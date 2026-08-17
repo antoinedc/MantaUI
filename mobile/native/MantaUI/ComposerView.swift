@@ -455,16 +455,19 @@ struct ComposerView: View {
             Button {
                 modelStore.setPlan(!plan.on)
             } label: {
-                HStack(spacing: Metrics.spacing.sp1) {
-                    Image(systemName: planIcon)
-                        .font(.system(size: Metrics.type.xs, weight: .medium))
-                    Text("Plan")
-                        .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
-                }
-                .foregroundColor(plan.on ? tokens.accentTx : tokens.tx2)
-                .padding(.vertical, Metrics.spacing.sp1)
-                .padding(.horizontal, Metrics.spacing.sp2)
-                .background(plan.on ? tokens.accentSoft : tokens.inset, in: Capsule())
+                // Same shape as attach and mic: a bare glyph on a fixed
+                // `chatHeaderBtn` square, with a fill ONLY when it is on. A
+                // resting fill made this the one control in the row that read as
+                // a button rather than an affordance, and the label made it the
+                // one control whose width changed when its state did — which is
+                // the whole "animation" on toggle. Fixed frame, no text: the only
+                // thing that changes is the background.
+                Image(systemName: planIcon)
+                    .font(.system(size: Metrics.type.body, weight: .medium))
+                    .foregroundColor(plan.on ? tokens.accentTx : tokens.tx2)
+                    .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
+                    .background(plan.on ? tokens.accentSoft : Color.clear, in: Circle())
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             // A lit-but-unavailable chip is honest, not toggleable: the plan
@@ -609,8 +612,10 @@ struct ComposerView: View {
     }
 
     /// The chip's single-line label: "✦ Opus 4.7 · High" + bolt when fast.
-    /// `.lineLimit(1)` + `.fixedSize(horizontal:)` is load-bearing — the model
-    /// name must never wrap at any Dynamic Type size.
+    /// `.lineLimit(1)` is load-bearing — the model name must never wrap at any
+    /// Dynamic Type size. It must NOT be paired with `.fixedSize(horizontal:)`:
+    /// that pins the text to its natural width, so a long name pushes the control
+    /// row past the composer box and off the screen edge instead of truncating.
     private var chipLabel: some View {
         HStack(spacing: Metrics.spacing.sp1) {
             if modelStore.loaded {
@@ -619,7 +624,7 @@ struct ComposerView: View {
                 Text(resolvedChipText)
                     .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
                     .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
+                    .truncationMode(.tail)
                 if isFastActive {
                     Image(systemName: "bolt.fill")
                         .font(.system(size: Metrics.type.xs, weight: .semibold))
@@ -636,7 +641,6 @@ struct ComposerView: View {
         .padding(.vertical, Metrics.spacing.sp1)
         .padding(.horizontal, Metrics.spacing.sp2)
         .background(tokens.accentSoft, in: Capsule())
-        .lineLimit(1)
     }
 
     private var activeModel: OpencodeModel? {
@@ -653,7 +657,7 @@ struct ComposerView: View {
     /// one visible is how a quota gets burned on max effort unnoticed.
     private var resolvedChipText: String {
         guard let model = activeModel else { return "Default" }
-        var parts = [model.name]
+        var parts = [ChatModel.shortName(model.name)]
         if let variant = modelStore.variant, !variant.isEmpty {
             parts.append(ChatModel.effortLabel(variant))
         }

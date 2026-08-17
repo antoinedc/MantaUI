@@ -249,6 +249,34 @@ enum ChatModel {
         }
     }
 
+    /// The vendor words the composer chip strips off a model's friendly name.
+    /// PORTED VERBATIM from `MODEL_BRAND_PREFIXES` in
+    /// `src/renderer/chatUtils.ts` — including the capitalisation, which is the
+    /// desktop's match and is therefore ours. When that list changes, change it
+    /// here; do not "improve" one side alone.
+    static let modelBrandPrefixes: Set<String> = [
+        "Claude", "Gemini", "DeepSeek", "Grok", "Mistral",
+        "Llama", "Qwen", "Command", "Gemma", "Phi", "Gpt",
+    ]
+
+    /// Compact display name for the composer chip — the Swift twin of the
+    /// desktop's `shortModelName`. The name opencode returns is usually
+    /// "<brand> <family> <version>" ("Claude Opus 5"); the chip shows the family
+    /// and version only ("Opus 5"), leaving the effort run beside it as the only
+    /// other token. An unknown prefix falls through unchanged, so no name is ever
+    /// mangled — and a name that is nothing BUT a brand word is returned whole
+    /// rather than emptied.
+    static func shortName(_ name: String) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let space = trimmed.firstIndex(of: " ") else { return trimmed }
+        guard modelBrandPrefixes.contains(String(trimmed[trimmed.startIndex..<space])) else {
+            return trimmed
+        }
+        let rest = trimmed[trimmed.index(after: space)...]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return rest.isEmpty ? trimmed : rest
+    }
+
     /// Capability glyphs for a catalogue row, in display order: "reasoning"
     /// when the model reasons, "vision" when it accepts image input. Both read
     /// the box's own capability flags rather than being inferred — a model can
