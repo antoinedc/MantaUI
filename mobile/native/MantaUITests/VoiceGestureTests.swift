@@ -184,18 +184,20 @@ final class VoiceGestureTests: XCTestCase {
         XCTAssertEqual(rtlLeft.0, .recordingHeld, "RTL: dragging left must not cancel (mirrored)")
     }
 
-    // MARK: - tap-toggle (decision #5)
+    // MARK: - tap-toggle (decision #5 — tap #1 starts, tap #2 stops)
 
-    func testTapToggleFromIdleLocksHandsFree() {
+    func testTapToggleFromIdleStartsHeld() {
+        // Tap #1 starts a finger-up take showing the held surface.
         let (phase, effect) = step(.idle, .tapToggle, elapsedMs: 0)
-        XCTAssertEqual(phase, .recordingLocked)
+        XCTAssertEqual(phase, .recordingHeld)
         XCTAssertEqual(effect, .haptic(.arm))
     }
 
-    func testTapToggleFromHeldLocks() {
+    func testTapToggleFromHeldSends() {
+        // Tap #2 while held: "a second tap stops" → stop and send.
         let (phase, effect) = step(.recordingHeld, .tapToggle, elapsedMs: 300)
-        XCTAssertEqual(phase, .recordingLocked)
-        XCTAssertEqual(effect, .haptic(.arm))
+        XCTAssertEqual(phase, .idle)
+        XCTAssertEqual(effect, .send)
     }
 
     func testTapToggleFromLockedSends() {

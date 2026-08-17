@@ -162,7 +162,9 @@ function rpc(channel, args) {
     case "secrets:list":
       return SECRETS;
     case "config:get":
-      return { pinnedWindows: [], hapticsEnabled: true };
+      // BET-1028: expose a Groq key so the composer's mic button is available
+      // (it is hidden otherwise — the mic gate reads `groqApiKey` from here).
+      return { pinnedWindows: [], hapticsEnabled: true, groqApiKey: "fixture-groq-key" };
     case "config:update":
       return {};
     case "opencode:models":

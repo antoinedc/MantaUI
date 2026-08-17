@@ -118,6 +118,12 @@ final class VoiceRecorder: ObservableObject {
             currentPhase: phase, input: .press, elapsedMs: 0)
         phase = nextPhase
         publishHaptic(effect)
+        beginCapture()
+    }
+
+    /// Begin the audio capture after the machine has armed a take. Shared by
+    /// the press-start (`start()`) and the first tap of the tap-toggle path.
+    private func beginCapture() {
         stopRequested = false
         pendingTake = nil
         accumulatedMs = 0
@@ -225,12 +231,20 @@ final class VoiceRecorder: ObservableObject {
     /// take only when the tap ends the take.
     @discardableResult
     func tapToggle() -> Take? {
-        guard phase != .idle else { return nil }
+        if phase == .idle {
+            // Tap #1: start a finger-up take into the held surface.
+            let (next, effect) = VoiceGesture.transition(
+                currentPhase: .idle, input: .tapToggle, elapsedMs: 0)
+            phase = next
+            publishHaptic(effect)
+            beginCapture()
+            return nil
+        }
         let (next, effect) = VoiceGesture.transition(
             currentPhase: phase, input: .tapToggle, elapsedMs: currentElapsedMs())
         publishHaptic(effect)
         if next == .idle {
-            // toggle OFF → stop and send.
+            // Tap #2: "a second tap stops" — stop and send.
             return finalizeTake()
         }
         phase = next

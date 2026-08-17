@@ -68,23 +68,29 @@ struct VoiceRecordingHeldView: View {
     var body: some View {
         let lockP = VoiceGesture.lockProgress(dy: translation.height)
         let cancelP = VoiceGesture.cancelProgress(dx: translation.width, isRTL: isRTL)
+        let isCancelling = recorder.phase == .cancelling
         let hintShift = cancelP * (micDiameter + Metrics.spacing.sp3)
 
         ZStack(alignment: .bottomTrailing) {
             HStack(alignment: .center, spacing: Metrics.spacing.sp2) {
                 AccessoryDot(danger: tokens.danger)
                 timer
-                cancelHint(progress: cancelP, shift: hintShift, isRTL: isRTL)
+                cancelHint(progress: cancelP, shift: hintShift, isRTL: isRTL, isCancelling: isCancelling)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            lockLane(lockProgress: lockP)
+            lockLane(lockProgress: lockP, isCancelling: isCancelling)
                 .padding(.trailing, Metrics.spacing.sp3)
                 .padding(.bottom, Metrics.spacing.sp2)
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp3)
         .contentShape(Rectangle())
+        // One accessibility element for the whole held surface (children stay
+        // individually reachable), so `voice-recording-held` resolves to a
+        // single element instead of propagating to every child in the AX tree.
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("voice-recording-held")
         .gesture(
             DragGesture(minimumDistance: 0)
                 .onChanged { value in
@@ -97,7 +103,6 @@ struct VoiceRecordingHeldView: View {
                     finishHoldRelease()
                 }
         )
-        .accessibilityIdentifier("voice-recording-held")
     }
 
     // MARK: records
@@ -111,15 +116,20 @@ struct VoiceRecordingHeldView: View {
     }
 
     /// The "‹ slide to cancel" hint — translates with the drag and fades toward
-    /// 0 as the cancel threshold is approached.
+    /// 0 as the cancel threshold is approached. Once the take is actually in
+    /// the cancelling phase it flips to a solid danger "release to cancel" —
+    /// still on the same held surface so the drag gesture stays mounted.
     @ViewBuilder
-    private func cancelHint(progress: Double, shift: CGFloat, isRTL: Bool) -> some View {
+    private func cancelHint(progress: Double, shift: CGFloat, isRTL: Bool, isCancelling: Bool) -> some View {
+        let text = isCancelling ? "release to cancel" : "‹ slide to cancel"
+        let color = isCancelling ? tokens.danger : tokens.tx3
+        let opacity = isCancelling ? 1.0 : 0.85 * (1 - progress)
         HStack {
             if isRTL { Spacer(minLength: 0) }
-            Text("‹ slide to cancel")
-                .font(.manta(size: Metrics.type.small))
-                .foregroundColor(tokens.tx3)
-                .opacity(0.85 * (1 - progress))
+            Text(text)
+                .font(.manta(size: Metrics.type.small, weight: isCancelling ? mantaFontWeight(Metrics.type.semibold) : .regular))
+                .foregroundColor(color)
+                .opacity(opacity)
                 .offset(x: isRTL ? -shift : shift)
                 .animation(.smooth(duration: 0.05), value: shift)
             if !isRTL { Spacer(minLength: 0) }
@@ -133,7 +143,7 @@ struct VoiceRecordingHeldView: View {
     /// The floating lock lane — chevron, lock glyph, enlarged mic — appearing
     /// only while held. The lock glyph brightens to `accentTx` as the lock
     /// threshold is approached.
-    private func lockLane(lockProgress: Double) -> some View {
+    private func lockLane(lockProgress: Double, isCancelling: Bool) -> some View {
         VStack(spacing: Metrics.spacing.sp2) {
             Image(systemName: "chevron.up")
                 .font(.system(size: Metrics.type.xs, weight: .bold))
@@ -283,6 +293,9 @@ struct VoiceRecordingLockedView: View {
             // Tap-toggle OFF: a second tap stops and sends.
             onTakeFrom(recorder.tapToggle())
         }
+        // One accessibility element for the surface; the bar's three buttons
+        // remain separate interactive elements (they carry their own ids).
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("voice-recording-locked")
     }
 
@@ -375,7 +388,10 @@ struct VoiceRecordingSurface: View {
         // exactly the same modifier (no second glass recipe anywhere).
         Group {
             switch recorder.phase {
-            case .recordingHeld:
+            case .recordingHeld, .cancelling:
+                // `.cancelling` renders through the held surface too so its
+                // drag gesture stays mounted (swapping it away mid-drag would
+                // cancel the gesture and lose the release→discard).
                 VoiceRecordingHeldView(recorder: recorder, isRTL: isRTL, tokens: tokens, onTake: onTake)
             case .recordingLocked, .paused:
                 VoiceRecordingLockedView(recorder: recorder, tokens: tokens, onTake: onTake, onDiscarded: { announceDiscard() })

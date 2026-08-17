@@ -170,14 +170,14 @@ enum VoiceGesture {
 
         case .tapToggle:
             switch currentPhase {
-            case .idle, .recordingHeld:
-                // Tap ON: start (or keep) a finger-up, hands-free take. A tap
-                // never needs the drag to be sustained, so it lands directly in
-                // the locked bar rather than the finger-down held surface —
-                // exactly the "usable without sustaining a drag" of decision #5.
-                return (.recordingLocked, .haptic(.arm))
-            case .recordingLocked, .paused:
-                // Tap OFF: stop and send.
+            case .idle:
+                // Tap #1: start a finger-up take — the held surface shows
+                // immediately (decision #5: "Tap starts…without sustaining a
+                // drag").
+                return (.recordingHeld, .haptic(.arm))
+            case .recordingHeld, .recordingLocked, .paused:
+                // Tap #2: "…and a second tap stops" — stop and send. From a
+                // locked take this is the same as `.tapSend`.
                 return (.idle, .send)
             default:
                 return (currentPhase, .none)
