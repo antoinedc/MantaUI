@@ -3,7 +3,6 @@ import {
   breadcrumbs,
   crumbLabel,
   parentPath,
-  worktreeBadge,
   hasWorktreeFanOut,
   gitStateLabel,
   worktreeName,
@@ -59,23 +58,6 @@ describe("crumbLabel", () => {
   it("extracts the last segment", () => {
     expect(crumbLabel("/home/dev/code")).toBe("code");
     expect(crumbLabel("/home/dev")).toBe("dev");
-  });
-});
-
-describe("worktreeBadge", () => {
-  it("returns empty for null", () => {
-    expect(worktreeBadge(null)).toBe("");
-  });
-
-  it("returns empty for 0 or 1 worktree", () => {
-    expect(worktreeBadge([])).toBe("");
-    expect(worktreeBadge([wt("/repo", "main")])).toBe("");
-  });
-
-  it("returns count for >1 worktree", () => {
-    expect(worktreeBadge([wt("/repo", "main"), wt("/repo-wt", "wt")])).toBe(
-      "⎇ 2 worktrees",
-    );
   });
 });
 

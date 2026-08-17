@@ -5,15 +5,15 @@
 //   (refreshCwdSuggestion / acceptCwdSuggestion from Sidebar.tsx, moved here).
 // - Clickable breadcrumbs under it — going up three levels is one click.
 // - A scrollable folder list using the existing `fsListDirs`. `..` first.
-//   `node_modules` and dot-folders render at --tx4 (dimmed, not hidden).
-// - Worktree badge on directories that have them; the fan-out question is
-//   asked HERE, before the user commits, instead of as a post-Create
-//   interstitial.
-// - Footer: the selected folder's git state, Cancel, and a primary Select.
+//   Dot-folders are hidden by default with a "Show hidden" toggle (Ctrl+H).
+// - The fan-out question is asked HERE, before the user commits, instead of
+//   as a post-Create interstitial.
+// - Footer: the selected folder's git state, the hidden-toggle, Cancel, and a
+//   primary Select.
 // - Mobile gets it as a full-height sheet (handled by .mobile-* CSS classes).
 //
-// Pure helpers (breadcrumbs / parentPath / worktreeBadge /
-// gitStateLabel) live in folderPicker.ts and are unit-tested there.
+// Pure helpers (breadcrumbs / parentPath / gitStateLabel /
+// hasWorktreeFanOut) live in folderPicker.ts and are unit-tested there.
 
 import { useEffect, useRef, useState } from "react";
 import {
@@ -30,7 +30,6 @@ import {
   gitStateLabel,
   hasWorktreeFanOut,
   parentPath,
-  worktreeBadge,
 } from "./folderPicker";
 import { Modal } from "./Modal";
 import { Button } from "./Button";
@@ -56,10 +55,13 @@ type Props = {
 };
 
 // A row in the folder list. `name` is the directory basename; `full` is the
-// absolute path to feed back into fsListDirs when the user descends.
+// absolute path to feed back into fsListDirs when the user descends; `hidden`
+// reflects the server's entry.hidden (basename starts with `.`), so the
+// render-time hidden filter can apply without re-fetching.
 type Row = {
   name: string;
   full: string;
+  hidden: boolean;
 };
 
 // Worktree fan-out state. When the user selects a folder that has >1
@@ -74,20 +76,18 @@ export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, fanOu
   const [path, setPath] = useState(initialPath);
   const [suggestion, setSuggestion] = useState<string | null>(null);
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // The picker stays MOUNTED (so Modal can play its exit); reset the browse
-  // location each time it re-opens, preserving the old per-open fresh-start.
+  // The picker stays MOUNTED (so Modal can play its exit); reset both the
+  // browse location and the hidden-folder toggle each time it re-opens,
+  // preserving the old per-open fresh-start. Hidden folders are OFF by
+  // default, every time — the toggle is component-local and never persisted.
   useEffect(() => {
-    if (open) setPath(initialPath);
+    if (open) {
+      setPath(initialPath);
+      setShowHidden(false);
+    }
   }, [open, initialPath]);
   const [rows, setRows] = useState<Row[]>([]);
-  // Per-directory worktree probe. Keyed by the row's full path; null = not
-  // probed yet / not a repo. We probe each row lazily after the listing
-  // loads, with a small concurrency cap to avoid hammering git. The badge
-  // ("⎇ N worktrees") shows on rows that have >1 worktree, so the user
-  // sees the fan-out option BEFORE committing (BET-417 §B).
-  const [worktreeCounts, setWorktreeCounts] = useState<
-    Record<string, WorktreeInfo[] | null>
-  >({});
+  const [showHidden, setShowHidden] = useState(false);
   const [fanOut, setFanOut] = useState<FanOut>(null);
   const [gitState, setGitState] = useState<string>("");
   const [loading, setLoading] = useState(false);
@@ -112,7 +112,7 @@ export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, fanOu
         const prefix = value.endsWith("/") ? "" : (value.split("/").pop() ?? "");
         const res = await window.api.fsListDirs(dir);
         const matches = res.entries
-          .filter((e) => !e.hidden && e.name.startsWith(prefix))
+          .filter((e) => (showHidden || !e.hidden) && e.name.startsWith(prefix))
           .map((e) => e.path);
         if (matches.length === 0) {
           setSuggestion(null);
@@ -152,7 +152,6 @@ export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, fanOu
   const listDir = async (dir: string) => {
     setLoading(true);
     setError(null);
-    setWorktreeCounts({});
     try {
       const res = await window.api.fsListDirs(dir);
       // Normalize the path field: if the server resolved a different directory
@@ -161,37 +160,24 @@ export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, fanOu
       if (res.dir.replace(/\/$/, "") !== dir.replace(/\/$/, "")) {
         setPath(res.dir + "/");
       }
-      const built: Row[] = res.entries
-        .filter((e) => !e.hidden)
-        .map((e) => ({ name: e.name, full: e.path }));
+      // Store the FULL (unfiltered) listing; hidden folders are filtered at
+      // render time so the toggle never re-fetches.
+      const built: Row[] = res.entries.map((e) => ({
+        name: e.name,
+        full: e.path,
+        hidden: e.hidden,
+      }));
       setRows(built);
-      // Probe the selected dir's own git state for the footer.
+      // Probe the selected dir's own git state for the footer. This is the
+      // only gitListWorktrees call per listing — the old per-row eager probe
+      // (one spawn per row) is gone; `select()` probes the chosen folder
+      // itself at commit time (BET-1074).
       try {
         const wts = await window.api.gitListWorktrees(dir);
         setGitState(gitStateLabel(wts));
       } catch {
         setGitState("");
       }
-      // Lazily probe each row for worktree fan-out (BET-417 §B). Probes run
-      // with concurrency 4 so a 20-row listing finishes in ~5 git calls
-      // instead of 20 sequential ones. Failures are silent (not a repo →
-      // no badge).
-      const probeRow = async (full: string) => {
-        try {
-          const wts = await window.api.gitListWorktrees(full);
-          setWorktreeCounts((prev) => ({ ...prev, [full]: wts }));
-        } catch {
-          setWorktreeCounts((prev) => ({ ...prev, [full]: null }));
-        }
-      };
-      const queue = [...built.map((r) => r.full)];
-      const workers = Array.from({ length: 4 }, async () => {
-        while (queue.length > 0) {
-          const full = queue.shift();
-          if (full) await probeRow(full);
-        }
-      });
-      void Promise.all(workers);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setRows([]);
@@ -267,6 +253,9 @@ export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, fanOu
   };
 
   const crumbs = breadcrumbs(path);
+  // The hidden filter is applied HERE, at render time, so toggling it never
+  // re-fetches — `rows` always holds the full listing.
+  const visible = showHidden ? rows : rows.filter((r) => !r.hidden);
 
   return (
     <Modal open={open} size="lg" padded={false} tall onDismiss={fanOutBusy ? undefined : onCancel} label="Select folder">
@@ -371,6 +360,19 @@ export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, fanOu
                         e.stopPropagation();
                         setSuggestion(null);
                       }
+                      // Hidden-folder toggle — "Ctrl+H" (and "Meta+Shift+." on
+                      // macOS), matching every native picker's show-hidden
+                      // convention. Stops propagation so nothing else sees it.
+                      if (e.ctrlKey && e.key.toLowerCase() === "h") {
+                        e.preventDefault();
+                        setShowHidden((s) => !s);
+                        return;
+                      }
+                      if (e.metaKey && e.shiftKey && e.key === ".") {
+                        e.preventDefault();
+                        setShowHidden((s) => !s);
+                        return;
+                      }
                     }}
                     spellCheck={false}
                     autoComplete="off"
@@ -427,10 +429,14 @@ export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, fanOu
               {error && (
                 <div className="px-3 py-4 text-meta text-danger">{error}</div>
               )}
-              {!loading && !error && rows.length === 0 && (
-                <div className="px-3 py-4 text-meta text-text-faint">No subfolders</div>
+              {!loading && !error && visible.length === 0 && (
+                <div className="px-3 py-4 text-meta text-text-faint">
+                  {rows.length === 0
+                    ? "No subfolders"
+                    : "Only hidden folders here — Ctrl+H to show"}
+                </div>
               )}
-              {!loading && !error && (
+              {!loading && !error && visible.length > 0 && (
                 <>
                   {/* `..` row — spec §B3 says ".. first". Goes up one level,
                       same as the breadcrumbs / up-arrow. */}
@@ -442,35 +448,34 @@ export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, fanOu
                     <ArrowUp size={14} className="shrink-0" aria-hidden="true" />
                     <span className="flex-1 min-w-0 truncate font-mono">..</span>
                   </button>
-                  {rows.map((r) => {
-                    const wtCount = worktreeCounts[r.full];
-                    const badge = worktreeBadge(wtCount ?? null);
-                    return (
-                      <button
-                        key={r.full}
-                        onClick={() => descend(r.full)}
-                        className={
-                          "w-full flex items-center gap-2 px-3 py-2 text-left text-meta rounded-xs text-text-muted " +
-                          "hover:bg-bg-soft"
-                        }
-                        title={r.full}
-                      >
-                        <FolderIcon size={14} className="shrink-0" aria-hidden="true" />
-                        <span className="flex-1 min-w-0 truncate font-mono">{r.name}</span>
-                        {badge && (
-                          <span className="text-label text-accent-tx shrink-0">{badge}</span>
-                        )}
-                      </button>
-                    );
-                  })}
+                  {visible.map((r) => (
+                    <button
+                      key={r.full}
+                      onClick={() => descend(r.full)}
+                      className="w-full flex items-center gap-2 px-3 py-2 text-left text-meta rounded-xs text-text-muted hover:bg-bg-soft"
+                      title={r.full}
+                    >
+                      <FolderIcon size={14} className="shrink-0" aria-hidden="true" />
+                      <span className="flex-1 min-w-0 truncate font-mono">{r.name}</span>
+                    </button>
+                  ))}
                 </>
               )}
             </div>
 
             {/* Footer */}
             <div className="flex items-center justify-between px-4 py-3 border-t border-border">
-              <div className="text-label text-text-faint font-mono truncate">
-                {gitState || "not a git repo"}
+              <div className="flex items-center gap-3 min-w-0">
+                <Button
+                  tone="ghost"
+                  onClick={() => setShowHidden((s) => !s)}
+                  ariaPressed={showHidden}
+                >
+                  {showHidden ? "Hide hidden" : "Show hidden"}
+                </Button>
+                <div className="text-label text-text-faint font-mono truncate">
+                  {gitState || "not a git repo"}
+                </div>
               </div>
               <div className="flex gap-2 shrink-0">
                 <Button onClick={onCancel} tone="ghost">

@@ -77,6 +77,7 @@ export function Button({
   children,
   hook,
   loading = false,
+  ariaPressed,
 }: {
   /** The visual tone. REQUIRED — the bare base is abstract (C4), so there is no safe default. */
   tone: keyof typeof BUTTON_TONE;
@@ -106,6 +107,8 @@ export function Button({
    * caller owns the label that announces it.
    */
   loading?: boolean;
+  /** Reflects a binary toggle state — renders the native `aria-pressed`. */
+  ariaPressed?: boolean;
 }) {
   const inert = disabled || loading;
   const className =
@@ -118,6 +121,7 @@ export function Button({
       onClick={onClick}
       title={title}
       aria-busy={loading || undefined}
+      aria-pressed={ariaPressed || undefined}
       className={className}
     >
       {children}

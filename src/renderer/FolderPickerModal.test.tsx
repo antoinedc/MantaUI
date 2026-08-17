@@ -22,6 +22,15 @@ function typeInto(el: HTMLInputElement, value: string) {
   el.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
+// Click the (footer) button whose trimmed label matches, wrapping in act.
+function clickButton(label: string) {
+  const btn = Array.from(document.body.querySelectorAll("button")).find(
+    (b) => b.textContent?.trim() === label,
+  );
+  expect(btn, `expected a button labelled "${label}"`).toBeTruthy();
+  act(() => btn!.click());
+}
+
 describe("FolderPickerModal — Escape (BET-724 review cycle 1 Question)", () => {
   let h: Harness | null = null;
   afterEach(() => {
@@ -106,5 +115,87 @@ describe("FolderPickerModal — Escape (BET-724 review cycle 1 Question)", () =>
       input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     });
     expect(cancelled).toBe(1);
+  });
+});
+
+describe("FolderPickerModal — hidden-folder toggle (BET-1074)", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  function listingWithHidden() {
+    return installMockApi({
+      fsListDirs: (dir: unknown) =>
+        Promise.resolve({
+          dir: dir as string,
+          entries: [
+            { name: "projects", path: "/home/projects", hidden: false },
+            { name: ".config", path: "/home/.config", hidden: true },
+          ],
+        }),
+      gitListWorktrees: () => Promise.reject(new Error("not a repo")),
+    });
+  }
+
+  it("hidden folder is absent initially, present after toggling on, absent after toggling off", async () => {
+    listingWithHidden();
+    h = mount(
+      <FolderPickerModal
+        open
+        initialPath="/home/dev"
+        onSelect={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+    await h.flush();
+
+    // Hidden folder hidden by default.
+    expect(h.docText()).not.toContain(".config");
+    expect(h.docText()).toContain("projects");
+
+    // Toggle on → hidden folder appears, button reads "Hide hidden".
+    await act(async () => {
+      clickButton("Show hidden");
+      await h!.flush();
+    });
+    expect(h.docText()).toContain(".config");
+    expect(h.docText()).toContain("Hide hidden");
+
+    // Toggle off → hidden folder gone again.
+    await act(async () => {
+      clickButton("Hide hidden");
+      await h!.flush();
+    });
+    expect(h.docText()).not.toContain(".config");
+  });
+
+  it("runs gitListWorktrees at most once per listing regardless of row count", async () => {
+    const { api } = installMockApi({
+      fsListDirs: (dir: unknown) =>
+        Promise.resolve({
+          dir: dir as string,
+          entries: Array.from({ length: 5 }, (_, i) => ({
+            name: `dir${i}`,
+            path: `/home/dir${i}`,
+            hidden: false,
+          })),
+        }),
+      gitListWorktrees: () => Promise.reject(new Error("not a repo")),
+    });
+    h = mount(
+      <FolderPickerModal
+        open
+        initialPath="/home/dev"
+        onSelect={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+    await h.flush();
+
+    // Only the footer probe for the current directory runs — never one per
+    // row. This is the regression guard for the old per-row git stampede.
+    expect(api.calls.gitListWorktrees?.length ?? 0).toBe(1);
   });
 });
