@@ -3,7 +3,7 @@
 
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { resolveToken, invalidateToken, normalizeUserCode, startDeviceGrant, pollDeviceGrant, ExpiredCodeError, DeviceFlowNotConfiguredError, DEVICE_CLIENT_ID, DEVICE_CLIENT_ID_PLACEHOLDER, clearStoredToken } from "./auth.mjs";
+import { resolveToken, invalidateToken, normalizeUserCode, startDeviceGrant, pollDeviceGrant, ExpiredCodeError, DeviceFlowNotConfiguredError, DEVICE_CLIENT_ID, DEVICE_CLIENT_ID_PLACEHOLDER, clearStoredToken, readVerdict, writeVerdict, clearVerdicts } from "./auth.mjs";
 
 // The module-level auth cache persists across test cases in this file — clear
 // it before each so a cached github.com resolution from one test can't leak
@@ -12,6 +12,7 @@ beforeEach(() => {
   invalidateToken("github.com");
   invalidateToken("gitlab.com");
   invalidateToken("");
+  clearVerdicts();
 });
 
 // A mutable clock so tests can simulate the TTL elapsing / staying put.
@@ -428,4 +429,24 @@ test("clearStoredToken does not delete a non-shared GITHUB_TOKEN nor other keys"
   });
   assert.deepEqual(r, { cleared: false });
   assert.deepEqual(removed, []);
+});
+
+// ---- verdict cache (BET-1056) ----------------------------------------------
+// The verdict cache is keyed on a fingerprint of the credential, NOT the host —
+// keying on the host alone would let a freshly reconnected credential inherit
+// the previous "rejected" verdict (the reconnect-poisoning regression).
+
+test("a verdict written for one credential is not returned for a different credential", () => {
+  writeVerdict("github.com", "token-A", "valid");
+  assert.equal(readVerdict("github.com", "token-A"), "valid", "same credential reads back");
+  assert.equal(readVerdict("github.com", "token-B"), null, "different credential does NOT inherit");
+  assert.equal(readVerdict("github.com", "token-A"), "valid", "first credential is unaffected");
+});
+
+test("a verdict older than the TTL reads as null (driven with an injected now)", () => {
+  const clock = makeClock();
+  writeVerdict("github.com", "tok", "valid", { now: clock.now });
+  assert.equal(readVerdict("github.com", "tok", { now: clock.now }), "valid");
+  clock.advance(60 * 60 * 1000 + 1);
+  assert.equal(readVerdict("github.com", "tok", { now: clock.now }), null, "expired verdict is unknown again");
 });

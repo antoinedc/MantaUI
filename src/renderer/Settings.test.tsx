@@ -219,6 +219,7 @@ describe("Settings — Forge Disconnect (BET-942)", () => {
           login: "octocat",
           kind: "github",
           source: "cli",
+          valid: null,
         }),
       forgeRulesList: () => Promise.resolve([]),
       forgeDisconnect: () => Promise.resolve({ ok: true }).then(forgeDisconnectMock),

@@ -32,7 +32,7 @@
 // write it to disk. The only thing a caller outside this module may do with a
 // resolved token is pass it to the fetch layer.
 
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 import { runLoginShell } from "../launchers.mjs";
 import { resolveSecret, loadSecrets, setSecret, listSecrets, deleteSecret } from "../secrets.mjs";
 import { configGet, configUpdate } from "../local.mjs";
@@ -65,6 +65,34 @@ const STORED_KEYS_BY_HOST = Object.freeze({
 
 // host -> { at, found, token?, source? }
 const CACHE = new Map();
+
+// How long a validity verdict is trusted. This TTL is NOT about GitHub's rate
+// limit (one call an hour against a 5,000/hour budget is nothing) — it exists
+// because the Settings pane refreshes its status every 10 seconds, and without
+// it that loop would probe forever. Do not "optimise" it away.
+const VERDICT_TTL_MS = 60 * 60 * 1000;
+const VERDICTS = new Map();
+
+// Never store or log a credential value.
+function credentialFingerprint(token) {
+  return createHash("sha256").update(String(token)).digest("hex").slice(0, 16);
+}
+
+/** @returns {"valid"|"rejected"|null} — null means "unknown, go ask". */
+export function readVerdict(host, token, { now = Date.now, ttlMs = VERDICT_TTL_MS } = {}) {
+  const hit = VERDICTS.get(`${host}:${credentialFingerprint(token)}`);
+  if (!hit) return null;
+  if (now() - hit.at >= ttlMs) return null;
+  return hit.verdict;
+}
+
+export function writeVerdict(host, token, verdict, { now = Date.now } = {}) {
+  VERDICTS.set(`${host}:${credentialFingerprint(token)}`, { at: now(), verdict });
+}
+
+export function clearVerdicts() {
+  VERDICTS.clear();
+}
 
 // Derive the env/secret key NAMESPACE for an arbitrary host. A self-hosted
 // host isn't in the fixed maps, so it gets a deterministic, host-derived name:
@@ -287,6 +315,7 @@ export async function clearStoredToken({ list = listSecrets, remove = deleteSecr
   );
   if (entry) await remove(entry.id);
   invalidateToken(GITHUB_CLI_HOST);
+  clearVerdicts();
   return { cleared: Boolean(entry) };
 }
 

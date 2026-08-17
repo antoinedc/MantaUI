@@ -88,7 +88,7 @@ export function createCloneStore({ gitCloneFn = gitClone, now = Date.now } = {})
           job.done = true;
           job.ok = false;
           // Surface the message WITHOUT any token that may have ridden on it.
-          job.error = String((e && e.message) || e).replace(/\bbearer\s+\S+\b/gi, "bearer ***");
+          job.error = (e instanceof Error && e.message ? e.message : String(e)).replace(/\bbearer\s+\S+\b/gi, "bearer ***");
           job.doneAt = now();
         }
       })();

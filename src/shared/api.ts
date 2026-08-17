@@ -208,7 +208,7 @@ export interface Api {
   // BET-788: forge read path (box-side only — a token never leaves the box).
   // forgeStatus reports connected/login; forgePullRequest takes a session cwd
   // and the server resolves cwd → origin → repo.
-  forgeStatus(): Promise<ForgeStatusResult>;
+  forgeStatus(opts?: { validate?: boolean }): Promise<ForgeStatusResult>;
   forgePullRequest(input: { cwd: string }): Promise<ForgePullRequestResult>;
   forgeDiff(input: ForgeRefTarget): Promise<ForgeDiffResult>;
   // BET-795: the work inbox. Box-side only — three cross-repo SEARCH queries,
