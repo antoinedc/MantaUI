@@ -198,24 +198,31 @@ struct ComposerView: View {
                 )
                 .transition(.opacity)
             }
-            if recorder.isHandsFree {
-                VoiceRecordingLockedView(
-                    recorder: recorder,
-                    tokens: tokens,
-                    onTake: { take in Task { await handleVoiceTake(take) } },
-                    onDiscarded: {
-                        UIAccessibility.post(notification: .announcement, argument: "Recording discarded")
-                    }
-                )
-                .transition(.opacity)
-            } else {
-                // ONE glass box, always. While a take is held the box keeps its size and
-                // its chrome and swaps its CONTENTS for the recording surface (see
-                // `inputBox`) — the composer stays MOUNTED because the mic button owns the
-                // in-flight touch and a view removed mid-gesture stops receiving it
-                // (BET-1051).
+            // ONE glass box, always. While a take is held the box keeps its size and
+            // its chrome and swaps its CONTENTS for the recording surface (see
+            // `inputBox`) — the composer stays MOUNTED because the mic button owns the
+            // in-flight touch and a view removed mid-gesture stops receiving it
+            // (BET-1051). The hands-free locked bar rides in the SAME ZStack and
+            // crossfades in on the phase-keyed `.smooth` curve (BET-1082): `inputBox`
+            // is only faded out + made inert while the take is hands-free, never
+            // swapped out structurally — a structural if/else removal/insertion here
+            // was what made the lock CUT to the bar instead of animating into it.
+            ZStack(alignment: .top) {
                 inputBox
+                    .opacity(recorder.isHandsFree ? 0 : 1)
+                    .allowsHitTesting(!recorder.isHandsFree)
+                    .accessibilityHidden(recorder.isHandsFree)
+                if recorder.isHandsFree {
+                    VoiceRecordingLockedView(
+                        recorder: recorder,
+                        tokens: tokens,
+                        onTake: { take in Task { await handleVoiceTake(take) } },
+                        onDiscarded: {
+                            UIAccessibility.post(notification: .announcement, argument: "Recording discarded")
+                        }
+                    )
                     .transition(.opacity)
+                }
             }
         }
         .padding(.horizontal, Metrics.spacing.sp3)
