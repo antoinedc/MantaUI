@@ -21,6 +21,7 @@ import { homedir } from "node:os";
 import { sep } from "node:path";
 import { stateHome, statePath } from "../shared/paths.mjs";
 import { STORE_PATH as AUTH_STORE_PATH } from "./auth.mjs";
+import { STORE_PATH as USAGE_STOP_STORE_PATH } from "./stoppedStore.mjs";
 
 test("the test run has a sandboxed state home", () => {
   const sandbox = process.env.MANTA_STATE_HOME;
@@ -44,4 +45,12 @@ test("store paths resolve inside the sandbox, not the live box", () => {
   );
   assert.ok(!AUTH_STORE_PATH.startsWith(homedir() + sep + ".manta"));
   assert.ok(statePath("secrets.json").startsWith(sandbox + sep));
+  // The usage-stopped store must land inside the sandbox the same way
+  // (BET-1047) — a fresh store pointing at $HOME re-opens the data-loss hole
+  // for this record and no other canary would notice.
+  assert.ok(
+    USAGE_STOP_STORE_PATH.startsWith(sandbox + sep),
+    `usage-stopped store resolved to ${USAGE_STOP_STORE_PATH}, outside the sandbox ${sandbox}`,
+  );
+  assert.ok(!USAGE_STOP_STORE_PATH.startsWith(homedir() + sep + ".manta"));
 });

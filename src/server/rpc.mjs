@@ -15,6 +15,13 @@ import {
 } from "../shared/streamInterpretation.mjs";
 import { listJobs as scheduleListJobs, deleteJob as scheduleDeleteJob, createJob as scheduleCreateJob } from "./schedule.mjs";
 import { listSnapshots as usageListSnapshots } from "./usage.mjs";
+import {
+  listStopped as usageStoppedList,
+  armStopped as usageStoppedArm,
+  disarmStopped as usageStoppedDisarm,
+  stampStoppedLastLooked as usageStoppedStampLastLooked,
+  markStoppedRan as usageStoppedMarkRan,
+} from "./stoppedStore.mjs";
 import { listHooks as webhookListHooks, deleteHook as webhookDeleteHook } from "./webhooks.mjs";
 import { listPages as servePageListStore } from "./servePage.mjs";
 import { listOutbox } from "./outbox.mjs";import { publicBaseUrl } from "./gatewayRegister.mjs";
@@ -1151,6 +1158,27 @@ export function buildHandlers({
     // set actually changes — this channel is for the initial paint / refetch.
     // preload: ipcRenderer.invoke(IPC.usageList)  → no args
     "usage:list": () => usageListSnapshots(),
+
+    // ---- usage-stop record (manta-server owned; BET-1047 stage 1) ----
+    // Durable box-side record of conversations stopped by a plan-usage limit.
+    // The store + enrolment path live in src/server/stoppedStore.mjs +
+    // usageStopEnroll.mjs; these channels read/mutate it. Mutations publish
+    // `usage-stopped.updated` so the indicator + modal refetch without polling.
+    // Mirrors the schedule:* pattern (same store shape, same bus event).
+    // preload: ipcRenderer.invoke(IPC.usageStoppedList)  → no args
+    "usage-stopped:list": () => usageStoppedList(),
+    // Arm an entry for resume (keeps it listed, marks it armed).
+    "usage-stopped:arm": (conversation) =>
+      usageStoppedArm({ conversation }, { publish: (evt) => bus.publish(evt) }),
+    // Disarm = modal uncheck = an explicit "no" → removes the row.
+    "usage-stopped:disarm": (conversation) =>
+      usageStoppedDisarm({ conversation }, { publish: (evt) => bus.publish(evt) }),
+    // Stamp the list-level "last looked" timestamp (modal close).
+    "usage-stopped:stamp-last-looked": () =>
+      usageStoppedStampLastLooked({}, { publish: (evt) => bus.publish(evt) }),
+    // Clear a row because the conversation ran successfully.
+    "usage-stopped:mark-ran": (conversation) =>
+      usageStoppedMarkRan({ conversation }, { publish: (evt) => bus.publish(evt) }),
 
     // ---- background jobs (manta-server owned; in-process on mobile) ----
     // Mirror of the /api/delegate REST surface for the renderer. Jobs are
