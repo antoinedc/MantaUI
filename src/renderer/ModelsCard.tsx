@@ -364,11 +364,8 @@ export function ModelsCard() {
   }, [models, searchQuery]);
 
   return (
-    <div className="space-y-3 pt-2 border-t border-border">
+    <div className="space-y-3">
       <div>
-        <label className="block text-micro font-semibold uppercase text-text-muted mb-1">
-          Models
-        </label>
         <div className="text-meta text-text-faint">
           <b className="text-text-muted">Default</b> = the model new &amp; cleared sessions start on (exactly one; must be Main-available).{" "}
           <b className="text-text-muted">Main</b> = selectable as the chat main agent (off hides it from the composer's model picker).{" "}

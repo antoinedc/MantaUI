@@ -67,10 +67,7 @@ export function SubscriptionsCard() {
   }, [refresh]);
 
   return (
-    <div className="space-y-2 pt-2 border-t border-border">
-      <label className="block text-micro font-semibold uppercase text-text-muted">
-        Subscriptions
-      </label>
+    <div className="space-y-2">
       <div className="text-meta text-text-faint space-y-1">
         <div>
           Sign in with a subscription you already pay for. Manta never sees
