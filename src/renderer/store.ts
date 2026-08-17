@@ -514,8 +514,9 @@ type State = {
   // three per-card restart prompts that used to live in ModelsCard,
   // ProvidersCard and ConnectProvider. Cleared by the banner's restart button
   // (and by any other path that restarts opencode, e.g. ConnectProvider's
-  // connect-completion restart). Desktop-only concept; mobile keeps its own
-  // inline restart prompt inside ProvidersCard.
+  // connect-completion restart). Desktop-only concept; there is no inline
+  // restart prompt anywhere else (the old ProvidersCard fallback was removed
+  // with BET-1035 — this banner is the ONE restart affordance).
   opencodeRestartNeeded: boolean;
   setOpencodeRestartNeeded: (v: boolean) => void;
   // ----- derived selectors -----
