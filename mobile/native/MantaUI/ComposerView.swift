@@ -198,7 +198,7 @@ struct ComposerView: View {
                 )
                 .transition(.opacity)
             }
-            if recorder.phase == .recordingLocked || recorder.phase == .paused {
+            if recorder.isHandsFree {
                 VoiceRecordingLockedView(
                     recorder: recorder,
                     tokens: tokens,
@@ -209,19 +209,25 @@ struct ComposerView: View {
                 )
                 .transition(.opacity)
             } else {
-                inputBox
-                    .overlay {
-                        if recorder.phase == .recordingHeld || recorder.phase == .cancelling {
-                            VoiceRecordingHeldView(
-                                recorder: recorder,
-                                translation: micTranslation,
-                                isRTL: isRTL,
-                                tokens: tokens
-                            )
-                            .transition(.opacity)
-                        }
+                // The composer stays MOUNTED while a take is held — the mic button owns
+                // the in-flight touch and a view removed mid-gesture stops receiving it
+                // (BET-1051). It is hidden, not unmounted, so the recording surface is
+                // what you see while the gesture underneath survives.
+                ZStack(alignment: .bottom) {
+                    inputBox
+                        .opacity(recorder.isHeld ? 0 : 1)
+                    if recorder.isHeld {
+                        VoiceRecordingHeldView(
+                            recorder: recorder,
+                            translation: micTranslation,
+                            isRTL: isRTL,
+                            tokens: tokens
+                        )
+                        .frame(maxWidth: .infinity)
+                        .transition(.opacity)
                     }
-                    .transition(.opacity)
+                }
+                .transition(.opacity)
             }
         }
         .padding(.horizontal, Metrics.spacing.sp3)
@@ -230,7 +236,16 @@ struct ComposerView: View {
         // persistent container so `lastAnnounced` survives the held-overlay ⇄
         // locked-bar swap without resetting (BET-1051).
         .modifier(VoiceFeedback(recorder: recorder))
-        .animation(.smooth(duration: 0.22), value: recorder.phase != .idle)
+        .animation(.smooth(duration: 0.22), value: recorder.phase)
+        // A locked take no longer needs the finger, and an idle one has no gesture at
+        // all: either way the press that started it is over, whether or not the drag's
+        // `onEnded` was ever delivered to a view that had already been removed.
+        .onChange(of: recorder.phase) { _, phase in
+            if phase == .idle || recorder.isHandsFree {
+                micTouchStart = nil
+                micTranslation = .zero
+            }
+        }
         // ONE presentation per view. The model sheet, the photo picker and the
         // file importer were all attached HERE, and SwiftUI honours only one of
         // them — which is why attaching a file silently did nothing. The two

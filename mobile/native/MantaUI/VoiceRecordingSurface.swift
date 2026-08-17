@@ -52,9 +52,8 @@ struct VoiceRecordingHeldView: View {
         let hintShift = cancelP * (micDiameter + Metrics.spacing.sp3)
 
         ZStack(alignment: .bottomTrailing) {
-            HStack(alignment: .center, spacing: Metrics.spacing.sp2) {
-                VoiceRecordDot(danger: tokens.danger)
-                timer
+            VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
+                VoiceTakeHeadline(recorder: recorder, tokens: tokens)
                 cancelHint(progress: cancelP, shift: hintShift, isRTL: isRTL, isCancelling: isCancelling)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -75,14 +74,6 @@ struct VoiceRecordingHeldView: View {
     }
 
     // MARK: records
-
-    /// The tabular mono-digit elapsed clock.
-    private var timer: some View {
-        Text(Waveform.formatClock(recorder.durationMs))
-            .font(.manta(size: Metrics.type.body, weight: .semibold).monospacedDigit())
-            .foregroundColor(tokens.tx1)
-            .accessibilityHidden(true)
-    }
 
     /// The "‹ slide to cancel" hint — translates with the drag and fades toward
     /// 0 as the cancel threshold is approached. Once the take is actually in
@@ -169,14 +160,9 @@ struct VoiceRecordingLockedView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp3) {
-            // Head row: record dot + timer + live waveform (right-aligned).
-            HStack(alignment: .center, spacing: Metrics.spacing.sp2) {
-                VoiceRecordDot(danger: tokens.danger)
-                timer
-                Spacer(minLength: Metrics.spacing.sp2)
-                VoiceBarsView(peaks: recorder.livePeaks, progress: nil, tokens: tokens,
-                              style: .live, onSeek: nil)
-            }
+            // Head row: record dot + elapsed clock + live waveform (shared with
+            // the held surface so there is ONE live-meter call site).
+            VoiceTakeHeadline(recorder: recorder, tokens: tokens)
 
             // Remaining-time line — only inside the warn window.
             if remaining < Waveform.Constants.warnRemainingMs {
@@ -215,13 +201,6 @@ struct VoiceRecordingLockedView: View {
 
     private var remaining: Int {
         max(0, Waveform.Constants.maxDurationMs - recorder.durationMs)
-    }
-
-    private var timer: some View {
-        Text(Waveform.formatClock(recorder.durationMs))
-            .font(.manta(size: Metrics.type.body, weight: .semibold).monospacedDigit())
-            .foregroundColor(tokens.tx1)
-            .accessibilityHidden(true)
     }
 
     private var discardButton: some View {
@@ -341,6 +320,27 @@ enum VoiceHapticPlayer {
         case .cancelArmed:
             UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
         }
+    }
+}
+
+/// Record dot + elapsed clock + live meter — the head row shared by the held
+/// and the locked surface, so there is ONE live-meter call site and ONE clock
+/// rather than a copy per surface.
+struct VoiceTakeHeadline: View {
+    @ObservedObject var recorder: VoiceRecorder
+    let tokens: Tokens
+
+    var body: some View {
+        HStack(alignment: .center, spacing: Metrics.spacing.sp2) {
+            VoiceRecordDot(danger: tokens.danger)
+            Text(Waveform.formatClock(recorder.durationMs))
+                .font(.manta(size: Metrics.type.body, weight: .semibold).monospacedDigit())
+                .foregroundColor(tokens.tx1)
+            Spacer(minLength: Metrics.spacing.sp2)
+            VoiceBarsView(peaks: recorder.livePeaks, progress: nil, tokens: tokens,
+                          style: .live, onSeek: nil)
+        }
+        .accessibilityHidden(true)
     }
 }
 
