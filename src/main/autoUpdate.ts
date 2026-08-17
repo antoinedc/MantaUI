@@ -99,9 +99,12 @@ function notifyRenderer(event: string, info: unknown): void {
 }
 
 // IPC handlers: renderer calls these to trigger download / quit-and-install.
-ipcMain.handle(IPC.autoUpdateDownload, () => {
-  autoUpdater.downloadUpdate();
-});
+// Both RETURN the underlying promise (rather than `() => { … }` bodies that
+// resolve `undefined` immediately), so a failure REJECTS the renderer's
+// `invoke` instead of being dropped. Without this the renderer cannot tell a
+// transient download failure from success and leaves its "Downloading…" state
+// stuck forever on a version that will never finish.
+ipcMain.handle(IPC.autoUpdateDownload, () => autoUpdater.downloadUpdate());
 
 ipcMain.handle(IPC.autoUpdateInstall, () => {
   autoUpdater.quitAndInstall();

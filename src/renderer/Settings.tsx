@@ -429,9 +429,29 @@ export function Settings({
     if (checking) return;
     setChecking(true);
     setServerCheckFailed(false);
+    // A hung check must never leave the button spinning forever with no way
+    // out. Each leg resolves-or-rejects, but a box whose server wedges before
+    // answering would await indefinitely — so bound the server leg with a
+    // timeout and treat expiry as a failed check rather than a never-ending
+    // "Checking…".
+    const withTimeout = <T,>(p: Promise<T>, ms: number): Promise<T> =>
+      new Promise<T>((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error("timeout")), ms);
+        p.then(
+          (v) => {
+            clearTimeout(t);
+            resolve(v);
+          },
+          (e) => {
+            clearTimeout(t);
+            reject(e);
+          },
+        );
+      });
+
     const [desktop, server] = await Promise.allSettled([
       window.api.autoUpdateCheck(),
-      window.api.serverUpdateCheck(),
+      withTimeout(window.api.serverUpdateCheck(), 15_000),
     ]);
     // autoUpdateCheck never rejects by contract (main resolves `{error}`
     // instead), so a rejection here means the bridge itself is missing —
@@ -444,6 +464,8 @@ export function Settings({
     if (server.status === "fulfilled") {
       setServerCheck(server.value);
     } else {
+      // Rejected, or timed out — indistinguishable at this level and both mean
+      // "we couldn't get an answer", not "up to date".
       setServerCheck(null);
       setServerCheckFailed(true);
     }
@@ -462,17 +484,20 @@ export function Settings({
     return off;
   }, []);
 
-  // A download ends in exactly one of two ways, and BOTH must clear the local
-  // in-flight state — otherwise the row sits on "Downloading…" forever, which
-  // is the same "looks busy, is actually dead" impression this feature exists
-  // to remove.
+  // A download ends in exactly one of three ways, and ALL of them must clear
+  // the local in-flight state — otherwise the row sits on "Downloading…"
+  // forever, which is the same "looks busy, is actually dead" impression this
+  // feature exists to remove.
   //
   //  - success: the store's `updatePrompt` appears (App.tsx sets it from the
   //    `update-downloaded` event) and the row becomes "Restart to update".
   //  - terminal failure: the store's `updateError` appears (main forwards only
-  //    non-transient failures). Nothing will arrive afterwards, so stop
-  //    pretending a download is in progress. The failure itself is reported by
-  //    the app-level banner; About just stops claiming to be busy.
+  //    non-transient failures). The failure is reported by the banner; About
+  //    just stops claiming to be busy.
+  //  - transient failure: main neither raises `updatePrompt` nor `updateError`
+  //    (a drop mid-download is deliberately not surfaced as a terminal error),
+  //    but the IPC now rejects, so the click handler's `.catch` below resets
+  //    the state and the "Download" button comes back — the user can retry.
   useEffect(() => {
     if (updatePrompt || updateError) {
       setDownloading(false);
@@ -844,7 +869,15 @@ export function Settings({
                         onClick={() => {
                           setDownloading(true);
                           setDownloadPercent(0);
-                          void window.api.autoUpdateDownload();
+                          // The IPC rejects on ANY failure (main now returns
+                          // the download promise), so a transient drop recovers
+                          // to the button instead of wedging "Downloading…".
+                          void window.api
+                            .autoUpdateDownload()
+                            .catch(() => {
+                              setDownloading(false);
+                              setDownloadPercent(null);
+                            });
                         }}
                       >
                         Download

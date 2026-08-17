@@ -848,10 +848,19 @@ export type ServerUpdateAvailablePayload = {
 // the push payload above this must be able to express "I looked and there is
 // nothing", because it answers a button press: `available:false` with no
 // version is a real, reportable answer, not a missing one.
+//
+// `ok` distinguishes that honest "no update" from a check that could not
+// COMPLETE. The background poller deliberately swallows a manifest-fetch
+// failure into `available:false` (a flaky feed must not crash the box), but
+// that same value is `available:false` for "up to date" — so without `ok` the
+// renderer would show the reassuring green "you're up to date" after a failed
+// on-demand check. `ok:false` lets it render a failure instead. Absent on an
+// old server it is treated as `true`.
 export type ServerUpdateCheck = {
   available: boolean;
   version?: string;
   notesUrl?: string | null;
+  ok?: boolean;
 };
 
 // Result of an ON-DEMAND desktop update check (`autoUpdate:check`).

@@ -67,6 +67,7 @@ test("createUpdateCheck: newer manifest → { available:true, version, notesUrl 
     available: true,
     version: "9.9.9",
     notesUrl: "https://mantaui.com/releases",
+    ok: true,
   });
 });
 
@@ -98,25 +99,29 @@ test("createUpdateCheck: manifest fetch throws → { available:false } (no rethr
   // The contract is that a flaky manifest URL must NEVER crash the poller —
   // a throw here would tear down the server on the first bad check.
   const res = await tick();
-  assert.deepEqual(res, { available: false });
+  // `ok:false` is what lets the ON-DEMAND path tell "there wasn't one" from
+  // "we couldn't tell". The background poll swallows the failure into the same
+  // `available:false` value, which is fine for a timer and would be a LIE for
+  // a manual "Check for updates" button — that is the fix this assertion pins.
+  assert.deepEqual(res, { available: false, ok: false });
 });
 
-test("createUpdateCheck: manifest missing version field → { available:false }", async () => {
+test("createUpdateCheck: manifest missing version field → { available:false, ok:true }", async () => {
   const { tick } = createUpdateCheck({
     fetchManifest: async () => ({ notes_url: "x", min_client: "0.0.0" }),
     currentVersion: "1.2.3",
   });
   const res = await tick();
-  assert.deepEqual(res, { available: false });
+  assert.deepEqual(res, { available: false, ok: true });
 });
 
-test("createUpdateCheck: manifest with non-string version → { available:false }", async () => {
+test("createUpdateCheck: manifest with non-string version → { available:false, ok:true }", async () => {
   const { tick } = createUpdateCheck({
     fetchManifest: async () => ({ version: 42, notes_url: "x", min_client: "0.0.0" }),
     currentVersion: "1.2.3",
   });
   const res = await tick();
-  assert.deepEqual(res, { available: false });
+  assert.deepEqual(res, { available: false, ok: true });
 });
 
 test("createUpdateCheck: passes the hardcoded MANIFEST_URL to fetchManifest", async () => {
@@ -578,7 +583,7 @@ test("createUpdateCheck: a concurrent tick JOINS the in-flight one (never a fals
   const [ra, rb] = await Promise.all([a, b]);
 
   assert.equal(fetches, 1, "the second caller must not start a second fetch");
-  assert.deepEqual(ra, { available: true, version: "2.0.0", notesUrl: null });
+  assert.deepEqual(ra, { available: true, version: "2.0.0", notesUrl: null, ok: true });
   assert.deepEqual(rb, ra, "both callers see the SAME real answer");
 });
 
@@ -609,7 +614,30 @@ test("poller.check(): returns the verdict so a button can say 'up to date'", asy
     fetchManifest: async () => SAME("1.2.3"),
   });
   try {
-    assert.deepEqual(await check(), { available: false });
+    assert.deepEqual(await check(), { available: false, ok: true });
+  } finally {
+    stop();
+  }
+});
+
+test("poller.check(): a manifest fetch failure is ok:false, never a false 'up to date'", async () => {
+  // The poller swallows fetch failures so a flaky feed can't crash the box —
+  // but the value it resolves is the SAME `available:false` that "up to date"
+  // resolves, so without `ok:false` the renderer's box row would show the
+  // reassuring green "you're up to date" after a failed check. That false okay
+  // is precisely what a "Check for updates" button exists to break, so the
+  // failure must be distinguishable.
+  const bus = fakeBus();
+  const { stop, check } = startServerUpdatePoller({
+    bus,
+    currentVersion: "1.2.3",
+    fetchManifest: async () => {
+      throw new Error("network unreachable");
+    },
+  });
+  try {
+    assert.deepEqual(await check(), { available: false, ok: false });
+    assert.equal(updateEvents(bus).length, 0, "a failed check must not raise a banner");
   } finally {
     stop();
   }
@@ -629,12 +657,16 @@ test("poller.check(): an available update is reported AND raises the banner", as
     assert.equal(result.available, true);
     assert.equal(result.version, "9.9.9");
     // The manual check reuses the poller's tick precisely so the button and the
-    // banner can never disagree about what is available.
-    assert.equal(updateEvents(bus).length, 1);
-    assert.deepEqual(updateEvents(bus)[0].payload, {
-      version: "9.9.9",
-      notesUrl: "https://mantaui.com/releases",
-    });
+    // banner can never disagree about what is available. A banner is raised
+    // with the right payload — the poller's own boot tick may add one more, so
+    // assert at least one rather than a count.
+    const events = updateEvents(bus).map((e) => e.payload);
+    assert.ok(events.length >= 1, "an available update must raise the banner");
+    assert.ok(
+      events.some((p) => p.version === "9.9.9" && p.notesUrl === "https://mantaui.com/releases"),
+      "a banner carries the right version + notesUrl",
+    );
+    assert.equal(notified.length, 1, "push deduped — one per version regardless of callers");
   } finally {
     stop();
   }
@@ -656,19 +688,26 @@ test("poller.check(): repeated checks keep answering, but notify at most once", 
     const second = await check();
     assert.equal(first.available, true);
     assert.deepEqual(second, first, "the second press must not report 'up to date'");
-    assert.equal(updateEvents(bus).length, 1, "banner raised once");
-    assert.equal(notified.length, 1, "notified once");
+    // `check()` re-surfaces the banner on every call (forceBanner) — this is
+    // the reconnect case where a desktop that came back after a release should
+    // see the banner even though the box's timer already notified that version.
+    // The banner is an idempotent store set, so re-publishing is harmless. The
+    // PUSH stays deduped: same version → one push, never a re-buzz.
+    assert.ok(updateEvents(bus).length >= 2, "a repeat check re-surfaces the banner (forceBanner)");
+    assert.equal(notified.length, 1, "push deduped — at most once per version");
   } finally {
     stop();
   }
 });
 
-test("poller.check(): a check racing the boot tick still publishes exactly ONCE", async () => {
+test("poller.check(): concurrent checks still push at most ONCE", async () => {
   // The dedup gate reads and writes `lastNotifiedVersion` with no `await`
-  // between them, so two concurrent runTicks resume as sequential microtasks
-  // and the second sees the gate already closed. That atomicity is what stops
-  // "user pressed the button just as the timer fired" from double-notifying —
-  // it is easy to break by adding an await inside the gate, so pin it.
+  // between them, so concurrent checks resume as sequential microtasks and the
+  // second sees the gate already closed. That atomicity is what stops "user
+  // pressed the button just as the timer fired" from double-notifying — it is
+  // easy to break by adding an await inside the gate, so pin the PUSH. (The
+  // banner may be published a few times — it is an idempotent store set and
+  // `check()` force-re-surfaces it — but a push must fire once per version.)
   const bus = fakeBus();
   const notified = [];
   const { stop, check } = startServerUpdatePoller({
@@ -678,11 +717,10 @@ test("poller.check(): a check racing the boot tick still publishes exactly ONCE"
     fetchManifest: async () => NEWER("9.9.9"),
   });
   try {
-    // The boot tick is already in flight (startPoller runs one immediately).
     const [a, b] = await Promise.all([check(), check()]);
     assert.equal(a.available, true);
     assert.equal(b.available, true, "every caller gets the real answer");
-    assert.equal(updateEvents(bus).length, 1, "one banner event, not one per caller");
+    assert.ok(updateEvents(bus).length >= 1, "banner surfaced at least once");
     assert.equal(notified.length, 1, "one push, not one per caller");
   } finally {
     stop();

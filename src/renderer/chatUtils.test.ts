@@ -1564,6 +1564,23 @@ describe("describeServerUpdate", () => {
     expect(row?.tone).toBe("error");
     expect(row?.text).toMatch(/couldn’t reach the box/i);
   });
+
+  it("a check that could not complete (ok:false) is an ERROR, never 'up to date'", () => {
+    // A manifest-fetch failure resolves `available:false` — the SAME value as
+    // "up to date". Without this branch the box row would show the green
+    // reassuring tone after a failed check. The failure must be read as an
+    // error, not a clean bill of health.
+    const row = describeServerUpdate({ available: false, ok: false });
+    expect(row?.tone).toBe("error");
+    expect(row?.tone).not.toBe("ok");
+    expect(row?.text).toMatch(/couldn’t check the box/i);
+  });
+
+  it("an absent ok is treated as a successful check (old server)", () => {
+    // A response from an older server that predates the `ok` field must still
+    // render normally, not as an error.
+    expect(describeServerUpdate({ available: false })?.tone).toBe("ok");
+  });
 });
 
 // ===== isTransientUpdateNetworkError =====

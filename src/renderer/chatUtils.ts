@@ -1146,11 +1146,19 @@ export function describeDesktopUpdate(
  * separately by the caller when the RPC itself did not come back.
  */
 export function describeServerUpdate(
-  r: { available: boolean; version?: string } | null,
+  r: { available: boolean; version?: string; ok?: boolean } | null,
   opts: { failed?: boolean } = {},
 ): UpdateRow | null {
+  // A genuine failure outranks any reading. Two ways to be here: the RPC that
+  // ran the check never came back (`failed`), or the box's check could not
+  // fetch the manifest (`ok === false`) — in BOTH cases the answer is "we
+  // can't know", NOT the reassuring green "you're up to date", which is what a
+  // swallowed manifest-fetch failure would otherwise render as.
   if (opts.failed) return { tone: "error", text: "Couldn’t reach the box to check." };
   if (r == null) return null;
+  if (r.ok === false) {
+    return { tone: "error", text: "Couldn’t check the box for updates right now." };
+  }
   if (r.available) {
     return {
       tone: "action",

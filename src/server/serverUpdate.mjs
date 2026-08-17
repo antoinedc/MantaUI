@@ -150,7 +150,8 @@ export const defaultFetchManifest = createManifestFetcher();
  * @param {object} deps
  * @param {(url:string) => Promise<any>} deps.fetchManifest
  * @param {string} deps.currentVersion
- * @returns {{ tick: () => Promise<{available:boolean, version?:string, notesUrl?:string|null}> }}
+ * @returns {{ tick: () => Promise<CheckResult> }} where
+ *   CheckResult = { available:boolean, version?:string, notesUrl?:string|null, ok:boolean }
  */
 export function createUpdateCheck({ fetchManifest, currentVersion, url }) {
   let inFlight = null;
@@ -162,16 +163,22 @@ export function createUpdateCheck({ fetchManifest, currentVersion, url }) {
     try {
       const manifest = await fetchManifest(feedUrl);
       if (!manifest || typeof manifest.version !== "string") {
-        return { available: false };
+        return { available: false, ok: true };
       }
       const available = isUpdateAvailable(currentVersion, manifest.version);
       const notesUrl =
         typeof manifest.notes_url === "string" ? manifest.notes_url : null;
       return available
-        ? { available: true, version: manifest.version, notesUrl }
-        : { available: false };
+        ? { available: true, version: manifest.version, notesUrl, ok: true }
+        : { available: false, ok: true };
     } catch {
-      return { available: false };
+      // The background poll must survive a flaky feed, so this swallows the
+      // throw — but `ok:false` is the flag the ON-DEMAND path needs to tell
+      // "there wasn't one" from "we couldn't tell". Without it, a manual
+      // "Check for updates" that hit a network hiccup would render the green
+      // "you're up to date", which is exactly the false okay this feature
+      // exists to prevent.
+      return { available: false, ok: false };
     }
   }
 
@@ -179,7 +186,7 @@ export function createUpdateCheck({ fetchManifest, currentVersion, url }) {
     // A dev build has `updateFeed: null`. Report "no update" rather than
     // falling back to the prod feed: a local build must never talk a real box
     // into installing a public release over it.
-    if (!feedUrl) return Promise.resolve({ available: false });
+    if (!feedUrl) return Promise.resolve({ available: false, ok: true });
     if (inFlight) return inFlight;
     inFlight = run().finally(() => {
       inFlight = null;
@@ -235,27 +242,37 @@ export function startServerUpdatePoller(
   });
   let lastNotifiedVersion = null;
 
-  async function runTick() {
-    const result = await tick();
-    // Always hand the caller the comparison result — `check()` returns this so
-    // a manual check can say "up to date" as confidently as "update available".
-    // The dedup below gates only the SIDE EFFECTS (banner + push), never the
-    // answer, so clicking the button twice reports the truth twice while
-    // notifying at most once.
-    if (!result?.available || !result.version) return result ?? { available: false };
-    if (result.version === lastNotifiedVersion) return result;
-    lastNotifiedVersion = result.version;
+  // Emit the two side effects of an available update, with separate gating.
+  //
+  // - The BANNER bus event is what any CONNECTED desktop shows. The timer lets
+  //   it through only once per version (a dismissed banner must not come back
+  //   every 30 minutes); an on-demand check passes `forceBanner:true` so a
+  //   desktop that reconnects AFTER a release — and therefore never saw the
+  //   timer's one-and-only banner — surfaces it on open. The banner is an
+  //   idempotent store set on the client, so re-publishing is harmless.
+  // - The PUSH is deduped for both paths: re-surfacing a banner on a fresh
+  //   connect must not re-buzz the phone.
+  async function publish(result, { forceBanner }) {
+    const firstForVersion = result.version !== lastNotifiedVersion;
+    if (forceBanner || firstForVersion) {
+      // Match the bus envelope documented in src/server/events.mjs: every
+      // `{kind, payload}` event from the server carries the per-kind fields
+      // INSIDE `payload`, not as siblings of `kind`. The renderer's
+      // dispatchFrame (src/renderer/api/httpApi.ts) destructures `{kind,
+      // payload}`; nesting here is what makes the `onServerUpdateAvailable`
+      // subscription see `{version, notesUrl}`.
+      bus.publish({
+        kind: "serverUpdateAvailable",
+        payload: { version: result.version, notesUrl: result.notesUrl ?? null },
+      });
+    }
+    if (!firstForVersion) return;
 
-    // Match the bus envelope documented in src/server/events.mjs: every
-    // `{kind, payload}` event from the server carries the per-kind fields
-    // INSIDE `payload`, not as siblings of `kind`. The renderer's dispatchFrame
-    // (src/renderer/api/httpApi.ts) destructures `{kind, payload}` and hands
-    // `payload` to its listeners; nesting here is what makes the stage-3
-    // `onServerUpdateAvailable` subscription see `{version, notesUrl}`.
-    bus.publish({
-      kind: "serverUpdateAvailable",
-      payload: { version: result.version, notesUrl: result.notesUrl ?? null },
-    });
+    // Written before the first await below, so two racing ticks cannot both
+    // pass this gate (JS microtasks resume sequentially; the second sees the
+    // gate already closed). This atomicity is what stops a check that races
+    // the timer from double-notifying.
+    lastNotifiedVersion = result.version;
 
     if (typeof notify === "function") {
       try {
@@ -273,7 +290,28 @@ export function startServerUpdatePoller(
         );
       }
     }
+  }
 
+  async function runTick() {
+    const result = await tick();
+    // Always hand the caller the comparison result — `check()` returns this so
+    // a manual check can say "up to date" as confidently as "update available".
+    // The dedup below gates only the SIDE EFFECTS (banner + push), never the
+    // answer, so clicking the button twice reports the truth twice while
+    // notifying at most once.
+    if (!result?.available || !result.version) return result ?? { available: false, ok: true };
+    await publish(result, { forceBanner: false });
+    return result;
+  }
+
+  // The ON-DEMAND path (Settings → About button, and the desktop's
+  // check-on-connect). Same comparison as the timer, but it always re-raises
+  // the banner (forceBanner:true) so a client that connects after a release
+  // still sees it, while the push stays deduped.
+  async function check() {
+    const result = await tick();
+    if (!result?.available || !result.version) return result ?? { available: false, ok: true };
+    await publish(result, { forceBanner: true });
     return result;
   }
 
@@ -282,7 +320,7 @@ export function startServerUpdatePoller(
     label: "server-update",
   });
 
-  return { stop, check: runTick };
+  return { stop, check };
 }
 
 /**
