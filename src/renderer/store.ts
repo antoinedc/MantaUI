@@ -7,6 +7,7 @@ import type {
   Project,
   TmuxWindow,
   UsageSnapshot,
+  StoppedRecord,
   WindowStatus,
 } from "../shared/types";
 import type { ConnectionState } from "../shared/net/state.js";
@@ -424,6 +425,13 @@ type State = {
   // NOT poll this; the box's usage poller (src/server/usage.mjs) is the only
   // timer. Empty array = no snapshots yet (or no provider connected).
   usage: UsageSnapshot[];
+  // BET-1049: the durable box-side record of conversations stopped by a
+  // plan-usage limit (window.api.usageStoppedList), kept live by the
+  // `usage-stopped.updated` bus event. The single source the sidebar pill,
+  // the row markers and the resume modal read — never cached separately in
+  // renderer state. `lastLookedStopped` is the modal's last-closed stamp.
+  usageStopped: StoppedRecord[];
+  lastLookedStopped: number | null;
   // BET-659: per-session live transcript, lifted from each ChatPanel so the
   // Artifacts panel (mounted as a sibling of <main> in App.tsx) can derive
   // artifacts WITHOUT a second opencodeMessages fetch. Keyed by sessionId,
@@ -588,6 +596,11 @@ type State = {
   // this is a straight replace, not a merge (the poller's contract is "the
   // current cache", not a diff).
   setUsage: (usage: UsageSnapshot[]) => void;
+  // Replace the stopped-conversation record (BET-1049) from
+  // window.api.usageStoppedList() or a `usage-stopped.updated` refetch. Both
+  // hand over the full {records, lastLooked} — a straight replace, not a
+  // merge (the record is the single source of truth).
+  setUsageStopped: (result: { records: StoppedRecord[]; lastLooked: number | null }) => void;
   // Chat-mode running state driven by opencode SSE (session.status /
   // session.idle / session.error). The PTY-pane poller can't see chat
   // windows' state — the holder runs `sleep infinity`, not claude — so
@@ -722,6 +735,8 @@ export const useStore = create<State>((set, get) => ({
   status: {},
   jobs: {},
   usage: [],
+  usageStopped: [],
+  lastLookedStopped: null,
   chatMessages: {},
   pendingScreenshots: [],
   agentFileToast: null,
@@ -1100,6 +1115,9 @@ export const useStore = create<State>((set, get) => ({
     }),
 
   setUsage: (usage) => set({ usage }),
+
+  setUsageStopped: ({ records, lastLooked }) =>
+    set({ usageStopped: Array.isArray(records) ? records : [], lastLookedStopped: lastLooked ?? null }),
 
   setChatRunning: (sessionId, running) =>
     set((prev) => {

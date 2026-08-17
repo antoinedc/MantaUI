@@ -1302,6 +1302,17 @@ export const IPC = {
   // the UsageSnapshot/UsageWindow doc comment above for that boundary.
   usageList: "usage:list", // () → UsageSnapshot[]
 
+  // ---- usage-limit stopped conversations (manta-server owned; BET-1047) ----
+  // Durable box-side record of conversations stopped by a plan-usage limit
+  // (src/server/stoppedStore.mjs). list → { records, lastLooked }; arm /
+  // disarm / stamp-last-looked mutate the record and publish
+  // `usage-stopped.updated`. Single source for the sidebar indicator + the
+  // resume modal.
+  usageStoppedList: "usage-stopped:list", // () → { records, lastLooked }
+  usageStoppedArm: "usage-stopped:arm", // (conversation) → void
+  usageStoppedDisarm: "usage-stopped:disarm", // (conversation) → void
+  usageStoppedStampLastLooked: "usage-stopped:stamp-last-looked", // () → void
+
   // ---- session progress (manta-server owned; BET-790) ----
   // Read-only: the durable progress record for a session (written by the AI's
   // `progress_report` opencode tool → POST /api/progress). Desktop + mobile
@@ -1650,6 +1661,33 @@ export type UsageSnapshot = {
   windows: UsageWindow[];
   extras?: { label: string; value: string }[]; // credits balance, model pools…
   fetchedAt: number; // epoch ms of the successful fetch
+};
+
+// One row of the durable box-side record of conversations stopped by a
+// plan-usage limit (src/server/stoppedStore.mjs, BET-1047). The SINGLE source
+// for the sidebar indicator, the row markers and the resume modal; it lives on
+// the box so all three survive an app restart. Input to the renderer, never
+// derived — the renderer only reads it, arms/disarms it, and stamps
+// last-looked.
+export type StoppedRecord = {
+  workspace: string; // the project/workspace the conversation lives in
+  conversation: string; // the opencode session id (row identity + grouping)
+  provider: "claude" | "codex" | "kimi"; // the meter that gates the resume
+  model?: string; // the model that was in flight (pinned on the continuation)
+  window: UsageWindowKind | null; // "session" | "weekly" | "monthly", when named
+  stoppedAt: number; // epoch ms — ordering + "new since you last looked"
+  cachedTokens?: number; // cached-token count at that moment (cold-cache cost)
+  armed?: boolean; // whether the user chose to resume it
+  attempts?: number; // so a permanently-refused conversation stops looping
+};
+export type UsageWindowKind = "session" | "weekly" | "monthly" | string;
+
+// The list-level read of the stopped record: the records plus the modal's
+// "last looked" timestamp (stamped when the modal closes so "new" badges
+// clear).
+export type StoppedListResult = {
+  records: StoppedRecord[];
+  lastLooked: number | null;
 };
 
 // A background-delegation job record (manta store: ~/.manta/delegate-jobs.json).

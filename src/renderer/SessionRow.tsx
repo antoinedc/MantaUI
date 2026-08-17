@@ -40,7 +40,7 @@
 
 import type { ReactNode } from "react";
 
-export type SessionStatus = "run" | "att" | "idle" | "ok" | "default";
+export type SessionStatus = "run" | "att" | "idle" | "ok" | "default" | "halted";
 
 // The row container. `group` is the identity hook for the call site's
 // group-hover affordances (the pin reveal, the stale-age reveal); it styles
@@ -95,6 +95,10 @@ const DOT: Record<SessionStatus, string> = {
   att: "bg-danger ring-[3px] ring-danger-bg animate-pulse",
   idle: "bg-warn",
   ok: "bg-ok",
+  // BET-1049: a conversation stopped by a provider limit. A hollow warn ring
+  // is deliberately distinct from the solid idle (`bg-warn`) and attention
+  // (`bg-danger` + pulse) dots — it waits on a clock, not on the user.
+  halted: "bg-transparent border border-warn",
 };
 
 // Name `.t`: one line, ellipsis; selected brightens + weights 600. The base
