@@ -372,7 +372,7 @@ enum ChatTranscriptMapper {
 
         guard !(liveSteps.isEmpty && liveSubagents.isEmpty) else { return blocks }
 
-        var liveRows = liveSteps.map { .step($0) }
+        var liveRows: [StepGroupRow] = liveSteps.map { .step($0) }
         liveRows.append(contentsOf: liveSubagents.map { .subagent($0) })
 
         // Dedup against ids the canonical transcript already owns — STEP rows
