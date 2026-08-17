@@ -67,6 +67,28 @@ export class ForgeRateLimitedError extends Error {
   }
 }
 
+/**
+ * Classify a forge request failure into an actionable kind. Pure.
+ *
+ * SAFETY PROPERTY: only "rejected" is destructive downstream (it is the only
+ * kind that may cause a stored credential to be deleted). Every other kind is
+ * inert, so a misclassification among them is cosmetic, never damaging. Keep it
+ * that way — do not widen what maps to "rejected".
+ *
+ * @param {unknown} err
+ * @returns {"rejected"|"rate_limited"|"forbidden"|"network"|"unknown"}
+ */
+export function classifyForgeError(err) {
+  if (err && err.name === "ForgeRateLimitedError") return "rate_limited";
+  const status = err && typeof err.status === "number" ? err.status : null;
+  if (status === 401) return "rejected";
+  if (status === 429) return "rate_limited";
+  if (status === 403) return "forbidden";
+  // The request layer only throws without a status when `fetch` itself failed.
+  if (status === null) return "network";
+  return "unknown";
+}
+
 function bucketOf(url) {
   try {
     return new URL(url).hostname;
@@ -229,9 +251,7 @@ async function fetchOne(url, token, tokenHeader, bucket, cacheKey, accept, parse
     throw new ForgeRateLimitedError(url);
   }
 
-  if (!res.ok) {
-    throw new Error(`github request failed (${res.status}) for ${url}`);
-  }
+  if (!res.ok) throw new GithubRequestError(res.status, url);
 
   const data = await parse(res);
   const etag = res.headers.get("etag");

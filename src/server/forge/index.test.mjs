@@ -25,6 +25,7 @@ import {
   seedPromptFor,
   INBOX_SEED_PROMPT,
   ForgeRateLimitedError,
+  classifyForgeError,
 } from "./index.mjs";
 import { getDraft, putComment } from "./draft.mjs";
 import { detectForgeWithHosts } from "./selfhost.mjs";
@@ -323,6 +324,24 @@ test("pullRequestForCwd: aheadCount is null when the rev-list call throws", asyn
 test("getAdapter throws UnsupportedByForgeError for an unknown kind", async () => {
   const runtime = createForgeRuntime({ fetch: async () => json({}, 200, {}) });
   assert.throws(() => runtime.getAdapter("gitea", "t"), (e) => e.name === "UnsupportedByForgeError");
+});
+
+test("classifyForgeError maps known failure kinds", () => {
+  assert.equal(classifyForgeError(new ForgeRateLimitedError(URL)), "rate_limited");
+  assert.equal(classifyForgeError({ status: 401 }), "rejected");
+  assert.equal(classifyForgeError({ status: 429 }), "rate_limited");
+  assert.equal(classifyForgeError({ status: 403 }), "forbidden");
+  assert.equal(classifyForgeError(new Error("offline")), "network");
+  assert.equal(classifyForgeError({ status: 500 }), "unknown");
+  assert.equal(classifyForgeError(null), "network");
+});
+
+test("read-path failure throws GithubRequestError carrying the status", async () => {
+  const runtime = createForgeRuntime({ fetch: async () => ({ ok: false, status: 401 }) });
+  await assert.rejects(
+    runtime.requestLayer.getJson(URL, { token: "t" }),
+    (e) => e.name === "GithubRequestError" && e.status === 401,
+  );
 });
 
 test("a configured self-hosted host routes through the box op with its apiBase", async () => {
