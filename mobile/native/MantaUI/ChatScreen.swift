@@ -178,14 +178,8 @@ private struct ChatScreenContent: View {
         autoScrollsToBottomOnAppend: true,
         scrollsToBottomOnReplace: true
     )
-    /// Owned by the VIEW, never by the store: `ListDataSource` keeps an
-    /// append-only change log that `TiledView` replays from index 0 whenever
-    /// it meets a data source it has not seen. A store-owned one is mutated
-    /// long before (and across more than one) view creation, so the replay
-    /// runs against an already-final snapshot and desyncs the collection
-    /// view — the invalid-batch-updates crash. View-owned, the log and the
-    /// replay cursor are born together and the replay is always coherent.
-    @State private var dataSource = ListDataSource<TranscriptRow>()
+    /// The `dataSource` (+ change log) is now owned by `TranscriptListView`,
+    /// which shares one lifetime with the scroll view it describes (BET-1062).
     /// Whether the transcript has been scrolled up far enough that the round
     /// "scroll to bottom" control (rendered in ComposerView's model-selection
     /// row) should be shown. Driven purely by scroll geometry; it does not
@@ -742,96 +736,26 @@ private struct ChatScreenContent: View {
     }
 
     private var transcript: some View {
-        // MessagingUI's TiledView owns the whole scroll layer: smooth
-        // bottom-follow on append/replace, keyboard + safe-area insets, and
-        // prepend-without-jump when older messages load. This deliberately
-        // replaces the hand-rolled ScrollView + LazyVStack + geometry/keyboard/
-        // landing machinery that was the source of the device-only blank-on-
-        // open, snap, and disappear-on-scroll bugs.
-        TiledView(dataSource: dataSource, scrollPosition: $scrollPosition) { row in
-            TranscriptBlockCell(item: row, tokens: tokens)
-        }
-        // The identity moved into the system navigation bar, which reserves its
-        // own space for the subtitle — so the transcript needs no top
-        // `.headerContent` inset of its own; the bar's safe area supplies it.
-        // Older messages load as you reach the top; TiledView's virtual layout
-        // inserts them without a scroll jump.
-        .prependLoader(.loader(
-            perform: { store.loadEarlier() },
-            isProcessing: store.loadingEarlier
-        ) {
-            LoadEarlierRow(loading: store.loadingEarlier, tokens: tokens) {}
-        })
-        // The running-state working row rendered as MessagingUI's typing
-        // indicator: a genuine row BELOW the last message, inside the scroll
-        // content — not floating chrome. It pins to the bottom because that is
-        // where the newest content sits, appears only while a turn runs, and
-        // vanishes when it ends. (BET-630 D1; the ambient refetch sweep lives
-        // on the composer's border and means a different thing, so the two
-        // never share an indicator.)
-        .typingIndicator(.indicator(isVisible: store.running) {
-            RunningIndicator(store: store)
-        })
-        // Reserves the floating composer's height inside the scroll CONTENT, so
-        // at rest the newest message and the typing indicator come to rest
-        // ABOVE the composer while still passing under it mid-scroll.
-        // `additionalContentInset` is MessagingUI's own inset channel; TiledView
-        // combines it with the SwiftUI safe area, which already carries the home
-        // indicator and the keyboard — so no extra arithmetic is needed here.
-        .additionalContentInset(
-            EdgeInsets(top: 0, leading: 0, bottom: bottomBarHeight, trailing: 0)
+        // The whole scroll layer now lives in `TranscriptListView`, which owns
+        // the `ListDataSource` change log and therefore shares ONE lifetime
+        // with the scroll view it describes (BET-1062). Declaring the store on
+        // the screen (BET-807) let it outlive the scroll view when the
+        // transcript branch was left for the skeleton / load-failure state —
+        // the fresh, empty collection view then met a log describing rows it
+        // never had ("attempt to delete item N from section 0 …").
+        TranscriptListView(
+            store: store,
+            tokens: tokens,
+            bottomInset: bottomBarHeight,
+            scrollPosition: $scrollPosition,
+            onPointsFromBottom: { showScrollToBottom = $0 > Self.scrollToBottomThreshold },
+            header: { sessionHeaderBlock }
         )
-        // The "scroll to bottom" control (rendered in ComposerView's
-        // model-selection row). It shows only once the user has scrolled up
-        // (pointsFromBottom above the threshold) — at the bottom there is
-        // nowhere to return to, so the button would be noise.
-        //
-        // Auto-follow is left constant (see init) so new messages pin to the
-        // newest turn smoothly. It must NOT be toggled from this geometry
-        // callback: when a message appends while the user is at the bottom,
-        // content grows before the scroll catches up, so pointsFromBottom
-        // briefly spikes past the threshold — toggling auto-follow off there
-        // makes every new event stop following then re-latch, which is exactly
-        // the "transcript goes up and back down" jump. Driving only the button
-        // from geometry keeps that from happening.
-        //
-        // These TiledView-only modifiers must be chained BEFORE
-        // `.simultaneousGesture` below: `onTiledScrollGeometryChange` is a
-        // method on the concrete TiledView type (it returns `Self`), not a
-        // `View` modifier — once a `View` modifier like `.simultaneousGesture`
-        // erases the type to `some View`, the compiler no longer sees it.
-        .onTiledScrollGeometryChange { geometry in
-            showScrollToBottom = geometry.pointsFromBottom > Self.scrollToBottomThreshold
-        }
-        .onChange(of: store.rows, initial: true) { _, rows in
-            dataSource.apply(rows)
-        }
-        // Context meter (BET-824): a strip mounted directly under the
-        // navigation bar. `safeAreaBar(edge: .top)` insets the scroll view's
-        // safe area AND extends the scroll-edge effect, so the transcript
-        // scrolls correctly beneath it — no toolbar item, no hand-rolled
-        // overlay. It renders whenever the reading is known (see `contextStrip`)
-        // and animates in above the transcript.
-        .safeAreaBar(edge: .top) {
-            sessionHeaderBlock
-        }
-        // A tap on the transcript lowers the keyboard. (TiledView handles the
-        // scroll-driven interactive keyboard dismiss itself.)
-        .simultaneousGesture(TapGesture().onEnded { resignKeyboard() })
     }
     /// How far above the bottom the user must scroll for the down-arrow to
     /// appear. Same magnitude MessagingUI uses internally for its own "near
     /// bottom" checks.
     private static let scrollToBottomThreshold: CGFloat = 100
-
-    /// Lower the keyboard by asking whoever holds first responder to give it
-    /// up. The composer's focus binding lives inside ComposerView, and routing
-    /// a "please blur" signal down to it would mean threading state through a
-    /// sibling view for one gesture.
-    private func resignKeyboard() {
-        UIApplication.shared.sendAction(
-            #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-    }
 
     // MARK: - Loading skeleton (D2 / BET-631)
 
@@ -1209,14 +1133,8 @@ struct ChatSubagentScreen: View {
         autoScrollsToBottomOnAppend: true,
         scrollsToBottomOnReplace: true
     )
-    /// Owned by the VIEW, never by the store: `ListDataSource` keeps an
-    /// append-only change log that `TiledView` replays from index 0 whenever
-    /// it meets a data source it has not seen. A store-owned one is mutated
-    /// long before (and across more than one) view creation, so the replay
-    /// runs against an already-final snapshot and desyncs the collection
-    /// view — the invalid-batch-updates crash. View-owned, the log and the
-    /// replay cursor are born together and the replay is always coherent.
-    @State private var dataSource = ListDataSource<TranscriptRow>()
+    /// The `dataSource` (+ change log) lives on `TranscriptListView`, which
+    /// shares one lifetime with the scroll view it describes (BET-1062).
 
     var body: some View {
         content
@@ -1242,21 +1160,14 @@ struct ChatSubagentScreen: View {
     }
 
     private var transcript: some View {
-        TiledView(dataSource: dataSource, scrollPosition: $scrollPosition) { row in
-            TranscriptBlockCell(item: row, tokens: tokens)
-        }
-        .prependLoader(.loader(
-            perform: { store.loadEarlier() },
-            isProcessing: store.loadingEarlier
-        ) {
-            LoadEarlierRow(loading: store.loadingEarlier, tokens: tokens) {}
-        })
-        .typingIndicator(.indicator(isVisible: store.running) {
-            RunningIndicator(store: store)
-        })
-        .onChange(of: store.rows, initial: true) { _, rows in
-            dataSource.apply(rows)
-        }
+        TranscriptListView(
+            store: store,
+            tokens: tokens,
+            bottomInset: 0,
+            scrollPosition: $scrollPosition,
+            onPointsFromBottom: nil,
+            header: { EmptyView() }
+        )
         .background(tokens.canvas.ignoresSafeArea())
         .onAppear { store.start() }
         .onDisappear { store.stop() }
@@ -1270,6 +1181,69 @@ struct ChatSubagentScreen: View {
             .padding(.horizontal, Metrics.spacing.sp3)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(tokens.canvas.ignoresSafeArea())
+    }
+}
+
+// MARK: - Shared transcript scroll layer (BET-1062)
+
+/// The transcript scroll layer, and the OWNER of its own change log.
+///
+/// `ListDataSource` keeps an append-only log describing the rows the collection
+/// view holds, so the two have to be born and die together. Declared on the
+/// SCREEN instead (BET-807), it outlives the scroll view every time the
+/// transcript branch is left for the loading skeleton or the load-failure
+/// state — and the rebuilt, empty collection view then meets a log describing
+/// rows it never had ("attempt to delete item N from section 0 which only
+/// contains 0 items"). Declared HERE, leaving the branch destroys both.
+///
+/// One view serves both the parent chat and the read-only subagent drill-in:
+/// the subagent's old chain was a strict subset of the parent's, so this
+/// deletes a duplicated TiledView chain rather than adding a layer.
+struct TranscriptListView<Header: View>: View {
+    @ObservedObject var store: ChatSessionStore
+    let tokens: Tokens
+    let bottomInset: CGFloat
+    @Binding var scrollPosition: TiledScrollPosition
+    var onPointsFromBottom: ((CGFloat) -> Void)? = nil
+    @ViewBuilder var header: () -> Header
+
+    @State private var dataSource = ListDataSource<TranscriptRow>()
+
+    var body: some View {
+        TiledView(dataSource: dataSource, scrollPosition: $scrollPosition) { row in
+            TranscriptBlockCell(item: row, tokens: tokens)
+        }
+        .prependLoader(.loader(
+            perform: { store.loadEarlier() },
+            isProcessing: store.loadingEarlier
+        ) {
+            LoadEarlierRow(loading: store.loadingEarlier, tokens: tokens) {}
+        })
+        .typingIndicator(.indicator(isVisible: store.running) {
+            RunningIndicator(store: store)
+        })
+        .additionalContentInset(
+            EdgeInsets(top: 0, leading: 0, bottom: bottomInset, trailing: 0)
+        )
+        .onTiledScrollGeometryChange { geometry in
+            onPointsFromBottom?(geometry.pointsFromBottom)
+        }
+        .onChange(of: store.rows, initial: true) { _, rows in
+            dataSource.apply(rows)
+        }
+        .safeAreaBar(edge: .top) {
+            header()
+        }
+        .simultaneousGesture(TapGesture().onEnded { resignKeyboard() })
+    }
+
+    /// Lower the keyboard by asking whoever holds first responder to give it
+    /// up. The composer's focus binding lives inside `ComposerView` (on the
+    /// parent), and routing a "please blur" signal down to it would mean
+    /// threading state through a sibling view for one gesture.
+    private func resignKeyboard() {
+        UIApplication.shared.sendAction(
+            #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
 }
 
