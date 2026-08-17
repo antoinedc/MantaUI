@@ -51,16 +51,6 @@ struct VoiceRecordingHeldView: View {
     /// the composer instead of stretching it.
     private var laneHeight: CGFloat { VoiceGesture.Thresholds.lock + micDiameter }
 
-    /// The mic tracks the finger ONE-TO-ONE, clamped by the same two distances the
-    /// machine acts on: both progress helpers are `-distance / threshold` clamped to
-    /// `0...1`, so multiplying back by the threshold reproduces the finger's own
-    /// travel and stops it dead at the point the gesture resolves. Do not add
-    /// clamping arithmetic, a scale factor, or an animation of your own.
-    private func micOffset(lockProgress: Double, cancelProgress: Double) -> CGSize {
-        CGSize(width: (isRTL ? 1 : -1) * cancelProgress * VoiceGesture.Thresholds.cancel,
-               height: -lockProgress * VoiceGesture.Thresholds.lock)
-    }
-
     var body: some View {
         let lockP = VoiceGesture.lockProgress(dy: translation.height)
         let cancelP = VoiceGesture.cancelProgress(dx: translation.width, isRTL: isRTL)
@@ -74,7 +64,7 @@ struct VoiceRecordingHeldView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .overlay(alignment: .bottomTrailing) {
-            lockLane(lockProgress: lockP, cancelProgress: cancelP, isArmed: isArmed)
+            lockLane(lockProgress: lockP, isArmed: isArmed)
                 .padding(.trailing, Metrics.spacing.sp3)
                 .padding(.bottom, Metrics.spacing.sp2)
         }
@@ -115,50 +105,57 @@ struct VoiceRecordingHeldView: View {
 
     // MARK: lock lane
 
-    /// The floating lock lane — lock glyph, chevron, enlarged mic — appearing
-    /// only while held. The chevron fades out and the lock glyph brightens to
-    /// `accentTx` as the lock threshold is approached; the mic carries all the
-    /// motion (via the drag's `translation`, applied with no spring so it never
-    /// lags the hand) and the lane's outline arms when the machine reports armed.
-    /// The bottom-up order puts the target the finger travels toward at the TOP
-    /// and the mic, which starts the drag, at the BOTTOM, held apart by a spacer.
-    private func lockLane(lockProgress: Double, cancelProgress: Double, isArmed: Bool) -> some View {
-        VStack(spacing: Metrics.spacing.sp2) {
-            Image(systemName: isArmed ? "lock.fill" : "lock")
-                .font(.system(size: Metrics.type.small))
-                .foregroundColor(isArmed ? tokens.accentTx : tokens.tx3)
-                .scaleEffect(1 + 0.35 * lockProgress)
-            Image(systemName: "chevron.up")
-                .font(.system(size: Metrics.type.xs, weight: .bold))
-                .foregroundColor(tokens.tx2)
-                .opacity(1 - lockProgress)
-            Spacer(minLength: 0)
-            mic
-                .offset(micOffset(lockProgress: lockProgress, cancelProgress: cancelProgress))
+    /// The floating lock lane, drawn only while held. The lane's drawn height IS
+    /// the travel: `laneHeight` is the mic plus `Thresholds.lock` and there is no
+    /// vertical rim, so the mic fills the capsule's bottom cap at rest and its top
+    /// cap when the lock arms. The lane is exactly one mic wide, so at either
+    /// extreme the mic and the capsule's rounded end are the same circle — if the
+    /// mic looks inset at either end, this geometry has been broken.
+    ///
+    /// The mic moves on the VERTICAL AXIS ONLY. The machine ignores horizontal
+    /// drag once the lock is armed, so a mic that slid sideways out of a 46pt lane
+    /// was animating a gesture that cannot happen. Slide-to-cancel is carried by
+    /// the hint text, which already shifts and fades.
+    private func lockLane(lockProgress: Double, isArmed: Bool) -> some View {
+        ZStack(alignment: .bottom) {
+            lockHint(progress: lockProgress)
+                .padding(.top, Metrics.spacing.sp2)
+                .frame(maxHeight: .infinity, alignment: .top)
+            mic(isArmed: isArmed)
+                .offset(y: -lockProgress * VoiceGesture.Thresholds.lock)
         }
-        .frame(width: Metrics.spacing.spPx * 46, height: laneHeight)
-        .padding(.vertical, Metrics.spacing.sp3)
+        .frame(width: micDiameter, height: laneHeight)
         .background(tokens.raised.opacity(0.9), in: Capsule())
         .overlay(Capsule().stroke(isArmed ? tokens.accentTx : tokens.borderSubtle,
                                   lineWidth: isArmed ? 2 : 1))
         .accessibilityIdentifier("voice-lock-lane")
     }
 
-    private var mic: some View {
+    /// The "slide up to lock" hint at the top of the lane. It fades out as the mic
+    /// arrives, so the mic can travel the full lane without ever covering a live
+    /// glyph — the armed state is carried by the lane's outline and by the mic's
+    /// own glyph, not by a second icon underneath it.
+    private func lockHint(progress: Double) -> some View {
+        VStack(spacing: Metrics.spacing.sp1) {
+            Image(systemName: "lock")
+                .font(.system(size: Metrics.type.small))
+                .foregroundColor(tokens.tx3)
+            Image(systemName: "chevron.up")
+                .font(.system(size: Metrics.type.xs, weight: .bold))
+                .foregroundColor(tokens.tx2)
+        }
+        .opacity(1 - progress)
+    }
+
+    private func mic(isArmed: Bool) -> some View {
         ZStack {
             Circle()
                 .fill(tokens.accentSolid)
-                .frame(width: micDiameter, height: micDiameter)
-                .overlay(
-                    Circle()
-                        .stroke(tokens.accent.opacity(0.14), lineWidth: 8)
-                )
-            Image(systemName: "mic.fill")
+            Image(systemName: isArmed ? "lock.fill" : "mic.fill")
                 .font(.system(size: micGlyphSize, weight: .semibold))
                 .foregroundColor(tokens.onAccent)
         }
         .frame(width: micDiameter, height: micDiameter)
-        .contentShape(Rectangle())
     }
 }
 
