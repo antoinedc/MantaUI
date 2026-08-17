@@ -213,7 +213,10 @@ enum ChatSubagentMapper {
         return SubagentSession(
             taskName: taskName,
             status: .running,
-            duration: ChatDuration.text(seconds: payload.durationMs),
+            // `durationMs` is MILLISECONDS on the wire (the desktop reference
+            // renders it via ms/1000); ChatDuration.text takes seconds, so
+            // convert before the helper — 1200 → 1.2 → "1.2s".
+            duration: ChatDuration.text(seconds: payload.durationMs.map { $0 / 1000 }),
             transcript: [],
             childSessionId: payload.childSessionId
         )
