@@ -72,6 +72,13 @@ struct MantaAppRoot: View {
                 // sample turn (bold/italic/inline code, fenced code, table) —
                 // the acceptance fixtures, no live box required.
                 MantaProseCaptureScene()
+            } else if let scene, scene == "voice-note-stored" {
+                // BET-1050 harness fixture: render the real `VoiceNotePlayerRow`
+                // (the `.stored` waveform) for a finished note, so the stored/
+                // playback path is evidenced on-device with no live box — the
+                // overflow bug never touched this path, but the reviewer asked
+                // to see it render post-change.
+                VoiceNoteStoredCaptureScene()
             } else if let scene, !scene.isEmpty {
                 // Capture-harness fixture mode — bypass the pair gate so the
                 // measurement scenes stay reachable (S4b parent/child baseline).

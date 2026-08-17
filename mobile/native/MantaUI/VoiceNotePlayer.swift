@@ -426,3 +426,60 @@ struct VoiceNotePendingRow: View {
         }
     }
 }
+
+// MARK: - Capture-harness scene
+
+/// Harness-only capture scene (BET-1050), elected via `MANTA_SCENE=voice-note-
+/// stored` — never rendered in normal app use. Shows the real
+/// `VoiceNotePlayerRow` for a finished note, i.e. the `.stored` waveform path
+/// (normalised, leading-aligned, seekable via `onSeek`), evidenced on-device
+/// with no live box.
+struct VoiceNoteStoredCaptureScene: View {
+    @StateObject private var engine: VoicePlaybackEngine
+
+    init() {
+        _engine = StateObject(wrappedValue: VoicePlaybackEngine(
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!)))
+    }
+
+    @Environment(\.colorScheme) private var colorScheme
+    private var tokens: Tokens { Tokens.scheme(colorScheme) }
+
+    /// A finished note whose peaks spell a normalised stored waveform.
+    private var note: VoiceNote {
+        VoiceNote(
+            id: "fixture-n1",
+            sessionId: "s1",
+            transcript: "This is a finished voice note rendered from stored peaks.",
+            mime: "audio/mp4",
+            durationMs: 12800,
+            peaks: fixturePeaks,
+            createdAt: 0,
+            expiresAt: nil,
+            audioAvailable: true
+        )
+    }
+
+    /// Deterministic stored peaks (`0...255`) shaped like a waveform.
+    private var fixturePeaks: [UInt8] {
+        var out = [UInt8]()
+        out.reserveCapacity(Waveform.Constants.maxStoredPeaks)
+        for i in 0..<Waveform.Constants.maxStoredPeaks {
+            let phase = Double(i) / Double(Waveform.Constants.maxStoredPeaks) * .pi * 4
+            let envelope = 0.3 + 0.7 * abs(sin(phase))
+            out.append(Waveform.quantizePeak(envelope))
+        }
+        return out
+    }
+
+    var body: some View {
+        tokens.canvas
+            .ignoresSafeArea()
+            .overlay(alignment: .bottom) {
+                VoiceNotePlayerRow(note: note, tokens: tokens)
+                    .environmentObject(engine)
+                    .padding(Metrics.spacing.sp3)
+                    .padding(.bottom, Metrics.spacing.sp6)
+            }
+    }
+}
