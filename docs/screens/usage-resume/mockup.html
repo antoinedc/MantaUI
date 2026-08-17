@@ -1,0 +1,648 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Mockup — Resume after limit reset</title>
+
+<!--
+  THE DESIGN CONTRACT for "resume after limit reset". Not a picture of one.
+  Read docs/visual-verification.md before editing, and docs/usage-resume.md for
+  the behavioural spec this renders.
+
+  It loads the app's OWN token file, so palette, spacing grid, radii and theme
+  switching are identical to the implementation by construction — a mockup that
+  hardcodes its own hexes drifts the moment a token is retuned.
+
+  The CSS below is mockup-only scaffolding so the file renders standalone. It is
+  NOT the implementation: every visual maps onto a primitive that already exists
+  (Modal / Checkbox / Pill / Callout / Toast) — see the mapping table at the
+  bottom of the page. Hand-rolling any of them is a review defect.
+
+  Four panels, matching the spec's sections:
+    1. the sidebar indicator + per-conversation markers (and the toast that
+       still exists, whose second action now opens the modal)
+    2. the modal on first open — picking what resumes
+    3. the modal reopened later — armed rows beside newly stopped ones
+    4. the reset arriving — sending, and a conversation still refused
+-->
+
+<link rel="stylesheet" href="/src/renderer/tokens.css" />
+<link rel="stylesheet" href="/node_modules/@fontsource-variable/inter/index.css" />
+<link rel="stylesheet" href="/node_modules/@fontsource-variable/jetbrains-mono/index.css" />
+<style>
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--canvas);
+    color: var(--tx1);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    padding: var(--sp-8) var(--sp-6) var(--sp-12);
+  }
+  .wrap { max-width: 1060px; margin: 0 auto; }
+
+  .page-hd { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-4); margin-bottom: var(--sp-8); }
+  .page-hd h1 { margin: 0 0 var(--sp-2); font: 600 24px/1.25 var(--font-sans); }
+  .page-hd p { margin: 0; color: var(--tx3); font: 400 14px/1.5 var(--font-sans); max-width: 68ch; }
+  .themebtn {
+    height: 32px; padding: 0 var(--sp-3); border: 1px solid var(--border);
+    border-radius: var(--r-md); background: var(--panel); color: var(--tx2);
+    font: 500 13px/1 var(--font-sans); cursor: pointer; flex: none;
+  }
+  .themebtn:hover { background: var(--fill-hover); color: var(--tx1); }
+
+  section { margin-bottom: var(--sp-12); }
+  .sec-hd { margin: 0 0 var(--sp-1); font: 600 17px/1.3 var(--font-sans); }
+  .sec-sub { margin: 0 0 var(--sp-4); color: var(--tx3); font: 400 13px/1.5 var(--font-sans); max-width: 74ch; }
+  .stage {
+    background: var(--inset); border: 1px solid var(--border-subtle);
+    border-radius: var(--r-xl); padding: var(--sp-6);
+    display: flex; gap: var(--sp-6); flex-wrap: wrap; align-items: flex-start;
+  }
+  .caption { margin: var(--sp-3) 0 0; color: var(--tx4); font: 400 12px/1.4 var(--font-sans); }
+
+  /* ---------- SIDEBAR ---------- */
+  .sidebar {
+    width: 268px; flex: none; background: var(--panel);
+    border: 1px solid var(--border); border-radius: var(--r-lg);
+    overflow: hidden; box-shadow: var(--shadow-sm);
+  }
+  .sb-hd {
+    display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2);
+    padding: var(--sp-3) var(--sp-3) var(--sp-3) var(--sp-4);
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .sb-title { font: 600 13px/1 var(--font-sans); color: var(--tx1); letter-spacing: .01em; }
+  .sb-hd-actions { display: flex; align-items: center; gap: var(--sp-1); }
+  .icon-btn {
+    width: 26px; height: 26px; display: grid; place-items: center;
+    border: 1px solid transparent; border-radius: var(--r-sm);
+    background: transparent; color: var(--tx3); cursor: pointer;
+  }
+  .icon-btn:hover { background: var(--fill-hover); color: var(--tx1); }
+
+  /* THE INDICATOR */
+  .halted-pill {
+    display: inline-flex; align-items: center; gap: var(--sp-1);
+    height: 24px; padding: 0 var(--sp-2) 0 var(--sp-1);
+    border: 1px solid var(--warn); border-radius: var(--r-full);
+    background: var(--warn-bg); color: var(--warn);
+    font: 600 12px/1 var(--font-sans); cursor: pointer;
+  }
+  .halted-pill:hover { background: var(--warn-bg); filter: brightness(1.15); }
+  .halted-pill svg { flex: none; }
+
+  .sb-group { padding: var(--sp-2) var(--sp-2) var(--sp-1); }
+  .sb-group-hd {
+    display: flex; align-items: center; gap: var(--sp-1);
+    padding: var(--sp-1) var(--sp-2); color: var(--tx4);
+    font: 600 11px/1.3 var(--font-sans); letter-spacing: .08em; text-transform: uppercase;
+  }
+  .sb-row {
+    display: flex; align-items: center; gap: var(--sp-2);
+    min-height: 30px; padding: var(--sp-1) var(--sp-2);
+    border-radius: var(--r-sm); color: var(--tx2);
+    font: 400 13px/1.3 var(--font-sans); cursor: pointer;
+  }
+  .sb-row:hover { background: var(--fill-hover); }
+  .sb-row.sel { background: var(--fill-active); color: var(--tx1); }
+  .sb-row .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dot { width: 6px; height: 6px; border-radius: var(--r-full); flex: none; }
+  .dot.idle { background: var(--warn); }
+  .dot.none { background: transparent; }
+  .halt-mark { color: var(--warn); display: inline-flex; flex: none; }
+
+  /* ---------- TOAST ---------- */
+  .toast {
+    width: 380px; background: var(--card); border: 1px solid var(--danger);
+    border-radius: var(--r-lg); box-shadow: var(--shadow-md); padding: var(--sp-3) var(--sp-3) var(--sp-2);
+  }
+  .toast-msg { display: flex; gap: var(--sp-2); font: 400 13px/1.45 var(--font-sans); color: var(--tx1); }
+  .toast-msg svg { flex: none; color: var(--danger); margin-top: 1px; }
+  .toast-actions { display: flex; gap: var(--sp-2); justify-content: flex-end; margin-top: var(--sp-2); }
+  .tbtn {
+    height: 28px; padding: 0 var(--sp-3); border-radius: var(--r-sm);
+    border: 1px solid var(--border); background: var(--panel); color: var(--tx2);
+    font: 500 12px/1 var(--font-sans); cursor: pointer;
+  }
+  .tbtn:hover { background: var(--fill-hover); color: var(--tx1); }
+  .tbtn.primary { background: var(--accent-solid); border-color: var(--accent-solid); color: var(--on-accent); }
+
+  /* ---------- MODAL ---------- */
+  .backdrop {
+    flex: 1; min-width: 560px; background: rgb(0 0 0 / .4);
+    border-radius: var(--r-lg); padding: var(--sp-5);
+    display: flex; align-items: flex-start; justify-content: center;
+  }
+  .modal {
+    width: min(560px, 100%); background: var(--card);
+    border: 1px solid var(--border); border-radius: var(--r-xl);
+    box-shadow: var(--shadow-lg); overflow: hidden; display: flex; flex-direction: column;
+  }
+  .m-hd { padding: var(--sp-5) var(--sp-5) var(--sp-3); display: flex; justify-content: space-between; gap: var(--sp-3); }
+  .m-hd h2 { margin: 0 0 var(--sp-1); font: 600 17px/1.3 var(--font-sans); }
+  .m-hd p { margin: 0; color: var(--tx3); font: 400 13px/1.5 var(--font-sans); }
+
+  .m-tools {
+    display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3);
+    padding: var(--sp-2) var(--sp-5); border-top: 1px solid var(--border-subtle);
+    border-bottom: 1px solid var(--border-subtle); background: var(--panel);
+  }
+  .linkbtn {
+    border: none; background: transparent; padding: 0; cursor: pointer;
+    color: var(--accent-tx); font: 500 13px/1 var(--font-sans);
+  }
+  .linkbtn:hover { text-decoration: underline; }
+  .m-count { color: var(--tx3); font: 400 12px/1 var(--font-sans); }
+
+  .m-body { padding: var(--sp-3) var(--sp-3) var(--sp-4); overflow: auto; max-height: 420px; }
+
+  .ws-hd {
+    display: flex; align-items: center; gap: var(--sp-2);
+    padding: var(--sp-3) var(--sp-2) var(--sp-1);
+    color: var(--tx4); font: 600 11px/1.3 var(--font-sans);
+    letter-spacing: .08em; text-transform: uppercase;
+  }
+  .ws-hd .rule { flex: 1; height: 1px; background: var(--border-subtle); }
+
+  .srow {
+    display: flex; gap: var(--sp-3); align-items: flex-start;
+    padding: var(--sp-3); border-radius: var(--r-md); border: 1px solid transparent;
+  }
+  .srow + .srow { margin-top: var(--sp-2); }
+  .srow:hover { background: var(--fill-hover); }
+  .srow.on { background: var(--fill); border-color: var(--border-subtle); }
+  .srow.dim { opacity: .55; }
+
+  .cb {
+    width: 16px; height: 16px; flex: none; margin-top: 2px;
+    border: 1px solid var(--border-strong); border-radius: var(--r-xs);
+    background: var(--canvas); display: grid; place-items: center; cursor: pointer;
+  }
+  .cb.on { background: var(--accent-solid); border-color: var(--accent-solid); color: var(--on-accent); }
+  .cb.on svg { display: block; }
+  .cb svg { display: none; }
+
+  .s-main { flex: 1; min-width: 0; }
+  .s-name { font: 500 13px/1.35 var(--font-sans); color: var(--tx1); display: flex; align-items: center; gap: var(--sp-2); }
+  .s-snip { margin-top: 2px; color: var(--tx4); font: 400 12px/1.4 var(--font-sans); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .s-meta { margin-top: var(--sp-2); display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+
+  .chip {
+    display: inline-flex; align-items: center; gap: var(--sp-1);
+    height: 20px; padding: 0 var(--sp-2);
+    border: 1px solid var(--border); border-radius: var(--r-full);
+    background: var(--raised); color: var(--tx2);
+    font: 500 11px/1 var(--font-mono); white-space: nowrap;
+  }
+  .chip .pv { color: var(--tx4); }
+  .chip.warn { border-color: var(--warn); background: var(--warn-bg); color: var(--warn); font-family: var(--font-sans); }
+  .chip.ok { border-color: var(--ok); background: var(--ok-bg); color: var(--ok); font-family: var(--font-sans); }
+  .chip.accent { border-color: var(--accent); background: var(--accent-bg); color: var(--accent-tx); font-family: var(--font-sans); }
+  .chip.danger { border-color: var(--danger); background: var(--danger-bg); color: var(--danger); font-family: var(--font-sans); }
+  .chip.plain { background: transparent; border-color: var(--border-subtle); color: var(--tx3); font-family: var(--font-sans); }
+
+  .m-ft {
+    display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3);
+    padding: var(--sp-3) var(--sp-5) var(--sp-4);
+    border-top: 1px solid var(--border-subtle); background: var(--panel);
+  }
+  .ft-left { color: var(--tx3); font: 400 12px/1.4 var(--font-sans); }
+  .ft-left b { color: var(--tx1); font-weight: 600; }
+  .ft-btns { display: flex; gap: var(--sp-2); }
+  .btn {
+    height: 32px; padding: 0 var(--sp-4); border-radius: var(--r-md);
+    border: 1px solid var(--border); background: var(--panel); color: var(--tx1);
+    font: 500 13px/1 var(--font-sans); cursor: pointer;
+  }
+  .btn:hover { background: var(--fill-hover); }
+  .btn.primary { background: var(--accent-solid); border-color: var(--accent-solid); color: var(--on-accent); }
+  .btn.primary:hover { filter: brightness(1.08); background: var(--accent-solid); }
+  .btn[disabled] { opacity: .45; cursor: not-allowed; }
+
+  .callout {
+    display: flex; gap: var(--sp-2); margin: var(--sp-2) var(--sp-2) 0;
+    padding: var(--sp-2) var(--sp-3); border-radius: var(--r-md);
+    border: 1px solid var(--warn); background: var(--warn-bg);
+    color: var(--tx2); font: 400 12px/1.45 var(--font-sans);
+  }
+  .callout svg { flex: none; color: var(--warn); margin-top: 1px; }
+
+  .notes { border-top: 1px solid var(--border-subtle); padding-top: var(--sp-5); }
+  .notes h3 { margin: 0 0 var(--sp-2); font: 600 13px/1.3 var(--font-sans); color: var(--tx2); }
+  .notes ul { margin: 0 0 var(--sp-4); padding-left: var(--sp-5); color: var(--tx3); font: 400 13px/1.6 var(--font-sans); }
+  .notes b { color: var(--tx1); font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="page-hd">
+    <div>
+      <h1>Resume after limit reset</h1>
+      <p>Design for the quota-interruption flow: a persistent sidebar indicator, per-conversation
+         markers, and one modal listing every conversation a subscription provider stopped —
+         grouped by workspace, each with the model that was in flight and its cold-cache cost.</p>
+    </div>
+    <button class="themebtn" onclick="document.documentElement.dataset.theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'">Toggle theme</button>
+  </div>
+
+  <!-- 1. INDICATOR -->
+  <section>
+    <h2 class="sec-hd">1 · The indicator</h2>
+    <p class="sec-sub">Sidebar header carries the count of stopped conversations; the rows carry a
+       marker so you can see which ones without opening anything. Both are fed by the box-side
+       record, so they survive an app restart. The marker clears when that conversation resumes
+       successfully; the pill disappears when the last one does.</p>
+    <div class="stage">
+
+      <div class="sidebar">
+        <div class="sb-hd">
+          <span class="sb-title">Workspaces</span>
+          <div class="sb-hd-actions">
+            <button class="halted-pill" title="3 conversations stopped by a provider limit">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M10 9v6M14 9v6"/></svg>
+              3
+            </button>
+            <button class="icon-btn" title="New workspace">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="sb-group">
+          <div class="sb-group-hd">manta</div>
+          <div class="sb-row sel">
+            <span class="dot none"></span>
+            <span class="nm">usage modal</span>
+          </div>
+          <div class="sb-row">
+            <span class="halt-mark" title="Stopped by Claude weekly limit">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M10 9v6M14 9v6"/></svg>
+            </span>
+            <span class="nm">BET-941 spec</span>
+          </div>
+          <div class="sb-row">
+            <span class="halt-mark" title="Stopped by Claude weekly limit">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M10 9v6M14 9v6"/></svg>
+            </span>
+            <span class="nm">sidebar refactor</span>
+          </div>
+          <div class="sb-row">
+            <span class="dot idle"></span>
+            <span class="nm">release notes</span>
+          </div>
+        </div>
+
+        <div class="sb-group">
+          <div class="sb-group-hd">ethernal</div>
+          <div class="sb-row">
+            <span class="halt-mark" title="Stopped by Codex 5-hour limit">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M10 9v6M14 9v6"/></svg>
+            </span>
+            <span class="nm">checkout flow</span>
+          </div>
+          <div class="sb-row">
+            <span class="dot none"></span>
+            <span class="nm">marketing site</span>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <div class="toast">
+          <div class="toast-msg">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.01"/></svg>
+            <span>Weekly limit reached on Claude — resets in 6d 3h (Thu, 21 Aug, 09:00).</span>
+          </div>
+          <div class="toast-actions">
+            <button class="tbtn">Remind me at reset</button>
+            <button class="tbtn primary">Keep going at reset</button>
+          </div>
+        </div>
+        <p class="caption">The toast is unchanged except that <b>Keep going at reset</b> now opens the modal
+           instead of scheduling one conversation. The toast is now optional — the sidebar pill is
+           the durable way back in.</p>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- 2. MODAL - DEFAULT -->
+  <section>
+    <h2 class="sec-hd">2 · The modal — picking what resumes</h2>
+    <p class="sec-sub">One list across all providers, grouped by workspace. Each row shows the model
+       that was in flight (locked in — this is what will send the continuation), the provider window
+       it is waiting on, and what the resume will cost in re-read tokens.</p>
+    <div class="stage">
+      <div class="backdrop">
+        <div class="modal">
+          <div class="m-hd">
+            <div>
+              <h2>Resume after limit reset</h2>
+              <p>4 conversations were stopped by a provider limit. Pick which ones should carry on
+                 by themselves when quota returns.</p>
+            </div>
+          </div>
+
+          <div class="m-tools">
+            <button class="linkbtn">Uncheck all</button>
+            <span class="m-count">3 of 4 selected</span>
+          </div>
+
+          <div class="m-body">
+
+            <div class="ws-hd"><span>manta</span><span class="rule"></span></div>
+
+            <div class="srow on">
+              <div class="cb on"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5.5 5.5L20 7"/></svg></div>
+              <div class="s-main">
+                <div class="s-name">BET-941 spec</div>
+                <div class="s-snip">…writing the interrupted-set record and the sidebar indicator</div>
+                <div class="s-meta">
+                  <span class="chip"><span class="pv">claude</span>&nbsp;sonnet-4.5</span>
+                  <span class="chip warn">Weekly · Thu 09:00 · in 6d 3h</span>
+                  <span class="chip plain">≈ 38k tokens re-read</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="srow on">
+              <div class="cb on"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5.5 5.5L20 7"/></svg></div>
+              <div class="s-main">
+                <div class="s-name">sidebar refactor</div>
+                <div class="s-snip">…extracting the group header into its own component</div>
+                <div class="s-meta">
+                  <span class="chip"><span class="pv">claude</span>&nbsp;opus-4.7</span>
+                  <span class="chip warn">Weekly · Thu 09:00 · in 6d 3h</span>
+                  <span class="chip plain">≈ 112k tokens re-read</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="ws-hd"><span>ethernal</span><span class="rule"></span></div>
+
+            <div class="srow on">
+              <div class="cb on"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5.5 5.5L20 7"/></svg></div>
+              <div class="s-main">
+                <div class="s-name">checkout flow</div>
+                <div class="s-snip">…patching the Stripe webhook retry path</div>
+                <div class="s-meta">
+                  <span class="chip"><span class="pv">codex</span>&nbsp;gpt-5.2</span>
+                  <span class="chip accent">5-hour · 14:20 · in 22 min</span>
+                  <span class="chip ok">cache still warm · no extra cost</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="srow dim">
+              <div class="cb"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5.5 5.5L20 7"/></svg></div>
+              <div class="s-main">
+                <div class="s-name">migration dry-run</div>
+                <div class="s-snip">…enumerating the tables that need a backfill</div>
+                <div class="s-meta">
+                  <span class="chip"><span class="pv">kimi</span>&nbsp;k2</span>
+                  <span class="chip warn">5-hour · 16:00 · in 2h 2m</span>
+                  <span class="chip plain">≈ 61k tokens re-read</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="callout">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v4M12 17v.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
+              <span>Two of these reset in six days — well past your 1 hour prompt-cache window, so
+                    their history is re-read from scratch. The estimate is per conversation above.</span>
+            </div>
+
+          </div>
+
+          <div class="m-ft">
+            <div class="ft-left"><b>3 selected</b> · ≈ 150k tokens re-read</div>
+            <div class="ft-btns">
+              <button class="btn">Cancel</button>
+              <button class="btn primary">Resume 3 at reset</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3. MODAL - ENROLLED / LIVE -->
+  <section>
+    <h2 class="sec-hd">3 · After scheduling — and reopened later</h2>
+    <p class="sec-sub">The same modal is the management surface. Reopening from the pill shows what is
+       already armed alongside anything stopped since, so newly interrupted conversations are added
+       by coming back and looking — nothing is enrolled on your behalf.</p>
+    <div class="stage">
+      <div class="backdrop">
+        <div class="modal">
+          <div class="m-hd">
+            <div>
+              <h2>Resume after limit reset</h2>
+              <p>3 armed · 1 stopped since you last looked.</p>
+            </div>
+          </div>
+
+          <div class="m-tools">
+            <button class="linkbtn">Check all</button>
+            <span class="m-count">3 of 4 selected</span>
+          </div>
+
+          <div class="m-body">
+
+            <div class="ws-hd"><span>manta</span><span class="rule"></span></div>
+
+            <div class="srow on">
+              <div class="cb on"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5.5 5.5L20 7"/></svg></div>
+              <div class="s-main">
+                <div class="s-name">BET-941 spec <span class="chip accent">armed</span></div>
+                <div class="s-snip">…writing the interrupted-set record and the sidebar indicator</div>
+                <div class="s-meta">
+                  <span class="chip"><span class="pv">claude</span>&nbsp;sonnet-4.5</span>
+                  <span class="chip warn">Weekly · Thu 09:00 · in 6d 3h</span>
+                  <span class="chip plain">≈ 38k tokens re-read</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="srow on">
+              <div class="cb on"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5.5 5.5L20 7"/></svg></div>
+              <div class="s-main">
+                <div class="s-name">sidebar refactor <span class="chip accent">armed</span></div>
+                <div class="s-snip">…extracting the group header into its own component</div>
+                <div class="s-meta">
+                  <span class="chip"><span class="pv">claude</span>&nbsp;opus-4.7</span>
+                  <span class="chip warn">Weekly · Thu 09:00 · in 6d 3h</span>
+                  <span class="chip plain">≈ 112k tokens re-read</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="srow">
+              <div class="cb"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5.5 5.5L20 7"/></svg></div>
+              <div class="s-main">
+                <div class="s-name">docs pass <span class="chip warn">new</span></div>
+                <div class="s-snip">…stopped 4 minutes ago</div>
+                <div class="s-meta">
+                  <span class="chip"><span class="pv">claude</span>&nbsp;sonnet-4.5</span>
+                  <span class="chip warn">Weekly · Thu 09:00 · in 6d 3h</span>
+                  <span class="chip plain">≈ 9k tokens re-read</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="ws-hd"><span>ethernal</span><span class="rule"></span></div>
+
+            <div class="srow on">
+              <div class="cb on"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5.5 5.5L20 7"/></svg></div>
+              <div class="s-main">
+                <div class="s-name">checkout flow <span class="chip accent">armed</span></div>
+                <div class="s-snip">…patching the Stripe webhook retry path</div>
+                <div class="s-meta">
+                  <span class="chip"><span class="pv">codex</span>&nbsp;gpt-5.2</span>
+                  <span class="chip accent">5-hour · 14:20 · in 22 min</span>
+                  <span class="chip ok">cache still warm · no extra cost</span>
+                </div>
+              </div>
+            </div>
+
+          </div>
+
+          <div class="m-ft">
+            <div class="ft-left"><b>3 selected</b> · ≈ 150k tokens re-read</div>
+            <div class="ft-btns">
+              <button class="btn">Close</button>
+              <button class="btn primary">Update</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 4. RESUMING + FAILURE -->
+  <section>
+    <h2 class="sec-hd">4 · Reset arrives — resuming, and a refusal</h2>
+    <p class="sec-sub">At the reset instant the box re-checks the provider's usage rather than firing
+       blind, then sends the continuations a couple of seconds apart. A conversation drops off the
+       list the moment it resumes — the sidebar is where you watch it run. One that comes back
+       refused stays and waits for the next check, so nothing disappears silently.</p>
+    <div class="stage">
+      <div class="backdrop">
+        <div class="modal">
+          <div class="m-hd">
+            <div>
+              <h2>Resume after limit reset</h2>
+              <p>Codex quota is back. 1 resumed and left the list; sending the rest.</p>
+            </div>
+          </div>
+
+          <div class="m-body">
+
+            <div class="ws-hd"><span>ethernal</span><span class="rule"></span></div>
+
+            <div class="srow">
+              <div class="cb on"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5.5 5.5L20 7"/></svg></div>
+              <div class="s-main">
+                <div class="s-name">payments retry</div>
+                <div class="s-meta">
+                  <span class="chip"><span class="pv">codex</span>&nbsp;gpt-5.2</span>
+                  <span class="chip plain">sending in 2s…</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="srow">
+              <div class="cb on"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5.5 5.5L20 7"/></svg></div>
+              <div class="s-main">
+                <div class="s-name">migration dry-run</div>
+                <div class="s-meta">
+                  <span class="chip"><span class="pv">kimi</span>&nbsp;k2</span>
+                  <span class="chip danger">still limited · retrying at next check</span>
+                </div>
+              </div>
+            </div>
+
+          </div>
+
+          <div class="m-ft">
+            <div class="ft-left"><b>1 sending</b> · 1 waiting for quota</div>
+            <div class="ft-btns">
+              <button class="btn">Close</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="notes">
+    <h3>What this mockup fixes</h3>
+    <ul>
+      <li><b>Wrong conversation.</b> Today the continuation goes to whichever pane was focused when the
+          toast appeared. Here it goes to the conversations that were actually stopped, and you can see
+          which.</li>
+      <li><b>Unknown model.</b> Today no model is pinned, so the resumed turn runs on the server default.
+          Here each row shows and locks the model that was in flight.</li>
+      <li><b>Invisible cost.</b> One vague warning becomes a per-conversation number and a batch total.</li>
+      <li><b>Lost on close.</b> The record lives on the box, so the pill and the markers are still there
+          after a restart — and the iOS client can adopt the same list later.</li>
+      <li><b>Blind firing.</b> The batch waits for the provider's usage to actually report recovered,
+          instead of a fixed offset, and a refusal re-queues rather than being dropped.</li>
+    </ul>
+
+    <h3>Accepted trade-offs</h3>
+    <ul>
+      <li>The continuation text is still the literal "Keep going" — no reference to what was interrupted.</li>
+      <li>A conversation whose reset already passed while the box was asleep resumes on wake, however
+          late that is.</li>
+      <li>Two of the three providers are detected on vendor prose, which will drift. The usage-meter
+          correlation exists so a reworded message degrades the feature instead of breaking it.</li>
+    </ul>
+
+    <h3>Build it out of the primitives that already exist — do not hand-roll</h3>
+    <p style="margin:0 0 var(--sp-3);color:var(--tx3);font:400 13px/1.6 var(--font-sans);">
+      The CSS in this file exists so the mockup renders standalone. It is <b>not</b> the
+      implementation. Every visual below already has a component; the classes here map onto them
+      one-for-one. A new bespoke button, checkbox, chip or dialog in this feature is a review defect.
+    </p>
+    <table style="width:100%;border-collapse:collapse;font:400 13px/1.5 var(--font-sans);margin-bottom:var(--sp-4);">
+      <thead><tr>
+        <th style="text-align:left;padding:var(--sp-2) var(--sp-3);border-bottom:1px solid var(--border-subtle);color:var(--tx4);font:600 11px/1.3 var(--font-sans);letter-spacing:.08em;text-transform:uppercase;">Mockup class</th>
+        <th style="text-align:left;padding:var(--sp-2) var(--sp-3);border-bottom:1px solid var(--border-subtle);color:var(--tx4);font:600 11px/1.3 var(--font-sans);letter-spacing:.08em;text-transform:uppercase;">Use this</th>
+      </tr></thead>
+      <tbody style="color:var(--tx2);">
+        <tr><td style="padding:var(--sp-2) var(--sp-3);border-bottom:1px solid var(--border-subtle);"><code>.modal</code> / <code>.backdrop</code></td><td style="padding:var(--sp-2) var(--sp-3);border-bottom:1px solid var(--border-subtle);"><code>Modal</code>, <code>size="lg"</code> (560px — the mockup is drawn at exactly that width), <code>tall</code></td></tr>
+        <tr><td style="padding:var(--sp-2) var(--sp-3);border-bottom:1px solid var(--border-subtle);"><code>.cb</code></td><td style="padding:var(--sp-2) var(--sp-3);border-bottom:1px solid var(--border-subtle);"><code>Checkbox</code> — including the row-level and check-all boxes</td></tr>
+        <tr><td style="padding:var(--sp-2) var(--sp-3);border-bottom:1px solid var(--border-subtle);"><code>.chip</code> (model, mono)</td><td style="padding:var(--sp-2) var(--sp-3);border-bottom:1px solid var(--border-subtle);"><code>Pill tone="neutral" size="meta" border</code></td></tr>
+        <tr><td style="padding:var(--sp-2) var(--sp-3);border-bottom:1px solid var(--border-subtle);"><code>.chip.warn / .ok / .accent / .danger</code></td><td style="padding:var(--sp-2) var(--sp-3);border-bottom:1px solid var(--border-subtle);"><code>Pill</code> with the matching <code>tone</code> — the four tones already exist, add none</td></tr>
+        <tr><td style="padding:var(--sp-2) var(--sp-3);border-bottom:1px solid var(--border-subtle);"><code>.chip.plain</code> (cost)</td><td style="padding:var(--sp-2) var(--sp-3);border-bottom:1px solid var(--border-subtle);"><code>Pill tone="neutral" size="meta"</code>, no border</td></tr>
+        <tr><td style="padding:var(--sp-2) var(--sp-3);border-bottom:1px solid var(--border-subtle);"><code>.callout</code></td><td style="padding:var(--sp-2) var(--sp-3);border-bottom:1px solid var(--border-subtle);"><code>Callout tone="warn" size="note"</code></td></tr>
+        <tr><td style="padding:var(--sp-2) var(--sp-3);border-bottom:1px solid var(--border-subtle);"><code>.toast</code></td><td style="padding:var(--sp-2) var(--sp-3);border-bottom:1px solid var(--border-subtle);">the existing app toast — unchanged except what its second action does</td></tr>
+        <tr><td style="padding:var(--sp-2) var(--sp-3);border-bottom:1px solid var(--border-subtle);"><code>.sidebar</code>, <code>.sb-row</code>, <code>.sb-group</code></td><td style="padding:var(--sp-2) var(--sp-3);border-bottom:1px solid var(--border-subtle);">the real sidebar. Only two things are added to it: the header pill and the row marker</td></tr>
+        <tr><td style="padding:var(--sp-2) var(--sp-3);border-bottom:1px solid var(--border-subtle);"><code>.halted-pill</code></td><td style="padding:var(--sp-2) var(--sp-3);border-bottom:1px solid var(--border-subtle);"><code>Pill tone="warn" size="meta" border</code> inside the existing header button</td></tr>
+        <tr><td style="padding:var(--sp-2) var(--sp-3);border-bottom:1px solid var(--border-subtle);"><code>.btn</code> / <code>.btn.primary</code></td><td style="padding:var(--sp-2) var(--sp-3);border-bottom:1px solid var(--border-subtle);">the modal footer buttons already used by <code>ConfirmModal</code></td></tr>
+      </tbody>
+    </table>
+
+    <h3>Type, spacing and colour — all on existing scales</h3>
+    <ul>
+      <li>Every size in this file is <code>var(--sp-*)</code> and every radius <code>var(--r-*)</code>.
+          Nothing off-grid was introduced; use the Tailwind equivalents (<code>p-3</code>,
+          <code>gap-2</code>, <code>rounded-md</code>) rather than raw pixels.</li>
+      <li>Font sizes map to the eight named roles: 11px = <code>text-micro</code>,
+          12px = <code>text-meta</code>, 13px = <code>text-label</code>, 14px = <code>text-body</code>,
+          17px = <code>text-title</code>, 24px = <code>text-display</code>.</li>
+      <li>Colours are tokens only — <code>--tx1..4</code>, <code>--warn</code>, <code>--ok</code>,
+          <code>--danger</code>, <code>--accent</code>, <code>--border*</code>, <code>--fill*</code>.
+          <b>No new token is required for this feature.</b> If you think you need one, you have
+          drifted from the design.</li>
+      <li>The only values deliberately not on a scale are the mockup's own framing (sidebar width,
+          modal body max-height) — those come from the real components, not from here.</li>
+    </ul>
+  </div>
+
+</div>
+</body>
+</html>
