@@ -43,6 +43,7 @@ import {
   parseProviderApiKey,
   readProviderApiKey,
   opencodeAuthPath,
+  completeProviderOauth,
 } from "./opencode.mjs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -2241,6 +2242,47 @@ test("generateSessionTitle sends agent:title and never a format/model field", as
       assert.equal(promptBody.agent, "title", "retitle must run on the title agent");
       assert.equal("format" in promptBody, false, "must never send a format/structured-output field");
       assert.equal("model" in promptBody, false, "title agent uses its own model, not our main model");
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// completeProviderOauth (BET-1043)
+// ---------------------------------------------------------------------------
+//
+// The oauth-auto (Codex headless) path fires the callback with NO code —
+// opencode then blocks polling the device-token endpoint. The oauth-code
+// path sends the user-typed code. One function must serve both, and only
+// include `code` in the body when it is a non-empty string.
+
+test("completeProviderOauth omits code from the body when passed empty string (oauth-auto)", async () => {
+  let captured = null;
+  await withMockFetch(
+    async (url, init) => {
+      captured = { url: String(url), method: init.method, body: JSON.parse(init.body) };
+      return new Response(null, { status: 204 });
+    },
+    async () => {
+      const r = await completeProviderOauth("openai", 1, "");
+      assert.ok(r.ok);
+      assert.equal(captured.url, "http://127.0.0.1:4096/provider/openai/oauth/callback");
+      assert.deepEqual(captured.body, { method: 1 });
+      assert.ok(!("code" in captured.body), "empty code must be omitted entirely");
+    },
+  );
+});
+
+test("completeProviderOauth includes code in the body when passed a real code (oauth-code)", async () => {
+  let captured = null;
+  await withMockFetch(
+    async (url, init) => {
+      captured = { method: init.method, body: JSON.parse(init.body) };
+      return new Response(null, { status: 204 });
+    },
+    async () => {
+      const r = await completeProviderOauth("openai", 1, "ABCD-1234");
+      assert.ok(r.ok);
+      assert.deepEqual(captured.body, { method: 1, code: "ABCD-1234" });
     },
   );
 });

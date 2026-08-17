@@ -1387,6 +1387,17 @@ export function isPollExpired(
   return now - startedAt >= limitMs;
 }
 
+/**
+ * Map the `oauth-status` action's error vocabulary to a user-facing message
+ * on the connect card. The server owns the expiry deadline now (BET-1043),
+ * so "expired" from here is truthful — the device code really did time out.
+ */
+export function deviceAuthErrorMessage(error?: string): string {
+  if (error === "expired") return "The sign-in code expired. Try again.";
+  if (error === "not_started") return "Sign-in didn't start. Try again.";
+  return "Sign-in failed. Try again.";
+}
+
 // ===== Terminal keyboard shortcuts (BET-333) =====
 //
 // Inside a terminal, plain Ctrl on Windows / Linux is the application's own

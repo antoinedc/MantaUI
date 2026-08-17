@@ -1236,17 +1236,25 @@ export async function startProviderOauth(providerID, methodIndex) {
 }
 
 /**
- * Complete a paste-back OAuth flow (POST /provider/{id}/oauth/callback {method, code}).
+ * Complete an OAuth device flow (POST /provider/{id}/oauth/callback {method[, code]}).
+ * Serves BOTH modes with one function: a `code`-mode flow sends the
+ * user-typed code; an `auto`-mode flow omits `code` entirely, in which
+ * case opencode's callback BLOCKS until the user approves on the
+ * provider's device page.
  * @param {string} providerID
  * @param {number} methodIndex
- * @param {string} code   the user-typed code from the device / browser page
+ * @param {string} code   the user-typed code for a `code`-mode flow; pass
+ *                        `""` for an `auto`-mode flow, where the call blocks
+ *                        until the user approves on the provider's device page.
  */
 export async function completeProviderOauth(providerID, methodIndex, code) {
   try {
+    const body = { method: methodIndex };
+    if (typeof code === "string" && code !== "") body.code = code;
     const res = await ocFetch(apiUrl(`/provider/${encodeURIComponent(providerID)}/oauth/callback`), {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ method: methodIndex, code }),
+      body: JSON.stringify(body),
     });
     if (!res.ok) {
       const detail = await res.text().catch(() => "");

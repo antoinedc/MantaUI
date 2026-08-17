@@ -49,6 +49,7 @@ import { X, Loader2 } from "lucide-react";
 import type { OpencodeProviderAuthRequest } from "../shared/types";
 import {
   connectPhaseLabel,
+  deviceAuthErrorMessage,
   deviceCodeFallback,
   formatRemaining,
   isPollExpired,
@@ -69,6 +70,10 @@ import { DeviceCodeSteps } from "./DeviceFlow";
 // The caps (5 min / 30 s / 5 min) are intentionally separate and live as
 // constants here so a future tuning pass touches one place, not three.
 const DEVICE_POLL_INTERVAL_MS = 3_000;
+// Display-only: fed to the ProcessPanel `remainingLabel`. The expiry
+// deadline itself is owned by the server (OAUTH_CALLBACK_LIMIT_MS in
+// subscriptionProviders.mjs) — this must MATCH it and exists only for the
+// countdown. (BET-1043)
 const DEVICE_POLL_LIMIT_MS = 5 * 60 * 1_000;
 const RESTART_POLL_INTERVAL_MS = 3_000;
 const RESTART_POLL_LIMIT_MS = 30_000;
@@ -439,29 +444,27 @@ export function ConnectProvider({
     // the 5-minute install cap.
   }, [phase.kind, phase.kind === "installingClaudeCli" ? phase.ptySessionKey : null, safeSetPhase, mounted]);
 
-  // Device-code poll (waiting). Polls `{action:"status"}` every 3s; the
-  // provider-id appearing in `connected[]` is the success signal (opencode
-  // has acknowledged the OAuth callback). Hard cap of 5 minutes — device
-  // codes do expire, and an unbounded poll would leave the user staring at
-  // a dead code. Cleanup runs on every phase change AND on unmount, so the
+  // Device-code poll (waiting). The server fired the oauth-auto callback
+  // DETACHED at `start` (opencode's callback blocks until the user approves
+  // on the provider's device page); this polls `{action:"oauth-status"}`
+  // every 3s to read its outcome. We deliberately do NOT watch `status` /
+  // (`connected[]` — opencode only computes that set at startup, so it
+  // cannot flip mid-wait). Expiry is owned by the server alone: a terminal
+  // `error` state (including "expired") is what the renderer turns into a
+  // failure. Cleanup runs on every phase change AND on unmount, so the
   // interval is freed as soon as we leave `waiting`.
   useEffect(() => {
     if (phase.kind !== "waiting") return;
-    const startedAt = Date.now();
     const handle = window.setInterval(async () => {
-      if (isPollExpired(startedAt, Date.now(), DEVICE_POLL_LIMIT_MS)) {
-        window.clearInterval(handle);
-        safeSetPhase({ kind: "failed", message: "The sign-in code expired. Try again." });
-        return;
-      }
       try {
-        const res = await window.api.opencodeProviderAuth({ action: "status" });
-        if (
-          res.action === "status" &&
-          res.providers.some((p) => p.id === id && p.connected)
-        ) {
+        const res = await window.api.opencodeProviderAuth({ action: "oauth-status", id });
+        if (res.action !== "oauth-status") return;
+        if (res.state === "ok") {
           window.clearInterval(handle);
           safeSetPhase({ kind: "applying", restartConfirmed: false });
+        } else if (res.state === "error") {
+          window.clearInterval(handle);
+          safeSetPhase({ kind: "failed", message: deviceAuthErrorMessage(res.error) });
         }
       } catch {
         /* keep polling; box may be transiently unreachable */

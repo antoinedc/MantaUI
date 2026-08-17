@@ -2217,7 +2217,13 @@ export type VoiceRetryResult =
 //   "disconnect"  → remove the provider's auth from opencode's store.
 //
 // "shape" on the `start` response is what the renderer keys the UI on:
-//   "oauth-auto"  — paste-back device flow (URL on user's device).
+//   "oauth-auto"  — opencode's Codex headless flow. The server fires the
+//                   callback DETACHED (`POST /provider/{id}/oauth/callback`
+//                   blocks until the user approves on the device page) and
+//                   the renderer polls its outcome via the `oauth-status`
+//                   action instead of watching `connected[]` (opencode only
+//                   computes that set at startup). See rpc.mjs's `start`
+//                   branch and the `oauth-status` action.
 //   "oauth-code"  — same UX, but opencode returned a short code to show inline.
 //   "api-key"     — render the password input (or the no-flow case).
 
@@ -2270,7 +2276,8 @@ export type OpencodeProviderAuthRequest =
   // tick while in the claude-login phase. Server-side: file mtime check
   // + restartOpencode() if changed + connected[] verification. The
   // server retains startedAt across requests by keying off sessionKey.
-  | { action: "claude-status"; sessionKey: string; startedAt: number };
+  | { action: "claude-status"; sessionKey: string; startedAt: number }
+  | { action: "oauth-status"; id: string };
 
 export type OpencodeProviderAuthResult =
   | { action: "status"; providers: SubscriptionStatus[] }
@@ -2296,4 +2303,5 @@ export type OpencodeProviderAuthResult =
   // the keep-polling case; `pre-existing` is a distinct failure (the
   // user already had a working login and the connect was a no-op);
   // `completed` means restartOpencode fired + the connect[ed] probe ran.
-  | { action: "claude-status"; ok: boolean; progress?: ClaudeLoginProgress; error?: string };
+  | { action: "claude-status"; ok: boolean; progress?: ClaudeLoginProgress; error?: string }
+  | { action: "oauth-status"; state: "pending" | "ok" | "error"; error?: string };
