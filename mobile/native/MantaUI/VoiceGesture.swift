@@ -14,11 +14,11 @@ import Foundation
 //   │                                                │
 //   │ press                                          │ release(hold) → .send
 //   │                                                │ release(too short) → Idle (silent)
-//   ▼                                                │ drag up   > lockThreshold → RecordingLocked
-// RecordingLocked ◄───────────────────────────────── │ drag left > cancelThreshold → Cancelling
-//   │  tapSend ──► .send (bar button)                │ tapLock (release under tapHoldMs) → RecordingLocked
+//   ▼                                                │ drag up  > lockThreshold → LockArmed
+// RecordingLocked ◄── release(armed commits) ── LockArmed
+//   │  tapSend ──► .send (bar button)                │  └─ drag back down (< lockThreshold) → RecordingHeld
 //   │  tapDiscard ───► .discard                      │
-//   │  tapPause ──► Paused ⇄ tapResume               │
+//   │  tapPause ──► Paused ⇄ tapResume               │ drag left > cancelThreshold → Cancelling
 // Cancelling ── dragBack ──► RecordingHeld           │
 //            └─ release ──► .discard                 │
 // any ── elapsed ≥ 300_000ms ──► .send          (the take is KEPT)
@@ -37,6 +37,11 @@ import Foundation
 enum VoicePhase: Equatable {
     case idle
     case recordingHeld
+    /// The finger is still down, at or past the top of the lock lane. The lock is
+    /// ARMED, not committed — exactly like `.cancelling` on the horizontal axis.
+    /// Only the RELEASE commits it, so the user can drag back down and change
+    /// their mind.
+    case lockArmed
     case recordingLocked
     case paused
     case cancelling
@@ -118,7 +123,7 @@ enum VoiceGesture {
         // Reaching the hard cap within a recording phase SENDS the take; it is
         // kept, never discarded (decision #6). Paused time never counts toward
         // the cap, so the caller's rebased elapsed only reaches it while live.
-        if (currentPhase == .recordingHeld || currentPhase == .recordingLocked),
+        if (currentPhase == .recordingHeld || currentPhase == .lockArmed || currentPhase == .recordingLocked),
            elapsedMs >= Waveform.Constants.maxDurationMs {
             return (.idle, .send)
         }
@@ -146,6 +151,10 @@ enum VoiceGesture {
                 return (.idle, .send)
             case .cancelling:
                 return (.idle, .discard)
+            case .lockArmed:
+                // Released at the top of the lane: the take goes hands-free. It is NOT
+                // sent — the bar's own send button is the only thing that sends it.
+                return (.recordingLocked, .none)
             default:
                 return (currentPhase, .none)
             }
@@ -201,14 +210,22 @@ enum VoiceGesture {
         switch currentPhase {
         case .recordingHeld:
             if dy < -lockThreshold {
-                // slide up to lock the take
-                return (.recordingLocked, .haptic(.lock))
+                // Slide up ARMS the lock; the release commits it.
+                return (.lockArmed, .haptic(.lock))
             }
             if x < -cancelThreshold {
                 // slide left to arm cancel (mirrored for RTL upstream)
                 return (.cancelling, .haptic(.cancelArmed))
             }
             return (.recordingHeld, .none)
+
+        case .lockArmed:
+            // Dragging back down out of the lock zone disarms it, exactly as dragging
+            // back out of the cancel zone returns a `.cancelling` take to held.
+            if dy >= -lockThreshold {
+                return (.recordingHeld, .none)
+            }
+            return (.lockArmed, .none)
 
         case .cancelling:
             // dragging back out of the cancel zone returns to the held take

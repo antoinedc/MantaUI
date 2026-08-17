@@ -49,10 +49,33 @@ final class VoiceGestureTests: XCTestCase {
 
     // MARK: - drag to lock / cancel
 
-    func testDragUpLocks() {
+    func testDragUpArmsTheLockButDoesNotCommitIt() {
         let (phase, effect) = step(.recordingHeld, .drag(dx: 0, dy: -100), elapsedMs: 100)
-        XCTAssertEqual(phase, .recordingLocked)
+        XCTAssertEqual(phase, .lockArmed)
         XCTAssertEqual(effect, .haptic(.lock))
+    }
+
+    func testDragBackDownFromArmedReturnsToHeld() {
+        let (phase, _) = step(.lockArmed, .drag(dx: 0, dy: -10), elapsedMs: 200)
+        XCTAssertEqual(phase, .recordingHeld)
+    }
+
+    func testReleaseWhileArmedLocks() {
+        let (phase, effect) = step(.lockArmed, .release, elapsedMs: 3000)
+        XCTAssertEqual(phase, .recordingLocked)
+        XCTAssertEqual(effect, .none)
+    }
+
+    func testCapSendsFromArmedToo() {
+        let (phase, effect) = step(.lockArmed, .tick, elapsedMs: Waveform.Constants.maxDurationMs)
+        XCTAssertEqual(phase, .idle)
+        XCTAssertEqual(effect, .send)
+    }
+
+    func testInterruptedWhileArmedDiscards() {
+        let (phase, effect) = step(.lockArmed, .interrupted, elapsedMs: 2000)
+        XCTAssertEqual(phase, .idle)
+        XCTAssertEqual(effect, .discard)
     }
 
     func testLockedTakeIgnoresFurtherDrags() {
