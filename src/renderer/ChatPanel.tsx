@@ -48,6 +48,7 @@ import {
   buildTitlePromptInput,
   buildTitleInstruction,
   sanitizeGeneratedTitle,
+  findSessionTitle,
   detectCommandFromText,
   type EntryMotionState,
   type StaleCacheResult,
@@ -1651,10 +1652,52 @@ export function ChatPanel({
     if (autoRenameInFlightRef.current) return;
 
     const turns = countUserTurns(messages);
-    if (!shouldAutoRename(turns)) return;
     if (turns <= lastAutoRenamedTurnRef.current) return; // already done this turn
 
     pendingRenameRef.current = false;
+
+    // Shared rename tail: sanitize → rename the tmux window → refresh. Both
+    // the first-name path and the every-Nth-turn path funnel through here so
+    // there's exactly ONE rename code path.
+    const renameWindow = async (raw: string) => {
+      const name = sanitizeGeneratedTitle(raw);
+      // Empty → generation failed/timed out; skip silently (never blank the
+      // window name, and the rename IPC rejects empty names anyway).
+      if (!name) return;
+      await window.api.tmuxRenameWindow({
+        sessionName: tmuxSession,
+        windowIndex,
+        newName: name,
+      });
+      await refresh();
+    };
+
+    // FIRST NAME — opencode already titles every session from its FIRST user
+    // message for free, so the first rename reads that title (one cheap list
+    // call) instead of spinning up a throwaway generation session. Only runs
+    // before any auto-rename this session; once lastAutoRenamedTurnRef is set,
+    // the every-Nth-turn path below takes over for drift tracking. If the
+    // title isn't populated yet, skip silently and let the next turn retry.
+    if (lastAutoRenamedTurnRef.current === 0) {
+      autoRenameInFlightRef.current = true;
+      void (async () => {
+        try {
+          const sessions = await window.api.opencodeListSessions(cwd ?? "");
+          const title = findSessionTitle(sessions, sessionId);
+          if (title) {
+            await renameWindow(title);
+            lastAutoRenamedTurnRef.current = turns;
+          }
+        } catch {
+          /* auto-rename is best-effort — never surface an error banner */
+        } finally {
+          autoRenameInFlightRef.current = false;
+        }
+      })();
+      return;
+    }
+
+    if (!shouldAutoRename(turns)) return;
 
     const input = buildTitlePromptInput(messages);
     if (!input) return;
@@ -1667,23 +1710,14 @@ export function ChatPanel({
           directory: cwd ?? "",
           instruction: buildTitleInstruction(input),
         });
-        const name = sanitizeGeneratedTitle(raw);
-        // Empty → generation failed/timed out; skip silently (never blank the
-        // window name, and the rename IPC rejects empty names anyway).
-        if (!name) return;
-        await window.api.tmuxRenameWindow({
-          sessionName: tmuxSession,
-          windowIndex,
-          newName: name,
-        });
-        await refresh();
+        await renameWindow(raw);
       } catch {
         /* auto-rename is best-effort — never surface an error banner */
       } finally {
         autoRenameInFlightRef.current = false;
       }
     })();
-  }, [running, messages, autoRenameSessions, tmuxSession, windowIndex, cwd, refresh]);
+  }, [running, messages, autoRenameSessions, tmuxSession, windowIndex, cwd, refresh, sessionId]);
 
   // ===== Voice (extracted to useVoice) =====
   const voice = useVoice({

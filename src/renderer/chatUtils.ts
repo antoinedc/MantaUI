@@ -140,6 +140,21 @@ export function formatModelContextSize(
   return `${Math.round(context / 1000)}k`;
 }
 
+// Find the opencode session title for a given session id, from the session
+// list returned by opencodeListSessions (GET /session). opencode names every
+// session from its FIRST user message for free, so this supplies the FIRST
+// auto-rename name without burning a throwaway generation session (BET-1018).
+// Returns "" when the session is missing or hasn't been titled yet — the
+// caller skips the rename and retries on the next turn.
+export function findSessionTitle(
+  sessions: { id: string; title?: string }[],
+  sessionId: string,
+): string {
+  if (!sessions || !sessionId) return "";
+  const s = sessions.find((x) => x.id === sessionId);
+  return s && typeof s.title === "string" ? s.title.trim() : "";
+}
+
 // Title-case a model variant / effort id for display: "high" → "High",
 // "extended-thinking" → "Extended Thinking". The raw id is preserved for the
 // wire; this is display-only. Extracted to chatUtils so ModelPicker's effort

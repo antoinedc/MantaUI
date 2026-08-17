@@ -827,12 +827,6 @@ export async function deleteSessionRaw(sessionId) {
 // erroring.
 export async function generateSessionTitle({ directory, instruction }) {
   const absDir = expandTilde(directory);
-  let model = null;
-  try {
-    model = await getDefaultModel();
-  } catch {
-    /* non-fatal */
-  }
 
   let sid = null;
   try {
@@ -850,10 +844,16 @@ export async function generateSessionTitle({ directory, instruction }) {
     }
     sid = (await createRes.json()).id;
 
-    const promptBody = { parts: [{ type: "text", text: instruction }] };
-    if (model) {
-      promptBody.model = { providerID: model.providerID, modelID: model.modelID };
-    }
+    // Run the retitle on opencode's own "title" agent: it uses its cheap
+    // naming model (instead of our main model) and returns a clean short name
+    // with no prose. sanitizeGeneratedTitle stays as a safety net.
+    //
+    // DO NOT add structured output here. Passing
+    // {"format":{"type":"json_schema",...}} to prompt_async is ACCEPTED on
+    // opencode 1.18.10, but opencode defaults `retryCount` and its own reader
+    // then rejects the whole session's message list with HTTP 400 forever —
+    // the entire transcript becomes unreadable, not just this message.
+    const promptBody = { parts: [{ type: "text", text: instruction }], agent: "title" };
     const promptRes = await ocFetch(
       apiUrl(
         `/session/${encodeURIComponent(sid)}/prompt_async?directory=${encodeURIComponent(absDir)}`,

@@ -16,6 +16,7 @@ import {
   filterCommands,
   dedupeAgainstBuiltins,
   formatModelContextSize,
+  findSessionTitle,
   formatHiddenTodosSummary,
   summarizeTodoProgress,
   todoStatusOf,
@@ -402,6 +403,39 @@ describe("formatModelContextSize", () => {
     expect(formatModelContextSize(-1)).toBeNull();
     expect(formatModelContextSize(Infinity)).toBeNull();
     expect(formatModelContextSize(NaN)).toBeNull();
+  });
+});
+
+// ===== findSessionTitle (BET-1018) =====
+describe("findSessionTitle", () => {
+  const sessions = [
+    { id: "ses_sky", title: "Sky colour" },
+    { id: "ses_pay", title: "  Payment webhook retry idempotency  " },
+    { id: "ses_untitled", title: "" },
+    { id: "ses_no_title" },
+  ];
+
+  it("returns the title for a matching session id", () => {
+    expect(findSessionTitle(sessions, "ses_sky")).toBe("Sky colour");
+  });
+
+  it("trims surrounding whitespace from the title", () => {
+    expect(findSessionTitle(sessions, "ses_pay")).toBe("Payment webhook retry idempotency");
+  });
+
+  it("returns '' when the session id has no match", () => {
+    expect(findSessionTitle(sessions, "ses_missing")).toBe("");
+  });
+
+  it("returns '' when the session carries no usable title", () => {
+    expect(findSessionTitle(sessions, "ses_untitled")).toBe("");
+    expect(findSessionTitle(sessions, "ses_no_title")).toBe("");
+  });
+
+  it("returns '' for an empty / missing session list or id", () => {
+    expect(findSessionTitle([], "ses_sky")).toBe("");
+    expect(findSessionTitle(sessions, "")).toBe("");
+    expect(findSessionTitle(undefined as never, "ses_sky")).toBe("");
   });
 });
 
