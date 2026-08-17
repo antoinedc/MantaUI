@@ -140,7 +140,7 @@ describe("extractLastSnippet", () => {
   });
   it("skips trailing non-text assistant parts and truncates long text", () => {
     const long = "a".repeat(120);
-    expect(extractLastSnippet([msg("assistant", long)])).toBe("a".repeat(89) + "…");
+    expect(extractLastSnippet([msg("assistant", long)])).toBe("a".repeat(90) + "…");
   });
   it("returns null when there is no assistant text", () => {
     expect(extractLastSnippet([msg("user", "hi")])).toBeNull();

@@ -645,7 +645,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
           {unarmedStoppedCountVal > 0 && (
             <button
               type="button"
-              className="p-0 border-0 bg-transparent cursor-pointer hover:brightness-110"
+              className="p-0 border-0 bg-transparent cursor-pointer"
               onClick={onOpenResumeModal}
               title={`${unarmedStoppedCountVal} conversation${unarmedStoppedCountVal === 1 ? "" : "s"} stopped by a provider limit`}
             >

@@ -168,7 +168,7 @@ export function UsageResumeModal({
                       key={r.conversation}
                       className={"flex gap-3 rounded-md p-3 " + (selected.has(r.conversation) ? "bg-fill border border-border-subtle" : "border border-transparent")}
                     >
-                      <div className="mt-0.5">
+                      <div className="mt-px">
                         <Checkbox
                           checked={selected.has(r.conversation)}
                           onChange={(c) => toggleOne(r.conversation, c)}
@@ -182,7 +182,7 @@ export function UsageResumeModal({
                           {isNewStopped(r, lastLooked) && <Pill tone="warn" size="meta">new</Pill>}
                         </div>
                         {snippets[r.conversation] && (
-                          <div className="mt-0.5 truncate text-meta text-text-faint">{snippets[r.conversation]}</div>
+                          <div className="mt-1 truncate text-meta text-text-faint">{snippets[r.conversation]}</div>
                         )}
                         <div className="mt-2 flex flex-wrap items-center gap-2">
                           <Pill tone="neutral" size="meta" border>
