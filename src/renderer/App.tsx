@@ -801,6 +801,15 @@ function Shell() {
     const preload = getMantaPreload();
     if (!preload) return;
     const off = preload.onScreenshotDetected((ev) => {
+      if (ev.source === "unavailable") {
+        useStore.getState().pushAppToast({
+          tone: "error",
+          message:
+            `Screenshot detection is off — ${ev.reason ?? "the folder can't be read"}. ` +
+            `Grant Manta UI access under System Settings > Privacy & Security > Files and Folders, then restart the app.`,
+        });
+        return;
+      }
       // Read the bytes HERE, once. Two reasons this is not just moved code:
       // the clipboard can hold something else by the time the user clicks, and
       // doing it here collapses the old accept path's file-vs-clipboard branch

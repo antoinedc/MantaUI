@@ -287,7 +287,7 @@ export interface Api {
   clipboardReadImage(): Promise<ArrayBuffer | null>;
 
   onScreenshotDetected(
-    cb: (ev: { source: "clipboard" | "file"; path?: string }) => void,
+    cb: (ev: { source: "clipboard" | "file" | "unavailable"; path?: string; reason?: string }) => void,
   ): () => void;
 
   // manta-server's notification router decided the desktop should show an OS
