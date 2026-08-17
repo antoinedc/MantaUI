@@ -1044,15 +1044,6 @@ export function buildHandlers({
           methodIndex: resolved.index,
         };
       }
-      if (action === "oauth-status") {
-        const id = String(req?.id ?? "");
-        const result = subscriptionProviders.classifyOauthCallback(
-          _oauthCallbacks.get(id),
-          Date.now(),
-        );
-        if (result.state !== "pending") _oauthCallbacks.delete(id);
-        return { action: "oauth-status", ...result };
-      }
       if (action === "code") {
         const id = String(req?.id ?? "");
         const methodIndex = Number(req?.methodIndex ?? -1);
@@ -1062,6 +1053,15 @@ export function buildHandlers({
         }
         const r = await oc.completeProviderOauth(id, methodIndex, code);
         return { action: "code", ok: !!r?.ok, error: r?.ok ? undefined : r?.error };
+      }
+      if (action === "oauth-status") {
+        const id = String(req?.id ?? "");
+        const result = subscriptionProviders.classifyOauthCallback(
+          _oauthCallbacks.get(id),
+          Date.now(),
+        );
+        if (result.state !== "pending") _oauthCallbacks.delete(id);
+        return { action: "oauth-status", ...result };
       }
       if (action === "key") {
         const id = String(req?.id ?? "");
