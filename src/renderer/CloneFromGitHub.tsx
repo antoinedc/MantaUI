@@ -180,8 +180,18 @@ export function CloneFromGitHub({
         }
         return;
       }
-      if (cancelled || !res || !res.id) {
-        if (!cancelled) setPhase({ kind: "failed", repo, message: "Couldn't start the clone.", errorKind: "unknown" });
+      if (cancelled) return;
+      if (!res || !res.id) {
+        // The server preflights the destination before starting a clone and
+        // returns a specific message (dest exists / not empty / unwritable /
+        // bad dest). Surface it verbatim — naming the folder, never the token —
+        // instead of a generic "couldn't start". Only a bare request error
+        // without a message falls back to the generic text.
+        if (res?.message) {
+          setPhase({ kind: "failed", repo, message: res.message, errorKind: "destination" });
+        } else {
+          setPhase({ kind: "failed", repo, message: "Couldn't start the clone.", errorKind: "unknown" });
+        }
         return;
       }
       controller.id = res.id;

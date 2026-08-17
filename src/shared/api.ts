@@ -250,7 +250,7 @@ export interface Api {
   forgeDevicePoll(input: { grantId: string }): Promise<ForgeDevicePollResult>;
   forgeDeviceCancel(input: { grantId: string }): Promise<{ ok: boolean }>;
   forgeRepos(): Promise<ForgeRepoListResult>;
-  forgeCloneStart(input: { url: string; dest: string; name: string }): Promise<{ id?: string; error?: string }>;
+  forgeCloneStart(input: { url: string; dest: string; name: string }): Promise<{ id?: string; error?: string; message?: string }>;
   forgeCloneStatus(input: { id: string }): Promise<ForgeCloneStatus | null>;
   forgeCloneCancel(input: { id: string }): Promise<{ cancelled: boolean }>;
 

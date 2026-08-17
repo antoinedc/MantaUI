@@ -63,6 +63,7 @@ let root: Root | null = null;
 let api: MockApi;
 
 type MountOverrides = {
+  forgeCloneStart?: () => Promise<{ id?: string; error?: string; message?: string }>;
   forgeCloneStatus?: () => Promise<ForgeCloneStatus | null>;
   onCloned?: (paths: string[]) => void;
 };
@@ -73,7 +74,7 @@ function mountPicker(overrides: MountOverrides = {}): void {
     // device-connect screen.
     forgeDeviceStart: () => Promise.resolve({ connected: true, grant: null }),
     forgeRepos: () => Promise.resolve({ repos: REPOS, stale: false, error: null }),
-    forgeCloneStart: () => Promise.resolve({ id: "c1" }),
+    forgeCloneStart: overrides.forgeCloneStart ?? (() => Promise.resolve({ id: "c1" })),
     forgeCloneStatus:
       overrides.forgeCloneStatus ?? (() => Promise.resolve(CLONE_IN_PROGRESS)),
   }));
@@ -232,6 +233,59 @@ describe("CloneFromGitHub picker", () => {
     await flushMicro();
 
     expect(clonedPaths).toEqual(["/root/alpha"]);
+  });
+
+  it("shows the server's preflight destination message (names the folder), not a generic start failure (BET-1073)", async () => {
+    // The server preflights the destination before starting a clone and, when
+    // it rejects, returns `{ error, message }` with no id. The picker must
+    // surface that specific message verbatim rather than the generic
+    // "Couldn't start the clone."
+    mountPicker({
+      forgeCloneStart: () =>
+        Promise.resolve({
+          error: "dest_not_empty",
+          message: "/root/alpha already exists and isn't empty.",
+        }),
+    });
+    await flushMicro();
+
+    const alphaBox = container!.querySelector(
+      'input[aria-label="Clone alpha"]',
+    ) as HTMLElement;
+    expect(alphaBox).toBeTruthy();
+    act(() => {
+      alphaBox.click();
+    });
+    act(() => {
+      cloneButtonFor("1 selected").click();
+    });
+    await flushMicro();
+
+    const body = container!.textContent ?? "";
+    expect(body).toContain("/root/alpha already exists and isn't empty.");
+    expect(body).not.toContain("Couldn't start the clone.");
+  });
+
+  it("falls back to the generic start failure when the server returns no message (BET-1073)", async () => {
+    mountPicker({
+      forgeCloneStart: () => Promise.resolve({ error: "bad_request" }),
+    });
+    await flushMicro();
+
+    const alphaBox = container!.querySelector(
+      'input[aria-label="Clone alpha"]',
+    ) as HTMLElement;
+    expect(alphaBox).toBeTruthy();
+    act(() => {
+      alphaBox.click();
+    });
+    act(() => {
+      cloneButtonFor("1 selected").click();
+    });
+    await flushMicro();
+
+    const body = container!.textContent ?? "";
+    expect(body).toContain("Couldn't start the clone.");
   });
 
   it("fetches repos exactly once, after sign-in completes, and never shows not_connected (BET-1011)", async () => {
