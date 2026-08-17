@@ -45,6 +45,19 @@ struct VoiceRecordingHeldView: View {
     private var micDiameter: CGFloat { Metrics.type.chatHeaderBtn + Metrics.spacing.sp2 }
     private var micGlyphSize: CGFloat { Metrics.type.body }
 
+    /// How far the mic travels at full progress on each axis. Both are one
+    /// spacing step — the glyph should feel attached to the finger, not fly.
+    private var micTravel: CGFloat { Metrics.spacing.sp6 }
+
+    /// The mic's offset, driven straight off the drag. Both progress helpers are
+    /// already clamped to 0...1, so this is bounded by construction — do not add
+    /// clamping arithmetic of your own. The horizontal component follows the
+    /// cancel direction, which the helper has already mirrored for RTL.
+    private func micOffset(lockProgress: Double, cancelProgress: Double) -> CGSize {
+        CGSize(width: (isRTL ? 1 : -1) * cancelProgress * micTravel,
+               height: -lockProgress * micTravel)
+    }
+
     var body: some View {
         let lockP = VoiceGesture.lockProgress(dy: translation.height)
         let cancelP = VoiceGesture.cancelProgress(dx: translation.width, isRTL: isRTL)
@@ -58,7 +71,7 @@ struct VoiceRecordingHeldView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            lockLane(lockProgress: lockP, isCancelling: isCancelling)
+            lockLane(lockProgress: lockP, cancelProgress: cancelP, isCancelling: isCancelling)
                 .padding(.trailing, Metrics.spacing.sp3)
                 .padding(.bottom, Metrics.spacing.sp2)
         }
@@ -100,28 +113,29 @@ struct VoiceRecordingHeldView: View {
     // MARK: lock lane
 
     /// The floating lock lane — chevron, lock glyph, enlarged mic — appearing
-    /// only while held. The lock glyph brightens to `accentTx` as the lock
-    /// threshold is approached (a pure crossfade of the two tokens).
-    private func lockLane(lockProgress: Double, isCancelling: Bool) -> some View {
+    /// only while held. The chevron fades out and the lock glyph brightens to
+    /// `accentTx` as the lock threshold is approached; the glyph rises and
+    /// grows, the lane's outline arms, and the mic tracks the finger (via the
+    /// drag's `translation`, applied with no spring so it never lags the hand).
+    private func lockLane(lockProgress: Double, cancelProgress: Double, isCancelling: Bool) -> some View {
         VStack(spacing: Metrics.spacing.sp2) {
             Image(systemName: "chevron.up")
                 .font(.system(size: Metrics.type.xs, weight: .bold))
                 .foregroundColor(tokens.tx2)
-            Image(systemName: "lock")
+                .opacity(1 - lockProgress)
+            Image(systemName: lockProgress >= 1 ? "lock.fill" : "lock")
                 .font(.system(size: Metrics.type.small))
-                .foregroundColor(tokens.tx3)
-                .overlay {
-                    Image(systemName: "lock")
-                        .font(.system(size: Metrics.type.small))
-                        .foregroundColor(tokens.accentTx)
-                        .opacity(lockProgress)
-                }
+                .foregroundColor(lockProgress >= 1 ? tokens.accentTx : tokens.tx3)
+                .scaleEffect(1 + 0.35 * lockProgress)
+                .offset(y: -lockProgress * Metrics.spacing.sp2)
             mic
+                .offset(micOffset(lockProgress: lockProgress, cancelProgress: cancelProgress))
         }
         .frame(width: Metrics.spacing.spPx * 46)
         .padding(.vertical, Metrics.spacing.sp3)
         .background(tokens.raised.opacity(0.9), in: Capsule())
-        .overlay(Capsule().stroke(tokens.borderSubtle, lineWidth: 1))
+        .overlay(Capsule().stroke(lockProgress >= 1 ? tokens.accentTx : tokens.borderSubtle,
+                                  lineWidth: lockProgress >= 1 ? 2 : 1))
         .accessibilityIdentifier("voice-lock-lane")
     }
 
