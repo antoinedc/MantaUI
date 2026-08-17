@@ -132,7 +132,7 @@ describe("paths — assertAbsolutePath", () => {
   });
 });
 
-
+describe("paths — expandTilde", () => {
   it("expands a bare `~` to the user's homedir", () => {
     expect(expandTilde("~")).toBe(homedir());
   });
