@@ -24,10 +24,11 @@ import { MantaLoader } from "./MantaLoader";
 export function SubscriptionsCard() {
   // The list is fetched through the shared cache (BET-1057): a cold open
   // shows the loader, a warm reopen renders instantly while it revalidates.
+  // Fetch rejections surface via the hook's `error`.
   const {
     data: statuses,
     loading,
-    error: loadError,
+    error,
     refresh,
   } = useCachedResource<SubscriptionStatus[]>("subscriptions", async () => {
     const res = await window.api.opencodeProviderAuth({ action: "status" });
@@ -36,10 +37,6 @@ export function SubscriptionsCard() {
     if (res.action !== "status") throw new Error("Unexpected response from the box.");
     return res.providers;
   });
-  // Mutation failures (disconnect / connect) surface here, alongside the
-  // hook's fetch error.
-  const [error, setError] = useState<string | null>(null);
-  const displayError = error ?? loadError;
   // Exactly one row can be mid-mutation at a time. The id is the registry
   // id (anthropic / openai / kimi-for-coding); null when idle.
   const [busy, setBusy] = useState<string | null>(null);
@@ -52,34 +49,22 @@ export function SubscriptionsCard() {
     async (id: string) => {
       if (busy) return;
       setBusy(id);
-      setError(null);
       try {
-        const res = await window.api.opencodeProviderAuth({ action: "disconnect", id });
-        if (res.action === "disconnect" && !res.ok) {
-          setError(res.error ?? "Disconnect failed.");
-        } else if (res.action !== "disconnect") {
-          setError("Unexpected response from the box.");
-        }
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
+        await window.api.opencodeProviderAuth({ action: "disconnect", id });
       } finally {
         setBusy(null);
         setDisconnectConfirmId(null);
+        // Refetch to reflect the box's current state after the mutation.
         void refresh();
       }
     },
     [busy, refresh],
   );
 
-  const onConnectDone = useCallback(
-    (ok: boolean) => {
-      setConnectingId(null);
-      setError(null);
-      if (!ok) setError("Connect didn't complete. Try again.");
-      void refresh();
-    },
-    [refresh],
-  );
+  const onConnectDone = useCallback(() => {
+    setConnectingId(null);
+    void refresh();
+  }, [refresh]);
 
   return (
     <div className="space-y-2 pt-2 border-t border-border">
@@ -93,7 +78,7 @@ export function SubscriptionsCard() {
         </div>
       </div>
 
-      {displayError && <div className="text-meta text-danger break-words">{displayError}</div>}
+      {error && <div className="text-meta text-danger break-words">{error}</div>}
 
       {loading ? (
         <div className="py-2">
@@ -147,10 +132,7 @@ export function SubscriptionsCard() {
               )
             ) : (
               <button
-                onClick={() => {
-                  setError(null);
-                  setConnectingId(s.id);
-                }}
+                onClick={() => setConnectingId(s.id)}
                 disabled={busy !== null || connectingId !== null}
                 className="px-2 py-1 text-meta bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text disabled:opacity-40"
               >

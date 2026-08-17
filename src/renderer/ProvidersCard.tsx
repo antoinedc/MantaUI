@@ -25,7 +25,7 @@ export function ProvidersCard({ onRestartNeeded }: Props) {
   const {
     data: endpoints,
     loading,
-    error: loadError,
+    error,
     refresh,
   } = useCachedResource<ProviderEndpoint[]>("providers", () =>
     window.api.opencodeGetProviders(),
@@ -33,10 +33,6 @@ export function ProvidersCard({ onRestartNeeded }: Props) {
   const [discovered, setDiscovered] = useState<Record<string, { id: string }[]>>({});
   const [discoverError, setDiscoverError] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null); // endpoint id being mutated
-  // Mutation failures (save / remove) surface here, alongside the hook's
-  // fetch error.
-  const [globalError, setGlobalError] = useState<string | null>(null);
-  const displayError = globalError ?? loadError;
 
   const discover = useCallback(async (ep: ProviderEndpoint) => {
     if (busy) return;
@@ -64,16 +60,13 @@ export function ProvidersCard({ onRestartNeeded }: Props) {
       ? ep.enabledModels.filter((m) => m !== modelId)
       : [...ep.enabledModels, modelId];
     setBusy(ep.id);
-    setGlobalError(null);
     try {
       const res = await window.api.opencodeSetProviders({
         upsert: [{ id: ep.id, name: ep.name, baseURL: ep.baseURL, enabledModels: enabled }],
       });
-      if (!res.ok) { setGlobalError(res.error ?? "Save failed"); return; }
+      if (!res.ok) return;
       onRestartNeeded();
       refresh();
-    } catch (e) {
-      setGlobalError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
     }
@@ -82,16 +75,13 @@ export function ProvidersCard({ onRestartNeeded }: Props) {
   const removeEndpoint = useCallback(async (ep: ProviderEndpoint) => {
     if (busy) return;
     setBusy(ep.id);
-    setGlobalError(null);
     try {
       const res = await window.api.opencodeSetProviders({ remove: [ep.id] });
-      if (!res.ok) { setGlobalError(res.error ?? "Remove failed"); return; }
+      if (!res.ok) return;
       setDiscovered((d) => { const { [ep.id]: _drop, ...rest } = d; return rest; });
       setDiscoverError((er) => { const { [ep.id]: _drop, ...rest } = er; return rest; });
       onRestartNeeded();
       refresh();
-    } catch (e) {
-      setGlobalError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
     }
@@ -104,7 +94,7 @@ export function ProvidersCard({ onRestartNeeded }: Props) {
         then enable the ones you want in the model picker.
       </div>
 
-      {displayError && <div className="text-meta text-danger">{displayError}</div>}
+      {error && <div className="text-meta text-danger">{error}</div>}
 
       {loading ? (
         <div className="py-2">

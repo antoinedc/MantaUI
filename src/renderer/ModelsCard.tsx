@@ -182,7 +182,7 @@ export function ModelsCard() {
   const {
     data,
     loading,
-    error: loadError,
+    error,
     refresh,
   } = useCachedResource<{ models: OpencodeModel[]; cfg: AppConfig }>("models", async () => {
     const [modelList, cfg] = await Promise.all([
@@ -211,9 +211,6 @@ export function ModelsCard() {
   // Tracks which model row is mid-mutation (key), or "__main__" /
   // "__default__" for the banner-side actions.
   const [busy, setBusy] = useState<string | null>(null);
-  // Mutation failures surface here, alongside the hook's fetch error.
-  const [globalError, setGlobalError] = useState<string | null>(null);
-  const displayError = globalError ?? loadError;
   const [searchQuery, setSearchQuery] = useState("");
   // Key ("providerID/modelID") of the model whose edit dialog is open, or null.
   const [editing, setEditing] = useState<string | null>(null);
@@ -240,7 +237,6 @@ export function ModelsCard() {
     async (key: string, currentlyMain: boolean) => {
       if (busy || !models) return;
       setBusy(key);
-      setGlobalError(null);
       try {
         const nextMain = new Set(deactivatedMain);
         if (currentlyMain) nextMain.add(key);
@@ -271,8 +267,6 @@ export function ModelsCard() {
           // typed for setting, not clearing).
           useStore.setState({ defaultModel: null });
         }
-      } catch (e) {
-        setGlobalError(e instanceof Error ? e.message : String(e));
       } finally {
         setBusy(null);
       }
@@ -284,7 +278,6 @@ export function ModelsCard() {
     async (key: string, currentlyActive: boolean) => {
       if (busy || !models) return;
       setBusy(key);
-      setGlobalError(null);
       try {
         const nextSet = new Set(deactivatedSub);
         if (currentlyActive) nextSet.add(key);
@@ -300,8 +293,6 @@ export function ModelsCard() {
         // Sub toggles write opencode.jsonc agent blocks — a restart is
         // required for opencode to re-read them. Raise the panel banner.
         useStore.getState().setOpencodeRestartNeeded(true);
-      } catch (e) {
-        setGlobalError(e instanceof Error ? e.message : String(e));
       } finally {
         setBusy(null);
       }
@@ -315,12 +306,9 @@ export function ModelsCard() {
     async (providerID: string, modelID: string) => {
       if (busy) return;
       setBusy("__default__");
-      setGlobalError(null);
       try {
         await setStoreDefaultModel({ providerID, modelID });
         void refresh();
-      } catch (e) {
-        setGlobalError(e instanceof Error ? e.message : String(e));
       } finally {
         setBusy(null);
       }
@@ -337,7 +325,6 @@ export function ModelsCard() {
     async (key: string, _model: OpencodeModel, override: ModelOverride) => {
       if (busy) return;
       setBusy(key);
-      setGlobalError(null);
       try {
         const cfg = await window.api.configGet();
         const existing = cfg.modelOverrides ?? {};
@@ -350,8 +337,6 @@ export function ModelsCard() {
         await refresh();
         setEditing(null);
         refreshModelCatalog();
-      } catch (e) {
-        setGlobalError(e instanceof Error ? e.message : String(e));
       } finally {
         setBusy(null);
       }
@@ -414,7 +399,7 @@ export function ModelsCard() {
         )}
       </div>
 
-      {displayError && <div className="text-meta text-danger">{displayError}</div>}
+      {error && <div className="text-meta text-danger">{error}</div>}
 
       <input
         type="text"
