@@ -770,7 +770,7 @@ export const httpApi: Api = {
 
   // -- screenshot detection (SSE push) --
   onScreenshotDetected: (cb) =>
-    on<{ source: "clipboard" | "file"; path?: string }>("screenshot", cb),
+    on<{ source: "clipboard" | "file" | "unavailable"; path?: string; reason?: string }>("screenshot", cb),
 
   // Desktop OS-notification directives from manta-server's notification router.
   // The /events WS delivers `desktopNotify` envelopes; subscribing here wires

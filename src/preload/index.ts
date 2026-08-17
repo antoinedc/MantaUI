@@ -76,9 +76,9 @@ const api = {
     ipcRenderer.invoke(IPC.readLocalFile, path),
 
   onScreenshotDetected: (
-    cb: (ev: { source: "clipboard" | "file"; path?: string }) => void,
+    cb: (ev: { source: "clipboard" | "file" | "unavailable"; path?: string; reason?: string }) => void,
   ): (() => void) => {
-    const listener = (_: unknown, ev: { source: "clipboard" | "file"; path?: string }) => cb(ev);
+    const listener = (_: unknown, ev: { source: "clipboard" | "file" | "unavailable"; path?: string; reason?: string }) => cb(ev);
     ipcRenderer.on(IPC.screenshotDetected, listener);
     return () => ipcRenderer.removeListener(IPC.screenshotDetected, listener);
   },

@@ -34,7 +34,7 @@ export type { InstallerEvent, InstallerState, InstallerStageSnapshotRow, Preflig
  */
 export interface MantaPreload {
   onScreenshotDetected(
-    cb: (ev: { source: "clipboard" | "file"; path?: string }) => void,
+    cb: (ev: { source: "clipboard" | "file" | "unavailable"; path?: string; reason?: string }) => void,
   ): () => void;
   // Subscribe to manta:// pair links delivered by the OS protocol handler.
   // The renderer validates the URL with parsePairPayload and routes it into

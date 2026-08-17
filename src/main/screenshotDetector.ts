@@ -27,6 +27,7 @@
 import { clipboard } from "electron";
 import { basename, join } from "node:path";
 import { watch as fsWatch } from "node:fs";
+import { readdir } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { IPC } from "../shared/types.js";
@@ -36,6 +37,25 @@ const execFileAsync = promisify(execFile);
 
 let screenshotClipboardTimer: ReturnType<typeof setInterval> | null = null;
 let screenshotDesktopWatcher: ReturnType<typeof fsWatch> | null = null;
+
+// A refused Desktop-folder privacy permission silently kills the file watcher
+// (readdir/fs.watch throw EPERM/EACCES). Report the failure to the user once
+// per app run so screenshot auto-attach dying is never silent.
+let unavailableReported = false;
+
+function reportUnavailable(
+  send: (channel: string, payload: unknown) => void,
+  dir: string,
+  err: unknown,
+): void {
+  if (unavailableReported) return;
+  unavailableReported = true;
+  const code = (err as NodeJS.ErrnoException).code;
+  send(IPC.screenshotDetected, {
+    source: "unavailable",
+    reason: `Can't read ${dir}: ${code ?? "unknown error"}`,
+  });
+}
 
 // macOS stamps every screenshot it writes with this extended attribute. It is
 // set by the OS at creation and survives renaming, moving and any locale — it
@@ -84,6 +104,15 @@ async function initFileWatcher(send: (channel: string, payload: unknown) => void
     // the ~/Desktop default. Not an error, must not be logged as one.
   }
   const dir = resolveScreenshotDir(rawLocation);
+  // A refused Desktop-folder privacy permission makes readdir throw EPERM/
+  // EACCES. Probe before watching so the refusal is surfaced to the user
+  // instead of silently killing screenshot auto-attach forever.
+  try {
+    await readdir(dir);
+  } catch (err) {
+    reportUnavailable(send, dir, err);
+    return;
+  }
   try {
     screenshotDesktopWatcher = fsWatch(dir, (event, filename) => {
       if (event !== "rename" || !filename) return;
@@ -99,9 +128,10 @@ async function initFileWatcher(send: (channel: string, payload: unknown) => void
         });
       }, 300);
     });
-  } catch {
-    // Directory might not exist or be accessible. Silently skip — clipboard
-    // poller still works.
+  } catch (err) {
+    // fs.watch itself can also throw on an inaccessible directory. Same
+    // report-and-stop; clipboard poller still works.
+    reportUnavailable(send, dir, err);
   }
 }
 
