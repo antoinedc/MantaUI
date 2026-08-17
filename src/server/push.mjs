@@ -38,6 +38,7 @@ import { publicBaseUrl } from "./gatewayRegister.mjs";
 import * as tmux from "./tmux.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 import { loadJobs } from "./delegate.mjs";
+import { createSeenIdFilter } from "./seenIds.mjs";
 
 const DIR = statePath();
 const APNS_TOKENS_PATH = join(DIR, "apns-tokens.json");
@@ -105,9 +106,13 @@ export async function addApnsToken(token, { store } = {}) {
     );
   }
   const path = store ?? APNS_TOKENS_PATH;
+  // APNs tokens are hex; case is insignificant, so normalise to lowercase at
+  // this single registration chokepoint — one phone can never occupy two
+  // case-differing entries (which would receive every notification twice).
+  const norm = token.toLowerCase();
   const tokens = await loadApnsTokens(path);
-  const next = tokens.filter((t) => t.token !== token);
-  next.push({ kind: "apns", token, registeredAt: Date.now() });
+  const next = tokens.filter((t) => t.token !== norm);
+  next.push({ kind: "apns", token: norm, registeredAt: Date.now() });
   await saveApnsTokens(next, path);
   return { ok: true, count: next.length };
 }
@@ -118,7 +123,10 @@ export async function removeApnsToken(token, { store } = {}) {
   const path = store ?? APNS_TOKENS_PATH;
   if (!token) return { ok: true, count: (await loadApnsTokens(path)).length };
   const tokens = await loadApnsTokens(path);
-  const next = tokens.filter((t) => t.token !== token);
+  // Normalise the same way addApnsToken does, so a prune of an upper-case
+  // spelling reported by the gateway still matches the stored (lowercased) entry.
+  const key = typeof token === "string" ? token.toLowerCase() : token;
+  const next = tokens.filter((t) => t.token !== key);
   if (next.length !== tokens.length) await saveApnsTokens(next, path);
   return { ok: true, count: next.length };
 }
@@ -150,75 +158,71 @@ export function getFocus() {
 }
 
 // ---------------------------------------------------------------------------
-// Desktop presence — the Electron app reports "I'm focused" so a mobile "done"
-// push is suppressed when the user is heads-down on the desktop (Discord's
-// "active on desktop ⇒ no mobile push" rule). The desktop reaches this server
-// directly over HTTPS and POSTs /push/desktop-presence on focus/blur/system-idle.
-//
-// Two timers gate suppression so a crashed/asleep desktop can't permanently
-// mute mobile:
-//   - lastSeen TTL (DESKTOP_PRESENCE_TTL_MS): no heartbeat in this long ⇒
-//     desktop is gone, mobile pushes resume regardless of the last `visible`.
-//   - grace window (DESKTOP_GRACE_MS): even after an explicit blur/idle, keep
-//     suppressing for this long so a quick desktop window-switch doesn't buzz
-//     the phone. Matches the ~30s Discord-style grace.
-//
-// Single user → a single snapshot. `visible` is the last reported foreground
-// state; `lastActive` is the last time desktop was actually focused (set on a
-// visible:true heartbeat), which the grace window is measured from.
+// Desktop presence — raw observations (idle + lock) POSTed by the app every 30s
+// forever; away/present/gone policy lives here (computeAwayAt + desktopState).
 // ---------------------------------------------------------------------------
 
-export const DESKTOP_PRESENCE_TTL_MS = 60_000; // heartbeat staleness cutoff
-export const DESKTOP_GRACE_MS = 30_000; // keep suppressing after blur/idle
+// No input anywhere for this long ⇒ the user left the desk. 10 min matches
+// Discord's push "inactive timeout" ceiling / Slack's cursor default; long on
+// purpose because waiting on a running turn without typing is normal in manta.
+export const IDLE_AWAY_MS = 10 * 60_000;
+// Screen locked this long ⇒ user left. Locking is PROOF, so far shorter than
+// idle (Slack: 1 min lock vs 10 min idle).
+export const LOCK_AWAY_MS = 5 * 60_000;
+// No heartbeat this long ⇒ app not running (quit/crash/sleep). Comfortably
+// above the desktop's 30s heartbeat interval.
+export const PRESENCE_TTL_MS = 90_000;
 
-let _desktop = { visible: false, lastSeen: 0, lastActive: 0 };
+let _desktop = { lastSeen: 0, idleSeconds: 0, lockedSeconds: null, awayAt: Infinity };
+/** Record a presence heartbeat; detect "the user came back"; recompute awayAt. */
+export function setDesktopPresence({ idleSeconds, lockedSeconds } = {}, now = Date.now()) {
+  // Coerce defensively (a malformed body must never throw or poison the record).
+  const idle =
+    typeof idleSeconds === "number" && Number.isFinite(idleSeconds) && idleSeconds >= 0
+      ? idleSeconds
+      : 0;
+  const locked =
+    typeof lockedSeconds === "number" &&
+    Number.isFinite(lockedSeconds) &&
+    lockedSeconds >= 0
+      ? lockedSeconds
+      : null;
 
-/**
- * Record a desktop presence heartbeat. The desktop posts these on focus, blur,
- * and system idle/resume; an absent heartbeat (TTL) means the desktop is gone.
- * @param {{visible?: boolean}} report
- * @param {number} [now] injectable clock for tests
- */
-export function setDesktopPresence({ visible } = {}, now = Date.now()) {
-  const vis = !!visible;
-  _desktop = {
-    visible: vis,
-    lastSeen: now,
-    // lastActive only advances while the desktop is actually foreground, so the
-    // grace window is measured from when the user last had it focused.
-    lastActive: vis ? now : _desktop.lastActive,
-  };
-  // The user is back at the desk → cancel any pending desktop→mobile
-  // escalations. They'll see the desktop notification (clicking it focuses the
-  // app, which trips this naturally); buzzing the phone now would duplicate.
-  if (vis) cancelAllEscalations();
+  // A LOWER idleSeconds than last = new input since last beat = the user came
+  // back (skip on first beat, lastSeen 0); cancel parked mobile pushes.
+  if (now > 0 && _desktop.lastSeen !== 0 && idle < _desktop.idleSeconds) {
+    cancelAllDeferredMobile();
+  }
+
+  _desktop = { lastSeen: now, idleSeconds: idle, lockedSeconds: locked, awayAt: computeAwayAt({ lastSeen: now, idleSeconds: idle, lockedSeconds: locked }) };
   return _desktop;
 }
 
 export function getDesktopPresence() {
   return _desktop;
 }
+/** The epoch-ms instant at which this desktop is "away". Two conditions, ONE
+ * answer (min): whichever trips first wins, so a machine that locks after 2 min
+ * crosses at lock+5min and idle+10min never fires separately. Infinity when
+ * neither can trip (never in practice — the idle candidate is always finite).
+ */
+export function computeAwayAt({ lastSeen, idleSeconds, lockedSeconds }) {
+  const byIdle = lastSeen + Math.max(0, IDLE_AWAY_MS - idleSeconds * 1000);
+  const byLock =
+    lockedSeconds == null
+      ? Infinity
+      : lastSeen + Math.max(0, LOCK_AWAY_MS - lockedSeconds * 1000);
+  return Math.min(byIdle, byLock);
+}
 
 /**
- * Pure: should a mobile "done" push be suppressed because the desktop is (or
- * was just) active? Suppress when the desktop is focused on ANY session, OR
- * was focused within the grace window — provided the heartbeat is fresh (TTL).
- *
- * @param {{visible:boolean, lastSeen:number, lastActive:number}} desktop
- * @param {number} now
- * @returns {boolean}
+ * Three states (replaces the old visible/stale pair): "gone" = no heartbeat in
+ * TTL (app not running); "away" = running but past awayAt; "present" = running
+ * and the user is at the machine.
  */
-export function shouldSuppressForDesktop(desktop, now = Date.now()) {
-  if (!desktop) return false;
-  // Stale heartbeat → desktop is gone (crash, sleep, network drop). Don't let
-  // a dead desktop mute mobile forever.
-  if (now - (desktop.lastSeen ?? 0) > DESKTOP_PRESENCE_TTL_MS) return false;
-  // Currently foreground on desktop → suppress.
-  if (desktop.visible) return true;
-  // Recently foreground (within the grace window) → still suppress so a quick
-  // desktop window-switch / brief blur doesn't immediately buzz the phone.
-  if (now - (desktop.lastActive ?? 0) <= DESKTOP_GRACE_MS) return true;
-  return false;
+export function desktopState(desktop, now = Date.now()) {
+  if (!desktop || now - (desktop.lastSeen ?? 0) > PRESENCE_TTL_MS) return "gone";
+  return now >= (desktop.awayAt ?? Infinity) ? "away" : "present";
 }
 
 // ---------------------------------------------------------------------------
@@ -229,10 +233,6 @@ export function shouldSuppressForDesktop(desktop, now = Date.now()) {
 // whether it goes to desktop, mobile, both, or escalates desktop→mobile. This
 // is what guarantees "no duplicates": one place sees everything.
 // ---------------------------------------------------------------------------
-
-// How long a desktop-first informational notif waits before escalating to a
-// mobile push, when the desktop is idle/away (app open but no recent input).
-export const ESCALATE_MS = 90_000;
 
 /**
  * Notification tier (Slack/Discord parity):
@@ -249,54 +249,32 @@ export function notifTier(payload) {
 }
 
 /**
- * Pure routing decision for one notification payload.
- *
- * @param {{kind?:string, urgent?:boolean, sessionId?:string|null}} payload
- * @param {{ desktop:any, focusSessionId:string|null, focusVisible:boolean }} presence
- * @param {number} now
- * @returns {{ desktop:boolean, mobileNow:boolean, escalateAfterMs:number|null }}
- *
- * The `desktop:true` directive is "emit a desktop notification"; the Electron
- * app does the final "am I literally viewing this session right now?"
- * suppression locally (it knows its focused window + active session), so we
- * don't plumb the desktop's session to the server. Mobile's "viewing this"
- * suppression must be server-side (a push can't be un-sent) → `focus*`.
+ * Pure routing for one notification. `deferMobile` (= park for the ticker) is
+ * how the phone gets at most one delivery per notif, delayed not added. Desktop
+ * "viewing S" is client-side; mobile's is server-side via `focus*` (can't un-send).
  */
 export function routeNotification(payload, presence, now = Date.now()) {
   const tier = notifTier(payload);
   const desktop = presence?.desktop;
-  // Heartbeat fresh ⇒ the Mac app is reachable (even if the user is idle).
-  const reachable =
-    !!desktop && now - (desktop.lastSeen ?? 0) <= DESKTOP_PRESENCE_TTL_MS;
-  // Active ⇒ focused + recent input (or within the grace window), fresh.
-  const active = shouldSuppressForDesktop(desktop, now);
-  // Mobile is foregrounded ON this very session ⇒ the in-app UI already shows
-  // it; no push needed for this device.
+  const state = desktopState(desktop, now);
   const mobileViewingThis =
     !!presence?.focusVisible &&
     !!presence?.focusSessionId &&
     presence.focusSessionId === payload?.sessionId;
 
   if (tier === "blocking") {
-    // Both devices, now. Desktop client self-suppresses if viewing S.
-    return { desktop: true, mobileNow: !mobileViewingThis, escalateAfterMs: null };
+    // Both devices, now; user has confirmed this branch — do not change it.
+    return { desktop: true, mobileNow: !mobileViewingThis, deferMobile: false };
   }
-
-  // informational
-  if (active) {
-    // At the desk → desktop only.
-    return { desktop: true, mobileNow: false, escalateAfterMs: null };
+  switch (state) {
+    case "present": // at the desk → desktop now, park mobile until they leave
+      return { desktop: true, mobileNow: false, deferMobile: !mobileViewingThis };
+    case "away": // left the desk but Mac open → desktop now + mobile now
+      return { desktop: true, mobileNow: !mobileViewingThis, deferMobile: false };
+    case "gone":
+    default: // desktop not running → mobile only
+      return { desktop: false, mobileNow: !mobileViewingThis, deferMobile: false };
   }
-  if (reachable) {
-    // Idle/away but app open → desktop now, escalate to mobile if unhandled.
-    return {
-      desktop: true,
-      mobileNow: false,
-      escalateAfterMs: mobileViewingThis ? null : ESCALATE_MS,
-    };
-  }
-  // Desktop gone (no heartbeat) → mobile only.
-  return { desktop: false, mobileNow: !mobileViewingThis, escalateAfterMs: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -568,19 +546,15 @@ async function isBackgroundJobSession(sessionId) {
 // Sessions seen "busy" since their last idle — gates the "done" push so we
 // don't notify on spurious idles. Keyed by sessionID.
 const _busy = new Set();
-
+// De-dupes raw opencode events (each arrives on both streams) — see seenIds.mjs.
+const _seenEvents = createSeenIdFilter();
 // Sessions with an unanswered question/permission. While present, the session's
 // idle is "blocked on the user", not "done" — so the "done" push is suppressed
 // (the question/permission push already told them to act).
 const _pending = new Set();
 
 // ---------------------------------------------------------------------------
-// Desktop sink + escalation state
-//
-// `_desktopSink` is injected by index.mjs and publishes a `desktopNotify` bus
-// envelope, which the Electron app consumes and renders as an OS Notification.
-// push.mjs stays decoupled from the bus (mirrors
-// how schedule.mjs takes an injected sendPrompt).
+// Desktop sink + deferred mobile delivery
 // ---------------------------------------------------------------------------
 
 let _desktopSink = null;
@@ -590,44 +564,56 @@ export function setDesktopSink(fn) {
   _desktopSink = typeof fn === "function" ? fn : null;
 }
 
-// Pending desktop→mobile escalations, keyed by notification tag. Each holds the
-// timer + the sessionId so we can cancel by session when the ask is answered.
-const _escalations = new Map();
-
-function cancelEscalation(tag) {
-  const e = _escalations.get(tag);
-  if (e) {
-    clearTimeout(e.timer);
-    _escalations.delete(tag);
+// Parked mobile-push deliveries keyed by tag (same-tag entry is overwritten).
+const _deferredMobile = new Map();
+/** Cancel every parked mobile delivery (user returned to the desk). */
+export function cancelAllDeferredMobile() {
+  _deferredMobile.clear();
+}
+/** Drop parked deliveries for one session (the ask was answered/resumed). */
+export function cancelDeferredMobileForSession(sessionId) {
+  if (!sessionId) return;
+  for (const [tag, entry] of _deferredMobile) {
+    if (entry.sessionId === sessionId) _deferredMobile.delete(tag);
   }
 }
 
-/** Cancel every pending escalation (user returned to the desk). */
-export function cancelAllEscalations() {
-  for (const e of _escalations.values()) clearTimeout(e.timer);
-  _escalations.clear();
+/** Test hook: tags with a parked mobile delivery. */
+export function _deferredMobileTags() {
+  return [..._deferredMobile.keys()];
 }
-
-/** Cancel pending escalations for one session (the ask was answered/resumed). */
-export function cancelEscalationsForSession(sessionId) {
-  if (!sessionId) return;
-  for (const [tag, e] of _escalations) {
-    if (e.sessionId === sessionId) {
-      clearTimeout(e.timer);
-      _escalations.delete(tag);
+/** Walk parked deliveries: deliver when away/gone; drop after 30 min; else leave. */
+export async function flushDeferredMobile(now = Date.now()) {
+  const STALE_DEFERRED_MS = 30 * 60_000;
+  for (const [tag, entry] of [..._deferredMobile]) {
+    const state = desktopState(_desktop, now);
+    if (state === "away" || state === "gone") {
+      _deferredMobile.delete(tag);
+      await sendPush(entry.payload).catch((e) =>
+        console.warn("[push] deferred send failed:", e?.message ?? e),
+      );
+    } else if (now - entry.deferredAt > STALE_DEFERRED_MS) {
+      _deferredMobile.delete(tag);
     }
   }
 }
-
-/** Test hook: tags with a pending escalation timer. */
-export function _pendingEscalationTags() {
-  return [..._escalations.keys()];
+/** 30s poller that flushes parked deliveries; started from index.mjs. */
+export function startDeferredMobilePoller({ intervalMs = 30_000 } = {}) {
+  let inFlight = false;
+  const timer = setInterval(async () => {
+    if (inFlight) return;
+    inFlight = true;
+    try {
+      await flushDeferredMobile();
+    } finally {
+      inFlight = false;
+    }
+  }, intervalMs);
+  timer.unref?.();
+  return { stop: () => clearInterval(timer) };
 }
 
-/**
- * Run a notification payload through the router and fire the chosen legs.
- * Desktop leg = sink (immediate); mobile leg = push now OR an escalation timer.
- */
+/** Fire routed legs: sink if desktop, sendPush now if mobileNow, else park it. */
 async function dispatchNotification(payload, now = Date.now()) {
   const route = routeNotification(
     payload,
@@ -639,13 +625,13 @@ async function dispatchNotification(payload, now = Date.now()) {
     now,
   );
 
-  // A re-notify for the same tag supersedes any pending escalation.
-  cancelEscalation(payload.tag);
+  // A re-notify for the same tag supersedes any parked delivery.
+  if (_deferredMobile.has(payload.tag)) _deferredMobile.delete(payload.tag);
 
   console.log(
     `[push] route kind=${payload.kind} sid=${payload.sessionId} ` +
       `→ desktop=${route.desktop} mobileNow=${route.mobileNow} ` +
-      `escalateMs=${route.escalateAfterMs ?? "-"}`,
+      `deferMobile=${route.deferMobile}`,
   );
 
   if (route.desktop && _desktopSink) {
@@ -658,13 +644,12 @@ async function dispatchNotification(payload, now = Date.now()) {
 
   if (route.mobileNow) {
     await sendPush(payload);
-  } else if (route.escalateAfterMs != null) {
-    const timer = setTimeout(() => {
-      _escalations.delete(payload.tag);
-      sendPush(payload).catch(() => {});
-    }, route.escalateAfterMs);
-    timer.unref?.();
-    _escalations.set(payload.tag, { timer, sessionId: payload.sessionId ?? null });
+  } else if (route.deferMobile) {
+    _deferredMobile.set(payload.tag, {
+      payload,
+      sessionId: payload.sessionId ?? null,
+      deferredAt: now,
+    });
   }
 }
 
@@ -778,21 +763,29 @@ export async function sendApnsFanout(payload, opts = {}) {
     : loadApnsTokens());
   if (!Array.isArray(tokens) || tokens.length === 0) return;
   const allValues = tokens.map((t) => t?.token).filter((t) => typeof t === "string");
-  // Self-heal: drop store entries the gateway would reject — one invalid
-  // token 400s the WHOLE batch (see isValidApnsToken), so a store poisoned
-  // before registration validation existed would otherwise silence push
-  // forever. Remove them here so the next send is clean.
-  const invalid = allValues.filter((t) => !isValidApnsToken(t));
-  if (invalid.length > 0) {
-    const remove = _removeApnsTokenOverride ?? removeApnsToken;
-    for (const t of invalid) {
-      await remove(t).catch(() => {});
+  // Self-heal before sending: drop entries the gateway would reject (one invalid
+  // token 400s the WHOLE batch) AND collapse case-insensitive duplicates (case is
+  // insignificant, so a two-spelling store delivers twice) — same repair as the
+  // invalid-token self-heal. `remove` is case-insensitive (see removeApnsToken).
+  const pruneToken = _removeApnsTokenOverride ?? removeApnsToken;
+  const survivors = new Set();
+  const toPrune = [];
+  for (const t of allValues) {
+    if (!isValidApnsToken(t) || survivors.has(t.toLowerCase())) {
+      toPrune.push(t);
+    } else {
+      survivors.add(t.toLowerCase());
+    }
+  }
+  if (toPrune.length > 0) {
+    for (const t of toPrune) {
+      await pruneToken(t).catch(() => {});
     }
     console.warn(
-      `[push] pruned ${invalid.length} invalid stored token(s) the gateway would reject`,
+      `[push] pruned ${toPrune.length} stored token(s): invalid or case-duplicate`,
     );
   }
-  const tokenValues = allValues.filter((t) => isValidApnsToken(t));
+  const tokenValues = [...survivors];
   if (tokenValues.length === 0) return;
 
   // Resolve the box identity + gateway_token from auth.json.
@@ -871,6 +864,10 @@ export async function sendApnsFanout(payload, opts = {}) {
  */
 export async function firePush(evt) {
   try {
+    // Each opencode event arrives on BOTH the global and scoped stream; drop one
+    // already seen so one event = one notification (unless it has no id).
+    if (_seenEvents.seen(evt?.id)) return;
+
     const type = evt?.type;
     const props = evt?.properties ?? {};
     const sid = typeof props.sessionID === "string" ? props.sessionID : null;
@@ -883,10 +880,10 @@ export async function firePush(evt) {
       if ((t === "busy" || t === "retry") && sid) {
         _busy.add(sid);
         _pending.delete(sid);
-        // The session resumed → the user is acting on it; cancel any pending
-        // desktop→mobile escalation for it (don't buzz the phone for work
+        // The session resumed → the user is acting on it; cancel any parked
+        // desktop→mobile delivery for it (don't buzz the phone for work
         // that's already moving again).
-        cancelEscalationsForSession(sid);
+        cancelDeferredMobileForSession(sid);
       }
       return;
     }
@@ -902,8 +899,8 @@ export async function firePush(evt) {
         type === "permission.rejected"
       ) {
         _pending.delete(sid);
-        // The ask was answered → cancel its pending escalation.
-        cancelEscalationsForSession(sid);
+        // The ask was answered → cancel its parked delivery.
+        cancelDeferredMobileForSession(sid);
       }
     }
 
@@ -972,8 +969,8 @@ export async function firePush(evt) {
 export function _resetPushState() {
   _busy.clear();
   _pending.clear();
-  cancelAllEscalations();
+  cancelAllDeferredMobile();
   _desktopSink = null;
   _focus = { sessionId: null, visible: false };
-  _desktop = { visible: false, lastSeen: 0, lastActive: 0 };
+  _desktop = { lastSeen: 0, idleSeconds: 0, lockedSeconds: null, awayAt: Infinity };
 }

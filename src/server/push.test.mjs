@@ -8,16 +8,16 @@ import { statePath } from "../shared/paths.mjs";
 import {
   classifyPushEvent,
   buildSessionLabel,
-  shouldSuppressForDesktop,
   shouldSuppressNotification,
   routeNotification,
   notifTier,
   fireNotify,
+  firePush,
   setDesktopPresence,
   setDesktopSink,
-  cancelEscalationsForSession,
-  cancelAllEscalations,
-  _pendingEscalationTags,
+  cancelDeferredMobileForSession,
+  cancelAllDeferredMobile,
+  _deferredMobileTags,
   _resetPushState,
   addApnsToken,
   isValidApnsToken,
@@ -26,9 +26,12 @@ import {
   _loadApnsTokensForTest,
   _setFanoutFakesForTest,
   _resetFanoutFakesForTest,
-  ESCALATE_MS,
-  DESKTOP_PRESENCE_TTL_MS,
-  DESKTOP_GRACE_MS,
+  computeAwayAt,
+  desktopState,
+  flushDeferredMobile,
+  IDLE_AWAY_MS,
+  LOCK_AWAY_MS,
+  PRESENCE_TTL_MS,
 } from "./push.mjs";
 
 const NOFOCUS = { focusSessionId: null, focusVisible: false, wasBusy: false };
@@ -567,60 +570,124 @@ test("buildSessionLabel → null for unknown / missing sessionID", () => {
   assert.equal(buildSessionLabel(null, "ses_a"), null);
 });
 
-// --- Desktop presence suppression (multi-device routing) -------------------
+// --- Desktop presence — away calculation + state (BET-1044) ----------------
 
 const NOW = 1_000_000_000;
 
-test("shouldSuppressForDesktop: desktop focused now → suppress", () => {
+test("computeAwayAt: idle-only (no lock) → lastSeen + 10min", () => {
   assert.equal(
-    shouldSuppressForDesktop(
-      { visible: true, lastSeen: NOW, lastActive: NOW },
-      NOW,
-    ),
-    true,
+    computeAwayAt({ lastSeen: NOW, idleSeconds: 0, lockedSeconds: null }),
+    NOW + IDLE_AWAY_MS,
   );
 });
 
-test("shouldSuppressForDesktop: blurred but within grace → suppress", () => {
-  const t = NOW + DESKTOP_GRACE_MS - 1;
+test("computeAwayAt: already-idle 4 min → lastSeen + 6min", () => {
   assert.equal(
-    shouldSuppressForDesktop(
-      { visible: false, lastSeen: t, lastActive: NOW },
-      t,
-    ),
-    true,
+    computeAwayAt({ lastSeen: NOW, idleSeconds: 240, lockedSeconds: null }),
+    NOW + IDLE_AWAY_MS - 240_000,
   );
 });
 
-test("shouldSuppressForDesktop: blurred past grace → allow push", () => {
-  const t = NOW + DESKTOP_GRACE_MS + 1;
+test("computeAwayAt: locked 0s → lastSeen + 5min (lock beats idle)", () => {
   assert.equal(
-    shouldSuppressForDesktop(
-      { visible: false, lastSeen: t, lastActive: NOW },
-      t,
-    ),
-    false,
+    computeAwayAt({ lastSeen: NOW, idleSeconds: 0, lockedSeconds: 0 }),
+    NOW + LOCK_AWAY_MS,
   );
 });
 
-test("shouldSuppressForDesktop: stale heartbeat (crash/sleep) → allow push", () => {
-  // visible:true but no heartbeat for > TTL → treat desktop as gone.
-  const t = NOW + DESKTOP_PRESENCE_TTL_MS + 1;
+test("computeAwayAt: locked 2min into a 10min idle window → ONE instant at lock+5min", () => {
+  // The reported scenario: a machine that locks after 2 minutes crosses at
+  // lock+5min; the idle+10min rule never fires separately — the two conditions
+  // resolve to one instant via min(), not two timers.
+  const idleAt = NOW + IDLE_AWAY_MS - 120_000; // idle+10min minus 2min elapsed
+  const lockAt = NOW + LOCK_AWAY_MS - 120_000; // lock+5min minus 2min elapsed
   assert.equal(
-    shouldSuppressForDesktop(
-      { visible: true, lastSeen: NOW, lastActive: NOW },
-      t,
-    ),
-    false,
+    computeAwayAt({ lastSeen: NOW, idleSeconds: 120, lockedSeconds: 120 }),
+    lockAt,
+  );
+  assert.notEqual(computeAwayAt({ lastSeen: NOW, idleSeconds: 120, lockedSeconds: 120 }), idleAt);
+});
+
+test("computeAwayAt: idleSeconds already past both thresholds → lastSeen (never negative)", () => {
+  // Long idle + long lock: both candidates clamp to >= lastSeen, min is lastSeen.
+  assert.equal(
+    computeAwayAt({ lastSeen: NOW, idleSeconds: 60 * 60, lockedSeconds: 60 * 60 }),
+    NOW,
   );
 });
 
-test("shouldSuppressForDesktop: no presence ever → allow push", () => {
+test("desktopState: fresh + before awayAt → present", () => {
   assert.equal(
-    shouldSuppressForDesktop({ visible: false, lastSeen: 0, lastActive: 0 }, NOW),
-    false,
+    desktopState({ lastSeen: NOW, idleSeconds: 0, lockedSeconds: null, awayAt: NOW + 1000 }, NOW + 500),
+    "present",
   );
-  assert.equal(shouldSuppressForDesktop(null, NOW), false);
+});
+
+test("desktopState: fresh + past awayAt → away", () => {
+  assert.equal(
+    desktopState({ lastSeen: NOW, idleSeconds: 0, lockedSeconds: null, awayAt: NOW - 1 }, NOW),
+    "away",
+  );
+});
+
+test("desktopState: heartbeat older than TTL → gone", () => {
+  assert.equal(
+    desktopState({ lastSeen: NOW, idleSeconds: 0, lockedSeconds: null, awayAt: NOW + 1000 }, NOW + PRESENCE_TTL_MS + 1),
+    "gone",
+  );
+});
+
+test("desktopState: never-seen record (lastSeen 0) → gone", () => {
+  assert.equal(
+    desktopState({ lastSeen: 0, idleSeconds: 0, lockedSeconds: null, awayAt: Infinity }, NOW),
+    "gone",
+  );
+  assert.equal(desktopState(null, NOW), "gone");
+});
+
+test("setDesktopPresence: a lower incoming idleSeconds cancels all deferred mobile", async () => {
+  _resetPushState();
+  setDesktopSink(() => {});
+  // Desktop present at the real clock (idle 300s, unlocked): an informational
+  // notify routes deferMobile, so something gets parked.
+  setDesktopPresence({ idleSeconds: 300, lockedSeconds: null });
+  await fireNotify({ message: "build done", sessionID: "ses_c" });
+  assert.equal(_deferredMobileTags().length, 1);
+  // User produced input since the last heartbeat → lower idle → the parked push
+  // is cancelled (they'll see the desktop notification).
+  setDesktopPresence({ idleSeconds: 5, lockedSeconds: null });
+  assert.deepEqual(_deferredMobileTags(), []);
+  _resetPushState();
+});
+
+test("setDesktopPresence: a higher incoming idleSeconds does NOT cancel deferred", async () => {
+  _resetPushState();
+  setDesktopSink(() => {});
+  setDesktopPresence({ idleSeconds: 5, lockedSeconds: null });
+  await fireNotify({ message: "build done", sessionID: "ses_d" });
+  assert.equal(_deferredMobileTags().length, 1);
+  // Idle grew (user stopped typing) → NOT a "came back" signal → still parked.
+  setDesktopPresence({ idleSeconds: 60, lockedSeconds: null });
+  assert.equal(_deferredMobileTags().length, 1);
+  _resetPushState();
+});
+
+test("setDesktopPresence: the first-ever heartbeat does not throw or cancel deferred", () => {
+  _resetPushState();
+  setDesktopPresence({ idleSeconds: 0, lockedSeconds: null });
+  assert.deepEqual(_deferredMobileTags(), []);
+  _resetPushState();
+});
+
+test("setDesktopPresence: a malformed body does not throw and does not corrupt the record", () => {
+  _resetPushState();
+  const r = setDesktopPresence({ idleSeconds: "junk", lockedSeconds: undefined });
+  assert.equal(r.idleSeconds, 0, "non-finite/absent idle coerced to 0");
+  assert.equal(r.lockedSeconds, null, "absent locked coerced to null");
+  const r2 = setDesktopPresence({ idleSeconds: -3, lockedSeconds: NaN });
+  assert.equal(r2.idleSeconds, 0, "negative idle clamped to 0");
+  assert.equal(r2.lockedSeconds, null, "NaN locked coerced to null");
+  _resetPushState();
 });
 
 test("unrelated event → null", () => {
@@ -635,9 +702,9 @@ test("unrelated event → null", () => {
 // ---------------------------------------------------------------------------
 
 const T = 1_000_000_000;
-const dActive = { visible: true, lastSeen: T, lastActive: T }; // at the desk
-const dIdle = { visible: false, lastSeen: T, lastActive: 0 }; // app open, away
-const dGone = { visible: false, lastSeen: 0, lastActive: 0 }; // no heartbeat
+const dPresent = { lastSeen: T, idleSeconds: 0, lockedSeconds: null, awayAt: T + 100_000 }; // running, user at machine
+const dAway = { lastSeen: T, idleSeconds: 0, lockedSeconds: null, awayAt: T - 1 }; // running, user left
+const dGone = { lastSeen: T - PRESENCE_TTL_MS - 1, idleSeconds: 0, lockedSeconds: null, awayAt: Infinity }; // no heartbeat
 const noMobile = { focusSessionId: null, focusVisible: false };
 
 test("notifTier: blocking vs informational", () => {
@@ -649,24 +716,22 @@ test("notifTier: blocking vs informational", () => {
   assert.equal(notifTier({ kind: "done" }), "informational");
 });
 
-test("route: informational + desktop active → desktop only", () => {
+test("route: informational + desktop present → desktop now, mobile deferred", () => {
   const r = routeNotification(
     { kind: "done", sessionId: "ses_1" },
-    { desktop: dActive, ...noMobile },
+    { desktop: dPresent, ...noMobile },
     T,
   );
-  assert.deepEqual(r, { desktop: true, mobileNow: false, escalateAfterMs: null });
+  assert.deepEqual(r, { desktop: true, mobileNow: false, deferMobile: true });
 });
 
-test("route: informational + desktop idle → desktop now, escalate mobile", () => {
+test("route: informational + desktop away → desktop now + mobile now", () => {
   const r = routeNotification(
     { kind: "done", sessionId: "ses_1" },
-    { desktop: dIdle, ...noMobile },
+    { desktop: dAway, ...noMobile },
     T,
   );
-  assert.equal(r.desktop, true);
-  assert.equal(r.mobileNow, false);
-  assert.equal(r.escalateAfterMs, ESCALATE_MS);
+  assert.deepEqual(r, { desktop: true, mobileNow: true, deferMobile: false });
 });
 
 test("route: informational + desktop gone → mobile only", () => {
@@ -675,16 +740,26 @@ test("route: informational + desktop gone → mobile only", () => {
     { desktop: dGone, ...noMobile },
     T,
   );
-  assert.deepEqual(r, { desktop: false, mobileNow: true, escalateAfterMs: null });
+  assert.deepEqual(r, { desktop: false, mobileNow: true, deferMobile: false });
 });
 
-test("route: informational + mobile foreground on this session → no mobile, no escalation", () => {
-  const idle = routeNotification(
+test("route: informational + mobile foreground on this session → no mobile, no defer", () => {
+  // present + phone viewing this session → nothing parked for mobile.
+  const present = routeNotification(
     { kind: "done", sessionId: "ses_1" },
-    { desktop: dIdle, focusSessionId: "ses_1", focusVisible: true },
+    { desktop: dPresent, focusSessionId: "ses_1", focusVisible: true },
     T,
   );
-  assert.equal(idle.escalateAfterMs, null);
+  assert.deepEqual(present, { desktop: true, mobileNow: false, deferMobile: false });
+  // away + phone viewing this session → desktop only, no mobile.
+  const away = routeNotification(
+    { kind: "done", sessionId: "ses_1" },
+    { desktop: dAway, focusSessionId: "ses_1", focusVisible: true },
+    T,
+  );
+  assert.equal(away.mobileNow, false);
+  assert.equal(away.deferMobile, false);
+  // gone + phone viewing this session → no mobile.
   const gone = routeNotification(
     { kind: "done", sessionId: "ses_1" },
     { desktop: dGone, focusSessionId: "ses_1", focusVisible: true },
@@ -699,7 +774,7 @@ test("route: blocking → both devices now (desktop + mobile), even when gone", 
     { desktop: dGone, ...noMobile },
     T,
   );
-  assert.deepEqual(r, { desktop: true, mobileNow: true, escalateAfterMs: null });
+  assert.deepEqual(r, { desktop: true, mobileNow: true, deferMobile: false });
 });
 
 test("route: blocking + mobile viewing this session → desktop yes, mobile suppressed", () => {
@@ -713,39 +788,165 @@ test("route: blocking + mobile viewing this session → desktop yes, mobile supp
 });
 
 // ---------------------------------------------------------------------------
-// Escalation lifecycle (stateful)
+// Deferred mobile delivery (stateful)
 // ---------------------------------------------------------------------------
 
-test("escalation: idle desktop schedules a mobile escalation; desktop-active cancels it", async () => {
+test("deferred: desktop present parks the mobile push; going away flushes it", async () => {
   _resetPushState();
   setDesktopSink(() => {}); // no-op desktop leg
-  setDesktopPresence({ visible: false }); // fresh heartbeat, idle/away
+  setDesktopPresence({ idleSeconds: 5, lockedSeconds: null }); // fresh, present
   await fireNotify({ message: "build done", sessionID: "ses_esc" });
-  assert.deepEqual(_pendingEscalationTags(), ["notify-ses_esc"]);
-  setDesktopPresence({ visible: true }); // user returns to the desk
-  assert.deepEqual(_pendingEscalationTags(), []);
+  assert.deepEqual(_deferredMobileTags(), ["notify-ses_esc"]);
+  // The user leaves the desk → the next flush delivers.
+  setDesktopPresence({ idleSeconds: 60 * 60, lockedSeconds: null });
+  await flushDeferredMobile();
+  assert.deepEqual(_deferredMobileTags(), []);
   _resetPushState();
 });
 
-test("escalation: answering one session cancels only its escalation", async () => {
+test("deferred: a lower idle heartbeat (user returns) cancels ALL parked deliveries", async () => {
   _resetPushState();
-  setDesktopPresence({ visible: false });
+  setDesktopSink(() => {});
+  setDesktopPresence({ idleSeconds: 5, lockedSeconds: null }); // present
   await fireNotify({ message: "x", sessionID: "ses_a" });
   await fireNotify({ message: "y", sessionID: "ses_b" });
-  assert.equal(_pendingEscalationTags().length, 2);
-  cancelEscalationsForSession("ses_a");
-  assert.deepEqual(_pendingEscalationTags(), ["notify-ses_b"]);
+  assert.equal(_deferredMobileTags().length, 2);
+  setDesktopPresence({ idleSeconds: 0, lockedSeconds: null }); // fresh input
+  assert.deepEqual(_deferredMobileTags(), []);
   _resetPushState();
 });
 
-test("escalation: re-notify same tag supersedes (no duplicate timer)", async () => {
+test("deferred: answering one session cancels only its parked delivery", async () => {
   _resetPushState();
-  setDesktopPresence({ visible: false });
+  setDesktopSink(() => {});
+  setDesktopPresence({ idleSeconds: 5, lockedSeconds: null }); // present
+  await fireNotify({ message: "x", sessionID: "ses_a" });
+  await fireNotify({ message: "y", sessionID: "ses_b" });
+  assert.equal(_deferredMobileTags().length, 2);
+  cancelDeferredMobileForSession("ses_a");
+  assert.deepEqual(_deferredMobileTags(), ["notify-ses_b"]);
+  _resetPushState();
+});
+
+test("deferred: re-notify same tag supersedes (no stack)", async () => {
+  _resetPushState();
+  setDesktopSink(() => {});
+  setDesktopPresence({ idleSeconds: 5, lockedSeconds: null }); // present
   await fireNotify({ message: "first", sessionID: "ses_s" });
   await fireNotify({ message: "second", sessionID: "ses_s" });
-  assert.deepEqual(_pendingEscalationTags(), ["notify-ses_s"]);
-  cancelAllEscalations();
+  assert.deepEqual(_deferredMobileTags(), ["notify-ses_s"]);
+  cancelAllDeferredMobile();
   _resetPushState();
+});
+
+// Counts mobile sends (each sendPush → one APNs fanout fetch). Installs the
+// fanout fakes and returns a counter, for the flush tests below.
+function withFanoutCount() {
+  _resetFanoutFakesForTest();
+  const sends = { count: 0 };
+  _setFanoutFakesForTest({
+    fetchImpl: async () => {
+      sends.count++;
+      return { ok: true, status: 200, json: async () => ({ results: [] }) };
+    },
+    loadApnsTokens: async () => [{ kind: "apns", token: "f1a1", registeredAt: 1 }],
+    removeApnsToken: async () => ({ ok: true, count: 0 }),
+    readBoxGatewayIdentity: async () => ({
+      box_id: "abcdef0123456789abcdef0123456789",
+      gateway_token: "00112233445566778899aabbccddeeff",
+    }),
+    gatewayBase: "https://gateway.test.local",
+  });
+  return sends;
+}
+
+test("flushDeferredMobile: NOT sent while present", async () => {
+  _resetPushState();
+  setDesktopSink(() => {});
+  setDesktopPresence({ idleSeconds: 5, lockedSeconds: null }); // present
+  await fireNotify({ message: "held", sessionID: "ses_h" });
+  const sends = withFanoutCount();
+  await flushDeferredMobile();
+  assert.equal(sends.count, 0, "desktop still present → nothing delivered");
+  assert.equal(_deferredMobileTags().length, 1, "still parked");
+  _resetPushState();
+  _resetFanoutFakesForTest();
+});
+
+test("flushDeferredMobile: IS sent once the state reaches away", async () => {
+  _resetPushState();
+  setDesktopSink(() => {});
+  setDesktopPresence({ idleSeconds: 5, lockedSeconds: null }); // present
+  await fireNotify({ message: "held", sessionID: "ses_h" });
+  const sends = withFanoutCount();
+  // Idle grew to 1h → awayAt is now → the flush sees "away".
+  setDesktopPresence({ idleSeconds: 60 * 60, lockedSeconds: null });
+  await flushDeferredMobile();
+  assert.equal(sends.count, 1, "delivered to mobile once away");
+  assert.deepEqual(_deferredMobileTags(), []);
+  _resetPushState();
+  _resetFanoutFakesForTest();
+});
+
+test("flushDeferredMobile: IS sent when the state reaches gone", async () => {
+  _resetPushState();
+  setDesktopSink(() => {});
+  setDesktopPresence({ idleSeconds: 5, lockedSeconds: null }); // present
+  await fireNotify({ message: "held", sessionID: "ses_ng" });
+  const sends = withFanoutCount();
+  // Same idle (no cancel), but a stale lastSeen past the TTL → gone.
+  setDesktopPresence({ idleSeconds: 5, lockedSeconds: null }, Date.now() - PRESENCE_TTL_MS - 1);
+  await flushDeferredMobile();
+  assert.equal(sends.count, 1, "delivered to mobile once gone");
+  assert.deepEqual(_deferredMobileTags(), []);
+  _resetPushState();
+  _resetFanoutFakesForTest();
+});
+
+test("flushDeferredMobile: dropped without sending after 30 min", async () => {
+  _resetPushState();
+  setDesktopSink(() => {});
+  const t0 = Date.now();
+  setDesktopPresence({ idleSeconds: 5, lockedSeconds: null }, t0); // present
+  await fireNotify({ message: "held", sessionID: "ses_stale" }); // deferredAt ≈ t0
+  // 31 minutes later the desktop is still present (fresh same-idle heartbeat),
+  // but the parked notification is stale → dropped, not sent.
+  const t1 = t0 + 31 * 60_000;
+  setDesktopPresence({ idleSeconds: 5, lockedSeconds: null }, t1);
+  const sends = withFanoutCount();
+  await flushDeferredMobile(t1);
+  assert.equal(sends.count, 0, "stale parked push dropped without sending");
+  assert.deepEqual(_deferredMobileTags(), []);
+  _resetPushState();
+  _resetFanoutFakesForTest();
+});
+
+test("flushDeferredMobile: dropped by cancelDeferredMobileForSession", async () => {
+  _resetPushState();
+  setDesktopSink(() => {});
+  setDesktopPresence({ idleSeconds: 5, lockedSeconds: null });
+  await fireNotify({ message: "held", sessionID: "ses_cn" });
+  cancelDeferredMobileForSession("ses_cn");
+  assert.deepEqual(_deferredMobileTags(), []);
+  _resetPushState();
+});
+
+test("REGRESSION: a deferred push that becomes deliverable flushes to EXACTLY ONE sendPush", async () => {
+  _resetPushState();
+  setDesktopSink(() => {});
+  setDesktopPresence({ idleSeconds: 5, lockedSeconds: null }); // present
+  await fireNotify({ message: "held", sessionID: "ses_once" });
+  assert.equal(_deferredMobileTags().length, 1);
+  const sends = withFanoutCount();
+  // Make it deliverable (gone) and flush twice — the second flush must send
+  // nothing because the entry was already delivered and removed.
+  setDesktopPresence({ idleSeconds: 5, lockedSeconds: null }, Date.now() - PRESENCE_TTL_MS - 1);
+  await flushDeferredMobile();
+  await flushDeferredMobile();
+  assert.equal(sends.count, 1, "exactly one sendPush across both flushes");
+  assert.deepEqual(_deferredMobileTags(), []);
+  _resetPushState();
+  _resetFanoutFakesForTest();
 });
 
 // ---------------------------------------------------------------------------
@@ -1152,4 +1353,121 @@ test("sendApnsFanout: all-invalid store prunes everything and sends nothing", as
       assert.equal(pruned.length, 1);
     },
   );
+});
+
+// ---------------------------------------------------------------------------
+// APNs case-insensitivity (BET-1044). Device tokens are hex; Apple routes either
+// spelling, so the same phone registered under two cases is ONE device — but an
+// exact-match store treated it as two and delivered every notification twice.
+// ---------------------------------------------------------------------------
+
+test("register-apns REGRESSION: upper- then lower-case same token → ONE entry (BET-1044)", async () => {
+  const store = makeApnsStorePath("case-dedupe");
+  try {
+    await addApnsToken("36DBB6F9abcdef", { store });
+    const r = await addApnsToken("36dbb6f9abcdef", { store });
+    assert.equal(r.count, 1, "case-differing re-registration is an upsert, not an append");
+    const tokens = await _loadApnsTokensForTest(store);
+    assert.equal(tokens.length, 1);
+    assert.equal(tokens[0].token, "36dbb6f9abcdef", "stored lowercased at the chokepoint");
+  } finally {
+    await rm(store, { force: true });
+  }
+});
+
+test("removeApnsToken REGRESSION: opposite case removes the stored entry (BET-1044)", async () => {
+  const store = makeApnsStorePath("case-remove");
+  try {
+    await addApnsToken("36dbb6f9abcdef", { store });
+    const r = await removeApnsToken("36DBB6F9ABCDEF", { store });
+    assert.equal(r.count, 0, "a prune reported in upper case matches the stored entry");
+    assert.equal((await _loadApnsTokensForTest(store)).length, 0);
+  } finally {
+    await rm(store, { force: true });
+  }
+});
+
+test("sendApnsFanout REGRESSION: collapses case-differing duplicate tokens to ONE delivery (BET-1044)", async () => {
+  await withValidationFanout(
+    {
+      storeTokens: [
+        { kind: "apns", token: "AA11", registeredAt: 1 },
+        { kind: "apns", token: "aa11", registeredAt: 2 },
+      ],
+    },
+    async ({ calls, pruned }) => {
+      await sendApnsFanout({ kind: "done" });
+      assert.equal(calls.length, 1);
+      const body = JSON.parse(calls[0].init.body);
+      assert.equal(body.tokens.length, 1, "both spellings → one token in the batch");
+      assert.equal(pruned.length, 1, "the duplicate spelling is self-healed out of the store");
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// One notification per event (BET-1044). Each opencode event arrives twice —
+// once on the global stream, once on the per-directory scoped one — so firePush
+// must drop an event whose id it has already seen, else session.error notifies
+// twice. Uses a permission.asked on a background-job child session: that kind is
+// NOT suppressed (a blocked job must still page the user), so the desktop sink
+// call is a clean per-notification observable.
+// ---------------------------------------------------------------------------
+
+function primeDelegateJob(childId) {
+  const jobsPath = statePath("delegate-jobs.json");
+  mkdirSync(statePath(), { recursive: true });
+  writeFileSync(jobsPath, JSON.stringify({ jobs: [{ childSessionID: childId }] }));
+  return jobsPath;
+}
+
+test("firePush REGRESSION: firing the same event twice → ONE notification (BET-1044)", async () => {
+  const jobsPath = primeDelegateJob("ses_dup1");
+  _resetPushState();
+  const sinkCalls = [];
+  setDesktopSink(() => sinkCalls.push(1));
+  try {
+    const evt = {
+      id: "evt_dup1",
+      type: "permission.asked",
+      properties: { sessionID: "ses_dup1", id: "per_dup1" },
+    };
+    await firePush(evt);
+    await firePush(evt);
+    assert.equal(sinkCalls.length, 1, "same event on both streams → one notification");
+  } finally {
+    rmSync(jobsPath, { force: true });
+    _resetPushState();
+  }
+});
+
+test("firePush: two events with different ids → two notifications", async () => {
+  const jobsPath = primeDelegateJob("ses_dup2");
+  _resetPushState();
+  const sinkCalls = [];
+  setDesktopSink(() => sinkCalls.push(1));
+  try {
+    const a = { id: "evt_a", type: "permission.asked", properties: { sessionID: "ses_dup2", id: "per_a" } };
+    const b = { id: "evt_b", type: "permission.asked", properties: { sessionID: "ses_dup2", id: "per_b" } };
+    await firePush(a);
+    await firePush(b);
+    assert.equal(sinkCalls.length, 2, "two distinct events → two notifications");
+  } finally {
+    rmSync(jobsPath, { force: true });
+    _resetPushState();
+  }
+});
+
+test("firePush: an event with no id is not dropped", async () => {
+  const jobsPath = primeDelegateJob("ses_noid");
+  _resetPushState();
+  const sinkCalls = [];
+  setDesktopSink(() => sinkCalls.push(1));
+  try {
+    await firePush({ type: "permission.asked", properties: { sessionID: "ses_noid", id: "per_noid" } });
+    assert.equal(sinkCalls.length, 1, "an id-less event still notifies (never silently swallowed)");
+  } finally {
+    rmSync(jobsPath, { force: true });
+    _resetPushState();
+  }
 });
