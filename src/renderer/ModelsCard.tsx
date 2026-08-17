@@ -191,8 +191,8 @@ export function ModelsCard() {
     ]);
     const deactivatedSubList = cfg.deactivatedSubagents ?? [];
     // The server (opencode:models) is the single source of truth for display
-    // overrides overrides, so the model list it returns is already overridden —
-    // use it as-is.
+    // overrides, so the model list it returns is already overridden — use it
+    // as-is.
     await window.api.opencodeSyncSubagents({
       models: modelList,
       deactivated: deactivatedSubList,
