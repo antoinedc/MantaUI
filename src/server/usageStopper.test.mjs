@@ -104,6 +104,14 @@ test("auth/credential failures never enrol (reuses the auth-error predicate)", (
   assert.equal(auth.enrolled, false, "claude credential failure must not enrol");
 });
 
+test("a user abort never enrols, even with a matching-looking name field", () => {
+  assert.equal(classifyUsageStopped({ provider: "claude", errorName: "MessageAbortedError", errorMessage: "stopped" }).enrolled, false);
+});
+
+test("a context overflow never enrols", () => {
+  assert.equal(classifyUsageStopped({ provider: "claude", errorName: "ContextOverflowError", errorMessage: "context window exceeded" }).enrolled, false);
+});
+
 test("unlisted / unknown provider is out of scope and never enrols", () => {
   assert.equal(isStoppedProvider("deepseek"), false);
   assert.equal(isStoppedProvider("openai"), false); // opencode providerID, not the adapter id

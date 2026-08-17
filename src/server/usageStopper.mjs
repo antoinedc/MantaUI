@@ -84,6 +84,24 @@ export const STOP_STRINGS = {
 
 const KNOWN_PROVIDERS = new Set(Object.keys(STOP_STRINGS));
 
+// Structural "definitely NOT a plan-limit stop" error names (spec §4.1's
+// "Never enrol" rows that are identifiable by name rather than wording):
+// a user abort (incl. the queued-message drain abort) and a context overflow.
+// Unlike the positive/negative wording table these are provider-agnostic and
+// must suppress BOTH signals — a context overflow or abort that happens to
+// occur while a meter reads at 100% must still not land a stopped record.
+export const NON_LIMIT_ERROR_NAMES = new Set(["MessageAbortedError", "ContextOverflowError"]);
+
+/**
+ * Is a failure structurally excluded from ever being a plan-limit stop (a user
+ * abort, or a context overflow)? Provider-agnostic; suppresses both signals.
+ * @param {unknown} errorName
+ * @returns {boolean}
+ */
+export function isNonLimitFailure(errorName) {
+  return typeof errorName === "string" && NON_LIMIT_ERROR_NAMES.has(errorName);
+}
+
 /**
  * Is this provider one the usage-stopped feature covers? Only the three
  * subscription providers (spec §3). Anything else (a pay-as-you-go key, an
@@ -117,6 +135,11 @@ export function classifyUsageStopped({ provider, errorName, errorMessage, error 
 
   const name = asString(errorName).toLowerCase();
   const msg = asString(errorMessage).toLowerCase();
+
+  // A user abort or a context overflow is structurally never a plan-limit stop,
+  // by name — suppress the match signal here too (defense in depth; the
+  // enrolment path additionally skips these before the meter correlation runs).
+  if (isNonLimitFailure(errorName)) return { enrolled: false };
 
   // Auth/credential failures must NEVER enrol. Reuse the existing auth-error
   // predicate rather than writing a second one (spec §4.1, issue Build §1).

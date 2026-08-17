@@ -42,7 +42,6 @@ test("a refused turn enrols with the provider, model, window and cached tokens",
   const { engine, upserts } = harness({ atLimit: false });
   engine.observeEvent(stepEvent("s1"));
   await engine.observeEvent(errorEvent("s1"));
-  await Promise.resolve();
   assert.equal(upserts.length, 1);
   const u = upserts[0];
   assert.equal(u.conversation, "s1");
@@ -58,7 +57,6 @@ test("meter correlation: unmatched wording + provider at limit → still enrols"
   const { engine, upserts } = harness({ atLimit: true });
   engine.observeEvent(stepEvent("s1", "openai", "gpt-5"));
   await engine.observeEvent(errorEvent("s1", "Error", "some completely unrelated failure"));
-  await Promise.resolve();
   assert.equal(upserts.length, 1);
   assert.equal(upserts[0].provider, "codex");
   assert.equal(upserts[0].window, null);
@@ -68,24 +66,35 @@ test("no signal: unmatched wording + provider under limit → no enrolment", asy
   const { engine, upserts } = harness({ atLimit: false });
   engine.observeEvent(stepEvent("s1"));
   await engine.observeEvent(errorEvent("s1", "Error", "some completely unrelated failure"));
-  await Promise.resolve();
   assert.equal(upserts.length, 0);
 });
 
 test("auth/credential failures never enrol even when at limit", async () => {
   const { engine, upserts } = harness({ atLimit: true });
   engine.observeEvent(stepEvent("s1"));
-  engine.observeEvent(
+  await engine.observeEvent(
     errorEvent("s1", "UnknownError", "Your Claude credential has expired"),
   );
-  await Promise.resolve();
   assert.equal(upserts.length, 0, "an auth failure must never land a stopped record");
+});
+
+test("a user abort never enrols even when at limit", async () => {
+  const { engine, upserts } = harness({ atLimit: true });
+  engine.observeEvent(stepEvent("s1"));
+  await engine.observeEvent(errorEvent("s1", "MessageAbortedError", "Aborted by user"));
+  assert.equal(upserts.length, 0, "a user abort must never land a stopped record");
+});
+
+test("a context overflow never enrols even when at limit", async () => {
+  const { engine, upserts } = harness({ atLimit: true });
+  engine.observeEvent(stepEvent("s1"));
+  await engine.observeEvent(errorEvent("s1", "ContextOverflowError", "Context full — try /compact"));
+  assert.equal(upserts.length, 0, "a context overflow must never land a stopped record");
 });
 
 test("a session with no observed step (unknown provider) never enrols", async () => {
   const { engine, upserts } = harness({ atLimit: true });
   await engine.observeEvent(errorEvent("s1"));
-  await Promise.resolve();
   assert.equal(upserts.length, 0);
 });
 
@@ -93,7 +102,6 @@ test("a kimi refusal maps to the kimi adapter and its window", async () => {
   const { engine, upserts } = harness({ atLimit: false });
   engine.observeEvent(stepEvent("s1", "kimi-for-coding", "kimi-k2"));
   await engine.observeEvent(errorEvent("s1", "Error", "reached your usage limit for this billing cycle"));
-  await Promise.resolve();
   assert.equal(upserts.length, 1);
   assert.equal(upserts[0].provider, "kimi");
   assert.equal(upserts[0].window, "weekly");
@@ -103,7 +111,6 @@ test("codex structural marker enrols via the error name", async () => {
   const { engine, upserts } = harness({ atLimit: false });
   engine.observeEvent(stepEvent("s1", "openai", "gpt-5"));
   await engine.observeEvent(errorEvent("s1", "usage_limit_reached", "Out of quota"));
-  await Promise.resolve();
   assert.equal(upserts.length, 1);
   assert.equal(upserts[0].provider, "codex");
 });
@@ -112,6 +119,5 @@ test("non-error and non-step events are ignored", async () => {
   const { engine, upserts } = harness({ atLimit: true });
   engine.observeEvent({ type: "session.idle", properties: { sessionID: "s1" } });
   engine.observeEvent({ type: "message.part.updated", properties: {} });
-  await Promise.resolve();
   assert.equal(upserts.length, 0);
 });

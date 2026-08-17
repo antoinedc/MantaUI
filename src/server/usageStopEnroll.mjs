@@ -24,7 +24,8 @@
 // is synchronous and testable; the async work (re-check + store write) is
 // injected.
 
-import { classifyUsageStopped, decideUsageEnrolment } from "./usageStopper.mjs";
+import { classifyUsageStopped, decideUsageEnrolment, isNonLimitFailure } from "./usageStopper.mjs";
+import { isClaudeCredentialError } from "./claudeAuth.mjs";
 import { adapterForProviderID } from "./usage.mjs";
 
 /**
@@ -85,6 +86,15 @@ export function createUsageStopEngine({ upsert, recheckAtLimit, resolveWorkspace
     const errorName = typeof err?.name === "string" ? err.name : undefined;
     const errorMessage =
       typeof err?.data?.message === "string" ? err.data.message : typeof err?.message === "string" ? err.message : undefined;
+
+    // A user abort or a context overflow is structurally never a plan-limit
+    // stop (spec §4.1) — suppress BOTH signals (an abort/overflow that happens
+    // while a meter reads at 100% must not over-enrol via the correlation).
+    if (isNonLimitFailure(errorName)) return;
+    // Auth/credential failures must never enrol (spec §4.1) — reuse the
+    // existing Claude auth-error predicate to suppress the correlation signal
+    // too, not just the word match. Returns false harmlessly for non-Claude.
+    if (isClaudeCredentialError(err)) return;
 
     const match = classifyUsageStopped({ provider: adapterId, errorName, errorMessage, error: err });
 
