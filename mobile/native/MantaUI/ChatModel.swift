@@ -199,8 +199,8 @@ enum ChatModel {
         return "Default"
     }
 
-    /// Fuzzy-match a spoken/named model against the pickable list (desktop's
-    /// `fuzzyMatchModel`-style resolution for the voice `model` action).
+    /// Fuzzy-match a named model against the pickable list (desktop's
+    /// `fuzzyMatchModel`-style resolution).
     static func findByQuery(_ models: [OpencodeModel], query: String) -> OpencodeModel? {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !q.isEmpty else { return nil }

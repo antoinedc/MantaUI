@@ -15,8 +15,8 @@ import UniformTypeIdentifiers
 //      as FilePart attachments on `opencode:prompt`.
 //   2. Model picker — per-session override (UserDefaults) with the configured
 //      default as fallback; box data from `opencode:models`/`default-model`.
-//   3. Voice — hold to record + dictate (insert at caret); long-press promotes
-//      to command mode routed through the box classifier. The mic button is
+//   3. Voice — hold to record + dictate (insert at caret); voice notes are a
+//      dedicated companion surface. The mic button is
 //      hidden when no Groq key is configured (same as desktop).
 //
 // The device does NOT transcribe or classify — Groq runs on the box (voice:*
@@ -780,7 +780,7 @@ struct ComposerView: View {
                 // sits bare on the glass, like the attach control — a resting
                 // dark disc read as a hole in the surface. While recording the
                 // fill is the state indicator, so it stays.
-                if recorder.phase == .recording {
+                if recorder.isRecording {
                     Circle()
                         .fill(micIconFill)
                         .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
@@ -804,30 +804,19 @@ struct ComposerView: View {
     }
 
     private var micIcon: String {
-        switch recorder.phase {
-        case .recording: return "mic.fill"
-        case .error: return "exclamationmark.triangle"
-        default: return "mic"
-        }
+        recorder.isRecording ? "mic.fill" : "mic"
     }
 
     private var micIconFill: Color {
-        switch recorder.phase {
-        case .recording: return tokens.accentSolid
-        default: return tokens.inset
-        }
+        recorder.isRecording ? tokens.accentSolid : tokens.inset
     }
 
     private var micIconColor: Color {
-        switch recorder.phase {
-        case .recording: return tokens.onAccent
-        case .error: return tokens.danger
-        default: return tokens.tx2
-        }
+        recorder.isRecording ? tokens.onAccent : tokens.tx2
     }
 
     private func micPress() {
-        guard micAvailable, recorder.phase != .recording else { return }
+        guard micAvailable, !recorder.isRecording else { return }
         // onChanged fires repeatedly during the permission await — one Task only.
         guard !micPressActive else { return }
         micPressActive = true
@@ -849,13 +838,13 @@ struct ComposerView: View {
 
     private func micRelease() {
         micPressActive = false
-        guard let data = recorder.stop() else {
+        guard let take = recorder.stop() else {
             // Too short — treat as an accidental tap, not an error (§ desktop
             // too-short guard). Quiet.
             return
         }
         Task {
-            await transcribe(data: data)
+            await transcribe(data: take.data)
         }
     }
 
