@@ -192,6 +192,28 @@ export async function markStoppedRan({ conversation }, { load = loadStoppedState
 }
 
 /**
+ * Record that a resumed conversation came back refused, incrementing its
+ * `attempts` in place so a permanently-refused conversation stops looping
+ * (spec §8 + §5: "A conversation that ... still refused stays in the list and
+ * waits for the next check. After a small number of attempts it stops retrying
+ * and is flagged"). Unlike upsertStopped this does NOT refresh stoppedAt or
+ * provide — a repeat refusal must not reset the "new since last looked" badge
+ * or clobber the model/window that enrolled it.
+ * @param {object} input
+ * @param {string} input.conversation
+ * @param {object} [deps]
+ */
+export async function bumpStoppedAttempts({ conversation }, { load = loadStoppedState, save = saveStoppedState, publish } = {}) {
+  if (!conversation) return;
+  const state = load();
+  const idx = indexOfRecord(state, conversation);
+  if (idx === -1) return;
+  state.records[idx] = { ...state.records[idx], attempts: (state.records[idx].attempts ?? 0) + 1 };
+  await save(state);
+  publish?.({ kind: "usage-stopped.updated", payload: { conversation } });
+}
+
+/**
  * Stamp the list-level "last looked" timestamp (set when the modal closes).
  * @param {object} [input]
  * @param {number} [input.now]

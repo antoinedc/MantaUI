@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { MotionConfig } from "framer-motion";
-import { Bell, Send, Terminal as TerminalIcon, type LucideIcon } from "lucide-react";
+import { Bell, Terminal as TerminalIcon, type LucideIcon } from "lucide-react";
 import { Sidebar, type SidebarHandle } from "./Sidebar";
 import { Terminal } from "./Terminal";
 import { ChatPanel } from "./ChatPanel";
@@ -24,11 +24,10 @@ import {
   resolveLauncherFlags,
 } from "./chatShared";
 import type { SyncPayload } from "../shared/api";
-import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, pruneVisitedSessions, registerMountedTerminal, shouldResyncWindowsForJobs, dispatchAppControl, formatResetAt, formatResetDistance, type AppControlHandlers, type MountedTerminal } from "./chatUtils";
+import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, pruneVisitedSessions, registerMountedTerminal, shouldResyncWindowsForJobs, dispatchAppControl, formatResetAt, type AppControlHandlers, type MountedTerminal } from "./chatUtils";
 import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
 import { UpdateBar } from "./UpdateBar";
 import { ConfirmModal } from "./ConfirmModal";
-import { Callout } from "./Callout";
 import { ReconnectingBanner } from "./ReconnectingBanner";
 import { pickBanner, type BannerState } from "./bannerPriority";
 import { parsePairPayload } from "../shared/pairPayload";
@@ -41,7 +40,6 @@ import {
   buildUsageLevels,
   buildWarnMessage,
   shouldFireUsageAlert,
-  shouldWarnStaleCache,
   type UsageAlertLevel,
 } from "./usageEscalation";
 
@@ -425,14 +423,6 @@ function Shell() {
   // ---- Subscription usage escalation (BET-739) ----
   // Fire-once level map (per `provider:window.kind`); see usageEscalation.ts.
   const usageLevelsRef = useRef<Record<string, UsageAlertLevel>>({});
-  // "Keep going at reset" confirm-modal payload. null = closed.
-  const [keepGoing, setKeepGoing] = useState<{
-    providerLabel: string;
-    windowLabel: string;
-    fireAt: number;
-    sessionID: string;
-  } | null>(null);
-  const cacheTtl = useStore((s) => s.cacheTtl);
 
   // Pull the box's CACHED usage snapshots. This is an in-memory read on the box
   // (no provider request), which is why it is safe to call on every reconnect.
@@ -638,6 +628,12 @@ function Shell() {
   const pushAppToastStore = useStore((s) => s.pushAppToast);
   const dismissAppToastStore = useStore((s) => s.dismissAppToast);
 
+  // The ONE remaining use of this offset is the "Remind me at reset" NOTIFY
+  // action below, which spec §9 explicitly keeps unchanged. The old
+  // "Keep going at reset" continuation path (which used this same helper as
+  // its fixed reset+60s fire instant) is DELETED — resuming an armed
+  // conversation is now entirely the box-side usage-resume engine's job, and
+  // nothing fires a resume at a fixed reset offset any more.
   const fireAtFor = (resetsAt: number | undefined): number | null =>
     resetsAt != null ? resetsAt + 60_000 : null;
 
@@ -666,37 +662,6 @@ function Shell() {
     },
     [],
   );
-
-  const confirmKeepGoing = useCallback(async () => {
-    if (!keepGoing) return;
-    const { fireAt, sessionID, providerLabel: pLabel, windowLabel } = keepGoing;
-    const res = await scheduleAtReset({
-      kind: "prompt",
-      prompt: "Keep going",
-      label: `Keep going: ${pLabel} ${windowLabel} reset`,
-      fireAt,
-      sessionID,
-    });
-    setKeepGoing(null);
-    pushAppToastStore(
-      res.ok && res.job
-        ? {
-            message: toastLine(Send, `“Keep going” will be sent ${formatResetAt(fireAt, Date.now())}.`),
-            actions: [
-              {
-                label: "Undo",
-                onClick: () => {
-                  if (res.job?.id) void window.api.scheduleDelete(res.job.id);
-                },
-              },
-            ],
-          }
-        : {
-            tone: "error",
-            message: `Couldn't schedule “Keep going”: ${res.error ?? "unknown error"}`,
-          },
-    );
-  }, [keepGoing, scheduleAtReset, pushAppToastStore]);
 
   useEffect(() => {
     if (!window.api.onUsageUpdated) return;
@@ -754,18 +719,6 @@ function Shell() {
                           });
                         }
                       })();
-                    },
-                  },
-                  {
-                    label: "Keep going at reset",
-                    onClick: () => {
-                      if (fireAt == null || !sessionID) return;
-                      setKeepGoing({
-                        providerLabel: label,
-                        windowLabel,
-                        fireAt,
-                        sessionID,
-                      });
                     },
                   },
                 ]
@@ -1781,34 +1734,6 @@ function Shell() {
         }}
         onCancel={() => setConfirmServerUpdate(false)}
       />
-
-      {/* Keep going at reset — BET-739 usage escalation confirm. Rendered at
-          App level (like the toasts) so it works over any pane. */}
-      {keepGoing && (
-        <ConfirmModal
-          open
-          title="Send an automatic message at reset?"
-          confirmLabel="Schedule it"
-          confirmTone="primary"
-          body={
-            <>
-              At {formatResetAt(keepGoing.fireAt, Date.now())} MantaUI will send “Keep going” to this
-              session on your behalf and the agent will resume unattended. You can cancel it any
-              time from ⏰ scheduled tasks.
-              {shouldWarnStaleCache(keepGoing.fireAt, Date.now(), cacheTtl) && (
-                <Callout tone="warn">
-                  The reset is {formatResetDistance(keepGoing.fireAt - Date.now())} away — well past
-                  your {cacheTtl === "5m" ? "5 minute" : "1 hour"} prompt-cache window. The whole
-                  conversation will be re-sent and re-billed as fresh input, which costs significantly
-                  more than a reply now.
-                </Callout>
-              )}
-            </>
-          }
-          onConfirm={() => void confirmKeepGoing()}
-          onCancel={() => setKeepGoing(null)}
-        />
-      )}
     </div>
   );
 }

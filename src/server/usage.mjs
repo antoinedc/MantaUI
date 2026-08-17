@@ -95,6 +95,18 @@ export function adapterForProviderID(providerID) {
   return ADAPTERS.find((a) => Array.isArray(a.providerIDs) && a.providerIDs.includes(providerID))?.id ?? null;
 }
 
+// The reverse mapping: usage adapter id ("claude" | "codex" | "kimi") -> the
+// opencode providerID it covers. The resume engine needs this to send a "Keep
+// going" continuation on the pinned model: the stopped record stores the model
+// by its usage ADAPTER id, but opencode's prompt injector keys the model
+// override by opencode providerID + modelID, and the two namespaces differ on
+// purpose (see adapterForProviderID). Each adapter covers exactly one opencode
+// providerID today. Returns null for an unlisted adapter (out of scope).
+export function providerIDForAdapter(adapterId) {
+  if (typeof adapterId !== "string") return null;
+  return ADAPTERS.find((a) => a.id === adapterId && Array.isArray(a.providerIDs) && a.providerIDs.length > 0)?.providerIDs[0] ?? null;
+}
+
 // Re-check ONE adapter's usage immediately (spec §4, signal 2), reusing the
 // existing adapter fetch rather than writing a second fetch. Returns true when
 // that provider is currently at its limit. Best-effort: a missing credential,
@@ -376,6 +388,11 @@ export function startUsagePoller(bus, { intervalMs = POLL_MS } = {}) {
       poller.stop();
       if (activePoller === poller) activePoller = null;
     },
+    // The resume engine reuses THIS poller to force one immediate re-check at
+    // a provider's expected reset instant (BET-1048) instead of running a
+    // second polling loop. Exposing the underlying tick lets a caller
+    // re-fetch usage on demand; the engine is the only caller today.
+    tick: () => poller.tick(),
   };
 }
 

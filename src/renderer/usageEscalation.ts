@@ -21,7 +21,7 @@
 // the exact strings the spec dictates.
 
 import type { UsageSnapshot, UsageWindow } from "../shared/types";
-import { formatWindowReset, selectCacheTtlMs } from "./chatUtils";
+import { formatWindowReset } from "./chatUtils";
 
 /** >=90 = warn, >=100 = limit; anything below 90 is "none". */
 export type UsageAlertLevel = "none" | "warn" | "limit";
@@ -91,20 +91,6 @@ export function shouldFireUsageAlert(
     }
   }
   return fired;
-}
-
-/**
- * "Shall the 'keep going' modal show the amber stale-cache warning?" True when
- * the reset is beyond the configured prompt-cache window — exactly when the
- * cached prefix will have expired and the next turn re-bills the whole
- * conversation as fresh input. Reuses selectCacheTtlMs (do not re-derive).
- */
-export function shouldWarnStaleCache(
-  fireAt: number,
-  now: number,
-  cacheTtl: "5m" | "1h",
-): boolean {
-  return fireAt - now > selectCacheTtlMs(cacheTtl);
 }
 
 /**
