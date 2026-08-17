@@ -556,71 +556,71 @@ re-titles work — the session title is first-name-only and never updates).
 
 ## Web Push notifications (`src/server/push.mjs`)
 
-Mobile PWA gets Web Push (VAPID) for events it can't otherwise see when
-backgrounded: `permission.asked`, `question.asked`, `session.error` (always),
-and `session.idle` → "done" (only if the session was busy AND not being
-watched). The **server** decides whether to surface a push (iOS revokes the
-subscription if a delivered push shows no notification), so suppression logic
-lives in `classifyPushEvent` / `firePush`, not the service worker
-(`src/renderer/public/sw.js` → copied to `mobile/www/sw.js` by `build:mobile`).
+Mobile gets native push (APNs via the gateway) for events it can't otherwise
+see when backgrounded: `permission.asked`, `question.asked`, `session.error`
+(always), and `session.idle` → "done" (only if the session was busy AND not
+being watched). The **server** decides whether to surface a notification, so
+suppression logic lives in `classifyPushEvent` / `firePush`.
 
 - **EVERY notification title is the session's `workspace / session-name`**
   (tmux session / window name), resolved by `firePush` via
   `buildSessionLabel(projects, sid)` over `tmux.listProjects()`. The lookup
   runs for the four notifying types only (`permission.asked`, `question.asked`,
-  `session.error`, `session.idle`) — never for the streaming-event firehose —
-  so we don't pay a tmux query per event. The kind-specific context moves to
-  the BODY (e.g. `Permission needed — …`, `Error — <msg>`, `<header> — <q>`),
-  and each kind falls back to its old descriptive title (`Claude is done`,
-  `Claude hit an error`, …) when the session isn't found in tmux. `classify
-  PushEvent`'s `titleOr(fallback)` helper centralizes this. The "from MantaUI"
-  subtitle under the notification is **iOS injecting the PWA name** — not in
-  our payload, not removable via the Push API.
+  `session.error`, `session.idle`) — never for the streaming-event firehose.
+  The kind-specific context moves to the BODY, and each kind falls back to its
+  old descriptive title when the session isn't found in tmux.
 
-- **Multi-device suppression (Discord rule: active on desktop ⇒ no mobile
-  push).** The desktop Electron app POSTs `/push/desktop-presence {visible}`
-  direct HTTPS to manta-server (`<serverUrl>/push/desktop-presence` with
-  `Authorization: Bearer <boxToken>`). No SSH forward — the server IS the box.
-  Implementation in `src/main/desktopPresence.ts` (`startDesktopPresence`,
-  `sendHeartbeatHttp`).
-  - **ACTIVE = window focused AND recent input — NOT focus alone.**
-    `desktopPresence.ts` gates `visible:true` on
-    `powerMonitor.getSystemIdleTime() < IDLE_ACTIVE_THRESHOLD_S` (30s) in
-    addition to window focus. This is THE fix for "no mobile pushes ever":
-    picking up your phone does **not** blur the desktop window (macOS only
-    fires `browser-window-blur` when another *Mac* app takes focus), so a
-    focus-only signal reports `visible:true` forever and permanently mutes
-    mobile. Idle-gating mirrors Slack/Discord "away" detection. A 10s poll
-    re-evaluates + heartbeats; blur/lock/suspend force an immediate
-    `visible:false`. **Do NOT regress to focus-only presence.**
-  - The server tracks `_desktop = {visible, lastSeen, lastActive}` and ONLY
-    the "done" push is gated by `shouldSuppressForDesktop(desktop, now)`
-    (pure, tested): suppress if desktop is currently `visible`, OR was visible
-    within `DESKTOP_GRACE_MS` (30s) — a quick window-switch shouldn't buzz the
-    phone — but NOT if `lastSeen` is stale past `DESKTOP_PRESENCE_TTL_MS`
-    (60s), so a crashed/asleep/idle desktop can't mute mobile forever.
-  - permission/question/error pushes are blocking and fire on every device
-    regardless (mirrors Slack/Discord still escalating mentions/DMs). Presence
-    is best-effort: if the mobile server is down or the forward isn't up, the
-    POST fails silently and mobile behaves as before (always notifies).
+- **One notification per event (BET-1044).** Each opencode event arrives on
+  BOTH the global stream and the per-directory scoped one. `firePush` drops an
+  event whose id it has already seen via the shared `createSeenIdFilter`
+  (`src/server/seenIds.mjs`, the same filter `streamInterp.mjs` uses), so a
+  `session.error` notifies once, not twice.
+
+- **Cross-device routing = desktop presence + mobile focus (Discord rule).**
+  The desktop Electron app POSTs `/push/desktop-presence` direct HTTPS to
+  manta-server (`<serverUrl>/push/desktop-presence`, `Authorization: Bearer
+  <boxToken>`) every 30s, forever, while it runs. It reports raw observations
+  only — `{idleSeconds, lockedSeconds}` — with **all policy on the server**:
+  - **`desktopPresence.ts` only measures.** `idleSeconds` is system-wide input
+    idle (`powerMonitor.getSystemIdleTime()`); `lockedSeconds` is how long the
+    screen has been locked (null when unlocked). Window **focus is NOT an
+    input** — Manta's normal pattern is to start a turn then work in another
+    app on the same Mac, and a focus-based rule would call that "away" and buzz
+    the phone while the user sits in front of the machine. System-wide input
+    idle correctly reports "present" there (Slack/Teams measure system input,
+    not their own window's focus). Reporting forever also means "app open but
+    user idle" is never mistaken for "app quit" — the server's TTL notices a
+    real quit within ~90s.
+  - **The server turns those into ONE away instant.** `computeAwayAt` merges
+    the idle threshold (`IDLE_AWAY_MS` = 10 min) and the lock threshold
+    (`LOCK_AWAY_MS` = 5 min) into a single epoch instant with `min()` — the two
+    are one calculation, **not two timers**, so a machine that locks after 2
+    minutes crosses at lock+5min and the idle+10min rule doesn't fire
+    separately. `desktopState` then answers present / away / gone: *gone* = no
+    heartbeat within `PRESENCE_TTL_MS` (90s), *away* = past `awayAt`, *present*
+    = otherwise.
+  - The informational-tier router: `present` → desktop now + **defer** the
+    mobile push (parked until the user leaves the desk or the notification goes
+    stale at 30 min — never delivered to a phone in the user's hand); `away` →
+    desktop now + mobile now (the Mac is open, so the desktop notification is
+    there on return); `gone` → mobile only. The old flat 90s escalation timer is
+    replaced by one parked list + one 30s poller (`flushDeferredMobile` /
+    `startDeferredMobilePoller`), re-evaluated against the live `awayAt` — no
+    rescheduling as that instant moves. A lower incoming `idleSeconds` heartbeat
+    means "the user came back" and cancels all parked mobile pushes; a session
+    resuming / its ask being answered cancels by session. Invariant: the phone
+    receives at most ONE delivery per notification.
+  - **Blocking tier (permission/question/error/urgent notify) is unchanged:**
+    both devices immediately, mobile suppressed only when the phone is
+    foregrounded on that same session. Do not touch it.
   - **EXCEPTION — `MessageAbortedError` never pushes.** `classifyPushEvent`'s
-    `session.error` branch reads `properties.error.name` and returns `null`
-    for `MessageAbortedError`. An abort is intentional, not a failure: it
-    fires on both an explicit user abort AND the mid-flight queued-message
-    DRAIN (user submits while running → MantaUI aborts the in-flight turn and
-    resubmits the queued prompt transparently; see the "Queued message drain"
-    pattern). The renderer already swallows this error's banner via
-    `isDrainAbortError`, but that suppression is **renderer-only** — the push
-    pump runs server-side and has zero visibility into `drainAbortRef`. Before
-    this check every drain fired a spurious "Error — The turn failed." push on
-    mobile. Do NOT regress: the name-check is the server's only signal (the
-    abort POST is unmarked and `drainAbortRef` never leaves the browser).
-    Regression test: `session.error MessageAbortedError → NO push` in
-    `src/server/push.test.mjs`.
-  - Observability: the server logs `[push] desktop-presence visible=…` on each
-    heartbeat and `[push] done sid=… suppressForDesktop=… desktop={…}` on every
-    "done" decision (`journalctl --user -u manta-server`). Without these the
-    suppression decision is undiagnosable — keep them.
+    `session.error` branch returns `null` for `MessageAbortedError` (user abort
+    or the queued-message drain). Do NOT regress: the name-check is the server's
+    only signal. Regression test in `src/server/push.test.mjs`.
+  - Observability: the server logs `[push] desktop-presence idle=…s locked=…`
+    on each heartbeat and `[push] route kind=… sid=… → desktop=… mobileNow=…
+    deferMobile=…` on every decision — the load-bearing way to diagnose routing
+    in production. Keep them.
 
 ## Scheduled prompts — MantaUI-native AI tool (`src/server/schedule.mjs`)
 
@@ -853,14 +853,21 @@ routing matrix + scenarios in `docs/manta-tools-notify.md`. Key facts:
   (permission/question/error, or `notify` with `urgent:true`) → every device
   now, no delay. **informational** ("done", normal `notify`) → desktop-first
   ladder.
-- **Escalation = desktop-first, then mobile.** `ESCALATE_MS = 90_000`. When
-  desktop is **idle/away** (heartbeat fresh but `visible:false`) for an
-  informational notif: emit desktop now, schedule a mobile push 90s later keyed
-  by `tag`. Cancel on: desktop becomes **active** (`setDesktopPresence
-  visible:true` → `cancelAllEscalations`), the session resumes / its ask is
-  answered (`cancelEscalationsForSession` from the busy/reply branches in
-  `firePush`), or a same-`tag` re-notify supersedes. Desktop **gone** (TTL
-  lapsed) → mobile immediately (no desktop leg).
+- **Cross-device routing (desktop-first, then deferred mobile).** The desktop
+  reports raw observations (idle + lock) every 30s; the server merges the idle
+  (10 min) and lock (5 min) thresholds into ONE away instant via `computeAwayAt`
+  (a single `min()`, not two timers) and classifies `desktopState` as
+  present/away/gone (`PRESENCE_TTL_MS` = 90s). Informational tier: `present` →
+  desktop now + **defer** mobile (parked in `_deferredMobile`, delivered on a
+  30s `flushDeferredMobile` poll once away/gone, dropped stale after 30 min);
+  `away` → desktop now + mobile now; `gone` → mobile only. **Cancel** the parked
+  push when: a heartbeat reports lower `idleSeconds` (`setDesktopPresence` →
+  `cancelAllDeferredMobile`), the session resumes / its ask is answered
+  (`cancelDeferredMobileForSession` from the busy/reply branches in `firePush`),
+  or a same-`tag` re-notify supersedes. The phone receives at most ONE delivery
+  per notification.
+- **Blocking tier is unchanged:** both devices immediately, mobile suppressed
+  only when the phone is foregrounded on that same session.
 - **The `notify` tool** (`docs/opencode-tools/notify.ts`, COPIED to
   `~/.config/opencode/tools/`, restart `opencode-serve`) is a thin registrar →
   `POST /api/notify {message, title?, urgent?, sessionID}` → `fireNotify`.
@@ -868,9 +875,9 @@ routing matrix + scenarios in `docs/manta-tools-notify.md`. Key facts:
   (`tag:"notify-<sid>"`). The model does NOT pick the device — the router does.
 - **No UI card (v1).** No `notify:*` window.api channels — it's AI-facing +
   server-routed. DND/quiet-hours deferred to v2.
-- Tests: `src/server/push.test.mjs` — `routeNotification` matrix (active /
-  idle / gone × blocking / informational), `notifTier`, and escalation
-  schedule/cancel/supersede (11 new, 41 total). Pure logic only.
+- Tests: `src/server/push.test.mjs` — `routeNotification` matrix (present /
+  away / gone × blocking / informational), `computeAwayAt`/`desktopState`, and
+  deferred flush/cancel/supersede. Pure logic only.
 
 ## Secrets — MantaUI-native AI tool (`src/server/secrets.mjs`)
 

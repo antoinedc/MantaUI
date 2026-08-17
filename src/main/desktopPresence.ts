@@ -1,58 +1,59 @@
-// desktopPresence.ts — report "the user is active on desktop" to the mobile
-// server so it can suppress redundant mobile "done" pushes (Discord's
-// "active on desktop ⇒ no mobile push" rule).
+// desktopPresence.ts — report the user's raw system state to the mobile server
+// so it can decide when to push to the phone (and when not to).
+//
+// All policy lives on the server side now (computeAwayAt / desktopState in
+// src/server/push.mjs). This file only measures and reports:
+//   - idleSeconds:  system-wide input idle time (any keyboard/mouse input on
+//                    the machine, in any application)
+//   - lockedSeconds: how long the screen has been locked (or null when unlocked)
+//
+// and it does so EVERY 30s while the app runs, unconditionally. Reporting
+// forever is the point: "app open but user idle" must never be
+// indistinguishable from "app quit" — the server's presence TTL notices a quit
+// within ~90s, and the idle/lock measurements let it decide "away" itself.
 //
 // Transport: direct HTTPS POST to `${serverUrl}/push/desktop-presence` with
 // `Authorization: Bearer <boxToken>`. No SSH forward needed — the server IS the
 // box. If the server isn't running, the POST simply fails and we swallow it —
 // presence is a nice-to-have, never load-bearing.
 //
-// ACTIVE = (a manta window is focused) AND (the user actually touched the
-// keyboard/mouse recently). Window focus ALONE is not enough: picking up your
-// phone does NOT blur the desktop window (macOS only fires blur when another
-// *Mac* app takes focus), so a focus-only signal would keep reporting "active"
-// forever and permanently mute mobile. We therefore gate on
-// powerMonitor.getSystemIdleTime() — exactly how Slack/Discord treat "away":
-// no input for a while ⇒ not actually at the desktop, let mobile notify.
-//
-// We poll every POLL_MS and report:
-//   - visible:true  while focused AND idleTime < IDLE_ACTIVE_THRESHOLD_S
-//   - visible:false otherwise (blurred, OR focused-but-idle = you walked away)
-// plus immediate visible:false on blur / lock / suspend, and a re-evaluate on
-// unlock / resume. The poll doubles as the heartbeat that keeps the server's
-// lastSeen fresh (TTL) while active, and lets it lapse once you go idle.
+// Window focus is deliberately NOT an input. Manta's normal working pattern is:
+// start a turn, then work in another app on the same Mac while it runs. A
+// focus-based rule would call that "away" and buzz the phone while the user is
+// sitting in front of the machine — the exact spam this replaced. System-wide
+// input idle correctly reports "present" in that case (Slack and Teams both
+// measure system input, not their own window's focus).
 
-import { app, BrowserWindow, powerMonitor } from "electron";
+import { powerMonitor } from "electron";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import type { AppConfig } from "../shared/types.js";
 
-// How often to re-evaluate active-state and refresh the server's lastSeen.
-// Must be comfortably under the server's DESKTOP_PRESENCE_TTL_MS (60s).
-const POLL_MS = 10_000;
-
-// No keyboard/mouse input for this long ⇒ treat the desktop as "away" even if a
-// manta window is still the frontmost Mac window. Tuned so glancing at your phone
-// for a moment doesn't immediately flip you away, but actually setting the Mac
-// down does. Combined with the server's 30s grace window, the effective
-// hand-off is ~IDLE_ACTIVE_THRESHOLD_S + 30s.
-const IDLE_ACTIVE_THRESHOLD_S = 30;
+// How often to report raw presence observations. Must stay comfortably under
+// the server's PRESENCE_TTL_MS (90s) so a missed beat doesn't read as "gone".
+const POLL_MS = 30_000;
 
 let getConfig: (() => AppConfig) | null = null;
 let pollTimer: NodeJS.Timeout | null = null;
 let started = false;
-let lastReported: boolean | null = null;
+// Epoch-ms when the screen locked or the machine suspended; null when unlocked.
+// Recorded here so a lock→heartbeat reflects the total time locked even between
+// unlock edges, and cleared so an unlocked state reports lockedSeconds: null.
+let lockedAt: number | null = null;
 
-function postPresence(visible: boolean): void {
+function postPresence(idleSeconds: number, lockedSeconds: number | null): void {
   const cfg = getConfig?.();
   if (!cfg) return;
-  sendHeartbeatHttp(cfg, visible);
+  sendHeartbeatHttp(cfg, { idleSeconds, lockedSeconds });
 }
 
-function sendHeartbeatHttp(cfg: AppConfig, visible: boolean): void {
+function sendHeartbeatHttp(
+  cfg: AppConfig,
+  body: { idleSeconds: number; lockedSeconds: number | null },
+): void {
   const serverUrl = (cfg.serverUrl || "").replace(/\/+$/, "");
   if (!serverUrl) return;
-  const body = JSON.stringify({ visible });
+  const payload = JSON.stringify(body);
   const url = new URL("/push/desktop-presence", serverUrl);
   const doRequest = url.protocol === "https:" ? httpsRequest : httpRequest;
   const req = doRequest(
@@ -63,7 +64,7 @@ function sendHeartbeatHttp(cfg: AppConfig, visible: boolean): void {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "content-length": Buffer.byteLength(body),
+        "content-length": Buffer.byteLength(payload),
         ...(cfg.boxToken ? { authorization: `Bearer ${cfg.boxToken}` } : {}),
       },
       timeout: 4000,
@@ -75,48 +76,30 @@ function sendHeartbeatHttp(cfg: AppConfig, visible: boolean): void {
   );
   req.on("error", () => {});
   req.on("timeout", () => req.destroy());
-  req.write(body);
+  req.write(payload);
   req.end();
 }
 
-function anyWindowFocused(): boolean {
-  return BrowserWindow.getAllWindows().some(
-    (w) => w.isFocused() && w.isVisible(),
-  );
-}
-
-// True when the user is genuinely working at the desktop right now: a manta
-// window is frontmost AND there's been recent keyboard/mouse input.
-function isDesktopActive(): boolean {
-  if (!anyWindowFocused()) return false;
+// System-wide input idle seconds. On throw (some Linux setups lack an idle
+// backend) report 0 — treat an unavailable idle backend as "user is present",
+// the conservative choice, and it preserves the old fallback intent.
+function currentIdleSeconds(): number {
   try {
-    return powerMonitor.getSystemIdleTime() < IDLE_ACTIVE_THRESHOLD_S;
+    return powerMonitor.getSystemIdleTime();
   } catch {
-    // getSystemIdleTime can throw on some Linux setups without an idle backend;
-    // fall back to focus alone there.
-    return true;
+    return 0;
   }
 }
 
-// Always POST while active (heartbeat keeps lastSeen fresh); when inactive,
-// POST only on the active→inactive edge (one clean visible:false), then go
-// quiet so the server's grace+TTL windows can lapse and mobile resumes.
-function evaluateAndReport(): void {
-  const active = isDesktopActive();
-  if (active) {
-    lastReported = true;
-    postPresence(true);
-  } else if (lastReported !== false) {
-    lastReported = false;
-    postPresence(false);
-  }
+function currentLockedSeconds(): number | null {
+  if (lockedAt == null) return null;
+  return (Date.now() - lockedAt) / 1000;
 }
 
-// Force an immediate visible:false (blur / lock / suspend) without waiting for
-// the next poll — promptly un-mutes mobile.
-function reportInactiveNow(): void {
-  lastReported = false;
-  postPresence(false);
+// Report raw observations, unconditionally. All away/present/gone policy is the
+// server's (computeAwayAt / desktopState in push.mjs).
+function report(): void {
+  postPresence(currentIdleSeconds(), currentLockedSeconds());
 }
 
 /**
@@ -128,23 +111,33 @@ export function startDesktopPresence(configGetter: () => AppConfig): void {
   started = true;
   getConfig = configGetter;
 
-  // Focus change → re-evaluate immediately (don't wait up to POLL_MS).
-  app.on("browser-window-focus", () => evaluateAndReport());
-  app.on("browser-window-blur", () => {
-    if (!anyWindowFocused()) reportInactiveNow();
+  // Lock / suspend are PROOF the user left — record the instant and report
+  // immediately so the server's lock-based away calculation starts from
+  // (roughly) the lock, not the next poll.
+  powerMonitor.on("lock-screen", () => {
+    if (lockedAt == null) lockedAt = Date.now();
+    report();
+  });
+  powerMonitor.on("suspend", () => {
+    if (lockedAt == null) lockedAt = Date.now();
+    report();
+  });
+  // Unlock / resume → clear the lock timestamp and report immediately.
+  powerMonitor.on("unlock-screen", () => {
+    lockedAt = null;
+    report();
+  });
+  powerMonitor.on("resume", () => {
+    lockedAt = null;
+    report();
   });
 
-  // System idle / lock / sleep → definitely away.
-  powerMonitor.on("lock-screen", () => reportInactiveNow());
-  powerMonitor.on("suspend", () => reportInactiveNow());
-  // Coming back → re-evaluate from the real focus + idle state.
-  powerMonitor.on("unlock-screen", () => evaluateAndReport());
-  powerMonitor.on("resume", () => evaluateAndReport());
-
-  // Initial state + periodic re-evaluation / heartbeat.
-  evaluateAndReport();
+  // Initial heartbeat + periodic raw reporting. Fires unconditionally —
+  // never goes quiet while the app runs, so a quit (not an idle) is the only
+  // thing that starves the server's TTL.
+  report();
   if (pollTimer) clearInterval(pollTimer);
-  pollTimer = setInterval(evaluateAndReport, POLL_MS);
+  pollTimer = setInterval(report, POLL_MS);
   if (pollTimer.unref) pollTimer.unref();
 }
 
@@ -152,6 +145,6 @@ export function stopDesktopPresence(): void {
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = null;
   started = false;
-  // Best-effort: tell the box we're gone so mobile pushes resume promptly.
-  if (lastReported !== false) reportInactiveNow();
+  // On quit the heartbeat simply stops and the server's PRESENCE_TTL_MS notices
+  // within ~90s — that is the intended "gone" path, not a regression.
 }
