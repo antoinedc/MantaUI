@@ -148,6 +148,13 @@ struct QueuedPrompt: Equatable {
 final class ChatSessionStore: ObservableObject {
 
     @Published private(set) var transcript: [TranscriptBlock] = []
+    /// The LAST fetched raw transcript (`opencode:messages`), kept alongside the
+    /// rendered `transcript` blocks so the plan card can run its exact
+    /// derivation (`isPlanExitQuestion` / `extractPlanData` need the raw tool
+    /// parts — callID, state.input, patch files — which the blocks discard).
+    /// Replaced wholesale on each fetch (loadEarlier refetches a larger tail,
+    /// so `messages` is always a superset of prior values, never a stale mix).
+    @Published private(set) var messages: [OpencodeMessage] = []
     @Published private(set) var inProgressText = ""
     @Published private(set) var blocks: [TranscriptBlock] = []
     /// The same transcript as `blocks`, but wrapped in `TranscriptRow` with a
@@ -719,6 +726,7 @@ final class ChatSessionStore: ObservableObject {
                 // failed fetch says nothing either way — leave it alone.
                 if !didFail { hasEarlier = loaded.count >= limit }
                 if !didFail || isFirstLoad {
+                    messages = loaded
                     transcript = ChatTranscriptMapper.blocks(from: loaded)
                     // The transcript now carries these messages, so any live
                     // copy of them is a duplicate — retire it BEFORE rebuilding
@@ -810,6 +818,42 @@ final class ChatSessionStore: ObservableObject {
                 if !questions.contains(where: { $0.id == request.id }) {
                     questions.append(request)
                 }
+            }
+        }
+    }
+
+    // MARK: - Plan card (BET-1026)
+
+    /// The plan card's "Build here": answer the plan_exit question "Yes" (so
+    /// opencode switches to the build agent), then re-send the plan text
+    /// OURSELVES with the BUILD model and no agent.
+    ///
+    /// The re-send is necessary, not a convenience: opencode's own "yes" would
+    /// stamp the injected build turn with the last user message's — i.e. the
+    /// PLANNING — model. Re-sending explicitly with `buildModel` (nil = let
+    /// opencode pick) is what makes the follow-up turn run on the build model.
+    /// Ported from `ChatPanel.tsx` `buildHere` (lines 2505-2529): the caller
+    /// has already flipped the local plan state off (through the model store,
+    /// which re-reads the build model), so `buildModel` is the session's build
+    /// model.
+    func buildHere(question: QuestionRequest, planText: String, buildModel: SendPromptInput.Model?) {
+        replyQuestion(question, answers: [["Yes"]])
+        Task {
+            await send(text: planText, attachments: [], model: buildModel, agent: nil)
+        }
+    }
+
+    /// The plan card's "Keep planning": answer the plan_exit question "No"
+    /// (which REJECTS plan_exit, leaving plan mode on by design). If the user
+    /// asked for a change, hand that back to the plan agent so it refines the
+    /// plan (still in plan mode — no edits). Ported from `ChatPanel.tsx`
+    /// `keepPlanning` (lines 2531-2548).
+    func keepPlanning(question: QuestionRequest, feedback: String) {
+        replyQuestion(question, answers: [["No"]])
+        let trimmed = feedback.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            Task {
+                await send(text: trimmed, attachments: [], model: nil, agent: "plan")
             }
         }
     }
