@@ -216,6 +216,126 @@ final class ChatTranscriptTests: XCTestCase {
                      "no state.metadata.sessionId means the child screen shows the empty state")
     }
 
+    // MARK: - Live subagent cards (BET-1085)
+    //
+    // The box publishes a `stream/subagent` frame per subagent while it runs,
+    // and the chat screen builds a live `.subagent` card from it — so the card
+    // appears immediately instead of only after the subagent finishes. These
+    // pin the running case that the completed-by-default fixtures below never
+    // exercised.
+
+    private func runningPayload(_ childSessionId: String = "ses_child") -> StreamSubagentPayload {
+        StreamSubagentPayload(
+            childSessionId: childSessionId,
+            agent: nil,
+            description: nil,
+            prompt: nil,
+            status: "running",
+            title: "unblock sweep",
+            output: nil,
+            truncated: nil,
+            durationMs: 1200,
+            runningCount: nil,
+            model: nil
+        )
+    }
+
+    /// A `task` part inside a still-in-flight assistant message (`time.completed
+    /// == nil`) yields no `.subagent` row from the canonical mapper. Pins the
+    /// skip at ChatModels.swift:267 as intentional — the live card is the only
+    /// in-flight surface, and un-skipping would render every streaming answer
+    /// twice.
+    func testTaskPartInFlightMessageProducesNoCanonicalSubagent() {
+        let msgs = [message(id: "m1", role: "assistant", parts: [
+            taskPart("t1", "m1", childID: "ses_child", title: "sweep", status: "running"),
+        ], completed: false)]
+        let blocks = ChatTranscriptMapper.blocks(from: msgs)
+        XCTAssertTrue(blocks.isEmpty,
+                      "an in-flight assistant message must not emit a canonical subagent row")
+    }
+
+    func testLiveSubagentAppendsRunningCard() {
+        let blocks = ChatTranscriptMapper.appendingLive(tools: [], subagents: [runningPayload()], to: [])
+        guard case .steps(.rows(let rows)) = blocks.last, rows.count == 1, case .subagent(let agent) = rows[0] else {
+            return XCTFail("expected exactly one live subagent row")
+        }
+        XCTAssertEqual(agent.taskName, "unblock sweep")
+        XCTAssertEqual(agent.childSessionId, "ses_child")
+        XCTAssertEqual(agent.status, .running)
+        XCTAssertEqual(agent.duration, "1.2s")
+    }
+
+    func testLiveSubagentCompletedIsNotAppended() {
+        let done = StreamSubagentPayload(
+            childSessionId: "ses_child", agent: nil, description: nil, prompt: nil,
+            status: "completed", title: "sweep", output: nil, truncated: nil,
+            durationMs: nil, runningCount: nil, model: nil
+        )
+        let blocks = ChatTranscriptMapper.appendingLive(tools: [], subagents: [done], to: [])
+        XCTAssertTrue(blocks.isEmpty,
+                      "a finished subagent belongs to the canonical transcript, not the live feed")
+    }
+
+    func testLiveSubagentDedupedAgainstCanonicalRow() {
+        let canonical = SubagentSession(taskName: "sweep", status: .running, duration: nil, transcript: [], childSessionId: "ses_child")
+        let blocks: [TranscriptBlock] = [.steps(.rows([.subagent(canonical)]))]
+        let merged = ChatTranscriptMapper.appendingLive(tools: [], subagents: [runningPayload()], to: blocks)
+        guard case .steps(.rows(let rows)) = merged[0] else {
+            return XCTFail("expected a steps group")
+        }
+        XCTAssertEqual(rows.count, 1,
+                       "a live card whose id the canonical transcript already owns must not be appended")
+    }
+
+    func testLiveTaskToolRowIsSuppressed() {
+        let task = LiveTool(idx: "t1", callID: "toolu_1", name: "task", presentationHint: "Find the skill", status: "running")
+        let taskBlocks = ChatTranscriptMapper.appendingLive(tools: [task], subagents: [], to: [])
+        XCTAssertTrue(taskBlocks.isEmpty,
+                      "the redundant task tool row must not render — the subagent frame owns the card")
+
+        let bash = LiveTool(idx: "t2", callID: "toolu_2", name: "bash", presentationHint: "run tests", status: "running")
+        let bashBlocks = ChatTranscriptMapper.appendingLive(tools: [bash], subagents: [], to: [])
+        guard case .steps(.rows(let rows)) = bashBlocks[0], rows.count == 1, case .step = rows[0] else {
+            return XCTFail("a non-task live tool must still append a step row")
+        }
+    }
+
+    func testSubagentIdIsUniquePerCallWithoutChildSession() {
+        func part(_ id: String, _ callID: String) -> OpencodePart {
+            let state: [String: JSONValue] = ["status": str("running"), "title": str("sweep")]
+            return OpencodePart(type: "tool", id: id, messageID: "m1", extra: [
+                "tool": str("task"),
+                "callID": str(callID),
+                "state": jsonObject(state),
+            ])
+        }
+        let a = ChatSubagentMapper.session(from: part("t1", "toolu_1"))
+        let b = ChatSubagentMapper.session(from: part("t2", "toolu_2"))
+        XCTAssertNotNil(a)
+        XCTAssertNotNil(b)
+        XCTAssertNil(a?.childSessionId)
+        XCTAssertNil(b?.childSessionId)
+        XCTAssertNotEqual(a?.id, b?.id,
+                          "two task parts with different call ids must not collide on the same row id")
+    }
+
+    func testSubagentEqualityTracksStatusAndDuration() {
+        let base = SubagentSession(taskName: "sweep", status: .running, duration: "1m12s", transcript: [])
+        let same = SubagentSession(taskName: "sweep", status: .running, duration: "1m12s", transcript: [])
+        XCTAssertEqual(base, same)
+
+        let differentStatus = SubagentSession(taskName: "sweep", status: .done, duration: "1m12s", transcript: [])
+        XCTAssertNotEqual(base, differentStatus, "a changed status is a change the diff must see")
+
+        let differentDuration = SubagentSession(taskName: "sweep", status: .running, duration: "2m01s", transcript: [])
+        XCTAssertNotEqual(base, differentDuration, "a changed duration is a change the diff must see")
+
+        // `transcript` is deliberately excluded from equality — it is content
+        // the destination screen reads, not something that defines the row.
+        let withTranscript = SubagentSession(taskName: "sweep", status: .running, duration: "1m12s", transcript: [.prose("x", at: nil)])
+        XCTAssertEqual(base, withTranscript, "equality must not depend on transcript content")
+    }
+
     /// Ownership moved to the child screen (BET-1024): a store constructed for
     /// a child session id is no longer placed in a parent-owned registry, so
     /// two screens opened on the same child id get two INDEPENDENT stores
@@ -506,7 +626,7 @@ final class ChatTranscriptTests: XCTestCase {
         ])]
         let blocks = ChatTranscriptMapper.blocks(from: canonical)
         let live = [LiveTool(idx: "t2", callID: "toolu_2", name: "read", presentationHint: "Read a.ts", status: "running")]
-        let merged = ChatTranscriptMapper.appendingLiveTools(live, to: blocks)
+        let merged = ChatTranscriptMapper.appendingLive(tools: live, subagents: [], to: blocks)
         guard case .steps(.rows(let rows)) = merged[0], rows.count == 2,
               case .step(let step) = rows[0], case .step(let liveStep) = rows[1] else {
             return XCTFail("expected both steps in one group")
@@ -526,7 +646,7 @@ final class ChatTranscriptTests: XCTestCase {
         ])]
         let blocks = ChatTranscriptMapper.blocks(from: canonical)
         let live = [LiveTool(idx: "t1", callID: "t1", name: "bash", presentationHint: nil, status: "running")]
-        let merged = ChatTranscriptMapper.appendingLiveTools(live, to: blocks)
+        let merged = ChatTranscriptMapper.appendingLive(tools: live, subagents: [], to: blocks)
         guard case .steps(.rows(let rows)) = merged[0] else {
             return XCTFail("expected a steps group")
         }
@@ -536,15 +656,15 @@ final class ChatTranscriptTests: XCTestCase {
     func testLiveToolCreatesGroupWhenNoStepsExist() {
         let blocks = ChatTranscriptMapper.blocks(from: [])
         let live = [LiveTool(idx: "t1", callID: "toolu_1", name: "bash", presentationHint: nil, status: "running")]
-        let merged = ChatTranscriptMapper.appendingLiveTools(live, to: blocks)
+        let merged = ChatTranscriptMapper.appendingLive(tools: live, subagents: [], to: blocks)
         guard case .steps(.rows(let rows)) = merged.last else {
             return XCTFail("expected a steps group to be created at the tail")
         }
         XCTAssertEqual(rows.count, 1)
     }
 
-    func testAppendingLiveToolsIsANoOpWhenEmpty() {
+    func testAppendingLiveIsANoOpWhenNothingToAppend() {
         let blocks = ChatTranscriptMapper.blocks(from: [])
-        XCTAssertTrue(ChatTranscriptMapper.appendingLiveTools([], to: blocks).isEmpty)
+        XCTAssertTrue(ChatTranscriptMapper.appendingLive(tools: [], subagents: [], to: blocks).isEmpty)
     }
 }

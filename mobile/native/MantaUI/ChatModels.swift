@@ -175,12 +175,47 @@ enum ChatSubagentMapper {
             duration = nil
         }
 
+        // The row's id must be unique per task part and stable across rebuilds:
+        // the child opencode session id when known, otherwise the tool's callID
+        // (never the task name — two subagents run under the same title would
+        // collide). See SubagentSession.init.
+        let callID = ChatJSON.string(part.extra["callID"])
+
         return SubagentSession(
             taskName: taskName,
             status: status,
             duration: duration,
             transcript: [],
-            childSessionId: childSessionId
+            childSessionId: childSessionId,
+            fallbackId: (callID?.isEmpty == false) ? callID : nil
+        )
+    }
+
+    /// The LIVE-subagent path: map the box's `stream/subagent` frame onto the
+    /// same SubagentSession the canonical mapper produces, so a running card
+    /// renders immediately from the live feed. `childSessionId` is always
+    /// present here — the box only emits the frame once opencode has stamped
+    /// the child session id.
+    static func session(from payload: StreamSubagentPayload) -> SubagentSession {
+        // Task name: the box's title first, then the description, then the
+        // agent id — a published subagent always carries at least a title.
+        let taskName: String
+        if let t = payload.title, !t.isEmpty {
+            taskName = t
+        } else if let d = payload.description, !d.isEmpty {
+            taskName = d
+        } else if let a = payload.agent, !a.isEmpty {
+            taskName = a
+        } else {
+            taskName = "subagent"
+        }
+
+        return SubagentSession(
+            taskName: taskName,
+            status: .running,
+            duration: ChatDuration.text(seconds: payload.durationMs),
+            transcript: [],
+            childSessionId: payload.childSessionId
         )
     }
 }
@@ -278,8 +313,8 @@ enum ChatTranscriptMapper {
         return blocks
     }
 
-    /// Append the still-running LIVE tools (streamed mid-turn by the box) to the
-    /// transcript, in the turn that spawned them.
+    /// Append the still-running LIVE tools AND live subagents (streamed mid-turn
+    /// by the box) to the transcript, in the turn that spawned them.
     ///
     /// This is the replacement for the deleted pinned running-tool overlay:
     /// a tool call renders inside the transcript (tailing its output as a live
@@ -287,7 +322,10 @@ enum ChatTranscriptMapper {
     /// `.running` step keyed by the SAME `callID` the canonical `stepIdentity`
     /// uses, so a live row and its completed canonical sibling share one
     /// identity and the turn-boundary refetch replaces the row IN PLACE — no
-    /// remove-and-reinsert flash (the whole point of this issue).
+    /// remove-and-reinsert flash (the whole point of this issue). A live
+    /// subagent becomes a `.subagent` card sourced from the box's `subagent`
+    /// frame, so the card renders while the subagent runs instead of arriving
+    /// only once it finishes.
     ///
     /// A live tool whose `callID` the transcript already owns is skipped: the
     /// canonical step has taken over, so appending again would duplicate it.
@@ -295,11 +333,19 @@ enum ChatTranscriptMapper {
     /// turn's rail); if the last step block is a rolled-up summary — completed
     /// content a running tool does not belong to — or there is none, a fresh
     /// group is opened at the end.
-    static func appendingLiveTools(_ liveTools: [LiveTool], to blocks: [TranscriptBlock]) -> [TranscriptBlock] {
-        guard !liveTools.isEmpty else { return blocks }
-
-        let liveSteps: [ToolStep] = liveTools.map { tool in
-            ToolStep(
+    static func appendingLive(
+        tools: [LiveTool],
+        subagents: [StreamSubagentPayload],
+        to blocks: [TranscriptBlock]
+    ) -> [TranscriptBlock] {
+        // A task part streams as an ordinary tool AND as the richer `subagent`
+        // frame (src/server/streamInterp.mjs documents the tool triple as
+        // redundant). Rendering both gives a bare "task" row next to the real
+        // card — and the tool row is the one that dumps the subagent's whole
+        // result into an unbounded view. The subagent frame is the only source.
+        let liveSteps: [ToolStep] = tools.compactMap { tool in
+            guard tool.name?.lowercased() != "task" else { return nil }
+            return ToolStep(
                 id: tool.callID.isEmpty ? tool.idx : tool.callID,
                 verb: StepVerb.text(for: tool.name ?? "tool"),
                 target: tool.presentationHint.flatMap { $0.isEmpty ? nil : $0 } ?? tool.name ?? "tool",
@@ -309,19 +355,31 @@ enum ChatTranscriptMapper {
             )
         }
 
+        // A finished subagent belongs to the canonical transcript, which owns it
+        // after the turn-boundary refetch; keeping the live copy too would
+        // double the row. Only pending/running payloads become live cards.
+        let liveSubagents: [SubagentSession] = subagents.compactMap { payload in
+            switch (payload.status ?? "").lowercased() {
+            case "pending", "running":
+                return ChatSubagentMapper.session(from: payload)
+            default:
+                return nil
+            }
+        }
+
+        guard !(liveSteps.isEmpty && liveSubagents.isEmpty) else { return blocks }
+
+        var liveRows = liveSteps.map { .step($0) }
+        liveRows.append(contentsOf: liveSubagents.map { .subagent($0) })
+
+        // Dedup against ids the canonical transcript already owns — STEP rows
+        // and SUBAGENT rows alike — so a live card disappears the instant the
+        // canonical one lands rather than briefly showing twice.
         let existingIDs = Set(blocks.flatMap { block -> [String] in
             guard case .steps(let content) = block else { return [] }
-            return content.rows.compactMap { row -> String? in
-                guard case .step(let step) = row else { return nil }
-                return step.id
-            }
+            return content.rows.map(\.id)
         })
-        // A live tool becomes a `.step` row — the `.rows` case holds
-        // `[StepGroupRow]`, and a step row is the step payload wrapped in
-        // `.step`. Deduping uses the ToolStep id before wrapping.
-        let toAppend: [StepGroupRow] = liveSteps
-            .filter { !existingIDs.contains($0.id) }
-            .map { .step($0) }
+        let toAppend = liveRows.filter { !existingIDs.contains($0.id) }
         guard !toAppend.isEmpty else { return blocks }
 
         var result = blocks
@@ -514,6 +572,46 @@ enum ChatQuestionAnswers {
             }
         }
         return true
+    }
+}
+
+// MARK: - Bounded tool-output preview
+
+/// The bounded preview of a tool's output shown inline in the transcript.
+///
+/// The box streams up to 20,000 characters per tool and flushes a tool's ENTIRE
+/// final output one frame before it marks the tool ended, so an inline view with
+/// no bound briefly renders thousands of points of text inside a self-sizing
+/// cell — which is what pushed the composer off screen. The full text is always
+/// one tap away (a subagent's on its drill-in screen; a command's in the
+/// terminal), so the inline copy is a peek, not the record.
+enum ToolOutputPreview {
+    static let maxLines = 12
+    static let maxCharacters = 2_000
+
+    /// Keep the LAST `maxLines` lines (output is a tail — the newest lines are
+    /// the interesting ones), then hard-cap the result to the last
+    /// `maxCharacters` characters so a single enormous line cannot escape the
+    /// line bound.
+    static func tail(_ output: String) -> String {
+        // An empty or whitespace-only input returns the input unchanged.
+        if output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return output
+        }
+
+        let lines = output.components(separatedBy: "\n")
+        var result = output
+        var trimmed = false
+        if lines.count > maxLines {
+            result = lines.suffix(maxLines).joined(separator: "\n")
+            trimmed = true
+        }
+        if result.count > maxCharacters {
+            result = String(result.suffix(maxCharacters))
+            trimmed = true
+        }
+        // One prefix, whichever bound bit — so the reader can see it is a tail.
+        return trimmed ? "… \n" + result : result
     }
 }
 

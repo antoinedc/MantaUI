@@ -630,7 +630,7 @@ final class ChatSessionStore: ObservableObject {
         // pristine while the live rows tail their output and vanish on
         // turnComplete (when the canonical refetch takes them over as steps).
         let liveTools = eventStore.sessionStates[sessionId]?.runningTools ?? []
-        let liveTranscript = ChatTranscriptMapper.appendingLiveTools(liveTools, to: transcript)
+        let liveTranscript = ChatTranscriptMapper.appendingLive(tools: liveTools, subagents: subagents, to: transcript)
 
         // Terminal state of the current turn, MOVED out of the pinned area into
         // the transcript, at the end of the turn it belongs to: session errors
