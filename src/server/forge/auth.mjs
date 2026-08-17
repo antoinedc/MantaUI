@@ -34,7 +34,7 @@
 
 import { randomBytes } from "node:crypto";
 import { runLoginShell } from "../launchers.mjs";
-import { resolveSecret, loadSecrets, setSecret } from "../secrets.mjs";
+import { resolveSecret, loadSecrets, setSecret, listSecrets, deleteSecret } from "../secrets.mjs";
 import { configGet, configUpdate } from "../local.mjs";
 import { readFile as fsReadFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -270,6 +270,24 @@ export async function rotateOauthPair(refresh, persistPair) {
  */
 export function invalidateToken(host) {
   CACHE.delete(host);
+}
+
+/**
+ * Delete the shared GITHUB_TOKEN secret that Manta's own device flow wrote, and
+ * drop every cached resolution for it. The ONLY credential Manta may delete —
+ * an env var and the user's `gh` CLI login are not ours to touch.
+ *
+ * Deliberately does NOT set `forgeDisconnected`: that flag means "the user asked
+ * us to ignore GitHub", which is a different thing from "this credential is dead".
+ * Setting it here would also suppress a perfectly good `gh` CLI login.
+ */
+export async function clearStoredToken({ list = listSecrets, remove = deleteSecret } = {}) {
+  const entry = list({ includeAll: true }).find(
+    (s) => s.key === "GITHUB_TOKEN" && s.scope === "shared",
+  );
+  if (entry) await remove(entry.id);
+  invalidateToken(GITHUB_CLI_HOST);
+  return { cleared: Boolean(entry) };
 }
 
 /**

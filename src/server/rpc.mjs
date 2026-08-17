@@ -43,10 +43,8 @@ import { searchMessages } from "./messageSearch.mjs";
 import { MIN_CLIENT } from "./version.mjs";
 import { forgeDiffForCwd, forgeStatus, pullRequestForCwd, shipPullRequest, shipPreview, mergePullRequest, draftGetForCwd, draftCommentForCwd, draftSubmitForCwd, replyThreadForCwd, forgeInbox, forgeDeviceStart, forgeDevicePoll, forgeDeviceCancel, forgeListRepos, forgeCloneStart, forgeCloneStatus, forgeCloneCancel } from "./forge/index.mjs";
 import { listRules as forgeListRules, formatIssueRef, parseIssueRef } from "./forgeRules.mjs";
-import { invalidateToken as invalidateForgeToken } from "./forge/auth.mjs";
+import { clearStoredToken } from "./forge/auth.mjs";
 import { parseRules as parseForgeRules } from "../shared/forgeRules.mjs";
-
-const GH_HOST = "github.com";
 
 // The number of rules (event entries) in a repo's rules YAML — shown in
 // Settings [G1] so a valid repo reads "3 rules".
@@ -422,10 +420,7 @@ export function buildHandlers({
     // secret is not an error). A successful device sign-in clears the flag.
     "forge:disconnect": async () => {
       await local.configUpdate({ forgeDisconnected: true });
-      const secrets = secretsListStore({ includeAll: true });
-      const ghToken = secrets.find((s) => s.key === "GITHUB_TOKEN" && s.scope === "shared");
-      if (ghToken) await secretsDeleteStore(ghToken.id);
-      invalidateForgeToken(GH_HOST);
+      await clearStoredToken();
       return { ok: true };
     },
 

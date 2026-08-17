@@ -3,7 +3,7 @@
 
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { resolveToken, invalidateToken, normalizeUserCode, startDeviceGrant, pollDeviceGrant, ExpiredCodeError, DeviceFlowNotConfiguredError, DEVICE_CLIENT_ID, DEVICE_CLIENT_ID_PLACEHOLDER } from "./auth.mjs";
+import { resolveToken, invalidateToken, normalizeUserCode, startDeviceGrant, pollDeviceGrant, ExpiredCodeError, DeviceFlowNotConfiguredError, DEVICE_CLIENT_ID, DEVICE_CLIENT_ID_PLACEHOLDER, clearStoredToken } from "./auth.mjs";
 
 // The module-level auth cache persists across test cases in this file — clear
 // it before each so a cached github.com resolution from one test can't leak
@@ -386,4 +386,46 @@ test("device grant: the production default client_id is real, not the placeholde
   const fetchFn = makeFetch(async () => ({ error: "authorization_pending" }));
   const started = await startDeviceGrant({ fetch: fetchFn, now: clock.now });
   assert.equal(started.pollInterval, 5, "the default id is unguarded — the device flow actually runs");
+});
+
+// ---- clearStoredToken (BET-1054) -------------------------------------------
+// Injection is mandatory — this suite runs on a live box and must never reach
+// the real secrets store. list/remove are stubbed in every case below.
+
+test("clearStoredToken deletes the shared GITHUB_TOKEN and returns {cleared:true}", async () => {
+  const removed = [];
+  const secrets = [
+    { id: "s1", key: "GITHUB_TOKEN", value: "ghp_shared", scope: "shared", sessionID: null, project: null },
+    { id: "s2", key: "OTHER", value: "v", scope: "shared", sessionID: null, project: null },
+  ];
+  const r = await clearStoredToken({
+    list: () => secrets,
+    remove: (id) => (removed.push(id), Promise.resolve()),
+  });
+  assert.deepEqual(r, { cleared: true });
+  assert.deepEqual(removed, ["s1"], "only the shared GITHUB_TOKEN is removed");
+});
+
+test("clearStoredToken is a no-op returning {cleared:false} when no such secret exists", async () => {
+  const removed = [];
+  const r = await clearStoredToken({
+    list: () => [{ id: "s1", key: "OTHER", scope: "shared", sessionID: null, project: null }],
+    remove: (id) => (removed.push(id), Promise.resolve()),
+  });
+  assert.deepEqual(r, { cleared: false });
+  assert.deepEqual(removed, []);
+});
+
+test("clearStoredToken does not delete a non-shared GITHUB_TOKEN nor other keys", async () => {
+  const removed = [];
+  const secrets = [
+    { id: "s1", key: "GITHUB_TOKEN", value: "ghp", scope: "session", sessionID: "ses_1", project: null },
+    { id: "s2", key: "OTHER", value: "v", scope: "shared", sessionID: null, project: null },
+  ];
+  const r = await clearStoredToken({
+    list: () => secrets,
+    remove: (id) => (removed.push(id), Promise.resolve()),
+  });
+  assert.deepEqual(r, { cleared: false });
+  assert.deepEqual(removed, []);
 });
