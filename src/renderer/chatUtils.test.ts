@@ -83,6 +83,8 @@ import {
   selectableModelGroups,
   filterModelGroups,
   moveMenuHighlight,
+  isDeprecated,
+  mainPickerGroups,
   MAX_PREVIEW_BYTES,
   resolvePreviewType,
   isWithinPreviewSize,
@@ -3046,6 +3048,68 @@ describe("selectableModelGroups", () => {
   it("an empty selection yields an empty (not null) grouped list", () => {
     const models = [M("a", "off", { enabled: false })];
     expect(selectableModelGroups(models, undefined)).toEqual([]);
+  });
+});
+
+// ===== isDeprecated =====
+
+describe("isDeprecated", () => {
+  it("is true only for status === 'deprecated'", () => {
+    expect(isDeprecated({ status: "deprecated" })).toBe(true);
+    expect(isDeprecated({ status: "live" })).toBe(false);
+    expect(isDeprecated({})).toBe(false);
+  });
+
+  it("handles null / undefined / absent status", () => {
+    expect(isDeprecated(null)).toBe(false);
+    expect(isDeprecated(undefined)).toBe(false);
+    expect(isDeprecated({ status: undefined })).toBe(false);
+  });
+});
+
+// ===== mainPickerGroups (BET-1139) =====
+
+describe("mainPickerGroups", () => {
+  const M = (
+    providerID: string,
+    id: string,
+    extra: Partial<OpencodeModel> = {},
+  ): OpencodeModel => ({ id, providerID, name: id, ...extra }) as OpencodeModel;
+
+  it("returns null groups for null input, with empty disabledKeys", () => {
+    expect(mainPickerGroups(null, undefined, undefined)).toEqual({
+      groups: null,
+      disabledKeys: [],
+    });
+  });
+
+  it("keeps a deprecated model present but DISABLED until opted in", () => {
+    const models = [
+      M("a", "live"),
+      M("a", "old", { status: "deprecated" }),
+    ];
+    const out = mainPickerGroups(models, undefined, undefined);
+    const ids = out.groups![0][1].map((m) => m.id);
+    expect(ids).toEqual(["live", "old"]);
+    expect(out.disabledKeys).toEqual(["a/old"]);
+  });
+
+  it("makes a deprecated model selectable once opted in", () => {
+    const models = [M("a", "old", { status: "deprecated" })];
+    const out = mainPickerGroups(models, undefined, ["a/old"]);
+    expect(out.groups![0][1].map((m) => m.id)).toEqual(["old"]);
+    expect(out.disabledKeys).toEqual([]);
+  });
+
+  it("still applies the enabled + deactivated gates", () => {
+    const models = [
+      M("a", "disabled", { enabled: false }),
+      M("a", "deactivated", { status: "deprecated" }),
+      M("a", "dep-disabled", { status: "deprecated", enabled: false }),
+    ];
+    const out = mainPickerGroups(models, ["a/deactivated"], undefined);
+    expect(out.groups).toEqual([]);
+    expect(out.disabledKeys).toEqual([]);
   });
 });
 

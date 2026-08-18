@@ -155,6 +155,8 @@ export function InputArea({
   onTogglePlan,
   activeProviderID,
   deactivatedMainModels,
+  optInModels,
+  onOptInModel,
   onOpenModels,
   onSelectModel,
   scheduleCount,
@@ -214,6 +216,10 @@ export function InputArea({
   // itself.
   activeProviderID: string | null;
   deactivatedMainModels: string[];
+  // BET-1139: "providerID/modelID" deprecated-model opt-ins (shared set) + the
+  // persisting callback — passed to ModelPicker for its disabled rows.
+  optInModels: string[];
+  onOptInModel: (key: string) => void;
   onOpenModels: () => void;
   onSelectModel: (m: ModelSelection | null) => void;
   // Plan-mode chip (BET-949): the resolved toggle state + the flip handler.
@@ -544,6 +550,8 @@ export function InputArea({
             modelOverride={modelOverride}
             defaultModel={defaultModel}
             deactivatedMainModels={deactivatedMainModels}
+            optInModels={optInModels}
+            onOptInModel={onOptInModel}
             onOpen={onOpenModels}
             onSelect={onSelectModel}
             labelOverride={shortLabel}

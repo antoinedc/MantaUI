@@ -524,7 +524,7 @@ export async function setReferences(ops, deps = {}) {
  * pre-sync existingAgents list (logged) so the card still renders something.
  */
 export async function syncSubagents(
-  { models = [], deactivated = [] } = {},
+  { models = [], deactivated = [], optIn = [] } = {},
   readConfig = readRemoteConfig,
   applySubagents = setSubagents,
 ) {
@@ -536,7 +536,7 @@ export async function syncSubagents(
     return [];
   }
   const existingAgents = readAgentBlocks(cfg);
-  const { upsert, remove } = reconcileSubagents({ models, existingAgents, deactivated });
+  const { upsert, remove } = reconcileSubagents({ models, existingAgents, deactivated, optIn });
   if (upsert.length === 0 && remove.length === 0) return existingAgents;
 
   const result = await applySubagents({ upsert, remove });

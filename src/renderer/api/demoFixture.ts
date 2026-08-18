@@ -92,6 +92,7 @@ export const demoAppConfig: AppConfig = {
   downloadsDir: "",
   defaultModel: { providerID: "anthropic", modelID: "claude-opus-4-7" },
   deactivatedMainModels: [],
+  optInModels: [],
   skillRegistryUrls: ["https://example.com/manta-skills-extra.json"],
   cacheTtl: "1h",
   launcherFlags: {},

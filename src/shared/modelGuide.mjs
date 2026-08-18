@@ -354,3 +354,15 @@ export function suggestModels(query, models, limit = 3) {
     .slice(0, limit)
     .map(({ m }) => ({ providerID: m?.providerID, id: m?.id, name: m?.name }));
 }
+
+// BET-1139: the ONE place the literal string "deprecated" is compared. Lives
+// in this shared node-safe module (not renderer chatUtils.ts) so BOTH the
+// renderer (chatUtils re-exports it as `isDeprecated`) and the server-side
+// subagentSync.mjs can call the same predicate — a single comparison across
+// the renderer/server module boundary. A model the provider still serves but
+// flags as deprecated is disabled-by-default; consumers must call this, never
+// re-compare the literal.
+export function isDeprecated(m) {
+  return !!m && m.status === "deprecated";
+}
+

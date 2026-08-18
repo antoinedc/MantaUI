@@ -33,6 +33,7 @@ import { Button } from "./Button";
 import { refreshModelCatalog } from "./modelCatalog";
 import { useCachedResource } from "./useCachedResource";
 import { MantaLoader } from "./MantaLoader";
+import { isDeprecated } from "./chatUtils";
 
 function modelKey(providerID: string, id: string): string {
   return `${providerID}/${id}`;
@@ -176,6 +177,9 @@ export function ModelsCard() {
   // Local working state for the toggles. Hydrated from configGet on mount.
   const [deactivatedMain, setDeactivatedMain] = useState<Set<string>>(new Set());
   const [deactivatedSub, setDeactivatedSub] = useState<Set<string>>(new Set());
+  // BET-1139: deprecated models the user explicitly opted back in to
+  // ("providerID/modelID"). Shared with the main picker's opt-in rows.
+  const [optIn, setOptIn] = useState<Set<string>>(new Set());
   // The model list + config are fetched through the shared cache (BET-1057).
   // The synchronized subagent reconcile stays inside the fetcher so it runs
   // on every (re)load exactly as before.
@@ -191,12 +195,14 @@ export function ModelsCard() {
       window.api.configGet(),
     ]);
     const deactivatedSubList = cfg.deactivatedSubagents ?? [];
+    const optInList = cfg.optInModels ?? [];
     // The server (opencode:models) is the single source of truth for display
     // overrides, so the model list it returns is already overridden — use it
     // as-is.
     await window.api.opencodeSyncSubagents({
       models: modelList,
       deactivated: deactivatedSubList,
+      optIn: optInList,
     });
     return { models: modelList, cfg };
   });
@@ -208,6 +214,7 @@ export function ModelsCard() {
     if (!data) return;
     setDeactivatedMain(new Set(data.cfg.deactivatedMainModels ?? []));
     setDeactivatedSub(new Set(data.cfg.deactivatedSubagents ?? []));
+    setOptIn(new Set(data.cfg.optInModels ?? []));
   }, [data]);
   // Tracks which model row is mid-mutation (key), or "__main__" /
   // "__default__" for the banner-side actions.
@@ -288,6 +295,7 @@ export function ModelsCard() {
         await window.api.opencodeSyncSubagents({
           models,
           deactivated: resolvedList,
+          optIn: [...optIn],
         });
         setDeactivatedSub(new Set(resolvedList));
         // Sub toggles write opencode.jsonc agent blocks — a restart is
@@ -296,7 +304,31 @@ export function ModelsCard() {
       });
       setBusy(null);
     },
-    [busy, mutate, models, deactivatedSub],
+    [busy, mutate, models, deactivatedSub, optIn],
+  );
+
+  // BET-1139: persist the user's opt-in for a deprecated model. Reconcile the
+  // subagents so the now-opted-in model's block is registered (and, being a
+  // shared set, the main picker row becomes selectable too).
+  const enableDeprecated = useCallback(
+    async (key: string) => {
+      if (busy || !models) return;
+      setBusy(key);
+      const nextList = [...new Set([...optIn, key])];
+      await mutate(async () => {
+        const cfg = await window.api.configUpdate({ optInModels: nextList });
+        const resolvedList = cfg.optInModels ?? nextList;
+        await window.api.opencodeSyncSubagents({
+          models,
+          deactivated: [...deactivatedSub],
+          optIn: resolvedList,
+        });
+        setOptIn(new Set(resolvedList));
+        useStore.getState().setOpencodeRestartNeeded(true);
+      });
+      setBusy(null);
+    },
+    [busy, mutate, models, deactivatedSub, optIn],
   );
 
   // Default radio — single-select. Writes defaultModel via the store's
@@ -447,8 +479,15 @@ export function ModelsCard() {
             )}
             {filtered.map((m) => {
               const key = modelKey(m.providerID, m.id);
-              const isMain = !deactivatedMain.has(key);
-              const isSub = !deactivatedSub.has(key);
+              // BET-1139: a deprecated model is disabled-by-default (all
+              // row controls locked) until the user opts it back in via the
+              // shared optIn set — the same opt-in that enables it in the
+              // main picker and registers it as a subagent.
+              const deprecated = isDeprecated(m);
+              const optedIn = optIn.has(key);
+              const deprecatedDisabled = deprecated && !optedIn;
+              const isMain = deprecatedDisabled ? false : !deactivatedMain.has(key);
+              const isSub = deprecatedDisabled ? false : !deactivatedSub.has(key);
               const isDefault =
                 savedDefault != null &&
                 savedDefault.providerID === m.providerID &&
@@ -457,13 +496,20 @@ export function ModelsCard() {
               const ctxSize = formatModelContextSize(m.limit?.context);
               const desc = m.description ?? info?.blurb;
               const isBusy = busy === key;
+              const rowDisabled = isBusy || deprecatedDisabled;
               return (
-                <tr key={key} className="border-b border-border/40 hover:bg-bg-soft/40">
+                <tr
+                  key={key}
+                  className={`border-b border-border/40 hover:bg-bg-soft/40 ${
+                    deprecatedDisabled ? "opacity-60" : ""
+                  }`}
+                >
                   <td className="px-3 py-2 align-middle">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-body text-text font-medium">{m.name}</span>
                       <span className="text-meta text-text-faint">{m.providerID}</span>
                       {ctxSize && <Tag numeric>{ctxSize}</Tag>}
+                      {deprecated && <Tag numeric>deprecated</Tag>}
                       {info && (
                         <span className={`px-2 py-px rounded-xs text-meta ${TIER_CLASS[info.tier]}`}>
                           {info.tier}
@@ -475,15 +521,31 @@ export function ModelsCard() {
                         {desc}
                       </div>
                     )}
+                    {deprecatedDisabled && (
+                      <button
+                        type="button"
+                        onClick={() => void enableDeprecated(key)}
+                        disabled={isBusy}
+                        className="mt-1 text-meta text-accent hover:underline disabled:opacity-40"
+                      >
+                        Enable deprecated (also registers as a subagent)
+                      </button>
+                    )}
                   </td>
                   <td className="px-3 py-2 align-middle text-center">
                     <input
                       type="radio"
                       name="defaultModel"
                       checked={isDefault}
-                      disabled={!isMain || isBusy}
+                      disabled={!isMain || rowDisabled}
                       onChange={() => void setDefault(m.providerID, m.id)}
-                      title={isMain ? "Set as default main model" : "Enable Main first"}
+                      title={
+                        deprecatedDisabled
+                          ? "Enable this deprecated model first"
+                          : isMain
+                            ? "Set as default main model"
+                            : "Enable Main first"
+                      }
                       className="appearance-none w-4 h-4 rounded-full border-[1.5px] border-border-strong bg-bg cursor-pointer checked:border-accent checked:bg-accent-solid disabled:opacity-30 disabled:cursor-not-allowed relative"
                       style={
                         isDefault
@@ -495,7 +557,7 @@ export function ModelsCard() {
                   <td className="px-3 py-2 align-middle text-center">
                     <Checkbox
                       checked={isMain}
-                      disabled={isBusy}
+                      disabled={rowDisabled}
                       onChange={() => void toggleMain(key, isMain)}
                       ariaLabel={`Main availability for ${m.name}`}
                     />
@@ -503,7 +565,7 @@ export function ModelsCard() {
                   <td className="px-3 py-2 align-middle text-center">
                     <Checkbox
                       checked={isSub}
-                      disabled={isBusy}
+                      disabled={rowDisabled}
                       onChange={() => void toggleSub(key, isSub)}
                       ariaLabel={`Sub availability for ${m.name}`}
                     />
@@ -512,7 +574,7 @@ export function ModelsCard() {
                     <button
                       type="button"
                       onClick={() => setEditing(key)}
-                      disabled={isBusy}
+                      disabled={rowDisabled}
                       className="inline-flex items-center justify-center p-2 rounded-xs text-text-faint hover:text-text hover:bg-fill-hover disabled:opacity-30 disabled:cursor-not-allowed"
                       aria-label={`Edit ${m.name}`}
                       title="Edit name / description / context"

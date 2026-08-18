@@ -108,6 +108,10 @@ describe("ModelMenu defaultRow — pinned top-row copy override (BET-948)", () =
     h?.unmount();
     h = null;
   });
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
 
   it("omitted → today's exact 'Server default' label + sub line", () => {    h = mount(
       <ModelMenu
@@ -145,5 +149,78 @@ describe("ModelMenu defaultRow — pinned top-row copy override (BET-948)", () =
     expect(text).not.toContain("set in Settings");
     // The body's model row is untouched.
     expect(text).toContain("Claude Opus 4.7");
+  });
+});
+
+describe("ModelMenu deprecated disabled rows (BET-1139)", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  const DEP_GROUPS: Array<[string, OpencodeModel[]]> = [
+    [
+      "anthropic",
+      [{
+        id: "claude-opus-4-7",
+        providerID: "anthropic",
+        name: "Claude Opus 4.7",
+        status: "deprecated",
+        capabilities: { input: ["text"] },
+      }],
+    ],
+  ];
+
+  it("renders a deprecated row disabled (outside the option set) with an enable action until opted in", () => {
+    let enabledKey: string | undefined;
+    h = mount(
+      <ModelMenu
+        open
+        anchorRef={anchorRef()}
+        groups={DEP_GROUPS}
+        modelOverride={null}
+        defaultModel={null}
+        disabledKeys={["anthropic/claude-opus-4-7"]}
+        onEnableDeprecated={(k) => {
+          enabledKey = k;
+        }}
+        onSelect={() => {}}
+        onClose={() => {}}
+      />,
+    );
+    const text = surface().textContent ?? "";
+    expect(text).toContain("Claude Opus 4.7");
+    // NOT in the roving/selectable option set (aria role="option").
+    const option = [...surface().querySelectorAll<HTMLElement>('[role="option"]')].find((e) =>
+      e.textContent?.includes("Claude Opus 4.7"),
+    );
+    expect(option).toBeUndefined();
+    // An enable action is offered and calls the caller's opt-in handler.
+    const btn = [...surface().querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+      b.textContent?.includes("Enable deprecated"),
+    );
+    expect(btn).toBeTruthy();
+    btn!.click();
+    expect(enabledKey).toBe("anthropic/claude-opus-4-7");
+  });
+
+  it("renders the row as a normal selectable option once its key is not disabled (opted in)", () => {
+    h = mount(
+      <ModelMenu
+        open
+        anchorRef={anchorRef()}
+        groups={DEP_GROUPS}
+        modelOverride={null}
+        defaultModel={null}
+        onSelect={() => {}}
+        onClose={() => {}}
+      />,
+    );
+    const option = [...surface().querySelectorAll<HTMLElement>('[role="option"]')].find((e) =>
+      e.textContent?.includes("Claude Opus 4.7"),
+    );
+    expect(option).toBeTruthy();
+    expect(option!.getAttribute("id")).toBe("anthropic/claude-opus-4-7");
   });
 });

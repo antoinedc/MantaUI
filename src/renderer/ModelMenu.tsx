@@ -32,6 +32,8 @@ export function ModelMenu({
   open,
   anchorRef,
   defaultRow,
+  disabledKeys,
+  onEnableDeprecated,
 }: {
   groups: Array<[string, OpencodeModel[]]> | null;
   modelOverride: ModelSelection | null;
@@ -48,10 +50,24 @@ export function ModelMenu({
    * "<model> · set in Settings" / "opencode decides").
    */
   defaultRow?: { label?: string; sub?: string };
+  /**
+   * BET-1139: "providerID/modelID" keys that are shown in the list but
+   * rendered GREYED/disabled — a deprecated model the user hasn't opted in to.
+   * These rows are NOT in the roving-highlight / selectable option set.
+   * Omitted or empty = every row is selectable (today's behaviour).
+   */
+  disabledKeys?: string[];
+  /** BET-1139: called with a disabled row's key when the user clicks its
+   *  "Enable deprecated" action. Persists the opt-in; the row then becomes a
+   *  normal selectable model. */
+  onEnableDeprecated?: (key: string) => void;
 }) {
   const [query, setQuery] = useState("");
   const [highlight, setHighlight] = useState(-1);
   const inputRef = useRef<HTMLInputElement>(null);
+  // BET-1139: deprecated rows shown but not selectable — greyed and kept OUT
+  // of the roving-highlight option set.
+  const disabledSet = useMemo(() => new Set(disabledKeys ?? []), [disabledKeys]);
 
   // Focus the search input as soon as the menu mounts (it opens on open).
   useEffect(() => {
@@ -100,6 +116,7 @@ export function ModelMenu({
   for (const [, ms] of filtered ?? []) {
     for (const m of ms) {
       const id = `${m.providerID}/${m.id}`;
+      if (disabledSet.has(id)) continue; // deprecated, not opted in — not selectable
       flatOptions.push({
         id,
         select: () => {
@@ -151,6 +168,37 @@ export function ModelMenu({
             const ctx = formatModelContextSize(m.limit?.context);
             const id = `${m.providerID}/${m.id}`;
             const active = isActive(m);
+            // BET-1139: a deprecated model the user hasn't opted in to renders
+            // as a disabled row — greyed, outside the roving-highlight option
+            // set, with a small "Enable deprecated" action. Kept intentionally
+            // minimal (the issue's ask): no fancy component.
+            if (disabledSet.has(id)) {
+              return (
+                <div
+                  key={m.id}
+                  className="flex w-full items-center gap-3 min-h-[34px] px-2 rounded-md text-left"
+                  aria-disabled="true"
+                >
+                  <span aria-hidden="true" className="w-4 flex-none" />
+                  <span className="flex-1 min-w-0 text-left">
+                    <span className="block truncate text-label font-medium text-text-faint/70">
+                      {m.name}
+                    </span>
+                  </span>
+                  <Tag numeric>deprecated</Tag>
+                  {onEnableDeprecated && (
+                    <button
+                      type="button"
+                      onClick={() => onEnableDeprecated(id)}
+                      className="flex-none text-meta text-text-faint hover:text-accent hover:underline"
+                      title={`Enable ${m.name} despite deprecation`}
+                    >
+                      Enable deprecated
+                    </button>
+                  )}
+                </div>
+              );
+            }
             return (
               <MenuOption
                 key={m.id}

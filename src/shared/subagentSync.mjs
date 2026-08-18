@@ -11,7 +11,7 @@
 // server (src/server/providers.mjs, Node ESM) and tests. The I/O wrapper
 // that reads/writes opencode.jsonc is syncSubagents() in providers.mjs.
 
-import { describeModel, familyKey } from "./modelGuide.mjs";
+import { describeModel, familyKey, isDeprecated } from "./modelGuide.mjs";
 
 // Lowercase, non-alphanumeric → "-", collapse repeats, trim leading/trailing
 // "-". Fallback naming for models whose family isn't in the catalog.
@@ -74,18 +74,25 @@ function modelKey(providerID, modelID) {
  *    that block's name added to `remove`.
  *  - Blocks whose `model` doesn't match any known model are NEVER touched
  *    (a user's hand-made agent) — they're simply not iterated.
+ *  - BET-1139: a DEPRECATED model is NOT auto-registered by default — its
+ *    block is added only when its "providerID/modelID" is in `optIn`. A
+ *    deprecated block that's already registered is left untouched (matches
+ *    the preserve-existing rule above).
  *
  * @param {object} input
- * @param {Array<{providerID: string, id: string}>} [input.models]
+ * @param {Array<{providerID: string, id: string, status?: string}>} [input.models]
  * @param {Array<{name: string, model: string, description: string}>} [input.existingAgents]
  * @param {string[]} [input.deactivated] - "providerID/modelID" strings
+ * @param {string[]} [input.optIn] - "providerID/modelID" strings of deprecated
+ *   models the user opted back in to (BET-1139)
  * @returns {{
  *   upsert: Array<{name: string, model: string, description: string}>,
  *   remove: string[],
  * }}
  */
-export function reconcileSubagents({ models = [], existingAgents = [], deactivated = [] } = {}) {
+export function reconcileSubagents({ models = [], existingAgents = [], deactivated = [], optIn = [] } = {}) {
   const deactivatedSet = new Set(deactivated);
+  const optInSet = new Set(optIn);
   const existingByModel = new Map();
   for (const agent of existingAgents) {
     if (!existingByModel.has(agent.model)) existingByModel.set(agent.model, agent);
@@ -97,6 +104,7 @@ export function reconcileSubagents({ models = [], existingAgents = [], deactivat
     const key = modelKey(m.providerID, m.id);
     if (deactivatedSet.has(key)) continue;
     if (existingByModel.has(key)) continue; // already registered — preserve as-is
+    if (isDeprecated(m) && !optInSet.has(key)) continue; // BET-1139: disabled unless opted in
     const name = deriveSubagentName(m.providerID, m.id, takenNames);
     takenNames.add(name.toLowerCase());
     const info = describeModel(m.providerID, m.id);

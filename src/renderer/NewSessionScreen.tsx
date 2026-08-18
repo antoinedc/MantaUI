@@ -149,6 +149,8 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   const dismissDraft = useStore((s) => s.dismissDraft);
   const setAutoSubmitPrompt = useStore((s) => s.setAutoSubmitPrompt);
   const deactivatedMainModels = useStore((s) => s.deactivatedMainModels);
+  const optInModels = useStore((s) => s.optInModels);
+  const optInModel = useStore((s) => s.optInModel);
   const existingProjects = useStore((s) => s.projects);
 
   const projectName =
@@ -1070,6 +1072,8 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
               modelOverride={draft.model}
               defaultModel={serverDefault}
               deactivatedMainModels={deactivatedMainModels}
+              optInModels={optInModels}
+              onOptInModel={optInModel}
               onOpen={() => {}}
               onSelect={(m: ModelSelection | null) => {
                 // null = clear back to the server default.

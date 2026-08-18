@@ -14,6 +14,10 @@ import type { VoiceNoteRecord } from "../shared/types";
 // one source of truth; re-imported here so chooseUpdateSkewVariant is
 // testable in isolation (no DOM/network, just the compare).
 import { isClientTooOld } from "../shared/versionCompare.mjs";
+// BET-1139: the deprecated-model predicate lives in the shared node-safe
+// module (the ONE place the literal "deprecated" is compared) and is imported
+// here so renderer consumers call `isDeprecated` rather than re-comparing.
+import { isDeprecated } from "../shared/modelGuide.mjs";
 
 // Stable identity for a mounted Terminal in App.tsx's visitedModes map. A
 // tmux window is identified by its session name + index, which EVERY window
@@ -2047,6 +2051,17 @@ export function hideFastSiblingGroups(
   return out;
 }
 
+// ===== deprecated-model predicate (BET-1139) =====
+//
+// `isDeprecated` (a model the provider still serves but flags as deprecated)
+// is disabled-by-default in the main picker and skipped by subagent
+// auto-registration, both reversed by an explicit per-model opt-in
+// (`optInModels`). The predicate lives in the shared node-safe module
+// `src/shared/modelGuide.mjs` — the ONE place the literal "deprecated" is
+// compared — and is re-exported here so renderer consumers call it, never
+// re-compare the literal.
+export { isDeprecated };
+
 // ===== selectableModelGroups =====
 //
 // The model set a user may actually switch TO — the answer to "does
@@ -2072,7 +2087,7 @@ export function selectableModelList(
   return models.filter(
     (m) =>
       m.enabled !== false &&
-      m.status !== "deprecated" &&
+      !isDeprecated(m) &&
       !deactivatedMain.has(`${m.providerID}/${m.id}`),
   );
 }
@@ -2095,6 +2110,55 @@ export function selectableModelGroups(
   }
   const sorted = [...map.entries()].sort(([a], [b]) => a.localeCompare(b));
   return hideFastSiblingGroups(sorted);
+}
+
+export type MainPickerGroups = {
+  /** Groups for the main model menu — includes deprecated models so they stay
+   *  importable/visible, with the same enabled/deactivated/fast-folding gates
+   *  as `selectableModelGroups`. */
+  groups: Array<[string, OpencodeModel[]]> | null;
+  /** "providerID/modelID" keys of DEPRECATED models shown disabled (not yet
+   *  opted in). Deprecated-but-opted-in models are ordinary selectable rows. */
+  disabledKeys: string[];
+};
+
+/**
+ * The main picker's candidate set (BET-1139). Unlike `selectableModelGroups`,
+ * a deprecated model is KEPT in the list — the user must be able to see and
+ * opt in to a model the provider is deprecating — but it is rendered disabled
+ * unless its "providerID/modelID" is in `optInModels` (`disabledKeys`). A
+ * deprecated model that HAS been opted in is fully selectable, same as a live
+ * model. Non-deprecated models behave exactly as `selectableModelGroups`.
+ * Used ONLY by the main composer picker; the delegate picker keeps filtering
+ * deprecated models via `selectableModelGroups`. `null` models → `null`
+ * groups (loading).
+ */
+export function mainPickerGroups(
+  models: OpencodeModel[] | null,
+  deactivatedMainModels: string[] | undefined,
+  optInModels: string[] | undefined,
+): MainPickerGroups {
+  if (!models) return { groups: null, disabledKeys: [] };
+  const deactivatedMain = new Set(deactivatedMainModels ?? []);
+  const optIn = new Set(optInModels ?? []);
+  const disabledKeys: string[] = [];
+  const kept = models.filter((m) => {
+    const key = `${m.providerID}/${m.id}`;
+    if (m.enabled === false) return false;
+    if (deactivatedMain.has(key)) return false;
+    if (isDeprecated(m) && !optIn.has(key)) {
+      disabledKeys.push(key);
+    }
+    return true;
+  });
+  const map = new Map<string, OpencodeModel[]>();
+  for (const m of kept) {
+    const arr = map.get(m.providerID) ?? [];
+    arr.push(m);
+    map.set(m.providerID, arr);
+  }
+  const sorted = [...map.entries()].sort(([a], [b]) => a.localeCompare(b));
+  return { groups: hideFastSiblingGroups(sorted), disabledKeys };
 }
 
 export type FastToggleState = {
@@ -2133,7 +2197,7 @@ export function resolveFastToggle(
         m.providerID === active.providerID &&
         m.id === counterpartId &&
         m.enabled !== false &&
-        m.status !== "deprecated",
+        !isDeprecated(m),
     ) ?? null;
 
   if (!counterpart) {

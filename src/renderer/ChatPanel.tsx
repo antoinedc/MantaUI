@@ -206,6 +206,8 @@ export function ChatPanel({
   const autoRenameSessions = useStore((s) => s.autoRenameSessions);
   const configDefaultModel = useStore((s) => s.defaultModel);
   const deactivatedMainModels = useStore((s) => s.deactivatedMainModels);
+  const optInModels = useStore((s) => s.optInModels);
+  const optInModel = useStore((s) => s.optInModel);
   const hiddenStatusItems = useStore((s) => s.hiddenStatusItems);
   // BET-789: the "Connect GitHub…" offer's per-box dismissal flag. Once set,
   // the offer never re-appears until the config flag is cleared.
@@ -3055,6 +3057,8 @@ export function ChatPanel({
         onTogglePlan={togglePlan}
         activeProviderID={activeModel?.providerID ?? null}
         deactivatedMainModels={deactivatedMainModels}
+        optInModels={optInModels}
+        onOptInModel={optInModel}
         onOpenModels={ensureModels}
         onSelectModel={selectModel}
         scheduleCount={schedules.length}
