@@ -124,6 +124,7 @@ struct ContextSheet: View {
     /// Big percentage in the band colour + "824k of 1M · Opus 4.7"; for a
     /// model with no known max context, a "No max context info" line instead
     /// — never a fabricated % or `of <limit>`.
+    @ViewBuilder
     private var header: some View {
         if context.hasLimit {
             HStack(alignment: .firstTextBaseline, spacing: Metrics.spacing.sp2) {

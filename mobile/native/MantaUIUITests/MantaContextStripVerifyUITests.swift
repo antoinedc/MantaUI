@@ -80,6 +80,139 @@ final class MantaContextStripVerifyUITests: XCTestCase {
         XCTAssertTrue(hasNumericPct, "context-strip has no numeric percentage label: '\(stripLabel)'")
     }
 
+    // BET-1138: on-device capture + assertion of the NO-max-context state.
+    // feed a `context` frame with hasLimit:false (fixture `context-nolimit`),
+    // then verify the strip renders a full-green fill with no % and the sheet
+    // shows "No max context info for this model" with tokens only.
+    func testNoMaxContextStateRenders() throws {
+        let app = XCUIApplication()
+        app.launch()
+        if app.textFields["onboarding-otp"].waitForExistence(timeout: 3) { pair(app) }
+        openChatWindow(app)
+
+        // Poll: keep pushing the no-limit context frame while waiting for the
+        // strip. The fixture's `/__control` send is a no-op until the app's
+        // /events socket is attached, so a single early push is lost; the loop
+        // covers the attach window deterministically.
+        let strip = app.buttons["context-strip"]
+        var pushedAny = false
+        let start = Date()
+        while !strip.exists, Date().timeIntervalSince(start) < 20 {
+            pushedAny = pushControl(action: "context-nolimit", retries: 1) || pushedAny
+            usleep(700_000)
+        }
+        usleep(500_000)
+        print("RESULT1138 pushedAnyNoLimitContext=\(pushedAny)")
+        let stripExists = strip.exists
+        let stripLabel = stripExists ? (strip.label) : ""
+        let hasNumericPct = stripLabel.range(
+            of: #"^Context \d+ percent$"#, options: .regularExpression) != nil
+        print("RESULT1138 stripExists=\(stripExists)")
+        print("RESULT1138 stripLabel=\(stripLabel.replacingOccurrences(of: "\n", with: " "))")
+        print("RESULT1138 stripHasNumericPct=\(hasNumericPct)")
+
+        print("AX-TREE-BEGIN UNKNOWN-STRIP")
+        print(app.debugDescription)
+        print("AX-TREE-END UNKNOWN-STRIP")
+        try saveConvergedScreenshot("bet1138-unknown-strip.png")
+
+        if stripExists { strip.tap() }
+        let noMax = app.staticTexts["No max context info for this model"]
+        let sheetShown = noMax.waitForExistence(timeout: 8)
+        usleep(700_000)
+        print("RESULT1138 sheetNoMaxText=\(sheetShown)")
+
+        print("AX-TREE-BEGIN UNKNOWN-SHEET")
+        print(app.debugDescription)
+        print("AX-TREE-END UNKNOWN-SHEET")
+        try saveConvergedScreenshot("bet1138-unknown-sheet.png")
+
+        XCTAssertTrue(pushedAny, "could not push context-nolimit through /__control")
+        XCTAssertTrue(stripExists, "context-strip not present in no-max-context state")
+        XCTAssertFalse(hasNumericPct, "unknown-state strip must carry no numeric %: '\(stripLabel)'")
+        XCTAssertTrue(sheetShown, "'No max context info for this model' never appeared in the sheet")
+    }
+
+    // Idempotent pairing against the fixture box (mirrors
+    // MantaRunningStateCaptureUITests).
+    private func pair(_ app: XCUIApplication) {
+        let pairCode = ProcessInfo.processInfo.environment["MANTA_PAIR_CODE"] ?? "123456"
+        let pairServer = ProcessInfo.processInfo.environment["MANTA_PAIR_SERVER"] ?? "http://127.0.0.1:8787"
+        let otp = app.textFields["onboarding-otp"]
+        otp.tap()
+        otp.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 6))
+        otp.typeText(pairCode)
+        let advanced = app.buttons["My server isn't reachable from the internet"].firstMatch
+        if advanced.waitForExistence(timeout: 3) { advanced.tap() }
+        let serverField = app.textFields["onboarding-server-url"]
+        XCTAssertTrue(serverField.waitForExistence(timeout: 5), "server URL field never appeared")
+        serverField.tap()
+        serverField.typeText(pairServer)
+        app.buttons["Continue"].firstMatch.tap()
+        let failure = app.staticTexts["onboarding-failure-subtitle"]
+        let deadline = Date().addingTimeInterval(45)
+        while Date() < deadline, !app.staticTexts["Know when it needs you"].exists, !failure.exists {
+            usleep(300_000)
+        }
+        XCTAssertFalse(failure.exists, "pairing failed")
+        app.buttons["Continue"].firstMatch.tap()
+        answerNotificationAlertIfPresent()
+        app.terminate()
+        app.launch()
+    }
+
+    private func openChatWindow(_ app: XCUIApplication) {
+        _ = app.otherElements["chat-screen"].waitForExistence(timeout: 10)
+            || app.textViews["composer-input"].firstMatch.waitForExistence(timeout: 5)
+        let row = app.buttons
+            .matching(NSPredicate(format: "label BEGINSWITH 'Chat' OR label BEGINSWITH 'default'"))
+            .firstMatch
+        if row.waitForExistence(timeout: 8) {
+            var swipes = 0
+            while !row.isHittable && swipes < 12 {
+                app.swipeUp(); usleep(200_000); swipes += 1
+            }
+            if row.isHittable { row.tap() }
+        }
+        _ = app.otherElements["chat-screen"].waitForExistence(timeout: 10)
+            || app.textViews["composer-input"].firstMatch.waitForExistence(timeout: 5)
+        usleep(1_500_000)
+        print("RESULT1138 openedChat=true")
+    }
+
+    private func answerNotificationAlertIfPresent() {
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        for label in ["Allow", "Don't Allow", "OK"] {
+            let button = springboard.buttons[label]
+            if button.waitForExistence(timeout: 3) {
+                button.tap()
+                return
+            }
+        }
+    }
+
+    private func saveConvergedScreenshot(_ name: String) throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+        var last = Data()
+        var converged = false
+        for _ in 0..<40 {
+            let shot = XCUIScreen.main.screenshot().pngRepresentation
+            if !last.isEmpty && shot == last {
+                try shot.write(to: url)
+                let att = XCTAttachment(data: shot)
+                att.name = name
+                att.lifetime = .keepAlways
+                add(att)
+                converged = true
+                break
+            }
+            last = shot
+            usleep(350_000)
+        }
+        XCTAssertTrue(converged, "screenshot never converged: \(name)")
+        print("RESULT1138 screenshot=\(name)")
+    }
+
     private func pushControl(action: String, retries: Int) -> Bool {
         guard let url = URL(string: "http://127.0.0.1:8787/__control") else { return false }
         for _ in 0..<retries {
