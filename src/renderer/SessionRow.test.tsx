@@ -240,4 +240,12 @@ describe("SessionRow — one line: dot · name · age", () => {
     expect(el.className).toContain("relative");
     expect(el.className).toContain("z-[1]");
   });
+
+  it("marquee: true wraps the name in the MarqueeLabel clip and still renders the text", () => {
+    h = mount(<SessionRow status="idle" name="Add CSV export" marquee />);
+    const el = h.container.firstElementChild as HTMLElement;
+    const name = el.firstElementChild!.nextElementSibling as HTMLElement;
+    expect(name.className).toContain("overflow-hidden");
+    expect(name.textContent).toBe("Add CSV export");
+  });
 });

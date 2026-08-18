@@ -359,3 +359,22 @@ html, body, #root {
     background: var(--raised);
   }
 }
+
+/* MarqueeLabel — hover-slide for truncated names (see MarqueeLabel.tsx).
+   The animation runs ONLY while the clip is hovered. Its absence when not
+   hovered is what snaps the text back to the start (the element reverts to
+   translateX(0) = the title from the beginning). --marquee-shift is set inline
+   by the component to the overflow width in px. Reduced-motion: static. */
+@keyframes manta-marquee {
+  0%   { transform: translateX(0); }
+  28%  { transform: translateX(var(--marquee-shift, 0px)); }
+  62%  { transform: translateX(var(--marquee-shift, 0px)); }
+  80%  { transform: translateX(0); }
+  100% { transform: translateX(0); }
+}
+.manta-marquee:hover .manta-marquee-inner {
+  animation: manta-marquee 9s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .manta-marquee:hover .manta-marquee-inner { animation: none; }
+}
