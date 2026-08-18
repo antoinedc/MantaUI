@@ -170,7 +170,11 @@ enum ChatSubagentMapper {
         let duration: String?
         if let start = ChatJSON.number(time?["start"]),
            let end = ChatJSON.number(time?["end"]) {
-            duration = ChatDuration.text(seconds: end - start)
+            // `state.time.start/end` are MILLISECONDS on the wire (opencode
+            // stamps tool time in ms — see `ChatDuration.text`); divide by 1000
+            // before the seconds-format helper, mirroring the live path — a
+            // task that ran 1.2s must not render as "20m0s".
+            duration = ChatDuration.text(seconds: (end - start) / 1000)
         } else {
             duration = nil
         }
@@ -536,10 +540,14 @@ enum ChatTranscriptMapper {
         return "\(part.messageID)-step-\(indexWithinMessage)"
     }
 
+    /// Tool-part `state.time.start/end` are MILLISECONDS on the wire (opencode
+    /// stamps tool time in ms — see `ChatDuration.text`); `ChatDuration.text`
+    /// takes seconds, so convert before the helper — a step that ran 0.4s must
+    /// not render as "6m40s". Mirrors the subagent paths.
     private static func durationSeconds(state: [String: JSONValue]?, time: [String: JSONValue]?) -> Double? {
         if let start = ChatJSON.number(time?["start"]),
            let end = ChatJSON.number(time?["end"]) {
-            return end - start
+            return (end - start) / 1000
         }
         return nil
     }
