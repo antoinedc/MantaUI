@@ -132,13 +132,30 @@ struct TranscriptBlockCell: TiledCellContent {
         // competed with the scroll view for the initiating touch — the "transcript
         // needs a second swipe" bug.
         //
-        // `CellReveal.rubberbandedOffset(max:)` is main-actor-isolated, but the
-        // `TiledCellContent` conformance here must stay nonisolated (Swift 6
-        // rejects main-actor isolation on a nonisolated protocol conformance as a
-        // data-race), so we read the library's raw `CellReveal.offset` — positive
-        // as the user swipes left — and clamp it to the gutter width ourselves,
-        // substituting a hard stop for the library's rubber-banding.
-        let reveal = min(max(0, context.cellReveal?.offset ?? 0), TranscriptGutter.gutterWidth)
+        // `CellReveal` is @MainActor-isolated and `body(context:)` here must stay
+        // nonisolated (Swift 6 rejects main-actor isolation on a nonisolated
+        // protocol conformance as a data-race), so the main-actor reveal state is
+        // passed down to `TranscriptCellReveal`, whose own `View.body` runs on the
+        // main actor and can read `rubberbandedOffset(max:)`.
+        TranscriptCellReveal(
+            cellReveal: context.cellReveal,
+            item: item,
+            tokens: tokens
+        )
+    }
+}
+
+/// Applies MessagingUI's reveal offset to a transcript cell. A plain `View`
+/// (NOT `@MainActor`-declared, so its init stays nonisolated and callable from
+/// the cell's nonisolated `body`) whose `body` reads the main-actor reveal
+/// state legally — SwiftUI's `View.body` is `@MainActor`.
+private struct TranscriptCellReveal: View {
+    let cellReveal: CellReveal?
+    let item: TranscriptRow
+    let tokens: Tokens
+
+    var body: some View {
+        let reveal = cellReveal?.rubberbandedOffset(max: TranscriptGutter.gutterWidth) ?? 0
 
         return cellContent
             .offset(x: -reveal)
