@@ -66,6 +66,7 @@ paths = [
   '''src/main/installer/knownHosts\.test\.ts''',
   '''src/main/installer/installer\.test\.ts''',
   '''src/main/auth\.test\.ts''',
+  '''src/main/download\.test\.ts''',
   '''src/server/local\.test\.mjs''',
   '''src/server/push\.test\.mjs''',
   '''src/server/devices\.test\.mjs''',
