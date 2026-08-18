@@ -1037,6 +1037,11 @@ export const IPC = {
   // Directory autocomplete: given a partial path, list matching subdirectories
   fsListDirs: "fs:list-dirs",
 
+  // BET-1091: create an empty, git-initialised scratch project directory
+  // under `root`, returning the real absolute path for the session-creation
+  // flow.
+  projectCreateScratch: "project:create-scratch",
+
   // BET-786: probe the box for git repos + read their origins + detect the gh
   // CLI. Server-side only, cached in server memory for 60s.
   forgeProbe: "forge:probe",

@@ -706,6 +706,8 @@ export const httpApi: Api = {
 
   // -- filesystem --
   fsListDirs: (partial) => rpc(IPC.fsListDirs, partial),
+  // BET-1091: create an empty, git-initialised scratch project directory.
+  projectCreateScratch: (input) => rpc(IPC.projectCreateScratch, input),
 
   // -- repo probe (BET-786) --
   forgeProbe: () => rpc(IPC.forgeProbe),

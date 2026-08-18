@@ -378,6 +378,13 @@ export function buildHandlers({
     // preload: ipcRenderer.invoke(IPC.fsListDirs, partial)  → args[0] = partial (string)
     "fs:list-dirs": (partial) => local.fsListDirs(partial),
 
+    // BET-1091: create an empty, git-initialised scratch project directory.
+    // Returns the real absolute path for stage 4 to feed into the existing
+    // session-creation call. Creates a directory and nothing else.
+    // preload: ipcRenderer.invoke(IPC.projectCreateScratch, { root, name })
+    //   → args[0] = { root: string, name: string }
+    "project:create-scratch": (i) => local.createScratchProject(i),
+
     // BET-786: probe the box for git repos + read origins + detect the gh CLI.
     // Server-side only; no renderer-supplied depth/caps (a renderer-supplied
     // depth would be a DoS on the user's own box).

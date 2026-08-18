@@ -9,12 +9,13 @@
 
 import { run } from "./tmux.mjs";
 import { spawn as nodeSpawn } from "node:child_process";
-import { readdir, readFile, stat, realpath } from "node:fs/promises";
+import { readdir, readFile, stat, realpath, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { statePath, expandTilde } from "../shared/paths.mjs";
 import { deriveWorktree, isWorktreeDirtyError } from "../shared/worktree.mjs";
+import { slugifyProjectName, uniqueSessionName } from "../shared/projectName.mjs";
 import { detectForge, repoKey } from "../shared/forge.mjs";
 import { runLoginShell } from "./launchers.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
@@ -260,6 +261,54 @@ export async function gitRemoveWorktree({ path: wtPath, force }) {
     }
   }
   return { removed: true };
+}
+
+// ============================================================
+// Scratch project — create an empty, git-initialised directory (BET-1091)
+// ============================================================
+//
+// createScratchProject({ root, name }) → { path, name }
+// preload: ipcRenderer.invoke(IPC.projectCreateScratch, { root, name })
+//   → args[0] = { root: string, name: string }
+//
+// Creates an empty project directory directly under `root` and initialises git
+// in it, returning the REAL absolute path. The renderer (stage 4) feeds that
+// path into the existing session-creation call exactly as if the user had
+// browsed to the folder, so nothing downstream changes.
+//
+// The requested `name` is slugified via the shared `slugifyProjectName` and
+// de-duplicated against the directories already present under `root` via the
+// shared `uniqueSessionName` (`name`, `name-2`, `name-3`, …). A missing root
+// is NOT an error — `mkdir` with `recursive:true` creates it. The git init is
+// NON-FATAL: a plain directory without git is still a usable workspace, and
+// the box may have no git. Errors from the root/name guards and the mkdir
+// propagate (fail-closed) so the renderer can show them inline.
+export async function createScratchProject({ root, name }) {
+  if (!root || !root.trim()) throw new Error("root is required");
+  const slug = slugifyProjectName(name);
+  if (!slug) throw new Error("name is required");
+  const baseRoot = expandTilde(root.trim());
+  // Build the set of names already taken directly under root. A missing /
+  // unreadable root is not an error here — the recursive mkdir below creates
+  // it, so treat it as an empty set.
+  let taken = new Set();
+  try {
+    const entries = await readdir(baseRoot, { withFileTypes: true });
+    taken = new Set(entries.filter((e) => e.isDirectory()).map((e) => e.name));
+  } catch {
+    taken = new Set();
+  }
+  const resolvedName = uniqueSessionName(slug, taken);
+  const path = join(baseRoot, resolvedName);
+  await mkdir(path, { recursive: true });
+  // NON-FATAL: a box without git still gets a usable directory.
+  try {
+    await run("git", ["-C", path, "init", "-b", "main"]);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`createScratchProject: git init failed (non-fatal): ${msg}`);
+  }
+  return { path, name: resolvedName };
 }
 
 // ============================================================

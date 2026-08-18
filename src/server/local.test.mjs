@@ -2,9 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fsListDirs, parseWorktrees, shouldSkipDir, dedupeRepoHits, sortRepoHits, parseGhAuthStatus, parseCloneProgress, gitPush, gitClone, scanRepos } from "./local.mjs";
+import { basename, join } from "node:path";
+import { fsListDirs, parseWorktrees, shouldSkipDir, dedupeRepoHits, sortRepoHits, parseGhAuthStatus, parseCloneProgress, gitPush, gitClone, scanRepos, createScratchProject } from "./local.mjs";
 
 test("parseWorktrees parses `git worktree list --porcelain`", () => {
   const out = parseWorktrees(
@@ -411,4 +412,65 @@ test("scanRepos: $HOME itself is never a workspace, while its children are scann
   const paths = repos.map((r) => r.path);
   assert.ok(!paths.includes("/home/u"), `home excluded: ${JSON.stringify(paths)}`);
   assert.ok(paths.includes("/home/u/projects/repo"), `home's children still scanned: ${JSON.stringify(paths)}`);
+});
+
+// ---- BET-1091: createScratchProject (scratch project dir) ------------------
+//
+// Pure/temp-dir logic only, consistent with the rest of the file. The git
+// init runs for real (git is present on the box) — we assert `.git` exists
+// but never shell out to a separate repo fixture.
+
+test("createScratchProject: fresh root creates the dir, returns an absolute path, and initialises git", async () => {
+  const root = await mkdtemp(join(tmpdir(), "scratch-fresh-"));
+  try {
+    const out = await createScratchProject({ root, name: "foo" });
+    assert.ok(out.path.startsWith("/"), `path is absolute: ${out.path}`);
+    assert.equal(out.name, "foo");
+    assert.equal(basename(out.path), "foo");
+    assert.ok(existsSync(join(out.path, ".git")), `.git present in ${out.path}`);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("createScratchProject: colliding name resolves to name-2 and leaves the original untouched", async () => {
+  const root = await mkdtemp(join(tmpdir(), "scratch-collide-"));
+  await mkdir(join(root, "foo"), { recursive: true });
+  try {
+    const out = await createScratchProject({ root, name: "foo" });
+    assert.equal(out.name, "foo-2");
+    assert.ok(existsSync(join(root, "foo")), "original foo untouched");
+    assert.ok(existsSync(out.path), "foo-2 created");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("createScratchProject: a non-existent root is created (recursive), no throw", async () => {
+  const base = await mkdtemp(join(tmpdir(), "scratch-missing-"));
+  const root = join(base, "does", "not", "exist");
+  try {
+    const out = await createScratchProject({ root, name: "foo" });
+    assert.ok(existsSync(out.path), "nested root created");
+    assert.ok(existsSync(join(out.path, ".git")), ".git exists in created root");
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("createScratchProject: unslugged input 'My App' creates 'my-app'", async () => {
+  const root = await mkdtemp(join(tmpdir(), "scratch-slug-"));
+  try {
+    const out = await createScratchProject({ root, name: "My App" });
+    assert.equal(out.name, "my-app");
+    assert.equal(basename(out.path), "my-app");
+    assert.ok(existsSync(out.path));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("createScratchProject: empty root and empty name each reject with the stated message", async () => {
+  await assert.rejects(createScratchProject({ root: "   ", name: "foo" }), /root is required/);
+  await assert.rejects(createScratchProject({ root: "/tmp", name: "   " }), /name is required/);
 });
