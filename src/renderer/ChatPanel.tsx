@@ -2665,6 +2665,8 @@ export function ChatPanel({
       ({ id, tier: "blocking", order, render });
     const amb = (id: string, render: React.ReactNode): PinnedCardRender =>
       ({ id, tier: "ambient", order: AMBIENT_CARD[id].order, label: AMBIENT_CARD[id].label, render });
+    const mng = (id: string, render: React.ReactNode): PinnedCardRender =>
+      ({ id, tier: "management", order: AMBIENT_CARD[id].order, render });
     const blockOrder = (id: string): number => {
       const map = blockingArrival.current;
       let order = map.get(id);
@@ -2747,7 +2749,7 @@ export function ChatPanel({
         </div>
       </MeasureColumn>));
     if (!jobOwnership) {
-      if (openPanel === "schedules") list.push(amb("schedules",
+      if (openPanel === "schedules") list.push(mng("schedules",
         <div className="shrink-0 px-4 pt-2 pb-2">
           <ScheduledTasksCard
             jobs={schedules}
@@ -2762,7 +2764,7 @@ export function ChatPanel({
             }}
           />
         </div>));
-      if (openPanel === "secrets") list.push(amb("secrets",
+      if (openPanel === "secrets") list.push(mng("secrets",
         <div className="shrink-0 px-4 pt-2 pb-2">
           <SecretsCard
             secrets={secrets}
@@ -2784,7 +2786,7 @@ export function ChatPanel({
             }}
           />
         </div>));
-      if (openPanel === "webhooks") list.push(amb("webhooks",
+      if (openPanel === "webhooks") list.push(mng("webhooks",
         <div className="shrink-0 px-4 pt-2 pb-2">
           <WebhooksCard
             hooks={webhooks}

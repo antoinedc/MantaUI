@@ -34,7 +34,7 @@ const TOGGLE_CLS =
 
 export function CardStack({ cards, sessionId }: { cards: PinnedCardRender[]; sessionId?: string }) {
   const arranged = useMemo(() => arrangeCards(cards), [cards]);
-  const { blocking, blockingMore, ambient, ambientRollup } = arranged;
+  const { blocking, blockingMore, ambient, ambientRollup, management } = arranged;
   const blockingList = useMemo(
     () => cards.filter((c) => c.tier === "blocking").sort((a, b) => b.order - a.order),
     [cards],
@@ -60,7 +60,15 @@ export function CardStack({ cards, sessionId }: { cards: PinnedCardRender[]; ses
   })();
 
   return (
-    <div className="shrink-0 overflow-y-auto" style={{ maxHeight: "30vh" }}>
+    <div className="shrink-0 flex flex-col">
+      {/* Management cards — full height, never capped, never rolled up. */}
+      {management.map((c) => (
+        <CardMount key={c.id} show k={c.id}>
+          {c.render}
+        </CardMount>
+      ))}
+      {/* Capped scroller — blocking + ambient unchanged. */}
+      <div className="shrink-0 overflow-y-auto" style={{ maxHeight: "30vh" }}>
       {/* Blocking tier — newest first, at most one expanded. */}
       {blockingList.length > 0 && (
         <div className="mx-auto w-full py-1" style={{ maxWidth: "var(--measure)" }}>
@@ -131,6 +139,7 @@ export function CardStack({ cards, sessionId }: { cards: PinnedCardRender[]; ses
             {rollupText} ›
           </button>
         ))}
+      </div>
     </div>
   );
 }

@@ -3353,7 +3353,7 @@ export function failuresToAgentPrompt(checks: ForgeCheckRun[]): string {
 // shape, different callers — merging them would force both to give up what
 // makes them simple.
 
-export type CardTier = "blocking" | "ambient";
+export type CardTier = "blocking" | "ambient" | "management";
 
 export interface PinnedCard {
   /** Stable key for the mount slot (e.g. "permission-<id>", "retry"). */
@@ -3378,6 +3378,8 @@ export interface PinnedCardStack<T extends PinnedCard = PinnedCard> {
   ambient: T[];
   /** Remaining ambient cards collapsed into a rollup row, priority order. */
   ambientRollup: T[];
+  /** User-toggled management cards (schedules/secrets/webhooks) — rendered full-height, un-capped. */
+  management: T[];
 }
 
 /** Max ambient cards rendered expanded; the rest collapse into the rollup row. */
@@ -3390,11 +3392,15 @@ export function arrangeCards<T extends PinnedCard>(cards: T[]): PinnedCardStack<
   const ambient = cards
     .filter((c) => c.tier === "ambient")
     .sort((a, b) => b.order - a.order);
+  const management = cards
+    .filter((c) => c.tier === "management")
+    .sort((a, b) => b.order - a.order);
   return {
     blocking: blocking[0] ?? null,
     blockingMore: Math.max(0, blocking.length - 1),
     ambient: ambient.slice(0, MAX_AMBIENT_EXPANDED),
     ambientRollup: ambient.slice(MAX_AMBIENT_EXPANDED),
+    management,
   };
 }
 
