@@ -98,7 +98,9 @@ const VERSION_RE = /\d+\.\d+\.\d+(?:[-.\w]*)?/;
 /**
  * Spawn a command and resolve its stdout, or null on ANY failure.
  *
- * The single spawn-and-read code path in this module. Resolves null — never
+ * The single spawn-and-read code path in this module. This shared helper is
+ * why the file needs no duplication-gate exemption — reuse it for a third
+ * spawn call rather than re-copying the scaffolding. Resolves null — never
  * rejects — on a spawn throw, a child `error`, a non-zero exit, or the
  * timeout. Callers treat null as "couldn't tell", never as a value.
  *
