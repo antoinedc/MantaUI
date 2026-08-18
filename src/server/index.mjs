@@ -90,6 +90,11 @@ import { upsertStopped, markStoppedRan, bumpStoppedAttempts } from "./stoppedSto
 import { createUsageStopEngine } from "./usageStopEnroll.mjs";
 import { createUsageResumeEngine } from "./usageResume.mjs";
 import * as appControl from "./appControl.mjs";
+import {
+  dispatch as mediaDispatch,
+  createPendingMediaStore,
+  createMediaSweep,
+} from "./media.mjs";
 import { setSecret, deleteSecret, listSecrets, provideSecret } from "./secrets.mjs";
 import { createPromptDelivery } from "./promptDelivery.mjs";
 import { ensureMantaPlanAgent } from "./providers.mjs";
@@ -887,6 +892,17 @@ void ensureMantaPlanAgent().catch((e) => console.error("[manta-plan] ensure fail
 // eslint-disable-next-line no-unused-vars
 const artifactSweep = createArtifactSweep();
 artifactSweep.start();
+
+// Inline-media orphan poller (BET-1147): in-memory pending placeholders for
+// `media_begin`. A `begin` with no matching `show` after 10 minutes publishes
+// `action:"fail"` and is dropped. Same sweep shape as createArtifactSweep
+// (inFlight guard + timer.unref()). See src/server/media.mjs.
+const mediaPending = createPendingMediaStore();
+const mediaSweep = createMediaSweep({
+  pending: mediaPending,
+  publish: (payload) => bus.publish({ kind: "media", payload }),
+});
+mediaSweep.start();
 
 // Voice-note audio TTL sweep (BET-834): deletes EXPIRED audio files every 5
 // min but KEEPS the records (transcript + waveform outlive the clip), flipping
@@ -2525,6 +2541,38 @@ const handleRequest = async (req, res) => {
         if (result?.ok && body?.action === "rename-session") {
           await syncState.refreshNow();
         }
+        respondJson(res, result.ok ? 200 : 400, result);
+        return;
+      }
+      respondJson(res, 405, { error: "method not allowed" });
+    } catch (e) {
+      // Errors return a message the model can act on, never a bare 500.
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // ---------- Inline media ----------
+  // POST /api/media  body {action, sessionID, messageID, ...action-specific}
+  //   → {ok, ...} on success, or {ok:false, error} (400) on a bad request.
+  // Three AI-facing tools with ONE route + an `action` discriminator (save |
+  // begin | show), mirroring /api/app-control:
+  //   save  — write media (base64 blob or existing file) into the artifact
+  //           mailbox and measure it.
+  //   begin — declare INTENDED metadata before a slow generation (returns a
+  //           handle; the orphan poller fails it after 10 min).
+  //   show  — swap in an existing local file (home-only path, measured).
+  // Client-visible placeholder events publish on the bus as ONE kind, `media`,
+  // with the matching `action` discriminator. See src/server/media.mjs.
+  if (path === "/api/media") {
+    try {
+      if (req.method === "POST") {
+        const body = await readJsonBody(req);
+        const deps = {
+          publish: (payload) => bus.publish({ kind: "media", payload }),
+          pending: mediaPending,
+        };
+        const result = await mediaDispatch(body?.action, body || {}, deps);
         respondJson(res, result.ok ? 200 : 400, result);
         return;
       }

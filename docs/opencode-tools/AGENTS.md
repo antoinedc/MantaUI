@@ -426,3 +426,29 @@ scratch space.
 - **Don't over-create.** Reserve todos for genuinely multi-step work (≈3+
   distinct actions). A single-step request doesn't need a checklist, and a
   wall of noise makes the real items easier to miss.
+
+## manta inline media
+
+You have three `media_*` tools to put a generated image or video INTO the
+transcript, with a correctly-sized placeholder while it is still being
+produced:
+
+- `media_save` — you have media in *some* form (raw base64 bytes, or a file you
+  downloaded with curl). Writes it into the artifact mailbox and measures it,
+  returning the real path + dimensions. Does NOT display it.
+- `media_begin` — call BEFORE a slow generation. Declares the *intended*
+  dimensions so the UI can reserve the exact final space. Returns a handle.
+- `media_show` — call AFTER the media exists, with a local path (+ the handle),
+  to swap the real media in.
+
+**`media_show` takes a LOCAL PATH ONLY.** It never fetches a URL and never
+accepts raw bytes — if you got media as bytes or from a URL, turn it into a
+file first (via `media_save`, or your own `curl`), then pass that file's path.
+The path must be inside the user's home directory.
+
+When generating something slow, call `media_begin` first, then `media_show` with
+the same handle once the file exists. A `media_begin` with no following
+`media_show` fails after 10 minutes (the placeholder is dropped). All three
+forward the current session + message id so the placeholder and artifact land
+on this turn. Install: `cp <repo>/docs/opencode-tools/media.ts
+~/.config/opencode/tools/media.ts` then restart `opencode-serve`.
