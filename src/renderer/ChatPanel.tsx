@@ -169,7 +169,7 @@ type Props = {
   // used by the optimistic "new session" flow so the first prompt + running
   // indicator appear immediately in the real chat view. Optional; present
   // only on the transient panel rendered while the tmux window is created.
-  autoSubmit?: { text: string; model?: ModelSelection; plan?: boolean };
+  autoSubmit?: { text: string; model?: ModelSelection; plan?: boolean; attachments?: Attachment[] };
   // App-control (BET-840/841): App owns the single `appControl` bus listener
   // and reaches the open panel for a `switch-model` action through these.
   // `selectModel` is registered so a model-switch applies the override through
@@ -1281,7 +1281,7 @@ export function ChatPanel({
   useEffect(() => {
     if (!autoSubmit || autoSubmitted.current) return;
     autoSubmitted.current = true;
-    const { text, model, plan } = autoSubmit;
+    const { text, model, plan, attachments } = autoSubmit;
     setModelOverride(model ?? null);
     // The draft's plan mode rides the same one-shot channel as the model
     // (the new panel can mount before the draft finishes handing off, and its
@@ -1292,6 +1292,11 @@ export function ChatPanel({
     // runs as the chosen agent.
     syncPlan(plan ?? false);
     setInput(text);
+    // (BET-1124) The draft staged files before the session existed — hand them
+    // to the composer so submit()'s normal path uploads path-ref chips into
+    // the text (@<path>) and media chips into FileParts. Already status:"ready"
+    // with a remotePath, so no per-chip upload spinner/shake here.
+    if (attachments?.length) setAttachments(attachments);
     // Clear the one-shot INSIDE the fired timeout, never in the effect body.
     // Clearing the store flips autoSubmit → undefined, which re-runs this
     // effect's cleanup (clearTimeout) and would cancel the deferred submit
@@ -1313,7 +1318,7 @@ export function ChatPanel({
       // cleanup, so there is still exactly one submission per autoSubmit value.
       autoSubmitted.current = false;
     };
-  }, [autoSubmit, setModelOverride, setInput, syncPlan]);
+  }, [autoSubmit, setModelOverride, setInput, syncPlan, setAttachments]);
 
   // BET-795: inbox "Start a session" — seed the composer (setInput) but do NOT
   // submit. One-shot via the same ref guard idiom as autoSubmit. Clearing the

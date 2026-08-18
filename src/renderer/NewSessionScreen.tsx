@@ -40,7 +40,7 @@ import { Tag } from "./Tag";
 import { ModelPicker } from "./ModelPicker";
 import { useModelCatalog } from "./modelCatalog";
 import { useAgentCatalog } from "./agentCatalog";
-import { MicButton, PlanChip, TrustRow } from "./ComposerParts";
+import { MicButton, PlanChip, TrustRow, AttachmentStrip } from "./ComposerParts";
 import { UsageDial } from "./UsageDial";
 import { IconButton } from "./IconButton";
 import { Button } from "./Button";
@@ -76,7 +76,13 @@ import type {
   TmuxCreateResult,
   WorktreeInfo,
 } from "../shared/types";
-import { type ModelSelection, resolveActiveModel } from "./chatShared";
+import {
+  type Attachment,
+  type ModelSelection,
+  guessMime,
+  mimeToInputMode,
+  resolveActiveModel,
+} from "./chatShared";
 
 // Normalise the tmux:new-session / new-window response. The (merged) server
 // returns { sessionId, windowIndex, projects }; tolerate an older server that
@@ -162,6 +168,30 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  // Hidden picker backing the attach button (BET-1124). The draft has no
+  // sessionId yet, so it uses its own input rather than the manta-attach-files
+  // bridge (which targets a live session's composer).
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Stage files a user picks into the draft's attachments. Upload is deferred
+  // to submit() — once the destination session/window name exists.
+  const onFiles = (files: FileList | null) => {
+    if (!files?.length) return;
+    const newAttachments = Array.from(files).map((f) => {
+      const mime = f.type || guessMime(f.name);
+      return {
+        id: `att-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+        filename: f.name,
+        mime,
+        asPathRef: mimeToInputMode(mime) === "other",
+        file: f,
+      };
+    });
+    updateDraft(draftId, {
+      attachments: [...draft.attachments, ...newAttachments],
+    });
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
 
   // ---- repo probe (BET-787): the new-project zero state ----
   // Probe the box for git repos + the gh CLI. The scan is purely additive: if
@@ -639,11 +669,40 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
       // lands on the session's FIRST turn (see ChatPanel's autoSubmit effect).
       // Only queue when there IS a prompt — scratch mode may submit empty.
       if (sessionId && text) {
+        // BET-1124: upload staged files into the new project's uploads dir,
+        // then pass them to the panel's auto-submit so the first prompt carries
+        // them (media → FileParts; non-media → @<path> appended). A failed
+        // upload aborts the whole send — no session left without its files.
+        const attachments: Attachment[] = [];
+        for (const a of draft.attachments) {
+          const buffer = await a.file.arrayBuffer();
+          const rp = await window.api.uploadBuffer({
+            projectName: sessionName,
+            filename: a.filename,
+            buffer,
+          });
+          if (rp) {
+            attachments.push({
+              id: a.id,
+              filename: a.filename,
+              mime: a.mime,
+              remotePath: rp,
+              status: "ready",
+              source: "drop",
+              asPathRef: a.asPathRef,
+            });
+          } else {
+            setError("Failed to upload " + a.filename);
+            setSending(false);
+            return;
+          }
+        }
         setAutoSubmitPrompt({
           sid: sessionId,
           text,
           model: draft.model ?? undefined,
           plan: draft.plan,
+          attachments,
         });
       }
       // Navigate to the new session (setActive + box-side select-window so the
@@ -727,11 +786,29 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
         // 6th param is the agent. Fan-out can't use the autoSubmit channel (it
         // sends directly), so resolve the plan agent here exactly as ChatPanel
         // does (plan.available && plan.on) so the two paths cannot diverge.
+        // BET-1124: upload staged files against the new session and pass them
+        // as attachments so fan-out doesn't silently drop them.
+        const attachments: { remotePath: string; mime: string; filename?: string }[] = [];
+        for (const a of draft.attachments) {
+          const buffer = await a.file.arrayBuffer();
+          const rp = await window.api.uploadBuffer({
+            projectName: sessionName,
+            filename: a.filename,
+            buffer,
+          });
+          if (rp) {
+            attachments.push({ remotePath: rp, mime: a.mime, filename: a.filename });
+          } else {
+            setError("Failed to upload " + a.filename);
+            setSending(false);
+            return;
+          }
+        }
         await window.api.opencodePrompt(
           sessionId,
           text,
           draft.model ?? undefined,
-          undefined,
+          attachments,
           undefined,
           plan.available && plan.on ? plan.agent : undefined,
         );
@@ -914,7 +991,35 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
             (voiceRecording ? "manta-recording" : "border-border-subtle")
           }
         >
-          <textarea
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            className="hidden"
+            tabIndex={-1}
+            aria-hidden="true"
+            onChange={(e) => onFiles(e.target.files)}
+          />
+          <div className="flex-1">
+            {draft.attachments.length > 0 && (
+              <AttachmentStrip
+                attachments={draft.attachments.map((a) => ({
+                  id: a.id,
+                  filename: a.filename,
+                  mime: a.mime,
+                  status: "ready" as const,
+                  source: "drop" as const,
+                  asPathRef: a.asPathRef,
+                  remotePath: undefined,
+                }))}
+                onRemove={(id) =>
+                  updateDraft(draftId, {
+                    attachments: draft.attachments.filter((a) => a.id !== id),
+                  })
+                }
+              />
+            )}
+            <textarea
             ref={inputRef}
             autoFocus
             value={draft.input}
@@ -926,9 +1031,10 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
                 : "Describe a task or ask a question"
             }
             rows={3}
-            className="flex-1 w-full bg-transparent border-0 text-prose text-text outline-none resize-none placeholder:text-text-faint"
+            className="w-full bg-transparent border-0 text-prose text-text outline-none resize-none placeholder:text-text-faint"
             spellCheck={false}
           />
+          </div>
 
           <button
             onClick={() => void submit()}
@@ -978,9 +1084,9 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
             <IconButton
               icon={<Paperclip />}
               label="Attach a file"
-              title="Attaching files is not available when starting a session"
+              title="Attach a file"
               size="xl"
-              disabled
+              onClick={() => fileInputRef.current?.click()}
             />
 
             {voiceEnabled ? (

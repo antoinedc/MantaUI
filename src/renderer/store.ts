@@ -18,6 +18,7 @@ import { isAssistantTurnInProgress, runWithConcurrency } from "./chatUtils";
 import { applyTheme, type ThemePref } from "./theme";
 import type { ToastItem } from "./Toast";
 import {
+  type Attachment,
   type ModelSelection,
   readSavedActiveSession,
   writeSavedActiveSession,
@@ -235,6 +236,22 @@ export type NewSessionDraft = {
   projectName: string;
   // The parent directory the new scratch folder goes in.
   scratchRoot: string;
+  // Staged files the user attached in the pre-session composer (BET-1124).
+  // Held in-memory (File refs) and uploaded lazily when the draft commits —
+  // same lifetime as the draft (lost on reload like everything else here).
+  attachments: DraftAttachment[];
+};
+
+// A file staged in a new-session draft before the session exists. `file` holds
+// the bytes in-memory; upload to ~/.manta-uploads happens at submit, once the
+// destination session/window name is known. `asPathRef` mirrors Attachment's
+// flag: false = multimodal FilePart, true = @<path> reference read by the AI.
+export type DraftAttachment = {
+  id: string;          // local id (keyed rendering/removal)
+  filename: string;
+  mime: string;
+  asPathRef: boolean;  // false = multimodal FilePart; true = @path ref
+  file: File;          // held in-memory; uploaded lazily at submit
 };
 
 // Per-window UI status: live `running`/`subagents` from the poller, plus an
@@ -419,7 +436,7 @@ type State = {
   // A one-shot prompt for a freshly-created chat session to auto-submit on its
   // first mount (draft → new-session flow). Consumed (cleared) by the panel
   // once it fires, so re-navigating to the session never re-sends it.
-  autoSubmitPrompt: { sid: string; text: string; model?: ModelSelection; plan?: boolean } | null;
+  autoSubmitPrompt: { sid: string; text: string; model?: ModelSelection; plan?: boolean; attachments?: Attachment[] } | null;
   // BET-795: a one-shot composer SEED — the inbox's "Start a session" lands in
   // a chat session with the prompt seeded into the composer but NOT submitted
   // (the user reviews + hits Enter). Delivered to the session's ChatPanel like
@@ -572,7 +589,7 @@ type State = {
   dismissDraft: (id: string) => void;
   setActiveDraft: (id: string) => void;
   setAutoSubmitPrompt: (
-    p: { sid: string; text: string; model?: ModelSelection; plan?: boolean } | null,
+    p: { sid: string; text: string; model?: ModelSelection; plan?: boolean; attachments?: Attachment[] } | null,
   ) => void;
   setSeedPrompt: (p: { sid: string; text: string } | null) => void;
   refresh: () => Promise<void>;
@@ -862,6 +879,7 @@ export const useStore = create<State>((set, get) => ({
           scratch: false,
           projectName: "",
           scratchRoot: "",
+          attachments: [],
         },
       ],
       activeDraftId: id,

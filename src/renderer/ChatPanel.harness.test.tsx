@@ -13,6 +13,8 @@ import { act } from "react";
 import { ChatPanel } from "./ChatPanel";
 import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
 import { useStore } from "./store";
+import { refreshModelCatalog } from "./modelCatalog";
+import type { Attachment } from "./chatShared";
 import {
   installMockApi,
   resetStore,
@@ -1296,5 +1298,98 @@ describe("ChatPanel auto-rename first-turn fallback (BET-1100 follow-up)", () =>
       windowIndex: 1,
       newName: "Manta setup check",
     });
+  });
+});
+
+// BET-1124: the new-session auto-submit carries staged attachments. The draft
+// hands the panel attachments (already status:"ready" with remotePath); the
+// panel seeds its composer strip from them and submit() sends path-ref chips
+// folded into the text (@<path>) and media chips as FileParts (never in text).
+describe("ChatPanel attachment auto-submit (BET-1124)", () => {
+  let api: MockApi;
+  let h: Harness | null = null;
+
+  beforeEach(() => {
+    ({ api } = installMockApi({
+      opencodeModels: () =>
+        Promise.resolve([
+          {
+            id: "claude-x",
+            providerID: "anthropic",
+            name: "Claude X",
+            limit: { context: 200000 },
+            capabilities: { input: { image: true, text: true } },
+          },
+        ]),
+      opencodeDefaultModel: () =>
+        Promise.resolve({ providerID: "anthropic", modelID: "claude-x" }),
+      opencodePrompt: () => Promise.resolve({ ok: true }),
+    }));
+    // The model catalog is module-cached; force a fresh fetch so activeModel
+    // resolves to the image-capable model above (otherwise the media chip's
+    // capability guard would refuse the send).
+    refreshModelCatalog();
+    resetStore();
+  });
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  it("seeds the composer strip and carries attachments through the first prompt", async () => {
+    const attachments: Attachment[] = [
+      {
+        id: "a1",
+        filename: "notes.md",
+        mime: "text/markdown",
+        remotePath: "/remote/notes.md",
+        status: "ready",
+        source: "drop",
+        asPathRef: true,
+      },
+      {
+        id: "a2",
+        filename: "img.png",
+        mime: "image/png",
+        remotePath: "/remote/img.png",
+        status: "ready",
+        source: "drop",
+        asPathRef: false,
+      },
+    ];
+    h = mount(
+      <ChatPanel
+        {...PROPS}
+        autoSubmit={{
+          text: "review these",
+          model: { providerID: "anthropic", modelID: "claude-x" },
+          attachments,
+        }}
+      />,
+    );
+    // submit() clears the composer strip after a successful send, so the
+    // seeding is asserted through its effects: only a panel whose strip was
+    // seeded (attachments in composer state) can fold the path-ref chip into
+    // the text or send the media chip as a FilePart.
+    await h.flush();
+
+    const calls = api.calls["opencodePrompt"] ?? [];
+    expect(calls.length).toBe(1);
+    const sentText = calls[0]?.[1] as string;
+    // Path-ref chip folded into the text as @<path> for the AI's Read tool.
+    expect(sentText).toContain("@/remote/notes.md");
+    // Media chip is NOT folded into the text.
+    expect(sentText).not.toContain("@/remote/img.png");
+    // Media chip travels as a FilePart attachment.
+    expect(calls[0]?.[3]).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          remotePath: "/remote/img.png",
+          mime: "image/png",
+          filename: "img.png",
+        }),
+      ]),
+    );
   });
 });

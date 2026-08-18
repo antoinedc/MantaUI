@@ -453,6 +453,7 @@ describe("Sidebar — only the active draft is highlighted (BET-1088)", () => {
           scratch: false,
           projectName: "",
           scratchRoot: "",
+          attachments: [],
         },
       ],
       projects: [
