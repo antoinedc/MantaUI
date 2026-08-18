@@ -1113,3 +1113,86 @@ describe("ChatPanel pending screenshots", () => {
     expect(useStore.getState().pendingScreenshots.map((s) => s.id)).toEqual(["b"]);
   });
 });
+
+// ===== Auto-rename single-rename contract (BET-1101) =====
+//
+// PR #1102 fixed the "Im then manta / Im" symptom at the root: all three chat
+// create sites now pass an EMPTY session title so opencode auto-titles from
+// the first user message. That mechanism (empty title at create sites) is
+// tested in tmux.test.mjs, but the END-TO-END single-rename behavior never
+// was. This pins the contract the reviewer asked for directly: drive the
+// FIRST user turn through the mounted panel, let the turn go busy → idle, and
+// assert exactly ONE `tmuxRenameWindow` fires — reading opencode's generated
+// title — with NO second `workspace / title` re-title shortly after.
+describe("ChatPanel auto-rename single rename (BET-1101)", () => {
+  let api: MockApi;
+  let bus: MockEventBus;
+  let h: Harness | null = null;
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  it("renames exactly once on the first turn, reading opencode's generated title", async () => {
+    // opencode titles every session from its FIRST user message for free, so
+    // the first auto-rename reads that title back via opencodeListSessions
+    // rather than spinning up a throwaway generation session (BET-1018).
+    ({ api, bus } = installMockApi({
+      opencodeListSessions: () =>
+        Promise.resolve([{ id: "ses_test", title: "Build the login page" }]),
+    }));
+    resetStore({ autoRenameSessions: true });
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    // Send the first user message through the real composer submit path.
+    const textarea = h.container.querySelector("textarea") as HTMLTextAreaElement;
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      "value",
+    )?.set;
+    await act(async () => {
+      setter?.call(textarea, "Build the login page");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      );
+    });
+    await h.flush();
+    // The optimistic user turn is in the transcript (it seeds the rename).
+    expect(h.text()).toContain("Build the login page");
+
+    // The turn goes busy → idle. The running true→false edge ARMS the
+    // auto-rename; the settled-transcript effect then evaluates it and reads
+    // opencode's generated title.
+    await emitStreamAndFlush(bus, h, {
+      sub: "running",
+      sessionId: "ses_test",
+      payload: { running: true },
+    });
+    await emitStreamAndFlush(bus, h, {
+      sub: "running",
+      sessionId: "ses_test",
+      payload: { running: false },
+    });
+
+    // EXACTLY ONE rename, with the clean generated title (not a stale
+    // "workspace / title" compound — the BET-1100 root-cause fix).
+    const renames = api.calls.tmuxRenameWindow ?? [];
+    expect(renames.length).toBe(1);
+    expect(renames[0][0]).toEqual({
+      sessionName: "proj",
+      windowIndex: 1,
+      newName: "Build the login page",
+    });
+
+    // No second `workspace / title` re-title a short time later: a single turn
+    // must not fire the every-Nth-turn drift rename.
+    await new Promise((r) => setTimeout(r, 60));
+    await h.flush();
+    expect(api.calls.tmuxRenameWindow ?? []).toHaveLength(1);
+  });
+});

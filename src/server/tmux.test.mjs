@@ -60,6 +60,15 @@ function findSetSid(cmds) {
   );
 }
 
+// Shared assertion for the chat-mode create paths (newWindow / newSession):
+// the opencode session must be created with an EMPTY title so opencode
+// auto-titles from the first user message — a seeded "workspace / window"
+// compound is what the auto-rename first-name path would read back and stamp
+// as "manta / im" (BET-1100/BET-1101).
+function assertCreatedEmptyTitle(oc, message) {
+  assert.equal(oc.created[0].title, "", message);
+}
+
 test("parseSessions builds project list from tmux -F output", () => {
   const sess = "alpha\t1\nbeta\t0";
   const wins = "alpha\t1\tmain\t1\t/home/u/alpha\nbeta\t1\tmain\t1\t/home/u/beta";
@@ -173,7 +182,7 @@ test("newWindow chatMode:true creates an opencode session AND stamps @manta-sess
   // (0) Empty title so opencode auto-titles from the first user message —
   // a seeded "workspace / window" title is what the auto-rename first-name
   // path would read back and stamp as "manta / im" (BET-1100).
-  assert.equal(oc.created[0].title, "", "chat session created with an empty title (no workspace-prefixed compound)");
+  assertCreatedEmptyTitle(oc, "chat session (new-window) created with an empty title so opencode auto-titles");
   // (2) holder pane launched (sleep infinity) rather than the default shell.
   const newWin = cmds.find((c) => c.args.includes("new-window"));
   assert.ok(newWin, "new-window issued");
@@ -225,7 +234,7 @@ test("newSession chatMode:true creates an opencode session AND stamps @manta-ses
   }
   assert.equal(oc.created.length, 1, "one opencode session created");
   assert.equal(oc.created[0].directory, cwd);
-  assert.equal(oc.created[0].title, "", "chat session created with an empty title so opencode auto-titles (BET-1100)");
+  assertCreatedEmptyTitle(oc, "chat session (new-session) created with an empty title so opencode auto-titles");
   const newSess = cmds.find((c) => c.args.includes("new-session"));
   assert.ok(newSess, "new-session issued");
   assert.ok(newSess.args.includes(CHAT_HOLDER_CMD), "holder cmd passed to new-session");
