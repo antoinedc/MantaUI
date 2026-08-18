@@ -96,23 +96,24 @@ export async function resolveBinary(bin, { access, env }) {
 const VERSION_RE = /\d+\.\d+\.\d+(?:[-.\w]*)?/;
 
 /**
- * Spawn `<absPath> --version` and read the first dotted version out of stdout.
+ * Spawn a command and resolve its stdout, or null on ANY failure.
  *
- * Every CLI in the catalog prints something like `2.1.233 (Claude Code)` or
- * `codex-cli 0.147.0`; the regex covers both. Any throw, non-zero exit, or
- * 10s timeout → returns null (never propagates).
+ * The single spawn-and-read code path in this module. Resolves null — never
+ * rejects — on a spawn throw, a child `error`, a non-zero exit, or the
+ * timeout. Callers treat null as "couldn't tell", never as a value.
  *
- * @param {string} absPath
+ * @param {string} cmd
+ * @param {string[]} args
  * @param {object} deps
  * @param {(cmd:string, args:string[], opts:any) => import("node:child_process").ChildProcess} deps.spawn
- * @param {number} [deps.timeoutMs=10000]
- * @returns {Promise<string|null>}
+ * @param {number} deps.timeoutMs
+ * @returns {Promise<string|null>} raw stdout on exit 0, else null
  */
-export function readVersion(absPath, { spawn, timeoutMs = 10_000 }) {
+function spawnStdout(cmd, args, { spawn, timeoutMs }) {
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn(absPath, ["--version"], { timeout: timeoutMs });
+      child = spawn(cmd, args, { timeout: timeoutMs });
     } catch {
       resolve(null);
       return;
@@ -139,14 +140,29 @@ export function readVersion(absPath, { spawn, timeoutMs = 10_000 }) {
 
     child.on("close", (code) => {
       clearTimeout(timer);
-      if (code !== 0) {
-        resolve(null);
-        return;
-      }
-      const m = out.match(VERSION_RE);
-      resolve(m ? m[0] : null);
+      resolve(code === 0 ? out : null);
     });
   });
+}
+
+/**
+ * Spawn `<absPath> --version` and read the first dotted version out of stdout.
+ *
+ * Every CLI in the catalog prints something like `2.1.233 (Claude Code)` or
+ * `codex-cli 0.147.0`; the regex covers both. Any throw, non-zero exit, or
+ * 10s timeout → returns null (never propagates).
+ *
+ * @param {string} absPath
+ * @param {object} deps
+ * @param {(cmd:string, args:string[], opts:any) => import("node:child_process").ChildProcess} deps.spawn
+ * @param {number} [deps.timeoutMs=10000]
+ * @returns {Promise<string|null>}
+ */
+export async function readVersion(absPath, { spawn, timeoutMs = 10_000 }) {
+  const out = await spawnStdout(absPath, ["--version"], { spawn, timeoutMs });
+  if (out == null) return null;
+  const m = out.match(VERSION_RE);
+  return m ? m[0] : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -195,44 +211,9 @@ export async function fetchLatest(entry, { fetchJson }) {
  * `npm install -g` over a vendor installer that would shadow it.
  */
 function defaultGetNpmGlobalRoot({ spawn }) {
-  return new Promise((resolve) => {
-    let child;
-    try {
-      child = spawn("npm", ["root", "-g"], { timeout: 5000 });
-    } catch {
-      resolve(null);
-      return;
-    }
-
-    let out = "";
-    child.stdout?.on("data", (d) => {
-      out += String(d);
-    });
-
-    const timer = setTimeout(() => {
-      try {
-        child.kill();
-      } catch {
-        /* already dead */
-      }
-      resolve(null);
-    }, 5000);
-
-    child.on("error", () => {
-      clearTimeout(timer);
-      resolve(null);
-    });
-
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      if (code !== 0) {
-        resolve(null);
-        return;
-      }
-      const trimmed = out.trim();
-      resolve(trimmed || null);
-    });
-  });
+  return spawnStdout("npm", ["root", "-g"], { spawn, timeoutMs: 5000 }).then(
+    (out) => (out == null ? null : out.trim() || null),
+  );
 }
 
 // ---------------------------------------------------------------------------
