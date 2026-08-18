@@ -34,7 +34,7 @@ function makeEngine(overrides = {}) {
   return engine;
 }
 
-const TOOL_COUNT = 15;
+const TOOL_COUNT = 18; // 15 reads (BET-1164) + 3 watcher tools watch/unwatch/list_watches (BET-1165)
 
 // ---------------------------------------------------------------------------
 // Registry integrity
@@ -63,6 +63,9 @@ test("registry exposes every cto read tool with a complete shape, all mode auto"
       "session_plan_mode",
       "get_config",
       "query_multica",
+      "watch",
+      "unwatch",
+      "list_watches",
     ].sort(),
   );
   for (const t of tools) {
@@ -71,7 +74,9 @@ test("registry exposes every cto read tool with a complete shape, all mode auto"
     assert.equal(typeof t.description, "string");
     assert.ok(t.description.length > 0);
     assert.ok(t.params && typeof t.params === "object");
-    assert.equal(t.mode, "auto");
+    // Reads are auto; the watcher tools are auto/confirm (watch registers a
+    // recurring probe, so it is confirm-gated).
+    assert.ok(t.mode === "auto" || t.mode === "confirm");
     assert.equal(typeof t.run, "function");
   }
 });
@@ -108,12 +113,15 @@ test("dispatch honors a gate returning deny (fails closed)", async () => {
   assert.match(result.error, /denied/);
 });
 
-test("dispatch fails closed when the gate requests confirm (not wired yet)", async () => {
+test("dispatch requires confirmation for a confirm-gated tool and does NOT act", async () => {
   const engine = makeEngine();
   const gate = () => "confirm";
+  // A confirm-gated tool that is not trusted pauses with needConfirmation
+  // (Issue 2 gate wiring) instead of failing closed.
   const result = await engine.dispatch("list_models", {}, { gate });
-  assert.equal(result.ok, false);
-  assert.match(result.error, /requires confirmation/);
+  assert.equal(result.ok, true);
+  assert.equal(result.needConfirmation, true);
+  assert.equal(typeof result.preview, "string");
 });
 
 test("default gate returns allow for every tool (Issue 1 ships auto)", async () => {

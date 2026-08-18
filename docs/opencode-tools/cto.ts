@@ -27,7 +27,8 @@ const MANTA_SERVER = process.env.MANTA_SERVER_URL || "http://127.0.0.1:8787";
 const CTO_TOOLS =
   "list_sessions, list_projects, read_transcript, search_messages, git_status, " +
   "git_branch, git_log, list_models, get_usage, usage_stopped, session_usage, " +
-  "context_state, session_plan_mode, get_config, query_multica";
+  "context_state, session_plan_mode, get_config, query_multica, watch, unwatch, " +
+  "list_watches";
 
 function boxToken() {
   const fromEnv = process.env.MANTA_BOX_TOKEN;
@@ -51,22 +52,34 @@ function authHeaders(body) {
 
 export const cto = tool({
   description: [
-    "Deterministic, read-only on-call CTO tools: inspect what's running on this box,",
+    "Deterministic on-call CTO tools: inspect what's running on this box,",
     "read chat transcripts, search messages, git state, models, plan usage,",
     "stopped conversations, per-session cost/context/plan-mode, config, and the",
-    "Multica task board. Nothing here mutates anything — all reads.",
+    "Multica task board. Reads never mutate anything. The watch/unwatch/list_watches",
+    "tools register watchers (watch is a confirm-mode action).",
     `Pick \`tool\` from: ${CTO_TOOLS}.`,
     "Pass that tool's arguments as a free-form object in \`args\`",
     "(e.g. {tool:\"read_transcript\", args:{sessionID:\"ses_...\"}}).",
+    "If the call returns needConfirmation for a confirm-mode tool, surface",
+    "\"I need your go-ahead: <preview>\" to the user; when they reply \"go ahead\",",
+    "re-invoke the SAME tool+args with \`approve: <id>\` (the id from the",
+    "needConfirmation result). Reply \"no\" to abort (reject).",
   ].join(" "),
   args: {
     tool: tool.schema
       .string()
-      .describe(`The cto read tool to run. One of: ${CTO_TOOLS}.`),
+      .describe(`The cto tool to run. One of: ${CTO_TOOLS}.`),
     args: tool.schema
       .object({})
       .passthrough()
       .describe("Free-form arguments for the chosen tool (depends on the tool)."),
+    approve: tool.schema
+      .string()
+      .optional()
+      .describe(
+        "When re-dispatching a confirm-mode tool after the user said \"go ahead\", pass " +
+          "the id from the earlier needConfirmation result to authorize it.",
+      ),
   },
   async execute(args, context) {
     const res = await fetch(`${MANTA_SERVER}/api/cto`, {
@@ -75,6 +88,7 @@ export const cto = tool({
       body: JSON.stringify({
         tool: args.tool,
         args: args.args ?? {},
+        approve: args.approve,
         sessionID: context?.sessionID,
         directory: context?.directory,
       }),

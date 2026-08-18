@@ -67,7 +67,7 @@ import {
   startCapSweeper,
 } from "./capabilities.mjs";
 import { notifyCapSession } from "./capNotifier.mjs";
-import { createDelegateEngine, buildPermissionRuleset as delegateBuildPermissionRuleset, resolveForgeOwner } from "./delegate.mjs";
+import { createDelegateEngine, buildPermissionRuleset as delegateBuildPermissionRuleset, resolveForgeOwner, loadJobs as loadDelegateJobs } from "./delegate.mjs";
 import {
   reportProgress,
   readProgressRecord,
@@ -940,6 +940,56 @@ async function maybeEnsureCtoAgent() {
   }
 }
 void maybeEnsureCtoAgent();
+
+// On-call CTO inbound funnel (Issue 2): the single place a CTO-bound event
+// enters the box. Producers (the send_to_cto tool, the watcher poller, a
+// scheduled prompt targeting the CTO, a webhook routed to the CTO) all call
+// `inbound()`. The server-side "call active" flag is FALSE this issue (Issue 3
+// sets it), so every event takes the PARKED route → dedupe → the existing
+// notification router (fireNotify). No parallel notify path.
+const ctoInbound = cto.createCtoInbound({
+  isCallActive: () => false, // Issue 3 sets the live flag; until then always parked
+  ctoSessionID: null, // resolved in Issue 3 when the live route flips on
+  fireNotify: (args) => push.fireNotify(args),
+  sendPrompt: (args) => promptDelivery.deliver(args),
+});
+
+// Which read a watcher's surface maps to. EXTERNAL surfaces (multica) go
+// through multica.mjs; NATIVE surfaces (schedule, delegate) through the box's
+// own stores. `session` needs no poller read — session events arrive directly
+// via send_to_cto. `crashlytics` is an external MCP read with no server-side
+// engine yet (stretch), so it never matches until that read lands (Issue 3).
+async function ctoSurfaceRead(surface, query) {
+  switch (surface) {
+    case "multica":
+      return queryMultica({ query: query ?? "" });
+    case "schedule":
+      return { ok: true, data: { jobs: await listJobs() } };
+    case "delegate":
+      return { ok: true, data: { jobs: await loadDelegateJobs() } };
+    case "crashlytics":
+      return { ok: true, data: { issues: [] } };
+    case "session":
+    default:
+      return { ok: true, data: {} };
+  }
+}
+
+// Watcher poller (Issue 2): probes each active watch against its surface's
+// existing read and routes a matching + unseen event into the inbound funnel.
+// In-flight-guarded + timer.unref(), mirroring the schedule/delegate pollers.
+const watcherPoller = cto.createWatcherPoller({
+  loadWatches: async () => Array.isArray(cto.loadCtoStore()?.watches) ? cto.loadCtoStore().watches : [],
+  saveWatches: async (watches) => {
+    const store = cto.loadCtoStore();
+    store.watches = Array.isArray(watches) ? watches : [];
+    await cto.saveCtoStore(store);
+  },
+  readSurface: ctoSurfaceRead,
+  sendToInbound: (input) => ctoInbound.inbound(input),
+});
+// eslint-disable-next-line no-unused-vars
+const stopWatcherPoller = watcherPoller.start({ intervalMs: 15_000 });
 
 // Sweep expired artifact-mailbox files (TTL past) every 5 min — non-destructive
 // otherwise: downloads do not delete, the sweep is what reclaims disk.
@@ -2614,13 +2664,58 @@ const handleRequest = async (req, res) => {
   // on-call CTO agent. dispatch wraps every tool so a quiet box / bad engine
   // returns a structured error, never a throw. `ctx.onNarrate` is a server-side
   // seam (wired by issue 3's voice window), never read off the HTTP body.
+  // ---------- On-call CTO inbound (Issue 2) ----------
+  // POST /api/cto/inbound  body {surface?, payload, seenId?} → {ok:true, ...}
+  // The single entry point for CTO-bound events. Producers: the global
+  // send_to_cto tool, the watcher poller, a scheduled prompt targeting the
+  // CTO, or a webhook routed to the CTO. With no live call (this issue) events
+  // are deduped + surfaced via the existing notification router; Issue 3 flips
+  // the live route on. See src/server/cto.mjs (createCtoInbound).
+  if (path === "/api/cto/inbound") {
+    try {
+      if (req.method === "POST") {
+        const body = await readJsonBody(req);
+        const result = await ctoInbound.inbound({
+          surface: body?.surface,
+          payload: body?.payload ?? {},
+          seenId: body?.seenId,
+        });
+        respondJson(res, result.ok ? 200 : 400, result);
+        return;
+      }
+      respondJson(res, 405, { error: "method not allowed" });
+    } catch (e) {
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
   if (path === "/api/cto") {
     try {
       if (req.method === "POST") {
         const body = await readJsonBody(req);
-        const result = await getCtoEngine().dispatch(body?.tool, body?.args ?? {}, {
+        const engine = getCtoEngine();
+        // Text-loop gate (Issue 2): an `approve` id re-authorizes the previously
+        // needConfirmation'd (tool, args) — the user said "go ahead". "no" is
+        // rejectConfirm; both drive the in-conversation loop (Issue 3 replaces it
+        // with voice).
+        if (typeof body?.approve === "string" && body.approve) engine.approveConfirm(body.approve);
+        let cfg = {};
+        try {
+          cfg = (await local.configGet()) ?? {};
+        } catch {
+          cfg = {};
+        }
+        // The gate reports each tool's declared mode: read-only auto tools run
+        // freely; confirm-mode tools (watch) pause for the user's go-ahead
+        // (handled inside dispatch via trustedActions / the approve loop).
+        const toolModes = new Map(engine.listTools().map((t) => [t.name, t.mode]));
+        const gate = (toolName) => (toolModes.get(toolName) === "confirm" ? "confirm" : "allow");
+        const result = await engine.dispatch(body?.tool, body?.args ?? {}, {
           sessionID: body?.sessionID,
           cwd: body?.directory,
+          trustedActions: Array.isArray(cfg?.cto?.trustedActions) ? cfg.cto.trustedActions : [],
+          gate,
         });
         respondJson(res, result.ok ? 200 : 400, result);
         return;

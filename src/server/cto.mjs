@@ -27,9 +27,12 @@
 //     engine-level failures, and the tools guard empty inputs.
 
 import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { statePath } from "../shared/paths.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 import { describeModel } from "../shared/modelGuide.mjs";
+import { createSeenIdFilter } from "./seenIds.mjs";
+import { startPoller } from "./startPoller.mjs";
 
 export const CTO_STORE_PATH = statePath("cto.json");
 
@@ -115,6 +118,12 @@ export function createCtoEngine(deps = {}) {
     gitLog = remoteGitLog,
     queryMultica = async () => ({ ok: true, data: {} }),
     isPlanAgent = (name) => name === "plan" || name === "manta-plan",
+    loadWatches = async () => Array.isArray(loadCtoStore()?.watches) ? loadCtoStore().watches : [],
+    saveWatches = async (watches) => {
+      const store = loadCtoStore();
+      store.watches = Array.isArray(watches) ? watches : [];
+      await saveCtoStore(store);
+    },
     now = () => Date.now(),
   } = deps;
 
@@ -648,9 +657,84 @@ export function createCtoEngine(deps = {}) {
   });
 
   // -------------------------------------------------------------------------
+  // Watchers (Issue 2) — watch / unwatch / list_watches
+  // -------------------------------------------------------------------------
+  // A watch registers a recurring probe against a SURFACE (multica, schedule,
+  // delegate, session…). The watcher poller (createWatcherPoller below) runs
+  // each active watch's query against the surface's existing read and, when
+  // its condition matches AND its seenId is new, calls cto.inbound with that
+  // surface. `watch` is a CONFIRM-mode tool: registering a repeat probe is a
+  // side effect, so it needs the user's go-ahead (see the gate dispatch below).
+  register({
+    name: "watch",
+    description:
+      "Register a watcher that probes a surface and surfaces a notification when its " +
+      "condition matches. `surface` is one of: multica (the task board), schedule, " +
+      "delegate, or session. `query` names what to read on that surface (for multica, " +
+      "e.g. the issue key or 'read from the board'); `condition` is a natural-language " +
+      "phrase describing the trigger (e.g. 'a P0 opens'). The watcher poller runs it " +
+      "periodically via the surface's existing read. NOTE: this is a confirm-mode " +
+      "action — it registers a recurring probe, so it needs your go-ahead before it takes " +
+      "effect.",
+    params: {
+      surface: { type: "string", description: "The surface to watch: multica, schedule, delegate, or session." },
+      query: { type: "string", description: "What to query on that surface (informational)." },
+      condition: { type: "string", description: "Natural-language condition for when to trigger." },
+    },
+    mode: "confirm",
+    run: async (ctx, args) => {
+      const surface = String(args?.surface ?? "").trim();
+      if (!surface) return { ok: false, error: "surface is required (multica, schedule, delegate, session)" };
+      const watch = {
+        id: randomBytes(4).toString("hex"),
+        surface,
+        query: String(args?.query ?? "").trim(),
+        condition: String(args?.condition ?? "").trim(),
+        active: true,
+        lastFiredAt: null,
+        createdAt: now(),
+      };
+      const watches = await loadWatches();
+      await saveWatches([...watches, watch]);
+      return { ok: true, data: { watch } };
+    },
+  });
+
+  register({
+    name: "unwatch",
+    description: "Remove a watcher by its id (from list_watches). Read what is registered," +
+      " then stop the probe.",
+    params: { id: { type: "string", description: "The watcher id to remove." } },
+    run: async (ctx, args) => {
+      const id = String(args?.id ?? "");
+      const watches = await loadWatches();
+      const next = (watches ?? []).filter((w) => w?.id !== id);
+      if (next.length === (watches ?? []).length) return { ok: true, data: { removed: false } };
+      await saveWatches(next);
+      return { ok: true, data: { removed: true } };
+    },
+  });
+
+  register({
+    name: "list_watches",
+    description: "List every registered watcher: id, surface, query, condition, active," +
+      " and when it last fired. Read-only.",
+    params: {},
+    run: async () => ({ ok: true, data: { watches: await loadWatches() } }),
+  });
+
+  // -------------------------------------------------------------------------
   // Dispatch
   // -------------------------------------------------------------------------
   const byName = new Map(tools.map((t) => [t.name, t]));
+
+  // The in-conversation confirmation loop (Issue 2's gate wiring). When a
+  // confirm-mode tool is not in `trustedActions`, dispatch returns
+  // `{ needConfirmation: true, id, preview }` WITHOUT running. The cto text
+  // agent surfaces "I need your go-ahead: <preview>"; the user's "go ahead"
+  // calls approveConfirm(id) and the re-dispatch runs; "no" calls
+  // rejectConfirm(id) to abort. Issue 3 replaces this text loop with voice.
+  const pendingConfirms = new Map(); // id -> { tool, args, approved }
 
   async function dispatch(name, args, ctx = {}) {
     const def = byName.get(String(name ?? ""));
@@ -668,10 +752,27 @@ export function createCtoEngine(deps = {}) {
       return { ok: false, error: `tool ${def.name} denied` };
     }
     if (decision === "confirm") {
-      // Issue 1 ships only "auto" tools and wires no confirm/deny surface.
-      // The seam exists so Issue 3 can gate before run; until then a confirm
-      // request fails closed with a clear message rather than running.
-      return { ok: false, error: `tool ${def.name} requires confirmation (not wired yet)` };
+      // A trusted action runs without asking; anything else pauses for the
+      // user's go-ahead (returns needConfirmation and does NOT act yet).
+      const trusted = Array.isArray(ctx?.trustedActions) ? ctx.trustedActions : [];
+      if (!trusted.includes(def.name)) {
+        const id = computeConfirmId(def.name, args ?? {});
+        const prior = pendingConfirms.get(id);
+        if (prior?.approved) {
+          // The user said "go ahead" → this exact (tool, args) is authorized;
+          // consume the approval and run.
+          pendingConfirms.delete(id);
+        } else {
+          if (!prior) pendingConfirms.set(id, { tool: def.name, args: args ?? {}, approved: false });
+          return {
+            ok: true,
+            needConfirmation: true,
+            id,
+            tool: def.name,
+            preview: buildPreview(def, args ?? {}),
+          };
+        }
+      }
     }
     const narrate = typeof ctx?.onNarrate === "function" ? ctx.onNarrate : NOOP_NARRATE;
     try {
@@ -689,6 +790,18 @@ export function createCtoEngine(deps = {}) {
     tools,
     listTools: () => tools.map((t) => ({ ...t })),
     dispatch,
+    // In-conversation gate loop (Issue 2): the cto text agent surfaces a
+    // needConfirmation preview; the user's "go ahead"/"no" drives these.
+    approveConfirm: (id) => {
+      const p = pendingConfirms.get(id);
+      if (!p) return false;
+      p.approved = true;
+      pendingConfirms.set(id, p);
+      return true;
+    },
+    rejectConfirm: (id) => pendingConfirms.delete(id),
+    listPendingConfirms: () =>
+      [...pendingConfirms.entries()].map(([id, p]) => ({ id, tool: p.tool, approved: p.approved })),
   };
 }
 
@@ -751,4 +864,221 @@ async function remoteGitLog(cwd, { n = 10, oneline = true } = {}) {
   const args = ["-C", cwd, "log", `--max-count=${n}`];
   if (oneline) args.push("--oneline");
   return runGit(args, cwd);
+}
+
+// ---------------------------------------------------------------------------
+// Inbound funnel (Issue 2) — createCtoInbound
+// ---------------------------------------------------------------------------
+// The single place a CTO-bound event enters the box. Producers (the
+// send_to_cto tool, the watcher poller, a scheduled prompt, a webhook) all
+// call `inbound({ surface, payload, seenId })`. Live vs parked is decided by
+// the server-side "call active" flag (Issue 3 sets it; this issue it is
+// always false, so every event takes the parked route). Parked events are
+// de-duped by seenId and surfaced through the EXISTING notification router
+// (push.mjs fireNotify) — no second notify path.
+export function createCtoInbound({
+  seenFilter = createSeenIdFilter(),
+  isCallActive = () => false,
+  ctoSessionID = null,
+  fireNotify = async () => {},
+  sendPrompt = async () => {},
+} = {}) {
+  async function inbound({ surface = "session", payload = {}, seenId } = {}) {
+    // De-dupe: an event whose seenId was already handled is a re-delivery
+    // (the same opencode event arrives on multiple streams; a watcher may
+    // re-poll). An event with no seenId is never swallowed.
+    if (typeof seenId === "string" && seenId && seenFilter.seen(seenId)) {
+      return { ok: true, deduped: true };
+    }
+    if (isCallActive()) {
+      // LIVE route (stub — Issue 3 sets the "call active" flag and injects
+      // the event as a turn into the CTO session). Until then this never runs.
+      if (sendPrompt && ctoSessionID && typeof payload?.message === "string" && payload.message) {
+        await sendPrompt({ sessionId: ctoSessionID, text: payload.message }).catch((e) =>
+          console.warn("[cto] live inject failed:", e?.message ?? e),
+        );
+      }
+      return { ok: true, live: true };
+    }
+    // PARKED route: surface via the existing notification router.
+    const message = typeof payload?.message === "string" ? payload.message.trim() : "";
+    if (message) {
+      try {
+        await fireNotify({
+          message,
+          title: typeof payload?.title === "string" && payload.title ? payload.title : undefined,
+          urgent: !!payload?.urgent,
+          sessionID: typeof payload?.sessionID === "string" ? payload.sessionID : undefined,
+        });
+      } catch (e) {
+        console.warn("[cto] inbound notify failed:", e?.message ?? e);
+      }
+    }
+    return { ok: true, parked: true };
+  }
+  return { inbound };
+}
+
+// ---------------------------------------------------------------------------
+// Watcher poller (Issue 2) — createWatcherPoller
+// ---------------------------------------------------------------------------
+// For each ACTIVE watch it runs the surface's existing read, computes a stable
+// seenId, and when the seenId is new AND the condition matches it calls the
+// inbound funnel with that surface. In-flight-guarded + timer.unref(), mirroring
+// the schedule/delegate pollers. The read + the seenId + the condition matcher
+// are all injected so the tick is unit-testable with no live engines.
+//
+// A watch whose surface read fails is skipped (logged, never wedges the loop);
+// a watch is only re-armed once its seenId moves, so a constantly-matching
+// read doesn't re-fire every tick.
+export function createWatcherPoller({
+  loadWatches,
+  saveWatches,
+  readSurface,
+  seenFilter = createSeenIdFilter(),
+  sendToInbound,
+  conditionMatches = defaultConditionMatches,
+  computeSeenId = defaultComputeSurfaceSeenId,
+  messageFor = defaultWatchMessage,
+  now = () => Date.now(),
+} = {}) {
+  let inFlight = false;
+
+  async function tick() {
+    if (inFlight) return;
+    inFlight = true;
+    try {
+      const watches = await loadWatches();
+      let mutated = false;
+      const snapshot = Array.isArray(watches) ? watches : [];
+      for (const watch of snapshot) {
+        if (!watch || watch.active === false || watch.disabled) continue;
+        if (!watch.surface) continue;
+        let read;
+        try {
+          read = await readSurface(watch.surface, watch.query);
+        } catch (e) {
+          console.warn(`[cto] watch ${watch.id} surface "${watch.surface}" read failed:`, e?.message ?? e);
+          continue;
+        }
+        const seenId = computeSeenId(read);
+        if (seenFilter.seen(seenId)) continue; // no new content since last tick
+        if (!conditionMatches(watch.condition, read)) continue; // not a trigger
+        await sendToInbound({ surface: watch.surface, payload: { message: messageFor(watch, read) }, seenId });
+        watch.lastFiredAt = now();
+        mutated = true;
+      }
+      if (mutated) await saveWatches(snapshot);
+    } catch (e) {
+      console.warn("[cto] watcher tick failed:", e?.message ?? e);
+    } finally {
+      inFlight = false;
+    }
+  }
+
+  return {
+    tick,
+    start: ({ intervalMs = 15_000 } = {}) => startPoller(tick, { intervalMs, label: "cto-watcher", immediate: true }),
+  };
+}
+
+// Build the notification message for a fired watch. Falls back to a clear
+// "condition matched on <surface>" line when the read carries no snippet.
+export function defaultWatchMessage(watch, read) {
+  const condition =
+    typeof watch?.condition === "string" && watch.condition ? ` (${watch.condition})` : "";
+  const snippet = firstSnippet(read?.data ?? read);
+  const base = `CTO watch on ${watch?.surface ?? "?"}${condition} matched`;
+  return snippet ? `${base}: ${snippet}` : base;
+}
+
+// ---------------------------------------------------------------------------
+// Pure helpers (injectable wires, unit-tested)
+// ---------------------------------------------------------------------------
+
+// Stable short hash of a string (used for confirm ids and surface seen ids).
+export function stableHash(str) {
+  let h = 2166136261;
+  const s = String(str ?? "");
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(36);
+}
+
+// Deterministic id for a pending confirmation of a (tool, args) pair, so the
+// user's "go ahead" re-dispatch of the SAME tool+args resolves to the pending
+// record.
+export function computeConfirmId(toolName, args) {
+  return stableHash(`${toolName}:${JSON.stringify(args ?? {})}`);
+}
+
+// A short human summary of a tool call for the "I need your go-ahead: …"
+// surface. Used in the needConfirmation preview.
+export function buildPreview(def, args) {
+  const header = [def?.name ?? "?"];
+  if (args && typeof args === "object") {
+    const entries = Object.entries(args).filter(([, v]) => v !== undefined && v !== null && v !== "");
+    if (entries.length) {
+      header.push(entries.map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : String(v)}`).join(", "));
+    }
+  }
+  const firstLine = (String(def?.description ?? "").split("\n")[0] ?? "").slice(0, 120);
+  if (firstLine) header.push(`— ${firstLine}`);
+  return header.join(" ");
+}
+
+const CONDITION_STOPWORDS = new Set([
+  "a", "an", "the", "of", "to", "in", "on", "for", "and", "or", "with",
+  "when", "if", "is", "are", "was", "were", "new", "opens", "open", "appears",
+  "shows", "changes", "has", "have", "any", "that", "this", "there", "it",
+]);
+
+// Keywords of a natural-language condition (lowercased tokens minus stopwords) —
+// the deterministic v1 condition evaluator. Issue 3 may replace this with an
+// LLM/narration judgement; until then a keyword hit is the honest seam.
+export function conditionKeywords(condition) {
+  if (typeof condition !== "string") return [];
+  return condition
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length > 0 && !CONDITION_STOPWORDS.has(t));
+}
+
+// Default condition evaluator: matches when any keyword from the condition is
+// present in the serialized read, or when the condition is empty/no keywords
+// (treat any new content as a trigger). Lowercased case-insensitive match.
+export function defaultConditionMatches(condition, read) {
+  const keywords = conditionKeywords(condition);
+  if (keywords.length === 0) return true;
+  const haystack = JSON.stringify(read ?? {}).toLowerCase();
+  return keywords.some((k) => haystack.includes(k));
+}
+
+// A stable seenId for a surface read. Prefers an explicit `seenId` on the read
+// (readers may stamp one, e.g. the newest issue id), else hashes a stable
+// serialization of the whole read. Two identical reads hash identically, so
+// the poller does not re-fire until content actually changes.
+export function defaultComputeSurfaceSeenId(read) {
+  if (read && typeof read === "object" && typeof read.seenId === "string" && read.seenId) {
+    return read.seenId;
+  }
+  return stableHash(JSON.stringify(read ?? {}));
+}
+
+// First short text snippet from a read for the watch notification message.
+function firstSnippet(data) {
+  if (!data) return null;
+  if (typeof data === "string") return data.slice(0, 140);
+  const issues = Array.isArray(data?.issues) ? data.issues : null;
+  if (issues) {
+    const first = issues.find((i) => i && (i.identifier || i.title));
+    if (first) {
+      const label = [first.identifier, first.status, first.title].filter(Boolean).join(" · ");
+      return label.slice(0, 140);
+    }
+  }
+  const text = JSON.stringify(data);
+  return text && text !== "{}" && text !== "[]" ? text.slice(0, 140) : null;
 }
