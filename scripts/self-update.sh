@@ -88,7 +88,13 @@ fi
 if [ -x "$MANTA_HOME/runtime/node/bin/node" ]; then
   NODE_CMD="$MANTA_HOME/runtime/node/bin/node"
 else
-  NODE_CMD="node"
+  # No vendored runtime (a git-checkout box runs whatever Node is on PATH).
+  # Resolve to an ABSOLUTE path: the `[ -x "$NODE_CMD" ]` guard below is a real
+  # filesystem test, and with the bare `node` fallback that guard ran `-x node`
+  # against CWD — false even when node is on PATH, so every CLI upgrade was
+  # silently skipped (BET-1158). `|| true` yields empty on a genuinely missing
+  # node, which the guard correctly treats as "not available".
+  NODE_CMD="$(command -v node || true)"
 fi
 
 # Put the box's OWN vendored runtime FIRST on PATH (BET-829). install.sh does
@@ -110,6 +116,23 @@ fi
 # vendored runtime (it runs whatever Node is on PATH, by design).
 if [ -d "$MANTA_HOME/runtime/node/bin" ]; then
   PATH="$MANTA_HOME/runtime/node/bin:$PATH"
+  export PATH
+fi
+
+# --- Put the AI CLIs on PATH for the upgrade step (BET-1158) ------------------
+# upgrade-clis.mjs spawns each installed CLI's upgrade command BY NAME
+# (`opencode upgrade`, `claude update`, …) and those binaries live in
+# ~/.local/bin (claude), ~/.opencode/bin (opencode) and ~/.bun/bin — dirs that
+# a ~/.bashrc adds but a systemd/launchd service's minimal PATH never carries.
+# Prepend the same home-relative set resolveBinary() in
+# src/server/cliUpdates.mjs searches so the upgrade commands resolve. A
+# packaged box already got its vendored runtime/node/bin above; these are the
+# user-level dirs that apply to every box kind.
+if [ -n "${HOME:-}" ]; then
+  for _cli_dir in "$HOME/.local/bin" "$HOME/.opencode/bin" "$HOME/.bun/bin"; do
+    [ -d "$_cli_dir" ] || continue
+    PATH="$_cli_dir:$PATH"
+  done
   export PATH
 fi
 
