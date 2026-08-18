@@ -119,13 +119,13 @@ extension StepGroupContent {
 /// scroll pan) slides the cell left to reveal it on a leftward drag. Every
 /// TiledView surface shares this cell, so both the parent chat and the subagent
 /// drill-in get the gutter with no per-screen code.
+@MainActor
 struct TranscriptBlockCell: TiledCellContent {
     typealias StateValue = Void
 
     let item: TranscriptRow
     let tokens: Tokens
 
-    @MainActor
     func body(context: CellContext<Void>) -> some View {
         // The reveal offset now comes from MessagingUI's OWN pan recogniser, which
         // is installed on the collection view and declares simultaneous recognition
