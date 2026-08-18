@@ -78,6 +78,13 @@ session-state snapshot.
   shared by renderer + server (`groq.mjs`, `subagentSync.mjs`,
   `modelGuide.mjs`).
 
+## Native iOS app — see `mobile/native/AGENTS.md`
+
+The Swift/iOS client has its own agent guide at **`mobile/native/AGENTS.md`**: architecture,
+the xcodegen build model, how to verify Swift changes (there is no Swift toolchain on the Linux
+box), the Swift 6 concurrency rules, and the transcript-list crash history. Read it before
+touching anything under `mobile/native/`.
+
 ## Build / run
 
 ```
