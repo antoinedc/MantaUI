@@ -135,7 +135,7 @@ import {
   classifyFollowOnScroll,
   createUserScrollIntent,
   hasUserScrollIntent,
-  isScrollbarGutterPress,
+  releaseUserScrollIntent,
   USER_SCROLL_INTENT_WINDOW_MS,
   FOLLOW_THRESHOLD_PX,
   describeSessionClose,
@@ -5186,22 +5186,34 @@ describe("user scroll intent", () => {
     expect(hasUserScrollIntent(intent, 1_000 + USER_SCROLL_INTENT_WINDOW_MS + 1)).toBe(false);
   });
 
-  it("holds indefinitely while the scrollbar gutter is held", () => {
-    // A slow drag can outlast the window; the flag, not the timestamp, covers it.
+  it("holds indefinitely while a pointer button is down", () => {
+    // A slow scrollbar drag can outlast the window; the flag, not the
+    // timestamp, is what covers it.
     const intent = createUserScrollIntent();
-    intent.draggingGutter = true;
+    intent.pointerDown = true;
     expect(hasUserScrollIntent(intent, Number.MAX_SAFE_INTEGER)).toBe(true);
   });
 
-  it("counts a press past clientWidth as a scrollbar gutter press", () => {
-    // Scroller at x=100, 300px content box, ~15px scrollbar to its right.
-    expect(isScrollbarGutterPress(408, { left: 100, clientWidth: 300 })).toBe(true);
+  it("grants the trailing window to a press that actually scrolled", () => {
+    // A quick click in the scrollbar track can release before its later scroll
+    // events land, so the release has to vouch for them.
+    const intent = createUserScrollIntent();
+    intent.pointerDown = true;
+    intent.pointerScrolled = true;
+    releaseUserScrollIntent(intent, 5_000);
+    expect(intent.pointerDown).toBe(false);
+    expect(hasUserScrollIntent(intent, 5_000 + USER_SCROLL_INTENT_WINDOW_MS)).toBe(true);
   });
 
-  it("does NOT count a press inside the content box (clicking a tool card)", () => {
-    expect(isScrollbarGutterPress(250, { left: 100, clientWidth: 300 })).toBe(false);
-    // The content box's own right edge is still content, not gutter.
-    expect(isScrollbarGutterPress(400, { left: 100, clientWidth: 300 })).toBe(false);
+  it("REGRESSION: a press that never scrolled grants nothing on release", () => {
+    // Clicking a tool card open re-measures its row and Virtuoso compensates a
+    // few ms later. If the click earned a window, that compensation would look
+    // like a user scroll-up — the same bug from the other side.
+    const intent = createUserScrollIntent();
+    intent.pointerDown = true;
+    releaseUserScrollIntent(intent, 5_000);
+    expect(intent.pointerDown).toBe(false);
+    expect(hasUserScrollIntent(intent, 5_001)).toBe(false);
   });
 });
 

@@ -3951,35 +3951,61 @@ export const USER_SCROLL_INTENT_WINDOW_MS = 250;
 
 /** Mutable "did the user just do something" record. Owned by Transcript.tsx. */
 export type UserScrollIntent = {
-  /** Timestamp of the last input event on the scroller. */
+  /** Timestamp of the last wheel / touch / key input on the scroller. */
   lastInputAt: number;
-  /** True between pointerdown on the scrollbar gutter and pointerup. */
-  draggingGutter: boolean;
+  /** A pointer button is held down on the scroller. */
+  pointerDown: boolean;
+  /** A scroll fired while that button was held — this press IS a scroll drag. */
+  pointerScrolled: boolean;
 };
 
 export function createUserScrollIntent(): UserScrollIntent {
-  return { lastInputAt: Number.NEGATIVE_INFINITY, draggingGutter: false };
+  return {
+    lastInputAt: Number.NEGATIVE_INFINITY,
+    pointerDown: false,
+    pointerScrolled: false,
+  };
 }
 
 export function hasUserScrollIntent(intent: UserScrollIntent, now: number): boolean {
-  if (intent.draggingGutter) return true;
+  // A held button covers every pointer-driven scroll: dragging the scrollbar
+  // thumb, click-to-page in the track, and drag-selecting past the top edge
+  // (which auto-scrolls). See the note on pointer intent below for why this is
+  // a held FLAG and not a geometric test of where the press landed.
+  if (intent.pointerDown) return true;
   return now - intent.lastInputAt <= USER_SCROLL_INTENT_WINDOW_MS;
 }
 
 /**
- * Was a pointerdown on the scroller's vertical scrollbar gutter?
+ * A pointer press became a scroll gesture — grant it the trailing window on
+ * release.
  *
- * A press inside the content box is a click (expanding a tool card, selecting
- * text) and must NOT vouch for the re-measure scrolls that follow it — that
- * would reopen the same hole from the other side. The gutter is the strip
- * between `clientWidth` (content box, scrollbar excluded) and the element's
- * full border-box width, so a press past `clientWidth` is a scroll gesture.
+ * WHY POINTER INTENT IS "BUTTON HELD", NOT "PRESSED ON THE SCROLLBAR".
+ * The obvious discriminator is geometry: a press past `clientWidth` is on the
+ * scrollbar gutter, a press inside the content box is a click (expanding a
+ * tool card, selecting text) and must not vouch for the re-measure scrolls
+ * that follow it. That test is a NO-OP under overlay scrollbars — the macOS
+ * default, and therefore the primary platform — where the bar is painted over
+ * the content and `clientWidth` equals the full border-box width, so no press
+ * is ever past it. Measured in headed Chromium: classic scrollbars report
+ * clientWidth 385 / offsetWidth 400, overlay reports 400 / 400, and BOTH
+ * dispatch pointerdown to the scroller at the same clientX. Geometry cannot
+ * tell them apart; the button state can. In the same measurement every scroll
+ * of a thumb drag fired with the button held, and a plain content click fired
+ * none.
+ *
+ * The residue is a press-and-hold ON CONTENT that spans a re-measure — a text
+ * selection drag, mostly, where detaching is the right behaviour anyway.
+ *
+ * A quick track click can release before its later scroll events land, so a
+ * press that demonstrably scrolled earns the normal input window on pointerup.
+ * A press that never scrolled earns nothing, which is what keeps a tool-card
+ * click from vouching for the compensation its own expansion causes.
  */
-export function isScrollbarGutterPress(
-  clientX: number,
-  el: { left: number; clientWidth: number },
-): boolean {
-  return clientX - el.left > el.clientWidth;
+export function releaseUserScrollIntent(intent: UserScrollIntent, now: number): void {
+  if (intent.pointerScrolled) intent.lastInputAt = now;
+  intent.pointerDown = false;
+  intent.pointerScrolled = false;
 }
 
 /**

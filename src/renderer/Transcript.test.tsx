@@ -308,6 +308,36 @@ describe("Transcript follow state", () => {
     h.unmount();
   });
 
+  it("detaches on a scrollbar drag (a button is held while the scroll fires)", () => {
+    // The path geometry could not cover: under overlay scrollbars (macOS) a
+    // press on the bar lands INSIDE the content box, so only the held button
+    // distinguishes it from a click. Measured in headed Chromium: every scroll
+    // of a thumb drag fires with the button down.
+    const { h, el, changes } = mountFollowing();
+    measure(el, { scrollTop: 1500, scrollHeight: 2000, clientHeight: 500 });
+    act(() => el.dispatchEvent(new Event("scroll")));
+    act(() => el.dispatchEvent(new Event("pointerdown")));
+    measure(el, { scrollTop: 1000, scrollHeight: 2000, clientHeight: 500 });
+    act(() => el.dispatchEvent(new Event("scroll")));
+    expect(changes.at(-1)).toBe(false);
+    h.unmount();
+  });
+
+  it("REGRESSION: clicking a tool card open does not detach", () => {
+    // A click scrolls nothing while held; the expansion re-measures the row and
+    // Virtuoso compensates a few ms LATER. That compensation must not inherit
+    // intent from the click that caused it.
+    const { h, el, changes } = mountFollowing();
+    measure(el, { scrollTop: 1500, scrollHeight: 2000, clientHeight: 500 });
+    act(() => el.dispatchEvent(new Event("scroll")));
+    act(() => el.dispatchEvent(new Event("pointerdown")));
+    act(() => window.dispatchEvent(new Event("pointerup")));
+    measure(el, { scrollTop: 1000, scrollHeight: 2000, clientHeight: 500 });
+    act(() => el.dispatchEvent(new Event("scroll")));
+    expect(changes).not.toContain(false);
+    h.unmount();
+  });
+
   it("re-attaches when a scroll lands back at the bottom, gesture or not", () => {
     const { h, el, changes } = mountFollowing();
     measure(el, { scrollTop: 1500, scrollHeight: 2000, clientHeight: 500 });

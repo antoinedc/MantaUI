@@ -1298,11 +1298,26 @@ Backup at `~/.tmux.conf.pre-MantaUI` on the remote if it was ever modified.
   WHETHER the user put it there. `classifyFollowOnScroll` takes a
   `userIntent` argument and only returns `false` when both agree; intent is
   a short window (`USER_SCROLL_INTENT_WINDOW_MS`) refreshed by wheel /
-  touch / keydown on the scroller, plus a held flag for a scrollbar-gutter
-  drag (`isScrollbarGutterPress` — a press inside the CONTENT box is a
-  click, e.g. expanding a tool card, and must not vouch for the re-measure
-  scrolls that follow it). Landing within `FOLLOW_THRESHOLD_PX` of the
-  bottom still re-attaches unconditionally.
+  touch / keydown on the scroller, plus a held-pointer flag. Landing within
+  `FOLLOW_THRESHOLD_PX` of the bottom still re-attaches unconditionally.
+
+  **Pointer intent is "a button is held", NOT "the press landed on the
+  scrollbar" — the geometric test is a no-op on the primary platform.** The
+  obvious discriminator is `clientX > left + clientWidth` (the gutter the
+  scrollbar reserves). That works with classic scrollbars and never fires
+  under **overlay** scrollbars, the macOS default, where the bar is painted
+  OVER the content and `clientWidth` is the full border-box width — so a
+  Mac user could not detach by dragging the scrollbar at all, while Windows
+  could. Measured in headed Chromium (the probe is worth re-running before
+  changing this): classic reports `clientWidth` 385 / `offsetWidth` 400,
+  overlay reports 400 / 400, and BOTH dispatch `pointerdown` to the scroller
+  at the same `clientX`. In the same run every scroll of a thumb drag fired
+  with the button held and a plain content click fired none — so the button
+  state separates them in both modes. A press that never scrolled earns
+  nothing on release (`releaseUserScrollIntent`), which is what stops a
+  tool-card click from vouching for the compensation its own expansion
+  causes; a press that DID scroll earns the normal window, covering a quick
+  track click whose scrolls land after the release.
 
   Two consequences worth knowing before editing this:
   - **A programmatic scroll away from the tail must now detach EXPLICITLY.**

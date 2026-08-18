@@ -42,7 +42,7 @@ import {
   classifyFollowOnScroll,
   createUserScrollIntent,
   hasUserScrollIntent,
-  isScrollbarGutterPress,
+  releaseUserScrollIntent,
   type EntryMotionState,
   type LiveTurn,
   workingIndicatorLabel,
@@ -534,28 +534,18 @@ export function Transcript({
     const mark = () => {
       intent.lastInputAt = Date.now();
     };
-    // A press in the CONTENT box is a click, not a scroll — see
-    // isScrollbarGutterPress. Dragging the gutter can outlast the intent
-    // window, hence the held flag rather than a timestamp.
-    const onPointerDown = (e: PointerEvent) => {
-      const rect = el.getBoundingClientRect();
-      intent.draggingGutter = isScrollbarGutterPress(e.clientX, {
-        left: rect.left,
-        clientWidth: el.clientWidth,
-      });
-      if (intent.draggingGutter) mark();
+    // Every pointer-driven scroll (thumb drag, click-to-page in the track,
+    // drag-select autoscroll) holds a button for the scrolls it causes; a
+    // click does not scroll at all while held. That, NOT where the press
+    // landed, is the discriminator — see releaseUserScrollIntent for the
+    // measurement that ruled out the geometric one under overlay scrollbars.
+    const onPointerDown = () => {
+      intent.pointerDown = true;
+      intent.pointerScrolled = false;
     };
-    const onPointerUp = () => {
-      if (!intent.draggingGutter) return;
-      intent.draggingGutter = false;
-      mark();
-    };
-    // Drag-selecting past the edge of the scroller auto-scrolls it; the button
-    // check keeps an idle mouse moving over the transcript from counting.
-    const onPointerMove = (e: PointerEvent) => {
-      if (e.buttons !== 0) mark();
-    };
+    const onPointerUp = () => releaseUserScrollIntent(intent, Date.now());
     const onScroll = () => {
+      if (intent.pointerDown) intent.pointerScrolled = true;
       const next = classifyFollowOnScroll(
         el,
         prevScrollTop,
@@ -567,11 +557,14 @@ export function Transcript({
     el.addEventListener("wheel", mark, { passive: true });
     el.addEventListener("touchstart", mark, { passive: true });
     el.addEventListener("touchmove", mark, { passive: true });
+    // Only reachable when focus is INSIDE the transcript (a "Load earlier"
+    // button, a link in a message) — during a turn it normally sits in the
+    // composer, which is outside this scroller and scrolls nothing. Kept
+    // because that focused case is real and the listener is free.
     el.addEventListener("keydown", mark);
     el.addEventListener("pointerdown", onPointerDown);
-    el.addEventListener("pointermove", onPointerMove, { passive: true });
     el.addEventListener("scroll", onScroll, { passive: true });
-    // On window, not the scroller: a gutter drag routinely ends with the
+    // On window, not the scroller: a scrollbar drag routinely ends with the
     // pointer somewhere else entirely.
     window.addEventListener("pointerup", onPointerUp);
     window.addEventListener("pointercancel", onPointerUp);
@@ -581,7 +574,6 @@ export function Transcript({
       el.removeEventListener("touchmove", mark);
       el.removeEventListener("keydown", mark);
       el.removeEventListener("pointerdown", onPointerDown);
-      el.removeEventListener("pointermove", onPointerMove);
       el.removeEventListener("scroll", onScroll);
       window.removeEventListener("pointerup", onPointerUp);
       window.removeEventListener("pointercancel", onPointerUp);
