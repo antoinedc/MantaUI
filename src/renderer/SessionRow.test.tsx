@@ -248,4 +248,14 @@ describe("SessionRow — one line: dot · name · age", () => {
     expect(name.className).toContain("overflow-hidden");
     expect(name.textContent).toBe("Add CSV export");
   });
+
+  it("marquee: true ellipsizes the inner text at rest", () => {
+    h = mount(<SessionRow status="idle" name="Add CSV export" marquee />);
+    const el = h.container.firstElementChild as HTMLElement;
+    const clip = el.firstElementChild!.nextElementSibling as HTMLElement;
+    const inner = clip.firstElementChild as HTMLElement;
+    expect(inner.className).toContain("text-ellipsis");
+    expect(inner.className).toContain("overflow-hidden");
+    expect(inner.className).toContain("max-w-full");
+  });
 });
