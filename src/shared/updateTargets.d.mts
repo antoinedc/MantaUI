@@ -61,3 +61,19 @@ export interface UpdateAllPlan {
  * Plan a single "Update all" run over the target list.
  */
 export function planUpdateAll(targets: UpdateTarget[]): UpdateAllPlan;
+
+export type RowUpdateState =
+  | { kind: "updating" }
+  | { kind: "busy" }
+  | { kind: "idle" };
+
+/**
+ * Decide a per-target update row's in-flight presentation (BET-1160):
+ * `updating` = THIS target is mid-update (spinner + its own label), `busy` =
+ * some OTHER update is in flight (this row's button disabled), `idle` =
+ * nothing in flight (normal presentation).
+ */
+export function rowUpdateState(
+  id: string,
+  state?: { updatingTargetId?: string | null; busy?: boolean },
+): RowUpdateState;

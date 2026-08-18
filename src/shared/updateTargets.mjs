@@ -221,3 +221,36 @@ export function planUpdateAll(targets) {
     confirmBody,
   };
 }
+
+/**
+ * Decide a per-target update row's in-flight presentation (BET-1160).
+ *
+ * Pure, so Settings (and any future consumer) and the banner never disagree
+ * about which row is busy / disabled / the one actually updating. Given the
+ * target id and the shared in-flight snapshot (`updatingTargetId` from the
+ * store, plus the aggregate `busy` that folds in the App-local box upgrade),
+ * returns exactly one of:
+ *
+ *   - `{ kind: "updating" }` — THIS target is the one being updated (`id`
+ *     equals `updatingTargetId`): its own button shows a spinner + "Updating…"
+ *     and is disabled; no other row shows a spinner.
+ *   - `{ kind: "busy" }`      — some OTHER update is in flight (`busy` is true
+ *     via a different `updatingTargetId` or the box leg): this row's button is
+ *     disabled, with no spinner of its own.
+ *   - `{ kind: "idle" }`      — nothing in flight: the row keeps its normal
+ *     action presentation.
+ *
+ * `id` is the row's target id; `updatingTargetId` is the store's in-flight
+ * target (null = none); `busy` is the aggregate busy flag. A row with a
+ * transient error is handled by the caller (it re-presents the button for
+ * retry regardless of this result).
+ *
+ * @param {string} id the target id of the row being considered
+ * @param {{ updatingTargetId: string|null, busy: boolean }} state
+ * @returns {{ kind: "updating" } | { kind: "busy" } | { kind: "idle" }}
+ */
+export function rowUpdateState(id, { updatingTargetId = null, busy = false } = {}) {
+  if (updatingTargetId != null && updatingTargetId === id) return { kind: "updating" };
+  if (updatingTargetId != null || busy) return { kind: "busy" };
+  return { kind: "idle" };
+}
