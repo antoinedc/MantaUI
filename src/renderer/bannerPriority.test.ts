@@ -4,9 +4,7 @@ import { pickBanner, BANNER_PRIORITY, type BannerState } from "./bannerPriority"
 const off: BannerState = {
   reconnecting: false,
   incompatible: false,
-  versionSkew: false,
-  updateFailed: false,
-  serverUpdate: false,
+  updates: false,
 };
 
 describe("pickBanner", () => {
@@ -15,31 +13,21 @@ describe("pickBanner", () => {
   });
 
   it("returns the only active kind", () => {
-    expect(pickBanner({ ...off, serverUpdate: true })).toBe("server-update");
-    expect(pickBanner({ ...off, updateFailed: true })).toBe("update-failed");
-    expect(pickBanner({ ...off, versionSkew: true })).toBe("version-skew");
+    expect(pickBanner({ ...off, updates: true })).toBe("updates");
     expect(pickBanner({ ...off, incompatible: true })).toBe("incompatible");
     expect(pickBanner({ ...off, reconnecting: true })).toBe("reconnecting");
   });
 
   it("picks the highest severity when several co-occur", () => {
     // all on → reconnecting wins
-    expect(pickBanner({ ...off, reconnecting: true, incompatible: true, versionSkew: true, updateFailed: true, serverUpdate: true })).toBe("reconnecting");
+    expect(pickBanner({ ...off, reconnecting: true, incompatible: true, updates: true })).toBe("reconnecting");
     // reconnecting off → incompatible wins
-    expect(pickBanner({ ...off, incompatible: true, versionSkew: true, updateFailed: true, serverUpdate: true })).toBe("incompatible");
-    // reconnecting + incompatible off → version-skew wins
-    expect(pickBanner({ ...off, versionSkew: true, updateFailed: true, serverUpdate: true })).toBe("version-skew");
-    // only the two lowest → update-failed wins over server-update
-    expect(pickBanner({ ...off, updateFailed: true, serverUpdate: true })).toBe("update-failed");
+    expect(pickBanner({ ...off, incompatible: true, updates: true })).toBe("incompatible");
+    // only the low tier → updates wins
+    expect(pickBanner({ ...off, updates: true })).toBe("updates");
   });
 
   it("priority order is exactly the spec severity chain", () => {
-    expect(BANNER_PRIORITY).toEqual([
-      "reconnecting",
-      "incompatible",
-      "version-skew",
-      "update-failed",
-      "server-update",
-    ]);
+    expect(BANNER_PRIORITY).toEqual(["reconnecting", "incompatible", "updates"]);
   });
 });

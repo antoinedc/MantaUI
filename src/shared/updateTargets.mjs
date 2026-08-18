@@ -95,3 +95,129 @@ export function summarizeUpdates(targets) {
   const disruptions = [...new Set(avail.map((t) => t.disruption).filter(Boolean))];
   return { count: names.length, names, disruptions };
 }
+
+/**
+ * Decide what the ONE unified update banner says (stage 3, BET-1098).
+ *
+ * Pure: given the canonical `UpdateTarget[]` (fixed display order) plus two
+ * aggregate flags, produce the banner copy — or `null` when there is nothing
+ * to say. This is what collapses the five banner kinds (version-skew,
+ * update-failed, server-update, plus the folded "behind" compat variant) into
+ * one `updates` banner.
+ *
+ * Precedence is exactly this order:
+ *   1. `failure` set        → danger, dismissible  ("update failed")
+ *   2. `mandatory`          → accent, NON-dismissible ("must update to keep
+ *                             working with this box" — the old version-skew)
+ *   3. exactly 1 available   → `${label} has an update available`
+ *   4. 2+ available          → `${n} updates available · ${names}`
+ *   5. else                  → `null` (no banner)
+ *
+ * `available` means the update exists AND we can apply it; `manual` targets
+ * never count (a "update by hand" row is not something an Update button does).
+ * `names` are the available labels in the FIXED display order joined by ", ";
+ * past three, take the first three and append ` +${n-3} more`.
+ *
+ * @param {Array<object>} targets UpdateTarget[] in fixed display order
+ * @param {{ mandatory: boolean, failure: string | null }} opts
+ * @returns {{ text: string, actionLabel: string, tone: "accent"|"danger",
+ *            dismissible: boolean } | null}
+ */
+export function describeUpdateBanner(targets, { mandatory = false, failure = null } = {}) {
+  if (failure != null && failure !== "") {
+    return {
+      text: `Update failed: ${failure}`,
+      actionLabel: "Download manually",
+      tone: "danger",
+      dismissible: true,
+    };
+  }
+
+  const avail = (Array.isArray(targets) ? targets : []).filter(
+    (t) => t && t.available && !t.manual,
+  );
+
+  if (mandatory) {
+    return {
+      text: "Manta UI must be updated to keep working with this box",
+      actionLabel: "Update",
+      tone: "accent",
+      dismissible: false,
+    };
+  }
+
+  if (avail.length === 1) {
+    return {
+      text: `${avail[0].label} has an update available`,
+      actionLabel: "Update",
+      tone: "accent",
+      dismissible: true,
+    };
+  }
+
+  if (avail.length >= 2) {
+    let names = avail
+      .slice(0, 3)
+      .map((t) => t.label)
+      .join(", ");
+    if (avail.length > 3) names += ` +${avail.length - 3} more`;
+    return {
+      text: `${avail.length} updates available · ${names}`,
+      actionLabel: "Update all",
+      tone: "accent",
+      dismissible: true,
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Plan a single "Update all" run over the canonical `UpdateTarget[]` (stage 3).
+ *
+ * `box` means ANY box-side target is updatable (server, opencode, or a CLI);
+ * `desktopDownload` / `desktopInstall` are the desktop leg (runs last).
+ * `needsConfirm` is true iff any available target's disruption is not "none"
+ * — a CLI-only update (all disruptions "none") needs NO confirm and NO dialog.
+ *
+ * `confirmBody` is the ordered confirm sentences:
+ *   1. any `ends-turns`                 → "Updating opencode restarts it, …"
+ *   2. any `reconnect` and NO ends-turns → "The box will restart briefly …"
+ *   3. any `app-restart`                 → "Manta UI will restart itself …"
+ * Rule 2 is suppressed when rule 1 applies (an opencode restart already
+ * implies the box restart — never print both).
+ *
+ * @param {Array<object>} targets UpdateTarget[]
+ * @returns {{ desktopDownload: boolean, box: boolean, desktopInstall: boolean,
+ *             needsConfirm: boolean, confirmBody: string[] }}
+ */
+export function planUpdateAll(targets) {
+  const avail = (Array.isArray(targets) ? targets : []).filter(
+    (t) => t && t.available && !t.manual,
+  );
+  const desktopDownload = avail.some((t) => t.id === "desktop");
+  const box = avail.some((t) => t.id !== "desktop");
+  const hasEndsTurns = avail.some((t) => t.disruption === "ends-turns");
+  const hasReconnect = avail.some((t) => t.disruption === "reconnect");
+  const hasAppRestart = avail.some((t) => t.disruption === "app-restart");
+
+  const confirmBody = [];
+  if (hasEndsTurns) {
+    confirmBody.push(
+      "Updating opencode restarts it, which ends every agent turn currently running. Any unsaved work in a running turn is lost.",
+    );
+  } else if (hasReconnect) {
+    confirmBody.push("The box will restart briefly and reconnect on its own.");
+  }
+  if (hasAppRestart) {
+    confirmBody.push("Manta UI will restart itself once the box is done.");
+  }
+
+  return {
+    desktopDownload,
+    box,
+    desktopInstall: desktopDownload,
+    needsConfirm: avail.some((t) => t.disruption !== "none"),
+    confirmBody,
+  };
+}

@@ -1,48 +1,41 @@
-// ===== Banner priority (BET-416 §E) =====
+// ===== Banner priority (BET-416 §E, stage 3 of the unified-update epic) =====
 //
-// App.tsx used to stack up to six full-width bars — five UpdateBar variants
-// (app update, update error, server update, version skew, compatibility) plus
-// ReconnectingBanner — that could all co-occur. The spec collapses them to
-// AT MOST ONE bar, chosen by severity:
+// App.tsx renders AT MOST ONE full-width bar, chosen by severity. The spec
+// collapsed the five update banner kinds (version-skew, update-failed,
+// server-update, plus the folded "behind" compat variant) into ONE `updates`
+// banner — its copy is produced by `describeUpdateBanner` in
+// src/shared/updateTargets.mjs. So the priority chain is:
 //
-//   reconnecting > incompatible > version skew > update failed > server update
+//   reconnecting > incompatible > updates
+//
+// `reconnecting` and `incompatible` stay ABOVE `updates` because they are a
+// different class of problem (connectivity, and a hard wire-contract block) —
+// an update prompt must not mask a broken link or a version that cannot talk
+// to the box at all.
 //
 // "Update available" (a downloaded desktop auto-update) is NOT a bar at all —
 // it is demoted to a small --accent dot on the Settings entry in the sidebar
 // footer; the bar is reserved for states that actually block you.
 //
 // `pickBanner` is pure so the severity order is unit-tested without mounting
-// App. The "behind" compatibility variant (box on the supported major but
-// older than the desktop) folds into `server-update` — it is an upgrade
-// prompt with the same self-update action, not a blocking incompatibility.
+// App.
 
-export type BannerKind =
-  | "reconnecting"
-  | "incompatible"
-  | "version-skew"
-  | "update-failed"
-  | "server-update";
+export type BannerKind = "reconnecting" | "incompatible" | "updates";
 
 export type BannerState = {
   /** Events-WebSocket is degraded (anything but connected/idle). */
   reconnecting: boolean;
   /** Desktop↔box are on different majors (wire-contract mismatch). */
   incompatible: boolean;
-  /** Client is older than the server's `minClient` (non-dismissible). */
-  versionSkew: boolean;
-  /** A desktop auto-update failed (integrity / permission). */
-  updateFailed: boolean;
-  /** A server update is available, OR the box is "behind" (upgradeable). */
-  serverUpdate: boolean;
+  /** Any update state warrants the banner (available / mandatory / failed). */
+  updates: boolean;
 };
 
 /** Severity order, highest first. */
 export const BANNER_PRIORITY: BannerKind[] = [
   "reconnecting",
   "incompatible",
-  "version-skew",
-  "update-failed",
-  "server-update",
+  "updates",
 ];
 
 /** Map a BannerKind to its BannerState flag (kebab kind → camelCase flag). */
@@ -50,9 +43,7 @@ function flagFor(kind: BannerKind, state: BannerState): boolean {
   switch (kind) {
     case "reconnecting": return state.reconnecting;
     case "incompatible": return state.incompatible;
-    case "version-skew": return state.versionSkew;
-    case "update-failed": return state.updateFailed;
-    case "server-update": return state.serverUpdate;
+    case "updates": return state.updates;
   }
 }
 

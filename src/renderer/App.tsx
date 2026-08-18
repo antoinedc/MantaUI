@@ -31,6 +31,8 @@ import { ConfirmModal } from "./ConfirmModal";
 import { UsageResumeModal } from "./UsageResumeModal";
 import { ReconnectingBanner } from "./ReconnectingBanner";
 import { pickBanner, type BannerState } from "./bannerPriority";
+import { describeUpdateBanner, planUpdateAll } from "../shared/updateTargets.mjs";
+import { refreshUpdateTargets } from "./updateCheck";
 import { parsePairPayload } from "../shared/pairPayload";
 import { channelConfig } from "../shared/channel.mjs";
 import { ErrorBoundary } from "./ErrorBoundary";
@@ -220,9 +222,9 @@ function Shell() {
   const setUpdateError = useStore((s) => s.setUpdateError);
   const boxIncompatible = useStore((s) => s.boxIncompatible);
   const setBoxIncompatible = useStore((s) => s.setBoxIncompatible);
-  const serverUpdatePrompt = useStore((s) => s.serverUpdatePrompt);
   const setServerUpdatePrompt = useStore((s) => s.setServerUpdatePrompt);
   const serverUpdateProgress = useStore((s) => s.serverUpdateProgress);
+  const updateTargets = useStore((s) => s.updateTargets);
   const connectionState = useStore((s) => s.connectionState);
   const launcherFlags = useStore((s) => s.launcherFlags);
   const createDraft = useStore((s) => s.createDraft);
@@ -934,14 +936,12 @@ function Shell() {
 
   // Server-update available (BET-225 stage 3): main forwards the box's
   // `serverUpdateAvailable` bus event to the renderer via the
-  // `serverUpdateAvailable` IPC channel. The renderer renders a "Server
-  // update available: {version}" bar via the shared UpdateBar component —
-  // same component as the desktop auto-update prompt, just a different
-  // message + button label (`serverUpdateApply` runs `scripts/self-update.sh`
-  // on the box). On mobile the IPC listener is a no-op (httpApi shim
-  // returns `() => {}`); mobile-specific mobile UI is out of scope — this
-  // subscription exists so the store field + bus-case stay in sync for a
-  // later mobile pass.
+  // `serverUpdateAvailable` IPC channel. The box's own poller fires this while
+  // we stay connected, so it is what surfaces a release that drops WHILE the
+  // app is open. We keep the store field (bus-case parity) and ALSO refresh
+  // the unified UpdateTarget[] — that is what the `updates` banner reads, so
+  // a poller-found release appears without waiting for a reconnect. On mobile
+  // the IPC listener is a no-op (httpApi shim returns `() => {}`).
   useEffect(() => {
     if (!window.api.onServerUpdateAvailable) return;
     const off = window.api.onServerUpdateAvailable((payload) => {
@@ -949,31 +949,28 @@ function Shell() {
         version: payload.version,
         notesUrl: payload.notesUrl ?? undefined,
       });
+      // Opportunistic; the banner re-derives from updateTargets.
+      void refreshUpdateTargets().catch(() => {});
     });
     return off;
   }, []);
 
-  // Check the box for an update as soon as we have a live connection, and
-  // again on every reconnect.
+  // Refresh the unified update picture as soon as we have a live connection,
+  // and again on every reconnect.
   //
-  // The box polls on its own timer, but that timer answers "has a release
-  // happened", not "is someone here to see it". A desktop that has been closed
-  // for a week reconnects to a box whose own last check may be nearly a full
-  // interval old, so the banner would be up to that late for the one moment it
-  // actually matters — the moment the user opens the app. This makes the
-  // common case immediate and leaves the timer as the backstop for when nobody
-  // is looking (it still fires the push).
-  //
-  // Cheap: one ~95-byte conditional GET on the box, which answers 304 when
-  // nothing changed. The result needs no handling here — the server publishes
-  // the usual `serverUpdateAvailable` bus event (deduped per version), so the
-  // banner appears through the subscription above, exactly as if the timer had
-  // found it. Failures are ignored on purpose: this is opportunistic, and the
-  // poller plus the manual button in Settings → About both remain.
+  // The server poller answers "has a release happened" on its own timer, but
+  // that timer is not "is someone here to see it". A desktop that has been
+  // closed for a week reconnects to a box whose own last check may be nearly a
+  // full interval old, so the banner would be up to that late for the one moment
+  // it actually matters — the moment the user opens the app. The shared
+  // `refreshUpdateTargets` runs BOTH legs (desktop + box), writes the unified
+  // UpdateTarget[] to the store, and is what drives the `updates` banner; the
+  // fast on-connect path is simply that same shared function called against a
+  // live connection. Failures are ignored on purpose: this is opportunistic,
+  // and the manual button in Settings → About plus the server poller remain.
   useEffect(() => {
     if (connectionState.state !== "connected") return;
-    if (!window.api.serverUpdateCheck) return;
-    void window.api.serverUpdateCheck().catch(() => {});
+    void refreshUpdateTargets().catch(() => {});
   }, [connectionState.state, apiGeneration]);
 
   // Server-update progress (this ticket): while the box runs
@@ -1352,35 +1349,51 @@ function Shell() {
   // finishOnboarding clears the force flag + re-reads config → normal shell,
   // no app restart.
 
-  // ===== Banner collapse (BET-416 §E) =====
+  // ===== Banner collapse (BET-416 §E, unified-update stage 3) =====
   //
   // At most ONE full-width bar is visible, chosen by severity
-  // (reconnecting > incompatible > version skew > update failed > server
-  // update). "Update available" (a downloaded desktop auto-update) is NOT a
-  // bar — it is demoted to a small --accent dot on the Settings entry in the
-  // sidebar footer (see Sidebar.tsx, reads `updatePrompt` from the store);
-  // the bar is reserved for states that actually block you. The "behind"
-  // compatibility variant folds into `server-update` (it is an upgrade prompt
-  // with the same self-update action, not a blocking incompatibility).
+  // (reconnecting > incompatible > updates). The five update banner kinds
+  // (version skew, update failed, server update, plus the folded "behind"
+  // compat variant) collapse into ONE `updates` banner whose copy comes from
+  // the pure `describeUpdateBanner(targets, {mandatory, failure})` in
+  // src/shared/updateTargets.mjs. "Update available" (a downloaded desktop
+  // auto-update) is NOT a bar — it is demoted to a small --accent dot on the
+  // Settings entry in the sidebar footer (see Sidebar.tsx, reads `updatePrompt`
+  // from the store); the bar is reserved for states that actually block you.
   const reconnecting = connectionState.state !== "connected" && connectionState.state !== "idle";
   const incompatible =
     boxIncompatible || (showCompatibilityCard && compatibilityVariant === "incompatible");
-  const versionSkew = chooseUpdateSkewVariant(clientVersion, serverMinClient) === "outdated";
-  const updateFailed = !!updateError;
-  const serverUpdate = !!serverUpdatePrompt || (showCompatibilityCard && compatibilityVariant === "behind");
-  const bannerState: BannerState = { reconnecting, incompatible, versionSkew, updateFailed, serverUpdate };
+  // `mandatory` is the old version-skew guard — this client no longer meets the
+  // box's minClient, so the "must update" banner is non-dismissible. It is a
+  // FLAG on the aggregate, not its own banner.
+  const mandatory = chooseUpdateSkewVariant(clientVersion, serverMinClient) === "outdated";
+  const updateBanner = describeUpdateBanner(updateTargets, {
+    mandatory,
+    failure: updateError?.message ?? null,
+  });
+  const bannerState: BannerState = {
+    reconnecting,
+    incompatible,
+    updates: updateBanner !== null,
+  };
   const activeBanner = pickBanner(bannerState);
 
   // BET-640: running the box's self-update can now fail EARLY (before the
   // server restart) — e.g. a packaged box that can't resolve its release
   // manifest, or a git box whose fetch dies. The RPC resolves {ok:false} in
-  // that case; surface it in the EXISTING update-failed banner (the same
-  // state the auto-update path already feeds) instead of silently reporting
-  // success and leaving the box stale.
-  // Restarting opencode ends every in-flight agent turn, so the box
-  // self-update is gated behind an explicit confirm dialog. The two
-  // server-update UpdateBars open it; "Update & restart" in the dialog is what
-  // actually fires applyServerUpdate().
+  // that case; surface it in the `updates` banner's danger tone via
+  // `updateError` instead of silently reporting success and leaving the box
+  // stale.
+  //
+  // Restarting opencode ends every in-flight agent turn, so a box self-update
+  // is gated behind an explicit confirm. Two entry points:
+  //   - Settings → About's per-row "Update & restart" is a STANDALONE box
+  //     update: it opens `confirmServerUpdate` → applyServerUpdate() and never
+  //     touches a desktop build (updateAllRunRef stays false, so the
+  //     desktop-install gate below never fires).
+  //   - The unified banner's "Update"/"Update all" goes through `runUpdateAll`
+  //     below, which shows its own "Update everything?" confirm when the plan
+  //     is disruptive.
   const [confirmServerUpdate, setConfirmServerUpdate] = useState(false);
 
   // BET-659: Artifacts panel open/closed. Owned here because the toggle lives
@@ -1410,6 +1423,28 @@ function Shell() {
   // error/progress clear.
   const [boxUpgrading, setBoxUpgrading] = useState(false);
 
+  // runUpdateAll state (stage 3, BET-1098). `updateAllRunRef` is true while a
+  // run's DESKTOP install is pending; `updateAllBoxConfirmed` is true once the
+  // box leg (if any) has completed AND the connection is confirmed back. A
+  // standalone box update (Settings → About's "Update & restart") leaves
+  // updateAllRunRef false, so the desktop-install gate never fires for it. The
+  // confirm modal is promise-based so the orchestrator can await the choice.
+  const updateAllRunRef = useRef(false);
+  const updateAllBoxConfirmed = useRef(false);
+  const updateAllResolvers = useRef<{ resolve: (ok: boolean) => void } | null>(null);
+  const [updateAllConfirmBody, setUpdateAllConfirmBody] = useState<string | null>(null);
+
+  // Step 4 of runUpdateAll: once the desktop download has landed (updatePrompt
+  // set) AND any box leg has completed + reconnected, restart into the new
+  // desktop build. Idempotent — clears the run ref so it fires at most once.
+  const finishUpdateAllOnce = () => {
+    if (!updateAllRunRef.current) return;
+    if (!useStore.getState().updatePrompt) return;
+    if (!updateAllBoxConfirmed.current) return;
+    updateAllRunRef.current = false;
+    void window.api.autoUpdateInstall();
+  };
+
   // Reconnect after a box self-upgrade → re-fetch the version pair so the
   // compatibility check re-evaluates against the box's NEW version. `boxUpgrading`
   // stays true until the refetch confirms the box advanced (bind in the reconcile
@@ -1431,6 +1466,11 @@ function Shell() {
       setBoxUpgrading(false);
       useStore.getState().setServerUpdateProgress(null);
       setUpdateError(null);
+      // The box run has completed and the connection is confirmed back (the
+      // reconnect refetch advanced the version). If runUpdateAll has a desktop
+      // install waiting on the box leg, fire it now.
+      updateAllBoxConfirmed.current = true;
+      finishUpdateAllOnce();
     }
   }, [boxUpgrading, compatibilityVariant]);
 
@@ -1471,6 +1511,82 @@ function Shell() {
     }
   };
 
+  // ===== The ONE update action: runUpdateAll (stage 3, BET-1098) =====
+  //
+  // Desktop install is terminal and runs LAST — nothing can follow it. The
+  // desktop bytes download concurrently with the box work, then the box leg
+  // runs (with the destructive restart gated behind one confirm), then the
+  // new desktop build installs once the box has completed AND reconnected.
+  const runUpdateAll = async () => {
+    const plan = planUpdateAll(updateTargets);
+
+    // 1. Desktop download in flight CONCURRENTLY with the box work — free
+    //    wall-clock time. A rejection here degrades to "no desktop install at
+    //    the end"; it must not abort the box leg.
+    if (plan.desktopDownload) {
+      window.api.autoUpdateDownload().catch(() => {});
+    }
+
+    // 2. One confirm if anything disruptive is about to happen. Cancelling
+    //    cancels the WHOLE run — the download already in flight simply is
+    //    never installed. A CLI-only update (needsConfirm false) shows NO
+    //    dialog at all: nothing disruptive happens, so nothing interrupts.
+    if (plan.needsConfirm) {
+      const ok = await new Promise<boolean>((resolve) => {
+        updateAllResolvers.current = { resolve };
+        setUpdateAllConfirmBody(plan.confirmBody.join(" "));
+      });
+      if (!ok) return;
+    }
+
+    if (plan.desktopInstall) updateAllRunRef.current = true;
+
+    // 3. Box leg. `applyServerUpdate` owns boxUpgrading / serverUpdateProgress /
+    //    boxRestarting / the 120s cap / isTransientUpdateNetworkError — reused
+    //    wholesale. The reconnect + success-reconcile effects resolve the real
+    //    outcome; `updateAllBoxConfirmed` flips true there (connection back),
+    //    which is what releases the desktop install.
+    if (plan.box) {
+      updateAllBoxConfirmed.current = false;
+      await applyServerUpdate();
+    }
+
+    // No box leg → nothing to wait for: mark the box confirmed now so the
+    // desktop install fires as soon as the download lands (updatePrompt).
+    if (!plan.box && plan.desktopInstall) {
+      updateAllBoxConfirmed.current = true;
+      finishUpdateAllOnce();
+    }
+  };
+
+  // Desktop install fires the moment the download lands when there is no box
+  // leg to wait on. For a boxed run this is inert until the reconcile effect
+  // sets updateAllBoxConfirmed (connection confirmed back); both paths converge
+  // on the idempotent finishUpdateAllOnce.
+  useEffect(() => {
+    finishUpdateAllOnce();
+  }, [updatePrompt]);
+
+  // The unified `updates` banner's action. The danger tone means "update
+  // failed" → the only sensible action is a manual download. Everything else
+  // (available / mandatory) runs the ONE orchestrator.
+  const onUpdateBannerAction = () => {
+    if (updateBanner?.tone === "danger") {
+      void window.api.openExternal("https://mantaui.com/downloads/Manta-latest.dmg");
+      return;
+    }
+    void runUpdateAll();
+  };
+
+  // "Remind me later": clear the failure + any server announce + the unified
+  // list, so the banner hides until the next refresh (reconnect or the
+  // Settings button). The sidebar --accent dot (updatePrompt) is untouched.
+  const onUpdateBannerDismiss = () => {
+    setUpdateError(null);
+    setServerUpdatePrompt(null);
+    useStore.getState().setUpdateTargets([]);
+  };
+
   // BET-459: when a chat session is the visible pane, the SessionHeader owns
   // the single top-of-pane row (breadcrumb + mode toggle) — the app titlebar
   // is hidden so the two don't stack. Non-chat panes (terminal / AI-TUI /
@@ -1498,12 +1614,13 @@ function Shell() {
       <main className="flex-1 flex flex-col min-w-0">
         {/* At most ONE full-width bar (BET-416 §E). `activeBanner` is the
             single highest-severity condition across reconnecting / incompatible
-            / version-skew / update-failed / server-update. "Update available"
-            (a downloaded desktop auto-update) is no longer a bar — it is a
-            small --accent dot on the Settings entry in the sidebar footer; the
-            bar is reserved for states that actually block you. A downloaded
-            update's install action is still reachable via the version-skew
-            bar's button (it picks autoUpdateInstall when an update is ready). */}
+            / updates. The `updates` bar collapses all five old update kinds
+            (version skew / update failed / server update / behind-compat /
+            desktop) — its copy comes from describeUpdateBanner and renders via
+            the SAME UpdateBar with a tone + busy/progress surface. "Update
+            available" (a downloaded desktop auto-update) is no longer a bar —
+            it is a small --accent dot on the Settings entry in the sidebar
+            footer; the bar is reserved for states that actually block you. */}
         {!showOnboarding && activeBanner === "reconnecting" && (
           <ReconnectingBanner
             state={connectionState}
@@ -1535,72 +1652,19 @@ function Shell() {
             }}
           />
         )}
-        {!showOnboarding && activeBanner === "version-skew" && (
+        {!showOnboarding && activeBanner === "updates" && updateBanner && (
           <UpdateBar
-            text={
-              <>This app is out of date and may not work correctly — please update.</>
-            }
-            actionLabel="Update"
-            onAction={() => {
-              if (updatePrompt) {
-                void window.api.autoUpdateInstall();
-              } else {
-                void window.api.autoUpdateDownload();
-              }
-            }}
-            dismissible={false}
-          />
-        )}
-        {!showOnboarding && activeBanner === "update-failed" && (
-          <UpdateBar
-            text={updateError!.message}
-            actionLabel="Download"
-            onAction={() => {
-              void window.api.openExternal("https://mantaui.com/downloads/Manta-latest.dmg");
-            }}
-            onDismiss={() => setUpdateError(null)}
-          />
-        )}
-        {!showOnboarding && activeBanner === "server-update" && serverUpdatePrompt && (
-          <UpdateBar
-            text={
-              <>
-                Server update available:{" "}
-                <span className="font-medium text-text">
-                  {serverUpdatePrompt.version}
-                </span>
-              </>
-            }
-            actionLabel="Update & restart"
-            onAction={() => setConfirmServerUpdate(true)}
-            onDismiss={() => setServerUpdatePrompt(null)}
+            text={updateBanner.text}
+            actionLabel={updateBanner.actionLabel}
+            onAction={onUpdateBannerAction}
+            onDismiss={onUpdateBannerDismiss}
+            dismissible={updateBanner.dismissible}
+            tone={updateBanner.tone}
             busy={boxUpgrading}
             progress={boxUpgrading && !boxRestarting ? serverUpdateProgress ?? undefined : undefined}
             busyLabel={boxRestarting ? "Restarting the box…" : "Updating the box…"}
           />
         )}
-        {!showOnboarding &&
-          activeBanner === "server-update" &&
-          !serverUpdatePrompt &&
-          showCompatibilityCard &&
-          compatibilityVariant === "behind" && (
-            <UpdateBar
-              text={
-                <>
-                  Box needs an upgrade:{" "}
-                  <span className="font-medium text-text">
-                    {serverVersion ?? "?"}
-                  </span>
-                </>
-              }
-              actionLabel="Upgrade box"
-              onAction={() => setConfirmServerUpdate(true)}
-              onDismiss={dismiss}
-              busy={boxUpgrading}
-              progress={boxUpgrading && !boxRestarting ? serverUpdateProgress ?? undefined : undefined}
-              busyLabel={boxRestarting ? "Restarting the box…" : "Updating the box…"}
-            />
-          )}
         {!isChatPaneActive && (
         <div className="titlebar-drag h-12 border-b border-border flex items-center px-4 gap-2 min-w-0">
           <div className="text-meta text-text-muted flex items-center gap-2 min-w-0">
@@ -1829,6 +1893,29 @@ function Shell() {
           void applyServerUpdate();
         }}
         onCancel={() => setConfirmServerUpdate(false)}
+      />
+
+      {/* "Update everything?" (runUpdateAll). One confirm for the WHOLE run
+          (desktop + box). The body is planUpdateAll's ordered sentences; the
+          resolvers route the user's choice back to the awaiting orchestrator.
+          Cancelling cancels the run including the desktop download in flight —
+          it is simply never installed. */}
+      <ConfirmModal
+        open={updateAllConfirmBody != null}
+        title="Update everything?"
+        body={updateAllConfirmBody ?? ""}
+        confirmLabel="Update"
+        confirmTone="primary"
+        onConfirm={() => {
+          setUpdateAllConfirmBody(null);
+          updateAllResolvers.current?.resolve(true);
+          updateAllResolvers.current = null;
+        }}
+        onCancel={() => {
+          setUpdateAllConfirmBody(null);
+          updateAllResolvers.current?.resolve(false);
+          updateAllResolvers.current = null;
+        }}
       />
 
       {/* Resume after limit reset (BET-1049). Rendered at App level (like the
