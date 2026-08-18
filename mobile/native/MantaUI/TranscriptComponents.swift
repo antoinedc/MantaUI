@@ -297,7 +297,7 @@ struct StepRowView: View {
             .buttonStyle(.plain)
 
             if expanded, let output = step.output {
-                Text(output)
+                Text(ToolOutputPreview.tail(output))
                     .font(.manta(size: Metrics.type.xs, design: .monospaced))
                     .foregroundColor(tokens.tx3)
                     .fixedSize(horizontal: false, vertical: true)
@@ -488,9 +488,14 @@ struct SubagentSession: Identifiable, Hashable {
     /// (BET-576); the S4b fixture leaves it nil (there is no child session).
     let childSessionId: String?
 
-    init(taskName: String, status: SubagentStatus, duration: String?, transcript: [TranscriptBlock], childSessionId: String? = nil) {
-        // Fixtures carry no child session, so they fall back to the task name.
-        self.id = childSessionId ?? "task:\(taskName)"
+    init(taskName: String, status: SubagentStatus, duration: String?, transcript: [TranscriptBlock], childSessionId: String? = nil, fallbackId: String? = nil) {
+        // The id must be unique per task part and stable across rebuilds: the
+        // child opencode session id when known, otherwise the explicitly
+        // provided tool-call discriminator (`fallbackId`). It is NEVER invented
+        // from the task name in production — two subagents run under the same
+        // title would collide. A nil fallback only reaches the fixture-only
+        // capture harness, whose single-row screens need no uniqueness.
+        self.id = childSessionId ?? fallbackId ?? "task:\(taskName)"
         self.taskName = taskName
         self.status = status
         self.duration = duration
@@ -498,13 +503,23 @@ struct SubagentSession: Identifiable, Hashable {
         self.childSessionId = childSessionId
     }
 
-    // Navigation values are compared by identity, never by deep transcript
-    // equality (which would also recurse). The transcript is content the
-    // destination view reads, not something that defines the route.
+    // Equality tracks the presentational fields that define the row — id,
+    // taskName, status, duration, childSessionId — so a subagent's status,
+    // title or duration changing registers as a change and the transcript diff
+    // re-applies it. `transcript` is deliberately excluded: it is content the
+    // destination screen reads, not something that defines the row, and
+    // comparing it would recurse through the whole block tree on every streamed
+    // event.
     static func == (lhs: SubagentSession, rhs: SubagentSession) -> Bool {
         lhs.id == rhs.id
+            && lhs.taskName == rhs.taskName
+            && lhs.status == rhs.status
+            && lhs.duration == rhs.duration
+            && lhs.childSessionId == rhs.childSessionId
     }
     func hash(into hasher: inout Hasher) {
+        // A hash may be coarser than equality; combining only `id` keeps
+        // navigation cheap while remaining consistent with a wider equality.
         hasher.combine(id)
     }
 
