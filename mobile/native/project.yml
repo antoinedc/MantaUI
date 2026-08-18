@@ -170,6 +170,10 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.antoinedc.mantaui.tests
         GENERATE_INFOPLIST_FILE: YES
+        # Simulator keychain access (KeychainCredentialStore) requires the
+        # keychain-access-groups entitlement; without it the test bundle hits
+        # errSecMissingEntitlement (-34018) and the token never round-trips.
+        CODE_SIGN_ENTITLEMENTS: MantaUITests/MantaUITests.entitlements
         CODE_SIGN_STYLE: Automatic
   # The UI test bundle is the hierarchy-dump leg of the native capture harness.
   # It launches the app and prints the accessibility tree (see capture.sh and
