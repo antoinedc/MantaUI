@@ -517,7 +517,10 @@ table.spec tr:last-child td{border-bottom:0}
 /* ---- rail ---- */
 .rail{background:var(--panel);border-right:1px solid var(--border-subtle);display:flex;flex-direction:column;min-width:0}
 .rail-top{height:46px;display:flex;align-items:center;gap:var(--sp-2);padding:0 var(--sp-3);border-bottom:1px solid var(--border-subtle);flex-shrink:0}
-.rail-top .logo{width:18px;height:18px;border-radius:5px;background:linear-gradient(135deg,var(--accent),color-mix(in srgb,var(--accent) 40%,var(--info)))}
+/* The brand mark is the ONE artwork — the manta ray the app ships as
+   manta-mark-128.png and draws in the transcript loader. Never a gradient
+   tile, never a hand-drawn SVG stand-in. */
+.rail-top .logo{width:18px;height:18px;background:url(https://mantaui.com/manta-logo.png) center/contain no-repeat}
 .rail-top .nm{font:600 13px/1 var(--font-sans)}
 .iconbtn{width:28px;height:28px;border-radius:var(--r-sm);border:0;background:transparent;color:var(--tx3);
   cursor:pointer;display:grid;place-items:center;transition:.15s var(--ease)}
@@ -2064,8 +2067,8 @@ table.spec tr:last-child td{border-bottom:0}
   background:var(--canvas);min-height:600px;display:flex;flex-direction:column;margin:var(--sp-3) 0 var(--sp-2)}
 .obstage{flex:1;display:grid;place-items:center;padding:var(--sp-8) var(--sp-5)}
 .obcard{width:min(560px,100%)}
-.oblogo{width:44px;height:44px;border-radius:12px;margin:0 auto var(--sp-5);
-  background:linear-gradient(135deg,var(--accent),color-mix(in srgb,var(--accent) 40%,var(--info)))}
+.oblogo{width:44px;height:44px;margin:0 auto var(--sp-5);
+  background:url(https://mantaui.com/manta-logo.png) center/contain no-repeat}
 .obrail{display:flex;align-items:center;justify-content:center;gap:var(--sp-3);margin-bottom:var(--sp-6)}
 .obrail .s{display:flex;align-items:center;gap:7px;font:500 12px/1 var(--font-sans);color:var(--tx4)}
 .obrail .s .n{width:19px;height:19px;border-radius:50%;border:1.5px solid var(--border-strong);

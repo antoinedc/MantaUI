@@ -192,14 +192,13 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
         {/* Header: brand mark + progress rail. */}
         <div className="text-center mb-10">
           <div className="inline-flex items-center gap-3 mb-8">
-            {/* The real brand mark (docs/brand/README.md: "The current
-                onboarding 'logo' is a generic inline SVG and must be replaced
-                with the Manta mark"). The PNG is the manta ray in the
-                cyan→blue brand gradient on a transparent ground, so it reads
-                on both the light and dark canvas — which is why the mark is
-                NOT tinted by the theme here. onboardingUi's inline MantaMark
-                stays for the mobile pair screen, where the shape is drawn in
-                white on an accent circle and a gradient PNG would not work. */}
+            {/* The brand mark — the SAME artwork as the transcript loader
+                (`MantaLoader.tsx`), and the only Manta mark that exists. The
+                PNG is the manta ray in the cyan→blue brand gradient on a
+                transparent ground, so it reads on both the light and dark
+                canvas — which is why the mark is NOT tinted by the theme
+                here. There is no inline-SVG alternative any more; see the
+                note at the top of `onboardingUi.tsx`. */}
             <img
               src={mantaMark}
               alt=""

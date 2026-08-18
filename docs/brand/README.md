@@ -18,13 +18,28 @@ scope** for this cycle.
 
 ## Logo
 
-- `manta-logo.png` — the mark: a stylized manta ray in the brand
-  cyan→blue gradient on the navy canvas.
+**There is exactly ONE Manta mark, and it is an image.** The stylized manta
+ray in the brand cyan→blue gradient on a transparent ground — `manta-mark.png`
+here, shipped to the app as `src/renderer/assets/manta-mark-128.png`, and
+rendered by `src/renderer/MantaLoader.tsx` (the transcript loader and its
+still `MantaMark`). Every surface that shows the brand uses that artwork.
+`manta-logo.png` / `manta-lockup.png` / the favicons / the platform icon sets
+are all derived from the same drawing.
+
+**Never draw a substitute.** No inline SVG "manta", no gradient rounded square,
+no generic glyph — not in product code, not in a mockup, not in a plan page. A
+stand-in gets copied as if it were official: a hand-drawn two-arc SVG lived in
+`onboardingUi.tsx` and spread into mockups and generated pages before it was
+deleted. If you need the mark, reference the image (product code imports
+`MantaLoader.tsx`; a standalone HTML page can use
+`https://mantaui.com/manta-logo.png`; a harness-served mockup can use
+`/docs/brand/manta-mark.png`).
+
 - Gradient: `linear-gradient(135deg, #49D7F5 0%, #2E6BFF 100%)`
   (`--gradient-brand`).
-- Icon sets (PWA / iOS / Android / desktop `.icns`) must be regenerated from
-  this mark. The current onboarding "logo" is a generic inline SVG and must be
-  replaced with the Manta mark + wordmark.
+- Icon sets (PWA / iOS / Android / desktop `.icns`) are regenerated from this
+  mark by `scripts/gen-icons.py`, which also writes the app's
+  `manta-mark-128.png`.
 
 ## Typography
 
