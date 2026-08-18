@@ -61,7 +61,46 @@ const PROJECTS = [
   },
 ];
 
+// Gesture-fixture filler: the chat opens auto-scrolled to the tail, so the
+// newest message is the LAST element of the array. To make the transcript tall
+// enough to actually scroll (the BET-1104 "scrolls on the first swipe" check
+// needs overflow), older filler messages are PREPENDED before the two anchor
+// messages below. The anchors (m1/m2) stay at the tail so the chat opens with
+// them on screen, exactly as the overflow capture harness expects.
+function buildTallTranscript() {
+  const filler = [];
+  const FILLER_PAIRS = 22; // 44 messages -> many screens of long prose
+  let id = 1000;
+  for (let i = 0; i < FILLER_PAIRS; i++) {
+    const uid = "f" + (id++);
+    const aid = "f" + (id++);
+    const pid = id;
+    // A several-line paragraph so each assistant row owns real height and the
+    // whole transcript overflows the viewport many times over.
+    const prose = (
+      "This is fixture paragraph " + i + ", part of the taller transcript the " +
+      "gesture tests need so there is something to scroll. It is intentionally " +
+      "a few sentences long so the row owns measurable height on screen. " +
+      "Repeating the filler across the array gives the transcript enough " +
+      "vertical extent that a single upward drag must begin scrolling " +
+      "immediately, which is the point of the exercise. ".repeat(2)
+    );
+    filler.push(
+      {
+        info: { id: uid, sessionID: SESSION_ID, role: "user", time: { created: now - 1000000 } },
+        parts: [{ type: "text", id: "p" + (pid - 1), messageID: uid, text: "Filler question " + i }],
+      },
+      {
+        info: { id: aid, sessionID: SESSION_ID, role: "assistant", time: { created: now - 900000, completed: now - 899000 } },
+        parts: [{ type: "text", id: "p" + pid, messageID: aid, text: prose }],
+      }
+    );
+  }
+  return filler;
+}
+
 const MESSAGES = [
+  ...buildTallTranscript(),
   {
     info: {
       id: "m1",
