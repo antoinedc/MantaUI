@@ -157,12 +157,20 @@ final class MantaEventStreamModelTests: XCTestCase {
     }
 
     func testParsesContextPayload() throws {
-        let f = try frame(#"{"kind":"stream","sub":"context","sessionId":"ses_1","payload":{"freshInput":10,"cacheRead":5,"cacheWrite":2,"totalInput":17,"pct":8,"segments":[{"kind":"fresh","pct":5},{"kind":"cacheWrite","pct":1},{"kind":"cacheRead","pct":2}]}}"#)
+        let f = try frame(#"{"kind":"stream","sub":"context","sessionId":"ses_1","payload":{"freshInput":10,"cacheRead":5,"cacheWrite":2,"totalInput":17,"pct":8,"hasLimit":true,"segments":[{"kind":"fresh","pct":5},{"kind":"cacheWrite","pct":1},{"kind":"cacheRead","pct":2}]}}"#)
         let p = try XCTUnwrap(f.decodedPayload(StreamContextPayload.self))
         XCTAssertEqual(p.freshInput, 10)
         XCTAssertEqual(p.cacheRead, 5)
         XCTAssertEqual(p.pct, 8)
+        XCTAssertEqual(p.hasLimit, true)
         XCTAssertEqual(p.segments.count, 3)
+    }
+
+    func testParsesContextPayloadWithoutLimit() throws {
+        let f = try frame(#"{"kind":"stream","sub":"context","sessionId":"ses_1","payload":{"freshInput":10,"cacheRead":5,"cacheWrite":2,"totalInput":17,"pct":0,"hasLimit":false,"segments":[]}}"#)
+        let p = try XCTUnwrap(f.decodedPayload(StreamContextPayload.self))
+        XCTAssertEqual(p.hasLimit, false)
+        XCTAssertEqual(p.segments.count, 0)
     }
 
     func testParsesTruncationPayloadWithMessageID() throws {

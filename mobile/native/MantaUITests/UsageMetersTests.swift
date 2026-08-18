@@ -221,7 +221,7 @@ final class UsageMetersTests: XCTestCase {
     /// derived `pct`/`segments` the box computed against the LAST-REPLY model's
     /// window. `totalInput` mirrors the box summing the three disjoint buckets.
     private func payload(fresh: Double = 0, read: Double = 0, write: Double = 0,
-                         pct: Double = 0,
+                         pct: Double = 0, hasLimit: Bool = true,
                          segments: [StreamContextSegment]) -> StreamContextPayload {
         StreamContextPayload(
             freshInput: fresh,
@@ -229,6 +229,7 @@ final class UsageMetersTests: XCTestCase {
             cacheWrite: write,
             totalInput: fresh + read + write,
             pct: pct,
+            hasLimit: hasLimit,
             segments: segments
         )
     }
@@ -243,13 +244,13 @@ final class UsageMetersTests: XCTestCase {
         let r = UsageMeters.recompute(s, limit: 1_000_000)
         XCTAssertEqual(r.pct, 4)
         XCTAssertEqual(r.segments.first { $0.kind == "fresh" }?.pct, 4)
+        XCTAssertEqual(r.hasLimit, true)
     }
 
-    /// `limit: nil` falls back to 200k (the desktop's ASSUMED_CONTEXT_TOKENS)
-    /// and reproduces the box's own number for a 200k model — recompute is a
-    /// no-op in the common case. Oracle: streamInterpretation.test.ts sums case
-    /// (input 10k, cache.read 30k, cache.write 5k → pct 23).
-    func testRecomputeNilLimitIsNoOpFor200kModel() {
+    /// `limit: nil` (an unknown selected-model window) signals "no max
+    /// context" via hasLimit:false and carries ONLY the raw token totals — no
+    /// fabricated %/segments against a made-up 200k (BET-1138).
+    func testRecomputeNilLimitSignalsUnknown() {
         let s = payload(fresh: 10_000, read: 30_000, write: 5_000, pct: 23,
                         segments: [
                             StreamContextSegment(kind: "fresh", pct: 5),
@@ -257,18 +258,25 @@ final class UsageMetersTests: XCTestCase {
                             StreamContextSegment(kind: "cacheRead", pct: 15),
                         ])
         let r = UsageMeters.recompute(s, limit: nil)
-        XCTAssertEqual(r.pct, 23)
-        XCTAssertEqual(r.segments.map(\.pct), [5, 2.5, 15])
+        XCTAssertEqual(r.hasLimit, false)
+        XCTAssertEqual(r.pct, 0)
+        XCTAssertEqual(r.segments, [])
         XCTAssertEqual(r.totalInput, 45_000)
+        XCTAssertEqual(r.freshInput, 10_000)
     }
 
-    /// A zero or negative limit must fall back to 200k, never divide by zero
-    /// or produce a negative percentage. Oracle: falls-back-to-ASSUMED case.
-    func testRecomputeNonPositiveLimitFallsBackTo200k() {
+    /// A zero or negative limit must signal "no max context" (hasLimit:false)
+    /// rather than dividing by zero, producing a negative percentage, or
+    /// fabricating a 200k window (BET-1138).
+    func testRecomputeNonPositiveLimitSignalsUnknown() {
         let s = payload(fresh: 100_000, pct: 50,
                         segments: [StreamContextSegment(kind: "fresh", pct: 50)])
-        XCTAssertEqual(UsageMeters.recompute(s, limit: 0).pct, 50)
-        XCTAssertEqual(UsageMeters.recompute(s, limit: -200_000).pct, 50)
+        for limit in [0.0, -200_000.0] {
+            let r = UsageMeters.recompute(s, limit: limit)
+            XCTAssertEqual(r.hasLimit, false)
+            XCTAssertEqual(r.pct, 0)
+            XCTAssertEqual(r.segments, [])
+        }
     }
 
     /// The raw counts ride through untouched — only the derived fields change.
