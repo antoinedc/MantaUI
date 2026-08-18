@@ -11,7 +11,7 @@
 // server (src/server/providers.mjs, Node ESM) and tests. The I/O wrapper
 // that reads/writes opencode.jsonc is syncSubagents() in providers.mjs.
 
-import { describeModel, familyKey } from "./modelGuide.mjs";
+import { describeModel, familyKey, isDeprecated } from "./modelGuide.mjs";
 
 // Lowercase, non-alphanumeric → "-", collapse repeats, trim leading/trailing
 // "-". Fallback naming for models whose family isn't in the catalog.
@@ -60,15 +60,6 @@ function modelKey(providerID, modelID) {
   return `${providerID}/${modelID}`;
 }
 
-// BET-1139: deprecated models are disabled-by-default (skipped by subagent
-// auto-registration) unless the user opted them back in via `optInModels`.
-// This module is node-importable (no TS), so it can't share the renderer's
-// `isDeprecated` from chatUtils.ts — the check lives here as the shared-side
-// single predicate.
-function isDeprecatedModel(m) {
-  return !!m && m.status === "deprecated";
-}
-
 /**
  * Diff the live model list against the currently configured subagent blocks
  * and the user's deactivated set. Pure — takes plain data, returns plain
@@ -113,7 +104,7 @@ export function reconcileSubagents({ models = [], existingAgents = [], deactivat
     const key = modelKey(m.providerID, m.id);
     if (deactivatedSet.has(key)) continue;
     if (existingByModel.has(key)) continue; // already registered — preserve as-is
-    if (isDeprecatedModel(m) && !optInSet.has(key)) continue; // BET-1139: disabled unless opted in
+    if (isDeprecated(m) && !optInSet.has(key)) continue; // BET-1139: disabled unless opted in
     const name = deriveSubagentName(m.providerID, m.id, takenNames);
     takenNames.add(name.toLowerCase());
     const info = describeModel(m.providerID, m.id);

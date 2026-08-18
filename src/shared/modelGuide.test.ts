@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { describeModel, familyKey, fuzzyMatchModel, suggestModels } from "./modelGuide.mjs";
+import { describeModel, familyKey, fuzzyMatchModel, suggestModels, isDeprecated } from "./modelGuide.mjs";
 
 describe("describeModel", () => {
   it("matches haiku family", () => {
@@ -275,5 +275,15 @@ describe("suggestModels", () => {
     expect(suggestModels("zzzz", MODELS)).toEqual([]);
     expect(suggestModels("", MODELS)).toEqual([]);
     expect(suggestModels(null as unknown as string, MODELS)).toEqual([]);
+  });
+});
+
+describe("isDeprecated", () => {
+  it("returns true only for status === 'deprecated'", () => {
+    expect(isDeprecated({ status: "deprecated" })).toBe(true);
+    expect(isDeprecated({ status: "active" })).toBe(false);
+    expect(isDeprecated({})).toBe(false);
+    expect(isDeprecated(null)).toBe(false);
+    expect(isDeprecated(undefined)).toBe(false);
   });
 });

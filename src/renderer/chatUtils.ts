@@ -14,6 +14,10 @@ import type { VoiceNoteRecord } from "../shared/types";
 // one source of truth; re-imported here so chooseUpdateSkewVariant is
 // testable in isolation (no DOM/network, just the compare).
 import { isClientTooOld } from "../shared/versionCompare.mjs";
+// BET-1139: the deprecated-model predicate lives in the shared node-safe
+// module (the ONE place the literal "deprecated" is compared) and is imported
+// here so renderer consumers call `isDeprecated` rather than re-comparing.
+import { isDeprecated } from "../shared/modelGuide.mjs";
 
 // Stable identity for a mounted Terminal in App.tsx's visitedModes map. A
 // tmux window is identified by its session name + index, which EVERY window
@@ -2049,18 +2053,14 @@ export function hideFastSiblingGroups(
 
 // ===== deprecated-model predicate (BET-1139) =====
 //
-// The SINGLE place the literal string "deprecated" is compared. A model the
-// provider still serves but flags as `status === "deprecated"` is kept
-// importable but defaulted to disabled in the main picker and skipped by
-// subagent auto-registration, both reversed by an explicit per-model opt-in
-// (`optInModels`). Every consumer calls this function — do not spread the
-// literal.
-
-export function isDeprecated(
-  m: { status?: string } | null | undefined,
-): boolean {
-  return !!m && m.status === "deprecated";
-}
+// `isDeprecated` (a model the provider still serves but flags as deprecated)
+// is disabled-by-default in the main picker and skipped by subagent
+// auto-registration, both reversed by an explicit per-model opt-in
+// (`optInModels`). The predicate lives in the shared node-safe module
+// `src/shared/modelGuide.mjs` — the ONE place the literal "deprecated" is
+// compared — and is re-exported here so renderer consumers call it, never
+// re-compare the literal.
+export { isDeprecated };
 
 // ===== selectableModelGroups =====
 //
@@ -2087,7 +2087,7 @@ export function selectableModelList(
   return models.filter(
     (m) =>
       m.enabled !== false &&
-      m.status !== "deprecated" &&
+      !isDeprecated(m) &&
       !deactivatedMain.has(`${m.providerID}/${m.id}`),
   );
 }
@@ -2197,7 +2197,7 @@ export function resolveFastToggle(
         m.providerID === active.providerID &&
         m.id === counterpartId &&
         m.enabled !== false &&
-        m.status !== "deprecated",
+        !isDeprecated(m),
     ) ?? null;
 
   if (!counterpart) {
