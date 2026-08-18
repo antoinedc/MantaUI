@@ -268,12 +268,12 @@ resolve_arch() {
     Darwin)
       case "$m" in
         arm64)  ARCH_KEY="darwin_arm64" ;;
-        *) die "unsupported Mac: $m — the MantaUI box installer supports Apple Silicon (arm64) Macs only.
-      Intel Macs are not supported as a box. If you just want to USE MantaUI on this Mac,
+        *) die "unsupported Mac: $m — the MantaUI server installer supports Apple Silicon (arm64) Macs only.
+      Intel Macs are not supported as a server. If you just want to USE MantaUI on this Mac,
       install the desktop app instead: https://mantaui.com/downloads/Manta-latest.dmg" ;;
       esac
       ;;
-    *) die "unsupported OS: $s (the MantaUI box installer supports Linux and macOS/Apple Silicon)" ;;
+    *) die "unsupported OS: $s (the MantaUI server installer supports Linux and macOS/Apple Silicon)" ;;
   esac
 }
 
