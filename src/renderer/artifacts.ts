@@ -135,6 +135,10 @@ const EXT_MIME: Record<string, string> = {
   ".gif": "image/gif",
   ".svg": "image/svg+xml",
   ".webp": "image/webp",
+  ".mp4": "video/mp4",
+  ".webm": "video/webm",
+  ".mov": "video/quicktime",
+  ".m4v": "video/x-m4v",
 };
 
 function extOf(p: string): string {

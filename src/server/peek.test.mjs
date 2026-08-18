@@ -14,6 +14,8 @@ import http from "node:http";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+import { parseByteRange } from "./range.mjs";
+
 // Helper: make a GET request and return { status, headers, body }
 function httpGet(url) {
   return new Promise((resolve, reject) => {
@@ -48,6 +50,28 @@ function httpHead(url) {
     });
     req.on("error", reject);
     req.end();
+  });
+}
+
+// Helper: make a GET request with the given Range header.
+function httpGetRange(url, range) {
+  return new Promise((resolve, reject) => {
+    const req = http.get(
+      url,
+      { headers: range === undefined ? {} : { Range: range } },
+      (res) => {
+        const chunks = [];
+        res.on("data", (c) => chunks.push(c));
+        res.on("end", () => {
+          resolve({
+            status: res.statusCode,
+            headers: res.headers,
+            body: Buffer.concat(chunks),
+          });
+        });
+      },
+    );
+    req.on("error", reject);
   });
 }
 
@@ -112,10 +136,40 @@ async function startPeekServer(testDir) {
 
           const ext = extname(resolved);
           const contentType = MIME[ext] ?? "application/octet-stream";
-          res.writeHead(200, {
+          const baseHeaders = {
             "content-type": contentType,
-            "content-length": String(s.size),
+            "accept-ranges": "bytes",
             "content-disposition": `inline; filename="${basename(resolved).replace(/"/g, "")}"`,
+          };
+          const range = parseByteRange(req.headers.range ?? null, s.size);
+          if (range === "unsatisfiable") {
+            res.writeHead(416, {
+              ...baseHeaders,
+              "content-range": `bytes */${s.size}`,
+            });
+            res.end();
+            return;
+          }
+          if (range) {
+            const length = range.end - range.start + 1;
+            res.writeHead(206, {
+              ...baseHeaders,
+              "content-range": `bytes ${range.start}-${range.end}/${s.size}`,
+              "content-length": String(length),
+            });
+            if (req.method === "HEAD") {
+              res.end();
+              return;
+            }
+            await pipeline(
+              createReadStream(resolved, { start: range.start, end: range.end }),
+              res,
+            );
+            return;
+          }
+          res.writeHead(200, {
+            ...baseHeaders,
+            "content-length": String(s.size),
           });
           if (req.method === "HEAD") {
             res.end();
@@ -302,5 +356,271 @@ test("/api/peek HEAD returns 404 for non-existent file", async () => {
     assert.equal(res.body.length, 0);
   } finally {
     server.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// parseByteRange — pure unit tests (no HTTP, no server)
+// ---------------------------------------------------------------------------
+
+test("parseByteRange: closed range bytes=0-99", () => {
+  assert.deepEqual(parseByteRange("bytes=0-99", 1000), { start: 0, end: 99 });
+});
+
+test("parseByteRange: closed range clamps end to EOF", () => {
+  assert.deepEqual(parseByteRange("bytes=900-2000", 1000), { start: 900, end: 999 });
+});
+
+test("parseByteRange: open-ended range bytes=100-", () => {
+  assert.deepEqual(parseByteRange("bytes=100-", 1000), { start: 100, end: 999 });
+});
+
+test("parseByteRange: suffix range bytes=-100", () => {
+  assert.deepEqual(parseByteRange("bytes=-100", 1000), { start: 900, end: 999 });
+});
+
+test("parseByteRange: suffix larger than file returns whole file", () => {
+  assert.deepEqual(parseByteRange("bytes=-5000", 1000), { start: 0, end: 999 });
+});
+
+test("parseByteRange: start past EOF is unsatisfiable", () => {
+  assert.equal(parseByteRange("bytes=1000-", 1000), "unsatisfiable");
+  assert.equal(parseByteRange("bytes=1001-2000", 1000), "unsatisfiable");
+});
+
+test("parseByteRange: end before start is unsatisfiable", () => {
+  assert.equal(parseByteRange("bytes=50-10", 1000), "unsatisfiable");
+});
+
+test("parseByteRange: zero-length / empty suffix range is unsatisfiable", () => {
+  assert.equal(parseByteRange("bytes=-0", 1000), "unsatisfiable");
+  assert.equal(parseByteRange("bytes=-", 1000), "unsatisfiable");
+});
+
+test("parseByteRange: range on empty file is unsatisfiable", () => {
+  assert.equal(parseByteRange("bytes=0-", 0), "unsatisfiable");
+  assert.equal(parseByteRange("bytes=-1", 0), "unsatisfiable");
+});
+
+test("parseByteRange: absent header returns null", () => {
+  assert.equal(parseByteRange(null, 1000), null);
+  assert.equal(parseByteRange(undefined, 1000), null);
+  assert.equal(parseByteRange("", 1000), null);
+});
+
+test("parseByteRange: unparseable header returns null", () => {
+  assert.equal(parseByteRange("bytes", 1000), null);
+  assert.equal(parseByteRange("bytes=", 1000), null);
+  assert.equal(parseByteRange("items=0-10", 1000), null);
+  assert.equal(parseByteRange("bytes=abc-def", 1000), null);
+  assert.equal(parseByteRange("bytes=0-99 extra", 1000), null);
+});
+
+test("parseByteRange: multi-range request returns null (serve whole file)", () => {
+  assert.equal(parseByteRange("bytes=0-99,300-400", 1000), null);
+});
+
+// ---------------------------------------------------------------------------
+// /api/peek Range behaviour — integration tests against the mock server
+// ---------------------------------------------------------------------------
+
+test("/api/peek advertises accept-ranges on GET and HEAD", async () => {
+  const testDir = join(homedir(), ".manta-test-peek-ranges-" + Date.now());
+  await mkdir(testDir, { recursive: true });
+  const testFile = join(testDir, "test.txt");
+  const content = "0123456789abcdefghij"; // 20 bytes
+  await writeFile(testFile, content);
+
+  try {
+    const { server, port } = await startPeekServer(testDir);
+    try {
+      const url = `http://127.0.0.1:${port}/api/peek?path=${encodeURIComponent(testFile)}`;
+      const get = await httpGet(url);
+      assert.equal(get.headers["accept-ranges"], "bytes");
+      const head = await httpHead(url);
+      assert.equal(head.headers["accept-ranges"], "bytes");
+    } finally {
+      server.close();
+    }
+  } finally {
+    await rm(testDir, { recursive: true, force: true });
+  }
+});
+
+test("/api/peek ranged GET returns 206 with the correct bytes and content-range", async () => {
+  const testDir = join(homedir(), ".manta-test-peek-range-get-" + Date.now());
+  await mkdir(testDir, { recursive: true });
+  const testFile = join(testDir, "test.txt");
+  const content = "0123456789abcdefghij"; // 20 bytes
+  await writeFile(testFile, content);
+
+  try {
+    const { server, port } = await startPeekServer(testDir);
+    try {
+      const url = `http://127.0.0.1:${port}/api/peek?path=${encodeURIComponent(testFile)}`;
+      const res = await httpGetRange(url, "bytes=5-9");
+      assert.equal(res.status, 206, `Response body: ${res.body.toString()}`);
+      assert.equal(res.body.toString(), "56789");
+      assert.equal(res.headers["content-range"], "bytes 5-9/20");
+      assert.equal(res.headers["content-length"], "5");
+    } finally {
+      server.close();
+    }
+  } finally {
+    await rm(testDir, { recursive: true, force: true });
+  }
+});
+
+test("/api/peek open-ended ranged GET returns the tail", async () => {
+  const testDir = join(homedir(), ".manta-test-peek-range-open-" + Date.now());
+  await mkdir(testDir, { recursive: true });
+  const testFile = join(testDir, "test.txt");
+  const content = "0123456789abcdefghij"; // 20 bytes
+  await writeFile(testFile, content);
+
+  try {
+    const { server, port } = await startPeekServer(testDir);
+    try {
+      const url = `http://127.0.0.1:${port}/api/peek?path=${encodeURIComponent(testFile)}`;
+      const res = await httpGetRange(url, "bytes=15-");
+      assert.equal(res.status, 206);
+      assert.equal(res.body.toString(), "fghij");
+      assert.equal(res.headers["content-range"], "bytes 15-19/20");
+      assert.equal(res.headers["content-length"], "5");
+    } finally {
+      server.close();
+    }
+  } finally {
+    await rm(testDir, { recursive: true, force: true });
+  }
+});
+
+test("/api/peek unsatisfiable range returns 416 with bytes */size", async () => {
+  const testDir = join(homedir(), ".manta-test-peek-range-416-" + Date.now());
+  await mkdir(testDir, { recursive: true });
+  const testFile = join(testDir, "test.txt");
+  await writeFile(testFile, "0123456789abcdefghij");
+
+  try {
+    const { server, port } = await startPeekServer(testDir);
+    try {
+      const url = `http://127.0.0.1:${port}/api/peek?path=${encodeURIComponent(testFile)}`;
+      const res = await httpGetRange(url, "bytes=100-200");
+      assert.equal(res.status, 416);
+      assert.equal(res.headers["content-range"], "bytes */20");
+      assert.equal(res.body.length, 0);
+    } finally {
+      server.close();
+    }
+  } finally {
+    await rm(testDir, { recursive: true, force: true });
+  }
+});
+
+test("/api/peek unranged GET is byte-identical to a plain 200", async () => {
+  const testDir = join(homedir(), ".manta-test-peek-unranged-" + Date.now());
+  await mkdir(testDir, { recursive: true });
+  const testFile = join(testDir, "test.txt");
+  const content = "hello world";
+  await writeFile(testFile, content);
+
+  try {
+    const { server, port } = await startPeekServer(testDir);
+    try {
+      const url = `http://127.0.0.1:${port}/api/peek?path=${encodeURIComponent(testFile)}`;
+      // Explicit no-range GET behaves exactly like the existing 200.
+      const res = await httpGetRange(url, undefined);
+      assert.equal(res.status, 200);
+      assert.equal(res.body.toString(), content);
+      assert.equal(res.headers["content-length"], String(Buffer.byteLength(content)));
+    } finally {
+      server.close();
+    }
+  } finally {
+    await rm(testDir, { recursive: true, force: true });
+  }
+});
+
+test("/api/peek multi-range request degrades to a full 200", async () => {
+  const testDir = join(homedir(), ".manta-test-peek-multirange-" + Date.now());
+  await mkdir(testDir, { recursive: true });
+  const testFile = join(testDir, "test.txt");
+  const content = "0123456789abcdefghij";
+  await writeFile(testFile, content);
+
+  try {
+    const { server, port } = await startPeekServer(testDir);
+    try {
+      const url = `http://127.0.0.1:${port}/api/peek?path=${encodeURIComponent(testFile)}`;
+      const res = await httpGetRange(url, "bytes=0-1,5-6");
+      assert.equal(res.status, 200);
+      assert.equal(res.body.toString(), content);
+    } finally {
+      server.close();
+    }
+  } finally {
+    await rm(testDir, { recursive: true, force: true });
+  }
+});
+
+test("/api/peek plain HEAD still reports the full size with no body (unchanged)", async () => {
+  const testDir = join(homedir(), ".manta-test-peek-head-range-" + Date.now());
+  await mkdir(testDir, { recursive: true });
+  const testFile = join(testDir, "test.txt");
+  const content = "0123456789abcdefghij"; // 20 bytes
+  await writeFile(testFile, content);
+
+  try {
+    const { server, port } = await startPeekServer(testDir);
+    try {
+      const res = await httpHead(`http://127.0.0.1:${port}/api/peek?path=${encodeURIComponent(testFile)}`);
+      assert.equal(res.status, 200, "plain HEAD stays 200 with the full size");
+      assert.equal(res.headers["content-length"], String(Buffer.byteLength(content)));
+      assert.equal(res.body.length, 0, "HEAD must not stream a body");
+    } finally {
+      server.close();
+    }
+  } finally {
+    await rm(testDir, { recursive: true, force: true });
+  }
+});
+
+test("/api/peek HEAD with a Range reports the slice length with no body", async () => {
+  const testDir = join(homedir(), ".manta-test-peek-head-range2-" + Date.now());
+  await mkdir(testDir, { recursive: true });
+  const testFile = join(testDir, "test.txt");
+  await writeFile(testFile, "0123456789abcdefghij"); // 20 bytes
+
+  try {
+    const { server, port } = await startPeekServer(testDir);
+    try {
+      const req = await new Promise((resolve, reject) => {
+        const r = http.request(
+          `http://127.0.0.1:${port}/api/peek?path=${encodeURIComponent(testFile)}`,
+          { method: "HEAD", headers: { Range: "bytes=5-9" } },
+          (res) => {
+            const chunks = [];
+            res.on("data", (c) => chunks.push(c));
+            res.on("end", () =>
+              resolve({
+                status: res.statusCode,
+                headers: res.headers,
+                body: Buffer.concat(chunks),
+              }),
+            );
+          },
+        );
+        r.on("error", reject);
+        r.end();
+      });
+      assert.equal(req.status, 206);
+      assert.equal(req.headers["content-range"], "bytes 5-9/20");
+      assert.equal(req.headers["content-length"], "5");
+      assert.equal(req.body.length, 0, "HEAD must not stream a body");
+    } finally {
+      server.close();
+    }
+  } finally {
+    await rm(testDir, { recursive: true, force: true });
   }
 });

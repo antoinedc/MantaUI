@@ -19,6 +19,7 @@ import * as tmux from "./tmux.mjs";
 import * as oc from "./opencode.mjs";
 import * as pty from "./pty.mjs";
 import * as local from "./local.mjs";
+import { parseByteRange } from "./range.mjs";
 import { createLogShipper, captureConsole, resolveAxiomConfig } from "../shared/logShip.mjs";
 
 // BET-187: ship every console.* (and any startup banner / poller log) to
@@ -1057,6 +1058,14 @@ const MIME = {
   ".svg": "image/svg+xml",
   ".ico": "image/x-icon",
   ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".mp4": "video/mp4",
+  ".webm": "video/webm",
+  ".mov": "video/quicktime",
+  ".m4v": "video/x-m4v",
   ".webmanifest": "application/manifest+json",
 };
 
@@ -1748,6 +1757,53 @@ const handleRequest = async (req, res) => {
       "content-type": contentType,
       "content-length": String(s.size),
       "content-disposition": `inline; filename="${basename(resolved).replace(/"/g, "")}"`,
+    });
+    const baseHeaders = {
+      "content-type": contentType,
+      "accept-ranges": "bytes",
+      "content-disposition": `inline; filename="${basename(resolved).replace(/"/g, "")}"`,
+    };
+    const range = parseByteRange(req.headers.range ?? null, s.size);
+    // Unsatisfiable range → 416 with `content-range: bytes */<size>`.
+    if (range === "unsatisfiable") {
+      res.writeHead(416, {
+        ...baseHeaders,
+        "content-range": `bytes */${s.size}`,
+      });
+      res.end();
+      return;
+    }
+    // Satisfiable single range → 206, streaming only that slice.
+    if (range) {
+      const length = range.end - range.start + 1;
+      res.writeHead(206, {
+        ...baseHeaders,
+        "content-range": `bytes ${range.start}-${range.end}/${s.size}`,
+        "content-length": String(length),
+      });
+      if (req.method === "HEAD") {
+        res.end();
+        return;
+      }
+      try {
+        await pipeline(
+          createReadStream(resolved, { start: range.start, end: range.end }),
+          res,
+        );
+      } catch (e) {
+        if (!res.headersSent) {
+          respondJson(res, 500, { error: String(e?.message ?? e) });
+        } else {
+          res.destroy();
+        }
+      }
+      return;
+    }
+    // Absent, unparseable, or multi-range header → exactly today's 200
+    // behaviour, byte for byte. Multi-range is deliberately not supported.
+    res.writeHead(200, {
+      ...baseHeaders,
+      "content-length": String(s.size),
     });
     // HEAD reports the size via `content-length` without streaming the body.
     if (req.method === "HEAD") {
