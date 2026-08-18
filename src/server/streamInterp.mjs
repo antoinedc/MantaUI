@@ -40,6 +40,7 @@ import {
   countUserTurns,
   buildTitlePromptInput,
   buildTitleInstruction,
+  humanizeProviderError,
   ASSUMED_CONTEXT_TOKENS,
 } from "../shared/streamInterpretation.mjs";
 import { planModeFromToolPart } from "../shared/planMode.mjs";
@@ -491,7 +492,10 @@ export function createStreamInterpreter({
         const message =
           typeof err?.data?.message === "string" ? err.data.message :
           typeof err?.message === "string" ? err.message : "The turn failed.";
-        emit(sid, "sessionError", { name, message });
+        // Unwrap a provider rejection body down to the human sentence so the
+        // native iOS transcript notice shows the same clean text desktop does
+        // (BET-1131). Lossless — unrecognised messages pass through unchanged.
+        emit(sid, "sessionError", { name, message: humanizeProviderError(message) });
         emitTurnComplete(sid, st, true);
         return;
       }
