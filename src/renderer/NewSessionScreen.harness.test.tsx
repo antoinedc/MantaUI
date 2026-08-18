@@ -309,7 +309,15 @@ describe("NewSessionScreen scratch mode (BET-1093)", () => {
     });
     refreshModelCatalog();
     refreshAgentCatalog();
-    resetStore({ projects: [], activeDraftId: d.id, drafts: [d], ...storeOverrides });
+    // Clear any leftover autoSubmitPrompt from a prior test in this file so the
+    // "empty prompt must NOT queue a prompt" assertion is not polluted.
+    resetStore({
+      projects: [],
+      activeDraftId: d.id,
+      drafts: [d],
+      autoSubmitPrompt: null,
+      ...storeOverrides,
+    });
     h = mount(<NewSessionScreen draftId={d.id} />);
     return api;
   }
@@ -327,7 +335,8 @@ describe("NewSessionScreen scratch mode (BET-1093)", () => {
     });
     refreshModelCatalog();
     refreshAgentCatalog();
-    resetStore({ projects: [], activeDraftId: "d-0", drafts: [draft()] });
+    const d = draft({ id: "d-0" });
+    resetStore({ projects: [], activeDraftId: "d-0", drafts: [d], autoSubmitPrompt: null });
     h = mount(<NewSessionScreen draftId="d-0" />);
     await h!.flush();
 
