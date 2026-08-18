@@ -36,8 +36,12 @@ import {
 } from "lucide-react";
 import { useStore } from "./store";
 import { Chip } from "./Chip";
+import { Tag } from "./Tag";
 import { ModelPicker } from "./ModelPicker";
-import { MicButton } from "./ComposerParts";
+import { useModelCatalog } from "./modelCatalog";
+import { useAgentCatalog } from "./agentCatalog";
+import { MicButton, PlanChip, TrustRow } from "./ComposerParts";
+import { UsageDial } from "./UsageDial";
 import { IconButton } from "./IconButton";
 import { Button } from "./Button";
 import { Card } from "./Card";
@@ -53,13 +57,13 @@ import { useVoiceRecorder } from "./voice";
 import {
   describeRepoRow,
   formatAge,
+  resolvePlanToggle,
   zeroStateMode,
   type RepoRow,
 } from "./chatUtils";
 import type { VoicePhase } from "./voice";
 import type {
   ForgeCliStatus,
-  OpencodeModel,
   Project,
   RepoHit,
   TmuxCreateResult,
@@ -411,40 +415,34 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
 
 
 
-  // Model state — fetched on mount (same pattern as ChatPanel).
-  const [models, setModels] = useState<OpencodeModel[] | null>(null);
-  const [serverDefault, setServerDefault] = useState<{
-    providerID: string;
-    modelID: string;
-  } | null>(null);
+  // Model state — the SHARED cached catalog (same hook as ChatPanel), so the
+  // picker renders its last-known models synchronously on remount instead of
+  // flashing empty while a fresh fetch runs. The shared module carries the
+  // same pre-pairing httpApi-only guard this screen's old local fetch had.
+  const { models, defaultModel: serverDefault } = useModelCatalog();
 
-  useEffect(() => {
-    let cancelled = false;
-    // GUARD (same pattern as App.tsx's launchersList effect): both of these
-    // live ONLY on httpApi. On a fresh/unpaired desktop boot `window.api` is
-    // still the raw preload OS-bridge subset, where they are undefined —
-    // calling them throws synchronously from the commit phase, which `.catch`
-    // cannot see and which unmounts the whole tree.
-    if (window.api.opencodeModels) {
-      window.api
-        .opencodeModels()
-        .then((list) => { if (!cancelled) setModels(list); })
-        .catch(() => {});
-    }
-    if (window.api.opencodeDefaultModel) {
-      window.api
-        .opencodeDefaultModel()
-        .then((d) => { if (!cancelled) setServerDefault(d); })
-        .catch(() => {});
-    }
-    return () => { cancelled = true; };
-  }, []);
-
+  // Active model object for the usage dial + model menu. Resolved through the
+  // same shared path ChatPanel uses so the welcome composer and a session
+  // never disagree about which model is active.
   const activeModel = useMemo(
     () => resolveActiveModel(models, draft.model, serverDefault),
     [models, draft.model, serverDefault],
   );
-  void activeModel; // used by ModelPicker via models + draft.model
+
+  // Plan mode availability comes from the shared box-level agent catalog
+  // (same source as a real session's composer), resolved against the draft's
+  // own plan flag. The chip drives draft.plan, which submit() carries into the
+  // created session's first turn.
+  const { agents } = useAgentCatalog();
+  const plan = useMemo(
+    () => resolvePlanToggle(agents, draft.plan),
+    [agents, draft.plan],
+  );
+
+  // Trust row: chatAutoAllow is a single global config value — flipping it
+  // here flips it everywhere (no per-draft copy; a draft isn't a session).
+  const chatAutoAllow = useStore((s) => s.chatAutoAllow);
+  const setChatAutoAllow = useStore((s) => s.setChatAutoAllow);
 
   // ---- resolve cwd for new-session mode ----
   // In new-session mode, the cwd defaults to the project's cwd (inherited
@@ -577,8 +575,15 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
 
       // Queue the first prompt for the App-mounted ChatPanel (which auto-submits
       // it through its own optimistic path) and navigate to the new session.
+      // The plan flag rides the same one-shot channel so the draft's plan mode
+      // lands on the session's FIRST turn (see ChatPanel's autoSubmit effect).
       if (sessionId) {
-        setAutoSubmitPrompt({ sid: sessionId, text, model: draft.model ?? undefined });
+        setAutoSubmitPrompt({
+          sid: sessionId,
+          text,
+          model: draft.model ?? undefined,
+          plan: draft.plan,
+        });
       }
       // Navigate to the new session (setActive + box-side select-window so the
       // PTY follows) — one store action shared with the sidebar/jump flows.
@@ -658,10 +663,16 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
       }
 
       if (sessionId && text) {
+        // 6th param is the agent. Fan-out can't use the autoSubmit channel (it
+        // sends directly), so resolve the plan agent here exactly as ChatPanel
+        // does (plan.available && plan.on) so the two paths cannot diverge.
         await window.api.opencodePrompt(
           sessionId,
           text,
           draft.model ?? undefined,
+          undefined,
+          undefined,
+          plan.available && plan.on ? plan.agent : undefined,
         );
       }
 
@@ -748,14 +759,17 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
               aria-label="Worktree branch name"
             />
           ) : (
-            <Chip on={draft.wantWorktree} onClick={() => {}} title="Current git branch">
-              <GitBranch size={13} className="shrink-0" aria-hidden="true" />
-              {branchName ? (
-                <span className="truncate max-w-[120px]">{branchName}</span>
-              ) : (
-                <span className="text-text-faint">no branch</span>
-              )}
-            </Chip>
+            // When "worktree" is unchecked the branch is not editable — it is
+            // metadata about the folder, not a control. An inert Tag (no
+            // button, no onClick, no popover) matches the session header's
+            // branch badge and avoids a dead hover affordance.
+            <Tag
+              size="sm"
+              icon={<GitBranch size={11} aria-hidden="true" className="shrink-0" />}
+              title={branchName ? `On branch ${branchName}` : "Not a git repository"}
+            >
+              <span className="truncate max-w-[120px]">{branchName ?? "no branch"}</span>
+            </Tag>
           )}
 
           <Checkbox
@@ -807,50 +821,63 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
           </button>
         </div>
 
-        {/* Controls row — model ▸ effort, then attach + dictate. */}
-        <div className="flex items-center gap-2 self-start">
-          <ModelPicker
-            modelLabel={null}
-            models={models}
-            modelOverride={draft.model}
-            defaultModel={serverDefault}
-            deactivatedMainModels={deactivatedMainModels}
-            onOpen={() => {}}
-            onSelect={(m: ModelSelection | null) => {
-              // null = clear back to the server default ("Auto").
-              updateDraft(draftId, {
-                model: m,
-                modelTouched: m != null,
-              });
-            }}
-            labelOverride={draft.modelTouched ? null : "Auto"}
-          />
-
-          <IconButton
-            icon={<Paperclip />}
-            label="Attach a file"
-            title="Attaching files is not available when starting a session"
-            size="xl"
-            disabled
-          />
-
-          {voiceEnabled ? (
-            <MicButton
-              phase={voicePhase}
-              onStart={() => { voiceRecorder.start(); }}
-              onStop={voiceRecorder.stop}
-              onCancel={voiceRecorder.cancel}
+        {/* Controls row — model ▸ effort + plan chip on the left, attach +
+            dictate beside them, with the usage dial grouped right (mirrors the
+            session composer's meta footer layout). No SessionToolbar here —
+            schedules/secrets/webhooks are session-scoped and there is no
+            session yet. */}
+        <div className="py-1 flex items-center justify-between gap-3 flex-wrap">
+          <span className="flex items-center gap-2 min-w-0 flex-wrap">
+            <ModelPicker
+              modelLabel={null}
+              models={models}
+              modelOverride={draft.model}
+              defaultModel={serverDefault}
+              deactivatedMainModels={deactivatedMainModels}
+              onOpen={() => {}}
+              onSelect={(m: ModelSelection | null) => {
+                // null = clear back to the server default.
+                updateDraft(draftId, { model: m });
+              }}
             />
-          ) : (
-              <IconButton
-                icon={<Mic />}
-                label="Dictate"
-                title="Dictation needs a Groq API key in Settings"
-                size="xl"
-                disabled
+            <PlanChip
+              plan={plan}
+              onToggle={() => updateDraft(draftId, { plan: !draft.plan })}
+            />
+
+            <IconButton
+              icon={<Paperclip />}
+              label="Attach a file"
+              title="Attaching files is not available when starting a session"
+              size="xl"
+              disabled
+            />
+
+            {voiceEnabled ? (
+              <MicButton
+                phase={voicePhase}
+                onStart={() => { voiceRecorder.start(); }}
+                onStop={voiceRecorder.stop}
+                onCancel={voiceRecorder.cancel}
               />
-            )}
+            ) : (
+                <IconButton
+                  icon={<Mic />}
+                  label="Dictate"
+                  title="Dictation needs a Groq API key in Settings"
+                  size="xl"
+                  disabled
+                />
+              )}
+          </span>
+          <span className="shrink-0 flex items-center gap-2 flex-wrap">
+            <UsageDial providerID={activeModel?.providerID ?? null} />
+          </span>
         </div>
+
+        {/* Permissions row — the shared trust toggle (plan mode reads "Plan
+            mode — edits blocked"; else the chatAutoAllow bypass). */}
+        <TrustRow planOn={plan.on} chatAutoAllow={chatAutoAllow} setChatAutoAllow={setChatAutoAllow} />
         </>
         ) : (
         <>

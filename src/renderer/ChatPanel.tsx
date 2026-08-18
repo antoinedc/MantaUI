@@ -169,7 +169,7 @@ type Props = {
   // used by the optimistic "new session" flow so the first prompt + running
   // indicator appear immediately in the real chat view. Optional; present
   // only on the transient panel rendered while the tmux window is created.
-  autoSubmit?: { text: string; model?: ModelSelection };
+  autoSubmit?: { text: string; model?: ModelSelection; plan?: boolean };
   // App-control (BET-840/841): App owns the single `appControl` bus listener
   // and reaches the open panel for a `switch-model` action through these.
   // `selectModel` is registered so a model-switch applies the override through
@@ -1275,8 +1275,16 @@ export function ChatPanel({
   useEffect(() => {
     if (!autoSubmit || autoSubmitted.current) return;
     autoSubmitted.current = true;
-    const { text, model } = autoSubmit;
+    const { text, model, plan } = autoSubmit;
     setModelOverride(model ?? null);
+    // The draft's plan mode rides the same one-shot channel as the model
+    // (the new panel can mount before the draft finishes handing off, and its
+    // plan state is seeded once from storage at mount — a side-channel write
+    // could land after that read). syncPlan triggers a re-render that
+    // reassigns submitRef.current to a closure holding the new plan, and the
+    // actual submit stays deferred in the setTimeout below, so the first turn
+    // runs as the chosen agent.
+    syncPlan(plan ?? false);
     setInput(text);
     // Clear the one-shot INSIDE the fired timeout, never in the effect body.
     // Clearing the store flips autoSubmit → undefined, which re-runs this
@@ -1299,7 +1307,7 @@ export function ChatPanel({
       // cleanup, so there is still exactly one submission per autoSubmit value.
       autoSubmitted.current = false;
     };
-  }, [autoSubmit, setModelOverride, setInput]);
+  }, [autoSubmit, setModelOverride, setInput, syncPlan]);
 
   // BET-795: inbox "Start a session" — seed the composer (setInput) but do NOT
   // submit. One-shot via the same ref guard idiom as autoSubmit. Clearing the

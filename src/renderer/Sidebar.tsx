@@ -103,6 +103,10 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   const worktreeCleanOnClose = useStore((s) => s.worktreeCleanOnClose);
   const drafts = useStore((s) => s.drafts);
   const activeDraftId = useStore((s) => s.activeDraftId);
+  // A draft is the active VIEW (App renders NewSessionScreen for it), so no
+  // real session row is current. The project GROUP header keeps its tint — a
+  // project-scoped draft genuinely lives inside that project.
+  const rowsSelectable = activeDraftId == null;
   const setActiveDraft = useStore((s) => s.setActiveDraft);
   const dismissDraft = useStore((s) => s.dismissDraft);
   // Downloaded desktop auto-update (BET-416 §E): signalled as a dot on the
@@ -716,6 +720,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                   project={r.project}
                   window={r.window}
                   isActive={
+                    rowsSelectable &&
                     activeProjectName === r.project.tmuxSession &&
                     activeWindowByProject[r.project.tmuxSession] === r.window.index
                   }
@@ -795,7 +800,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
               {!isCollapsed && (
                 <div className="pl-2 space-y-px mt-px">
                   {topWindows.map((w) => {
-                    const isActive = isProjectActive && activeWinIdx === w.index;
+                    const isActive = rowsSelectable && isProjectActive && activeWinIdx === w.index;
                     const kids = n.children.get(w.index) ?? [];
                     return (
                       <div key={w.index}>
@@ -838,7 +843,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                         {kids.map((childIdx, i) => {
                           const childWin = p.windows.find((x) => x.index === childIdx);
                           if (!childWin) return null;
-                          const childActive = isProjectActive && activeWinIdx === childIdx;
+                          const childActive = rowsSelectable && isProjectActive && activeWinIdx === childIdx;
                           return (
                             <JobChildRow
                               key={`job:${p.tmuxSession}:${childIdx}`}

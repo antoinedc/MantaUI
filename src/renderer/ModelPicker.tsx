@@ -47,7 +47,6 @@ export function ModelPicker({
   deactivatedMainModels,
   onOpen,
   onSelect,
-  defaultLabel = null,
   labelOverride = null,
 }: {
   modelLabel: string | null;
@@ -60,14 +59,9 @@ export function ModelPicker({
   deactivatedMainModels?: string[];
   onOpen: () => void;
   onSelect: (m: ModelSelection | null) => void;
-  // Welcome-screen helpers for the model button label.
-  //   - `defaultLabel` (e.g. "Auto"): shown when NO per-session override is
-  //     active (the server default is in effect).
-  //   - `labelOverride`: shown unconditionally, highest precedence — lets a
-  //     caller display "Auto" until the user first picks a model, even when
-  //     the override is seeded from the configured default.
-  // Both are no-ops for callers that don't pass them (ChatPanel).
-  defaultLabel?: string | null;
+  // Welcome-screen helper for the model button label: shown unconditionally,
+  // highest precedence — lets a caller display "Auto" until the user first
+  // picks a model. A no-op for callers that don't pass it (ChatPanel).
   labelOverride?: string | null;
 }) {
   const [modelOpen, setModelOpen] = useState(false);
@@ -124,16 +118,11 @@ export function ModelPicker({
       ? "Default"
       : "High";
 
-  // Friendly display name for the model button. Falls back through the same
-  // precedence as the old label: override → default → last-used → stub.
-  // `defaultLabel` (e.g. "Auto", the welcome-screen convention) replaces the
-  // resolved name when the server default is active and no override is set;
-  // `labelOverride` wins unconditionally (highest precedence).
+  // Friendly display name for the model button: the caller's labelOverride
+  // (highest precedence), else the resolved active model name, else the
+  // modelLabel prop, else the "opencode" stub.
   const modelDisplayName =
-    labelOverride ??
-    (modelOverride == null && defaultLabel
-      ? defaultLabel
-      : activeModel?.name ?? modelLabel ?? "opencode");
+    labelOverride ?? activeModel?.name ?? modelLabel ?? "opencode";
 
   // ⚡ fast-mode toggle — the third segment. Flipping it swaps the active model
   // for its `-fast` twin (or back), carrying the selected effort across. It is
