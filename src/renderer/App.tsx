@@ -936,14 +936,12 @@ function Shell() {
 
   // Server-update available (BET-225 stage 3): main forwards the box's
   // `serverUpdateAvailable` bus event to the renderer via the
-  // `serverUpdateAvailable` IPC channel. The renderer renders a "Server
-  // update available: {version}" bar via the shared UpdateBar component —
-  // same component as the desktop auto-update prompt, just a different
-  // message + button label (`serverUpdateApply` runs `scripts/self-update.sh`
-  // on the box). On mobile the IPC listener is a no-op (httpApi shim
-  // returns `() => {}`); mobile-specific mobile UI is out of scope — this
-  // subscription exists so the store field + bus-case stay in sync for a
-  // later mobile pass.
+  // `serverUpdateAvailable` IPC channel. The box's own poller fires this while
+  // we stay connected, so it is what surfaces a release that drops WHILE the
+  // app is open. We keep the store field (bus-case parity) and ALSO refresh
+  // the unified UpdateTarget[] — that is what the `updates` banner reads, so
+  // a poller-found release appears without waiting for a reconnect. On mobile
+  // the IPC listener is a no-op (httpApi shim returns `() => {}`).
   useEffect(() => {
     if (!window.api.onServerUpdateAvailable) return;
     const off = window.api.onServerUpdateAvailable((payload) => {
@@ -951,6 +949,8 @@ function Shell() {
         version: payload.version,
         notesUrl: payload.notesUrl ?? undefined,
       });
+      // Opportunistic; the banner re-derives from updateTargets.
+      void refreshUpdateTargets().catch(() => {});
     });
     return off;
   }, []);
@@ -1426,10 +1426,9 @@ function Shell() {
   // runUpdateAll state (stage 3, BET-1098). `updateAllRunRef` is true while a
   // run's DESKTOP install is pending; `updateAllBoxConfirmed` is true once the
   // box leg (if any) has completed AND the connection is confirmed back. A
-  // standalone box update (Settings → About, or Settings' "Use runUpdateAll"
-  // path for manual rows) leaves updateAllRunRef false, so the desktop install
-  // gate never fires for it. The confirm modal is promise-based so the
-  // orchestrator can await the user's choice.
+  // standalone box update (Settings → About's "Update & restart") leaves
+  // updateAllRunRef false, so the desktop-install gate never fires for it. The
+  // confirm modal is promise-based so the orchestrator can await the choice.
   const updateAllRunRef = useRef(false);
   const updateAllBoxConfirmed = useRef(false);
   const updateAllResolvers = useRef<{ resolve: (ok: boolean) => void } | null>(null);

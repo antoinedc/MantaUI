@@ -35,6 +35,7 @@ import { SettingsRow } from "./SettingsRow";
 import { BANNER_BTN } from "./Toast";
 import { errorDisclosure } from "./settingsError";
 import { describeUpdateTarget } from "./chatUtils";
+import type { UpdateRow } from "./chatUtils";
 import { refreshUpdateTargets } from "./updateCheck";
 import { forgeCredentialSecondary } from "./chatUtils";
 import { useCachedResource } from "./useCachedResource";
