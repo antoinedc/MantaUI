@@ -847,6 +847,56 @@ describe("ChatPanel re-activation re-pin defers to the re-measured tail (BET-100
   });
 });
 
+// ===== A deep-link jump detaches the transcript EXPLICITLY =====
+//
+// The artifacts panel / ⌘F "go to this message" jump used to detach as a side
+// effect: it scrolled up, and any scroll-up was read as the user leaving the
+// tail. That inference is gone (a scroll event is not a gesture — react-
+// virtuoso issues its own), so the jump has to say so itself. Without this the
+// next streamed chunk yanks the user straight back off the row they asked for.
+// The jump-to-latest button is the observable: it is shown iff not following.
+describe("ChatPanel deep-link jump detaches from the tail", () => {
+  let h: Harness | null = null;
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  it("shows jump-to-latest after a manta-scroll-to-message jump", async () => {
+    const transcript = [
+      {
+        info: {
+          id: "msg_old",
+          sessionID: "ses_test",
+          role: "assistant" as const,
+          time: { created: 1, completed: 2 },
+        },
+        parts: [{ type: "text", id: "prt_old", messageID: "msg_old", text: "way back" }],
+      },
+    ];
+    installMockApi({ opencodeMessages: () => Promise.resolve(transcript as never) });
+    resetStore();
+
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    const jump = () => h!.container.querySelector(".manta-jump-latest") as HTMLElement;
+    expect(jump().dataset.shown).toBe("false");
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent("manta-scroll-to-message", {
+          detail: { sessionId: "ses_test", messageId: "msg_old" },
+        }),
+      );
+    });
+    await h.flush();
+
+    expect(jump().dataset.shown).toBe("true");
+  });
+});
+
 // ===== Abort self-heals orphaned questions (BET-116) =====
 //
 // opencode's /question pending list is cumulative and never expires. A

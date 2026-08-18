@@ -3914,18 +3914,98 @@ export function scrollElementToTail(el: HTMLElement | null): void {
  * - Landing within FOLLOW_THRESHOLD_PX of the bottom always means following,
  *   whatever caused it (the user scrolling back down, our own tail scroll, or
  *   the scroller clamping after the transcript shrank on /compact).
- * - Moving UP while away from the bottom is the only thing that stops it.
+ * - Moving UP while away from the bottom stops it — but ONLY when the move
+ *   came from the user (`userIntent`). A scroll event is not by itself
+ *   evidence of intent: react-virtuoso writes to the scroller behind our back
+ *   (its "upward scrolling compensation" when a row above the viewport is
+ *   re-measured, and the unshift/deviation corrections), and those arrive as
+ *   ordinary scroll events with a LOWER scrollTop. Treating them as a
+ *   scroll-up is what detached the transcript on every tool call: the card
+ *   lands, its row is re-measured, Virtuoso compensates, and the transcript
+ *   stopped following with no user input at all. See the intent tracker in
+ *   Transcript.tsx for what counts as a gesture.
  */
 export const FOLLOW_THRESHOLD_PX = 64;
 
 export function classifyFollowOnScroll(
   m: { scrollTop: number; scrollHeight: number; clientHeight: number },
   prevScrollTop: number,
+  userIntent: boolean,
 ): boolean | null {
   const distanceFromBottom = m.scrollHeight - m.scrollTop - m.clientHeight;
   if (distanceFromBottom <= FOLLOW_THRESHOLD_PX) return true;
-  if (m.scrollTop < prevScrollTop) return false;
+  if (userIntent && m.scrollTop < prevScrollTop) return false;
   return null;
+}
+
+/**
+ * How long a user input event vouches for the scroll events that follow it.
+ *
+ * A gesture and the scrolling it causes are not one event: a wheel tick is
+ * followed by trackpad momentum that fires scroll events with no further
+ * wheel events, and a keyboard PageUp scrolls a frame later. The window has
+ * to outlive that gap while staying far shorter than the interval between a
+ * gesture and the next unrelated re-measure.
+ */
+export const USER_SCROLL_INTENT_WINDOW_MS = 250;
+
+/** Mutable "did the user just do something" record. Owned by Transcript.tsx. */
+export type UserScrollIntent = {
+  /** Timestamp of the last wheel / touch / key input on the scroller. */
+  lastInputAt: number;
+  /** A pointer button is held down on the scroller. */
+  pointerDown: boolean;
+  /** A scroll fired while that button was held — this press IS a scroll drag. */
+  pointerScrolled: boolean;
+};
+
+export function createUserScrollIntent(): UserScrollIntent {
+  return {
+    lastInputAt: Number.NEGATIVE_INFINITY,
+    pointerDown: false,
+    pointerScrolled: false,
+  };
+}
+
+export function hasUserScrollIntent(intent: UserScrollIntent, now: number): boolean {
+  // A held button covers every pointer-driven scroll: dragging the scrollbar
+  // thumb, click-to-page in the track, and drag-selecting past the top edge
+  // (which auto-scrolls). See the note on pointer intent below for why this is
+  // a held FLAG and not a geometric test of where the press landed.
+  if (intent.pointerDown) return true;
+  return now - intent.lastInputAt <= USER_SCROLL_INTENT_WINDOW_MS;
+}
+
+/**
+ * A pointer press became a scroll gesture — grant it the trailing window on
+ * release.
+ *
+ * WHY POINTER INTENT IS "BUTTON HELD", NOT "PRESSED ON THE SCROLLBAR".
+ * The obvious discriminator is geometry: a press past `clientWidth` is on the
+ * scrollbar gutter, a press inside the content box is a click (expanding a
+ * tool card, selecting text) and must not vouch for the re-measure scrolls
+ * that follow it. That test is a NO-OP under overlay scrollbars — the macOS
+ * default, and therefore the primary platform — where the bar is painted over
+ * the content and `clientWidth` equals the full border-box width, so no press
+ * is ever past it. Measured in headed Chromium: classic scrollbars report
+ * clientWidth 385 / offsetWidth 400, overlay reports 400 / 400, and BOTH
+ * dispatch pointerdown to the scroller at the same clientX. Geometry cannot
+ * tell them apart; the button state can. In the same measurement every scroll
+ * of a thumb drag fired with the button held, and a plain content click fired
+ * none.
+ *
+ * The residue is a press-and-hold ON CONTENT that spans a re-measure — a text
+ * selection drag, mostly, where detaching is the right behaviour anyway.
+ *
+ * A quick track click can release before its later scroll events land, so a
+ * press that demonstrably scrolled earns the normal input window on pointerup.
+ * A press that never scrolled earns nothing, which is what keeps a tool-card
+ * click from vouching for the compensation its own expansion causes.
+ */
+export function releaseUserScrollIntent(intent: UserScrollIntent, now: number): void {
+  if (intent.pointerScrolled) intent.lastInputAt = now;
+  intent.pointerDown = false;
+  intent.pointerScrolled = false;
 }
 
 /**

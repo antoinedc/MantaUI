@@ -40,6 +40,9 @@ import {
   formatDuration,
   scrollElementToTail,
   classifyFollowOnScroll,
+  createUserScrollIntent,
+  hasUserScrollIntent,
+  releaseUserScrollIntent,
   type EntryMotionState,
   type LiveTurn,
   workingIndicatorLabel,
@@ -498,25 +501,83 @@ export function Transcript({
   // animating open (Virtuoso's totalListHeight sums header + footer + list, so
   // one signal covers all of it). This replaces `followOutput`, which fired
   // only on item-COUNT changes and therefore missed every one of those.
+  //
+  // The write is doubled across a frame on purpose. Virtuoso publishes
+  // `totalListHeightChanged` from its size stream — synchronously, inside the
+  // ResizeObserver tick — while the list padding that carries part of that
+  // height is React state and lands on a later commit. So the `scrollHeight`
+  // the first write reads can still be the pre-growth one, leaving the
+  // transcript parked short of the real tail; the rAF write runs after the
+  // commit has painted and lands on it. Both are guarded on the follow state,
+  // so a user who scrolls up in between is not yanked back.
   const stickToTail = useCallback(() => {
     if (!followingRef.current) return;
     scrollElementToTail(scrollerElRef.current);
+    requestAnimationFrame(() => {
+      if (!followingRef.current) return;
+      scrollElementToTail(scrollerElRef.current);
+    });
   }, [followingRef, scrollerElRef]);
 
-  // The user's intent, and the only thing that can stop the follow. Content
-  // growth fires no scroll event, so it cannot reach this listener — which is
-  // exactly why the transcript can no longer detach on its own.
+  // The user's intent, and the only thing that can stop the follow.
+  //
+  // Two signals, deliberately separate: WHERE the scroller is (the scroll
+  // event) and WHETHER the user put it there (an input event). Content growth
+  // fires no scroll event at all, and the scroll events Virtuoso fires for its
+  // own corrections carry no input — so neither can detach the transcript.
+  // See classifyFollowOnScroll for why the second signal had to be added.
   useEffect(() => {
     const el = scrollerElRef.current;
     if (!el) return;
+    const intent = createUserScrollIntent();
     let prevScrollTop = el.scrollTop;
+    const mark = () => {
+      intent.lastInputAt = Date.now();
+    };
+    // Every pointer-driven scroll (thumb drag, click-to-page in the track,
+    // drag-select autoscroll) holds a button for the scrolls it causes; a
+    // click does not scroll at all while held. That, NOT where the press
+    // landed, is the discriminator — see releaseUserScrollIntent for the
+    // measurement that ruled out the geometric one under overlay scrollbars.
+    const onPointerDown = () => {
+      intent.pointerDown = true;
+      intent.pointerScrolled = false;
+    };
+    const onPointerUp = () => releaseUserScrollIntent(intent, Date.now());
     const onScroll = () => {
-      const next = classifyFollowOnScroll(el, prevScrollTop);
+      if (intent.pointerDown) intent.pointerScrolled = true;
+      const next = classifyFollowOnScroll(
+        el,
+        prevScrollTop,
+        hasUserScrollIntent(intent, Date.now()),
+      );
       prevScrollTop = el.scrollTop;
       if (next !== null) onFollowingChange(next);
     };
+    el.addEventListener("wheel", mark, { passive: true });
+    el.addEventListener("touchstart", mark, { passive: true });
+    el.addEventListener("touchmove", mark, { passive: true });
+    // Only reachable when focus is INSIDE the transcript (a "Load earlier"
+    // button, a link in a message) — during a turn it normally sits in the
+    // composer, which is outside this scroller and scrolls nothing. Kept
+    // because that focused case is real and the listener is free.
+    el.addEventListener("keydown", mark);
+    el.addEventListener("pointerdown", onPointerDown);
     el.addEventListener("scroll", onScroll, { passive: true });
-    return () => el.removeEventListener("scroll", onScroll);
+    // On window, not the scroller: a scrollbar drag routinely ends with the
+    // pointer somewhere else entirely.
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerUp);
+    return () => {
+      el.removeEventListener("wheel", mark);
+      el.removeEventListener("touchstart", mark);
+      el.removeEventListener("touchmove", mark);
+      el.removeEventListener("keydown", mark);
+      el.removeEventListener("pointerdown", onPointerDown);
+      el.removeEventListener("scroll", onScroll);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+    };
   }, [hasMessages, onFollowingChange, scrollerElRef]);
 
   return (

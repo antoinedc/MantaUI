@@ -1286,6 +1286,51 @@ Backup at `~/.tmux.conf.pre-MantaUI` on the remote if it was ever modified.
   at the bottom". Content growing under the user changes the latter and
   must not change the former.**
 
+  **A scroll event is not a user gesture either — that was generation six.**
+  A `scroll` event with a lower `scrollTop` was read as "the user dragged
+  up", but react-virtuoso writes to the scroller itself: its *upward
+  scrolling compensation* fires whenever a row above the viewport is
+  re-measured (plus the unshift/`deviation` corrections). A tool card
+  landing mid-turn re-measures its row, Virtuoso compensates, and the
+  transcript detached with no user input at all — the "every tool call
+  bounces me out and I have to click jump-to-latest" report. So the two
+  signals are now separate: WHERE the scroller is (the scroll event) and
+  WHETHER the user put it there. `classifyFollowOnScroll` takes a
+  `userIntent` argument and only returns `false` when both agree; intent is
+  a short window (`USER_SCROLL_INTENT_WINDOW_MS`) refreshed by wheel /
+  touch / keydown on the scroller, plus a held-pointer flag. Landing within
+  `FOLLOW_THRESHOLD_PX` of the bottom still re-attaches unconditionally.
+
+  **Pointer intent is "a button is held", NOT "the press landed on the
+  scrollbar" — the geometric test is a no-op on the primary platform.** The
+  obvious discriminator is `clientX > left + clientWidth` (the gutter the
+  scrollbar reserves). That works with classic scrollbars and never fires
+  under **overlay** scrollbars, the macOS default, where the bar is painted
+  OVER the content and `clientWidth` is the full border-box width — so a
+  Mac user could not detach by dragging the scrollbar at all, while Windows
+  could. Measured in headed Chromium (the probe is worth re-running before
+  changing this): classic reports `clientWidth` 385 / `offsetWidth` 400,
+  overlay reports 400 / 400, and BOTH dispatch `pointerdown` to the scroller
+  at the same `clientX`. In the same run every scroll of a thumb drag fired
+  with the button held and a plain content click fired none — so the button
+  state separates them in both modes. A press that never scrolled earns
+  nothing on release (`releaseUserScrollIntent`), which is what stops a
+  tool-card click from vouching for the compensation its own expansion
+  causes; a press that DID scroll earns the normal window, covering a quick
+  track click whose scrolls land after the release.
+
+  Two consequences worth knowing before editing this:
+  - **A programmatic scroll away from the tail must now detach EXPLICITLY.**
+    `scrollToMessage` (the artifacts / ⌘F deep-link jump) calls
+    `setFollowing(false)` itself; it used to rely on the resulting scroll-up
+    being mistaken for a gesture, which is exactly the mistake being fixed.
+  - **`stickToTail` writes twice, across a frame.** Virtuoso publishes
+    `totalListHeightChanged` synchronously inside the ResizeObserver tick,
+    while the list padding carrying part of that height is React state that
+    lands on a later commit — so the first write can read a pre-growth
+    `scrollHeight` and park short of the tail. The rAF write lands on the
+    real one. Both are guarded on the follow state.
+
   Note the tail scroll is `scrollTop = scrollHeight`, not
   `scrollToIndex({ index: "LAST" })`, because the Footer renders below the
   last item.
