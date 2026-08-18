@@ -460,7 +460,7 @@ describe("CloneFromGitHub picker", () => {
     const text = container!.textContent ?? "";
     // The network message renders inside the picker's error callout…
     expect(text).toContain(
-      "Couldn't reach GitHub from your box. Check its connection and try again.",
+      "Couldn't reach GitHub from your server. Check its connection and try again.",
     );
     // …and the picker stays up — a blip must not look like a sign-out.
     expect(text).toContain("Clone a repository");

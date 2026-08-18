@@ -327,7 +327,7 @@ export const SecretsCard = memo(function SecretsCard({
               submit();
             }
           }}
-          placeholder="value (stored on the box; never shown again)"
+          placeholder="value (stored on the server; never shown again)"
           type="password"
           spellCheck={false}
           autoCapitalize="off"
@@ -346,7 +346,7 @@ export const SecretsCard = memo(function SecretsCard({
             disabled={!canSave}
             className="shrink-0 px-2 py-1 rounded-xs border disabled:opacity-40"
             style={{ borderColor: "rgb(var(--accent-rgb) / 0.53)", color: "var(--accent)" }}
-            title="Store this secret on the box"
+            title="Store this secret on the server"
           >
             {saving ? "saving…" : "Save"}
           </button>

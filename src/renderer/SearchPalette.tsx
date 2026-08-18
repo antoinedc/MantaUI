@@ -195,7 +195,7 @@ export function SearchPalette({
         if (!supported) {
           return (
             <div className="px-3 py-3 text-label text-text-faint">
-              Search needs a newer box runtime — update the box.
+              Search needs a newer server runtime — update the server.
             </div>
           );
         }

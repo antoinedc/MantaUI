@@ -464,7 +464,7 @@ export function SessionHeader({
       <ConfirmModal
         open={confirm === "delete"}
         title="Delete this session?"
-        body={`“${sessionName}” and its tmux window will be killed on the box. This can't be undone.`}
+        body={`“${sessionName}” and its tmux window will be killed on the server. This can't be undone.`}
         confirmLabel="Delete session"
         onConfirm={() => {
           setConfirm(null);

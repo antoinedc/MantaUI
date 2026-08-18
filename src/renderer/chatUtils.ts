@@ -2194,7 +2194,7 @@ export function resolvePlanToggle(
   if (!plan)
     return on
       ? { available: false, on: true, title: "Plan mode on (plan agent unavailable)" }
-      : { available: false, on: false, title: "This box has no plan agent" };
+      : { available: false, on: false, title: "This server has no plan agent" };
   return {
     available: true,
     on,
@@ -3500,7 +3500,7 @@ export function repoListErrorMessage(code: string | null | undefined): string {
     return "GitHub refused this request. If the repositories belong to an organisation, it may require SSO authorisation for your sign-in.";
   }
   if (code === "network") {
-    return "Couldn't reach GitHub from your box. Check its connection and try again.";
+    return "Couldn't reach GitHub from your server. Check its connection and try again.";
   }
   return "Couldn't list your repositories from GitHub.";
 }
@@ -3514,17 +3514,17 @@ export function forgeCredentialSecondary(status: {
 }): string {
   if (status.valid === false) {
     if (status.source === "cli") {
-      return "GitHub rejected the gh CLI sign-in on your box. Run `gh auth login` there, or Disconnect.";
+      return "GitHub rejected the gh CLI sign-in on your server. Run `gh auth login` there, or Disconnect.";
     }
     if (status.source === "env") {
-      return "GitHub rejected the MANTA_GITHUB_TOKEN environment variable on your box. Replace it there, or Disconnect.";
+      return "GitHub rejected the MANTA_GITHUB_TOKEN environment variable on your server. Replace it there, or Disconnect.";
     }
     return "GitHub rejected this sign-in. Disconnect, then connect again.";
   }
   const where =
-    status.source === "cli" ? "from the gh CLI on your box"
+    status.source === "cli" ? "from the gh CLI on your server"
     : status.source === "env" ? "from the MANTA_GITHUB_TOKEN env var"
-    : status.source === "stored" ? "signed in on this box"
+    : status.source === "stored" ? "signed in on this server"
     : "connected";
   return status.login ? `@${status.login} · ${where}` : where;
 }
@@ -4007,7 +4007,7 @@ export function describeSessionClose(args: {
   /** The worktree that WILL be removed, or null when none will be. */
   worktreePath: string | null;
 }): CloseConfirmCopy {
-  const parts = ["Its tmux window will be killed on the box."];
+  const parts = ["Its tmux window will be killed on the server."];
   if (args.running) parts.push("A turn is currently running and will be stopped.");
   if (args.worktreePath) parts.push(`Its worktree at ${args.worktreePath} will be removed.`);
   return {
@@ -4032,8 +4032,8 @@ export function describeProjectClose(args: {
       : `Close “${name}” and its ${sessionCount} session${sessionCount === 1 ? "" : "s"}?`;
   const parts = [
     sessionCount === 0
-      ? "Its tmux session will be killed on the box."
-      : `All ${sessionCount} tmux window${sessionCount === 1 ? "" : "s"} will be killed on the box.`,
+      ? "Its tmux session will be killed on the server."
+      : `All ${sessionCount} tmux window${sessionCount === 1 ? "" : "s"} will be killed on the server.`,
   ];
   if (runningCount > 0) {
     parts.push(

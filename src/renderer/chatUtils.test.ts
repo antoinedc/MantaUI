@@ -4843,7 +4843,7 @@ describe("repoListErrorMessage (BET-1011)", () => {
 
   it("explains a network failure", () => {
     expect(repoListErrorMessage("network")).toBe(
-      "Couldn't reach GitHub from your box. Check its connection and try again.",
+      "Couldn't reach GitHub from your server. Check its connection and try again.",
     );
   });
 
@@ -4859,13 +4859,13 @@ describe("repoListErrorMessage (BET-1011)", () => {
 describe("forgeCredentialSecondary (BET-1059)", () => {
   it("explains a rejected gh CLI credential", () => {
     expect(forgeCredentialSecondary({ login: "a", source: "cli", valid: false })).toBe(
-      "GitHub rejected the gh CLI sign-in on your box. Run `gh auth login` there, or Disconnect.",
+      "GitHub rejected the gh CLI sign-in on your server. Run `gh auth login` there, or Disconnect.",
     );
   });
 
   it("explains a rejected env-var credential", () => {
     expect(forgeCredentialSecondary({ login: "a", source: "env", valid: false })).toBe(
-      "GitHub rejected the MANTA_GITHUB_TOKEN environment variable on your box. Replace it there, or Disconnect.",
+      "GitHub rejected the MANTA_GITHUB_TOKEN environment variable on your server. Replace it there, or Disconnect.",
     );
   });
 
@@ -4880,13 +4880,13 @@ describe("forgeCredentialSecondary (BET-1059)", () => {
 
   it("valid with a login → @login · <where>", () => {
     expect(forgeCredentialSecondary({ login: "antoinedc", source: "cli", valid: true })).toBe(
-      "@antoinedc · from the gh CLI on your box",
+      "@antoinedc · from the gh CLI on your server",
     );
   });
 
   it("valid with no login → the bare <where>", () => {
     expect(forgeCredentialSecondary({ login: null, source: "stored", valid: true })).toBe(
-      "signed in on this box",
+      "signed in on this server",
     );
   });
 
@@ -5187,7 +5187,7 @@ describe("describeSessionClose", () => {
   it("idle + no worktree → exact single sentence", () => {
     expect(describeSessionClose({ name: "Deploy", running: false, worktreePath: null })).toEqual({
       title: 'Close “Deploy”?',
-      body: "Its tmux window will be killed on the box.",
+      body: "Its tmux window will be killed on the server.",
       confirmLabel: "Close session",
     });
   });
@@ -5213,7 +5213,7 @@ describe("describeSessionClose", () => {
       worktreePath: "/srv/manta/ethernal",
     });
     expect(r.body).toBe(
-      "Its tmux window will be killed on the box. " +
+      "Its tmux window will be killed on the server. " +
         "A turn is currently running and will be stopped. " +
         "Its worktree at /srv/manta/ethernal will be removed.",
     );
@@ -5234,7 +5234,7 @@ describe("describeProjectClose", () => {
       worktreeCount: 0,
     });
     expect(r.title).toBe("Close “orphan”?");
-    expect(r.body).toBe("Its tmux session will be killed on the box.");
+    expect(r.body).toBe("Its tmux session will be killed on the server.");
     expect(r.confirmLabel).toBe("Close project");
   });
 
@@ -5246,7 +5246,7 @@ describe("describeProjectClose", () => {
       worktreeCount: 0,
     });
     expect(r.title).toBe("Close “manta” and its 1 session?");
-    expect(r.body).toBe("All 1 tmux window will be killed on the box.");
+    expect(r.body).toBe("All 1 tmux window will be killed on the server.");
   });
 
   it("4 sessions, 2 running → plural mid-turn sentence", () => {
