@@ -99,6 +99,25 @@ type Props = {
   onDone?: () => void;
 };
 
+type ZeroAction = {
+  label: string;
+  tone: "primary" | "default" | "ghost";
+  onClick: () => void;
+  disabled?: boolean;
+};
+
+function ZeroStateActions({ actions, className }: { actions: ZeroAction[]; className?: string }) {
+  return (
+    <div className={"flex items-center flex-wrap gap-2" + (className ? " " + className : "")}>
+      {actions.map((a) => (
+        <Button key={a.label} tone={a.tone} onClick={a.onClick} disabled={a.disabled}>
+          {a.label}
+        </Button>
+      ))}
+    </div>
+  );
+}
+
 export function NewSessionScreen({ draftId, onDone }: Props) {
   // Per-row lifecycle for the repo-probe batch setup (BET-787 [S8]).
   type RowPhase = "idle" | "queued" | "creating" | "ready" | "error";
@@ -859,11 +878,10 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
                   <Skeleton width={52} />
                   <Skeleton width={44} />
                 </div>
-                <div className="flex items-center gap-2 mt-4">
-                  <Button tone="default" onClick={() => setPickerOpen(true)}>
-                    Browse for a folder…
-                  </Button>
-                </div>
+                <ZeroStateActions
+                  className="mt-4"
+                  actions={[{ label: "Browse for a folder…", tone: "default", onClick: () => setPickerOpen(true) }]}
+                />
               </>
             ) : zeroState === "degraded" ? (
               <>
@@ -873,11 +891,10 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
                     Couldn't scan for repositories. Point Manta at a folder instead.
                   </p>
                 </div>
-                <div className="flex justify-center mt-2">
-                  <Button tone="primary" onClick={() => setPickerOpen(true)}>
-                    Browse for a folder…
-                  </Button>
-                </div>
+                <ZeroStateActions
+                  className="justify-center mt-2"
+                  actions={[{ label: "Browse for a folder…", tone: "primary", onClick: () => setPickerOpen(true) }]}
+                />
               </>
             ) : zeroState === "fresh" ? (
               <>
@@ -889,17 +906,13 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
                     No repositories found. Clone one from GitHub, or point Manta at a folder.
                   </p>
                 </div>
-                <div className="flex justify-center gap-2 mt-4">
-                  <Button
-                    tone="primary"
-                    onClick={() => setCloneOpen(true)}
-                  >
-                    Clone from GitHub…
-                  </Button>
-                  <Button tone="ghost" onClick={() => setPickerOpen(true)}>
-                    Browse for a folder…
-                  </Button>
-                </div>
+                <ZeroStateActions
+                  className="justify-center mt-4"
+                  actions={[
+                    { label: "Clone from GitHub…", tone: "primary", onClick: () => setCloneOpen(true) },
+                    { label: "Browse for a folder…", tone: "ghost", onClick: () => setPickerOpen(true) },
+                  ]}
+                />
               </>
             ) : (
               <ScrollFrame
@@ -930,34 +943,31 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
                   </>
                 }
                 footer={
-                  <div className="flex items-center flex-wrap gap-2 mt-3">
-                    {batchDone && !sending && hasFailed ? (
+                  batchDone && !sending && hasFailed ? (
+                    <div className="flex items-center flex-wrap gap-2 mt-3">
                       <Button tone="primary" onClick={() => void finishSetup()}>
                         Done
                       </Button>
-                    ) : batchDone ? (
+                    </div>
+                  ) : batchDone ? (
+                    <div className="flex items-center flex-wrap gap-2 mt-3">
                       <span className="text-meta text-text-faint">Setting up workspaces…</span>
-                    ) : (
-                      <>
-                        <Button
-                          tone="primary"
-                          onClick={() => void setupWorkspaces()}
-                          disabled={checked.size === 0}
-                        >
-                          Set up {checked.size} workspace{checked.size === 1 ? "" : "s"}
-                        </Button>
-                        <Button tone="default" onClick={() => setPickerOpen(true)}>
-                          Browse for a folder…
-                        </Button>
-                        <Button
-                          tone="default"
-                          onClick={() => setCloneOpen(true)}
-                        >
-                          Clone from GitHub…
-                        </Button>
-                      </>
-                    )}
-                  </div>
+                    </div>
+                  ) : (
+                    <ZeroStateActions
+                      className="mt-3"
+                      actions={[
+                        {
+                          label: `Set up ${checked.size} workspace${checked.size === 1 ? "" : "s"}`,
+                          tone: "primary",
+                          onClick: () => void setupWorkspaces(),
+                          disabled: checked.size === 0,
+                        },
+                        { label: "Browse for a folder…", tone: "default", onClick: () => setPickerOpen(true) },
+                        { label: "Clone from GitHub…", tone: "default", onClick: () => setCloneOpen(true) },
+                      ]}
+                    />
+                  )
                 }
               >
                 <div className="space-y-1">
