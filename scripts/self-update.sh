@@ -73,7 +73,7 @@ exec >>"$LOG_FILE" 2>&1
 . "$MANTA_HOME/scripts/lib/release.sh"
 
 # --- Detect install kind ------------------------------------------------------
-echo "MANTA_PROGRESS 1/6 Checking for updates"
+echo "MANTA_PROGRESS 1/7 Checking for updates"
 if [ -d "$MANTA_HOME/.git" ]; then
   INSTALL_KIND=git
 elif [ -f "$MANTA_HOME/RELEASE.json" ]; then
@@ -113,47 +113,52 @@ if [ -d "$MANTA_HOME/runtime/node/bin" ]; then
   export PATH
 fi
 
-# --- Upgrade the opencode binary (BET-1016) ----------------------------------
-# opencode is installed once (deliberately UNPINNED) and otherwise frozen at
-# install time, so every box drifts from whatever it was installed with forever.
-# Fold its upgrade into the self-update so a box stops drifting: run `opencode
-# upgrade` (the CLI command on the installed binary — no auth question, no port
-# assumption) and capture `opencode --version` before/after to report whether
-# anything actually changed.
+# --- Upgrade every installed AI CLI (BET-1097) --------------------------------
+# opencode, claude, codex, kimi are installed once (deliberately UNPINNED) and
+# otherwise frozen at install time, so every box drifts from whatever it was
+# installed with. The whole upgrade loop lives in node (scripts/upgrade-clis.mjs,
+# reusing the stage-1 catalog + detector — the ONE place that knows how to find
+# and upgrade a CLI). It writes a state file with `CLIS_CHANGED` (comma-separated
+# ids of CLIs whose version actually changed) and `OPENCODE_CHANGED=0|1`, which
+# we source below to drive the early exit and the conditional restarts.
 #
-# MUST run BEFORE the packaged-install early exit below: that cheap exit skips
-# EVERYTHING (including the restart at MANTA_PROGRESS 5/6) when the box tarball
-# is already current, and an opencode-only upgrade must still fall through to
-# that restart. `OPCODE_VERSION_CHANGED` is the flag the early exit re-checks —
-# set here so the early exit can go conditional on it.
+# MUST run BEFORE the packaged-install early exit and before any payload
+# replacement: that cheap exit skips EVERYTHING (including the restarts) when
+# the box tarball is already current, and a CLI-only upgrade must still fall
+# through to the restart(s) that apply. RUNS ON THE RUNTIME NODE THE SCRIPT
+# ALREADY PINNED ON PATH ($MANTA_HOME/runtime/node/bin — NODE_CMD).
 #
 # Non-fatal throughout, mirroring refresh_opencode_tools(): an offline box, a
-# missing CLI, or a refused upgrade must never abort the server update.
-OPCODE_VERSION_CHANGED=0
-upgrade_opencode() {
-  if ! command -v opencode >/dev/null 2>&1; then
-    echo "⚠ self-update: opencode not found on PATH — skipping binary upgrade"
-    return 0
-  fi
-  local before after
-  before="$(opencode --version 2>/dev/null || true)"
-  before="${before:-unknown}"
-  if ! opencode upgrade >/dev/null 2>&1; then
-    echo "⚠ self-update: opencode upgrade failed (current: $before) — continuing"
-    return 0
-  fi
-  after="$(opencode --version 2>/dev/null || true)"
-  after="${after:-unknown}"
-  if [ "$before" != "$after" ]; then
-    OPCODE_VERSION_CHANGED=1
-    echo "✓ self-update: opencode upgraded: $before → $after"
+# missing CLI, a refused upgrade, a vendor endpoint that 500s, or even a node
+# that cannot run the script must never abort the server update.
+echo "MANTA_PROGRESS 2/7 Updating command-line tools"
+CLIS_CHANGED=""
+OPENCODE_CHANGED=0
+CLI_STATE_FILE="$STATE_HOME/.manta/upgrade-clis.state"
+if [ -x "$NODE_CMD" ] && [ -f "$MANTA_HOME/scripts/upgrade-clis.mjs" ]; then
+  if "$NODE_CMD" "$MANTA_HOME/scripts/upgrade-clis.mjs" \
+       --progress-step=2 --progress-total=7 --state-file="$CLI_STATE_FILE"; then
+    if [ -f "$CLI_STATE_FILE" ]; then
+      . "$CLI_STATE_FILE"
+      CLIS_CHANGED="${CLIS_CHANGED:-}"
+      OPENCODE_CHANGED="${OPENCODE_CHANGED:-0}"
+    fi
   else
-    echo "✓ self-update: opencode already current ($before)"
+    echo "⚠ self-update: CLI upgrade script failed — continuing with no CLI changes"
   fi
-}
-upgrade_opencode
+else
+  echo "⚠ self-update: node unavailable — skipping CLI upgrades"
+fi
+if [ -n "$CLIS_CHANGED" ]; then CLIS_CHANGED_FLAG=1; else CLIS_CHANGED_FLAG=0; fi
 
-echo "MANTA_PROGRESS 2/6 Downloading update"
+# --- Payload-replaced flag (BET-1097) -----------------------------------------
+# Tracks whether this run swapped the box payload (a git reset --hard, or a
+# release tarball extraction). Set at the ONE place each kind does its swap; the
+# conditional restart block reads this single flag to decide opencode-and-server
+# vs opencode-only vs nothing.
+PAYLOAD_REPLACED=0
+
+echo "MANTA_PROGRESS 3/7 Downloading update"
 if [ "$INSTALL_KIND" = "git" ]; then
   # A git checkout has no vendored runtime under version control — the box runs
   # whatever Node is on PATH. So a git box's runtime is only ever updated by
@@ -163,6 +168,7 @@ if [ "$INSTALL_KIND" = "git" ]; then
 
   log "self-update: resetting to origin/main"
   git -C "$MANTA_HOME" reset --hard origin/main -q
+  PAYLOAD_REPLACED=1
 else
   # packaged install — download + verify + extract the release tarball and
   # replace only the payload paths the release owns.
@@ -211,10 +217,11 @@ else
   # Cheap early exit when already current — no download, no reinstall, no
   # restart. The decision itself lives in scripts/lib/release.sh so it can be
   # unit-tested; see release_is_current for why it compares the build's commit
-  # rather than its version number. BET-1016: the exit is conditional on BOTH
-  # the box being current AND opencode not having changed — an opencode-only
-  # upgrade must fall through to the restart below, never be swallowed here.
-  if should_skip_self_update "$INSTALLED_VERSION" "$INSTALLED_GIT_SHA" "$TARBALL_VERSION" "$TARBALL_GIT_SHA" "$OPCODE_VERSION_CHANGED"; then
+  # rather than its version number. The exit is conditional on BOTH the box
+  # being current AND no CLI having changed (BET-1016, generalised in BET-1097)
+  # — a CLI-only upgrade must fall through to the restart below, never be
+  # swallowed here.
+  if should_skip_self_update "$INSTALLED_VERSION" "$INSTALLED_GIT_SHA" "$TARBALL_VERSION" "$TARBALL_GIT_SHA" "$CLIS_CHANGED_FLAG"; then
     if [ -n "$INSTALLED_GIT_SHA" ] && [ -n "$TARBALL_GIT_SHA" ]; then
       ok "self-update: already at $TARBALL_VERSION ($TARBALL_GIT_SHA)"
     else
@@ -256,6 +263,7 @@ else
   # half-written tree — most important for `runtime/`, which the running server
   # executes from. It also stamps RELEASE.json so the box records its version.
   replace_release_payload "$WORK/pkg" "$MANTA_HOME" "$NODE_CMD"
+  PAYLOAD_REPLACED=1
   # Report the commit alongside the version: two releases legitimately share a
   # version number now, so "0.0.29 → 0.0.29" alone reads like a no-op.
   if [ -n "$TARBALL_GIT_SHA" ]; then
@@ -265,7 +273,7 @@ else
   fi
 fi
 
-echo "MANTA_PROGRESS 3/6 Installing dependencies"
+echo "MANTA_PROGRESS 4/7 Installing dependencies"
 install_prod_deps "$MANTA_HOME"
 
 # --- Refresh the manta-native opencode tools --------------------------------
@@ -332,7 +340,7 @@ refresh_opencode_tools() {
   echo "✓ self-update: opencode tools refreshed ($changed of $copied changed)"
 }
 
-echo "MANTA_PROGRESS 4/6 Refreshing AI tools"
+echo "MANTA_PROGRESS 5/7 Refreshing AI tools"
 refresh_opencode_tools
 
 # --- Sync opencode agent guidance (BET-640) -----------------------------------
@@ -342,36 +350,66 @@ refresh_opencode_tools
 # update without rewriting existing (possibly user-edited) sections.
 sync_opencode_guidance "$MANTA_HOME/docs/opencode-tools/AGENTS.md" "${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}/AGENTS.md"
 
-echo "MANTA_PROGRESS 5/6 Restarting opencode"
-# Restart opencode so refreshed tools are actually loaded. opencode only
-# re-scans its tools/ directory at startup, so without this an update
-# leaves the new tools inert on disk. UNCONDITIONAL: the user confirmed a
-# restart before the update started, so the behaviour must be predictable
-# rather than depending on whether any tool file happened to change.
-if command -v systemctl >/dev/null 2>&1; then
-  echo "▸ self-update: restarting opencode-serve"
-  systemctl --user restart opencode-serve || echo "⚠ self-update: opencode restart failed"
-elif [ "$(uname -s)" = "Darwin" ]; then
-  echo "▸ self-update: kickstarting com.mantaui.opencode LaunchAgent"
-  launchctl kickstart -k "gui/$(id -u)/com.mantaui.opencode" || echo "⚠ self-update: opencode restart failed"
-else
-  echo "⚠ self-update: no systemctl/launchctl — restart opencode manually"
-fi
+# --- Conditional restarts (BET-1097) ------------------------------------------
+# Replacing a CLI binary on Linux does NOT disturb a running process — a running
+# opencode/claude session keeps the old version until it is next launched. So we
+# restart ONLY what actually needs it:
+#
+#   | Condition                                     | Restart                |
+#   |-----------------------------------------------|------------------------|
+#   | box payload was replaced (git reset / tarball)| opencode AND server   |
+#   | opencode changed, payload did not             | opencode only         |
+#   | only other CLIs changed                       | NOTHING               |
+#
+# `PAYLOAD_REPLACED` is the single flag set at the one place each install kind
+# swaps its payload. `OPENCODE_CHANGED` comes from the upgrade-clis state file.
+# A skipped step emits no MANTA_PROGRESS line; the bar jumps forward (the
+# progress parser requires strictly-increasing steps).
 
-echo "MANTA_PROGRESS 6/6 Restarting box server"
-# Restart the supervisor that runs manta-server. Linux uses the systemd
-# --user unit (default since v1); macOS (BET-277) uses the LaunchAgent
-# installed by install.sh — `launchctl kickstart -k` kills any running
-# instance and starts a fresh one. Other hosts have no persistent
-# supervisor and the user is expected to restart by hand.
-if command -v systemctl >/dev/null 2>&1; then
-  echo "▸ self-update: restarting manta-server.service"
-  systemctl --user restart manta-server.service
-elif [ "$(uname -s)" = "Darwin" ]; then
-  echo "▸ self-update: kickstarting com.mantaui.server LaunchAgent"
-  launchctl kickstart -k "gui/$(id -u)/com.mantaui.server"
+restart_opencode() {
+  # Restart opencode so refreshed tools are actually loaded. opencode only
+  # re-scans its tools/ directory at startup, so without this an update leaves
+  # the new tools inert on disk.
+  if command -v systemctl >/dev/null 2>&1; then
+    echo "▸ self-update: restarting opencode-serve"
+    systemctl --user restart opencode-serve || echo "⚠ self-update: opencode restart failed"
+  elif [ "$(uname -s)" = "Darwin" ]; then
+    echo "▸ self-update: kickstarting com.mantaui.opencode LaunchAgent"
+    launchctl kickstart -k "gui/$(id -u)/com.mantaui.opencode" || echo "⚠ self-update: opencode restart failed"
+  else
+    echo "⚠ self-update: no systemctl/launchctl — restart opencode manually"
+  fi
+}
+
+restart_server() {
+  # Restart the supervisor that runs manta-server. Linux uses the systemd
+  # --user unit (default since v1); macOS (BET-277) uses the LaunchAgent
+  # installed by install.sh — `launchctl kickstart -k` kills any running
+  # instance and starts a fresh one. Other hosts have no persistent
+  # supervisor and the user is expected to restart by hand.
+  if command -v systemctl >/dev/null 2>&1; then
+    echo "▸ self-update: restarting manta-server.service"
+    systemctl --user restart manta-server.service
+  elif [ "$(uname -s)" = "Darwin" ]; then
+    echo "▸ self-update: kickstarting com.mantaui.server LaunchAgent"
+    launchctl kickstart -k "gui/$(id -u)/com.mantaui.server"
+  else
+    echo "⚠ self-update: no systemctl/launchctl — restart manta-server manually"
+  fi
+}
+
+if [ "$PAYLOAD_REPLACED" = "1" ]; then
+  echo "MANTA_PROGRESS 6/7 Restarting opencode"
+  restart_opencode
+  echo "MANTA_PROGRESS 7/7 Restarting box server"
+  restart_server
+elif [ "$OPENCODE_CHANGED" = "1" ]; then
+  echo "MANTA_PROGRESS 6/7 Restarting opencode"
+  restart_opencode
 else
-  echo "⚠ self-update: no systemctl/launchctl — restart manta-server manually"
+  # Only other CLIs changed → restart nothing. Replacing a CLI binary does not
+  # disturb a running process, so there is nothing to restart.
+  echo "✓ self-update: CLI(s) updated; no restart needed (payload untouched, opencode unchanged)"
 fi
 
 echo "✓ self-update: complete"

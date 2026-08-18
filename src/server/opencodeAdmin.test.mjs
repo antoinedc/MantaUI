@@ -173,10 +173,10 @@ describe("runServerSelfUpdate", () => {
     writeFileSync(
       logPath,
       [
-        "MANTA_PROGRESS 1/6 Checking for updates",
+        "MANTA_PROGRESS 1/7 Checking for updates",
         "▸ self-update: fetching origin/main",
-        "MANTA_PROGRESS 2/6 Downloading update",
-        "MANTA_PROGRESS 3/6 Installing dependencies",
+        "MANTA_PROGRESS 2/7 Updating command-line tools",
+        "MANTA_PROGRESS 3/7 Downloading update",
         "",
       ].join("\n"),
     );
@@ -208,13 +208,13 @@ describe("runServerSelfUpdate", () => {
     );
     assert.deepEqual(progress[0].payload, {
       step: 1,
-      total: 6,
+      total: 7,
       label: "Checking for updates",
     });
     assert.deepEqual(progress[2].payload, {
       step: 3,
-      total: 6,
-      label: "Installing dependencies",
+      total: 7,
+      label: "Downloading update",
     });
   });
 
