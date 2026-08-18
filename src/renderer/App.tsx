@@ -225,6 +225,10 @@ function Shell() {
   const setServerUpdatePrompt = useStore((s) => s.setServerUpdatePrompt);
   const serverUpdateProgress = useStore((s) => s.serverUpdateProgress);
   const updateTargets = useStore((s) => s.updateTargets);
+  // BET-1160: the single target mid-update (null = none). With the App-local
+  // `boxUpgrading` it makes up the aggregate `busy` that disables the banner
+  // / Settings rows while ANY update runs.
+  const updatingTargetId = useStore((s) => s.updatingTargetId);
   const connectionState = useStore((s) => s.connectionState);
   const launcherFlags = useStore((s) => s.launcherFlags);
   const createDraft = useStore((s) => s.createDraft);
@@ -1688,7 +1692,11 @@ function Shell() {
             onDismiss={onUpdateBannerDismiss}
             dismissible={updateBanner.dismissible}
             tone={updateBanner.tone}
-            busy={boxUpgrading}
+            // BET-1160: treat ANY in-flight update (a per-CLI run sets
+            // updatingTargetId; the box leg sets boxUpgrading) as busy — the
+            // action is disabled and the bar shows its in-flight progress. The
+            // boxUpgrading determinate/indeterminate surface is unchanged.
+            busy={boxUpgrading || updatingTargetId != null}
             progress={boxUpgrading && !boxRestarting ? serverUpdateProgress ?? undefined : undefined}
             busyLabel={boxRestarting ? "Restarting the server…" : "Updating the server…"}
           />
@@ -1897,6 +1905,11 @@ function Shell() {
           // handling). Settings deliberately does not call serverUpdateApply()
           // itself; a second call site would be a second copy of all of that.
           onRequestServerUpdate={() => setConfirmServerUpdate(true)}
+          // BET-1160: Settings needs the aggregate busy to disable its rows
+          // while a box update runs (boxUpgrading is App-local, not in the
+          // store); the per-target in-flight/error state it reads from the
+          // store itself.
+          busy={boxUpgrading || updatingTargetId != null}
         />
       )}
       {searchOpen && activeChatSessionId != null && (

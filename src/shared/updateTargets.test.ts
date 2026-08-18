@@ -6,6 +6,7 @@ import {
   summarizeUpdates,
   describeUpdateBanner,
   planUpdateAll,
+  rowUpdateState,
 } from "./updateTargets.mjs";
 
 const cli = (
@@ -421,5 +422,25 @@ describe("planUpdateAll", () => {
   it("app-restart alone does NOT suppress the reconnect sentence (no ends-turns)", () => {
     const plan = planUpdateAll([t("server", true, false, "reconnect")]);
     expect(plan.confirmBody).toEqual(["The server will restart briefly and reconnect on its own."]);
+  });
+});
+
+describe("rowUpdateState", () => {
+  it("reports `updating` only for the exact target that is mid-update", () => {
+    const state = { updatingTargetId: "server", busy: true };
+    expect(rowUpdateState("server", state)).toEqual({ kind: "updating" });
+    expect(rowUpdateState("desktop", state)).toEqual({ kind: "busy" });
+    expect(rowUpdateState("opencode", state)).toEqual({ kind: "busy" });
+  });
+
+  it("reports `busy` when another update or the box leg is in flight", () => {
+    expect(rowUpdateState("desktop", { updatingTargetId: "server", busy: true })).toEqual({ kind: "busy" });
+    // busy can be true from the App-local box upgrade alone (updatingTargetId null).
+    expect(rowUpdateState("desktop", { updatingTargetId: null, busy: true })).toEqual({ kind: "busy" });
+  });
+
+  it("reports `idle` when nothing is in flight", () => {
+    expect(rowUpdateState("desktop", { updatingTargetId: null, busy: false })).toEqual({ kind: "idle" });
+    expect(rowUpdateState("server", {})).toEqual({ kind: "idle" });
   });
 });

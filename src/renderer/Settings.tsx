@@ -36,6 +36,7 @@ import { BANNER_BTN } from "./Toast";
 import { errorDisclosure } from "./settingsError";
 import { describeUpdateTarget } from "./chatUtils";
 import { refreshUpdateTargets } from "./updateCheck";
+import { rowUpdateState } from "../shared/updateTargets.mjs";
 import { forgeCredentialSecondary } from "./chatUtils";
 import { useCachedResource } from "./useCachedResource";
 import { MantaLoader } from "./MantaLoader";
@@ -294,6 +295,14 @@ function GroupCard({ title, danger = false, children }: {
  * pinned "Update ready" strip is up) the desktop row's own Update button is
  * suppressed — the strip IS that single-click action, and a second one for
  * the same target would re-download an already-downloaded update.
+ *
+ * BET-1160: `rowState` + `error` are the in-flight/result presentation, read
+ * from the shared store (via the parent) so this row and the banner can never
+ * disagree. `rowState.kind === "updating"` means THIS target is mid-update →
+ * its own spinner + "Updating…" (every other row is just disabled);
+ * `rowState.kind === "busy"` means some OTHER update is in flight → the button
+ * is disabled. `error` is this target's transient result error → the row flips
+ * to the shared error tone and the button is re-enabled for retry.
  */
 function UpdateTargetRow({
   target,
@@ -301,23 +310,32 @@ function UpdateTargetRow({
   downloadPercent,
   installReady,
   onUpdate,
+  rowState,
+  error,
 }: {
   target: UpdateTarget;
   downloading: boolean;
   downloadPercent: number | null;
   installReady: boolean;
   onUpdate: (t: UpdateTarget) => void;
+  rowState: { kind: "updating" } | { kind: "busy" } | { kind: "idle" };
+  error: string | null;
 }) {
   const row = describeUpdateTarget(target);
   const hasUpdate = target.latest != null && target.latest !== target.current;
+  const updating = rowState.kind === "updating";
+  const busy = rowState.kind === "busy";
 
   // Today's UpdateResultRow dot tones, kept as-is (BET-1099 design contract).
+  // A transient update error flips the dot to the error tone (reuses the
+  // existing error presentation — no new markup).
+  const dotTone = error != null ? "error" : row.tone;
   const dot =
-    row.tone === "ok"
+    dotTone === "ok"
       ? "bg-ok"
-      : row.tone === "action"
+      : dotTone === "action"
         ? "bg-accent"
-        : row.tone === "error"
+        : dotTone === "error"
           ? "bg-danger"
           : "bg-[var(--tx4)]";
 
@@ -325,10 +343,23 @@ function UpdateTargetRow({
   // rest are quiet text (ok / error) or a manual link (muted, when there is a
   // URL to offer).
   let action: ReactNode = null;
-  if (row.tone === "action") {
-    // A finished desktop download is marked by the pinned "Update ready" strip
-    // (installReady); suppress the desktop row's own Update button then, since
-    // a second one would re-download an already-downloaded update.
+  if (updating) {
+    // THIS target is the one being updated — its own spinner + label. No other
+    // row shows a spinner; those are just disabled via `busy`.
+    action = (
+      <span className="shrink-0 text-meta text-text-faint inline-flex items-center gap-2">
+        <span
+          aria-hidden
+          className="inline-block h-3 w-3 rounded-full border-2 border-current border-t-transparent animate-spin"
+        />
+        Updating…
+      </span>
+    );
+  } else if (row.tone === "action") {
+    // An update is available (or a failed one to retry). A finished desktop
+    // download is marked by the pinned "Update ready" strip (installReady);
+    // suppress the desktop row's own Update button then, since a second one
+    // would re-download an already-downloaded update.
     if (!(target.id === "desktop" && installReady)) {
       if (target.id === "desktop" && downloading) {
         action = (
@@ -337,8 +368,10 @@ function UpdateTargetRow({
           </span>
         );
       } else {
+        // Disabled while any update is in flight (`busy`); re-enabled (with the
+        // inline error above) so the user can retry a failed row.
         action = (
-          <button className={BANNER_BTN} onClick={() => onUpdate(target)}>
+          <button className={BANNER_BTN} disabled={busy} onClick={() => onUpdate(target)}>
             Update
           </button>
         );
@@ -370,8 +403,10 @@ function UpdateTargetRow({
     <div className="flex items-center gap-2 text-[length:var(--font-size-2xs)]">
       <span aria-hidden className={`inline-block shrink-0 w-[length:var(--step-dot)] h-[length:var(--step-dot)] rounded-full ${dot}`} />
       <span className="text-text">{target.label}</span>
-      <span className="flex-1 min-w-0 truncate font-mono text-text-quiet">
-        {hasUpdate ? (
+      <span className={`flex-1 min-w-0 truncate font-mono ${error != null ? "text-danger" : "text-text-quiet"}`}>
+        {error != null ? (
+          error
+        ) : hasUpdate ? (
           <>
             {target.current ?? ""} →{" "}
             <span className="text-text-muted font-medium">{target.latest}</span>
@@ -389,6 +424,7 @@ export function Settings({
   onClose,
   initialSection,
   onRequestServerUpdate,
+  busy = false,
 }: {
   onClose: () => void;
   /** Section to land on when the modal mounts (e.g. the `manta-open-settings`
@@ -402,6 +438,11 @@ export function Settings({
    *  a successful restart stop looking like a failure. A second call site here
    *  would be a second, subtly different version of all of that. */
   onRequestServerUpdate?: () => void;
+  /** Aggregate "an update is in flight" (`updatingTargetId != null ||
+   *  boxUpgrading`). Passed DOWN from App because `boxUpgrading` is App-local;
+   *  the per-target in-flight + error state itself is read from the shared
+   *  store so Settings and the banner can never disagree. */
+  busy?: boolean;
 }) {
   // BET-730: per-field selectors, never a bare useStore() — a no-selector
   // destructure re-renders the whole Settings tree on every store write.
@@ -421,6 +462,14 @@ export function Settings({
   const launcherFlags = useStore((s) => s.launcherFlags);
   const updatePrompt = useStore((s) => s.updatePrompt);
   const updateTargets = useStore((s) => s.updateTargets);
+  // BET-1160: in-flight/result update state, read from the shared store so
+  // Settings and the update banner never disagree. `updatingTargetId` is the
+  // single target mid-update (null = none); `targetUpdateErrors[id]` carries a
+  // target's last transient error (null = none).
+  const updatingTargetId = useStore((s) => s.updatingTargetId);
+  const targetUpdateErrors = useStore((s) => s.targetUpdateErrors);
+  const setUpdatingTarget = useStore((s) => s.setUpdatingTarget);
+  const setTargetUpdateError = useStore((s) => s.setTargetUpdateError);
   // Terminal auto-update failure (integrity / permission / unusable feed).
   // Read here only to end About's "Downloading…" state — the banner owns
   // reporting it.
@@ -498,6 +547,20 @@ export function Settings({
   const [checkedAt, setCheckedAt] = useState<number | null>(null);
   const [downloading, setDownloading] = useState(false);
   const [downloadPercent, setDownloadPercent] = useState<number | null>(null);
+
+  // BET-1160 never-stuck invariant: a fresh Settings open (re)mount resets the
+  // transient in-flight update state to idle — no stale spinner, no button left
+  // permanently disabled from a previous session. Durable truth (what is
+  // available / up to date) comes from `updateTargets`, not from the transient
+  // `updatingTargetId` / `targetUpdateErrors`, so discarding them here is safe.
+  useEffect(() => {
+    setUpdatingTarget(null);
+    const errs = useStore.getState().targetUpdateErrors;
+    for (const id of Object.keys(errs)) {
+      if (errs[id] != null) setTargetUpdateError(id, null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const runUpdateCheck = async () => {
     if (checking) return;
@@ -925,6 +988,8 @@ export function Settings({
                   downloadPercent={downloadPercent}
                   installReady={Boolean(updatePrompt)}
                   onUpdate={handleRowUpdate}
+                  rowState={rowUpdateState(t.id, { updatingTargetId, busy })}
+                  error={targetUpdateErrors[t.id] ?? null}
                 />
               ))}
             </div>

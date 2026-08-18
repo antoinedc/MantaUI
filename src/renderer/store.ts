@@ -503,6 +503,14 @@ type State = {
   // to drive the single `updates` banner (via describeUpdateBanner /
   // planUpdateAll) and by Settings → About. Empty [] until the first refresh.
   updateTargets: UpdateTarget[];
+  // Update in-flight/result state, OWNED here (BET-1160). BET-1159 sets the
+  // lifecycle (one target mid-update, cleared in every terminal path via
+  // `setUpdatingTarget(null)`); BET-1161 clears a row's transient error on a
+  // successful re-check. Only `updatingTargetId` + `targetUpdateErrors` live
+  // here; the aggregate `busy` (`updatingTargetId != null || boxUpgrading`)
+  // is derived where boxUpgrading (App-local) is known, never stored twice.
+  updatingTargetId: string | null;
+  targetUpdateErrors: Record<string, string | null>;
   // A TERMINAL auto-update failure (integrity / permission). Set from main's
   // autoUpdate:error IPC, which only fires for failures the user must act on
   // — transient network errors are filtered server-side of the bridge.
@@ -726,6 +734,14 @@ type State = {
   setAgentFileToast: (t: AgentFileReady | null) => void;
   setUpdatePrompt: (p: { version: string; releaseName?: string } | null) => void;
   setUpdateTargets: (t: UpdateTarget[]) => void;
+  // BET-1160: in-flight/result update state (see the field block above). Exactly
+  // one target may be mid-update at a time (`setUpdatingTarget(id)` starts it,
+  // `setUpdatingTarget(null)` ends it); a per-target error message rides
+  // `targetUpdateErrors` (null = no error for that id). Idempotence/ordering:
+  // BET-1159's finally clears `updatingTargetId` on RPC ok + reject, and a
+  // box reconnect / Settings-close resets it — the store never selfers.
+  setUpdatingTarget: (id: string | null) => void;
+  setTargetUpdateError: (id: string, error: string | null) => void;
   setUpdateError: (p: { message: string; raw: string } | null) => void;
   setBoxIncompatible: (b: boolean) => void;
   setServerUpdatePrompt: (
@@ -797,6 +813,8 @@ export const useStore = create<State>((set, get) => ({
   systemNotice: null,
   updatePrompt: null,
   updateTargets: [],
+  updatingTargetId: null,
+  targetUpdateErrors: {},
   updateError: null,
   boxIncompatible: false,
   serverUpdatePrompt: null,
@@ -1132,6 +1150,9 @@ export const useStore = create<State>((set, get) => ({
   setSystemNotice: (t) => set({ systemNotice: t }),
   setUpdatePrompt: (p) => set({ updatePrompt: p }),
   setUpdateTargets: (t) => set({ updateTargets: t }),
+  setUpdatingTarget: (id) => set({ updatingTargetId: id }),
+  setTargetUpdateError: (id, error) =>
+    set((prev) => ({ targetUpdateErrors: { ...prev.targetUpdateErrors, [id]: error } })),
   setUpdateError: (p) => set({ updateError: p }),
   setBoxIncompatible: (b) => set({ boxIncompatible: b }),
   setServerUpdatePrompt: (p) => set({ serverUpdatePrompt: p }),
