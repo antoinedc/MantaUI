@@ -248,6 +248,7 @@ describe("MenuItem migration — SessionMenu call sites (BET-535)", () => {
         cacheWrite: 1,
         totalInput: 100,
         pct: 12,
+        hasLimit: true,
         segments: [],
       },
       ctxLimit: 200000,

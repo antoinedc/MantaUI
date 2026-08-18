@@ -175,9 +175,9 @@ describe("findLast", () => {
 describe("resolveActiveModel (BET-415)", () => {
   // Minimal models: two providers, one with variants.
   const models: OpencodeModel[] = [
-    { id: "claude-sonnet-4", providerID: "anthropic", name: "Claude Sonnet 4" },
-    { id: "claude-opus-4", providerID: "anthropic", name: "Claude Opus 4", variants: [{ id: "high" }] },
-    { id: "deepseek-chat", providerID: "deepseek", name: "DeepSeek Chat" },
+    { id: "claude-sonnet-4", providerID: "anthropic", name: "Claude Sonnet 4", capabilities: { input: ["text"] } },
+    { id: "claude-opus-4", providerID: "anthropic", name: "Claude Opus 4", variants: [{ id: "high" }], capabilities: { input: ["text"] } },
+    { id: "deepseek-chat", providerID: "deepseek", name: "DeepSeek Chat", capabilities: { input: ["text"] } },
   ];
 
   it("returns null when no models are loaded", () => {

@@ -136,6 +136,7 @@ describe("StatusOverflow — the overflow Dropdown is portalled, not clipped (BE
         cacheWrite: 0,
         totalInput: 1000,
         pct: 2,
+        hasLimit: true,
         segments: [],
       },
       ctxLimit: 100_000,

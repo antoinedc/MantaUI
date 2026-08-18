@@ -687,7 +687,7 @@ function ContextPill({
                   {pct}%
                 </span>
                 <span className="font-mono text-meta font-medium text-text-faint">
-                  {formatTokensCompact(totalInput)} / {formatTokensCompact(ctxLimit)} tokens
+                  {formatTokensCompact(totalInput)} / {formatTokensCompact(ctxLimit ?? 0)} tokens
                 </span>
               </div>
 

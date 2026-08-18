@@ -348,6 +348,7 @@ export function mountSessionHeader(
         cacheWrite: 0,
         totalInput: 0,
         pct: 0,
+        hasLimit: true,
         segments: [],
       }}
       ctxLimit={0}
