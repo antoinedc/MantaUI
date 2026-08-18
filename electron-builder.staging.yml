@@ -13,11 +13,13 @@
 #   - publish.url — staging app reads its auto-update feed from the /staging path;
 #                  electron-updater's "generic" provider polls this and offers an
 #                  in-app upgrade.
-#   - mac.artifactName — base inherits `${productName}-${version}-${arch}.dmg` which
-#                  would produce a filename containing spaces and parentheses
-#                  ("Manta UI (Staging)-0.0.17-arm64.dmg"). That breaks the
-#                  scp / sha256sum steps in scripts/release/publish.sh. Override
-#                  to a hyphenated, no-space filename.
+#   - mac.artifactName — base inherits `${productName}-${version}-${arch}.${ext}`
+#                  which would produce a filename containing spaces and
+#                  parentheses ("Manta UI (Staging)-0.0.17-arm64.dmg"). That
+#                  breaks the scp / sha256sum steps in scripts/release/publish.sh.
+#                  Override to a hyphenated, no-space filename — but KEEP
+#                  `${ext}`: this name covers the zip target too, and a
+#                  hardcoded `.dmg` makes 7-Zip fail the build (E_INVALIDARG).
 #
 # Everything else (entitlements, hardenedRuntime, target arch, notarize:true,
 # win nsis signing posture, linux AppImage executableName, files exclusion of
@@ -39,4 +41,4 @@ publish:
   url: https://mantaui.com/staging/updates
 
 mac:
-  artifactName: "Manta-UI-Staging-${version}-${arch}.dmg"
+  artifactName: "Manta-UI-Staging-${version}-${arch}.${ext}"
