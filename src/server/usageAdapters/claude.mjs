@@ -26,19 +26,11 @@ async function defaultReadCredentials() {
   }
 }
 
-// Anthropic sometimes sends `used_percentage` (0-100) directly and always
-// sends `utilization` too — prefer `used_percentage` when both are present.
-// `utilization` has been observed BOTH as a 0-1 fraction (the documented
-// shape) and, live against api.anthropic.com/api/oauth/usage as of 2026-08,
-// already as a 0-100 percentage (e.g. `"utilization":58.0`) — a fraction can
-// never exceed 1.0, so treat anything > 1 as already a percentage rather than
-// re-scaling it into the 5800% range.
+// The provider reports a 0-100 percentage (used_percentage or utilization)
+// and it is used verbatim, never rescaled.
 function pctOf(pool) {
-  if (typeof pool?.used_percentage === "number") return pool.used_percentage;
-  if (typeof pool?.utilization === "number") {
-    return pool.utilization > 1 ? pool.utilization : pool.utilization * 100;
-  }
-  return undefined;
+  const v = pool?.used_percentage ?? pool?.utilization;
+  return typeof v === "number" ? v : undefined;
 }
 
 // Per-model 7d pools ride under either `seven_day_opus`/`seven_day_sonnet` or
