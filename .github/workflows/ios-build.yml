@@ -1,6 +1,12 @@
-# iOS compile gate (BET-651). Compiles the native app + BOTH test bundles for
-# any PR that touches mobile/native. build-for-testing, never `test` —
-# execution stays on the Mac plugin; this gate only proves the Swift compiles.
+# iOS build + unit-test gate. Compiles the native app + both test bundles for
+# any PR that touches mobile/native, then RUNS the MantaUITests unit bundle on
+# a simulator.
+#
+# Only the UNIT bundle runs here. MantaUIUITests is deliberately excluded: it is
+# the hierarchy-dump leg of the capture harness (driven by capture.sh, see
+# mobile/native/FINDINGS.md), not a regression suite, and simulator UI tests are
+# slow and flake-prone on a shared runner. It stays a manual / Mac-plugin run.
+#
 # NOT in required-checks.json: the paths filter means most PRs never produce
 # this context, and requiring it would block them all (see AGENTS.md).
 #
@@ -9,7 +15,7 @@
 # which only Xcode 26 can read; macos-14's Xcode 15.4 cannot open it at all
 # ("future Xcode project file format (77)" — verified live on the first run).
 # macos-26 ships Xcode 26 on a standard (free) runner.
-name: iOS Build
+name: iOS Build & Test
 
 on:
   pull_request:
@@ -24,7 +30,7 @@ concurrency:
 jobs:
   ios-build:
     runs-on: macos-26
-    timeout-minutes: 30
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: mobile/native
@@ -41,17 +47,65 @@ jobs:
           restore-keys: |
             ios-build-${{ runner.os }}-
 
-      - name: Install xcodegen
-        run: brew install xcodegen
+      - name: Install xcodegen + xcbeautify
+        run: brew install xcodegen xcbeautify
 
       - name: Generate Xcode project (project.yml is the source of truth)
         run: xcodegen generate
 
+      - name: Pick a simulator
+        id: sim
+        run: |
+          set -euo pipefail
+          UDID=$(xcrun simctl list devices available --json \
+            | python3 -c '
+            import json, sys
+            runtimes = json.load(sys.stdin)["devices"]
+            best = None
+            for runtime, devices in sorted(runtimes.items()):
+                if "iOS" not in runtime:
+                    continue
+                for device in devices:
+                    if device.get("isAvailable") and device["name"].startswith("iPhone"):
+                        best = device["udid"]
+            if best:
+                print(best)
+            ')
+          if [ -z "$UDID" ]; then
+            echo "::error::No available iPhone simulator on this runner."
+            xcrun simctl list devices available
+            exit 1
+          fi
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+          echo "Selected simulator $UDID"
+
       - name: Compile app + test bundles
         run: |
           set -o pipefail
-          xcodebuild build-for-testing \
+          NSUnbufferedIO=YES xcodebuild build-for-testing \
             -project MantaUI.xcodeproj \
             -scheme MantaUI \
-            -destination 'generic/platform=iOS Simulator' \
-            CODE_SIGNING_ALLOWED=NO
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}" \
+            CODE_SIGNING_ALLOWED=NO \
+            2>&1 | xcbeautify --renderer github-actions
+
+      - name: Run unit tests (MantaUITests)
+        run: |
+          set -o pipefail
+          NSUnbufferedIO=YES xcodebuild test-without-building \
+            -project MantaUI.xcodeproj \
+            -scheme MantaUI \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}" \
+            -only-testing:MantaUITests \
+            -resultBundlePath TestResults.xcresult \
+            CODE_SIGNING_ALLOWED=NO \
+            2>&1 | xcbeautify --renderer github-actions
+
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-test-results
+          path: mobile/native/TestResults.xcresult
+          retention-days: 7
+          if-no-files-found: ignore
