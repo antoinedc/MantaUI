@@ -505,6 +505,13 @@ const fsListDirs = (partial: string): Promise<DirListing> =>
 const gitListWorktrees = (cwd: string): Promise<WorktreeInfo[]> =>
   Promise.resolve(demoGitListWorktrees(cwd));
 
+// BET-1091: create a scratch project dir. Fictional — the demo has no box
+// filesystem tree to create a directory in, so it returns a plausible path
+// named after the requested (already-slugified) name. Stubbed explicitly so
+// the coverage test's unimplemented list stays accurate.
+const projectCreateScratch = (input: { root: string; name: string }): Promise<{ path: string; name: string }> =>
+  Promise.resolve({ path: "/home/demo/projects/" + input.name, name: input.name });
+
 // Version guard (BET-225 stage 3 Part C + BET-357 §3). Pretend the client and
 // server are the aligned default unless the demo state needs a specific version
 // pair to drive a banner — the renderer reads these in an effect and derives
@@ -602,6 +609,7 @@ export const explicitMethods = {
   outboxList,
   fsListDirs,
   gitListWorktrees,
+  projectCreateScratch,
   getClientVersion,
   getServerVersion,
   onAutoUpdateError,

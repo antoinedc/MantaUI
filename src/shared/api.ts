@@ -204,6 +204,11 @@ export interface Api {
 
   fsListDirs(partial: string): Promise<DirListing>;
 
+  // BET-1091: create an empty, git-initialised scratch project directory
+  // under `root`, returning the real absolute path. The renderer (stage 4)
+  // feeds `path` into the existing session-creation call.
+  projectCreateScratch(input: { root: string; name: string }): Promise<{ path: string; name: string }>;
+
   // BET-786: probe the box for git repos + read origins + detect the gh CLI.
   // Server-side only; the box caches the result in memory for 60s.
   forgeProbe(): Promise<ForgeProbeResult>;
