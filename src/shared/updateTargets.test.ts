@@ -1,5 +1,22 @@
 import { describe, it, expect } from "vitest";
+import type { UpdateTarget } from "./types";
+import { describeUpdateTarget } from "../renderer/chatUtils";
 import { buildUpdateTargets, summarizeUpdates } from "./updateTargets.mjs";
+
+const cli = (
+  id: UpdateTarget["id"],
+  label: string,
+  disruption: UpdateTarget["disruption"] = "none",
+): UpdateTarget => ({
+  id,
+  label,
+  current: null,
+  latest: null,
+  available: false,
+  ok: true,
+  manual: false,
+  disruption,
+});
 
 describe("buildUpdateTargets", () => {
   it("always emits desktop + server in that fixed order, in front of the CLIs", () => {
@@ -38,6 +55,10 @@ describe("buildUpdateTargets", () => {
     expect(desktop.ok).toBe(true);
     expect(desktop.available).toBe(false);
     expect(desktop.manual).toBe(true);
+    // A dev build is rendered as MUTED ("Update manually"), never "ok" — an
+    // unanswerable check must not read as a clean bill of health.
+    expect(describeUpdateTarget(desktop).tone).toBe("muted");
+    expect(describeUpdateTarget(desktop).tone).not.toBe("ok");
   });
 
   it("a failed desktop check is ok:false", () => {
@@ -101,16 +122,6 @@ describe("buildUpdateTargets", () => {
   });
 
   it("places opencode third and the remaining CLIs alphabetically by label", () => {
-    const cli = (id, label) => ({
-      id,
-      label,
-      current: null,
-      latest: null,
-      available: false,
-      ok: true,
-      manual: false,
-      disruption: "none",
-    });
     const result = buildUpdateTargets({
       desktopCheck: { supported: true, available: false, version: "0.0.36" },
       serverCheck: {
@@ -132,15 +143,12 @@ describe("buildUpdateTargets", () => {
   it("display order is stable regardless of input order", () => {
     // Shuffle both the CLI array and rely on the fixed legs always winning the
     // first two slots. The result must be identical every time.
-    const orderFor = (targets) =>
+    const orderFor = (targets: UpdateTarget[]) =>
       buildUpdateTargets({
         desktopCheck: { supported: true, available: false, version: "0.0.36" },
         serverCheck: { available: false, targets },
       }).map((t) => t.id);
 
-    const cli = (id, label) => ({
-      id, label, current: null, latest: null, available: false, ok: true, manual: false, disruption: "none",
-    });
     const a = [cli("codex", "Codex"), cli("opencode", "opencode"), cli("claude", "Claude Code")];
     const b = [cli("claude", "Claude Code"), cli("codex", "Codex"), cli("opencode", "opencode")];
     expect(orderFor(a)).toEqual(["desktop", "server", "opencode", "claude", "codex"]);
@@ -149,7 +157,12 @@ describe("buildUpdateTargets", () => {
 });
 
 describe("summarizeUpdates", () => {
-  const t = (id, available, manual = false, disruption = "none") => ({
+  const t = (
+    id: UpdateTarget["id"],
+    available: boolean,
+    manual = false,
+    disruption: UpdateTarget["disruption"] = "none",
+  ): UpdateTarget => ({
     id,
     label: id,
     current: null,
@@ -185,8 +198,8 @@ describe("summarizeUpdates", () => {
 
   it("dedupes disruption values", () => {
     const summary = summarizeUpdates([
-      t("a", true, false, "reconnect"),
-      t("b", true, false, "reconnect"),
+      t("claude", true, false, "reconnect"),
+      t("codex", true, false, "reconnect"),
     ]);
     expect(summary.disruptions).toEqual(["reconnect"]);
   });
