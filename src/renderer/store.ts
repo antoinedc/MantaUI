@@ -405,6 +405,7 @@ type State = {
   // built-in default (whisper-large-v3-turbo).
   groqApiKey: string;
   voiceTranscriptionModel: string;
+  openaiApiKey: string;
   // On-call CTO feature (BET-1166). Nested block mirrors AppConfig#cto; the
   // call window + settings read it off the store.
   cto: AppConfig["cto"];
@@ -792,6 +793,7 @@ export const useStore = create<State>((set, get) => ({
   launcherFlags: {},
   groqApiKey: "",
   voiceTranscriptionModel: "",
+  openaiApiKey: "",
   cto: undefined,
   shareAnalytics: true,
   theme: "system",
@@ -1069,6 +1071,7 @@ export const useStore = create<State>((set, get) => ({
       launcherFlags: c.launcherFlags ?? {},
       groqApiKey: c.groqApiKey ?? "",
       voiceTranscriptionModel: c.voiceTranscriptionModel ?? "",
+      openaiApiKey: c.openaiApiKey ?? "",
       cto: c.cto ? { ...c.cto } : undefined,
       shareAnalytics: c.shareAnalytics ?? true,
       pinnedWindows: Array.isArray(c.pinnedWindows) ? c.pinnedWindows : [],

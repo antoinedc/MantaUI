@@ -301,6 +301,18 @@ export const SETTINGS: SettingEntry[] = [
     default: "",
     placeholder: "whisper-large-v3-turbo",
   },
+  {
+    id: "openaiApiKey",
+    section: "voice",
+    label: "OpenAI API key",
+    help: "Enables the on-call CTO voice call window (OpenAI Realtime). Stored on the box; the renderer never sees it.",
+    control: "password",
+    configKey: "openaiApiKey",
+    platform: "both",
+    default: "",
+    commitOnBlur: true,
+    placeholder: "sk-… (leave blank to disable the call window)",
+  },
 
   // ----- on-call CTO (BET-1166) -----
   // Nested under `cto.*` in AppConfig. The surface renders these through the

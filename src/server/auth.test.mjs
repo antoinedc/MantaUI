@@ -138,18 +138,21 @@ test("isPublicAssetPath only exempts the favicon (web/PWA client retired, BET-55
 // query-param token fallback — /events + /pty (BET-51; /pty re-added in BET-158)
 // ----------------------------------------------------------------------------
 
-test("queryTokenAllowedForPath allows /events AND /pty", () => {
+test("queryTokenAllowedForPath allows /events, /pty and /call", () => {
   assert.equal(queryTokenAllowedForPath("/events"), true);
   // BET-158: /pty is back (binary-safe terminal WS that the relay bridges).
   assert.equal(queryTokenAllowedForPath("/pty"), true);
+  // BET-1166: /call is the on-call CTO voice window WS (browser WS cannot set an
+  // Authorization header, so it uses the ?token= fallback like /events + /pty).
+  assert.equal(queryTokenAllowedForPath("/call"), true);
   // every other route must present a real Bearer header
   assert.equal(queryTokenAllowedForPath("/api/projects"), false);
   assert.equal(queryTokenAllowedForPath("/rpc/tmux"), false);
   assert.equal(queryTokenAllowedForPath("/auth/status"), false);
   assert.equal(queryTokenAllowedForPath("/"), false);
   assert.equal(queryTokenAllowedForPath("/events/../api/projects"), false);
-  // exactly the two paths, nothing more
-  assert.deepEqual([...QUERY_TOKEN_PATHS].sort(), ["/events", "/pty"]);
+  // exactly the three paths, nothing more
+  assert.deepEqual([...QUERY_TOKEN_PATHS].sort(), ["/call", "/events", "/pty"]);
 });
 
 test("authorizationForRequest: header always wins on any route", () => {
