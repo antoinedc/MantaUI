@@ -56,6 +56,18 @@ const DEFAULT_CONFIG = {
   // sweep deletes the file (transcript + waveform are kept forever). 0 = keep
   // forever. Default 168 (7 days).
   voiceNoteTtlHours: 168,
+  // "On-call CTO" feature (BET-1164..1166). Server-side defaults mirror
+  // src/shared/types.ts AppConfig#cto. `enabled` off (false) until shipped;
+  // with it off the box never registers the cto agent nor wires the engine.
+  cto: {
+    enabled: false,
+    transport: "realtime",
+    model: "",
+    voice: "",
+    trustedActions: [],
+    parkedBehavior: "auto-open",
+    alwaysListening: false,
+  },
   // BET-799: user-configured self-hosted forge hosts — `[{ host, kind, apiBase? }]`.
   // Lets a self-hosted GitHub/GitLab instance (which `detectForge` deliberately
   // rejects) resolve to its forge + API root. `kind` is "github" | "gitlab".
@@ -91,11 +103,29 @@ export async function configGet() {
   return getConfig();
 }
 
-// configUpdate(patch) — merge patch, persist, return full config.
+// configUpdate(patch) — merge patch, persist, return full config. Dotted keys
+// (e.g. "cto.enabled") are written as nested paths so the schemas that address
+// nested config (`cto.*`) land where the server reads them. Flat keys merge as
+// before. Deep objects are merged one level (enough for the cto block).
 // preload: ipcRenderer.invoke(IPC.configUpdate, patch) → args[0] = patch
 export async function configUpdate(patch) {
   const current = await getConfig();
-  const next = { ...current, ...patch };
+  const next = { ...current };
+  for (const [key, value] of Object.entries(patch ?? {})) {
+    if (typeof key === "string" && key.includes(".")) {
+      const [head, ...rest] = key.split(".");
+      const target = { ...(next[head] ?? {}) };
+      let cur = target;
+      for (let i = 0; i < rest.length - 1; i++) {
+        cur[rest[i]] = { ...(cur[rest[i]] ?? {}) };
+        cur = cur[rest[i]];
+      }
+      cur[rest[rest.length - 1]] = value;
+      next[head] = target;
+    } else {
+      next[key] = value;
+    }
+  }
   await saveConfig(next);
   return next;
 }
