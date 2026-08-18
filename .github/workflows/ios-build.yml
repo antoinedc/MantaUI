@@ -86,7 +86,13 @@ jobs:
             -project MantaUI.xcodeproj \
             -scheme MantaUI \
             -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}" \
-            CODE_SIGNING_ALLOWED=NO \
+            # Ad-hoc sign (the gate used CODE_SIGNING_ALLOWED=NO): the Keychain
+            # round-trip test needs keychain-access-groups embedded in a code
+            # signature; an unsigned bundle carries no entitlements, so the
+            # simulator rejects every SecItem call with errSecMissingEntitlement
+            # (-34018). CODE_SIGN_IDENTITY=- embeds the project.yml entitlements
+            # ad-hoc, which is all a simulator destination requires.
+            CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=YES \
             2>&1 | xcbeautify --renderer github-actions
 
       - name: Run unit tests (MantaUITests)
@@ -98,7 +104,13 @@ jobs:
             -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}" \
             -only-testing:MantaUITests \
             -resultBundlePath TestResults.xcresult \
-            CODE_SIGNING_ALLOWED=NO \
+            # Ad-hoc sign (the gate used CODE_SIGNING_ALLOWED=NO): the Keychain
+            # round-trip test needs keychain-access-groups embedded in a code
+            # signature; an unsigned bundle carries no entitlements, so the
+            # simulator rejects every SecItem call with errSecMissingEntitlement
+            # (-34018). CODE_SIGN_IDENTITY=- embeds the project.yml entitlements
+            # ad-hoc, which is all a simulator destination requires.
+            CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=YES \
             2>&1 | xcbeautify --renderer github-actions
 
       - name: Upload test results
