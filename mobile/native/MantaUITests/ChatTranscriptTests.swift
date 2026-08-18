@@ -18,7 +18,7 @@ final class ChatTranscriptTests: XCTestCase {
         OpencodePart(type: "text", id: id, messageID: messageID, text: text)
     }
 
-    private func toolPart(_ id: String, _ messageID: String, tool: String, status: String, input: [String: JSONValue], output: String? = nil, start: Double? = 100, end: Double? = 100.4) -> OpencodePart {
+    private func toolPart(_ id: String, _ messageID: String, tool: String, status: String, input: [String: JSONValue], output: String? = nil, start: Double? = 12000, end: Double? = 12400) -> OpencodePart {
         var state: [String: JSONValue] = [
             "status": str(status),
             "input": jsonObject(input),
@@ -39,7 +39,7 @@ final class ChatTranscriptTests: XCTestCase {
             "title": str(title),
             "metadata": jsonObject(["sessionId": str(childID)]),
         ]
-        stateObject["time"] = jsonObject(["start": num(0), "end": num(5)])
+        stateObject["time"] = jsonObject(["start": num(1200), "end": num(2400)])
         return OpencodePart(type: "tool", id: id, messageID: messageID, extra: [
             "tool": str("task"),
             "state": jsonObject(stateObject),
@@ -152,7 +152,7 @@ final class ChatTranscriptTests: XCTestCase {
 
     func testBashStepMapsToRanVerbAndCommandTarget() {
         let msgs = [message(id: "m1", role: "assistant", parts: [
-            toolPart("t1", "m1", tool: "bash", status: "completed", input: ["command": str("multica issue get BET-520")], output: "Blocked", start: 100, end: 100.4),
+            toolPart("t1", "m1", tool: "bash", status: "completed", input: ["command": str("multica issue get BET-520")], output: "Blocked", start: 12000, end: 12400),
         ])]
         let blocks = ChatTranscriptMapper.blocks(from: msgs)
         guard case .steps(.rows(let rows)) = blocks[0], rows.count == 1, case .step(let step) = rows[0] else {
@@ -193,7 +193,9 @@ final class ChatTranscriptTests: XCTestCase {
         XCTAssertEqual(agent.taskName, "unblock sweep")
         XCTAssertEqual(agent.childSessionId, "ses_child")
         XCTAssertEqual(agent.status, .running)
-        XCTAssertEqual(agent.duration, "5.0s")
+        // 2400 - 1200 = 1200ms = 1.2s; a ms-on-the-wire value must not render
+        // 1000× inflated ("20m0s") like it did before the ms→s fix.
+        XCTAssertEqual(agent.duration, "1.2s")
     }
 
     /// A task part not yet stamped with `state.metadata.sessionId` (the 
