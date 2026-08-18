@@ -35,6 +35,12 @@ final class ChatModelStore: ObservableObject {
     /// first. Persisted PER BOX (a habit, not a conversation), unlike the
     /// override/variant above which are per-session.
     @Published private(set) var recents: [ModelChoice] = []
+    /// "providerID/modelID" keys of deprecated models the user has explicitly
+    /// opted back in to (BET-1140). Per box (UserDefaults), like recents — not
+    /// per session, so the choice follows the user across sessions. A
+    /// deprecated model NOT in this set renders greyed/disabled in the
+    /// catalogue list until opted in.
+    @Published private(set) var deprecatedOptIns: Set<String> = []
     /// Plan mode is ON for this session (the per-session `manta:chat:<sid>:plan`
     /// boolean — BET-952). A plain Bool, deliberately NOT folded into the model
     /// blob: iOS stores that as a distinct "providerID/modelID" string.
@@ -67,6 +73,7 @@ final class ChatModelStore: ObservableObject {
         self.defaultModel = catalog.defaultModel
         self.loaded = catalog.loaded
         self.recents = ModelRecents.load()
+        self.deprecatedOptIns = DeprecatedModelOptIns.load()
         catalog.objectWillChange
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.mirrorCatalog() }
@@ -260,6 +267,18 @@ final class ChatModelStore: ObservableObject {
         let currentVariant = variant
         setOverride(OpencodeModelID(providerID: target.providerID, modelID: target.modelID))
         if let currentVariant { setVariant(currentVariant) }
+    }
+
+    // MARK: - Deprecated-model opt-in (BET-1140)
+
+    /// Persist the user's opt-in for a deprecated model, flipping its catalogue
+    /// row from disabled to selectable. Idempotent — a second opt-in for the
+    /// same model is a no-op.
+    func optIn(_ model: OpencodeModel) {
+        let key = "\(model.providerID)/\(model.id)"
+        guard !deprecatedOptIns.contains(key) else { return }
+        deprecatedOptIns.insert(key)
+        DeprecatedModelOptIns.save(deprecatedOptIns)
     }
 
     // MARK: - Plan mode (BET-952)
