@@ -1506,7 +1506,7 @@ describe("chooseUpdateSkewVariant", () => {
 describe("describeUpdateTarget", () => {
   const target = (over: Partial<UpdateTarget>): UpdateTarget => ({
     id: "desktop",
-    label: "Manta UI",
+    label: "Desktop app",
     current: null,
     latest: null,
     available: false,
