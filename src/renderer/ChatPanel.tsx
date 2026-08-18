@@ -1550,7 +1550,10 @@ export function ChatPanel({
         sessionName: tmuxSession,
         windowIndex,
         cwd: cwd ?? "",
-        title: `${tmuxSession} / cleared`,
+        // Empty title so opencode auto-titles the fresh session from its next
+        // user message; seeding "workspace / cleared" would be read back by the
+        // auto-rename first-name path and stamp a workspace-prefixed name (BET-1100).
+        title: "",
       });
       // /clear carries the session's model forward so the user doesn't re-pick
       // after every clear; plan mode state is carried on top.

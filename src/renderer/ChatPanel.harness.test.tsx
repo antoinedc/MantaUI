@@ -287,7 +287,7 @@ describe("ChatPanel session resources", () => {
           sessionName: "proj",
           windowIndex: 1,
           cwd: "/home/dev/projects/x",
-          title: "proj / cleared",
+          title: "",
         },
       ],
     ]);

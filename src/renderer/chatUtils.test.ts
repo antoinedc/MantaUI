@@ -438,6 +438,12 @@ describe("findSessionTitle", () => {
     expect(findSessionTitle(sessions, "ses_no_title")).toBe("");
   });
 
+  it("returns a contraction title intact (no apostrophe stripping to a fragment) (BET-1100)", () => {
+    expect(findSessionTitle([{ id: "ses_im", title: "I'm just checking the setup" }], "ses_im")).toBe(
+      "I'm just checking the setup",
+    );
+  });
+
   it("returns '' for an empty / missing session list or id", () => {
     expect(findSessionTitle([], "ses_sky")).toBe("");
     expect(findSessionTitle(sessions, "")).toBe("");
