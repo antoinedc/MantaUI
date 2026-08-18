@@ -354,32 +354,7 @@ describe("NewSessionScreen scratch mode (BET-1093)", () => {
     expect(nameInput!.value).toMatch(/^[a-z]+-[a-z]+-[a-z]+$/);
   });
 
-  it("reroll produces a different project name", async () => {
-    const d = scratchDraft();
-    mountScratch(d);
-    await h!.flush();
-
-    const nameInput = h!.container.querySelector(
-      'input[aria-label="Project name"]',
-    ) as HTMLInputElement;
-    const first = nameInput!.value;
-    expect(first).toBe("fresh-app");
-
-    const reroll = [...h!.container.querySelectorAll("button")].find(
-      (b) => b.getAttribute("aria-label") === "Pick another name",
-    );
-    expect(reroll).toBeTruthy();
-    act(() => reroll!.click());
-    await h!.flush();
-
-    const second = (
-      h!.container.querySelector('input[aria-label="Project name"]') as HTMLInputElement
-    ).value;
-    expect(second).not.toBe(first);
-    expect(second).toMatch(/^[a-z]+-[a-z]+-[a-z]+$/);
-  });
-
-  it("slugifies the typed project name as the user types", async () => {
+  it("keeps the typed project name verbatim and previews the derived folder", async () => {
     const d = scratchDraft();
     mountScratch(d);
     await h!.flush();
@@ -390,11 +365,47 @@ describe("NewSessionScreen scratch mode (BET-1093)", () => {
     act(() => typeIntoInput(nameInput, "My App"));
     await h!.flush();
 
+    // The field keeps the typed text verbatim — never rewritten to a slug.
     expect(
       (
         h!.container.querySelector('input[aria-label="Project name"]') as HTMLInputElement
       ).value,
-    ).toBe("my-app");
+    ).toBe("My App");
+    // The destination line previews the DERIVED folder slug (root is /home).
+    expect(h!.text()).toContain("/home/my-app");
+  });
+
+  it("a name with no letters or digits disables create and explains why", async () => {
+    const d = scratchDraft({ input: "" });
+    mountScratch(d);
+    await h!.flush();
+
+    const nameInput = h!.container.querySelector(
+      'input[aria-label="Project name"]',
+    ) as HTMLInputElement;
+    act(() => typeIntoInput(nameInput, "!!!"));
+    await h!.flush();
+
+    const create = h!.container.querySelector(
+      'button[aria-label="Create workspace"]',
+    ) as HTMLButtonElement;
+    expect(create).toBeTruthy();
+    expect(create.disabled).toBe(true);
+    expect(h!.text()).toContain("Add at least one letter or number");
+  });
+
+  it("scratch mode renders no branch or worktree control", async () => {
+    const d = scratchDraft();
+    mountScratch(d);
+    await h!.flush();
+
+    expect(
+      h!.container.querySelector('input[aria-label="Worktree branch name"]'),
+    ).toBeNull();
+    expect(
+      h!.container.querySelector('input[aria-label="Create in a fresh git worktree"]'),
+    ).toBeNull();
+    expect(h!.text()).not.toContain("worktree");
   });
 
   it("submit with an empty prompt creates the scratch dir, no createDir, no queued prompt", async () => {
