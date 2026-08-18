@@ -263,7 +263,7 @@ final class ModelRecentsTests: XCTestCase {
         XCTAssertFalse(label.contains("Xhigh"))
     }
 
-    // MARK: - Cockpit + catalogue copy (BET-894): catalogueBadge / cardSubtitle / pickableCount
+    // MARK: - Cockpit + catalogue copy (BET-894/BET-1140): catalogueBadge / cardSubtitle / catalogueCount
 
     /// A bare model for the badge/subtitle tests, with the context limit and
     /// capability flags explicit the way the wire object carries them.
@@ -314,26 +314,27 @@ final class ModelRecentsTests: XCTestCase {
         XCTAssertEqual(ChatModel.cardSubtitle(m), "anthropic · 1M context")
     }
 
-    // MARK: - ChatModel.pickableCount
+    // MARK: - ChatModel.catalogueCount (BET-1140)
 
-    func testPickableCountExcludesDisabledDeprecatedAndFastTwins() {
+    func testCatalogueCountIncludesDeprecatedExcludesDisabledAndFastTwins() {
         let base = OpencodeModel(id: "gpt-5.6", providerID: "openai", name: "GPT-5.6")
         // The -fast twin of a visible base is a MODE, not a choice — excluded.
         let fast = OpencodeModel(id: "gpt-5.6-fast", providerID: "openai", name: "GPT-5.6 Fast")
         let disabled = OpencodeModel(id: "disabled", providerID: "openai", name: "Disabled", enabled: false)
+        // A deprecated model is KEPT in the list (visible, greyed) — counted.
         let deprecated = OpencodeModel(id: "deprecated", providerID: "openai", name: "Deprecated", status: "deprecated")
         let regular = OpencodeModel(id: "gpt-4o", providerID: "openai", name: "GPT-4o")
         let models = [base, fast, disabled, deprecated, regular]
 
-        XCTAssertEqual(ChatModel.pickableCount(models), 2)
-        // Must equal the sum of the sections `groups(_:)` actually renders.
-        let groupsSum = ChatModel.groups(models).reduce(0) { $0 + $1.models.count }
-        XCTAssertEqual(ChatModel.pickableCount(models), groupsSum)
+        XCTAssertEqual(ChatModel.catalogueCount(models), 3)
+        // Must equal the sum of the sections `catalogueGroups(_:)` actually renders.
+        let groupsSum = ChatModel.catalogueGroups(models).reduce(0) { $0 + $1.models.count }
+        XCTAssertEqual(ChatModel.catalogueCount(models), groupsSum)
     }
 
-    func testPickableCountSingleModel() {
+    func testCatalogueCountSingleModel() {
         let models = [OpencodeModel(id: "opus", providerID: "anthropic", name: "Claude Opus 4.7")]
-        XCTAssertEqual(ChatModel.pickableCount(models), 1)
+        XCTAssertEqual(ChatModel.catalogueCount(models), 1)
     }
 
     // MARK: - ChatModel.ModelCapabilityFilter.matches (BET-895)

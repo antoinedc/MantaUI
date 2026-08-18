@@ -257,7 +257,7 @@ struct ModelPickerSheet: View {
                     .font(.manta(size: Metrics.type.small, weight: .semibold))
                     .foregroundColor(tokens.tx1)
                 Spacer(minLength: 0)
-                Text("\(ChatModel.pickableCount(modelStore.models))")
+                Text("\(ChatModel.catalogueCount(modelStore.models))")
                     .font(.manta(size: Metrics.type.small))
                     .foregroundColor(tokens.tx4)
                 Image(systemName: "chevron.right")
@@ -303,7 +303,7 @@ struct ModelCatalogueView: View {
     private var groups: [(provider: String, models: [OpencodeModel])] {
         let all = modelStore.models
         let filtered = all.filter { ChatModel.matches($0, filter: filter, in: all) }
-        return ChatModel.filteredGroups(ChatModel.groups(filtered), query: query)
+        return ChatModel.filteredGroups(ChatModel.catalogueGroups(filtered), query: query)
     }
 
     private func isSelected(_ m: OpencodeModel) -> Bool {
@@ -312,7 +312,11 @@ struct ModelCatalogueView: View {
     }
 
     /// Pick a model from the catalogue and record it as a recently-used triple.
+    /// A disabled (deprecated, not opted-in) row can never reach here — its
+    /// Button is disabled — but the guard keeps the store from ever setting a
+    /// deprecated override it wasn't meant to allow.
     private func select(_ m: OpencodeModel) {
+        guard !ChatModel.isCatalogueRowDisabled(m, optIn: modelStore.deprecatedOptIns) else { return }
         modelStore.setOverride(OpencodeModelID(providerID: m.providerID, modelID: m.id))
         modelStore.recordCurrentChoice()
     }
@@ -327,7 +331,7 @@ struct ModelCatalogueView: View {
                 .searchable(
                     text: $query,
                     placement: .navigationBarDrawer(displayMode: .always),
-                    prompt: "Search \(ChatModel.pickableCount(modelStore.models)) models"
+                    prompt: "Search \(ChatModel.catalogueCount(modelStore.models)) models"
                 )
             } else {
                 ProgressView("Loading models…")
@@ -366,7 +370,9 @@ struct ModelCatalogueView: View {
     /// The model list, grouped into a Section per provider. Empty-query misses
     /// AND a capability filter with no matches both render the platform search
     /// empty state — a user who filters to Vision on a box with no vision model
-    /// gets the platform state, not a blank list.
+    /// gets the platform state, not a blank list. A deprecated model not yet
+    /// opted in renders a greyed, non-selectable row with an "Enable" action
+    /// (BET-1140); once opted in it becomes an ordinary selectable row.
     @ViewBuilder
     private var providerSections: some View {
         if groups.isEmpty {
@@ -375,20 +381,11 @@ struct ModelCatalogueView: View {
             ForEach(groups, id: \.provider) { group in
                 Section {
                     ForEach(group.models, id: \.id) { m in
-                        Button { select(m); onPick() } label: {
-                            HStack(alignment: .center, spacing: Metrics.spacing.sp2) {
-                                VStack(alignment: .leading, spacing: Metrics.spacing.spPx) {
-                                    Text(m.name)
-                                        .lineLimit(1)
-                                    let badge = ChatModel.catalogueBadge(m)
-                                    if !badge.isEmpty {
-                                        Text(badge)
-                                            .font(.manta(size: Metrics.type.xs))
-                                            .foregroundColor(tokens.tx3)
-                                    }
-                                }
-                                Spacer()
-                                if isSelected(m) { checkmark }
+                        if ChatModel.isCatalogueRowDisabled(m, optIn: modelStore.deprecatedOptIns) {
+                            disabledRow(for: m)
+                        } else {
+                            Button { select(m); onPick() } label: {
+                                modelRow(for: m)
                             }
                         }
                     }
@@ -397,6 +394,54 @@ struct ModelCatalogueView: View {
                 }
             }
         }
+    }
+
+    /// The ordinary selectable catalogue row: name + capability/context badge,
+    /// and the checkmark when it's the active model.
+    private func modelRow(for m: OpencodeModel) -> some View {
+        HStack(alignment: .center, spacing: Metrics.spacing.sp2) {
+            VStack(alignment: .leading, spacing: Metrics.spacing.spPx) {
+                Text(m.name)
+                    .lineLimit(1)
+                let badge = ChatModel.catalogueBadge(m)
+                if !badge.isEmpty {
+                    Text(badge)
+                        .font(.manta(size: Metrics.type.xs))
+                        .foregroundColor(tokens.tx3)
+                }
+            }
+            Spacer()
+            if isSelected(m) { checkmark }
+        }
+    }
+
+    /// A deprecated model the user hasn't opted in to: greyed, NOT a tappable
+    /// Button, with a small "Enable" action that persists the opt-in — the
+    /// minimal disabled-row affordance BET-1140 asks for. Mirrors the desktop's
+    /// `Enable deprecated` row in ModelMenu.tsx.
+    private func disabledRow(for m: OpencodeModel) -> some View {
+        HStack(alignment: .center, spacing: Metrics.spacing.sp2) {
+            VStack(alignment: .leading, spacing: Metrics.spacing.spPx) {
+                Text(m.name)
+                    .lineLimit(1)
+                    .foregroundColor(tokens.tx3)
+                let badge = ChatModel.catalogueBadge(m)
+                if !badge.isEmpty {
+                    Text(badge)
+                        .font(.manta(size: Metrics.type.xs))
+                        .foregroundColor(tokens.tx4)
+                }
+            }
+            Spacer()
+            Text("deprecated")
+                .font(.manta(size: Metrics.type.twoXS, weight: .semibold))
+                .foregroundColor(tokens.tx4)
+            Button("Enable") { modelStore.optIn(m) }
+                .font(.manta(size: Metrics.type.xs, weight: .semibold))
+                .foregroundColor(tokens.accentTx)
+                .accessibilityIdentifier("model-enable-deprecated")
+        }
+        .accessibilityIdentifier("model-deprecated-disabled-\(m.id)")
     }
 
     private var checkmark: some View {

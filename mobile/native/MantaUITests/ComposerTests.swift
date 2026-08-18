@@ -246,6 +246,50 @@ final class ComposerTests: XCTestCase {
         XCTAssertEqual(ChatModel.shortName("Gemini Claude Weird"), "Claude Weird")
     }
 
+    // MARK: - ChatModel deprecation + catalogue (BET-1140)
+
+    func testIsDeprecatedMatchesExactStatus() {
+        XCTAssertTrue(ChatModel.isDeprecated(model("anthropic", "opus", status: "deprecated")))
+        XCTAssertFalse(ChatModel.isDeprecated(model("anthropic", "opus", status: "live")))
+        XCTAssertFalse(ChatModel.isDeprecated(model("anthropic", "opus")))
+    }
+
+    func testIsPickableExcludesDeprecated() {
+        XCTAssertTrue(ChatModel.isPickable(model("anthropic", "sonnet")))
+        XCTAssertFalse(ChatModel.isPickable(model("anthropic", "deprecated", status: "deprecated")))
+        XCTAssertFalse(ChatModel.isPickable(model("anthropic", "disabled", enabled: false)))
+    }
+
+    func testCatalogueGroupsKeepsDeprecatedButNotDisabled() {
+        let models = [
+            model("anthropic", "haiku"),
+            model("anthropic", "deprecated", status: "deprecated"),
+            model("anthropic", "disabled", enabled: false),
+            model("zebra", "z1"),
+        ]
+        let groups = ChatModel.catalogueGroups(models)
+        XCTAssertEqual(groups.map(\.provider), ["anthropic", "zebra"])
+        // Deprecated stays visible; explicitly-disabled is dropped.
+        XCTAssertEqual(groups[0].models.map(\.id), ["haiku", "deprecated"])
+    }
+
+    func testCatalogueGroupsFoldsDeprecatedFastTwins() {
+        let models = [
+            model("openai", "gpt-5.6"),
+            model("openai", "gpt-5.6-fast", status: "deprecated"),
+        ]
+        let groups = ChatModel.catalogueGroups(models)
+        // The -fast twin of a visible base is a mode — folded even when deprecated.
+        XCTAssertEqual(groups[0].models.map(\.id), ["gpt-5.6"])
+    }
+
+    func testCatalogueRowDisabledUntilOptedIn() {
+        let deprecated = model("anthropic", "opus", status: "deprecated")
+        XCTAssertTrue(ChatModel.isCatalogueRowDisabled(deprecated, optIn: []))
+        XCTAssertFalse(ChatModel.isCatalogueRowDisabled(deprecated, optIn: ["anthropic/opus"]))
+        XCTAssertFalse(ChatModel.isCatalogueRowDisabled(model("anthropic", "haiku"), optIn: []))
+    }
+
     // MARK: - ChatVoice.mime
 
     func testMimeFromFilenameExtension() {

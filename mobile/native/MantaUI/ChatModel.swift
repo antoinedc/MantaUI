@@ -65,7 +65,7 @@ enum ChatModel {
             $0.providerID == active.providerID &&
             $0.id == counterpartID &&
             $0.enabled != false &&
-            $0.status?.lowercased() != "deprecated"
+            !isDeprecated($0)
         }
         guard let counterpart else {
             if isFast {
@@ -169,12 +169,53 @@ enum ChatModel {
         }
     }
 
-    /// A model is pickable when it is not explicitly disabled and not
-    /// deprecated. Absent `enabled`/`status` (common) → pickable.
+    // MARK: - Deprecation (BET-1140)
+
+    /// A model the provider still serves but flags as deprecated. THE single
+    /// predicate: the ONLY place the literal "deprecated" is compared on iOS —
+    /// the Swift mirror of `isDeprecated` in `src/shared/modelGuide.mjs`
+    /// (BET-1139). Consumers must call this, never re-compare the literal.
+    /// Mirrors the desktop exactly (byte-for-byte status match) so the two stay
+    /// in lockstep.
+    static func isDeprecated(_ model: OpencodeModel) -> Bool {
+        model.status == "deprecated"
+    }
+
+    /// A model is pickable (selectable) when it is not explicitly disabled and
+    /// not deprecated. Absent `enabled`/`status` (common) → pickable. A
+    /// deprecated model that has NOT been opted in stays non-pickable here; it
+    /// remains VISIBLE in the catalogue as a disabled row (see
+    /// `catalogueGroups` / `isCatalogueRowDisabled`) until the user opts in.
     static func isPickable(_ m: OpencodeModel) -> Bool {
         if m.enabled == false { return false }
-        if m.status?.lowercased() == "deprecated" { return false }
+        if isDeprecated(m) { return false }
         return true
+    }
+
+    /// The catalogue's ("All models") candidate groups. Same alphabetical /
+    /// enabled / `-fast`-sibling-folding gates as `groups(_:)`, EXCEPT a
+    /// deprecated model is KEPT in the list so it stays visible + importable
+    /// (rendered as a greyed, non-selectable row until opted in). Mirror of the
+    /// desktop `mainPickerGroups` keep-deprecated behaviour (BET-1139).
+    static func catalogueGroups(_ models: [OpencodeModel]) -> [(provider: String, models: [OpencodeModel])] {
+        var map: [String: [OpencodeModel]] = [:]
+        for m in models where m.enabled != false {
+            map[m.providerID, default: []].append(m)
+        }
+        return map.keys.sorted().compactMap { provider in
+            guard let all = map[provider] else { return nil }
+            let ids = Set(all.map(\.id))
+            let kept = all.filter { !(isFastModelID($0.id) && ids.contains(baseModelID($0.id))) }
+            return kept.isEmpty ? nil : (provider, kept)
+        }
+    }
+
+    /// Whether a catalogue row renders disabled — the model is deprecated AND
+    /// its "providerID/modelID" has not been opted in. The single row-disabled
+    /// decision for the catalogue; mirrors the desktop `disabledKeys` set from
+    /// `mainPickerGroups` (BET-1139).
+    static func isCatalogueRowDisabled(_ m: OpencodeModel, optIn deprecatedOptIns: Set<String>) -> Bool {
+        isDeprecated(m) && !deprecatedOptIns.contains("\(m.providerID)/\(m.id)")
     }
 
     /// The effective selection: override wins, else the configured default.
@@ -377,12 +418,12 @@ enum ChatModel {
         return parts.joined(separator: " · ")
     }
 
-    /// How many models the catalogue will actually show in its "All models · N"
-    /// count — the total across `groups(_:)`, so the count can never disagree
-    /// with the list beneath it (which likewise excludes disabled/deprecated
-    /// models and `-fast` twins whose base twin survives).
-    static func pickableCount(_ models: [OpencodeModel]) -> Int {
-        groups(models).reduce(0) { $0 + $1.models.count }
+    /// How many rows the catalogue will actually show in its "All models · N"
+    /// count — the total across `catalogueGroups(_:)`, so the count can never
+    /// disagree with the list beneath it (which now includes deprecated rows,
+    /// greyed/disabled until opted in).
+    static func catalogueCount(_ models: [OpencodeModel]) -> Int {
+        catalogueGroups(models).reduce(0) { $0 + $1.models.count }
     }
 
     /// Encode a selection as the persisted `providerID/modelID` string.
