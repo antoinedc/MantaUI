@@ -526,34 +526,8 @@ test("poller: in-flight guard prevents overlapping ticks", async () => {
 // Adapter: claude — captured sample payloads, fed inline (no fixture files)
 // ----------------------------------------------------------------------------
 
-test("claude adapter: utilization fraction (0-1) is converted to a percentage", async () => {
-  const sample = {
-    rate_limits: {
-      five_hour: { utilization: 0.78, resets_at: 1735689600 },
-      seven_day: { utilization: 0.41, resets_at: "2025-01-07T09:00:00.000Z" },
-      seven_day_opus: { utilization: 0.64 },
-      seven_day_sonnet: { used_percentage: 18 },
-    },
-  };
-  const snap = await claudeAdapter.fetch({
-    fetchImpl: async () => fakeResponse(200, sample),
-    readCredentials: async () => ({ accessToken: "tok" }),
-  });
-  assert.equal(snap.provider, "claude");
-  assert.equal(snap.windows.length, 2);
-  const session = snap.windows.find((w) => w.kind === "session");
-  assert.equal(session.label, "Session (5h)");
-  assert.equal(session.pct, 78);
-  assert.equal(session.resetsAt, 1735689600000);
-  const weekly = snap.windows.find((w) => w.kind === "weekly");
-  assert.equal(weekly.pct, 41);
-  assert.equal(weekly.resetsAt, Date.parse("2025-01-07T09:00:00.000Z"));
-  assert.equal(snap.extras.find((e) => e.label === "Opus (7d)").value, "64%");
-  assert.equal(snap.extras.find((e) => e.label === "Sonnet (7d)").value, "18%");
-});
-
 test("claude adapter: used_percentage is preferred over utilization when both are present", async () => {
-  const sample = { rate_limits: { five_hour: { utilization: 0.5, used_percentage: 93 } } };
+  const sample = { rate_limits: { five_hour: { utilization: 50, used_percentage: 93 } } };
   const snap = await claudeAdapter.fetch({
     fetchImpl: async () => fakeResponse(200, sample),
     readCredentials: async () => ({ accessToken: "tok" }),
@@ -603,7 +577,7 @@ test("claude adapter: still honours a rate_limits wrapper if a future build rein
 });
 
 test("claude adapter: no absolutes, no planLabel — never fabricated", async () => {
-  const sample = { rate_limits: { five_hour: { utilization: 0.1 } } };
+  const sample = { rate_limits: { five_hour: { utilization: 10 } } };
   const snap = await claudeAdapter.fetch({
     fetchImpl: async () => fakeResponse(200, sample),
     readCredentials: async () => ({ accessToken: "tok" }),
@@ -611,6 +585,15 @@ test("claude adapter: no absolutes, no planLabel — never fabricated", async ()
   assert.equal("planLabel" in snap, false);
   assert.equal("used" in snap.windows[0], false);
   assert.equal("limit" in snap.windows[0], false);
+});
+
+test("claude adapter: a 1% reading is 1%, not 100% (reset-time regression)", async () => {
+  const sample = { five_hour: { utilization: 1, resets_at: "2026-08-18T19:20:00.000Z" } };
+  const snap = await claudeAdapter.fetch({
+    fetchImpl: async () => fakeResponse(200, sample),
+    readCredentials: async () => ({ accessToken: "tok" }),
+  });
+  assert.equal(snap.windows.find((w) => w.kind === "session").pct, 1);
 });
 
 test("claude adapter: detect() requires a non-empty accessToken", async () => {
