@@ -10,8 +10,11 @@
 		0129D15936E52427A46702E7 /* MantaAuthClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 989AB507C4722A4CF012C3B8 /* MantaAuthClientTests.swift */; };
 		01871023D47544D64443194D /* MantaModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C8240F1954861B4846E279D /* MantaModels.swift */; };
 		0488B71F794FC6E64CDC0B23 /* TerminalKeyRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D7BC8920829E8847057C8DA /* TerminalKeyRow.swift */; };
+		058E2179669599C216446E7C /* ToolOutputPreviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAD2C923C52DE07EB54AB821 /* ToolOutputPreviewTests.swift */; };
 		0DA0C1C92C06A3BED780494E /* UsageMeters.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A81D1BB24FB02E4DFFA04FE /* UsageMeters.swift */; };
 		12070C130BD9D1CD9EA0603F /* WaveformTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AEF7554D798247FECA6BFF84 /* WaveformTests.swift */; };
+		12C1D08D7311357D1872FA18 /* ChatJSON.swift in Sources */ = {isa = PBXBuildFile; fileRef = E246039C1A3AA38065BE89B0 /* ChatJSON.swift */; };
+		1888AC1DE5A98EFBE6DDEA51 /* DeprecatedModelOptIns.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6169B72F37CC138729DDD22E /* DeprecatedModelOptIns.swift */; };
 		1A55CBC343898856735AF0F8 /* MantaChatSurfaceCaptureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 570E190164DB3AB83DC14283 /* MantaChatSurfaceCaptureUITests.swift */; };
 		1B9026B4F0286A5186FD5197 /* MantaSettingsModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39978655A14BFA5D39336286 /* MantaSettingsModels.swift */; };
 		1E8A1AB9FB3945E6092CA2E2 /* UsageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAFF319B4F3CD4F13A20A1EB /* UsageStore.swift */; };
@@ -79,6 +82,7 @@
 		9C027B884D963083B775876C /* GoogleService-Info.plist in Resources */ = {isa = PBXBuildFile; fileRef = CAD176AE6BC2E7A6024A5761 /* GoogleService-Info.plist */; };
 		9CF891D747797006729FDBD3 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4E84DF65831DE58599C53BD /* RootView.swift */; };
 		9E9F0CED519AB1DF30516047 /* ChatOverflowCaptureScene.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4603364B1845FF6C330EB601 /* ChatOverflowCaptureScene.swift */; };
+		ABA727BCDA6229EC5FC4C87B /* DeprecatedModelOptInsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39B5E0C86E9FA4A10239DBFA /* DeprecatedModelOptInsTests.swift */; };
 		AF7832C75B545CF27B10EB13 /* MantaLiveArtifactsUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4FA4CCB9740565057F26D31 /* MantaLiveArtifactsUITests.swift */; };
 		B0D305420CA78C35FFD1E617 /* ArtifactDerivation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15E5DB4B26254A37A3075BD2 /* ArtifactDerivation.swift */; };
 		B46B35ED65EDB8F13002F091 /* MessagingUI in Frameworks */ = {isa = PBXBuildFile; productRef = 2B48EABB4EC8AF086CA5C6AB /* MessagingUI */; };
@@ -113,6 +117,7 @@
 		ED03A3C1AAFA1094A92A9ECA /* MantaDeepLinkUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B7A1F140660F9AC7AF07E00 /* MantaDeepLinkUITests.swift */; };
 		EDFF1716E461980191B71C85 /* MantaPairFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D8A1A5388E54F31462D616F /* MantaPairFixture.swift */; };
 		EE22C75492152C8594275C5C /* ChatOverflowSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA460F4E709501AE6C65D08A /* ChatOverflowSheet.swift */; };
+		EE3F3D2D85BC08D58A78A564 /* MantaError.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11BB42810D0F3D3ADD9B557 /* MantaError.swift */; };
 		F30211F79048035CE5520266 /* RunningIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BA4ADBB2FD5BAC7940D5B69 /* RunningIndicator.swift */; };
 		F84BE156312997C53C3314AF /* MantaDeepLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8879A94FE1BE824F438342AD /* MantaDeepLink.swift */; };
 		FF511A296958C8376966852F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 82EEBB3B72D8F63CF4D8CB7B /* Assets.xcassets */; };
@@ -148,6 +153,7 @@
 		1BBC0EC48A556426D44A1A42 /* MantaContextStripVerifyUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaContextStripVerifyUITests.swift; sourceTree = "<group>"; };
 		1E1306D325FEB295B7AB874E /* MantaEventStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaEventStore.swift; sourceTree = "<group>"; };
 		1ED9F61E845DE68677AFEFF2 /* VoiceNote.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceNote.swift; sourceTree = "<group>"; };
+		1F2DD310976F1DDDA947FDA1 /* MantaUITests.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = MantaUITests.entitlements; sourceTree = "<group>"; };
 		229392FD3405558D301D0809 /* ChatModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatModel.swift; sourceTree = "<group>"; };
 		24994B33B60EB6C4C6EF4178 /* SessionListStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListStore.swift; sourceTree = "<group>"; };
 		25870866D56CCE59805BCC0E /* MantaAppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaAppDelegate.swift; sourceTree = "<group>"; };
@@ -161,6 +167,7 @@
 		36E99A4154D594C6A36FB890 /* MantaLiveTypeaheadSlashUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaLiveTypeaheadSlashUITests.swift; sourceTree = "<group>"; };
 		38864A574D6CE5142E07B487 /* ModelRecentsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelRecentsTests.swift; sourceTree = "<group>"; };
 		39978655A14BFA5D39336286 /* MantaSettingsModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaSettingsModels.swift; sourceTree = "<group>"; };
+		39B5E0C86E9FA4A10239DBFA /* DeprecatedModelOptInsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeprecatedModelOptInsTests.swift; sourceTree = "<group>"; };
 		4098461F579869804595B0A3 /* ChatModelCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatModelCatalog.swift; sourceTree = "<group>"; };
 		436675A65BF149932C1EADE0 /* ChatScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatScreen.swift; sourceTree = "<group>"; };
 		4603364B1845FF6C330EB601 /* ChatOverflowCaptureScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatOverflowCaptureScene.swift; sourceTree = "<group>"; };
@@ -177,6 +184,7 @@
 		5C02DA420B52094269A88E80 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		5D71EC917661085ED10E0867 /* FolderPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FolderPickerView.swift; sourceTree = "<group>"; };
 		5EF0199856D7E4C0B0D2595C /* MantaUIOverflowCaptureUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaUIOverflowCaptureUITests.swift; sourceTree = "<group>"; };
+		6169B72F37CC138729DDD22E /* DeprecatedModelOptIns.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeprecatedModelOptIns.swift; sourceTree = "<group>"; };
 		6717B2E85100A1BCAC163A31 /* VoiceGesture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceGesture.swift; sourceTree = "<group>"; };
 		681F342360878481A0D8364F /* MantaOverflowCaptureUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaOverflowCaptureUITests.swift; sourceTree = "<group>"; };
 		6BA4ADBB2FD5BAC7940D5B69 /* RunningIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunningIndicator.swift; sourceTree = "<group>"; };
@@ -211,6 +219,7 @@
 		9CA2F9C1585492985A5D82ED /* MantaActionRPCWireTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaActionRPCWireTests.swift; sourceTree = "<group>"; };
 		9DD6CA51FD8B7CE80314E0CD /* ModelRecents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelRecents.swift; sourceTree = "<group>"; };
 		9F06F838B4779D52B29E1173 /* VoiceRecordingSurface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceRecordingSurface.swift; sourceTree = "<group>"; };
+		A11BB42810D0F3D3ADD9B557 /* MantaError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaError.swift; sourceTree = "<group>"; };
 		A1E78B0F5B521937B40937DC /* SettingsScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsScreen.swift; sourceTree = "<group>"; };
 		A26BEC5EF47268C8B29239F0 /* TranscriptComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptComponents.swift; sourceTree = "<group>"; };
 		A2C97C92B5E1ADA62F799D73 /* ModelPickerSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelPickerSheet.swift; sourceTree = "<group>"; };
@@ -236,9 +245,11 @@
 		D178D08102AB83BF93B82D16 /* SessionResourceCards.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionResourceCards.swift; sourceTree = "<group>"; };
 		D687A8F5AD2BEEAC0D728C3C /* UsageMetersTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageMetersTests.swift; sourceTree = "<group>"; };
 		DA2C52DC49C55784D6EF2B65 /* TerminalModelsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalModelsTests.swift; sourceTree = "<group>"; };
+		DAD2C923C52DE07EB54AB821 /* ToolOutputPreviewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolOutputPreviewTests.swift; sourceTree = "<group>"; };
 		DC240598BDE45C3D43B46191 /* MantaUI.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = MantaUI.entitlements; sourceTree = "<group>"; };
 		DD646A4951E292E750890CCB /* MantaAppRoot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaAppRoot.swift; sourceTree = "<group>"; };
 		E0733CF7BEEE1C7B517C4010 /* ChatLoadingSkeleton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatLoadingSkeleton.swift; sourceTree = "<group>"; };
+		E246039C1A3AA38065BE89B0 /* ChatJSON.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatJSON.swift; sourceTree = "<group>"; };
 		E4A5AE775D3F3D82FC69A54F /* VoiceGestureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceGestureTests.swift; sourceTree = "<group>"; };
 		E4FA4CCB9740565057F26D31 /* MantaLiveArtifactsUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaLiveArtifactsUITests.swift; sourceTree = "<group>"; };
 		EAA20AACFCE7D2BA897AE130 /* VoiceNotePlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceNotePlayer.swift; sourceTree = "<group>"; };
@@ -300,6 +311,7 @@
 				C25DFE9E1AD1E939DBF7101D /* ChatTranscriptTests.swift */,
 				938AB4A14437119280E1B53A /* ComposerTests.swift */,
 				7E94945B8AA543436D5A6202 /* ComposerTypeaheadTests.swift */,
+				39B5E0C86E9FA4A10239DBFA /* DeprecatedModelOptInsTests.swift */,
 				9CA2F9C1585492985A5D82ED /* MantaActionRPCWireTests.swift */,
 				989AB507C4722A4CF012C3B8 /* MantaAuthClientTests.swift */,
 				EF45305B46745A80925FC1A4 /* MantaEventStreamTests.swift */,
@@ -307,11 +319,13 @@
 				EBC7D0BF807861DCCABC5A26 /* MantaResourceCardModelsTests.swift */,
 				57FFB984A951D5C7BD8D02F9 /* MantaSettingsTests.swift */,
 				9BF85CE7BB8B25AABF039BC5 /* MantaTransportTests.swift */,
+				1F2DD310976F1DDDA947FDA1 /* MantaUITests.entitlements */,
 				38864A574D6CE5142E07B487 /* ModelRecentsTests.swift */,
 				BEBD86C54D5730F24D2E956E /* PlanDerivationTests.swift */,
 				B82B782F73475FDD71F6D6B5 /* PolishTests.swift */,
 				9803742B79E4302F8813EFCC /* SessionModelsTests.swift */,
 				DA2C52DC49C55784D6EF2B65 /* TerminalModelsTests.swift */,
+				DAD2C923C52DE07EB54AB821 /* ToolOutputPreviewTests.swift */,
 				D687A8F5AD2BEEAC0D728C3C /* UsageMetersTests.swift */,
 				E4A5AE775D3F3D82FC69A54F /* VoiceGestureTests.swift */,
 				AE01D00B6A031E239CC12EAD /* VoiceNoteTests.swift */,
@@ -353,6 +367,7 @@
 			children = (
 				15E5DB4B26254A37A3075BD2 /* ArtifactDerivation.swift */,
 				82EEBB3B72D8F63CF4D8CB7B /* Assets.xcassets */,
+				E246039C1A3AA38065BE89B0 /* ChatJSON.swift */,
 				E0733CF7BEEE1C7B517C4010 /* ChatLoadingSkeleton.swift */,
 				229392FD3405558D301D0809 /* ChatModel.swift */,
 				4098461F579869804595B0A3 /* ChatModelCatalog.swift */,
@@ -365,6 +380,7 @@
 				0451BC1AF50CB3A8D80344A5 /* ChatVoice.swift */,
 				ED6ABAA46F1CBD2093D4AC87 /* ComposerTypeahead.swift */,
 				C42691C89906181C99929354 /* ComposerView.swift */,
+				6169B72F37CC138729DDD22E /* DeprecatedModelOptIns.swift */,
 				5D71EC917661085ED10E0867 /* FolderPickerView.swift */,
 				CAD176AE6BC2E7A6024A5761 /* GoogleService-Info.plist */,
 				5C02DA420B52094269A88E80 /* Info.plist */,
@@ -375,6 +391,7 @@
 				2F29E8693B4AA4191CF9C556 /* MantaAuthClient.swift */,
 				8879A94FE1BE824F438342AD /* MantaDeepLink.swift */,
 				0FCC705A51D162CE3E7E3B00 /* MantaDynamicType.swift */,
+				A11BB42810D0F3D3ADD9B557 /* MantaError.swift */,
 				1E1306D325FEB295B7AB874E /* MantaEventStore.swift */,
 				872DDE9D9BAD041950DAC24A /* MantaLoader.swift */,
 				8C8240F1954861B4846E279D /* MantaModels.swift */,
@@ -636,6 +653,7 @@
 				650862947C7F0D6C393C94BB /* ChatTranscriptTests.swift in Sources */,
 				96F128D3EBC0D1432F603FDB /* ComposerTests.swift in Sources */,
 				9203A22473582BAD597CFABC /* ComposerTypeaheadTests.swift in Sources */,
+				ABA727BCDA6229EC5FC4C87B /* DeprecatedModelOptInsTests.swift in Sources */,
 				5A03FC0627C87718E260CC02 /* MantaActionRPCWireTests.swift in Sources */,
 				0129D15936E52427A46702E7 /* MantaAuthClientTests.swift in Sources */,
 				9BF6855A825F539665FF1563 /* MantaEventStreamTests.swift in Sources */,
@@ -648,6 +666,7 @@
 				E8B921F11FB02F147C910B32 /* PolishTests.swift in Sources */,
 				E013C537E1082259B979DF35 /* SessionModelsTests.swift in Sources */,
 				C414F36E83344076CE4F1ACD /* TerminalModelsTests.swift in Sources */,
+				058E2179669599C216446E7C /* ToolOutputPreviewTests.swift in Sources */,
 				97CCE1CDDEF2E81BF57B52D1 /* UsageMetersTests.swift in Sources */,
 				B7D2A1C0F9EC29C5B0002C8F /* VoiceGestureTests.swift in Sources */,
 				49F13D74AD1B942D3313970B /* VoiceNoteTests.swift in Sources */,
@@ -660,6 +679,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				B0D305420CA78C35FFD1E617 /* ArtifactDerivation.swift in Sources */,
+				12C1D08D7311357D1872FA18 /* ChatJSON.swift in Sources */,
 				959894A87F301CC717772BD3 /* ChatLoadingSkeleton.swift in Sources */,
 				D776E336456236DC1493565F /* ChatModel.swift in Sources */,
 				E394FF8B718A3D7871EC749C /* ChatModelCatalog.swift in Sources */,
@@ -672,6 +692,7 @@
 				C96C7F34F91F06214FD25523 /* ChatVoice.swift in Sources */,
 				8C67D893A425A3B5495CB882 /* ComposerTypeahead.swift in Sources */,
 				D9266F363BEB86F687C320FC /* ComposerView.swift in Sources */,
+				1888AC1DE5A98EFBE6DDEA51 /* DeprecatedModelOptIns.swift in Sources */,
 				95A9EDE98E7304030E438CEF /* FolderPickerView.swift in Sources */,
 				67A2877890E8B008335AD7C0 /* KeychainCredentialStore.swift in Sources */,
 				612658EEF8599BDB18369375 /* MantaAPIClient.swift in Sources */,
@@ -680,6 +701,7 @@
 				863035B4DE4C873A0BD9D0F5 /* MantaAuthClient.swift in Sources */,
 				F84BE156312997C53C3314AF /* MantaDeepLink.swift in Sources */,
 				9068396FC592D6010419D13D /* MantaDynamicType.swift in Sources */,
+				EE3F3D2D85BC08D58A78A564 /* MantaError.swift in Sources */,
 				33DC8035C0E87F9A3A7DA7DB /* MantaEventStore.swift in Sources */,
 				74D756D48A7D2A5483170A8B /* MantaLoader.swift in Sources */,
 				01871023D47544D64443194D /* MantaModels.swift in Sources */,
@@ -747,6 +769,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_ENTITLEMENTS = MantaUITests/MantaUITests.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
@@ -924,6 +947,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_ENTITLEMENTS = MantaUITests/MantaUITests.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
