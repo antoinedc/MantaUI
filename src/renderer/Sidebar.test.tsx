@@ -450,6 +450,9 @@ describe("Sidebar — only the active draft is highlighted (BET-1088)", () => {
           model: null,
           plan: false,
           input: "",
+          scratch: false,
+          projectName: "",
+          scratchRoot: "",
         },
       ],
       projects: [

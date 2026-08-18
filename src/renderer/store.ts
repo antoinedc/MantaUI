@@ -226,6 +226,14 @@ export type NewSessionDraft = {
   // for an unknown session id), mirrored here.
   plan: boolean;
   input: string;
+  // Scratch mode (BET-1093): this draft creates a brand-new empty project from
+  // scratch (a derived directory) rather than pointing at an existing folder.
+  scratch: boolean;
+  // The generated or typed workspace name; also the folder basename under
+  // `scratchRoot` when `scratch` is true.
+  projectName: string;
+  // The parent directory the new scratch folder goes in.
+  scratchRoot: string;
 };
 
 // Per-window UI status: live `running`/`subagents` from the poller, plus an
@@ -843,6 +851,9 @@ export const useStore = create<State>((set, get) => ({
           model: defaultModel ?? null,
           plan: false,
           input: "",
+          scratch: false,
+          projectName: "",
+          scratchRoot: "",
         },
       ],
       activeDraftId: id,
