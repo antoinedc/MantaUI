@@ -1698,6 +1698,7 @@ export type OutboxFile = {
   sessionID: string | null;
   mtime: number;
   expiresAt: number | null;
+  messageID: string | null;
 };
 
 // Input shape for secretsSet (UI → store). The value travels renderer → IPC →

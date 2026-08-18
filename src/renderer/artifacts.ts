@@ -159,7 +159,7 @@ function deriveOutboxArtifact(row: OutboxFile): Artifact {
     mime,
     size: row.size,
     at: row.mtime || 0,
-    messageId: null,
+    messageId: row.messageID ?? null,
     context: null,
     expiresAt: row.expiresAt,
   };

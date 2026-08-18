@@ -1660,10 +1660,12 @@ const handleRequest = async (req, res) => {
   }
 
   // ---------- Push a file as a workspace artifact (send_file tool) ----------
-  // POST /api/outbox/push { filePath, sessionID, ttlHours? }
+  // POST /api/outbox/push { filePath, sessionID, ttlHours?, messageID? }
   // Copies the AI-generated file into ~/.manta-outbox/<sessionID>/ so it shows
   // in the artifacts panel's Files tab (workspace-linked, TTL'd, not deleted
   // on download) and announces it via the outbox scanner's agentFile toast.
+  // `messageID` stamps the calling opencode turn on the file so the Artifacts
+  // panel's "Jump to message" works; absent/non-string values are ignored.
   if (req.method === "POST" && path === "/api/outbox/push") {
     let body;
     try {
@@ -1673,6 +1675,10 @@ const handleRequest = async (req, res) => {
     }
     const result = await pushArtifact(body?.filePath, body?.sessionID, {
       ttlHours: body?.ttlHours,
+      messageID:
+        typeof body?.messageID === "string" && body.messageID.trim()
+          ? body.messageID
+          : undefined,
     });
     return result.ok
       ? respondJson(res, 200, { ok: true, row: result.row })

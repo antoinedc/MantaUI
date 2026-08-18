@@ -16,7 +16,7 @@
 //     download (/api/peek) and /api/download leave the source in place.
 //   - The arrival toast (`agentFile`) still fires on new files.
 
-import { readdir, stat, copyFile, mkdir, rm } from "node:fs/promises";
+import { readdir, stat, copyFile, mkdir, rm, readFile, writeFile } from "node:fs/promises";
 import { join, basename } from "node:path";
 import { outboxRoot as defaultOutboxRoot } from "../shared/paths.mjs";
 import { startPoller } from "./startPoller.mjs";
@@ -34,6 +34,42 @@ function resolveExpiry(ttlHours, mtime) {
       ? ttlHours * 3600 * 1000
       : DEFAULT_TTL_MS;
   return mtime + ttl;
+}
+
+// Per-file metadata sidecar. `send_file` stamps the calling opencode message id
+// (and any per-push TTL override) here so `listOutbox` can surface it without
+// nesting the file (nesting would make it invisible to the panel and immune to
+// the sweep). The sidecar is always beside the file it describes.
+export function sidecarPath(filePath) {
+  return `${filePath}.manta.json`;
+}
+
+// "Is this a sidecar file?" — used by BOTH listOutbox and expireArtifacts so
+// sidecars never surface as artifacts and never survive the deletion of their
+// file. The single source of truth for the suffix.
+export function isSidecar(name) {
+  return typeof name === "string" && name.endsWith(".manta.json");
+}
+
+// Best-effort, never throws. Missing / empty / corrupt → "no metadata",
+// identical to a file that predates the sidecar.
+async function readSidecar(path) {
+  try {
+    const raw = await readFile(path, "utf-8");
+    const meta = raw ? JSON.parse(raw) : null;
+    return meta && typeof meta === "object" ? meta : {};
+  } catch {
+    return {};
+  }
+}
+
+// Best-effort, never throws.
+async function writeSidecar(path, meta) {
+  try {
+    await writeFile(path, JSON.stringify(meta));
+  } catch {
+    /* non-fatal — the push still succeeds, metadata is lost */
+  }
 }
 
 // List the artifact mailbox. Each row is { path, name, size, sessionID, mtime,
@@ -54,6 +90,7 @@ export async function listOutbox(root = defaultOutboxRoot(), { sessionID } = {})
     const full = join(root, ent.name);
     if (ent.isFile()) {
       if (sessionID != null && sessionID !== "") continue;
+      if (isSidecar(ent.name)) continue;
       out.push(await statRow(full, ent.name, null, now));
     } else if (ent.isDirectory()) {
       if (sessionID != null && ent.name !== sessionID) continue;
@@ -65,6 +102,7 @@ export async function listOutbox(root = defaultOutboxRoot(), { sessionID } = {})
       }
       for (const sub of subEntries) {
         if (!sub.isFile()) continue;
+        if (isSidecar(sub.name)) continue;
         out.push(await statRow(join(full, sub.name), sub.name, ent.name, now));
       }
     }
@@ -75,16 +113,28 @@ export async function listOutbox(root = defaultOutboxRoot(), { sessionID } = {})
 async function statRow(path, name, sessionID, now) {
   try {
     const st = await stat(path);
+    const meta = await readSidecar(sidecarPath(path));
+    const expiresAt = "expiresAt" in meta ? meta.expiresAt : resolveExpiry(null, st.mtimeMs, now);
     return {
       path,
       name,
       size: st.size,
       sessionID,
       mtime: st.mtimeMs,
-      expiresAt: resolveExpiry(null, st.mtimeMs, now),
+      expiresAt,
+      messageID:
+        typeof meta.messageID === "string" && meta.messageID ? meta.messageID : null,
     };
   } catch {
-    return { path, name, size: 0, sessionID, mtime: 0, expiresAt: null };
+    return {
+      path,
+      name,
+      size: 0,
+      sessionID,
+      mtime: 0,
+      expiresAt: null,
+      messageID: null,
+    };
   }
 }
 
@@ -94,7 +144,7 @@ async function statRow(path, name, sessionID, now) {
 export async function pushArtifact(
   filePath,
   sessionID,
-  { root = defaultOutboxRoot(), ttlHours } = {},
+  { root = defaultOutboxRoot(), ttlHours, messageID } = {},
 ) {
   if (!sessionID || typeof sessionID !== "string" || !sessionID.trim()) {
     return { ok: false, error: "sessionID is required" };
@@ -111,8 +161,16 @@ export async function pushArtifact(
   await mkdir(destDir, { recursive: true });
   const dest = join(destDir, safe);
   await copyFile(filePath, dest);
+  const msgId =
+    typeof messageID === "string" && messageID.trim() ? messageID : null;
+  if (msgId || ttlHours != null) {
+    const st = await stat(dest);
+    const meta = {};
+    if (msgId) meta.messageID = msgId;
+    if (ttlHours != null) meta.expiresAt = resolveExpiry(ttlHours, st.mtimeMs);
+    await writeSidecar(sidecarPath(dest), meta);
+  }
   const row = await statRow(dest, safe, sessionID, Date.now());
-  if (ttlHours != null) row.expiresAt = resolveExpiry(ttlHours, row.mtime);
   return { ok: true, row };
 }
 
@@ -136,6 +194,7 @@ export async function expireArtifacts(
       const subs = await readdir(full, { withFileTypes: true });
       for (const sub of subs) {
         if (!sub.isFile()) continue;
+        if (isSidecar(sub.name)) continue;
         const subFull = join(full, sub.name);
         let st;
         try {
@@ -145,6 +204,7 @@ export async function expireArtifacts(
         }
         if (now - st.mtimeMs > ttlMs) {
           await rm(subFull, { force: true });
+          await rm(sidecarPath(subFull), { force: true });
           removed++;
         }
       }
