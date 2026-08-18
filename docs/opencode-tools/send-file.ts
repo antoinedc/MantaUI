@@ -16,6 +16,8 @@
 //   - Workspace-linked under the caller's opencode sessionID.
 //   - TTL (default 7 days) — NOT deleted on download; swept when it expires.
 //   - Re-downloadable until then.
+//   - Stamps the calling opencode `context.messageID` on the artifact so the
+//     Artifacts panel's "Jump to message" scrolls to the turn that sent it.
 //
 // See docs/manta-tools-scheduler.md for the general "manta tools" pattern.
 
@@ -106,6 +108,7 @@ export const send_file = tool({
       filePath: args.path,
       sessionID: context.sessionID,
       ttlHours: args.ttlHours,
+      messageID: context.messageID,
     });
     const ttl =
       result.row?.expiresAt == null
