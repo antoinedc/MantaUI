@@ -34,8 +34,9 @@ import { useApplySetting } from "./settingsApply";
 import { SettingsRow } from "./SettingsRow";
 import { BANNER_BTN } from "./Toast";
 import { errorDisclosure } from "./settingsError";
-import { describeDesktopUpdate, describeServerUpdate, type UpdateRow } from "./chatUtils";
-import type { DesktopUpdateCheck, ServerUpdateCheck } from "../shared/types";
+import { describeUpdateTarget } from "./chatUtils";
+import type { UpdateRow } from "./chatUtils";
+import type { DesktopUpdateCheck, ServerUpdateCheck, UpdateTarget } from "../shared/types";
 import { forgeCredentialSecondary } from "./chatUtils";
 import { useCachedResource } from "./useCachedResource";
 import { MantaLoader } from "./MantaLoader";
@@ -505,8 +506,41 @@ export function Settings({
     }
   }, [updatePrompt, updateError]);
 
-  const desktopRow = describeDesktopUpdate(desktopCheck);
-  const serverRow = describeServerUpdate(serverCheck, { failed: serverCheckFailed });
+  // Each leg's verdict row, from the ONE shared describe function. The old
+  // code had two bespoke describe-functions (describeDesktopUpdate /
+  // describeServerUpdate); BET-1096 replaced them with describeUpdateTarget
+  // keyed off the shared UpdateTarget shape. Until stage 3 unifies the About
+  // list, this thin per-leg adapter shapes each check into an UpdateTarget.
+  // `ok` preserves the exact old semantics: a check that hasn't run (or whose
+  // RPC never came back) must NOT read as "up to date".
+  const desktopTarget: UpdateTarget | null =
+    desktopCheck == null
+      ? null
+      : {
+          id: "desktop",
+          label: "Manta UI",
+          current: clientVersion,
+          latest: desktopCheck.version,
+          available: desktopCheck.available,
+          ok: !desktopCheck.error,
+          manual: desktopCheck.supported === false,
+          disruption: "app-restart",
+        };
+  const serverTarget: UpdateTarget | null =
+    serverCheck == null && !serverCheckFailed
+      ? null
+      : {
+          id: "server",
+          label: "The box",
+          current: serverVersion,
+          latest: serverCheck?.version ?? null,
+          available: serverCheck?.available === true,
+          ok: serverCheck ? serverCheck.ok !== false : false,
+          manual: false,
+          disruption: "reconnect",
+        };
+  const desktopRow = desktopTarget ? describeUpdateTarget(desktopTarget) : null;
+  const serverRow = serverTarget ? describeUpdateTarget(serverTarget) : null;
 
   // opencode port — exposed in the Box "Advanced" row (BET-420). Read via
   // configGet (it's an AppConfig key with no store mirror) and committed via

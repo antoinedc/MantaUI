@@ -41,8 +41,7 @@ import {
   runWithConcurrency,
   chooseUpdateSkewVariant,
   isTransientUpdateNetworkError,
-  describeDesktopUpdate,
-  describeServerUpdate,
+  describeUpdateTarget,
   arrowUpNavigatesHistory,
   arrowDownNavigatesHistory,
   parseDeviceCode,
@@ -147,7 +146,7 @@ import {
   deviceAuthErrorMessage,
 } from "./chatUtils";
 
-import type { OpencodeModel, OpencodeAgent, UsageSnapshot, OpencodeMessage, OpencodePart, VoiceNoteRecord, ForgeInboxItem, QuestionRequest } from "../shared/types";
+import type { OpencodeModel, OpencodeAgent, UsageSnapshot, OpencodeMessage, OpencodePart, VoiceNoteRecord, ForgeInboxItem, QuestionRequest, UpdateTarget } from "../shared/types";
 
 
 
@@ -1495,95 +1494,54 @@ describe("chooseUpdateSkewVariant", () => {
 });
 
 // ===== "Check for updates" verdict rows =====
-describe("describeDesktopUpdate", () => {
-  it("returns null before a check has run (renders nothing, not 'up to date')", () => {
-    expect(describeDesktopUpdate(null)).toBeNull();
+describe("describeUpdateTarget", () => {
+  const target = (over: Partial<UpdateTarget>): UpdateTarget => ({
+    id: "desktop",
+    label: "Manta UI",
+    current: null,
+    latest: null,
+    available: false,
+    ok: true,
+    manual: false,
+    disruption: "app-restart",
+    ...over,
   });
 
-  it("reports up to date as 'ok'", () => {
-    expect(describeDesktopUpdate({ supported: true, available: false, version: "0.0.36" })).toEqual({
+  it("reports a current target as 'ok', up to date", () => {
+    expect(describeUpdateTarget(target({ id: "desktop" }))).toEqual({
       tone: "ok",
-      text: "Manta UI is up to date.",
+      text: "Up to date",
     });
   });
 
-  it("names the available version and asks for an action", () => {
-    expect(describeDesktopUpdate({ supported: true, available: true, version: "0.0.37" })).toEqual({
-      tone: "action",
-      text: "Manta UI 0.0.37 is available.",
-    });
+  it("reports an available target as 'action', update available", () => {
+    const row = describeUpdateTarget(target({ available: true }));
+    expect(row.tone).toBe("action");
+    expect(row.text).toBe("Update available");
   });
 
-  it("still reports an available update when the feed carries no version", () => {
-    expect(describeDesktopUpdate({ supported: true, available: true, version: null })).toEqual({
-      tone: "action",
-      text: "An update is available.",
-    });
+  it("reports a manual target as 'muted' — never 'up to date'", () => {
+    // A dev build (supported:false → manual) and a CLI with no safe upgrade
+    // command have to read as "not applicable", not as a clean bill of health.
+    const row = describeUpdateTarget(target({ manual: true }));
+    expect(row.tone).toBe("muted");
+    expect(row.tone).not.toBe("ok");
   });
 
-  it("an unsupported build is MUTED, never 'up to date'", () => {
-    // A dev build and a mobile client have no updater at all. Rendering either
-    // as "up to date" is a claim about something that was never checked — the
-    // precise shape of reassurance that let a permanently broken macOS updater
-    // pass for a healthy one.
-    const row = describeDesktopUpdate({ supported: false, available: false, version: null });
-    expect(row?.tone).toBe("muted");
-    expect(row?.tone).not.toBe("ok");
+  it("a failed check is an ERROR and outranks every other reading", () => {
+    // Even a manual, available target must render as a failure, not as an
+    // action or a reassuring "up to date". The invariant: an unanswerable
+    // check is NEVER rendered as "ok".
+    const row = describeUpdateTarget(target({ ok: false, manual: true, available: true }));
+    expect(row).toEqual({ tone: "error", text: "Couldn't check" });
   });
 
-  it("a failed check is an ERROR and outranks the up-to-date reading", () => {
-    const row = describeDesktopUpdate({
-      supported: true,
-      available: false,
-      version: null,
-      error: "Couldn't check for updates.",
-    });
-    expect(row).toEqual({ tone: "error", text: "Couldn't check for updates." });
-  });
-});
-
-describe("describeServerUpdate", () => {
-  it("returns null before a check has run", () => {
-    expect(describeServerUpdate(null)).toBeNull();
-  });
-
-  it("reports up to date as 'ok'", () => {
-    expect(describeServerUpdate({ available: false })).toEqual({
-      tone: "ok",
-      text: "The box is up to date.",
-    });
-  });
-
-  it("names the available box version and asks for an action", () => {
-    expect(describeServerUpdate({ available: true, version: "0.0.37" })).toEqual({
-      tone: "action",
-      text: "Box update 0.0.37 is available.",
-    });
-  });
-
-  it("an unreachable box is an ERROR, and outranks any stale result", () => {
-    // The RPC not coming back is a different fact from the box saying "nothing
-    // new", and must not inherit the reassuring tone of the latter.
-    const row = describeServerUpdate({ available: false }, { failed: true });
-    expect(row?.tone).toBe("error");
-    expect(row?.text).toMatch(/couldn’t reach the box/i);
-  });
-
-  it("a check that could not complete (ok:false) is an ERROR, never 'up to date'", () => {
-    // A manifest-fetch failure resolves `available:false` — the SAME value as
-    // "up to date". Without this branch the box row would show the green
-    // reassuring tone after a failed check. The failure must be read as an
-    // error, not a clean bill of health.
-    const row = describeServerUpdate({ available: false, ok: false });
-    expect(row?.tone).toBe("error");
-    expect(row?.tone).not.toBe("ok");
-    expect(row?.text).toMatch(/couldn’t check the box/i);
-  });
-
-  it("an absent ok is treated as a successful check (old server)", () => {
-    // A response from an older server that predates the `ok` field must still
-    // render normally, not as an error.
-    expect(describeServerUpdate({ available: false })?.tone).toBe("ok");
+  it("manual outranks available", () => {
+    // A target that is both manual and available (e.g. a broken updater) must
+    // be muted "Update manually", not an actionable "Update available".
+    const row = describeUpdateTarget(target({ manual: true, available: true }));
+    expect(row.tone).toBe("muted");
+    expect(row.text).toBe("Update manually");
   });
 });
 
