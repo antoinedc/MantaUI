@@ -149,4 +149,41 @@ describe("reconcileSubagents", () => {
     expect(reconcileSubagents({})).toEqual({ upsert: [], remove: [] });
     expect(reconcileSubagents(undefined)).toEqual({ upsert: [], remove: [] });
   });
+
+  // ===== BET-1139: deprecated models disabled by default, opt-in reverses =====
+
+  const oldModel = { providerID: "anthropic", id: "claude-old-1", status: "deprecated" };
+
+  it("skips a deprecated model unless opted in", () => {
+    const { upsert } = reconcileSubagents({ models: [haiku, oldModel] });
+    const models = upsert.map((u) => u.model);
+    expect(models).toEqual(["anthropic/claude-haiku-4"]);
+  });
+
+  it("registers a deprecated model when it is in the opt-in set", () => {
+    const { upsert } = reconcileSubagents({
+      models: [oldModel],
+      optIn: ["anthropic/claude-old-1"],
+    });
+    expect(upsert).toHaveLength(1);
+    expect(upsert[0].model).toBe("anthropic/claude-old-1");
+  });
+
+  it("leaves an already-registered deprecated block untouched (preserve-existing)", () => {
+    const existingAgents = [
+      { name: "old-model", model: "anthropic/claude-old-1", description: "pre-existing" },
+    ];
+    const { upsert, remove } = reconcileSubagents({ models: [oldModel], existingAgents });
+    expect(upsert).toEqual([]);
+    expect(remove).toEqual([]);
+  });
+
+  it("still respects deactivation alongside the deprecated opt-in gate", () => {
+    const { upsert } = reconcileSubagents({
+      models: [oldModel],
+      deactivated: ["anthropic/claude-old-1"],
+      optIn: ["anthropic/claude-old-1"],
+    });
+    expect(upsert).toEqual([]);
+  });
 });

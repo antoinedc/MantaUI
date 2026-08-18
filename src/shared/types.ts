@@ -180,6 +180,15 @@ export type AppConfig = {
   // (a default must be Main-available). Absent/empty = every known model
   // is selectable as the chat main agent.
   deactivatedMainModels?: string[];
+  // BET-1139: models the user has EXPLICITLY opted back in to despite being
+  // deprecated (status === "deprecated"). Same shape as `deactivatedMainModels`
+  // — "providerID/modelID" strings. A deprecated model is disabled by default
+  // in the main picker and skipped by subagent auto-registration; the user's
+  // opt-in (persisted here via the generic configGet/configUpdate channels,
+  // no new IPC/plumbing) flips both back on for THAT model. Absent/empty =
+  // every deprecated model stays disabled. Do NOT conflate with the
+  // deactivated sets — those hide/remove; this ENABLES a deprecated default.
+  optInModels?: string[];
   // Anthropic prompt cache TTL used by opencode. Used ONLY to predict when
   // a chat session has gone stale (cache expired → the next user turn
   // would re-bill the entire cached prefix as cache_creation_input_tokens

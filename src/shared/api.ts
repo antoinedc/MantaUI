@@ -408,6 +408,9 @@ export interface Api {
   opencodeSyncSubagents(input: {
     models: OpencodeModel[];
     deactivated: string[];
+    // BET-1139: "providerID/modelID" deprecated-model opt-ins — a deprecated
+    // model is only auto-registered as a subagent when present here.
+    optIn?: string[];
   }): Promise<SubagentDef[]>;
   opencodeRestart(): Promise<void>;
   opencodeVcsBranch(directory?: string): Promise<string | null>;

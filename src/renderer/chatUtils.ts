@@ -2047,6 +2047,21 @@ export function hideFastSiblingGroups(
   return out;
 }
 
+// ===== deprecated-model predicate (BET-1139) =====
+//
+// The SINGLE place the literal string "deprecated" is compared. A model the
+// provider still serves but flags as `status === "deprecated"` is kept
+// importable but defaulted to disabled in the main picker and skipped by
+// subagent auto-registration, both reversed by an explicit per-model opt-in
+// (`optInModels`). Every consumer calls this function — do not spread the
+// literal.
+
+export function isDeprecated(
+  m: { status?: string } | null | undefined,
+): boolean {
+  return !!m && m.status === "deprecated";
+}
+
 // ===== selectableModelGroups =====
 //
 // The model set a user may actually switch TO — the answer to "does
@@ -2095,6 +2110,55 @@ export function selectableModelGroups(
   }
   const sorted = [...map.entries()].sort(([a], [b]) => a.localeCompare(b));
   return hideFastSiblingGroups(sorted);
+}
+
+export type MainPickerGroups = {
+  /** Groups for the main model menu — includes deprecated models so they stay
+   *  importable/visible, with the same enabled/deactivated/fast-folding gates
+   *  as `selectableModelGroups`. */
+  groups: Array<[string, OpencodeModel[]]> | null;
+  /** "providerID/modelID" keys of DEPRECATED models shown disabled (not yet
+   *  opted in). Deprecated-but-opted-in models are ordinary selectable rows. */
+  disabledKeys: string[];
+};
+
+/**
+ * The main picker's candidate set (BET-1139). Unlike `selectableModelGroups`,
+ * a deprecated model is KEPT in the list — the user must be able to see and
+ * opt in to a model the provider is deprecating — but it is rendered disabled
+ * unless its "providerID/modelID" is in `optInModels` (`disabledKeys`). A
+ * deprecated model that HAS been opted in is fully selectable, same as a live
+ * model. Non-deprecated models behave exactly as `selectableModelGroups`.
+ * Used ONLY by the main composer picker; the delegate picker keeps filtering
+ * deprecated models via `selectableModelGroups`. `null` models → `null`
+ * groups (loading).
+ */
+export function mainPickerGroups(
+  models: OpencodeModel[] | null,
+  deactivatedMainModels: string[] | undefined,
+  optInModels: string[] | undefined,
+): MainPickerGroups {
+  if (!models) return { groups: null, disabledKeys: [] };
+  const deactivatedMain = new Set(deactivatedMainModels ?? []);
+  const optIn = new Set(optInModels ?? []);
+  const disabledKeys: string[] = [];
+  const kept = models.filter((m) => {
+    const key = `${m.providerID}/${m.id}`;
+    if (m.enabled === false) return false;
+    if (deactivatedMain.has(key)) return false;
+    if (isDeprecated(m) && !optIn.has(key)) {
+      disabledKeys.push(key);
+    }
+    return true;
+  });
+  const map = new Map<string, OpencodeModel[]>();
+  for (const m of kept) {
+    const arr = map.get(m.providerID) ?? [];
+    arr.push(m);
+    map.set(m.providerID, arr);
+  }
+  const sorted = [...map.entries()].sort(([a], [b]) => a.localeCompare(b));
+  return { groups: hideFastSiblingGroups(sorted), disabledKeys };
 }
 
 export type FastToggleState = {

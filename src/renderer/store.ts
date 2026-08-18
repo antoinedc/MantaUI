@@ -384,6 +384,9 @@ type State = {
   // "providerID/modelID" strings; absent/empty = every model is Main-available.
   // Mirror of AppConfig.deactivatedMainModels; read by ModelPicker.
   deactivatedMainModels: string[];
+  // Mirror of AppConfig.optInModels (BET-1139); read by ModelPicker's
+  // deprecated-model opt-in rows.
+  optInModels: string[];
   // User-added skill registry URLs (written to remote opencode.jsonc on save).
   skillRegistryUrls: string[];
   // Anthropic prompt cache TTL — drives the "/clear to save Nk tokens"
@@ -607,6 +610,11 @@ type State = {
   // other config setters. New/cleared sessions inherit it (see ChatPanel's
   // configDefaultModel), so it must survive restart — hence the config write.
   setDefaultModel: (model: { providerID: string; modelID: string }) => Promise<void>;
+  // BET-1139: record the user's explicit opt-in for a deprecated model
+  // ("providerID/modelID"), flipping the disabled-by-default main-picker +
+  // subagent behaviour back on for THAT model. Optimistic set + configUpdate +
+  // reconcile, matching the other config setters.
+  optInModel: (key: string) => Promise<void>;
   applyProjects: (projects: Project[]) => void;
   applyConfig: (c: AppConfig) => void;
   // BET-678: apply one sync payload — routes each changed field to the right
@@ -751,6 +759,7 @@ export const useStore = create<State>((set, get) => ({
   downloadsDir: "",
   defaultModel: null,
   deactivatedMainModels: [],
+  optInModels: [],
   skillRegistryUrls: [],
   cacheTtl: "1h",
   launcherFlags: {},
@@ -1023,6 +1032,7 @@ export const useStore = create<State>((set, get) => ({
       downloadsDir: c.downloadsDir ?? "",
       defaultModel: c.defaultModel ?? null,
       deactivatedMainModels: c.deactivatedMainModels ?? [],
+      optInModels: Array.isArray(c.optInModels) ? c.optInModels : [],
       skillRegistryUrls: c.skillRegistryUrls ?? [],
       cacheTtl: c.cacheTtl === "5m" ? "5m" : "1h",
       launcherFlags: c.launcherFlags ?? {},
@@ -1053,6 +1063,15 @@ export const useStore = create<State>((set, get) => ({
     const next = await window.api.configUpdate({ defaultModel: model });
     // Reconcile with what main actually saved (handles error/reject paths).
     set({ defaultModel: next.defaultModel ?? null });
+  },
+
+  optInModel: async (key) => {
+    const cur = get().optInModels;
+    if (cur.includes(key)) return;
+    const next = [...cur, key];
+    set({ optInModels: next });
+    const saved = await window.api.configUpdate({ optInModels: next });
+    set({ optInModels: saved.optInModels ?? next });
   },
 
   setChatAutoAllow: async (v) => {

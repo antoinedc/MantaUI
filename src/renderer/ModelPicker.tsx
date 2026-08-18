@@ -16,7 +16,7 @@ import { useMemo, useRef, useState } from "react";
 import { ChevronDown, Sparkles, Zap, ZapOff } from "lucide-react";
 import type { OpencodeModel } from "../shared/types";
 import { type ModelSelection, resolveActiveModel } from "./chatShared";
-import { selectableModelGroups, selectableModelList, resolveFastToggle, titleCase } from "./chatUtils";
+import { selectableModelList, resolveFastToggle, mainPickerGroups, titleCase } from "./chatUtils";
 import { SplitChip } from "./Chip";
 import { EffortMenu } from "./EffortMenu";
 import { ModelMenu } from "./ModelMenu";
@@ -45,6 +45,8 @@ export function ModelPicker({
   modelOverride,
   defaultModel,
   deactivatedMainModels,
+  optInModels,
+  onOptInModel,
   onOpen,
   onSelect,
   labelOverride = null,
@@ -57,6 +59,13 @@ export function ModelPicker({
   // from the picker. Filter lives in the same `groups` chokepoint as the
   // existing enabled/status gate. Default [] = no Main filtering.
   deactivatedMainModels?: string[];
+  // BET-1139: "providerID/modelID" strings of deprecated models the user has
+  // explicitly opted back in to. Empty/absent = every deprecated model shows
+  // disabled. Shared with the subagent path and the store's `optInModels`.
+  optInModels?: string[];
+  // Persist an opt-in (BET-1139) — flips a deprecated model's disabled row to
+  // a normal selectable one.
+  onOptInModel?: (key: string) => void;
   onOpen: () => void;
   onSelect: (m: ModelSelection | null) => void;
   // Welcome-screen helper for the model button label: shown unconditionally,
@@ -86,12 +95,15 @@ export function ModelPicker({
     [models, deactivatedMainModels],
   );
 
-  // The dropdown's candidate set: selectable models grouped by provider,
-  // sorted, with `-fast` siblings folded into their base (they're reached
-  // through the ⚡ segment). Shared with the delegate model picker.
-  const groups = useMemo(
-    () => selectableModelGroups(models, deactivatedMainModels),
-    [models, deactivatedMainModels],
+  // The dropdown's candidate set: models grouped by provider, sorted, with
+  // `-fast` siblings folded into their base (they're reached through the ⚡
+  // segment). BET-1139: unlike the selectable set, deprecated models are KEPT
+  // in the list (visible + importable) but flagged disabled unless opted in
+  // (`disabledKeys`) — the user must be able to see and opt in to a model the
+  // provider is deprecating.
+  const picker = useMemo(
+    () => mainPickerGroups(models, deactivatedMainModels, optInModels),
+    [models, deactivatedMainModels, optInModels],
   );
 
   // Resolve the active model object (for the friendly name + variant list).
@@ -252,7 +264,9 @@ export function ModelPicker({
         <ModelMenu
           open={modelOpen}
           anchorRef={modelBtnRef}
-          groups={groups}
+          groups={picker.groups}
+          disabledKeys={picker.disabledKeys}
+          onEnableDeprecated={onOptInModel}
           modelOverride={modelOverride}
           defaultModel={defaultModel}
           onSelect={onSelect}
