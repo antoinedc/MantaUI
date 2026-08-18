@@ -56,6 +56,9 @@ const DEFAULT_CONFIG = {
   // sweep deletes the file (transcript + waveform are kept forever). 0 = keep
   // forever. Default 168 (7 days).
   voiceNoteTtlHours: 168,
+  // OpenAI API key for the on-call CTO voice transport (BET-1166). Stored on
+  // the box like groqApiKey; the renderer never sees it.
+  openaiApiKey: "",
   // "On-call CTO" feature (BET-1164..1166). Server-side defaults mirror
   // src/shared/types.ts AppConfig#cto. `enabled` off (false) until shipped;
   // with it off the box never registers the cto agent nor wires the engine.

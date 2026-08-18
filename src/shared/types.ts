@@ -210,6 +210,11 @@ export type AppConfig = {
   // manta credentials (ssh identity path, opencode auth). Settings UI shows
   // a masked password input. Absent → mic button is hidden in the UI.
   groqApiKey?: string;
+  // ----- On-call CTO (BET-1166) -----
+  // OpenAI API key for the Realtime voice transport. Stored on the box (like
+  // groqApiKey) and never reaches the renderer — the call window relays audio
+  // through the box's /call WS. Absent → the call window can't start a call.
+  openaiApiKey?: string;
   // ----- Analytics (BET-217) -----
   // When true (the default), this instance ships console.* output + a handful
   // of structured events to Axiom for remote debugging. When false, the
