@@ -1,306 +1,307 @@
-// Tests for the /api/peek route — file peek for HTTP-mode desktop.
+// Tests for the /api/peek file-serving route. These drive the REAL handler
+// (src/server/peek.mjs, the same module index.mjs calls) with real node:fs I/O
+// and a fake Writable response — no re-implemented mock. Plus the pure
+// parseByteRange unit tests.
 // Run via `npm run test:server` (node:test).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
+import { Writable } from "node:stream";
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
+import { pipeline } from "node:stream/promises";
 import { writeFile, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { fileURLToPath } from "node:url";
-import { dirname } from "node:path";
-import http from "node:http";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+import { parseByteRange } from "./range.mjs";
+import { createPeekHandler } from "./peek.mjs";
 
-// Helper: make a GET request and return { status, headers, body }
-function httpGet(url) {
-  return new Promise((resolve, reject) => {
-    const req = http.get(url, (res) => {
-      const chunks = [];
-      res.on("data", (c) => chunks.push(c));
-      res.on("end", () => {
-        resolve({
-          status: res.statusCode,
-          headers: res.headers,
-          body: Buffer.concat(chunks),
-        });
-      });
-    });
-    req.on("error", reject);
-  });
+const MIME = {
+  ".txt": "text/plain; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".png": "image/png",
+};
+
+// The real handler, wired with real fs + homedir, driven in-process.
+function makeHandler() {
+  return createPeekHandler({ homedir, stat, createReadStream, pipeline, MIME });
 }
 
-// Helper: make a HEAD request — same response shape, body expected empty.
-function httpHead(url) {
-  return new Promise((resolve, reject) => {
-    const req = http.request(url, { method: "HEAD" }, (res) => {
-      const chunks = [];
-      res.on("data", (c) => chunks.push(c));
-      res.on("end", () => {
-        resolve({
-          status: res.statusCode,
-          headers: res.headers,
-          body: Buffer.concat(chunks),
-        });
-      });
-    });
-    req.on("error", reject);
-    req.end();
-  });
+// A Writable response that captures status + headers + streamed bytes.
+class FakeRes extends Writable {
+  constructor() {
+    super();
+    this.statusCode = null;
+    this.headers = null;
+    this._chunks = [];
+  }
+  writeHead(status, headers) {
+    this.statusCode = status;
+    this.headers = headers;
+    return this;
+  }
+  get body() {
+    return Buffer.concat(this._chunks);
+  }
+  _write(chunk, _enc, cb) {
+    this._chunks.push(Buffer.from(chunk));
+    cb();
+  }
 }
 
-// Helper: start a minimal server with the peek route logic
-async function startPeekServer(testDir) {
-  const { readFile, stat: fsStat } = await import("node:fs/promises");
-  const { createReadStream } = await import("node:fs");
-  const { pipeline } = await import("node:stream/promises");
-  const { resolve: pathResolve, extname, basename } = await import("node:path");
-  const httpMod = await import("node:http");
-
-  const MIME = {
-    ".txt": "text/plain; charset=utf-8",
-    ".json": "application/json; charset=utf-8",
-    ".png": "image/png",
-    ".html": "text/html; charset=utf-8",
-  };
-
-  return new Promise((serverResolve) => {
-    const server = httpMod.createServer(async (req, res) => {
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const path = url.pathname;
-
-      if ((req.method === "GET" || req.method === "HEAD") && path === "/api/peek") {
-        try {
-          const raw = url.searchParams.get("path") ?? "";
-          if (!raw) {
-            res.writeHead(400, { "content-type": "application/json" });
-            res.end(JSON.stringify({ error: "path is required" }));
-            return;
-          }
-          let resolved = raw;
-          if (resolved === "~") resolved = homedir() + "/";
-          else if (resolved.startsWith("~/")) resolved = homedir() + resolved.slice(1);
-          else resolved = pathResolve(resolved);
-
-          const home = homedir() + "/";
-          if (resolved !== home && !resolved.startsWith(home)) {
-            res.writeHead(403, { "content-type": "application/json" });
-            res.end(JSON.stringify({ error: "path outside home directory" }));
-            return;
-          }
-
-          let s;
-          try {
-            s = await fsStat(resolved);
-          } catch (e) {
-            if (e?.code === "ENOENT") {
-              res.writeHead(404, { "content-type": "application/json" });
-              res.end(JSON.stringify({ error: "not found" }));
-              return;
-            }
-            res.writeHead(500, { "content-type": "application/json" });
-            res.end(JSON.stringify({ error: String(e?.message ?? e) }));
-            return;
-          }
-          if (!s.isFile()) {
-            res.writeHead(404, { "content-type": "application/json" });
-            res.end(JSON.stringify({ error: "not a file" }));
-            return;
-          }
-
-          const ext = extname(resolved);
-          const contentType = MIME[ext] ?? "application/octet-stream";
-          res.writeHead(200, {
-            "content-type": contentType,
-            "content-length": String(s.size),
-            "content-disposition": `inline; filename="${basename(resolved).replace(/"/g, "")}"`,
-          });
-          if (req.method === "HEAD") {
-            res.end();
-            return;
-          }
-          await pipeline(createReadStream(resolved), res);
-        } catch (e) {
-          if (!res.headersSent) {
-            res.writeHead(500, { "content-type": "application/json" });
-            res.end(JSON.stringify({ error: String(e?.message ?? e) }));
-          } else {
-            res.destroy();
-          }
-        }
-        return;
-      }
-
-      res.writeHead(404);
-      res.end("not found");
-    });
-
-    server.listen(0, "127.0.0.1", () => {
-      const addr = server.address();
-      serverResolve({ server, port: addr.port });
-    });
-  });
+function request(method, range) {
+  return { method, headers: range === undefined ? {} : { range } };
 }
 
-test("/api/peek serves a text file with correct content", async () => {
-  const testDir = join(homedir(), ".manta-test-peek-" + Date.now());
-  await mkdir(testDir, { recursive: true });
-  const testFile = join(testDir, "test.txt");
-  await writeFile(testFile, "hello world");
+function peekUrl(absPath) {
+  return new URL("http://127.0.0.1:8787/api/peek?path=" + encodeURIComponent(absPath));
+}
 
+// Drive the real handler and await the response (stream completes).
+async function runPeek({ path, method = "GET", range }) {
+  const res = new FakeRes();
+  await makeHandler()(request(method, range), res, peekUrl(path));
+  return res;
+}
+
+// Create a throwaway test dir inside the user's home dir.
+function tempRoot(tag) {
+  return join(homedir(), `.manta-test-peek-${tag}-${Date.now()}`);
+}
+
+// ---------------------------------------------------------------------------
+// parseByteRange — pure unit tests (no HTTP, no server)
+// ---------------------------------------------------------------------------
+
+test("parseByteRange: closed range bytes=0-99", () => {
+  assert.deepEqual(parseByteRange("bytes=0-99", 1000), { start: 0, end: 99 });
+});
+
+test("parseByteRange: closed range clamps end to EOF", () => {
+  assert.deepEqual(parseByteRange("bytes=900-2000", 1000), { start: 900, end: 999 });
+});
+
+test("parseByteRange: open-ended range bytes=100-", () => {
+  assert.deepEqual(parseByteRange("bytes=100-", 1000), { start: 100, end: 999 });
+});
+
+test("parseByteRange: suffix range bytes=-100", () => {
+  assert.deepEqual(parseByteRange("bytes=-100", 1000), { start: 900, end: 999 });
+});
+
+test("parseByteRange: suffix larger than file returns whole file", () => {
+  assert.deepEqual(parseByteRange("bytes=-5000", 1000), { start: 0, end: 999 });
+});
+
+test("parseByteRange: start past EOF is unsatisfiable", () => {
+  assert.equal(parseByteRange("bytes=1000-", 1000), "unsatisfiable");
+  assert.equal(parseByteRange("bytes=1001-2000", 1000), "unsatisfiable");
+});
+
+test("parseByteRange: end before start is unsatisfiable", () => {
+  assert.equal(parseByteRange("bytes=50-10", 1000), "unsatisfiable");
+});
+
+test("parseByteRange: zero-length / empty suffix range is unsatisfiable", () => {
+  assert.equal(parseByteRange("bytes=-0", 1000), "unsatisfiable");
+  assert.equal(parseByteRange("bytes=-", 1000), "unsatisfiable");
+});
+
+test("parseByteRange: range on empty file is unsatisfiable", () => {
+  assert.equal(parseByteRange("bytes=0-", 0), "unsatisfiable");
+  assert.equal(parseByteRange("bytes=-1", 0), "unsatisfiable");
+});
+
+test("parseByteRange: absent header returns null", () => {
+  assert.equal(parseByteRange(null, 1000), null);
+  assert.equal(parseByteRange(undefined, 1000), null);
+  assert.equal(parseByteRange("", 1000), null);
+});
+
+test("parseByteRange: unparseable header returns null", () => {
+  assert.equal(parseByteRange("bytes", 1000), null);
+  assert.equal(parseByteRange("bytes=", 1000), null);
+  assert.equal(parseByteRange("items=0-10", 1000), null);
+  assert.equal(parseByteRange("bytes=abc-def", 1000), null);
+  assert.equal(parseByteRange("bytes=0-99 extra", 1000), null);
+});
+
+test("parseByteRange: multi-range request returns null (serve whole file)", () => {
+  assert.equal(parseByteRange("bytes=0-99,300-400", 1000), null);
+});
+
+// ---------------------------------------------------------------------------
+// Real handler — GET/HEAD 200/206/416 behaviour
+// ---------------------------------------------------------------------------
+
+const CONTENT = "0123456789abcdefghij"; // 20 bytes
+
+test("/api/peek GET serves the full file with correct headers", async () => {
+  const root = tempRoot("get");
+  await mkdir(root, { recursive: true });
+  const file = join(root, "test.txt");
+  await writeFile(file, CONTENT);
   try {
-    const { server, port } = await startPeekServer(testDir);
-    try {
-      const res = await httpGet(`http://127.0.0.1:${port}/api/peek?path=${encodeURIComponent(testFile)}`);
-      assert.equal(res.status, 200, `Response body: ${res.body.toString()}`);
-      assert.equal(res.headers["content-type"], "text/plain; charset=utf-8");
-      assert.equal(res.body.toString(), "hello world");
-    } finally {
-      server.close();
-    }
+    const res = await runPeek({ path: file });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.headers["content-type"], "text/plain; charset=utf-8");
+    assert.equal(res.headers["accept-ranges"], "bytes");
+    assert.equal(res.headers["content-length"], String(Buffer.byteLength(CONTENT)));
+    assert.equal(res.body.toString(), CONTENT);
   } finally {
-    await rm(testDir, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("/api/peek HEAD reports the full size with no body", async () => {
+  const root = tempRoot("head");
+  await mkdir(root, { recursive: true });
+  const file = join(root, "test.txt");
+  await writeFile(file, CONTENT);
+  try {
+    const res = await runPeek({ path: file, method: "HEAD" });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.headers["accept-ranges"], "bytes");
+    assert.equal(res.headers["content-length"], String(Buffer.byteLength(CONTENT)));
+    assert.equal(res.body.length, 0, "HEAD must not stream a body");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("/api/peek ranged GET returns 206 with the correct bytes and content-range", async () => {
+  const root = tempRoot("ranged-get");
+  await mkdir(root, { recursive: true });
+  const file = join(root, "test.txt");
+  await writeFile(file, CONTENT);
+  try {
+    const res = await runPeek({ path: file, range: "bytes=5-9" });
+    assert.equal(res.statusCode, 206);
+    assert.equal(res.body.toString(), "56789");
+    assert.equal(res.headers["content-range"], "bytes 5-9/20");
+    assert.equal(res.headers["content-length"], "5");
+    assert.equal(res.headers["accept-ranges"], "bytes");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("/api/peek open-ended ranged GET returns the tail", async () => {
+  const root = tempRoot("ranged-open");
+  await mkdir(root, { recursive: true });
+  const file = join(root, "test.txt");
+  await writeFile(file, CONTENT);
+  try {
+    const res = await runPeek({ path: file, range: "bytes=15-" });
+    assert.equal(res.statusCode, 206);
+    assert.equal(res.body.toString(), "fghij");
+    assert.equal(res.headers["content-range"], "bytes 15-19/20");
+    assert.equal(res.headers["content-length"], "5");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("/api/peek unsatisfiable range returns 416 with bytes */size", async () => {
+  const root = tempRoot("416");
+  await mkdir(root, { recursive: true });
+  const file = join(root, "test.txt");
+  await writeFile(file, CONTENT);
+  try {
+    const res = await runPeek({ path: file, range: "bytes=100-200" });
+    assert.equal(res.statusCode, 416);
+    assert.equal(res.headers["content-range"], "bytes */20");
+    assert.equal(res.body.length, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("/api/peek HEAD with a Range reports the slice length with no body", async () => {
+  const root = tempRoot("head-range");
+  await mkdir(root, { recursive: true });
+  const file = join(root, "test.txt");
+  await writeFile(file, CONTENT);
+  try {
+    const res = await runPeek({ path: file, method: "HEAD", range: "bytes=5-9" });
+    assert.equal(res.statusCode, 206);
+    assert.equal(res.headers["content-range"], "bytes 5-9/20");
+    assert.equal(res.headers["content-length"], "5");
+    assert.equal(res.body.length, 0, "HEAD must not stream a body");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("/api/peek multi-range request degrades to a full 200", async () => {
+  const root = tempRoot("multirange");
+  await mkdir(root, { recursive: true });
+  const file = join(root, "test.txt");
+  await writeFile(file, CONTENT);
+  try {
+    const res = await runPeek({ path: file, range: "bytes=0-1,5-6" });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.toString(), CONTENT);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("/api/peek expands ~ to the home directory", async () => {
+  const ts = Date.now();
+  const file = join(homedir(), `.manta-test-peek-home-${ts}.txt`);
+  await writeFile(file, "home file content");
+  try {
+    const res = await runPeek({ path: `~/.manta-test-peek-home-${ts}.txt` });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.toString(), "home file content");
+  } finally {
+    await rm(file, { force: true });
+  }
+});
+
+test("/api/peek serves JSON with the correct content-type", async () => {
+  const root = tempRoot("json");
+  await mkdir(root, { recursive: true });
+  const file = join(root, "data.json");
+  await writeFile(file, '{"key":"value"}');
+  try {
+    const res = await runPeek({ path: file });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.headers["content-type"], "application/json; charset=utf-8");
+    assert.equal(res.body.toString(), '{"key":"value"}');
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 
 test("/api/peek rejects missing path with 400", async () => {
-  const { server, port } = await startPeekServer();
-  try {
-    const res = await httpGet(`http://127.0.0.1:${port}/api/peek`);
-    assert.equal(res.status, 400);
-    const body = JSON.parse(res.body.toString());
-    assert.equal(body.error, "path is required");
-  } finally {
-    server.close();
-  }
+  const res = await runPeek({ path: "" });
+  assert.equal(res.statusCode, 400);
+  assert.deepEqual(JSON.parse(res.body.toString()), { error: "path is required" });
 });
 
 test("/api/peek rejects path traversal with 403", async () => {
-  const { server, port } = await startPeekServer();
-  try {
-    // Try to access a file outside home dir
-    const res = await httpGet(`http://127.0.0.1:${port}/api/peek?path=/etc/passwd`);
-    assert.equal(res.status, 403);
-    const body = JSON.parse(res.body.toString());
-    assert.equal(body.error, "path outside home directory");
-  } finally {
-    server.close();
-  }
+  const res = await runPeek({ path: "/etc/passwd" });
+  assert.equal(res.statusCode, 403);
+  assert.deepEqual(JSON.parse(res.body.toString()), { error: "path outside home directory" });
 });
 
-test("/api/peek returns 404 for non-existent file", async () => {
-  const nonExistent = join(homedir(), "nonexistent-file-12345.txt");
-  const { server, port } = await startPeekServer();
-  try {
-    const res = await httpGet(`http://127.0.0.1:${port}/api/peek?path=${encodeURIComponent(nonExistent)}`);
-    assert.equal(res.status, 404);
-    const body = JSON.parse(res.body.toString());
-    assert.equal(body.error, "not found");
-  } finally {
-    server.close();
-  }
+test("/api/peek returns 404 for a non-existent file", async () => {
+  const res = await runPeek({ path: join(homedir(), "nonexistent-file-12345.txt") });
+  assert.equal(res.statusCode, 404);
+  assert.deepEqual(JSON.parse(res.body.toString()), { error: "not found" });
 });
 
-test("/api/peek returns 404 for directory", async () => {
-  const testDir = join(homedir(), ".manta-test-peek-dir-" + Date.now());
-  await mkdir(testDir, { recursive: true });
-  const { server, port } = await startPeekServer();
+test("/api/peek returns 404 for a directory", async () => {
+  const root = tempRoot("dir");
+  await mkdir(root, { recursive: true });
   try {
-    const res = await httpGet(`http://127.0.0.1:${port}/api/peek?path=${encodeURIComponent(testDir)}`);
-    assert.equal(res.status, 404);
-    const body = JSON.parse(res.body.toString());
-    assert.equal(body.error, "not a file");
+    const res = await runPeek({ path: root });
+    assert.equal(res.statusCode, 404);
+    assert.deepEqual(JSON.parse(res.body.toString()), { error: "not a file" });
   } finally {
-    server.close();
-    await rm(testDir, { recursive: true, force: true });
-  }
-});
-
-test("/api/peek expands ~ to home directory", async () => {
-  // Create a file in home dir
-  const ts = Date.now();
-  const testFile = join(homedir(), `.manta-test-peek-home-${ts}.txt`);
-  await writeFile(testFile, "home file content");
-  const relativePath = `~/.manta-test-peek-home-${ts}.txt`;
-
-  const { server, port } = await startPeekServer();
-  try {
-    const res = await httpGet(`http://127.0.0.1:${port}/api/peek?path=${encodeURIComponent(relativePath)}`);
-    assert.equal(res.status, 200);
-    assert.equal(res.body.toString(), "home file content");
-  } finally {
-    server.close();
-    await rm(testFile, { force: true });
-  }
-});
-
-test("/api/peek serves JSON with correct content-type", async () => {
-  const testDir = join(homedir(), ".manta-test-peek-json-" + Date.now());
-  await mkdir(testDir, { recursive: true });
-  const testFile = join(testDir, "data.json");
-  await writeFile(testFile, '{"key":"value"}');
-
-  try {
-    const { server, port } = await startPeekServer(testDir);
-    try {
-      const res = await httpGet(`http://127.0.0.1:${port}/api/peek?path=${encodeURIComponent(testFile)}`);
-      assert.equal(res.status, 200);
-      assert.equal(res.headers["content-type"], "application/json; charset=utf-8");
-      assert.equal(res.body.toString(), '{"key":"value"}');
-    } finally {
-      server.close();
-    }
-  } finally {
-    await rm(testDir, { recursive: true, force: true });
-  }
-});
-
-test("/api/peek HEAD reports content-length without a body", async () => {
-  const testDir = join(homedir(), ".manta-test-peek-head-" + Date.now());
-  await mkdir(testDir, { recursive: true });
-  const testFile = join(testDir, "test.txt");
-  const content = "hello world";
-  await writeFile(testFile, content);
-
-  try {
-    const { server, port } = await startPeekServer(testDir);
-    try {
-      const res = await httpHead(`http://127.0.0.1:${port}/api/peek?path=${encodeURIComponent(testFile)}`);
-      assert.equal(res.status, 200, `Response body: ${res.body.toString()}`);
-      assert.equal(res.headers["content-type"], "text/plain; charset=utf-8");
-      assert.equal(res.headers["content-length"], String(Buffer.byteLength(content)));
-      assert.equal(res.body.length, 0, "HEAD must not stream a body");
-    } finally {
-      server.close();
-    }
-  } finally {
-    await rm(testDir, { recursive: true, force: true });
-  }
-});
-
-test("/api/peek HEAD rejects path traversal with 403", async () => {
-  const { server, port } = await startPeekServer();
-  try {
-    // Node suppresses the body on HEAD responses; the status must match GET's 403.
-    const res = await httpHead(`http://127.0.0.1:${port}/api/peek?path=/etc/passwd`);
-    assert.equal(res.status, 403);
-    assert.equal(res.body.length, 0);
-  } finally {
-    server.close();
-  }
-});
-
-test("/api/peek HEAD returns 404 for non-existent file", async () => {
-  const nonExistent = join(homedir(), "nonexistent-file-12345.txt");
-  const { server, port } = await startPeekServer();
-  try {
-    // Node suppresses the body on HEAD responses; the status must match GET's 404.
-    const res = await httpHead(`http://127.0.0.1:${port}/api/peek?path=${encodeURIComponent(nonExistent)}`);
-    assert.equal(res.status, 404);
-    assert.equal(res.body.length, 0);
-  } finally {
-    server.close();
+    await rm(root, { recursive: true, force: true });
   }
 });
