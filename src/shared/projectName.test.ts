@@ -57,6 +57,18 @@ describe("slugifyProjectName", () => {
     // trailing "-", which must be stripped.
     expect(slugifyProjectName("a".repeat(31) + "-b")).toBe("a".repeat(31));
   });
+
+  it("transliterates Latin diacritics via Unicode NFKD decomposition", () => {
+    expect(slugifyProjectName("Café Résumé")).toBe("cafe-resume");
+    expect(slugifyProjectName("Ångström IDE")).toBe("angstrom-ide");
+    expect(slugifyProjectName("naïve—dash")).toBe("naive-dash"); // em-dash U+2014
+  });
+
+  it("returns '' for a script with no ASCII decomposition", () => {
+    // A CJK name has no ASCII decomposition, so it yields no slug; callers
+    // already handle '' as "no usable name".
+    expect(slugifyProjectName("日本語")).toBe("");
+  });
 });
 
 describe("projectDirFor", () => {

@@ -1,39 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
-  slugify,
   deriveWorktree,
   isWorktreeDirtyError,
 } from "./worktree.mjs";
-
-describe("slugify", () => {
-  it("lowercases, collapses spaces and strips symbols", () => {
-    expect(slugify("Hello World")).toBe("hello-world");
-  });
-
-  it("collapses runs of non-alphanumeric chars into a single '-'", () => {
-    expect(slugify("foo!!  bar??baz")).toBe("foo-bar-baz");
-  });
-
-  it("trims leading and trailing '-'", () => {
-    expect(slugify("  --hello--  ")).toBe("hello");
-  });
-
-  it("returns 'session' for an all-symbol / empty name", () => {
-    expect(slugify("")).toBe("session");
-    expect(slugify("___")).toBe("session");
-    expect(slugify("   ")).toBe("session");
-    expect(slugify("!!!")).toBe("session");
-  });
-
-  it("strips unicode to a '-', then collapses/trims to 'session'", () => {
-    expect(slugify("café — résumé")).toBe("caf-r-sum");
-  });
-
-  it("treats null/undefined as empty → 'session'", () => {
-    expect(slugify(null as unknown as string)).toBe("session");
-    expect(slugify(undefined as unknown as string)).toBe("session");
-  });
-});
 
 describe("deriveWorktree", () => {
   const REPO = "/home/me/projects/myapp";
@@ -60,6 +29,19 @@ describe("deriveWorktree", () => {
       branchExists: noBranch,
     });
     expect(r).toEqual({ path: `${PARENT}/${BASE}-session`, branch: "session" });
+  });
+
+  it("caps a long name to a 32-character branch", () => {
+    // The 32-char cap now applies to worktree branches too (BET-1115).
+    const name = "x".repeat(40);
+    const r = deriveWorktree({
+      repoRoot: REPO,
+      name,
+      dirExists: noDir,
+      branchExists: noBranch,
+    });
+    expect(r.branch).toHaveLength(32);
+    expect(r.branch).toBe("x".repeat(32));
   });
 
   it("appends -2, -3, … when the directory collides", () => {

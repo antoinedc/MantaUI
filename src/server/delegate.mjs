@@ -33,7 +33,7 @@ import {
   clearProgress as defaultClearProgress,
 } from "./progress.mjs";
 import { startPoller } from "./startPoller.mjs";
-import { slugify } from "../shared/worktree.mjs";
+import { slugifyProjectName } from "../shared/projectName.mjs";
 import {
   parseGitStatus,
   summarizeTranscript,
@@ -169,7 +169,7 @@ export function buildCompletionText(job) {
 // prompt, slugified. Pure.
 export function deriveName(prompt) {
   const words = String(prompt ?? "").trim().split(/\s+/).slice(0, 4).join(" ");
-  return slugify(words || "background");
+  return slugifyProjectName(words) || "background";
 }
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,3 @@
-export function slugify(name: string | null | undefined): string;
-
 export function deriveWorktree(input: {
   repoRoot: string;
   name: string;
