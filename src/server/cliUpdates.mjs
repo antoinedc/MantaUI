@@ -15,7 +15,11 @@ import { join } from "node:path";
 import { constants } from "node:fs";
 import { access as fsAccess } from "node:fs/promises";
 import { spawn as nodeSpawn } from "node:child_process";
-import { CLI_CATALOG, resolveUpgradeCommand } from "../shared/cliCatalog.mjs";
+import {
+  CLI_CATALOG,
+  HOME_CLI_INSTALL_DIRS,
+  resolveUpgradeCommand,
+} from "../shared/cliCatalog.mjs";
 import { isUpdateAvailable } from "../shared/versionCompare.mjs";
 import { createJsonFetcher } from "./conditionalFetch.mjs";
 
@@ -68,10 +72,13 @@ function defaultFetchJsonFor(entryId) {
  */
 export async function resolveBinary(bin, { access, env }) {
   const home = env?.HOME ?? "";
+  // The home CLI install dirs come from the single shared source
+  // (HOME_CLI_INSTALL_DIRS in src/shared/cliCatalog.mjs) — the same list
+  // scripts/self-update.sh prepends to PATH for its by-name upgrade commands
+  // (BET-1163). /opt/homebrew/bin and /usr/local/bin are system-level dirs
+  // (not home-relative) and are pinned additionally.
   const pinned = [
-    join(home, ".local", "bin"),
-    join(home, ".opencode", "bin"),
-    join(home, ".bun", "bin"),
+    ...HOME_CLI_INSTALL_DIRS.map((rel) => join(home, rel)),
     "/opt/homebrew/bin",
     "/usr/local/bin",
   ];

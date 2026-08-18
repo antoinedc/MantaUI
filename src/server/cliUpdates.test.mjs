@@ -18,6 +18,7 @@ import {
   detectClis,
   createCliDetector,
 } from "./cliUpdates.mjs";
+import { HOME_CLI_INSTALL_DIRS } from "../shared/cliCatalog.mjs";
 
 // ---------------------------------------------------------------------------
 // resolveBinary — THE PATH TRAP regression
@@ -56,6 +57,25 @@ test("resolveBinary: falls back to a PATH-visible binary not in a pinned dir", a
   const env = { HOME: "/home/user", PATH: "/usr/bin:/home/user/.opencode/bin" };
   const access = makeAccess(["/home/user/.opencode/bin/opencode"]);
   assert.equal(await resolveBinary("opencode", { access, env }), "/home/user/.opencode/bin/opencode");
+});
+
+test("resolveBinary: searches EVERY home CLI install dir from the single shared source (BET-1163)", async () => {
+  // The home CLI dirs are no longer hardcoded here — they come from
+  // HOME_CLI_INSTALL_DIRS (src/shared/cliCatalog.mjs), the SAME constant
+  // scripts/self-update.sh consumes (via scripts/list-cli-bin-dirs.mjs). This
+  // pins that the detector really consumes the whole shared list: a binary
+  // placed ONLY in each listed home dir must be found. If someone adds a dir
+  // to the shared source, this test forces resolveBinary to search it too —
+  // the drift-trap is structural, not remembered.
+  const home = "/home/user";
+  const env = { HOME: home, PATH: "/usr/bin:/bin" };
+  assert.ok(Array.isArray(HOME_CLI_INSTALL_DIRS) && HOME_CLI_INSTALL_DIRS.length > 0);
+  for (const rel of HOME_CLI_INSTALL_DIRS) {
+    const abs = `${home}/${rel}/somecli`;
+    const access = makeAccess([abs]);
+    const found = await resolveBinary("somecli", { access, env });
+    assert.equal(found, abs, `must search home CLI dir ${home}/${rel}`);
+  }
 });
 
 // ---------------------------------------------------------------------------
