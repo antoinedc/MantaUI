@@ -312,6 +312,13 @@ export function buildHandlers({
   cliDetector = null,
   // Hard bound on the CLI probe, injectable for tests (defaults to 15s).
   cliProbeTimeoutMs = CLI_PROBE_TIMEOUT_MS,
+  // Single-CLI upgrade (BET-1162): upgrades exactly ONE installed CLI by catalog
+  // id, reusing the shared cliDetector + runUpgrade spawn. Injected via
+  // buildHandlers deps (like runServerSelfUpdate / cliDetector) so the routing
+  // test can stub it; production wiring passes src/server/cliUpdates.mjs's
+  // upgradeCli. Null when not wired → the channel answers `{ok:false,
+  // error:"no upgrade path"}` rather than throwing.
+  upgradeCli = null,
   delegate,
   progress,
   voiceNotes,
@@ -873,6 +880,22 @@ export function buildHandlers({
         }
       }
       return result;
+    },
+
+    // single-CLI update (BET-1162, server half): upgrades exactly ONE installed
+    // box CLI by catalog id, reusing the cached cliDetector + shared runUpgrade
+    // spawn — this is the per-row action behind the renderer's per-row split
+    // (BET-1159). Delegate to the injected `upgradeCli` (src/server/cliUpdates.mjs
+    // in production; stubbed in rpc.test.mjs). Unknown/blank cliId (or an
+    // unwired dep) resolves `{ok:false, error:"no upgrade path"}` rather than
+    // ever throwing — the renderer's per-row save button expects a clean
+    // result, not a rejection.
+    "server:cli-update": (ctx) => {
+      const cliId = ctx?.cliId;
+      if (!upgradeCli || typeof cliId !== "string" || !cliId) {
+        return Promise.resolve({ ok: false, error: "no upgrade path" });
+      }
+      return upgradeCli(cliId);
     },
 
     // preload: ipcRenderer.invoke(IPC.opencodeDefaultModel)  → no args

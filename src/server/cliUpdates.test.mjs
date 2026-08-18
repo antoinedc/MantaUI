@@ -17,6 +17,8 @@ import {
   fetchLatest,
   detectClis,
   createCliDetector,
+  runUpgrade,
+  upgradeCli,
 } from "./cliUpdates.mjs";
 import { HOME_CLI_INSTALL_DIRS } from "../shared/cliCatalog.mjs";
 
@@ -335,4 +337,160 @@ test("detectClis: uses a real default fetchJson when none is injected (regressio
   } finally {
     globalThis.fetch = origFetch;
   }
+});
+
+// ---------------------------------------------------------------------------
+// runUpgrade — the single shared upgrade-spawn (BET-1162)
+// ---------------------------------------------------------------------------
+
+// A stub spawn that produces a child emitting either `error` or `close`.
+function upgradeSpawnResult({ code = 0, error = false, never = false } = {}) {
+  const calls = [];
+  const stub = (cmd, args, opts) => {
+    calls.push({ cmd, args, opts });
+    const child = new EventEmitter();
+    child.kill = () => {};
+    if (never) return child; // never emits — deadline enforced by spawn's timeout, not here
+    process.nextTick(() => {
+      if (error) child.emit("error", new Error("ENOENT"));
+      else child.emit("close", code);
+    });
+    return child;
+  };
+  return { stub, calls };
+}
+
+test("runUpgrade: resolves on exit 0 with stdio inherit and the default timeout", async () => {
+  const { stub, calls } = upgradeSpawnResult({ code: 0 });
+  await runUpgrade(["claude", "update"], { spawn: stub });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].cmd, "claude");
+  assert.deepEqual(calls[0].args, ["update"]);
+  assert.equal(calls[0].opts.stdio, "inherit", "streams child stdout/stderr through");
+  assert.equal(calls[0].opts.timeout, 10 * 60 * 1000, "10-minute per-CLI timeout");
+});
+
+test("runUpgrade: rejects on a non-zero exit", async () => {
+  const { stub } = upgradeSpawnResult({ code: 1 });
+  await assert.rejects(runUpgrade(["claude", "update"], { spawn: stub }), /claude exited with code 1/);
+});
+
+test("runUpgrade: rejects on a spawn error (ENOENT)", async () => {
+  const { stub } = upgradeSpawnResult({ error: true });
+  await assert.rejects(runUpgrade(["nothing", "here"], { spawn: stub }), /ENOENT/);
+});
+
+test("runUpgrade: enforces the injected timeout and honours an injected timeoutMs", async () => {
+  const { stub, calls } = upgradeSpawnResult({ code: 0 });
+  await runUpgrade(["npm", "install", "-g", "x"], { spawn: stub, timeoutMs: 1234 });
+  assert.equal(calls[0].opts.timeout, 1234);
+});
+
+test("runUpgrade: propagates an injected env to the child", async () => {
+  const { stub, calls } = upgradeSpawnResult({ code: 0 });
+  const env = { PATH: "/home/user/.local/bin:/usr/bin" };
+  await runUpgrade(["claude", "update"], { spawn: stub, env });
+  assert.equal(calls[0].opts.env, env);
+});
+
+// ---------------------------------------------------------------------------
+// upgradeCli — per-row single-CLI upgrade (BET-1162)
+// ---------------------------------------------------------------------------
+
+// Build injected deps for upgradeCli. `spawn` is what readBinaryVersion uses to
+// re-read the version after the run; `runCalls` records the upgrade spawn.
+function upgradeDeps({ results, access, spawn, run, env }) {
+  const runCalls = [];
+  return {
+    deps: {
+      detect: async () => results,
+      access: access ?? makeAccess([]),
+      spawn: spawn ?? fakeSpawnResult({ stdout: null }), // after-version read
+      env: env ?? { HOME: "/home/user", PATH: "/usr/bin:/bin" },
+      run:
+        run ??
+        (async (argv, opts) => {
+          runCalls.push({ argv, opts });
+        }),
+    },
+    runCalls,
+  };
+}
+
+test("upgradeCli: unknown id → { ok:false, error:'no upgrade path' }, run NOT called", async () => {
+  const { deps, runCalls } = upgradeDeps({
+    results: [{ id: "claude", upgrade: ["claude", "update"], current: "1.0.0" }],
+  });
+  const res = await upgradeCli("unknown", deps);
+  assert.deepEqual(res, { ok: false, error: "no upgrade path" });
+  assert.equal(runCalls.length, 0, "run must not be called for an unknown id");
+});
+
+test("upgradeCli: target with no upgrade command → { ok:false, error:'no upgrade path' }, run NOT called", async () => {
+  // A `manual` CLI (e.g. Homebrew-managed) has `upgrade:null` — nothing to run.
+  const { deps, runCalls } = upgradeDeps({
+    results: [{ id: "claude", upgrade: null, current: "1.0.0" }],
+  });
+  const res = await upgradeCli("claude", deps);
+  assert.deepEqual(res, { ok: false, error: "no upgrade path" });
+  assert.equal(runCalls.length, 0);
+});
+
+test("upgradeCli: successful run with a version bump → { ok:true, before, after, changed:true }", async () => {
+  const bin = "/home/user/.local/bin/claude";
+  const { deps, runCalls } = upgradeDeps({
+    results: [{ id: "claude", upgrade: ["claude", "update"], current: "1.0.0" }],
+    access: makeAccess([bin]), // granted X_OK so resolveBinary finds the binary
+    spawn: fakeSpawnResult({ stdout: "2.0.0" }), // after-version read → 2.0.0
+  });
+  const res = await upgradeCli("claude", deps);
+  assert.equal(res.ok, true);
+  assert.equal(res.before, "1.0.0");
+  assert.equal(res.after, "2.0.0");
+  assert.equal(res.changed, true);
+  // The upgrade command array is handed to run exactly.
+  assert.deepEqual(runCalls[0].argv, ["claude", "update"]);
+});
+
+test("upgradeCli: pins PATH with the CLI bin dirs so bare-name upgrades resolve", async () => {
+  const bin = "/home/user/.local/bin/claude";
+  const { deps, runCalls } = upgradeDeps({
+    results: [{ id: "claude", upgrade: ["claude", "update"], current: "1.0.0" }],
+    access: makeAccess([bin]),
+    spawn: fakeSpawnResult({ stdout: "2.0.0" }),
+    env: { HOME: "/home/user", PATH: "/usr/bin:/bin" },
+  });
+  await upgradeCli("claude", deps);
+  const upgradeEnv = runCalls[0].opts.env;
+  assert.ok(
+    upgradeEnv.PATH.startsWith("/home/user/.local/bin:/home/user/.opencode/bin:/home/user/.bun/bin:/opt/homebrew/bin:/usr/local/bin:"),
+    "PATH must be pinned with the CLI bin dirs BEFORE the inherited PATH",
+  );
+  assert.ok(upgradeEnv.PATH.endsWith("/usr/bin:/bin"), "inherited PATH preserved at the tail");
+});
+
+test("upgradeCli: successful run returning the SAME version → changed:false", async () => {
+  const bin = "/home/user/.local/bin/claude";
+  const { deps } = upgradeDeps({
+    results: [{ id: "claude", upgrade: ["claude", "update"], current: "2.0.0" }],
+    access: makeAccess([bin]),
+    spawn: fakeSpawnResult({ stdout: "2.0.0" }), // still 2.0.0 → no change
+  });
+  const res = await upgradeCli("claude", deps);
+  assert.equal(res.ok, true);
+  assert.equal(res.before, "2.0.0");
+  assert.equal(res.after, "2.0.0");
+  assert.equal(res.changed, false);
+});
+
+test("upgradeCli: a throwing run → { ok:false, error }, never rejects", async () => {
+  const { deps } = upgradeDeps({
+    results: [{ id: "claude", upgrade: ["claude", "update"], current: "1.0.0" }],
+    run: async () => {
+      throw new Error("vendor 500s");
+    },
+  });
+  const res = await upgradeCli("claude", deps);
+  assert.equal(res.ok, false);
+  assert.equal(res.error, "Error: vendor 500s");
 });

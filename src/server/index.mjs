@@ -53,7 +53,7 @@ import {
   startVoiceSweep,
 } from "./voiceNotes.mjs";
 import { startServerUpdatePoller, createOpencodeUpdateForwarder } from "./serverUpdate.mjs";
-import { createCliDetector } from "./cliUpdates.mjs";
+import { createCliDetector, upgradeCli } from "./cliUpdates.mjs";
 import { runServerSelfUpdate } from "./opencodeAdmin.mjs";
 import { startSchedulePoller, createJob, listJobs, deleteJob } from "./schedule.mjs";
 import { startUsagePoller, recheckAdapterAtLimit, providerIDForAdapter, listSnapshots } from "./usage.mjs";
@@ -831,6 +831,11 @@ rpcHandlers = buildHandlers({
   // box-update check). 5-minute cached, in-flight-joining probe; no second
   // poller, no new channel, no second bus event kind.
   cliDetector: createCliDetector(),
+  // BET-1162: per-row single-CLI upgrade (the `server:cli-update` channel).
+  // Shares the SAME cached detector instance above (wired to the
+  // `server:update-check` probe) so a manual per-row upgrade reuses the fresh
+  // probe rather than spawning a second detector.
+  upgradeCli,
   // BET-834: voice-note metadata over /rpc (audio goes over REST). Oldest
   // first, filtered by session, no audio bytes.
   voiceNotes: {
