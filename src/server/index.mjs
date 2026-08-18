@@ -86,10 +86,13 @@ import {
 } from "./servePage.mjs";
 import { publishPlanBundle } from "./planRender.mjs";
 import { listPeers, inspectPeer, sendPeerMessage, resolveWorkspace } from "./peers.mjs";
-import { upsertStopped, markStoppedRan, bumpStoppedAttempts } from "./stoppedStore.mjs";
+import { upsertStopped, markStoppedRan, bumpStoppedAttempts, listStopped } from "./stoppedStore.mjs";
 import { createUsageStopEngine } from "./usageStopEnroll.mjs";
 import { createUsageResumeEngine } from "./usageResume.mjs";
 import * as appControl from "./appControl.mjs";
+import * as cto from "./cto.mjs";
+import { queryMultica } from "./multica.mjs";
+import { searchMessages } from "./messageSearch.mjs";
 import {
   dispatch as mediaDispatch,
   createPendingMediaStore,
@@ -97,7 +100,7 @@ import {
 } from "./media.mjs";
 import { setSecret, deleteSecret, listSecrets, provideSecret } from "./secrets.mjs";
 import { createPromptDelivery } from "./promptDelivery.mjs";
-import { ensureMantaPlanAgent } from "./providers.mjs";
+import { ensureMantaPlanAgent, ensureCtoAgent } from "./providers.mjs";
 import {
   createWebhookEngine,
   createHook,
@@ -886,6 +889,57 @@ const { stop: stopServePageCleanup } = startCleanupPoller();
 // restarts opencode only when the config changed. Idempotent + fire-and-forget
 // so a failure here never blocks or fails server startup.
 void ensureMantaPlanAgent().catch((e) => console.error("[manta-plan] ensure failed:", e));
+
+// On-call CTO (BET-1164): build the engine lazily once, wired to the box's
+// real engines (all read-only). The engine's `dispatch` seam is what the
+// `/api/cto` route (and, later, issues 2/3) consume. Building lazily keeps it
+// off the hot startup path and lets every dep resolve after module init.
+let ctoEngine = null;
+function getCtoEngine() {
+  if (!ctoEngine) {
+    ctoEngine = cto.createCtoEngine({
+      listProjects: () => tmux.listProjects(),
+      listSessions: (dir) => oc.listSessions(dir),
+      listMessages: (sid, opts) => oc.listMessages(sid, opts),
+      listModels: () => oc.listModels(),
+      getSessionAgent: (sid) => oc.getSessionAgent(sid),
+      listSnapshots,
+      listStopped,
+      searchMessages,
+      configGet: () => local.configGet(),
+      gitStatus: (cwd) => tmux.run("git", ["-C", cwd, "status", "--porcelain"]).then((r) => r?.stdout ?? ""),
+      gitBranch: (cwd) =>
+        tmux.run("git", ["-C", cwd, "branch", "--show-current"]).then((r) => (r?.stdout ?? "").trim() || null),
+      gitLog: (cwd, { n }) =>
+        tmux.run("git", ["-C", cwd, "log", `--max-count=${n}`, "--oneline"]).then((r) => r?.stdout ?? ""),
+      queryMultica,
+    });
+  }
+  return ctoEngine;
+}
+
+// Best-effort install of the `cto` primary agent (BET-1164) — ONLY when the
+// feature is enabled (default off until shipped). Reads/writes opencode.jsonc
+// via the existing writer, restarts opencode only when the block changed.
+async function maybeEnsureCtoAgent() {
+  try {
+    let cfg;
+    try {
+      cfg = await local.configGet();
+    } catch {
+      cfg = {};
+    }
+    if (!cfg?.cto?.enabled) return;
+    const model =
+      cfg?.defaultModel?.providerID && cfg?.defaultModel?.modelID
+        ? `${cfg.defaultModel.providerID}/${cfg.defaultModel.modelID}`
+        : undefined;
+    await ensureCtoAgent({ model });
+  } catch (e) {
+    console.error("[cto] ensure failed:", e);
+  }
+}
+void maybeEnsureCtoAgent();
 
 // Sweep expired artifact-mailbox files (TTL past) every 5 min — non-destructive
 // otherwise: downloads do not delete, the sweep is what reclaims disk.
@@ -2547,6 +2601,32 @@ const handleRequest = async (req, res) => {
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
       // Errors return a message the model can act on, never a bare 500.
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // ---------- On-call CTO (BET-1164) ----------
+  // POST /api/cto  body {tool, args, sessionID, directory}
+  //   → 200 {ok:true, data} or 400 {ok:false, error}.
+  // The deterministic read-only tool belt. Called by the remote AI's global
+  // `cto` opencode tool (docs/opencode-tools/cto.ts) and consumed by the
+  // on-call CTO agent. dispatch wraps every tool so a quiet box / bad engine
+  // returns a structured error, never a throw. `ctx.onNarrate` is a server-side
+  // seam (wired by issue 3's voice window), never read off the HTTP body.
+  if (path === "/api/cto") {
+    try {
+      if (req.method === "POST") {
+        const body = await readJsonBody(req);
+        const result = await getCtoEngine().dispatch(body?.tool, body?.args ?? {}, {
+          sessionID: body?.sessionID,
+          cwd: body?.directory,
+        });
+        respondJson(res, result.ok ? 200 : 400, result);
+        return;
+      }
+      respondJson(res, 405, { error: "method not allowed" });
+    } catch (e) {
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;

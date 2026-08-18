@@ -648,3 +648,93 @@ export async function ensureMantaPlanAgent(deps = {}) {
     return { ok: false, changed: false, error: e instanceof Error ? e.message : String(e) };
   }
 }
+
+// ---------------------------------------------------------------------------
+// On-call CTO agent (BET-1164, issue 1/3)
+// ---------------------------------------------------------------------------
+// A `cto` primary agent carrying the deterministic read tool belt (exposed to
+// opencode as the global `cto` custom tool — see docs/opencode-tools/cto.ts);
+// this block just gives the agent a prompt + makes it selectable as a normal
+// chat session. Mirrors the manta-plan block/ensurer below.
+export const CTO_AGENT_NAME = "cto";
+
+// Committed under docs/ so it exists at the same relative location in a dev
+// checkout and a release tarball (both re-materialize the full source tree).
+const CTO_PROMPT_REL = "../../docs/opencode/skills/cto/prompt.md";
+
+export function ctoPromptPath(fromMetaUrl = import.meta.url) {
+  return fileURLToPath(new URL(CTO_PROMPT_REL, fromMetaUrl));
+}
+
+export function ctoAgentBlock(promptPath, model) {
+  const block = {
+    name: CTO_AGENT_NAME,
+    // mode primary (NOT subagent) — the cto agent is selectable as a normal
+    // chat session ("ask the on-call CTO what's running"), and modify access
+    // is bounded below to the read-only `cto` tool.
+    mode: "primary",
+    description:
+      "On-call CTO: answer what's running, git state, usage/stopped conversations, " +
+      "plan mode, context state and the Multica board via deterministic read-only tools.",
+    permission: { cto: "allow" },
+    prompt: `{file:${promptPath}}`,
+  };
+  if (typeof model === "string" && model) block.model = model;
+  return block;
+}
+
+/**
+ * Best-effort installer/ensurer for the box-side `cto` primary agent block in
+ * opencode.jsonc. Idempotent (a no-op diff when the block already exists) and
+ * never throws — I/O/restart failures log and return `{ ok:false }` so the
+ * startup wire-in can fire-and-forget. Injected deps default to the real box
+ * (readRemoteConfig / setSubagents / restartOpencode) exactly like
+ * ensureMantaPlanAgent.
+ *
+ * Gated by `cto.enabled`: with the feature off (the default until shipped)
+ * the caller simply does not invoke this.
+ *
+ * @param {object} [deps]
+ * @param {() => Promise<object>} [deps.readConfig]
+ * @param {(ops) => Promise<{ok: boolean, error?: string}>} [deps.applySubagents]
+ * @param {() => Promise<{ok: boolean, error?: string}>} [deps.restart]
+ * @param {string} [deps.promptPath]
+ * @param {string} [deps.model]
+ * @param {{warn?: Function, error?: Function}} [deps.log]
+ * @returns {Promise<{ok: boolean, changed: boolean, reason?: string, error?: string}>}
+ */
+export async function ensureCtoAgent(deps = {}) {
+  const {
+    readConfig = readRemoteConfig,
+    applySubagents = setSubagents,
+    restart = restartOpencode,
+    promptPath = ctoPromptPath(),
+    model,
+    log = console,
+  } = deps;
+  try {
+    let cfg;
+    try {
+      cfg = await readConfig();
+    } catch (e) {
+      log.warn?.("[providers] cto: config unreadable, skipping install:", e);
+      return { ok: false, changed: false, reason: "unreadable" };
+    }
+    if (cfg?.agent?.[CTO_AGENT_NAME]) {
+      return { ok: true, changed: false };
+    }
+    const result = await applySubagents({ upsert: [ctoAgentBlock(promptPath, model)] });
+    if (!result.ok) {
+      log.warn?.("[providers] cto: write failed:", result.error);
+      return { ok: false, changed: false, error: result.error };
+    }
+    const restartResult = await restart();
+    if (!restartResult.ok) {
+      log.warn?.("[providers] cto: restart after install failed:", restartResult.error);
+    }
+    return { ok: true, changed: true };
+  } catch (e) {
+    log.error?.("[providers] ensureCtoAgent failed:", e);
+    return { ok: false, changed: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
