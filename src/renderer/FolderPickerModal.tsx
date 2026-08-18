@@ -15,7 +15,7 @@
 // Pure helpers (breadcrumbs / parentPath / gitStateLabel /
 // hasWorktreeFanOut) live in folderPicker.ts and are unit-tested there.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronRight,
   X,
@@ -72,93 +72,85 @@ type FanOut =
   | null
   | { worktrees: WorktreeInfo[]; cwd: string };
 
+// How long the path field settles before the box is asked to list it. One
+// debounce for the whole picker — the ghost-text completion is derived
+// from the SAME listing, so a keystroke costs at most one round trip.
+export const LIST_DEBOUNCE_MS = 120;
+
 export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, fanOutBusy, onCancel }: Props) {
   const [path, setPath] = useState(initialPath);
-  const [suggestion, setSuggestion] = useState<string | null>(null);
-  const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // The picker stays MOUNTED (so Modal can play its exit); reset both the
-  // browse location and the hidden-folder toggle each time it re-opens,
-  // preserving the old per-open fresh-start. Hidden folders are OFF by
-  // default, every time — the toggle is component-local and never persisted.
-  useEffect(() => {
-    if (open) {
-      setPath(initialPath);
-      setShowHidden(false);
-    }
-  }, [open, initialPath]);
   const [rows, setRows] = useState<Row[]>([]);
   const [showHidden, setShowHidden] = useState(false);
   const [fanOut, setFanOut] = useState<FanOut>(null);
   const [gitState, setGitState] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const listSeq = useRef(0);
 
-  useEffect(() => {
-    return () => {
-      if (debounce.current) clearTimeout(debounce.current);
-    };
-  }, []);
+  // The ghost-text completion is DERIVED from the listing that is already on
+  // screen — no second fetch, no second debounce. `suppressSuggestion` is the
+  // one thing the user can do to it: Escape hides it until they type again.
+  const [suppressSuggestion, setSuppressSuggestion] = useState(true);
 
-  // ---- path completion (moved verbatim from Sidebar.tsx) ----
-  const refreshSuggestion = (value: string) => {
-    if (debounce.current) clearTimeout(debounce.current);
-    if (!value) {
-      setSuggestion(null);
-      return;
-    }
-    debounce.current = setTimeout(async () => {
-      try {
-        const dir = value.endsWith("/") ? value : parentPath(value);
-        const prefix = value.endsWith("/") ? "" : (value.split("/").pop() ?? "");
-        const res = await window.api.fsListDirs(dir);
-        const matches = res.entries
-          .filter((e) => (showHidden || !e.hidden) && e.name.startsWith(prefix))
-          .map((e) => e.path);
-        if (matches.length === 0) {
-          setSuggestion(null);
-          return;
-        }
-        if (matches.length === 1) {
-          setSuggestion(matches[0] + "/");
-          return;
-        }
-        const lcp = matches.reduce((acc, m) => {
-          let i = 0;
-          while (i < acc.length && i < m.length && acc[i] === m[i]) i++;
-          return acc.slice(0, i);
-        });
-        setSuggestion(lcp.length > value.length ? lcp : null);
-      } catch {
-        setSuggestion(null);
-      }
-    }, 80);
+  const suggestion = useMemo(() => {
+    if (suppressSuggestion || !path) return null;
+    const prefix = path.endsWith("/") ? "" : (path.split("/").pop() ?? "");
+    const matches = rows
+      .filter((r) => (showHidden || !r.hidden) && r.name.startsWith(prefix))
+      .map((r) => r.full);
+    if (matches.length === 0) return null;
+    if (matches.length === 1) return matches[0] + "/";
+    const lcp = matches.reduce((acc, m) => {
+      let i = 0;
+      while (i < acc.length && i < m.length && acc[i] === m[i]) i++;
+      return acc.slice(0, i);
+    });
+    return lcp.length > path.length ? lcp : null;
+  }, [suppressSuggestion, path, rows, showHidden]);
+
+  // Every path change that is NOT the user typing hides the ghost text, the
+  // way the old explicit setSuggestion(null) calls did.
+  const setPathQuiet = (next: string) => {
+    setPath(next);
+    setSuppressSuggestion(true);
   };
+
+  // The picker stays MOUNTED (so Modal can play its exit); reset both the
+  // browse location and the hidden-folder toggle each time it re-opens,
+  // preserving the old per-open fresh-start. Hidden folders are OFF by
+  // default, every time — the toggle is component-local and never persisted.
+  useEffect(() => {
+    if (open) {
+      setPathQuiet(initialPath);
+      setShowHidden(false);
+    }
+  }, [open, initialPath]);
 
   const onPathChange = (value: string) => {
     setPath(value);
-    refreshSuggestion(value);
+    setSuppressSuggestion(false);
   };
 
   const acceptSuggestion = (): boolean => {
     if (!suggestion || !suggestion.startsWith(path)) return false;
     if (suggestion === path) return false;
     setPath(suggestion);
-    setSuggestion(null);
-    refreshSuggestion(suggestion);
     return true;
   };
 
   // ---- listing ----
   const listDir = async (dir: string) => {
+    const seq = ++listSeq.current;
     setLoading(true);
     setError(null);
     try {
       const res = await window.api.fsListDirs(dir);
-      // Normalize the path field: if the server resolved a different directory
-      // than the one we listed (e.g. a typed `~` expanded to an absolute path),
-      // set it once so no tilde survives anywhere in the UI.
-      if (res.dir.replace(/\/$/, "") !== dir.replace(/\/$/, "")) {
-        setPath(res.dir + "/");
+      if (seq !== listSeq.current) return;
+      // Only an empty field or a tilde path needs the box to resolve it. Writing
+      // the field back on any other mismatch is what made clearing it snap to the
+      // home directory while the user was still typing.
+      if (dir === "" || dir.startsWith("~")) {
+        setPathQuiet(res.dir + "/");
       }
       // Store the FULL (unfiltered) listing; hidden folders are filtered at
       // render time so the toggle never re-fetches.
@@ -174,36 +166,40 @@ export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, fanOu
       // itself at commit time (BET-1074).
       try {
         const wts = await window.api.gitListWorktrees(dir);
+        if (seq !== listSeq.current) return;
         setGitState(gitStateLabel(wts));
       } catch {
+        if (seq !== listSeq.current) return;
         setGitState("");
       }
     } catch (e) {
+      if (seq !== listSeq.current) return;
       setError(e instanceof Error ? e.message : String(e));
       setRows([]);
       setGitState("");
     } finally {
-      setLoading(false);
+      if (seq === listSeq.current) setLoading(false);
     }
   };
 
-  // List whenever the path resolves to a real directory. We list the parent
-  // of the current path so the user sees siblings + can descend. If the path
-  // ends with "/", we list its contents directly.
+  // The directory the list shows: the typed path itself when it ends in "/",
+  // otherwise its parent (so a half-typed segment still lists its siblings).
+  const listDirPath = path.endsWith("/") ? path : parentPath(path);
+
   useEffect(() => {
-    const dir = path.endsWith("/") ? path : parentPath(path);
-    void listDir(dir);
+    const timer = setTimeout(() => { void listDir(listDirPath); }, LIST_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path]);
+  }, [listDirPath]);
 
   const descend = (full: string) => {
     const next = full.endsWith("/") ? full : full + "/";
-    setPath(next);
+    setPathQuiet(next);
   };
 
   const goUp = () => {
     const up = parentPath(path);
-    setPath(up);
+    setPathQuiet(up);
   };
 
   // Resolve "home": ask the server to list the home directory (empty input
@@ -211,11 +207,10 @@ export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, fanOu
   // how the Home button and an empty-field Go work without any tilde in the
   // UI or across the wire.
   const goHome = () => {
-    setSuggestion(null);
     void (async () => {
       try {
         const res = await window.api.fsListDirs("");
-        setPath((res.dir || "") + "/");
+        setPathQuiet((res.dir || "") + "/");
       } catch {
         // home probe failed — leave the field as-is
       }
@@ -232,8 +227,7 @@ export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, fanOu
       return;
     }
     const next = target.endsWith("/") ? target : target + "/";
-    setSuggestion(null);
-    setPath(next);
+    setPathQuiet(next);
   };
 
   const select = async () => {
@@ -358,7 +352,7 @@ export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, fanOu
                       // free Escape bubble up to Modal and close the dialog.
                       if (e.key === "Escape" && suggestion) {
                         e.stopPropagation();
-                        setSuggestion(null);
+                        setSuppressSuggestion(true);
                       }
                       // Hidden-folder toggle — "Ctrl+H" (and "Meta+Shift+." on
                       // macOS), matching every native picker's show-hidden
@@ -405,7 +399,7 @@ export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, fanOu
                       aria-hidden="true"
                     />
                     <button
-                      onClick={() => setPath(c)}
+                      onClick={() => setPathQuiet(c)}
                       className={
                         "px-1 py-px rounded-xs " +
                         (i === crumbs.length - 1
@@ -423,7 +417,7 @@ export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, fanOu
 
             {/* Folder list */}
             <div className="flex-1 overflow-y-auto px-2 py-1">
-              {loading && (
+              {loading && rows.length === 0 && !error && (
                 <div className="px-3 py-4 text-meta text-text-faint">Loading…</div>
               )}
               {error && (
@@ -436,7 +430,7 @@ export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, fanOu
                     : "Only hidden folders here — Ctrl+H to show"}
                 </div>
               )}
-              {!loading && !error && visible.length > 0 && (
+              {!error && visible.length > 0 && (
                 <>
                   {/* `..` row — spec §B3 says ".. first". Goes up one level,
                       same as the breadcrumbs / up-arrow. */}

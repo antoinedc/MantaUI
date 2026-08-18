@@ -15,7 +15,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { act } from "react";
 import { installMockApi, mount, type Harness, type MockApi } from "./testHarness";
-import { FolderPickerModal } from "./FolderPickerModal";
+import { FolderPickerModal, LIST_DEBOUNCE_MS } from "./FolderPickerModal";
 
 // The one harness alive right now; the shared afterEach unmounts it so no test
 // leaks a mounted dialog into the next.
@@ -24,6 +24,15 @@ afterEach(() => {
   mounted?.unmount();
   mounted = null;
 });
+
+// The picker debounces its directory listing; give the timer + the fetch
+// it schedules room to land before asserting on rows or ghost text.
+async function settle(h: Harness) {
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, LIST_DEBOUNCE_MS + 80));
+  });
+  await h.flush();
+}
 
 // Install a mock api, mount the picker at the default path, and flush its
 // effects. `apiOverrides` are spread on top of the shared fetch/stub defaults,
@@ -48,6 +57,7 @@ async function mountPicker(
     />,
   );
   await mounted.flush();
+  await settle(mounted);
   return { h: mounted, api };
 }
 
@@ -97,11 +107,7 @@ describe("FolderPickerModal — Escape (BET-724 review cycle 1 Question)", () =>
     act(() => {
       typeInto(input, "/home/dev/pro");
     });
-    // The suggestion fetch is debounced 80ms; give it (and the state update
-    // it triggers) room to land.
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 150));
-    });
+    await settle(h);
     expect(h.docText()).toContain("jects/"); // the ghost-text tail of "/home/dev/projects/"
 
     // First Escape: dismisses the suggestion, dialog stays open.
@@ -179,5 +185,32 @@ describe("FolderPickerModal — hidden-folder toggle (BET-1074)", () => {
     // Only the footer probe for the current directory runs — never one per
     // row. This is the regression guard for the old per-row git stampede.
     expect(api.calls.gitListWorktrees?.length ?? 0).toBe(1);
+  });
+});
+
+describe("FolderPickerModal — per-keystroke re-list (BET-1117)", () => {
+  it("typing inside one path segment does not re-list the directory", async () => {
+    let listCalls = 0;
+    const { h } = await mountPicker({
+      fsListDirs: (dir: unknown) => {
+        listCalls++;
+        return Promise.resolve({ dir: dir as string, entries: [] });
+      },
+    });
+
+    const baseline = listCalls;
+    const input = h.docQuery("input") as HTMLInputElement;
+    act(() => {
+      typeInto(input, "/home/dev/p");
+    });
+    act(() => {
+      typeInto(input, "/home/dev/pr");
+    });
+    act(() => {
+      typeInto(input, "/home/dev/pro");
+    });
+    await settle(h);
+
+    expect(listCalls).toBeLessThanOrEqual(baseline + 1);
   });
 });
