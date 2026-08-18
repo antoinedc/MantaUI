@@ -169,6 +169,10 @@ struct VoiceRecordingHeldView: View {
 struct VoiceRecordingLockedView: View {
     @ObservedObject var recorder: VoiceRecorder
     let tokens: Tokens
+    /// Optional glass identity shared with the composer's `inputBox` so the two
+    /// morph into each other via `.glassEffectID` (BET-1089) rather than cutting
+    /// — nil keeps the locked bar a standalone glass shape.
+    var glassID: (id: String, namespace: Namespace.ID)? = nil
     var onTake: (VoiceRecorder.Take) -> Void = { _ in }
     var onDiscarded: () -> Void = {}
 
@@ -212,7 +216,7 @@ struct VoiceRecordingLockedView: View {
         // remain separate interactive elements (they carry their own ids).
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("voice-recording-locked")
-        .modifier(BoxChrome(cornerRadius: Metrics.radius.xl, stroke: tokens.borderSubtle, tint: tokens.panel.opacity(0.35)))
+        .modifier(BoxChrome(cornerRadius: Metrics.radius.xl, stroke: tokens.borderSubtle, tint: tokens.panel.opacity(0.35), glassID: glassID))
     }
 
     private var remaining: Int {

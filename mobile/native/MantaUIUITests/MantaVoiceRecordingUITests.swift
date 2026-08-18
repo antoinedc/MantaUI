@@ -54,6 +54,19 @@ final class MantaVoiceRecordingUITests: XCTestCase {
         XCTAssertTrue(app.buttons["voice-discard"].exists, "locked bar missing voice-discard")
         XCTAssertTrue(app.buttons["voice-pause"].exists, "locked bar missing voice-pause")
         XCTAssertTrue(app.buttons["voice-send"].exists, "locked bar missing voice-send")
+
+        // BET-1089 structural-swap guard: while hands-free, the composer's own
+        // controls must NOT be on screen behind / blended into the locked bar.
+        // With the structural if/else (exactly ONE BoxChrome shape mounted) these
+        // genuinely unmount. NOTE this also passes under the old BET-1082 ZStack
+        // build, which merely set `accessibilityHidden` on `inputBox` — so this
+        // assertion guards the SWAP (the composer is not mounted), not the pixels
+        // (the glass-blend overlap itself is a rendering defect the AX tree cannot
+        // see; that is verified on the simulator via bet1051-locked.png).
+        XCTAssertFalse(app.buttons["send-button"].exists, "composer send-button still on screen while locked")
+        XCTAssertFalse(app.buttons["mic-button"].exists, "composer mic-button still on screen while locked")
+        XCTAssertFalse(app.descendants(matching: .any)["usage-dot"].exists, "composer usage-dot still on screen while locked")
+
         snap(app, marker: "REC-LOCKED", png: "bet1051-locked.png")
 
         // Clean up so the simulator isn't left recording.
