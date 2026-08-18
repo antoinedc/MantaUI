@@ -222,11 +222,14 @@ deterministic and reproducible from the block alone, because a canonical
 refetch re-derives them (see `stableScrollID`/`uniqueTranscriptRows`).
 
 This area has been diagnosed and fixed **more than once** and has recurred
-each time. BET-1103, BET-1104 and BET-1105 were rewriting exactly this — the
-`.steps` block identity and the transcript tests. **As of `origin/main` @
-`ea515d14` all three have merged** (PRs #1103/#1104/#1105); check whether they
-are on your base before touching row identity, and treat any new
-`TiledView`/batch-update crash as a likely regression of this family.
+each time. BET-1103, BET-1104 and BET-1105 have been rewriting exactly this:
+BET-1103 (stable identity for the `.steps` transcript block) **has merged**
+into `main`, while BET-1104 (replacing the hand-rolled transcript gestures
+with MessagingUI's own) and BET-1105 are **not merged** as of 2026-08-18.
+**Check which of these are on your base** (and whether they have merged/landed
+since) before touching row identity, row ordering, or the update path, and
+treat any new `TiledView`/batch-update crash as a likely regression of this
+family.
 
 ## 7. Networking and error handling
 
@@ -298,5 +301,5 @@ its iOS sections for the full write-up; the essentials are:
 - **`project.pbxproj` is generated** — edit `project.yml` and re-`xcodegen`,
   never the `.pbxproj` by hand.
 - **The transcript-list crash family** (§6) is the app's live crash surface —
-  treat row-identity/ordering changes as high-risk and check whether
-  BET-1103/1104/1105 are present on your base.
+  treat row-identity/ordering changes as high-risk and check which of
+  BET-1103/1104/1105 (see §6) have landed on your base.
