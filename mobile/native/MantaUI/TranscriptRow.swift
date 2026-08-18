@@ -125,6 +125,7 @@ struct TranscriptBlockCell: TiledCellContent {
     let item: TranscriptRow
     let tokens: Tokens
 
+    @MainActor
     func body(context: CellContext<Void>) -> some View {
         // The reveal offset now comes from MessagingUI's OWN pan recogniser, which
         // is installed on the collection view and declares simultaneous recognition
