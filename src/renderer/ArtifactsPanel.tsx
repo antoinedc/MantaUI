@@ -47,6 +47,7 @@ import { IconButton } from "./IconButton";
 import { ArtifactPreview } from "./ArtifactPreview";
 import { ReviewPane } from "./ReviewPane";
 import { authHeaders, clientToken, serverBase } from "./api/httpApi";
+import { getMantaPreload } from "./preloadAccess";
 import { planPageUrl } from "../shared/planMode.mjs";
 
 // Resolve an artifact's bytes to a Blob. An artifact's `href` is not always a
@@ -90,6 +91,22 @@ async function artifactToBlob(artifact: Artifact): Promise<Blob | null> {
 // download>, the same save pattern httpApi's agentPullFile uses. BET-660's
 // rows reuse this; do not reimplement.
 export async function downloadArtifact(artifact: Artifact): Promise<void> {
+  // BET-1156: on desktop, unify on the ONE laptop-download path — route the
+  // box file through agentPullFile → the preload bridge → main writes a real
+  // file to downloadsDir. data: URLs have no box path, so those keep the blob
+  // path below.
+  if (
+    getMantaPreload()?.downloadFileToDownloads &&
+    artifact.href &&
+    !artifact.href.startsWith("data:")
+  ) {
+    try {
+      await window.api.agentPullFile(artifact.href);
+    } catch {
+      /* download failed on desktop — non-fatal; the source stays on the box */
+    }
+    return;
+  }
   try {
     const blob = await artifactToBlob(artifact);
     if (!blob) return;

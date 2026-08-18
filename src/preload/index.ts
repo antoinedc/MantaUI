@@ -117,6 +117,14 @@ const api = {
   revealInFolder: (localPath: string): Promise<void> =>
     ipcRenderer.invoke(IPC.revealInFolder, localPath),
 
+  // BET-1156: the one desktop download-to-downloads path. Main fetches
+  // /api/download with the box token, writes to downloadsDir, and returns the
+  // saved local path ("" on failure). Mirrors revealInFolder — OS-integration
+  // only, never on window.api / httpApi (those delegate here when the preload
+  // is present).
+  downloadFileToDownloads: (remotePath: string, filename: string): Promise<string> =>
+    ipcRenderer.invoke(IPC.downloadFileToDownloads, remotePath, filename),
+
   // BET-387: native file picker (single file, defaults to ~/.ssh/). Used by
   // the custom-host SSH installer panel's "Identity file" Browse button.
   // Returns { canceled:true } on a cancel / no-selection close. Mirrors

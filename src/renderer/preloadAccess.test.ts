@@ -30,6 +30,7 @@ function makeFakePreload(): MantaPreload {
     readLocalFile: vi.fn(async () => new ArrayBuffer(0)),
     openExternal: vi.fn(async () => {}),
     revealInFolder: vi.fn(async () => {}),
+    downloadFileToDownloads: vi.fn(async () => ""),
     // BET-387: native file-dialog bridge. The fake matches the MantaPreload
     // shape; per-method behavior is exercised by the main-process handler
     // (Electron dialog) — here we only care about getMantaPreload's contract.

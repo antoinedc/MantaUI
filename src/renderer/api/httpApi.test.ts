@@ -523,3 +523,63 @@ describe("dispatchToListeners", () => {
     errorSpy.mockRestore();
   });
 });
+
+// ---------------------------------------------------------------------------
+// BET-1156 — agentPullFile: the one desktop download-to-downloads path
+// ---------------------------------------------------------------------------
+
+describe("httpApi agentPullFile desktop bridge delegation", () => {
+  it("prefers the preload bridge on desktop and returns the saved local path", async () => {
+    const downloadFileToDownloads = vi.fn(async () => "/Users/a/Downloads/report.pdf");
+    vi.stubGlobal("window", {
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      __mantaPreload: { downloadFileToDownloads },
+    });
+    const out = await httpApi.agentPullFile("/home/dev/outbox/report.pdf");
+    expect(out).toBe("/Users/a/Downloads/report.pdf");
+    expect(downloadFileToDownloads).toHaveBeenCalledWith(
+      "/home/dev/outbox/report.pdf",
+      "report.pdf",
+    );
+  });
+
+  it("throws on desktop when the bridge returns '' so the toast can retry", async () => {
+    const downloadFileToDownloads = vi.fn(async () => "");
+    vi.stubGlobal("window", {
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      __mantaPreload: { downloadFileToDownloads },
+    });
+    await expect(httpApi.agentPullFile("/home/dev/outbox/report.pdf")).rejects.toThrow();
+  });
+
+  it("falls back to the browser blob download when no preload bridge is present", async () => {
+    const clickSpy = vi.fn();
+    const removeSpy = vi.fn();
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      status: 200,
+      ok: true,
+      blob: async () => new Blob(["x"]),
+    })));
+    vi.stubGlobal("document", {
+      addEventListener: mockAddEventListener,
+      removeEventListener: mockRemoveEventListener,
+      visibilityState: "visible",
+      createElement: (tag: string) =>
+        tag === "a" ? { click: clickSpy, remove: removeSpy } : {},
+      body: { appendChild: vi.fn(), removeChild: vi.fn() },
+    });
+    // No __mantaPreload on window → getMantaPreload() returns null → blob path.
+    vi.stubGlobal("window", { addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    vi.stubGlobal("URL", {
+      createObjectURL: vi.fn(() => "blob:x"),
+      revokeObjectURL: vi.fn(),
+    });
+    mockLocalStorage["manta_server"] = "http://localhost";
+
+    const out = await httpApi.agentPullFile("/home/dev/outbox/report.pdf");
+    expect(clickSpy).toHaveBeenCalled();
+    expect(out).toBe("");
+  });
+});

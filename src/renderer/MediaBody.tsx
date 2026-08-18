@@ -24,7 +24,7 @@
 //     fabricates a percentage (the server sends none).
 
 import { memo, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
-import { Loader2, Play } from "lucide-react";
+import { Loader2, Play, Download } from "lucide-react";
 import { ToolCard } from "./ToolCard";
 import { OutputWell } from "./OutputWell";
 import { type Artifact } from "./artifacts";
@@ -195,10 +195,18 @@ function ReadyMedia({ entry }: { entry: MediaEntry }) {
 
   const label = meta.title ?? (meta.path?.split("/").pop() ?? meta.kind);
 
+  // BET-1156: the shared laptop-download path. On desktop agentPullFile routes
+  // through the preload bridge → main writes a real file to downloadsDir;
+  // on mobile/web it falls back to a browser download. Used by both the hover
+  // overlay and the preview overlay's Download.
+  const handleDownload = () => {
+    if (meta.path) void window.api.agentPullFile(meta.path);
+  };
+
   return (
     <>
       <div
-        className="w-full"
+        className="w-full relative group"
         style={boxStyle(entry)}
         onClick={openPreview}
         onKeyDown={onKeyDown}
@@ -235,14 +243,34 @@ function ReadyMedia({ entry }: { entry: MediaEntry }) {
             </span>
           </div>
         )}
+        {/* BET-1156: hover-only Download overlay INSIDE the reserved box.
+            Absolute + pointer-events-none so it never changes the box
+            dimensions and never blocks the whole-box click-to-preview; only
+            the button itself receives pointer events. */}
+        {status === "ready" && meta.path && (
+          <div className="pointer-events-none absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity">
+            <button
+              type="button"
+              aria-label="Download"
+              title="Download"
+              onClick={(e) => {
+                e.stopPropagation();
+                handleDownload();
+              }}
+              className="pointer-events-auto grid place-items-center w-6 h-6 rounded-md bg-bg-elev border border-border-subtle text-text hover:bg-fill-hover"
+            >
+              <Download size={14} aria-hidden="true" />
+            </button>
+          </div>
+        )}
       </div>
       {previewOpen && artifact && (
         <ArtifactPreview
           artifacts={[artifact]}
           index={0}
           onClose={() => setPreviewOpen(false)}
-          onDownload={() => {}}
-          onAttach={() => {}}
+          onDownload={() => handleDownload()}
+          onAttach={null}
         />
       )}
     </>

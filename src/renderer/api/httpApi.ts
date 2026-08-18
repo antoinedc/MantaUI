@@ -860,13 +860,27 @@ export const httpApi: Api = {
   // there's no silent disk write — the user taps Save → agentPullFile triggers
   // a browser download.
   onAgentFileReady: (cb) => on<AgentFileReady>("agentFile", cb),
-  // "Pull to downloads" on a device = trigger a browser download of the
-  // server-local file. We point an <a download> at /api/download and let the
-  // WebView/browser save it (the download is NON-destructive — the source
-  // stays in ~/.manta-outbox/ until the TTL sweep, so a retry after failure is
-  // always safe). Returns "" so the ChatPanel toast knows there's no
-  // local path to "Reveal" (a desktop-only affordance) and just dismisses.
+  // Pull a box file to the device. On desktop (BET-1156) this routes through
+  // the downloadFileToDownloads preload bridge → main writes a REAL file to
+  // downloadsDir and returns its local absolute path, so the outbox toast
+  // flips to "Reveal". On mobile/web (no preload) it triggers a browser
+  // download of the server-local file and returns "" (no local path to
+  // "Reveal" there — a desktop-only affordance). The download is
+  // NON-destructive either way — the source stays in ~/.manta-outbox/ until
+  // the TTL sweep, so a retry after failure is always safe.
   agentPullFile: async (remotePath) => {
+    const preload = getMantaPreload();
+    if (preload?.downloadFileToDownloads) {
+      // Desktop: the real download-to-downloads path. "" = failure — throw so
+      // the save handler keeps the toast up (and offer a retry) instead of
+      // silently falling through to the dead blob path.
+      const local = await preload.downloadFileToDownloads(
+        remotePath,
+        remotePath.split("/").pop() ?? "file",
+      );
+      if (local) return local;
+      throw new Error("download failed");
+    }
     try {
       const url = `${serverBase()}/api/download?path=${encodeURIComponent(remotePath)}`;
       // /api/download is a gated data route, but an <a download> element can't
@@ -900,6 +914,16 @@ export const httpApi: Api = {
       // the toast up and offer a retry.
       throw e;
     }
+    return "";
+  },
+  // BET-1156: the one desktop download-to-downloads path, exposed on window.api
+  // for symmetry with agentPullFile (which delegates here via the preload).
+  // On desktop the preload bridge → main writes to downloadsDir and returns the
+  // saved path; on mobile/web (no preload) it returns "" so callers fall back
+  // to the browser blob path. Mirrors how revealInFolder is bridged.
+  downloadFileToDownloads: async (remotePath, filename) => {
+    const preload = getMantaPreload();
+    if (preload?.downloadFileToDownloads) return await preload.downloadFileToDownloads(remotePath, filename);
     return "";
   },
   // No OS file manager to reveal into on a phone/browser — no-op.

@@ -50,6 +50,7 @@ export const DEMO_UNIMPLEMENTED = [
   "delegatePendingApprovals",
   "delegateStart",
   "delegateStop",
+  "downloadFileToDownloads",
   "forgeCloneCancel",
   "forgeCloneStart",
   "forgeCloneStatus",

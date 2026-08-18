@@ -51,8 +51,9 @@ export type AppConfig = {
   onboardingSkipped?: boolean;
   // ----- Agent → laptop file push (outbox) -----
   // The reverse of drag-and-drop upload: the remote AI drops a file into
-  // `~/.manta-outbox/` and manta scp-pulls it to the Mac. An outbox poller in
-  // main watches that dir over the warm ControlMaster.
+  // `~/.manta-outbox/` and the desktop downloads it to the Mac over the direct
+  // HTTPS connection (BET-1156 — the download runs through /api/download in
+  // main, writing to downloadsDir; the old ssh/scp pull model is gone).
   //
   // Trust flag, analogous to chatAutoAllow. When true, detected outbox files
   // are pulled to `downloadsDir` immediately and the toast is informational
@@ -1204,6 +1205,13 @@ export const IPC = {
   // Pull a remote outbox file to the local downloads dir. Returns the saved
   // local absolute path. Deletes the remote source on success (one-shot mailbox).
   agentPullFile: "agent:pull-file",
+  // BET-1156: the one desktop download-to-downloads path. Main fetches
+  // `/api/download?path=<remotePath>` with the box token and writes the bytes
+  // to `downloadsDir` (default `app.getPath("downloads")`), deduping a name
+  // collision. Returns the saved local absolute path, or "" on failure. Every
+  // desktop download (toast Save, inline-media preview + hover, artifacts
+  // panel) funnels through this single bridged path.
+  downloadFileToDownloads: "agent:download-to-downloads",
   // Reveal a local file in Finder / the OS file manager.
   revealInFolder: "shell:reveal-in-folder",
   // main → renderer push: a new file appeared in the remote ~/.manta-outbox/.

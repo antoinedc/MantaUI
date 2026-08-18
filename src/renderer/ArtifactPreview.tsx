@@ -127,7 +127,10 @@ export function ArtifactPreview({
   index: number;
   onClose: () => void;
   onDownload: (artifact: Artifact) => void;
-  onAttach: (artifact: Artifact) => void;
+  // BET-1156: optional. The inline-media preview passes null (it has no
+  // attach affordance — Attach stays only in the Artifacts panel); the panel
+  // passes a real handler so its preview keeps Attach.
+  onAttach: ((artifact: Artifact) => void) | null;
 }) {
   const [idx, setIdx] = useState(() => Math.min(Math.max(index, 0), Math.max(artifacts.length - 1, 0)));
   const artifact = artifacts[idx];
@@ -244,12 +247,14 @@ export function ArtifactPreview({
           <span className="flex-1 min-w-0 font-mono text-meta text-text truncate" title={artifact.href}>
             {artifact.label}
           </span>
-          <IconButton
-            icon={<Paperclip />}
-            label="Attach"
-            title="Attach"
-            onClick={() => onAttach(artifact)}
-          />
+          {typeof onAttach === "function" && (
+            <IconButton
+              icon={<Paperclip />}
+              label="Attach"
+              title="Attach"
+              onClick={() => onAttach(artifact)}
+            />
+          )}
           <IconButton
             icon={<Download />}
             label="Download"
