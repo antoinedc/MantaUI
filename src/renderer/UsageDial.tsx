@@ -42,7 +42,7 @@ import { mbtn } from "./ComposerParts";
 // the same single lookup instead of duplicating it.
 const PROVIDER_LABELS: Record<string, string> = {
   claude: "Claude",
-  codex: "Codex",
+  codex: "OpenAI",
   kimi: "Kimi",
 };
 

@@ -1414,6 +1414,63 @@ export async function readProviderApiKey(providerId, { readFile = readFileSync }
   return parseProviderApiKey(raw, providerId);
 }
 
+/**
+ * Pure: extract a provider's OAuth access token from the ALREADY-READ text of
+ * opencode's auth store. Mirrors `parseProviderApiKey` above exactly — never
+ * throws, returns `""` (this value is used directly as a Bearer header) for
+ * invalid JSON, a missing provider entry, or an entry that isn't an oauth
+ * token. Discriminating on `type === "oauth"` matters for the same reason the
+ * api-key reader discriminates on `type === "api"`: the value goes straight
+ * into a `Bearer` header, so an entry of the wrong type must never supply it.
+ *
+ * opencode persists an oauth sign-in as
+ * `{"<providerId>": {"type":"oauth", "access":"…", "refresh":"…", …}}` — e.g.
+ * the `openai` entry this box writes for an OpenAI sign-in.
+ *
+ * @param {string} rawFileText
+ * @param {string} providerId
+ * @returns {string}
+ */
+export function parseProviderOAuthToken(rawFileText, providerId) {
+  try {
+    const entry = JSON.parse(rawFileText)?.[providerId];
+    return entry?.type === "oauth" && typeof entry?.access === "string" && entry.access.length > 0
+      ? entry.access
+      : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Read a provider's OAuth access token straight off opencode's own auth store.
+ * The sibling of `readProviderApiKey` above for the oauth entry shape — a
+ * READER only, never a writer: opencode owns the token's lifecycle (including
+ * refreshing it), and an expired token simply 401s at the usage endpoint.
+ *
+ * Tolerates a missing file by returning `""` — NEVER throws, so a caller can
+ * `await` this unconditionally. The file-read function is injectable
+ * (`readFile`), defaulting to the real `readFileSync`, so tests never touch a
+ * real auth store. Reuses `opencodeAuthPath()` — do not compute the path again.
+ *
+ * SECURITY: this resolves a LIVE credential. It must never log, echo, or
+ * return the token anywhere but to its direct caller, and a caller must never
+ * fold it into an error message.
+ *
+ * @param {string} providerId
+ * @param {{ readFile?: (file: string, encoding: string) => string }} [opts]
+ * @returns {Promise<string>}
+ */
+export async function readProviderOAuthToken(providerId, { readFile = readFileSync } = {}) {
+  let raw;
+  try {
+    raw = readFile(opencodeAuthPath(), "utf-8");
+  } catch {
+    return "";
+  }
+  return parseProviderOAuthToken(raw, providerId);
+}
+
 // ---------------------------------------------------------------------------
 // VCS
 // ---------------------------------------------------------------------------
