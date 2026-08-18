@@ -97,7 +97,13 @@ mac:
   entitlements: "assets/entitlements.mac.plist"
   entitlementsInherit: "assets/entitlements.mac.plist"
   darkModeSupport: true
-  artifactName: "${productName}-${version}-${arch}.dmg"
+  # `${ext}` is MANDATORY here, not cosmetic: this name applies to EVERY mac
+  # target, so a hardcoded `.dmg` also renames the zip. electron-builder then
+  # asks 7-Zip to create `… -arm64.dmg`, 7-Zip cannot infer a format from that
+  # extension, and the whole build dies with `E_INVALIDARG` right after the DMG
+  # is packed — which is exactly what broke mac-v0.0.36 the day the zip target
+  # landed. The dmg filename is unchanged by this.
+  artifactName: "${productName}-${version}-${arch}.${ext}"
   # Distribution OUTSIDE the App Store: sign with a "Developer ID Application"
   # certificate. electron-builder auto-selects it from the login keychain when
   # present (or set CSC_LINK/CSC_KEY_PASSWORD to a .p12). Explicit so an App
