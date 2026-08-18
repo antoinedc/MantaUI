@@ -537,12 +537,16 @@ SSH — the old `host`-based mode is fully removed.
 
 ## Auto-rename (session titles) — BET-1018
 
-When `autoRenameSessions` is on, a chat-mode window gets its **first name from
-opencode's own session title**, which opencode derives from the FIRST user
-message for free (`GET /session`, read via `opencodeListSessions(cwd)` →
-`findSessionTitle`). Before that, the empty-first-name case was only named on
-the every-5th-turn drift rename. If the title isn't populated yet the effect
-skips silently and retries on the next turn; never blank a window name.
+When `autoRenameSessions` is on, a chat-mode window gets its **first name on
+its first turn** from opencode's own session title **when opencode has one**
+(`GET /session`, read via `opencodeListSessions(cwd)` → `findSessionTitle`).
+A manta-created chat session is created with an EMPTY title, and opencode does
+NOT title it from the first message (verified live, 1.18.10) — so for a fresh
+window that title is "". The first-name path therefore **falls through to the
+title agent** (`opencodeGenerateTitle`) so the first turn still produces a
+sensible rename instead of keeping the creation-time first-word placeholder.
+If generation also fails/times out the effect retries on the next turn; never
+blank a window name.
 
 Subsequent **re-titles** (every `AUTO_RENAME_EVERY_N_TURNS` = 5 turns) run on
 opencode's **"title" agent** (`agent:"title"` in `generateSessionTitle`'s
