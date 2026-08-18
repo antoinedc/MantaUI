@@ -140,9 +140,9 @@ final class SessionListStore: ObservableObject {
 
     private static func describe(_ error: Error) -> String {
         if let known = error as? MantaError, known == .authRequired {
-            return "Your box rejected this device — pair it again."
+            return "Your server rejected this device — pair it again."
         }
-        return "Couldn't reach your box"
+        return "Couldn't reach your server"
     }
 
     /// Adopt the project list a mutating RPC already returned (post-create),

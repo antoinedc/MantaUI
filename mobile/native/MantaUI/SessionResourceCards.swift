@@ -288,7 +288,7 @@ private struct SecretAddForm: View {
                     Text("1–64 chars: a letter or underscore, then letters/digits/underscores.")
                 }
                 Section {
-                    SecureField("Value (stored on the box; never shown again)", text: $value)
+                    SecureField("Value (stored on the server; never shown again)", text: $value)
                         .font(.system(.body, design: .monospaced))
                 }
                 Section {

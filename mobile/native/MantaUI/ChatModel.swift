@@ -119,7 +119,7 @@ enum ChatModel {
         guard let plan else {
             return on
                 ? PlanToggle(available: false, on: true, loading: false, agent: nil, title: "Plan mode on (plan agent unavailable)")
-                : PlanToggle(available: false, on: false, loading: false, agent: nil, title: "This box has no plan agent")
+                : PlanToggle(available: false, on: false, loading: false, agent: nil, title: "This server has no plan agent")
         }
         return PlanToggle(
             available: true,

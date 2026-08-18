@@ -47,7 +47,7 @@ final class MantaUIOverflowCaptureUITests: XCTestCase {
         // 3. The gate that proves the ACTION SHEET (not the overflow sheet) is
         //    up: the native action sheet's unique message text OR its Cancel
         //    button (UIAlertController may expose the two differently).
-        let message = app.staticTexts["Starts a fresh session in this window. The transcript stays on the box."]
+        let message = app.staticTexts["Starts a fresh session in this window. The transcript stays on the server."]
         let presented = message.waitForExistence(timeout: 8)
             || app.buttons["Cancel"].waitForExistence(timeout: 8)
         if !presented {

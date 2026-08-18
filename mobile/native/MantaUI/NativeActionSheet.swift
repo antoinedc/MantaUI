@@ -87,7 +87,7 @@ enum SessionConfirmCopy {
 
     static let clear = Copy(
         title: "Clear this session?",
-        message: "Starts a fresh session in this window. The transcript stays on the box.",
+        message: "Starts a fresh session in this window. The transcript stays on the server.",
         destructiveTitle: "Clear session"
     )
     static let delete = Copy(

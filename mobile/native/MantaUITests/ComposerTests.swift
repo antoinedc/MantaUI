@@ -188,7 +188,7 @@ final class ComposerTests: XCTestCase {
         let r = ChatModel.planToggle(agents: [agent("build", mode: "primary")], on: false)
         XCTAssertFalse(r.available)
         XCTAssertFalse(r.on)
-        XCTAssertEqual(r.title, "This box has no plan agent")
+        XCTAssertEqual(r.title, "This server has no plan agent")
         XCTAssertNil(r.agent)
     }
 
@@ -202,7 +202,7 @@ final class ComposerTests: XCTestCase {
     func testPlanToggleSubagentNamedPlanDoesNotCount() {
         let r = ChatModel.planToggle(agents: [agent("plan", mode: "subagent")], on: false)
         XCTAssertFalse(r.available)
-        XCTAssertEqual(r.title, "This box has no plan agent")
+        XCTAssertEqual(r.title, "This server has no plan agent")
     }
 
     func testPlanToggleAvailableOffAndOn() {

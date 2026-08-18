@@ -147,7 +147,7 @@ struct ModelPickerSheet: View {
 
     private var activeModelSubtitle: String {
         guard let model = activeModel else {
-            return "Using the model your box is configured to use."
+            return "Using the model your server is configured to use."
         }
         return ChatModel.cardSubtitle(model)
     }

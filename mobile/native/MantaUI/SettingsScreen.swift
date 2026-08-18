@@ -328,7 +328,7 @@ struct SettingsScreen: View {
                 .font(.manta(size: Metrics.type.twoXS, weight: .semibold))
                 .foregroundColor(tokens.tx2)
                 .textCase(.uppercase)
-            Text("Restore every setting to its default. This does not remove your box pairing or projects.")
+            Text("Restore every setting to its default. This does not remove your server pairing or projects.")
                 .font(.manta(size: Metrics.type.small))
                 .foregroundColor(tokens.tx3)
             Button {
@@ -359,7 +359,7 @@ struct SettingsScreen: View {
             Text("Reset all settings?")
                 .font(.manta(size: Metrics.type.body, weight: .semibold))
                 .foregroundColor(tokens.tx1)
-            Text("Every setting will return to its default. Your box pairing and projects are not affected. You can undo this right after.")
+            Text("Every setting will return to its default. Your server pairing and projects are not affected. You can undo this right after.")
                 .font(.manta(size: Metrics.type.small))
                 .foregroundColor(tokens.tx3)
                 .multilineTextAlignment(.center)
