@@ -152,10 +152,13 @@ fi
 if [ -n "$CLIS_CHANGED" ]; then CLIS_CHANGED_FLAG=1; else CLIS_CHANGED_FLAG=0; fi
 
 # --- Payload-replaced flag (BET-1097) -----------------------------------------
-# Tracks whether this run swapped the box payload (a git reset --hard, or a
-# release tarball extraction). Set at the ONE place each kind does its swap; the
-# conditional restart block reads this single flag to decide opencode-and-server
-# vs opencode-only vs nothing.
+# Tracks whether this run ACTUALLY swapped the box payload (a git reset --hard
+# that moved HEAD, or a release tarball extraction). Set at the ONE place each
+# kind does its swap, and ONLY when the swap really changes the payload — a
+# current box (git box already on origin/main, or packaged box already at the
+# published build) that only upgraded a CLI must leave this 0 so the restart
+# block drops to opencode-only / nothing. The conditional restart block reads
+# this single flag to decide opencode-and-server vs opencode-only vs nothing.
 PAYLOAD_REPLACED=0
 
 echo "MANTA_PROGRESS 3/7 Downloading update"
@@ -166,9 +169,17 @@ if [ "$INSTALL_KIND" = "git" ]; then
   log "self-update: fetching origin/main into $MANTA_HOME"
   git -C "$MANTA_HOME" fetch origin main -q
 
-  log "self-update: resetting to origin/main"
-  git -C "$MANTA_HOME" reset --hard origin/main -q
-  PAYLOAD_REPLACED=1
+  # Only mark the payload replaced when the reset actually moves the checkout.
+  # A git box already on origin/main with only a CLI changed must not restart
+  # both services (BET-1097 review fix): PAYLOAD_REPLACED reflects whether the
+  # payload genuinely changed, not merely that the reset command ran.
+  if [ "$(git -C "$MANTA_HOME" rev-parse HEAD)" != "$(git -C "$MANTA_HOME" rev-parse origin/main)" ]; then
+    log "self-update: resetting to origin/main"
+    git -C "$MANTA_HOME" reset --hard origin/main -q
+    PAYLOAD_REPLACED=1
+  else
+    log "self-update: already at origin/main"
+  fi
 else
   # packaged install — download + verify + extract the release tarball and
   # replace only the payload paths the release owns.
@@ -229,47 +240,66 @@ else
     fi
     exit 0
   fi
-  if [ -n "$INSTALLED_GIT_SHA" ] && [ -n "$TARBALL_GIT_SHA" ]; then
-    log "self-update: new build $INSTALLED_GIT_SHA → $TARBALL_GIT_SHA"
-  fi
 
-  WORK="$(mktemp -d "${TMPDIR:-/tmp}/manta-update.XXXXXX")"
-  trap 'rm -rf "$WORK"' EXIT
-
-  log "self-update: downloading $host/releases/$TARBALL_FILE"
-  curl -fsSL "$host/releases/$TARBALL_FILE" -o "$WORK/manta.tar.gz" \
-    || die "self-update: download failed: $host/releases/$TARBALL_FILE"
-
-  log "self-update: verifying tarball sha256…"
-  verify_sha256 "$WORK/manta.tar.gz" "$TARBALL_SHA"
-
-  log "self-update: extracting to $WORK/pkg…"
-  mkdir "$WORK/pkg"
-  tar -xzf "$WORK/manta.tar.gz" -C "$WORK/pkg" --strip-components=1 \
-    || die "self-update: extract failed"
-
-  # A torn/corrupt download must never overwrite a working install — confirm
-  # the payload is complete before replacing anything.
-  [ -f "$WORK/pkg/src/server/index.mjs" ] \
-    || die "self-update: bad tarball — missing src/server/index.mjs"
-  [ -f "$WORK/pkg/RELEASE.json" ] \
-    || die "self-update: bad tarball — missing RELEASE.json"
-
-  # Replace ONLY the paths the incoming release owns (`includes` in its
-  # RELEASE.json — read from the INCOMING release, not the installed one, so a
-  # box installed before a path joined the list still picks it up). This is a
-  # single call into scripts/lib/release.sh: it stages each path as
-  # `<dest>/<rel>.new` and swaps with `mv`, so a failed copy can never leave a
-  # half-written tree — most important for `runtime/`, which the running server
-  # executes from. It also stamps RELEASE.json so the box records its version.
-  replace_release_payload "$WORK/pkg" "$MANTA_HOME" "$NODE_CMD"
-  PAYLOAD_REPLACED=1
-  # Report the commit alongside the version: two releases legitimately share a
-  # version number now, so "0.0.29 → 0.0.29" alone reads like a no-op.
-  if [ -n "$TARBALL_GIT_SHA" ]; then
-    ok "self-update: replaced release payload ($INSTALLED_VERSION → $TARBALL_VERSION, commit $TARBALL_GIT_SHA)"
+  # Split the payload decision from the early exit. `should_skip_self_update`
+  # returns "carry on" for BOTH a stale box AND a current box whose CLI(s)
+  # changed — so re-check `release_is_current` here to decide whether there is
+  # actually a payload swap to do. This is the fix for the review Block:
+  # PAYLOAD_REPLACED must reflect whether the payload ACTUALLY changed (box was
+  # stale), not merely that the replace function ran. A current box with a
+  # CLI-only upgrade must NOT set PAYLOAD_REPLACED — that would restart both
+  # services and kill every running agent turn for no reason.
+  if release_is_current "$INSTALLED_VERSION" "$INSTALLED_GIT_SHA" "$TARBALL_VERSION" "$TARBALL_GIT_SHA"; then
+    # Box is already current; we only got here because a CLI changed. Fall
+    # through to deps/tools/restart WITHOUT touching the payload.
+    if [ -n "$TARBALL_GIT_SHA" ]; then
+      ok "self-update: already at $TARBALL_VERSION ($TARBALL_GIT_SHA); CLI(s) updated → no payload swap"
+    else
+      ok "self-update: already at $TARBALL_VERSION; CLI(s) updated → no payload swap"
+    fi
   else
-    ok "self-update: replaced release payload ($INSTALLED_VERSION → $TARBALL_VERSION)"
+    if [ -n "$INSTALLED_GIT_SHA" ] && [ -n "$TARBALL_GIT_SHA" ]; then
+      log "self-update: new build $INSTALLED_GIT_SHA → $TARBALL_GIT_SHA"
+    fi
+
+    WORK="$(mktemp -d "${TMPDIR:-/tmp}/manta-update.XXXXXX")"
+    trap 'rm -rf "$WORK"' EXIT
+
+    log "self-update: downloading $host/releases/$TARBALL_FILE"
+    curl -fsSL "$host/releases/$TARBALL_FILE" -o "$WORK/manta.tar.gz" \
+      || die "self-update: download failed: $host/releases/$TARBALL_FILE"
+
+    log "self-update: verifying tarball sha256…"
+    verify_sha256 "$WORK/manta.tar.gz" "$TARBALL_SHA"
+
+    log "self-update: extracting to $WORK/pkg…"
+    mkdir "$WORK/pkg"
+    tar -xzf "$WORK/manta.tar.gz" -C "$WORK/pkg" --strip-components=1 \
+      || die "self-update: extract failed"
+
+    # A torn/corrupt download must never overwrite a working install — confirm
+    # the payload is complete before replacing anything.
+    [ -f "$WORK/pkg/src/server/index.mjs" ] \
+      || die "self-update: bad tarball — missing src/server/index.mjs"
+    [ -f "$WORK/pkg/RELEASE.json" ] \
+      || die "self-update: bad tarball — missing RELEASE.json"
+
+    # Replace ONLY the paths the incoming release owns (`includes` in its
+    # RELEASE.json — read from the INCOMING release, not the installed one, so a
+    # box installed before a path joined the list still picks it up). This is a
+    # single call into scripts/lib/release.sh: it stages each path as
+    # `<dest>/<rel>.new` and swaps with `mv`, so a failed copy can never leave a
+    # half-written tree — most important for `runtime/`, which the running server
+    # executes from. It also stamps RELEASE.json so the box records its version.
+    replace_release_payload "$WORK/pkg" "$MANTA_HOME" "$NODE_CMD"
+    PAYLOAD_REPLACED=1
+    # Report the commit alongside the version: two releases legitimately share a
+    # version number now, so "0.0.29 → 0.0.29" alone reads like a no-op.
+    if [ -n "$TARBALL_GIT_SHA" ]; then
+      ok "self-update: replaced release payload ($INSTALLED_VERSION → $TARBALL_VERSION, commit $TARBALL_GIT_SHA)"
+    else
+      ok "self-update: replaced release payload ($INSTALLED_VERSION → $TARBALL_VERSION)"
+    fi
   fi
 fi
 
