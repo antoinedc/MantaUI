@@ -870,7 +870,7 @@ function Shell() {
         // reason on the pair step, opening the flow if it isn't already up.
         const st = useStore.getState();
         st.setPairLinkError(
-          "That pairing link isn't valid. Generate a fresh one on your box (run `manta pair`) and open the new link.",
+          "That pairing link isn't valid. Generate a fresh one on your server (run `manta pair`) and open the new link.",
         );
         const onboardingOpen =
           st.onboardingForced ||
@@ -1631,7 +1631,7 @@ function Shell() {
           <UpdateBar
             text={
               <>
-                This box (v
+                This server (v
                 <span className="font-medium text-text">
                   {serverVersion ?? "?"}
                 </span>
@@ -1662,7 +1662,7 @@ function Shell() {
             tone={updateBanner.tone}
             busy={boxUpgrading}
             progress={boxUpgrading && !boxRestarting ? serverUpdateProgress ?? undefined : undefined}
-            busyLabel={boxRestarting ? "Restarting the box…" : "Updating the box…"}
+            busyLabel={boxRestarting ? "Restarting the server…" : "Updating the server…"}
           />
         )}
         {!isChatPaneActive && (
@@ -1698,7 +1698,7 @@ function Shell() {
             {boxStale && (
               <span
                 className="shrink-0 inline-flex items-center gap-1 text-text-faint"
-                title="The box's tmux is unreachable — showing the last known session list."
+                title="The server's tmux is unreachable — showing the last known session list."
               >
                 <span
                   className="inline-block w-1.5 h-1.5 rounded-full shrink-0 bg-warn"
@@ -1884,7 +1884,7 @@ function Shell() {
           the update starts. */}
       <ConfirmModal
         open={confirmServerUpdate}
-        title="Update the box?"
+        title="Update the server?"
         body="This restarts opencode, which will end every agent turn currently running in any session. Any unsaved work in a running turn is lost."
         confirmLabel="Update & restart"
         confirmTone="primary"

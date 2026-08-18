@@ -120,7 +120,7 @@ export function InboxPalette({ onClose }: { onClose: () => void }) {
         .then((res) => {
           if (cancelled) return;
           setItems(sortInbox(res?.items ?? []));
-          if (res?.error === "not_connected") setLoadError("GitHub isn't connected on this box.");
+          if (res?.error === "not_connected") setLoadError("GitHub isn't connected on this server.");
         })
         .catch(() => {
           if (cancelled) return;
@@ -161,7 +161,7 @@ export function InboxPalette({ onClose }: { onClose: () => void }) {
   const createSessionFromItem = async (item: ForgeInboxItem) => {
     const path = repos[item.repoKey];
     if (!path) {
-      setError(`No local checkout of ${repoName(item)} on this box to start a session in.`);
+      setError(`No local checkout of ${repoName(item)} on this server to start a session in.`);
       return;
     }
     setError(null);
@@ -209,7 +209,7 @@ export function InboxPalette({ onClose }: { onClose: () => void }) {
   const delegateInBackground = async (item: ForgeInboxItem) => {
     const path = repos[item.repoKey];
     if (!path) {
-      setError(`No local checkout of ${repoName(item)} on this box to delegate in.`);
+      setError(`No local checkout of ${repoName(item)} on this server to delegate in.`);
       return;
     }
     const active = useStore.getState().activeSession();

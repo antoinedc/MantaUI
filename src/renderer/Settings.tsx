@@ -783,14 +783,14 @@ export function Settings({
     const preload = getMantaPreload();
     if (!preload?.authUnpair) {
       setRemovingBox(false);
-      setRemoveResult({ ok: false, message: "Removing a box is only supported in the desktop app." });
+      setRemoveResult({ ok: false, message: "Removing a server is only supported in the desktop app." });
       return;
     }
     try {
       const outcome = await preload.authUnpair();
       await useStore.getState().refresh().catch(() => {});
       if (outcome.ok) { setRemoveResult({ ok: true, message: "" }); onClose(); return; }
-      setRemoveResult({ ok: false, message: outcome.message || "The box's token could not be revoked remotely. Local credentials were cleared." });
+      setRemoveResult({ ok: false, message: outcome.message || "The server's token could not be revoked remotely. Local credentials were cleared." });
     } catch (e) {
       setRemoveResult({ ok: false, message: e instanceof Error ? e.message : String(e) });
     } finally {
@@ -931,7 +931,7 @@ export function Settings({
           </GroupCard>
           <GroupCard title="Danger zone" danger>
             <div className="space-y-3">
-              <div className="text-body text-text-faint">Restore every setting below to its default. This does not remove your box pairing or projects.</div>
+              <div className="text-body text-text-faint">Restore every setting below to its default. This does not remove your server pairing or projects.</div>
               <Button onClick={() => setConfirmReset(true)} tone="danger">Reset all settings…</Button>
             </div>
           </GroupCard>
@@ -987,7 +987,7 @@ export function Settings({
                   value={opencodePortDraft}
                   onChange={(e) => { setOpencodePortDraft(e.target.value); setOpencodePortSavedAt(null); }}
                   onBlur={commitOpencodePort}
-                  help="Local port forwarded to the box's opencode serve instance. Defaults to 14096 to avoid colliding with a local opencode on 4096."
+                  help="Local port forwarded to the server's opencode serve instance. Defaults to 14096 to avoid colliding with a local opencode on 4096."
                   footer={opencodePortSavedAt ? <div role="status" className="text-meta text-ok">Saved</div> : undefined}
                 />
               </div>
@@ -996,9 +996,9 @@ export function Settings({
 
           <GroupCard title="Danger zone" danger>
             <div className="space-y-3">
-              <div className="text-body text-text-faint">Forget this box on the desktop. If the box is reachable, its current token is revoked too.</div>
+              <div className="text-body text-text-faint">Forget this server on the desktop. If the server is reachable, its current token is revoked too.</div>
               <Button onClick={() => setConfirmRemove(true)} disabled={removingBox} tone="default">
-                {removingBox ? "Removing…" : "Remove box"}
+                {removingBox ? "Removing…" : "Remove server"}
               </Button>
             </div>
             {removeResult && !removeResult.ok && <div role="alert" className="text-body text-warn">{removeResult.message}</div>}
@@ -1095,8 +1095,8 @@ export function Settings({
                 not a switch). Gates dispatch, not the visibility of the list
                 below. */}
             <div className="flex items-center gap-2 py-1">
-              <Checkbox id="forge-rules-enabled" checked={forgeRulesOn} onChange={(v) => void toggleForgeRules(v)} ariaLabel="Let forge rules start agents on this box" />
-              <span className="text-body text-text-muted">Let forge rules start agents on this box</span>
+              <Checkbox id="forge-rules-enabled" checked={forgeRulesOn} onChange={(v) => void toggleForgeRules(v)} ariaLabel="Let forge rules start agents on this server" />
+              <span className="text-body text-text-muted">Let forge rules start agents on this server</span>
             </div>
             {forgeRulesError ? (
               <div role="alert" className="text-body text-danger">{errorDisclosure("Couldn't load the forge rules list.", forgeRulesError)}</div>
@@ -1105,7 +1105,7 @@ export function Settings({
                 <MantaLoader size="inline" label="Loading forge rules" />
               </div>
             ) : (forgeRules ?? []).length === 0 ? (
-              <div className="text-body text-text-faint">No forge rules yet. The AI authors them on the box with <code className="text-text-muted">forge_rules.save</code>; each is a YAML file at <code className="text-text-muted">~/.manta/forge-rules/</code>.</div>
+              <div className="text-body text-text-faint">No forge rules yet. The AI authors them on the server with <code className="text-text-muted">forge_rules.save</code>; each is a YAML file at <code className="text-text-muted">~/.manta/forge-rules/</code>.</div>
             ) : (
               <div className="space-y-1">
                 {(forgeRules ?? []).map((r) =>
@@ -1183,7 +1183,7 @@ export function Settings({
           </GroupCard>
           {availableLaunchers.some((l) => l.flags.length > 0) && (
             <GroupCard title="CLI launch options">
-              <div className="text-body text-text-faint">Flags used when launching an AI CLI (e.g. Claude Code) directly in a session's terminal. Only CLIs detected on this box are shown.</div>
+              <div className="text-body text-text-faint">Flags used when launching an AI CLI (e.g. Claude Code) directly in a session's terminal. Only CLIs detected on this server are shown.</div>
               <div className="space-y-4">
                 {availableLaunchers.filter((l) => l.flags.length > 0).map((l) => (
                   <div key={l.id} className="space-y-2">
@@ -1339,8 +1339,8 @@ export function Settings({
       {/* In-app confirm: Remove box (replaces window.confirm — BET-419 §D). */}
       <ConfirmModal
         open={confirmRemove}
-        title="Remove this box?"
-        body="The desktop will forget its pairing and saved projects. If the box is reachable, its current token is also revoked. If the box is offline, the local credentials are cleared and the box's token will be rotated the next time it starts."
+        title="Remove this server?"
+        body="The desktop will forget its pairing and saved projects. If the server is reachable, its current token is also revoked. If the server is offline, the local credentials are cleared and the server's token will be rotated the next time it starts."
         confirmLabel="Remove"
         onConfirm={() => void removeBox()}
         onCancel={() => setConfirmRemove(false)}
@@ -1350,7 +1350,7 @@ export function Settings({
       <ConfirmModal
         open={confirmReset}
         title="Reset all settings?"
-        body="Every setting will return to its default. Your box pairing and projects are not affected. You can undo this right after."
+        body="Every setting will return to its default. Your server pairing and projects are not affected. You can undo this right after."
         confirmLabel="Reset"
         onConfirm={() => void resetAll()}
         onCancel={() => setConfirmReset(false)}
