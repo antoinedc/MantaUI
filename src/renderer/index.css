@@ -360,21 +360,39 @@ html, body, #root {
   }
 }
 
-/* MarqueeLabel — hover-slide for truncated names (see MarqueeLabel.tsx).
-   The animation runs ONLY while the clip is hovered. Its absence when not
-   hovered is what snaps the text back to the start (the element reverts to
-   translateX(0) = the title from the beginning). --marquee-shift is set inline
-   by the component to the overflow width in px. Reduced-motion: static. */
+/* MarqueeLabel — RTL hover-loop for truncated names (see MarqueeLabel.tsx).
+   The animation runs ONLY while the clip is hovered, so lifting the pointer
+   reverts to transform:none = the title reads from the start (no scroll state
+   to remember). --marquee-shift is the overflow width in px (set inline by the
+   component); --marquee-gap adds breathing room so the tail fully clears the
+   clip instead of stopping flush against it. At rest the inner caps at 100% of
+   the clip and ellipsizes (...); both are removed while animating so the whole
+   name scrolls. Reduced-motion: a static ellipsized label. */
 @keyframes manta-marquee {
   0%   { transform: translateX(0); }
-  28%  { transform: translateX(var(--marquee-shift, 0px)); }
-  62%  { transform: translateX(var(--marquee-shift, 0px)); }
-  80%  { transform: translateX(0); }
+  35%  { transform: translateX(calc(-1 * (var(--marquee-shift, 0px) + var(--marquee-gap, 24px)))); }
+  65%  { transform: translateX(calc(-1 * (var(--marquee-shift, 0px) + var(--marquee-gap, 24px)))); }
+  90%  { transform: translateX(0); }
   100% { transform: translateX(0); }
 }
 .manta-marquee:hover .manta-marquee-inner {
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
   animation: manta-marquee 9s linear infinite;
 }
+/* Slight fade at the right (cutoff) edge while animating — scoped to :hover
+   so the resting label never fades. */
+.manta-marquee:hover {
+  -webkit-mask-image: linear-gradient(to left, transparent 0, #000 18px);
+  mask-image: linear-gradient(to left, transparent 0, #000 18px);
+}
 @media (prefers-reduced-motion: reduce) {
-  .manta-marquee:hover .manta-marquee-inner { animation: none; }
+  .manta-marquee:hover .manta-marquee-inner {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    animation: none;
+  }
+  .manta-marquee:hover { mask-image: none; }
 }

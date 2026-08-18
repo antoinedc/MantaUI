@@ -18,7 +18,7 @@ import {
 } from "react";
 
 const CLIP = "overflow-hidden";
-const INNER = "manta-marquee-inner inline-block whitespace-nowrap";
+const INNER = "manta-marquee-inner inline-block whitespace-nowrap max-w-full overflow-hidden text-ellipsis";
 
 export function MarqueeLabel({
   children,
