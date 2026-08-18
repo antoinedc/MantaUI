@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<title>Mockup — Unified update banner + About update list</title>
+
+<!--
+  THE SPEC for the unified update surface (BET update-epic). This file is the
+  design contract, not a picture of one. Read docs/visual-verification.md
+  before editing.
+
+  It loads the app's REAL token stylesheet, so every colour, spacing step,
+  radius and type stack resolves to the same variable the app uses at runtime.
+  There is deliberately NOT ONE hex literal in the stylesheet below. If you
+  need a value that has no token, that is a signal to stop and ask — not to
+  hardcode.
+
+  ============================ CONFORMANCE SCOPE ============================
+    .mk-bar-*    → app `UpdateBar` (src/renderer/UpdateBar.tsx), one region
+                   per state. All six states are ONE component with different
+                   props — do not build six components.
+    .mk-about    → the About card's update list in Settings.tsx.
+
+  OUT of conformance scope — do not build, do not report as a defect:
+  per-target checkboxes, an "update later"/snooze scheduler, a changelog
+  viewer, release notes rendering, a separate CLI settings section, any
+  progress UI for individual CLI upgrades beyond the single step label.
+
+  ============================ WHAT IS NEW vs TODAY =========================
+    1. `tone` prop on UpdateBar: "accent" (default, today's look, unchanged)
+       or "danger" (update FAILED). Today a failure renders in the accent
+       tint, which reads as "here is something nice for you".
+    2. The bar text is produced by ONE pure function from a target list.
+       Single vs multiple is a text difference, not a component difference.
+    3. The About card renders ONE row per target from the SAME list, with a
+       mono version column. It replaces the two bespoke rows (desktop leg /
+       box leg) that exist today.
+-->
+
+<link rel="stylesheet" href="/src/renderer/tokens.css" />
+<link rel="stylesheet" href="/node_modules/@fontsource-variable/inter/index.css" />
+<link rel="stylesheet" href="/node_modules/@fontsource-variable/jetbrains-mono/index.css" />
+
+<style>
+  /* ---- page chrome (NOT part of the contract; it only lays regions out) */
+  body { margin: 0; padding: var(--sp-6); background: var(--canvas);
+         color: var(--tx1); font-family: var(--font-sans);
+         line-height: var(--ui-lh); font-size: var(--font-size-small); }
+  .cap { font-size: var(--font-size-2xs); color: var(--tx4);
+         margin: var(--sp-6) 0 var(--sp-2); font-family: var(--font-mono); }
+  .cap:first-of-type { margin-top: 0; }
+  .note { font-size: var(--font-size-2xs); color: var(--tx3);
+          margin: var(--sp-1) 0 0; max-width: 90ch; }
+  .frame { width: 760px; background: var(--panel); border: 1px solid var(--border-subtle);
+           border-radius: var(--r-md); overflow: clip; }
+
+  /* ======================================================================
+     REGION 1 — UpdateBar
+     Base is TODAY's bar, unchanged: bg accent/10, bottom border accent/30,
+     pl --sp-3, py --sp-2, --font-size-2xs (text-meta), --tx1 text.
+     ====================================================================== */
+  .mk-bar {
+    display: flex; align-items: center; gap: var(--sp-2);
+    flex-shrink: 0;
+    background: rgb(var(--accent-rgb) / 0.10);
+    border-bottom: 1px solid rgb(var(--accent-rgb) / 0.30);
+    padding: var(--sp-2) var(--sp-3);
+    font-size: var(--font-size-2xs);
+    color: var(--tx1);
+  }
+  /* NEW: danger tone. Same geometry, semantic colour swap only. */
+  .mk-bar[data-tone="danger"] {
+    background: rgb(var(--danger-rgb) / 0.10);
+    border-bottom-color: rgb(var(--danger-rgb) / 0.30);
+  }
+
+  .mk-bar__text { flex: 1; min-width: 0; overflow: hidden;
+                  text-overflow: ellipsis; white-space: nowrap; }
+  /* The target list is quieter than the headline count. One line, truncates
+     with the headline — never wraps the bar to two lines. */
+  .mk-bar__names { color: var(--tx3); }
+
+  /* Action button — the EXISTING BANNER_BTN, token-for-token. */
+  .mk-btn {
+    flex-shrink: 0; border: 0; cursor: pointer;
+    border-radius: var(--r-xs);
+    background: rgb(var(--accent-rgb) / 0.20);
+    color: var(--accent);
+    padding: var(--sp-px) var(--sp-2);
+    font: inherit; font-weight: var(--weight-medium);
+  }
+  .mk-bar[data-tone="danger"] .mk-btn {
+    background: rgb(var(--danger-rgb) / 0.20);
+    color: var(--danger);
+  }
+  .mk-x { flex-shrink: 0; color: var(--tx4); background: none; border: 0;
+          cursor: pointer; display: inline-flex; align-items: center; padding: 0; }
+
+  /* Progress — EXISTING geometry: 128px × 6px, pill, accent/20 track. */
+  .mk-track { flex-shrink: 0; width: 128px; height: 6px; border-radius: var(--r-full);
+              background: rgb(var(--accent-rgb) / 0.20); overflow: clip; position: relative; }
+  .mk-fill { height: 100%; background: var(--accent); }
+  .mk-sweep { position: absolute; height: 100%; width: 40%; border-radius: var(--r-full);
+              background: var(--accent); animation: mk-sweep 1.4s var(--ease-out) infinite; }
+  @keyframes mk-sweep { 0% { left: -40%; } 100% { left: 100%; } }
+  @media (prefers-reduced-motion: reduce) { .mk-sweep { animation: none; left: 0; } }
+
+  /* ======================================================================
+     REGION 2 — About card update list
+     ====================================================================== */
+  .mk-about { width: 560px; background: var(--card); border: 1px solid var(--border-subtle);
+              border-radius: var(--r-md); padding: var(--sp-4);
+              display: flex; flex-direction: column; gap: var(--sp-3); }
+  .mk-about__title { font-size: var(--font-size-xs); font-weight: var(--weight-semibold);
+                     color: var(--tx2); margin: 0; }
+
+  .mk-actions { display: flex; align-items: center; gap: var(--sp-3); }
+  .mk-btn2 { border: 1px solid var(--border); background: var(--fill); color: var(--tx1);
+             border-radius: var(--r-sm); padding: var(--sp-1) var(--sp-3);
+             font: inherit; cursor: pointer; }
+  .mk-checked { font-size: var(--font-size-2xs); color: var(--tx4); }
+
+  .mk-list { display: flex; flex-direction: column; gap: var(--sp-2); }
+  /* ONE row shape for every target. The four columns are fixed in this order:
+     dot · name · versions · action. */
+  .mk-row { display: flex; align-items: center; gap: var(--sp-2);
+            font-size: var(--font-size-2xs); }
+  .mk-dot { flex-shrink: 0; width: var(--step-dot); height: var(--step-dot);
+            border-radius: var(--r-full); background: var(--tx4); }
+  .mk-dot[data-tone="ok"]     { background: var(--ok); }
+  .mk-dot[data-tone="action"] { background: var(--accent); }
+  .mk-dot[data-tone="error"]  { background: var(--danger); }
+  .mk-name { color: var(--tx1); }
+  /* Versions are MONO so the digits align down the column and a version
+     change is legible at a glance. Quiet tier — they are reference, not the
+     message. */
+  .mk-ver { flex: 1; min-width: 0; font-family: var(--font-mono);
+            color: var(--tx4); overflow: hidden; text-overflow: ellipsis;
+            white-space: nowrap; }
+  .mk-ver strong { color: var(--tx2); font-weight: var(--weight-medium); }
+  .mk-note { color: var(--tx4); flex-shrink: 0; }
+  .mk-link { color: var(--accent); text-decoration: none; flex-shrink: 0; }
+</style>
+</head>
+<body>
+
+<p class="cap">.mk-bar-one — exactly ONE target available</p>
+<div class="frame">
+  <div class="mk-bar mk-bar-one" data-tone="accent">
+    <span class="mk-bar__text">Claude Code has an update available</span>
+    <button class="mk-btn">Update</button>
+    <button class="mk-x" aria-label="Dismiss update">✕</button>
+  </div>
+</div>
+<p class="note">Singular copy names the ONE thing. Never "1 update available" —
+that is a count nobody needed. The phrasing "&lt;label&gt; has an update available"
+is used for ALL six targets so no label needs an article or special-casing. Version numbers are deliberately absent from the
+bar: they belong in Settings, and they push the names out of a one-line bar.</p>
+
+<p class="cap">.mk-bar-many — 2 or more targets available</p>
+<div class="frame">
+  <div class="mk-bar mk-bar-many" data-tone="accent">
+    <span class="mk-bar__text">3 updates available <span class="mk-bar__names">· Manta&nbsp;UI, the box, Claude&nbsp;Code</span></span>
+    <button class="mk-btn">Update all</button>
+    <button class="mk-x" aria-label="Dismiss update">✕</button>
+  </div>
+</div>
+<p class="note">Names are listed in the FIXED display order (Manta UI, the box,
+opencode, then CLIs alphabetically) — never in completion or discovery order,
+which would make the same state render differently twice. Past three names the
+tail collapses: "4 updates available · Manta UI, the box, opencode +1 more".</p>
+
+<p class="cap">.mk-bar-step — running, determinate</p>
+<div class="frame">
+  <div class="mk-bar mk-bar-step" data-tone="accent">
+    <span class="mk-bar__text">Updating Claude Code (2/7)</span>
+    <div class="mk-track" role="progressbar" aria-valuenow="2" aria-valuemin="1" aria-valuemax="7">
+      <div class="mk-fill" style="width: 28%"></div>
+    </div>
+  </div>
+</div>
+
+<p class="cap">.mk-bar-busy — running, indeterminate (restart / desktop install)</p>
+<div class="frame">
+  <div class="mk-bar mk-bar-busy" data-tone="accent">
+    <span class="mk-bar__text">Restarting the box…</span>
+    <div class="mk-track" role="progressbar" aria-label="Restarting the box">
+      <div class="mk-sweep"></div>
+    </div>
+  </div>
+</div>
+<p class="note">While busy the bar shows NO action and NO dismiss — today's
+behaviour, unchanged. One label at a time; the orchestrator owns which.</p>
+
+<p class="cap">.mk-bar-required — mandatory, non-dismissible</p>
+<div class="frame">
+  <div class="mk-bar mk-bar-required" data-tone="accent">
+    <span class="mk-bar__text">Manta UI must be updated to keep working with this box</span>
+    <button class="mk-btn">Update</button>
+  </div>
+</div>
+<p class="note">Same bar, no ✕. Mandatory is a FLAG on the aggregate, not a
+separate banner — that is what removes the version-skew bar as its own case.</p>
+
+<p class="cap">.mk-bar-failed — an update failed (NEW tone)</p>
+<div class="frame">
+  <div class="mk-bar mk-bar-failed" data-tone="danger">
+    <span class="mk-bar__text">Update failed: the download could not be verified</span>
+    <button class="mk-btn">Download manually</button>
+    <button class="mk-x" aria-label="Dismiss update">✕</button>
+  </div>
+</div>
+<p class="note">The ONLY new visual token pairing in this spec: --danger-rgb at
+the same 0.10 / 0.30 / 0.20 alphas the accent tone already uses. A failure
+rendered in the accent tint is the bug this fixes.</p>
+
+<p class="cap">.mk-about — Settings › General › About</p>
+<div class="mk-about">
+  <p class="mk-about__title">About</p>
+
+  <div class="mk-actions">
+    <button class="mk-btn2">Check for updates</button>
+    <span class="mk-checked">Checked 14:32:05</span>
+  </div>
+
+  <div class="mk-list">
+    <div class="mk-row">
+      <span class="mk-dot" data-tone="action"></span>
+      <span class="mk-name">Manta UI</span>
+      <span class="mk-ver">0.0.39 → <strong>0.0.40</strong></span>
+      <button class="mk-btn">Update</button>
+    </div>
+    <div class="mk-row">
+      <span class="mk-dot" data-tone="ok"></span>
+      <span class="mk-name">The box</span>
+      <span class="mk-ver">1.4.2</span>
+      <span class="mk-note">Up to date</span>
+    </div>
+    <div class="mk-row">
+      <span class="mk-dot" data-tone="action"></span>
+      <span class="mk-name">opencode</span>
+      <span class="mk-ver">1.18.10 → <strong>1.18.18</strong></span>
+      <button class="mk-btn">Update</button>
+    </div>
+    <div class="mk-row">
+      <span class="mk-dot" data-tone="action"></span>
+      <span class="mk-name">Claude Code</span>
+      <span class="mk-ver">2.1.233 → <strong>2.1.234</strong></span>
+      <button class="mk-btn">Update</button>
+    </div>
+    <div class="mk-row">
+      <span class="mk-dot" data-tone="muted"></span>
+      <span class="mk-name">Codex</span>
+      <span class="mk-ver">0.147.0</span>
+      <a class="mk-link" href="#">Update manually ↗</a>
+    </div>
+    <div class="mk-row">
+      <span class="mk-dot" data-tone="error"></span>
+      <span class="mk-name">Kimi Code</span>
+      <span class="mk-ver">1.2.0</span>
+      <span class="mk-note">Couldn't check</span>
+    </div>
+  </div>
+</div>
+<p class="note">One row shape, six instances. A target the box does NOT have
+installed produces no row at all — the list is built from what exists, never
+from a hardcoded roster. "Couldn't check" is --danger and is NEVER rendered as
+"Up to date": an unanswerable check is not a clean bill of health. A target
+whose upgrade command we cannot determine gets the muted dot and a link, never
+a button that would run the wrong thing.</p>
+
+</body>
+</html>
