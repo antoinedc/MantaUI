@@ -740,6 +740,22 @@ final class ChatSessionStore: ObservableObject {
                 // failed fetch says nothing either way — leave it alone.
                 if !didFail { hasEarlier = loaded.count >= limit }
                 if !didFail || isFirstLoad {
+                    // BET-1125 — never let a racing EMPTY refetch clobber a
+                    // just-hydrated transcript (the blank-chat-on-open bug). A
+                    // pre-existing session's FIRST load hydrates its history
+                    // (e.g. 6 rows); a ~1.4s-later refetch — from a connection
+                    // sink or stream turn-boundary edge — can transiently return
+                    // no tail, and overwriting with `[]` wiped the screen to
+                    // blank. A NEWLY CREATED / CLEARED session is always a
+                    // fresh store whose FIRST load returns empty, and that empty
+                    // IS authoritative (transcript is still empty, or
+                    // `isFirstLoad` is true) — so a populated `transcript` only
+                    // ever reaches here when real history must be kept. A genuine
+                    // clear never rebuilds against old data: it swaps the session
+                    // id and rebuilds the store (ChatScreen.clearSession).
+                    if loaded.isEmpty, !transcript.isEmpty, !isFirstLoad {
+                        return
+                    }
                     messages = loaded
                     voiceNoteMap = ChatTranscriptMapper.buildVoiceNoteMap(messages: loaded, notes: voiceNotes)
                     transcript = ChatTranscriptMapper.blocks(from: loaded, voiceNotes: voiceNotes)
