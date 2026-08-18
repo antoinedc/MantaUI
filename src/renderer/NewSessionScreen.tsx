@@ -33,6 +33,7 @@ import {
   Loader2,
   Mic,
   Paperclip,
+  RotateCw,
 } from "lucide-react";
 import { useStore } from "./store";
 import { Chip } from "./Chip";
@@ -61,7 +62,13 @@ import {
   zeroStateMode,
   type RepoRow,
 } from "./chatUtils";
-import { deriveProjectName, promptWindowName, uniqueSessionName } from "../shared/projectName.mjs";
+import {
+  deriveProjectName,
+  generateProjectName,
+  promptWindowName,
+  slugifyProjectName,
+  uniqueSessionName,
+} from "../shared/projectName.mjs";
 import type { VoicePhase } from "./voice";
 import type {
   ForgeCliStatus,
@@ -145,6 +152,12 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
 
   // ---- local (non-persisted) UI state ----
   const [pickerOpen, setPickerOpen] = useState(false);
+  // What the folder picker is editing right now: the composer's cwd ("cwd",
+  // today's behaviour) or the scratch root ("root", BET-1093). Default "cwd".
+  const [pickerTarget, setPickerTarget] = useState<"cwd" | "root">("cwd");
+  // Entry names returned by fsListDirs(scratchRoot), the local collision hint
+  // for scratch mode (BET-1093 §5).
+  const [fsEntries, setFsEntries] = useState<Set<string>>(new Set());
   const [worktrees, setWorktrees] = useState<WorktreeInfo[] | null>(null);
   const [isGitRepo, setIsGitRepo] = useState(false);
   const [sending, setSending] = useState(false);
@@ -381,11 +394,12 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
     }
   };
 
-  // The clone root [S6] proposes inline: the box's real home dir + `/projects`,
-  // or the common parent of the repos the probe found when they share one.
-  // Editable inside the picker. When homeDir is unknown the root is empty and
-  // the clone button stays disabled — never invent a fallback string.
-  const proposedCloneRoot = useMemo(() => {
+  // The proposed workspace root: the box's real home dir + `/projects`, or the
+  // common parent of the repos the probe found when they share one. One memo,
+  // two consumers — the GitHub clone root [S6] and scratch mode's `scratchRoot`
+  // (BET-1093). Editable inside the picker. When homeDir is unknown the root is
+  // empty and callers stay disabled — never invent a fallback string.
+  const proposedWorkspaceRoot = useMemo(() => {
     const dirs = probeRepos
       .map((r) => (r.path?.includes("/") ? r.path.split("/").slice(0, -1).join("/") : ""))
       .filter(Boolean);
@@ -399,7 +413,45 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
     return common && common !== "/" ? common : homeDir ? `${homeDir}/projects` : "";
   }, [probeRepos, homeDir]);
 
+  // BET-1093: "Start from scratch" — flip this draft into scratch mode and name
+  // it immediately (generation is local + instant, so the composer never opens
+  // with an empty-name state and Create is never blocked on naming).
+  const startScratch = () =>
+    updateDraft(draftId, {
+      scratch: true,
+      projectName: generateProjectName(),
+      scratchRoot: proposedWorkspaceRoot,
+    });
 
+  // Collision hint for scratch mode: the entry names under scratchRoot plus
+  // every existing project session. Non-fatal — an unreadable root yields an
+  // empty set and no hint.
+  const scratchTaken = useMemo(() => {
+    const s = new Set(fsEntries);
+    for (const p of existingProjects) s.add(p.tmuxSession);
+    return s;
+  }, [fsEntries, existingProjects]);
+
+  useEffect(() => {
+    if (!draft.scratch || !draft.scratchRoot) {
+      setFsEntries(new Set());
+      return;
+    }
+    let cancelled = false;
+    window.api
+      .fsListDirs(draft.scratchRoot)
+      .then((listing) => {
+        if (cancelled) return;
+        setFsEntries(new Set((listing?.entries ?? []).map((e) => e.name)));
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setFsEntries(new Set());
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [draft.scratch, draft.scratchRoot]);
 
   // Model state — the SHARED cached catalog (same hook as ChatPanel), so the
   // picker renders its last-known models synchronously on remount instead of
@@ -512,22 +564,37 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   const submit = async () => {
     if (sending) return;
     const text = draft.input.trim();
-    if (!text) return;
+    if (!text && !draft.scratch) return;
     setSending(true);
     setError(null);
 
     try {
-      // Resolve folder + (optionally) a fresh worktree once, up front.
+      // Scratch mode: create the empty project directory first (the server
+      // slugifies + de-dups the name and returns the real absolute path). Its
+      // `createDir` must NOT ride the session call below — the dir exists now.
+      let scratchPath: string | undefined;
+      if (draft.scratch) {
+        const res = await window.api.projectCreateScratch({
+          root: draft.scratchRoot,
+          name: draft.projectName,
+        });
+        scratchPath = res.path;
+      }
+      // Resolve folder + (optionally) a fresh worktree once, up front. The
+      // worktree block is entirely skipped in scratch mode (nothing to branch
+      // from).
       let worktreePath: string | undefined;
-      if (draft.wantWorktree && isGitRepo) {
+      if (!draft.scratch && draft.wantWorktree && isGitRepo) {
         const wt = await window.api.gitAddWorktree({ cwd: draft.cwd, name: draft.worktreeBranch });
         worktreePath = wt.path;
       }
-      const dir = worktreePath ?? draft.cwd;
+      const dir = scratchPath ?? worktreePath ?? draft.cwd;
       const newProject = isNewProject;
+      // The session name comes from the REAL directory (the server may have
+      // suffixed / slugified the scratch name) — the folder is the truth.
       const sessionName = newProject
         ? uniqueSessionName(
-            deriveProjectName(draft.cwd),
+            deriveProjectName(dir),
             new Set(existingProjects.map((p) => p.tmuxSession)),
           )
         : projectName!;
@@ -538,7 +605,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
             cwd: dir,
             windowName: "default",
             chatMode: true,
-            ...(worktreePath ? {} : { createDir: true }),
+            ...(worktreePath || draft.scratch ? {} : { createDir: true }),
           })
         : await window.api.tmuxNewWindow({
             sessionName,
@@ -563,7 +630,8 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
       // it through its own optimistic path) and navigate to the new session.
       // The plan flag rides the same one-shot channel so the draft's plan mode
       // lands on the session's FIRST turn (see ChatPanel's autoSubmit effect).
-      if (sessionId) {
+      // Only queue when there IS a prompt — scratch mode may submit empty.
+      if (sessionId && text) {
         setAutoSubmitPrompt({
           sid: sessionId,
           text,
@@ -693,14 +761,22 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   // git repo, so the worktree intent can't be honored yet. Render the chip
   // unchecked and enabled so the picker can choose a folder first.
   const emptyWorktree = isNewProject && !isGitRepo;
-  const worktreeChipEnabled = emptyWorktree || isGitRepo;
+  // A repo with no commits has nothing to branch from, and an empty scratch
+  // project is by definition commit-less — force the worktree checkbox off.
+  const worktreeChipEnabled = !draft.scratch && (emptyWorktree || isGitRepo);
 
   // The repo-probe zero state is the NEW-project zero state only. The
   // new-session-in-an-existing-project variant keeps today's composer
   // untouched, and the "Browse for a folder…" escape from the zero state lands
   // back on today's composer once a folder is picked (degrades to exactly
   // today's behaviour, never a state worse than before the probe existed).
-  const showComposer = !isNewProject || browseChosen;
+  const showComposer = !isNewProject || browseChosen || draft.scratch;
+
+  // Send-button affordance: "Create workspace" when the composer is in scratch
+  // mode with an empty prompt (the action creates the project), otherwise the
+  // standard "Start a session".
+  const createLabel = draft.scratch && !draft.input.trim() ? "Create workspace" : "Start a session";
+  const scratchNameTaken = draft.scratch && !!draft.projectName && scratchTaken.has(draft.projectName);
 
   return (
     // data-screen is the visual harness's handle on this screen (see
@@ -709,7 +785,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
     <div data-screen="welcome" className="h-full flex flex-col items-center justify-center px-8">
       {cloneOpen ? (
         <CloneFromGitHub
-          defaultRoot={proposedCloneRoot}
+          defaultRoot={proposedWorkspaceRoot}
           onCancel={() => setCloneOpen(false)}
           onCloned={(paths) => void setupCloned(paths)}
         />
@@ -718,22 +794,58 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
         {showComposer ? (
         <>
         <div className="text-center space-y-1 mb-4">
-          <h1 className="text-display font-bold tracking-tight text-text">What's up next?</h1>
-          <p className="text-body text-text-faint">
-            Start a session on any folder your box can see.
-          </p>
+          {draft.scratch ? (
+            <>
+              <h1 className="text-display font-bold tracking-tight text-text">Start something new</h1>
+              <p className="text-body text-text-faint">
+                Name it whatever you like — we picked one to get you going.
+              </p>
+            </>
+          ) : (
+            <>
+              <h1 className="text-display font-bold tracking-tight text-text">What's up next?</h1>
+              <p className="text-body text-text-faint">
+                Start a session on any folder your box can see.
+              </p>
+            </>
+          )}
         </div>
 
-        {/* Chip row — folder, then branch + worktree as ONE segmented control. */}
-        <div className="flex items-center gap-2 self-start">
-          <Chip
-            onClick={() => setPickerOpen(true)}
-            title={draft.cwd || "Select folder"}
-          >
-            <FolderIcon size={13} className="shrink-0 text-text-muted" aria-hidden="true" />
-            <span className="truncate max-w-[200px]">{folderLabel}</span>
-            <ChevronDown size={13} className="shrink-0 text-text-faint" aria-hidden="true" />
-          </Chip>
+        {/* Chip row — in scratch mode the name input + reroll replace the folder
+            chip; the branch chip + worktree checkbox stay in both modes. */}
+        <div className="self-start flex flex-col gap-2">
+        <div className="flex items-center gap-2">
+          {draft.scratch ? (
+            <>
+              <input
+                value={draft.projectName}
+                onChange={(e) =>
+                  updateDraft(draftId, { projectName: slugifyProjectName(e.target.value) })
+                }
+                spellCheck={false}
+                className="h-8 w-[240px] rounded-md border border-accent bg-bg-soft px-3 text-meta font-mono text-text outline-none focus:border-accent"
+                placeholder="project-name"
+                aria-label="Project name"
+              />
+              <IconButton
+                icon={<RotateCw />}
+                label="Pick another name"
+                onClick={() => updateDraft(draftId, { projectName: generateProjectName() })}
+              />
+            </>
+          ) : (
+            <Chip
+              onClick={() => {
+                setPickerTarget("cwd");
+                setPickerOpen(true);
+              }}
+              title={draft.cwd || "Select folder"}
+            >
+              <FolderIcon size={13} className="shrink-0 text-text-muted" aria-hidden="true" />
+              <span className="truncate max-w-[200px]">{folderLabel}</span>
+              <ChevronDown size={13} className="shrink-0 text-text-faint" aria-hidden="true" />
+            </Chip>
+          )}
 
           {draft.wantWorktree && isGitRepo ? (
             <input
@@ -767,6 +879,30 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
           />
         </div>
 
+        {draft.scratch && (
+          <div className="text-meta text-text-faint font-mono">
+            ↳ {draft.scratchRoot}/{draft.projectName} ·{" "}
+            <button
+              type="button"
+              onClick={() => {
+                setPickerTarget("root");
+                setPickerOpen(true);
+              }}
+              className="text-accent-tx underline decoration-dotted"
+            >
+              edit
+            </button>
+          </div>
+        )}
+
+        {scratchNameTaken && (
+          <span className="text-meta text-warn">
+            {draft.projectName} already exists — will create{" "}
+            {uniqueSessionName(draft.projectName, scratchTaken)}
+          </span>
+        )}
+        </div>
+
         {/* Composer — a single tall input card. */}
         <div
           className={
@@ -780,7 +916,11 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
             value={draft.input}
             onChange={(e) => updateDraft(draftId, { input: e.target.value })}
             onKeyDown={onKeyDown}
-            placeholder="Describe a task or ask a question"
+            placeholder={
+              draft.scratch
+                ? "Describe a task, or leave it empty and just start"
+                : "Describe a task or ask a question"
+            }
             rows={3}
             className="flex-1 w-full bg-transparent border-0 text-prose text-text outline-none resize-none placeholder:text-text-faint"
             spellCheck={false}
@@ -788,14 +928,14 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
 
           <button
             onClick={() => void submit()}
-            disabled={sending || !draft.input.trim()}
-            aria-label="Start a session"
+            disabled={sending || (!draft.input.trim() && !draft.scratch)}
+            aria-label={createLabel}
             title={
               sending
                 ? "Starting…"
                 : draft.input.trim()
                   ? "Start a session"
-                  : "Describe a task to start"
+                  : createLabel
             }
             className="shrink-0 w-7 h-7 rounded-sm bg-fill text-text-faint inline-grid place-items-center hover:text-text hover:bg-fill-hover disabled:opacity-50"
           >
@@ -880,7 +1020,10 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
                 </div>
                 <ZeroStateActions
                   className="mt-4"
-                  actions={[{ label: "Browse for a folder…", tone: "default", onClick: () => setPickerOpen(true) }]}
+                  actions={[
+                    { label: "Browse for a folder…", tone: "default", onClick: () => setPickerOpen(true) },
+                    { label: "Start from scratch", tone: "default", onClick: startScratch },
+                  ]}
                 />
               </>
             ) : zeroState === "degraded" ? (
@@ -893,7 +1036,10 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
                 </div>
                 <ZeroStateActions
                   className="justify-center mt-2"
-                  actions={[{ label: "Browse for a folder…", tone: "primary", onClick: () => setPickerOpen(true) }]}
+                  actions={[
+                    { label: "Browse for a folder…", tone: "primary", onClick: () => setPickerOpen(true) },
+                    { label: "Start from scratch", tone: "default", onClick: startScratch },
+                  ]}
                 />
               </>
             ) : zeroState === "fresh" ? (
@@ -911,6 +1057,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
                   actions={[
                     { label: "Clone from GitHub…", tone: "primary", onClick: () => setCloneOpen(true) },
                     { label: "Browse for a folder…", tone: "ghost", onClick: () => setPickerOpen(true) },
+                    { label: "Start from scratch", tone: "default", onClick: startScratch },
                   ]}
                 />
               </>
@@ -965,6 +1112,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
                         },
                         { label: "Browse for a folder…", tone: "default", onClick: () => setPickerOpen(true) },
                         { label: "Clone from GitHub…", tone: "default", onClick: () => setCloneOpen(true) },
+                        { label: "Start from scratch", tone: "default", onClick: startScratch },
                       ]}
                     />
                   )
@@ -1048,22 +1196,32 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
 
       <FolderPickerModal
           open={pickerOpen}
-          initialPath={draft.cwd || "~"}
+          initialPath={pickerTarget === "root" ? draft.scratchRoot || "~" : draft.cwd || "~"}
           onSelect={(path) => {
-            updateDraft(draftId, { cwd: path });
-            if (isNewProject) setBrowseChosen(true);
+            if (pickerTarget === "root") {
+              // Editing the scratch root: write it, don't touch cwd/browse.
+              updateDraft(draftId, { scratchRoot: path });
+            } else {
+              updateDraft(draftId, { cwd: path });
+              if (isNewProject) setBrowseChosen(true);
+            }
             setPickerOpen(false);
+            setPickerTarget("cwd");
           }}
           onFanOut={(baseCwd, wts) => {
             updateDraft(draftId, { cwd: baseCwd });
             if (isNewProject) setBrowseChosen(true);
+            setPickerTarget("cwd");
             // Carry the worktree list straight into the submit — the picker
             // stays open and OWNS the in-flight state (its buttons disable and
             // read "Creating…" via fanOutBusy) instead of a second modal.
             void submitFanOut(baseCwd, wts);
           }}
           fanOutBusy={sending}
-          onCancel={() => setPickerOpen(false)}
+          onCancel={() => {
+            setPickerTarget("cwd");
+            setPickerOpen(false);
+          }}
         />
     </div>
   );

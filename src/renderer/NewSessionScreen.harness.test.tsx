@@ -21,7 +21,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { act } from "react";
-import { installMockApi, resetStore, mount, type Harness } from "./testHarness";
+import { installMockApi, resetStore, mount, type Harness, type MockApi } from "./testHarness";
 import { NewSessionScreen } from "./NewSessionScreen";
 import type { NewSessionDraft } from "./store";
 import { useStore } from "./store";
@@ -46,6 +46,9 @@ function draft(overrides: Partial<NewSessionDraft> = {}): NewSessionDraft {
     model: null,
     plan: false,
     input: "",
+    scratch: false,
+    projectName: "",
+    scratchRoot: "",
     ...overrides,
   };
 }
@@ -264,5 +267,191 @@ describe("NewSessionScreen composer parity (BET-1088)", () => {
     const asp = useStore.getState().autoSubmitPrompt;
     expect(asp?.plan).toBe(true);
     expect(asp?.text).toBe("hello");
+  });
+});
+
+// Scratch mode (BET-1093): "Start from scratch" — generated name, slugified
+// typing, reroll, and the create-scratch / session-creation call sequence on
+// submit with and without a prompt.
+describe("NewSessionScreen scratch mode (BET-1093)", () => {
+  let h: Harness | null = null;
+
+  const scratchDraft = (overrides: Partial<NewSessionDraft> = {}): NewSessionDraft =>
+    draft({
+      mode: "new-project",
+      cwd: "/x",
+      wantWorktree: false,
+      scratch: true,
+      projectName: "fresh-app",
+      scratchRoot: "/home",
+      ...overrides,
+    });
+
+  // A helper to set a controlled <input>'s value the way React expects (native
+  // setter + input event) so onChange fires — mirrors typeInto for textareas.
+  function typeIntoInput(el: HTMLInputElement, value: string) {
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      "value",
+    )?.set;
+    setter?.call(el, value);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  function mountScratch(
+    d: NewSessionDraft,
+    apiOverrides: Record<string, unknown> = {},
+    storeOverrides: Partial<ReturnType<typeof useStore.getState>> = {},
+  ): MockApi {
+    const { api } = installMockApi({
+      fsListDirs: () => Promise.resolve({ dir: "/home", entries: [] }),
+      ...apiOverrides,
+    });
+    refreshModelCatalog();
+    refreshAgentCatalog();
+    resetStore({ projects: [], activeDraftId: d.id, drafts: [d], ...storeOverrides });
+    h = mount(<NewSessionScreen draftId={d.id} />);
+    return api;
+  }
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  it("clicking Start from scratch shows the composer with a three-word project name", async () => {
+    // Reach the fresh zero state (probe succeeds, no repos) with a real home.
+    installMockApi({
+      forgeProbe: () => Promise.resolve({ repos: [], cli: null, homeDir: "/home/dev" }),
+      fsListDirs: () => Promise.resolve({ dir: "/home/dev/projects", entries: [] }),
+    });
+    refreshModelCatalog();
+    refreshAgentCatalog();
+    resetStore({ projects: [], activeDraftId: "d-0", drafts: [draft()] });
+    h = mount(<NewSessionScreen draftId="d-0" />);
+    await h!.flush();
+
+    const btn = [...h!.container.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("Start from scratch"),
+    );
+    expect(btn).toBeTruthy();
+    act(() => btn!.click());
+    await h!.flush();
+
+    const nameInput = h!.container.querySelector(
+      'input[aria-label="Project name"]',
+    ) as HTMLInputElement;
+    expect(nameInput).toBeTruthy();
+    expect(nameInput!.value).toMatch(/^[a-z]+-[a-z]+-[a-z]+$/);
+  });
+
+  it("reroll produces a different project name", async () => {
+    const d = scratchDraft();
+    mountScratch(d);
+    await h!.flush();
+
+    const nameInput = h!.container.querySelector(
+      'input[aria-label="Project name"]',
+    ) as HTMLInputElement;
+    const first = nameInput!.value;
+    expect(first).toBe("fresh-app");
+
+    const reroll = [...h!.container.querySelectorAll("button")].find(
+      (b) => b.getAttribute("aria-label") === "Pick another name",
+    );
+    expect(reroll).toBeTruthy();
+    act(() => reroll!.click());
+    await h!.flush();
+
+    const second = (
+      h!.container.querySelector('input[aria-label="Project name"]') as HTMLInputElement
+    ).value;
+    expect(second).not.toBe(first);
+    expect(second).toMatch(/^[a-z]+-[a-z]+-[a-z]+$/);
+  });
+
+  it("slugifies the typed project name as the user types", async () => {
+    const d = scratchDraft();
+    mountScratch(d);
+    await h!.flush();
+
+    const nameInput = h!.container.querySelector(
+      'input[aria-label="Project name"]',
+    ) as HTMLInputElement;
+    act(() => typeIntoInput(nameInput, "My App"));
+    await h!.flush();
+
+    expect(
+      (
+        h!.container.querySelector('input[aria-label="Project name"]') as HTMLInputElement
+      ).value,
+    ).toBe("my-app");
+  });
+
+  it("submit with an empty prompt creates the scratch dir, no createDir, no queued prompt", async () => {
+    const d = scratchDraft({ input: "" });
+    const api = mountScratch(d, {
+      projectCreateScratch: (input: { root: string; name: string }) =>
+        Promise.resolve({ path: `${input.root}/${input.name}`, name: input.name }),
+      tmuxNewSession: () =>
+        Promise.resolve({ sessionId: "ses-x", windowIndex: 0, projects: [] }),
+    }, {
+      // Neutralize dismissDraft so the post-submit draft removal doesn't drop
+      // the directly-mounted screen's hooks (mirrors the composer-parity tests).
+      dismissDraft: () => {},
+    });
+    await h!.flush();
+
+    const create = h!.container.querySelector(
+      'button[aria-label="Create workspace"]',
+    ) as HTMLButtonElement;
+    expect(create, "expected the Create workspace button in scratch mode").toBeTruthy();
+    act(() => create.click());
+    await h!.flush();
+
+    const ps = api.calls.projectCreateScratch ?? [];
+    expect(ps.length).toBe(1);
+    expect(ps[0][0]).toEqual({ root: "/home", name: "fresh-app" });
+
+    const ts = api.calls.tmuxNewSession ?? [];
+    expect(ts.length).toBe(1);
+    const arg = ts[0][0] as Record<string, unknown>;
+    expect(arg.cwd).toBe("/home/fresh-app");
+    expect("createDir" in arg).toBe(false);
+
+    expect(useStore.getState().autoSubmitPrompt).toBeNull();
+  });
+
+  it("submit with a prompt creates the dir AND queues the prompt", async () => {
+    const d = scratchDraft({ input: "wire it up" });
+    const api = mountScratch(d, {
+      projectCreateScratch: (input: { root: string; name: string }) =>
+        Promise.resolve({ path: `${input.root}/${input.name}`, name: input.name }),
+      tmuxNewSession: () =>
+        Promise.resolve({ sessionId: "ses-y", windowIndex: 0, projects: [] }),
+    }, {
+      dismissDraft: () => {},
+    });
+    await h!.flush();
+
+    const start = h!.container.querySelector(
+      'button[aria-label="Start a session"]',
+    ) as HTMLButtonElement;
+    expect(start).toBeTruthy();
+    act(() => start.click());
+    await h!.flush();
+
+    const ps = api.calls.projectCreateScratch ?? [];
+    expect(ps.length).toBe(1);
+    expect(ps[0][0]).toEqual({ root: "/home", name: "fresh-app" });
+
+    const ts = api.calls.tmuxNewSession ?? [];
+    expect(ts.length).toBe(1);
+    const arg = ts[0][0] as Record<string, unknown>;
+    expect(arg.cwd).toBe("/home/fresh-app");
+    expect("createDir" in arg).toBe(false);
+
+    const asp = useStore.getState().autoSubmitPrompt;
+    expect(asp?.text).toBe("wire it up");
   });
 });
