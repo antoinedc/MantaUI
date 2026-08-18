@@ -170,6 +170,10 @@ test("newWindow chatMode:true creates an opencode session AND stamps @manta-sess
   // (1) opencode session created in the window's cwd.
   assert.equal(oc.created.length, 1, "one opencode session created");
   assert.equal(oc.created[0].directory, cwd);
+  // (0) Empty title so opencode auto-titles from the first user message —
+  // a seeded "workspace / window" title is what the auto-rename first-name
+  // path would read back and stamp as "manta / im" (BET-1100).
+  assert.equal(oc.created[0].title, "", "chat session created with an empty title (no workspace-prefixed compound)");
   // (2) holder pane launched (sleep infinity) rather than the default shell.
   const newWin = cmds.find((c) => c.args.includes("new-window"));
   assert.ok(newWin, "new-window issued");
@@ -221,6 +225,7 @@ test("newSession chatMode:true creates an opencode session AND stamps @manta-ses
   }
   assert.equal(oc.created.length, 1, "one opencode session created");
   assert.equal(oc.created[0].directory, cwd);
+  assert.equal(oc.created[0].title, "", "chat session created with an empty title so opencode auto-titles (BET-1100)");
   const newSess = cmds.find((c) => c.args.includes("new-session"));
   assert.ok(newSess, "new-session issued");
   assert.ok(newSess.args.includes(CHAT_HOLDER_CMD), "holder cmd passed to new-session");

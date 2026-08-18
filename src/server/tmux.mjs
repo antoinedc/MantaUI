@@ -477,9 +477,13 @@ export async function newSession({ name, cwd, windowName, createDir, chatMode, e
   // making a second one.
   const sid =
     existingSessionId ??
-    (await maybeCreateChatSession(
-      oc, chatMode, dir, `${name} / ${windowName ?? "default"}`, permission,
-    ));
+    // Pass an EMPTY title so opencode auto-generates the session's real title
+    // from its first user message. Seeding a compound `${name} / ${windowName}`
+    // title here disables opencode's auto-title and the BET-1018 auto-rename
+    // first-name path then reads that workspace-prefixed string back and
+    // renames the window to "workspace / fragment" (BET-1100). The tmux window
+    // name itself comes from `windowName` below, not from this title.
+    (await maybeCreateChatSession(oc, chatMode, dir, "", permission));
   const idx = await newSessionGetIndex(name, dir, windowName, !!chatMode);
   await applySessionSurvivability(name);
   if (sid) await restampSessionId(name, idx, sid);
@@ -506,9 +510,9 @@ export async function newWindow({ sessionName, windowName, cwd, chatMode, existi
   const dir = resolveCwdOrThrow(cwd);
   const sid =
     existingSessionId ??
-    (await maybeCreateChatSession(
-      oc, chatMode, dir, `${sessionName} / ${windowName}`, permission,
-    ));
+    // Empty title → opencode auto-titles from the first user message (BET-1100);
+    // see the newSession call for why the compound form poisons auto-rename.
+    (await maybeCreateChatSession(oc, chatMode, dir, "", permission));
   let idx;
   try {
     idx = await newWindowGetIndex(sessionName, windowName, dir, !!chatMode);

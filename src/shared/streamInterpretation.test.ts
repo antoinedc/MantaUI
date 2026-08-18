@@ -1966,6 +1966,13 @@ describe("sanitizeGeneratedTitle", () => {
     );
   });
 
+  it("preserves a contraction's apostrophe — never strips 'I'm' to 'Im' (BET-1100)", () => {
+    expect(sanitizeGeneratedTitle("I'm just checking out the manta setup")).toBe(
+      "I'm just checking out the manta",
+    );
+    expect(sanitizeGeneratedTitle("I'm FIXING IT")).toBe("I'm FIXING IT");
+  });
+
   it("returns empty for null/blank (caller must skip the rename)", () => {
     expect(sanitizeGeneratedTitle(null)).toBe("");
     expect(sanitizeGeneratedTitle("   ")).toBe("");
