@@ -45,7 +45,17 @@ extension TranscriptBlock {
             return "p\(text.hashValue)@\(at?.timeIntervalSince1970 ?? 0)"
         case .file(let attachment):
             return "f" + attachmentIdentity(attachment)
-        case .steps(let content): return "s" + content.rows.map(\.id).joined(separator: "|")
+        // The FIRST row's id, not all of them joined. A step group grows by APPENDING
+        // rows, so the first row's id is fixed for the life of the group while a
+        // concatenation changes on every new step — which made the diff see a
+        // different row and delete + re-insert the whole group per tool call. Same
+        // stable-identity treatment `ToolStep.id` already gets (see the comment on
+        // `ToolStep.id`), applied to the group that contains them.
+        //
+        // Two step groups can never collide: a row id is a tool callID (or the
+        // part id), unique per call. An empty group falls back to a constant, and
+        // `uniqueTranscriptRows` suffixes any duplicate anyway.
+        case .steps(let content): return "s" + (content.rows.first?.id ?? "empty")
         case .notice(let text, let kind): return "n\(kind)\(text.hashValue)"
         case .queuedPrompt(let text): return "q\(text.hashValue)"
         }
