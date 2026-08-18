@@ -101,3 +101,53 @@ export async function transcribeAudio({ buffer, mime, apiKey, model }) {
   const json = /** @type {{ text?: string }} */ (await res.json());
   return { text: typeof json.text === "string" ? json.text : "" };
 }
+
+// ---------------------------------------------------------------------------
+// Orpheus TTS (narration)
+// ---------------------------------------------------------------------------
+// The on-call CTO (BET-1166) narrates tool boundaries with a fast, light
+// voice distinct from the Realtime model. Groq serves canopylabs/orpheus over
+// its OpenAI-compatible /audio/speech endpoint. Runs in main / the server only
+// — the API key never leaves the trusted process. Returns raw audio bytes +
+// mime so the renderer can play them through WebAudio/HTMLMediaElement.
+
+const GROQ_ORPHEUS_MODEL = "canopylabs/orpheus-v1-english";
+const GROQ_ORPHEUS_VOICE = "tara";
+
+/**
+ * Synthesize short narration audio via Groq Orpheus.
+ *
+ * @param {object} args
+ * @param {string}           args.text    — the text to speak
+ * @param {string}           args.apiKey  — required; throws if empty
+ * @param {string}           [args.model] — defaults to canopylabs/orpheus-v1-english
+ * @param {string}           [args.voice] — defaults to "tara"
+ * @param {"mp3"|"wav"|"opus"} [args.format] — audio response format, default "mp3"
+ * @returns {Promise<{ buffer: Uint8Array, mime: string }>}
+ */
+export async function synthesizeSpeech({ text, apiKey, model, voice, format = "mp3" }) {
+  if (!apiKey || typeof apiKey !== "string") {
+    throw new Error("Groq API key not configured. Add it in Settings.");
+  }
+  if (!text || !text.trim()) throw new Error("Nothing to say.");
+  const mime = format === "wav" ? "audio/wav" : format === "opus" ? "audio/opus" : "audio/mpeg";
+  const res = await fetch(`${GROQ_BASE}/audio/speech`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${apiKey}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: model || GROQ_ORPHEUS_MODEL,
+      voice: voice || GROQ_ORPHEUS_VOICE,
+      input: text.trim(),
+      response_format: format,
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Groq speech ${res.status}: ${body.slice(0, 200)}`);
+  }
+  const buf = Buffer.from(await res.arrayBuffer());
+  return { buffer: new Uint8Array(buf), mime };
+}

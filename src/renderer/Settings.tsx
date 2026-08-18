@@ -454,6 +454,7 @@ export function Settings({
   const cacheTtl = useStore((s) => s.cacheTtl);
   const groqApiKey = useStore((s) => s.groqApiKey);
   const voiceTranscriptionModel = useStore((s) => s.voiceTranscriptionModel);
+  const openaiApiKey = useStore((s) => s.openaiApiKey);
   const allowAgentPush = useStore((s) => s.allowAgentPush);
   const downloadsDir = useStore((s) => s.downloadsDir);
   const worktreePerSession = useStore((s) => s.worktreePerSession);
@@ -505,6 +506,7 @@ export function Settings({
       cacheTtl,
       groqApiKey,
       voiceTranscriptionModel,
+      openaiApiKey,
       allowAgentPush,
       downloadsDir,
       worktreePerSession,
@@ -520,7 +522,7 @@ export function Settings({
       "cto.alwaysListening": cto?.alwaysListening ?? false,
       "cto.parkedBehavior": cto?.parkedBehavior ?? "auto-open",
     }),
-    [cacheTtl, groqApiKey, voiceTranscriptionModel, allowAgentPush, downloadsDir, worktreePerSession, worktreeCleanOnClose, uploadCleanupHours, voiceNoteTtlHours, theme, autoRenameSessions, alwaysShowUsage, cto],
+    [cacheTtl, groqApiKey, voiceTranscriptionModel, openaiApiKey, allowAgentPush, downloadsDir, worktreePerSession, worktreeCleanOnClose, uploadCleanupHours, voiceNoteTtlHours, theme, autoRenameSessions, alwaysShowUsage, cto],
   );
 
   const commitKey = async (entry: SettingEntry, nextValue: unknown) => {

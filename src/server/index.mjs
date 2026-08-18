@@ -39,6 +39,7 @@ import { createLogShipper, captureConsole, resolveAxiomConfig } from "../shared/
 }
 import { createBus, handleEventsRequest, attachEventsWs } from "./events.mjs";
 import { attachPtyWs } from "./ptyWs.mjs";
+import { attachCallWs } from "./callWs.mjs";
 import { buildHandlers, handleRpcRequest } from "./rpc.mjs";
 import { startStatusPoller } from "./status.mjs";
 import { createSyncState } from "./syncState.mjs";
@@ -943,11 +944,34 @@ void maybeEnsureCtoAgent();
 // sets it), so every event takes the PARKED route → dedupe → the existing
 // notification router (fireNotify). No parallel notify path.
 const ctoInbound = cto.createCtoInbound({
-  isCallActive: () => false, // Issue 3 sets the live flag; until then always parked
-  ctoSessionID: null, // resolved in Issue 3 when the live route flips on
+  isCallActive: () => callActive,
+  ctoSessionID: null, // issue 3 wires the live route below via the active call engine
   fireNotify: (args) => push.fireNotify(args),
-  sendPrompt: (args) => promptDelivery.deliver(args),
+  sendPrompt: async ({ text }) => {
+    // LIVE route (issue 3): while a call is open, inject the inbound event as
+    // a turn into the active Realtime session so the CTO speaks it. Parked
+    // events never reach here (isCallActive guards the branch).
+    const engine = activeCallEngine;
+    if (engine && text) {
+      try {
+        engine.injectTurn(typeof text === "string" ? text : String(text ?? ""));
+      } catch (e) {
+        console.warn("[cto] live inject failed:", e?.message ?? e);
+      }
+    }
+  },
 });
+
+// The server-side "call active" flag issue 2's inbound funnel reads. Set by
+// the /call WS handler (issue 3): true while a call window is connected, with
+// a reference to its engine so live inbound events can be spoken. Parked state
+// (window hidden) keeps the flag false → events take the existing push route.
+let callActive = false;
+let activeCallEngine = null;
+function setCallActive(active, engine) {
+  callActive = !!active;
+  activeCallEngine = active && engine ? engine : null;
+}
 
 // Which read a watcher's surface maps to. EXTERNAL surfaces (multica) go
 // through multica.mjs; NATIVE surfaces (schedule, delegate) through the box's
@@ -2983,6 +3007,25 @@ const handleUpgrade = (req, socket, head) => {
     // or ?token=<box_token>) connect here for a low-latency raw-byte
     // terminal stream.
     wss.handleUpgrade(req, socket, head, (ws) => attachPtyWs(ws, url));
+    return;
+  }
+  if (url.pathname === "/call") {
+    // On-call CTO voice window (BET-1166). The renderer's call window streams
+    // opus mic frames here; the box relays to OpenAI Realtime (key server-side).
+    wss.handleUpgrade(req, socket, head, (ws) =>
+      attachCallWs(ws, url, {
+        dispatchCto: (name, args, ctx) => getCtoEngine().dispatch(name, args, {
+          ...ctx,
+          gate: ctx?.gate ?? (() => "confirm"),
+        }),
+        approveConfirm: (id) => getCtoEngine().approveConfirm(id),
+        rejectConfirm: (id) => getCtoEngine().rejectConfirm(id),
+        configGet: () => local.configGet(),
+        listTools: () => getCtoEngine().listTools(),
+        setCallActive,
+        onNarrate: () => {}, // narration events flow out via engine.publish
+      }),
+    );
     return;
   }
   socket.destroy();
