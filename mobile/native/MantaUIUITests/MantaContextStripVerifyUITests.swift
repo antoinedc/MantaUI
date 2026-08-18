@@ -62,18 +62,28 @@ final class MantaContextStripVerifyUITests: XCTestCase {
         let stripExists = strip.exists
         let stripLabel = strip.exists ? (strip.label) : ""
         let hasNumericPct = stripLabel.range(
-            of: #"^Context \d+ percent$"#, options: .regularExpression) != nil
-
-        print("AX-TREE-BEGIN")
-        print(app.debugDescription)
-        print("AX-TREE-END")
-
-        print("RESULT stripExists=\(stripExists)")
-        print("RESULT stripLabel=\(stripLabel.replacingOccurrences(of: "\n", with: " "))")
+            of: #"^Context \d+ percent"#, options: .regularExpression) != nil
         print("RESULT hasNumericPct=\(hasNumericPct)")
 
         let png = try saveConvergedScreenshot()
         print("RESULT screenshot=\(png.lastPathComponent) bytes=\(try Data(contentsOf: png).count)")
+
+        // BET-1138 KNOWN-reading evidence: open the sheet and capture the
+        // segmented bar (fresh/written/cached) + `of <limit>` header — the
+        // known-read counterpart to testNoMaxContextStateRenders.
+        if strip.exists {
+            strip.tap()
+            let legend = app.staticTexts
+                .matching(NSPredicate(format: "label BEGINSWITH 'fresh'"))
+                .firstMatch
+            let sheetShown = legend.waitForExistence(timeout: 8)
+            usleep(1_000_000)
+            print("RESULT1138 knownSheetShown=\(sheetShown)")
+            print("AX-TREE-BEGIN KNOWN-SHEET")
+            print(app.debugDescription)
+            print("AX-TREE-END KNOWN-SHEET")
+            try saveConvergedScreenshot("bet1138-known-sheet.png")
+        }
 
         XCTAssertTrue(openedChat, "no chat window row ('Chat'/'default') to open")
         XCTAssertTrue(stripExists, "context-strip element not present in accessibility hierarchy")
@@ -90,35 +100,46 @@ final class MantaContextStripVerifyUITests: XCTestCase {
         if app.textFields["onboarding-otp"].waitForExistence(timeout: 3) { pair(app) }
         openChatWindow(app)
 
-        // Poll: keep pushing the no-limit context frame while waiting for the
-        // strip. The fixture's `/__control` send is a no-op until the app's
-        // /events socket is attached, so a single early push is lost; the loop
-        // covers the attach window deterministically.
+        // Keep the no-limit context frame LIVE the whole time — strip capture
+        // through sheet confirm. A fixture `/__control` send is a no-op until
+        // the app's /events socket attaches (so early pushes are lost), AND a
+        // later refetch can evict the context reading, so a single push can
+        // expire before the tap lands. Re-pushing on each iteration covers
+        // both windows deterministically.
         let strip = app.buttons["context-strip"]
-        var pushedAny = false
-        let start = Date()
-        while !strip.exists, Date().timeIntervalSince(start) < 20 {
-            pushedAny = pushControl(action: "context-nolimit", retries: 1) || pushedAny
-            usleep(700_000)
-        }
-        usleep(500_000)
-        print("RESULT1138 pushedAnyNoLimitContext=\(pushedAny)")
-        let stripExists = strip.exists
-        let stripLabel = stripExists ? (strip.label) : ""
-        let hasNumericPct = stripLabel.range(
-            of: #"^Context \d+ percent$"#, options: .regularExpression) != nil
-        print("RESULT1138 stripExists=\(stripExists)")
-        print("RESULT1138 stripLabel=\(stripLabel.replacingOccurrences(of: "\n", with: " "))")
-        print("RESULT1138 stripHasNumericPct=\(hasNumericPct)")
-
-        print("AX-TREE-BEGIN UNKNOWN-STRIP")
-        print(app.debugDescription)
-        print("AX-TREE-END UNKNOWN-STRIP")
-        try saveConvergedScreenshot("bet1138-unknown-strip.png")
-
-        if stripExists { strip.tap() }
         let noMax = app.staticTexts["No max context info for this model"]
-        let sheetShown = noMax.waitForExistence(timeout: 8)
+        var pushedAny = false
+        var stripExists = false
+        var hasNumericPct = false
+        var sheetShown = false
+        let start = Date()
+        while Date().timeIntervalSince(start) < 30 {
+            pushedAny = pushControl(action: "context-nolimit", retries: 1) || pushedAny
+            if strip.exists {
+                if !stripExists {
+                    stripExists = true
+                    let stripLabel = strip.label
+                    hasNumericPct = stripLabel.range(
+                        of: #"^Context \d+ percent"#, options: .regularExpression) != nil
+                    print("RESULT1138 stripExists=\(stripExists)")
+                    print("RESULT1138 stripLabel=\(stripLabel.replacingOccurrences(of: "\n", with: " "))")
+                    print("RESULT1138 stripHasNumericPct=\(hasNumericPct)")
+
+                    print("AX-TREE-BEGIN UNKNOWN-STRIP")
+                    print(app.debugDescription)
+                    print("AX-TREE-END UNKNOWN-STRIP")
+                    try saveConvergedScreenshot("bet1138-unknown-strip.png")
+
+                    strip.tap()
+                }
+                if noMax.exists {
+                    sheetShown = true
+                    break
+                }
+            }
+            usleep(500_000)
+        }
+        print("RESULT1138 pushedAnyNoLimitContext=\(pushedAny)")
         usleep(700_000)
         print("RESULT1138 sheetNoMaxText=\(sheetShown)")
 
@@ -129,7 +150,7 @@ final class MantaContextStripVerifyUITests: XCTestCase {
 
         XCTAssertTrue(pushedAny, "could not push context-nolimit through /__control")
         XCTAssertTrue(stripExists, "context-strip not present in no-max-context state")
-        XCTAssertFalse(hasNumericPct, "unknown-state strip must carry no numeric %: '\(stripLabel)'")
+        XCTAssertFalse(hasNumericPct, "unknown-state strip must carry no numeric %")
         XCTAssertTrue(sheetShown, "'No max context info for this model' never appeared in the sheet")
     }
 

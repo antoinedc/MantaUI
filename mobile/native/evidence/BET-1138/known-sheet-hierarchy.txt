@@ -1,0 +1,54 @@
+On-device context sheet accessibility hierarchy — KNOWN-reading path (hasLimit:true).
+Sheet AX: header '28 % 55k of 0 · Default' and the fresh/written/cached segmented-meter legend.
+NOTE: 'of 0' — the fixture serves no model with a context window (opencode:models -> []), so the selected-model `limit` is nil and formatTokens(nil) reads 0; the segmented bar + legend are what the known path demonstrates.
+SHEET
+        Other, 0x116953700, {{-402.0, -874.0}, {1206.0, 2622.0}}, identifier: 'PopoverDismissRegion', label: 'dismiss popup'
+        Other, 0x116953840, {{8.0, 415.0}, {386.0, 451.0}}
+          Button, 0x116953980, {{164.5, 410.2}, {73.0, 24.0}}, label: 'Sheet Grabber', value: Half screen
+          Other, 0x116953ac0, {{8.0, 415.0}, {386.0, 451.0}}
+            Other, 0x116953c00, {{8.0, 415.0}, {386.0, 451.0}}
+              Other, 0x116953d40, {{8.0, 415.0}, {386.0, 451.0}}
+                Other, 0x116953e80, {{8.0, 415.0}, {386.0, 451.0}}
+                  Other, 0x116960000, {{8.0, 415.0}, {386.0, 451.0}}
+                    NavigationBar, 0x116960140, {{8.0, 430.4}, {386.0, 51.9}}, identifier: 'Context'
+                      StaticText, 0x116960280, {{170.6, 441.6}, {60.5, 19.8}}, label: 'Context'
+                      Other, 0x1169603c0, {{311.7, 434.2}, {63.1, 34.6}}, label: 'Done'
+                        Other, 0x116960500, {{311.7, 434.2}, {63.1, 34.6}}
+                          Button, 0x116960640, {{311.7, 434.2}, {63.1, 34.6}}, label: 'Done'
+                    Other, 0x116960780, {{8.0, 415.0}, {386.0, 451.0}}
+                      Other, 0x1169608c0, {{8.0, 415.0}, {386.0, 451.0}}
+                        Other, 0x116960a00, {{8.0, 415.0}, {386.0, 451.0}}
+                          Other, 0x116960b40, {{8.0, 415.0}, {386.0, 451.0}}
+                            CollectionView, 0x116960c80, {{8.0, 415.0}, {386.0, 451.0}}
+                              Other, 0x116960dc0, {{-7.4, -419.7}, {416.7, 1099.4}}
+                              Other, 0x116960f00, {{8.0, 415.0}, {386.0, 451.0}}
+                                Other, 0x116961040, {{8.0, 415.0}, {386.0, 119.8}}
+                              Other, 0x116961180, {{8.0, 415.0}, {386.0, 451.0}}
+                              Cell, 0x1169612c0, {{23.4, 515.8}, {355.3, 61.1}}
+                                Other, 0x116961400, {{23.4, 515.8}, {355.3, 61.1}}
+                                  Other, 0x116961540, {{23.4, 515.8}, {355.3, 61.1}}
+                                    Other, 0x116961680, {{23.4, 515.8}, {355.3, 61.1}}
+                                Other, 0x1169617c0, {{23.4, 515.8}, {355.3, 61.1}}
+                                  Other, 0x116961900, {{23.4, 515.8}, {355.3, 61.1}}
+                                    Other, 0x116961a40, {{23.4, 515.8}, {355.3, 61.1}}
+                                      StaticText, 0x116961b80, {{23.4, 515.8}, {355.3, 61.1}}, label: '28, %, 55k of 0 · Default'
+                                        StaticText, 0x116961cc0, {{38.7, 530.3}, {34.6, 32.3}}, label: '28'
+                                        StaticText, 0x116961e00, {{81.0, 542.1}, {14.7, 17.3}}, label: '%'
+                                        StaticText, 0x116961f40, {{103.4, 544.0}, {100.8, 15.0}}, label: '55k of 0 · Default'
+                              Cell, 0x116962080, {{23.4, 577.0}, {355.3, 57.0}}
+                                Other, 0x1169621c0, {{23.4, 577.0}, {355.3, 57.0}}
+                                  Other, 0x116962300, {{23.4, 577.0}, {355.3, 57.0}}
+                                    Other, 0x116962440, {{23.4, 577.0}, {355.3, 57.0}}
+                                Other, 0x116962580, {{23.4, 577.0}, {355.3, 57.0}}
+                                  Other, 0x1169626c0, {{23.4, 577.0}, {355.3, 57.0}}
+                                    Other, 0x116962800, {{23.4, 577.0}, {355.3, 57.0}}
+                                      StaticText, 0x116962940, {{38.7, 606.7}, {9.9, 12.8}}, label: '■'
+                                      StaticText, 0x116962a80, {{52.5, 606.7}, {41.6, 12.8}}, label: 'fresh 4k'
+                                      StaticText, 0x116962bc0, {{101.8, 606.7}, {9.9, 12.8}}, label: '■'
+                                      StaticText, 0x116962d00, {{115.5, 606.7}, {44.8, 12.8}}, label: 'written 0'
+                                      StaticText, 0x116962e40, {{168.0, 606.7}, {9.9, 12.8}}, label: '■'
+                                      StaticText, 0x116962f80, {{181.8, 606.7}, {57.3, 12.8}}, label: 'cached 51k'
+                              Other, 0x1169630c0, {{38.7, 576.0}, {324.5, 1.0}}
+                                Other, 0x116963200, {{38.7, 576.0}, {324.5, 1.0}}
+                              Cell, 0x116963340, {{23.4, 634.0}, {355.3, 45.8}}
+                                Other, 0x116963480, {{23.4, 634.0}, {355.3, 45.8}}

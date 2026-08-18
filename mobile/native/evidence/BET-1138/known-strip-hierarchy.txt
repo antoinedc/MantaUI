@@ -1,0 +1,10 @@
+On-device context-strip accessibility hierarchy — KNOWN-reading path (hasLimit:true, fixture `context` control).
+Strip AX: Button 'context-strip' label 'Context 28 percent, cache cold, 12k tokens re-billed on the next message', value 28%.
+STRIP
+                          Button, 0x116951a40, {{12.0, 116.0}, {378.0, 24.0}}, identifier: 'context-strip', label: 'Context 28 percent, cache cold, 12k tokens re-billed on the next message', value: 28 %
+                            StaticText, 0x116951b80, {{12.0, 121.3}, {43.0, 13.3}}, label: 'Context'
+                            Other, 0x116951cc0, {{63.0, 126.0}, {221.7, 4.0}}, value: 28 %
+                              ProgressIndicator, 0x116951e00, {{63.0, 116.0}, {221.7, 24.0}}, value: 28 %
+                            StaticText, 0x116951f40, {{292.7, 121.3}, {26.3, 13.3}}, label: '28%'
+                            StaticText, 0x116952080, {{327.0, 121.3}, {46.7, 13.3}}, label: '12k cold'
+                            Image, 0x1169521c0, {{383.7, 123.3}, {5.7, 9.7}}, identifier: 'chevron.right', label: 'Forward'
