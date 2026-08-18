@@ -174,14 +174,20 @@ enum UsageMeters {
     /// always derivable here. Mirrors the desktop's `computeContextBreakdown`
     /// (src/shared/streamInterpretation.mjs) so both clients agree.
     static func recompute(_ ctx: StreamContextPayload, limit: Double?) -> StreamContextPayload {
-        // The desktop's ASSUMED_CONTEXT_TOKENS fallback — used whenever the
-        // selected model's window is unknown or non-positive, exactly as the
-        // shared `computeContextBreakdown` does.
-        let safeLimit: Double
-        if let limit, limit.isFinite, limit > 0 {
-            safeLimit = limit
-        } else {
-            safeLimit = assumedContextTokens
+        // Unknown selected-model window (nil, non-positive, non-finite) —
+        // mirror the shared `computeContextBreakdown` (BET-1137/1138): signal
+        // "no max context" via hasLimit:false and carry ONLY the raw token
+        // totals. Never fabricate a % against a made-up 200k window.
+        guard let limit, limit.isFinite, limit > 0 else {
+            return StreamContextPayload(
+                freshInput: ctx.freshInput,
+                cacheRead: ctx.cacheRead,
+                cacheWrite: ctx.cacheWrite,
+                totalInput: ctx.totalInput,
+                pct: 0,
+                hasLimit: false,
+                segments: []
+            )
         }
 
         // Guard the raw counts: the payload arrives from the box already
@@ -193,16 +199,16 @@ enum UsageMeters {
         let write  = ctx.cacheWrite.isFinite  ? max(0, ctx.cacheWrite)  : 0
         let total  = ctx.totalInput.isFinite  ? max(0, ctx.totalInput)  : 0
 
-        let rawPct = (total / safeLimit) * 100
+        let rawPct = (total / limit) * 100
         // Rounded, clamped to 0...100 (mirrors `Math.min(100, Math.round(...))`).
         let pct = min(100, max(0, rawPct.rounded()))
 
         // Each segment is its bucket over the SELECTED limit, in cost-decreasing
         // order fresh → cacheWrite → cacheRead, matching the desktop's order.
         var segments = [
-            StreamContextSegment(kind: "fresh", pct: (fresh / safeLimit) * 100),
-            StreamContextSegment(kind: "cacheWrite", pct: (write / safeLimit) * 100),
-            StreamContextSegment(kind: "cacheRead", pct: (read / safeLimit) * 100),
+            StreamContextSegment(kind: "fresh", pct: (fresh / limit) * 100),
+            StreamContextSegment(kind: "cacheWrite", pct: (write / limit) * 100),
+            StreamContextSegment(kind: "cacheRead", pct: (read / limit) * 100),
         ]
         // Rescale segments that would sum past 100 the same way the desktop
         // does (streamInterpretation.mjs), so an over-context payload never
@@ -219,15 +225,12 @@ enum UsageMeters {
             cacheWrite: ctx.cacheWrite,
             totalInput: ctx.totalInput,
             pct: pct,
+            hasLimit: true,
             segments: segments
         )
     }
 
     // MARK: - Reset-time absolute formatters (BET-967)
-
-    /// The desktop's `ASSUMED_CONTEXT_TOKENS` (200k) — the denominator when no
-    /// model window is available. Mirrors `computeContextBreakdown`.
-    private static let assumedContextTokens: Double = 200_000
 
     // OS locale on purpose (autoupdatingCurrent), and the TEMPLATE chooses
     // 12- vs 24-hour from the device — never a literal "HH:mm" pattern and

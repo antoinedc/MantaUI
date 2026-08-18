@@ -204,6 +204,7 @@ struct StreamContextPayload: Codable, Equatable, Sendable {
     var cacheWrite: Double
     var totalInput: Double
     var pct: Double
+    var hasLimit: Bool
     var segments: [StreamContextSegment]
 }
 

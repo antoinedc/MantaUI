@@ -41,7 +41,6 @@ import {
   buildTitlePromptInput,
   buildTitleInstruction,
   humanizeProviderError,
-  ASSUMED_CONTEXT_TOKENS,
 } from "../shared/streamInterpretation.mjs";
 import { planModeFromToolPart } from "../shared/planMode.mjs";
 import { createSeenIdFilter } from "./seenIds.mjs";
@@ -400,9 +399,7 @@ export function createStreamInterpreter({
             (tokens.cache?.read ?? 0) +
             (tokens.cache?.write ?? 0);
           if (totalInput > 0) {
-            const limit =
-              contextLimitFor(msgInfo.providerID, msgInfo.modelID) ??
-              ASSUMED_CONTEXT_TOKENS;
+            const limit = contextLimitFor(msgInfo.providerID, msgInfo.modelID);
             if (
               !st.contextEmitted ||
               st.contextEmitted.totalInput !== totalInput ||
@@ -518,10 +515,7 @@ export function createStreamInterpreter({
         }
         const tokens = props.tokens ?? props.usage;
         if (tokens) {
-          const limit =
-            contextLimitFor(props.providerID, props.modelID) ??
-            ASSUMED_CONTEXT_TOKENS;
-          emit(sid, "context", computeContextBreakdown(tokens, limit));
+          emit(sid, "context", computeContextBreakdown(tokens, contextLimitFor(props.providerID, props.modelID)));
           // cache staleness: cachedTokens ~ cached prefix size
           st.cachedTokens =
             (tokens?.cache?.read ?? 0) + (tokens?.cache?.write ?? 0) ||

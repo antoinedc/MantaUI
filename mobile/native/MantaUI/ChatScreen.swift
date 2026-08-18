@@ -840,52 +840,85 @@ private struct ChatScreenContent: View {
     /// the HIG treats progress indicators as transient, and this one never
     /// disappears once the reading is known, so it reads as a persistent meter
     /// and VoiceOver announces it so.
+    ///
+    /// For a model that reports NO max context (`hasLimit == false`) the strip
+    /// renders a solid full-green fill with no percentage — an "active, but
+    /// unbounded" reading instead of a fabricated number.
     @ViewBuilder
     private var contextStrip: some View {
-        if let pct = contextPct, UsageMeters.shouldShowContext(pct: pct) {
-            Button { showContextSheet = true } label: {
-                HStack(spacing: Metrics.spacing.sp2) {
-                    Text("Context")
-                        .font(.manta(size: Metrics.type.twoXS, weight: .semibold))
-                        .foregroundColor(tokens.tx4)
-                    Gauge(value: pct, in: 0...100) { EmptyView() }
-                        .gaugeStyle(.accessoryLinearCapacity)
-                        .tint(contextBandColor)
-                        .frame(maxWidth: .infinity, maxHeight: 4)
-                    Text("\(Int(pct.rounded()))%")
-                        .font(.manta(size: Metrics.type.twoXS, weight: .bold))
-                        .foregroundColor(contextBandColor)
-                    if let coldLabel = UsageMeters.staleChipLabel(store.cache) {
-                        Text(coldLabel)
-                            .font(.manta(size: Metrics.type.twoXS, weight: .bold))
-                            .foregroundColor(tokens.warn)
-                    }
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: Metrics.type.twoXS, weight: .semibold))
-                        .foregroundColor(tokens.tx4)
-                }
-                .frame(height: 24)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(
-                cacheIsStale
-                    ? "Context \(Int(pct.rounded())) percent, cache cold, \(UsageMeters.formatTokens(store.cache?.staleTokens)) tokens re-billed on the next message"
-                    : "Context \(Int(pct.rounded())) percent"
-            )
-            .accessibilityIdentifier("context-strip")
-            // Context legitimately drops after a compaction; animate that drop
-            // rather than snapping it, or it reads as a glitch.
-            .animation(.easeInOut(duration: 0.4), value: pct)
+        if let ctx = contextBreakdown, !ctx.hasLimit {
+            unknownContextStrip
+        } else if let pct = contextPct, UsageMeters.shouldShowContext(pct: pct) {
+            knownContextStrip(pct)
         }
+    }
+
+    private func knownContextStrip(_ pct: Double) -> some View {
+        Button { showContextSheet = true } label: {
+            HStack(spacing: Metrics.spacing.sp2) {
+                Text("Context")
+                    .font(.manta(size: Metrics.type.twoXS, weight: .semibold))
+                    .foregroundColor(tokens.tx4)
+                Gauge(value: pct, in: 0...100) { EmptyView() }
+                    .gaugeStyle(.accessoryLinearCapacity)
+                    .tint(contextBandColor)
+                    .frame(maxWidth: .infinity, maxHeight: 4)
+                Text("\(Int(pct.rounded()))%")
+                    .font(.manta(size: Metrics.type.twoXS, weight: .bold))
+                    .foregroundColor(contextBandColor)
+                if let coldLabel = UsageMeters.staleChipLabel(store.cache) {
+                    Text(coldLabel)
+                        .font(.manta(size: Metrics.type.twoXS, weight: .bold))
+                        .foregroundColor(tokens.warn)
+                }
+                Image(systemName: "chevron.right")
+                    .font(.system(size: Metrics.type.twoXS, weight: .semibold))
+                    .foregroundColor(tokens.tx4)
+            }
+            .frame(height: 24)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(
+            cacheIsStale
+                ? "Context \(Int(pct.rounded())) percent, cache cold, \(UsageMeters.formatTokens(store.cache?.staleTokens)) tokens re-billed on the next message"
+                : "Context \(Int(pct.rounded())) percent"
+        )
+        .accessibilityIdentifier("context-strip")
+        // Context legitimately drops after a compaction; animate that drop
+        // rather than snapping it, or it reads as a glitch.
+        .animation(.easeInOut(duration: 0.4), value: pct)
+    }
+
+    private var unknownContextStrip: some View {
+        Button { showContextSheet = true } label: {
+            HStack(spacing: Metrics.spacing.sp2) {
+                Text("Context")
+                    .font(.manta(size: Metrics.type.twoXS, weight: .semibold))
+                    .foregroundColor(tokens.tx4)
+                Gauge(value: 100, in: 0...100) { EmptyView() }
+                    .gaugeStyle(.accessoryLinearCapacity)
+                    .tint(tokens.ok)
+                    .frame(maxWidth: .infinity, maxHeight: 4)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: Metrics.type.twoXS, weight: .semibold))
+                    .foregroundColor(tokens.tx4)
+            }
+            .frame(height: 24)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Context — no max context info for this model")
+        .accessibilityIdentifier("context-strip")
     }
 
     @ViewBuilder
     private var contextSheet: some View {
-        // The strip only shows for a known reading, but the context can go
-        // unknown in the window between the tap and the sheet presenting —
-        // never fabricate a 0% sheet for "we don't know".
-        if let ctx = contextBreakdown, UsageMeters.shouldShowContext(pct: ctx.pct) {
+        // The strip only shows for a known reading (or the no-max-context
+        // unknown state), but the context can go unknown in the window between
+        // the tap and the sheet presenting — never fabricate a 0% sheet for
+        // "we don't know".
+        if let ctx = contextBreakdown, !ctx.hasLimit || UsageMeters.shouldShowContext(pct: ctx.pct) {
             ContextSheet(
                 context: ctx,
                 cache: store.cache,
