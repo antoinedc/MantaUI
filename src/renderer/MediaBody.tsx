@@ -1,0 +1,286 @@
+// MediaBody.tsx — the single inline-media renderer (BET-1148).
+//
+// ONE component used by BOTH call sites: the media card driven by the `media`
+// bus events (begin → reserve, show → swap in, fail → label) and the existing
+// `file`-part branch of ToolCall for image/video mimes. Writing two renderers
+// is a defect for this issue, so MediaBody is the only one.
+//
+// The load-bearing rule (BET-1148): the placeholder RESERVES the media's final
+// aspect box before the bytes arrive. `resolveMediaAspect` (chatUtils) yields
+// the width÷height from explicit dimensions, else the declared aspect ratio,
+// else the labelled 16:9 default — and every state (pending / ready / failed /
+// expired) renders inside the SAME reserved box, so the transcript's
+// pin-to-bottom logic never sees a height change under the reader. A `show`
+// swaps the finished media in at the exact same aspect: zero movement.
+//
+// Decisions (locked, do not revisit):
+//   - renders as the BODY of a ToolCard, on the inset surface (OutputWell),
+//     expanded by default — the image is the result, not the evidence.
+//   - no autoplay, ever: video shows a first frame with an explicit play control.
+//   - clicking media opens the existing ArtifactPreview overlay (no second lightbox).
+//   - bytes are fetched through the existing /api/peek route with the existing
+//     auth headers, exactly as ArtifactPreview does (no new fetch path).
+//   - pending shows a skeleton + elapsed clock + the declared title; it never
+//     fabricates a percentage (the server sends none).
+
+import { memo, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
+import { Loader2, Play } from "lucide-react";
+import { ToolCard } from "./ToolCard";
+import { OutputWell } from "./OutputWell";
+import { type Artifact } from "./artifacts";
+import { ArtifactPreview } from "./ArtifactPreview";
+import { clientToken, serverBase, authHeaders } from "./api/httpApi";
+import {
+  type MediaEntry,
+  formatDuration,
+  isWithinPreviewSize,
+  mediaGrid,
+  mediaKindFromMime,
+  resolveMediaAspect,
+} from "./chatUtils";
+import { useClockTick, WORKING_TICK_MS, nowMs } from "./clock";
+
+// The reserved box is capped at a sane reading width so a huge aspect never
+// opens at full-column width; the finished media uses the SAME cap and aspect,
+// so swap-in never changes the box.
+const MEDIA_MAX_W = 520;
+
+function boxStyle(entry: MediaEntry): CSSProperties {
+  return { aspectRatio: `${resolveMediaAspect(entry.meta)}`, maxWidth: MEDIA_MAX_W };
+}
+
+const TILE_CLS =
+  "rounded-md border border-border-subtle bg-inset flex items-center justify-center overflow-hidden relative";
+
+function TileIndex({ n }: { n: number }) {
+  return (
+    <span className="absolute left-1 top-1 px-1 py-px rounded-xs bg-bg-elev border border-border-subtle text-[10px] leading-none text-text-faint font-mono">
+      {n}
+    </span>
+  );
+}
+
+// Pending — the reserved box with a skeleton + elapsed clock. Only mounted
+// while `state === "pending"`, so its 1s ticker (the shared WORKING_TICK_MS
+// bucket, the RunningIndicator precedent) stops the moment a show/fail lands.
+function PendingBox({ entry }: { entry: MediaEntry }) {
+  useClockTick(WORKING_TICK_MS);
+  const { meta } = entry;
+  const beganAt = entry.beganAt ?? null;
+  const elapsed = beganAt != null ? formatDuration(nowMs() - beganAt) : "<1s";
+  const grid = mediaGrid(meta.count);
+  const label = meta.kind === "video" ? "Generating video" : "Generating image";
+
+  return (
+    <div className="w-full flex flex-col" style={{ gap: "var(--sp-2)" }}>
+      {grid.tiles > 1 ? (
+        <div
+          className="grid gap-2"
+          style={{ gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}
+        >
+          {Array.from({ length: grid.tiles }).map((_, i) => (
+            <div key={i} className={TILE_CLS} style={boxStyle(entry)} data-media-box>
+              <TileIndex n={i + 1} />
+              <Loader2 className="animate-spin text-text-faint" size={18} aria-hidden="true" />
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className={TILE_CLS} style={boxStyle(entry)} data-media-box>
+          <Loader2 className="animate-spin text-text-faint" size={18} aria-hidden="true" />
+        </div>
+      )}
+      {grid.more > 0 && (
+        <div className="text-label text-text-faint">+{grid.more} more</div>
+      )}
+      <div className="flex items-center gap-2 text-label text-text-muted">
+        <span className="text-text">{label}</span>
+        {elapsed && <span className="tabular-nums text-text-faint">{elapsed}</span>}
+        <span className="text-text-quiet">· this usually takes a few seconds</span>
+      </div>
+    </div>
+  );
+}
+
+function DegradedBox({ entry }: { entry: MediaEntry }) {
+  const label = entry.state === "expired" ? "This media expired" : "The media failed to generate";
+  return (
+    <div className="w-full" style={boxStyle(entry)} data-media-box>
+      <div className="h-full w-full rounded-md border border-border-subtle bg-inset grid place-items-center text-label text-text-muted">
+        <span>⚠ {label}</span>
+      </div>
+    </div>
+  );
+}
+
+function ReadyMedia({ entry }: { entry: MediaEntry }) {
+  const { meta } = entry;
+  const kind = mediaKindFromMime(meta.mime) ?? meta.kind;
+  const [status, setStatus] = useState<"loading" | "error" | "ready">("loading");
+  const [url, setUrl] = useState<string | null>(null);
+  const urlRef = useRef<string | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
+
+  useEffect(() => {
+    const path = meta.path;
+    if (!path) {
+      setStatus("error");
+      return;
+    }
+    setStatus("loading");
+    const ctrl = new AbortController();
+    let localUrl: string | null = null;
+    const run = async () => {
+      try {
+        const base = `${serverBase()}/api/peek?path=${encodeURIComponent(path)}`;
+        const headers = authHeaders(clientToken());
+        const head = await fetch(base, { method: "HEAD", headers, signal: ctrl.signal });
+        if (!head.ok) throw new Error("head");
+        const size = Number(head.headers.get("content-length") ?? 0);
+        if (!isWithinPreviewSize(size)) throw new Error("too-large");
+        const res = await fetch(base, { method: "GET", headers, signal: ctrl.signal });
+        if (!res.ok) throw new Error("get");
+        const blob = await res.blob();
+        const u = URL.createObjectURL(blob);
+        localUrl = u;
+        urlRef.current = u;
+        setUrl(u);
+        setStatus("ready");
+      } catch {
+        if (!ctrl.signal.aborted) setStatus("error");
+      }
+    };
+    void run();
+    return () => {
+      ctrl.abort();
+      if (localUrl) URL.revokeObjectURL(localUrl);
+    };
+  }, [meta.path]);
+
+  useEffect(
+    () => () => {
+      if (urlRef.current) URL.revokeObjectURL(urlRef.current);
+    },
+    [],
+  );
+
+  const artifact = useMemo<Artifact | null>(() => {
+    if (!meta.path) return null;
+    const label = meta.title ?? (meta.path.split("/").pop() || meta.path);
+    return {
+      id: `media:${meta.path}`,
+      kind: kind === "image" ? "image" : "file",
+      origin: "agent",
+      key: meta.path.toLowerCase(),
+      label,
+      href: meta.path,
+      mime: meta.mime,
+      size: null,
+      at: 0,
+      messageId: null,
+      context: null,
+      expiresAt: null,
+    };
+  }, [meta.path, meta.title, meta.mime, kind]);
+
+  const openPreview = () => {
+    if (artifact) setPreviewOpen(true);
+  };
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      openPreview();
+    }
+  };
+
+  const label = meta.title ?? (meta.path?.split("/").pop() ?? meta.kind);
+
+  return (
+    <>
+      <div
+        className="w-full"
+        style={boxStyle(entry)}
+        onClick={openPreview}
+        onKeyDown={onKeyDown}
+        role="button"
+        tabIndex={0}
+        aria-label={`Open ${kind} preview`}
+        title="Click to view"
+        data-media-box
+        data-open-preview
+      >
+        {status === "loading" && (
+          <div className={TILE_CLS} style={{ height: "100%" }}>
+            <Loader2 className="animate-spin text-text-faint" size={18} aria-hidden="true" />
+          </div>
+        )}
+        {status === "error" && (
+          <div className={TILE_CLS} style={{ height: "100%" }}>
+            <span className="text-label text-text-muted">⚠ Couldn’t load this media</span>
+          </div>
+        )}
+        {status === "ready" && kind === "image" && url && (
+          <img
+            src={url}
+            alt={label}
+            className="w-full h-full object-contain rounded-md border border-border-subtle bg-inset"
+          />
+        )}
+        {status === "ready" && kind === "video" && url && (
+          <div className="relative w-full h-full rounded-md border border-border-subtle bg-inset overflow-hidden">
+            {/* No autoplay, ever: explicit play control + first-frame poster. */}
+            <video src={url} controls preload="metadata" className="w-full h-full" />
+            <span className="pointer-events-none absolute left-1 top-1 grid place-items-center w-6 h-6 rounded-full bg-bg-elev border border-border-subtle text-text-faint">
+              <Play size={11} aria-hidden="true" />
+            </span>
+          </div>
+        )}
+      </div>
+      {previewOpen && artifact && (
+        <ArtifactPreview
+          artifacts={[artifact]}
+          index={0}
+          onClose={() => setPreviewOpen(false)}
+          onDownload={() => {}}
+          onAttach={() => {}}
+        />
+      )}
+    </>
+  );
+}
+
+function MediaContent({ entry }: { entry: MediaEntry }) {
+  if (entry.state === "pending") return <PendingBox entry={entry} />;
+  if (entry.state === "ready") return <ReadyMedia entry={entry} />;
+  return <DegradedBox entry={entry} />;
+}
+
+/**
+ * The single media renderer. Renders the full card — a ToolCard shell, expanded
+ * by default, with the media body on the inset surface. Memoized (the store
+ * keeps a stable per-message entry reference; a typing keystroke re-renders the
+ * ChatPanel but must not re-render this leaf).
+ */
+export const MediaBody = memo(function MediaBody({ entry }: { entry: MediaEntry }) {
+  const [expanded, setExpanded] = useState(true);
+  const { meta, state } = entry;
+  const name = meta.kind === "video" ? "Video" : "Image";
+  const arg = meta.title ?? undefined;
+  const degraded = state === "failed" || state === "expired";
+
+  return (
+    <ToolCard
+      tone={degraded ? "error" : undefined}
+      name={name}
+      arg={arg}
+      expanded={expanded}
+      onToggle={() => setExpanded((v) => !v)}
+    >
+      {expanded && (
+        <OutputWell variant="attached">
+          <MediaContent entry={entry} />
+        </OutputWell>
+      )}
+    </ToolCard>
+  );
+});
