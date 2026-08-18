@@ -875,6 +875,18 @@ export const demoModels: OpencodeModel[] = [
     capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
     variants: [{ id: "balanced" }],
   },
+  // A model with NO reported context window — exercises the "no max context"
+  // state in the SessionHeader context pill (solid full-width green fill,
+  // "No max context info for this model" popover, no fabricated %).
+  {
+    id: "qwen-2-5-coder",
+    providerID: "local",
+    name: "Qwen 2.5 Coder (local)",
+    status: "active",
+    enabled: true,
+    limit: { context: null },
+    capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
+  },
 ];
 
 // AI-CLI TUI launchers the box reports (src/server/launcherRegistry.mjs,

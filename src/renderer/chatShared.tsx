@@ -155,33 +155,23 @@ export function pastVerbFor(messageId: string): string {
   return SPINNER_VERBS_PAST[verbIndexFor(messageId)];
 }
 
-// Detect whether a model can accept file attachments. Two shapes in the wild:
-//   /provider source:  capabilities = {attachment: bool, input: {image, pdf, ...}}
-//   /api/model source: capabilities = {tools, input: ["text", "image", ...]}
-// Treat "supports attachments" as: any non-"text" input modality.
+// Detect whether a model can accept file attachments. Normalization guarantees
+// `capabilities.input` is a canonical array of string modalities (never the
+// raw object-map shape) — treat "supports attachments" as any non-"text"
+// modality.
 export function modelSupportsAttachments(m: OpencodeModel | null): boolean {
   const modes = modelInputModes(m);
   return modes.some((v) => v !== "text");
 }
 
 // Return the set of input modalities the model accepts (text, image, pdf,
-// video, audio, ...). Empty array if unknown.
+// video, audio, ...). Empty array if unknown. Normalization owns the canonical
+// array shape; this only defensively filters to strings.
 export function modelInputModes(m: OpencodeModel | null): string[] {
   if (!m) return [];
-  const caps = m.capabilities as unknown as
-    | { input?: unknown }
-    | undefined;
-  if (!caps) return [];
-  const input = caps.input;
-  if (Array.isArray(input)) {
-    return input.filter((v): v is string => typeof v === "string");
-  }
-  if (input && typeof input === "object") {
-    return Object.entries(input as Record<string, unknown>)
-      .filter(([, v]) => v === true)
-      .map(([k]) => k);
-  }
-  return [];
+  const input = m.capabilities?.input;
+  if (!Array.isArray(input)) return [];
+  return input.filter((v): v is string => typeof v === "string");
 }
 
 // Group a mime type into one of opencode's input modality buckets so we can

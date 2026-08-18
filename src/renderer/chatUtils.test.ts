@@ -459,6 +459,7 @@ function model(id: string, providerID: string): OpencodeModel {
     providerID,
     name: id,
     limit: { context: 200_000 },
+    capabilities: { tools: true, input: ["text"], output: ["text"] },
   };
 }
 

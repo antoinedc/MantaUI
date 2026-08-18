@@ -1111,6 +1111,7 @@ export async function listModels(overrides = {}) {
       if (!p.id || !connected.has(p.id)) continue;
       for (const modelId of Object.keys(p.models ?? {})) {
         const m = _normalizeProviderModel(p.id, modelId, (p.models ?? {})[modelId]);
+        if (!m) continue;
         const key = `${m.providerID}/${m.id}`;
         out.push(applyModelOverride(m, overrides?.[key]));
       }
@@ -1142,7 +1143,48 @@ export function applyModelOverride(m, override) {
   return next;
 }
 
+// Canonicalize a providerInput-backed modality field to the single canonical
+// array-of-strings shape. Handles both raw shapes seen in the wild:
+//   /provider source:  input: {image, pdf, ...}  (object map, true = enabled)
+//   /api/model source: input: ["text", "image"]  (array)
+// Anything else → `[]`.
+function _normalizeModalities(input) {
+  if (Array.isArray(input)) {
+    return input.filter((v) => typeof v === "string");
+  }
+  if (input && typeof input === "object") {
+    return Object.entries(input)
+      .filter(([, v]) => v === true)
+      .map(([k]) => String(k));
+  }
+  return [];
+}
+
+// Canonicalize a model's `limit`. `context` is `number | null`; `null` means
+// "the provider gave no usable limit — never fabricate one". `0`, negative,
+// NaN, Infinity and missing all map to `null`. `output` is kept only when a
+// positive finite number.
+function _normalizeLimit(raw) {
+  const limit = {};
+  if (typeof raw?.context === "number" && Number.isFinite(raw.context) && raw.context > 0) {
+    limit.context = raw.context;
+  } else {
+    limit.context = null;
+  }
+  if (typeof raw?.output === "number" && Number.isFinite(raw.output) && raw.output > 0) {
+    limit.output = raw.output;
+  }
+  return limit;
+}
+
+// Normalize ONE raw provider model into the canonical OpencodeModel shape.
+// This is the only chokepoint every raw provider model passes through — after
+// it the shape must be canonical (capabilities always an object with array
+// `input`/`output`; `limit.context` never fabricated). Returns null when the
+// model is unaddressable (an empty/absent providerID would silently break
+// grouping/auth/usage), in which case the caller must SKIP it.
 function _normalizeProviderModel(providerID, modelId, m) {
+  if (typeof providerID !== "string" || providerID.length === 0) return null;
   let variants;
   const vRaw = m.variants;
   if (Array.isArray(vRaw)) {
@@ -1153,6 +1195,7 @@ function _normalizeProviderModel(providerID, modelId, m) {
   } else if (vRaw && typeof vRaw === "object") {
     variants = Object.keys(vRaw).map((id) => ({ id }));
   }
+  const caps = m.capabilities ?? {};
   return {
     id: String(m.id ?? modelId),
     providerID,
@@ -1160,8 +1203,13 @@ function _normalizeProviderModel(providerID, modelId, m) {
     name: typeof m.name === "string" ? m.name : String(m.id ?? modelId),
     status: typeof m.status === "string" ? m.status : undefined,
     enabled: typeof m.enabled === "boolean" ? m.enabled : undefined,
-    limit: m.limit,
-    capabilities: m.capabilities,
+    limit: _normalizeLimit(m.limit),
+    capabilities: {
+      tools: typeof caps.tools === "boolean" ? caps.tools : undefined,
+      attachment: typeof caps.attachment === "boolean" ? caps.attachment : undefined,
+      input: _normalizeModalities(caps.input),
+      output: _normalizeModalities(caps.output),
+    },
     variants: variants && variants.length > 0 ? variants : undefined,
   };
 }

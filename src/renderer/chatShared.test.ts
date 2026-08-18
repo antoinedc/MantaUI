@@ -129,22 +129,25 @@ describe("modelInputModes", () => {
     ]);
   });
 
-  it("reads an object-shaped input map (/provider shape), keeping only true keys", () => {
+  it("returns [] for an object-map input (normalization owns that shape now)", () => {
+    // The raw /provider object-map (input: {image: true, ...}) is canonicalized
+    // to an array at the normalization chokepoint; the renderer no longer
+    // special-cases it, so an un-normalized map reads as "unknown".
     expect(
       modelInputModes(model({ input: { text: true, image: true, pdf: false } })),
-    ).toEqual(["text", "image"]);
+    ).toEqual([]);
   });
 });
 
 describe("modelSupportsAttachments", () => {
   it("is false when the only modality is text", () => {
     expect(modelSupportsAttachments(model({ input: ["text"] }))).toBe(false);
-    expect(modelSupportsAttachments(model({ input: { text: true } }))).toBe(false);
+    expect(modelSupportsAttachments(model({ input: ["text", "text"] }))).toBe(false);
   });
 
   it("is true when any non-text modality is present", () => {
     expect(modelSupportsAttachments(model({ input: ["text", "image"] }))).toBe(true);
-    expect(modelSupportsAttachments(model({ input: { image: true } }))).toBe(true);
+    expect(modelSupportsAttachments(model({ input: ["image"] }))).toBe(true);
   });
 
   it("is false for null / unknown capabilities", () => {

@@ -118,7 +118,7 @@ export function SessionHeader({
 }: {
   branch: string | null;
   ctxBreakdown: ContextBreakdown;
-  ctxLimit: number;
+  ctxLimit: number | null;
   staleCache: StaleCacheResult;
   modelName: string | null;
   // When false (no owning tmux window) the session menu is hidden — fork /
@@ -211,9 +211,9 @@ export function SessionHeader({
   onCreatePr?: () => void;
   onEnsureShipPreview?: () => void;
 }) {
-  const { pct, segments, freshInput, cacheRead, cacheWrite, totalInput } =
+  const { pct, hasLimit, segments, freshInput, cacheRead, cacheWrite, totalInput } =
     ctxBreakdown;
-  const fill = ctxStageColor(pct);
+  const fill = ctxStageColor(hasLimit && pct !== null ? pct : 0);
   const showContext = totalInput > 0;
   const stale = staleCache.isStale;
   const artifactsToggle = onToggleArtifacts
@@ -322,6 +322,7 @@ export function SessionHeader({
       render: () => (
         <ContextPill
           pct={pct}
+          hasLimit={hasLimit}
           segments={segments}
           fill={fill}
           stale={stale}
@@ -577,6 +578,7 @@ function SegmentedBar({
 
 function ContextPill({
   pct,
+  hasLimit,
   segments,
   fill,
   stale,
@@ -589,12 +591,13 @@ function ContextPill({
   staleCache,
   onRequestClear,
 }: {
-  pct: number;
+  pct: number | null;
+  hasLimit: boolean;
   segments: ContextBreakdown["segments"];
   fill: string;
   stale: boolean;
   totalInput: number;
-  ctxLimit: number;
+  ctxLimit: number | null;
   freshInput: number;
   cacheRead: number;
   cacheWrite: number;
@@ -633,19 +636,30 @@ function ContextPill({
         }
       >
         <Pill tone={stale ? "warn" : "neutral"}>
-          {/* Mini segmented bar inside the pill — same segment order/colors as
-              the popover's bar but at pill scale (w-16 h-2). */}
-          <SegmentedBar
-            segments={segments}
-            segColor={segColor}
-            className="w-16 h-2 rounded-full"
-          />
-          <span
-            className="tabular-nums font-mono font-semibold"
-            style={{ color: stale ? CACHE_WRITE_COLOR : fill }}
-          >
-            {pct}%
-          </span>
+          {hasLimit ? (
+            <>
+              {/* Mini segmented bar inside the pill — same segment order/colors
+                  as the popover's bar but at pill scale (w-16 h-2 rounded-full). */}
+              <SegmentedBar
+                segments={segments}
+                segColor={segColor}
+                className="w-16 h-2 rounded-full"
+              />
+              <span
+                className="tabular-nums font-mono font-semibold"
+                style={{ color: stale ? CACHE_WRITE_COLOR : fill }}
+              >
+                {pct}%
+              </span>
+            </>
+          ) : (
+            // Unknown context window — a solid full-width green fill with no
+            // percentage (rendering one would fabricate a number).
+            <span
+              className="w-16 h-2 rounded-full"
+              style={{ backgroundColor: fill }}
+            />
+          )}
           {stale && (
             <span className="tabular-nums font-mono font-semibold">
               {formatTokensCompact(staleCache.staleTokens)} cold
@@ -663,46 +677,77 @@ function ContextPill({
         hook="manta-ctx-popover"
         surfaceClassName="w-[340px] p-4"
       >
-          {/* Headline — the percentage leads, the absolute counts qualify it.
-              Baseline-aligned so the 15px metric and the 12px mono counts sit
-              on one line rather than centring against each other. */}
-          <div className="flex items-baseline gap-2 mb-3">
-            <span className="text-prose font-semibold text-text leading-none">
-              {pct}%
-            </span>
-            <span className="font-mono text-meta font-medium text-text-faint">
-              {formatTokensCompact(totalInput)} / {formatTokensCompact(ctxLimit)} tokens
-            </span>
-          </div>
+          {hasLimit ? (
+            <>
+              {/* Headline — the percentage leads, the absolute counts qualify it.
+                  Baseline-aligned so the 15px metric and the 12px mono counts sit
+                  on one line rather than centring against each other. */}
+              <div className="flex items-baseline gap-2 mb-3">
+                <span className="text-prose font-semibold text-text leading-none">
+                  {pct}%
+                </span>
+                <span className="font-mono text-meta font-medium text-text-faint">
+                  {formatTokensCompact(totalInput)} / {formatTokensCompact(ctxLimit)} tokens
+                </span>
+              </div>
 
-          {/* Segmented bar — the pill's mini bar at reading size. */}
-          <SegmentedBar
-            segments={segments}
-            segColor={segColor}
-            className="w-full h-[7px] rounded-xs mb-3"
-          />
+              {/* Segmented bar — the pill's mini bar at reading size. */}
+              <SegmentedBar
+                segments={segments}
+                segColor={segColor}
+                className="w-full h-[7px] rounded-xs mb-3"
+              />
 
-          {/* Legend with per-segment counts. */}
-          <div className="flex flex-col gap-1 mb-4">
-            <LegendRow
-              color={fill}
-              label="Fresh input"
-              count={freshInput}
-              hint="Uncached — billed at the full input rate."
-            />
-            <LegendRow
-              color={CACHE_WRITE_COLOR}
-              label="Cache write"
-              count={cacheWrite}
-              hint="Warming the prompt cache — full input rate plus a surcharge."
-            />
-            <LegendRow
-              color={CACHE_READ_COLOR}
-              label="Cache read"
-              count={cacheRead}
-              hint="Served from the prompt cache — around a tenth of the input rate."
-            />
-          </div>
+              {/* Legend with per-segment counts. */}
+              <div className="flex flex-col gap-1 mb-4">
+                <LegendRow
+                  color={fill}
+                  label="Fresh input"
+                  count={freshInput}
+                  hint="Uncached — billed at the full input rate."
+                />
+                <LegendRow
+                  color={CACHE_WRITE_COLOR}
+                  label="Cache write"
+                  count={cacheWrite}
+                  hint="Warming the prompt cache — full input rate plus a surcharge."
+                />
+                <LegendRow
+                  color={CACHE_READ_COLOR}
+                  label="Cache read"
+                  count={cacheRead}
+                  hint="Served from the prompt cache — around a tenth of the input rate."
+                />
+              </div>
+            </>
+          ) : (
+            // Unknown context window — no fabricated percentage is ever shown.
+            // Surface the "no max context" message plus the tokens-used totals
+            // (reusing the breakdown's computed counts) with no bar and no %.
+            <div className="flex flex-col gap-1 mb-4">
+              <div className="text-prose font-semibold text-text mb-2">
+                No max context info for this model
+              </div>
+              <LegendRow
+                color={fill}
+                label="Fresh input"
+                count={freshInput}
+                hint="Uncached — billed at the full input rate."
+              />
+              <LegendRow
+                color={CACHE_WRITE_COLOR}
+                label="Cache write"
+                count={cacheWrite}
+                hint="Warming the prompt cache — full input rate plus a surcharge."
+              />
+              <LegendRow
+                color={CACHE_READ_COLOR}
+                label="Cache read"
+                count={cacheRead}
+                hint="Served from the prompt cache — around a tenth of the input rate."
+              />
+            </div>
+          )}
 
           {modelName && (
             <div className="text-meta text-text-faint truncate" title={modelName}>

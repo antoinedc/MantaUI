@@ -195,7 +195,7 @@ describe("NewSessionScreen composer parity (BET-1088)", () => {
     mountComposer(d, {
       opencodeModels: () =>
         Promise.resolve([
-          { id: "claude-x", providerID: "anthropic", name: "Claude X", limit: { context: 200000 } },
+          { id: "claude-x", providerID: "anthropic", name: "Claude X", limit: { context: 200000 }, capabilities: { input: ["text"] } },
         ]),
       opencodeDefaultModel: () =>
         Promise.resolve({ providerID: "anthropic", modelID: "claude-x" }),

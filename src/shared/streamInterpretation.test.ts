@@ -50,6 +50,7 @@ describe("computeContextBreakdown", () => {
     expect(b.cacheWrite).toBe(0);
     expect(b.totalInput).toBe(0);
     expect(b.pct).toBe(0);
+    expect(b.hasLimit).toBe(true);
     expect(b.segments.every((s) => s.pct === 0)).toBe(true);
   });
 
@@ -62,6 +63,7 @@ describe("computeContextBreakdown", () => {
     expect(b.cacheRead).toBe(30_000);
     expect(b.cacheWrite).toBe(5_000);
     expect(b.totalInput).toBe(45_000);
+    expect(b.hasLimit).toBe(true);
     // 45_000 / 200_000 = 22.5% → 23 rounded
     expect(b.pct).toBe(23);
   });
@@ -145,14 +147,19 @@ describe("computeContextBreakdown", () => {
     expect(b.totalInput).toBe(0);
   });
 
-  it("falls back to ASSUMED_CONTEXT_TOKENS when limit is non-positive", () => {
-    // Avoids division-by-zero / negative-pct paths.
-    const b = computeContextBreakdown(
-      { input: 100_000, cache: { read: 0, write: 0 } },
-      0,
-    );
-    // 100_000 / 200_000 = 50%
-    expect(b.pct).toBe(50);
+  it("signals unknown context (hasLimit false, pct null) when limit is null / non-positive", () => {
+    // The token totals are still computed; only the percentage is suppressed.
+    const tokens = { input: 100_000, cache: { read: 20_000, write: 0 } };
+    for (const limit of [null, 0, -1, Infinity, NaN]) {
+      const b = computeContextBreakdown(tokens, limit);
+      expect(b.freshInput).toBe(100_000);
+      expect(b.cacheRead).toBe(20_000);
+      expect(b.cacheWrite).toBe(0);
+      expect(b.totalInput).toBe(120_000);
+      expect(b.hasLimit).toBe(false);
+      expect(b.pct).toBe(null);
+      expect(b.segments).toEqual([]);
+    }
   });
 });
 
@@ -2001,29 +2008,22 @@ describe("resolveContextLimit", () => {
     expect(resolveContextLimit({ limit: { context: 200_000 } })).toBe(200_000);
   });
 
-  it("falls back to the assumed default when model is null/undefined", () => {
-    expect(resolveContextLimit(null)).toBe(ASSUMED_CONTEXT_TOKENS);
-    expect(resolveContextLimit(undefined)).toBe(ASSUMED_CONTEXT_TOKENS);
+  it("returns null when model is null/undefined (no fabricated default)", () => {
+    expect(resolveContextLimit(null)).toBe(null);
+    expect(resolveContextLimit(undefined)).toBe(null);
   });
 
-  it("falls back when limit or limit.context is missing", () => {
-    expect(resolveContextLimit({})).toBe(ASSUMED_CONTEXT_TOKENS);
-    expect(resolveContextLimit({ limit: {} })).toBe(ASSUMED_CONTEXT_TOKENS);
+  it("returns null when limit or limit.context is missing", () => {
+    expect(resolveContextLimit({})).toBe(null);
+    expect(resolveContextLimit({ limit: {} })).toBe(null);
+    expect(resolveContextLimit({ limit: { context: null } })).toBe(null);
   });
 
   it("rejects non-positive, non-finite, and non-numeric values", () => {
-    expect(resolveContextLimit({ limit: { context: 0 } })).toBe(
-      ASSUMED_CONTEXT_TOKENS,
-    );
-    expect(resolveContextLimit({ limit: { context: -1 } })).toBe(
-      ASSUMED_CONTEXT_TOKENS,
-    );
-    expect(resolveContextLimit({ limit: { context: Infinity } })).toBe(
-      ASSUMED_CONTEXT_TOKENS,
-    );
-    expect(resolveContextLimit({ limit: { context: NaN } })).toBe(
-      ASSUMED_CONTEXT_TOKENS,
-    );
+    expect(resolveContextLimit({ limit: { context: 0 } })).toBe(null);
+    expect(resolveContextLimit({ limit: { context: -1 } })).toBe(null);
+    expect(resolveContextLimit({ limit: { context: Infinity } })).toBe(null);
+    expect(resolveContextLimit({ limit: { context: NaN } })).toBe(null);
   });
 });
 
