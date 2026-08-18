@@ -19,7 +19,7 @@ import * as tmux from "./tmux.mjs";
 import * as oc from "./opencode.mjs";
 import * as pty from "./pty.mjs";
 import * as local from "./local.mjs";
-import { parseByteRange } from "./range.mjs";
+import { createPeekHandler } from "./peek.mjs";
 import { createLogShipper, captureConsole, resolveAxiomConfig } from "../shared/logShip.mjs";
 
 // BET-187: ship every console.* (and any startup banner / poller log) to
@@ -1183,6 +1183,16 @@ function respondJson(res, status, obj) {
   res.end(JSON.stringify(obj));
 }
 
+// /api/peek handler with the real route logic in src/server/peek.mjs (tested
+// directly in peek.test.mjs — no mock). Injected with the real fs/homedir.
+const peekHandler = createPeekHandler({
+  homedir,
+  stat,
+  createReadStream,
+  pipeline,
+  MIME,
+});
+
 function requireLoopback(req, res, errorMessage) {
   if (
     isLocalDirectRequest({
@@ -1719,106 +1729,11 @@ const handleRequest = async (req, res) => {
   // Path is resolved against the caller's home dir (~ expansion) and
   // constrained to stay inside it (path-traversal guard). Content-Type is
   // inferred from the file extension; falls back to application/octet-stream.
+  // Supports single byte ranges (206/416, `accept-ranges: bytes`); absent,
+  // unparseable, or multi-range headers serve the whole file (200). The logic
+  // lives in src/server/peek.mjs so it is tested directly, not via a mock.
   if ((req.method === "GET" || req.method === "HEAD") && path === "/api/peek") {
-    const raw = url.searchParams.get("path") ?? "";
-    if (!raw) {
-      respondJson(res, 400, { error: "path is required" });
-      return;
-    }
-    // Expand ~ to $HOME so callers can pass ~/foo/bar.
-    let resolved = raw;
-    if (resolved === "~") resolved = homedir() + "/";
-    else if (resolved.startsWith("~/")) resolved = homedir() + resolved.slice(1);
-    else resolved = resolve(resolved);
-    // Guard: resolved path must stay inside the user's home dir.
-    const home = homedir() + "/";
-    if (resolved !== home && !resolved.startsWith(home)) {
-      respondJson(res, 403, { error: "path outside home directory" });
-      return;
-    }
-    let s;
-    try {
-      s = await stat(resolved);
-    } catch (e) {
-      if (e?.code === "ENOENT") {
-        respondJson(res, 404, { error: "not found" });
-        return;
-      }
-      respondJson(res, 500, { error: String(e?.message ?? e) });
-      return;
-    }
-    if (!s.isFile()) {
-      respondJson(res, 404, { error: "not a file" });
-      return;
-    }
-    const ext = extname(resolved);
-    const contentType = MIME[ext] ?? "application/octet-stream";
-    res.writeHead(200, {
-      "content-type": contentType,
-      "content-length": String(s.size),
-      "content-disposition": `inline; filename="${basename(resolved).replace(/"/g, "")}"`,
-    });
-    const baseHeaders = {
-      "content-type": contentType,
-      "accept-ranges": "bytes",
-      "content-disposition": `inline; filename="${basename(resolved).replace(/"/g, "")}"`,
-    };
-    const range = parseByteRange(req.headers.range ?? null, s.size);
-    // Unsatisfiable range → 416 with `content-range: bytes */<size>`.
-    if (range === "unsatisfiable") {
-      res.writeHead(416, {
-        ...baseHeaders,
-        "content-range": `bytes */${s.size}`,
-      });
-      res.end();
-      return;
-    }
-    // Satisfiable single range → 206, streaming only that slice.
-    if (range) {
-      const length = range.end - range.start + 1;
-      res.writeHead(206, {
-        ...baseHeaders,
-        "content-range": `bytes ${range.start}-${range.end}/${s.size}`,
-        "content-length": String(length),
-      });
-      if (req.method === "HEAD") {
-        res.end();
-        return;
-      }
-      try {
-        await pipeline(
-          createReadStream(resolved, { start: range.start, end: range.end }),
-          res,
-        );
-      } catch (e) {
-        if (!res.headersSent) {
-          respondJson(res, 500, { error: String(e?.message ?? e) });
-        } else {
-          res.destroy();
-        }
-      }
-      return;
-    }
-    // Absent, unparseable, or multi-range header → exactly today's 200
-    // behaviour, byte for byte. Multi-range is deliberately not supported.
-    res.writeHead(200, {
-      ...baseHeaders,
-      "content-length": String(s.size),
-    });
-    // HEAD reports the size via `content-length` without streaming the body.
-    if (req.method === "HEAD") {
-      res.end();
-      return;
-    }
-    try {
-      await pipeline(createReadStream(resolved), res);
-    } catch (e) {
-      if (!res.headersSent) {
-        respondJson(res, 500, { error: String(e?.message ?? e) });
-      } else {
-        res.destroy();
-      }
-    }
+    await peekHandler(req, res, url);
     return;
   }
 
