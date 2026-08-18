@@ -18,7 +18,14 @@ packages:
     from: "12.17.0"
   MessagingUI:
     url: https://github.com/FluidGroup/swiftui-messaging-ui
-    from: "1.0.0"
+    # PINNED TO A REVISION, deliberately. `from:` is a floating range: it can
+    # resolve to a different build with no repo diff, which is intolerable for a
+    # package whose recent releases have repeatedly regressed scroll offset and
+    # self-sizing. This revision is PR #43, the newest commit on main, and is the
+    # first line that carries #39's `primeCollectionViewItemCountForBatchUpdate`
+    # — the fix for the `applyChange` batch-update crash. The 1.x `ListDataSource`
+    # API is gone from every revision containing that fix, hence the migration below.
+    revision: 1ec611adfb17c74075239565273f6902cdf77db6
   MarkdownView:
     url: https://github.com/LiYanan2004/MarkdownView
     exactVersion: "3.0.0"

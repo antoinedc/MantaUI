@@ -1064,8 +1064,8 @@
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/FluidGroup/swiftui-messaging-ui";
 			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 1.0.0;
+				kind = revision;
+				revision = 1ec611adfb17c74075239565273f6902cdf77db6;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
