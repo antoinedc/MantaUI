@@ -129,6 +129,26 @@ export function createCtoEngine(deps = {}) {
     });
   };
 
+  // Best-effort branch resolver: one git call per distinct directory, cached.
+  // Shared by list_sessions / list_projects so the per-project git state is
+  // computed once, never per window.
+  function makeBranchResolver() {
+    const cache = new Map();
+    return async function branchFor(dir) {
+      if (!dir) return null;
+      if (!cache.has(dir)) {
+        let branch = null;
+        try {
+          branch = (await gitBranch(dir)) ?? null;
+        } catch {
+          branch = null;
+        }
+        cache.set(dir, branch);
+      }
+      return cache.get(dir);
+    };
+  }
+
   // -------------------------------------------------------------------------
   // What's running — list_sessions / list_projects
   // -------------------------------------------------------------------------
@@ -172,22 +192,7 @@ export function createCtoEngine(deps = {}) {
   async function summarizeProjects(raw) {
     const projects = Array.isArray(raw) ? raw : [];
     const { info } = await sessionInfoMap(projects);
-    // Branch per distinct directory (best-effort, one git call per dir — never
-    // per window) so listing a box with many windows stays cheap.
-    const branchCache = new Map();
-    async function branchFor(dir) {
-      if (!dir) return null;
-      if (!branchCache.has(dir)) {
-        let branch = null;
-        try {
-          branch = (await gitBranch(dir)) ?? null;
-        } catch {
-          branch = null;
-        }
-        branchCache.set(dir, branch);
-      }
-      return branchCache.get(dir);
-    }
+    const branchFor = makeBranchResolver();
     return Promise.all(
       projects.map(async (p) => ({
         tmuxSession: p?.tmuxSession,
@@ -218,22 +223,7 @@ export function createCtoEngine(deps = {}) {
     run: async (ctx, args) => {
       const projects = await listProjects();
       const { info, sessionsById } = await sessionInfoMap(projects);
-
-      // Per-directory branch cache (best-effort, one git call per dir).
-      const branchCache = new Map();
-      async function branchFor(dir) {
-        if (!dir) return null;
-        if (!branchCache.has(dir)) {
-          let branch = null;
-          try {
-            branch = (await gitBranch(dir)) ?? null;
-          } catch {
-            branch = null;
-          }
-          branchCache.set(dir, branch);
-        }
-        return branchCache.get(dir);
-      }
+      const branchFor = makeBranchResolver();
 
       const sessions = [];
       for (const p of Array.isArray(projects) ? projects : []) {

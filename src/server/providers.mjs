@@ -365,6 +365,29 @@ export async function patchGlobalConfig(patch) {
 }
 
 /**
+ * Shared core for setProviders / setSubagents — both are the same write-through
+ * PATCH shape (reject `remove`, upsert each block via a builder, PATCH one
+ * config key) with no HTTP delete semantics. `configKey` is "provider" or
+ * "agent"; `keyFor(input)` and `build(input)` produce the per-entry key + block.
+ */
+async function patchBlocks(ops, deps, configKey, keyFor, build) {
+  const patch = deps?.patch ?? patchGlobalConfig;
+  const upserts = ops?.upsert ?? [];
+  const removes = ops?.remove ?? [];
+
+  if (removes.length > 0) {
+    return { ok: false, error: REMOVE_UNSUPPORTED_MSG };
+  }
+
+  if (upserts.length === 0) return { ok: true };
+  const collected = {};
+  for (const input of upserts) {
+    collected[keyFor(input)] = build(input);
+  }
+  return patch({ [configKey]: collected });
+}
+
+/**
  * Apply a set of provider mutations through opencode's config endpoint.
  * Upserts go through PATCH /global/config — the single authority that owns
  * both the in-memory config and the file. `remove` ops are NOT supported
@@ -376,20 +399,13 @@ export async function patchGlobalConfig(patch) {
  * work. Does NOT restart opencode; the caller decides (prompt-before-restart).
  */
 export async function setProviders(ops, deps = {}) {
-  const patch = deps.patch ?? patchGlobalConfig;
-  const upserts = ops.upsert ?? [];
-  const removes = ops.remove ?? [];
-
-  if (removes.length > 0) {
-    return { ok: false, error: REMOVE_UNSUPPORTED_MSG };
-  }
-
-  if (upserts.length === 0) return { ok: true };
-  const providerPatch = {};
-  for (const input of upserts) {
-    providerPatch[input.id] = upsertProviderBlock({}, input).provider[input.id];
-  }
-  return patch({ provider: providerPatch });
+  return patchBlocks(
+    ops,
+    deps,
+    "provider",
+    (input) => input.id,
+    (input) => upsertProviderBlock({}, input).provider[input.id],
+  );
 }
 
 /**
@@ -423,20 +439,13 @@ export async function getSubagents(readConfig = readRemoteConfig) {
  * follow-up work. Does NOT restart opencode; the caller must do that manually.
  */
 export async function setSubagents(ops, deps = {}) {
-  const patch = deps.patch ?? patchGlobalConfig;
-  const upserts = ops.upsert ?? [];
-  const removes = ops.remove ?? [];
-
-  if (removes.length > 0) {
-    return { ok: false, error: REMOVE_UNSUPPORTED_MSG };
-  }
-
-  if (upserts.length === 0) return { ok: true };
-  const agentPatch = {};
-  for (const input of upserts) {
-    agentPatch[input.name] = upsertAgentBlock({}, input).agent[input.name];
-  }
-  return patch({ agent: agentPatch });
+  return patchBlocks(
+    ops,
+    deps,
+    "agent",
+    (input) => input.name,
+    (input) => upsertAgentBlock({}, input).agent[input.name],
+  );
 }
 
 /**
@@ -571,12 +580,27 @@ export function mantaPlanPromptPath(fromMetaUrl = import.meta.url) {
   return fileURLToPath(new URL(MANTA_PLAN_PROMPT_REL, fromMetaUrl));
 }
 
+// Assemble a primary-agent block object. Shared by the manta-plan and cto
+// agents — both are the same "a selectable primary agent with a file-based
+// prompt + permission block" shape; only the content differs. `model` is left
+// unset (inherit the session default) unless provided.
+function agentBlock({ name, description, permission, promptPath, model }) {
+  const block = {
+    name,
+    mode: "primary",
+    description,
+    permission,
+    prompt: `{file:${promptPath}}`,
+  };
+  if (typeof model === "string" && model) block.model = model;
+  return block;
+}
+
 export function mantaPlanAgentBlock(promptPath) {
-  return {
+  return agentBlock({
     name: MANTA_PLAN_AGENT_NAME,
     // mode primary (NOT subagent) — BET-983 only offers `mode !== "subagent"`
     // agents in the composer's Plan target selection.
-    mode: "primary",
     description: "Research a request and produce a structured, buildable plan.",
     // opencode merges each agent's permission block AFTER its shared defaults
     // (which deny plan_enter/plan_exit for every agent); these allows are what
@@ -587,20 +611,58 @@ export function mantaPlanAgentBlock(promptPath) {
       edit: { "*": "ask", ".opencode/plans/**": "allow" },
       bash: "ask",
     },
-    // model deliberately unset → inherit the session default.
-    prompt: `{file:${promptPath}}`,
-  };
+    promptPath,
+  });
+}
+
+/**
+ * Shared installer/ensurer core for a box-side opencode agent block.
+ * Idempotent (a no-op diff when the named block already exists) and never
+ * throws — I/O/restart failures log and return `{ ok:false }` so the startup
+ * wire-in can fire-and-forget. Both ensureMantaPlanAgent and ensureCtoAgent
+ * delegate here; keep them thin wrappers.
+ *
+ * @param {object} o
+ * @param {string} o.agentName
+ * @param {() => object} o.buildBlock
+ * @param {() => Promise<object>} o.readConfig
+ * @param {(ops) => Promise<{ok: boolean, error?: string}>} o.applySubagents
+ * @param {() => Promise<{ok: boolean, error?: string}>} o.restart
+ * @param {string} o.logPrefix
+ * @param {{warn?: Function, error?: Function}} o.log
+ * @returns {Promise<{ok: boolean, changed: boolean, reason?: string, error?: string}>}
+ */
+async function runEnsureAgent({ agentName, buildBlock, readConfig, applySubagents, restart, logPrefix, log }) {
+  try {
+    let cfg;
+    try {
+      cfg = await readConfig();
+    } catch (e) {
+      log.warn?.(`[providers] ${logPrefix}: config unreadable, skipping install:`, e);
+      return { ok: false, changed: false, reason: "unreadable" };
+    }
+    if (cfg?.agent?.[agentName]) {
+      return { ok: true, changed: false };
+    }
+    const result = await applySubagents({ upsert: [buildBlock()] });
+    if (!result.ok) {
+      log.warn?.(`[providers] ${logPrefix}: write failed:`, result.error);
+      return { ok: false, changed: false, error: result.error };
+    }
+    const restartResult = await restart();
+    if (!restartResult.ok) {
+      log.warn?.(`[providers] ${logPrefix}: restart after install failed:`, restartResult.error);
+    }
+    return { ok: true, changed: true };
+  } catch (e) {
+    log.error?.(`[providers] ${logPrefix}:`, e);
+    return { ok: false, changed: false, error: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 /**
  * Best-effort installer/ensurer for the box-side `manta-plan` primary agent
- * block in opencode.jsonc. Idempotent:
- *  - If a `manta-plan` block already exists, does nothing (no write, no
- *    restart) — a no-op diff against the existing config.
- *  - Otherwise upserts the block via the EXISTING setSubagents writer and
- *    restarts opencode ONLY because the config changed.
- * Never throws — any I/O or restart failure logs and returns
- * `{ ok: false, ... }` so the startup wire-in can fire-and-forget.
+ * block in opencode.jsonc.
  *
  * `readConfig`/`applySubagents`/`restart`/`promptPath` are injectable for
  * tests; defaults hit the real box (readRemoteConfig, setSubagents,
@@ -622,31 +684,15 @@ export async function ensureMantaPlanAgent(deps = {}) {
     promptPath = mantaPlanPromptPath(),
     log = console,
   } = deps;
-  try {
-    let cfg;
-    try {
-      cfg = await readConfig();
-    } catch (e) {
-      log.warn?.("[providers] manta-plan: config unreadable, skipping install:", e);
-      return { ok: false, changed: false, reason: "unreadable" };
-    }
-    if (cfg?.agent?.[MANTA_PLAN_AGENT_NAME]) {
-      return { ok: true, changed: false };
-    }
-    const result = await applySubagents({ upsert: [mantaPlanAgentBlock(promptPath)] });
-    if (!result.ok) {
-      log.warn?.("[providers] manta-plan: write failed:", result.error);
-      return { ok: false, changed: false, error: result.error };
-    }
-    const restartResult = await restart();
-    if (!restartResult.ok) {
-      log.warn?.("[providers] manta-plan: restart after install failed:", restartResult.error);
-    }
-    return { ok: true, changed: true };
-  } catch (e) {
-    log.error?.("[providers] ensureMantaPlanAgent failed:", e);
-    return { ok: false, changed: false, error: e instanceof Error ? e.message : String(e) };
-  }
+  return runEnsureAgent({
+    agentName: MANTA_PLAN_AGENT_NAME,
+    buildBlock: () => mantaPlanAgentBlock(promptPath),
+    readConfig,
+    applySubagents,
+    restart,
+    logPrefix: "ensureMantaPlanAgent",
+    log,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -667,20 +713,18 @@ export function ctoPromptPath(fromMetaUrl = import.meta.url) {
 }
 
 export function ctoAgentBlock(promptPath, model) {
-  const block = {
+  return agentBlock({
     name: CTO_AGENT_NAME,
     // mode primary (NOT subagent) — the cto agent is selectable as a normal
     // chat session ("ask the on-call CTO what's running"), and modify access
     // is bounded below to the read-only `cto` tool.
-    mode: "primary",
     description:
       "On-call CTO: answer what's running, git state, usage/stopped conversations, " +
       "plan mode, context state and the Multica board via deterministic read-only tools.",
     permission: { cto: "allow" },
-    prompt: `{file:${promptPath}}`,
-  };
-  if (typeof model === "string" && model) block.model = model;
-  return block;
+    promptPath,
+    model,
+  });
 }
 
 /**
@@ -712,29 +756,13 @@ export async function ensureCtoAgent(deps = {}) {
     model,
     log = console,
   } = deps;
-  try {
-    let cfg;
-    try {
-      cfg = await readConfig();
-    } catch (e) {
-      log.warn?.("[providers] cto: config unreadable, skipping install:", e);
-      return { ok: false, changed: false, reason: "unreadable" };
-    }
-    if (cfg?.agent?.[CTO_AGENT_NAME]) {
-      return { ok: true, changed: false };
-    }
-    const result = await applySubagents({ upsert: [ctoAgentBlock(promptPath, model)] });
-    if (!result.ok) {
-      log.warn?.("[providers] cto: write failed:", result.error);
-      return { ok: false, changed: false, error: result.error };
-    }
-    const restartResult = await restart();
-    if (!restartResult.ok) {
-      log.warn?.("[providers] cto: restart after install failed:", restartResult.error);
-    }
-    return { ok: true, changed: true };
-  } catch (e) {
-    log.error?.("[providers] ensureCtoAgent failed:", e);
-    return { ok: false, changed: false, error: e instanceof Error ? e.message : String(e) };
-  }
+  return runEnsureAgent({
+    agentName: CTO_AGENT_NAME,
+    buildBlock: () => ctoAgentBlock(promptPath, model),
+    readConfig,
+    applySubagents,
+    restart,
+    logPrefix: "ensureCtoAgent",
+    log,
+  });
 }
