@@ -440,15 +440,17 @@ test("release_is_current: an unreadable installed stamp is never 'current'", () 
   assert.equal(isCurrent("", "", "0.0.29", "def456"), false);
 });
 
-// --- should_skip_self_update: the BET-1016 early-exit decision ------------------
+// --- should_skip_self_update: the early-exit decision -------------------------
 //
 // The updater's early exit must skip the whole update ONLY when the box is
-// current AND opencode is unchanged. If opencode changed, the box must keep
-// going so its restart step runs — otherwise an opencode-only upgrade is
-// swallowed by the cheap exit and the new binary never gets restarted. This is
-// the full 2x2 (box-current x opencode-changed) matrix.
+// current AND no CLI changed. If a CLI changed, the box must keep going so its
+// restart step runs — otherwise a CLI-only upgrade is swallowed by the cheap
+// exit and the new binary never gets restarted. `clis_changed` is a flag the
+// caller derives from the upgrade-clis state file: 1 when ANY changed CLI is
+// listed (opencode is now just one row of the catalog). This is the full 2x2
+// (box-current x clis-changed) matrix.
 
-function shouldSkip(installedVersion, installedSha, releaseVersion, releaseSha, opencodeChanged) {
+function shouldSkip(installedVersion, installedSha, releaseVersion, releaseSha, clisChanged) {
   const script = `
     log() { :; }; ok() { :; }; warn() { :; }; die() { echo "$*" >&2; exit 1; }
     . "${RELEASE_LIB}"
@@ -456,26 +458,26 @@ function shouldSkip(installedVersion, installedSha, releaseVersion, releaseSha, 
   `;
   const out = execFileSync(
     "bash",
-    ["-c", script, "bash", installedVersion, installedSha, releaseVersion, releaseSha, opencodeChanged],
+    ["-c", script, "bash", installedVersion, installedSha, releaseVersion, releaseSha, clisChanged],
     { encoding: "utf-8" },
   );
   return out.trim() === "skip";
 }
 
-test("should_skip_self_update: box current + opencode unchanged → skip", () => {
+test("should_skip_self_update: box current + no CLI changed → skip", () => {
   assert.equal(shouldSkip("0.0.29", "abc123", "0.0.29", "abc123", "0"), true);
 });
 
-test("should_skip_self_update: box current + opencode CHANGED → do NOT skip", () => {
-  // An opencode-only upgrade on an already-current box must fall through to the
+test("should_skip_self_update: box current + a CLI CHANGED → do NOT skip", () => {
+  // A CLI-only upgrade on an already-current box must fall through to the
   // restart — this is the whole reason the early exit is now conditional.
   assert.equal(shouldSkip("0.0.29", "abc123", "0.0.29", "abc123", "1"), false);
 });
 
-test("should_skip_self_update: box stale + opencode unchanged → do NOT skip", () => {
+test("should_skip_self_update: box stale + no CLI changed → do NOT skip", () => {
   assert.equal(shouldSkip("0.0.29", "abc123", "0.0.30", "def456", "0"), false);
 });
 
-test("should_skip_self_update: box stale + opencode changed → do NOT skip", () => {
+test("should_skip_self_update: box stale + a CLI changed → do NOT skip", () => {
   assert.equal(shouldSkip("0.0.29", "abc123", "0.0.30", "def456", "1"), false);
 });
