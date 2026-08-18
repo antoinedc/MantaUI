@@ -165,6 +165,29 @@ final class UsageMetersTests: XCTestCase {
         XCTAssertEqual(UsageMeters.formatTokens(nil), "0")
     }
 
+    // MARK: - providerLabel (BET-1130 — mirrors the desktop dial lookup)
+
+    /// The three known adapters map to their spoken names, matching
+    /// `providerLabel` in src/renderer/UsageDial.tsx exactly.
+    func testProviderLabelKnownAdapters() {
+        XCTAssertEqual(UsageMeters.providerLabel("claude"), "Claude")
+        XCTAssertEqual(UsageMeters.providerLabel("codex"), "OpenAI")
+        XCTAssertEqual(UsageMeters.providerLabel("kimi"), "Kimi")
+    }
+
+    /// An unknown adapter id is capitalised (first char upper, rest unchanged)
+    /// so a 4th adapter needs no client change — same fallback as the desktop.
+    func testProviderLabelUnknownCapitalised() {
+        XCTAssertEqual(UsageMeters.providerLabel("openai"), "Openai")
+        XCTAssertEqual(UsageMeters.providerLabel("deepseek"), "Deepseek")
+    }
+
+    /// A missing/empty provider yields "" — never a crash or "null".
+    func testProviderLabelMissingIsEmpty() {
+        XCTAssertEqual(UsageMeters.providerLabel(nil), "")
+        XCTAssertEqual(UsageMeters.providerLabel(""), "")
+    }
+
     // MARK: - staleChipLabel (BET-969)
 
     private func cache(_ isStale: Bool, staleTokens: Double) -> StreamCachePayload {

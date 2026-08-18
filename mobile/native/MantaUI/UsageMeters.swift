@@ -139,6 +139,22 @@ enum UsageMeters {
         return "\(Int((tokens / 1_000_000).rounded()))M"
     }
 
+    /// The desktop's `providerLabel` lookup (`providerLabel` in
+    /// src/renderer/UsageDial.tsx), shared verbatim so the iOS usage sheet and
+    /// the desktop dial/popover never disagree about a provider's name: claude
+    /// → "Claude", codex → "OpenAI", kimi → "Kimi", otherwise the adapter id
+    /// capitalised (first character upper, rest unchanged — a 4th adapter needs
+    /// no client change). Empty/missing → "".
+    static func providerLabel(_ provider: String?) -> String {
+        guard let provider, !provider.isEmpty else { return "" }
+        switch provider {
+        case "claude": return "Claude"
+        case "codex": return "OpenAI"
+        case "kimi": return "Kimi"
+        default: return provider.prefix(1).uppercased() + provider.dropFirst()
+        }
+    }
+
     /// "344k cold" when the box has flagged the prompt cache stale, nil
     /// otherwise. Pure, so the label is unit-testable and the view renders
     /// whatever comes back — the staleness DECISION belongs to the box
