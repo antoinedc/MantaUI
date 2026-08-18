@@ -33,7 +33,6 @@ import {
   Loader2,
   Mic,
   Paperclip,
-  RotateCw,
 } from "lucide-react";
 import { useStore } from "./store";
 import { Chip } from "./Chip";
@@ -432,6 +431,14 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
     return s;
   }, [fsEntries, existingProjects]);
 
+  // The folder name is DERIVED from the typed project name — the user types
+  // freely, the filesystem gets a safe slug. One derivation, read by the
+  // destination line, the collision hint and the create button.
+  const scratchFolder = useMemo(
+    () => slugifyProjectName(draft.projectName),
+    [draft.projectName],
+  );
+
   useEffect(() => {
     if (!draft.scratch || !draft.scratchRoot) {
       setFsEntries(new Set());
@@ -761,9 +768,9 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   // git repo, so the worktree intent can't be honored yet. Render the chip
   // unchecked and enabled so the picker can choose a folder first.
   const emptyWorktree = isNewProject && !isGitRepo;
-  // A repo with no commits has nothing to branch from, and an empty scratch
-  // project is by definition commit-less — force the worktree checkbox off.
-  const worktreeChipEnabled = !draft.scratch && (emptyWorktree || isGitRepo);
+  // A repo with no commits has nothing to branch from. The worktree checkbox
+  // no longer renders in scratch mode, so there's no scratch guard needed.
+  const worktreeChipEnabled = emptyWorktree || isGitRepo;
 
   // The repo-probe zero state is the NEW-project zero state only. The
   // new-session-in-an-existing-project variant keeps today's composer
@@ -776,7 +783,15 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   // mode with an empty prompt (the action creates the project), otherwise the
   // standard "Start a session".
   const createLabel = draft.scratch && !draft.input.trim() ? "Create workspace" : "Start a session";
-  const scratchNameTaken = draft.scratch && !!draft.projectName && scratchTaken.has(draft.projectName);
+  // One hint slot for the scratch name: either it cannot produce a folder at
+  // all, or it collides with something already under the root. Never both.
+  const scratchHint = !draft.scratch
+    ? null
+    : !scratchFolder
+      ? "Add at least one letter or number — that becomes the folder name."
+      : scratchTaken.has(scratchFolder)
+        ? `${scratchFolder} already exists — will create ${uniqueSessionName(scratchFolder, scratchTaken)}`
+        : null;
 
   return (
     // data-screen is the visual harness's handle on this screen (see
@@ -811,77 +826,71 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
           )}
         </div>
 
-        {/* Chip row — in scratch mode the name input + reroll replace the folder
-            chip; the branch chip + worktree checkbox stay in both modes. */}
+        {/* Chip row — in scratch mode ONLY the name input renders; a brand-new
+            empty directory has no branch and nothing to branch from, so there
+            is no folder chip, no branch chip and no worktree checkbox. */}
         <div className="self-start flex flex-col gap-2">
         <div className="flex items-center gap-2">
           {draft.scratch ? (
-            <>
-              <input
-                value={draft.projectName}
-                onChange={(e) =>
-                  updateDraft(draftId, { projectName: slugifyProjectName(e.target.value) })
-                }
-                spellCheck={false}
-                className="h-8 w-[240px] rounded-md border border-accent bg-bg-soft px-3 text-meta font-mono text-text outline-none focus:border-accent"
-                placeholder="project-name"
-                aria-label="Project name"
-              />
-              <IconButton
-                icon={<RotateCw />}
-                label="Pick another name"
-                onClick={() => updateDraft(draftId, { projectName: generateProjectName() })}
-              />
-            </>
-          ) : (
-            <Chip
-              onClick={() => {
-                setPickerTarget("cwd");
-                setPickerOpen(true);
-              }}
-              title={draft.cwd || "Select folder"}
-            >
-              <FolderIcon size={13} className="shrink-0 text-text-muted" aria-hidden="true" />
-              <span className="truncate max-w-[200px]">{folderLabel}</span>
-              <ChevronDown size={13} className="shrink-0 text-text-faint" aria-hidden="true" />
-            </Chip>
-          )}
-
-          {draft.wantWorktree && isGitRepo ? (
             <input
-              value={draft.worktreeBranch}
-              onChange={(e) => updateDraft(draftId, { worktreeBranch: e.target.value })}
+              value={draft.projectName}
+              onChange={(e) => updateDraft(draftId, { projectName: e.target.value })}
               spellCheck={false}
-              className="h-8 w-[132px] rounded-md border border-accent bg-bg-soft px-3 text-meta font-mono text-text outline-none focus:border-accent"
-              placeholder="branch-name"
-              aria-label="Worktree branch name"
+              className="h-8 w-[240px] rounded-md border border-accent bg-bg-soft px-3 text-meta text-text outline-none focus:border-accent"
+              placeholder="Project name"
+              aria-label="Project name"
             />
           ) : (
-            // When "worktree" is unchecked the branch is not editable — it is
-            // metadata about the folder, not a control. An inert Tag (no
-            // button, no onClick, no popover) matches the session header's
-            // branch badge and avoids a dead hover affordance.
-            <Tag
-              size="sm"
-              icon={<GitBranch size={11} aria-hidden="true" className="shrink-0" />}
-              title={branchName ? `On branch ${branchName}` : "Not a git repository"}
-            >
-              <span className="truncate max-w-[120px]">{branchName ?? "no branch"}</span>
-            </Tag>
-          )}
+            <>
+              <Chip
+                onClick={() => {
+                  setPickerTarget("cwd");
+                  setPickerOpen(true);
+                }}
+                title={draft.cwd || "Select folder"}
+              >
+                <FolderIcon size={13} className="shrink-0 text-text-muted" aria-hidden="true" />
+                <span className="truncate max-w-[200px]">{folderLabel}</span>
+                <ChevronDown size={13} className="shrink-0 text-text-faint" aria-hidden="true" />
+              </Chip>
 
-          <Checkbox
-            checked={draft.wantWorktree}
-            disabled={!worktreeChipEnabled}
-            onChange={(v) => updateDraft(draftId, { wantWorktree: v })}
-            label="worktree"
-            ariaLabel="Create in a fresh git worktree"
-          />
+              {draft.wantWorktree && isGitRepo ? (
+                <input
+                  value={draft.worktreeBranch}
+                  onChange={(e) => updateDraft(draftId, { worktreeBranch: e.target.value })}
+                  spellCheck={false}
+                  className="h-8 w-[132px] rounded-md border border-accent bg-bg-soft px-3 text-meta font-mono text-text outline-none focus:border-accent"
+                  placeholder="branch-name"
+                  aria-label="Worktree branch name"
+                />
+              ) : (
+                // When "worktree" is unchecked the branch is not editable — it is
+                // metadata about the folder, not a control. An inert Tag (no
+                // button, no onClick, no popover) matches the session header's
+                // branch badge and avoids a dead hover affordance.
+                <Tag
+                  size="sm"
+                  icon={<GitBranch size={11} aria-hidden="true" className="shrink-0" />}
+                  title={branchName ? `On branch ${branchName}` : "Not a git repository"}
+                >
+                  <span className="truncate max-w-[120px]">{branchName ?? "no branch"}</span>
+                </Tag>
+              )}
+
+              <Checkbox
+                checked={draft.wantWorktree}
+                disabled={!worktreeChipEnabled}
+                onChange={(v) => updateDraft(draftId, { wantWorktree: v })}
+                label="worktree"
+                ariaLabel="Create in a fresh git worktree"
+              />
+            </>
+          )}
         </div>
 
         {draft.scratch && (
           <div className="text-meta text-text-faint font-mono">
-            ↳ {draft.scratchRoot}/{draft.projectName} ·{" "}
+            ↳ {draft.scratchRoot}/{scratchFolder} ·{" "}
             <button
               type="button"
               onClick={() => {
@@ -895,12 +904,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
           </div>
         )}
 
-        {scratchNameTaken && (
-          <span className="text-meta text-warn">
-            {draft.projectName} already exists — will create{" "}
-            {uniqueSessionName(draft.projectName, scratchTaken)}
-          </span>
-        )}
+        {scratchHint && <span className="text-meta text-warn">{scratchHint}</span>}
         </div>
 
         {/* Composer — a single tall input card. */}
@@ -928,7 +932,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
 
           <button
             onClick={() => void submit()}
-            disabled={sending || (!draft.input.trim() && !draft.scratch)}
+            disabled={sending || (draft.scratch ? !scratchFolder : !draft.input.trim())}
             aria-label={createLabel}
             title={
               sending
