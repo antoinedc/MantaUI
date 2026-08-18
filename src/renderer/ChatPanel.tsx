@@ -1651,14 +1651,16 @@ export function ChatPanel({
     const renameWindow = async (raw: string) => {
       const name = sanitizeGeneratedTitle(raw);
       // Empty → generation failed/timed out; skip silently (never blank the
-      // window name, and the rename IPC rejects empty names anyway).
-      if (!name) return;
+      // window name, and the rename IPC rejects empty names anyway) and report
+      // failure so the first-name caller retries on the next turn.
+      if (!name) return false;
       await window.api.tmuxRenameWindow({
         sessionName: tmuxSession,
         windowIndex,
         newName: name,
       });
       await refresh();
+      return true;
     };
 
     // FIRST NAME — opencode's own session title is the preferred first name
@@ -1672,8 +1674,7 @@ export function ChatPanel({
           const sessions = await window.api.opencodeListSessions(cwd ?? "");
           const title = findSessionTitle(sessions, sessionId);
           if (title) {
-            await renameWindow(title);
-            lastAutoRenamedTurnRef.current = turns;
+            if (await renameWindow(title)) lastAutoRenamedTurnRef.current = turns;
             return;
           }
           // opencode does NOT auto-title a session created with an empty
@@ -1682,13 +1683,16 @@ export function ChatPanel({
           // read back "" and silently skipped, leaving the creation-time
           // first-word placeholder ("im"). Fall through to the title agent
           // (opencodeGenerateTitle) so the first turn still yields exactly
-          // ONE sensible rename.
+          // ONE sensible rename. We advance lastAutoRenamedTurnRef ONLY on a
+          // successful rename — a transient generation failure/timeout (raw
+          // sanitizes to "") leaves the ref at 0 so the next turn retries,
+          // matching the pre-BET-1100 first-name retry semantics instead of
+          // costing the window its name for four extra turns.
           const raw = await window.api.opencodeGenerateTitle({
             directory: cwd ?? "",
             instruction: buildTitleInstruction(buildTitlePromptInput(messages)),
           });
-          await renameWindow(raw);
-          lastAutoRenamedTurnRef.current = turns;
+          if (await renameWindow(raw)) lastAutoRenamedTurnRef.current = turns;
         } catch {
           /* auto-rename is best-effort — never surface an error banner */
         } finally {

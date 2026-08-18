@@ -32,6 +32,16 @@ const PROPS = {
   isActive: true,
 };
 
+// Shared assertion for both composer-submit paths (Enter key + Send button):
+// opencodePrompt was called with the session id and the typed text.
+function expectPromptSent(api: MockApi, text: string): void {
+  const calls = api.calls.opencodePrompt ?? [];
+  expect(calls.length).toBeGreaterThan(0);
+  // opencodePrompt(sessionId, text, ...)
+  expect(calls[0][0]).toBe("ses_test");
+  expect(calls[0][1]).toBe(text);
+}
+
 // react-virtuoso is NOT mocked here. BET-802 needed to observe the panel's
 // imperative scroll; the panel no longer scrolls through Virtuoso's handle —
 // since BET-933 it scrolls the scroller ELEMENT directly (scrollTop =
@@ -613,11 +623,7 @@ describe("ChatPanel composer submit", () => {
     });
     await h.flush();
 
-    const calls = api.calls.opencodePrompt ?? [];
-    expect(calls.length).toBeGreaterThan(0);
-    // opencodePrompt(sessionId, text, ...)
-    expect(calls[0][0]).toBe("ses_test");
-    expect(calls[0][1]).toBe("ship it");
+    expectPromptSent(api, "ship it");
   });
 
   it("calls opencodePrompt when the user clicks the Send button", async () => {
@@ -639,10 +645,7 @@ describe("ChatPanel composer submit", () => {
     });
     await h.flush();
 
-    const calls = api.calls.opencodePrompt ?? [];
-    expect(calls.length).toBeGreaterThan(0);
-    expect(calls[0][0]).toBe("ses_test");
-    expect(calls[0][1]).toBe("ship it");
+    expectPromptSent(api, "ship it");
   });
 
   it("does not submit an empty composer on Enter", async () => {
@@ -1114,16 +1117,59 @@ describe("ChatPanel pending screenshots", () => {
   });
 });
 
-// ===== Auto-rename single-rename contract (BET-1101) =====
+// ===== Auto-rename: single-rename + first-turn fallback =====
 //
-// PR #1102 fixed the "Im then manta / Im" symptom at the root: all three chat
-// create sites now pass an EMPTY session title so opencode auto-titles from
-// the first user message. That mechanism (empty title at create sites) is
-// tested in tmux.test.mjs, but the END-TO-END single-rename behavior never
-// was. This pins the contract the reviewer asked for directly: drive the
-// FIRST user turn through the mounted panel, let the turn go busy → idle, and
-// assert exactly ONE `tmuxRenameWindow` fires — reading opencode's generated
-// title — with NO second `workspace / title` re-title shortly after.
+// BET-1100/1101 fixed the "Im then manta / Im" symptom at the root: all three
+// chat create sites pass an EMPTY session title. But BET-1100 assumed opencode
+// auto-titles a session from its first user message "for free" — that premise
+// is FALSE (a session created with an empty title stays empty-titled even after
+// its first turn, verified live against opencode 1.18.10). So the first-name
+// path reads back "" and must fall through to the title agent
+// (opencodeGenerateTitle) to still produce ONE sensible rename. These tests
+// drive a first turn through the mounted panel and pin the single-rename
+// contract across both cases: opencode HAS a title (fast path) and opencode
+// left the session untitled (title-agent fallback), including the retry-on-
+// failure behavior.
+
+// Submit a user message through the real composer submit path (returns nothing).
+async function submitMessage(h: Harness, text: string): Promise<void> {
+  const textarea = h.container.querySelector("textarea") as HTMLTextAreaElement;
+  const setter = Object.getOwnPropertyDescriptor(
+    window.HTMLTextAreaElement.prototype,
+    "value",
+  )?.set;
+  await act(async () => {
+    setter?.call(textarea, text);
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => {
+    textarea.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+  });
+  await h.flush();
+  expect(h.text()).toContain(text);
+}
+
+// Drive a turn running true→false (the edge that ARMS the auto-rename) and
+// flush so the settled-transcript effect evaluates it.
+async function turnIdle(
+  bus: MockEventBus,
+  h: Harness,
+  sessionId: string,
+): Promise<void> {
+  await emitStreamAndFlush(bus, h, {
+    sub: "running",
+    sessionId,
+    payload: { running: true },
+  });
+  await emitStreamAndFlush(bus, h, {
+    sub: "running",
+    sessionId,
+    payload: { running: false },
+  });
+}
+
 describe("ChatPanel auto-rename single rename (BET-1101)", () => {
   let api: MockApi;
   let bus: MockEventBus;
@@ -1134,10 +1180,9 @@ describe("ChatPanel auto-rename single rename (BET-1101)", () => {
     h = null;
   });
 
-  it("renames exactly once on the first turn, reading opencode's generated title", async () => {
-    // opencode titles every session from its FIRST user message for free, so
-    // the first auto-rename reads that title back via opencodeListSessions
-    // rather than spinning up a throwaway generation session (BET-1018).
+  it("renames exactly once on the first turn via opencode's title (fast path)", async () => {
+    // opencode HAS titled the session, so the first-name fast path should use
+    // it (via opencodeListSessions) and MUST NOT spin up a title agent.
     ({ api, bus } = installMockApi({
       opencodeListSessions: () =>
         Promise.resolve([{ id: "ses_test", title: "Build the login page" }]),
@@ -1146,41 +1191,11 @@ describe("ChatPanel auto-rename single rename (BET-1101)", () => {
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
 
-    // Send the first user message through the real composer submit path.
-    const textarea = h.container.querySelector("textarea") as HTMLTextAreaElement;
-    const setter = Object.getOwnPropertyDescriptor(
-      window.HTMLTextAreaElement.prototype,
-      "value",
-    )?.set;
-    await act(async () => {
-      setter?.call(textarea, "Build the login page");
-      textarea.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    await act(async () => {
-      textarea.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
-      );
-    });
-    await h.flush();
-    // The optimistic user turn is in the transcript (it seeds the rename).
-    expect(h.text()).toContain("Build the login page");
+    await submitMessage(h, "Build the login page");
+    await turnIdle(bus, h, "ses_test");
 
-    // The turn goes busy → idle. The running true→false edge ARMS the
-    // auto-rename; the settled-transcript effect then evaluates it and reads
-    // opencode's generated title.
-    await emitStreamAndFlush(bus, h, {
-      sub: "running",
-      sessionId: "ses_test",
-      payload: { running: true },
-    });
-    await emitStreamAndFlush(bus, h, {
-      sub: "running",
-      sessionId: "ses_test",
-      payload: { running: false },
-    });
-
-    // EXACTLY ONE rename, with the clean generated title (not a stale
-    // "workspace / title" compound — the BET-1100 root-cause fix).
+    // EXACTLY ONE rename, with the clean generated title — and the title agent
+    // was NOT called (the fast path returned before it).
     const renames = api.calls.tmuxRenameWindow ?? [];
     expect(renames.length).toBe(1);
     expect(renames[0][0]).toEqual({
@@ -1188,6 +1203,7 @@ describe("ChatPanel auto-rename single rename (BET-1101)", () => {
       windowIndex: 1,
       newName: "Build the login page",
     });
+    expect(api.calls.opencodeGenerateTitle ?? []).toHaveLength(0);
 
     // No second `workspace / title` re-title a short time later: a single turn
     // must not fire the every-Nth-turn drift rename.
@@ -1197,15 +1213,6 @@ describe("ChatPanel auto-rename single rename (BET-1101)", () => {
   });
 });
 
-// ===== Auto-rename first-turn fallback (BET-1100 follow-up) =====
-//
-// BET-1100/1101 assumed opencode auto-titles a session from its first user
-// message "for free". That premise is FALSE — a session created with an empty
-// title stays empty-titled even after its first turn (verified live against
-// opencode 1.18.10). So the first-name path read back "" and skipped the
-// rename, leaving the creation-time first-word placeholder ("im"). This pins
-// the fix: when opencode has no title, the first turn falls through to
-// opencodeGenerateTitle (the title agent) so it still renames exactly once.
 describe("ChatPanel auto-rename first-turn fallback (BET-1100 follow-up)", () => {
   let api: MockApi;
   let bus: MockEventBus;
@@ -1227,36 +1234,17 @@ describe("ChatPanel auto-rename first-turn fallback (BET-1100 follow-up)", () =>
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
 
-    const textarea = h.container.querySelector("textarea") as HTMLTextAreaElement;
-    const setter = Object.getOwnPropertyDescriptor(
-      window.HTMLTextAreaElement.prototype,
-      "value",
-    )?.set;
-    await act(async () => {
-      setter?.call(textarea, "I'm just checking the manta setup");
-      textarea.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    await act(async () => {
-      textarea.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
-      );
-    });
-    await h.flush();
-    expect(h.text()).toContain("I'm just checking the manta setup");
+    await submitMessage(h, "I'm just checking the manta setup");
+    await turnIdle(bus, h, "ses_test");
 
-    await emitStreamAndFlush(bus, h, {
-      sub: "running",
-      sessionId: "ses_test",
-      payload: { running: true },
-    });
-    await emitStreamAndFlush(bus, h, {
-      sub: "running",
-      sessionId: "ses_test",
-      payload: { running: false },
-    });
-
-    // The empty title forced the title-agent fallback, which produced the name.
-    expect(api.calls.opencodeGenerateTitle ?? []).toHaveLength(1);
+    // The empty title forced the title-agent fallback, which produced the name
+    // from the real conversation (asserting the instruction is fed the text,
+    // not an empty/garbage transcript).
+    const genCalls = api.calls.opencodeGenerateTitle ?? [];
+    expect(genCalls).toHaveLength(1);
+    expect(JSON.stringify(genCalls[0][0])).toContain(
+      "I'm just checking the manta setup",
+    );
     const renames = api.calls.tmuxRenameWindow ?? [];
     expect(renames.length).toBe(1);
     expect(renames[0][0]).toEqual({
@@ -1269,5 +1257,44 @@ describe("ChatPanel auto-rename first-turn fallback (BET-1100 follow-up)", () =>
     await new Promise((r) => setTimeout(r, 60));
     await h.flush();
     expect(api.calls.tmuxRenameWindow ?? []).toHaveLength(1);
+  });
+
+  it("retries the title agent on the next turn when generation returns empty", async () => {
+    // Generation fails on turn 1 (returns "") and succeeds on turn 2. The
+    // first-name fallback must advance lastAutoRenamedTurnRef ONLY on a
+    // successful rename, so a transient failure doesn't cost the window its
+    // name for the next four turns — turn 2 retries and renames.
+    let genCalls = 0;
+    ({ api, bus } = installMockApi({
+      opencodeListSessions: () =>
+        Promise.resolve([{ id: "ses_test", title: "" }]),
+      opencodeGenerateTitle: () => {
+        genCalls += 1;
+        return Promise.resolve(genCalls === 1 ? "" : "Manta setup check");
+      },
+    }));
+    resetStore({ autoRenameSessions: true });
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    await submitMessage(h, "I'm just checking the manta setup");
+    await turnIdle(bus, h, "ses_test");
+
+    // Turn 1: generation failed ("") → no rename, ref NOT advanced.
+    expect(api.calls.opencodeGenerateTitle ?? []).toHaveLength(1);
+    expect(api.calls.tmuxRenameWindow ?? []).toHaveLength(0);
+
+    // Turn 2: retries, succeeds → exactly one rename now.
+    await submitMessage(h, "Let's dig in");
+    await turnIdle(bus, h, "ses_test");
+
+    expect(api.calls.opencodeGenerateTitle ?? []).toHaveLength(2);
+    const renames = api.calls.tmuxRenameWindow ?? [];
+    expect(renames).toHaveLength(1);
+    expect(renames[0][0]).toEqual({
+      sessionName: "proj",
+      windowIndex: 1,
+      newName: "Manta setup check",
+    });
   });
 });

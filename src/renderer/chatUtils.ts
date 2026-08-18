@@ -141,11 +141,17 @@ export function formatModelContextSize(
 }
 
 // Find the opencode session title for a given session id, from the session
-// list returned by opencodeListSessions (GET /session). opencode names every
-// session from its FIRST user message for free, so this supplies the FIRST
-// auto-rename name without burning a throwaway generation session (BET-1018).
-// Returns "" when the session is missing or hasn't been titled yet — the
-// caller skips the rename and retries on the next turn.
+// list returned by opencodeListSessions (GET /session). opencode names a
+// session from its first user message only when it has one — a manta-created
+// chat session is created with an EMPTY title and opencode leaves it empty
+// even after the first turn (verified live, 1.18.10; BET-1100's premise was
+// wrong), so for those sessions this returns "". The auto-rename first-name
+// caller therefore falls through to the title agent
+// (opencodeGenerateTitle), and only uses this cheap list path for sessions
+// that genuinely carry a title (e.g. adopted/externally-created ones).
+// Returns "" when the session is missing or hasn't been titled — the caller
+// falls through to generation, and retries on the next turn if that also
+// fails.
 export function findSessionTitle(
   sessions: { id: string; title?: string }[],
   sessionId: string,
