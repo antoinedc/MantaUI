@@ -84,6 +84,11 @@ struct ComposerView: View {
     var onSlashFork: (() -> Void)? = nil
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.layoutDirection) private var layoutDirection
+    /// Shared glass identity for the composer box ⇄ locked-bar morph. Both
+    /// `inputBox` and the locked surface carry this SAME id inside the one
+    /// `GlassEffectContainer`, so their glass shapes morph into each other on
+    /// the held→locked transition instead of cutting or stacking (BET-1089).
+    @Namespace private var composerGlass
 
     @State private var text = ""
     @State private var attachments: [ComposerAttachment] = []
@@ -198,31 +203,43 @@ struct ComposerView: View {
                 )
                 .transition(.opacity)
             }
-            // ONE glass box, always. While a take is held the box keeps its size and
-            // its chrome and swaps its CONTENTS for the recording surface (see
-            // `inputBox`) — the composer stays MOUNTED because the mic button owns the
-            // in-flight touch and a view removed mid-gesture stops receiving it
-            // (BET-1051). The hands-free locked bar rides in the SAME ZStack and
-            // crossfades in on the phase-keyed `.smooth` curve (BET-1082): `inputBox`
-            // is only faded out + made inert while the take is hands-free, never
-            // swapped out structurally — a structural if/else removal/insertion here
-            // was what made the lock CUT to the bar instead of animating into it.
-            ZStack(alignment: .top) {
-                inputBox
-                    .opacity(recorder.isHandsFree ? 0 : 1)
-                    .allowsHitTesting(!recorder.isHandsFree)
-                    .accessibilityHidden(recorder.isHandsFree)
+            // ONE glass box, always. The composer stays MOUNTED while the take is
+            // HELD (BET-1051) because the mic button owns the in-flight touch — but
+            // that mounting lives INSIDE `inputBox`, whose contents swap for the
+            // held surface. The hands-free phase is structurally different: it is
+            // only ever entered after the finger is up (the mic's own `onEnded`),
+            // so the composer and the locked bar must never coexist. BET-1082 tried
+            // to crossfade them by stacking both in a ZStack with `inputBox` faded
+            // to `.opacity(0)` — but a glass shape's fill is composited by the
+            // shared `GlassEffectContainer`, so the faded box still contributed its
+            // shape and the two fused into one compound blob. Fix (BET-1089): swap
+            // structurally to exactly ONE BoxChrome shape and key the change on
+            // `.glassEffectID` (the same id + namespace on both) so the glass
+            // morphs instead of stacking or cutting.
+            Group {
                 if recorder.isHandsFree {
                     VoiceRecordingLockedView(
                         recorder: recorder,
                         tokens: tokens,
+                        glassID: ("composer-box", composerGlass),
                         onTake: { take in Task { await handleVoiceTake(take) } },
                         onDiscarded: {
                             UIAccessibility.post(notification: .announcement, argument: "Recording discarded")
                         }
                     )
-                    .transition(.opacity)
+                } else {
+                    inputBox
                 }
+            }
+            // Report the height of WHICHEVER glass box is currently mounted. Any
+            // onGeometryChange owned by `inputBox` alone would silently freeze when
+            // it unmounts for a locked take — the differently-sized locked bar
+            // would be on screen while the transcript's under-box scrim kept the
+            // composer's last height (BET-1089, scrim/inset).
+            .onGeometryChange(for: CGFloat.self) { proxy in
+                proxy.size.height
+            } action: { height in
+                onGlassBoxHeightChange(height + Metrics.spacing.sp2)
             }
         }
         .padding(.horizontal, Metrics.spacing.sp3)
@@ -369,7 +386,7 @@ struct ComposerView: View {
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp2)
-        .modifier(BoxChrome(cornerRadius: cornerRadius, stroke: borderColor, tint: tokens.panel.opacity(0.35)))
+        .modifier(BoxChrome(cornerRadius: cornerRadius, stroke: borderColor, tint: tokens.panel.opacity(0.35), glassID: ("composer-box", composerGlass)))
         // The expand control is an OVERLAY, not a row: it must sit in the top
         // right corner whether or not there are chips to share a line with, and
         // as an overlay it costs no vertical space when there are none.
@@ -379,11 +396,6 @@ struct ComposerView: View {
                     .padding(.top, Metrics.spacing.sp2)
                     .padding(.trailing, Metrics.spacing.sp3)
             }
-        }
-        .onGeometryChange(for: CGFloat.self) { proxy in
-            proxy.size.height
-        } action: { height in
-            onGlassBoxHeightChange(height + Metrics.spacing.sp2)
         }
     }
 
@@ -1376,20 +1388,39 @@ struct BoxChrome: ViewModifier {
     /// box read as a solid panel instead of glass, defeating the whole
     /// point of the effect.
     let tint: Color
+    /// An OPTIONAL glass identity for `.glassEffectID(_:in:)`. When two
+    /// shapes inside the same `GlassEffectContainer` carry the SAME id in
+    /// the SAME `Namespace`, they morph into each other instead of reading
+    /// as separate glass shapes — this is how the composer box and the
+    /// locked recording bar swap (BET-1089) without cutting and without
+    /// stacking two glass boxes. Nil (the default) keeps the modifier a
+    /// plain chrome application.
+    var glassID: (id: String, namespace: Namespace.ID)? = nil
 
+    @ViewBuilder
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        return content
-            // Liquid Glass, the iOS 26 system material, rather than the flat
-            // `.ultraThinMaterial` this used to fill with — same treatment as
-            // the session list's search capsule and the chat header buttons.
-            // The shape is passed through so the glass morphs with the box
-            // instead of snapping between the two forms. A panel fill sits
-            // beneath the glass so the composer is a bit less see-through.
-            .background(tint, in: shape)
-            .glassEffect(.regular, in: shape)
-            .overlay {
-                shape.strokeBorder(stroke, lineWidth: 1)
-            }
+        if let glassID {
+            content
+                // Liquid Glass, the iOS 26 system material, rather than the flat
+                // `.ultraThinMaterial` this used to fill with — same treatment as
+                // the session list's search capsule and the chat header buttons.
+                // The shape is passed through so the glass morphs with the box
+                // instead of snapping between the two forms. A panel fill sits
+                // beneath the glass so the composer is a bit less see-through.
+                .background(tint, in: shape)
+                .glassEffect(.regular, in: shape)
+                .glassEffectID(glassID.id, in: glassID.namespace)
+                .overlay {
+                    shape.strokeBorder(stroke, lineWidth: 1)
+                }
+        } else {
+            content
+                .background(tint, in: shape)
+                .glassEffect(.regular, in: shape)
+                .overlay {
+                    shape.strokeBorder(stroke, lineWidth: 1)
+                }
+        }
     }
 }

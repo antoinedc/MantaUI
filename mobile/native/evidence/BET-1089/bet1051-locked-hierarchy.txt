@@ -1,0 +1,61 @@
+Attributes: Application, 0xADDR, pid: PID, label: 'MantaUI'
+Element subtree:
+→Application, 0xADDR, pid: PID, label: 'MantaUI'
+Window (Main), 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+NavigationBar, 0xADDR, {{0.0, 62.0}, {402.0, 54.0}}, identifier: 'Chat'
+Button, 0xADDR, {{16.0, 62.0}, {44.0, 44.0}}, identifier: 'BackButton', label: 'Sessions'
+StaticText, 0xADDR, {{182.0, 73.7}, {38.0, 20.7}}, label: 'Chat'
+Other, 0xADDR, {{346.0, 66.0}, {36.0, 36.0}}, identifier: 'ellipsis', label: 'Session actions'
+Other, 0xADDR, {{346.0, 66.0}, {36.0, 36.0}}
+Button, 0xADDR, {{350.0, 66.0}, {28.0, 36.0}}, identifier: 'ellipsis', label: 'Session actions'
+Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+Other, 0xADDR, {{0.0, 0.0}, {402.0, 884.0}}, identifier: 'chat-screen'
+Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+CollectionView, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+Other, 0xADDR, {{0.0, 0.0}, {402.0, 188.8}}
+Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+Other, 0xADDR, {{0.0, 0.0}, {402.0, 188.8}}
+Image, 0xADDR, {{-120.0, -166.0}, {642.0, 332.0}}, identifier: 'AdditionalDimmingOverlay'
+Other, 0xADDR, {{0.0, 0.0}, {402.0, 106.0}}
+Other, 0xADDR, {{0.0, 0.0}, {402.0, 188.8}}
+Other, 0xADDR, {{0.0, 0.0}, {402.0, 188.8}}
+Other, 0xADDR, {{0.0, 0.0}, {402.0, 188.8}}
+Other, 0xADDR, {{0.0, 0.0}, {402.0, 188.8}}
+Other, 0xADDR, {{0.0, 0.0}, {402.0, 188.8}}
+Other, 0xADDR, {{0.0, 0.0}, {402.0, 188.8}}
+Other, 0xADDR, {{0.0, 0.0}, {402.0, 188.8}}
+Other, 0xADDR, {{369.0, 124.0}, {30.0, 554.7}}, label: 'Vertical scroll bar, 138 122 pages', value: 0 %
+Other, 0xADDR, {{396.0, 668.7}, {3.0, 7.0}}
+Other, 0xADDR, {{62.0, 841.0}, {278.0, 30.0}}, label: 'Horizontal scroll bar, 1 page', value: 0 %
+Other, 0xADDR, {{65.0, 868.0}, {272.0, 3.0}}
+Other, 0xADDR, {{369.0, 124.0}, {30.0, 554.7}}, label: 'Vertical scroll bar, 138 122 pages', value: 0 %
+Other, 0xADDR, {{396.0, 668.7}, {3.0, 7.0}}
+Other, 0xADDR, {{62.0, 841.0}, {278.0, 30.0}}, label: 'Horizontal scroll bar, 1 page', value: 0 %
+Other, 0xADDR, {{65.0, 868.0}, {272.0, 3.0}}
+Other, 0xADDR, {{0.0, 0.0}, {0.0, 0.0}}
+Other, 0xADDR, {{12.0, 710.7}, {378.0, 121.3}}, identifier: 'voice-recording-locked'
+Other, 0xADDR, {{22.0, 726.3}, {15.0, 15.0}}
+StaticText, 0xADDR, {{43.0, 724.7}, {33.7, 18.0}}, label: '0:02'
+Other, 0xADDR, {{100.7, 722.7}, {277.3, 22.0}}
+Button, 0xADDR, {{32.0, 756.7}, {38.0, 38.0}}, identifier: 'voice-discard', label: 'Discard recording'
+Button, 0xADDR, {{182.0, 756.7}, {38.0, 38.0}}, identifier: 'voice-pause', label: 'Pause recording'
+Button, 0xADDR, {{332.0, 756.7}, {38.0, 38.0}}, identifier: 'voice-send', label: 'Send recording'
+StaticText, 0xADDR, {{94.7, 806.7}, {212.7, 13.3}}, label: 'tap ❙❙ to pause · ➤ transcribes and sends'
+Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+Path to element:
+→Application, 0xADDR, pid: PID, label: 'MantaUI'
+Query chain:
+→Find: Target Application 'com.antoinedc.mantaui'
+Output: {
+Application, 0xADDR, pid: PID, label: 'MantaUI'
+}
