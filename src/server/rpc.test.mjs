@@ -711,6 +711,55 @@ test("server:update-check defaults to 'no update' when the dep is not wired", as
   assert.deepEqual(await handlers["server:update-check"](), { available: false });
 });
 
+test("server:update-check attaches CLI `targets` from the cliDetector", async () => {
+  // BET-1096 stage 2: the box-update check gains the box-side CLI targets so
+  // the renderer can assemble ONE UpdateTarget list without a second call.
+  const { deps } = makeDeps([]);
+  deps.checkServerUpdate = async () => ({ available: false });
+  deps.cliDetector = {
+    detect: async () => [
+      { id: "opencode", label: "opencode", current: "1.0.0", latest: "1.1.0", available: true, ok: true, manual: false, disruption: "ends-turns" },
+    ],
+  };
+  const handlers = buildHandlers(deps);
+  const result = await handlers["server:update-check"]();
+  assert.equal(result.available, false);
+  assert.equal(result.targets.length, 1);
+  assert.equal(result.targets[0].id, "opencode");
+});
+
+test("server:update-check swallows a throwing cliDetector and keeps the box verdict", async () => {
+  // A CLI probe must NEVER break the box-update check. Detection throwing or
+  // timing out → the payload comes back WITHOUT `targets`, box verdict intact.
+  const { deps } = makeDeps([]);
+  deps.checkServerUpdate = async () => ({ available: true, version: "9.9.9" });
+  deps.cliDetector = { detect: async () => { throw new Error("probe exploded"); } };
+  const handlers = buildHandlers(deps);
+  const result = await handlers["server:update-check"]();
+  assert.deepEqual(result, { available: true, version: "9.9.9" });
+});
+
+test("server:update-check swallows a timing-out cliDetector and keeps the box verdict", async () => {
+  // The handler bounds the probe with a hard timeout. A probe that never
+  // resolves (wedged network fetch) must not hang the click — it is dropped.
+  const { deps } = makeDeps([]);
+  deps.checkServerUpdate = async () => ({ available: false });
+  deps.cliDetector = { detect: () => new Promise(() => {}) }; // never resolves
+  deps.cliProbeTimeoutMs = 20; // tiny bound for the test
+  const handlers = buildHandlers(deps);
+  const result = await handlers["server:update-check"]();
+  assert.deepEqual(result, { available: false });
+});
+
+test("server:update-check works with no cliDetector wired (older box)", async () => {
+  // buildHandlers must not require the dep: a non-wired detector is the same
+  // shape as an older box with no CLI probe — desktop + server only.
+  const { deps } = makeDeps([]);
+  deps.checkServerUpdate = async () => ({ available: false });
+  const handlers = buildHandlers(deps);
+  assert.deepEqual(await handlers["server:update-check"](), { available: false });
+});
+
 test("server:update-apply propagates runServerSelfUpdate's failure result through the RPC", async () => {
   // Defense-in-depth: when the spawn throws (script missing, no exec
   // bit, EACCES), the channel must surface that to the caller as

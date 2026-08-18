@@ -861,6 +861,39 @@ export type ServerUpdateCheck = {
   version?: string;
   notesUrl?: string | null;
   ok?: boolean;
+  // Box-side CLI update targets (BET-1096, stage 2 of the unified-update
+  // epic). Absent on an older box that predates the CLI probe — consumers
+  // must degrade to displaying just the fixed desktop + server targets.
+  // `available` above keeps its EXACT original meaning (the box SERVER has an
+  // update) — it is load-bearing for the existing poller, banner and push
+  // dedup, and must not be redefined to include the CLIs.
+  targets?: UpdateTarget[];
+};
+
+// Identity of one line in the unified update list (BET-1096). `desktop` and
+// `server` are always present; the four CLIs (opencode / claude / codex / kimi)
+// arrive from the box. `available` means an update exists AND we can apply it;
+// `ok:false` means we could not determine the state — NEVER render that as
+// "up to date". `manual` (no safe upgrade command, or a dev build with no
+// updater) surfaces as a link, not a button.
+export type UpdateTargetId =
+  | "desktop"
+  | "server"
+  | "opencode"
+  | "claude"
+  | "codex"
+  | "kimi";
+
+export type UpdateTarget = {
+  id: UpdateTargetId;
+  label: string; // "Manta UI" | "The box" | "opencode" | "Claude Code" | "Codex" | "Kimi Code"
+  current: string | null;
+  latest: string | null;
+  available: boolean; // an update exists AND we can apply it
+  ok: boolean; // false = we could not determine. NEVER render as up to date.
+  manual: boolean; // no safe upgrade command → link, not a button
+  manualUrl?: string;
+  disruption: "none" | "reconnect" | "ends-turns" | "app-restart";
 };
 
 // Result of an ON-DEMAND desktop update check (`autoUpdate:check`).

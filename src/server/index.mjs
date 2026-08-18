@@ -52,6 +52,7 @@ import {
   startVoiceSweep,
 } from "./voiceNotes.mjs";
 import { startServerUpdatePoller, createOpencodeUpdateForwarder } from "./serverUpdate.mjs";
+import { createCliDetector } from "./cliUpdates.mjs";
 import { runServerSelfUpdate } from "./opencodeAdmin.mjs";
 import { startSchedulePoller, createJob, listJobs, deleteJob } from "./schedule.mjs";
 import { startUsagePoller, recheckAdapterAtLimit, providerIDForAdapter, listSnapshots } from "./usage.mjs";
@@ -815,6 +816,12 @@ rpcHandlers = buildHandlers({
     typeof checkServerUpdate === "function"
       ? checkServerUpdate()
       : Promise.resolve({ available: false }),
+  // BET-1096 stage 2: the box-side CLI detector rides the existing
+  // `server:update-check` call, so the response gains the CLI targets (behind
+  // a timeout + try/catch in the handler — a CLI probe can never break the
+  // box-update check). 5-minute cached, in-flight-joining probe; no second
+  // poller, no new channel, no second bus event kind.
+  cliDetector: createCliDetector(),
   // BET-834: voice-note metadata over /rpc (audio goes over REST). Oldest
   // first, filtered by session, no audio bytes.
   voiceNotes: {

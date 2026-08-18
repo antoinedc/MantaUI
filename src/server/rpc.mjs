@@ -265,6 +265,35 @@ export async function dispatch(handlers, channel, args) {
 //                         regression guard is pinned to it today).
 // Channel key strings MUST match IPC.* values in src/shared/types.ts.
 // Arg shapes MUST match what src/preload/index.ts packs per channel.
+
+// Hard cap on the CLI probe inside `server:update-check`. The detector's own
+// per-probe timeouts bound version reads, but `fetchLatest` has no AbortSignal
+// — a wedged network call could hang the whole click. Matches the renderer's
+// 15s server-leg timeout so the two can't disagree about what "a check that
+// just didn't answer" means.
+const CLI_PROBE_TIMEOUT_MS = 15_000;
+
+/**
+ * Bound a CLI-probe promise with a hard timeout. On expiry it REJECTS, which
+ * the `server:update-check` handler treats as "return without targets" — a CLI
+ * probe must never be able to break the box-update check.
+ */
+function withCliProbeTimeout(promise, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("cli probe timeout")), timeoutMs);
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+
 export function buildHandlers({
   tmux,
   oc,
@@ -278,6 +307,12 @@ export function buildHandlers({
   opencodeVersion,
   runServerSelfUpdate,
   checkServerUpdate = () => Promise.resolve({ available: false }),
+  // Box-side CLI update detector (BET-1096). Null when not wired — the
+  // `server:update-check` handler then returns the box verdict WITHOUT
+  // `targets`, exactly as an older box would.
+  cliDetector = null,
+  // Hard bound on the CLI probe, injectable for tests (defaults to 15s).
+  cliProbeTimeoutMs = CLI_PROBE_TIMEOUT_MS,
   delegate,
   progress,
   voiceNotes,
@@ -825,7 +860,23 @@ export function buildHandlers({
     // Injected via buildHandlers deps for the same reason as
     // runServerSelfUpdate: the poller owns the state and is wired in
     // src/server/index.mjs.
-    "server:update-check": () => checkServerUpdate(),
+    "server:update-check": async () => {
+      const result = await checkServerUpdate();
+      // BET-1096 stage 2: the CLI probe rides the call that already happens so
+      // the box-update check gains the box-side CLI targets without a second
+      // poller or channel. GUARDED: if detection throws or times out, return
+      // the payload WITHOUT `targets` rather than failing the whole check — a
+      // CLI probe must never be able to break the box-update check.
+      if (cliDetector) {
+        try {
+          const targets = await withCliProbeTimeout(cliDetector.detect(), cliProbeTimeoutMs);
+          if (Array.isArray(targets) && targets.length > 0) result.targets = targets;
+        } catch {
+          // Detection threw or timed out — return the box verdict untouched.
+        }
+      }
+      return result;
+    },
 
     // preload: ipcRenderer.invoke(IPC.opencodeDefaultModel)  → no args
     "opencode:default-model": () => oc.getDefaultModel(),

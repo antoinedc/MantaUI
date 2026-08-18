@@ -5,7 +5,7 @@
 // without DOM/Electron/network).
 import type { ReactNode } from "react";
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { AppControlPayload, CheckRollup, DelegateApprovalTool, ForgeCheckRun, ForgeInboxItem, InboxReason, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, PermissionRequest, ProgressRecord, ProgressState, Project, PullRequest, QuestionRequest, RepoHit, SubscriptionStatus, TmuxWindow, UsageSnapshot, UsageWindow } from "../shared/types";
+import type { AppControlPayload, CheckRollup, DelegateApprovalTool, ForgeCheckRun, ForgeInboxItem, InboxReason, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, PermissionRequest, ProgressRecord, ProgressState, Project, PullRequest, QuestionRequest, RepoHit, SubscriptionStatus, TmuxWindow, UpdateTarget, UsageSnapshot, UsageWindow } from "../shared/types";
 import type { SessionMode } from "./chatShared";
 import type { VoiceNoteRecord } from "../shared/types";
 // Value import — `isClientTooOld` is the pure semver compare that drives
@@ -1114,58 +1114,31 @@ export type UpdateRowTone = "ok" | "action" | "muted" | "error";
 export type UpdateRow = { tone: UpdateRowTone; text: string };
 
 /**
- * Describe the desktop leg of an update check.
+ * Describe ONE update target for its row.
  *
- * `supported:false` deliberately maps to "muted", not "ok": an unpacked dev
- * build and a mobile client have no updater at all, and claiming they are "up
- * to date" would be a statement about something that was never checked.
- */
-export function describeDesktopUpdate(
-  r: { supported: boolean; available: boolean; version: string | null; error?: string } | null,
-): UpdateRow | null {
-  if (r == null) return null;
-  if (r.error) return { tone: "error", text: r.error };
-  if (!r.supported) return { tone: "muted", text: "Updates aren’t available in this build." };
-  if (r.available) {
-    return {
-      tone: "action",
-      text: r.version ? `Manta UI ${r.version} is available.` : "An update is available.",
-    };
-  }
-  return { tone: "ok", text: "Manta UI is up to date." };
-}
-
-/**
- * Describe the box leg of an update check.
+ * One function for every target. The old code had two bespoke functions
+ * (`describeDesktopUpdate` / `describeServerUpdate`) doing the same job for
+ * two targets; there are about to be six, so both are replaced by this single
+ * one keyed off the shared `UpdateTarget` shape.
  *
- * The server check resolves `{available:false}` both when the box is current
- * AND when the manifest fetch failed — `createUpdateCheck` swallows fetch
- * errors by design so a flaky feed can never crash the poller. That conflation
- * is invisible and acceptable for a background poll, but it means this row can
- * only ever claim "up to date" as the box's own best answer; `failed` is passed
- * separately by the caller when the RPC itself did not come back.
+ * Rules, in this exact order — the ordering IS the semantics:
+ *  - `!t.ok`       → error, "Couldn't check"
+ *  - `t.manual`    → muted, "Update manually"
+ *  - `t.available` → action, "Update available"
+ *  - else          → ok, "Up to date"
+ *
+ * The invariant that must survive: an unanswerable check is NEVER rendered as
+ * "ok". "Up to date" and "couldn't check" otherwise look identical — both are
+ * a sentence with no button — and a reassuring silence over a failed check is
+ * exactly how a permanently broken macOS updater passed for a healthy one. So
+ * `!ok` wins over everything, and `manual` (a dev build with no updater, or a
+ * CLI with no safe upgrade command) is "muted", never "ok".
  */
-export function describeServerUpdate(
-  r: { available: boolean; version?: string; ok?: boolean } | null,
-  opts: { failed?: boolean } = {},
-): UpdateRow | null {
-  // A genuine failure outranks any reading. Two ways to be here: the RPC that
-  // ran the check never came back (`failed`), or the box's check could not
-  // fetch the manifest (`ok === false`) — in BOTH cases the answer is "we
-  // can't know", NOT the reassuring green "you're up to date", which is what a
-  // swallowed manifest-fetch failure would otherwise render as.
-  if (opts.failed) return { tone: "error", text: "Couldn’t reach the box to check." };
-  if (r == null) return null;
-  if (r.ok === false) {
-    return { tone: "error", text: "Couldn’t check the box for updates right now." };
-  }
-  if (r.available) {
-    return {
-      tone: "action",
-      text: r.version ? `Box update ${r.version} is available.` : "A box update is available.",
-    };
-  }
-  return { tone: "ok", text: "The box is up to date." };
+export function describeUpdateTarget(t: UpdateTarget): UpdateRow {
+  if (!t.ok) return { tone: "error", text: "Couldn't check" };
+  if (t.manual) return { tone: "muted", text: "Update manually" };
+  if (t.available) return { tone: "action", text: "Update available" };
+  return { tone: "ok", text: "Up to date" };
 }
 
 // ===== Box self-update: transient network failure vs real failure =====
