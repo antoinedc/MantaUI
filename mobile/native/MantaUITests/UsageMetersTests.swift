@@ -327,20 +327,20 @@ final class UsageMetersTests: XCTestCase {
     /// `pct` is clamped to 0...100 before drawing — a provider can report
     /// over 100, and a negative never wraps around into a full ring.
     func testMeterRingClampBounds() {
-        XCTAssertEqual(MeterRing.clamp(-5), 0)
-        XCTAssertEqual(MeterRing.clamp(0), 0)
-        XCTAssertEqual(MeterRing.clamp(140), 100)
-        XCTAssertEqual(MeterRing.clamp(100), 100)
+        XCTAssertEqual(UsageMeters.clamp(-5), 0)
+        XCTAssertEqual(UsageMeters.clamp(0), 0)
+        XCTAssertEqual(UsageMeters.clamp(140), 100)
+        XCTAssertEqual(UsageMeters.clamp(100), 100)
     }
 
     /// The ≥100 boundary: 99.9 is still a ring (not full); 100 (and anything
     /// over, once clamped) is a solid disc — a "full" ring would be
     /// indistinguishable from 99%.
     func testMeterRingIsFullBoundary() {
-        XCTAssertFalse(MeterRing.isFull(99.9))
-        XCTAssertFalse(MeterRing.isFull(0))
-        XCTAssertTrue(MeterRing.isFull(100))
-        XCTAssertTrue(MeterRing.isFull(120))
+        XCTAssertFalse(UsageMeters.isFull(99.9))
+        XCTAssertFalse(UsageMeters.isFull(0))
+        XCTAssertTrue(UsageMeters.isFull(100))
+        XCTAssertTrue(UsageMeters.isFull(120))
     }
 
     // MARK: - shouldShowContext (BET-1022)

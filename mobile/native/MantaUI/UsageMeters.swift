@@ -36,6 +36,17 @@ enum UsageMeters {
         return .ok
     }
 
+    /// Clamp a 0-100 percentage (providers can report over 100).
+    static func clamp(_ pct: Double) -> Double {
+        min(max(pct, 0), 100)
+    }
+
+    /// Whether the (already-clamped) percentage is at/over 100 — the
+    /// solid-disc state. Pure so the ≥100 boundary is unit-testable.
+    static func isFull(_ pct: Double) -> Bool {
+        pct >= 100
+    }
+
     /// Whether the context meter should render at all.
     ///
     /// Above zero only: a fresh session with no billed turn reports 0% and a
