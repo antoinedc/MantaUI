@@ -590,6 +590,12 @@ export function ChatPanel({
   // Whether the panel is currently being dragged over with files (for the
   // big "drop to attach" overlay).
   const [dragHover, setDragHover] = useState(false);
+  // dragenter/dragleave fire for EVERY nested element the pointer crosses, so
+  // a naive leave clears the overlay mid-hover. Count depth (same pattern as
+  // the terminal's onDragEnter/onDragLeave) and only clear at zero — a
+  // `currentTarget === target` check never fires because dragleave's target is
+  // always the deepest child, not the container.
+  const dragDepth = useRef(0);
   // Ref mirror of the child-status map so `toggleTaskExpand` can read
   // current values synchronously without taking them as deps.
   const liveChildStatusRef = useRef<Map<string, "running" | "idle">>(new Map());
@@ -632,6 +638,7 @@ export function ChatPanel({
     setAgentMentions([]);
     setSystemNotice(null);
     setDragHover(false);
+    dragDepth.current = 0;
     // BET-837: voice notes reset on session change, then fetched once per
     // session (metadata only — audio rides the REST GET on demand).
     setVoiceNotes([]);
@@ -1979,6 +1986,7 @@ export function ChatPanel({
   const onPanelDragEnter = useCallback((e: React.DragEvent) => {
     if (!Array.from(e.dataTransfer?.types ?? []).includes("Files")) return;
     e.preventDefault();
+    dragDepth.current++;
     setDragHover(true);
   }, []);
   const onPanelDragOver = useCallback((e: React.DragEvent) => {
@@ -1987,13 +1995,25 @@ export function ChatPanel({
     e.dataTransfer.dropEffect = "copy";
   }, []);
   const onPanelDragLeave = useCallback((e: React.DragEvent) => {
-    // Only clear when leaving the panel itself, not crossing into a child.
-    if (e.currentTarget === e.target) setDragHover(false);
+    if (!Array.from(e.dataTransfer?.types ?? []).includes("Files")) return;
+    e.preventDefault();
+    // Nested-element crossing: only clear once the depth unwinds to zero
+    // (leaving the panel, not crossing into a child).
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setDragHover(false);
+  }, []);
+  const onPanelDragEnd = useCallback(() => {
+    // dragend fires when a drag operation ends even if dragleave never does
+    // (e.g. the pointer leaves the window and the drop happens on the
+    // desktop). Always unwind to zero so the overlay can't stay stuck.
+    dragDepth.current = 0;
+    setDragHover(false);
   }, []);
   const onPanelDrop = useCallback(
     (e: React.DragEvent) => {
       if (!Array.from(e.dataTransfer?.types ?? []).includes("Files")) return;
       e.preventDefault();
+      dragDepth.current = 0;
       setDragHover(false);
       if (e.dataTransfer.files.length > 0) {
         void addDroppedFiles(e.dataTransfer.files);
@@ -2822,6 +2842,7 @@ export function ChatPanel({
       onDragEnter={onPanelDragEnter}
       onDragOver={onPanelDragOver}
       onDragLeave={onPanelDragLeave}
+      onDragEnd={onPanelDragEnd}
       onDrop={onPanelDrop}
     >
       {/* Header dropped — manta's outer chrome already shows project/window. */}
