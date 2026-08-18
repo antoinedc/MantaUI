@@ -29,7 +29,7 @@ import { Pill } from "./Pill";
 import { ReviewPane } from "./ReviewPane";
 import { useStore } from "./store";
 import { formatAge, inboxReasonLabel, sortInbox } from "./chatUtils";
-import { deriveProjectName, uniqueSessionName } from "./NewSessionScreen";
+import { deriveProjectName, uniqueSessionName } from "../shared/projectName.mjs";
 import type { ForgeInboxItem } from "../shared/types";
 
 // The status-dot tone for each inbox reason — the mockup's deliberate mix:
