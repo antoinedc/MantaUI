@@ -61,6 +61,20 @@ export const CLI_CATALOG = [
   },
 ];
 
+// The HOME-RELATIVE dirs where the AI CLIs install their binaries: claude →
+// ~/.local/bin, opencode → ~/.opencode/bin, bun-installed CLIs → ~/.bun/bin.
+//
+// This is the SINGLE source for the home CLI install-dir list (BET-1163). Two
+// consumers must never drift apart:
+//   * resolveBinary() in src/server/cliUpdates.mjs pins these (resolved against
+//     $HOME) before PATH so a spawned manta-server can find the CLIs.
+//   * scripts/list-cli-bin-dirs.mjs emits them so scripts/self-update.sh can
+//     prepend each existing one to PATH for its by-name upgrade commands.
+// They are RELATIVE to $HOME on purpose — each consumer resolves against its
+// own notion of the box's home. If you add a home CLI dir, add it here and it
+// reaches both.
+export const HOME_CLI_INSTALL_DIRS = [".local/bin", ".opencode/bin", ".bun/bin"];
+
 // Homebrew-managed install prefixes. Re-running a vendor installer over a
 // brew-managed binary installs a shadowing second copy — the upgrade must
 // refuse rather than do that.

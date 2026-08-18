@@ -16,6 +16,15 @@ export interface CliCatalogEntry {
 export const CLI_CATALOG: CliCatalogEntry[];
 
 /**
+ * HOME-relative dirs where the AI CLIs install their binaries
+ * (claude → ~/.local/bin, opencode → ~/.opencode/bin, bun-installed CLIs →
+ * ~/.bun/bin). Resolved against $HOME by each consumer (resolveBinary's
+ * pinning, self-update.sh's PATH prepend). Adding a home CLI dir here reaches
+ * both — never hardcode it in a single consumer (BET-1163).
+ */
+export const HOME_CLI_INSTALL_DIRS: string[];
+
+/**
  * Which command upgrades this CLI, given where its binary actually is.
  * Returns null = "we cannot upgrade this safely" → the UI shows a manual link.
  * Precedence: npm-managed → `npm install -g <pkg>@latest`; Homebrew-managed →

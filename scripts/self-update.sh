@@ -121,18 +121,26 @@ fi
 
 # --- Put the AI CLIs on PATH for the upgrade step (BET-1158) ------------------
 # upgrade-clis.mjs spawns each installed CLI's upgrade command BY NAME
-# (`opencode upgrade`, `claude update`, …) and those binaries live in
-# ~/.local/bin (claude), ~/.opencode/bin (opencode) and ~/.bun/bin — dirs that
-# a ~/.bashrc adds but a systemd/launchd service's minimal PATH never carries.
-# Prepend the same home-relative set resolveBinary() in
-# src/server/cliUpdates.mjs searches so the upgrade commands resolve. A
-# packaged box already got its vendored runtime/node/bin above; these are the
-# user-level dirs that apply to every box kind.
-if [ -n "${HOME:-}" ]; then
-  for _cli_dir in "$HOME/.local/bin" "$HOME/.opencode/bin" "$HOME/.bun/bin"; do
+# (`opencode upgrade`, `claude update`, …) and those binaries live in dirs
+# that a ~/.bashrc adds but a systemd/launchd service's minimal PATH never
+# carries. Prepend the same home-relative set resolveBinary() in
+# src/server/cliUpdates.mjs searches so the upgrade commands resolve.
+#
+# The list is NOT hardcoded here (BET-1163): it comes from the SINGLE source,
+# HOME_CLI_INSTALL_DIRS in src/shared/cliCatalog.mjs — emitted by
+# scripts/list-cli-bin-dirs.mjs (RELATIVE to $HOME, one per line). Only
+# existing dirs are added, so a box missing some is unaffected. Guarded on
+# node + the script being present; if node can't run, the CLI upgrade step
+# below is skipped anyway, so skipping the prepend is consistent. A packaged
+# box already got its vendored runtime/node/bin above; these are the user-level
+# dirs that apply to every box kind.
+if [ -n "${HOME:-}" ] && [ -x "$NODE_CMD" ] && [ -f "$MANTA_HOME/scripts/list-cli-bin-dirs.mjs" ]; then
+  while IFS= read -r _rel_dir; do
+    [ -n "$_rel_dir" ] || continue
+    _cli_dir="$HOME/$_rel_dir"
     [ -d "$_cli_dir" ] || continue
     PATH="$_cli_dir:$PATH"
-  done
+  done < <("$NODE_CMD" "$MANTA_HOME/scripts/list-cli-bin-dirs.mjs")
   export PATH
 fi
 

@@ -4950,11 +4950,21 @@ test("self-update.sh NODE_CMD: no-runtime box resolves node to an absolute path 
 
 test("self-update.sh prepends AI CLI install dirs to PATH for the upgrade step (BET-1158)", () => {
   const src = scriptFile("self-update.sh");
-  const start = src.indexOf('if [ -n "${HOME:-}" ]; then');
+  const start = src.indexOf('if [ -n "${HOME:-}" ] &&');
   assert.ok(start !== -1, "self-update.sh must prepend CLI install dirs to PATH");
   const end = src.indexOf("\n\n", start);
   assert.ok(end !== -1, "CLI-dirs PATH block must be followed by a blank line");
   const block = src.slice(start, end);
+
+  // The dir list is NOT hardcoded in the shell (BET-1163): it must come from
+  // the single source, HOME_CLI_INSTALL_DIRS, emitted by
+  // scripts/list-cli-bin-dirs.mjs, which the block shells out to via NODE_CMD.
+  // The "must not hardcode" assertion pins the drift-trap fix at the source.
+  assert.match(
+    block,
+    /list-cli-bin-dirs\.mjs/,
+    "the CLI-dirs PATH block must consume scripts/list-cli-bin-dirs.mjs, not repeat the dirs",
+  );
 
   const fakeHome = mkdtempSync(join(tmpdir(), "manta-cli-home-"));
   try {
@@ -4962,7 +4972,7 @@ test("self-update.sh prepends AI CLI install dirs to PATH for the upgrade step (
     mkdirSync(join(fakeHome, ".opencode", "bin"), { recursive: true });
     const out = runSelfUpdateSnippet(
       block,
-      `HOME="${fakeHome}"`,
+      `HOME="${fakeHome}"\nNODE_CMD="$(command -v node)"\nMANTA_HOME="${join(__dirname, "..")}"`,
       [
         'case ":$PATH:" in *":$HOME/.local/bin:"*) echo "LOCAL_BIN=1";; *) echo "LOCAL_BIN=0";; esac',
         'case ":$PATH:" in *":$HOME/.opencode/bin:"*) echo "OPENCODE_BIN=1";; *) echo "OPENCODE_BIN=0";; esac',

@@ -1,5 +1,26 @@
 import { describe, it, expect } from "vitest";
-import { CLI_CATALOG, resolveUpgradeCommand } from "./cliCatalog.mjs";
+import { CLI_CATALOG, HOME_CLI_INSTALL_DIRS, resolveUpgradeCommand } from "./cliCatalog.mjs";
+
+describe("HOME_CLI_INSTALL_DIRS", () => {
+  it("lists the three home-relative AI CLI install dirs, in resolution order", () => {
+    // Single source of truth for the home CLI install-dir list (BET-1163): the
+    // value resolveBinary() pins AND self-update.sh emits. Keep in sync with
+    // resolveBinary/src/server/cliUpdates.mjs and scripts/list-cli-bin-dirs.mjs.
+    expect(HOME_CLI_INSTALL_DIRS).toEqual([
+      ".local/bin", // claude
+      ".opencode/bin", // opencode
+      ".bun/bin", // bun-installed CLIs
+    ]);
+  });
+
+  it("entries are HOME-relative (no leading slash, no $HOME baked in)", () => {
+    for (const rel of HOME_CLI_INSTALL_DIRS) {
+      expect(rel).toBeTruthy();
+      expect(rel.startsWith("/")).toBe(false);
+      expect(rel.startsWith("./")).toBe(false);
+    }
+  });
+});
 
 describe("CLI_CATALOG", () => {
   it("has the four expected CLIs with their manual URLs", () => {
