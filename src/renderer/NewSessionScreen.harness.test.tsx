@@ -49,6 +49,7 @@ function draft(overrides: Partial<NewSessionDraft> = {}): NewSessionDraft {
     scratch: false,
     projectName: "",
     scratchRoot: "",
+    attachments: [],
     ...overrides,
   };
 }
@@ -473,5 +474,157 @@ describe("NewSessionScreen scratch mode (BET-1093)", () => {
 
     const asp = useStore.getState().autoSubmitPrompt;
     expect(asp?.text).toBe("wire it up");
+  });
+});
+
+// BET-1124: attach files before starting a session. The attach icon opens a
+// hidden file input; selected files are staged into the draft's attachments
+// and rendered as removable chips; on submit they upload and ride the first
+// prompt's autoSubmit channel.
+describe("NewSessionScreen attach-before-start (BET-1124)", () => {
+  let h: Harness | null = null;
+
+  const GIT_WT: WorktreeInfo[] = [
+    { path: "/x", head: "abc", branch: "main", bare: false, detached: false },
+  ];
+
+  function mountComposer(
+    d: NewSessionDraft,
+    apiOverrides: Record<string, unknown> = {},
+    storeOverrides: Partial<ReturnType<typeof useStore.getState>> = {},
+  ): MockApi {
+    const { api } = installMockApi({
+      gitListWorktrees: () => Promise.resolve(GIT_WT),
+      ...apiOverrides,
+    });
+    refreshModelCatalog();
+    refreshAgentCatalog();
+    resetStore({
+      projects: [],
+      activeDraftId: d.id,
+      drafts: [d],
+      ...storeOverrides,
+    });
+    h = mount(<NewSessionScreen draftId={d.id} />);
+    return api;
+  }
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  // jsdom can't open a native picker; drive the hidden input directly the way
+  // a selection would (files + change event → onFiles).
+  function stageFile(input: HTMLInputElement, file: File) {
+    Object.defineProperty(input, "files", {
+      value: [file] as unknown as FileList,
+      configurable: true,
+    });
+    act(() => input.dispatchEvent(new Event("change", { bubbles: true })));
+  }
+
+  it("selecting a file through the hidden input stages a removable chip", async () => {
+    const d = draft({ mode: { projectName: "proj" }, cwd: "/x", input: "build it" });
+    mountComposer(d);
+    await h!.flush();
+
+    // The attach control is enabled (it was hard-coded disabled before) and
+    // its title no longer says the feature is unavailable.
+    const attach = [...h!.container.querySelectorAll("button")].find(
+      (b) => b.getAttribute("aria-label") === "Attach a file",
+    ) as HTMLButtonElement | undefined;
+    expect(attach).toBeTruthy();
+    expect(attach!.disabled).toBe(false);
+    expect(attach!.getAttribute("title")).toBe("Attach a file");
+
+    const input = h!.container.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(input, "expected the hidden file input").toBeTruthy();
+
+    const file = new File(["content"], "note.md", { type: "text/markdown" });
+    stageFile(input, file);
+    await h!.flush();
+
+    // The chip renders with the filename.
+    expect(h!.text()).toContain("note.md");
+    const staged = useStore.getState().drafts.find((x) => x.id === d.id)!.attachments;
+    expect(staged).toHaveLength(1);
+    expect(staged[0].filename).toBe("note.md");
+    // text/markdown is not FilePart-safe → path ref.
+    expect(staged[0].asPathRef).toBe(true);
+
+    // Clicking the chip's remove splices it out of the draft.
+    const remove = h!.container.querySelector(
+      'button[aria-label="Remove attachment"]',
+    ) as HTMLButtonElement;
+    expect(remove, "expected a remove button on the chip").toBeTruthy();
+    act(() => remove.click());
+    await h!.flush();
+
+    expect(h!.text()).not.toContain("note.md");
+    expect(useStore.getState().drafts.find((x) => x.id === d.id)!.attachments).toHaveLength(0);
+  });
+
+  it("submit uploads staged files and carries them on the first prompt", async () => {
+    const d = draft({ mode: { projectName: "proj" }, cwd: "/x", input: "summarize" });
+    const api = mountComposer(
+      d,
+      {
+        uploadBuffer: () => Promise.resolve("/remote/note.md"),
+        tmuxNewWindow: () =>
+          Promise.resolve({ sessionId: "ses-1", windowIndex: 0, projects: [] }),
+      },
+      {
+        projects: [
+          {
+            tmuxSession: "proj",
+            defaultCwd: "/x",
+            attached: false,
+            windows: [
+              {
+                index: 0,
+                name: "w",
+                active: true,
+                paneCurrentPath: "/x",
+                opencodeSessionId: "ses-1",
+              },
+            ],
+          },
+        ],
+        // Neutralize dismissDraft (see the composer-parity tests — submit()
+        // closes over the store binding from the render).
+        dismissDraft: () => {},
+      },
+    );
+    await h!.flush();
+
+    const file = new File(["content"], "note.md", { type: "text/markdown" });
+    // jsdom's File lacks arrayBuffer(); submit() reads bytes this way.
+    (file as File & { arrayBuffer: () => Promise<ArrayBuffer> }).arrayBuffer =
+      () => Promise.resolve(new ArrayBuffer(1));
+    stageFile(h!.container.querySelector('input[type="file"]') as HTMLInputElement, file);
+    await h!.flush();
+
+    const start = h!.container.querySelector(
+      'button[aria-label="Start a session"]',
+    ) as HTMLButtonElement;
+    act(() => start.click());
+    await h!.flush();
+
+    const ups = api.calls.uploadBuffer ?? [];
+    expect(ups.length).toBe(1);
+    expect(ups[0]?.[0]).toMatchObject({ projectName: "proj", filename: "note.md" });
+
+    const asp = useStore.getState().autoSubmitPrompt;
+    expect(asp?.text).toBe("summarize");
+    expect(asp?.attachments).toHaveLength(1);
+    expect(asp?.attachments![0]).toMatchObject({
+      filename: "note.md",
+      mime: "text/markdown",
+      remotePath: "/remote/note.md",
+      status: "ready",
+      source: "drop",
+      asPathRef: true,
+    });
   });
 });
