@@ -247,10 +247,26 @@ final class UsageMetersTests: XCTestCase {
         XCTAssertEqual(r.hasLimit, true)
     }
 
-    /// `limit: nil` (an unknown selected-model window) signals "no max
-    /// context" via hasLimit:false and carries ONLY the raw token totals — no
-    /// fabricated %/segments against a made-up 200k (BET-1138).
-    func testRecomputeNilLimitSignalsUnknown() {
+    /// The box drives the unknown signal (`hasLimit:false`), and recompute must
+    /// preserve it — it never re-derives "no max context" from the SELECTED
+    /// model's window (BET-1138: use hasLimit from the payload, no second
+    /// unknown representation). Raw token totals ride through, derived fields
+    /// stay empty.
+    func testRecomputePreservesUnknownWhenPayloadHasNoLimit() {
+        let s = payload(fresh: 10_000, read: 30_000, write: 5_000, pct: 0,
+                        hasLimit: false, segments: [])
+        let r = UsageMeters.recompute(s, limit: 1_000_000)
+        XCTAssertEqual(r.hasLimit, false)
+        XCTAssertEqual(r.pct, 0)
+        XCTAssertEqual(r.segments, [])
+        XCTAssertEqual(r.totalInput, 45_000)
+    }
+
+    /// `limit: nil` (an unknown SELECTED-model window) does NOT turn a known
+    /// box reading into "no max context": the box already flagged hasLimit:true,
+    /// so recompute keeps it and sizes the bar against the assumed 200k — the
+    /// unknown-type signal is the box's hasLimit:false, not this pct.
+    func testRecomputeNilLimitKeepsKnownPct() {
         let s = payload(fresh: 10_000, read: 30_000, write: 5_000, pct: 23,
                         segments: [
                             StreamContextSegment(kind: "fresh", pct: 5),
@@ -258,24 +274,22 @@ final class UsageMetersTests: XCTestCase {
                             StreamContextSegment(kind: "cacheRead", pct: 15),
                         ])
         let r = UsageMeters.recompute(s, limit: nil)
-        XCTAssertEqual(r.hasLimit, false)
-        XCTAssertEqual(r.pct, 0)
-        XCTAssertEqual(r.segments, [])
+        XCTAssertEqual(r.hasLimit, true)
+        XCTAssertEqual(r.pct, 23) // 45_000 / 200_000 → 22.5 → 23
+        XCTAssertEqual(r.segments.map(\.pct), [5, 2.5, 15])
         XCTAssertEqual(r.totalInput, 45_000)
-        XCTAssertEqual(r.freshInput, 10_000)
     }
 
-    /// A zero or negative limit must signal "no max context" (hasLimit:false)
-    /// rather than dividing by zero, producing a negative percentage, or
-    /// fabricating a 200k window (BET-1138).
-    func testRecomputeNonPositiveLimitSignalsUnknown() {
+    /// A zero or negative SELECTED-model limit likewise keeps a box-confirmed
+    /// hasLimit:true, bar-sized against the assumed 200k — never NaN, and
+    /// never an invented "no max context" (that stays the box's call).
+    func testRecomputeNonPositiveLimitKeepsKnownPct() {
         let s = payload(fresh: 100_000, pct: 50,
                         segments: [StreamContextSegment(kind: "fresh", pct: 50)])
         for limit in [0.0, -200_000.0] {
             let r = UsageMeters.recompute(s, limit: limit)
-            XCTAssertEqual(r.hasLimit, false)
-            XCTAssertEqual(r.pct, 0)
-            XCTAssertEqual(r.segments, [])
+            XCTAssertEqual(r.hasLimit, true)
+            XCTAssertEqual(r.pct, 50) // 100_000 / 200_000 → 50
         }
     }
 
