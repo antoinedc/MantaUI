@@ -3113,7 +3113,7 @@ public_ingress_preflight public 0 yes ubuntu
 echo "SHOULD_NOT_REACH=yes"
 `,
   });
-  assert.match(out, /Cannot complete the install: giving this box a public HTTPS address/);
+  assert.match(out, /Cannot complete the install: giving this server a public HTTPS address/);
   assert.match(out, /Nothing has been installed\./);
   // All three recovery alternatives must be named (D3).
   assert.match(out, /Install as root/);
@@ -3181,7 +3181,7 @@ public_ingress_preflight "$_PRE_INGRESS" 0 yes ubuntu
 echo "SHOULD_NOT_REACH=yes"
 `,
   });
-  assert.match(out, /Cannot complete the install: giving this box a public HTTPS address/);
+  assert.match(out, /Cannot complete the install: giving this server a public HTTPS address/);
   assert.match(out, /Nothing has been installed\./);
   assert.doesNotMatch(out, /SHOULD_NOT_REACH=yes/);
 });

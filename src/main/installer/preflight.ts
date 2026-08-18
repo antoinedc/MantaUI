@@ -240,13 +240,13 @@ export function classifyPreflight(probes: PreflightProbes): PreflightResult {
     failures.push({
       cause: "Could not connect to the host over SSH.",
       action:
-        "Check the alias resolves, the box is reachable, and SSH is running on the expected port.",
+        "Check the alias resolves, the server is reachable, and SSH is running on the expected port.",
     });
   } else if (probes.reachability === "auth-failed") {
     failures.push({
       cause: "SSH key authentication was rejected.",
       action:
-        "Make sure your key is loaded (ssh-add) and listed in the box's ~/.ssh/authorized_keys.",
+        "Make sure your key is loaded (ssh-add) and listed in the server's ~/.ssh/authorized_keys.",
     });
   }
 
@@ -255,7 +255,7 @@ export function classifyPreflight(probes: PreflightProbes): PreflightResult {
     if (label === null) {
       const why =
         probes.os.id === "darwin"
-          ? "Intel Macs are not supported as a MantaUI box."
+          ? "Intel Macs are not supported as a MantaUI server."
           : probes.os.id === "linux"
           ? `Linux ${probes.os.arch} is not on the supported list (the installer ships x86_64 and aarch64).`
           : "The installer does not support this operating system.";
@@ -269,9 +269,9 @@ export function classifyPreflight(probes: PreflightProbes): PreflightResult {
   const skew = Math.abs(probes.clockSkewSeconds);
   if (skew > CLOCK_SKEW_FAIL_SECONDS) {
     failures.push({
-      cause: `Box clock is off by ${skew}s.`,
+      cause: `Server clock is off by ${skew}s.`,
       action:
-        "Certificate issuance and OAuth will fail. Sync the box's time, then try again.",
+        "Certificate issuance and OAuth will fail. Sync the server's time, then try again.",
     });
   }
 
