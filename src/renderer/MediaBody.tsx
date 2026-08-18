@@ -54,7 +54,7 @@ const TILE_CLS =
 
 function TileIndex({ n }: { n: number }) {
   return (
-    <span className="absolute left-1.5 top-1.5 px-1.5 py-px rounded-xs bg-bg-elev border border-border-subtle text-[10px] leading-none text-text-faint font-mono">
+    <span className="absolute left-1 top-1 px-1 py-px rounded-xs bg-bg-elev border border-border-subtle text-[10px] leading-none text-text-faint font-mono">
       {n}
     </span>
   );
@@ -230,7 +230,7 @@ function ReadyMedia({ entry }: { entry: MediaEntry }) {
           <div className="relative w-full h-full rounded-md border border-border-subtle bg-inset overflow-hidden">
             {/* No autoplay, ever: explicit play control + first-frame poster. */}
             <video src={url} controls preload="metadata" className="w-full h-full" />
-            <span className="pointer-events-none absolute left-1.5 top-1.5 grid place-items-center w-6 h-6 rounded-full bg-bg-elev border border-border-subtle text-text-faint">
+            <span className="pointer-events-none absolute left-1 top-1 grid place-items-center w-6 h-6 rounded-full bg-bg-elev border border-border-subtle text-text-faint">
               <Play size={11} aria-hidden="true" />
             </span>
           </div>
