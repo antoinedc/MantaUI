@@ -23,7 +23,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { act } from "react";
 import { installMockApi, resetStore, mount, type Harness, type MockApi } from "./testHarness";
 import { NewSessionScreen } from "./NewSessionScreen";
-import type { NewSessionDraft } from "./store";
+import type { NewSessionDraft, DraftAttachment } from "./store";
 import { useStore } from "./store";
 import { refreshModelCatalog } from "./modelCatalog";
 import { refreshAgentCatalog } from "./agentCatalog";
@@ -626,5 +626,116 @@ describe("NewSessionScreen attach-before-start (BET-1124)", () => {
       source: "drop",
       asPathRef: true,
     });
+  });
+});
+
+// BET-1127 follow-up: the fan-out submit path (submitFanOut — one session, one
+// window per worktree) must carry staged attachments to the first window just
+// like the single-folder submit() path does. Before BET-1124 the fan-out path
+// silently dropped staged files; this closes the coverage gap on that fix.
+describe("NewSessionScreen fan-out submit carries staged attachments (BET-1127)", () => {
+  let h: Harness | null = null;
+
+  // Two worktrees under /x — hasWorktreeFanOut needs >1. The first becomes the
+  // session's initial window; the rest are added as new windows.
+  const FANOUT_WTS: WorktreeInfo[] = [
+    { path: "/x/main", head: "abc", branch: "main", bare: false, detached: false },
+    { path: "/x/feature", head: "def", branch: "feat", bare: false, detached: false },
+  ];
+
+  // jsdom's File lacks arrayBuffer(); submitFanOut() reads bytes this way.
+  function stagedFile(): DraftAttachment {
+    const file = new File(["content"], "note.md", { type: "text/markdown" });
+    (file as File & { arrayBuffer: () => Promise<ArrayBuffer> }).arrayBuffer = () =>
+      Promise.resolve(new ArrayBuffer(1));
+    return { id: "att-1", filename: "note.md", mime: "text/markdown", asPathRef: true, file };
+  }
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  it("uploads staged files against the session and passes them as the attachments arg to opencodePrompt", async () => {
+    const d = draft({
+      mode: "new-project",
+      cwd: "/x",
+      wantWorktree: false,
+      input: "fan it",
+      attachments: [stagedFile()],
+    });
+    const { api } = installMockApi({
+      // Reach the "fresh" zero state so "Browse for a folder…" opens the
+      // picker at the draft's cwd (/x) with pickerTarget "cwd".
+      forgeProbe: () => Promise.resolve({ repos: [], cli: null, homeDir: "/home/dev" }),
+      fsListDirs: (dir: unknown) => Promise.resolve({ dir: dir as string, entries: [] }),
+      gitListWorktrees: (dir: unknown) =>
+        Promise.resolve(dir === "/x" ? FANOUT_WTS : []),
+      tmuxNewSession: () =>
+        Promise.resolve({ sessionId: "ses-fan-1", windowIndex: 0, projects: [] }),
+      tmuxNewWindow: () =>
+        Promise.resolve({ sessionId: "ses-fan-1", windowIndex: 1, projects: [] }),
+      uploadBuffer: () => Promise.resolve("/remote/note.md"),
+      // submitFanOut awaits refresh(), which calls syncSnapshot; hand it a
+      // benign envelope so the refresh resolves instead of crashing in
+      // applySyncPayload (the default mock resolves undefined).
+      syncSnapshot: () =>
+        Promise.resolve({ gen: 1, seq: 1, changed: {} }) as never,
+    });
+    refreshModelCatalog();
+    refreshAgentCatalog();
+    // Neutralize dismissDraft (the direct-mount shim) so clearing the draft at
+    // the end of submitFanOut doesn't drop the screen's hooks mid-assertion.
+    resetStore({
+      projects: [],
+      activeDraftId: d.id,
+      drafts: [d],
+      dismissDraft: () => {},
+    });
+    h = mount(<NewSessionScreen draftId={d.id} />);
+    await h.flush();
+
+    // Open the folder picker from the fresh zero state.
+    const browse = [...h.container.querySelectorAll("button")].find((b) =>
+      b.textContent?.trim().startsWith("Browse for a folder"),
+    );
+    expect(browse, "expected a Browse for a folder… button").toBeTruthy();
+    act(() => browse!.click());
+    await h.flush();
+
+    // The picker opens at /x (the draft cwd). Press Enter in the path field to
+    // commit — select() probes gitListWorktrees("/x"), which returns >1
+    // worktree, so the modal asks the fan-out question.
+    const pathInput = h.docQuery("input") as HTMLInputElement;
+    expect(pathInput, "expected the picker's path input").toBeTruthy();
+    expect(pathInput.value).toBe("/x");
+    act(() => {
+      pathInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    await h.flush();
+
+    // The fan-out question appears; commit to one session per worktree.
+    const fanBtn = [...document.querySelectorAll("button")].find((b) =>
+      b.textContent?.trim() === "One per worktree",
+    );
+    expect(fanBtn, "expected the 'One per worktree' fan-out button").toBeTruthy();
+    act(() => fanBtn!.click());
+    await h.flush();
+
+    // uploadBuffer fires against the fan-out session name (deriveProjectName
+    // of /x → "x") for each staged file.
+    const ups = api.calls.uploadBuffer ?? [];
+    expect(ups.length).toBe(1);
+    expect(ups[0]?.[0]).toMatchObject({ projectName: "x", filename: "note.md" });
+
+    // opencodePrompt receives the attachments arg (4th param) — the
+    // { remotePath, mime, filename } array — for the first window's prompt.
+    const prompts = api.calls.opencodePrompt ?? [];
+    expect(prompts.length).toBe(1);
+    expect(prompts[0]?.[0]).toBe("ses-fan-1");
+    expect(prompts[0]?.[1]).toBe("fan it");
+    expect(prompts[0]?.[3]).toEqual([
+      { remotePath: "/remote/note.md", mime: "text/markdown", filename: "note.md" },
+    ]);
   });
 });
