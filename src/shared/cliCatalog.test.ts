@@ -19,7 +19,7 @@ describe("CLI_CATALOG", () => {
   });
 
   it("marks opencode as the only non-npm, github-tracked CLI", () => {
-    const opencode = CLI_CATALOG.find((c) => c.id === "opencode");
+    const opencode = CLI_CATALOG.find((c) => c.id === "opencode")!;
     expect(opencode.latest).toEqual({ kind: "github", repo: "anomalyco/opencode" });
     expect(opencode.npmPackage).toBeNull();
     expect(opencode.upgrade).toEqual(["opencode", "upgrade"]);
@@ -44,7 +44,7 @@ describe("resolveUpgradeCommand", () => {
       if (entry.upgrade[0] !== "sh") continue;
       // Re-resolving an arbitrary path outside npm/homebrew must hand back the
       // exact constant, byte-for-byte.
-      const cmd = resolveUpgradeCommand(entry, "/usr/bin/" + entry.bin, null);
+      const cmd = resolveUpgradeCommand(entry, "/usr/bin/" + entry.bin, null) as string[];
       expect(cmd).toEqual(entry.upgrade);
       expect(cmd.join(" ")).not.toContain("undefined");
       expect(cmd.join(" ")).not.toContain("[object");
