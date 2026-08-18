@@ -1747,7 +1747,7 @@ export type ScheduledJob = {
 // colour scale, or placement with the context pill.
 export type UsageWindow = {
   kind: "session" | "weekly" | string; // open set — a daily window just works
-  label: string; // "Session (5h)"
+  label: string; // "5h"
   pct: number; // 0-100, ALWAYS present (derived when the provider reports only absolutes)
   used?: number; // absolute count when the provider exposes one
   limit?: number; // absolute cap when the provider exposes one

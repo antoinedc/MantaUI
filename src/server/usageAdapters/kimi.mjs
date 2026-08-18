@@ -23,7 +23,7 @@
 // src/renderer/chatUtils.ts AUTH_PROVIDER_LABELS) — not "moonshot" / "kimi".
 
 import { readProviderApiKey } from "../opencode.mjs";
-import { normalizeWindow } from "./normalizeWindow.mjs";
+import { normalizeWindow, usageWindowLabel } from "./normalizeWindow.mjs";
 import { httpError } from "./httpError.mjs";
 
 const USAGE_URL = "https://api.kimi.com/coding/v1/usages";
@@ -88,11 +88,11 @@ export const kimiAdapter = {
     // is the session window.
     const limitsArr = Array.isArray(data?.limits) ? data.limits : [];
     const sessionEntry = limitsArr.find((l) => minutesOf(l?.window) === 300);
-    const session = windowFromDetail(sessionEntry?.detail, "session", "Session (5h)");
+    const session = windowFromDetail(sessionEntry?.detail, "session", usageWindowLabel(300 * 60));
     if (session) windows.push(session);
 
     // `usage` is the WEEKLY window.
-    const weekly = windowFromDetail(data?.usage, "weekly", "Weekly");
+    const weekly = windowFromDetail(data?.usage, "weekly", usageWindowLabel(7 * 86400));
     if (weekly) windows.push(weekly);
 
     // No planLabel on this endpoint — it needs a cookie-auth web API, out of

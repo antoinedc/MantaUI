@@ -10,7 +10,7 @@
 
 import { readFile } from "node:fs/promises";
 import { CREDENTIALS_PATH, parseCredentials } from "../claudeAuth.mjs";
-import { normalizeWindow } from "./normalizeWindow.mjs";
+import { normalizeWindow, usageWindowLabel } from "./normalizeWindow.mjs";
 import { httpError } from "./httpError.mjs";
 
 const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
@@ -75,7 +75,7 @@ export const claudeAdapter = {
     const session = fiveHour
       ? normalizeWindow({
           kind: "session",
-          label: "Session (5h)",
+          label: usageWindowLabel(5 * 3600),
           pct: pctOf(fiveHour),
           resetsAt: fiveHour?.resets_at,
         })
@@ -86,7 +86,7 @@ export const claudeAdapter = {
     const weekly = sevenDay
       ? normalizeWindow({
           kind: "weekly",
-          label: "Weekly",
+          label: usageWindowLabel(7 * 86400),
           pct: pctOf(sevenDay),
           resetsAt: sevenDay?.resets_at,
         })

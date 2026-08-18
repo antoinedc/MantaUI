@@ -22,6 +22,19 @@ function clampPct(n) {
   return Math.round(Math.max(0, Math.min(100, n)));
 }
 
+/** A window's human label, derived from its length in SECONDS: "45m", "5h",
+ *  "7d", "30d". Returns "" for a missing/unusable duration — callers pass the
+ *  result straight to normalizeWindow, whose `label` already defaults to "".
+ *  Never throws: `Number()` on a weird input yields NaN → "".
+ */
+export function usageWindowLabel(seconds) {
+  const s = Number(seconds);
+  if (!Number.isFinite(s) || s <= 0) return "";
+  if (s < 3600) return `${Math.round(s / 60)}m`;
+  if (s < 86400) return `${Math.round(s / 3600)}h`;
+  return `${Math.round(s / 86400)}d`;
+}
+
 /**
  * @param {object} raw
  * @param {"session"|"weekly"|string} [raw.kind]
