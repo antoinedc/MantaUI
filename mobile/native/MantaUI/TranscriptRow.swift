@@ -168,6 +168,13 @@ private struct TranscriptCellReveal: View {
                 .offset(x: TranscriptGutter.gutterWidth - reveal)
                 .allowsHitTesting(false)
             }
+            // A stable per-row accessibility handle so a UI test can drive the
+            // reveal gesture on ONE specific row (and observe the timestamp
+            // strip). This only groups the row for accessibility — it does not
+            // add, disable or otherwise alter MessagingUI's reveal recogniser
+            // and does not change TranscriptGutter.gutterWidth.
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier(TranscriptGutter.rowAccessibilityID)
     }
 
     @ViewBuilder
@@ -266,4 +273,7 @@ enum TranscriptGutter {
     /// Finger travel needed for a full reveal. Longer than the strip itself,
     /// so the strip arrives damped instead of slamming open on a flick.
     static let gutterTravel: CGFloat = 96
+    /// Accessibility id on every transcript row, exposed so a gesture-driving
+    /// UI test can target one row (and read its timestamp strip) deterministically.
+    static let rowAccessibilityID = "transcript-row"
 }
