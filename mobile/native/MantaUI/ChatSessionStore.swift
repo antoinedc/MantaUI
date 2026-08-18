@@ -756,7 +756,15 @@ final class ChatSessionStore: ObservableObject {
                     if loaded.isEmpty, !transcript.isEmpty, !isFirstLoad {
                         return
                     }
-                    messages = loaded
+                    // Root cause of the blank-chat-on-open clobber (BET-1105 /
+                    // BET-1125 follow-up): the local `var messages` in this
+                    // function SHADOWED the `@Published messages` property, so
+                    // `self.messages` was never populated here. `refreshVoiceNotes`
+                    // reads `self.messages` and remaps `transcript` from it, so
+                    // with the property empty it mapped 0 blocks and wiped a
+                    // just-hydrated transcript to blank. Assign to the PROPERTY
+                    // (self.messages), not the shadowed local.
+                    self.messages = loaded
                     voiceNoteMap = ChatTranscriptMapper.buildVoiceNoteMap(messages: loaded, notes: voiceNotes)
                     transcript = ChatTranscriptMapper.blocks(from: loaded, voiceNotes: voiceNotes)
                     // The transcript now carries these messages, so any live
@@ -805,9 +813,19 @@ final class ChatSessionStore: ObservableObject {
     func refreshVoiceNotes() async {
         let notes = (try? await api.voiceNotes(sessionId: sessionId)) ?? []
         await MainActor.run {
+            let remapped = ChatTranscriptMapper.blocks(from: messages, voiceNotes: notes)
             voiceNotes = notes
             voiceNoteMap = ChatTranscriptMapper.buildVoiceNoteMap(messages: messages, notes: notes)
-            transcript = ChatTranscriptMapper.blocks(from: messages, voiceNotes: notes)
+            // Defensive, mirrors BET-1125's fetch guard: never let a voice-notes
+            // refresh replace an already-populated transcript with an empty
+            // remap. A session that has voice-note metadata but (transiently)
+            // no mapped messages must not blank the chat. The primary fix for
+            // the blank-on-open clobber is the `self.messages = loaded` shadow
+            // fix in `fetchTranscript`; this guard keeps `refreshVoiceNotes`
+            // from ever being a second clobber path.
+            if !(remapped.isEmpty && !transcript.isEmpty) {
+                transcript = remapped
+            }
             rebuildBlocks()
         }
     }
