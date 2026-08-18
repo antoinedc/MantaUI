@@ -61,7 +61,7 @@ final class MantaLiveChatClearCaptureUITests: XCTestCase {
 
         // 5. Tap Clear → native action sheet presents (message OR Cancel).
         clearRow.tap()
-        let presented = app.staticTexts["Starts a fresh session in this window. The transcript stays on the box."].waitForExistence(timeout: 8)
+        let presented = app.staticTexts["Starts a fresh session in this window. The transcript stays on the server."].waitForExistence(timeout: 8)
             || app.buttons["Cancel"].waitForExistence(timeout: 8)
             || app.alerts.firstMatch.waitForExistence(timeout: 4)
         print("RESULT actionSheetPresented=\(presented)")

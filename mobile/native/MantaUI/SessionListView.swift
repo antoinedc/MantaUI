@@ -665,7 +665,7 @@ struct SessionListView: View {
             Text("Can't load your sessions")
                 .font(.manta(size: Metrics.type.body, weight: .semibold))
                 .foregroundColor(tokens.tx3)
-            Text(store.loadError ?? "Couldn't reach your box")
+            Text(store.loadError ?? "Couldn't reach your server")
                 .font(.manta(size: Metrics.type.small))
                 .foregroundColor(tokens.tx4)
                 .multilineTextAlignment(.center)

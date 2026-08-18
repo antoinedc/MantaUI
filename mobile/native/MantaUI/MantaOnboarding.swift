@@ -67,7 +67,7 @@ final class MantaOnboardingFlow: ObservableObject {
     // No hardcoded ring: the linking progress stages are all resolved through
     // the copy table; there is no positional/color literal anywhere in app code.
     let linkingStages: [String] = [
-        "Reached your box",
+        "Reached your server",
         "Verified the code",
         "Saving credentials",
     ]
@@ -123,7 +123,7 @@ final class MantaOnboardingFlow: ObservableObject {
                 serverUrl: derived.absoluteString
             )
         } else {
-            manualError = "Enter your Box ID (32 hex chars), or your server URL below."
+            manualError = "Enter your Server ID (32 hex chars), or your server URL below."
             showAdvanced = true
             return
         }
@@ -334,7 +334,7 @@ struct MantaManualEntryView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp6) {
             header(title: "Enter the code",
-                   subtitle: "Read the six digits off your desktop, or run `manta pair` on the box.")
+                   subtitle: "Read the six digits off your desktop, or run `manta pair` on the server.")
             VStack(alignment: .leading, spacing: Metrics.spacing.sp3) {
                 // BET-702: in-app QR scan sits above the manual fields. A
                 // decoded Manta payload routes through the SAME `flow.receive`
@@ -356,7 +356,7 @@ struct MantaManualEntryView: View {
                 .accessibilityIdentifier("onboarding-scan-button")
                 OTPField(value: $flow.code, placeholder: "000000", tokens: tokens)
                     .accessibilityIdentifier("onboarding-otp")
-                TextField("Box ID (32 hex)", text: $flow.boxId)
+                TextField("Server ID (32 hex)", text: $flow.boxId)
                     .font(.manta(size: Metrics.type.body, design: .monospaced))
                     .textFieldStyle(.plain)
                     .padding(Metrics.spacing.sp3)
@@ -366,7 +366,7 @@ struct MantaManualEntryView: View {
                     .autocorrectionDisabled()
                     .accessibilityIdentifier("onboarding-box-id")
                 Button(action: { withAnimation { flow.showAdvanced.toggle() } }) {
-                    Text(flow.showAdvanced ? "Hide server URL" : "My box isn't reachable from the internet")
+                    Text(flow.showAdvanced ? "Hide server URL" : "My server isn't reachable from the internet")
                         .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
                         .foregroundColor(tokens.accentTx)
                 }
@@ -456,7 +456,7 @@ struct MantaLinkingView: View {
                     .tint(tokens.accent)
                 Spacer()
             }
-            Text("Credentials stay on this phone and on your box.")
+            Text("Credentials stay on this phone and on your server.")
                 .font(.manta(size: Metrics.type.small))
                 .foregroundColor(tokens.tx4)
             Spacer(minLength: 0)
@@ -522,12 +522,12 @@ struct MantaFailureView: View {
             // Claim succeeded but the Keychain write failed. Retry re-attempts
             // ONLY the save — the code is already burned, never re-claim.
             return ("Paired, but couldn't save to this phone",
-                    "Your box accepted the code, but this phone couldn't store the connection yet.",
+                    "Your server accepted the code, but this phone couldn't store the connection yet.",
                     "Nothing is linked until the credentials save. Try saving again — don't enter a new code.",
                     "Try again", { flow.retrySave() },
                     ("Back", { flow.backToEntry() }))
         case .unreachable:
-            return ("Can't reach your box",
+            return ("Can't reach your server",
                     "The code is valid but nothing answered. Nothing was linked.",
                     "It may be asleep — check it's powered on and the server is running. Or this network blocks it — try cellular instead of Wi-Fi.",
                     "Try again", { flow.retry() },
@@ -535,7 +535,7 @@ struct MantaFailureView: View {
         case .rateLimited:
             return ("Too many attempts",
                     "Wait a moment and try again. Nothing was linked.",
-                    "Rate limiting protects your box. Give it a few seconds.",
+                    "Rate limiting protects your server. Give it a few seconds.",
                     "Try again", { flow.retry() },
                     ("Back", { flow.backToEntry() }))
         case .serverError:
@@ -661,7 +661,7 @@ struct MantaOnboardingRoot: View {
                 Text("Pair your phone")
                     .font(.manta(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.semibold)))
                     .foregroundColor(tokens.tx1)
-                Text("Connect this device to your box.")
+                Text("Connect this device to your server.")
                     .font(.manta(size: Metrics.type.small))
                     .foregroundColor(tokens.tx4)
             }
@@ -686,17 +686,17 @@ struct MantaSwitchBoxSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp6) {
             VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
-                Text("Switch box?")
+                Text("Switch server?")
                     .font(.manta(size: Metrics.type.display, weight: mantaFontWeight(Metrics.type.semibold)))
                     .foregroundColor(tokens.tx1)
-                Text("A Manta pairing link arrived while you're connected to another box. Switching re-pairs this phone to the new one.")
+                Text("A Manta pairing link arrived while you're connected to another server. Switching re-pairs this phone to the new one.")
                     .font(.manta(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
                     .foregroundColor(tokens.tx3)
             }
             MantaCard(tokens: tokens) {
                 VStack(alignment: .leading, spacing: Metrics.spacing.sp3) {
-                    hostRow(label: "Current box", host: currentHost)
-                    hostRow(label: "New box", host: newHost)
+                    hostRow(label: "Current server", host: currentHost)
+                    hostRow(label: "New server", host: newHost)
                 }
             }
             MantaPrimaryButton(title: "Switch", disabled: false,
@@ -727,7 +727,7 @@ struct MantaSwitchBoxSheet: View {
                 .lineLimit(2)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityIdentifier(label == "Current box" ? "switch-box-current" : "switch-box-new")
+        .accessibilityIdentifier(label == "Current server" ? "switch-box-current" : "switch-box-new")
     }
 }
 

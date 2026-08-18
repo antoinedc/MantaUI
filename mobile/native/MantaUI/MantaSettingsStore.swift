@@ -103,7 +103,7 @@ final class MantaSettingsStore: ObservableObject {
             }
             lastError = nil
         } else {
-            lastError = "Couldn't load settings from the box."
+            lastError = "Couldn't load settings from the server."
         }
         loaded = true
     }

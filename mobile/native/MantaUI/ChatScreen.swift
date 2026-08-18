@@ -1085,7 +1085,7 @@ private struct ChatScreenContent: View {
             Image(systemName: "exclamationmark.triangle")
                 .font(.system(size: Metrics.type.display))
                 .foregroundColor(tokens.warn)
-            Text("Couldn't reach your box")
+            Text("Couldn't reach your server")
                 .font(.manta(size: Metrics.type.body, weight: .semibold))
                 .foregroundColor(tokens.tx1)
             Text("Tap to retry.")
