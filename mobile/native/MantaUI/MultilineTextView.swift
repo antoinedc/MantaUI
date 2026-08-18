@@ -131,7 +131,9 @@ struct MultilineTextView: UIViewRepresentable {
 
         func textViewDidChange(_ textView: UITextView) {
             parent.text = textView.text
-            parent.recalculateHeight(textView as! WrappingTextView)
+            if let wrapping = textView as? WrappingTextView {
+                parent.recalculateHeight(wrapping)
+            }
         }
     }
 }

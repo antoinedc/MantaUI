@@ -64,7 +64,7 @@ enum MantaPairing {
         let parts = hostLower.split(separator: ".").map(String.init)
         let octets = parts.map { Int($0) }
         guard octets.count == 4,
-              octets.allSatisfy({ $0 != nil && (0...255).contains($0!) })
+              octets.allSatisfy({ octet in octet.map { (0...255).contains($0) } ?? false })
         else { return false }
         let values = octets.compactMap { $0 }
         let a = values[0], b = values[1]

@@ -48,6 +48,9 @@ struct Artifact: Identifiable, Equatable, Sendable {
 enum ArtifactDerivation {
     // https?://… up to the first whitespace, `>` or `<` — mirrors the desktop's
     // URL_RE exactly.
+    // The pattern is a compile-time literal: this can only throw if the literal
+    // itself is malformed, which any test run catches immediately.
+    // swiftlint:disable:next force_try
     private static let urlRegex = try! NSRegularExpression(pattern: #"https?://[^\s<>]+"#)
 
     // Extension → MIME for agent-pushed files (src/renderer/artifacts.ts

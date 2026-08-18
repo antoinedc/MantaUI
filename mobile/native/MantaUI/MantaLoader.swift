@@ -108,6 +108,9 @@ struct MantaLoader: View {
     private var mark: some View {
         // Loaded by name from the bundle: the PNG is a loose resource, not an
         // asset-catalog entry, so both spellings are tried.
+        // The logo is a bundled resource under Resources/logo, not an asset
+        // catalog entry — there is no generated symbol to prefer.
+        // swiftlint:disable:next prefer_asset_symbols
         Image(uiImage: UIImage(named: "manta-logo") ?? UIImage(named: "manta-logo.png") ?? UIImage())
             .resizable()
             .scaledToFit()

@@ -47,8 +47,13 @@ final class TerminalKeyBarView: UIView {
     private let row1Stack = UIStackView()
     private let row2Scroll = UIScrollView()
     private let row2Stack = UIStackView()
+    // Built once in setup() immediately after init and non-nil for the whole
+    // lifetime of the view; making them optional would add a `?` to every use
+    // site without removing any real nil case.
+    // swiftlint:disable implicitly_unwrapped_optional
     private var escButton: UIButton!
     private var ctrlButton: UIButton!
+    // swiftlint:enable implicitly_unwrapped_optional
 
     private static let keyMinSize: CGFloat = 44
     private static let keyHoriz: CGFloat = 12

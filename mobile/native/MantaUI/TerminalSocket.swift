@@ -19,8 +19,6 @@ import Foundation
 // reconnect respawns the shell but the webview's scrollback survives.
 // ===========================================================================
 
-import Foundation
-
 @MainActor
 final class TerminalSocket {
     enum State: Equatable, Sendable {
@@ -211,6 +209,9 @@ private func clamp(_ v: Int, lo: Int, hi: Int) -> Int {
 
 private extension Data {
     var utf8String: String {
+        // Lossy UTF-8 on purpose: pty output arrives chunked mid-sequence, and
+        // a failable initialiser would discard whole frames.
+        // swiftlint:disable:next optional_data_string_conversion
         String(decoding: self, as: UTF8.self)
     }
 }

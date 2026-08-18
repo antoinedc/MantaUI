@@ -37,6 +37,9 @@ enum PlanDerivation {
     private static let authoringTools: Set<String> = ["write", "edit", "multiEdit", "patch", "plan", "plan_exit"]
 
     /// Every `.opencode/plans/*.md` reference. Mirrors the desktop's PLAN_REF_RE.
+    // The pattern is a compile-time literal: this can only throw if the literal
+    // itself is malformed, which any test run catches immediately.
+    // swiftlint:disable:next force_try
     private static let planRefRegex: NSRegularExpression = try! NSRegularExpression(
         pattern: #"\.opencode/plans/[\w.-]+\.md"#)
 

@@ -194,7 +194,7 @@ enum MantaStreamRouter {
             s.toolStartOrder.removeAll()
         case "toolStarted":
             if let p = try? frame.decodedPayload(StreamToolStartedPayload.self) {
-                let callID = (p.callID?.isEmpty ?? true) ? p.idx : p.callID!
+                let callID = p.callID.flatMap { $0.isEmpty ? nil : $0 } ?? p.idx
                 s.tools[p.idx] = LiveTool(
                     idx: p.idx,
                     callID: callID,
