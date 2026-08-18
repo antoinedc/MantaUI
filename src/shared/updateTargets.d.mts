@@ -77,3 +77,20 @@ export function rowUpdateState(
   id: string,
   state?: { updatingTargetId?: string | null; busy?: boolean },
 ): RowUpdateState;
+
+/**
+ * Discriminate a target into "a box-side CLI" vs the two special targets.
+ * A CLI row runs just that CLI's upgrade; the server row keeps the full
+ * self-update; the desktop row keeps the download. Keyed off id, never off
+ * label or disruption (BET-1159).
+ */
+export function isCliTarget(t: UpdateTarget | null | undefined): boolean;
+
+/**
+ * Decide whether to re-run `refreshUpdateTargets()` after a CLI-update RPC
+ * resolves (BET-1161). Refreshes only on an explicit `ok:true` — a failed or
+ * absent result is left intact so the row keeps the Update button for retry.
+ */
+export function shouldRefreshAfterCliUpdate(
+  res: { ok: boolean; error?: string } | null | undefined,
+): boolean;

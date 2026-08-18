@@ -36,7 +36,7 @@ import { BANNER_BTN } from "./Toast";
 import { errorDisclosure } from "./settingsError";
 import { describeUpdateTarget } from "./chatUtils";
 import { refreshUpdateTargets } from "./updateCheck";
-import { rowUpdateState } from "../shared/updateTargets.mjs";
+import { rowUpdateState, isCliTarget } from "../shared/updateTargets.mjs";
 import { forgeCredentialSecondary } from "./chatUtils";
 import { useCachedResource } from "./useCachedResource";
 import { MantaLoader } from "./MantaLoader";
@@ -290,11 +290,13 @@ function GroupCard({ title, danger = false, children }: {
  * `downloading` / `downloadPercent` belong to the desktop leg only (a manual
  * download started from this row replaces the Update button with its
  * progress). Every box-side target (server, opencode, each CLI) shares the
- * same `onUpdate`, which raises `onRequestServerUpdate` — there is no per-CLI
- * apply. When `installReady` is set (a desktop download finished and the
- * pinned "Update ready" strip is up) the desktop row's own Update button is
- * suppressed — the strip IS that single-click action, and a second one for
- * the same target would re-download an already-downloaded update.
+ * same `onUpdate`, which routes by target id: a CLI runs its own upgrade via
+ * App's `onRunCliUpdate` (BET-1159), the server raises `onRequestServerUpdate`
+ * (BET-1159's `isCliTarget` discriminator decides). When `installReady` is set
+ * (a desktop download finished and the pinned "Update ready" strip is up) the
+ * desktop row's own Update button is suppressed — the strip IS that
+ * single-click action, and a second one for the same target would re-download
+ * an already-downloaded update.
  *
  * BET-1160: `rowState` + `error` are the in-flight/result presentation, read
  * from the shared store (via the parent) so this row and the banner can never
@@ -425,6 +427,7 @@ export function Settings({
   initialSection,
   onRequestServerUpdate,
   busy = false,
+  onRunCliUpdate,
 }: {
   onClose: () => void;
   /** Section to land on when the modal mounts (e.g. the `manta-open-settings`
@@ -443,6 +446,11 @@ export function Settings({
    *  the per-target in-flight + error state itself is read from the shared
    *  store so Settings and the banner can never disagree. */
   busy?: boolean;
+  /** Ask App.tsx to run its per-CLI update (BET-1159). A CLI row routes here
+   *  rather than calling the RPC itself, so App owns the ONE runCliUpdate —
+   *  the busy lifecycle (setUpdatingTarget) and the post-update refresh
+   *  (BET-1161) live in exactly one place. */
+  onRunCliUpdate?: (t: UpdateTarget) => void;
 }) {
   // BET-730: per-field selectors, never a bare useStore() — a no-selector
   // destructure re-renders the whole Settings tree on every store write.
@@ -610,10 +618,10 @@ export function Settings({
   // always describe the same state. The two bespoke per-leg blocks they
   // replace were deleted in stage 4.
   //
-  // The action button for every box-side target (server, opencode, each CLI)
-  // raises `onRequestServerUpdate` — there is no per-CLI apply, updating ANY
-  // box target means running the box update, and App.tsx owns the confirm,
-  // progress, 120s cap and transient-error handling in exactly one place.
+  // A CLI row (opencode / claude / codex / kimi) routes to App's `onRunCliUpdate`
+  // (BET-1159) — the ONE runCliUpdate that upgrades just that CLI and re-checks
+  // targets after it finishes (BET-1161). The server row keeps the full box
+  // update via `onRequestServerUpdate`; the desktop row keeps the download.
   const handleRowUpdate = (t: UpdateTarget) => {
     if (t.id === "desktop") {
       setDownloading(true);
@@ -627,6 +635,8 @@ export function Settings({
           setDownloading(false);
           setDownloadPercent(null);
         });
+    } else if (isCliTarget(t)) {
+      onRunCliUpdate?.(t);
     } else {
       onRequestServerUpdate?.();
     }

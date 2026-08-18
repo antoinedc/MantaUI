@@ -254,3 +254,38 @@ export function rowUpdateState(id, { updatingTargetId = null, busy = false } = {
   if (updatingTargetId != null || busy) return { kind: "busy" };
   return { kind: "idle" };
 }
+
+/**
+ * Discriminate a per-row/per-target update action into "a box-side CLI" vs the
+ * two special targets (BET-1159). A CLI row (opencode / claude / codex / kimi)
+ * runs JUST that CLI's upgrade via `runCliUpdate`; the server row keeps the
+ * full self-update and the desktop row keeps the download. Keyed off `id`, never
+ * off label or disruption, so the banner and the Settings rows can never
+ * disagree about which action a target takes.
+ *
+ * @param {object} t an UpdateTarget
+ * @returns {boolean} true when `t` is a box-side CLI (everything but desktop/server)
+ */
+export function isCliTarget(t) {
+  return Boolean(t && t.id !== "desktop" && t.id !== "server");
+}
+
+/**
+ * Decide whether to re-run `refreshUpdateTargets()` after a CLI-update RPC
+ * resolves (BET-1161, STEP 2). We refresh ONLY on success: a failed RPC must
+ * NOT be refreshed into a lie — the target's versions stay as-is (still
+ * "available"), so the row keeps the Update button for retry and the error is
+ * rendered by BET-1160's per-target errors. On a genuine success the re-check
+ * drops the target from the available set, so the row flips to "Up to date"
+ * and the banner clears automatically.
+ *
+ * Note the RPC shown here is the *result* — a *thrown* RPC (route missing /
+ * 500) is a separate path: runCliUpdate's catch renders the per-target error
+ * instead, and this stays false (no refresh into a lie).
+ *
+ * @param {{ok: boolean}|null} res the `server:cli-update` RPC result
+ * @returns {boolean} true when a re-check should follow
+ */
+export function shouldRefreshAfterCliUpdate(res) {
+  return Boolean(res && res.ok);
+}

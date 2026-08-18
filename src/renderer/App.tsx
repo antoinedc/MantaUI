@@ -31,13 +31,13 @@ import { ConfirmModal } from "./ConfirmModal";
 import { UsageResumeModal } from "./UsageResumeModal";
 import { ReconnectingBanner } from "./ReconnectingBanner";
 import { pickBanner, type BannerState } from "./bannerPriority";
-import { describeUpdateBanner, planUpdateAll } from "../shared/updateTargets.mjs";
+import { describeUpdateBanner, planUpdateAll, isCliTarget, shouldRefreshAfterCliUpdate } from "../shared/updateTargets.mjs";
 import { refreshUpdateTargets } from "./updateCheck";
 import { parsePairPayload } from "../shared/pairPayload";
 import { channelConfig } from "../shared/channel.mjs";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { MantaLoader } from "./MantaLoader";
-import type { AvailableLauncher, MediaEventPayload } from "../shared/types";
+import type { AvailableLauncher, MediaEventPayload, UpdateTarget } from "../shared/types";
 import {
   buildLimitMessage,
   buildUsageLevels,
@@ -1543,6 +1543,49 @@ function Shell() {
     }
   };
 
+  // ===== Per-CLI update (BET-1159) + post-update re-check (BET-1161) =====
+  //
+  // Clicking a CLI row (opencode / claude / codex / kimi) upgrades JUST that
+  // one CLI via the `server:cli-update` RPC (BET-1162 provides the server half)
+  // rather than running the full box self-update. The server row keeps the
+  // existing box flow (applyServerUpdate) and the desktop row keeps the
+  // download — see the shared `isCliTarget` discriminator. Serialized: at most
+  // one target may be updating at a time.
+  //
+  // Ordering (BET-1161): the busy flag is cleared in `finally` BEFORE the
+  // re-check runs, so the UI never flashes back to a re-clickable "Update"
+  // mid-flight. We re-check only on success — a failed RPC leaves the target's
+  // versions as-is (still "available") so the row keeps the Update button for
+  // retry and the per-target error (BET-1160) renders. On a genuine success the
+  // shared refresh drops the target from the available set, so the row flips to
+  // "Up to date" via describeUpdateTarget and the banner clears automatically.
+  const runCliUpdate = async (t: UpdateTarget) => {
+    useStore.getState().setUpdatingTarget(t.id);
+    let succeeded = false;
+    try {
+      const res = await window.api.serverCliUpdate(t.id);
+      if (shouldRefreshAfterCliUpdate(res)) {
+        succeeded = true;
+      } else {
+        useStore.getState().setTargetUpdateError(t.id, res?.error ?? "Update failed");
+      }
+    } catch (e) {
+      // A THROWN RPC (e.g. route missing / 404 / 500 before BET-1162's server
+      // half is deployed) must render a per-target error and be handled, not
+      // surface as an unhandled rejection. The target's versions stay as-is
+      // (still "available"), so the row keeps the Update button for retry.
+      useStore.getState().setTargetUpdateError(
+        t.id,
+        e instanceof Error ? e.message : String(e),
+      );
+    } finally {
+      useStore.getState().setUpdatingTarget(null);
+    }
+    // BET-1161: AFTER the busy state clears (the finally above), re-run the one
+    // shared check so the UI reflects the new version and stops offering Update.
+    if (succeeded) void refreshUpdateTargets().catch(() => {});
+  };
+
   // ===== The ONE update action: runUpdateAll (stage 3, BET-1098) =====
   //
   // Desktop install is terminal and runs LAST — nothing can follow it. The
@@ -1600,11 +1643,19 @@ function Shell() {
   }, [updatePrompt]);
 
   // The unified `updates` banner's action. The danger tone means "update
-  // failed" → the only sensible action is a manual download. Everything else
-  // (available / mandatory) runs the ONE orchestrator.
+  // failed" → the only sensible action is a manual download. A single available
+  // CLI target (opencode / claude / codex / kimi) runs JUST that CLI's upgrade
+  // via `runCliUpdate` (BET-1159), not the full box self-update. Everything
+  // else (lone desktop / server, or multiple targets) keeps the ONE
+  // orchestrator, runUpdateAll, which owns desktop+box sequencing.
   const onUpdateBannerAction = () => {
     if (updateBanner?.tone === "danger") {
       void window.api.openExternal("https://mantaui.com/downloads/Manta-latest.dmg");
+      return;
+    }
+    const single = (updateTargets ?? []).filter((t) => t && t.available && !t.manual);
+    if (single.length === 1 && isCliTarget(single[0])) {
+      void runCliUpdate(single[0]);
       return;
     }
     void runUpdateAll();
@@ -1910,6 +1961,7 @@ function Shell() {
           // store); the per-target in-flight/error state it reads from the
           // store itself.
           busy={boxUpgrading || updatingTargetId != null}
+          onRunCliUpdate={runCliUpdate}
         />
       )}
       {searchOpen && activeChatSessionId != null && (

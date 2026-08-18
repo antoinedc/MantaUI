@@ -1300,6 +1300,22 @@ export const httpApi: Api = {
   // device capability.
   serverUpdateCheck: () => rpc<ServerUpdateCheck>(IPC.serverUpdateCheck),
 
+  // -- single-CLI update (BET-1162 server half) --
+  // Renderer → server RPC: upgrade exactly ONE installed box CLI by catalog id.
+  // Reuses the cached CLI detector + shared runUpgrade spawn. Args are a single
+  // `{ cliId }` object (mirrors how neighbouring channels pack args). Resolves
+  // with `{ok, before?, after?, changed?, error?}` and never rejects — BET-1159
+  // routes CLI rows here and BET-1161 re-checks targets after it resolves.
+  serverCliUpdate: (cliId) =>
+    rpc<{
+      ok: boolean;
+      before?: string | null;
+      after?: string | null;
+      changed?: boolean;
+      error?: string;
+    }>(IPC.serverCliUpdate, { cliId }),
+
+
   // -- server-update available subscription (BET-225 stage 3) --
   // /events WS stream publishes `{kind: "serverUpdateAvailable", payload}`
   // (the same envelope shape desktopNotify uses). The renderer's UpdateBar

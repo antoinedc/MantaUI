@@ -732,6 +732,22 @@ export interface Api {
   // report different things.
   serverUpdateCheck(): Promise<ServerUpdateCheck>;
 
+  // Single-CLI update (BET-1162 server half): upgrade exactly ONE installed box
+  // CLI (opencode / claude / codex / kimi) by catalog id. Reuses the cached CLI
+  // detector and the shared runUpgrade spawn — no new detection or upgrade
+  // mechanism. Resolves with `{ok, before?, after?, changed?, error?}` and
+  // never rejects. This is the per-row action BET-1159's `runCliUpdate` calls;
+  // BET-1161 re-checks update targets after it resolves.
+  serverCliUpdate(
+    cliId: string,
+  ): Promise<{
+    ok: boolean;
+    before?: string | null;
+    after?: string | null;
+    changed?: boolean;
+    error?: string;
+  }>;
+
   // Server-update available subscription (BET-225 stage 3): fires when the
   // box's server-update poller sees a newer manifest version. Mirrors the
   // desktopNotify pattern — main subscribes to manta-server's /events SSE,

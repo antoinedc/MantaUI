@@ -7,6 +7,8 @@ import {
   describeUpdateBanner,
   planUpdateAll,
   rowUpdateState,
+  isCliTarget,
+  shouldRefreshAfterCliUpdate,
 } from "./updateTargets.mjs";
 
 const cli = (
@@ -442,5 +444,54 @@ describe("rowUpdateState", () => {
   it("reports `idle` when nothing is in flight", () => {
     expect(rowUpdateState("desktop", { updatingTargetId: null, busy: false })).toEqual({ kind: "idle" });
     expect(rowUpdateState("server", {})).toEqual({ kind: "idle" });
+  });
+});
+
+describe("isCliTarget (BET-1159 discriminator)", () => {
+  const t = (
+    id: UpdateTarget["id"],
+    disruption: UpdateTarget["disruption"] = "none",
+  ): UpdateTarget => ({
+    id,
+    label: id,
+    current: null,
+    latest: null,
+    available: true,
+    ok: true,
+    manual: false,
+    disruption,
+  });
+
+  it("desktop and server are NOT CLI targets", () => {
+    expect(isCliTarget(t("desktop"))).toBe(false);
+    expect(isCliTarget(t("server"))).toBe(false);
+  });
+
+  it("every box CLI id is a CLI target, whatever its disruption", () => {
+    for (const [id, disruption] of [
+      ["opencode", "ends-turns"],
+      ["claude", "none"],
+      ["codex", "reconnect"],
+      ["kimi", "none"],
+    ] as const) {
+      expect(isCliTarget(t(id, disruption))).toBe(true);
+    }
+  });
+
+  it("a null/undefined target is never a CLI target", () => {
+    expect(isCliTarget(null as unknown as UpdateTarget)).toBe(false);
+    expect(isCliTarget(undefined as unknown as UpdateTarget)).toBe(false);
+  });
+});
+
+describe("shouldRefreshAfterCliUpdate (BET-1161)", () => {
+  it("refreshes only on an explicit ok:true result", () => {
+    expect(shouldRefreshAfterCliUpdate({ ok: true })).toBe(true);
+    expect(shouldRefreshAfterCliUpdate({ ok: false, error: "boom" })).toBe(false);
+  });
+
+  it("never refreshes on a null/absent result (don't refresh into a lie)", () => {
+    expect(shouldRefreshAfterCliUpdate(null)).toBe(false);
+    expect(shouldRefreshAfterCliUpdate(undefined)).toBe(false);
   });
 });
