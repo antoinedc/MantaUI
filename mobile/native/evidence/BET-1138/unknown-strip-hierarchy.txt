@@ -1,0 +1,123 @@
+AX-TREE-BEGIN UNKNOWN-STRIP
+    t =    36.61s Requesting snapshot of accessibility hierarchy for app with pid 43185
+    t =    36.79s Requesting snapshot of accessibility hierarchy for app with pid 43185
+Attributes: Application, 0x116852800, pid: 43185, label: 'MantaUI'
+Element subtree:
+ →Application, 0x116852800, pid: 43185, label: 'MantaUI'
+    Window (Main), 0x116852a80, {{0.0, 0.0}, {402.0, 874.0}}
+      Other, 0x116852580, {{0.0, 0.0}, {402.0, 874.0}}
+        Other, 0x116850140, {{0.0, 0.0}, {402.0, 874.0}}
+          Other, 0x116850640, {{0.0, 0.0}, {402.0, 874.0}}
+            Other, 0x116850780, {{0.0, 0.0}, {402.0, 874.0}}
+              Other, 0x116851540, {{0.0, 0.0}, {402.0, 874.0}}
+                NavigationBar, 0x116852d00, {{0.0, 62.0}, {402.0, 54.0}}, identifier: 'Chat'
+                  Button, 0x116852f80, {{16.0, 62.0}, {44.0, 44.0}}, identifier: 'BackButton', label: 'Sessions'
+                  StaticText, 0x1168535c0, {{182.0, 73.7}, {38.0, 20.7}}, label: 'Chat'
+                  Other, 0x116853700, {{346.0, 66.0}, {36.0, 36.0}}, identifier: 'ellipsis', label: 'Session actions'
+                    Other, 0x116850280, {{346.0, 66.0}, {36.0, 36.0}}
+                      Button, 0x1168503c0, {{350.0, 66.0}, {28.0, 36.0}}, identifier: 'ellipsis', label: 'Session actions'
+                Other, 0x116850500, {{0.0, 0.0}, {402.0, 874.0}}
+                  Other, 0x116851b80, {{0.0, 0.0}, {402.0, 874.0}}
+                    Other, 0x116851e00, {{0.0, 0.0}, {402.0, 874.0}}
+                      Other, 0x116851f40, {{0.0, 0.0}, {402.0, 874.0}}
+                        Other, 0x1168517c0, {{0.0, 0.0}, {402.0, 884.0}}, identifier: 'chat-screen'
+                          Other, 0x116851900, {{0.0, 0.0}, {402.0, 874.0}}
+                            CollectionView, 0x116851680, {{0.0, 0.0}, {402.0, 874.0}}
+                              Cell, 0x116850dc0, {{0.0, -208.7}, {402.0, 213.0}}
+                                Other, 0x116850a00, {{0.0, -208.7}, {402.0, 213.0}}
+                                  Other, 0x116850b40, {{0.0, -208.7}, {402.0, 213.0}}
+                                    Other, 0x116850c80, {{12.0, -208.7}, {434.7, 201.0}}, identifier: 'transcript-row'
+                                      Other, 0x1168baf80, {{12.0, -208.7}, {378.0, 201.0}}, identifier: 'assistant-prose'
+                                        StaticText, 0x1168bb0c0, {{12.0, -208.7}, {378.0, 201.0}}, label: 'This is fixture paragraph 19, part of the taller transcript the gesture tests need so there is something to scroll. It is intentionally a few sentences long so the row owns measurable height on screen. Repeating the filler across the array gives the transcript enough vertical extent that a single upward drag must begin scrolling immediately, which is the point of the exercise. immediately, which is the point of the exercise.'
+                                      StaticText, 0x1168bb200, {{415.3, -108.8}, {31.3, 13.3}}, label: '17:09'
+                              Other, 0x1168bb340, {{0.0, 0.0}, {402.0, 874.0}}
+                                Other, 0x1168bb480, {{0.0, 0.0}, {402.0, 212.8}}
+                              Other, 0x1168bb5c0, {{0.0, 0.0}, {402.0, 874.0}}
+                                Other, 0x1168bb700, {{0.0, 0.0}, {402.0, 212.8}}
+                                  Image, 0x1168bb840, {{-120.0, -166.0}, {642.0, 332.0}}, identifier: 'AdditionalDimmingOverlay'
+                                  Other, 0x1168bb980, {{0.0, 0.0}, {402.0, 140.0}}
+                                  Other, 0x1168bbac0, {{0.0, 0.0}, {402.0, 212.8}}
+                                    Other, 0x1168bbc00, {{0.0, 0.0}, {402.0, 212.8}}
+                                  Other, 0x1168bbd40, {{0.0, 0.0}, {402.0, 212.8}}
+                                    Other, 0x1168bbe80, {{0.0, 0.0}, {402.0, 212.8}}
+                                  Other, 0x106a17840, {{0.0, 0.0}, {402.0, 212.8}}
+                                    Other, 0x106a17700, {{0.0, 0.0}, {402.0, 212.8}}
+                                    Other, 0x106a17e80, {{0.0, 0.0}, {402.0, 212.8}}
+                              Cell, 0x106a17ac0, {{0.0, 4.3}, {402.0, 58.0}}
+                                Other, 0x106a17200, {{0.0, 4.3}, {402.0, 58.0}}
+                                  Other, 0x106a17340, {{0.0, 4.3}, {402.0, 58.0}}
+                                    Other, 0x106a17480, {{0.0, 4.3}, {446.7, 42.0}}, identifier: 'transcript-row'
+                                      Other, 0x106a175c0, {{0.0, 4.3}, {402.0, 42.0}}, identifier: 'user-band'
+                                        StaticText, 0x1169fc000, {{12.0, 16.3}, {121.3, 18.0}}, label: 'Filler question 20'
+                                      StaticText, 0x1169fc140, {{415.3, 26.7}, {31.3, 13.3}}, label: '17:07'
+                              Cell, 0x1169fc280, {{0.0, 62.3}, {402.0, 213.0}}
+                                Other, 0x1169fc3c0, {{0.0, 62.3}, {402.0, 213.0}}
+                                  Other, 0x1169fc500, {{0.0, 62.3}, {402.0, 213.0}}
+                                    Other, 0x1169fc640, {{12.0, 62.3}, {434.7, 201.0}}, identifier: 'transcript-row'
+                                      Other, 0x1169fc780, {{12.0, 62.3}, {378.0, 201.0}}, identifier: 'assistant-prose'
+                                        StaticText, 0x1169fc8c0, {{12.0, 62.3}, {378.0, 201.0}}, label: 'This is fixture paragraph 20, part of the taller transcript the gesture tests need so there is something to scroll. It is intentionally a few sentences long so the row owns measurable height on screen. Repeating the filler across the array gives the transcript enough vertical extent that a single upward drag must begin scrolling immediately, which is the point of the exercise. immediately, which is the point of the exercise.'
+                                      StaticText, 0x1169fca00, {{415.3, 162.2}, {31.3, 13.3}}, label: '17:09'
+                              Cell, 0x1169fcb40, {{0.0, 275.3}, {402.0, 58.0}}
+                                Other, 0x1169fcc80, {{0.0, 275.3}, {402.0, 58.0}}
+                                  Other, 0x1169fcdc0, {{0.0, 275.3}, {402.0, 58.0}}
+                                    Other, 0x1169fcf00, {{0.0, 275.3}, {446.7, 42.0}}, identifier: 'transcript-row'
+                                      Other, 0x1169fd040, {{0.0, 275.3}, {402.0, 42.0}}, identifier: 'user-band'
+                                        StaticText, 0x1169fd180, {{12.0, 287.3}, {118.7, 18.0}}, label: 'Filler question 21'
+                                      StaticText, 0x1169fd2c0, {{415.3, 297.7}, {31.3, 13.3}}, label: '17:07'
+                              Cell, 0x1169fd400, {{0.0, 333.3}, {402.0, 213.0}}
+                                Other, 0x1169fd540, {{0.0, 333.3}, {402.0, 213.0}}
+                                  Other, 0x1169fd680, {{0.0, 333.3}, {402.0, 213.0}}
+                                    Other, 0x1169fd7c0, {{12.0, 333.3}, {434.7, 201.0}}, identifier: 'transcript-row'
+                                      Other, 0x1169fd900, {{12.0, 333.3}, {378.0, 201.0}}, identifier: 'assistant-prose'
+                                        StaticText, 0x1169fda40, {{12.0, 333.3}, {378.0, 201.0}}, label: 'This is fixture paragraph 21, part of the taller transcript the gesture tests need so there is something to scroll. It is intentionally a few sentences long so the row owns measurable height on screen. Repeating the filler across the array gives the transcript enough vertical extent that a single upward drag must begin scrolling immediately, which is the point of the exercise. immediately, which is the point of the exercise.'
+                                      StaticText, 0x1169fdb80, {{415.3, 433.2}, {31.3, 13.3}}, label: '17:09'
+                              Cell, 0x1169fdcc0, {{0.0, 546.3}, {402.0, 83.3}}
+                                Other, 0x1169fde00, {{0.0, 546.3}, {402.0, 83.3}}
+                                  Other, 0x1169fdf40, {{0.0, 546.3}, {402.0, 83.3}}
+                                    Other, 0x1169fe080, {{0.0, 546.3}, {446.7, 67.3}}, identifier: 'transcript-row'
+                                      Other, 0x1169fe1c0, {{0.0, 546.3}, {402.0, 67.3}}, identifier: 'user-band'
+                                        StaticText, 0x1169fe300, {{12.0, 558.3}, {351.3, 43.3}}, label: 'Can this sheet show attach, a live scheduled-task count and secrets?'
+                                      StaticText, 0x1169fe440, {{415.3, 581.3}, {31.3, 13.3}}, label: '17:24'
+                              Cell, 0x1169fe580, {{0.0, 629.7}, {402.0, 82.3}}
+                                Other, 0x1169fe6c0, {{0.0, 629.7}, {402.0, 82.3}}
+                                  Other, 0x1169fe800, {{0.0, 629.7}, {402.0, 82.3}}
+                                    Other, 0x1169fe940, {{12.0, 629.7}, {434.7, 70.3}}, identifier: 'transcript-row'
+                                      Other, 0x1169fea80, {{12.0, 629.7}, {362.0, 70.3}}, identifier: 'assistant-prose'
+                                        StaticText, 0x1169febc0, {{12.0, 629.7}, {362.0, 70.3}}, label: 'Yes — tap the ellipsis in the header. Scheduled tasks carries a live count, and secrets lists names without ever sending a value to the phone.'
+                                      StaticText, 0x1169fed00, {{415.3, 664.2}, {31.3, 13.3}}, label: '17:24'
+                              Other, 0x1169fee40, {{369.0, 148.0}, {30.0, 564.0}}, label: 'Vertical scroll bar, 138 122 pages', value: 100 %
+                                Other, 0x1169fef80, {{396.0, 633.0}, {3.0, 76.0}}
+                              Other, 0x1169ff0c0, {{62.0, 841.0}, {278.0, 30.0}}, label: 'Horizontal scroll bar, 1 page', value: 0 %
+                                Other, 0x1169ff200, {{65.0, 868.0}, {272.0, 3.0}}
+                              Other, 0x1169ff340, {{369.0, 148.0}, {30.0, 564.0}}, label: 'Vertical scroll bar, 138 122 pages', value: 100 %
+                                Other, 0x1169ff480, {{396.0, 633.0}, {3.0, 76.0}}
+                              Other, 0x1169ff5c0, {{62.0, 841.0}, {278.0, 30.0}}, label: 'Horizontal scroll bar, 1 page', value: 0 %
+                                Other, 0x1169ff700, {{65.0, 868.0}, {272.0, 3.0}}
+                          Button, 0x1169ff840, {{12.0, 116.0}, {378.0, 24.0}}, identifier: 'context-strip', label: 'Context — no max context info for this model', value: 100 %
+                            StaticText, 0x1169ff980, {{12.0, 121.3}, {43.0, 13.3}}, label: 'Context'
+                            Other, 0x1169ffac0, {{63.0, 126.0}, {310.7, 4.0}}, value: 100 %
+                              ProgressIndicator, 0x1169ffc00, {{63.0, 116.0}, {310.7, 24.0}}, value: 100 %
+                            Image, 0x1169ffd40, {{383.7, 123.3}, {5.7, 9.7}}, identifier: 'chevron.right', label: 'Forward'
+                          StaticText, 0x1169ffe80, {{29.0, 760.0}, {73.7, 18.0}}, label: 'Message…'
+                          TextView, 0x116a04000, {{24.0, 752.0}, {354.0, 26.0}}, identifier: 'composer-input'
+                            Other, 0x116a04140, {{345.0, 752.0}, {30.0, 26.0}}, label: 'Vertical scroll bar, 2 pages', value: 0 %
+                              Other, 0x116a04280, {{372.0, 739.0}, {3.0, 36.0}}
+                          Button, 0x116a043c0, {{24.0, 793.3}, {79.0, 23.7}}, identifier: 'model-picker', label: 'Model'
+                            Image, 0x116a04500, {{33.3, 798.3}, {11.3, 13.7}}, identifier: 'sparkles', label: 'Sparkle'
+                            StaticText, 0x116a04640, {{50.0, 797.2}, {45.0, 15.7}}, label: 'Default'
+                          Button, 0x116a04780, {{111.0, 786.0}, {38.0, 38.0}}, identifier: 'attach-button', label: 'Attach'
+                            Button, 0x116a048c0, {{111.0, 786.0}, {38.0, 38.0}}
+                              Image, 0x116a04a00, {{111.0, 786.0}, {38.0, 38.0}}, identifier: 'paperclip', label: 'Attach'
+                          Button, 0x116a04b40, {{294.0, 786.0}, {38.0, 38.0}}, identifier: 'mic-button', label: 'Record'
+                          Button, 0x116a04c80, {{340.0, 786.0}, {38.0, 38.0}}, identifier: 'send-button', label: 'Send', Disabled
+                Other, 0x116a04dc0, {{0.0, 0.0}, {402.0, 874.0}}
+                  Other, 0x116a04f00, {{0.0, 0.0}, {402.0, 874.0}}
+Path to element:
+ →Application, 0x116852800, pid: 43185, label: 'MantaUI'
+Query chain:
+ →Find: Target Application 'com.antoinedc.mantaui'
+  Output: {
+    Application, 0x116a05040, pid: 43185, label: 'MantaUI'
+  }
+
+AX-TREE-END UNKNOWN-STRIP
