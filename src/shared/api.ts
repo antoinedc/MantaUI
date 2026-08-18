@@ -325,6 +325,15 @@ export interface Api {
   agentPullFile(remotePath: string): Promise<string>;
   revealInFolder(localPath: string): Promise<void>;
 
+  // BET-1156: the ONE desktop download-to-downloads path. Main fetches
+  // `/api/download?path=<remotePath>` with the box token and writes the bytes
+  // to `downloadsDir` (default `~/Downloads`), deduping a name collision.
+  // Returns the saved local absolute path on success, "" on failure. On desktop
+  // every download (outbox toast Save, inline-media preview + hover overlay,
+  // artifacts panel) funnels through this; `agentPullFile` delegates to it on
+  // desktop and keeps the browser blob fallback for mobile/web (no preload).
+  downloadFileToDownloads(remotePath: string, filename: string): Promise<string>;
+
   // Ephemeral shell-in-cwd (or AI CLI TUI) PTYs, one per session-mode
   // composite key (`${sessionId}:${modeId}`). See src/server/pty.mjs.
   ptySpawn(opts: SpawnOptions): Promise<void>;
@@ -789,6 +798,7 @@ export type PreloadApi = Pick<
   | "peekRemoteFile"
   | "openExternal"
   | "revealInFolder"
+  | "downloadFileToDownloads"
   | "onServerUpdateAvailable"
   | "autoUpdateDownload"
   | "autoUpdateInstall"

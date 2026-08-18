@@ -38,6 +38,7 @@ import {
 } from "./screenshotDetector.js";
 import { checkForUpdates } from "./autoUpdate.js";
 import { titleBarOptions } from "./windowChrome.js";
+import { downloadFileToDownloads } from "./download.js";
 import { registerInstallerHandlers } from "./installer/handlers.js";
 import {
   resolveChannel,
@@ -344,6 +345,24 @@ function registerHandlers(): void {
   });
 
   ipcMain.handle(IPC.openExternal, (_e, url: string) => shell.openExternal(url));
+
+  // BET-1156: the ONE desktop download-to-downloads path. Pulls
+  // /api/download?path=<remotePath> with the live box token (read from config
+  // here, never caller-supplied) and writes the bytes to downloadsDir (absent
+  // → app.getPath("downloads")), deduping a name collision. Returns the saved
+  // local absolute path, or "" on failure so the caller can keep a retry
+  // affordance up. Every desktop download (toast Save, inline-media preview +
+  // hover overlay, artifacts panel) funnels through this bridged path.
+  ipcMain.handle(IPC.downloadFileToDownloads, async (_e, remotePath: string, filename: string) =>
+    downloadFileToDownloads({
+      serverUrl: config.serverUrl ?? "",
+      boxToken: config.boxToken ?? "",
+      downloadsDir: config.downloadsDir,
+      defaultDir: app.getPath("downloads"),
+      remotePath,
+      filename,
+    }),
+  );
 
   // BET-387: native file picker for the custom-host SSH installer panel's
   // "Identity file" field. Only main can spawn an OS dialog. Defaults the

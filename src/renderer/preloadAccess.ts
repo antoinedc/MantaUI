@@ -59,6 +59,13 @@ export interface MantaPreload {
   readLocalFile(path: string): Promise<ArrayBuffer>;
   openExternal(url: string): Promise<void>;
   revealInFolder(localPath: string): Promise<void>;
+  // BET-1156: the one desktop download-to-downloads path. Main fetches
+  // `/api/download?path=<remotePath>` with the box token and writes the bytes
+  // to `downloadsDir` (default `~/Downloads`), deduping a name collision.
+  // Returns the saved local absolute path on success, "" on failure. Only the
+  // desktop preload exposes this; mobile/web callers see null and fall back to
+  // a browser blob download.
+  downloadFileToDownloads(remotePath: string, filename: string): Promise<string>;
   // BET-387: native file picker (single file, defaults to ~/.ssh/). Used by
   // the custom-host SSH installer panel's "Identity file" Browse button.
   // Returns { canceled:true } on a cancel / no-selection close; absent on

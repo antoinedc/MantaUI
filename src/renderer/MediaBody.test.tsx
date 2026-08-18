@@ -9,7 +9,7 @@
 // placeholder and NO <img>; video never autoplays.
 
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { mount, type Harness } from "./testHarness";
+import { mount, installMockApi, type Harness } from "./testHarness";
 import { MediaBody } from "./MediaBody";
 import type { MediaEntry, MediaKind, MediaState } from "./chatUtils";
 
@@ -122,5 +122,105 @@ describe("MediaBody", () => {
     h = mount(<MediaBody entry={entry("pending")} />);
     const toggle = h.container.querySelector("button[aria-expanded='true']");
     expect(toggle).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// BET-1156 — hover download overlay + working preview download
+// ---------------------------------------------------------------------------
+
+describe("MediaBody download (BET-1156)", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+    vi.unstubAllGlobals();
+  });
+
+  function installPullSpy() {
+    const agentPullFile = vi.fn(async () => "/Users/a/Downloads/x");
+    installMockApi({ agentPullFile });
+    return agentPullFile;
+  }
+
+  function clickDownload(): HTMLElement | null {
+    const btn = h!.container.querySelector('button[aria-label="Download"]') as HTMLElement | null;
+    btn?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    return btn;
+  }
+
+  // Mount a ready image/video through the same stub path shared by every test
+  // here, returning the pull spy + a `finish()` that lets the byte fetch settle.
+  function mountReady(kind: "image" | "video", filename: string, mime: string) {
+    const agentPullFile = installPullSpy();
+    const restore = stubPeekFetch();
+    const isImage = kind === "image";
+    h = mount(
+      <MediaBody
+        entry={entry("ready", {
+          meta: {
+            kind,
+            path: `/home/dev/${filename}`,
+            mime,
+            width: isImage ? 800 : 1920,
+            height: isImage ? 600 : 1080,
+            aspectRatio: null,
+            count: null,
+            title: null,
+          },
+        })}
+      />,
+    );
+    return {
+      agentPullFile,
+      finish: async () => {
+        await h!.flush();
+        restore();
+      },
+    };
+  }
+
+  it("ready image: hover overlay renders, its press downloads and does not open the preview", async () => {
+    const { agentPullFile, finish } = mountReady("image", "a.png", "image/png");
+    await finish();
+
+    const btn = clickDownload();
+    expect(btn).toBeTruthy();
+    expect(agentPullFile).toHaveBeenCalledWith("/home/dev/a.png");
+
+    // pointer-events guard: only the button receives pointer events, and the
+    // press must NOT open the whole-box click-to-preview overlay.
+    expect(btn?.parentElement?.className).toContain("pointer-events-none");
+    expect(btn?.className).toContain("pointer-events-auto");
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it("ready video: hover overlay renders and its press downloads", async () => {
+    const { agentPullFile, finish } = mountReady("video", "clip.mp4", "video/mp4");
+    await finish();
+
+    const btn = clickDownload();
+    expect(btn).toBeTruthy();
+    expect(agentPullFile).toHaveBeenCalledWith("/home/dev/clip.mp4");
+  });
+
+  it("ready image preview Download is wired to the shared download path and has no Attach", async () => {
+    const { agentPullFile, finish } = mountReady("image", "a.png", "image/png");
+    await finish();
+
+    // Open the preview overlay by clicking the whole media box.
+    (h!.container.querySelector("[data-open-preview]") as HTMLElement).click();
+    await h!.flush();
+    const dialog = document.body.querySelector('[role="dialog"]');
+    expect(dialog).toBeTruthy();
+
+    // No dead Attach affordance in the inline-media preview.
+    expect(document.body.querySelector('[role="dialog"] button[aria-label="Attach"]')).toBeNull();
+
+    // Preview Download calls the shared download path.
+    (document.body.querySelector('[role="dialog"] button[aria-label="Download"]') as HTMLElement | null)
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    await h!.flush();
+    expect(agentPullFile).toHaveBeenCalledWith("/home/dev/a.png");
   });
 });
