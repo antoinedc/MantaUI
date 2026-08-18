@@ -28,3 +28,11 @@ src/main/installer/handlers.test.ts
 # scans changed files). Same rationale as the handlers.test.ts exemption above;
 # my BET-1008 additions introduced no new clones.
 src/main/installer/installer.test.ts
+# BET-1119: the CLI latest-version probe suite. jscpd flags an INTRA-file,
+# pre-existing self-clone — the spawn-with-timeout scaffolding shared by
+# readVersion and defaultGetNpmGlobalRoot (19 lines) — which exists on
+# origin/main and surfaces ONLY because this file is in a diff (the gate scans
+# changed files). Same rationale as the installer.test.ts exemption above; the
+# BET-1119 fix (default fetchJson for the probe) introduced no new clones, and
+# de-duplicating those two helpers is out of this tightly-scoped fix's remit.
+src/server/cliUpdates.mjs
