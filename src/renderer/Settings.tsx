@@ -35,7 +35,6 @@ import { SettingsRow } from "./SettingsRow";
 import { BANNER_BTN } from "./Toast";
 import { errorDisclosure } from "./settingsError";
 import { describeUpdateTarget } from "./chatUtils";
-import type { UpdateRow } from "./chatUtils";
 import { refreshUpdateTargets } from "./updateCheck";
 import { forgeCredentialSecondary } from "./chatUtils";
 import { useCachedResource } from "./useCachedResource";
@@ -50,6 +49,7 @@ import type {
   ForgeRuleRow,
   ForgeStatusResult,
   OpencodeReference,
+  UpdateTarget,
 } from "../shared/types";
 import {
   SETTINGS,
@@ -273,14 +273,45 @@ function GroupCard({ title, danger = false, children }: {
 }
 
 /**
- * One line of "Check for updates" output: a tone dot, the verdict, and an
- * optional action.
+ * ONE row of the About update list, for ONE target (stage 4, BET-1099).
  *
- * The dot is the point. "Up to date" and "couldn't check" both render as a
- * sentence with no button, and without a colour they read the same at a glance
- * — which is the failure this whole feature is meant to make impossible.
+ * Four columns in this fixed order — dot · name · versions · action — driven
+ * entirely by the one shared describe function (`describeUpdateTarget`). The
+ * component contains NO per-target branching: the tone it returns picks the
+ * action column, and nothing else varies between targets.
+ *
+ * The dot carries the visual message that the old verdict sentence did — "Up
+ * to date", "Couldn't check" and a manual update are all "no button" states,
+ * and without a colour they read identically, which is the failure this whole
+ * feature exists to make impossible. Version numbers are MONO so the digits
+ * align down the column and a change is legible at a glance.
+ *
+ * `downloading` / `downloadPercent` belong to the desktop leg only (a manual
+ * download started from this row replaces the Update button with its
+ * progress). Every box-side target (server, opencode, each CLI) shares the
+ * same `onUpdate`, which raises `onRequestServerUpdate` — there is no per-CLI
+ * apply. When `installReady` is set (a desktop download finished and the
+ * pinned "Update ready" strip is up) the desktop row's own Update button is
+ * suppressed — the strip IS that single-click action, and a second one for
+ * the same target would re-download an already-downloaded update.
  */
-function UpdateResultRow({ row, children }: { row: UpdateRow; children?: ReactNode }) {
+function UpdateTargetRow({
+  target,
+  downloading,
+  downloadPercent,
+  installReady,
+  onUpdate,
+}: {
+  target: UpdateTarget;
+  downloading: boolean;
+  downloadPercent: number | null;
+  installReady: boolean;
+  onUpdate: (t: UpdateTarget) => void;
+}) {
+  const row = describeUpdateTarget(target);
+  const hasUpdate = target.latest != null && target.latest !== target.current;
+
+  // Today's UpdateResultRow dot tones, kept as-is (BET-1099 design contract).
   const dot =
     row.tone === "ok"
       ? "bg-ok"
@@ -288,14 +319,68 @@ function UpdateResultRow({ row, children }: { row: UpdateRow; children?: ReactNo
         ? "bg-accent"
         : row.tone === "error"
           ? "bg-danger"
-          : "bg-text-faint";
+          : "bg-[var(--tx4)]";
+
+  // Action column per tone. `action` is the only tone that gets a button; the
+  // rest are quiet text (ok / error) or a manual link (muted, when there is a
+  // URL to offer).
+  let action: ReactNode = null;
+  if (row.tone === "action") {
+    // A finished desktop download is marked by the pinned "Update ready" strip
+    // (installReady); suppress the desktop row's own Update button then, since
+    // a second one would re-download an already-downloaded update.
+    if (!(target.id === "desktop" && installReady)) {
+      if (target.id === "desktop" && downloading) {
+        action = (
+          <span className="shrink-0 text-meta text-text-faint">
+            {downloadPercent == null ? "Downloading…" : `Downloading ${Math.round(downloadPercent)}%`}
+          </span>
+        );
+      } else {
+        action = (
+          <button className={BANNER_BTN} onClick={() => onUpdate(target)}>
+            Update
+          </button>
+        );
+      }
+    }
+  } else if (row.tone === "muted") {
+    if (target.manualUrl) {
+      const url = target.manualUrl;
+      action = (
+        <a
+          className="shrink-0 text-accent no-underline hover:underline"
+          href={url}
+          onClick={(e) => {
+            e.preventDefault();
+            void window.api.openExternal(url);
+          }}
+        >
+          Update manually ↗
+        </a>
+      );
+    }
+  } else if (row.tone === "ok") {
+    action = <span className="shrink-0 text-text-quiet">Up to date</span>;
+  } else if (row.tone === "error") {
+    action = <span className="shrink-0 text-danger">Couldn't check</span>;
+  }
+
   return (
-    <div className="flex items-center gap-2">
-      <span aria-hidden className={`inline-block w-2 h-2 rounded-full shrink-0 ${dot}`} />
-      <span className={`flex-1 text-meta ${row.tone === "error" ? "text-danger" : "text-text-muted"}`}>
-        {row.text}
+    <div className="flex items-center gap-2 text-[length:var(--font-size-2xs)]">
+      <span aria-hidden className={`inline-block shrink-0 w-[length:var(--step-dot)] h-[length:var(--step-dot)] rounded-full ${dot}`} />
+      <span className="text-text">{target.label}</span>
+      <span className="flex-1 min-w-0 truncate font-mono text-text-quiet">
+        {hasUpdate ? (
+          <>
+            {target.current ?? ""} →{" "}
+            <span className="text-text-muted font-medium">{target.latest}</span>
+          </>
+        ) : (
+          target.current ?? ""
+        )}
       </span>
-      {children}
+      {action}
     </div>
   );
 }
@@ -387,7 +472,6 @@ export function Settings({
   // Client + server versions for About.
   const [clientVersion, setClientVersion] = useState<string | null>(null);
   const [serverVersion, setServerVersion] = useState<string | null>(null);
-  const [opencodeVersion, setOpencodeVersion] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
     void Promise.all([
@@ -397,12 +481,6 @@ export function Settings({
       if (cancelled) return;
       if (client && typeof client.version === "string") setClientVersion(client.version);
       if (server && typeof server.version === "string") setServerVersion(server.version);
-      // BET-428: opencode version ships in the same getServerVersion response
-      // (opencode's HTTP API has no version endpoint, so the server shells out
-      // to `opencode --version` once at startup). Only render when it's a real
-      // value — FALLBACK_VERSION ("0.0.0") means opencode isn't installed, so
-      // we hide the line rather than show a misleading "v0.0.0".
-      if (server && typeof server.opencodeVersion === "string" && server.opencodeVersion && server.opencodeVersion !== "0.0.0") setOpencodeVersion(server.opencodeVersion);
     });
     return () => { cancelled = true; };
   }, []);
@@ -464,16 +542,32 @@ export function Settings({
     }
   }, [updatePrompt, updateError]);
 
-  // Each leg's verdict row, from the ONE shared describe function
-  // (describeUpdateTarget), keyed off the SAME canonical UpdateTarget[] the
-  // banner reads (stored by the shared refreshUpdateTargets — stage 3,
-  // BET-1098). Stage 4 unifies the About list into one row per target; for
-  // now the two existing rows (desktop / box) are sliced straight out of that
-  // list, so Settings and the banner always describe the same state.
-  const desktopTarget = updateTargets.find((t) => t.id === "desktop") ?? null;
-  const serverTarget = updateTargets.find((t) => t.id === "server") ?? null;
-  const desktopRow = desktopTarget ? describeUpdateTarget(desktopTarget) : null;
-  const serverRow = serverTarget ? describeUpdateTarget(serverTarget) : null;
+  // One row per target (BET-1099): the list below maps over the canonical
+  // `updateTargets` in its fixed display order, so Settings and the banner
+  // always describe the same state. The two bespoke per-leg blocks they
+  // replace were deleted in stage 4.
+  //
+  // The action button for every box-side target (server, opencode, each CLI)
+  // raises `onRequestServerUpdate` — there is no per-CLI apply, updating ANY
+  // box target means running the box update, and App.tsx owns the confirm,
+  // progress, 120s cap and transient-error handling in exactly one place.
+  const handleRowUpdate = (t: UpdateTarget) => {
+    if (t.id === "desktop") {
+      setDownloading(true);
+      setDownloadPercent(0);
+      // The IPC rejects on ANY failure (main now returns the download
+      // promise), so a transient drop recovers to the button instead of
+      // wedging "Downloading…".
+      void window.api
+        .autoUpdateDownload()
+        .catch(() => {
+          setDownloading(false);
+          setDownloadPercent(null);
+        });
+    } else {
+      onRequestServerUpdate?.();
+    }
+  };
 
   // opencode port — exposed in the Box "Advanced" row (BET-420). Read via
   // configGet (it's an AppConfig key with no store mirror) and committed via
@@ -797,12 +891,6 @@ export function Settings({
       return (
         <>
           <GroupCard title="About">
-            <div className="text-body text-text-muted">
-              Desktop <span className="font-medium text-text">{clientVersion ?? "…"}</span>
-              {serverVersion && (<><span className="text-text-faint"> · </span>server <span className="font-medium text-text">{serverVersion}</span></>)}
-              {opencodeVersion && (<><span className="text-text-faint"> · </span>opencode <span className="font-medium text-text">{opencodeVersion}</span></>)}
-            </div>
-
             {/* A downloaded desktop update outranks everything below: it is the
                 one state where the user's next action is a single click, so it
                 stays pinned regardless of whether a check has been run. */}
@@ -824,61 +912,22 @@ export function Settings({
               )}
             </div>
 
-            {(desktopRow || serverRow) && (
-              <div className="space-y-2">
-                {/* Desktop leg. The action is Download, not Install: autoDownload
-                    is off, so the bytes are only fetched on an explicit press. */}
-                {desktopRow && !updatePrompt && (
-                  <UpdateResultRow row={desktopRow}>
-                    {desktopTarget?.available && !downloading && (
-                      <button
-                        className={BANNER_BTN}
-                        onClick={() => {
-                          setDownloading(true);
-                          setDownloadPercent(0);
-                          // The IPC rejects on ANY failure (main now returns
-                          // the download promise), so a transient drop recovers
-                          // to the button instead of wedging "Downloading…".
-                          void window.api
-                            .autoUpdateDownload()
-                            .catch(() => {
-                              setDownloading(false);
-                              setDownloadPercent(null);
-                            });
-                        }}
-                      >
-                        Download
-                      </button>
-                    )}
-                    {downloading && (
-                      <span className="shrink-0 text-meta text-text-faint">
-                        {downloadPercent == null ? "Downloading…" : `Downloading ${Math.round(downloadPercent)}%`}
-                      </span>
-                    )}
-                    {desktopTarget && desktopTarget.ok === false && (
-                      <button
-                        className={BANNER_BTN}
-                        onClick={() => { void window.api.openExternal("https://mantaui.com/downloads/Manta-latest.dmg"); }}
-                      >
-                        Download manually
-                      </button>
-                    )}
-                  </UpdateResultRow>
-                )}
-
-                {/* Box leg. Routed to App.tsx so the confirm + progress + error
-                    handling is shared with the banner (see onRequestServerUpdate). */}
-                {serverRow && (
-                  <UpdateResultRow row={serverRow}>
-                    {serverTarget?.available && onRequestServerUpdate && (
-                      <button className={BANNER_BTN} onClick={onRequestServerUpdate}>
-                        Update &amp; restart
-                      </button>
-                    )}
-                  </UpdateResultRow>
-                )}
-              </div>
-            )}
+            {/* One row per update target, in the canonical display order from
+                `refreshUpdateTargets` — Manta UI, the box, opencode, then each
+                installed CLI. A target the box does NOT have installed produces
+                no row at all. */}
+            <div className="space-y-2">
+              {updateTargets.map((t) => (
+                <UpdateTargetRow
+                  key={t.id}
+                  target={t}
+                  downloading={downloading}
+                  downloadPercent={downloadPercent}
+                  installReady={Boolean(updatePrompt)}
+                  onUpdate={handleRowUpdate}
+                />
+              ))}
+            </div>
           </GroupCard>
           <GroupCard title="Danger zone" danger>
             <div className="space-y-3">
