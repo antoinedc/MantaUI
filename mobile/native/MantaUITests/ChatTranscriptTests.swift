@@ -597,6 +597,48 @@ final class ChatTranscriptTests: XCTestCase {
                        "non-colliding blocks must keep their content-stable ids unchanged")
     }
 
+    // MARK: - Step-group identity (BET-1103)
+    //
+    // A step group grows by appending rows. Its id must therefore be fixed for the
+    // life of the group: an id derived from ALL row ids changes on every new step,
+    // so the diff sees a different row and deletes + re-inserts the whole group on
+    // every tool call — visible jank, and the remove/insert traffic behind the
+    // `_TiledView.applyChange` crashes.
+
+    private func step(_ id: String) -> StepGroupRow {
+        .step(ToolStep(id: id, verb: "Read", target: "a.swift",
+                       duration: "0.4s", status: .completed, output: nil))
+    }
+
+    func testStepGroupIDIsUnchangedWhenAStepIsAppended() {
+        let before = TranscriptBlock.steps(.rows([step("call-1")]))
+        let after = TranscriptBlock.steps(.rows([step("call-1"), step("call-2")]))
+        XCTAssertEqual(before.stableScrollID, after.stableScrollID,
+                       "appending a step must not change the group's id, or the whole group is deleted and re-inserted")
+    }
+
+    func testStepGroupIDIsUnchangedWhenTheGroupRollsUp() {
+        let rows = [step("call-1"), step("call-2"), step("call-3")]
+        let plain = TranscriptBlock.steps(.rows(rows))
+        let rolled = TranscriptBlock.steps(.rollup(summary: "▸ 3 steps", rows: rows))
+        XCTAssertEqual(plain.stableScrollID, rolled.stableScrollID,
+                       "rolling up is the same group and must be an in-place update, not a remove + insert")
+    }
+
+    func testDifferentStepGroupsGetDifferentIDs() {
+        let a = TranscriptBlock.steps(.rows([step("call-1")]))
+        let b = TranscriptBlock.steps(.rows([step("call-9")]))
+        XCTAssertNotEqual(a.stableScrollID, b.stableScrollID,
+                          "two distinct step groups must not share an id")
+    }
+
+    func testEmptyStepGroupsStillGetUniqueRowIDs() {
+        let blocks: [TranscriptBlock] = [.steps(.rows([])), .steps(.rows([]))]
+        let rows = uniqueTranscriptRows(blocks)
+        XCTAssertEqual(Set(rows.map(\.id)).count, 2,
+                       "uniqueTranscriptRows must still de-duplicate empty step groups")
+    }
+
     // MARK: - Step disclosure (BET-823)
 
     func testStepDisclosureStateDefaults() {
