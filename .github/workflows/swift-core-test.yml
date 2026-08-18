@@ -1,0 +1,40 @@
+# Headless unit tests for the iOS app's pure logic.
+#
+# Runs on ubuntu, in the official Swift image, against mobile/native/Package.swift
+# — a manifest listing the Foundation-only subset of the app's sources. No Xcode,
+# no simulator, ~1 minute.
+#
+# This does NOT replace the macOS build/test job: it cannot see any code touching
+# SwiftUI, UIKit or the simulator. It is a fast first signal on the logic layer.
+#
+# NOT in required-checks.json: the paths filter means most PRs never produce this
+# context, and requiring it would block them all (see AGENTS.md).
+name: Swift Core Tests
+
+on:
+  pull_request:
+    paths:
+      - "mobile/native/**"
+      - ".github/workflows/swift-core-test.yml"
+
+concurrency:
+  group: swift-core-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  swift-core-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container:
+      image: swift:6.1
+    defaults:
+      run:
+        working-directory: mobile/native
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: swift build --build-path .build
+
+      - name: Test
+        run: swift test --build-path .build
