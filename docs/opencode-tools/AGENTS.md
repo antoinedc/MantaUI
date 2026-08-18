@@ -470,3 +470,27 @@ normal chat session) is pre-wired to use this belt. Install/update is a COPY,
 never a symlink: `cp <repo>/docs/opencode-tools/cto.ts
 ~/.config/opencode/tools/cto.ts` then `systemctl --user restart
 opencode-serve`. The engine lives in `src/server/cto.mjs` (see there).
+
+## manta on-call CTO inbound — `send_to_cto` + watchers (BET-1165)
+
+Two companion capabilities to the `cto` read belt, both global opencode tools.
+
+- **`send_to_cto(message, opts?)`** (global tool, `docs/opencode-tools/send-to-cto.ts`):
+  report a note up to the CTO from ANY session. With no live call it is surfaced
+  to the user as a notification; once the call-window feature ships it is injected
+  into the CTO conversation as a turn. Use it to flag something the CTO should know
+  (a new P0, a blocker, a call-back request). Thin registrar → `POST /api/cto/inbound`.
+- **`watch(surface, condition)`** + `unwatch` / `list_watches` (via the `cto` tool,
+  `docs/opencode-tools/cto.ts`): register a recurring probe against a surface
+  (`multica`, `schedule`, `delegate`, ...). The box runs the watch's condition
+  against that surface's existing read and surfaces a notification when it matches
+  AND something new appeared. `watch` is a **confirm-mode** action: it needs the
+  user's go-ahead before it takes effect. When the `cto` tool returns
+  `needConfirmation: { id, preview }`, surface "I need your go-ahead: <preview>"
+  and re-dispatch the SAME tool+args with `approve: <id>` on "go ahead" (or abort
+  on "no").
+
+Install/update each tool as a COPY (`cp docs/opencode-tools/{send-to-cto,cto}.ts
+~/.config/opencode/tools/`) then `systemctl --user restart opencode-serve`. The
+engine + routers live in `src/server/cto.mjs` (createCtoEngine / createCtoInbound /
+createWatcherPoller).
