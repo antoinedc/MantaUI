@@ -1235,13 +1235,13 @@ struct TranscriptListView<Header: View>: View {
         .onTiledScrollGeometryChange { geometry in
             onPointsFromBottom?(geometry.pointsFromBottom)
         }
+        .onTapBackground { resignKeyboard() }
         .onChange(of: store.rows, initial: true) { _, rows in
             dataSource.apply(rows)
         }
         .safeAreaBar(edge: .top) {
             header()
         }
-        .simultaneousGesture(TapGesture().onEnded { resignKeyboard() })
     }
 
     /// Lower the keyboard by asking whoever holds first responder to give it

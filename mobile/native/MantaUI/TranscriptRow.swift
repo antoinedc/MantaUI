@@ -114,10 +114,11 @@ extension StepGroupContent {
 /// chat uses — this is not a parallel renderer.
 ///
 /// The wall-clock timestamp gutter rides WITH the cell: an overlay parks it off
-/// the trailing edge, and the `TranscriptGutterReveal` gesture (ported verbatim
-/// from the legacy TranscriptView) slides the cell left to reveal it on a
-/// leftward drag. Every TiledView surface shares this cell, so both the parent
-/// chat and the subagent drill-in get the gutter with no per-screen code.
+/// the trailing edge, and MessagingUI's own reveal offset (driven off the cell's
+/// `context.cellReveal`, from the library's pan recogniser integrated with the
+/// scroll pan) slides the cell left to reveal it on a leftward drag. Every
+/// TiledView surface shares this cell, so both the parent chat and the subagent
+/// drill-in get the gutter with no per-screen code.
 struct TranscriptBlockCell: TiledCellContent {
     typealias StateValue = Void
 
@@ -125,22 +126,25 @@ struct TranscriptBlockCell: TiledCellContent {
     let tokens: Tokens
 
     func body(context: CellContext<Void>) -> some View {
-        TranscriptGutterReveal {
-            // The LIVE streaming tail (a `.prose` with no completion time)
-            // renders as lightweight plain text rather than a full
-            // `MarkdownView` re-parse of the accumulated turn each flush
-            // (BET-752 task 1). Completed canonical prose keeps its markdown.
-            cellContent
-                .overlay(alignment: .trailing) {
-                    TimestampGutterLabel(
-                        date: item.block.timestamp,
-                        width: TranscriptGutter.gutterWidth,
-                        tokens: tokens
-                    )
-                    .offset(x: TranscriptGutter.gutterWidth)
-                    .allowsHitTesting(false)
-                }
-        }
+        // The reveal offset now comes from MessagingUI's OWN pan recogniser, which
+        // is installed on the collection view and declares simultaneous recognition
+        // with its scroll pan. The SwiftUI DragGesture this replaces did not, and
+        // competed with the scroll view for the initiating touch — the "transcript
+        // needs a second swipe" bug. `rubberbandedOffset` is the library's damped
+        // travel, replacing our hand-rolled gutterTravel ratio.
+        let reveal = context.cellReveal?.rubberbandedOffset(max: TranscriptGutter.gutterWidth) ?? 0
+
+        return cellContent
+            .offset(x: -reveal)
+            .overlay(alignment: .trailing) {
+                TimestampGutterLabel(
+                    date: item.block.timestamp,
+                    width: TranscriptGutter.gutterWidth,
+                    tokens: tokens
+                )
+                .offset(x: TranscriptGutter.gutterWidth - reveal)
+                .allowsHitTesting(false)
+            }
     }
 
     @ViewBuilder
@@ -231,7 +235,7 @@ struct SystemNoticeView: View {
     }
 }
 
-/// Gutter geometry, defined ONCE and shared by the cell's reveal gesture and the
+/// Gutter geometry, defined ONCE and shared by the cell's reveal offset and the
 /// legacy TranscriptView (no duplicate constants).
 enum TranscriptGutter {
     /// Width of the revealed timestamp strip / how far the cell slides.
@@ -239,47 +243,4 @@ enum TranscriptGutter {
     /// Finger travel needed for a full reveal. Longer than the strip itself,
     /// so the strip arrives damped instead of slamming open on a flick.
     static let gutterTravel: CGFloat = 96
-}
-
-/// Applies the legacy swipe-to-reveal-timestamp gesture to a single cell,
-/// ported VERBATIM from the old TranscriptView: same finger-travel threshold,
-/// same offset math, same spring.
-///
-/// A wrapper View so the `@GestureState` lives in a SwiftUI-backed view — the
-/// cell itself is a `TiledCellContent` (not a `View`), and `@GestureState`
-/// needs real DynamicProperty storage. The gesture is simultaneous with the
-/// scroll view's own pan and deliberately inert unless the movement is clearly
-/// sideways and leftward, so neither gesture steals from the other.
-struct TranscriptGutterReveal<Content: View>: View {
-    private let content: Content
-
-    /// Live drag offset, negative (leftward) and clamped to the strip width.
-    /// `@GestureState` resets itself the instant the finger lifts, which is what
-    /// springs the cell back with no release handler of our own.
-    @GestureState private var gutterReveal: CGFloat = 0
-
-    init(@ViewBuilder content: () -> Content) {
-        self.content = content()
-    }
-
-    var body: some View {
-        content
-            .offset(x: gutterReveal)
-            .animation(.interactiveSpring(response: 0.28, dampingFraction: 0.86), value: gutterReveal)
-            .simultaneousGesture(gutterGesture)
-    }
-
-    private var gutterGesture: some Gesture {
-        DragGesture(minimumDistance: 16)
-            .updating($gutterReveal) { value, state, _ in
-                let dx = value.translation.width
-                let dy = value.translation.height
-                guard dx < 0, -dx > abs(dy) * 1.5 else {
-                    state = 0
-                    return
-                }
-                let progress = min(1, -dx / TranscriptGutter.gutterTravel)
-                state = -TranscriptGutter.gutterWidth * progress
-            }
-    }
 }
