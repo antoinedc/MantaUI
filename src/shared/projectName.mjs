@@ -42,11 +42,18 @@ export function generateProjectName(rand = Math.random) {
  * strips leading/trailing `-`; truncates to 32 characters; strips any trailing
  * `-` left by the truncation. Empty or all-punctuation input returns `""`.
  *
+ * Latin diacritics are transliterated (`é` → `e`) via Unicode NFKD
+ * decomposition. Scripts with no ASCII decomposition (CJK, and
+ * non-decomposable Latin letters such as `ß` and `ø`) still slug away — an
+ * all-CJK name returns `""`, which callers already treat as "no usable name".
+ *
  * @param {string} input
  * @returns {string}
  */
 export function slugifyProjectName(input) {
   const slug = String(input ?? "")
+    .normalize("NFKD")
+    .replace(/\p{Diacritic}/gu, "")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
