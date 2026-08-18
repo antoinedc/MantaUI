@@ -4900,6 +4900,83 @@ test("self-update.sh does NOT restart opencode — that would kill in-flight age
   );
 });
 
+// ----------------------------------------------------------------------------
+// scripts/self-update.sh — NODE_CMD / CLI-PATH resolution (BET-1158).
+// ----------------------------------------------------------------------------
+//
+// A git-checkout box has no $MANTA_HOME/runtime/node/bin, so NODE_CMD falls
+// back to whatever node is on PATH. BET-1158: the old fallback was the bare
+// literal `node`, and the `[ -x "$NODE_CMD" ]` guard then ran `-x node` — a
+// CWD-relative filesystem test that is false even when node is on PATH — so
+// every CLI upgrade was silently skipped ("node unavailable"). The fallback
+// must resolve to an ABSOLUTE path via `command -v node`, and the CLI install
+// dirs (~/.local/bin, ~/.opencode/bin, ~/.bun/bin) must be prepended to PATH
+// so upgrade-clis.mjs's by-name upgrade commands resolve. Both tests run the
+// REAL shipped block out of the actual script against a fake box layout, so a
+// regression in the shipped source is what goes red.
+function runSelfUpdateSnippet(block, pre = "", extra = "") {
+  const dir = mkdtempSync(join(tmpdir(), "manta-selfupd-snip-"));
+  const path = join(dir, "snippet.sh");
+  writeFileSync(path, `set -euo pipefail\n${pre}\n${block}\n${extra}\n`, { mode: 0o755 });
+  try {
+    const res = spawnSync("bash", [path], { encoding: "utf8", env: process.env });
+    return `${res.stdout ?? ""}${res.stderr ?? ""}EXIT=${res.status}`;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("self-update.sh NODE_CMD: no-runtime box resolves node to an absolute path so the CLI-upgrade guard passes (BET-1158)", () => {
+  const src = scriptFile("self-update.sh");
+  const start = src.indexOf('if [ -x "$MANTA_HOME/runtime/node/bin/node" ]; then');
+  assert.ok(start !== -1, "self-update.sh must resolve NODE_CMD against the vendored runtime first");
+  const end = src.indexOf("\n\n", start);
+  assert.ok(end !== -1, "NODE_CMD resolution block must be followed by a blank line");
+  const block = src.slice(start, end);
+
+  const fakeHome = mkdtempSync(join(tmpdir(), "manta-no-runtime-")); // no runtime/node/bin
+  try {
+    const out = runSelfUpdateSnippet(
+      block,
+      `MANTA_HOME="${fakeHome}"`,
+      'if [ -n "$NODE_CMD" ] && [ -x "$NODE_CMD" ]; then echo "GUARD_OK"; else echo "GUARD_SKIP"; fi',
+    );
+    assert.match(out, /GUARD_OK/, "the -x guard must pass when node is on PATH but not vendored");
+    assert.doesNotMatch(out, /GUARD_SKIP/);
+  } finally {
+    rmSync(fakeHome, { recursive: true, force: true });
+  }
+});
+
+test("self-update.sh prepends AI CLI install dirs to PATH for the upgrade step (BET-1158)", () => {
+  const src = scriptFile("self-update.sh");
+  const start = src.indexOf('if [ -n "${HOME:-}" ]; then');
+  assert.ok(start !== -1, "self-update.sh must prepend CLI install dirs to PATH");
+  const end = src.indexOf("\n\n", start);
+  assert.ok(end !== -1, "CLI-dirs PATH block must be followed by a blank line");
+  const block = src.slice(start, end);
+
+  const fakeHome = mkdtempSync(join(tmpdir(), "manta-cli-home-"));
+  try {
+    mkdirSync(join(fakeHome, ".local", "bin"), { recursive: true });
+    mkdirSync(join(fakeHome, ".opencode", "bin"), { recursive: true });
+    const out = runSelfUpdateSnippet(
+      block,
+      `HOME="${fakeHome}"`,
+      [
+        'case ":$PATH:" in *":$HOME/.local/bin:"*) echo "LOCAL_BIN=1";; *) echo "LOCAL_BIN=0";; esac',
+        'case ":$PATH:" in *":$HOME/.opencode/bin:"*) echo "OPENCODE_BIN=1";; *) echo "OPENCODE_BIN=0";; esac',
+        'case ":$PATH:" in *":$HOME/.bun/bin:"*) echo "BUN_BIN=1";; *) echo "BUN_BIN=0";; esac',
+      ].join("\n"),
+    );
+    assert.match(out, /LOCAL_BIN=1/, "~/.local/bin (claude) must be on PATH for the upgrade step");
+    assert.match(out, /OPENCODE_BIN=1/, "~/.opencode/bin (opencode) must be on PATH for the upgrade step");
+    assert.match(out, /BUN_BIN=0/, "an absent dir (~/.bun/bin here) must NOT be added to PATH");
+  } finally {
+    rmSync(fakeHome, { recursive: true, force: true });
+  }
+});
+
 test("install.sh writes service-read config files via install_root_file, never `sudo -n mv` (BET-440)", () => {
   // BET-440 outage: the marker-replace branch staged the new Caddyfile in a
   // mktemp file then moved it into place with `sudo -n mv`. mktemp(1) makes
