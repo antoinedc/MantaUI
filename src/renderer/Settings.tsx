@@ -458,6 +458,7 @@ export function Settings({
   const autoRenameSessions = useStore((s) => s.autoRenameSessions);
   const alwaysShowUsage = useStore((s) => s.alwaysShowUsage);
   const theme = useStore((s) => s.theme);
+  const cto = useStore((s) => s.cto);
   const skillRegistryUrls = useStore((s) => s.skillRegistryUrls);
   const launcherFlags = useStore((s) => s.launcherFlags);
   const updatePrompt = useStore((s) => s.updatePrompt);
@@ -508,8 +509,13 @@ export function Settings({
       theme,
       autoRenameSessions,
       alwaysShowUsage,
+      "cto.enabled": cto?.enabled ?? false,
+      "cto.model": cto?.model ?? "",
+      "cto.voice": cto?.voice ?? "",
+      "cto.alwaysListening": cto?.alwaysListening ?? false,
+      "cto.parkedBehavior": cto?.parkedBehavior ?? "auto-open",
     }),
-    [cacheTtl, groqApiKey, voiceTranscriptionModel, allowAgentPush, downloadsDir, worktreePerSession, worktreeCleanOnClose, uploadCleanupHours, voiceNoteTtlHours, theme, autoRenameSessions, alwaysShowUsage],
+    [cacheTtl, groqApiKey, voiceTranscriptionModel, allowAgentPush, downloadsDir, worktreePerSession, worktreeCleanOnClose, uploadCleanupHours, voiceNoteTtlHours, theme, autoRenameSessions, alwaysShowUsage, cto],
   );
 
   const commitKey = async (entry: SettingEntry, nextValue: unknown) => {

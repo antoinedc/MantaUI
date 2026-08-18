@@ -41,15 +41,54 @@ export function useApplySetting(pushToast: (t: ToastItem) => void) {
     const key = entry.configKey;
     value = coerceSettingValue(entry, value);
     if (key === "theme") applyTheme(value as ThemePref);
-    useStore.setState({ [key]: value });
+    setStorePath(key, value);
     try {
       const next = await window.api.configUpdate({ [key]: value });
-      const reconciled = (next as Record<string, unknown>)[key];
-      useStore.setState({ [key]: reconciled ?? value });
+      const reconciled = readStorePath(next as Record<string, unknown>, key);
+      setStorePath(key, reconciled ?? value);
     } catch (e) {
-      useStore.setState({ [key]: prevValue });
+      setStorePath(key, prevValue);
       if (key === "theme") applyTheme(prevValue as ThemePref);
       pushToast({ id: `err-${key}-${Date.now()}`, message: errorDisclosure(`Couldn't set ${entry.label.toLowerCase()}.`, e) });
     }
   };
+}
+
+/**
+ * Read a possibly-dotted path (e.g. "cto.enabled") from an object. Flat keys
+ * return the value directly.
+ */
+function readStorePath(root: Record<string, unknown>, key: string): unknown {
+  if (!key.includes(".")) return root[key];
+  const parts = key.split(".");
+  let cur: unknown = root;
+  for (const part of parts) {
+    if (cur == null || typeof cur !== "object") return undefined;
+    cur = (cur as Record<string, unknown>)[part];
+  }
+  return cur;
+}
+
+/**
+ * Write a possibly-dotted path into the zustand store as a nested object. The
+ * store is shallow-merged by setState, so a nested path must be written as a
+ * whole parent object built from the current store state (no stomping others).
+ */
+function setStorePath(key: string, value: unknown): void {
+  if (!key.includes(".")) {
+    useStore.setState({ [key]: value });
+    return;
+  }
+  const parts = key.split(".");
+  const head = parts[0];
+  const current = {
+    ...(((useStore.getState() as Record<string, unknown>)[head] as object) ?? {}),
+  };
+  let cur = current as Record<string, unknown>;
+  for (let i = 1; i < parts.length - 1; i++) {
+    cur[parts[i]] = { ...((cur[parts[i]] as Record<string, unknown>) ?? {}) };
+    cur = cur[parts[i]] as Record<string, unknown>;
+  }
+  cur[parts[parts.length - 1]] = value;
+  useStore.setState({ [head]: current });
 }
