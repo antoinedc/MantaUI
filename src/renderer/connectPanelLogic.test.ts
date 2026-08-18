@@ -57,7 +57,7 @@ describe("deriveConnectPanel — no row carries a `hint` (BET-1007)", () => {
 });
 
 describe("deriveConnectPanel — precedence table (BET-961)", () => {
-  it("row 1 — paired: 'Your box is ready' + progress 1 + next", () => {
+  it("row 1 — paired: 'Your server is ready' + progress 1 + next", () => {
     const s = deriveConnectPanel({
       ...base,
       paired: true,
@@ -66,7 +66,7 @@ describe("deriveConnectPanel — precedence table (BET-961)", () => {
     });
     expect(status({ paired: true, elapsedSeconds: 72 })).toEqual({
       tone: "ok",
-      text: "Your box is ready",
+      text: "Your server is ready",
       meta: "6 of 6 · 1:12",
     });
     expect(s.status?.progress).toBe(1);
@@ -75,7 +75,7 @@ describe("deriveConnectPanel — precedence table (BET-961)", () => {
     expect(s.actions).toEqual(["next"]);
   });
 
-  it("row 2 — preflight failure: 'Couldn't reach the box' + failures, log null", () => {
+  it("row 2 — preflight failure: 'Couldn't reach the server' + failures, log null", () => {
     const s = deriveConnectPanel({
       ...base,
       stage: "preflight",
@@ -85,7 +85,7 @@ describe("deriveConnectPanel — precedence table (BET-961)", () => {
     });
     expect(status({ stage: "preflight", preflightFailure: { failures: [] } })).toEqual({
       tone: "error",
-      text: "Couldn't reach the box",
+      text: "Couldn't reach the server",
       meta: "1 of 6",
     });
     expect(s.status?.progress).toBe(1 / 6);
@@ -259,7 +259,7 @@ describe("deriveConnectPanel — precedence table (BET-961)", () => {
 
   it("higher precedence beats lower — paired beats an install error", () => {
     const s = deriveConnectPanel({ ...base, paired: true, installError: "boom" });
-    expect(s.status?.text).toBe("Your box is ready");
+    expect(s.status?.text).toBe("Your server is ready");
     expect(s.status?.tone).toBe("ok");
     expect(s.actions).toEqual(["next"]);
   });
@@ -297,18 +297,18 @@ describe("deriveConnectPanel — manual mode rows (BET-962)", () => {
     expect(s.targetCollapsed).toBe(false);
   });
 
-  it("M2 — idle manual: 'Enter the 6-digit code from the box' + hint; Connect disabled until canConnect", () => {
+  it("M2 — idle manual: 'Enter the 6-digit code from the server' + hint; Connect disabled until canConnect", () => {
     const idle = deriveConnectPanel(manual({}));
     expect(idle.status).toEqual({
       tone: "idle",
-      text: "Enter the 6-digit code from the box",
+      text: "Enter the 6-digit code from the server",
       meta: null,
       progress: null,
       sub: null,
     });
     expect(idle.details).toEqual({
       kind: "hint",
-      text: "Run `manta pair` on the box to get a code.",
+      text: "Run `manta pair` on the server to get a code.",
     });
     expect(idle.log).toBeNull();
     expect(idle.actions).toEqual(["connect"]);
@@ -349,11 +349,11 @@ describe("deriveConnectPanel — manual mode rows (BET-962)", () => {
     expect(s.targetCollapsed).toBe(false);
   });
 
-  it("M5 — claim succeeded: 'Your box is ready' + Next →, zone A collapsed", () => {
+  it("M5 — claim succeeded: 'Your server is ready' + Next →, zone A collapsed", () => {
     const s = deriveConnectPanel(manual({ paired: true }));
     expect(s.status).toEqual({
       tone: "ok",
-      text: "Your box is ready",
+      text: "Your server is ready",
       meta: null,
       progress: null,
       sub: null,
@@ -366,7 +366,7 @@ describe("deriveConnectPanel — manual mode rows (BET-962)", () => {
 
   it("precedence — paired beats a claim error in manual mode", () => {
     const s = deriveConnectPanel(manual({ paired: true, claimError: "x" }));
-    expect(s.status?.text).toBe("Your box is ready");
+    expect(s.status?.text).toBe("Your server is ready");
     expect(s.actions).toEqual(["next"]);
   });
 

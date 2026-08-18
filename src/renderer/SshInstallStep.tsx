@@ -86,7 +86,7 @@ function SecretPrompt({
   onCancel: () => void;
 }) {
   const isSudo = kind === "sudo-password";
-  const hostLabel = host || "this box";
+  const hostLabel = host || "this server";
   const heading = isSudo
     ? `Administrator password needed on ${hostLabel}`
     : "Unlock your SSH key";
@@ -99,16 +99,16 @@ function SecretPrompt({
       <p className="text-meta text-text-muted">
         {isSudo ? (
           <>
-            MantaUI needs to run three commands as root to give this box a
+            The desktop app needs to run three commands as root to give this server a
             public HTTPS address: install Caddy from the official
             Debian/Ubuntu package repository, write the Caddy site config for
-            your box's hostname, and reload the Caddy service. Nothing else on
+            your server's hostname, and reload the Caddy service. Nothing else on
             this install needs root.
             <br />
             <br />
-            Your password is sent to the box over the SSH connection you are
+            Your password is sent to the server over the SSH connection you are
             already using, stored in a file only your user can read, used for
-            this install only, and deleted when it finishes. MantaUI never
+            this install only, and deleted when it finishes. It never
             saves it.
           </>
         ) : (
@@ -155,8 +155,8 @@ function SecretPrompt({
               and run the installer again. No password needed.
             </li>
             <li>
-              <span className="font-medium">Use Tailscale</span> — MantaUI
-              then needs no root at all. On the box, run:{" "}
+              <span className="font-medium">Use Tailscale</span> — the desktop app
+              then needs no root at all. On the server, run:{" "}
               <code className="font-mono text-code bg-bg rounded-sm px-2 py-1 text-text-muted">
                 curl -fsSL https://tailscale.com/install.sh | sh
               </code>{" "}
@@ -168,7 +168,7 @@ function SecretPrompt({
             </li>
             <li>
               <span className="font-medium">Grant this user sudo access</span>{" "}
-              on the box, then run the installer again.
+              on the server, then run the installer again.
             </li>
           </ul>
         </div>
@@ -401,7 +401,7 @@ export function SshInstallStep({
           secretKind: kind,
           prompt:
             kind === "sudo-password"
-              ? `Administrator password needed on ${installHostLabel || "this box"}`
+              ? `Administrator password needed on ${installHostLabel || "this server"}`
               : "Enter the passphrase for your SSH key:",
         });
         setSecretInput("");
@@ -807,7 +807,7 @@ export function SshInstallStep({
           className="text-label font-medium text-text-muted"
           htmlFor="ssh-host"
         >
-          Box address
+          Server address
         </label>
         <span className="text-meta text-text-quiet">{hostCountLabel}</span>
       </div>
@@ -866,7 +866,7 @@ export function SshInstallStep({
                 <input
                   id="ssh-custom-host"
                   type="text"
-                  placeholder="box.example.com"
+                  placeholder="server.example.com"
                   value={customHost}
                   onChange={(e) => {
                     setCustomHost(e.target.value);
@@ -953,7 +953,7 @@ export function SshInstallStep({
             </div>
             <p className="text-meta text-text-faint">
               Leave a field empty to let OpenSSH decide. These are used for
-              this box only — your ~/.ssh/config is never written to.
+              this server only — your ~/.ssh/config is never written to.
             </p>
           </div>
         </>
@@ -982,7 +982,7 @@ export function SshInstallStep({
   // `installHostLabel` is captured at install start from the resolved
   // SshTarget, so a custom host reads "root@54.73.231.25" and an alias reads
   // its own label.
-  const hostLabel = installHostLabel || "your box";
+  const hostLabel = installHostLabel || "your server";
   const targetSummary = (
     <div className="flex items-center gap-2 min-w-0">
       {paired ? (

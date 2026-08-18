@@ -139,7 +139,7 @@ export function deriveConnectPanel(input: ConnectInput): ConnectPanelState {
       return {
         status: {
           tone: "ok",
-          text: "Your box is ready",
+          text: "Your server is ready",
           meta: null,
           progress: null,
           sub: null,
@@ -196,12 +196,12 @@ export function deriveConnectPanel(input: ConnectInput): ConnectPanelState {
     return {
       status: {
         tone: "idle",
-        text: "Enter the 6-digit code from the box",
+        text: "Enter the 6-digit code from the server",
         meta: null,
         progress: null,
         sub: null,
       },
-      details: { kind: "hint", text: "Run `manta pair` on the box to get a code." },
+      details: { kind: "hint", text: "Run `manta pair` on the server to get a code." },
       log: null,
       actions: ["connect"],
       disabledActions: input.canConnect ? undefined : ["connect"],
@@ -219,7 +219,7 @@ export function deriveConnectPanel(input: ConnectInput): ConnectPanelState {
     return {
       status: {
         tone: "ok",
-        text: "Your box is ready",
+        text: "Your server is ready",
         meta: `${total} of ${total} · ${formatElapsed(input.elapsedSeconds)}`,
         progress: 1,
         sub: null,
@@ -236,7 +236,7 @@ export function deriveConnectPanel(input: ConnectInput): ConnectPanelState {
     return {
       status: {
         tone: "error",
-        text: "Couldn't reach the box",
+        text: "Couldn't reach the server",
         meta: stageMeta(input),
         progress,
         sub: null,

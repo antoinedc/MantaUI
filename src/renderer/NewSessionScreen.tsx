@@ -897,7 +897,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
             <>
               <h1 className="text-display font-bold tracking-tight text-text">What's up next?</h1>
               <p className="text-body text-text-faint">
-                Start a session on any folder your box can see.
+                Start a session on any folder your server can see.
               </p>
             </>
           )}
@@ -1121,7 +1121,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
               <>
                 <div className="text-center space-y-1 mb-4">
                   <h1 className="text-display font-bold tracking-tight text-text">What's up next?</h1>
-                  <p className="text-body text-text-faint">Looking for repositories on your box…</p>
+                  <p className="text-body text-text-faint">Looking for repositories on your server…</p>
                 </div>
                 <div className="space-y-2" aria-hidden="true">
                   <Skeleton width={38} />
@@ -1156,7 +1156,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
               <>
                 <div className="text-center space-y-1 mb-4">
                   <h1 className="text-display font-bold tracking-tight text-text">
-                    Let's get some code on this box
+                    Let's get some code on this server
                   </h1>
                   <p className="text-body text-text-faint">
                     No repositories found. Clone one from GitHub, or point Manta at a folder.
@@ -1178,7 +1178,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
                     <div className="text-center space-y-1 mb-4">
                       <h1 className="text-display font-bold tracking-tight text-text">What's up next?</h1>
                       <p className="text-body text-text-faint">
-                        Found {probeRepos.length} {probeRepos.length === 1 ? "repository" : "repositories"} on your box.
+                        Found {probeRepos.length} {probeRepos.length === 1 ? "repository" : "repositories"} on your server.
                       </p>
                     </div>
 

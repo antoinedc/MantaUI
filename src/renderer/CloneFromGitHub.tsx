@@ -176,7 +176,7 @@ export function CloneFromGitHub({
         res = await window.api.forgeCloneStart({ url: repo.cloneUrl, dest, name: repo.name });
       } catch {
         if (!cancelled) {
-          setPhase({ kind: "failed", repo, message: "Couldn't reach the box.", errorKind: "unknown" });
+          setPhase({ kind: "failed", repo, message: "Couldn't reach the server.", errorKind: "unknown" });
         }
         return;
       }

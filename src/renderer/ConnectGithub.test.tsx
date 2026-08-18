@@ -204,6 +204,6 @@ describe("ConnectGithubPanel poll loop", () => {
       start: () => Promise.resolve({ connected: false, notConfigured: true, grant: null }),
     });
     await flushMicro();
-    expect(text()).toContain("GitHub sign-in isn't configured on this box yet");
+    expect(text()).toContain("GitHub sign-in isn't configured on this server yet");
   });
 });

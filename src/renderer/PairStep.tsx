@@ -122,7 +122,7 @@ export function PairStep({ onPaired }: { onPaired: () => void }) {
   return (
     <div>
       <h2 className="text-display font-semibold tracking-tight text-text mb-2">
-        Connect your box
+        Connect your server
       </h2>
       <p className="text-body text-text-muted leading-relaxed mb-8 max-w-md">
         Pick the machine you want to run Manta on. It installs itself over SSH
@@ -269,7 +269,7 @@ function ManualPairPanel({
   // `targetSummary` replaces it, so there are no `disabled` copies of these
   // fields. The host label for the summary is the address the user paired
   // against (or the pending deep-link's server).
-  const hostLabel = serverUrlTrimmed || prefill?.serverUrl || "your box";
+  const hostLabel = serverUrlTrimmed || prefill?.serverUrl || "your server";
   const targetSummary = (
     <div className="flex items-center gap-2 min-w-0">
       {paired ? (
@@ -309,7 +309,7 @@ function ManualPairPanel({
             inputMode="url"
             autoComplete="off"
             spellCheck={false}
-            placeholder="https://box.mantaui.com"
+            placeholder="https://server.mantaui.com"
             value={serverUrl}
             onChange={(e) => {
               setServerUrl(e.target.value);
@@ -338,7 +338,7 @@ function ManualPairPanel({
             htmlFor="pair-box-id"
             className="text-label font-medium text-text-muted"
           >
-            Box ID{" "}
+            Server ID{" "}
             <span className="font-normal text-text-faint">
               (optional if Host set)
             </span>

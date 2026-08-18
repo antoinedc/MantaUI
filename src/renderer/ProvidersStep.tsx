@@ -70,7 +70,7 @@ export function ProvidersStep({
     setRefreshing(true);
     setLoadError(null);
     if (typeof window.api.opencodeProviderAuth !== "function") {
-      setLoadError("Couldn't reach the box to check providers.");
+      setLoadError("Couldn't reach the server to check providers.");
       setStatuses([]);
       setRefreshing(false);
       return;
@@ -78,7 +78,7 @@ export function ProvidersStep({
     try {
       const res = await window.api.opencodeProviderAuth({ action: "status" });
       if (res.action !== "status") {
-        setLoadError("Unexpected response from the box.");
+        setLoadError("Unexpected response from the server.");
         setStatuses([]);
         return;
       }
