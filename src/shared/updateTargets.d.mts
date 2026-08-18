@@ -31,3 +31,33 @@ export function buildUpdateTargets(args: {
  * `manual` targets never count.
  */
 export function summarizeUpdates(targets: UpdateTarget[]): UpdateTargetSummary;
+
+export interface UpdateBanner {
+  text: string;
+  actionLabel: string;
+  tone: "accent" | "danger";
+  dismissible: boolean;
+}
+
+/**
+ * Decide what the ONE unified update banner says: the copy for the `updates`
+ * banner, or `null` when there is nothing to show. Precedence: failure set →
+ * mandatory → exactly-one available → 2+ available → null.
+ */
+export function describeUpdateBanner(
+  targets: UpdateTarget[],
+  opts: { mandatory: boolean; failure: string | null },
+): UpdateBanner | null;
+
+export interface UpdateAllPlan {
+  desktopDownload: boolean; // desktop target available
+  box: boolean; // ANY box-side target available (server, opencode, or a CLI)
+  desktopInstall: boolean; // same as desktopDownload; runs last
+  needsConfirm: boolean; // true iff any available target's disruption !== "none"
+  confirmBody: string[]; // sentences, in order
+}
+
+/**
+ * Plan a single "Update all" run over the target list.
+ */
+export function planUpdateAll(targets: UpdateTarget[]): UpdateAllPlan;

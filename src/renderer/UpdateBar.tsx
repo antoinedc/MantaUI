@@ -1,25 +1,23 @@
-// UpdateBar.tsx — shared "an update exists" banner used for three prompts:
+// UpdateBar.tsx — the ONE unified update banner (stage 3, BET-1098).
 //
-//   1. Desktop auto-update (electron-updater finished downloading a new
-//      version): "Update available: {version}" + "Restart to update" button.
-//   2. Server update (BET-225 stage 3): "Server update available: {version}"
-//      + "Update & restart" button (fires `scripts/self-update.sh` on the box).
-//   3. Version-skew guard (BET-225 stage 3 Part C): "This app is out of
-//      date and may not work correctly — please update." + a button that
-//      triggers an update flow (autoUpdateInstall / autoUpdateDownload on
-//      desktop, App Store informational on mobile). This variant is
-//      NON-dismissible (`dismissible: false` hides the × button) — the
-//      RPC contract on either side has shifted past `minClient`, so the
-//      user MUST act before continuing.
+// All update states (desktop update, server/box update, CLI updates, the
+// mandatory "must update" skew guard, and an update failure) render through a
+// single component. Its copy — text, action label, tone, dismissibility — is
+// produced by `describeUpdateBanner` in src/shared/updateTargets.mjs and
+// passed straight through as props. One component, one usage; props carry the
+// whole surface area.
 //
-// One component, three usages; the spec wants this consolidated rather
-// than three near-identical inline banners. Props carry the surface area:
-// text + action label + action handler + optional dismiss handler.
+// `tone` selects the semantic tint:
+//   - "accent" (default) — today's look, byte-identical. Available/mandatory
+//     updates read as normal app events.
+//   - "danger" — an update FAILED. Swaps the accent tint (which read as "here
+//     is something nice for you") for `--danger` at the same 0.10 / 0.30 /
+//     0.20 alphas. This is the ONLY visual change of the whole stage.
 //
-// `dismissible` defaults to true — the desktop auto-update and server-update
-// cases are both user-dismissible (a "remind me later" semantic). The skew
-// guard explicitly opts out (`dismissible: false`) so the banner sticks
-// until the client gets on a supported version.
+// `dismissible` defaults to true — most update rows are user-dismissible (a
+// "remind me later" semantic). The mandatory skew-guard explicitly opts out
+// (`dismissible: false`) so the banner sticks until the client is on a
+// supported version.
 
 import type { ReactNode } from "react";
 import { X } from "lucide-react";
@@ -40,6 +38,9 @@ export type UpdateBarProps = {
   onDismiss?: () => void;
   /** When true (default), show the × button. Skew guard passes false. */
   dismissible?: boolean;
+  /** Semantic tint. "accent" (default) is today's look; "danger" renders a
+   *  failed update in the danger tone (bg/border/button all swap). */
+  tone?: "accent" | "danger";
   /** When set, the bar renders a determinate progress bar in place of the
    *  action button. */
   progress?: { step: number; total: number; label: string };
@@ -54,9 +55,8 @@ export type UpdateBarProps = {
 };
 
 /**
- * Single update-banner component shared by desktop auto-update, server
- * update, and the version-skew guard. Visual style mirrors the original
- * inline banner in App.tsx so the three usages look identical.
+ * Single update-banner component driven by `describeUpdateBanner`. `tone`
+ * picks the semantic tint; everything else is copied verbatim from stage 1.
  */
 export function UpdateBar({
   text,
@@ -64,6 +64,7 @@ export function UpdateBar({
   onAction,
   onDismiss,
   dismissible = true,
+  tone = "accent",
   progress,
   busy = false,
   busyLabel = "Updating…",
@@ -73,6 +74,10 @@ export function UpdateBar({
     : busy
       ? busyLabel
       : text;
+  const danger = tone === "danger";
+  const bannerBtn = danger
+    ? "shrink-0 rounded-xs bg-danger/20 px-2 py-px text-danger hover:bg-danger/30 font-medium disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-danger"
+    : BANNER_BTN;
   return (
     // `pr-[…]` (not `px-3`) reserves the OS caption-button strip: this bar
     // renders ABOVE the titlebar row, so on Windows (titleBarOverlay) the
@@ -81,8 +86,12 @@ export function UpdateBar({
     // already reserves this via `.titlebar-inset-right`; a top-of-window bar
     // needs the same reservation. `--titlebar-inset-right` evaluates to 0 on
     // macOS/Linux (neither defines the `titlebar-area-*` env vars), so this is
-    // exactly `px-3` everywhere else.
-    <div className="shrink-0 bg-accent/10 border-b border-accent/30 pl-3 pr-[calc(var(--sp-3)+var(--titlebar-inset-right))] py-2 text-meta text-text flex items-center gap-2">
+    // exactly `px-3` everywhere else. `tone` swaps ONLY the tint classes.
+    <div
+      className={`shrink-0 ${
+        danger ? "bg-danger/10 border-danger/30" : "bg-accent/10 border-accent/30"
+      } border-b pl-3 pr-[calc(var(--sp-3)+var(--titlebar-inset-right))] py-2 text-meta text-text flex items-center gap-2`}
+    >
       <span className="flex-1 truncate">{statusLabel}</span>
       {busy || progress ? (
         <div
@@ -108,7 +117,7 @@ export function UpdateBar({
             onClick={() => {
               onAction();
             }}
-            className={BANNER_BTN}
+            className={bannerBtn}
           >
             {actionLabel}
           </button>

@@ -35,8 +35,7 @@ import { SettingsRow } from "./SettingsRow";
 import { BANNER_BTN } from "./Toast";
 import { errorDisclosure } from "./settingsError";
 import { describeUpdateTarget } from "./chatUtils";
-import type { UpdateRow } from "./chatUtils";
-import type { DesktopUpdateCheck, ServerUpdateCheck, UpdateTarget } from "../shared/types";
+import { refreshUpdateTargets } from "./updateCheck";
 import { forgeCredentialSecondary } from "./chatUtils";
 import { useCachedResource } from "./useCachedResource";
 import { MantaLoader } from "./MantaLoader";
@@ -335,6 +334,7 @@ export function Settings({
   const skillRegistryUrls = useStore((s) => s.skillRegistryUrls);
   const launcherFlags = useStore((s) => s.launcherFlags);
   const updatePrompt = useStore((s) => s.updatePrompt);
+  const updateTargets = useStore((s) => s.updateTargets);
   // Terminal auto-update failure (integrity / permission / unusable feed).
   // Read here only to end About's "Downloading…" state — the banner owns
   // reporting it.
@@ -408,70 +408,27 @@ export function Settings({
 
   // ===== "Check for updates" (About) =====
   //
-  // One button, two independent checks, run in PARALLEL and reported
-  // separately. They are separate systems — the desktop app updates itself
-  // through electron-updater against mantaui.com/updates, the box updates
-  // itself by running scripts/self-update.sh against a different manifest — and
-  // collapsing them into a single "you're up to date" would hide the common
-  // case where exactly one of the two is behind.
-  //
-  // `Promise.allSettled`, not `all`: a failure of one leg must still report the
-  // other. A box that is unreachable says nothing about whether the desktop has
-  // an update waiting.
+  // ONE shared implementation — `refreshUpdateTargets()` (./updateCheck) runs
+  // both legs in PARALLEL with a 15s timeout on the server leg (a wedged box
+  // must not spin the button forever), builds the canonical UpdateTarget[]
+  // with `buildUpdateTargets`, and stores it in the store. The SAME function
+  // is what App.tsx's check-on-connect calls, so the Settings button and the
+  // on-connect banner can never disagree. `Promise.allSettled` semantics live
+  // inside it: a failure of one leg still reports the other.
   const [checking, setChecking] = useState(false);
   const [checkedAt, setCheckedAt] = useState<number | null>(null);
-  const [desktopCheck, setDesktopCheck] = useState<DesktopUpdateCheck | null>(null);
-  const [serverCheck, setServerCheck] = useState<ServerUpdateCheck | null>(null);
-  const [serverCheckFailed, setServerCheckFailed] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [downloadPercent, setDownloadPercent] = useState<number | null>(null);
 
   const runUpdateCheck = async () => {
     if (checking) return;
     setChecking(true);
-    setServerCheckFailed(false);
-    // A hung check must never leave the button spinning forever with no way
-    // out. Each leg resolves-or-rejects, but a box whose server wedges before
-    // answering would await indefinitely — so bound the server leg with a
-    // timeout and treat expiry as a failed check rather than a never-ending
-    // "Checking…".
-    const withTimeout = <T,>(p: Promise<T>, ms: number): Promise<T> =>
-      new Promise<T>((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error("timeout")), ms);
-        p.then(
-          (v) => {
-            clearTimeout(t);
-            resolve(v);
-          },
-          (e) => {
-            clearTimeout(t);
-            reject(e);
-          },
-        );
-      });
-
-    const [desktop, server] = await Promise.allSettled([
-      window.api.autoUpdateCheck(),
-      withTimeout(window.api.serverUpdateCheck(), 15_000),
-    ]);
-    // autoUpdateCheck never rejects by contract (main resolves `{error}`
-    // instead), so a rejection here means the bridge itself is missing —
-    // report it as unsupported rather than as an update failure.
-    setDesktopCheck(
-      desktop.status === "fulfilled"
-        ? desktop.value
-        : { supported: false, available: false, version: null },
-    );
-    if (server.status === "fulfilled") {
-      setServerCheck(server.value);
-    } else {
-      // Rejected, or timed out — indistinguishable at this level and both mean
-      // "we couldn't get an answer", not "up to date".
-      setServerCheck(null);
-      setServerCheckFailed(true);
+    try {
+      await refreshUpdateTargets({ clientVersion, serverVersion });
+      setCheckedAt(Date.now());
+    } finally {
+      setChecking(false);
     }
-    setCheckedAt(Date.now());
-    setChecking(false);
   };
 
   // Percent for a manual desktop download. Subscribed unconditionally (the
@@ -506,39 +463,14 @@ export function Settings({
     }
   }, [updatePrompt, updateError]);
 
-  // Each leg's verdict row, from the ONE shared describe function. The old
-  // code had two bespoke describe-functions (describeDesktopUpdate /
-  // describeServerUpdate); BET-1096 replaced them with describeUpdateTarget
-  // keyed off the shared UpdateTarget shape. Until stage 3 unifies the About
-  // list, this thin per-leg adapter shapes each check into an UpdateTarget.
-  // `ok` preserves the exact old semantics: a check that hasn't run (or whose
-  // RPC never came back) must NOT read as "up to date".
-  const desktopTarget: UpdateTarget | null =
-    desktopCheck == null
-      ? null
-      : {
-          id: "desktop",
-          label: "Manta UI",
-          current: clientVersion,
-          latest: desktopCheck.version,
-          available: desktopCheck.available,
-          ok: !desktopCheck.error,
-          manual: desktopCheck.supported === false,
-          disruption: "app-restart",
-        };
-  const serverTarget: UpdateTarget | null =
-    serverCheck == null && !serverCheckFailed
-      ? null
-      : {
-          id: "server",
-          label: "The box",
-          current: serverVersion,
-          latest: serverCheck?.version ?? null,
-          available: serverCheck?.available === true,
-          ok: serverCheck ? serverCheck.ok !== false : false,
-          manual: false,
-          disruption: "reconnect",
-        };
+  // Each leg's verdict row, from the ONE shared describe function
+  // (describeUpdateTarget), keyed off the SAME canonical UpdateTarget[] the
+  // banner reads (stored by the shared refreshUpdateTargets — stage 3,
+  // BET-1098). Stage 4 unifies the About list into one row per target; for
+  // now the two existing rows (desktop / box) are sliced straight out of that
+  // list, so Settings and the banner always describe the same state.
+  const desktopTarget = updateTargets.find((t) => t.id === "desktop") ?? null;
+  const serverTarget = updateTargets.find((t) => t.id === "server") ?? null;
   const desktopRow = desktopTarget ? describeUpdateTarget(desktopTarget) : null;
   const serverRow = serverTarget ? describeUpdateTarget(serverTarget) : null;
 
@@ -897,7 +829,7 @@ export function Settings({
                     is off, so the bytes are only fetched on an explicit press. */}
                 {desktopRow && !updatePrompt && (
                   <UpdateResultRow row={desktopRow}>
-                    {desktopCheck?.available && !downloading && (
+                    {desktopTarget?.available && !downloading && (
                       <button
                         className={BANNER_BTN}
                         onClick={() => {
@@ -922,7 +854,7 @@ export function Settings({
                         {downloadPercent == null ? "Downloading…" : `Downloading ${Math.round(downloadPercent)}%`}
                       </span>
                     )}
-                    {desktopCheck?.error && (
+                    {desktopTarget && desktopTarget.ok === false && (
                       <button
                         className={BANNER_BTN}
                         onClick={() => { void window.api.openExternal("https://mantaui.com/downloads/Manta-latest.dmg"); }}
@@ -937,7 +869,7 @@ export function Settings({
                     handling is shared with the banner (see onRequestServerUpdate). */}
                 {serverRow && (
                   <UpdateResultRow row={serverRow}>
-                    {serverCheck?.available && onRequestServerUpdate && (
+                    {serverTarget?.available && onRequestServerUpdate && (
                       <button className={BANNER_BTN} onClick={onRequestServerUpdate}>
                         Update &amp; restart
                       </button>

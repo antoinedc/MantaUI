@@ -9,6 +9,7 @@ import type {
   UsageSnapshot,
   StoppedRecord,
   WindowStatus,
+  UpdateTarget,
 } from "../shared/types";
 import type { ConnectionState } from "../shared/net/state.js";
 import type { SyncPayload } from "../shared/api.js";
@@ -477,6 +478,11 @@ type State = {
   // updateDownloaded event). Guarded — the mobile httpApi shim's
   // onAutoUpdate* are no-ops, so this is desktop-only.
   updatePrompt: { version: string; releaseName?: string } | null;
+  // Canonical unified update list (stage 3, BET-1098). Produced by the shared
+  // `refreshUpdateTargets()` over both update-check legs and read by App.tsx
+  // to drive the single `updates` banner (via describeUpdateBanner /
+  // planUpdateAll) and by Settings → About. Empty [] until the first refresh.
+  updateTargets: UpdateTarget[];
   // A TERMINAL auto-update failure (integrity / permission). Set from main's
   // autoUpdate:error IPC, which only fires for failures the user must act on
   // — transient network errors are filtered server-side of the bridge.
@@ -686,6 +692,7 @@ type State = {
   removePendingScreenshots: (ids: string[]) => void;
   setAgentFileToast: (t: AgentFileReady | null) => void;
   setUpdatePrompt: (p: { version: string; releaseName?: string } | null) => void;
+  setUpdateTargets: (t: UpdateTarget[]) => void;
   setUpdateError: (p: { message: string; raw: string } | null) => void;
   setBoxIncompatible: (b: boolean) => void;
   setServerUpdatePrompt: (
@@ -754,6 +761,7 @@ export const useStore = create<State>((set, get) => ({
   appToasts: [],
   systemNotice: null,
   updatePrompt: null,
+  updateTargets: [],
   updateError: null,
   boxIncompatible: false,
   serverUpdatePrompt: null,
@@ -1077,6 +1085,7 @@ export const useStore = create<State>((set, get) => ({
     set((prev) => ({ appToasts: prev.appToasts.filter((t) => t.id !== id) })),
   setSystemNotice: (t) => set({ systemNotice: t }),
   setUpdatePrompt: (p) => set({ updatePrompt: p }),
+  setUpdateTargets: (t) => set({ updateTargets: t }),
   setUpdateError: (p) => set({ updateError: p }),
   setBoxIncompatible: (b) => set({ boxIncompatible: b }),
   setServerUpdatePrompt: (p) => set({ serverUpdatePrompt: p }),
