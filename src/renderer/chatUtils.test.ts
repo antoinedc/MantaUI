@@ -4843,7 +4843,7 @@ describe("repoListErrorMessage (BET-1011)", () => {
 
   it("explains a network failure", () => {
     expect(repoListErrorMessage("network")).toBe(
-      "Couldn't reach GitHub from your box. Check its connection and try again.",
+      "Couldn't reach GitHub from your server. Check its connection and try again.",
     );
   });
 
