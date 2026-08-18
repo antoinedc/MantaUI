@@ -119,7 +119,6 @@ extension StepGroupContent {
 /// scroll pan) slides the cell left to reveal it on a leftward drag. Every
 /// TiledView surface shares this cell, so both the parent chat and the subagent
 /// drill-in get the gutter with no per-screen code.
-@MainActor
 struct TranscriptBlockCell: TiledCellContent {
     typealias StateValue = Void
 
@@ -131,9 +130,15 @@ struct TranscriptBlockCell: TiledCellContent {
         // is installed on the collection view and declares simultaneous recognition
         // with its scroll pan. The SwiftUI DragGesture this replaces did not, and
         // competed with the scroll view for the initiating touch — the "transcript
-        // needs a second swipe" bug. `rubberbandedOffset` is the library's damped
-        // travel, replacing our hand-rolled gutterTravel ratio.
-        let reveal = context.cellReveal?.rubberbandedOffset(max: TranscriptGutter.gutterWidth) ?? 0
+        // needs a second swipe" bug.
+        //
+        // `CellReveal.rubberbandedOffset(max:)` is main-actor-isolated, but the
+        // `TiledCellContent` conformance here must stay nonisolated (Swift 6
+        // rejects main-actor isolation on a nonisolated protocol conformance as a
+        // data-race), so we read the library's raw `CellReveal.offset` — positive
+        // as the user swipes left — and clamp it to the gutter width ourselves,
+        // substituting a hard stop for the library's rubber-banding.
+        let reveal = min(max(0, context.cellReveal?.offset ?? 0), TranscriptGutter.gutterWidth)
 
         return cellContent
             .offset(x: -reveal)
