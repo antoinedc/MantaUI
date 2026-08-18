@@ -1,7 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createStreamInterpreter } from "./streamInterp.mjs";
-import { ASSUMED_CONTEXT_TOKENS } from "../shared/streamInterpretation.mjs";
 
 function make(now = 500_000) {
   const events = [];
@@ -843,13 +842,13 @@ test("the context denominator comes from the resolver", () => {
   assert.deepEqual(calls, [["anthropic", "claude-opus-5"]]);
 });
 
-test("a resolver miss falls back to the assumed window", () => {
+test("a resolver miss passes the unknown limit straight through (no fake window)", () => {
   const { interp, events } = makeCtx(() => null);
   interp.interpret(updatedWith(ASSISTANT_MSG));
   const ctx = events.filter((e) => e.sub === "context");
   assert.equal(ctx.length, 1);
-  // (2 + 182191 + 1516) / 200_000 -> 91.85 -> 92
-  assert.equal(ctx[0].payload.pct, Math.round((183709 / ASSUMED_CONTEXT_TOKENS) * 100));
+  assert.equal(ctx[0].payload.hasLimit, false);
+  assert.equal(ctx[0].payload.pct, null);
 });
 
 test("repeated message.updated events are deduped per session", () => {

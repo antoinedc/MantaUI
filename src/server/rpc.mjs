@@ -11,7 +11,6 @@ import { expandTilde } from "../shared/paths.mjs";
 import {
   computeContextBreakdown,
   selectLatestTokenUsage,
-  ASSUMED_CONTEXT_TOKENS,
 } from "../shared/streamInterpretation.mjs";
 import { listJobs as scheduleListJobs, deleteJob as scheduleDeleteJob, createJob as scheduleCreateJob } from "./schedule.mjs";
 import { listSnapshots as usageListSnapshots } from "./usage.mjs";
@@ -737,9 +736,7 @@ export function buildHandlers({
       const messages = await oc.listMessages(sessionId, { slim: true });
       const found = selectLatestTokenUsage(messages);
       if (!found) return null;
-      const limit =
-        contextLimitFor(found.providerID, found.modelID) ??
-        ASSUMED_CONTEXT_TOKENS;
+      const limit = contextLimitFor(found.providerID, found.modelID);
       return computeContextBreakdown(found.tokens, limit);
     },
 

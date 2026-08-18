@@ -121,41 +121,56 @@ struct ContextSheet: View {
         .presentationDragIndicator(.visible)
     }
 
-    /// Big percentage in the band colour + "824k of 1M · Opus 4.7".
+    /// Big percentage in the band colour + "824k of 1M · Opus 4.7"; for a
+    /// model with no known max context, a "No max context info" line instead
+    /// — never a fabricated % or `of <limit>`.
+    @ViewBuilder
     private var header: some View {
-        HStack(alignment: .firstTextBaseline, spacing: Metrics.spacing.sp2) {
-            Group {
-                Text("\(Int(context.pct.rounded()))")
-                    .font(.system(size: Metrics.type.display, weight: .bold))
-                Text("%")
-                    .font(.manta(size: Metrics.type.body, weight: .bold))
+        if context.hasLimit {
+            HStack(alignment: .firstTextBaseline, spacing: Metrics.spacing.sp2) {
+                Group {
+                    Text("\(Int(context.pct.rounded()))")
+                        .font(.system(size: Metrics.type.display, weight: .bold))
+                    Text("%")
+                        .font(.manta(size: Metrics.type.body, weight: .bold))
+                }
+                .foregroundColor(bandColor)
+                Text("\(UsageMeters.formatTokens(context.totalInput)) of \(UsageMeters.formatTokens(limit)) · \(modelName)")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
             }
-            .foregroundColor(bandColor)
-            Text("\(UsageMeters.formatTokens(context.totalInput)) of \(UsageMeters.formatTokens(limit)) · \(modelName)")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-            Spacer(minLength: 0)
+            .accessibilityElement(children: .combine)
+        } else {
+            HStack(alignment: .firstTextBaseline, spacing: Metrics.spacing.sp2) {
+                Text("No max context info for this model")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+            }
         }
-        .accessibilityElement(children: .combine)
     }
 
     /// The segmented meter: fresh input (accent), cache-written (warn),
     /// cache-read (info) — the box-computed per-segment percentages, whose
-    /// sum is the overall fill.
+    /// sum is the overall fill. For the unknown state (no max context) only
+    /// the fresh/written/cached token stats are shown, with no bar.
     private var segmentedMeter: some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
-            GeometryReader { geo in
-                let w = geo.size.width
-                HStack(spacing: 0) {
-                    segment(tokens.accent, pct: segmentPct("fresh"), width: w)
-                    segment(tokens.warn, pct: segmentPct("cacheWrite"), width: w)
-                    segment(tokens.info, pct: segmentPct("cacheRead"), width: w)
-                    Spacer(minLength: 0)
+            if context.hasLimit {
+                GeometryReader { geo in
+                    let w = geo.size.width
+                    HStack(spacing: 0) {
+                        segment(tokens.accent, pct: segmentPct("fresh"), width: w)
+                        segment(tokens.warn, pct: segmentPct("cacheWrite"), width: w)
+                        segment(tokens.info, pct: segmentPct("cacheRead"), width: w)
+                        Spacer(minLength: 0)
+                    }
+                    .frame(height: 8)
+                    .background(tokens.fill, in: RoundedRectangle(cornerRadius: Metrics.radius.full))
                 }
                 .frame(height: 8)
-                .background(tokens.fill, in: RoundedRectangle(cornerRadius: Metrics.radius.full))
             }
-            .frame(height: 8)
             HStack(spacing: Metrics.spacing.sp2) {
                 legend("fresh", UsageMeters.formatTokens(context.freshInput), color: tokens.accent)
                 legend("written", UsageMeters.formatTokens(context.cacheWrite), color: tokens.warn)

@@ -18,7 +18,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   computeContextBreakdown,
-  ASSUMED_CONTEXT_TOKENS,
 } from "../shared/streamInterpretation.mjs";
 
 test("dispatch routes a known channel to its handler with args", async () => {
@@ -1002,13 +1001,14 @@ test("opencode:context derives a breakdown from a billed assistant message", asy
     listCalls.push(opts);
     return [{ info: { role: "assistant", tokens, providerID: "anthropic", modelID: "claude-sonnet-4-6" } }];
   };
-  const handlers = buildHandlers(deps);
+  const handlers = buildHandlers({ ...deps, contextLimitFor: () => 400_000 });
   const res = await handlers["opencode:context"]("ses_idle");
   assert.deepEqual(listCalls, [{ slim: true }]);
-  assert.deepEqual(res, computeContextBreakdown(tokens, ASSUMED_CONTEXT_TOKENS));
+  assert.deepEqual(res, computeContextBreakdown(tokens, 400_000));
+  assert.equal(res.hasLimit, true);
 });
 
-test("opencode:context uses contextLimitFor and falls back to ASSUMED_CONTEXT_TOKENS", async () => {
+test("opencode:context uses contextLimitFor; unknown limit yields hasLimit:false", async () => {
   const tokens = { input: 100_000, cache: { read: 0, write: 0 } };
   const deps = makeDeps([]).deps;
   deps.oc.listMessages = async () => [
@@ -1023,15 +1023,14 @@ test("opencode:context uses contextLimitFor and falls back to ASSUMED_CONTEXT_TO
   assert.deepEqual(limited, computeContextBreakdown(tokens, 400_000));
   assert.equal(limited.hasLimit, true);
 
-  const fallback = buildHandlers({
+  const unknown = buildHandlers({
     ...deps,
     contextLimitFor: () => null,
   });
-  const fellBack = await fallback["opencode:context"]("s");
-  assert.deepEqual(fellBack, computeContextBreakdown(tokens, ASSUMED_CONTEXT_TOKENS));
-  assert.equal(fellBack.hasLimit, true);
-
-  assert.notEqual(limited.pct, fellBack.pct);
+  const noLimit = await unknown["opencode:context"]("s");
+  assert.deepEqual(noLimit, computeContextBreakdown(tokens, null));
+  assert.equal(noLimit.hasLimit, false);
+  assert.equal(noLimit.pct, null);
 });
 
 test("opencode:context returns null for an empty transcript", async () => {

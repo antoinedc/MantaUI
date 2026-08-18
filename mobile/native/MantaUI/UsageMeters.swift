@@ -174,9 +174,28 @@ enum UsageMeters {
     /// always derivable here. Mirrors the desktop's `computeContextBreakdown`
     /// (src/shared/streamInterpretation.mjs) so both clients agree.
     static func recompute(_ ctx: StreamContextPayload, limit: Double?) -> StreamContextPayload {
-        // The desktop's ASSUMED_CONTEXT_TOKENS fallback — used whenever the
-        // selected model's window is unknown or non-positive, exactly as the
-        // shared `computeContextBreakdown` does.
+        // The "is there a real max context?" signal comes from the BOX
+        // (hasLimit), never re-derived here (BET-1138: "use hasLimit from the
+        // payload" — no second unknown representation). When the box has no
+        // limit, the strip/sheet render the unknown state; the derived fields
+        // are irrelevant and left empty.
+        guard ctx.hasLimit else {
+            return StreamContextPayload(
+                freshInput: ctx.freshInput,
+                cacheRead: ctx.cacheRead,
+                cacheWrite: ctx.cacheWrite,
+                totalInput: ctx.totalInput,
+                pct: 0,
+                hasLimit: false,
+                segments: []
+            )
+        }
+
+        // Box confirmed a max exists; re-derive pct/segments against the
+        // SELECTED model's window. When that window is unknown, fall back to
+        // the desktop's assumed 200k exactly as pre-BET-1138 recompute did —
+        // this only sizes the visible bar; the unknown-state signal is the
+        // box's hasLimit:false, never this pct.
         let safeLimit: Double
         if let limit, limit.isFinite, limit > 0 {
             safeLimit = limit
@@ -219,14 +238,18 @@ enum UsageMeters {
             cacheWrite: ctx.cacheWrite,
             totalInput: ctx.totalInput,
             pct: pct,
+            hasLimit: true,
             segments: segments
         )
     }
 
     // MARK: - Reset-time absolute formatters (BET-967)
 
-    /// The desktop's `ASSUMED_CONTEXT_TOKENS` (200k) — the denominator when no
-    /// model window is available. Mirrors `computeContextBreakdown`.
+    /// Client-side bar-sizing fallback (the desktop's `ASSUMED_CONTEXT_TOKENS`).
+    /// Used ONLY to size the visible bar when the box has confirmed a max exists
+    /// (`hasLimit:true`) but the SELECTED model's window is unknown. The
+    /// unknown-state signal is the box's `hasLimit:false` — never fabricated by
+    /// this constant.
     private static let assumedContextTokens: Double = 200_000
 
     // OS locale on purpose (autoupdatingCurrent), and the TEMPLATE chooses

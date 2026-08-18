@@ -354,6 +354,7 @@ const server = http.createServer((req, res) => {
             cacheWrite: 0,
             totalInput: 55000,
             pct: 55,
+            hasLimit: true,
             segments: [],
           }));
           wsSend(wsFrame("cache", {
@@ -361,6 +362,20 @@ const server = http.createServer((req, res) => {
             idleMs: 1_800_000,
             staleTokens: 12400,
             ttlMs: 3_600_000,
+          }));
+          break;
+        case "context-nolimit": // BET-1138: emit a context reading with NO max
+          // context (`hasLimit:false` — the box now passes that signal through
+          // instead of fabricating a 200k window). Carries only the raw token
+          // totals, which is what the unknown-state sheet shows.
+          wsSend(wsFrame("context", {
+            freshInput: 10000,
+            cacheRead: 30000,
+            cacheWrite: 5000,
+            totalInput: 45000,
+            pct: 0,
+            hasLimit: false,
+            segments: [],
           }));
           break;
         default:
