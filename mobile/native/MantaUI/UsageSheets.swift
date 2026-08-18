@@ -25,10 +25,10 @@ struct MeterRing: View {
     let track: Color
 
     var body: some View {
-        let clamped = Self.clamp(pct)
+        let clamped = UsageMeters.clamp(pct)
         // At/over 100 the fraction would be a full ring identical to 99% —
         // so it becomes a solid disc instead. That state must be unmistakable.
-        if Self.isFull(clamped) {
+        if UsageMeters.isFull(clamped) {
             Circle()
                 .fill(color)
                 .frame(width: diameter, height: diameter)
@@ -51,17 +51,6 @@ struct MeterRing: View {
         case .warn: return tokens.warn
         case .danger: return tokens.danger
         }
-    }
-
-    /// Clamp a 0-100 percentage (providers can report over 100).
-    static func clamp(_ pct: Double) -> Double {
-        min(max(pct, 0), 100)
-    }
-
-    /// Whether the (already-clamped) percentage is at/over 100 — the
-    /// solid-disc state. Pure so the ≥100 boundary is unit-testable.
-    static func isFull(_ pct: Double) -> Bool {
-        pct >= 100
     }
 }
 

@@ -1,14 +1,5 @@
 import Foundation
 
-enum MantaError: Error, Equatable {
-    case authRequired
-    case server(String)
-    case transport(String)
-    /// A voice clip was stored but its transcription failed (HTTP 409). The
-    /// recorder must be KEPT — the caller surfaces a Retry against the id.
-    case storedButUntranscribed(noteID: String)
-}
-
 final class MantaAPIClient: Sendable {
     let serverURL: URL
     private let tokenProvider: @Sendable () -> String?
