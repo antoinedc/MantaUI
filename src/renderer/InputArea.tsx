@@ -17,7 +17,9 @@
 // a focus state instead of hairline dividers around a naked textarea.
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 import { Mic, Square } from "lucide-react";
+import { MOTION_BASE, MOTION_EASE } from "./chatMotion";
 import type { OpencodeModel } from "../shared/types";
 import type { Voice } from "./hooks/useVoice";
 import {
@@ -476,32 +478,58 @@ export function InputArea({
         {/* The desktop mic + attach buttons moved DOWN into the meta row
             beside the model picker; the box now holds only the message and
             Send. The mobile PTT FAB is still rendered above the composer. */}
-        {/* Send button — sits beside the textarea in the composer box (BET-620
-            change 4). Accent when there's text to send, muted fill when empty. */}
-        <button
-          onClick={() => (running ? abort() : submit())}
-          disabled={!running && !input.trim()}
-          aria-label={running ? "Stop the running turn" : "Send message"}
-          title={running ? "Stop (Esc)" : "Send (Enter)"}
-          className={
-            "w-7 h-7 rounded-sm grid place-items-center shrink-0 transition-colors " +
-            "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent " +
-            "disabled:cursor-default " +
-            (running || input.trim()
-              ? "bg-accent text-on-accent hover:bg-accent/90"
-              : "bg-fill text-text-faint")
-          }
-        >
-          {/* Both glyphs are SOLID (BET icon pass): against the accent fill an
-              outline reads as a faint sketch, and the hollow square in
-              particular did not say "stop". Square keeps its stroke on top of
-              the fill so it stays optically the same size as before. */}
-          {running ? (
-            <Square size={12} fill="currentColor" aria-hidden="true" />
-          ) : (
-            <SendFilled size={14} />
+        {/* Send + Stop buttons — sit beside the textarea in the composer box
+            (BET-620 change 4). Two side-by-side buttons: SEND first, then
+            STOP. Send appears whenever there's text (accent when it can be
+            sent); while the agent is running a click instead queues the
+            message through the same submit path as ⏎. Stop appears only while
+            running and aborts. Both slide in/out horizontally with the shared
+            framer tokens so reduced-motion is inherited via App's
+            MotionConfig. */}
+        <AnimatePresence initial={false}>
+          {input.trim() && (
+            <motion.button
+              key="send"
+              type="button"
+              onClick={() => submit()}
+              aria-label={running ? "Queue message while running" : "Send message"}
+              title={running ? "Queue (Enter)" : "Send (Enter)"}
+              initial={{ opacity: 0, x: 8 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 8 }}
+              transition={{ duration: MOTION_BASE, ease: MOTION_EASE }}
+              className={
+                "w-7 h-7 rounded-sm grid place-items-center shrink-0 transition-colors " +
+                "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent " +
+                "bg-accent text-on-accent hover:bg-accent/90"
+              }
+            >
+              <SendFilled size={14} />
+            </motion.button>
           )}
-        </button>
+          {running && (
+            <motion.button
+              key="stop"
+              type="button"
+              onClick={() => abort()}
+              aria-label="Stop the running turn"
+              title="Stop (Esc)"
+              initial={{ opacity: 0, x: 8 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 8 }}
+              transition={{ duration: MOTION_BASE, ease: MOTION_EASE }}
+              className={
+                "w-7 h-7 rounded-sm grid place-items-center shrink-0 transition-colors " +
+                "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent " +
+                "bg-accent text-on-accent hover:bg-accent/90"
+              }
+            >
+              {/* Solid square — against the accent fill an outline square read
+                  as a faint sketch; the solid fill is what says "stop". */}
+              <Square size={12} fill="currentColor" aria-hidden="true" />
+            </motion.button>
+          )}
+        </AnimatePresence>
         </div>
         )}
       </div>
