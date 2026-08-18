@@ -90,6 +90,13 @@ import {
   isWithinPreviewSize,
   formatPreviewFooter,
   countPreviewLines,
+  resolveMediaAspect,
+  mediaKindFromMime,
+  isMediaMime,
+  mediaGrid,
+  filePartToMediaEntry,
+  applyMediaEvent,
+  dispatchMedia,
   previewLanguage,
   previewOriginWord,
   decodeDataUri,
@@ -5587,5 +5594,162 @@ describe("deviceAuthErrorMessage", () => {
   it("falls back to the generic copy for anything else / undefined", () => {
     expect(deviceAuthErrorMessage("bad_response")).toBe("Sign-in failed. Try again.");
     expect(deviceAuthErrorMessage(undefined)).toBe("Sign-in failed. Try again.");
+  });
+});
+
+// =============================================================================
+// Inline media (BET-1148) — pure helpers for the transcript media renderer.
+// =============================================================================
+describe("resolvePreviewType video", () => {
+  it("routes video/* to the video renderer instead of refuse", () => {
+    expect(resolvePreviewType("video/mp4", "clip.mp4")).toBe("video");
+    expect(resolvePreviewType("video/quicktime", "clip.mov")).toBe("video");
+  });
+});
+
+describe("mediaKindFromMime / isMediaMime", () => {
+  it("maps image/* and video/* mimes", () => {
+    expect(mediaKindFromMime("image/png")).toBe("image");
+    expect(mediaKindFromMime("Image/PNG")).toBe("image");
+    expect(mediaKindFromMime("video/mp4")).toBe("video");
+    expect(mediaKindFromMime("application/pdf")).toBeNull();
+    expect(mediaKindFromMime(null)).toBeNull();
+    expect(mediaKindFromMime(undefined)).toBeNull();
+  });
+
+  it("isMediaMime is true only for media mimes", () => {
+    expect(isMediaMime("image/png")).toBe(true);
+    expect(isMediaMime("video/webm")).toBe(true);
+    expect(isMediaMime("application/pdf")).toBe(false);
+    expect(isMediaMime(null)).toBe(false);
+  });
+});
+
+describe("resolveMediaAspect", () => {
+  it("uses explicit dimensions when both are known", () => {
+    expect(resolveMediaAspect({ width: 800, height: 600, aspectRatio: null })).toBeCloseTo(4 / 3, 5);
+  });
+
+  it("falls back to the declared aspect ratio when dimensions are unknown", () => {
+    expect(resolveMediaAspect({ width: null, height: null, aspectRatio: 1.5 })).toBeCloseTo(1.5, 5);
+  });
+
+  it("defaults to 16:9 when neither is known", () => {
+    expect(resolveMediaAspect({ width: null, height: null, aspectRatio: null })).toBeCloseTo(16 / 9, 5);
+  });
+
+  it("ignores non-positive dimensions/ratios", () => {
+    expect(resolveMediaAspect({ width: 0, height: 0, aspectRatio: null })).toBeCloseTo(16 / 9, 5);
+    expect(resolveMediaAspect({ width: 100, height: 0, aspectRatio: null })).toBeCloseTo(16 / 9, 5);
+  });
+});
+
+describe("mediaGrid", () => {
+  it("renders a single tile for 0/1/unknown counts", () => {
+    expect(mediaGrid(null)).toEqual({ tiles: 1, more: 0 });
+    expect(mediaGrid(0)).toEqual({ tiles: 1, more: 0 });
+    expect(mediaGrid(1)).toEqual({ tiles: 1, more: 0 });
+  });
+
+  it("caps at 4 tiles and folds the rest behind +N more", () => {
+    expect(mediaGrid(2)).toEqual({ tiles: 2, more: 0 });
+    expect(mediaGrid(4)).toEqual({ tiles: 4, more: 0 });
+    expect(mediaGrid(5)).toEqual({ tiles: 4, more: 1 });
+    expect(mediaGrid(7)).toEqual({ tiles: 4, more: 3 });
+  });
+});
+
+describe("applyMediaEvent", () => {
+  const begin = { action: "begin", handle: "h1", sessionID: "s", messageID: "m", kind: "image", width: 800, height: 600, count: 3, title: "logo" } as const;
+
+  it("begin reserves a pending entry with the declared metadata", () => {
+    const e = applyMediaEvent(undefined, begin, 1000);
+    expect(e.state).toBe("pending");
+    expect(e.beganAt).toBe(1000);
+    expect(e.handle).toBe("h1");
+    expect(e.meta.kind).toBe("image");
+    expect(e.meta.width).toBe(800);
+    expect(e.meta.height).toBe(600);
+    expect(e.meta.count).toBe(3);
+  });
+
+  it("begin 'video' kind is preserved", () => {
+    const e = applyMediaEvent(undefined, { ...begin, kind: "video" }, 0);
+    expect(e.meta.kind).toBe("video");
+  });
+
+  it("show swaps a pending entry to ready, carrying prior metadata", () => {
+    const pending = applyMediaEvent(undefined, begin, 1000);
+    const e = applyMediaEvent(pending, { action: "show", path: "/home/dev/logo.png", mime: "image/png", width: 800, height: 600, handle: "h1", sessionID: "s", messageID: "m" });
+    expect(e.state).toBe("ready");
+    expect(e.meta.path).toBe("/home/dev/logo.png");
+    expect(e.meta.mime).toBe("image/png");
+    expect(e.meta.kind).toBe("image");
+    expect(e.meta.count).toBe(3);
+    expect(e.beganAt).toBe(1000);
+  });
+
+  it("show without a prior begin works standalone (kind from mime)", () => {
+    const e = applyMediaEvent(undefined, { action: "show", path: "/v/clip.mp4", mime: "video/mp4", width: 1920, height: 1080 });
+    expect(e.state).toBe("ready");
+    expect(e.meta.kind).toBe("video");
+  });
+
+  it("fail ends a pending entry as failed, preserving the reserved box metadata", () => {
+    const pending = applyMediaEvent(undefined, begin, 1000);
+    const e = applyMediaEvent(pending, { action: "fail", handle: "h1" });
+    expect(e.state).toBe("failed");
+    expect(e.meta.width).toBe(800);
+    expect(e.meta.height).toBe(600);
+    expect(e.meta.kind).toBe("image");
+  });
+});
+
+describe("filePartToMediaEntry", () => {
+  it("derives a ready image entry from a file part", () => {
+    const e = filePartToMediaEntry({ type: "file", mime: "image/png", url: "file:///home/dev/diagram.png", filename: "diagram.png" } as never);
+    expect(e.state).toBe("ready");
+    expect(e.meta.kind).toBe("image");
+    expect(e.meta.path).toBe("/home/dev/diagram.png");
+    expect(e.meta.mime).toBe("image/png");
+  });
+
+  it("derives a ready video entry from a file part", () => {
+    const e = filePartToMediaEntry({ type: "file", mime: "video/mp4", url: "file:///home/dev/clip.mp4" } as never);
+    expect(e.meta.kind).toBe("video");
+    expect(e.meta.path).toBe("/home/dev/clip.mp4");
+  });
+
+  it("falls back to image for a non-media file part (never used, defensive)", () => {
+    const e = filePartToMediaEntry({ type: "file", mime: "application/pdf", url: "file:///x.pdf" } as never);
+    expect(e.meta.kind).toBe("image");
+  });
+});
+
+describe("dispatchMedia", () => {
+  it("routes begin/show/fail to the matching handler only", () => {
+    const seen: string[] = [];
+    const handlers = {
+      begin: () => seen.push("begin"),
+      show: () => seen.push("show"),
+      fail: () => seen.push("fail"),
+    };
+    dispatchMedia({ action: "begin" }, handlers);
+    dispatchMedia({ action: "show" }, handlers);
+    dispatchMedia({ action: "fail" }, handlers);
+    expect(seen).toEqual(["begin", "show", "fail"]);
+  });
+
+  it("ignores non-object payloads and unknown actions", () => {
+    const seen: string[] = [];
+    const handlers = { begin: () => seen.push("begin"), show: () => seen.push("show"), fail: () => seen.push("fail") };
+    dispatchMedia(null, handlers);
+    dispatchMedia("x", handlers);
+    dispatchMedia({ action: "unknown" }, handlers);
+    expect(seen).toEqual([]);
+  });
+
+  it("still routes when only some handlers are supplied", () => {
+    expect(() => dispatchMedia({ action: "show" }, {})).not.toThrow();
   });
 });

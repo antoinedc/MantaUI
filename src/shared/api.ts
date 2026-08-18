@@ -82,6 +82,7 @@ import type {
   PluginRegistryRow,
   TranscriptHit,
   AppControlPayload,
+  MediaEventPayload,
 } from "./types.js";
 import type { ClaimOutcome } from "./claim.mjs";
 
@@ -502,6 +503,12 @@ export interface Api {
   // `action`. No-op on the preload bridge and on demoApi (Proxy fallback
   // returns a no-op unsubscribe).
   onAppControl(cb: (payload: AppControlPayload) => void): () => void;
+
+  // Inline media (BET-1148). The box publishes ONE `media` bus kind with an
+  // `action` discriminator (begin / show / fail); the desktop subscribes once
+  // and switches on `action`. No-op on the preload bridge and on demoApi
+  // (Proxy fallback returns a no-op unsubscribe).
+  onMedia(cb: (payload: MediaEventPayload) => void): () => void;
 
   // Secrets (manta-server owned; desktop reaches it over -L 18787). list returns
   // METADATA ONLY (never values). set carries the value renderer → box (never

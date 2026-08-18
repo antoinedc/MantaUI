@@ -357,6 +357,9 @@ export type TranscriptProps = {
   finishByMessageId: Map<string, import("./chatUtils").TruncationKind>;
   userCommandInfo: Map<string, { name: string; arguments: string }>;
   voiceNoteByMessageId: Map<string, VoiceNoteRecord>;
+  // BET-1148: messageID → inline media entry (from the `media` bus events),
+  // memoized at ChatPanel scope like the other per-message maps.
+  mediaByMessageId: Map<string, import("./chatUtils").MediaEntry>;
   pendingVoiceNote: PendingVoiceNote | null;
   onRetryVoiceNote: (noteId: string) => void;
   onReplyQuestion: (q: QuestionRequest, answers: string[][]) => void;
@@ -396,6 +399,7 @@ export function Transcript({
   finishByMessageId,
   userCommandInfo,
   voiceNoteByMessageId,
+  mediaByMessageId,
   pendingVoiceNote,
   onRetryVoiceNote,
   onReplyQuestion,
@@ -671,6 +675,11 @@ export function Transcript({
                     truncation={finishByMessageId.get(m.info.id) ?? null}
                     commandInfo={cmdInfo}
                     voiceNote={voiceNote}
+                    media={
+                      m.info.role === "user"
+                        ? null
+                        : mediaByMessageId.get(m.info.id) ?? null
+                    }
                     entering={entryMotion.entering.has(m.info.id)}
                   />
                 );

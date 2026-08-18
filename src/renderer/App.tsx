@@ -24,7 +24,7 @@ import {
   resolveLauncherFlags,
 } from "./chatShared";
 import type { SyncPayload } from "../shared/api";
-import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, pruneVisitedSessions, registerMountedTerminal, shouldResyncWindowsForJobs, dispatchAppControl, formatResetAt, type AppControlHandlers, type MountedTerminal } from "./chatUtils";
+import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, pruneVisitedSessions, registerMountedTerminal, shouldResyncWindowsForJobs, dispatchAppControl, dispatchMedia, applyMediaEvent, formatResetAt, type AppControlHandlers, type MountedTerminal } from "./chatUtils";
 import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
 import { UpdateBar } from "./UpdateBar";
 import { ConfirmModal } from "./ConfirmModal";
@@ -37,7 +37,7 @@ import { parsePairPayload } from "../shared/pairPayload";
 import { channelConfig } from "../shared/channel.mjs";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { MantaLoader } from "./MantaLoader";
-import type { AvailableLauncher } from "../shared/types";
+import type { AvailableLauncher, MediaEventPayload } from "../shared/types";
 import {
   buildLimitMessage,
   buildUsageLevels,
@@ -1139,6 +1139,34 @@ function Shell() {
     });
     return off;
   }, [refresh, apiGeneration]);
+
+  // Inline media bus (BET-1148). The box publishes ONE `media` kind with an
+  // `action` discriminator (begin / show / fail) whenever the media tools land
+  // a client-visible effect. Subscribe ONCE here (not from inside ChatPanel —
+  // panels mount/unmount per session) and switch on `action`, routing the
+  // state into the store keyed sessionId → messageID so the owning panel's
+  // transcript draws the media card. The entries are derived by the pure
+  // `applyMediaEvent` reducer (preserves prior reserved-box metadata across
+  // begin → show / begin → fail).
+  useEffect(() => {
+    if (!window.api.onMedia) return;
+    const off = window.api.onMedia((payload) => {
+      const sessionID = payload.sessionID ?? "";
+      const messageID = payload.messageID ?? "";
+      if (!sessionID || !messageID) return;
+      // One switch on the payload's action (begin | show | fail); each routes
+      // the same way — reduce the entry with the pure `applyMediaEvent` (which
+      // carries the reserved-box metadata forward across begin → show /
+      // begin → fail) keyed by messageID in the store.
+      const reduce = (p: MediaEventPayload) => {
+        const st = useStore.getState();
+        const prev = st.inlineMedia[sessionID]?.[messageID];
+        st.setMediaEntry(sessionID, messageID, applyMediaEvent(prev, p));
+      };
+      dispatchMedia(payload, { begin: reduce, show: reduce, fail: reduce });
+    });
+    return off;
+  }, [apiGeneration]);
 
   // Desktop OS notifications. manta-server's router (push.mjs) decides WHICH
   // device(s) get a notification (no duplicates) and forwards a desktop directive

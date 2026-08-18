@@ -48,6 +48,7 @@ type Loaded =
   | { status: "too-large"; size: number }
   | { status: "error" }
   | { status: "ready"; kind: "image"; url: string; size: number }
+  | { status: "ready"; kind: "video"; url: string; size: number }
   | { status: "ready"; kind: "pdf"; url: string; size: number }
   | { status: "ready"; kind: "text"; text: string; lines: number; language: string };
 
@@ -108,6 +109,7 @@ async function loadArtifact(
   // image / pdf: keep the body as bytes and address it via an object URL.
   const blob = await res.blob();
   const url = URL.createObjectURL(blob);
+  if (type === "video") return { status: "ready", kind: "video", url, size };
   return { status: "ready", kind: type === "pdf" ? "pdf" : "image", url, size };
 }
 
@@ -214,9 +216,11 @@ export function ArtifactPreview({
                 size: loaded.size,
                 origin: artifact.origin,
               }
-            : loaded.kind === "pdf"
-              ? { size: loaded.size }
-              : { lines: loaded.lines, language: loaded.language },
+            : loaded.kind === "video"
+              ? { size: loaded.size, origin: artifact.origin }
+              : loaded.kind === "pdf"
+                ? { size: loaded.size }
+                : { lines: loaded.lines, language: loaded.language },
         )
       : "";
 
@@ -304,6 +308,19 @@ export function ArtifactPreview({
                   const el = e.currentTarget;
                   setDims({ width: el.naturalWidth, height: el.naturalHeight });
                 }}
+              />
+            </div>
+          )}
+
+          {loaded.status === "ready" && loaded.kind === "video" && (
+            <div className="m-auto p-4 w-full h-full grid place-items-center">
+              {/* No autoplay: an explicit play control + first-frame poster. */}
+              <video
+                src={loaded.url}
+                controls
+                preload="metadata"
+                title={artifact.label}
+                className="max-w-full max-h-full"
               />
             </div>
           )}

@@ -2346,6 +2346,16 @@ export function ChatPanel({
     [messages, voiceNotes],
   );
 
+  // BET-1148: inline media entries for THIS session (keyed by messageID), fed
+  // by the App-level `media` bus listener. The object reference is stable
+  // across unrelated sessions' updates, so this selector + the memo below only
+  // re-render when this session's media actually changes (a begin/show/fail).
+  const inlineMedia = useStore((s) => s.inlineMedia[sessionId]);
+  const mediaByMessageId = useMemo(
+    () => new Map(Object.entries(inlineMedia ?? {})),
+    [inlineMedia],
+  );
+
   // Retry transcription for a note whose transcript came back empty (the 409
   // send path). On success append the (now-transcribed) record and clear the
   // pending row; the transcript flows through as a normal user message exactly
@@ -2949,6 +2959,7 @@ export function ChatPanel({
             finishByMessageId={finishByMessageId}
             userCommandInfo={userCommandInfo}
             voiceNoteByMessageId={voiceNoteByMessageId}
+            mediaByMessageId={mediaByMessageId}
             pendingVoiceNote={pendingVoiceNote}
             onRetryVoiceNote={retryVoiceNote}
             onReplyQuestion={replyQuestion}

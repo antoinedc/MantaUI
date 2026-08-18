@@ -14,7 +14,7 @@ import type {
 import type { ConnectionState } from "../shared/net/state.js";
 import type { SyncPayload } from "../shared/api.js";
 import { clientToken } from "./api/httpApi";
-import { isAssistantTurnInProgress, runWithConcurrency } from "./chatUtils";
+import { isAssistantTurnInProgress, runWithConcurrency, type MediaEntry } from "./chatUtils";
 import { applyTheme, type ThemePref } from "./theme";
 import type { ToastItem } from "./Toast";
 import {
@@ -680,6 +680,14 @@ type State = {
   // which leave the `messages` reference stable — don't re-emit the whole
   // array to every store subscriber.
   setChatMessages: (sessionId: string, messages: OpencodeMessage[]) => void;
+  // BET-1148: inline media placeholder state, keyed sessionId → messageID.
+  // Fed by the single App-level `media` bus listener (App.tsx) via
+  // `window.api.onMedia`; ChatPanel reads its own session's slice so the media
+  // card for a messageID renders in the transcript (a `begin` reserves the
+  // box before any bytes arrive, a `show` swaps the media in, a `fail` ends
+  // it as a labelled placeholder).
+  inlineMedia: Record<string, Record<string, MediaEntry>>;
+  setMediaEntry: (sessionId: string, messageID: string, entry: MediaEntry) => void;
   // One-shot startup replay of chat-mode attention. opencode's SSE stream is
   // forward-only — it does NOT re-emit `question.asked` / `permission.asked`
   // for requests that were already pending when the app (re)connected. So on
@@ -782,6 +790,7 @@ export const useStore = create<State>((set, get) => ({
   usageStopped: [],
   lastLookedStopped: null,
   chatMessages: {},
+  inlineMedia: {},
   pendingScreenshots: [],
   agentFileToast: null,
   appToasts: [],
@@ -1328,8 +1337,6 @@ export const useStore = create<State>((set, get) => ({
       const owner = resolveSessionOwner(prev.projects, sessionId);
       if (!owner) return prev;
       const old = prev.status[owner.tmuxSession]?.[owner.windowIndex];
-      // No-op when unchanged (same guard as setChatSubagents) so the
-      // frequent progress refetches don't re-emit to the whole sidebar.
       if ((old?.progressLabel ?? null) === (label ?? null)) return prev;
       const nextWin: WindowStatusUI = {
         running: old?.running ?? false,
@@ -1354,6 +1361,18 @@ export const useStore = create<State>((set, get) => ({
     set((prev) => {
       if (prev.chatMessages[sessionId] === messages) return prev;
       return { chatMessages: { ...prev.chatMessages, [sessionId]: messages } };
+    }),
+
+  setMediaEntry: (sessionId, messageID, entry) =>
+    set((prev) => {
+      const session = prev.inlineMedia[sessionId] ?? {};
+      if (session[messageID] === entry) return prev;
+      return {
+        inlineMedia: {
+          ...prev.inlineMedia,
+          [sessionId]: { ...session, [messageID]: entry },
+        },
+      };
     }),
 
   replayChatAttention: async () => {

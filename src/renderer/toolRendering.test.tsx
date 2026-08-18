@@ -254,6 +254,47 @@ describe("non-tool assistant parts", () => {
     expect(h.text() ?? "").not.toContain("⎿");
     expect(h.container.querySelector("button[aria-expanded]")).toBeNull();
   });
+
+  // BET-1148: an image/video file part renders the shared MediaBody (the media
+  // IS the result) instead of the header-only card. A non-media mime keeps the
+  // header-only card.
+  it("renders an image file part via MediaBody (expanded, with a body)", () => {
+    installMockApi();
+    h = mount(
+      <AssistantPart
+        part={{ type: "file", filename: "diagram.png", mime: "image/png", url: "file:///home/dev/diagram.png" } as unknown as OpencodePart}
+        showThinking={false}
+      />,
+    );
+    expect(h.text()).toContain("Image");
+    // A media card is expanded by default → a working disclosure chevron.
+    expect(h.container.querySelector("button[aria-expanded]")).toBeTruthy();
+  });
+
+  it("renders a video file part via MediaBody, not the header-only card", () => {
+    installMockApi();
+    h = mount(
+      <AssistantPart
+        part={{ type: "file", filename: "clip.mp4", mime: "video/mp4", url: "file:///home/dev/clip.mp4" } as unknown as OpencodePart}
+        showThinking={false}
+      />,
+    );
+    expect(h.text()).toContain("Video");
+    expect(h.container.querySelector("button[aria-expanded]")).toBeTruthy();
+  });
+
+  it("keeps a non-media file part header-only (no disclosure chevron)", () => {
+    installMockApi();
+    h = mount(
+      <AssistantPart
+        part={{ type: "file", filename: "data.csv", mime: "text/csv", url: "file:///home/dev/data.csv" } as unknown as OpencodePart}
+        showThinking={false}
+      />,
+    );
+    expect(h.text() ?? "").not.toContain("Image");
+    expect(h.text() ?? "").not.toContain("Video");
+    expect(h.container.querySelector("button[aria-expanded]")).toBeNull();
+  });
 });
 
 describe("TaskBody subagent row", () => {

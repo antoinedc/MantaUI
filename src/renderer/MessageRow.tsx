@@ -32,6 +32,8 @@ import {
 } from "./chatUtils";
 import { pastVerbFor } from "./chatShared";
 import { AssistantPart } from "./ToolCall";
+import { MediaBody } from "./MediaBody";
+import type { MediaEntry } from "./chatUtils";
 import { MantaMark } from "./MantaLoader";
 import { MessageBubble } from "./MessageBubble";
 import { VoicePlayer } from "./VoiceNote";
@@ -253,6 +255,7 @@ export const MessageRow = memo(function MessageRow({
   truncation,
   commandInfo,
   voiceNote = null,
+  media = null,
   entering = false,
 }: {
   msg: OpencodeMessage;
@@ -286,6 +289,12 @@ export const MessageRow = memo(function MessageRow({
   // undefined = a normal typed message (and the subagent transcripts in
   // TaskCard, which have no notes).
   voiceNote?: VoiceNoteRecord | null;
+  // BET-1148: the inline-media entry (from the `media` bus events) this
+  // assistant message owns, keyed by messageID. When set, the row renders the
+  // MediaBody card — a `begin` reserves the box, a `show` swaps the media in,
+  // a `fail` ends it as a labelled placeholder. Stable reference from a panel
+  // memo, so the MessageRow memo chain is untouched.
+  media?: MediaEntry | null;
   // True when this message ARRIVED while the user was watching, as opposed to
   // being part of the transcript they loaded (transcript-motion). Decided once
   // in Transcript by `updateEntryMotion` and sticky for the row's whole life —
@@ -426,6 +435,7 @@ export const MessageRow = memo(function MessageRow({
 
   return stampedRow(
     <div className="flex flex-col" style={{ gap: "var(--block-gap)" }}>
+      {media != null && !isUser && <MediaBody entry={media} />}
       {visibleParts.map((p) => (
         <AssistantPart
           key={p.id}

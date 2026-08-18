@@ -5,7 +5,7 @@
 // without DOM/Electron/network).
 import type { ReactNode } from "react";
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { AppControlPayload, CheckRollup, DelegateApprovalTool, ForgeCheckRun, ForgeInboxItem, InboxReason, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, PermissionRequest, ProgressRecord, ProgressState, Project, PullRequest, QuestionRequest, RepoHit, SubscriptionStatus, TmuxWindow, UpdateTarget, UsageSnapshot, UsageWindow } from "../shared/types";
+import type { AppControlPayload, CheckRollup, DelegateApprovalTool, ForgeCheckRun, ForgeInboxItem, InboxReason, MediaEventPayload, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, PermissionRequest, ProgressRecord, ProgressState, Project, PullRequest, QuestionRequest, RepoHit, SubscriptionStatus, TmuxWindow, UpdateTarget, UsageSnapshot, UsageWindow } from "../shared/types";
 import type { SessionMode } from "./chatShared";
 import type { VoiceNoteRecord } from "../shared/types";
 // Value import — `isClientTooOld` is the pure semver compare that drives
@@ -2621,7 +2621,7 @@ export function updateEntryMotion(
  *  Exactly this many bytes passes; one more byte refuses (`isWithinPreviewSize`). */
 export const MAX_PREVIEW_BYTES = 25 * 1024 * 1024;
 
-export type PreviewType = "image" | "pdf" | "text" | "refuse";
+export type PreviewType = "image" | "video" | "pdf" | "text" | "refuse";
 
 /** The small text-extension allowlist (the "text renderer" fallback when the
  *  mime gives no text/*-family answer). `.csv` is deliberately ABSENT — it is
@@ -2642,6 +2642,7 @@ export function previewExtension(filename: string): string {
  *  fallback to its filename extension. Exactly four renderers plus a refusal:
  *
  *    image/*            → image
+ *    video/*            → video
  *    application/pdf    → pdf
  *    text/csv           → refuse (out of scope; downloads)
  *    text/*             → text
@@ -2655,6 +2656,7 @@ export function resolvePreviewType(mime: string | null, filename: string): Previ
   if (mime) {
     const m = mime.toLowerCase();
     if (m.startsWith("image/")) return "image";
+    if (m.startsWith("video/")) return "video";
     if (m === "application/pdf") return "pdf";
     if (m === "text/csv") return "refuse";
     if (m.startsWith("text/")) return "text";
@@ -2714,6 +2716,9 @@ export function formatPreviewFooter(
 ): string {
   if (type === "image") {
     return `${info.width ?? 0} × ${info.height ?? 0} · ${formatBytes(info.size ?? 0)} · ${previewOriginWord(info.origin ?? "agent")}`;
+  }
+  if (type === "video") {
+    return `${formatBytes(info.size ?? 0)} · ${previewOriginWord(info.origin ?? "agent")}`;
   }
   if (type === "pdf") return formatBytes(info.size ?? 0);
   return `${info.lines ?? 0} lines · ${info.language ?? "text"}`;
@@ -3881,6 +3886,224 @@ export function dispatchAppControl(
     return;
   }
   // compact-session + any unknown action: no-op.
+}
+
+// =============================================================================
+// Inline media (BET-1148) — pure model for the transcript media renderer.
+//
+// The server half (src/server/media.mjs) publishes ONE `media` bus kind with
+// an `action` discriminator (`begin` | `show` | `fail`). The renderer keeps a
+// per-session map of placeholder entries keyed by messageID (store
+// `inlineMedia`, fed by the single App-level `onMedia` listener) and a shared
+// `MediaBody` draws them. Everything derivable is kept pure and tested here so
+// the component stays a thin presenter, per the repo's standing rule.
+//
+// The load-bearing invariant (from the BET-1148 spec): the placeholder MUST
+// reserve the media's final aspect box before the bytes arrive, so the
+// transcript's pin-to-bottom logic never sees a height change under the
+// reader. `resolveMediaAspect` is the single source of that box.
+// =============================================================================
+
+/** What the media is. `begin` declares it; `show`/`file` derive it from mime. */
+export type MediaKind = "image" | "video";
+
+/** The four render states a media entry can be in. `expired` is a supported
+ *  render state (a labelled placeholder, like `failed`) that the degrade
+ *  ladder can reach; `begin`/`show`/`fail` events map to pending/ready/failed. */
+export type MediaState = "pending" | "ready" | "failed" | "expired";
+
+/** Resolved presentational metadata for a media item. Width/height/aspectRatio
+ *  are the "reserve the final box" inputs — unknown → the 16:9 default. */
+export type MediaMeta = {
+  kind: MediaKind;
+  /** Absolute box path (ready only) served by /api/peek. */
+  path: string | null;
+  mime: string | null;
+  width: number | null;
+  height: number | null;
+  /** Width÷height ratio declared up front, when dimensions are unknown. */
+  aspectRatio: number | null;
+  /** Expected variant count (the grid of numbered tiles). */
+  count: number | null;
+  title: string | null;
+};
+
+/** One placeholder/media item, keyed by messageID within a session. */
+export type MediaEntry = {
+  handle: string | null;
+  state: MediaState;
+  meta: MediaMeta;
+  /** When the `begin` landed (pending only) — drives the elapsed clock. */
+  beganAt: number | null;
+};
+
+/** The default reserved box: 16:9 (width÷height) when nothing is known. The
+ *  card labels itself as possibly-reflowing in that case (one bounded reflow,
+ *  never a growth from zero height). */
+export const DEFAULT_MEDIA_ASPECT = 16 / 9;
+
+/** Map a mime to a media kind, or null when it isn't image/video. */
+export function mediaKindFromMime(mime: string | null | undefined): MediaKind | null {
+  const m = (mime ?? "").toLowerCase();
+  if (m.startsWith("image/")) return "image";
+  if (m.startsWith("video/")) return "video";
+  return null;
+}
+
+/** True when the mime is image/* or video/* — i.e. the file-part branch should
+ *  render MediaBody instead of the header-only file card. */
+export function isMediaMime(mime: string | null | undefined): boolean {
+  return mediaKindFromMime(mime) != null;
+}
+
+function numOrNull(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+function strOrNull(v: unknown): string | null {
+  return typeof v === "string" && v.trim() !== "" ? v : null;
+}
+
+function baseMeta(kind: MediaKind): MediaMeta {
+  return {
+    kind,
+    path: null,
+    mime: null,
+    width: null,
+    height: null,
+    aspectRatio: null,
+    count: null,
+    title: null,
+  };
+}
+
+/** The reserved box's width÷height. Explicit dimensions win, then the declared
+ *  aspect ratio, then the 16:9 default. Used both to reserve the placeholder
+ *  and to keep the finished media in the exact same box. */
+export function resolveMediaAspect(meta: Pick<MediaMeta, "width" | "height" | "aspectRatio">): number {
+  if (
+    typeof meta.width === "number" &&
+    meta.width > 0 &&
+    typeof meta.height === "number" &&
+    meta.height > 0
+  ) {
+    return meta.width / meta.height;
+  }
+  if (typeof meta.aspectRatio === "number" && meta.aspectRatio > 0) return meta.aspectRatio;
+  return DEFAULT_MEDIA_ASPECT;
+}
+
+/** The variant grid, from the `begin`-declared count: at most 4 numbered tiles
+ *  in 2 columns; anything beyond collapses behind a `+N more` row. */
+export function mediaGrid(count: number | null): { tiles: number; more: number } {
+  const c = typeof count === "number" && Number.isFinite(count) ? Math.floor(count) : 0;
+  if (c <= 1) return { tiles: 1, more: 0 };
+  return { tiles: Math.min(c, 4), more: Math.max(0, c - 4) };
+}
+
+/** Parse a transcript `file` part into a ready media entry. A file part's wire
+ *  shape (src/server/opencode.mjs) is { type:"file", mime, url:"file://<abs>",
+ *  filename? } — the absolute path is the `file://` URL stripped. */
+export function filePartToMediaEntry(part: OpencodePart): MediaEntry {
+  const url = String((part as Record<string, unknown>).url ?? "");
+  const mime = strOrNull((part as Record<string, unknown>).mime);
+  const kind = mediaKindFromMime(mime) ?? "image";
+  return {
+    handle: null,
+    state: "ready",
+    beganAt: null,
+    meta: {
+      ...baseMeta(kind),
+      path: url.replace(/^file:\/\//, "") || null,
+      mime,
+    },
+  };
+}
+
+/** State derivation from the media bus events. `prev` is the entry already
+ *  stored for this messageID (undefined on first sight). `begin` reserves a
+ *  pending box; `show` swaps in the file (ready); `fail` ends a never-shown
+ *  placeholder as a labelled failure, keeping whatever reserved-box metadata
+ *  `begin` declared so the box doesn't collapse. */
+export function applyMediaEvent(
+  prev: MediaEntry | undefined,
+  payload: MediaEventPayload,
+  now: number = Date.now(),
+): MediaEntry {
+  const action = payload.action;
+  if (action === "begin") {
+    const kind = payload.kind === "video" ? "video" : "image";
+    return {
+      handle: strOrNull(payload.handle),
+      state: "pending",
+      beganAt: now,
+      meta: {
+        ...baseMeta(kind),
+        width: numOrNull(payload.width),
+        height: numOrNull(payload.height),
+        aspectRatio: numOrNull(payload.aspectRatio),
+        count: numOrNull(payload.count),
+        title: strOrNull(payload.title),
+      },
+    };
+  }
+  if (action === "show") {
+    const prevMeta = prev?.meta ?? baseMeta("image");
+    const mime = strOrNull(payload.mime) ?? prevMeta.mime;
+    const kind = mediaKindFromMime(mime) ?? prevMeta.kind;
+    return {
+      handle: strOrNull(payload.handle) ?? prev?.handle ?? null,
+      state: "ready",
+      beganAt: prev?.beganAt ?? null,
+      meta: {
+        ...prevMeta,
+        kind,
+        path: strOrNull(payload.path) ?? prevMeta.path,
+        mime,
+        width: numOrNull(payload.width),
+        height: numOrNull(payload.height),
+        count: prevMeta.count,
+        title: strOrNull(payload.title) ?? prevMeta.title,
+      },
+    };
+  }
+  if (action === "fail") {
+    const meta = prev?.meta ?? baseMeta("image");
+    return {
+      handle: strOrNull(payload.handle) ?? prev?.handle ?? null,
+      state: "failed",
+      beganAt: prev?.beganAt ?? null,
+      meta,
+    };
+  }
+  // Unknown action: leave whatever was there (or a neutral pending box).
+  return prev ?? { handle: null, state: "pending", beganAt: null, meta: baseMeta("image") };
+}
+
+/** The one-switch media dispatcher (mirrors dispatchAppControl). The App-level
+ *  `onMedia` listener hands it the raw payload; it routes to the matching
+ *  handler so call sites never switch on `action` themselves. */
+export type MediaHandlers = {
+  begin?: (p: MediaEventPayload) => void;
+  show?: (p: MediaEventPayload) => void;
+  fail?: (p: MediaEventPayload) => void;
+};
+
+export function dispatchMedia(payload: unknown, handlers: MediaHandlers): void {
+  if (!payload || typeof payload !== "object") return;
+  const p = payload as MediaEventPayload;
+  if (p.action === "begin") {
+    handlers.begin?.(p);
+    return;
+  }
+  if (p.action === "show") {
+    handlers.show?.(p);
+    return;
+  }
+  if (p.action === "fail") {
+    handlers.fail?.(p);
+    return;
+  }
 }
 
 // ---- Work inbox (BET-795) --------------------------------------------------

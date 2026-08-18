@@ -936,6 +936,32 @@ export type AppControlPayload = {
   name?: string;
 };
 
+// BET-1148: inline media bus events (src/server/media.mjs). ONE `media` bus
+// kind with an `action` discriminator, published when the media tools land a
+// client-visible effect:
+//   begin — the model declared it will generate media (reserve the final box).
+//   show  — the file exists; swap the media in (carries the box path + mime).
+//   fail  — a `begin` was never followed by a `show` (orphan sweep); the
+//           placeholder ends as a labelled failure.
+// The renderer routes by (sessionID, messageID) and keys its per-session
+// placeholder state on `messageID`. Client-agnostic so the native client can
+// adopt the same bus kind later.
+export type MediaEventPayload = {
+  action: string;
+  handle?: string | null;
+  sessionID?: string | null;
+  messageID?: string | null;
+  kind?: "image" | "video" | null;
+  width?: number | null;
+  height?: number | null;
+  aspectRatio?: number | null;
+  count?: number | null;
+  title?: string | null;
+  path?: string | null;
+  mime?: string | null;
+  size?: number | null;
+};
+
 // SSH installer (BET-355) — push-event shape + state snapshot. These types
 // are declared in src/shared/types.ts so both the preload runtime (which
 // imports them into src/preload/index.ts) AND the renderer-side accessor

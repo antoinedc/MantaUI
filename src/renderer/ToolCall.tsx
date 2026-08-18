@@ -16,7 +16,7 @@ import { memo, useState } from "react";
 import { motion } from "framer-motion";
 import { MESSAGE_IN_ENTER, MESSAGE_IN_IDLE } from "./chatMotion";
 import type { OpencodePart } from "../shared/types";
-import { resolveToolOutput } from "./chatUtils";
+import { filePartToMediaEntry, isMediaMime, resolveToolOutput } from "./chatUtils";
 import { type ToolState } from "./chatShared";
 import { renderMarkdown } from "./MarkdownBody";
 import {
@@ -29,6 +29,7 @@ import {
   WebFetchBody,
 } from "./ToolBodies";
 import { ToolCard } from "./ToolCard";
+import { MediaBody } from "./MediaBody";
 import { OutputWell } from "./OutputWell";
 import { TaskCard } from "./TaskCard";
 import { CardMount } from "./components/CardMount";
@@ -140,14 +141,20 @@ function renderAssistantPart(
     return <PatchCard part={part} />;
   }
 
-  // File reference (attached file in a prompt, or returned by a tool). Header
-  // only — filename + mime is the whole of it. Deliberately NO chevron, for the
+  // File reference (attached file in a prompt, or returned by a tool). An
+  // image/video file part renders the shared MediaBody (BET-1148) — the media
+  // IS the result, so it shows inline rather than collapsing to a header-only
+  // card. Any other mime keeps today's header-only card: filename + mime is
+  // the whole of it. Deliberately NO chevron for the non-media case, for the
   // same reason as the unrecognized-part fallback below: there is no body to
   // reveal, and a disclosure whose expanded state repeats its own header is
   // worse than no disclosure at all.
   if (part.type === "file") {
     const filename = String((part as Record<string, unknown>).filename ?? "");
     const mime = String((part as Record<string, unknown>).mime ?? "");
+    if (isMediaMime(mime)) {
+      return <MediaBody entry={filePartToMediaEntry(part)} />;
+    }
     return <ToolCard tone="ok" name="File" arg={`${filename || "(file)"}${mime ? ` · ${mime}` : ""}`} />;
   }
 
