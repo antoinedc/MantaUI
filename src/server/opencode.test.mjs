@@ -42,6 +42,8 @@ import {
   claudeCliStatus,
   parseProviderApiKey,
   readProviderApiKey,
+  parseProviderOAuthToken,
+  readProviderOAuthToken,
   opencodeAuthPath,
   completeProviderOauth,
 } from "./opencode.mjs";
@@ -154,6 +156,88 @@ test("readProviderApiKey returns the key for a valid api-type entry", async () =
     await readVia(JSON.stringify({ "kimi-for-coding": { type: "api", key: "kimi-provider-key" } })),
     "kimi-provider-key",
   );
+});
+
+// ---------------------------------------------------------------------------
+// parseProviderOAuthToken (BET-1128) — the oauth sibling of
+// parseProviderApiKey. Reads the `access` token of an `oauth`-type entry in
+// opencode's own auth store (e.g. the `openai` entry for an OpenAI sign-in).
+// Never touches a real file.
+// ---------------------------------------------------------------------------
+
+const OPENAI_OAUTH = JSON.stringify({
+  openai: { type: "oauth", access: "mom-access-token", refresh: "mom-refresh", accountId: "acc-1", expires: 1788 },
+});
+
+test("parseProviderOAuthToken extracts the access token from an oauth-type entry", () => {
+  assert.equal(parseProviderOAuthToken(OPENAI_OAUTH, "openai"), "mom-access-token");
+});
+
+test("parseProviderOAuthToken returns \"\" for an api-type entry (no `access` field)", () => {
+  const raw = JSON.stringify({ openai: { type: "api", key: "some-key" } });
+  assert.equal(parseProviderOAuthToken(raw, "openai"), "");
+});
+
+test("parseProviderOAuthToken returns \"\" for a provider with no entry", () => {
+  const raw = JSON.stringify({ anthropic: { type: "oauth", access: "x", refresh: "y" } });
+  assert.equal(parseProviderOAuthToken(raw, "openai"), "");
+});
+
+test("parseProviderOAuthToken returns \"\" for a non-oauth entry even when it carries a non-empty `access` (type gate)", () => {
+  // type === "oauth" is the discriminant — a stray `access` on an api/common
+  // entry must never be trusted as a Bearer credential.
+  const raw = JSON.stringify({ openai: { type: "api", access: "should-not-leak", key: "x" } });
+  assert.equal(parseProviderOAuthToken(raw, "openai"), "");
+  const rawNoType = JSON.stringify({ openai: { access: "still-no-type" } });
+  assert.equal(parseProviderOAuthToken(rawNoType, "openai"), "");
+});
+
+test("parseProviderOAuthToken returns \"\" for an empty-string access token", () => {
+  const raw = JSON.stringify({ openai: { type: "oauth", access: "" } });
+  assert.equal(parseProviderOAuthToken(raw, "openai"), "");
+});
+
+test("parseProviderOAuthToken returns \"\" for unparseable JSON", () => {
+  assert.equal(parseProviderOAuthToken("not json{", "openai"), "");
+});
+
+test("parseProviderOAuthToken returns \"\" for an empty auth store", () => {
+  assert.equal(parseProviderOAuthToken("{}", "openai"), "");
+});
+
+test("parseProviderOAuthToken never echoes the token into an exception (it doesn't throw at all)", () => {
+  assert.equal(parseProviderOAuthToken("null", "openai"), "");
+  assert.equal(parseProviderOAuthToken("[]", "openai"), "");
+  assert.equal(parseProviderOAuthToken('"just a string"', "openai"), "");
+});
+
+// readProviderOAuthToken (BET-1128) — the IO wrapper around
+// parseProviderOAuthToken, mirroring readProviderApiKey exactly: injectable
+// readFile, "" (never a throw) on missing file / unparseable / wrong type.
+const readOauthVia = (text) =>
+  readProviderOAuthToken("openai", { readFile: () => text });
+
+test("readProviderOAuthToken returns \"\" when the auth store file is missing (reader throws)", async () => {
+  assert.equal(
+    await readProviderOAuthToken("openai", { readFile: () => { throw new Error("ENOENT"); } }),
+    "",
+  );
+});
+
+test("readProviderOAuthToken returns \"\" for unparseable JSON", async () => {
+  assert.equal(await readOauthVia("not json{"), "");
+});
+
+test("readProviderOAuthToken returns \"\" for a provider with no entry", async () => {
+  assert.equal(await readOauthVia(JSON.stringify({ anthropic: { type: "oauth", access: "x" } })), "");
+});
+
+test("readProviderOAuthToken returns \"\" for an api-type entry", async () => {
+  assert.equal(await readOauthVia(JSON.stringify({ openai: { type: "api", key: "k" } })), "");
+});
+
+test("readProviderOAuthToken returns the access token for a valid oauth-type entry", async () => {
+  assert.equal(await readOauthVia(OPENAI_OAUTH), "mom-access-token");
 });
 
 // opencodeAuthPath (review cycle 2 Nit): mirrors messageSearch.mjs's

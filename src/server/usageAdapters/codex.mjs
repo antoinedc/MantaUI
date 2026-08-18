@@ -1,36 +1,32 @@
 // codex.mjs — usage adapter for Codex / ChatGPT Plus-Pro (BET-737).
 //
-// Credential: ~/.codex/auth.json, `tokens.access_token` (falls back to a
-// top-level `access_token`). Path resolved via homedir() — never hardcode
-// `/home/...` (matches claudeAuth.mjs's own CREDENTIALS_PATH convention).
+// Credential: opencode's OWN OpenAI sign-in — `~/.local/share/opencode/
+// auth.json`, the `openai` entry, oauth `access` token. This adapter is a
+// READER of opencode's connection, not a second place to enter it — no config
+// field, no secrets-store entry, no new credentials file (`readProviderOAuthToken`
+// in opencode.mjs resolves the store path and returns "" on any read/parse
+// failure or a missing/wrong-type entry — never throws). opencode is the only
+// thing on the box that runs models, so an OpenAI session opencode does not
+// hold is not usage worth reporting; opencode also owns the token's refresh
+// lifecycle (an expired token simply 401s and the poller's carry-forward
+// handles it). If the user isn't signed into OpenAI through opencode,
+// `detect()` is simply false: a silent, correct inactive state, not an error.
 //
 // Endpoint schema is public in the codex repo — the most stable of the three
 // adapters — but every field read stays defensive anyway, for consistency
 // with its siblings and in case the box is running an older/newer codex CLI.
 
-import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { readProviderOAuthToken } from "../opencode.mjs";
 import { normalizeWindow } from "./normalizeWindow.mjs";
 import { httpError } from "./httpError.mjs";
 
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+const PROVIDER_ID = "openai";
 
-function authPath() {
-  return join(homedir(), ".codex", "auth.json");
-}
-
-// Default I/O — overridable per-call so tests never touch the real
-// credentials file or the network.
-async function defaultReadToken() {
-  try {
-    const raw = await readFile(authPath(), "utf-8");
-    const parsed = JSON.parse(raw);
-    const token = parsed?.tokens?.access_token ?? parsed?.access_token;
-    return typeof token === "string" ? token : null;
-  } catch {
-    return null;
-  }
+// Default I/O — overridable per-call so tests never touch opencode's real
+// auth store or the network.
+function defaultReadToken() {
+  return readProviderOAuthToken(PROVIDER_ID);
 }
 
 function titleCase(s) {
