@@ -175,7 +175,7 @@ test("saveMedia: accepts data (base64) and returns measured metadata", async () 
   assert.equal(writes.length, 1); // decoded blob staged to temp
   assert.equal(pushed.length, 1);
   assert.equal(pushed[0].sid, "s1");
-  assert.deepEqual(pushed[0].opts, { messageID: "m1" });
+  assert.deepEqual(pushed[0].opts, { messageID: "m1", media: true });
 });
 
 test("saveMedia: accepts sourcePath (existing file) as-is", async () => {

@@ -260,6 +260,7 @@ export async function saveMedia(
 
   const pushed = await pushArtifact(measurePath, sessionID, {
     messageID: typeof messageID === "string" && messageID ? messageID : undefined,
+    media: true,
   });
 
   if (tempDir) await remove(tempDir, { recursive: true, force: true }).catch(() => {});

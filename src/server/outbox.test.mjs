@@ -326,3 +326,77 @@ test("pushArtifact ignores a blank/absent messageID (no empty sidecar written)",
     await rm(src, { force: true });
   }
 });
+
+test("pushArtifact with media:true tags the sidecar; listOutbox exposes media true", async () => {
+  const root = await makeOutbox();
+  const src = join(root, "..", "src-media.png");
+  await writeFile(src, "img\n");
+  try {
+    const res = await pushArtifact(src, "ses_m", { root, media: true, messageID: "msg-media" });
+    assert.equal(res.ok, true);
+    assert.equal(res.row.media, true, "row returned to tool carries the tag");
+    const listed = await listOutbox(root, { sessionID: "ses_m" });
+    assert.equal(listed.length, 1);
+    assert.equal(listed[0].media, true, "persisted tag survives listOutbox round-trip");
+    assert.equal(listed[0].messageID, "msg-media", "messageID still present alongside the tag");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(src, { force: true });
+  }
+});
+
+test("pushArtifact without media:true exposes media false", async () => {
+  const root = await makeOutbox();
+  const src = join(root, "..", "src-plain.png");
+  await writeFile(src, "img\n");
+  try {
+    const res = await pushArtifact(src, "ses_p", { root });
+    assert.equal(res.ok, true);
+    assert.equal(res.row.media, false, "ordinary push is untagged");
+    const listed = await listOutbox(root, { sessionID: "ses_p" });
+    assert.equal(listed.length, 1);
+    assert.equal(listed[0].media, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(src, { force: true });
+  }
+});
+
+test("scanner publishes NO agentFile event for a media-tagged row", async () => {
+  const root = await makeOutbox();
+  const bus = fakeBus();
+  const src = join(root, "..", "img-media.png");
+  await writeFile(src, "img\n");
+  try {
+    await pushArtifact(src, "ses_m", { root, media: true, messageID: "m1" });
+    const { tick } = createOutboxScanner(bus, root);
+    await tick();
+    await tick();
+    assert.equal(fileEvents(bus).length, 0, "media file never announced");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(src, { force: true });
+  }
+});
+
+test("scanner announces an untagged row alongside a media-tagged one", async () => {
+  const root = await makeOutbox();
+  const bus = fakeBus();
+  const srcMedia = join(root, "..", "img-a.png");
+  const srcPlain = join(root, "..", "doc-b.pdf");
+  await writeFile(srcMedia, "img\n");
+  await writeFile(srcPlain, "pdf\n");
+  try {
+    await pushArtifact(srcMedia, "ses_m", { root, media: true, messageID: "m1" });
+    await pushArtifact(srcPlain, "ses_p", { root });
+    const { tick } = createOutboxScanner(bus, root);
+    await tick();
+    const evs = fileEvents(bus);
+    assert.equal(evs.length, 1, "only the untagged file is announced");
+    assert.equal(evs[0].payload.name, "doc-b.pdf");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(srcMedia, { force: true });
+    await rm(srcPlain, { force: true });
+  }
+});
