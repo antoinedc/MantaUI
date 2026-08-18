@@ -170,7 +170,7 @@ describe("deriveArtifacts", () => {
 
   it("outbox file → file artifact (origin agent, scoped to its session)", () => {
     const got = deriveArtifacts([], [], "ses_a", [
-      { path: "/home/dev/.manta-outbox/q3-revenue.csv", name: "q3-revenue.csv", size: 1204, sessionID: "ses_a", mtime: 5000, expiresAt: 5000 + 604800000 },
+      { path: "/home/dev/.manta-outbox/q3-revenue.csv", name: "q3-revenue.csv", size: 1204, sessionID: "ses_a", mtime: 5000, expiresAt: 5000 + 604800000, messageID: "msg-abc" },
     ]);
     expect(got).toHaveLength(1);
     expect(got[0]).toMatchObject({
@@ -181,7 +181,7 @@ describe("deriveArtifacts", () => {
       mime: "text/csv",
       size: 1204,
       at: 5000,
-      messageId: null,
+      messageId: "msg-abc",
       context: null,
       expiresAt: 5000 + 604800000,
     });
@@ -189,14 +189,14 @@ describe("deriveArtifacts", () => {
 
   it("outbox files from another session are excluded (workspace-linked)", () => {
     const got = deriveArtifacts([], [], "ses_a", [
-      { path: "/home/dev/.manta-outbox/x.csv", name: "x.csv", size: 1, sessionID: "ses_OTHER", mtime: 1000, expiresAt: null },
+      { path: "/home/dev/.manta-outbox/x.csv", name: "x.csv", size: 1, sessionID: "ses_OTHER", mtime: 1000, expiresAt: null, messageID: null },
     ]);
     expect(got).toEqual([]);
   });
 
   it("outbox image file → image artifact with its mime", () => {
     const got = deriveArtifacts([], [], "ses_a", [
-      { path: "/home/dev/.manta-outbox/shot.png", name: "shot.png", size: 2048, sessionID: "ses_a", mtime: 1000, expiresAt: null },
+      { path: "/home/dev/.manta-outbox/shot.png", name: "shot.png", size: 2048, sessionID: "ses_a", mtime: 1000, expiresAt: null, messageID: null },
     ]);
     expect(got).toHaveLength(1);
     expect(got[0].kind).toBe("image");
@@ -205,7 +205,7 @@ describe("deriveArtifacts", () => {
 
   it("outbox file with an unknown extension keeps a null mime (file kind)", () => {
     const got = deriveArtifacts([], [], "ses_a", [
-      { path: "/home/dev/.manta-outbox/archive.bin", name: "archive.bin", size: 99, sessionID: "ses_a", mtime: 1000, expiresAt: null },
+      { path: "/home/dev/.manta-outbox/archive.bin", name: "archive.bin", size: 99, sessionID: "ses_a", mtime: 1000, expiresAt: null, messageID: null },
     ]);
     expect(got).toHaveLength(1);
     expect(got[0].kind).toBe("file");
@@ -217,7 +217,7 @@ describe("deriveArtifacts", () => {
       msg("u", "user", [filePart({ filename: "mine.csv", url: "file:///home/dev/.manta-uploads/mine.csv" })]),
     ];
     const got = deriveArtifacts(messages, [], "ses_a", [
-      { path: "/home/dev/.manta-outbox/pushed.pdf", name: "pushed.pdf", size: 100, sessionID: "ses_a", mtime: 2000, expiresAt: null },
+      { path: "/home/dev/.manta-outbox/pushed.pdf", name: "pushed.pdf", size: 100, sessionID: "ses_a", mtime: 2000, expiresAt: null, messageID: null },
     ]);
     expect(got.length).toBe(2);
     expect(got.map((a) => a.origin).sort()).toEqual(["agent", "user"]);
