@@ -44,12 +44,12 @@ resolve_arch() {
     Darwin)
       case "$m" in
         arm64)  ARCH_KEY="darwin_arm64" ;;
-        *) die "unsupported Mac: $m — the MantaUI box installer supports Apple Silicon (arm64) Macs only.
-      Intel Macs are not supported as a box. If you just want to USE MantaUI on this Mac,
+        *) die "unsupported Mac: $m — the MantaUI server installer supports Apple Silicon (arm64) Macs only.
+      Intel Macs are not supported as a server. If you just want to USE MantaUI on this Mac,
       install the desktop app instead: https://mantaui.com/downloads/Manta-latest.dmg" ;;
       esac
       ;;
-    *) die "unsupported OS: $s (the MantaUI box installer supports Linux and macOS/Apple Silicon)" ;;
+    *) die "unsupported OS: $s (the MantaUI server installer supports Linux and macOS/Apple Silicon)" ;;
   esac
 }
 
@@ -245,9 +245,9 @@ install_prod_deps() {
   warn "self-update: npm ci failed — restoring the previous node_modules"
   rm -rf "$dest/node_modules"
   if [ -d "$backup" ]; then
-    mv "$backup" "$dest/node_modules" || die "self-update: could not restore node_modules — box may not start; re-run install.sh"
+    mv "$backup" "$dest/node_modules" || die "self-update: could not restore node_modules — server may not start; re-run install.sh"
     die "self-update: dependency install failed; previous node_modules restored.
-      The box still runs, but it is now on new source with older deps — re-run
+      The server still runs, but it is now on new source with older deps — re-run
       install.sh to get a matching prebuilt tree."
   fi
   die "self-update: dependency install failed and there was no previous node_modules to restore — re-run install.sh"
