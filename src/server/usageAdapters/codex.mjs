@@ -17,7 +17,7 @@
 // with its siblings and in case the box is running an older/newer codex CLI.
 
 import { readProviderOAuthToken } from "../opencode.mjs";
-import { normalizeWindow } from "./normalizeWindow.mjs";
+import { normalizeWindow, usageWindowLabel } from "./normalizeWindow.mjs";
 import { httpError } from "./httpError.mjs";
 
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
@@ -69,7 +69,7 @@ export const codexAdapter = {
     const session = primary
       ? normalizeWindow({
           kind: "session",
-          label: "Session (5h)",
+          label: usageWindowLabel(primary?.limit_window_seconds),
           pct: primary?.used_percent,
           resetsAt: resolveResetsAt(primary, nowMs),
         })
@@ -80,7 +80,7 @@ export const codexAdapter = {
     const weekly = secondary
       ? normalizeWindow({
           kind: "weekly",
-          label: "Weekly",
+          label: usageWindowLabel(secondary?.limit_window_seconds),
           pct: secondary?.used_percent,
           resetsAt: resolveResetsAt(secondary, nowMs),
         })

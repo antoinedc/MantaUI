@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { normalizeWindow, createUsagePoller, ADAPTERS, rateLimitBackoffMs, carryForward } from "./usage.mjs";
+import { usageWindowLabel } from "./usageAdapters/normalizeWindow.mjs";
 import { claudeAdapter } from "./usageAdapters/claude.mjs";
 import { codexAdapter } from "./usageAdapters/codex.mjs";
 import { kimiAdapter } from "./usageAdapters/kimi.mjs";
@@ -117,6 +118,25 @@ test("normalizeWindow: kind/label/binding pass through", () => {
   // binding omitted entirely when not explicitly true.
   const w2 = normalizeWindow({ pct: 41 });
   assert.equal("binding" in w2, false);
+});
+
+// ----------------------------------------------------------------------------
+// usageWindowLabel — pure
+// ----------------------------------------------------------------------------
+
+test("usageWindowLabel: unusable durations yield an empty label", () => {
+  assert.equal(usageWindowLabel(0), "");
+  assert.equal(usageWindowLabel(-1), "");
+  assert.equal(usageWindowLabel(undefined), "");
+  assert.equal(usageWindowLabel(null), "");
+  assert.equal(usageWindowLabel("abc"), "");
+});
+
+test("usageWindowLabel: derives m/h/d from the window length in seconds", () => {
+  assert.equal(usageWindowLabel(1800), "30m");
+  assert.equal(usageWindowLabel(18000), "5h");
+  assert.equal(usageWindowLabel(604800), "7d");
+  assert.equal(usageWindowLabel(2592000), "30d");
 });
 
 // ----------------------------------------------------------------------------
@@ -653,6 +673,37 @@ test("codex adapter: no credits, no plan_type — extras/planLabel omitted, not 
   });
   assert.equal("planLabel" in snap, false);
   assert.equal("extras" in snap, false);
+});
+
+test("codex adapter: a 30-day primary window is labelled 30d, not Session (5h)", async () => {
+  const sample = {
+    rate_limit: {
+      primary_window: { used_percent: 3, limit_window_seconds: 2592000, reset_at: 1735700000000 },
+      secondary_window: { used_percent: 91, reset_at: 1735700000000 },
+    },
+  };
+  const snap = await codexAdapter.fetch({
+    fetchImpl: async () => fakeResponse(200, sample),
+    readToken: async () => "tok",
+    now: () => 1_700_000_000_000,
+  });
+  const session = snap.windows.find((w) => w.kind === "session");
+  assert.equal(session.label, "30d");
+});
+
+test("codex adapter: a window with no limit_window_seconds still yields a usable window with empty label", async () => {
+  const sample = {
+    rate_limit: { primary_window: { used_percent: 5, reset_at: 1735700000000 } },
+  };
+  const snap = await codexAdapter.fetch({
+    fetchImpl: async () => fakeResponse(200, sample),
+    readToken: async () => "tok",
+    now: () => 1_700_000_000_000,
+  });
+  const session = snap.windows.find((w) => w.kind === "session");
+  assert.ok(session, "a pct with no duration still produces a window");
+  assert.equal(session.label, "");
+  assert.equal(session.pct, 5);
 });
 
 test("codex adapter: detect() requires a non-empty token", async () => {

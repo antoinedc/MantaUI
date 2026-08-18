@@ -28,7 +28,7 @@
  * @typedef {Object} UsageWindow
  * @property {"session"|"weekly"|string} kind  Open set — a provider with a
  *   daily window works with no engine change.
- * @property {string} label      Human label, e.g. "Session (5h)".
+ * @property {string} label      Human label, e.g. "5h".
  * @property {number} pct        0-100, ALWAYS present. Derived when the
  *                               provider reports only absolutes.
  * @property {number} [used]     Absolute count when the provider exposes one.
