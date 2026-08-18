@@ -907,11 +907,6 @@ function getCtoEngine() {
       listStopped,
       searchMessages,
       configGet: () => local.configGet(),
-      gitStatus: (cwd) => tmux.run("git", ["-C", cwd, "status", "--porcelain"]).then((r) => r?.stdout ?? ""),
-      gitBranch: (cwd) =>
-        tmux.run("git", ["-C", cwd, "branch", "--show-current"]).then((r) => (r?.stdout ?? "").trim() || null),
-      gitLog: (cwd, { n }) =>
-        tmux.run("git", ["-C", cwd, "log", `--max-count=${n}`, "--oneline"]).then((r) => r?.stdout ?? ""),
       queryMultica,
     });
   }
