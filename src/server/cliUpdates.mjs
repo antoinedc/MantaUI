@@ -23,6 +23,23 @@ import { createJsonFetcher } from "./conditionalFetch.mjs";
 const defaultAccess = (p, mode) => fsAccess(p, mode);
 const defaultSpawn = (cmd, args, opts) => nodeSpawn(cmd, args, opts);
 
+// One conditional-GET fetcher PER CATALOG ENTRY, memoized for the process
+// lifetime. It MUST be per-entry, never one shared instance: createJsonFetcher
+// caches exactly ONE etag and ONE parsed body per fetcher, so a single fetcher
+// used for four different URLs could answer a 304 with the body of a DIFFERENT
+// package. Per-entry keeps the conditional GET correct (each entry maps to
+// exactly one URL) and keeps the ETag benefit across the detector's 5-minute
+// re-probes.
+const entryFetchers = new Map();
+function defaultFetchJsonFor(entryId) {
+  let f = entryFetchers.get(entryId);
+  if (!f) {
+    f = createJsonFetcher({ label: "cli latest fetch" });
+    entryFetchers.set(entryId, f);
+  }
+  return f;
+}
+
 // ---------------------------------------------------------------------------
 // resolveBinary
 // ---------------------------------------------------------------------------
@@ -261,7 +278,9 @@ export async function detectClis(deps = {}) {
     if (!absPath) continue; // not installed → omitted entirely
 
     const current = await readVersion(absPath, { spawn });
-    const latest = await fetchLatest(entry, { fetchJson: deps.fetchJson });
+    const latest = await fetchLatest(entry, {
+      fetchJson: deps.fetchJson ?? defaultFetchJsonFor(entry.id),
+    });
 
     const upgrade = resolveUpgradeCommand(entry, absPath, npmGlobalRoot);
     const manual = upgrade === null;

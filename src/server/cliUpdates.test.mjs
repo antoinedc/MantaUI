@@ -289,3 +289,30 @@ test("detector: two concurrent detect() calls perform ONE probe round", async ()
   await detector.detect();
   assert.equal(rootProbes, 1, "cached result must not re-probe");
 });
+
+test("detectClis: uses a real default fetchJson when none is injected (regression)", async () => {
+  // THE regression: deps.fetchJson had no production default, so every CLI
+  // reported latest:null / ok:false and Settings › About said "Couldn't check".
+  const deps = detectDeps({ installed: ["/home/user/.local/bin/claude"] });
+  delete deps.fetchJson; // exactly how src/server/index.mjs wires it
+
+  const urls = [];
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    urls.push(String(url));
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => null }, // no etag — keeps the memoized fetcher inert for later tests
+      json: async () => ({ version: "9.9.9" }),
+    };
+  };
+  try {
+    const [claude] = await detectClis(deps);
+    assert.deepEqual(urls, ["https://registry.npmjs.org/@anthropic-ai/claude-code/latest"]);
+    assert.equal(claude.latest, "9.9.9");
+    assert.equal(claude.ok, true);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
