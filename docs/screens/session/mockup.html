@@ -105,7 +105,10 @@
 /* ---- rail ---- */
 .rail{background:var(--panel);border-right:1px solid var(--border-subtle);display:flex;flex-direction:column;min-width:0}
 .rail-top{height:46px;display:flex;align-items:center;gap:var(--sp-2);padding:0 var(--sp-3);border-bottom:1px solid var(--border-subtle);flex-shrink:0}
-.rail-top .logo{width:18px;height:18px;border-radius:5px;background:linear-gradient(135deg,var(--accent),color-mix(in srgb,var(--accent) 40%,var(--info)))}
+/* The one Manta mark — the same artwork the app ships as
+   src/renderer/assets/manta-mark-128.png and draws in the transcript loader.
+   Never a gradient tile or a hand-drawn SVG stand-in. */
+.rail-top .logo{width:18px;height:18px;background:url(/docs/brand/manta-mark.png) center/contain no-repeat}
 .rail-top .nm{font:600 13px/1 var(--font-sans)}
 .iconbtn{width:28px;height:28px;border-radius:var(--r-sm);border:0;background:transparent;color:var(--tx3);
   cursor:pointer;display:grid;place-items:center;transition:.15s var(--ease)}

@@ -64,20 +64,14 @@
       margin-bottom: 32px;
     }
 
+    /* The brand mark is the ONE artwork (the manta ray in the cyan→blue
+       gradient) — same image the app ships as manta-mark-128.png and draws in
+       the transcript loader. No gradient tile, no stand-in glyph. */
     .logo-icon {
       width: 36px;
       height: 36px;
-      background: linear-gradient(135deg, var(--accent), #a78bfa);
-      border-radius: var(--radius-sm);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-
-    .logo-icon svg {
-      width: 20px;
-      height: 20px;
-      color: white;
+      object-fit: contain;
+      display: block;
     }
 
     .logo-text {
@@ -670,13 +664,7 @@
     <!-- Header -->
     <div class="header">
       <div class="logo">
-        <div class="logo-icon">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 2L2 7l10 5 10-5-10-5z"/>
-            <path d="M2 17l10 5 10-5"/>
-            <path d="M2 12l10 5 10-5"/>
-          </svg>
-        </div>
+        <img class="logo-icon" src="https://mantaui.com/manta-logo.png" alt="" aria-hidden="true">
         <span class="logo-text">manta</span>
       </div>
 

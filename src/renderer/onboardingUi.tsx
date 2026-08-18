@@ -10,34 +10,14 @@ import { Button } from "./Button";
 
 // ── Brand mark ───────────────────────────────────────────────────────────────
 //
-// BET-421 §F: first-run used a PNG on desktop and an inline SVG on mobile.
-// One mark for both. The two-arc manta shape is the same path the mobile
-// SetupScreen already drew; rendering it with `currentColor` lets the
-// caller pick accent/white without a second asset.
-
-export function MantaMark({ className = "w-9 h-9" }: { className?: string }) {
-  return (
-    <svg
-      className={className}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      aria-hidden="true"
-    >
-      <path
-        d="M3 17c3-6 6-9 9-9s6 3 9 9"
-        strokeWidth="2"
-        strokeLinecap="round"
-      />
-      <path
-        d="M7 17c2-3.5 3.4-5 5-5s3 1.5 5 5"
-        strokeWidth="2"
-        strokeLinecap="round"
-        opacity=".6"
-      />
-    </svg>
-  );
-}
+// There is NO brand mark here, and there must never be one again. The Manta
+// mark is ONE artwork — the manta ray in the cyan→blue gradient, shipped as
+// `src/renderer/assets/manta-mark-128.png` and rendered by `MantaLoader.tsx`
+// (`MantaLoader` / `MantaMark`). Every surface that shows the brand imports
+// from there. This file used to export a hand-drawn two-arc SVG "manta" as a
+// second mark; it was not the manta ray, it drifted into mockups and plan
+// pages as if it were official, and it is deleted. Do not re-add an inline
+// SVG, a gradient square, or any other stand-in — import the real mark.
 
 // ── Icons ────────────────────────────────────────────────────────────────────
 
