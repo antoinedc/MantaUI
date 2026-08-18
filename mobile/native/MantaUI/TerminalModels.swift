@@ -98,7 +98,8 @@ enum TerminalKeyInput {
               let v = c.asciiValue, (97...122).contains(Int(v)) else {
             return nil
         }
-        return String(UnicodeScalar(Int(v) - 96)!)
+        guard let scalar = UnicodeScalar(Int(v) - 96) else { return nil }
+        return String(scalar)
     }
 }
 

@@ -38,6 +38,21 @@ disabled_rules:
   - large_tuple
   - nesting
   - function_parameter_count
+  # Cosmetic rules that are ON BY DEFAULT and were never listed here. This
+  # config is a crash gate, not a formatter (see the header), so they are off
+  # for the same reason line_length is. These accounted for 84 of the original
+  # baseline's 104 unique violations.
+  - trailing_comma
+  - implicit_optional_initialization
+  - multiple_closures_with_trailing_closure
+  - control_statement
+  - for_where
+  - vertical_whitespace
+  - trailing_newline
+  - orphaned_doc_comment
+  - statement_position
+  - unused_closure_parameter
+  - unneeded_synthesized_initializer
 
 # Crash-prevention rules that are OPT-IN and therefore off unless listed here.
 opt_in_rules:

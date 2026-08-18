@@ -161,7 +161,12 @@ enum UsageMeters {
         // The desktop's ASSUMED_CONTEXT_TOKENS fallback — used whenever the
         // selected model's window is unknown or non-positive, exactly as the
         // shared `computeContextBreakdown` does.
-        let safeLimit = (limit?.isFinite == true && limit! > 0) ? limit! : assumedContextTokens
+        let safeLimit: Double
+        if let limit, limit.isFinite, limit > 0 {
+            safeLimit = limit
+        } else {
+            safeLimit = assumedContextTokens
+        }
 
         // Guard the raw counts: the payload arrives from the box already
         // rounded and non-negative, but a bad value must never produce NaN or

@@ -214,10 +214,15 @@ final class TerminalContainerController: UIViewController {
     let dangerColor: UIColor
     private var cancellables = Set<AnyCancellable>()
 
+    // Built once in setup() immediately after init and non-nil for the whole
+    // lifetime of the view; making them optional would add a `?` to every use
+    // site without removing any real nil case.
+    // swiftlint:disable implicitly_unwrapped_optional
     private var webView: WKWebView!
     private var inputField: TerminalInputField!
     private var keyBar: TerminalKeyBarView!
     private var floatingBar: TerminalFloatingBarView!
+    // swiftlint:enable implicitly_unwrapped_optional
     private var socket: TerminalSocket?
     private let api = MantaAPIClient.live()
 
@@ -536,6 +541,9 @@ extension TerminalContainerController: WKScriptMessageHandler, WKNavigationDeleg
         }
     }
 
+    // Apple's WKNavigationDelegate signature — changing the `!` silently
+    // un-conforms and the callback stops firing.
+    // swiftlint:disable:next implicitly_unwrapped_optional
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         webViewDidFinish(webView)
     }
