@@ -21,6 +21,10 @@ export function describeTruncation(kind: TruncationKind): {
   hint: string;
 };
 
+/** Unwrap the human sentence from a provider rejection body
+ *  (`<reason phrase>: <JSON>`), or return the input unchanged. Lossless. */
+export function humanizeProviderError(raw: string): string;
+
 export function findFlushBoundary(buffer: string): number;
 
 /** Max time a chunk may be withheld before the caller flushes at the latest

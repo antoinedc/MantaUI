@@ -38,6 +38,7 @@ import {
   shouldAutoRename,
   shouldDropEventForSessionFilter,
   summarizeChildSession,
+  humanizeProviderError,
 } from "./streamInterpretation.mjs";
 
 
@@ -2044,5 +2045,113 @@ describe("isSafeCut", () => {
   it("ignores underscores — they are constant in paths and identifiers", () => {
     // Counting them would block almost every cut.
     expect(isSafeCut("see src/foo_bar.ts and _baz. ")).toBe(true);
+  });
+});
+
+describe("humanizeProviderError", () => {
+  const screenshot =
+    "Bad Request: {\"detail\":\"The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.\"}";
+
+  it("unwraps the screenshot case end to end", () => {
+    expect(humanizeProviderError(screenshot)).toBe(
+      "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.",
+    );
+  });
+
+  it("unwraps the four body shapes WITH a leading reason phrase", () => {
+    expect(
+      humanizeProviderError(
+        `Bad Request: ${JSON.stringify({ detail: "detail sentence" })}`,
+      ),
+    ).toBe("detail sentence");
+    expect(
+      humanizeProviderError(
+        `Bad Request: ${JSON.stringify({
+          error: { message: "openai sentence", type: "invalid_request_error", code: "model_not_found", param: null },
+        })}`,
+      ),
+    ).toBe("openai sentence");
+    expect(
+      humanizeProviderError(
+        `Bad Request: ${JSON.stringify({
+          type: "error",
+          error: { type: "not_found_error", message: "anthropic sentence" },
+        })}`,
+      ),
+    ).toBe("anthropic sentence");
+    expect(
+      humanizeProviderError(
+        `Bad Request: ${JSON.stringify({ message: "misc sentence" })}`,
+      ),
+    ).toBe("misc sentence");
+  });
+
+  it("unwraps the four body shapes WITHOUT a leading reason phrase", () => {
+    expect(humanizeProviderError(JSON.stringify({ detail: "detail sentence" }))).toBe(
+      "detail sentence",
+    );
+    expect(
+      humanizeProviderError(JSON.stringify({ error: { message: "openai sentence" } })),
+    ).toBe("openai sentence");
+    expect(
+      humanizeProviderError(JSON.stringify({ type: "error", error: { type: "x", message: "anthropic sentence" } })),
+    ).toBe("anthropic sentence");
+    expect(humanizeProviderError(JSON.stringify({ message: "misc sentence" }))).toBe(
+      "misc sentence",
+    );
+  });
+
+  it("drops the reason phrase but keeps the extracted sentence", () => {
+    // The extracted sentence already says everything the reason phrase did.
+    expect(
+      humanizeProviderError(`Bad Request: ${JSON.stringify({ message: "Too many requests, retry later." })}`),
+    ).toBe("Too many requests, retry later.");
+  });
+
+  it("returns unrecognised input losslessly (fallback)", () => {
+    // Plain prose with no JSON.
+    expect(humanizeProviderError("The provider is down.")).toBe("The provider is down.");
+    // A reason-phrase prefix over non-JSON prose is NOT treated as a body split.
+    expect(humanizeProviderError("Bad Request: something happened.")).toBe(
+      "Bad Request: something happened.",
+    );
+    // Malformed JSON.
+    expect(humanizeProviderError("{nope")).toBe("{nope");
+    // Valid JSON of an unrecognised shape.
+    expect(humanizeProviderError(JSON.stringify({ foo: 1 }))).toBe(JSON.stringify({ foo: 1 }));
+    // Empty string.
+    expect(humanizeProviderError("")).toBe("");
+    // A body whose `detail` is an array (FastAPI validation errors).
+    expect(
+      humanizeProviderError(JSON.stringify({ detail: [{ loc: ["body"], msg: "field required" }] })),
+    ).toBe(JSON.stringify({ detail: [{ loc: ["body"], msg: "field required" }] }));
+    // A non-string detail.
+    expect(humanizeProviderError(JSON.stringify({ detail: 42 }))).toBe(JSON.stringify({ detail: 42 }));
+    // Non-object JSON (number/string/array without a recognised shape).
+    expect(humanizeProviderError("42")).toBe("42");
+    expect(humanizeProviderError(JSON.stringify(["a", "b"]))).toBe(JSON.stringify(["a", "b"]));
+  });
+
+  it("favours error.message over a top-level message", () => {
+    expect(
+      humanizeProviderError(
+        JSON.stringify({ error: { message: "nested wins" }, message: "top-level" }),
+      ),
+    ).toBe("nested wins");
+  });
+
+  it("is idempotent (humanize(humanize(x)) === humanize(x))", () => {
+    const inputs = [
+      screenshot,
+      `Bad Request: ${JSON.stringify({ detail: "detail sentence" })}`,
+      `Bad Request: ${JSON.stringify({ error: { message: "openai sentence" } })}`,
+      "plain prose",
+      JSON.stringify({ foo: 1 }),
+      "Bad Request: something happened.",
+    ];
+    for (const raw of inputs) {
+      const once = humanizeProviderError(raw);
+      expect(humanizeProviderError(once)).toBe(once);
+    }
   });
 });

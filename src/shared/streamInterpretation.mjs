@@ -95,6 +95,64 @@ export function describeTruncation(kind) {
   }
 }
 
+// Pull the human sentence out of a provider rejection body, so an error banner
+// that currently reads `Bad Request: {"detail":"The 'gpt-5.6-sol' model is not
+// supported…"}` instead shows just the sentence inside. Pure, no I/O, no throw.
+//
+// The wire shape is always `<HTTP reason phrase>: <raw provider response body>`.
+// Only bodies we recognise are unwrapped; anything we don't understand is
+// returned byte-identical (lossless fallback — an unreadable error is far
+// better than a missing one).
+export function humanizeProviderError(raw) {
+  if (typeof raw !== "string") return raw;
+  let body = raw;
+  // Split an optional leading `<reason phrase>: ` off the front. Only treat the
+  // leading segment as a reason phrase when the remainder is itself JSON
+  // (starts with `{` or `[`); plain prose like `Bad Request: something happened`
+  // is NOT a JSON body and is left untouched.
+  const sep = raw.indexOf(": ");
+  if (sep > 0) {
+    const rest = raw.slice(sep + 2);
+    if (rest.startsWith("{") || rest.startsWith("[")) body = rest;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return raw;
+  }
+  const sentence = extractErrorSentence(parsed);
+  if (typeof sentence === "string" && sentence.length > 0) return sentence;
+  return raw;
+}
+
+// Recognise the four provider body shapes and return the human sentence, or
+// null when none match.
+//
+//   | Provider                    | Body                                    | Extract     |
+//   |-----------------------------|-----------------------------------------|-------------|
+//   | Codex / ChatGPT backend     | `{"detail":"…"}`                        | `detail`    |
+//   | OpenAI API                  | `{"error":{"message":"…",…}}`           | `error.message` |
+//   | Anthropic                   | `{"type":"error","error":{…,"message":"…"}}` | `error.message` |
+//   | Misc / OpenAI-compatible    | `{"message":"…"}`                       | `message`   |
+//
+// Order matters only in that `error.message` is checked before a top-level
+// `message`. `detail` may also arrive as an array of objects (FastAPI
+// validation errors) — if it is not a non-empty string, the shape is unmatched.
+function extractErrorSentence(parsed) {
+  if (!parsed || typeof parsed !== "object") return null;
+  const errObj = parsed.error;
+  if (errObj && typeof errObj === "object") {
+    const m = errObj.message;
+    if (typeof m === "string" && m.length > 0) return m;
+  }
+  const detail = parsed.detail;
+  if (typeof detail === "string" && detail.length > 0) return detail;
+  const message = parsed.message;
+  if (typeof message === "string" && message.length > 0) return message;
+  return null;
+}
+
 // ===== Streamed-text flush boundaries =====
 //
 // opencode streams text/reasoning content via `message.part.delta` events

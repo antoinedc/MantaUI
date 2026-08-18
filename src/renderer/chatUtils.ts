@@ -92,6 +92,7 @@ export {
   describeTruncation,
   extractSubagentInfo,
   findFlushBoundary,
+  humanizeProviderError,
   hydrateQuestion,
   isAssistantTurnComplete,
   isAssistantTurnInProgress,

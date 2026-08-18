@@ -69,6 +69,7 @@ import {
   hydrateQuestion,
   authErrorAdvice,
   fetchTranscriptWithRetry,
+  humanizeProviderError,
 } from "../chatUtils";
 import { planModeFromToolPart, isPlanAgent } from "../../shared/planMode.mjs";
 import type { TokenUsage } from "../chatShared";
@@ -522,22 +523,27 @@ export function useSseBus(params: {
           setRunning(false);
           return;
         }
+        // Unwrap a provider rejection body (e.g. `Bad Request: {"detail":"…"}`)
+        // down to the human sentence for every branch below. `authErrorAdvice`
+        // above keeps reading the ORIGINAL `raw` — its regex matches on message
+        // content and its behaviour must not shift (BET-1131).
+        const human = humanizeProviderError(raw);
         let msg: string;
         switch (err?.name) {
           case "ContextOverflowError":
-            msg = `Context full — try /compact: ${raw}`;
+            msg = `Context full — try /compact: ${human}`;
             break;
           case "MessageOutputLengthError":
             msg = "Response truncated (hit output limit)";
             break;
           case "StructuredOutputError":
-            msg = `Structured output failed: ${raw}`;
+            msg = `Structured output failed: ${human}`;
             break;
           case "ApiError":
-            msg = `API error: ${raw}`;
+            msg = `API error: ${human}`;
             break;
           default:
-            msg = raw;
+            msg = human;
         }
         setSendError(msg);
         setAuthReconnect(null);
