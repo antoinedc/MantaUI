@@ -6,7 +6,7 @@
 // and the press-and-hold mic button. InputArea.tsx composes them.
 
 import { useRef } from "react";
-import { Clock, Key, Webhook, X, Mic, Loader2, Paperclip, Trash2, Pause, Play } from "lucide-react";
+import { Clock, Key, Webhook, X, Mic, Loader2, Paperclip, Trash2, Pause, Play, DraftingCompass, Shield } from "lucide-react";
 import type { VoicePhase } from "./voice";
 import { type Attachment, type TypeaheadRow } from "./chatShared";
 import type { PendingScreenshot } from "./store";
@@ -19,6 +19,8 @@ import { formatClock, VOICE_TAP_HOLD_MS } from "../shared/waveform.mjs";
 // @-file row visible when it moves past the popup's scroll fold.
 import { useSelectedIntoView } from "./PaletteShell";
 import { MeasureColumn } from "./MeasureColumn";
+import { Chip } from "./Chip";
+import type { PlanToggleState } from "./chatUtils";
 
 /**
  * The send glyph: lucide's paper plane as a SOLID shape.
@@ -661,5 +663,95 @@ export function MicButton({
     >
       {busy ? <Loader2 size={16} aria-hidden="true" className="animate-spin" /> : <Mic size={16} aria-hidden="true" />}
     </button>
+  );
+}
+
+// ===== Plan mode chip (BET-949) =====
+//
+// Shared by the session composer (InputArea) and the pre-session composer
+// (NewSessionScreen) — both render the same three-state control: a loading
+// pulse while the plan agent is unresolved, a disabled chip with an
+// explanatory title when this box has no plan agent, and a live toggle when
+// it does. Loading renders a chip-sized pulse placeholder (same bg-border
+// animate-pulse recipe as ModelPicker's SkeletonBar); unavailable renders
+// the chip disabled-equivalent with an explanatory title.
+export function PlanChip({
+  plan,
+  onToggle,
+}: {
+  plan: PlanToggleState;
+  onToggle: () => void;
+}) {
+  return plan.loading ? (
+    <span
+      className="inline-flex items-center h-[9px] rounded-full bg-border animate-pulse"
+      style={{ width: 64 }}
+      aria-hidden="true"
+    />
+  ) : (
+    <Chip
+      on={plan.on}
+      onClick={onToggle}
+      disabled={!plan.available}
+      title={plan.title}
+      hook="manta-plan-toggle"
+    >
+      <DraftingCompass size={13} aria-hidden="true" />
+      Plan
+    </Chip>
+  );
+}
+
+// ===== Trust / permissions row (BET-415) =====
+//
+// The ambient state line under the composer: in plan mode the edit tools are
+// gone so nothing is bypassed and the row reports "Plan mode — edits blocked"
+// WITHOUT rendering the bypass button — two contradictory permission claims
+// stacked together is how users stop believing either. Otherwise it toggles
+// chatAutoAllow (a single global config value: flipping it here flips it
+// everywhere), going danger-coloured while bypassing. Shared with the
+// pre-session composer so a draft and a session never disagree.
+export function TrustRow({
+  planOn,
+  chatAutoAllow,
+  setChatAutoAllow,
+}: {
+  planOn: boolean;
+  chatAutoAllow: boolean;
+  setChatAutoAllow: (v: boolean) => Promise<void>;
+}) {
+  return (
+    <div className="pb-3 flex items-center">
+      {planOn ? (
+        <span className="inline-flex items-center gap-2 text-[11px] leading-none font-normal py-[6px] px-0 text-text-muted">
+          <Shield size={14} aria-hidden="true" />
+          Plan mode — edits blocked
+        </span>
+      ) : (
+        <button
+          onClick={() => setChatAutoAllow(!chatAutoAllow)}
+          className={
+            // Smaller + regular weight (was 11.5px medium): this is an ambient
+            // state line under the composer, not a call to action. The danger
+            // colour is what makes the bypassing state read — the type does
+            // not need to carry it too.
+            "inline-flex items-center gap-2 text-[11px] leading-none font-normal py-[6px] px-0 " +
+            (chatAutoAllow
+              ? "text-danger hover:text-danger"
+              : "text-text-muted hover:text-text-muted")
+          }
+          title={
+            chatAutoAllow
+              ? "Bypassing permissions — click to re-enable approval"
+              : "Permissions on — click to bypass"
+          }
+        >
+          <Shield size={14} aria-hidden="true" />
+          {chatAutoAllow
+            ? "Bypassing permissions"
+            : "Permissions on — click to bypass"}
+        </button>
+      )}
+    </div>
   );
 }

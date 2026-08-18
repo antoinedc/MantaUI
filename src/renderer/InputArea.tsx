@@ -17,7 +17,7 @@
 // a focus state instead of hairline dividers around a naked textarea.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { DraftingCompass, Mic, Shield, Square } from "lucide-react";
+import { Mic, Square } from "lucide-react";
 import type { OpencodeModel } from "../shared/types";
 import type { Voice } from "./hooks/useVoice";
 import {
@@ -33,15 +33,16 @@ import {
 } from "./chatShared";
 import { baseModelId, isFastModelId, shortModelName } from "./chatUtils";
 import { ModelPicker } from "./ModelPicker";
-import { Chip } from "./Chip";
 import { MeasureColumn } from "./MeasureColumn";
 import {
   AttachButton,
   AttachmentStrip,
   MicButton,
+  PlanChip,
   RecordingRow,
   SendFilled,
   SessionToolbar,
+  TrustRow,
   PendingScreenshotStrip,
 } from "./ComposerParts";
 import type { PendingScreenshot } from "./store";
@@ -519,28 +520,9 @@ export function InputArea({
             onSelect={onSelectModel}
             labelOverride={shortLabel}
           />
-          {/* Plan mode chip (BET-949) — the counterpart to the model picker.
-              Loading renders a chip-sized pulse placeholder (same bg-border
-              animate-pulse recipe as ModelPicker's SkeletonBar); unavailable
-              renders the chip disabled-equivalent with an explanatory title. */}
-          {plan.loading ? (
-            <span
-              className="inline-flex items-center h-[9px] rounded-full bg-border animate-pulse"
-              style={{ width: 64 }}
-              aria-hidden="true"
-            />
-          ) : (
-            <Chip
-              on={plan.on}
-              onClick={onTogglePlan}
-              disabled={!plan.available}
-              title={plan.title}
-              hook="manta-plan-toggle"
-            >
-              <DraftingCompass size={13} aria-hidden="true" />
-              Plan
-            </Chip>
-          )}
+          {/* Plan mode chip (BET-949) — shared PlanChip, also used by the
+              new-session composer, so the two controls never drift. */}
+          <PlanChip plan={plan} onToggle={onTogglePlan} />
           {/* Input-mode affordances (🎤 / 📎) sit HERE, beside the model
               group, rather than inside the input box. They choose HOW you
               compose — the same category as which model you compose for —
@@ -607,44 +589,12 @@ export function InputArea({
         </span>
       </div>
       {/* Trust toggle — labelled control with a Shield icon (BET-415).
-          Replaces the ▶▶/▷▷ glyphs. Same chatAutoAllow behaviour, same
-          config key. Danger colour when bypassing.
-          In plan mode (BET-949) nothing is bypassed — the edit tools are gone —
-          so this row reports "Plan mode — edits blocked" instead and the
-          bypass state is not shown. Two contradictory permission claims stacked
-          together is how users stop believing either. */}
-      <div className="pb-3 flex items-center">
-        {plan.on ? (
-          <span className="inline-flex items-center gap-2 text-[11px] leading-none font-normal py-[6px] px-0 text-text-muted">
-            <Shield size={14} aria-hidden="true" />
-            Plan mode — edits blocked
-          </span>
-        ) : (
-        <button
-          onClick={() => setChatAutoAllow(!chatAutoAllow)}
-          className={
-            // Smaller + regular weight (was 11.5px medium): this is an ambient
-            // state line under the composer, not a call to action. The danger
-            // colour is what makes the bypassing state read — the type does
-            // not need to carry it too.
-            "inline-flex items-center gap-2 text-[11px] leading-none font-normal py-[6px] px-0 " +
-            (chatAutoAllow
-              ? "text-danger hover:text-danger"
-              : "text-text-muted hover:text-text-muted")
-          }
-          title={
-            chatAutoAllow
-              ? "Bypassing permissions — click to re-enable approval"
-              : "Permissions on — click to bypass"
-          }
-        >
-          <Shield size={14} aria-hidden="true" />
-          {chatAutoAllow
-            ? "Bypassing permissions"
-            : "Permissions on — click to bypass"}
-        </button>
-        )}
-      </div>
+          Shared TrustRow (also used by the new-session composer). In plan
+          mode nothing is bypassed — the edit tools are gone — so the row
+          reports "Plan mode — edits blocked" instead and the bypass state is
+          not shown. Two contradictory permission claims stacked together is
+          how users stop believing either. */}
+      <TrustRow planOn={plan.on} chatAutoAllow={chatAutoAllow} setChatAutoAllow={setChatAutoAllow} />
       </MeasureColumn>
     </div>
   );

@@ -221,7 +221,10 @@ export type NewSessionDraft = {
   worktreeBranch: string;
   // null = auto / not explicitly picked (presentational only until submit).
   model: ModelSelection | null;
-  modelTouched: boolean;
+  // Plan mode for the FIRST turn of the session this draft creates. A fresh
+  // session defaults to build mode when opened (readPlanSaved returns false
+  // for an unknown session id), mirrored here.
+  plan: boolean;
   input: string;
 };
 
@@ -407,7 +410,7 @@ type State = {
   // A one-shot prompt for a freshly-created chat session to auto-submit on its
   // first mount (draft → new-session flow). Consumed (cleared) by the panel
   // once it fires, so re-navigating to the session never re-sends it.
-  autoSubmitPrompt: { sid: string; text: string; model?: ModelSelection } | null;
+  autoSubmitPrompt: { sid: string; text: string; model?: ModelSelection; plan?: boolean } | null;
   // BET-795: a one-shot composer SEED — the inbox's "Start a session" lands in
   // a chat session with the prompt seeded into the composer but NOT submitted
   // (the user reviews + hits Enter). Delivered to the session's ChatPanel like
@@ -555,7 +558,7 @@ type State = {
   dismissDraft: (id: string) => void;
   setActiveDraft: (id: string) => void;
   setAutoSubmitPrompt: (
-    p: { sid: string; text: string; model?: ModelSelection } | null,
+    p: { sid: string; text: string; model?: ModelSelection; plan?: boolean } | null,
   ) => void;
   setSeedPrompt: (p: { sid: string; text: string } | null) => void;
   refresh: () => Promise<void>;
@@ -823,6 +826,7 @@ export const useStore = create<State>((set, get) => ({
   createDraft: (mode) => {
     const id = newDraftId();
     const worktreePerSession = get().worktreePerSession;
+    const defaultModel = get().defaultModel;
     set((prev) => ({
       drafts: [
         ...prev.drafts,
@@ -832,8 +836,12 @@ export const useStore = create<State>((set, get) => ({
           cwd: mode === "new-project" ? "~" : "",
           wantWorktree: mode === "new-project" ? false : worktreePerSession ?? true,
           worktreeBranch: "worktree",
-          model: null,
-          modelTouched: false,
+          // Seed from the configured global default (mirror ChatPanel's
+          // readSavedModel ?? configDefaultModel), NOT null — the model menu's
+          // "Server default" row still works because the picker's "clear back
+          // to default" onSelect writes model:null explicitly.
+          model: defaultModel ?? null,
+          plan: false,
           input: "",
         },
       ],

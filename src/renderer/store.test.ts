@@ -754,6 +754,16 @@ describe("new-session drafts", () => {
     expect(d.wantWorktree).toBe(false);
   });
 
+  it("createDraft seeds model from the store defaultModel and plan defaults to false", () => {
+    useStore.setState({ defaultModel: { providerID: "anthropic", modelID: "claude-sonnet-4" } });
+    const id = useStore.getState().createDraft("new-project");
+    const d = useStore.getState().drafts.find((x) => x.id === id)!;
+    // Mirrors ChatPanel's readSavedModel ?? configDefaultModel seed.
+    expect(d.model).toEqual({ providerID: "anthropic", modelID: "claude-sonnet-4" });
+    // A fresh session defaults to build mode (readPlanSaved on an unknown id).
+    expect(d.plan).toBe(false);
+  });
+
   it("createDraft new-session mode targets the project and seeds cwd from config", () => {
     useStore.setState({ worktreePerSession: true });
     useStore.getState().createDraft({ projectName: "better-ui" });

@@ -418,3 +418,72 @@ describe("Sidebar — project close worktree-cleanup + toast path (killProject, 
     ).toBe(true);
   });
 });
+
+describe("Sidebar — only the active draft is highlighted (BET-1088)", () => {
+  let h: Harness | null = null;
+
+  beforeEach(() => {
+    localStorage.clear();
+    installMockApi({
+      configUpdate: (patch: Record<string, unknown>) =>
+        Promise.resolve({ pinnedWindows: (patch as { pinnedWindows?: string[] }).pinnedWindows ?? [] }),
+    });
+  });
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  it("with a project-scoped draft active, no session row is selected but the draft row + group header keep their state", async () => {
+    resetStore({
+      activeProjectName: "proj",
+      activeWindowByProject: { proj: 0 },
+      activeDraftId: "draft-1",
+      drafts: [
+        {
+          id: "draft-1",
+          mode: { projectName: "proj" },
+          cwd: "/x",
+          wantWorktree: false,
+          worktreeBranch: "worktree",
+          model: null,
+          plan: false,
+          input: "",
+        },
+      ],
+      projects: [
+        proj({
+          tmuxSession: "proj",
+          windows: [
+            { index: 0, name: "win", active: true, paneCurrentPath: "/x", opencodeSessionId: null },
+          ],
+        }),
+      ],
+    });
+    h = mount(
+      <Sidebar onOpenSettings={() => {}} onNewProject={() => {}} onNewSessionInProject={() => {}} onOpenResumeModal={() => {}} />,
+    );
+    await h.flush();
+
+    // Exactly one selected row: the draft. The session the user came from must
+    // not also claim to be current.
+    const selected = h.container.querySelectorAll('[aria-selected="true"]');
+    expect(selected.length).toBe(1);
+    expect(selected[0].textContent).toContain("new session");
+
+    // The window row is present but NOT selected.
+    const winRow = [...h.container.querySelectorAll('[role="treeitem"]')].find((el) =>
+      el.textContent?.includes("win"),
+    );
+    expect(winRow).toBeTruthy();
+    expect(winRow!.getAttribute("aria-selected")).toBe("false");
+
+    // The project group header keeps its active tint (a project-scoped draft
+    // genuinely lives inside that project).
+    const headerName = [...h.container.querySelectorAll("span")].find(
+      (el) => el.textContent?.trim() === "proj" && el.className.includes("text-text"),
+    );
+    expect(headerName).toBeTruthy();
+  });
+});
