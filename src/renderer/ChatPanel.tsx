@@ -409,8 +409,14 @@ export function ChatPanel({
   const scrollToMessage = useCallback((messageId: string, behavior: "smooth" | "auto" = "smooth") => {
     const idx = (messagesRef.current ?? []).findIndex((m) => m.info.id === messageId);
     if (idx < 0) return;
+    // Detach EXPLICITLY. A jump to an old row is a deliberate "take me there",
+    // so the next streamed chunk must not yank the user back to the tail — and
+    // it can no longer detach itself as a side effect, because the follow state
+    // now only listens to user gestures (see classifyFollowOnScroll). Landing
+    // near the bottom re-attaches on its own via the scroll listener.
+    setFollowing(false);
     virtuosoRef.current?.scrollToIndex({ index: idx, align: "center", behavior });
-  }, []);
+  }, [setFollowing]);
 
   // ===== Per-session model override =====
   // Declared before useSseBus: the auth-banner providerID below derives from

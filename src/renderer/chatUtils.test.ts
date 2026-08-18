@@ -133,6 +133,10 @@ import {
   inboxReasonLabel,
   scrollElementToTail,
   classifyFollowOnScroll,
+  createUserScrollIntent,
+  hasUserScrollIntent,
+  isScrollbarGutterPress,
+  USER_SCROLL_INTENT_WINDOW_MS,
   FOLLOW_THRESHOLD_PX,
   describeSessionClose,
   describeProjectClose,
@@ -5109,7 +5113,7 @@ describe("scrollElementToTail", () => {
 describe("classifyFollowOnScroll", () => {
   it("is following at the exact bottom (distance 0)", () => {
     // scrollHeight - scrollTop - clientHeight === 0
-    expect(classifyFollowOnScroll({ scrollTop: 600, scrollHeight: 1000, clientHeight: 400 }, 600))
+    expect(classifyFollowOnScroll({ scrollTop: 600, scrollHeight: 1000, clientHeight: 400 }, 600, false))
       .toBe(true);
   });
 
@@ -5118,6 +5122,7 @@ describe("classifyFollowOnScroll", () => {
       classifyFollowOnScroll(
         { scrollTop: 1000 - FOLLOW_THRESHOLD_PX, scrollHeight: 1000, clientHeight: 0 },
         500,
+        false,
       ),
     ).toBe(true);
   });
@@ -5125,14 +5130,13 @@ describe("classifyFollowOnScroll", () => {
   it("is null (no decision) when away from the bottom but scrollTop increased", () => {
     // Scrolling down through history must not toggle anything.
     expect(
-      classifyFollowOnScroll({ scrollTop: 700, scrollHeight: 1000, clientHeight: 100 }, 500),
+      classifyFollowOnScroll({ scrollTop: 700, scrollHeight: 1000, clientHeight: 100 }, 500, true),
     ).toBe(null);
   });
 
-  it("is false (stop following) when away from the bottom and scrollTop decreased", () => {
-    // The user scrolled up — the only un-follow path.
+  it("is false (stop following) when the USER scrolled up away from the bottom", () => {
     expect(
-      classifyFollowOnScroll({ scrollTop: 300, scrollHeight: 1000, clientHeight: 100 }, 500),
+      classifyFollowOnScroll({ scrollTop: 300, scrollHeight: 1000, clientHeight: 100 }, 500, true),
     ).toBe(false);
   });
 
@@ -5141,7 +5145,17 @@ describe("classifyFollowOnScroll", () => {
     // threshold -> scrollTop did NOT decrease, so the event is `null`. This
     // is the bug: a growing tool card must never detach the transcript.
     expect(
-      classifyFollowOnScroll({ scrollTop: 500, scrollHeight: 2000, clientHeight: 100 }, 500),
+      classifyFollowOnScroll({ scrollTop: 500, scrollHeight: 2000, clientHeight: 100 }, 500, true),
+    ).toBe(null);
+  });
+
+  it("REGRESSION: a scroll-up with no user gesture must not detach the transcript", () => {
+    // Virtuoso's upward-scrolling compensation after re-measuring a row that a
+    // tool card just grew: scrollTop moves UP, far from the bottom, with no
+    // input event anywhere near it. Identical numbers to the user case above —
+    // the intent flag is the ONLY thing that separates them.
+    expect(
+      classifyFollowOnScroll({ scrollTop: 300, scrollHeight: 1000, clientHeight: 100 }, 500, false),
     ).toBe(null);
   });
 
@@ -5149,8 +5163,45 @@ describe("classifyFollowOnScroll", () => {
     // The transcript shrank so the browser clamped scrollTop down; the result
     // is at the bottom, so following wins (bottom check evaluated first).
     expect(
-      classifyFollowOnScroll({ scrollTop: 900, scrollHeight: 1000, clientHeight: 100 }, 999999),
+      classifyFollowOnScroll({ scrollTop: 900, scrollHeight: 1000, clientHeight: 100 }, 999999, false),
     ).toBe(true);
+  });
+
+  it("re-attaches on a user scroll back down to the bottom", () => {
+    expect(
+      classifyFollowOnScroll({ scrollTop: 900, scrollHeight: 1000, clientHeight: 100 }, 300, true),
+    ).toBe(true);
+  });
+});
+
+describe("user scroll intent", () => {
+  it("is absent on a fresh tracker", () => {
+    expect(hasUserScrollIntent(createUserScrollIntent(), 1_000_000)).toBe(false);
+  });
+
+  it("holds for the window after an input event, then lapses", () => {
+    const intent = createUserScrollIntent();
+    intent.lastInputAt = 1_000;
+    expect(hasUserScrollIntent(intent, 1_000 + USER_SCROLL_INTENT_WINDOW_MS)).toBe(true);
+    expect(hasUserScrollIntent(intent, 1_000 + USER_SCROLL_INTENT_WINDOW_MS + 1)).toBe(false);
+  });
+
+  it("holds indefinitely while the scrollbar gutter is held", () => {
+    // A slow drag can outlast the window; the flag, not the timestamp, covers it.
+    const intent = createUserScrollIntent();
+    intent.draggingGutter = true;
+    expect(hasUserScrollIntent(intent, Number.MAX_SAFE_INTEGER)).toBe(true);
+  });
+
+  it("counts a press past clientWidth as a scrollbar gutter press", () => {
+    // Scroller at x=100, 300px content box, ~15px scrollbar to its right.
+    expect(isScrollbarGutterPress(408, { left: 100, clientWidth: 300 })).toBe(true);
+  });
+
+  it("does NOT count a press inside the content box (clicking a tool card)", () => {
+    expect(isScrollbarGutterPress(250, { left: 100, clientWidth: 300 })).toBe(false);
+    // The content box's own right edge is still content, not gutter.
+    expect(isScrollbarGutterPress(400, { left: 100, clientWidth: 300 })).toBe(false);
   });
 });
 

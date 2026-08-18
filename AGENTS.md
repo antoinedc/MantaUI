@@ -1286,6 +1286,36 @@ Backup at `~/.tmux.conf.pre-MantaUI` on the remote if it was ever modified.
   at the bottom". Content growing under the user changes the latter and
   must not change the former.**
 
+  **A scroll event is not a user gesture either — that was generation six.**
+  A `scroll` event with a lower `scrollTop` was read as "the user dragged
+  up", but react-virtuoso writes to the scroller itself: its *upward
+  scrolling compensation* fires whenever a row above the viewport is
+  re-measured (plus the unshift/`deviation` corrections). A tool card
+  landing mid-turn re-measures its row, Virtuoso compensates, and the
+  transcript detached with no user input at all — the "every tool call
+  bounces me out and I have to click jump-to-latest" report. So the two
+  signals are now separate: WHERE the scroller is (the scroll event) and
+  WHETHER the user put it there. `classifyFollowOnScroll` takes a
+  `userIntent` argument and only returns `false` when both agree; intent is
+  a short window (`USER_SCROLL_INTENT_WINDOW_MS`) refreshed by wheel /
+  touch / keydown on the scroller, plus a held flag for a scrollbar-gutter
+  drag (`isScrollbarGutterPress` — a press inside the CONTENT box is a
+  click, e.g. expanding a tool card, and must not vouch for the re-measure
+  scrolls that follow it). Landing within `FOLLOW_THRESHOLD_PX` of the
+  bottom still re-attaches unconditionally.
+
+  Two consequences worth knowing before editing this:
+  - **A programmatic scroll away from the tail must now detach EXPLICITLY.**
+    `scrollToMessage` (the artifacts / ⌘F deep-link jump) calls
+    `setFollowing(false)` itself; it used to rely on the resulting scroll-up
+    being mistaken for a gesture, which is exactly the mistake being fixed.
+  - **`stickToTail` writes twice, across a frame.** Virtuoso publishes
+    `totalListHeightChanged` synchronously inside the ResizeObserver tick,
+    while the list padding carrying part of that height is React state that
+    lands on a later commit — so the first write can read a pre-growth
+    `scrollHeight` and park short of the tail. The rAF write lands on the
+    real one. Both are guarded on the follow state.
+
   Note the tail scroll is `scrollTop = scrollHeight`, not
   `scrollToIndex({ index: "LAST" })`, because the Footer renders below the
   last item.

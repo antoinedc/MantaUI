@@ -40,6 +40,9 @@ import {
   formatDuration,
   scrollElementToTail,
   classifyFollowOnScroll,
+  createUserScrollIntent,
+  hasUserScrollIntent,
+  isScrollbarGutterPress,
   type EntryMotionState,
   type LiveTurn,
   workingIndicatorLabel,
@@ -498,25 +501,91 @@ export function Transcript({
   // animating open (Virtuoso's totalListHeight sums header + footer + list, so
   // one signal covers all of it). This replaces `followOutput`, which fired
   // only on item-COUNT changes and therefore missed every one of those.
+  //
+  // The write is doubled across a frame on purpose. Virtuoso publishes
+  // `totalListHeightChanged` from its size stream — synchronously, inside the
+  // ResizeObserver tick — while the list padding that carries part of that
+  // height is React state and lands on a later commit. So the `scrollHeight`
+  // the first write reads can still be the pre-growth one, leaving the
+  // transcript parked short of the real tail; the rAF write runs after the
+  // commit has painted and lands on it. Both are guarded on the follow state,
+  // so a user who scrolls up in between is not yanked back.
   const stickToTail = useCallback(() => {
     if (!followingRef.current) return;
     scrollElementToTail(scrollerElRef.current);
+    requestAnimationFrame(() => {
+      if (!followingRef.current) return;
+      scrollElementToTail(scrollerElRef.current);
+    });
   }, [followingRef, scrollerElRef]);
 
-  // The user's intent, and the only thing that can stop the follow. Content
-  // growth fires no scroll event, so it cannot reach this listener — which is
-  // exactly why the transcript can no longer detach on its own.
+  // The user's intent, and the only thing that can stop the follow.
+  //
+  // Two signals, deliberately separate: WHERE the scroller is (the scroll
+  // event) and WHETHER the user put it there (an input event). Content growth
+  // fires no scroll event at all, and the scroll events Virtuoso fires for its
+  // own corrections carry no input — so neither can detach the transcript.
+  // See classifyFollowOnScroll for why the second signal had to be added.
   useEffect(() => {
     const el = scrollerElRef.current;
     if (!el) return;
+    const intent = createUserScrollIntent();
     let prevScrollTop = el.scrollTop;
+    const mark = () => {
+      intent.lastInputAt = Date.now();
+    };
+    // A press in the CONTENT box is a click, not a scroll — see
+    // isScrollbarGutterPress. Dragging the gutter can outlast the intent
+    // window, hence the held flag rather than a timestamp.
+    const onPointerDown = (e: PointerEvent) => {
+      const rect = el.getBoundingClientRect();
+      intent.draggingGutter = isScrollbarGutterPress(e.clientX, {
+        left: rect.left,
+        clientWidth: el.clientWidth,
+      });
+      if (intent.draggingGutter) mark();
+    };
+    const onPointerUp = () => {
+      if (!intent.draggingGutter) return;
+      intent.draggingGutter = false;
+      mark();
+    };
+    // Drag-selecting past the edge of the scroller auto-scrolls it; the button
+    // check keeps an idle mouse moving over the transcript from counting.
+    const onPointerMove = (e: PointerEvent) => {
+      if (e.buttons !== 0) mark();
+    };
     const onScroll = () => {
-      const next = classifyFollowOnScroll(el, prevScrollTop);
+      const next = classifyFollowOnScroll(
+        el,
+        prevScrollTop,
+        hasUserScrollIntent(intent, Date.now()),
+      );
       prevScrollTop = el.scrollTop;
       if (next !== null) onFollowingChange(next);
     };
+    el.addEventListener("wheel", mark, { passive: true });
+    el.addEventListener("touchstart", mark, { passive: true });
+    el.addEventListener("touchmove", mark, { passive: true });
+    el.addEventListener("keydown", mark);
+    el.addEventListener("pointerdown", onPointerDown);
+    el.addEventListener("pointermove", onPointerMove, { passive: true });
     el.addEventListener("scroll", onScroll, { passive: true });
-    return () => el.removeEventListener("scroll", onScroll);
+    // On window, not the scroller: a gutter drag routinely ends with the
+    // pointer somewhere else entirely.
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerUp);
+    return () => {
+      el.removeEventListener("wheel", mark);
+      el.removeEventListener("touchstart", mark);
+      el.removeEventListener("touchmove", mark);
+      el.removeEventListener("keydown", mark);
+      el.removeEventListener("pointerdown", onPointerDown);
+      el.removeEventListener("pointermove", onPointerMove);
+      el.removeEventListener("scroll", onScroll);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+    };
   }, [hasMessages, onFollowingChange, scrollerElRef]);
 
   return (

@@ -247,6 +247,82 @@ describe("Transcript virtualization (react-virtuoso)", () => {
   });
 });
 
+// ===== Follow state (BET-933 follow-up) =====
+//
+// The pure decision is covered in chatUtils.test.ts; what shipped broken was
+// the WIRING, and only a mounted transcript with a real scroll listener can
+// see it. The reported symptom was that every tool call detached the
+// transcript and left the user clicking "jump to latest": react-virtuoso
+// writes to the scroller itself (upward-scrolling compensation after a row is
+// re-measured), which arrives as an ordinary scroll event with a lower
+// scrollTop and was indistinguishable from the user dragging up.
+describe("Transcript follow state", () => {
+  // jsdom has no layout, so the three scroll metrics are permanently 0. Define
+  // them on the instance to drive classifyFollowOnScroll deterministically.
+  function measure(el: HTMLElement, m: { scrollTop: number; scrollHeight: number; clientHeight: number }) {
+    for (const [k, v] of Object.entries(m)) {
+      Object.defineProperty(el, k, { value: v, configurable: true, writable: true });
+    }
+  }
+
+  function mountFollowing() {
+    const scrollerElRef: React.MutableRefObject<HTMLElement | null> = { current: null };
+    const followingRef = { current: true };
+    const changes: boolean[] = [];
+    motionStateRef = { current: null };
+    const h = mount(
+      <Transcript
+        {...props(HISTORY)}
+        scrollerElRef={scrollerElRef}
+        followingRef={followingRef}
+        onFollowingChange={(v: boolean) => {
+          followingRef.current = v;
+          changes.push(v);
+        }}
+      />,
+    );
+    return { h, el: scrollerElRef.current!, changes };
+  }
+
+  it("REGRESSION: a scroll-up with no user gesture keeps the transcript following", () => {
+    const { h, el, changes } = mountFollowing();
+    expect(el).not.toBeNull();
+    // Pinned at the tail.
+    measure(el, { scrollTop: 1500, scrollHeight: 2000, clientHeight: 500 });
+    act(() => el.dispatchEvent(new Event("scroll")));
+    // Virtuoso compensates for a re-measured row: 500px up, no input event.
+    measure(el, { scrollTop: 1000, scrollHeight: 2000, clientHeight: 500 });
+    act(() => el.dispatchEvent(new Event("scroll")));
+    expect(changes).not.toContain(false);
+    h.unmount();
+  });
+
+  it("still detaches when the same scroll follows a wheel gesture", () => {
+    const { h, el, changes } = mountFollowing();
+    measure(el, { scrollTop: 1500, scrollHeight: 2000, clientHeight: 500 });
+    act(() => el.dispatchEvent(new Event("scroll")));
+    act(() => el.dispatchEvent(new WheelEvent("wheel", { deltaY: -400 })));
+    measure(el, { scrollTop: 1000, scrollHeight: 2000, clientHeight: 500 });
+    act(() => el.dispatchEvent(new Event("scroll")));
+    expect(changes.at(-1)).toBe(false);
+    h.unmount();
+  });
+
+  it("re-attaches when a scroll lands back at the bottom, gesture or not", () => {
+    const { h, el, changes } = mountFollowing();
+    measure(el, { scrollTop: 1500, scrollHeight: 2000, clientHeight: 500 });
+    act(() => el.dispatchEvent(new Event("scroll")));
+    act(() => el.dispatchEvent(new WheelEvent("wheel", { deltaY: -400 })));
+    measure(el, { scrollTop: 1000, scrollHeight: 2000, clientHeight: 500 });
+    act(() => el.dispatchEvent(new Event("scroll")));
+    expect(changes.at(-1)).toBe(false);
+    measure(el, { scrollTop: 1500, scrollHeight: 2000, clientHeight: 500 });
+    act(() => el.dispatchEvent(new Event("scroll")));
+    expect(changes.at(-1)).toBe(true);
+    h.unmount();
+  });
+});
+
 describe("TranscriptList padding pass-through (BET-691)", () => {
   it("leaves Virtuoso's vertical offsets intact on the list element", () => {
     // react-virtuoso writes the virtualization offsets into this element's

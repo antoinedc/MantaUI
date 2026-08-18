@@ -3914,18 +3914,72 @@ export function scrollElementToTail(el: HTMLElement | null): void {
  * - Landing within FOLLOW_THRESHOLD_PX of the bottom always means following,
  *   whatever caused it (the user scrolling back down, our own tail scroll, or
  *   the scroller clamping after the transcript shrank on /compact).
- * - Moving UP while away from the bottom is the only thing that stops it.
+ * - Moving UP while away from the bottom stops it — but ONLY when the move
+ *   came from the user (`userIntent`). A scroll event is not by itself
+ *   evidence of intent: react-virtuoso writes to the scroller behind our back
+ *   (its "upward scrolling compensation" when a row above the viewport is
+ *   re-measured, and the unshift/deviation corrections), and those arrive as
+ *   ordinary scroll events with a LOWER scrollTop. Treating them as a
+ *   scroll-up is what detached the transcript on every tool call: the card
+ *   lands, its row is re-measured, Virtuoso compensates, and the transcript
+ *   stopped following with no user input at all. See the intent tracker in
+ *   Transcript.tsx for what counts as a gesture.
  */
 export const FOLLOW_THRESHOLD_PX = 64;
 
 export function classifyFollowOnScroll(
   m: { scrollTop: number; scrollHeight: number; clientHeight: number },
   prevScrollTop: number,
+  userIntent: boolean,
 ): boolean | null {
   const distanceFromBottom = m.scrollHeight - m.scrollTop - m.clientHeight;
   if (distanceFromBottom <= FOLLOW_THRESHOLD_PX) return true;
-  if (m.scrollTop < prevScrollTop) return false;
+  if (userIntent && m.scrollTop < prevScrollTop) return false;
   return null;
+}
+
+/**
+ * How long a user input event vouches for the scroll events that follow it.
+ *
+ * A gesture and the scrolling it causes are not one event: a wheel tick is
+ * followed by trackpad momentum that fires scroll events with no further
+ * wheel events, and a keyboard PageUp scrolls a frame later. The window has
+ * to outlive that gap while staying far shorter than the interval between a
+ * gesture and the next unrelated re-measure.
+ */
+export const USER_SCROLL_INTENT_WINDOW_MS = 250;
+
+/** Mutable "did the user just do something" record. Owned by Transcript.tsx. */
+export type UserScrollIntent = {
+  /** Timestamp of the last input event on the scroller. */
+  lastInputAt: number;
+  /** True between pointerdown on the scrollbar gutter and pointerup. */
+  draggingGutter: boolean;
+};
+
+export function createUserScrollIntent(): UserScrollIntent {
+  return { lastInputAt: Number.NEGATIVE_INFINITY, draggingGutter: false };
+}
+
+export function hasUserScrollIntent(intent: UserScrollIntent, now: number): boolean {
+  if (intent.draggingGutter) return true;
+  return now - intent.lastInputAt <= USER_SCROLL_INTENT_WINDOW_MS;
+}
+
+/**
+ * Was a pointerdown on the scroller's vertical scrollbar gutter?
+ *
+ * A press inside the content box is a click (expanding a tool card, selecting
+ * text) and must NOT vouch for the re-measure scrolls that follow it — that
+ * would reopen the same hole from the other side. The gutter is the strip
+ * between `clientWidth` (content box, scrollbar excluded) and the element's
+ * full border-box width, so a press past `clientWidth` is a scroll gesture.
+ */
+export function isScrollbarGutterPress(
+  clientX: number,
+  el: { left: number; clientWidth: number },
+): boolean {
+  return clientX - el.left > el.clientWidth;
 }
 
 /**
