@@ -20,7 +20,8 @@ final class ToolOutputPreviewTests: XCTestCase {
         XCTAssertEqual(output.components(separatedBy: "\n").count, ToolOutputPreview.maxLines + 1,
                        "prefix line + the kept \(ToolOutputPreview.maxLines) lines")
         XCTAssertTrue(output.hasSuffix("line 30"), "the tail must keep the NEWEST lines")
-        XCTAssertFalse(output.contains("line 1"), "the head-most lines must be dropped")
+        XCTAssertFalse(output.contains("line 1\n"), "the head-most lines must be dropped")
+        XCTAssertTrue(output.contains("line 19"), "the tail must start at the 19th line")
     }
 
     func testSingleEnormousLineIsCharacterBounded() {
