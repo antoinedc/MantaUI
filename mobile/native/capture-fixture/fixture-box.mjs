@@ -30,6 +30,19 @@ const HOST = "127.0.0.1";
 // chat opens promptly.
 const MSGS_DELAY_MS = Number(process.env.FIXTURE_MSGS_DELAY_MS || 0);
 
+// BET-1151 (C4 load-earlier): when set, the `opencode:messages` RPC honors the
+// client's `limit` and returns only the most recent `limit` messages (the tail
+// window), exactly as a real opencode box does. Because the total history is
+// longer than the window, `hasEarlier` becomes true in the app and the
+// "Load earlier messages" edge row is reachable at the pinned top; tapping it
+// widens the window by `earlierMessageStep` and reveals more of the transcript.
+//
+// Default OFF so the gesture/scroll harness keeps the FULL tall transcript on
+// screen (its C5 check needs all messages laid out to overflow the viewport).
+// Turn it on for the C4 load-earlier capture only:
+//   FIXTURE_EARLY_HISTORY=1 node mobile/native/capture-fixture/fixture-box.mjs
+const EARLY_HISTORY = process.env.FIXTURE_EARLY_HISTORY === "1";
+
 const SESSION_ID = "session-1";
 const PROJECT = "Demo";
 const CWD = `/Users/${process.env.USER || "demo"}/demo`;
@@ -181,6 +194,22 @@ function rpc(channel, args) {
     case "tmux:list":
       return PROJECTS;
     case "opencode:messages":
+      // BET-1151 C4: in early-history mode, return just the tail `limit` window
+      // so the app sees a real "more history exists above" page. `hasEarlier`
+      // in the store is `loaded.count >= limit`, so returning a full page makes
+      // the load-earlier edge row appear; a page shorter than `limit` (after
+      // widening) means the top of history is reached and the row drops away.
+      if (EARLY_HISTORY) {
+        const preOpts = args[1];
+        const limit = preOpts && typeof preOpts === "object" ? preOpts.limit : undefined;
+        const window = Number.isInteger(limit) && limit > 0 ? MESSAGES.slice(-limit) : MESSAGES;
+        if (Number.isInteger(limit) && limit > 0) {
+          console.error(`[rpc] opencode:messages early-history window limit=${limit} -> ${window.length} msgs (full=${MESSAGES.length})`);
+        }
+        return new Promise((resolve) => {
+          setTimeout(() => resolve(window), MSGS_DELAY_MS);
+        });
+      }
       return new Promise((resolve) => {
         setTimeout(() => resolve(MESSAGES), MSGS_DELAY_MS);
       });
