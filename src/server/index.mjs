@@ -754,7 +754,7 @@ const authRateLimit = createRateLimiter({
 });
 if (!authEnforced) {
   console.warn(
-    "[auth] ⚠️  MANTA_AUTH_DISABLED=1 — the box server is UNAUTHENTICATED. " +
+    "[auth] ⚠️  MANTA_AUTH_DISABLED=1 — the server is UNAUTHENTICATED. " +
       "Anyone who can reach this port has full access. Unset it and pair a device.",
   );
 } else {
@@ -1424,7 +1424,7 @@ const handleRequest = async (req, res) => {
           !requireLoopback(
             req,
             res,
-            "pairing codes can only be minted from the box itself (run `manta pair` locally)",
+            "pairing codes can only be minted from the server itself (run `manta pair` locally)",
           )
         ) {
           return;

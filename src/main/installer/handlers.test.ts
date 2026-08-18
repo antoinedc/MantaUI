@@ -573,7 +573,7 @@ describe("registerInstallerHandlers — passphrase pause/resume (BET-360)", () =
         {
           cause: "SSH key authentication was rejected.",
           action:
-            "Make sure your key is loaded (ssh-add) and listed in the box's ~/.ssh/authorized_keys.",
+            "Make sure your key is loaded (ssh-add) and listed in the server's ~/.ssh/authorized_keys.",
         },
       ],
       unknownHost: null,

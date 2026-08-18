@@ -193,11 +193,11 @@ sudo_priv() {
     nopasswd) sudo -n "$@" ;;
     tty)      sudo "$@" ;;
     none)
-      die "Cannot run commands as root on this box — giving it a public HTTPS address is impossible without root.
+      die "Cannot run commands as root on this server — giving it a public HTTPS address is impossible without root.
         Choose one of these and run the installer again:
         * Install as root  — ssh root@$(hostname) then run the same install command
         * Use Tailscale    — curl -fsSL https://tailscale.com/install.sh | sh; sudo tailscale up; then run the installer again
-        * Grant this user sudo access on the box, then run the installer again."
+        * Grant this user sudo access on the server, then run the installer again."
       ;;
   esac
 }
@@ -450,7 +450,7 @@ public_ingress_preflight() {
   fi
 
   if [ "$root_usable" != "1" ]; then
-    die "Cannot complete the install: giving this box a public HTTPS address needs to run
+    die "Cannot complete the install: giving this server a public HTTPS address needs to run
       three commands as root (install Caddy, write its site config, reload it), and
       this user cannot run commands as root without a password.
 
@@ -464,7 +464,7 @@ public_ingress_preflight() {
             sudo tailscale up
             then run the same install command
 
-        * Grant this user sudo access on the box, then run the installer again."
+        * Grant this user sudo access on the server, then run the installer again."
   fi
 }
 
@@ -1466,7 +1466,7 @@ main() {
     # requires Tailscale (a Mac that's never logged in is unsupported —
     # Issue C will wire that up via LaunchAgents). B/C (gateway register
     # + merge-gateway) still run below for the APNs push token.
-    log "macOS detected — skipping Caddy/apt/DNS/vhost; box is loopback-only. Use Tailscale to reach this box off-network."
+    log "macOS detected — skipping Caddy/apt/DNS/vhost; server is loopback-only. Use Tailscale to reach this server off-network."
   else
     log "Configuring public TLS via Caddy + gateway registration (privileged)…"
   fi
@@ -1491,7 +1491,7 @@ main() {
 
   if [ -z "$BOX_ID_FOR_GATEWAY" ]; then
     if [ "$DRY_RUN" != "1" ] && [ "$SKIP_PUBLIC_TLS" != "1" ]; then
-      die "no box_id in $MANTA_AUTH_FILE after waiting — cannot register the gateway, so this box would have no public HTTPS.
+      die "no box_id in $MANTA_AUTH_FILE after waiting — cannot register the gateway, so this server would have no public HTTPS.
         Start the manta-server at least once ($(supervisor_hint restart server)), then run the installer again.
 
         Fix the above and run the installer again — re-running is safe and preserves your box identity."
@@ -1529,7 +1529,7 @@ main() {
           ok "gateway registration complete."
         else
           if [ "$SKIP_PUBLIC_TLS" != "1" ]; then
-            die "merge-gateway failed — the gateway token/host could not be persisted, so this box would advertise a hostname whose config is incomplete (see /tmp/manta-gateway-merge.err).
+            die "merge-gateway failed — the gateway token/host could not be persisted, so this server would advertise a hostname whose config is incomplete (see /tmp/manta-gateway-merge.err).
               Fix the gateway registration issue and run the installer again.
 
               Fix the above and run the installer again — re-running is safe and preserves your box identity."
@@ -1538,12 +1538,12 @@ main() {
         fi
       else
         if [ "$SKIP_PUBLIC_TLS" != "1" ]; then
-          die "gateway registration POST failed — this box would have no public HTTPS without it.
+          die "gateway registration POST failed — this server would have no public HTTPS without it.
             ${MANTA_GATEWAY_BASE:+($MANTA_GATEWAY_BASE) }Fix the gateway/network issue and run the installer again.
 
             Fix the above and run the installer again — re-running is safe and preserves your box identity."
         fi
-        warn "gateway registration POST failed — the box will retry on every server restart."
+        warn "gateway registration POST failed — the server will retry on every server restart."
       fi
     fi
   fi
@@ -1631,7 +1631,7 @@ main() {
   # as failed, not dressed as success). Dry-run just shows the plan.
   if [ "$SKIP_PUBLIC_TLS" != "1" ]; then
     if [ "$DRY_RUN" = "1" ]; then
-      dry_log "would determine the box's public IP and poll DNS for $GATEWAY_HOST (up to 90s)"
+      dry_log "would determine the server's public IP and poll DNS for $GATEWAY_HOST (up to 90s)"
       dry_log "would render + install the Caddy vhost (box_id=$BOX_ID_FOR_GATEWAY, port=$MANTA_PORT)"
       dry_log "would run: systemctl reload caddy"
     else
@@ -1666,7 +1666,7 @@ main() {
         BOX_PUBLIC_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
       fi
       if [ -z "$BOX_PUBLIC_IP" ]; then
-        die "could not determine the box's public IP — cannot complete the public path.
+        die "could not determine the server's public IP — cannot complete the public path.
           Fix your network/egress so api.ipify.org (or hostname -I) reports a public address, then run the installer again.
 
           Fix the above and run the installer again — re-running is safe and preserves your box identity."
@@ -1869,7 +1869,7 @@ EOF
   if [ "$INGRESS_MODE" = "tailscale" ]; then
     cat <<EOF
 
-Tailscale detected ($TAILNET_IP) — your box is reachable over the tailnet at
+Tailscale detected ($TAILNET_IP) — your server is reachable over the tailnet at
 http://$TAILNET_IP:$MANTA_PORT (plain HTTP; WireGuard encrypts the hop). No public
 DNS, no Caddy, no Let's Encrypt on this path. Devices on the same tailnet can
 connect directly; off-tailnet devices need Tailscale access first.
@@ -1877,8 +1877,8 @@ EOF
   else
     cat <<EOF
 
-Your box serves its own public hostname — https://<box_id>.boxes.mantaui.com
-(Caddy on this box terminates TLS and reverse-proxies 127.0.0.1:8787). The
+Your server serves its own public hostname — https://<box_id>.boxes.mantaui.com
+(Caddy on this server terminates TLS and reverse-proxies 127.0.0.1:8787). The
 desktop / mobile app discovers it directly via the box_id below; no relay,
 no tunnel, no dial-out.
 EOF
