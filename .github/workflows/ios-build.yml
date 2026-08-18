@@ -59,18 +59,18 @@ jobs:
           set -euo pipefail
           UDID=$(xcrun simctl list devices available --json \
             | python3 -c '
-import json, sys
-runtimes = json.load(sys.stdin)["devices"]
-best = None
-for runtime, devices in sorted(runtimes.items()):
-    if "iOS" not in runtime:
-        continue
-    for device in devices:
-        if device.get("isAvailable") and device["name"].startswith("iPhone"):
-            best = device["udid"]
-if best:
-    print(best)
-')
+            import json, sys
+            runtimes = json.load(sys.stdin)["devices"]
+            best = None
+            for runtime, devices in sorted(runtimes.items()):
+                if "iOS" not in runtime:
+                    continue
+                for device in devices:
+                    if device.get("isAvailable") and device["name"].startswith("iPhone"):
+                        best = device["udid"]
+            if best:
+                print(best)
+            ')
           if [ -z "$UDID" ]; then
             echo "::error::No available iPhone simulator on this runner."
             xcrun simctl list devices available
