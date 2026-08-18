@@ -172,18 +172,40 @@ export function createCtoEngine(deps = {}) {
   async function summarizeProjects(raw) {
     const projects = Array.isArray(raw) ? raw : [];
     const { info } = await sessionInfoMap(projects);
-    return projects.map((p) => ({
-      tmuxSession: p?.tmuxSession,
-      defaultCwd: p?.defaultCwd,
-      windows: (p?.windows ?? []).map((w) => ({
-        index: w?.index,
-        name: w?.name,
-        active: !!w?.active,
-        chat: typeof w?.opencodeSessionId === "string" && !!w?.opencodeSessionId,
-        sessionID: w?.opencodeSessionId ?? null,
-        model: w?.opencodeSessionId ? (info.get(w.opencodeSessionId)?.model ?? null) : null,
+    // Branch per distinct directory (best-effort, one git call per dir — never
+    // per window) so listing a box with many windows stays cheap.
+    const branchCache = new Map();
+    async function branchFor(dir) {
+      if (!dir) return null;
+      if (!branchCache.has(dir)) {
+        let branch = null;
+        try {
+          branch = (await gitBranch(dir)) ?? null;
+        } catch {
+          branch = null;
+        }
+        branchCache.set(dir, branch);
+      }
+      return branchCache.get(dir);
+    }
+    return Promise.all(
+      projects.map(async (p) => ({
+        tmuxSession: p?.tmuxSession,
+        defaultCwd: p?.defaultCwd,
+        branch: await branchFor(p?.defaultCwd),
+        windows: await Promise.all(
+          (p?.windows ?? []).map(async (w) => ({
+            index: w?.index,
+            name: w?.name,
+            active: !!w?.active,
+            chat: typeof w?.opencodeSessionId === "string" && !!w?.opencodeSessionId,
+            sessionID: w?.opencodeSessionId ?? null,
+            model: w?.opencodeSessionId ? (info.get(w.opencodeSessionId)?.model ?? null) : null,
+            branch: w?.opencodeSessionId ? await branchFor(w?.paneCurrentPath || p?.defaultCwd) : await branchFor(p?.defaultCwd),
+          })),
+        ),
       })),
-    }));
+    );
   }
 
   register({
@@ -196,6 +218,23 @@ export function createCtoEngine(deps = {}) {
     run: async (ctx, args) => {
       const projects = await listProjects();
       const { info, sessionsById } = await sessionInfoMap(projects);
+
+      // Per-directory branch cache (best-effort, one git call per dir).
+      const branchCache = new Map();
+      async function branchFor(dir) {
+        if (!dir) return null;
+        if (!branchCache.has(dir)) {
+          let branch = null;
+          try {
+            branch = (await gitBranch(dir)) ?? null;
+          } catch {
+            branch = null;
+          }
+          branchCache.set(dir, branch);
+        }
+        return branchCache.get(dir);
+      }
+
       const sessions = [];
       for (const p of Array.isArray(projects) ? projects : []) {
         for (const w of p?.windows ?? []) {
@@ -209,7 +248,7 @@ export function createCtoEngine(deps = {}) {
             window: `${w?.index}${w?.name ? `:${w.name}` : ""}`,
             model: info_.model ?? null,
             planMode: !!isPlanAgent(await safeAgent(sid)),
-            branch: null,
+            branch: await branchFor(info_.directory ?? w?.paneCurrentPath ?? p?.defaultCwd),
             directory: info_.directory ?? w?.paneCurrentPath ?? p?.defaultCwd ?? null,
             cost: s?.cost ?? null,
             tokens: s?.tokens ?? null,

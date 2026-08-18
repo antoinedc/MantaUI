@@ -209,6 +209,37 @@ test("quiet box: no sessions / no usage / no board never throws", async () => {
   assert.equal(board.ok, true);
 });
 
+test("list_sessions resolves per-session model, plan mode and branch from injected engines", async () => {
+  const engine = makeEngine({
+    listProjects: async () => [
+      {
+        tmuxSession: "proj",
+        defaultCwd: "/repo",
+        windows: [
+          { index: 0, name: "chat", paneCurrentPath: "/repo", opencodeSessionId: "ses_1", active: true },
+          { index: 1, name: "term", paneCurrentPath: "/repo", opencodeSessionId: null, active: false },
+        ],
+      },
+    ],
+    listSessions: async (dir) => [
+      { id: "ses_1", info: { providerID: "anthropic", modelID: "claude-opus-4-7" }, cost: 0.5, tokens: { input: 10, output: 2 }, time: { updated: 100 } },
+    ],
+    getSessionAgent: async (sid) => (sid === "ses_1" ? "plan" : null),
+    gitBranch: async (dir) => { assert.equal(dir, "/repo"); return "feature/x"; },
+  });
+  const r = await engine.dispatch("list_sessions", {}, {});
+  assert.equal(r.ok, true);
+  assert.equal(r.data.sessions.length, 1);
+  const s = r.data.sessions[0];
+  assert.equal(s.model, "anthropic/claude-opus-4-7");
+  assert.equal(s.planMode, true);
+  assert.equal(s.branch, "feature/x");
+  assert.equal(s.cost, 0.5);
+  // The project row carries the same branch; the non-chat window stays a row.
+  assert.equal(r.data.projects[0].branch, "feature/x");
+  assert.equal(r.data.projects[0].windows.length, 2);
+});
+
 test("session_usage / context_state / git tools resolve cleanly on empty fakes", async () => {
   const engine = makeEngine();
   const su = await engine.dispatch("session_usage", { sessionID: "ses_x" }, {});
