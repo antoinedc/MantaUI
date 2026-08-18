@@ -127,7 +127,7 @@ describe("Pill migration — ContextPill call site (BET-534 two-adopter rule)", 
     return mount(
       <SessionHeader
         branch={null}
-        ctxBreakdown={{ freshInput: 1, cacheRead: 1, cacheWrite: 1, totalInput: 100, pct: 12, segments: [] }}
+        ctxBreakdown={{ freshInput: 1, cacheRead: 1, cacheWrite: 1, totalInput: 100, pct: 12, hasLimit: true, segments: [] }}
         ctxLimit={200000}
         staleCache={{ isStale: stale, idleMs: stale ? 3_600_000 : 0, staleTokens, ttlMs: 3_600_000 }}
         modelName={null}

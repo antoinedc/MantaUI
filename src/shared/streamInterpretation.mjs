@@ -23,15 +23,16 @@ export const ASSUMED_CONTEXT_TOKENS = 200_000;
 // Resolve the effective context window in tokens for an active model. Reads
 // `limit.context` off the OpencodeModel (which mirrors the provider's real
 // window — e.g. 1_000_000 for Opus 4.7, 200_000 for Sonnet 4 / Haiku 4.5).
-// Falls back to ASSUMED_CONTEXT_TOKENS when unknown so the bar still moves
-// and is roughly meaningful before the first turn.
+// Returns `null` when the model reports no usable limit (no model, no limit,
+// or a non-positive / non-finite value) — the caller must render the "no max
+// context" state, NOT fabricate a number.
 //
 // Accepts the minimal `{ limit?: { context?: number } } | null` shape so
 // callers don't have to import OpencodeModel here.
 export function resolveContextLimit(model) {
   const c = model?.limit?.context;
   if (typeof c === "number" && Number.isFinite(c) && c > 0) return c;
-  return ASSUMED_CONTEXT_TOKENS;
+  return null;
 }
 
 // Classify a per-step finish reason emitted by opencode into the smallest
@@ -440,13 +441,28 @@ export function computeContextBreakdown(tokens, limit) {
   const cacheRead = Math.max(0, Math.round(tokens?.cache?.read ?? 0));
   const cacheWrite = Math.max(0, Math.round(tokens?.cache?.write ?? 0));
   const totalInput = freshInput + cacheRead + cacheWrite;
-  const safeLimit = limit > 0 ? limit : ASSUMED_CONTEXT_TOKENS;
-  const rawPct = (totalInput / safeLimit) * 100;
+
+  const hasLimit = typeof limit === "number" && Number.isFinite(limit) && limit > 0;
+  // Unknown limit (null, non-positive, non-finite) — report the token totals
+  // but signal "no max context" so the consumer never renders a fake %.
+  if (!hasLimit) {
+    return {
+      freshInput,
+      cacheRead,
+      cacheWrite,
+      totalInput,
+      pct: null,
+      hasLimit: false,
+      segments: [],
+    };
+  }
+
+  const rawPct = (totalInput / limit) * 100;
   const pct = Math.min(100, Math.round(rawPct));
 
-  const segFresh = (freshInput / safeLimit) * 100;
-  const segRead = (cacheRead / safeLimit) * 100;
-  const segWrite = (cacheWrite / safeLimit) * 100;
+  const segFresh = (freshInput / limit) * 100;
+  const segRead = (cacheRead / limit) * 100;
+  const segWrite = (cacheWrite / limit) * 100;
   const segments = [
     { kind: "fresh", pct: segFresh },
     { kind: "cacheWrite", pct: segWrite },
@@ -457,7 +473,7 @@ export function computeContextBreakdown(tokens, limit) {
     const scale = 100 / sum;
     for (const s of segments) s.pct *= scale;
   }
-  return { freshInput, cacheRead, cacheWrite, totalInput, pct, segments };
+  return { freshInput, cacheRead, cacheWrite, totalInput, pct, hasLimit: true, segments };
 }
 
 /**

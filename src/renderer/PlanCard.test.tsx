@@ -19,8 +19,8 @@ const GROUPS: Array<[string, OpencodeModel[]]> = [
   [
     "anthropic",
     [
-      { id: "claude-opus-4-7", providerID: "anthropic", name: "Claude Opus 4.7", family: "Claude" },
-      { id: "claude-sonnet-4-6", providerID: "anthropic", name: "Claude Sonnet 4.6", family: "Claude" },
+      { id: "claude-opus-4-7", providerID: "anthropic", name: "Claude Opus 4.7", family: "Claude", capabilities: { input: ["text"] } },
+      { id: "claude-sonnet-4-6", providerID: "anthropic", name: "Claude Sonnet 4.6", family: "Claude", capabilities: { input: ["text"] } },
     ],
   ],
 ];

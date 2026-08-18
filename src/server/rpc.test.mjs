@@ -1021,6 +1021,7 @@ test("opencode:context uses contextLimitFor and falls back to ASSUMED_CONTEXT_TO
   });
   const limited = await withLimit["opencode:context"]("s");
   assert.deepEqual(limited, computeContextBreakdown(tokens, 400_000));
+  assert.equal(limited.hasLimit, true);
 
   const fallback = buildHandlers({
     ...deps,
@@ -1028,6 +1029,7 @@ test("opencode:context uses contextLimitFor and falls back to ASSUMED_CONTEXT_TO
   });
   const fellBack = await fallback["opencode:context"]("s");
   assert.deepEqual(fellBack, computeContextBreakdown(tokens, ASSUMED_CONTEXT_TOKENS));
+  assert.equal(fellBack.hasLimit, true);
 
   assert.notEqual(limited.pct, fellBack.pct);
 });

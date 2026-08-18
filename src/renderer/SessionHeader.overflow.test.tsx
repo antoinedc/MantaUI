@@ -52,6 +52,7 @@ function contextHeader(): Partial<React.ComponentProps<typeof import("./SessionH
       cacheWrite: 0,
       totalInput: 1000,
       pct: 2,
+      hasLimit: true,
       segments: [],
     },
     ctxLimit: 100_000,

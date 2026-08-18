@@ -6,8 +6,8 @@
 export const ASSUMED_CONTEXT_TOKENS: number;
 
 export function resolveContextLimit(
-  model: { limit?: { context?: number } } | null | undefined,
-): number;
+  model: { limit?: { context?: number | null } } | null | undefined,
+): number | null;
 
 export type TruncationKind = "output-cap" | "context-wall" | "tool-cutoff";
 
@@ -90,13 +90,14 @@ export type ContextBreakdown = {
   cacheRead: number;
   cacheWrite: number;
   totalInput: number;
-  pct: number;
+  pct: number | null;
+  hasLimit: boolean;
   segments: { kind: ContextSegment; pct: number }[];
 };
 
 export function computeContextBreakdown(
   tokens: { input?: number; cache?: { read?: number; write?: number } } | null | undefined,
-  limit: number,
+  limit: number | null,
 ): ContextBreakdown;
 
 export function selectLatestTokenUsage(

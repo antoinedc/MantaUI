@@ -2213,15 +2213,34 @@ export type SubagentInput = {
 // Trimmed view of an opencode model from GET /api/model. The wire format
 // includes provider auth (`options.aisdk.provider.apiKey`) — opencode.ts
 // strips that field before this leaves the main process.
+// Input modalities a model accepts/produces. Open-ended: "text" | "image" |
+// "pdf" | "video" | "audio" | any provider-specific or custom value.
+export type InputModality = string;
+
+// Canonical model capabilities. After normalization at the chokepoint
+// (_normalizeProviderModel in src/server/opencode.mjs), `input`/`output` are
+// ALWAYS arrays of strings — the renderer must never handle the raw provider
+// object-map shape. `tools`/`attachment` pass through as booleans.
+export type OpencodeModelCapabilities = {
+  tools?: boolean;
+  attachment?: boolean;
+  input?: InputModality[];   // CANONICAL: array of strings after normalization
+  output?: InputModality[];
+};
+
 export type OpencodeModel = {
   id: string;            // e.g. "claude-opus-4-7"
   providerID: string;    // e.g. "anthropic"
   family?: string;
   name: string;          // human-readable, e.g. "Claude Opus 4.7"
-  status?: string;       // "active" / "deprecated" / ...
+  status?: "active" | "deprecated" | (string & {});
   enabled?: boolean;
-  limit?: { context?: number; output?: number };
-  capabilities?: { tools?: boolean; input?: string[]; output?: string[] };
+  // `limit.context` is `number | null` where `null` = "the provider gave no
+  // limit; do NOT fabricate one". `output` is only present when the provider
+  // reported a positive finite value.
+  limit?: { context: number | null; output?: number };
+  // REQUIRED after normalization (always at least `{}`).
+  capabilities: OpencodeModelCapabilities;
   variants?: Array<{ id: string }>;
   // User-supplied display override (via Settings → Models → edit). Set by the
   // server at listModels() time from AppConfig.modelOverrides; absent when the

@@ -1318,7 +1318,7 @@ describe("ChatPanel attachment auto-submit (BET-1124)", () => {
             providerID: "anthropic",
             name: "Claude X",
             limit: { context: 200000 },
-            capabilities: { input: { image: true, text: true } },
+            capabilities: { input: ["image", "text"] },
           },
         ]),
       opencodeDefaultModel: () =>

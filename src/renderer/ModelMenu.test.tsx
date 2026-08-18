@@ -15,7 +15,7 @@ import type { OpencodeModel } from "../shared/types";
 const GROUPS: Array<[string, OpencodeModel[]]> = [
   [
     "anthropic",
-    [{ id: "claude-opus-4-7", providerID: "anthropic", name: "Claude Opus 4.7" }],
+    [{ id: "claude-opus-4-7", providerID: "anthropic", name: "Claude Opus 4.7", capabilities: { input: ["text"] } }],
   ],
 ];
 
