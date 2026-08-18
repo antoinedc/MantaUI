@@ -11,9 +11,8 @@ import MessagingUI
 // answerable permissions/questions) and renders through the EXISTING
 // TranscriptComponents (§8/§8a): there is no second transcript renderer.
 //
-// Container per BET-481: ScrollView + LazyVStack — do NOT re-measure or replace.
-// The scroll anchor is the one part that moved: it is scoped to `.sizeChanges`
-// and the initial landing is an explicit post-layout scroll (see `transcript`).
+// The transcript container is MessagingUI `TiledView` (UICollectionView-backed),
+// fed a snapshot of `store.rows`.
 // Subagent rows PUSH a live child
 // screen via NavigationStack (parent scroll untouched; BET-576 binds the child
 // to the same observable source).
@@ -178,8 +177,9 @@ private struct ChatScreenContent: View {
         autoScrollsToBottomOnAppend: true,
         scrollsToBottomOnReplace: true
     )
-    /// The `dataSource` (+ change log) is now owned by `TranscriptListView`,
-    /// which shares one lifetime with the scroll view it describes (BET-1062).
+    /// The transcript rows are passed to `TiledView(items:)` as a snapshot of
+    /// `store.rows`; MessagingUI diffs it internally, so there is no separate
+    /// data source or change log to keep in sync (BET-1105).
     /// Whether the transcript has been scrolled up far enough that the round
     /// "scroll to bottom" control (rendered in ComposerView's model-selection
     /// row) should be shown. Driven purely by scroll geometry; it does not
@@ -736,13 +736,10 @@ private struct ChatScreenContent: View {
     }
 
     private var transcript: some View {
-        // The whole scroll layer now lives in `TranscriptListView`, which owns
-        // the `ListDataSource` change log and therefore shares ONE lifetime
-        // with the scroll view it describes (BET-1062). Declaring the store on
-        // the screen (BET-807) let it outlive the scroll view when the
-        // transcript branch was left for the skeleton / load-failure state —
-        // the fresh, empty collection view then met a log describing rows it
-        // never had ("attempt to delete item N from section 0 …").
+        // The whole scroll layer lives in `TranscriptListView`, which renders a
+        // snapshot of `store.rows` via `TiledView(items:)`. There is no separate
+        // data source or change log to fall out of sync with the scroll view —
+        // the BET-807/BET-1062 lifetime hazard is gone with the snapshot API.
         TranscriptListView(
             store: store,
             tokens: tokens,
@@ -1140,8 +1137,8 @@ struct ChatSubagentScreen: View {
         autoScrollsToBottomOnAppend: true,
         scrollsToBottomOnReplace: true
     )
-    /// The `dataSource` (+ change log) lives on `TranscriptListView`, which
-    /// shares one lifetime with the scroll view it describes (BET-1062).
+    /// Rendered by `TranscriptListView` from a snapshot of `store.rows` — no
+    /// separate data source or change log (BET-1105).
 
     var body: some View {
         content
@@ -1193,15 +1190,11 @@ struct ChatSubagentScreen: View {
 
 // MARK: - Shared transcript scroll layer (BET-1062)
 
-/// The transcript scroll layer, and the OWNER of its own change log.
-///
-/// `ListDataSource` keeps an append-only log describing the rows the collection
-/// view holds, so the two have to be born and die together. Declared on the
-/// SCREEN instead (BET-807), it outlives the scroll view every time the
-/// transcript branch is left for the loading skeleton or the load-failure
-/// state — and the rebuilt, empty collection view then meets a log describing
-/// rows it never had ("attempt to delete item N from section 0 which only
-/// contains 0 items"). Declared HERE, leaving the branch destroys both.
+/// The transcript scroll layer, feeding `store.rows` to MessagingUI's
+/// `TiledView(items:)` as a snapshot. There is no separate data source and no
+/// change log to replay, so the BET-807/BET-1062 change-log lifetime hazard is
+/// gone: the rows come straight from the store on every update, and MessagingUI
+/// diffs the snapshot internally to animate changes.
 ///
 /// One view serves both the parent chat and the read-only subagent drill-in:
 /// the subagent's old chain was a strict subset of the parent's, so this
@@ -1214,10 +1207,8 @@ struct TranscriptListView<Header: View>: View {
     var onPointsFromBottom: ((CGFloat) -> Void)? = nil
     @ViewBuilder var header: () -> Header
 
-    @State private var dataSource = ListDataSource<TranscriptRow>()
-
     var body: some View {
-        TiledView(dataSource: dataSource, scrollPosition: $scrollPosition) { row in
+        TiledView(items: store.rows, scrollPosition: $scrollPosition) { row in
             TranscriptBlockCell(item: row, tokens: tokens)
         }
         .prependLoader(.loader(
@@ -1236,9 +1227,6 @@ struct TranscriptListView<Header: View>: View {
             onPointsFromBottom?(geometry.pointsFromBottom)
         }
         .onTapBackground { resignKeyboard() }
-        .onChange(of: store.rows, initial: true) { _, rows in
-            dataSource.apply(rows)
-        }
         .safeAreaBar(edge: .top) {
             header()
         }
