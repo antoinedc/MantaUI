@@ -19,6 +19,7 @@
 import { isUpdateAvailable } from "../shared/versionCompare.mjs";
 import { resolveBoxChannel } from "../shared/channel.mjs";
 import { startPoller } from "./startPoller.mjs";
+import { createJsonFetcher } from "./conditionalFetch.mjs";
 
 // 30 min. This was 6h, chosen when every poll cost a full manifest download.
 // It no longer does: `defaultFetchManifest` sends `If-None-Match`, and the
@@ -62,6 +63,11 @@ export const MANIFEST_URL = "https://mantaui.com/updates/server.json";
 /**
  * Build a conditional-GET manifest fetcher.
  *
+ * Thin wrapper over the shared `createJsonFetcher` (src/server/conditionalFetch.mjs):
+ * the ETag-caching conditional-GET body lives there so the CLI update probes
+ * (cliUpdates.mjs) reuse the SAME logic. This wrapper only pins the default
+ * URL and the "manifest" error label.
+ *
  * The manifest is a ~95-byte JSON file that changes a handful of times a month,
  * polled forever by every box. Re-downloading it on every tick is pure waste,
  * and that waste is what forced the poll interval to be slow (6h) in the first
@@ -80,38 +86,11 @@ export const MANIFEST_URL = "https://mantaui.com/updates/server.json";
  *
  * Each returned fetcher owns its own cache, so tests get a clean one per call
  * and the poller's fetcher is never shared with an unrelated caller.
- *
- * `fetchImpl` is resolved PER CALL, not captured at construction: the previous
- * `defaultFetchManifest` was a plain function that called the global `fetch`
- * when invoked, so a caller (or a test) replacing `globalThis.fetch` after
- * import still took effect. Binding it once at module load would have silently
- * removed that.
  */
 export function createManifestFetcher({ fetchImpl } = {}) {
-  let etag = null;
-  let cached = null;
-
-  return async function fetchManifest(url = MANIFEST_URL) {
-    const doFetch = fetchImpl ?? globalThis.fetch;
-    const headers = etag ? { "if-none-match": etag } : undefined;
-    const res = await doFetch(url, headers ? { headers } : undefined);
-
-    if (res.status === 304) {
-      if (cached === null) {
-        throw new Error("manifest fetch returned 304 with no cached manifest");
-      }
-      return cached;
-    }
-    if (!res.ok) throw new Error(`manifest fetch failed: ${res.status}`);
-
-    const manifest = await res.json();
-    // Only remember the validator once the body parsed — caching an ETag for a
-    // body we failed to read would make every later poll a 304 that returns a
-    // stale/absent manifest.
-    const nextEtag = res.headers?.get?.("etag") ?? null;
-    etag = typeof nextEtag === "string" && nextEtag !== "" ? nextEtag : null;
-    cached = manifest;
-    return manifest;
+  const fetchJson = createJsonFetcher({ fetchImpl, label: "manifest fetch" });
+  return async function fetchManifest(url = MANIFEST_URL, init) {
+    return fetchJson(url, init);
   };
 }
 
