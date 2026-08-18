@@ -3,9 +3,9 @@
 // The box (server IS the box) keeps a durable, workspace-linked mailbox of
 // files the remote AI sends the user. The AI drops a file under
 // ~/.manta-outbox/<sessionID>/ (its opencode session id — the workspace) via
-// the `send_file` tool; a local scanner surfaces it to connected devices as an
-// `agentFile` bus event (the "AI sent you a file" toast). Detection is a plain
-// local `readdir`.
+// the `send_file` tool (or the inline-media tools); a local scanner surfaces
+// it to connected devices as an `agentFile` bus event (the "AI sent you a
+// file" toast). Detection is a plain local `readdir`.
 //
 // Durability semantics (reconciled with the old one-shot mailbox):
 //   - WORKSPACE-LINKED: files live in a subdir named by the opencode session
@@ -124,6 +124,7 @@ async function statRow(path, name, sessionID, now) {
       expiresAt,
       messageID:
         typeof meta.messageID === "string" && meta.messageID ? meta.messageID : null,
+      media: meta.media === true,
     };
   } catch {
     return {
@@ -134,6 +135,7 @@ async function statRow(path, name, sessionID, now) {
       mtime: 0,
       expiresAt: null,
       messageID: null,
+      media: false,
     };
   }
 }
@@ -144,7 +146,7 @@ async function statRow(path, name, sessionID, now) {
 export async function pushArtifact(
   filePath,
   sessionID,
-  { root = defaultOutboxRoot(), ttlHours, messageID } = {},
+  { root = defaultOutboxRoot(), ttlHours, messageID, media } = {},
 ) {
   if (!sessionID || typeof sessionID !== "string" || !sessionID.trim()) {
     return { ok: false, error: "sessionID is required" };
@@ -168,6 +170,7 @@ export async function pushArtifact(
     const meta = {};
     if (msgId) meta.messageID = msgId;
     if (ttlHours != null) meta.expiresAt = resolveExpiry(ttlHours, st.mtimeMs);
+    if (media) meta.media = true;
     await writeSidecar(sidecarPath(dest), meta);
   }
   const row = await statRow(dest, safe, sessionID, Date.now());
@@ -277,6 +280,7 @@ export function createOutboxScanner(bus, root) {
       }
       for (const entry of entries) {
         if (seen.has(entry.path)) continue;
+        if (entry.media === true) continue;
         seen.add(entry.path);
         bus.publish({
           kind: "agentFile",

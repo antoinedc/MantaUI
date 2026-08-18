@@ -1725,6 +1725,8 @@ export type OutboxFile = {
   mtime: number;
   expiresAt: number | null;
   messageID: string | null;
+  // true when pushed by the inline-media tools; suppress the agentFile toast
+  media?: boolean;
 };
 
 // Input shape for secretsSet (UI → store). The value travels renderer → IPC →
