@@ -1196,3 +1196,78 @@ describe("ChatPanel auto-rename single rename (BET-1101)", () => {
     expect(api.calls.tmuxRenameWindow ?? []).toHaveLength(1);
   });
 });
+
+// ===== Auto-rename first-turn fallback (BET-1100 follow-up) =====
+//
+// BET-1100/1101 assumed opencode auto-titles a session from its first user
+// message "for free". That premise is FALSE — a session created with an empty
+// title stays empty-titled even after its first turn (verified live against
+// opencode 1.18.10). So the first-name path read back "" and skipped the
+// rename, leaving the creation-time first-word placeholder ("im"). This pins
+// the fix: when opencode has no title, the first turn falls through to
+// opencodeGenerateTitle (the title agent) so it still renames exactly once.
+describe("ChatPanel auto-rename first-turn fallback (BET-1100 follow-up)", () => {
+  let api: MockApi;
+  let bus: MockEventBus;
+  let h: Harness | null = null;
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  it("generates a title when opencode left the session untitled, renaming once", async () => {
+    // opencode has NOT titled the session (title:""), as on a live box.
+    ({ api, bus } = installMockApi({
+      opencodeListSessions: () =>
+        Promise.resolve([{ id: "ses_test", title: "" }]),
+      opencodeGenerateTitle: () => Promise.resolve("Manta setup check"),
+    }));
+    resetStore({ autoRenameSessions: true });
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    const textarea = h.container.querySelector("textarea") as HTMLTextAreaElement;
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      "value",
+    )?.set;
+    await act(async () => {
+      setter?.call(textarea, "I'm just checking the manta setup");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      );
+    });
+    await h.flush();
+    expect(h.text()).toContain("I'm just checking the manta setup");
+
+    await emitStreamAndFlush(bus, h, {
+      sub: "running",
+      sessionId: "ses_test",
+      payload: { running: true },
+    });
+    await emitStreamAndFlush(bus, h, {
+      sub: "running",
+      sessionId: "ses_test",
+      payload: { running: false },
+    });
+
+    // The empty title forced the title-agent fallback, which produced the name.
+    expect(api.calls.opencodeGenerateTitle ?? []).toHaveLength(1);
+    const renames = api.calls.tmuxRenameWindow ?? [];
+    expect(renames.length).toBe(1);
+    expect(renames[0][0]).toEqual({
+      sessionName: "proj",
+      windowIndex: 1,
+      newName: "Manta setup check",
+    });
+
+    // No second rename shortly after.
+    await new Promise((r) => setTimeout(r, 60));
+    await h.flush();
+    expect(api.calls.tmuxRenameWindow ?? []).toHaveLength(1);
+  });
+});

@@ -1661,12 +1661,10 @@ export function ChatPanel({
       await refresh();
     };
 
-    // FIRST NAME — opencode already titles every session from its FIRST user
-    // message for free, so the first rename reads that title (one cheap list
-    // call) instead of spinning up a throwaway generation session. Only runs
-    // before any auto-rename this session; once lastAutoRenamedTurnRef is set,
-    // the every-Nth-turn path below takes over for drift tracking. If the
-    // title isn't populated yet, skip silently and let the next turn retry.
+    // FIRST NAME — opencode's own session title is the preferred first name
+    // (one cheap list call instead of a throwaway generation session). Only
+    // runs before any auto-rename this session; once lastAutoRenamedTurnRef
+    // is set, the every-Nth-turn path below takes over for drift tracking.
     if (lastAutoRenamedTurnRef.current === 0) {
       autoRenameInFlightRef.current = true;
       void (async () => {
@@ -1676,7 +1674,21 @@ export function ChatPanel({
           if (title) {
             await renameWindow(title);
             lastAutoRenamedTurnRef.current = turns;
+            return;
           }
+          // opencode does NOT auto-title a session created with an empty
+          // title — verified live (1.18.10): the title stays "" even after
+          // the first turn. BET-1100 assumed it did, so the first-name path
+          // read back "" and silently skipped, leaving the creation-time
+          // first-word placeholder ("im"). Fall through to the title agent
+          // (opencodeGenerateTitle) so the first turn still yields exactly
+          // ONE sensible rename.
+          const raw = await window.api.opencodeGenerateTitle({
+            directory: cwd ?? "",
+            instruction: buildTitleInstruction(buildTitlePromptInput(messages)),
+          });
+          await renameWindow(raw);
+          lastAutoRenamedTurnRef.current = turns;
         } catch {
           /* auto-rename is best-effort — never surface an error banner */
         } finally {
