@@ -266,9 +266,3 @@ describe("NewSessionScreen composer parity (BET-1088)", () => {
     expect(asp?.text).toBe("hello");
   });
 });
-
-  it("appends -2, -3, … until a free name is found", () => {
-    expect(uniqueSessionName("repo", new Set(["repo"]))).toBe("repo-2");
-    expect(uniqueSessionName("repo", new Set(["repo", "repo-2", "repo-3"]))).toBe("repo-4");
-  });
-});

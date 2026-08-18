@@ -11,7 +11,7 @@ import { ADJECTIVES, NOUNS } from "./friendlyWords.mjs";
 
 describe("generateProjectName", () => {
   // Sequence of [0,1) values, cycling when exhausted.
-  function seqRand(...vals) {
+  function seqRand(...vals: number[]) {
     let i = 0;
     return () => vals[i++ % vals.length];
   }
