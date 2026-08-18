@@ -3952,6 +3952,7 @@ describe("selectStatusItems", () => {
 describe("arrangeCards", () => {
   const blocking = (id: string, order: number) => ({ id, tier: "blocking" as const, order });
   const ambient = (id: string, order: number) => ({ id, tier: "ambient" as const, order });
+  const management = (id: string, order: number) => ({ id, tier: "management" as const, order });
 
   it("returns an empty result for no cards", () => {
     expect(arrangeCards([])).toEqual({
@@ -3959,6 +3960,7 @@ describe("arrangeCards", () => {
       blockingMore: 0,
       ambient: [],
       ambientRollup: [],
+      management: [],
     });
   });
 
@@ -4043,6 +4045,35 @@ describe("arrangeCards", () => {
     expect(r.blockingMore).toBe(0);
     expect(r.ambient.length).toBe(2);
     expect(r.ambientRollup.length).toBe(2);
+  });
+
+  it("a management card lands in management, not ambient/rollup", () => {
+    const r = arrangeCards([ambient("retry", 7), management("schedules", 3)]);
+    expect(r.management.map((c) => c.id)).toEqual(["schedules"]);
+    expect(r.ambient.map((c) => c.id)).toEqual(["retry"]);
+    expect(r.ambientRollup).toEqual([]);
+  });
+
+  it("a management card does not consume ambient expanded slots", () => {
+    const r = arrangeCards([
+      management("secrets", 2),
+      ambient("retry", 7),
+      ambient("compaction", 6),
+      ambient("send-error", 5),
+      ambient("queued", 4),
+    ]);
+    expect(r.ambient.length).toBe(2);
+    expect(r.ambientRollup.length).toBe(2);
+    expect(r.management.map((c) => c.id)).toEqual(["secrets"]);
+  });
+
+  it("management ordering (highest order first) is independent of input order", () => {
+    const r = arrangeCards([
+      management("webhooks", 1),
+      management("schedules", 3),
+      management("secrets", 2),
+    ]);
+    expect(r.management.map((c) => c.id)).toEqual(["schedules", "secrets", "webhooks"]);
   });
 });
 
