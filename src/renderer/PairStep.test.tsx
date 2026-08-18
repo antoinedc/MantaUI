@@ -74,12 +74,12 @@ describe("PairStep render harness (BET-382 / BET-962)", () => {
     h = mount(<PairStep onPaired={noopOnPaired} />);
     const headings = h.container.querySelectorAll("h2");
     expect(headings).toHaveLength(1);
-    expect(headings[0].textContent).toBe("Connect your box");
+    expect(headings[0].textContent).toBe("Connect your server");
     expect(h.text()).toContain(
       "Pick the machine you want to run Manta on.",
     );
-    expect(h.text()).not.toContain("Connect to your box");
-    expect(h.text()).not.toContain("Set up your box via SSH");
+    expect(h.text()).not.toContain("Connect to your server");
+    expect(h.text()).not.toContain("Set up your server via SSH");
     expect(h.text()).not.toContain("Skip setup");
     expect(h.text()).not.toContain("Pair manually with a code");
     expect(h.text()).not.toContain("Advanced");
@@ -93,7 +93,7 @@ describe("PairStep render harness (BET-382 / BET-962)", () => {
     expect(h.container.querySelector("#pair-code")).not.toBeNull();
     expect(h.container.querySelector("#pair-host")).not.toBeNull();
     // Zone B shows the idle manual status; zone A carries the mode-switch link.
-    expect(h.text()).toContain("Enter the 6-digit code from the box");
+    expect(h.text()).toContain("Enter the 6-digit code from the server");
     expect(h.text()).toContain("Back to the host picker");
   });
 

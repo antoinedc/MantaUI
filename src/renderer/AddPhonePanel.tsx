@@ -104,7 +104,7 @@ export function AddPhonePanel() {
                 <span className="font-mono text-text">{pairing.pairingCode}</span>
               </div>
               <div className="text-body">
-                <span className="text-text-muted">Box ID:</span>{" "}
+                <span className="text-text-muted">Server ID:</span>{" "}
                 <span className="font-mono text-text break-all">{pairing.boxId}</span>
               </div>
               <PairingCountdown expiry={new Date(pairing.expiresAt)} />
@@ -124,7 +124,7 @@ export function AddPhonePanel() {
 
       <div className="text-body text-text-faint">
         {pairing?.ok
-          ? "Prefer to type it? Enter the six digits and the box ID above on your phone instead of scanning."
+          ? "Prefer to type it? Enter the six digits and the Server ID above on your phone instead of scanning."
           : "Prefer to type it? Enter the six-digit code on your phone instead of scanning."}
       </div>
     </div>

@@ -189,12 +189,12 @@ export function ConnectProvider({
       try {
         res = await window.api.opencodeProviderAuth(req);
       } catch {
-        if (!cancelled) safeSetPhase({ kind: "failed", message: "Couldn't reach the box. Try again." });
+        if (!cancelled) safeSetPhase({ kind: "failed", message: "Couldn't reach the server. Try again." });
         return;
       }
       if (cancelled) return;
       if (res.action !== "start") {
-        safeSetPhase({ kind: "failed", message: "Unexpected response from the box." });
+        safeSetPhase({ kind: "failed", message: "Unexpected response from the server." });
         return;
       }
       // BET-354: claude-login shape carries a sessionKey for the live
@@ -395,7 +395,7 @@ export function ConnectProvider({
           kind: "failed",
           reason: "claude-cli-install",
           message:
-            "The Claude CLI didn't install in time. The box itself is fine — try again, use a different model, or install it manually.",
+            "The Claude CLI didn't install in time. The server itself is fine — try again, use a different model, or install it manually.",
         });
         return;
       }
@@ -427,7 +427,7 @@ export function ConnectProvider({
             kind: "failed",
             reason: "claude-cli-install",
             message:
-              "The Claude CLI installer exited without installing the binary. The box itself is fine — try again, use a different model, or install it manually from https://claude.ai.",
+              "The Claude CLI installer exited without installing the binary. The server itself is fine — try again, use a different model, or install it manually from https://claude.ai.",
           });
           return;
         }
@@ -618,7 +618,7 @@ export function ConnectProvider({
                 url: phase.url,
                 instructions: phase.instructions,
                 methodIndex: phase.methodIndex,
-                inputError: "Couldn't reach the box. Try again.",
+                inputError: "Couldn't reach the server. Try again.",
               });
               return;
             }
@@ -671,7 +671,7 @@ export function ConnectProvider({
                 safeSetPhase({
                   kind: "needsKey",
                   consoleUrl: phase.consoleUrl,
-                  inputError: "Couldn't reach the box. Try again.",
+                  inputError: "Couldn't reach the server. Try again.",
                 });
                 return;
               }
@@ -722,7 +722,7 @@ export function ConnectProvider({
             } catch {
               safeSetPhase({
                 ...phase,
-                inputError: "Couldn't reach the box. Try again.",
+                inputError: "Couldn't reach the server. Try again.",
               });
               return;
             }
@@ -748,12 +748,12 @@ export function ConnectProvider({
         >
           <div className="space-y-2">
             <p className="text-text-muted">
-              The <b className="text-text">claude</b> CLI isn't on this box yet.
+              The <b className="text-text">claude</b> CLI isn't on this server yet.
               Installing it now via the official installer — no action needed.
             </p>
             <details className="text-meta">
               <summary className="text-text-faint cursor-pointer hover:text-text-muted">
-                Show what's happening on the box
+                Show what's happening on the server
               </summary>
               <div className="rounded-xs border border-border overflow-hidden h-40 bg-[var(--inset)] mt-1">
                 <Terminal
@@ -1037,7 +1037,7 @@ function ClaudeLoginBlock({
     <div className="space-y-2">
       {preExisting ? (
         <div className="text-text-muted">
-          {inputError ?? "Claude is already signed in on this box."}
+          {inputError ?? "Claude is already signed in on this server."}
         </div>
       ) : (
         <>
@@ -1074,7 +1074,7 @@ function ClaudeLoginBlock({
               still render through xterm for users who want to watch. */}
           <details className="text-meta">
             <summary className="text-text-faint cursor-pointer hover:text-text-muted">
-              Show what's happening on the box
+              Show what's happening on the server
             </summary>
             <div className="rounded-xs border border-border overflow-hidden h-40 bg-[var(--inset)] mt-1">
               <Terminal

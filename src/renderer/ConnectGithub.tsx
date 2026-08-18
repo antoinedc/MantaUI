@@ -131,7 +131,7 @@ export function ConnectGithubPanel({
       } catch {
         if (cancelled) return;
         // A connection-level failure surfaces here, not in a caller phase.
-        setStage({ kind: "error", message: "Couldn't reach the box. Try again." });
+        setStage({ kind: "error", message: "Couldn't reach the server. Try again." });
       }
     })();
     return () => {
@@ -183,7 +183,7 @@ export function ConnectGithubPanel({
         inFlight = false;
         if (cancelled) return;
         if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-          fail("Couldn't reach the box. Try again.");
+          fail("Couldn't reach the server. Try again.");
           return;
         }
         scheduleNext();
@@ -282,7 +282,7 @@ export function ConnectGithubPanel({
           <PanelHeader title="Connect GitHub" />
           <div className="p-4">
             <Callout tone="warn">
-              GitHub sign-in isn't configured on this box yet.
+              GitHub sign-in isn't configured on this server yet.
             </Callout>
             <div className="flex gap-2 mt-3">
               <Button tone="ghost" onClick={cancel}>

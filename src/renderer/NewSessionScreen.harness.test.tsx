@@ -103,7 +103,7 @@ describe("NewSessionScreen mount against an unpaired window.api", () => {
     await h.flush();
 
     // Fresh-box heading (probe succeeded, zero repos found).
-    expect(h.container.textContent).toContain("Let's get some code on this box");
+    expect(h.container.textContent).toContain("Let's get some code on this server");
     // No worktree chip in the repo-probe zero state.
     const checkbox = h.container.querySelector(
       'input[aria-label="Create in a fresh git worktree"]',
