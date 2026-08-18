@@ -452,3 +452,21 @@ the same handle once the file exists. A `media_begin` with no following
 forward the current session + message id so the placeholder and artifact land
 on this turn. Install: `cp <repo>/docs/opencode-tools/media.ts
 ~/.config/opencode/tools/media.ts` then restart `opencode-serve`.
+
+## manta on-call CTO reads
+
+You have a `cto` tool (global opencode custom tool, BET-1164) that runs
+deterministic, READ-ONLY diagnostics about this box and the Multica board:
+`cto {tool, args}` where `tool` is one of `list_sessions` / `list_projects` /
+`read_transcript` / `search_messages` / `git_status` / `git_branch` /
+`git_log` / `list_models` / `get_usage` / `usage_stopped` / `session_usage` /
+`context_state` / `session_plan_mode` / `get_config` / `query_multica`.
+Nothing mutates anything; results are plain JSON. Reach for these to answer
+"What's running?", "what did we ship on Multica?", "what's our usage / any
+stopped conversations?", "is <session> in plan mode?", or "context state of
+<session>?". A quiet box (no sessions / empty board) is a valid answer — report
+the empty state, never fabricate. The `cto` opencode agent (selectable as a
+normal chat session) is pre-wired to use this belt. Install/update is a COPY,
+never a symlink: `cp <repo>/docs/opencode-tools/cto.ts
+~/.config/opencode/tools/cto.ts` then `systemctl --user restart
+opencode-serve`. The engine lives in `src/server/cto.mjs` (see there).

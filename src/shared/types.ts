@@ -253,6 +253,33 @@ export type AppConfig = {
   // render. Rides the generic configGet/configUpdate path — no dedicated IPC
   // channel. Absent/empty = no pins.
   pinnedWindows?: string[];
+  // ----- On-call CTO (BET-1164) -----
+  // The "on-call CTO" feature: a deterministic read-only tool belt (the `cto`
+  // engine's dispatch surface) surfaced as an opencode agent + voice window.
+  // This issue (1/3) wires ONLY `enabled`; the rest of the shape is defined
+  // now (with the engine/store) so the later issues (2 = inbound feed, 3 =
+  // call window + voice) just plumb through fields already agreed. Absent =
+  // the whole feature off.
+  cto?: {
+    // Master switch. False (the default) until the feature is shipped — with
+    // it off the box never registers the `cto` agent nor wires the engine.
+    enabled?: boolean;
+    // Transport for voice narration of tool boundaries (Issue 3). "realtime"
+    // (default) = the eventual walkie-talkie transport; "groq" = TTS via Groq.
+    transport?: "realtime" | "groq";
+    // The model the `cto` agent runs on (Issue 3). Absent → opencode default.
+    model?: string;
+    // Voice/narration model id (Issue 3).
+    voice?: string;
+    // Tool names the user has allowed to run without narration/confirm
+    // (Issue 2, the inbound feed's trusted set). Absent/empty = none trusted.
+    trustedActions?: string[];
+    // What the box does when a call window is left parked (Issue 3).
+    // "push" (default) = notify the user; "auto-open" = open the window.
+    parkedBehavior?: "auto-open" | "push";
+    // Whether the call window listens continuously (Issue 3). Default false.
+    alwaysListening?: boolean;
+  };
 };
 
 // ----- Live tmux state -----
