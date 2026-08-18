@@ -61,6 +61,7 @@ import {
   zeroStateMode,
   type RepoRow,
 } from "./chatUtils";
+import { deriveProjectName, promptWindowName, uniqueSessionName } from "../shared/projectName.mjs";
 import type { VoicePhase } from "./voice";
 import type {
   ForgeCliStatus,
@@ -97,40 +98,6 @@ type Props = {
   // new session; this lets the caller run any post-commit bookkeeping.
   onDone?: () => void;
 };
-
-// Derive a tmux session name from a folder path: the basename, fallback to
-// "project". Tilde-form and trailing slashes are handled. Exported for
-// testing (pure).
-export function deriveProjectName(cwd: string): string {
-  const clean = cwd.replace(/\/+$/, "");
-  if (!clean || clean === "~") return "project";
-  const parts = clean.split("/").filter(Boolean);
-  return parts[parts.length - 1] || "project";
-}
-
-// Numeric de-dup on top of deriveProjectName: returns the base name if free,
-// else the first free `base-2`, `base-3`, … against the `taken` set (the
-// existing project session names). THE one naming helper for a session name —
-// shared by every path that creates a project (the repo-probe batch, the
-// draft composer submit, and the worktree fan-out), so a twin never lands with
-// the same tmux session name. Exported for testing (pure).
-export function uniqueSessionName(base: string, taken: Set<string>): string {
-  if (!taken.has(base)) return base;
-  let i = 2;
-  while (taken.has(`${base}-${i}`)) i++;
-  return `${base}-${i}`;
-}
-
-// A readable, largely-unique window name derived from the first word of the
-// typed prompt (e.g. "Deploy the billing service" → "deploy"). This avoids the
-// old constant "worktree"/"session" that produced a sidebar full of identical
-// rows. Falls back to "session" on a non-alphanumeric or empty first word.
-export function promptWindowName(input: string): string {
-  const clean = (input.trim().split(/\s+/)[0] ?? "")
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]/g, "");
-  return clean ? clean.slice(0, 24) : "session";
-}
 
 export function NewSessionScreen({ draftId, onDone }: Props) {
   // Per-row lifecycle for the repo-probe batch setup (BET-787 [S8]).

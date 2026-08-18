@@ -22,7 +22,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { act } from "react";
 import { installMockApi, resetStore, mount, type Harness } from "./testHarness";
-import { NewSessionScreen, uniqueSessionName } from "./NewSessionScreen";
+import { NewSessionScreen } from "./NewSessionScreen";
 import type { NewSessionDraft } from "./store";
 import { useStore } from "./store";
 import { refreshModelCatalog } from "./modelCatalog";
@@ -264,20 +264,5 @@ describe("NewSessionScreen composer parity (BET-1088)", () => {
     const asp = useStore.getState().autoSubmitPrompt;
     expect(asp?.plan).toBe(true);
     expect(asp?.text).toBe("hello");
-  });
-});
-
-// BET-787: the numeric session-name de-dup is ONE shared helper — every path
-// that creates a project (repo-probe batch, composer submit, worktree fan-out)
-// must go through it, or two projects can land with the same tmux session
-// name. Pin it here so the duplication can't silently re-split.
-describe("uniqueSessionName", () => {
-  it("returns the base name when it is free", () => {
-    expect(uniqueSessionName("repo", new Set(["server", "other"]))).toBe("repo");
-  });
-
-  it("appends -2, -3, … until a free name is found", () => {
-    expect(uniqueSessionName("repo", new Set(["repo"]))).toBe("repo-2");
-    expect(uniqueSessionName("repo", new Set(["repo", "repo-2", "repo-3"]))).toBe("repo-4");
   });
 });

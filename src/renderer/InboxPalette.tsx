@@ -12,7 +12,7 @@
 // `Delegate in background` — all operating on the currently selected row.
 //
 // "Start a session" reuses the ONE creation path (tmuxNewSession + the
-// worktree/project helpers from NewSessionScreen): it resolves the item's repo
+// worktree/project naming helpers from src/shared/projectName.mjs): it resolves the item's repo
 // to a local path on the box, adds a worktree, creates the session, lands in
 // it, and SEEDS the composer with the box-provided prompt WITHOUT submitting
 // (the user reviews + hits Enter). "Delegate in background" runs the same
@@ -29,7 +29,7 @@ import { Pill } from "./Pill";
 import { ReviewPane } from "./ReviewPane";
 import { useStore } from "./store";
 import { formatAge, inboxReasonLabel, sortInbox } from "./chatUtils";
-import { deriveProjectName, uniqueSessionName } from "./NewSessionScreen";
+import { deriveProjectName, uniqueSessionName } from "../shared/projectName.mjs";
 import type { ForgeInboxItem } from "../shared/types";
 
 // The status-dot tone for each inbox reason — the mockup's deliberate mix:
