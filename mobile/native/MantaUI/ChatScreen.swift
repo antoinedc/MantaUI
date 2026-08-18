@@ -1190,19 +1190,11 @@ struct ChatSubagentScreen: View {
 
 // MARK: - Shared transcript scroll layer (BET-1062)
 
-/// The transcript scroll layer, fed from `store.rows` as a snapshot. There is no
-/// separate data source and no change log to replay, so the BET-807/BET-1062
-/// change-log lifetime hazard is gone: MessagingUI diffs the snapshot internally
-/// to animate changes.
-///
-/// Rows are held in a LOCAL snapshot (`rows`) rather than passed to
-/// `TiledView(items:)` straight from the store. The transcript mounts only after
-/// the store's first fetch completes, so `store.rows` is already non-empty when
-/// this view first builds — and applying a non-empty snapshot inside `makeUIView`
-/// (before the collection view is laid out on-screen) renders blank cells. The
-/// local snapshot starts empty and is filled from `onChange(initial: true)`,
-/// mirroring the removed `.onChange { dataSource.apply }` timing: items apply on
-/// first appearance, after layout, so persisted history renders on open.
+/// The transcript scroll layer, feeding `store.rows` to MessagingUI's
+/// `TiledView(items:)` as a snapshot. There is no separate data source and no
+/// change log to replay, so the BET-807/BET-1062 change-log lifetime hazard is
+/// gone: the rows come straight from the store on every update, and MessagingUI
+/// diffs the snapshot internally to animate changes.
 ///
 /// One view serves both the parent chat and the read-only subagent drill-in:
 /// the subagent's old chain was a strict subset of the parent's, so this
@@ -1215,14 +1207,8 @@ struct TranscriptListView<Header: View>: View {
     var onPointsFromBottom: ((CGFloat) -> Void)? = nil
     @ViewBuilder var header: () -> Header
 
-    /// Local snapshot of `store.rows` fed to `TiledView(items:)`. Starts empty
-    /// so the collection view mounts and lays out before any items apply (see
-    /// the type doc — applying non-empty items at `makeUIView` renders blank).
-    /// A plain snapshot, not a change log; no replay/lifetime hazard.
-    @State private var rows: [TranscriptRow] = []
-
     var body: some View {
-        TiledView(items: rows, scrollPosition: $scrollPosition) { row in
+        TiledView(items: store.rows, scrollPosition: $scrollPosition) { row in
             TranscriptBlockCell(item: row, tokens: tokens)
         }
         .prependLoader(.loader(
@@ -1241,9 +1227,6 @@ struct TranscriptListView<Header: View>: View {
             onPointsFromBottom?(geometry.pointsFromBottom)
         }
         .onTapBackground { resignKeyboard() }
-        .onChange(of: store.rows, initial: true) { _, newRows in
-            rows = newRows
-        }
         .safeAreaBar(edge: .top) {
             header()
         }
