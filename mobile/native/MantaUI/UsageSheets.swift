@@ -233,17 +233,17 @@ struct UsageSheet: View {
         // below the content.
         NavigationStack {
             List {
-                Section(footer: Text("Updated \(updatedAgo) · the dot tracks the 5-hour window.")) {
+                Section(footer: footer) {
                     if let session = UsageMeters.sessionWindow(snapshots) {
-                        UsageWindowRow(window: session, name: "Session", caption: "5-hour window", tokens: tokens)
+                        UsageWindowRow(window: session, tokens: tokens)
                     }
                     if let weekly = UsageMeters.weeklyWindow(snapshots) {
-                        UsageWindowRow(window: weekly, name: "Weekly", caption: "7-day window", tokens: tokens)
+                        UsageWindowRow(window: weekly, tokens: tokens)
                     }
                 }
             }
             .listStyle(.insetGrouped)
-            .navigationTitle("Claude plan")
+            .navigationTitle(planTitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
@@ -262,15 +262,34 @@ struct UsageSheet: View {
         if minutes < 1 { return "just now" }
         return "\(minutes)m ago"
     }
+
+    /// The sheet's title — the provider whose snapshot the sheet shows,
+    /// mapped the same way the desktop dial names providers (claude →
+    /// "Claude", codex → "OpenAI", kimi → "Kimi", else capitalised id).
+    private var planTitle: String {
+        UsageMeters.providerLabel(primarySnapshot?.provider)
+    }
+
+    /// The snapshot that drives the sheet — the one holding the primary (dot)
+    /// window, falling back to the first snapshot when none does.
+    private var primarySnapshot: UsageSnapshot? {
+        snapshots.first { $0.windows.contains { $0.kind == "session" } } ?? snapshots.first
+    }
+
+    /// "Updated 2m ago · the dot tracks 5h." The window the dot actually tracks
+    /// is the session (primary, first) window — named from its own `label`, so
+    /// the footer never asserts a fixed 5-hour window.
+    private var footer: Text {
+        let windowLabel = UsageMeters.sessionWindow(snapshots)?.label ?? ""
+        return Text("Updated \(updatedAgo) · the dot tracks \(windowLabel).")
+    }
 }
 
-/// One window row in the usage sheet: band ring, name, window-length caption,
+/// One window row in the usage sheet: band ring, the server's window `label`,
 /// percentage, meter, and the reset countdown/date. The list draws the row's
 /// surface, so there is no hand-rolled card here.
 private struct UsageWindowRow: View {
     let window: UsageWindow
-    let name: String
-    let caption: String
     let tokens: Tokens
 
     var body: some View {
@@ -279,11 +298,8 @@ private struct UsageWindowRow: View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
             HStack(spacing: Metrics.spacing.sp1) {
                 MeterRing(pct: window.pct, color: tint, diameter: 11, lineWidth: 2.5, track: tokens.borderSubtle)
-                Text(name)
+                Text(window.label ?? "")
                     .font(.body)
-                Text(caption)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
                 Spacer(minLength: 0)
                 Text("\(Int(window.pct.rounded()))%")
                     .font(.body.weight(.semibold))
