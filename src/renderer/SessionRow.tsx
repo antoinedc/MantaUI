@@ -40,6 +40,8 @@
 
 import type { ReactNode } from "react";
 
+import { MarqueeLabel } from "./MarqueeLabel";
+
 export type SessionStatus = "run" | "att" | "idle" | "ok" | "default" | "halted";
 
 // The row container. `group` is the identity hook for the call site's
@@ -107,6 +109,9 @@ const DOT: Record<SessionStatus, string> = {
 const NAME_REST = "flex-1 min-w-0 truncate text-label font-medium text-text-muted";
 const NAME_SELECTED = "flex-1 min-w-0 truncate text-label font-semibold text-text";
 
+const NAME_MARQUEE = "flex-1 min-w-0 text-label font-medium text-text-muted";
+const NAME_MARQUEE_SELECTED = "flex-1 min-w-0 text-label font-semibold text-text";
+
 // Age `.age`: mono tabular numerals, right-aligned, never shrinks. `ageStale`
 // hides the slot at rest and reveals it on row hover (visibility-preserving,
 // so revealing it shifts nothing).
@@ -115,6 +120,7 @@ const AGE_CHROME = "shrink-0 min-w-[20px] text-right font-mono tabular-nums text
 export function SessionRow({
   status,
   selected = false,
+  marquee = false,
   child = false,
   lastChild = false,
   name,
@@ -133,6 +139,8 @@ export function SessionRow({
   status: SessionStatus;
   /** `.on` — `--raised` surface + the C3 marker. */
   selected?: boolean;
+  /** marquee: true wraps the name in MarqueeLabel (hover-slide for truncated text). */
+  marquee?: boolean;
   /** `.child` — 26px indent + the `left:13px` tree connectors. */
   child?: boolean;
   /** Last child in its group — the trunk stops at the elbow instead of
@@ -178,7 +186,13 @@ export function SessionRow({
       className={row}
     >
       <span className={`${DOT_BASE} ${DOT[status]}`} title={statusTitle} aria-hidden="true" />
-      <span className={selected ? NAME_SELECTED : NAME_REST}>{name}</span>
+      {marquee ? (
+        <MarqueeLabel className={selected ? NAME_MARQUEE_SELECTED : NAME_MARQUEE}>
+          {name}
+        </MarqueeLabel>
+      ) : (
+        <span className={selected ? NAME_SELECTED : NAME_REST}>{name}</span>
+      )}
       <span className={AGE_CHROME + (ageStale ? " invisible group-hover:visible" : " visible")}>
         {age}
       </span>

@@ -50,6 +50,7 @@ import { Callout } from "./Callout";
 import { ForgeMark, hasForgeMark } from "./ForgeMark";
 import { Dropdown, MenuItem } from "./MenuItem";
 import { Popover } from "./Popover";
+import { MarqueeLabel } from "./MarqueeLabel";
 import { ConfirmModal } from "./ConfirmModal";
 
 // Cache-segment colors for the header pill.
@@ -392,12 +393,12 @@ export function SessionHeader({
             many workspaces, and the branch alone does not identify one. It is
             not decoration, and nothing else in the desktop chrome carries it. */}
       {crumb && (
-        <span
-          className="text-label text-text-faint shrink-0 truncate max-w-[200px]"
+        <MarqueeLabel
+          className="text-label text-text-faint shrink-0 max-w-[200px]"
           title={crumb}
         >
           {crumb}
-        </span>
+        </MarqueeLabel>
       )}
 
       {/* Branch chip — session state, at the `sm` tag density so it reads as

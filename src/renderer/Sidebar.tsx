@@ -1253,6 +1253,7 @@ function WindowRow({
               </span>
             )
           }
+          marquee={!isRenaming}
           age={age.text}
           ageStale={age.stale}
           trailing={<PinSlot pinned={pinned} onToggle={onTogglePin} />}
@@ -1301,6 +1302,7 @@ function JobChildRow({
           child
           lastChild={lastChild}
           name={w.name}
+          marquee
           age={age.text}
           ageStale={age.stale}
           title={title}
