@@ -1,0 +1,38 @@
+# SwiftLint crash-prevention gate for the native iOS app.
+#
+# Linux + Docker on purpose: these rules are SwiftSyntax-based and need no
+# Xcode, so this runs in ~30s on a free ubuntu runner instead of occupying a
+# macOS one. Config lives at mobile/native/.swiftlint.yml.
+#
+# A BASELINE (.swiftlint-baseline.json) records violations that already existed
+# when linting was introduced. Those do not fail the build; anything NEW does.
+#
+# NOT in required-checks.json: the paths filter means most PRs never produce
+# this context, and requiring it would block them all (see AGENTS.md).
+name: Swift Lint
+
+on:
+  pull_request:
+    paths:
+      - "mobile/native/**"
+      - ".github/workflows/swift-lint.yml"
+
+concurrency:
+  group: swift-lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  swiftlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: SwiftLint (baseline-filtered)
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/mobile/native:/work" \
+            -w /work \
+            ghcr.io/realm/swiftlint:latest \
+            swiftlint lint --strict --baseline .swiftlint-baseline.json

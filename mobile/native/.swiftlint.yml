@@ -1,0 +1,75 @@
+# SwiftLint — crash-prevention configuration.
+#
+# This config is deliberately NOT a style guide. Only rules that catch runtime
+# CRASHES are enabled; everything cosmetic is disabled. The app's live crash
+# reports are all trap-style terminations, so a linter earns its place here by
+# catching those and nothing else.
+#
+# Adoption uses a BASELINE (.swiftlint-baseline.json): existing violations are
+# recorded and ignored, new ones fail CI. Regenerate it only to REMOVE entries
+# after fixing violations — never to absorb new ones.
+
+included:
+  - MantaUI
+
+excluded:
+  # Test bundles: ~53 deliberate force-unwraps in URL/HTTPURLResponse fixtures.
+  # Idiomatic in tests, pure noise from a linter.
+  - MantaUITests
+  - MantaUIUITests
+  # Machine-generated from TypeScript sources by `npm run gen:swift-*`.
+  # Linting generated code just means editing a generator to satisfy a linter.
+  - ../../generated
+  # Dependency checkouts, if a local build ever leaves them here.
+  - .build
+  - DerivedData
+
+# Everything cosmetic off. This is a crash gate, not a formatter.
+disabled_rules:
+  - line_length
+  - trailing_whitespace
+  - todo
+  - identifier_name
+  - type_name
+  - file_length
+  - type_body_length
+  - function_body_length
+  - cyclomatic_complexity
+  - large_tuple
+  - nesting
+  - function_parameter_count
+
+# Crash-prevention rules that are OPT-IN and therefore off unless listed here.
+opt_in_rules:
+  # THE big one: `x!` on an optional. The single most common Swift crash.
+  - force_unwrapping
+  # `var x: Int!` — a force unwrap deferred to every use site.
+  # force_unwrapping does NOT cover this; both rules are needed.
+  - implicitly_unwrapped_optional
+  # `[unowned self]` — EXC_BAD_ACCESS when the referent is already gone.
+  # `[weak self]` is almost always what was meant.
+  - unhandled_throwing_task
+  - unowned_variable_capture
+  # An observer token that is discarded can never be removed -> callback into
+  # a deallocated object.
+  - discarded_notification_center_observer
+  # Asset literals: a typo'd name is a runtime nil, generated symbols are a
+  # compile error.
+  - prefer_asset_symbols
+  # Mismatched actor/Sendable annotations — relevant given Swift 6 mode.
+  - incompatible_concurrency_annotation
+  # A bare fatalError() gives a crash report with no reason string.
+  - fatal_error_message
+
+# These two are ON by default but only WARN by default. A warning nobody sees
+# is not a gate.
+force_cast: error
+force_try: error
+
+force_unwrapping:
+  severity: error
+
+implicitly_unwrapped_optional:
+  severity: error
+
+reporter: "github-actions-logging"
