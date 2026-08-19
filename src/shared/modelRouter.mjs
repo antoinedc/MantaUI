@@ -90,8 +90,10 @@ export function filterByConstraints(models, { contextTokens = 0, needs = {} } = 
     if (m?.status != null && m.status !== "active") return false;
     if (typeof m?.limit?.context === "number" && m.limit.context < headroom) return false;
     if (needs.tools === true && m?.capabilities?.toolcall === false) return false;
-    if (needs.image === true && m?.capabilities?.input?.image !== true) return false;
-    if (needs.pdf === true && m?.capabilities?.input?.pdf !== true) return false;
+    // Image/pdf gates only apply when the model declares capabilities at all;
+    // absent capabilities are permissive (unknown).
+    if (needs.image === true && m?.capabilities && m?.capabilities?.input?.image !== true) return false;
+    if (needs.pdf === true && m?.capabilities && m?.capabilities?.input?.pdf !== true) return false;
     return true;
   });
 }
@@ -164,9 +166,9 @@ function applyConstraints(models, contextTokens, needs) {
     let drop = null;
     if (m?.status != null && m.status !== "active") drop = "status";
     else if (typeof m?.limit?.context === "number" && m.limit.context < headroom) drop = "context";
-    else if (needs.tools === true && m?.capabilities?.toolcall === false) drop = "tools";
-    else if (needs.image === true && m?.capabilities?.input?.image !== true) drop = "image";
-    else if (needs.pdf === true && m?.capabilities?.input?.pdf !== true) drop = "pdf";
+    else     if (needs.tools === true && m?.capabilities?.toolcall === false) drop = "tools";
+    else if (needs.image === true && m?.capabilities && m?.capabilities?.input?.image !== true) drop = "image";
+    else if (needs.pdf === true && m?.capabilities && m?.capabilities?.input?.pdf !== true) drop = "pdf";
     if (drop) counts[drop] += 1;
     else kept.push(m);
   }

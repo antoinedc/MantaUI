@@ -6,7 +6,7 @@ export interface ModelInfo {
   tier: ModelTier;
 }
 
-export function tierRank(tier: string): number;
+export function tierRank(tier: string | undefined): number;
 
 export function describeModel(
   providerID: string,

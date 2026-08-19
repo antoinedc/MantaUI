@@ -10,8 +10,9 @@ import {
   AGENT_TIER,
 } from "./modelRouter.mjs";
 import { tierRank } from "./modelGuide.mjs";
+import type { Model } from "./modelRouter.mjs";
 
-function m(id, over = {}) {
+function m(id: string, over: Partial<Model> = {}): Model {
   return { providerID: "anthropic", id, status: "active", cost: { input: 0, output: 0 }, ...over };
 }
 
@@ -145,7 +146,7 @@ describe("chooseModel", () => {
     expect(AGENT_FLOOR.general).toBe("balanced");
     expect(AGENT_TIER.economy.general).toBe("fast");
     // floor must win: a fast model exists but the lower bound is balanced
-    expect(res.model.id).toBe("claude-sonnet-4");
+    expect(res.model?.id).toBe("claude-sonnet-4");
     expect(res.reason).toBeTruthy();
   });
 
@@ -170,7 +171,7 @@ describe("chooseModel", () => {
         policy: { enabled: true, preset: "balanced" },
         nowMs: 0,
       });
-      expect(res.model.id).toBe(base.model.id);
+      expect(res.model?.id).toBe(base.model?.id);
     }
   });
 
