@@ -249,6 +249,20 @@ struct ToolStep: Identifiable, Hashable {
     }
 }
 
+/// Fixed layout constants for step-group rows. Deliberately NOT design tokens:
+/// the 44pt minimum row height is Apple's HIG tappable-target floor, and the
+/// type scale intentionally caps far below it, so these are plain numbers.
+private enum StepRowLayout {
+    /// Apple HIG minimum tappable target height.
+    static let minHeight: CGFloat = 44
+    /// The leading inset shared by a row's text, its expanded output well and
+    /// the 1pt separator between rows — it starts under the text (after the
+    /// status glyph), the iOS Settings idiom, rather than at the container's
+    /// own leading edge. `sp3` glyph leading + glyph + `sp2` inter-glyph gap.
+    static let contentLeading: CGFloat =
+        Metrics.spacing.sp3 + Metrics.type.stepDot + Metrics.spacing.sp2
+}
+
 struct StepRowView: View {
     let step: ToolStep
     let tokens: Tokens
@@ -283,15 +297,28 @@ struct StepRowView: View {
                         .font(.manta(size: Metrics.type.xs, design: .monospaced))
                         .foregroundColor(tokens.tx4)
                         .lineLimit(1)
-                        .truncationMode(.tail)
+                        // Middle-ellipsis: a long project-root prefix truncates
+                        // at the tail and every path under it collapses to the
+                        // same prefix, so the part that tells two paths apart
+                        // survives. Middle keeps both ends readable.
+                        .truncationMode(.middle)
                     Spacer(minLength: 0)
                     Text(step.duration)
                         .font(.manta(size: Metrics.type.twoXS))
                         .foregroundColor(tokens.tx4)
+                    Image(systemName: "chevron.right")
+                        .font(.manta(size: Metrics.type.xs))
+                        .foregroundColor(tokens.tx4)
+                        // The chevron points down (rotated 90°) while expanded.
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
                 }
                 .padding(.vertical, Metrics.type.stepRowY)
-                .padding(.leading, glyphLeading)
+                .padding(.leading, Metrics.spacing.sp3)
                 .padding(.trailing, Metrics.spacing.sp3)
+                // 44pt min so the whole row is a comfortably tappable target;
+                // contentShape makes the entire row width respond, not just the
+                // glyph and text.
+                .frame(minHeight: StepRowLayout.minHeight)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -303,32 +330,22 @@ struct StepRowView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, Metrics.spacing.sp2)
-                    .padding(.leading, contentLeading)
+                    .padding(.leading, StepRowLayout.contentLeading)
                     .padding(.trailing, Metrics.spacing.sp3)
                     // Only an EXPANDED row's output well keeps a material of its
                     // own — Liquid Glass belongs to the navigation layer, never
-                    // the content layer, so a tool step gets no background of its
-                    // own (see StepGroupView; a rail replaces the old panel).
+                    // the content layer, so a tool step gets no background of
+                    // its own (see StepGroupView; the panel is the container's).
                     .background(tokens.inset)
                     .accessibilityIdentifier("step-output")
+                    // Only the OUTPUT WELL animates (expand/collapse); the
+                    // header row must never move on tap. Keyed on the user's
+                    // own toggle (not the derived `expanded`), so a status-driven
+                    // change — a running step replaced by its completed sibling
+                    // — collapses instantly with no animated height shift.
+                    .animation(.smooth(duration: 0.22), value: userToggled)
             }
         }
-        // Expand/collapse is animated, matching the file's animation convention
-        // (BET-752 task 6).
-        .animation(.smooth(duration: 0.22), value: expanded)
-    }
-
-    /// The rail line (StepGroupView) sits at `sp4` from the group's leading
-    /// edge, and each status glyph sits ON that line, breaking it. Parking the
-    /// glyph's leading at `sp4 - stepDot/2` centres it on the line.
-    private var glyphLeading: CGFloat {
-        Metrics.spacing.sp4 - Metrics.type.stepDot / 2
-    }
-
-    /// Text and output align after the glyph + its inter-glyph spacing, so an
-    /// expanded output well reads as continuing the row it belongs to.
-    private var contentLeading: CGFloat {
-        glyphLeading + Metrics.type.stepDot + Metrics.spacing.sp2
     }
 
     /// One SF Symbol + one Tokens colour per state, in a SINGLE switch — the
@@ -394,52 +411,82 @@ struct StepGroupView: View {
                 rowsView(rows)
             case .rollup(let summary, let rows):
                 VStack(spacing: 0) {
-                    Button(action: { rollupExpanded.toggle() }) {
-                        // The roll-up chevron is the leading `▸` already in the
-                        // summary string (mockup `.group`), rendered at 12px
-                        // mono — no separate glyph, no extra size literal.
-                        Text(summary)
-                            .lineLimit(1)
-                            .font(.manta(size: Metrics.type.xs, design: .monospaced))
-                            .foregroundColor(tokens.tx4)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.vertical, Metrics.type.stepRowY)
-                            .padding(.leading, Metrics.spacing.sp4)
-                            .padding(.trailing, Metrics.spacing.sp3)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
+                    rollupHeader(summary)
                     if rollupExpanded {
+                        // A row between the roll-up summary and the first
+                        // expanded step, matching the between-rows separators.
+                        stepSeparator
                         rowsView(rows)
+                            // Only the COLLAPSING rows container animates; the
+                            // summary header must never move (the StepRowView
+                            // jitter fix, applied to the roll-up too).
+                            .animation(.smooth(duration: 0.22), value: rollupExpanded)
                     }
                 }
-                // Roll-up expand is animated, matching the file's animation
-                // convention (BET-752 task 6).
-                .animation(.smooth(duration: 0.22), value: rollupExpanded)
             }
         }
-        // The step group is a TIMELINE RAIL, not a panel: a 1pt vertical
-        // connector inset `sp4` from the leading edge, running the height of the
-        // group, with each row's status glyph sitting on it and breaking it.
-        // Liquid Glass belongs to the navigation layer, never the content layer,
-        // so a tool step gets no material of its own — the old panel, its
-        // border stroke, and the hairline separators between rows are all gone;
-        // only an expanded row's output well keeps a fill (see StepRowView).
-        .background(alignment: .leading) {
-            Rectangle()
-                .fill(tokens.borderSubtle)
-                .frame(width: Metrics.spacing.spPx)
-                .padding(.leading, Metrics.spacing.sp4)
-        }
+        // §8: one rounded grouped container per consecutive run of step rows —
+        // `panel` background, `--r-md` radius, 1pt `border-subtle` stroke. The
+        // rail is gone: no vertical connector, no leading gutter, no content
+        // indented to dodge it. Liquid Glass still belongs to the navigation
+        // layer only — a content row keeps no material of its own.
+        .background(
+            RoundedRectangle(cornerRadius: Metrics.radius.md)
+                .fill(tokens.panel)
+                .overlay(
+                    RoundedRectangle(cornerRadius: Metrics.radius.md)
+                        .strokeBorder(tokens.borderSubtle, lineWidth: 1)
+                )
+        )
+        .clipShape(RoundedRectangle(cornerRadius: Metrics.radius.md))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("step-rows")
+    }
+
+    /// The roll-up summary rendered as a row of the same container: 44pt min
+    /// height, full-width `contentShape` and a trailing chevron, so its tap
+    /// affordance matches its expanded step siblings. The summary COPY (with
+    /// its leading `▸`) is unchanged (ChatRollup.summary).
+    private func rollupHeader(_ summary: String) -> some View {
+        Button(action: { rollupExpanded.toggle() }) {
+            HStack(spacing: Metrics.spacing.sp2) {
+                Text(summary)
+                    .lineLimit(1)
+                    .font(.manta(size: Metrics.type.xs, design: .monospaced))
+                    .foregroundColor(tokens.tx4)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.manta(size: Metrics.type.xs))
+                    .foregroundColor(tokens.tx4)
+                    .rotationEffect(.degrees(rollupExpanded ? 90 : 0))
+            }
+            .padding(.vertical, Metrics.type.stepRowY)
+            .padding(.leading, Metrics.spacing.sp3)
+            .padding(.trailing, Metrics.spacing.sp3)
+            .frame(minHeight: StepRowLayout.minHeight)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// The 1pt `borderSubtle` separator between two rows: inset from the
+    /// leading edge by the row's content inset (starts under the text, the iOS
+    /// Settings idiom) and full-bleed to the trailing edge.
+    private var stepSeparator: some View {
+        Rectangle()
+            .fill(tokens.borderSubtle)
+            .frame(height: Metrics.spacing.spPx)
+            .padding(.leading, StepRowLayout.contentLeading)
     }
 
     @ViewBuilder
     private func rowsView(_ rows: [StepGroupRow]) -> some View {
         VStack(spacing: 0) {
-            ForEach(Array(rows.enumerated()), id: \.element.id) { _, row in
+            ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
                 rowView(row)
+                if index < rows.count - 1 {
+                    stepSeparator
+                }
             }
         }
     }
@@ -738,12 +785,15 @@ struct SubagentRowView: View {
                 Text(agent.statusText)
                     .font(.manta(size: Metrics.type.twoXS))
                     .foregroundColor(tokens.tx4)
-                Text("›")
-                    .font(.manta(size: Metrics.type.small))
+                // Trailing chevron matches its step-row siblings inside the
+                // container; a navigation push, so it is never rotated.
+                Image(systemName: "chevron.right")
+                    .font(.manta(size: Metrics.type.xs))
                     .foregroundColor(tokens.tx4)
             }
             .padding(.vertical, Metrics.type.stepRowY)
             .padding(.horizontal, Metrics.spacing.sp3)
+            .frame(minHeight: StepRowLayout.minHeight)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
