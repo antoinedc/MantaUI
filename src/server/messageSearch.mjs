@@ -16,17 +16,15 @@
 // Degradation: a box that has not taken the Node 24 runtime yet has no
 // `node:sqlite`, or there is no opencode.db — both return
 // { supported:false, hits:[] } and the UI shows "update the box". searchMessages
-// NEVER throws; DB errors are logged once, the handle is closed+nulled so the
-// next call reopens, and we return { supported:true, hits:[] }.
+// NEVER throws; DB errors are logged once, the handle is closed so the next
+// call reopens (see opencodeDb.mjs), and we return { supported:true, hits:[] }.
 //
 // The schema (verified live; do not re-derive):
 //   part(id TEXT PK, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT)
 //   message(id TEXT PK, session_id TEXT, time_created INTEGER, data TEXT)
 // part.data / message.data are JSON blobs.
 
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { existsSync } from "node:fs";
+import { getDb } from "./opencodeDb.mjs";
 
 const SNIPPET_PRE_CHARS = 60;
 const SNIPPET_POST_CHARS = 200;
@@ -34,41 +32,6 @@ const SNIPPET_POST_CHARS = 200;
 // MAX_LIMIT over-fetch bounds a LIKE scan before the JS text-part filter
 // drops non-text rows (tool arguments etc.).
 const MAX_LIMIT = 800;
-
-let dbHandle = null;
-
-// Resolve opencode's SQLite path. First existing wins; a test/override hook
-// (`MANTA_OPENCODE_DB`) is used as-is. null → the box cannot search.
-export function resolveDbPath() {
-  if (process.env.MANTA_OPENCODE_DB) return process.env.MANTA_OPENCODE_DB;
-  if (process.env.XDG_DATA_HOME) {
-    const p = join(process.env.XDG_DATA_HOME, "opencode", "opencode.db");
-    if (existsSync(p)) return p;
-    return null;
-  }
-  const p = join(homedir(), ".local", "share", "opencode", "opencode.db");
-  if (existsSync(p)) return p;
-  return null;
-}
-
-// Lazily open node:sqlite read-only. The import lives in a try/catch because
-// on a box that hasn't taken the Node 24 runtime yet it throws — that must
-// degrade to { supported:false }, not crash the server. Null handle on any
-// failure.
-async function getDb() {
-  if (dbHandle) return dbHandle;
-  const path = resolveDbPath();
-  if (!path) return null;
-  try {
-    const { DatabaseSync } = await import("node:sqlite");
-    dbHandle = new DatabaseSync(path, { readOnly: true });
-    return dbHandle;
-  } catch (e) {
-    console.warn("[messageSearch] node:sqlite unavailable:", e?.message ?? e);
-    dbHandle = null;
-    return null;
-  }
-}
 
 // The only exported entry point used by rpc.mjs.
 export async function searchMessages({
@@ -117,7 +80,6 @@ export async function searchMessages({
     } catch {
       /* already closed */
     }
-    dbHandle = null;
     return { supported: true, hits: [] };
   }
 }
