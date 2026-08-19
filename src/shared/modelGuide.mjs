@@ -384,3 +384,15 @@ export function readModalities(value) {
   return [];
 }
 
+/**
+ * Order a model tier on a numeric scale for comparisons. fast -> 0,
+ * balanced -> 1, deep -> 2, anything unknown -> 1 (balanced).
+ *
+ * @param {string} tier
+ * @returns {number}
+ */
+export function tierRank(tier) {
+  if (tier === "fast") return 0;
+  if (tier === "deep") return 2;
+  return 1;
+}

@@ -6,6 +6,8 @@ export interface ModelInfo {
   tier: ModelTier;
 }
 
+export function tierRank(tier: string): number;
+
 export function describeModel(
   providerID: string,
   modelID: string
