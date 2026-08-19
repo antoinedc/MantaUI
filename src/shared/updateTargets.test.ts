@@ -44,7 +44,7 @@ describe("buildUpdateTargets", () => {
     const desktop = result[0];
     expect(desktop).toMatchObject({
       id: "desktop",
-      label: "Desktop app",
+      label: "Manta Desktop",
       latest: "0.0.37",
       available: true,
       ok: true,
@@ -90,7 +90,7 @@ describe("buildUpdateTargets", () => {
     const server = result[1];
     expect(server).toMatchObject({
       id: "server",
-      label: "The server",
+      label: "Manta Server",
       current: "0.0.36",
       latest: "0.0.37",
       available: true,
@@ -242,7 +242,7 @@ describe("describeUpdateBanner", () => {
 
   it("failure outranks mandatory and every count", () => {
     const banner = describeUpdateBanner(
-      [t("desktop", "Desktop app", true)],
+      [t("desktop", "Manta Desktop", true)],
       { mandatory: true, failure: "permission denied" },
     );
     expect(banner?.tone).toBe("danger");
@@ -252,7 +252,7 @@ describe("describeUpdateBanner", () => {
   it("mandatory → accent, NON-dismissible, must-update copy", () => {
     const banner = describeUpdateBanner([], { mandatory: true, failure: null });
     expect(banner).toEqual({
-      text: "Desktop app must be updated to keep working with this server",
+      text: "Manta Desktop must be updated to keep working with this server",
       actionLabel: "Update",
       tone: "accent",
       dismissible: false,
@@ -260,7 +260,7 @@ describe("describeUpdateBanner", () => {
   });
 
   it("mandatory renders even with no targets available", () => {
-    const banner = describeUpdateBanner([t("desktop", "Desktop app", false)], {
+    const banner = describeUpdateBanner([t("desktop", "Manta Desktop", false)], {
       mandatory: true,
       failure: null,
     });
@@ -268,7 +268,7 @@ describe("describeUpdateBanner", () => {
   });
 
   it("exactly one available → '<label> has an update available' for every target", () => {
-    for (const label of ["Desktop app", "The server", "opencode", "Claude Code", "Codex", "Kimi Code"]) {
+    for (const label of ["Manta Desktop", "Manta Server", "opencode", "Claude Code", "Codex", "Kimi Code"]) {
       const banner = describeUpdateBanner([t("claude", label, true)], {
         mandatory: false,
         failure: null,
@@ -284,11 +284,11 @@ describe("describeUpdateBanner", () => {
 
   it("two available → 'N updates available · names' in display order", () => {
     const banner = describeUpdateBanner(
-      [t("desktop", "Desktop app", true), t("server", "The server", true, false, "reconnect")],
+      [t("desktop", "Manta Desktop", true), t("server", "Manta Server", true, false, "reconnect")],
       { mandatory: false, failure: null },
     );
     expect(banner).toEqual({
-      text: "2 updates available · Desktop app, The server",
+      text: "2 updates available · Manta Desktop, Manta Server",
       actionLabel: "Update all",
       tone: "accent",
       dismissible: true,
@@ -298,31 +298,31 @@ describe("describeUpdateBanner", () => {
   it("three available → all three names", () => {
     const banner = describeUpdateBanner(
       [
-        t("desktop", "Desktop app", true),
-        t("server", "The server", true, false, "reconnect"),
+        t("desktop", "Manta Desktop", true),
+        t("server", "Manta Server", true, false, "reconnect"),
         t("opencode", "opencode", true, false, "ends-turns"),
       ],
       { mandatory: false, failure: null },
     );
-    expect(banner?.text).toBe("3 updates available · Desktop app, The server, opencode");
+    expect(banner?.text).toBe("3 updates available · Manta Desktop, Manta Server, opencode");
   });
 
   it("past three names → keep first three and append '+N more'", () => {
     const banner = describeUpdateBanner(
       [
-        t("desktop", "Desktop app", true),
-        t("server", "The server", true, false, "reconnect"),
+        t("desktop", "Manta Desktop", true),
+        t("server", "Manta Server", true, false, "reconnect"),
         t("opencode", "opencode", true, false, "ends-turns"),
         t("claude", "Claude Code", true),
       ],
       { mandatory: false, failure: null },
     );
-    expect(banner?.text).toBe("4 updates available · Desktop app, The server, opencode +1 more");
+    expect(banner?.text).toBe("4 updates available · Manta Desktop, Manta Server, opencode +1 more");
   });
 
   it("zero available → null (no banner)", () => {
     const banner = describeUpdateBanner(
-      [t("desktop", "Desktop app", false), t("server", "The server", false)],
+      [t("desktop", "Manta Desktop", false), t("server", "Manta Server", false)],
       { mandatory: false, failure: null },
     );
     expect(banner).toBeNull();
@@ -330,7 +330,7 @@ describe("describeUpdateBanner", () => {
 
   it("manual targets never count as available", () => {
     const banner = describeUpdateBanner(
-      [t("desktop", "Desktop app", true, true), t("server", "The server", false)],
+      [t("desktop", "Manta Desktop", true, true), t("server", "Manta Server", false)],
       { mandatory: false, failure: null },
     );
     expect(banner).toBeNull();
@@ -366,8 +366,8 @@ describe("planUpdateAll", () => {
       needsConfirm: true,
     });
     expect(plan.confirmBody).toEqual([
-      "The server will restart briefly and reconnect on its own.",
-      "Desktop app will restart itself once the server is done.",
+      "Manta Server will restart briefly and reconnect on its own.",
+      "Manta Desktop will restart itself once Manta Server is done.",
     ]);
   });
 
@@ -389,7 +389,7 @@ describe("planUpdateAll", () => {
     // restart), but app-restart still appears.
     expect(plan.confirmBody).toEqual([
       "Updating opencode restarts it, which ends every agent turn currently running. Any unsaved work in a running turn is lost.",
-      "Desktop app will restart itself once the server is done.",
+      "Manta Desktop will restart itself once Manta Server is done.",
     ]);
   });
 
@@ -406,7 +406,7 @@ describe("planUpdateAll", () => {
     expect(plan.desktopDownload).toBe(true);
     expect(plan.box).toBe(false);
     expect(plan.needsConfirm).toBe(true);
-    expect(plan.confirmBody).toEqual(["Desktop app will restart itself once the server is done."]);
+    expect(plan.confirmBody).toEqual(["Manta Desktop will restart itself once Manta Server is done."]);
   });
 
   it("manual targets never count toward any leg", () => {
@@ -422,7 +422,7 @@ describe("planUpdateAll", () => {
 
   it("app-restart alone does NOT suppress the reconnect sentence (no ends-turns)", () => {
     const plan = planUpdateAll([t("server", true, false, "reconnect")]);
-    expect(plan.confirmBody).toEqual(["The server will restart briefly and reconnect on its own."]);
+    expect(plan.confirmBody).toEqual(["Manta Server will restart briefly and reconnect on its own."]);
   });
 });
 

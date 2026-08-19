@@ -2023,7 +2023,7 @@ function Shell() {
           the update starts. */}
       <ConfirmModal
         open={confirmServerUpdate}
-        title="Update the server?"
+        title="Update Manta Server?"
         body="This restarts opencode, which will end every agent turn currently running in any session. Any unsaved work in a running turn is lost."
         confirmLabel="Update & restart"
         confirmTone="primary"

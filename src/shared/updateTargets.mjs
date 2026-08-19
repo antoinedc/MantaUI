@@ -11,8 +11,8 @@
 
 // Fixed labels and disruption values for the two non-CLI targets. The CLI ones
 // come from the catalog and ride through `serverCheck.targets` unchanged.
-const DESKTOP_FIXED = { label: "Desktop app", disruption: "app-restart" };
-const SERVER_FIXED = { label: "The server", disruption: "reconnect" };
+const DESKTOP_FIXED = { label: "Manta Desktop", disruption: "app-restart" };
+const SERVER_FIXED = { label: "Manta Server", disruption: "reconnect" };
 
 /**
  * Build the canonical UpdateTarget[] from the two update-check results.
@@ -155,7 +155,7 @@ export function describeUpdateBanner(targets, { mandatory = false, failure = nul
 
   if (mandatory) {
     return {
-      text: "Desktop app must be updated to keep working with this server",
+      text: "Manta Desktop must be updated to keep working with this server",
       actionLabel: "Update",
       tone: "accent",
       dismissible: false,
@@ -223,10 +223,10 @@ export function planUpdateAll(targets) {
       "Updating opencode restarts it, which ends every agent turn currently running. Any unsaved work in a running turn is lost.",
     );
   } else if (hasReconnect) {
-    confirmBody.push("The server will restart briefly and reconnect on its own.");
+    confirmBody.push("Manta Server will restart briefly and reconnect on its own.");
   }
   if (hasAppRestart) {
-    confirmBody.push("Desktop app will restart itself once the server is done.");
+    confirmBody.push("Manta Desktop will restart itself once Manta Server is done.");
   }
 
   return {
