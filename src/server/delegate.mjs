@@ -41,6 +41,7 @@ import {
 } from "./peers.mjs";
 import { extractSubagentInfo } from "../shared/streamInterpretation.mjs";
 import { fuzzyMatchModel, suggestModels } from "../shared/modelGuide.mjs";
+import { chooseModel } from "../shared/modelRouter.mjs";
 
 // ---------------------------------------------------------------------------
 // Constants (mirrors capabilities.mjs exactly — reuse, do not diverge)
@@ -492,6 +493,58 @@ export function resolveRequestedModel(model, models) {
 }
 
 /**
+ * THE single routing decision point for a subagent/delegate spawn (BET-1220).
+ *
+ * This is the ONE place in src/server that calls `chooseModel` — every else
+ * goes through this helper, so there can never be a second, divergent model
+ * decision. It hands `chooseModel` the subagent intent (agent + tool needs +
+ * `incumbent` = whatever model the caller would have used today) and returns
+ * the model to actually run on.
+ *
+ * Provably safe on the off-path: when `policy` is disabled (no modelRouter
+ * config on a box that has never seen this feature), `chooseModel` returns
+ * `incumbent` exactly — so a spawn is byte-identical to today's. And any
+ * throw inside the routing is swallowed, falling back to `incumbent`, so a
+ * routing failure can never fail a spawn.
+ *
+ * @param {object} [input]
+ * @param {object|null} [input.incumbent]  the model the code would have used today
+ * @param {Array<object>} [input.catalog]  opencode model list
+ * @param {{ enabled?: boolean, preset?: string, perAgent?: Record<string,string> }} [input.policy]
+ * @param {Array<object>} [input.quota]    usage snapshots
+ * @param {string} [input.agent]           subagent type (default "general")
+ * @param {number} [input.nowMs]
+ * @returns {object|null} the model to run on (incumbent on off-path / failure)
+ */
+export function chooseSubagentModel({
+  incumbent = null,
+  catalog = [],
+  policy = { enabled: false },
+  quota = [],
+  agent = "general",
+  nowMs = Date.now(),
+} = {}) {
+  try {
+    const decision = chooseModel({
+      intent: { kind: "subagent", agent, needs: { tools: true }, contextTokens: 0, incumbent },
+      catalog,
+      telemetry: {},
+      quota,
+      policy,
+      nowMs,
+    });
+    const model = decision?.model ?? incumbent;
+    const label = model ? `${model.providerID}/${model.id}` : "";
+    console.log(`[router] subagent agent=${agent} → ${label} (${decision?.reason ?? ""})`);
+    return model;
+  } catch (e) {
+    // Routing must never break a spawn — fall back to the incumbent model.
+    console.warn("[router] subagent routing failed, using incumbent:", e?.message ?? e);
+    return incumbent;
+  }
+}
+
+/**
  * @param {{prompt:string, model?:string|{providerID:string, modelID:string, variant?:string}, parentSessionID:string, parentDirectory:string,
  *          link?: {issue?:{repoKey:string,number:number}, pr?:{repoKey:string,number:number}}|null}} input
  *        `model` (BET-947) — optional model for the job's session: free text
@@ -505,7 +558,7 @@ export function resolveRequestedModel(model, models) {
  *        newWindow/gitAddWorktree/gitRun/oc listMessages/listModels/now)
  */
 export async function startJob(input, deps = {}) {
-  const { deliver, listModels } = deps;
+  const { deliver, listModels, configGet = async () => ({}), listSnapshots = () => [] } = deps;
 
   const prompt = String(input?.prompt ?? "");
   const parentSessionID = input?.parentSessionID;
@@ -619,11 +672,51 @@ export async function startJob(input, deps = {}) {
   // 8. Send the opening prompt via the shared delivery module's deliver. The
   //    requested model (resolved above) is threaded through so a delegate that
   //    asked for a specific model actually runs on it; omitted → the default.
+  //
+  //    BET-1220: the effective model passes through the subagent router
+  //    (chooseSubagentModel). With routing off (no modelRouter config) it
+  //    returns `incumbent` = the requested model / null, byte-identical to
+  //    today. Routing must never break a spawn, so every input read (policy,
+  //    quota, catalog) is individually guarded and the whole decision falls
+  //    back to `deliverModel` on any throw.
+  let effectiveModel = deliverModel;
+  try {
+    let policy = { enabled: false };
+    try {
+      policy = (await configGet())?.modelRouter ?? { enabled: false };
+    } catch {
+      policy = { enabled: false };
+    }
+    let quota = [];
+    try {
+      quota = listSnapshots();
+      if (!Array.isArray(quota)) quota = [];
+    } catch {
+      quota = [];
+    }
+    let catalog = [];
+    try {
+      catalog = listModels ? await listModels() : [];
+      if (!Array.isArray(catalog)) catalog = [];
+    } catch {
+      catalog = [];
+    }
+    effectiveModel = chooseSubagentModel({
+      incumbent: deliverModel ?? null,
+      catalog,
+      policy,
+      quota,
+      agent: "general",
+      nowMs: Date.now(),
+    });
+  } catch {
+    effectiveModel = deliverModel;
+  }
   try {
     await deliver({
       sessionId: reg.job.childSessionID,
       text: buildJobPrompt({ prompt, worktree: reg.job.worktree, branch: reg.job.branch }),
-      ...(deliverModel ? { model: deliverModel } : {}),
+      ...(effectiveModel ? { model: effectiveModel } : {}),
     });
   } catch (e) {
     // deliver never rejects in production, but guard anyway — the job is

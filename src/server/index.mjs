@@ -487,6 +487,12 @@ const delegateEngine = createDelegateEngine({
   gitRun: (args) => tmux.run("git", args),
   listMessages: (sid) => oc.listMessages(sid),
   listModels: (overrides) => oc.listModels(overrides),
+  // BET-1220: routing inputs for the subagent model decision in startJob.
+  // configGet supplies the modelRouter policy (absent on a box that has never
+  // seen the feature → routing stays off); listSnapshots supplies quota, and
+  // startJob guards both so they can never break a spawn.
+  configGet: () => local.configGet(),
+  listSnapshots,
   abortSession: (sid) => oc.abortSession(sid),
   // BET-418 §B: detect a running job whose parent opencode session is gone so
   // the sweeper can stop + clean it up (nobody left to report to).
