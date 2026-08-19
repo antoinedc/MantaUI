@@ -74,6 +74,31 @@ verify_sha256() {
       (corrupt download or stale manifest — re-run; if it persists, report it)"
 }
 
+# detect_install_kind <has_release_json> <has_git>
+#
+# Decide which update path a box takes: `packaged` (release tarball -> prebuilt
+# node_modules, no on-box build) or `git` (a live dev checkout -> git reset +
+# on-box npm).
+#
+# RELEASE.json is the ground truth for a RELEASE-DEPLOYED box and therefore
+# WINS over an incidental .git/. install.sh makes every box it creates a git
+# checkout (deploy_git_checkout) so the box can self-update, but such a box's
+# source+deps come from the release tarball and it has no toolchain — misreading
+# it as a dev git box sends it down the git path, which rebuilds node_modules on
+# the box and fails with no compiler (the "re-run install.sh to get a matching
+# prebuilt tree" brick). Only a checkout with NO RELEASE.json is a true dev box.
+#
+# Pure: both inputs are caller-computed booleans, so this is unit-testable.
+detect_install_kind() { # $1=has_release_json $2=has_git
+  if [ "$1" = "1" ]; then
+    printf 'packaged'
+  elif [ "$2" = "1" ]; then
+    printf 'git'
+  else
+    printf 'none'
+  fi
+}
+
 # replace_release_payload <pkg-dir> <dest-dir> <node-bin>
 #
 # Replace every path the incoming release owns in <dest-dir> with the copy from

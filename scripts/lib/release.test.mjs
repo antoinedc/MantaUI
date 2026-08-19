@@ -440,6 +440,46 @@ test("release_is_current: an unreadable installed stamp is never 'current'", () 
   assert.equal(isCurrent("", "", "0.0.29", "def456"), false);
 });
 
+// --- detect_install_kind: packaged-vs-git routing ------------------------------
+//
+// RELEASE.json (true for every install.sh box) MUST win over .git/, because
+// install.sh git-inits the dir it creates — so .git alone does NOT mean "dev
+// checkout". If .git were checked first (the pre-fix bug), every install.sh
+// box would route to the on-box `npm ci` path and brick on a toolchain-less
+// box. Only a checkout with no RELEASE.json is a real dev box.
+
+function detectKind(hasReleaseJson, hasGit) {
+  const script = `
+    log() { :; }; ok() { :; }; warn() { :; }; die() { echo "$*" >&2; exit 1; }
+    . "${RELEASE_LIB}"
+    detect_install_kind "$1" "$2"
+  `;
+  const out = execFileSync(
+    "bash",
+    ["-c", script, "bash", String(hasReleaseJson), String(hasGit)],
+    { encoding: "utf-8" },
+  );
+  return out.trim();
+}
+
+test("detect_install_kind: an install.sh box (RELEASE.json + .git) is packaged, not git", () => {
+  // The regression: install.sh boxes carry BOTH a RELEASE.json stamp AND an
+  // incidental .git/ (install.sh git-inits the dir). RELEASE.json must win.
+  assert.equal(detectKind(1, 1), "packaged");
+});
+
+test("detect_install_kind: a dev clone (no RELEASE.json, has .git) stays git", () => {
+  assert.equal(detectKind(0, 1), "git");
+});
+
+test("detect_install_kind: a bare extracted tarball (RELEASE.json only) is packaged", () => {
+  assert.equal(detectKind(1, 0), "packaged");
+});
+
+test("detect_install_kind: neither → none", () => {
+  assert.equal(detectKind(0, 0), "none");
+});
+
 // --- should_skip_self_update: the early-exit decision -------------------------
 //
 // The updater's early exit must skip the whole update ONLY when the box is
