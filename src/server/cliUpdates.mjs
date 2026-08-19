@@ -459,5 +459,15 @@ export function createCliDetector(deps = {}) {
     return inFlight;
   }
 
-  return { detect };
+  // Drop the cached result so the next detect() re-probes the box immediately
+  // instead of serving the TTL-stale snapshot. Call this after a successful
+  // CLI upgrade so the UI's "update available" clears right away rather than
+  // lingering up to the 5-minute TTL. Any in-flight probe (rare here) is left
+  // alone — it completes on its own and re-caches a fresh result.
+  function invalidate() {
+    lastResult = null;
+    lastAt = 0;
+  }
+
+  return { detect, invalidate };
 }

@@ -826,6 +826,35 @@ test("server:cli-update: resolves 'no upgrade path' when the dep is not wired", 
   assert.deepEqual(result, { ok: false, error: "no upgrade path" });
 });
 
+test("server:cli-update: invalidates the cliDetector cache on a SUCCESSFUL upgrade", async () => {
+  // The whole point of the unified-update flow (BET-1162): after a per-row CLI
+  // upgrade succeeds, the shared detector's 5-min cache must be dropped so the
+  // next server:update-check reflects the new version immediately — otherwise
+  // the UI's "has an update available" lingers for the TTL. A failed upgrade
+  // must NOT invalidate (the old state is still accurate).
+  const { deps } = makeDeps([]);
+  let invalidated = 0;
+  deps.upgradeCli = async () => ({ ok: true, before: "1.0.0", after: "2.0.0", changed: true });
+  deps.cliDetector = { detect: async () => [], invalidate: () => { invalidated += 1; } };
+  const handlers = buildHandlers(deps);
+
+  const ok = await handlers["server:cli-update"]({ cliId: "claude" });
+  assert.equal(ok.ok, true);
+  assert.equal(invalidated, 1, "successful upgrade must invalidate the detector cache");
+});
+
+test("server:cli-update: does NOT invalidate the cache when the upgrade fails", async () => {
+  const { deps } = makeDeps([]);
+  let invalidated = 0;
+  deps.upgradeCli = async () => ({ ok: false, error: "claude update exited with code 1" });
+  deps.cliDetector = { detect: async () => [], invalidate: () => { invalidated += 1; } };
+  const handlers = buildHandlers(deps);
+
+  const res = await handlers["server:cli-update"]({ cliId: "claude" });
+  assert.equal(res.ok, false);
+  assert.equal(invalidated, 0, "failed upgrade must NOT invalidate the cache");
+});
+
 // ===== /rpc response compression (mobile session-load perf) =====
 
 /** Minimal fake req/res pair for handleRpcRequest. */

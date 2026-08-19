@@ -890,12 +890,18 @@ export function buildHandlers({
     // unwired dep) resolves `{ok:false, error:"no upgrade path"}` rather than
     // ever throwing — the renderer's per-row save button expects a clean
     // result, not a rejection.
-    "server:cli-update": (ctx) => {
+    "server:cli-update": async (ctx) => {
       const cliId = ctx?.cliId;
       if (!upgradeCli || typeof cliId !== "string" || !cliId) {
         return Promise.resolve({ ok: false, error: "no upgrade path" });
       }
-      return upgradeCli(cliId);
+      const result = await upgradeCli(cliId);
+      // A successful CLI upgrade invalidates the shared detector's 5-minute
+      // cache so the next server:update-check reflects the new version
+      // immediately — the UI's "Claude Code has an update available" clears
+      // right away instead of lingering for the TTL.
+      if (result?.ok && cliDetector?.invalidate) cliDetector.invalidate();
+      return result;
     },
 
     // preload: ipcRenderer.invoke(IPC.opencodeDefaultModel)  → no args

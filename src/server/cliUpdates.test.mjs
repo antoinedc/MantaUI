@@ -312,6 +312,40 @@ test("detector: two concurrent detect() calls perform ONE probe round", async ()
   assert.equal(rootProbes, 1, "cached result must not re-probe");
 });
 
+test("detector: invalidate() drops the cache so the next detect re-probes", async () => {
+  // After a successful CLI upgrade the server calls cliDetector.invalidate() so
+  // the very next server:update-check reflects the new version — clearing the
+  // UI's "update available" immediately instead of waiting out the 5-min TTL.
+  let rootProbes = 0;
+  const byPath = {
+    "/usr/local/bin/claude": "1.0.0",
+    "/home/user/.opencode/bin/opencode": "1.1.1",
+  };
+  const deps = detectDeps({
+    installed: Object.keys(byPath),
+    versions: byPath,
+    root: null,
+    spawn: (bin) => fakeSpawnResult({ stdout: byPath[bin] })(),
+  });
+  deps.getNpmGlobalRoot = async () => {
+    rootProbes += 1;
+    return null;
+  };
+
+  const detector = createCliDetector(deps);
+  await detector.detect();
+  const probesAfterFirst = rootProbes;
+
+  // A cached call does NOT re-probe.
+  await detector.detect();
+  assert.equal(rootProbes, probesAfterFirst, "cached call must not re-probe");
+
+  // invalidate() forces the next detect to run a fresh probe.
+  detector.invalidate();
+  await detector.detect();
+  assert.equal(rootProbes, probesAfterFirst + 1, "invalidate() must force a fresh probe");
+});
+
 test("detectClis: uses a real default fetchJson when none is injected (regression)", async () => {
   // THE regression: deps.fetchJson had no production default, so every CLI
   // reported latest:null / ok:false and Settings › About said "Couldn't check".
