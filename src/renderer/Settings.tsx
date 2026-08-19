@@ -57,7 +57,6 @@ import type {
 import {
   SETTINGS,
   SETTING_SECTIONS,
-  SECTION_GROUPS,
   settingsForSection,
   searchSettings,
   sectionIsModified,
@@ -234,10 +233,6 @@ const SECTION_ICONS: Record<SettingSectionId, typeof SettingsIcon> = {
   voice: Mic,
   cto: PhoneCall,
 };
-
-// Card groupings for the schema-driven sections live in SECTION_GROUPS
-// (src/shared/settingsSchema.ts). Sections with per-section custom content
-// (general, box, accounts, extensions) are rendered by renderCustom instead.
 
 // A --card surface with a micro-caps group heading (BET-461 §4). The chrome
 // (--card bg, --border edge, --r-lg radius, 12px v / 16px h padding) lives on
@@ -936,6 +931,16 @@ export function Settings({
   const simpleEntries = schemaEntries.filter((e) => e.control !== "custom");
 
   const renderField = (entry: SettingEntry): ReactNode => {
+    if (entry.id === "pluginsEnabled") {
+      // Mac-local (configKey null): its value lives in `pluginsOn`, not the
+      // generic `values` map, and it renders as a checkbox (its on-screen
+      // look for BET-189), not the generic switch.
+      return (
+        <SettingsRow name={entry.label} help={entry.help}>
+          <Checkbox id={fieldId(entry)} checked={pluginsOn} onChange={(v) => void togglePlugins(v)} ariaLabel={entry.label} />
+        </SettingsRow>
+      );
+    }
     const cur = entry.configKey ? values[entry.configKey] : undefined;
     switch (entry.control) {
       case "toggle":
@@ -1102,12 +1107,7 @@ export function Settings({
     if (section === "extensions") {
       return (
         <>
-          <GroupCard title="Plugins">
-            {pluginsToggleEntry && (
-              <SettingsRow name={pluginsToggleEntry.label} help={pluginsToggleEntry.help}>
-                <Checkbox id={fieldId(pluginsToggleEntry)} checked={pluginsOn} onChange={(v) => void togglePlugins(v)} ariaLabel={pluginsToggleEntry.label} />
-              </SettingsRow>
-            )}
+          <GroupCard>
             {pluginsError ? (
               <div role="alert" className="text-body text-danger">{errorDisclosure("Couldn't load the plugins list.", pluginsError)}</div>
             ) : pluginsLoading ? (
@@ -1309,43 +1309,29 @@ export function Settings({
     return null;
   };
 
-  // The plugins toggle is a schema entry but also drives the registry list,
-  // so render it specially here (it's Mac-local, not a config key). We pull
-  // it out of simpleEntries and render it at the top of the Extensions panel.
-  const pluginsToggleEntry = SETTINGS.find((e) => e.id === "pluginsEnabled");
-  const simpleEntriesExPlugins = simpleEntries.filter((e) => e.id !== "pluginsEnabled");
-
-  // Assemble the active section's panels as --card groups. Card-grouped
-  // schema sections come from SECTION_GROUPS; General's Theme + custom blocks
-  // and the fully custom sections (box/accounts/extensions) come from
-  // renderCustom.
+  // Assemble the active section's panels as --card groups, driven entirely by
+  // the schema (BET-1174): consecutive non-custom entries sharing a `group`
+  // render as one GroupCard titled by that group, then the section's custom
+  // content (About/danger-zone, Box, Accounts, plugin registry, ...) renders
+  // after — grouped cards first, custom after.
   const renderSection = (section: SettingSectionId): ReactNode => {
-    const grouped = SECTION_GROUPS[section] ?? [];
-    const byId = new Map(simpleEntriesExPlugins.map((e) => [e.id, e]));
-    const groupedBlocks = grouped.map((g) => (
-      <GroupCard key={g.title} title={g.title}>
-        {g.entryIds.map((id) => {
-          const entry = byId.get(id);
-          return entry ? <div key={id}>{renderField(entry)}</div> : null;
-        })}
-      </GroupCard>
-    ));
-
-    let custom: ReactNode = null;
-    if (section === "general") {
-      const theme = simpleEntriesExPlugins.find((e) => e.id === "theme");
-      custom = (
-        <>
-          {theme && <GroupCard title="Appearance"><div>{renderField(theme)}</div></GroupCard>}
-          {renderCustom("general")}
-        </>
-      );
-    } else {
-      custom = renderCustom(section);
+    const grouped: { title: string; entries: SettingEntry[] }[] = [];
+    for (const e of simpleEntries) {
+      const tail = grouped[grouped.length - 1];
+      if (e.group && tail && tail.title === e.group) tail.entries.push(e);
+      else grouped.push({ title: e.group ?? "", entries: [e] });
     }
-
     return (
-      <>{groupedBlocks}{custom}</>
+      <>
+        {grouped.map((g) => (
+          <GroupCard key={g.title} title={g.title}>
+            {g.entries.map((entry) => (
+              <div key={entry.id}>{renderField(entry)}</div>
+            ))}
+          </GroupCard>
+        ))}
+        {renderCustom(section)}
+      </>
     );
   };
 
