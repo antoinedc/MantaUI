@@ -42,6 +42,7 @@ import {
   runWithConcurrency,
   chooseUpdateSkewVariant,
   isTransientUpdateNetworkError,
+  boxUpgradeLanded,
   describeUpdateTarget,
   arrowUpNavigatesHistory,
   arrowDownNavigatesHistory,
@@ -1625,6 +1626,19 @@ describe("isTransientUpdateNetworkError", () => {
     expect(isTransientUpdateNetworkError(undefined)).toBe(false);
     expect(isTransientUpdateNetworkError("")).toBe(false);
     expect(isTransientUpdateNetworkError(42)).toBe(false);
+  });
+});
+
+// ===== boxUpgradeLanded =====
+describe("boxUpgradeLanded", () => {
+  it("returns true only when both versions are present and differ", () => {
+    expect(boxUpgradeLanded(null, "1.0.1")).toBe(false);
+    expect(boxUpgradeLanded("1.0.0", null)).toBe(false);
+    expect(boxUpgradeLanded("", "1.0.1")).toBe(false);
+    expect(boxUpgradeLanded("1.0.0", "")).toBe(false);
+    expect(boxUpgradeLanded("1.0.0", "1.0.0")).toBe(false);
+    expect(boxUpgradeLanded("1.0.0", "1.0.1")).toBe(true);
+    expect(boxUpgradeLanded("1.0.1", "1.0.0")).toBe(true);
   });
 });
 

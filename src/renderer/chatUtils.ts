@@ -1202,6 +1202,31 @@ export function isTransientUpdateNetworkError(err: unknown): boolean {
   );
 }
 
+/**
+ * Has the box restarted onto a different build than the one it was running
+ * when the upgrade was started?
+ *
+ * This is the ONLY signal that ends the in-flight upgrade state. It is an
+ * edge (the version CHANGED), never a level — the previous implementation
+ * asked "is the box currently not behind the desktop", which is already true
+ * when the user clicks and so cancelled the in-flight state instantly.
+ *
+ * Any change counts, not just a newer version: a different build means the
+ * box restarted, which is what the state is waiting for. Deliberately no
+ * version comparison — that would drag in ordering rules for no benefit.
+ *
+ * A missing value on either side can never satisfy this. That is intentional:
+ * "we don't know" must not read as "it worked". Those cases fall through to
+ * the caller's timeout.
+ */
+export function boxUpgradeLanded(
+  fromVersion: string | null | undefined,
+  currentVersion: string | null | undefined,
+): boolean {
+  if (!fromVersion || !currentVersion) return false;
+  return fromVersion !== currentVersion;
+}
+
 // ===== Composer arrow-key: history vs caret navigation =====
 //
 // The OLD logic scanned for `\n` before/after the caret to decide "first/last
