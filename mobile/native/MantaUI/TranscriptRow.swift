@@ -117,29 +117,52 @@ extension StepGroupContent {
 /// The callbacks + context the blocking cards need when they render inside the
 /// transcript tail (BET-1214). The cards' behaviour, copy and callbacks are
 /// unchanged from the pinned-above-composer era — only their LOCATION moved, so
-/// this struct carries the same closures ChatScreen used to hand the cards
-/// directly. It is an in-property value type with no `static` storage (see the
-/// "no static var" rule).
+/// this type carries the same closures ChatScreen used to hand the cards
+/// directly.
 ///
-/// Delivered through the SwiftUI ENVIRONMENT, not stored on the transcript cell:
-/// the `TiledCellContent` cell's `body(context:)` is required to be
-/// `nonisolated` (Swift 6), so a closure-carrying value can't be threaded as a
-/// stored cell property across that boundary. The parent injects it via
-/// `.environment(\.transcriptCardActions, …)` and only a `@MainActor`
-/// `View.body` ever reads it.
-struct TranscriptCardActions {
+/// A `@MainActor final class` (not a struct): it holds main-actor-bound closures
+/// that touch a `@MainActor` store, and the transcript cell's `body(context:)`
+/// is required by `TiledCellContent` to be `nonisolated`, so the card actions
+/// are delivered through the SwiftUI environment — an actor-isolated reference
+/// type is implicitly `Sendable`, which is exactly what an `EnvironmentKey`
+/// `static` default and a cross-view round-trip need, while everything reads the
+/// closures on the main actor only.
+@MainActor
+final class TranscriptCardActions {
     /// The raw transcript the plan card's exact derivation reads.
-    var messages: [OpencodeMessage]
+    let messages: [OpencodeMessage]
     /// The session's BUILD-model name for the plan card's subtitle.
-    var buildModelName: String
+    let buildModelName: String
     /// The deterministic plan-page URL (nil when no usable slug can be formed).
-    var planURL: String?
-    var onPermissionReply: (PermissionRequest, PermissionReply) -> Void
-    var onQuestionSubmit: (QuestionRequest, [[String]]) -> Void
-    var onQuestionReject: (QuestionRequest) -> Void
-    var onBuildHere: (QuestionRequest, String) -> Void
-    var onKeepPlanning: (QuestionRequest, String) -> Void
-    var onOpenPage: () -> Void
+    let planURL: String?
+    let onPermissionReply: (PermissionRequest, PermissionReply) -> Void
+    let onQuestionSubmit: (QuestionRequest, [[String]]) -> Void
+    let onQuestionReject: (QuestionRequest) -> Void
+    let onBuildHere: (QuestionRequest, String) -> Void
+    let onKeepPlanning: (QuestionRequest, String) -> Void
+    let onOpenPage: () -> Void
+
+    init(
+        messages: [OpencodeMessage],
+        buildModelName: String,
+        planURL: String?,
+        onPermissionReply: @escaping (PermissionRequest, PermissionReply) -> Void,
+        onQuestionSubmit: @escaping (QuestionRequest, [[String]]) -> Void,
+        onQuestionReject: @escaping (QuestionRequest) -> Void,
+        onBuildHere: @escaping (QuestionRequest, String) -> Void,
+        onKeepPlanning: @escaping (QuestionRequest, String) -> Void,
+        onOpenPage: @escaping () -> Void
+    ) {
+        self.messages = messages
+        self.buildModelName = buildModelName
+        self.planURL = planURL
+        self.onPermissionReply = onPermissionReply
+        self.onQuestionSubmit = onQuestionSubmit
+        self.onQuestionReject = onQuestionReject
+        self.onBuildHere = onBuildHere
+        self.onKeepPlanning = onKeepPlanning
+        self.onOpenPage = onOpenPage
+    }
 }
 
 /// The environment key carrying the blocking-card actions into transcript cells.
