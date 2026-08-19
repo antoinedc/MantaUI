@@ -500,7 +500,6 @@ export function Settings({
       "cto.model": cto?.model ?? "",
       "cto.voice": cto?.voice ?? "",
       "cto.alwaysListening": cto?.alwaysListening ?? false,
-      "cto.parkedBehavior": cto?.parkedBehavior ?? "auto-open",
     }),
     [cacheTtl, groqApiKey, voiceTranscriptionModel, openaiApiKey, allowAgentPush, downloadsDir, worktreePerSession, worktreeCleanOnClose, uploadCleanupHours, voiceNoteTtlHours, theme, autoRenameSessions, alwaysShowUsage, cto],
   );

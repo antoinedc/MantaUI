@@ -279,9 +279,6 @@ export type AppConfig = {
     // Tool names the user has allowed to run without narration/confirm
     // (Issue 2, the inbound feed's trusted set). Absent/empty = none trusted.
     trustedActions?: string[];
-    // What the box does when a call window is left parked (Issue 3).
-    // "push" (default) = notify the user; "auto-open" = open the window.
-    parkedBehavior?: "auto-open" | "push";
     // Whether the call window listens continuously (Issue 3). Default false.
     alwaysListening?: boolean;
   };

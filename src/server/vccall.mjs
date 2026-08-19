@@ -29,10 +29,23 @@ const REALTIME_BASE = "wss://api.openai.com/v1/realtime";
 const DEFAULT_REALTIME_MODEL = "gpt-realtime-2.1";
 const DEFAULT_VOICE = "alloy";
 
+// Per-1M-token cost of the Realtime model, used to turn a response.done
+// `usage` object into a dollar figure for the per-call spend cap. Ratios from
+// OpenAI's pricing page (https://openai.com/api/pricing/) on 2026-08-19 for
+// gpt-4o-realtime-preview — audio tokens bill at a higher rate than text, and
+// input/output are separate. Re-check these if the model or its pricing moves.
+export const REALTIME_TOKEN_RATES = {
+  inputTextUsdPerM: 5.0, //  $5.00 / 1M input text tokens
+  outputTextUsdPerM: 20.0, // $20.00 / 1M output text tokens
+  inputAudioUsdPerM: 40.0, //  $40.00 / 1M input audio tokens
+  outputAudioUsdPerM: 80.0, // $80.00 / 1M output audio tokens
+};
+
 // Cost cap defaults (USD). Per-call cap disconnects + notifies; a generous
 // auto-idle park leaves the model no silent spend.
 export const DEFAULT_SPEND_CAP_USD = 5;
 export const DEFAULT_IDLE_PARK_MS = 60_000;
+export const DEFAULT_CONFIRM_TIMEOUT_MS = 30_000;
 
 // The Realtime session is instructed to ask for go-ahead before acting on a
 // confirm-mode tool. This is the contract the model follows (issue 2's text
@@ -85,6 +98,8 @@ export function createVcCallEngine(deps = {}) {
     onNarrate = () => {},
     onState = () => {},
     now = () => Date.now(),
+    setTimeout: setTimer = setTimeout,
+    clearTimeout: clearTimer = clearTimeout,
   } = deps;
 
   const state = {
@@ -106,6 +121,7 @@ export function createVcCallEngine(deps = {}) {
     caps: {
       spendCapUsd: DEFAULT_SPEND_CAP_USD,
       idleParkMs: DEFAULT_IDLE_PARK_MS,
+      confirmTimeoutMs: DEFAULT_CONFIRM_TIMEOUT_MS,
       maxReconnectAttempts: 5,
       reconnectBaseMs: 1000,
     },
@@ -119,7 +135,7 @@ export function createVcCallEngine(deps = {}) {
 
   function clearIdleTimer() {
     if (state.idleTimer) {
-      clearTimeout(state.idleTimer);
+      clearTimer(state.idleTimer);
       state.idleTimer = null;
     }
   }
@@ -127,7 +143,7 @@ export function createVcCallEngine(deps = {}) {
   function armIdleTimer() {
     clearIdleTimer();
     if (!state.caps.idleParkMs) return;
-    state.idleTimer = setTimeout(() => {
+    state.idleTimer = setTimer(() => {
       // Auto-idle → park: tear down the Realtime session (no silent spend).
       if (state.status === "live") {
         publish({ type: "notify", message: "Calls idle — closed the session." });
@@ -165,6 +181,7 @@ export function createVcCallEngine(deps = {}) {
       idleParkMs: typeof cfg?.cto?.idleParkMs === "number" ? cfg.cto.idleParkMs : DEFAULT_IDLE_PARK_MS,
       maxReconnectAttempts: typeof conf?.reconnect?.maxAttempts === "number" ? conf.reconnect.maxAttempts : 5,
       reconnectBaseMs: typeof conf?.reconnect?.baseMs === "number" ? conf.reconnect.baseMs : 1000,
+      confirmTimeoutMs: typeof cfg?.cto?.confirmTimeoutMs === "number" ? cfg.cto.confirmTimeoutMs : DEFAULT_CONFIRM_TIMEOUT_MS,
     };
     if (!apiKey) {
       state.apiKey = null;
@@ -302,7 +319,11 @@ export function createVcCallEngine(deps = {}) {
   // -------------------------------------------------------------------------
 
   function handleUserAudio(b64) {
-    armIdleTimer();
+    // Raw mic frames must NOT re-arm the idle timer: with always-listening
+    // (the default on some boxes) frames arrive continuously, so a deadline
+    // that resets on every packet never fires and auto-park never happens.
+    // Idle is armed on conversational activity only (speech / response in
+    // receiveRealtime), not on the mere presence of audio packets.
     send({ type: "input_audio_buffer.append", audio: b64 });
   }
 
@@ -394,10 +415,13 @@ export function createVcCallEngine(deps = {}) {
         for (const item of items) {
           if (item?.type === "function_call") await handleFunctionCall(item);
         }
+        // Feed the completed response's usage into the spend cap (cost guard).
+        chargeUsage(evt);
         return armIdleTimer();
       }
       case "input_audio_buffer.speech_started":
-        return barge();
+        barge();
+        return armIdleTimer();
       case "input_audio_buffer.speech_stopped":
         return armIdleTimer();
       case "conversation.item.added": {
@@ -437,7 +461,36 @@ export function createVcCallEngine(deps = {}) {
   function handleAudioDelta(evt) {
     // Forward raw delta audio to the renderer to play (PCM audio).
     if (evt?.delta) emit({ type: "audio", delta: evt.delta });
-    armIdleTimer();
+  }
+
+  // Turn a response.done `usage` object into a dollar figure and feed the
+  // per-call spend cap. Returns early (leaves the cap machinery untouched)
+  // when the usage object lacks the text/audio breakdown — never invent an
+  // estimate for a response we can't price.
+  function chargeUsage(evt) {
+    // GA places response.done usage at the event level; tolerate it on the
+    // response too so a payload-shape change never silently disables the cap.
+    const usage = evt?.usage ?? evt?.response?.usage;
+    const usd = usageToUsd(usage);
+    if (usd == null) return;
+    spend(usd);
+  }
+
+  function usageToUsd(usage) {
+    if (!usage || typeof usage !== "object") return null;
+    const inputDetails = usage.input_token_details ?? usage.input_details;
+    const outputDetails = usage.output_token_details ?? usage.output_details;
+    const it = inputDetails?.text_tokens;
+    const ia = inputDetails?.audio_tokens;
+    const ot = outputDetails?.text_tokens;
+    const oa = outputDetails?.audio_tokens;
+    if ([it, ia, ot, oa].some((n) => typeof n !== "number")) return null;
+    const usd =
+      it * REALTIME_TOKEN_RATES.inputTextUsdPerM +
+      ia * REALTIME_TOKEN_RATES.inputAudioUsdPerM +
+      ot * REALTIME_TOKEN_RATES.outputTextUsdPerM +
+      oa * REALTIME_TOKEN_RATES.outputAudioUsdPerM;
+    return usd / 1_000_000;
   }
 
   // A user utterance (from input transcription) is the ONLY thing that can
@@ -546,8 +599,8 @@ export function createVcCallEngine(deps = {}) {
 
   // A pending confirm with no re-issue times out → abort + re-plan.
   function armConfirmTimeout(id) {
-    const ms = state.caps.confirmTimeoutMs ?? 30_000;
-    const t = setTimeout(() => {
+    const ms = state.caps.confirmTimeoutMs ?? DEFAULT_CONFIRM_TIMEOUT_MS;
+    const t = setTimer(() => {
       const pc = state.pendingConfirm;
       if (pc && pc.id === id) {
         rejectConfirm(id);
