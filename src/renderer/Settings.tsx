@@ -10,6 +10,7 @@ import {
   Folder,
   Plug,
   Mic,
+  PhoneCall,
 } from "lucide-react";
 import { useStore } from "./store";
 import { ConfirmModal } from "./ConfirmModal";
@@ -229,6 +230,7 @@ const SECTION_ICONS: Record<SettingSectionId, typeof SettingsIcon> = {
   files: Folder,
   extensions: Plug,
   voice: Mic,
+  cto: PhoneCall,
 };
 
 // Card groupings for the schema-driven sections. Each { title, entryIds }

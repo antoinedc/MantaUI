@@ -170,11 +170,15 @@ export function createVcCallEngine(deps = {}) {
     ws.on("error", () => {
       /* close handler does teardown */
     });
-    // Send the session config.
+    // Send the session config. pcm16 in/out: the call renderer encodes mic
+    // frames as raw 16-bit PCM (decodable with a plain AudioBuffer, no opus
+    // wasm dependency) and decodes the model's pcm16 deltas the same way.
     send({ type: "session.update", session: {
       instructions: SESSION_INSTRUCTIONS,
       voice,
       modalities: ["audio", "text"],
+      input_audio_format: "pcm16",
+      output_audio_format: "pcm16",
       tools: state.tools.map((t) => ({ type: "function", name: t.name, description: t.description, parameters: t.params })),
       turn_detection: { type: "server_vad", create_response: true },
     }});

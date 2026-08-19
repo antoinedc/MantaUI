@@ -39,6 +39,7 @@ import {
 import { checkForUpdates } from "./autoUpdate.js";
 import { titleBarOptions } from "./windowChrome.js";
 import { downloadFileToDownloads } from "./download.js";
+import { createCallWindowController } from "./callWindow.js";
 import { registerInstallerHandlers } from "./installer/handlers.js";
 import {
   resolveChannel,
@@ -273,6 +274,17 @@ app.on("before-quit", () => {
 });
 
 function registerHandlers(): void {
+  // On-call CTO floating window (BET-1166). The controller reads connection
+  // config + persisted bounds lazily from the live `config`.
+  const callWindow = createCallWindowController({
+    getBounds: () => config.callWindowBounds,
+    saveBounds: (b) => commit({ callWindowBounds: { x: b.x, y: b.y, width: b.width, height: b.height } }),
+  });
+  ipcMain.handle(IPC.callWindowShow, () => callWindow.show());
+  ipcMain.handle(IPC.callWindowPark, () => callWindow.park());
+  ipcMain.handle(IPC.callWindowHangup, () => callWindow.hangup());
+  ipcMain.handle(IPC.callGetConfig, () => ({ serverUrl: config.serverUrl ?? "", boxToken: config.boxToken ?? "" }));
+
   // Read ONLY by main.tsx's boot sequence (`chooseDesktopTransport`), before
   // httpApi is installed as `window.api` — used to seed httpApi's
   // localStorage credentials from the desktop's local config.json (pairing
