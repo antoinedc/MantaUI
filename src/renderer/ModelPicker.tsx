@@ -50,6 +50,14 @@ export function ModelPicker({
   onOpen,
   onSelect,
   labelOverride = null,
+  // BET-1222: when the router chose this session's model, the composer pill
+  // explains WHY (reason) and offers one-click undo to the incumbent model.
+  // `routed` is pure display state; the undo action itself (set override back
+  // to the incumbent, clear the routed state, surface failures) is supplied by
+  // the caller via `onRoutedUndone` so it routes through the SAME error/toast
+  // mechanism the picker's own selects use — no second persistence path.
+  routed = null,
+  onRoutedUndone,
 }: {
   modelLabel: string | null;
   models: OpencodeModel[] | null;
@@ -72,6 +80,9 @@ export function ModelPicker({
   // highest precedence — lets a caller display "Auto" until the user first
   // picks a model. A no-op for callers that don't pass it (ChatPanel).
   labelOverride?: string | null;
+  // BET-1222 routed state (see above).
+  routed?: { reason: string; incumbent: { providerID: string; modelID: string } } | null;
+  onRoutedUndone?: () => void;
 }) {
   const [modelOpen, setModelOpen] = useState(false);
   const [variantOpen, setVariantOpen] = useState(false);
@@ -173,7 +184,11 @@ export function ModelPicker({
           ) : (
             <span className="flex items-center gap-1 truncate">
               <Sparkles size={13} aria-hidden="true" className="shrink-0 text-accent" />
-              <span className="truncate max-w-[140px]">{modelDisplayName}</span>
+              <span className="truncate max-w-[140px]">
+                {routed ? "◆ " : ""}
+                {modelDisplayName}
+                {routed ? " · routed" : ""}
+              </span>
               <ChevronDown size={13} aria-hidden="true" className="shrink-0 text-text-faint" />
             </span>
           )
@@ -241,6 +256,7 @@ export function ModelPicker({
         extraPressed={fast.on}
         extraDisabled={!fast.available}
         rightAccent
+        leftAccent={Boolean(routed)}
         popup
         leftHook="manta-model-picker-btn"
         rightHook="manta-effort-picker-btn"
@@ -255,6 +271,23 @@ export function ModelPicker({
               : "Pick effort / variant"
         }
       />
+
+      {/* Routed pill — the honesty mechanism (BET-1222). When the router set
+          this session's model, show WHY and a one-click undo back to the model
+          the user would have had. The reason never renders without routed: the
+          caller's `routed` state is the only thing that switches this on. */}
+      {routed && !loading && (
+        <span className="flex items-center gap-2 flex-wrap">
+          <span className="text-meta text-text-faint">{routed.reason}</span>
+          <button
+            type="button"
+            onClick={onRoutedUndone}
+            className="font-mono text-meta rounded-full border border-border bg-raised px-3 py-1 text-text-muted hover:bg-fill-hover"
+          >
+            undo · keep {routed.incumbent.providerID}/{routed.incumbent.modelID} here
+          </button>
+        </span>
+      )}
 
       {/* Model dropdown — renders through the specced Dropdown + MenuOption
           surface (ModelMenu: search strip, pinned server-default header,

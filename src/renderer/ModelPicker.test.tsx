@@ -14,6 +14,7 @@
 // below is one of those three lies.
 
 import { describe, it, expect, afterEach } from "vitest";
+import { act } from "react";
 import { mount, type Harness } from "./testHarness";
 import { ModelPicker } from "./ModelPicker";
 import type { OpencodeModel } from "../shared/types";
@@ -85,5 +86,71 @@ describe("ModelPicker — loading state (models === null)", () => {
     expect(shell.hasAttribute("aria-busy")).toBe(false);
     const text = c.textContent ?? "";
     expect(text).toContain("Claude Opus 4.7");
+  });
+});
+
+describe("ModelPicker — routed pill (BET-1222)", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  function render(
+    routed: { reason: string; incumbent: { providerID: string; modelID: string } } | null,
+    onRoutedUndone: () => void = () => {},
+  ): HTMLElement {
+    h?.unmount();
+    h = mount(
+      <ModelPicker
+        modelLabel={null}
+        models={MODELS}
+        modelOverride={null}
+        defaultModel={{ providerID: "anthropic", modelID: "claude-opus-4-7" }}
+        onOpen={() => {}}
+        onSelect={() => {}}
+        routed={routed}
+        onRoutedUndone={onRoutedUndone}
+      />,
+    );
+    return h.container;
+  }
+
+  it("renders the routed treatment when routed is set (◆ prefix, · routed, reason, undo)", () => {
+    const c = render({
+      reason: "build → deep tier: anthropic weekly at 89%",
+      incumbent: { providerID: "anthropic", modelID: "claude-opus-4-7" },
+    });
+    const text = c.textContent ?? "";
+    expect(text).toContain("◆ ");
+    expect(text).toContain(" · routed");
+    expect(text).toContain("build → deep tier: anthropic weekly at 89%");
+    expect(text).toContain("undo · keep anthropic/claude-opus-4-7 here");
+  });
+
+  it("renders no routed pill when routed is null", () => {
+    const c = render(null);
+    const text = c.textContent ?? "";
+    expect(text).not.toContain("routed");
+    expect(text).not.toContain("undo");
+  });
+
+  it("invokes onRoutedUndone when the undo button is pressed", () => {
+    let undone = false;
+    const c = render(
+      {
+        reason: "r",
+        incumbent: { providerID: "anthropic", modelID: "claude-opus-4-7" },
+      },
+      () => {
+        undone = true;
+      },
+    );
+    const btn = [...c.querySelectorAll("button")].find((b) =>
+      (b.textContent ?? "").includes("undo"),
+    );
+    expect(btn).toBeTruthy();
+    act(() => (btn as HTMLButtonElement).click());
+    expect(undone).toBe(true);
   });
 });

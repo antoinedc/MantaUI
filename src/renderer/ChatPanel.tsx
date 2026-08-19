@@ -428,6 +428,14 @@ export function ChatPanel({
   const [modelOverride, setModelOverride] = useState<ModelSelection | null>(() =>
     readSavedModel(sessionId) ?? configDefaultModel ?? null,
   );
+  // BET-1222: routed state for the composer pill — set when the router chose
+  // this session's model (fed by the main-conversation routing wiring). The
+  // pill renders ONLY while this is non-null; clearing it reverts the pill to
+  // its normal appearance.
+  const [routed, setRouted] = useState<{
+    reason: string;
+    incumbent: { providerID: string; modelID: string };
+  } | null>(null);
   // Active-model providerID for the auth-error banner (BET-316). Per-session
   // override wins over the persisted default; null if neither is set. Memoized
   // on `modelOverride` (the in-memory selection, itself seeded from
@@ -1508,6 +1516,24 @@ export function ChatPanel({
     },
     [sessionId],
   );
+
+  // BET-1222: undo a routed model choice. Reverts through the SAME per-session
+  // override path the manual picker uses (selectModel + writeSavedModel) — no
+  // second persistence path — then clears the routed state so the pill reverts.
+  // Awaited: a failure surfaces on the existing sendError banner rather than
+  // being swallowed.
+  const undoRouted = useCallback(async () => {
+    if (!routed) return;
+    try {
+      await selectModel({
+        providerID: routed.incumbent.providerID,
+        modelID: routed.incumbent.modelID,
+      });
+      setRouted(null);
+    } catch (e) {
+      setSendError(String((e as Error)?.message ?? e));
+    }
+  }, [routed, selectModel]);
 
   // App-control (BET-840/841): expose this panel's `selectModel` to App so the
   // box's `switch-model` app-control event drives the override through the same
@@ -3070,6 +3096,8 @@ export function ChatPanel({
         models={models}
         modelOverride={modelOverride}
         defaultModel={defaultModel}
+        routed={routed}
+        onRoutedUndone={() => void undoRouted()}
         plan={plan}
         onTogglePlan={togglePlan}
         activeProviderID={activeModel?.providerID ?? null}
