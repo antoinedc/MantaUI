@@ -86,7 +86,7 @@ export function rowUpdateState(
 
 export interface DesktopUpdateBusy {
   busyLabel: string;
-  progress: { step: number; total: number; label: string } | null;
+  progress: { step: number; total: number; label: string; percent?: boolean } | null;
 }
 
 /**
