@@ -327,14 +327,31 @@ export function CallApp() {
   }
 
   async function hangup() {
+    // Tell the box to tear the call down BEFORE closing the socket: the
+    // server's control:hangup path hangs up the engine, and the ws.on("close")
+    // teardown remains as the backstop for a window that vanishes without
+    // warning.
+    wsRef.current?.send(JSON.stringify({ type: "control", action: "hangup" }));
     setStatus("disconnected");
     wsRef.current?.close();
     micStreamRef.current?.getTracks().forEach((t) => t.stop());
+    micStreamRef.current = null;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (window as any).__mantaPreload?.call?.hangup?.();
   }
 
   function park() {
+    // Park must actually stop the call from the box's perspective: send the
+    // control:park frame (the server tears down the Realtime session + clears
+    // the call-active flag so inbound CTO events go to push, not to a hidden
+    // window) and stop the mic so nothing keeps streaming/billing.
+    wsRef.current?.send(JSON.stringify({ type: "control", action: "park" }));
+    micStreamRef.current?.getTracks().forEach((t) => t.stop());
+    micStreamRef.current = null;
+    // Mic is off once parked, so the indicator reads "off" (the manual spec:
+    // "the mic indicator is off"). A parked call's engine is torn down anyway;
+    // if the window is later re-shown the user toggles Talk to restart the mic.
+    setListening(false);
     setStatus("parked");
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (window as any).__mantaPreload?.call?.park?.();

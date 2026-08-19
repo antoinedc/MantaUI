@@ -272,20 +272,6 @@ enum SettingsSchema {
             commitOnBlur: false,
             placeholder: nil,
         ),
-        SettingEntry(
-            id: "ctoParkedBehavior",
-            section: "cto",
-            label: "When parked",
-            help: "What the box does with an inbound CTO event while no call is open.",
-            control: SettingControl.segmented,
-            configKey: "cto.parkedBehavior",
-            defaultString: "auto-open",
-            defaultBool: nil,
-            defaultNumber: nil,
-            options: [SettingOption(value: "auto-open", label: "Auto-open"), SettingOption(value: "push", label: "Notify only")],
-            commitOnBlur: false,
-            placeholder: nil,
-        ),
     ]
 
     static func entries(in sectionID: String) -> [SettingEntry] {

@@ -464,3 +464,121 @@ test("classifyConfirmReply: ambiguous / empty / unrelated → unclear (never an 
     assert.equal(classifyConfirmReply(t), "unclear", JSON.stringify(t));
   }
 });
+
+test("mic frames alone do NOT postpone the idle park (auto-park still fires)", async () => {
+  // A controllable fake clock: the engine's timers live in `timers` and only
+  // advance when `advance()` runs, so we can prove the idle deadline is NOT
+  // pushed forward by raw mic packets.
+  let fakeTime = 0;
+  let seq = 0;
+  const timers = new Map();
+  const setTimer = (fn, ms) => {
+    const id = ++seq;
+    timers.set(id, { at: fakeTime + ms, fn });
+    return id;
+  };
+  const clearTimer = (id) => {
+    timers.delete(id);
+  };
+  const advance = (ms) => {
+    fakeTime += ms;
+    for (const [id, t] of [...timers]) {
+      if (t.at <= fakeTime) {
+        timers.delete(id);
+        t.fn();
+      }
+    }
+  };
+  const { engine, ws } = makeEngine({
+    now: () => fakeTime,
+    setTimeout: setTimer,
+    clearTimeout: clearTimer,
+  });
+  await engine.start({ openaiApiKey: "sk-test", cto: { idleParkMs: 100, model: "m", voice: "v" } });
+  engine.receiveRealtime({ type: "session.created", session: { id: "s1" } });
+  assert.equal(engine.listState().status, "live");
+
+  // Continuously stream mic frames for 90ms. The idle deadline is armed at
+  // t=100; re-arming it from each frame (the old behaviour) would keep it at
+  // t≈190, so the original deadline would be the proof of the fix.
+  for (let i = 0; i < 90; i++) {
+    advance(1);
+    engine.handleUserAudio("AAAA");
+  }
+  assert.equal(engine.listState().status, "live", "still live while the deadline hasn't passed");
+
+  // Cross the ORIGINAL deadline (t=100). A deadline reset by mic frames would
+  // still be in the future at t=105 → the fixed engine auto-parks, the buggy
+  // one would not.
+  advance(15);
+  assert.equal(engine.listState().status, "parked", "auto-parked at the idle deadline despite mic frames");
+  assert.equal(ws.closed, true, "realtime session torn down on auto-idle park");
+});
+
+test("response.done usage accumulates spend and hangs up once the cap is crossed", async () => {
+  const { engine, ws, published } = makeEngine();
+  await engine.start({ openaiApiKey: "sk-test", cto: { spendCapUsd: 0.1, model: "m", voice: "v" } });
+  engine.receiveRealtime({ type: "session.created", session: { id: "s1" } });
+  assert.equal(ws.closed, false, "call live before spend");
+
+  // 1000 text + 1000 audio input tokens; 500 text + 2000 audio output tokens
+  // → $0.045 + $0.17 = $0.215 (see REALTIME_TOKEN_RATES). That crosses cap $0.10.
+  const usage = {
+    input_token_details: { text_tokens: 1000, audio_tokens: 1000 },
+    output_token_details: { text_tokens: 500, audio_tokens: 2000 },
+  };
+  engine.receiveRealtime({ type: "response.done", usage });
+
+  const costs = published.filter((m) => m.type === "cost");
+  assert.equal(costs.length, 1, "a cost frame was published");
+  assert.ok(Math.abs(costs[0].usd - 0.215) < 1e-9, "cost frame reflects response usage");
+  assert.equal(ws.closed, true, "hung up once the cap is crossed");
+  assert.equal(engine.listState().status, "idle");
+  assert.ok(published.some((m) => m.type === "notify" && /\bspend cap\b/i.test(m.message)), "cap notify published");
+});
+
+test("spend accumulates across responses below the cap", async () => {
+  const { engine, published } = makeEngine();
+  await engine.start({ openaiApiKey: "sk-test", cto: { model: "m", voice: "v" } });
+  engine.receiveRealtime({ type: "session.created", session: { id: "s1" } });
+  const usage = {
+    input_token_details: { text_tokens: 1000, audio_tokens: 1000 },
+    output_token_details: { text_tokens: 500, audio_tokens: 2000 },
+  };
+  engine.receiveRealtime({ type: "response.done", usage });
+  engine.receiveRealtime({ type: "response.done", usage });
+  const costs = published.filter((m) => m.type === "cost");
+  assert.equal(costs.length, 2);
+  assert.ok(Math.abs(costs[1].usd - 0.43) < 1e-9, "spend accumulates across responses");
+});
+
+test("response.done without a usable usage breakdown does NOT invent spend", async () => {
+  const { engine, ws, published } = makeEngine();
+  await engine.start({ openaiApiKey: "sk-test", cto: { spendCapUsd: 0.01, model: "m" } });
+  engine.receiveRealtime({ type: "session.created", session: { id: "s1" } });
+  engine.receiveRealtime({ type: "response.done", usage: { total_tokens: 5000 } });
+  assert.equal(published.some((m) => m.type === "cost"), false, "no cost frame from unusable usage");
+  assert.equal(ws.closed, false, "not hung up on an un-priceable response");
+});
+
+test("spend parses the GA usage shape (evt.response.usage, *_details) — BET-1178/1180", async () => {
+  const { engine, ws, published } = makeEngine();
+  await engine.start({ openaiApiKey: "sk-test", cto: { spendCapUsd: 0.1, model: "m" } });
+  engine.receiveRealtime({ type: "session.created", session: { id: "s1" } });
+  // GA's response.done carries usage under response.usage with the *_details
+  // field naming (vs the beta event-level *_token_details). Same token counts
+  // as the beta-shape test → same $ figure.
+  engine.receiveRealtime({
+    type: "response.done",
+    response: {
+      usage: {
+        input_details: { text_tokens: 1000, audio_tokens: 1000 },
+        output_details: { text_tokens: 500, audio_tokens: 2000 },
+      },
+    },
+  });
+  const costs = published.filter((m) => m.type === "cost");
+  assert.equal(costs.length, 1, "a cost frame was published from GA-shaped usage");
+  assert.ok(Math.abs(costs[0].usd - 0.215) < 1e-9, "GA usage priced identically to beta usage");
+  assert.equal(ws.closed, true, "spend cap trips on GA-shaped usage too");
+});

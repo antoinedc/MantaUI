@@ -112,6 +112,33 @@ test("park / hangup clear the call-active flag and hangup the engine", async () 
   assert.equal(activeState[activeState.length - 1], false, "call-active cleared");
 });
 
+test("control: park clears the call-active flag and parks the engine (no silent session)", async () => {
+  const client = makeClientWs();
+  const rt = makeFakeRealtime();
+  const activeState = [];
+  attachCallWs(client, new URL("/call", "http://x"), {
+    realtimeConnect: async () => rt,
+    configGet: async () => ({ openaiApiKey: "sk-test", cto: {} }),
+    listTools: () => [],
+    setCallActive: (a) => activeState.push(a),
+  });
+  await new Promise((r) => setTimeout(r, 10));
+  deliver(client, { type: "control", action: "park" });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(rt.closed, true, "realtime session torn down on park");
+  assert.equal(activeState[activeState.length - 1], false, "call-active cleared on park");
+  assert.ok(
+    client.clientSent.some((m) => {
+      try {
+        return JSON.parse(m).type === "state" && JSON.parse(m).state === "parked";
+      } catch {
+        return false;
+      }
+    }),
+    "engine reports parked to the renderer",
+  );
+});
+
 test("socket close tears down and clears the call-active flag (no silent session)", async () => {
   const client = makeClientWs();
   const rt = makeFakeRealtime();

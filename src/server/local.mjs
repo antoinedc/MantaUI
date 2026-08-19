@@ -68,7 +68,6 @@ const DEFAULT_CONFIG = {
     model: "",
     voice: "",
     trustedActions: [],
-    parkedBehavior: "auto-open",
     alwaysListening: false,
   },
   // BET-799: user-configured self-hosted forge hosts — `[{ host, kind, apiBase? }]`.

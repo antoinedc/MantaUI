@@ -383,21 +383,6 @@ export const SETTINGS: SettingEntry[] = [
     default: false,
     group: "Setup",
   },
-  {
-    id: "ctoParkedBehavior",
-    section: "cto",
-    label: "When parked",
-    help: "What the box does with an inbound CTO event while no call is open.",
-    control: "segmented",
-    configKey: "cto.parkedBehavior",
-    platform: "both",
-    default: "auto-open",
-    group: "Setup",
-    options: [
-      { value: "auto-open", label: "Auto-open" },
-      { value: "push", label: "Notify only" },
-    ],
-  },
 ];
 
 // ----- pure helpers -----
