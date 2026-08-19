@@ -763,9 +763,11 @@ private struct ChatScreenContent: View {
             bottomInset: bottomBarHeight,
             scrollPosition: $scrollPosition,
             onPointsFromBottom: { showScrollToBottom = $0 > Self.scrollToBottomThreshold },
-            cards: cardActions,
             header: { sessionHeaderBlock }
         )
+        // Deliver the blocking-card actions to the transcript cells via the
+        // SwiftUI environment (BET-1214). The subagent drill-in keeps `nil`.
+        .environment(\.transcriptCardActions, cardActions)
     }
     /// How far above the bottom the user must scroll for the down-arrow to
     /// appear. Same magnitude MessagingUI uses internally for its own "near
@@ -1242,21 +1244,17 @@ struct TranscriptListView<Header: View>: View {
     let bottomInset: CGFloat
     @Binding var scrollPosition: TiledScrollPosition
     var onPointsFromBottom: ((CGFloat) -> Void)? = nil
-    /// The blocking-card callbacks, threaded down to the transcript cells.
-    /// Read-only surfaces (subagent drill-in) leave the environment unset and
-    /// cards render inert (BET-1214).
-    var cards: TranscriptCardActions? = nil
     @ViewBuilder var header: () -> Header
 
     var body: some View {
-        // Deliver the blocking-card actions to the cells via the environment —
-        // the cell's `body(context:)` is nonisolated, and a closure-carrying
-        // value cannot be threaded through it (Swift 6). The cells read
-        // `\.transcriptCardActions` back inside their `@MainActor` bodies.
+        // The blocking-card actions are delivered to the cells through the
+        // SwiftUI environment (a closure-carrying `@MainActor` reference can't
+        // be threaded through the cell's nonisolated `body`); the enclosing chat
+        // screen injects `\.transcriptCardActions` at its call site. Read-only
+        // surfaces (subagent drill-in) leave it unset → cards render inert.
         TiledView(items: store.rows, scrollPosition: $scrollPosition) { row in
             TranscriptBlockCell(item: row, tokens: tokens)
         }
-        .environment(\.transcriptCardActions, cards)
         .prependLoader(.loader(
             perform: { store.loadEarlier() },
             isProcessing: store.loadingEarlier
