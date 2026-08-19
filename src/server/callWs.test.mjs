@@ -128,3 +128,28 @@ test("socket close tears down and clears the call-active flag (no silent session
   assert.equal(rt.closed, true);
   assert.equal(activeState[activeState.length - 1], false);
 });
+
+test("a rejected engine.start pushes an error frame and is not an unhandled rejection", async () => {
+  const client = makeClientWs();
+  const unhandled = [];
+  const onUnhandled = (reason) => {
+    unhandled.push(reason);
+  };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    attachCallWs(client, new URL("/call", "http://x"), {
+      // Deliberately NOT a ws (no .on): openTransport's configureTransport
+      // throws after the connect call, so engine.start rejects. The boot
+      // IIFE's .catch must contain it.
+      realtimeConnect: async () => ({ send() {} }),
+      configGet: async () => ({ openaiApiKey: "sk-test", cto: {} }),
+      listTools: () => [],
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    const frames = client.clientSent.map((m) => JSON.parse(m));
+    assert.ok(frames.some((m) => m.type === "error"), "error frame pushed to renderer");
+    assert.equal(unhandled.length, 0, "no unhandled rejection surfaced");
+  } finally {
+    process.removeListener("unhandledRejection", onUnhandled);
+  }
+});

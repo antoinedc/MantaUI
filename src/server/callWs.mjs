@@ -83,7 +83,10 @@ export function attachCallWs(ws, url, opts = {}) {
       } catch {
         /* narration is best-effort; never breaks the call */
       }
-    })();
+    })().catch((err) => {
+      console.error("[callWs] narration failed:", err);
+      sendJson({ type: "error", error: "narration_failed" });
+    });
   }
 
   const engine = createVcCallEngine({
@@ -120,7 +123,13 @@ export function attachCallWs(ws, url, opts = {}) {
       },
     });
     await engine.start(cfg);
-  })();
+  })().catch((err) => {
+    // One call window failing is a call-window problem, never a box-wide
+    // outage: never let a boot failure become an unhandled rejection (which
+    // exits the process).
+    console.error("[callWs] engine.start failed:", err);
+    sendJson({ type: "error", error: "call_boot_failed" });
+  });
 
   ws.on("message", (raw) => {
     let msg;

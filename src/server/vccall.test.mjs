@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { createVcCallEngine } from "./vccall.mjs";
+import { createVcCallEngine, awaitOpen } from "./vccall.mjs";
 
 // A fake OpenAI Realtime WebSocket: an EventEmitter whose .send captures
 // client→OpenAI messages and .close flips a flag. Tests drive the connection
@@ -257,4 +257,53 @@ test("regression: the Realtime socket authenticates with the OpenAI key, not the
   });
   assert.ok(capturedHeaders, "realtimeConnect was called");
   assert.equal(capturedHeaders.authorization, "Bearer sk-openai");
+});
+
+test("awaitOpen resolves once the socket emits open", async () => {
+  const ws = makeFakeWs();
+  const p = awaitOpen(ws);
+  ws.emit("open");
+  assert.equal(await p, ws);
+});
+
+test("awaitOpen rejects when the socket errors before open", async () => {
+  const ws = makeFakeWs();
+  const p = awaitOpen(ws);
+  ws.emit("error", new Error("connect refused"));
+  await assert.rejects(p);
+});
+
+test("awaitOpen rejects when the socket closes before open", async () => {
+  const ws = makeFakeWs();
+  const p = awaitOpen(ws);
+  ws.emit("close");
+  await assert.rejects(p);
+});
+
+test("awaitOpen removes all listeners once settled", async () => {
+  const ws = makeFakeWs();
+  const settled = awaitOpen(ws);
+  ws.emit("open");
+  await settled;
+  assert.equal(ws.listenerCount("open"), 0);
+  assert.equal(ws.listenerCount("error"), 0);
+  assert.equal(ws.listenerCount("close"), 0);
+});
+
+test("a socket whose send throws publishes an error frame and does not propagate (start resolves)", async () => {
+  const { engine, published } = makeEngine({
+    realtimeConnect: async () => {
+      const ws = makeFakeWs();
+      ws.send = () => {
+        throw new Error("socket dead");
+      };
+      return ws;
+    },
+  });
+  // start() must resolve (not reject) — the write failure is contained.
+  await engine.start({ openaiApiKey: "sk-test", cto: {} });
+  assert.ok(
+    published.some((m) => m.type === "error" && m.error === "realtime_send_failed"),
+    "error frame published on failed send",
+  );
 });
