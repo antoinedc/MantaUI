@@ -11,6 +11,15 @@
 // from a plain row to a keyboard-activatable button so a checkbox/dot row and
 // a clickable row share one component (docs/components.md decision 2).
 //
+// GOTCHA — a row that contains its own controls must not also handle those
+// controls' clicks. A `<label>`-wrapped checkbox (see Checkbox.tsx) re-dispatches
+// a click on its hidden `<input>`, so a user's single click on the visible box
+// produces TWO click events at the row; an unguarded row `onClick` would toggle
+// twice — selecting then instantly deselecting. The guard below therefore
+// ignores any click whose target is (or is inside) an interactive control, and
+// lets that control handle it. It deliberately does NOT stop propagation: the
+// control's own handler still runs, the row just declines to act.
+//
 // Note the deliberate asymmetry with the chrome primitives (Button, Checkbox,
 // StatusDot): this is a *composable container*, not a single chrome element,
 // so it takes `className` (e.g. a `manta-*` identity hook). The slots stay the
@@ -44,7 +53,23 @@ export function ListRow({
     <div
       role={onClick ? "button" : undefined}
       tabIndex={onClick ? 0 : undefined}
-      onClick={onClick}
+      onClick={
+        onClick
+          ? (e) => {
+              // A control inside the row owns its own click. A <label>-wrapped
+              // checkbox additionally re-dispatches a click on its hidden <input>,
+              // so the row sees TWO clicks for one user click and would toggle
+              // twice — selecting then instantly deselecting.
+              if (
+                (e.target as HTMLElement).closest(
+                  "label,input,button,a,select,textarea",
+                )
+              )
+                return;
+              onClick();
+            }
+          : undefined
+      }
       onKeyDown={
         onClick
           ? (e) => {
