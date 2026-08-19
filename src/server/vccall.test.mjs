@@ -236,3 +236,25 @@ test("reconnect: giving up after maxAttempts surfaces a dropped state", async ()
   assert.equal(stateLog.includes("reconnecting"), true);
   assert.equal(stateLog[stateLog.length - 1], "dropped");
 });
+
+test("regression: the Realtime socket authenticates with the OpenAI key, not the Groq key (BET-1173)", async () => {
+  // With BOTH groqApiKey and openaiApiKey present, the bearer token must be
+  // the OpenAI key. A Groq key is required for chat dictation, so nearly every
+  // user has one — a groqApiKey fallback would open the OpenAI Realtime socket
+  // with a Groq credential, get rejected, and end in the dropped state.
+  let capturedHeaders = null;
+  const { engine } = makeEngine({
+    realtimeConnect: async (url, headers) => {
+      capturedHeaders = headers;
+      const ws = makeFakeWs();
+      return ws;
+    },
+  });
+  await engine.start({
+    groqApiKey: "gsk-groq",
+    openaiApiKey: "sk-openai",
+    cto: {},
+  });
+  assert.ok(capturedHeaders, "realtimeConnect was called");
+  assert.equal(capturedHeaders.authorization, "Bearer sk-openai");
+});

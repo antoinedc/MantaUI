@@ -256,7 +256,7 @@ const SECTION_GROUPS: Partial<Record<SettingSectionId, { title: string; entryIds
     { title: "Speech to text (Groq)", entryIds: ["groqApiKey", "voiceTranscriptionModel"] },
   ],
   cto: [
-    { title: "Setup", entryIds: ["ctoEnabled", "ctoModel", "ctoVoice", "ctoAlwaysListening", "ctoParkedBehavior"] },
+    { title: "Setup", entryIds: ["openaiApiKey", "ctoEnabled", "ctoModel", "ctoVoice", "ctoAlwaysListening", "ctoParkedBehavior"] },
   ],
 };
 

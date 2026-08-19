@@ -204,7 +204,7 @@ enum SettingsSchema {
         ),
         SettingEntry(
             id: "openaiApiKey",
-            section: "voice",
+            section: "cto",
             label: "OpenAI API key",
             help: "Enables the on-call CTO voice call window (OpenAI Realtime). Stored on the box; the renderer never sees it.",
             control: SettingControl.password,

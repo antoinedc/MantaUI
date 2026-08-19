@@ -301,9 +301,13 @@ export const SETTINGS: SettingEntry[] = [
     default: "",
     placeholder: "whisper-large-v3-turbo",
   },
+
+  // ----- on-call CTO (BET-1166) -----
+  // Nested under `cto.*` in AppConfig. The surface renders these through the
+  // generic schema-driven fields (configUpdate handles the cto.* prefix).
   {
     id: "openaiApiKey",
-    section: "voice",
+    section: "cto",
     label: "OpenAI API key",
     help: "Enables the on-call CTO voice call window (OpenAI Realtime). Stored on the box; the renderer never sees it.",
     control: "password",
@@ -313,10 +317,6 @@ export const SETTINGS: SettingEntry[] = [
     commitOnBlur: true,
     placeholder: "sk-… (leave blank to disable the call window)",
   },
-
-  // ----- on-call CTO (BET-1166) -----
-  // Nested under `cto.*` in AppConfig. The surface renders these through the
-  // generic schema-driven fields (configUpdate handles the cto.* prefix).
   {
     id: "ctoEnabled",
     section: "cto",
