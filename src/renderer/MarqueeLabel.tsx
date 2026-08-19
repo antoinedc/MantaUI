@@ -1,13 +1,14 @@
 // MarqueeLabel — a reusable hover-marquee text label for truncated names.
 //
 // Renders an overflow-clipping outer span (the clip) containing one nowrap
-// inner span (the text). When the inner text is wider than the clip (i.e. it
-// WOULD truncate), hovering the clip slides the text on a loop with a dwell at
-// each end. When not hovered — or not truncated, or reduced-motion — the inner
-// span has transform:none, so the title ALWAYS reads from the start (R1). The
-// animation is applied only under :hover in index.css, so lifting the pointer
-// snaps the text back to the start by construction; there is no scroll offset
-// to remember or reset.
+// inner span (the text) plus an ellipsizing REST sibling. The inner span is
+// ALWAYS full-width and is animated with a pure transform, so its box never
+// changes on hover — lifting the pointer returns to the start with no reflow.
+// At rest an ellipsizing REST sibling is shown; on hover CSS swaps to the
+// animated inner. Because the inner keeps its layout size in both states
+// (visibility, not display, hides it at rest), its scrollWidth stays
+// measurable and the ResizeObserver (which observes only the clip) never
+// re-fires on hover.
 
 import {
   useLayoutEffect,
@@ -18,7 +19,8 @@ import {
 } from "react";
 
 const CLIP = "overflow-hidden";
-const INNER = "manta-marquee-inner inline-block whitespace-nowrap max-w-full overflow-hidden text-ellipsis";
+const INNER = "manta-marquee-inner inline-block whitespace-nowrap";
+const REST = "manta-marquee-rest block w-full truncate";
 
 export function MarqueeLabel({
   children,
@@ -50,7 +52,6 @@ export function MarqueeLabel({
     if (typeof ResizeObserver === "undefined") return; // jsdom / environments without RO
     const ro = new ResizeObserver(measure);
     ro.observe(clip);
-    ro.observe(inner);
     return () => ro.disconnect();
   }, [children]);
 
@@ -61,6 +62,11 @@ export function MarqueeLabel({
       className={`${CLIP}${over ? " manta-marquee" : ""} ${className}`}
       style={over ? ({ "--marquee-shift": `${shift}px` } as CSSProperties) : undefined}
     >
+      {over && (
+        <span className={REST}>
+          {children}
+        </span>
+      )}
       <span ref={innerRef} className={INNER}>
         {children}
       </span>

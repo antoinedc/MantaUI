@@ -361,13 +361,17 @@ html, body, #root {
 }
 
 /* MarqueeLabel — RTL hover-loop for truncated names (see MarqueeLabel.tsx).
-   The animation runs ONLY while the clip is hovered, so lifting the pointer
-   reverts to transform:none = the title reads from the start (no scroll state
-   to remember). --marquee-shift is the overflow width in px (set inline by the
-   component); --marquee-gap adds breathing room so the tail fully clears the
-   clip instead of stopping flush against it. At rest the inner caps at 100% of
-   the clip and ellipsizes (...); both are removed while animating so the whole
-   name scrolls. Reduced-motion: a static ellipsized label. */
+   The inner span is ALWAYS full-width (`inline-block whitespace-nowrap`) and is
+   animated with a pure transform, so its box NEVER changes on hover — lifting
+   the pointer reverts to transform:none = the title reads from the start. At
+   rest an ellipsizing sibling (`manta-marquee-rest`, width-constrained +
+   text-ellipsis) is shown; on hover CSS swaps to the animated inner. Because
+   the inner keeps its layout size in both states (visibility, not display,
+   hides it at rest), `inner.scrollWidth` stays measurable and the ResizeObserver
+   (which observes only the clip) never fires from hovering. My --marquee-shift
+   is the overflow width in px (set inline by the component); --marquee-gap adds
+   breathing room so the tail fully clears the clip. Reduced-motion: a static
+   ellipsized label. */
 @keyframes manta-marquee {
   0%   { transform: translateX(0); }
   35%  { transform: translateX(calc(-1 * (var(--marquee-shift, 0px) + var(--marquee-gap, 24px)))); }
@@ -375,24 +379,37 @@ html, body, #root {
   90%  { transform: translateX(0); }
   100% { transform: translateX(0); }
 }
+/* At rest: show the ellipsized REST copy; hide the animated inner but keep it
+   laid out (visibility) so its width is still measurable. */
+.manta-marquee .manta-marquee-inner {
+  visibility: hidden;
+}
+/* On hover: swap — hide the REST copy, reveal + animate the inner. No width or
+   overflow change, so entering hover reflows nothing and re-fires nothing. */
+.manta-marquee:hover .manta-marquee-rest {
+  display: none;
+}
 .manta-marquee:hover .manta-marquee-inner {
-  max-width: none;
-  overflow: visible;
-  text-overflow: clip;
+  visibility: visible;
   animation: manta-marquee 9s linear infinite;
 }
-/* Slight fade at the right (cutoff) edge while animating — scoped to :hover
-   so the resting label never fades. */
+/* Slight fade at the right (cutoff) edge while animating — scoped to :hover so
+   the resting label never fades. */
 .manta-marquee:hover {
   -webkit-mask-image: linear-gradient(to left, transparent 0, #000 18px);
   mask-image: linear-gradient(to left, transparent 0, #000 18px);
 }
 @media (prefers-reduced-motion: reduce) {
+  /* Reduced motion: never swap — keep the static ellipsized REST label. */
   .manta-marquee:hover .manta-marquee-inner {
-    max-width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    visibility: hidden;
     animation: none;
   }
-  .manta-marquee:hover { mask-image: none; }
+  .manta-marquee:hover .manta-marquee-rest {
+    display: block;
+  }
+  .manta-marquee:hover {
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
 }
