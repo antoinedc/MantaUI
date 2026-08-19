@@ -24,7 +24,7 @@ import {
   resolveLauncherFlags,
 } from "./chatShared";
 import type { SyncPayload } from "../shared/api";
-import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, pruneVisitedSessions, registerMountedTerminal, shouldResyncWindowsForJobs, dispatchAppControl, dispatchMedia, applyMediaEvent, formatResetAt, voiceUi, type AppControlHandlers, type MountedTerminal } from "./chatUtils";
+import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, pruneVisitedSessions, registerMountedTerminal, shouldResyncWindowsForJobs, dispatchAppControl, dispatchMedia, applyMediaEvent, formatResetAt, voiceUi, boxUpgradeLanded, type AppControlHandlers, type MountedTerminal } from "./chatUtils";
 import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
 import { UpdateBar } from "./UpdateBar";
 import { ConfirmModal } from "./ConfirmModal";
@@ -64,6 +64,13 @@ import { providerLabel } from "./UsageDial";
 // link can never be misclaimed by a `manta://`-registered app, and a
 // `manta://` link can never silently pass through a staging build.
 const PAIR_PARSE_SCHEME = channelConfig(__MANTA_CHANNEL__).urlScheme;
+
+// How long the in-flight upgrade state may persist before it is force-cleared
+// so the user can retry. A real observed box update (opencode upgrade +
+// download + dependency swap + two service restarts) took ~95s end to end, so
+// the old 120s left almost no headroom and would flip the bar back to a
+// clickable state while the box was still updating.
+const BOX_UPGRADE_MAX_MS = 600_000;
 
 // BET-659: Artifacts panel open/closed — device-local, default CLOSED. Lazy
 // read with try/catch (repo convention — localStorage can throw).
@@ -1475,6 +1482,12 @@ function Shell() {
   const updateAllRunRef = useRef(false);
   const updateAllBoxConfirmed = useRef(false);
   const updateAllResolvers = useRef<{ resolve: (ok: boolean) => void } | null>(null);
+
+  // The box version at the moment the upgrade was started. The in-flight state
+  // ends when the box comes back reporting a DIFFERENT one — see
+  // boxUpgradeLanded. A ref, not state: it is click-scoped, must not trigger a
+  // render, and must be readable in the effect without being a dependency.
+  const upgradeFromVersionRef = useRef<string | null>(null);
   const [updateAllConfirmBody, setUpdateAllConfirmBody] = useState<string | null>(null);
 
   // Step 4 of runUpdateAll: once the desktop download has landed (updatePrompt
@@ -1498,25 +1511,25 @@ function Shell() {
     setUpdateRefreshKey((k) => k + 1);
   }, [connectionState.state, boxUpgrading]);
 
-  // Once the box has advanced (variant is no longer "behind"), end the in-flight
-  // state and clear any stale update-failed banner + frozen progress — the upgrade
-  // landed. A REAL early failure leaves the box behind, so `compatibilityVariant`
-  // stays "behind", `boxUpgrading` is cleared directly in applyServerUpdate, and
-  // the actionable banner persists for retry.
+  // Once the box restarts onto a DIFFERENT build than the one the upgrade was
+  // started from (see boxUpgradeLanded — an edge, never the version-relationship
+  // level), end the in-flight state and clear any stale update-failed banner +
+  // frozen progress: the upgrade landed. A REAL early failure leaves the box on
+  // the same build, so the state is instead cleared directly in applyServerUpdate
+  // and the actionable banner persists for retry.
   useEffect(() => {
     if (!boxUpgrading) return;
-    if (compatibilityVariant === "match" || compatibilityVariant === "unknown") {
-      setBoxUpgrading(false);
-      useStore.getState().setUpdatingTarget(null);
-      useStore.getState().setServerUpdateProgress(null);
-      setUpdateError(null);
-      // The box run has completed and the connection is confirmed back (the
-      // reconnect refetch advanced the version). If runUpdateAll has a desktop
-      // install waiting on the box leg, fire it now.
-      updateAllBoxConfirmed.current = true;
-      finishUpdateAllOnce();
-    }
-  }, [boxUpgrading, compatibilityVariant]);
+    if (!boxUpgradeLanded(upgradeFromVersionRef.current, serverVersion)) return;
+    setBoxUpgrading(false);
+    useStore.getState().setUpdatingTarget(null);
+    useStore.getState().setServerUpdateProgress(null);
+    setUpdateError(null);
+    // The box run has completed and the connection is confirmed back (the
+    // reconnect refetch advanced the version). If runUpdateAll has a desktop
+    // install waiting on the box leg, fire it now.
+    updateAllBoxConfirmed.current = true;
+    finishUpdateAllOnce();
+  }, [boxUpgrading, serverVersion]);
 
   // Safety net: never leave the banner stuck in the in-flight state (e.g. the box
   // reconnected but somehow never advanced). Cap it; the user can then retry.
@@ -1526,7 +1539,7 @@ function Shell() {
       setBoxUpgrading(false);
       useStore.getState().setUpdatingTarget(null);
       useStore.getState().setServerUpdateProgress(null);
-    }, 120_000);
+    }, BOX_UPGRADE_MAX_MS);
     return () => clearTimeout(t);
   }, [boxUpgrading]);
 
@@ -1536,32 +1549,25 @@ function Shell() {
     boxUpgrading && connectionState.state !== "connected" && connectionState.state !== "idle";
 
   const applyServerUpdate = async () => {
-    // DIAG: capture the banner server-update lifecycle so a "no loading state"
-    // report can be traced against runtime truth instead of assumptions.
-    console.debug("[update] applyServerUpdate start, boxUpgrading was", boxUpgrading);
+    upgradeFromVersionRef.current = serverVersion;
     setBoxUpgrading(true);
     // Mark the server row as the in-flight target so Settings' per-target
     // spinner actually renders ("updating"). boxUpgrading alone only made the
     // row "busy" (disabled, NO spinner), which is exactly the missing server
     // loading state. Cleared on the reconcile / cap / early-failure paths below.
     useStore.getState().setUpdatingTarget("server");
-    console.debug("[update] applyServerUpdate boxUpgrading now TRUE, updatingTarget=server");
     try {
       const res = await window.api.serverUpdateApply();
-      console.debug("[update] serverUpdateApply resolved", res);
       if (res && res.ok === false) {
-        console.debug("[update] serverUpdateApply ok:false → clearing in-flight", res.error);
         useStore.getState().setUpdatingTarget(null);
         setBoxUpgrading(false);
         setUpdateError({ message: res.error || "Server update failed", raw: res.error ?? "" });
       }
     } catch (e) {
-      const transient = isTransientUpdateNetworkError(e);
-      console.debug("[update] serverUpdateApply rejected, transient?", transient, "err:", String(e));
       // A bare connection error is the box restarting itself mid-update (the
       // success path) — swallow it; the reconnect + version re-check above
       // resolves the real outcome. Structured failures still raise the banner.
-      if (transient) return;
+      if (isTransientUpdateNetworkError(e)) return;
       useStore.getState().setUpdatingTarget(null);
       setBoxUpgrading(false);
       setUpdateError({
