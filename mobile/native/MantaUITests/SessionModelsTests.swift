@@ -8,66 +8,130 @@ final class SessionModelsTests: XCTestCase {
 
     // MARK: - §7.1a subtitle table
 
-    func testSubtitleSubagentsReplacesRunningAndModel() {
-        let s = SessionRowStatus(running: true, attention: false, subagentsRunning: 3, modelLabel: "opus 4.8")
-        XCTAssertEqual(SessionRowSubtitle.text(for: s), "3 subagents")
+    func testSubtitleBackgroundJobsReplaceRunningAndModel() {
+        let s = SessionRowStatus(running: true, attention: false, backgroundJobs: 3, modelLabel: "opus 4.8")
+        XCTAssertEqual(SessionRowSubtitle.text(for: s), "3 background jobs")
     }
 
-    func testSubtitleSubagentsSingular() {
-        let s = SessionRowStatus(running: true, attention: false, subagentsRunning: 1, modelLabel: nil)
-        XCTAssertEqual(SessionRowSubtitle.text(for: s), "1 subagent")
+    func testSubtitleBackgroundJobsSingular() {
+        let s = SessionRowStatus(running: true, attention: false, backgroundJobs: 1, modelLabel: nil)
+        XCTAssertEqual(SessionRowSubtitle.text(for: s), "1 background job")
     }
 
     func testSubtitleRunningShowsModel() {
-        let s = SessionRowStatus(running: true, attention: false, subagentsRunning: 0, modelLabel: "opus 4.8")
+        let s = SessionRowStatus(running: true, attention: false, backgroundJobs: 0, modelLabel: "opus 4.8")
         XCTAssertEqual(SessionRowSubtitle.text(for: s), "running · opus 4.8")
     }
 
     func testSubtitleRunningWithoutModelFallsBackToRunning() {
-        let s = SessionRowStatus(running: true, attention: false, subagentsRunning: 0, modelLabel: nil)
+        let s = SessionRowStatus(running: true, attention: false, backgroundJobs: 0, modelLabel: nil)
         XCTAssertEqual(SessionRowSubtitle.text(for: s), "running")
     }
 
     func testSubtitleNeedsYouWhenBlocked() {
-        let s = SessionRowStatus(running: false, attention: true, subagentsRunning: 0, modelLabel: nil)
+        let s = SessionRowStatus(running: false, attention: true, backgroundJobs: 0, modelLabel: nil)
         XCTAssertEqual(SessionRowSubtitle.text(for: s), "needs you")
     }
 
     // MARK: - §7.1a progress label (BET-791)
 
     func testSubtitleWorkingProgressLabelReplacesRunningAndModel() {
-        let s = SessionRowStatus(running: true, attention: false, subagentsRunning: 0, modelLabel: "opus 4.8", progressLabel: "Running integration tests")
+        let s = SessionRowStatus(running: true, attention: false, backgroundJobs: 0, modelLabel: "opus 4.8", progressLabel: "Running integration tests")
         XCTAssertEqual(SessionRowSubtitle.text(for: s), "Running integration tests")
     }
 
     func testSubtitleWorkingProgressLabelEmptyFallsBackToRunning() {
-        let s = SessionRowStatus(running: true, attention: false, subagentsRunning: 0, modelLabel: nil, progressLabel: "")
+        let s = SessionRowStatus(running: true, attention: false, backgroundJobs: 0, modelLabel: nil, progressLabel: "")
         XCTAssertEqual(SessionRowSubtitle.text(for: s), "running")
     }
 
-    func testSubtitleProgressLabelStillLosesToSubagents() {
-        let s = SessionRowStatus(running: true, attention: false, subagentsRunning: 2, modelLabel: nil, progressLabel: "Running integration tests")
-        XCTAssertEqual(SessionRowSubtitle.text(for: s), "2 subagents")
+    func testSubtitleBackgroundJobsStillBeatProgressLabel() {
+        let s = SessionRowStatus(running: true, attention: false, backgroundJobs: 2, modelLabel: nil, progressLabel: "Running integration tests")
+        XCTAssertEqual(SessionRowSubtitle.text(for: s), "2 background jobs")
     }
 
     func testSubtitleIdleIsNil() {
-        let s = SessionRowStatus(running: false, attention: false, subagentsRunning: 0, modelLabel: nil)
+        let s = SessionRowStatus(running: false, attention: false, backgroundJobs: 0, modelLabel: nil)
         XCTAssertNil(SessionRowSubtitle.text(for: s))
     }
 
-    // MARK: - §7.1 status dot
+    // MARK: - BET-1213 background-job nesting
 
+    private func win(_ index: Int, _ sid: String?) -> MantaWindow {
+        MantaWindow(index: index, name: "w\(index)", active: false, paneCurrentPath: "", opencodeSessionId: sid, worktreePath: nil)
+    }
+
+    private func job(_ id: String, parent: String?, child: String?, status: String = "running") -> DelegateJob {
+        DelegateJob(id: id, parentSessionID: parent, childSessionID: child, status: status)
+    }
+
+    private func proj(_ windows: [MantaWindow]) -> MantaProject {
+        MantaProject(tmuxSession: "proj", defaultCwd: "/tmp", windows: windows, attached: false, mantaOwned: nil)
+    }
+
+    func testNestingHidesChildUnderPresentParent() {
+        let p = proj([win(0, "ses_parent"), win(1, "ses_child")])
+        let nesting = SessionJobNesting.compute(project: p, jobs: [job("j1", parent: "ses_parent", child: "ses_child")])
+        XCTAssertEqual(nesting.hidden, [1])
+        XCTAssertEqual(nesting.activeChildCounts, [0: 1])
+    }
+
+    func testNestingChildStaysVisibleWhenParentWindowAbsent() {
+        // The child window exists but its parent session has no window in the
+        // project — the child must NOT be orphaned or hidden.
+        let p = proj([win(0, "ses_child")])
+        let nesting = SessionJobNesting.compute(project: p, jobs: [job("j1", parent: "ses_gone", child: "ses_child")])
+        XCTAssertTrue(nesting.hidden.isEmpty)
+        XCTAssertTrue(nesting.activeChildCounts.isEmpty)
+    }
+
+    func testNestingIgnoresJobWhoseChildWindowIsAbsent() {
+        let p = proj([win(0, "ses_parent")])
+        let nesting = SessionJobNesting.compute(project: p, jobs: [job("j1", parent: "ses_parent", child: "ses_no_window")])
+        XCTAssertTrue(nesting.hidden.isEmpty)
+        XCTAssertTrue(nesting.activeChildCounts.isEmpty)
+    }
+
+    func testNestingNoJobsIsANoop() {
+        let p = proj([win(0, "ses_a"), win(1, "ses_b")])
+        let nesting = SessionJobNesting.compute(project: p, jobs: [])
+        XCTAssertTrue(nesting.hidden.isEmpty)
+        XCTAssertTrue(nesting.activeChildCounts.isEmpty)
+    }
+
+    func testNestingCountsOnlyNonTerminalJobs() {
+        // Both children are hidden (any job whose child+parent windows exist),
+        // but only the RUNNING one counts toward the parent's background-job
+        // subtitle.
+        let p = proj([win(0, "ses_parent"), win(1, "ses_run"), win(2, "ses_done")])
+        let nesting = SessionJobNesting.compute(project: p, jobs: [
+            job("a", parent: "ses_parent", child: "ses_run", status: "running"),
+            job("b", parent: "ses_parent", child: "ses_done", status: "done"),
+        ])
+        XCTAssertEqual(nesting.hidden, [1, 2])
+        XCTAssertEqual(nesting.activeChildCounts, [0: 1])
+    }
+
+    func testNestingChildOfTerminalJobIsStillHidden() {
+        // Desktop hides a nested child window regardless of job status.
+        let p = proj([win(0, "ses_parent"), win(1, "ses_done")])
+        let nesting = SessionJobNesting.compute(project: p, jobs: [job("a", parent: "ses_parent", child: "ses_done", status: "done")])
+        XCTAssertEqual(nesting.hidden, [1])
+        XCTAssertTrue(nesting.activeChildCounts.isEmpty)
+    }
+
+    // MARK: - §7.1 status dot
     func testDotNeedsYouTakesPrecedenceOverRunning() {
-        let s = SessionRowStatus(running: true, attention: true, subagentsRunning: 0, modelLabel: nil)
+        let s = SessionRowStatus(running: true, attention: true, backgroundJobs: 0, modelLabel: nil)
         XCTAssertEqual(SessionDotState.forRow(s), .needsYou)
     }
 
     func testDotRunning() {
-        XCTAssertEqual(SessionDotState.forRow(SessionRowStatus(running: true, attention: false, subagentsRunning: 0, modelLabel: nil)), .running)
+        XCTAssertEqual(SessionDotState.forRow(SessionRowStatus(running: true, attention: false, backgroundJobs: 0, modelLabel: nil)), .running)
     }
 
     func testDotIdle() {
-        XCTAssertEqual(SessionDotState.forRow(SessionRowStatus(running: false, attention: false, subagentsRunning: 0, modelLabel: nil)), .idle)
+        XCTAssertEqual(SessionDotState.forRow(SessionRowStatus(running: false, attention: false, backgroundJobs: 0, modelLabel: nil)), .idle)
     }
 
     // MARK: - Timer / duration
@@ -117,19 +181,19 @@ final class SessionModelsTests: XCTestCase {
     func testSessionRowAgeGate() {
         let activity = now.addingTimeInterval(-3600)
         // Running rows show no age even with activity known (the dot is the signal).
-        let running = SessionRowStatus(running: true, attention: false, subagentsRunning: 0,
+        let running = SessionRowStatus(running: true, attention: false, backgroundJobs: 0,
                                        modelLabel: nil, lastActivity: activity)
         XCTAssertNil(SessionRowAge.text(for: running, now: now))
         // Attention rows likewise.
-        let attention = SessionRowStatus(running: false, attention: true, subagentsRunning: 0,
+        let attention = SessionRowStatus(running: false, attention: true, backgroundJobs: 0,
                                          modelLabel: nil, lastActivity: activity)
         XCTAssertNil(SessionRowAge.text(for: attention, now: now))
         // No known activity → no age.
-        let none = SessionRowStatus(running: false, attention: false, subagentsRunning: 0,
+        let none = SessionRowStatus(running: false, attention: false, backgroundJobs: 0,
                                     modelLabel: nil, lastActivity: nil)
         XCTAssertNil(SessionRowAge.text(for: none, now: now))
         // A plain idle row with activity → the formatted age.
-        let idle = SessionRowStatus(running: false, attention: false, subagentsRunning: 0,
+        let idle = SessionRowStatus(running: false, attention: false, backgroundJobs: 0,
                                     modelLabel: "opus 4.8", lastActivity: activity)
         XCTAssertEqual(SessionRowAge.text(for: idle, now: now), "1h")
     }
@@ -137,14 +201,14 @@ final class SessionModelsTests: XCTestCase {
     // MARK: - BET-897 idle subtitle (model only)
 
     func testIdleSubtitleModelOnly() {
-        let s = SessionRowStatus(running: false, attention: false, subagentsRunning: 0, modelLabel: "opus 4.8")
+        let s = SessionRowStatus(running: false, attention: false, backgroundJobs: 0, modelLabel: "opus 4.8")
         XCTAssertEqual(SessionRowSubtitle.text(for: s), "opus 4.8")
     }
 
     func testIdleSubtitleRecencyOnlyBecomesNil() {
         // Recency now lives in the age chip, not the subtitle — a row with
         // activity but no model shows nothing here.
-        let s = SessionRowStatus(running: false, attention: false, subagentsRunning: 0,
+        let s = SessionRowStatus(running: false, attention: false, backgroundJobs: 0,
                                  modelLabel: nil, lastActivity: now.addingTimeInterval(-3600))
         XCTAssertNil(SessionRowSubtitle.text(for: s))
     }
@@ -152,39 +216,39 @@ final class SessionModelsTests: XCTestCase {
     func testIdleSubtitleModelOnlyIgnoresRecency() {
         // Model alone; recency is carried by the trailing age chip, so it no
         // longer appears here (used to read "opus 4.8 · 1h ago").
-        let s = SessionRowStatus(running: false, attention: false, subagentsRunning: 0,
+        let s = SessionRowStatus(running: false, attention: false, backgroundJobs: 0,
                                  modelLabel: "opus 4.8", lastActivity: now.addingTimeInterval(-3600))
         XCTAssertEqual(SessionRowSubtitle.text(for: s), "opus 4.8")
     }
 
     func testIdleSubtitleNothingKnownIsNil() {
-        let s = SessionRowStatus(running: false, attention: false, subagentsRunning: 0,
+        let s = SessionRowStatus(running: false, attention: false, backgroundJobs: 0,
                                  modelLabel: nil, lastActivity: nil)
         XCTAssertNil(SessionRowSubtitle.text(for: s))
     }
 
     func testIdleSubtitleTerminalWinsOverModelAndRecency() {
-        let s = SessionRowStatus(running: false, attention: false, subagentsRunning: 0,
+        let s = SessionRowStatus(running: false, attention: false, backgroundJobs: 0,
                                  modelLabel: "opus 4.8", lastActivity: now.addingTimeInterval(-3600),
                                  isTerminal: true)
         XCTAssertEqual(SessionRowSubtitle.text(for: s), "terminal")
     }
 
-    func testIdleSubtitleRunningAttentionSubagentPrecedenceUnchanged() {
-        // Subagents win over an idle model/recency line.
-        let subagents = SessionRowStatus(running: true, attention: false, subagentsRunning: 2,
-                                         modelLabel: "opus 4.8", lastActivity: now.addingTimeInterval(-3600))
-        XCTAssertEqual(SessionRowSubtitle.text(for: subagents), "2 subagents")
+    func testIdleSubtitleRunningAttentionBackgroundJobPrecedenceUnchanged() {
+        // Background jobs win over an idle model/recency line.
+        let bg = SessionRowStatus(running: true, attention: false, backgroundJobs: 2,
+                                  modelLabel: "opus 4.8", lastActivity: now.addingTimeInterval(-3600))
+        XCTAssertEqual(SessionRowSubtitle.text(for: bg), "2 background jobs")
         // Running wins over the idle tail.
-        let running = SessionRowStatus(running: true, attention: false, subagentsRunning: 0,
+        let running = SessionRowStatus(running: true, attention: false, backgroundJobs: 0,
                                        modelLabel: "opus 4.8", lastActivity: now.addingTimeInterval(-3600))
         XCTAssertEqual(SessionRowSubtitle.text(for: running), "running · opus 4.8")
         // Attention wins over the idle tail even with a recency present.
-        let attention = SessionRowStatus(running: false, attention: true, subagentsRunning: 0,
+        let attention = SessionRowStatus(running: false, attention: true, backgroundJobs: 0,
                                          modelLabel: "opus 4.8", lastActivity: now.addingTimeInterval(-3600))
         XCTAssertEqual(SessionRowSubtitle.text(for: attention), "needs you")
         // A terminal row whose running flag is somehow true still reports running.
-        let terminalRunning = SessionRowStatus(running: true, attention: false, subagentsRunning: 0,
+        let terminalRunning = SessionRowStatus(running: true, attention: false, backgroundJobs: 0,
                                                modelLabel: nil, isTerminal: true)
         XCTAssertEqual(SessionRowSubtitle.text(for: terminalRunning), "running")
     }
@@ -519,5 +583,86 @@ final class SessionListMutationTests: XCTestCase {
     func testPinOrderOtherProjectPinDoesNotAffect() {
         let ws = windows(["a", "b"])
         XCTAssertEqual(names(SessionOrder.sorted(ws, project: "proj", pinned: [SessionPinID.window("other", index: 0)])), ["a", "b"])
+    }
+}
+
+// MARK: - BET-1213 delegate:list failure tolerance
+//
+// A box that predates delegation answers `delegate:list` with an unknown-
+// channel error. That must leave the project list fully working: every window
+// visible, no count, no error banner, no empty state. This drives the real
+// store seam through a stubbed URLSession (same pattern as
+// MantaEventStreamTests' StubTranscriptURLProtocol), with the jobs channel
+// returning the server's `{error: "unknown rpc channel: …"}` envelope while
+// `tmux:list` succeeds.
+
+@MainActor
+final class SessionListJobToleranceTests: XCTestCase {
+
+    private final class StubChannelURLProtocol: URLProtocol {
+        nonisolated(unsafe) static var responseBySubstring: [String: String] = [:]
+
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+        override func startLoading() {
+            let urlString = request.url?.absoluteString ?? ""
+            var body = Self.responseBySubstring["default"] ?? #"{"result": null}"#
+            for (key, value) in Self.responseBySubstring where urlString.contains(key) {
+                body = value
+                break
+            }
+            let data = Data(body.utf8)
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        }
+
+        override func stopLoading() {}
+    }
+
+    private let projectJSON = #"""
+    {"result":[{"tmuxSession":"proj","defaultCwd":"/tmp","windows":[
+      {"index":0,"name":"a","active":false,"paneCurrentPath":"","opencodeSessionId":"ses_a"},
+      {"index":1,"name":"b","active":false,"paneCurrentPath":"","opencodeSessionId":"ses_b"}
+    ],"attached":false}]}
+    """#
+
+    private func makeAPI() -> MantaAPIClient {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [StubChannelURLProtocol.self]
+        return MantaAPIClient(
+            serverURL: URL(string: "https://box.example")!,
+            tokenProvider: { "tok" },
+            session: URLSession(configuration: config)
+        )
+    }
+
+    func testUnknownDelegateChannelLeavesProjectListIntact() async {
+        StubChannelURLProtocol.responseBySubstring = [
+            "default": #"{"error":"unknown rpc channel: delegate:list"}"#,
+            "tmux:list": projectJSON,
+        ]
+        let store = SessionListStore(api: makeAPI(), eventStore: MantaEventStore())
+
+        await store.refresh()
+
+        // The project list loaded fully despite the failing jobs fetch.
+        XCTAssertEqual(store.projects.count, 1)
+        let project = store.projects[0]
+        XCTAssertEqual(project.windows.count, 2)
+        // Every window stays visible — a missing job list hides nothing.
+        XCTAssertEqual(store.visibleWindows(in: project).map(\.index), [0, 1])
+        // And no window carries a background-job count.
+        for w in project.windows {
+            XCTAssertEqual(store.rowStatus(for: w).backgroundJobs, 0)
+        }
+        XCTAssertNil(store.loadError)
     }
 }
