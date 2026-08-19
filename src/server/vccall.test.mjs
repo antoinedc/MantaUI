@@ -26,7 +26,7 @@ function makeEngine(overrides = {}) {
   const config = {
     openaiApiKey: "sk-test",
     cto: {
-      model: "gpt-4o-realtime-preview",
+      model: "gpt-realtime-2.1",
       voice: "alloy",
       trustedActions: ["trusted_list_sessions"],
     },
@@ -69,10 +69,11 @@ test("start connects and sends a session.update with the tools configured", asyn
   const sent = json(ws);
   assert.ok(sent.some((m) => m.type === "session.update"), "session.update sent");
   const su = sent.find((m) => m.type === "session.update");
-  assert.equal(su.session.voice, "nova");
-  assert.equal(su.session.modalities.join(","), "audio,text");
+  assert.equal(su.session.type, "realtime");
+  assert.equal(su.session.audio.output.voice, "nova");
+  assert.equal(su.session.audio.input.turn_detection.type, "server_vad");
+  assert.equal(su.session.output_modalities.join(","), "audio");
   assert.equal(su.session.tools.length, 2);
-  assert.equal(su.session.turn_detection.type, "server_vad");
   assert.equal(stateLog[0], "connecting");
 
   // Server → client: session.created flips the call live.
@@ -86,10 +87,12 @@ test("function-call round-trip: dispatches to cto, emits working + cost, complet
   engine.receiveRealtime({ type: "session.created", session: { id: "s1" } });
 
   await engine.receiveRealtime({
-    type: "response.function_call_arguments.done",
-    call_id: "call-1",
-    name: "trusted_list_sessions",
-    arguments: "{}",
+    type: "response.done",
+    response: {
+      output: [
+        { type: "function_call", call_id: "call-1", name: "trusted_list_sessions", arguments: "{}" },
+      ],
+    },
   });
 
   assert.equal(calls.length, 1);
@@ -110,10 +113,12 @@ test("voice confirm: gated tool pauses, re-issue (spoken go-ahead) approves and 
 
   // First call to a gated, untrusted action → pause for go-ahead.
   await engine.receiveRealtime({
-    type: "response.function_call_arguments.done",
-    call_id: "call-1",
-    name: "confirmable_action",
-    arguments: "{\"x\":1}",
+    type: "response.done",
+    response: {
+      output: [
+        { type: "function_call", call_id: "call-1", name: "confirmable_action", arguments: "{\"x\":1}" },
+      ],
+    },
   });
   assert.equal(published.some((m) => m.type === "confirm" && m.id === "cid-1"), true);
   assert.equal(await engine.listState().pendingConfirm?.tool, "confirmable_action");
@@ -125,10 +130,12 @@ test("voice confirm: gated tool pauses, re-issue (spoken go-ahead) approves and 
   calls.length = 0;
   const before = calls.length;
   await engine.receiveRealtime({
-    type: "response.function_call_arguments.done",
-    call_id: "call-2",
-    name: "confirmable_action",
-    arguments: "{\"x\":1}",
+    type: "response.done",
+    response: {
+      output: [
+        { type: "function_call", call_id: "call-2", name: "confirmable_action", arguments: "{\"x\":1}" },
+      ],
+    },
   });
   assert.ok(ws.approved?.includes("cid-1"), "approveConfirm called on the spoken go-ahead");
   // dispatchCto ran a second time (the approved re-dispatch).
@@ -136,6 +143,21 @@ test("voice confirm: gated tool pauses, re-issue (spoken go-ahead) approves and 
   assert.equal(published.some((m) => m.type === "confirm-resolved" && m.ok === true), true);
   assert.equal(await engine.listState().pendingConfirm, null);
   assert.equal(before, 0);
+});
+
+test("GA event names: output_audio delta + transcript deltas publish audio/transcript (BET-1178)", async () => {
+  const { engine, published } = makeEngine();
+  await engine.start({ openaiApiKey: "sk-test", cto: {} });
+  engine.receiveRealtime({ type: "session.created", session: { id: "s1" } });
+
+  engine.receiveRealtime({ type: "response.output_audio.delta", delta: "AAE=" });
+  assert.equal(published.some((m) => m.type === "audio" && m.delta === "AAE="), true);
+
+  engine.receiveRealtime({ type: "response.output_audio_transcript.delta", delta: "Hello" });
+  assert.equal(published.some((m) => m.type === "transcript" && m.delta === "Hello" && m.role === "cto"), true);
+
+  engine.receiveRealtime({ type: "response.output_audio_transcript.done", transcript: "Hello world" });
+  assert.equal(published.some((m) => m.type === "transcript-finished" && m.text === "Hello world"), true);
 });
 
 test("barge: speech_started cancels the in-flight response and notifies the renderer", async () => {
@@ -158,10 +180,12 @@ test("narration seam: onNarrate is threaded into the dispatch ctx", async () => 
   await engine.start({ openaiApiKey: "sk-test", cto: {} });
   engine.receiveRealtime({ type: "session.created", session: { id: "s1" } });
   await engine.receiveRealtime({
-    type: "response.function_call_arguments.done",
-    call_id: "c",
-    name: "trusted_list_sessions",
-    arguments: "{}",
+    type: "response.done",
+    response: {
+      output: [
+        { type: "function_call", call_id: "c", name: "trusted_list_sessions", arguments: "{}" },
+      ],
+    },
   });
   assert.equal(typeof calls[0].ctx.onNarrate, "function");
   // Call it and confirm the injected seam fires.
@@ -257,6 +281,20 @@ test("regression: the Realtime socket authenticates with the OpenAI key, not the
   });
   assert.ok(capturedHeaders, "realtimeConnect was called");
   assert.equal(capturedHeaders.authorization, "Bearer sk-openai");
+});
+
+test("regression: the connect headers carry no openai-beta key (GA, not the retired beta interface) (BET-1178)", async () => {
+  let capturedHeaders = null;
+  const { engine } = makeEngine({
+    realtimeConnect: async (url, headers) => {
+      capturedHeaders = headers;
+      return makeFakeWs();
+    },
+  });
+  await engine.start({ openaiApiKey: "sk-openai", cto: {} });
+  assert.ok(capturedHeaders, "realtimeConnect was called");
+  assert.equal(capturedHeaders.authorization, "Bearer sk-openai");
+  assert.ok(!Object.keys(capturedHeaders).some((k) => k.toLowerCase() === "openai-beta"), "no openai-beta header");
 });
 
 test("awaitOpen resolves once the socket emits open", async () => {

@@ -26,7 +26,7 @@
 import { WebSocket as NodeWebSocket } from "ws";
 
 const REALTIME_BASE = "wss://api.openai.com/v1/realtime";
-const DEFAULT_REALTIME_MODEL = "gpt-4o-realtime-preview";
+const DEFAULT_REALTIME_MODEL = "gpt-realtime-2.1";
 const DEFAULT_VOICE = "alloy";
 
 // Cost cap defaults (USD). Per-call cap disconnects + notifies; a generous
@@ -168,7 +168,6 @@ export function createVcCallEngine(deps = {}) {
       setStatus("connecting");
       ws = await realtimeConnect(`${REALTIME_BASE}?model=${encodeURIComponent(model)}`, {
         authorization: `Bearer ${apiKey}`,
-        "openai-beta": "realtime=v1",
       });
     } catch (e) {
       scheduleReconnect("connect_error");
@@ -179,13 +178,21 @@ export function createVcCallEngine(deps = {}) {
     if (!state.startedAt) state.startedAt = now();
     configureTransport(ws);
     send({ type: "session.update", session: {
+      type: "realtime",
+      model,
       instructions: SESSION_INSTRUCTIONS,
-      voice,
-      modalities: ["audio", "text"],
-      input_audio_format: "pcm16",
-      output_audio_format: "pcm16",
+      output_modalities: ["audio"],
+      audio: {
+        input: {
+          format: { type: "audio/pcm", rate: 24000 },
+          turn_detection: { type: "server_vad", create_response: true },
+        },
+        output: {
+          format: { type: "audio/pcm" },
+          voice,
+        },
+      },
       tools: state.tools.map((t) => ({ type: "function", name: t.name, description: t.description, parameters: t.params })),
-      turn_detection: { type: "server_vad", create_response: true },
     }});
     armIdleTimer();
     return ws;
@@ -342,26 +349,34 @@ export function createVcCallEngine(deps = {}) {
     switch (evt.type) {
       case "session.created":
         return handleSessionCreated(evt);
-      case "response.audio.delta":
+      case "response.output_audio.delta":
         return handleAudioDelta(evt);
-      case "response.audio_transcript.delta": {
+      case "response.output_audio_transcript.delta": {
         const d = evt.delta ?? "";
         if (d) emit({ type: "transcript", delta: d, role: "cto" });
         return;
       }
-      case "response.audio_transcript.done": {
+      case "response.output_audio_transcript.done": {
         const t = evt.transcript ?? "";
         if (t) emit({ type: "transcript-finished", text: t, role: "cto" });
         return;
       }
       case "response.output_audio.done":
-      case "response.done":
         return armIdleTimer();
+      case "response.done": {
+        // GA's `response.done` carries complete function-call items in
+        // `response.output`; dispatch each one (the only function-call path).
+        const items = evt?.response?.output ?? [];
+        for (const item of items) {
+          if (item?.type === "function_call") await handleFunctionCall(item);
+        }
+        return armIdleTimer();
+      }
       case "input_audio_buffer.speech_started":
         return barge();
       case "input_audio_buffer.speech_stopped":
         return armIdleTimer();
-      case "conversation.item.created": {
+      case "conversation.item.added": {
         // User speech item → push STT text when available.
         if (evt?.item?.type === "message" && evt.item.role === "user") {
           for (const c of evt.item.content ?? []) {
@@ -377,10 +392,6 @@ export function createVcCallEngine(deps = {}) {
         if (t) emit({ type: "stt", text: t });
         return;
       }
-      case "response.function_call_arguments.done":
-        return handleFunctionCall(evt);
-      case "response.function_call_arguments.delta":
-        return; // accumulate in openai's built-in buffer; done carries full args
       case "error":
         return handleError(evt);
       default:
@@ -397,7 +408,7 @@ export function createVcCallEngine(deps = {}) {
   }
 
   function handleAudioDelta(evt) {
-    // Forward raw delta audio to the renderer to play (base64 opus).
+    // Forward raw delta audio to the renderer to play (PCM audio).
     if (evt?.delta) emit({ type: "audio", delta: evt.delta });
     armIdleTimer();
   }
