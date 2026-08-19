@@ -13,6 +13,7 @@ import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import http from "node:http";
 import { expandTilde, patchPath } from "../shared/paths.mjs";
+import { readModalities } from "../shared/modelGuide.mjs";
 import { startPoller } from "./startPoller.mjs";
 import {
   CREDENTIALS_PATH,
@@ -1143,23 +1144,6 @@ export function applyModelOverride(m, override) {
   return next;
 }
 
-// Canonicalize a providerInput-backed modality field to the single canonical
-// array-of-strings shape. Handles both raw shapes seen in the wild:
-//   /provider source:  input: {image, pdf, ...}  (object map, true = enabled)
-//   /api/model source: input: ["text", "image"]  (array)
-// Anything else → `[]`.
-function _normalizeModalities(input) {
-  if (Array.isArray(input)) {
-    return input.filter((v) => typeof v === "string");
-  }
-  if (input && typeof input === "object") {
-    return Object.entries(input)
-      .filter(([, v]) => v === true)
-      .map(([k]) => String(k));
-  }
-  return [];
-}
-
 // Canonicalize a model's `limit`. `context` is `number | null`; `null` means
 // "the provider gave no usable limit — never fabricate one". `0`, negative,
 // NaN, Infinity and missing all map to `null`. `output` is kept only when a
@@ -1207,8 +1191,8 @@ function _normalizeProviderModel(providerID, modelId, m) {
     capabilities: {
       tools: typeof caps.tools === "boolean" ? caps.tools : undefined,
       attachment: typeof caps.attachment === "boolean" ? caps.attachment : undefined,
-      input: _normalizeModalities(caps.input),
-      output: _normalizeModalities(caps.output),
+      input: readModalities(caps.input),
+      output: readModalities(caps.output),
     },
     variants: variants && variants.length > 0 ? variants : undefined,
   };

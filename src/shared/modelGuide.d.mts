@@ -15,6 +15,8 @@ export function familyKey(modelID: string): string | null;
 
 export function isDeprecated(m: { status?: string } | null | undefined): boolean;
 
+export function readModalities(value: unknown): string[];
+
 export interface ResolvedModel {
   id?: string;
   name?: string;

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { describeModel, familyKey, fuzzyMatchModel, suggestModels, isDeprecated } from "./modelGuide.mjs";
+import { describeModel, familyKey, fuzzyMatchModel, suggestModels, isDeprecated, readModalities } from "./modelGuide.mjs";
 
 describe("describeModel", () => {
   it("matches haiku family", () => {
@@ -285,5 +285,26 @@ describe("isDeprecated", () => {
     expect(isDeprecated({})).toBe(false);
     expect(isDeprecated(null)).toBe(false);
     expect(isDeprecated(undefined)).toBe(false);
+  });
+});
+
+describe("readModalities", () => {
+  it("passes an array of strings through unchanged", () => {
+    expect(readModalities(["text", "image", "pdf"])).toEqual(["text", "image", "pdf"]);
+  });
+
+  it("reads the object-of-flags form, keeping only the true keys in key order", () => {
+    expect(readModalities({ image: true, text: true, pdf: false })).toEqual(["image", "text"]);
+  });
+
+  it("drops non-string members of an array", () => {
+    expect(readModalities(["text", 5, null, "image"])).toEqual(["text", "image"]);
+  });
+
+  it("returns [] for undefined, null, a string, or a number", () => {
+    expect(readModalities(undefined)).toEqual([]);
+    expect(readModalities(null)).toEqual([]);
+    expect(readModalities("text")).toEqual([]);
+    expect(readModalities(42)).toEqual([]);
   });
 });

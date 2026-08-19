@@ -12,6 +12,7 @@
 
 import { createContext, type ReactNode } from "react";
 import type { OpencodeMessage, OpencodeModel } from "../shared/types";
+import { readModalities } from "../shared/modelGuide.mjs";
 // TokenUsage now lives in src/shared/types.ts (the single source — it also
 // types OpencodeMessageInfo.tokens, which killed the renderer's
 // `as unknown as { tokens?: TokenUsage }` casts, BET-733/L10). Re-exported here
@@ -155,23 +156,21 @@ export function pastVerbFor(messageId: string): string {
   return SPINNER_VERBS_PAST[verbIndexFor(messageId)];
 }
 
-// Detect whether a model can accept file attachments. Normalization guarantees
-// `capabilities.input` is a canonical array of string modalities (never the
-// raw object-map shape) — treat "supports attachments" as any non-"text"
-// modality.
+// Detect whether a model can accept file attachments. Reads the input
+// modalities via the shared `readModalities` (both wire shapes tolerated) —
+// treat "supports attachments" as any non-"text" modality.
 export function modelSupportsAttachments(m: OpencodeModel | null): boolean {
   const modes = modelInputModes(m);
   return modes.some((v) => v !== "text");
 }
 
 // Return the set of input modalities the model accepts (text, image, pdf,
-// video, audio, ...). Empty array if unknown. Normalization owns the canonical
-// array shape; this only defensively filters to strings.
+// video, audio, ...). Both wire shapes are tolerated — the box normalizes to an
+// array, but a client can talk to an older box that emits the object-of-flags
+// form — so this delegates to the shared `readModalities`
+// (src/shared/modelGuide.mjs), the ONLY supported reader for these fields.
 export function modelInputModes(m: OpencodeModel | null): string[] {
-  if (!m) return [];
-  const input = m.capabilities?.input;
-  if (!Array.isArray(input)) return [];
-  return input.filter((v): v is string => typeof v === "string");
+  return readModalities(m?.capabilities?.input);
 }
 
 // Group a mime type into one of opencode's input modality buckets so we can

@@ -2313,15 +2313,17 @@ export type SubagentInput = {
 // "pdf" | "video" | "audio" | any provider-specific or custom value.
 export type InputModality = string;
 
-// Canonical model capabilities. After normalization at the chokepoint
-// (_normalizeProviderModel in src/server/opencode.mjs), `input`/`output` are
-// ALWAYS arrays of strings — the renderer must never handle the raw provider
-// object-map shape. `tools`/`attachment` pass through as booleans.
+// Model capabilities. The box normalizes `capabilities.input` / `.output` to
+// arrays of strings, but a client may be talking to an OLDER box (the desktop
+// app and the box update on separate tracks), so both shapes reach clients —
+// the provider's raw object-of-flags form and the canonical array form.
+// `readModalities` (src/shared/modelGuide.mjs) is the ONLY supported way to
+// read these two fields. `tools`/`attachment` pass through as booleans.
 export type OpencodeModelCapabilities = {
   tools?: boolean;
   attachment?: boolean;
-  input?: InputModality[];   // CANONICAL: array of strings after normalization
-  output?: InputModality[];
+  input?: InputModality[] | Record<string, boolean>;
+  output?: InputModality[] | Record<string, boolean>;
 };
 
 export type OpencodeModel = {
