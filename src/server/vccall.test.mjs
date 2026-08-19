@@ -269,6 +269,89 @@ test("barge: speech_started cancels the in-flight response and notifies the rend
   assert.ok(published.some((m) => m.type === "barge"));
 });
 
+test("interrupt: truncates the in-flight item at the played point (BET-1186)", async () => {
+  const { engine, ws } = makeEngine();
+  await startLive(engine);
+  // The model's audio item is added → tracked, and the renderer is told to
+  // reset its played counter. Then the renderer reports it has played 1500ms.
+  engine.receiveRealtime({
+    type: "response.output_item.added",
+    item: { id: "item-7", type: "message", role: "assistant" },
+  });
+  engine.setPlayedMs(1500);
+  // The user interrupts (server VAD barge path).
+  engine.receiveRealtime({ type: "input_audio_buffer.speech_started" });
+  const sent = json(ws);
+  const trunc = sent.find((m) => m.type === "conversation.item.truncate");
+  assert.ok(trunc, "conversation.item.truncate sent on interrupt");
+  assert.equal(trunc.item_id, "item-7", "carries the tracked response item id");
+  assert.equal(trunc.content_index, 0);
+  assert.equal(trunc.audio_end_ms, 1500, "truncates at the non-zero played point");
+  const truncIdx = sent.findIndex((m) => m.type === "conversation.item.truncate");
+  const cancelIdx = sent.findIndex((m) => m.type === "response.cancel");
+  assert.ok(truncIdx >= 0 && cancelIdx >= 0 && truncIdx < cancelIdx, "truncate precedes response.cancel");
+});
+
+test("interrupt: no truncate is sent when nothing is playing (BET-1186)", async () => {
+  const { engine, ws } = makeEngine();
+  await startLive(engine);
+  engine.receiveRealtime({ type: "input_audio_buffer.speech_started" });
+  const sent = json(ws);
+  assert.equal(sent.some((m) => m.type === "conversation.item.truncate"), false, "no truncate when nothing played");
+  assert.ok(sent.some((m) => m.type === "response.cancel"), "still cancels the response");
+});
+
+test("a completed response clears the tracked item; it is not truncated later (BET-1186)", async () => {
+  const { engine, ws } = makeEngine();
+  await startLive(engine);
+  engine.receiveRealtime({
+    type: "response.output_item.added",
+    item: { id: "item-A", type: "message", role: "assistant" },
+  });
+  engine.setPlayedMs(900);
+  engine.receiveRealtime({ type: "response.done", response: {} });
+  // A later interrupt must NOT truncate the already-completed item.
+  engine.receiveRealtime({ type: "input_audio_buffer.speech_started" });
+  const sent = json(ws);
+  assert.equal(sent.some((m) => m.type === "conversation.item.truncate"), false, "completed item not truncated");
+});
+
+test("a new response output item resets the per-response played figure (BET-1186)", async () => {
+  const { engine, ws } = makeEngine();
+  await startLive(engine);
+  engine.receiveRealtime({
+    type: "response.output_item.added",
+    item: { id: "item-1", type: "message", role: "assistant" },
+  });
+  engine.setPlayedMs(800);
+  // A second response starts → the newest item is tracked and played resets.
+  engine.receiveRealtime({
+    type: "response.output_item.added",
+    item: { id: "item-2", type: "message", role: "assistant" },
+  });
+  assert.equal(engine.listState().responseItemId, "item-2", "tracks the newest response item");
+  assert.equal(engine.listState().playedMs, 0, "played reset to 0 for the new response");
+  const before = json(ws).length;
+  engine.receiveRealtime({ type: "input_audio_buffer.speech_started" });
+  const sent = json(ws).slice(before);
+  assert.equal(
+    sent.some((m) => m.type === "conversation.item.truncate"),
+    false,
+    "no truncate: the new response hasn't played yet",
+  );
+});
+
+test("session.update carries the tuned server_vad named constants (BET-1186)", async () => {
+  const { engine, ws } = makeEngine();
+  await engine.start({ openaiApiKey: "sk-test", cto: {} });
+  const su = json(ws).find((m) => m.type === "session.update");
+  const td = su.session.audio.input.turn_detection;
+  assert.equal(td.type, "server_vad");
+  assert.equal(td.threshold, 0.7);
+  assert.equal(td.prefix_padding_ms, 300);
+  assert.equal(td.silence_duration_ms, 400);
+});
+
 test("narration seam: onNarrate is threaded into the dispatch ctx", async () => {
   let narrated = null;
   const { engine, calls } = makeEngine({

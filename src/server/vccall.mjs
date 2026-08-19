@@ -29,6 +29,31 @@ const REALTIME_BASE = "wss://api.openai.com/v1/realtime";
 const DEFAULT_REALTIME_MODEL = "gpt-realtime-2.1";
 const DEFAULT_VOICE = "alloy";
 
+// Server VAD (voice-activity detection) tuning for a desktop room (BET-1186).
+// `turn_detection.server_vad` is what makes the model consider the user to be
+// speaking — and therefore when it interrupts the in-flight answer (barge) or
+// responds. The API's defaults (threshold 0.5, 300ms prefix padding, 500ms
+// silence) are tuned for a quiet mic, so with a laptop mic and audible
+// speakers the model gets "interrupted" by room noise and by its own voice.
+// What raising/lowering each knob does:
+//   - threshold:         minimum onset loudness to count as speech. Raise
+//                        (->0.7-0.8) to reject room noise / speaker bleed; raise
+//                        too far and quiet-but-real speech is missed.
+//   - prefix_padding_ms: silence appended BEFORE detected speech so no leading
+//                        syllables are swallowed. Raise if word onsets get
+//                        clipped; it is NOT an anti-noise knob.
+//   - silence_duration_ms: how long the user must stay quiet before speech is
+//                        declared finished. Longer suits slow talkers but makes
+//                        the model slow to barge; shorter cuts off sooner.
+// The ecosystem's usual starting point for noisy input is threshold ~0.7 with
+// a tighter silence window (kept here). Tune these from one place after a real
+// call; do NOT add config keys until we have measured values.
+const SERVER_VAD = {
+  threshold: 0.7,
+  prefix_padding_ms: 300,
+  silence_duration_ms: 400,
+};
+
 // Per-1M-token cost of the Realtime model, used to turn a response.done
 // `usage` object into a dollar figure for the per-call spend cap (cost guard).
 // These ratios come from OpenAI's realtime pricing page
@@ -113,6 +138,8 @@ export function createVcCallEngine(deps = {}) {
     openai: null, // ws-like to OpenAI
     tools: [], // [{name,description,params}]
     session: null,
+    responseItemId: null, // in-flight assistant audio item id (for truncate, BET-1186)
+    playedMs: 0, // ms of the current response the renderer has played (BET-1186)
     pendingConfirm: null, // {id, tool, preview, at}
     ongoingSpend: 0, // per-call USD spent
     idleTimer: null,
@@ -233,10 +260,10 @@ export function createVcCallEngine(deps = {}) {
       model,
       instructions: SESSION_INSTRUCTIONS,
       output_modalities: ["audio"],
-      audio: {
-        input: {
-          format: { type: "audio/pcm", rate: 24000 },
-          turn_detection: { type: "server_vad", create_response: true },
+        audio: {
+          input: {
+            format: { type: "audio/pcm", rate: 24000 },
+            turn_detection: { type: "server_vad", create_response: true, ...SERVER_VAD },
           // Input transcription turns the user's speech into text so that a
           // pending confirm can be approved by their actual words (BET-1181).
           transcription: { model: "whisper-1" },
@@ -347,10 +374,27 @@ export function createVcCallEngine(deps = {}) {
   }
 
   function barge() {
+    // BET-1186 correctness half: the renderer owns speaker playback, so the
+    // model cannot know how much of its reply actually reached the user. The
+    // renderer continuously reports ms-played for the current response; on an
+    // interruption truncate the in-flight item at that point so the unplayed
+    // remainder is removed from the model's history — otherwise its next turn
+    // builds on sentences the user never heard. Only when a response item is
+    // tracked AND some audio actually played (nothing playing → no truncate).
+    if (state.responseItemId && state.playedMs > 0) {
+      send({
+        type: "conversation.item.truncate",
+        item_id: state.responseItemId,
+        content_index: 0,
+        audio_end_ms: Math.round(state.playedMs),
+      });
+    }
     // Stop playback + cancel the in-flight model response so the new user
     // input wins. Realtime handles turn-taking natively.
     emit({ type: "barge" });
     send({ type: "response.cancel" });
+    state.responseItemId = null;
+    state.playedMs = 0;
     clearIdleTimer();
   }
 
@@ -392,6 +436,8 @@ export function createVcCallEngine(deps = {}) {
     return {
       status: state.status,
       tools: state.tools.map((t) => t.name),
+      responseItemId: state.responseItemId,
+      playedMs: state.playedMs,
       pendingConfirm: state.pendingConfirm
         ? { id: state.pendingConfirm.id, tool: state.pendingConfirm.tool, preview: state.pendingConfirm.preview }
         : null,
@@ -423,6 +469,20 @@ export function createVcCallEngine(deps = {}) {
       }
       case "response.output_audio.done":
         return armIdleTimer();
+      case "response.output_item.added": {
+        // Track the in-flight assistant (audio) response item id so an
+        // interruption can truncate the conversation at the played point
+        // (BET-1186). A new output item starts a fresh response → reset the
+        // per-response played figure and tell the renderer to reset its
+        // playback counter too.
+        const item = evt?.item;
+        if (item && item.type === "message" && item.role === "assistant") {
+          state.responseItemId = item.id ?? null;
+          state.playedMs = 0;
+          emit({ type: "response-start" });
+        }
+        return;
+      }
       case "response.done": {
         // GA's `response.done` carries complete function-call items in
         // `response.output`; dispatch each one (the only function-call path).
@@ -432,6 +492,8 @@ export function createVcCallEngine(deps = {}) {
         }
         // Feed the completed response's usage into the spend cap (cost guard).
         chargeUsage(evt);
+        // The response finished — nothing left to truncate.
+        state.responseItemId = null;
         return armIdleTimer();
       }
       case "input_audio_buffer.speech_started":
@@ -647,6 +709,13 @@ export function createVcCallEngine(deps = {}) {
     handleUserAudio,
     commitAndRespond,
     barge,
+    // BET-1186: the renderer reports how much of the current response it has
+    // actually played, so an interruption can truncate at the right point.
+    setPlayedMs: (ms) => {
+      if (typeof ms === "number" && Number.isFinite(ms) && ms >= 0) {
+        state.playedMs = ms;
+      }
+    },
     injectTurn,
     hangup,
     park,

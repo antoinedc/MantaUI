@@ -188,6 +188,11 @@ export function CallApp() {
       case "barge":
         outNodeRef.current?.port.postMessage({ kind: "clear" });
         return;
+      case "response-start":
+        // A new response's audio is starting → reset the played counter so an
+        // interruption truncates only THIS response (BET-1186).
+        outNodeRef.current?.port.postMessage({ kind: "reset" });
+        return;
       case NARRATE_KIND:
         // Narration (spec #6): the box synthesized (Groq Orpheus) + streamed
         // this as audio; decode + play it. The working line stays visible.
@@ -259,12 +264,23 @@ export function CallApp() {
   function setupAudioOut(isCancelled: () => boolean = () => false) {
     const ctx = getOrCreateAudioCtx();
     if (!ctx) return;
+    // BET-1186: the worklet is the one place that knows how many samples it
+    // has ACTUALLY written to the output (played), vs what is still queued in
+    // `buf`. It reports ms-played to the renderer on every push so the box can
+    // `conversation.item.truncate` the in-flight reply at exactly the point
+    // the user heard. 24000 Hz → ms = samples / 24.
     const workletSrc = `
       class Out extends AudioWorkletProcessor {
-        constructor(){ super(); this.buf = new Float32Array(0); this.port.onmessage=(e)=>{ const d=e.data; if(d.kind==='push'){ const a=new Float32Array(d.samples); const n=new Float32Array(this.buf.length+a.length); n.set(this.buf); n.set(a,this.buf.length); this.buf=n; } if(d.kind==='clear'){ this.buf=new Float32Array(0); } }; }
+        constructor(){ super(); this.buf = new Float32Array(0); this.played = 0;
+          this.port.onmessage=(e)=>{ const d=e.data;
+            if(d.kind==='push'){ const a=new Float32Array(d.samples); const n=new Float32Array(this.buf.length+a.length); n.set(this.buf); n.set(a,this.buf.length); this.buf=n; this.port.postMessage({kind:'played', ms: Math.round(this.played/24)}); }
+            if(d.kind==='reset'){ this.buf=new Float32Array(0); this.played=0; this.port.postMessage({kind:'played', ms:0}); }
+            if(d.kind==='clear'){ this.buf=new Float32Array(0); }
+          };
+        }
         process(inputs, outputs){
           const out = outputs[0][0]; if(!out) return true;
-          if(this.buf.length>0){ const n=Math.min(out.length,this.buf.length); out.set(this.buf.subarray(0,n)); this.buf=this.buf.subarray(n); }
+          if(this.buf.length>0){ const n=Math.min(out.length,this.buf.length); out.set(this.buf.subarray(0,n)); this.buf=this.buf.subarray(n); this.played+=n; }
           return true;
         }
       }
@@ -278,6 +294,16 @@ export function CallApp() {
         return;
       }
       const node = new AudioWorkletNode(ctx, "pcm-out");
+      // Forward the worklet's played-ms up to the box (the renderer can't read
+      // the audio thread synchronously — the worklet pushes it on each batch).
+      node.port.onmessage = (ev) => {
+        const d = ev.data as { kind?: string; ms?: number };
+        if (d?.kind === "played" && typeof d.ms === "number") {
+          if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ type: "played", ms: d.ms }));
+          }
+        }
+      };
       node.connect(ctx.destination);
       outNodeRef.current = node;
       URL.revokeObjectURL(url);
