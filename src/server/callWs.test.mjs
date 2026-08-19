@@ -265,3 +265,43 @@ test("a second /call attach while one is active tears down the first (takeover)"
   assert.equal(activeState[activeState.length - 1], true, "takeover leaves the new call active");
   assert.equal(registry.isActive(), true, "registry still points at the new call");
 });
+
+test("detach log reason keys off current registry state, not attach-time displaced (BET-1188)", async () => {
+  const registry = createCallRegistry();
+  const logs = [];
+  const makeOpts = () => ({
+    realtimeConnect: async () => ({}),
+    configGet: async () => ({ openaiApiKey: "sk-test", cto: {} }),
+    listTools: () => [],
+    registry,
+    log: (m) => logs.push(m),
+  });
+
+  const firstClient = makeClientWs();
+  attachCallWs(firstClient, new URL("/call", "http://x"), makeOpts());
+  await new Promise((r) => setTimeout(r, 10));
+
+  // A second call takes over the first (it displaces the first call).
+  const secondClient = makeClientWs();
+  attachCallWs(secondClient, new URL("/call", "http://x"), makeOpts());
+  await new Promise((r) => setTimeout(r, 10));
+
+  // The displaced first call's teardown is identity-guarded — a no-op that
+  // logs nothing, by design. So no detach line has been emitted yet.
+  assert.deepEqual(
+    logs.filter((m) => m.startsWith("[call] detach:")),
+    [],
+    "displaced call's identity-guarded teardown logs nothing",
+  );
+
+  // The SECOND call (which took over) now closes for real. Nothing displaced
+  // it, so the log must NOT carry the "(displaced by takeover)" suffix that
+  // the old attach-time `displaced` value would have stamped on it.
+  secondClient.close();
+  await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(
+    logs.filter((m) => m.startsWith("[call] detach:")),
+    ["[call] detach: socket close"],
+    "a call that took over is not mislabelled as displaced when it later closes",
+  );
+});

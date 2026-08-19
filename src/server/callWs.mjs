@@ -253,7 +253,16 @@ export function attachCallWs(ws, url, opts = {}) {
     // takeover displacing this call) tears the engine down and clears the
     // active flag — identity-guarded so a displaced call can't clear a newer
     // call's flag.
-    clearActive(`socket close${displaced ? " (displaced by takeover)" : ""}`);
+    //
+    // Key the "(displaced by takeover)" label off the registry's CURRENT call
+    // state — whether a DIFFERENT call now holds the flag — not this call's
+    // attach-time `displaced` value (which is what *this* call displaced, and
+    // has nothing to do with why this socket is closing). A call that itself
+    // took over is not being displaced when its socket later closes; a call a
+    // newer one replaced is.
+    const current = registry ? registry.current() : null;
+    const displacedByTakeover = !!current && current.engine !== engine;
+    clearActive(`socket close${displacedByTakeover ? " (displaced by takeover)" : ""}`);
     engine.hangup();
   });
   ws.on("error", () => {
