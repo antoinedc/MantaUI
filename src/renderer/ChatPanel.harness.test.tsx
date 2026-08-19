@@ -822,7 +822,7 @@ describe("ChatPanel main-conversation routing (BET-1225)", () => {
     // The routed model is threaded through the existing prompt's modelOverride.
     const promptCall = api.calls["opencodePrompt"]?.[0];
     expect(promptCall?.[0]).toBe("ses_test");
-    expect(promptCall?.[2]?.modelID).toBe("claude-sonnet-4-6");
+    expect((promptCall?.[2] as { modelID?: string } | undefined)?.modelID).toBe("claude-sonnet-4-6");
   });
 
   it("leaves the prompt's model untouched when the decision is a no-op (BET-1225)", async () => {
