@@ -979,17 +979,13 @@ function setCallActive(active, engine) {
 
 // Which read a watcher's surface maps to. NATIVE surfaces (schedule, delegate)
 // go through the box's own stores. `session` needs no poller read — session
-// events arrive directly via send_to_cto. `crashlytics` is an external MCP read
-// with no server-side engine yet (stretch), so it never matches until that read
-// lands (Issue 3).
+// events arrive directly via send_to_cto.
 async function ctoSurfaceRead(surface, query) {
   switch (surface) {
     case "schedule":
       return { ok: true, data: { jobs: await listJobs() } };
     case "delegate":
       return { ok: true, data: { jobs: await loadDelegateJobs() } };
-    case "crashlytics":
-      return { ok: true, data: { issues: [] } };
     case "session":
     default:
       return { ok: true, data: {} };
