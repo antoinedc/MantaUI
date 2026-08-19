@@ -269,6 +269,11 @@ struct ComposerView: View {
         // the box (and the control row beneath it) on the same curve as the
         // text growing — no snapping when a chip appears or is dismissed.
         .animation(.smooth(duration: 0.22), value: attachments.count)
+        // Plan mode toggling inserts/removes the label row above the text area.
+        // The box (and, in the locked path, whatever is pinned inside it)
+        // resizes on the same curve — an attachment glides and a plan toggle no
+        // longer snaps (BET-1210).
+        .animation(.smooth(duration: 0.22), value: modelStore.planOn)
         .onChange(of: photoItems) { _ in
             Task { await processPhotos() }
         }
@@ -355,20 +360,21 @@ struct ComposerView: View {
 
                 // Plan mode label — one line above the text area so the mode stays
                 // visible where you type (BET-952). Phones lose ambient state
-                // fastest, so plan mode must be readable at a glance.
+                // fastest, so plan mode must be readable at a glance. The label
+                // draws NO glyph — it shares the chip's slot above it, so a second
+                // compass here would read as a duplicate control (BET-1210).
                 if modelStore.planOn {
-                    Label("Plan mode · edits blocked", systemImage: planIcon)
+                    Text("Plan mode · edits blocked")
                         .font(.manta(size: Metrics.type.twoXS, weight: mantaFontWeight(Metrics.type.medium)))
                         .foregroundColor(tokens.accentTx)
                         .padding(.bottom, Metrics.spacing.spPx)
+                        // Slide up into place + fade rather than popping, so the
+                        // mode label reads as an introduction, not a cut (BET-1210).
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
 
                 // The message line.
                 textArea
-
-                // Control row — pinned to the box's final line. No separator above
-                // it: the text and the controls sit on one continuous glass surface.
-                controlRow
             }
             // Hidden, never unmounted: `controlRow` holds the mic button, and the
             // touch that started this take is still being delivered to it.
@@ -383,6 +389,18 @@ struct ComposerView: View {
                 )
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+        }
+        // The control row is pinned to the box's bottom edge with safeAreaInset
+        // instead of living inside the growing VStack above. Its vertical
+        // position therefore no longer depends on what appears above it — the
+        // plan-mode label or an attachment chip — so toggling plan mode (or
+        // adding a chip) grows/shrinks the box ABOVE the row and the plan chip
+        // no longer jumps (BET-1210). BoxChrome below wraps this whole composite
+        // (growing content + pinned row), so the row stays visually inside the
+        // glass.
+        .safeAreaInset(edge: .bottom, spacing: Metrics.spacing.sp2) {
+            controlRow
+                .opacity(recorder.isHeld ? 0 : 1)
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp2)
