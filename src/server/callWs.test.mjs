@@ -95,6 +95,29 @@ test("client audio/commit/barge bridge into the Realtime session", async () => {
   assert.ok(sent.some((m) => m.type === "response.cancel"), "barge reaches realtime");
 });
 
+test("client played-ms drives the truncate on interrupt (BET-1186)", async () => {
+  const client = makeClientWs();
+  const rt = makeFakeRealtime();
+  attachCallWs(client, new URL("/call", "http://x"), {
+    realtimeConnect: async () => rt,
+    configGet: async () => ({ openaiApiKey: "sk-test", cto: {} }),
+    listTools: () => [],
+  });
+  await new Promise((r) => setTimeout(r, 10));
+  // The model's audio item is added (tracked server-side)…
+  rt.emit("message", Buffer.from(JSON.stringify({ type: "response.output_item.added", item: { id: "item-9", type: "message", role: "assistant" } })));
+  // …the renderer reports it has played 2000ms…
+  deliver(client, { type: "played", ms: 2000 });
+  // …then the server VAD fires an interruption.
+  rt.emit("message", Buffer.from(JSON.stringify({ type: "input_audio_buffer.speech_started" })));
+  await new Promise((r) => setTimeout(r, 10));
+  const sent = rt.sent.map((s) => JSON.parse(s));
+  assert.ok(
+    sent.some((m) => m.type === "conversation.item.truncate" && m.item_id === "item-9" && m.audio_end_ms === 2000),
+    "truncate sent at the reported played point",
+  );
+});
+
 test("park / hangup clear the call-active flag and hangup the engine", async () => {
   const client = makeClientWs();
   const rt = makeFakeRealtime();

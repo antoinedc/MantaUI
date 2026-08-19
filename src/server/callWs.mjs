@@ -12,6 +12,7 @@
 //   { type:"audio", delta:<base64 opus> }  → engine.handleUserAudio
 //   { type:"commit" }                       → engine.commitAndRespond
 //   { type:"barge" }                        → engine.barge
+//   { type:"played", ms }                   → engine.setPlayedMs (truncate pt)
 //   { type:"control", action:"park"|"hangup" } → lifecycle
 // Server→client (JSON text): every engine.publish(msg) forwarded verbatim
 //   ({ type:"state"|"audio"|"transcript"|"stt"|"working"|"confirm"|… }).
@@ -232,6 +233,11 @@ export function attachCallWs(ws, url, opts = {}) {
         return;
       case "barge":
         engine.barge();
+        return;
+      case "played":
+        // BET-1186: renderer reports ms it has actually played of the current
+        // response, so an interruption can truncate the conversation there.
+        if (typeof msg.ms === "number") engine.setPlayedMs(msg.ms);
         return;
       case "control":
         if (msg.action === "park") {
