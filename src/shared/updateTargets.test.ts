@@ -471,7 +471,7 @@ describe("desktopUpdateBusy", () => {
     const state = desktopUpdateBusy({ ...base, desktopDownloadPercent: 42 });
     expect(state).toEqual({
       busyLabel: "Downloading 42%",
-      progress: { step: 42, total: 100, label: "Downloading update" },
+      progress: { step: 42, total: 100, label: "Downloading update", percent: true },
     });
   });
 

@@ -43,7 +43,7 @@ export type UpdateBarProps = {
   tone?: "accent" | "danger";
   /** When set, the bar renders a determinate progress bar in place of the
    *  action button. */
-  progress?: { step: number; total: number; label: string };
+  progress?: { step: number; total: number; label: string; percent?: boolean };
   /** When true, the bar is in an IN-FLIGHT state: it renders an indeterminate
    *  progress bar (or the determinate `progress` if supplied) and NO action /
    *  dismiss buttons. Used while a box self-upgrade is running, so the restart
@@ -70,7 +70,9 @@ export function UpdateBar({
   busyLabel = "Updating…",
 }: UpdateBarProps) {
   const statusLabel = progress
-    ? `${progress.label} (${progress.step}/${progress.total})`
+    ? progress.percent
+      ? `${progress.label} ${Math.round((progress.step / progress.total) * 100)}%`
+      : `${progress.label} (${progress.step}/${progress.total})`
     : busy
       ? busyLabel
       : text;

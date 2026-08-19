@@ -304,7 +304,7 @@ export function rowUpdateState(id, { updatingTargetId = null, busy = false } = {
  *
  * @param {{ updatingTargetId?: string|null, desktopDownloadPercent?: number|null,
  *          desktopRestarting?: boolean }} state
- * @returns {{ busyLabel: string, progress: { step:number, total:number, label:string } | null } | null}
+ * @returns {{ busyLabel: string, progress: { step:number, total:number, label:string, percent?:boolean } | null } | null}
  */
 export function desktopUpdateBusy({
   updatingTargetId = null,
@@ -324,7 +324,7 @@ export function desktopUpdateBusy({
   if (percent != null) {
     return {
       busyLabel: `Downloading ${percent}%`,
-      progress: { step: percent, total: 100, label: "Downloading update" },
+      progress: { step: percent, total: 100, label: "Downloading update", percent: true },
     };
   }
   return { busyLabel: "Downloading…", progress: null };

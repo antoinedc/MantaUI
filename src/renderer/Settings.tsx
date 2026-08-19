@@ -304,7 +304,7 @@ function UpdateTargetRow({
   /** BET-1195: the desktop leg's presentation (from `desktopUpdateBusy`), so
    *  the row and the banner agree. null for non-desktop targets / no desktop
    *  run in flight. */
-  desktopBusy: { busyLabel: string; progress: { step: number; total: number; label: string } | null } | null;
+  desktopBusy: { busyLabel: string; progress: { step: number; total: number; label: string; percent?: boolean } | null } | null;
   installReady: boolean;
   onUpdate: (t: UpdateTarget) => void;
   rowState: { kind: "updating" } | { kind: "busy" } | { kind: "idle" };

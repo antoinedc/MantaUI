@@ -70,4 +70,18 @@ describe("UpdateBar", () => {
     const fill = bar.firstElementChild as HTMLElement;
     expect(fill.style.width).toBe("50%");
   });
+
+  it("percent progress renders a percentage label (Downloading finder-style 80%)", () => {
+    h = mount(
+      <UpdateBar
+        text="x"
+        actionLabel="x"
+        onAction={() => {}}
+        progress={{ step: 80, total: 100, label: "Downloading update", percent: true }}
+      />,
+    );
+    // The label shows 80%, not 80/100.
+    expect(h.text()).toContain("Downloading update 80%");
+    expect(h.text()).not.toContain("80/100");
+  });
 });
