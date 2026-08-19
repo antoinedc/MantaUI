@@ -82,8 +82,10 @@ describe("settingsForSection", () => {
   it("returns only entries in the given section for the platform", () => {
     const voiceDesktop = settingsForSection(ALL, "voice", "desktop");
     expect(voiceDesktop.map((e) => e.id).sort()).toEqual(
-      ["groqApiKey", "openaiApiKey", "voiceTranscriptionModel"],
+      ["groqApiKey", "voiceTranscriptionModel"],
     );
+    const ctoDesktop = settingsForSection(ALL, "cto", "desktop");
+    expect(ctoDesktop.map((e) => e.id)).toContain("openaiApiKey");
   });
 });
 

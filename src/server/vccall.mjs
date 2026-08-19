@@ -138,7 +138,7 @@ export function createVcCallEngine(deps = {}) {
     if (state.status === "connecting" || state.status === "live") return;
     state.cfg = cfg;
     const conf = cfg?.cto ?? {};
-    const apiKey = cfg?.groqApiKey || cfg?.openaiApiKey;
+    const apiKey = cfg?.openaiApiKey;
     state.caps = {
       spendCapUsd: typeof cfg?.cto?.spendCapUsd === "number" ? cfg.cto.spendCapUsd : DEFAULT_SPEND_CAP_USD,
       idleParkMs: typeof cfg?.cto?.idleParkMs === "number" ? cfg.cto.idleParkMs : DEFAULT_IDLE_PARK_MS,

@@ -2032,6 +2032,13 @@ recorder and is not exported from `voice.ts`.)
   reintroduce a chunked-streaming spike; it under-delivered vs the
   added complexity in spike testing.
 
+## On-call CTO voice call (OpenAI Realtime)
+
+The OpenAI key lives in Settings → On-call CTO (`openaiApiKey`), stored in the
+box's config and never sent to the renderer. Narration uses the Groq key while
+the Realtime model authenticates with the OpenAI key — two deliberately separate
+credentials, each used where it belongs.
+
 ## File upload paths (chat-mode)
 
 Three upload paths all land in `~/.manta-uploads/<session>/<ts>/` on the remote:
