@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, extname, normalize, resolve, basename } from "node:path";
 import { homedir, hostname } from "node:os";
 import { pipeline } from "node:stream/promises";
-import { uploadRoot, outboxRoot } from "../shared/paths.mjs";
+import { uploadRoot } from "../shared/paths.mjs";
 import { synthesizeSpeech } from "../shared/groq.mjs";
 import { WebSocketServer } from "ws";
 import * as tmux from "./tmux.mjs";
@@ -1353,10 +1353,6 @@ function requireLoopback(req, res, errorMessage) {
 // multipart parser.
 
 const UPLOAD_ROOT = uploadRoot();
-// Agent → device download root. The mobile mirror of the desktop outbox pull:
-// the device fetches a server-local file the AI dropped here. Constrained to
-// this dir so a crafted ?path= can't read arbitrary files off the box.
-const OUTBOX_ROOT = outboxRoot();
 const SESSION_RE = /^[A-Za-z0-9._-]+$/;
 const BATCH_RE = /^[0-9]{6,20}$/;
 
@@ -1402,16 +1398,27 @@ async function handleUpload(req, res, url) {
   respondJson(res, 200, { path: target });
 }
 
-// Agent → device download: stream a file from ~/.manta-outbox/ back to the
-// device as a browser download. Path-traversal guarded — the resolved path
-// must stay inside OUTBOX_ROOT. NON-destructive: the source is left in place;
-// the artifact's lifetime is its TTL, swept by `expireArtifacts`, not by a
-// download. Re-download is always allowed until then.
+// Agent → device download: stream a file back to the device as a browser
+// download. Path-traversal guarded with the SAME home-scoped rule /api/peek
+// uses (see peek.mjs): expand a leading `~`, resolve, and require the result
+// to stay inside the user's home dir. The outbox lives under home, so outbox
+// toast Save + artifacts downloads are unaffected (the historical guard was
+// "inside OUTBOX_ROOT", which is a strict subset of home). Widening to home
+// also lets INLINE media downloaded via media_show (whose /api/peek display
+// path already serves any home file to the same bearer) be saved — previously
+// those returned 403 and the download button threw "download failed". This
+// does not expand the readable set for an authenticated client. NON-destructive:
+// the source is left in place; its lifetime is the artifact TTL, swept by
+// `expireArtifacts`, not by a download. Re-download is always allowed.
 async function handleDownload(req, res, url) {
   const raw = url.searchParams.get("path") ?? "";
-  const resolved = resolve(raw);
-  if (resolved !== OUTBOX_ROOT && !resolved.startsWith(OUTBOX_ROOT + "/")) {
-    respondJson(res, 403, { error: "path outside outbox" });
+  let resolved = raw;
+  if (resolved === "~") resolved = homedir() + "/";
+  else if (resolved.startsWith("~/")) resolved = homedir() + resolved.slice(1);
+  else resolved = resolve(resolved);
+  const home = homedir() + "/";
+  if (resolved !== home && !resolved.startsWith(home)) {
+    respondJson(res, 403, { error: "path outside home directory" });
     return;
   }
   try {
