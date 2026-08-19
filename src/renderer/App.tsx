@@ -1758,7 +1758,29 @@ function Shell() {
             }}
           />
         )}
-        {!showOnboarding && activeBanner === "updates" && updateBanner && (
+        {/* In-flight update bar — rendered UNCONDITIONALLY (not gated on
+            `activeBanner`) so banner priority can't hide it. When the box
+            restarts itself at the end of an update the events link drops,
+            which flips `activeBanner` to the higher-priority `reconnecting` and
+            UNMOUNTS an `activeBanner === "updates"`-gated bar — so without this
+            the loader vanished exactly at the restart phase, when a loading
+            state matters most. `boxUpgrading` stays true until the version
+            re-check confirms the box advanced (or the 120s cap / a real early
+            failure). */}
+        {!showOnboarding && (boxUpgrading || updatingTargetId != null) && (
+          <UpdateBar
+            text={updateBanner?.text ?? "Updating…"}
+            actionLabel={updateBanner?.actionLabel ?? "Update"}
+            onAction={onUpdateBannerAction}
+            dismissible={false}
+            tone={updateBanner?.tone}
+            busy
+            progress={boxUpgrading && !boxRestarting ? serverUpdateProgress ?? undefined : undefined}
+            busyLabel={boxRestarting ? "Restarting the server…" : "Updating…"}
+          />
+        )}
+        {!showOnboarding && activeBanner === "updates" && updateBanner &&
+          !boxUpgrading && updatingTargetId == null && (
           <UpdateBar
             text={updateBanner.text}
             actionLabel={updateBanner.actionLabel}
