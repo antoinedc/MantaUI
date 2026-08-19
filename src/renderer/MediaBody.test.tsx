@@ -11,6 +11,7 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { mount, installMockApi, type Harness } from "./testHarness";
 import { MediaBody } from "./MediaBody";
+import { useStore } from "./store";
 import type { MediaEntry, MediaKind, MediaState } from "./chatUtils";
 
 function entry(
@@ -222,5 +223,57 @@ describe("MediaBody download (BET-1156)", () => {
       ?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     await h!.flush();
     expect(agentPullFile).toHaveBeenCalledWith("/home/dev/a.png");
+  });
+
+  // BET-1198: the download icon overlaying transcript media must CONFIRM the
+  // save like every other download does. It used to be fire-and-forget, so a
+  // save that worked looked exactly like a dead button — which is how a working
+  // download got reported as broken.
+  it("the hover overlay's press confirms the save, naming the full folder", async () => {
+    useStore.setState({ appToasts: [] });
+    const { finish } = mountReady("image", "a.png", "image/png");
+    await finish();
+
+    clickDownload();
+    await h!.flush();
+
+    const toast = useStore.getState().appToasts.at(-1);
+    expect(String(toast?.message)).toBe("Saved x to /Users/a/Downloads");
+    expect(toast?.actions?.[0].label).toBe("Reveal");
+  });
+
+  it("the hover overlay reports a FAILED save instead of failing silently", async () => {
+    useStore.setState({ appToasts: [] });
+    installMockApi({
+      agentPullFile: vi.fn(async () => {
+        throw new Error("download failed");
+      }),
+    });
+    const restore = stubPeekFetch();
+    h = mount(
+      <MediaBody
+        entry={entry("ready", {
+          meta: {
+            kind: "image",
+            path: "/home/dev/a.png",
+            mime: "image/png",
+            width: 800,
+            height: 600,
+            aspectRatio: null,
+            count: null,
+            title: null,
+          },
+        })}
+      />,
+    );
+    await h.flush();
+    restore();
+
+    clickDownload();
+    await h.flush();
+
+    const toast = useStore.getState().appToasts.at(-1);
+    expect(toast?.tone).toBe("error");
+    expect(String(toast?.message)).toContain("still on the server");
   });
 });
