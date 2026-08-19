@@ -630,6 +630,93 @@ test("message.part.updated flushes the buffered tail of a short answer", () => {
   assert.equal(flushes[0].payload.text, "Hello");
 });
 
+// BET-1209: a reasoning part's content streams in a field literally named
+// `text`, byte-identical to a prose delta. The interpreter must classify it as
+// `reasoning` from the part's `type` snapshot so a thin client (iOS) can keep
+// it out of the conversation. opencode emits `message.part.updated` (type
+// known) BEFORE it starts streaming the deltas.
+test("reasoning deltas stream as reasoning, never as text (BET-1209)", () => {
+  const { interp, events } = make();
+  interp.interpret({
+    type: "message.part.updated",
+    properties: { sessionID: SID, part: { id: "p1", type: "reasoning" } },
+  });
+  interp.interpret({
+    type: "message.part.delta",
+    properties: { sessionID: SID, messageID: "msg1", partID: "p1", field: "text", delta: "Let me think step by step.\n\n" },
+  });
+  const flushes = events.filter((e) => e.sub === "flush");
+  assert.equal(flushes.length, 1, "the reasoning delta flushed at the boundary");
+  assert.ok(
+    flushes.every((f) => f.payload.field !== "text"),
+    "no reasoning content leaks to the device as ordinary prose",
+  );
+  assert.equal(flushes[0].payload.field, "reasoning");
+});
+
+test("text deltas still flush as text (BET-1209)", () => {
+  const { interp, events } = make();
+  interp.interpret({
+    type: "message.part.updated",
+    properties: { sessionID: SID, part: { id: "p1", type: "text" } },
+  });
+  interp.interpret({
+    type: "message.part.delta",
+    properties: { sessionID: SID, messageID: "msg1", partID: "p1", field: "text", delta: "Regular prose.\n\n" },
+  });
+  const flushes = events.filter((e) => e.sub === "flush");
+  assert.equal(flushes.length, 1);
+  assert.equal(flushes[0].payload.field, "text");
+});
+
+test("a delta whose part id was never announced is classified text (BET-1209)", () => {
+  const { interp, events } = make();
+  interp.interpret({
+    type: "message.part.delta",
+    properties: { sessionID: SID, messageID: "msg1", partID: "ghost", field: "text", delta: "Unknown part prose.\n\n" },
+  });
+  const flushes = events.filter((e) => e.sub === "flush");
+  assert.equal(flushes.length, 1);
+  assert.equal(flushes[0].payload.field, "text");
+});
+
+test("a reasoning part that finalizes with buffered text emits no flush (BET-1209)", () => {
+  const { interp, events } = make();
+  interp.interpret({
+    type: "message.part.updated",
+    properties: { sessionID: SID, part: { id: "p1", type: "reasoning" } },
+  });
+  interp.interpret({
+    type: "message.part.delta",
+    properties: { sessionID: SID, messageID: "msg1", partID: "p1", field: "text", delta: "end of thinking, no boundary" },
+  });
+  assert.equal(events.length, 0, "no boundary yet -> nothing flushed");
+  interp.interpret({
+    type: "message.part.updated",
+    properties: { sessionID: SID, part: { id: "p1", type: "reasoning", text: "end of thinking, no boundary" } },
+  });
+  const flushes = events.filter((e) => e.sub === "flush");
+  assert.equal(flushes.length, 0, "the reasoning tail is dropped, never flushed as prose");
+});
+
+test("partTypes does not retain entries for finalized parts (BET-1209)", () => {
+  const { interp } = make();
+  interp.interpret({
+    type: "message.part.updated",
+    properties: { sessionID: SID, part: { id: "p1", type: "reasoning" } },
+  });
+  interp.interpret({
+    type: "message.part.delta",
+    properties: { sessionID: SID, messageID: "msg1", partID: "p1", field: "text", delta: "x" },
+  });
+  interp.interpret({
+    type: "message.part.updated",
+    properties: { sessionID: SID, part: { id: "p1", type: "reasoning", text: "x" } },
+  });
+  const st = interp.getState(SID);
+  assert.equal(st.partTypes.has("p1"), false, "finalized part released from partTypes");
+});
+
 test("message.updated records the message from properties.info (no wrapper)", () => {
   const { interp, events } = make();
   interp.interpret({

@@ -81,6 +81,7 @@ function newSessionState() {
   return {
     parts: new Map(),          // partID -> { messageID, field, text } (delta buffers)
     finalParts: new Set(),     // partIDs that got a message.part.updated snapshot
+    partTypes: new Map(),      // partID -> part type ("text"|"reasoning"|...) from message.part.updated (BET-1209)
     tools: new Map(),          // toolIdx(partID) -> { idx, name, status, sent, truncated, ended }
     childSessionIds: new Set(),
     liveChildStatus: new Map(),
@@ -282,15 +283,23 @@ export function createStreamInterpreter({
         // ever emitted and a streaming answer reached the phone as silence.
         const part = evt.properties?.part;
         const messageID = evt.properties?.messageID ?? part?.messageID;
+        const partID = evt.properties?.partID ?? part?.id;
+        // opencode never sets `field` to "reasoning": its ReasoningPart carries
+        // its content in a property literally named `text`, so a reasoning
+        // delta arrives byte-identical to a prose delta. The only reliable
+        // discriminator is the part's `type`, recorded from the
+        // `message.part.updated` snapshot that opencode emits BEFORE it starts
+        // streaming into the part (BET-1209). Fall back to the field/type when
+        // no snapshot was seen (classified "text", today's behaviour).
         const rawField = evt.properties?.field ?? part?.type;
-        const field = rawField === "reasoning" ? "reasoning" : "text";
+        const known = partID != null ? st.partTypes.get(partID) : null;
+        const field = known === "reasoning" || rawField === "reasoning" ? "reasoning" : "text";
         const chunk =
           typeof evt.properties?.delta === "string"
             ? evt.properties.delta
             : typeof part?.text === "string"
               ? part.text
               : "";
-        const partID = evt.properties?.partID ?? part?.id;
         if (!messageID || !partID || !chunk) return;
         const cur = st.parts.get(partID) ?? { messageID, field, text: "", firstAt: now() };
         if (cur.firstAt == null) cur.firstAt = now();
@@ -319,22 +328,32 @@ export function createStreamInterpreter({
         // subagent (task tool) + finalize part snapshot
         const part = evt.properties?.part;
         const partID = part?.id;
+        // Record the part's type BEFORE the flush-and-finalize block below, so
+        // a reasoning part that finalizes is withheld correctly (BET-1209).
+        // opencode creates the part via `message.part.updated` (type known)
+        // before streaming deltas into it, so this entry is present before the
+        // first `message.part.delta` ever lands.
+        if (partID != null && part?.type != null) st.partTypes.set(partID, part.type);
         if (partID && st.parts.has(partID)) {
           // Flush whatever is still buffered before dropping the part. A
           // boundary only fires at a paragraph break or a closed code fence,
           // so a short answer ends its whole life inside the buffer — without
-          // this it was streamed as nothing at all.
-          const pending = st.parts.get(partID);
-          if (pending?.text) {
-            emit(sid, "flush", {
-              messageID: pending.messageID,
-              partID,
-              field: pending.field,
-              text: pending.text,
-            });
+          // this it was streamed as nothing at all. A REASONING part is the
+          // one exception: its tail must NOT reach the device as prose, so it
+          // is dropped un-flushed (BET-1209).
+          if (st.partTypes.get(partID) !== "reasoning") {
+            const pending = st.parts.get(partID);
+            if (pending?.text) {
+              emit(sid, "flush", {
+                messageID: pending.messageID,
+                partID,
+                field: pending.field,
+                text: pending.text,
+              });
+            }
           }
           st.finalParts.add(partID);
-          st.parts.delete(partID);
+          if (st.parts.delete(partID)) st.partTypes.delete(partID);
         }
         const info = extractSubagentInfo(part);
         if (info) {
