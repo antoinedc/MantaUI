@@ -7,6 +7,7 @@ import {
   describeUpdateBanner,
   planUpdateAll,
   rowUpdateState,
+  isCliTarget,
 } from "./updateTargets.mjs";
 
 const cli = (
@@ -442,5 +443,26 @@ describe("rowUpdateState", () => {
   it("reports `idle` when nothing is in flight", () => {
     expect(rowUpdateState("desktop", { updatingTargetId: null, busy: false })).toEqual({ kind: "idle" });
     expect(rowUpdateState("server", {})).toEqual({ kind: "idle" });
+  });
+});
+
+describe("isCliTarget", () => {
+  // The two non-CLI targets must NEVER be treated as per-CLI rows — the whole
+  // per-row feature keys off this tri-state identity, not the label.
+  it("desktop and server are NOT cli targets", () => {
+    expect(isCliTarget(cli("desktop", "Manta UI"))).toBe(false);
+    expect(isCliTarget(cli("server", "The box"))).toBe(false);
+  });
+
+  it("every catalog CLI id IS a cli target", () => {
+    expect(isCliTarget(cli("opencode", "opencode"))).toBe(true);
+    expect(isCliTarget(cli("claude", "Claude Code"))).toBe(true);
+    expect(isCliTarget(cli("codex", "Codex"))).toBe(true);
+    expect(isCliTarget(cli("kimi", "Kimi Code"))).toBe(true);
+  });
+
+  it("null/undefined is never a cli target", () => {
+    expect(isCliTarget(null)).toBe(false);
+    expect(isCliTarget(undefined)).toBe(false);
   });
 });

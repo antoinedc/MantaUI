@@ -136,6 +136,7 @@ export const DEMO_UNIMPLEMENTED = [
   "secretsDelete",
   "secretsList",
   "secretsSet",
+  "serverCliUpdate",
   "serverUpdateApply",
   "serverUpdateCheck",
   "tmuxConfigStatus",

@@ -36,7 +36,7 @@ import { BANNER_BTN } from "./Toast";
 import { errorDisclosure } from "./settingsError";
 import { describeUpdateTarget } from "./chatUtils";
 import { refreshUpdateTargets } from "./updateCheck";
-import { rowUpdateState } from "../shared/updateTargets.mjs";
+import { rowUpdateState, isCliTarget } from "../shared/updateTargets.mjs";
 import { forgeCredentialSecondary } from "./chatUtils";
 import { useCachedResource } from "./useCachedResource";
 import { MantaLoader } from "./MantaLoader";
@@ -425,6 +425,7 @@ export function Settings({
   initialSection,
   onRequestServerUpdate,
   busy = false,
+  onCliUpdate,
 }: {
   onClose: () => void;
   /** Section to land on when the modal mounts (e.g. the `manta-open-settings`
@@ -443,6 +444,10 @@ export function Settings({
    *  the per-target in-flight + error state itself is read from the shared
    *  store so Settings and the banner can never disagree. */
   busy?: boolean;
+  /** BET-1159: App's per-CLI update router. Settings delegates a CLI row here
+   *  (decided by the shared `isCliTarget` discriminator) so the Settings rows
+   *  and App's banner route through the SAME path — no second discriminator. */
+  onCliUpdate?: (t: UpdateTarget) => void;
 }) {
   // BET-730: per-field selectors, never a bare useStore() — a no-selector
   // destructure re-renders the whole Settings tree on every store write.
@@ -610,10 +615,14 @@ export function Settings({
   // always describe the same state. The two bespoke per-leg blocks they
   // replace were deleted in stage 4.
   //
-  // The action button for every box-side target (server, opencode, each CLI)
-  // raises `onRequestServerUpdate` — there is no per-CLI apply, updating ANY
-  // box target means running the box update, and App.tsx owns the confirm,
-  // progress, 120s cap and transient-error handling in exactly one place.
+  // The action routes by target id through the shared `isCliTarget`
+  // discriminator (BET-1159): desktop keeps its download; every CLI row
+  // delegates to App's per-CLI router (`onCliUpdate` — the SAME path the
+  // banner uses), so a CLI row upgrades JUST that CLI, never the whole box;
+  // the server row keeps the box self-update flow (`onRequestServerUpdate`),
+  // which App's confirm → applyServerUpdate path owns unchanged. The row's
+  // disabled/spinner presentation (busy + updatingTargetId) is BET-1160's
+  // `rowUpdateState`, already read from the store — nothing to add here.
   const handleRowUpdate = (t: UpdateTarget) => {
     if (t.id === "desktop") {
       setDownloading(true);
@@ -627,6 +636,8 @@ export function Settings({
           setDownloading(false);
           setDownloadPercent(null);
         });
+    } else if (isCliTarget(t)) {
+      onCliUpdate?.(t);
     } else {
       onRequestServerUpdate?.();
     }
