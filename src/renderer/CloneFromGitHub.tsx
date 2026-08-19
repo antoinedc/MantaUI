@@ -397,6 +397,7 @@ export function CloneFromGitHub({
                   name={r.name}
                   secondary={r.description || "—"}
                   trailing={r.pushedAt != null ? formatAge(Date.now() - r.pushedAt) : "—"}
+                  onClick={() => toggleRepo(r.fullName, !checked.has(r.fullName))}
                 />
               ))}
             {reposState.kind === "ready" && filtered.length === 0 && (

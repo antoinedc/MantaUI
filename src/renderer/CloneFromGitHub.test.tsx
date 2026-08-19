@@ -466,4 +466,19 @@ describe("CloneFromGitHub picker", () => {
     expect(text).toContain("Clone a repository");
     expect(container!.querySelector('input[aria-label="Search repositories"]')).toBeTruthy();
   });
+
+  it("selects a repo when its row (not the hidden checkbox) is clicked, and updates the button (BET-1199)", async () => {
+    mountPicker();
+    await flushMicro();
+
+    // The row is the ListRow rendered as a role=button; its name text is alpha's.
+    const alphaRow = Array.from(
+      container!.querySelectorAll<HTMLElement>('div[role="button"]'),
+    ).find((r) => r.textContent?.includes("alpha"));
+    expect(alphaRow).toBeTruthy();
+    act(() => {
+      alphaRow!.click();
+    });
+    expect(cloneButtonFor("1 selected")).toBeTruthy();
+  });
 });
