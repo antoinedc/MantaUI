@@ -24,7 +24,7 @@
 //     fabricates a percentage (the server sends none).
 
 import { memo, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
-import { Loader2, Play, Download } from "lucide-react";
+import { Loader2, Download } from "lucide-react";
 import { ToolCard } from "./ToolCard";
 import { OutputWell } from "./OutputWell";
 import { type Artifact } from "./artifacts";
@@ -241,12 +241,9 @@ function ReadyMedia({ entry }: { entry: MediaEntry }) {
           />
         )}
         {status === "ready" && kind === "video" && url && (
-          <div className="relative w-full h-full rounded-md border border-border-subtle bg-inset overflow-hidden">
+          <div className="w-full h-full rounded-md border border-border-subtle bg-inset overflow-hidden">
             {/* No autoplay, ever: explicit play control + first-frame poster. */}
             <video src={url} controls preload="metadata" className="w-full h-full" />
-            <span className="pointer-events-none absolute left-1 top-1 grid place-items-center w-6 h-6 rounded-full bg-bg-elev border border-border-subtle text-text-faint">
-              <Play size={11} aria-hidden="true" />
-            </span>
           </div>
         )}
         {/* BET-1156: hover-only Download overlay INSIDE the reserved box.
@@ -263,7 +260,7 @@ function ReadyMedia({ entry }: { entry: MediaEntry }) {
                 e.stopPropagation();
                 handleDownload();
               }}
-              className="pointer-events-auto grid place-items-center w-6 h-6 rounded-md bg-bg-elev border border-border-subtle text-text hover:bg-fill-hover"
+              className="pointer-events-auto grid place-items-center w-6 h-6 rounded-md text-text-faint hover:bg-fill-hover hover:text-text focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
             >
               <Download size={14} aria-hidden="true" />
             </button>
