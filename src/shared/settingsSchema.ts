@@ -73,6 +73,10 @@ export type SettingEntry = {
   commitOnBlur?: boolean;
   /** Placeholder for text/path/password. */
   placeholder?: string;
+  /** Card heading this entry renders under on desktop. Entries sharing a
+   *  group render in one card, in schema order. `custom` entries are drawn
+   *  by the surface itself and carry no group. */
+  group?: string;
 };
 
 // General sits above the clusters because it is about this app, not the box
@@ -102,6 +106,7 @@ export const SETTINGS: SettingEntry[] = [
     configKey: "theme",
     platform: "desktop",
     default: "system",
+    group: "Appearance",
     options: [
       { value: "system", label: "System" },
       { value: "light", label: "Light" },
@@ -119,6 +124,7 @@ export const SETTINGS: SettingEntry[] = [
     configKey: null, // mobile-local (localStorage), not a server config key
     platform: "mobile",
     default: "",
+    group: "Connection",
     placeholder: "https://manta.example.com",
   },
   {
@@ -154,6 +160,7 @@ export const SETTINGS: SettingEntry[] = [
     configKey: "cacheTtl",
     platform: "both",
     default: "1h",
+    group: "Requests",
     options: [
       { value: "5m", label: "5 minutes" },
       { value: "1h", label: "1 hour" },
@@ -168,6 +175,7 @@ export const SETTINGS: SettingEntry[] = [
     configKey: "alwaysShowUsage",
     platform: "both",
     default: false,
+    group: "Plan usage",
   },
 
   // ----- sessions (per-session behaviour) -----
@@ -180,6 +188,7 @@ export const SETTINGS: SettingEntry[] = [
     configKey: "autoRenameSessions",
     platform: "both",
     default: false,
+    group: "Naming",
   },
   {
     id: "worktreePerSession",
@@ -190,6 +199,7 @@ export const SETTINGS: SettingEntry[] = [
     configKey: "worktreePerSession",
     platform: "desktop",
     default: false,
+    group: "Git worktrees",
   },
   {
     id: "worktreeCleanOnClose",
@@ -200,6 +210,7 @@ export const SETTINGS: SettingEntry[] = [
     configKey: "worktreeCleanOnClose",
     platform: "desktop",
     default: false,
+    group: "Git worktrees",
   },
   {
     id: "chatAutoAllow",
@@ -210,6 +221,7 @@ export const SETTINGS: SettingEntry[] = [
     configKey: "chatAutoAllow",
     platform: "mobile",
     default: false,
+    group: "Permissions",
   },
 
   // ----- files (agent ↔ laptop file flow) -----
@@ -222,6 +234,7 @@ export const SETTINGS: SettingEntry[] = [
     configKey: "allowAgentPush",
     platform: "desktop",
     default: false,
+    group: "Files the agent sends you",
   },
   {
     id: "downloadsDir",
@@ -232,6 +245,7 @@ export const SETTINGS: SettingEntry[] = [
     configKey: "downloadsDir",
     platform: "desktop",
     default: "",
+    group: "Files the agent sends you",
     placeholder: "~/Downloads (default)",
   },
   {
@@ -243,6 +257,7 @@ export const SETTINGS: SettingEntry[] = [
     configKey: "uploadCleanupHours",
     platform: "both",
     default: 24,
+    group: "Files you send the agent",
     options: [
       { value: "24", label: "24 hours" },
       { value: "168", label: "7 days" },
@@ -258,6 +273,7 @@ export const SETTINGS: SettingEntry[] = [
     configKey: "voiceNoteTtlHours",
     platform: "both",
     default: 168,
+    group: "Voice note audio retention",
     options: [
       { value: "24", label: "24 hours" },
       { value: "168", label: "7 days" },
@@ -275,6 +291,7 @@ export const SETTINGS: SettingEntry[] = [
     configKey: null, // Mac-local (preload bridge), not a server config key
     platform: "desktop",
     default: false,
+    group: "Plugins",
   },
 
   // ----- voice (Groq STT) -----
@@ -288,6 +305,7 @@ export const SETTINGS: SettingEntry[] = [
     platform: "both",
     default: "",
     commitOnBlur: true,
+    group: "Speech to text (Groq)",
     placeholder: "gsk_… (leave blank to disable)",
   },
   {
@@ -299,6 +317,7 @@ export const SETTINGS: SettingEntry[] = [
     configKey: "voiceTranscriptionModel",
     platform: "both",
     default: "",
+    group: "Speech to text (Groq)",
     placeholder: "whisper-large-v3-turbo",
   },
 
@@ -315,6 +334,7 @@ export const SETTINGS: SettingEntry[] = [
     platform: "both",
     default: "",
     commitOnBlur: true,
+    group: "Setup",
     placeholder: "sk-… (leave blank to disable the call window)",
   },
   {
@@ -326,6 +346,7 @@ export const SETTINGS: SettingEntry[] = [
     configKey: "cto.enabled",
     platform: "both",
     default: false,
+    group: "Setup",
   },
   {
     id: "ctoModel",
@@ -336,6 +357,7 @@ export const SETTINGS: SettingEntry[] = [
     configKey: "cto.model",
     platform: "both",
     default: "",
+    group: "Setup",
     placeholder: "gpt-4o-realtime-preview",
   },
   {
@@ -347,6 +369,7 @@ export const SETTINGS: SettingEntry[] = [
     configKey: "cto.voice",
     platform: "both",
     default: "",
+    group: "Setup",
     placeholder: "alloy",
   },
   {
@@ -358,6 +381,7 @@ export const SETTINGS: SettingEntry[] = [
     configKey: "cto.alwaysListening",
     platform: "both",
     default: false,
+    group: "Setup",
   },
   {
     id: "ctoParkedBehavior",
@@ -368,47 +392,13 @@ export const SETTINGS: SettingEntry[] = [
     configKey: "cto.parkedBehavior",
     platform: "both",
     default: "auto-open",
+    group: "Setup",
     options: [
       { value: "auto-open", label: "Auto-open" },
       { value: "push", label: "Notify only" },
     ],
   },
 ];
-
-// ----- desktop card groupings (BET-1175) -----
-//
-// The desktop Settings window (src/renderer/Settings.tsx) renders each
-// section's simple fields as one or more GroupCards. SECTION_GROUPS is the
-// desktop's map of section → card title → ordered entry ids. It must stay a
-// complete mirror of SETTINGS for the desktop platform: any non-`custom`
-// desktop-visible entry that is missing here (and not drawn by a dedicated
-// card) renders NOWHERE on desktop, while still appearing in Search and on
-// mobile — the exact drift that hid `openaiApiKey` (BET-1173). The guard in
-// settingsSchema.test.ts ("every desktop-visible schema field renders on
-// desktop") asserts every such entry is covered, so none can silently drop.
-export const SECTION_GROUPS: Partial<
-  Record<SettingSectionId, { title: string; entryIds: string[] }[]>
-> = {
-  models: [
-    { title: "Requests", entryIds: ["cacheTtl"] },
-    { title: "Plan usage", entryIds: ["alwaysShowUsage"] },
-  ],
-  sessions: [
-    { title: "Naming", entryIds: ["autoRenameSessions"] },
-    { title: "Git worktrees", entryIds: ["worktreePerSession", "worktreeCleanOnClose"] },
-  ],
-  files: [
-    { title: "Files the agent sends you", entryIds: ["allowAgentPush", "downloadsDir"] },
-    { title: "Files you send the agent", entryIds: ["uploadCleanupHours"] },
-    { title: "Voice note audio retention", entryIds: ["voiceNoteTtlHours"] },
-  ],
-  voice: [
-    { title: "Speech to text (Groq)", entryIds: ["groqApiKey", "voiceTranscriptionModel"] },
-  ],
-  cto: [
-    { title: "Setup", entryIds: ["openaiApiKey", "ctoEnabled", "ctoModel", "ctoVoice", "ctoAlwaysListening", "ctoParkedBehavior"] },
-  ],
-};
 
 // ----- pure helpers -----
 
