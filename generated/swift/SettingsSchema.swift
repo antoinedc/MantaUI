@@ -242,7 +242,7 @@ enum SettingsSchema {
             defaultNumber: nil,
             options: nil,
             commitOnBlur: false,
-            placeholder: "gpt-4o-realtime-preview",
+            placeholder: "gpt-realtime-2.1",
         ),
         SettingEntry(
             id: "ctoVoice",
