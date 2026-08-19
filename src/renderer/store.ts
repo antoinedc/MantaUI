@@ -409,6 +409,9 @@ type State = {
   // On-call CTO feature (BET-1166). Nested block mirrors AppConfig#cto; the
   // call window + settings read it off the store.
   cto: AppConfig["cto"];
+  // Model routing (BET-1215). Nested block mirrors AppConfig#modelRouting;
+  // Settings reads it off the store (config-only — no wiring yet).
+  modelRouting: AppConfig["modelRouting"];
   // Analytics opt-out (BET-217). Default true; false = this instance ships
   // nothing to Axiom (desktop renderer + server). Mobile always ships
   // regardless. Mirror of AppConfig.shareAnalytics.
@@ -803,6 +806,7 @@ export const useStore = create<State>((set, get) => ({
   voiceTranscriptionModel: "",
   openaiApiKey: "",
   cto: undefined,
+  modelRouting: undefined,
   shareAnalytics: true,
   theme: "system",
   pinnedWindows: [],
@@ -1082,6 +1086,7 @@ export const useStore = create<State>((set, get) => ({
       voiceTranscriptionModel: c.voiceTranscriptionModel ?? "",
       openaiApiKey: c.openaiApiKey ?? "",
       cto: c.cto ? { ...c.cto } : undefined,
+      modelRouting: c.modelRouting ? { ...c.modelRouting } : undefined,
       shareAnalytics: c.shareAnalytics ?? true,
       pinnedWindows: Array.isArray(c.pinnedWindows) ? c.pinnedWindows : [],
       theme:

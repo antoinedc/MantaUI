@@ -177,6 +177,33 @@ export const SETTINGS: SettingEntry[] = [
     default: false,
     group: "Plan usage",
   },
+  {
+    id: "modelRoutingEnabled",
+    section: "models",
+    label: "Let Manta pick the model",
+    help: "Chooses a model per task when a session or subagent starts, and when a plan usage limit would otherwise stop the work. Never changes model in the middle of an exchange. Every choice shows why, and can be undone.",
+    control: "toggle",
+    configKey: "modelRouting.enabled",
+    platform: "desktop",
+    default: false,
+    group: "Routing",
+  },
+  {
+    id: "modelRoutingPreset",
+    section: "models",
+    label: "Balance",
+    help: "Economy favours the cheapest model that still clears the quality floor for each kind of work. Performance favours the strongest. Each kind of work has a floor that Economy will not go below.",
+    control: "segmented",
+    configKey: "modelRouting.preset",
+    platform: "desktop",
+    default: "balanced",
+    group: "Routing",
+    options: [
+      { value: "economy", label: "Economy" },
+      { value: "balanced", label: "Balanced" },
+      { value: "performance", label: "Performance" },
+    ],
+  },
 
   // ----- sessions (per-session behaviour) -----
   {

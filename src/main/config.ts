@@ -6,6 +6,10 @@ import { migrateLegacyCapConfig } from "../shared/configMigration.mjs";
 
 const DEFAULT_CONFIG: AppConfig = {
   projects: [],
+  // Model routing (BET-1215). Off by default (opt-in — routing acts on the
+  // user's behalf). The live server default lives in src/server/local.mjs;
+  // this mirrors it for desktop-side config reads.
+  modelRouting: { enabled: false, preset: "balanced" },
 };
 
 function configPath(): string {
