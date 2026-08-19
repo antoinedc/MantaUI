@@ -637,6 +637,11 @@ export interface Api {
     query: string;
     sessionIds: string[];
   }): Promise<{ supported: boolean; hits: TranscriptHit[] }>;
+  // BET-1219: read-only spend/latency ledger over opencode's store.
+  // `sinceMs` filters assistant rows to time_created >= sinceMs (default 0 =
+  // all). Measurement only — no routing. `supported:false` = the box can't
+  // read opencode.db (needs the Node 24 runtime).
+  ledgerSummary(opts?: { sinceMs?: number }): Promise<LedgerSummary | { supported: false }>;
 
   // Slash-command execution.
   opencodeRunCommand(input: {

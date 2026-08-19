@@ -39,6 +39,7 @@ import { backupClaudeCredentials, CREDENTIALS_PATH } from "./claudeAuth.mjs";
 import { addApnsToken } from "./push.mjs";
 import { getRegistry as pluginsGetRegistry } from "./plugins.mjs";
 import { searchMessages } from "./messageSearch.mjs";
+import { ledgerSummary } from "./modelLedger.mjs";
 import { MIN_CLIENT } from "./version.mjs";
 import { forgeDiffForCwd, forgeStatus, pullRequestForCwd, shipPullRequest, shipPreview, mergePullRequest, draftGetForCwd, draftCommentForCwd, draftSubmitForCwd, replyThreadForCwd, forgeInbox, forgeDeviceStart, forgeDevicePoll, forgeDeviceCancel, forgeListRepos, forgeCloneStart, forgeCloneStatus, forgeCloneCancel } from "./forge/index.mjs";
 import { listRules as forgeListRules, formatIssueRef, parseIssueRef } from "./forgeRules.mjs";
@@ -949,6 +950,13 @@ export function buildHandlers({
     // hasn't taken the Node 24 runtime yet.
     // preload: ipcRenderer.invoke(IPC.opencodeSearchMessages, { query, sessionIds })
     "opencode:search-messages": (input) => searchMessages(input ?? {}),
+
+    // BET-1219: read-only spend/latency ledger over opencode's SQLite
+    // (modelLedger.mjs). Args { sinceMs } — filters assistant rows to
+    // time_created >= sinceMs (default 0 = all). Measurement only: no
+    // routing, no behaviour change. Degrades to { supported:false } on a
+    // box that hasn't taken the Node 24 runtime yet / has no opencode.db.
+    "ledger:summary": (opts) => ledgerSummary(opts ?? {}),
 
     // preload: ipcRenderer.invoke(IPC.opencodeRunCommand, { sessionId, command, arguments, model?, attachments? })
     // → args[0] = that object; opencode.mjs runCommand expects same shape
