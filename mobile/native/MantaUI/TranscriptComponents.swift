@@ -792,12 +792,24 @@ enum TranscriptBlock: Equatable {
     /// A prompt accepted mid-turn, waiting for the session to go idle. Rendered
     /// as a DIM ghost user bubble where the message will actually land.
     case queuedPrompt(String)
+    /// A pending permission request rendered as a blocking card in the
+    /// transcript tail (BET-1214). The card's callbacks come from the
+    /// surface's `TranscriptCardActions`, never from the block — a block stays
+    /// pure Equatable data so its identity survives a rebuild unchanged.
+    case permission(PermissionRequest)
+    /// The plan_exit question, upgraded into the dedicated plan card and
+    /// rendered in the transcript tail (BET-1214). Excluded from `.question`
+    /// — the two cards never coexist for the same question.
+    case planExit(QuestionRequest)
+    /// A generic pending question rendered as a card in the transcript tail
+    /// (BET-1214).
+    case question(QuestionRequest)
 
     /// The time shown in the gutter; nil for blocks that have none.
     var timestamp: Date? {
         switch self {
         case .user(_, let at), .prose(_, let at): return at
-        case .steps, .file, .notice, .queuedPrompt: return nil
+        case .steps, .file, .notice, .queuedPrompt, .permission, .planExit, .question: return nil
         }
     }
 }

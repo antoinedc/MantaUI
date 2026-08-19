@@ -58,6 +58,13 @@ extension TranscriptBlock {
         case .steps(let content): return "s" + (content.rows.first?.id ?? "empty")
         case .notice(let text, let kind): return "n\(kind)\(text.hashValue)"
         case .queuedPrompt(let text): return "q\(text.hashValue)"
+        // Cards key on the REQUEST id — stable and unique. Do NOT hash content:
+        // a card whose text is edited mid-flight would change identity and cause
+        // a delete+insert in the list. The prefixes are distinct so a question
+        // and a plan-exit question carrying the same id never collide (BET-1214).
+        case .permission(let p): return "pm" + p.id
+        case .planExit(let q): return "px" + q.id
+        case .question(let q): return "qq" + q.id
         }
     }
 }
@@ -107,6 +114,72 @@ extension StepGroupContent {
     }
 }
 
+/// The callbacks + context the blocking cards need when they render inside the
+/// transcript tail (BET-1214). The cards' behaviour, copy and callbacks are
+/// unchanged from the pinned-above-composer era — only their LOCATION moved, so
+/// this type carries the same closures ChatScreen used to hand the cards
+/// directly.
+///
+/// A `@MainActor final class` (not a struct): it holds main-actor-bound closures
+/// that touch a `@MainActor` store, and the transcript cell's `body(context:)`
+/// is required by `TiledCellContent` to be `nonisolated`, so the card actions
+/// are delivered through the SwiftUI environment — an actor-isolated reference
+/// type is implicitly `Sendable`, which is exactly what an `EnvironmentKey`
+/// `static` default and a cross-view round-trip need, while everything reads the
+/// closures on the main actor only.
+@MainActor
+final class TranscriptCardActions {
+    /// The raw transcript the plan card's exact derivation reads.
+    let messages: [OpencodeMessage]
+    /// The session's BUILD-model name for the plan card's subtitle.
+    let buildModelName: String
+    /// The deterministic plan-page URL (nil when no usable slug can be formed).
+    let planURL: String?
+    let onPermissionReply: (PermissionRequest, PermissionReply) -> Void
+    let onQuestionSubmit: (QuestionRequest, [[String]]) -> Void
+    let onQuestionReject: (QuestionRequest) -> Void
+    let onBuildHere: (QuestionRequest, String) -> Void
+    let onKeepPlanning: (QuestionRequest, String) -> Void
+    let onOpenPage: () -> Void
+
+    init(
+        messages: [OpencodeMessage],
+        buildModelName: String,
+        planURL: String?,
+        onPermissionReply: @escaping (PermissionRequest, PermissionReply) -> Void,
+        onQuestionSubmit: @escaping (QuestionRequest, [[String]]) -> Void,
+        onQuestionReject: @escaping (QuestionRequest) -> Void,
+        onBuildHere: @escaping (QuestionRequest, String) -> Void,
+        onKeepPlanning: @escaping (QuestionRequest, String) -> Void,
+        onOpenPage: @escaping () -> Void
+    ) {
+        self.messages = messages
+        self.buildModelName = buildModelName
+        self.planURL = planURL
+        self.onPermissionReply = onPermissionReply
+        self.onQuestionSubmit = onQuestionSubmit
+        self.onQuestionReject = onQuestionReject
+        self.onBuildHere = onBuildHere
+        self.onKeepPlanning = onKeepPlanning
+        self.onOpenPage = onOpenPage
+    }
+}
+
+/// The environment key carrying the blocking-card actions into transcript cells.
+private struct TranscriptCardActionsKey: EnvironmentKey {
+    static let defaultValue: TranscriptCardActions? = nil
+}
+
+extension EnvironmentValues {
+    /// The blocking-card callbacks for the current transcript surface, or nil
+    /// on read-only surfaces (subagent drill-in, capture fixture) where cards
+    /// render inert.
+    var transcriptCardActions: TranscriptCardActions? {
+        get { self[TranscriptCardActionsKey.self] }
+        set { self[TranscriptCardActionsKey.self] = newValue }
+    }
+}
+
 // MARK: - Cell
 
 /// Renders ONE transcript block inside `TiledView`, reusing the same
@@ -137,6 +210,11 @@ struct TranscriptBlockCell: TiledCellContent {
         // protocol conformance as a data-race), so the main-actor reveal state is
         // passed down to `TranscriptCellReveal`, whose own `View.body` runs on the
         // main actor and can read `rubberbandedOffset(max:)`.
+        //
+        // The blocking-card actions are NOT threaded through this nonisolated
+        // body — a closure-carrying value can't cross it. They arrive via the
+        // SwiftUI environment and are read inside `TranscriptCellReveal.body`
+        // (main actor) (BET-1214).
         TranscriptCellReveal(
             cellReveal: context.cellReveal,
             item: item,
@@ -153,6 +231,11 @@ private struct TranscriptCellReveal: View {
     let cellReveal: CellReveal?
     let item: TranscriptRow
     let tokens: Tokens
+    /// The blocking-card callbacks, injected by the enclosing chat screen via
+    /// `.environment(\.transcriptCardActions, …)` — read only on the main actor
+    /// here, so it never crosses the nonisolated cell boundary. Nil on
+    /// read-only surfaces (subagent drill-in, capture fixture).
+    @Environment(\.transcriptCardActions) private var cardActions
 
     var body: some View {
         let reveal = cellReveal?.rubberbandedOffset(max: TranscriptGutter.gutterWidth) ?? 0
@@ -177,12 +260,13 @@ private struct TranscriptCellReveal: View {
             .accessibilityIdentifier(TranscriptGutter.rowAccessibilityID)
     }
 
+    @MainActor
     @ViewBuilder
     private var cellContent: some View {
         if case .prose(let text, nil) = item.block {
             LiveProseTail(text: text, tokens: tokens)
         } else {
-            transcriptBlockView(item.block, tokens: tokens)
+            transcriptBlockView(item.block, tokens: tokens, cards: cardActions)
         }
     }
 }
@@ -190,8 +274,28 @@ private struct TranscriptCellReveal: View {
 /// The ONE transcript block renderer, shared by every surface — the live
 /// TiledView cell (`TranscriptBlockCell`) and the legacy `TranscriptView` the
 /// capture fixture still uses. There is deliberately no second switch anywhere.
+///
+/// `@MainActor`: the blocking cards are main-actor views whose callbacks touch a
+/// `@MainActor` store, and the cards' closures are not `Sendable` — so this
+/// function must run on the main actor (both callers are `@MainActor`
+/// `View.body`s). The card actions come from `cards` (nil on read-only
+/// surfaces → the cards render inert, never wiring to a live store).
+@MainActor
 @ViewBuilder
-func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens) -> some View {
+func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens, cards: TranscriptCardActions? = nil) -> some View {
+    // The inert action set a read-only surface falls back to: every card
+    // renders harmlessly but no closure reaches a live store.
+    let actions = cards ?? TranscriptCardActions(
+        messages: [],
+        buildModelName: "",
+        planURL: nil,
+        onPermissionReply: { _, _ in },
+        onQuestionSubmit: { _, _ in },
+        onQuestionReject: { _ in },
+        onBuildHere: { _, _ in },
+        onKeepPlanning: { _, _ in },
+        onOpenPage: {}
+    )
     switch block {
     case .user(let text, _):
         UserBand(text: text, tokens: tokens)
@@ -222,6 +326,33 @@ func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens) -> some View 
         UserBand(text: text, tokens: tokens)
             .opacity(0.45)
             .padding(.bottom, Metrics.spacing.sp4)
+    case .permission(let permission):
+        PermissionCard(permission: permission, tokens: tokens) { reply in
+            actions.onPermissionReply(permission, reply)
+        }
+        .padding(.horizontal, Metrics.spacing.sp3)
+        .padding(.bottom, Metrics.spacing.sp3)
+    case .planExit(let question):
+        PlanCard(
+            question: question,
+            messages: actions.messages,
+            buildModelName: actions.buildModelName,
+            planURL: actions.planURL,
+            tokens: tokens,
+            onBuildHere: { feedback in actions.onBuildHere(question, feedback) },
+            onKeepPlanning: { feedback in actions.onKeepPlanning(question, feedback) },
+            onOpenPage: actions.onOpenPage
+        )
+        .padding(.horizontal, Metrics.spacing.sp3)
+        .padding(.bottom, Metrics.spacing.sp3)
+    case .question(let question):
+        QuestionCard(question: question, tokens: tokens) { answers in
+            actions.onQuestionSubmit(question, answers)
+        } onReject: {
+            actions.onQuestionReject(question)
+        }
+        .padding(.horizontal, Metrics.spacing.sp3)
+        .padding(.bottom, Metrics.spacing.sp3)
     }
 }
 

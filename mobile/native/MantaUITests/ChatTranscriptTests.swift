@@ -597,6 +597,61 @@ final class ChatTranscriptTests: XCTestCase {
                        "non-colliding blocks must keep their content-stable ids unchanged")
     }
 
+    // MARK: - Blocking-card row identity (BET-1214)
+    //
+    // Permission / plan / question cards now live in the transcript tail. They
+    // key their row id on the REQUEST id (stable + unique) rather than hashing
+    // content, so an edited card text mid-flight never changes the row's
+    // identity (which would delete+insert the card in the list).
+
+    private func cardPermission(_ id: String) -> PermissionRequest {
+        PermissionRequest(id: id, sessionID: "ses", permission: "Shell", patterns: nil, always: nil, metadata: nil, tool: nil)
+    }
+
+    private func cardQuestion(_ id: String) -> QuestionRequest {
+        QuestionRequest(id: id, sessionID: "ses", questions: [], tool: nil, requestId: nil)
+    }
+
+    func testCardStableScrollIDsAreStableAcrossRebuilds() {
+        let blocks: [TranscriptBlock] = [
+            .permission(cardPermission("p1")),
+            .planExit(cardQuestion("q1")),
+            .question(cardQuestion("q2")),
+        ]
+        let first = uniqueTranscriptRows(blocks).map(\.id)
+        let second = uniqueTranscriptRows(blocks).map(\.id)
+        XCTAssertEqual(first, second,
+                       "card ids must be stable across rebuilds so the diff stays stable")
+    }
+
+    func testPlanExitAndQuestionCardsDifferForSameRequestId() {
+        let q = cardQuestion("shared")
+        XCTAssertNotEqual(
+            TranscriptBlock.planExit(q).stableScrollID,
+            TranscriptBlock.question(q).stableScrollID,
+            "a plan-exit card and a generic question card must never share a row id"
+        )
+    }
+
+    func testCardKindsDoNotCollideOnAnIdenticalId() {
+        let rows = uniqueTranscriptRows([
+            .permission(cardPermission("x")),
+            .planExit(cardQuestion("x")),
+            .question(cardQuestion("x")),
+        ])
+        XCTAssertEqual(Set(rows.map(\.id)).count, 3,
+                       "three card kinds sharing an id string must still be distinct rows")
+    }
+
+    func testPermissionCardIDsAreStableAndUniquePerRequest() {
+        let rows = uniqueTranscriptRows([
+            .permission(cardPermission("a")),
+            .permission(cardPermission("b")),
+        ])
+        XCTAssertEqual(rows.map(\.id), ["pma", "pmb"],
+                       "permission row ids key on the request id")
+    }
+
     // MARK: - Step-group identity (BET-1103)
     //
     // A step group grows by appending rows. Its id must therefore be fixed for the
