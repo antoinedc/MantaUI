@@ -334,6 +334,64 @@ final class SessionModelsTests: XCTestCase {
         XCTAssertFalse(shouldFireTurnCompleteHaptic(
             turnCompleteEdge: true, showScrollToBottom: true, isActive: true, hapticsEnabled: false))
     }
+
+    // MARK: - BET-1203 model capabilities decode both input shapes
+
+    private func decodeModels(_ json: String) -> [OpencodeModel]? {
+        guard let data = json.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode([OpencodeModel].self, from: data)
+    }
+
+    func testCapabilitiesInputListShapeDecodesImage() {
+        let models = decodeModels("""
+        [{"id":"m","providerID":"anthropic","name":"M","capabilities":{"input":["text","image","pdf"]}}]
+        """)
+        XCTAssertEqual(models?.count, 1)
+        XCTAssertTrue(models?.first?.capabilities?.input?.image == true)
+    }
+
+    func testCapabilitiesInputObjectShapeDecodesImageAndOmitsFalseFlag() {
+        let models = decodeModels("""
+        [{"id":"m","providerID":"anthropic","name":"M","capabilities":{"input":{"text":true,"image":true,"pdf":false}}}]
+        """)
+        XCTAssertEqual(models?.count, 1)
+        let input = models?.first?.capabilities?.input
+        XCTAssertTrue(input?.image == true)
+        XCTAssertFalse(input?.names.contains("pdf") == true)
+    }
+
+    func testCapabilitiesInputObjectImageFalseDecodesAsFalse() {
+        let models = decodeModels("""
+        [{"id":"m","providerID":"anthropic","name":"M","capabilities":{"input":{"text":true,"image":false}}}]
+        """)
+        XCTAssertEqual(models?.count, 1)
+        XCTAssertTrue(models?.first?.capabilities?.input?.image == false)
+    }
+
+    func testCapabilitiesInputGarbageShapeStillDecodesModel() {
+        let models = decodeModels("""
+        [{"id":"m","providerID":"anthropic","name":"M","capabilities":{"input":42}}]
+        """)
+        XCTAssertEqual(models?.count, 1)
+        XCTAssertTrue(models?.first?.capabilities?.input?.image == false)
+    }
+
+    /// The actual production failure: one model in the new (list) shape must not
+    /// empty the whole catalogue. A list of two models — first list shape,
+    /// second object shape — must return both.
+    func testCapabilitiesInputMixedShapesDoNotEmptyTheCatalogue() {
+        let models = decodeModels("""
+        [
+          {"id":"a","providerID":"anthropic","name":"A","capabilities":{"input":["text","image","pdf"]}},
+          {"id":"b","providerID":"anthropic","name":"B","capabilities":{"input":{"text":true,"image":true,"pdf":false}}}
+        ]
+        """)
+        XCTAssertEqual(models?.count, 2)
+        XCTAssertEqual(models?.first?.id, "a")
+        XCTAssertEqual(models?.last?.id, "b")
+        XCTAssertTrue(models?.first?.capabilities?.input?.image == true)
+        XCTAssertTrue(models?.last?.capabilities?.input?.image == true)
+    }
 }
 
 // MARK: - BET-746 rename/fork failure feedback

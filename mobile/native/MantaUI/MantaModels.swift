@@ -313,10 +313,36 @@ struct OpencodeModel: Codable, Equatable, Sendable {
 /// present with the wrong TYPE throws and takes the whole model list with it,
 /// which is exactly how the catalogue silently came up empty.
 struct ModelCapabilities: Codable, Equatable, Sendable {
-    /// Input modalities, an OBJECT of flags on the wire (`{"text":true,
-    /// "image":true,…}`) — never a list of strings.
+    /// Input modalities. TWO shapes reach this client and both are valid:
+    /// a list of names (`["text","image"]`, what the box sends after it
+    /// normalizes) and the provider's raw object of flags
+    /// (`{"text":true,"image":true}`, what an older box forwards untouched).
+    /// The app and the box update on separate tracks, so neither shape can be
+    /// assumed. Anything else decodes to empty — "unknown", never a claim that
+    /// the model supports nothing — and never throws, because a throw here
+    /// takes the whole model list with it.
     struct Modalities: Codable, Equatable, Sendable {
-        var image: Bool?
+        var names: [String] = []
+
+        var image: Bool { names.contains("image") }
+
+        init(names: [String] = []) { self.names = names }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.singleValueContainer()
+            if let list = try? container.decode([String].self) {
+                names = list
+            } else if let flags = try? container.decode([String: Bool].self) {
+                names = flags.filter { $0.value }.map(\.key).sorted()
+            } else {
+                names = []
+            }
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.singleValueContainer()
+            try container.encode(names)
+        }
     }
     var reasoning: Bool?
     var input: Modalities?
