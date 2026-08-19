@@ -456,13 +456,13 @@ on this turn. Install: `cp <repo>/docs/opencode-tools/media.ts
 ## manta on-call CTO reads
 
 You have a `cto` tool (global opencode custom tool, BET-1164) that runs
-deterministic, READ-ONLY diagnostics about this box and the Multica board:
+deterministic, READ-ONLY diagnostics about this box:
 `cto {tool, args}` where `tool` is one of `list_sessions` / `list_projects` /
 `read_transcript` / `search_messages` / `git_status` / `git_branch` /
 `git_log` / `list_models` / `get_usage` / `usage_stopped` / `session_usage` /
-`context_state` / `session_plan_mode` / `get_config` / `query_multica`.
+`context_state` / `session_plan_mode` / `get_config`.
 Nothing mutates anything; results are plain JSON. Reach for these to answer
-"What's running?", "what did we ship on Multica?", "what's our usage / any
+"What's running?", "what's our usage / any
 stopped conversations?", "is <session> in plan mode?", or "context state of
 <session>?". A quiet box (no sessions / empty board) is a valid answer — report
 the empty state, never fabricate. The `cto` opencode agent (selectable as a
@@ -482,7 +482,7 @@ Two companion capabilities to the `cto` read belt, both global opencode tools.
   (a new P0, a blocker, a call-back request). Thin registrar → `POST /api/cto/inbound`.
 - **`watch(surface, condition)`** + `unwatch` / `list_watches` (via the `cto` tool,
   `docs/opencode-tools/cto.ts`): register a recurring probe against a surface
-  (`multica`, `schedule`, `delegate`, ...). The box runs the watch's condition
+  (`schedule`, `delegate`, ...). The box runs the watch's condition
   against that surface's existing read and surfaces a notification when it matches
   AND something new appeared. `watch` is a **confirm-mode** action: it needs the
   user's go-ahead before it takes effect. When the `cto` tool returns

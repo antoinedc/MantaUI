@@ -13,7 +13,7 @@
 // manta-server's /api/cto (same box, no SSH hop) and returns the read result.
 // Every read is deterministic and read-only — see src/server/cto.mjs, which
 // owns the engine (it reuses tmux, opencode, usage, messageSearch, local,
-// stoppedStore and the multica CLI; nothing is reimplemented).
+// stoppedStore; nothing is reimplemented).
 
 import { tool } from "@opencode-ai/plugin";
 import { readFileSync } from "node:fs";
@@ -27,7 +27,7 @@ const MANTA_SERVER = process.env.MANTA_SERVER_URL || "http://127.0.0.1:8787";
 const CTO_TOOLS =
   "list_sessions, list_projects, read_transcript, search_messages, git_status, " +
   "git_branch, git_log, list_models, get_usage, usage_stopped, session_usage, " +
-  "context_state, session_plan_mode, get_config, query_multica, watch, unwatch, " +
+  "context_state, session_plan_mode, get_config, watch, unwatch, " +
   "list_watches";
 
 function boxToken() {
@@ -54,8 +54,8 @@ export const cto = tool({
   description: [
     "Deterministic on-call CTO tools: inspect what's running on this box,",
     "read chat transcripts, search messages, git state, models, plan usage,",
-    "stopped conversations, per-session cost/context/plan-mode, config, and the",
-    "Multica task board. Reads never mutate anything. The watch/unwatch/list_watches",
+    "stopped conversations, per-session cost/context/plan-mode, and config. Reads",
+    "never mutate anything. The watch/unwatch/list_watches",
     "tools register watchers (watch is a confirm-mode action).",
     `Pick \`tool\` from: ${CTO_TOOLS}.`,
     "Pass that tool's arguments as a free-form object in \`args\`",

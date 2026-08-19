@@ -2,7 +2,7 @@
 // Pure logic + injected I/O: registry integrity, dispatch (default-allow gate,
 // deny/confirm fail-closed, onNarrate boundaries), the tool reads (all
 // deterministic, none throw on a quiet box), and the cto.json store lifecycle.
-// No live tmux / opencode / multica.
+// No live tmux / opencode.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -28,13 +28,12 @@ function makeEngine(overrides = {}) {
     gitStatus: async () => "",
     gitBranch: async () => null,
     gitLog: async () => "",
-    queryMultica: async () => ({ ok: true }),
     ...overrides,
   });
   return engine;
 }
 
-const TOOL_COUNT = 18; // 15 reads (BET-1164) + 3 watcher tools watch/unwatch/list_watches (BET-1165)
+const TOOL_COUNT = 17; // 14 reads (BET-1164) + 3 watcher tools watch/unwatch/list_watches (BET-1165)
 
 // ---------------------------------------------------------------------------
 // Registry integrity
@@ -62,7 +61,6 @@ test("registry exposes every cto read tool with a complete shape, all mode auto"
       "context_state",
       "session_plan_mode",
       "get_config",
-      "query_multica",
       "watch",
       "unwatch",
       "list_watches",
@@ -213,8 +211,6 @@ test("quiet box: no sessions / no usage / no board never throws", async () => {
     const r = await engine.dispatch(tool, {}, {});
     assert.equal(r.ok, true, tool);
   }
-  const board = await engine.dispatch("query_multica", {}, {});
-  assert.equal(board.ok, true);
 });
 
 test("list_sessions resolves per-session model, plan mode and branch from injected engines", async () => {
