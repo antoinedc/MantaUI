@@ -111,15 +111,42 @@ test("dispatch honors a gate returning deny (fails closed)", async () => {
   assert.match(result.error, /denied/);
 });
 
-test("dispatch requires confirmation for a confirm-gated tool and does NOT act", async () => {
+test("an auto tool dispatches WITHOUT confirmation even when a confirm gate is supplied", async () => {
   const engine = makeEngine();
   const gate = () => "confirm";
-  // A confirm-gated tool that is not trusted pauses with needConfirmation
-  // (Issue 2 gate wiring) instead of failing closed.
+  // Reads are mode:"auto" — the registry wins over a caller-supplied confirm
+  // gate, so a hardcoded confirm gate can no longer pause a read (BET-1181).
   const result = await engine.dispatch("list_models", {}, { gate });
+  assert.equal(result.ok, true);
+  assert.equal(result.needConfirmation, undefined);
+});
+
+test("a confirm tool still returns needConfirmation (does NOT act)", async () => {
+  const engine = makeEngine();
+  const gate = () => "confirm";
+  // `watch` is the one confirm-mode tool. A confirm gate on it pauses.
+  const result = await engine.dispatch("watch", { surface: "schedule" }, { gate });
   assert.equal(result.ok, true);
   assert.equal(result.needConfirmation, true);
   assert.equal(typeof result.preview, "string");
+});
+
+test("a confirm tool pauses by default (no gate) and trustedActions bypasses it", async () => {
+  const saved = [];
+  const engine = makeEngine({
+    loadWatches: async () => [],
+    saveWatches: async (w) => saved.push(w),
+  });
+  // Default (DEFAULT_GATE = allow) still pauses a confirm tool — mode is what
+  // decides, not the gate.
+  const paused = await engine.dispatch("watch", { surface: "schedule" }, {});
+  assert.equal(paused.ok, true);
+  assert.equal(paused.needConfirmation, true);
+  // trustedActions bypasses the pause for a confirm tool.
+  const run = await engine.dispatch("watch", { surface: "schedule" }, { trustedActions: ["watch"] });
+  assert.equal(run.ok, true);
+  assert.equal(run.needConfirmation, undefined);
+  assert.ok(saved.length > 0, "trusted confirm tool actually ran (watcher saved)");
 });
 
 test("default gate returns allow for every tool (Issue 1 ships auto)", async () => {

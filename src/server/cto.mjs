@@ -693,12 +693,12 @@ export function createCtoEngine(deps = {}) {
   // -------------------------------------------------------------------------
   const byName = new Map(tools.map((t) => [t.name, t]));
 
-  // The in-conversation confirmation loop (Issue 2's gate wiring). When a
-  // confirm-mode tool is not in `trustedActions`, dispatch returns
-  // `{ needConfirmation: true, id, preview }` WITHOUT running. The cto text
-  // agent surfaces "I need your go-ahead: <preview>"; the user's "go ahead"
-  // calls approveConfirm(id) and the re-dispatch runs; "no" calls
-  // rejectConfirm(id) to abort. Issue 3 replaces this text loop with voice.
+  // The in-conversation confirmation loop (Issue 2's gate wiring). A confirm-
+  // mode tool that is not in `trustedActions` (and not already approved)
+  // returns `{ needConfirmation: true, id, preview }` WITHOUT running. The
+  // caller surfaces "I need your go-ahead: <preview>"; approval or rejection
+  // flows through approveConfirm(id) / rejectConfirm(id), and the re-dispatch
+  // runs. Issue 3 gates that approval on the user's own spoken words.
   const pendingConfirms = new Map(); // id -> { tool, args, approved }
 
   async function dispatch(name, args, ctx = {}) {
@@ -706,17 +706,25 @@ export function createCtoEngine(deps = {}) {
     if (!def) {
       return { ok: false, error: `unknown cto tool: ${name} (known: ${tools.map((t) => t.name).join(", ")})` };
     }
+    // The tool's declared `mode` is the source of truth for confirmation:
+    //   - `auto` tools (every read) never confirm — only deny policy applies,
+    //     and a caller-supplied "confirm" gate is ignored (registry mode wins).
+    //   - `confirm` tools pause for the user's go-ahead unless trusted or
+    //     already approved.
+    // So a caller can no longer manufacture a confirm for a read by passing a
+    // hardcoded confirm gate; the seam stays for deny/allow policy only.
     const gate = typeof ctx?.gate === "function" ? ctx.gate : DEFAULT_GATE;
-    let decision;
-    try {
-      decision = gate(def.name, args ?? {});
-    } catch {
-      decision = "deny";
-    }
-    if (decision === "deny") {
-      return { ok: false, error: `tool ${def.name} denied` };
-    }
-    if (decision === "confirm") {
+
+    if (def.mode === "confirm") {
+      let decision;
+      try {
+        decision = gate(def.name, args ?? {});
+      } catch {
+        decision = "deny";
+      }
+      if (decision === "deny") {
+        return { ok: false, error: `tool ${def.name} denied` };
+      }
       // A trusted action runs without asking; anything else pauses for the
       // user's go-ahead (returns needConfirmation and does NOT act yet).
       const trusted = Array.isArray(ctx?.trustedActions) ? ctx.trustedActions : [];
@@ -737,6 +745,18 @@ export function createCtoEngine(deps = {}) {
             preview: buildPreview(def, args ?? {}),
           };
         }
+      }
+    } else {
+      // Auto tool: confirmation never applies. Only deny policy is consulted;
+      // a "confirm" decision is coerced to allow.
+      let decision;
+      try {
+        decision = gate(def.name, args ?? {});
+      } catch {
+        decision = "deny";
+      }
+      if (decision === "deny") {
+        return { ok: false, error: `tool ${def.name} denied` };
       }
     }
     const narrate = typeof ctx?.onNarrate === "function" ? ctx.onNarrate : NOOP_NARRATE;

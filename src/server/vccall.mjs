@@ -48,6 +48,27 @@ export function clampModel(v, dflt) {
   return typeof v === "string" && v.trim() ? v.trim() : dflt;
 }
 
+// Deliberately dumb confirmation-reply classifier (BET-1181). Approval of a
+// pending confirm must come from the user's OWN words, so this maps a spoken
+// transcript to yes / no / unclear with a short explicit phrase list and
+// defaults to "unclear" — which is NOT an approval. Any ambiguity leaves the
+// pending confirm running until its timeout aborts it.
+const YES_PHRASES = ["yes", "yeah", "yep", "yup", "sure", "okay", "ok", "go ahead", "goahead", "do it", "please do", "confirm", "approve", "proceed", "fine"];
+const NO_PHRASES = ["no", "nope", "nah", "cancel", "stop", "abort", "dont", "don't", "never", "reject", "deny", "not"];
+
+export function classifyConfirmReply(text) {
+  const t = String(text ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9']+/g, " ")
+    .trim();
+  if (!t) return "unclear";
+  // A leading explicit no wins (covers "no", "no thanks", "not now", …).
+  if (NO_PHRASES.some((p) => t === p || t.startsWith(`${p} `))) return "no";
+  if (YES_PHRASES.some((p) => t === p || t.startsWith(`${p} `))) return "yes";
+  return "unclear";
+}
+
 /**
  * Build the vccall engine. Returns a control surface plus the low-level
  * `receiveRealtime(evt, send)` dispatcher so tests can drive a fake WS.
@@ -186,6 +207,9 @@ export function createVcCallEngine(deps = {}) {
         input: {
           format: { type: "audio/pcm", rate: 24000 },
           turn_detection: { type: "server_vad", create_response: true },
+          // Input transcription turns the user's speech into text so that a
+          // pending confirm can be approved by their actual words (BET-1181).
+          transcription: { model: "whisper-1" },
         },
         output: {
           format: { type: "audio/pcm" },
@@ -389,7 +413,10 @@ export function createVcCallEngine(deps = {}) {
       }
       case "conversation.item.input_audio_transcription.completed": {
         const t = evt?.transcript ?? "";
-        if (t) emit({ type: "stt", text: t });
+        if (t) {
+          emit({ type: "stt", text: t });
+          handleUserUtterance(t);
+        }
         return;
       }
       case "error":
@@ -413,6 +440,30 @@ export function createVcCallEngine(deps = {}) {
     armIdleTimer();
   }
 
+  // A user utterance (from input transcription) is the ONLY thing that can
+  // authorize a pending confirm. A clear "yes" approves it; a clear "no"
+  // rejects it; anything else leaves it pending until the timeout aborts.
+  function handleUserUtterance(transcript) {
+    const pc = state.pendingConfirm;
+    if (!pc || pc.approvedByUser) return;
+    const verdict = classifyConfirmReply(transcript);
+    if (verdict === "yes") {
+      approveConfirm(pc.id);
+      pc.approvedByUser = true;
+      armConfirmTimeout(pc.id);
+      emit({ type: "confirm-resolved", id: pc.id, ok: true });
+    } else if (verdict === "no") {
+      rejectConfirm(pc.id);
+      state.pendingConfirm = null;
+      emit({ type: "confirm-resolved", id: pc.id, ok: false });
+      send({
+        type: "conversation.item.create",
+        item: { type: "message", role: "user", content: [{ type: "input_text", text: "User said no. Abort and replan, do not act." }] },
+      });
+      send({ type: "response.create" });
+    }
+  }
+
   async function handleFunctionCall(evt) {
     const name = evt?.name;
     const rawArgs = evt?.arguments ?? "{}";
@@ -424,27 +475,43 @@ export function createVcCallEngine(deps = {}) {
     }
     emit({ type: "working", tool: name });
 
-    // Voice-confirm resolution: if there is a pending confirm for the SAME
-    // (tool,args), the model re-issuing it IS the user's spoken "go ahead"…
+    // A model re-issue of the SAME pending (tool,args) is only authorized if
+    // the user's own words approved it. A re-issue with no such utterance is
+    // NOT an approval — re-raise the pause instead of acting.
     const pc = state.pendingConfirm;
-    if (pc && pc.tool === name && sameArgs(pc.args, args)) {
-      approveConfirm(pc.id);
+    const isReissue = pc && pc.tool === name && sameArgs(pc.args, args);
+    if (isReissue) {
+      if (!pc.approvedByUser) {
+        emit({ type: "confirm", id: pc.id, tool: name, preview: pc.preview });
+        send({
+          type: "conversation.item.create",
+          item: {
+            type: "function_call_output",
+            call_id: evt?.call_id,
+            output: JSON.stringify({ ok: true, awaiting_confirmation: true, preview: pc.preview }),
+          },
+        });
+        send({ type: "response.create" });
+        armConfirmTimeout(pc.id);
+        return;
+      }
+      // Spoken "go ahead" → clear the local pending; the engine's approval
+      // lets this re-dispatch actually run.
       state.pendingConfirm = null;
-      emit({ type: "confirm-resolved", id: pc.id, ok: true });
     }
 
     const conf = (await configGet().catch(() => ({}))) ?? {};
     const result = await dispatchCto(name, args, {
-      gate: () => "confirm",
       trustedActions: Array.isArray(conf?.cto?.trustedActions) ? conf.cto.trustedActions : [],
       onNarrate,
     });
 
     if (result?.needConfirmation && !pc) {
-      // Gated tool, user hasn't spoken yet → pause for go-ahead.
+      // Gated tool, user hasn't spoken yet → pause for go-ahead. It is only
+      // approved by an affirmative user utterance (see handleUserUtterance).
       const id = result.id;
       emit({ type: "confirm", id, tool: name, preview: result.preview });
-      state.pendingConfirm = { id, tool: name, args, preview: result.preview, at: now() };
+      state.pendingConfirm = { id, tool: name, args, preview: result.preview, at: now(), approvedByUser: false };
       armConfirmTimeout(id);
       // Tell the model to ask, then complete the function call so it can speak.
       send({

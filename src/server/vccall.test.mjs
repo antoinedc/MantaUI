@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { createVcCallEngine, awaitOpen } from "./vccall.mjs";
+import { createVcCallEngine, awaitOpen, classifyConfirmReply } from "./vccall.mjs";
 
 // A fake OpenAI Realtime WebSocket: an EventEmitter whose .send captures
 // client→OpenAI messages and .close flips a flag. Tests drive the connection
@@ -63,6 +63,61 @@ function json(ws) {
   return ws.sent.map((s) => JSON.parse(s));
 }
 
+// Engine for the voice-confirm flow tests. Its dispatchCto mimics the real cto
+// engine: a confirmable tool returns needConfirmation until it has been
+// approved (approveConfirm flips the flag), then the same call runs — the only
+// way to observe "approves once" end to end.
+function makeConfirmEngine(overrides = {}) {
+  const ws = makeFakeWs();
+  const published = [];
+  const calls = [];
+  let approved = false;
+  const engine = createVcCallEngine({
+    realtimeConnect: async () => ws,
+    configGet: async () => ({ openaiApiKey: "sk-test", cto: { trustedActions: [] } }),
+    dispatchCto: async (name, args, ctx) => {
+      calls.push({ name, args, ctx });
+      if (name === "confirmable_action") {
+        return approved ? { ok: true } : { ok: true, needConfirmation: true, id: "cid-1", preview: "send the report" };
+      }
+      return { ok: true };
+    },
+    approveConfirm: (id) => {
+      approved = true;
+      ws.approved = [...(ws.approved ?? []), id];
+      return true;
+    },
+    rejectConfirm: (id) => {
+      ws.rejected = [...(ws.rejected ?? []), id];
+      return true;
+    },
+    publish: (m) => published.push(m),
+    ...overrides,
+  });
+  engine.setTools([
+    { name: "confirmable_action", description: "an action", params: {} },
+    { name: "trusted_list_sessions", description: "list sessions", params: {} },
+  ]);
+  return { engine, ws, published, calls };
+}
+
+async function startLive(engine) {
+  await engine.start({ openaiApiKey: "sk-test", cto: {} });
+  engine.receiveRealtime({ type: "session.created", session: { id: "s1" } });
+}
+
+// Raise the confirm pause for confirmable_action({x:1}) via GA's response.done.
+async function raiseConfirm(engine) {
+  await engine.receiveRealtime({
+    type: "response.done",
+    response: {
+      output: [
+        { type: "function_call", call_id: "call-1", name: "confirmable_action", arguments: '{"x":1}' },
+      ],
+    },
+  });
+}
+
 test("start connects and sends a session.update with the tools configured", async () => {
   const { engine, ws, stateLog } = makeEngine();
   await engine.start({ openaiApiKey: "sk-test", cto: { model: "m1", voice: "nova" } });
@@ -106,29 +161,26 @@ test("function-call round-trip: dispatches to cto, emits working + cost, complet
   assert.ok(sent.some((m) => m.type === "response.create"));
 });
 
-test("voice confirm: gated tool pauses, re-issue (spoken go-ahead) approves and runs", async () => {
-  const { engine, ws, published, calls } = makeEngine();
-  await engine.start({ openaiApiKey: "sk-test", cto: { trustedActions: [] } });
-  engine.receiveRealtime({ type: "session.created", session: { id: "s1" } });
+test("voice confirm: a gated tool pauses until the user's words authorize it", async () => {
+  const { engine, ws, published } = makeConfirmEngine();
+  await startLive(engine);
 
   // First call to a gated, untrusted action → pause for go-ahead.
-  await engine.receiveRealtime({
-    type: "response.done",
-    response: {
-      output: [
-        { type: "function_call", call_id: "call-1", name: "confirmable_action", arguments: "{\"x\":1}" },
-      ],
-    },
-  });
+  await raiseConfirm(engine);
   assert.equal(published.some((m) => m.type === "confirm" && m.id === "cid-1"), true);
   assert.equal(await engine.listState().pendingConfirm?.tool, "confirmable_action");
   const sent = json(ws);
   const out = sent.find((m) => m.type === "conversation.item.create" && m.item.type === "function_call_output");
   assert.ok(out.item.output.includes("awaiting_confirmation"), "pauses for go-ahead");
+});
 
-  // The model re-issues the SAME tool+args (user said "go ahead") → approves + runs.
+test("voice confirm: a model re-issue with NO affirmative user utterance does NOT approve", async () => {
+  const { engine, ws, calls } = makeConfirmEngine();
+  await startLive(engine);
+  await raiseConfirm(engine); // paused
   calls.length = 0;
-  const before = calls.length;
+
+  // The model re-issues the SAME tool+args, but the user has said nothing.
   await engine.receiveRealtime({
     type: "response.done",
     response: {
@@ -137,12 +189,57 @@ test("voice confirm: gated tool pauses, re-issue (spoken go-ahead) approves and 
       ],
     },
   });
-  assert.ok(ws.approved?.includes("cid-1"), "approveConfirm called on the spoken go-ahead");
-  // dispatchCto ran a second time (the approved re-dispatch).
-  assert.equal(calls.length, 1);
-  assert.equal(published.some((m) => m.type === "confirm-resolved" && m.ok === true), true);
-  assert.equal(await engine.listState().pendingConfirm, null);
-  assert.equal(before, 0);
+  assert.ok(!ws.approved?.includes("cid-1"), "no approval without a spoken yes");
+  assert.equal(calls.length, 0, "action did NOT run (re-issue re-raised, not approved)");
+  assert.equal(await engine.listState().pendingConfirm?.tool, "confirmable_action", "still pending");
+});
+
+test("voice confirm: re-issue AFTER an affirmative utterance approves once and runs", async () => {
+  const { engine, ws, calls } = makeConfirmEngine();
+  await startLive(engine);
+  await raiseConfirm(engine); // paused
+  calls.length = 0;
+
+  // The user actually says yes (input transcription of their speech).
+  engine.receiveRealtime({ type: "conversation.item.input_audio_transcription.completed", transcript: "yes" });
+  assert.ok(ws.approved?.includes("cid-1"), "approveConfirm called on the spoken yes");
+
+  // Now the model re-issues the same tool+args → it is authorized to run.
+  await engine.receiveRealtime({
+    type: "response.done",
+    response: {
+      output: [
+        { type: "function_call", call_id: "call-3", name: "confirmable_action", arguments: '{"x":1}' },
+      ],
+    },
+  });
+  assert.equal(ws.approved?.filter((id) => id === "cid-1").length, 1, "approved exactly once");
+  assert.equal(calls.length, 1, "approved re-issue dispatched and ran");
+  assert.equal(await engine.listState().pendingConfirm, null, "pending cleared after approval");
+});
+
+test("voice confirm: a negative utterance rejects the pending confirm", async () => {
+  const { engine, ws, published } = makeConfirmEngine();
+  await startLive(engine);
+  await raiseConfirm(engine); // paused
+
+  engine.receiveRealtime({ type: "conversation.item.input_audio_transcription.completed", transcript: "no" });
+  assert.ok(ws.rejected?.includes("cid-1"), "rejectConfirm called on a spoken no");
+  assert.equal(await engine.listState().pendingConfirm, null, "pending cleared on reject");
+  assert.equal(published.some((m) => m.type === "confirm-resolved" && m.ok === false), true);
+  const sent = json(ws);
+  assert.ok(sent.some((m) => m.type === "conversation.item.create" && m.item.role === "user"), "model told to replan");
+});
+
+test("voice confirm: an unclear utterance leaves it pending (not an approval)", async () => {
+  const { engine, ws } = makeConfirmEngine();
+  await startLive(engine);
+  await raiseConfirm(engine); // paused
+
+  engine.receiveRealtime({ type: "conversation.item.input_audio_transcription.completed", transcript: "huh what was that" });
+  assert.ok(!ws.approved?.length, "unclear reply never approves");
+  assert.ok(!ws.rejected?.length, "unclear reply never rejects");
+  assert.equal(await engine.listState().pendingConfirm?.tool, "confirmable_action", "still pending until timeout aborts");
 });
 
 test("GA event names: output_audio delta + transcript deltas publish audio/transcript (BET-1178)", async () => {
@@ -344,4 +441,26 @@ test("a socket whose send throws publishes an error frame and does not propagate
     published.some((m) => m.type === "error" && m.error === "realtime_send_failed"),
     "error frame published on failed send",
   );
+});
+
+// ---------------------------------------------------------------------------
+// classifyConfirmReply
+// ---------------------------------------------------------------------------
+
+test("classifyConfirmReply: affirmative utterances → yes", () => {
+  for (const t of ["yes", "yeah", "yep", "go ahead", "okay, do it", "sure, go ahead", "yes you can", "ok"]) {
+    assert.equal(classifyConfirmReply(t), "yes", JSON.stringify(t));
+  }
+});
+
+test("classifyConfirmReply: negative utterances → no", () => {
+  for (const t of ["no", "nope", "no, cancel", "not now", "cancel that", "stop"]) {
+    assert.equal(classifyConfirmReply(t), "no", JSON.stringify(t));
+  }
+});
+
+test("classifyConfirmReply: ambiguous / empty / unrelated → unclear (never an approval)", () => {
+  for (const t of ["", "   ", "hmm", "what's that", "thank you", "you know", "42"]) {
+    assert.equal(classifyConfirmReply(t), "unclear", JSON.stringify(t));
+  }
 });
