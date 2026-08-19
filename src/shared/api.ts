@@ -81,6 +81,7 @@ import type {
   SubagentInput,
   PluginRegistryRow,
   TranscriptHit,
+  LedgerSummary,
   AppControlPayload,
   MediaEventPayload,
 } from "./types.js";
