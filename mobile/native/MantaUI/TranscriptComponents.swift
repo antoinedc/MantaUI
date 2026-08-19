@@ -211,6 +211,90 @@ struct MantaProseCaptureScene: View {
 // Verb is 600 weight `tx2`; target is 12px mono `tx4`. Output is collapsed by
 // default, revealed inline on `inset` in 12px mono when the row is tapped.
 
+/// Capture-harness scene (MANTA_SCENE=step-rows).
+///
+/// A deterministic fixture that renders the REAL `StepGroupView`/`StepRowView`
+/// against a sample run — running + completed steps, an expanded output well,
+/// a roll-up summary, and a subagent row — reachable with no live paired box,
+/// mirroring the `MantaProseCaptureScene` / `ChatLoadingScene` pattern. It is
+/// what the simulator captures to visually verify the grouped-container
+/// treatment of tool calls (BET-1212).
+struct MantaStepRowsCaptureScene: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var tokens: Tokens { Tokens.scheme(colorScheme) }
+
+    var body: some View {
+        ZStack {
+            tokens.canvas.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: Metrics.spacing.sp8) {
+                    // A 2-step run: one completed (output expanded) + one running.
+                    StepGroupView(
+                        content: .rows([
+                            .step(ToolStep(
+                                id: "cap-ran-1", verb: "Ran", target: "node scripts/deploy.mjs --env staging",
+                                duration: "2.4s", status: .completed, output: "✓ build ok\n✓ uploaded\n— releasing…"
+                            )),
+                            .step(ToolStep(
+                                id: "cap-read-1", verb: "Read", target: "src/server/index.mjs",
+                                duration: "0.3s", status: .running, output: nil
+                            )),
+                        ]),
+                        tokens: tokens
+                    )
+                    // A long path so middle-truncation is observable.
+                    StepGroupView(
+                        content: .rows([
+                            .step(ToolStep(
+                                id: "cap-read-2", verb: "Read",
+                                target: "/Users/antoine/projects/very-long-project-root/src/renderer/ChatPanel.tsx",
+                                duration: "0.2s", status: .completed, output: nil
+                            )),
+                            .step(ToolStep(
+                                id: "cap-search-1", verb: "Search", target: "gh pr view 429 --json files",
+                                duration: "0.9s", status: .completed, output: nil
+                            )),
+                        ]),
+                        tokens: tokens
+                    )
+                    // A roll-up row inside the same container treatment.
+                    StepGroupView(
+                        content: .rollup(
+                            summary: "▸ 4 steps · read 3 files, 1 search",
+                            rows: (1...3).map { i in
+                                .step(ToolStep(
+                                    id: "cap-rollup-read-\(i)", verb: "Read", target: "src/rollup/file-\(i).ts",
+                                    duration: "0.2s", status: .completed, output: nil
+                                ))
+                            } + [
+                                .step(ToolStep(
+                                    id: "cap-rollup-search-1", verb: "Search", target: "rollup target",
+                                    duration: "0.8s", status: .completed, output: nil
+                                ))
+                            ]
+                        ),
+                        tokens: tokens
+                    )
+                    // A subagent row sharing the container.
+                    StepGroupView(
+                        content: .rows([
+                            .subagent(SubagentSession(
+                                taskName: "unstick sweep", status: .done, duration: nil, transcript: [],
+                                childSessionId: "ses_cap_subagent"
+                            )),
+                        ]),
+                        tokens: tokens
+                    )
+                }
+                .padding(Metrics.spacing.sp3)
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("step-rows-scene")
+        }
+    }
+}
+
 /// The Vercel AI Elements tool-step taxonomy, ported verbatim. `awaitingApproval`
 /// (a tool blocked on a permission gate) and `denied` (permission refused) are
 /// FIRST-CLASS states, not error variants — a coding agent with a permission
