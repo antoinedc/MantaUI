@@ -34,6 +34,16 @@ export type { InstallerEvent, InstallerState, InstallerStageSnapshotRow, Preflig
  * HTTP — those are NOT OS-integration and must not live here.
  */
 export interface MantaPreload {
+  // On-call CTO floating window (BET-1166). The call window's renderer uses
+  // these to show/park/hang the window and to fetch the {serverUrl, boxToken}
+  // it needs to open its /call WebSocket. Exposed by src/preload/index.ts
+  // under `__mantaPreload.call`.
+  call: {
+    show(): Promise<void>;
+    park(): Promise<void>;
+    hangup(): Promise<void>;
+    getConfig(): Promise<{ serverUrl: string; boxToken: string }>;
+  };
   onScreenshotDetected(
     cb: (ev: { source: "clipboard" | "file" | "unavailable"; path?: string; reason?: string }) => void,
   ): () => void;

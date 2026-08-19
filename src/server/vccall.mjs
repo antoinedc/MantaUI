@@ -67,7 +67,8 @@ export function createVcCallEngine(deps = {}) {
   } = deps;
 
   const state = {
-    status: "idle", // idle | connecting | live | parked | dropped
+    active: false, // a live call is open (set true on session.created)
+    status: "idle", // idle | connecting | live | parked | dropped | reconnecting
     openai: null, // ws-like to OpenAI
     tools: [], // [{name,description,params}]
     session: null,
@@ -75,7 +76,18 @@ export function createVcCallEngine(deps = {}) {
     ongoingSpend: 0, // per-call USD spent
     idleTimer: null,
     startedAt: null,
-    caps: { spendCapUsd: DEFAULT_SPEND_CAP_USD, idleParkMs: DEFAULT_IDLE_PARK_MS },
+    apiKey: null,
+    model: null,
+    voice: null,
+    cfg: {},
+    reconnectAttempts: 0,
+    reconnectTimer: null,
+    caps: {
+      spendCapUsd: DEFAULT_SPEND_CAP_USD,
+      idleParkMs: DEFAULT_IDLE_PARK_MS,
+      maxReconnectAttempts: 5,
+      reconnectBaseMs: 1000,
+    },
   };
 
   function setStatus(s) {
@@ -124,19 +136,33 @@ export function createVcCallEngine(deps = {}) {
 
   async function start(cfg = {}) {
     if (state.status === "connecting" || state.status === "live") return;
+    state.cfg = cfg;
     const conf = cfg?.cto ?? {};
     const apiKey = cfg?.groqApiKey || cfg?.openaiApiKey;
     state.caps = {
       spendCapUsd: typeof cfg?.cto?.spendCapUsd === "number" ? cfg.cto.spendCapUsd : DEFAULT_SPEND_CAP_USD,
       idleParkMs: typeof cfg?.cto?.idleParkMs === "number" ? cfg.cto.idleParkMs : DEFAULT_IDLE_PARK_MS,
+      maxReconnectAttempts: typeof conf?.reconnect?.maxAttempts === "number" ? conf.reconnect.maxAttempts : 5,
+      reconnectBaseMs: typeof conf?.reconnect?.baseMs === "number" ? conf.reconnect.baseMs : 1000,
     };
     if (!apiKey) {
+      state.apiKey = null;
       setStatus("dropped");
       emit({ type: "error", error: "openai_key_missing" });
+      showConnectionState("dropped", "openai_key_missing");
       return;
     }
-    const model = clampModel(conf.model, DEFAULT_REALTIME_MODEL);
-    const voice = typeof conf.voice === "string" && conf.voice ? conf.voice : DEFAULT_VOICE;
+    state.apiKey = apiKey;
+    state.model = clampModel(conf.model, DEFAULT_REALTIME_MODEL);
+    state.voice = typeof conf.voice === "string" && conf.voice ? conf.voice : DEFAULT_VOICE;
+    state.reconnectAttempts = 0;
+    return openTransport();
+  }
+
+  // One connection attempt: connect → wire message/close/error → send
+  // session.update. Returns the ws on success, null on connect failure.
+  async function openTransport() {
+    const { model, apiKey, voice } = state;
     let ws;
     try {
       setStatus("connecting");
@@ -145,34 +171,13 @@ export function createVcCallEngine(deps = {}) {
         "openai-beta": "realtime=v1",
       });
     } catch (e) {
-      setStatus("dropped");
-      emit({ type: "dropped", reason: String(e?.message ?? e) });
-      return;
+      scheduleReconnect("connect_error");
+      return null;
     }
+    state.reconnectAttempts = 0;
     state.openai = ws;
-    state.startedAt = now();
-    state.ongoingSpend = 0;
-    ws.on("message", (raw) => {
-      let evt;
-      try {
-        evt = JSON.parse(typeof raw === "string" ? raw : raw.toString("utf8"));
-      } catch {
-        return;
-      }
-      receiveRealtime(evt);
-    });
-    ws.on("close", () => {
-      if (state.status === "live" || state.status === "connecting") {
-        setStatus("dropped");
-        emit({ type: "dropped", reason: "realtime_closed" });
-      }
-    });
-    ws.on("error", () => {
-      /* close handler does teardown */
-    });
-    // Send the session config. pcm16 in/out: the call renderer encodes mic
-    // frames as raw 16-bit PCM (decodable with a plain AudioBuffer, no opus
-    // wasm dependency) and decodes the model's pcm16 deltas the same way.
+    if (!state.startedAt) state.startedAt = now();
+    configureTransport(ws);
     send({ type: "session.update", session: {
       instructions: SESSION_INSTRUCTIONS,
       voice,
@@ -184,6 +189,66 @@ export function createVcCallEngine(deps = {}) {
     }});
     armIdleTimer();
     return ws;
+  }
+
+  function configureTransport(ws) {
+    ws.on("message", (raw) => {
+      let evt;
+      try {
+        evt = JSON.parse(typeof raw === "string" ? raw : raw.toString("utf8"));
+      } catch {
+        return;
+      }
+      receiveRealtime(evt);
+    });
+    ws.on("close", () => {
+      // Box restart / Realtime drop (spec #10): reconnect with backoff instead
+      // of permanently dropping. Park/hangup close the socket deliberately and
+      // clear `state.active`, so those do NOT reconnect.
+      if (state.active && (state.status === "live" || state.status === "connecting")) {
+        scheduleReconnect("realtime_closed");
+      }
+    });
+    ws.on("error", () => {
+      /* close handler drives reconnect */
+    });
+  }
+
+  // Reconnect with capped exponential backoff; visible "reconnecting" state so
+  // the renderer can surface "call dropped — reconnecting…". Gives up (dropped)
+  // after `maxReconnectAttempts` so a permanently-down provider doesn't spin.
+  function scheduleReconnect(reason) {
+    if (!state.active || state.status === "parked" || state.status === "idle") return;
+    if (state.reconnectAttempts >= state.caps.maxReconnectAttempts) {
+      clearReconnectTimer();
+      state.openai = null;
+      setStatus("dropped");
+      showConnectionState("dropped", reason);
+      emit({ type: "dropped", reason });
+      return;
+    }
+    clearReconnectTimer();
+    state.openai = null;
+    state.reconnectAttempts += 1;
+    setStatus("reconnecting");
+    showConnectionState("reconnecting", reason);
+    const delay = Math.min(state.caps.reconnectBaseMs * 2 ** (state.reconnectAttempts - 1), 10_000);
+    state.reconnectTimer = setTimeout(() => {
+      if (!state.active || state.status === "parked") return;
+      openTransport().catch(() => {});
+    }, delay);
+    if (state.reconnectTimer?.unref) state.reconnectTimer.unref();
+  }
+
+  function clearReconnectTimer() {
+    if (state.reconnectTimer) {
+      clearTimeout(state.reconnectTimer);
+      state.reconnectTimer = null;
+    }
+  }
+
+  function showConnectionState(stateName, reason) {
+    publish({ type: "connstate", state: stateName, reason });
   }
 
   function send(msg) {
@@ -224,7 +289,9 @@ export function createVcCallEngine(deps = {}) {
   }
 
   function hangup() {
+    state.active = false;
     clearIdleTimer();
+    clearReconnectTimer();
     if (state.openai) {
       try { state.openai.close(); } catch { /* ignore */ }
     }
@@ -234,7 +301,9 @@ export function createVcCallEngine(deps = {}) {
   }
 
   function park() {
+    state.active = false;
     clearIdleTimer();
+    clearReconnectTimer();
     if (state.openai) {
       try { state.openai.close(); } catch { /* ignore */ }
     }
@@ -312,6 +381,8 @@ export function createVcCallEngine(deps = {}) {
 
   function handleSessionCreated(evt) {
     state.session = evt?.session ?? null;
+    state.active = true;
+    state.reconnectAttempts = 0;
     setStatus("live");
     emit({ type: "ready", sessionId: state.session?.id ?? null });
   }

@@ -14,6 +14,7 @@ import { dirname, join, extname, normalize, resolve, basename } from "node:path"
 import { homedir, hostname } from "node:os";
 import { pipeline } from "node:stream/promises";
 import { uploadRoot, outboxRoot } from "../shared/paths.mjs";
+import { synthesizeSpeech } from "../shared/groq.mjs";
 import { WebSocketServer } from "ws";
 import * as tmux from "./tmux.mjs";
 import * as oc from "./opencode.mjs";
@@ -3028,7 +3029,10 @@ const handleUpgrade = (req, socket, head) => {
         configGet: () => local.configGet(),
         listTools: () => getCtoEngine().listTools(),
         setCallActive,
-        onNarrate: () => {}, // narration events flow out via engine.publish
+        // Narration (spec #6): the box synthesizes tool-boundary narration with
+        // Groq Orpheus (key server-side) and streams it down /call as audio.
+        synthesizeSpeech,
+        onNarrate: () => {}, // callWs wraps onNarrate → narrator
       }),
     );
     return;

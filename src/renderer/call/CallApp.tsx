@@ -19,6 +19,7 @@ type CallState =
   | "listening"
   | "working"
   | "confirm"
+  | "reconnecting"
   | "parked"
   | "dropped";
 
@@ -55,6 +56,7 @@ export function CallApp() {
   const micStreamRef = useRef<MediaStream | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const outNodeRef = useRef<AudioWorkletNode | null>(null);
+  const initialSetRef = useRef(false);
 
   // ----- connect the /call WS + mic + audio-out -----
   useEffect(() => {
@@ -104,10 +106,37 @@ export function CallApp() {
   function handleServerMessage(msg: Record<string, unknown>) {
     const type = String(msg.type ?? "");
     switch (type) {
-      case "state":
-        setStatus(mapState(String(msg.state ?? "disconnected")));
-        if (String(msg.state) === "parked") setWorking(null);
+      case "config": {
+        // The box tells us its cto profile (push-to-barge default, voice,
+        // transport). Spec #8: respect cto.alwaysListening — never hardcode
+        // always-listening. Only the first config (the connect-time one) sets
+        // the initial mic state, so a user toggle mid-call is never clobbered.
+        const always = (msg.cto as { alwaysListening?: boolean } | undefined)?.alwaysListening;
+        setListening((on) => (initialSetRef.current ? on : Boolean(always)));
+        initialSetRef.current = true;
         return;
+      }
+      case "state": {
+        const s = String(msg.state ?? "disconnected");
+        setStatus(mapState(s));
+        if (s === "reconnecting") {
+          setError("Call dropped — reconnecting…");
+        } else if (error && s === "live") {
+          setError(null);
+        }
+        if (s === "parked") setWorking(null);
+        return;
+      }
+      case "connstate": {
+        if (String(msg.state) === "reconnecting") {
+          setStatus("reconnecting");
+          setError("Call dropped — reconnecting…");
+        } else if (String(msg.state) === "dropped") {
+          setStatus("dropped");
+          setError(String(msg.reason ?? "Call dropped."));
+        }
+        return;
+      }
       case "transcript":
         setTranscript((t) =>
           appendTranscript(t, String(msg.role) === "user" ? "user" : "cto", String(msg.delta ?? "")),
@@ -135,8 +164,9 @@ export function CallApp() {
         outNodeRef.current?.port.postMessage({ kind: "clear" });
         return;
       case NARRATE_KIND:
-        // Narration audio is generated on the box and streamed as `audio`
-        // separately; nothing to render beyond the working line it complements.
+        // Narration (spec #6): the box synthesized (Groq Orpheus) + streamed
+        // this as audio; decode + play it. The working line stays visible.
+        playNarration(String(msg.audio ?? ""), String(msg.mime ?? "audio/mpeg"));
         return;
       case "cost":
         setSpend(Number(msg.usd ?? 0));
@@ -202,6 +232,34 @@ export function CallApp() {
     const buf = base64ToInt16(base64);
     if (!buf || buf.length === 0) return;
     outNodeRef.current?.port.postMessage({ kind: "push", samples: Array.from(buf) });
+  }
+
+  // Narration (spec #6): the box streamed fully-encoded audio (mp3) it made
+  // with Groq Orpheus. Decode + play it through the shared AudioContext.
+  function playNarration(base64: string, _mime: string) {
+    if (!base64) return;
+    let ctx = audioCtxRef.current;
+    if (!ctx) {
+      try {
+        ctx = new AudioContext();
+        audioCtxRef.current = ctx;
+      } catch {
+        return;
+      }
+    }
+    const bytes = base64ToBytes(base64);
+    if (!bytes) return;
+    ctx.decodeAudioData(bytes.buffer as ArrayBuffer).then(
+      (buffer) => {
+        const src = ctx!.createBufferSource();
+        src.buffer = buffer;
+        src.connect(ctx!.destination);
+        src.start();
+      },
+      () => {
+        /* mime not decodable here — silent, never breaks the call */
+      },
+    );
   }
 
   function makePcmWorklet(ctx: AudioContext, onSamples: (s: Int16Array) => void): Promise<AudioWorkletNode> {
@@ -323,6 +381,7 @@ export function CallApp() {
 function mapState(s: string): CallState {
   if (s === "live") return "listening";
   if (s === "parked") return "parked";
+  if (s === "reconnecting") return "reconnecting";
   if (s === "idle") return "disconnected";
   if (s === "connecting") return "connecting";
   if (s === "dropped") return "dropped";
@@ -345,13 +404,23 @@ function appendTranscript(list: TranscriptLine[], role: "user" | "cto", delta: s
 
 function base64ToInt16(b64: string): Int16Array | null {
   try {
-    const bin = atob(b64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const bytes = base64ToBytes(b64);
+    if (!bytes) return null;
     const samples = new Int16Array(bytes.length / 2);
     const dv = new DataView(bytes.buffer);
     for (let i = 0; i < samples.length; i++) samples[i] = dv.getInt16(i * 2, true);
     return samples;
+  } catch {
+    return null;
+  }
+}
+
+function base64ToBytes(b64: string): Uint8Array | null {
+  try {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
   } catch {
     return null;
   }

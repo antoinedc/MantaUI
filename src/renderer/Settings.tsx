@@ -13,6 +13,7 @@ import {
   PhoneCall,
 } from "lucide-react";
 import { useStore } from "./store";
+import type { AppConfig } from "../shared/types.js";
 import { ConfirmModal } from "./ConfirmModal";
 import { useFocusTrap } from "./useFocusTrap";
 import { Checkbox } from "./Checkbox";
@@ -253,6 +254,9 @@ const SECTION_GROUPS: Partial<Record<SettingSectionId, { title: string; entryIds
   ],
   voice: [
     { title: "Speech to text (Groq)", entryIds: ["groqApiKey", "voiceTranscriptionModel"] },
+  ],
+  cto: [
+    { title: "Setup", entryIds: ["ctoEnabled", "ctoModel", "ctoVoice", "ctoAlwaysListening", "ctoParkedBehavior"] },
   ],
 };
 
@@ -1284,6 +1288,42 @@ export function Settings({
               </div>
             </GroupCard>
           )}
+        </>
+      );
+    }
+    if (section === "cto") {
+      return (
+        <>
+          {!cto?.enabled && (
+            <GroupCard title="First call">
+              <div className="text-body text-text">
+                Set up the on-call CTO: toggle <strong>On-call CTO enabled</strong> above, pick its model + voice so it can answer, then add tools to <strong>Trusted actions</strong> to let it run them without asking for a go-ahead. Untrusted tools pause and ask you first during a call.
+              </div>
+            </GroupCard>
+          )}
+          <GroupCard title="Trusted actions (allowlist)">
+            <div className="text-body text-text-faint">
+              Tool names the CTO may run without pausing for your spoken go-ahead. One per line. Empty = ask before every gated tool.
+            </div>
+            <textarea
+              id="cto-trusted-actions"
+              rows={6}
+              spellCheck={false}
+              className="w-full border border-border rounded-xs bg-bg-soft px-3 py-2 text-body text-text font-mono mt-2"
+              placeholder={"e.g.\nlist_sessions\nlist_projects"}
+              defaultValue={((cto?.trustedActions) ?? []).join("\n")}
+              onBlur={(e) => {
+                const ids = e.target.value
+                  .split(/\n|,/)
+                  .map((s) => s.trim())
+                  .filter(Boolean);
+                useStore.setState({ cto: { ...(cto ?? {}), trustedActions: ids } });
+                void window.api
+                  .configUpdate({ "cto.trustedActions": ids } as Partial<AppConfig>)
+                  .catch(() => {});
+              }}
+            />
+          </GroupCard>
         </>
       );
     }

@@ -208,3 +208,31 @@ test("park closes the session without silent spend and sets parked", async () =>
   assert.equal(ws.closed, true);
   assert.equal(stateLog[stateLog.length - 1], "parked");
 });
+
+test("reconnect: an unexpected realtime close while live enters a reconnecting state (not a permanent drop)", async () => {
+  const { engine, ws, stateLog } = makeEngine({});
+  await engine.start({ openaiApiKey: "sk-test", cto: { reconnect: { maxAttempts: 5, baseMs: 10 } } });
+  engine.receiveRealtime({ type: "session.created", session: { id: "s1" } });
+  // Simulate the provider dropping the socket mid-call.
+  ws.emit("close");
+  assert.equal(stateLog.includes("reconnecting"), true);
+  assert.equal(stateLog.includes("dropped"), false, "reconnecting, not dropped");
+});
+
+test("reconnect: giving up after maxAttempts surfaces a dropped state", async () => {
+  const { engine, ws, stateLog } = makeEngine({
+    realtimeConnect: async () => {
+      // First connect works; subsequent reconnect attempts fail.
+      if (stateLog.filter((s) => s === "connecting").length <= 1) return ws;
+      throw new Error("provider down");
+    },
+  });
+  await engine.start({ openaiApiKey: "sk-test", cto: { reconnect: { maxAttempts: 1, baseMs: 5 } } });
+  engine.receiveRealtime({ type: "session.created", session: { id: "s1" } });
+  ws.emit("close"); // attempt 1 → reconnect
+  await new Promise((r) => setTimeout(r, 20)); // let the reconnect attempt run + fail
+  ws.emit("close"); // reconnect attempt's socket closes → attempt 2 >= max → dropped
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(stateLog.includes("reconnecting"), true);
+  assert.equal(stateLog[stateLog.length - 1], "dropped");
+});

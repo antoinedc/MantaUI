@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { MotionConfig } from "framer-motion";
-import { Bell, Terminal as TerminalIcon, type LucideIcon } from "lucide-react";
+import { Bell, PhoneCall, Terminal as TerminalIcon, type LucideIcon } from "lucide-react";
 import { Sidebar, type SidebarHandle } from "./Sidebar";
 import { Terminal } from "./Terminal";
 import { ChatPanel } from "./ChatPanel";
@@ -210,6 +210,9 @@ function Shell() {
   const projects = useStore((s) => s.projects);
   const activeProjectName = useStore((s) => s.activeProjectName);
   const activeWindowByProject = useStore((s) => s.activeWindowByProject);
+  // On-call CTO (BET-1166): whether the call window is available + a handler
+  // that opens it via the genuine preload bridge (window.api is httpApi here).
+  const ctoEnabled = useStore((s) => s.cto?.enabled === true);
   // BET-1049: resolve a stopped record's `conversation` (an opencode session
   // id) to its sidebar window name, for the resume modal rows. Records whose
   // window can't be resolved fall back to the raw id.
@@ -1812,6 +1815,26 @@ function Shell() {
               </span>
             )}
           </div>
+
+          {/* On-call CTO (BET-1166): opens the floating voice-call window via
+              the genuine preload bridge (window.api is httpApi here). Gated on
+              the feature being enabled so it doesn't clutter an unconfigured
+              app. */}
+          {ctoEnabled && (
+            <button
+              type="button"
+              onClick={() => {
+                const pre = getMantaPreload();
+                pre?.call?.show?.();
+              }}
+              className="text-text-faint hover:text-text hover:bg-fill-hover rounded-xs p-1 inline-flex items-center"
+              style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
+              title="On-call CTO"
+              aria-label="Open on-call CTO call window"
+            >
+              <PhoneCall size={16} aria-hidden="true" />
+            </button>
+          )}
 
           {/* Session-mode toggle (BET-459): a terminal glyph that swaps
               Terminal ↔ Chat — the icon-button presentation of the old
