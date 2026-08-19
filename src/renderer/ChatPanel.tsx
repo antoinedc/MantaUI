@@ -310,7 +310,7 @@ export function ChatPanel({
   }, []);
   // Forward declaration: submitRef is defined later (depends on submit), but
   // useSseBus needs it now for the drain effect.
-  const submitRef = useRef<(textOverride?: string) => void>(() => {});
+  const submitRef = useRef<(textOverride?: string, attachmentsOverride?: Attachment[]) => void>(() => {});
   // Input state must be declared before useSseBus (which needs setInput).
   const [input, setInput] = useState("");
   // Bumped after each submit so useInputHistory re-reads localStorage and the
@@ -1053,15 +1053,16 @@ export function ChatPanel({
     refreshPermissions();
   }, [isActive, scheduleRefetch, refreshQuestions, refreshPermissions]);
 
-  const submit = useCallback(async (textOverride?: string) => {
+  const submit = useCallback(async (textOverride?: string, attachmentsOverride?: Attachment[]) => {
+    const submitAttachments = attachmentsOverride ?? attachments;
     // Block submit while any attachment is still uploading.
-    if (attachments.some((a) => a.status === "uploading")) {
+    if (submitAttachments.some((a) => a.status === "uploading")) {
       setSendError("Wait for attachments to finish uploading.");
       return;
     }
     // Non-media chips ride along as `@<remote-path>` tokens appended to the
     // message text — the AI reads them with its Read tool.
-    const pathRefAttachments = attachments.filter(
+    const pathRefAttachments = submitAttachments.filter(
       (a) => a.status === "ready" && !!a.remotePath && a.asPathRef,
     );
     const pathRefText = pathRefAttachments.map((a) => `@${a.remotePath}`).join(" ");
@@ -1162,7 +1163,7 @@ export function ChatPanel({
 
     // Only media chips become multimodal FileParts; path-ref chips were
     // already folded into `text` above.
-    const readyAttachments = attachments
+    const readyAttachments = submitAttachments
       .filter((a) => a.status === "ready" && a.remotePath && !a.asPathRef)
       .map((a) => ({
         remotePath: a.remotePath!,
@@ -1315,7 +1316,11 @@ export function ChatPanel({
     // on the setInput re-render having committed before the timer fires.
     const t = setTimeout(() => {
       useStore.getState().setAutoSubmitPrompt(null);
-      submitRef.current?.(text);
+      // Attachments ride the same explicit-override channel as the text: like
+      // textOverride, this deferred first-turn submit must not depend on the
+      // setAttachments re-render having committed a fresh closure before the
+      // timer fires, or the staged draft file is silently dropped.
+      submitRef.current?.(text, attachments);
     }, 0);
     return () => {
       clearTimeout(t);
