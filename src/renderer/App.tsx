@@ -1507,6 +1507,7 @@ function Shell() {
     if (!boxUpgrading) return;
     if (compatibilityVariant === "match" || compatibilityVariant === "unknown") {
       setBoxUpgrading(false);
+      useStore.getState().setUpdatingTarget(null);
       useStore.getState().setServerUpdateProgress(null);
       setUpdateError(null);
       // The box run has completed and the connection is confirmed back (the
@@ -1523,6 +1524,7 @@ function Shell() {
     if (!boxUpgrading) return;
     const t = setTimeout(() => {
       setBoxUpgrading(false);
+      useStore.getState().setUpdatingTarget(null);
       useStore.getState().setServerUpdateProgress(null);
     }, 120_000);
     return () => clearTimeout(t);
@@ -1535,9 +1537,15 @@ function Shell() {
 
   const applyServerUpdate = async () => {
     setBoxUpgrading(true);
+    // Mark the server row as the in-flight target so Settings' per-target
+    // spinner actually renders ("updating"). boxUpgrading alone only made the
+    // row "busy" (disabled, NO spinner), which is exactly the missing server
+    // loading state. Cleared on the reconcile / cap / early-failure paths below.
+    useStore.getState().setUpdatingTarget("server");
     try {
       const res = await window.api.serverUpdateApply();
       if (res && res.ok === false) {
+        useStore.getState().setUpdatingTarget(null);
         setBoxUpgrading(false);
         setUpdateError({ message: res.error || "Server update failed", raw: res.error ?? "" });
       }
@@ -1546,6 +1554,7 @@ function Shell() {
       // success path) — swallow it; the reconnect + version re-check above
       // resolves the real outcome. Structured failures still raise the banner.
       if (isTransientUpdateNetworkError(e)) return;
+      useStore.getState().setUpdatingTarget(null);
       setBoxUpgrading(false);
       setUpdateError({
         message: e instanceof Error ? e.message : String(e),
