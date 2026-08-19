@@ -234,6 +234,38 @@ export function formatBytes(n: number): string {
   return `${val < 10 ? val.toFixed(1).replace(/\.0$/, "") : Math.round(val)} ${units[i]}`;
 }
 
+// ===== Download confirmation (BET-1198) =====
+//
+// Every desktop download (outbox toast Save, inline-media hover/preview
+// Download, artifacts row) ends by writing a REAL file to the downloads
+// folder — but the only feedback used to be a faint "· saved to Downloads"
+// on one of the three, and nothing at all on the other two. A save the user
+// can't see reads as a save that didn't happen (that is exactly how a working
+// inline-media download got reported as broken). The confirmation names the
+// FULL folder so the file is findable without guessing which folder "Downloads"
+// meant — a custom `downloadsDir` in Settings makes that genuinely ambiguous.
+//
+// Pure: split a saved absolute path into the folder that holds it and the file
+// name. Returns null when there is no OS path to describe — mobile/web, where
+// agentPullFile hands the bytes to the browser and returns "" (the browser owns
+// the "downloaded" chrome there, so we must not claim a path we don't have).
+export function describeSavedFile(
+  localPath: string | undefined | null,
+): { dir: string; name: string } | null {
+  if (typeof localPath !== "string") return null;
+  const trimmed = localPath.trim();
+  if (!trimmed) return null;
+  // Windows separators too — the desktop app ships on Windows and main hands
+  // back whatever `path.join` produced there.
+  const cut = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
+  if (cut < 0) return { dir: "", name: trimmed };
+  const name = trimmed.slice(cut + 1);
+  if (!name) return null; // a bare directory ("/a/b/") is not a saved file
+  // Keep the root slash: dirname("/x.png") is "/", not "".
+  const dir = cut === 0 ? trimmed.slice(0, 1) : trimmed.slice(0, cut);
+  return { dir, name };
+}
+
 // Decode a `data:<mime>;base64,<payload>` (or url-encoded) URI into its MIME
 // type and raw bytes. Used by the artifacts panel so a self-contained inline
 // image (href is a data URI, not a box path) can be downloaded/attached

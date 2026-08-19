@@ -365,6 +365,26 @@ require-confirm toast the user hasn't answered isn't re-offered every 3s.
   `agentFileToast` in the store, App.tsx owns the one `onAgentFileReady`
   listener, the active ChatPanel renders it. De-dupe on collision via
   `uniqueLocalPath` (`report.pdf` → `report (1).pdf`).
+- **`/api/download` is scoped to the user's HOME dir, not to the outbox
+  (BET-1195).** Inline media shown via `media_show` can sit at ANY path inside
+  home — the tool never copies it into the mailbox — so an outbox-only guard
+  meant a file the transcript happily DISPLAYED (`/api/peek`, already
+  home-scoped, same bearer) could not be SAVED: the download 403'd, the desktop
+  bridge returned `""`, and the renderer threw a bare "download failed". The two
+  routes now share one rule. This does not widen what an authenticated client
+  can read; it only stops display and download from disagreeing.
+- **Every download REPORTS ITSELF (BET-1198) — `saveToDownloads` in
+  `src/renderer/downloadFeedback.ts` is the one non-toast call site.** The
+  inline-media hover/preview Download and the artifacts row were previously
+  fire-and-forget: a success showed nothing and a failure showed only an
+  "Uncaught (in promise)" in devtools, so the two were indistinguishable from a
+  dead button — a WORKING save was reported as broken more than once. Rules:
+  desktop success → a confirmation toast naming the **full destination folder**
+  (`Saved dog.mp4 to /Users/x/Downloads`) + Reveal; mobile/web (`agentPullFile`
+  returns `""`) → silent ON PURPOSE, the browser owns that chrome; failure → an
+  error toast saying the file is still on the server. The agent-file toast keeps
+  its own Save→Reveal lifecycle but shares the copy via `savedToastMessage`.
+  Name the folder, never just "Downloads": `downloadsDir` makes that ambiguous.
 - **The AI sends files via the `send_file` tool** (`docs/opencode-tools/send-file.ts`,
   a manta-native opencode tool like `serve_page`). It POSTs the file path + its
   `context.sessionID` to `POST /api/outbox/push`, which copies the file into
