@@ -1170,15 +1170,16 @@ export function ChatPanel({
         filename: a.filename,
       }));
 
-    // Refuse to submit if the user has attachments but the active model
-    // can't accept them — opencode would error mid-stream with a vague
-    // "media type X functionality not supported" message. Block here with
-    // a clearer reason instead.
+    // Refuse only what the model positively declares it cannot take. A file
+    // that maps to no media mode ("other") is refused on its own — that is a
+    // property of the file, not the model. But a modality check requires
+    // capability information to exist: when we know nothing, we send and let
+    // the provider answer, rather than asserting "accepted: none".
     if (readyAttachments.length > 0) {
       const modes = modelInputModes(activeModel);
       const unsupported = readyAttachments
         .map((a) => ({ filename: a.filename, mime: a.mime, mode: mimeToInputMode(a.mime) }))
-        .filter((a) => a.mode === "other" || !modes.includes(a.mode));
+        .filter((a) => a.mode === "other" || (modes.length > 0 && !modes.includes(a.mode)));
       if (unsupported.length > 0) {
         setRunning(false);
         // Strip the optimistic user message — the send is being refused.
