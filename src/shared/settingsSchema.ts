@@ -358,7 +358,7 @@ export const SETTINGS: SettingEntry[] = [
     platform: "both",
     default: "",
     group: "Setup",
-    placeholder: "gpt-4o-realtime-preview",
+    placeholder: "gpt-realtime-2.1",
   },
   {
     id: "ctoVoice",
