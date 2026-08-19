@@ -60,7 +60,11 @@ export default defineConfig({
     },
     build: {
       rollupOptions: {
-        input: { index: resolve(__dirname, "src/renderer/index.html") },
+        input: {
+          index: resolve(__dirname, "src/renderer/index.html"),
+          // The floating on-call CTO window (BET-1166): frameless call.html.
+          call: resolve(__dirname, "src/renderer/call.html"),
+        },
       },
     },
     resolve: {

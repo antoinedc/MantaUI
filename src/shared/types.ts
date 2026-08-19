@@ -210,6 +210,11 @@ export type AppConfig = {
   // manta credentials (ssh identity path, opencode auth). Settings UI shows
   // a masked password input. Absent → mic button is hidden in the UI.
   groqApiKey?: string;
+  // ----- On-call CTO (BET-1166) -----
+  // OpenAI API key for the Realtime voice transport. Stored on the box (like
+  // groqApiKey) and never reaches the renderer — the call window relays audio
+  // through the box's /call WS. Absent → the call window can't start a call.
+  openaiApiKey?: string;
   // ----- Analytics (BET-217) -----
   // When true (the default), this instance ships console.* output + a handful
   // of structured events to Axiom for remote debugging. When false, the
@@ -280,6 +285,9 @@ export type AppConfig = {
     // Whether the call window listens continuously (Issue 3). Default false.
     alwaysListening?: boolean;
   };
+  // Position/size of the floating on-call CTO window (BET-1166). Persisted so
+  // the window remembers where the user parked it across runs.
+  callWindowBounds?: { x?: number; y?: number; width: number; height: number };
 };
 
 // ----- Live tmux state -----
@@ -1280,6 +1288,17 @@ export const IPC = {
   // DesktopNotifyPayload. The renderer suppresses it if it's already viewing
   // that session, else shows it via the Notification API + deep-links on click.
   desktopNotify: "desktop:notify",
+
+  // ---- on-call CTO voice window (BET-1166) ----
+  // Renderer → main controls for the floating call window. `show` reveals it
+  // (creating it on first use), `park` hides it while keeping the window
+  // alive, `hangup` destroys it. `callGetConfig` returns the {serverUrl,
+  // boxToken} the call renderer needs to open its /call WS (no second
+  // transport, no API key — audio + events ride the /call WS).
+  callWindowShow: "call:window-show",
+  callWindowPark: "call:window-park",
+  callWindowHangup: "call:window-hangup",
+  callGetConfig: "call:get-config",
 
   // ---- opencode chat-mode ----
   // Fetch a session's transcript (one-shot HTTP call on the remote).

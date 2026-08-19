@@ -12,13 +12,16 @@ function mockMobileWeb(): void {
 // Build a fake preload with spy callbacks so we can verify forwarding.
 function makeFakePreload(): MantaPreload {
   return {
+    call: {
+      show: vi.fn(async () => {}),
+      park: vi.fn(async () => {}),
+      hangup: vi.fn(async () => {}),
+      getConfig: vi.fn(async () => ({ serverUrl: "", boxToken: "" })),
+    },
     onScreenshotDetected: vi.fn((cb: (ev: unknown) => void) => {
       cb({ source: "clipboard" });
       return vi.fn();
     }),
-    // BET-240: deep-link pairing bridge. Matches the MantaPreload shape in
-    // src/renderer/preloadAccess.ts; we don't exercise its buffering here —
-    // that's tested implicitly by App.tsx's wiring + PairStep's prefill.
     onPairLink: vi.fn((_cb: (url: string) => void) => vi.fn()),
     clipboardWriteText: vi.fn(async () => {}),
     clipboardReadImage: vi.fn(async () => null),

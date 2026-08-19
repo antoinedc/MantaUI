@@ -1,0 +1,175 @@
+// callWs.mjs — the /call WebSocket handler (BET-1166, issue 3/3).
+//
+// The renderer's call window connects here (auth-gated at the upgrade layer,
+// mirroring /pty) and streams opus mic frames up while receiving transcript /
+// audio / intent events down. One vccall engine per socket; the engine owns
+// the OpenAI Realtime session (whose key lives on the box, never in the
+// renderer). Lives in its own module so the WS↔engine wiring is unit-testable
+// without standing up the HTTP server — attachCallWs(ws, url, opts) is called
+// only after the upgrade is authorized and the path is /call.
+//
+// Client→server (JSON text):
+//   { type:"audio", delta:<base64 opus> }  → engine.handleUserAudio
+//   { type:"commit" }                       → engine.commitAndRespond
+//   { type:"barge" }                        → engine.barge
+//   { type:"control", action:"park"|"hangup" } → lifecycle
+// Server→client (JSON text): every engine.publish(msg) forwarded verbatim
+//   ({ type:"state"|"audio"|"transcript"|"stt"|"working"|"confirm"|… }).
+
+import { createVcCallEngine } from "./vccall.mjs";
+
+/**
+ * Attach a /call WS to a fresh vccall engine. Auth + path matching happen at
+ * the upgrade layer (src/server/index.mjs). `opts` supplies the engine deps
+ * and the live-routing hooks (the "call active" flag that issue 2's inbound
+ * funnel reads):
+ *   { dispatchCto, approveConfirm, rejectConfirm, configGet,
+ *     synthesizeSpeech, onNarrate,
+ *     setCallActive:(active, engine|null)=>void }
+ *
+ * @param {object} ws   a `ws` WebSocket instance
+ * @param {URL}    url  the parsed upgrade URL
+ * @param {object} [opts]
+ */
+export function attachCallWs(ws, url, opts = {}) {
+  const {
+    dispatchCto,
+    approveConfirm,
+    rejectConfirm,
+    configGet,
+    synthesizeSpeech,
+    realtimeConnect,
+    onNarrate = () => {},
+    setCallActive = () => {},
+  } = opts;
+
+  let open = true;
+  function sendJson(obj) {
+    if (!open) return;
+    try {
+      ws.send(JSON.stringify(obj));
+    } catch {
+      /* socket closing */
+    }
+  }
+
+  // Narration (spec #6): tool-boundary narration is a separate, lighter voice
+  // than the Realtime model — a server-side Groq Orpheus TTS synthesis pushed
+  // down the /call WS as `cto.narrate` {text, audio(base64), mime}. The key
+  // never leaves the box; the renderer just plays the audio.
+  function narrate(raw) {
+    if (!raw) return;
+    const text = cleanNarration(String(raw));
+    onNarrate(text);
+    (async () => {
+      let cfg = {};
+      try {
+        cfg = (await configGet()) ?? {};
+      } catch {
+        cfg = {};
+      }
+      const apiKey = cfg.groqApiKey;
+      if (!apiKey) return;
+      try {
+        const { buffer, mime } = await synthesizeSpeech({
+          text,
+          apiKey,
+          model: cfg.cto?.transport === "groq" ? cfg.cto?.voice : undefined,
+          voice: cfg.cto?.voice || undefined,
+        });
+        if (buffer && buffer.length > 0) {
+          sendJson({ type: "cto.narrate", text, audio: Buffer.from(buffer).toString("base64"), mime });
+        }
+      } catch {
+        /* narration is best-effort; never breaks the call */
+      }
+    })();
+  }
+
+  const engine = createVcCallEngine({
+    dispatchCto,
+    approveConfirm,
+    rejectConfirm,
+    configGet,
+    synthesizeSpeech,
+    realtimeConnect,
+    onNarrate: narrate,
+    publish: sendJson,
+  });
+
+  // Boot the call on connect (open a Realtime session). The keys live on the
+  // box; the engine reads them via configGet — nothing reaches the renderer.
+  engine.setTools(opts.listTools ? opts.listTools() : []);
+  (async () => {
+    let cfg = {};
+    try {
+      cfg = (await configGet()) ?? {};
+    } catch {
+      cfg = {};
+    }
+    setCallActive(true, engine);
+    // Push the cto profile to the renderer so it honours the config (e.g. the
+    // push-to-barge default reads cto.alwaysListening; never hardcodes it).
+    sendJson({
+      type: "config",
+      cto: {
+        alwaysListening: cfg?.cto?.alwaysListening === true,
+        voice: cfg?.cto?.voice || "alloy",
+        transport: cfg?.cto?.transport || "realtime",
+        enabled: cfg?.cto?.enabled === true,
+      },
+    });
+    await engine.start(cfg);
+  })();
+
+  ws.on("message", (raw) => {
+    let msg;
+    try {
+      msg = JSON.parse(typeof raw === "string" ? raw : raw.toString("utf8"));
+    } catch {
+      return;
+    }
+    if (!msg || typeof msg !== "object") return;
+    switch (msg.type) {
+      case "audio":
+        if (typeof msg.delta === "string") engine.handleUserAudio(msg.delta);
+        return;
+      case "commit":
+        engine.commitAndRespond();
+        return;
+      case "barge":
+        engine.barge();
+        return;
+      case "control":
+        if (msg.action === "park") {
+          setCallActive(false, null);
+          engine.park();
+        } else if (msg.action === "hangup") {
+          setCallActive(false, null);
+          engine.hangup();
+        }
+        return;
+      default:
+        return;
+    }
+  });
+
+  ws.on("close", () => {
+    open = false;
+    setCallActive(false, null);
+    engine.hangup();
+  });
+  ws.on("error", () => {
+    /* cleanup runs in close */
+  });
+}
+
+// Narration text from cto.dispatch arrives as terse `[cto] <tool>` / ` ok` /
+// ` error` labels (issue 1's seam). Turn them into something the Orpheus voice
+// can actually speak.
+function cleanNarration(raw) {
+  let s = raw.replace(/^\[cto\]\s*/i, "").trim();
+  if (s.endsWith(" ok")) return `${s.slice(0, -3)} done`;
+  if (s.endsWith(" error")) return `${s.slice(0, -6)} failed`;
+  return s || "Working on it";
+}

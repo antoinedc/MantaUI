@@ -43,7 +43,8 @@ export type SettingSectionId =
   | "sessions"
   | "files"
   | "extensions"
-  | "voice";
+  | "voice"
+  | "cto";
 
 export type SettingSection = {
   id: SettingSectionId;
@@ -85,6 +86,7 @@ export const SETTING_SECTIONS: SettingSection[] = [
   { id: "files", label: "Files", group: "AGENT" },
   { id: "extensions", label: "Extensions", group: "AGENT" },
   { id: "voice", label: "Voice", group: "AGENT" },
+  { id: "cto", label: "On-call CTO", group: "AGENT" },
 ];
 
 // The schema. `custom` entries are placeholders so search/section listing
@@ -298,6 +300,78 @@ export const SETTINGS: SettingEntry[] = [
     platform: "both",
     default: "",
     placeholder: "whisper-large-v3-turbo",
+  },
+  {
+    id: "openaiApiKey",
+    section: "voice",
+    label: "OpenAI API key",
+    help: "Enables the on-call CTO voice call window (OpenAI Realtime). Stored on the box; the renderer never sees it.",
+    control: "password",
+    configKey: "openaiApiKey",
+    platform: "both",
+    default: "",
+    commitOnBlur: true,
+    placeholder: "sk-… (leave blank to disable the call window)",
+  },
+
+  // ----- on-call CTO (BET-1166) -----
+  // Nested under `cto.*` in AppConfig. The surface renders these through the
+  // generic schema-driven fields (configUpdate handles the cto.* prefix).
+  {
+    id: "ctoEnabled",
+    section: "cto",
+    label: "On-call CTO enabled",
+    help: "Registers the cto agent and enables the call window. Off by default until the feature ships.",
+    control: "toggle",
+    configKey: "cto.enabled",
+    platform: "both",
+    default: false,
+  },
+  {
+    id: "ctoModel",
+    section: "cto",
+    label: "CTO model",
+    help: "The model the on-call CTO answers through.",
+    control: "text",
+    configKey: "cto.model",
+    platform: "both",
+    default: "",
+    placeholder: "gpt-4o-realtime-preview",
+  },
+  {
+    id: "ctoVoice",
+    section: "cto",
+    label: "CTO voice",
+    help: "Voice/narration model id for the call window.",
+    control: "text",
+    configKey: "cto.voice",
+    platform: "both",
+    default: "",
+    placeholder: "alloy",
+  },
+  {
+    id: "ctoAlwaysListening",
+    section: "cto",
+    label: "Always listening",
+    help: "When off, the call window is push-to-barge: the mic opens only while you hold/click to talk.",
+    control: "toggle",
+    configKey: "cto.alwaysListening",
+    platform: "both",
+    default: false,
+  },
+  {
+    id: "ctoParkedBehavior",
+    section: "cto",
+    label: "When parked",
+    help: "What the box does with an inbound CTO event while no call is open.",
+    control: "segmented",
+    configKey: "cto.parkedBehavior",
+    platform: "both",
+    default: "auto-open",
+    options: [
+      { value: "auto-open", label: "Auto-open" },
+      { value: "push", label: "Notify only" },
+    ],
   },
 ];
 

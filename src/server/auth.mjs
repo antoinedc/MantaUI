@@ -219,7 +219,7 @@ export function isPublicAssetPath(path) {
 // authorize(). The header always wins when present (non-browser clients keep
 // using it); the query token is honored only as a fallback and only on the
 // allowlisted stream paths (/events, /pty).
-export const QUERY_TOKEN_PATHS = new Set(["/events", "/pty"]);
+export const QUERY_TOKEN_PATHS = new Set(["/events", "/pty", "/call"]);
 
 export function queryTokenAllowedForPath(path) {
   return QUERY_TOKEN_PATHS.has(path);

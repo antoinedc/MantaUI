@@ -10,8 +10,10 @@ import {
   Folder,
   Plug,
   Mic,
+  PhoneCall,
 } from "lucide-react";
 import { useStore } from "./store";
+import type { AppConfig } from "../shared/types.js";
 import { ConfirmModal } from "./ConfirmModal";
 import { useFocusTrap } from "./useFocusTrap";
 import { Checkbox } from "./Checkbox";
@@ -229,6 +231,7 @@ const SECTION_ICONS: Record<SettingSectionId, typeof SettingsIcon> = {
   files: Folder,
   extensions: Plug,
   voice: Mic,
+  cto: PhoneCall,
 };
 
 // Card groupings for the schema-driven sections. Each { title, entryIds }
@@ -251,6 +254,9 @@ const SECTION_GROUPS: Partial<Record<SettingSectionId, { title: string; entryIds
   ],
   voice: [
     { title: "Speech to text (Groq)", entryIds: ["groqApiKey", "voiceTranscriptionModel"] },
+  ],
+  cto: [
+    { title: "Setup", entryIds: ["ctoEnabled", "ctoModel", "ctoVoice", "ctoAlwaysListening", "ctoParkedBehavior"] },
   ],
 };
 
@@ -454,6 +460,7 @@ export function Settings({
   const cacheTtl = useStore((s) => s.cacheTtl);
   const groqApiKey = useStore((s) => s.groqApiKey);
   const voiceTranscriptionModel = useStore((s) => s.voiceTranscriptionModel);
+  const openaiApiKey = useStore((s) => s.openaiApiKey);
   const allowAgentPush = useStore((s) => s.allowAgentPush);
   const downloadsDir = useStore((s) => s.downloadsDir);
   const worktreePerSession = useStore((s) => s.worktreePerSession);
@@ -463,6 +470,7 @@ export function Settings({
   const autoRenameSessions = useStore((s) => s.autoRenameSessions);
   const alwaysShowUsage = useStore((s) => s.alwaysShowUsage);
   const theme = useStore((s) => s.theme);
+  const cto = useStore((s) => s.cto);
   const skillRegistryUrls = useStore((s) => s.skillRegistryUrls);
   const launcherFlags = useStore((s) => s.launcherFlags);
   const updatePrompt = useStore((s) => s.updatePrompt);
@@ -504,6 +512,7 @@ export function Settings({
       cacheTtl,
       groqApiKey,
       voiceTranscriptionModel,
+      openaiApiKey,
       allowAgentPush,
       downloadsDir,
       worktreePerSession,
@@ -513,8 +522,13 @@ export function Settings({
       theme,
       autoRenameSessions,
       alwaysShowUsage,
+      "cto.enabled": cto?.enabled ?? false,
+      "cto.model": cto?.model ?? "",
+      "cto.voice": cto?.voice ?? "",
+      "cto.alwaysListening": cto?.alwaysListening ?? false,
+      "cto.parkedBehavior": cto?.parkedBehavior ?? "auto-open",
     }),
-    [cacheTtl, groqApiKey, voiceTranscriptionModel, allowAgentPush, downloadsDir, worktreePerSession, worktreeCleanOnClose, uploadCleanupHours, voiceNoteTtlHours, theme, autoRenameSessions, alwaysShowUsage],
+    [cacheTtl, groqApiKey, voiceTranscriptionModel, openaiApiKey, allowAgentPush, downloadsDir, worktreePerSession, worktreeCleanOnClose, uploadCleanupHours, voiceNoteTtlHours, theme, autoRenameSessions, alwaysShowUsage, cto],
   );
 
   const commitKey = async (entry: SettingEntry, nextValue: unknown) => {
@@ -1274,6 +1288,42 @@ export function Settings({
               </div>
             </GroupCard>
           )}
+        </>
+      );
+    }
+    if (section === "cto") {
+      return (
+        <>
+          {!cto?.enabled && (
+            <GroupCard title="First call">
+              <div className="text-body text-text">
+                Set up the on-call CTO: toggle <strong>On-call CTO enabled</strong> above, pick its model + voice so it can answer, then add tools to <strong>Trusted actions</strong> to let it run them without asking for a go-ahead. Untrusted tools pause and ask you first during a call.
+              </div>
+            </GroupCard>
+          )}
+          <GroupCard title="Trusted actions (allowlist)">
+            <div className="text-body text-text-faint">
+              Tool names the CTO may run without pausing for your spoken go-ahead. One per line. Empty = ask before every gated tool.
+            </div>
+            <textarea
+              id="cto-trusted-actions"
+              rows={6}
+              spellCheck={false}
+              className="w-full border border-border rounded-xs bg-bg-soft px-3 py-2 text-body text-text font-mono mt-2"
+              placeholder={"e.g.\nlist_sessions\nlist_projects"}
+              defaultValue={((cto?.trustedActions) ?? []).join("\n")}
+              onBlur={(e) => {
+                const ids = e.target.value
+                  .split(/\n|,/)
+                  .map((s) => s.trim())
+                  .filter(Boolean);
+                useStore.setState({ cto: { ...(cto ?? {}), trustedActions: ids } });
+                void window.api
+                  .configUpdate({ "cto.trustedActions": ids } as Partial<AppConfig>)
+                  .catch(() => {});
+              }}
+            />
+          </GroupCard>
         </>
       );
     }
