@@ -44,19 +44,33 @@ function defaultFetchJsonFor(entryId) {
   return f;
 }
 
-// ---------------------------------------------------------------------------
-// resolveBinary
-// ---------------------------------------------------------------------------
-
-// THE PATH TRAP — this ordering is the whole reason this function exists.
+// THE PATH TRAP — this ordering is the whole reason these helpers exist.
 // A process spawned by manta-server gets the SYSTEM path only. `~/.local/bin`
 // (claude) and `~/.opencode/bin` (opencode) are added by `~/.bashrc`, which a
 // non-login shell never reads — so every one of these CLIs is INVISIBLE unless
 // PATH is pinned. `scripts/self-update.sh` already pins PATH for exactly this
 // reason. Search these pinned dirs, in order, before `process.env.PATH`.
 //
+// Single source for the pinned-dir list, shared by resolveBinary (the search
+// order) and upgradeCli (building the PATH for an upgrade spawn — upgrade-clis
+// invokes BARE NAME upgrades like `claude update`, and systemd services lack
+// these dirs). The home-relative entries come from the shared
+// HOME_CLI_INSTALL_DIRS (src/shared/cliCatalog.mjs — the same list
+// scripts/self-update.sh prepends to PATH, BET-1163); /opt/homebrew/bin and
+// /usr/local/bin are system-level dirs (not home-relative) and are pinned
+// additionally. Never duplicate this literal a third time — read the constant.
+//
 // Never shells out to `which`/`command -v` — check X_OK access on each
 // candidate directly.
+const CLI_BIN_DIRS = [...HOME_CLI_INSTALL_DIRS, "/opt/homebrew/bin", "/usr/local/bin"];
+
+function resolveCliBinDirs(home) {
+  return CLI_BIN_DIRS.map((dir) => (dir.startsWith("/") ? dir : join(home, dir)));
+}
+
+// ---------------------------------------------------------------------------
+// resolveBinary
+// ---------------------------------------------------------------------------
 
 /**
  * Resolve a CLI binary to an absolute path, or null if it is not executable
@@ -72,16 +86,7 @@ function defaultFetchJsonFor(entryId) {
  */
 export async function resolveBinary(bin, { access, env }) {
   const home = env?.HOME ?? "";
-  // The home CLI install dirs come from the single shared source
-  // (HOME_CLI_INSTALL_DIRS in src/shared/cliCatalog.mjs) — the same list
-  // scripts/self-update.sh prepends to PATH for its by-name upgrade commands
-  // (BET-1163). /opt/homebrew/bin and /usr/local/bin are system-level dirs
-  // (not home-relative) and are pinned additionally.
-  const pinned = [
-    ...HOME_CLI_INSTALL_DIRS.map((rel) => join(home, rel)),
-    "/opt/homebrew/bin",
-    "/usr/local/bin",
-  ];
+  const pinned = resolveCliBinDirs(home);
   const pathDirs = (env?.PATH ?? "").split(":").filter(Boolean);
 
   for (const dir of [...pinned, ...pathDirs]) {
@@ -172,6 +177,122 @@ export async function readVersion(absPath, { spawn, timeoutMs = 10_000 }) {
   if (out == null) return null;
   const m = out.match(VERSION_RE);
   return m ? m[0] : null;
+}
+
+// ---------------------------------------------------------------------------
+// runUpgrade
+// ---------------------------------------------------------------------------
+
+/**
+ * Run one upgrade command array (`["opencode","upgrade"]`,
+ * `["npm","install","-g",…]`, or a `["sh","-c",…]` pipeline). Streams child
+ * stdout/stderr through (stdio:"inherit") so the self-update log shows what the
+ * vendor installer did. Resolves on exit 0, rejects otherwise — on ENOENT
+ * (spawn throw / child `error`) and on any non-zero exit. Per-CLI timeout is
+ * enforced by spawn's `timeout`.
+ *
+ * This is the ONE shared upgrade-spawn implementation — consumed by both
+ * `scripts/upgrade-clis.mjs` (the whole-box loop) and `upgradeCli`
+ * (single-CLI upgrade). `env` is propagated to the child so a caller can pin
+ * PATH; omitted, the child inherits the parent environment exactly as before.
+ *
+ * @param {string[]} argv - the upgrade command as `[cmd, ...args]`.
+ * @param {object} [deps]
+ * @param {(cmd:string, args:string[], opts:any) => import("node:child_process").ChildProcess} [deps.spawn]
+ * @param {Record<string,string>} [deps.env]
+ * @param {number} [deps.timeoutMs=10*60*1000]
+ * @returns {Promise<void>}
+ */
+export function runUpgrade(argv, { spawn = nodeSpawn, env, timeoutMs = 10 * 60 * 1000 } = {}) {
+  const [cmd, ...args] = argv;
+  return new Promise((resolve, reject) => {
+    let child;
+    try {
+      child = spawn(cmd, args, { stdio: "inherit", timeout: timeoutMs, env });
+    } catch (e) {
+      reject(e);
+      return;
+    }
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`${cmd} exited with code ${code}`));
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// upgradeCli
+// ---------------------------------------------------------------------------
+
+/**
+ * Upgrade exactly ONE installed CLI, by catalog id, to its latest version.
+ *
+ * REUSES the existing pieces — the cached detector's detect() and current
+ * version, resolveBinary's pinned-dir search, readVersion after the upgrade,
+ * and runUpgrade to execute — it does NOT re-implement detection or the
+ * upgrade command. Returns `{ ok }` and NEVER rejects: any throw is caught and
+ * returned as `{ ok:false, error }`.
+ *
+ * @param {string} cliId - a CLI_CATALOG id (opencode / claude / codex / kimi).
+ * @param {object} [deps]
+ * @param {() => Promise<Array<object>>} [deps.detect] - the cached detector's
+ *   detect(). Defaults to a fresh createCliDetector().detect.
+ * @param {(argv:string[], opts?:object) => Promise<void>} [deps.run]
+ * @param {(p:string, mode:number) => Promise<void>} [deps.access]
+ * @param {object} [deps.env]
+ * @param {(cmd:string, args:string[], opts:any) => import("node:child_process").ChildProcess} [deps.spawn] - used for the after-upgrade version read.
+ * @param {({spawn}) => Promise<string|null>} [deps.getNpmGlobalRoot]
+ * @returns {Promise<{ok:boolean; before?:string|null; after?:string|null; changed?:boolean; error?:string}>}
+ */
+export async function upgradeCli(cliId, deps = {}) {
+  try {
+    const detect = deps.detect ?? createCliDetector().detect;
+    const run = deps.run ?? runUpgrade;
+    const access = deps.access ?? defaultAccess;
+    const env = deps.env ?? process.env;
+    const spawn = deps.spawn ?? nodeSpawn;
+
+    const results = await detect();
+    const t = results.find((r) => r.id === cliId);
+    if (!t || !Array.isArray(t.upgrade) || t.upgrade.length === 0) {
+      // Unknown id, or a target with no resolvable upgrade command (manual /
+    // Homebrew-managed) — nothing we can safely run.
+      return { ok: false, error: "no upgrade path" };
+    }
+
+    const before = t.current ?? null;
+
+    // Pin PATH for the upgrade spawn: upgrade-clis invokes BARE NAMES
+    // (`claude update`, `npm install -g …`) and systemd services lack the CLI
+    // dirs. Same list resolveBinary searches.
+    const home = env?.HOME ?? "";
+    const pinnedCliPath = [...resolveCliBinDirs(home), env?.PATH ?? ""]
+      .filter(Boolean)
+      .join(":");
+    const upgradeEnv = { ...env, PATH: pinnedCliPath };
+
+    await run(t.upgrade, { spawn, env: upgradeEnv });
+
+    // Re-resolve the binary + re-read the version to see whether it changed.
+    const after = await readBinaryVersion(cliId, { access, env, spawn });
+    return {
+      ok: true,
+      before,
+      after,
+      changed: !!after && after !== before,
+    };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+async function readBinaryVersion(cliId, { access, env, spawn }) {
+  const entry = CLI_CATALOG.find((c) => c.id === cliId);
+  if (!entry?.bin) return null;
+  const absPath = await resolveBinary(entry.bin, { access, env });
+  if (!absPath) return null;
+  return readVersion(absPath, { spawn });
 }
 
 // ---------------------------------------------------------------------------

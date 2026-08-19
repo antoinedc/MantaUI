@@ -779,6 +779,53 @@ test("server:update-apply propagates runServerSelfUpdate's failure result throug
   });
 });
 
+// ---- BET-1162: `server:cli-update` routing (per-row single-CLI upgrade) ----
+
+test("server:cli-update routes to the injected upgradeCli with the passed cliId and returns its result", async () => {
+  // The per-row action behind the renderer's per-row split (BET-1159). The
+  // channel must hand the catalog id to the injected upgradeCli and return its
+  // verdict verbatim — a typo in `ctx.cliId` or a dropped return value would
+  // silently break the per-row update button.
+  const { deps } = makeDeps([]);
+  const cliIds = [];
+  deps.upgradeCli = async (cliId) => {
+    cliIds.push(cliId);
+    return { ok: true, before: "1.0.0", after: "2.0.0", changed: true };
+  };
+  const handlers = buildHandlers(deps);
+  const result = await handlers["server:cli-update"]({ cliId: "claude" });
+  assert.deepEqual(cliIds, ["claude"], "cliId passed through verbatim");
+  assert.deepEqual(result, { ok: true, before: "1.0.0", after: "2.0.0", changed: true });
+});
+
+test("server:cli-update: unknown/blank cliId handled without throwing", async () => {
+  // Blank/absent cliId must resolve a clean `{ok:false, error:"no upgrade
+  // path"}` result rather than throwing — a throw would crash the RPC
+  // dispatcher into a 500 the renderer can't act on. The injected upgradeCli
+  // must NOT be called (there is nothing to upgrade).
+  const { deps } = makeDeps([]);
+  const cliIds = [];
+  deps.upgradeCli = async (cliId) => {
+    cliIds.push(cliId);
+    return { ok: true };
+  };
+  const handlers = buildHandlers(deps);
+  for (const ctx of [{}, { cliId: "" }, { cliId: 42 }, null]) {
+    const result = await handlers["server:cli-update"](ctx);
+    assert.deepEqual(result, { ok: false, error: "no upgrade path" });
+  }
+  assert.equal(cliIds.length, 0, "upgradeCli must not be called for blank/unknown cliId");
+});
+
+test("server:cli-update: resolves 'no upgrade path' when the dep is not wired", async () => {
+  // Older box / not-yet-wired upgradeCli → the per-row button degrades to the
+  // same clean "no upgrade path" result, never a rejected promise.
+  const { deps } = makeDeps([]);
+  const handlers = buildHandlers(deps);
+  const result = await handlers["server:cli-update"]({ cliId: "claude" });
+  assert.deepEqual(result, { ok: false, error: "no upgrade path" });
+});
+
 // ===== /rpc response compression (mobile session-load perf) =====
 
 /** Minimal fake req/res pair for handleRpcRequest. */

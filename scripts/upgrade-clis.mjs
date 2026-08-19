@@ -35,9 +35,7 @@ import { constants } from "node:fs";
 import { access as fsAccess } from "node:fs/promises";
 import { writeFileSync } from "node:fs";
 import { CLI_CATALOG } from "../src/shared/cliCatalog.mjs";
-import { detectClis, readVersion, resolveBinary } from "../src/server/cliUpdates.mjs";
-
-const PER_CLI_TIMEOUT_MS = 10 * 60 * 1000;
+import { detectClis, readVersion, resolveBinary, runUpgrade } from "../src/server/cliUpdates.mjs";
 
 function parseArgs(argv) {
   const out = { progressStep: "2", progressTotal: "7", stateFile: null };
@@ -51,28 +49,6 @@ function parseArgs(argv) {
 
 function warn(message) {
   process.stderr.write(`⚠ upgrade-clis: ${message}\n`);
-}
-
-// Run one upgrade command array (`["opencode","upgrade"]`, `["npm","install","-g",…]`,
-// or a `["sh","-c",…]` pipeline). Streams child stdout/stderr through so the
-// self-update log shows what the vendor installer did. Resolves on exit 0,
-// rejects otherwise. Per-CLI timeout is enforced by spawn's `timeout`.
-function runUpgrade(argv) {
-  const [cmd, ...args] = argv;
-  return new Promise((resolve, reject) => {
-    let child;
-    try {
-      child = nodeSpawn(cmd, args, { stdio: "inherit", timeout: PER_CLI_TIMEOUT_MS });
-    } catch (e) {
-      reject(e);
-      return;
-    }
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`${cmd} exited with code ${code}`));
-    });
-  });
 }
 
 function writeStateFile(file, cliIds, opencodeChanged) {
@@ -101,7 +77,7 @@ async function main() {
 
       const before = r.current ?? null;
       try {
-        await runUpgrade(r.upgrade);
+        await runUpgrade(r.upgrade, { spawn: nodeSpawn });
       } catch (e) {
         warn(`${r.label}: upgrade failed (${e.message}) — continuing`);
         continue;
