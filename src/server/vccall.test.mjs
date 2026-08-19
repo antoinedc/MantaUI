@@ -126,6 +126,8 @@ test("start connects and sends a session.update with the tools configured", asyn
   const su = sent.find((m) => m.type === "session.update");
   assert.equal(su.session.type, "realtime");
   assert.equal(su.session.audio.output.voice, "nova");
+  assert.equal(su.session.audio.output.format.type, "audio/pcm");
+  assert.equal(su.session.audio.output.format.rate, 24000);
   assert.equal(su.session.audio.input.turn_detection.type, "server_vad");
   assert.equal(su.session.output_modalities.join(","), "audio");
   assert.equal(su.session.tools.length, 2);
