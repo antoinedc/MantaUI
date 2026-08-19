@@ -212,7 +212,6 @@ export function CallApp() {
   }
 
   async function startMic(ws: WebSocket, isCancelled: () => boolean = () => false) {
-    if (!listening) return;
     if (micStreamRef.current) return;
     let stream: MediaStream | null = null;
     try {
