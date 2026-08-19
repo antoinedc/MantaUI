@@ -174,6 +174,11 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   // sessionId yet, so it uses its own input rather than the manta-attach-files
   // bridge (which targets a live session's composer).
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Drop-to-attach state (BET-1204): a dotted "Drop to attach" overlay shows
+  // while files are dragged over the screen. dragDepth unwinds nested-element
+  // crossings so the overlay only clears when the pointer leaves the screen.
+  const [dragHover, setDragHover] = useState(false);
+  const dragDepth = useRef(0);
 
   // Stage files a user picks into the draft's attachments. Upload is deferred
   // to submit() — once the destination session/window name exists.
@@ -193,6 +198,37 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
       attachments: [...draft.attachments, ...newAttachments],
     });
     if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  // ---- drop-to-attach (BET-1204) ----
+  // A drop feeds the EXACT same path as the paperclip button: onFiles →
+  // draft.attachments → deferred upload by submit()/submitFanOut(). Zero new
+  // upload, zero new staging, zero new data path — a pure drag affordance
+  // layered on the existing attach code.
+  const onDragEnter = (e: React.DragEvent) => {
+    if (!Array.from(e.dataTransfer?.types ?? []).includes("Files")) return;
+    e.preventDefault();
+    dragDepth.current++;
+    setDragHover(true);
+  };
+  const onDragOver = (e: React.DragEvent) => {
+    if (!Array.from(e.dataTransfer?.types ?? []).includes("Files")) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  };
+  const onDragLeave = (e: React.DragEvent) => {
+    if (!Array.from(e.dataTransfer?.types ?? []).includes("Files")) return;
+    e.preventDefault();
+    // Nested-element crossing: only clear once the depth unwinds to zero.
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setDragHover(false);
+  };
+  const onDrop = (e: React.DragEvent) => {
+    if (!Array.from(e.dataTransfer?.types ?? []).includes("Files")) return;
+    e.preventDefault();
+    dragDepth.current = 0;
+    setDragHover(false);
+    onFiles(e.dataTransfer.files);
   };
 
   // ---- repo probe (BET-787): the new-project zero state ----
@@ -876,7 +912,30 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
     // data-screen is the visual harness's handle on this screen (see
     // scripts/visual/screens.mjs). One stable attribute per screen root, so
     // the harness never depends on a class name or DOM position.
-    <div data-screen="welcome" className="h-full flex flex-col items-center justify-center px-8">
+    <div
+      data-screen="welcome"
+      className="h-full flex flex-col items-center justify-center px-8 relative"
+      onDragEnter={onDragEnter}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
+      {/* Drop-to-attach overlay (BET-1204): dotted border + tinted bg only
+          while files are over the screen. pointer-events-none so the inner
+          DOM still receives the drop (the overlay never intercepts it). */}
+      {dragHover && (
+        <div
+          className="absolute inset-0 z-30 pointer-events-none rounded-md border-2 border-dashed flex items-center justify-center"
+          style={{
+            borderColor: "var(--accent)",
+            backgroundColor: "var(--accent-bg)",
+          }}
+        >
+          <span className="text-body text-text" style={{ color: "var(--accent)" }}>
+            Drop to attach
+          </span>
+        </div>
+      )}
       {cloneOpen ? (
         <CloneFromGitHub
           defaultRoot={proposedWorkspaceRoot}
