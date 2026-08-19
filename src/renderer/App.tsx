@@ -31,13 +31,21 @@ import { ConfirmModal } from "./ConfirmModal";
 import { UsageResumeModal } from "./UsageResumeModal";
 import { ReconnectingBanner } from "./ReconnectingBanner";
 import { pickBanner, type BannerState } from "./bannerPriority";
-import { describeUpdateBanner, planUpdateAll } from "../shared/updateTargets.mjs";
+import {
+  describeUpdateBanner,
+  planUpdateAll,
+  isCliTarget,
+} from "../shared/updateTargets.mjs";
 import { refreshUpdateTargets } from "./updateCheck";
 import { parsePairPayload } from "../shared/pairPayload";
 import { channelConfig } from "../shared/channel.mjs";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { MantaLoader } from "./MantaLoader";
-import type { AvailableLauncher, MediaEventPayload } from "../shared/types";
+import type {
+  AvailableLauncher,
+  MediaEventPayload,
+  UpdateTarget,
+} from "../shared/types";
 import {
   buildLimitMessage,
   buildUsageLevels,
@@ -1543,6 +1551,59 @@ function Shell() {
     }
   };
 
+  // ===== Per-row CLI update (BET-1159) =====
+  //
+  // The renderer half of "click one CLI row, upgrade just that CLI". Exactly
+  // one target updates at a time — the busy gate (any update in flight,
+  // including a box upgrade) serializes against overlap. `updatingTargetId`
+  // (set via the shared store) drives the row's spinner + disabled state while
+  // the RPC is in flight; the server RPC (BET-1162) never rejects, so a
+  // failure is read off `res.ok`. BET-1160/1161 already own the store slice
+  // (`updatingTargetId`/`targetUpdateErrors`) and the per-row loading states;
+  // this is only the CLI routing.
+  const runCliUpdate = async (t: UpdateTarget) => {
+    if (updatingTargetId != null || boxUpgrading) return;
+    useStore.getState().setUpdatingTarget(t.id);
+    try {
+      const res = await window.api.serverCliUpdate(t.id);
+      if (res && res.ok === false) {
+        useStore.getState().setTargetUpdateError(t.id, res.error ?? "Update failed");
+      }
+    } catch (e) {
+      // Defensive: the RPC's contract is to never reject, but a bare
+      // connection error would strand the spinner forever. Record it as the
+      // per-row error and let the row recover, never leave `updatingTargetId`
+      // stuck.
+      useStore.getState().setTargetUpdateError(
+        t.id,
+        e instanceof Error ? e.message : "Update failed",
+      );
+    } finally {
+      useStore.getState().setUpdatingTarget(null);
+    }
+    // BET-1161: after busy clears, re-check so the row/node reflects the new
+    // version instead of the stale pre-upgrade one.
+    void refreshUpdateTargets().catch(() => {});
+  };
+
+  // The ONE per-target update router, shared by the Settings rows and the
+  // banner's single-target path (BET-1159). Routes by target id — the only
+  // discriminator (`isCliTarget`, never label or disruption). `desktop` keeps
+  // its download, `server` keeps the box flow unchanged; every CLI id runs the
+  // per-CLI upgrade above.
+  const handleTargetUpdate = (t: UpdateTarget) => {
+    if (isCliTarget(t)) {
+      void runCliUpdate(t);
+      return;
+    }
+    if (t.id === "desktop") {
+      void window.api.autoUpdateDownload().catch(() => {});
+      return;
+    }
+    // server — the box's own self-update flow (confirm → applyServerUpdate).
+    setConfirmServerUpdate(true);
+  };
+
   // ===== The ONE update action: runUpdateAll (stage 3, BET-1098) =====
   //
   // Desktop install is terminal and runs LAST — nothing can follow it. The
@@ -1600,11 +1661,18 @@ function Shell() {
   }, [updatePrompt]);
 
   // The unified `updates` banner's action. The danger tone means "update
-  // failed" → the only sensible action is a manual download. Everything else
-  // (available / mandatory) runs the ONE orchestrator.
+  // failed" → the only sensible action is a manual download. A SINGLE available
+  // CLI target is precisely that CLI's per-row upgrade (BET-1159) — route it
+  // through the per-target router instead of the whole-box run. Everything else
+  // (mandatory, or 2+ available / mixed) runs the ONE orchestrator.
   const onUpdateBannerAction = () => {
     if (updateBanner?.tone === "danger") {
       void window.api.openExternal("https://mantaui.com/downloads/Manta-latest.dmg");
+      return;
+    }
+    const avail = updateTargets.filter((t) => t.available && !t.manual);
+    if (avail.length === 1 && isCliTarget(avail[0])) {
+      handleTargetUpdate(avail[0]);
       return;
     }
     void runUpdateAll();
@@ -1910,6 +1978,10 @@ function Shell() {
           // store); the per-target in-flight/error state it reads from the
           // store itself.
           busy={boxUpgrading || updatingTargetId != null}
+          // BET-1159: per-row CLI updates. App owns the single-router
+          // discriminator (`isCliTarget`) and the per-CLI run; Settings only
+          // needs to delegate a CLI row to it.
+          onCliUpdate={(t) => void runCliUpdate(t)}
         />
       )}
       {searchOpen && activeChatSessionId != null && (

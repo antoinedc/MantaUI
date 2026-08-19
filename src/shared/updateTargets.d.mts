@@ -30,6 +30,12 @@ export function buildUpdateTargets(args: {
  * `names` in display order, and the deduped set of their `disruptions`.
  * `manual` targets never count.
  */
+/**
+ * The ONE target-identity discriminator for per-row updates (BET-1159): true
+ * iff the target is a per-CLI update (id is none of "desktop" / "server").
+ */
+export function isCliTarget(t: UpdateTarget | null | undefined): boolean;
+
 export function summarizeUpdates(targets: UpdateTarget[]): UpdateTargetSummary;
 
 export interface UpdateBanner {

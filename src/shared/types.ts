@@ -1607,6 +1607,13 @@ export const IPC = {
   // and the banner can never disagree.
   serverUpdateCheck: "server:update-check",           // () → ServerUpdateCheck
 
+  // ---- single-CLI update (BET-1162, server half; consumed by BET-1159) ----
+  // Upgrade exactly ONE installed box CLI (opencode / claude / codex / kimi) by
+  // catalog id, reusing the cached CLI detector + the shared runUpgrade spawn.
+  // Returns {ok, before?, after?, changed?, error?} — never rejects. This is
+  // the per-row action behind BET-1159 (renderer per-row split).
+  serverCliUpdate: "server:cli-update",               // (cliId: string) → CliUpdateResult
+
   // ---- client version (BET-225 stage 3) ----
   // Returns the desktop app's own version via Electron's `app.getVersion()`
   // (which reads the same package.json the server uses). Renderer combines

@@ -37,6 +37,22 @@ const SERVER_FIXED = { label: "The server", disruption: "reconnect" };
  * @param {string|null} [args.serverVersion] the running box version
  * @returns {Array<object>} UpdateTarget[] in fixed display order
  */
+/**
+ * The ONE target-identity discriminator for per-row updates (BET-1159).
+ *
+ * "Is this a CLI row?" is used by BOTH the Settings rows and the banner's
+ * routing (App.tsx) to decide which update path a single target takes. The
+ * only source of truth for "CLI" is the id — never the label or disruption.
+ * `desktop` and `server` are the two non-CLI targets; anything else in the
+ * UpdateTargetId union (opencode / claude / codex / kimi) is a CLI.
+ *
+ * @param {object} t an UpdateTarget
+ * @returns {boolean} true iff `t` is a per-CLI update target
+ */
+export function isCliTarget(t) {
+  return Boolean(t) && t.id !== "desktop" && t.id !== "server";
+}
+
 export function buildUpdateTargets({
   desktopCheck = null,
   serverCheck = null,
