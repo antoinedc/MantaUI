@@ -22,6 +22,7 @@ import { StatusDot } from "./StatusDot";
 import { ListRow } from "./ListRow";
 import { ProvidersCard } from "./ProvidersCard";
 import { ModelsCard } from "./ModelsCard";
+import { ModelLedgerCard } from "./ModelLedgerCard";
 import { SubscriptionsCard } from "./SubscriptionsCard";
 import { AddPhonePanel } from "./AddPhonePanel";
 import { getMantaPreload } from "./preloadAccess";
@@ -1096,6 +1097,7 @@ export function Settings({
       return (
         <GroupCard title="Models">
           <ModelsCard />
+          <ModelLedgerCard />
         </GroupCard>
       );
     }
