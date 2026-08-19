@@ -7,18 +7,23 @@
 #
 # Two kinds of box are supported (BET-640):
 #
-#   * git checkout (the maintainer's dev box): update = `git fetch origin main`
-#     + `git reset --hard origin/main`.
-#   * packaged install (every box created by `curl mantaui.com/install.sh`):
-#     a plain directory with RELEASE.json (no .git). Update = download the
+#   * packaged install (EVERY box created by `curl mantaui.com/install.sh`):
+#     identified by RELEASE.json (install.sh also git-inits the dir, but that
+#     incidental .git/ never determines the path). Update = download the
 #     release tarball for this arch, verify it, extract it, and replace the
 #     payload paths the incoming release owns (`includes` in RELEASE.json) —
-#     which DOES include `runtime/` (the vendored Node, so a runtime version
-#     bump can reach an installed box) but NOT `node_modules/` (which is
-#     reinstalled by the `npm ci --omit=dev` step that runs immediately after).
+#     which includes `runtime/` (the vendored Node) AND `node_modules/` (the
+#     PREBUILT, arch-/ABI-verified tree, so an update never rebuilds deps and
+#     needs no toolchain). install_prod_deps skips its network-fallback `npm ci`
+#     entirely when the payload supplied node_modules.
+#   * git checkout (a live DEV box — a clone with NO RELEASE.json): update =
+#     `git fetch origin main` + `git reset --hard origin/main`. Dev boxes have
+#     a toolchain and may run arbitrary source, so they keep the on-box npm
+#     path.
 #
-# The install kind is detected, not assumed, so a box installed before the
-# updater understood packaged installs (or whose git fetch fails) self-heals.
+# The install kind is detected from RELEASE.json-first (never .git-first), so
+# every install.sh box routes to the prebuilt tarball path and self-heals even
+# when its dir carries a .git/.
 #
 # Two-hop note (do not "fix"): an installed box runs the copy of this script
 # it already has on disk, so the FIRST update after a payload-swap change ships
@@ -73,12 +78,17 @@ exec >>"$LOG_FILE" 2>&1
 . "$MANTA_HOME/scripts/lib/release.sh"
 
 # --- Detect install kind ------------------------------------------------------
+# RELEASE.json identifies a RELEASE-DEPLOYED box and WINS over .git/: install.sh
+# makes every box it creates a git checkout, so checking .git first misreads an
+# install.sh box (which carries RELEASE.json AND .git) as a dev checkout and
+# sends it down the on-box `npm ci` path — which fails without a toolchain.
+# Only a checkout with no RELEASE.json is a true dev box; it keeps the git path.
+# See detect_install_kind in scripts/lib/release.sh (unit-tested).
 echo "MANTA_PROGRESS 1/7 Checking for updates"
-if [ -d "$MANTA_HOME/.git" ]; then
-  INSTALL_KIND=git
-elif [ -f "$MANTA_HOME/RELEASE.json" ]; then
-  INSTALL_KIND=packaged
-else
+HAS_RELEASE_JSON=0; [ -f "$MANTA_HOME/RELEASE.json" ] && HAS_RELEASE_JSON=1
+HAS_GIT=0;           [ -d "$MANTA_HOME/.git" ]          && HAS_GIT=1
+INSTALL_KIND="$(detect_install_kind "$HAS_RELEASE_JSON" "$HAS_GIT")"
+if [ "$INSTALL_KIND" = "none" ]; then
   die "self-update: $MANTA_HOME is neither a git checkout nor a packaged install"
 fi
 
@@ -459,11 +469,35 @@ restart_server() {
   fi
 }
 
+# wait_server_healthy — after a payload swap + restart, confirm the box actually
+# comes back up before we report the update as complete. Without this a release
+# that won't boot would report "self-update: complete" on a dead box. This is a
+# LOUD failure (die with guidance), not a rollback: rolling the payload back in
+# place fights a self-replacing updater's two-hop hazard, so auto-restore is
+# deliberately out of scope here (see the header's "Two-hop note").
+wait_server_healthy() {
+  local url="${MANTA_HEALTH_URL:-http://127.0.0.1:${MANTA_PORT:-8787}/auth/status}"
+  local attempts="${SELF_UPDATE_HEALTH_ATTEMPTS:-40}"
+  local i=1
+  while [ "$i" -le "$attempts" ]; do
+    if curl -fsS --max-time 3 "$url" >/dev/null 2>&1; then
+      ok "self-update: server healthy at $url (attempt $i)"
+      return 0
+    fi
+    sleep 1
+    i=$((i + 1))
+  done
+  warn "self-update: server did not become healthy at $url after ${attempts}s"
+  die "server did not become healthy after the update — re-run install.sh to restore a matching prebuilt tree"
+}
+
 if [ "$PAYLOAD_REPLACED" = "1" ]; then
   echo "MANTA_PROGRESS 6/7 Restarting opencode"
   restart_opencode
   echo "MANTA_PROGRESS 7/7 Restarting box server"
   restart_server
+  # Confirm the new payload actually boots before reporting success.
+  wait_server_healthy
 elif [ "$OPENCODE_CHANGED" = "1" ]; then
   echo "MANTA_PROGRESS 6/7 Restarting opencode"
   restart_opencode
