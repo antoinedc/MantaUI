@@ -35,6 +35,7 @@ import {
   describeUpdateBanner,
   planUpdateAll,
   isCliTarget,
+  desktopUpdateBusy,
 } from "../shared/updateTargets.mjs";
 import { refreshUpdateTargets } from "./updateCheck";
 import { parsePairPayload } from "../shared/pairPayload";
@@ -247,6 +248,11 @@ function Shell() {
   // `boxUpgrading` it makes up the aggregate `busy` that disables the banner
   // / Settings rows while ANY update runs.
   const updatingTargetId = useStore((s) => s.updatingTargetId);
+  // BET-1195: the desktop leg's in-flight state, owned in the shared store (not
+  // Settings) so the banner and the Settings row can never disagree. The
+  // percent is fed from IPC.autoUpdateProgress at App level; the restart beat is
+  // the App-local `desktopRestarting` below (the desktop analogue of boxRestarting).
+  const desktopDownloadPercent = useStore((s) => s.desktopDownloadPercent);
   const connectionState = useStore((s) => s.connectionState);
   const launcherFlags = useStore((s) => s.launcherFlags);
   const createDraft = useStore((s) => s.createDraft);
@@ -942,6 +948,21 @@ function Shell() {
     return off;
   }, []);
 
+  // BET-1195: the desktop leg's in-flight DOWNLOAD percent lives in the shared
+  // store, subscribed ONCE here at App level, so the banner AND Settings both
+  // read the SAME value and can never disagree (the old Settings-local copy is
+  // what made the banner path + runUpdateAll show nothing — the state never
+  // left that component). main emits this on every electron-updater
+  // `download-progress` tick; zero here only when no download is running.
+  useEffect(() => {
+    const off = window.api.onAutoUpdateProgress?.((p) => {
+      useStore.getState().setDesktopDownloadPercent(
+        typeof p.percent === "number" ? Math.max(0, Math.min(100, p.percent)) : null,
+      );
+    });
+    return off;
+  }, []);
+
   // Terminal auto-update failure. Main only forwards failures the user has to
   // ACT on (integrity / permission — see shared/updateError.mjs); transient
   // network errors never arrive here, so this banner can't nag about a flaky
@@ -1473,6 +1494,14 @@ function Shell() {
   // error/progress clear.
   const [boxUpgrading, setBoxUpgrading] = useState(false);
 
+  // BET-1195: the DESKTOP leg's terminal INSTALL / app-restart beat — the
+  // analogue of `boxRestarting`. Set right before `autoUpdateInstall()` (which
+  // quits + reinstalls), it puts the bar into a non-dismissible, indeterminate
+  // "Restarting Manta Desktop…" state. quitAndInstall gives no progress events,
+  // so it is intentionally never cleared — the app dies a moment later, and
+  // this is deliberately the last thing the user sees.
+  const [desktopRestarting, setDesktopRestarting] = useState(false);
+
   // runUpdateAll state (stage 3, BET-1098). `updateAllRunRef` is true while a
   // run's DESKTOP install is pending; `updateAllBoxConfirmed` is true once the
   // box leg (if any) has completed AND the connection is confirmed back. A
@@ -1498,6 +1527,11 @@ function Shell() {
     if (!useStore.getState().updatePrompt) return;
     if (!updateAllBoxConfirmed.current) return;
     updateAllRunRef.current = false;
+    // BET-1195: the install/restart beat. Set BEFORE autoUpdateInstall — the
+    // bar flips to the indeterminate "Restarting Manta Desktop…" state (the
+    // desktop analogue of boxRestarting) as the last thing the user sees; the
+    // window quits a moment later, so this state is never cleared by design.
+    setDesktopRestarting(true);
     void window.api.autoUpdateInstall();
   };
 
@@ -1547,6 +1581,16 @@ function Shell() {
   // indeterminate "Restarting the box…" presentation instead of a frozen step.
   const boxRestarting =
     boxUpgrading && connectionState.state !== "connected" && connectionState.state !== "idle";
+
+  // BET-1195: the DESKTOP leg's presentation, decided by the pure shared helper
+  // (`desktopUpdateBusy`) so the banner and Settings can never disagree. null
+  // while no desktop update is running; otherwise the download label/progress
+  // or the terminal "Restarting Manta Desktop…" beat.
+  const desktopBusy = desktopUpdateBusy({
+    updatingTargetId,
+    desktopDownloadPercent,
+    desktopRestarting,
+  });
 
   const applyServerUpdate = async () => {
     upgradeFromVersionRef.current = serverVersion;
@@ -1615,6 +1659,40 @@ function Shell() {
     }
   };
 
+  // ===== Desktop download (BET-1195) =====
+  //
+  // The ONE shared runner for the desktop download leg, used by BOTH call sites
+  // (runUpdateAll's desktop leg and handleTargetUpdate's `desktop` branch — a
+  // desktop update applied once through a second, subtly different copy is how
+  // this feature lost its loading state the first time). It sets the shared
+  // in-flight state (`updatingTargetId = "desktop"` + a 0% seed), runs the
+  // download, and clears that state on EVERY terminal path as the never-stuck
+  // invariant demands:
+  //   - download resolves   → the `update-downloaded` event set updatePrompt;
+  //                           the row/banner recover to the "restart" state.
+  //   - download rejects    → clear + surface via the per-row error so the
+  //                           row/banner recover to a retryable button (a bare
+  //                           `.catch(()=>{})` would otherwise WEDGE the busy
+  //                           state we just introduced).
+  // The install/restart beat is NOT this function's job (it is App-level
+  // finishUpdateAllOnce / the caller's), so it needs no knowledge of it.
+  const runDesktopDownload = async () => {
+    useStore.getState().setUpdatingTarget("desktop");
+    useStore.getState().setDesktopDownloadPercent(0);
+    try {
+      await window.api.autoUpdateDownload();
+      useStore.getState().setUpdatingTarget(null);
+      useStore.getState().setDesktopDownloadPercent(null);
+    } catch (e) {
+      useStore.getState().setUpdatingTarget(null);
+      useStore.getState().setDesktopDownloadPercent(null);
+      useStore.getState().setTargetUpdateError(
+        "desktop",
+        e instanceof Error ? e.message : "Update download failed",
+      );
+    }
+  };
+
   // The ONE per-target update router, shared by the Settings rows and the
   // banner's single-target path (BET-1159). Routes by target id — the only
   // discriminator (`isCliTarget`, never label or disruption). `desktop` keeps
@@ -1626,7 +1704,7 @@ function Shell() {
       return;
     }
     if (t.id === "desktop") {
-      void window.api.autoUpdateDownload().catch(() => {});
+      void runDesktopDownload();
       return;
     }
     // server — the box's own self-update flow (confirm → applyServerUpdate).
@@ -1642,17 +1720,12 @@ function Shell() {
   const runUpdateAll = async () => {
     const plan = planUpdateAll(updateTargets);
 
-    // 1. Desktop download in flight CONCURRENTLY with the box work — free
-    //    wall-clock time. A rejection here degrades to "no desktop install at
-    //    the end"; it must not abort the box leg.
-    if (plan.desktopDownload) {
-      window.api.autoUpdateDownload().catch(() => {});
-    }
-
-    // 2. One confirm if anything disruptive is about to happen. Cancelling
-    //    cancels the WHOLE run — the download already in flight simply is
-    //    never installed. A CLI-only update (needsConfirm false) shows NO
-    //    dialog at all: nothing disruptive happens, so nothing interrupts.
+    // 1. One confirm if anything disruptive is about to happen. Cancelling
+    //    cancels the WHOLE run — and because the desktop leg only STARTS after
+    //    this point, a cancelled run has started nothing, so no desktop
+    //    in-flight state is ever set (the never-stuck invariant). A CLI-only
+    //    update (needsConfirm false) shows NO dialog at all: nothing disruptive
+    //    happens, so nothing interrupts.
     if (plan.needsConfirm) {
       const ok = await new Promise<boolean>((resolve) => {
         updateAllResolvers.current = { resolve };
@@ -1662,6 +1735,14 @@ function Shell() {
     }
 
     if (plan.desktopInstall) updateAllRunRef.current = true;
+
+    // 2. Desktop download in flight CONCURRENTLY with the box work — free
+    //    wall-clock time. runDesktopDownload owns the desktop in-flight state
+    //    and clears it on every terminal path. A rejection here degrades to "no
+    //    desktop install at the end"; it must not abort the box leg.
+    if (plan.desktopDownload) {
+      void runDesktopDownload();
+    }
 
     // 3. Box leg. `applyServerUpdate` owns boxUpgrading / serverUpdateProgress /
     //    boxRestarting / the 120s cap / isTransientUpdateNetworkError — reused
@@ -1790,7 +1871,7 @@ function Shell() {
             state matters most. `boxUpgrading` stays true until the version
             re-check confirms the box advanced (or the 120s cap / a real early
             failure). */}
-        {!showOnboarding && (boxUpgrading || updatingTargetId != null) && (
+        {!showOnboarding && (boxUpgrading || updatingTargetId != null || desktopRestarting) && (
           <UpdateBar
             text={updateBanner?.text ?? "Updating…"}
             actionLabel={updateBanner?.actionLabel ?? "Update"}
@@ -1798,8 +1879,26 @@ function Shell() {
             dismissible={false}
             tone={updateBanner?.tone}
             busy
-            progress={boxUpgrading && !boxRestarting ? serverUpdateProgress ?? undefined : undefined}
-            busyLabel={boxRestarting ? "Restarting the server…" : "Updating…"}
+            // BET-1195: each in-flight leg presents its own bar. The box leg
+            // keeps its determinate step progress / "Restarting the server…";
+            // the DESKTOP leg (the gap BET-1160 left) shows its download percent
+            // while downloading and the terminal "Restarting Manta Desktop…"
+            // beat before install — both from the shared `desktopUpdateBusy`
+            // helper so this bar and Settings always agree.
+            progress={
+              boxUpgrading
+                ? !boxRestarting
+                  ? serverUpdateProgress ?? undefined
+                  : undefined
+                : desktopBusy?.progress ?? undefined
+            }
+            busyLabel={
+              boxUpgrading
+                ? boxRestarting
+                  ? "Restarting the server…"
+                  : "Updating…"
+                : desktopBusy?.busyLabel ?? "Updating…"
+            }
           />
         )}
         {!showOnboarding && activeBanner === "updates" && updateBanner &&
@@ -2054,6 +2153,13 @@ function Shell() {
           // discriminator (`isCliTarget`) and the per-CLI run; Settings only
           // needs to delegate a CLI row to it.
           onCliUpdate={(t) => void runCliUpdate(t)}
+          // BET-1195: the desktop row delegates to App's single desktop
+          // download runner (runs through the shared store so Settings and the
+          // banner can never disagree), and receives the App-local restart beat
+          // so the row can't present a download that the banner says is
+          // restarting.
+          onDesktopUpdate={() => void runDesktopDownload()}
+          desktopRestarting={desktopRestarting}
         />
       )}
       {searchOpen && activeChatSessionId != null && (

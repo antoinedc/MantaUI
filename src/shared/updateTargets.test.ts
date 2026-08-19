@@ -7,6 +7,7 @@ import {
   describeUpdateBanner,
   planUpdateAll,
   rowUpdateState,
+  desktopUpdateBusy,
   isCliTarget,
 } from "./updateTargets.mjs";
 
@@ -443,6 +444,60 @@ describe("rowUpdateState", () => {
   it("reports `idle` when nothing is in flight", () => {
     expect(rowUpdateState("desktop", { updatingTargetId: null, busy: false })).toEqual({ kind: "idle" });
     expect(rowUpdateState("server", {})).toEqual({ kind: "idle" });
+  });
+
+  it("a DESKTOP run marks other rows disabled exactly as a CLI run does", () => {
+    // BET-1195: the desktop leg reuses the same `updatingTargetId` the per-CLI
+    // legs use, so a desktop run disables every other row just like a CLI run.
+    const state = { updatingTargetId: "desktop", busy: true };
+    expect(rowUpdateState("desktop", state)).toEqual({ kind: "updating" });
+    expect(rowUpdateState("server", state)).toEqual({ kind: "busy" });
+    expect(rowUpdateState("claude", state)).toEqual({ kind: "busy" });
+  });
+});
+
+describe("desktopUpdateBusy", () => {
+  const base = { updatingTargetId: "desktop", desktopDownloadPercent: null, desktopRestarting: false };
+
+  it("returns null when no desktop update is in flight", () => {
+    expect(desktopUpdateBusy({ ...base, updatingTargetId: null })).toBeNull();
+    // A CLI run (updatingTargetId = the CLI id) is NOT a desktop run.
+    expect(desktopUpdateBusy({ ...base, updatingTargetId: "claude" })).toBeNull();
+    // Nothing at all.
+    expect(desktopUpdateBusy({})).toBeNull();
+  });
+
+  it("desktop downloading with a percent → determinate progress + label", () => {
+    const state = desktopUpdateBusy({ ...base, desktopDownloadPercent: 42 });
+    expect(state).toEqual({
+      busyLabel: "Downloading 42%",
+      progress: { step: 42, total: 100, label: "Downloading update" },
+    });
+  });
+
+  it("clamps out-of-range percents and rounds", () => {
+    expect(desktopUpdateBusy({ ...base, desktopDownloadPercent: 99.6 })?.progress?.step).toBe(100);
+    expect(desktopUpdateBusy({ ...base, desktopDownloadPercent: -3 })?.progress?.step).toBe(0);
+    expect(desktopUpdateBusy({ ...base, desktopDownloadPercent: 42.4 })?.busyLabel).toBe("Downloading 42%");
+  });
+
+  it("desktop downloading with NO percent yet → indeterminate 'Downloading…'", () => {
+    expect(desktopUpdateBusy({ ...base, desktopDownloadPercent: null })).toEqual({
+      busyLabel: "Downloading…",
+      progress: null,
+    });
+  });
+
+  it("desktop restarting → indeterminate 'Restarting Manta Desktop…' with no percent", () => {
+    const state = desktopUpdateBusy({ ...base, desktopRestarting: true, desktopDownloadPercent: 42 });
+    expect(state).toEqual({ busyLabel: "Restarting Manta Desktop…", progress: null });
+  });
+
+  it("the restart beat answers even after the download leg cleared the id", () => {
+    // finishUpdateAllOnce sets desktopRestarting AFTER runDesktopDownload clears
+    // updatingTargetId — the beat must still present.
+    const state = desktopUpdateBusy({ updatingTargetId: null, desktopDownloadPercent: null, desktopRestarting: true });
+    expect(state?.busyLabel).toBe("Restarting Manta Desktop…");
   });
 });
 
