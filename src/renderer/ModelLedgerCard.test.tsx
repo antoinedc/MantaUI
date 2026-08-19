@@ -59,6 +59,15 @@ describe("ModelLedgerCard", () => {
     expect(text).not.toContain("$");
   });
 
+  it("hides the card entirely when the fetch rejects (network error)", async () => {
+    installMockApi({
+      ledgerSummary: () => Promise.reject(new Error("network down")),
+    });
+    h = mount(<ModelLedgerCard />);
+    await h.flush();
+    expect(h.text()).toBe("");
+  });
+
   it("renders the four legend entries and the top-model row from a fixture summary", async () => {
     installMockApi({ ledgerSummary: () => Promise.resolve(fixture()) });
     h = mount(<ModelLedgerCard />);

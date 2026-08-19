@@ -5,8 +5,11 @@
 // user can finally SEE that most of their bill is prompt cache, and which
 // model / agent runs on what. No routing, no controls that mutate anything.
 //
-// Three states, each honest:
+// Four states, each honest:
 //   - loading  → "Reading your history…"
+//   - fetch rejected (network error) → render nothing (hide the card entirely)
+//     — no card, no numbers, no sentence. A transient network glitch must not
+//     read as "your runtime is outdated".
 //   - { supported:false } → "Spend history needs a newer box runtime." — NO
 //     zeros. A card full of $0.00 would read "you spent nothing", which is a
 //     lie.
@@ -46,23 +49,25 @@ function Numeric({
 
 export function ModelLedgerCard() {
   // loading=true until the first resolution below; data is null until then.
-  const [state, setState] = useState<{ loading: boolean; data: LedgerData | null }>({
-    loading: true,
-    data: null,
-  });
+  const [state, setState] = useState<{
+    loading: boolean;
+    data: LedgerData | null;
+    fetchError: boolean;
+  }>({ loading: true, data: null, fetchError: false });
 
   useEffect(() => {
     let alive = true;
     window.api
       .ledgerSummary()
       .then((r: LedgerData) => {
-        if (alive) setState({ loading: false, data: r });
+        if (alive) setState({ loading: false, data: r, fetchError: false });
       })
       .catch(() => {
         // Fetch failed (not "unsupported" — that comes back as a resolved
         // { supported:false }). Don't show the upgrade sentence for a network
-        // error; hide the card rather than fabricate a bill.
-        if (alive) setState({ loading: false, data: null });
+        // error; hide the card entirely rather than fabricate a bill or mislead
+        // the user into thinking their runtime is outdated.
+        if (alive) setState({ loading: false, data: null, fetchError: true });
       });
     return () => {
       alive = false;
@@ -79,6 +84,10 @@ export function ModelLedgerCard() {
         <div className="text-meta text-text-faint">Reading your history…</div>
       </Card>
     );
+  }
+
+  if (state.fetchError) {
+    return null;
   }
 
   const data = state.data;
