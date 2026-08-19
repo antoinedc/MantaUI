@@ -3012,10 +3012,7 @@ const handleUpgrade = (req, socket, head) => {
     // opus mic frames here; the box relays to OpenAI Realtime (key server-side).
     wss.handleUpgrade(req, socket, head, (ws) =>
       attachCallWs(ws, url, {
-        dispatchCto: (name, args, ctx) => getCtoEngine().dispatch(name, args, {
-          ...ctx,
-          gate: ctx?.gate ?? (() => "confirm"),
-        }),
+        dispatchCto: (name, args, ctx) => getCtoEngine().dispatch(name, args, { ...ctx }),
         approveConfirm: (id) => getCtoEngine().approveConfirm(id),
         rejectConfirm: (id) => getCtoEngine().rejectConfirm(id),
         configGet: () => local.configGet(),
