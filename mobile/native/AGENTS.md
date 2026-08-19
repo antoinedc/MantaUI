@@ -222,14 +222,24 @@ deterministic and reproducible from the block alone, because a canonical
 refetch re-derives them (see `stableScrollID`/`uniqueTranscriptRows`).
 
 This area has been diagnosed and fixed **more than once** and has recurred
-each time. BET-1103, BET-1104 and BET-1105 have been rewriting exactly this:
-BET-1103 (stable identity for the `.steps` transcript block) **has merged**
-into `main`, while BET-1104 (replacing the hand-rolled transcript gestures
-with MessagingUI's own) and BET-1105 are **not merged** as of 2026-08-18.
-**Check which of these are on your base** (and whether they have merged/landed
-since) before touching row identity, row ordering, or the update path, and
-treat any new `TiledView`/batch-update crash as a likely regression of this
-family.
+each time. BET-1103, BET-1104 and BET-1105 rewrote exactly this, and **all
+three are now merged into `main`** (verified 2026-08-19):
+
+- **BET-1103** — stable identity for the `.steps` transcript block.
+- **BET-1104** — the hand-rolled transcript gestures are **gone**, replaced by
+  MessagingUI's own recognisers (`eda646e1`). The reveal is now horizontal-only
+  (`abs(x) > abs(y) && x < 0`) and runs *simultaneously* with the scroll pan, so
+  **it cannot swallow a vertical drag** — do not diagnose a scrolling fault as
+  the reveal gesture eating the pan. That mechanism no longer exists.
+- **BET-1105** — the list renders from a plain snapshot of the rows; the
+  hand-rolled `ListDataSource` and its append-only change log are gone, which
+  removed the mechanism behind the "invalid batch updates" crash.
+
+Row identity still matters, but the sharpest edge is gone. **Verify against the
+code on your base rather than trusting this paragraph** — an earlier version of
+it said BET-1104 was unmerged for a day after it landed, and that stale line
+sent an agent chasing a gesture that had already been deleted. Treat any new
+`TiledView`/batch-update crash as a likely regression of this family.
 
 ## 7. Networking and error handling
 
