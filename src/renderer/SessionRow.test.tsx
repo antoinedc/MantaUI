@@ -249,13 +249,15 @@ describe("SessionRow — one line: dot · name · age", () => {
     expect(name.textContent).toBe("Add CSV export");
   });
 
-  it("marquee: true ellipsizes the inner text at rest", () => {
+  it("marquee: true keeps the inner span width-unconstrained (no width-mutation jitter)", () => {
     h = mount(<SessionRow status="idle" name="Add CSV export" marquee />);
     const el = h.container.firstElementChild as HTMLElement;
     const clip = el.firstElementChild!.nextElementSibling as HTMLElement;
     const inner = clip.firstElementChild as HTMLElement;
-    expect(inner.className).toContain("text-ellipsis");
-    expect(inner.className).toContain("overflow-hidden");
-    expect(inner.className).toContain("max-w-full");
+    expect(inner.className).toContain("manta-marquee-inner");
+    expect(inner.className).toContain("whitespace-nowrap");
+    expect(inner.className).not.toContain("max-w-full");
+    expect(inner.className).not.toContain("overflow-hidden");
+    expect(inner.className).not.toContain("text-ellipsis");
   });
 });
