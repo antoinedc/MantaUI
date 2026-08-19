@@ -129,13 +129,19 @@ describe("modelInputModes", () => {
     ]);
   });
 
-  it("returns [] for an object-map input (normalization owns that shape now)", () => {
-    // The raw /provider object-map (input: {image: true, ...}) is canonicalized
-    // to an array at the normalization chokepoint; the renderer no longer
-    // special-cases it, so an un-normalized map reads as "unknown".
+  it("reads an object-of-flags input, keeping only the true keys (/provider shape)", () => {
     expect(
       modelInputModes(model({ input: { text: true, image: true, pdf: false } })),
-    ).toEqual([]);
+    ).toEqual(["text", "image"]);
+  });
+
+  it("REGRESSION: tolerates the object-of-flags shape from an older box (BET-1201)", () => {
+    // A client can be NEWER than the box it talks to, so it may receive the
+    // provider's raw object-of-flags form rather than the normalized array.
+    // This is the incident guard: it must NOT read as "no input modalities".
+    expect(
+      modelInputModes(model({ input: { text: true, image: true, pdf: true } })),
+    ).toEqual(["text", "image", "pdf"]);
   });
 });
 

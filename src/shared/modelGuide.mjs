@@ -366,3 +366,21 @@ export function isDeprecated(m) {
   return !!m && m.status === "deprecated";
 }
 
+// Read a model's declared modalities from EITHER wire shape.
+//
+// The box normalizes `capabilities.input` / `.output` to an array of strings,
+// but a client can be NEWER than the box it talks to — the desktop app and the
+// box update on separate tracks — so a client may still receive the provider's
+// raw object-of-flags form. Both are accepted here. Anything else reads as
+// "unknown" and returns [], which callers must treat as "no information",
+// NEVER as "this model supports nothing".
+export function readModalities(value) {
+  if (Array.isArray(value)) return value.filter((v) => typeof v === "string");
+  if (value && typeof value === "object") {
+    return Object.entries(value)
+      .filter(([, v]) => v === true)
+      .map(([k]) => String(k));
+  }
+  return [];
+}
+
