@@ -348,8 +348,11 @@ export function CallApp() {
     wsRef.current?.send(JSON.stringify({ type: "control", action: "park" }));
     micStreamRef.current?.getTracks().forEach((t) => t.stop());
     micStreamRef.current = null;
+    // Mic is off once parked, so the indicator reads "off" (the manual spec:
+    // "the mic indicator is off"). A parked call's engine is torn down anyway;
+    // if the window is later re-shown the user toggles Talk to restart the mic.
+    setListening(false);
     setStatus("parked");
-    setListening(true);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (window as any).__mantaPreload?.call?.park?.();
   }
