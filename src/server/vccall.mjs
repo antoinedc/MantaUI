@@ -253,7 +253,16 @@ export function createVcCallEngine(deps = {}) {
 
   function send(msg) {
     if (state.openai && typeof state.openai.send === "function") {
-      state.openai.send(typeof msg === "string" ? msg : JSON.stringify(msg));
+      // A websocket can close between any two writes; a send on a CONNECTING /
+      // CLOSED socket throws, and that must never take the server down. Publish
+      // an error frame instead of propagating (openTransport keeps running and
+      // the reconnect/close handlers own the retry).
+      try {
+        state.openai.send(typeof msg === "string" ? msg : JSON.stringify(msg));
+      } catch {
+        publish({ type: "error", error: "realtime_send_failed" });
+        return;
+      }
     }
   }
 
@@ -504,6 +513,48 @@ export function createVcCallEngine(deps = {}) {
   };
 }
 
+/**
+ * Resolve once `ws` is open; reject if it errors or closes before open. The
+ * realtimeConnect contract is "resolves with an OPEN socket" — openTransport
+ * writes to it immediately, and a write on a CONNECTING socket throws. Takes a
+ * ws-like EventEmitter (never references NodeWebSocket) and removes its
+ * listeners once settled.
+ *
+ * @param {import("events").EventEmitter & object} ws a ws-like instance
+ * @returns {Promise<object>} resolves with the same `ws` once open
+ */
+export function awaitOpen(ws) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      ws.removeListener("open", onOpen);
+      ws.removeListener("error", onError);
+      ws.removeListener("close", onClose);
+    };
+    const onOpen = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(ws);
+    };
+    const onError = (err) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err instanceof Error ? err : new Error(String(err)));
+    };
+    const onClose = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error("websocket closed before open"));
+    };
+    ws.on("open", onOpen);
+    ws.on("error", onError);
+    ws.on("close", onClose);
+  });
+}
+
 async function defaultRealtimeConnect(url, headers) {
-  return new NodeWebSocket(url, { headers });
+  return awaitOpen(new NodeWebSocket(url, { headers }));
 }
