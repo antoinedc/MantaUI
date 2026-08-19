@@ -1571,6 +1571,12 @@ function Shell() {
       const res = await window.api.serverCliUpdate(t.id);
       if (res && res.ok === false) {
         useStore.getState().setTargetUpdateError(t.id, res.error ?? "Update failed");
+      } else {
+        // The server invalidated its CLI-detector cache on success, so a fresh
+        // probe now reflects the new version. AWAIT it BEFORE clearing the
+        // loading state — otherwise the row re-renders the stale pre-upgrade
+        // target for a frame and flickers back to the "Update" button.
+        await refreshUpdateTargets().catch(() => {});
       }
     } catch (e) {
       // Defensive: the RPC's contract is to never reject, but a bare
@@ -1584,9 +1590,6 @@ function Shell() {
     } finally {
       useStore.getState().setUpdatingTarget(null);
     }
-    // BET-1161: after busy clears, re-check so the row/node reflects the new
-    // version instead of the stale pre-upgrade one.
-    void refreshUpdateTargets().catch(() => {});
   };
 
   // The ONE per-target update router, shared by the Settings rows and the
