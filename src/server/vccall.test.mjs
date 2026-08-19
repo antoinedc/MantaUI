@@ -584,3 +584,25 @@ test("spend parses the GA usage shape (evt.response.usage, *_details) — BET-11
   assert.ok(Math.abs(costs[0].usd - 0.215) < 1e-9, "GA usage priced identically to beta usage");
   assert.equal(ws.closed, true, "spend cap trips on GA-shaped usage too");
 });
+
+test("a hangup during connect closes the socket once it opens (no orphan session, BET-1185)", async () => {
+  const ws = makeFakeWs();
+  let resolveConnect;
+  const pending = new Promise((resolve) => {
+    resolveConnect = resolve;
+  });
+  const engine = createVcCallEngine({
+    realtimeConnect: () => pending,
+    configGet: async () => ({ openaiApiKey: "sk-test", cto: {} }),
+    dispatchCto: async () => ({ ok: true }),
+    publish: () => {},
+    onState: () => {},
+  });
+  engine.setTools([]);
+  const startPromise = engine.start({ openaiApiKey: "sk-test", cto: {} });
+  // Hang up while the realtime connect is still in flight, then let it open.
+  engine.hangup();
+  resolveConnect(ws);
+  await startPromise;
+  assert.equal(ws.closed, true, "post-hangup connect does not leave a live orphan session");
+});

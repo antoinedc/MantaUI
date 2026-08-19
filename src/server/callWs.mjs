@@ -19,13 +19,50 @@
 import { createVcCallEngine } from "./vccall.mjs";
 
 /**
+ * The single-call registry (BET-1185, Cause 2). Owns the "exactly one live
+ * call" invariant across every /call socket: `begin` registers a new call and
+ * returns whatever was active before it (the displaced call the caller must
+ * tear down); `end` clears the active call ONLY if that exact engine is still
+ * the current one — so a displaced call's own teardown can never clear the flag
+ * for the call that replaced it.
+ */
+export function createCallRegistry() {
+  let active = null; // { id, engine, ws }
+  let seq = 0;
+  return {
+    /** Register a new call as active; returns the displaced call or null. */
+    begin(engine, ws) {
+      const displaced = active;
+      active = { id: ++seq, engine, ws };
+      return displaced;
+    },
+    /** Clear the active call if (and only if) it is this engine. Returns true if cleared. */
+    end(engine) {
+      if (active && active.engine === engine) {
+        active = null;
+        return true;
+      }
+      return false;
+    },
+    current() {
+      return active;
+    },
+    isActive() {
+      return active !== null;
+    },
+  };
+}
+
+/**
  * Attach a /call WS to a fresh vccall engine. Auth + path matching happen at
  * the upgrade layer (src/server/index.mjs). `opts` supplies the engine deps
- * and the live-routing hooks (the "call active" flag that issue 2's inbound
- * funnel reads):
+ *  and the live-routing hooks (the "call active" flag that issue 2's inbound
+ *  funnel reads):
  *   { dispatchCto, approveConfirm, rejectConfirm, configGet,
  *     synthesizeSpeech, onNarrate,
- *     setCallActive:(active, engine|null)=>void }
+ *     setCallActive:(active, engine|null)=>void,
+ *     registry,          // a shared createCallRegistry() — the single-call guard
+ *     log:(msg)=>void }  // default console.log; the box logs nothing for calls
  *
  * @param {object} ws   a `ws` WebSocket instance
  * @param {URL}    url  the parsed upgrade URL
@@ -41,6 +78,8 @@ export function attachCallWs(ws, url, opts = {}) {
     realtimeConnect,
     onNarrate = () => {},
     setCallActive = () => {},
+    registry = null,
+    log = (msg) => console.log(msg),
   } = opts;
 
   let open = true;
@@ -100,6 +139,52 @@ export function attachCallWs(ws, url, opts = {}) {
     publish: sendJson,
   });
 
+  // ----- single-call guard (BET-1185, Cause 2) -----
+  // The box permits ONE live call. Register this socket+engine as the active
+  // call at attach time (synchronously, BEFORE the async boot). If another
+  // call is already active it is displaced — a reconnecting window must be
+  // able to take over a dead session, so we close its socket rather than
+  // reject it. The displaced socket's own `close` handler hangs its engine and
+  // clears the flag in an identity-guarded way (registry.end only clears the
+  // active call if that engine is still the current one), so the displaced
+  // call can never clobber the flag for the call that replaced it.
+  let displaced = null;
+  if (registry) {
+    displaced = registry.begin(engine, ws);
+  }
+  markActive(displaced ? "takeover" : "new");
+  if (displaced) {
+    log(`[call] takeover: closing the ${displacedCause(displaced)} on new /call`);
+    if (typeof displaced.ws?.close === "function") {
+      displaced.ws.close();
+    } else {
+      try {
+        displaced.engine.hangup();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  function markActive(reason) {
+    setCallActive(true, engine);
+    log(`[call] attach: ${reason}`);
+  }
+
+  function clearActive(reason) {
+    if (registry) {
+      // Identity guard: only clear if THIS engine is still the active call.
+      // If it was already displaced by a takeover, leaving the new call's flag
+      // alone is the point.
+      const cleared = registry.end(engine);
+      if (!cleared) return;
+      setCallActive(false, null);
+    } else {
+      setCallActive(false, null);
+    }
+    log(`[call] detach: ${reason}`);
+  }
+
   // Boot the call on connect (open a Realtime session). The keys live on the
   // box; the engine reads them via configGet — nothing reaches the renderer.
   engine.setTools(opts.listTools ? opts.listTools() : []);
@@ -110,7 +195,6 @@ export function attachCallWs(ws, url, opts = {}) {
     } catch {
       cfg = {};
     }
-    setCallActive(true, engine);
     // Push the cto profile to the renderer so it honours the config (e.g. the
     // push-to-barge default reads cto.alwaysListening; never hardcodes it).
     sendJson({
@@ -151,10 +235,10 @@ export function attachCallWs(ws, url, opts = {}) {
         return;
       case "control":
         if (msg.action === "park") {
-          setCallActive(false, null);
+          clearActive("park");
           engine.park();
         } else if (msg.action === "hangup") {
-          setCallActive(false, null);
+          clearActive("hangup");
           engine.hangup();
         }
         return;
@@ -165,12 +249,22 @@ export function attachCallWs(ws, url, opts = {}) {
 
   ws.on("close", () => {
     open = false;
-    setCallActive(false, null);
+    // A socket close (normal hangup, the renderer window vanishing, or a
+    // takeover displacing this call) tears the engine down and clears the
+    // active flag — identity-guarded so a displaced call can't clear a newer
+    // call's flag.
+    clearActive(`socket close${displaced ? " (displaced by takeover)" : ""}`);
     engine.hangup();
   });
   ws.on("error", () => {
     /* cleanup runs in close */
   });
+}
+
+// human label for which call was displaced, for the takeover log line
+function displacedCause(d) {
+  if (d?.ws?.id) return `socket ${d.ws.id}`;
+  return "active call";
 }
 
 // Narration text from cto.dispatch arrives as terse `[cto] <tool>` / ` ok` /

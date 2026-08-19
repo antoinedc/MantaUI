@@ -40,7 +40,7 @@ import { createLogShipper, captureConsole, resolveAxiomConfig } from "../shared/
 }
 import { createBus, handleEventsRequest, attachEventsWs } from "./events.mjs";
 import { attachPtyWs } from "./ptyWs.mjs";
-import { attachCallWs } from "./callWs.mjs";
+import { attachCallWs, createCallRegistry } from "./callWs.mjs";
 import { buildHandlers, handleRpcRequest } from "./rpc.mjs";
 import { startStatusPoller } from "./status.mjs";
 import { createSyncState } from "./syncState.mjs";
@@ -976,6 +976,11 @@ function setCallActive(active, engine) {
   callActive = !!active;
   activeCallEngine = active && engine ? engine : null;
 }
+// Single-call guard (BET-1185, Cause 2): exactly one live /call at a time. A
+// new /call while one is active displaces (tears down) the previous one; the
+// registry is passed to every attach so the takeover logic runs inside
+// callWs.mjs where it is unit-testable.
+const callRegistry = createCallRegistry();
 
 // Which read a watcher's surface maps to. NATIVE surfaces (schedule, delegate)
 // go through the box's own stores. `session` needs no poller read — session
@@ -3018,6 +3023,7 @@ const handleUpgrade = (req, socket, head) => {
         configGet: () => local.configGet(),
         listTools: () => getCtoEngine().listTools(),
         setCallActive,
+        registry: callRegistry,
         // Narration (spec #6): the box synthesizes tool-boundary narration with
         // Groq Orpheus (key server-side) and streams it down /call as audio.
         synthesizeSpeech,

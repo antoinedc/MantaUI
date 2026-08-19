@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { attachCallWs } from "./callWs.mjs";
+import { attachCallWs, createCallRegistry } from "./callWs.mjs";
 
 function makeClientWs() {
   const ws = new EventEmitter();
@@ -179,4 +179,89 @@ test("a rejected engine.start pushes an error frame and is not an unhandled reje
   } finally {
     process.removeListener("unhandledRejection", onUnhandled);
   }
+});
+
+test("createCallRegistry begins/ends identity-guarded: a displaced call can't clear a newer call", () => {
+  const r = createCallRegistry();
+  const e1 = { engine: 1 };
+  const e2 = { engine: 2 };
+  const s1 = { id: "s1" };
+  const s2 = { id: "s2" };
+
+  assert.equal(r.isActive(), false);
+  const displaced1 = r.begin(e1, s1);
+  assert.equal(displaced1, null, "first begin displaces nothing");
+  assert.equal(r.isActive(), true);
+
+  // Second call displaces the first.
+  const displaced2 = r.begin(e2, s2);
+  assert.equal(displaced2.engine, e1, "second begin displaces the first call");
+  assert.equal(displaced2.ws, s1);
+
+  // The DISPLACED call (engine 1) trying to end must NOT clear the active flag.
+  assert.equal(r.end(e1), false, "displaced engine end is a no-op");
+  assert.equal(r.isActive(), true, "active call survives the displaced call's teardown");
+
+  // The actual active call (engine 2) clears it.
+  assert.equal(r.end(e2), true, "active engine end clears the call");
+  assert.equal(r.isActive(), false);
+});
+
+test("a second /call attach while one is active tears down the first (takeover)", async () => {
+  const registry = createCallRegistry();
+  const activeState = [];
+  const makeOpts = (configGet) => ({
+    realtimeConnect: async () => ({}), // realtime ws shape is mocked below via engine deps
+    configGet,
+    listTools: () => [],
+    setCallActive: (a) => activeState.push(a),
+    registry,
+    log: () => {},
+  });
+
+  // First call: real, open realtime session.
+  const firstClient = makeClientWs();
+  const firstRt = makeFakeRealtime();
+  attachCallWs(firstClient, new URL("/call", "http://x"), {
+    ...makeOpts(async () => ({ openaiApiKey: "sk-test", cto: {} })),
+    realtimeConnect: async () => firstRt,
+  });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(activeState[0], true, "first call active on connect");
+  assert.equal(firstRt.closed, false, "first realtime open before takeover");
+  assert.notEqual(firstClient.closed, true, "first socket open before takeover");
+
+  // Second call attaches while the first is live → displaces it.
+  const secondClient = makeClientWs();
+  const secondRt = makeFakeRealtime();
+  attachCallWs(secondClient, new URL("/call", "http://x"), {
+    ...makeOpts(async () => ({ openaiApiKey: "sk-test", cto: {} })),
+    realtimeConnect: async () => secondRt,
+  });
+  await new Promise((r) => setTimeout(r, 10));
+
+  // The first engine was hung up and its socket closed.
+  assert.equal(firstRt.closed, true, "first engine hung up on takeover");
+  assert.equal(firstClient.closed, true, "first socket closed on takeover");
+
+  // Let the second call's Realtime session come up.
+  secondRt.emit("message", Buffer.from(JSON.stringify({ type: "session.created", session: { id: "s2" } })));
+  await new Promise((r) => setTimeout(r, 10));
+
+  // The second call is the live one.
+  assert.ok(
+    secondClient.clientSent.some((m) => {
+      try {
+        return JSON.parse(m).type === "state" && JSON.parse(m).state === "live";
+      } catch {
+        return false;
+      }
+    }),
+    "second call becomes live",
+  );
+  assert.equal(secondRt.closed, false, "second realtime stays open");
+
+  // The first call's teardown must NOT have cleared the active flag.
+  assert.equal(activeState[activeState.length - 1], true, "takeover leaves the new call active");
+  assert.equal(registry.isActive(), true, "registry still points at the new call");
 });

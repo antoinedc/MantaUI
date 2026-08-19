@@ -108,6 +108,7 @@ export function createVcCallEngine(deps = {}) {
 
   const state = {
     active: false, // a live call is open (set true on session.created)
+    deactivated: false, // hangup/park ran — no further connect/reconnect (BET-1185)
     status: "idle", // idle | connecting | live | parked | dropped | reconnecting
     openai: null, // ws-like to OpenAI
     tools: [], // [{name,description,params}]
@@ -213,6 +214,14 @@ export function createVcCallEngine(deps = {}) {
       });
     } catch (e) {
       scheduleReconnect("connect_error");
+      return null;
+    }
+    // BET-1185 (Cause 2): a takeover / hangup / close can deactivate this
+    // engine while the connect is in flight (the Realtime socket opened after
+    // hangup). Don't leave a live, unbilled-but-fatal orphan session behind —
+    // close the socket and bow out; the active call owns the conversation.
+    if (state.deactivated) {
+      try { ws.close(); } catch { /* ignore */ }
       return null;
     }
     state.reconnectAttempts = 0;
@@ -355,6 +364,7 @@ export function createVcCallEngine(deps = {}) {
 
   function hangup() {
     state.active = false;
+    state.deactivated = true;
     clearIdleTimer();
     clearReconnectTimer();
     if (state.openai) {
@@ -367,6 +377,7 @@ export function createVcCallEngine(deps = {}) {
 
   function park() {
     state.active = false;
+    state.deactivated = true;
     clearIdleTimer();
     clearReconnectTimer();
     if (state.openai) {
