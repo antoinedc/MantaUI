@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { PRESETS } from "./modelRouter.mjs";
 import {
   SETTINGS,
   SETTING_SECTIONS,
@@ -123,6 +124,40 @@ describe("uploadCleanupHours (BET-427)", () => {
   });
   it("carries a 0-disables option", () => {
     expect(entry!.options?.some((o) => o.value === "0")).toBe(true);
+  });
+});
+
+describe("model routing entries (BET-1218)", () => {
+  const enabled = ALL.find((e) => e.id === "modelRoutingEnabled");
+  const preset = ALL.find((e) => e.id === "modelRoutingPreset");
+
+  it("are present in the models section for desktop", () => {
+    const desktop = settingsForSection(ALL, "models", "desktop");
+    expect(enabled).toBeDefined();
+    expect(preset).toBeDefined();
+    expect(desktop.some((e) => e.id === "modelRoutingEnabled")).toBe(true);
+    expect(desktop.some((e) => e.id === "modelRoutingPreset")).toBe(true);
+  });
+
+  it("are desktop-only (never rendered on mobile)", () => {
+    const mobile = settingsForPlatform(ALL, "mobile");
+    expect(mobile.some((e) => e.id === "modelRoutingEnabled")).toBe(false);
+    expect(mobile.some((e) => e.id === "modelRoutingPreset")).toBe(false);
+  });
+
+  it("the enabled toggle defaults to FALSE (the consent boundary)", () => {
+    // Routing acts on the user's behalf, so it is strictly opt-in.
+    expect(enabled!.control).toBe("toggle");
+    expect(enabled!.configKey).toBe("modelRouting.enabled");
+    expect(enabled!.default).toBe(false);
+  });
+
+  it("the preset uses the exact PRESETS values from modelRouter (no drift)", () => {
+    expect(preset!.control).toBe("segmented");
+    expect(preset!.configKey).toBe("modelRouting.preset");
+    expect(preset!.default).toBe("balanced");
+    const values = preset!.options?.map((o) => o.value);
+    expect(values).toEqual(PRESETS);
   });
 });
 

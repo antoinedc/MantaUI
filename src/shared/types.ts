@@ -282,6 +282,21 @@ export type AppConfig = {
     // Whether the call window listens continuously (Issue 3). Default false.
     alwaysListening?: boolean;
   };
+  // ----- Model routing (BET-1215) -----
+  // Manta picks the cheapest model that still clears the quality floor for a
+  // given kind of work, instead of always using the default. Off by default
+  // (hard requirement — routing acts on the user's behalf, so it is opt-in,
+  // matching chatAutoAllow / pluginsEnabled). Config-only in this issue; the
+  // router wiring issue reads this into the router's `policy` argument.
+  modelRouting?: {
+    // Master switch. False (the default) until the user opts in.
+    enabled: boolean;
+    // Three-way balance dial. Default "balanced".
+    preset: "economy" | "balanced" | "performance";
+    // Per-agent tier override (config-only — no UI builds this). Absent /
+    // partial = fall back to the preset's tier table.
+    perAgent?: Record<string, "fast" | "balanced" | "deep">;
+  };
   // Position/size of the floating on-call CTO window (BET-1166). Persisted so
   // the window remembers where the user parked it across runs.
   callWindowBounds?: { x?: number; y?: number; width: number; height: number };
