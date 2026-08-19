@@ -1573,6 +1573,20 @@ describe("isTransientUpdateNetworkError", () => {
     expect(isTransientUpdateNetworkError(new Error("Load failed"))).toBe(true);
   });
 
+  it("treats a gateway 5xx on the update RPC as the same transient restart-drop", () => {
+    // Over HTTPS a reverse proxy answers the in-flight update RPC with a bare
+    // gateway 5xx while the box restarts itself — the same benign success-path
+    // drop as `Failed to fetch`, just a different spelling. Must NOT abort the
+    // graceful boxUpgrading flow.
+    expect(isTransientUpdateNetworkError(new Error("HTTP 502 Bad Gateway"))).toBe(true);
+    expect(isTransientUpdateNetworkError(new Error("HTTP 502"))).toBe(true);
+    expect(isTransientUpdateNetworkError(new Error("HTTP 503"))).toBe(true);
+    expect(isTransientUpdateNetworkError(new Error("HTTP 504 Gateway Timeout"))).toBe(true);
+    expect(isTransientUpdateNetworkError(new Error("Bad Gateway"))).toBe(true);
+    expect(isTransientUpdateNetworkError(new Error("HTTP 521"))).toBe(true);
+    expect(isTransientUpdateNetworkError(new Error("HTTP 524 origin is unreachable"))).toBe(true);
+  });
+
   it("does NOT treat a real server-reported early failure as transient", () => {
     // Genuine failures come back as structured strings from the RPC result,
     // not as connection errors — these must still raise the update-failed banner.
@@ -1580,6 +1594,16 @@ describe("isTransientUpdateNetworkError", () => {
     expect(isTransientUpdateNetworkError(new Error("self-update: manifest is malformed"))).toBe(false);
     expect(isTransientUpdateNetworkError(new Error("self-update: bad tarball — missing src/server/index.mjs"))).toBe(false);
     expect(isTransientUpdateNetworkError(new Error("spawn /abs/scripts/self-update.sh EACCES"))).toBe(false);
+    // Even a structured failure whose text mentions the download URL (which can
+    // contain "502") must stay real — the box is UP and reported it couldn't
+    // fetch the tarball. The `self-update:` guard wins over the gateway match.
+    expect(isTransientUpdateNetworkError(new Error("self-update: download failed: https://mantaui.com/releases/manta-x.tar.gz"))).toBe(false);
+  });
+
+  it("does NOT treat a bare HTTP 500 (server up but errored) as transient", () => {
+    // 500 means the box answered — it is NOT restarting, so this is a real
+    // failure, not the benign origin-unreachable family.
+    expect(isTransientUpdateNetworkError(new Error("HTTP 500 Internal Server Error"))).toBe(false);
   });
 
   it("is tolerant of null/undefined and arbitrary input", () => {

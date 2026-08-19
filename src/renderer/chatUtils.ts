@@ -1180,6 +1180,17 @@ export function isTransientUpdateNetworkError(err: unknown): boolean {
   // failures and must never be classified transient — the banner-relevant
   // resolver's `res.ok === false` branch surfaces them for real.
   if (msg.includes("self-update:")) return false;
+  // When a reverse proxy (Cloudflare/Caddy) sits between the app and the box,
+  // the SAME benign "box is restarting itself mid-update" drop that a direct
+  // socket surfaces as `Failed to fetch` arrives as a gateway 5xx — the proxy
+  // answers the in-flight update RPC with origin-unreachable while the box is
+  // briefly down. That is the success path's side-effect, not a real failure:
+  // the reconnect + version re-check resolve it, so it must not flip the
+  // update-failed banner (which would abort the graceful boxUpgrading flow).
+  // 502 bad-gateway / 503 / 504 gateway-timeout, plus Cloudflare's
+  // origin-down codes (521/522/524). A bare 500 ("Internal Server Error") is
+  // NOT in the set — the box is up, so that is a genuine failure.
+  if (/http (502|503|504|521|522|524)\b|bad gateway|gateway timeout|origin is unreachable/.test(msg)) return true;
   return (
     msg.includes("failed to fetch") ||
     msg.includes("fetch failed") ||
