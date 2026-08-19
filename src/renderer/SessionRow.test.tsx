@@ -249,15 +249,17 @@ describe("SessionRow — one line: dot · name · age", () => {
     expect(name.textContent).toBe("Add CSV export");
   });
 
-  it("marquee: true keeps the inner span width-unconstrained (no width-mutation jitter)", () => {
+  it("marquee: true still renders exactly ONE in-flow, one-line name (no double-height row)", () => {
     h = mount(<SessionRow status="idle" name="Add CSV export" marquee />);
     const el = h.container.firstElementChild as HTMLElement;
     const clip = el.firstElementChild!.nextElementSibling as HTMLElement;
-    const inner = clip.firstElementChild as HTMLElement;
-    expect(inner.className).toContain("manta-marquee-inner");
-    expect(inner.className).toContain("whitespace-nowrap");
-    expect(inner.className).not.toContain("max-w-full");
-    expect(inner.className).not.toContain("overflow-hidden");
-    expect(inner.className).not.toContain("text-ellipsis");
+    // The label's box comes from one truncating child; the sliding copy (when
+    // the text overflows) is absolutely positioned on top of it and adds no
+    // height. A second in-flow copy is what made every truncated row two lines
+    // tall (BET-1172). Geometry itself is covered in MarqueeLabel.test.tsx.
+    expect(clip.children).toHaveLength(1);
+    const rest = clip.firstElementChild as HTMLElement;
+    expect(rest.className).toContain("manta-marquee-rest");
+    expect(rest.className).toContain("truncate");
   });
 });

@@ -361,17 +361,16 @@ html, body, #root {
 }
 
 /* MarqueeLabel — RTL hover-loop for truncated names (see MarqueeLabel.tsx).
-   The inner span is ALWAYS full-width (`inline-block whitespace-nowrap`) and is
-   animated with a pure transform, so its box NEVER changes on hover — lifting
-   the pointer reverts to transform:none = the title reads from the start. At
-   rest an ellipsizing sibling (`manta-marquee-rest`, width-constrained +
-   text-ellipsis) is shown; on hover CSS swaps to the animated inner. Because
-   the inner keeps its layout size in both states (visibility, not display,
-   hides it at rest), `inner.scrollWidth` stays measurable and the ResizeObserver
-   (which observes only the clip) never fires from hovering. My --marquee-shift
-   is the overflow width in px (set inline by the component); --marquee-gap adds
-   breathing room so the tail fully clears the clip. Reduced-motion: a static
-   ellipsized label. */
+   The label's box comes from ONE in-flow child: the resting, ellipsized copy
+   (`manta-marquee-rest`), always exactly one line tall. The sliding copy
+   (`manta-marquee-inner`) is ABSOLUTELY POSITIONED on top of it, so it adds no
+   height and no width and hovering cannot reflow anything — it is a pure
+   transform, and lifting the pointer reverts to transform:none = the title
+   reads from the start. Do NOT make the sliding copy an in-flow sibling: even
+   `visibility:hidden` reserves a second line and doubles every truncated row's
+   height (BET-1172). --marquee-shift is the overflow width in px (set inline by
+   the component); --marquee-gap adds breathing room so the tail fully clears
+   the clip. Reduced-motion: a static ellipsized label. */
 @keyframes manta-marquee {
   0%   { transform: translateX(0); }
   35%  { transform: translateX(calc(-1 * (var(--marquee-shift, 0px) + var(--marquee-gap, 24px)))); }
@@ -379,15 +378,15 @@ html, body, #root {
   90%  { transform: translateX(0); }
   100% { transform: translateX(0); }
 }
-/* At rest: show the ellipsized REST copy; hide the animated inner but keep it
-   laid out (visibility) so its width is still measurable. */
+/* At rest: the ellipsized REST copy is the visible one; the overlay is hidden. */
 .manta-marquee .manta-marquee-inner {
   visibility: hidden;
 }
-/* On hover: swap — hide the REST copy, reveal + animate the inner. No width or
-   overflow change, so entering hover reflows nothing and re-fires nothing. */
+/* On hover: swap which copy is visible and animate the overlay. Both are
+   visibility flips — no display, width or overflow change — so entering hover
+   changes no geometry and re-fires no measurement. */
 .manta-marquee:hover .manta-marquee-rest {
-  display: none;
+  visibility: hidden;
 }
 .manta-marquee:hover .manta-marquee-inner {
   visibility: visible;
@@ -406,7 +405,7 @@ html, body, #root {
     animation: none;
   }
   .manta-marquee:hover .manta-marquee-rest {
-    display: block;
+    visibility: visible;
   }
   .manta-marquee:hover {
     -webkit-mask-image: none;
