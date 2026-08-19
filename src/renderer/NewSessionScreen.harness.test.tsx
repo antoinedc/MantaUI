@@ -627,6 +627,74 @@ describe("NewSessionScreen attach-before-start (BET-1124)", () => {
       asPathRef: true,
     });
   });
+
+  // BET-1204: drag-and-drop on the new-session draft screen stages through the
+  // identical onFiles path as the paperclip button (onFiles → draft.attachments
+  // → upload on submit). A synthetic drop must produce the same chip + upload.
+  it("a drop on the screen root stages the file and uploads it on submit", async () => {
+    const d = draft({ mode: { projectName: "proj" }, cwd: "/x", input: "summarize" });
+    const api = mountComposer(
+      d,
+      {
+        uploadBuffer: () => Promise.resolve("/remote/note.md"),
+        tmuxNewWindow: () =>
+          Promise.resolve({ sessionId: "ses-1", windowIndex: 0, projects: [] }),
+      },
+      {
+        projects: [
+          {
+            tmuxSession: "proj",
+            defaultCwd: "/x",
+            attached: false,
+            windows: [
+              {
+                index: 0,
+                name: "w",
+                active: true,
+                paneCurrentPath: "/x",
+                opencodeSessionId: "ses-1",
+              },
+            ],
+          },
+        ],
+        dismissDraft: () => {},
+      },
+    );
+    await h!.flush();
+
+    const root = h!.container.querySelector('[data-screen="welcome"]') as HTMLElement;
+    expect(root, "expected the screen root").toBeTruthy();
+
+    const file = new File(["content"], "note.md", { type: "text/markdown" });
+    // jsdom's File lacks arrayBuffer(); submit() reads bytes this way.
+    (file as File & { arrayBuffer: () => Promise<ArrayBuffer> }).arrayBuffer =
+      () => Promise.resolve(new ArrayBuffer(1));
+
+    // jsdom has no DataTransfer; hand the drop event a minimal stub whose
+    // types/files the handlers read (Array.from(types) + onFiles(files)).
+    const drop = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, "dataTransfer", {
+      value: { types: ["Files"], files: [file] as unknown as FileList, dropEffect: "none" },
+    });
+    act(() => root.dispatchEvent(drop));
+    await h!.flush();
+
+    // The chip appears, staged through the same onFiles path as the button.
+    expect(h!.text()).toContain("note.md");
+    const staged = useStore.getState().drafts.find((x) => x.id === d.id)!.attachments;
+    expect(staged).toHaveLength(1);
+    expect(staged[0].filename).toBe("note.md");
+
+    const start = h!.container.querySelector(
+      'button[aria-label="Start a session"]',
+    ) as HTMLButtonElement;
+    act(() => start.click());
+    await h!.flush();
+
+    const ups = api.calls.uploadBuffer ?? [];
+    expect(ups.length).toBe(1);
+    expect(ups[0]?.[0]).toMatchObject({ projectName: "proj", filename: "note.md" });
+  });
 });
 
 // BET-1127 follow-up: the fan-out submit path (submitFanOut — one session, one
