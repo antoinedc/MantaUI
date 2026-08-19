@@ -1536,24 +1536,32 @@ function Shell() {
     boxUpgrading && connectionState.state !== "connected" && connectionState.state !== "idle";
 
   const applyServerUpdate = async () => {
+    // DIAG: capture the banner server-update lifecycle so a "no loading state"
+    // report can be traced against runtime truth instead of assumptions.
+    console.debug("[update] applyServerUpdate start, boxUpgrading was", boxUpgrading);
     setBoxUpgrading(true);
     // Mark the server row as the in-flight target so Settings' per-target
     // spinner actually renders ("updating"). boxUpgrading alone only made the
     // row "busy" (disabled, NO spinner), which is exactly the missing server
     // loading state. Cleared on the reconcile / cap / early-failure paths below.
     useStore.getState().setUpdatingTarget("server");
+    console.debug("[update] applyServerUpdate boxUpgrading now TRUE, updatingTarget=server");
     try {
       const res = await window.api.serverUpdateApply();
+      console.debug("[update] serverUpdateApply resolved", res);
       if (res && res.ok === false) {
+        console.debug("[update] serverUpdateApply ok:false → clearing in-flight", res.error);
         useStore.getState().setUpdatingTarget(null);
         setBoxUpgrading(false);
         setUpdateError({ message: res.error || "Server update failed", raw: res.error ?? "" });
       }
     } catch (e) {
+      const transient = isTransientUpdateNetworkError(e);
+      console.debug("[update] serverUpdateApply rejected, transient?", transient, "err:", String(e));
       // A bare connection error is the box restarting itself mid-update (the
       // success path) — swallow it; the reconnect + version re-check above
       // resolves the real outcome. Structured failures still raise the banner.
-      if (isTransientUpdateNetworkError(e)) return;
+      if (transient) return;
       useStore.getState().setUpdatingTarget(null);
       setBoxUpgrading(false);
       setUpdateError({
