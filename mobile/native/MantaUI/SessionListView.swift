@@ -7,7 +7,7 @@ import UIKit
 //   §7.1   grouped list: project group headers (Title Case, 15px/600 tx2),
 //          rows = windows with [dot][name+subtitle][timer], min-height 62,
 //          radius 20, no dividers, most-recently-active row gets `fill`.
-//   §7.1a  subtitle table (subagents / running · model / needs you / absent).
+//   §7.1a  subtitle table (background jobs / running · model / needs you / absent).
 //   §7.2   tap opens; swipe-left delete (full-swipe commit); swipe-right pin;
 //          long-press context menu (Rename · Pin · Fork, sep, Delete).
 //   §7.3   idle delete → immediate + 5 s undo (RPC held); running → confirm
@@ -248,8 +248,13 @@ struct SessionListView: View {
     }
 
     private func rowEntries(_ project: MantaProject) -> [SessionRowEntry] {
-        let count = project.windows.count
-        return project.windows.enumerated().map { idx, window in
+        // BET-1213: a background job's child window gets no row of its own on
+        // mobile — it is hidden here and represented by the count on its
+        // parent row. Positions are computed over the VISIBLE windows so the
+        // first rendered row still rounds the card's top corner.
+        let visible = store.visibleWindows(in: project)
+        let count = visible.count
+        return visible.enumerated().map { idx, window in
             SessionRowEntry(project: project.tmuxSession, window: window,
                             position: .at(index: idx, count: count))
         }
@@ -285,6 +290,9 @@ struct SessionListView: View {
     @ViewBuilder
     private func groupHeader(_ project: MantaProject) -> some View {
         let running = store.runningCount(in: project)
+        // The total chip counts VISIBLE windows: hidden background-job rows are
+        // no longer counted, matching the running chip (BET-1213).
+        let visibleCount = store.visibleWindows(in: project).count
         HStack(spacing: Metrics.spacing.sp2) {
             Text(titleCased(project.tmuxSession))
                 .font(.manta(size: Metrics.type.body, weight: .semibold))
@@ -294,7 +302,7 @@ struct SessionListView: View {
             if running > 0 {
                 chip("\(running) running", fg: tokens.accentTx, bg: tokens.accentSoft)
             }
-            chip("\(project.windows.count)", fg: tokens.tx4, bg: tokens.fill)
+            chip("\(visibleCount)", fg: tokens.tx4, bg: tokens.fill)
         }
         .padding(.top, Metrics.type.listGroupAbove)
         .padding(.bottom, Metrics.type.listGroupBelow)

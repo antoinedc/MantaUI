@@ -59,6 +59,67 @@ struct MantaWorktree: Codable, Equatable, Sendable {
     var detached: Bool
 }
 
+// MARK: - Background jobs (BET-1213)
+
+/// A background-delegation job record, mirrored from the box's `delegate:list`
+/// channel. One fetch covers BOTH kinds the box's job store adopts: a `delegate`
+/// job, and a `task` subagent launched with `background: true`
+/// (src/server/delegate.mjs). `parentSessionID` is the session that started the
+/// job; `childSessionID` is the job's own opencode session (null until created).
+/// Unknown fields are ignored by Codable.
+struct DelegateJob: Codable, Equatable, Sendable {
+    var id: String
+    var parentSessionID: String?
+    var childSessionID: String?
+    var status: String
+
+    /// Whether the job is still live. `done`/`failed`/`stopped` are terminal;
+    /// anything else (a running job, or a status a newer box added) counts as
+    /// active so the count never under-reports a live job.
+    var isActive: Bool {
+        status != "done" && status != "failed" && status != "stopped"
+    }
+}
+
+/// Result of nesting a project's windows against its jobs (BET-1213).
+struct DelegateNesting: Equatable, Sendable {
+    /// Child window indices to REMOVE from the project's top-level rows.
+    var hidden: Set<Int>
+    /// Parent window index -> count of non-terminal jobs nested under it.
+    var activeChildCounts: [Int: Int]
+}
+
+/// Pure port of the desktop `computeJobNesting` (src/renderer/chatUtils.ts).
+/// For each job whose child window AND parent window both exist in the project,
+/// the child window is hidden — on mobile it renders as NO row of its own; the
+/// parent row carries the background-job count instead (no nested row, no
+/// disclosure). A job whose parent window is gone leaves the child VISIBLE at
+/// top level (never orphan a reachable session). A job whose child window is
+/// absent is ignored.
+enum SessionJobNesting {
+    static func compute(project: MantaProject, jobs: [DelegateJob]) -> DelegateNesting {
+        var hidden = Set<Int>()
+        var counts: [Int: Int] = [:]
+        var byOpencodeId: [String: MantaWindow] = [:]
+        for w in project.windows {
+            if let sid = w.opencodeSessionId, !sid.isEmpty {
+                byOpencodeId[sid] = w
+            }
+        }
+        for job in jobs {
+            guard let child = job.childSessionID, !child.isEmpty,
+                  let childWin = byOpencodeId[child] else { continue }
+            guard let parent = job.parentSessionID, !parent.isEmpty,
+                  let parentWin = byOpencodeId[parent] else { continue }
+            hidden.insert(childWin.index)
+            if job.isActive {
+                counts[parentWin.index, default: 0] += 1
+            }
+        }
+        return DelegateNesting(hidden: hidden, activeChildCounts: counts)
+    }
+}
+
 /// The durable, session-scoped "where is this turn right now" record (BET-790,
 /// mirroring src/server/progress.mjs). One record per session; `step` is
 /// monotonic and clamped server-side. The list surface reads only the model's
@@ -110,7 +171,10 @@ struct KillWindowInput: Sendable {
 struct SessionRowStatus: Equatable, Sendable {
     var running: Bool
     var attention: Bool
-    var subagentsRunning: Int
+    /// Number of non-terminal background jobs nested under this window
+    /// (BET-1213). Missing delegation (an older box) is just 0 — a missing job
+    /// list is missing decoration, never a missing session.
+    var backgroundJobs: Int
     var modelLabel: String?
     /// BET-791: the model-authored progress label for a working turn (e.g.
     /// "Running integration tests"). Absent when the turn has no record, or
@@ -124,17 +188,19 @@ struct SessionRowStatus: Equatable, Sendable {
 }
 
 enum SessionRowSubtitle {
-    /// §7.1a subtitle table — precedence: subagents, then the working progress
-    /// label, then running, then blocked, then (idle) model. The
-    /// subagent case REPLACES the line. A model-authored progress label
-    /// (BET-791) is more informative than a bare "running" / "running · model",
-    /// so it replaces both when a working turn names its step. The first four
-    /// branches are unchanged from the original table; only the idle tail is
-    /// new (BET-897): a terminal row says "terminal", otherwise the idle line
-    /// is the model label alone; recency lives in the age chip (BET-1084).
+    /// §7.1a subtitle table — precedence: background jobs, then the working
+    /// progress label, then running, then blocked, then (idle) model. The
+    /// background-job case REPLACES the line (the count is the number of
+    /// non-terminal jobs nested under the window). A model-authored progress
+    /// label (BET-791) is more informative than a bare "running" /
+    /// "running · model", so it replaces both when a working turn names its
+    /// step. The first four branches are unchanged from the original table;
+    /// only the idle tail is new (BET-897): a terminal row says "terminal",
+    /// otherwise the idle line is the model label alone; recency lives in the
+    /// age chip (BET-1084).
     static func text(for s: SessionRowStatus) -> String? {
-        if s.subagentsRunning > 0 {
-            return "\(s.subagentsRunning) subagent" + (s.subagentsRunning == 1 ? "" : "s")
+        if s.backgroundJobs > 0 {
+            return "\(s.backgroundJobs) background job" + (s.backgroundJobs == 1 ? "" : "s")
         }
         if s.running {
             if let label = s.progressLabel, !label.isEmpty {

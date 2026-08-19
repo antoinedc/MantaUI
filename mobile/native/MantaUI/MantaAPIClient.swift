@@ -158,6 +158,24 @@ final class MantaAPIClient: Sendable {
         try await callRequired("tmux:list", args: [], as: [MantaProject].self)
     }
 
+    /// `delegate:list` — the box's background-delegation jobs (BET-1213).
+    /// No-arg returns ALL jobs, so a single fetch covers a `delegate` job and a
+    /// `task` subagent the job store adopted. The engine returns a bare
+    /// `DelegateJob[]`; a no-engine fallback returns `{jobs: []}`, which we
+    /// normalize (mirrors desktop httpApi.delegateList). A box that predates
+    /// delegation answers with an unknown-channel error — that THROWS, and the
+    /// caller decides whether it is fatal (it is not for the session list).
+    func delegateList() async throws -> [DelegateJob] {
+        let data = try await transport(channel: "delegate:list", args: [])
+        if let jobs = try? Self.decode(data, as: [DelegateJob].self) {
+            return jobs
+        }
+        if let envelope = try Self.decode(data, as: DelegateJobsEnvelope.self) {
+            return envelope.jobs
+        }
+        return []
+    }
+
     /// `tmux:new-session` — create a new project (tmux session).
     func newSession(_ input: NewSessionInput) async throws -> [MantaProject] {
         let dict: [String: Any] = [
@@ -716,6 +734,12 @@ final class MantaAPIClient: Sendable {
 }
 
 private struct VoidResult: Decodable {}
+
+/// `delegate:list` can answer `{jobs: [...]}` on a no-engine fallback; the
+/// normalize path in `delegateList()` decodes that shape.
+private struct DelegateJobsEnvelope: Decodable {
+    let jobs: [DelegateJob]
+}
 
 /// The `opencode:fork-session` reply is `{ newSessionId, projects }`; only the
 /// new session id is consumed by callers (to navigate to the fork). The extra

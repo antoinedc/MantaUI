@@ -8,9 +8,10 @@ import SwiftUI
 // Owns the live data behind the §7.1 list:
 //   - the grouped project/window list from `tmux:list` (refreshed on demand
 //     and on every healthy stream reconnect via `resyncHandler`);
-//   - per-row live status (running / attention / subagents / model) merged
-//     from the S1b event store (`sessionStates` keyed by the window's
-//     `opencodeSessionId`) plus attention tracking on the raw frame surface;
+//   - per-row live status (running / attention / background jobs / model)
+//     merged from the S1b event store (`sessionStates` keyed by the window's
+//     `opencodeSessionId`) plus the `delegate:list` jobs fetch and attention
+//     tracking on the raw frame surface;
 //   - pinned windows (`pinnedWindows`) and the haptics enable flag, both
 //     persisted through `config:update`;
 //   - §7.3 delete-with-undo: an idle delete is held 5 s, the RPC fires only
@@ -70,6 +71,12 @@ final class SessionListStore: ObservableObject {
     @Published private(set) var hapticsEnabled = true
     /// pinID -> pending delete being held within its 5 s undo window.
     @Published private(set) var pendingDeletes: [String: PendingDelete] = [:]
+    /// Background-delegation jobs keyed by the job's child opencode session id
+    /// (BET-1213). Decoration ONLY: fetched on the same cadence as `projects`
+    /// but tolerated — a box that predates delegation errors on `delegate:list`,
+    /// and that must leave the list fully visible with no counts (a missing job
+    /// list is missing decoration, never missing sessions).
+    @Published private(set) var delegateJobs: [String: DelegateJob] = [:]
 
     private let api: MantaAPIClient
     private let mutations: SessionListMutationAPI
@@ -84,6 +91,11 @@ final class SessionListStore: ObservableObject {
     /// (BET-791). Fed from `progress:get` on `progress.updated` frames + a
     /// backfill on refresh; drives the row subtitle via `rowStatus`.
     private var progressBySession: [String: String] = [:]
+    /// Parent opencodeSessionID → count of non-terminal jobs nested under it
+    /// (BET-1213). Drives the background-job subtitle via `rowStatus`.
+    private var backgroundJobsBySession: [String: Int] = [:]
+    /// Project tmuxSession → child window indices hidden because they're jobs.
+    private var hiddenByProject: [String: Set<Int>] = [:]
     /// A refresh asked for while one was already in flight. The request used to
     /// be DROPPED (`guard !loading else { return }`) and never rescheduled, so
     /// the foreground/reconnect refresh that raced the launch fetch simply
@@ -131,6 +143,16 @@ final class SessionListStore: ObservableObject {
             loadedOnce = true
             loadError = nil
             await refreshSessionMeta()
+            // The job list is decoration: if `delegate:list` fails (an older
+            // box errors on the unknown channel), every window stays visible
+            // and no count shows — never a blank list. On success adopt it; on
+            // failure keep whatever we had (stale jobs still resolve to real
+            // windows) and just re-derive nesting against the new projects.
+            if let jobs = try? await api.delegateList() {
+                applyJobs(jobs)
+            } else {
+                recomputeNesting()
+            }
         } catch {
             // Keep whatever was already on screen — a failed fetch must never
             // blank a list we successfully loaded before.
@@ -160,6 +182,46 @@ final class SessionListStore: ObservableObject {
         projects = list
         loadedOnce = true
         loadError = nil
+        recomputeNesting()
+    }
+
+    /// The windows that actually render for a project — its top-level rows with
+    /// background-job child windows filtered out (BET-1213).
+    func visibleWindows(in project: MantaProject) -> [MantaWindow] {
+        let hidden = hiddenByProject[project.tmuxSession] ?? []
+        return project.windows.filter { !hidden.contains($0.index) }
+    }
+
+    /// Adopt the fetched job list, keyed by childSessionID, and re-derive
+    /// nesting (hidden windows + per-parent counts) against the current
+    /// projects.
+    private func applyJobs(_ list: [DelegateJob]) {
+        var jobs: [String: DelegateJob] = [:]
+        for j in list {
+            if let child = j.childSessionID, !child.isEmpty { jobs[child] = j }
+        }
+        delegateJobs = jobs
+        recomputeNesting()
+    }
+
+    /// Re-run the pure nesting computation over the current projects+jobs and
+    /// publish the derived maps. Called whenever either input changes.
+    private func recomputeNesting() {
+        var hidden: [String: Set<Int>] = [:]
+        var counts: [String: Int] = [:]
+        let jobs = Array(delegateJobs.values)
+        for p in projects {
+            let nesting = SessionJobNesting.compute(project: p, jobs: jobs)
+            hidden[p.tmuxSession] = nesting.hidden
+            for (index, count) in nesting.activeChildCounts {
+                if let w = p.windows.first(where: { $0.index == index }),
+                   let sid = w.opencodeSessionId, !sid.isEmpty {
+                    counts[sid] = count
+                }
+            }
+        }
+        hiddenByProject = hidden
+        backgroundJobsBySession = counts
     }
 
     private func refreshSessionMeta() async {
@@ -194,11 +256,10 @@ final class SessionListStore: ObservableObject {
         let sid = window.opencodeSessionId ?? ""
         let stream = eventStore.sessionStates[sid]
         let running = stream?.running == true
-        let subagents = runningSubagents(stream?.subagents ?? [])
         return SessionRowStatus(
             running: running,
             attention: attentionSessions.contains(sid),
-            subagentsRunning: subagents,
+            backgroundJobs: backgroundJobsBySession[sid] ?? 0,
             modelLabel: sessionMeta[sid]?.modelLabel,
             progressLabel: progressBySession[sid],
             lastActivity: sessionMeta[sid]?.lastActivity,
@@ -206,20 +267,11 @@ final class SessionListStore: ObservableObject {
         )
     }
 
-    /// How many of a project's windows are mid-turn (drives the group header
-    /// chip).
+    /// How many of a project's visible windows are mid-turn (drives the group
+    /// header chip). Hidden background-job windows are excluded — a job is
+    /// represented by its parent's count, not by a running row of its own.
     func runningCount(in project: MantaProject) -> Int {
-        project.windows.filter { rowStatus(for: $0).running }.count
-    }
-
-    /// Number of live child subagents for a session (box-published).
-    private func runningSubagents(_ subagents: [StreamSubagentPayload]) -> Int {
-        let counted = subagents.filter { $0.status == "running" }.count
-        if counted > 0 { return counted }
-        if let last = subagents.last, let count = last.runningCount {
-            return Int(count)
-        }
-        return 0
+        visibleWindows(in: project).filter { rowStatus(for: $0).running }.count
     }
 
     // MARK: - Attention (needs-you dot / subtitle)
@@ -443,6 +495,9 @@ final class SessionListStore: ObservableObject {
         attentionSessions = []
         sessionMeta = [:]
         progressBySession = [:]
+        delegateJobs = [:]
+        backgroundJobsBySession = [:]
+        hiddenByProject = [:]
         pinnedWindows = []
         hapticsEnabled = true
     }
