@@ -233,7 +233,7 @@ export function createVcCallEngine(deps = {}) {
           transcription: { model: "whisper-1" },
         },
         output: {
-          format: { type: "audio/pcm" },
+          format: { type: "audio/pcm", rate: 24000 },
           voice,
         },
       },
