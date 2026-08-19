@@ -58,6 +58,13 @@ extension TranscriptBlock {
         case .steps(let content): return "s" + (content.rows.first?.id ?? "empty")
         case .notice(let text, let kind): return "n\(kind)\(text.hashValue)"
         case .queuedPrompt(let text): return "q\(text.hashValue)"
+        // Cards key on the REQUEST id — stable and unique. Do NOT hash content:
+        // a card whose text is edited mid-flight would change identity and cause
+        // a delete+insert in the list. The prefixes are distinct so a question
+        // and a plan-exit question carrying the same id never collide (BET-1214).
+        case .permission(let p): return "pm" + p.id
+        case .planExit(let q): return "px" + q.id
+        case .question(let q): return "qq" + q.id
         }
     }
 }
@@ -107,6 +114,28 @@ extension StepGroupContent {
     }
 }
 
+/// The callbacks + context the blocking cards need when they render inside the
+/// transcript tail (BET-1214). The cards' behaviour, copy and callbacks are
+/// unchanged from the pinned-above-composer era — only their LOCATION moved, so
+/// this struct carries the same closures ChatScreen used to hand the cards
+/// directly. It is an in-property value type with no `static` storage (see the
+/// "no static var" rule); a read-only surface just leaves `cards` nil and
+/// `transcriptBlockView` supplies inert callbacks (see `transcriptBlockView`).
+struct TranscriptCardActions {
+    /// The raw transcript the plan card's exact derivation reads.
+    var messages: [OpencodeMessage]
+    /// The session's BUILD-model name for the plan card's subtitle.
+    var buildModelName: String
+    /// The deterministic plan-page URL (nil when no usable slug can be formed).
+    var planURL: String?
+    var onPermissionReply: (PermissionRequest, PermissionReply) -> Void
+    var onQuestionSubmit: (QuestionRequest, [[String]]) -> Void
+    var onQuestionReject: (QuestionRequest) -> Void
+    var onBuildHere: (QuestionRequest, String) -> Void
+    var onKeepPlanning: (QuestionRequest, String) -> Void
+    var onOpenPage: () -> Void
+}
+
 // MARK: - Cell
 
 /// Renders ONE transcript block inside `TiledView`, reusing the same
@@ -124,6 +153,7 @@ struct TranscriptBlockCell: TiledCellContent {
 
     let item: TranscriptRow
     let tokens: Tokens
+    var cards: TranscriptCardActions?
 
     func body(context: CellContext<Void>) -> some View {
         // The reveal offset now comes from MessagingUI's OWN pan recogniser, which
@@ -140,7 +170,8 @@ struct TranscriptBlockCell: TiledCellContent {
         TranscriptCellReveal(
             cellReveal: context.cellReveal,
             item: item,
-            tokens: tokens
+            tokens: tokens,
+            cards: cards
         )
     }
 }
@@ -153,6 +184,7 @@ private struct TranscriptCellReveal: View {
     let cellReveal: CellReveal?
     let item: TranscriptRow
     let tokens: Tokens
+    let cards: TranscriptCardActions?
 
     var body: some View {
         let reveal = cellReveal?.rubberbandedOffset(max: TranscriptGutter.gutterWidth) ?? 0
@@ -182,7 +214,7 @@ private struct TranscriptCellReveal: View {
         if case .prose(let text, nil) = item.block {
             LiveProseTail(text: text, tokens: tokens)
         } else {
-            transcriptBlockView(item.block, tokens: tokens)
+            transcriptBlockView(item.block, tokens: tokens, cards: cards)
         }
     }
 }
@@ -190,8 +222,24 @@ private struct TranscriptCellReveal: View {
 /// The ONE transcript block renderer, shared by every surface — the live
 /// TiledView cell (`TranscriptBlockCell`) and the legacy `TranscriptView` the
 /// capture fixture still uses. There is deliberately no second switch anywhere.
+/// The blocking cards take their callbacks from `cards`; a read-only surface
+/// passes nil and the cards render inert (a no-op, never wiring to a live
+/// store). A block itself never carries closures.
 @ViewBuilder
-func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens) -> some View {
+func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens, cards: TranscriptCardActions? = nil) -> some View {
+    // The inert action set a read-only surface falls back to: every card
+    // renders harmlessly but no closure reaches a live store.
+    let actions = cards ?? TranscriptCardActions(
+        messages: [],
+        buildModelName: "",
+        planURL: nil,
+        onPermissionReply: { _, _ in },
+        onQuestionSubmit: { _, _ in },
+        onQuestionReject: { _ in },
+        onBuildHere: { _, _ in },
+        onKeepPlanning: { _, _ in },
+        onOpenPage: {}
+    )
     switch block {
     case .user(let text, _):
         UserBand(text: text, tokens: tokens)
@@ -222,6 +270,33 @@ func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens) -> some View 
         UserBand(text: text, tokens: tokens)
             .opacity(0.45)
             .padding(.bottom, Metrics.spacing.sp4)
+    case .permission(let permission):
+        PermissionCard(permission: permission, tokens: tokens) { reply in
+            actions.onPermissionReply(permission, reply)
+        }
+        .padding(.horizontal, Metrics.spacing.sp3)
+        .padding(.bottom, Metrics.spacing.sp3)
+    case .planExit(let question):
+        PlanCard(
+            question: question,
+            messages: actions.messages,
+            buildModelName: actions.buildModelName,
+            planURL: actions.planURL,
+            tokens: tokens,
+            onBuildHere: { feedback in actions.onBuildHere(question, feedback) },
+            onKeepPlanning: { feedback in actions.onKeepPlanning(question, feedback) },
+            onOpenPage: actions.onOpenPage
+        )
+        .padding(.horizontal, Metrics.spacing.sp3)
+        .padding(.bottom, Metrics.spacing.sp3)
+    case .question(let question):
+        QuestionCard(question: question, tokens: tokens) { answers in
+            actions.onQuestionSubmit(question, answers)
+        } onReject: {
+            actions.onQuestionReject(question)
+        }
+        .padding(.horizontal, Metrics.spacing.sp3)
+        .padding(.bottom, Metrics.spacing.sp3)
     }
 }
 

@@ -821,3 +821,114 @@ final class CompactConfirmGateTests: XCTestCase {
                       "a compact proceeds only after the confirm sheet's destructive action")
     }
 }
+
+// MARK: - Blocking-card tail ordering + question split (BET-1214)
+
+final class TrailingCardsTests: XCTestCase {
+
+    private func cardPermission(_ id: String) -> PermissionRequest {
+        PermissionRequest(id: id, sessionID: "ses", permission: "Shell", patterns: nil, always: nil, metadata: nil, tool: nil)
+    }
+
+    private func cardQuestion(_ id: String) -> QuestionRequest {
+        QuestionRequest(id: id, sessionID: "ses", questions: [], tool: nil, requestId: nil)
+    }
+
+    private func queued(_ text: String) -> QueuedPrompt {
+        QueuedPrompt(text: text, attachments: [], model: nil, mentions: nil, agent: nil)
+    }
+
+    private func kind(_ block: TranscriptBlock) -> String {
+        switch block {
+        case .notice: return "notice"
+        case .permission: return "permission"
+        case .planExit: return "planExit"
+        case .question: return "question"
+        case .queuedPrompt: return "queuedPrompt"
+        default: return "other"
+        }
+    }
+
+    func testTrailingOrderIsNoticesThenPermissionThenPlanThenQuestionThenQueued() {
+        let blocks = ChatSessionStore.trailingBlocks(
+            sessionError: StreamSessionErrorPayload(name: nil, message: "boom"),
+            truncation: StreamTruncationPayload(kind: "", label: "trunc", messageID: nil),
+            running: false,
+            permission: cardPermission("p"),
+            planExitQuestion: cardQuestion("pe"),
+            question: cardQuestion("q"),
+            queuedPrompts: [queued("next")]
+        )
+        XCTAssertEqual(blocks.map(kind),
+                       ["notice", "notice", "permission", "planExit", "question", "queuedPrompt"],
+                       "tail order is fixed: notices → permission → planExit → question → queuedPrompts")
+    }
+
+    func testTruncationNoticeSuppressedWhileRunning() {
+        let blocks = ChatSessionStore.trailingBlocks(
+            sessionError: nil,
+            truncation: StreamTruncationPayload(kind: "", label: "trunc", messageID: nil),
+            running: true,
+            permission: nil, planExitQuestion: nil, question: nil, queuedPrompts: [])
+        XCTAssertEqual(blocks.map(kind), [],
+                       "a truncation notice must not render while the turn is still running")
+    }
+
+    func testOmittedCardsProduceNoBlocks() {
+        let blocks = ChatSessionStore.trailingBlocks(
+            sessionError: nil, truncation: nil, running: false,
+            permission: nil, planExitQuestion: nil, question: nil, queuedPrompts: [])
+        XCTAssertEqual(blocks, [])
+    }
+
+    func testQueuedPromptsStayLastBehindEveryCard() {
+        let blocks = ChatSessionStore.trailingBlocks(
+            sessionError: nil, truncation: nil, running: false,
+            permission: cardPermission("p"), planExitQuestion: cardQuestion("pe"), question: cardQuestion("q"),
+            queuedPrompts: [queued("a"), queued("b")])
+        let kinds = blocks.map(kind)
+        XCTAssertEqual(kinds.last, "queuedPrompt",
+                       "queued prompts represent what happens next and must stay at the very end")
+        XCTAssertEqual(kinds.filter { $0 == "queuedPrompt" }.count, 2)
+    }
+
+    // MARK: - splitQuestions (plan card never coexists with generic question card)
+
+    private func planExitQuestion(_ id: String, callID: String) -> QuestionRequest {
+        QuestionRequest(id: id, sessionID: "ses", questions: [],
+                        tool: PermissionTool(messageID: "m1", callID: callID), requestId: nil)
+    }
+
+    private func planMessage(callID: String) -> OpencodeMessage {
+        OpencodeMessage(
+            info: OpencodeMessageInfo(id: "m1", sessionID: "ses", role: .assistant,
+                                      time: OpencodeTime(created: 0)),
+            parts: [OpencodePart(type: "tool", id: "p1", messageID: "m1",
+                                 extra: ["tool": .string("plan_exit"), "callID": .string(callID)])]
+        )
+    }
+
+    func testSplitQuestionsPutsPlanExitApartFromGeneric() {
+        let pe = planExitQuestion("pe", callID: "call-exit")
+        let plain = cardQuestion("plain")
+        let split = ChatSessionStore.splitQuestions([pe, plain], messages: [planMessage(callID: "call-exit")])
+        XCTAssertEqual(split.planExit?.id, "pe")
+        XCTAssertEqual(split.generic?.id, "plain",
+                       "the plan-exit and the generic question card must render different questions")
+    }
+
+    func testSplitQuestionsNeverReturnsTheSameQuestionAsBoth() {
+        let pe = planExitQuestion("pe", callID: "call-exit")
+        let split = ChatSessionStore.splitQuestions([pe], messages: [planMessage(callID: "call-exit")])
+        XCTAssertEqual(split.planExit?.id, "pe")
+        XCTAssertNil(split.generic,
+                     "a plan-exit question must never also surface as a generic question card")
+    }
+
+    func testSplitQuestionsOfAPlainQuestionHasNoPlanExit() {
+        let plain = cardQuestion("plain")
+        let split = ChatSessionStore.splitQuestions([plain], messages: [planMessage(callID: "call-exit")])
+        XCTAssertNil(split.planExit)
+        XCTAssertEqual(split.generic?.id, "plain")
+    }
+}

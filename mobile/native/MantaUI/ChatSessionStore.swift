@@ -639,17 +639,20 @@ final class ChatSessionStore: ObservableObject {
         // Terminal state of the current turn, MOVED out of the pinned area into
         // the transcript, at the end of the turn it belongs to: session errors
         // and truncations scroll WITH their turn rather than hovering over the
-        // composer.
-        var trailing: [TranscriptBlock] = []
-        if let err = sessionError {
-            trailing.append(.notice(err.message, .error))
-        }
-        if let trunc = truncation, !running {
-            trailing.append(.notice(trunc.label ?? "Response truncated", .warn))
-        }
-        // Prompts accepted mid-turn render as dim ghost bubbles at the very
-        // tail — where they will actually land once the current turn finishes.
-        trailing.append(contentsOf: queuedPrompts.map { .queuedPrompt($0.text) })
+        // composer. The blocking cards (permission / plan / question) join the
+        // tail here too, in the agreed fixed order — notices first, then
+        // permission, plan-exit, generic question, and the queued prompts LAST
+        // (they represent what happens next). See `trailingBlocks` for the
+        // pinned order.
+        let trailing = Self.trailingBlocks(
+            sessionError: sessionError,
+            truncation: truncation,
+            running: running,
+            permission: newestPermission,
+            planExitQuestion: newestPlanQuestion,
+            question: newestQuestion,
+            queuedPrompts: queuedPrompts
+        )
 
         let newRows: [TranscriptRow]
         if inProgressText.isEmpty {
@@ -685,6 +688,43 @@ final class ChatSessionStore: ObservableObject {
                 + uniqueTranscriptRows(trailing)
         }
         rows = newRows
+    }
+
+    /// Build the transcript-TAIL block array in the ONE fixed order: system
+    /// notices (session error, then truncation), the blocking cards (permission
+    /// → plan-exit → generic question), then the queued prompts LAST — they
+    /// represent what happens next and must stay at the very end. Pure and
+    /// unit-tested so the ordering cannot drift between the two rebuild
+    /// branches (BET-1214).
+    static func trailingBlocks(
+        sessionError: StreamSessionErrorPayload?,
+        truncation: StreamTruncationPayload?,
+        running: Bool,
+        permission: PermissionRequest?,
+        planExitQuestion: QuestionRequest?,
+        question: QuestionRequest?,
+        queuedPrompts: [QueuedPrompt]
+    ) -> [TranscriptBlock] {
+        var trailing: [TranscriptBlock] = []
+        if let err = sessionError {
+            trailing.append(.notice(err.message, .error))
+        }
+        if let trunc = truncation, !running {
+            trailing.append(.notice(trunc.label ?? "Response truncated", .warn))
+        }
+        if let permission {
+            trailing.append(.permission(permission))
+        }
+        if let planQ = planExitQuestion {
+            trailing.append(.planExit(planQ))
+        }
+        if let question {
+            trailing.append(.question(question))
+        }
+        // Prompts accepted mid-turn render as dim ghost bubbles at the very
+        // tail — where they will actually land once the current turn finishes.
+        trailing.append(contentsOf: queuedPrompts.map { .queuedPrompt($0.text) })
+        return trailing
     }
 
     // MARK: - Refetch
@@ -1101,11 +1141,39 @@ final class ChatSessionStore: ObservableObject {
 
     // MARK: - Header
 
-    /// The newest pending permission, if any (used by the bottom cards).
+    /// The newest pending permission, if any (rendered as a tail card).
     var newestPermission: PermissionRequest? { permissions.last }
 
-    /// The newest pending question request, if any.
-    var newestQuestion: QuestionRequest? { questions.last }
+    /// Partition the pending questions into the plan-exit one and the generic
+    /// remaining one. Pure and unit-tested so the plan card and the generic
+    /// question card can never render for the same question — the split is by
+    /// the exact tool callID (`PlanDerivation.isPlanExitQuestion`), never by
+    /// wording.
+    static func splitQuestions(
+        _ questions: [QuestionRequest],
+        messages: [OpencodeMessage]
+    ) -> (planExit: QuestionRequest?, generic: QuestionRequest?) {
+        let planExit = questions.last(where: { PlanDerivation.isPlanExitQuestion($0, in: messages) })
+        let generic = questions.last(where: { !PlanDerivation.isPlanExitQuestion($0, in: messages) })
+        return (planExit, generic)
+    }
+
+    /// The newest pending question EXCLUDING the plan_exit question (which is
+    /// rendered by the dedicated plan card).
+    var newestQuestion: QuestionRequest? {
+        Self.splitQuestions(questions, messages: messages).generic
+    }
+
+    /// The newest plan_exit question, when one is pending.
+    var newestPlanQuestion: QuestionRequest? {
+        Self.splitQuestions(questions, messages: messages).planExit
+    }
+
+    /// True when at least one blocking card (permission / plan / question) is
+    /// present, driving the one-time scroll-to-bottom on arrival (BET-1214).
+    var hasBlockingCard: Bool {
+        newestPermission != nil || newestPlanQuestion != nil || newestQuestion != nil
+    }
 
     /// When the current turn started (nil when idle). The running row measures
     /// live elapsed against its own 1s tick rather than stream-state changes

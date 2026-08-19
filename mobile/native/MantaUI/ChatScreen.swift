@@ -185,6 +185,10 @@ private struct ChatScreenContent: View {
     /// row) should be shown. Driven purely by scroll geometry; it does not
     /// touch auto-follow, which stays constant so new messages pin smoothly.
     @State private var showScrollToBottom = false
+    /// Tracks whether a blocking card was present on the last render, so the
+    /// auto-scroll on card arrival fires ONCE per no-card → card transition
+    /// (never per rebuild) and re-arms when a card leaves (BET-1214).
+    @State private var wasBlockingCardPresent = false
 
     /// Measured height of the floating bottom bar (cards + composer), fed to
     /// the transcript's `additionalContentInset` bottom inset so the newest
@@ -299,6 +303,18 @@ private struct ChatScreenContent: View {
                 if running, BranchFreshnessPolicy.shouldRefresh(didSubmit: true, now: Date(), lastFetch: nil) {
                     Task { await refreshBranch() }
                 }
+            }
+            // BET-1214: a blocking card (permission / plan / question) can now be
+            // scrolled away — it is a transcript-tail row, not a pinned overlay.
+            // When a card ARRIVES while the user is following it is already in
+            // view; the auto-scroll matters when they are scrolled away, so the
+            // new ask is not silently missed. Fire ONCE on the no-card → card
+            // transition, never per rebuild; re-arm when the card leaves.
+            .onChange(of: isBlockingCardPresent) { _, nowPresent in
+                if nowPresent, !wasBlockingCardPresent {
+                    scrollPosition.scrollTo(edge: .bottom, animated: true)
+                }
+                wasBlockingCardPresent = nowPresent
             }
             // BET-673: fire one success haptic when a turn completes while the
             // user has scrolled up (scroll-to-bottom chip showing) and the scene
@@ -746,6 +762,7 @@ private struct ChatScreenContent: View {
             bottomInset: bottomBarHeight,
             scrollPosition: $scrollPosition,
             onPointsFromBottom: { showScrollToBottom = $0 > Self.scrollToBottomThreshold },
+            cards: cardActions,
             header: { sessionHeaderBlock }
         )
     }
@@ -1007,64 +1024,50 @@ private struct ChatScreenContent: View {
             }
             // Only things that BLOCK the turn and need a tap stay here. Live
             // running tools now render INSIDE the transcript (in the turn that
-            // spawned them); sessionError / truncation / queued prompts moved
-            // into the transcript tail too. Todos stay, collapsed to a single
+            // spawned them); sessionError / truncation / queued prompts AND the
+            // blocking cards (permission / plan / question) all moved into the
+            // transcript tail too (BET-1214). Todos stay, collapsed to a single
             // line while a turn runs.
             if let todos = store.todos, !(todos.visible?.visible ?? todos.active ?? []).isEmpty {
                 TodosCard(payload: todos, tokens: tokens, compact: store.running)
-            }
-            if let permission = newestPermission {
-                PermissionCard(permission: permission, tokens: tokens) { reply in
-                    store.replyPermission(permission, reply: reply)
-                }
-            }
-            // The plan_exit question upgrades into a dedicated PlanCard and is
-            // EXCLUDED from newestQuestion (below), exactly as desktop excludes
-            // it from its inline question stack (`ChatPanel.tsx:2896`) — so the
-            // plan card and the generic question card never render for the
-            // same question.
-            if let planQ = newestPlanQuestion {
-                PlanCard(
-                    question: planQ,
-                    messages: store.messages,
-                    buildModelName: buildModelName,
-                    planURL: planURL,
-                    tokens: tokens,
-                    onBuildHere: { feedback in
-                        handleBuildHere(planQ, feedback: feedback)
-                    },
-                    onKeepPlanning: { feedback in
-                        store.keepPlanning(question: planQ, feedback: feedback)
-                    },
-                    onOpenPage: { openPlanPage() }
-                )
-            }
-            if let question = newestQuestion {
-                QuestionCard(question: question, tokens: tokens) { answers in
-                    store.replyQuestion(question, answers: answers)
-                } onReject: {
-                    store.rejectQuestion(question)
-                }
             }
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.top, Metrics.spacing.sp2)
     }
 
-    private var newestPermission: PermissionRequest? {
-        store.permissions.last
+    /// The callbacks + context the blocking cards need now that they render in
+    /// the transcript tail via `transcriptBlockView`, not the pinned bottom
+    /// stack. Same closures the cards always took — only their delivery route
+    /// changed (BET-1214).
+    private var cardActions: TranscriptCardActions {
+        TranscriptCardActions(
+            messages: store.messages,
+            buildModelName: buildModelName,
+            planURL: planURL,
+            onPermissionReply: { permission, reply in
+                store.replyPermission(permission, reply: reply)
+            },
+            onQuestionSubmit: { question, answers in
+                store.replyQuestion(question, answers: answers)
+            },
+            onQuestionReject: { question in
+                store.rejectQuestion(question)
+            },
+            onBuildHere: { question, feedback in
+                handleBuildHere(question, feedback: feedback)
+            },
+            onKeepPlanning: { question, feedback in
+                store.keepPlanning(question: question, feedback: feedback)
+            },
+            onOpenPage: { openPlanPage() }
+        )
     }
 
-    /// The newest pending question EXCLUDING the plan_exit question (which is
-    /// rendered by the dedicated PlanCard). Matching the exact tool callID via
-    /// `PlanDerivation.isPlanExitQuestion` — never the question text — so the
-    /// plan card and the generic question card can never appear simultaneously.
-    private var newestQuestion: QuestionRequest? {
-        store.questions.last(where: { !PlanDerivation.isPlanExitQuestion($0, in: store.messages) })
-    }
-
-    private var newestPlanQuestion: QuestionRequest? {
-        store.questions.last(where: { PlanDerivation.isPlanExitQuestion($0, in: store.messages) })
+    /// True while a blocking card is present, driving the one-time scroll to
+    /// its arrival (BET-1214).
+    private var isBlockingCardPresent: Bool {
+        store.hasBlockingCard
     }
 
     /// The deterministic plan-page URL for this session (`<base>/pages/plan-…`,
@@ -1238,11 +1241,15 @@ struct TranscriptListView<Header: View>: View {
     let bottomInset: CGFloat
     @Binding var scrollPosition: TiledScrollPosition
     var onPointsFromBottom: ((CGFloat) -> Void)? = nil
+    /// The blocking-card callbacks, threaded to the cells so cards render in
+    /// the transcript tail. Read-only surfaces (subagent drill-in) leave it
+    /// nil and render inert cards (BET-1214).
+    var cards: TranscriptCardActions? = nil
     @ViewBuilder var header: () -> Header
 
     var body: some View {
         TiledView(items: store.rows, scrollPosition: $scrollPosition) { row in
-            TranscriptBlockCell(item: row, tokens: tokens)
+            TranscriptBlockCell(item: row, tokens: tokens, cards: cards)
         }
         .prependLoader(.loader(
             perform: { store.loadEarlier() },
@@ -1414,7 +1421,7 @@ private struct TodosCard: View {
 
 // MARK: - Permission card (answerable, §7.5)
 
-private struct PermissionCard: View {
+struct PermissionCard: View {
     let permission: PermissionRequest
     let tokens: Tokens
     let onReply: (PermissionReply) -> Void
@@ -1432,13 +1439,7 @@ private struct PermissionCard: View {
                 replyButton("Allow once", reply: .once, filled: true)
                 replyButton("Allow always", reply: .always, filled: false)
                 Spacer()
-                Button {
-                    onReply(.reject)
-                } label: {
-                    Text("Reject")
-                        .font(.manta(size: Metrics.type.small, weight: .medium))
-                        .foregroundColor(tokens.danger)
-                }
+                rejectButton
             }
         }
         .padding(Metrics.spacing.sp3)
@@ -1468,6 +1469,23 @@ private struct PermissionCard: View {
                 .padding(.horizontal, Metrics.spacing.sp3)
                 .padding(.vertical, Metrics.spacing.sp2)
                 .background(filled ? tokens.accentSolid : tokens.accentSoft, in: Capsule())
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var rejectButton: some View {
+        Button {
+            onReply(.reject)
+        } label: {
+            Text("Reject")
+                .font(.manta(size: Metrics.type.small, weight: .medium))
+                .foregroundColor(tokens.danger)
+                .padding(.horizontal, Metrics.spacing.sp3)
+                .padding(.vertical, Metrics.spacing.sp2)
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
@@ -1475,7 +1493,7 @@ private struct PermissionCard: View {
 
 // MARK: - Question card (answerable, §7.5)
 
-private struct QuestionCard: View {
+struct QuestionCard: View {
     let question: QuestionRequest
     let tokens: Tokens
     let onSubmit: ([[String]]) -> Void
@@ -1500,8 +1518,12 @@ private struct QuestionCard: View {
                     Text(q.question)
                         .font(.manta(size: Metrics.type.body))
                         .foregroundColor(tokens.tx1)
-                    ForEach(Array(q.options.enumerated()), id: \.offset) { oi, option in
-                        optionButton(questionIndex: index, optionIndex: oi, label: option.label, multi: q.multiple == true)
+                    // Options are spaced sp2 apart (BET-1214) so each 44pt row
+                    // reads as its own target.
+                    VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
+                        ForEach(Array(q.options.enumerated()), id: \.offset) { oi, option in
+                            optionButton(questionIndex: index, optionIndex: oi, label: option.label, multi: q.multiple == true)
+                        }
                     }
                 }
             }
@@ -1520,6 +1542,10 @@ private struct QuestionCard: View {
                 Button("Reject", action: onReject)
                     .font(.manta(size: Metrics.type.small, weight: .medium))
                     .foregroundColor(tokens.danger)
+                    .padding(.horizontal, Metrics.spacing.sp3)
+                    .padding(.vertical, Metrics.spacing.sp2)
+                    .frame(minHeight: 44)
+                    .contentShape(Rectangle())
                 Spacer()
                 Button { submit() } label: {
                     Text("Send")
@@ -1528,6 +1554,8 @@ private struct QuestionCard: View {
                         .padding(.horizontal, Metrics.spacing.sp3)
                         .padding(.vertical, Metrics.spacing.sp2)
                         .background(canSubmit ? AnyShapeStyle(tokens.accentSolid) : AnyShapeStyle(tokens.inset), in: Capsule())
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .disabled(!canSubmit)
@@ -1560,7 +1588,7 @@ private struct QuestionCard: View {
         } label: {
             HStack(spacing: Metrics.spacing.sp2) {
                 Image(systemName: isOn ? "checkmark.square.fill" : "square")
-                    .font(.system(size: Metrics.type.xs))
+                    .font(.system(size: Metrics.type.body))
                     .foregroundColor(isOn ? tokens.accent : tokens.tx4)
                 Text(label)
                     .font(.manta(size: Metrics.type.small))
@@ -1568,7 +1596,16 @@ private struct QuestionCard: View {
                     .multilineTextAlignment(.leading)
                 Spacer(minLength: 0)
             }
-            .padding(.vertical, Metrics.spacing.sp1)
+            // The FULL row width is the tap target — 44pt minimum (Apple's
+            // minimum hit size) and a visible surface so the target is legible,
+            // not merely present (BET-1214).
+            .padding(.horizontal, Metrics.spacing.sp3)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .contentShape(Rectangle())
+            .background(
+                isOn ? AnyShapeStyle(tokens.accentSoft) : AnyShapeStyle(tokens.inset),
+                in: RoundedRectangle(cornerRadius: Metrics.radius.md)
+            )
         }
         .buttonStyle(.plain)
     }
@@ -1609,7 +1646,7 @@ private struct QuestionCard: View {
 /// bare text button in `tx3` (not `danger` — keeping planning is not
 /// destructive). All colours/spacing/radii/type resolve through the existing
 /// generated tokens — no new token.
-private struct PlanCard: View {
+struct PlanCard: View {
     let question: QuestionRequest
     let messages: [OpencodeMessage]
     /// The session's BUILD-model name for "Ready to build · <model>".
@@ -1696,6 +1733,8 @@ private struct PlanCard: View {
                 .padding(.horizontal, Metrics.spacing.sp3)
                 .padding(.vertical, Metrics.spacing.sp2)
                 .background(tokens.accentSolid, in: Capsule())
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
@@ -1714,6 +1753,8 @@ private struct PlanCard: View {
             .padding(.horizontal, Metrics.spacing.sp3)
             .padding(.vertical, Metrics.spacing.sp2)
             .background(tokens.accentSoft, in: Capsule())
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
@@ -1725,6 +1766,10 @@ private struct PlanCard: View {
             Text("Keep planning")
                 .font(.manta(size: Metrics.type.small, weight: .medium))
                 .foregroundColor(tokens.tx3)
+                .padding(.horizontal, Metrics.spacing.sp3)
+                .padding(.vertical, Metrics.spacing.sp2)
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
