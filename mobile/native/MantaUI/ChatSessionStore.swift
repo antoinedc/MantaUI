@@ -696,7 +696,9 @@ final class ChatSessionStore: ObservableObject {
     /// represent what happens next and must stay at the very end. Pure and
     /// unit-tested so the ordering cannot drift between the two rebuild
     /// branches (BET-1214).
-    static func trailingBlocks(
+    /// `nonisolated`: pure (value-in, value-out, no main-actor state), so it is
+    /// directly unit-testable from a nonisolated XCTest body.
+    nonisolated static func trailingBlocks(
         sessionError: StreamSessionErrorPayload?,
         truncation: StreamTruncationPayload?,
         running: Bool,
@@ -1149,7 +1151,9 @@ final class ChatSessionStore: ObservableObject {
     /// question card can never render for the same question — the split is by
     /// the exact tool callID (`PlanDerivation.isPlanExitQuestion`), never by
     /// wording.
-    static func splitQuestions(
+    /// `nonisolated`: pure (value-in, value-out), so it is directly
+    /// unit-testable from a nonisolated XCTest body.
+    nonisolated static func splitQuestions(
         _ questions: [QuestionRequest],
         messages: [OpencodeMessage]
     ) -> (planExit: QuestionRequest?, generic: QuestionRequest?) {
@@ -1181,7 +1185,9 @@ final class ChatSessionStore: ObservableObject {
     /// guard the moment a card is present (so a later card re-arrival fires
     /// again). Unit-tested so "once per transition, not per rebuild" cannot
     /// drift (BET-1214).
-    static func shouldScrollForCardArrival(_ nowPresent: Bool, wasPresent: Bool) -> (scroll: Bool, present: Bool) {
+    /// `nonisolated`: pure (value-in, value-out), so it is directly
+    /// unit-testable from a nonisolated XCTest body.
+    nonisolated static func shouldScrollForCardArrival(_ nowPresent: Bool, wasPresent: Bool) -> (scroll: Bool, present: Bool) {
         (scroll: nowPresent && !wasPresent, present: nowPresent)
     }
 
