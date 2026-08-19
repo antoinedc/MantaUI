@@ -4349,3 +4349,22 @@ export function describeProjectClose(args: {
   }
   return { title, body: parts.join(" "), confirmLabel: "Close project" };
 }
+
+// ===== On-call CTO voice UI build flag (BET-1191) =====
+//
+// The voice-call feature is being rebuilt on a different stack; until then its
+// UI is hidden unless explicitly enabled at build/dev time. `voiceUiEnabled` is
+// the PURE predicate (off unless the flag is exactly "1"), so it can be
+// unit-tested by passing the env value in; `voiceUi` is THE single call site
+// that reads `import.meta.env` — every consumer consults `voiceUi`, never the
+// flag directly.
+
+/** BET-1191 — hide the on-call CTO voice UI unless `VITE_MANTA_VOICE === "1"`.
+ *  Pure: pass the build-time env value in, don't mock the build environment. */
+export function voiceUiEnabled(voiceFlag: string | undefined): boolean {
+  return voiceFlag === "1";
+}
+
+/** The one read of the build-time flag. Off by default; a developer turns the
+ *  voice UI on with `VITE_MANTA_VOICE=1 npm run dev`. */
+export const voiceUi: boolean = voiceUiEnabled(import.meta.env.VITE_MANTA_VOICE);

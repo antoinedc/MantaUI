@@ -324,6 +324,10 @@ export const SETTINGS: SettingEntry[] = [
   // ----- on-call CTO (BET-1166) -----
   // Nested under `cto.*` in AppConfig. The surface renders these through the
   // generic schema-driven fields (configUpdate handles the cto.* prefix).
+  // BET-1191: these are desktop-only — iOS has no call surface and nothing on
+  // it can use them, so they must not render in the native iOS settings
+  // screen. On desktop the whole section is additionally hidden behind the
+  // VITE_MANTA_VOICE build flag (see renderer/Settings.tsx `voiceUi`).
   {
     id: "openaiApiKey",
     section: "cto",
@@ -331,7 +335,7 @@ export const SETTINGS: SettingEntry[] = [
     help: "Enables the on-call CTO voice call window (OpenAI Realtime). Stored on the box; the renderer never sees it.",
     control: "password",
     configKey: "openaiApiKey",
-    platform: "both",
+    platform: "desktop",
     default: "",
     commitOnBlur: true,
     group: "Setup",
@@ -344,7 +348,7 @@ export const SETTINGS: SettingEntry[] = [
     help: "Registers the cto agent and enables the call window. Off by default until the feature ships.",
     control: "toggle",
     configKey: "cto.enabled",
-    platform: "both",
+    platform: "desktop",
     default: false,
     group: "Setup",
   },
@@ -355,7 +359,7 @@ export const SETTINGS: SettingEntry[] = [
     help: "The model the on-call CTO answers through.",
     control: "text",
     configKey: "cto.model",
-    platform: "both",
+    platform: "desktop",
     default: "",
     group: "Setup",
     placeholder: "gpt-realtime-2.1",
@@ -367,7 +371,7 @@ export const SETTINGS: SettingEntry[] = [
     help: "Voice/narration model id for the call window.",
     control: "text",
     configKey: "cto.voice",
-    platform: "both",
+    platform: "desktop",
     default: "",
     group: "Setup",
     placeholder: "alloy",
@@ -379,7 +383,7 @@ export const SETTINGS: SettingEntry[] = [
     help: "When off, the call window is push-to-barge: the mic opens only while you hold/click to talk.",
     control: "toggle",
     configKey: "cto.alwaysListening",
-    platform: "both",
+    platform: "desktop",
     default: false,
     group: "Setup",
   },

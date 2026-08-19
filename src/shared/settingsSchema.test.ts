@@ -87,6 +87,14 @@ describe("settingsForPlatform", () => {
     expect(desktop.some((e) => e.id === "serverUrlMobile")).toBe(false); // mobile
     expect(desktop.some((e) => e.id === "chatAutoAllow")).toBe(false); // mobile
   });
+
+  it("excludes cto entries from mobile (BET-1191 — iOS has no call surface)", () => {
+    // The on-call CTO sections are desktop-only: none of their entries
+    // (including the OpenAI key) may render in the native iOS settings screen.
+    const mobile = settingsForPlatform(ALL, "mobile");
+    expect(mobile.some((e) => e.section === "cto")).toBe(false);
+    expect(mobile.some((e) => e.id === "openaiApiKey")).toBe(false);
+  });
 });
 
 describe("settingsForSection", () => {
@@ -136,6 +144,16 @@ describe("searchSettings", () => {
   it("respects platform", () => {
     const hits = searchSettings(ALL, "server url", "desktop");
     expect(hits).toEqual([]); // serverUrlMobile is mobile-only
+  });
+
+  it("returns nothing for cto fields once the cto section is filtered out (BET-1191 flag off)", () => {
+    // Settings hides the CTO section behind the VITE_MANTA_VOICE build flag by
+    // filtering the section out of the entries it searches (`VOICE_SETTINGS`).
+    // With that same filter applied, the OpenAI API key field and any "cto"
+    // talk must not surface through search.
+    const filtered = ALL.filter((e) => e.section !== "cto");
+    expect(searchSettings(filtered, "openai api key", "desktop")).toEqual([]);
+    expect(searchSettings(filtered, "on-call cto", "desktop")).toEqual([]);
   });
 });
 

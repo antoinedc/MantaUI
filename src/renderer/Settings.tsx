@@ -36,7 +36,7 @@ import { useApplySetting } from "./settingsApply";
 import { SettingsRow } from "./SettingsRow";
 import { BANNER_BTN } from "./Toast";
 import { errorDisclosure } from "./settingsError";
-import { describeUpdateTarget } from "./chatUtils";
+import { describeUpdateTarget, voiceUi } from "./chatUtils";
 import { refreshUpdateTargets } from "./updateCheck";
 import { rowUpdateState, isCliTarget } from "../shared/updateTargets.mjs";
 import { forgeCredentialSecondary } from "./chatUtils";
@@ -69,6 +69,14 @@ import {
 } from "../shared/settingsSchema";
 
 const PLATFORM = "desktop" as const;
+
+// BET-1191: the on-call CTO section + fields are hidden unless the build-time
+// voice flag is on. `voiceUi` is the SINGLE predicate — it feeds both the nav
+// (section list) and the search (which bypasses the section list and reads the
+// schema directly), so the two surfaces can never disagree. Everything else in
+// Settings is untouched.
+const VOICE_SECTIONS = voiceUi ? SETTING_SECTIONS : SETTING_SECTIONS.filter((s) => s.id !== "cto");
+const VOICE_SETTINGS = voiceUi ? SETTINGS : SETTINGS.filter((e) => e.section !== "cto");
 
 // Render a millisecond timeout as "5s" or "30m".
 function formatTimeout(ms: number): string {
@@ -469,15 +477,17 @@ export function Settings({
 
   // Active tab + search — declared early so the plugins effect below can read
   // activeTab without a TDZ violation.
-  const [activeTab, setActiveTab] = useState<SettingSectionId>(initialSection ?? "general");
+  const [activeTab, setActiveTab] = useState<SettingSectionId>(
+    initialSection && VOICE_SECTIONS.some((s) => s.id === initialSection) ? initialSection : "general",
+  );
   const [query, setQuery] = useState("");
   // A section request that lands while the modal is already open re-targets
   // it, rather than only applying on mount.
   useEffect(() => {
-    if (initialSection) setActiveTab(initialSection);
+    if (initialSection && VOICE_SECTIONS.some((s) => s.id === initialSection)) setActiveTab(initialSection);
   }, [initialSection]);
   const inSearch = query.trim().length > 0;
-  const searchHits = useMemo(() => searchSettings(SETTINGS, query, PLATFORM), [query]);
+  const searchHits = useMemo(() => searchSettings(VOICE_SETTINGS, query, PLATFORM), [query]);
 
   // Current config values for schema-driven fields, read directly from the
   // store (NO local field state → no stomping bug).
@@ -919,9 +929,9 @@ export function Settings({
   const onRailKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
     e.preventDefault();
-    const idx = SETTING_SECTIONS.findIndex((s) => s.id === activeTab);
+    const idx = VOICE_SECTIONS.findIndex((s) => s.id === activeTab);
     const dir = e.key === "ArrowDown" || e.key === "ArrowRight" ? 1 : -1;
-    const next = SETTING_SECTIONS[(idx + dir + SETTING_SECTIONS.length) % SETTING_SECTIONS.length];
+    const next = VOICE_SECTIONS[(idx + dir + VOICE_SECTIONS.length) % VOICE_SECTIONS.length];
     setActiveTab(next.id);
     railRefs.current[next.id]?.focus();
   };
@@ -1314,6 +1324,7 @@ export function Settings({
   // content (About/danger-zone, Box, Accounts, plugin registry, ...) renders
   // after — grouped cards first, custom after.
   const renderSection = (section: SettingSectionId): ReactNode => {
+    if (section === "cto" && !voiceUi) return null; // BET-1191: hidden unless the build flag is on
     const grouped: { title: string; entries: SettingEntry[] }[] = [];
     for (const e of simpleEntries) {
       const tail = grouped[grouped.length - 1];
@@ -1343,7 +1354,7 @@ export function Settings({
           <h2 id="settings-title" tabIndex={-1} className="text-title font-semibold">Settings</h2>
         </div>
         <nav className="flex-1 py-2 px-2 overflow-y-auto" role="tablist" aria-label="Settings sections">
-          {SETTING_SECTIONS.map((tab, i) => {
+          {VOICE_SECTIONS.map((tab, i) => {
             const modified = sectionIsModified(SETTINGS, tab.id, PLATFORM, values);
             const prev = i > 0 ? SETTING_SECTIONS[i - 1] : null;
             const showGroup = tab.group && (!prev || prev.group !== tab.group);
