@@ -158,10 +158,12 @@ export function pastVerbFor(messageId: string): string {
 
 // Detect whether a model can accept file attachments. Reads the input
 // modalities via the shared `readModalities` (both wire shapes tolerated) —
-// treat "supports attachments" as any non-"text" modality.
+// treat "supports attachments" as any non-"text" modality. Unknown
+// capabilities mean "no reason to warn": an empty modality list is allow,
+// not deny — the provider answers if the send really was invalid.
 export function modelSupportsAttachments(m: OpencodeModel | null): boolean {
   const modes = modelInputModes(m);
-  return modes.some((v) => v !== "text");
+  return modes.length === 0 || modes.some((v) => v !== "text");
 }
 
 // Return the set of input modalities the model accepts (text, image, pdf,

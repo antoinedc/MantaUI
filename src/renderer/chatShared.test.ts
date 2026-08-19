@@ -156,9 +156,10 @@ describe("modelSupportsAttachments", () => {
     expect(modelSupportsAttachments(model({ input: ["image"] }))).toBe(true);
   });
 
-  it("is false for null / unknown capabilities", () => {
-    expect(modelSupportsAttachments(null)).toBe(false);
-    expect(modelSupportsAttachments(model(undefined))).toBe(false);
+  it("is true when capabilities are unknown (absence of info is not a denial)", () => {
+    expect(modelSupportsAttachments(null)).toBe(true);
+    expect(modelSupportsAttachments(model(undefined))).toBe(true);
+    expect(modelSupportsAttachments(model({ input: [] }))).toBe(true);
   });
 });
 
