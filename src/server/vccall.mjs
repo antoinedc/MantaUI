@@ -30,10 +30,14 @@ const DEFAULT_REALTIME_MODEL = "gpt-realtime-2.1";
 const DEFAULT_VOICE = "alloy";
 
 // Per-1M-token cost of the Realtime model, used to turn a response.done
-// `usage` object into a dollar figure for the per-call spend cap. Ratios from
-// OpenAI's pricing page (https://openai.com/api/pricing/) on 2026-08-19 for
-// gpt-4o-realtime-preview — audio tokens bill at a higher rate than text, and
-// input/output are separate. Re-check these if the model or its pricing moves.
+// `usage` object into a dollar figure for the per-call spend cap (cost guard).
+// These ratios come from OpenAI's realtime pricing page
+// (https://openai.com/api/pricing/) as of 2026-08-19 — audio tokens bill at a
+// higher rate than text, and input/output are separate. They were captured for
+// the older gpt-4o-realtime-preview; the default model is now gpt-realtime-2.1
+// (BET-1178), so re-confirm the per-token rates against the current model's
+// published pricing before relying on the exact dollar figure. The guard still
+// fires on whatever is logged here.
 export const REALTIME_TOKEN_RATES = {
   inputTextUsdPerM: 5.0, //  $5.00 / 1M input text tokens
   outputTextUsdPerM: 20.0, // $20.00 / 1M output text tokens

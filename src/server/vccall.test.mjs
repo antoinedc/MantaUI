@@ -560,3 +560,25 @@ test("response.done without a usable usage breakdown does NOT invent spend", asy
   assert.equal(published.some((m) => m.type === "cost"), false, "no cost frame from unusable usage");
   assert.equal(ws.closed, false, "not hung up on an un-priceable response");
 });
+
+test("spend parses the GA usage shape (evt.response.usage, *_details) — BET-1178/1180", async () => {
+  const { engine, ws, published } = makeEngine();
+  await engine.start({ openaiApiKey: "sk-test", cto: { spendCapUsd: 0.1, model: "m" } });
+  engine.receiveRealtime({ type: "session.created", session: { id: "s1" } });
+  // GA's response.done carries usage under response.usage with the *_details
+  // field naming (vs the beta event-level *_token_details). Same token counts
+  // as the beta-shape test → same $ figure.
+  engine.receiveRealtime({
+    type: "response.done",
+    response: {
+      usage: {
+        input_details: { text_tokens: 1000, audio_tokens: 1000 },
+        output_details: { text_tokens: 500, audio_tokens: 2000 },
+      },
+    },
+  });
+  const costs = published.filter((m) => m.type === "cost");
+  assert.equal(costs.length, 1, "a cost frame was published from GA-shaped usage");
+  assert.ok(Math.abs(costs[0].usd - 0.215) < 1e-9, "GA usage priced identically to beta usage");
+  assert.equal(ws.closed, true, "spend cap trips on GA-shaped usage too");
+});
