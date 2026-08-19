@@ -18,7 +18,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useStore } from "./store";
 import { ToastStack, type ToastItem } from "./Toast";
-import { formatBytes } from "./chatUtils";
+import { describeSavedFile, formatBytes } from "./chatUtils";
 
 export function GlobalToasts() {
   const agentFileToast = useStore((s) => s.agentFileToast);
@@ -97,14 +97,27 @@ export function GlobalToasts() {
     for (const id of toastOrder) {
       if (id === "agent-file" && agentFileToast) {
         const size = formatBytes(agentFileToast.size);
+        const savedFolder = describeSavedFile(agentFileToast.localPath)?.dir ?? null;
         items.push({
           id: "agent-file",
+          // Post-save the toast becomes a CONFIRMATION naming the full folder
+          // (BET-1198). The old "· saved to Downloads" was both too faint to
+          // notice and ambiguous once a custom downloads folder is configured,
+          // so a completed save was routinely read as "nothing happened".
+          // `savedFolder` is null on mobile/web (no OS path), which keeps the
+          // old generic wording there rather than claiming a path we don't have.
           message: (
             <>
-              <span className="text-text">↓ {agentFileToast.name}</span>
+              <span className="text-text">
+                {agentFileToast.autoPulled ? "✓" : "↓"} {agentFileToast.name}
+              </span>
               {size && <span className="text-text-faint"> · {size}</span>}
               <span className="text-text-faint">
-                {agentFileToast.autoPulled ? " · saved to Downloads" : " — AI sent you a file"}
+                {!agentFileToast.autoPulled
+                  ? " — AI sent you a file"
+                  : savedFolder
+                    ? ` · saved to ${savedFolder}`
+                    : " · saved to Downloads"}
               </span>
             </>
           ),

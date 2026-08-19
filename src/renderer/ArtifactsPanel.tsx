@@ -43,6 +43,7 @@ import {
   type PlanStatus,
 } from "./artifacts";
 import { decodeDataUri, expiryLabel, formatBytes, resolvePreviewType } from "./chatUtils";
+import { saveToDownloads } from "./downloadFeedback";
 import { IconButton } from "./IconButton";
 import { ArtifactPreview } from "./ArtifactPreview";
 import { ReviewPane } from "./ReviewPane";
@@ -100,11 +101,10 @@ export async function downloadArtifact(artifact: Artifact): Promise<void> {
     artifact.href &&
     !artifact.href.startsWith("data:")
   ) {
-    try {
-      await window.api.agentPullFile(artifact.href);
-    } catch {
-      /* download failed on desktop — non-fatal; the source stays on the box */
-    }
+    // BET-1198: `saveToDownloads` reports the outcome (confirmation naming the
+    // full folder, or an error toast). The old swallow-and-return-silently made
+    // a real save and a real failure look identical — like nothing happened.
+    await saveToDownloads(artifact.href);
     return;
   }
   try {

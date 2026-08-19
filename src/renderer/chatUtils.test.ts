@@ -8,6 +8,7 @@ import {
   computeLiveTurn,
   formatTokens,
   formatBytes,
+  describeSavedFile,
   voiceUiEnabled,
   expiryLabel,
   formatDuration,
@@ -294,6 +295,45 @@ describe("formatBytes", () => {
     expect(formatBytes(1024 * 1024)).toBe("1 MB");
     expect(formatBytes(5.5 * 1024 * 1024)).toBe("5.5 MB");
     expect(formatBytes(3 * 1024 * 1024 * 1024)).toBe("3 GB");
+  });
+});
+
+// ===== describeSavedFile =====
+
+describe("describeSavedFile", () => {
+  it("splits an absolute POSIX path into folder + name", () => {
+    expect(describeSavedFile("/Users/antoine/Downloads/dog-running.mp4")).toEqual({
+      dir: "/Users/antoine/Downloads",
+      name: "dog-running.mp4",
+    });
+  });
+
+  it("splits a Windows path on backslashes", () => {
+    expect(describeSavedFile("C:\\Users\\antoine\\Downloads\\report.pdf")).toEqual({
+      dir: "C:\\Users\\antoine\\Downloads",
+      name: "report.pdf",
+    });
+  });
+
+  it("keeps the root slash rather than reporting an empty folder", () => {
+    expect(describeSavedFile("/dog.png")).toEqual({ dir: "/", name: "dog.png" });
+  });
+
+  it("returns null when there is no OS path to describe (mobile/web)", () => {
+    // agentPullFile returns "" on mobile — the browser owns the download
+    // chrome there, so the toast must not claim a path we don't have.
+    expect(describeSavedFile("")).toBeNull();
+    expect(describeSavedFile("   ")).toBeNull();
+    expect(describeSavedFile(undefined)).toBeNull();
+    expect(describeSavedFile(null)).toBeNull();
+  });
+
+  it("returns null for a bare directory (no file name)", () => {
+    expect(describeSavedFile("/Users/antoine/Downloads/")).toBeNull();
+  });
+
+  it("treats a bare filename as having no folder", () => {
+    expect(describeSavedFile("dog.png")).toEqual({ dir: "", name: "dog.png" });
   });
 });
 

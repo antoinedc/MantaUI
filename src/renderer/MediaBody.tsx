@@ -38,6 +38,7 @@ import {
   mediaKindFromMime,
   resolveMediaAspect,
 } from "./chatUtils";
+import { saveToDownloads } from "./downloadFeedback";
 import { useClockTick, WORKING_TICK_MS, nowMs } from "./clock";
 
 // The reserved box is capped at a sane reading width so a huge aspect never
@@ -199,8 +200,13 @@ function ReadyMedia({ entry }: { entry: MediaEntry }) {
   // through the preload bridge → main writes a real file to downloadsDir;
   // on mobile/web it falls back to a browser download. Used by both the hover
   // overlay and the preview overlay's Download.
+  //
+  // Goes through `saveToDownloads` so the save REPORTS ITSELF (BET-1198): this
+  // used to be a bare fire-and-forget call, so a successful download showed the
+  // user nothing at all and a failed one showed only an unhandled rejection in
+  // devtools — indistinguishable from each other, and from a broken button.
   const handleDownload = () => {
-    if (meta.path) void window.api.agentPullFile(meta.path);
+    if (meta.path) void saveToDownloads(meta.path);
   };
 
   return (
