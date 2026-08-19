@@ -933,28 +933,36 @@ final class TrailingCardsTests: XCTestCase {
     }
 }
 
-final class CardScrollTriggerTests: XCTestCase {
-    func testScrollsOnNoCardToCardTransitionOnly() {
-        let noToCard = ChatSessionStore.shouldScrollForCardArrival(true, wasPresent: false)
-        XCTAssertTrue(noToCard.scroll, "entering a card from no-card must scroll once")
-        XCTAssertTrue(noToCard.present, "the guard re-arms to present after the edge")
+// MARK: - Blocking-card arrival scroll trigger (BET-1214)
+
+final class CardArrivalScrollTriggerTests: XCTestCase {
+
+    func testScrollFiresOnceOnNoCardToCardTransition() {
+        // absent → present: scroll, and re-arm (present = true).
+        let edge = ChatSessionStore.shouldScrollForCardArrival(true, wasPresent: false)
+        XCTAssertTrue(edge.scroll, "the no-card → card transition must auto-scroll")
+        XCTAssertTrue(edge.present, "the guard re-arms once a card is present")
     }
 
-    func testDoesNotScrollOnPresentToPresentRebuild() {
-        let rebuild = ChatSessionStore.shouldScrollForCardArrival(true, wasPresent: true)
-        XCTAssertFalse(rebuild.scroll, "a card that stays present across rebuilds must not re-scroll")
-        XCTAssertTrue(rebuild.present)
+    func testNoScrollOnPresentToPresentRebuilds() {
+        let steady = ChatSessionStore.shouldScrollForCardArrival(true, wasPresent: true)
+        XCTAssertFalse(steady.scroll, "a present→present rebuild must NOT re-scroll (once per transition, not per rebuild)")
+        XCTAssertTrue(steady.present)
     }
 
-    func testDoesNotScrollWhenCardLeaves() {
+    func testNoScrollWhenCardLeaves() {
         let leaving = ChatSessionStore.shouldScrollForCardArrival(false, wasPresent: true)
         XCTAssertFalse(leaving.scroll, "a card leaving must not scroll")
-        XCTAssertFalse(leaving.present, "the guard clears so a later arrival fires again")
+        XCTAssertFalse(leaving.present, "the guard disarms so the NEXT arrival re-arms")
     }
 
-    func testDoesNotScrollWhenNeither() {
-        let neither = ChatSessionStore.shouldScrollForCardArrival(false, wasPresent: false)
-        XCTAssertFalse(neither.scroll)
-        XCTAssertFalse(neither.present)
+    func testCardReArrivalScrollsAgain() {
+        // absent → present (scroll, arm) → absent (disarm) → present (scroll).
+        let first = ChatSessionStore.shouldScrollForCardArrival(true, wasPresent: false)
+        let leaving = ChatSessionStore.shouldScrollForCardArrival(false, wasPresent: first.present)
+        let second = ChatSessionStore.shouldScrollForCardArrival(true, wasPresent: leaving.present)
+        XCTAssertTrue(first.scroll, "first arrival scrolls")
+        XCTAssertFalse(leaving.scroll)
+        XCTAssertTrue(second.scroll, "a later re-arrival after a leave scrolls again")
     }
 }
