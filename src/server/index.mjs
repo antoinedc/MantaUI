@@ -93,7 +93,6 @@ import { createUsageStopEngine } from "./usageStopEnroll.mjs";
 import { createUsageResumeEngine } from "./usageResume.mjs";
 import * as appControl from "./appControl.mjs";
 import * as cto from "./cto.mjs";
-import { queryMultica } from "./multica.mjs";
 import { searchMessages } from "./messageSearch.mjs";
 import {
   dispatch as mediaDispatch,
@@ -914,7 +913,6 @@ function getCtoEngine() {
       listStopped,
       searchMessages,
       configGet: () => local.configGet(),
-      queryMultica,
     });
   }
   return ctoEngine;
@@ -979,15 +977,13 @@ function setCallActive(active, engine) {
   activeCallEngine = active && engine ? engine : null;
 }
 
-// Which read a watcher's surface maps to. EXTERNAL surfaces (multica) go
-// through multica.mjs; NATIVE surfaces (schedule, delegate) through the box's
-// own stores. `session` needs no poller read — session events arrive directly
-// via send_to_cto. `crashlytics` is an external MCP read with no server-side
-// engine yet (stretch), so it never matches until that read lands (Issue 3).
+// Which read a watcher's surface maps to. NATIVE surfaces (schedule, delegate)
+// go through the box's own stores. `session` needs no poller read — session
+// events arrive directly via send_to_cto. `crashlytics` is an external MCP read
+// with no server-side engine yet (stretch), so it never matches until that read
+// lands (Issue 3).
 async function ctoSurfaceRead(surface, query) {
   switch (surface) {
-    case "multica":
-      return queryMultica({ query: query ?? "" });
     case "schedule":
       return { ok: true, data: { jobs: await listJobs() } };
     case "delegate":

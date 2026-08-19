@@ -2,7 +2,7 @@
 //
 // The durable server foundation for the on-call CTO feature: a registry of
 // deterministic READ-ONLY tools (what's running, transcripts, git, usage,
-// plan mode, config, the Multica board) exposed through a single
+// plan mode, config) exposed through a single
 // `dispatch(tool, args, ctx)` seam that the later issues (2 = inbound feed,
 // 3 = call window + voice) and the opencode text agent all consume.
 //
@@ -15,7 +15,7 @@
 //     built by `createCtoEngine(deps)`; deps carry every engine the tools
 //     need (listProjects, listSessions, listMessages, listModels,
 //     getSessionAgent, listSnapshots, listStopped, searchMessages, configGet,
-//     the git helpers, queryMultica, now). Tests inject fakes; index.mjs
+//     the git helpers, now). Tests inject fakes; index.mjs
 //     wires the real engines.
 //   - Every tool is `mode: "auto"`. The `gate` seam (a `(tool, args) =>
 //     "allow"|"confirm"|"deny"` callback) is implemented but Issue 1 ships no
@@ -97,7 +97,6 @@ const NOOP_NARRATE = () => {};
  * @param {(cwd: string) => Promise<string>} [deps.gitStatus]   porcelain or throw
  * @param {(cwd: string) => Promise<string|null>} [deps.gitBranch]  current branch or null
  * @param {(cwd: string, opts: object) => Promise<string>} [deps.gitLog]
- * @param {(input: object) => Promise<object>} [deps.queryMultica]  multica.queryMultica
  * @param {(name: string|null) => boolean} [deps.isPlanAgent]  shared planMode isPlanAgent
  * @param {() => number} [deps.now]
  * @returns {{tools: Array<object>, dispatch: Function, listTools: Function}}
@@ -116,7 +115,6 @@ export function createCtoEngine(deps = {}) {
     gitStatus = remoteGitStatus,
     gitBranch = remoteGitBranch,
     gitLog = remoteGitLog,
-    queryMultica = async () => ({ ok: true, data: {} }),
     isPlanAgent = (name) => name === "plan" || name === "manta-plan",
     loadWatches = async () => Array.isArray(loadCtoStore()?.watches) ? loadCtoStore().watches : [],
     saveWatches = async (watches) => {
@@ -624,32 +622,9 @@ export function createCtoEngine(deps = {}) {
   });
 
   // -------------------------------------------------------------------------
-  // Multica board — query_multica
-  // -------------------------------------------------------------------------
-  register({
-    name: "query_multica",
-    description:
-      "Query the Multica task board (an external integration, not native Manta): pass " +
-      "`issue` with a bump key (e.g. \"BET-123\") for that issue's detail + task-runs + " +
-      "pull requests, or omit it for a board overview grouped by status. Read-only.",
-    params: {
-      query: { type: "string", description: "Natural-language intent (informational)." },
-      issue: { type: "string", description: "Optional issue key, e.g. BET-123." },
-    },
-    run: async (ctx, args) => {
-      try {
-        const data = await queryMultica({ query: args?.query ?? "", issue: args?.issue ?? null });
-        return { ok: true, data };
-      } catch (e) {
-        return { ok: false, error: `multica query failed: ${e?.message ?? e}` };
-      }
-    },
-  });
-
-  // -------------------------------------------------------------------------
   // Watchers (Issue 2) — watch / unwatch / list_watches
   // -------------------------------------------------------------------------
-  // A watch registers a recurring probe against a SURFACE (multica, schedule,
+  // A watch registers a recurring probe against a SURFACE (schedule,
   // delegate, session…). The watcher poller (createWatcherPoller below) runs
   // each active watch's query against the surface's existing read and, when
   // its condition matches AND its seenId is new, calls cto.inbound with that
@@ -659,22 +634,22 @@ export function createCtoEngine(deps = {}) {
     name: "watch",
     description:
       "Register a watcher that probes a surface and surfaces a notification when its " +
-      "condition matches. `surface` is one of: multica (the task board), schedule, " +
-      "delegate, or session. `query` names what to read on that surface (for multica, " +
-      "e.g. the issue key or 'read from the board'); `condition` is a natural-language " +
+      "condition matches. `surface` is one of: schedule, " +
+      "delegate, or session. `query` names what to read on that surface (for schedule, " +
+      "e.g. the job id or 'read from the board'); `condition` is a natural-language " +
       "phrase describing the trigger (e.g. 'a P0 opens'). The watcher poller runs it " +
       "periodically via the surface's existing read. NOTE: this is a confirm-mode " +
       "action — it registers a recurring probe, so it needs your go-ahead before it takes " +
       "effect.",
     params: {
-      surface: { type: "string", description: "The surface to watch: multica, schedule, delegate, or session." },
+      surface: { type: "string", description: "The surface to watch: schedule, delegate, or session." },
       query: { type: "string", description: "What to query on that surface (informational)." },
       condition: { type: "string", description: "Natural-language condition for when to trigger." },
     },
     mode: "confirm",
     run: async (ctx, args) => {
       const surface = String(args?.surface ?? "").trim();
-      if (!surface) return { ok: false, error: "surface is required (multica, schedule, delegate, session)" };
+      if (!surface) return { ok: false, error: "surface is required (schedule, delegate, session)" };
       const watch = {
         id: randomBytes(4).toString("hex"),
         surface,
