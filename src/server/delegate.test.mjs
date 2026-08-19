@@ -21,6 +21,7 @@ import {
   adoptSubagentJob,
   effectiveModelFromMessages,
   tickActivity,
+  chooseSubagentModel,
 } from "./delegate.mjs";
 
 // ----------------------------------------------------------------------------
@@ -518,6 +519,111 @@ test("startJob with no model calls deliver without a model key (BET-947 regressi
   assert.equal("model" in h.delivered[0], false, "no model key on the default path");
   const job = h.jobs.find((j) => j.childSessionID === "child_default");
   assert.equal(job.requestedModel, null);
+});
+
+// ----------------------------------------------------------------------------
+// BET-1220 — subagent model routing at spawn
+// ----------------------------------------------------------------------------
+
+test("startJob with routing off delivers the incumbent model byte-identical (BET-1220)", async () => {
+  const h = startHarness("child_route_off");
+  h.deps.configGet = async () => ({}); // no modelRouter key → routing off
+  h.deps.listSnapshots = () => [];
+  h.deps.listModels = async () => mockModels();
+  const res = await startJob(
+    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo",
+      model: { providerID: "anthropic", modelID: "claude-opus-4-5" } },
+    h.deps,
+  );
+  assert.equal(res.ok, true);
+  assert.equal(h.delivered.length, 1);
+  // routing off → the requested model passes through exactly as before BET-1220
+  assert.deepEqual(h.delivered[0].model, { providerID: "anthropic", modelID: "claude-opus-4-5" });
+});
+
+test("startJob survives a throwing listSnapshots and delivers the incumbent (BET-1220)", async () => {
+  const h = startHarness("child_quota_throw");
+  h.deps.listSnapshots = () => { throw new Error("usage dead"); };
+  const res = await startJob(
+    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo",
+      model: { providerID: "anthropic", modelID: "claude-opus-4-5" } },
+    h.deps,
+  );
+  assert.equal(res.ok, true);
+  assert.equal(h.delivered.length, 1, "a throwing quota must never fail the spawn");
+  assert.deepEqual(h.delivered[0].model, { providerID: "anthropic", modelID: "claude-opus-4-5" });
+});
+
+test("chooseSubagentModel routes an explore agent to a fast-tier model when enabled (BET-1220)", () => {
+  const catalog = [
+    { providerID: "anthropic", id: "claude-opus-4", status: "active" },   // deep
+    { providerID: "anthropic", id: "claude-haiku-4", status: "active" }, // fast
+  ];
+  const chosen = chooseSubagentModel({
+    incumbent: { providerID: "anthropic", modelID: "claude-opus-4" },
+    catalog,
+    policy: { enabled: true, preset: "economy" }, // economy + explore → fast tier
+    quota: [],
+    agent: "explore",
+    nowMs: 1_700_000_000_000,
+  });
+  // NOTE: this asserts the ROUTER WRAPPER's per-agent contract (the reusable
+  // chooseSubagentModel — what any future explore-routing spawn would call).
+  // It is not asserting end-to-end coverage: today every MANTA-controlled
+  // delegate spawn is a general-purpose background job, so startJob routes with
+  // `agent: "general"` — explore/build/plan subagents are spawned by opencode's
+  // own task tool, which Manta never dispatches. The end-to-end wiring for a
+  // general spawn is covered by the "startJob with routing on normalises the
+  // winner to a deliver shape" test below.
+  assert.equal(chosen?.providerID, "anthropic");
+  assert.equal(chosen?.modelID, "claude-haiku-4", "explore under economy must land on the fast-tier model");
+});
+
+test("startJob with routing on normalises the catalog winner to a {providerID, modelID} deliver shape (BET-1220)", async () => {
+  const h = startHarness("child_route_on");
+  h.deps.configGet = async () => ({ modelRouter: { enabled: true, preset: "economy" } });
+  h.deps.listSnapshots = () => [];
+  h.deps.listModels = async () => [
+    { providerID: "anthropic", id: "claude-opus-4", status: "active" },   // deep
+    { providerID: "anthropic", id: "claude-sonnet-4", status: "active" }, // balanced
+    { providerID: "anthropic", id: "claude-haiku-4", status: "active" },  // fast
+  ];
+  const res = await startJob(
+    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo" },
+    h.deps,
+  );
+  assert.equal(res.ok, true);
+  assert.equal(h.delivered.length, 1);
+  assert.ok(h.delivered[0].model, "routing on should deliver a decided model");
+  assert.equal(h.delivered[0].model.providerID, "anthropic");
+  // economy + general → the balanced floor wins; the winner is NORMALISED from
+  // the catalog's {providerID, id} into sendPrompt's {providerID, modelID}.
+  assert.equal(h.delivered[0].model.modelID, "claude-sonnet-4");
+  assert.equal("id" in h.delivered[0].model, false, "deliver must receive modelID, not the catalog's id field");
+});
+
+test("chooseSubagentModel returns the incumbent on an off-path and is load-bearing (BET-1220)", () => {
+  const incumbent = { providerID: "anthropic", modelID: "claude-opus-4" };
+  const catalog = [
+    { providerID: "anthropic", id: "claude-opus-4", status: "active" },
+    { providerID: "anthropic", id: "claude-haiku-4", status: "active" },
+  ];
+  // routing disabled → incumbent unchanged even though a cheaper fast model exists
+  assert.deepEqual(
+    chooseSubagentModel({ incumbent, catalog, policy: { enabled: false }, agent: "explore", nowMs: 0 }),
+    incumbent,
+  );
+  // an enabled router with no survivors (all dead) still falls back to incumbent
+  assert.deepEqual(
+    chooseSubagentModel({
+      incumbent,
+      catalog: [{ providerID: "anthropic", id: "claude-opus-4", status: "retired" }],
+      policy: { enabled: true, preset: "economy" },
+      agent: "explore",
+      nowMs: 0,
+    }),
+    incumbent,
+  );
 });
 
 test("requestedModel survives a tickActivity that rewrites job.model (BET-947)", async () => {
