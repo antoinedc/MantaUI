@@ -83,3 +83,21 @@ export function rowUpdateState(
   id: string,
   state?: { updatingTargetId?: string | null; busy?: boolean },
 ): RowUpdateState;
+
+export interface DesktopUpdateBusy {
+  busyLabel: string;
+  progress: { step: number; total: number; label: string } | null;
+}
+
+/**
+ * Decide the desktop leg's in-flight presentation (BET-1195): `null` when no
+ * desktop update is running; otherwise the label + (possible) determinate
+ * progress for download-vs-restart. See rowUpdateState for the "desktop marks
+ * OTHER rows disabled" relationship — the desktop leg reuses `updatingTargetId`
+ * so a desktop run disables other rows exactly as a CLI run does.
+ */
+export function desktopUpdateBusy(state?: {
+  updatingTargetId?: string | null;
+  desktopDownloadPercent?: number | null;
+  desktopRestarting?: boolean;
+}): DesktopUpdateBusy | null;

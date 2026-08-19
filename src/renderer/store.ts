@@ -515,6 +515,13 @@ type State = {
   // is derived where boxUpgrading (App-local) is known, never stored twice.
   updatingTargetId: string | null;
   targetUpdateErrors: Record<string, string | null>;
+  // BET-1195: live download percent of a desktop auto-update in flight, owned
+  // here (NOT in Settings) so the banner and the Settings row can never
+  // disagree — the exact failure mode BET-1160's store contract exists to
+  // prevent. Fed from `IPC.autoUpdateProgress` at App level; cleared on every
+  // terminal path exactly like `updatingTargetId`. No percent represented as a
+  // percent means a download started but hasn't ticked yet.
+  desktopDownloadPercent: number | null;
   // A TERMINAL auto-update failure (integrity / permission). Set from main's
   // autoUpdate:error IPC, which only fires for failures the user must act on
   // — transient network errors are filtered server-side of the bridge.
@@ -745,6 +752,7 @@ type State = {
   // BET-1159's finally clears `updatingTargetId` on RPC ok + reject, and a
   // box reconnect / Settings-close resets it — the store never selfers.
   setUpdatingTarget: (id: string | null) => void;
+  setDesktopDownloadPercent: (p: number | null) => void;
   setTargetUpdateError: (id: string, error: string | null) => void;
   setUpdateError: (p: { message: string; raw: string } | null) => void;
   setBoxIncompatible: (b: boolean) => void;
@@ -821,6 +829,7 @@ export const useStore = create<State>((set, get) => ({
   updateTargets: [],
   updatingTargetId: null,
   targetUpdateErrors: {},
+  desktopDownloadPercent: null,
   updateError: null,
   boxIncompatible: false,
   serverUpdatePrompt: null,
@@ -1159,6 +1168,7 @@ export const useStore = create<State>((set, get) => ({
   setUpdatePrompt: (p) => set({ updatePrompt: p }),
   setUpdateTargets: (t) => set({ updateTargets: t }),
   setUpdatingTarget: (id) => set({ updatingTargetId: id }),
+  setDesktopDownloadPercent: (p) => set({ desktopDownloadPercent: p }),
   setTargetUpdateError: (id, error) =>
     set((prev) => ({ targetUpdateErrors: { ...prev.targetUpdateErrors, [id]: error } })),
   setUpdateError: (p) => set({ updateError: p }),

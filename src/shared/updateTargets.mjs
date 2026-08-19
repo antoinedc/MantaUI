@@ -270,3 +270,62 @@ export function rowUpdateState(id, { updatingTargetId = null, busy = false } = {
   if (updatingTargetId != null || busy) return { kind: "busy" };
   return { kind: "idle" };
 }
+
+/**
+ * Decide the DESKTOP leg's in-flight presentation (BET-1195).
+ *
+ * The desktop leg was the ONE unified-update surface with no loading state: the
+ * banner rendered the idle, clickable "Update" button through the whole
+ * download, then the app quit with no "restarting" beat (BET-1160 wired the
+ * server leg and the per-CLI legs but never the desktop leg). This is the
+ * desktop analogue of the box leg's `boxUpgrading` / `serverUpdateProgress` /
+ * `boxRestarting` trio, kept in ONE pure function so the banner and Settings
+ * can never disagree about which surface is busy or what it says.
+ *
+ * Returns `null` when no desktop update is running, or the presentation for the
+ * one that is:
+ *
+ *   - `{ busyLabel: "Restarting Manta Desktop…", progress: null }` — the
+ *     terminal INSTALL / app-restart beat drives `desktopRestarting`. There is
+ *     no percent to report and quitAndInstall emits no progress events, so the
+ *     bar is indeterminate. Never cleared by design — the app quits a moment
+ *     later, and this is the last thing the user sees.
+ *   - `{ busyLabel: "Downloading N%", progress: { step, total: 100, label } }` —
+ *     a DOWNLOAD in progress with a live percent from `desktopDownloadPercent`.
+ *   - `{ busyLabel: "Downloading…", progress: null }` — a download that has
+ *     started but not yet reported a percent (determinate is impossible yet).
+ *
+ * `updatingTargetId` is the store's single in-flight target (BET-1160): the
+ * desktop leg sets it to `"desktop"` when its download starts, exactly as a CLI
+ * leg sets its own id, so `rowUpdateState` marks OTHER rows `busy`/disabled the
+ * same way a CLI run does. The restart beat keeps the id (it is the one
+ * intentionally-permanent state), so `desktopUpdateBusy` answers for it even
+ * after the download leg cleared the id.
+ *
+ * @param {{ updatingTargetId?: string|null, desktopDownloadPercent?: number|null,
+ *          desktopRestarting?: boolean }} state
+ * @returns {{ busyLabel: string, progress: { step:number, total:number, label:string } | null } | null}
+ */
+export function desktopUpdateBusy({
+  updatingTargetId = null,
+  desktopDownloadPercent = null,
+  desktopRestarting = false,
+} = {}) {
+  if (desktopRestarting) {
+    return { busyLabel: "Restarting Manta Desktop…", progress: null };
+  }
+  if (updatingTargetId !== "desktop") return null;
+
+  const raw = Number(desktopDownloadPercent);
+  const percent =
+    typeof desktopDownloadPercent === "number" && Number.isFinite(raw)
+      ? Math.max(0, Math.min(100, Math.round(raw)))
+      : null;
+  if (percent != null) {
+    return {
+      busyLabel: `Downloading ${percent}%`,
+      progress: { step: percent, total: 100, label: "Downloading update" },
+    };
+  }
+  return { busyLabel: "Downloading…", progress: null };
+}

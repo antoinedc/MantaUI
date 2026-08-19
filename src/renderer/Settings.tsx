@@ -38,7 +38,7 @@ import { BANNER_BTN } from "./Toast";
 import { errorDisclosure } from "./settingsError";
 import { describeUpdateTarget, voiceUi } from "./chatUtils";
 import { refreshUpdateTargets } from "./updateCheck";
-import { rowUpdateState, isCliTarget } from "../shared/updateTargets.mjs";
+import { rowUpdateState, isCliTarget, desktopUpdateBusy } from "../shared/updateTargets.mjs";
 import { forgeCredentialSecondary } from "./chatUtils";
 import { useCachedResource } from "./useCachedResource";
 import { MantaLoader } from "./MantaLoader";
@@ -294,16 +294,17 @@ function GroupCard({ title, danger = false, children }: {
  */
 function UpdateTargetRow({
   target,
-  downloading,
-  downloadPercent,
+  desktopBusy,
   installReady,
   onUpdate,
   rowState,
   error,
 }: {
   target: UpdateTarget;
-  downloading: boolean;
-  downloadPercent: number | null;
+  /** BET-1195: the desktop leg's presentation (from `desktopUpdateBusy`), so
+   *  the row and the banner agree. null for non-desktop targets / no desktop
+   *  run in flight. */
+  desktopBusy: { busyLabel: string; progress: { step: number; total: number; label: string } | null } | null;
   installReady: boolean;
   onUpdate: (t: UpdateTarget) => void;
   rowState: { kind: "updating" } | { kind: "busy" } | { kind: "idle" };
@@ -331,7 +332,15 @@ function UpdateTargetRow({
   // rest are quiet text (ok / error) or a manual link (muted, when there is a
   // URL to offer).
   let action: ReactNode = null;
-  if (updating) {
+  if (target.id === "desktop" && desktopBusy) {
+    // BET-1195: the desktop row shows its REAL in-flight state — the download
+    // percent, or the terminal "Restarting Manta Desktop…" beat — from the
+    // shared helper, instead of the generic "Updating…" spinner. Same label the
+    // banner shows; they can never diverge.
+    action = (
+      <span className="shrink-0 text-meta text-text-faint">{desktopBusy.busyLabel}</span>
+    );
+  } else if (updating) {
     // THIS target is the one being updated — its own spinner + label. No other
     // row shows a spinner; those are just disabled via `busy`.
     action = (
@@ -349,21 +358,13 @@ function UpdateTargetRow({
     // suppress the desktop row's own Update button then, since a second one
     // would re-download an already-downloaded update.
     if (!(target.id === "desktop" && installReady)) {
-      if (target.id === "desktop" && downloading) {
-        action = (
-          <span className="shrink-0 text-meta text-text-faint">
-            {downloadPercent == null ? "Downloading…" : `Downloading ${Math.round(downloadPercent)}%`}
-          </span>
-        );
-      } else {
-        // Disabled while any update is in flight (`busy`); re-enabled (with the
-        // inline error above) so the user can retry a failed row.
-        action = (
-          <button className={BANNER_BTN} disabled={busy} onClick={() => onUpdate(target)}>
-            Update
-          </button>
-        );
-      }
+      // Disabled while any update is in flight (`busy`); re-enabled (with the
+      // inline error above) so the user can retry a failed row.
+      action = (
+        <button className={BANNER_BTN} disabled={busy} onClick={() => onUpdate(target)}>
+          Update
+        </button>
+      );
     }
   } else if (row.tone === "muted") {
     if (target.manualUrl) {
@@ -414,6 +415,8 @@ export function Settings({
   onRequestServerUpdate,
   busy = false,
   onCliUpdate,
+  onDesktopUpdate,
+  desktopRestarting = false,
 }: {
   onClose: () => void;
   /** Section to land on when the modal mounts (e.g. the `manta-open-settings`
@@ -436,6 +439,17 @@ export function Settings({
    *  (decided by the shared `isCliTarget` discriminator) so the Settings rows
    *  and App's banner route through the SAME path — no second discriminator. */
   onCliUpdate?: (t: UpdateTarget) => void;
+  /** BET-1195: App's single desktop download runner. Settings delegates the
+   *  desktop row here (mirroring the CLI story) so the desktop leg's in-flight
+   *  state lives in the shared store — the banner and the row can never
+   *  disagree. The row's download percent + restart beat come from the store /
+   *  this prop, not a Settings-local copy. */
+  onDesktopUpdate?: () => void;
+  /** BET-1195: App-local flag set right before quit-and-install (the desktop
+   *  analogue of boxRestarting). Passed down so the row can show "Restarting
+   *  Manta Desktop…" instead of a download percent the download no longer talks
+   *  about. */
+  desktopRestarting?: boolean;
 }) {
   // BET-730: per-field selectors, never a bare useStore() — a no-selector
   // destructure re-renders the whole Settings tree on every store write.
@@ -463,12 +477,21 @@ export function Settings({
   // target's last transient error (null = none).
   const updatingTargetId = useStore((s) => s.updatingTargetId);
   const targetUpdateErrors = useStore((s) => s.targetUpdateErrors);
+  // BET-1195: the desktop download's live percent, owned in the SHARED store
+  // (fed at App level from IPC.autoUpdateProgress) so this row and the banner
+  // can never disagree. The old Settings-local copy is what left the banner
+  // path and runUpdateAll with no loading state.
+  const desktopDownloadPercent = useStore((s) => s.desktopDownloadPercent);
   const setUpdatingTarget = useStore((s) => s.setUpdatingTarget);
   const setTargetUpdateError = useStore((s) => s.setTargetUpdateError);
-  // Terminal auto-update failure (integrity / permission / unusable feed).
-  // Read here only to end About's "Downloading…" state — the banner owns
-  // reporting it.
-  const updateError = useStore((s) => s.updateError);
+  // BET-1195: the desktop leg's presentation, decided by the SAME pure shared
+  // helper the banner uses, so the row and the banner can never disagree about
+  // whether the desktop is downloading (with what percent) or restarting.
+  const desktopBusy = desktopUpdateBusy({
+    updatingTargetId,
+    desktopDownloadPercent,
+    desktopRestarting,
+  });
   const boxToken = useStore((s) => s.boxToken);
   const serverUrl = useStore((s) => s.serverUrl);
   const push = useStore((s) => s.pushAppToast);
@@ -547,16 +570,17 @@ export function Settings({
   // inside it: a failure of one leg still reports the other.
   const [checking, setChecking] = useState(false);
   const [checkedAt, setCheckedAt] = useState<number | null>(null);
-  const [downloading, setDownloading] = useState(false);
-  const [downloadPercent, setDownloadPercent] = useState<number | null>(null);
 
   // BET-1160 never-stuck invariant: a fresh Settings open (re)mount resets the
   // transient in-flight update state to idle — no stale spinner, no button left
   // permanently disabled from a previous session. Durable truth (what is
   // available / up to date) comes from `updateTargets`, not from the transient
   // `updatingTargetId` / `targetUpdateErrors`, so discarding them here is safe.
+  // The desktop download percent is also cleared here (BET-1195): a re-opened
+  // Settings must not present a stale percent for a download that ended.
   useEffect(() => {
     setUpdatingTarget(null);
+    useStore.getState().setDesktopDownloadPercent(null);
     const errs = useStore.getState().targetUpdateErrors;
     for (const id of Object.keys(errs)) {
       if (errs[id] != null) setTargetUpdateError(id, null);
@@ -575,64 +599,24 @@ export function Settings({
     }
   };
 
-  // Percent for a manual desktop download. Subscribed unconditionally (the
-  // no-op unsubscribe on mobile makes this safe) so a download started here
-  // renders progress instead of a button that looks stuck for minutes on a
-  // 100MB artifact.
-  useEffect(() => {
-    const off = window.api.onAutoUpdateProgress?.((p) => {
-      setDownloadPercent(typeof p.percent === "number" ? p.percent : null);
-    });
-    return off;
-  }, []);
-
-  // A download ends in exactly one of three ways, and ALL of them must clear
-  // the local in-flight state — otherwise the row sits on "Downloading…"
-  // forever, which is the same "looks busy, is actually dead" impression this
-  // feature exists to remove.
-  //
-  //  - success: the store's `updatePrompt` appears (App.tsx sets it from the
-  //    `update-downloaded` event) and the row becomes "Restart to update".
-  //  - terminal failure: the store's `updateError` appears (main forwards only
-  //    non-transient failures). The failure is reported by the banner; About
-  //    just stops claiming to be busy.
-  //  - transient failure: main neither raises `updatePrompt` nor `updateError`
-  //    (a drop mid-download is deliberately not surfaced as a terminal error),
-  //    but the IPC now rejects, so the click handler's `.catch` below resets
-  //    the state and the "Download" button comes back — the user can retry.
-  useEffect(() => {
-    if (updatePrompt || updateError) {
-      setDownloading(false);
-      setDownloadPercent(null);
-    }
-  }, [updatePrompt, updateError]);
-
   // One row per target (BET-1099): the list below maps over the canonical
   // `updateTargets` in its fixed display order, so Settings and the banner
   // always describe the same state. The two bespoke per-leg blocks they
   // replace were deleted in stage 4.
   //
   // The action routes by target id through the shared `isCliTarget`
-  // discriminator (BET-1159): desktop keeps its download; every CLI row
-  // delegates to App's per-CLI router (`onCliUpdate` — the SAME path the
-  // banner uses), so a CLI row upgrades JUST that CLI, never the whole box;
-  // the server row keeps the box self-update flow (`onRequestServerUpdate`),
-  // which App's confirm → applyServerUpdate path owns unchanged. The row's
-  // disabled/spinner presentation (busy + updatingTargetId) is BET-1160's
-  // `rowUpdateState`, already read from the store — nothing to add here.
+  // discriminator (BET-1159): desktop delegates to App's single desktop runner
+  // (`onDesktopUpdate` — the SAME path the banner uses, so Settings never keeps
+  // a second copy of the download/in-flight state; BET-1195); every CLI row
+  // delegates to App's per-CLI router (`onCliUpdate`), so a CLI row upgrades
+  // JUST that CLI, never the whole box; the server row keeps the box
+  // self-update flow (`onRequestServerUpdate`), which App's confirm →
+  // applyServerUpdate path owns unchanged. The row's disabled/spinner
+  // presentation (busy + updatingTargetId) is BET-1160's `rowUpdateState`,
+  // already read from the store — nothing to add here.
   const handleRowUpdate = (t: UpdateTarget) => {
     if (t.id === "desktop") {
-      setDownloading(true);
-      setDownloadPercent(0);
-      // The IPC rejects on ANY failure (main now returns the download
-      // promise), so a transient drop recovers to the button instead of
-      // wedging "Downloading…".
-      void window.api
-        .autoUpdateDownload()
-        .catch(() => {
-          setDownloading(false);
-          setDownloadPercent(null);
-        });
+      onDesktopUpdate?.();
     } else if (isCliTarget(t)) {
       onCliUpdate?.(t);
     } else {
@@ -1002,8 +986,7 @@ export function Settings({
                 <UpdateTargetRow
                   key={t.id}
                   target={t}
-                  downloading={downloading}
-                  downloadPercent={downloadPercent}
+                  desktopBusy={desktopBusy}
                   installReady={Boolean(updatePrompt)}
                   onUpdate={handleRowUpdate}
                   rowState={rowUpdateState(t.id, { updatingTargetId, busy })}
