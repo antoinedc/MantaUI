@@ -460,6 +460,12 @@ restart_server() {
   # supervisor and the user is expected to restart by hand.
   if command -v systemctl >/dev/null 2>&1; then
     echo "▸ self-update: restarting manta-server.service"
+    # BET-1192: patch the installed unit with KillMode=process (and
+    # daemon-reload) BEFORE the restart. systemd stops the unit using the
+    # currently-loaded config, so the patch must complete first — done this
+    # way the FIRST upgrade to the fixed version already saves the user's
+    # sessions instead of being the last update to destroy them.
+    ensure_server_kill_policy
     systemctl --user restart manta-server.service
   elif [ "$(uname -s)" = "Darwin" ]; then
     echo "▸ self-update: kickstarting com.mantaui.server LaunchAgent"

@@ -521,3 +521,134 @@ test("should_skip_self_update: box stale + no CLI changed → do NOT skip", () =
 test("should_skip_self_update: box stale + a CLI changed → do NOT skip", () => {
   assert.equal(shouldSkip("0.0.29", "abc123", "0.0.30", "def456", "1"), false);
 });
+
+// --- KillMode policy (BET-1192): the systemd unit patch -----------------------
+//
+// The systemd default KillMode=control-group SIGTERMs every process in the
+// service's cgroup on stop/restart, and manta-server's tmux + pane shells live
+// in that cgroup — so every restart destroyed every session. The fix narrows
+// the kill to the main process with KillMode=process. `ensure_kill_policy_text`
+// is the pure text transform (unit-tested directly); `ensure_server_kill_policy`
+// patches the INSTALLED unit in place and daemon-reloads. The patcher must be
+// idempotent and NEVER override an operator's explicit KillMode= line.
+
+// The shipped systemd template — used by the drift guard below. The test file
+// lives in scripts/lib/, so the template is one dir up under scripts/systemd/.
+const MANTA_SERVICE_TEMPLATE = join(__dirname, "../systemd/manta-server.service");
+
+const SERVICE_TEXT = `[Unit]
+Description=manta box server
+[Service]
+Type=simple
+Restart=on-failure
+[Install]
+WantedBy=default.target
+`;
+
+/** Source release.sh and echo the result of ensure_kill_policy_text "$KILL_TEXT". */
+function killPolicyText(text) {
+  // Pass the text via an env var (not argv) so arbitrary content survives
+  // shell quoting; the function echoes the (possibly transformed) text.
+  return execFileSync(
+    "bash",
+    ["-c", `log(){ :;}; ok(){ :;}; warn(){ :;}; die(){ echo "$*" >&2; exit 1; }\n. '${RELEASE_LIB}'\nensure_kill_policy_text "$KILL_TEXT"`],
+    { env: { ...process.env, KILL_TEXT: text }, encoding: "utf-8" },
+  );
+}
+
+test("ensure_kill_policy_text: text with no KillMode gains ONE KillMode=process right after [Service]", () => {
+  const out = killPolicyText(SERVICE_TEXT);
+  assert.equal(out, `[Unit]\nDescription=manta box server\n[Service]\nKillMode=process\nType=simple\nRestart=on-failure\n[Install]\nWantedBy=default.target\n`);
+  assert.equal((out.match(/^KillMode=process$/gm) ?? []).length, 1, "exactly one KillMode=process");
+});
+
+test("ensure_kill_policy_text: already containing KillMode=process comes back byte-identical", () => {
+  const text = `[Service]\nKillMode=process\nRestart=on-failure\n`;
+  assert.equal(killPolicyText(text), text);
+});
+
+test("ensure_kill_policy_text: containing KillMode=mixed is never overridden", () => {
+  const text = `[Service]\nKillMode=mixed\nRestart=on-failure\n`;
+  assert.equal(killPolicyText(text), text);
+});
+
+test("ensure_kill_policy_text: applying twice equals applying once (idempotent)", () => {
+  const once = killPolicyText(SERVICE_TEXT);
+  assert.equal(killPolicyText(once), once);
+});
+
+test("ensure_kill_policy_text: a unit with no [Service] section is left unchanged", () => {
+  const text = `[Unit]\nDescription=no service section\n`;
+  assert.equal(killPolicyText(text), text);
+});
+
+/**
+ * Source release.sh and run ensure_server_kill_policy against a real temp unit
+ * path, with `systemctl` stubbed on PATH to a recorder so the test can assert
+ * whether daemon-reload actually ran. Returns { status, stdout, reloaded }.
+ */
+function runServerKillPolicy(unitPath) {
+  const dir = mkdtempSync(join(tmpdir(), "manta-kill-"));
+  const binDir = join(dir, "bin");
+  mkdirSync(binDir, { recursive: true });
+  const calls = join(dir, "systemctl.calls");
+  // Stub systemctl on PATH to a recorder so the test can assert whether
+  // daemon-reload actually ran (the function must only reload when it wrote).
+  writeFileSync(
+    join(binDir, "systemctl"),
+    `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
+    { mode: 0o755 },
+  );
+  const r = sourceAndRun(`ensure_server_kill_policy '${unitPath}'`, {
+    preamble: `export PATH='${binDir}':"$PATH"`,
+  });
+  let reloaded = false;
+  if (existsSync(calls)) {
+    reloaded = readFileSync(calls, "utf8").split("\n").some((l) => l.includes("daemon-reload"));
+  }
+  rmSync(dir, { recursive: true, force: true });
+  return { status: r.status, stdout: r.stdout, reloaded };
+}
+
+test("ensure_server_kill_policy: a missing unit path returns 0 and creates nothing", () => {
+  const missing = join(mkdtempSync(join(tmpdir(), "manta-kill-missing-")), "nope.service");
+  const r = runServerKillPolicy(missing);
+  assert.equal(r.status, 0);
+  assert.equal(existsSync(missing), false, "must not create the unit");
+  assert.equal(r.reloaded, false, "must not daemon-reload for a missing unit");
+});
+
+test("ensure_server_kill_policy: patches a unit that lacks KillMode and daemon-reloads", () => {
+  const dir = mkdtempSync(join(tmpdir(), "manta-kill-"));
+  const unitPath = join(dir, "manta-server.service");
+  writeFileSync(unitPath, SERVICE_TEXT);
+  try {
+    const r = runServerKillPolicy(unitPath);
+    assert.equal(r.status, 0);
+    assert.match(readFileSync(unitPath, "utf8"), /^KillMode=process$/m);
+    assert.equal(r.reloaded, true, "a changed unit must trigger daemon-reload");
+    assert.match(r.stdout, /patched with KillMode=process/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ensure_server_kill_policy: an already-patched unit is not rewritten and not daemon-reloaded", () => {
+  const dir = mkdtempSync(join(tmpdir(), "manta-kill-"));
+  const unitPath = join(dir, "manta-server.service");
+  const text = `[Service]\nKillMode=process\nRestart=on-failure\n`;
+  writeFileSync(unitPath, text);
+  try {
+    const r = runServerKillPolicy(unitPath);
+    assert.equal(r.status, 0);
+    assert.equal(readFileSync(unitPath, "utf8"), text, "file must be byte-identical");
+    assert.equal(r.reloaded, false, "no-op patch must not daemon-reload");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("drift guard: the shipped systemd template is already unchanged by ensure_kill_policy_text", () => {
+  const template = readFileSync(MANTA_SERVICE_TEMPLATE, "utf8");
+  assert.equal(killPolicyText(template), template);
+});
