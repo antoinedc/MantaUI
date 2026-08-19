@@ -119,7 +119,7 @@ final class ModelRecentsTests: XCTestCase {
             name: "m",
             capabilities: ModelCapabilities(
                 reasoning: reasoning,
-                input: image.map { ModelCapabilities.Modalities(image: $0) }
+                input: image.map { ModelCapabilities.Modalities(names: $0 ? ["image"] : []) }
             )
         )
     }
@@ -275,7 +275,7 @@ final class ModelRecentsTests: XCTestCase {
             limit: context.map { ModelLimit(context: $0) },
             capabilities: ModelCapabilities(
                 reasoning: reasoning,
-                input: image.map { ModelCapabilities.Modalities(image: $0) }
+                input: image.map { ModelCapabilities.Modalities(names: $0 ? ["image"] : []) }
             )
         )
     }
@@ -351,7 +351,7 @@ final class ModelRecentsTests: XCTestCase {
             enabled: enabled,
             capabilities: ModelCapabilities(
                 reasoning: reasoning,
-                input: image.map { ModelCapabilities.Modalities(image: $0) }
+                input: image.map { ModelCapabilities.Modalities(names: $0 ? ["image"] : []) }
             )
         )
     }
