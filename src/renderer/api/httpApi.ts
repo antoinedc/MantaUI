@@ -659,7 +659,8 @@ function on<T>(kind: Kind, cb: (p: T) => void): () => any {
 //     "no OS path" and fall back to uploadBuffer's byte path — that fallback
 //     is what makes drag-in work in http mode; don't remove it.
 //   • agentPullFile (outbox) → browser download via /api/download — WORKS;
-//     revealInFolder        → no-op (no OS file manager to reveal into).
+//     revealInFolder        → delegates to the preload when there IS one
+//     (desktop), no-op only on a phone/browser with no file manager.
 //   • openExternal (chat links) → window.open (the WebView is a browser) — WORKS.
 //   • clipboardWriteText / clipboardReadImage → routed to the server RPC no-ops;
 //     OSC52 desktop-clipboard sync is a preload-only affordance and silently
@@ -926,8 +927,18 @@ export const httpApi: Api = {
     if (preload?.downloadFileToDownloads) return await preload.downloadFileToDownloads(remotePath, filename);
     return "";
   },
-  // No OS file manager to reveal into on a phone/browser — no-op.
-  revealInFolder: async (_localPath) => {},
+  // Reveal a saved file in Finder / the OS file manager. BRIDGED, like
+  // peekRemoteFile / downloadFileToDownloads: on desktop `window.api` is
+  // swapped to THIS client once paired, so an unconditional no-op here means
+  // every Reveal button in the app silently does nothing on the very platform
+  // that has a file manager — which is exactly what happened to the download
+  // toast's Reveal (the file WAS saved; the button just never called Finder).
+  // The no-op survives only for a phone/browser, where there is nothing to
+  // reveal into.
+  revealInFolder: async (localPath) => {
+    const preload = getMantaPreload();
+    if (preload?.revealInFolder) await preload.revealInFolder(localPath);
+  },
 
   /**
    * Markdown links in ChatPanel always call `window.api.openExternal(href)`

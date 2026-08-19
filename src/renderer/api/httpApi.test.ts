@@ -583,3 +583,30 @@ describe("httpApi agentPullFile desktop bridge delegation", () => {
     expect(out).toBe("");
   });
 });
+
+// ---------------------------------------------------------------------------
+// revealInFolder — bridged, not a blanket no-op
+//
+// The desktop swaps window.api to THIS client once paired, so an unconditional
+// no-op here disabled every Reveal button on the only platform with a file
+// manager: the download toast saved the file correctly and then did nothing
+// when asked to show it.
+// ---------------------------------------------------------------------------
+
+describe("httpApi revealInFolder", () => {
+  it("delegates to the preload bridge on desktop", async () => {
+    const revealInFolder = vi.fn(async () => {});
+    vi.stubGlobal("window", {
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      __mantaPreload: { revealInFolder },
+    });
+    await httpApi.revealInFolder("/Users/a/Downloads/report.pdf");
+    expect(revealInFolder).toHaveBeenCalledWith("/Users/a/Downloads/report.pdf");
+  });
+
+  it("stays a no-op on a phone/browser (no preload, nothing to reveal into)", async () => {
+    vi.stubGlobal("window", { addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    await expect(httpApi.revealInFolder("/Users/a/Downloads/report.pdf")).resolves.toBeUndefined();
+  });
+});
