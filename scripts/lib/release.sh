@@ -347,3 +347,66 @@ should_skip_self_update() {
   fi
   return 1
 }
+
+# ensure_kill_policy_text — echo unit text with `KillMode=process` present in
+# [Service] exactly once. Idempotent, and NEVER overrides an existing
+# KillMode= line whatever its value (an operator's explicit choice wins).
+# $1 = full unit file text. Behaviour, exhaustively:
+#   * text already containing any line matching `^KillMode=` -> echo unchanged,
+#     byte for byte
+#   * otherwise -> insert `KillMode=process` on the line immediately after
+#     [Service]
+#   * no [Service] section at all -> echo unchanged (nothing safe to do)
+ensure_kill_policy_text() {
+  local text="$1" line
+  # Already carries a KillMode line (whatever its value) -> leave byte-for-byte.
+  if printf '%s\n' "$text" | grep -q '^KillMode='; then
+    printf '%s' "$text"
+    return 0
+  fi
+  # No [Service] section -> nothing safe to anchor the insert on.
+  if ! printf '%s\n' "$text" | grep -q '^\[Service\]'; then
+    printf '%s' "$text"
+    return 0
+  fi
+  # Insert KillMode=process on the line immediately after [Service]. sed keeps
+  # every other byte (and trailing newline) untouched, so the insert is exact
+  # and re-applying is a no-op (the next run sees ^KillMode= and returns early).
+  printf '%s' "$text" | sed '/^\[Service\]$/a KillMode=process'
+  return 0
+}
+
+# ensure_server_kill_policy — patch the INSTALLED systemd unit in place if
+# needed and daemon-reload so the NEXT restart uses it. Never fatal: the worst
+# case on any failure is the pre-existing behaviour (sessions destroyed by the
+# restart), which is no worse than not running this at all.
+# $1 = unit path, default $HOME/.config/systemd/user/manta-server.service.
+# Behaviour, exhaustively:
+#   * unit file missing (macOS, nohup fallback) -> return 0, write nothing
+#   * patched text identical to current text -> return 0, do NOT write, do NOT
+#     daemon-reload
+#   * text changed -> write it back, `systemctl --user daemon-reload`, log once
+#   * any failure (unwritable file, daemon-reload non-zero) -> warn, return 0
+ensure_server_kill_policy() {
+  local unit="${1:-$HOME/.config/systemd/user/manta-server.service}"
+  local current patched
+  [ -f "$unit" ] || return 0
+  if ! current="$(cat "$unit")"; then
+    warn "ensure_server_kill_policy: could not read $unit"
+    return 0
+  fi
+  patched="$(ensure_kill_policy_text "$current")" || return 0
+  if [ "$patched" = "$current" ]; then
+    return 0
+  fi
+  if ! printf '%s' "$patched" > "$unit"; then
+    warn "ensure_server_kill_policy: could not write $unit"
+    return 0
+  fi
+  if ! systemctl --user daemon-reload; then
+    warn "ensure_server_kill_policy: daemon-reload failed for $unit"
+    return 0
+  fi
+  log "manta-server unit patched with KillMode=process ($unit)"
+  return 0
+}

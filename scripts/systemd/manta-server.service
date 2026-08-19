@@ -47,6 +47,12 @@ Environment=MANTA_CHANNEL=@@MANTA_CHANNEL@@
 # hop, so the box is reachable WITHOUT TLS on this listener.
 Environment=MANTA_TAILNET_HOST=@@MANTA_TAILNET_HOST@@
 Environment=PATH=@@AGENT_PATH@@
+# tmux and every pane shell are children of this service and therefore live in
+# its cgroup. The systemd default (KillMode=control-group) SIGTERMs the whole
+# cgroup on stop/restart, which destroyed every session on the box on every
+# restart — including the one the self-update performs on itself. Narrow the
+# kill to the main process so sessions (and the update script) survive.
+KillMode=process
 Restart=on-failure
 RestartSec=2
 # Give the server a moment to flush on stop before SIGKILL.

@@ -356,6 +356,36 @@ jobs:
           tmux -V
           echo "ok — server-side tmux works."
 
+      - name: Assert — tmux sessions survive a server restart (BET-1192)
+        run: |
+          set -euo pipefail
+          # Linux kills tmux on every restart because it lives in the service's
+          # systemd cgroup. macOS launchd kills by PROCESS GROUP, which tmux
+          # daemonizes itself out of at startup — so sessions SHOULD survive a
+          # `launchctl kickstart -k`. This assertion proves that expectation: if
+          # it fails, BET-1192's macOS side needs its own (separate) fix, not a
+          # guessed plist edit.
+          name="survival"
+          curl -fsS -X POST http://127.0.0.1:8787/rpc/tmux:new-session \
+            -H "authorization: Bearer $MANTA_TOKEN" \
+            -H 'content-type: application/json' \
+            --data "{\"args\":[{\"name\":\"$name\",\"cwd\":\"$HOME\"}]}" \
+            -o /dev/null \
+            || { echo "FAIL: could not create survival session"; exit 1; }
+          tmux has-session -t "$name" || { echo "FAIL: session not present before restart"; exit 1; }
+          launchctl kickstart -k "gui/$(id -u)/com.mantaui.server"
+          for i in $(seq 1 30); do
+            # Any status (incl. the unpaired 401) = the listener is back.
+            if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8787/auth/status || true)" != "000" ]; then
+              break
+            fi
+            sleep 1
+          done
+          tmux has-session -t "$name" \
+            || { echo "FAIL: tmux session '$name' was killed by the server restart"; exit 1; }
+          echo "ok — session '$name' survived the server restart (macOS launchd kills by process group)"
+          tmux kill-session -t "$name" || true
+
       - name: Assert — re-running the installer preserves box identity
         run: |
           set -euo pipefail
