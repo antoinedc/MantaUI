@@ -220,7 +220,7 @@ export const UsageDial = memo(function UsageDial({ providerID }: UsageDialProps)
 // + fill, and a reset line. The component iterates `snapshot.windows` — it
 // never hardcodes "session"/"weekly" so a provider with a third window (or a
 // daily one) renders with zero changes here.
-function UsageWindowRow({ usageWindow: w, nowMs }: { usageWindow: UsageWindow; nowMs: number }) {
+export function UsageWindowRow({ usageWindow: w, nowMs }: { usageWindow: UsageWindow; nowMs: number }) {
   // Awaiting its replacement numbers: show no value and no fill rather than a
   // figure we know is the previous window's. The notice above the list says
   // why, and formatWindowReset already renders "resetting…" below.

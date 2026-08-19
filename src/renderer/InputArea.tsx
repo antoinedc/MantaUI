@@ -151,6 +151,8 @@ export function InputArea({
   models,
   modelOverride,
   defaultModel,
+  routed,
+  onRoutedUndone,
   plan,
   onTogglePlan,
   activeProviderID,
@@ -210,6 +212,10 @@ export function InputArea({
   models: OpencodeModel[] | null;
   modelOverride: ModelSelection | null;
   defaultModel: { providerID: string; modelID: string } | null;
+  // BET-1222 routed state — forwarded to ModelPicker: reason + incumbent shown
+  // on the routed pill, and the caller-owned undo action.
+  routed?: { reason: string; incumbent: { providerID: string; modelID: string } } | null;
+  onRoutedUndone?: () => void;
   // BET-738: the active model's providerID, already resolved by ChatPanel
   // via resolveActiveModel (the same computation `shortLabel` above uses) —
   // passed straight through to UsageDial, which never re-resolves the model
@@ -549,6 +555,8 @@ export function InputArea({
             models={models}
             modelOverride={modelOverride}
             defaultModel={defaultModel}
+            routed={routed}
+            onRoutedUndone={onRoutedUndone}
             deactivatedMainModels={deactivatedMainModels}
             optInModels={optInModels}
             onOptInModel={onOptInModel}

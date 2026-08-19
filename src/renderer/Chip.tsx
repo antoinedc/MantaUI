@@ -135,6 +135,7 @@ export function SplitChip({
   onLeftClick,
   onRightClick,
   rightAccent = false,
+  leftAccent = false,
   leftTitle,
   rightTitle,
   hook,
@@ -162,6 +163,13 @@ export function SplitChip({
   onRightClick: () => void;
   /** Accent the right segment (`--accent-tx` + semibold) — the split control's one accent element. */
   rightAccent?: boolean;
+  /**
+   * Accent the LEFT segment (`--accent-tx`, colour only) — the routed-model
+   * pill uses this to mark that the model was chosen by the router rather than
+   * the user. Mirrors `rightAccent`, the split control's one colour accent;
+   * no weight change, same depth as the right accent.
+   */
+  leftAccent?: boolean;
   /** Native `title` on the left button. */
   leftTitle?: string;
   /** Native `title` on the right button. */
@@ -256,7 +264,9 @@ export function SplitChip({
   const leftAria = leftExpanded !== undefined ? { "aria-expanded": leftExpanded } : {};
   const rightAria = rightExpanded !== undefined ? { "aria-expanded": rightExpanded } : {};
   const idle = loading ? " cursor-default" : " hover:bg-fill-hover hover:text-text";
-  const leftClass = `${leftHook ? `${leftHook} ` : ""}inline-flex items-center ${CHIP_PAD} h-full${idle}`;
+  const leftClass =
+    `${leftHook ? `${leftHook} ` : ""}inline-flex items-center ${CHIP_PAD} h-full${idle}` +
+    `${leftAccent && !loading ? " text-accent-tx" : ""}`;
   // `rightAccent` is a COLOUR accent only. It used to add `font-semibold` too,
   // which made the effort label the heaviest text in the composer — the accent
   // already carries the emphasis, and the extra weight only shouted.

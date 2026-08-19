@@ -21,6 +21,7 @@ import { Toggle } from "./Toggle";
 import { StatusDot } from "./StatusDot";
 import { ListRow } from "./ListRow";
 import { ProvidersCard } from "./ProvidersCard";
+import { ModelRoutingCard } from "./ModelRoutingCard";
 import { ModelsCard } from "./ModelsCard";
 import { ModelLedgerCard } from "./ModelLedgerCard";
 import { SubscriptionsCard } from "./SubscriptionsCard";
@@ -1095,10 +1096,17 @@ export function Settings({
     }
     if (section === "models") {
       return (
-        <GroupCard title="Models">
-          <ModelsCard />
-          <ModelLedgerCard />
-        </GroupCard>
+        <>
+          {/* Routing card mounts under the schema-driven "Routing" group (the
+              toggle + preset). The card shows what routing *would* do — the
+              per-agent tiers + plan windows — so it stays visible even when
+              routing is off. */}
+          <ModelRoutingCard />
+          <GroupCard title="Models">
+            <ModelsCard />
+            <ModelLedgerCard />
+          </GroupCard>
+        </>
       );
     }
     if (section === "extensions") {
