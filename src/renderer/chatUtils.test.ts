@@ -8,6 +8,7 @@ import {
   computeLiveTurn,
   formatTokens,
   formatBytes,
+  voiceUiEnabled,
   expiryLabel,
   formatDuration,
   formatClockTime,
@@ -296,6 +297,19 @@ describe("formatBytes", () => {
 });
 
 // ===== expiryLabel =====
+
+describe("voiceUiEnabled (BET-1191)", () => {
+  it("is off when the build flag is unset or any value other than '1'", () => {
+    expect(voiceUiEnabled(undefined)).toBe(false);
+    expect(voiceUiEnabled("")).toBe(false);
+    expect(voiceUiEnabled("0")).toBe(false);
+    expect(voiceUiEnabled("true")).toBe(false);
+  });
+
+  it("is on when the build flag is exactly '1'", () => {
+    expect(voiceUiEnabled("1")).toBe(true);
+  });
+});
 
 describe("expiryLabel", () => {
   const NOW = 1_700_000_000_000;

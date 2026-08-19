@@ -24,7 +24,7 @@ import {
   resolveLauncherFlags,
 } from "./chatShared";
 import type { SyncPayload } from "../shared/api";
-import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, pruneVisitedSessions, registerMountedTerminal, shouldResyncWindowsForJobs, dispatchAppControl, dispatchMedia, applyMediaEvent, formatResetAt, type AppControlHandlers, type MountedTerminal } from "./chatUtils";
+import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, pruneVisitedSessions, registerMountedTerminal, shouldResyncWindowsForJobs, dispatchAppControl, dispatchMedia, applyMediaEvent, formatResetAt, voiceUi, type AppControlHandlers, type MountedTerminal } from "./chatUtils";
 import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
 import { UpdateBar } from "./UpdateBar";
 import { ConfirmModal } from "./ConfirmModal";
@@ -1861,8 +1861,9 @@ function Shell() {
           {/* On-call CTO (BET-1166): opens the floating voice-call window via
               the genuine preload bridge (window.api is httpApi here). Gated on
               the feature being enabled so it doesn't clutter an unconfigured
-              app. */}
-          {ctoEnabled && (
+              app, AND on the BET-1191 build flag so the voice UI is not
+              reachable in a normal build. */}
+          {ctoEnabled && voiceUi && (
             <button
               type="button"
               onClick={() => {
