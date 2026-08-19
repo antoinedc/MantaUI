@@ -101,6 +101,22 @@ function normalizeCreate(
   };
 }
 
+// Upload one staged draft attachment and return its remote path, or null on
+// failure. Shared by submit() and submitFanOut() so both creation paths run
+// the exact same read+upload round-trip. The caller decides the abort.
+export async function uploadDraftAttachment(
+  projectName: string,
+  a: { filename: string; file: File },
+): Promise<string | null> {
+  const buffer = await a.file.arrayBuffer();
+  const rp = await window.api.uploadBuffer({
+    projectName,
+    filename: a.filename,
+    buffer,
+  });
+  return rp ? rp : null;
+}
+
 type Props = {
   // The id of the store draft this composer edits (see NewSessionDraft). The
   // draft holds the persisted composer workspace; the active view renders this
@@ -677,12 +693,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
         // upload aborts the whole send — no session left without its files.
         const attachments: Attachment[] = [];
         for (const a of draft.attachments) {
-          const buffer = await a.file.arrayBuffer();
-          const rp = await window.api.uploadBuffer({
-            projectName: sessionName,
-            filename: a.filename,
-            buffer,
-          });
+          const rp = await uploadDraftAttachment(sessionName, a);
           if (rp) {
             attachments.push({
               id: a.id,
@@ -792,12 +803,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
         // as attachments so fan-out doesn't silently drop them.
         const attachments: { remotePath: string; mime: string; filename?: string }[] = [];
         for (const a of draft.attachments) {
-          const buffer = await a.file.arrayBuffer();
-          const rp = await window.api.uploadBuffer({
-            projectName: sessionName,
-            filename: a.filename,
-            buffer,
-          });
+          const rp = await uploadDraftAttachment(sessionName, a);
           if (rp) {
             attachments.push({ remotePath: rp, mime: a.mime, filename: a.filename });
           } else {
