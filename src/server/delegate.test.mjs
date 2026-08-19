@@ -22,6 +22,7 @@ import {
   effectiveModelFromMessages,
   tickActivity,
   chooseSubagentModel,
+  chooseMainModel,
 } from "./delegate.mjs";
 
 // ----------------------------------------------------------------------------
@@ -624,6 +625,78 @@ test("chooseSubagentModel returns the incumbent on an off-path and is load-beari
     }),
     incumbent,
   );
+});
+
+// ----------------------------------------------------------------------------
+// BET-1225 — main-conversation ("build") routing decision
+// ----------------------------------------------------------------------------
+
+test("chooseMainModel returns the FULL decision — model, reason, incumbent — and normalises the winner to {providerID, modelID} (BET-1225)", () => {
+  const catalog = [
+    { providerID: "anthropic", id: "claude-opus-4", status: "active" },     // deep
+    { providerID: "anthropic", id: "claude-sonnet-4", status: "active" },   // balanced
+    { providerID: "anthropic", id: "claude-haiku-4", status: "active" },    // fast
+  ];
+  const incumbent = { providerID: "anthropic", modelID: "claude-opus-4" };
+  const decision = chooseMainModel({
+    incumbent,
+    catalog,
+    policy: { enabled: true, preset: "economy" }, // economy + build → balanced floor
+    quota: [],
+    agent: "build",
+    nowMs: 1_700_000_000_000,
+  });
+  // The main-conversation decision is richer than the subagent wrapper: the
+  // renderer needs the model, a reason, and the incumbent for the undo pill.
+  assert.equal(decision.changed, true);
+  assert.equal(decision.model?.providerID, "anthropic");
+  assert.equal(decision.model?.modelID, "claude-sonnet-4", "build under economy must land on the balanced-tier floor");
+  assert.equal("id" in decision.model, false, "the routed model must carry modelID, not the catalog's id");
+  assert.match(decision.reason, /build → balanced tier/, "reason names the build agent and tier");
+  assert.deepEqual(decision.incumbent, incumbent, "incumbent is preserved for the undo pill");
+});
+
+test("chooseMainModel on the off-path returns the incumbent with changed:false, never a hidden switch (BET-1225)", () => {
+  const incumbent = { providerID: "anthropic", modelID: "claude-opus-4" };
+  const catalog = [
+    { providerID: "anthropic", id: "claude-opus-4", status: "active" },
+    { providerID: "anthropic", id: "claude-haiku-4", status: "active" },
+  ];
+  // routing disabled → no switch, even though a cheaper fast model exists
+  const off = chooseMainModel({ incumbent, catalog, policy: { enabled: false }, agent: "build", nowMs: 0 });
+  assert.equal(off.changed, false);
+  assert.deepEqual(off.model, incumbent);
+  assert.equal(off.reason, "routing is off");
+  // an enabled router with no survivors (all dead) still falls back to incumbent
+  const noSurvivors = chooseMainModel({
+    incumbent,
+    catalog: [{ providerID: "anthropic", id: "claude-opus-4", status: "retired" }],
+    policy: { enabled: true, preset: "economy" },
+    agent: "build",
+    nowMs: 0,
+  });
+  assert.equal(noSurvivors.changed, false);
+  assert.deepEqual(noSurvivors.model, incumbent);
+});
+
+test("chooseMainModel when the router picks the same model reports changed:false (BET-1225)", () => {
+  // deep incumbent + performance preset → build stays deep → same model, no pill.
+  const incumbent = { providerID: "anthropic", modelID: "claude-opus-4" };
+  const catalog = [
+    { providerID: "anthropic", id: "claude-opus-4", status: "active" },
+    { providerID: "anthropic", id: "claude-sonnet-4", status: "active" },
+  ];
+  const decision = chooseMainModel({
+    incumbent,
+    catalog,
+    policy: { enabled: true, preset: "performance" },
+    quota: [],
+    agent: "build",
+    nowMs: 0,
+  });
+  assert.equal(decision.changed, false, "no model was substituted → the pill must not render");
+  assert.deepEqual(decision.model, incumbent);
+  assert.deepEqual(decision.incumbent, incumbent);
 });
 
 test("requestedModel survives a tickActivity that rewrites job.model (BET-947)", async () => {

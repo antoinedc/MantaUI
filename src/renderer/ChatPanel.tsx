@@ -446,6 +446,38 @@ export function ChatPanel({
     [modelOverride, configDefaultModel],
   );
 
+  // BET-1225: main-conversation routing, the honesty half of the routing epic.
+  // On session start, ask the server for the router's "build" decision. When it
+  // actually changed the model (routing enabled AND picked a different winner),
+  // apply the routed model as the active override — so the next prompt actually
+  // runs on it — and populate `routed` with the reason + incumbent so the
+  // composer renders the undoable routed pill. The incumbent is the model the
+  // session would run on without routing (the user's per-session pick or the
+  // persisted default); undo reverts to exactly that. Best-effort: a null or
+  // failed decision (routing off / demo transport) leaves routing silent, and
+  // never breaks the session. Re-runs on session change; the user's own
+  // selectModel clears the pill.
+  useEffect(() => {
+    let cancelled = false;
+    const incumbent = readSavedModel(sessionId) ?? configDefaultModel ?? null;
+    window.api
+      .opencodeModelRoute(incumbent, "build")
+      .then((d) => {
+        if (cancelled || !d || !d.changed || !d.model) return;
+        setModelOverride(d.model);
+        // The pill (which offers undo back to a prior model) renders only when
+        // there is an incumbent to revert to; with no prior model there is
+        // nothing to undo, so the decision applies silently.
+        if (d.incumbent) setRouted({ reason: d.reason, incumbent: d.incumbent });
+      })
+      .catch(() => {
+        /* routing is best-effort — never break the session over it */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
+
   // ===== Per-session plan mode (BET-949) =====
   // Local on/off, seeded from the per-session storage key (the `Session.agent`
   // seed falls back to this). The honesty handlers in useSseBus sync this from
@@ -1513,6 +1545,9 @@ export function ChatPanel({
     (m: ModelSelection | null) => {
       setModelOverride(m);
       writeSavedModel(sessionId, m);
+      // A manual model choice ends any routed state: once the user picks the
+      // model themselves, the pill must not claim the router chose it (BET-1225).
+      setRouted(null);
     },
     [sessionId],
   );

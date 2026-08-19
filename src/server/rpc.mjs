@@ -33,6 +33,7 @@ import { resolveWorkspace } from "./peers.mjs";
 import * as providers from "./providers.mjs";
 import * as launchers from "./launchers.mjs";
 import * as subscriptionProviders from "./subscriptionProviders.mjs";
+import { chooseMainModel } from "./delegate.mjs";
 import { restartOpencode, runServerSelfUpdate } from "./opencodeAdmin.mjs";
 import { pollClaudeLogin, claudeCliStatus } from "./opencode.mjs";
 import { backupClaudeCredentials, CREDENTIALS_PATH } from "./claudeAuth.mjs";
@@ -792,6 +793,41 @@ export function buildHandlers({
     "opencode:models": async () => {
       const cfg = await local.configGet();
       return oc.listModels(cfg.modelOverrides ?? {});
+    },
+
+    // BET-1225: main-conversation ("build" agent) routing decision. ChatPanel
+    // asks once at session start; the server is the ONE place chooseModel runs
+    // (chooseMainModel in delegate.mjs, sat beside chooseSubagentModel), so
+    // the routed pill reflects the same decision the send path would apply.
+    // Returns the full decision { model, reason, incumbent, changed } so the
+    // renderer can apply the routed model AND surface the undoable pill. Every
+    // input is guarded — missing policy / quota / catalog must never throw and
+    // falls back to the incumbent (routing off by default).
+    "routing:main": async (input) => {
+      const incumbent = input?.incumbent ?? null;
+      const agent = input?.agent ?? "build";
+      let policy = { enabled: false };
+      let quota = [];
+      let catalog = [];
+      try {
+        const cfg = await local.configGet();
+        policy = cfg?.modelRouter ?? { enabled: false };
+      } catch {
+        policy = { enabled: false };
+      }
+      try {
+        quota = usageListSnapshots();
+        if (!Array.isArray(quota)) quota = [];
+      } catch {
+        quota = [];
+      }
+      try {
+        catalog = await oc.listModels();
+        if (!Array.isArray(catalog)) catalog = [];
+      } catch {
+        catalog = [];
+      }
+      return chooseMainModel({ incumbent, catalog, policy, quota, agent, nowMs: Date.now() });
     },
 
     // Provider management — now served from the server (BET-82.3).

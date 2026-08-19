@@ -761,6 +761,102 @@ describe("ChatPanel composer submit", () => {
   });
 });
 
+// ===== Main-conversation routing populates the routed pill (BET-1225) =====
+//
+// The server's routing decision for the session is fetched once on mount. When
+// it actually changed the model, ChatPanel applies the routed model as the
+// active override (so the next prompt runs on it) and populates `routed` so the
+// composer renders the undoable pill. A null / no-op decision leaves routing
+// silent and the prompt's model untouched.
+describe("ChatPanel main-conversation routing (BET-1225)", () => {
+  let api: MockApi;
+  let h: Harness | null = null;
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  function typeInto(el: HTMLTextAreaElement, value: string) {
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      "value",
+    )?.set;
+    setter?.call(el, value);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  it("applies a changed routing decision as the active model for the next prompt (BET-1225)", async () => {
+    ({ api } = installMockApi({
+      opencodePrompt: () => Promise.resolve({ ok: true }),
+      opencodeModelRoute: () =>
+        Promise.resolve({
+          model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
+          reason: "build → balanced tier: anthropic quota ample",
+          incumbent: { providerID: "anthropic", modelID: "claude-opus-4-5" },
+          changed: true,
+        }),
+    }));
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    // The routing RPC ran once per session start with the session-scoped agent.
+    const routeCalls = api.calls["opencodeModelRoute"] ?? [];
+    expect(routeCalls.length).toBeGreaterThan(0);
+    // No persisted per-session model / config default in the test harness →
+    // the incumbent (the model the session would otherwise use) is null.
+    expect(routeCalls[0][0]).toBeNull();
+
+    const textarea = h.container.querySelector("textarea");
+    await act(async () => {
+      typeInto(textarea as HTMLTextAreaElement, "hello");
+    });
+    await act(async () => {
+      (textarea as HTMLTextAreaElement).dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      );
+    });
+    await h.flush();
+
+    // The routed model is threaded through the existing prompt's modelOverride.
+    const promptCall = api.calls["opencodePrompt"]?.[0];
+    expect(promptCall?.[0]).toBe("ses_test");
+    expect(promptCall?.[2]?.modelID).toBe("claude-sonnet-4-6");
+  });
+
+  it("leaves the prompt's model untouched when the decision is a no-op (BET-1225)", async () => {
+    ({ api } = installMockApi({
+      opencodePrompt: () => Promise.resolve({ ok: true }),
+      opencodeModelRoute: () =>
+        Promise.resolve({
+          model: null,
+          reason: "routing is off",
+          incumbent: null,
+          changed: false,
+        }),
+    }));
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    const textarea = h.container.querySelector("textarea");
+    await act(async () => {
+      typeInto(textarea as HTMLTextAreaElement, "hi");
+    });
+    await act(async () => {
+      (textarea as HTMLTextAreaElement).dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      );
+    });
+    await h.flush();
+
+    const promptCall = api.calls["opencodePrompt"]?.[0];
+    expect(promptCall?.[0]).toBe("ses_test");
+    expect(promptCall?.[2]).toBeUndefined();
+  });
+});
+
 // ===== Re-activation re-pin defers the tail scroll until the scroller
 // re-measures (BET-1003) =====
 //
