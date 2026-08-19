@@ -286,6 +286,18 @@ const api = {
     ipcRenderer.on(IPC.installerEvent, listener);
     return () => ipcRenderer.removeListener(IPC.installerEvent, listener);
   },
+
+  // On-call CTO floating window controls (BET-1166). The call.html renderer
+  // uses these to show/park/hang the window and to fetch the {serverUrl,
+  // boxToken} it needs to open its /call WebSocket. No second transport and
+  // no API key ever reaches this surface — audio + events ride the /call WS.
+  call: {
+    show: (): Promise<void> => ipcRenderer.invoke(IPC.callWindowShow),
+    park: (): Promise<void> => ipcRenderer.invoke(IPC.callWindowPark),
+    hangup: (): Promise<void> => ipcRenderer.invoke(IPC.callWindowHangup),
+    getConfig: (): Promise<{ serverUrl: string; boxToken: string }> =>
+      ipcRenderer.invoke(IPC.callGetConfig),
+  },
 };
 
 // Expose the real preload bridge under a STABLE, dedicated name — NOT "api".

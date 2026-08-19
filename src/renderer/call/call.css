@@ -1,0 +1,207 @@
+/* call/call.css — the on-call CTO floating window (BET-1166). Tokens only. */
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  font-family: var(--font-sans);
+  color: var(--tx1);
+}
+
+.call {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: var(--canvas);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  transition: background 0.15s var(--ease-out);
+}
+
+.call--connecting,
+.call--disconnected {
+  border-color: var(--border-subtle);
+}
+.call--dropped {
+  border-color: var(--danger);
+}
+
+/* The header is the drag region for the frameless window. */
+.call-header {
+  -webkit-app-region: drag;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--panel);
+  border-bottom: 1px solid var(--border-subtle);
+  user-select: none;
+}
+
+.call-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--r-full);
+  transition: background 0.15s var(--ease-out);
+}
+.call-dot.listening {
+  background: var(--ok);
+  box-shadow: 0 0 0 4px var(--ok-bg);
+  animation: pulse 1.6s var(--ease-out) infinite;
+}
+.call-dot.parked {
+  background: var(--warn);
+  box-shadow: 0 0 0 4px var(--warn-bg);
+}
+.call-dot.busy {
+  background: var(--accent-solid);
+  box-shadow: 0 0 0 4px var(--accent-bg);
+}
+
+@keyframes pulse {
+  0% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+.call-title {
+  font-size: var(--font-size-small);
+  font-weight: 600;
+  color: var(--tx1);
+}
+
+.call-spend {
+  margin-left: auto;
+  font-size: var(--font-size-2xs);
+  color: var(--tx3);
+  font-variant-numeric: tabular-nums;
+}
+
+.call-body {
+  flex: 1 1 auto;
+  padding: var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.listening-line {
+  color: var(--tx2);
+  font-size: var(--font-size-small);
+}
+.working-line {
+  color: var(--accent-tx);
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-solid);
+  border-radius: var(--r-md);
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--font-size-small);
+}
+.confirm-banner {
+  border: 1px solid var(--warn);
+  background: var(--warn-bg);
+  border-radius: var(--r-md);
+  padding: var(--sp-3);
+}
+.confirm-preview {
+  color: var(--tx1);
+  font-size: var(--font-size-body);
+}
+.confirm-hint {
+  margin-top: var(--sp-1);
+  color: var(--tx2);
+  font-size: var(--font-size-2xs);
+}
+.call-error {
+  color: var(--danger);
+  border: 1px solid var(--danger);
+  background: var(--danger-bg);
+  border-radius: var(--r-md);
+  padding: var(--sp-3);
+  font-size: var(--font-size-small);
+}
+
+.transcript {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-height: 0;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: var(--sp-2);
+}
+
+.tline {
+  display: flex;
+  gap: var(--sp-2);
+  font-size: var(--font-size-small);
+  line-height: 1.4;
+}
+.tline.user .ttext {
+  color: var(--tx2);
+}
+.tline.cto .ttext {
+  color: var(--tx1);
+}
+.trole {
+  flex: 0 0 auto;
+  color: var(--tx3);
+  font-weight: 600;
+}
+
+.call-controls {
+  display: flex;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--panel);
+  border-top: 1px solid var(--border-subtle);
+  -webkit-app-region: no-drag;
+}
+
+.ctl {
+  -webkit-app-region: no-drag;
+  flex: 1 1 auto;
+  border: 1px solid var(--border);
+  background: var(--raised);
+  color: var(--tx1);
+  border-radius: var(--r-sm);
+  padding: var(--sp-2);
+  font-size: var(--font-size-2xs);
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: background 0.12s var(--ease-out), border-color 0.12s var(--ease-out);
+}
+.ctl:hover {
+  border-color: var(--accent-solid);
+}
+.ctl.on {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+.ctl.off {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+.ctl.danger {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.ctl.park {
+  color: var(--tx2);
+}
