@@ -14,7 +14,7 @@
 // (unarmedStoppedCount), covered by the pure-helper tests in usageResume.test.ts.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { installMockApi, mount, resetStore, type Harness } from "./testHarness";
+import { installMockApi, mount, resetStore, clickCheckbox, type Harness } from "./testHarness";
 import { UsageResumeModal } from "./UsageResumeModal";
 import type { StoppedRecord } from "../shared/types";
 
@@ -31,16 +31,11 @@ const rec = (p: Partial<StoppedRecord> = {}): StoppedRecord => ({
   ...p,
 });
 
-function checkBox(harness: Harness, conversation: string): HTMLInputElement {
-  const input = harness.docQuery(`input[aria-label="Resume ${conversation}"]`) as HTMLInputElement | null;
-  if (!input) throw new Error(`no checkbox for ${conversation}`);
-  return input;
-}
-
 function toggle(harness: Harness, conversation: string): void {
-  // A real `.click()` on the native checkbox — React wires checkbox onChange
-  // to the native click event (a manual `change` event is not observed).
-  checkBox(harness, conversation).click();
+  // Drive the checkbox the way a user does — on the visible box, not the
+  // sr-only input. React wires checkbox onChange to the browser's
+  // label-activation click, which is exactly the path this exercises.
+  clickCheckbox(harness, `Resume ${conversation}`);
 }
 
 function primary(harness: Harness): HTMLButtonElement | null {
