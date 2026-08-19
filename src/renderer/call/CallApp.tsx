@@ -59,8 +59,17 @@ export function CallApp() {
   const initialSetRef = useRef(false);
 
   // ----- connect the /call WS + mic + audio-out -----
+  //
+  // StrictMode safety (BET-1185): the async body awaits BEFORE it creates the
+  // socket, so a StrictMode unmount (cleanup sets `cancelled`) during that
+  // await would otherwise leave the body to run to completion and open a
+  // socket the cleanup never sees — leaking a second Realtime session that
+  // talks over the live one. We check `cancelled` after EVERY await and bail
+  // (closing anything this run created), for the socket, the mic stream, and
+  // the audio context alike.
   useEffect(() => {
     let cancelled = false;
+    const isCancelled = () => cancelled;
     (async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const pre = (window as any).__mantaPreload?.call;
@@ -69,6 +78,7 @@ export function CallApp() {
         return;
       }
       const cfg = await pre.getConfig();
+      if (isCancelled()) return; // cleanup ran during the await — create nothing
       if (!cfg?.serverUrl || !cfg?.boxToken) {
         setStatus("dropped");
         setError("Not connected to a box.");
@@ -91,14 +101,29 @@ export function CallApp() {
         }
         handleServerMessage(msg);
       };
-      startMic(ws);
-      setupAudioOut();
+      if (isCancelled()) {
+        ws.close();
+        return;
+      }
+
+      // Capture and playback run on ONE shared AudioContext so the browser's
+      // echo canceller has a reference to what is being played (BET-1185).
+      await startMic(ws, isCancelled);
+      if (isCancelled()) {
+        ws.close();
+        return;
+      }
+      await setupAudioOut(isCancelled);
+      if (isCancelled()) {
+        ws.close();
+        return;
+      }
     })();
     return () => {
       cancelled = true;
       wsRef.current?.close();
-      micStreamRef.current?.getTracks().forEach((t) => t.stop());
-      audioCtxRef.current?.close().catch(() => {});
+      cleanupMic();
+      cleanupAudio();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -186,15 +211,26 @@ export function CallApp() {
     }
   }
 
-  async function startMic(ws: WebSocket) {
+  async function startMic(ws: WebSocket, isCancelled: () => boolean = () => false) {
     if (!listening) return;
     if (micStreamRef.current) return;
+    let stream: MediaStream | null = null;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
+      stream = await navigator.mediaDevices.getUserMedia({
         audio: { channelCount: 1, sampleRate: 24000, echoCancellation: true, noiseSuppression: true },
       });
+      if (isCancelled()) {
+        stopStream(stream);
+        return;
+      }
       micStreamRef.current = stream;
-      const ctx = new AudioContext({ sampleRate: 24000 });
+      // Same shared AudioContext as playback, so echo cancellation works.
+      const ctx = getOrCreateAudioCtx();
+      if (!ctx) {
+        stopStream(stream);
+        micStreamRef.current = null;
+        return;
+      }
       const src = ctx.createMediaStreamSource(stream);
       // Keep the graph pulling (src + worklet must stay connected to the
       // destination to process) but emit no sound: route both capture nodes
@@ -208,6 +244,11 @@ export function CallApp() {
           ws.send(JSON.stringify({ type: "audio", delta: pcm16ToBase64(samples) }));
         }
       });
+      if (isCancelled()) {
+        stopStream(stream);
+        micStreamRef.current = null;
+        return;
+      }
       src.connect(worklet);
       worklet.connect(monitor);
     } catch {
@@ -215,9 +256,9 @@ export function CallApp() {
     }
   }
 
-  function setupAudioOut() {
-    const ctx = new AudioContext({ sampleRate: 24000 });
-    audioCtxRef.current = ctx;
+  function setupAudioOut(isCancelled: () => boolean = () => false) {
+    const ctx = getOrCreateAudioCtx();
+    if (!ctx) return;
     const workletSrc = `
       class Out extends AudioWorkletProcessor {
         constructor(){ super(); this.buf = new Float32Array(0); this.port.onmessage=(e)=>{ const d=e.data; if(d.kind==='push'){ const a=new Float32Array(d.samples); const n=new Float32Array(this.buf.length+a.length); n.set(this.buf); n.set(a,this.buf.length); this.buf=n; } if(d.kind==='clear'){ this.buf=new Float32Array(0); } }; }
@@ -232,11 +273,49 @@ export function CallApp() {
     const blob = new Blob([workletSrc], { type: "application/javascript" });
     const url = URL.createObjectURL(blob);
     ctx.audioWorklet.addModule(url).then(() => {
+      if (isCancelled()) {
+        cleanupAudio();
+        return;
+      }
       const node = new AudioWorkletNode(ctx, "pcm-out");
       node.connect(ctx.destination);
       outNodeRef.current = node;
       URL.revokeObjectURL(url);
-    }).catch(() => {});
+    }).catch(() => {
+      URL.revokeObjectURL(url);
+    });
+  }
+
+  // A single shared AudioContext for both mic capture and playback, so the
+  // browser's echo canceller sees what is being played (BET-1185).
+  function getOrCreateAudioCtx(): AudioContext | null {
+    if (audioCtxRef.current) return audioCtxRef.current;
+    try {
+      const ctx = new AudioContext({ sampleRate: 24000 });
+      audioCtxRef.current = ctx;
+      return ctx;
+    } catch {
+      return null;
+    }
+  }
+
+  function cleanupMic() {
+    if (micStreamRef.current) {
+      micStreamRef.current.getTracks().forEach((t) => t.stop());
+      micStreamRef.current = null;
+    }
+  }
+
+  function cleanupAudio() {
+    outNodeRef.current = null;
+    if (audioCtxRef.current) {
+      audioCtxRef.current.close().catch(() => {});
+      audioCtxRef.current = null;
+    }
+  }
+
+  function stopStream(stream: MediaStream) {
+    stream.getTracks().forEach((t) => t.stop());
   }
 
   function playPcm(base64: string) {
@@ -254,22 +333,15 @@ export function CallApp() {
   // with Groq Orpheus. Decode + play it through the shared AudioContext.
   function playNarration(base64: string, _mime: string) {
     if (!base64) return;
-    let ctx = audioCtxRef.current;
-    if (!ctx) {
-      try {
-        ctx = new AudioContext();
-        audioCtxRef.current = ctx;
-      } catch {
-        return;
-      }
-    }
+    const ctx = getOrCreateAudioCtx();
+    if (!ctx) return;
     const bytes = base64ToBytes(base64);
     if (!bytes) return;
     ctx.decodeAudioData(bytes.buffer as ArrayBuffer).then(
       (buffer) => {
-        const src = ctx!.createBufferSource();
+        const src = ctx.createBufferSource();
         src.buffer = buffer;
-        src.connect(ctx!.destination);
+        src.connect(ctx.destination);
         src.start();
       },
       () => {
