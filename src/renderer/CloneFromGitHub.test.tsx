@@ -22,7 +22,7 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { CloneFromGitHub } from "./CloneFromGitHub";
-import { installMockApi, type MockApi } from "./testHarness";
+import { installMockApi, mount, clickCheckbox, type Harness, type MockApi } from "./testHarness";
 import type { ForgeCloneStatus } from "../shared/types";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -61,6 +61,9 @@ const CLONE_IN_PROGRESS = {
 let container: HTMLElement | null = null;
 let root: Root | null = null;
 let api: MockApi;
+// The shared harness handle, used to drive checkboxes the way a user does
+// (clickCheckbox) rather than poking the sr-only input.
+let h: Harness | null = null;
 
 type MountOverrides = {
   forgeCloneStart?: () => Promise<{ id?: string; error?: string; message?: string }>;
@@ -78,18 +81,14 @@ function mountPicker(overrides: MountOverrides = {}): void {
     forgeCloneStatus:
       overrides.forgeCloneStatus ?? (() => Promise.resolve(CLONE_IN_PROGRESS)),
   }));
-  container = document.createElement("div");
-  document.body.appendChild(container);
-  root = createRoot(container);
-  act(() => {
-    root!.render(
-      <CloneFromGitHub
-        defaultRoot="/root"
-        onCancel={() => {}}
-        onCloned={overrides.onCloned ?? (() => {})}
-      />,
-    );
-  });
+  h = mount(
+    <CloneFromGitHub
+      defaultRoot="/root"
+      onCancel={() => {}}
+      onCloned={overrides.onCloned ?? (() => {})}
+    />,
+  );
+  container = h.container;
 }
 
 async function flushMicro(): Promise<void> {
@@ -115,6 +114,7 @@ function unmount(): void {
     root?.unmount();
   });
   root = null;
+  h = null;
   if (container) {
     container.remove();
     container = null;
@@ -154,13 +154,7 @@ describe("CloneFromGitHub picker", () => {
     mountPicker();
     await flushMicro();
 
-    const alphaBox = container!.querySelector(
-      'input[aria-label="Clone alpha"]',
-    ) as HTMLInputElement;
-    expect(alphaBox).toBeTruthy();
-    act(() => {
-      alphaBox.click();
-    });
+    clickCheckbox(h!, "Clone alpha");
     expect(cloneButtonFor("1 selected")).toBeTruthy();
 
     // Search for something that no longer matches alpha.
@@ -216,13 +210,7 @@ describe("CloneFromGitHub picker", () => {
     });
     await flushMicro();
 
-    const alphaBox = container!.querySelector(
-      'input[aria-label="Clone alpha"]',
-    ) as HTMLInputElement;
-    expect(alphaBox).toBeTruthy();
-    act(() => {
-      alphaBox.click();
-    });
+    clickCheckbox(h!, "Clone alpha");
     act(() => {
       cloneButtonFor("1 selected").click();
     });
@@ -249,13 +237,7 @@ describe("CloneFromGitHub picker", () => {
     });
     await flushMicro();
 
-    const alphaBox = container!.querySelector(
-      'input[aria-label="Clone alpha"]',
-    ) as HTMLElement;
-    expect(alphaBox).toBeTruthy();
-    act(() => {
-      alphaBox.click();
-    });
+    clickCheckbox(h!, "Clone alpha");
     act(() => {
       cloneButtonFor("1 selected").click();
     });
@@ -272,13 +254,7 @@ describe("CloneFromGitHub picker", () => {
     });
     await flushMicro();
 
-    const alphaBox = container!.querySelector(
-      'input[aria-label="Clone alpha"]',
-    ) as HTMLElement;
-    expect(alphaBox).toBeTruthy();
-    act(() => {
-      alphaBox.click();
-    });
+    clickCheckbox(h!, "Clone alpha");
     act(() => {
       cloneButtonFor("1 selected").click();
     });

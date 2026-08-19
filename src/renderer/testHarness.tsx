@@ -302,6 +302,47 @@ export function mount(el: React.ReactElement, opts: MountOptions = {}): Harness 
   };
 }
 
+// Click a Checkbox the way a user does: on the visible box, not the sr-only
+// input. The M527 Checkbox primitive renders a real `<input type="checkbox">`
+// as `sr-only` (1px, clipped, invisible) inside a `<label>` next to a styled
+// `span[aria-hidden]` box. A user clicks that box, and the real browser path is
+// label-activation → the input's click — exactly where checkbox defects live.
+// Driving the hidden input directly exercises a path no user can reach, so it
+// reports green on a control nobody could operate (BET-1199).
+//
+// Locates the input by its accessible name (container first, then
+// document.body for controls rendered through a Modal portal), climbs to the
+// wrapping `<label>`, and dispatches a bubbling, cancelable click on the
+// visible box inside act(). Throws if any step fails so a renamed ariaLabel
+// fails loudly instead of silently doing nothing.
+export function clickCheckbox(h: Harness, ariaLabel: string): void {
+  const sel = `input[aria-label="${ariaLabel}"]`;
+  const input =
+    h.container.querySelector<HTMLElement>(sel) ?? h.docQuery<HTMLElement>(sel);
+  if (!input) {
+    throw new Error(
+      `clickCheckbox: no checkbox with aria-label "${ariaLabel}" found`,
+    );
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  if (input.getAttribute("type") !== "checkbox") {
+    throw new Error(
+      `clickCheckbox: input "${ariaLabel}" is type "${input.getAttribute("type") ?? "?"}", not a checkbox`,
+    );
+  }
+  const label = input.closest("label");
+  if (!label) {
+    throw new Error(`clickCheckbox: checkbox "${ariaLabel}" is not inside a <label>`);
+  }
+  const box = label.querySelector<HTMLElement>('span[aria-hidden="true"]');
+  if (!box) {
+    throw new Error(`clickCheckbox: checkbox "${ariaLabel}" has no visible box`);
+  }
+  act(() => {
+    box.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+  });
+}
+
 // Convenience: emit an event through the bus and flush.
 export async function emitAndFlush(
   bus: MockEventBus,

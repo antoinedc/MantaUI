@@ -18,7 +18,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { act } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { mount, installMockApi, type Harness } from "./testHarness";
+import { mount, installMockApi, clickCheckbox, type Harness } from "./testHarness";
 import { Settings } from "./Settings";
 import { useStore } from "./store";
 
@@ -272,11 +272,6 @@ describe("Settings — schema-driven toasts are error-only (BET-1055)", () => {
   // "Auto-rename sessions" is a schema toggle (platform "both",
   // configKey "autoRenameSessions"), committed through applySetting →
   // configUpdate, and lives on the Sessions tab.
-  const autoRenameInput = () =>
-    h!.container.querySelector<HTMLInputElement>(
-      'input[aria-label="Auto-rename sessions"]',
-    );
-
   const stubApi = (configUpdate?: () => Promise<unknown>) =>
     installMockApi({
       configGet: () => Promise.resolve({}),
@@ -289,11 +284,7 @@ describe("Settings — schema-driven toasts are error-only (BET-1055)", () => {
     });
 
   const toggleAutoRename = () => {
-    const input = autoRenameInput();
-    expect(input, "Auto-rename sessions checkbox").toBeTruthy();
-    act(() => {
-      (input as HTMLInputElement).click();
-    });
+    clickCheckbox(h!, "Auto-rename sessions");
   };
 
   afterEach(() => {
