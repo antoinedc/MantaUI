@@ -567,7 +567,39 @@ test("chooseSubagentModel routes an explore agent to a fast-tier model when enab
     agent: "explore",
     nowMs: 1_700_000_000_000,
   });
-  assert.equal(chosen?.id, "claude-haiku-4", "explore under economy must land on the fast-tier model");
+  // NOTE: this asserts the ROUTER WRAPPER's per-agent contract (the reusable
+  // chooseSubagentModel — what any future explore-routing spawn would call).
+  // It is not asserting end-to-end coverage: today every MANTA-controlled
+  // delegate spawn is a general-purpose background job, so startJob routes with
+  // `agent: "general"` — explore/build/plan subagents are spawned by opencode's
+  // own task tool, which Manta never dispatches. The end-to-end wiring for a
+  // general spawn is covered by the "startJob with routing on normalises the
+  // winner to a deliver shape" test below.
+  assert.equal(chosen?.providerID, "anthropic");
+  assert.equal(chosen?.modelID, "claude-haiku-4", "explore under economy must land on the fast-tier model");
+});
+
+test("startJob with routing on normalises the catalog winner to a {providerID, modelID} deliver shape (BET-1220)", async () => {
+  const h = startHarness("child_route_on");
+  h.deps.configGet = async () => ({ modelRouter: { enabled: true, preset: "economy" } });
+  h.deps.listSnapshots = () => [];
+  h.deps.listModels = async () => [
+    { providerID: "anthropic", id: "claude-opus-4", status: "active" },   // deep
+    { providerID: "anthropic", id: "claude-sonnet-4", status: "active" }, // balanced
+    { providerID: "anthropic", id: "claude-haiku-4", status: "active" },  // fast
+  ];
+  const res = await startJob(
+    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo" },
+    h.deps,
+  );
+  assert.equal(res.ok, true);
+  assert.equal(h.delivered.length, 1);
+  assert.ok(h.delivered[0].model, "routing on should deliver a decided model");
+  assert.equal(h.delivered[0].model.providerID, "anthropic");
+  // economy + general → the balanced floor wins; the winner is NORMALISED from
+  // the catalog's {providerID, id} into sendPrompt's {providerID, modelID}.
+  assert.equal(h.delivered[0].model.modelID, "claude-sonnet-4");
+  assert.equal("id" in h.delivered[0].model, false, "deliver must receive modelID, not the catalog's id field");
 });
 
 test("chooseSubagentModel returns the incumbent on an off-path and is load-bearing (BET-1220)", () => {

@@ -524,17 +524,49 @@ export function chooseSubagentModel({
   agent = "general",
   nowMs = Date.now(),
 } = {}) {
+  // The model deliver()/sendPrompt() accept is the structured shape
+  // {providerID, modelID} (opencode's sendPrompt reads `model.modelID`). A
+  // catalog winner carries `.id`, not `.modelID` — so a routed winner has to
+  // be normalised into the deliver shape or the model override is silently
+  // dropped. This is a no-op for the requested-model incumbent (which is
+  // already {providerID, modelID}).
+  function toDeliverModel(m) {
+    if (!m) return null;
+    const providerID = m?.providerID ?? "";
+    const modelID = m?.modelID ?? m?.id ?? "";
+    if (!providerID || !modelID) return null;
+    const out = { providerID, modelID };
+    if (typeof m?.variant === "string" && m.variant) out.variant = m.variant;
+    return out;
+  }
+
+  // Normalise the incumbent into catalog shape ({providerID, id}) for the
+  // comparison inside chooseModel, so its `changed` flag / modelKey() treat a
+  // requested model and a catalog entry of the same model as equal. The ORIGINAL
+  // structured incumbent is preserved and returned on the off-path.
+  const catalogIncumbent = incumbent
+    ? { providerID: incumbent.providerID, id: incumbent.modelID ?? incumbent.id }
+    : null;
+
   try {
     const decision = chooseModel({
-      intent: { kind: "subagent", agent, needs: { tools: true }, contextTokens: 0, incumbent },
+      intent: { kind: "subagent", agent, needs: { tools: true }, contextTokens: 0, incumbent: catalogIncumbent },
       catalog,
       telemetry: {},
       quota,
       policy,
       nowMs,
     });
-    const model = decision?.model ?? incumbent;
-    const label = model ? `${model.providerID}/${model.id}` : "";
+    // On the off-path / no-survivors path chooseModel returns the very
+    // catalogIncumbent reference it was handed; map that back to the original
+    // structured incumbent so the deliver call stays byte-identical to today.
+    // A real catalog winner is normalised into the {providerID, modelID} shape
+    // sendPrompt expects.
+    const model =
+      decision?.model === catalogIncumbent
+        ? incumbent
+        : toDeliverModel(decision?.model ?? incumbent);
+    const label = model ? `${model.providerID}/${model.modelID ?? model.id}` : "";
     console.log(`[router] subagent agent=${agent} → ${label} (${decision?.reason ?? ""})`);
     return model;
   } catch (e) {
