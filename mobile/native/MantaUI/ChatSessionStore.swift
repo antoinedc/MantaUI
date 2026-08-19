@@ -1175,6 +1175,16 @@ final class ChatSessionStore: ObservableObject {
         newestPermission != nil || newestPlanQuestion != nil || newestQuestion != nil
     }
 
+    /// The pure transition rule for the one-time auto-scroll when a blocking
+    /// card arrives: scroll exactly on the no-card → card edge, never on a
+    /// present→present rebuild or a card-leaving transition, and re-arm the
+    /// guard the moment a card is present (so a later card re-arrival fires
+    /// again). Unit-tested so "once per transition, not per rebuild" cannot
+    /// drift (BET-1214).
+    static func shouldScrollForCardArrival(_ nowPresent: Bool, wasPresent: Bool) -> (scroll: Bool, present: Bool) {
+        (scroll: nowPresent && !wasPresent, present: nowPresent)
+    }
+
     /// When the current turn started (nil when idle). The running row measures
     /// live elapsed against its own 1s tick rather than stream-state changes
     /// (BET-630, D1).

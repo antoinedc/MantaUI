@@ -119,8 +119,14 @@ extension StepGroupContent {
 /// unchanged from the pinned-above-composer era — only their LOCATION moved, so
 /// this struct carries the same closures ChatScreen used to hand the cards
 /// directly. It is an in-property value type with no `static` storage (see the
-/// "no static var" rule); a read-only surface just leaves `cards` nil and
-/// `transcriptBlockView` supplies inert callbacks (see `transcriptBlockView`).
+/// "no static var" rule).
+///
+/// Delivered through the SwiftUI ENVIRONMENT, not stored on the transcript cell:
+/// the `TiledCellContent` cell's `body(context:)` is required to be
+/// `nonisolated` (Swift 6), so a closure-carrying value can't be threaded as a
+/// stored cell property across that boundary. The parent injects it via
+/// `.environment(\.transcriptCardActions, …)` and only a `@MainActor`
+/// `View.body` ever reads it.
 struct TranscriptCardActions {
     /// The raw transcript the plan card's exact derivation reads.
     var messages: [OpencodeMessage]
@@ -134,6 +140,21 @@ struct TranscriptCardActions {
     var onBuildHere: (QuestionRequest, String) -> Void
     var onKeepPlanning: (QuestionRequest, String) -> Void
     var onOpenPage: () -> Void
+}
+
+/// The environment key carrying the blocking-card actions into transcript cells.
+private struct TranscriptCardActionsKey: EnvironmentKey {
+    static let defaultValue: TranscriptCardActions? = nil
+}
+
+extension EnvironmentValues {
+    /// The blocking-card callbacks for the current transcript surface, or nil
+    /// on read-only surfaces (subagent drill-in, capture fixture) where cards
+    /// render inert.
+    var transcriptCardActions: TranscriptCardActions? {
+        get { self[TranscriptCardActionsKey.self] }
+        set { self[TranscriptCardActionsKey.self] = newValue }
+    }
 }
 
 // MARK: - Cell
@@ -153,7 +174,6 @@ struct TranscriptBlockCell: TiledCellContent {
 
     let item: TranscriptRow
     let tokens: Tokens
-    var cards: TranscriptCardActions?
 
     func body(context: CellContext<Void>) -> some View {
         // The reveal offset now comes from MessagingUI's OWN pan recogniser, which
@@ -167,11 +187,15 @@ struct TranscriptBlockCell: TiledCellContent {
         // protocol conformance as a data-race), so the main-actor reveal state is
         // passed down to `TranscriptCellReveal`, whose own `View.body` runs on the
         // main actor and can read `rubberbandedOffset(max:)`.
+        //
+        // The blocking-card actions are NOT threaded through this nonisolated
+        // body — a closure-carrying value can't cross it. They arrive via the
+        // SwiftUI environment and are read inside `TranscriptCellReveal.body`
+        // (main actor) (BET-1214).
         TranscriptCellReveal(
             cellReveal: context.cellReveal,
             item: item,
-            tokens: tokens,
-            cards: cards
+            tokens: tokens
         )
     }
 }
@@ -184,7 +208,11 @@ private struct TranscriptCellReveal: View {
     let cellReveal: CellReveal?
     let item: TranscriptRow
     let tokens: Tokens
-    let cards: TranscriptCardActions?
+    /// The blocking-card callbacks, injected by the enclosing chat screen via
+    /// `.environment(\.transcriptCardActions, …)` — read only on the main actor
+    /// here, so it never crosses the nonisolated cell boundary. Nil on
+    /// read-only surfaces (subagent drill-in, capture fixture).
+    @Environment(\.transcriptCardActions) private var cardActions
 
     var body: some View {
         let reveal = cellReveal?.rubberbandedOffset(max: TranscriptGutter.gutterWidth) ?? 0
@@ -209,12 +237,13 @@ private struct TranscriptCellReveal: View {
             .accessibilityIdentifier(TranscriptGutter.rowAccessibilityID)
     }
 
+    @MainActor
     @ViewBuilder
     private var cellContent: some View {
         if case .prose(let text, nil) = item.block {
             LiveProseTail(text: text, tokens: tokens)
         } else {
-            transcriptBlockView(item.block, tokens: tokens, cards: cards)
+            transcriptBlockView(item.block, tokens: tokens, cards: cardActions)
         }
     }
 }
@@ -222,9 +251,13 @@ private struct TranscriptCellReveal: View {
 /// The ONE transcript block renderer, shared by every surface — the live
 /// TiledView cell (`TranscriptBlockCell`) and the legacy `TranscriptView` the
 /// capture fixture still uses. There is deliberately no second switch anywhere.
-/// The blocking cards take their callbacks from `cards`; a read-only surface
-/// passes nil and the cards render inert (a no-op, never wiring to a live
-/// store). A block itself never carries closures.
+///
+/// `@MainActor`: the blocking cards are main-actor views whose callbacks touch a
+/// `@MainActor` store, and the cards' closures are not `Sendable` — so this
+/// function must run on the main actor (both callers are `@MainActor`
+/// `View.body`s). The card actions come from `cards` (nil on read-only
+/// surfaces → the cards render inert, never wiring to a live store).
+@MainActor
 @ViewBuilder
 func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens, cards: TranscriptCardActions? = nil) -> some View {
     // The inert action set a read-only surface falls back to: every card

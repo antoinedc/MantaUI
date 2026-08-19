@@ -932,3 +932,29 @@ final class TrailingCardsTests: XCTestCase {
         XCTAssertEqual(split.generic?.id, "plain")
     }
 }
+
+final class CardScrollTriggerTests: XCTestCase {
+    func testScrollsOnNoCardToCardTransitionOnly() {
+        let noToCard = ChatSessionStore.shouldScrollForCardArrival(true, wasPresent: false)
+        XCTAssertTrue(noToCard.scroll, "entering a card from no-card must scroll once")
+        XCTAssertTrue(noToCard.present, "the guard re-arms to present after the edge")
+    }
+
+    func testDoesNotScrollOnPresentToPresentRebuild() {
+        let rebuild = ChatSessionStore.shouldScrollForCardArrival(true, wasPresent: true)
+        XCTAssertFalse(rebuild.scroll, "a card that stays present across rebuilds must not re-scroll")
+        XCTAssertTrue(rebuild.present)
+    }
+
+    func testDoesNotScrollWhenCardLeaves() {
+        let leaving = ChatSessionStore.shouldScrollForCardArrival(false, wasPresent: true)
+        XCTAssertFalse(leaving.scroll, "a card leaving must not scroll")
+        XCTAssertFalse(leaving.present, "the guard clears so a later arrival fires again")
+    }
+
+    func testDoesNotScrollWhenNeither() {
+        let neither = ChatSessionStore.shouldScrollForCardArrival(false, wasPresent: false)
+        XCTAssertFalse(neither.scroll)
+        XCTAssertFalse(neither.present)
+    }
+}

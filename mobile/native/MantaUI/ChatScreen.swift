@@ -311,10 +311,11 @@ private struct ChatScreenContent: View {
             // new ask is not silently missed. Fire ONCE on the no-card → card
             // transition, never per rebuild; re-arm when the card leaves.
             .onChange(of: isBlockingCardPresent) { _, nowPresent in
-                if nowPresent, !wasBlockingCardPresent {
+                let decision = ChatSessionStore.shouldScrollForCardArrival(nowPresent, wasPresent: wasBlockingCardPresent)
+                if decision.scroll {
                     scrollPosition.scrollTo(edge: .bottom, animated: true)
                 }
-                wasBlockingCardPresent = nowPresent
+                wasBlockingCardPresent = decision.present
             }
             // BET-673: fire one success haptic when a turn completes while the
             // user has scrolled up (scroll-to-bottom chip showing) and the scene
@@ -1241,16 +1242,21 @@ struct TranscriptListView<Header: View>: View {
     let bottomInset: CGFloat
     @Binding var scrollPosition: TiledScrollPosition
     var onPointsFromBottom: ((CGFloat) -> Void)? = nil
-    /// The blocking-card callbacks, threaded to the cells so cards render in
-    /// the transcript tail. Read-only surfaces (subagent drill-in) leave it
-    /// nil and render inert cards (BET-1214).
+    /// The blocking-card callbacks, threaded down to the transcript cells.
+    /// Read-only surfaces (subagent drill-in) leave the environment unset and
+    /// cards render inert (BET-1214).
     var cards: TranscriptCardActions? = nil
     @ViewBuilder var header: () -> Header
 
     var body: some View {
+        // Deliver the blocking-card actions to the cells via the environment —
+        // the cell's `body(context:)` is nonisolated, and a closure-carrying
+        // value cannot be threaded through it (Swift 6). The cells read
+        // `\.transcriptCardActions` back inside their `@MainActor` bodies.
         TiledView(items: store.rows, scrollPosition: $scrollPosition) { row in
-            TranscriptBlockCell(item: row, tokens: tokens, cards: cards)
+            TranscriptBlockCell(item: row, tokens: tokens)
         }
+        .environment(\.transcriptCardActions, cards)
         .prependLoader(.loader(
             perform: { store.loadEarlier() },
             isProcessing: store.loadingEarlier
