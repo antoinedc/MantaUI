@@ -310,7 +310,7 @@ export function ChatPanel({
   }, []);
   // Forward declaration: submitRef is defined later (depends on submit), but
   // useSseBus needs it now for the drain effect.
-  const submitRef = useRef<(textOverride?: string) => void>(() => {});
+  const submitRef = useRef<(textOverride?: string, attachmentsOverride?: Attachment[]) => void>(() => {});
   // Input state must be declared before useSseBus (which needs setInput).
   const [input, setInput] = useState("");
   // Bumped after each submit so useInputHistory re-reads localStorage and the
