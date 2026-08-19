@@ -172,6 +172,11 @@ export function CallApp() {
         setSpend(Number(msg.usd ?? 0));
         return;
       case "error":
+        // A non-fatal error frame from the Realtime session (one rejected
+        // event) must not kill a working call — set the error text and leave
+        // the status alone; only "dropped" transitions the window to dropped.
+        setError(String(msg.error ?? msg.reason ?? "Call error."));
+        return;
       case "dropped":
         setError(String(msg.error ?? msg.reason ?? "Call dropped."));
         setStatus("dropped");
@@ -191,14 +196,20 @@ export function CallApp() {
       micStreamRef.current = stream;
       const ctx = new AudioContext({ sampleRate: 24000 });
       const src = ctx.createMediaStreamSource(stream);
-      src.connect(ctx.destination); // monitor is muted; kept for liveness
+      // Keep the graph pulling (src + worklet must stay connected to the
+      // destination to process) but emit no sound: route both capture nodes
+      // to a zero-gain monitor instead of the raw destination.
+      const monitor = ctx.createGain();
+      monitor.gain.value = 0;
+      monitor.connect(ctx.destination);
+      src.connect(monitor);
       const worklet = await makePcmWorklet(ctx, (samples) => {
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: "audio", delta: pcm16ToBase64(samples) }));
         }
       });
       src.connect(worklet);
-      worklet.connect(ctx.destination);
+      worklet.connect(monitor);
     } catch {
       setError("Microphone unavailable.");
     }
@@ -231,7 +242,12 @@ export function CallApp() {
   function playPcm(base64: string) {
     const buf = base64ToInt16(base64);
     if (!buf || buf.length === 0) return;
-    outNodeRef.current?.port.postMessage({ kind: "push", samples: Array.from(buf) });
+    // WebAudio writes float samples in −1…1; the wire carries raw PCM16
+    // (−32768…32767), so convert once here and hand the worklet a
+    // (transferred) Float32Array instead of a JS number array.
+    const f = new Float32Array(buf.length);
+    for (let i = 0; i < buf.length; i++) f[i] = buf[i] / 32768;
+    outNodeRef.current?.port.postMessage({ kind: "push", samples: f }, [f.buffer]);
   }
 
   // Narration (spec #6): the box streamed fully-encoded audio (mp3) it made
@@ -270,7 +286,7 @@ export function CallApp() {
           const ch=inputs[0] && inputs[0][0]; if(!ch) return true;
           const a=new Float32Array(this.frame.length+ch.length); a.set(this.frame); a.set(ch,this.frame.length); this.frame=a;
           const n=Math.floor(this.frame.length/480);
-          if(n>=1){ const use=n*480; this.port.postMessage(this.frame.subarray(0,use), [this.frame.buffer]); this.frame=this.frame.subarray(use); }
+          if(n>=1){ const use=n*480; const head=this.frame.subarray(0,use); this.frame=this.frame.slice(use); this.port.postMessage(head,[head.buffer]); }
           return true;
         }
       }
