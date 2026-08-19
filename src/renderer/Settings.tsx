@@ -57,6 +57,7 @@ import type {
 import {
   SETTINGS,
   SETTING_SECTIONS,
+  SECTION_GROUPS,
   settingsForSection,
   searchSettings,
   sectionIsModified,
@@ -234,31 +235,9 @@ const SECTION_ICONS: Record<SettingSectionId, typeof SettingsIcon> = {
   cto: PhoneCall,
 };
 
-// Card groupings for the schema-driven sections. Each { title, entryIds }
-// becomes one --card surface with a micro-caps group heading, mirroring the
-// mockup's group labels. Sections with per-section custom content (general,
-// box, accounts, extensions) are rendered by renderCustom instead.
-const SECTION_GROUPS: Partial<Record<SettingSectionId, { title: string; entryIds: string[] }[]>> = {
-  models: [
-    { title: "Requests", entryIds: ["cacheTtl"] },
-    { title: "Plan usage", entryIds: ["alwaysShowUsage"] },
-  ],
-  sessions: [
-    { title: "Naming", entryIds: ["autoRenameSessions"] },
-    { title: "Git worktrees", entryIds: ["worktreePerSession", "worktreeCleanOnClose"] },
-  ],
-  files: [
-    { title: "Files the agent sends you", entryIds: ["allowAgentPush", "downloadsDir"] },
-    { title: "Files you send the agent", entryIds: ["uploadCleanupHours"] },
-    { title: "Voice note audio retention", entryIds: ["voiceNoteTtlHours"] },
-  ],
-  voice: [
-    { title: "Speech to text (Groq)", entryIds: ["groqApiKey", "voiceTranscriptionModel"] },
-  ],
-  cto: [
-    { title: "Setup", entryIds: ["openaiApiKey", "ctoEnabled", "ctoModel", "ctoVoice", "ctoAlwaysListening", "ctoParkedBehavior"] },
-  ],
-};
+// Card groupings for the schema-driven sections live in SECTION_GROUPS
+// (src/shared/settingsSchema.ts). Sections with per-section custom content
+// (general, box, accounts, extensions) are rendered by renderCustom instead.
 
 // A --card surface with a micro-caps group heading (BET-461 §4). The chrome
 // (--card bg, --border edge, --r-lg radius, 12px v / 16px h padding) lives on

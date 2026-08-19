@@ -375,6 +375,41 @@ export const SETTINGS: SettingEntry[] = [
   },
 ];
 
+// ----- desktop card groupings (BET-1175) -----
+//
+// The desktop Settings window (src/renderer/Settings.tsx) renders each
+// section's simple fields as one or more GroupCards. SECTION_GROUPS is the
+// desktop's map of section → card title → ordered entry ids. It must stay a
+// complete mirror of SETTINGS for the desktop platform: any non-`custom`
+// desktop-visible entry that is missing here (and not drawn by a dedicated
+// card) renders NOWHERE on desktop, while still appearing in Search and on
+// mobile — the exact drift that hid `openaiApiKey` (BET-1173). The guard in
+// settingsSchema.test.ts ("every desktop-visible schema field renders on
+// desktop") asserts every such entry is covered, so none can silently drop.
+export const SECTION_GROUPS: Partial<
+  Record<SettingSectionId, { title: string; entryIds: string[] }[]>
+> = {
+  models: [
+    { title: "Requests", entryIds: ["cacheTtl"] },
+    { title: "Plan usage", entryIds: ["alwaysShowUsage"] },
+  ],
+  sessions: [
+    { title: "Naming", entryIds: ["autoRenameSessions"] },
+    { title: "Git worktrees", entryIds: ["worktreePerSession", "worktreeCleanOnClose"] },
+  ],
+  files: [
+    { title: "Files the agent sends you", entryIds: ["allowAgentPush", "downloadsDir"] },
+    { title: "Files you send the agent", entryIds: ["uploadCleanupHours"] },
+    { title: "Voice note audio retention", entryIds: ["voiceNoteTtlHours"] },
+  ],
+  voice: [
+    { title: "Speech to text (Groq)", entryIds: ["groqApiKey", "voiceTranscriptionModel"] },
+  ],
+  cto: [
+    { title: "Setup", entryIds: ["openaiApiKey", "ctoEnabled", "ctoModel", "ctoVoice", "ctoAlwaysListening", "ctoParkedBehavior"] },
+  ],
+};
+
 // ----- pure helpers -----
 
 /** Entries visible on a given platform (both + that platform). */

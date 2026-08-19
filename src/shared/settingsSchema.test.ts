@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   SETTINGS,
   SETTING_SECTIONS,
+  SECTION_GROUPS,
   settingsForPlatform,
   settingsForSection,
   searchSettings,
@@ -86,6 +87,55 @@ describe("settingsForSection", () => {
     );
     const ctoDesktop = settingsForSection(ALL, "cto", "desktop");
     expect(ctoDesktop.map((e) => e.id)).toContain("openaiApiKey");
+  });
+});
+
+describe("SECTION_GROUPS desktop coverage (BET-1175)", () => {
+  // The desktop Settings window renders each section's simple fields from
+  // SECTION_GROUPS — a separate hand list from SETTINGS. A desktop-visible,
+  // non-`custom` entry missing from it (or whose section isn't grouped at
+  // all) renders NOWHERE on desktop while still showing in Search + on
+  // mobile. These two are drawn by explicit dedicated cards in Settings.tsx
+  // rather than a SECTION_GROUPS group.
+  const DESKTOP_SPECIAL_CARDS = new Set(["theme", "pluginsEnabled"]);
+
+  it("every desktop-visible schema field renders on desktop", () => {
+    const desktop = settingsForPlatform(ALL, "desktop");
+    const uncovered: string[] = [];
+
+    for (const e of desktop) {
+      if (e.control === "custom") continue; // drawn by bespoke custom content
+      if (DESKTOP_SPECIAL_CARDS.has(e.id)) continue; // theme (General), pluginsEnabled (Extensions)
+
+      const groups = SECTION_GROUPS[e.section] ?? [];
+      const idsInSection = groups.flatMap((g) => g.entryIds);
+      if (!idsInSection.includes(e.id)) {
+        uncovered.push(`${e.id} (${e.section})`);
+      }
+    }
+
+    expect(uncovered, "desktop-visible schema fields with no SECTION_GROUPS card").toEqual([]);
+  });
+
+  it("every SECTION_GROUPS entry id resolves to a real, desktop-visible schema entry", () => {
+    const desktopIds = new Set(settingsForPlatform(ALL, "desktop").map((e) => e.id));
+    const stale: string[] = [];
+    for (const section of Object.keys(SECTION_GROUPS)) {
+      for (const group of SECTION_GROUPS[section as keyof typeof SECTION_GROUPS]!) {
+        for (const id of group.entryIds) {
+          if (!desktopIds.has(id)) stale.push(`${section}.${id}`);
+        }
+      }
+    }
+    expect(stale, "SECTION_GROUPS entry ids that don't exist in SETTINGS on desktop").toEqual([]);
+  });
+
+  it("throws when a group id list has no entries (a group is never empty)", () => {
+    for (const section of Object.keys(SECTION_GROUPS)) {
+      for (const group of SECTION_GROUPS[section as keyof typeof SECTION_GROUPS]!) {
+        expect(group.entryIds.length, `${section}/${group.title}`).toBeGreaterThan(0);
+      }
+    }
   });
 });
 
