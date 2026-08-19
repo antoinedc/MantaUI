@@ -54,7 +54,7 @@ final class MantaPairingDriverUITests: XCTestCase {
 
         // The six-digit code alone cannot address a box; the claim target is
         // the server URL behind the advanced disclosure.
-        let advanced = app.buttons["My box isn't reachable from the internet"]
+        let advanced = app.buttons["My server isn't reachable from the internet"]
         if advanced.waitForExistence(timeout: 3) { advanced.tap() }
         let serverField = app.textFields["onboarding-server-url"]
         XCTAssertTrue(serverField.waitForExistence(timeout: 5), "server URL field never appeared")

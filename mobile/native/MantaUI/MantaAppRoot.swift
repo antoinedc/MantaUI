@@ -72,6 +72,12 @@ struct MantaAppRoot: View {
                 // sample turn (bold/italic/inline code, fenced code, table) —
                 // the acceptance fixtures, no live box required.
                 MantaProseCaptureScene()
+            } else if let scene, scene == "step-rows" {
+                // BET-1212 fixture: render the REAL step-group rows inside their
+                // grouped container against a fixed sample (running + completed
+                // steps, an expanded output well, a roll-up, a subagent row) —
+                // so the tool-call grouping is measurable with no live box.
+                MantaStepRowsCaptureScene()
             } else if let scene, scene == "voice-note-stored" {
                 // BET-1050 harness fixture: render the real `VoiceNotePlayerRow`
                 // (the `.stored` waveform) for a finished note, so the stored/
