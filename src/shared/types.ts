@@ -1394,6 +1394,9 @@ export const IPC = {
   // BET-698: server-side conversation search over opencode's SQLite
   // (messageSearch.mjs). Returns { supported, hits }.
   opencodeSearchMessages: "opencode:search-messages",
+  // BET-1219: read-only spend/latency ledger over opencode's store.
+  // Returns { supported, ...LedgerSummary }.
+  ledgerSummary: "ledger:summary",
   // Slash-command execution: invokes POST /session/{id}/command. Distinct
   // from opencode:prompt — the server treats commands specially (templates,
   // configured agent/model, etc.).
@@ -1754,6 +1757,30 @@ export type TranscriptHit = {
   match: string;
   post: string;
   timeCreated: number | null;
+};
+
+// BET-1219: read-only spend/latency ledger over opencode's store
+// (`ledger:summary` RPC). Crosses the wire, so it lives in shared/types.
+// The four cacheShare fractions sum to ~1 (±0.001): each is that bucket's
+// share of the summed billed token cost proxy (input + output + cacheRead +
+// cacheWrite). Arrays are sorted by cost descending. p50Ms/p90Ms are null
+// below 5 timed turns. `supported:false` = the box can't read opencode.db.
+export type LedgerSummary = {
+  supported: boolean;
+  totals: { turns: number; cost: number; input: number; output: number; cacheRead: number; cacheWrite: number };
+  cacheShare: { output: number; cacheRead: number; cacheWrite: number; input: number };
+  byModel: {
+    key: string; // "providerID/modelID"
+    turns: number;
+    cost: number;
+    costPerTurn: number;
+    outPerTurn: number;
+    tokensPerSec: number;
+    p50Ms: number | null;
+    p90Ms: number | null;
+  }[];
+  byAgent: { agent: string | null; isChild: boolean; turns: number; cost: number; costPerTurn: number }[];
+  byProject: { directory: string; turns: number; cost: number }[];
 };
 
 // A secret's METADATA — what the UI and `secret_list` see. NEVER carries the

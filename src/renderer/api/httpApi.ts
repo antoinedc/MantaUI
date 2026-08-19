@@ -1228,6 +1228,7 @@ export const httpApi: Api = {
   opencodeReferences: () => rpc(IPC.opencodeReferences),
   opencodeSetReferences: (ops) => rpc(IPC.opencodeSetReferences, ops),
   opencodeSearchMessages: (input) => rpc(IPC.opencodeSearchMessages, input),
+  ledgerSummary: (opts) => rpc(IPC.ledgerSummary, opts),
 
   // -- slash-command execution --
   opencodeRunCommand: (input) => rpc(IPC.opencodeRunCommand, input),

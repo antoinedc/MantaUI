@@ -1,0 +1,155 @@
+// Tests for modelLedger.mjs — the read-only spend/latency ledger.
+// Pure: all fixtures run against `aggregate`, never a real database. Run via
+// `npm run test:server` (node:test).
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { aggregate } from "./modelLedger.mjs";
+
+// Fixture builder. Fill only the fields a test cares about.
+function row(over = {}) {
+  return {
+    providerID: "anthropic",
+    modelID: "claude-sonnet-4-6",
+    agent: "build",
+    parentId: null,
+    directory: "/work/proj",
+    cost: 0,
+    input: 0,
+    output: 0,
+    reasoning: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    startedMs: 0,
+    completedMs: 0,
+    ...over,
+  };
+}
+
+const closeTo = (actual, expected, tol, msg) =>
+  assert.ok(Math.abs(actual - expected) <= tol, `${msg}: ${actual} !≈ ${expected} (±${tol})`);
+
+// Assert every numeric field in the ledger is finite (no NaN/Infinity).
+function assertFinite(ledger) {
+  const nums = [ledger.totals, ledger.cacheShare, ...ledger.byModel, ...ledger.byAgent, ...ledger.byProject];
+  for (const obj of nums) {
+    for (const v of Object.values(obj)) {
+      if (typeof v === "number") assert.ok(Number.isFinite(v), `non-finite value: ${v}`);
+    }
+  }
+}
+
+test("cache-share fractions sum to 1 and match a hand-computed fixture", () => {
+  const ledger = aggregate([
+    row({ cost: 1, input: 100, output: 10, cacheRead: 50, cacheWrite: 40 }),
+  ]);
+  // proxy = 100 + 10 + 50 + 40 = 200
+  closeTo(ledger.cacheShare.output, 10 / 200, 1e-9, "output");
+  closeTo(ledger.cacheShare.cacheRead, 50 / 200, 1e-9, "cacheRead");
+  closeTo(ledger.cacheShare.cacheWrite, 40 / 200, 1e-9, "cacheWrite");
+  closeTo(ledger.cacheShare.input, 100 / 200, 1e-9, "input");
+  const sum =
+    ledger.cacheShare.output + ledger.cacheShare.cacheRead + ledger.cacheShare.cacheWrite + ledger.cacheShare.input;
+  closeTo(sum, 1, 1e-3, "sum");
+});
+
+test("costPerTurn and tokensPerSec correct on a 3-row fixture", () => {
+  const ledger = aggregate([
+    row({ providerID: "p", modelID: "m", cost: 6, output: 200, startedMs: 1000, completedMs: 3000 }),
+    row({ providerID: "p", modelID: "m", cost: 4, output: 100, startedMs: 2000, completedMs: 4000 }),
+    row({ providerID: "p", modelID: "m", cost: 2, output: 300, startedMs: 500, completedMs: 1500 }),
+  ]);
+  const model = ledger.byModel[0];
+  assert.equal(model.key, "p/m");
+  assert.equal(model.turns, 3);
+  // cost 6+4+2 = 12, / 3 turns
+  closeTo(model.costPerTurn, 4, 1e-9, "costPerTurn");
+  closeTo(model.outPerTurn, 200, 1e-9, "outPerTurn");
+  // output 200+100+300 = 600; durations 2000+2000+1000 ms = 5s → 600/5 = 120
+  closeTo(model.tokensPerSec, 120, 1e-9, "tokensPerSec");
+  assertFinite(ledger);
+});
+
+test("missing/zero/oversize durations are excluded from timing but included in cost", () => {
+  const validMs = 5000; // 5s, in budget
+  const ledger = aggregate([
+    row({ cost: 10, output: 100, startedMs: 100, completedMs: 100 + validMs }), // valid
+    row({ cost: 20, output: 100, startedMs: 1000, completedMs: undefined }), // completed missing
+    row({ cost: 30, output: 100, startedMs: 1000, completedMs: 1000 }), // zero-length
+    row({ cost: 40, output: 100, startedMs: 1000, completedMs: 1000 + 601_000 }), // > 600s
+  ]);
+  // All four still count for cost.
+  assert.equal(ledger.totals.turns, 4);
+  closeTo(ledger.totals.cost, 100, 1e-9, "cost");
+  const model = ledger.byModel[0];
+  closeTo(model.costPerTurn, 25, 1e-9, "costPerTurn");
+  // Timing uses only the single valid row: output 100, duration 5s → 20 tok/s.
+  closeTo(model.tokensPerSec, 100 / 5, 1e-9, "tokensPerSec");
+  // 1 timed turn < 5 → percentiles null.
+  assert.equal(model.p50Ms, null);
+  assert.equal(model.p90Ms, null);
+  assertFinite(ledger);
+});
+
+test("p50/p90 are null below 5 timed turns, finite above", () => {
+  const few = aggregate([
+    row({ startedMs: 0, completedMs: 100 }),
+    row({ startedMs: 0, completedMs: 200 }),
+  ]);
+  assert.equal(few.byModel[0].p50Ms, null);
+  assert.equal(few.byModel[0].p90Ms, null);
+
+  const five = aggregate([
+    row({ startedMs: 1000, completedMs: 1100 }),
+    row({ startedMs: 1000, completedMs: 1200 }),
+    row({ startedMs: 1000, completedMs: 1300 }),
+    row({ startedMs: 1000, completedMs: 1400 }),
+    row({ startedMs: 1000, completedMs: 1500 }),
+  ]);
+  assert.equal(typeof five.byModel[0].p50Ms, "number");
+  assert.equal(typeof five.byModel[0].p90Ms, "number");
+  assertFinite(five);
+});
+
+test("empty input yields all zeros and no NaN", () => {
+  const ledger = aggregate([]);
+  assert.equal(ledger.totals.turns, 0);
+  assert.equal(ledger.totals.cost, 0);
+  assert.equal(ledger.totals.input, 0);
+  assert.equal(ledger.totals.output, 0);
+  assert.equal(ledger.totals.cacheRead, 0);
+  assert.equal(ledger.totals.cacheWrite, 0);
+  assert.equal(ledger.byModel.length, 0);
+  assert.equal(ledger.byAgent.length, 0);
+  assert.equal(ledger.byProject.length, 0);
+  // Explicit NaN/Infinity assertion (test 5).
+  for (const v of Object.values(ledger.totals)) assert.ok(Number.isFinite(v));
+  for (const v of Object.values(ledger.cacheShare)) assert.ok(Number.isFinite(v));
+});
+
+test("byAgent marks isChild correctly from parentId", () => {
+  const ledger = aggregate([
+    row({ agent: "explore", parentId: "ses-child" }), // subagent session
+    row({ agent: "explore", parentId: "ses-child" }),
+    row({ agent: "build", parentId: null }), // top-level session
+    row({ agent: "general", providerID: "x", modelID: "y", parentId: "ses-2" }),
+  ]);
+  const byAgent = Object.fromEntries(ledger.byAgent.map((a) => [a.agent, a]));
+  assert.equal(byAgent.explore.isChild, true);
+  assert.equal(byAgent.build.isChild, false);
+  assert.equal(byAgent.general.isChild, true);
+  assertFinite(ledger);
+});
+
+test("every array is sorted by cost descending", () => {
+  const ledger = aggregate([
+    row({ providerID: "a", modelID: "a", cost: 5, agent: "one", directory: "/x", startedMs: 0, completedMs: 100 }),
+    row({ providerID: "a", modelID: "b", cost: 9, agent: "two", directory: "/y", startedMs: 0, completedMs: 100 }),
+    row({ providerID: "a", modelID: "c", cost: 2, agent: "three", directory: "/z", startedMs: 0, completedMs: 100 }),
+  ]);
+  const desc = (arr, get) => arr.every((v, i) => i === 0 || get(arr[i - 1]) >= get(v));
+  assert.ok(desc(ledger.byModel, (m) => m.cost));
+  assert.ok(desc(ledger.byAgent, (a) => a.cost));
+  assert.ok(desc(ledger.byProject, (p) => p.cost));
+  assert.equal(ledger.byModel[0].key, "a/b");
+});

@@ -75,6 +75,7 @@ export const DEMO_UNIMPLEMENTED = [
   "getPathForFile",
   "gitAddWorktree",
   "gitRemoveWorktree",
+  "ledgerSummary",
   "onAgentFileReady",
   "onAppControl",
   "onAutoUpdateAvailable",
