@@ -34,6 +34,9 @@
  * @property {number} [used]     Absolute count when the provider exposes one.
  * @property {number} [limit]    Absolute cap when the provider exposes one.
  * @property {number} [resetsAt] Epoch MILLISECONDS.
+ * @property {number} [startedAt] Epoch ms when this window opened. Absent when
+ *   the provider does not report a window start — consumers must NOT guess a
+ *   start from `resetsAt` minus an assumed window length.
  * @property {boolean} [binding] The provider says this window bites first.
  * @property {boolean} [stale] True when this reading describes a window whose
  *   reset instant has already passed: the provider has not published the new
@@ -59,6 +62,11 @@
  * @property {string} [planLabel]   "Max 20x", "Pro", "Allegretto".
  * @property {UsageWindow[]} windows
  * @property {{label:string,value:string}[]} [extras]  Credits balance, model pools.
+ * @property {number} [balance]    Account credit in dollars. May be NEGATIVE
+ *                                 (overdrawn). Absent means *unknown*, never 0.
+ * @property {number} [overagePrice] $ per unit beyond the included allowance,
+ *                                 when the plan publishes one.
+ * @property {boolean} [exhausted] The provider will refuse work now.
  * @property {number} fetchedAt     Epoch ms of the successful fetch.
  */
 /**
@@ -278,6 +286,14 @@ export function createUsagePoller({
             ...(raw.planLabel ? { planLabel: raw.planLabel } : {}),
             windows,
             ...(Array.isArray(raw.extras) && raw.extras.length > 0 ? { extras: raw.extras } : {}),
+            // Carry the account-level fields through so a changed balance /
+            // overage / exhausted flag lands in contentKey and actually
+            // surfaces a usage.updated. (BET-1238: dropping these here would
+            // make the balance read as frozen — the dial never learns it
+            // moved because results is rebuilt each tick, not passed through.)
+            ...(raw.balance !== undefined ? { balance: raw.balance } : {}),
+            ...(raw.overagePrice !== undefined ? { overagePrice: raw.overagePrice } : {}),
+            ...(raw.exhausted === true ? { exhausted: true } : {}),
             fetchedAt: nowMs,
           });
           backoffUntil.delete(adapter.id);

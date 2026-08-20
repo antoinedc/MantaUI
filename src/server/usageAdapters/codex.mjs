@@ -19,6 +19,7 @@
 import { readProviderOAuthToken } from "../opencode.mjs";
 import { normalizeWindow, usageWindowLabel } from "./normalizeWindow.mjs";
 import { httpError } from "./httpError.mjs";
+import { isUsageAtLimit } from "../usageStopper.mjs";
 
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const PROVIDER_ID = "openai";
@@ -92,13 +93,20 @@ export const codexAdapter = {
     if (balance !== undefined && balance !== null) {
       extras.push({ label: "Credits balance", value: String(balance) });
     }
+    const balanceNum = typeof balance === "number" && Number.isFinite(balance) ? balance : undefined;
 
     const planLabel = titleCase(data?.plan_type);
+
+    // The provider will refuse work now: any window is at/over its limit, or
+    // credits are spent/overdrawn (balance ≤ 0).
+    const exhausted = isUsageAtLimit(windows) || (balanceNum !== undefined && balanceNum <= 0);
 
     return {
       provider: "codex",
       ...(planLabel ? { planLabel } : {}),
       windows,
+      ...(balanceNum !== undefined ? { balance: balanceNum } : {}),
+      ...(exhausted ? { exhausted: true } : {}),
       ...(extras.length > 0 ? { extras } : {}),
     };
   },

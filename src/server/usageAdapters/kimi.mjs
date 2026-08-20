@@ -25,6 +25,7 @@
 import { readProviderApiKey } from "../opencode.mjs";
 import { normalizeWindow, usageWindowLabel } from "./normalizeWindow.mjs";
 import { httpError } from "./httpError.mjs";
+import { isUsageAtLimit } from "../usageStopper.mjs";
 
 const USAGE_URL = "https://api.kimi.com/coding/v1/usages";
 const PROVIDER_ID = "kimi-for-coding";
@@ -97,6 +98,7 @@ export const kimiAdapter = {
 
     // No planLabel on this endpoint — it needs a cookie-auth web API, out of
     // scope per the issue spec.
-    return { provider: "kimi", windows };
+    const exhausted = isUsageAtLimit(windows);
+    return { provider: "kimi", windows, ...(exhausted ? { exhausted: true } : {}) };
   },
 };
