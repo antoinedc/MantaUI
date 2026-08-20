@@ -99,6 +99,18 @@ type ModelRouteDecision = {
   incumbent: PromptModel | null;
   changed: boolean;
 };
+// BET-1249: a provider-agnostic catalogue entry as served by
+// `opencode:model-catalog` (models.dev view). Consumed by the renderer's
+// "Models we couldn't identify" block for identity + typeahead.
+export type ModelCatalogEntry = {
+  id?: string;
+  name?: string;
+  family?: string;
+  description?: string;
+  reasoning?: boolean;
+  tool_call?: boolean;
+  limit?: { context?: number; output?: number };
+};
 type PromptAttachment = { remotePath: string; mime: string; filename?: string };
 type PromptAgentMention = {
   name: string;
@@ -419,6 +431,15 @@ export interface Api {
     incumbent: PromptModel | null,
     agent?: string,
   ): Promise<ModelRouteDecision | null>;
+  // BET-1249: the provider-agnostic model catalogue for the "Models we
+  // couldn't identify" block — resolve opaque endpoint ids and typeahead over
+  // every known model. `supported:false` when the box has no catalogue yet
+  // (never thrown). Entries are the same shape modelIdentity consumes.
+  opencodeModelCatalog(): Promise<{
+    supported: boolean;
+    size: number;
+    entries: ModelCatalogEntry[];
+  }>;
   opencodeDefaultModel(): Promise<{ providerID: string; modelID: string } | null>;
   opencodeGetProviders(): Promise<ProviderEndpoint[]>;
   opencodeSetProviders(ops: {
