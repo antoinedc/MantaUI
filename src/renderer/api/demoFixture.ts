@@ -832,7 +832,7 @@ export const demoModels: OpencodeModel[] = [
     status: "active",
     enabled: true,
     limit: { context: 1_000_000, output: 32_000 },
-    capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
+    capabilities: { toolcall: true, input: ["text", "image"], output: ["text"] },
   },
   {
     id: "claude-sonnet-4-6",
@@ -841,7 +841,7 @@ export const demoModels: OpencodeModel[] = [
     status: "active",
     enabled: true,
     limit: { context: 200_000, output: 16_000 },
-    capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
+    capabilities: { toolcall: true, input: ["text", "image"], output: ["text"] },
   },
   // Third model exists so the visual gate can capture the effort picker's
   // OPEN state (BET-511): the two default models expose no `variants`, which
@@ -857,7 +857,7 @@ export const demoModels: OpencodeModel[] = [
     status: "active",
     enabled: true,
     limit: { context: 1_000_000, output: 32_000 },
-    capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
+    capabilities: { toolcall: true, input: ["text", "image"], output: ["text"] },
     variants: [{ id: "balanced" }, { id: "maximum" }],
   },
   // The `-fast` twin of the model above, so the composer's ⚡ fast-mode toggle
@@ -873,7 +873,7 @@ export const demoModels: OpencodeModel[] = [
     status: "active",
     enabled: true,
     limit: { context: 1_000_000, output: 32_000 },
-    capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
+    capabilities: { toolcall: true, input: ["text", "image"], output: ["text"] },
     variants: [{ id: "balanced" }],
   },
   // A model with NO reported context window — exercises the "no max context"
@@ -886,7 +886,7 @@ export const demoModels: OpencodeModel[] = [
     status: "active",
     enabled: true,
     limit: { context: null },
-    capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
+    capabilities: { toolcall: true, input: ["text", "image"], output: ["text"] },
   },
 ];
 

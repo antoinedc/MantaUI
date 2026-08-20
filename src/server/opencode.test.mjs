@@ -39,6 +39,7 @@ import {
   getDefaultModel,
   generateSessionTitle,
   listModels,
+  _normalizeProviderModel,
   claudeCliStatus,
   parseProviderApiKey,
   readProviderApiKey,
@@ -1344,6 +1345,74 @@ test("listModels returns [] on a transport throw (never re-throws)", async () =>
       assert.deepEqual(out, []);
     },
   );
+});
+
+// _normalizeProviderModel — the single chokepoint every raw provider model
+// passes through. BET-1228: it must CARRY price (incl. cache rates), expose
+// `toolcall` under its own name (not the renamed `tools`), and preserve
+// `reasoning` + `releaseDate`. The absence of price is invisible at runtime
+// (every model scores equal), so these tests are the only thing pinning it.
+// ---------------------------------------------------------------------------
+
+test("_normalizeProviderModel carries price and cache rates through", () => {
+  const m = _normalizeProviderModel("anthropic", "claude-opus-4-7", {
+    id: "claude-opus-4-7",
+    cost: { input: 5, output: 25, cache: { read: 0.5, write: 6.25 } },
+  });
+  assert.deepEqual(m.cost, {
+    input: 5,
+    output: 25,
+    cacheRead: 0.5,
+    cacheWrite: 6.25,
+  });
+});
+
+test("_normalizeProviderModel distinguishes 0 from missing cost (never 0 for unknown)", () => {
+  const zero = _normalizeProviderModel("p", "m0", { id: "m0", cost: { input: 0 } });
+  assert.equal(zero.cost.input, 0);
+  assert.equal(zero.cost.output, undefined);
+
+  const missing = _normalizeProviderModel("p", "m1", { id: "m1", cost: {} });
+  assert.equal(missing.cost.input, undefined);
+  assert.equal(missing.cost.output, undefined);
+
+  const absent = _normalizeProviderModel("p", "m2", { id: "m2" });
+  assert.equal(absent.cost.input, undefined);
+  assert.equal(absent.cost.output, undefined);
+});
+
+test("_normalizeProviderModel drops NaN and negative cost values (to undefined)", () => {
+  const m = _normalizeProviderModel("p", "m", {
+    id: "m",
+    cost: { input: NaN, output: -3, cache: { read: Infinity } },
+  });
+  assert.equal(m.cost.input, undefined);
+  assert.equal(m.cost.output, undefined);
+  assert.equal(m.cost.cacheRead, undefined);
+  assert.equal(m.cost.cacheWrite, undefined);
+});
+
+test("_normalizeProviderModel keeps toolcall under its own name and preserves false", () => {
+  const m = _normalizeProviderModel("p", "m", {
+    id: "m",
+    capabilities: { toolcall: false, attachment: true },
+  });
+  assert.equal(m.capabilities.toolcall, false);
+  assert.equal(m.capabilities.tools, undefined);
+  assert.equal(m.capabilities.attachment, true);
+});
+
+test("_normalizeProviderModel carries reasoning and trims empty releaseDate to undefined", () => {
+  const m = _normalizeProviderModel("p", "m", {
+    id: "m",
+    release_date: "2025-01-01",
+    capabilities: { reasoning: true },
+  });
+  assert.equal(m.releaseDate, "2025-01-01");
+  assert.equal(m.capabilities.reasoning, true);
+
+  const empty = _normalizeProviderModel("p", "m2", { id: "m2", release_date: "" });
+  assert.equal(empty.releaseDate, undefined);
 });
 
 // Scoped-stream readiness gate (BET-115 fix C)
