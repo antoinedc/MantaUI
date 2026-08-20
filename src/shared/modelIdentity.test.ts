@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { resolveIdentity } from "./modelIdentity.mjs";
+import type { ModelCatalog } from "./modelIdentity.mjs";
 
 // A minimal catalogue matcher mirroring the box-side model catalogue's
 // semantics (normalise + family-grouped handles → exact/ambiguous/none). The
@@ -13,7 +14,7 @@ function normalize(modelsId: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
-function index(entries: any[]) {
+function index(entries: any[]): ModelCatalog {
   const byHandle = new Map<string, any[]>();
   const add = (keys: Set<string>, v: unknown) => {
     if (typeof v === "string" && v !== "") keys.add(normalize(v));
@@ -84,9 +85,9 @@ describe("resolveIdentity — the three real cases", () => {
     expect(r.catalogId).toBe("qwen/qwen3.6-27b");
     expect(r.candidates).toEqual([]);
     // 0 is absent, not zero → the catalogue's real 131072 stands.
-    expect(r.effective.limit.context).toBe(131072);
+    expect(r.effective.limit!.context).toBe(131072);
     expect(r.effective.family).toBe("qwen");
-    expect(r.effective.capabilities.reasoning).toBe(true);
+    expect(r.effective.capabilities!.reasoning).toBe(true);
   });
 
   it("ornith is ambiguous — all four same-family sizes, no guessing", () => {
@@ -134,7 +135,7 @@ describe("resolveIdentity — credibility rule for limit.context", () => {
   it("a provider limit.context of 0 is absent → catalogue value is used", () => {
     const model = { providerID: "chutes", id: "qwen3.6-27b", family: "", limit: { context: 0 } };
     const r = resolveIdentity(model, null, CATALOG);
-    expect(r.effective.limit.context).toBe(131072);
+    expect(r.effective.limit!.context).toBe(131072);
   });
 
   it("a provider limit.context of 262144 against a catalogue 1048576 → provider wins", () => {
@@ -142,7 +143,7 @@ describe("resolveIdentity — credibility rule for limit.context", () => {
     // endpoint property of 262144, which is a fact about ITS endpoint.
     const model = { providerID: "chutes", id: "qwen-1m", family: "", limit: { context: 262144 } };
     const r = resolveIdentity(model, null, CATALOG);
-    expect(r.effective.limit.context).toBe(262144);
+    expect(r.effective.limit!.context).toBe(262144);
   });
 });
 
