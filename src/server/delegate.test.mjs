@@ -582,7 +582,10 @@ test("chooseSubagentModel routes an explore agent to a fast-tier model when enab
 
 test("startJob with routing on normalises the catalog winner to a {providerID, modelID} deliver shape (BET-1220)", async () => {
   const h = startHarness("child_route_on");
-  h.deps.configGet = async () => ({ modelRouter: { enabled: true, preset: "economy" } });
+  // PINS THE CONFIG KEY BY NAME (BET-1227): routing reads `modelRouting`, the
+  // key Settings writes. A rename here fails by construction, so this asserts
+  // the key, not just the behaviour.
+  h.deps.configGet = async () => ({ modelRouting: { enabled: true, preset: "economy" } });
   h.deps.listSnapshots = () => [];
   h.deps.listModels = async () => [
     { providerID: "anthropic", id: "claude-opus-4", status: "active" },   // deep
@@ -601,6 +604,23 @@ test("startJob with routing on normalises the catalog winner to a {providerID, m
   // the catalog's {providerID, id} into sendPrompt's {providerID, modelID}.
   assert.equal(h.delivered[0].model.modelID, "claude-sonnet-4");
   assert.equal("id" in h.delivered[0].model, false, "deliver must receive modelID, not the catalog's id field");
+});
+
+test("startJob ignores the stale modelRouter key and delivers the incumbent (BET-1227)", async () => {
+  const h = startHarness("child_stale_key");
+  // The wrong, never-written key must NOT enable routing — an enabled flag under
+  // `modelRouter` is inert, exactly as it has been on every box since shipping.
+  h.deps.configGet = async () => ({ modelRouter: { enabled: true, preset: "economy" } });
+  const res = await startJob(
+    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo",
+      model: { providerID: "anthropic", modelID: "claude-opus-4" } },
+    h.deps,
+  );
+  assert.equal(res.ok, true);
+  assert.equal(h.delivered.length, 1);
+  // routing stayed off → the requested model passes through byte-identical,
+  // proving we are NOT reading the stale `modelRouter` name.
+  assert.deepEqual(h.delivered[0].model, { providerID: "anthropic", modelID: "claude-opus-4" });
 });
 
 test("chooseSubagentModel returns the incumbent on an off-path and is load-bearing (BET-1220)", () => {

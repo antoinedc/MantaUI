@@ -501,7 +501,7 @@ export function resolveRequestedModel(model, models) {
  * `incumbent` = whatever model the caller would have used today) and returns
  * the model to actually run on.
  *
- * Provably safe on the off-path: when `policy` is disabled (no modelRouter
+ * Provably safe on the off-path: when `policy` is disabled (no modelRouting
  * config on a box that has never seen this feature), `chooseModel` returns
  * `incumbent` exactly — so a spawn is byte-identical to today's. And any
  * throw inside the routing is swallowed, falling back to `incumbent`, so a
@@ -778,7 +778,7 @@ export async function startJob(input, deps = {}) {
   //    asked for a specific model actually runs on it; omitted → the default.
   //
   //    BET-1220: the effective model passes through the subagent router
-  //    (chooseSubagentModel). With routing off (no modelRouter config) it
+  //    (chooseSubagentModel). With routing off (no modelRouting config) it
   //    returns `incumbent` = the requested model / null, byte-identical to
   //    today. Routing must never break a spawn, so every input read (policy,
   //    quota, catalog) is individually guarded and the whole decision falls
@@ -787,7 +787,7 @@ export async function startJob(input, deps = {}) {
   try {
     let policy = { enabled: false };
     try {
-      policy = (await configGet())?.modelRouter ?? { enabled: false };
+      policy = (await configGet())?.modelRouting ?? { enabled: false };
     } catch {
       policy = { enabled: false };
     }
