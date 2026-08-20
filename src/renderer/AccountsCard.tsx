@@ -153,7 +153,9 @@ export function describeMissing(missing: readonly string[]): string | null {
   if (phrases.length === 0) return null;
   if (phrases.length === 1) return phrases[0];
   const head = phrases.slice(0, -1);
-  return `${head.join(", ")}${head.length > 1 ? "," : ""} and ${phrases[phrases.length - 1]}`;
+  // Oxford comma style: "which model, and whether it caches" (2+) and
+  // "which model, what it costs, whether it caches, and how it compares" (4).
+  return `${head.join(", ")}, and ${phrases[phrases.length - 1]}`;
 }
 
 /** The row's help line: "Supported · subscription · Max 20x" or the custom form. */
@@ -170,17 +172,16 @@ export function helpText(r: AccountRowModel): string {
 
 type HealthMap = Record<string, { state: string; retryInMs?: number | null }>;
 
-const HEALTH_STATES = ["ok", "out-of-credit", "rate-limited", "failing"] as const;
-
 function normalizeHealth(h: HealthMap | null | undefined, id: string): {
   health: AccountRowModel["health"];
   retryInMinutes?: number;
 } {
   const entry = h?.[id];
-  const st = (HEALTH_STATES as readonly string[]).includes(entry?.state)
-    ? (entry?.state as AccountRowModel["health"])
-    : undefined;
-  if (st && st !== "ok") {
+  const st =
+    entry?.state === "out-of-credit" || entry?.state === "rate-limited" || entry?.state === "failing"
+      ? entry.state
+      : undefined;
+  if (st) {
     const retryInMinutes =
       st === "rate-limited" && typeof entry?.retryInMs === "number"
         ? Math.max(1, Math.ceil((entry.retryInMs ?? 0) / 60000))

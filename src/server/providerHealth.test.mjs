@@ -247,3 +247,18 @@ test("unattributable failures (no session / unknown provider) are ignored", () =
   assert.deepEqual(engine.all(), {});
   assert.equal(published.filter((e) => e.kind === "provider-health.needs-attention").length, 0);
 });
+
+test("retryIn() reports the remaining rate-limit cooldown, then null once it expires (BET-1250)", () => {
+  const { engine, error, clock, providerID } = make();
+  assert.equal(engine.retryIn(providerID), null, "no cooldown before a 429");
+  error(429, 60000);
+  assert.equal(engine.state(providerID), PROVIDER_HEALTH_STATE.RATE_LIMITED);
+  const remaining = engine.retryIn(providerID);
+  // retryAfterMs 60000 is clamped up to the 2-min floor, so just assert a
+  // finite positive cooldown is reported.
+  assert.ok(remaining !== null && remaining > 0, `expected a positive remain cooldown, got ${remaining}`);
+  // Advance past the cooldown: the flag auto-recovers and retryIn bakes to null.
+  clock.t += 10 * 60 * 1000;
+  assert.equal(engine.retryIn(providerID), null);
+  assert.equal(engine.state(providerID), PROVIDER_HEALTH_STATE.OK);
+});
