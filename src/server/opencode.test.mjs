@@ -39,6 +39,7 @@ import {
   getDefaultModel,
   generateSessionTitle,
   listModels,
+  listRoutableModels,
   _normalizeProviderModel,
   claudeCliStatus,
   parseProviderApiKey,
@@ -1377,6 +1378,72 @@ test("listModels returns [] on a transport throw (never re-throws)", async () =>
       assert.deepEqual(out, []);
     },
   );
+});
+
+// listRoutableModels — the single routable-catalogue helper (BET-1229). Auto's
+// consent set: a model is routable only when it is connected AND active AND
+// enabled AND not deactivated for the surface AND opted-in if deprecated. The
+// user's ticks are the only consent expression, so this filters the raw
+// connected catalogue for whoever routes.
+// ---------------------------------------------------------------------------
+
+const routableCatalogue = [
+  // connected + active + enabled → routable everywhere
+  { providerID: "anthropic", id: "claude-opus-4", name: "Opus 4", status: "active", enabled: true },
+  // `status` absent → routable
+  { providerID: "anthropic", id: "claude-sonnet-4", name: "Sonnet 4" },
+  // `enabled: false` → never routable
+  { providerID: "anthropic", id: "claude-haiku-4", name: "Haiku 4", status: "active", enabled: false },
+  // `status: "deprecated"` → only with opt-in
+  { providerID: "anthropic", id: "claude-low-1", name: "Low 1", status: "deprecated" },
+  // `status` some other non-active value → never routable
+  { providerID: "openai", id: "gpt-5", name: "GPT-5", status: "retired" },
+];
+
+test("listRoutableModels: empty/absent config excludes nothing (fresh box)", async () => {
+  const out = await listRoutableModels("sub", undefined, async () => routableCatalogue);
+  const keys = out.map((m) => `${m.providerID}/${m.id}`).sort();
+  // openai/gpt-5 is retired and anthropic/claude-haiku-4 is disabled → still
+  // excluded by status/enabled; everything else survives an empty config.
+  assert.deepEqual(keys, ["anthropic/claude-opus-4", "anthropic/claude-sonnet-4"]);
+});
+
+test("listRoutableModels: main/surface deactivation are independent", async () => {
+  const cfg = {
+    deactivatedMainModels: ["anthropic/claude-opus-4"],
+    deactivatedSubagents: ["anthropic/claude-sonnet-4"],
+  };
+  const main = await listRoutableModels("main", cfg, async () => routableCatalogue);
+  const mainKeys = main.map((m) => `${m.providerID}/${m.id}`);
+  // opus-4 is deactivated for main (absent) but sonnet-4 (not in main's set) survives.
+  assert.ok(!mainKeys.includes("anthropic/claude-opus-4"), "main must drop main-deactivated opus-4");
+  assert.ok(mainKeys.includes("anthropic/claude-sonnet-4"), "main keeps sub-only-deactivated sonnet-4");
+
+  const sub = await listRoutableModels("sub", cfg, async () => routableCatalogue);
+  const subKeys = sub.map((m) => `${m.providerID}/${m.id}`);
+  // vice-versa: sub drops sub-deactivated sonnet-4, keeps opus-4.
+  assert.ok(!subKeys.includes("anthropic/claude-sonnet-4"), "sub must drop sub-deactivated sonnet-4");
+  assert.ok(subKeys.includes("anthropic/claude-opus-4"), "sub keeps main-only-deactivated opus-4");
+});
+
+test("listRoutableModels: deprecated model requires opt-in", async () => {
+  // claude-low-1 is deprecated; without opt-in it is dropped, with opt-in kept.
+  const noOptIn = await listRoutableModels("sub", {}, async () => routableCatalogue);
+  assert.ok(!noOptIn.some((m) => m.id === "claude-low-1"), "deprecated absent without opt-in");
+
+  const opted = await listRoutableModels(
+    "sub",
+    { optInModels: ["anthropic/claude-low-1"] },
+    async () => routableCatalogue,
+  );
+  assert.ok(opted.some((m) => m.id === "claude-low-1"), "deprecated present once opted-in");
+});
+
+test("listRoutableModels: status != active and enabled:false are always excluded", async () => {
+  const out = await listRoutableModels("main", {}, async () => routableCatalogue);
+  const keys = out.map((m) => `${m.providerID}/${m.id}`);
+  assert.ok(!keys.includes("anthropic/claude-haiku-4"), "enabled:false excluded");
+  assert.ok(!keys.includes("openai/gpt-5"), "status retired excluded");
 });
 
 // _normalizeProviderModel — the single chokepoint every raw provider model

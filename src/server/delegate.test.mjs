@@ -623,6 +623,40 @@ test("startJob ignores the stale modelRouter key and delivers the incumbent (BET
   assert.deepEqual(h.delivered[0].model, { providerID: "anthropic", modelID: "claude-opus-4" });
 });
 
+// BET-1229 — a routed subagent spawn can only ever produce one of the models
+// the user's ticks consent to. startJob hands the router listRoutableModels
+// ("sub", cfg) instead of the raw connected catalogue, so models the user
+// deactivated for subagents are excluded before the router ever sees them.
+test("startJob routes only within the consent (sub) catalogue (BET-1229)", async () => {
+  const h = startHarness("child_consent");
+  // Routing on, and the user has deactivated every subagent model except
+  // claude-opus-4 and gpt-5 (the "ticked" set).
+  h.deps.configGet = async () => ({
+    modelRouting: { enabled: true, preset: "economy" },
+    deactivatedSubagents: ["anthropic/claude-sonnet-4", "anthropic/claude-haiku-4"],
+  });
+  h.deps.listSnapshots = () => [];
+  h.deps.listModels = async () => [
+    { providerID: "anthropic", id: "claude-opus-4", status: "active" },
+    { providerID: "anthropic", id: "claude-sonnet-4", status: "active" },
+    { providerID: "anthropic", id: "claude-haiku-4", status: "active" },
+    { providerID: "openai", id: "gpt-5", status: "active" },
+  ];
+  const res = await startJob(
+    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo" },
+    h.deps,
+  );
+  assert.equal(res.ok, true);
+  assert.equal(h.delivered.length, 1);
+  assert.ok(h.delivered[0].model, "routing should decide a model");
+  const key = `${h.delivered[0].model.providerID}/${h.delivered[0].model.modelID}`;
+  // The winner must be within the consented set — never a deactivated model.
+  assert.ok(
+    key === "anthropic/claude-opus-4" || key === "openai/gpt-5",
+    `routed subagent landed on deactivated model ${key}`,
+  );
+});
+
 test("chooseSubagentModel returns the incumbent on an off-path and is load-bearing (BET-1220)", () => {
   const incumbent = { providerID: "anthropic", modelID: "claude-opus-4" };
   const catalog = [

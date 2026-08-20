@@ -13,7 +13,7 @@ import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import http from "node:http";
 import { expandTilde, patchPath } from "../shared/paths.mjs";
-import { readModalities } from "../shared/modelGuide.mjs";
+import { readModalities, isDeprecated } from "../shared/modelGuide.mjs";
 import { startPoller } from "./startPoller.mjs";
 import { parseRetryAfterMs } from "./usageAdapters/httpError.mjs";
 import {
@@ -1128,6 +1128,63 @@ export async function listModels(overrides = {}) {
     }
   } catch {
     /* non-fatal */
+  }
+  return out;
+}
+
+/**
+ * The models Auto is allowed to choose from, for a given surface.
+ *
+ * A model is routable when ALL of these hold (checked in this order):
+ *   1. it is in `listModels()` (i.e. its provider is connected);
+ *   2. `status` is absent or `"active"`;
+ *   3. `enabled` is not `false`;
+ *   4. its "providerID/modelID" key is NOT in `deactivatedMainModels`
+ *      (surface `"main"`) or `deactivatedSubagents` (surface `"sub"`);
+ *   5. if it is deprecated (`isDeprecated` — BET-1139), its key IS in
+ *      `optInModels`.
+ *
+ * The user's ticks are the only expression of "models I consent to run", so
+ * routing must be a choice *within* this set — never over the raw connected
+ * catalogue (which includes every model the user unticked).
+ *
+ * NOTE for future main-conversation routing: use `listRoutableModels("main",
+ * cfg)` here too — the RPC issue in this epic will call it. Do NOT add a
+ * second filter; this is the one place routing consent is computed.
+ *
+ * @param {"main"|"sub"} surface
+ * @param {object} cfg  AppConfig (deactivatedMainModels, deactivatedSubagents, optInModels)
+ * @param {Function} [models]  model-source to list from; defaults to `listModels`
+ *        (the real one). Injectable so tests can pass a fake catalogue.
+ * @returns {Promise<Array<{id: string, providerID: string, ...}>>}
+ */
+export async function listRoutableModels(surface, cfg, models = listModels) {
+  const deactivated = new Set(
+    surface === "main"
+      ? cfg?.deactivatedMainModels ?? []
+      : cfg?.deactivatedSubagents ?? [],
+  );
+  const optIn = new Set(cfg?.optInModels ?? []);
+  const out = [];
+  let listed = [];
+  try {
+    listed = await models();
+    if (!Array.isArray(listed)) listed = [];
+  } catch {
+    /* non-fatal */
+  }
+  for (const m of listed) {
+    if (!m || typeof m !== "object") continue;
+    // A model the provider flags `status: "deprecated"` is decided by rule 5
+    // below (opt-in), NOT hard-blocked here — otherwise no deprecated model
+    // could ever be opted back in. Any other non-active status is excluded.
+    const deprecated = isDeprecated(m);
+    if (m.status && m.status !== "active" && !deprecated) continue;
+    if (m.enabled === false) continue;
+    const key = `${m.providerID}/${m.id}`;
+    if (deactivated.has(key)) continue;
+    if (deprecated && !optIn.has(key)) continue;
+    out.push(m);
   }
   return out;
 }

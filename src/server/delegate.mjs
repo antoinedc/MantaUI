@@ -42,6 +42,7 @@ import {
 import { extractSubagentInfo } from "../shared/streamInterpretation.mjs";
 import { fuzzyMatchModel, suggestModels } from "../shared/modelGuide.mjs";
 import { chooseModel } from "../shared/modelRouter.mjs";
+import { listRoutableModels } from "./opencode.mjs";
 
 // ---------------------------------------------------------------------------
 // Constants (mirrors capabilities.mjs exactly — reuse, do not diverge)
@@ -785,9 +786,18 @@ export async function startJob(input, deps = {}) {
   //    back to `deliverModel` on any throw.
   let effectiveModel = deliverModel;
   try {
+    // configGet supplies BOTH the routing policy and the consent model list
+    // (deactivatedSubagents / optInModels). Read it once, guarded, so a throw
+    // here can never break a spawn.
+    let cfg = {};
+    try {
+      cfg = (await configGet()) ?? {};
+    } catch {
+      cfg = {};
+    }
     let policy = { enabled: false };
     try {
-      policy = (await configGet())?.modelRouting ?? { enabled: false };
+      policy = cfg.modelRouting ?? { enabled: false };
     } catch {
       policy = { enabled: false };
     }
@@ -800,7 +810,7 @@ export async function startJob(input, deps = {}) {
     }
     let catalog = [];
     try {
-      catalog = listModels ? await listModels() : [];
+      catalog = await listRoutableModels("sub", cfg, listModels);
       if (!Array.isArray(catalog)) catalog = [];
     } catch {
       catalog = [];
