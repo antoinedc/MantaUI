@@ -517,6 +517,14 @@ export function ChatPanel({
   // never breaks the session. Re-runs on session change; the user's own
   // selectModel clears the pill.
   useEffect(() => {
+    // BET-1255: Auto-session model choice is owned SOLELY by the boundary
+    // routing in submit() (BET-1248) — it already re-decides on the first
+    // turn, which is itself a boundary. Returning early for Auto avoids a
+    // second, immediately-overwritten "build" RPC decision (and the confusing
+    // co-existence of its undo pill with the Auto-row reason). The gate reads
+    // the same session key the effect already reads, so the [sessionId]
+    // dependency stays correct on session change.
+    if (readSavedChoice(sessionId).kind === "auto") return;
     let cancelled = false;
     const incumbent = readSavedModel(sessionId) ?? configDefaultModel ?? null;
     window.api
