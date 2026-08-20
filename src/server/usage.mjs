@@ -157,8 +157,8 @@ const MAX_STALE_RETRIES = 3;
 // provider asking for an hour still must not blank the dial for an hour.
 // Both ends collapse the old "header present / header absent" branch into one
 // expression.
-const MIN_RATE_LIMIT_BACKOFF_MS = 2 * 60_000;  // 2 minutes
-const MAX_RATE_LIMIT_BACKOFF_MS = 15 * 60_000; // 15 minutes
+export const MIN_RATE_LIMIT_BACKOFF_MS = 2 * 60_000;  // 2 minutes
+export const MAX_RATE_LIMIT_BACKOFF_MS = 15 * 60_000; // 15 minutes
 // How long a snapshot may be carried forward across failed/backed-off ticks
 // before it is dropped. Sits above the stale-warning threshold the popover
 // uses, so a carried reading visibly ages into a warning before it disappears.
