@@ -1,42 +1,57 @@
+import type { AccountState } from "./marginalCost.d.mts";
+import type { ModelDeclaration, ModelCatalog, CatalogEntry } from "./modelIdentity.d.mts";
+import type { Field as QualityField } from "./modelQuality.d.mts";
+import type {
+  ReliabilityBaseline,
+  ReliabilitySample,
+} from "./toolReliability.d.mts";
+
 export type Tier = "fast" | "balanced" | "deep";
 
 export const PRESETS: string[];
-export const AGENT_FLOOR: Record<string, Tier>;
 export const AGENT_TIER: Record<string, Record<string, Tier>>;
-export const REFERENCE_PRICE: number;
-export const FREE_FLOOR: number;
 
 export interface Model {
   providerID?: string;
   id?: string;
+  family?: string;
   status?: string;
-  cost?: { input?: number; output?: number };
-  limit?: { context?: number };
+  cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
+  limit?: { context?: number; output?: number };
   capabilities?: {
     toolcall?: boolean;
+    reasoning?: boolean;
     input?: { image?: boolean; pdf?: boolean };
   };
 }
 
-export interface QuotaWindow {
-  providerIDs?: string[];
-  pct?: number;
-  stale?: boolean;
-  resetsAt?: number;
-  period?: string;
+export interface TelemetryEntry {
+  tokensPerSec?: number;
+  p50Ms?: number;
+  p90Ms?: number;
+  latencyMs?: number;
 }
 
-export function filterByConstraints(
-  models: Model[],
-  opts?: {
-    contextTokens?: number;
-    needs?: { tools?: boolean; image?: boolean; pdf?: boolean };
-  }
-): Model[];
-
-export function scarcity(window: unknown, nowMs: number): number;
-
-export function effectivePrice(model: Model, quota: QuotaWindow[], nowMs: number): number;
+export interface RoutingServices {
+  catalogMatcher?: ModelCatalog;
+  catalogEntryFor?: (endpoint: Model) => CatalogEntry | null | undefined;
+  qualityField?: QualityField;
+  /** Keyed by "providerID/modelID". */
+  declared?: Record<string, ModelDeclaration>;
+  providerClass?: Record<string, "supported" | "custom">;
+  /** Keyed by providerID. */
+  accounts?: Record<string, AccountState>;
+  /** Keyed by providerID — the provider-health state string. */
+  health?: Record<string, string>;
+  /** Keyed by "providerID/modelID". */
+  telemetry?: Record<string, TelemetryEntry>;
+  reliability?: {
+    samples?: Record<string, ReliabilitySample>;
+    baseline?: Record<string, ReliabilityBaseline>;
+  };
+  mix?: unknown;
+  referenceByModel?: Record<string, unknown>;
+}
 
 export interface ChooseInput {
   intent?: {
@@ -47,10 +62,9 @@ export interface ChooseInput {
     incumbent?: Model | null;
   };
   catalog?: Model[];
-  telemetry?: Record<string, { tokensPerSec?: number; p50Ms?: number }>;
-  quota?: QuotaWindow[];
   policy?: { preset?: string; perAgent?: Record<string, string> };
   nowMs?: number;
+  services?: RoutingServices;
 }
 
 export interface ChooseResult {

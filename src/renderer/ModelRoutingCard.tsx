@@ -6,13 +6,15 @@
 // — a warn-toned notice when a window is nearly spent, a neutral one-liner
 // otherwise.
 //
-// Tiers are READ from the pure router module (`AGENT_TIER` / `AGENT_FLOOR`),
-// never hardcoded here, so the card and the router cannot drift. Plan usage is
-// the SAME state the composer's usage dial reads (`store.usage`) — no second
-// fetch, no second percentage bar (the bar IS `UsageWindowRow`, reused).
+// Tiers are READ from the pure router module (`AGENT_TIER`) and the quality
+// floors from `modelQuality` (`AGENT_FLOOR_SCORE`), never hardcoded here, so
+// the card and the router cannot drift. Plan usage is the SAME state the
+// composer's usage dial reads (`store.usage`) — no second fetch, no second
+// percentage bar (the bar IS `UsageWindowRow`, reused).
 
 import { useState } from "react";
-import { AGENT_FLOOR, AGENT_TIER } from "../shared/modelRouter.mjs";
+import { AGENT_TIER } from "../shared/modelRouter.mjs";
+import { AGENT_FLOOR_SCORE, tierForScore } from "../shared/modelQuality.mjs";
 import { tierRank } from "../shared/modelGuide.mjs";
 import { useStore } from "./store";
 import { Card } from "./Card";
@@ -35,7 +37,7 @@ const AGENT_ROWS: { agent: string; sub: string }[] = [
 // target computation (modelRouter.mjs) so the card never lies about a floor.
 function effectiveTier(preset: string | undefined, agent: string): string {
   const presetTier = AGENT_TIER?.[preset ?? ""]?.[agent] ?? "balanced";
-  const floor = AGENT_FLOOR?.[agent] ?? "balanced";
+  const floor = tierForScore(AGENT_FLOOR_SCORE?.[agent] ?? 0);
   return tierRank(presetTier) >= tierRank(floor) ? presetTier : floor;
 }
 

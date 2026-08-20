@@ -24,6 +24,7 @@ import {
   chooseSubagentModel,
   chooseMainModel,
 } from "./delegate.mjs";
+import { familyKey } from "../shared/modelGuide.mjs";
 
 // ----------------------------------------------------------------------------
 // Harness: in-memory load/save on a closure-held array, recorded publish +
@@ -62,6 +63,30 @@ function harness(initialJobs = [], fixedNow = 1_700_000_000_000) {
 
 const CAP_ERROR =
   "too many background jobs running (5). Do not retry — either wait for one to finish, or do this work yourself.";
+
+// BET-1236: the router gated a candidate on description completeness
+// (autoEligibility). The routing-era tests must feed it the routing context
+// (identity matcher + quality entry + declared price/caching) so the bare
+// {providerID, id, status} fixtures are eligible, exactly as the box's wiring
+// will when it lands. Without these the router honestly reports "no usable
+// endpoint" and returns the incumbent.
+function routingServicesFor(list, extra = {}) {
+  const declared = {};
+  for (const m of list ?? []) {
+    if (!m || typeof m !== "object") continue;
+    declared[`${m.providerID}/${m.id}`] = { catalogId: m.id, price: {}, caches: true };
+  }
+  return {
+    catalogMatcher: { lookupModel: (id) => ({ id }), matchModel: (id) => ({ kind: "exact", candidates: [{ id }] }) },
+    catalogEntryFor: (c) => ({ family: familyKey(c?.id) ?? undefined }),
+    qualityField: {},
+    declared,
+    accounts: {},
+    health: {},
+    telemetry: {},
+    ...extra,
+  };
+}
 
 // ----------------------------------------------------------------------------
 // 1. buildJobPrompt — with and without a worktree
@@ -567,6 +592,7 @@ test("chooseSubagentModel routes an explore agent to a fast-tier model when the 
     quota: [],
     agent: "explore",
     nowMs: 1_700_000_000_000,
+    services: routingServicesFor(catalog),
   });
   // NOTE: this asserts the ROUTER WRAPPER's per-agent contract (the reusable
   // chooseSubagentModel — what any future explore-routing spawn would call).
@@ -587,11 +613,13 @@ test("startJob with routing on normalises the catalog winner to a {providerID, m
   // the key, not just the behaviour.
   h.deps.configGet = async () => ({ modelRouting: { preset: "economy" } });
   h.deps.listSnapshots = () => [];
-  h.deps.listModels = async () => [
+  const models = [
     { providerID: "anthropic", id: "claude-opus-4", status: "active" },   // deep
     { providerID: "anthropic", id: "claude-sonnet-4", status: "active" }, // balanced
     { providerID: "anthropic", id: "claude-haiku-4", status: "active" },  // fast
   ];
+  h.deps.listModels = async () => models;
+  h.deps.routingServices = routingServicesFor(models);
   const res = await startJob(
     { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo" },
     h.deps,
@@ -637,12 +665,14 @@ test("startJob routes only within the consent (sub) catalogue (BET-1229)", async
     deactivatedSubagents: ["anthropic/claude-sonnet-4", "anthropic/claude-haiku-4"],
   });
   h.deps.listSnapshots = () => [];
-  h.deps.listModels = async () => [
+  const models = [
     { providerID: "anthropic", id: "claude-opus-4", status: "active" },
     { providerID: "anthropic", id: "claude-sonnet-4", status: "active" },
     { providerID: "anthropic", id: "claude-haiku-4", status: "active" },
     { providerID: "openai", id: "gpt-5", status: "active" },
   ];
+  h.deps.listModels = async () => models;
+  h.deps.routingServices = routingServicesFor(models);
   const res = await startJob(
     { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo" },
     h.deps,
@@ -700,6 +730,7 @@ test("chooseMainModel returns the FULL decision — model, reason, incumbent —
     quota: [],
     agent: "build",
     nowMs: 1_700_000_000_000,
+    services: routingServicesFor(catalog),
   });
   // The main-conversation decision is richer than the subagent wrapper: the
   // renderer needs the model, a reason, and the incumbent for the undo pill.
