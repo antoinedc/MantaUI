@@ -1144,6 +1144,22 @@ export function applyModelOverride(m, override) {
   return next;
 }
 
+// Canonicalize a model's `cost` (opencode reports `cost: { input, output,
+// cache: { read, write } }`). Keep only finite, non-negative numbers; a
+// missing/NaN/negative value becomes `undefined`, NEVER `0` — the difference
+// between "free" and "unknown" is load-bearing for the router (BET-1228).
+// opencode's `cost.tiers`/`experimentalOver200K` are context-tiered pricing,
+// deliberately not modelled here.
+function _normalizePrice(raw) {
+  const p = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined);
+  return {
+    input: p(raw?.input),
+    output: p(raw?.output),
+    cacheRead: p(raw?.cache?.read),
+    cacheWrite: p(raw?.cache?.write),
+  };
+}
+
 // Canonicalize a model's `limit`. `context` is `number | null`; `null` means
 // "the provider gave no usable limit — never fabricate one". `0`, negative,
 // NaN, Infinity and missing all map to `null`. `output` is kept only when a
@@ -1167,7 +1183,7 @@ function _normalizeLimit(raw) {
 // `input`/`output`; `limit.context` never fabricated). Returns null when the
 // model is unaddressable (an empty/absent providerID would silently break
 // grouping/auth/usage), in which case the caller must SKIP it.
-function _normalizeProviderModel(providerID, modelId, m) {
+export function _normalizeProviderModel(providerID, modelId, m) {
   if (typeof providerID !== "string" || providerID.length === 0) return null;
   let variants;
   const vRaw = m.variants;
@@ -1188,8 +1204,12 @@ function _normalizeProviderModel(providerID, modelId, m) {
     status: typeof m.status === "string" ? m.status : undefined,
     enabled: typeof m.enabled === "boolean" ? m.enabled : undefined,
     limit: _normalizeLimit(m.limit),
+    cost: _normalizePrice(m.cost),
+    releaseDate:
+      typeof m.release_date === "string" && m.release_date !== "" ? m.release_date : undefined,
     capabilities: {
-      tools: typeof caps.tools === "boolean" ? caps.tools : undefined,
+      toolcall: typeof caps.toolcall === "boolean" ? caps.toolcall : undefined,
+      reasoning: typeof caps.reasoning === "boolean" ? caps.reasoning : undefined,
       attachment: typeof caps.attachment === "boolean" ? caps.attachment : undefined,
       input: readModalities(caps.input),
       output: readModalities(caps.output),

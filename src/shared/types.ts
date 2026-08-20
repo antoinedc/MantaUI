@@ -2362,9 +2362,13 @@ export type InputModality = string;
 // app and the box update on separate tracks), so both shapes reach clients —
 // the provider's raw object-of-flags form and the canonical array form.
 // `readModalities` (src/shared/modelGuide.mjs) is the ONLY supported way to
-// read these two fields. `tools`/`attachment` pass through as booleans.
+// read these two fields. `toolcall`/`reasoning`/`attachment` pass through as
+// booleans. `toolcall` matches the upstream opencode capability name (the
+// router's filterByConstraints checks `capabilities.toolcall`), so the box
+// must NOT rename it to `tools` (BET-1228).
 export type OpencodeModelCapabilities = {
-  tools?: boolean;
+  toolcall?: boolean;
+  reasoning?: boolean;
   attachment?: boolean;
   input?: InputModality[] | Record<string, boolean>;
   output?: InputModality[] | Record<string, boolean>;
@@ -2381,6 +2385,20 @@ export type OpencodeModel = {
   // limit; do NOT fabricate one". `output` is only present when the provider
   // reported a positive finite value.
   limit?: { context: number | null; output?: number };
+  // Price in $ per 1M tokens, as reported by the provider. Each field is
+  // `number | undefined`: undefined (or a field absent from `cost`) means the
+  // price is UNKNOWN, which is deliberately distinct from 0 (free) — the
+  // router treats unknown as free but the distinction is load-bearing for a
+  // later issue in the routing epic (BET-1228).
+  cost?: {
+    input?: number; // $ per 1M input tokens
+    output?: number; // $ per 1M output tokens
+    cacheRead?: number; // $ per 1M cached-read tokens
+    cacheWrite?: number; // $ per 1M cache-write tokens
+  };
+  // `release_date` as reported by the provider; only a non-empty string is
+  // kept (some providers report "").
+  releaseDate?: string;
   // REQUIRED after normalization (always at least `{}`).
   capabilities: OpencodeModelCapabilities;
   variants?: Array<{ id: string }>;
