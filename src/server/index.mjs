@@ -92,6 +92,7 @@ import { listPeers, inspectPeer, sendPeerMessage, resolveWorkspace } from "./pee
 import { upsertStopped, markStoppedRan, bumpStoppedAttempts, listStopped } from "./stoppedStore.mjs";
 import { createUsageStopEngine } from "./usageStopEnroll.mjs";
 import { createUsageResumeEngine } from "./usageResume.mjs";
+import { createProviderHealth } from "./providerHealth.mjs";
 import * as appControl from "./appControl.mjs";
 import * as cto from "./cto.mjs";
 import { searchMessages } from "./messageSearch.mjs";
@@ -419,6 +420,19 @@ const usageStopEngine = createUsageStopEngine({
       return "";
     }
   },
+});
+
+// Provider health (BET-1240, Automatic Routing Stage 4): tracks whether each
+// provider is WORKING or NOT from the HTTP status of its failed turns (402 =
+// out of credit, 429 = rate limited, other repeated failures = soft failing),
+// recovered by evidence only — never by a clock. Attribute via usageStopEngine's
+// OWN per-session provider cache (getSessionModel — no second cache is built
+// here); observeEvent is fed the opencode pump below alongside the others.
+const providerHealth = createProviderHealth({
+  publish: (evt) => bus.publish(evt),
+  getSessionModel: (sessionId) => usageStopEngine.getSessionModel(sessionId),
+  providerIDForAdapter,
+  recheckAtLimit: (adapterId) => recheckAdapterAtLimit(adapterId),
 });
 
 // Capability-job sweeper: same shape as startSchedulePoller — fails out stale
@@ -1150,6 +1164,13 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
     resumeEngine.observeEvent(evt);
   } catch (e) {
     console.warn("[usage-resume] observeEvent failed:", e?.message ?? e);
+  }
+  // Provider health (BET-1240): record whether the attributed provider is
+  // rate-limited / out-of-credit / failing from the preserved HTTP status.
+  try {
+    providerHealth.observeEvent(evt);
+  } catch (e) {
+    console.warn("[provider-health] observeEvent failed:", e?.message ?? e);
   }
   // Auto-recover expired Claude credentials (server-side; works with no client attached).
   oc.maybeRecoverCredentials(evt).catch(() => {});
