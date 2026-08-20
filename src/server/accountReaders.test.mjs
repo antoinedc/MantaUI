@@ -7,8 +7,12 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { readerFromDescriptor, loadAccountReaders } from "./accountReaders.mjs";
 import { createUsagePoller } from "./usage.mjs";
+import { validateDescriptor, readDescriptor } from "../shared/accountDescriptor.mjs";
 
 const DESCRIPTOR = {
   id: "samplecredits",
@@ -70,6 +74,31 @@ test("reader.fetch reuses the shared httpError shape for a non-2xx", async () =>
       }),
     (err) => err.status === 500 && /HTTP 500/.test(err.message),
   );
+});
+
+test("shipped openrouter descriptor reads the live /api/v1/credits payload (BET-1239 regression)", () => {
+  // The real OpenRouter endpoint returns { data: { total_credits, total_usage } }
+  // — NOT a top-level `credits` field. The shipped descriptor must resolve the
+  // balance at data.total_credits AND map the credit pool as a window so an
+  // overdrawn account (total_usage > total_credits, as captured live) trips
+  // `exhausted` instead of showing a healthy positive balance.
+  const dir = dirname(fileURLToPath(import.meta.url));
+  const raw = JSON.parse(readFileSync(join(dir, "accountDescriptors", "openrouter.json"), "utf-8"));
+  const v = validateDescriptor(raw);
+  assert.equal(v.valid, true);
+  if (!v.valid) return;
+
+  // Live capture 2026-08-20 with a real key: usage 20.0717 > credits 20.
+  const overdrawn = { data: { total_credits: 20, total_usage: 20.071752339 } };
+  const snap = readDescriptor(v.descriptor, overdrawn, 0);
+  assert.equal(snap.balance, 20);
+  assert.equal(snap.exhausted, true);
+  assert.equal(snap.windows[0].pct, 100);
+
+  const healthy = { data: { total_credits: 20, total_usage: 5 } };
+  const healthySnap = readDescriptor(v.descriptor, healthy, 0);
+  assert.equal(healthySnap.exhausted, undefined);
+  assert.equal(healthySnap.windows[0].pct, 25);
 });
 
 test("an invalid descriptor is reported by name and excluded; valid ones load", () => {
