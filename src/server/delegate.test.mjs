@@ -634,6 +634,49 @@ test("startJob with routing on normalises the catalog winner to a {providerID, m
   assert.equal("id" in h.delivered[0].model, false, "deliver must receive modelID, not the catalog's id field");
 });
 
+// BET-1252 — the EXIT-CRITERIA path: startJob builds its RoutingServices from
+// LIVE-style readers (catalogue + health + ledger) rather than a hand-built
+// `routingServices` injection, and under a configured preset picks a real,
+// non-incumbent model. A provider the reader reports as out-of-credit /
+// rate-limited is excluded from the outcome.
+test("startJob routes to a non-incumbent model from live routing readers (BET-1252)", async () => {
+  const h = startHarness("child_live_routing");
+  h.deps.configGet = async () => ({ modelRouting: { preset: "economy" } });
+  h.deps.listSnapshots = () => [];
+  const models = [
+    // openai/gpt-5 is the CHEAPEST — but the health reader reports it
+    // rate-limited, so it must be excluded from the decision.
+    { providerID: "openai", id: "gpt-5", status: "active", cost: { input: 0.1, output: 0.4, cacheRead: 0.05, cacheWrite: 0.15 }, capabilities: { toolcall: true } },
+    { providerID: "anthropic", id: "claude-opus-4", status: "active", cost: { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 22.5 }, capabilities: { reasoning: true, toolcall: true } },
+    { providerID: "anthropic", id: "claude-sonnet-4", status: "active", cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 4.5 }, capabilities: { reasoning: true, toolcall: true } },
+    { providerID: "anthropic", id: "claude-haiku-4", status: "active", cost: { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.5 }, capabilities: { toolcall: true } },
+  ];
+  h.deps.listModels = async () => models;
+  // Live-style readers (NOT a pre-built routingServices).
+  const cat = (id) => ({ id, family: familyKey(id) });
+  h.deps.catalogIndex = {
+    lookupModel: (id) => cat(id),
+    matchModel: (id) => ({ kind: "exact", candidates: [cat(id)] }),
+    allModels: () => [],
+  };
+  h.deps.providerHealthState = (pid) => (pid === "openai" ? "rate-limited" : "ok");
+  h.deps.endpointSummary = async () => ({ supported: true });
+
+  const res = await startJob(
+    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo" },
+    h.deps,
+  );
+  assert.equal(res.ok, true);
+  assert.equal(h.delivered.length, 1);
+  // A decided, non-incumbent model — never the rate-limited openai/gpt-5.
+  assert.ok(h.delivered[0].model, "live routing should decide a model");
+  assert.notEqual(h.delivered[0].model.providerID, "openai", "rate-limited provider must be excluded");
+  // economy + general → the cheapest survivor that MEETS the general agent's
+  // balanced floor. gpt-5 (cheapest but rate-limited) and haiku-4 (below the
+  // floor) are both excluded → sonnet-4 wins.
+  assert.deepEqual(h.delivered[0].model, { providerID: "anthropic", modelID: "claude-sonnet-4" });
+});
+
 test("startJob ignores the stale modelRouter key and delivers the incumbent (BET-1227)", async () => {
   const h = startHarness("child_stale_key");
   // The wrong, never-written key must NOT activate routing — a preset under

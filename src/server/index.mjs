@@ -93,6 +93,10 @@ import { upsertStopped, markStoppedRan, bumpStoppedAttempts, listStopped } from 
 import { createUsageStopEngine } from "./usageStopEnroll.mjs";
 import { createUsageResumeEngine } from "./usageResume.mjs";
 import { createProviderHealth } from "./providerHealth.mjs";
+import {
+  startModelCatalogPoller as startRoutingModelCatalog,
+} from "./modelCatalog.mjs";
+import { endpointSummary as routingEndpointSummary } from "./modelLedger.mjs";
 import * as appControl from "./appControl.mjs";
 import * as cto from "./cto.mjs";
 import { searchMessages } from "./messageSearch.mjs";
@@ -448,6 +452,15 @@ const stopProviderHealthFunds = bus.subscribe((evt) => {
 // as resumeEngine's warmup; a provider marked exhausted stays excluded).
 providerHealth.deliverSnapshots(listSnapshots());
 
+// BET-1252: the box's model catalogue (provider-agnostic, for routing
+// identity/quality). Starts the page poller (immediate first tick, inFlight
+// guard, timer.unref()) and exposes its controller as the routing catalogue
+// index both production callers (delegate startJob + rpc routing:main) build
+// their RoutingServices from. Degrades to an empty catalogue until the first
+// successful fetch — routing treats that as "models unidentifiable" and falls
+// back to the incumbent, never an error.
+const routingCatalogIndex = startRoutingModelCatalog({});
+
 // Capability-job sweeper: same shape as startSchedulePoller — fails out stale
 // `running` jobs (30 min) and expired `queued` jobs (24h), then prunes terminal
 // jobs past retention/cap. Notifies the originating session on every
@@ -522,6 +535,14 @@ const delegateEngine = createDelegateEngine({
   // break a spawn.
   configGet: () => local.configGet(),
   listSnapshots,
+  // BET-1252: the routing-services readers for startJob. All optional; a
+  // missing reader degrades to absent services → the router returns the
+  // incumbent, never breaking a spawn. routingCatalogIndex is the model
+  // catalogue controller; providerHealthState is per-provider working state;
+  // endpointSummary is the DB-backed reliability/telemetry ledger.
+  catalogIndex: routingCatalogIndex,
+  providerHealthState: (providerID) => providerHealth.state(providerID),
+  endpointSummary: routingEndpointSummary,
   abortSession: (sid) => oc.abortSession(sid),
   // BET-418 §B: detect a running job whose parent opencode session is gone so
   // the sweeper can stop + clean it up (nobody left to report to).
@@ -836,6 +857,12 @@ rpcHandlers = buildHandlers({
   serverVersion: SERVER_VERSION,
   opencodeVersion: OPENCODE_VERSION,
   delegate: delegateEngine,
+  // BET-1252: routing-services readers shared with delegate (the routing:main
+  // channel). Same degradation contract:
+  // absent readers ⇒ absent services ⇒ the router returns the incumbent.
+  routingCatalogIndex,
+  routingProviderHealthState: (providerID) => providerHealth.state(providerID),
+  routingEndpointSummary,
   // BET-790: renderer read channel for a session's progress record (the
   // server store from src/server/progress.mjs). The write side is the AI's
   // progress_report tool → POST /api/progress.

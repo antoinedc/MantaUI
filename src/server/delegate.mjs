@@ -43,6 +43,7 @@ import { extractSubagentInfo } from "../shared/streamInterpretation.mjs";
 import { fuzzyMatchModel, suggestModels } from "../shared/modelGuide.mjs";
 import { chooseModel } from "../shared/modelRouter.mjs";
 import { listRoutableModels } from "./opencode.mjs";
+import { buildRoutingServices } from "./routingServices.mjs";
 
 // ---------------------------------------------------------------------------
 // Constants (mirrors capabilities.mjs exactly — reuse, do not diverge)
@@ -820,6 +821,27 @@ export async function startJob(input, deps = {}) {
     } catch {
       catalog = [];
     }
+    // Build the router's RoutingServices context from live box state (BET-1252).
+    // `deps.routingServices` (test injection) is used verbatim when present;
+    // otherwise the box-side builder assembles catalogue + accounts + health +
+    // declared + reliability from the readers in `deps`. Every reader inside
+    // buildRoutingServices is individually guarded and this whole assembly is
+    // wrapped so a failure here degrades to absent services → chooseSubagentModel
+    // returns the incumbent. Routing must never break a spawn.
+    let services = deps?.routingServices;
+    if (!services) {
+      try {
+        services = await buildRoutingServices(cfg, {
+          catalogIndex: deps.catalogIndex,
+          endpoints: catalog,
+          snapshots: quota,
+          providerHealthState: deps.providerHealthState,
+          endpointSummary: deps.endpointSummary,
+        });
+      } catch {
+        services = deps?.routingServices;
+      }
+    }
     effectiveModel = chooseSubagentModel({
       incumbent: deliverModel ?? null,
       catalog,
@@ -827,7 +849,7 @@ export async function startJob(input, deps = {}) {
       quota,
       agent: "general",
       nowMs: Date.now(),
-      services: deps?.routingServices,
+      services,
     });
   } catch {
     effectiveModel = deliverModel;
