@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<title>Mockup — Automatic Manta Routing</title>
+
+<!--
+  THE SPEC for the Automatic Manta Routing surfaces (BET-1226). This file is the
+  design contract, not a picture of one. Read docs/visual-verification.md before
+  editing.
+
+  Two rules make this a contract rather than decoration — both copied from
+  docs/screens/settings/mockup.html, which is the reference for this format:
+
+  1. It loads the app's REAL token stylesheet below. Every colour, spacing step,
+     radius, shadow and type stack resolves to the same variable the app uses at
+     runtime. There is deliberately NO `:root` block in this file — a mockup that
+     hardcodes its own hexes is not a spec, it is a picture, and it drifts the
+     moment a token is retuned.
+
+  2. Every surface here is annotated with the PRIMITIVE that must build it. The
+     implementer's job is to pass the right props, not to reproduce this markup.
+     The classes below exist only so this page renders; where a row says
+     "→ MenuOption", the shipped code must be a MenuOption.
+
+
+  ======================= WHAT MUST BE BUILT FROM PRIMITIVES =======================
+
+    surface                     build with
+    ------------------------    ----------------------------------------------
+    dropdown shell              Dropdown            (MenuItem.tsx)
+    Auto row / Server default   MenuOption          (MenuOption.tsx)
+    "auto" badge                Tag numeric tone    (Tag.tsx)
+    composer chip               SplitChip           (Chip.tsx)
+    settings / accounts card    GroupCard → Card    (Settings.tsx / Card.tsx)
+    every settings row          SettingsRow         (SettingsRow.tsx)
+    Balance / candidate chips   ChipGroup           (the `segmented` control)
+    model search input          the field style already in ModelsCard's EditModelModal
+
+  Adding a `className` escape hatch to any of those primitives is out of bounds
+  (epic standing decision 3). If a primitive cannot express something here, raise
+  it rather than working around it.
+
+
+  ============================ CONFORMANCE SCOPE ============================
+
+  IN scope — the delta this epic ships:
+    - the Auto row, its sub-line, and its position above Server default
+    - the composer chip's Auto label
+    - the "Automatic Manta Routing" card holding Balance and nothing else
+    - the "Models we couldn't identify" block
+    - Subscriptions + Custom endpoints merged into one Accounts list
+
+  OUT of scope — shown for context only, do NOT rebuild:
+    - the model list inside the dropdown (ships today)
+    - the Default/Main/Sub table and the spend ledger card (ship today)
+    - the composer's mic / attach / usage / schedules / secrets buttons
+-->
+
+<link rel="stylesheet" href="/src/renderer/tokens.css" />
+<link rel="stylesheet" href="/node_modules/@fontsource-variable/inter/index.css" />
+<link rel="stylesheet" href="/node_modules/@fontsource-variable/jetbrains-mono/index.css" />
+
+<style>
+  /* Page chrome — NOT part of the spec. Only the surfaces below are. */
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--canvas); color:var(--tx1);
+    font-family:var(--font-sans); line-height:var(--ui-lh);
+    font-size:var(--font-size-body); padding:var(--sp-10) var(--sp-6) var(--sp-12);
+  }
+  .wrap{max-width:920px;margin:0 auto;display:flex;flex-direction:column;gap:var(--sp-8)}
+  h1{font-size:var(--font-size-display);margin:0 0 var(--sp-2);letter-spacing:-.01em}
+  .lede{color:var(--tx3);margin:0 0 var(--sp-6)}
+  h2{
+    font-size:var(--font-size-chat-title);margin:0 0 var(--sp-3);
+    padding-bottom:var(--sp-2);border-bottom:1px solid var(--border-subtle);
+  }
+  .anno{
+    font-family:var(--font-mono);font-size:var(--font-size-2xs);color:var(--tx4);
+    margin:var(--sp-2) 0 0;
+  }
+  .anno b{color:var(--accent-tx);font-weight:500}
+
+  .frame{
+    background:var(--panel);border:1px solid var(--border);border-radius:var(--r-lg);
+    overflow:hidden;box-shadow:var(--shadow-md);
+  }
+  .frame-cap{
+    font-size:var(--font-size-2xs);text-transform:uppercase;letter-spacing:.06em;color:var(--tx4);
+    padding:var(--sp-2) var(--sp-3);border-bottom:1px solid var(--border-subtle);background:var(--card);
+  }
+  .frame-body{padding:var(--sp-5)}
+
+  /* ---- Dropdown (→ Dropdown) ---- */
+  .menu{
+    width:400px;background:var(--raised);border:1px solid var(--border);
+    border-radius:var(--r-lg);box-shadow:var(--shadow-md);overflow:hidden;
+  }
+  .menu .srch{
+    display:flex;align-items:center;gap:var(--sp-2);padding:var(--sp-2) var(--sp-3);
+    border-bottom:1px solid var(--border-subtle);color:var(--tx4);font-size:var(--font-size-small);
+  }
+  .menu .kbd{
+    margin-left:auto;font-size:var(--font-size-2xs);color:var(--tx4);
+    border:1px solid var(--border);border-radius:var(--r-xs);padding:1px var(--sp-1);
+  }
+  .menu .grp{
+    font-size:var(--font-size-2xs);text-transform:uppercase;letter-spacing:.07em;
+    color:var(--tx4);padding:var(--sp-3) var(--sp-3) var(--sp-1);font-weight:600;
+  }
+  .menu .ftr{
+    border-top:1px solid var(--border-subtle);padding:var(--sp-2) var(--sp-3);
+    font-size:var(--font-size-2xs);color:var(--tx4);display:flex;gap:var(--sp-2);
+  }
+
+  /* ---- Option row (→ MenuOption). Metrics mirror MenuOption exactly. ---- */
+  .row{
+    display:flex;align-items:center;gap:var(--sp-3);min-height:34px;
+    padding:0 var(--sp-2);margin-bottom:var(--sp-1);border-radius:var(--r-md);
+  }
+  .row.two{min-height:44px}
+  .row .tick{width:var(--sp-4);flex:none;color:var(--accent-tx);opacity:0;font-size:11px}
+  .row.sel .tick{opacity:1}
+  .row .lab{flex:1;min-width:0}
+  .row .lab b{
+    display:block;font-size:var(--font-size-small);font-weight:500;color:var(--tx1);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  }
+  .row.sel .lab b{color:var(--accent-tx);font-weight:600}
+  .row .lab span{
+    display:block;font-size:11.5px;color:var(--tx3);margin-top:2px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  }
+  .row.sel{background:var(--accent-bg)}
+
+  /* ---- Tag (→ Tag numeric). Metrics mirror Tag `md`. ---- */
+  .tag{
+    flex:none;display:inline-flex;align-items:center;font-family:var(--font-mono);
+    line-height:1;font-weight:500;height:23px;padding:0 var(--sp-2);font-size:11.5px;
+    border-radius:var(--r-full);border:1px solid var(--border);
+    background:var(--fill);color:var(--tx3);
+  }
+  .tag.accent{background:transparent;color:var(--accent-tx)}
+
+  /* ---- Composer + SplitChip (→ SplitChip) ---- */
+  .composer{
+    background:var(--card);border:1px solid var(--border);border-radius:var(--r-lg);
+    padding:var(--sp-3) var(--sp-3) var(--sp-2);
+  }
+  .composer .ph{color:var(--tx4);font-size:var(--font-size-body);padding:var(--sp-1) 0 var(--sp-3)}
+  .meta{display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap}
+  .split{
+    display:inline-flex;border:1px solid var(--border);border-radius:var(--r-full);
+    background:var(--fill);overflow:hidden;font-size:var(--font-size-xs);
+  }
+  .split .seg{display:flex;align-items:center;gap:var(--sp-1);padding:var(--sp-1) var(--sp-3);color:var(--tx2);white-space:nowrap}
+  .split .seg + .seg{border-left:1px solid var(--border)}
+  .split .seg.on{background:var(--accent-bg);color:var(--accent-tx)}
+  .spark{color:var(--accent)}
+  .chev{color:var(--tx4);font-size:9px}
+  .mbtn{
+    width:26px;height:26px;border:1px solid var(--border);border-radius:var(--r-sm);
+    display:inline-flex;align-items:center;justify-content:center;
+    color:var(--tx3);font-size:var(--font-size-xs);background:var(--fill);
+  }
+  .grow{flex:1}
+
+  /* ---- Settings card (→ GroupCard) + row (→ SettingsRow) ---- */
+  .card{
+    background:var(--card);border:1px solid var(--border);border-radius:var(--r-lg);
+    padding:var(--sp-4) var(--sp-4);
+  }
+  .card + .card{margin-top:var(--sp-3)}
+  .card .ttl{
+    font-size:var(--font-size-2xs);text-transform:uppercase;letter-spacing:.07em;
+    color:var(--tx4);font-weight:600;margin:0 0 var(--sp-3);
+  }
+  .srow{
+    display:flex;align-items:flex-start;gap:var(--sp-5);padding:var(--sp-3) 0;
+    border-bottom:1px solid var(--border-subtle);
+  }
+  .srow:last-of-type{border-bottom:0}
+  .srow .l{flex:1;min-width:0}
+  .srow .l b{display:block;font-size:var(--font-size-body);font-weight:500;color:var(--tx1)}
+  .srow .l span{display:block;font-size:12.5px;line-height:1.5;color:var(--tx3);margin-top:3px;max-width:54ch}
+  .srow .ctl{flex:none;display:flex;align-items:center;gap:var(--sp-2);padding-top:2px}
+  .state{font-size:var(--font-size-xs);align-self:center}
+  .state.ok{color:var(--ok)} .state.warn{color:var(--warn)}
+  .state.bad{color:var(--danger)} .state.quiet{color:var(--tx4)}
+  .note{
+    font-size:var(--font-size-xs);color:var(--tx4);margin:var(--sp-3) 0 0;
+    padding-top:var(--sp-3);border-top:1px solid var(--border-subtle);
+  }
+  .intro{font-size:var(--font-size-xs);color:var(--tx3);margin:0 0 var(--sp-3);max-width:62ch}
+
+  /* ---- ChipGroup (→ ChipGroup, the `segmented` control) ---- */
+  .chips{display:inline-flex;border:1px solid var(--border);border-radius:var(--r-md);overflow:hidden;flex:none;font-size:var(--font-size-xs)}
+  .chips i{font-style:normal;padding:var(--sp-1) var(--sp-3);color:var(--tx3);background:var(--fill)}
+  .chips i + i{border-left:1px solid var(--border)}
+  .chips i.on{background:var(--accent-solid);color:var(--on-accent);font-weight:600}
+  .chiprow{display:flex;gap:var(--sp-1);flex-wrap:wrap;margin-top:var(--sp-2)}
+  .chiprow i{
+    font-style:normal;font-size:var(--font-size-2xs);border:1px solid var(--border);
+    border-radius:var(--r-full);padding:3px var(--sp-2);color:var(--tx2);
+  }
+  .chiprow i.on{border-color:var(--accent);background:var(--accent-bg);color:var(--accent-tx)}
+  .field{
+    display:block;max-width:340px;background:var(--inset);border:1px solid var(--border);
+    border-radius:var(--r-sm);padding:var(--sp-2) var(--sp-3);
+    font-size:var(--font-size-xs);color:var(--tx1);margin-top:var(--sp-2);
+  }
+  .field em{font-style:normal;color:var(--tx4)}
+  .sub{display:block;font-size:var(--font-size-2xs);color:var(--tx4);margin-top:7px}
+  .sub b{color:var(--tx2)}
+  .link{font-size:var(--font-size-2xs);color:var(--tx4)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Automatic Manta Routing</h1>
+  <p class="lede">The five surfaces this epic ships. Every value on this page resolves to a token
+    in <code>src/renderer/tokens.css</code>; there are no hardcoded colours.</p>
+</header>
+
+<!-- ══════════════════════════════════ 1 ══════════════════════════════════ -->
+<section>
+  <h2>1 · Composer — the model dropdown, Auto on</h2>
+  <div class="frame">
+    <div class="frame-cap">chat · model dropdown open</div>
+    <div class="frame-body">
+      <div class="menu">
+        <div class="srch">🔍 <span>Search models</span><span class="kbd">esc</span></div>
+
+        <!-- header: TWO pinned rows, Auto first -->
+        <div class="row two sel">
+          <span class="tick">✓</span>
+          <span class="lab">
+            <b>Auto — Manta picks per task</b>
+            <span>Balanced · anthropic, plan under pace</span>
+          </span>
+          <span class="tag accent">auto</span>
+        </div>
+        <div class="row two">
+          <span class="tick">✓</span>
+          <span class="lab">
+            <b>Server default</b>
+            <span>Claude Opus 5 · set in Settings</span>
+          </span>
+        </div>
+
+        <!-- context only — ships today -->
+        <div class="grp">anthropic</div>
+        <div class="row"><span class="tick">✓</span><span class="lab"><b>Claude Opus 5</b></span><span class="tag">1M</span></div>
+        <div class="row"><span class="tick">✓</span><span class="lab"><b>Claude Opus 4.8</b></span><span class="tag">1M</span></div>
+        <div class="grp">openai</div>
+        <div class="row"><span class="tick">✓</span><span class="lab"><b>GPT-5.6 Sol</b></span><span class="tag">500k</span></div>
+        <div class="ftr">⚙ <span>Manage models…</span></div>
+      </div>
+    </div>
+  </div>
+  <p class="anno">
+    Auto is <b>index 0</b> of the roving order, always rendered, whether or not a server default exists.<br>
+    Both pinned rows are <b>MenuOption</b> with a <code>sub</code> (which is what makes them 44px).<br>
+    The reason goes in <b>sub</b> — there is no separate reason strip.<br>
+    Badge is <b>Tag numeric tone="accent"</b>. Selecting any model row turns Auto off; there is no other off switch.
+  </p>
+</section>
+
+<!-- ══════════════════════════════════ 2 ══════════════════════════════════ -->
+<section>
+  <h2>2 · Composer — the chip</h2>
+  <div class="frame">
+    <div class="frame-cap">chat · composer footer</div>
+    <div class="frame-body">
+      <div class="composer">
+        <div class="ph">Ask anything…</div>
+        <div class="meta">
+          <span class="split">
+            <span class="seg on"><span class="spark">✦</span> Auto · Opus 5 <span class="chev">▾</span></span>
+            <span class="seg">High <span class="chev">▾</span></span>
+            <span class="seg">⚡</span>
+          </span>
+          <span class="mbtn">🎙</span><span class="mbtn">📎</span>
+          <span class="grow"></span>
+          <span class="mbtn">◔</span><span class="mbtn">⏰</span><span class="mbtn">🔑</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="anno">
+    <b>SplitChip</b>, unchanged structurally. Only the left segment's string changes:
+    <code>Auto</code> before a decision, <code>Auto · &lt;model&gt;</code> after.<br>
+    Accent pair is <b>--accent-bg / --accent-tx</b> — the same pair <code>rightAccent</code> already uses. Do not add a second accent mechanism.<br>
+    While <code>models === null</code> the existing skeleton branch wins over the Auto label.
+  </p>
+</section>
+
+<!-- ══════════════════════════════════ 3 ══════════════════════════════════ -->
+<section>
+  <h2>3 · Settings → Models</h2>
+  <div class="frame">
+    <div class="frame-cap">settings · models</div>
+    <div class="frame-body">
+
+      <div class="card">
+        <div class="ttl">Automatic Manta Routing</div>
+        <div class="srow">
+          <div class="l">
+            <b>Balance</b>
+            <span>Economy favours the cheapest model that still clears the quality floor for each
+              kind of work. Performance favours the strongest. Each kind of work has a floor
+              Economy will not go below.</span>
+          </div>
+          <span class="ctl"><span class="chips"><i>Economy</i><i class="on">Balanced</i><i>Performance</i></span></span>
+        </div>
+        <p class="note">Turn routing on per conversation from the model picker. Auto only chooses
+          among models ticked <b>Main</b> below — and, for subagents, ticked <b>Sub</b>.</p>
+      </div>
+
+      <div class="card">
+        <div class="ttl">Models we couldn't identify</div>
+        <p class="intro">Served under a name the catalogue doesn't recognise, so Manta can't tell
+          what they are or what they're good at. They stay usable by hand. Identify one and Auto
+          can start choosing it.</p>
+
+        <div class="srow">
+          <div class="l">
+            <b>an endpoint / qwen3.6-27b</b>
+            <span>Matched automatically → Qwen3.6 27B · balanced · 262k context</span>
+          </div>
+          <span class="ctl"><span class="link">Change</span></span>
+        </div>
+
+        <div class="srow">
+          <div class="l">
+            <b>an endpoint / ornith</b>
+            <span>Four models share this name — which one is it?</span>
+            <span class="chiprow">
+              <i>Ornith 1.0 9B</i><i>Ornith 1.0 31B</i><i>Ornith 1.0 35B</i><i class="on">Ornith 1.0 397B</i>
+            </span>
+          </div>
+          <span class="ctl"><span class="tag">choose</span></span>
+        </div>
+
+        <div class="srow">
+          <div class="l">
+            <b>an endpoint / default</b>
+            <span>No match — tell us which model this is</span>
+            <span class="field">MiniMax-M3 <em>— long-context coding, perception, agent planning</em></span>
+            <span class="sub">Costs here: <b>free</b> · Caching: <b>none</b> · Use for: <b>whatever M3 is good at</b></span>
+          </div>
+          <span class="ctl"><span class="tag accent">save</span></span>
+        </div>
+
+        <p class="note">Can't say? Leave it. The model stays available to pick by hand — Auto just
+          won't choose something it can't describe.</p>
+      </div>
+
+      <div class="card">
+        <div class="ttl">Models</div>
+        <div class="srow"><div class="l"><b>Default · Main · Sub table</b><span>Unchanged. Your ticks are what Auto is allowed to choose from.</span></div></div>
+        <div class="srow"><div class="l"><b>Where your spend goes</b><span>Unchanged.</span></div></div>
+      </div>
+
+    </div>
+  </div>
+  <p class="anno">
+    The routing card is <b>schema-driven</b> — one <code>group: "Automatic Manta Routing"</code> holding the existing
+    <code>modelRoutingPreset</code> entry. No component work; the enable entry is deleted.<br>
+    Every row is <b>SettingsRow</b>; the segmented controls are <b>ChipGroup</b>; the model field reuses
+    <b>ModelsCard's existing input style</b>.<br>
+    Defaults on an unidentified row: costs <b>free</b>, caching <b>none</b> — "none" over-estimates cost, which is the safe direction.
+  </p>
+</section>
+
+<!-- ══════════════════════════════════ 4 ══════════════════════════════════ -->
+<section>
+  <h2>4 · Settings → Accounts</h2>
+  <div class="frame">
+    <div class="frame-cap">settings · accounts</div>
+    <div class="frame-body">
+      <div class="card">
+        <div class="ttl">Accounts</div>
+
+        <div class="srow">
+          <div class="l"><b>Claude</b><span>Supported · subscription · Max 20x</span></div>
+          <span class="state ok">5h window 41% · under pace</span>
+        </div>
+        <div class="srow">
+          <div class="l"><b>OpenAI · Codex</b><span>Supported · subscription</span></div>
+          <span class="state quiet">Not connected</span>
+        </div>
+        <div class="srow">
+          <div class="l"><b>A gateway</b><span>Supported · prepaid credit</span></div>
+          <span class="state ok">$18.40 remaining</span>
+        </div>
+        <div class="srow">
+          <div class="l"><b>A prepaid endpoint</b><span>Custom · declared $0.02 / $0.08 per M</span></div>
+          <span class="ctl"><span class="state bad">Out of credit</span><span class="link">Try again</span></span>
+        </div>
+        <div class="srow">
+          <div class="l"><b>A free endpoint</b><span>Custom · Auto needs: which model, and whether it caches</span></div>
+          <span class="state quiet">No usage data</span>
+        </div>
+
+        <p class="note">One list: subscriptions and custom endpoints are both a way to reach a model
+          that costs something and can run out. Supported rows show real numbers; custom rows show
+          none, and say what Auto still needs.</p>
+      </div>
+    </div>
+  </div>
+  <p class="anno">
+    <b>One</b> list and <b>one</b> row renderer — merging Subscriptions and Custom endpoints is the point of the issue.<br>
+    <b>"No usage data"</b> is the literal, correct state for every custom provider. Never a zero, never a bar —
+    each of those is a specific false claim.<br>
+    The gaps named in the help line are exactly <code>autoEligibility(...).missing</code>, so the UI cannot
+    claim something different from what blocks routing.<br>
+    <b>Try again</b> appears only on an out-of-credit row (rate-limited recovers on its own) and must report
+    <b>both</b> outcomes.
+  </p>
+</section>
+
+</div>
+</body>
+</html>
