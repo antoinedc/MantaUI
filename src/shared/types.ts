@@ -1892,6 +1892,8 @@ export type UsageWindow = {
   used?: number; // absolute count when the provider exposes one
   limit?: number; // absolute cap when the provider exposes one
   resetsAt?: number; // epoch ms
+  startedAt?: number; // epoch ms — when this window opened; absent when the
+  // provider does not report one (never guess it from resetsAt minus a window length)
   binding?: boolean; // the provider says this window bites first
   // True when this reading describes a window whose reset instant has already
   // passed: the provider has not published the new window's numbers yet, so
@@ -1914,6 +1916,10 @@ export type UsageSnapshot = {
   // src/server/usageAdapters/ upholds this.
   windows: UsageWindow[];
   extras?: { label: string; value: string }[]; // credits balance, model pools…
+  balance?: number; // account credit in dollars; may be NEGATIVE (overdrawn).
+  // Absent = unknown, never 0.
+  overagePrice?: number; // $ per unit beyond the included allowance, when published
+  exhausted?: boolean; // the provider will refuse work now
   fetchedAt: number; // epoch ms of the successful fetch
 };
 

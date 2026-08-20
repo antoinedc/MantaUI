@@ -100,6 +100,20 @@ test("normalizeWindow: resetsAt — epoch seconds vs epoch ms vs ISO string", ()
   assert.equal(bad.pct, 10);
 });
 
+test("normalizeWindow: startedAt survives — epoch seconds vs epoch ms vs ISO string", () => {
+  // < 1e12 → treated as epoch seconds, like resetsAt.
+  assert.equal(normalizeWindow({ pct: 10, startedAt: 1735689600 }).startedAt, 1735689600000);
+  // >= 1e12 → already ms.
+  assert.equal(normalizeWindow({ pct: 10, startedAt: 1735689600000 }).startedAt, 1735689600000);
+  // ISO string → Date.parse.
+  const iso = normalizeWindow({ pct: 10, startedAt: "2026-01-01T00:00:00.000Z" });
+  assert.equal(iso.startedAt, Date.parse("2026-01-01T00:00:00.000Z"));
+  // Unparseable string → field dropped, window still valid.
+  const bad = normalizeWindow({ pct: 10, startedAt: "not-a-date" });
+  assert.equal(bad.startedAt, undefined);
+  assert.equal(bad.pct, 10);
+});
+
 test("normalizeWindow: non-finite counts are dropped, not coerced to NaN/Infinity", () => {
   // used fails to coerce → falls through to "missing denominators" → null.
   assert.equal(normalizeWindow({ used: "abc", limit: 200 }), null);
@@ -519,6 +533,25 @@ test("poller: a genuine content change publishes again", async () => {
   assert.equal(published.length, 2);
 });
 
+test("poller: a snapshot whose ONLY change is balance publishes again (balance is in contentKey)", async () => {
+  let balance = 14.2;
+  const adapter = makeAdapter("a", {
+    detect: async () => true,
+    fetch: async () => ({ windows: [{ kind: "session", label: "s", pct: 20 }], balance }),
+  });
+  const published = [];
+  const poller = createUsagePoller({
+    adapters: [adapter],
+    now: () => 1000,
+    publish: (evt) => published.push(evt),
+  });
+  await poller.tick();
+  assert.equal(published.length, 1);
+  balance = 11.1; // windows unchanged — only the credit balance moved
+  await poller.tick();
+  assert.equal(published.length, 2, "a changed balance must surface a usage.updated");
+});
+
 test("poller: in-flight guard prevents overlapping ticks", async () => {
   let concurrent = 0;
   let maxConcurrent = 0;
@@ -616,6 +649,15 @@ test("claude adapter: a 1% reading is 1%, not 100% (reset-time regression)", asy
   assert.equal(snap.windows.find((w) => w.kind === "session").pct, 1);
 });
 
+test("claude adapter: a 100% window reports exhausted", async () => {
+  const sample = { rate_limits: { five_hour: { utilization: 100 } } };
+  const snap = await claudeAdapter.fetch({
+    fetchImpl: async () => fakeResponse(200, sample),
+    readCredentials: async () => ({ accessToken: "tok" }),
+  });
+  assert.equal(snap.exhausted, true);
+});
+
 test("claude adapter: detect() requires a non-empty accessToken", async () => {
   assert.equal(await claudeAdapter.detect({ readCredentials: async () => ({ accessToken: "x" }) }), true);
   assert.equal(await claudeAdapter.detect({ readCredentials: async () => null }), false);
@@ -662,6 +704,49 @@ test("codex adapter: prefers reset_at, falls back to now + reset_after_seconds",
   assert.equal(weekly.pct, 91);
   assert.equal(weekly.resetsAt, 1735700000000);
   assert.equal(snap.extras.find((e) => e.label === "Credits balance").value, "14.2");
+  assert.equal(snap.balance, 14.2, "credits balance promoted to the top-level balance field");
+  assert.equal("exhausted" in snap, false, "a positive balance with windows < 100% is not exhausted");
+});
+
+test("codex adapter: a negative balance is preserved as negative and reports exhausted", async () => {
+  const sample = {
+    rate_limit: { primary_window: { used_percent: 30, reset_after_seconds: 60 } },
+    credits: { balance: -4.5 },
+  };
+  const snap = await codexAdapter.fetch({
+    fetchImpl: async () => fakeResponse(200, sample),
+    readToken: async () => "tok",
+    now: () => 0,
+  });
+  assert.equal(snap.balance, -4.5, "negative (overdrawn) balance is not clamped");
+  assert.equal(snap.extras.find((e) => e.label === "Credits balance").value, "-4.5");
+  assert.equal(snap.exhausted, true, "a balance <= 0 means the account will refuse work");
+});
+
+test("codex adapter: a 100% window reports exhausted even with a positive balance", async () => {
+  const sample = {
+    rate_limit: { primary_window: { used_percent: 100, reset_after_seconds: 60 } },
+    credits: { balance: 10 },
+  };
+  const snap = await codexAdapter.fetch({
+    fetchImpl: async () => fakeResponse(200, sample),
+    readToken: async () => "tok",
+    now: () => 0,
+  });
+  assert.equal(snap.balance, 10);
+  assert.equal(snap.exhausted, true, "a window at 100% is exhausted regardless of balance");
+});
+
+test("codex adapter: absent credits balance stays undefined, never 0", async () => {
+  const sample = { rate_limit: { primary_window: { used_percent: 5, reset_after_seconds: 60 } } };
+  const snap = await codexAdapter.fetch({
+    fetchImpl: async () => fakeResponse(200, sample),
+    readToken: async () => "tok",
+    now: () => 0,
+  });
+  assert.equal("balance" in snap, false, "no credits field → no balance key at all");
+  assert.equal(snap.balance, undefined, "absent balance is undefined, not 0");
+  assert.equal("exhausted" in snap, false);
 });
 
 test("codex adapter: no credits, no plan_type — extras/planLabel omitted, not fabricated", async () => {
@@ -743,6 +828,18 @@ test("kimi adapter: weekly (string counts) + session (300-minute limits entry, r
   assert.equal(session.limit, 200);
   assert.equal(session.pct, 70);
   assert.equal(session.resetsAt, 1735700000000); // epoch seconds → ms
+});
+
+test("kimi adapter: a window at/over its limit reports exhausted", async () => {
+  const sample = {
+    usage: { limit: 200, used: 200 },
+    limits: [{ window: { duration: 300, timeUnit: "minute" }, detail: { limit: 200, used: 200 } }],
+  };
+  const snap = await kimiAdapter.fetch({
+    fetchImpl: async () => fakeResponse(200, sample),
+    readKey: async () => "key",
+  });
+  assert.equal(snap.exhausted, true);
 });
 
 test("kimi adapter: a 5h window given in hours (not minutes) still resolves", async () => {

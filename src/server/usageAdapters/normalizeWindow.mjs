@@ -91,6 +91,14 @@ export function normalizeWindow(raw) {
     if (Number.isFinite(parsed)) window.resetsAt = parsed;
   }
 
+  const rawStarted = raw.startedAt;
+  if (typeof rawStarted === "number" && Number.isFinite(rawStarted)) {
+    window.startedAt = rawStarted < 1e12 ? rawStarted * 1000 : rawStarted;
+  } else if (typeof rawStarted === "string" && rawStarted) {
+    const parsed = Date.parse(rawStarted);
+    if (Number.isFinite(parsed)) window.startedAt = parsed;
+  }
+
   if (raw.binding === true) window.binding = true;
 
   return window;

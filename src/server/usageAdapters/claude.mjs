@@ -12,6 +12,7 @@ import { readFile } from "node:fs/promises";
 import { CREDENTIALS_PATH, parseCredentials } from "../claudeAuth.mjs";
 import { normalizeWindow, usageWindowLabel } from "./normalizeWindow.mjs";
 import { httpError } from "./httpError.mjs";
+import { isUsageAtLimit } from "../usageStopper.mjs";
 
 const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 
@@ -99,9 +100,12 @@ export const claudeAdapter = {
     const sonnetExtra = extraFor(limits?.seven_day_sonnet ?? limits?.["7d_sonnet"], "Sonnet (7d)");
     if (sonnetExtra) extras.push(sonnetExtra);
 
+    const exhausted = isUsageAtLimit(windows);
+
     return {
       provider: "claude",
       windows,
+      ...(exhausted ? { exhausted: true } : {}),
       ...(extras.length > 0 ? { extras } : {}),
     };
   },
