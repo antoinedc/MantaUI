@@ -541,6 +541,7 @@ export function chooseSubagentModel({
   quota = [],
   agent = "general",
   nowMs = Date.now(),
+  services,
 } = {}) {
   // Normalise the incumbent into catalog shape ({providerID, id}) for the
   // comparison inside chooseModel, so its `changed` flag / modelKey() treat a
@@ -558,6 +559,7 @@ export function chooseSubagentModel({
       quota,
       policy,
       nowMs,
+      services,
     });
     // On the off-path / no-survivors path chooseModel returns the very
     // catalogIncumbent reference it was handed; map that back to the original
@@ -613,6 +615,7 @@ export function chooseMainModel({
   quota = [],
   agent = "build",
   nowMs = Date.now(),
+  services,
 } = {}) {
   const incumbentShape = incumbent
     ? { providerID: incumbent.providerID, modelID: incumbent.modelID ?? incumbent.id ?? "" }
@@ -631,6 +634,7 @@ export function chooseMainModel({
       quota,
       policy,
       nowMs,
+      services,
     });
     const model =
       decision?.model === catalogIncumbent
@@ -823,6 +827,7 @@ export async function startJob(input, deps = {}) {
       quota,
       agent: "general",
       nowMs: Date.now(),
+      services: deps?.routingServices,
     });
   } catch {
     effectiveModel = deliverModel;

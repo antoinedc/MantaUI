@@ -1,271 +1,333 @@
 import { describe, it, expect } from "vitest";
-import {
-  filterByConstraints,
-  scarcity,
-  effectivePrice,
-  chooseModel,
-  REFERENCE_PRICE,
-  FREE_FLOOR,
-  AGENT_FLOOR,
-  AGENT_TIER,
-} from "./modelRouter.mjs";
+import { chooseModel, AGENT_TIER, PRESETS, type RoutingServices } from "./modelRouter.mjs";
 import { tierRank } from "./modelGuide.mjs";
-import type { Model } from "./modelRouter.mjs";
+import { AGENT_FLOOR_SCORE } from "./modelQuality.mjs";
 
-function m(id: string, over: Partial<Model> = {}): Model {
-  return { providerID: "anthropic", id, status: "active", cost: { input: 0, output: 0 }, ...over };
+// A catalogue entry field that forces a precise, known quality score so tests
+// control the tier band deterministically. qualityScore's benchmark path wins
+// over the family seed; the identity percentile is the score itself.
+const CHECK = { name: "SWE-Bench Verified", score: 0.5 };
+
+const TIER_SCORE: Record<string, number> = { fast: 0.25, balanced: 0.55, deep: 0.85 };
+
+type EndpointOver = Record<string, unknown> & { providerID?: string; tier?: string; score?: number };
+type Endpoint = Record<string, unknown>;
+
+function endpoint(id: string, over: EndpointOver = {}): Endpoint {
+  const { providerID = "p", tier = "balanced", score, ...rest } = over;
+  return {
+    providerID,
+    id,
+    status: "active",
+    cost: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 0.5 },
+    capabilities: { toolcall: true, input: { image: true, pdf: true } },
+    _score: score ?? TIER_SCORE[tier],
+    ...rest,
+  };
 }
 
-describe("tierRank", () => {
-  it("orders fast < balanced < deep, unknown to balanced", () => {
-    expect(tierRank("fast")).toBe(0);
-    expect(tierRank("balanced")).toBe(1);
-    expect(tierRank("deep")).toBe(2);
-    expect(tierRank("unknown")).toBe(1);
-    expect(tierRank(undefined)).toBe(1);
-  });
-});
+function defaultDeclared(catalog: Endpoint[]): Record<string, { catalogId: string }> {
+  return Object.fromEntries(catalog.map((c) => [`${c.providerID}/${c.id}`, { catalogId: String(c.id) }]));
+}
 
-describe("filterByConstraints", () => {
-  it("drops a model whose context limit leaves no headroom", () => {
-    const ok = m("ok", { limit: { context: 125 } });
-    const bad = m("bad", { limit: { context: 124 } });
-    const res = filterByConstraints([ok, bad], { contextTokens: 100 });
-    expect(res.map((x) => x.id)).toEqual(["ok"]);
-  });
+type RouteOpts = {
+  catalog: Endpoint[];
+  policy?: Record<string, unknown>;
+  intent?: Record<string, unknown>;
+  services?: Record<string, unknown>;
+  nowMs?: number;
+};
 
-  it("drops on toolcall:false when tools are needed, keeps missing metadata", () => {
-    const good = m("good", { capabilities: { toolcall: true } });
-    const bad = m("bad", { capabilities: { toolcall: false } });
-    const missing = m("missing"); // no capabilities at all
-    const res = filterByConstraints([good, bad, missing], { needs: { tools: true } });
-    expect(res.map((x) => x.id)).toEqual(["good", "missing"]);
+function route({ catalog, policy, intent = {}, services: extra = {}, nowMs = 0 }: RouteOpts) {
+  const services: RoutingServices = {
+    catalogEntryFor: (c: any) => ({ benchmarks: [{ ...CHECK, score: c?._score }] }),
+    qualityField: { benchmarkPercentile: (_n: string, s: any) => s },
+    declared: defaultDeclared(catalog),
+    accounts: {},
+    health: {},
+    telemetry: {},
+    ...(extra as RoutingServices),
+  };
+  return chooseModel({
+    intent: { kind: "start", agent: "general", ...intent },
+    catalog,
+    policy,
+    nowMs,
+    services,
   });
+}
 
-  it("drops on missing image input when images are needed", () => {
-    const good = m("good", { capabilities: { input: { image: true } } });
-    const bad = m("bad", { capabilities: { input: { image: false } } });
-    const missing = m("missing");
-    const res = filterByConstraints([good, bad, missing], { needs: { image: true } });
-    expect(res.map((x) => x.id)).toEqual(["good", "missing"]);
-  });
+const keyOf = (m: { providerID?: string; id?: string } | null | undefined) =>
+  m ? `${m.providerID}/${m.id}` : "";
 
-  it("drops on missing pdf input when pdfs are needed", () => {
-    const good = m("good", { capabilities: { input: { pdf: true } } });
-    const hasImageButNoPdf = m("img", { capabilities: { input: { image: true } } });
-    const missing = m("missing");
-    const res = filterByConstraints([good, hasImageButNoPdf, missing], { needs: { pdf: true } });
-    expect(res.map((x) => x.id)).toEqual(["good", "missing"]);
-  });
-
-  it("drops on non-active status, keeps missing status", () => {
-    const active = m("active", { status: "active" });
-    const retired = m("retired", { status: "retired" });
-    const deprecated = m("deprecated", { status: "deprecated" });
-    const noStatus = m("noStatus");
-    const res = filterByConstraints([active, retired, deprecated, noStatus]);
-    expect(res.map((x) => x.id)).toEqual(["active", "noStatus"]);
-  });
-
-  it("keeps models with missing metadata (permissive) on every gate", () => {
-    const bare = m("bare");
-    const res = filterByConstraints([bare], {
-      contextTokens: 100,
-      needs: { tools: true, image: true, pdf: true },
-    });
-    expect(res.map((x) => x.id)).toEqual(["bare"]);
-  });
-});
-
-describe("scarcity", () => {
-  it("returns 0 with no window or pct below 50", () => {
-    expect(scarcity(undefined, 0)).toBe(0);
-    expect(scarcity(null, 0)).toBe(0);
-    expect(scarcity({}, 0)).toBe(0);
-    expect(scarcity({ pct: 49 }, 0)).toBe(0);
-  });
-
-  it("ramps at 50/75/89/100", () => {
-    expect(scarcity({ pct: 50 }, 0)).toBe(0);
-    expect(scarcity({ pct: 75 }, 0)).toBe(0.5);
-    expect(scarcity({ pct: 89 }, 0)).toBeCloseTo(0.78, 5);
-    expect(scarcity({ pct: 100 }, 0)).toBe(1);
-  });
-
-  it("returns 0 on a stale reading", () => {
-    expect(scarcity({ pct: 100, stale: true }, 0)).toBe(0);
-  });
-
-  it("is lower near a reset", () => {
-    const now = 1_000_000;
-    const far = scarcity({ pct: 89, resetsAt: now + 25 * 60 * 60 * 1000 }, now);
-    const near = scarcity({ pct: 89, resetsAt: now }, now);
-    expect(far).toBeCloseTo(0.78, 5);
-    expect(near).toBeCloseTo(0.78 * 0.25, 5);
-    expect(near).toBeLessThan(far);
-  });
-
-  it("always returns a finite number in [0,1]", () => {
-    for (const w of [{ pct: -5 }, { pct: 200 }, { pct: 75, resetsAt: 0 }, { pct: 40 }]) {
-      const v = scarcity(w, 1e6);
-      expect(Number.isFinite(v)).toBe(true);
-      expect(v).toBeGreaterThanOrEqual(0);
-      expect(v).toBeLessThanOrEqual(1);
-    }
-  });
-});
-
-describe("effectivePrice", () => {
-  it("prices a dollar model by cost with no quota window", () => {
-    const model = m("paid", { cost: { input: 2, output: 3 } });
-    expect(effectivePrice(model, [], 0)).toBe(5);
-  });
-
-  it("blends quota scarcity into a subscription model at 89%", () => {
-    const model = m("sub", { providerID: "anthropic", cost: { input: 0, output: 0 } });
-    const quota = [{ providerIDs: ["anthropic"], pct: 89 }];
-    expect(effectivePrice(model, quota, 0)).toBeCloseTo(0.78 * REFERENCE_PRICE, 5);
-  });
-
-  it("gives a free model with no window the FREE_FLOOR", () => {
-    const model = m("free", { cost: { input: 0, output: 0 } });
-    expect(effectivePrice(model, [], 0)).toBe(FREE_FLOOR);
-  });
-});
-
-describe("chooseModel", () => {
-  it("honours the agent floor under economy (general raised fast -> balanced)", () => {
-    const fast = m("claude-haiku-4"); // tier fast
-    const balanced = m("claude-sonnet-4"); // tier balanced
-    const res = chooseModel({
-      intent: { kind: "start", agent: "general" },
-      catalog: [balanced, fast],
-      policy: { preset: "economy" },
-      nowMs: 0,
-    });
-    expect(AGENT_FLOOR.general).toBe("balanced");
+describe("PRESETS / AGENT_TIER", () => {
+  it("exposes the three presets and the tier table read by the renderer", () => {
+    expect(PRESETS).toEqual(["economy", "balanced", "performance"]);
+    expect(AGENT_TIER.balanced.general).toBe("balanced");
     expect(AGENT_TIER.economy.general).toBe("fast");
-    // floor must win: a fast model exists but the lower bound is balanced
-    expect(res.model?.id).toBe("claude-sonnet-4");
-    expect(res.reason).toBeTruthy();
   });
+});
 
-  it("is deterministic across 100 shuffles of the catalog", () => {
-    const catalog = [
-      m("claude-sonnet-4"),
-      m("gpt-4o"),
-      m("gpt-5"),
-      m("claude-haiku-4"),
-    ];
-    const base = chooseModel({
-      intent: { kind: "start", agent: "general", incumbent: m("claude-sonnet-4") },
-      catalog,
-      policy: { preset: "balanced" },
-      nowMs: 0,
-    });
-    for (let i = 0; i < 100; i++) {
-      const shuffled = [...catalog].sort(() => Math.random() - 0.5);
-      const res = chooseModel({
-        intent: { kind: "start", agent: "general", incumbent: m("claude-sonnet-4") },
-        catalog: shuffled,
-        policy: { preset: "balanced" },
-        nowMs: 0,
-      });
-      expect(res.model?.id).toBe(base.model?.id);
-    }
-  });
-
-  it("returns the incumbent and non-empty reason on every path", () => {
-    const incumbent = m("claude-sonnet-4");
-    const paths = [
-      chooseModel({
-        intent: { kind: "mid-exchange", agent: "general", incumbent },
-        catalog: [m("claude-haiku-4")],
-        policy: { preset: "balanced" },
-        nowMs: 0,
-      }),
-      chooseModel({
-        intent: { kind: "start", agent: "general", incumbent },
-        catalog: [m("claude-sonnet-4")],
-        policy: {},
-        nowMs: 0,
-      }),
-      chooseModel({
-        intent: { kind: "start", agent: "general", incumbent },
-        catalog: [m("dead", { status: "retired" })],
-        policy: { preset: "balanced" },
-        nowMs: 0,
-      }),
-      chooseModel({
-        intent: { kind: "start", agent: "general" },
-        catalog: [m("claude-sonnet-4")],
-        policy: { preset: "balanced" },
-        nowMs: 0,
-      }),
-    ];
-    for (const p of paths) {
-      expect(typeof p.reason).toBe("string");
-      expect(p.reason.length).toBeGreaterThan(0);
-    }
-  });
-
-  it("returns the incumbent unchanged when the conversation did not activate routing", () => {
-    const incumbent = m("claude-sonnet-4");
-    const res = chooseModel({
-      intent: { kind: "start", agent: "general", incumbent },
-      catalog: [m("claude-haiku-4")],
-      policy: {},
-      nowMs: 0,
-    });
+describe("chooseModel — off-path and invariants", () => {
+  it("returns the incumbent by reference when routing is not activated", () => {
+    const incumbent = endpoint("m", { providerID: "a" });
+    const res = route({ catalog: [endpoint("other")], policy: {}, intent: { incumbent } });
     expect(res.model).toBe(incumbent);
     expect(res.changed).toBe(false);
     expect(res.reason).toBe("routing not activated for this conversation");
   });
 
-  it("REGRESSION: routing activates from a preset alone, without any enabled flag (BET-1251)", () => {
-    // BET-1243 deleted the global `enabled` toggle; activation is per
-    // conversation via the composer's preset pick. A preset in the policy must
-    // be sufficient — no `enabled` field is consulted.
-    const cheap = m("claude-haiku-4"); // tier fast
-    const balanced = m("claude-sonnet-4"); // tier balanced
-    const res = chooseModel({
-      intent: { kind: "start", agent: "general", incumbent: m("claude-opus-4") },
-      catalog: [cheap, balanced],
-      policy: { preset: "economy" }, // no enabled key at all
-      nowMs: 0,
+  it("never routes mid-exchange", () => {
+    const incumbent = endpoint("m", { providerID: "a" });
+    const cheap = endpoint("other", { tier: "fast" });
+    const res = route({
+      catalog: [incumbent, cheap],
+      policy: { preset: "performance" },
+      intent: { kind: "mid-exchange", incumbent },
     });
-    expect(res.model?.id).toBe("claude-sonnet-4");
-    expect(res.changed).toBe(true);
+    expect(res.model).toBe(incumbent);
+    expect(res.changed).toBe(false);
+    expect(res.reason).toBe("mid-exchange switching is disabled");
   });
 
-  it("returns the incumbent when nothing survives filtering", () => {
-    const incumbent = m("claude-sonnet-4");
-    const res = chooseModel({
-      intent: { kind: "start", agent: "general", incumbent },
-      catalog: [m("dead", { status: "retired" })],
+  it("returns incumbent + non-empty reason when nothing survives filtering", () => {
+    const incumbent = endpoint("m", { providerID: "a" });
+    const res = route({
+      catalog: [endpoint("dead", { status: "retired" })],
       policy: { preset: "balanced" },
-      nowMs: 0,
+      intent: { incumbent },
     });
     expect(res.model).toBe(incumbent);
     expect(res.changed).toBe(false);
     expect(res.reason).toContain("no general model passes constraints");
   });
 
-  it("REGRESSION: mid-exchange never switches", () => {
-    const incumbent = m("claude-opus-4");
-    // A far cheaper, perfectly valid candidate exists — switching must still
-    // be refused: replaying one model's thinking blocks to another is a
-    // documented source of provider errors, and the cold cache write costs
-    // more than it saves.
-    const cheap = m("claude-haiku-4");
-    const res = chooseModel({
-      intent: { kind: "mid-exchange", agent: "general", incumbent },
-      catalog: [incumbent, cheap],
-      policy: { preset: "performance" },
-      nowMs: 0,
+  it("REGRESSION: routing activates from a preset alone (BET-1251)", () => {
+    const cheap = endpoint("haiku-4", { tier: "fast" });
+    const balanced = endpoint("sonnet-4", { tier: "balanced" });
+    const res = route({
+      catalog: [cheap, balanced],
+      policy: { preset: "economy" },
+      intent: { incumbent: endpoint("opus-4", { providerID: "a" }) },
+    });
+    expect(res.model?.id).toBe("sonnet-4");
+    expect(res.changed).toBe(true);
+  });
+});
+
+describe("chooseModel — hard stages (eligibility, capability, health)", () => {
+  it("honours the agent floor under economy (general raised fast -> balanced)", () => {
+    expect(AGENT_FLOOR_SCORE.general).toBe(0.4);
+    expect(AGENT_TIER.economy.general).toBe("fast");
+    const fast = endpoint("haiku-4", { tier: "fast" });
+    const balanced = endpoint("sonnet-4", { tier: "balanced" });
+    const res = route({ catalog: [balanced, fast], policy: { preset: "economy" } });
+    if (tierRank(AGENT_TIER.economy.general) < tierRank("balanced")) {
+      // floor must win: a fast model exists but the lower bound is balanced
+      expect(res.model?.id).toBe("sonnet-4");
+    }
+    expect(res.model).toBeTruthy();
+  });
+
+  it("endpoints do not merge — two providers of one model are two candidates", () => {
+    const dear = endpoint("m", { providerID: "a" });
+    const cheap = endpoint("m", { providerID: "b", cost: { input: 0.1, output: 0.1, cacheRead: 0.05, cacheWrite: 0.05 } });
+    const res = route({ catalog: [dear, cheap], policy: { preset: "balanced" } });
+    expect(res.model?.providerID).toBe("b");
+    expect(res.alternatives.some((x) => keyOf(x) === keyOf(dear))).toBe(true);
+  });
+
+  it("cheaper blended price wins between two endpoints of the same model", () => {
+    const a = endpoint("m", { providerID: "a", cost: { input: 1, output: 1, cacheRead: 0.5, cacheWrite: 0.5 } });
+    const b = endpoint("m", { providerID: "b", cost: { input: 5, output: 5, cacheRead: 2.5, cacheWrite: 2.5 } });
+    const res = route({ catalog: [b, a], policy: { preset: "balanced" } });
+    expect(res.model?.providerID).toBe("a");
+  });
+
+  it("the cache case: identical input/output, the caching endpoint wins", () => {
+    const caching = endpoint("m", { providerID: "a", cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } });
+    const noCache = endpoint("m", { providerID: "b", cost: { input: 1, output: 1 } });
+    const res = route({
+      catalog: [noCache, caching],
+      policy: { preset: "balanced" },
+      services: { declared: { ...defaultDeclared([caching, noCache]), "b/m": { catalogId: "m", caches: true } } },
+    });
+    expect(res.model?.providerID).toBe("a");
+  });
+
+  it("tool filter fires: a tool-requiring intent drops toolcall:false", () => {
+    const good = endpoint("m", { providerID: "a", capabilities: { toolcall: true, input: { image: true, pdf: true } } });
+    const bad = endpoint("m", { providerID: "b", capabilities: { toolcall: false, input: { image: true, pdf: true } } });
+    const res = route({
+      catalog: [bad, good],
+      policy: { preset: "balanced" },
+      intent: { needs: { tools: true } },
+    });
+    expect(res.model?.providerID).toBe("a");
+    expect(res.alternatives.find((x) => keyOf(x) === keyOf(bad))).toBeUndefined();
+  });
+
+  it("modality: an image-carrying turn drops an endpoint that cannot take images", () => {
+    const good = endpoint("m", { providerID: "a" });
+    const noImg = endpoint("m", { providerID: "b", capabilities: { toolcall: true, input: { image: false, pdf: true } } });
+    const res = route({
+      catalog: [noImg, good],
+      policy: { preset: "balanced" },
+      intent: { needs: { image: true } },
+    });
+    expect(res.model?.providerID).toBe("a");
+  });
+
+  it("unidentifiable excluded: autoEligibility false is never chosen", () => {
+    const known = endpoint("known");
+    const opaque = endpoint("opaque", { providerID: "q" });
+    // `opaque` is deliberately NOT declared, so its identity is unknown.
+    const res = route({
+      catalog: [opaque, known],
+      policy: { preset: "balanced" },
+      services: { declared: defaultDeclared([known]) },
+    });
+    expect(res.model?.id).toBe("known");
+  });
+
+  it("unhealthy excluded: an out-of-credit provider is unselectable even when sole candidate", () => {
+    const only = endpoint("m", { providerID: "a" });
+    const incumbent = endpoint("inc", { providerID: "x" });
+    const res = route({
+      catalog: [only],
+      policy: { preset: "balanced" },
+      services: { health: { a: "out-of-credit" } },
+      intent: { incumbent },
     });
     expect(res.model).toBe(incumbent);
     expect(res.changed).toBe(false);
-    expect(res.reason).toBe("mid-exchange switching is disabled");
+    expect(res.reason).toContain("out-of-credit");
+  });
+
+  it("rate-limited is also excluded as a hard constraint", () => {
+    const only = endpoint("m", { providerID: "a" });
+    const incumbent = endpoint("inc", { providerID: "x" });
+    const res = route({
+      catalog: [only],
+      policy: { preset: "balanced" },
+      services: { health: { a: "rate-limited" } },
+      intent: { incumbent },
+    });
+    expect(res.model).toBe(incumbent);
+    expect(res.reason).toContain("rate-limited");
+  });
+});
+
+describe("chooseModel — soft ordering (stage 3)", () => {
+  it("reliability outranks price within a model: a penalised endpoint loses to a dearer reliable one", () => {
+    const reliable = endpoint("m", { providerID: "a", cost: { input: 10, output: 10, cacheRead: 5, cacheWrite: 5 } });
+    const unreliable = endpoint("m", { providerID: "b", cost: { input: 1, output: 1, cacheRead: 0.5, cacheWrite: 0.5 } });
+    const res = route({
+      catalog: [unreliable, reliable],
+      policy: { preset: "balanced" },
+      services: {
+        reliability: {
+          samples: { "b/m": { requests: 30, errored: 15, rate: 0.5 } },
+          baseline: { m: { rate: 0.1, n: 100 } },
+        },
+      },
+    });
+    expect(res.model?.providerID).toBe("a");
+  });
+
+  it("below the sample floor no penalty applies and cost decides", () => {
+    const reliable = endpoint("m", { providerID: "a", cost: { input: 10, output: 10, cacheRead: 5, cacheWrite: 5 } });
+    const cheap = endpoint("m", { providerID: "b", cost: { input: 1, output: 1, cacheRead: 0.5, cacheWrite: 0.5 } });
+    const res = route({
+      catalog: [cheap, reliable],
+      policy: { preset: "balanced" },
+      services: {
+        reliability: {
+          samples: { "b/m": { requests: 3, errored: 3, rate: 1 } },
+          baseline: { m: { rate: 0.1, n: 100 } },
+        },
+      },
+    });
+    expect(res.model?.providerID).toBe("b");
+  });
+
+  it("ties are defined: identical cost yields the same winner across runs and shuffles", () => {
+    const a = endpoint("m", { providerID: "a" });
+    const b = endpoint("m", { providerID: "b" });
+    const base = route({ catalog: [a, b], policy: { preset: "balanced" } });
+    for (let i = 0; i < 40; i++) {
+      const shuffled = [a, b].sort(() => Math.random() - 0.5);
+      const res = route({ catalog: shuffled, policy: { preset: "balanced" } });
+      expect(keyOf(res.model)).toBe(keyOf(base.model));
+    }
+    expect(keyOf(base.model)).toBe("a/m"); // full key is the last, deterministic tiebreak
+  });
+
+  it("is deterministic across 100 shuffles of the catalog", () => {
+    const catalog = [
+      endpoint("sonnet-4", { tier: "balanced" }),
+      endpoint("gpt-4o", { tier: "balanced" }),
+      endpoint("gpt-5", { tier: "balanced" }),
+      endpoint("haiku-4", { tier: "fast" }),
+    ];
+    const incumbent = endpoint("sonnet-4", { providerID: "a" });
+    const base = route({ catalog, policy: { preset: "balanced" }, intent: { incumbent } });
+    for (let i = 0; i < 100; i++) {
+      const shuffled = [...catalog].sort(() => Math.random() - 0.5);
+      const res = route({ catalog: shuffled, policy: { preset: "balanced" }, intent: { incumbent } });
+      expect(keyOf(res.model)).toBe(keyOf(base.model));
+    }
+  });
+
+  it("partitions by model: a cheaper weaker model never displaces a stronger one under balanced", () => {
+    const strong = endpoint("strong", { tier: "balanced", score: 0.6, providerID: "a", cost: { input: 100, output: 100, cacheRead: 50, cacheWrite: 50 } });
+    const weak = endpoint("weak", { tier: "balanced", score: 0.45, providerID: "b", cost: { input: 1, output: 1, cacheRead: 0.5, cacheWrite: 0.5 } });
+    const res = route({ catalog: [weak, strong], policy: { preset: "balanced" } });
+    expect(res.model?.id).toBe("strong");
+  });
+
+  it("under economy the partition is flattened: the cheaper weaker model wins, and the reason says so", () => {
+    const strong = endpoint("strong", { tier: "balanced", score: 0.6, providerID: "a", cost: { input: 100, output: 100, cacheRead: 50, cacheWrite: 50 } });
+    const weak = endpoint("weak", { tier: "balanced", score: 0.45, providerID: "b", cost: { input: 1, output: 1, cacheRead: 0.5, cacheWrite: 0.5 } });
+    const res = route({ catalog: [weak, strong], policy: { preset: "economy" } });
+    expect(res.model?.id).toBe("weak");
+    expect(res.reason.toLowerCase()).toContain("economy");
+  });
+
+  it("widening: an empty target band widens one band, never below the floor", () => {
+    // general's floor is balanced; only a deep model is available -> widen up to deep.
+    const deep = endpoint("deep", { tier: "deep", providerID: "a" });
+    const res = route({ catalog: [deep], policy: { preset: "balanced" } });
+    expect(res.model?.id).toBe("deep");
+  });
+
+  it("soft never empties: even when every endpoint is penalised, a winner is still returned", () => {
+    const a = endpoint("m", { providerID: "a" });
+    const b = endpoint("m", { providerID: "b" });
+    const res = route({
+      catalog: [a, b],
+      policy: { preset: "balanced" },
+      services: {
+        reliability: {
+          samples: { "a/m": { requests: 30, errored: 30, rate: 1 }, "b/m": { requests: 30, errored: 30, rate: 1 } },
+          baseline: { m: { rate: 0.1, n: 100 } },
+        },
+      },
+    });
+    expect(res.model).toBeTruthy();
+    expect(["a", "b"]).toContain(res.model?.providerID);
+  });
+});
+
+describe("chooseModel — return shape", () => {
+  it("alternatives are capped at 3 same-tier runners-up, ordered", () => {
+    const a = endpoint("m", { providerID: "a", cost: { input: 1, output: 1, cacheRead: 0.5, cacheWrite: 0.5 } });
+    const b = endpoint("m", { providerID: "b", cost: { input: 2, output: 2, cacheRead: 1, cacheWrite: 1 } });
+    const c = endpoint("m", { providerID: "c", cost: { input: 3, output: 3, cacheRead: 1.5, cacheWrite: 1.5 } });
+    const d = endpoint("m", { providerID: "d", cost: { input: 4, output: 4, cacheRead: 2, cacheWrite: 2 } });
+    const e = endpoint("m", { providerID: "e", cost: { input: 5, output: 5, cacheRead: 2.5, cacheWrite: 2.5 } });
+    const res = route({ catalog: [a, b, c, d, e], policy: { preset: "balanced" } });
+    expect(res.model?.providerID).toBe("a");
+    expect(res.alternatives.map((x) => x.providerID)).toEqual(["b", "c", "d"]);
   });
 });

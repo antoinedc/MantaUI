@@ -6,8 +6,7 @@ import {
   AGENT_FLOOR_SCORE,
   TIERS,
 } from "./modelQuality.mjs";
-import { FAMILY_TIERS, tierRank } from "./modelGuide.mjs";
-import { AGENT_FLOOR } from "./modelRouter.mjs";
+import { FAMILY_TIERS } from "./modelGuide.mjs";
 import type { QualityModel } from "./modelQuality.mjs";
 
 // A test field helper that converts a benchmark score to a percentile of "the
@@ -140,11 +139,12 @@ describe("tierForScore", () => {
 });
 
 describe("meetsFloor", () => {
-  it("matches today's AGENT_FLOOR for all five agents", () => {
+  it("matches the score floors for all five agents", () => {
     const agents = ["build", "plan", "general", "explore", "title"];
     for (const s of [0, 0.25, 0.55, 0.85, 1]) {
       for (const agent of agents) {
-        const expected = tierRank(tierForScore(s)) >= tierRank(AGENT_FLOOR[agent]);
+        const floor = AGENT_FLOOR_SCORE[agent] ?? 0;
+        const expected = s >= floor;
         expect(meetsFloor(s, agent)).toBe(expected);
       }
     }
