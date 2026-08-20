@@ -123,6 +123,9 @@ struct MantaAppRoot: View {
             Task { await sessionStore.refresh() }
         }
         .onOpenURL { url in
+            #if DEBUG
+            if MantaDebugRouter.route(url) { return }
+            #endif
             _ = MantaPairingRouter.route(url)
         }
         .onReceive(MantaPairingRouter.shared.$pendingPayload) { payload in

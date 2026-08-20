@@ -23,6 +23,9 @@ struct SessionListView: View {
     @ObservedObject var store: SessionListStore
     @EnvironmentObject private var eventStore: MantaEventStore
     @EnvironmentObject private var pushRouter: MantaPushRouter
+    #if DEBUG
+    @ObservedObject private var debugRouter = MantaDebugRouter.shared
+    #endif
     @Environment(\.colorScheme) private var colorScheme
 
     @State private var searchText = ""
@@ -160,6 +163,10 @@ struct SessionListView: View {
         // (the tap routed before the list appeared).
         .onAppear { consumePushLink() }
         .onChange(of: pushRouter.pendingSessionID) { _ in consumePushLink() }
+        #if DEBUG
+        .onChange(of: debugRouter.pendingSubagentPush) { _ in consumeDebugSubagentPush() }
+        .onChange(of: debugRouter.pendingPanTag) { _ in consumeDebugPan() }
+        #endif
         // Surface a mutation failure (rename/fork) the store published. Cleared
         // once consumed so the same message can't re-toast on a later change.
         .onChange(of: store.actionMessage) { _, message in
@@ -215,6 +222,56 @@ struct SessionListView: View {
             path.append(SessionOpenTarget(project: "", windowIndex: 0, name: "session", sessionId: sessionId))
         }
     }
+
+    // MARK: - Debug deep-link (§BET-1257)
+
+    #if DEBUG
+    /// BET-1257 — open the REAL failing child's drill-in with no finger, push
+    /// it, and once its transcript has laid out, start the pan/offset recorder
+    /// on it. The child STAYS open (no auto-pop) so a real pan (idb ui swipe)
+    /// can be driven against it while PanProbe records whether the recogniser
+    /// fires and whether contentOffset moves.
+    private func consumeDebugSubagentPush() {
+        guard let req = debugRouter.pendingSubagentPush else { return }
+        debugRouter.pendingSubagentPush = nil
+        let sessionId = req.parentSessionID
+
+        if let project = store.projects.first(where: { $0.windows.contains { $0.opencodeSessionId == sessionId } }),
+           let window = project.windows.first(where: { $0.opencodeSessionId == sessionId }) {
+            path.append(SessionOpenTarget(project: project.tmuxSession, windowIndex: window.index, name: window.name, sessionId: sessionId))
+        } else {
+            path.append(SessionOpenTarget(project: "", windowIndex: 0, name: "session", sessionId: sessionId))
+        }
+
+        // Let the parent push settle so its SubagentSession destination is
+        // registered, then push the child.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            path.append(SubagentSession(
+                taskName: "debug drill-in",
+                status: .done,
+                duration: nil,
+                transcript: [],
+                childSessionId: req.childSessionID,
+                fallbackId: "debug-\(req.childSessionID)"
+            ))
+        }
+
+        // Once the child is up and its transcript has loaded + laid out over
+        // real HTTPS, start recording its pan/offset. It stays open for the
+        // pan test (§6).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
+            PanProbe.shared.start(tag: "child")
+        }
+    }
+
+    /// BET-1257 — start the pan/offset recorder on the current screen (used
+    /// for the parent control after popping back). No navigation.
+    private func consumeDebugPan() {
+        guard let tag = debugRouter.pendingPanTag else { return }
+        debugRouter.pendingPanTag = nil
+        PanProbe.shared.start(tag: tag)
+    }
+    #endif
 
     // MARK: - List
 
