@@ -43,7 +43,18 @@ const MSGS_DELAY_MS = Number(process.env.FIXTURE_MSGS_DELAY_MS || 0);
 //   FIXTURE_EARLY_HISTORY=1 node mobile/native/capture-fixture/fixture-box.mjs
 const EARLY_HISTORY = process.env.FIXTURE_EARLY_HISTORY === "1";
 
+// BET-1211 diagnostic: when set, the parent transcript ends with a subagent
+// `task` tool part (drill-in agent-row) and `opencode:messages` serves a LONG
+// child transcript for the child session id, so the subagent drill-in screen
+// (with many screens of child content) is reproducible on the simulator via
+// this fixture — no real subagent session needed. Default OFF so the existing
+// fixture-driven capture suites (which assert the current tail shape) are
+// unaffected.
+//   FIXTURE_SUBAGENT=1 node mobile/native/capture-fixture/fixture-box.mjs
+const SUBAGENT = process.env.FIXTURE_SUBAGENT === "1";
+
 const SESSION_ID = "session-1";
+const CHILD_SESSION_ID = "session-child-1";
 const PROJECT = "Demo";
 const CWD = `/Users/${process.env.USER || "demo"}/demo`;
 
@@ -112,6 +123,38 @@ function buildTallTranscript() {
   return filler;
 }
 
+// BET-1211: a LONG child transcript (many screens) served when the app asks for
+// the subagent's child session. Mirror of `buildTallTranscript` scoped to the
+// child session id, so the drill-in screen has real overflow to scroll.
+function buildChildTranscript() {
+  const filler = [];
+  const FILLER_PAIRS = 20; // 40 messages -> many screens of long child prose
+  let id = 2000;
+  for (let i = 0; i < FILLER_PAIRS; i++) {
+    const uid = "c" + (id++);
+    const aid = "c" + (id++);
+    const pid = id;
+    const prose = (
+      "This is CHILD fixture paragraph " + i + ", part of the subagent's long " +
+      "transcript. It is intentionally a few sentences long so the row owns " +
+      "measurable height on screen, giving the drill-in screen enough vertical " +
+      "extent that a single upward drag must begin scrolling — which is exactly " +
+      "the point of the BET-1211 scroll diagnostic. ".repeat(2)
+    );
+    filler.push(
+      {
+        info: { id: uid, sessionID: CHILD_SESSION_ID, role: "user", time: { created: now - 1000000 } },
+        parts: [{ type: "text", id: "p" + (pid - 1), messageID: uid, text: "Child question " + i }],
+      },
+      {
+        info: { id: aid, sessionID: CHILD_SESSION_ID, role: "assistant", time: { created: now - 900000, completed: now - 899000 } },
+        parts: [{ type: "text", id: "p" + pid, messageID: aid, text: prose }],
+      }
+    );
+  }
+  return filler;
+}
+
 const MESSAGES = [
   ...buildTallTranscript(),
   {
@@ -145,6 +188,50 @@ const MESSAGES = [
         text: "Yes — tap the ellipsis in the header. Scheduled tasks carries a live count, and secrets lists names without ever sending a value to the phone.",
       },
     ],
+  },
+];
+
+// BET-1211: a subagent `task` tool part appended at the tail, so the parent
+// transcript carries a drill-in agent-row. Status "running" mirrors the real
+// steer session; `metadata.sessionId` is what lets the app open the child.
+const TASK_MESSAGE = {
+  info: {
+    id: "m_task",
+    sessionID: SESSION_ID,
+    role: "assistant",
+    time: { created: now + 3, completed: now + 3 },
+  },
+  parts: [
+    {
+      type: "tool",
+      id: "prt_task",
+      messageID: "m_task",
+      tool: "task",
+      callID: "call_task_1",
+      state: {
+        status: "running",
+        title: "fixture subagent",
+        metadata: { sessionId: CHILD_SESSION_ID },
+        time: { start: (now - 5) * 1000, end: now * 1000 },
+      },
+    },
+  ],
+};
+
+if (SUBAGENT) {
+  MESSAGES.push(TASK_MESSAGE);
+}
+
+// The LONG child transcript served when the app drills into the subagent.
+const CHILD_MESSAGES = [
+  ...buildChildTranscript(),
+  {
+    info: { id: "cm1", sessionID: CHILD_SESSION_ID, role: "user", time: { created: now } },
+    parts: [{ type: "text", id: "cp1", messageID: "cm1", text: "Run the Scroll diagnostic." }],
+  },
+  {
+    info: { id: "cm2", sessionID: CHILD_SESSION_ID, role: "assistant", time: { created: now, completed: now + 2 } },
+    parts: [{ type: "text", id: "cp2", messageID: "cm2", text: "Diagnostic complete — this is the final child message." }],
   },
 ];
 
@@ -194,6 +281,14 @@ function rpc(channel, args) {
     case "tmux:list":
       return PROJECTS;
     case "opencode:messages":
+      // BET-1211: the subagent child's own transcript is served when the app
+      // requests the child session id (the fixture's parent tail carries a
+      // `task` tool part whose metadata.sessionId points here).
+      if (SUBAGENT && args[0] === CHILD_SESSION_ID) {
+        return new Promise((resolve) => {
+          setTimeout(() => resolve(CHILD_MESSAGES), 0);
+        });
+      }
       // BET-1151 C4: in early-history mode, return just the tail `limit` window
       // so the app sees a real "more history exists above" page. `hasEarlier`
       // in the store is `loaded.count >= limit`, so returning a full page makes
