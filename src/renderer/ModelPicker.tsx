@@ -50,6 +50,11 @@ export function ModelPicker({
   onOpen,
   onSelect,
   labelOverride = null,
+  // BET-1247: when the session's model choice is `auto` (the three-state
+  // choice BET-1245), the chip MUST say so and, once the router has resolved a
+  // model (a turn has run and `modelOverride` carries the routed pick), which
+  // model Auto chose. Until a model is resolved there is nothing to claim.
+  auto = false,
   // BET-1222: when the router chose this session's model, the composer pill
   // explains WHY (reason) and offers one-click undo to the incumbent model.
   // `routed` is pure display state; the undo action itself (set override back
@@ -80,6 +85,8 @@ export function ModelPicker({
   // highest precedence — lets a caller display "Auto" until the user first
   // picks a model. A no-op for callers that don't pass it (ChatPanel).
   labelOverride?: string | null;
+  // BET-1247: session model choice is `auto` (see above).
+  auto?: boolean;
   // BET-1222 routed state (see above).
   routed?: { reason: string; incumbent: { providerID: string; modelID: string } } | null;
   onRoutedUndone?: () => void;
@@ -119,9 +126,16 @@ export function ModelPicker({
 
   // Resolve the active model object (for the friendly name + variant list).
   // Shared resolution path with ChatPanel (BET-415 duplication gate).
+  // Under Auto, the resolved model is the one the router CHOSE (it is applied
+  // to `modelOverride` the moment a turn runs), never the server default —
+  // falling back to the default would claim "Auto · <default>" for a model Auto
+  // had not actually picked. So under Auto we resolve from the override only.
   const activeModel = useMemo<OpencodeModel | null>(
-    () => resolveActiveModel(models, modelOverride, defaultModel),
-    [models, modelOverride, defaultModel],
+    () =>
+      auto
+        ? resolveActiveModel(models, modelOverride, null)
+        : resolveActiveModel(models, modelOverride, defaultModel),
+    [models, modelOverride, defaultModel, auto],
   );
 
   const variants = activeModel?.variants ?? [];
@@ -144,8 +158,13 @@ export function ModelPicker({
   // Friendly display name for the model button: the caller's labelOverride
   // (highest precedence), else the resolved active model name, else the
   // modelLabel prop, else the "opencode" stub.
-  const modelDisplayName =
-    labelOverride ?? activeModel?.name ?? modelLabel ?? "opencode";
+  // Under Auto this is replaced entirely: "Auto" until the router has resolved
+  // a model, then "Auto · <model>" so the chip never hides who is answering.
+  const modelDisplayName = auto
+    ? activeModel
+      ? `Auto · ${activeModel.name}`
+      : "Auto"
+    : labelOverride ?? activeModel?.name ?? modelLabel ?? "opencode";
 
   // ⚡ fast-mode toggle — the third segment. Flipping it swaps the active model
   // for its `-fast` twin (or back), carrying the selected effort across. It is
@@ -167,6 +186,15 @@ export function ModelPicker({
   // no fast twin. A user reading that gets three facts about a model nobody has
   // resolved. Placeholder bars say "not yet" instead.
   const loading = models === null;
+
+  // Native title on the left segment. Under Auto with a resolved model, name
+  // the full resolved model + provider so hovering answers "what exactly is
+  // this". Otherwise today's copy stands.
+  const leftTitle = loading
+    ? LOADING_TITLE
+    : auto && activeModel
+      ? `Auto · ${activeModel.name} (${activeModel.providerID})`
+      : "Pick model for next prompt";
 
   return (
     <div className="overflow-visible min-w-0">
@@ -256,13 +284,13 @@ export function ModelPicker({
         extraPressed={fast.on}
         extraDisabled={!fast.available}
         rightAccent
-        leftAccent={Boolean(routed)}
+        leftAccent={Boolean(routed) || auto}
         popup
         leftHook="manta-model-picker-btn"
         rightHook="manta-effort-picker-btn"
         leftExpanded={modelOpen}
         rightExpanded={variantOpen}
-        leftTitle={loading ? LOADING_TITLE : "Pick model for next prompt"}
+        leftTitle={leftTitle}
         rightTitle={
           loading
             ? LOADING_TITLE

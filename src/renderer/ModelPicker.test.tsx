@@ -17,6 +17,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { act } from "react";
 import { mount, type Harness } from "./testHarness";
 import { ModelPicker } from "./ModelPicker";
+import type { ModelSelection } from "./chatShared";
 import type { OpencodeModel } from "../shared/types";
 
 const MODELS: OpencodeModel[] = [
@@ -152,5 +153,105 @@ describe("ModelPicker — routed pill (BET-1222)", () => {
     expect(btn).toBeTruthy();
     act(() => (btn as HTMLButtonElement).click());
     expect(undone).toBe(true);
+  });
+});
+
+describe("ModelPicker — Auto mode (BET-1247)", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  function render(props: {
+    models?: OpencodeModel[] | null;
+    modelOverride?: ModelSelection | null;
+    defaultModel?: { providerID: string; modelID: string } | null;
+    auto?: boolean;
+    labelOverride?: string | null;
+  }): HTMLElement {
+    h?.unmount();
+    h = mount(
+      <ModelPicker
+        modelLabel={null}
+        models={props.models === undefined ? MODELS : props.models}
+        modelOverride={props.modelOverride ?? null}
+        defaultModel={props.defaultModel ?? null}
+        auto={props.auto ?? false}
+        labelOverride={props.labelOverride ?? null}
+        onOpen={() => {}}
+        onSelect={() => {}}
+      />,
+    );
+    return h.container;
+  }
+
+  // The left segment button's text — the model part of the split chip. Its
+  // two icons (Sparkles, ChevronDown) are empty glyphs, so the textContent is
+  // exactly the label string under test.
+  function leftLabel(c: HTMLElement): string {
+    const btn = c.querySelector<HTMLElement>(".manta-model-picker-btn");
+    return btn?.textContent ?? "";
+  }
+
+  it("reads just 'Auto' when Auto is on and no model is resolved yet", () => {
+    const c = render({ auto: true, modelOverride: null, defaultModel: null });
+    const label = leftLabel(c);
+    expect(label).toContain("Auto");
+    // No specific model is claimed while Auto has not chosen one — a "·" would
+    // assert a model that nobody has resolved.
+    expect(label).not.toContain("·");
+  });
+
+  it("reads 'Auto · <model>' once Auto has resolved a model", () => {
+    const c = render({
+      auto: true,
+      modelOverride: { providerID: "anthropic", modelID: "claude-opus-4-7" },
+      defaultModel: null,
+    });
+    expect(leftLabel(c)).toContain("Auto · Claude Opus 4.7");
+  });
+
+  it("leaves the label byte-identical when Auto is off", () => {
+    const c = render({
+      auto: false,
+      modelOverride: null,
+      defaultModel: { providerID: "anthropic", modelID: "claude-opus-4-7" },
+    });
+    // Today's label, exactly: the resolved default model's friendly name.
+    expect(leftLabel(c)).toBe("Claude Opus 4.7");
+    expect(leftLabel(c)).not.toContain("Auto");
+  });
+
+  it("never renders the Auto label while the catalog is in flight", () => {
+    const c = render({ auto: true, models: null });
+    const text = c.textContent ?? "";
+    expect(text).not.toContain("Auto");
+    expect(c.querySelector(".manta-model-picker-btn")).toBeTruthy();
+  });
+
+  it("leaves the effort and fast-toggle segments unchanged under Auto", () => {
+    const c = render({
+      auto: true,
+      modelOverride: { providerID: "anthropic", modelID: "claude-opus-4-7" },
+      defaultModel: null,
+    });
+    // Resolved model exposes variants → the effort segment stays interactive
+    // with its default label; the ⚡ fast toggle is still present.
+    expect(c.textContent ?? "").toContain("Default");
+    expect(c.querySelector(".manta-fast-toggle-btn")).toBeTruthy();
+  });
+
+  it("names the full resolved model + provider in the auto hover title", () => {
+    const c = render({
+      auto: true,
+      modelOverride: { providerID: "anthropic", modelID: "claude-opus-4-7" },
+      defaultModel: null,
+    });
+    const title = c
+      .querySelector<HTMLElement>(".manta-model-picker-btn")
+      ?.getAttribute("title") ?? "";
+    expect(title).toContain("Claude Opus 4.7");
+    expect(title).toContain("anthropic");
   });
 });

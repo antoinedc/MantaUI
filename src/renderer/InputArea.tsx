@@ -151,6 +151,7 @@ export function InputArea({
   models,
   modelOverride,
   defaultModel,
+  auto,
   routed,
   onRoutedUndone,
   plan,
@@ -212,6 +213,9 @@ export function InputArea({
   models: OpencodeModel[] | null;
   modelOverride: ModelSelection | null;
   defaultModel: { providerID: string; modelID: string } | null;
+  // BET-1247: the session's model choice is `auto` — the composer chip must
+  // say "Auto" and, once the router has resolved a model, which one.
+  auto: boolean;
   // BET-1222 routed state — forwarded to ModelPicker: reason + incumbent shown
   // on the routed pill, and the caller-owned undo action.
   routed?: { reason: string; incumbent: { providerID: string; modelID: string } } | null;
@@ -555,6 +559,7 @@ export function InputArea({
             models={models}
             modelOverride={modelOverride}
             defaultModel={defaultModel}
+            auto={auto}
             routed={routed}
             onRoutedUndone={onRoutedUndone}
             deactivatedMainModels={deactivatedMainModels}
