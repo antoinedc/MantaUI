@@ -502,8 +502,8 @@ export function resolveRequestedModel(model, models) {
  * `incumbent` = whatever model the caller would have used today) and returns
  * the model to actually run on.
  *
- * Provably safe on the off-path: when `policy` is disabled (no modelRouting
- * config on a box that has never seen this feature), `chooseModel` returns
+ * Provably safe on the off-path: when the policy has no routing directive (no
+ * preset — a conversation that has not asked to route), `chooseModel` returns
  * `incumbent` exactly — so a spawn is byte-identical to today's. And any
  * throw inside the routing is swallowed, falling back to `incumbent`, so a
  * routing failure can never fail a spawn.
@@ -511,7 +511,7 @@ export function resolveRequestedModel(model, models) {
  * @param {object} [input]
  * @param {object|null} [input.incumbent]  the model the code would have used today
  * @param {Array<object>} [input.catalog]  opencode model list
- * @param {{ enabled?: boolean, preset?: string, perAgent?: Record<string,string> }} [input.policy]
+ * @param {{ preset?: string, perAgent?: Record<string,string> }} [input.policy]
  * @param {Array<object>} [input.quota]    usage snapshots
  * @param {string} [input.agent]           subagent type (default "general")
  * @param {number} [input.nowMs]
@@ -537,7 +537,7 @@ function toDeliverModel(m) {
 export function chooseSubagentModel({
   incumbent = null,
   catalog = [],
-  policy = { enabled: false },
+  policy = {},
   quota = [],
   agent = "general",
   nowMs = Date.now(),
@@ -592,14 +592,15 @@ export function chooseSubagentModel({
  * to the incumbent. That is the honesty contract of the routing epic: a main
  * conversation's model is never switched without a visible, undoable reason.
  *
- * Same safety contract as chooseSubagentModel: policy off / throw / no
- * survivors all fall back to `incumbent` with `changed: false`, so enabling
- * routing can never substitute a model the user was not shown and can undo.
+ * Same safety contract as chooseSubagentModel: a policy with no routing
+ * directive / any throw / no survivors all fall back to `incumbent` with
+ * `changed: false`, so enabling routing can never substitute a model the user
+ * was not shown and can undo.
  *
  * @param {object} [input]
  * @param {object|null} [input.incumbent]  the model the session would use without routing
  * @param {Array<object>} [input.catalog]  opencode model list
- * @param {{ enabled?: boolean, preset?: string, perAgent?: Record<string,string> }} [input.policy]
+ * @param {{ preset?: string, perAgent?: Record<string,string> }} [input.policy]
  * @param {Array<object>} [input.quota]    usage snapshots
  * @param {string} [input.agent]           main-conversation agent (default "build")
  * @param {number} [input.nowMs]
@@ -608,7 +609,7 @@ export function chooseSubagentModel({
 export function chooseMainModel({
   incumbent = null,
   catalog = [],
-  policy = { enabled: false },
+  policy = {},
   quota = [],
   agent = "build",
   nowMs = Date.now(),
@@ -779,7 +780,7 @@ export async function startJob(input, deps = {}) {
   //    asked for a specific model actually runs on it; omitted → the default.
   //
   //    BET-1220: the effective model passes through the subagent router
-  //    (chooseSubagentModel). With routing off (no modelRouting config) it
+  //    (chooseSubagentModel). With no routing directive in the policy it
   //    returns `incumbent` = the requested model / null, byte-identical to
   //    today. Routing must never break a spawn, so every input read (policy,
   //    quota, catalog) is individually guarded and the whole decision falls
@@ -795,11 +796,11 @@ export async function startJob(input, deps = {}) {
     } catch {
       cfg = {};
     }
-    let policy = { enabled: false };
+    let policy = {};
     try {
-      policy = cfg.modelRouting ?? { enabled: false };
+      policy = cfg.modelRouting ?? {};
     } catch {
-      policy = { enabled: false };
+      policy = {};
     }
     let quota = [];
     try {

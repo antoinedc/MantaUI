@@ -489,9 +489,10 @@ const delegateEngine = createDelegateEngine({
   listMessages: (sid) => oc.listMessages(sid),
   listModels: (overrides) => oc.listModels(overrides),
   // BET-1220: routing inputs for the subagent model decision in startJob.
-  // configGet supplies the modelRouter policy (absent on a box that has never
-  // seen the feature → routing stays off); listSnapshots supplies quota, and
-  // startJob guards both so they can never break a spawn.
+  // configGet supplies the modelRouting policy (absent on a conversation that
+  // has not asked to route → the spawn passes the incumbent through);
+  // listSnapshots supplies quota, and startJob guards both so they can never
+  // break a spawn.
   configGet: () => local.configGet(),
   listSnapshots,
   abortSession: (sid) => oc.abortSession(sid),

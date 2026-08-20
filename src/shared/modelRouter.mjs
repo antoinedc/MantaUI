@@ -187,6 +187,19 @@ function bindingReason(counts) {
   return CONSTRAINT_LABELS[best] ?? "constraints";
 }
 
+// Whether a policy asks the router to run at all. Routing is activated per
+// conversation, not by a global switch: the composer's model picker activates
+// it for a conversation by supplying a preset, and a per-agent override map can
+// pin specific tiers on top. The former global `enabled` field is gone
+// (BET-1243) — there is no box-wide off switch. An absent/empty policy (no
+// preset, no per-agent override) means the conversation did not ask to route.
+function routingActive(policy) {
+  if (typeof policy !== "object" || policy === null) return false;
+  if (typeof policy.preset === "string" && policy.preset.length > 0) return true;
+  const perAgent = policy.perAgent;
+  return !!perAgent && typeof perAgent === "object" && Object.keys(perAgent).length > 0;
+}
+
 // A single sentence naming the agent, the tier, and the binding factor.
 function explain({ agent, tierName, winner, quota, nowMs }) {
   const window = pickWindow(winner?.providerID, quota, nowMs);
@@ -207,7 +220,7 @@ function explain({ agent, tierName, winner, quota, nowMs }) {
  * @param {Array<object>} [input.catalog] - Model[] from opencode
  * @param {Record<string, { tokensPerSec?: number, p50Ms?: number }>} [input.telemetry]
  * @param {Array<object>} [input.quota] - UsageSnapshot[]
- * @param {{ enabled?: boolean, preset?: string, perAgent?: Record<string,string> }} [input.policy]
+ * @param {{ preset?: string, perAgent?: Record<string,string> }} [input.policy]
  * @param {number} [input.nowMs]
  * @returns {{ model: object|null, reason: string, alternatives: object[], changed: boolean }}
  */
@@ -226,8 +239,13 @@ export function chooseModel(input = {}) {
     };
   }
 
-  if (policy?.enabled !== true) {
-    return { model: incumbent, reason: "routing is off", alternatives: [], changed: false };
+  // Activation is per-conversation: routing runs only when this conversation
+  // supplied a routing directive — a preset the composer picker set, or a
+  // per-agent override. The former global on/off (`enabled`) is gone
+  // (BET-1243); "no preset" is a conversation that did not ask to route, not a
+  // box-wide off switch, so an empty policy returns the incumbent unchanged.
+  if (!routingActive(policy)) {
+    return { model: incumbent, reason: "routing not activated for this conversation", alternatives: [], changed: false };
   }
 
   const needs = intent?.needs ?? {};
