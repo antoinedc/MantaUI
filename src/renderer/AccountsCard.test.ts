@@ -14,6 +14,7 @@ import type { UsageWindow } from "../shared/types";
 import {
   describeAccountState,
   describeMissing,
+  endpointEligibility,
   helpText,
   usagePace,
   type AccountRowModel,
@@ -162,6 +163,42 @@ describe("helpText", () => {
       }).missing,
     };
     expect(helpText(row)).toContain("Custom · Auto needs: which model, what it costs, whether it caches, and how it compares");
+  });
+});
+
+describe("endpointEligibility (multi-model union — reviewer Question)", () => {
+  const ep = (models: string[]) => ({
+    id: "voska",
+    name: "VoskaAI",
+    baseURL: "https://api.voska.org/v1",
+    hasApiKey: true,
+    enabledModels: models,
+  });
+
+  it("unions gaps across ALL enabled models so a declared model can't mask an unresolved one", () => {
+    // alpha is fully declared; beta is opaque + undeclared.
+    const declared = {
+      "voska/alpha": { catalogId: "alpha-model", price: { input: 0.02, output: 0.08 }, caches: false },
+    };
+    const { missing } = endpointEligibility(ep(["alpha", "beta"]), declared, null);
+    // beta's gaps must still surface — the endpoint is NOT fully described.
+    expect(missing).toEqual(
+      expect.arrayContaining([MISSING.IDENTITY, MISSING.PRICE, MISSING.CACHING, MISSING.QUALITY]),
+    );
+  });
+
+  it("an endpoint whose every model is declared is fully described", () => {
+    const declared = {
+      "voska/alpha": { catalogId: "a", price: { input: 1, output: 2 }, caches: false, tierOverride: "balanced" },
+      "voska/beta": { catalogId: "b", price: { input: 1, output: 2 }, caches: false, tierOverride: "balanced" },
+    };
+    const { missing } = endpointEligibility(ep(["alpha", "beta"]), declared, null);
+    expect(missing).toEqual([]);
+  });
+
+  it("an endpoint with no enabled models still reports the gaps it needs", () => {
+    const { missing } = endpointEligibility(ep([]), {}, null);
+    expect(missing).toEqual(expect.arrayContaining([MISSING.IDENTITY]));
   });
 });
 

@@ -201,46 +201,57 @@ function subscriptionReading(snap: UsageSnapshot | undefined, nowMs: number) {
 const isSubscriptionId = (id: string, statuses: SubscriptionStatus[]) =>
   statuses.some((s) => s.id === id);
 
-/** Auto-eligibility gaps for a custom endpoint — the same gate the router waits on. */
-function endpointEligibility(
+/**
+ * Auto-eligibility gaps for a custom endpoint — the same gate the router waits
+ * on, with the ONE-gate rule applied at the ENDPOINT level. The router will not
+ * route an endpoint until EVERY model on it is describable, so the row's
+ * "Auto needs" set is the UNION of the per-model gaps across all enabled
+ * models. An endpoint that reads "fully described" while a later model still
+ * blocks routing is exactly the drift this issue exists to prevent.
+ */
+export function endpointEligibility(
   ep: ProviderEndpoint,
   declared: Record<string, DeclaredModel> | undefined,
   matcher: RoutingCatalog["matcher"],
 ): { missing: string[]; declaredPrice?: string } {
-  const modelId = ep.enabledModels?.[0] ?? null;
-  const key = modelId ? `${ep.id}/${modelId}` : null;
-  const decl: DeclaredModel | undefined = key ? declared?.[key] : undefined;
-
-  let identityKnown = false;
-  if (key) {
-    if (decl?.catalogId) {
-      identityKnown = true;
-    } else if (matcher && modelId) {
-      const id = resolveIdentity({ providerID: ep.id, id: modelId }, undefined, matcher);
-      identityKnown = id.state === "resolved";
-    }
-  }
-
-  const result = autoEligibility({
-    model: {},
-    identity: { known: identityKnown },
-    quality: { known: identityKnown },
-    declared: decl,
-    providerClass: "custom",
-  });
-
+  const modelIds = ep.enabledModels?.length ? ep.enabledModels : [null as string | null];
+  const missing = new Set<string>();
   let declaredPrice: string | undefined;
-  const price = decl?.price;
-  if (price && price !== "free" && typeof price === "object") {
-    const p = price as { input?: number; output?: number };
-    if (Number.isFinite(p.input ?? 0) || Number.isFinite(p.output ?? 0)) {
-      const input = Number.isFinite(p.input ?? 0) ? (p.input as number) : 0;
-      const output = Number.isFinite(p.output ?? 0) ? (p.output as number) : 0;
-      declaredPrice = `$${input.toFixed(2)} / $${output.toFixed(2)} per M`;
+
+  for (const modelId of modelIds) {
+    const key = modelId ? `${ep.id}/${modelId}` : null;
+    const decl: DeclaredModel | undefined = key ? declared?.[key] : undefined;
+
+    let identityKnown = false;
+    if (key) {
+      if (decl?.catalogId) {
+        identityKnown = true;
+      } else if (matcher && modelId) {
+        const id = resolveIdentity({ providerID: ep.id, id: modelId }, undefined, matcher);
+        identityKnown = id.state === "resolved";
+      }
+    }
+
+    const result = autoEligibility({
+      model: {},
+      identity: { known: identityKnown },
+      quality: { known: identityKnown },
+      declared: decl,
+      providerClass: "custom",
+    });
+    for (const k of result.missing) missing.add(k);
+
+    if (declaredPrice == null && decl?.price && decl.price !== "free" && typeof decl.price === "object") {
+      const p = decl.price as { input?: number; output?: number };
+      if (Number.isFinite(p.input ?? 0) || Number.isFinite(p.output ?? 0)) {
+        const input = Number.isFinite(p.input ?? 0) ? (p.input as number) : 0;
+        const output = Number.isFinite(p.output ?? 0) ? (p.output as number) : 0;
+        declaredPrice = `$${input.toFixed(2)} / $${output.toFixed(2)} per M`;
+      }
     }
   }
 
-  return { missing: result.missing, declaredPrice };
+  return { missing: [...missing], declaredPrice };
 }
 
 // ===== The one row component =====
