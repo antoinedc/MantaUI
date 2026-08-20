@@ -25,6 +25,7 @@ export interface CrossesResult {
 }
 
 export function crossesBoundary(input?: CrossesInput): CrossesResult;
+export function boundaryPhrase(boundary: string | null): string;
 
 export interface ShouldSwitchInput {
   incumbent?: object | null;

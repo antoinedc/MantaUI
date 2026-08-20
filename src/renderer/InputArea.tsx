@@ -152,6 +152,8 @@ export function InputArea({
   modelOverride,
   defaultModel,
   auto,
+  autoReason,
+  onSelectAuto,
   routed,
   onRoutedUndone,
   plan,
@@ -216,6 +218,12 @@ export function InputArea({
   // BET-1247: the session's model choice is `auto` — the composer chip must
   // say "Auto" and, once the router has resolved a model, which one.
   auto: boolean;
+  // BET-1248: the latest boundary-routing reason, shown in the Auto row once
+  // a decision has resolved.
+  autoReason?: string | null;
+  // BET-1248: user re-picked Auto in the menu — forwarded to the ModelPicker's
+  // Auto row so it renders + re-decides on the next turn.
+  onSelectAuto?: () => void;
   // BET-1222 routed state — forwarded to ModelPicker: reason + incumbent shown
   // on the routed pill, and the caller-owned undo action.
   routed?: { reason: string; incumbent: { providerID: string; modelID: string } } | null;
@@ -560,6 +568,8 @@ export function InputArea({
             modelOverride={modelOverride}
             defaultModel={defaultModel}
             auto={auto}
+            autoReason={autoReason}
+            onSelectAuto={onSelectAuto}
             routed={routed}
             onRoutedUndone={onRoutedUndone}
             deactivatedMainModels={deactivatedMainModels}

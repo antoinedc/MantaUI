@@ -98,6 +98,27 @@ export function crossesBoundary(input = {}) {
   return { crossed: false, boundary: null };
 }
 
+const BOUNDARY_PHRASE = {
+  [BOUNDARY.FIRST_TURN]: "first turn",
+  [BOUNDARY.AGENT]: "agent changed",
+  [BOUNDARY.CONSTRAINT]: "context or capability",
+  [BOUNDARY.COMPACTED]: "just compacted",
+  [BOUNDARY.USER]: "Auto re-selected",
+};
+
+/**
+ * A short human phrase naming WHICH boundary justified a re-decision. The
+ * router's `reason` already explains the model choice; this appends the
+ * trigger context so the routed pill reads "…cost/quality… · just compacted".
+ * Pure display — returns "" for an unknown/null boundary (never throws).
+ *
+ * @param {string|null} boundary a `BOUNDARY.*` value
+ * @returns {string}
+ */
+export function boundaryPhrase(boundary) {
+  return BOUNDARY_PHRASE[boundary] ?? "";
+}
+
 // 0-based position of the incumbent endpoint within `ranked`, or -1 if absent.
 function incumbentIndex(incumbent, ranked) {
   const k = endpointKey(incumbent);

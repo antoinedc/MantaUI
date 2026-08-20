@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { BOUNDARY, crossesBoundary, shouldSwitch } from "./routingBoundary.mjs";
+import { BOUNDARY, crossesBoundary, shouldSwitch, boundaryPhrase } from "./routingBoundary.mjs";
 
 // A routed endpoint with a distinct (providerID/id) identity, like the router's.
 function ep(providerID: string, id: string) {
@@ -186,5 +186,20 @@ describe("shouldSwitch — hysteresis", () => {
     expect(
       shouldSwitch({ ...base, ranked: [...n4.slice(0, 3), ep("anthropic", "a")] }),
     ).toEqual({ switch: true, why: "incumbent-dropped-out" });
+  });
+});
+
+describe("boundaryPhrase", () => {
+  it("returns a phrase per boundary kind", () => {
+    expect(boundaryPhrase(BOUNDARY.FIRST_TURN)).toBe("first turn");
+    expect(boundaryPhrase(BOUNDARY.AGENT)).toBe("agent changed");
+    expect(boundaryPhrase(BOUNDARY.CONSTRAINT)).toBe("context or capability");
+    expect(boundaryPhrase(BOUNDARY.COMPACTED)).toBe("just compacted");
+    expect(boundaryPhrase(BOUNDARY.USER)).toBe("Auto re-selected");
+  });
+
+  it("returns an empty string for an unknown / null boundary (never throws)", () => {
+    expect(boundaryPhrase(null)).toBe("");
+    expect(boundaryPhrase("nope")).toBe("");
   });
 });

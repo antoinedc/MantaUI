@@ -78,6 +78,8 @@ import {
   readSavedChoice,
   readSavedModel,
   writeSavedModel,
+  writeSavedChoice,
+  modelFromChoice,
   readPlanSaved,
   writePlanSaved,
   readSavedDelegateModel,
@@ -90,6 +92,7 @@ import {
   type TaskContextValue,
   type TokenUsage,
 } from "./chatShared";
+import { crossesBoundary, shouldSwitch, boundaryPhrase } from "../shared/routingBoundary.mjs";
 import { useModelCatalog } from "./modelCatalog";
 import { useAgentCatalog } from "./agentCatalog";
 import { MantaLoader } from "./MantaLoader";
@@ -434,8 +437,13 @@ export function ChatPanel({
   const [autoActive, setAutoActive] = useState<boolean>(
     () => readSavedChoice(sessionId).kind === "auto",
   );
+  // BET-1248: the override seed derives from the THREE-state choice
+  // (readSavedChoice, BET-1245) so the rest of the component is untouched:
+  // {kind:"model"} → the model, {kind:"server-default"} → the global default,
+  // {kind:"auto"} → null until the router resolves one. The routed pick is
+  // applied to the override the moment a turn runs (BET-1247).
   const [modelOverride, setModelOverride] = useState<ModelSelection | null>(() =>
-    autoActive ? null : readSavedModel(sessionId) ?? configDefaultModel ?? null,
+    modelFromChoice(readSavedChoice(sessionId), configDefaultModel),
   );
   // BET-1222: routed state for the composer pill — set when the router chose
   // this session's model (fed by the main-conversation routing wiring). The
@@ -445,6 +453,44 @@ export function ChatPanel({
     reason: string;
     incumbent: { providerID: string; modelID: string };
   } | null>(null);
+  // BET-1248: boundary-routing state for the main conversation. `routedModel`
+  // is the session's current routed endpoint — the incumbent shouldSwitch uses
+  // and the model the next Auto turn runs on; `routedReason` is the latest
+  // decision reason (with the boundary phrase appended) for surfacing. Keyed
+  // by session: reset on session change, exactly like stepTokens / liveTodos /
+  // finishByMessageId.
+  const [routedModel, setRoutedModel] = useState<ModelSelection | null>(null);
+  const [routedReason, setRoutedReason] = useState<string | null>(null);
+  // Ref mirror so submit() reads the incumbent synchronously without re-creating
+  // the callback on every routed change (the commandsRef pattern).
+  const routedModelRef = useRef<ModelSelection | null>(null);
+  useEffect(() => {
+    routedModelRef.current = routedModel;
+  }, [routedModel]);
+  // Apply a boundary-routing decision: record the incumbent + reason and, under
+  // Auto, set the active override so the pill and send paths run on it.
+  const applyRouted = useCallback((model: ModelSelection | null, reason: string) => {
+    routedModelRef.current = model;
+    setRoutedModel(model);
+    setRoutedReason(reason);
+    setModelOverride(model);
+  }, []);
+  // The agent the PREVIOUS turn ran as — drives the agent-changed boundary.
+  const lastAgentRef = useRef<string | undefined>(undefined);
+  // A compaction completed since the last submit (cache is gone → re-deciding
+  // is free). Latched from the compaction card (see the effect below the SSE
+  // bus), cleared on the next turn.
+  const justCompactedRef = useRef(false);
+  // The user re-picked Auto while a routed model may exist — the next turn
+  // re-decides (user-requested boundary). Detected as an autoActive flip.
+  const pendingAutoUserRef = useRef(false);
+  const priorAutoRef = useRef(autoActive);
+  useEffect(() => {
+    if (autoActive && !priorAutoRef.current && routedModelRef.current) {
+      pendingAutoUserRef.current = true;
+    }
+    priorAutoRef.current = autoActive;
+  }, [autoActive]);
   // Active-model providerID for the auth-error banner (BET-316). Per-session
   // override wins over the persisted default; null if neither is set. Memoized
   // on `modelOverride` (the in-memory selection, itself seeded from
@@ -583,6 +629,14 @@ export function ChatPanel({
     submitRef,
   });
 
+  // BET-1248: latch a completed compaction into `justCompactedRef` so the
+  // NEXT submit re-evaluates routing at the (now free) compacted boundary. The
+  // compaction card clears itself ~2.5s later; latching keeps the boundary
+  // valid for the next turn regardless of how fast the user reacts.
+  useEffect(() => {
+    if (compactionState?.phase === "done") justCompactedRef.current = true;
+  }, [compactionState]);
+
   // Manual dismiss of the pinned todo card — the user's escape hatch for a
   // stale list that's non-terminal. Mirrors the auto-dismiss path in submit().
   // Stable identity so it doesn't defeat ActiveTodos' React.memo.
@@ -666,11 +720,16 @@ export function ChatPanel({
     setError(null);
     const planOnStart = readPlanSaved(sessionId);
     setPlanOn(planOnStart);
-    const autoNow = readSavedChoice(sessionId).kind === "auto";
-    setAutoActive(autoNow);
-    setModelOverride(
-      autoNow ? null : readSavedModel(sessionId) ?? configDefaultModel ?? null,
-    );
+    const choiceNow = readSavedChoice(sessionId);
+    setAutoActive(choiceNow.kind === "auto");
+    setModelOverride(modelFromChoice(choiceNow, configDefaultModel));
+    // BET-1248: routed state is per-session — reset on session change (and on
+    // /clear, which swaps the session id), exactly like stepTokens / liveTodos.
+    setRoutedModel(null);
+    setRoutedReason(null);
+    routedModelRef.current = null;
+    pendingAutoUserRef.current = false;
+    priorAutoRef.current = choiceNow.kind === "auto";
     // Seed plan mode from the session's own `agent` field when present (BET-949
     // §5): a session pre-set to plan OUTSIDE MantaUI would otherwise show the
     // chip off and send the next prompt as build — the stored key alone can't
@@ -1250,13 +1309,94 @@ export function ChatPanel({
       }
     }
 
+    // BET-1248: route the main conversation at boundaries ONLY — never on a
+    // non-Auto session, never mid-exchange (this is submit(), the single send
+    // path reachable from the composer and the queued drain, which goes through
+    // submit too). All the judgement lives in routingBoundary.mjs; this
+    // component supplies facts and applies the answer. A routing failure must
+    // never fail a turn — it falls back to the previous routed model (or the
+    // server default) and sends.
+    let sendModel = modelOverride;
+    if (autoActive && text) {
+      if (readSavedChoice(sessionId).kind === "auto") {
+        const incumbent = routedModelRef.current;
+        const incumbentModel = incumbent
+          ? resolveActiveModel(models, incumbent, null)
+          : null;
+        const ctxTokens = latestTokens
+          ? (latestTokens.input ?? 0) +
+            (latestTokens.cache?.read ?? 0) +
+            (latestTokens.cache?.write ?? 0)
+          : undefined;
+        const requiredModes = readyAttachments.map((a) => mimeToInputMode(a.mime));
+        const currentAgent = planAgent ?? "build";
+        const { crossed, boundary } = crossesBoundary({
+          hasRoutedModel: incumbent != null,
+          agent: currentAgent,
+          previousAgent: lastAgentRef.current,
+          contextTokens: ctxTokens ?? undefined,
+          incumbentContextLimit: incumbentModel?.limit?.context ?? undefined,
+          requiredModalities: requiredModes,
+          incumbentModalities: incumbentModel
+            ? modelInputModes(incumbentModel)
+            : [],
+          incumbentHealthy: true,
+          justCompacted: justCompactedRef.current,
+          userRequested: pendingAutoUserRef.current,
+        });
+        justCompactedRef.current = false;
+        pendingAutoUserRef.current = false;
+        lastAgentRef.current = currentAgent;
+        if (crossed) {
+          try {
+            const decision = await window.api.routingChoose({
+              sessionId,
+              directory: cwd ?? "",
+              agent: currentAgent,
+              surface: "main",
+              contextTokens: ctxTokens ?? 0,
+              needs: {
+                tools: Boolean(planAgent),
+                image: readyAttachments.some((a) => mimeToInputMode(a.mime) === "image"),
+                pdf: readyAttachments.some((a) => mimeToInputMode(a.mime) === "pdf"),
+              },
+              incumbent,
+            });
+            const ranked = decision.model
+              ? [decision.model, ...decision.alternatives]
+              : decision.alternatives;
+            // Hysteresis: only move off the incumbent when it genuinely fell out
+            // (didn't survive the router's contention), and only when the router
+            // actually offered a model. Otherwise keep it and send on it as-is.
+            if (
+              decision.model &&
+              shouldSwitch({
+                incumbent,
+                ranked,
+                incumbentStillEligible: true,
+                incumbentStillCapable: true,
+                incumbentHealthy: true,
+              }).switch
+            ) {
+              const reason = decision.reason + (boundary ? ` · ${boundaryPhrase(boundary)}` : "");
+              applyRouted(decision.model, reason);
+              sendModel = decision.model;
+            }
+          } catch {
+            // routing failure must never fail a turn — fall through to the
+            // previous routed model (or the server default) and send.
+          }
+        }
+      }
+    }
+
     try {
       if (knownCommand && slashMatch) {
         await window.api.opencodeRunCommand({
           sessionId,
           command: cmdName!,
           arguments: slashMatch[2] ?? "",
-          model: modelOverride ?? undefined,
+          model: sendModel ?? undefined,
           agent: planAgent,
           attachments: readyAttachments,
         });
@@ -1290,7 +1430,7 @@ export function ChatPanel({
         await window.api.opencodePrompt(
           sessionId,
           text,
-          modelOverride ?? undefined,
+          sendModel ?? undefined,
           readyAttachments,
           resolvedMentions.length > 0 ? resolvedMentions : undefined,
           planAgent,
@@ -1313,7 +1453,7 @@ export function ChatPanel({
     // (clear/fork/compact) are read via their ref mirror below (declared after
     // submit in this file — the established commandsRef pattern) so submit
     // always sees their current value without them re-rotating this callback.
-  }, [input, running, sessionId, modelOverride, attachments, agentMentions, tmuxSession, windowIndex, plan]);
+  }, [input, running, sessionId, modelOverride, attachments, agentMentions, tmuxSession, windowIndex, plan, autoActive, models, applyRouted]);
 
   // Always-current ref to submit — lets the queued-message effect call the
   // latest version without adding submit to the effect's dependency array
@@ -1562,6 +1702,18 @@ export function ChatPanel({
     },
     [sessionId],
   );
+
+  // BET-1248: the user explicitly re-picked Auto — write the three-state choice,
+  // flip the UI to Auto, and flag the NEXT turn as a user-requested boundary so
+  // it re-decides at once (crossesBoundary USER). Clears the override so the
+  // pill reads "Auto · chooses when the turn starts" until routing resolves.
+  const onSelectAuto = useCallback(() => {
+    writeSavedChoice(sessionId, { kind: "auto" });
+    setAutoActive(true);
+    setModelOverride(null);
+    setRouted(null);
+    if (routedModelRef.current) pendingAutoUserRef.current = true;
+  }, [sessionId]);
 
   // BET-1222: undo a routed model choice. Reverts through the SAME per-session
   // override path the manual picker uses (selectModel + writeSavedModel) — no
@@ -3143,6 +3295,8 @@ export function ChatPanel({
         modelOverride={modelOverride}
         defaultModel={defaultModel}
         auto={autoActive}
+        autoReason={routedReason}
+        onSelectAuto={onSelectAuto}
         routed={routed}
         onRoutedUndone={() => void undoRouted()}
         plan={plan}

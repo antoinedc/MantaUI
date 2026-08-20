@@ -55,6 +55,12 @@ export function ModelPicker({
   // model (a turn has run and `modelOverride` carries the routed pick), which
   // model Auto chose. Until a model is resolved there is nothing to claim.
   auto = false,
+  // BET-1248: the latest boundary-routing reason — forwarded to ModelMenu's
+  // Auto row sub-line once a decision has resolved.
+  autoReason = null,
+  // BET-1248: the user re-picking Auto — when provided the ModelMenu's Auto
+  // row is rendered (a control can NEVER be present without a handler).
+  onSelectAuto,
   // BET-1222: when the router chose this session's model, the composer pill
   // explains WHY (reason) and offers one-click undo to the incumbent model.
   // `routed` is pure display state; the undo action itself (set override back
@@ -87,6 +93,10 @@ export function ModelPicker({
   labelOverride?: string | null;
   // BET-1247: session model choice is `auto` (see above).
   auto?: boolean;
+  // BET-1248: the latest boundary-routing reason for the Auto row.
+  autoReason?: string | null;
+  // BET-1248: the user re-picking Auto (render the Auto row).
+  onSelectAuto?: () => void;
   // BET-1222 routed state (see above).
   routed?: { reason: string; incumbent: { providerID: string; modelID: string } } | null;
   onRoutedUndone?: () => void;
@@ -332,6 +342,9 @@ export function ModelPicker({
           defaultModel={defaultModel}
           onSelect={onSelect}
           onClose={() => setModelOpen(false)}
+          autoActive={auto}
+          onSelectAuto={onSelectAuto}
+          autoReason={autoReason ?? undefined}
         />
       )}
 
