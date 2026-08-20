@@ -983,3 +983,139 @@ describe("useSseBus plan-mode mirror (BET-973)", () => {
     expect(planCalls).toEqual([false]);
   });
 });
+
+describe("BET-1248 main-conversation routing at boundaries (ChatPanel submit)", () => {
+  let api: MockApi;
+  let bus: MockEventBus;
+  let h: Harness | null = null;
+  const ROUTED = { providerID: "anthropic", modelID: "claude-routed" };
+  type RouterModel = { providerID: string; modelID: string; variant?: string } | null;
+
+  function typeInto(el: HTMLTextAreaElement, value: string) {
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      "value",
+    )?.set;
+    setter?.call(el, value);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  async function submitAsUser(text: string) {
+    const textarea = h!.container.querySelector("textarea") as HTMLTextAreaElement;
+    await act(async () => {
+      typeInto(textarea, text);
+      textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    // The async submit() body awaits routingChoose + opencodePrompt; settle
+    // the whole chain (two macrotask hops) before asserting.
+    await h!.flush();
+    await h!.flush();
+  }
+
+  // Flip the box's running→idle so the NEXT submit sends (instead of queuing).
+  // Mirrors the drain tests' turnComplete + TURN_SETTLE_MS settle window.
+  async function settleIdle() {
+    await emitStreamAndFlush(bus, h!, {
+      sub: "turnComplete",
+      sessionId: "ses_test",
+      payload: { complete: true, running: false },
+    });
+    await new Promise((r) => setTimeout(r, TURN_SETTLE_MS + 50));
+    await h!.flush();
+  }
+
+  // The model opencodePrompt was last called with for a given user text.
+  // opencodePrompt(sessionId, text, model, ...) → args[2] is the model.
+  function promptModelFor(text: string): unknown {
+    const calls = (api.calls.opencodePrompt ?? []) as unknown[][];
+    const hit = [...calls].reverse().find((a) => a[1] === text);
+    return hit ? hit[2] : undefined;
+  }
+
+  function decision(model: RouterModel, alternatives: RouterModel[] = []) {
+    return Promise.resolve({ model, reason: "cost", alternatives, changed: true });
+  }
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+    localStorage.clear();
+  });
+
+  async function mountAuto(overrides: Record<string, unknown> = {}) {
+    localStorage.setItem("manta:chat:ses_test:model", "auto");
+    ({ api, bus } = installMockApi({
+      routingChoose: () => decision(ROUTED),
+      opencodePrompt: () => Promise.resolve({ ok: true }),
+      ...overrides,
+    }));
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+  }
+
+  it("first turn with Auto on → routingChoose is called once and the turn is sent on the returned model", async () => {
+    await mountAuto();
+    await submitAsUser("hello");
+    expect((api.calls.routingChoose ?? []).length).toBe(1);
+    expect(promptModelFor("hello")).toEqual(ROUTED);
+  });
+
+  it("a follow-up with no boundary → routingChoose is NOT called; the same model is reused", async () => {
+    await mountAuto();
+    await submitAsUser("first");
+    await settleIdle();
+    await submitAsUser("second");
+    expect((api.calls.routingChoose ?? []).length).toBe(1);
+    expect(promptModelFor("first")).toEqual(ROUTED);
+    expect(promptModelFor("second")).toEqual(ROUTED);
+  });
+
+  it("after a compaction → routingChoose is called, but with the incumbent in contention the model does NOT change", async () => {
+    await mountAuto();
+    await submitAsUser("first");
+    await settleIdle();
+    // Compaction completes (cache is gone) — the next turn crosses a boundary.
+    await emitAndFlush(bus, h!, {
+      type: "session.next.compaction.started",
+      properties: { sessionID: "ses_test", reason: "context", text: "" },
+    });
+    await emitAndFlush(bus, h!, {
+      type: "session.next.compaction.ended",
+      properties: { sessionID: "ses_test" },
+    });
+    // The router returns the incumbent → it stays in the contention window.
+    await submitAsUser("after compact");
+    expect((api.calls.routingChoose ?? []).length).toBe(2);
+    expect(promptModelFor("after compact")).toEqual(ROUTED);
+  });
+
+  it("routingChoose rejecting → the turn still sends, on the previous model", async () => {
+    localStorage.setItem("manta:chat:ses_test:model", "auto");
+    ({ api, bus } = installMockApi({
+      routingChoose: () => Promise.reject(new Error("router down")),
+      opencodePrompt: () => Promise.resolve({ ok: true }),
+    }));
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    await submitAsUser("hi");
+    // A turn was still sent. First turn with no incumbent → server default.
+    expect((api.calls.opencodePrompt ?? []).length).toBeGreaterThan(0);
+    expect(promptModelFor("hi")).toBeUndefined();
+  });
+
+  it("Auto off → routingChoose is never called", async () => {
+    localStorage.clear(); // server-default choice
+    ({ api, bus } = installMockApi({
+      routingChoose: () => decision(ROUTED),
+      opencodePrompt: () => Promise.resolve({ ok: true }),
+    }));
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    await submitAsUser("hi");
+    expect(api.calls.routingChoose ?? []).toHaveLength(0);
+    expect(promptModelFor("hi")).toBeUndefined();
+  });
+});
