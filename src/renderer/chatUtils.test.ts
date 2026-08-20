@@ -54,7 +54,6 @@ import {
   customProviderDraftError,
   connectPhaseLabel,
   isPollExpired,
-  describeSubscriptionStatus,
   arrangeCards,
   terminalShortcut,
   authErrorAdvice,
@@ -1902,41 +1901,6 @@ describe("isPollExpired", () => {
     expect(isPollExpired(NaN, 1000, 5000)).toBe(false);
     expect(isPollExpired(1000, NaN, 5000)).toBe(false);
     expect(isPollExpired(1000, 1000, NaN)).toBe(false);
-  });
-});
-
-// ===== describeSubscriptionStatus (BET-314) =====
-//
-// SubscriptionsCard renders "connected" / "not connected" next to each row.
-// The string is the entire UX (no badge, no chip), so a future copy tweak
-// should land here, not inline in the JSX. Two tests, both exhaustive over
-// the boolean — anything else (a third value, mixed casing) is a regression.
-
-describe("describeSubscriptionStatus", () => {
-  it("returns 'connected' when status.connected is true", () => {
-    expect(
-      describeSubscriptionStatus({
-        id: "anthropic",
-        label: "Claude",
-        plan: "Claude Pro / Max",
-        console: null,
-        docs: "https://claude.com/pricing",
-        connected: true,
-      }),
-    ).toBe("connected");
-  });
-
-  it("returns 'not connected' when status.connected is false", () => {
-    expect(
-      describeSubscriptionStatus({
-        id: "openai",
-        label: "Codex",
-        plan: "ChatGPT Plus / Pro",
-        console: null,
-        docs: "https://openai.com/chatgpt/pricing",
-        connected: false,
-      }),
-    ).toBe("not connected");
   });
 });
 

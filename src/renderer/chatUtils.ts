@@ -5,7 +5,7 @@
 // without DOM/Electron/network).
 import type { ReactNode } from "react";
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { AppControlPayload, CheckRollup, DelegateApprovalTool, ForgeCheckRun, ForgeInboxItem, InboxReason, MediaEventPayload, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, PermissionRequest, ProgressRecord, ProgressState, Project, PullRequest, QuestionRequest, RepoHit, SubscriptionStatus, TmuxWindow, UpdateTarget, UsageSnapshot, UsageWindow } from "../shared/types";
+import type { AppControlPayload, CheckRollup, DelegateApprovalTool, ForgeCheckRun, ForgeInboxItem, InboxReason, MediaEventPayload, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, PermissionRequest, ProgressRecord, ProgressState, Project, PullRequest, QuestionRequest, RepoHit, TmuxWindow, UpdateTarget, UsageSnapshot, UsageWindow } from "../shared/types";
 import type { SessionMode } from "./chatShared";
 import type { VoiceNoteRecord } from "../shared/types";
 // Value import — `isClientTooOld` is the pure semver compare that drives
@@ -1571,18 +1571,6 @@ export function terminalShortcut(
   }
 }
 
-// ===== Subscription provider status (BET-314) =====
-//
-// Single source of truth for the connected/not-connected label the
-// SubscriptionsCard renders next to each row. The renderer never invents
-// its own copy here — the connect-card description ("● connected") is the
-// whole UX, and pinning the strings in chatUtils.ts keeps a future i18n /
-// copy pass touching one place. Returns "connected" / "not connected" with
-// no extra ornament (no leading dot, no uppercase — the row already draws
-// the dot separately and styles the casing).
-export function describeSubscriptionStatus(s: SubscriptionStatus): string {
-  return s.connected ? "connected" : "not connected";
-}
 // ===== Auth-error banner (BET-316) =====
 //
 // Opencode emits `session.error` whenever a turn fails. The legacy path in
