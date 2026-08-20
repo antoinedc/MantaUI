@@ -1324,6 +1324,42 @@ test("routing:choose is handed the filtered catalogue for the requested surface 
   assert.deepEqual(out.alternatives, out.alternatives.filter((a) => a && a.modelID), "alternatives are well-formed {providerID, modelID}");
 });
 
+// BET-1253: routing:main must be handed the same FILTERED catalogue for the
+// "main" surface that routing:choose uses — not the raw connected listModels.
+// Two entry points for one surface must resolve the same routable set, or a
+// main conversation could be routed onto a model the user deactivated/retired.
+test("routing:main is handed the filtered catalogue for the main surface (not listModels)", async () => {
+  const { deps } = makeDeps([]);
+  // Config that ACTIVATES routing so the decision core runs against the
+  // returned catalogue.
+  deps.local.configGet = async () => ({ projects: [], modelRouting: { preset: "economy" } });
+  let surfaceSeen = null;
+  let cfgSeen = null;
+  let calls = 0;
+  deps.routingListRoutableModels = async (surface, cfg) => {
+    surfaceSeen = surface;
+    cfgSeen = cfg;
+    calls++;
+    return [
+      { providerID: "anthropic", id: "claude-opus-4", status: "active" },
+      { providerID: "anthropic", id: "claude-sonnet-4", status: "active" },
+      { providerID: "anthropic", id: "claude-haiku-4", status: "active" },
+    ];
+  };
+  const handlers = buildHandlers(deps);
+  const out = await handlers["routing:main"]({
+    incumbent: { providerID: "anthropic", modelID: "claude-opus-4" },
+    agent: "build",
+  });
+  assert.equal(calls, 1);
+  assert.equal(surfaceSeen, "main", "routing:main must request the filtered catalogue for the main surface");
+  assert.equal(cfgSeen?.modelRouting?.preset, "economy", "routing:main passes the config through to the seam");
+  // A real decision was produced from the injected (filtered) catalogue — a
+  // selected model normalised into {providerID, modelID}.
+  assert.equal(out.model?.providerID, "anthropic");
+  assert.ok(typeof out.model?.modelID === "string" && out.model.modelID.length > 0);
+});
+
 // accounts:retry always reports an outcome — a non-empty message in BOTH the
 // cleared and not-cleared cases (AGENTS.md: it does the thing and says so,
 // or fails and says why; a swallowed bare return is a dead button).

@@ -837,8 +837,13 @@ export function buildHandlers({
       } catch {
         quota = [];
       }
+      // BET-1253: the FILTERED catalogue for the "main" surface. Use the same
+      // routingListRoutableModels seam routing:choose does — the ONE place
+      // routing consent is computed — never a second filter, never raw
+      // listModels. Otherwise routing:main could route a main conversation onto
+      // a model the user deactivated/retired (which routing:choose excludes).
       try {
-        catalog = await oc.listModels();
+        catalog = await routingListRoutableModels("main", cfg);
         if (!Array.isArray(catalog)) catalog = [];
       } catch {
         catalog = [];
