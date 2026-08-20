@@ -516,6 +516,23 @@ export function resolveRequestedModel(model, models) {
  * @param {number} [input.nowMs]
  * @returns {object|null} the model to run on (incumbent on off-path / failure)
  */
+// The model deliver()/sendPrompt() accept is the structured shape
+// {providerID, modelID} (opencode's sendPrompt reads `model.modelID`). A
+// catalog winner carries `.id`, not `.modelID` — so a routed winner has to be
+// normalised into the deliver shape or the model override is silently dropped.
+// This is a no-op for the requested-model incumbent (which is already
+// {providerID, modelID}). Shared by both routing wrappers below so the two
+// decision points normalise identically.
+function toDeliverModel(m) {
+  if (!m) return null;
+  const providerID = m?.providerID ?? "";
+  const modelID = m?.modelID ?? m?.id ?? "";
+  if (!providerID || !modelID) return null;
+  const out = { providerID, modelID };
+  if (typeof m?.variant === "string" && m.variant) out.variant = m.variant;
+  return out;
+}
+
 export function chooseSubagentModel({
   incumbent = null,
   catalog = [],
@@ -524,22 +541,6 @@ export function chooseSubagentModel({
   agent = "general",
   nowMs = Date.now(),
 } = {}) {
-  // The model deliver()/sendPrompt() accept is the structured shape
-  // {providerID, modelID} (opencode's sendPrompt reads `model.modelID`). A
-  // catalog winner carries `.id`, not `.modelID` — so a routed winner has to
-  // be normalised into the deliver shape or the model override is silently
-  // dropped. This is a no-op for the requested-model incumbent (which is
-  // already {providerID, modelID}).
-  function toDeliverModel(m) {
-    if (!m) return null;
-    const providerID = m?.providerID ?? "";
-    const modelID = m?.modelID ?? m?.id ?? "";
-    if (!providerID || !modelID) return null;
-    const out = { providerID, modelID };
-    if (typeof m?.variant === "string" && m.variant) out.variant = m.variant;
-    return out;
-  }
-
   // Normalise the incumbent into catalog shape ({providerID, id}) for the
   // comparison inside chooseModel, so its `changed` flag / modelKey() treat a
   // requested model and a catalog entry of the same model as equal. The ORIGINAL
@@ -573,6 +574,77 @@ export function chooseSubagentModel({
     // Routing must never break a spawn — fall back to the incumbent model.
     console.warn("[router] subagent routing failed, using incumbent:", e?.message ?? e);
     return incumbent;
+  }
+}
+
+/**
+ * THE other single routing decision point: the user-facing MAIN conversation
+ * ("build" agent). Sat beside chooseSubagentModel so `chooseModel` is still
+ * called from exactly one module — the one place a model is decided.
+ *
+ * Unlike the subagent wrapper, which returns only the model the spawn should
+ * run on (the spawn is opaque to the user), this returns the FULL decision —
+ * the routed `model`, the human-readable `reason`, the `incumbent` it would
+ * otherwise have used, and a `changed` flag — so the renderer can (a) apply
+ * the routed model to the next prompt's `modelOverride` AND (b) render the
+ * routed pill (`ChatPanel.routed`) exposing the reason and offering undo back
+ * to the incumbent. That is the honesty contract of the routing epic: a main
+ * conversation's model is never switched without a visible, undoable reason.
+ *
+ * Same safety contract as chooseSubagentModel: policy off / throw / no
+ * survivors all fall back to `incumbent` with `changed: false`, so enabling
+ * routing can never substitute a model the user was not shown and can undo.
+ *
+ * @param {object} [input]
+ * @param {object|null} [input.incumbent]  the model the session would use without routing
+ * @param {Array<object>} [input.catalog]  opencode model list
+ * @param {{ enabled?: boolean, preset?: string, perAgent?: Record<string,string> }} [input.policy]
+ * @param {Array<object>} [input.quota]    usage snapshots
+ * @param {string} [input.agent]           main-conversation agent (default "build")
+ * @param {number} [input.nowMs]
+ * @returns {{ model: object|null, reason: string, incumbent: object|null, changed: boolean }}
+ */
+export function chooseMainModel({
+  incumbent = null,
+  catalog = [],
+  policy = { enabled: false },
+  quota = [],
+  agent = "build",
+  nowMs = Date.now(),
+} = {}) {
+  const incumbentShape = incumbent
+    ? { providerID: incumbent.providerID, modelID: incumbent.modelID ?? incumbent.id ?? "" }
+    : null;
+  // Normalise the incumbent into catalog shape ({providerID, id}) so the
+  // `changed` comparison inside chooseModel treats a requested model and a
+  // catalog entry of the same model as equal (mirrors chooseSubagentModel).
+  const catalogIncumbent = incumbent
+    ? { providerID: incumbent.providerID, id: incumbent.modelID ?? incumbent.id }
+    : null;
+  try {
+    const decision = chooseModel({
+      intent: { kind: "main", agent, needs: { tools: true }, contextTokens: 0, incumbent: catalogIncumbent },
+      catalog,
+      telemetry: {},
+      quota,
+      policy,
+      nowMs,
+    });
+    const model =
+      decision?.model === catalogIncumbent
+        ? incumbent
+        : toDeliverModel(decision?.model ?? incumbent);
+    return {
+      model,
+      reason: decision?.reason ?? "",
+      incumbent: incumbentShape,
+      changed: decision?.changed === true,
+    };
+  } catch (e) {
+    // Routing must never change a main conversation invisibly — and must never
+    // break the send — so any failure falls back to the incumbent.
+    console.warn("[router] main routing failed, using incumbent:", e?.message ?? e);
+    return { model: incumbent, reason: "routing failed", incumbent: incumbentShape, changed: false };
   }
 }
 

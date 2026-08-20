@@ -1350,6 +1350,8 @@ export const IPC = {
   // Model picker: list available models on the remote opencode server (with
   // provider secrets stripped before forwarding).
   opencodeModels: "opencode:models",
+  // BET-1225: main-conversation routing decision at session start.
+  opencodeModelRoute: "routing:main",
   // Provider management: list/set custom providers + discover models.
   opencodeGetProviders: "opencode:get-providers",
   opencodeSetProviders: "opencode:set-providers",

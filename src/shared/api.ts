@@ -88,6 +88,17 @@ import type {
 import type { ClaimOutcome } from "./claim.mjs";
 
 type PromptModel = { providerID: string; modelID: string; variant?: string };
+// BET-1225: the server-side main-conversation routing decision, returned by
+// opencodeModelRoute. `model` is the router's chosen model to apply to the
+// next prompt; `reason` is why (shown on the routed pill); `incumbent` is the
+// model it replaced (what undo reverts to); `changed` is whether a substitution
+// actually happened (false on routing-off / failure / no-op).
+type ModelRouteDecision = {
+  model: PromptModel | null;
+  reason: string;
+  incumbent: PromptModel | null;
+  changed: boolean;
+};
 type PromptAttachment = { remotePath: string; mime: string; filename?: string };
 type PromptAgentMention = {
   name: string;
@@ -399,6 +410,15 @@ export interface Api {
 
   // Model picker.
   opencodeModels(): Promise<OpencodeModel[]>;
+  // BET-1225: fetch the server's main-conversation routing decision for the
+  // session at start, so the renderer can apply the routed model and render
+  // the undoable routed pill. `incumbent` is the model the session would use
+  // without routing (the user's per-session pick or the persisted default).
+  // Returns null on the demo/no-op transport (routing is never exercised).
+  opencodeModelRoute(
+    incumbent: PromptModel | null,
+    agent?: string,
+  ): Promise<ModelRouteDecision | null>;
   opencodeDefaultModel(): Promise<{ providerID: string; modelID: string } | null>;
   opencodeGetProviders(): Promise<ProviderEndpoint[]>;
   opencodeSetProviders(ops: {
