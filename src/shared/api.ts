@@ -467,6 +467,13 @@ export interface Api {
     state: string;
     message: string;
   }>;
+  // BET-1250: the Accounts list's per-provider health snapshot, keyed by
+  // opencode providerID. `retryInMs` is present only while the provider is
+  // rate-limited (its cooldown remaining). Never throws; {} when health isn't
+  // wired on the box (routing inert).
+  accountHealth(): Promise<
+    Record<string, { state: string; retryInMs?: number | null }>
+  >;
   // BET-1249: the provider-agnostic model catalogue for the "Models we
   // couldn't identify" block — resolve opaque endpoint ids and typeahead over
   // every known model. `supported:false` when the box has no catalogue yet

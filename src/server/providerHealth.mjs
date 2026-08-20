@@ -277,5 +277,20 @@ export function createProviderHealth({
     return out;
   }
 
-  return { observeEvent, state, retry, deliverSnapshots, all };
+  /**
+   * The remaining ms of a rate-limit cooldown for providerID, or null when the
+   * provider is not currently cooling down (never negative — baked at 0 once
+   * expired). The Accounts UI reads this to render the "retry in Nm" suffix on
+   * a rate-limited row.
+   * @param {string} providerID
+   * @returns {number|null}
+   */
+  function retryIn(providerID) {
+    const until = rateLimitedUntil.get(providerID);
+    if (until == null) return null;
+    const remaining = until - now();
+    return remaining > 0 ? remaining : null;
+  }
+
+  return { observeEvent, state, retry, deliverSnapshots, all, retryIn };
 }

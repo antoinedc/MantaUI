@@ -20,11 +20,10 @@ import { Checkbox } from "./Checkbox";
 import { Toggle } from "./Toggle";
 import { StatusDot } from "./StatusDot";
 import { ListRow } from "./ListRow";
-import { ProvidersCard } from "./ProvidersCard";
+import { AccountsCard } from "./AccountsCard";
 import { ModelRoutingCard } from "./ModelRoutingCard";
 import { ModelsCard } from "./ModelsCard";
 import { ModelLedgerCard } from "./ModelLedgerCard";
-import { SubscriptionsCard } from "./SubscriptionsCard";
 import { AddPhonePanel } from "./AddPhonePanel";
 import { getMantaPreload } from "./preloadAccess";
 import { resolveLauncherFlags } from "./chatShared";
@@ -1077,20 +1076,14 @@ export function Settings({
       );
     }
     if (section === "accounts") {
-      // Subscriptions + custom endpoints merged into one list (BET-420).
-      // Both are "a way to reach a model"; the shared CustomProviderForm
-      // lives inside ProvidersCard and probes + validates identically here
-      // and in onboarding.
+      // Subscriptions + custom endpoints merged into ONE Accounts list
+      // (BET-1250). Both are "a way to reach a model that costs something and
+      // can run out"; the shared CustomProviderForm probes + validates
+      // identically here and in onboarding. One group, one list, one row.
       return (
-        <>
-          <GroupCard title="Subscriptions">
-            <SubscriptionsCard />
-          </GroupCard>
-          <GroupCard title="Custom endpoints">
-            <div className="text-body text-text-faint">OpenAI-compatible endpoints opencode can serve. Add one, refresh to discover models, then enable the ones you want in the model picker.</div>
-            <ProvidersCard onRestartNeeded={requestRestart} />
-          </GroupCard>
-        </>
+        <GroupCard title="Accounts">
+          <AccountsCard />
+        </GroupCard>
       );
     }
     if (section === "models") {

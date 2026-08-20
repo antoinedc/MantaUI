@@ -992,6 +992,26 @@ export function buildHandlers({
       }
     },
 
+    // BET-1250: the Accounts list's per-provider health snapshot. The renderer
+    // builds its rows from usage readings + subscription status + the health
+    // states below — the same providerHealth engine that gates the router, so
+    // "what the UI shows" can never drift from "what blocks Auto" (one gate).
+    // Degrades to {} when providerHealth isn't wired (routing inert) — never
+    // throws. `retryInMs` is present only while a provider is rate-limited.
+    "accounts:health": async () => {
+      if (!providerHealth || typeof providerHealth.all !== "function") return {};
+      const all = providerHealth.all() ?? {};
+      const out = {};
+      for (const [providerID, state] of Object.entries(all)) {
+        const retryInMs =
+          state === "rate-limited" && typeof providerHealth.retryIn === "function"
+            ? providerHealth.retryIn(providerID)
+            : undefined;
+        out[providerID] = { state, retryInMs };
+      }
+      return out;
+    },
+
     // BET-1249: the provider-agnostic model catalogue for the renderer's
     // "Models we couldn't identify" block. Read-only — the renderer builds the
     // matcher (shared modelCatalog.mjs) over the returned entries and persists

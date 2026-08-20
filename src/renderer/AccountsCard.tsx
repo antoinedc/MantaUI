@@ -1,0 +1,635 @@
+// ===== AccountsCard (BET-1250) =====
+//
+// The ONE Accounts list in Settings. Subscriptions and custom endpoints are
+// both "a way to reach a model that costs something and can run out", so they
+// live in a single list with a single row renderer — two separate cards is the
+// defect this replaces. Supported rows (subscriptions) show real usage
+// readings; custom rows show none, and name what Auto still needs.
+//
+// One list component (AccountsCard) + one row component (AccountRow). The
+// connect/disconnect (subscription) and refresh/remove + model toggles (custom)
+// flows are folded into that single row; the shared sub-components
+// (ConnectProvider, CustomProviderForm) are reused as-is.
+//
+// The state column is built from the SAME sources that gate the router:
+//   - usage readings (window / pace / balance) from the store's usage slice —
+//     the identical state the composer dial reads, no second fetch;
+//   - health (out-of-credit / rate-limited / failing) from providerHealth via
+//     the `accounts:health` RPC — the same engine that excludes Auto, so the
+//     UI can never claim something different from what blocks routing;
+//   - credential absence (not connected) from the subscription status /
+//     provider hasApiKey;
+//   - Auto-eligibility gaps for custom rows from the SHARED autoEligibility
+//     gate (the one gate the router waits on).
+//
+// Freshness is refetch-driven (no poll, no bus subscription) — the standing
+// desktop-renderer precedent (see the retired SubscriptionsCard). The pure
+// helpers here (describeAccountState, describeMissing, usagePace, helpText)
+// are unit-tested.
+
+import { useCallback, useMemo, useState, type ReactNode } from "react";
+import { X } from "lucide-react";
+import type { ProviderEndpoint, SubscriptionStatus, UsageSnapshot, UsageWindow } from "../shared/types";
+import { autoEligibility, MISSING } from "../shared/autoEligibility.mjs";
+import { resolveIdentity } from "../shared/modelIdentity.mjs";
+import { ConnectProvider } from "./ConnectProvider";
+import { CustomProviderForm } from "./CustomProviderForm";
+import { Checkbox } from "./Checkbox";
+import { SettingsRow } from "./SettingsRow";
+import { MantaLoader } from "./MantaLoader";
+import { useCachedResource } from "./useCachedResource";
+import { useRoutingCatalog, type RoutingCatalog } from "./routingCatalog";
+import { useStore } from "./store";
+
+// ===== Pure row logic (unit-tested) =====
+
+export type AccountStatus = "ok" | "warn" | "danger" | "quiet";
+
+export type AccountState = { text: string; tone: AccountStatus };
+
+export type DeclaredModel = {
+  catalogId?: string;
+  price?: { input?: number; output?: number } | "free";
+  caches?: boolean | { read?: boolean; write?: boolean };
+  tierOverride?: string;
+};
+
+export type AccountRowModel = {
+  /** opencode providerID — the key accounts:health and usage match on. */
+  id: string;
+  className: "Supported" | "Custom";
+  kind: "subscription" | "declared";
+  name: string;
+  plan?: string;
+  /** credential present (subscription connected / custom has an api key). */
+  connected: boolean;
+  /** A usage reading (window label / pct / pace) when one exists. */
+  reading: { label: string; pct: number; pace: string } | null;
+  /** Credit balance in dollars, or null when unknown. */
+  balance: number | null;
+  health: "ok" | "out-of-credit" | "rate-limited" | "failing";
+  /** Remaining rate-limit cooldown, whole minutes (health === "rate-limited"). */
+  retryInMinutes?: number;
+  /** Machine keys (autoEligibility MISSING) Auto still needs for a custom row. */
+  eligibilityMissing: string[];
+  /** Declared price sentence for a custom row that is fully described. */
+  declaredPrice?: string;
+};
+
+const LOW_BALANCE_DOLLARS = 5;
+
+const formatDollars = (n: number) => (Number.isFinite(n) ? n.toFixed(2) : String(n));
+
+/**
+ * The state column for an account row — one always-honest string. `No usage
+ * data` is never a zero, never a full/empty bar: a reading is real or absent.
+ * Precedence: on-fire health outranks a reading (a window pct is not the story
+ * when the provider is refusing work); a reading outranks a balance; then
+ * credential absence; then "no usage data".
+ */
+export function describeAccountState(r: AccountRowModel): AccountState {
+  if (r.health === "out-of-credit") return { text: "Out of credit", tone: "danger" };
+  if (r.health === "rate-limited") {
+    return {
+      text: r.retryInMinutes ? `Rate limited · retry in ${r.retryInMinutes}m` : "Rate limited",
+      tone: "warn",
+    };
+  }
+  if (r.health === "failing") return { text: "Not responding", tone: "warn" };
+  if (r.reading) {
+    const pct = r.reading.pct;
+    const tone: AccountStatus = pct >= 90 ? "danger" : pct >= 70 ? "warn" : "ok";
+    return { text: `${r.reading.label} ${pct}% · ${r.reading.pace}`, tone };
+  }
+  if (typeof r.balance === "number" && Number.isFinite(r.balance)) {
+    return {
+      text: `$${formatDollars(r.balance)} remaining`,
+      tone: r.balance < LOW_BALANCE_DOLLARS ? "danger" : "ok",
+    };
+  }
+  if (!r.connected) return { text: "Not connected", tone: "quiet" };
+  return { text: "No usage data", tone: "quiet" };
+}
+
+export const STATE_TONE_CLASS: Record<AccountStatus, string> = {
+  ok: "text-ok",
+  warn: "text-warn",
+  danger: "text-danger",
+  quiet: "text-text-quiet",
+};
+
+/**
+ * Classify a subscription window's pace ("under" / "on" / "over") from how fast
+ * it is being consumed against how far through the window we are. Deterministic
+ * on (nowMs, window). Falls back to a pct-based heuristic when the window
+ * carries no timing.
+ */
+export function usagePace(w: UsageWindow, nowMs: number): string {
+  if (typeof w.startedAt === "number" && typeof w.resetsAt === "number" && w.resetsAt > w.startedAt) {
+    const elapsed = (nowMs - w.startedAt) / (w.resetsAt - w.startedAt);
+    if (elapsed > 0) {
+      const ratio = w.pct / 100 / elapsed;
+      if (ratio < 0.9) return "under pace";
+      if (ratio > 1.1) return "over pace";
+      return "on pace";
+    }
+  }
+  return w.pct >= 80 ? "over pace" : "on pace";
+}
+
+// The machine-key → phrase map lives HERE, in the renderer, once. autoEligibility
+// deliberately carries no user-facing copy; the router and this UI share the
+// same MISSING keys by construction.
+const MISSING_PHRASE: Record<string, string> = {
+  [MISSING.IDENTITY]: "which model",
+  [MISSING.PRICE]: "what it costs",
+  [MISSING.CACHING]: "whether it caches",
+  [MISSING.QUALITY]: "how it compares",
+};
+
+/** Join missing-eligibility keys into "which model, what it costs, and …". */
+export function describeMissing(missing: readonly string[]): string | null {
+  const phrases = missing.filter((k) => k in MISSING_PHRASE).map((k) => MISSING_PHRASE[k]);
+  if (phrases.length === 0) return null;
+  if (phrases.length === 1) return phrases[0];
+  const head = phrases.slice(0, -1);
+  return `${head.join(", ")}${head.length > 1 ? "," : ""} and ${phrases[phrases.length - 1]}`;
+}
+
+/** The row's help line: "Supported · subscription · Max 20x" or the custom form. */
+export function helpText(r: AccountRowModel): string {
+  if (r.className === "Custom") {
+    const missing = describeMissing(r.eligibilityMissing);
+    if (missing) return `Custom · Auto needs: ${missing}`;
+    return `Custom · declared${r.declaredPrice ? ` · ${r.declaredPrice}` : ""}`;
+  }
+  return `Supported · subscription${r.plan ? ` · ${r.plan}` : ""}`;
+}
+
+// ===== Row assembly (card-side) =====
+
+type HealthMap = Record<string, { state: string; retryInMs?: number | null }>;
+
+const HEALTH_STATES = ["ok", "out-of-credit", "rate-limited", "failing"] as const;
+
+function normalizeHealth(h: HealthMap | null | undefined, id: string): {
+  health: AccountRowModel["health"];
+  retryInMinutes?: number;
+} {
+  const entry = h?.[id];
+  const st = (HEALTH_STATES as readonly string[]).includes(entry?.state)
+    ? (entry?.state as AccountRowModel["health"])
+    : undefined;
+  if (st && st !== "ok") {
+    const retryInMinutes =
+      st === "rate-limited" && typeof entry?.retryInMs === "number"
+        ? Math.max(1, Math.ceil((entry.retryInMs ?? 0) / 60000))
+        : undefined;
+    return { health: st, retryInMinutes };
+  }
+  return { health: "ok" };
+}
+
+function subscriptionReading(snap: UsageSnapshot | undefined, nowMs: number) {
+  if (!snap || !Array.isArray(snap.windows) || snap.windows.length === 0) return null;
+  const w = snap.windows[0];
+  if (typeof w?.pct !== "number") return null;
+  return { label: w.label ?? "", pct: w.pct, pace: usagePace(w, nowMs) };
+}
+
+const isSubscriptionId = (id: string, statuses: SubscriptionStatus[]) =>
+  statuses.some((s) => s.id === id);
+
+/** Auto-eligibility gaps for a custom endpoint — the same gate the router waits on. */
+function endpointEligibility(
+  ep: ProviderEndpoint,
+  declared: Record<string, DeclaredModel> | undefined,
+  matcher: RoutingCatalog["matcher"],
+): { missing: string[]; declaredPrice?: string } {
+  const modelId = ep.enabledModels?.[0] ?? null;
+  const key = modelId ? `${ep.id}/${modelId}` : null;
+  const decl: DeclaredModel | undefined = key ? declared?.[key] : undefined;
+
+  let identityKnown = false;
+  if (key) {
+    if (decl?.catalogId) {
+      identityKnown = true;
+    } else if (matcher && modelId) {
+      const id = resolveIdentity({ providerID: ep.id, id: modelId }, undefined, matcher);
+      identityKnown = id.state === "resolved";
+    }
+  }
+
+  const result = autoEligibility({
+    model: {},
+    identity: { known: identityKnown },
+    quality: { known: identityKnown },
+    declared: decl,
+    providerClass: "custom",
+  });
+
+  let declaredPrice: string | undefined;
+  const price = decl?.price;
+  if (price && price !== "free" && typeof price === "object") {
+    const p = price as { input?: number; output?: number };
+    if (Number.isFinite(p.input ?? 0) || Number.isFinite(p.output ?? 0)) {
+      const input = Number.isFinite(p.input ?? 0) ? (p.input as number) : 0;
+      const output = Number.isFinite(p.output ?? 0) ? (p.output as number) : 0;
+      declaredPrice = `$${input.toFixed(2)} / $${output.toFixed(2)} per M`;
+    }
+  }
+
+  return { missing: result.missing, declaredPrice };
+}
+
+// ===== The one row component =====
+
+function AccountRow({
+  row,
+  busy,
+  connectState,
+  onConnectChange,
+  onDisconnect,
+  onRetry,
+  onDiscover,
+  onRemove,
+}: {
+  row: AccountRowModel;
+  busy: string | null;
+  connectState: {
+    connectingId: string | null;
+    disconnectConfirmId: string | null;
+    setConnectingId: (id: string | null) => void;
+    setDisconnectConfirmId: (id: string | null) => void;
+  };
+  onConnectChange: (id: string, label: string) => void;
+  onDisconnect: (id: string) => void;
+  onRetry: (id: string) => void;
+  onDiscover: (id: string) => void;
+  onRemove: (id: string) => void;
+}) {
+  const state = describeAccountState(row);
+  const isBusy = busy === row.id;
+  const { connectingId, disconnectConfirmId, setConnectingId, setDisconnectConfirmId } = connectState;
+
+  let control: ReactNode;
+
+  if (row.health === "out-of-credit") {
+    control = (
+      <>
+        <span className={STATE_TONE_CLASS[state.tone]}>{state.text}</span>
+        <button
+          onClick={() => onRetry(row.id)}
+          disabled={isBusy}
+          className="px-2 py-1 text-meta bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text disabled:opacity-40"
+          title={
+            row.className === "Custom"
+              ? "I've topped this up — clears the flag, sends no traffic."
+              : "Re-read the meter and clear the out-of-credit flag if it reports funds."
+          }
+        >
+          {isBusy ? "…" : "Try again"}
+        </button>
+      </>
+    );
+  } else {
+    control = (
+      <>
+        <span className={STATE_TONE_CLASS[state.tone]}>{state.text}</span>
+        {row.className === "Custom" ? (
+          <>
+            <button
+              onClick={() => onDiscover(row.id)}
+              disabled={isBusy}
+              className="px-2 py-1 text-meta bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text disabled:opacity-40"
+            >
+              {isBusy ? "…" : "Refresh"}
+            </button>
+            <button
+              onClick={() => onRemove(row.id)}
+              disabled={isBusy}
+              className="text-meta text-text-faint hover:text-text px-1 inline-flex items-center"
+              title="Remove endpoint"
+              aria-label={`Remove ${row.name}`}
+            >
+              <X size={14} aria-hidden="true" />
+            </button>
+          </>
+        ) : row.connected ? (
+          disconnectConfirmId === row.id ? (
+            <>
+              <button
+                onClick={() => onDisconnect(row.id)}
+                disabled={busy !== null}
+                className="px-2 py-1 text-meta bg-danger-bg border border-danger rounded-xs text-danger hover:text-danger disabled:opacity-40"
+              >
+                {busy === row.id ? "…" : "Disconnect"}
+              </button>
+              <button
+                onClick={() => setDisconnectConfirmId(null)}
+                disabled={busy !== null}
+                className="px-2 py-1 text-meta text-text-faint hover:text-text disabled:opacity-40"
+              >
+                Cancel
+              </button>
+            </>
+          ) : (
+            <button
+              onClick={() => setDisconnectConfirmId(row.id)}
+              disabled={busy !== null || connectingId !== null}
+              className="px-2 py-1 text-meta bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text disabled:opacity-40"
+            >
+              Disconnect
+            </button>
+          )
+        ) : (
+          <button
+            onClick={() => setConnectingId(row.id)}
+            disabled={busy !== null || connectingId !== null}
+            className="px-2 py-1 text-meta bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text disabled:opacity-40"
+          >
+            Connect
+          </button>
+        )}
+      </>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      <SettingsRow name={row.name} help={helpText(row)}>
+        {control}
+      </SettingsRow>
+
+      {connectingId === row.id && (
+        <div className="pl-4">
+          <ConnectProvider
+            id={row.id}
+            label={row.name}
+            onDone={() => onConnectChange(row.id, row.name)}
+            onCancel={() => setConnectingId(null)}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ===== The one list component =====
+
+type AccountsData = {
+  statuses: SubscriptionStatus[];
+  providers: ProviderEndpoint[];
+  health: HealthMap | null;
+  declared: Record<string, DeclaredModel> | undefined;
+};
+
+export function AccountsCard() {
+  const snapshots = useStore((s) => s.usage) ?? [];
+  // Snapshot taken once per Settings open so pace/reset lines don't re-render on
+  // the store's usage ticks (mirrors ModelRoutingCard's `nowMs`).
+  const [nowMs] = useState(() => Date.now());
+  const routingCatalog = useRoutingCatalog();
+
+  const [busy, setBusy] = useState<string | null>(null);
+  const [connectingId, setConnectingId] = useState<string | null>(null);
+  const [disconnectConfirmId, setDisconnectConfirmId] = useState<string | null>(null);
+  const [retryResult, setRetryResult] = useState<Record<string, string>>({});
+
+  const {
+    data,
+    loading,
+    error,
+    refresh,
+    mutate,
+  } = useCachedResource<AccountsData>("accounts", async () => {
+    const res = await window.api.opencodeProviderAuth({ action: "status" });
+    if (res.action !== "status") throw new Error("Unexpected response from the box.");
+    const providers = await window.api.opencodeGetProviders().catch(() => []);
+    const health = await window.api.accountHealth().catch(() => null);
+    const cfg = await window.api.configGet().catch(() => null);
+    const declared = (cfg as { modelRouting?: { declaredModels?: Record<string, DeclaredModel> } } | null)
+      ?.modelRouting?.declaredModels;
+    return { statuses: res.providers, providers, health, declared };
+  });
+
+  const rows = useMemo<AccountRowModel[]>(() => {
+    if (!data) return [];
+    const statuses = data.statuses ?? [];
+    const providers = data.providers ?? [];
+    const health = data.health;
+
+    const supported: AccountRowModel[] = statuses.map((s) => {
+      const snap = snapshots.find((u) => u.providerIDs?.includes(s.id));
+      const reading = subscriptionReading(snap, nowMs);
+      const balance = typeof snap?.balance === "number" ? snap.balance : null;
+      const { health: h, retryInMinutes } = normalizeHealth(health, s.id);
+      // A reader reporting "exhausted" refuses work — surfaced as a health
+      // out-of-credit even before providerHealth sees a 402.
+      const effectiveHealth: AccountRowModel["health"] =
+        snap?.exhausted === true ? "out-of-credit" : h;
+      return {
+        id: s.id,
+        className: "Supported" as const,
+        kind: "subscription" as const,
+        name: s.label,
+        plan: s.plan,
+        connected: s.connected,
+        reading,
+        balance,
+        health: effectiveHealth,
+        retryInMinutes,
+        eligibilityMissing: [],
+      };
+    });
+
+    const custom: AccountRowModel[] = providers
+      .filter((ep) => !isSubscriptionId(ep.id, statuses))
+      .map((ep) => {
+        const elig = endpointEligibility(ep, data.declared, routingCatalog.matcher);
+        const { health: h, retryInMinutes } = normalizeHealth(health, ep.id);
+        return {
+          id: ep.id,
+          className: "Custom" as const,
+          kind: "declared" as const,
+          name: ep.name,
+          connected: ep.hasApiKey,
+          reading: null,
+          balance: null,
+          health: h,
+          retryInMinutes,
+          eligibilityMissing: elig.missing,
+          declaredPrice: elig.declaredPrice,
+        };
+      });
+
+    return [...supported, ...custom];
+  }, [data, snapshots, nowMs, routingCatalog.matcher]);
+
+  const disconnect = useCallback(
+    async (id: string) => {
+      if (busy) return;
+      setBusy(id);
+      await mutate(async () => {
+        const res = await window.api.opencodeProviderAuth({ action: "disconnect", id });
+        if (res.action !== "disconnect") throw new Error("Unexpected response from the box.");
+        if (!res.ok) throw new Error(res.error ?? "Disconnect failed.");
+        void refresh();
+      });
+      setBusy(null);
+      setDisconnectConfirmId(null);
+    },
+    [busy, mutate, refresh],
+  );
+
+  const onConnectChange = useCallback(() => {
+    setConnectingId(null);
+    void refresh();
+  }, [refresh]);
+
+  // Try again — reports BOTH outcomes (cleared vs still-refused) per AGENTS.md.
+  const retry = useCallback(
+    async (id: string) => {
+      if (busy) return;
+      setBusy(id);
+      try {
+        const res = await window.api.accountsRetry(id);
+        setRetryResult((r) => ({ ...r, [id]: res?.message ?? "Retry done." }));
+        void refresh();
+      } catch (e) {
+        setRetryResult((r) => ({
+          ...r,
+          [id]: e instanceof Error ? e.message : "Retry failed — try again.",
+        }));
+      } finally {
+        setBusy(null);
+      }
+    },
+    [busy, refresh],
+  );
+
+  const toggleModel = useCallback(
+    async (ep: ProviderEndpoint, modelId: string) => {
+      if (busy) return;
+      const enabled = ep.enabledModels.includes(modelId)
+        ? ep.enabledModels.filter((m) => m !== modelId)
+        : [...ep.enabledModels, modelId];
+      setBusy(ep.id);
+      await mutate(async () => {
+        const res = await window.api.opencodeSetProviders({
+          upsert: [{ id: ep.id, name: ep.name, baseURL: ep.baseURL, enabledModels: enabled }],
+        });
+        if (!res.ok) throw new Error(res.error ?? "Save failed");
+        useStore.getState().setOpencodeRestartNeeded(true);
+        void refresh();
+      });
+      setBusy(null);
+    },
+    [busy, mutate, refresh],
+  );
+
+  const discover = useCallback(
+    async (ep: ProviderEndpoint) => {
+      if (busy) return;
+      setBusy(ep.id);
+      try {
+        await window.api.opencodeDiscoverModels(ep.baseURL, "");
+        void refresh();
+      } finally {
+        setBusy(null);
+      }
+    },
+    [busy, refresh],
+  );
+
+  const removeEndpoint = useCallback(
+    async (ep: ProviderEndpoint) => {
+      if (busy) return;
+      setBusy(ep.id);
+      await mutate(async () => {
+        const res = await window.api.opencodeSetProviders({ remove: [ep.id] });
+        if (!res.ok) throw new Error(res.error ?? "Remove failed");
+        useStore.getState().setOpencodeRestartNeeded(true);
+        void refresh();
+      });
+      setBusy(null);
+    },
+    [busy, mutate, refresh],
+  );
+
+  return (
+    <div className="space-y-2">
+      <div className="text-meta text-text-faint">
+        Subscriptions and custom endpoints are both a way to reach a model that
+        costs something and can run out.
+      </div>
+
+      {error && <div className="text-meta text-danger break-words">{error}</div>}
+
+      {loading ? (
+        <div className="py-2">
+          <MantaLoader size="inline" label="Loading accounts" />
+        </div>
+      ) : rows.length === 0 ? (
+        <div className="text-meta text-text-faint py-2">No accounts configured yet.</div>
+      ) : (
+        <div className="space-y-4">
+          {rows.map((row) => {
+            const ep =
+              row.className === "Custom"
+                ? data?.providers.find((p) => p.id === row.id)
+                : undefined;
+            return (
+              <div key={row.id}>
+                <AccountRow
+                  row={row}
+                  busy={busy}
+                  connectState={{
+                    connectingId,
+                    disconnectConfirmId,
+                    setConnectingId,
+                    setDisconnectConfirmId,
+                  }}
+                  onConnectChange={onConnectChange}
+                  onDisconnect={(id) => void disconnect(id)}
+                  onRetry={(id) => void retry(id)}
+                  onDiscover={() => ep && void discover(ep)}
+                  onRemove={() => ep && void removeEndpoint(ep)}
+                />
+                {retryResult[row.id] && (
+                  <div role="status" className="text-meta text-text-faint pl-[6px] -mt-1">
+                    {retryResult[row.id]}
+                  </div>
+                )}
+                {ep && (
+                  <div className="pl-4 space-y-1">
+                    <code className="text-meta text-text-faint truncate block">{ep.baseURL}</code>
+                    {ep.enabledModels.map((m) => (
+                      <div key={m} className="flex items-center gap-2 text-meta">
+                        <Checkbox
+                          checked={ep.enabledModels.includes(m)}
+                          onChange={() => void toggleModel(ep, m)}
+                          ariaLabel={m}
+                          disabled={busy === row.id}
+                        />
+                        <span className="text-text-muted">{m}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <CustomProviderForm compact onSaved={() => void refresh()} />
+
+      <div className="text-meta text-text-quiet pt-3 border-t border-border-subtle">
+        One list: subscriptions and custom endpoints are both a way to reach a
+        model that costs something and can run out. Supported rows show real
+        numbers; custom rows show none, and say what Auto still needs.
+      </div>
+    </div>
+  );
+}
