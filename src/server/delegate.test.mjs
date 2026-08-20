@@ -528,7 +528,7 @@ test("startJob with no model calls deliver without a model key (BET-947 regressi
 
 test("startJob with routing off delivers the incumbent model byte-identical (BET-1220)", async () => {
   const h = startHarness("child_route_off");
-  h.deps.configGet = async () => ({}); // no modelRouter key → routing off
+  h.deps.configGet = async () => ({}); // no routing config → not activated
   h.deps.listSnapshots = () => [];
   h.deps.listModels = async () => mockModels();
   const res = await startJob(
@@ -555,7 +555,7 @@ test("startJob survives a throwing listSnapshots and delivers the incumbent (BET
   assert.deepEqual(h.delivered[0].model, { providerID: "anthropic", modelID: "claude-opus-4-5" });
 });
 
-test("chooseSubagentModel routes an explore agent to a fast-tier model when enabled (BET-1220)", () => {
+test("chooseSubagentModel routes an explore agent to a fast-tier model when the conversation activates routing (BET-1220)", () => {
   const catalog = [
     { providerID: "anthropic", id: "claude-opus-4", status: "active" },   // deep
     { providerID: "anthropic", id: "claude-haiku-4", status: "active" }, // fast
@@ -563,7 +563,7 @@ test("chooseSubagentModel routes an explore agent to a fast-tier model when enab
   const chosen = chooseSubagentModel({
     incumbent: { providerID: "anthropic", modelID: "claude-opus-4" },
     catalog,
-    policy: { enabled: true, preset: "economy" }, // economy + explore → fast tier
+    policy: { preset: "economy" }, // economy + explore → fast tier
     quota: [],
     agent: "explore",
     nowMs: 1_700_000_000_000,
@@ -585,7 +585,7 @@ test("startJob with routing on normalises the catalog winner to a {providerID, m
   // PINS THE CONFIG KEY BY NAME (BET-1227): routing reads `modelRouting`, the
   // key Settings writes. A rename here fails by construction, so this asserts
   // the key, not just the behaviour.
-  h.deps.configGet = async () => ({ modelRouting: { enabled: true, preset: "economy" } });
+  h.deps.configGet = async () => ({ modelRouting: { preset: "economy" } });
   h.deps.listSnapshots = () => [];
   h.deps.listModels = async () => [
     { providerID: "anthropic", id: "claude-opus-4", status: "active" },   // deep
@@ -608,9 +608,10 @@ test("startJob with routing on normalises the catalog winner to a {providerID, m
 
 test("startJob ignores the stale modelRouter key and delivers the incumbent (BET-1227)", async () => {
   const h = startHarness("child_stale_key");
-  // The wrong, never-written key must NOT enable routing — an enabled flag under
-  // `modelRouter` is inert, exactly as it has been on every box since shipping.
-  h.deps.configGet = async () => ({ modelRouter: { enabled: true, preset: "economy" } });
+  // The wrong, never-written key must NOT activate routing — a preset under
+  // `modelRouter` is inert (the wire key is `modelRouting`), exactly as it has
+  // been on every box since shipping.
+  h.deps.configGet = async () => ({ modelRouter: { preset: "economy" } });
   const res = await startJob(
     { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo",
       model: { providerID: "anthropic", modelID: "claude-opus-4" } },
@@ -618,7 +619,7 @@ test("startJob ignores the stale modelRouter key and delivers the incumbent (BET
   );
   assert.equal(res.ok, true);
   assert.equal(h.delivered.length, 1);
-  // routing stayed off → the requested model passes through byte-identical,
+  // routing not activated → the requested model passes through byte-identical,
   // proving we are NOT reading the stale `modelRouter` name.
   assert.deepEqual(h.delivered[0].model, { providerID: "anthropic", modelID: "claude-opus-4" });
 });
@@ -632,7 +633,7 @@ test("startJob routes only within the consent (sub) catalogue (BET-1229)", async
   // Routing on, and the user has deactivated every subagent model except
   // claude-opus-4 and gpt-5 (the "ticked" set).
   h.deps.configGet = async () => ({
-    modelRouting: { enabled: true, preset: "economy" },
+    modelRouting: { preset: "economy" },
     deactivatedSubagents: ["anthropic/claude-sonnet-4", "anthropic/claude-haiku-4"],
   });
   h.deps.listSnapshots = () => [];
@@ -663,17 +664,17 @@ test("chooseSubagentModel returns the incumbent on an off-path and is load-beari
     { providerID: "anthropic", id: "claude-opus-4", status: "active" },
     { providerID: "anthropic", id: "claude-haiku-4", status: "active" },
   ];
-  // routing disabled → incumbent unchanged even though a cheaper fast model exists
+  // routing not activated (no preset) → incumbent unchanged even though a cheaper fast model exists
   assert.deepEqual(
-    chooseSubagentModel({ incumbent, catalog, policy: { enabled: false }, agent: "explore", nowMs: 0 }),
+    chooseSubagentModel({ incumbent, catalog, policy: {}, agent: "explore", nowMs: 0 }),
     incumbent,
   );
-  // an enabled router with no survivors (all dead) still falls back to incumbent
+  // an activated router with no survivors (all dead) still falls back to incumbent
   assert.deepEqual(
     chooseSubagentModel({
       incumbent,
       catalog: [{ providerID: "anthropic", id: "claude-opus-4", status: "retired" }],
-      policy: { enabled: true, preset: "economy" },
+      policy: { preset: "economy" },
       agent: "explore",
       nowMs: 0,
     }),
@@ -695,7 +696,7 @@ test("chooseMainModel returns the FULL decision — model, reason, incumbent —
   const decision = chooseMainModel({
     incumbent,
     catalog,
-    policy: { enabled: true, preset: "economy" }, // economy + build → balanced floor
+    policy: { preset: "economy" }, // economy + build → balanced floor
     quota: [],
     agent: "build",
     nowMs: 1_700_000_000_000,
@@ -716,16 +717,16 @@ test("chooseMainModel on the off-path returns the incumbent with changed:false, 
     { providerID: "anthropic", id: "claude-opus-4", status: "active" },
     { providerID: "anthropic", id: "claude-haiku-4", status: "active" },
   ];
-  // routing disabled → no switch, even though a cheaper fast model exists
-  const off = chooseMainModel({ incumbent, catalog, policy: { enabled: false }, agent: "build", nowMs: 0 });
+  // routing not activated (no preset) → no switch, even though a cheaper fast model exists
+  const off = chooseMainModel({ incumbent, catalog, policy: {}, agent: "build", nowMs: 0 });
   assert.equal(off.changed, false);
   assert.deepEqual(off.model, incumbent);
-  assert.equal(off.reason, "routing is off");
-  // an enabled router with no survivors (all dead) still falls back to incumbent
+  assert.equal(off.reason, "routing not activated for this conversation");
+  // an activated router with no survivors (all dead) still falls back to incumbent
   const noSurvivors = chooseMainModel({
     incumbent,
     catalog: [{ providerID: "anthropic", id: "claude-opus-4", status: "retired" }],
-    policy: { enabled: true, preset: "economy" },
+    policy: { preset: "economy" },
     agent: "build",
     nowMs: 0,
   });
@@ -743,7 +744,7 @@ test("chooseMainModel when the router picks the same model reports changed:false
   const decision = chooseMainModel({
     incumbent,
     catalog,
-    policy: { enabled: true, preset: "performance" },
+    policy: { preset: "performance" },
     quota: [],
     agent: "build",
     nowMs: 0,

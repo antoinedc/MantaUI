@@ -49,7 +49,7 @@ export interface ChooseInput {
   catalog?: Model[];
   telemetry?: Record<string, { tokensPerSec?: number; p50Ms?: number }>;
   quota?: QuotaWindow[];
-  policy?: { enabled?: boolean; preset?: string; perAgent?: Record<string, string> };
+  policy?: { preset?: string; perAgent?: Record<string, string> };
   nowMs?: number;
 }
 

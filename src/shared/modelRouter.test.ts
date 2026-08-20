@@ -140,7 +140,7 @@ describe("chooseModel", () => {
     const res = chooseModel({
       intent: { kind: "start", agent: "general" },
       catalog: [balanced, fast],
-      policy: { enabled: true, preset: "economy" },
+      policy: { preset: "economy" },
       nowMs: 0,
     });
     expect(AGENT_FLOOR.general).toBe("balanced");
@@ -160,7 +160,7 @@ describe("chooseModel", () => {
     const base = chooseModel({
       intent: { kind: "start", agent: "general", incumbent: m("claude-sonnet-4") },
       catalog,
-      policy: { enabled: true, preset: "balanced" },
+      policy: { preset: "balanced" },
       nowMs: 0,
     });
     for (let i = 0; i < 100; i++) {
@@ -168,7 +168,7 @@ describe("chooseModel", () => {
       const res = chooseModel({
         intent: { kind: "start", agent: "general", incumbent: m("claude-sonnet-4") },
         catalog: shuffled,
-        policy: { enabled: true, preset: "balanced" },
+        policy: { preset: "balanced" },
         nowMs: 0,
       });
       expect(res.model?.id).toBe(base.model?.id);
@@ -181,25 +181,25 @@ describe("chooseModel", () => {
       chooseModel({
         intent: { kind: "mid-exchange", agent: "general", incumbent },
         catalog: [m("claude-haiku-4")],
-        policy: { enabled: true, preset: "balanced" },
+        policy: { preset: "balanced" },
         nowMs: 0,
       }),
       chooseModel({
         intent: { kind: "start", agent: "general", incumbent },
         catalog: [m("claude-sonnet-4")],
-        policy: { enabled: false, preset: "balanced" },
+        policy: {},
         nowMs: 0,
       }),
       chooseModel({
         intent: { kind: "start", agent: "general", incumbent },
         catalog: [m("dead", { status: "retired" })],
-        policy: { enabled: true, preset: "balanced" },
+        policy: { preset: "balanced" },
         nowMs: 0,
       }),
       chooseModel({
         intent: { kind: "start", agent: "general" },
         catalog: [m("claude-sonnet-4")],
-        policy: { enabled: true, preset: "balanced" },
+        policy: { preset: "balanced" },
         nowMs: 0,
       }),
     ];
@@ -209,17 +209,33 @@ describe("chooseModel", () => {
     }
   });
 
-  it("returns the incumbent unchanged when routing is disabled", () => {
+  it("returns the incumbent unchanged when the conversation did not activate routing", () => {
     const incumbent = m("claude-sonnet-4");
     const res = chooseModel({
       intent: { kind: "start", agent: "general", incumbent },
       catalog: [m("claude-haiku-4")],
-      policy: { enabled: false },
+      policy: {},
       nowMs: 0,
     });
     expect(res.model).toBe(incumbent);
     expect(res.changed).toBe(false);
-    expect(res.reason).toBe("routing is off");
+    expect(res.reason).toBe("routing not activated for this conversation");
+  });
+
+  it("REGRESSION: routing activates from a preset alone, without any enabled flag (BET-1251)", () => {
+    // BET-1243 deleted the global `enabled` toggle; activation is per
+    // conversation via the composer's preset pick. A preset in the policy must
+    // be sufficient — no `enabled` field is consulted.
+    const cheap = m("claude-haiku-4"); // tier fast
+    const balanced = m("claude-sonnet-4"); // tier balanced
+    const res = chooseModel({
+      intent: { kind: "start", agent: "general", incumbent: m("claude-opus-4") },
+      catalog: [cheap, balanced],
+      policy: { preset: "economy" }, // no enabled key at all
+      nowMs: 0,
+    });
+    expect(res.model?.id).toBe("claude-sonnet-4");
+    expect(res.changed).toBe(true);
   });
 
   it("returns the incumbent when nothing survives filtering", () => {
@@ -227,7 +243,7 @@ describe("chooseModel", () => {
     const res = chooseModel({
       intent: { kind: "start", agent: "general", incumbent },
       catalog: [m("dead", { status: "retired" })],
-      policy: { enabled: true, preset: "balanced" },
+      policy: { preset: "balanced" },
       nowMs: 0,
     });
     expect(res.model).toBe(incumbent);
@@ -245,7 +261,7 @@ describe("chooseModel", () => {
     const res = chooseModel({
       intent: { kind: "mid-exchange", agent: "general", incumbent },
       catalog: [incumbent, cheap],
-      policy: { enabled: true, preset: "performance" },
+      policy: { preset: "performance" },
       nowMs: 0,
     });
     expect(res.model).toBe(incumbent);

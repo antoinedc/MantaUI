@@ -831,7 +831,7 @@ describe("ChatPanel main-conversation routing (BET-1225)", () => {
       opencodeModelRoute: () =>
         Promise.resolve({
           model: null,
-          reason: "routing is off",
+          reason: "routing not activated for this conversation",
           incumbent: null,
           changed: false,
         }),

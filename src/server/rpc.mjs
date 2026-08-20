@@ -802,18 +802,18 @@ export function buildHandlers({
     // Returns the full decision { model, reason, incumbent, changed } so the
     // renderer can apply the routed model AND surface the undoable pill. Every
     // input is guarded — missing policy / quota / catalog must never throw and
-    // falls back to the incumbent (routing off by default).
+    // falls back to the incumbent (a conversation that did not ask to route).
     "routing:main": async (input) => {
       const incumbent = input?.incumbent ?? null;
       const agent = input?.agent ?? "build";
-      let policy = { enabled: false };
+      let policy = {};
       let quota = [];
       let catalog = [];
       try {
         const cfg = await local.configGet();
-        policy = cfg?.modelRouter ?? { enabled: false };
+        policy = cfg?.modelRouting ?? {};
       } catch {
-        policy = { enabled: false };
+        policy = {};
       }
       try {
         quota = usageListSnapshots();
