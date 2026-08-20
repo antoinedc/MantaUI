@@ -92,6 +92,7 @@ function clampRetryAfterMs(retryAfterMs) {
  *   observeEvent: (evt: object|null|undefined) => void,
  *   state: (providerID: string) => string,
  *   retry: (providerID: string) => Promise<{cleared: boolean, state: string}>,
+ *   deliverSnapshots: (snapshots: Array<object>|null|undefined) => void,
  *   all: () => Record<string, string>,
  * }}
  */
@@ -143,11 +144,12 @@ export function createProviderHealth({
     publish({ kind: "provider-health.needs-attention", payload: { providerID, state: newState } });
   }
 
-  // A successful turn on the provider is evidence of life: it clears the
-  // evidence-only out-of-credit flag and the soft failure streak. The
-  // rate-limited flag is deliberately NOT touched here — it recovers by its
-  // own cooldown expiry, not by success.
-  function clearForSuccess(providerID) {
+  // Clear the evidence-only out-of-credit flag (and the soft failure streak) —
+  // the shared act behind all of the flag's recovery paths: a successful turn,
+  // `retry()`, and a supported provider's reader reporting funds on a normal
+  // poll. The rate-limited flag is deliberately NOT touched here — it recovers
+  // by its own cooldown expiry, not by any of these.
+  function reset(providerID) {
     known.add(providerID);
     outOfCredit.delete(providerID);
     consecutiveFailures.delete(providerID);
@@ -213,7 +215,7 @@ export function createProviderHealth({
 
     if (evt.type === "session.next.step.ended") {
       // The model produced a step → the provider is demonstrably working.
-      clearForSuccess(providerID);
+      reset(providerID);
       return;
     }
     if (evt.type === "session.error") {
@@ -233,9 +235,7 @@ export function createProviderHealth({
     if (!adapterId) {
       // Custom provider: no meter exists to re-read. Clear optimistically and
       // send no traffic; the next routed turn is the real test.
-      outOfCredit.delete(providerID);
-      consecutiveFailures.delete(providerID);
-      published.delete(providerID);
+      reset(providerID);
       return { cleared: true, state: state(providerID) };
     }
     let atLimit = false;
@@ -245,11 +245,29 @@ export function createProviderHealth({
       atLimit = false; // a failed re-check must never clear on an absent reading
     }
     if (!atLimit) {
-      outOfCredit.delete(providerID);
-      consecutiveFailures.delete(providerID);
-      published.delete(providerID);
+      reset(providerID);
     }
     return { cleared: !atLimit, state: state(providerID) };
+  }
+
+  /**
+   * Recovery path #3 on a normal poll (issue §Three ways the flag clears): a
+   * SUPPORTED provider's reader reporting funds. Driven by the EXISTING usage
+   * poller's `usage.updated` snapshots — no second poller. The poller only
+   * emits `exhausted` when true (usage.mjs: `...(raw.exhausted === true ? …
+   * : {})`), so a snapshot for the adapter that is NOT marked exhausted IS the
+   * affirmative "reader reporting funds" evidence that clears the evidence-only
+   * out-of-credit flag. A snapshot marked `exhausted: true`, or no snapshot at
+   * all, is no evidence — the flag stays (never clear on an absent reading).
+   * @param {Array<{provider:string, exhausted?:boolean}|null|undefined>|null|undefined} snapshots
+   */
+  function deliverSnapshots(snapshots) {
+    for (const s of snapshots ?? []) {
+      if (!s || typeof s?.provider !== "string") continue;
+      if (s.exhausted === true) continue; // still refusing work — no funds
+      const providerID = providerIDForAdapter(s.provider);
+      if (providerID && outOfCredit.has(providerID)) reset(providerID);
+    }
   }
 
   /** Every attributed provider mapped to its current state. */
@@ -259,5 +277,5 @@ export function createProviderHealth({
     return out;
   }
 
-  return { observeEvent, state, retry, all };
+  return { observeEvent, state, retry, deliverSnapshots, all };
 }

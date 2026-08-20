@@ -183,6 +183,31 @@ test("out-of-credit outranks a concurrent rate-limit in state()", () => {
   assert.equal(engine.state(providerID), PROVIDER_HEALTH_STATE.OUT_OF_CREDIT);
 });
 
+test("a supported provider's reader reporting funds on a normal poll clears out-of-credit", () => {
+  const { engine, error, providerID } = make();
+  error(402);
+  assert.equal(engine.state(providerID), PROVIDER_HEALTH_STATE.OUT_OF_CREDIT);
+  // A normal poll snapshot for the adapter NOT marked exhausted = funds.
+  engine.deliverSnapshots([{ provider: "claude", exhausted: false, windows: [] }]);
+  assert.equal(engine.state(providerID), PROVIDER_HEALTH_STATE.OK);
+});
+
+test("a poll snapshot still marked exhausted does NOT clear out-of-credit", () => {
+  const { engine, error, providerID } = make();
+  error(402);
+  engine.deliverSnapshots([{ provider: "claude", exhausted: true }]);
+  assert.equal(engine.state(providerID), PROVIDER_HEALTH_STATE.OUT_OF_CREDIT);
+  // And no snapshot / a non-matching provider is no evidence either.
+  engine.deliverSnapshots([]);
+  assert.equal(engine.state(providerID), PROVIDER_HEALTH_STATE.OUT_OF_CREDIT);
+});
+
+test("deliverSnapshots is inert for a provider that is not out-of-credit", () => {
+  const { engine, providerID } = make();
+  engine.deliverSnapshots([{ provider: "claude", exhausted: false }]);
+  assert.equal(engine.state(providerID), PROVIDER_HEALTH_STATE.OK);
+});
+
 test("needs-attention publishes ONCE at the transition, not per observation", () => {
   const { engine, error, published } = make();
   error(429, 0);

@@ -434,6 +434,19 @@ const providerHealth = createProviderHealth({
   providerIDForAdapter,
   recheckAtLimit: (adapterId) => recheckAdapterAtLimit(adapterId),
 });
+// Recovery path #3 (issue §Three ways the flag clears): a supported provider's
+// reader reporting funds on a normal poll clears its evidence-only
+// out-of-credit flag. Reuses the EXISTING usage poller's `usage.updated`
+// snapshots — no second poller — exactly as resumeEngine.deliverSnapshots does.
+// eslint-disable-next-line no-unused-vars
+const stopProviderHealthFunds = bus.subscribe((evt) => {
+  if (evt?.kind === "usage.updated" && Array.isArray(evt.payload?.snapshots)) {
+    providerHealth.deliverSnapshots(evt.payload.snapshots);
+  }
+});
+// Prime on startup with whatever the poller already has cached (same rationale
+// as resumeEngine's warmup; a provider marked exhausted stays excluded).
+providerHealth.deliverSnapshots(listSnapshots());
 
 // Capability-job sweeper: same shape as startSchedulePoller — fails out stale
 // `running` jobs (30 min) and expired `queued` jobs (24h), then prunes terminal
