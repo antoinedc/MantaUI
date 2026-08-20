@@ -8,6 +8,7 @@ import {
 } from "./modelQuality.mjs";
 import { FAMILY_TIERS, tierRank } from "./modelGuide.mjs";
 import { AGENT_FLOOR } from "./modelRouter.mjs";
+import type { QualityModel } from "./modelQuality.mjs";
 
 // A test field helper that converts a benchmark score to a percentile of "the
 // models we can currently see" — the injected ranking helper qualityScore
@@ -25,8 +26,8 @@ function percentileField(allScores: number[]) {
   };
 }
 
-function model(over: Record<string, unknown> = {}) {
-  return { id: "m", providerID: "p", ...over };
+function model(over: Record<string, unknown> = {}): QualityModel {
+  return { id: "m", providerID: "p", ...over } as QualityModel;
 }
 
 describe("qualityScore — benchmark", () => {
