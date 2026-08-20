@@ -34,6 +34,11 @@ export function ModelMenu({
   defaultRow,
   disabledKeys,
   onEnableDeprecated,
+  // BET-1246 — the three-state Auto row (BET-1245's `{ kind: "auto" }` choice).
+  autoActive = false,
+  onSelectAuto,
+  presetLabel,
+  autoReason,
 }: {
   groups: Array<[string, OpencodeModel[]]> | null;
   modelOverride: ModelSelection | null;
@@ -42,6 +47,32 @@ export function ModelMenu({
   onClose: () => void;
   open: boolean;
   anchorRef: RefObject<HTMLElement>;
+  /**
+   * BET-1246: true when this session's three-state choice is `{ kind: "auto" }`
+   * (BET-1245) — the Auto pinned row renders selected and the Server-default row
+   * (and every model row) renders unselected. Mutually exclusive with a model
+   * override by construction.
+   */
+  autoActive?: boolean;
+  /**
+   * BET-1246: called when the user chooses the Auto row. When this is OMITTED
+   * the Auto row is NOT rendered at all (so a control can never render dead —
+   * see the "NEVER STUB A CONTROL" rule). The delegate model picker (Cards.tsx)
+   * omits it: auto-routing is a MAIN-conversation concept, so that surface keeps
+   * today's single pinned Server-default row.
+   */
+  onSelectAuto?: () => void;
+  /**
+   * BET-1246: the active routing preset's display label (e.g. "Balanced"),
+   * shown in the Auto row's sub-line when Auto is active.
+   */
+  presetLabel?: string;
+  /**
+   * BET-1246: the routing decision's human-readable reason (what `routing:choose`
+   * / `routing:main` returned). Shown in the Auto row's sub-line when Auto is
+   * active and a decision exists.
+   */
+  autoReason?: string;
   /**
    * Copy override for the pinned top (server-default) row ONLY — the row that
    * means "no override". A second consumer (the delegate model picker) needs
@@ -85,11 +116,30 @@ export function ModelMenu({
   const serverSub = serverModel
     ? `${serverModel.name} · set in Settings`
     : "opencode decides";
-  const serverSelected = modelOverride == null;
+  // BET-1246: the Server-default row is selected only when Auto is NOT active
+  // and no model override is set — the three states are mutually exclusive.
+  const serverSelected = !autoActive && modelOverride == null;
   // `defaultRow` overrides ONLY this pinned row's label/sub — the copy that
   // signals "no override". Omitted, today's exact strings stand.
   const defaultLabel = defaultRow?.label ?? "Server default";
   const defaultSub = defaultRow?.sub ?? serverSub;
+
+  // BET-1246: the Auto row is the first pinned row, above Server default. It is
+  // present only in the composer (caller supplied `onSelectAuto`) and never in
+  // the delegate model picker (which omits it — auto-routing is a main
+  // concept). The sub-line is a single composed string from what is known:
+  //   - Auto active + a decision  → `${presetLabel} · ${autoReason}`
+  //   - Auto active, no decision  → `${presetLabel} · chooses when the turn starts`
+  //   - Auto not active           → static "Chooses a model per task…"
+  // The reason text is what the caller supplied (what `routing:choose` returned);
+  // the renderer never composes that sentence itself.
+  const showAuto = typeof onSelectAuto === "function";
+  const autoSelected = Boolean(autoActive);
+  const autoSub = !autoSelected
+    ? "Chooses a model per task, never mid-turn"
+    : autoReason
+      ? `${presetLabel ?? "Auto"} · ${autoReason}`
+      : `${presetLabel ?? "Auto"} · chooses when the turn starts`;
 
   const filtered = useMemo(
     () => (groups == null ? null : filterModelGroups(groups, query)),
@@ -108,11 +158,22 @@ export function ModelMenu({
     );
   };
 
-  // The flattened option list the roving highlight indexes over: the
-  // server-default row (index 0) plus every visible model row, in group order.
-  const flatOptions: Array<{ id: string; select: () => void }> = [
-    { id: "server-default", select: () => { onSelect(null); onClose(); } },
-  ];
+  // The flattened option list the roving highlight indexes over: the Auto row
+  // (index 0, when present) then the server-default row, then every visible
+  // model row, in group order. Adding Auto as the first entry shifts every
+  // model row's index by one; the `moveMenuHighlight` arithmetic and the
+  // `optionIndexById` lookup below handle the shift unchanged.
+  const flatOptions: Array<{ id: string; select: () => void }> = [];
+  if (showAuto) {
+    flatOptions.push({
+      id: "auto",
+      select: () => { onSelectAuto!(); onClose(); },
+    });
+  }
+  flatOptions.push({
+    id: "server-default",
+    select: () => { onSelect(null); onClose(); },
+  });
   for (const [, ms] of filtered ?? []) {
     for (const m of ms) {
       const id = `${m.providerID}/${m.id}`;
@@ -256,17 +317,37 @@ export function ModelMenu({
         </>
       }
       header={
-        <MenuOption
-          id="server-default"
-          selected={serverSelected}
-          active={highlight === 0}
-          label={defaultLabel}
-          sub={defaultSub}
-          onSelect={() => {
-            onSelect(null);
-            onClose();
-          }}
-        />
+        <>
+          {showAuto && (
+            <MenuOption
+              id="auto"
+              selected={autoSelected}
+              active={highlight === optionIndexById.get("auto")}
+              label="Auto — Manta picks per task"
+              sub={autoSub}
+              trailing={
+                <Tag numeric tone={autoSelected ? "accent" : "default"}>
+                  auto
+                </Tag>
+              }
+              onSelect={() => {
+                onSelectAuto!();
+                onClose();
+              }}
+            />
+          )}
+          <MenuOption
+            id="server-default"
+            selected={serverSelected}
+            active={highlight === optionIndexById.get("server-default")}
+            label={defaultLabel}
+            sub={defaultSub}
+            onSelect={() => {
+              onSelect(null);
+              onClose();
+            }}
+          />
+        </>
       }
       footer={
         // BET-645 — deactivating a model lives in Settings → Models; the model

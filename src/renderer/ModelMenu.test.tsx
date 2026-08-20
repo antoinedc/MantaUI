@@ -8,6 +8,7 @@
 // break the opener).
 
 import { describe, it, expect, afterEach } from "vitest";
+import { act } from "react";
 import { mount, type Harness } from "./testHarness";
 import { ModelMenu } from "./ModelMenu";
 import type { OpencodeModel } from "../shared/types";
@@ -222,5 +223,224 @@ describe("ModelMenu deprecated disabled rows (BET-1139)", () => {
     );
     expect(option).toBeTruthy();
     expect(option!.getAttribute("id")).toBe("anthropic/claude-opus-4-7");
+  });
+});
+
+describe("ModelMenu Auto row (BET-1246)", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  function autoRow(): HTMLElement {
+    const el = [...surface().querySelectorAll<HTMLElement>('[role="option"]')].find((e) =>
+      e.textContent?.includes("Auto — Manta picks per task"),
+    );
+    expect(el, "expected the Auto pinned row").toBeTruthy();
+    return el!;
+  }
+
+  function serverRow(): HTMLElement {
+    const el = [...surface().querySelectorAll<HTMLElement>('[role="option"]')].find((e) =>
+      e.textContent?.includes("Server default"),
+    );
+    expect(el, "expected the Server default pinned row").toBeTruthy();
+    return el!;
+  }
+
+  function searchInput(): HTMLInputElement {
+    const el = surface().querySelector<HTMLInputElement>('input[aria-label="Search models"]');
+    expect(el, "expected the model search input").toBeTruthy();
+    return el!;
+  }
+
+  function press(el: HTMLElement, key: string) {
+    act(() => {
+      el.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+    });
+  }
+
+  it("renders the Auto row whether or not a server default is set", () => {
+    // No server default model.
+    h = mount(
+      <ModelMenu
+        open
+        anchorRef={anchorRef()}
+        groups={GROUPS}
+        modelOverride={null}
+        defaultModel={null}
+        onSelectAuto={() => {}}
+        onSelect={() => {}}
+        onClose={() => {}}
+      />,
+    );
+    expect(autoRow().textContent).toContain("Auto — Manta picks per task");
+    expect(autoRow().querySelector(".font-mono")?.textContent).toBe("auto");
+    // Unmount and mount again WITH a server default model — the Auto row is
+    // always the first pinned row regardless of the server default.
+    h!.unmount();
+    h = mount(
+      <ModelMenu
+        open
+        anchorRef={anchorRef()}
+        groups={GROUPS}
+        modelOverride={null}
+        defaultModel={{ providerID: "anthropic", modelID: "claude-opus-4-7" }}
+        onSelectAuto={() => {}}
+        onSelect={() => {}}
+        onClose={() => {}}
+      />,
+    );
+    expect(autoRow().textContent).toContain("Auto — Manta picks per task");
+  });
+
+  it("is index 0 in the roving order — ArrowDown from the search field highlights Auto first, then Server default", () => {
+    h = mount(
+      <ModelMenu
+        open
+        anchorRef={anchorRef()}
+        groups={GROUPS}
+        modelOverride={null}
+        defaultModel={null}
+        onSelectAuto={() => {}}
+        onSelect={() => {}}
+        onClose={() => {}}
+      />,
+    );
+    const input = searchInput();
+    // Initial state: nothing highlighted (the aria-activedescendant attr is absent).
+    expect(input.getAttribute("aria-activedescendant")).toBeNull();
+    press(input, "ArrowDown");
+    expect(input.getAttribute("aria-activedescendant")).toBe("auto");
+    press(input, "ArrowDown");
+    expect(input.getAttribute("aria-activedescendant")).toBe("server-default");
+  });
+
+  it("selecting Auto calls the auto handler and closes; selecting a model calls onSelect with that model", () => {
+    let autoCalls = 0;
+    let closed = 0;
+    let selected: unknown = null;
+    h = mount(
+      <ModelMenu
+        open
+        anchorRef={anchorRef()}
+        groups={GROUPS}
+        modelOverride={null}
+        defaultModel={null}
+        onSelectAuto={() => {
+          autoCalls++;
+        }}
+        onSelect={(m) => {
+          selected = m;
+        }}
+        onClose={() => {
+          closed++;
+        }}
+      />,
+    );
+    act(() => autoRow().click());
+    expect(autoCalls).toBe(1);
+    expect(closed).toBe(1);
+
+    // Selecting a model row still calls onSelect with that model (Auto off).
+    const modelRow = [...surface().querySelectorAll<HTMLElement>('[role="option"]')].find((e) =>
+      e.textContent?.includes("Claude Opus 4.7"),
+    )!;
+    act(() => modelRow.click());
+    expect(selected).toEqual({ providerID: "anthropic", modelID: "claude-opus-4-7" });
+    expect(closed).toBe(2);
+  });
+
+  it("marks the Auto row aria-selected (and not Server default) when Auto is active", () => {
+    h = mount(
+      <ModelMenu
+        open
+        anchorRef={anchorRef()}
+        groups={GROUPS}
+        modelOverride={null}
+        defaultModel={null}
+        autoActive
+        onSelectAuto={() => {}}
+        onSelect={() => {}}
+        onClose={() => {}}
+      />,
+    );
+    expect(autoRow().getAttribute("aria-selected")).toBe("true");
+    expect(serverRow().getAttribute("aria-selected")).toBe("false");
+  });
+
+  it("shows the caller-supplied reason string in the Auto row's sub-line when Auto is active", () => {
+    h = mount(
+      <ModelMenu
+        open
+        anchorRef={anchorRef()}
+        groups={GROUPS}
+        modelOverride={null}
+        defaultModel={null}
+        autoActive
+        presetLabel="Balanced"
+        autoReason="moved: the previous provider ran out"
+        onSelectAuto={() => {}}
+        onSelect={() => {}}
+        onClose={() => {}}
+      />,
+    );
+    const rowText = autoRow().textContent ?? "";
+    expect(rowText).toContain("Balanced · moved: the previous provider ran out");
+  });
+
+  it("renders the 'no decision yet' sub-line when Auto is active and no reason is supplied", () => {
+    h = mount(
+      <ModelMenu
+        open
+        anchorRef={anchorRef()}
+        groups={GROUPS}
+        modelOverride={null}
+        defaultModel={null}
+        autoActive
+        presetLabel="Balanced"
+        onSelectAuto={() => {}}
+        onSelect={() => {}}
+        onClose={() => {}}
+      />,
+    );
+    expect(autoRow().textContent).toContain("Balanced · chooses when the turn starts");
+  });
+
+  it("renders the static sub-line when Auto is not active", () => {
+    h = mount(
+      <ModelMenu
+        open
+        anchorRef={anchorRef()}
+        groups={GROUPS}
+        modelOverride={null}
+        defaultModel={null}
+        onSelectAuto={() => {}}
+        onSelect={() => {}}
+        onClose={() => {}}
+      />,
+    );
+    expect(autoRow().textContent).toContain("Chooses a model per task, never mid-turn");
+  });
+
+  it("omits the Auto row entirely when onSelectAuto is not supplied (delegate picker surface)", () => {
+    h = mount(
+      <ModelMenu
+        open
+        anchorRef={anchorRef()}
+        groups={GROUPS}
+        modelOverride={null}
+        defaultModel={null}
+        onSelect={() => {}}
+        onClose={() => {}}
+      />,
+    );
+    const auto = [...surface().querySelectorAll<HTMLElement>('[role="option"]')].find((e) =>
+      e.textContent?.includes("Auto — Manta picks per task"),
+    );
+    expect(auto).toBeUndefined();
+    // Server default remains the single pinned row (index 0 in the roving order).
+    expect(serverRow().textContent).toContain("Server default");
   });
 });
