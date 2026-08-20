@@ -259,6 +259,15 @@ private struct ChatScreenContent: View {
                     }
                     .accessibilityLabel("Session actions")
                 }
+#if DEBUG
+                // BET-1211 TEMPORARY probe trigger — removed before merge.
+                ToolbarItem(placement: .topBarLeading) {
+                    Button { ScrollDiagnostic.probe(tag: "parent") } label: {
+                        Image(systemName: "stethoscope")
+                    }
+                    .accessibilityIdentifier("diag-probe")
+                }
+#endif
             }
             .onAppear {
                 // Three independent fetches, all started together: the
@@ -1187,6 +1196,17 @@ struct ChatSubagentScreen: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackgroundVisibility(.visible, for: .navigationBar)
             .toolbarBackground(tokens.canvas, for: .navigationBar)
+#if DEBUG
+            // BET-1211 TEMPORARY probe trigger — removed before merge.
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { ScrollDiagnostic.probe(tag: "child") } label: {
+                        Image(systemName: "stethoscope")
+                    }
+                    .accessibilityIdentifier("diag-probe")
+                }
+            }
+#endif
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("subagent-scene")
     }

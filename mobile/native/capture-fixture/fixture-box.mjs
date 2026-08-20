@@ -226,6 +226,19 @@ if (SUBAGENT) {
 const CHILD_MESSAGES = [
   ...buildChildTranscript(),
   {
+    info: { id: "cm_giant", sessionID: CHILD_SESSION_ID, role: "assistant", time: { created: now, completed: now + 2 } },
+    parts: [{ type: "text", id: "cp_giant", messageID: "cm_giant",
+      // BET-1211 (hypothesis #2): ONE giant prose row (~10k+ pt, like a real
+      // subagent's enormous output). A single row orders of magnitude taller
+      // than the viewport is the exact content shape that can break MessagingUI
+      // tiling / anchor arithmetic. Default OFF (FIXTURE_GIANT_ROW=1) so the
+      // baseline healthy-child probe stays comparable.
+      text: process.env.FIXTURE_GIANT_ROW === "1"
+        ? ("This is a deliberately GIANT child row to test hypothesis #2 — a single prose block tall enough to span many viewports, mirroring a real subagent's enormous output. ".repeat(700))
+        : "" },
+    ],
+  },
+  {
     info: { id: "cm1", sessionID: CHILD_SESSION_ID, role: "user", time: { created: now } },
     parts: [{ type: "text", id: "cp1", messageID: "cm1", text: "Run the Scroll diagnostic." }],
   },
