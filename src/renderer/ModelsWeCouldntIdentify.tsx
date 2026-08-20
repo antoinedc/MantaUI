@@ -167,7 +167,7 @@ function IdentifyEditor({
         <div className="text-meta text-text-quiet">{selected.description}</div>
       ) : null}
       <div>
-        <div className="text-micro font-semibold uppercase text-text-muted mb-1.5">
+        <div className="text-micro font-semibold uppercase text-text-muted mb-2">
           Costs here
         </div>
         <ChipGroup
@@ -203,7 +203,7 @@ function IdentifyEditor({
         )}
       </div>
       <div>
-        <div className="text-micro font-semibold uppercase text-text-muted mb-1.5">
+        <div className="text-micro font-semibold uppercase text-text-muted mb-2">
           Caching
         </div>
         <ChipGroup

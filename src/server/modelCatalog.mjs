@@ -33,7 +33,9 @@ import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 import { startPoller } from "./startPoller.mjs";
 // The pure matching code lives in shared so the renderer's identity block and
 // the server's routing core share ONE matcher (see shared/modelCatalog.mjs).
-// Re-exporting keeps this module's public API (and its tests) unchanged.
+// Re-exporting keeps this module's public API (and its tests) unchanged, and
+// the local import is what the controller below calls.
+import { createModelIndex } from "../shared/modelCatalog.mjs";
 export { normalize, entryHandles, createModelIndex } from "../shared/modelCatalog.mjs";
 
 // The provider-agnostic view of models.dev. The per-provider view is already
