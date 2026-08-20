@@ -16,6 +16,7 @@
 // shared handle from opencodeDb.mjs is opened read-only and stays so.
 
 import { getDb } from "./opencodeDb.mjs";
+import { classifyToolCall, aggregateReliability } from "../shared/toolReliability.mjs";
 
 // Turns longer than this are excluded from TIMING only (still counted for
 // cost) — the spec cap is 600s of wall-clock.
@@ -182,10 +183,182 @@ function byCostDesc(a, b) {
 }
 
 /**
+ * I/O. Reads the raw assistant message rows over the rolling window via the
+ * shared getDb() handle. Shared by `ledgerSummary` and `endpointSummary` so
+ * the SQL + parse + role-filter lives in exactly one place. Returns the parsed
+ * `data` object plus the joined session fields. Never throws.
+ */
+async function assistantRows(db, since) {
+  const sql = `
+    SELECT m.data AS msg_data,
+           s.parent_id AS parent_id,
+           s.agent AS agent,
+           s.directory AS directory
+    FROM message m
+    JOIN session s ON s.id = m.session_id
+    WHERE m.time_created >= ?`;
+  const stmt = db.prepare(sql);
+  const out = [];
+  for (const row of stmt.all(since)) {
+    let data;
+    try {
+      data = JSON.parse(row.msg_data);
+    } catch {
+      continue;
+    }
+    if (!data || typeof data !== "object" || data.role !== "assistant") continue;
+    out.push({
+      data,
+      parentId: row.parent_id != null ? String(row.parent_id) : null,
+      agent: row.agent ?? null,
+      directory: row.directory ?? null,
+    });
+  }
+  return out;
+}
+
+/**
+ * PURE. Fold raw assistant message `data` into the tool-call reliability,
+ * speed, latency and mix figures, keyed per endpoint ("providerID/modelID").
+ *
+ * Each row may carry tool-call data: `toolCalls` (Array<{name, arguments}>)
+ * and an optional `tools` list (Array of tool defs). A row with tool calls is
+ * one request that ended in tool calls; per-endpoint reliability reuses the
+ * same request-level aggregation as the rest of the app. Timing reuses the
+ * existing percentile + timing-exclusion helpers — no second copy.
+ *
+ * Returns an object keyed by endpoint; the shape is what the routing issue
+ * consumes. Never throws.
+ */
+export function aggregateEndpointStats(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  const byEndpoint = new Map();
+  for (const r of list) {
+    const key = `${r.providerID ?? ""}/${r.modelID ?? ""}`;
+    let e = byEndpoint.get(key);
+    if (!e) {
+      e = {
+        key,
+        durations: [],
+        speeds: [],
+        toolRequests: [],
+        mix: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      };
+      byEndpoint.set(key, e);
+    }
+
+    e.mix.input += num(r.input);
+    e.mix.output += num(r.output);
+    e.mix.cacheRead += num(r.cacheRead);
+    e.mix.cacheWrite += num(r.cacheWrite);
+
+    const durMs = timedDurationMs(r.startedMs, r.completedMs);
+    if (durMs !== null) {
+      e.durations.push(durMs);
+      const out = num(r.output);
+      e.speeds.push(safeDiv(out, durMs / 1000));
+    }
+
+    const calls = Array.isArray(r.toolCalls) ? r.toolCalls : [];
+    if (calls.length > 0) {
+      e.toolRequests.push({ toolCalls: calls, tools: Array.isArray(r.tools) ? r.tools : [] });
+    }
+  }
+
+  const out = {};
+  for (const key of [...byEndpoint.keys()].sort()) {
+    const e = byEndpoint.get(key);
+    const durs = e.durations.sort((a, b) => a - b);
+    const speeds = e.speeds.sort((a, b) => a - b);
+    out[key] = {
+      reliability: aggregateReliability(e.toolRequests),
+      speed: {
+        p50TokensPerSec: speeds.length ? percentile(speeds, 0.5) : null,
+        p90TokensPerSec: speeds.length ? percentile(speeds, 0.9) : null,
+      },
+      latency: {
+        p50Ms: durs.length ? percentile(durs, 0.5) : null,
+        p90Ms: durs.length ? percentile(durs, 0.9) : null,
+      },
+      mix: { ...e.mix },
+    };
+  }
+  return out;
+}
+
+// Extract the tool calls from a single assistant message's parts (each part of
+// type "tool" carries a name plus its arguments/input). No call follows into a
+// second pass when the message stores none.
+function extractToolCalls(data) {
+  const parts = Array.isArray(data.parts) ? data.parts : [];
+  const calls = [];
+  for (const p of parts) {
+    if (!p || typeof p !== "object" || p.type !== "tool") continue;
+    const name = p.tool;
+    const args = p.state && p.state.input;
+    if (name == null) continue;
+    calls.push({ name, arguments: args });
+  }
+  return calls;
+}
+
+// Best-effort source of the request's tool definitions from the stored message
+// data. When absent (the common case — schemata aren't persisted), reliability
+// degrades to the conservative invalid-json-only signal, matching the "schema
+// absent ⇒ valid" rule in the classification. No new capture path is added.
+function extractTools(data) {
+  return Array.isArray(data.tools) ? data.tools : [];
+}
+
+/**
+ * I/O. Per-endpoint measurement (reliability, speed, latency, mix) over a
+ * rolling window of assistant rows, via the shared getDb() handle. Degrades
+ * exactly like `ledgerSummary`: returns { supported:false } — never throws —
+ * when getDb() yields null, and a failed query also degrades. Read-only.
+ */
+export async function endpointSummary({ sinceMs = 0 } = {}) {
+  const db = await getDb();
+  if (!db) return { supported: false };
+
+  try {
+    const since = num(sinceMs);
+    const rows = [];
+    for (const { data } of await assistantRows(db, since)) {
+      const tokens = data.tokens ?? {};
+      const cache = tokens.cache ?? {};
+      rows.push({
+        providerID: data.providerID ?? null,
+        modelID: data.modelID ?? null,
+        input: tokens.input,
+        output: tokens.output,
+        cacheRead: cache.read,
+        cacheWrite: cache.write,
+        startedMs: data.time?.created,
+        completedMs: data.time?.completed,
+        toolCalls: extractToolCalls(data),
+        tools: extractTools(data),
+      });
+    }
+    return { supported: true, ...aggregateEndpointStats(rows) };
+  } catch (e) {
+    // Query error: log once, drop the handle so the next call reopens, and
+    // degrade to { supported:false } — never an exception, never zeros (a card
+    // full of 0.00 would read as "perfect reliability", which is a lie).
+    console.error("[modelLedger] endpoint query failed:", e?.message ?? e);
+    try {
+      db.close();
+    } catch {
+      /* already closed */
+    }
+    return { supported: false };
+  }
+}
+
+/**
  * I/O. Reads assistant rows via the shared getDb() handle, parses their JSON,
  * and folds them through aggregate(). Returns { supported:false } — never
- * throws — when getDb() yields null, mirroring searchMessages. Rows whose
- * data fails JSON.parse or whose role !== "assistant" are skipped silently.
+ * throws — when getDb() yields null, mirroring searchMessages. Rows whose data
+ * fails JSON.parse or whose role !== "assistant" are skipped silently.
  */
 export async function ledgerSummary({ sinceMs = 0 } = {}) {
   const db = await getDb();
@@ -193,32 +366,16 @@ export async function ledgerSummary({ sinceMs = 0 } = {}) {
 
   try {
     const since = num(sinceMs);
-    const sql = `
-      SELECT m.data AS msg_data,
-             s.parent_id AS parent_id,
-             s.agent AS agent,
-             s.directory AS directory
-      FROM message m
-      JOIN session s ON s.id = m.session_id
-      WHERE m.time_created >= ?`;
-    const stmt = db.prepare(sql);
     const rows = [];
-    for (const row of stmt.all(since)) {
-      let data;
-      try {
-        data = JSON.parse(row.msg_data);
-      } catch {
-        continue;
-      }
-      if (!data || typeof data !== "object" || data.role !== "assistant") continue;
+    for (const { data, parentId, agent, directory } of await assistantRows(db, since)) {
       const tokens = data.tokens ?? {};
       const cache = tokens.cache ?? {};
       rows.push({
         providerID: data.providerID ?? null,
         modelID: data.modelID ?? null,
-        agent: row.agent ?? null,
-        parentId: row.parent_id != null ? String(row.parent_id) : null,
-        directory: row.directory ?? null,
+        agent,
+        parentId,
+        directory,
         cost: data.cost,
         input: tokens.input,
         output: tokens.output,
