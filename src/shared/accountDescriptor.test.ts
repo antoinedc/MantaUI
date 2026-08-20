@@ -15,7 +15,7 @@ const base = {
   balance: { path: "account.balance", units: "dollars", sign: "positive-is-credit" },
 };
 
-const ok = (raw) => {
+const ok = (raw: Record<string, unknown>) => {
   const r = validateDescriptor(raw);
   if (!r.valid) throw new Error(`expected valid descriptor, got: ${r.errors.join("; ")}`);
   return r.descriptor;
@@ -119,8 +119,9 @@ describe("readDescriptor", () => {
       { data: { used: 120, limit: 200, resets_at: 1700000000, started_at: 1699990000 } },
       0,
     );
-    expect(snap.windows).toHaveLength(1);
-    const w = snap.windows[0];
+    const windows = snap.windows as Array<Record<string, unknown>>;
+    expect(windows).toHaveLength(1);
+    const w = windows[0];
     expect(w.kind).toBe("weekly");
     expect(w.label).toBe("7d");
     expect(w.used).toBe(120);
