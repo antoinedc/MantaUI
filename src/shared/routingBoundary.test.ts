@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { BOUNDARY, crossesBoundary, shouldSwitch } from "./routingBoundary.mjs";
+import { BOUNDARY, crossesBoundary, shouldSwitch, boundaryPhrase } from "./routingBoundary.mjs";
 
 // A routed endpoint with a distinct (providerID/id) identity, like the router's.
 function ep(providerID: string, id: string) {
@@ -21,7 +21,7 @@ const followUp = {
 
 describe("crossesBoundary — each boundary in isolation", () => {
   it("FIRST_TURN when there is no routed model yet", () => {
-    expect(crossesBoundary({ ...followUp, hasRoutedModel: false })).toEqual({
+    expect(crossesBoundary({ ...followUp, hasRoutedModel: false })).toMatchObject({
       crossed: true,
       boundary: BOUNDARY.FIRST_TURN,
     });
@@ -30,13 +30,13 @@ describe("crossesBoundary — each boundary in isolation", () => {
   it("AGENT when the agent changed (plan -> build)", () => {
     expect(
       crossesBoundary({ ...followUp, agent: "build", previousAgent: "plan" }),
-    ).toEqual({ crossed: true, boundary: BOUNDARY.AGENT });
+    ).toMatchObject({ crossed: true, boundary: BOUNDARY.AGENT });
   });
 
   it("CONSTRAINT when context outgrew the incumbent's limit", () => {
     expect(
       crossesBoundary({ ...followUp, contextTokens: 41000, incumbentContextLimit: 40000 }),
-    ).toEqual({ crossed: true, boundary: BOUNDARY.CONSTRAINT });
+    ).toMatchObject({ crossed: true, boundary: BOUNDARY.CONSTRAINT });
   });
 
   it("CONSTRAINT when a required modality is missing", () => {
@@ -46,25 +46,25 @@ describe("crossesBoundary — each boundary in isolation", () => {
         requiredModalities: ["image", "pdf"],
         incumbentModalities: ["text", "image"],
       }),
-    ).toEqual({ crossed: true, boundary: BOUNDARY.CONSTRAINT });
+    ).toMatchObject({ crossed: true, boundary: BOUNDARY.CONSTRAINT });
   });
 
   it("CONSTRAINT when the incumbent provider is unhealthy", () => {
-    expect(crossesBoundary({ ...followUp, incumbentHealthy: false })).toEqual({
+    expect(crossesBoundary({ ...followUp, incumbentHealthy: false })).toMatchObject({
       crossed: true,
       boundary: BOUNDARY.CONSTRAINT,
     });
   });
 
   it("COMPACTED when the cache is gone anyway", () => {
-    expect(crossesBoundary({ ...followUp, justCompacted: true })).toEqual({
+    expect(crossesBoundary({ ...followUp, justCompacted: true })).toMatchObject({
       crossed: true,
       boundary: BOUNDARY.COMPACTED,
     });
   });
 
   it("USER when the user re-picked Auto", () => {
-    expect(crossesBoundary({ ...followUp, userRequested: true })).toEqual({
+    expect(crossesBoundary({ ...followUp, userRequested: true })).toMatchObject({
       crossed: true,
       boundary: BOUNDARY.USER,
     });
@@ -73,20 +73,20 @@ describe("crossesBoundary — each boundary in isolation", () => {
 
 describe("crossesBoundary — no boundary", () => {
   it("returns crossed:false for an ordinary follow-up turn", () => {
-    expect(crossesBoundary(followUp)).toEqual({ crossed: false, boundary: null });
+    expect(crossesBoundary(followUp)).toMatchObject({ crossed: false, boundary: null });
   });
 
   it("drifting numbers alone never cross a boundary (context growing under the limit)", () => {
     expect(
       crossesBoundary({ ...followUp, contextTokens: 25000 }),
-    ).toEqual({ crossed: false, boundary: null });
+    ).toMatchObject({ crossed: false, boundary: null });
     expect(
       crossesBoundary({
         ...followUp,
         contextTokens: 1,
         incumbentContextLimit: 1,
       }),
-    ).toEqual({ crossed: false, boundary: null });
+    ).toMatchObject({ crossed: false, boundary: null });
   });
 
   it("precedence: FIRST_TURN beats every later boundary", () => {
@@ -99,7 +99,7 @@ describe("crossesBoundary — no boundary", () => {
         justCompacted: true,
         userRequested: true,
       }),
-    ).toEqual({ crossed: true, boundary: BOUNDARY.FIRST_TURN });
+    ).toMatchObject({ crossed: true, boundary: BOUNDARY.FIRST_TURN });
   });
 
   it("precedence: AGENT beats CONSTRAINT/COMPACTED/USER", () => {
@@ -111,7 +111,66 @@ describe("crossesBoundary — no boundary", () => {
         incumbentHealthy: false,
         justCompacted: true,
       }),
-    ).toEqual({ crossed: true, boundary: BOUNDARY.AGENT });
+    ).toMatchObject({ crossed: true, boundary: BOUNDARY.AGENT });
+  });
+});
+
+describe("crossesBoundary — capability/health facts (BET-1248 reviewer Block)", () => {
+  it("a context-outgrown incumbent is reported NOT stillCapable", () => {
+    expect(
+      crossesBoundary({ ...followUp, contextTokens: 41000, incumbentContextLimit: 40000 }),
+    ).toMatchObject({ crossed: true, boundary: BOUNDARY.CONSTRAINT, stillCapable: false, stillHealthy: true });
+  });
+
+  it("a missing modality is reported NOT stillCapable", () => {
+    expect(
+      crossesBoundary({
+        ...followUp,
+        requiredModalities: ["image", "pdf"],
+        incumbentModalities: ["text", "image"],
+      }),
+    ).toMatchObject({ crossed: true, boundary: BOUNDARY.CONSTRAINT, stillCapable: false, stillHealthy: true });
+  });
+
+  it("an unhealthy incumbent is reported NOT stillHealthy", () => {
+    expect(
+      crossesBoundary({ ...followUp, incumbentHealthy: false }),
+    ).toMatchObject({ crossed: true, boundary: BOUNDARY.CONSTRAINT, stillCapable: true, stillHealthy: false });
+  });
+
+  it("non-constraint boundaries keep the incumbent capable + healthy", () => {
+    const res = crossesBoundary({ ...followUp, justCompacted: true });
+    expect(res.crossed).toBe(true);
+    expect(res.boundary).toBe(BOUNDARY.COMPACTED);
+    expect(res.stillCapable).toBe(true);
+    expect(res.stillHealthy).toBe(true);
+  });
+
+  it("no boundary → crossed:false and the incumbent still fits", () => {
+    const res = crossesBoundary(followUp);
+    expect(res).toMatchObject({ crossed: false, boundary: null, stillCapable: true, stillHealthy: true });
+  });
+
+  it("wire: a context-outgrown incumbent STILL SWITCHES while in the top-N (the Block)", () => {
+    // crossesBoundary reports the incapability...
+    const { crossed, boundary, stillCapable, stillHealthy } = crossesBoundary({
+      ...followUp,
+      contextTokens: 41000,
+      incumbentContextLimit: 40000,
+    });
+    expect(crossed).toBe(true);
+    expect(boundary).toBe(BOUNDARY.CONSTRAINT);
+    // ...and shouldSwitch honours it OVER the contention window: the incumbent
+    // is ranked #1, yet incapable → the turn switches to a capable alternative.
+    expect(
+      shouldSwitch({
+        incumbent: ep("anthropic", "a"),
+        ranked: [ep("anthropic", "a"), ep("openai", "b")],
+        incumbentStillEligible: true,
+        incumbentStillCapable: stillCapable,
+        incumbentHealthy: stillHealthy,
+      }),
+    ).toEqual({ switch: true, why: "incumbent-incapable" });
   });
 });
 
@@ -186,5 +245,20 @@ describe("shouldSwitch — hysteresis", () => {
     expect(
       shouldSwitch({ ...base, ranked: [...n4.slice(0, 3), ep("anthropic", "a")] }),
     ).toEqual({ switch: true, why: "incumbent-dropped-out" });
+  });
+});
+
+describe("boundaryPhrase", () => {
+  it("returns a phrase per boundary kind", () => {
+    expect(boundaryPhrase(BOUNDARY.FIRST_TURN)).toBe("first turn");
+    expect(boundaryPhrase(BOUNDARY.AGENT)).toBe("agent changed");
+    expect(boundaryPhrase(BOUNDARY.CONSTRAINT)).toBe("context or capability");
+    expect(boundaryPhrase(BOUNDARY.COMPACTED)).toBe("just compacted");
+    expect(boundaryPhrase(BOUNDARY.USER)).toBe("Auto re-selected");
+  });
+
+  it("returns an empty string for an unknown / null boundary (never throws)", () => {
+    expect(boundaryPhrase(null)).toBe("");
+    expect(boundaryPhrase("nope")).toBe("");
   });
 });

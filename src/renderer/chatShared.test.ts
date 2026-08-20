@@ -21,6 +21,7 @@ import {
   readSavedChoice,
   writeSavedChoice,
   carrySavedChoice,
+  modelFromChoice,
   resolveLauncherFlags,
   readPromptHistory,
   appendPromptHistory,
@@ -351,6 +352,25 @@ describe("readSavedChoice / writeSavedChoice (three-state, BET-1245)", () => {
   it("a session's choice is isolated from another session id", () => {
     writeSavedChoice("sess-1", { kind: "auto" });
     expect(readSavedChoice("sess-2")).toEqual({ kind: "server-default" });
+  });
+});
+
+describe("modelFromChoice (BET-1248 seed derivation)", () => {
+  const sel = { providerID: "anthropic", modelID: "claude-sonnet-4-6" };
+  const server = { providerID: "anthropic", modelID: "claude-opus-4-7" };
+
+  it("{kind:'model'} → the explicit model (default ignored)", () => {
+    expect(modelFromChoice({ kind: "model", model: sel }, server)).toEqual(sel);
+  });
+
+  it("{kind:'server-default'} → the global default, or null when none", () => {
+    expect(modelFromChoice({ kind: "server-default" }, server)).toEqual(server);
+    expect(modelFromChoice({ kind: "server-default" }, null)).toBeNull();
+  });
+
+  it("{kind:'auto'} → null (the routed pick is applied once a turn resolves)", () => {
+    expect(modelFromChoice({ kind: "auto" }, server)).toBeNull();
+    expect(modelFromChoice({ kind: "auto" }, null)).toBeNull();
   });
 });
 

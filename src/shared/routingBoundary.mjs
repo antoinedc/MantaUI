@@ -61,19 +61,12 @@ export function crossesBoundary(input = {}) {
     userRequested = false,
   } = input;
 
-  // FIRST_TURN — new session or after /clear; there is nothing to re-decide, we
-  // are deciding for the first time. Cheapest, checked first.
-  if (hasRoutedModel === false) {
-    return { crossed: true, boundary: BOUNDARY.FIRST_TURN };
-  }
-
-  // AGENT — the assistant's judgement role changed (plan <-> build).
-  if (agent != null && previousAgent != null && agent !== previousAgent) {
-    return { crossed: true, boundary: BOUNDARY.AGENT };
-  }
-
-  // CONSTRAINT — the incumbent genuinely no longer fits the turn: it lost its
-  // context window, lacks a modality the turn needs, or its provider went away.
+  // The capability/health FACTS, computed once here (the single copy of the
+  // constraint logic). A CONSTRAINT boundary means the incumbent no longer fits
+  // the turn, so the caller threads these into `shouldSwitch` to force a switch
+  // off an outgrown/incapable/unhealthy incumbent even while it stays in the
+  // router's top-N. Non-constraint boundaries keep the incumbent genuinely
+  // capable + healthy, so those retain today's contention-only behaviour.
   const contextOutgrown =
     typeof incumbentContextLimit === "number" &&
     typeof contextTokens === "number" &&
@@ -81,21 +74,58 @@ export function crossesBoundary(input = {}) {
   const modalityMissing = requiredModalities.some(
     (m) => !incumbentModalities.includes(m),
   );
+  const stillCapable = !(contextOutgrown || modalityMissing);
+  const stillHealthy = incumbentHealthy;
+
+  // FIRST_TURN — new session or after /clear; there is nothing to re-decide, we
+  // are deciding for the first time. Cheapest, checked first.
+  if (hasRoutedModel === false) {
+    return { crossed: true, boundary: BOUNDARY.FIRST_TURN, stillCapable, stillHealthy };
+  }
+
+  // AGENT — the assistant's judgement role changed (plan <-> build).
+  if (agent != null && previousAgent != null && agent !== previousAgent) {
+    return { crossed: true, boundary: BOUNDARY.AGENT, stillCapable, stillHealthy };
+  }
+
+  // CONSTRAINT — the incumbent genuinely no longer fits the turn: it lost its
+  // context window, lacks a modality the turn needs, or its provider went away.
   if (incumbentHealthy === false || contextOutgrown || modalityMissing) {
-    return { crossed: true, boundary: BOUNDARY.CONSTRAINT };
+    return { crossed: true, boundary: BOUNDARY.CONSTRAINT, stillCapable, stillHealthy };
   }
 
   // COMPACTED — the cache is gone anyway, so re-evaluating is free.
   if (justCompacted === true) {
-    return { crossed: true, boundary: BOUNDARY.COMPACTED };
+    return { crossed: true, boundary: BOUNDARY.COMPACTED, stillCapable, stillHealthy };
   }
 
   // USER — the user explicitly re-picked Auto; honour it.
   if (userRequested === true) {
-    return { crossed: true, boundary: BOUNDARY.USER };
+    return { crossed: true, boundary: BOUNDARY.USER, stillCapable, stillHealthy };
   }
 
-  return { crossed: false, boundary: null };
+  return { crossed: false, boundary: null, stillCapable, stillHealthy };
+}
+
+const BOUNDARY_PHRASE = {
+  [BOUNDARY.FIRST_TURN]: "first turn",
+  [BOUNDARY.AGENT]: "agent changed",
+  [BOUNDARY.CONSTRAINT]: "context or capability",
+  [BOUNDARY.COMPACTED]: "just compacted",
+  [BOUNDARY.USER]: "Auto re-selected",
+};
+
+/**
+ * A short human phrase naming WHICH boundary justified a re-decision. The
+ * router's `reason` already explains the model choice; this appends the
+ * trigger context so the routed pill reads "…cost/quality… · just compacted".
+ * Pure display — returns "" for an unknown/null boundary (never throws).
+ *
+ * @param {string|null} boundary a `BOUNDARY.*` value
+ * @returns {string}
+ */
+export function boundaryPhrase(boundary) {
+  return BOUNDARY_PHRASE[boundary] ?? "";
 }
 
 // 0-based position of the incumbent endpoint within `ranked`, or -1 if absent.

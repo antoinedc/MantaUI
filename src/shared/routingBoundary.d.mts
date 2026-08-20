@@ -22,9 +22,16 @@ export interface CrossesInput {
 export interface CrossesResult {
   crossed: boolean;
   boundary: string | null;
+  // Whether the incumbent still "fits" this turn (context within its limit AND
+  // every required modality present) and its provider is healthy. A CONSTRAINT
+  // boundary sets one of these false so the caller can force a switch even when
+  // the incumbent stays in the router's top-N.
+  stillCapable: boolean;
+  stillHealthy: boolean;
 }
 
 export function crossesBoundary(input?: CrossesInput): CrossesResult;
+export function boundaryPhrase(boundary: string | null): string;
 
 export interface ShouldSwitchInput {
   incumbent?: object | null;

@@ -324,6 +324,30 @@ export function readSavedModel(sessionId: string): ModelSelection | null {
 }
 
 /**
+ * Map a three-state `ModelChoice` to the active override `ModelSelection`
+ * (or `null`). The single place `modelOverride`'s seed derives from the choice
+ * so every consumer keeps reading a plain model (BET-1248):
+ *  - `{kind:"model"}`          → the explicit model
+ *  - `{kind:"server-default"}` → the global default (today's behaviour)
+ *  - `{kind:"auto"}`           → `null` until the router resolves one (the
+ *                                routed pick is applied separately to the
+ *                                override the moment a turn runs)
+ */
+export function modelFromChoice(
+  choice: ModelChoice,
+  serverDefault: ModelSelection | null,
+): ModelSelection | null {
+  switch (choice.kind) {
+    case "model":
+      return choice.model;
+    case "server-default":
+      return serverDefault;
+    case "auto":
+      return null;
+  }
+}
+
+/**
  * @deprecated Superseded by `writeSavedChoice` (BET-1245). Thin wrapper: writes
  * an explicit model, or clears to the server default when `m` is null.
  */
