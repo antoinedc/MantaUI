@@ -1360,6 +1360,10 @@ export const IPC = {
   opencodeModels: "opencode:models",
   // BET-1225: main-conversation routing decision at session start.
   opencodeModelRoute: "routing:main",
+  // BET-1244: generic read-only routing decision for either surface (main|sub).
+  routingChoose: "routing:choose",
+  // BET-1244: Accounts "Try again" — clear a provider's out-of-credit flag.
+  accountsRetry: "accounts:retry",
   // BET-1249: the provider-agnostic model catalogue (models.dev) for the
   // renderer's "Models we couldn't identify" block — resolve opaque endpoint
   // ids and typeahead over every known model. Read-only; entry-level data.

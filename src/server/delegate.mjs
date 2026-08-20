@@ -525,7 +525,7 @@ export function resolveRequestedModel(model, models) {
 // This is a no-op for the requested-model incumbent (which is already
 // {providerID, modelID}). Shared by both routing wrappers below so the two
 // decision points normalise identically.
-function toDeliverModel(m) {
+export function toDeliverModel(m) {
   if (!m) return null;
   const providerID = m?.providerID ?? "";
   const modelID = m?.modelID ?? m?.id ?? "";

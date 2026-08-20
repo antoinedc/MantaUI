@@ -33,6 +33,7 @@ import { explicitMethods } from "./demoApi.js";
 //   - a key removed → someone added a demo stub (or deleted the Api method).
 //     Delete the name from this list.
 export const DEMO_UNIMPLEMENTED = [
+  "accountsRetry",
   "agentPullFile",
   "authClaim",
   "authPair",
@@ -133,6 +134,7 @@ export const DEMO_UNIMPLEMENTED = [
   "ptyWrite",
   "pushRegisterApns",
   "revealInFolder",
+  "routingChoose",
   "scheduleCreate",
   "scheduleDelete",
   "scheduleList",
