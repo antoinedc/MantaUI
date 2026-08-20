@@ -13,6 +13,7 @@
 		058E2179669599C216446E7C /* ToolOutputPreviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAD2C923C52DE07EB54AB821 /* ToolOutputPreviewTests.swift */; };
 		0DA0C1C92C06A3BED780494E /* UsageMeters.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A81D1BB24FB02E4DFFA04FE /* UsageMeters.swift */; };
 		12070C130BD9D1CD9EA0603F /* WaveformTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AEF7554D798247FECA6BFF84 /* WaveformTests.swift */; };
+		12BF6CF95679710C484807E9 /* MantaScrollTraceUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39217C665D64CEFA1C5F5C79 /* MantaScrollTraceUITests.swift */; };
 		12C1D08D7311357D1872FA18 /* ChatJSON.swift in Sources */ = {isa = PBXBuildFile; fileRef = E246039C1A3AA38065BE89B0 /* ChatJSON.swift */; };
 		1888AC1DE5A98EFBE6DDEA51 /* DeprecatedModelOptIns.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6169B72F37CC138729DDD22E /* DeprecatedModelOptIns.swift */; };
 		1A55CBC343898856735AF0F8 /* MantaChatSurfaceCaptureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 570E190164DB3AB83DC14283 /* MantaChatSurfaceCaptureUITests.swift */; };
@@ -166,6 +167,7 @@
 		35ECC10E3DB9A931F8EB5420 /* MantaUI.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = MantaUI.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		36E99A4154D594C6A36FB890 /* MantaLiveTypeaheadSlashUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaLiveTypeaheadSlashUITests.swift; sourceTree = "<group>"; };
 		38864A574D6CE5142E07B487 /* ModelRecentsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelRecentsTests.swift; sourceTree = "<group>"; };
+		39217C665D64CEFA1C5F5C79 /* MantaScrollTraceUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaScrollTraceUITests.swift; sourceTree = "<group>"; };
 		39978655A14BFA5D39336286 /* MantaSettingsModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaSettingsModels.swift; sourceTree = "<group>"; };
 		39B5E0C86E9FA4A10239DBFA /* DeprecatedModelOptInsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeprecatedModelOptInsTests.swift; sourceTree = "<group>"; };
 		4098461F579869804595B0A3 /* ChatModelCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatModelCatalog.swift; sourceTree = "<group>"; };
@@ -461,6 +463,7 @@
 				8D8A1A5388E54F31462D616F /* MantaPairFixture.swift */,
 				AD55034506C4DF218AD7300E /* MantaPairingDriverUITests.swift */,
 				17673950838B843917DA660F /* MantaRunningStateCaptureUITests.swift */,
+				39217C665D64CEFA1C5F5C79 /* MantaScrollTraceUITests.swift */,
 				12A39FBE813A8B20F7F00055 /* MantaSubagentDrillInUITests.swift */,
 				7442EBB8ACC827C69BDD2B6E /* MantaTranscriptGestureUITests.swift */,
 				714E922397017504533FC4EE /* MantaUIHierarchyCaptureUITests.swift */,
@@ -635,6 +638,7 @@
 				EDFF1716E461980191B71C85 /* MantaPairFixture.swift in Sources */,
 				D8B312D02500D61F791EF275 /* MantaPairingDriverUITests.swift in Sources */,
 				51F9E82B1001E68644519724 /* MantaRunningStateCaptureUITests.swift in Sources */,
+				12BF6CF95679710C484807E9 /* MantaScrollTraceUITests.swift in Sources */,
 				DE5E17651AB0E9C750C4D712 /* MantaSubagentDrillInUITests.swift in Sources */,
 				6AA12AFE81F85477EBFB3D25 /* MantaTranscriptGestureUITests.swift in Sources */,
 				4DFA9582998C586AAC579F31 /* MantaUIHierarchyCaptureUITests.swift in Sources */,
@@ -826,7 +830,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0.17;
+				MARKETING_VERSION = 1.0.18;
 				OTHER_LDFLAGS = "-ObjC";
 				PRODUCT_BUNDLE_IDENTIFIER = com.antoinedc.mantaui;
 				PRODUCT_NAME = MantaUI;
@@ -933,7 +937,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0.17;
+				MARKETING_VERSION = 1.0.18;
 				OTHER_LDFLAGS = "-ObjC";
 				PRODUCT_BUNDLE_IDENTIFIER = com.antoinedc.mantaui;
 				PRODUCT_NAME = MantaUI;

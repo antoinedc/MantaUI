@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 import UserNotifications
 import MessagingUI
+import OSLog
 
 // ===========================================================================
 // S4 — chat screen wired to live data (BET-596).
@@ -763,6 +764,7 @@ private struct ChatScreenContent: View {
             bottomInset: bottomBarHeight,
             scrollPosition: $scrollPosition,
             onPointsFromBottom: { showScrollToBottom = $0 > Self.scrollToBottomThreshold },
+            surface: "parent",
             header: { sessionHeaderBlock }
         )
         // Deliver the blocking-card actions to the transcript cells via the
@@ -1209,6 +1211,7 @@ struct ChatSubagentScreen: View {
             bottomInset: 0,
             scrollPosition: $scrollPosition,
             onPointsFromBottom: nil,
+            surface: "child",
             header: { EmptyView() }
         )
         .background(tokens.canvas.ignoresSafeArea())
@@ -1244,6 +1247,8 @@ struct TranscriptListView<Header: View>: View {
     let bottomInset: CGFloat
     @Binding var scrollPosition: TiledScrollPosition
     var onPointsFromBottom: ((CGFloat) -> Void)? = nil
+    /// BET-1211 TEMPORARY diagnostic label ("parent"/"child") — remove before merge.
+    var surface: String = "?"
     @ViewBuilder var header: () -> Header
 
     var body: some View {
@@ -1269,6 +1274,11 @@ struct TranscriptListView<Header: View>: View {
         )
         .onTiledScrollGeometryChange { geometry in
             onPointsFromBottom?(geometry.pointsFromBottom)
+            // BET-1211 TEMPORARY scroll probe — remove before merge.
+            os_log("[scroll] %{public}@ off=%.1f content=%.1f visible=%.1f insetT=%.1f insetB=%.1f",
+                   log: .default, type: .info,
+                   surface, geometry.contentOffset.y, geometry.contentSize.height,
+                   geometry.visibleSize.height, geometry.contentInset.top, geometry.contentInset.bottom)
         }
         .onTapBackground { resignKeyboard() }
         .safeAreaBar(edge: .top) {
