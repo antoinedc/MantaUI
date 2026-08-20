@@ -481,6 +481,10 @@ export function ChatPanel({
   // is free). Latched from the compaction card (see the effect below the SSE
   // bus), cleared on the next turn.
   const justCompactedRef = useRef(false);
+  // Ref mirror of latestTokens (set below, after its memo is defined) so submit
+  // reads the CURRENT context size without re-creating the callback on every
+  // stream update (the liveChildStatusRef / permissionsRef pattern).
+  const latestTokensRef = useRef<TokenUsage | null>(null);
   // The user re-picked Auto while a routed model may exist — the next turn
   // re-decides (user-requested boundary). Detected as an autoActive flip.
   const pendingAutoUserRef = useRef(false);
@@ -1323,14 +1327,14 @@ export function ChatPanel({
         const incumbentModel = incumbent
           ? resolveActiveModel(models, incumbent, null)
           : null;
-        const ctxTokens = latestTokens
-          ? (latestTokens.input ?? 0) +
-            (latestTokens.cache?.read ?? 0) +
-            (latestTokens.cache?.write ?? 0)
+        const ctxTokens = latestTokensRef.current
+          ? (latestTokensRef.current.input ?? 0) +
+            (latestTokensRef.current.cache?.read ?? 0) +
+            (latestTokensRef.current.cache?.write ?? 0)
           : undefined;
         const requiredModes = readyAttachments.map((a) => mimeToInputMode(a.mime));
         const currentAgent = planAgent ?? "build";
-        const { crossed, boundary } = crossesBoundary({
+        const { crossed, boundary, stillCapable, stillHealthy } = crossesBoundary({
           hasRoutedModel: incumbent != null,
           agent: currentAgent,
           previousAgent: lastAgentRef.current,
@@ -1366,16 +1370,17 @@ export function ChatPanel({
               ? [decision.model, ...decision.alternatives]
               : decision.alternatives;
             // Hysteresis: only move off the incumbent when it genuinely fell out
-            // (didn't survive the router's contention), and only when the router
-            // actually offered a model. Otherwise keep it and send on it as-is.
+            // (didn't survive the router's contention) OR it no longer fits the
+            // turn (a CONSTRAINT boundary made it incapable/unhealthy — force the
+            // switch away regardless of where it ranks). Otherwise keep it.
             if (
               decision.model &&
               shouldSwitch({
                 incumbent,
                 ranked,
                 incumbentStillEligible: true,
-                incumbentStillCapable: true,
-                incumbentHealthy: true,
+                incumbentStillCapable: stillCapable,
+                incumbentHealthy: stillHealthy,
               }).switch
             ) {
               const reason = decision.reason + (boundary ? ` · ${boundaryPhrase(boundary)}` : "");
@@ -2319,6 +2324,13 @@ export function ChatPanel({
     }
     return null;
   }, [messages, stepTokens]);
+
+  // BET-1248: mirror latestTokens into a ref so submit's boundary routing reads
+  // the CURRENT context size (it can't take latestTokens as a dep — it is
+  // declared after submit — and a stale closure would miss context-outgrown).
+  useEffect(() => {
+    latestTokensRef.current = latestTokens;
+  }, [latestTokens]);
 
   // ===== Stale prompt-cache detection =====
   //
