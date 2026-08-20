@@ -245,35 +245,90 @@ export function modelKey(sessionId: string): string {
   return `manta:chat:${sessionId}:model`;
 }
 
-export function readSavedModel(sessionId: string): ModelSelection | null {
+/**
+ * What the session's model picker is set to. Three states (BET-1245):
+ * - `{ kind: "auto" }`        — automatic routing picks the model for this conversation.
+ * - `{ kind: "model" }`       — an explicit `ModelSelection`, the historical meaning of
+ *                               the stored value.
+ * - `{ kind: "server-default" }` — today's `null`: let opencode pick its default.
+ *
+ * Kept separate from `ModelSelection` on purpose: widening `ModelSelection` would force
+ * every consumer that forwards a model to a provider to re-narrow it.
+ */
+export type ModelChoice =
+  | { kind: "auto" }
+  | { kind: "model"; model: ModelSelection }
+  | { kind: "server-default" };
+
+/**
+ * Read the per-session model choice. One storage key (`modelKey`), three states.
+ * The stored value is either absent (`server-default`), a `ModelSelection` JSON
+ * object (`{ kind: "model" }`), or the bare literal string `"auto"`
+ * (`{ kind: "auto" }`). A malformed or unparseable value falls back to
+ * `server-default`; never throws out of a storage read.
+ */
+export function readSavedChoice(sessionId: string): ModelChoice {
   try {
     const raw = localStorage.getItem(modelKey(sessionId));
-    if (!raw) return null;
+    if (raw === null) return { kind: "server-default" };
+    if (raw === "auto") return { kind: "auto" };
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed.providerID === "string" && typeof parsed.modelID === "string") {
-      return parsed as ModelSelection;
+      return { kind: "model", model: parsed as ModelSelection };
     }
-    return null;
+    return { kind: "server-default" };
   } catch {
-    return null;
+    return { kind: "server-default" };
   }
 }
 
-export function writeSavedModel(sessionId: string, m: ModelSelection | null): void {
+/**
+ * Persist the per-session model choice under the SAME key as the historical
+ * `ModelSelection` JSON (so existing sessions keep their stored model, and a
+ * later variant is a compatible read). `auto` is written as the bare string
+ * `"auto"`; `server-default` removes the key (an absent value means default).
+ */
+export function writeSavedChoice(sessionId: string, c: ModelChoice): void {
   try {
-    if (m) localStorage.setItem(modelKey(sessionId), JSON.stringify(m));
-    else localStorage.removeItem(modelKey(sessionId));
+    switch (c.kind) {
+      case "auto":
+        localStorage.setItem(modelKey(sessionId), "auto");
+        break;
+      case "model":
+        localStorage.setItem(modelKey(sessionId), JSON.stringify(c.model));
+        break;
+      case "server-default":
+        localStorage.removeItem(modelKey(sessionId));
+        break;
+    }
   } catch { /* quota / disabled storage */ }
 }
 
-// /clear carry-forward: copy the session's model to the new session id so the
-// user doesn't have to re-pick after every clear. Copies the RAW stored value.
-export function copySavedModel(fromSessionId: string, toSessionId: string): void {
-  try {
-    const raw = localStorage.getItem(modelKey(fromSessionId));
-    if (raw === null) return;
-    localStorage.setItem(modelKey(toSessionId), raw);
-  } catch { /* quota / disabled storage */ }
+/**
+ * /clear carry-forward: copy the session's model choice to the new session id
+ * so the user doesn't have to re-pick after every clear. Carry the FULL choice
+ * (including `auto`) — clearing a conversation must not silently drop Auto.
+ */
+export function carrySavedChoice(fromSessionId: string, toSessionId: string): void {
+  writeSavedChoice(toSessionId, readSavedChoice(fromSessionId));
+}
+
+/**
+ * @deprecated Superseded by `readSavedChoice` (BET-1245). Thin wrapper over the
+ * three-state reader: returns the explicit `ModelSelection`, or `null` for the
+ * auto / server-default states. Prefer `readSavedChoice` and narrow yourself.
+ */
+export function readSavedModel(sessionId: string): ModelSelection | null {
+  const c = readSavedChoice(sessionId);
+  return c.kind === "model" ? c.model : null;
+}
+
+/**
+ * @deprecated Superseded by `writeSavedChoice` (BET-1245). Thin wrapper: writes
+ * an explicit model, or clears to the server default when `m` is null.
+ */
+export function writeSavedModel(sessionId: string, m: ModelSelection | null): void {
+  writeSavedChoice(sessionId, m ? { kind: "model", model: m } : { kind: "server-default" });
 }
 
 // Per-session plan-mode override (BET-949). Deliberately its OWN storage key —
