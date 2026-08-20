@@ -34,6 +34,7 @@ import * as providers from "./providers.mjs";
 import * as launchers from "./launchers.mjs";
 import * as subscriptionProviders from "./subscriptionProviders.mjs";
 import { chooseMainModel } from "./delegate.mjs";
+import { buildRoutingServices } from "./routingServices.mjs";
 import { restartOpencode, runServerSelfUpdate } from "./opencodeAdmin.mjs";
 import { pollClaudeLogin, claudeCliStatus } from "./opencode.mjs";
 import { backupClaudeCredentials, CREDENTIALS_PATH } from "./claudeAuth.mjs";
@@ -326,6 +327,11 @@ export function buildHandlers({
   progress,
   voiceNotes,
   contextLimitFor = () => null,
+  // BET-1252: the routing-services readers. Null/absent → the assembly degrades
+  // to absent services and the router returns the incumbent (routing inert).
+  routingCatalogIndex = null,
+  routingProviderHealthState = () => null,
+  routingEndpointSummary = () => null,
 }) {
   // The sole resolver for project cwd — no longer mirrored to a desktop-main
   // copy (the src/main/index.ts duplicate was retired in the HTTP-only
@@ -807,15 +813,15 @@ export function buildHandlers({
     "routing:main": async (input) => {
       const incumbent = input?.incumbent ?? null;
       const agent = input?.agent ?? "build";
-      let policy = {};
+      let cfg = {};
       let quota = [];
       let catalog = [];
       try {
-        const cfg = await local.configGet();
-        policy = cfg?.modelRouting ?? {};
+        cfg = (await local.configGet()) ?? {};
       } catch {
-        policy = {};
+        cfg = {};
       }
+      const policy = cfg?.modelRouting ?? {};
       try {
         quota = usageListSnapshots();
         if (!Array.isArray(quota)) quota = [];
@@ -828,7 +834,23 @@ export function buildHandlers({
       } catch {
         catalog = [];
       }
-      return chooseMainModel({ incumbent, catalog, policy, quota, agent, nowMs: Date.now() });
+      // BET-1252: assemble the routing-services context from live box state.
+      // Build is guarded (every reader degrades to absent) and the whole wrap
+      // degrades to null services → the router returns the incumbent unchanged,
+      // so a routing failure can never change a conversation invisibly.
+      let services = null;
+      try {
+        services = await buildRoutingServices(cfg, {
+          catalogIndex: routingCatalogIndex,
+          endpoints: catalog,
+          snapshots: quota,
+          providerHealthState: routingProviderHealthState,
+          endpointSummary: routingEndpointSummary,
+        });
+      } catch {
+        services = null;
+      }
+      return chooseMainModel({ incumbent, catalog, policy, quota, agent, nowMs: Date.now(), services });
     },
 
     // BET-1249: the provider-agnostic model catalogue for the renderer's
