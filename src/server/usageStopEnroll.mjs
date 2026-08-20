@@ -53,7 +53,7 @@ function freshModel(sessionId) {
  * @param {(adapterId: string) => Promise<boolean>|boolean} deps.recheckAtLimit  wire to recheckAdapterAtLimit
  * @param {(sessionId: string) => Promise<string|undefined>|string|undefined} [deps.resolveWorkspace]  best-effort project label
  * @param {() => number} [deps.now]
- * @returns {{ observeEvent: (evt: object) => void }}
+ * @returns {{ observeEvent: (evt: object) => void, getSessionModel: (sessionId: string) => {adapterId:string|null, model?:string, cachedTokens:number}|null }}
  */
 export function createUsageStopEngine({ upsert, recheckAtLimit, resolveWorkspace = () => "", now = () => Date.now() } = {}) {
   const sessionModel = new Map(); // sessionId -> {conversation, adapterId, model?, cachedTokens}
@@ -147,5 +147,16 @@ export function createUsageStopEngine({ upsert, recheckAtLimit, resolveWorkspace
     }
   }
 
-  return { observeEvent };
+  // Read-only view of the per-session provider record this engine already
+  // keeps (fed by `session.next.step.ended` — the ONLY event that carries the
+  // provider). Stage 4's provider-health record reads the SAME cache rather
+  // than building a second one (BET-1230). Returns null for a session whose
+  // provider was never observed.
+  function getSessionModel(sessionId) {
+    const m = sessionModel.get(sessionId);
+    if (!m) return null;
+    return { adapterId: m.adapterId, model: m.model, cachedTokens: m.cachedTokens };
+  }
+
+  return { observeEvent, getSessionModel };
 }

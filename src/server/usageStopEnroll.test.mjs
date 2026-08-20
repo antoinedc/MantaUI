@@ -138,3 +138,17 @@ test("non-error and non-step events are ignored", async () => {
   engine.observeEvent({ type: "message.part.updated", properties: {} });
   assert.equal(upserts.length, 0);
 });
+
+test("getSessionModel exposes the cached provider record (BET-1230)", () => {
+  const { engine } = harness();
+  // Before any step event: no record.
+  assert.equal(engine.getSessionModel("s1"), null);
+  // A step event seeds the per-session provider cache.
+  engine.observeEvent(stepEvent("s1", "openai", "gpt-5", { read: 2, write: 3 }));
+  const m = engine.getSessionModel("s1");
+  assert.equal(m.adapterId, "codex"); // openai -> adapter id "codex"
+  assert.equal(m.model, "gpt-5");
+  assert.equal(m.cachedTokens, 5);
+  // An unknown session stays null.
+  assert.equal(engine.getSessionModel("nobody"), null);
+});

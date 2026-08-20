@@ -365,6 +365,38 @@ test("createSession primes directory cache; sendPrompt then appends ?directory="
   );
 });
 
+test("sendPrompt non-2xx carries status + Retry-After (BET-1230)", async () => {
+  // The model-turn path must mirror the usage meter's HTTP error shape so a
+  // refusal can be told apart by status (402/429/5xx) without string-matching.
+  _resetSessionDirectoryCache();
+  await withMockFetch(
+    async (url) => {
+      if (String(url).startsWith("http://127.0.0.1:4096/session?directory=")) {
+        return new Response(
+          JSON.stringify({ id: "ses_rl", title: "t", directory: "/w", projectID: "p" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response("slow down", {
+        status: 429,
+        headers: { "retry-after": "30" },
+      });
+    },
+    async () => {
+      let thrown = null;
+      try {
+        await sendPrompt({ sessionId: "ses_rl", text: "hi" });
+      } catch (e) {
+        thrown = e;
+      }
+      assert.ok(thrown, "expected sendPrompt to throw on a non-2xx");
+      assert.equal(thrown.status, 429);
+      assert.equal(thrown.retryAfterMs, 30_000);
+      assert.match(thrown.message, /429/);
+    },
+  );
+});
+
 test("sendPrompt includes agent when passed and omits it when not", async () => {
   // BET-949: the plan-mode chip must drive `agent:"plan"` on the prompt_async
   // body; an omitted agent keeps today's body byte-identical.

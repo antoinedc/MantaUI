@@ -25,6 +25,18 @@ export function describeTruncation(kind: TruncationKind): {
  *  (`<reason phrase>: <JSON>`), or return the input unchanged. Lossless. */
 export function humanizeProviderError(raw: string): string;
 
+/** Map a provider error message's leading HTTP reason phrase to a status
+ *  code, or null when the phrase isn't in the closed table (BET-1230). */
+export function providerErrorStatus(message: string | null | undefined): number | null;
+
+/** Enrich a `session.error` `properties.error` with `httpStatus` /
+ *  `retryAfterMs`, preserving `name` / `data.message`. Returns the same
+ *  reference when nothing is resolvable. */
+export function enrichProviderError(
+  error: Record<string, any> | null | undefined,
+  retryAfterMs?: number,
+): Record<string, any>;
+
 export function findFlushBoundary(buffer: string): number;
 
 /** Max time a chunk may be withheld before the caller flushes at the latest
