@@ -75,6 +75,7 @@ import {
   modelInputModes,
   modelKey,
   modelSupportsAttachments,
+  readSavedChoice,
   readSavedModel,
   writeSavedModel,
   readPlanSaved,
@@ -425,8 +426,16 @@ export function ChatPanel({
   // it. Initialized from the per-session localStorage override for the session,
   // falling back to the persisted global default (the same seed useSseBus's
   // providerID used to recompute from readSavedModel on every render).
+  // BET-1247: whether the session's model choice is Auto (the three-state
+  // choice from BET-1245). Under Auto the override seeds to null rather than
+  // the server default — the default is not "the model Auto chose", and the
+  // chip must read "Auto" until the router actually resolves one (a turn
+  // running applies the routed pick to `modelOverride`).
+  const [autoActive, setAutoActive] = useState<boolean>(
+    () => readSavedChoice(sessionId).kind === "auto",
+  );
   const [modelOverride, setModelOverride] = useState<ModelSelection | null>(() =>
-    readSavedModel(sessionId) ?? configDefaultModel ?? null,
+    autoActive ? null : readSavedModel(sessionId) ?? configDefaultModel ?? null,
   );
   // BET-1222: routed state for the composer pill — set when the router chose
   // this session's model (fed by the main-conversation routing wiring). The
@@ -657,8 +666,10 @@ export function ChatPanel({
     setError(null);
     const planOnStart = readPlanSaved(sessionId);
     setPlanOn(planOnStart);
+    const autoNow = readSavedChoice(sessionId).kind === "auto";
+    setAutoActive(autoNow);
     setModelOverride(
-      readSavedModel(sessionId) ?? configDefaultModel ?? null,
+      autoNow ? null : readSavedModel(sessionId) ?? configDefaultModel ?? null,
     );
     // Seed plan mode from the session's own `agent` field when present (BET-949
     // §5): a session pre-set to plan OUTSIDE MantaUI would otherwise show the
@@ -3131,6 +3142,7 @@ export function ChatPanel({
         models={models}
         modelOverride={modelOverride}
         defaultModel={defaultModel}
+        auto={autoActive}
         routed={routed}
         onRoutedUndone={() => void undoRouted()}
         plan={plan}
