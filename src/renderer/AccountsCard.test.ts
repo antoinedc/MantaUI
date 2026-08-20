@@ -10,6 +10,7 @@
 
 import { describe, it, expect } from "vitest";
 import { autoEligibility, MISSING } from "../shared/autoEligibility.mjs";
+import type { UsageWindow } from "../shared/types";
 import {
   describeAccountState,
   describeMissing,
@@ -62,10 +63,10 @@ describe("describeAccountState", () => {
   });
 
   it("custom row with no reader shows exactly 'No usage data' — no bar, no zero", () => {
-    const row = {
+    const row: AccountRowModel = {
       id: "voska",
-      className: "Custom" as const,
-      kind: "declared" as const,
+      className: "Custom",
+      kind: "declared",
       name: "VoskaAI",
       connected: true,
       reading: null,
@@ -144,10 +145,10 @@ describe("helpText", () => {
   });
 
   it("custom row with gaps names them in the help line", () => {
-    const row = {
+    const row: AccountRowModel = {
       id: "x",
-      className: "Custom" as const,
-      kind: "declared" as const,
+      className: "Custom",
+      kind: "declared",
       name: "X",
       connected: true,
       reading: null,
@@ -169,7 +170,7 @@ describe("usagePace", () => {
     const now = 500;
     // Window spans 0..1000ms, started at 0, resets at 1000 → at now=500 the
     // window is 50% elapsed, so pace is consumed% vs the 50% mark.
-    const w = (pct: number) => ({ pct, startedAt: 0, resetsAt: 1000 });
+    const w = (pct: number): UsageWindow => ({ pct, startedAt: 0, resetsAt: 1000, label: "5h", kind: "session" });
     // 20% consumed at 50% elapsed → under pace.
     expect(usagePace(w(20), now)).toBe("under pace");
     // 50% consumed at 50% elapsed → on pace.
