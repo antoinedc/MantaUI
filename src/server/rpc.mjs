@@ -41,6 +41,7 @@ import { addApnsToken } from "./push.mjs";
 import { getRegistry as pluginsGetRegistry } from "./plugins.mjs";
 import { searchMessages } from "./messageSearch.mjs";
 import { ledgerSummary } from "./modelLedger.mjs";
+import { allModels as catalogAllModels } from "./modelCatalog.mjs";
 import { MIN_CLIENT } from "./version.mjs";
 import { forgeDiffForCwd, forgeStatus, pullRequestForCwd, shipPullRequest, shipPreview, mergePullRequest, draftGetForCwd, draftCommentForCwd, draftSubmitForCwd, replyThreadForCwd, forgeInbox, forgeDeviceStart, forgeDevicePoll, forgeDeviceCancel, forgeListRepos, forgeCloneStart, forgeCloneStatus, forgeCloneCancel } from "./forge/index.mjs";
 import { listRules as forgeListRules, formatIssueRef, parseIssueRef } from "./forgeRules.mjs";
@@ -828,6 +829,21 @@ export function buildHandlers({
         catalog = [];
       }
       return chooseMainModel({ incumbent, catalog, policy, quota, agent, nowMs: Date.now() });
+    },
+
+    // BET-1249: the provider-agnostic model catalogue for the renderer's
+    // "Models we couldn't identify" block. Read-only — the renderer builds the
+    // matcher (shared modelCatalog.mjs) over the returned entries and persists
+    // user declarations through configUpdate, NOT this channel. An empty box
+    // catalogue is reported as { supported:false } (never thrown), matching
+    // the sibling degradation contract.
+    "opencode:model-catalog": async () => {
+      try {
+        const entries = catalogAllModels();
+        return { supported: entries.length > 0, size: entries.length, entries };
+      } catch {
+        return { supported: false, size: 0, entries: [] };
+      }
     },
 
     // Provider management — now served from the server (BET-82.3).

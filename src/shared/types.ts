@@ -300,7 +300,7 @@ export type AppConfig = {
       {
         catalogId?: string;
         price?: { input: number; output: number } | "free";
-        caches?: false | { read: number; write?: number };
+        caches?: false | { read?: boolean; write?: boolean };
         tierOverride?: "fast" | "balanced" | "deep";
       }
     >;
@@ -1360,6 +1360,10 @@ export const IPC = {
   opencodeModels: "opencode:models",
   // BET-1225: main-conversation routing decision at session start.
   opencodeModelRoute: "routing:main",
+  // BET-1249: the provider-agnostic model catalogue (models.dev) for the
+  // renderer's "Models we couldn't identify" block — resolve opaque endpoint
+  // ids and typeahead over every known model. Read-only; entry-level data.
+  opencodeModelCatalog: "opencode:model-catalog",
   // Provider management: list/set custom providers + discover models.
   opencodeGetProviders: "opencode:get-providers",
   opencodeSetProviders: "opencode:set-providers",
