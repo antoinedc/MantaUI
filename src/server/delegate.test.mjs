@@ -677,6 +677,49 @@ test("startJob routes to a non-incumbent model from live routing readers (BET-12
   assert.deepEqual(h.delivered[0].model, { providerID: "anthropic", modelID: "claude-sonnet-4" });
 });
 
+// BET-1252 (reviewer nit): end-to-end through startJob — a reliability-DERANKED
+// endpoint (bad tool-call rate vs the SAME model's baseline) sorts last, so the
+// routed winner is the sibling endpoint serving the same model at the same
+// price, never the broken one. Proves the ledger wiring actually reaches the
+// router's derank and influences the outcome.
+test("startJob routes to the non-deranked sibling when an endpoint is reliability-penalised (BET-1252)", async () => {
+  const h = startHarness("child_derank");
+  h.deps.configGet = async () => ({ modelRouting: { preset: "balanced" } });
+  h.deps.listSnapshots = () => [];
+  const models = [
+    // Same model served by two endpoints at the SAME price — only reliability
+    // can separate them. anthropic/claude-sonnet-4 is the alphabetical
+    // tie-break winner, but its endpoint has a bad tool-call rate → it must be
+    // reliability-penalised and lose to openai's clean copy. This pins that the
+    // ledger's derank actually swings the outcome, not the model-id tie-break.
+    { providerID: "anthropic", id: "claude-sonnet-4", status: "active", cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 4.5 }, capabilities: { reasoning: true, toolcall: true } },
+    { providerID: "openai", id: "claude-sonnet-4", status: "active", cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 4.5 }, capabilities: { reasoning: true, toolcall: true } },
+  ];
+  h.deps.listModels = async () => models;
+  const cat = (id) => ({ id, family: "sonnet" });
+  h.deps.catalogIndex = {
+    lookupModel: (id) => cat(id),
+    matchModel: (id) => ({ kind: "exact", candidates: [cat(id)] }),
+    allModels: () => [],
+  };
+  h.deps.providerHealthState = () => "ok";
+  h.deps.endpointSummary = async () => ({
+    supported: true,
+    "anthropic/claude-sonnet-4": { reliability: { requests: 25, errored: 12, rate: 0.48 }, speed: {}, latency: {}, mix: {} },
+    "openai/claude-sonnet-4": { reliability: { requests: 25, errored: 0, rate: 0 }, speed: {}, latency: {}, mix: {} },
+  });
+
+  const res = await startJob(
+    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo" },
+    h.deps,
+  );
+  assert.equal(res.ok, true);
+  assert.equal(h.delivered.length, 1);
+  // The deranked (anthropic, alphabetical winner) endpoint must NOT win the
+  // same-model contest — the clean openai copy does.
+  assert.deepEqual(h.delivered[0].model, { providerID: "openai", modelID: "claude-sonnet-4" });
+});
+
 test("startJob ignores the stale modelRouter key and delivers the incumbent (BET-1227)", async () => {
   const h = startHarness("child_stale_key");
   // The wrong, never-written key must NOT activate routing — a preset under
