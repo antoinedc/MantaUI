@@ -1,0 +1,7 @@
+{
+  "id": "openrouter",
+  "providerIDs": ["openrouter"],
+  "url": "https://openrouter.ai/api/v1/credits",
+  "auth": "bearer",
+  "balance": { "path": "credits", "units": "dollars", "sign": "positive-is-credit" }
+}

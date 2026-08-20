@@ -85,12 +85,22 @@ import { claudeAdapter } from "./usageAdapters/claude.mjs";
 import { codexAdapter } from "./usageAdapters/codex.mjs";
 import { kimiAdapter } from "./usageAdapters/kimi.mjs";
 import { isUsageAtLimit } from "./usageStopper.mjs";
+import { loadAccountReaders } from "./accountReaders.mjs";
 
 export { normalizeWindow };
 
-// The registry of built-in adapters. Registry only — the engine below never
-// branches on a provider name.
-export const ADAPTERS = [claudeAdapter, codexAdapter, kimiAdapter];
+// The registry of built-in readers. Registry only — the engine below never
+// branches on a provider name. Holds the code adapters AND the descriptor-
+// backed readers (BET-1239): each descriptor in ./accountDescriptors/ becomes
+// an ordinary reader with the SAME `{id, providerIDs, detect, fetch}` shape as
+// the code adapters, so the engine cannot tell them apart. Growing the
+// supported list is authoring one JSON file — no change here, no branch.
+export const ADAPTERS = [
+  claudeAdapter,
+  codexAdapter,
+  kimiAdapter,
+  ...loadAccountReaders(),
+];
 
 // Map an opencode providerID ("anthropic" | "openai" | "kimi-for-coding") to
 // its usage adapter id ("claude" | "codex" | "kimi"). The two namespaces differ
