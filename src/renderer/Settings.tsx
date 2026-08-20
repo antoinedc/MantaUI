@@ -536,7 +536,6 @@ export function Settings({
       "cto.model": cto?.model ?? "",
       "cto.voice": cto?.voice ?? "",
       "cto.alwaysListening": cto?.alwaysListening ?? false,
-      "modelRouting.enabled": modelRouting?.enabled ?? false,
       "modelRouting.preset": modelRouting?.preset ?? "balanced",
     }),
     [cacheTtl, groqApiKey, voiceTranscriptionModel, openaiApiKey, allowAgentPush, downloadsDir, worktreePerSession, worktreeCleanOnClose, uploadCleanupHours, voiceNoteTtlHours, theme, autoRenameSessions, alwaysShowUsage, cto, modelRouting],
@@ -1097,10 +1096,9 @@ export function Settings({
     if (section === "models") {
       return (
         <>
-          {/* Routing card mounts under the schema-driven "Routing" group (the
-              toggle + preset). The card shows what routing *would* do — the
-              per-agent tiers + plan windows — so it stays visible even when
-              routing is off. */}
+          {/* Routing card — the per-agent tiers + plan windows. Renders what
+              routing would do, alongside the schema-driven "Automatic Manta
+              Routing" Balance card. There is no global toggle (BET-1243). */}
           <ModelRoutingCard />
           <GroupCard title="Models">
             <ModelsCard />

@@ -79,7 +79,6 @@ const DEFAULT_CONFIG = {
   // it is opt-in, matching chatAutoAllow / pluginsEnabled). Config-only in
   // this issue; no behaviour change until the router wiring issue reads it.
   modelRouting: {
-    enabled: false,
     preset: "balanced",
   },
 };

@@ -9,7 +9,7 @@ const DEFAULT_CONFIG: AppConfig = {
   // Model routing (BET-1215). Off by default (opt-in — routing acts on the
   // user's behalf). The live server default lives in src/server/local.mjs;
   // this mirrors it for desktop-side config reads.
-  modelRouting: { enabled: false, preset: "balanced" },
+  modelRouting: { preset: "balanced" },
 };
 
 function configPath(): string {
