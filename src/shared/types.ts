@@ -289,13 +289,21 @@ export type AppConfig = {
   // matching chatAutoAllow / pluginsEnabled). Config-only in this issue; the
   // router wiring issue reads this into the router's `policy` argument.
   modelRouting?: {
-    // Master switch. False (the default) until the user opts in.
-    enabled: boolean;
     // Three-way balance dial. Default "balanced".
     preset: "economy" | "balanced" | "performance";
     // Per-agent tier override (config-only — no UI builds this). Absent /
     // partial = fall back to the preset's tier table.
     perAgent?: Record<string, "fast" | "balanced" | "deep">;
+    // Per-endpoint identity + price declared by the user. Key: "providerID/modelID".
+    declaredModels?: Record<
+      string,
+      {
+        catalogId?: string;
+        price?: { input: number; output: number } | "free";
+        caches?: false | { read: number; write?: number };
+        tierOverride?: "fast" | "balanced" | "deep";
+      }
+    >;
   };
   // Position/size of the floating on-call CTO window (BET-1166). Persisted so
   // the window remembers where the user parked it across runs.

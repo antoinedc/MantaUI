@@ -128,28 +128,31 @@ describe("uploadCleanupHours (BET-427)", () => {
 });
 
 describe("model routing entries (BET-1218)", () => {
-  const enabled = ALL.find((e) => e.id === "modelRoutingEnabled");
   const preset = ALL.find((e) => e.id === "modelRoutingPreset");
 
-  it("are present in the models section for desktop", () => {
+  it("the enabled toggle no longer exists (routing is per-conversation only)", () => {
+    // The global toggle was deleted: routing is activated per conversation from
+    // the composer's model picker, so a global consent switch would be a second
+    // control for one decision (and a stub — its config key was never read).
+    expect(ALL.find((e) => e.id === "modelRoutingEnabled")).toBeUndefined();
+  });
+
+  it("the preset is present in the models section for desktop", () => {
     const desktop = settingsForSection(ALL, "models", "desktop");
-    expect(enabled).toBeDefined();
     expect(preset).toBeDefined();
-    expect(desktop.some((e) => e.id === "modelRoutingEnabled")).toBe(true);
     expect(desktop.some((e) => e.id === "modelRoutingPreset")).toBe(true);
   });
 
-  it("are desktop-only (never rendered on mobile)", () => {
+  it("the preset is desktop-only (never rendered on mobile)", () => {
     const mobile = settingsForPlatform(ALL, "mobile");
-    expect(mobile.some((e) => e.id === "modelRoutingEnabled")).toBe(false);
     expect(mobile.some((e) => e.id === "modelRoutingPreset")).toBe(false);
   });
 
-  it("the enabled toggle defaults to FALSE (the consent boundary)", () => {
-    // Routing acts on the user's behalf, so it is strictly opt-in.
-    expect(enabled!.control).toBe("toggle");
-    expect(enabled!.configKey).toBe("modelRouting.enabled");
-    expect(enabled!.default).toBe(false);
+  it("the preset renders in the Automatic Manta Routing group", () => {
+    expect(preset!.control).toBe("segmented");
+    expect(preset!.configKey).toBe("modelRouting.preset");
+    expect(preset!.default).toBe("balanced");
+    expect(preset!.group).toBe("Automatic Manta Routing");
   });
 
   it("the preset uses the exact PRESETS values from modelRouter (no drift)", () => {

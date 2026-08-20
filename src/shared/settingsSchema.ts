@@ -178,17 +178,6 @@ export const SETTINGS: SettingEntry[] = [
     group: "Plan usage",
   },
   {
-    id: "modelRoutingEnabled",
-    section: "models",
-    label: "Let Manta pick the model",
-    help: "Chooses a model per task when a session or subagent starts, and when a plan usage limit would otherwise stop the work. Never changes model in the middle of an exchange. Every choice shows why, and can be undone.",
-    control: "toggle",
-    configKey: "modelRouting.enabled",
-    platform: "desktop",
-    default: false,
-    group: "Routing",
-  },
-  {
     id: "modelRoutingPreset",
     section: "models",
     label: "Balance",
@@ -197,7 +186,7 @@ export const SETTINGS: SettingEntry[] = [
     configKey: "modelRouting.preset",
     platform: "desktop",
     default: "balanced",
-    group: "Routing",
+    group: "Automatic Manta Routing",
     options: [
       { value: "economy", label: "Economy" },
       { value: "balanced", label: "Balanced" },

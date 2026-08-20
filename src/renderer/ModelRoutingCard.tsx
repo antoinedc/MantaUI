@@ -10,9 +10,6 @@
 // never hardcoded here, so the card and the router cannot drift. Plan usage is
 // the SAME state the composer's usage dial reads (`store.usage`) — no second
 // fetch, no second percentage bar (the bar IS `UsageWindowRow`, reused).
-//
-// When routing is OFF the card is still rendered (greyed) — showing what
-// *would* happen is the point, and the "Routing is off" chip explains the state.
 
 import { useState } from "react";
 import { AGENT_FLOOR, AGENT_TIER } from "../shared/modelRouter.mjs";
@@ -54,7 +51,6 @@ export function ModelRoutingCard() {
   // lines don't re-render constantly inside Settings.
   const [nowMs] = useState(() => Date.now());
 
-  const enabled = modelRouting?.enabled === true;
   const preset = modelRouting?.preset ?? "balanced";
   const perAgent = modelRouting?.perAgent;
 
@@ -73,10 +69,7 @@ export function ModelRoutingCard() {
 
   let chipClass: string;
   let chipText: string;
-  if (!enabled) {
-    chipClass = CHIP_NEUTRAL;
-    chipText = "Routing is off — you choose the model.";
-  } else if (nearlySpent) {
+  if (nearlySpent) {
     chipClass = CHIP_WARN;
     chipText = `${nearlySpent.provider} ${nearlySpent.label} is nearly spent — new subagents are routing to cheaper models until it resets.`;
   } else {
@@ -87,7 +80,7 @@ export function ModelRoutingCard() {
 
   return (
     <Card header={<span className="text-micro uppercase text-text-faint">Routing</span>}>
-      <div className={enabled ? "" : "opacity-60"}>
+      <div>
         {/* Block A — per-agent pills */}
         <div>
           {AGENT_ROWS.map((row, i) => {

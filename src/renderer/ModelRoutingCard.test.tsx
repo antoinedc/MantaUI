@@ -2,8 +2,9 @@
 //
 // ModelRoutingCard — the Routing card in Settings → Models (BET-1222). Tiers
 // must be read from the router module (never a literal), plan usage comes from
-// the shared store (the same source the composer dial uses), and the card must
-// stay visible — greyed — when routing is off.
+// the shared store (the same source the composer dial uses), and the card shows
+// what routing *would* do — there is no global off-state (BET-1243 removed the
+// toggle; routing is activated per conversation from the model picker).
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mount, type Harness } from "./testHarness";
@@ -35,7 +36,7 @@ describe("ModelRoutingCard", () => {
   let h: Harness | null = null;
 
   beforeEach(() => {
-    useStore.setState({ usage: [], modelRouting: { enabled: true, preset: "balanced" } });
+    useStore.setState({ usage: [], modelRouting: { preset: "balanced" } });
   });
 
   afterEach(() => {
@@ -70,17 +71,17 @@ describe("ModelRoutingCard", () => {
     expect(c.html()).toContain("border-warn bg-warn-bg");
   });
 
-  it("renders the 'Routing is off' chip and keeps the card present when disabled", () => {
-    useStore.setState({ modelRouting: { enabled: false, preset: "balanced" } });
+  it("renders the preset caption chip when no window is near-spent", () => {
+    useStore.setState({ modelRouting: { preset: "balanced" } });
     const c = render();
-    expect(c.text()).toContain("Routing is off — you choose the model.");
-    // Card still present (the whole point) — agent rows still render, greyed.
-    expect(c.text()).toContain("build");
-    expect(c.html()).toContain("opacity-60");
+    // With no global off-state (routing is per-conversation now), the card
+    // always shows the active preset caption and never the greyed-out state.
+    expect(c.text()).toContain("Balanced — cheapest model");
+    expect(c.html()).not.toContain("opacity-60");
   });
 
   it("shows tiers matching AGENT_TIER imported from modelRouter.mjs", () => {
-    useStore.setState({ modelRouting: { enabled: true, preset: "balanced" } });
+    useStore.setState({ modelRouting: { preset: "balanced" } });
     const c = render();
     const text = c.text();
     // Assert against the module import, never a literal — so the card and the
