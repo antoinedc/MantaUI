@@ -4,7 +4,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { aggregate } from "./modelLedger.mjs";
+import { aggregate, aggregateEndpointStats, endpointSummary } from "./modelLedger.mjs";
+import { _resetDbHandle } from "./opencodeDb.mjs";
 
 // Fixture builder. Fill only the fields a test cares about.
 function row(over = {}) {
@@ -152,4 +153,80 @@ test("every array is sorted by cost descending", () => {
   assert.ok(desc(ledger.byAgent, (a) => a.cost));
   assert.ok(desc(ledger.byProject, (p) => p.cost));
   assert.equal(ledger.byModel[0].key, "a/b");
+});
+
+// ---- aggregateEndpointStats (per-endpoint reliability/speed/latency/mix) ----
+
+const readTool = {
+  name: "read",
+  input_schema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+};
+
+test("aggregateEndpointStats produces the per-endpoint shape over fixture rows", () => {
+  const stats = aggregateEndpointStats([
+    // Endpoint A, request 1 — one clean tool call, 200 output tokens in 1s.
+    {
+      providerID: "anthropic", modelID: "claude-sonnet",
+      input: 100, output: 200, cacheRead: 50, cacheWrite: 40,
+      startedMs: 1000, completedMs: 2000,
+      toolCalls: [{ name: "read", arguments: { path: "/a" } }], tools: [readTool],
+    },
+    // Endpoint A, request 2 — two calls, one bogus → the WHOLE request errors.
+    {
+      providerID: "anthropic", modelID: "claude-sonnet",
+      input: 50, output: 300, cacheRead: 0, cacheWrite: 0,
+      startedMs: 1000, completedMs: 2000,
+      toolCalls: [
+        { name: "read", arguments: { path: "/b" } },
+        { name: "bogus", arguments: {} },
+      ],
+      tools: [readTool],
+    },
+    // Endpoint B — a single clean request, distinct model.
+    {
+      providerID: "anthropic", modelID: "claude-opus",
+      input: 10, output: 20, cacheRead: 0, cacheWrite: 0,
+      startedMs: 1000, completedMs: 2000,
+      toolCalls: [{ name: "read", arguments: { path: "/c" } }], tools: [readTool],
+    },
+  ]);
+
+  const sonnet = stats["anthropic/claude-sonnet"];
+  // Two tool-ending requests; the second is errored → requests 2, errored 1.
+  assert.deepEqual(sonnet.reliability, { requests: 2, errored: 1, rate: 0.5 });
+  // mix: raw token-count sums.
+  assert.deepEqual(sonnet.mix, { input: 150, output: 500, cacheRead: 50, cacheWrite: 40 });
+  // Timing reflects two 1s timed turns.
+  assert.equal(typeof sonnet.latency.p50Ms, "number");
+  assert.equal(typeof sonnet.latency.p90Ms, "number");
+  assert.equal(typeof sonnet.speed.p50TokensPerSec, "number");
+  assert.equal(typeof sonnet.speed.p90TokensPerSec, "number");
+
+  const opus = stats["anthropic/claude-opus"];
+  assert.deepEqual(opus.reliability, { requests: 1, errored: 0, rate: 0 });
+
+  // Rows without tool calls do not inflate reliability.
+  const clean = aggregateEndpointStats([
+    { providerID: "p", modelID: "m", input: 0, output: 0, cacheRead: 0, cacheWrite: 0, toolCalls: [], tools: [] },
+    { providerID: "p", modelID: "m", input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  ]);
+  assert.deepEqual(clean["p/m"].reliability, { requests: 0, errored: 0, rate: 0 });
+  assert.equal(clean["p/m"].latency.p50Ms, null); // no timed turns
+});
+
+test("endpointSummary returns { supported:false } with no zeros when the DB is unavailable", async () => {
+  const prev = process.env.MANTA_OPENCODE_DB;
+  process.env.MANTA_OPENCODE_DB = "/nonexistent/opencode.db";
+  _resetDbHandle();
+  try {
+    const res = await endpointSummary();
+    // A `supported:false` card must not look like "perfect reliability" — no
+    // zeros smuggled in, no per-endpoint numbers at all.
+    assert.deepEqual(res, { supported: false });
+    assert.equal("reliability" in res, false);
+  } finally {
+    if (prev === undefined) delete process.env.MANTA_OPENCODE_DB;
+    else process.env.MANTA_OPENCODE_DB = prev;
+    _resetDbHandle();
+  }
 });
