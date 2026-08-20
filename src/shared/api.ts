@@ -99,6 +99,18 @@ type ModelRouteDecision = {
   incumbent: PromptModel | null;
   changed: boolean;
 };
+// BET-1244: the generic, read-only routing decision (`routing:choose`) — the
+// sibling of ModelRouteDecision that carries no `incumbent` but adds
+// `alternatives` (the next-best candidates a surface can offer). `model` stays
+// null on routing-off / no-survivors / failure; `changed` is false whenever no
+// substitution is offered. Never throws: on an internal failure the server
+// returns the incumbent unchanged with reason "routing unavailable".
+type RoutingChooseDecision = {
+  model: PromptModel | null;
+  reason: string;
+  alternatives: PromptModel[];
+  changed: boolean;
+};
 // BET-1249: a provider-agnostic catalogue entry as served by
 // `opencode:model-catalog` (models.dev view). Consumed by the renderer's
 // "Models we couldn't identify" block for identity + typeahead.
@@ -431,6 +443,30 @@ export interface Api {
     incumbent: PromptModel | null,
     agent?: string,
   ): Promise<ModelRouteDecision | null>;
+  // BET-1244: the read-only, side-effect-free routing decision for either
+  // surface ("main" | "sub"), resolved by the SAME decision core the subagent
+  // path uses. No state is written and no prompt is sent. Never throws — on
+  // any internal failure it returns the incumbent unchanged with reason
+  // "routing unavailable", alternatives empty, changed false.
+  routingChoose(input: {
+    sessionId: string;
+    directory: string;
+    agent: string;
+    surface: "main" | "sub";
+    contextTokens: number;
+    needs?: { tools?: boolean; image?: boolean; pdf?: boolean };
+    incumbent: PromptModel | null;
+  }): Promise<RoutingChooseDecision>;
+  // BET-1244: the Accounts "Try again" action — clears the out-of-credit
+  // evidence-only flag for a provider, delegated to server-side provider
+  // health (supported providers re-read their meter; custom providers clear
+  // optimistically with no traffic). `message` is a factual row string and is
+  // NEVER empty — the button reports both outcomes.
+  accountsRetry(providerID: string): Promise<{
+    ok: boolean;
+    state: string;
+    message: string;
+  }>;
   // BET-1249: the provider-agnostic model catalogue for the "Models we
   // couldn't identify" block — resolve opaque endpoint ids and typeahead over
   // every known model. `supported:false` when the box has no catalogue yet

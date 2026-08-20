@@ -33,10 +33,11 @@ import { resolveWorkspace } from "./peers.mjs";
 import * as providers from "./providers.mjs";
 import * as launchers from "./launchers.mjs";
 import * as subscriptionProviders from "./subscriptionProviders.mjs";
-import { chooseMainModel } from "./delegate.mjs";
+import { chooseMainModel, toDeliverModel } from "./delegate.mjs";
 import { buildRoutingServices } from "./routingServices.mjs";
 import { restartOpencode, runServerSelfUpdate } from "./opencodeAdmin.mjs";
-import { pollClaudeLogin, claudeCliStatus } from "./opencode.mjs";
+import { pollClaudeLogin, claudeCliStatus, listRoutableModels } from "./opencode.mjs";
+import { chooseModel } from "../shared/modelRouter.mjs";
 import { backupClaudeCredentials, CREDENTIALS_PATH } from "./claudeAuth.mjs";
 import { addApnsToken } from "./push.mjs";
 import { getRegistry as pluginsGetRegistry } from "./plugins.mjs";
@@ -332,6 +333,14 @@ export function buildHandlers({
   routingCatalogIndex = null,
   routingProviderHealthState = () => null,
   routingEndpointSummary = () => null,
+  // BET-1244: the filtered catalogue for routing:choose — listRoutableModels
+  // (S1c) is the ONE place routing consent is computed; routing:choose gets the
+  // filtered catalogue from it, never a second filter. Injectable for tests.
+  routingListRoutableModels = listRoutableModels,
+  // BET-1244: the provider-health engine (createProviderHealth) exposing
+  // `retry` for the Accounts "Try again" action. Null when not wired → the
+  // accounts:retry channel answers a non-empty failure message, never a throw.
+  providerHealth = null,
 }) {
   // The sole resolver for project cwd — no longer mirrored to a desktop-main
   // copy (the src/main/index.ts duplicate was retired in the HTTP-only
@@ -851,6 +860,136 @@ export function buildHandlers({
         services = null;
       }
       return chooseMainModel({ incumbent, catalog, policy, quota, agent, nowMs: Date.now(), services });
+    },
+
+    // BET-1244: the read-only, side-effect-free routing decision — the generic
+    // sibling of routing:main (which decides the main conversation's model at
+    // session start). Unlike routing:main it takes the SURFACE explicitly
+    // ("main" | "sub"), so the same single decision core (chooseModel — the one
+    // the subagent path calls) can answer for either, and returns the decision
+    // VERBATIM: { model, reason, alternatives, changed }. No state is written,
+    // no prompt is sent. It never throws — on any internal failure it returns
+    // the incumbent unchanged with reason "routing unavailable", so a routing
+    // failure can never fail a turn (the same guarantee chooseSubagentModel
+    // makes).
+    "routing:choose": async (input) => {
+      const incumbent = input?.incumbent ?? null;
+      const agent = input?.agent ?? "general";
+      const surface = input?.surface === "sub" ? "sub" : "main";
+      // The entire gather + decide is one guarded unit: a failing catalogue,
+      // snapshot reader, health tracker or a throwing router all degrade to the
+      // incumbent-unchanged fallback below, never a throw to the caller.
+      try {
+        let cfg = {};
+        try {
+          cfg = (await local.configGet()) ?? {};
+        } catch {
+          cfg = {};
+        }
+        const policy = cfg?.modelRouting ?? {};
+        let quota = [];
+        try {
+          quota = usageListSnapshots();
+          if (!Array.isArray(quota)) quota = [];
+        } catch {
+          quota = [];
+        }
+        // BET-1244/S1c: the FILTERED catalogue. listRoutableModels is the one
+        // place routing consent is computed — do not build a second filter here
+        // (use routingListRoutableModels, never raw listModels / oc.listModels).
+        let catalog = [];
+        try {
+          catalog = await routingListRoutableModels(surface, cfg);
+          if (!Array.isArray(catalog)) catalog = [];
+        } catch {
+          catalog = [];
+        }
+        let services = null;
+        try {
+          services = await buildRoutingServices(cfg, {
+            catalogIndex: routingCatalogIndex,
+            endpoints: catalog,
+            snapshots: quota,
+            providerHealthState: routingProviderHealthState,
+            endpointSummary: routingEndpointSummary,
+          });
+        } catch {
+          services = null;
+        }
+        // Normalise the incumbent into catalog shape ({providerID, id}) so the
+        // `changed` comparison inside chooseModel treats a requested model and
+        // a catalog entry of the same model as equal (mirrors chooseMainModel).
+        const catalogIncumbent = incumbent
+          ? { providerID: incumbent.providerID, id: incumbent.modelID ?? incumbent.id }
+          : null;
+        const decision = chooseModel({
+          intent: {
+            kind: surface === "sub" ? "subagent" : "main",
+            agent,
+            needs: input?.needs ?? {},
+            contextTokens: typeof input?.contextTokens === "number" ? input.contextTokens : 0,
+            incumbent: catalogIncumbent,
+          },
+          catalog,
+          telemetry: {},
+          quota,
+          policy,
+          nowMs: Date.now(),
+          services,
+        });
+        // On the off-path / no-survivors path chooseModel returns the very
+        // catalogIncumbent reference it was handed; map that back to the
+        // original structured incumbent so the decision stays byte-identical.
+        // A real winner / alternative is normalised into {providerID, modelID}.
+        return {
+          model:
+            decision?.model === catalogIncumbent
+              ? incumbent
+              : toDeliverModel(decision?.model ?? incumbent),
+          reason: decision?.reason ?? "",
+          alternatives: Array.isArray(decision?.alternatives)
+            ? decision.alternatives.map(toDeliverModel).filter(Boolean)
+            : [],
+          changed: decision?.changed === true,
+        };
+      } catch (e) {
+        console.warn("[router] routing:choose failed, using incumbent:", e?.message ?? e);
+        return { model: incumbent, reason: "routing unavailable", alternatives: [], changed: false };
+      }
+    },
+
+    // BET-1244: the Accounts "Try again" action. Delegates straight to
+    // providerHealth.retry (S4c), which already encodes the supported-vs-custom
+    // behaviour — supported read the meter and clear only on funds; custom clear
+    // optimistically with no traffic. `message` is a short factual sentence the
+    // row can display and is NEVER empty: the button reports both outcomes
+    // (AGENTS.md: it does the thing and says so / fails and says why).
+    "accounts:retry": async (input) => {
+      const providerID = typeof input?.providerID === "string" ? input.providerID.trim() : "";
+      if (!providerID) {
+        return { ok: false, state: "unknown", message: "No provider id given to retry." };
+      }
+      if (!providerHealth || typeof providerHealth.retry !== "function") {
+        return {
+          ok: false,
+          state: "unknown",
+          message: "Provider health isn't wired on this box — can't retry.",
+        };
+      }
+      try {
+        const r = await providerHealth.retry(providerID);
+        const cleared = r?.cleared === true;
+        const state = typeof r?.state === "string" && r.state ? r.state : "unknown";
+        return {
+          ok: cleared,
+          state,
+          message: cleared
+            ? `${providerID} is back in the pool (out-of-credit flag cleared).`
+            : `${providerID} still reports out of credit — check the account.`,
+        };
+      } catch (e) {
+        return { ok: false, state: "error", message: `Retry failed: ${e?.message ?? "unknown error"}` };
+      }
     },
 
     // BET-1249: the provider-agnostic model catalogue for the renderer's

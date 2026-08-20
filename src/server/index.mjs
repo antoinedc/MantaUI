@@ -863,6 +863,9 @@ rpcHandlers = buildHandlers({
   routingCatalogIndex,
   routingProviderHealthState: (providerID) => providerHealth.state(providerID),
   routingEndpointSummary,
+  // BET-1244: the provider-health engine itself, for the Accounts "Try again"
+  // action (accounts:retry delegates to providerHealth.retry).
+  providerHealth,
   // BET-790: renderer read channel for a session's progress record (the
   // server store from src/server/progress.mjs). The write side is the AI's
   // progress_report tool → POST /api/progress.

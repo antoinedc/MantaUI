@@ -1232,3 +1232,115 @@ test("opencode:provider-auth start does NOT fire the detached callback for claud
   await handlers["opencode:provider-auth"]({ action: "start", id: "kimi-for-coding" });
   assert.equal(called, 0, "api-key (kimi) must NOT fire the callback");
 });
+
+// ---- BET-1244: routing:choose / accounts:retry channels ----
+
+// routing:choose is read-only and never throws. A policy with no routing
+// directive (no preset / no perAgent) resolves to routing being unusable, and
+// the decision returns the incumbent unchanged — never a hidden switch and
+// never a throw.
+test("routing:choose returns the incumbent unchanged when routing is not activated", async () => {
+  const { deps } = makeDeps([]);
+  // local.configGet returns { projects } only — no modelRouting → routing off.
+  deps.routingListRoutableModels = async (surface, cfg) => [
+    { providerID: "anthropic", id: "claude-sonnet-4", status: "active" },
+  ];
+  const handlers = buildHandlers(deps);
+  const incumbent = { providerID: "anthropic", modelID: "claude-opus-4" };
+  const out = await handlers["routing:choose"]({
+    sessionId: "ses_1",
+    directory: "/w",
+    agent: "build",
+    surface: "main",
+    contextTokens: 0,
+    needs: {},
+    incumbent,
+  });
+  assert.deepEqual(out.model, incumbent, "off-path keeps the incumbent");
+  assert.equal(out.changed, false);
+  assert.deepEqual(out.alternatives, []);
+  assert.equal(out.reason, "routing not activated for this conversation");
+});
+
+// routing:choose must NEVER throw — even when every dependency rejects. It
+// degrades to the incumbent unchanged rather than propagating the failure.
+test("routing:choose never throws when its dependencies reject", async () => {
+  const { deps } = makeDeps([]);
+  deps.local.configGet = async () => { throw new Error("config down"); };
+  deps.routingListRoutableModels = async () => { throw new Error("catalogue down"); };
+  const handlers = buildHandlers(deps);
+  const incumbent = { providerID: "anthropic", modelID: "claude-opus-4" };
+  // Must RESOLVE (not reject) with the incumbent unchanged, never a throw.
+  const out = await handlers["routing:choose"]({
+    sessionId: "ses_1",
+    directory: "/w",
+    agent: "build",
+    surface: "main",
+    contextTokens: 0,
+    needs: {},
+    incumbent,
+  });
+  assert.deepEqual(out.model, incumbent);
+  assert.equal(out.changed, false);
+  assert.deepEqual(out.alternatives, []);
+  assert.ok(typeof out.reason === "string" && out.reason.length > 0);
+});
+
+// routing:choose must be handed the FILTERED catalogue — listRoutableModels
+// with the right surface — never a second filter and never raw listModels.
+test("routing:choose is handed the filtered catalogue for the requested surface (not listModels)", async () => {
+  const { deps } = makeDeps([]);
+  // Config that ACTIVATES routing so the decision core actually runs against
+  // the returned catalogue.
+  deps.local.configGet = async () => ({ projects: [], modelRouting: { preset: "economy" } });
+  let surfaceSeen = null;
+  let calls = 0;
+  deps.routingListRoutableModels = async (surface) => {
+    surfaceSeen = surface;
+    calls++;
+    return [
+      { providerID: "anthropic", id: "claude-opus-4", status: "active" },
+      { providerID: "anthropic", id: "claude-sonnet-4", status: "active" },
+      { providerID: "anthropic", id: "claude-haiku-4", status: "active" },
+    ];
+  };
+  const handlers = buildHandlers(deps);
+  const out = await handlers["routing:choose"]({
+    sessionId: "ses_1",
+    directory: "/w",
+    agent: "build",
+    surface: "sub",
+    contextTokens: 0,
+    needs: {},
+    incumbent: { providerID: "anthropic", modelID: "claude-opus-4" },
+  });
+  assert.equal(calls, 1);
+  assert.equal(surfaceSeen, "sub", "listRoutableModels must be called with the requested surface");
+  // A real decision was produced from the injected (filtered) catalogue — a
+  // selected model normalised into {providerID, modelID}.
+  assert.equal(out.model?.providerID, "anthropic");
+  assert.ok(typeof out.model?.modelID === "string" && out.model.modelID.length > 0);
+  assert.equal("id" in (out.model ?? {}), false, "the routed model carries modelID, not the catalog's id");
+  assert.deepEqual(out.alternatives, out.alternatives.filter((a) => a && a.modelID), "alternatives are well-formed {providerID, modelID}");
+});
+
+// accounts:retry always reports an outcome — a non-empty message in BOTH the
+// cleared and not-cleared cases (AGENTS.md: it does the thing and says so,
+// or fails and says why; a swallowed bare return is a dead button).
+test("accounts:retry returns a non-empty message in both cleared and not-cleared cases", async () => {
+  const { deps } = makeDeps([]);
+  deps.providerHealth = { retry: async () => ({ cleared: true, state: "working" }) };
+  const handlers = buildHandlers(deps);
+
+  const cleared = await handlers["accounts:retry"]({ providerID: "anthropic" });
+  assert.equal(cleared.ok, true);
+  assert.equal(cleared.state, "working");
+  assert.ok(typeof cleared.message === "string" && cleared.message.length > 0, "cleared case needs a message");
+
+  deps.providerHealth = { retry: async () => ({ cleared: false, state: "out_of_credit" }) };
+  const handlers2 = buildHandlers(deps);
+  const notCleared = await handlers2["accounts:retry"]({ providerID: "anthropic" });
+  assert.equal(notCleared.ok, false);
+  assert.equal(notCleared.state, "out_of_credit");
+  assert.ok(typeof notCleared.message === "string" && notCleared.message.length > 0, "not-cleared case needs a message");
+});
