@@ -39,6 +39,8 @@ import {
   shouldDropEventForSessionFilter,
   summarizeChildSession,
   humanizeProviderError,
+  providerErrorStatus,
+  enrichProviderError,
 } from "./streamInterpretation.mjs";
 
 
@@ -2153,5 +2155,80 @@ describe("humanizeProviderError", () => {
       const once = humanizeProviderError(raw);
       expect(humanizeProviderError(once)).toBe(once);
     }
+  });
+
+  // BET-1230 pin: the new status reader must NOT move the banner copy. These are
+  // the same reason-phrase messages providerErrorStatus maps; the sentence the
+  // renderer shows is unchanged from before providerErrorStatus existed.
+  it("is unchanged for status-carrying messages (BET-1230 pin)", () => {
+    expect(humanizeProviderError('Payment Required: {"detail":"Balance $0"}')).toBe("Balance $0");
+    expect(humanizeProviderError('Too Many Requests: {"message":"slow down"}')).toBe("slow down");
+    expect(humanizeProviderError('Unauthorized: {"error":{"message":"bad key"}}')).toBe("bad key");
+  });
+});
+
+describe("providerErrorStatus", () => {
+  it("maps the leading HTTP reason phrase to its code", () => {
+    expect(providerErrorStatus('Payment Required: {"detail":"Quota exceeded"}')).toBe(402);
+    expect(providerErrorStatus('Too Many Requests: {"message":"slow down"}')).toBe(429);
+    expect(providerErrorStatus('Unauthorized: {"error":{"message":"bad key"}}')).toBe(401);
+    expect(providerErrorStatus('Bad Request: {"message":"nope"}}')).toBe(400);
+    expect(providerErrorStatus('Service Unavailable: {"detail":"down"}}')).toBe(503);
+    expect(providerErrorStatus('Internal Server Error: {"detail":"boom"}}')).toBe(500);
+  });
+
+  it("is case-insensitive on the phrase", () => {
+    expect(providerErrorStatus("payment required: {}")).toBe(402);
+    expect(providerErrorStatus("TOO MANY REQUESTS: {}")).toBe(429);
+  });
+
+  it("returns null when there is no leading reason phrase", () => {
+    expect(providerErrorStatus("some provider was unhappy")).toBe(null);
+  });
+
+  it("returns null for an unknown phrase — never a guess", () => {
+    expect(providerErrorStatus("Coffee Machine is Angry: {}")).toBe(null);
+  });
+
+  it("returns null for non-string or empty input", () => {
+    expect(providerErrorStatus(null)).toBe(null);
+    expect(providerErrorStatus(undefined)).toBe(null);
+    expect(providerErrorStatus("")).toBe(null);
+    // No ": " separator.
+    expect(providerErrorStatus("Payment Required")).toBe(null);
+  });
+});
+
+describe("enrichProviderError", () => {
+  it("attaches httpStatus parsed from the message, preserving name + data", () => {
+    const err = {
+      name: "ApiError",
+      data: { message: 'Payment Required: {"detail":"Balance $0"}' },
+    };
+    const out = enrichProviderError(err);
+    expect(out.httpStatus).toBe(402);
+    expect(out.name).toBe("ApiError");
+    expect(out.data.message).toBe('Payment Required: {"detail":"Balance $0"}');
+    expect(out.retryAfterMs).toBeUndefined();
+  });
+
+  it("attaches retryAfterMs when supplied", () => {
+    const err = { name: "ApiError", data: { message: "Too Many Requests: {}" } };
+    const out = enrichProviderError(err, 30_000);
+    expect(out.httpStatus).toBe(429);
+    expect(out.retryAfterMs).toBe(30_000);
+  });
+
+  it("returns the same reference when nothing is resolvable", () => {
+    const err = { name: "ApiError", data: { message: "some provider was unhappy" } };
+    expect(enrichProviderError(err)).toBe(err);
+  });
+
+  it("is additive — leaves unknown fields intact", () => {
+    const err = { name: "ApiError", extra: 1, data: { message: "Bad Request: {}" } };
+    const out = enrichProviderError(err);
+    expect(out.httpStatus).toBe(400);
+    expect(out.extra).toBe(1);
+    expect(out.data.message).toBe("Bad Request: {}");
   });
 });

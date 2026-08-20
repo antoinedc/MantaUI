@@ -45,6 +45,7 @@ import { buildHandlers, handleRpcRequest } from "./rpc.mjs";
 import { startStatusPoller } from "./status.mjs";
 import { createSyncState } from "./syncState.mjs";
 import { createStreamInterpreter } from "./streamInterp.mjs";
+import { enrichProviderError } from "../shared/streamInterpretation.mjs";
 import { startOutboxPoller, pushArtifact, createArtifactSweep } from "./outbox.mjs";
 import { startUploadCleanupPoller } from "./uploads.mjs";
 import {
@@ -1100,6 +1101,17 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
   const forwardedUpdate = forwardOpencodeUpdate(evt);
   if (forwardedUpdate) {
     bus.publish(forwardedUpdate);
+  }
+  // Preserve the provider HTTP status on a failed turn (BET-1230). The raw
+  // `session.error` message is "<reason phrase>: <body>" — parse the phrase
+  // back to a status so downstream (provider health, Stage 4) can tell 402
+  // (out of credit) from 429 (rate limited) from 5xx (broken) without
+  // substring-matching error text. Purely additive: `error` is replaced by an
+  // enriched copy whose `name` / `data.message` are byte-identical, so every
+  // existing consumer (renderer banner, push classification, the usage-stop
+  // enroller) keeps working unchanged.
+  if (evt && evt.type === "session.error" && evt.properties?.error) {
+    evt.properties.error = enrichProviderError(evt.properties.error);
   }
   // Box-side stream interpretation (BET-551 / §17): derive interpreted events
   // from the raw opencode stream and publish them on the SAME bus (no second

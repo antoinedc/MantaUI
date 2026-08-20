@@ -15,6 +15,7 @@ import http from "node:http";
 import { expandTilde, patchPath } from "../shared/paths.mjs";
 import { readModalities } from "../shared/modelGuide.mjs";
 import { startPoller } from "./startPoller.mjs";
+import { parseRetryAfterMs } from "./usageAdapters/httpError.mjs";
 import {
   CREDENTIALS_PATH,
   parseCredentials,
@@ -659,7 +660,15 @@ export async function sendPrompt({ sessionId, text, model, agent, attachments, m
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    throw new Error(`opencode sendPrompt ${res.status}: ${await res.text()}`);
+    const err = new Error(`opencode sendPrompt ${res.status}: ${await res.text()}`);
+    // Mirror the usage-meter HTTP error shape (usageAdapters/httpError.mjs):
+    // carry the real status + Retry-After so the provider-refusal path can
+    // tell 402 (out of credit) from 429 (rate limited) from 5xx (broken)
+    // without string-matching the body (BET-1230).
+    err.status = res.status;
+    const retryAfterMs = parseRetryAfterMs(res.headers?.get?.("retry-after"));
+    if (retryAfterMs !== undefined) err.retryAfterMs = retryAfterMs;
+    throw err;
   }
 }
 

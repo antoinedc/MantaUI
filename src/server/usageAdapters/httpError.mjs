@@ -8,6 +8,23 @@
 // regardless of status — only usage.mjs's 429 branch reads it.
 
 /**
+ * Parse a `Retry-After` header value (seconds) into milliseconds, or
+ * undefined when there's no usable value. `>= 0`, NOT `> 0`: Anthropic's
+ * usage endpoint answers a 429 with a literal `retry-after: 0`, and treating
+ * that as "no header" is what sent the poller into its long default backoff
+ * and blanked the dial for 15 minutes at a time. A falsy raw header (absent
+ * or "") stays undefined. Shared so the model-turn path (BET-1230) parses it
+ * the same way the usage meter does.
+ * @param {string|undefined|null} raw
+ * @returns {number|undefined}
+ */
+export function parseRetryAfterMs(raw) {
+  const secs = raw ? Number(raw) : NaN;
+  if (Number.isFinite(secs) && secs >= 0) return secs * 1000;
+  return undefined;
+}
+
+/**
  * @param {{status:number, headers?:{get?:(name:string)=>string|null|undefined}}} res
  * @param {string} label  short adapter-provided context for the message, e.g. "claude usage"
  * @returns {Error & {status:number, retryAfterMs?:number}}
@@ -17,12 +34,8 @@ export function httpError(res, label) {
   err.status = res.status;
   // Parsed regardless of status: only usage.mjs's 429 branch reads
   // `retryAfterMs`, so a status guard here would gate a field nobody else
-  // touches. `>= 0`, NOT `> 0`: Anthropic's usage endpoint answers a 429 with
-  // a literal `retry-after: 0`, and treating that as "no header" is what sent
-  // the poller into its long default backoff and blanked the dial for 15
-  // minutes at a time. A falsy raw header (absent or "") stays undefined.
-  const raw = res.headers?.get?.("retry-after");
-  const secs = raw ? Number(raw) : NaN;
-  if (Number.isFinite(secs) && secs >= 0) err.retryAfterMs = secs * 1000;
+  // touches.
+  const retryAfterMs = parseRetryAfterMs(res.headers?.get?.("retry-after"));
+  if (retryAfterMs !== undefined) err.retryAfterMs = retryAfterMs;
   return err;
 }

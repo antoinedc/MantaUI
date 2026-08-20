@@ -154,6 +154,85 @@ function extractErrorSentence(parsed) {
   return null;
 }
 
+// ===== Provider HTTP status (BET-1230) =====
+// The provider's HTTP status does not survive on the model-turn path: a
+// refusal arrives as a `session.error` whose message is
+// "<HTTP reason phrase>: <raw provider body>", e.g.
+//   'Payment Required: {"detail":{"message":"Quota exceeded…"}}'.
+// `humanizeProviderError` (above) discards the leading phrase in favour of
+// the inner sentence; these helpers are a SECOND, additive reader of the
+// same string that maps the phrase back to a status code so downstream
+// (provider health, Stage 4) can distinguish 402 (out of credit) from 429
+// (rate limited) from 5xx (broken) without substring-matching error text.
+
+// Closed table of HTTP reason phrases → status codes. CLOSED by design —
+// only phrases listed here map; anything else yields null, so a wording that
+// fails to match fails VISIBLY (null) instead of being silently misread.
+// Greppable: to add a phrase, edit the table, not a regex.
+// Keys are lowercase; opencode reports the provider's raw reason phrase.
+const REASON_PHRASE_STATUS = new Map([
+  // 4xx — client / auth / capability refusals
+  ["bad request", 400],
+  ["unauthorized", 401],
+  ["payment required", 402],
+  ["forbidden", 403],
+  ["not found", 404],
+  ["method not allowed", 405],
+  ["not acceptable", 406],
+  ["request timeout", 408],
+  ["conflict", 409],
+  ["gone", 410],
+  ["unprocessable entity", 422],
+  ["too many requests", 429],
+  // 5xx — provider side / upstream broken
+  ["internal server error", 500],
+  ["not implemented", 501],
+  ["bad gateway", 502],
+  ["service unavailable", 503],
+  ["gateway timeout", 504],
+  ["http version not supported", 505],
+]);
+
+/**
+ * Map a provider error message's leading HTTP reason phrase to a status code,
+ * or null when the leading segment isn't a known phrase. Returns null for
+ * anything that isn't a non-empty `<phrase>: `-prefixed string. Does not
+ * mutate or affect `humanizeProviderError` — it is an additive reader of the
+ * same string. Pure, no I/O, no throw.
+ * @param {string} message
+ * @returns {number | null}
+ */
+export function providerErrorStatus(message) {
+  if (typeof message !== "string") return null;
+  const sep = message.indexOf(": ");
+  if (sep <= 0) return null;
+  return REASON_PHRASE_STATUS.get(message.slice(0, sep).toLowerCase()) ?? null;
+}
+
+/**
+ * Enrich a `session.error` event's `properties.error` object with the
+ * provider's `httpStatus` (parsed from the message's leading reason phrase)
+ * and, when supplied, `retryAfterMs`. Purely additive: `name` and
+ * `data.message` are copied through untouched, so every existing consumer
+ * (renderer banner, push classification, the usage-stop enroller) keeps
+ * working unchanged. Returns the SAME reference when nothing is resolvable.
+ *
+ * @param {object} error  `evt.properties.error` of a `session.error` event
+ * @param {number} [retryAfterMs]  ms from a Retry-After header, when in hand
+ * @returns {object}
+ */
+export function enrichProviderError(error, retryAfterMs) {
+  const message =
+    typeof error?.data?.message === "string" ? error.data.message : "";
+  const httpStatus = providerErrorStatus(message);
+  if (httpStatus == null && retryAfterMs == null) return error;
+  return {
+    ...error,
+    ...(httpStatus != null ? { httpStatus } : {}),
+    ...(retryAfterMs != null ? { retryAfterMs } : {}),
+  };
+}
+
 // ===== Streamed-text flush boundaries =====
 //
 // opencode streams text/reasoning content via `message.part.delta` events
