@@ -18,7 +18,9 @@ import {
   writeSavedMode,
   readSavedModel,
   writeSavedModel,
-  copySavedModel,
+  readSavedChoice,
+  writeSavedChoice,
+  carrySavedChoice,
   resolveLauncherFlags,
   readPromptHistory,
   appendPromptHistory,
@@ -299,21 +301,80 @@ describe("readSavedModel / writeSavedModel", () => {
   });
 });
 
-describe("copySavedModel /clear carry-forward", () => {
+describe("readSavedChoice / writeSavedChoice (three-state, BET-1245)", () => {
   beforeEach(() => {
     localStorage.clear();
   });
   const sel = { providerID: "anthropic", modelID: "claude-sonnet-4-6" };
 
-  it("copies the source session's model to the destination session id", () => {
-    writeSavedModel("sess-1", sel);
-    copySavedModel("sess-1", "sess-2");
-    expect(readSavedModel("sess-2")).toEqual(sel);
+  it("round-trips the auto state", () => {
+    writeSavedChoice("sess-1", { kind: "auto" });
+    expect(readSavedChoice("sess-1")).toEqual({ kind: "auto" });
   });
 
-  it("is a no-op when the source has no stored model (destination stays null)", () => {
-    copySavedModel("sess-1", "sess-2");
-    expect(readSavedModel("sess-2")).toBeNull();
+  it("round-trips an explicit model", () => {
+    writeSavedChoice("sess-1", { kind: "model", model: sel });
+    expect(readSavedChoice("sess-1")).toEqual({ kind: "model", model: sel });
+  });
+
+  it("round-trips the server-default state (key absent)", () => {
+    writeSavedChoice("sess-1", { kind: "server-default" });
+    expect(readSavedChoice("sess-1")).toEqual({ kind: "server-default" });
+    expect(localStorage.getItem("manta:chat:sess-1:model")).toBeNull();
+  });
+
+  it("an existing stored ModelSelection still reads as { kind: 'model' }", () => {
+    localStorage.setItem("manta:chat:sess-1:model", JSON.stringify(sel));
+    expect(readSavedChoice("sess-1")).toEqual({ kind: "model", model: sel });
+  });
+
+  it("an absent key reads server-default", () => {
+    expect(readSavedChoice("sess-1")).toEqual({ kind: "server-default" });
+  });
+
+  it("the bare string 'auto' reads as auto", () => {
+    localStorage.setItem("manta:chat:sess-1:model", "auto");
+    expect(readSavedChoice("sess-1")).toEqual({ kind: "auto" });
+  });
+
+  it("malformed JSON reads server-default and does not throw", () => {
+    localStorage.setItem("manta:chat:sess-1:model", "{not json");
+    expect(() => readSavedChoice("sess-1")).not.toThrow();
+    expect(readSavedChoice("sess-1")).toEqual({ kind: "server-default" });
+  });
+
+  it("writes auto as the bare string, not a JSON object", () => {
+    writeSavedChoice("sess-1", { kind: "auto" });
+    expect(localStorage.getItem("manta:chat:sess-1:model")).toBe("auto");
+  });
+
+  it("a session's choice is isolated from another session id", () => {
+    writeSavedChoice("sess-1", { kind: "auto" });
+    expect(readSavedChoice("sess-2")).toEqual({ kind: "server-default" });
+  });
+});
+
+describe("carrySavedChoice /clear carry-forward", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+  const sel = { providerID: "anthropic", modelID: "claude-sonnet-4-6" };
+
+  it("carries an explicit model to the destination session id", () => {
+    writeSavedChoice("sess-1", { kind: "model", model: sel });
+    carrySavedChoice("sess-1", "sess-2");
+    expect(readSavedChoice("sess-2")).toEqual({ kind: "model", model: sel });
+  });
+
+  it("carries the auto state to the destination session id", () => {
+    writeSavedChoice("sess-1", { kind: "auto" });
+    carrySavedChoice("sess-1", "sess-2");
+    expect(readSavedChoice("sess-2")).toEqual({ kind: "auto" });
+  });
+
+  it("is a no-op when the source has no stored choice (destination stays default)", () => {
+    carrySavedChoice("sess-1", "sess-2");
+    expect(readSavedChoice("sess-2")).toEqual({ kind: "server-default" });
   });
 });
 

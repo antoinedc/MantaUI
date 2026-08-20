@@ -69,7 +69,7 @@ import { isPlanAgent, planPageUrl } from "../shared/planMode.mjs";
 import { serverBase } from "./api/httpApi";
 import {
   appendPromptHistory,
-  copySavedModel,
+  carrySavedChoice,
   guessMime,
   mimeToInputMode,
   modelInputModes,
@@ -1636,10 +1636,10 @@ export function ChatPanel({
         // auto-rename first-name path and stamp a workspace-prefixed name (BET-1100).
         title: "",
       });
-      // /clear carries the session's model forward so the user doesn't re-pick
-      // after every clear; plan mode state is carried on top.
+      // /clear carries the session's model choice forward so the user doesn't
+      // re-pick after every clear (including Auto); plan mode state on top.
       if (cleared?.newSessionId) {
-        copySavedModel(sessionId, cleared.newSessionId);
+        carrySavedChoice(sessionId, cleared.newSessionId);
         if (planOn) {
           writePlanSaved(cleared.newSessionId, true);
         }
