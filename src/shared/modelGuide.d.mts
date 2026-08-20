@@ -8,6 +8,8 @@ export interface ModelInfo {
 
 export function tierRank(tier: string | undefined): number;
 
+export const FAMILY_TIERS: Record<string, ModelTier>;
+
 export function describeModel(
   providerID: string,
   modelID: string

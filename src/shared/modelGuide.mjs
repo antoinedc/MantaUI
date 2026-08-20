@@ -206,6 +206,15 @@ const CATALOG = [
   },
 ];
 
+// Family → tier, derived from CATALOG so it cannot drift. modelQuality.mjs
+// seeds its family→score table from this so already-covered families keep
+// their current tier when quality becomes percentile-based. Exposed (rather
+// than reading CATALOG directly) so the association survives the eventual
+// removal of the `tier` field from CATALOG entries.
+export const FAMILY_TIERS = Object.fromEntries(
+  CATALOG.map((e) => [e.key, e.tier]),
+);
+
 function matchFamily(modelID) {
   if (!modelID || typeof modelID !== "string") return null;
   const normalized = modelID.toLowerCase();
