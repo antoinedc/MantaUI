@@ -157,9 +157,13 @@ test("usageWindowLabel: derives m/h/d from the window length in seconds", () => 
 // ADAPTERS registry
 // ----------------------------------------------------------------------------
 
-test("ADAPTERS registers exactly the three built-in providers", () => {
+test("ADAPTERS registers the three code adapters plus each shipped descriptor reader", () => {
   const ids = ADAPTERS.map((a) => a.id).sort();
-  assert.deepEqual(ids, ["claude", "codex", "kimi"]);
+  // BET-1239: the descriptor-backed readers load from ./accountDescriptors/ and
+  // land in the same registry as the code adapters. The three adapters are the
+  // fixed base; the shipped descriptor set is the current worked example
+  // ("openrouter") — adding another descriptor later widens this list.
+  assert.deepEqual(ids, ["claude", "codex", "kimi", "openrouter"]);
   for (const a of ADAPTERS) {
     assert.equal(typeof a.detect, "function");
     assert.equal(typeof a.fetch, "function");
