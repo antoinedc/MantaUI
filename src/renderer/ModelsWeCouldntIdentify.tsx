@@ -53,7 +53,6 @@ export type DeclaredModel = {
   catalogId?: string;
   price?: { input: number; output: number } | "free";
   caches?: false | { read?: boolean; write?: boolean };
-  tierOverride?: "fast" | "balanced" | "deep";
 };
 
 const modelKey = (providerID: string, id: string) => `${providerID}/${id}`;

@@ -189,8 +189,8 @@ describe("endpointEligibility (multi-model union — reviewer Question)", () => 
 
   it("an endpoint whose every model is declared is fully described", () => {
     const declared = {
-      "voska/alpha": { catalogId: "a", price: { input: 1, output: 2 }, caches: false, tierOverride: "balanced" },
-      "voska/beta": { catalogId: "b", price: { input: 1, output: 2 }, caches: false, tierOverride: "balanced" },
+      "voska/alpha": { catalogId: "a", price: { input: 1, output: 2 }, caches: false },
+      "voska/beta": { catalogId: "b", price: { input: 1, output: 2 }, caches: false },
     };
     const { missing } = endpointEligibility(ep(["alpha", "beta"]), declared, null);
     expect(missing).toEqual([]);

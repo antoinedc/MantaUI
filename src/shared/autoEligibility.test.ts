@@ -14,7 +14,6 @@ function complete(over: Partial<AutoEligibilityInput> = {}): AutoEligibilityInpu
       catalogId: "some-catalog-model",
       price: { input: 1, output: 3 },
       caches: { read: true, write: true },
-      tierOverride: "balanced",
     },
     ...over,
   };
@@ -67,26 +66,14 @@ describe("autoEligibility", () => {
     expect(res.missing).toEqual([]);
   });
 
-  it("quality.known === false and no tierOverride → QUALITY missing", () => {
-    const { tierOverride, ...declaredNoTier } = complete().declared!;
+  it("quality.known === false → QUALITY missing", () => {
     const res = autoEligibility(
       complete({
         quality: { known: false, score: undefined },
-        declared: declaredNoTier,
       }),
     );
     expect(res.eligible).toBe(false);
     expect(res.missing).toContain(MISSING.QUALITY);
-  });
-
-  it("quality.known === false, tierOverride present → QUALITY satisfied", () => {
-    const res = autoEligibility(
-      complete({
-        quality: { known: false, score: undefined },
-        declared: { tierOverride: "fast" },
-      }),
-    );
-    expect(res.missing).not.toContain(MISSING.QUALITY);
   });
 
   it("declared identity (catalogId) satisfies IDENTITY even when identity.known is false", () => {

@@ -54,11 +54,12 @@ export function autoEligibility(input) {
   const hasDeclaredCaches = declared?.caches !== undefined;
   if (!hasCacheRates && !hasDeclaredCaches) missing.push(MISSING.CACHING);
 
-  // QUALITY — can we place it in the field to honour a tier floor? Missing
-  // when quality is known-false; an explicit tierOverride satisfies it.
+  // QUALITY — can we place it in the field to honour a tier floor? Missing when
+  // quality is known-false. A declared catalogId supplies quality through the
+  // catalogue instead (the better mechanism — the field it replaced never had a
+  // producer or a working consumer, BET-1268).
   const qualityKnown = quality?.known !== false;
-  const hasTierOverride = Boolean(declared?.tierOverride);
-  if (!qualityKnown && !hasTierOverride) missing.push(MISSING.QUALITY);
+  if (!qualityKnown) missing.push(MISSING.QUALITY);
 
   return { eligible: missing.length === 0, missing };
 }

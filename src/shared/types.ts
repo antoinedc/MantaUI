@@ -301,7 +301,6 @@ export type AppConfig = {
         catalogId?: string;
         price?: { input: number; output: number } | "free";
         caches?: false | { read?: boolean; write?: boolean };
-        tierOverride?: "fast" | "balanced" | "deep";
       }
     >;
   };

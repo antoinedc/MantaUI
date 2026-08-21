@@ -18,13 +18,13 @@ test("normalizeDeclared reads modelRouting.declaredModels and passes objects thr
     modelRouting: {
       preset: "balanced",
       declaredModels: {
-        "anthropic/claude-opus-4": { catalogId: "claude-opus-4", tierOverride: "deep" },
+        "anthropic/claude-opus-4": { price: { input: 1, output: 2 } },
         "sample/custom": "not-an-object",
       },
     },
   });
   assert.deepEqual(out, {
-    "anthropic/claude-opus-4": { catalogId: "claude-opus-4", tierOverride: "deep" },
+    "anthropic/claude-opus-4": { price: { input: 1, output: 2 } },
   });
 });
 
@@ -125,9 +125,31 @@ test("ledgerToServices is empty-safe and ignores degenerate rows", () => {
   assert.deepEqual(mix, {});
 });
 
+test("buildRoutingServices: catalogEntryFor honours a declared catalogId over a fuzzy match (BET-1268)", async () => {
+  // The fuzzy matcher would resolve `mystery` to the throwaway entry; the
+  // user's declaration says it is really `declared-sonnet`. The declared
+  // identity must win.
+  const services = await buildRoutingServices(
+    { modelRouting: { preset: "balanced", declaredModels: { "p/mystery": { catalogId: "declared-sonnet" } } } },
+    {
+      catalogIndex: {
+        lookupModel: (id) =>
+          id === "declared-sonnet" ? { id: "declared-sonnet", family: "sonnet" } : null,
+        matchModel: (id) =>
+          id === "mystery"
+            ? { kind: "exact", candidates: [{ id: "fuzzy-entry", family: "haiku" }] }
+            : { kind: "none", candidates: [] },
+        allModels: () => [],
+      },
+    },
+  );
+  const entry = services.catalogEntryFor({ providerID: "p", id: "mystery" });
+  assert.equal(entry.family, "sonnet"); // from the declared catalogue entry, not the fuzzy one
+});
+
 test("buildRoutingServices assembles a full services object from live readers", async () => {
   const services = await buildRoutingServices(
-    { modelRouting: { preset: "balanced", declaredModels: { "anthropic/claude-opus-4": { tierOverride: "deep" } } } },
+    { modelRouting: { preset: "balanced", declaredModels: { "anthropic/claude-opus-4": { price: { input: 1, output: 2 } } } } },
     {
       catalogIndex: {
         lookupModel: (id) => (id === "claude-opus-4" ? { id } : null),
@@ -161,7 +183,7 @@ test("buildRoutingServices assembles a full services object from live readers", 
   // quality field ranks the score
   assert.equal(typeof services.qualityField.benchmarkPercentile, "function");
   // declared from config
-  assert.deepEqual(services.declared["anthropic/claude-opus-4"], { tierOverride: "deep" });
+  assert.deepEqual(services.declared["anthropic/claude-opus-4"], { price: { input: 1, output: 2 } });
   // accounts keyed by providerID, exhausted carried
   assert.equal(services.accounts.anthropic.exhausted, true);
   // health excludes the rate-limited provider
