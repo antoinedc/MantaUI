@@ -607,8 +607,8 @@ test("startJob survives a throwing listSnapshots and delivers the incumbent (BET
 
 test("chooseSubagentModel routes an explore agent to a fast-tier model when the conversation activates routing (BET-1220)", () => {
   const catalog = [
-    { providerID: "anthropic", id: "claude-opus-4", status: "active" },   // deep
-    { providerID: "anthropic", id: "claude-haiku-4", status: "active" }, // fast
+    normalize("anthropic", "claude-opus-4", rawProviderModel({ id: "claude-opus-4" })),   // deep
+    normalize("anthropic", "claude-haiku-4", rawProviderModel({ id: "claude-haiku-4" })), // fast
   ];
   const chosen = chooseSubagentModel({
     incumbent: { providerID: "anthropic", modelID: "claude-opus-4" },
@@ -639,9 +639,9 @@ test("startJob with routing on normalises the catalog winner to a {providerID, m
   h.deps.configGet = async () => ({ modelRouting: { preset: "economy" } });
   h.deps.listSnapshots = () => [];
   const models = [
-    { providerID: "anthropic", id: "claude-opus-4", status: "active" },   // deep
-    { providerID: "anthropic", id: "claude-sonnet-4", status: "active" }, // balanced
-    { providerID: "anthropic", id: "claude-haiku-4", status: "active" },  // fast
+    normalize("anthropic", "claude-opus-4", rawProviderModel({ id: "claude-opus-4" })),   // deep
+    normalize("anthropic", "claude-sonnet-4", rawProviderModel({ id: "claude-sonnet-4" })), // balanced
+    normalize("anthropic", "claude-haiku-4", rawProviderModel({ id: "claude-haiku-4" })),  // fast
   ];
   h.deps.listModels = async () => models;
   h.deps.routingServices = routingServicesFor(models);
@@ -671,10 +671,10 @@ test("startJob routes to a non-incumbent model from live routing readers (BET-12
   const models = [
     // openai/gpt-5 is the CHEAPEST — but the health reader reports it
     // rate-limited, so it must be excluded from the decision.
-    { providerID: "openai", id: "gpt-5", status: "active", cost: { input: 0.1, output: 0.4, cacheRead: 0.05, cacheWrite: 0.15 }, capabilities: { toolcall: true } },
-    { providerID: "anthropic", id: "claude-opus-4", status: "active", cost: { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 22.5 }, capabilities: { reasoning: true, toolcall: true } },
-    { providerID: "anthropic", id: "claude-sonnet-4", status: "active", cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 4.5 }, capabilities: { reasoning: true, toolcall: true } },
-    { providerID: "anthropic", id: "claude-haiku-4", status: "active", cost: { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.5 }, capabilities: { toolcall: true } },
+    normalize("openai", "gpt-5", rawProviderModel({ id: "gpt-5", cost: { input: 0.1, output: 0.4, cache: { read: 0.05, write: 0.15 } }, capabilities: { toolcall: true } })),
+    normalize("anthropic", "claude-opus-4", rawProviderModel({ id: "claude-opus-4", cost: { input: 15, output: 75, cache: { read: 1.5, write: 22.5 } }, capabilities: { reasoning: true, toolcall: true } })),
+    normalize("anthropic", "claude-sonnet-4", rawProviderModel({ id: "claude-sonnet-4", cost: { input: 3, output: 15, cache: { read: 0.3, write: 4.5 } }, capabilities: { reasoning: true, toolcall: true } })),
+    normalize("anthropic", "claude-haiku-4", rawProviderModel({ id: "claude-haiku-4", cost: { input: 1, output: 5, cache: { read: 0.1, write: 1.5 } }, capabilities: { toolcall: true } })),
   ];
   h.deps.listModels = async () => models;
   // Live-style readers (NOT a pre-built routingServices).
@@ -717,8 +717,8 @@ test("startJob routes to the non-deranked sibling when an endpoint is reliabilit
     // tie-break winner, but its endpoint has a bad tool-call rate → it must be
     // reliability-penalised and lose to openai's clean copy. This pins that the
     // ledger's derank actually swings the outcome, not the model-id tie-break.
-    { providerID: "anthropic", id: "claude-sonnet-4", status: "active", cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 4.5 }, capabilities: { reasoning: true, toolcall: true } },
-    { providerID: "openai", id: "claude-sonnet-4", status: "active", cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 4.5 }, capabilities: { reasoning: true, toolcall: true } },
+    normalize("anthropic", "claude-sonnet-4", rawProviderModel({ id: "claude-sonnet-4", cost: { input: 3, output: 15, cache: { read: 0.3, write: 4.5 } }, capabilities: { reasoning: true, toolcall: true } })),
+    normalize("openai", "claude-sonnet-4", rawProviderModel({ id: "claude-sonnet-4", cost: { input: 3, output: 15, cache: { read: 0.3, write: 4.5 } }, capabilities: { reasoning: true, toolcall: true } })),
   ];
   h.deps.listModels = async () => models;
   const cat = (id) => ({ id, family: "sonnet" });
@@ -777,10 +777,10 @@ test("startJob routes only within the consent (sub) catalogue (BET-1229)", async
   });
   h.deps.listSnapshots = () => [];
   const models = [
-    { providerID: "anthropic", id: "claude-opus-4", status: "active" },
-    { providerID: "anthropic", id: "claude-sonnet-4", status: "active" },
-    { providerID: "anthropic", id: "claude-haiku-4", status: "active" },
-    { providerID: "openai", id: "gpt-5", status: "active" },
+    normalize("anthropic", "claude-opus-4", rawProviderModel({ id: "claude-opus-4" })),
+    normalize("anthropic", "claude-sonnet-4", rawProviderModel({ id: "claude-sonnet-4" })),
+    normalize("anthropic", "claude-haiku-4", rawProviderModel({ id: "claude-haiku-4" })),
+    normalize("openai", "gpt-5", rawProviderModel({ id: "gpt-5" })),
   ];
   h.deps.listModels = async () => models;
   h.deps.routingServices = routingServicesFor(models);
@@ -802,8 +802,8 @@ test("startJob routes only within the consent (sub) catalogue (BET-1229)", async
 test("chooseSubagentModel returns the incumbent on an off-path and is load-bearing (BET-1220)", () => {
   const incumbent = { providerID: "anthropic", modelID: "claude-opus-4" };
   const catalog = [
-    { providerID: "anthropic", id: "claude-opus-4", status: "active" },
-    { providerID: "anthropic", id: "claude-haiku-4", status: "active" },
+    normalize("anthropic", "claude-opus-4", rawProviderModel({ id: "claude-opus-4" })),
+    normalize("anthropic", "claude-haiku-4", rawProviderModel({ id: "claude-haiku-4" })),
   ];
   // routing not activated (no preset) → incumbent unchanged even though a cheaper fast model exists
   assert.deepEqual(
@@ -814,7 +814,7 @@ test("chooseSubagentModel returns the incumbent on an off-path and is load-beari
   assert.deepEqual(
     chooseSubagentModel({
       incumbent,
-      catalog: [{ providerID: "anthropic", id: "claude-opus-4", status: "retired" }],
+      catalog: [normalize("anthropic", "claude-opus-4", rawProviderModel({ id: "claude-opus-4", status: "retired" }))],
       policy: { preset: "economy" },
       agent: "explore",
       nowMs: 0,
@@ -829,9 +829,9 @@ test("chooseSubagentModel returns the incumbent on an off-path and is load-beari
 
 test("chooseMainModel returns the FULL decision — model, reason, incumbent — and normalises the winner to {providerID, modelID} (BET-1225)", () => {
   const catalog = [
-    { providerID: "anthropic", id: "claude-opus-4", status: "active" },     // deep
-    { providerID: "anthropic", id: "claude-sonnet-4", status: "active" },   // balanced
-    { providerID: "anthropic", id: "claude-haiku-4", status: "active" },    // fast
+    normalize("anthropic", "claude-opus-4", rawProviderModel({ id: "claude-opus-4" })),     // deep
+    normalize("anthropic", "claude-sonnet-4", rawProviderModel({ id: "claude-sonnet-4" })),   // balanced
+    normalize("anthropic", "claude-haiku-4", rawProviderModel({ id: "claude-haiku-4" })),    // fast
   ];
   const incumbent = { providerID: "anthropic", modelID: "claude-opus-4" };
   const decision = chooseMainModel({
@@ -856,8 +856,8 @@ test("chooseMainModel returns the FULL decision — model, reason, incumbent —
 test("chooseMainModel on the off-path returns the incumbent with changed:false, never a hidden switch (BET-1225)", () => {
   const incumbent = { providerID: "anthropic", modelID: "claude-opus-4" };
   const catalog = [
-    { providerID: "anthropic", id: "claude-opus-4", status: "active" },
-    { providerID: "anthropic", id: "claude-haiku-4", status: "active" },
+    normalize("anthropic", "claude-opus-4", rawProviderModel({ id: "claude-opus-4" })),
+    normalize("anthropic", "claude-haiku-4", rawProviderModel({ id: "claude-haiku-4" })),
   ];
   // routing not activated (no preset) → no switch, even though a cheaper fast model exists
   const off = chooseMainModel({ incumbent, catalog, policy: {}, agent: "build", nowMs: 0 });
@@ -867,7 +867,7 @@ test("chooseMainModel on the off-path returns the incumbent with changed:false, 
   // an activated router with no survivors (all dead) still falls back to incumbent
   const noSurvivors = chooseMainModel({
     incumbent,
-    catalog: [{ providerID: "anthropic", id: "claude-opus-4", status: "retired" }],
+    catalog: [normalize("anthropic", "claude-opus-4", rawProviderModel({ id: "claude-opus-4", status: "retired" }))],
     policy: { preset: "economy" },
     agent: "build",
     nowMs: 0,
@@ -880,8 +880,8 @@ test("chooseMainModel when the router picks the same model reports changed:false
   // deep incumbent + performance preset → build stays deep → same model, no pill.
   const incumbent = { providerID: "anthropic", modelID: "claude-opus-4" };
   const catalog = [
-    { providerID: "anthropic", id: "claude-opus-4", status: "active" },
-    { providerID: "anthropic", id: "claude-sonnet-4", status: "active" },
+    normalize("anthropic", "claude-opus-4", rawProviderModel({ id: "claude-opus-4" })),
+    normalize("anthropic", "claude-sonnet-4", rawProviderModel({ id: "claude-sonnet-4" })),
   ];
   const decision = chooseMainModel({
     incumbent,

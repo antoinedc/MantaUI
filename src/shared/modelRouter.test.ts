@@ -3,6 +3,13 @@ import { chooseModel, AGENT_TIER, PRESETS, type RoutingServices } from "./modelR
 import { endpointKey } from "./endpointKey.mjs";
 import { tierRank } from "./modelGuide.mjs";
 import { AGENT_FLOOR_SCORE } from "./modelQuality.mjs";
+// Standing rule 9: a routing test may not hand-write a candidate literal.
+// Build every candidate through the REAL normaliser (the same seam the
+// BET-1267 cases use) so the fixtures can never drift from what production
+// actually produces.
+// @ts-expect-error — server module has no .d.mts; _normalizeProviderModel is
+// the canonical OpencodeModel producer every routed test builds through.
+import { _normalizeProviderModel } from "../server/opencode.mjs";
 
 // A catalogue entry field that forces a precise, known quality score so tests
 // control the tier band deterministically. qualityScore's benchmark path wins
@@ -11,20 +18,40 @@ const CHECK = { name: "SWE-Bench Verified", score: 0.5 };
 
 const TIER_SCORE: Record<string, number> = { fast: 0.25, balanced: 0.55, deep: 0.85 };
 
-type EndpointOver = Record<string, unknown> & { providerID?: string; tier?: string; score?: number };
+type EndpointOver = Record<string, unknown> & {
+  providerID?: string;
+  tier?: string;
+  score?: number;
+  cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  capabilities?: { toolcall?: boolean; input?: Array<string> | Record<string, boolean> };
+};
 type Endpoint = Record<string, unknown>;
 
+// The intended benchmark quality per endpoint, keyed by endpointKey. Quality
+// is a catalogue SERVICE input (the benchmark a given model posts), never a
+// field on the candidate — so it lives here, looked up from the normalised
+// candidate's providerID/id exactly as production's catalogue lookup does,
+// instead of being hand-stamped onto the candidate object.
+const SCORES = new Map<string, number>();
+
+// Build one candidate through the real normaliser fed a raw `/provider`
+// payload, so a fixture can never quietly disagree with what the box produces.
 function endpoint(id: string, over: EndpointOver = {}): Endpoint {
-  const { providerID = "p", tier = "balanced", score, ...rest } = over;
-  return {
-    providerID,
+  const { providerID = "p", tier = "balanced", score, cost, capabilities, ...rest } = over;
+  const key = `${providerID}/${id}`;
+  SCORES.set(key, score ?? TIER_SCORE[tier]);
+  const raw = {
     id,
     status: "active",
-    cost: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 0.5 },
-    capabilities: { toolcall: true, input: { image: true, pdf: true } },
-    _score: score ?? TIER_SCORE[tier],
+    cost: cost
+      ? { input: cost.input, output: cost.output, cache: { read: cost.cacheRead, write: cost.cacheWrite } }
+      : { input: 1, output: 2, cache: { read: 0.5, write: 0.5 } },
+    capabilities: { toolcall: true, input: ["image", "pdf"], ...capabilities },
     ...rest,
   };
+  const m = _normalizeProviderModel(providerID, id, raw);
+  if (!m) throw new Error(`candidate ${providerID}/${id} failed to normalise`);
+  return m;
 }
 
 function defaultDeclared(catalog: Endpoint[]): Record<string, { catalogId: string }> {
@@ -41,7 +68,7 @@ type RouteOpts = {
 
 function route({ catalog, policy, intent = {}, services: extra = {}, nowMs = 0 }: RouteOpts) {
   const services: RoutingServices = {
-    catalogEntryFor: (c: any) => ({ benchmarks: [{ ...CHECK, score: c?._score }] }),
+    catalogEntryFor: (c: any) => ({ benchmarks: [{ ...CHECK, score: SCORES.get(endpointKey(c)) ?? CHECK.score }] }),
     qualityField: { benchmarkPercentile: (_n: string, s: any) => s },
     declared: defaultDeclared(catalog),
     accounts: {},

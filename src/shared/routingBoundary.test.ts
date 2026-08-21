@@ -5,6 +5,11 @@ import { endpointKey } from "./endpointKey.mjs";
 // boundary normaliser whose OUTPUT shape is exactly what the renderer hands
 // shouldSwitch on both sides (the bug this file pins).
 import { toDeliverModel } from "../server/delegate.mjs";
+// Standing rule 9: build the incumbent in the real canonical model shape, not
+// a hand-written literal — cross the boundary with what production produces.
+// @ts-expect-error — server module has no .d.mts; _normalizeProviderModel is
+// the canonical OpencodeModel producer.
+import { _normalizeProviderModel } from "../server/opencode.mjs";
 
 /**
  * A routed endpoint in the shape PRODUCTION actually produces across the RPC
@@ -18,11 +23,20 @@ function ep(providerID: string, id: string): { providerID: string; modelID: stri
   return out;
 }
 
-// An incumbent endpoint in the model shape crossesBoundary now reads for its
-// declared modalities (via acceptsModality) — { capabilities.input } like an
-// OpencodeModel — NOT a pre-computed array. Unknown input ([]) = allow.
+// An incumbent endpoint in the model shape crossesBoundary reads for its
+// declared modalities (via acceptsModality) — { capabilities.input } on the
+// canonical OpencodeModel, built through the REAL normaliser. Unknown input
+// ([]) = allow.
 function incumbentModel(input: string[]): object {
-  return { capabilities: { input } };
+  const raw = {
+    id: "m",
+    status: "active",
+    cost: { input: 1, output: 2, cache: { read: 0.5, write: 0.5 } },
+    capabilities: { toolcall: true, input },
+  };
+  const m = _normalizeProviderModel("p", "m", raw);
+  if (!m) throw new Error("incumbent model failed to normalise");
+  return m;
 }
 
 const followUp = {
