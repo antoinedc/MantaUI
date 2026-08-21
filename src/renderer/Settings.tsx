@@ -21,7 +21,7 @@ import { Toggle } from "./Toggle";
 import { StatusDot } from "./StatusDot";
 import { ListRow } from "./ListRow";
 import { AccountsCard } from "./AccountsCard";
-import { ModelRoutingCard } from "./ModelRoutingCard";
+import { ModelsWeCouldntIdentify } from "./ModelsWeCouldntIdentify";
 import { ModelsCard } from "./ModelsCard";
 import { ModelLedgerCard } from "./ModelLedgerCard";
 import { AddPhonePanel } from "./AddPhonePanel";
@@ -1089,10 +1089,10 @@ export function Settings({
     if (section === "models") {
       return (
         <>
-          {/* Routing card — the per-agent tiers + plan windows. Renders what
-              routing would do, alongside the schema-driven "Automatic Manta
-              Routing" Balance card. There is no global toggle (BET-1243). */}
-          <ModelRoutingCard />
+          {/* The identify block is a sibling GroupCard ABOVE the Models card
+              (BET-1272 §8e). The schema-driven "Automatic Manta Routing" and
+              "Plan usage" groups render before these via renderSection. */}
+          <ModelsWeCouldntIdentify />
           <GroupCard title="Models">
             <ModelsCard />
             <ModelLedgerCard />

@@ -134,28 +134,36 @@ export function createModelCatalogController({
   };
 }
 
-// The box's own singleton. `startModelCatalogPoller` loads the cached copy and
-// arms the periodic refresh; before it is called the matcher is empty
-// (`{supported:false}`) — safe, honest, non-blocking.
+// The box's own singleton. There is exactly ONE catalogue on the box;
+// `opencode:model-catalog` and the module-level lookup/match/allModels read
+// it, and `startModelCatalogPoller` is what keeps IT fresh. (It used to build
+// a second, unrelated controller — the BET-1272 defect that left the singleton
+// empty forever on a first boot that predated the cache file, so the RPC
+// reported `{supported:false}` while the cache on disk held hundreds of
+// entries.) Before the poller starts the matcher reflects whatever is cached
+// on disk at import; a never-populated box reports `{supported:false}` — safe,
+// honest, non-blocking.
 const boxCatalog = createModelCatalogController({});
 
 /**
- * Load the box's model catalogue and keep it fresh. Reuses `startPoller.mjs`
- * (immediate first tick, inFlight guard, `timer.unref()`). Returns `{ stop }`
- * plus the same lookup/match/allModels/status as the controller, so a caller
- * (later routing stages) can read the catalogue through one object while the
- * module-level `lookupModel`/`matchModel`/`allModels` stay in sync.
+ * Load the box's model catalogue and keep it fresh. Starts the module-level
+ * singleton and returns handles onto it. Reuses `startPoller.mjs` (immediate
+ * first tick, inFlight guard, `timer.unref()`). Returns `{ stop }` plus the
+ * same lookup/match/allModels/status as the controller, so a caller can read
+ * the catalogue through one object while the module-level
+ * `lookupModel`/`matchModel`/`allModels` stay in sync — they all read
+ * `boxCatalog`.
  */
 export function startModelCatalogPoller(opts = {}) {
-  const controller = createModelCatalogController(opts);
-  const handle = controller.start();
+  void opts;
+  const handle = boxCatalog.start();
   return {
     stop: handle.stop,
-    refresh: controller.refresh,
-    lookupModel: controller.lookupModel,
-    matchModel: controller.matchModel,
-    allModels: controller.allModels,
-    status: controller.status,
+    refresh: boxCatalog.refresh,
+    lookupModel: boxCatalog.lookupModel,
+    matchModel: boxCatalog.matchModel,
+    allModels: boxCatalog.allModels,
+    status: boxCatalog.status,
   };
 }
 

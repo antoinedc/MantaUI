@@ -1,26 +1,35 @@
-// ===== ModelsWeCouldntIdentify (BET-1249) =====
+// ===== ModelsWeCouldntIdentify (BET-1249 / BET-1272) =====
 //
 // "Models we couldn't identify" — the Settings → Models block that lets a
-// user tell us what an opaque endpoint is actually serving. Rendered above the
-// model table, ONLY when at least one endpoint has no user declaration
-// (`declaredModels[key]` absent) — an empty section is noise on a healthy box.
+// user tell us what an opaque endpoint is actually serving. It is the SIBLING
+// GroupCard above the models table (mounted in Settings), not a card nested
+// inside it.
+//
+// An endpoint is listed ONLY when it fails the shared Auto-eligibility gate
+// (autoEligibility.mjs — the SAME gate the router waits on), so the UI can
+// never claim something is routable when it is not. An endpoint that is fully
+// described (identity + price + caching + quality known) is not listed. When
+// the catalogue itself is unavailable there is nothing to resolve against, so
+// the block renders a single explanatory line instead of hiding — a surface
+// that hides when its input is missing is indistinguishable from a broken one.
 //
 // One SettingsRow per unresolved endpoint, its case derived from the shared
 // identity resolver:
 //   • exact      → we auto-matched a single catalogue entry → "Matched
-//                  automatically → …" + a Change action (opens the editor).
+//                  automatically → …" + a Change action; listed only while a
+//                  gap (e.g. price) remains, and the help line says which.
 //   • ambiguous  → several catalogue entries could be it → the candidate chips;
 //                  we never guess between them.
 //   • none       → no match → a searchable typeahead over the catalogue, plus
-//                  the two optional fields (Costs here, default free; Caching,
-//                  default none — the safe-overestimate direction).
+//                  the two optional fields (Costs here, no default; Caching,
+//                  default none). Price has NO default — Save stays disabled
+//                  until the user picks Free or enters rates.
 //
 // Saving writes a ModelDeclaration into `modelRouting.declaredModels[key]` via
-// the caller's `onDeclare` (ModelsCard routes it through configUpdate) and the
-// row disappears (declared → no longer unresolved). Leaving a row untouched
-// writes nothing.
+// configUpdate and the row disappears (declared → eligible). Leaving a row
+// untouched writes nothing.
 
-import { useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { Eyebrow } from "./Eyebrow";
 import { Card } from "./Card";
 import { SettingsRow } from "./SettingsRow";
@@ -29,13 +38,16 @@ import { Button } from "./Button";
 import { Checkbox } from "./Checkbox";
 import { describeModel } from "../shared/modelGuide.mjs";
 import { resolveIdentity } from "../shared/modelIdentity.mjs";
+import { autoEligibility } from "../shared/autoEligibility.mjs";
 import { formatModelContextSize } from "./chatUtils";
-import type { OpencodeModel } from "../shared/types";
+import { describeMissing } from "./AccountsCard";
+import { useCachedResource } from "./useCachedResource";
+import { useRoutingCatalog } from "./routingCatalog";
+import type { AppConfig, OpencodeModel } from "../shared/types";
 import type {
   OpencodeModel as IdentityOpencodeModel,
 } from "../shared/modelIdentity.mjs";
 import type { ModelCatalog, ModelCatalogEntry } from "../shared/modelCatalog.mjs";
-import type { RoutingCatalog } from "./routingCatalog";
 
 export type DeclaredModel = {
   catalogId?: string;
@@ -129,25 +141,35 @@ function IdentifyEditor({
   onCancel?: () => void;
 }) {
   const [selected, setSelected] = useState<ModelCatalogEntry | null>(initial);
-  const [priceMode, setPriceMode] = useState<"free" | "custom">("free");
+  // Price has NO default (BET-1272 §8f): "" ("none chosen") is the initial
+  // state, and Save stays disabled until the user picks Free or enters at
+  // least one rate. Caching keeps its "none" default (that genuinely
+  // over-estimates cost).
+  const [priceMode, setPriceMode] = useState<"" | "free" | "custom">("");
   const [costIn, setCostIn] = useState("");
   const [costOut, setCostOut] = useState("");
   const [cacheMode, setCacheMode] = useState<"none" | "custom">("none");
   const [cacheRead, setCacheRead] = useState(true);
   const [cacheWrite, setCacheWrite] = useState(true);
 
+  // The user has supplied a price: Free is a complete answer; Custom needs at
+  // least one finite rate, otherwise the declaration would silently omit price
+  // and the endpoint would stay ineligible (still listed) after a save.
+  const priceChosen =
+    priceMode === "free" ||
+    (priceMode === "custom" &&
+      (Number.isFinite(parseFloat(costIn)) || Number.isFinite(parseFloat(costOut))));
+
   const save = () => {
-    if (!selected) return;
+    if (!selected || !priceChosen) return;
     const decl: DeclaredModel = { catalogId: selected.id };
     if (priceMode === "custom") {
       const input = parseFloat(costIn);
       const output = parseFloat(costOut);
-      if (Number.isFinite(input) || Number.isFinite(output)) {
-        decl.price = {
-          input: Number.isFinite(input) ? input : 0,
-          output: Number.isFinite(output) ? output : 0,
-        };
-      }
+      decl.price = {
+        input: Number.isFinite(input) ? input : 0,
+        output: Number.isFinite(output) ? output : 0,
+      };
     } else {
       decl.price = "free";
     }
@@ -229,7 +251,7 @@ function IdentifyEditor({
         )}
       </div>
       <div className="flex items-center gap-2">
-        <Button onClick={save} tone="primary" disabled={!selected || busy}>
+        <Button onClick={save} tone="primary" disabled={!selected || !priceChosen || busy}>
           Save
         </Button>
         {onCancel && (
@@ -242,42 +264,89 @@ function IdentifyEditor({
   );
 }
 
-export function ModelsWeCouldntIdentify({
-  models,
-  declaredModels,
-  catalog,
-  busyKey,
-  onDeclare,
-}: {
-  models: OpencodeModel[];
-  declaredModels: Record<string, DeclaredModel> | undefined;
-  catalog: RoutingCatalog;
-  /** The "providerID/modelID" key mid-mutation, for disabling that row. */
-  busyKey: string | null;
-  onDeclare: (key: string, decl: DeclaredModel) => void;
-}) {
+export function ModelsWeCouldntIdentify() {
+  const {
+    data,
+    refresh,
+  } = useCachedResource<{
+    models: OpencodeModel[];
+    declaredModels: Record<string, DeclaredModel> | undefined;
+  }>("modelsWeCouldntIdentify", async () => {
+    const [modelList, cfg] = await Promise.all([
+      window.api.opencodeModels(),
+      window.api.configGet(),
+    ]);
+    return {
+      models: modelList,
+      declaredModels: (cfg as AppConfig).modelRouting?.declaredModels,
+    };
+  });
+  const catalog = useRoutingCatalog();
   const matcher = catalog.matcher;
+  const models = data?.models;
+  const declaredModels = data?.declaredModels;
+  const [busy, setBusy] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  const declare = useCallback(
+    async (key: string, decl: DeclaredModel) => {
+      if (busy) return;
+      setBusy(key);
+      setSaveError(null);
+      try {
+        const cfg = (await window.api.configGet()) as AppConfig;
+        const routing = cfg.modelRouting ?? { preset: "balanced" };
+        const declared = { ...(routing.declaredModels ?? {}), [key]: decl };
+        await window.api.configUpdate({
+          modelRouting: { ...routing, declaredModels: declared },
+        });
+        // A fresh fetch removes the now-declared (eligible) endpoint in the
+        // same tick. A failed mutation changed nothing on the box and cleared
+        // nothing, so refresh only on success.
+        await refresh();
+      } catch (e) {
+        setSaveError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setBusy(null);
+      }
+    },
+    [busy, refresh],
+  );
 
   const rows = useMemo(() => {
-    if (!matcher) return [];
+    if (!matcher || !models) return [];
     const out: {
       model: OpencodeModel;
       key: string;
       state: "exact" | "ambiguous" | "none";
       catalogId: string | null;
       candidates: ModelCatalogEntry[];
+      missing: string[];
     }[] = [];
     for (const m of models) {
       const key = modelKey(m.providerID, m.id);
-      if (declaredModels?.[key]) continue;
+      const decl = declaredModels?.[key];
       // The renderer's OpencodeModel and modelIdentity's are structurally alike
       // at runtime but disagree on the `capabilities.input` sub-type; the cast
       // is only for TS (resolveIdentity reads providerID/id/family/limit/cost).
       const id = resolveIdentity(
         m as unknown as IdentityOpencodeModel,
-        null,
+        decl ?? null,
         matcher,
       );
+      // The ONE gate: list an endpoint only when Auto cannot yet describe it —
+      // the same gate the router waits on. A resolved identity with a known
+      // price and known caching is eligible and NOT listed.
+      const elig = autoEligibility({
+        model: id.effective,
+        identity: { known: id.state === "resolved" },
+        quality: { known: id.state === "resolved" },
+        declared: decl,
+        // These models come from opencode's own provider list (the supported
+        // catalogue providers); the input is required by type.
+        providerClass: "supported",
+      });
+      if (elig.eligible) continue;
       if (id.state === "resolved") {
         out.push({
           model: m,
@@ -285,6 +354,7 @@ export function ModelsWeCouldntIdentify({
           state: "exact",
           catalogId: id.catalogId,
           candidates: [],
+          missing: elig.missing,
         });
       } else if (id.state === "ambiguous") {
         const candidates = (id.candidates ?? [])
@@ -296,6 +366,7 @@ export function ModelsWeCouldntIdentify({
           state: "ambiguous",
           catalogId: null,
           candidates,
+          missing: elig.missing,
         });
       } else {
         out.push({
@@ -304,14 +375,40 @@ export function ModelsWeCouldntIdentify({
           state: "none",
           catalogId: null,
           candidates: [],
+          missing: elig.missing,
         });
       }
     }
     return out;
   }, [models, declaredModels, matcher]);
 
-  if (!matcher) return null;
-  if (rows.length === 0) return null;
+  // The catalogue is unavailable — nothing on the box can be resolved. Render
+  // the block with a single explanatory line rather than hiding (a surface
+  // that disappears when its input is missing reads as broken).
+  if (!catalog.supported || !matcher) {
+    return (
+      <div>
+        <Eyebrow>Models we couldn't identify</Eyebrow>
+        <Card>
+          <div className="space-y-4">
+            <p className="text-meta text-text-faint max-w-[62ch]">
+              Served under a name the catalogue doesn't recognise, so Manta can't
+              tell what they are or what they're good at. They stay usable by
+              hand. Identify one and Auto can start choosing it.
+            </p>
+            <p className="text-meta text-text-quiet">
+              Manta couldn't load the model catalogue, so it can't tell what any
+              of these endpoints are. Auto won't choose a model it can't
+              describe. This usually clears on its own — reopen Settings in a
+              minute.
+            </p>
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
+  if (!models || rows.length === 0) return null;
 
   return (
     <div>
@@ -324,13 +421,19 @@ export function ModelsWeCouldntIdentify({
             hand. Identify one and Auto can start choosing it.
           </p>
 
+          {saveError && (
+            <div role="alert" className="text-meta text-danger">
+              {saveError}
+            </div>
+          )}
+
           {rows.map((row) => (
             <EndpointRow
               key={row.key}
               row={row}
               matcher={matcher}
-              busy={busyKey === row.key}
-              onDeclare={(decl) => onDeclare(row.key, decl)}
+              busy={busy === row.key}
+              onDeclare={(decl) => void declare(row.key, decl)}
             />
           ))}
 
@@ -356,6 +459,7 @@ function EndpointRow({
     state: "exact" | "ambiguous" | "none";
     catalogId: string | null;
     candidates: ModelCatalogEntry[];
+    missing: string[];
   };
   matcher: ModelCatalog;
   busy: boolean;
@@ -372,7 +476,14 @@ function EndpointRow({
     const bits = [entry?.name ?? row.catalogId];
     if (tier) bits.push(tier);
     if (ctx) bits.push(ctx);
-    const help = entry || row.catalogId ? `Matched automatically → ${bits.join(" · ")}` : null;
+    const missing = describeMissing(row.missing);
+    // The row is listed only because something is still missing for Auto; name
+    // that gap so the UI never claims a different thing from what blocks
+    // routing. "what it costs" / "whether it caches" / "how it compares" come
+    // from autoEligibility's MISSING keys via describeMissing.
+    const help =
+      `Matched automatically → ${bits.join(" · ")}` +
+      (missing ? ` — Auto still needs: ${missing}` : "");
     return (
       <SettingsRow name={name} help={help}>
         {editing ? (
