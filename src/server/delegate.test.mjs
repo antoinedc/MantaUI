@@ -955,25 +955,25 @@ test("BET-1267 3a: an image turn against a model with NO declared modalities sur
 });
 
 test("BET-1267 3b: a 150k-token conversation drops a 32k-context model for context headroom — the real size reaches the decision", () => {
-  const small = normalize("p", "ctx-32k", rawProviderModel({ id: "ctx-32k", limit: { context: 32000 }, capabilities: { toolcall: true, reasoning: true } }));
-  const large = normalize("p", "ctx-200k", rawProviderModel({ id: "ctx-200k", limit: { context: 200000 }, capabilities: { toolcall: true } }));
-  // The 32k model is structurally DEEP (reasoning) and would win on quality —
-  // only the headroom filter can correctly remove it for a 150k conversation.
-  const incumbent = { providerID: "p", modelID: "ctx-200k" };
+  const small = normalize("p", "ctx-32k", rawProviderModel({ id: "ctx-32k", limit: { context: 32000 }, capabilities: { toolcall: true } }));
+  // The incumbent is a DIFFERENT model, absent from the catalog: whether the
+  // 32k candidate is dropped (context headroom, real 150k size) is the only
+  // thing separating "falls back to the incumbent" from "routes onto the 32k".
+  const incumbent = { providerID: "p", modelID: "elsewhere" };
   const chosen = chooseSubagentModel({
     incumbent,
-    catalog: [small, large],
+    catalog: [small],
     policy: { preset: "balanced" },
     quota: [],
     agent: "general",
     nowMs: 0,
     contextTokens: 150000,
-    services: routingServicesFor([small, large]),
+    services: routingServicesFor([small]),
   });
-  assert.equal(
-    chosen?.modelID,
-    "ctx-200k",
-    "a 32k model cannot hold a 150k conversation (1.25x headroom) and must be dropped; the 200k model is the only survivor",
+  assert.deepEqual(
+    chosen,
+    incumbent,
+    "a 32k model cannot hold a 150k conversation (1.25x headroom) and must drop, falling back to the incumbent",
   );
 });
 
