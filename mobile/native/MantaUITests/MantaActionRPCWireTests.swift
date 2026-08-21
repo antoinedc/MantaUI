@@ -47,13 +47,11 @@ final class MantaActionRPCWireTests: XCTestCase {
 
     func testNewSessionSingleWraps() async throws {
         let client = makeClient()
-        // The create channels return the project LIST, and a reply carrying no
-        // result is now an error rather than an empty list (that laundering is
-        // what let an unanswered `tmux:list` blank the session list). These
-        // tests only assert the REQUEST shape, so they need a reply the method
-        // can actually return — the class-wide `{"result": null}` default is
-        // not one for these three.
-        CapturingURLProtocol.result = #"{"result": []}"#
+        // These tests only assert the REQUEST shape, so they need a reply the
+        // method can return, and it must be the shape the box actually sends —
+        // the `{sessionId, windowIndex, projects}` object, not the legacy
+        // bare `Project[]`.
+        CapturingURLProtocol.result = #"{"result": {"sessionId": null, "windowIndex": 0, "projects": []}}"#
         try await client.newSession(NewSessionInput(name: "p", cwd: "/d", windowName: "w", createDir: true, chatMode: true))
         assertSingleWrapped()
         XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/tmux:new-session")
@@ -61,10 +59,33 @@ final class MantaActionRPCWireTests: XCTestCase {
 
     func testNewWindowSingleWraps() async throws {
         let client = makeClient()
-        CapturingURLProtocol.result = #"{"result": []}"#
+        CapturingURLProtocol.result = #"{"result": {"sessionId": null, "windowIndex": 0, "projects": []}}"#
         try await client.newWindow(NewWindowInput(sessionName: "p", windowName: "w", cwd: nil, chatMode: true))
         assertSingleWrapped()
         XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/tmux:new-window")
+    }
+
+    // MARK: - create-channel reply decode (BET-1259)
+
+    /// The box's `tmux:new-session` reply is `{sessionId, windowIndex,
+    /// projects}` (since 2026-08-06). `newSession` must decode that object and
+    /// return its `projects` array without throwing.
+    func testNewSessionDecodesObjectReply() async throws {
+        let client = makeClient()
+        CapturingURLProtocol.result = #"{"result": {"sessionId": "ses_1", "windowIndex": 2, "projects": []}}"#
+        let projects = try await client.newSession(NewSessionInput(name: "p", cwd: "/d", windowName: "w", createDir: true, chatMode: true))
+        XCTAssertTrue(projects.isEmpty)
+    }
+
+    /// A box that predates 2026-08-06 answers with a bare `Project[]`.
+    /// `newSession` must decode that legacy shape and return it without
+    /// throwing — this is the regression that used to surface as a
+    /// `DecodingError.typeMismatch`.
+    func testNewSessionDecodesLegacyArrayReply() async throws {
+        let client = makeClient()
+        CapturingURLProtocol.result = #"{"result": []}"#
+        let projects = try await client.newSession(NewSessionInput(name: "p", cwd: "/d", windowName: "w", createDir: true, chatMode: true))
+        XCTAssertTrue(projects.isEmpty)
     }
 
     func testKillWindowSingleWraps() async throws {

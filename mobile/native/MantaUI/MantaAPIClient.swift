@@ -177,6 +177,9 @@ final class MantaAPIClient: Sendable {
     }
 
     /// `tmux:new-session` — create a new project (tmux session).
+    /// The reply is normalised through `TmuxCreateResult`, which absorbs both
+    /// the box's `{sessionId, windowIndex, projects}` object and the legacy
+    /// bare `Project[]`.
     func newSession(_ input: NewSessionInput) async throws -> [MantaProject] {
         let dict: [String: Any] = [
             "name": input.name,
@@ -185,12 +188,14 @@ final class MantaAPIClient: Sendable {
             "createDir": input.createDir,
             "chatMode": input.chatMode,
         ]
-        return try await callRequired("tmux:new-session", args: [dict], as: [MantaProject].self)
+        return try await callRequired("tmux:new-session", args: [dict], as: TmuxCreateResult.self).projects
     }
 
     /// `tmux:new-window` — create a new session (window) in an existing project.
     /// A chat-mode window becomes a live opencode session the moment its first
-    /// message is sent.
+    /// message is sent. The reply is normalised through `TmuxCreateResult`,
+    /// which absorbs both the box's `{sessionId, windowIndex, projects}` object
+    /// and the legacy bare `Project[]`.
     func newWindow(_ input: NewWindowInput) async throws -> [MantaProject] {
         var dict: [String: Any] = [
             "sessionName": input.sessionName,
@@ -198,7 +203,7 @@ final class MantaAPIClient: Sendable {
             "chatMode": input.chatMode,
         ]
         if let cwd = input.cwd { dict["cwd"] = cwd }
-        return try await callRequired("tmux:new-window", args: [dict], as: [MantaProject].self)
+        return try await callRequired("tmux:new-window", args: [dict], as: TmuxCreateResult.self).projects
     }
 
     /// `tmux:kill-window` — delete a session (a row in the list).

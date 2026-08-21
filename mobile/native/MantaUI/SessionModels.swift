@@ -157,6 +157,29 @@ struct NewWindowInput: Sendable {
     var chatMode: Bool
 }
 
+/// The reply from `tmux:new-session` / `tmux:new-window`.
+///
+/// The box answers `{sessionId, windowIndex, projects}` (since 2026-08-06); a
+/// box that predates that answers with a bare `Project[]`. ONE type absorbs
+/// both so the two call sites stay a single code path and neither has to know
+/// which box it is talking to. Only `projects` is consumed — the caller finds
+/// the created window by name — so the other two fields are deliberately
+/// dropped rather than plumbed through to nothing.
+struct TmuxCreateResult: Decodable, Equatable, Sendable {
+    let projects: [MantaProject]
+
+    private enum CodingKeys: String, CodingKey { case projects }
+
+    init(from decoder: Decoder) throws {
+        if let list = try? [MantaProject](from: decoder) {
+            projects = list
+            return
+        }
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        projects = try container.decode([MantaProject].self, forKey: .projects)
+    }
+}
+
 /// Delete-input payload for `tmux:kill-window`.
 struct KillWindowInput: Sendable {
     var sessionName: String
@@ -505,4 +528,27 @@ func shouldFireTurnCompleteHaptic(
     hapticsEnabled: Bool
 ) -> Bool {
     turnCompleteEdge && showScrollToBottom && isActive && hapticsEnabled
+}
+
+/// User-facing text for a failed create. The box sends a specific, actionable
+/// reason (a missing directory, a name clash); the sheet used to replace all of
+/// it with one generic line, which is why a create failure was undiagnosable
+/// from the phone. Anything that is NOT a message written for a human — a
+/// decoding failure, a URLError — still falls back to the generic line, because
+/// its text would mean nothing to the user.
+enum SessionCreateFailure {
+    static let generic = "Couldn't create the session."
+
+    static func message(for error: Error) -> String {
+        switch error {
+        case MantaError.authRequired:
+            return "Not signed in to this box."
+        case MantaError.server(let text) where !text.isEmpty:
+            return text
+        case MantaError.transport(let text) where !text.isEmpty:
+            return text
+        default:
+            return generic
+        }
+    }
 }

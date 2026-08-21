@@ -173,7 +173,7 @@ struct SessionCreateSheet: View {
                 }
             } catch {
                 await MainActor.run {
-                    self.error = "Couldn't create the session"
+                    self.error = SessionCreateFailure.message(for: error)
                     self.creating = false
                 }
             }

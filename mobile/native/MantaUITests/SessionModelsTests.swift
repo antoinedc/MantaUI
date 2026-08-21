@@ -456,6 +456,24 @@ final class SessionModelsTests: XCTestCase {
         XCTAssertTrue(models?.first?.capabilities?.input?.image == true)
         XCTAssertTrue(models?.last?.capabilities?.input?.image == true)
     }
+
+    // MARK: - BET-1259 create-failure messaging
+
+    func testCreateFailureSurfacesServerReason() {
+        XCTAssertEqual(SessionCreateFailure.message(for: MantaError.server("boom")), "boom")
+    }
+
+    func testCreateFailureEmptyServerMessageFallsBackToGeneric() {
+        XCTAssertEqual(SessionCreateFailure.message(for: MantaError.server("")), SessionCreateFailure.generic)
+    }
+
+    func testCreateFailureAuthRequired() {
+        XCTAssertEqual(SessionCreateFailure.message(for: MantaError.authRequired), "Not signed in to this box.")
+    }
+
+    func testCreateFailureUnrelatedErrorFallsBackToGeneric() {
+        XCTAssertEqual(SessionCreateFailure.message(for: URLError(.timedOut)), SessionCreateFailure.generic)
+    }
 }
 
 // MARK: - BET-746 rename/fork failure feedback
