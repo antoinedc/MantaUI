@@ -92,6 +92,7 @@ struct SessionListView: View {
             }
             .navigationTitle("Sessions")
             .navigationBarTitleDisplayMode(.large)
+            .mantaNavigationBarBackground(tokens)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {

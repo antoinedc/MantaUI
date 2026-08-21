@@ -1,6 +1,9 @@
 import SwiftUI
 
 // ===========================================================================
+// Shared screen chrome — this file holds the view chrome every full-screen
+// surface must match, of which the edge scrim is one piece.
+//
 // Edge scrim.
 //
 // The shared fade behind floating chrome — the chat composer, the session
@@ -160,5 +163,27 @@ struct Scrim: View {
                 .init(color: tokens.canvas.opacity(1.0), location: 1.0),
             ]
         }
+    }
+}
+
+// ===========================================================================
+// Navigation-bar background.
+//
+// Same reason the scrim above is one component: these must MATCH. Every
+// full-screen surface pins its nav bar to solid `canvas` so the bar, the
+// list background and a pinned section header read as one continuous
+// surface. Left to the platform, the bar is transparent at the scroll edge
+// and a system blur once scrolled, and content smears under it.
+//
+// It was written out by hand on the chat screen and the subagent screen and
+// simply forgotten on the session list, which is exactly the drift one
+// modifier prevents.
+// ===========================================================================
+
+extension View {
+    func mantaNavigationBarBackground(_ tokens: Tokens) -> some View {
+        self
+            .toolbarBackgroundVisibility(.visible, for: .navigationBar)
+            .toolbarBackground(tokens.canvas, for: .navigationBar)
     }
 }
