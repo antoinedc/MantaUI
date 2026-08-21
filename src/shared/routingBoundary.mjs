@@ -22,10 +22,10 @@ export const BOUNDARY = {
   USER: "user-requested", // the user re-picked Auto
 };
 
-// Stable machine identity of a routed endpoint. Same convention as modelRouter.
-function endpointKey(m) {
-  return m ? `${m?.providerID ?? ""}/${m?.id ?? ""}` : "";
-}
+// The single endpoint-identity definition, shared with the router. Accepts both
+// the RPC boundary shape ({providerID, modelID}) and the router's internal
+// catalogue shape ({providerID, id}) so the two STOP being two conventions.
+import { endpointKey } from "./endpointKey.mjs";
 
 /**
  * Does this turn cross a decision point?

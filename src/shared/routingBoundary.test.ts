@@ -1,9 +1,21 @@
 import { describe, it, expect } from "vitest";
 import { BOUNDARY, crossesBoundary, shouldSwitch, boundaryPhrase } from "./routingBoundary.mjs";
+import { endpointKey } from "./endpointKey.mjs";
+// @ts-expect-error — server module has no .d.mts; toDeliverModel is the RPC
+// boundary normaliser whose OUTPUT shape is exactly what the renderer hands
+// shouldSwitch on both sides (the bug this file pins).
+import { toDeliverModel } from "../server/delegate.mjs";
 
-// A routed endpoint with a distinct (providerID/id) identity, like the router's.
-function ep(providerID: string, id: string) {
-  return { providerID, id };
+/**
+ * A routed endpoint in the shape PRODUCTION actually produces across the RPC
+ * boundary: `{providerID, modelID}` (see toDeliverModel). NOT the router's
+ * catalogue shape — building fixtures by hand in the router shape is how this
+ * file's 26 cases all passed against a function production never calls.
+ */
+function ep(providerID: string, id: string): { providerID: string; modelID: string } {
+  const out = toDeliverModel({ providerID, id });
+  if (!out) throw new Error("toDeliverModel returned null for a well-formed endpoint");
+  return out;
 }
 
 const followUp = {
@@ -244,6 +256,48 @@ describe("shouldSwitch — hysteresis", () => {
     // default topN=3: position 3 (4th, 0-based index 3) is outside → switch
     expect(
       shouldSwitch({ ...base, ranked: [...n4.slice(0, 3), ep("anthropic", "a")] }),
+    ).toEqual({ switch: true, why: "incumbent-dropped-out" });
+  });
+
+  it("THE BUG: a different model of the SAME provider as the incumbent switches", () => {
+    // Both sides arrive in the RPC deliver shape {providerID, modelID}. Before
+    // the shared endpointKey, each collapsed to "anthropic/" (its `.id` was
+    // undefined), the incumbent "matched" the first same-provider candidate,
+    // and this returned incumbent-retained — routing never switched. The shared
+    // key sees anthropic/a !== anthropic/z, so the incumbent fell out → switch.
+    const incumbent = ep("anthropic", "a");
+    const differentModelSameProvider = ep("anthropic", "z");
+    expect(
+      shouldSwitch({
+        incumbent,
+        ranked: [differentModelSameProvider],
+        incumbentStillEligible: true,
+        incumbentStillCapable: true,
+        incumbentHealthy: true,
+      }),
+    ).toEqual({ switch: true, why: "incumbent-dropped-out" });
+  });
+
+  it("an incumbent with no identity never matches another with no identity (empty-key guard)", () => {
+    // An endpoint that lost its model id has key "" — "no identity". Two such
+    // keys must never be treated as the same endpoint. Build both from the real
+    // producer, then strip the model id (toDeliverModel refuses to emit them).
+    const noModel = { ...ep("anthropic", "a") } as { providerID: string; modelID?: string };
+    delete noModel.modelID;
+    const otherNoModel = { ...ep("openai", "b") } as { providerID: string; modelID?: string };
+    delete otherNoModel.modelID;
+    expect(endpointKey(noModel)).toBe("");
+    expect(endpointKey(otherNoModel)).toBe("");
+    // incumbentIndex treats an empty incumbent key as absent → NOT the same
+    // endpoint, so the empty-ranked neighbour does not retain the incumbent.
+    expect(
+      shouldSwitch({
+        incumbent: noModel,
+        ranked: [otherNoModel],
+        incumbentStillEligible: true,
+        incumbentStillCapable: true,
+        incumbentHealthy: true,
+      }),
     ).toEqual({ switch: true, why: "incumbent-dropped-out" });
   });
 });

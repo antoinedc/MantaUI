@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { chooseModel, AGENT_TIER, PRESETS, type RoutingServices } from "./modelRouter.mjs";
+import { endpointKey } from "./endpointKey.mjs";
 import { tierRank } from "./modelGuide.mjs";
 import { AGENT_FLOOR_SCORE } from "./modelQuality.mjs";
 
@@ -27,7 +28,7 @@ function endpoint(id: string, over: EndpointOver = {}): Endpoint {
 }
 
 function defaultDeclared(catalog: Endpoint[]): Record<string, { catalogId: string }> {
-  return Object.fromEntries(catalog.map((c) => [`${c.providerID}/${c.id}`, { catalogId: String(c.id) }]));
+  return Object.fromEntries(catalog.map((c) => [endpointKey(c), { catalogId: String(c.id) }]));
 }
 
 type RouteOpts = {
@@ -57,8 +58,7 @@ function route({ catalog, policy, intent = {}, services: extra = {}, nowMs = 0 }
   });
 }
 
-const keyOf = (m: { providerID?: string; id?: string } | null | undefined) =>
-  m ? `${m.providerID}/${m.id}` : "";
+const keyOf = endpointKey;
 
 describe("PRESETS / AGENT_TIER", () => {
   it("exposes the three presets and the tier table read by the renderer", () => {
