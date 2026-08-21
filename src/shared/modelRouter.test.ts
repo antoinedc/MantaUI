@@ -8,7 +8,12 @@ import { AGENT_FLOOR_SCORE } from "./modelQuality.mjs";
 // these defects survived a green suite. The services context is likewise built
 // through the REAL box-side assembly (buildRoutingServices) so the
 // declared-catalogId behaviour of catalogEntryFor is the shipped one.
+// The two server .mjs modules have no bundled type declarations (they are
+// consumed from node:test .test.mjs). The seams below are exercised through
+// the real modules — the fixtures are deliberately not hand-typed.
+// @ts-expect-error — server .mjs has no bundled declarations; used for the real normaliser.
 import { _normalizeProviderModel } from "../server/opencode.mjs";
+// @ts-expect-error — server .mjs has no bundled declarations; used for the real services wiring.
 import { buildRoutingServices } from "../server/routingServices.mjs";
 
 // A catalogue entry field that forces a precise, known quality score so tests
