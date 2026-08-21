@@ -57,7 +57,7 @@ extension TranscriptBlock {
         // `uniqueTranscriptRows` suffixes any duplicate anyway.
         case .steps(let content): return "s" + (content.rows.first?.id ?? "empty")
         case .notice(let text, let kind): return "n\(kind)\(text.hashValue)"
-        case .queuedPrompt(let text): return "q\(text.hashValue)"
+        case .queuedPrompt(let prompt): return "pending-\(prompt.id)"
         // Cards key on the REQUEST id — stable and unique. Do NOT hash content:
         // a card whose text is edited mid-flight would change identity and cause
         // a delete+insert in the list. The prefixes are distinct so a question
@@ -197,6 +197,11 @@ struct TranscriptBlockCell: TiledCellContent {
 
     let item: TranscriptRow
     let tokens: Tokens
+    /// User-initiated retry of a failed pending prompt, threaded down from the
+    /// store-owning transcript surface. `@MainActor` (hence Sendable) so it can
+    /// cross the cell's nonisolated `body` legally; invoked only on the main
+    /// actor (inside `TranscriptCellReveal.body`).
+    let onRetry: @MainActor (String) -> Void
 
     func body(context: CellContext<Void>) -> some View {
         // The reveal offset now comes from MessagingUI's OWN pan recogniser, which
@@ -218,7 +223,8 @@ struct TranscriptBlockCell: TiledCellContent {
         TranscriptCellReveal(
             cellReveal: context.cellReveal,
             item: item,
-            tokens: tokens
+            tokens: tokens,
+            onRetry: onRetry
         )
     }
 }
@@ -231,6 +237,10 @@ private struct TranscriptCellReveal: View {
     let cellReveal: CellReveal?
     let item: TranscriptRow
     let tokens: Tokens
+    /// User-initiated retry of a failed pending prompt; `@MainActor` (Sendable)
+    /// so it crosses the nonisolated cell boundary, read only on the main actor
+    /// here.
+    let onRetry: @MainActor (String) -> Void
     /// The blocking-card callbacks, injected by the enclosing chat screen via
     /// `.environment(\.transcriptCardActions, …)` — read only on the main actor
     /// here, so it never crosses the nonisolated cell boundary. Nil on
@@ -266,7 +276,7 @@ private struct TranscriptCellReveal: View {
         if case .prose(let text, nil) = item.block {
             LiveProseTail(text: text, tokens: tokens)
         } else {
-            transcriptBlockView(item.block, tokens: tokens, cards: cardActions)
+            transcriptBlockView(item.block, tokens: tokens, cards: cardActions, onRetry: onRetry)
         }
     }
 }
@@ -282,7 +292,7 @@ private struct TranscriptCellReveal: View {
 /// surfaces → the cards render inert, never wiring to a live store).
 @MainActor
 @ViewBuilder
-func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens, cards: TranscriptCardActions? = nil) -> some View {
+func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens, cards: TranscriptCardActions? = nil, onRetry: @escaping @MainActor (String) -> Void = { _ in }) -> some View {
     // The inert action set a read-only surface falls back to: every card
     // renders harmlessly but no closure reaches a live store.
     let actions = cards ?? TranscriptCardActions(
@@ -320,12 +330,34 @@ func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens, cards: Transc
         SystemNoticeView(text: text, kind: kind, tokens: tokens)
             .padding(.horizontal, Metrics.spacing.sp3)
             .padding(.bottom, Metrics.spacing.sp3)
-    case .queuedPrompt(let text):
-        // A ghost, dimmed user bubble — the message will land here once the
-        // current turn ends, so it renders a preview of where that will be.
-        UserBand(text: text, tokens: tokens)
-            .opacity(0.45)
-            .padding(.bottom, Metrics.spacing.sp4)
+    case .queuedPrompt(let prompt):
+        // A dim ghost user bubble while the send is waiting/sending (the
+        // message will land here once delivered) — flipped to a full-strength
+        // bubble with a tap-to-retry beneath once the send has failed.
+        switch prompt.state {
+        case .waiting, .sending:
+            UserBand(text: prompt.text, tokens: tokens)
+                .opacity(0.45)
+                .padding(.bottom, Metrics.spacing.sp4)
+        case .failed:
+            VStack(alignment: .leading, spacing: 0) {
+                UserBand(text: prompt.text, tokens: tokens)
+                Button {
+                    onRetry(prompt.id)
+                } label: {
+                    HStack(spacing: Metrics.spacing.sp2) {
+                        Image(systemName: "arrow.clockwise")
+                        Text("Couldn't send — tap to retry")
+                    }
+                    .font(.manta(size: Metrics.type.twoXS))
+                    .foregroundColor(tokens.danger)
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, Metrics.spacing.sp3)
+                .padding(.bottom, Metrics.spacing.sp4)
+                .accessibilityIdentifier("pending-prompt-retry")
+            }
+        }
     case .permission(let permission):
         PermissionCard(permission: permission, tokens: tokens) { reply in
             actions.onPermissionReply(permission, reply)

@@ -134,16 +134,6 @@ enum ChatStreamDelta {
     }
 }
 
-/// A prompt accepted while a turn was running, held until the session goes
-/// idle. Carries everything `send()` needs so the drain replays it verbatim.
-struct QueuedPrompt: Equatable {
-    let text: String
-    let attachments: [SendPromptInput.Attachment]
-    let model: SendPromptInput.Model?
-    let mentions: [SendPromptInput.Mention]?
-    let agent: String?
-}
-
 @MainActor
 final class ChatSessionStore: ObservableObject {
 
@@ -182,10 +172,13 @@ final class ChatSessionStore: ObservableObject {
     @Published private(set) var permissions: [PermissionRequest] = []
     @Published private(set) var planOn: Bool?
     @Published private(set) var subagents: [StreamSubagentPayload] = []
-    /// Prompts accepted mid-turn, FIFO. Drained one per idle edge — never
-    /// POSTed while `running`, which is what used to implicitly abort the
-    /// in-flight turn.
-    @Published private(set) var queuedPrompts: [QueuedPrompt] = []
+    /// The session's durable outbox rows, FIFO in submit order. A prompt a
+    /// user committed but the box has not acknowledged — `waiting` while a turn
+    /// runs (or after a relaunch), `sending` while its POST is in flight, and
+    /// `failed` (tap-to-retry) when the POST did not land. Persisted through
+    /// `PendingPromptStore`; drained one per idle edge — never POSTed while
+    /// `running`, which is what used to implicitly abort the in-flight turn.
+    @Published private(set) var pendingPrompts: [PendingPrompt] = []
     @Published private(set) var loading = false
     @Published private(set) var loadFailed = false
     /// True while the box was connected and the stream dropped (mirrors
@@ -375,14 +368,17 @@ final class ChatSessionStore: ObservableObject {
         // subagent screen owns ITS OWN store (BET-1024), so nothing here
         // touches any child; this releases the parent's own resources only.
         eventStore.unregisterSession(sessionId)
-        // A queued prompt must never fire into a session the user has left.
-        queuedPrompts.removeAll()
     }
 
     func load() {
         guard !loading else { return }
         loading = true
         refreshing = true
+        // Surface any prompts this session still has outstanding (a failed or
+        // waiting send from a previous visit). The rows render from the outbox;
+        // a relaunch has already migrated stale `waiting`/`sending` rows to
+        // `.failed` via `PendingPromptStore.failStaleOnLaunch`.
+        pendingPrompts = PendingPromptStore.prompts(for: sessionId, in: PendingPromptStore.load())
         Task {
             await fetchTranscript(isFirstLoad: true)
             // Cleared HERE, not inside the fetch: the fetch can return early
@@ -559,10 +555,10 @@ final class ChatSessionStore: ObservableObject {
         runningSince = running ? (s.runningSince ?? runningSince) : nil
 
         // The session just went idle (stream fold set `running = false`): any
-        // queued prompt may now be sent. Guard-based, so firing on whichever
+        // pending prompt may now be sent. Guard-based, so firing on whichever
         // path folded running down is harmless — a second call is a no-op while
-        // running (the drain's send sets it optimistically) or an empty queue.
-        drainQueuedPromptIfIdle()
+        // running (the drain's deliver sets it optimistically) or an empty box.
+        drainPendingPromptIfIdle()
 
         // Refetch the canonical transcript at turn boundaries so a finished
         // turn's blocks (steps/prose/subagents) land as real content. The fetch
@@ -651,7 +647,7 @@ final class ChatSessionStore: ObservableObject {
             permission: newestPermission,
             planExitQuestion: newestPlanQuestion,
             question: newestQuestion,
-            queuedPrompts: queuedPrompts
+            pendingPrompts: pendingPrompts
         )
 
         let newRows: [TranscriptRow]
@@ -705,7 +701,7 @@ final class ChatSessionStore: ObservableObject {
         permission: PermissionRequest?,
         planExitQuestion: QuestionRequest?,
         question: QuestionRequest?,
-        queuedPrompts: [QueuedPrompt]
+        pendingPrompts: [PendingPrompt]
     ) -> [TranscriptBlock] {
         var trailing: [TranscriptBlock] = []
         if let err = sessionError {
@@ -725,7 +721,7 @@ final class ChatSessionStore: ObservableObject {
         }
         // Prompts accepted mid-turn render as dim ghost bubbles at the very
         // tail — where they will actually land once the current turn finishes.
-        trailing.append(contentsOf: queuedPrompts.map { .queuedPrompt($0.text) })
+        trailing.append(contentsOf: pendingPrompts.map { .queuedPrompt($0) })
         return trailing
     }
 
@@ -971,61 +967,70 @@ final class ChatSessionStore: ObservableObject {
     /// composer trims); attachments + model are optional and flow through the
     /// unchanged `opencode:prompt` surface.
     ///
-    /// Returns `true` when the box accepted the prompt, `false` when the RPC
-    /// failed. On failure the optimistic running/tail state is rolled back so
-    /// the UI doesn't sit on a forever-spinner, and the caller is told so it
-    /// can restore the user's typed text.
-    @discardableResult
-    func send(text: String, attachments: [SendPromptInput.Attachment], model: SendPromptInput.Model?, mentions: [SendPromptInput.Mention]? = nil, agent: String? = nil) async -> Bool {
+    /// The prompt first enters the durable outbox as a `.waiting` row, then is
+    /// delivered immediately if the session is idle (or picked up by the idle
+    /// drain if a turn is running). Failure is surfaced by the pending row in
+    /// the transcript with its own tap-to-retry — never retried automatically.
+    func send(text: String, attachments: [SendPromptInput.Attachment], model: SendPromptInput.Model?, mentions: [SendPromptInput.Mention]? = nil, agent: String? = nil) async {
+        let prompt = PendingPrompt(
+            id: UUID().uuidString,
+            sessionId: sessionId,
+            text: text,
+            attachments: attachments,
+            model: model,
+            mentions: mentions,
+            agent: agent,
+            state: .waiting
+        )
+        pendingPrompts = PendingPromptStore.upsert(prompt, into: pendingPrompts)
+        PendingPromptStore.save(pendingPrompts)
         // A send while the turn runs must not reach opencode — it would abort
-        // the in-flight turn implicitly. Queue it; the idle edge drains FIFO.
-        if running {
-            queuedPrompts.append(QueuedPrompt(text: text, attachments: attachments, model: model, mentions: mentions, agent: agent))
-            return true
-        }
-        // Echo the message straight into the transcript and assume the turn is
-        // running. The box confirms both within a second (running frame, then
-        // the canonical refetch replaces this block), but without the echo the
-        // screen sits completely unchanged after a send, which reads as "the
-        // send did nothing".
-        var optimisticUserIndex: Int?
-        if !text.isEmpty {
-            optimisticUserIndex = transcript.count
-            transcript.append(.user(text, at: Date()))
-            rebuildBlocks()
-        }
+        // the in-flight turn implicitly. The idle drain picks it up.
+        if running { return }
+        await deliver(prompt)
+    }
+
+    /// POST one pending prompt now. Keyed on the prompt's stable id (minted
+    /// once at submit and reused across a retry), so the row's identity never
+    /// changes across `waiting → sending → failed → waiting` — TiledView
+    /// updates it in place instead of remove+insert.
+    private func deliver(_ prompt: PendingPrompt) async {
+        mark(prompt, .sending)
+        // Set up the optimistic turn state `send()` used to set inline. A user
+        // submit is a genuinely new turn: re-arm the one-per-turn completion
+        // latch, mint the streaming tail's stable id, and assume the turn is
+        // running until the box confirms (the running frame, then the canonical
+        // refetch of the real user message, land within a second).
         running = true
         optimisticRunning = true
         turnComplete = false
-        // A user submit is a genuinely new turn: re-arm the one-per-turn
-        // completion latch so this turn's completion is counted once (BET-752
-        // task 5).
         completionArmed = true
         sessionError = nil
         if runningSince == nil {
             runningSince = Date()
-            // A send starts a turn directly (no stream running transition to
-            // mint this from), so mint the streaming tail's stable id here too.
             streamingTailID = "live-\(sessionId)-\(UUID().uuidString)"
             liveTailRowID = streamingTailID
         }
         do {
             try await api.sendPrompt(SendPromptInput(
                 sessionId: sessionId,
-                text: text,
-                model: model,
-                attachments: attachments.isEmpty ? nil : attachments,
-                mentions: mentions,
-                agent: agent
+                text: prompt.text,
+                model: prompt.model,
+                attachments: prompt.attachments.isEmpty ? nil : prompt.attachments,
+                mentions: prompt.mentions,
+                agent: prompt.agent
             ))
+            // Success: nothing is outstanding any more. Drop the pending row;
+            // the canonical refetch already carries the real user message.
+            remove(prompt.id)
             // A dictated note's user message now exists on the box; refetch the
             // notes so its player bubble attaches under it (BET-1029).
             Task { await refreshVoiceNotes() }
-            return true
         } catch {
             // Surface the failure instead of swallowing it: stop the running
             // state and clear the optimistic tail so the spinner doesn't stay
-            // on forever, and let the caller restore the lost message.
+            // on forever. The failed row in the transcript is the error
+            // surface — no separate `actionHint` for this flow.
             optimisticRunning = false
             let rolledBack = ChatStreamMerge.afterSendFailure(to: ChatStreamTurnState(
                 running: running,
@@ -1037,35 +1042,47 @@ final class ChatSessionStore: ObservableObject {
             running = rolledBack.running
             turnComplete = rolledBack.turnComplete
             streamingTailID = rolledBack.streamingTailID
-            // Remove THIS send's optimistic echo: the box never received the
-            // message, so it belongs back in the composer input (which the
-            // caller restores), not standing in the transcript as if sent.
-            // `fetchTranscript` can replace the whole array, so guard on the
-            // captured index still holding our echo before removing it.
-            if let idx = optimisticUserIndex, idx < transcript.count,
-               case .user(let echoed, _) = transcript[idx], echoed == text {
-                transcript.remove(at: idx)
-                rebuildBlocks()
-            }
-            return false
+            mark(prompt, .failed)
         }
     }
 
-    /// Drain ONE queued prompt now that the session is idle. One per edge: the
-    /// send() below sets `running = true` optimistically, so a second queued
-    /// item waits for the next idle. Strict FIFO.
-    private func drainQueuedPromptIfIdle() {
-        guard !running, !queuedPrompts.isEmpty else { return }
-        let next = queuedPrompts.removeFirst()
-        Task { @MainActor in
-            let ok = await send(text: next.text, attachments: next.attachments, model: next.model, mentions: next.mentions, agent: next.agent)
-            if !ok {
-                // The send failed after the box accepted going idle — don't lose
-                // the prompt silently. Put it back at the FRONT and tell the user.
-                queuedPrompts.insert(next, at: 0)
-                actionHint = "Queued message failed to send — will retry on next turn"
-            }
+    /// Drain ONE pending prompt now that the session is idle. One per idle
+    /// edge: `deliver` sets `running = true` optimistically, so a second
+    /// pending prompt waits for the next idle. Strict FIFO over `.waiting`
+    /// rows (a `.failed`/`.sending` row is never auto-delivered).
+    private func drainPendingPromptIfIdle() {
+        guard !running else { return }
+        guard let next = pendingPrompts.first(where: { $0.state == .waiting }) else { return }
+        Task { @MainActor in await deliver(next) }
+    }
+
+    /// User-initiated retry of a failed prompt. The ONLY path out of `.failed`.
+    /// Reuses the prompt's id — row identity survives the retry.
+    func retry(promptID: String) {
+        guard let index = pendingPrompts.firstIndex(where: { $0.id == promptID }),
+              pendingPrompts[index].state == .failed else { return }
+        var prompt = pendingPrompts[index]
+        prompt.state = .waiting
+        pendingPrompts[index] = prompt
+        PendingPromptStore.save(pendingPrompts)
+        if !running {
+            Task { @MainActor in await deliver(prompt) }
         }
+    }
+
+    /// Set a pending row's state, persisting and publishing it.
+    private func mark(_ prompt: PendingPrompt, _ state: PendingPrompt.State) {
+        guard let index = pendingPrompts.firstIndex(where: { $0.id == prompt.id }) else { return }
+        var updated = pendingPrompts[index]
+        updated.state = state
+        pendingPrompts[index] = updated
+        PendingPromptStore.save(pendingPrompts)
+    }
+
+    /// Remove a pending row, persisting and publishing the result.
+    private func remove(_ id: String) {
+        pendingPrompts = PendingPromptStore.remove(id: id, from: pendingPrompts)
+        PendingPromptStore.save(pendingPrompts)
     }
 
     /// Interrupt the running turn.
