@@ -22,7 +22,7 @@ type EndpointOver = Record<string, unknown> & {
   providerID?: string;
   tier?: string;
   score?: number;
-  cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  cost?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
   capabilities?: { toolcall?: boolean; input?: Array<string> | Record<string, boolean> };
 };
 type Endpoint = Record<string, unknown>;
