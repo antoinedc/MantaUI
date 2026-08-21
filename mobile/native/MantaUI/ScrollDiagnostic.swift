@@ -66,8 +66,33 @@ enum ScrollDiagnostic {
         return out
     }
 
+    /// Every non-empty `accessibilityIdentifier` under `v`. Used to PROVE
+    /// which screen ("chat-screen" = parent, "subagent-scene" = child) is
+    /// actually on screen for a given probe/pan trace, instead of trusting
+    /// the caller's intent — the exact ambiguity that made a prior run's
+    /// "child pan fired" trace unusable as evidence (its surface identity
+    /// was never independently confirmed in the log itself).
+    static func identifiedViews(_ v: UIView) -> [String] {
+        var out: [String] = []
+        if let id = v.accessibilityIdentifier, !id.isEmpty { out.append(id) }
+        for sub in v.subviews { out += identifiedViews(sub) }
+        return out
+    }
+
+    /// `chat-screen` (parent) / `subagent-scene` (child) markers currently
+    /// mounted in the key window, for the surface-identity line every probe
+    /// and pan trace now logs.
+    static func screenMarkers() -> String {
+        guard let win = keyWindow() else { return "no-window" }
+        let ids = Set(identifiedViews(win))
+        var found: [String] = []
+        if ids.contains("chat-screen") { found.append("chat-screen(parent)") }
+        if ids.contains("subagent-scene") { found.append("subagent-scene(child)") }
+        return found.isEmpty ? "none" : found.joined(separator: "+")
+    }
+
     static func probe(tag: String) {
-        write("=== probe[\(tag)] \(Date()) ===")
+        write("=== probe[\(tag)] \(Date()) screens=\(screenMarkers()) ===")
         guard let win = UIApplication.shared.connectedScenes
             .compactMap({ $0 as? UIWindowScene }).flatMap({ $0.windows })
             .first(where: { $0.isKeyWindow }) else {
@@ -131,7 +156,10 @@ final class PanProbe {
     func start(tag: String) {
         stop()
         self.tag = tag
-        ScrollDiagnostic.write("=== pan[\(tag)] \(Date()) ===")
+        // The line that settles "was this really the child?" — logged at the
+        // moment recording starts, not inferred later from which deep link
+        // was sent (see ScrollDiagnostic.screenMarkers).
+        ScrollDiagnostic.write("=== pan[\(tag)] \(Date()) screens=\(ScrollDiagnostic.screenMarkers()) ===")
         guard let win = ScrollDiagnostic.keyWindow(),
               let sv = ScrollDiagnostic.allScrollViews(win).max(by: { $0.contentSize.height < $1.contentSize.height }) else {
             ScrollDiagnostic.write("[\(tag)] no tall scroll view to record")

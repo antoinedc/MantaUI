@@ -56,12 +56,15 @@ final class MantaPushRouter: ObservableObject {
 final class MantaDebugRouter: ObservableObject {
     static let shared = MantaDebugRouter()
 
-    /// A DEBUG request to open `<childSessionID>`'s drill-in, having first
-    /// pushed `<parentSessionID>`'s chat screen (so the SubagentSession
-    /// destination is registered on the stack). Consumed by SessionListView.
+    /// A DEBUG request to open `<parentSessionID>`'s chat screen and,
+    /// optionally, drill into `<childSessionID>`'s subagent screen from it.
+    /// A nil `childSessionID` pushes ONLY the parent and starts the pan
+    /// recorder there — the automatable parent CONTROL run (no separate
+    /// "which screen is this?" ambiguity: the empty `child=` is unambiguous
+    /// by construction). Consumed by SessionListView.
     struct Request: Equatable {
         var parentSessionID: String
-        var childSessionID: String
+        var childSessionID: String?
     }
 
     @Published var pendingSubagentPush: Request?
@@ -74,6 +77,8 @@ final class MantaDebugRouter: ObservableObject {
     private init() {}
 
     /// Parse a `manta://debug/subagent?...` link. Returns true iff handled.
+    /// `child=` is OPTIONAL: omitted/empty pushes only the parent (control
+    /// run); present pushes parent then drills into that child.
     @discardableResult
     static func route(_ url: URL) -> Bool {
         guard url.scheme == "manta", url.host == "debug" else { return false }
@@ -81,8 +86,9 @@ final class MantaDebugRouter: ObservableObject {
             let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems
             let session = items?.first(where: { $0.name == "session" })?.value
             let child = items?.first(where: { $0.name == "child" })?.value
-            guard let session, !session.isEmpty, let child, !child.isEmpty else { return false }
-            shared.pendingSubagentPush = Request(parentSessionID: session, childSessionID: child)
+            guard let session, !session.isEmpty else { return false }
+            let trimmedChild = (child?.isEmpty ?? true) ? nil : child
+            shared.pendingSubagentPush = Request(parentSessionID: session, childSessionID: trimmedChild)
             return true
         }
         if url.path == "/pan" {

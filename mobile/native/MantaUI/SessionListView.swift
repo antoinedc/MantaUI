@@ -226,11 +226,14 @@ struct SessionListView: View {
     // MARK: - Debug deep-link (§BET-1257)
 
     #if DEBUG
-    /// BET-1257 — open the REAL failing child's drill-in with no finger, push
-    /// it, and once its transcript has laid out, start the pan/offset recorder
-    /// on it. The child STAYS open (no auto-pop) so a real pan (idb ui swipe)
-    /// can be driven against it while PanProbe records whether the recogniser
-    /// fires and whether contentOffset moves.
+    /// BET-1257 — open the REAL failing parent (and, if `childSessionID` is
+    /// set, drill into that child) with no finger, then start the pan/offset
+    /// recorder on whichever screen ends up on top. A nil `childSessionID` is
+    /// the automatable PARENT CONTROL run — no pop-back choreography needed,
+    /// so it can run unattended in the same job as the child case. Either way
+    /// the recorded screen stays open (no auto-pop) so a real pan (idb ui
+    /// swipe) can be driven against it while PanProbe records whether the
+    /// recogniser fires and whether contentOffset moves.
     private func consumeDebugSubagentPush() {
         guard let req = debugRouter.pendingSubagentPush else { return }
         debugRouter.pendingSubagentPush = nil
@@ -243,6 +246,14 @@ struct SessionListView: View {
             path.append(SessionOpenTarget(project: "", windowIndex: 0, name: "session", sessionId: sessionId))
         }
 
+        guard let childSessionId = req.childSessionID else {
+            // Parent-only control run: let the push settle, then record.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                PanProbe.shared.start(tag: "parent")
+            }
+            return
+        }
+
         // Let the parent push settle so its SubagentSession destination is
         // registered, then push the child.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
@@ -251,8 +262,8 @@ struct SessionListView: View {
                 status: .done,
                 duration: nil,
                 transcript: [],
-                childSessionId: req.childSessionID,
-                fallbackId: "debug-\(req.childSessionID)"
+                childSessionId: childSessionId,
+                fallbackId: "debug-\(childSessionId)"
             ))
         }
 
