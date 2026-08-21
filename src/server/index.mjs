@@ -2237,6 +2237,7 @@ const handleRequest = async (req, res) => {
         const result = await delegateEngine.startJobWithApproval({
           prompt: body?.prompt,
           model: body?.model,
+          subagent_type: body?.subagent_type,
           parentSessionID: body?.sessionID,
           parentDirectory: body?.directory,
           tools: body?.tools,

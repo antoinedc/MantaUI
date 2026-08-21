@@ -23,6 +23,7 @@ import {
   tickActivity,
   chooseSubagentModel,
   chooseMainModel,
+  resolveNamedModel,
 } from "./delegate.mjs";
 import { familyKey } from "../shared/modelGuide.mjs";
 // Per standing rule 9: a routing test may not hand-write a candidate literal.
@@ -797,6 +798,165 @@ test("startJob routes only within the consent (sub) catalogue (BET-1229)", async
     key === "anthropic/claude-opus-4" || key === "openai/gpt-5",
     `routed subagent landed on deactivated model ${key}`,
   );
+});
+
+// ----------------------------------------------------------------------------
+// BET-1275 — delegate model precedence: an explicit model wins, silence routes
+// on the subagent's own intent (11a), a named model is never routed over and
+// must respect the Sub ticks (11b / rule 3).
+// ----------------------------------------------------------------------------
+
+function threeTierAnthropicModels() {
+  return [
+    { providerID: "anthropic", id: "claude-opus-4", status: "active" },    // deep
+    { providerID: "anthropic", id: "claude-sonnet-4", status: "active" },  // balanced
+    { providerID: "anthropic", id: "claude-haiku-4", status: "active" },   // fast
+  ];
+}
+
+// Capture the `[router]` log lines chooseSubagentModel emits — the observable
+// record that routing ran AND with which agent. Asserting on this (the intent)
+// rather than the specific winner is what the issue asks for.
+async function captureRouterLines(fn, ...args) {
+  const lines = [];
+  const orig = console.log;
+  console.log = (...a) => lines.push(a.join(" "));
+  let out;
+  try {
+    out = await fn(...args);
+  } finally {
+    console.log = orig;
+  }
+  return { out, lines };
+}
+
+test("BET-1275 11b: a named Sub-ticked model runs on it and NEVER invokes the router", async () => {
+  const h = startHarness("child_named_ticked");
+  h.deps.configGet = async () => ({ modelRouting: { preset: "economy" } }); // routing ON
+  h.deps.listSnapshots = () => [];
+  h.deps.listModels = async () => mockModels();
+  // A throwing router stub: if routing ever runs for a NAMED model, this throws
+  // (the named path skips routing entirely and never calls it).
+  h.deps.chooseSubagentModel = () => {
+    throw new Error("router must not run for a named model");
+  };
+  const res = await startJob(
+    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo", model: "opus" },
+    h.deps,
+  );
+  assert.equal(res.ok, true);
+  assert.equal(h.delivered.length, 1);
+  // Named, ticked model is honoured verbatim — never routed over.
+  assert.deepEqual(h.delivered[0].model, { providerID: "anthropic", modelID: "claude-opus-4-5" });
+});
+
+test("BET-1275 rule 3: a named UN-ticked model fails loudly naming close candidates", async () => {
+  const h = harness([]);
+  h.deps.listModels = async () => mockModels();
+  // The user unticked (deactivated for subagents) claude-sonnet-4-6; only
+  // claude-opus-4-5 and deepseek-chat stay routable — so naming the unticked
+  // sonnet must fail loudly, naming the closest routable sibling (opus).
+  h.deps.configGet = async () => ({
+    modelRouting: { preset: "balanced" },
+    deactivatedSubagents: ["anthropic/claude-sonnet-4-6"],
+  });
+  const res = await startJob(
+    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo",
+      model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" } },
+    h.deps,
+  );
+  assert.equal(res.ok, false);
+  assert.match(res.error, /not routable/);
+  assert.equal(h.delivered.length, 0, "no prompt delivered on an un-ticked model");
+  assert.equal(h.jobs.length, 0, "no job persisted on an un-ticked model");
+});
+
+// resolveNamedModel reuses the SHARED suggestModels matcher for its retry hint
+// (the issue forbids a second matcher). Assert the hint names a routable
+// candidate when one shares tokens with the query — the "fails loudly, naming
+// close candidates" contract at the unit level.
+test("BET-1275 11b: resolveNamedModel names the closest routable candidate on no-match", () => {
+  const routable = [{ providerID: "anthropic", id: "claude-opus-4-5" }];
+  assert.throws(
+    () => resolveNamedModel("opus 9", routable),
+    /No model matched "opus 9".*Closest models: anthropic\/claude-opus-4-5/,
+  );
+});
+
+test("BET-1275 11b: resolveNamedModel rejects a structured model missing from the routable (sub) catalogue", () => {
+  const routable = [
+    { providerID: "anthropic", id: "claude-opus-4-5" },
+    { providerID: "deepseek", id: "deepseek-chat" },
+  ];
+  assert.throws(
+    () => resolveNamedModel({ providerID: "anthropic", modelID: "claude-sonnet-4-6" }, routable),
+    /"anthropic\/claude-sonnet-4-6" is not routable on this box/,
+  );
+});
+
+test("BET-1275 11a: delegate({}) with subagent_type 'explore' routes with agent=explore (intent, not the winner)", async () => {
+  const h = startHarness("child_explore");
+  h.deps.configGet = async () => ({ modelRouting: { preset: "balanced" } });
+  h.deps.listSnapshots = () => [];
+  const models = threeTierAnthropicModels();
+  h.deps.listModels = async () => models;
+  h.deps.routingServices = routingServicesFor(models);
+  const { out, lines } = await captureRouterLines((input) => startJob(input, h.deps), {
+    prompt: "do it",
+    parentSessionID: "parent",
+    parentDirectory: "/repo",
+    subagent_type: "explore",
+  });
+  assert.equal(out.ok, true);
+  assert.equal(h.delivered.length, 1);
+  // The requested subagent type IS the intent — the [router] line names the
+  // agent the spawn routed as. Assert the intent, not which model won.
+  assert.ok(
+    lines.some((l) => l.includes("[router] subagent agent=explore")),
+    `expected agent=explore in [router] line; got: ${lines.join(" | ")}`,
+  );
+});
+
+test("BET-1275 11a: an absent/blank subagent_type routes with agent=general", async () => {
+  const h = startHarness("child_blank_agent");
+  h.deps.configGet = async () => ({ modelRouting: { preset: "balanced" } });
+  h.deps.listSnapshots = () => [];
+  const models = threeTierAnthropicModels();
+  h.deps.listModels = async () => models;
+  h.deps.routingServices = routingServicesFor(models);
+  const { out, lines } = await captureRouterLines((input) => startJob(input, h.deps), {
+    prompt: "do it",
+    parentSessionID: "parent",
+    parentDirectory: "/repo",
+    subagent_type: "   ",
+  });
+  assert.equal(out.ok, true);
+  // A blank subagent_type (unknown) must map to the general agent, not leak
+  // through as an empty agent and not crash.
+  assert.ok(
+    lines.some((l) => l.includes("[router] subagent agent=general")),
+    `expected agent=general in [router] line; got: ${lines.join(" | ")}`,
+  );
+});
+
+test("BET-1275: a background job routes from the box config even with no parent-Auto input", async () => {
+  const h = startHarness("child_routes_unaauto");
+  h.deps.configGet = async () => ({ modelRouting: { preset: "economy" }, deactivatedSubagents: [] });
+  h.deps.listSnapshots = () => [];
+  const models = threeTierAnthropicModels();
+  h.deps.listModels = async () => models;
+  h.deps.routingServices = routingServicesFor(models);
+  // No `model`, no subagent_type, no composer, NO path where the parent
+  // conversation's Auto state could be consulted — the delegate has no
+  // per-conversation auto choice to inherit (rule 4). Routing must still fire
+  // from the box config's preset and decide a model.
+  const res = await startJob(
+    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo" },
+    h.deps,
+  );
+  assert.equal(res.ok, true);
+  assert.equal(h.delivered.length, 1);
+  assert.ok(h.delivered[0].model, "routing decided a model with no parent-Auto input");
 });
 
 test("chooseSubagentModel returns the incumbent on an off-path and is load-bearing (BET-1220)", () => {
