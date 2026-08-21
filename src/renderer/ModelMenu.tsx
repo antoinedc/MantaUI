@@ -69,7 +69,7 @@ export function ModelMenu({
   presetLabel?: string;
   /**
    * BET-1246: the routing decision's human-readable reason (what `routing:choose`
-   * / `routing:main` returned). Shown in the Auto row's sub-line when Auto is
+   * returned). Shown in the Auto row's sub-line when Auto is
    * active and a decision exists.
    */
   autoReason?: string;

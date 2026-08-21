@@ -50,6 +50,7 @@ describe("ModelPicker — loading state (models === null)", () => {
         defaultModel={{ providerID: "anthropic", modelID: "claude-opus-4-7" }}
         onOpen={() => {}}
         onSelect={() => {}}
+        onSelectEffort={() => {}}
       />,
     );
     return h.container;
@@ -98,7 +99,9 @@ describe("ModelPicker — routed pill (BET-1222)", () => {
   });
 
   function render(
-    routed: { reason: string; incumbent: { providerID: string; modelID: string } } | null,
+    routed:
+      | { reason: string; incumbent: { providerID: string; modelID: string } | null }
+      | null,
     onRoutedUndone: () => void = () => {},
   ): HTMLElement {
     h?.unmount();
@@ -112,6 +115,7 @@ describe("ModelPicker — routed pill (BET-1222)", () => {
         onSelect={() => {}}
         routed={routed}
         onRoutedUndone={onRoutedUndone}
+        onSelectEffort={() => {}}
       />,
     );
     return h.container;
@@ -154,6 +158,18 @@ describe("ModelPicker — routed pill (BET-1222)", () => {
     act(() => (btn as HTMLButtonElement).click());
     expect(undone).toBe(true);
   });
+
+  it("renders the reason without an undo action when routed has no incumbent (BET-1274 10e)", () => {
+    // The first turn of a session has nothing to undo — the pill still says why
+    // the model is what it is, but offers no undo button.
+    const c = render({
+      reason: "first turn boundary",
+      incumbent: null,
+    });
+    const text = c.textContent ?? "";
+    expect(text).toContain("first turn boundary");
+    expect(text).not.toContain("undo");
+  });
 });
 
 describe("ModelPicker — Auto mode (BET-1247)", () => {
@@ -181,6 +197,7 @@ describe("ModelPicker — Auto mode (BET-1247)", () => {
         labelOverride={props.labelOverride ?? null}
         onOpen={() => {}}
         onSelect={() => {}}
+        onSelectEffort={() => {}}
       />,
     );
     return h.container;
@@ -253,5 +270,66 @@ describe("ModelPicker — Auto mode (BET-1247)", () => {
       ?.getAttribute("title") ?? "";
     expect(title).toContain("Claude Opus 4.7");
     expect(title).toContain("anthropic");
+  });
+});
+
+describe("ModelPicker — effort/fast write effort, not a model choice (BET-1274 10c)", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  it("routes an effort-menu selection to onSelectEffort, never onSelect", () => {
+    const effortCalls: ModelSelection[] = [];
+    const modelCalls: ModelSelection[] = [];
+    h = mount(
+      <ModelPicker
+        modelLabel={null}
+        models={MODELS}
+        modelOverride={{ providerID: "anthropic", modelID: "claude-opus-4-7" }}
+        defaultModel={null}
+        onOpen={() => {}}
+        onSelect={(m) => { if (m) modelCalls.push(m); }}
+        onSelectEffort={(m) => effortCalls.push(m)}
+      />,
+    );
+    // Open the effort (right) segment menu.
+    const effortBtn = h.container.querySelector<HTMLElement>(".manta-effort-picker-btn");
+    expect(effortBtn).toBeTruthy();
+    act(() => (effortBtn as HTMLButtonElement).click());
+    // Select the "High" variant row.
+    const high = [...h.container.querySelectorAll("button")].find((b) =>
+      (b.textContent ?? "").includes("High"),
+    );
+    expect(high).toBeTruthy();
+    act(() => (high as HTMLButtonElement).click());
+    // The effort went to onSelectEffort (with the variant) — and NOT to the
+    // model-choice onSelect, which is what used to pin the model + exit Auto.
+    expect(effortCalls).toHaveLength(1);
+    expect(effortCalls[0].variant).toBe("high");
+    expect(modelCalls).toHaveLength(0);
+  });
+
+  it("names the capitalized balance preset in the Auto row sub-line (BET-1274 10d)", () => {
+    h = mount(
+      <ModelPicker
+        modelLabel={null}
+        models={MODELS}
+        modelOverride={null}
+        defaultModel={null}
+        auto
+        presetLabel="Balanced"
+        autoReason="moved: the previous provider ran out"
+        onSelectAuto={() => {}}
+        onOpen={() => {}}
+        onSelect={() => {}}
+        onSelectEffort={() => {}}
+      />,
+    );
+    // Open the model dropdown; the Auto pinned row is its first header row.
+    const modelBtn = h.container.querySelector<HTMLElement>(".manta-model-picker-btn");
+    act(() => (modelBtn as HTMLButtonElement).click());
+    expect((h.container.textContent ?? "")).toContain("Balanced · moved: the previous provider ran out");
   });
 });

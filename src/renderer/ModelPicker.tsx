@@ -69,6 +69,13 @@ export function ModelPicker({
   // mechanism the picker's own selects use — no second persistence path.
   routed = null,
   onRoutedUndone,
+  // BET-1274 10c: effort (variant) + the ⚡ fast toggle call THIS, not
+  // `onSelect` — writing a variant never changes the ModelChoice kind and
+  // never turns Auto off.
+  onSelectEffort,
+  // BET-1274 10d: the routing preset's display label ("Balanced"), threaded to
+  // the Auto row's sub-line so Auto can name the user's balance setting.
+  presetLabel,
 }: {
   modelLabel: string | null;
   models: OpencodeModel[] | null;
@@ -87,6 +94,10 @@ export function ModelPicker({
   onOptInModel?: (key: string) => void;
   onOpen: () => void;
   onSelect: (m: ModelSelection | null) => void;
+  // BET-1274 10c: kind-preserving effort/fast selection (see above).
+  onSelectEffort: (m: ModelSelection) => void;
+  // BET-1274 10d: the routing preset's display label for the Auto row.
+  presetLabel?: string;
   // Welcome-screen helper for the model button label: shown unconditionally,
   // highest precedence — lets a caller display "Auto" until the user first
   // picks a model. A no-op for callers that don't pass it (ChatPanel).
@@ -157,6 +168,12 @@ export function ModelPicker({
   // active model exposes no variant list the right segment is simply
   // non-interactive (nothing to select).
   const effortDisabled = variants.length === 0;
+  // BET-1274 10g: no resolved model yet (catalog in flight, OR Auto before its
+  // first turn resolved a model) ⇒ the right segment must not claim a value.
+  // "High" is the design's default only for a RESOLVED model that has no
+  // variant list; with no model at all the effort side says "not yet", reusing
+  // the loading treatment rather than inventing a third state.
+  const rightUnresolved = models === null || activeModel === null;
   // Label reflects the user's selected variant; with no selectable variants
   // (or no selection yet) it shows the design's default effort value.
   const effortLabel = activeVariant
@@ -232,7 +249,7 @@ export function ModelPicker({
           )
         }
         right={
-          loading ? (
+          rightUnresolved ? (
             <span className="flex items-center gap-1">
               <SkeletonBar width={30} />
               <ChevronDown size={13} aria-hidden="true" className="shrink-0 text-text-quiet" />
@@ -286,7 +303,7 @@ export function ModelPicker({
           if (!fast.available || !fast.target) return;
           setModelOpen(false);
           setVariantOpen(false);
-          onSelect(fast.target);
+          onSelectEffort(fast.target);
         }}
         extraTitle={loading ? LOADING_TITLE : fast.title}
         extraLabel="Fast mode"
@@ -302,7 +319,7 @@ export function ModelPicker({
         rightExpanded={variantOpen}
         leftTitle={leftTitle}
         rightTitle={
-          loading
+          rightUnresolved
             ? LOADING_TITLE
             : effortDisabled
               ? "This model has no effort / variant setting"
@@ -311,19 +328,23 @@ export function ModelPicker({
       />
 
       {/* Routed pill — the honesty mechanism (BET-1222). When the router set
-          this session's model, show WHY and a one-click undo back to the model
-          the user would have had. The reason never renders without routed: the
-          caller's `routed` state is the only thing that switches this on. */}
+          this session's model, show WHY and, when there is a model it moved
+          away from, a one-click undo back to it. The reason renders whenever
+          `routed` is set (including a first turn with no incumbent — nothing
+          to undo, so no undo action); the undo button renders only when an
+          incumbent exists (BET-1274 10e). */}
       {routed && !loading && (
         <span className="flex items-center gap-2 flex-wrap">
           <span className="text-meta text-text-faint">{routed.reason}</span>
-          <button
-            type="button"
-            onClick={onRoutedUndone}
-            className="font-mono text-meta rounded-full border border-border bg-raised px-3 py-1 text-text-muted hover:bg-fill-hover"
-          >
-            undo · keep {routed.incumbent.providerID}/{routed.incumbent.modelID} here
-          </button>
+          {routed.incumbent && (
+            <button
+              type="button"
+              onClick={onRoutedUndone}
+              className="font-mono text-meta rounded-full border border-border bg-raised px-3 py-1 text-text-muted hover:bg-fill-hover"
+            >
+              undo · keep {routed.incumbent.providerID}/{routed.incumbent.modelID} here
+            </button>
+          )}
         </span>
       )}
 
@@ -345,6 +366,7 @@ export function ModelPicker({
           autoActive={auto}
           onSelectAuto={onSelectAuto}
           autoReason={autoReason ?? undefined}
+          presetLabel={presetLabel}
         />
       )}
 
@@ -357,7 +379,7 @@ export function ModelPicker({
           variants={variants}
           activeModel={activeModel}
           activeVariantId={activeVariantId}
-          onSelect={onSelect}
+          onSelect={onSelectEffort}
           onClose={() => setVariantOpen(false)}
         />
       )}

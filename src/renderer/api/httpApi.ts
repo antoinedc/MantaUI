@@ -1060,8 +1060,6 @@ export const httpApi: Api = {
 
   // -- model picker --
   opencodeModels: () => rpc(IPC.opencodeModels),
-  opencodeModelRoute: (incumbent, agent) =>
-    rpc(IPC.opencodeModelRoute, { incumbent, agent }),
   routingChoose: (input) => rpc(IPC.routingChoose, input),
   accountsRetry: (providerID) => rpc(IPC.accountsRetry, { providerID }),
   accountHealth: () => rpc(IPC.accountsHealth),

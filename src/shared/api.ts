@@ -91,19 +91,8 @@ import type {
 import type { ClaimOutcome } from "./claim.mjs";
 
 type PromptModel = { providerID: string; modelID: string; variant?: string };
-// BET-1225: the server-side main-conversation routing decision, returned by
-// opencodeModelRoute. `model` is the router's chosen model to apply to the
-// next prompt; `reason` is why (shown on the routed pill); `incumbent` is the
-// model it replaced (what undo reverts to); `changed` is whether a substitution
-// actually happened (false on routing-off / failure / no-op).
-type ModelRouteDecision = {
-  model: PromptModel | null;
-  reason: string;
-  incumbent: PromptModel | null;
-  changed: boolean;
-};
 // BET-1244: the generic, read-only routing decision (`routing:choose`) — the
-// sibling of ModelRouteDecision that carries no `incumbent` but adds
+// routing decision carries no `incumbent` but adds
 // `alternatives` (the next-best candidates a surface can offer). `model` stays
 // null on routing-off / no-survivors / failure; `changed` is false whenever no
 // substitution is offered. Never throws: on an internal failure the server
@@ -437,15 +426,6 @@ export interface Api {
 
   // Model picker.
   opencodeModels(): Promise<OpencodeModel[]>;
-  // BET-1225: fetch the server's main-conversation routing decision for the
-  // session at start, so the renderer can apply the routed model and render
-  // the undoable routed pill. `incumbent` is the model the session would use
-  // without routing (the user's per-session pick or the persisted default).
-  // Returns null on the demo/no-op transport (routing is never exercised).
-  opencodeModelRoute(
-    incumbent: PromptModel | null,
-    agent?: string,
-  ): Promise<ModelRouteDecision | null>;
   // BET-1244: the read-only, side-effect-free routing decision for either
   // surface ("main" | "sub"), resolved by the SAME decision core the subagent
   // path uses. No state is written and no prompt is sent. Never throws — on

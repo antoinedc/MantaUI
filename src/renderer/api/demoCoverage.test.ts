@@ -115,7 +115,6 @@ export const DEMO_UNIMPLEMENTED = [
   "opencodeGetProviders",
   "opencodeGetSubagents",
   "opencodeModelCatalog",
-  "opencodeModelRoute",
   "opencodePermissionReply",
   "opencodePrompt",
   "opencodeQuestionReject",

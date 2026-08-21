@@ -455,7 +455,7 @@ providerHealth.deliverSnapshots(listSnapshots());
 // BET-1252: the box's model catalogue (provider-agnostic, for routing
 // identity/quality). Starts the page poller (immediate first tick, inFlight
 // guard, timer.unref()) and exposes its controller as the routing catalogue
-// index both production callers (delegate startJob + rpc routing:main) build
+// index the production callers (delegate startJob + rpc routing:choose) build
 // their RoutingServices from. Degrades to an empty catalogue until the first
 // successful fetch — routing treats that as "models unidentifiable" and falls
 // back to the incumbent, never an error.
@@ -857,7 +857,7 @@ rpcHandlers = buildHandlers({
   serverVersion: SERVER_VERSION,
   opencodeVersion: OPENCODE_VERSION,
   delegate: delegateEngine,
-  // BET-1252: routing-services readers shared with delegate (the routing:main
+  // BET-1252: routing-services readers shared with delegate (the routing:choose
   // channel). Same degradation contract:
   // absent readers ⇒ absent services ⇒ the router returns the incumbent.
   routingCatalogIndex,

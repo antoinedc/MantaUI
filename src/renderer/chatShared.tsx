@@ -249,6 +249,11 @@ export type ModelSelection = { providerID: string; modelID: string; variant?: st
  *                               the stored value.
  * - `{ kind: "server-default" }` — today's `null`: let opencode pick its default.
  *
+ * The `variant` (effort dial) is stored separately from the model identity:
+ * on `model` it rides the `ModelSelection.variant, and the `auto` kind carries
+ * its own optional `variant` (BET-1274 10c — choosing an effort never turns
+ * Auto off, so Auto must be able to carry it).
+ *
  * Kept separate from `ModelSelection` on purpose: widening `ModelSelection` would force
  * every consumer that forwards a model to a provider to re-narrow it.
  */

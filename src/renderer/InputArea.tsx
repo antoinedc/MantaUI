@@ -240,6 +240,10 @@ export function InputArea({
   onOptInModel: (key: string) => void;
   onOpenModels: () => void;
   onSelectModel: (m: ModelSelection | null) => void;
+  // BET-1274 10c: kind-preserving effort/fast selection (never turns Auto off).
+  onSelectEffort: (m: ModelSelection) => void;
+  // BET-1274 10d: the routing preset's display label for the Auto row.
+  presetLabel?: string;
   // Plan-mode chip (BET-949): the resolved toggle state + the flip handler.
   plan: PlanToggleState;
   onTogglePlan: () => void;
@@ -577,6 +581,8 @@ export function InputArea({
             onOptInModel={onOptInModel}
             onOpen={onOpenModels}
             onSelect={onSelectModel}
+            onSelectEffort={onSelectEffort}
+            presetLabel={presetLabel}
             labelOverride={shortLabel}
           />
           {/* Plan mode chip (BET-949) — shared PlanChip, also used by the

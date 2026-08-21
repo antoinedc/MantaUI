@@ -34,7 +34,7 @@ import { resolveWorkspace } from "./peers.mjs";
 import * as providers from "./providers.mjs";
 import * as launchers from "./launchers.mjs";
 import * as subscriptionProviders from "./subscriptionProviders.mjs";
-import { chooseMainModel, toDeliverModel } from "./delegate.mjs";
+import { toDeliverModel } from "./delegate.mjs";
 import { buildRoutingServices } from "./routingServices.mjs";
 import { restartOpencode, runServerSelfUpdate } from "./opencodeAdmin.mjs";
 import { pollClaudeLogin, claudeCliStatus, listRoutableModels } from "./opencode.mjs";
@@ -812,69 +812,8 @@ export function buildHandlers({
       return oc.listModels(cfg.modelOverrides ?? {});
     },
 
-    // BET-1225: main-conversation ("build" agent) routing decision. ChatPanel
-    // asks once at session start; the decision runs through the shared
-    // chooseMainModel wrapper (delegate.mjs), so the routed pill reflects the
-    // same decision the send path would apply. Returns the full decision
-    // { model, reason, incumbent, changed } so the renderer can apply the
-    // routed model AND surface the undoable pill. Every input is guarded —
-    // missing policy / quota / catalog must never throw and falls back to the
-    // incumbent (a conversation that did not ask to route).
-    "routing:main": async (input) => {
-      const incumbent = input?.incumbent ?? null;
-      const agent = input?.agent ?? "build";
-      let cfg = {};
-      let quota = [];
-      let catalog = [];
-      try {
-        cfg = (await local.configGet()) ?? {};
-      } catch {
-        cfg = {};
-      }
-      const policy = cfg?.modelRouting ?? {};
-      try {
-        quota = usageListSnapshots();
-        if (!Array.isArray(quota)) quota = [];
-      } catch {
-        quota = [];
-      }
-      // BET-1253: the FILTERED catalogue for the "main" surface. Use the same
-      // routingListRoutableModels seam routing:choose does — the ONE place
-      // routing consent is computed — never a second filter, never raw
-      // listModels. Otherwise routing:main could route a main conversation onto
-      // a model the user deactivated/retired (which routing:choose excludes).
-      try {
-        catalog = await routingListRoutableModels("main", cfg);
-        if (!Array.isArray(catalog)) catalog = [];
-      } catch {
-        catalog = [];
-      }
-      // BET-1252: assemble the routing-services context from live box state.
-      // Build is guarded (every reader degrades to absent) and the whole wrap
-      // degrades to null services → the router returns the incumbent unchanged,
-      // so a routing failure can never change a conversation invisibly.
-      let services = null;
-      try {
-        services = await buildRoutingServices(cfg, {
-          catalogIndex: routingCatalogIndex,
-          endpoints: catalog,
-          snapshots: quota,
-          providerHealthState: routingProviderHealthState,
-          endpointSummary: routingEndpointSummary,
-        });
-      } catch (e) {
-        // 11e: a silently-degrading services build is how "no model passes
-        // constraints (identity)" hides. Never fatal — routing degrading is
-        // correct, degrading silently is not.
-        console.error(`[router] routing services degraded, routing on absent context: ${e?.message ?? e}`);
-        services = null;
-      }
-      return chooseMainModel({ incumbent, catalog, policy, agent, nowMs: Date.now(), services });
-    },
-
     // BET-1244: the read-only, side-effect-free routing decision — the generic
-    // sibling of routing:main (which decides the main conversation's model at
-    // session start). Unlike routing:main it takes the SURFACE explicitly
+    // routing decision for a surface. It takes the SURFACE explicitly
     // ("main" | "sub"), so the same single decision core (chooseModel — the one
     // the subagent path calls) can answer for either, and returns the decision
     // VERBATIM: { model, reason, alternatives, changed }. No state is written,
@@ -932,7 +871,7 @@ export function buildHandlers({
         }
         // Normalise the incumbent into catalog shape ({providerID, id}) so the
         // `changed` comparison inside chooseModel treats a requested model and
-        // a catalog entry of the same model as equal (mirrors chooseMainModel).
+        // a catalog entry of the same model as equal.
         const catalogIncumbent = incumbent
           ? { providerID: incumbent.providerID, id: incumbent.modelID ?? incumbent.id }
           : null;
