@@ -1,22 +1,18 @@
 // Shared per-session model choice, box-backed (BET-1281).
 //
-// WHY THIS EXISTS. The per-conversation model choice used to live in
-// localStorage (`manta:chat:<sid>:model`), so it never left the Mac. It now
-// lives in the box store (~/.manta/model-prefs.json, src/server/modelPrefs.mjs,
-// BET-1279) so the same conversation opened on another device shows the same
-// choice. This module is the SINGLE renderer cache for that store — one
-// `model-prefs:get` for the whole box, cached at module scope, refetched on the
-// `model-prefs.updated` bus event. ChatPanel never fetches per-session (there is
-// deliberately no per-session RPC channel, and none should be added).
-//
-// Modeled on modelCatalog.ts: module-level cache + a hook for consumers.
+// The per-conversation model choice used to live in localStorage
+// (`manta:chat:<sid>:model`); it now lives in the box store
+// (src/server/modelPrefs.mjs, BET-1279) so the same conversation opened on
+// another device shows the same choice. This module is the SINGLE renderer
+// cache for that store — one `model-prefs:get` for the whole box, cached at
+// module scope, refetched on the `model-prefs.updated` bus event. ChatPanel
+// never fetches per-session (no per-session RPC channel exists or should be
+// added). Modeled on modelCatalog.ts: module-level cache + a hook.
 //
 // The box store holds a CONCRETE per-session `ModelSelection` or ABSENCE
-// (absence = server default). It has no slot for the desktop's "Auto" routing
-// mode (BET-1245): Auto is a desktop-routing concept that can't run on a second
-// device, so its flag is kept device-locally OUTSIDE the `manta:chat:` namespace
-// (that namespace is now box-backed; the DoD grep only admits the plan key
-// there). Everything else is box-backed.
+// (absence = server default). It has no slot for the desktop "Auto" routing mode
+// (BET-1245), so Auto's flag stays device-local OUTSIDE `manta:chat:` (that
+// namespace is now box-backed; the DoD grep only admits the plan key there).
 
 import { useEffect, useMemo, useState } from "react";
 import type { ModelPrefsSessionRecord, ModelPrefsState } from "../shared/types";
@@ -115,7 +111,14 @@ export function sessionSelectionFromRecord(
   rec: ModelPrefsSessionRecord | undefined,
 ): ModelSelection | null {
   if (!rec) return null;
-  if (typeof rec.providerID !== "string" || typeof rec.modelID !== "string") return null;
+  if (
+    typeof rec.providerID !== "string" ||
+    rec.providerID === "" ||
+    typeof rec.modelID !== "string" ||
+    rec.modelID === ""
+  ) {
+    return null;
+  }
   const model: ModelSelection = { providerID: rec.providerID, modelID: rec.modelID };
   if (typeof rec.variant === "string" && rec.variant !== "") model.variant = rec.variant;
   return model;
@@ -143,13 +146,33 @@ export function resolveSessionChoice(
 export function useSessionModelChoice(sessionId: string): ModelChoice {
   const { sessions } = useModelPrefs();
   const isAuto = readSessionAuto(sessionId);
-  // useMemo gives the choice a stable identity unless the box mirror or the
-  // Auto flag actually changed, so consumers can depend on it without re-running
-  // on every render.
-  return useMemo(
-    () => resolveSessionChoice(sessions, sessionId, isAuto),
-    [sessions, sessionId, isAuto],
-  );
+  const rec = sessions[sessionId];
+  // Resolve to primitive fields so the memo is STABLE across a no-op box
+  // refetch (the mirror hands back a new object with the same contents). A
+  // consumer depends on `sessionChoice` identity to reseed its local override;
+  // making it stable means a routing-applied override is not clobbered by an
+  // empty initial/refetch that resolves to the same stored choice.
+  const providerID =
+    typeof rec?.providerID === "string" && rec.providerID !== "" ? rec.providerID : null;
+  const modelID =
+    typeof rec?.modelID === "string" && rec.modelID !== "" ? rec.modelID : null;
+  const variant =
+    typeof rec?.variant === "string" && rec.variant !== "" ? rec.variant : undefined;
+  const kind: ModelChoice["kind"] =
+    isAuto ? "auto" : providerID && modelID ? "model" : "server-default";
+  return useMemo(() => {
+    switch (kind) {
+      case "auto":
+        return { kind: "auto" as const };
+      case "model":
+        return {
+          kind: "model" as const,
+          model: { providerID: providerID!, modelID: modelID!, ...(variant ? { variant } : {}) },
+        };
+      default:
+        return { kind: "server-default" as const };
+    }
+  }, [kind, providerID, modelID, variant]);
 }
 
 /**
@@ -174,10 +197,15 @@ export function setSessionChoice(sessionId: string, choice: ModelChoice): void {
   if (choice.kind === "auto") return;
   const api = window.api as Partial<typeof window.api>;
   if (!api.modelPrefsSet) return; // pre-pairing subset
-  void window.api.modelPrefsSet({
-    sessionId,
-    selection: choice.kind === "model" ? choice.model : null,
-  });
+  // Fire-and-forget: the local override already updated optimistically. A failed
+  // write just means the box isn't synced yet — swallow it (no toast on every
+  // pick); the next update event refetch reconciles.
+  void window.api
+    .modelPrefsSet({
+      sessionId,
+      selection: choice.kind === "model" ? choice.model : null,
+    })
+    .catch(() => {});
 }
 
 // ---- one-shot migration (BET-1281 step 4) ----
@@ -268,7 +296,7 @@ export function migrateModelPrefs(): void {
     if (collected) {
       const api = window.api as Partial<typeof window.api>;
       if (collected.sessions && Object.keys(collected.sessions).length > 0 && api.modelPrefsSeed) {
-        void window.api.modelPrefsSeed({ sessions: collected.sessions });
+        void window.api.modelPrefsSeed({ sessions: collected.sessions }).catch(() => {});
       }
       for (const sid of collected.auto) setSessionChoice(sid, { kind: "auto" });
     }

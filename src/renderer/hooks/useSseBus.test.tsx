@@ -9,6 +9,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { act, useRef, useState } from "react";
 import { ChatPanel } from "../ChatPanel";
+import { sessionAutoKey } from "../modelPrefs";
 import { useSseBus, TURN_SETTLE_MS, type SseBus } from "./useSseBus";
 import type { OpencodeMessage } from "../../shared/types";
 import {
@@ -1043,7 +1044,7 @@ describe("BET-1248 main-conversation routing at boundaries (ChatPanel submit)", 
   });
 
   async function mountAuto(overrides: Record<string, unknown> = {}) {
-    localStorage.setItem("manta:chat:ses_test:model", "auto");
+    localStorage.setItem(sessionAutoKey("ses_test"), "1");
     ({ api, bus } = installMockApi({
       routingChoose: () => decision(ROUTED),
       opencodePrompt: () => Promise.resolve({ ok: true }),
@@ -1091,7 +1092,7 @@ describe("BET-1248 main-conversation routing at boundaries (ChatPanel submit)", 
   });
 
   it("routingChoose rejecting → the turn still sends, on the previous model", async () => {
-    localStorage.setItem("manta:chat:ses_test:model", "auto");
+    localStorage.setItem(sessionAutoKey("ses_test"), "1");
     ({ api, bus } = installMockApi({
       routingChoose: () => Promise.reject(new Error("router down")),
       opencodePrompt: () => Promise.resolve({ ok: true }),
