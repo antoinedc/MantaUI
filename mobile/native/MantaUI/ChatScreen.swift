@@ -249,8 +249,7 @@ private struct ChatScreenContent: View {
             .environmentObject(voicePlayer)
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackgroundVisibility(.visible, for: .navigationBar)
-            .toolbarBackground(tokens.canvas, for: .navigationBar)
+            .mantaNavigationBarBackground(tokens)
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     Button { showOverflow = true } label: {
@@ -1183,8 +1182,7 @@ struct ChatSubagentScreen: View {
         content
             .navigationTitle(subtitle.isEmpty ? title : "\(title) · \(subtitle)")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackgroundVisibility(.visible, for: .navigationBar)
-            .toolbarBackground(tokens.canvas, for: .navigationBar)
+            .mantaNavigationBarBackground(tokens)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("subagent-scene")
     }
