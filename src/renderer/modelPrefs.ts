@@ -15,7 +15,11 @@
 // namespace is now box-backed; the DoD grep only admits the plan key there).
 
 import { useEffect, useMemo, useState } from "react";
-import type { ModelPrefsSessionRecord, ModelPrefsState } from "../shared/types";
+import type {
+  ModelPrefsSelection,
+  ModelPrefsSessionRecord,
+  ModelPrefsState,
+} from "../shared/types";
 import type { ModelChoice, ModelSelection } from "./chatShared";
 
 // ---- module-level cache of the whole box store ----
@@ -186,25 +190,27 @@ export function sessionBoxSelection(sessionId: string): ModelSelection | null {
 
 /**
  * Persist a user pick: update the device-local Auto flag immediately and write
- * the box. auto → local flag only (the box has no Auto slot); model → the box
- * session record; server-default → delete the box session record. This is the
- * single write path — the same setter powers selectModel, auto, /clear carry
- * and the app-control switch-model fallback. Fire-and-forget; a client
- * refetching its own write is a harmless no-op (no echo suppression).
+ * the box. auto → local flag (the box has no Auto slot); model → the box session
+ * record; server-default → delete the box session record. This is the single
+ * write path — the same setter powers selectModel, auto, /clear carry and the
+ * app-control switch-model fallback. Fire-and-forget; a client refetching its
+ * own write is a harmless no-op (no echo suppression).
  */
 export function setSessionChoice(sessionId: string, choice: ModelChoice): void {
   writeSessionAuto(sessionId, choice.kind === "auto");
-  if (choice.kind === "auto") return;
   const api = window.api as Partial<typeof window.api>;
   if (!api.modelPrefsSet) return; // pre-pairing subset
+  // Auto wins in selection resolution, but clear any lingering box record for
+  // the session so turning Auto off later can't resurface a stale model (reviewer
+  // nit). /clear carry of an Auto choice rides this same path and clears the
+  // destination id's record too.
+  const selection: ModelPrefsSelection | null =
+    choice.kind === "model" ? choice.model : null;
   // Fire-and-forget: the local override already updated optimistically. A failed
   // write just means the box isn't synced yet — swallow it (no toast on every
   // pick); the next update event refetch reconciles.
   void window.api
-    .modelPrefsSet({
-      sessionId,
-      selection: choice.kind === "model" ? choice.model : null,
-    })
+    .modelPrefsSet({ sessionId, selection })
     .catch(() => {});
 }
 
