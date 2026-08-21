@@ -813,13 +813,13 @@ export function buildHandlers({
     },
 
     // BET-1225: main-conversation ("build" agent) routing decision. ChatPanel
-    // asks once at session start; the server is the ONE place chooseModel runs
-    // (chooseMainModel in delegate.mjs, sat beside chooseSubagentModel), so
-    // the routed pill reflects the same decision the send path would apply.
-    // Returns the full decision { model, reason, incumbent, changed } so the
-    // renderer can apply the routed model AND surface the undoable pill. Every
-    // input is guarded — missing policy / quota / catalog must never throw and
-    // falls back to the incumbent (a conversation that did not ask to route).
+    // asks once at session start; the decision runs through the shared
+    // chooseMainModel wrapper (delegate.mjs), so the routed pill reflects the
+    // same decision the send path would apply. Returns the full decision
+    // { model, reason, incumbent, changed } so the renderer can apply the
+    // routed model AND surface the undoable pill. Every input is guarded —
+    // missing policy / quota / catalog must never throw and falls back to the
+    // incumbent (a conversation that did not ask to route).
     "routing:main": async (input) => {
       const incumbent = input?.incumbent ?? null;
       const agent = input?.agent ?? "build";
@@ -862,10 +862,14 @@ export function buildHandlers({
           providerHealthState: routingProviderHealthState,
           endpointSummary: routingEndpointSummary,
         });
-      } catch {
+      } catch (e) {
+        // 11e: a silently-degrading services build is how "no model passes
+        // constraints (identity)" hides. Never fatal — routing degrading is
+        // correct, degrading silently is not.
+        console.error(`[router] routing services degraded, routing on absent context: ${e?.message ?? e}`);
         services = null;
       }
-      return chooseMainModel({ incumbent, catalog, policy, quota, agent, nowMs: Date.now(), services });
+      return chooseMainModel({ incumbent, catalog, policy, agent, nowMs: Date.now(), services });
     },
 
     // BET-1244: the read-only, side-effect-free routing decision — the generic
@@ -919,7 +923,11 @@ export function buildHandlers({
             providerHealthState: routingProviderHealthState,
             endpointSummary: routingEndpointSummary,
           });
-        } catch {
+        } catch (e) {
+          // 11e: a silently-degrading services build is how "no model passes
+          // constraints (identity)" hides. Never fatal — routing degrading is
+          // correct, degrading silently is not.
+          console.error(`[router] routing services degraded, routing on absent context: ${e?.message ?? e}`);
           services = null;
         }
         // Normalise the incumbent into catalog shape ({providerID, id}) so the
@@ -941,8 +949,6 @@ export function buildHandlers({
             incumbent: catalogIncumbent,
           },
           catalog,
-          telemetry: {},
-          quota,
           policy,
           nowMs: Date.now(),
           services,
@@ -1575,12 +1581,14 @@ export function buildHandlers({
     "delegate:start": (input) => {
       const i = typeof input === "object" && input !== null ? input : {};
       if (!delegate) return { ok: false, error: "no engine" };
-      return delegate.startJob({
+      const startArgs = {
         prompt: i.prompt,
         model: i.model,
         parentSessionID: i.sessionID,
         parentDirectory: i.directory,
-      });
+      };
+      if (i.subagent_type) startArgs.subagent_type = i.subagent_type;
+      return delegate.startJob(startArgs);
     },
 
     // ---- session progress (manta-server owned; BET-790) ----

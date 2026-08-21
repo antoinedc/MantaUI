@@ -110,10 +110,22 @@ export const delegate = tool({
       .optional()
       .describe(
         "Optional model id for the job's session, as free text.\u200b " +
-          "When omitted the job uses the box's default model. The value must be " +
-          "a model id the box knows (matched by the box, not freeform): a bad " +
-          "value fails loudly rather than silently picking a different model. " +
+          "Naming a model is the OFF switch for automatic routing: the job " +
+          "runs on EXACTLY this model and Auto never overrides it. It must be " +
+          "a model you approved (ticked) for subagents on this box — an " +
+          "unapproved / unknown value fails loudly naming the closest " +
+          "candidates rather than silently picking a different model. " +
+          "Omit to let Auto route the subagent on its own intent. " +
           "Not validated client-side.",
+      ),
+    subagent_type: z
+      .string()
+      .optional()
+      .describe(
+        "The subagent type / role for this background job, passed to the " +
+          "router as the job's intent ('general', 'explore', 'build', 'plan', " +
+          "or a custom named agent). Auto applies that agent's tier floor. " +
+          "Omit to default to 'general'.",
       ),
     tools: z
       .array(
@@ -148,6 +160,7 @@ export const delegate = tool({
     const res = await call("POST", "/api/delegate", {
       prompt: args.prompt,
       model: args.model,
+      subagent_type: args.subagent_type,
       tools: args.tools,
       sessionID: context.sessionID,
       directory: context.directory,

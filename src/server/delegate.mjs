@@ -436,25 +436,31 @@ async function registerJob(
 }
 
 /**
- * Resolve a delegate `model` argument to the structured shape deliver() and
- * sendPrompt() accept ({providerID, modelID, variant?}).
+ * Resolve a caller-NAMED delegate `model` (BET-1275 11b). A named model is the
+ * OFF SWITCH for Auto routing — the caller decided, and Auto only ever fills
+ * silence — so the caller's choice is honoured verbatim and never routed over.
+ *
+ * A named model must STILL respect the user's Sub ticks (rule 3): the value is
+ * validated against the SUB-ticked (routable) catalogue
+ * (`listRoutableModels("sub", …)`), so a model the user unticked / deactivated
+ * fails LOUDLY naming the closest candidates rather than silently running on
+ * it. An empty catalogue (no routable models available / `listModels`
+ * unavailable) has nothing to validate against — a structured `{providerID,
+ * modelID}` passes through exactly as it did before the Sub rule existed.
  *
  * A structured `{providerID, modelID, variant?}` value is accepted as-is
- * (skips matching — the renderer sends this shape). Free text is matched
- * against the box's known models with the SHARED fuzzy matcher
- * (src/shared/modelGuide.mjs — the same one app-control uses for
- * manta_switch_model; do not write a second matcher). No match → {ok:false}
- * naming the closest candidates, so a bad value fails loudly instead of
- * silently falling back to opencode's default.
+ * (skips matching — a caller can send this shape). Free text is matched with
+ * the SHARED fuzzy matcher (src/shared/modelGuide.mjs — the same one
+ * app-control uses for manta_switch_model; do not write a second matcher).
  *
- * `requested` is the canonical "providerID/modelID" string recorded on the job
- * as `requestedModel` (what was asked for, never overwritten).
- *
- * @param {unknown} model
- * @param {Array<object>} models oc.listModels() output
- * @returns {{ok:true, model:{providerID:string, modelID:string, variant?:string}|null, requested:string|null}|{ok:false, error:string}}
+ * @param {string|{providerID:string, modelID:string, variant?:string}} model
+ * @param {Array<object>} catalog  the Sub-ticked routable catalogue
+ * @returns {{providerID:string, modelID:string, variant?:string}}
+ * @throws {Error} naming the closest candidates when `model` matches nothing
+ *   in the routable catalogue.
  */
-export function resolveRequestedModel(model, models) {
+export function resolveNamedModel(model, catalog) {
+  const src = Array.isArray(catalog) ? catalog : [];
   if (model && typeof model === "object" && !Array.isArray(model)) {
     if (
       typeof model.providerID === "string" &&
@@ -466,42 +472,57 @@ export function resolveRequestedModel(model, models) {
       if (typeof model.variant === "string" && model.variant) {
         structured.variant = model.variant;
       }
-      return {
-        ok: true,
-        model: structured,
-        requested: `${model.providerID}/${model.modelID}`,
-      };
+      if (src.length > 0) {
+        const present = src.some(
+          (c) => c?.providerID === structured.providerID && c?.id === structured.modelID,
+        );
+        if (!present) {
+          throw new Error(unroutableError(structured, src));
+        }
+      }
+      return structured;
     }
-    return { ok: false, error: "model must be free text or an object with string providerID and modelID." };
+    throw new Error("model must be free text or an object with string providerID and modelID.");
   }
   const query = typeof model === "string" ? model.trim() : "";
-  if (!query) {
-    // No model requested — byte-identical to today: the box's default applies.
-    return { ok: true, model: null, requested: null };
-  }
-  const resolved = fuzzyMatchModel(query, models);
+  if (!query) throw new Error("model must be free text or an object with string providerID and modelID.");
+  const resolved = fuzzyMatchModel(query, src);
   if (!resolved) {
-    const suggestions = suggestModels(query, models, 3);
-    const hint = suggestions.length
-      ? ` Closest models: ${suggestions.map((s) => `${s.providerID}/${s.id}`).join(", ")}.`
-      : " No models are currently available on this box.";
-    return { ok: false, error: `No model matched "${model}".${hint}` };
+    throw new Error(noMatchError(model, src));
   }
-  return {
-    ok: true,
-    model: { providerID: resolved.providerID, modelID: resolved.id },
-    requested: `${resolved.providerID}/${resolved.id}`,
-  };
+  return { providerID: resolved.providerID, modelID: resolved.id };
+}
+
+function candidateHint(query, src) {
+  const suggestions = suggestModels(query, src, 3);
+  if (!suggestions.length) return "";
+  return ` Closest routable models: ${suggestions.map((s) => `${s.providerID}/${s.id}`).join(", ")}.`;
+}
+
+function noMatchError(model, src) {
+  const suggestions = suggestModels(String(model).trim(), src, 3);
+  const hint = suggestions.length
+    ? ` Closest models: ${suggestions.map((s) => `${s.providerID}/${s.id}`).join(", ")}.`
+    : " No models are currently routable (ticked) on this box.";
+  return `No model matched "${model}".${hint}`;
+}
+
+function unroutableError(structured, src) {
+  const hint = candidateHint(structured.modelID, src);
+  return `Model "${structured.providerID}/${structured.modelID}" is not routable on this box (unticked or deactivated).${hint}`;
 }
 
 /**
  * THE single routing decision point for a subagent/delegate spawn (BET-1220).
  *
- * This is the ONE place in src/server that calls `chooseModel` — every else
- * goes through this helper, so there can never be a second, divergent model
- * decision. It hands `chooseModel` the subagent intent (agent + tool needs +
+ * This wrapper hands `chooseModel` the subagent intent (agent + tool needs +
  * `incumbent` = whatever model the caller would have used today) and returns
- * the model to actually run on.
+ * the model to actually run on. It shares its `chooseModel` argument builder
+ * with chooseMainModel below (see buildChooseModelInput) so the main and
+ * subagent paths can never diverge again. Note: it is NOT the only module that
+ * calls `chooseModel` — rpc.mjs's `routing:choose` calls it directly (it carries
+ * a caller-supplied surface + needs). The wrappers share ONE builder; the RPC
+ * builds its own intent for its different surface.
  *
  * Provably safe on the off-path: when the policy has no routing directive (no
  * preset — a conversation that has not asked to route), `chooseModel` returns
@@ -513,7 +534,6 @@ export function resolveRequestedModel(model, models) {
  * @param {object|null} [input.incumbent]  the model the code would have used today
  * @param {Array<object>} [input.catalog]  opencode model list
  * @param {{ preset?: string, perAgent?: Record<string,string> }} [input.policy]
- * @param {Array<object>} [input.quota]    usage snapshots
  * @param {string} [input.agent]           subagent type (default "general")
  * @param {number} [input.nowMs]
  * @returns {object|null} the model to run on (incumbent on off-path / failure)
@@ -540,41 +560,85 @@ export function toDeliverModel(m) {
 // Named, not a bare literal, so the intent is explicit (BET-1267 3b).
 const SUBAGENT_INITIAL_CONTEXT_TOKENS = 0;
 
+// The default routing agent for a delegate spawn (BET-1275 11a). A delegate may
+// carry a `subagent_type` — the job's own intent declaration — and routing must
+// apply that agent's tier floor; an absent / empty / non-string value falls back
+// to this general agent. Named constant, not a bare literal.
+const DEFAULT_SUBAGENT_AGENT = "general";
+
+// Resolve a delegate job's requested subagent type for the router (11a). The
+// subagent type IS the intent declaration ("the agent already is the intent
+// declaration" — the whole argument against a prompt classifier), so any
+// non-empty string is passed through verbatim as the routing agent; only an
+// absent/blank/non-string value maps to the general agent.
+function resolveSubagentAgent(raw) {
+  if (typeof raw === "string") {
+    const t = raw.trim();
+    if (t) return t;
+  }
+  return DEFAULT_SUBAGENT_AGENT;
+}
+
+// The incumbent projected into catalog shape ({providerID, id}) so chooseModel's
+// `changed` comparison / modelKey() treat a requested model and a catalog entry
+// of the same model as equal. Shared so the builder and the wrappers can never
+// project it differently.
+function catalogIncumbentOf(incumbent) {
+  return incumbent ? { providerID: incumbent.providerID, id: incumbent.modelID ?? incumbent.id } : null;
+}
+
+// Shared argument-builder for the two routing wrappers (BET-1275 11d).
+// chooseSubagentModel and chooseMainModel MUST hand chooseModel the same intent
+// shape — this is what kept the main-conversation and subagent paths from
+// diverging (they disagreed on `needs.tools` in the real-facts issue). The main
+// path needs a couple of extra fields around the decision, but the chooseModel
+// ARGUMENT is identical. routing:choose in rpc.mjs builds its own intent because
+// it carries a caller-supplied surface + needs; these two server wrappers share
+// this one builder so they cannot diverge again.
+function buildChooseModelInput({ kind, agent, needs, contextTokens, incumbent, catalog, policy, nowMs, services }) {
+  return {
+    intent: { kind, agent, needs, contextTokens, incumbent: catalogIncumbentOf(incumbent) },
+    catalog,
+    policy,
+    nowMs,
+    services,
+  };
+}
+
 export function chooseSubagentModel({
   incumbent = null,
   catalog = [],
   policy = {},
-  quota = [],
-  agent = "general",
+  agent = DEFAULT_SUBAGENT_AGENT,
   nowMs = Date.now(),
   contextTokens = SUBAGENT_INITIAL_CONTEXT_TOKENS,
   services,
 } = {}) {
-  // Normalise the incumbent into catalog shape ({providerID, id}) for the
-  // comparison inside chooseModel, so its `changed` flag / modelKey() treat a
-  // requested model and a catalog entry of the same model as equal. The ORIGINAL
-  // structured incumbent is preserved and returned on the off-path.
-  const catalogIncumbent = incumbent
-    ? { providerID: incumbent.providerID, id: incumbent.modelID ?? incumbent.id }
-    : null;
-
+  // The ORIGINAL structured incumbent is preserved and returned on the off-path;
+  // its {providerID, id} projection is passed to chooseModel so the `changed`
+  // comparison / modelKey() treat a requested model and a catalog entry of the
+  // same model as equal.
   try {
-    const decision = chooseModel({
-      intent: { kind: "subagent", agent, needs: { tools: true }, contextTokens, incumbent: catalogIncumbent },
-      catalog,
-      telemetry: {},
-      quota,
-      policy,
-      nowMs,
-      services,
-    });
+    const decision = chooseModel(
+      buildChooseModelInput({
+        kind: "subagent",
+        agent,
+        needs: { tools: true },
+        contextTokens,
+        incumbent,
+        catalog,
+        policy,
+        nowMs,
+        services,
+      }),
+    );
     // On the off-path / no-survivors path chooseModel returns the very
-    // catalogIncumbent reference it was handed; map that back to the original
+    // catalogIncumbent it was handed; map that back to the original
     // structured incumbent so the deliver call stays byte-identical to today.
     // A real catalog winner is normalised into the {providerID, modelID} shape
     // sendPrompt expects.
     const model =
-      decision?.model === catalogIncumbent
+      decision?.model === catalogIncumbentOf(incumbent)
         ? incumbent
         : toDeliverModel(decision?.model ?? incumbent);
     const label = model ? `${model.providerID}/${model.modelID ?? model.id}` : "";
@@ -589,8 +653,8 @@ export function chooseSubagentModel({
 
 /**
  * THE other single routing decision point: the user-facing MAIN conversation
- * ("build" agent). Sat beside chooseSubagentModel so `chooseModel` is still
- * called from exactly one module — the one place a model is decided.
+ * ("build" agent). Sat beside chooseSubagentModel, sharing its `chooseModel`
+ * argument builder (buildChooseModelInput) so the two can never diverge.
  *
  * Unlike the subagent wrapper, which returns only the model the spawn should
  * run on (the spawn is opaque to the user), this returns the FULL decision —
@@ -610,7 +674,6 @@ export function chooseSubagentModel({
  * @param {object|null} [input.incumbent]  the model the session would use without routing
  * @param {Array<object>} [input.catalog]  opencode model list
  * @param {{ preset?: string, perAgent?: Record<string,string> }} [input.policy]
- * @param {Array<object>} [input.quota]    usage snapshots
  * @param {string} [input.agent]           main-conversation agent (default "build")
  * @param {number} [input.nowMs]
  * @returns {{ model: object|null, reason: string, incumbent: object|null, changed: boolean }}
@@ -619,7 +682,6 @@ export function chooseMainModel({
   incumbent = null,
   catalog = [],
   policy = {},
-  quota = [],
   agent = "build",
   nowMs = Date.now(),
   contextTokens = SUBAGENT_INITIAL_CONTEXT_TOKENS,
@@ -628,24 +690,22 @@ export function chooseMainModel({
   const incumbentShape = incumbent
     ? { providerID: incumbent.providerID, modelID: incumbent.modelID ?? incumbent.id ?? "" }
     : null;
-  // Normalise the incumbent into catalog shape ({providerID, id}) so the
-  // `changed` comparison inside chooseModel treats a requested model and a
-  // catalog entry of the same model as equal (mirrors chooseSubagentModel).
-  const catalogIncumbent = incumbent
-    ? { providerID: incumbent.providerID, id: incumbent.modelID ?? incumbent.id }
-    : null;
   try {
-    const decision = chooseModel({
-      intent: { kind: "main", agent, needs: { tools: true }, contextTokens, incumbent: catalogIncumbent },
-      catalog,
-      telemetry: {},
-      quota,
-      policy,
-      nowMs,
-      services,
-    });
+    const decision = chooseModel(
+      buildChooseModelInput({
+        kind: "main",
+        agent,
+        needs: { tools: true },
+        contextTokens,
+        incumbent,
+        catalog,
+        policy,
+        nowMs,
+        services,
+      }),
+    );
     const model =
-      decision?.model === catalogIncumbent
+      decision?.model === catalogIncumbentOf(incumbent)
         ? incumbent
         : toDeliverModel(decision?.model ?? incumbent);
     return {
@@ -663,20 +723,33 @@ export function chooseMainModel({
 }
 
 /**
- * @param {{prompt:string, model?:string|{providerID:string, modelID:string, variant?:string}, parentSessionID:string, parentDirectory:string,
+ * @param {{prompt:string, model?:string|{providerID:string, modelID:string, variant?:string}, subagent_type?:string, parentSessionID:string, parentDirectory:string,
  *          link?: {issue?:{repoKey:string,number:number}, pr?:{repoKey:string,number:number}}|null}} input
- *        `model` (BET-947) — optional model for the job's session: free text
- *        resolved via the shared fuzzy matcher, or a structured
- *        {providerID, modelID, variant?} used as-is. Unmatchable free text
- *        fails the delegation loudly naming candidates.
+ *        `model` (BET-947, BET-1275 11b) — optional model for the job's session:
+ *        free text resolved via the shared fuzzy matcher, or a structured
+ *        {providerID, modelID, variant?} used as-is. A named model is the OFF
+ *        SWITCH for Auto routing (never routed over) and must still be in the
+ *        user's Sub-ticked (routable) set — an un-ticked / deactivated /
+ *        unmatchable value fails the delegation loudly naming candidates.
+ *        `subagent_type` (BET-1275 11a) — the job's own intent declaration; Auto
+ *        routing applies this agent's tier floor instead of a hardcoded
+ *        "general". Absent/blank maps to "general".
  *        `link` (BET-844) — the optional session link (at most one issue + one
  *        PR, `{issue?, pr?}` shape) a forge-triggered delegate carries so the
  *        progress sink addresses the linked issue/PR. Stored on the job record.
  * @param {object} deps injected I/O (load/save/publish/deliver/listProjects/
- *        newWindow/gitAddWorktree/gitRun/oc listMessages/listModels/now)
+ *        newWindow/gitAddWorktree/gitRun/oc listMessages/listModels/now;
+ *        routingServices/catalogIndex/providerHealthState/endpointSummary for
+ *        the router; chooseSubagentModel only as a test seam)
  */
 export async function startJob(input, deps = {}) {
   const { deliver, listModels, configGet = async () => ({}), listSnapshots = () => [] } = deps;
+  // listRoutableModels defaults its `models` argument to the REAL opencode.mjs
+  // listModels whenever it is handed `undefined` — so passing an absent reader
+  // through would hit a live box (or the wrong reader in a test). Guard it: an
+  // absent reader means an EMPTY catalogue (a named structured model then
+  // passes through exactly as it did before Sub-validation), never a live call.
+  const listModelsSafe = typeof listModels === "function" ? listModels : async () => [];
 
   const prompt = String(input?.prompt ?? "");
   const parentSessionID = input?.parentSessionID;
@@ -685,19 +758,55 @@ export async function startJob(input, deps = {}) {
   if (!parentSessionID) return { ok: false, error: "parentSessionID is required" };
   if (!parentDirectory) return { ok: false, error: "parentDirectory is required" };
 
-  // Resolve the requested model once, up front. A structured model is used
-  // as-is; free text is matched against the box's known models via the shared
-  // fuzzy matcher, and an unmatchable value fails the delegation loudly
-  // (naming candidates) rather than silently falling back to the default. A
-  // missing input model leaves both null — the box default, byte-identical to
-  // today. Only fetch the model list when a model was actually requested.
+  // Gather the routing inputs ONCE, up front. They serve BOTH the named-model
+  // path (11b — a named model is validated against the Sub-ticked catalogue,
+  // and that must happen BEFORE a window is created so a rejection orphans
+  // nothing) and the routing path (11a — the route button only fills silence).
+  // Every read is individually guarded so a failure can never break a spawn;
+  // an absent value degrades to "no routing config / empty catalogue".
+  let cfg = {};
+  try {
+    cfg = (await configGet()) ?? {};
+  } catch {
+    cfg = {};
+  }
+  let policy = {};
+  try {
+    policy = cfg.modelRouting ?? {};
+  } catch {
+    policy = {};
+  }
+  let quota = [];
+  try {
+    quota = listSnapshots();
+    if (!Array.isArray(quota)) quota = [];
+  } catch {
+    quota = [];
+  }
+  let catalog = [];
+  try {
+    catalog = await listRoutableModels("sub", cfg, listModelsSafe);
+    if (!Array.isArray(catalog)) catalog = [];
+  } catch {
+    catalog = [];
+  }
+
+  // Resolve the requested model once, up front (11b). A caller-NAMED model is
+  // the off switch for Auto routing — Auto only ever fills silence — so it is
+  // honoured verbatim and never routed over. It must STILL respect the user's
+  // Sub ticks (rule 3), so it is validated against the Sub-filtered catalogue
+  // and an un-ticked / deactivated / unmatchable value fails the delegation
+  // LOUDLY (naming the closest candidates) rather than silently running on it.
+  // A missing model leaves both null — the box default, byte-identical to today.
   let requestedModel = null;
   let deliverModel = null;
   if (input?.model) {
-    const resolved = resolveRequestedModel(input.model, listModels ? await listModels() : []);
-    if (!resolved.ok) return resolved;
-    requestedModel = resolved.requested;
-    deliverModel = resolved.model;
+    try {
+      deliverModel = resolveNamedModel(input.model, catalog);
+    } catch (e) {
+      return { ok: false, error: e?.message ?? String(e) };
+    }
+    requestedModel = `${deliverModel.providerID}/${deliverModel.modelID}`;
   }
 
   // The whole creation — nesting + cap checks, worktree, window, record append —
@@ -788,53 +897,31 @@ export async function startJob(input, deps = {}) {
   if (!reg.ok) return reg;
 
   // 8. Send the opening prompt via the shared delivery module's deliver. The
-  //    requested model (resolved above) is threaded through so a delegate that
-  //    asked for a specific model actually runs on it; omitted → the default.
-  //
-  //    BET-1220: the effective model passes through the subagent router
-  //    (chooseSubagentModel). With no routing directive in the policy it
-  //    returns `incumbent` = the requested model / null, byte-identical to
-  //    today. Routing must never break a spawn, so every input read (policy,
-  //    quota, catalog) is individually guarded and the whole decision falls
-  //    back to `deliverModel` on any throw.
+  //    effective model is decided here, and the rule is exactly the composer's
+  //    (BET-1275): an explicit choice is the off switch; only silence routes.
+  //    - 11b: a caller-NAMED model is that off switch — it was resolved + Sub-
+  //      validated above (before any window was created) and is used VERBATIM.
+  //      Routing is skipped entirely: no router is invoked, no [router] line is
+  //      emitted, no substitution can ever happen.
+  //    - 11a/11e: with no named model, Auto routes on the job's REQUESTED
+  //      subagent type (the job's own intent declaration, not a hardcoded
+  //      "general"). A routed decision with no routing directive in the policy
+  //      returns the box default (null), byte-identical to today. Routing must
+  //      never break a spawn, so a degraded services build is logged (never
+  //      silent) and any throw falls back to the default model.
   let effectiveModel = deliverModel;
-  try {
-    // configGet supplies BOTH the routing policy and the consent model list
-    // (deactivatedSubagents / optInModels). Read it once, guarded, so a throw
-    // here can never break a spawn.
-    let cfg = {};
-    try {
-      cfg = (await configGet()) ?? {};
-    } catch {
-      cfg = {};
-    }
-    let policy = {};
-    try {
-      policy = cfg.modelRouting ?? {};
-    } catch {
-      policy = {};
-    }
-    let quota = [];
-    try {
-      quota = listSnapshots();
-      if (!Array.isArray(quota)) quota = [];
-    } catch {
-      quota = [];
-    }
-    let catalog = [];
-    try {
-      catalog = await listRoutableModels("sub", cfg, listModels);
-      if (!Array.isArray(catalog)) catalog = [];
-    } catch {
-      catalog = [];
-    }
+  if (input?.model) {
+    effectiveModel = deliverModel;
+  } else {
+    const route = deps?.chooseSubagentModel ?? chooseSubagentModel;
     // Build the router's RoutingServices context from live box state (BET-1252).
     // `deps.routingServices` (test injection) is used verbatim when present;
     // otherwise the box-side builder assembles catalogue + accounts + health +
     // declared + reliability from the readers in `deps`. Every reader inside
-    // buildRoutingServices is individually guarded and this whole assembly is
-    // wrapped so a failure here degrades to absent services → chooseSubagentModel
-    // returns the incumbent. Routing must never break a spawn.
+    // buildRoutingServices is individually guarded, and the whole assembly is
+    // wrapped so a failure degrades to absent services — but it must NEVER
+    // degrade SILENTLY (11e): "no services" reads as "no model passes
+    // constraints", so a degraded build logs once with the error message.
     let services = deps?.routingServices;
     if (!services) {
       try {
@@ -845,21 +932,26 @@ export async function startJob(input, deps = {}) {
           providerHealthState: deps.providerHealthState,
           endpointSummary: deps.endpointSummary,
         });
-      } catch {
-        services = deps?.routingServices;
+      } catch (e) {
+        console.error(`[router] routing services degraded, routing on absent context: ${e?.message ?? e}`);
+        services = null;
       }
     }
-    effectiveModel = chooseSubagentModel({
-      incumbent: deliverModel ?? null,
-      catalog,
-      policy,
-      quota,
-      agent: "general",
-      nowMs: Date.now(),
-      services,
-    });
-  } catch {
-    effectiveModel = deliverModel;
+    try {
+      effectiveModel = route({
+        incumbent: null,
+        catalog,
+        policy,
+        agent: resolveSubagentAgent(input?.subagent_type),
+        nowMs: Date.now(),
+        services,
+      });
+    } catch (e) {
+      // The default route() already swallows internally; this is a second
+      // belt-and-braces guard so an injected route stub can never break a spawn.
+      console.error("[router] subagent routing threw, using default:", e?.message ?? e);
+      effectiveModel = deliverModel;
+    }
   }
   try {
     await deliver({
