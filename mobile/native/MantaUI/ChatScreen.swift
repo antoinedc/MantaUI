@@ -1209,7 +1209,10 @@ struct ChatSubagentScreen: View {
             bottomInset: 0,
             scrollPosition: $scrollPosition,
             onPointsFromBottom: nil,
-            header: { EmptyView() }
+            // BET-1257 EXPERIMENT: a truly-empty `EmptyView()` header is the
+            // leading suspect for the child's broken touch delivery — testing
+            // whether ANY non-empty `.safeAreaBar` content restores the pan.
+            header: { Color.clear.frame(height: 0.5) }
         )
         .background(tokens.canvas.ignoresSafeArea())
         .onAppear { store.start() }
