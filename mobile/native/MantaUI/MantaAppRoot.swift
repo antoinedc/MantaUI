@@ -21,6 +21,10 @@ struct MantaAppRoot: View {
     /// A pairing payload that arrived while already paired — pending the
     /// "Switch box?" confirmation (BET-702).
     @State private var switchRequest: MantaPairing.PairPayload?
+    /// Guards the once-per-launch outbox migration: prompts left `waiting`/
+    /// `sending` when the process died become `.failed`. Must run exactly once,
+    /// before any session screen reads the outbox (BET-1263).
+    @State private var didFailStale = false
 
     init() {
         // UI-test / verification seam (BET-702): `MANTA_UI_FORCE_PAIRED` makes
@@ -94,7 +98,13 @@ struct MantaAppRoot: View {
                 // tap-open's chat to live data; S3 delivers the list, its
                 // actions, and creation.
                 SessionListView(store: sessionStore)
-                    .onAppear { store.start() }
+                    .onAppear {
+                        if !didFailStale {
+                            didFailStale = true
+                            _ = PendingPromptStore.failStaleOnLaunch()
+                        }
+                        store.start()
+                    }
                     .task { await sessionStore.refresh() }
             } else {
                 MantaOnboardingRoot(flow: flow, tokens: tokens)

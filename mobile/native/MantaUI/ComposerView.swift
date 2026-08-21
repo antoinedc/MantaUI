@@ -1148,18 +1148,14 @@ struct ComposerView: View {
             guard let remotePath = attachment.remotePath else { return nil }
             return SendPromptInput.Attachment(remotePath: remotePath, mime: attachment.mime, filename: attachment.filename)
         }
-        let sentText = trimmed
         let mentions = draftMentions.isEmpty ? nil : draftMentions
         // Send the resolved plan agent only while plan mode is actually on.
         let agent = modelStore.planToggle.on ? modelStore.planToggle.agent : nil
         Task { @MainActor in
-            // On a failed send the store rolled its running state back; restore
-            // the user's message so it is never silently lost, and surface why.
-            let ok = await store.send(text: sentText, attachments: sendAttachments, model: model, mentions: mentions, agent: agent)
-            if !ok {
-                text = sentText
-                surfaceHint("Send failed — message restored")
-            }
+            // Failure is surfaced by the failed pending-prompt row in the
+            // transcript with its own tap-to-retry — the composer is not a
+            // second recovery path (BET-1263).
+            await store.send(text: trimmed, attachments: sendAttachments, model: model, mentions: mentions, agent: agent)
         }
         text = ""
         attachments = []

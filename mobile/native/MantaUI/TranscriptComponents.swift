@@ -789,9 +789,10 @@ enum TranscriptBlock: Equatable {
     /// A terminal system notice (session error / truncation) at the end of the
     /// turn it belongs to.
     case notice(String, SystemNotice)
-    /// A prompt accepted mid-turn, waiting for the session to go idle. Rendered
-    /// as a DIM ghost user bubble where the message will actually land.
-    case queuedPrompt(String)
+    /// A prompt the user committed that the box has not acknowledged. Renders as a
+    /// dim ghost user bubble while waiting/sending, and as a retryable failure row
+    /// once the send has failed.
+    case queuedPrompt(PendingPrompt)
     /// A pending permission request rendered as a blocking card in the
     /// transcript tail (BET-1214). The card's callbacks come from the
     /// surface's `TranscriptCardActions`, never from the block — a block stays

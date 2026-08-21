@@ -129,8 +129,7 @@ final class ChatStreamMergeTests: XCTestCase {
         )
         await Task.yield()
 
-        let ok = await store.send(text: "hello", attachments: [], model: nil)
-        XCTAssertTrue(ok)
+        await store.send(text: "hello", attachments: [], model: nil)
         XCTAssertTrue(store.running, "a send reports running optimistically")
 
         // Unrelated context frame while the box hasn't confirmed → keep running.
@@ -170,8 +169,7 @@ final class ChatStreamMergeTests: XCTestCase {
         stream.inject(#"{"kind":"stream","sub":"context","sessionId":"ses","payload":{"freshInput":0,"cacheRead":0,"cacheWrite":0,"totalInput":0,"pct":0,"segments":[]}}"#)
         await Task.yield()
 
-        let ok = await store.send(text: "hello", attachments: [], model: nil)
-        XCTAssertTrue(ok)
+        await store.send(text: "hello", attachments: [], model: nil)
         XCTAssertTrue(store.running, "a send reports running optimistically")
 
         // The box reconnects and states the authoritative running set: this
@@ -203,8 +201,7 @@ final class ChatStreamMergeTests: XCTestCase {
         XCTAssertEqual(store.streamingTailID, "")
 
         // User sends the next message before the refetch lands.
-        let ok = await store.send(text: "next", attachments: [], model: nil)
-        XCTAssertTrue(ok)
+        await store.send(text: "next", attachments: [], model: nil)
         XCTAssertTrue(store.running)
         let mintedTail = store.streamingTailID
         XCTAssertFalse(mintedTail.isEmpty, "send() mints the streaming tail")
@@ -231,8 +228,7 @@ final class ChatStreamMergeTests: XCTestCase {
             eventStore: MantaEventStore(stream: TestStreamControl(), tokenProvider: { nil }, serverProvider: { nil }),
             api: api
         )
-        let ok = await store.send(text: "hello", attachments: [], model: nil)
-        XCTAssertFalse(ok, "a failed send must be reported as failed")
+        await store.send(text: "hello", attachments: [], model: nil)
         XCTAssertFalse(store.running, "a failed send must stop the running state (no forever-spinner)")
 
         let userBlocks = store.transcript.filter {
@@ -240,6 +236,8 @@ final class ChatStreamMergeTests: XCTestCase {
             return false
         }
         XCTAssertEqual(userBlocks.count, 0, "a failed send must not leave the message in the transcript")
+        XCTAssertEqual(store.pendingPrompts.filter { $0.state == .failed }.count, 1,
+                       "a failed send must leave a failed pending row with tap-to-retry")
     }
 
     // MARK: - Permissions routing (BET-715)
@@ -363,9 +361,9 @@ final class ChatStreamMergeTests: XCTestCase {
         await Task.yield()
         XCTAssertTrue(store.running)
 
-        let ok = await store.send(text: "queued", attachments: [], model: nil)
-        XCTAssertTrue(ok, "a mid-turn send is accepted (queued), not rejected")
-        XCTAssertEqual(store.queuedPrompts.count, 1, "the send must be queued")
+        await store.send(text: "queued", attachments: [], model: nil)
+        XCTAssertEqual(store.pendingPrompts.filter { $0.state == .waiting }.count, 1,
+                       "a mid-turn send is accepted and queued, not rejected")
         XCTAssertEqual(RecordingPromptURLProtocol.sentTexts, [],
                        "no prompt may be POSTed while a turn runs")
     }
@@ -384,15 +382,15 @@ final class ChatStreamMergeTests: XCTestCase {
         await Task.yield()
         stream.inject(#"{"kind":"stream","sub":"running","sessionId":"ses","payload":{"running":true}}"#)
         await Task.yield()
-        _ = await store.send(text: "q1", attachments: [], model: nil)
-        XCTAssertEqual(store.queuedPrompts.count, 1)
+        await store.send(text: "q1", attachments: [], model: nil)
+        XCTAssertEqual(store.pendingPrompts.filter { $0.state == .waiting }.count, 1)
         XCTAssertEqual(RecordingPromptURLProtocol.sentTexts, [])
 
         // Turn finishes → idle edge drains exactly one.
         stream.inject(#"{"kind":"stream","sub":"turnComplete","sessionId":"ses","payload":{"complete":true,"running":false}}"#)
         await waitUntil { RecordingPromptURLProtocol.sentTexts == ["q1"] }
 
-        XCTAssertEqual(store.queuedPrompts.count, 0, "the queue must empty after the idle drain")
+        XCTAssertEqual(store.pendingPrompts.count, 0, "the outbox must empty after the idle drain")
         XCTAssertEqual(RecordingPromptURLProtocol.sentTexts, ["q1"],
                        "the queued prompt must be sent exactly once on idle")
         XCTAssertTrue(store.running, "the drained send sets running optimistically")
@@ -411,16 +409,16 @@ final class ChatStreamMergeTests: XCTestCase {
         await Task.yield()
         stream.inject(#"{"kind":"stream","sub":"running","sessionId":"ses","payload":{"running":true}}"#)
         await Task.yield()
-        _ = await store.send(text: "q1", attachments: [], model: nil)
-        _ = await store.send(text: "q2", attachments: [], model: nil)
-        XCTAssertEqual(store.queuedPrompts.count, 2)
+        await store.send(text: "q1", attachments: [], model: nil)
+        await store.send(text: "q2", attachments: [], model: nil)
+        XCTAssertEqual(store.pendingPrompts.filter { $0.state == .waiting }.count, 2)
 
         // First idle edge → only q1.
         stream.inject(#"{"kind":"stream","sub":"turnComplete","sessionId":"ses","payload":{"complete":true,"running":false}}"#)
         await waitUntil { RecordingPromptURLProtocol.sentTexts == ["q1"] }
         XCTAssertEqual(RecordingPromptURLProtocol.sentTexts, ["q1"],
                        "the first idle edge must send only the FIRST queued prompt")
-        XCTAssertEqual(store.queuedPrompts.count, 1)
+        XCTAssertEqual(store.pendingPrompts.filter { $0.state == .waiting }.count, 1)
 
         // Drain's send is running; box confirms, then that turn finishes →
         // second drains.
@@ -430,12 +428,14 @@ final class ChatStreamMergeTests: XCTestCase {
         await waitUntil { RecordingPromptURLProtocol.sentTexts == ["q1", "q2"] }
         XCTAssertEqual(RecordingPromptURLProtocol.sentTexts, ["q1", "q2"],
                        "the second idle edge must send the second queued prompt (FIFO)")
-        XCTAssertEqual(store.queuedPrompts.count, 0)
+        XCTAssertEqual(store.pendingPrompts.count, 0)
     }
 
-    /// Leaving the session (stop) clears the queue so a queued prompt never
-    /// fires into a session the user has left.
-    func testStopClearsQueuedPrompts() async {
+    /// Leaving the session must NOT discard an outstanding prompt: the outbox
+    /// is durable (BET-1263), so `stop()` preserves it and a later `load()`
+    /// re-hydrates it. The old "clear the queue on leave" behaviour was
+    /// precisely the silent-loss bug this ticket removes.
+    func testStopPreservesPendingPrompts() async {
         let stream = TestStreamControl()
         let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
         let store = ChatSessionStore(
@@ -446,12 +446,12 @@ final class ChatStreamMergeTests: XCTestCase {
         await Task.yield()
         stream.inject(#"{"kind":"stream","sub":"running","sessionId":"ses","payload":{"running":true}}"#)
         await Task.yield()
-        _ = await store.send(text: "q1", attachments: [], model: nil)
-        XCTAssertEqual(store.queuedPrompts.count, 1)
+        await store.send(text: "q1", attachments: [], model: nil)
+        XCTAssertEqual(store.pendingPrompts.filter { $0.state == .waiting }.count, 1)
 
         store.stop()
-        XCTAssertEqual(store.queuedPrompts.count, 0,
-                       "leaving the session must clear the queue")
+        XCTAssertEqual(store.pendingPrompts.filter { $0.state == .waiting }.count, 1,
+                       "leaving the session must NOT clear the durable outbox")
     }
 
     // MARK: - Once-per-turn completion signal (BET-752 task 5)
@@ -472,8 +472,7 @@ final class ChatStreamMergeTests: XCTestCase {
 
         // A genuine user turn starts via `send()` (re-arms the once-per-turn
         // latch).
-        let ok = await store.send(text: "hello", attachments: [], model: nil)
-        XCTAssertTrue(ok)
+        await store.send(text: "hello", attachments: [], model: nil)
 
         // Message A streams and completes.
         stream.inject(#"{"kind":"stream","sub":"running","sessionId":"ses","payload":{"running":true}}"#)
@@ -494,7 +493,7 @@ final class ChatStreamMergeTests: XCTestCase {
                        "a second message completion of the SAME turn must not emit another haptic")
 
         // A NEW user turn re-arms and counts its own completion once.
-        _ = await store.send(text: "again", attachments: [], model: nil)
+        await store.send(text: "again", attachments: [], model: nil)
         stream.inject(#"{"kind":"stream","sub":"running","sessionId":"ses","payload":{"running":true}}"#)
         await Task.yield()
         stream.inject(#"{"kind":"stream","sub":"turnComplete","sessionId":"ses","payload":{"complete":true,"running":false}}"#)
@@ -834,8 +833,9 @@ final class TrailingCardsTests: XCTestCase {
         QuestionRequest(id: id, sessionID: "ses", questions: [], tool: nil, requestId: nil)
     }
 
-    private func queued(_ text: String) -> QueuedPrompt {
-        QueuedPrompt(text: text, attachments: [], model: nil, mentions: nil, agent: nil)
+    private func queued(_ text: String) -> PendingPrompt {
+        PendingPrompt(id: UUID().uuidString, sessionId: "ses", text: text,
+                      attachments: [], model: nil, mentions: nil, agent: nil, state: .waiting)
     }
 
     private func kind(_ block: TranscriptBlock) -> String {
@@ -857,7 +857,7 @@ final class TrailingCardsTests: XCTestCase {
             permission: cardPermission("p"),
             planExitQuestion: cardQuestion("pe"),
             question: cardQuestion("q"),
-            queuedPrompts: [queued("next")]
+            pendingPrompts: [queued("next")]
         )
         XCTAssertEqual(blocks.map(kind),
                        ["notice", "notice", "permission", "planExit", "question", "queuedPrompt"],
@@ -869,7 +869,7 @@ final class TrailingCardsTests: XCTestCase {
             sessionError: nil,
             truncation: StreamTruncationPayload(kind: "", label: "trunc", messageID: nil),
             running: true,
-            permission: nil, planExitQuestion: nil, question: nil, queuedPrompts: [])
+            permission: nil, planExitQuestion: nil, question: nil, pendingPrompts: [])
         XCTAssertEqual(blocks.map(kind), [],
                        "a truncation notice must not render while the turn is still running")
     }
@@ -877,7 +877,7 @@ final class TrailingCardsTests: XCTestCase {
     func testOmittedCardsProduceNoBlocks() {
         let blocks = ChatSessionStore.trailingBlocks(
             sessionError: nil, truncation: nil, running: false,
-            permission: nil, planExitQuestion: nil, question: nil, queuedPrompts: [])
+            permission: nil, planExitQuestion: nil, question: nil, pendingPrompts: [])
         XCTAssertEqual(blocks, [])
     }
 
@@ -885,7 +885,7 @@ final class TrailingCardsTests: XCTestCase {
         let blocks = ChatSessionStore.trailingBlocks(
             sessionError: nil, truncation: nil, running: false,
             permission: cardPermission("p"), planExitQuestion: cardQuestion("pe"), question: cardQuestion("q"),
-            queuedPrompts: [queued("a"), queued("b")])
+            pendingPrompts: [queued("a"), queued("b")])
         let kinds = blocks.map(kind)
         XCTAssertEqual(kinds.last, "queuedPrompt",
                        "queued prompts represent what happens next and must stay at the very end")

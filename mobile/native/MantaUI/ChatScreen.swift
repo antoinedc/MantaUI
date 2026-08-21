@@ -1265,7 +1265,7 @@ struct TranscriptListView<Header: View>: View {
         // screen injects `\.transcriptCardActions` at its call site. Read-only
         // surfaces (subagent drill-in) leave it unset → cards render inert.
         TiledView(items: store.rows, scrollPosition: $scrollPosition) { row in
-            TranscriptBlockCell(item: row, tokens: tokens)
+            TranscriptBlockCell(item: row, tokens: tokens, onRetry: { store.retry(promptID: $0) })
         }
         .prependLoader(.loader(
             perform: { store.loadEarlier() },
