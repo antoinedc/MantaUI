@@ -21,6 +21,7 @@ import {
   stampStoppedLastLooked as usageStoppedStampLastLooked,
   markStoppedRan as usageStoppedMarkRan,
 } from "./stoppedStore.mjs";
+import { getModelPrefs as modelPrefsGetStore, setModelPrefs as modelPrefsSetStore, seedModelPrefs as modelPrefsSeedStore } from "./modelPrefs.mjs";
 import { listHooks as webhookListHooks, deleteHook as webhookDeleteHook } from "./webhooks.mjs";
 import { listPages as servePageListStore } from "./servePage.mjs";
 import { listOutbox } from "./outbox.mjs";import { publicBaseUrl } from "./gatewayRegister.mjs";
@@ -1530,6 +1531,22 @@ export function buildHandlers({
     // Clear a row because the conversation ran successfully.
     "usage-stopped:mark-ran": (conversation) =>
       usageStoppedMarkRan({ conversation }, { publish: (evt) => bus.publish(evt) }),
+
+    // ---- per-session model prefs (manta-server owned; BET-1279) ----
+    // Durable box-side record of per-conversation model selection (provider+
+    // model, variant, fast flavour) + the recent-choices list, so the same
+    // conversation opened on a second device has the same model. The store +
+    // logic live in src/server/modelPrefs.mjs; these channels read/mutate it.
+    // Mutations publish `model-prefs.updated` ({sessionId} hint) so clients
+    // refetch without polling. seed is the one-shot non-destructive migration.
+    // preload: ipcRenderer.invoke(IPC.modelPrefsGet)  → no args
+    "model-prefs:get": () => modelPrefsGetStore(),
+    // preload: ipcRenderer.invoke(IPC.modelPrefsSet, { sessionId?, selection?, recents? })
+    "model-prefs:set": (input) =>
+      modelPrefsSetStore(input ?? {}, { publish: (evt) => bus.publish(evt) }),
+    // preload: ipcRenderer.invoke(IPC.modelPrefsSeed, { sessions?, recents? })
+    "model-prefs:seed": (input) =>
+      modelPrefsSeedStore(input ?? {}, { publish: (evt) => bus.publish(evt) }),
 
     // ---- background jobs (manta-server owned; in-process on mobile) ----
     // Mirror of the /api/delegate REST surface for the renderer. Jobs are

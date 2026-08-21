@@ -22,6 +22,7 @@ import { sep } from "node:path";
 import { stateHome, statePath } from "../shared/paths.mjs";
 import { STORE_PATH as AUTH_STORE_PATH } from "./auth.mjs";
 import { STORE_PATH as USAGE_STOP_STORE_PATH } from "./stoppedStore.mjs";
+import { STORE_PATH as MODEL_PREFS_STORE_PATH } from "./modelPrefs.mjs";
 
 test("the test run has a sandboxed state home", () => {
   const sandbox = process.env.MANTA_STATE_HOME;
@@ -53,4 +54,10 @@ test("store paths resolve inside the sandbox, not the live box", () => {
     `usage-stopped store resolved to ${USAGE_STOP_STORE_PATH}, outside the sandbox ${sandbox}`,
   );
   assert.ok(!USAGE_STOP_STORE_PATH.startsWith(homedir() + sep + ".manta"));
+  // The model-prefs store (BET-1279) must land inside the sandbox the same way.
+  assert.ok(
+    MODEL_PREFS_STORE_PATH.startsWith(sandbox + sep),
+    `model-prefs store resolved to ${MODEL_PREFS_STORE_PATH}, outside the sandbox ${sandbox}`,
+  );
+  assert.ok(!MODEL_PREFS_STORE_PATH.startsWith(homedir() + sep + ".manta"));
 });
