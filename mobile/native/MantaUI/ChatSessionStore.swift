@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import UIKit
 
 // ===========================================================================
 // S4 — chat session store (BET-596).
@@ -990,6 +991,18 @@ final class ChatSessionStore: ObservableObject {
         await deliver(prompt)
     }
 
+    /// Run `work` inside a background-task assertion so an in-flight send is not
+    /// frozen the instant the app is backgrounded. The assertion is ALWAYS ended,
+    /// including on the expiration handler — an unbalanced one is a watchdog kill.
+    private func withBackgroundAssertion<T>(_ name: String, _ work: () async throws -> T) async rethrows -> T {
+        var id: UIBackgroundTaskIdentifier = .invalid
+        id = UIApplication.shared.beginBackgroundTask(withName: name) {
+            if id != .invalid { UIApplication.shared.endBackgroundTask(id); id = .invalid }
+        }
+        defer { if id != .invalid { UIApplication.shared.endBackgroundTask(id); id = .invalid } }
+        return try await work()
+    }
+
     /// POST one pending prompt now. Keyed on the prompt's stable id (minted
     /// once at submit and reused across a retry), so the row's identity never
     /// changes across `waiting → sending → failed → waiting` — TiledView
@@ -1012,14 +1025,16 @@ final class ChatSessionStore: ObservableObject {
             liveTailRowID = streamingTailID
         }
         do {
-            try await api.sendPrompt(SendPromptInput(
-                sessionId: sessionId,
-                text: prompt.text,
-                model: prompt.model,
-                attachments: prompt.attachments.isEmpty ? nil : prompt.attachments,
-                mentions: prompt.mentions,
-                agent: prompt.agent
-            ))
+            try await withBackgroundAssertion("send-prompt") {
+                try await api.sendPrompt(SendPromptInput(
+                    sessionId: sessionId,
+                    text: prompt.text,
+                    model: prompt.model,
+                    attachments: prompt.attachments.isEmpty ? nil : prompt.attachments,
+                    mentions: prompt.mentions,
+                    agent: prompt.agent
+                ))
+            }
             // Success: nothing is outstanding any more. Drop the pending row;
             // the canonical refetch already carries the real user message.
             remove(prompt.id)
