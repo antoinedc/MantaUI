@@ -331,3 +331,74 @@ describe("chooseModel — return shape", () => {
     expect(res.alternatives.map((x) => x.providerID)).toEqual(["b", "c", "d"]);
   });
 });
+
+describe("chooseModel — decision trace (BET-1265)", () => {
+  it("on a winner, reports what it actually used: quality basis, cost, mix, reliability, telemetry", () => {
+    const a = endpoint("sonnet", { providerID: "p", tier: "balanced" });
+    const b = endpoint("haiku", { providerID: "p", tier: "fast" });
+    const res = route({
+      catalog: [a, b],
+      policy: { preset: "balanced" },
+      intent: { incumbent: endpoint("opus", { providerID: "p" }), contextTokens: 0, needs: { tools: true } },
+      services: { telemetry: { "p/sonnet": { p50Ms: 120, p90Ms: 300, tokensPerSec: 80 } } },
+    });
+    expect(res.model?.id).toBe("sonnet");
+    expect(res.trace.considered).toBe(2);
+    expect(res.trace.dropped).toEqual([]);
+    expect(res.trace.intent).toEqual({ contextTokens: 0, needs: { tools: true } });
+    expect(res.trace.target.widened).toBe(false);
+    const w = res.trace.winner!;
+    expect(typeof w.quality.score).toBe("number");
+    expect(["benchmark", "family", "structural"]).toContain(w.quality.basis);
+    expect(w.quality.known).toBe(true);
+    expect(typeof w.cost.value).toBe("number");
+    expect(w.cost.mixSource).toBe("default");
+    expect(w.cost.reference).toBe("absent");
+    expect(w.reliability).toBe("unmeasured");
+    expect(w.telemetry).toEqual({ p50Ms: 120, p90Ms: 300, tokensPerSec: 80 });
+  });
+
+  it("measured telemetry is read, with per-field null fallback when absent", () => {
+    const res = route({
+      catalog: [endpoint("m", { tier: "balanced" })],
+      policy: { preset: "balanced" },
+      services: { telemetry: { "p/m": { tokensPerSec: 40 } } },
+    });
+    const w = res.trace.winner!;
+    expect(w.telemetry).toEqual({ p50Ms: null, p90Ms: null, tokensPerSec: 40 });
+  });
+
+  it("intent echoes the caller's contextTokens and needs verbatim", () => {
+    const res = route({
+      catalog: [endpoint("m", { tier: "balanced" })],
+      policy: { preset: "balanced" },
+      intent: { contextTokens: 0, needs: {} },
+    });
+    expect(res.trace.intent).toEqual({ contextTokens: 0, needs: {} });
+  });
+
+  it("no-survivor: winner is null and dropped names every stage/reason pair with counts", () => {
+    const retired = endpoint("retired", { status: "retired" });
+    const opaque = endpoint("opaque", { providerID: "q" });
+    const toolLess = endpoint("tool", { providerID: "p", capabilities: { toolcall: false, input: { image: true, pdf: true } } });
+    const incumbent = endpoint("inc", { providerID: "x" });
+    const res = route({
+      catalog: [retired, opaque, toolLess],
+      policy: { preset: "balanced" },
+      intent: { incumbent, contextTokens: 0, needs: { tools: true } },
+      services: { declared: defaultDeclared([retired, toolLess]) }, // opaque deliberately not declared
+    });
+    expect(res.model?.providerID).toBe("x"); // incumbent returned unchanged
+    expect(res.trace.winner).toBeNull();
+    expect(res.trace.considered).toBe(3);
+    expect(res.trace.dropped).toHaveLength(3);
+    expect(res.trace.dropped).toEqual(
+      expect.arrayContaining([
+        { stage: "capable", reason: "no active model", n: 1 },
+        { stage: "eligible", reason: "identity", n: 1 },
+        { stage: "capable", reason: "tool calling", n: 1 },
+      ]),
+    );
+    expect(res.trace.intent).toEqual({ contextTokens: 0, needs: { tools: true } });
+  });
+});

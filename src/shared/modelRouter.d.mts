@@ -67,11 +67,31 @@ export interface ChooseInput {
   services?: RoutingServices;
 }
 
+export type QualityBasis = "benchmark" | "family" | "structural";
+export type MixSource = "measured" | "default";
+export type ReferenceFlag = "catalogue" | "absent";
+
+export interface RoutingSignals {
+  quality: { score: number; basis: QualityBasis; known: boolean };
+  cost: { value: number; basis: string; mixSource: MixSource; reference: ReferenceFlag };
+  reliability: "measured" | "unmeasured";
+  telemetry: { p50Ms: number | null; p90Ms: number | null; tokensPerSec: number | null };
+}
+
+export interface RoutingTrace {
+  considered: number;
+  dropped: { stage: "eligible" | "capable"; reason: string; n: number }[];
+  intent: { contextTokens: number; needs: { tools: boolean; image: boolean; pdf: boolean } };
+  target: { tier: string; floorTier: string; widened: boolean };
+  winner: RoutingSignals | null;
+}
+
 export interface ChooseResult {
   model: Model | null;
   reason: string;
   alternatives: Model[];
   changed: boolean;
+  trace: RoutingTrace;
 }
 
 export function chooseModel(input?: ChooseInput): ChooseResult;
