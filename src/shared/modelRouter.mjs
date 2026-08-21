@@ -9,6 +9,7 @@
 // ever appears here or in its imports.
 
 import { tierRank } from "./modelGuide.mjs";
+import { endpointKey } from "./endpointKey.mjs";
 import { qualityScore, tierForScore, meetsFloor, AGENT_FLOOR_SCORE } from "./modelQuality.mjs";
 import { resolveIdentity } from "./modelIdentity.mjs";
 import { autoEligibility, MISSING } from "./autoEligibility.mjs";
@@ -46,8 +47,6 @@ export const AGENT_TIER = {
   balanced: { build: "deep", plan: "deep", general: "balanced", explore: "fast" },
   performance: { build: "deep", plan: "deep", general: "deep", explore: "balanced" },
 };
-
-const endpointKey = (c) => `${c?.providerID ?? ""}/${c?.id ?? ""}`;
 
 const BINDING_ORDER = [
   "no active model", "context headroom", "tool calling", "image input", "pdf input",
@@ -247,9 +246,9 @@ function selectBand(ordered, targetRank, agent) {
 
 function explain({ agent, tierName, preset, winner, cost }) {
   if (preset === "economy") {
-    return `${agent} → ${tierName} tier (economy): ${winner.providerID}/${winner.id} cheapest at $${cost.toFixed(4)}`;
+    return `${agent} → ${tierName} tier (economy): ${endpointKey(winner)} cheapest at $${cost.toFixed(4)}`;
   }
-  return `${agent} → ${tierName} tier: ${winner.providerID}/${winner.id}`;
+  return `${agent} → ${tierName} tier: ${endpointKey(winner)}`;
 }
 
 /**
