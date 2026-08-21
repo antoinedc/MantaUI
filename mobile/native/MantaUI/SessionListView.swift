@@ -91,7 +91,9 @@ struct SessionListView: View {
                 }
             }
             .navigationTitle("Sessions")
-            .navigationBarTitleDisplayMode(.large)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackgroundVisibility(.visible, for: .navigationBar)
+            .toolbarBackground(tokens.canvas, for: .navigationBar)
             .mantaNavigationBarBackground(tokens)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
