@@ -393,6 +393,17 @@ export function readModalities(value) {
   return [];
 }
 
+// The SINGLE predicate for "can this model accept a modality this turn needs?"
+// Used by the send-path refusal check (ChatPanel), routingBoundary's
+// constraint decision, and the router's capability stage — one definition so
+// nobody re-derives it. `[]` means "no information", which is NEVER "supports
+// nothing" (readModalities' contract): an unknown capability set is allow, the
+// provider answers if the send really was invalid.
+export function acceptsModality(model, mode) {
+  const modes = readModalities(model?.capabilities?.input);
+  return modes.length === 0 || modes.includes(mode);
+}
+
 /**
  * Order a model tier on a numeric scale for comparisons. fast -> 0,
  * balanced -> 1, deep -> 2, anything unknown -> 1 (balanced).

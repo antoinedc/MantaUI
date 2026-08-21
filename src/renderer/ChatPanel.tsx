@@ -93,6 +93,7 @@ import {
   type TokenUsage,
 } from "./chatShared";
 import { crossesBoundary, shouldSwitch, boundaryPhrase } from "../shared/routingBoundary.mjs";
+import { acceptsModality } from "../shared/modelGuide.mjs";
 import { useModelCatalog } from "./modelCatalog";
 import { useAgentCatalog } from "./agentCatalog";
 import { MantaLoader } from "./MantaLoader";
@@ -1302,7 +1303,7 @@ export function ChatPanel({
       const modes = modelInputModes(activeModel);
       const unsupported = readyAttachments
         .map((a) => ({ filename: a.filename, mime: a.mime, mode: mimeToInputMode(a.mime) }))
-        .filter((a) => a.mode === "other" || (modes.length > 0 && !modes.includes(a.mode)));
+        .filter((a) => a.mode === "other" || !acceptsModality(activeModel, a.mode));
       if (unsupported.length > 0) {
         setRunning(false);
         // Strip the optimistic user message — the send is being refused.
@@ -1349,9 +1350,7 @@ export function ChatPanel({
           contextTokens: ctxTokens ?? undefined,
           incumbentContextLimit: incumbentModel?.limit?.context ?? undefined,
           requiredModalities: requiredModes,
-          incumbentModalities: incumbentModel
-            ? modelInputModes(incumbentModel)
-            : [],
+          incumbentModel,
           incumbentHealthy: true,
           justCompacted: justCompactedRef.current,
           userRequested: pendingAutoUserRef.current,
@@ -1366,9 +1365,9 @@ export function ChatPanel({
               directory: cwd ?? "",
               agent: currentAgent,
               surface: "main",
-              contextTokens: ctxTokens ?? 0,
+              contextTokens: ctxTokens,
               needs: {
-                tools: Boolean(planAgent),
+                tools: true,
                 image: readyAttachments.some((a) => mimeToInputMode(a.mime) === "image"),
                 pdf: readyAttachments.some((a) => mimeToInputMode(a.mime) === "pdf"),
               },

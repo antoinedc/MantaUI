@@ -456,7 +456,10 @@ export interface Api {
     directory: string;
     agent: string;
     surface: "main" | "sub";
-    contextTokens: number;
+    // The real conversation size. Absent when the caller had no token reading
+    // yet — an absent value is a caller bug and the headroom check skips
+    // (BET-1267 3b); it is never silently defaulted to 0.
+    contextTokens?: number;
     needs?: { tools?: boolean; image?: boolean; pdf?: boolean };
     incumbent: PromptModel | null;
   }): Promise<RoutingChooseDecision>;

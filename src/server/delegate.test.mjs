@@ -25,6 +25,12 @@ import {
   chooseMainModel,
 } from "./delegate.mjs";
 import { familyKey } from "../shared/modelGuide.mjs";
+// Per standing rule 9: a routing test may not hand-write a candidate literal.
+// Build every candidate through the REAL normaliser so the fixtures can never
+// drift from what production produces (that drift is how this epic's defects
+// survived a fully green suite).
+import { _normalizeProviderModel } from "./opencode.mjs";
+import { chooseModel } from "../shared/modelRouter.mjs";
 
 // ----------------------------------------------------------------------------
 // Harness: in-memory load/save on a closure-held array, recorded publish +
@@ -86,6 +92,25 @@ function routingServicesFor(list, extra = {}) {
     telemetry: {},
     ...extra,
   };
+}
+
+// A raw provider-model payload in the shape opencode's `/provider` emits, and
+// the normaliser that turns it into the canonical OpencodeModel the router
+// actually sees. Tests NEVER construct the router candidate by hand.
+function rawProviderModel(over = {}) {
+  return {
+    id: "m",
+    status: "active",
+    limit: { context: 32000, output: 16000 },
+    cost: { input: 3, output: 15, cache: { read: 0.3, write: 3 } },
+    capabilities: { toolcall: true, input: ["text", "image", "pdf"] },
+    ...over,
+  };
+}
+function normalize(providerID, modelId, raw) {
+  const m = _normalizeProviderModel(providerID, modelId, raw);
+  assert.ok(m, "candidate must normalise (fixture drift check)");
+  return m;
 }
 
 // ----------------------------------------------------------------------------
@@ -869,6 +894,104 @@ test("chooseMainModel when the router picks the same model reports changed:false
   assert.equal(decision.changed, false, "no model was substituted → the pill must not render");
   assert.deepEqual(decision.model, incumbent);
   assert.deepEqual(decision.incumbent, incumbent);
+});
+
+// ----------------------------------------------------------------------------
+// BET-1267 — the hard filters must receive the turn's real facts. Every
+// candidate here is built through _normalizeProviderModel (standing rule 9),
+// and each case FAILS on main (the fixture feeds production's real shape, so a
+// green suite can no longer hide the defect).
+// ----------------------------------------------------------------------------
+
+test("BET-1267 3a: an image turn against a real-normalised model that DECLARES image input survives", () => {
+  const imageCapable = normalize("p", "imgm", rawProviderModel({ id: "imgm", capabilities: { toolcall: true, input: { text: true, image: true } } }));
+  const decision = chooseModel({
+    intent: { kind: "start", agent: "general", incumbent: null, contextTokens: 0, needs: { image: true } },
+    catalog: [imageCapable],
+    policy: { preset: "balanced" },
+    nowMs: 0,
+    services: routingServicesFor([imageCapable]),
+  });
+  assert.ok(decision.model, "an image-capable model must survive an image turn");
+  assert.equal(decision.model?.id, "imgm");
+  assert.ok(
+    !decision.trace.dropped.some((d) => d.reason === "image input"),
+    "must not be dropped for image input",
+  );
+});
+
+test("BET-1267 3a: an image turn drops a text-only model (image input) and keeps the image-capable control", () => {
+  const textOnly = normalize("p", "textm", rawProviderModel({ id: "textm", capabilities: { toolcall: true, input: ["text"] } }));
+  const imageCapable = normalize("p", "imgm", rawProviderModel({ id: "imgm", capabilities: { toolcall: true, input: ["text", "image"] } }));
+  const decision = chooseModel({
+    intent: { kind: "start", agent: "general", incumbent: null, contextTokens: 0, needs: { image: true } },
+    catalog: [textOnly, imageCapable],
+    policy: { preset: "balanced" },
+    nowMs: 0,
+    services: routingServicesFor([textOnly, imageCapable]),
+  });
+  assert.ok(
+    decision.trace.dropped.some((d) => d.stage === "capable" && d.reason === "image input"),
+    "the text-only model must be dropped with 'image input'",
+  );
+  assert.equal(decision.model?.id, "imgm", "the image-capable control must win");
+});
+
+test("BET-1267 3a: an image turn against a model with NO declared modalities survives (unknown = allow)", () => {
+  const noMods = normalize("p", "nomo", rawProviderModel({ id: "nomo", capabilities: { toolcall: true } }));
+  const decision = chooseModel({
+    intent: { kind: "start", agent: "general", incumbent: null, contextTokens: 0, needs: { image: true } },
+    catalog: [noMods],
+    policy: { preset: "balanced" },
+    nowMs: 0,
+    services: routingServicesFor([noMods]),
+  });
+  assert.ok(decision.model, "a model with no declared modalities must survive an image turn");
+  assert.equal(decision.model?.id, "nomo");
+  assert.ok(
+    !decision.trace.dropped.some((d) => d.reason === "image input"),
+    "must not be dropped for image input",
+  );
+});
+
+test("BET-1267 3b: a 150k-token conversation drops a 32k-context model for context headroom — the real size reaches the decision", () => {
+  const small = normalize("p", "ctx-32k", rawProviderModel({ id: "ctx-32k", limit: { context: 32000 }, capabilities: { toolcall: true } }));
+  // The incumbent is a DIFFERENT model, absent from the catalog: whether the
+  // 32k candidate is dropped (context headroom, real 150k size) is the only
+  // thing separating "falls back to the incumbent" from "routes onto the 32k".
+  const incumbent = { providerID: "p", modelID: "elsewhere" };
+  const chosen = chooseSubagentModel({
+    incumbent,
+    catalog: [small],
+    policy: { preset: "balanced" },
+    quota: [],
+    agent: "general",
+    nowMs: 0,
+    contextTokens: 150000,
+    services: routingServicesFor([small]),
+  });
+  assert.deepEqual(
+    chosen,
+    incumbent,
+    "a 32k model cannot hold a 150k conversation (1.25x headroom) and must drop, falling back to the incumbent",
+  );
+});
+
+test("BET-1267 3d: an opted-in deprecated model survives the router (status is not re-litigated at the decision core)", () => {
+  const deprecated = normalize("p", "legacy", rawProviderModel({ id: "legacy", status: "deprecated" }));
+  const decision = chooseModel({
+    intent: { kind: "start", agent: "general", incumbent: null, contextTokens: 0, needs: {} },
+    catalog: [deprecated],
+    policy: { preset: "balanced" },
+    nowMs: 0,
+    services: routingServicesFor([deprecated]),
+  });
+  assert.ok(decision.model, "an opted-in deprecated model must survive the router");
+  assert.equal(decision.model?.id, "legacy");
+  assert.ok(
+    !decision.trace.dropped.some((d) => d.reason === "no active model"),
+    "must not be dropped for status",
+  );
 });
 
 test("requestedModel survives a tickActivity that rewrites job.model (BET-947)", async () => {

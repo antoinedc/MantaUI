@@ -933,7 +933,11 @@ export function buildHandlers({
             kind: surface === "sub" ? "subagent" : "main",
             agent,
             needs: input?.needs ?? {},
-            contextTokens: typeof input?.contextTokens === "number" ? input.contextTokens : 0,
+            // BET-1267 3b: the renderer sends the REAL conversation size. An
+            // absent value is a caller bug — pass undefined through so the
+            // headroom check skips instead of silently passing 0 (which would
+            // read as "zero tokens").
+            contextTokens: typeof input?.contextTokens === "number" ? input.contextTokens : undefined,
             incumbent: catalogIncumbent,
           },
           catalog,

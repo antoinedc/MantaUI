@@ -26,6 +26,10 @@ export const BOUNDARY = {
 // the RPC boundary shape ({providerID, modelID}) and the router's internal
 // catalogue shape ({providerID, id}) so the two STOP being two conventions.
 import { endpointKey } from "./endpointKey.mjs";
+// The single "can this endpoint take this attachment" predicate, shared with
+// the router's capability stage and the renderer's send-path refusal. Unknown
+// declared modalities = allow, never "supports nothing" (BET-1267 3e).
+import { acceptsModality } from "./modelGuide.mjs";
 
 /**
  * Does this turn cross a decision point?
@@ -41,7 +45,8 @@ import { endpointKey } from "./endpointKey.mjs";
  * @param {number}   [input.contextTokens]        current context size
  * @param {number}   [input.incumbentContextLimit]max context the incumbent can hold
  * @param {string[]} [input.requiredModalities]   modalities this turn needs
- * @param {string[]} [input.incumbentModalities]  modalities the incumbent has
+ * @param {object}   [input.incumbentModel]        the incumbent endpoint (read
+ *        for its declared input modalities via acceptsModality)
  * @param {boolean}  [input.incumbentHealthy]     true → provider is available
  * @param {boolean}  [input.justCompacted]        true → cache is gone anyway
  * @param {boolean}  [input.userRequested]        true → user re-picked Auto
@@ -55,7 +60,7 @@ export function crossesBoundary(input = {}) {
     contextTokens,
     incumbentContextLimit,
     requiredModalities = [],
-    incumbentModalities = [],
+    incumbentModel = null,
     incumbentHealthy = true,
     justCompacted = false,
     userRequested = false,
@@ -71,8 +76,11 @@ export function crossesBoundary(input = {}) {
     typeof incumbentContextLimit === "number" &&
     typeof contextTokens === "number" &&
     contextTokens > incumbentContextLimit;
+  // The SAME predicate the send path and the router use: a model with no
+  // declared modalities is not missing one (unknown = allow), so it never
+  // forces a re-route on an attachment turn (BET-1267 3e).
   const modalityMissing = requiredModalities.some(
-    (m) => !incumbentModalities.includes(m),
+    (m) => !acceptsModality(incumbentModel, m),
   );
   const stillCapable = !(contextOutgrown || modalityMissing);
   const stillHealthy = incumbentHealthy;

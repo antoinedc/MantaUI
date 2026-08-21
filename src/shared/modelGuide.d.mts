@@ -21,6 +21,11 @@ export function isDeprecated(m: { status?: string } | null | undefined): boolean
 
 export function readModalities(value: unknown): string[];
 
+export function acceptsModality(
+  model: { capabilities?: { input?: unknown } } | null | undefined,
+  mode: string
+): boolean;
+
 export interface ResolvedModel {
   id?: string;
   name?: string;
