@@ -164,6 +164,8 @@ export function InputArea({
   onOptInModel,
   onOpenModels,
   onSelectModel,
+  onSelectEffort,
+  presetLabel,
   scheduleCount,
   onSchedules,
   onSecrets,
@@ -224,9 +226,13 @@ export function InputArea({
   // BET-1248: user re-picked Auto in the menu — forwarded to the ModelPicker's
   // Auto row so it renders + re-decides on the next turn.
   onSelectAuto?: () => void;
-  // BET-1222 routed state — forwarded to ModelPicker: reason + incumbent shown
-  // on the routed pill, and the caller-owned undo action.
-  routed?: { reason: string; incumbent: { providerID: string; modelID: string } } | null;
+  // BET-1222/BET-1274 routed state — forwarded to ModelPicker: reason shown on
+  // the routed pill, and the (possibly null) incumbent drives the optional undo
+  // action (no incumbent = first turn, nothing to undo).
+  routed?: {
+    reason: string;
+    incumbent: { providerID: string; modelID: string } | null;
+  } | null;
   onRoutedUndone?: () => void;
   // BET-738: the active model's providerID, already resolved by ChatPanel
   // via resolveActiveModel (the same computation `shortLabel` above uses) —

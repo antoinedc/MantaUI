@@ -108,8 +108,12 @@ export function ModelPicker({
   autoReason?: string | null;
   // BET-1248: the user re-picking Auto (render the Auto row).
   onSelectAuto?: () => void;
-  // BET-1222 routed state (see above).
-  routed?: { reason: string; incumbent: { providerID: string; modelID: string } } | null;
+  // BET-1222/BET-1274 routed state (see above). `incumbent` null = a first turn
+  // with nothing to undo (the pill renders the reason only).
+  routed?: {
+    reason: string;
+    incumbent: { providerID: string; modelID: string } | null;
+  } | null;
   onRoutedUndone?: () => void;
 }) {
   const [modelOpen, setModelOpen] = useState(false);

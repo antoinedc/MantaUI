@@ -294,16 +294,18 @@ describe("ModelPicker — effort/fast write effort, not a model choice (BET-1274
         onSelectEffort={(m) => effortCalls.push(m)}
       />,
     );
-    // Open the effort (right) segment menu.
+    // Open the effort (right) segment menu. The dropdown portals to document.body.
     const effortBtn = h.container.querySelector<HTMLElement>(".manta-effort-picker-btn");
     expect(effortBtn).toBeTruthy();
     act(() => (effortBtn as HTMLButtonElement).click());
+    const effortMenu = document.body.querySelector<HTMLElement>(".manta-effort-dropdown");
+    expect(effortMenu).toBeTruthy();
     // Select the "High" variant row.
-    const high = [...h.container.querySelectorAll("button")].find((b) =>
+    const high = [...(effortMenu?.querySelectorAll<HTMLElement>('[role="option"]') ?? [])].find((b) =>
       (b.textContent ?? "").includes("High"),
     );
     expect(high).toBeTruthy();
-    act(() => (high as HTMLButtonElement).click());
+    act(() => (high as HTMLElement).click());
     // The effort went to onSelectEffort (with the variant) — and NOT to the
     // model-choice onSelect, which is what used to pin the model + exit Auto.
     expect(effortCalls).toHaveLength(1);
@@ -330,6 +332,11 @@ describe("ModelPicker — effort/fast write effort, not a model choice (BET-1274
     // Open the model dropdown; the Auto pinned row is its first header row.
     const modelBtn = h.container.querySelector<HTMLElement>(".manta-model-picker-btn");
     act(() => (modelBtn as HTMLButtonElement).click());
-    expect((h.container.textContent ?? "")).toContain("Balanced · moved: the previous provider ran out");
+    const modelMenu = document.body.querySelector<HTMLElement>(".manta-model-dropdown");
+    const autoRow = [...(modelMenu?.querySelectorAll<HTMLElement>('[role="option"]') ?? [])].find((e) =>
+      (e.textContent ?? "").includes("Auto — Manta picks per task"),
+    );
+    expect(autoRow).toBeTruthy();
+    expect(autoRow?.textContent ?? "").toContain("Balanced · moved: the previous provider ran out");
   });
 });
