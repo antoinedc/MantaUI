@@ -94,7 +94,7 @@ struct SessionListView: View {
             .navigationBarTitleDisplayMode(.large)
             .mantaNavigationBarBackground(tokens)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .topBarLeading) {
                     Button {
                         SessionHaptics.fire(.selection, enabled: store.hapticsEnabled)
                         showSettings = true
@@ -102,11 +102,28 @@ struct SessionListView: View {
                         Image(systemName: "gearshape")
                             .foregroundColor(tokens.tx2)
                     }
+                    // The system's own glass BUTTON style, not a plain button
+                    // with a glass effect layered over it: the layered version
+                    // renders correctly but eats the touch, so the button looks
+                    // dead. Both header buttons use the same style so they read
+                    // as a matched pair.
+                    .buttonStyle(.glass)
                     .accessibilityLabel("Settings")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        SessionHaptics.fire(.selection, enabled: store.hapticsEnabled)
+                        presentCreateMenu()
+                    } label: {
+                        Image(systemName: "plus")
+                            .foregroundColor(tokens.tx2)
+                    }
+                    .buttonStyle(.glass)
+                    .accessibilityLabel("New session")
                 }
             }
             .refreshable { await store.refresh() }
-            .safeAreaInset(edge: .bottom) { capsule }
+            .safeAreaInset(edge: .bottom) { searchBar }
             .overlay(alignment: .top) { errorBanner }
             .navigationDestination(for: SessionOpenTarget.self) { target in
                 if let sessionId = target.sessionId, !sessionId.isEmpty {
@@ -537,65 +554,39 @@ struct SessionListView: View {
         }
     }
 
-    // MARK: - Floating capsule (+ search) + create
+    // MARK: - Floating search bar
 
-    // The search + create control FLOATS over the list on Liquid Glass, the
-    // system material for iOS 26 chrome. It used to be a flat
-    // `.ultraThinMaterial` rectangle spanning the full width, which reads as an
-    // opaque grey band with a hard seam — not glass, and visibly not a system
-    // control. Each element carries its own glass so the pill and the button
-    // are separate floating shapes, which is what `GlassEffectContainer` is
-    // for; there is no full-bleed backing plate any more.
-    private var capsule: some View {
-        GlassEffectContainer(spacing: Metrics.spacing.sp3) {
-            HStack(spacing: Metrics.spacing.sp3) {
-                HStack(spacing: Metrics.spacing.sp2) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: Metrics.type.xs))
-                        .foregroundColor(tokens.tx4)
-                    TextField("Search sessions", text: $searchText)
-                        .font(.manta(size: Metrics.type.small))
-                        .foregroundColor(tokens.tx1)
-                }
-                .padding(.horizontal, Metrics.spacing.sp3)
-                .padding(.vertical, Metrics.spacing.sp3)
-                .glassEffect(.regular.interactive(), in: .capsule)
-
-                Button {
-                    SessionHaptics.fire(.selection, enabled: store.hapticsEnabled)
-                    presentCreateMenu()
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: Metrics.type.body, weight: .semibold))
-                        // onAccent, NOT accentTx: accentTx is the accent colour
-                        // for text on a NEUTRAL background. Over a solid accent
-                        // fill it is the same colour in light mode, which is why
-                        // this button was a featureless blue disc. Every other
-                        // filled-accent control in the app already uses onAccent.
-                        .foregroundColor(tokens.onAccent)
-                        .frame(width: 44, height: 44)
-                }
-                // The system's own glass BUTTON style, not a plain button with
-                // a glass effect layered over it: the layered version rendered
-                // correctly but ate the touch, so the button looked dead.
-                .buttonStyle(.glassProminent)
-                .tint(tokens.accentSolid)
-                .clipShape(.circle)
-                .accessibilityLabel("New")
-            }
+    // The search field FLOATS over the list on Liquid Glass, the system
+    // material for iOS 26 chrome. It used to be a flat `.ultraThinMaterial`
+    // rectangle spanning the full width, which reads as an opaque grey band
+    // with a hard seam — not glass, and visibly not a system control.
+    //
+    // It used to share a `GlassEffectContainer` with a floating create button.
+    // That button now lives in the navigation bar, so the container has a
+    // single child and is deleted with it: a container whose whole job is to
+    // relate two glass shapes is noise once there is only one.
+    private var searchBar: some View {
+        HStack(spacing: Metrics.spacing.sp2) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: Metrics.type.xs))
+                .foregroundColor(tokens.tx4)
+            TextField("Search sessions", text: $searchText)
+                .font(.manta(size: Metrics.type.small))
+                .foregroundColor(tokens.tx1)
         }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, Metrics.spacing.sp3)
+        .padding(.vertical, Metrics.spacing.sp3)
+        .glassEffect(.regular.interactive(), in: .capsule)
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.bottom, Metrics.spacing.sp2)
-        // Rows passing behind the floating capsule fade out rather than
+        // Rows passing behind the floating search bar fade out rather than
         // colliding with it. Same component as the chat composer's scrim, so
         // the two screens read identically — including the overhang, without
-        // which the list comes back to full brightness in the strip below the
-        // capsule.
-        // Sized to the capsule itself — a `.background` is exactly its
-        // container — plus the overhang below, matching the chat composer:
-        // `fadeInsideContainer` puts the fade band AT the capsule's top edge
-        // rather than hanging above it, so rows stay fully readable until
-        // the capsule and dissolve behind its glass.
+        // which the list comes back to full brightness in the strip below it.
+        // `fadeInsideContainer` puts the fade band AT the bar's top edge rather
+        // than hanging above it, so rows stay fully readable until the bar and
+        // dissolve behind its glass.
         .background {
             Scrim(edge: .bottom, tokens: tokens, overhang: Metrics.spacing.sp12, fadeInsideContainer: true)
         }
