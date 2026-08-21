@@ -830,24 +830,33 @@ async function captureRouterLines(fn, ...args) {
   return { out, lines };
 }
 
-test("BET-1275 11b: a named Sub-ticked model runs on it and NEVER invokes the router", async () => {
+test("BET-1275 11b: a named Sub-ticked model runs on it, skip routing, and emits NO [router] line", async () => {
   const h = startHarness("child_named_ticked");
   h.deps.configGet = async () => ({ modelRouting: { preset: "economy" } }); // routing ON
   h.deps.listSnapshots = () => [];
   h.deps.listModels = async () => mockModels();
   // A throwing router stub: if routing ever runs for a NAMED model, this throws
-  // (the named path skips routing entirely and never calls it).
+  // (the named path skips routing entirely and never calls it). On main this
+  // seam doesn't exist, so the [router]-line assertion below is the load-bearing
+  // on-main failure — main ALWAYS routes a named model and logs a decision.
   h.deps.chooseSubagentModel = () => {
     throw new Error("router must not run for a named model");
   };
-  const res = await startJob(
-    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo", model: "opus" },
-    h.deps,
-  );
-  assert.equal(res.ok, true);
+  const { out, lines } = await captureRouterLines((input) => startJob(input, h.deps), {
+    prompt: "do it",
+    parentSessionID: "parent",
+    parentDirectory: "/repo",
+    model: "opus",
+  });
+  assert.equal(out.ok, true);
   assert.equal(h.delivered.length, 1);
   // Named, ticked model is honoured verbatim — never routed over.
   assert.deepEqual(h.delivered[0].model, { providerID: "anthropic", modelID: "claude-opus-4-5" });
+  // Routing is SKIPPED: no [router] decision line may be emitted for the spawn.
+  assert.ok(
+    !lines.some((l) => l.includes("[router]")),
+    `a named model must not route; got [router] lines: ${lines.join(" | ")}`,
+  );
 });
 
 test("BET-1275 rule 3: a named UN-ticked model fails loudly naming close candidates", async () => {
