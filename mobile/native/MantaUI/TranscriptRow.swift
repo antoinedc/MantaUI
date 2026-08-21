@@ -198,9 +198,10 @@ struct TranscriptBlockCell: TiledCellContent {
     let item: TranscriptRow
     let tokens: Tokens
     /// User-initiated retry of a failed pending prompt, threaded down from the
-    /// store-owning transcript surface. Invoked only on the main actor (inside
-    /// `TranscriptCellReveal.body`).
-    let onRetry: (String) -> Void
+    /// store-owning transcript surface. `@MainActor` (hence Sendable) so it can
+    /// cross the cell's nonisolated `body` legally; invoked only on the main
+    /// actor (inside `TranscriptCellReveal.body`).
+    let onRetry: @MainActor (String) -> Void
 
     func body(context: CellContext<Void>) -> some View {
         // The reveal offset now comes from MessagingUI's OWN pan recogniser, which
@@ -236,9 +237,10 @@ private struct TranscriptCellReveal: View {
     let cellReveal: CellReveal?
     let item: TranscriptRow
     let tokens: Tokens
-    /// User-initiated retry of a failed pending prompt; read only on the main
-    /// actor here, so it never crosses the nonisolated cell boundary.
-    let onRetry: (String) -> Void
+    /// User-initiated retry of a failed pending prompt; `@MainActor` (Sendable)
+    /// so it crosses the nonisolated cell boundary, read only on the main actor
+    /// here.
+    let onRetry: @MainActor (String) -> Void
     /// The blocking-card callbacks, injected by the enclosing chat screen via
     /// `.environment(\.transcriptCardActions, …)` — read only on the main actor
     /// here, so it never crosses the nonisolated cell boundary. Nil on
@@ -290,7 +292,7 @@ private struct TranscriptCellReveal: View {
 /// surfaces → the cards render inert, never wiring to a live store).
 @MainActor
 @ViewBuilder
-func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens, cards: TranscriptCardActions? = nil, onRetry: (String) -> Void = { _ in }) -> some View {
+func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens, cards: TranscriptCardActions? = nil, onRetry: @escaping @MainActor (String) -> Void = { _ in }) -> some View {
     // The inert action set a read-only surface falls back to: every card
     // renders harmlessly but no closure reaches a live store.
     let actions = cards ?? TranscriptCardActions(
