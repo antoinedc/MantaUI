@@ -17,6 +17,9 @@ import {
   createModelIndex,
   createModelCatalogController,
   startModelCatalogPoller,
+  lookupModel,
+  matchModel,
+  allModels,
 } from "./modelCatalog.mjs";
 
 const FIXTURE = JSON.parse(
@@ -176,21 +179,32 @@ test("a failed refresh never blanks a catalogue already held in memory", async (
   assert.equal(ctl.matchModel("ornith").kind, "ambiguous");
 });
 
-test("startModelCatalogPoller reuses startPoller: immediate tick populates the catalogue", async () => {
-  const cachePath = statePath("model-catalog.test-poller.json");
-  const poller = startModelCatalogPoller({ fetchImpl: stubFetch(), cachePath });
+test("a poller refresh is visible through the module-level allModels() — ONE catalogue (BET-1272)", async () => {
+  // Regression: startModelCatalogPoller used to build a SECOND, unrelated
+  // controller, so the module-level allModels() (which `opencode:model-catalog`
+  // reads) never saw a refresh on a first boot that predated the cache file —
+  // the box reported `{supported:false}` while the cache on disk held hundreds
+  // of entries. The poller must start the module's OWN singleton, so a fresh
+  // fetch on the box must be visible through the module-level API.
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = stubFetch();
+  const poller = startModelCatalogPoller();
   try {
-    // Immediate first tick is async; bounded-wait until it has landed.
     const deadline = Date.now() + 2000;
     while (Date.now() < deadline) {
-      if (poller.status().supported) break;
+      if (allModels().length === FIXTURE.length) break;
       await new Promise((r) => setTimeout(r, 10));
     }
-    assert.equal(poller.status().supported, true);
-    assert.equal(poller.matchModel("qwen3.6-27b").kind, "exact");
-    assert.equal(poller.lookupModel("minimax/MiniMax-M3")?.id, "minimax/MiniMax-M3");
+    assert.equal(
+      allModels().length,
+      FIXTURE.length,
+      "module-level allModels must reflect the poller's refresh",
+    );
+    assert.equal(matchModel("qwen3.6-27b").kind, "exact");
+    assert.equal(lookupModel("minimax/MiniMax-M3")?.id, "minimax/MiniMax-M3");
   } finally {
     poller.stop();
+    globalThis.fetch = realFetch;
   }
 });
 

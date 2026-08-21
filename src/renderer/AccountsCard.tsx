@@ -398,8 +398,6 @@ type AccountsData = {
 
 export function AccountsCard() {
   const snapshots = useStore((s) => s.usage) ?? [];
-  // Snapshot taken once per Settings open so pace/reset lines don't re-render on
-  // the store's usage ticks (mirrors ModelRoutingCard's `nowMs`).
   const [nowMs] = useState(() => Date.now());
   const routingCatalog = useRoutingCatalog();
 

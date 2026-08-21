@@ -34,11 +34,6 @@ import { refreshModelCatalog } from "./modelCatalog";
 import { useCachedResource } from "./useCachedResource";
 import { MantaLoader } from "./MantaLoader";
 import { isDeprecated } from "./chatUtils";
-import {
-  ModelsWeCouldntIdentify,
-  type DeclaredModel,
-} from "./ModelsWeCouldntIdentify";
-import { useRoutingCatalog } from "./routingCatalog";
 
 function modelKey(providerID: string, id: string): string {
   return `${providerID}/${id}`;
@@ -378,33 +373,6 @@ export function ModelsCard() {
     [busy, mutate, refresh],
   );
 
-  // ---- "Models we couldn't identify" (BET-1249) ----
-  // The provider-agnostic catalogue (fetched once) that resolves opaque
-  // endpoint identity + powers the typeahead. The user declarations live in
-  // AppConfig.modelRouting.declaredModels, read from the same cfg the table
-  // already holds.
-  const routingCatalog = useRoutingCatalog();
-
-  const declareModel = useCallback(
-    async (key: string, decl: DeclaredModel) => {
-      if (busy || !models) return;
-      setBusy(key);
-      await mutate(async () => {
-        const cfg = await window.api.configGet();
-        const routing = cfg.modelRouting ?? { preset: "balanced" };
-        const declared = { ...(routing.declaredModels ?? {}), [key]: decl };
-        await window.api.configUpdate({
-          modelRouting: { ...routing, declaredModels: declared },
-        });
-        // The block's rows derive from `declaredModels` (via the cached cfg),
-        // so a fresh fetch removes the now-declared endpoint in the same tick.
-        await refresh();
-      });
-      setBusy(null);
-    },
-    [busy, mutate, models, refresh],
-  );
-
   // ---- Render ----
 
   const filtered = useMemo(() => {
@@ -426,17 +394,6 @@ export function ModelsCard() {
 
   return (
     <div className="space-y-3">
-      {/* BET-1249: surfaced above the table, only when a model needs identity. */}
-      {models && (
-        <ModelsWeCouldntIdentify
-          models={models}
-          declaredModels={data?.cfg.modelRouting?.declaredModels}
-          catalog={routingCatalog}
-          busyKey={busy}
-          onDeclare={declareModel}
-        />
-      )}
-
       <div>
         <div className="text-meta text-text-faint">
           <b className="text-text-muted">Default</b> = the model new &amp; cleared sessions start on (exactly one; must be Main-available).{" "}
