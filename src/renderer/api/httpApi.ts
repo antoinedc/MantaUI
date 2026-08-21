@@ -15,6 +15,9 @@ import {
   type StreamEnvelope,
   type UsageSnapshot,
   type StoppedListResult,
+  type ModelPrefsState,
+  type ModelPrefsSetInput,
+  type ModelPrefsSeedInput,
   type WindowStatus,
   type VoiceNoteRecord,
   type VoiceRetryResult,
@@ -362,6 +365,7 @@ type Kind =
   | "delegate.updated"
   | "usage.updated"
   | "usage-stopped.updated"
+  | "model-prefs.updated"
   | "progress.updated"
   | "appControl"
   | "media"
@@ -384,6 +388,7 @@ const listeners: Record<Kind, Set<(p: unknown) => void>> = {
   "delegate.updated": new Set(),
   "usage.updated": new Set(),
   "usage-stopped.updated": new Set(),
+  "model-prefs.updated": new Set(),
   "progress.updated": new Set(),
   appControl: new Set(),
   media: new Set(),
@@ -1099,6 +1104,13 @@ export const httpApi: Api = {
   usageStoppedDisarm: (conversation) => rpc(IPC.usageStoppedDisarm, conversation),
   usageStoppedStampLastLooked: () => rpc(IPC.usageStoppedStampLastLooked),
 
+  // -- per-session model prefs (manta-server owned; BET-1279) --
+  // rpcOptional so an older box that lacks the `model-prefs:*` channels
+  // degrades to an empty state / a no-op instead of surfacing a red 500.
+  modelPrefsGet: () => rpcOptional<ModelPrefsState>(IPC.modelPrefsGet, { sessions: {}, recents: [] }),
+  modelPrefsSet: (input: ModelPrefsSetInput) => rpcOptional(IPC.modelPrefsSet, undefined, input ?? {}),
+  modelPrefsSeed: (input: ModelPrefsSeedInput) => rpcOptional(IPC.modelPrefsSeed, undefined, input ?? {}),
+
   // -- session progress (manta-server owned; BET-790) --
   progressGet: (sessionId) => rpc(IPC.progressGet, sessionId),
   // BET-791: the box publishes `progress.updated` whenever a session's record
@@ -1168,6 +1180,12 @@ export const httpApi: Api = {
   // store's `usageStopped` slice.
   onUsageStoppedUpdated: (cb) =>
     on<{ conversation?: string }>("usage-stopped.updated", cb),
+
+  // BET-1279: the box publishes `model-prefs.updated` ({sessionId}) on the bus
+  // whenever the model-pref store changes. The payload is a hint only —
+  // subscribers refetch modelPrefsGet() and apply it to the composer.
+  onModelPrefsUpdated: (cb) =>
+    on<{ sessionId?: string }>("model-prefs.updated", cb),
 
   // BET-840/841: the box publishes a single `appControl` bus kind with an
   // `action` discriminator whenever an app-control tool lands a client-visible

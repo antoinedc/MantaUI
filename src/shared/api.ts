@@ -25,6 +25,9 @@ import type {
   ScheduledJob,
   UsageSnapshot,
   StoppedListResult,
+  ModelPrefsState,
+  ModelPrefsSetInput,
+  ModelPrefsSeedInput,
   ProgressRecord,
   SecretMeta,
   SecretInput,
@@ -590,6 +593,20 @@ export interface Api {
   // / ran / last-looked). Subscribers refetch usageStoppedList() — the payload
   // is a hint, not the record. No-op on the preload bridge and on demoApi.
   onUsageStoppedUpdated(cb: (payload: { conversation?: string }) => void): () => void;
+
+  // Per-session model prefs (BET-1279). Durable box-side record of the
+  // per-conversation model selection + recent choices. get reads the whole
+  // { sessions, recents }; set upserts/deletes a session's selection and/or
+  // replaces recents; seed is the one-shot non-destructive migration. All
+  // mutate the SAME store the composer reads, so every device agrees.
+  modelPrefsGet(): Promise<ModelPrefsState>;
+  modelPrefsSet(input: ModelPrefsSetInput): Promise<void>;
+  modelPrefsSeed(input: ModelPrefsSeedInput): Promise<void>;
+  // BET-1279: the box publishes `model-prefs.updated` ({sessionId}) on the
+  // /events bus whenever the store changes. The payload is a hint only —
+  // subscribers refetch modelPrefsGet(). No-op on the preload bridge and on
+  // demoApi (Proxy fallback returns a no-op unsubscribe).
+  onModelPrefsUpdated(cb: (payload: { sessionId?: string }) => void): () => void;
 
   // App-control (BET-840/841). The box publishes ONE `appControl` bus kind
   // with an `action` discriminator (switch-model / rename-session /

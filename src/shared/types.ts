@@ -1532,6 +1532,17 @@ export const IPC = {
   usageStoppedDisarm: "usage-stopped:disarm", // (conversation) → void
   usageStoppedStampLastLooked: "usage-stopped:stamp-last-looked", // () → void
 
+  // ---- per-session model prefs (manta-server owned; BET-1279) ----
+  // Durable box-side record of per-conversation model selection (provider+
+  // model, variant, fast flavour) + the recent-choices list
+  // (src/server/modelPrefs.mjs). get → { sessions, recents }; set upserts /
+  // deletes a session's selection and/or replaces recents; seed is the
+  // one-shot non-destructive migration each client runs. Mutations publish
+  // `model-prefs.updated` ({sessionId} hint); clients refetch.
+  modelPrefsGet: "model-prefs:get", // () → { sessions, recents }
+  modelPrefsSet: "model-prefs:set", // ({ sessionId?, selection?, recents? }) → void
+  modelPrefsSeed: "model-prefs:seed", // ({ sessions?, recents? }) → void
+
   // ---- session progress (manta-server owned; BET-790) ----
   // Read-only: the durable progress record for a session (written by the AI's
   // `progress_report` opencode tool → POST /api/progress). Desktop + mobile
@@ -1966,6 +1977,39 @@ export type UsageWindowKind = "session" | "weekly" | "monthly" | string;
 export type StoppedListResult = {
   records: StoppedRecord[];
   lastLooked: number | null;
+};
+
+// ---- per-session model prefs (BET-1279) ----
+// Durable box-side record of per-conversation model selection + recent model
+// choices (src/server/modelPrefs.mjs). Mirrors the on-disk store exactly:
+// `variant` is OMITTED when absent (never null), a session record has no
+// `fast` field, and `recents[]` DOES carry `fast` + a base `modelID` (the iOS
+// ModelChoice shape). Read via `model-prefs:get`; not to be constructed by the
+// renderer (declarations only this ticket).
+export type ModelPrefsSelection = {
+  providerID: string;
+  modelID: string;
+  variant?: string;
+  fast?: boolean;
+};
+export type ModelPrefsSessionRecord = {
+  providerID: string;
+  modelID: string;
+  variant?: string;
+  updatedAt: number;
+};
+export type ModelPrefsState = {
+  sessions: Record<string, ModelPrefsSessionRecord>;
+  recents: ModelPrefsSelection[];
+};
+export type ModelPrefsSetInput = {
+  sessionId?: string;
+  selection?: ModelPrefsSelection | null;
+  recents?: ModelPrefsSelection[];
+};
+export type ModelPrefsSeedInput = {
+  sessions?: Record<string, ModelPrefsSelection>;
+  recents?: ModelPrefsSelection[];
 };
 
 // A background-delegation job record (manta store: ~/.manta/delegate-jobs.json).
