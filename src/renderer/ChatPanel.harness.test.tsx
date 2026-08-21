@@ -15,7 +15,7 @@ import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
 import { useStore } from "./store";
 import { refreshModelCatalog } from "./modelCatalog";
 import type { Attachment } from "./chatShared";
-import { writeSavedChoice } from "./chatShared";
+import { sessionAutoKey } from "./modelPrefs";
 import {
   installMockApi,
   resetStore,
@@ -781,10 +781,11 @@ describe("ChatPanel composer submit", () => {
    beforeEach(() => {
      // jsdom localStorage is shared across tests in this file, and the suite
      // mounts the same ses_test session every time. Reset the per-session model
-     // choice to server-default so a prior test's "auto" write can't leak into
-     // a later non-Auto test (and vice versa). BET-1255 relies on this to
-     // switch cleanly between Auto and non-Auto sessions.
-     writeSavedChoice("ses_test", { kind: "server-default" });
+     // choice to server-default by clearing the device-local Auto flag (the box
+     // mirror's `modelPrefsGet` returns empty in the harness) so a prior test's
+     // "auto" write can't leak into a later non-Auto test (and vice versa).
+     // BET-1255 relies on this to switch cleanly between Auto and non-Auto.
+     localStorage.removeItem(sessionAutoKey("ses_test"));
    });
 
   function typeInto(el: HTMLTextAreaElement, value: string) {
@@ -867,7 +868,7 @@ describe("ChatPanel composer submit", () => {
   });
 
   it("makes no opencodeModelRoute mount call for an Auto session (BET-1255)", async () => {
-    writeSavedChoice("ses_test", { kind: "auto" });
+    localStorage.setItem(sessionAutoKey("ses_test"), "1");
     ({ api } = installMockApi({
       opencodeModelRoute: () =>
         Promise.resolve({
@@ -887,7 +888,7 @@ describe("ChatPanel composer submit", () => {
   });
 
   it("still routes an Auto session's first turn via the boundary router (BET-1255)", async () => {
-    writeSavedChoice("ses_test", { kind: "auto" });
+    localStorage.setItem(sessionAutoKey("ses_test"), "1");
     const routedModel = { providerID: "anthropic", modelID: "claude-sonnet-4-6" };
     ({ api } = installMockApi({
       opencodePrompt: () => Promise.resolve({ ok: true }),

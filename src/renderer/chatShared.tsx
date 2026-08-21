@@ -236,14 +236,11 @@ export function guessMime(filename: string): string {
   return map[ext] ?? "application/octet-stream";
 }
 
-// Per-session model override. Stored in localStorage keyed by sessionId so the
-// picker remembers the user's choice across panel mounts. `null` (or missing)
-// means "let opencode pick its default" — matches the prompt_async fallback.
+// A single per-session model override: provider + model (+ optional reasoning
+// effort variant). Lives in the box model-prefs store (src/renderer/modelPrefs.ts,
+// BET-1281) so the same conversation shows the same choice on another device.
+// `null` (or missing) means "let opencode pick its default".
 export type ModelSelection = { providerID: string; modelID: string; variant?: string };
-
-export function modelKey(sessionId: string): string {
-  return `manta:chat:${sessionId}:model`;
-}
 
 /**
  * What the session's model picker is set to. Three states (BET-1245):
@@ -259,69 +256,6 @@ export type ModelChoice =
   | { kind: "auto" }
   | { kind: "model"; model: ModelSelection }
   | { kind: "server-default" };
-
-/**
- * Read the per-session model choice. One storage key (`modelKey`), three states.
- * The stored value is either absent (`server-default`), a `ModelSelection` JSON
- * object (`{ kind: "model" }`), or the bare literal string `"auto"`
- * (`{ kind: "auto" }`). A malformed or unparseable value falls back to
- * `server-default`; never throws out of a storage read.
- */
-export function readSavedChoice(sessionId: string): ModelChoice {
-  try {
-    const raw = localStorage.getItem(modelKey(sessionId));
-    if (raw === null) return { kind: "server-default" };
-    if (raw === "auto") return { kind: "auto" };
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed.providerID === "string" && typeof parsed.modelID === "string") {
-      return { kind: "model", model: parsed as ModelSelection };
-    }
-    return { kind: "server-default" };
-  } catch {
-    return { kind: "server-default" };
-  }
-}
-
-/**
- * Persist the per-session model choice under the SAME key as the historical
- * `ModelSelection` JSON (so existing sessions keep their stored model, and a
- * later variant is a compatible read). `auto` is written as the bare string
- * `"auto"`; `server-default` removes the key (an absent value means default).
- */
-export function writeSavedChoice(sessionId: string, c: ModelChoice): void {
-  try {
-    switch (c.kind) {
-      case "auto":
-        localStorage.setItem(modelKey(sessionId), "auto");
-        break;
-      case "model":
-        localStorage.setItem(modelKey(sessionId), JSON.stringify(c.model));
-        break;
-      case "server-default":
-        localStorage.removeItem(modelKey(sessionId));
-        break;
-    }
-  } catch { /* quota / disabled storage */ }
-}
-
-/**
- * /clear carry-forward: copy the session's model choice to the new session id
- * so the user doesn't have to re-pick after every clear. Carry the FULL choice
- * (including `auto`) — clearing a conversation must not silently drop Auto.
- */
-export function carrySavedChoice(fromSessionId: string, toSessionId: string): void {
-  writeSavedChoice(toSessionId, readSavedChoice(fromSessionId));
-}
-
-/**
- * @deprecated Superseded by `readSavedChoice` (BET-1245). Thin wrapper over the
- * three-state reader: returns the explicit `ModelSelection`, or `null` for the
- * auto / server-default states. Prefer `readSavedChoice` and narrow yourself.
- */
-export function readSavedModel(sessionId: string): ModelSelection | null {
-  const c = readSavedChoice(sessionId);
-  return c.kind === "model" ? c.model : null;
-}
 
 /**
  * Map a three-state `ModelChoice` to the active override `ModelSelection`
@@ -345,14 +279,6 @@ export function modelFromChoice(
     case "auto":
       return null;
   }
-}
-
-/**
- * @deprecated Superseded by `writeSavedChoice` (BET-1245). Thin wrapper: writes
- * an explicit model, or clears to the server default when `m` is null.
- */
-export function writeSavedModel(sessionId: string, m: ModelSelection | null): void {
-  writeSavedChoice(sessionId, m ? { kind: "model", model: m } : { kind: "server-default" });
 }
 
 // Per-session plan-mode override (BET-949). Deliberately its OWN storage key —
