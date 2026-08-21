@@ -30,7 +30,7 @@ describe("blendedPrice — the headline case", () => {
 describe("blendedPrice — declared free vs implausible zero", () => {
   it("a declared-free model with no reference is price 0, known true", () => {
     const res = blendedPrice(model({ input: 0, output: 0 }));
-    expect(res).toEqual({ price: 0, known: true });
+    expect(res).toEqual({ price: 0, known: true, mixSource: "default", reference: "absent" });
   });
 
   it("implausible zero (input 0, output 0) with a priced reference is known false and returns the reference price", () => {
@@ -88,6 +88,32 @@ describe("blendedPrice — degenerate input is finite and non-negative", () => {
     expect(typeof res.price).toBe("number");
     expect(Number.isFinite(res.price)).toBe(true);
     expect(res.price).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe("blendedPrice — source flags (BET-1265)", () => {
+  it("reports a default mix and absent reference when neither is supplied", () => {
+    const res = blendedPrice(model({ input: 5, output: 25 }));
+    expect(res.mixSource).toBe("default");
+    expect(res.reference).toBe("absent");
+  });
+
+  it("reports measured + catalogue when a usable mix and a reference are supplied", () => {
+    const res = blendedPrice(model({ input: 5, output: 25 }), { input: 0.5, output: 0.1, cacheRead: 0.3, cacheWrite: 0.1 }, { input: 5, output: 25 });
+    expect(res.mixSource).toBe("measured");
+    expect(res.reference).toBe("catalogue");
+  });
+
+  it("an all-zero mix falls back to default and reports it", () => {
+    const res = blendedPrice(model({ input: 5, output: 25 }), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+    expect(res.mixSource).toBe("default");
+  });
+
+  it("the unknown-price early return carries both flags too", () => {
+    const res = blendedPrice(model({ input: 5 }), undefined, { input: 5, output: 25 });
+    expect(res.known).toBe(false);
+    expect(res.mixSource).toBe("default");
+    expect(res.reference).toBe("catalogue");
   });
 });
 

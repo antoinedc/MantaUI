@@ -13,7 +13,30 @@ import { qualityScore, tierForScore, meetsFloor, AGENT_FLOOR_SCORE } from "./mod
 import { resolveIdentity } from "./modelIdentity.mjs";
 import { autoEligibility, MISSING } from "./autoEligibility.mjs";
 import { marginalCost } from "./marginalCost.mjs";
+import { blendedPrice } from "./blendedPrice.mjs";
 import { shouldDerank } from "./toolReliability.mjs";
+
+// The inspectable decision record (BET-1265). `quality.basis` and `cost.basis`
+// are passed through VERBATIM from qualityScore / marginalCost — never
+// re-mapped or prettified. `reliability` is "measured" when a sample exists on
+// the box, "unmeasured" otherwise.
+/**
+ * @typedef {object} RoutingSignals
+ * @property {{ score: number, basis: "benchmark"|"family"|"structural", known: boolean }} quality
+ * @property {{ value: number, basis: string, mixSource: "measured"|"default",
+ *              reference: "catalogue"|"absent" }} cost
+ * @property {"measured"|"unmeasured"} reliability
+ * @property {{ p50Ms: number|null, p90Ms: number|null, tokensPerSec: number|null }} telemetry
+ */
+
+/**
+ * @typedef {object} RoutingTrace
+ * @property {number} considered
+ * @property {{ stage: "eligible"|"capable", reason: string, n: number }[]} dropped
+ * @property {{ contextTokens: number, needs: { tools: boolean, image: boolean, pdf: boolean } }} intent
+ * @property {{ tier: string, floorTier: string, widened: boolean }} target
+ * @property {RoutingSignals|null} winner
+ */
 
 export const PRESETS = ["economy", "balanced", "performance"];
 
@@ -71,16 +94,26 @@ function assess(candidate, { nowMs }, services) {
     providerClass: services.providerClass?.[candidate.providerID] ?? "supported",
   });
   const mc = marginalCost({ model: candidate, account: services.accounts?.[candidate.providerID], nowMs, mix: services.mix, reference: services.referenceByModel?.[candidate.id] });
+  // The raw mix/reference flags blendedPrice already computed with the SAME
+  // inputs marginalCost handed it — reported verbatim, not recomputed. This is
+  // what makes a silently-defaulted mix / absent catalogue visible (BET-1265).
+  const bp = blendedPrice(candidate, services.mix, services.referenceByModel?.[candidate.id]);
   const penalise = shouldDerank(services.reliability?.samples?.[key], services.reliability?.baseline?.[candidate.id]).penalise === true;
   return {
     key,
     candidate,
+    quality,
     qualityScore: quality.known ? quality.score : 0,
     tier: tierForScore(quality.known ? quality.score : undefined),
     eligible: elig.eligible,
     missing: elig.missing,
     marginalCost: mc.exhausted ? Infinity : mc.cost,
     exhausted: mc.exhausted,
+    costBasis: mc.basis,
+    mixSource: bp.mixSource,
+    reference: bp.reference,
+    reliability: services.reliability?.samples?.[key] ? "measured" : "unmeasured",
+    telemetry: services.telemetry?.[key] ?? {},
     penalise,
   };
 }
@@ -108,6 +141,30 @@ function bindingReason(counts) {
 const num0 = (v) => (isNum(v) ? v : 0);
 const numInf = (v) => (isNum(v) ? v : Infinity);
 const telemetryOf = (a, services) => services.telemetry?.[a.key] ?? {};
+
+// The winner's inspectable signals, read off the assessed entry — every value
+// was already computed during assess(); nothing new is derived here.
+function signalsOf(a) {
+  return {
+    quality: {
+      score: a.quality.score,
+      basis: a.quality.basis,
+      known: a.quality.known,
+    },
+    cost: {
+      value: a.marginalCost,
+      basis: a.costBasis,
+      mixSource: a.mixSource,
+      reference: a.reference,
+    },
+    reliability: a.reliability,
+    telemetry: {
+      p50Ms: typeof a.telemetry?.p50Ms === "number" ? a.telemetry.p50Ms : null,
+      p90Ms: typeof a.telemetry?.p90Ms === "number" ? a.telemetry.p90Ms : null,
+      tokensPerSec: typeof a.telemetry?.tokensPerSec === "number" ? a.telemetry.tokensPerSec : null,
+    },
+  };
+}
 
 // Soft ordering within a competing set (same model, or a flattened economy
 // set): penalised sorts last; then cost; then quality, throughput, the
@@ -208,21 +265,40 @@ function explain({ agent, tierName, preset, winner, cost }) {
  *   (all optional; absent is permissive / measured-average, never false):
  *   { catalogMatcher, catalogEntryFor, qualityField, declared, providerClass,
  *     accounts, health, telemetry, reliability, mix, referenceByModel }
- * @returns {{ model: object|null, reason: string, alternatives: object[], changed: boolean }}
+ * @returns {{ model: object|null, reason: string, alternatives: object[], changed: boolean, trace: object }}
  */
 export function chooseModel(input = {}) {
   const { intent = {}, catalog = [], policy = {}, nowMs = 0 } = input;
   const services = input.services && typeof input.services === "object" ? input.services : {};
   const agent = intent?.agent ?? "general";
   const incumbent = intent?.incumbent ?? null;
+  // Echoes back EXACTLY what the caller passed — unmodified, never the
+  // normalised `contextTokens`. A caller hardcoding contextTokens: 0 becomes
+  // visible here (BET-1265) without reading the caller.
+  const traceIntent = {
+    contextTokens: intent?.contextTokens,
+    needs: intent?.needs ?? {},
+  };
 
   if (intent?.kind === "mid-exchange") {
-    return { model: incumbent, reason: "mid-exchange switching is disabled", alternatives: [], changed: false };
+    return {
+      model: incumbent,
+      reason: "mid-exchange switching is disabled",
+      alternatives: [],
+      changed: false,
+      trace: { considered: 0, dropped: [], intent: traceIntent, target: { tier: "", floorTier: "", widened: false }, winner: null },
+    };
   }
   // Off-path (no routing directive): return the incumbent BY REFERENCE,
   // byte-identical so a box without routing behaves exactly as before.
   if (!routingActive(policy)) {
-    return { model: incumbent, reason: "routing not activated for this conversation", alternatives: [], changed: false };
+    return {
+      model: incumbent,
+      reason: "routing not activated for this conversation",
+      alternatives: [],
+      changed: false,
+      trace: { considered: 0, dropped: [], intent: traceIntent, target: { tier: "", floorTier: "", widened: false }, winner: null },
+    };
   }
 
   const needs = intent?.needs ?? {};
@@ -230,28 +306,57 @@ export function chooseModel(input = {}) {
 
   const survivors = [];
   const counts = {};
+  const drops = [];
+  let considered = 0;
+  const addDrop = (stage, reason) => {
+    const existing = drops.find((d) => d.stage === stage && d.reason === reason);
+    if (existing) existing.n += 1;
+    else drops.push({ stage, reason, n: 1 });
+  };
   for (const c of Array.isArray(catalog) ? catalog : []) {
+    considered += 1;
     const a = assess(c, { nowMs }, services);
     const cap = capabilityDrop(c, hardCtx);
     if ((a.exhausted && !cap) || cap || !a.eligible) {
-      counts[bindLabel(a, cap)] = (counts[bindLabel(a, cap)] ?? 0) + 1;
+      const label = bindLabel(a, cap);
+      counts[label] = (counts[label] ?? 0) + 1;
+      // "capable" = can't do THIS turn (missing capability / exhausted);
+      // "eligible" = not admissible by the completeness rules at all.
+      addDrop(cap || a.exhausted ? "capable" : "eligible", label);
       continue;
     }
     survivors.push(a);
   }
 
-  if (survivors.length === 0) {
-    return { model: incumbent, reason: `no ${agent} model passes constraints (${bindingReason(counts)})`, alternatives: [], changed: false };
-  }
-
   const targetRaw = policy?.perAgent?.[agent] ?? AGENT_TIER?.[policy?.preset]?.[agent] ?? "balanced";
   const floorScore = AGENT_FLOOR_SCORE[agent] ?? 0;
   const targetRank = Math.max(tierRank(targetRaw), tierRank(tierForScore(floorScore)));
+  const targetTrace = {
+    tier: TIER_BY_RANK[targetRank],
+    floorTier: tierForScore(floorScore),
+    widened: false,
+  };
+
+  if (survivors.length === 0) {
+    return {
+      model: incumbent,
+      reason: `no ${agent} model passes constraints (${bindingReason(counts)})`,
+      alternatives: [],
+      changed: false,
+      trace: { considered, dropped: drops, intent: traceIntent, target: targetTrace, winner: null },
+    };
+  }
 
   const explored = stage3Order(survivors, { preset: policy?.preset, telemetry: services.telemetry });
   const band = selectBand(explored, targetRank, agent);
   if (band.length === 0) {
-    return { model: incumbent, reason: `no ${agent} model meets the ${TIER_BY_RANK[targetRank]} target above the ${floorScore} floor`, alternatives: [], changed: false };
+    return {
+      model: incumbent,
+      reason: `no ${agent} model meets the ${TIER_BY_RANK[targetRank]} target above the ${floorScore} floor`,
+      alternatives: [],
+      changed: false,
+      trace: { considered, dropped: drops, intent: traceIntent, target: targetTrace, winner: null },
+    };
   }
 
   const winner = band[0].candidate;
@@ -261,5 +366,12 @@ export function chooseModel(input = {}) {
     reason: explain({ agent, tierName: TIER_BY_RANK[tierRank(band[0].tier)], preset: policy?.preset, winner, cost: band[0].marginalCost }),
     alternatives: band.slice(1, 4).map((a) => a.candidate),
     changed: !incumbent || endpointKey(incumbent) !== winnerKey,
+    trace: {
+      considered,
+      dropped: drops,
+      intent: traceIntent,
+      target: { ...targetTrace, widened: tierRank(band[0].tier) !== targetRank },
+      winner: signalsOf(band[0]),
+    },
   };
 }

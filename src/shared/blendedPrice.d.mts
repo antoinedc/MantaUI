@@ -16,9 +16,14 @@ export type Mix = {
   cacheWrite: number;
 };
 
+export type MixSource = "measured" | "default";
+export type ReferenceFlag = "catalogue" | "absent";
+
 export interface PriceBits {
   price: number;
   known: boolean;
+  mixSource: MixSource;
+  reference: ReferenceFlag;
 }
 
 export const DEFAULT_MIX: Mix;

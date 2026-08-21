@@ -41,8 +41,12 @@ function dollar(v) {
 // Normalise a caller-supplied mix so the four fractions sum to 1. A mix that
 // does not sum to 1 is rescaled, not rejected. A missing / empty / all-zero
 // mix falls back to DEFAULT_MIX (a box with no ledger history).
+//
+// Module-private. Reports which branch it took: "measured" when the caller
+// supplied a usable mix, "default" when it fell back to DEFAULT_MIX. This is
+// how a box that never fed it ledger counts becomes visible (the trace).
 function normalizeMix(mix) {
-  if (!mix || typeof mix !== "object") return { ...DEFAULT_MIX };
+  if (!mix || typeof mix !== "object") return { mix: { ...DEFAULT_MIX }, source: "default" };
   const raw = {
     input: dollar(mix.input),
     output: dollar(mix.output),
@@ -50,12 +54,15 @@ function normalizeMix(mix) {
     cacheWrite: dollar(mix.cacheWrite),
   };
   const total = raw.input + raw.output + raw.cacheRead + raw.cacheWrite;
-  if (!(total > 0)) return { ...DEFAULT_MIX };
+  if (!(total > 0)) return { mix: { ...DEFAULT_MIX }, source: "default" };
   return {
-    input: raw.input / total,
-    output: raw.output / total,
-    cacheRead: raw.cacheRead / total,
-    cacheWrite: raw.cacheWrite / total,
+    mix: {
+      input: raw.input / total,
+      output: raw.output / total,
+      cacheRead: raw.cacheRead / total,
+      cacheWrite: raw.cacheWrite / total,
+    },
+    source: "measured",
   };
 }
 
@@ -77,13 +84,14 @@ function normalizeMix(mix) {
  * @param {object} [mix]            {input, output, cacheRead, cacheWrite} fractions summing to 1
  * @param {object} [reference]      {input, output} typical price for this model from the
  *                                  provider-agnostic catalogue, used for the implausible-zero rule
- * @returns {{ price: number, known: boolean }}
+ * @returns {{ price: number, known: boolean, mixSource: "measured"|"default", reference: "catalogue"|"absent" }}
  */
 export function blendedPrice(model, mix, reference) {
-  const useMix = normalizeMix(mix);
+  const { mix: useMix, source: mixSource } = normalizeMix(mix);
   const cost = model && typeof model.cost === "object" && model.cost !== null ? model.cost : null;
 
   const hasReference = reference !== null && typeof reference === "object";
+  const referenceFlag = hasReference ? "catalogue" : "absent";
 
   // --- known ---------------------------------------------------------------
   // A missing cost bag, or a missing (non-numeric) input/output rate, leaves
@@ -110,7 +118,7 @@ export function blendedPrice(model, mix, reference) {
   // no reference we return 0 rather than inventing a number anyone could trust.
   if (!known) {
     const price = hasReference ? dollar(reference.input) + dollar(reference.output) : 0;
-    return { price, known: false };
+    return { price, known: false, mixSource, reference: referenceFlag };
   }
 
   // Missing cache rates bill at the full input rate; declared 0 stays 0.
@@ -125,7 +133,7 @@ export function blendedPrice(model, mix, reference) {
     cacheRead * useMix.cacheRead +
     cacheWrite * useMix.cacheWrite;
 
-  return { price: dollar(price), known: true };
+  return { price: dollar(price), known: true, mixSource, reference: referenceFlag };
 }
 
 /**
