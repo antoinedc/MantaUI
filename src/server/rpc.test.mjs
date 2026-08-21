@@ -1360,6 +1360,49 @@ test("routing:main is handed the filtered catalogue for the main surface (not li
   assert.ok(typeof out.model?.modelID === "string" && out.model.modelID.length > 0);
 });
 
+// BET-1265: routing:choose emits exactly one `[router]` line (the box-side
+// signal that routing ran) whenever an activated routing decision is made.
+// Format: [router] <surface>/<agent> → <provider>/<model> · <basis> ·
+// considered=<n> dropped=<n> mix=<measured|default>. Gated on nothing.
+test("routing:choose logs exactly one well-formed [router] line on a routed decision", async () => {
+  const { deps } = makeDeps([]);
+  // Config that ACTIVATES routing so the decision core actually runs.
+  deps.local.configGet = async () => ({
+    projects: [],
+    modelRouting: { preset: "economy", declaredModels: { "anthropic/claude-sonnet-4": { catalogId: "claude-sonnet-4" } } },
+  });
+  deps.routingListRoutableModels = async () => [
+    { providerID: "anthropic", id: "claude-sonnet-4", status: "active", cost: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 0.5 } },
+  ];
+  const fakeCatalog = {
+    matchModel: (id) => ({ kind: "exact", candidates: [{ id, name: id }] }),
+    lookupModel: (id) => ({ id }),
+    allModels: () => [{ id: "claude-sonnet-4", benchmarks: [{ name: "SWE-Bench Verified", score: 0.8 }] }],
+  };
+  const handlers = buildHandlers({ ...deps, routingCatalogIndex: fakeCatalog });
+  const lines = [];
+  const orig = console.log;
+  console.log = (...a) => lines.push(a.join(" "));
+  try {
+    await handlers["routing:choose"]({
+      sessionId: "ses_1",
+      directory: "/w",
+      agent: "build",
+      surface: "main",
+      contextTokens: 0,
+      needs: {},
+      incumbent: { providerID: "anthropic", modelID: "claude-opus-4" },
+    });
+  } finally {
+    console.log = orig;
+  }
+  assert.equal(lines.length, 1, "exactly one [router] line, no debug flag");
+  // Deterministic for this injected catalogue: a real winner (sonnet, no
+  // account → cost basis "unknown"), zero drops, mix=default (no measured
+  // ledger mix on today's wiring — the evidence BET-1265 exists to surface).
+  assert.equal(lines[0], "[router] main/build → anthropic/claude-sonnet-4 · unknown · considered=1 dropped=0 mix=default");
+});
+
 // accounts:retry always reports an outcome — a non-empty message in BOTH the
 // cleared and not-cleared cases (AGENTS.md: it does the thing and says so,
 // or fails and says why; a swallowed bare return is a dead button).
