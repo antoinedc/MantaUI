@@ -1209,7 +1209,21 @@ struct ChatSubagentScreen: View {
             bottomInset: 0,
             scrollPosition: $scrollPosition,
             onPointsFromBottom: nil,
-            header: { EmptyView() }
+            // BET-1257 — a literally-empty `EmptyView()` header broke touch
+            // delivery to the transcript on THIS screen specifically: the
+            // child is reached via `NavigationStack.navigationDestination`
+            // (a push), while the parent's identical `TranscriptListView` is
+            // the stack's root. Measured with real HID input (idb, clean
+            // single-process room): with `EmptyView()` the collection view's
+            // pan gesture recognizer never even reaches `.began` — zero pan
+            // events under five real swipes, confirmed on a screenshot that
+            // the transcript never moved. Swapping in ANY non-empty
+            // `.safeAreaBar` content (a 0.5pt clear spacer — no visual
+            // change) restored a full pan trace (Began/Changed/Ended,
+            // hundreds of points of real movement) with no other change.
+            // The parent, which has always passed real header content here,
+            // is the control and is untouched by this file.
+            header: { Color.clear.frame(height: 0.5) }
         )
         .background(tokens.canvas.ignoresSafeArea())
         .onAppear { store.start() }
