@@ -281,9 +281,9 @@ export function modelFromChoice(
   }
 }
 
-// Per-session plan-mode override (BET-949). Deliberately its OWN storage key —
-// NOT folded into the `manta:chat:<sid>:model` JSON blob (that blob is a model
-// selection and the native iOS client stores it in an incompatible format).
+// Per-session plan-mode override (BET-949). Deliberately its OWN storage key,
+// kept apart from the box-backed model choice (BET-1281) — the plan flag is a
+// per-session local toggle (agent change), not a model selection.
 // Value is the literal "1" when on, absent otherwise.
 export function planKey(sessionId: string): string {
   return `manta:chat:${sessionId}:plan`;
