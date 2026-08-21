@@ -27,7 +27,7 @@ export interface CrossesInput {
   contextTokens?: number;
   incumbentContextLimit?: number;
   requiredModalities?: string[];
-  incumbentModalities?: string[];
+  incumbentModel?: object | null;
   incumbentHealthy?: boolean;
   justCompacted?: boolean;
   userRequested?: boolean;

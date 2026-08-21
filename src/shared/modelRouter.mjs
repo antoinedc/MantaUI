@@ -8,7 +8,7 @@
 // no node: imports, no Date.now() — time arrives as `nowMs`. No provider NAME
 // ever appears here or in its imports.
 
-import { tierRank } from "./modelGuide.mjs";
+import { tierRank, acceptsModality } from "./modelGuide.mjs";
 import { endpointKey } from "./endpointKey.mjs";
 import { qualityScore, tierForScore, meetsFloor, AGENT_FLOOR_SCORE } from "./modelQuality.mjs";
 import { resolveIdentity } from "./modelIdentity.mjs";
@@ -49,7 +49,7 @@ export const AGENT_TIER = {
 };
 
 const BINDING_ORDER = [
-  "no active model", "context headroom", "tool calling", "image input", "pdf input",
+  "context headroom", "tool calling", "image input", "pdf input",
   "out-of-credit", "rate-limited", "identity", "price", "caching", "quality",
 ];
 
@@ -65,14 +65,18 @@ function routingActive(policy) {
   return !!(policy.perAgent && typeof policy.perAgent === "object" && Object.keys(policy.perAgent).length > 0);
 }
 
-// Hard Stage 2 — the capability reason an endpoint cannot do THIS turn. The
-// one exception to permissive-missing is `status`, as today.
+// Hard Stage 2 — the capability reason an endpoint cannot do THIS turn. Every
+// `needs.*` stays hard, but the parser PERMISSIVE-missing (an unknown / absent
+// capability set reads as allow — `readModalities` returns [] for "no
+// information" and that is never "supports nothing").
 function capabilityDrop(m, { contextTokens, needs, health }) {
-  if (m?.status != null && m.status !== "active") return "no active model";
+  // No `status` check here: an opted-in deprecated model passed the routable
+  // catalogue (listRoutableModels) and must not be re-litigated at the decision
+  // core. The router trusts its input catalogue for status.
   if (typeof m?.limit?.context === "number" && m.limit.context < contextTokens * 1.25) return "context headroom";
   if (needs.tools === true && m?.capabilities?.toolcall === false) return "tool calling";
-  if (needs.image === true && m?.capabilities && m?.capabilities?.input?.image !== true) return "image input";
-  if (needs.pdf === true && m?.capabilities && m?.capabilities?.input?.pdf !== true) return "pdf input";
+  if (needs.image === true && !acceptsModality(m, "image")) return "image input";
+  if (needs.pdf === true && !acceptsModality(m, "pdf")) return "pdf input";
   const hs = HEALTH_EXCLUDED[health?.[m.providerID]];
   return hs ?? null;
 }
@@ -301,7 +305,11 @@ export function chooseModel(input = {}) {
   }
 
   const needs = intent?.needs ?? {};
-  const hardCtx = { contextTokens: typeof intent?.contextTokens === "number" ? intent.contextTokens : 0, needs, health: services.health };
+  // contextTokens arrives as the real conversation size; an absent value is a
+  // caller bug — let the headroom check SKIP (undefined * 1.25 = NaN never
+  // < limit) rather than silently passing 0, which would read as "zero
+  // tokens" and lie about how full the context is.
+  const hardCtx = { contextTokens: typeof intent?.contextTokens === "number" ? intent.contextTokens : undefined, needs, health: services.health };
 
   const survivors = [];
   const counts = {};

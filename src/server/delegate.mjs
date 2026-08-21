@@ -535,6 +535,11 @@ export function toDeliverModel(m) {
   return out;
 }
 
+// A subagent spawn starts with a fresh context — there is no conversation to
+// fit into the headroom check yet, so its contextTokens is legitimately 0.
+// Named, not a bare literal, so the intent is explicit (BET-1267 3b).
+const SUBAGENT_INITIAL_CONTEXT_TOKENS = 0;
+
 export function chooseSubagentModel({
   incumbent = null,
   catalog = [],
@@ -542,6 +547,7 @@ export function chooseSubagentModel({
   quota = [],
   agent = "general",
   nowMs = Date.now(),
+  contextTokens = SUBAGENT_INITIAL_CONTEXT_TOKENS,
   services,
 } = {}) {
   // Normalise the incumbent into catalog shape ({providerID, id}) for the
@@ -554,7 +560,7 @@ export function chooseSubagentModel({
 
   try {
     const decision = chooseModel({
-      intent: { kind: "subagent", agent, needs: { tools: true }, contextTokens: 0, incumbent: catalogIncumbent },
+      intent: { kind: "subagent", agent, needs: { tools: true }, contextTokens, incumbent: catalogIncumbent },
       catalog,
       telemetry: {},
       quota,
@@ -616,6 +622,7 @@ export function chooseMainModel({
   quota = [],
   agent = "build",
   nowMs = Date.now(),
+  contextTokens = SUBAGENT_INITIAL_CONTEXT_TOKENS,
   services,
 } = {}) {
   const incumbentShape = incumbent
@@ -629,7 +636,7 @@ export function chooseMainModel({
     : null;
   try {
     const decision = chooseModel({
-      intent: { kind: "main", agent, needs: { tools: true }, contextTokens: 0, incumbent: catalogIncumbent },
+      intent: { kind: "main", agent, needs: { tools: true }, contextTokens, incumbent: catalogIncumbent },
       catalog,
       telemetry: {},
       quota,

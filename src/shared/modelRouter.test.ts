@@ -93,9 +93,13 @@ describe("chooseModel — off-path and invariants", () => {
   it("returns incumbent + non-empty reason when nothing survives filtering", () => {
     const incumbent = endpoint("m", { providerID: "a" });
     const res = route({
-      catalog: [endpoint("dead", { status: "retired" })],
+      catalog: [endpoint("dead", { providerID: "p" })],
       policy: { preset: "balanced" },
       intent: { incumbent },
+      // A still-hard drop (provider out of credit) — status no longer excludes
+      // a model (BET-1267 3d), so "nothing survives" must come from a real
+      // per-turn constraint.
+      services: { health: { p: "out-of-credit" } },
     });
     expect(res.model).toBe(incumbent);
     expect(res.changed).toBe(false);
@@ -378,15 +382,18 @@ describe("chooseModel — decision trace (BET-1265)", () => {
   });
 
   it("no-survivor: winner is null and dropped names every stage/reason pair with counts", () => {
-    const retired = endpoint("retired", { status: "retired" });
+    // Three candidates dropped for three still-hard reasons: out-of-credit
+    // (health), unknown identity, and no tool-calling. Status no longer drops
+    // a model (BET-1267 3d), so no "no active model" here.
+    const credit = endpoint("credit", { providerID: "p" });
     const opaque = endpoint("opaque", { providerID: "q" });
     const toolLess = endpoint("tool", { providerID: "p", capabilities: { toolcall: false, input: { image: true, pdf: true } } });
     const incumbent = endpoint("inc", { providerID: "x" });
     const res = route({
-      catalog: [retired, opaque, toolLess],
+      catalog: [credit, opaque, toolLess],
       policy: { preset: "balanced" },
       intent: { incumbent, contextTokens: 0, needs: { tools: true } },
-      services: { declared: defaultDeclared([retired, toolLess]) }, // opaque deliberately not declared
+      services: { declared: defaultDeclared([credit, toolLess]), health: { p: "out-of-credit" } },
     });
     expect(res.model?.providerID).toBe("x"); // incumbent returned unchanged
     expect(res.trace.winner).toBeNull();
@@ -394,7 +401,7 @@ describe("chooseModel — decision trace (BET-1265)", () => {
     expect(res.trace.dropped).toHaveLength(3);
     expect(res.trace.dropped).toEqual(
       expect.arrayContaining([
-        { stage: "capable", reason: "no active model", n: 1 },
+        { stage: "capable", reason: "out-of-credit", n: 1 },
         { stage: "eligible", reason: "identity", n: 1 },
         { stage: "capable", reason: "tool calling", n: 1 },
       ]),

@@ -18,6 +18,13 @@ function ep(providerID: string, id: string): { providerID: string; modelID: stri
   return out;
 }
 
+// An incumbent endpoint in the model shape crossesBoundary now reads for its
+// declared modalities (via acceptsModality) — { capabilities.input } like an
+// OpencodeModel — NOT a pre-computed array. Unknown input ([]) = allow.
+function incumbentModel(input: string[]): object {
+  return { capabilities: { input } };
+}
+
 const followUp = {
   hasRoutedModel: true,
   agent: "general",
@@ -25,7 +32,7 @@ const followUp = {
   contextTokens: 1000,
   incumbentContextLimit: 40000,
   requiredModalities: ["text"],
-  incumbentModalities: ["text", "image"],
+  incumbentModel: incumbentModel(["text", "image"]),
   incumbentHealthy: true,
   justCompacted: false,
   userRequested: false,
@@ -56,7 +63,7 @@ describe("crossesBoundary — each boundary in isolation", () => {
       crossesBoundary({
         ...followUp,
         requiredModalities: ["image", "pdf"],
-        incumbentModalities: ["text", "image"],
+        incumbentModel: incumbentModel(["text", "image"]),
       }),
     ).toMatchObject({ crossed: true, boundary: BOUNDARY.CONSTRAINT });
   });
@@ -139,9 +146,23 @@ describe("crossesBoundary — capability/health facts (BET-1248 reviewer Block)"
       crossesBoundary({
         ...followUp,
         requiredModalities: ["image", "pdf"],
-        incumbentModalities: ["text", "image"],
+        incumbentModel: incumbentModel(["text", "image"]),
       }),
     ).toMatchObject({ crossed: true, boundary: BOUNDARY.CONSTRAINT, stillCapable: false, stillHealthy: true });
+  });
+
+  it("BET-1267 3e: an incumbent with NO declared modalities never forces a re-route on an attachment turn", () => {
+    // [] = "no information", never "supports nothing" — a model with an
+    // unknown capability set must NOT be treated as missing the modality, so
+    // an image turn does not trigger a CONSTRAINT re-route (it used to, on
+    // every attachment turn, because [] read as absent).
+    expect(
+      crossesBoundary({
+        ...followUp,
+        requiredModalities: ["image"],
+        incumbentModel: incumbentModel([]),
+      }),
+    ).toMatchObject({ crossed: false, boundary: null, stillCapable: true, stillHealthy: true });
   });
 
   it("an unhealthy incumbent is reported NOT stillHealthy", () => {
