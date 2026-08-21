@@ -245,7 +245,8 @@ test("seedModelPrefs does NOT overwrite an existing session key or non-empty rec
   assert.equal(store.sessions.ses_2.modelID, "added");
   // non-empty recents NOT overwritten
   assert.deepEqual(store.recents, [{ providerID: "existing", modelID: "keep", fast: true }]);
-  assert.deepEqual(published, []);
+  // ses_2 IS a genuinely new session (merged) → one publish, empty payload
+  assert.deepEqual(published, [{ kind: "model-prefs.updated", payload: {} }]);
 });
 
 test("seedModelPrefs with nothing to merge publishes nothing", async () => {
