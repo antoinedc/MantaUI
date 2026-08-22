@@ -104,11 +104,6 @@ struct SessionListView: View {
                         Image(systemName: "gearshape")
                             .foregroundColor(tokens.tx2)
                     }
-                    // Hidden shared background: iOS 26 paints an automatic
-                    // glass capsule behind image bar buttons; suppressing it
-                    // keeps these as bare icons while leaving standard
-                    // toolbar hit-testing untouched.
-                    .sharedBackgroundVisibility(.hidden)
                     .accessibilityLabel("Settings")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
@@ -119,7 +114,6 @@ struct SessionListView: View {
                         Image(systemName: "plus")
                             .foregroundColor(tokens.tx2)
                     }
-                    .sharedBackgroundVisibility(.hidden)
                     .accessibilityLabel("New session")
                 }
             }
