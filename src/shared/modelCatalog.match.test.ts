@@ -340,6 +340,63 @@ describe("BET-1313 — repo-mates of one weights repo resolve to the entry the i
   });
 });
 
+// BET-1314 — the corroboration context veto (BET-1303 5.4c) fires on the raw
+// endpoint-vs-catalogue comparison, which mistakes two spellings of the SAME
+// window for an over-claim (128K = 2^17 = 131072 binary vs the catalogue's
+// 128000 decimal — ratio 1.024). The veto must fire only on a MATERIAL
+// over-claim, so the live `deepseek-ai/DeepSeek-V3.2-TEE` endpoint resolves to
+// `deepseek-v3.2` instead of being discarded in favour of the wrong repo-mates.
+describe("BET-1314 — the context veto tolerates representational noise", () => {
+  const matcher = createModelIndex(FIXTURE);
+
+  it("observed live case: endpoint 131072/65536 for the 128K v3.2 entry → exact, not ambiguous", () => {
+    const res = matcher.matchModel("deepseek-ai/DeepSeek-V3.2-TEE", {
+      modalities: ["text"],
+      context: 131072,
+      output: 65536,
+    });
+    expect(res.kind).toBe("exact");
+    expect(res.candidates[0]?.id).toBe("deepseek/deepseek-v3.2");
+  });
+
+  it("a genuine over-claim must still veto: 1M context for a 128K entry is never a confident match", () => {
+    const res = matcher.matchModel("deepseek-ai/DeepSeek-V3.2-TEE", {
+      modalities: ["text"],
+      context: 1000000,
+      output: 65536,
+    });
+    // The 1M claim is far outside the tolerance band, so the 128K entry is
+    // vetoed; it must never resolve as the exact/serving match (the guard the
+    // tolerance exists to preserve). The repo-mate fallback may still surface
+    // the trio honestly as ambiguous, but never as a confident v3.2 match.
+    expect(res.kind).not.toBe("exact");
+    expect(res.candidates[0]?.id).not.toBe("deepseek/deepseek-v3.2");
+  });
+
+  it("fractionally-larger context (131072 vs 128000) and output (65536 vs 64000) are NOT vetoed", () => {
+    let res = matcher.matchModel("deepseek-ai/DeepSeek-V3.2-TEE", {
+      modalities: ["text"],
+      context: 131072, // 1.024x the catalogue's 128000 — same window, binary spelling
+      output: 64000,   // equal
+    });
+    expect(res.kind, "fractionally-larger context must not veto").toBe("exact");
+    expect(res.candidates[0]?.id).toBe("deepseek/deepseek-v3.2");
+
+    res = matcher.matchModel("deepseek-ai/DeepSeek-V3.2-TEE", {
+      modalities: ["text"],
+      context: 128000, // equal
+      output: 65536,   // 1.024x the catalogue's 64000 — output is not a veto
+    });
+    expect(res.kind, "fractionally-larger output must not veto").toBe("exact");
+    expect(res.candidates[0]?.id).toBe("deepseek/deepseek-v3.2");
+  });
+
+  // Acceptance §"existing rows still resolve" (claude-opus-5-fast, Qwen/Qwen3-32B-TEE,
+  // zai-org/GLM-5.2-TEE) is already covered verbatim by the BET-1313 block's
+  // "the single-repo path and the other layers are undisturbed" test — not
+  // duplicated here to keep the duplication gate clean.
+});
+
 // Assert an ambiguous result surfaces every sibling size of the family.
 function runnableOrnithSizes(candidates: ModelCatalogEntry[]): void {
   const ids = candidates.map((c) => c.id).sort();
