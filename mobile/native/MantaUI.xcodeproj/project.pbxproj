@@ -94,6 +94,7 @@
 		BFC5BB268D33C67CB9C66A9E /* MarkdownView in Frameworks */ = {isa = PBXBuildFile; productRef = F69CF621A0341F78A09CFF85 /* MarkdownView */; };
 		C2C89BEF7843F4F3460A926F /* MantaOverflowCaptureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 681F342360878481A0D8364F /* MantaOverflowCaptureUITests.swift */; };
 		C414F36E83344076CE4F1ACD /* TerminalModelsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA2C52DC49C55784D6EF2B65 /* TerminalModelsTests.swift */; };
+		C793E66F54A00FC2171A4C02 /* MantaOnboardingFlowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AB857DC320F76CB5C95A89A /* MantaOnboardingFlowTests.swift */; };
 		C873DB69BB5BC6966B945F38 /* ComposerHistoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FBF552FE7478A5E46C1FDFF /* ComposerHistoryTests.swift */; };
 		C96C7F34F91F06214FD25523 /* ChatVoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0451BC1AF50CB3A8D80344A5 /* ChatVoice.swift */; };
 		CC6A77686B936B4DB6026466 /* ChatModelStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A6472C0BC3BDACAC4559198 /* ChatModelStore.swift */; };
@@ -179,6 +180,7 @@
 		436675A65BF149932C1EADE0 /* ChatScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatScreen.swift; sourceTree = "<group>"; };
 		4603364B1845FF6C330EB601 /* ChatOverflowCaptureScene.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatOverflowCaptureScene.swift; sourceTree = "<group>"; };
 		471BF240012879FDED5689C1 /* ChatSessionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSessionStore.swift; sourceTree = "<group>"; };
+		4AB857DC320F76CB5C95A89A /* MantaOnboardingFlowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaOnboardingFlowTests.swift; sourceTree = "<group>"; };
 		4B1B39AEF93CAAB814A6DBD7 /* MantaOnboarding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaOnboarding.swift; sourceTree = "<group>"; };
 		4B4BD7922C8909E3A3961957 /* VoiceRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceRecorder.swift; sourceTree = "<group>"; };
 		4EA1F1EEE75DBB6A786FEE4F /* NativeActionSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeActionSheet.swift; sourceTree = "<group>"; };
@@ -324,6 +326,7 @@
 				9CA2F9C1585492985A5D82ED /* MantaActionRPCWireTests.swift */,
 				989AB507C4722A4CF012C3B8 /* MantaAuthClientTests.swift */,
 				EF45305B46745A80925FC1A4 /* MantaEventStreamTests.swift */,
+				4AB857DC320F76CB5C95A89A /* MantaOnboardingFlowTests.swift */,
 				ABB2884AC2B1D0FE1E0DA8EB /* MantaPairingTests.swift */,
 				EBC7D0BF807861DCCABC5A26 /* MantaResourceCardModelsTests.swift */,
 				57FFB984A951D5C7BD8D02F9 /* MantaSettingsTests.swift */,
@@ -670,6 +673,7 @@
 				5A03FC0627C87718E260CC02 /* MantaActionRPCWireTests.swift in Sources */,
 				0129D15936E52427A46702E7 /* MantaAuthClientTests.swift in Sources */,
 				9BF6855A825F539665FF1563 /* MantaEventStreamTests.swift in Sources */,
+				C793E66F54A00FC2171A4C02 /* MantaOnboardingFlowTests.swift in Sources */,
 				685261838F0EFABC1AB8B6B1 /* MantaPairingTests.swift in Sources */,
 				7C41CAE9FE6D1E06DEC10142 /* MantaResourceCardModelsTests.swift in Sources */,
 				8A6656EBBD6AEC1B5CE7D0D6 /* MantaSettingsTests.swift in Sources */,
@@ -842,7 +846,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0.18;
+				MARKETING_VERSION = 1.0.19;
 				OTHER_LDFLAGS = "-ObjC";
 				PRODUCT_BUNDLE_IDENTIFIER = com.antoinedc.mantaui;
 				PRODUCT_NAME = MantaUI;
@@ -949,7 +953,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0.18;
+				MARKETING_VERSION = 1.0.19;
 				OTHER_LDFLAGS = "-ObjC";
 				PRODUCT_BUNDLE_IDENTIFIER = com.antoinedc.mantaui;
 				PRODUCT_NAME = MantaUI;

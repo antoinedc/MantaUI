@@ -174,7 +174,7 @@ final class MantaLiveTypeaheadSlashUITests: XCTestCase {
         }
         let row = app.buttons.matching(NSPredicate(format: "label CONTAINS 'bet775'")).firstMatch
         guard row.waitForExistence(timeout: 20) else {
-            print("RESULT bet775-row-missing pair=\(app.textFields["onboarding-otp"].exists)")
+            print("RESULT bet775-row-missing pair=\(app.buttons["onboarding-manual-toggle"].exists)")
             print("DUMP-BEGIN")
             print(app.debugDescription)
             print("DUMP-END")

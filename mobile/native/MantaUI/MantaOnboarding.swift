@@ -40,17 +40,23 @@ final class MantaOnboardingFlow: ObservableObject {
 
     @Published var phase: Phase = .entry
 
-    /// BET-702: present the in-app QR scanner sheet. Set by the entry screen's
-    /// "Scan QR code" button AND by the `onboarding-scan` capture scene; the
-    /// onboarding root owns the sheet (so it can be deterministically mounted).
-    @Published var scanRequested = false
-
-    // Manual-entry inputs.
+    // Manual-entry inputs. `showManual` collapses the manual fields behind the
+    // "Manual Setup" disclosure (BET-1308 — the entry screen is camera-first).
     @Published var code = ""
     @Published var boxId = ""
     @Published var serverURL = ""
+    @Published var showManual = false
     @Published var showAdvanced = false
     @Published var manualError: String?
+
+    /// In-flight claim guards (BET-1308). A successful QR decode delivers the
+    /// same code on every frame, and a pairing code is single-use — so a claim
+    /// must never be concurrent with another, and a stale claim's result must
+    /// never overwrite a newer one. `claimInFlight` stops a second claim from
+    /// starting while one is running; `claimGeneration` drops any result that
+    /// arrives for a claim that is no longer the latest.
+    private var claimInFlight = false
+    private var claimGeneration = 0
 
     // The payload currently on the linking screen.
     private(set) var pending: MantaPairing.PairPayload?
@@ -63,15 +69,6 @@ final class MantaOnboardingFlow: ObservableObject {
     /// immediately (skip the notifications priming — the device is already a
     /// Manta client) and `onPaired` is responsible for resetting local state.
     var isSwitching = false
-
-    // No hardcoded ring: the linking progress stages are all resolved through
-    // the copy table; there is no positional/color literal anywhere in app code.
-    let linkingStages: [String] = [
-        "Reached your server",
-        "Verified the code",
-        "Saving credentials",
-    ]
-    @Published var activeLinkingStage = 0
 
     private let auth: MantaAuthClient
     var onPaired: () -> Void
@@ -150,7 +147,6 @@ final class MantaOnboardingFlow: ObservableObject {
         }
         do {
             try KeychainCredentialStore.shared.save(credentials)
-            activeLinkingStage = 2
             phase = .notifications
         } catch {
             phase = .failure(.saveFailed)
@@ -170,12 +166,8 @@ final class MantaOnboardingFlow: ObservableObject {
         let box = "0123abcd0123abcd0123abcd0123abcd"
         let suffix = name.hasPrefix("onboarding-") ? String(name.dropFirst("onboarding-".count)) : name
         switch suffix {
-        case "scan":
-            phase = .entry
-            scanRequested = true
         case "linking":
             pending = MantaPairing.PairPayload(boxId: box, code: "123456", serverUrl: nil)
-            activeLinkingStage = 0
             phase = .linking
         case "notifications":
             phase = .notifications
@@ -206,31 +198,37 @@ final class MantaOnboardingFlow: ObservableObject {
     // MARK: - Linking
 
     private func startLinking(_ payload: MantaPairing.PairPayload) {
+        // A duplicate payload (the scanner delivers the same code on many
+        // frames) must never start a second concurrent claim — only the first
+        // claim of a batch runs.
+        guard !claimInFlight else { return }
         pending = payload
         phase = .linking
-        activeLinkingStage = 0
-        Task { await runClaim(payload) }
+        claimInFlight = true
+        claimGeneration += 1
+        let generation = claimGeneration
+        Task { await runClaim(payload, generation: generation) }
     }
 
-    private func runClaim(_ payload: MantaPairing.PairPayload) async {
-        // Progress stages are informational; the volunteer device-registry name
-        // is surfaced server-side so a linked device is identifiable (§6.3).
+    private func runClaim(_ payload: MantaPairing.PairPayload, generation: Int) async {
+        defer { finishClaim(generation) }
+        // The volunteer device-registry name is surfaced server-side so a
+        // linked device is identifiable (§6.3).
         let name = UIDevice.current.name
         // claimBaseURL is the same resolution MantaAuthClient.claim performs; a
         // nil base can never produce a .success outcome, so failing here is the
         // same classification arriving one step earlier — and it removes the
         // need for a placeholder URL that could never be a real claim target.
         guard let serverURL = MantaPairing.claimBaseURL(payload) else {
-            phase = .failure(.serverError)
+            if self.currentGeneration(generation) {
+                phase = .failure(.serverError)
+            }
             return
         }
-        // Stage 1: the claim request starts.
-        activeLinkingStage = 0
         let outcome = await auth.claim(payload, deviceName: name)
-        // Stage 2: the HTTP response arrived.
-        activeLinkingStage = 1
         switch outcome {
         case .success(let boxToken, let boxId, _):
+            guard self.currentGeneration(generation) else { return }
             let credentials = MantaCredentials(
                 serverUrl: serverURL.absoluteString,
                 boxId: boxId,
@@ -239,8 +237,7 @@ final class MantaOnboardingFlow: ObservableObject {
             savedCredentials = credentials
             do {
                 try KeychainCredentialStore.shared.save(credentials)
-                // Stage 3: the Keychain save succeeded.
-                activeLinkingStage = 2
+                guard self.currentGeneration(generation) else { return }
                 if isSwitching {
                     // Re-pair onto a new box: the old device is already a
                     // Manta client — skip the notifications primer and hand off
@@ -250,17 +247,42 @@ final class MantaOnboardingFlow: ObservableObject {
                     phase = .notifications
                 }
             } catch {
+                guard self.currentGeneration(generation) else { return }
                 phase = .failure(.saveFailed)
             }
         case .wrongCode:
-            phase = .failure(.rejected)
+            if self.currentGeneration(generation) {
+                phase = .failure(.rejected)
+            }
         case .rateLimited:
-            phase = .failure(.rateLimited)
+            if self.currentGeneration(generation) {
+                phase = .failure(.rateLimited)
+            }
         case .network:
-            phase = .failure(.unreachable)
+            if self.currentGeneration(generation) {
+                phase = .failure(.unreachable)
+            }
         case .serverError, .invalidResponse:
-            phase = .failure(.serverError)
+            if self.currentGeneration(generation) {
+                phase = .failure(.serverError)
+            }
         }
+    }
+
+    /// True when `generation` is still the latest claim — i.e. no newer claim
+    /// has started since this one did. Guards every `phase` / `savedCredentials`
+    /// write so a stale claim's result can never overwrite a newer one.
+    private func currentGeneration(_ generation: Int) -> Bool {
+        generation == claimGeneration
+    }
+
+    /// Release the in-flight guard for `generation`, but ONLY if it is still
+    /// the current claim — a stale claim finishing must not clear the newer
+    /// claim's in-flight flag. Mirrored as a `defer` in `runClaim` so every
+    /// exit path settles it.
+    private func finishClaim(_ generation: Int) {
+        guard generation == claimGeneration else { return }
+        claimInFlight = false
     }
 
     private func requestNotificationAuthorization() async {
@@ -274,6 +296,7 @@ final class MantaOnboardingFlow: ObservableObject {
 private struct MantaPrimaryButton: View {
     let title: String
     let disabled: Bool
+    var identifier: String?
     let action: () -> Void
     var tokens: Tokens
 
@@ -289,6 +312,23 @@ private struct MantaPrimaryButton: View {
         .buttonStyle(.plain)
         .disabled(disabled)
         .opacity(disabled ? 0.4 : 1)
+        .modifier(IdentifierModifier(identifier))
+    }
+}
+
+/// Applies an optional accessibility identifier to a button without the
+/// call-site boilerplate of a conditional modifier. The manual submit button
+/// carries `onboarding-submit`; every other use passes `nil`.
+private struct IdentifierModifier: ViewModifier {
+    let identifier: String?
+    init(_ identifier: String?) { self.identifier = identifier }
+
+    func body(content: Content) -> some View {
+        if let identifier {
+            content.accessibilityIdentifier(identifier)
+        } else {
+            content
+        }
     }
 }
 
@@ -325,7 +365,7 @@ private struct MantaCard<Content: View>: View {
     }
 }
 
-// MARK: - Manual ("Enter the code")
+// MARK: - Manual (camera-first entry)
 
 struct MantaManualEntryView: View {
     @ObservedObject var flow: MantaOnboardingFlow
@@ -333,30 +373,36 @@ struct MantaManualEntryView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp6) {
-            header(title: "Enter the code",
-                   subtitle: "Read the six digits off your desktop, or run `manta pair` on the server.")
+            // The embedded camera panel is always present. A decoded Manta
+            // payload routes through the SAME `flow.receive` path as a deep
+            // link — straight to the loading screen, no confirmation step.
+            MantaCameraPanel(tokens: tokens) { payload in
+                flow.receive(payload: payload)
+            }
+            manualDisclosure
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, Metrics.spacing.sp6)
+        .padding(.top, Metrics.spacing.sp8)
+    }
+
+    @ViewBuilder
+    private var manualDisclosure: some View {
+        // "Manual Setup" — collapsed by default. Expands to: Box ID, Pairing
+        // code, the private-server-URL disclosure, then the submit button.
+        Button(action: { withAnimation { flow.showManual.toggle() } }) {
+            Text("Manual Setup")
+                .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
+                .foregroundColor(tokens.accentTx)
+        }
+        .buttonStyle(.plain)
+        .padding(.vertical, Metrics.spacing.sp2)
+        .contentShape(Rectangle())
+        .accessibilityIdentifier("onboarding-manual-toggle")
+
+        if flow.showManual {
             VStack(alignment: .leading, spacing: Metrics.spacing.sp3) {
-                // BET-702: in-app QR scan sits above the manual fields. A
-                // decoded Manta payload routes through the SAME `flow.receive`
-                // path as a deep link. The sheet itself is presented by the
-                // onboarding root via `flow.scanRequested`.
-                Button(action: { flow.scanRequested = true }) {
-                    HStack(spacing: Metrics.spacing.sp3) {
-                        Image(systemName: "qrcode.viewfinder")
-                            .font(.system(size: Metrics.type.body))
-                        Text("Scan QR code")
-                            .font(.manta(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
-                    }
-                    .foregroundColor(tokens.onAccent)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, Metrics.spacing.sp3)
-                    .background(tokens.accentSolid, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("onboarding-scan-button")
-                OTPField(value: $flow.code, placeholder: "000000", tokens: tokens)
-                    .accessibilityIdentifier("onboarding-otp")
-                TextField("Server ID (32 hex)", text: $flow.boxId)
+                TextField("Box ID (32 hex)", text: $flow.boxId)
                     .font(.manta(size: Metrics.type.body, design: .monospaced))
                     .textFieldStyle(.plain)
                     .padding(Metrics.spacing.sp3)
@@ -365,12 +411,24 @@ struct MantaManualEntryView: View {
                     .autocapitalization(.none)
                     .autocorrectionDisabled()
                     .accessibilityIdentifier("onboarding-box-id")
+
+                VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
+                    Text("Pairing code")
+                        .font(.manta(size: Metrics.type.small))
+                        .foregroundColor(tokens.tx4)
+                    OTPField(value: $flow.code, placeholder: "000000", tokens: tokens)
+                        .accessibilityIdentifier("onboarding-otp")
+                }
+
+                // The only way to pair a box that is not reachable from the
+                // internet — kept, nested inside Manual Setup.
                 Button(action: { withAnimation { flow.showAdvanced.toggle() } }) {
                     Text(flow.showAdvanced ? "Hide server URL" : "My server isn't reachable from the internet")
                         .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
                         .foregroundColor(tokens.accentTx)
                 }
                 .buttonStyle(.plain)
+                .accessibilityIdentifier("onboarding-server-toggle")
                 if flow.showAdvanced {
                     TextField("https://100.64.0.9:8787", text: $flow.serverURL)
                         .font(.manta(size: Metrics.type.small, design: .monospaced))
@@ -388,26 +446,12 @@ struct MantaManualEntryView: View {
                         .foregroundColor(tokens.danger)
                         .accessibilityIdentifier("onboarding-error")
                 }
+                MantaPrimaryButton(title: "Continue",
+                                   disabled: !canContinue,
+                                   identifier: "onboarding-submit",
+                                   action: { flow.manualContinue() },
+                                   tokens: tokens)
             }
-            MantaPrimaryButton(title: "Continue",
-                               disabled: !canContinue,
-                               action: { flow.manualContinue() },
-                               tokens: tokens)
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, Metrics.spacing.sp6)
-        .padding(.top, Metrics.spacing.sp8)
-    }
-
-    private func header(title: String, subtitle: String) -> some View {
-        VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
-            Text(title)
-                .font(.manta(size: Metrics.type.display, weight: mantaFontWeight(Metrics.type.semibold)))
-                .foregroundColor(tokens.tx1)
-            Text(subtitle)
-                .font(.manta(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
-                .foregroundColor(tokens.tx3)
-                .lineSpacing(pointsForLineHeight(Metrics.type.body))
         }
     }
 
@@ -419,50 +463,17 @@ struct MantaManualEntryView: View {
     }
 }
 
-// MARK: - Linking (progress)
+// MARK: - Linking (full-screen loader)
 
 struct MantaLinkingView: View {
-    @ObservedObject var flow: MantaOnboardingFlow
+    let flow: MantaOnboardingFlow
     var tokens: Tokens
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Metrics.spacing.sp6) {
-            VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
-                Text("Linking")
-                    .font(.manta(size: Metrics.type.display, weight: mantaFontWeight(Metrics.type.semibold)))
-                    .foregroundColor(tokens.tx1)
-                Text("A couple of seconds.")
-                    .font(.manta(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
-                    .foregroundColor(tokens.tx3)
-            }
-            MantaCard(tokens: tokens) {
-                VStack(alignment: .leading, spacing: Metrics.spacing.sp3) {
-                    ForEach(Array(flow.linkingStages.enumerated()), id: \.offset) { index, stage in
-                        HStack(spacing: Metrics.spacing.sp2) {
-                            Circle()
-                                .fill(index <= flow.activeLinkingStage ? tokens.accent : tokens.tx4)
-                                .frame(width: Metrics.type.stepDot, height: Metrics.type.stepDot)
-                            Text(stage)
-                                .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
-                                .foregroundColor(index <= flow.activeLinkingStage ? tokens.tx1 : tokens.tx4)
-                        }
-                        .accessibilityIdentifier("linking-stage-\(index)")
-                    }
-                }
-            }
-            HStack {
-                Spacer()
-                ProgressView()
-                    .tint(tokens.accent)
-                Spacer()
-            }
-            Text("Credentials stay on this phone and on your server.")
-                .font(.manta(size: Metrics.type.small))
-                .foregroundColor(tokens.tx4)
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, Metrics.spacing.sp6)
-        .padding(.top, Metrics.spacing.sp8)
+        // The app's one loader, full-screen — not a card inside a ScrollView.
+        // Rendered outside the root's ScrollView (see MantaOnboardingRoot).
+        MantaLoader(caption: "Linking…", tokens: tokens, size: .screen)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -608,29 +619,28 @@ struct MantaOnboardingRoot: View {
     var body: some View {
         ZStack {
             tokens.canvas.ignoresSafeArea()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    // One brand mark at the top of the first step (not every
-                    // step — §5.2.6: no icon/badge atop every step header).
-                    if case .entry = flow.phase {
-                        mark
-                            .padding(.top, Metrics.spacing.sp8)
-                            .padding(.bottom, Metrics.spacing.sp6)
+            if case .linking = flow.phase {
+                // The loader is a full screen, not a card inside the scroll
+                // shell — render it outside the ScrollView so it fills the
+                // screen exactly like the other full-screen waits.
+                MantaLinkingView(flow: flow, tokens: tokens)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        // One brand mark at the top of the first step (not every
+                        // step — §5.2.6: no icon/badge atop every step header).
+                        if case .entry = flow.phase {
+                            mark
+                                .padding(.top, Metrics.spacing.sp8)
+                                .padding(.bottom, Metrics.spacing.sp6)
+                        }
+                        screen
                     }
-                    screen
                 }
             }
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("onboarding-root")
-        .sheet(isPresented: Binding(
-            get: { flow.scanRequested },
-            set: { if !$0 { flow.scanRequested = false } }
-        )) {
-            MantaQRScannerSheet(tokens: tokens) { payload in
-                flow.receive(payload: payload)
-            }
-        }
     }
 
     @ViewBuilder
@@ -639,6 +649,8 @@ struct MantaOnboardingRoot: View {
         case .entry:
             MantaManualEntryView(flow: flow, tokens: tokens)
         case .linking:
+            // Rendered outside the ScrollView above; kept here so the switch
+            // stays exhaustive.
             MantaLinkingView(flow: flow, tokens: tokens)
         case .failure(let kind):
             MantaFailureView(flow: flow, kind: kind, tokens: tokens)
@@ -649,14 +661,9 @@ struct MantaOnboardingRoot: View {
 
     private var mark: some View {
         HStack(spacing: Metrics.spacing.sp3) {
-            RoundedRectangle(cornerRadius: Metrics.radius.md)
-                .fill(tokens.accentSolid)
-                .frame(width: Metrics.spacing.sp8, height: Metrics.spacing.sp8)
-                .overlay(
-                    Text("M")
-                        .font(.manta(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.semibold)))
-                        .foregroundColor(tokens.onAccent)
-                )
+            // The REAL bundled logo, shared with MantaLoader — not a hand-drawn
+            // letter tile (BET-1308).
+            MantaLogoMark(size: Metrics.spacing.sp8)
             VStack(alignment: .leading, spacing: Metrics.spacing.spPx) {
                 Text("Pair your phone")
                     .font(.manta(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.semibold)))
@@ -751,9 +758,4 @@ private struct OTPField: View {
                 value = MantaPairing.normalizeCode(newValue)
             }
     }
-}
-
-@MainActor
-private func pointsForLineHeight(_ size: CGFloat) -> CGFloat {
-    max(0, (Metrics.type.uiLineHeight - 1) * size)
 }
