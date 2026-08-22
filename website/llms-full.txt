@@ -337,6 +337,7 @@ MantaMantaUI
         [Download for Windows](/downloads/Manta-latest-x64.exe)
 
       Manta UI on macOS: a workspace sidebar listing projects and their sessions, next to an agent transcript, a completed task checklist and the reply composer.
+      Manta UI on macOS: a workspace sidebar listing projects and their sessions, next to an agent transcript, a completed task checklist and the reply composer.
 
       Bring your own subscriptions
 
