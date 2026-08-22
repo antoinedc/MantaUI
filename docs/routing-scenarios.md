@@ -48,6 +48,15 @@ A scenario's expectation is a property of the decision, so a new model or a
 renamed provider never requires editing the deck — the property is what the
 routing set is built on.
 
+**The matcher vocabulary is the issue's closed §12b list, plus two documented
+set-membership additions** — `winnerIn` (winner is one of the given endpoint
+keys) and `winnerNotIn` (winner is none of them), the generalised positive
+complement of §12b's negative-only `excludes`. The §12c scenarios' set-membership
+claims (A14/A16/A17/A20/A21/A26) cannot be expressed with `excludes` alone, so
+these two complete it; they remain decision-property assertions (endpoint keys,
+never model names). These should be named in the epic's closed list so the spec
+stays the single source of truth.
+
 ---
 
 ## Deck B — the live behaviour checklist

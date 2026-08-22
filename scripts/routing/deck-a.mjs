@@ -35,6 +35,9 @@ import { applyRoutingOverrides, resolveNowOverride } from "../../src/shared/rout
 import { endpointKey } from "../../src/shared/endpointKey.mjs";
 import { tierForScore, qualityScore } from "../../src/shared/modelQuality.mjs";
 import { tierRank } from "../../src/shared/modelGuide.mjs";
+import { marginalCost } from "../../src/shared/marginalCost.mjs";
+import { blendedPrice } from "../../src/shared/blendedPrice.mjs";
+import { resolveIdentity } from "../../src/shared/modelIdentity.mjs";
 
 // Optional ledger reader — degrades to "absent" when the box's Node can't
 // provide it (the services contract: a missing ledger never breaks a decision).
@@ -156,8 +159,14 @@ function factsOf({ decision, trace }) {
   };
 }
 
-// The CLOSED matcher vocabulary (12b). Do not add a new matcher here without
-// updating the spec's closed list.
+// The CLOSED matcher vocabulary (12b). The issue's list is the whole
+// vocabulary; this deck documents two set-membership additions the §12c
+// scenarios need which the list's negative-only `excludes` cannot express:
+// `winnerIn` (winner is one of the given endpoint keys) and `winnerNotIn`
+// (winner is none of them — the generalised, positive complement of the issue's
+// `excludes`). They are still DECISION-property assertions (endpoint keys,
+// never model names); keep the list closed to exactly the §12b set plus these
+// two — do not add a new matcher here without updating the spec's closed list.
 function evaluateExpectation(expect, fact, results) {
   if (!expect) return { pass: true, detail: "" };
   const fails = [];
@@ -368,6 +377,66 @@ function printTable(rows) {
   }
 }
 
+// Per-endpoint marginal cost + blended price, resolved the SAME way the router
+// does (identity → effective model, per-endpoint mix, reference, account) so
+// the inert-signal checks read production values, not a guess. Mirrors
+// `assess()` in src/shared/modelRouter.mjs for the cost/quality fields only.
+function endpointCost(c, services, nowMs, replacementCost) {
+  const key = endpointKey(c);
+  const dec = services?.declared?.[key] ?? null;
+  let m = c;
+  try {
+    const identity = resolveIdentity(c, dec, services?.catalogMatcher);
+    m = identity?.effective ?? c;
+  } catch {
+    m = c;
+  }
+  const mix = services?.mix?.[key] ?? services?.mixDefault;
+  const ref = dec?.price !== undefined ? null : services?.referenceByModel?.[c.id];
+  const bp = blendedPrice(m, mix, ref);
+  const now = num(nowMs) ?? Date.now();
+  const cost = marginalCost({
+    model: m,
+    account: services?.accounts?.[c.providerID] ?? null,
+    nowMs: now,
+    mix,
+    reference: ref,
+    replacementCost,
+  });
+  return { key, blended: bp, cost };
+}
+
+// The cheapest acceptable non-subscription alternative (mirrors
+// computeReplacementCost in modelRouter.mjs) — the subscription exchange rate.
+function computeReplacementCost(catalog, services) {
+  let best = null;
+  for (const c of Array.isArray(catalog) ? catalog : []) {
+    const account = services?.accounts?.[c.providerID] ?? null;
+    if (account?.kind === "subscription") continue;
+    const key = endpointKey(c);
+    const dec = services?.declared?.[key] ?? null;
+    let m = c;
+    try {
+      const identity = resolveIdentity(c, dec, services?.catalogMatcher);
+      m = identity?.effective ?? c;
+    } catch {
+      m = c;
+    }
+    const ref = dec?.price !== undefined ? null : services?.referenceByModel?.[c.id];
+    const p = blendedPrice(m, services?.mix?.[key] ?? services?.mixDefault, ref).price;
+    if (best === null || num(p) === null) continue;
+    if (num(p) < best) best = num(p);
+  }
+  return best === null ? undefined : best;
+}
+
+const distinctCount = (vals) =>
+  new Set(
+    vals
+      .filter((v) => num(v) !== null)
+      .map((v) => Math.fround(num(v))),
+  ).size;
+
 async function inertSignalFindings({ cfg, policy, rows }) {
   const findings = [];
   let catalog = [];
@@ -390,6 +459,22 @@ async function inertSignalFindings({ cfg, policy, rows }) {
   } catch (e) {
     findings.push(`catalogue scan unavailable: ${e?.message ?? e}`);
     return findings;
+  }
+
+  // Per-endpoint cost facts, computed once for checks 1 & 5.
+  const nowMs = Date.now();
+  const replacementCost = computeReplacementCost(catalog, services);
+  const costByKey = {};
+  for (const c of catalog) costByKey[endpointKey(c)] = endpointCost(c, services, nowMs, replacementCost);
+
+  // 1. all marginal costs equal — the DEFAULT_MIX signature (pricing is inert
+  // when every endpoint prices identically).
+  const priced = Object.values(costByKey).filter((ec) => ec.cost?.exhausted !== true && num(ec.cost?.cost) !== null);
+  if (catalog.length > 1 && priced.length > 1) {
+    const distinct = new Set(priced.map((ec) => Math.fround(num(ec.cost.cost))));
+    if (distinct.size === 1) {
+      findings.push(`all ${priced.length} routable endpoints share one marginal cost (${fmtMoney(num(priced[0].cost.cost))}) — the DEFAULT_MIX signature`);
+    }
   }
 
   // 2. more than 40% of endpoints resolve to quality-unknown. Resolve quality
@@ -429,13 +514,36 @@ async function inertSignalFindings({ cfg, policy, rows }) {
     if (count === 0) findings.push(`hard filter never fires anywhere in the deck: ${filter}`);
   }
 
-  // 4. reliability / latency / throughput each fail to distinguish a pair.
-  const hasLedger = !!services?.reliability?.samples && Object.keys(services.reliability.samples).length > 0;
-  if (!hasLedger) {
-    findings.push("reliability has no samples — cannot distinguish any pair (ledger absent/empty)");
+  // 4. reliability, latency AND throughput each distinguish at least one pair.
+  const relVals = catalog.map((c) => services?.reliability?.samples?.[endpointKey(c)]?.rate);
+  const p50Vals = catalog.map((c) => services?.telemetry?.[endpointKey(c)]?.p50Ms ?? null);
+  const p90Vals = catalog.map((c) => services?.telemetry?.[endpointKey(c)]?.p90Ms ?? null);
+  const tpVals = catalog.map((c) => services?.telemetry?.[endpointKey(c)]?.tokensPerSec ?? null);
+  if (catalog.length > 1) {
+    const rel = distinctCount(relVals);
+    if (rel < 2) findings.push(`reliability does not distinguish any pair of endpoints (${rel === 0 ? "no samples" : `${rel} distinct value`})`);
+    const p50 = distinctCount(p50Vals);
+    if (p50 < 2) findings.push(`latency p50 does not distinguish any pair of endpoints (${p50 === 0 ? "no telemetry" : `${p50} distinct value`})`);
+    const p90 = distinctCount(p90Vals);
+    if (p90 < 2) findings.push(`latency p90 does not distinguish any pair of endpoints (${p90 === 0 ? "no telemetry" : `${p90} distinct value`})`);
+    const tp = distinctCount(tpVals);
+    if (tp < 2) findings.push(`throughput does not distinguish any pair of endpoints (${tp === 0 ? "no telemetry" : `${tp} distinct value`})`);
+  }
+
+  // 5. any endpoint whose cost.basis is unknown while its provider reports a
+  // cost — the "provider prices it but routing didn't read the account" tell.
+  const unknownWithCost = [];
+  for (const ec of Object.values(costByKey)) {
+    if (ec.cost?.basis === "unknown" && ec.blended?.known === true && num(ec.blended.price) > 0) {
+      unknownWithCost.push(ec.key);
+    }
+  }
+  if (unknownWithCost.length) {
+    findings.push(`endpoint(s) priced cost.basis=unknown while the provider reports a cost: ${unknownWithCost.join(", ")}`);
   }
 
   // 6. a decision using default mix while the ledger has data.
+  const hasLedger = !!services?.reliability?.samples && Object.keys(services.reliability.samples).length > 0;
   for (const r of rows) {
     if (r.winner && r.winner.mixSource === "default" && hasLedger) {
       findings.push(`decision ${r.id} used default mix while the ledger has data`);
