@@ -27,7 +27,8 @@
     "visual:compare": "npm run build && node scripts/visual/compare.mjs",
     "visual:styles": "npm run build && node scripts/visual/style-diff.mjs",
     "visual:baselines": "node scripts/visual/baseline-diff.mjs",
-    "visual:companion": "node scripts/visual/companion.mjs"
+    "visual:companion": "node scripts/visual/companion.mjs",
+    "routing:deck": "node scripts/routing/deck-a.mjs"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.3.0",

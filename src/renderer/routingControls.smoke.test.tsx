@@ -35,7 +35,7 @@ import {
   type Harness,
 } from "./testHarness";
 import { invalidateCachedResource } from "./useCachedResource";
-import { refreshRoutingCatalog } from "./routingCatalog";
+import { _resetRoutingCatalogCache } from "./routingCatalog";
 import { AccountsCard } from "./AccountsCard";
 import { ModelsCard } from "./ModelsCard";
 import { ModelsWeCouldntIdentify } from "./ModelsWeCouldntIdentify";
@@ -309,7 +309,7 @@ describe("control smoke — AccountsCard", () => {
       opencodeModelCatalog: () =>
         Promise.resolve({ supported: true, size: ENTRIES.length, entries: ENTRIES }),
     });
-    refreshRoutingCatalog();
+    _resetRoutingCatalogCache();
     h = mount(<AccountsCard />);
     await h.flush();
     await h.flush();
@@ -373,7 +373,7 @@ describe("control smoke — ModelsWeCouldntIdentify", () => {
       opencodeModelCatalog: () =>
         Promise.resolve({ supported: true, size: ENTRIES.length, entries: ENTRIES }),
     });
-    refreshRoutingCatalog();
+    _resetRoutingCatalogCache();
     h = mount(<ModelsWeCouldntIdentify />);
     await h.flush();
     await h.flush();

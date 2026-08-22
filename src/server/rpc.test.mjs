@@ -1458,6 +1458,117 @@ test("routing:choose reports incumbentStillEligible=true for a describable incum
   assert.equal(out.incumbentStillEligible, true, "a describable incumbent must read eligible");
 });
 
+// BET-1276 12a: the dev-only overrides bag on routing:choose. When NODE_ENV is
+// not "production" (the harness / local box), enabledMain restricts the
+// candidate pool to the listed endpoint keys, and accounts/health replace their
+// services keys for ONE call — read-only, side-effect-free.
+test("routing:choose honours enabledMain by restricting the candidate pool (12a)", async () => {
+  const { deps } = makeDeps([]);
+  deps.local.configGet = async () => ({
+    projects: [],
+    modelRouting: {
+      preset: "balanced",
+      declaredModels: {
+        "anthropic/claude-opus-4": { catalogId: "claude-opus-4" },
+        "anthropic/claude-sonnet-4": { catalogId: "claude-sonnet-4" },
+      },
+    },
+  });
+  deps.routingListRoutableModels = async () => [
+    { providerID: "anthropic", id: "claude-opus-4", status: "active", cost: { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 15 } },
+    { providerID: "anthropic", id: "claude-sonnet-4", status: "active", cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 } },
+  ];
+  const fakeCatalog = {
+    matchModel: (id) => ({ kind: "exact", candidates: [{ id, name: id }] }),
+    lookupModel: (id) => ({ id }),
+    allModels: () => [
+      { id: "claude-opus-4", benchmarks: [{ name: "SWE-Bench Verified", score: 0.95 }] },
+      { id: "claude-sonnet-4", benchmarks: [{ name: "SWE-Bench Verified", score: 0.8 }] },
+    ],
+  };
+  const handlers = buildHandlers({ ...deps, routingCatalogIndex: fakeCatalog });
+  // Both are build-qualified (deep); unfiltered the higher-quality opus wins.
+  // Restricting the pool to sonnet proves the decision saw ONLY sonnet.
+  const out = await handlers["routing:choose"]({
+    sessionId: "ses_1",
+    directory: "/w",
+    agent: "build",
+    surface: "main",
+    contextTokens: 0,
+    needs: {},
+    incumbent: { providerID: "anthropic", modelID: "claude-opus-4" },
+    overrides: { enabledMain: ["anthropic/claude-sonnet-4"] },
+  });
+  console.log("DEBUG12a", JSON.stringify({ model: out.model, reason: out.reason, changed: out.changed }));
+  assert.equal(out.changed, true, "switching off the restricted-out incumbent");
+  assert.equal(out.model?.modelID, "claude-sonnet-4", "winner must come from the enabledMain pool");
+});
+
+// 12a: a health override replaces services.health for one call, so an
+// excluded/failing provider reads unhealthy on the SAME round trip the decision
+// core responds to the override.
+test("routing:choose applies a health override to the incumbent-health report (12a)", async () => {
+  const { deps } = makeDeps([]);
+  deps.local.configGet = async () => ({ projects: [], modelRouting: { preset: "economy" } });
+  deps.routingListRoutableModels = async () => [
+    { providerID: "anthropic", id: "claude-opus-4", status: "active" },
+  ];
+  deps.routingProviderHealthState = () => null; // real health: ok
+  const handlers = buildHandlers(deps);
+  const out = await handlers["routing:choose"]({
+    sessionId: "ses_1",
+    directory: "/w",
+    agent: "build",
+    surface: "main",
+    contextTokens: 0,
+    needs: {},
+    incumbent: { providerID: "anthropic", modelID: "claude-opus-4" },
+    overrides: { health: { anthropic: "failing" } },
+  });
+  assert.equal(out.incumbentHealthy, false, "health override must flip the incumbent-health report");
+});
+
+// 12a gate: in production the overrides bag is IGNORED silently — a stale
+// client reaching prod must not change a real turn. Neither the candidate pool
+// nor the incumbent-health report may react to it.
+test("routing:choose ignores the overrides bag when NODE_ENV is production (12a gate)", async () => {
+  const { deps } = makeDeps([]);
+  deps.local.configGet = async () => ({ projects: [], modelRouting: { preset: "balanced" } });
+  deps.routingListRoutableModels = async () => [
+    { providerID: "anthropic", id: "claude-opus-4", status: "active", cost: { input: 15, output: 75 } },
+    { providerID: "anthropic", id: "claude-haiku-4", status: "active", cost: { input: 1, output: 5 } },
+  ];
+  const fakeCatalog = {
+    matchModel: (id) => ({ kind: "exact", candidates: [{ id, name: id }] }),
+    lookupModel: (id) => ({ id }),
+    allModels: () => [{ id: "claude-opus-4", benchmarks: [{ name: "SWE-Bench Verified", score: 0.9 }] }],
+  };
+  const handlers = buildHandlers({ ...deps, routingCatalogIndex: fakeCatalog });
+  const prev = process.env.NODE_ENV;
+  process.env.NODE_ENV = "production";
+  try {
+    const out = await handlers["routing:choose"]({
+      sessionId: "ses_1",
+      directory: "/w",
+      agent: "build",
+      surface: "main",
+      contextTokens: 0,
+      needs: {},
+      incumbent: { providerID: "anthropic", modelID: "claude-opus-4" },
+      overrides: {
+        enabledMain: ["anthropic/claude-haiku-4"],
+        health: { anthropic: "failing" },
+      },
+    });
+    // build wants deep → opus stays (the pool was NOT restricted to haiku).
+    assert.equal(out.model?.modelID, "claude-opus-4", "overrides must be inert in production");
+    assert.equal(out.incumbentHealthy, true, "health override must be inert in production");
+  } finally {
+    process.env.NODE_ENV = prev;
+  }
+});
+
+
 // accounts:retry always reports an outcome — a non-empty message in BOTH the
 // cleared and not-cleared cases (AGENTS.md: it does the thing and says so,
 // or fails and says why; a swallowed bare return is a dead button).

@@ -8,11 +8,45 @@ before the routing set is called done and record the actual result per line (not
 "✓") on the owning issue.
 
 - **Deck A — the scenario replay harness** (BET-1276): programmatic replay of
-  recorded scenarios through the routing core. Blocked; owns this file's Deck A
-  section.
+  recorded scenarios through the routing core — `npm run routing:deck`. This
+  file's Deck A section below.
 - **Deck B — the live behaviour checklist** (BET-1277): this file's Deck B
   section below — a human-in-the-app checklist, run once before the routing set
   is done.
+
+---
+
+## Deck A — the scenario replay harness
+
+Run on a live box against its real routing state:
+
+```
+npm run routing:deck
+```
+
+It replays 30 scenarios through the routing DECISION core (`chooseModel`) with
+the box's real catalogue, usage snapshots and ledger (via the dev-only
+`overrides` bag on `routing:choose` — see `src/shared/routingOverrides.mjs`),
+judging each against DECISION PROPERTIES (tier, cost, exclusions, determinism),
+never a model name. It prints one row per scenario plus the inert-signal
+section, and exits non-zero on any failure.
+
+**It is NOT part of `npm test`.** It depends on the box's live account /
+catalogue / ledger state, which the suite forbids. It is a diagnostic you run
+and read.
+
+**Prompt content is NOT an input to routing.** The decision never reads the
+prompt — it is a lookup over the agent, the preset, conversation size,
+attachments, account state and the user's tick list. The deck varies exactly
+those inputs. Do NOT rebuild it around prompt difficulty; a deck that had to
+change every time a prompt "felt" hard would fail every scenario and teach us
+nothing.
+
+The scenario set and matcher vocabulary are closed and live in
+`scripts/routing/scenarios.json` + `scripts/routing/deck-a.mjs` (12b/12c/12d).
+A scenario's expectation is a property of the decision, so a new model or a
+renamed provider never requires editing the deck — the property is what the
+routing set is built on.
 
 ---
 
