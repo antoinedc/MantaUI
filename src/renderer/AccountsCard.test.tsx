@@ -8,6 +8,7 @@
 
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { mount, installMockApi, clickCheckbox, type Harness, type MockApi } from "./testHarness";
+import { invalidateCachedResource } from "./useCachedResource";
 import { AccountsCard } from "./AccountsCard";
 
 function statusProvider() {
@@ -236,6 +237,46 @@ describe("AccountsCard Try-again tone by outcome (9c)", () => {
     expect(status).toBeTruthy();
     expect(status!.textContent).toContain("back in the pool");
     expect((status as HTMLElement).className).toContain("text-ok");
+    h.unmount();
+  });
+});
+
+describe("AccountsCard Try-again verdict clears on recovery (9c)", () => {
+  it("drops the verdict once a refetch shows the row recovered", async () => {
+    // Cold-start the "accounts" cache so the mount fetch actually reads health.
+    invalidateCachedResource("accounts");
+    let calls = 0;
+    installMockApi({
+      opencodeProviderAuth: () => Promise.resolve(statusProvider()),
+      opencodeGetProviders: () => Promise.resolve([]),
+      accountHealth: () => {
+        calls++;
+        // First read (mount) is out-of-credit; every later read (retry's own
+        // refetch) shows the flag cleared — so the verdict must not linger.
+        return Promise.resolve(calls <= 1 ? { anthropic: { state: "out-of-credit" } } : { anthropic: { state: "ok" } });
+      },
+      configGet: () => Promise.resolve({}),
+      opencodeSetProviders: () => Promise.resolve({ ok: true }),
+      opencodeDiscoverModels: () => Promise.resolve({ ok: true, models: [] }),
+      accountsRetry: () =>
+        Promise.resolve({
+          ok: false,
+          state: "out-of-credit",
+          message: "still reports out of credit — check the account.",
+        }),
+    });
+    const h = mount(<AccountsCard />);
+    await h.flush();
+    // out-of-credit at mount → Try again is present
+    expect(buttonByText(h, "Try again")).toBeTruthy();
+    buttonByText(h, "Try again")!.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, cancelable: true }),
+    );
+    // The retry's own refetch re-reads health (now ok) → row is healthy → the
+    // stale verdict is dropped rather than sitting under a healthy row.
+    await h.flush();
+    expect(h.container.textContent).not.toContain("still reports out of credit");
+    expect(buttonByText(h, "Try again")).toBeNull();
     h.unmount();
   });
 });
