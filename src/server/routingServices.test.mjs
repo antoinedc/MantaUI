@@ -159,6 +159,28 @@ test("ledgerToServices is empty-safe and ignores degenerate rows; no mix => no m
   assert.equal(mixDefault, undefined);
 });
 
+test("ledgerToServices: an endpoint with zero tool-call requests is UNMEASURED, not rate 0 (BET-1297)", () => {
+  // A `requests: 0` row means the ledger measured no tool-call requests for
+  // that endpoint. Surfacing it as a `rate: 0` sample fabricated "perfect
+  // reliability" for every unmeasured endpoint, which made the reliability
+  // dimension uniformly 0 across the catalogue — the §12d inert signal. It
+  // must be excluded so the router treats it as absent (unmeasured-average).
+  const { reliability } = ledgerToServices({
+    supported: true,
+    endpoints: {
+      // Measured: real tool-call evidence -> a real sample.
+      "p/opus": { reliability: { requests: 40, errored: 4, rate: 0.1 } },
+      // Unmeasured: no tool-call requests -> NO sample, NOT rate 0.
+      "p/sonnet": { reliability: { requests: 0, errored: 0, rate: 0 } },
+      // row entirely without a reliability field -> ignored as before
+      "p/haiku": {},
+    },
+  });
+  assert.deepEqual(reliability.samples, { "p/opus": { requests: 40, errored: 4, rate: 0.1 } });
+  // The per-model baseline must not count the unmeasured (requests:0) endpoint.
+  assert.deepEqual(reliability.baseline, { opus: { rate: 0.1, n: 40 } });
+});
+
 test("ledgerToServices: supported:false leaves reliability/telemetry undefined and emits no endpoint named 'supported' (7a)", () => {
   // An unsupported ledger (no DB) is NOT the same as a ledger with nothing in
   // it. The first must leave reliability/telemetry ABSENT (router's permissive

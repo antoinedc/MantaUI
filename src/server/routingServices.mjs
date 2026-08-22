@@ -177,7 +177,14 @@ export function ledgerToServices(stats) {
   const endpoints = isObj(stats?.endpoints) ? stats.endpoints : {};
   for (const [key, s] of Object.entries(endpoints)) {
     const rel = isObj(s?.reliability) ? s.reliability : null;
-    if (rel && typeof rel.requests === "number") {
+    // Only endpoints with actual tool-call evidence produce a reliability
+    // sample. A `requests === 0` row (no tool-call requests measured) is NOT a
+    // 0% error rate — it is unmeasured, and surfacing `rate: 0` for it was
+    // fabricating "perfect reliability" on every unmeasured endpoint, making
+    // the reliability dimension uniformly 0 across the catalogue and unable to
+    // distinguish any pair (the BET-1297 §12d inert-signal). The router treats
+    // an absent sample as unmeasured-average (rank 1) — the honest value.
+    if (rel && typeof rel.requests === "number" && rel.requests > 0) {
       const requests = rel.requests;
       const errored = num(rel.errored);
       samples[key] = { requests, errored, rate: num(rel.rate) };

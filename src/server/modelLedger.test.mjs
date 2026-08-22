@@ -230,3 +230,64 @@ test("endpointSummary returns { supported:false } with no zeros when the DB is u
     _resetDbHandle();
   }
 });
+
+test("endpointSummary reads tool calls from the part table so reliability is measured, not uniformly 0 (BET-1297)", async (t) => {
+  // opencode stores a message's tool parts in the separate `part` table, not
+  // in `message.data` (which has no `parts` array). Before this fix the ledger
+  // read `data.parts`, measured zero tool-call requests on every endpoint, and
+  // every reliability rate came back 0. This seeds a real DB with tool parts
+  // and asserts they reach aggregateReliability. It needs node:sqlite (Node
+  // 22.5+); on the CI runtime (Node 20) node:sqlite is absent and the ledger
+  // correctly degrades to { supported:false } — nothing to assert, so skip.
+  let DatabaseSync;
+  try {
+    ({ DatabaseSync } = await import("node:sqlite"));
+  } catch {
+    t.skip("node:sqlite unavailable on this runtime — endpointSummary degrades to unsupported");
+    return;
+  }
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "manta-ledger-"));
+  const dbPath = join(dir, "opencode.db");
+  try {
+    const seed = new DatabaseSync(dbPath);
+    seed.exec(`
+      CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+      CREATE TABLE session (id TEXT, parent_id TEXT, agent TEXT, directory TEXT);
+      CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+    `);
+    const now = Date.now();
+    seed.prepare("INSERT INTO session (id, parent_id, agent, directory) VALUES (?,?,?,?)").run("s1", null, "build", "/w");
+    const insMsg = seed.prepare("INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?)");
+    const insPart = seed.prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)");
+    const msgMeta = { role: "assistant", providerID: "anthropic", modelID: "claude-sonnet", tokens: { input: 10, output: 20, cache: { read: 0, write: 0 } }, time: { created: now - 2000, completed: now - 1000 } };
+    insMsg.run("a1", "s1", now, now, JSON.stringify({ ...msgMeta }));
+    insMsg.run("a2", "s1", now, now, JSON.stringify({ ...msgMeta }));
+    // Request 1: clean object arguments -> valid.
+    insPart.run("p1", "a1", "s1", now, now, JSON.stringify({ type: "tool", tool: "read", callID: "c1", state: { status: "completed", input: { path: "/a" } } }));
+    // Request 2: arguments are a string that fails JSON.parse -> invalid-json,
+    // an errored request (its whole request errors per aggregateReliability).
+    insPart.run("p2", "a2", "s1", now, now, JSON.stringify({ type: "tool", tool: "read", callID: "c2", state: { status: "completed", input: "{not json}" } }));
+    seed.close();
+
+    const prev = process.env.MANTA_OPENCODE_DB;
+    process.env.MANTA_OPENCODE_DB = dbPath;
+    _resetDbHandle();
+    try {
+      const res = await endpointSummary({ sinceMs: now - 60_000 });
+      assert.equal(res.supported, true);
+      const ep = res.endpoints?.["anthropic/claude-sonnet"];
+      assert.ok(ep, "expected the endpoint to be measured");
+      // Two tool-ending requests, one malformed -> requests 2, errored 1.
+      assert.deepEqual(ep.reliability, { requests: 2, errored: 1, rate: 0.5 });
+    } finally {
+      if (prev === undefined) delete process.env.MANTA_OPENCODE_DB;
+      else process.env.MANTA_OPENCODE_DB = prev;
+      _resetDbHandle();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
