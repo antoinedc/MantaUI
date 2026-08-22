@@ -36,7 +36,7 @@ import { resolveIdentity, type ModelDeclaration } from "../shared/modelIdentity.
 import { qualityScore } from "../shared/modelQuality.mjs";
 import { ConnectProvider } from "./ConnectProvider";
 import { CustomProviderForm } from "./CustomProviderForm";
-import { Checkbox } from "./Checkbox";
+import { ModelChecklist } from "./ModelChecklist";
 import { SettingsRow } from "./SettingsRow";
 import { MantaLoader } from "./MantaLoader";
 import { useCachedResource } from "./useCachedResource";
@@ -704,17 +704,12 @@ export function AccountsCard() {
                         {discovered[ep.id].length === 1 ? "" : "s"}
                       </div>
                     )}
-                    {(discovered[ep.id] ?? ep.enabledModels.map((id) => ({ id }))).map((m) => (
-                      <div key={m.id} className="flex items-center gap-2 text-meta">
-                        <Checkbox
-                          checked={ep.enabledModels.includes(m.id)}
-                          onChange={() => void toggleModel(ep, m.id)}
-                          ariaLabel={m.id}
-                          disabled={busy === row.id}
-                        />
-                        <span className="text-text-muted">{m.id}</span>
-                      </div>
-                    ))}
+                    <ModelChecklist
+                      models={discovered[ep.id] ?? ep.enabledModels.map((id) => ({ id }))}
+                      checked={new Set(ep.enabledModels)}
+                      onToggle={(id) => void toggleModel(ep, id)}
+                      disabled={busy === row.id}
+                    />
                   </div>
                 )}
               </div>

@@ -23,7 +23,7 @@ import path from "node:path";
 
 // Every primitive in the M527 inventory. Adding one here is the whole cost of
 // putting it under the epic's rules.
-const PRIMITIVES = ["Card", "IconButton", "Field", "Pill", "MenuItem", "MenuOption", "SessionRow", "Checkbox", "Button", "Chip", "SplitChip", "Toggle", "Callout", "Tag", "IconCard", "Eyebrow", "SettingsRow", "StatusDot", "OutputWell", "ToolCard", "MeasureColumn", "MessageBubble", "MantaLoader"] as const;
+const PRIMITIVES = ["Card", "IconButton", "Field", "Pill", "MenuItem", "MenuOption", "SessionRow", "Checkbox", "Button", "Chip", "SplitChip", "Toggle", "Callout", "Tag", "IconCard", "Eyebrow", "SettingsRow", "StatusDot", "OutputWell", "ToolCard", "MeasureColumn", "MessageBubble", "MantaLoader", "ModelChecklist"] as const;
 
 // A primitive component whose implementation lives in a differently-named
 // module file. `Chip.tsx` exports BOTH `Chip` and `SplitChip` (they share the
