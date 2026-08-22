@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { PRESETS } from "./modelRouter.mjs";
+// 7f: PRESETS now lives in the schema module (its only production consumer and
+// the module the Swift drift generator transpiles). The no-drift guard below
+// still pins the schema's preset options to the ROUTER's preset vocabulary
+// (the AGENT_TIER keys) so a rename in the decision core can never drift from
+// the schema without this test going red.
+import { AGENT_TIER } from "./modelRouter.mjs";
+import { PRESETS } from "./settingsSchema";
 import {
   SETTINGS,
   SETTING_SECTIONS,
@@ -155,12 +161,14 @@ describe("model routing entries (BET-1218)", () => {
     expect(preset!.group).toBe("Automatic Manta Routing");
   });
 
-  it("the preset uses the exact PRESETS values from modelRouter (no drift)", () => {
+  it("the preset uses the schema's PRESETS values and they match the router's AGENT_TIER keys (no drift)", () => {
     expect(preset!.control).toBe("segmented");
     expect(preset!.configKey).toBe("modelRouting.preset");
     expect(preset!.default).toBe("balanced");
     const values = preset!.options?.map((o) => o.value);
     expect(values).toEqual(PRESETS);
+    // No drift with the decision core: every schema preset is a router preset.
+    expect([...PRESETS].sort()).toEqual(Object.keys(AGENT_TIER).sort());
   });
 });
 

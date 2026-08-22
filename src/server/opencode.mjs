@@ -1302,8 +1302,6 @@ export function _normalizeProviderModel(providerID, modelId, m) {
     enabled: typeof m.enabled === "boolean" ? m.enabled : undefined,
     limit: _normalizeLimit(m.limit),
     cost: _normalizePrice(m.cost),
-    releaseDate:
-      typeof m.release_date === "string" && m.release_date !== "" ? m.release_date : undefined,
     capabilities: {
       toolcall: typeof caps.toolcall === "boolean" ? caps.toolcall : undefined,
       reasoning: typeof caps.reasoning === "boolean" ? caps.reasoning : undefined,

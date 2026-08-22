@@ -685,7 +685,7 @@ test("startJob routes to a non-incumbent model from live routing readers (BET-12
     allModels: () => [],
   };
   h.deps.providerHealthState = (pid) => (pid === "openai" ? "rate-limited" : "ok");
-  h.deps.endpointSummary = async () => ({ supported: true });
+  h.deps.endpointSummary = async () => ({ supported: true, endpoints: {} });
 
   const res = await startJob(
     { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo" },
@@ -730,8 +730,10 @@ test("startJob routes to the non-deranked sibling when an endpoint is reliabilit
   h.deps.providerHealthState = () => "ok";
   h.deps.endpointSummary = async () => ({
     supported: true,
-    "anthropic/claude-sonnet-4": { reliability: { requests: 25, errored: 12, rate: 0.48 }, speed: {}, latency: {}, mix: {} },
-    "openai/claude-sonnet-4": { reliability: { requests: 25, errored: 0, rate: 0 }, speed: {}, latency: {}, mix: {} },
+    endpoints: {
+      "anthropic/claude-sonnet-4": { reliability: { requests: 25, errored: 12, rate: 0.48 }, speed: {}, latency: {}, mix: {} },
+      "openai/claude-sonnet-4": { reliability: { requests: 25, errored: 0, rate: 0 }, speed: {}, latency: {}, mix: {} },
+    },
   });
 
   const res = await startJob(

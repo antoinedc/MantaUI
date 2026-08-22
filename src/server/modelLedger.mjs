@@ -16,11 +16,15 @@
 // shared handle from opencodeDb.mjs is opened read-only and stays so.
 
 import { getDb } from "./opencodeDb.mjs";
-import { classifyToolCall, aggregateReliability } from "../shared/toolReliability.mjs";
+import { aggregateReliability } from "../shared/toolReliability.mjs";
 
 // Turns longer than this are excluded from TIMING only (still counted for
 // cost) — the spec cap is 600s of wall-clock.
 const TIMING_MAX_MS = 600_000;
+
+// Reliability and telemetry describe how an endpoint behaves NOW. A rolling
+// window is what lets a provider that had a bad week recover on its own.
+export const ROUTING_LEDGER_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 
 // Coerce an arbitrary JSON value to a finite number, else 0. Value-missing
 // or a NaN/Infinity anywhere in the ledger is a bug; every division must
@@ -315,6 +319,11 @@ function extractTools(data) {
  * rolling window of assistant rows, via the shared getDb() handle. Degrades
  * exactly like `ledgerSummary`: returns { supported:false } — never throws —
  * when getDb() yields null, and a failed query also degrades. Read-only.
+ *
+ * On success the flag is separated from the data: `{ supported: true,
+ * endpoints: {…} }`. `endpoints` is 7a's map keyed by "providerID/modelID";
+ * the flag being distinct is what lets a caller tell "no ledger"
+ * ({supported:false}) from "a ledger with nothing measured" ({endpoints:{}}).
  */
 export async function endpointSummary({ sinceMs = 0 } = {}) {
   const db = await getDb();
@@ -339,7 +348,7 @@ export async function endpointSummary({ sinceMs = 0 } = {}) {
         tools: extractTools(data),
       });
     }
-    return { supported: true, ...aggregateEndpointStats(rows) };
+    return { supported: true, endpoints: aggregateEndpointStats(rows) };
   } catch (e) {
     // Query error: log once, drop the handle so the next call reopens, and
     // degrade to { supported:false } — never an exception, never zeros (a card

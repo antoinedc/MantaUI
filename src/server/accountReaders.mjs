@@ -77,7 +77,7 @@ export function readerFromDescriptor(descriptor) {
       });
       if (!res.ok) throw httpError(res, `${descriptor.id} usage`);
       const payload = await res.json();
-      return readDescriptor(descriptor, payload, now());
+      return readDescriptor(descriptor, payload);
     },
   };
 }

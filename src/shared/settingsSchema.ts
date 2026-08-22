@@ -4,6 +4,16 @@
 // complex cards (ModelsCard, the merged Accounts list, plugins, skill-
 // registries list, launcher flags, pairing, box status) stay as per-section
 // custom content rendered alongside the schema-driven fields.
+
+// 7f: the preset options are THE routing presets. They live HERE (in the
+// schema module) because the Swift settings-schema drift generator
+// (scripts/gen-swift-settings.mjs) transpiles this module to CJS and runs it
+// through a `new Function` that can only `require` CJS siblings — a cross-
+// `.ts`→`.mjs` import here breaks CI's `typecheck-test` (MODULE_NOT_FOUND).
+// Defining PRESETS here keeps the three options declared in exactly one place;
+// the no-drift guard (these must equal the router's AGENT_TIER preset keys)
+// lives in settingsSchema.test.ts.
+export const PRESETS = ["economy", "balanced", "performance"];
 //
 // BET-420 restructured the six flat tabs into eight sections clustered as
 // three ideas:
@@ -187,11 +197,10 @@ export const SETTINGS: SettingEntry[] = [
     platform: "desktop",
     default: "balanced",
     group: "Automatic Manta Routing",
-    options: [
-      { value: "economy", label: "Economy" },
-      { value: "balanced", label: "Balanced" },
-      { value: "performance", label: "Performance" },
-    ],
+    options: PRESETS.map((value) => ({
+      value,
+      label: value[0].toUpperCase() + value.slice(1),
+    })),
   },
 
   // ----- sessions (per-session behaviour) -----

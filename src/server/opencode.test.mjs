@@ -1481,8 +1481,8 @@ test("listRoutableModels: status != active and enabled:false are always excluded
 // _normalizeProviderModel — the single chokepoint every raw provider model
 // passes through. BET-1228: it must CARRY price (incl. cache rates), expose
 // `toolcall` under its own name (not the renamed `tools`), and preserve
-// `reasoning` + `releaseDate`. The absence of price is invisible at runtime
-// (every model scores equal), so these tests are the only thing pinning it.
+// `reasoning`. The absence of price is invisible at runtime (every model
+// scores equal), so these tests are the only thing pinning it.
 // ---------------------------------------------------------------------------
 
 test("_normalizeProviderModel carries price and cache rates through", () => {
@@ -1533,17 +1533,12 @@ test("_normalizeProviderModel keeps toolcall under its own name and preserves fa
   assert.equal(m.capabilities.attachment, true);
 });
 
-test("_normalizeProviderModel carries reasoning and trims empty releaseDate to undefined", () => {
+test("_normalizeProviderModel carries reasoning through", () => {
   const m = _normalizeProviderModel("p", "m", {
     id: "m",
-    release_date: "2025-01-01",
     capabilities: { reasoning: true },
   });
-  assert.equal(m.releaseDate, "2025-01-01");
   assert.equal(m.capabilities.reasoning, true);
-
-  const empty = _normalizeProviderModel("p", "m2", { id: "m2", release_date: "" });
-  assert.equal(empty.releaseDate, undefined);
 });
 
 // Scoped-stream readiness gate (BET-115 fix C)

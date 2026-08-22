@@ -176,7 +176,6 @@ describe("marginalCost — exhausted first", () => {
       marginalCost({ model: MODEL, nowMs: 0, replacementCost: EXCHANGE, account: sub(w(80, -0.4286 * R, R)) }),
       marginalCost({ model: MODEL, nowMs: 0, account: credit(10) }),
       marginalCost({ model: MODEL, nowMs: 0, account: credit() }),
-      marginalCost({ model: MODEL, nowMs: 0, account: { kind: "none" } }),
       marginalCost({ model: MODEL, nowMs: 0, account: null }),
     ];
     for (const res of cases) {
@@ -184,5 +183,15 @@ describe("marginalCost — exhausted first", () => {
       expect(res.cost).toBeGreaterThanOrEqual(0);
       expect(Number.isFinite(res.cost)).toBe(true);
     }
+  });
+
+  it("a 'none' kind is no longer a pricing branch — it falls through to the no-account blended rate (7f)", () => {
+    // accountsFromSnapshots only ever emits "credit" or "subscription", so the
+    // kind:"none" branch (and its basis:"none") was dead. A none/unknown kind
+    // now prices at the blended rate like a missing account, basis "unknown".
+    const res = marginalCost({ model: MODEL, nowMs: 0, account: { kind: "none" } });
+    expect(res.exhausted).toBe(false);
+    expect(res.basis).toBe("unknown");
+    expect(res.cost).toBeGreaterThanOrEqual(0);
   });
 });

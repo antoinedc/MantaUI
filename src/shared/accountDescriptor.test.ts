@@ -28,7 +28,7 @@ describe("validateDescriptor", () => {
     if (!r.valid) return;
     expect(r.descriptor).toEqual(base);
     // A validated descriptor is directly usable for reading.
-    const snap = readDescriptor(r.descriptor, { account: { balance: 42 } }, 0);
+    const snap = readDescriptor(r.descriptor, { account: { balance: 42 } });
     expect(snap.balance).toBe(42);
   });
 
@@ -85,19 +85,19 @@ describe("validateDescriptor", () => {
 
 describe("readDescriptor", () => {
   it("maps a nested balance path correctly", () => {
-    const snap = readDescriptor(ok(base), { account: { balance: 42 } }, 0);
+    const snap = readDescriptor(ok(base), { account: { balance: 42 } });
     expect(snap.balance).toBe(42);
   });
 
   it("a negative balance under positive-is-credit sets exhausted and stays negative", () => {
-    const snap = readDescriptor(ok(base), { account: { balance: -5 } }, 0);
+    const snap = readDescriptor(ok(base), { account: { balance: -5 } });
     expect(snap.balance).toBe(-5);
     expect(snap.exhausted).toBe(true);
   });
 
   it("positive-is-debt inverts correctly", () => {
     const d = ok({ ...base, balance: { ...base.balance, sign: "positive-is-debt" } });
-    const snap = readDescriptor(d, { account: { balance: 15 } }, 0);
+    const snap = readDescriptor(d, { account: { balance: 15 } });
     // 15 balance means 15 of debt → -15 credit → overdrawn.
     expect(snap.balance).toBe(-15);
     expect(snap.exhausted).toBe(true);
@@ -105,14 +105,14 @@ describe("readDescriptor", () => {
 
   it("positive-is-debt does not set exhausted for a (credit) negative raw value", () => {
     const d = ok({ ...base, balance: { ...base.balance, sign: "positive-is-debt" } });
-    const snap = readDescriptor(d, { account: { balance: -10 } }, 0);
+    const snap = readDescriptor(d, { account: { balance: -10 } });
     expect(snap.balance).toBe(10);
     expect(snap.exhausted).toBeUndefined();
   });
 
   it("a payload missing the balance path leaves balance undefined, NOT 0", () => {
     const d = ok({ ...base, balance: { ...base.balance, path: "nope.missing" } });
-    const snap = readDescriptor(d, {}, 0);
+    const snap = readDescriptor(d, {});
     expect(snap.balance).toBeUndefined();
     expect(snap).not.toHaveProperty("balance");
   });
@@ -134,7 +134,6 @@ describe("readDescriptor", () => {
     const snap = readDescriptor(
       d,
       { data: { used: 120, limit: 200, resets_at: 1700000000, started_at: 1699990000 } },
-      0,
     );
     const windows = snap.windows as Array<Record<string, unknown>>;
     expect(windows).toHaveLength(1);
@@ -153,13 +152,13 @@ describe("readDescriptor", () => {
       ...base,
       windows: [{ kind: "session", label: "5h", pct: "w.pct" }],
     });
-    const snap = readDescriptor(d, { w: { pct: 100 } }, 0);
+    const snap = readDescriptor(d, { w: { pct: 100 } });
     expect(snap.exhausted).toBe(true);
   });
 
   it("balance.minusPath subtracts: balance = value(path) − value(minusPath)", () => {
     const d = ok({ ...base, balance: { ...base.balance, minusPath: "data.total_usage" } });
-    const snap = readDescriptor(d, { account: { balance: 20 }, data: { total_usage: 20.07 } }, 0);
+    const snap = readDescriptor(d, { account: { balance: 20 }, data: { total_usage: 20.07 } });
     // 20 − 20.07 = −0.07 → overdrawn (negative under positive-is-credit).
     expect(snap.balance).toBeCloseTo(-0.07, 9);
     expect(snap.exhausted).toBe(true);
@@ -167,7 +166,7 @@ describe("readDescriptor", () => {
 
   it("a declared kind is carried onto the snapshot for accountsFromSnapshots", () => {
     const d = ok({ ...base, kind: "credit" });
-    const snap = readDescriptor(d, { account: { balance: 5 } }, 0);
+    const snap = readDescriptor(d, { account: { balance: 5 } });
     expect(snap.kind).toBe("credit");
   });
 });

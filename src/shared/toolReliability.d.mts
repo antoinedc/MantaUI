@@ -20,7 +20,8 @@ export type ReliabilitySample = { requests: number; errored: number; rate: numbe
 
 export type ReliabilityBaseline = { rate: number; n: number };
 
-export type DerankDecision = { penalise: boolean; reason: string };
+export type ReliabilityRank = 0 | 1 | 2;
+export type DerankDecision = { rank: ReliabilityRank; reason: string };
 
 export const MIN_SAMPLE_REQUESTS: number;
 export const DERANK_MARGIN_SIGMA: number;

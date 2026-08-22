@@ -131,47 +131,56 @@ describe("aggregateReliability", () => {
 describe("shouldDerank", () => {
   const baseline = { rate: 0.1, n: 1000 };
 
-  it("below the sample floor: never penalise, even at a 100% error rate", () => {
+  it("below the sample floor → unmeasured (rank 1), even at a 100% error rate", () => {
     const sample = { requests: MIN_SAMPLE_REQUESTS - 1, errored: MIN_SAMPLE_REQUESTS - 1, rate: 1 };
     expect(sample.requests).toBeLessThan(MIN_SAMPLE_REQUESTS);
     expect(shouldDerank(sample, baseline)).toEqual({
-      penalise: false,
+      rank: 1,
       reason: expect.stringContaining("floor"),
     });
   });
 
-  it("at/above the floor, materially worse than baseline → penalise", () => {
+  it("at/above the floor, materially worse than baseline → deranked (rank 2)", () => {
     const sample = { requests: 50, errored: 10, rate: 0.2 };
-    expect(shouldDerank(sample, baseline).penalise).toBe(true);
+    expect(shouldDerank(sample, baseline).rank).toBe(2);
   });
 
-  it("equal to baseline → do not penalise", () => {
+  it("equal to baseline → measured-reliable (rank 0)", () => {
     const sample = { requests: 50, errored: 5, rate: 0.1 };
     expect(sample.rate).toBe(baseline.rate);
-    expect(shouldDerank(sample, baseline).penalise).toBe(false);
+    expect(shouldDerank(sample, baseline).rank).toBe(0);
   });
 
-  it("close to baseline (within a sigma) → do not penalise", () => {
+  it("close to baseline (within a sigma) → measured-reliable (rank 0)", () => {
     // threshold ≈ 0.1 + 1*sqrt(0.09/1000) ≈ 0.10949; 0.105 is inside.
     const sample = { requests: 60, errored: 6, rate: 0.1 };
-    expect(shouldDerank(sample, { rate: 0.1, n: 5000 }).penalise).toBe(false);
+    expect(shouldDerank(sample, { rate: 0.1, n: 5000 }).rank).toBe(0);
   });
 
-  it("no baseline → never penalise", () => {
+  it("no baseline → unmeasured (rank 1)", () => {
     const sample = { requests: 50, errored: 25, rate: 0.5 };
-    expect(shouldDerank(sample, undefined).penalise).toBe(false);
-    expect(shouldDerank(sample, null).penalise).toBe(false);
+    expect(shouldDerank(sample, undefined).rank).toBe(1);
+    expect(shouldDerank(sample, null).rank).toBe(1);
   });
 
-  it("a single-endpoint baseline (n<=1) is no baseline → never penalise", () => {
+  it("a single-endpoint baseline (n<=1) is no baseline → unmeasured (rank 1)", () => {
     const sample = { requests: 50, errored: 25, rate: 0.5 };
-    expect(shouldDerank(sample, { rate: 0.1, n: 1 }).penalise).toBe(false);
+    expect(shouldDerank(sample, { rate: 0.1, n: 1 }).rank).toBe(1);
+  });
+
+  it("the rank is three-valued: measured(0) < unmeasured(1) < deranked(2) (7d)", () => {
+    const measured = shouldDerank({ requests: 50, errored: 5, rate: 0.1 }, baseline); // within margin
+    const unmeasured = shouldDerank({ requests: 3, errored: 3, rate: 1 }, baseline); // below floor
+    const deranked = shouldDerank({ requests: 50, errored: 25, rate: 0.5 }, baseline); // exceeds
+    expect(measured.rank).toBe(0);
+    expect(unmeasured.rank).toBe(1);
+    expect(deranked.rank).toBe(2);
   });
 
   it("penalise reasons are descriptive when they fire", () => {
     const sample = { requests: 50, errored: 25, rate: 0.5 };
     const res = shouldDerank(sample, { rate: 0.1, n: 1000 });
-    expect(res.penalise).toBe(true);
+    expect(res.rank).toBe(2);
     expect(res.reason).toContain("exceeds baseline");
   });
 });

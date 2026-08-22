@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { chooseModel, incumbentStillEligible, AGENT_TIER, PRESETS, type RoutingServices } from "./modelRouter.mjs";
+import { chooseModel, incumbentStillEligible, AGENT_TIER, type RoutingServices } from "./modelRouter.mjs";
 import { endpointKey } from "./endpointKey.mjs";
 import { tierRank } from "./modelGuide.mjs";
 import { AGENT_FLOOR_SCORE } from "./modelQuality.mjs";
@@ -151,9 +151,8 @@ async function catalogueServices(opts: {
   )) as RoutingServices;
 }
 
-describe("PRESETS / AGENT_TIER", () => {
-  it("exposes the three presets and the tier table read by the renderer", () => {
-    expect(PRESETS).toEqual(["economy", "balanced", "performance"]);
+describe("AGENT_TIER", () => {
+  it("exposes the tier table read by the renderer", () => {
     expect(AGENT_TIER.balanced.general).toBe("balanced");
     expect(AGENT_TIER.economy.general).toBe("fast");
   });
@@ -411,6 +410,72 @@ describe("chooseModel — soft ordering (stage 3)", () => {
     });
     expect(res.model).toBeTruthy();
     expect(["a", "b"]).toContain(res.model?.providerID);
+  });
+
+  it("7d: a measured-reliable endpoint beats an unmeasured one at identical cost", () => {
+    // Provider ids are chosen OPPOSITE the rank order so a main-branch key
+    // tie-break would pick the wrong one — this test fails on main where an
+    // unmeasured endpoint was treated as good (identical to measured).
+    const measured = endpoint("m", { providerID: "z" });
+    const unmeasured = endpoint("m", { providerID: "a" });
+    const res = route({
+      catalog: [unmeasured, measured],
+      policy: { preset: "balanced" },
+      services: {
+        reliability: {
+          samples: { "z/m": { requests: 50, errored: 5, rate: 0.1 } },
+          baseline: { m: { rate: 0.1, n: 1000 } },
+        },
+      },
+    });
+    expect(res.model?.providerID).toBe("z");
+  });
+
+  it("7d: an unmeasured endpoint beats a deranked one", () => {
+    const unmeasured = endpoint("m", { providerID: "a" });
+    const deranked = endpoint("m", { providerID: "y" });
+    const res = route({
+      catalog: [deranked, unmeasured],
+      policy: { preset: "balanced" },
+      services: {
+        reliability: {
+          samples: { "y/m": { requests: 50, errored: 25, rate: 0.5 } },
+          baseline: { m: { rate: 0.1, n: 1000 } },
+        },
+      },
+    });
+    expect(res.model?.providerID).toBe("a");
+  });
+
+  it("two endpoints differing only in p50TokensPerSec are ordered by it", () => {
+    const fast = endpoint("m", { providerID: "a" });
+    const slow = endpoint("m", { providerID: "z" });
+    const res = route({
+      catalog: [slow, fast],
+      policy: { preset: "balanced" },
+      services: {
+        telemetry: { "a/m": { tokensPerSec: 100 }, "z/m": { tokensPerSec: 40 } },
+      },
+    });
+    expect(res.model?.providerID).toBe("a");
+  });
+
+  it("7e: two endpoints differing only in p90TokensPerSec are ordered by it (throughput p50 ties)", () => {
+    // Keys tilt the other way so a main-branch tie-break (which discarded the
+    // p90 throughput) would pick the slower endpoint — fails on main, fixed here.
+    const fast = endpoint("m", { providerID: "z" });
+    const slow = endpoint("m", { providerID: "a" });
+    const res = route({
+      catalog: [slow, fast],
+      policy: { preset: "balanced" },
+      services: {
+        telemetry: {
+          "z/m": { tokensPerSec: 100, p90TokensPerSec: 90 },
+          "a/m": { tokensPerSec: 100, p90TokensPerSec: 60 },
+        },
+      },
+    });
+    expect(res.model?.providerID).toBe("z");
   });
 });
 

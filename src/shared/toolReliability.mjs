@@ -13,8 +13,9 @@
 // only.
 
 // Minimum number of requests that ended in tool calls before an endpoint's
-// observed error rate is treated as statistical evidence. Below this we never
-// penalise — three bad requests out of three is anecdote, not evidence.
+// observed error rate is treated as statistical evidence. Below this the
+// endpoint is UNMEASURED (rank 1, treated as average) — three bad requests out
+// of three is anecdote, not evidence.
 export const MIN_SAMPLE_REQUESTS = 20;
 
 // The margin, in "standard deviations" (of the baseline proportion's standard
@@ -201,39 +202,46 @@ function fmtPct(x) {
 }
 
 /**
- * Should this endpoint be penalised for reliability?
+ * The reliability rank of an endpoint — three-valued, NOT the old binary
+ * "penalise?". The design is explicit: *an endpoint with no measurement yet is
+ * treated as average, never as good.* A binary flag cannot express that — below
+ * the sample floor the old rule returned "no penalty", identical to a measured
+ * reliable endpoint. The rank orders the within-model contest:
+ *   0 = measured-reliable (enough evidence, not materially worse than baseline)
+ *   1 = unmeasured (no usable measurement yet → treated as AVERAGE, never good)
+ *   2 = deranked (measured and materially worse than the model baseline)
  *
  * Rules that keep it honest:
- *  - below {@link MIN_SAMPLE_REQUESTS} → never penalise (anecdote, not
- *    evidence), even at a 100% error rate;
+ *  - below {@link MIN_SAMPLE_REQUESTS} → unmeasured (anecdote, not evidence),
+ *    even at a 100% error rate;
  *  - no baseline to compare against (no baseline rate, or `n <= 1` i.e. a
- *    model served by a single endpoint) → never penalise — there is nothing to
- *    be worse than;
- *  - otherwise penalise only when this endpoint's rate exceeds the same
- *    MODEL's baseline rate by more than {@link DERANK_MARGIN_SIGMA} standard
- *    errors of that baseline.
+ *    model served by a single endpoint) → unmeasured — there is nothing to be
+ *    worse than;
+ *  - otherwise derank only when this endpoint's rate exceeds the same MODEL's
+ *    baseline rate by more than {@link DERANK_MARGIN_SIGMA} standard errors of
+ *    that baseline; everything else is measured-reliable.
  *
  * @param {{requests:number, errored:number, rate:number}} sample  this endpoint
  * @param {{rate:number, n:number}|null|undefined} baseline  same model's rate
  *   across all its endpoints; null/undefined ⇒ no baseline
- * @returns {{penalise:boolean, reason:string}}
+ * @returns {{rank:0|1|2, reason:string}}
  */
 export function shouldDerank(sample, baseline) {
   const requests = num0(sample && sample.requests);
   if (requests < MIN_SAMPLE_REQUESTS) {
-    return { penalise: false, reason: `below sample floor (${requests} < ${MIN_SAMPLE_REQUESTS} requests)` };
+    return { rank: 1, reason: `below sample floor (${requests} < ${MIN_SAMPLE_REQUESTS} requests)` };
   }
 
   const b = baseline && typeof baseline === "object" ? baseline : null;
   if (!b || typeof b.rate !== "number" || typeof b.n !== "number" || !(b.n > 1)) {
-    return { penalise: false, reason: "no baseline to compare against" };
+    return { rank: 1, reason: "no baseline to compare against" };
   }
 
   const p = b.rate;
   const se = Math.sqrt((p * (1 - p)) / b.n);
   const threshold = p + DERANK_MARGIN_SIGMA * se;
   if (sample.rate > threshold) {
-    return { penalise: true, reason: `rate ${fmtPct(sample.rate)} exceeds baseline ${fmtPct(p)} by >${DERANK_MARGIN_SIGMA}\u03c3` };
+    return { rank: 2, reason: `rate ${fmtPct(sample.rate)} exceeds baseline ${fmtPct(p)} by >${DERANK_MARGIN_SIGMA}\u03c3` };
   }
-  return { penalise: false, reason: `within baseline margin (${fmtPct(sample.rate)} \u2264 ${fmtPct(p)} + ${DERANK_MARGIN_SIGMA}\u03c3)` };
+  return { rank: 0, reason: `within baseline margin (${fmtPct(sample.rate)} \u2264 ${fmtPct(p)} + ${DERANK_MARGIN_SIGMA}\u03c3)` };
 }

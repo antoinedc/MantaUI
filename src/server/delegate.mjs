@@ -842,6 +842,9 @@ export async function startJob(input, deps = {}) {
     effectiveModel = deliverModel;
   } else {
     const route = deps?.chooseSubagentModel ?? chooseSubagentModel;
+    // One injected clock for this decision (rolling-window edge + TTL timestamp
+    // in buildRoutingServices, and the router's own ordering) — same instant.
+    const nowMs = Date.now();
     // Build the router's RoutingServices context from live box state (BET-1252).
     // `deps.routingServices` (test injection) is used verbatim when present;
     // otherwise the box-side builder assembles catalogue + accounts + health +
@@ -859,7 +862,7 @@ export async function startJob(input, deps = {}) {
           snapshots: quota,
           providerHealthState: deps.providerHealthState,
           endpointSummary: deps.endpointSummary,
-        });
+        }, nowMs);
       } catch (e) {
         console.error(`[router] routing services degraded, routing on absent context: ${e?.message ?? e}`);
         services = null;
@@ -871,7 +874,7 @@ export async function startJob(input, deps = {}) {
         catalog,
         policy,
         agent: resolveSubagentAgent(input?.subagent_type),
-        nowMs: Date.now(),
+        nowMs,
         services,
       });
     } catch (e) {

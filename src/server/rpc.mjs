@@ -828,6 +828,7 @@ export function buildHandlers({
       // The entire gather + decide is one guarded unit: a failing catalogue,
       // snapshot reader, health tracker or a throwing router all degrade to the
       // incumbent-unchanged fallback below, never a throw to the caller.
+      const nowMs = Date.now();
       try {
         let cfg = {};
         try {
@@ -861,7 +862,7 @@ export function buildHandlers({
             snapshots: quota,
             providerHealthState: routingProviderHealthState,
             endpointSummary: routingEndpointSummary,
-          });
+          }, nowMs);
         } catch (e) {
           // 11e: a silently-degrading services build is how "no model passes
           // constraints (identity)" hides. Never fatal — routing degrading is
@@ -915,7 +916,7 @@ export function buildHandlers({
           },
           catalog,
           policy,
-          nowMs: Date.now(),
+          nowMs,
           services,
         });
         // The box-side signal that routing ran (BET-1265). Always logged, no

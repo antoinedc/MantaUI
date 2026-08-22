@@ -20,7 +20,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mount, installMockApi, resetStore, type Harness } from "./testHarness";
 import { ModelsWeCouldntIdentify } from "./ModelsWeCouldntIdentify";
-import { refreshRoutingCatalog } from "./routingCatalog";
+import { _resetRoutingCatalogCache } from "./routingCatalog";
 
 // A trimmed provider-agnostic catalogue fixture (models.dev shape).
 const ENTRIES = [
@@ -70,7 +70,7 @@ function mountBlock(opts: {
           : { supported: false, size: 0, entries: [] },
       ),
   });
-  refreshRoutingCatalog();
+  _resetRoutingCatalogCache();
   const h = mount(<ModelsWeCouldntIdentify />);
   return { h, api };
 }
