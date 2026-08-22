@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { homedir } from "node:os";
+import { existsSync } from "node:fs";
 import { transcribeAudio } from "../shared/groq.mjs";
 import { expandTilde } from "../shared/paths.mjs";
 import {
@@ -1329,9 +1330,19 @@ export function buildHandlers({
         // "Connected" forever. The auth store is what both connect and
         // disconnect write, so it reflects the truth immediately.
         const connected = await oc.readAuthedProviderIds();
+        // BET-1320: a provider whose detect path exists on disk has its
+        // credential owned outside Manta (e.g. the Claude CLI) — flag it so
+        // the renderer shows the owner instead of a Disconnect it can't
+        // deliver. Expand a leading `~` via the shared expandTilde (the one
+        // place that knows how).
+        const externallyManaged = new Set(
+          subscriptionProviders.SUBSCRIPTION_PROVIDERS.filter((p) =>
+            (p.detect ?? []).some((d) => existsSync(expandTilde(d))),
+          ).map((p) => p.id),
+        );
         return {
           action: "status",
-          providers: subscriptionProviders.subscriptionStatuses(connected),
+          providers: subscriptionProviders.subscriptionStatuses(connected, externallyManaged),
         };
       }
       if (action === "start") {

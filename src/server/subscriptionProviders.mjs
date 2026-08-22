@@ -42,6 +42,13 @@ export const SUBSCRIPTION_PROVIDERS = [
     plan: "Claude Pro / Max",
     prefer: [{ type: "oauth", match: "claude code account" }],
     detect: ["~/.claude/.credentials.json"],
+    // BET-1320: the opencode-claude-auth plugin re-syncs
+    // ~/.claude/.credentials.json into opencode's auth store at startup and
+    // every 5 minutes, so deleting the anthropic credential is undone within
+    // minutes — Manta cannot deliver a Disconnect for this row. When this
+    // detect path is present, the status branch flags the row as externally
+    // managed and the renderer shows the owner instead of a dead button.
+    managedBy: "the Claude CLI on this box",
     console: null,
     docs: "https://claude.com/pricing",
     // BET-354: tag that flags this row for the claude-login connect shape
@@ -231,14 +238,21 @@ export function describeConnectShape(resolvedMethod, authorizeResponse, id) {
  * @property {string|null} console  where to mint a key, or null
  * @property {string} docs       canonical setup doc URL
  * @property {boolean} connected  true iff id ∈ connected
+ * @property {boolean} managedExternally  true iff id ∈ externallyManaged — the
+ *                             credential is owned outside Manta and a
+ *                             Disconnect cannot be delivered
+ * @property {string|null} managedBy  who owns the credential (registry value,
+ *                             null when not externally managed)
  */
 
 /**
  * @param {string[]} connected  the `connected[]` array from opencode's GET /provider
+ * @param {Set<string>} [externallyManaged]  provider ids whose credential Manta does not own
  * @returns {SubscriptionStatus[]}
  */
-export function subscriptionStatuses(connected) {
+export function subscriptionStatuses(connected, externallyManaged = new Set()) {
   const set = new Set(Array.isArray(connected) ? connected : []);
+  const managed = externallyManaged instanceof Set ? externallyManaged : new Set();
   return SUBSCRIPTION_PROVIDERS.map((p) => ({
     id: p.id,
     label: p.label,
@@ -246,6 +260,8 @@ export function subscriptionStatuses(connected) {
     console: p.console,
     docs: p.docs,
     connected: set.has(p.id),
+    managedExternally: managed.has(p.id),
+    managedBy: p.managedBy ?? null,
   }));
 }
 
