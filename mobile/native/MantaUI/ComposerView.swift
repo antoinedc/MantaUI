@@ -299,6 +299,10 @@ struct ComposerView: View {
             if recallingHistory {
                 recallingHistory = false
             } else {
+                // The user edited by typing (not ↑/↓ recall): exit history
+                // cycling so the next ↑ treats the edited text as a fresh
+                // draft instead of resuming the abandoned walk (BET-1305).
+                navigator.reset()
                 handleTextChange(newValue)
             }
         }
@@ -1208,7 +1212,12 @@ struct ComposerView: View {
     }
 
     private func historyUp() {
-        refreshHistoryEntries()
+        // Only re-seed from persisted + transcript when NOT already cycling:
+        // a fresh navigator starts with index == nil, so reseeding on every
+        // press would reset the walk and repeated ↑ would never advance past
+        // the newest entry. Preserve position once cycling has begun; refresh
+        // on entering cycling so newly-arrived turns are picked up (BET-1305).
+        if navigator.index == nil { refreshHistoryEntries() }
         guard !navigator.entries.isEmpty else { return }
         recallingHistory = true
         if let value = navigator.up(currentDraft: text) { text = value }
