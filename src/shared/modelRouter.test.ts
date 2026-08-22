@@ -11,10 +11,17 @@ import { AGENT_FLOOR_SCORE } from "./modelQuality.mjs";
 // The two server .mjs modules have no bundled type declarations (they are
 // consumed from node:test .test.mjs). The seams below are exercised through
 // the real modules — the fixtures are deliberately not hand-typed.
-// @ts-expect-error — server .mjs has no bundled declarations; used for the real normaliser.
+// The tests import real server .mjs (normaliser, services wiring, adapters) so
+// fixtures and account shapes cannot quietly disagree with production (BET-1269
+// standing rule 9). Those modules have no bundled .d.mts, hence the directives.
+// @ts-expect-error — server .mjs has no bundled declarations.
 import { _normalizeProviderModel } from "../server/opencode.mjs";
-// @ts-expect-error — server .mjs has no bundled declarations; used for the real services wiring.
-import { buildRoutingServices } from "../server/routingServices.mjs";
+// @ts-expect-error — server .mjs has no bundled declarations.
+import { buildRoutingServices, accountsFromSnapshots } from "../server/routingServices.mjs";
+// @ts-expect-error — server .mjs has no bundled declarations.
+import { claudeAdapter } from "../server/usageAdapters/claude.mjs";
+// @ts-expect-error — server .mjs has no bundled declarations.
+import { codexAdapter } from "../server/usageAdapters/codex.mjs";
 
 // A catalogue entry field that forces a precise, known quality score so tests
 // control the tier band deterministically. qualityScore's benchmark path wins
@@ -91,6 +98,58 @@ function route({ catalog, policy, intent = {}, services: extra = {}, nowMs = 0 }
 }
 
 const keyOf = endpointKey;
+
+// A fetch-shaped Response for the real adapters — never the network.
+function fakeRes(status: number, body: unknown) {
+  return { ok: status < 300, status, headers: { get: () => null }, json: async () => body };
+}
+
+async function claudeSnapshot(body: unknown) {
+  return claudeAdapter.fetch({
+    readCredentials: async () => ({ accessToken: "x" }),
+    fetchImpl: async () => fakeRes(200, body),
+  });
+}
+
+async function codexSnapshot(body: unknown) {
+  return codexAdapter.fetch({
+    readToken: async () => "x",
+    fetchImpl: async () => fakeRes(200, body),
+    now: () => 0,
+  });
+}
+
+// The real adapters' fetch() does not carry providerIDs — the usage poller adds
+// them from adapter.providerIDs. Mirror that so accountsFromSnapshots keys by
+// opencode providerID exactly as production does.
+function accountFor(adapter: { providerIDs: string[] }, snapshot: Record<string, unknown>) {
+  return accountsFromSnapshots([{ ...snapshot, providerIDs: adapter.providerIDs }] as any);
+}
+
+// Real services for a catalogue-driven scenario: reference prices, benchmarks,
+// accounts and a ledger mix all built through buildRoutingServices.
+async function catalogueServices(opts: {
+  declaredModels: Record<string, unknown>;
+  entries: Record<string, unknown>;
+  endpoints: Array<Record<string, unknown>>;
+  snapshots?: Array<Record<string, unknown>>;
+  endpointSummary?: () => Promise<Record<string, unknown>>;
+}) {
+  return (await buildRoutingServices(
+    { modelRouting: { preset: "balanced", declaredModels: opts.declaredModels } },
+    {
+      catalogIndex: {
+        lookupModel: (id: string) => (opts.entries[id] ? opts.entries[id] : null),
+        matchModel: () => ({ kind: "none", candidates: [] }),
+        allModels: () => Object.values(opts.entries),
+      },
+      endpoints: opts.endpoints as any,
+      snapshots: (opts.snapshots as any) ?? [],
+      providerHealthState: () => undefined,
+      endpointSummary: opts.endpointSummary ?? (async () => ({})),
+    },
+  )) as RoutingServices;
+}
 
 describe("PRESETS / AGENT_TIER", () => {
   it("exposes the three presets and the tier table read by the renderer", () => {
@@ -538,5 +597,174 @@ describe("chooseModel — judge the resolved endpoint, not the provider's raw cl
     // has none (it would place the endpoint by family instead).
     expect(w.quality.basis).toBe("benchmark");
     expect(w.quality.known).toBe(true);
+  });
+});
+
+describe("chooseModel — the cost stage (BET-1269): measured mix, catalogue reference, subscription pricing", () => {
+  // --- Test 2: mix is measured ---------------------------------------------
+  // Two endpoints, identical capability (same model, same band), differing only
+  // in cache discount. Under a cache-heavy MEASURED mix the caching endpoint
+  // wins; under a cache-light measured mix the cheap-fresh one wins. On main
+  // the per-endpoint mix never arrives, so mixSource stays "default".
+  const CACHE_HEAVY = { input: 0.08, output: 0.05, cacheRead: 0.8, cacheWrite: 0.07 };
+  const CACHE_LIGHT = { input: 0.45, output: 0.45, cacheRead: 0.05, cacheWrite: 0.05 };
+
+  it("2. mix is measured: the winner flips with a cache-heavy vs cache-light ledger mix", () => {
+    const cachey = endpoint("m", { providerID: "a", cost: { input: 2, output: 2, cacheRead: 0.1, cacheWrite: 0.1 } });
+    const fresh = endpoint("m", { providerID: "b", cost: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 } });
+    const heavy = route({
+      catalog: [fresh, cachey],
+      policy: { preset: "balanced" },
+      services: { mix: { "a/m": CACHE_HEAVY, "b/m": CACHE_HEAVY }, mixDefault: CACHE_HEAVY },
+    });
+    expect(heavy.model?.providerID).toBe("a");
+    expect(heavy.trace.winner!.cost.mixSource).toBe("measured");
+    const light = route({
+      catalog: [fresh, cachey],
+      policy: { preset: "balanced" },
+      services: { mix: { "a/m": CACHE_LIGHT, "b/m": CACHE_LIGHT }, mixDefault: CACHE_LIGHT },
+    });
+    expect(light.model?.providerID).toBe("b");
+    expect(light.trace.winner!.cost.mixSource).toBe("measured");
+  });
+
+  it("2b. an endpoint with no ledger history is priced on the box's overall mixDefault", () => {
+    // Both mixDefault entries are the same per-endpoint value in 2; here the
+    // winner's cost is computed with mixDefault alone (no per-endpoint mix).
+    const cachey = endpoint("m", { providerID: "a", cost: { input: 2, output: 2, cacheRead: 0.1, cacheWrite: 0.1 } });
+    const fresh = endpoint("m", { providerID: "b", cost: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 } });
+    const res = route({
+      catalog: [fresh, cachey],
+      policy: { preset: "balanced" },
+      services: { mixDefault: CACHE_HEAVY },
+    });
+    expect(res.trace.winner!.cost.mixSource).toBe("measured");
+    expect(res.model?.providerID).toBe("a");
+  });
+
+  // --- Test 3: implausible zero loses (catalogue reference wired) ----------
+  const ORIG_SONNET = {
+    id: "declared-sonnet",
+    family: "sonnet",
+    limit: { context: 262000 },
+    benchmarks: [{ name: "SWE-Bench Verified", score: 0.85 }],
+    cost: { input: 3, output: 15 },
+  };
+
+  it("3. a reseller quoting 0/0 for a model the catalogue prices in dollars loses", async () => {
+    const services = await catalogueServices({
+      declaredModels: { "b/declared-sonnet": { catalogId: "declared-sonnet", caches: false }, "a/declared-sonnet": { catalogId: "declared-sonnet", caches: false } },
+      entries: { "declared-sonnet": ORIG_SONNET },
+      endpoints: [{ providerID: "b", id: "declared-sonnet" }, { providerID: "a", id: "declared-sonnet" }],
+    });
+    const reseller = _normalizeProviderModel("b", "declared-sonnet", { id: "declared-sonnet", status: "active", cost: { input: 0, output: 0 }, capabilities: { toolcall: true } })!;
+    const firstParty = _normalizeProviderModel("a", "declared-sonnet", { id: "declared-sonnet", status: "active", cost: { input: 3, output: 15 }, capabilities: { toolcall: true } })!;
+    const res = chooseModel({
+      intent: { kind: "start", agent: "general", needs: {}, contextTokens: 1000 },
+      catalog: [reseller, firstParty],
+      policy: { preset: "balanced" },
+      services,
+    });
+    // The reseller's 0/0 is judged against the catalogue's real rate (it is NOT
+    // a gift) — so the first party, quoting the real rate, wins within the
+    // model's own cost contest.
+    expect(res.model?.providerID).toBe("a");
+  });
+
+  it("3b. a declared-free endpoint still wins", async () => {
+    const services = await catalogueServices({
+      declaredModels: { "b/declared-sonnet": { catalogId: "declared-sonnet", price: "free", caches: false }, "a/declared-sonnet": { catalogId: "declared-sonnet", caches: false } },
+      entries: { "declared-sonnet": ORIG_SONNET },
+      endpoints: [{ providerID: "b", id: "declared-sonnet" }, { providerID: "a", id: "declared-sonnet" }],
+    });
+    const declaredFree = _normalizeProviderModel("b", "declared-sonnet", { id: "declared-sonnet", status: "active", cost: { input: 3, output: 15 }, capabilities: { toolcall: true } })!;
+    const firstParty = _normalizeProviderModel("a", "declared-sonnet", { id: "declared-sonnet", status: "active", cost: { input: 3, output: 15 }, capabilities: { toolcall: true } })!;
+    const res = chooseModel({
+      intent: { kind: "start", agent: "general", needs: {}, contextTokens: 1000 },
+      catalog: [declaredFree, firstParty],
+      policy: { preset: "balanced" },
+      services,
+    });
+    // A user-declared "free" is AUTHORITATIVE — the catalogue reference does not
+    // re-classify it as implausible zero. The free endpoint wins.
+    expect(res.model?.providerID).toBe("b");
+  });
+
+  // --- Test 5: subscription beats free (real codex subscription) -----------
+  it("5. a well-paced subscription outranks a free model of equal task capability (5e)", async () => {
+    // The real codex adapter: a *subscription* (kind) that also reports a credit
+    // balance. On main the balance inference misclassifies it as credit.
+    const snap: any = await codexSnapshot({
+      rate_limit: { primary_window: { used_percent: 60, limit_window_seconds: 18000, reset_at: 2000 } },
+      plan_type: "plus",
+      credits: { balance: 14.2 },
+    });
+    // Position the session window ON PACE (consumed 0.6 / elapsed 0.6) so the
+    // cost basis is the pace curve, not the gauge.
+    const win = snap.windows[0];
+    win.startedAt = 1000;
+    win.resetsAt = 2000;
+    const onPaceNow = 1000 + 0.6 * (2000 - 1000);
+    const accounts = accountFor(codexAdapter, snap as any); // { openai: { kind: "subscription", balance: 14.2, windows: [...] } }
+    const codexModel = endpoint("gpt", { providerID: "openai", tier: "balanced" });
+    const freeModel = endpoint("free", { providerID: "f", tier: "fast", cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } });
+    const res = route({
+      catalog: [freeModel, codexModel],
+      policy: { preset: "balanced" },
+      nowMs: onPaceNow,
+      services: {
+        accounts: { openai: (accounts as any).openai },
+        declared: { ...defaultDeclared([codexModel, freeModel]), "f/free": { catalogId: "free", price: "free" } },
+      },
+    });
+    expect(res.model?.providerID).toBe("openai");
+    expect(res.trace.winner!.cost.basis.startsWith("subscription")).toBe(true);
+    expect(res.trace.winner!.cost.basis).toBe("subscription-pace");
+  });
+
+  // --- Test 6: exhausted is excluded, not expensive -------------------------
+  it("6. an exhausted provider is unselectable even as the only candidate; the incumbent is kept", async () => {
+    // The real claude adapter reporting a 100% session window → exhausted.
+    const snap: any = await claudeSnapshot({
+      five_hour: { utilization: 100, resets_at: 2000 },
+      seven_day: { utilization: 30, resets_at: 2000 + 86400000 },
+    });
+    const accounts = accountFor(claudeAdapter, snap as any); // { anthropic: { kind: "subscription", windows: [pct 100], exhausted: true } }
+    const only = endpoint("m", { providerID: "anthropic" });
+    const incumbent = endpoint("inc", { providerID: "x" });
+    const res = route({
+      catalog: [only],
+      policy: { preset: "balanced" },
+      intent: { incumbent },
+      services: { accounts: { anthropic: (accounts as any).anthropic } },
+    });
+    expect(res.model?.providerID).toBe("x");
+    expect(res.changed).toBe(false);
+    expect(res.reason.toLowerCase()).toContain("no general model passes constraints");
+  });
+
+  // --- Test 7: stale never excludes -----------------------------------------
+  // A stale 100% window (set by the usage poller the moment a reset passes) must
+  // not escalate: it contributes neither exhaustion nor pace. On main the
+  // exhaustion check ignores `stale` and drops the provider.
+  it("7. a stale 100% window leaves the provider selectable", () => {
+    const a = endpoint("m", { providerID: "a" });
+    const res = route({
+      catalog: [a],
+      policy: { preset: "balanced" },
+      services: { accounts: { a: { kind: "subscription", windows: [{ pct: 100, stale: true }] } } },
+    });
+    expect(res.model?.providerID).toBe("a");
+  });
+
+  it("7b. if every window is stale the account is priced as if it had none (no-window), not exhausted", () => {
+    const a = endpoint("m", { providerID: "a" });
+    const res = route({
+      catalog: [a],
+      policy: { preset: "balanced" },
+      services: { accounts: { a: { kind: "subscription", windows: [{ pct: 100, stale: true }] } } },
+    });
+    expect(res.model?.providerID).toBe("a");
+    expect(res.trace.winner!.cost.basis).toBe("subscription-no-window");
   });
 });
