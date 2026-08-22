@@ -63,9 +63,6 @@ h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;backgroun
 .cta-row{display:flex;gap:12px;align-items:center;justify-content:center;flex-wrap:wrap;margin-top:30px}
 .btn-lg{height:50px;padding:0 26px;font-size:15.5px}
 .btn svg{width:15px;height:15px;flex:none}
-.aw .badgeico svg{width:10px;height:10px}
-.aw .card .pl{font-size:8px;letter-spacing:.12em;text-transform:uppercase;color:var(--slate-500);font-weight:700;margin-right:6px}
-.aw .tlab{font-size:8px;letter-spacing:.12em;text-transform:uppercase;color:var(--slate-500);font-weight:700;margin-bottom:-2px}
 
 /* ---- agent logos strip ---- */
 .agents{margin-top:40px;padding-top:26px;border-top:1px solid var(--border-subtle)}
@@ -76,88 +73,14 @@ h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;backgroun
   border-radius:var(--radius-full);border:1px solid var(--border-default);background:var(--fill-subtle)}
 .agentrow span.more{border-style:dashed;color:var(--slate-500);font-weight:500}
 
-/* ---- app window mockup (shared shell) ---- */
-.aw{border:1px solid var(--border-default);border-radius:12px;overflow:hidden;background:var(--surface-app);
-  box-shadow:var(--shadow-xl);display:flex;flex-direction:column;font-size:12px;line-height:1.55}
-.aw .chrome{height:32px;background:var(--surface-inset);border-bottom:1px solid var(--border-subtle);
-  display:flex;align-items:center;gap:6px;padding:0 12px;flex:none}
-.aw .chrome i{width:9px;height:9px;border-radius:50%;background:var(--navy-600);display:block}
-.aw .chrome .t{margin-left:10px;font-size:11px;color:var(--slate-500);font-weight:600}
-.aw .body{display:flex;flex:1;min-height:0;align-items:stretch}
-.aw .sb{width:190px;flex:none;background:var(--surface-inset);border-right:1px solid var(--border-subtle);
-  display:flex;flex-direction:column;min-height:0}
-.aw .sbh{display:flex;align-items:center;padding:11px 12px 7px;font-size:9.5px;letter-spacing:.14em;
-  text-transform:uppercase;color:var(--navy-500);font-weight:700}
-.aw .sbh .sp{margin-left:auto;color:var(--navy-500);font-size:12px}
-.aw .grp{padding:10px 12px 3px;font-size:9px;letter-spacing:.12em;color:var(--navy-500);font-weight:700}
-.aw .ses{display:flex;align-items:center;gap:8px;padding:5px 12px;font-size:11.5px;color:var(--text-tertiary);
-  border-left:2px solid transparent}
-.aw .ses .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.aw .ses .tm{margin-left:auto;font-family:var(--font-mono);font-size:9.5px;color:var(--slate-500);flex:none}
-.aw .ses.on{background:var(--fill-subtle);color:var(--text-secondary);border-left-color:var(--blue-500);font-weight:600}
-.aw .ses.att{background:color-mix(in srgb,var(--amber-500) 12%,transparent)}
-.aw .dot{width:6px;height:6px;border-radius:50%;flex:none;background:var(--navy-600)}
-.aw .dot.run{background:var(--cyan-400);box-shadow:0 0 7px var(--cyan-400)}
-.aw .dot.att{background:var(--amber-500);box-shadow:0 0 7px var(--amber-500)}
-.aw .dot.ok{background:var(--green-500)}
-.aw .sbf{margin-top:auto;padding:9px 12px;border-top:1px solid var(--border-subtle);font-size:11px;color:var(--slate-500)}
-.aw .main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
-.aw .hdr{height:36px;flex:none;border-bottom:1px solid var(--border-subtle);display:flex;align-items:center;
-  gap:9px;padding:0 12px;white-space:nowrap;overflow:hidden}
-.aw .crumb{font-size:11.5px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;font-weight:600}
-.aw .chip{font-family:var(--font-mono);font-size:9.5px;background:var(--fill-subtle);border:1px solid var(--border-default);
-  border-radius:5px;padding:2px 7px;color:var(--blue-300);flex:none}
-.aw .ctx{margin-left:auto;display:flex;align-items:center;gap:6px;flex:none}
-.aw .ctxbar{width:46px;height:4px;border-radius:2px;background:var(--surface-inset);display:flex;overflow:hidden}
-.aw .ctxbar b{display:block;height:100%}
-.aw .ctxpc{font-family:var(--font-mono);font-size:9.5px;color:var(--slate-400)}
-.aw .tr{flex:1;padding:12px 14px;min-height:0;display:flex;flex-direction:column;gap:8px}
-.aw .um{border-left:2px solid var(--blue-400);background:var(--fill-subtle);border-radius:0 6px 6px 0;
-  padding:7px 10px;color:var(--text-secondary);font-size:11.5px}
-.aw code{font-family:var(--font-mono);font-size:10.5px;color:var(--cyan-400)}
-.aw .tool{display:flex;align-items:center;gap:7px;font-family:var(--font-mono);font-size:10.5px;color:var(--text-secondary)}
-.aw .tool .meta{color:var(--slate-500);font-family:var(--font-sans);font-size:10.5px}
-.aw .add{color:var(--green-500)}.aw .del{color:var(--red-500)}
-.aw .sub{margin-left:13px;padding-left:9px;border-left:1px solid var(--border-default);font-family:var(--font-mono);
-  font-size:10px;color:var(--slate-500);line-height:1.7}
-.aw .diff{background:var(--surface-inset);border:1px solid var(--border-subtle);border-radius:6px;overflow:hidden;
-  font-family:var(--font-mono);font-size:10px;line-height:1.75}
-.aw .diff .ln{display:flex}
-.aw .diff .ln .g{width:26px;flex:none;text-align:right;padding-right:7px;color:var(--navy-500);user-select:none}
-.aw .diff .ln .s{width:11px;flex:none;text-align:center;color:var(--slate-500)}
-.aw .diff .ln .c{padding-right:8px;white-space:pre;overflow:hidden;color:var(--text-tertiary)}
-.aw .diff .ln.p{background:color-mix(in srgb,var(--green-500) 13%,transparent)}
-.aw .diff .ln.p .s,.aw .diff .ln.p .c{color:var(--green-500)}
-.aw .diff .ln.m{background:color-mix(in srgb,var(--red-500) 13%,transparent)}
-.aw .diff .ln.m .s,.aw .diff .ln.m .c{color:var(--red-500)}
-.aw .kw{color:var(--blue-300)}
-.aw .card{background:var(--surface-panel);border:1px solid var(--border-default);border-radius:8px;padding:9px 11px;flex:none}
-.aw .card .ct{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--text-primary);font-weight:700}
-.aw .card .cs{font-family:var(--font-mono);font-size:10px;color:var(--slate-400);margin:2px 0 0 22px}
-.aw .badgeico{width:16px;height:16px;border-radius:4px;display:flex;align-items:center;justify-content:center;
-  font-size:9px;font-weight:800;flex:none}
-.aw .row{display:flex;gap:6px;align-items:center;margin-top:8px;margin-left:22px}
-.aw .b{font-size:10.5px;font-weight:700;padding:4px 10px;border-radius:5px;white-space:nowrap}
-.aw .b.pri{background:var(--blue-500);color:#fff}
-.aw .b.sec{background:var(--fill-subtle);border:1px solid var(--border-default);color:var(--text-secondary);font-weight:600}
-.aw .b.dang{color:var(--red-500);margin-left:auto;font-weight:600}
-.aw .comp{flex:none;padding:0 14px 11px}
-.aw .box{border:1px solid var(--blue-500);border-radius:8px;padding:8px 11px;display:flex;align-items:center;
-  background:var(--surface-app);color:var(--slate-500);font-size:11.5px}
-.aw .meta{display:flex;align-items:center;gap:7px;margin-top:8px}
-.aw .mp{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;font-weight:600;padding:3px 9px;
-  border-radius:6px;border:1px solid var(--border-default);color:var(--text-secondary)}
-.aw .mp.b{color:var(--blue-300)}
+/* ---- hero screenshot ---- */
 .hero-shot{margin-top:52px;max-width:1000px;margin-left:auto;margin-right:auto}
-.hero-shot .aw{height:430px}
-/* On a phone the two-pane mockup gives the transcript ~180px and neither pane
-   reads. The session list is the less interesting half, so it goes and the
-   transcript gets the full width. */
-@media(max-width:700px){
-  .aw .sb{display:none}
-  .hero-shot{margin-top:36px}
-  .hero-shot .aw{height:330px}
-}
+/* The capture is a macOS window whose rounded corners live in its alpha
+   channel, so the shadow has to follow the alpha — a box-shadow would draw a
+   rectangle behind it. drop-shadow() takes offset/offset/blur/colour, which is
+   exactly the shape of --shadow-xl, so this themes itself with the page. */
+.hero-shot img{display:block;width:100%;height:auto;filter:drop-shadow(var(--shadow-xl))}
+@media(max-width:700px){.hero-shot{margin-top:36px}}
 
 /* ---- pillars ---- */
 .pillars{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--border-subtle);
@@ -400,69 +323,10 @@ h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;backgroun
     </div>
 
     <div class="hero-shot">
-      <div class="aw">
-        <div class="chrome"><i></i><i></i><i></i><span class="t">Manta UI</span></div>
-        <div class="body">
-          <div class="sb">
-            <div class="sbh">Workspace<span class="sp">+</span></div>
-            <div class="grp">CLAUDE MAX</div>
-            <div class="ses on"><span class="dot run"></span><span class="nm">Deploy billing service</span><span class="tm">4m</span></div>
-            <div class="ses att"><span class="dot att"></span><span class="nm">Fix red CI on main</span>
-              <span class="tm" style="color:var(--amber-500);font-weight:800">!</span></div>
-            <div class="grp">CODEX</div>
-            <div class="ses"><span class="dot run"></span><span class="nm">Add CSV export</span><span class="tm">2m</span></div>
-            <div class="ses"><span class="dot"></span><span class="nm">Refactor auth middleware</span><span class="tm">14m</span></div>
-            <div class="sbf">Settings</div>
-          </div>
-          <div class="main">
-            <div class="hdr">
-              <span class="crumb">Deploy billing service</span>
-              <span class="chip">feat/orders-csv</span>
-              <span class="ctx">
-                <span class="ctxbar"><b style="width:44%;background:var(--blue-500)"></b><b style="width:16%;background:var(--amber-500)"></b><b style="width:22%;background:var(--cyan-400)"></b></span>
-                <span class="ctxpc">38%</span>
-              </span>
-            </div>
-            <div class="tr">
-              <div class="um">Add a <code>/export.csv</code> endpoint that streams the result set as CSV.</div>
-              <div class="tool"><span class="dot ok"></span>Read(app/routes/orders.py)</div>
-              <div class="sub">Read 23 lines</div>
-              <div class="tool"><span class="dot ok"></span>Edit(app/routes/orders.py)
-                <span class="meta"><span class="add">+38</span> <span class="del">-4</span></span></div>
-              <div class="diff">
-                <div class="ln m"><span class="g">11</span><span class="s">-</span><span class="c">async def list_orders(status: str | None = None):</span></div>
-                <div class="ln p"><span class="g">11</span><span class="s">+</span><span class="c">async def list_orders(</span></div>
-                <div class="ln p"><span class="g">12</span><span class="s">+</span><span class="c">    status: str | None = Query(default=None),</span></div>
-                <div class="ln p"><span class="g">13</span><span class="s">+</span><span class="c">    created_after: datetime | None = Query(default=None),</span></div>
-                <div class="ln p"><span class="g">14</span><span class="s">+</span><span class="c">) -&gt; list[dict]:</span></div>
-                <div class="ln"><span class="g">15</span><span class="s"></span><span class="c">    query = Order.query(session)</span></div>
-                <div class="ln p"><span class="g">16</span><span class="s">+</span><span class="c"><span class="kw">    return</span> [o.to_dict() <span class="kw">for</span> o <span class="kw">in</span> (<span class="kw">await</span> query.all())]</span></div>
-              </div>
-              <div class="tlab">Running command</div>
-              <div class="tool"><span class="dot run"></span>Bash(pytest tests/test_orders.py)
-                <span class="meta">running 12s</span></div>
-              <div class="sub">collected 24 items<br>tests/test_orders.py .......</div>
-            </div>
-            <div style="padding:0 14px 9px">
-              <div class="card">
-                <div class="ct"><span class="badgeico" style="background:color-mix(in srgb,var(--amber-500) 16%,transparent);
-                  border:1px solid color-mix(in srgb,var(--amber-500) 38%,transparent);color:var(--amber-500)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v5c0 4.5 3 8 7 10 4-2 7-5.5 7-10V6z"/><path d="m9.5 12 1.8 1.8 3.5-3.6"/></svg></span>
-                  <span class="pl">Permission required</span> Run a shell command?</div>
-                <div class="cs">alembic upgrade head</div>
-                <div class="row">
-                  <span class="b pri">Allow once</span>
-                  <span class="b sec">Always allow <span style="opacity:.65">alembic upgrade *</span></span>
-                  <span class="b dang">Reject</span>
-                </div>
-              </div>
-            </div>
-            <div class="comp">
-              <div class="box">Reply, or describe the next task</div>
-              <div class="meta"><span class="mp b">Opus 4.7 &#9662;</span><span class="mp">High &#9662;</span></div>
-            </div>
-          </div>
-        </div>
-      </div>
+      <img src="/shot-app.webp" srcset="/shot-app.webp 1000w, /shot-app-2x.webp 2000w"
+        sizes="(max-width:1040px) 100vw, 1000px" width="1000" height="606"
+        fetchpriority="high" decoding="async"
+        alt="Manta UI on macOS: a workspace sidebar listing projects and their sessions, next to an agent transcript, a completed task checklist and the reply composer.">
     </div>
 
     <div class="agents">

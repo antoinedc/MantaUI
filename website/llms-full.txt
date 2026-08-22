@@ -336,51 +336,7 @@ MantaMantaUI
         [Download for macOS](/downloads/Manta-latest.dmg)
         [Download for Windows](/downloads/Manta-latest-x64.exe)
 
-        Manta UI
-
-            Workspace+
-            CLAUDE MAX
-            Deploy billing service4m
-            Fix red CI on main
-              !
-            CODEX
-            Add CSV export2m
-            Refactor auth middleware14m
-            Settings
-
-              Deploy billing service
-              feat/orders-csv
-
-                38%
-
-              Add a `/export.csv` endpoint that streams the result set as CSV.
-              Read(app/routes/orders.py)
-              Read 23 lines
-              Edit(app/routes/orders.py)
-                +38 -4
-
-                11-async def list_orders(status: str | None = None):
-                11+async def list_orders(
-                12+    status: str | None = Query(default=None),
-                13+    created_after: datetime | None = Query(default=None),
-                14+) -> list[dict]:
-                15    query = Order.query(session)
-                16+    return [o.to_dict() for o in (await query.all())]
-
-              Running command
-              Bash(pytest tests/test_orders.py)
-                running 12s
-              collected 24 items tests/test_orders.py .......
-
-                  Permission required Run a shell command?
-                alembic upgrade head
-
-                  Allow once
-                  Always allow alembic upgrade *
-                  Reject
-
-              Reply, or describe the next task
-              Opus 4.7 &#9662;High &#9662;
+      Manta UI on macOS: a workspace sidebar listing projects and their sessions, next to an agent transcript, a completed task checklist and the reply composer.
 
       Bring your own subscriptions
 
