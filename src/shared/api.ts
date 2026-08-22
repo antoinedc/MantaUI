@@ -102,6 +102,13 @@ type RoutingChooseDecision = {
   reason: string;
   alternatives: PromptModel[];
   changed: boolean;
+  // BET-1270 6e: the box's facts about the incumbent the caller sent, returned
+  // on the SAME round trip so the renderer holds no health/eligibility state of
+  // its own. `incumbentHealthy` is false when the incumbent's provider is
+  // excluded or failing; `incumbentStillEligible` is the router's completeness
+  // gate (autoEligibility).
+  incumbentHealthy: boolean;
+  incumbentStillEligible: boolean;
 };
 // BET-1249: a provider-agnostic catalogue entry as served by
 // `opencode:model-catalog` (models.dev view). Consumed by the renderer's

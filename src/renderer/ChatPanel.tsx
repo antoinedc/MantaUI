@@ -481,6 +481,11 @@ export function ChatPanel({
   // — never silently. The model is applied to the override, carrying forward
   // the user's current in-memory effort (BET-1274 10c) so a just-chosen effort
   // is not dropped by a route.
+  // The incumbent provider's health as LAST REPORTED BY THE BOX (routing:choose
+  // returns it — see 6e). Kept as a ref so crossesBoundary can read whether the
+  // incumbent is still available BEFORE the next routing:choose round trip, while
+  // the renderer itself holds no independent health state. Defaults healthy.
+  const incumbentHealthRef = useRef<boolean>(true);
   const applyRouted = useCallback((model: ModelSelection | null, reason: string) => {
     const incumbent = routedModelRef.current;
     setRouted({
@@ -731,6 +736,7 @@ export function ChatPanel({
     setRoutedModel(null);
     setRoutedReason(null);
     routedModelRef.current = null;
+    incumbentHealthRef.current = true;
     pendingAutoUserRef.current = false;
     // Seed plan mode from the session's own `agent` field when present (BET-949
     // §5): a session pre-set to plan OUTSIDE MantaUI would otherwise show the
@@ -1331,7 +1337,7 @@ export function ChatPanel({
         : undefined;
       const requiredModes = readyAttachments.map((a) => mimeToInputMode(a.mime));
       const currentAgent = planAgent ?? "build";
-      const { crossed, boundary, stillCapable, stillHealthy } = crossesBoundary({
+      const { crossed, boundary, stillCapable } = crossesBoundary({
         hasRoutedModel: incumbent != null,
         agent: currentAgent,
         previousAgent: lastAgentRef.current,
@@ -1339,7 +1345,7 @@ export function ChatPanel({
         incumbentContextLimit: incumbentModel?.limit?.context ?? undefined,
         requiredModalities: requiredModes,
         incumbentModel,
-        incumbentHealthy: true,
+        incumbentHealthy: incumbentHealthRef.current,
         justCompacted: justCompactedRef.current,
         userRequested: pendingAutoUserRef.current,
       });
@@ -1361,6 +1367,10 @@ export function ChatPanel({
             },
             incumbent,
           });
+          // Remember the box's answer about the incumbent for the NEXT turn's
+          // crossesBoundary (so an outage fires a CONSTRAINT boundary even before
+          // this turn switches). Defaults healthy when the box didn't report.
+          incumbentHealthRef.current = decision.incumbentHealthy !== false;
           const ranked = decision.model
             ? [decision.model, ...decision.alternatives]
             : decision.alternatives;
@@ -1373,9 +1383,9 @@ export function ChatPanel({
             shouldSwitch({
               incumbent,
               ranked,
-              incumbentStillEligible: true,
+              incumbentStillEligible: decision.incumbentStillEligible !== false,
               incumbentStillCapable: stillCapable,
-              incumbentHealthy: stillHealthy,
+              incumbentHealthy: decision.incumbentHealthy !== false,
             }).switch
           ) {
             const reason = decision.reason + (boundary ? ` · ${boundaryPhrase(boundary)}` : "");

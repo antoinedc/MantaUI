@@ -617,6 +617,31 @@ export async function getMessage(sessionId, messageId) {
   }
 }
 
+// BET-1270 6c: transport-level refusals (a non-2xx on the prompt_async POST
+// itself) carry the provider's Retry-After, but surface to the box as a THROWN
+// error rather than a `session.error` SSE event — so the Retry-After never
+// reaches providerHealth and every rate-limit clamps to the 2-min floor. Record
+// the transport refusal per-session at the point it is read, so the opencode
+// pump's session.error enrichment can attach its retryAfterMs when the matching
+// session.error arrives (a model-level 429 that streams via SSE carries no
+// header). Best-effort bridge; nothing here is awaited.
+const _transportRefusalBySession = new Map(); // sessionId -> { httpStatus, retryAfterMs? }
+
+/**
+ * Read + clear a session's most recent transport-level refusal. The pump calls
+ * this while enriching a `session.error` for the same session, so the
+ * Retry-After read at the prompt boundary reaches providerHealth / the Accounts
+ * row. Returns undefined when there is no (or no more) recorded refusal.
+ * @param {string} [sessionId]
+ * @returns {{ httpStatus?: number, retryAfterMs?: number }|undefined}
+ */
+export function getAndClearSessionRefusal(sessionId) {
+  if (!sessionId) return undefined;
+  const r = _transportRefusalBySession.get(sessionId);
+  if (r) _transportRefusalBySession.delete(sessionId);
+  return r;
+}
+
 /**
  * Send a user message (prompt_async — returns 204 immediately; response
  * streams via SSE). Model is per-prompt; omit to use opencode's default.
@@ -668,6 +693,12 @@ export async function sendPrompt({ sessionId, text, model, agent, attachments, m
     err.status = res.status;
     const retryAfterMs = parseRetryAfterMs(res.headers?.get?.("retry-after"));
     if (retryAfterMs !== undefined) err.retryAfterMs = retryAfterMs;
+    // BET-1270 6c: stash the transport Retry-After for the session so the pump
+    // can attach it to the matching session.error (see getAndClearSessionRefusal).
+    _transportRefusalBySession.set(sessionId, {
+      httpStatus: res.status,
+      ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+    });
     throw err;
   }
 }
