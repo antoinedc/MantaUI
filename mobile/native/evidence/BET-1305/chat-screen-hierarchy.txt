@@ -1,0 +1,118 @@
+Attributes: Application, 0x104a7ef80, pid: 36224, label: 'MantaUI'
+Element subtree:
+ →Application, 0x104a7ef80, pid: 36224, label: 'MantaUI'
+    Window (Main), 0x104a7f200, {{0.0, 0.0}, {402.0, 874.0}}
+      Other, 0x104a7f340, {{0.0, 0.0}, {402.0, 874.0}}
+        Other, 0x104a7f480, {{0.0, 0.0}, {402.0, 874.0}}
+          Other, 0x104a7f5c0, {{0.0, 0.0}, {402.0, 874.0}}
+            Other, 0x104a7f700, {{0.0, 0.0}, {402.0, 874.0}}
+              Other, 0x104a7f840, {{0.0, 0.0}, {402.0, 874.0}}
+                NavigationBar, 0x104a7fe80, {{0.0, 62.0}, {402.0, 54.0}}, identifier: 'Chat'
+                  Button, 0x104a7fd40, {{16.0, 62.0}, {44.0, 44.0}}, identifier: 'BackButton', label: 'Sessions'
+                  StaticText, 0x104a7f980, {{182.0, 73.7}, {38.0, 20.7}}, label: 'Chat'
+                  Other, 0x104a7fac0, {{346.0, 66.0}, {36.0, 36.0}}, identifier: 'ellipsis', label: 'Session actions'
+                    Other, 0x104a7fc00, {{346.0, 66.0}, {36.0, 36.0}}
+                      Button, 0x114846e40, {{350.0, 66.0}, {28.0, 36.0}}, identifier: 'ellipsis', label: 'Session actions'
+                Other, 0x114846f80, {{0.0, 0.0}, {402.0, 874.0}}
+                  Other, 0x1148470c0, {{0.0, 0.0}, {402.0, 874.0}}
+                    Other, 0x114847200, {{0.0, 0.0}, {402.0, 874.0}}
+                      Other, 0x114847340, {{0.0, 0.0}, {402.0, 874.0}}
+                        Other, 0x114847480, {{0.0, 0.0}, {402.0, 884.0}}, identifier: 'chat-screen'
+                          Other, 0x1148475c0, {{0.0, 0.0}, {402.0, 874.0}}
+                            CollectionView, 0x114847700, {{0.0, 0.0}, {402.0, 874.0}}
+                              Cell, 0x114847d40, {{0.0, -51.7}, {402.0, 58.0}}
+                                Other, 0x114847e80, {{0.0, -51.7}, {402.0, 58.0}}
+                                  Other, 0x114847c00, {{0.0, -51.7}, {402.0, 58.0}}
+                                    Other, 0x114847840, {{0.0, -51.7}, {452.3, 42.0}}, identifier: 'transcript-row'
+                                      Other, 0x114847980, {{0.0, -51.7}, {402.0, 42.0}}, identifier: 'user-band'
+                                        StaticText, 0x114847ac0, {{12.0, -39.7}, {121.3, 18.0}}, label: 'Filler question 20'
+                                      StaticText, 0x114844b40, {{409.7, -29.3}, {42.7, 13.3}}, label: '5:10 PM'
+                              Other, 0x1148448c0, {{0.0, 0.0}, {402.0, 874.0}}
+                                Other, 0x114846bc0, {{0.0, 0.0}, {402.0, 188.8}}
+                              Other, 0x114846d00, {{0.0, 0.0}, {402.0, 874.0}}
+                                Other, 0x114844280, {{0.0, 0.0}, {402.0, 188.8}}
+                                  Image, 0x1148443c0, {{-120.0, -166.0}, {642.0, 332.0}}, identifier: 'AdditionalDimmingOverlay'
+                                  Other, 0x114844a00, {{0.0, 0.0}, {402.0, 106.0}}
+                                  Other, 0x114844c80, {{0.0, 0.0}, {402.0, 188.8}}
+                                    Other, 0x114844500, {{0.0, 0.0}, {402.0, 188.8}}
+                                  Other, 0x114845400, {{0.0, 0.0}, {402.0, 188.8}}
+                                    Other, 0x114844f00, {{0.0, 0.0}, {402.0, 188.8}}
+                                  Other, 0x1148452c0, {{0.0, 0.0}, {402.0, 188.8}}
+                                    Other, 0x114845540, {{0.0, 0.0}, {402.0, 188.8}}
+                                    Other, 0x114845e00, {{0.0, 0.0}, {402.0, 188.8}}
+                              Cell, 0x114846080, {{0.0, 6.3}, {402.0, 213.0}}
+                                Other, 0x1148457c0, {{0.0, 6.3}, {402.0, 213.0}}
+                                  Other, 0x114845900, {{0.0, 6.3}, {402.0, 213.0}}
+                                    Other, 0x114845a40, {{12.0, 6.3}, {440.3, 201.0}}, identifier: 'transcript-row'
+                                      Other, 0x114845180, {{12.0, 6.3}, {378.0, 201.0}}, identifier: 'assistant-prose'
+                                        StaticText, 0x114845040, {{12.0, 6.3}, {378.0, 201.0}}, label: 'This is fixture paragraph 20, part of the taller transcript the gesture tests need so there is something to scroll. It is intentionally a few sentences long so the row owns measurable height on screen. Repeating the filler across the array gives the transcript enough vertical extent that a single upward drag must begin scrolling immediately, which is the point of the exercise. immediately, which is the point of the exercise.'
+                                      StaticText, 0x114844dc0, {{409.7, 106.2}, {42.7, 13.3}}, label: '5:12 PM'
+                              Cell, 0x114845f40, {{0.0, 219.3}, {402.0, 58.0}}
+                                Other, 0x114846300, {{0.0, 219.3}, {402.0, 58.0}}
+                                  Other, 0x1148461c0, {{0.0, 219.3}, {402.0, 58.0}}
+                                    Other, 0x1148466c0, {{0.0, 219.3}, {452.3, 42.0}}, identifier: 'transcript-row'
+                                      Other, 0x114846440, {{0.0, 219.3}, {402.0, 42.0}}, identifier: 'user-band'
+                                        StaticText, 0x114846580, {{12.0, 231.3}, {118.7, 18.0}}, label: 'Filler question 21'
+                                      StaticText, 0x114845680, {{409.7, 241.7}, {42.7, 13.3}}, label: '5:10 PM'
+                              Cell, 0x114845cc0, {{0.0, 277.3}, {402.0, 213.0}}
+                                Other, 0x114845b80, {{0.0, 277.3}, {402.0, 213.0}}
+                                  Other, 0x114846800, {{0.0, 277.3}, {402.0, 213.0}}
+                                    Other, 0x114844780, {{12.0, 277.3}, {440.3, 201.0}}, identifier: 'transcript-row'
+                                      Other, 0x114846a80, {{12.0, 277.3}, {378.0, 201.0}}, identifier: 'assistant-prose'
+                                        StaticText, 0x114846940, {{12.0, 277.3}, {378.0, 201.0}}, label: 'This is fixture paragraph 21, part of the taller transcript the gesture tests need so there is something to scroll. It is intentionally a few sentences long so the row owns measurable height on screen. Repeating the filler across the array gives the transcript enough vertical extent that a single upward drag must begin scrolling immediately, which is the point of the exercise. immediately, which is the point of the exercise.'
+                                      StaticText, 0x114844640, {{409.7, 377.2}, {42.7, 13.3}}, label: '5:12 PM'
+                              Cell, 0x114888000, {{0.0, 490.3}, {402.0, 83.3}}
+                                Other, 0x114888140, {{0.0, 490.3}, {402.0, 83.3}}
+                                  Other, 0x114888280, {{0.0, 490.3}, {402.0, 83.3}}
+                                    Other, 0x1148883c0, {{0.0, 490.3}, {452.3, 67.3}}, identifier: 'transcript-row'
+                                      Other, 0x114888500, {{0.0, 490.3}, {402.0, 67.3}}, identifier: 'user-band'
+                                        StaticText, 0x114888640, {{12.0, 502.3}, {351.3, 43.3}}, label: 'Can this sheet show attach, a live scheduled-task count and secrets?'
+                                      StaticText, 0x114888780, {{409.7, 525.3}, {42.7, 13.3}}, label: '5:27 PM'
+                              Cell, 0x1148888c0, {{0.0, 573.7}, {402.0, 82.3}}
+                                Other, 0x114888a00, {{0.0, 573.7}, {402.0, 82.3}}
+                                  Other, 0x114888b40, {{0.0, 573.7}, {402.0, 82.3}}
+                                    Other, 0x114888c80, {{12.0, 573.7}, {440.3, 70.3}}, identifier: 'transcript-row'
+                                      Other, 0x114888dc0, {{12.0, 573.7}, {362.0, 70.3}}, identifier: 'assistant-prose'
+                                        StaticText, 0x114888f00, {{12.0, 573.7}, {362.0, 70.3}}, label: 'Yes — tap the ellipsis in the header. Scheduled tasks carries a live count, and secrets lists names without ever sending a value to the phone.'
+                                      StaticText, 0x114889040, {{409.7, 608.2}, {42.7, 13.3}}, label: '5:27 PM'
+                              Cell, 0x114889180, {{0.0, 656.0}, {402.0, 56.0}}
+                                Other, 0x1148892c0, {{0.0, 656.0}, {402.0, 56.0}}
+                                  Other, 0x114889400, {{0.0, 656.0}, {402.0, 56.0}}
+                                    Other, 0x114889540, {{12.0, 656.0}, {378.0, 44.0}}, identifier: 'transcript-row'
+                                      Other, 0x114889680, {{12.0, 656.0}, {378.0, 44.0}}, identifier: 'step-rows'
+                                        Button, 0x1148897c0, {{12.0, 656.0}, {378.0, 44.0}}, label: 'fixture subagent, 5.0s'
+                                          StaticText, 0x114889900, {{48.0, 670.2}, {104.0, 15.7}}, label: 'fixture subagent'
+                                          StaticText, 0x114889a40, {{338.7, 671.3}, {22.3, 13.3}}, label: '5.0s'
+                                          Image, 0x114889b80, {{371.3, 673.0}, {6.0, 10.3}}, identifier: 'chevron.right', label: 'Forward'
+                                      StaticText, 0x114889cc0, {{402.0, 677.0}, {58.0, 14.0}}
+                              Cell, 0x114889e00, {{0.0, 712.0}, {402.0, 40.0}}
+                              Other, 0x114889f40, {{369.0, 124.0}, {30.0, 588.0}}, label: 'Vertical scroll bar, 138 122 pages', value: 100 %
+                                Other, 0x11488a080, {{396.0, 627.0}, {3.0, 78.0}}
+                              Other, 0x11488a1c0, {{62.0, 841.0}, {278.0, 30.0}}, label: 'Horizontal scroll bar, 1 page', value: 0 %
+                                Other, 0x11488a300, {{65.0, 868.0}, {272.0, 3.0}}
+                              Other, 0x11488a440, {{369.0, 124.0}, {30.0, 588.0}}, label: 'Vertical scroll bar, 138 122 pages', value: 100 %
+                                Other, 0x11488a580, {{396.0, 627.0}, {3.0, 78.0}}
+                              Other, 0x11488a6c0, {{62.0, 841.0}, {278.0, 30.0}}, label: 'Horizontal scroll bar, 1 page', value: 0 %
+                                Other, 0x11488a800, {{65.0, 868.0}, {272.0, 3.0}}
+                          Other, 0x11488a940, {{0.0, 0.0}, {0.0, 0.0}}
+                          StaticText, 0x11488aa80, {{29.0, 760.0}, {73.7, 18.0}}, label: 'Message…'
+                          TextView, 0x11488abc0, {{24.0, 752.0}, {354.0, 72.0}}, identifier: 'composer-input'
+                            Other, 0x11488ad00, {{345.0, 752.0}, {30.0, 26.0}}, label: 'Vertical scroll bar, 2 pages', value: 0 %
+                              Other, 0x11488ae40, {{372.0, 739.0}, {3.0, 36.0}}
+                          Button, 0x11488af80, {{24.0, 793.3}, {79.0, 23.7}}, identifier: 'model-picker', label: 'Model'
+                            Image, 0x11488b0c0, {{33.3, 798.3}, {11.3, 13.7}}, identifier: 'sparkles', label: 'Sparkle'
+                            StaticText, 0x11488b200, {{50.0, 797.2}, {45.0, 15.7}}, label: 'Default'
+                          Button, 0x11488b340, {{111.0, 786.0}, {38.0, 38.0}}, identifier: 'attach-button', label: 'Attach'
+                            Button, 0x11488b480, {{111.0, 786.0}, {38.0, 38.0}}
+                              Image, 0x11488b5c0, {{111.0, 786.0}, {38.0, 38.0}}, identifier: 'paperclip', label: 'Attach'
+                          Button, 0x11488b700, {{294.0, 786.0}, {38.0, 38.0}}, identifier: 'mic-button', label: 'Record'
+                          Button, 0x11488b840, {{340.0, 786.0}, {38.0, 38.0}}, identifier: 'send-button', label: 'Send', Disabled
+                Other, 0x11488b980, {{0.0, 0.0}, {402.0, 874.0}}
+                  Other, 0x11488bac0, {{0.0, 0.0}, {402.0, 874.0}}
+Path to element:
+ →Application, 0x104a7ef80, pid: 36224, label: 'MantaUI'
+Query chain:
+ →Find: Target Application 'com.antoinedc.mantaui'
+  Output: {
+    Application, 0x11488bc00, pid: 36224, label: 'MantaUI'
+  }
