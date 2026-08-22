@@ -41,7 +41,7 @@ import {
 } from "./peers.mjs";
 import { extractSubagentInfo } from "../shared/streamInterpretation.mjs";
 import { fuzzyMatchModel, suggestModels } from "../shared/modelGuide.mjs";
-import { chooseModel } from "../shared/modelRouter.mjs";
+import { chooseModel, describeDecision } from "../shared/modelRouter.mjs";
 import { listRoutableModels } from "./opencode.mjs";
 import { buildRoutingServices } from "./routingServices.mjs";
 
@@ -640,8 +640,7 @@ export function chooseSubagentModel({
       decision?.model === catalogIncumbentOf(incumbent)
         ? incumbent
         : toDeliverModel(decision?.model ?? incumbent);
-    const label = model ? `${model.providerID}/${model.modelID ?? model.id}` : "";
-    console.log(`[router] subagent agent=${agent} → ${label} (${decision?.reason ?? ""})`);
+    console.log(describeDecision(decision, { surface: "sub", agent }));
     return model;
   } catch (e) {
     // Routing must never break a spawn — fall back to the incumbent model.
