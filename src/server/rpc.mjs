@@ -39,6 +39,11 @@ import { buildRoutingServices } from "./routingServices.mjs";
 import { restartOpencode, runServerSelfUpdate } from "./opencodeAdmin.mjs";
 import { pollClaudeLogin, claudeCliStatus, listRoutableModels } from "./opencode.mjs";
 import { chooseModel, incumbentStillEligible } from "../shared/modelRouter.mjs";
+import {
+  applyRoutingOverrides,
+  resolveNowOverride,
+  resolveHealthOverride,
+} from "../shared/routingOverrides.mjs";
 import { backupClaudeCredentials, CREDENTIALS_PATH } from "./claudeAuth.mjs";
 import { addApnsToken } from "./push.mjs";
 import { getRegistry as pluginsGetRegistry } from "./plugins.mjs";
@@ -825,10 +830,16 @@ export function buildHandlers({
       const incumbent = input?.incumbent ?? null;
       const agent = input?.agent ?? "general";
       const surface = input?.surface === "sub" ? "sub" : "main";
+      // BET-1276 12a: the dev-only overrides bag. Gated on NODE_ENV !==
+      // "production" — when gated off the field is IGNORED silently, never
+      // rejected, so a stale client can't break a real turn. The injected
+      // clock/harness path is read-only and side-effect-free (see
+      // src/shared/routingOverrides.mjs).
+      const routingOverridesOn = process.env.NODE_ENV !== "production";
+      const nowMs = resolveNowOverride(input?.overrides, routingOverridesOn, Date.now());
       // The entire gather + decide is one guarded unit: a failing catalogue,
       // snapshot reader, health tracker or a throwing router all degrade to the
       // incumbent-unchanged fallback below, never a throw to the caller.
-      const nowMs = Date.now();
       try {
         let cfg = {};
         try {
@@ -870,6 +881,16 @@ export function buildHandlers({
           console.error(`[router] routing services degraded, routing on absent context: ${e?.message ?? e}`);
           services = null;
         }
+        // BET-1276 12a: apply the dev-only overrides bag for this ONE call —
+        // replaces accounts/health on services, filters the candidate pool to
+        // enabledMain/enabledSub for this surface. Gated off in production.
+        const { services: effServices, catalog: effCatalog } = applyRoutingOverrides({
+          services,
+          catalog,
+          surface,
+          overrides: input?.overrides,
+          gated: routingOverridesOn,
+        });
         // Resolve the incumbent's FULL catalog endpoint (the normalized
         // OpencodeModel with cost/capabilities) so the eligibility gate sees the
         // real endpoint, not a price-less stub. BET-1270 6e reviewer Block: a
@@ -879,7 +900,7 @@ export function buildHandlers({
         // the incumbent is absent from the routable catalog (genuinely not
         // routable → honestly ineligible).
         const fullIncumbent = incumbent
-          ? (Array.isArray(catalog) ? catalog : []).find(
+          ? (Array.isArray(effCatalog) ? effCatalog : []).find(
               (c) =>
                 c?.providerID === incumbent.providerID &&
                 String(c?.id ?? c?.modelID ?? "") === String(incumbent.modelID ?? incumbent.id ?? ""),
@@ -896,11 +917,14 @@ export function buildHandlers({
         // when the incumbent's provider is excluded or failing; `incumbentStillEligible`
         // is the SAME completeness gate the router uses (autoEligibility), so the
         // renderer's shouldSwitch can force an ineligible/unhealthy incumbent out.
+        const overriddenHealth = resolveHealthOverride(input?.overrides, routingOverridesOn);
         const incumbentHealthy = !["out-of-credit", "rate-limited", "failing"].includes(
-          routingProviderHealthState(incumbent?.providerID) ?? "ok",
+          overriddenHealth?.[incumbent?.providerID] ??
+            routingProviderHealthState(incumbent?.providerID) ??
+            "ok",
         );
         const stillEligible = catalogIncumbent
-          ? incumbentStillEligible(catalogIncumbent, services)
+          ? incumbentStillEligible(catalogIncumbent, effServices)
           : true;
         const decision = chooseModel({
           intent: {
@@ -914,10 +938,10 @@ export function buildHandlers({
             contextTokens: typeof input?.contextTokens === "number" ? input.contextTokens : undefined,
             incumbent: catalogIncumbent,
           },
-          catalog,
+          catalog: effCatalog,
           policy,
           nowMs,
-          services,
+          services: effServices,
         });
         // The box-side signal that routing ran (BET-1265). Always logged, no
         // debug flag: a decision nobody watches is a decision not made. Names

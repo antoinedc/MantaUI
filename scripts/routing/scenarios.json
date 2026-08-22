@@ -1,0 +1,512 @@
+{
+  "$comment": "Deck A -- scenario replay harness for Automatic Manta Routing (BET-1276). Each scenario declares its intent, its dev-only overrides, and what it EXPECTS as a property of the DECISION (never a model name). The closed matcher vocabulary in deck-a.mjs: equalsScenario, cheaperThan, dearerThan, tierAtLeast, tierAtMost, sameModelAs, differentModelFrom, keepsIncumbent, excludes, reasonMentions, traceField, winnerIn, winnerNotIn. Special modes handle properties of a sequence (pacing/determinism/sensitivity). Key names are providerID/modelID endpoint keys.",
+  "scenarios": [
+    {
+      "id": "A01",
+      "name": "build, Balanced, 12k",
+      "agent": "build",
+      "contextTokens": 12000,
+      "needs": {
+        "tools": true
+      },
+      "expectedNote": "tierAtLeast deep",
+      "expect": {
+        "tierAtLeast": "deep"
+      }
+    },
+    {
+      "id": "A02",
+      "name": "explore, Balanced, 12k",
+      "agent": "explore",
+      "contextTokens": 12000,
+      "needs": {},
+      "expectedNote": "cheaperThan A01",
+      "expect": {
+        "cheaperThan": "A01"
+      }
+    },
+    {
+      "id": "A03",
+      "name": "plan, Balanced, 12k",
+      "agent": "plan",
+      "contextTokens": 12000,
+      "needs": {
+        "tools": true
+      },
+      "expectedNote": "tierAtLeast deep",
+      "expect": {
+        "tierAtLeast": "deep"
+      }
+    },
+    {
+      "id": "A04",
+      "name": "general, Balanced, 12k",
+      "agent": "general",
+      "contextTokens": 12000,
+      "needs": {},
+      "expectedNote": "tier between A02(fast) and A01(deep)",
+      "expect": {
+        "tierAtLeast": "balanced",
+        "tierAtMost": "deep"
+      }
+    },
+    {
+      "id": "A05",
+      "name": "build, Economy",
+      "agent": "build",
+      "contextTokens": 12000,
+      "needs": {
+        "tools": true
+      },
+      "policyOverride": {
+        "preset": "economy"
+      },
+      "expectedNote": "cheaperThan A01, reasons economy",
+      "expect": {
+        "cheaperThan": "A01",
+        "reasonMentions": "economy"
+      }
+    },
+    {
+      "id": "A06",
+      "name": "explore, Performance",
+      "agent": "explore",
+      "contextTokens": 12000,
+      "needs": {},
+      "policyOverride": {
+        "preset": "performance"
+      },
+      "expectedNote": "tierAtLeast A02's (fast) -- performance floors explore to balanced",
+      "expect": {
+        "tierAtLeast": "balanced"
+      }
+    },
+    {
+      "id": "A07",
+      "name": "highest-floor agent (plan), Economy",
+      "agent": "plan",
+      "contextTokens": 12000,
+      "needs": {
+        "tools": true
+      },
+      "policyOverride": {
+        "preset": "economy"
+      },
+      "expectedNote": "never below plan's deep floor",
+      "expect": {
+        "tierAtLeast": "deep"
+      }
+    },
+    {
+      "id": "A08",
+      "name": "build, 10k",
+      "agent": "build",
+      "contextTokens": 10000,
+      "needs": {},
+      "expectedNote": "sameModelAs A01 (10k vs 12k no boundary)",
+      "expect": {
+        "sameModelAs": "A01"
+      }
+    },
+    {
+      "id": "A09",
+      "name": "build, 400k",
+      "agent": "build",
+      "contextTokens": 400000,
+      "needs": {
+        "tools": true
+      },
+      "expectedNote": "excludes every smaller-window endpoint (haiku 200k)",
+      "expect": {
+        "excludes": [
+          "anthropic/claude-haiku-4-5-20251001"
+        ]
+      }
+    },
+    {
+      "id": "A10",
+      "name": "build, larger than every model",
+      "agent": "build",
+      "contextTokens": 2000000,
+      "needs": {
+        "tools": true
+      },
+      "incumbent": {
+        "providerID": "anthropic",
+        "modelID": "claude-opus-4-8"
+      },
+      "expectedNote": "keepsIncumbent; reason cites headroom",
+      "expect": {
+        "keepsIncumbent": true,
+        "reasonMentions": "headroom"
+      }
+    },
+    {
+      "id": "A11",
+      "name": "build + image",
+      "agent": "build",
+      "contextTokens": 12000,
+      "needs": {
+        "image": true,
+        "tools": true
+      },
+      "expectedNote": "no image-incapable winner (voska is text-only)",
+      "expect": {
+        "excludes": [
+          "voska/default"
+        ]
+      }
+    },
+    {
+      "id": "A12",
+      "name": "build + pdf",
+      "agent": "build",
+      "contextTokens": 12000,
+      "needs": {
+        "pdf": true,
+        "tools": true
+      },
+      "expectedNote": "no pdf-incapable winner",
+      "expect": {
+        "excludes": [
+          "voska/default"
+        ]
+      }
+    },
+    {
+      "id": "A13",
+      "name": "build + image, only text-only model enabled",
+      "agent": "build",
+      "contextTokens": 12000,
+      "needs": {
+        "image": true
+      },
+      "incumbent": {
+        "providerID": "anthropic",
+        "modelID": "claude-opus-4-8"
+      },
+      "overrides": {
+        "enabledMain": [
+          "voska/default"
+        ]
+      },
+      "expectedNote": "keepsIncumbent -- must not fail the turn",
+      "expect": {
+        "keepsIncumbent": true
+      }
+    },
+    {
+      "id": "A14",
+      "name": "enabledMain = two endpoints, x10",
+      "agent": "build",
+      "mode": "determinism",
+      "repeats": 10,
+      "baseKeys": [
+        "anthropic/claude-opus-4-8",
+        "anthropic/claude-opus-5"
+      ],
+      "expectedNote": "winner is one of the two, over 10 repeats",
+      "expect": {
+        "winnerIn": [
+          "anthropic/claude-opus-4-8",
+          "anthropic/claude-opus-5"
+        ]
+      }
+    },
+    {
+      "id": "A15",
+      "name": "enabledMain = []",
+      "agent": "build",
+      "contextTokens": 12000,
+      "needs": {},
+      "incumbent": {
+        "providerID": "anthropic",
+        "modelID": "claude-opus-4-8"
+      },
+      "overrides": {
+        "enabledMain": []
+      },
+      "expectedNote": "keepsIncumbent; reason says no candidate passed",
+      "expect": {
+        "keepsIncumbent": true
+      }
+    },
+    {
+      "id": "A16",
+      "name": "enabledSub = one endpoint, surface sub",
+      "surface": "sub",
+      "agent": "build",
+      "contextTokens": 12000,
+      "needs": {},
+      "overrides": {
+        "enabledSub": [
+          "anthropic/claude-opus-4-8"
+        ]
+      },
+      "expectedNote": "that endpoint wins",
+      "expect": {
+        "winnerIn": [
+          "anthropic/claude-opus-4-8"
+        ]
+      }
+    },
+    {
+      "id": "A17",
+      "name": "a deprecated model, ticked and opted-in",
+      "agent": "build",
+      "contextTokens": 12000,
+      "needs": {},
+      "overrides": {
+        "enabledMain": [
+          "anthropic/claude-opus-4-5-20251101"
+        ]
+      },
+      "expectedNote": "the opted-in deprecated model is a candidate (live box has none opted-in)",
+      "expect": {
+        "winnerIn": [
+          "anthropic/claude-opus-4-5-20251101"
+        ]
+      }
+    },
+    {
+      "id": "A18",
+      "name": "well-paced subscription beats free, trace basis",
+      "agent": "build",
+      "contextTokens": 12000,
+      "needs": {},
+      "overrides": {
+        "accounts": {
+          "anthropic": {
+            "kind": "subscription",
+            "windows": [
+              {
+                "kind": "subscription",
+                "pct": 55,
+                "startedAt": 1785500000000,
+                "resetsAt": 1788092000000
+              }
+            ]
+          }
+        }
+      },
+      "expectedNote": "subscription wins; traceField winner.cost.basis = subscription-pace",
+      "expect": {
+        "traceField": {
+          "path": "winner.cost.basis",
+          "equals": "subscription-pace"
+        }
+      }
+    },
+    {
+      "id": "A19",
+      "name": "same consumed %, early vs late in window (pacing)",
+      "mode": "pacing",
+      "pacing": {
+        "providerID": "anthropic",
+        "pct": 40,
+        "earlyFraction": 0.05,
+        "lateFraction": 0.85,
+        "overagePrice": 3
+      },
+      "expectedNote": "materially different cost -- proves pacing, not gauge-reading",
+      "expect": {}
+    },
+    {
+      "id": "A20",
+      "name": "subscription exhausted",
+      "agent": "build",
+      "contextTokens": 12000,
+      "needs": {},
+      "incumbent": {
+        "providerID": "anthropic",
+        "modelID": "claude-opus-4-8"
+      },
+      "overrides": {
+        "accounts": {
+          "anthropic": {
+            "kind": "subscription",
+            "windows": [
+              {
+                "kind": "subscription",
+                "pct": 100,
+                "startedAt": 1785500000000,
+                "resetsAt": 1788092000000
+              }
+            ]
+          }
+        },
+        "enabledMain": [
+          "anthropic/claude-opus-4-8",
+          "anthropic/claude-opus-4-8-fast",
+          "anthropic/claude-sonnet-5",
+          "anthropic/claude-haiku-4-5-20251001",
+          "anthropic/claude-fable-5",
+          "anthropic/claude-opus-5",
+          "anthropic/claude-opus-5-fast"
+        ]
+      },
+      "expectedNote": "excludes exhausted subscription; a same-tier alternative wins; no failure",
+      "expect": {
+        "winnerNotIn": [
+          "anthropic/claude-opus-4-8",
+          "anthropic/claude-opus-4-8-fast",
+          "anthropic/claude-sonnet-5",
+          "anthropic/claude-haiku-4-5-20251001",
+          "anthropic/claude-fable-5",
+          "anthropic/claude-opus-5",
+          "anthropic/claude-opus-5-fast"
+        ]
+      }
+    },
+    {
+      "id": "A21",
+      "name": "provider health out-of-credit",
+      "agent": "build",
+      "contextTokens": 12000,
+      "needs": {},
+      "incumbent": {
+        "providerID": "anthropic",
+        "modelID": "claude-opus-4-8"
+      },
+      "overrides": {
+        "health": {
+          "anthropic": "out-of-credit"
+        }
+      },
+      "expectedNote": "excludes the out-of-credit provider",
+      "expect": {
+        "winnerNotIn": [
+          "anthropic/claude-opus-4-8"
+        ]
+      }
+    },
+    {
+      "id": "A22",
+      "name": "provider health failing (soft)",
+      "agent": "build",
+      "contextTokens": 12000,
+      "needs": {},
+      "overrides": {
+        "health": {
+          "anthropic": "failing"
+        }
+      },
+      "expectedNote": "failing is only deranked, not excluded -- deep still selectable",
+      "expect": {
+        "tierAtLeast": "deep"
+      }
+    },
+    {
+      "id": "A23",
+      "name": "custom endpoint, nothing declared",
+      "agent": "build",
+      "contextTokens": 12000,
+      "needs": {},
+      "incumbent": {
+        "providerID": "anthropic",
+        "modelID": "claude-opus-4-8"
+      },
+      "overrides": {
+        "enabledMain": [
+          "custom/my-endpoint"
+        ]
+      },
+      "expectedNote": "a custom endpoint with nothing declared is excluded (live box has no custom endpoint)",
+      "expect": {
+        "keepsIncumbent": true
+      }
+    },
+    {
+      "id": "A24",
+      "name": "one model, two providers, different price",
+      "agent": "build",
+      "contextTokens": 12000,
+      "needs": {},
+      "expectedNote": "two distinct candidates; cheaper wins (needs a model on two providers)",
+      "expect": {}
+    },
+    {
+      "id": "A25",
+      "name": "one model, same price, subscription vs gateway",
+      "agent": "build",
+      "contextTokens": 12000,
+      "needs": {},
+      "expectedNote": "subscription wins a same-price contest (needs a gateway endpoint)",
+      "expect": {}
+    },
+    {
+      "id": "A26",
+      "name": "two endpoints, x10 + shuffled order",
+      "agent": "build",
+      "mode": "determinism",
+      "repeats": 10,
+      "baseKeys": [
+        "anthropic/claude-opus-4-8",
+        "anthropic/claude-sonnet-5"
+      ],
+      "expectedNote": "identical winner across 10 repeats AND shuffled input order",
+      "expect": {
+        "winnerIn": [
+          "anthropic/claude-opus-4-8",
+          "anthropic/claude-sonnet-5"
+        ]
+      }
+    },
+    {
+      "id": "A27",
+      "name": "provider quotes $0 for a priced model",
+      "agent": "build",
+      "contextTokens": 12000,
+      "needs": {},
+      "expectedNote": "a $0 quote for a priced model does not outrank first-party (needs same model both ways)",
+      "expect": {}
+    },
+    {
+      "id": "A28",
+      "name": "declared-free endpoint stays free",
+      "agent": "build",
+      "contextTokens": 12000,
+      "needs": {},
+      "expectedNote": "a declared-free endpoint stays free and can win (needs a declaredModels entry)",
+      "expect": {}
+    },
+    {
+      "id": "A29",
+      "name": "stability x10 (A01 config)",
+      "agent": "build",
+      "contextTokens": 12000,
+      "needs": {},
+      "mode": "determinism",
+      "repeats": 10,
+      "expectedNote": "identical model and reason across 10 repeats",
+      "expect": {}
+    },
+    {
+      "id": "A30",
+      "name": "change exactly one input at a time from A01",
+      "agent": "build",
+      "mode": "sensitivity",
+      "baseline": "A01",
+      "flips": [
+        {
+          "label": "preset->economy",
+          "moves": true,
+          "scenario": {
+            "policyOverride": {
+              "preset": "economy"
+            }
+          }
+        },
+        {
+          "label": "ctx 10k",
+          "moves": false,
+          "scenario": {
+            "contextTokens": 10000
+          }
+        }
+      ],
+      "expectedNote": "only the changed input moves the outcome",
+      "expect": {}
+    }
+  ]
+}
