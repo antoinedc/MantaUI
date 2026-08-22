@@ -1144,6 +1144,11 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
                 // null = clear back to the server default.
                 updateDraft(draftId, { model: m });
               }}
+              onSelectEffort={(m: ModelSelection) => {
+                // No Auto concept on the welcome composer: effort/fast pin the
+                // draft's model with the chosen variant (BET-1274 10c).
+                updateDraft(draftId, { model: m });
+              }}
             />
             <PlanChip
               plan={plan}

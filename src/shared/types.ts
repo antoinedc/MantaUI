@@ -283,11 +283,9 @@ export type AppConfig = {
     alwaysListening?: boolean;
   };
   // ----- Model routing (BET-1215) -----
-  // Manta picks the cheapest model that still clears the quality floor for a
-  // given kind of work, instead of always using the default. Off by default
-  // (hard requirement — routing acts on the user's behalf, so it is opt-in,
-  // matching chatAutoAllow / pluginsEnabled). Config-only in this issue; the
-  // router wiring issue reads this into the router's `policy` argument.
+  // Manta picks the model for a conversation while Auto is on (the per-session
+  // gate). Config carries the balance dial; the Auto on/off switch is the
+  // composer's model picker, never this block.
   modelRouting?: {
     // Three-way balance dial. Default "balanced".
     preset: "economy" | "balanced" | "performance";
@@ -1357,8 +1355,6 @@ export const IPC = {
   // Model picker: list available models on the remote opencode server (with
   // provider secrets stripped before forwarding).
   opencodeModels: "opencode:models",
-  // BET-1225: main-conversation routing decision at session start.
-  opencodeModelRoute: "routing:main",
   // BET-1244: generic read-only routing decision for either surface (main|sub).
   routingChoose: "routing:choose",
   // BET-1244: Accounts "Try again" — clear a provider's out-of-credit flag.

@@ -518,10 +518,10 @@ function unroutableError(structured, src) {
  * This wrapper hands `chooseModel` the subagent intent (agent + tool needs +
  * `incumbent` = whatever model the caller would have used today) and returns
  * the model to actually run on. It shares its `chooseModel` argument builder
- * with chooseMainModel below (see buildChooseModelInput) so the main and
- * subagent paths can never diverge again. Note: it is NOT the only module that
- * calls `chooseModel` — rpc.mjs's `routing:choose` calls it directly (it carries
- * a caller-supplied surface + needs). The wrappers share ONE builder; the RPC
+ * with the subagent path's other caller so they can never diverge. Note: it is
+ * NOT the only module that calls `chooseModel` — rpc.mjs's `routing:choose`
+ * calls it directly (it carries a caller-supplied surface + needs). The
+ * wrappers share ONE builder; the RPC
  * builds its own intent for its different surface.
  *
  * Provably safe on the off-path: when the policy has no routing directive (no
@@ -587,14 +587,13 @@ function catalogIncumbentOf(incumbent) {
   return incumbent ? { providerID: incumbent.providerID, id: incumbent.modelID ?? incumbent.id } : null;
 }
 
-// Shared argument-builder for the two routing wrappers (BET-1275 11d).
-// chooseSubagentModel and chooseMainModel MUST hand chooseModel the same intent
-// shape — this is what kept the main-conversation and subagent paths from
-// diverging (they disagreed on `needs.tools` in the real-facts issue). The main
-// path needs a couple of extra fields around the decision, but the chooseModel
-// ARGUMENT is identical. routing:choose in rpc.mjs builds its own intent because
-// it carries a caller-supplied surface + needs; these two server wrappers share
-// this one builder so they cannot diverge again.
+// Shared argument-builder for the subagent routing wrapper (BET-1275 11d).
+// chooseSubagentModel hands chooseModel the same intent shape as the main
+// path did before the mount-time main route was deleted — this is what kept the
+// main-conversation and subagent paths from diverging (they disagreed on
+// `needs.tools` in the real-facts issue). routing:choose in rpc.mjs builds its
+// own intent because it carries a caller-supplied surface + needs, but this
+// subagent wrapper uses this one builder so its own callers cannot diverge again.
 function buildChooseModelInput({ kind, agent, needs, contextTokens, incumbent, catalog, policy, nowMs, services }) {
   return {
     intent: { kind, agent, needs, contextTokens, incumbent: catalogIncumbentOf(incumbent) },
@@ -648,77 +647,6 @@ export function chooseSubagentModel({
     // Routing must never break a spawn — fall back to the incumbent model.
     console.warn("[router] subagent routing failed, using incumbent:", e?.message ?? e);
     return incumbent;
-  }
-}
-
-/**
- * THE other single routing decision point: the user-facing MAIN conversation
- * ("build" agent). Sat beside chooseSubagentModel, sharing its `chooseModel`
- * argument builder (buildChooseModelInput) so the two can never diverge.
- *
- * Unlike the subagent wrapper, which returns only the model the spawn should
- * run on (the spawn is opaque to the user), this returns the FULL decision —
- * the routed `model`, the human-readable `reason`, the `incumbent` it would
- * otherwise have used, and a `changed` flag — so the renderer can (a) apply
- * the routed model to the next prompt's `modelOverride` AND (b) render the
- * routed pill (`ChatPanel.routed`) exposing the reason and offering undo back
- * to the incumbent. That is the honesty contract of the routing epic: a main
- * conversation's model is never switched without a visible, undoable reason.
- *
- * Same safety contract as chooseSubagentModel: a policy with no routing
- * directive / any throw / no survivors all fall back to `incumbent` with
- * `changed: false`, so enabling routing can never substitute a model the user
- * was not shown and can undo.
- *
- * @param {object} [input]
- * @param {object|null} [input.incumbent]  the model the session would use without routing
- * @param {Array<object>} [input.catalog]  opencode model list
- * @param {{ preset?: string, perAgent?: Record<string,string> }} [input.policy]
- * @param {string} [input.agent]           main-conversation agent (default "build")
- * @param {number} [input.nowMs]
- * @returns {{ model: object|null, reason: string, incumbent: object|null, changed: boolean }}
- */
-export function chooseMainModel({
-  incumbent = null,
-  catalog = [],
-  policy = {},
-  agent = "build",
-  nowMs = Date.now(),
-  contextTokens = SUBAGENT_INITIAL_CONTEXT_TOKENS,
-  services,
-} = {}) {
-  const incumbentShape = incumbent
-    ? { providerID: incumbent.providerID, modelID: incumbent.modelID ?? incumbent.id ?? "" }
-    : null;
-  try {
-    const decision = chooseModel(
-      buildChooseModelInput({
-        kind: "main",
-        agent,
-        needs: { tools: true },
-        contextTokens,
-        incumbent,
-        catalog,
-        policy,
-        nowMs,
-        services,
-      }),
-    );
-    const model =
-      decision?.model === catalogIncumbentOf(incumbent)
-        ? incumbent
-        : toDeliverModel(decision?.model ?? incumbent);
-    return {
-      model,
-      reason: decision?.reason ?? "",
-      incumbent: incumbentShape,
-      changed: decision?.changed === true,
-    };
-  } catch (e) {
-    // Routing must never change a main conversation invisibly — and must never
-    // break the send — so any failure falls back to the incumbent.
-    console.warn("[router] main routing failed, using incumbent:", e?.message ?? e);
-    return { model: incumbent, reason: "routing failed", incumbent: incumbentShape, changed: false };
   }
 }
 

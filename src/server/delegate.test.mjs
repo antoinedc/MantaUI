@@ -22,7 +22,6 @@ import {
   effectiveModelFromMessages,
   tickActivity,
   chooseSubagentModel,
-  chooseMainModel,
   resolveNamedModel,
 } from "./delegate.mjs";
 import { familyKey } from "../shared/modelGuide.mjs";
@@ -990,79 +989,6 @@ test("chooseSubagentModel returns the incumbent on an off-path and is load-beari
     }),
     incumbent,
   );
-});
-
-// ----------------------------------------------------------------------------
-// BET-1225 — main-conversation ("build") routing decision
-// ----------------------------------------------------------------------------
-
-test("chooseMainModel returns the FULL decision — model, reason, incumbent — and normalises the winner to {providerID, modelID} (BET-1225)", () => {
-  const catalog = [
-    normalize("anthropic", "claude-opus-4", rawProviderModel({ id: "claude-opus-4" })),     // deep
-    normalize("anthropic", "claude-sonnet-4", rawProviderModel({ id: "claude-sonnet-4" })),   // balanced
-    normalize("anthropic", "claude-haiku-4", rawProviderModel({ id: "claude-haiku-4" })),    // fast
-  ];
-  const incumbent = { providerID: "anthropic", modelID: "claude-opus-4" };
-  const decision = chooseMainModel({
-    incumbent,
-    catalog,
-    policy: { preset: "economy" }, // economy + build → balanced floor
-    quota: [],
-    agent: "build",
-    nowMs: 1_700_000_000_000,
-    services: routingServicesFor(catalog),
-  });
-  // The main-conversation decision is richer than the subagent wrapper: the
-  // renderer needs the model, a reason, and the incumbent for the undo pill.
-  assert.equal(decision.changed, true);
-  assert.equal(decision.model?.providerID, "anthropic");
-  assert.equal(decision.model?.modelID, "claude-sonnet-4", "build under economy must land on the balanced-tier floor");
-  assert.equal("id" in decision.model, false, "the routed model must carry modelID, not the catalog's id");
-  assert.match(decision.reason, /build → balanced tier/, "reason names the build agent and tier");
-  assert.deepEqual(decision.incumbent, incumbent, "incumbent is preserved for the undo pill");
-});
-
-test("chooseMainModel on the off-path returns the incumbent with changed:false, never a hidden switch (BET-1225)", () => {
-  const incumbent = { providerID: "anthropic", modelID: "claude-opus-4" };
-  const catalog = [
-    normalize("anthropic", "claude-opus-4", rawProviderModel({ id: "claude-opus-4" })),
-    normalize("anthropic", "claude-haiku-4", rawProviderModel({ id: "claude-haiku-4" })),
-  ];
-  // routing not activated (no preset) → no switch, even though a cheaper fast model exists
-  const off = chooseMainModel({ incumbent, catalog, policy: {}, agent: "build", nowMs: 0 });
-  assert.equal(off.changed, false);
-  assert.deepEqual(off.model, incumbent);
-  assert.equal(off.reason, "routing not activated for this conversation");
-  // an activated router with no survivors (all dead) still falls back to incumbent
-  const noSurvivors = chooseMainModel({
-    incumbent,
-    catalog: [normalize("anthropic", "claude-opus-4", rawProviderModel({ id: "claude-opus-4", status: "retired" }))],
-    policy: { preset: "economy" },
-    agent: "build",
-    nowMs: 0,
-  });
-  assert.equal(noSurvivors.changed, false);
-  assert.deepEqual(noSurvivors.model, incumbent);
-});
-
-test("chooseMainModel when the router picks the same model reports changed:false (BET-1225)", () => {
-  // deep incumbent + performance preset → build stays deep → same model, no pill.
-  const incumbent = { providerID: "anthropic", modelID: "claude-opus-4" };
-  const catalog = [
-    normalize("anthropic", "claude-opus-4", rawProviderModel({ id: "claude-opus-4" })),
-    normalize("anthropic", "claude-sonnet-4", rawProviderModel({ id: "claude-sonnet-4" })),
-  ];
-  const decision = chooseMainModel({
-    incumbent,
-    catalog,
-    policy: { preset: "performance" },
-    quota: [],
-    agent: "build",
-    nowMs: 0,
-  });
-  assert.equal(decision.changed, false, "no model was substituted → the pill must not render");
-  assert.deepEqual(decision.model, incumbent);
-  assert.deepEqual(decision.incumbent, incumbent);
 });
 
 // ----------------------------------------------------------------------------

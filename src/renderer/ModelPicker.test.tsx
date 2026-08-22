@@ -50,6 +50,7 @@ describe("ModelPicker — loading state (models === null)", () => {
         defaultModel={{ providerID: "anthropic", modelID: "claude-opus-4-7" }}
         onOpen={() => {}}
         onSelect={() => {}}
+        onSelectEffort={() => {}}
       />,
     );
     return h.container;
@@ -98,7 +99,9 @@ describe("ModelPicker — routed pill (BET-1222)", () => {
   });
 
   function render(
-    routed: { reason: string; incumbent: { providerID: string; modelID: string } } | null,
+    routed:
+      | { reason: string; incumbent: { providerID: string; modelID: string } | null }
+      | null,
     onRoutedUndone: () => void = () => {},
   ): HTMLElement {
     h?.unmount();
@@ -112,6 +115,7 @@ describe("ModelPicker — routed pill (BET-1222)", () => {
         onSelect={() => {}}
         routed={routed}
         onRoutedUndone={onRoutedUndone}
+        onSelectEffort={() => {}}
       />,
     );
     return h.container;
@@ -154,6 +158,18 @@ describe("ModelPicker — routed pill (BET-1222)", () => {
     act(() => (btn as HTMLButtonElement).click());
     expect(undone).toBe(true);
   });
+
+  it("renders the reason without an undo action when routed has no incumbent (BET-1274 10e)", () => {
+    // The first turn of a session has nothing to undo — the pill still says why
+    // the model is what it is, but offers no undo button.
+    const c = render({
+      reason: "first turn boundary",
+      incumbent: null,
+    });
+    const text = c.textContent ?? "";
+    expect(text).toContain("first turn boundary");
+    expect(text).not.toContain("undo");
+  });
 });
 
 describe("ModelPicker — Auto mode (BET-1247)", () => {
@@ -181,6 +197,7 @@ describe("ModelPicker — Auto mode (BET-1247)", () => {
         labelOverride={props.labelOverride ?? null}
         onOpen={() => {}}
         onSelect={() => {}}
+        onSelectEffort={() => {}}
       />,
     );
     return h.container;
@@ -253,5 +270,101 @@ describe("ModelPicker — Auto mode (BET-1247)", () => {
       ?.getAttribute("title") ?? "";
     expect(title).toContain("Claude Opus 4.7");
     expect(title).toContain("anthropic");
+  });
+});
+
+describe("ModelPicker — effort/fast write effort, not a model choice (BET-1274 10c)", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  it("routes an effort-menu selection to onSelectEffort, never onSelect", () => {
+    const effortCalls: ModelSelection[] = [];
+    const modelCalls: ModelSelection[] = [];
+    h = mount(
+      <ModelPicker
+        modelLabel={null}
+        models={MODELS}
+        modelOverride={{ providerID: "anthropic", modelID: "claude-opus-4-7" }}
+        defaultModel={null}
+        onOpen={() => {}}
+        onSelect={(m) => { if (m) modelCalls.push(m); }}
+        onSelectEffort={(m) => effortCalls.push(m)}
+      />,
+    );
+    // Open the effort (right) segment menu. The dropdown portals to document.body.
+    const effortBtn = h.container.querySelector<HTMLElement>(".manta-effort-picker-btn");
+    expect(effortBtn).toBeTruthy();
+    act(() => (effortBtn as HTMLButtonElement).click());
+    const effortMenu = document.body.querySelector<HTMLElement>(".manta-effort-dropdown");
+    expect(effortMenu).toBeTruthy();
+    // Select the "High" variant row.
+    const high = [...(effortMenu?.querySelectorAll<HTMLElement>('[role="option"]') ?? [])].find((b) =>
+      (b.textContent ?? "").includes("High"),
+    );
+    expect(high).toBeTruthy();
+    act(() => (high as HTMLElement).click());
+    // The effort went to onSelectEffort (with the variant) — and NOT to the
+    // model-choice onSelect, which is what used to pin the model + exit Auto.
+    expect(effortCalls).toHaveLength(1);
+    expect(effortCalls[0].variant).toBe("high");
+    expect(modelCalls).toHaveLength(0);
+  });
+
+  it("names the capitalized balance preset in the Auto row sub-line (BET-1274 10d)", () => {
+    h = mount(
+      <ModelPicker
+        modelLabel={null}
+        models={MODELS}
+        modelOverride={null}
+        defaultModel={null}
+        auto
+        presetLabel="Balanced"
+        autoReason="moved: the previous provider ran out"
+        onSelectAuto={() => {}}
+        onOpen={() => {}}
+        onSelect={() => {}}
+        onSelectEffort={() => {}}
+      />,
+    );
+    // Open the model dropdown; the Auto pinned row is its first header row.
+    const modelBtn = h.container.querySelector<HTMLElement>(".manta-model-picker-btn");
+    act(() => (modelBtn as HTMLButtonElement).click());
+    const modelMenu = document.body.querySelector<HTMLElement>(".manta-model-dropdown");
+    const autoRow = [...(modelMenu?.querySelectorAll<HTMLElement>('[role="option"]') ?? [])].find((e) =>
+      (e.textContent ?? "").includes("Auto — Manta picks per task"),
+    );
+    expect(autoRow).toBeTruthy();
+    expect(autoRow?.textContent ?? "").toContain("Balanced · moved: the previous provider ran out");
+  });
+
+  it("after a model choice Auto is off and the dropdown has exactly one selected row (BET-1274 test 1)", () => {
+    // The post-pick UI state (BET-1274 10b): non-Auto + an explicit override.
+    // Auto and Server-default rows are deselected; only the picked model row is.
+    h = mount(
+      <ModelPicker
+        modelLabel={null}
+        models={MODELS}
+        modelOverride={{ providerID: "anthropic", modelID: "claude-opus-4-7" }}
+        defaultModel={null}
+        auto={false}
+        onOpen={() => {}}
+        onSelect={() => {}}
+        onSelectEffort={() => {}}
+      />,
+    );
+    // The chip no longer claims Auto — a plain model name.
+    const btn = h.container.querySelector<HTMLElement>(".manta-model-picker-btn");
+    expect(btn?.textContent ?? "").not.toContain("Auto");
+    expect(btn?.textContent ?? "").toContain("Claude Opus 4.7");
+
+    // Open the dropdown: exactly one row is selected (the picked model).
+    act(() => (btn as HTMLButtonElement).click());
+    const menu = document.body.querySelector<HTMLElement>(".manta-model-dropdown");
+    const selected = [...(menu?.querySelectorAll<HTMLElement>('[role="option"][aria-selected="true"]') ?? [])];
+    expect(selected.length).toBe(1);
+    expect(selected[0].textContent ?? "").toContain("Claude Opus 4.7");
   });
 });

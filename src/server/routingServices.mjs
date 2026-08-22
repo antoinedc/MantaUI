@@ -5,8 +5,8 @@
 // object that the WIRING must construct from live box readers — the model
 // catalogue, provider health, usage snapshots (accounts), and the endpoint
 // ledger (reliability / telemetry / mix). This is that assembly, and it is the
-// single source of truth for BOTH production callers (delegate startJob and
-// rpc routing:main) so the subagent and main-conversation paths share one
+// single source of truth for the production callers (delegate startJob and
+// rpc routing:choose) so the subagent and main-conversation paths share one
 // build ("one code path").
 //
 // Safety contract — every reader is OPTIONAL and individually guarded. The

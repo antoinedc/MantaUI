@@ -64,6 +64,7 @@ import {
   isPlanExitQuestion,
   extractPlanData,
   selectableModelGroups,
+  titleCase,
 } from "./chatUtils";
 import { isPlanAgent, planPageUrl } from "../shared/planMode.mjs";
 import { serverBase } from "./api/httpApi";
@@ -90,7 +91,6 @@ import { crossesBoundary, shouldSwitch, boundaryPhrase } from "../shared/routing
 import { acceptsModality } from "../shared/modelGuide.mjs";
 import { useModelCatalog } from "./modelCatalog";
 import {
-  readSessionAuto,
   sessionBoxSelection,
   setSessionChoice,
   useSessionModelChoice,
@@ -213,6 +213,9 @@ export function ChatPanel({
   const deactivatedMainModels = useStore((s) => s.deactivatedMainModels);
   const optInModels = useStore((s) => s.optInModels);
   const optInModel = useStore((s) => s.optInModel);
+  // BET-1274 10d: the routing preset drives the Auto row's display label; the
+  // value lives on the same store block Settings writes (modelRouting.preset).
+  const routingPreset = useStore((s) => s.modelRouting?.preset);
   const hiddenStatusItems = useStore((s) => s.hiddenStatusItems);
   // BET-789: the "Connect GitHub…" offer's per-box dismissal flag. Once set,
   // the offer never re-appears until the config flag is cleared.
@@ -448,13 +451,13 @@ export function ChatPanel({
   const [modelOverride, setModelOverride] = useState<ModelSelection | null>(() =>
     modelFromChoice(sessionChoice, configDefaultModel),
   );
-  // BET-1222: routed state for the composer pill — set when the router chose
-  // this session's model (fed by the main-conversation routing wiring). The
-  // pill renders ONLY while this is non-null; clearing it reverts the pill to
-  // its normal appearance.
+  // BET-1248: routed state for the composer pill — set when the router chose
+  // this session's model (fed by the main-conversation boundary routing in
+  // submit). The pill renders ONLY while this is non-null; clearing it reverts
+  // the pill to its normal appearance.
   const [routed, setRouted] = useState<{
     reason: string;
-    incumbent: { providerID: string; modelID: string };
+    incumbent: { providerID: string; modelID: string } | null;
   } | null>(null);
   // BET-1248: boundary-routing state for the main conversation. `routedModel`
   // is the session's current routed endpoint — the incumbent shouldSwitch uses
@@ -470,14 +473,30 @@ export function ChatPanel({
   useEffect(() => {
     routedModelRef.current = routedModel;
   }, [routedModel]);
-  // Apply a boundary-routing decision: record the incumbent + reason and, under
-  // Auto, set the active override so the pill and send paths run on it.
+  // The single producer of `routed`: apply a boundary-routing decision. With
+  // an incumbent (the model the session was on before the switch) surface the
+  // undoable pill — the reason and the model undo reverts to. With no
+  // incumbent (the first turn of a session) there is nothing to undo, so the
+  // reason still surfaces (the pill renders the reason without an undo action)
+  // — never silently. The model is applied to the override, carrying forward
+  // the user's current in-memory effort (BET-1274 10c) so a just-chosen effort
+  // is not dropped by a route.
   const applyRouted = useCallback((model: ModelSelection | null, reason: string) => {
+    const incumbent = routedModelRef.current;
+    setRouted({
+      reason,
+      incumbent: incumbent
+        ? { providerID: incumbent.providerID, modelID: incumbent.modelID }
+        : null,
+    });
     routedModelRef.current = model;
     setRoutedModel(model);
     setRoutedReason(reason);
-    setModelOverride(model);
-  }, []);
+    const override =
+      model && modelOverride?.variant ? { ...model, variant: modelOverride.variant } : model;
+    setModelOverride(override);
+    return override;
+  }, [modelOverride]);
   // The agent the PREVIOUS turn ran as — drives the agent-changed boundary.
   const lastAgentRef = useRef<string | undefined>(undefined);
   // A compaction completed since the last submit (cache is gone → re-deciding
@@ -519,46 +538,6 @@ export function ChatPanel({
     () => modelOverride?.providerID ?? configDefaultModel?.providerID ?? null,
     [modelOverride, configDefaultModel],
   );
-
-  // BET-1225: main-conversation routing, the honesty half of the routing epic.
-  // On session start, ask the server for the router's "build" decision. When it
-  // actually changed the model (routing enabled AND picked a different winner),
-  // apply the routed model as the active override — so the next prompt actually
-  // runs on it — and populate `routed` with the reason + incumbent so the
-  // composer renders the undoable routed pill. The incumbent is the model the
-  // session would run on without routing (the user's per-session pick or the
-  // persisted default); undo reverts to exactly that. Best-effort: a null or
-  // failed decision (routing off / demo transport) leaves routing silent, and
-  // never breaks the session. Re-runs on session change; the user's own
-  // selectModel clears the pill.
-  useEffect(() => {
-    // BET-1255: Auto-session model choice is owned SOLELY by the boundary
-    // routing in submit() (BET-1248) — it already re-decides on the first
-    // turn, which is itself a boundary. Returning early for Auto avoids a
-    // second, immediately-overwritten "build" RPC decision (and the confusing
-    // co-existence of its undo pill with the Auto-row reason). The gate reads
-    // the same session key the effect already reads, so the [sessionId]
-    // dependency stays correct on session change.
-    if (readSessionAuto(sessionId)) return;
-    let cancelled = false;
-    const incumbent = sessionBoxSelection(sessionId) ?? configDefaultModel ?? null;
-    window.api
-      .opencodeModelRoute(incumbent, "build")
-      .then((d) => {
-        if (cancelled || !d || !d.changed || !d.model) return;
-        setModelOverride(d.model);
-        // The pill (which offers undo back to a prior model) renders only when
-        // there is an incumbent to revert to; with no prior model there is
-        // nothing to undo, so the decision applies silently.
-        if (d.incumbent) setRouted({ reason: d.reason, incumbent: d.incumbent });
-      })
-      .catch(() => {
-        /* routing is best-effort — never break the session over it */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [sessionId]);
 
   // ===== Per-session plan mode (BET-949) =====
   // Local on/off, seeded from the per-session storage key (the `Session.agent`
@@ -1341,73 +1320,73 @@ export function ChatPanel({
     // server default) and sends.
     let sendModel = modelOverride;
     if (autoActive && text) {
-      if (readSessionAuto(sessionId)) {
-        const incumbent = routedModelRef.current;
-        const incumbentModel = incumbent
-          ? resolveActiveModel(models, incumbent, null)
-          : null;
-        const ctxTokens = latestTokensRef.current
-          ? (latestTokensRef.current.input ?? 0) +
-            (latestTokensRef.current.cache?.read ?? 0) +
-            (latestTokensRef.current.cache?.write ?? 0)
-          : undefined;
-        const requiredModes = readyAttachments.map((a) => mimeToInputMode(a.mime));
-        const currentAgent = planAgent ?? "build";
-        const { crossed, boundary, stillCapable, stillHealthy } = crossesBoundary({
-          hasRoutedModel: incumbent != null,
-          agent: currentAgent,
-          previousAgent: lastAgentRef.current,
-          contextTokens: ctxTokens ?? undefined,
-          incumbentContextLimit: incumbentModel?.limit?.context ?? undefined,
-          requiredModalities: requiredModes,
-          incumbentModel,
-          incumbentHealthy: true,
-          justCompacted: justCompactedRef.current,
-          userRequested: pendingAutoUserRef.current,
-        });
-        justCompactedRef.current = false;
-        pendingAutoUserRef.current = false;
-        lastAgentRef.current = currentAgent;
-        if (crossed) {
-          try {
-            const decision = await window.api.routingChoose({
-              sessionId,
-              directory: cwd ?? "",
-              agent: currentAgent,
-              surface: "main",
-              contextTokens: ctxTokens,
-              needs: {
-                tools: true,
-                image: readyAttachments.some((a) => mimeToInputMode(a.mime) === "image"),
-                pdf: readyAttachments.some((a) => mimeToInputMode(a.mime) === "pdf"),
-              },
+      const incumbent = routedModelRef.current;
+      const incumbentModel = incumbent
+        ? resolveActiveModel(models, incumbent, null)
+        : null;
+      const ctxTokens = latestTokensRef.current
+        ? (latestTokensRef.current.input ?? 0) +
+          (latestTokensRef.current.cache?.read ?? 0) +
+          (latestTokensRef.current.cache?.write ?? 0)
+        : undefined;
+      const requiredModes = readyAttachments.map((a) => mimeToInputMode(a.mime));
+      const currentAgent = planAgent ?? "build";
+      const { crossed, boundary, stillCapable, stillHealthy } = crossesBoundary({
+        hasRoutedModel: incumbent != null,
+        agent: currentAgent,
+        previousAgent: lastAgentRef.current,
+        contextTokens: ctxTokens ?? undefined,
+        incumbentContextLimit: incumbentModel?.limit?.context ?? undefined,
+        requiredModalities: requiredModes,
+        incumbentModel,
+        incumbentHealthy: true,
+        justCompacted: justCompactedRef.current,
+        userRequested: pendingAutoUserRef.current,
+      });
+      justCompactedRef.current = false;
+      pendingAutoUserRef.current = false;
+      lastAgentRef.current = currentAgent;
+      if (crossed) {
+        try {
+          const decision = await window.api.routingChoose({
+            sessionId,
+            directory: cwd ?? "",
+            agent: currentAgent,
+            surface: "main",
+            contextTokens: ctxTokens,
+            needs: {
+              tools: true,
+              image: readyAttachments.some((a) => mimeToInputMode(a.mime) === "image"),
+              pdf: readyAttachments.some((a) => mimeToInputMode(a.mime) === "pdf"),
+            },
+            incumbent,
+          });
+          const ranked = decision.model
+            ? [decision.model, ...decision.alternatives]
+            : decision.alternatives;
+          // Hysteresis: only move off the incumbent when it genuinely fell out
+          // (didn't survive the router's contention) OR it no longer fits the
+          // turn (a CONSTRAINT boundary made it incapable/unhealthy — force the
+          // switch away regardless of where it ranks). Otherwise keep it.
+          if (
+            decision.model &&
+            shouldSwitch({
               incumbent,
-            });
-            const ranked = decision.model
-              ? [decision.model, ...decision.alternatives]
-              : decision.alternatives;
-            // Hysteresis: only move off the incumbent when it genuinely fell out
-            // (didn't survive the router's contention) OR it no longer fits the
-            // turn (a CONSTRAINT boundary made it incapable/unhealthy — force the
-            // switch away regardless of where it ranks). Otherwise keep it.
-            if (
-              decision.model &&
-              shouldSwitch({
-                incumbent,
-                ranked,
-                incumbentStillEligible: true,
-                incumbentStillCapable: stillCapable,
-                incumbentHealthy: stillHealthy,
-              }).switch
-            ) {
-              const reason = decision.reason + (boundary ? ` · ${boundaryPhrase(boundary)}` : "");
-              applyRouted(decision.model, reason);
-              sendModel = decision.model;
-            }
-          } catch {
-            // routing failure must never fail a turn — fall through to the
-            // previous routed model (or the server default) and send.
+              ranked,
+              incumbentStillEligible: true,
+              incumbentStillCapable: stillCapable,
+              incumbentHealthy: stillHealthy,
+            }).switch
+          ) {
+            const reason = decision.reason + (boundary ? ` · ${boundaryPhrase(boundary)}` : "");
+            sendModel = applyRouted(decision.model, reason);
           }
+        } catch {
+          // Routing failure must never fail a turn — the turn still sends on the
+          // previous routed model (or the server default). But it must not do so
+          // silently: the chip would keep claiming Auto picked a model the router
+          // never chose. Say so on the existing error banner.
+          setSendError("Couldn't pick a model — sent on the default. Auto will try again next turn.");
         }
       }
     }
@@ -1705,12 +1684,15 @@ export function ChatPanel({
     setModelOverride(null);
   }, [models, sessionId, sessionChoice]);
 
+  // BET-1247/BET-1274: a manual model choice is THE off switch for Auto — the
+  // design contract's only one. It writes the three-state choice, flips the UI
+  // off Auto (so the chip stops claiming Auto in this very commit), and ends
+  // any routed pill state (BET-1225).
   const selectModel = useCallback(
     (m: ModelSelection | null) => {
       setModelOverride(m);
       setSessionChoice(sessionId, m ? { kind: "model", model: m } : { kind: "server-default" });
-      // A manual model choice ends any routed state: once the user picks the
-      // model themselves, the pill must not claim the router chose it (BET-1225).
+      setAutoActive(false);
       setRouted(null);
     },
     [sessionId],
@@ -1728,22 +1710,49 @@ export function ChatPanel({
     if (routedModelRef.current) pendingAutoUserRef.current = true;
   }, [sessionId]);
 
+  // BET-1274 10c: effort (the variant dial) and the ⚡ fast toggle write a
+  // VARIANT, not a model choice — they must not change the ModelChoice kind and
+  // must not turn Auto off. Under a pinned model ("model") the value (possibly a
+  // `-fast` twin model) is merged into the box-backed record; under "auto" the
+  // box has no model/effort slot (BET-1287: Auto is a device-local boolean), so
+  // the effort is applied to the current in-memory routed model only and Auto is
+  // never exited; server-default falls back to pinning (same as before).
+  const onSelectEffort = useCallback(
+    (value: ModelSelection) => {
+      const choice = sessionChoice;
+      if (choice.kind === "model") {
+        const merged = { ...choice.model, ...value };
+        setSessionChoice(sessionId, { kind: "model", model: merged });
+        setModelOverride(merged);
+      } else if (choice.kind === "auto") {
+        // Auto has no model/effort slot to persist into — applying effort here
+        // only affects the current in-memory routed model (the next send runs at
+        // that effort) without exiting Auto. The fast-twin MODEL swap stays a
+        // model choice and is not expressible under Auto; Auto keeps picking.
+        setModelOverride((prev) => (prev ? { ...prev, variant: value.variant } : prev));
+      } else {
+        setSessionChoice(sessionId, {
+          kind: "model",
+          model: { providerID: value.providerID, modelID: value.modelID, variant: value.variant },
+        });
+        setModelOverride({ ...value });
+      }
+    },
+    [sessionId, sessionChoice],
+  );
+
   // BET-1222: undo a routed model choice. Reverts through the SAME per-session
   // override path the manual picker uses (selectModel) — no
   // second persistence path — then clears the routed state so the pill reverts.
-  // Awaited: a failure surfaces on the existing sendError banner rather than
-  // being swallowed.
-  const undoRouted = useCallback(async () => {
-    if (!routed) return;
-    try {
-      await selectModel({
-        providerID: routed.incumbent.providerID,
-        modelID: routed.incumbent.modelID,
-      });
-      setRouted(null);
-    } catch (e) {
-      setSendError(String((e as Error)?.message ?? e));
-    }
+  // selectModel is synchronous; a failure cannot occur here, so this needs no
+  // async wrapper or try/catch (BET-1274 10e).
+  const undoRouted = useCallback(() => {
+    if (!routed?.incumbent) return;
+    selectModel({
+      providerID: routed.incumbent.providerID,
+      modelID: routed.incumbent.modelID,
+    });
+    setRouted(null);
   }, [routed, selectModel]);
 
   // App-control (BET-840/841): expose this panel's `selectModel` to App so the
@@ -3327,6 +3336,8 @@ export function ChatPanel({
         onOptInModel={optInModel}
         onOpenModels={ensureModels}
         onSelectModel={selectModel}
+        onSelectEffort={onSelectEffort}
+        presetLabel={routingPreset ? titleCase(routingPreset) : undefined}
         scheduleCount={schedules.length}
         onSchedules={() => togglePanel("schedules")}
         onSecrets={() => togglePanel("secrets")}

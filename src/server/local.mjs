@@ -74,10 +74,9 @@ const DEFAULT_CONFIG = {
   // Lets a self-hosted GitHub/GitLab instance (which `detectForge` deliberately
   // rejects) resolve to its forge + API root. `kind` is "github" | "gitlab".
   forgeHosts: [],
-  // Model routing (BET-1215): pick the cheapest model that clears the floor.
-  // Off by default (hard requirement — routing acts on the user's behalf, so
-  // it is opt-in, matching chatAutoAllow / pluginsEnabled). Config-only in
-  // this issue; no behaviour change until the router wiring issue reads it.
+  // Model routing (BET-1215): the balance dial for Automatic Manta Routing.
+  // Auto's on/off switch is the composer's per-conversation model picker, not
+  // this block — there is no config gate that turns routing on/off globally.
   modelRouting: {
     preset: "balanced",
   },

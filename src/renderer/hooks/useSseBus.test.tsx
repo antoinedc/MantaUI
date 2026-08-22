@@ -1091,7 +1091,7 @@ describe("BET-1248 main-conversation routing at boundaries (ChatPanel submit)", 
     expect(promptModelFor("after compact")).toEqual(ROUTED);
   });
 
-  it("routingChoose rejecting → the turn still sends, on the previous model", async () => {
+  it("routingChoose rejecting → the turn still sends, on the previous model, and the error banner says so (BET-1274 test 4)", async () => {
     localStorage.setItem(sessionAutoKey("ses_test"), "1");
     ({ api, bus } = installMockApi({
       routingChoose: () => Promise.reject(new Error("router down")),
@@ -1104,6 +1104,9 @@ describe("BET-1248 main-conversation routing at boundaries (ChatPanel submit)", 
     // A turn was still sent. First turn with no incumbent → server default.
     expect((api.calls.opencodePrompt ?? []).length).toBeGreaterThan(0);
     expect(promptModelFor("hi")).toBeUndefined();
+    // …and it is not silent: the banner tells the user the router was
+    // unreachable rather than letting the chip pretend Auto picked a model.
+    expect(h?.container.textContent ?? "").toContain("Couldn't pick a model");
   });
 
   it("Auto off → routingChoose is never called", async () => {
