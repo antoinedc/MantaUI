@@ -91,7 +91,7 @@ SessionHeader's session menu moved with it.
 
 | Primitive | File | Adopters | Variants |
 | --- | --- | --- | --- |
-| Button | `src/renderer/Button.tsx` | 2 — `Settings.tsx`, `FolderPickerModal.tsx` | `tone: default\|primary\|ghost\|danger` (required, no default — the bare base is abstract, C4); `disabled`; `type`; `title`; `children`; `hook`. No `size` prop — one size only (the spec has no `.btn.sm` rule). |
+| Button | `src/renderer/Button.tsx` | 3 — `Settings.tsx`, `FolderPickerModal.tsx`, `CustomProviderForm.tsx` | `tone: default\|primary\|ghost\|danger` (required, no default — the bare base is abstract, C4); `disabled`; `type`; `title`; `children`; `hook`. No `size` prop — one size only (the spec has no `.btn.sm` rule). |
 | Chip | `src/renderer/Chip.tsx` | 2 — `NewSessionScreen.tsx` (folder chip + branch chip); `ModelPicker.tsx` (via the shared module) | `on` (the accent "active" state); `onClick`; `title`; `children`; `hook`. No `size` prop — one size only (29px hit area) |
 | SplitChip | `src/renderer/Chip.tsx` | 2 — `ModelPicker.tsx` (model ▸ effort split); `NewSessionScreen.tsx` (via the shared module) | `left`/`right` (ReactNode); `onLeftClick`/`onRightClick`; `rightAccent` (accent-tx + semibold on the right — replaces the composer's old inline `var(--accent-tx)`); `leftTitle`/`rightTitle`; `popup` (OPT-IN `aria-haspopup="listbox"` on both segments — a generic split control does not assume popup semantics, so a non-popup adopter omits it); `hook`. Both co-reside in `Chip.tsx` because they share the shell and must not diverge |
 | Card | `src/renderer/Card.tsx` | 3 — `Cards.tsx`, `Settings.tsx`, `NewSessionScreen.tsx` | `danger` (optional); `header`/`actions` slots |
