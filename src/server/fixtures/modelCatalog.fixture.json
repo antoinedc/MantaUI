@@ -1,82 +1,316 @@
 [
-  {
-    "id": "qwen/qwen3.6-27b",
-    "name": "Qwen3.6-27B",
-    "family": "qwen",
-    "description": "Qwen3.6 tuned for long-context coding (exact-match fixture)",
-    "reasoning": true,
-    "tool_call": true,
-    "modalities": { "input": ["text"], "output": ["text"] },
-    "open_weights": true,
-    "limit": { "context": 131072, "output": 8192 },
-    "benchmarks": [{ "name": "SWE-Bench Verified", "score": 58.4, "metric": "resolved" }]
-  },
-  {
-    "id": "chutes/Ornith-9B",
-    "name": "Ornith 9B",
-    "family": "ornith",
-    "description": "Ornith family, 9B variant",
-    "reasoning": true,
-    "tool_call": true,
-    "modalities": { "input": ["text"], "output": ["text"] },
-    "open_weights": true,
-    "limit": { "context": 32768, "output": 4096 }
-  },
-  {
-    "id": "chutes/Ornith-31B",
-    "name": "Ornith 31B",
-    "family": "ornith",
-    "description": "Ornith family, 31B variant",
-    "reasoning": true,
-    "tool_call": true,
-    "modalities": { "input": ["text"], "output": ["text"] },
-    "open_weights": true,
-    "limit": { "context": 65536, "output": 8192 }
-  },
-  {
-    "id": "chutes/Ornith-35B",
-    "name": "Ornith 35B",
-    "family": "ornith",
-    "description": "Ornith family, 35B variant",
-    "reasoning": true,
-    "tool_call": true,
-    "modalities": { "input": ["text"], "output": ["text"] },
-    "open_weights": true,
-    "limit": { "context": 65536, "output": 8192 }
-  },
-  {
-    "id": "chutes/Ornith-397B",
-    "name": "Ornith 397B",
-    "family": "ornith",
-    "description": "Ornith family, 397B variant",
-    "reasoning": false,
-    "tool_call": true,
-    "modalities": { "input": ["text"], "output": ["text"] },
-    "open_weights": true,
-    "limit": { "context": 262144, "output": 32768 }
-  },
-  {
-    "id": "minimax/MiniMax-M3",
-    "name": "MiniMax-M3",
-    "family": "minimax",
-    "description": "MiniMax multimodal model for long-context coding, perception, and agent planning",
-    "attachment": true,
-    "reasoning": true,
-    "tool_call": true,
-    "modalities": { "input": ["text", "image", "video"], "output": ["text"] },
-    "open_weights": true,
-    "limit": { "context": 512000, "output": 128000 },
-    "benchmarks": [{ "name": "SWE-Bench Verified", "score": 80.5, "metric": "resolved" }]
-  },
-  {
-    "id": "deepseek/deepseek-chat",
-    "name": "DeepSeek Chat",
-    "family": "deepseek",
-    "description": "DeepSeek general chat model",
-    "reasoning": false,
-    "tool_call": true,
-    "modalities": { "input": ["text"], "output": ["text"] },
-    "open_weights": true,
-    "limit": { "context": 65536, "output": 8192 }
-  }
+    {
+        "id": "qwen/qwen3.6-27b",
+        "name": "Qwen3.6-27B",
+        "family": "qwen",
+        "description": "Qwen3.6 tuned for long-context coding (exact-match fixture)",
+        "reasoning": true,
+        "tool_call": true,
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "open_weights": true,
+        "limit": {
+            "context": 131072,
+            "output": 8192
+        },
+        "benchmarks": [
+            {
+                "name": "SWE-Bench Verified",
+                "score": 58.4,
+                "metric": "resolved"
+            }
+        ]
+    },
+    {
+        "id": "chutes/Ornith-9B",
+        "name": "Ornith 9B",
+        "family": "ornith",
+        "description": "Ornith family, 9B variant",
+        "reasoning": true,
+        "tool_call": true,
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "open_weights": true,
+        "limit": {
+            "context": 32768,
+            "output": 4096
+        }
+    },
+    {
+        "id": "chutes/Ornith-31B",
+        "name": "Ornith 31B",
+        "family": "ornith",
+        "description": "Ornith family, 31B variant",
+        "reasoning": true,
+        "tool_call": true,
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "open_weights": true,
+        "limit": {
+            "context": 65536,
+            "output": 8192
+        }
+    },
+    {
+        "id": "chutes/Ornith-35B",
+        "name": "Ornith 35B",
+        "family": "ornith",
+        "description": "Ornith family, 35B variant",
+        "reasoning": true,
+        "tool_call": true,
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "open_weights": true,
+        "limit": {
+            "context": 65536,
+            "output": 8192
+        }
+    },
+    {
+        "id": "chutes/Ornith-397B",
+        "name": "Ornith 397B",
+        "family": "ornith",
+        "description": "Ornith family, 397B variant",
+        "reasoning": false,
+        "tool_call": true,
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "open_weights": true,
+        "limit": {
+            "context": 262144,
+            "output": 32768
+        }
+    },
+    {
+        "id": "minimax/MiniMax-M3",
+        "name": "MiniMax-M3",
+        "family": "minimax",
+        "description": "MiniMax multimodal model for long-context coding, perception, and agent planning",
+        "attachment": true,
+        "reasoning": true,
+        "tool_call": true,
+        "modalities": {
+            "input": [
+                "text",
+                "image",
+                "video"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "open_weights": true,
+        "limit": {
+            "context": 512000,
+            "output": 128000
+        },
+        "benchmarks": [
+            {
+                "name": "SWE-Bench Verified",
+                "score": 80.5,
+                "metric": "resolved"
+            }
+        ]
+    },
+    {
+        "id": "deepseek/deepseek-chat",
+        "name": "DeepSeek Chat",
+        "family": "deepseek",
+        "description": "DeepSeek general chat model",
+        "reasoning": false,
+        "tool_call": true,
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "open_weights": true,
+        "limit": {
+            "context": 65536,
+            "output": 8192
+        }
+    },
+    {
+        "id": "alibaba/qwen3-32b",
+        "name": "Qwen3 32B",
+        "family": "qwen",
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/Qwen/Qwen3-32B"
+            }
+        ],
+        "limit": {
+            "context": 131072,
+            "output": 16384
+        },
+        "description": "Qwen3 32B, open-weight (exact fixture for release weights repo)"
+    },
+    {
+        "id": "alibaba/qwen3-30b-a3b",
+        "name": "Qwen3 30B A3B",
+        "family": "qwen",
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/Qwen/Qwen3-30B-A3B"
+            }
+        ],
+        "limit": {
+            "context": 65536,
+            "output": 8192
+        },
+        "description": "Qwen3 30B-A3B \u2014 a sibling size that must NOT be conflated with qwen3-32b"
+    },
+    {
+        "id": "zhipuai/glm-5.2",
+        "name": "Glm 5.2",
+        "family": "glm",
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/zai-org/GLM-5.2"
+            }
+        ],
+        "limit": {
+            "context": 131072,
+            "output": 16384
+        },
+        "description": "GLM-5.2; reseller vendor disagrees with the catalogue"
+    },
+    {
+        "id": "zhipuai/glm-5.1",
+        "name": "Glm 5.1",
+        "family": "glm",
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/zai-org/GLM-5.1"
+            }
+        ],
+        "limit": {
+            "context": 131072,
+            "output": 16384
+        },
+        "description": "GLM-5.1 \u2014 must not be conflated with GLM-5.2"
+    },
+    {
+        "id": "moonshotai/kimi-k3",
+        "name": "Kimi K3",
+        "family": "kimi",
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/moonshotai/Kimi-K3"
+            }
+        ],
+        "limit": {
+            "context": 131072,
+            "output": 16384
+        },
+        "description": "Kimi K3, weights repo"
+    },
+    {
+        "id": "openai/gpt-5.5",
+        "name": "Gpt 5.5",
+        "family": "gpt",
+        "limit": {
+            "context": 128000,
+            "output": 16000
+        },
+        "description": "GPT-5.5 \u2014 tier-decoration corroboration fixture"
+    },
+    {
+        "id": "openai/gpt-5.5-pro",
+        "name": "Gpt 5.5 Pro",
+        "family": "gpt",
+        "limit": {
+            "context": 128000,
+            "output": 40000
+        },
+        "description": "GPT-5.5 Pro \u2014 the richer sibling gpt-5.5-fast must NOT hit"
+    },
+    {
+        "id": "anthropic/claude-opus-5",
+        "name": "Claude Opus 5",
+        "family": "claude",
+        "limit": {
+            "context": 200000,
+            "output": 64000
+        },
+        "description": "Claude Opus 5 \u2014 claude-opus-5-fast must resolve here, not 4-5"
+    },
+    {
+        "id": "anthropic/claude-opus-4-5",
+        "name": "Claude Opus 4 5",
+        "family": "claude",
+        "limit": {
+            "context": 200000,
+            "output": 64000
+        },
+        "description": "Claude Opus 4-5 \u2014 version inequality must reject it"
+    },
+    {
+        "id": "nvidia/nemotron-3-ultra-550b-a55b",
+        "name": "Nemotron 3 Ultra 550B A55B",
+        "family": "nemotron",
+        "limit": {
+            "context": 131072,
+            "output": 16384
+        },
+        "description": "Nemotron 3 Ultra 550B-A55B \u2014 size present on one side only"
+    },
+    {
+        "id": "meta/muse-spark-1.2",
+        "name": "Muse Spark 1.2",
+        "family": "muse",
+        "limit": {
+            "context": 32768,
+            "output": 4096
+        },
+        "description": "Muse Spark 1.2 \u2014 multi-token decoration fixture"
+    },
+    {
+        "id": "mistral/mistral-nemo",
+        "name": "Mistral Nemo",
+        "family": "mistral",
+        "limit": {
+            "context": 128000,
+            "output": 16384
+        },
+        "description": "Mistral Nemo \u2014 date-only owner-mismatch fixture"
+    }
 ]

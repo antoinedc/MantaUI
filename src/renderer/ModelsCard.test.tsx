@@ -35,8 +35,8 @@ const ENTRIES = [
 // Renderer OpencodeModel fixtures — each exercises one identity case.
 const EXACT_MODEL = {
   providerID: "acme",
-  id: "my-endpoint",
-  family: "claude-haiku-4",
+  id: "claude-haiku-4",
+  family: "haiku",
   name: "My Endpoint",
   // Caching is known from the provider's cost — but there is no price. A
   // single "price" gap, which is exactly what the router waits on.
@@ -96,7 +96,7 @@ describe("ModelsWeCouldntIdentify (the block)", () => {
 
   it("is absent when the catalogue is healthy and every endpoint is fully described", async () => {
     const declared = {
-      [key("acme", "my-endpoint")]: { catalogId: "acme/claude-haiku-4", price: "free", caches: false },
+      [key("acme", "claude-haiku-4")]: { catalogId: "acme/claude-haiku-4", price: "free", caches: false },
       [key("custom", "ornith")]: { catalogId: "x/ornith-small", price: "free", caches: false },
       [key("custom", "default-model")]: { catalogId: "custom/qwen3.5-72b", price: "free", caches: false },
     };
@@ -121,7 +121,7 @@ describe("ModelsWeCouldntIdentify (the block)", () => {
     await h.flush();
     await h.flush();
     const text = h.text();
-    expect(text).toContain("acme / my-endpoint");
+    expect(text).toContain("acme / claude-haiku-4");
     // Exactly one row.
     expect(text.match(/Matched automatically/g)?.length).toBe(1);
     // The help line names the SAME gap autoEligibility would report: price
@@ -248,13 +248,50 @@ describe("ModelsWeCouldntIdentify (the block)", () => {
     await h.flush();
     await h.flush();
     const text = h.text();
-    expect(text).toContain("acme / my-endpoint");
+    expect(text).toContain("acme / claude-haiku-4");
     expect(text).toContain("Matched automatically →");
     expect(text).toContain("Claude Haiku 4");
     const change = [...h.container.querySelectorAll("button")].find((b) =>
       b.textContent?.trim() === "Change",
     );
     expect(change).toBeTruthy();
+  });
+
+  it("exact probable → names the evidence and Confirm declares through the existing path", async () => {
+    // A layer-4 structural (digit-anchored) match carries confidence "probable":
+    // the row names the evidence and offers a Confirm action next to Change.
+    // The distinct identity of the endpoint is never a ModelCatalogEntry
+    // handle, so it must infer via the structural layer.
+    const probable = { providerID: "custom", id: "qwen3.5-72b-tee", family: "", name: "Tee" };
+    const { h: hh, api } = mountBlock({ models: [probable], catalogue: OK() });
+    h = hh;
+    await h.flush();
+    await h.flush();
+    const text = h.text();
+    expect(text).toContain("We think this is Qwen3.5 72B");
+    const confirm = [...h.container.querySelectorAll("button")].find((b) =>
+      b.textContent?.trim() === "Confirm",
+    );
+    expect(confirm).toBeTruthy();
+    const change = [...h.container.querySelectorAll("button")].find((b) =>
+      b.textContent?.trim() === "Change",
+    );
+    expect(change).toBeTruthy();
+
+    // Confirm goes through the SAME save path as the ambiguous chips — it
+    // writes a ModelDeclaration (catalogId) via configUpdate and refreshes.
+    confirm!.click();
+    await h.flush();
+    await h.flush();
+    const updates = api.calls.configUpdate as unknown[][];
+    const declPatch = updates.find((args) => {
+      const patch = args[0] as { modelRouting?: { declaredModels?: Record<string, unknown> } };
+      return !!patch?.modelRouting?.declaredModels;
+    });
+    expect(declPatch).toBeTruthy();
+    const declared = (declPatch![0] as { modelRouting: { declaredModels: Record<string, unknown> } })
+      .modelRouting.declaredModels;
+    expect(declared[key("custom", "qwen3.5-72b-tee")]).toEqual({ catalogId: "custom/qwen3.5-72b" });
   });
 });
 

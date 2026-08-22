@@ -1,5 +1,5 @@
 export type IdentityState = "resolved" | "ambiguous" | "unknown";
-export type IdentitySource = "provider" | "matched" | "declared" | null;
+export type IdentitySource = "matched" | "declared" | null;
 
 export interface OpencodeModel {
   providerID?: string;
@@ -34,14 +34,26 @@ export interface CatalogueEntry {
   tool_call?: boolean;
   modalities?: { input?: string[]; output?: string[] };
   limit?: { context?: number; output?: number };
+  weights?: { label?: string; url?: string }[];
   benchmarks?: { name: string; score: number; metric?: string }[];
+}
+
+export interface EndpointFacts {
+  modalities?: string[];
+  context?: number;
+  output?: number;
 }
 
 export interface ModelCatalog {
   lookupModel(catalogId: string): CatalogueEntry | null;
-  matchModel(localModelId: string): {
+  matchModel(
+    localModelId: string,
+    endpointFacts?: EndpointFacts
+  ): {
     kind: "exact" | "ambiguous" | "none";
     candidates: CatalogueEntry[];
+    confidence?: "certain" | "probable";
+    evidence?: string;
   };
 }
 
@@ -51,6 +63,8 @@ export interface IdentityResult {
   candidates: string[];
   source: IdentitySource;
   effective: EffectiveModel;
+  confidence?: "certain" | "probable";
+  evidence?: string;
 }
 
 export interface EffectiveModel extends OpencodeModel {
