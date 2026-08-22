@@ -723,7 +723,7 @@ export function AccountsCard() {
         </div>
       )}
 
-      <CustomProviderForm compact onSaved={() => void refresh()} />
+      <CustomProviderForm onSaved={() => void refresh()} />
 
       <div className="text-meta text-text-quiet pt-3 border-t border-border-subtle">
         One list: subscriptions and custom endpoints are both a way to reach a

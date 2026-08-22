@@ -152,7 +152,7 @@ async function smokeDrive(opts: {
   const enqueue = () => {
     const root = scope === "container" ? h.container : document.body;
     for (const el of Array.from(root.querySelectorAll<Element>(INTERACTIVE))) {
-      const id = controlId(el);
+    const id = controlId(el);
       if (seen.has(id)) continue;
       seen.add(id);
       queue.push(el);
@@ -282,7 +282,7 @@ describe("control smoke — AccountsCard", () => {
   });
 
   const ACCOUNTS_INERT: Record<string, string> = {
-    "button|||||Add endpoint Probe": "Add-endpoint Probe is disabled until name + baseURL are entered (draftErr gate)",
+    "button|button|Probe endpoint": "Add-endpoint Probe is disabled until name + baseURL are entered (draftErr gate)",
   };
 
   it("every control it renders does something observable", async () => {

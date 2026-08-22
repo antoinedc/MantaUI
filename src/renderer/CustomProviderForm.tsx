@@ -19,6 +19,7 @@
 // caller share one source of truth.
 
 import { useState } from "react";
+import type { ReactNode } from "react";
 import { Loader2 } from "lucide-react";
 import type { DiscoverResult } from "../shared/types";
 import {
@@ -29,17 +30,12 @@ import { Field } from "./Field";
 import { Checkbox } from "./Checkbox";
 import { Button } from "./Button";
 
-const DANGER = "var(--danger)";
-
 type Phase = "editing" | "probing" | "ready";
 
 export function CustomProviderForm({
   onSaved,
-  compact = false,
 }: {
   onSaved: () => Promise<void> | void;
-  /** compact: Settings card styling (tighter padding, smaller labels). */
-  compact?: boolean;
 }) {
   const [name, setName] = useState("");
   const [baseURL, setBaseURL] = useState("");
@@ -160,76 +156,10 @@ export function CustomProviderForm({
   const busy = phase === "probing";
   const inSave = saveStep !== null;
 
-  if (compact) {
-    return (
-      <div className="border border-dashed border-border rounded-xs p-2 space-y-1">
-        <div className="text-micro font-semibold uppercase text-text-faint">
-          Add endpoint
-        </div>
-        <CustomInput
-          placeholder="name (e.g. VoskaAI)"
-          value={name}
-          disabled={busy}
-          onChange={setName}
-          onReset={phase !== "editing" ? reset : undefined}
-        />
-        <CustomInput
-          placeholder="baseURL (https://api.voska.org/v1)"
-          value={baseURL}
-          disabled={busy}
-          onChange={setBaseURL}
-        />
-        <input
-          type="password"
-          autoComplete="off"
-          spellCheck={false}
-          placeholder="API key (optional)"
-          value={apiKey}
-          disabled={busy}
-          onChange={(e) => setApiKey(e.target.value)}
-          className="w-full bg-bg-soft border border-border px-2 py-1 text-meta rounded-xs"
-        />
-        {derivedId && (
-          <div className="text-micro text-text-faint">
-            id: <code>{derivedId}</code>
-          </div>
-        )}
-        {error && <div className="text-meta text-danger">{error}</div>}
-        {phase === "ready" && models && (
-          <ModelList
-            models={models}
-            checked={checked}
-            onToggle={toggle}
-            disabled={busy}
-          />
-        )}
-        <div className="flex gap-2 pt-1">
-          {inSave || phase === "ready" ? (
-            <button
-              onClick={() => void save()}
-              disabled={busy || checked.size === 0}
-              className="px-3 py-1 text-meta bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text disabled:opacity-40"
-            >
-              {saveStep === "save" ? "Saving…" : saveStep === "restart" ? "Restarting opencode…" : `Save ${checked.size} model${checked.size === 1 ? "" : "s"}`}
-            </button>
-          ) : (
-            <button
-              onClick={() => void probe()}
-              disabled={busy || draftErr !== null}
-              className="px-3 py-1 text-meta bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text disabled:opacity-40"
-            >
-              {busy ? "Probing…" : "Probe"}
-            </button>
-          )}
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="rounded-sm border border-border bg-bg-soft p-3 space-y-3">
+    <div className="rounded-md border border-dashed border-border p-4 space-y-3">
       <div className="text-micro font-semibold uppercase text-text-faint">
-        Add a custom provider
+        Add endpoint
       </div>
       <CustomInput
         label="Name"
@@ -238,12 +168,14 @@ export function CustomProviderForm({
         disabled={busy}
         onChange={setName}
         onReset={phase !== "editing" ? reset : undefined}
+        help={
+          derivedId ? (
+            <>
+              Provider id: <code className="text-text-muted">{derivedId}</code>
+            </>
+          ) : undefined
+        }
       />
-      {derivedId && (
-        <div className="text-meta text-text-faint -mt-1">
-          Provider id: <code className="text-text-muted">{derivedId}</code>
-        </div>
-      )}
       <CustomInput
         label="Base URL"
         placeholder="https://api.voska.org/v1"
@@ -253,14 +185,15 @@ export function CustomProviderForm({
       />
       <CustomInput
         label="API key (optional)"
-        placeholder="key"
+        placeholder="sk-…"
         value={apiKey}
         type="password"
+        autoComplete="off"
         disabled={busy}
         onChange={setApiKey}
       />
       {error && (
-        <div role="alert" className="text-meta" style={{ color: DANGER }}>
+        <div role="alert" className="text-meta text-danger">
           {error}
         </div>
       )}
@@ -343,6 +276,8 @@ function CustomInput(props: {
   disabled: boolean;
   onChange: (v: string) => void;
   onReset?: () => void;
+  autoComplete?: string;
+  help?: ReactNode;
 }) {
   return (
     <Field
@@ -354,6 +289,8 @@ function CustomInput(props: {
       mono={false}
       disabled={props.disabled}
       onChange={(e) => props.onChange(e.target.value)}
+      autoComplete={props.autoComplete}
+      help={props.help}
       footer={
         props.onReset ? (
           <button
