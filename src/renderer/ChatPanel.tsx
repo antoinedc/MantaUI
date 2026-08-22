@@ -69,16 +69,10 @@ import { isPlanAgent, planPageUrl } from "../shared/planMode.mjs";
 import { serverBase } from "./api/httpApi";
 import {
   appendPromptHistory,
-  carrySavedChoice,
   guessMime,
   mimeToInputMode,
   modelInputModes,
-  modelKey,
   modelSupportsAttachments,
-  readSavedChoice,
-  readSavedModel,
-  writeSavedModel,
-  writeSavedChoice,
   modelFromChoice,
   readPlanSaved,
   writePlanSaved,
@@ -95,6 +89,12 @@ import {
 import { crossesBoundary, shouldSwitch, boundaryPhrase } from "../shared/routingBoundary.mjs";
 import { acceptsModality } from "../shared/modelGuide.mjs";
 import { useModelCatalog } from "./modelCatalog";
+import {
+  readSessionAuto,
+  sessionBoxSelection,
+  setSessionChoice,
+  useSessionModelChoice,
+} from "./modelPrefs";
 import { useAgentCatalog } from "./agentCatalog";
 import { MantaLoader } from "./MantaLoader";
 import { MeasureColumn } from "./MeasureColumn";
@@ -427,24 +427,26 @@ export function ChatPanel({
 
   // ===== Per-session model override =====
   // Declared before useSseBus: the auth-banner providerID below derives from
-  // it. Initialized from the per-session localStorage override for the session,
-  // falling back to the persisted global default (the same seed useSseBus's
-  // providerID used to recompute from readSavedModel on every render).
+  // it. Seeded from the box-backed per-session choice (modelPrefs.ts, BET-1281),
+  // falling back to the persisted global default.
   // BET-1247: whether the session's model choice is Auto (the three-state
   // choice from BET-1245). Under Auto the override seeds to null rather than
   // the server default — the default is not "the model Auto chose", and the
   // chip must read "Auto" until the router actually resolves one (a turn
   // running applies the routed pick to `modelOverride`).
+  // BET-1281: the box-backed per-session choice (the model-prefs box store +
+  // the device-local Auto flag). Single source for every seed below.
+  const sessionChoice = useSessionModelChoice(sessionId);
   const [autoActive, setAutoActive] = useState<boolean>(
-    () => readSavedChoice(sessionId).kind === "auto",
+    () => sessionChoice.kind === "auto",
   );
-  // BET-1248: the override seed derives from the THREE-state choice
-  // (readSavedChoice, BET-1245) so the rest of the component is untouched:
-  // {kind:"model"} → the model, {kind:"server-default"} → the global default,
-  // {kind:"auto"} → null until the router resolves one. The routed pick is
-  // applied to the override the moment a turn runs (BET-1247).
+  // BET-1248: the override seed derives from the THREE-state choice so the
+  // rest of the component is untouched: {kind:"model"} → the model,
+  // {kind:"server-default"} → the global default, {kind:"auto"} → null until
+  // the router resolves one. The routed pick is applied to the override the
+  // moment a turn runs (BET-1247).
   const [modelOverride, setModelOverride] = useState<ModelSelection | null>(() =>
-    modelFromChoice(readSavedChoice(sessionId), configDefaultModel),
+    modelFromChoice(sessionChoice, configDefaultModel),
   );
   // BET-1222: routed state for the composer pill — set when the router chose
   // this session's model (fed by the main-conversation routing wiring). The
@@ -496,6 +498,18 @@ export function ChatPanel({
     }
     priorAutoRef.current = autoActive;
   }, [autoActive]);
+  // BET-1281: keep the panel's local override + Auto flag in sync with the
+  // box-backed choice. Runs on mount and whenever the choice changes — e.g. the
+  // box mirror first loads, an `model-prefs.updated` refetch lands (including a
+  // refetch of this client's own write, a harmless reseed of the same value), or
+  // /clear swaps the session id. `sessionChoice` is memoized, so this does not
+  // re-run on keystroke renders.
+  useEffect(() => {
+    setAutoActive(sessionChoice.kind === "auto");
+    setModelOverride(modelFromChoice(sessionChoice, configDefaultModel));
+    priorAutoRef.current = sessionChoice.kind === "auto";
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionChoice, configDefaultModel]);
   // Active-model providerID for the auth-error banner (BET-316). Per-session
   // override wins over the persisted default; null if neither is set. Memoized
   // on `modelOverride` (the in-memory selection, itself seeded from
@@ -525,9 +539,9 @@ export function ChatPanel({
     // co-existence of its undo pill with the Auto-row reason). The gate reads
     // the same session key the effect already reads, so the [sessionId]
     // dependency stays correct on session change.
-    if (readSavedChoice(sessionId).kind === "auto") return;
+    if (readSessionAuto(sessionId)) return;
     let cancelled = false;
-    const incumbent = readSavedModel(sessionId) ?? configDefaultModel ?? null;
+    const incumbent = sessionBoxSelection(sessionId) ?? configDefaultModel ?? null;
     window.api
       .opencodeModelRoute(incumbent, "build")
       .then((d) => {
@@ -733,16 +747,12 @@ export function ChatPanel({
     setError(null);
     const planOnStart = readPlanSaved(sessionId);
     setPlanOn(planOnStart);
-    const choiceNow = readSavedChoice(sessionId);
-    setAutoActive(choiceNow.kind === "auto");
-    setModelOverride(modelFromChoice(choiceNow, configDefaultModel));
     // BET-1248: routed state is per-session — reset on session change (and on
     // /clear, which swaps the session id), exactly like stepTokens / liveTodos.
     setRoutedModel(null);
     setRoutedReason(null);
     routedModelRef.current = null;
     pendingAutoUserRef.current = false;
-    priorAutoRef.current = choiceNow.kind === "auto";
     // Seed plan mode from the session's own `agent` field when present (BET-949
     // §5): a session pre-set to plan OUTSIDE MantaUI would otherwise show the
     // chip off and send the next prompt as build — the stored key alone can't
@@ -1331,7 +1341,7 @@ export function ChatPanel({
     // server default) and sends.
     let sendModel = modelOverride;
     if (autoActive && text) {
-      if (readSavedChoice(sessionId).kind === "auto") {
+      if (readSessionAuto(sessionId)) {
         const incumbent = routedModelRef.current;
         const incumbentModel = incumbent
           ? resolveActiveModel(models, incumbent, null)
@@ -1684,30 +1694,21 @@ export function ChatPanel({
   // If the saved model references one that isn't in the current list of
   // connected models (common after switching providers or fixing listModels'
   // source endpoint), clear it. Otherwise the server rejects the prompt with a
-  // not-found error and nothing reaches the transcript.
+  // not-found error and nothing reaches the transcript. Reads the BOX-backed
+  // selection (BET-1281); re-runs when models or the session choice change.
   useEffect(() => {
     if (!models) return;
-    let saved: ModelSelection | null = null;
-    try {
-      const raw = localStorage.getItem(modelKey(sessionId));
-      if (raw) {
-        const p = JSON.parse(raw);
-        if (p && typeof p.providerID === "string" && typeof p.modelID === "string") {
-          saved = p as ModelSelection;
-        }
-      }
-    } catch { /* non-JSON / disabled storage — nothing to heal */ }
-    if (!saved) return;
-    const sel = saved;
+    const sel = sessionBoxSelection(sessionId);
+    if (!sel) return;
     if (models.some((m) => m.providerID === sel.providerID && m.id === sel.modelID)) return;
-    writeSavedModel(sessionId, null);
+    setSessionChoice(sessionId, { kind: "server-default" });
     setModelOverride(null);
-  }, [models, sessionId]);
+  }, [models, sessionId, sessionChoice]);
 
   const selectModel = useCallback(
     (m: ModelSelection | null) => {
       setModelOverride(m);
-      writeSavedModel(sessionId, m);
+      setSessionChoice(sessionId, m ? { kind: "model", model: m } : { kind: "server-default" });
       // A manual model choice ends any routed state: once the user picks the
       // model themselves, the pill must not claim the router chose it (BET-1225).
       setRouted(null);
@@ -1720,7 +1721,7 @@ export function ChatPanel({
   // it re-decides at once (crossesBoundary USER). Clears the override so the
   // pill reads "Auto · chooses when the turn starts" until routing resolves.
   const onSelectAuto = useCallback(() => {
-    writeSavedChoice(sessionId, { kind: "auto" });
+    setSessionChoice(sessionId, { kind: "auto" });
     setAutoActive(true);
     setModelOverride(null);
     setRouted(null);
@@ -1728,7 +1729,7 @@ export function ChatPanel({
   }, [sessionId]);
 
   // BET-1222: undo a routed model choice. Reverts through the SAME per-session
-  // override path the manual picker uses (selectModel + writeSavedModel) — no
+  // override path the manual picker uses (selectModel) — no
   // second persistence path — then clears the routed state so the pill reverts.
   // Awaited: a failure surfaces on the existing sendError banner rather than
   // being swallowed.
@@ -1747,7 +1748,7 @@ export function ChatPanel({
 
   // App-control (BET-840/841): expose this panel's `selectModel` to App so the
   // box's `switch-model` app-control event drives the override through the same
-  // path the picker uses (setModelOverride + writeSavedModel). Re-registers on
+  // path the picker uses (setModelOverride + setSessionChoice). Re-registers on
   // session change; unregisters on unmount so a closed panel can't be reached.
   useEffect(() => {
     registerModelControl?.(sessionId, selectModel);
@@ -1814,7 +1815,7 @@ export function ChatPanel({
       // /clear carries the session's model choice forward so the user doesn't
       // re-pick after every clear (including Auto); plan mode state on top.
       if (cleared?.newSessionId) {
-        carrySavedChoice(sessionId, cleared.newSessionId);
+        setSessionChoice(cleared.newSessionId, sessionChoice);
         if (planOn) {
           writePlanSaved(cleared.newSessionId, true);
         }
@@ -1823,7 +1824,7 @@ export function ChatPanel({
     } catch (e) {
       setSendError(String((e as Error)?.message ?? e));
     }
-  }, [tmuxSession, windowIndex, cwd, planOn, refresh]);
+  }, [tmuxSession, windowIndex, cwd, planOn, refresh, sessionChoice]);
 
   // Current-value ref mirrors for `submit` — declared AFTER submit in this file
   // (the established commandsRef pattern), so submit reads these instead of

@@ -20,9 +20,9 @@ import {
   type ModelSelection,
   readSavedMode,
   writeSavedMode,
-  writeSavedModel,
   resolveLauncherFlags,
 } from "./chatShared";
+import { setSessionChoice } from "./modelPrefs";
 import type { SyncPayload } from "../shared/api";
 import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, pruneVisitedSessions, registerMountedTerminal, shouldResyncWindowsForJobs, dispatchAppControl, dispatchMedia, applyMediaEvent, formatResetAt, voiceUi, boxUpgradeLanded, type AppControlHandlers, type MountedTerminal } from "./chatUtils";
 import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
@@ -1170,8 +1170,11 @@ function Shell() {
         switchModel: ({ sessionId, providerID, modelID }) => {
           const sel: ModelSelection = { providerID, modelID };
           const apply = panelModelControl.current.get(sessionId);
+          // With a panel mounted, drive its override through selectModel (the
+          // picker path); with none, route through the shared box-backed setter
+          // (BET-1281) so the write still lands — the panel reads it on mount.
           if (apply) apply(sel);
-          else writeSavedModel(sessionId, sel);
+          else setSessionChoice(sessionId, { kind: "model", model: sel });
         },
         renameSession: () => {
           // tmux is the source of truth; the existing refresh re-reads it.

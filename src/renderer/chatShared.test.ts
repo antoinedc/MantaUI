@@ -16,11 +16,6 @@ import {
   findLast,
   readSavedMode,
   writeSavedMode,
-  readSavedModel,
-  writeSavedModel,
-  readSavedChoice,
-  writeSavedChoice,
-  carrySavedChoice,
   modelFromChoice,
   resolveLauncherFlags,
   readPromptHistory,
@@ -30,6 +25,12 @@ import {
   readSavedActiveSession,
   writeSavedActiveSession,
 } from "./chatShared";
+import {
+  parseOldModelPrefs,
+  collectOldModelPrefs,
+  resolveSessionChoice,
+  sessionSelectionFromRecord,
+} from "./modelPrefs";
 import type { OpencodeModel } from "../shared/types";
 
 // Minimal OpencodeModel factory — only the `capabilities` field matters for
@@ -268,90 +269,107 @@ describe("readSavedMode / writeSavedMode (BET-138)", () => {
    });
  });
 
-describe("readSavedModel / writeSavedModel", () => {
-  beforeEach(() => {
-    localStorage.clear();
-  });
-  const sel = { providerID: "anthropic", modelID: "claude-sonnet-4-6" };
-
-  it("writes then reads back the same selection", () => {
-    writeSavedModel("sess-1", sel);
-    expect(readSavedModel("sess-1")).toEqual(sel);
+describe("sessionSelectionFromRecord (BET-1281) — box record → ModelSelection", () => {
+  it("maps a full record (with variant) to a ModelSelection", () => {
+    expect(
+      sessionSelectionFromRecord({ providerID: "anthropic", modelID: "claude-sonnet-4-6", variant: "high", updatedAt: 1 }),
+    ).toEqual({ providerID: "anthropic", modelID: "claude-sonnet-4-6", variant: "high" });
   });
 
-  it("writeSavedModel(sid, null) clears it; read returns null", () => {
-    writeSavedModel("sess-1", sel);
-    writeSavedModel("sess-1", null);
-    expect(readSavedModel("sess-1")).toBeNull();
-    expect(localStorage.getItem("manta:chat:sess-1:model")).toBeNull();
+  it("omits variant when absent", () => {
+    expect(
+      sessionSelectionFromRecord({ providerID: "anthropic", modelID: "claude-sonnet-4-6", updatedAt: 1 }),
+    ).toEqual({ providerID: "anthropic", modelID: "claude-sonnet-4-6" });
   });
 
-  it("unset session reads null", () => {
-    expect(readSavedModel("sess-1")).toBeNull();
-  });
-
-  it("a session's model is isolated from another session id", () => {
-    writeSavedModel("sess-1", sel);
-    expect(readSavedModel("sess-2")).toBeNull();
-  });
-
-  it("malformed (non-JSON) stored value reads null and does not throw", () => {
-    localStorage.setItem("manta:chat:sess-1:model", "{not json");
-    expect(() => readSavedModel("sess-1")).not.toThrow();
-    expect(readSavedModel("sess-1")).toBeNull();
+  it("returns null for a missing or malformed record", () => {
+    expect(sessionSelectionFromRecord(undefined)).toBeNull();
+    expect(sessionSelectionFromRecord({ providerID: "", modelID: "x", updatedAt: 1 })).toBeNull();
+    expect(sessionSelectionFromRecord({ providerID: "x", modelID: "", updatedAt: 1 })).toBeNull();
   });
 });
 
-describe("readSavedChoice / writeSavedChoice (three-state, BET-1245)", () => {
-  beforeEach(() => {
-    localStorage.clear();
-  });
-  const sel = { providerID: "anthropic", modelID: "claude-sonnet-4-6" };
+describe("resolveSessionChoice (BET-1281) — box sessions + Auto flag → three-state choice", () => {
+  const sessions = {
+    s1: { providerID: "anthropic", modelID: "claude-sonnet-4-6", updatedAt: 1 },
+  };
 
-  it("round-trips the auto state", () => {
-    writeSavedChoice("sess-1", { kind: "auto" });
-    expect(readSavedChoice("sess-1")).toEqual({ kind: "auto" });
+  it("Auto flag wins → { kind: 'auto' } even with a box record present", () => {
+    expect(resolveSessionChoice(sessions, "s1", true)).toEqual({ kind: "auto" });
   });
 
-  it("round-trips an explicit model", () => {
-    writeSavedChoice("sess-1", { kind: "model", model: sel });
-    expect(readSavedChoice("sess-1")).toEqual({ kind: "model", model: sel });
+  it("a present + valid record → { kind: 'model' }", () => {
+    expect(resolveSessionChoice(sessions, "s1", false)).toEqual({
+      kind: "model",
+      model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
+    });
   });
 
-  it("round-trips the server-default state (key absent)", () => {
-    writeSavedChoice("sess-1", { kind: "server-default" });
-    expect(readSavedChoice("sess-1")).toEqual({ kind: "server-default" });
-    expect(localStorage.getItem("manta:chat:sess-1:model")).toBeNull();
+  it("absence (no record) → { kind: 'server-default' }", () => {
+    expect(resolveSessionChoice(sessions, "s2", false)).toEqual({ kind: "server-default" });
+  });
+});
+
+describe("parseOldModelPrefs / collectOldModelPrefs (BET-1281 migration)", () => {
+  it("parses a concrete model key", () => {
+    expect(parseOldModelPrefs("manta:chat:sess-1:model", JSON.stringify({ providerID: "anthropic", modelID: "claude-sonnet-4-6" }))).toEqual({
+      sessionId: "sess-1",
+      kind: "model",
+      model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
+    });
   });
 
-  it("an existing stored ModelSelection still reads as { kind: 'model' }", () => {
-    localStorage.setItem("manta:chat:sess-1:model", JSON.stringify(sel));
-    expect(readSavedChoice("sess-1")).toEqual({ kind: "model", model: sel });
+  it("parses a variant-bearing model key", () => {
+    expect(parseOldModelPrefs("manta:chat:sess-1:model", JSON.stringify({ providerID: "p", modelID: "m", variant: "low" }))).toEqual({
+      sessionId: "sess-1",
+      kind: "model",
+      model: { providerID: "p", modelID: "m", variant: "low" },
+    });
   });
 
-  it("an absent key reads server-default", () => {
-    expect(readSavedChoice("sess-1")).toEqual({ kind: "server-default" });
+  it("parses the bare 'auto' literal as the auto marker", () => {
+    expect(parseOldModelPrefs("manta:chat:sess-1:model", "auto")).toEqual({ sessionId: "sess-1", kind: "auto" });
   });
 
-  it("the bare string 'auto' reads as auto", () => {
-    localStorage.setItem("manta:chat:sess-1:model", "auto");
-    expect(readSavedChoice("sess-1")).toEqual({ kind: "auto" });
+  it("ignores plan keys", () => {
+    expect(parseOldModelPrefs("manta:chat:sess-1:plan", "1")).toBeNull();
   });
 
-  it("malformed JSON reads server-default and does not throw", () => {
-    localStorage.setItem("manta:chat:sess-1:model", "{not json");
-    expect(() => readSavedChoice("sess-1")).not.toThrow();
-    expect(readSavedChoice("sess-1")).toEqual({ kind: "server-default" });
+  it("ignores non-model keys and non-matching keys", () => {
+    expect(parseOldModelPrefs("manta:foo", "x")).toBeNull();
+    expect(parseOldModelPrefs("other", null)).toBeNull();
   });
 
-  it("writes auto as the bare string, not a JSON object", () => {
-    writeSavedChoice("sess-1", { kind: "auto" });
-    expect(localStorage.getItem("manta:chat:sess-1:model")).toBe("auto");
+  it("skips malformed values (bad JSON, missing fields, empty session id)", () => {
+    expect(parseOldModelPrefs("manta:chat:sess-1:model", "{not json")).toBeNull();
+    expect(parseOldModelPrefs("manta:chat:sess-1:model", JSON.stringify({ modelID: "m" }))).toBeNull();
+    expect(parseOldModelPrefs("manta:chat:sess-1:model", JSON.stringify({ providerID: "p" }))).toBeNull();
+    expect(parseOldModelPrefs("manta:chat::model", JSON.stringify({ providerID: "p", modelID: "m" }))).toBeNull();
+    expect(parseOldModelPrefs("manta:chat:sess-1:model", null)).toBeNull();
   });
 
-  it("a session's choice is isolated from another session id", () => {
-    writeSavedChoice("sess-1", { kind: "auto" });
-    expect(readSavedChoice("sess-2")).toEqual({ kind: "server-default" });
+  it("collectOldModelPrefs builds sessions + auto lists, skipping malformed", () => {
+    const getEntry = (k: string): string | null =>
+      ({
+        "manta:chat:s1:model": JSON.stringify({ providerID: "anthropic", modelID: "claude-sonnet-4-6" }),
+        "manta:chat:s2:model": "auto",
+        "manta:chat:s3:model": "garbage",
+        "manta:chat:s4:plan": "1",
+      })[k] ?? null;
+    const collected = collectOldModelPrefs(getEntry, [
+      "manta:chat:s1:model",
+      "manta:chat:s2:model",
+      "manta:chat:s3:model",
+      "manta:chat:s4:plan",
+    ]);
+    expect(collected).not.toBeNull();
+    expect(collected!.sessions).toEqual({ s1: { providerID: "anthropic", modelID: "claude-sonnet-4-6" } });
+    expect(collected!.auto).toEqual(["s2"]);
+  });
+
+  it("collectOldModelPrefs returns null when nothing parseable was found", () => {
+    const collected = collectOldModelPrefs((k) => (k === "manta:chat:s1:model" ? "garbage" : null), ["manta:chat:s1:model", "manta:chat:s1:plan"]);
+    expect(collected).toBeNull();
   });
 });
 
@@ -371,30 +389,6 @@ describe("modelFromChoice (BET-1248 seed derivation)", () => {
   it("{kind:'auto'} → null (the routed pick is applied once a turn resolves)", () => {
     expect(modelFromChoice({ kind: "auto" }, server)).toBeNull();
     expect(modelFromChoice({ kind: "auto" }, null)).toBeNull();
-  });
-});
-
-describe("carrySavedChoice /clear carry-forward", () => {
-  beforeEach(() => {
-    localStorage.clear();
-  });
-  const sel = { providerID: "anthropic", modelID: "claude-sonnet-4-6" };
-
-  it("carries an explicit model to the destination session id", () => {
-    writeSavedChoice("sess-1", { kind: "model", model: sel });
-    carrySavedChoice("sess-1", "sess-2");
-    expect(readSavedChoice("sess-2")).toEqual({ kind: "model", model: sel });
-  });
-
-  it("carries the auto state to the destination session id", () => {
-    writeSavedChoice("sess-1", { kind: "auto" });
-    carrySavedChoice("sess-1", "sess-2");
-    expect(readSavedChoice("sess-2")).toEqual({ kind: "auto" });
-  });
-
-  it("is a no-op when the source has no stored choice (destination stays default)", () => {
-    carrySavedChoice("sess-1", "sess-2");
-    expect(readSavedChoice("sess-2")).toEqual({ kind: "server-default" });
   });
 });
 

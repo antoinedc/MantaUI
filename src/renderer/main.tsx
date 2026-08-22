@@ -15,6 +15,7 @@ import { installHttpTransport, setWindowApi } from "./transportInstall";
 import { applyTheme } from "./theme";
 import { pinDemoClock } from "./clock";
 import { loadPersistedSnapshot } from "./store";
+import { migrateModelPrefs } from "./modelPrefs";
 
 // Demo mode (BET-302): `?demo` in the URL swaps the real httpApi for a
 // fixture-backed transport and skips pairing / config / credential logic
@@ -126,6 +127,10 @@ async function chooseDesktopTransport(realPreload: PreloadApi): Promise<void> {
       // the cache so a re-pair to another box never replays the old box's
       // sessions/config.
       loadPersistedSnapshot(config.boxId);
+      // BET-1281: one-shot migration of the old per-session model keys
+      // (`manta:chat:*:model`) into the box store, right after the httpApi
+      // transport is live so modelPrefsSeed / setSessionChoice can reach it.
+      migrateModelPrefs();
     }
   } catch (e) {
     console.warn("[bui] configGet failed at entry:", e);

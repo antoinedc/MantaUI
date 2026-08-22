@@ -137,6 +137,10 @@ function defaultApiImpl(): Record<string, unknown> {
     webhookList: () => Promise.resolve([]),
     webhookDelete: () => Promise.resolve(),
     progressGet: () => Promise.resolve(null),
+    // Per-session model prefs (BET-1281): ChatPanel reads the box mirror through
+    // the shared modelPrefs module. Empty by default unless a test overrides it.
+    modelPrefsGet: () => Promise.resolve({ sessions: {}, recents: [] }),
+    onModelPrefsUpdated: () => () => {},
     // Voice / files — component may probe these on mount.
     getPathForFile: () => "",
     clipboardReadImage: () => Promise.resolve(null),
