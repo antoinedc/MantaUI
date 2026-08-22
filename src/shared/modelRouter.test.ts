@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { chooseModel, incumbentStillEligible, AGENT_TIER, PRESETS, type RoutingServices } from "./modelRouter.mjs";
+import { chooseModel, incumbentStillEligible, AGENT_TIER, type RoutingServices } from "./modelRouter.mjs";
 import { endpointKey } from "./endpointKey.mjs";
 import { tierRank } from "./modelGuide.mjs";
 import { AGENT_FLOOR_SCORE } from "./modelQuality.mjs";
@@ -151,9 +151,8 @@ async function catalogueServices(opts: {
   )) as RoutingServices;
 }
 
-describe("PRESETS / AGENT_TIER", () => {
-  it("exposes the three presets and the tier table read by the renderer", () => {
-    expect(PRESETS).toEqual(["economy", "balanced", "performance"]);
+describe("AGENT_TIER", () => {
+  it("exposes the tier table read by the renderer", () => {
     expect(AGENT_TIER.balanced.general).toBe("balanced");
     expect(AGENT_TIER.economy.general).toBe("fast");
   });

@@ -5,11 +5,15 @@
 // registries list, launcher flags, pairing, box status) stay as per-section
 // custom content rendered alongside the schema-driven fields.
 
-// 7f: the preset options are THE routing presets from the decision core — one
-// source of truth, so a rename in modelRouter can never drift from the schema
-// (the no-drift relationship BET-1232's test pins). Deliberately imported, not
-// re-declared by hand.
-import { PRESETS } from "./modelRouter.mjs";
+// 7f: the preset options are THE routing presets. They live HERE (in the
+// schema module) because the Swift settings-schema drift generator
+// (scripts/gen-swift-settings.mjs) transpiles this module to CJS and runs it
+// through a `new Function` that can only `require` CJS siblings — a cross-
+// `.ts`→`.mjs` import here breaks CI's `typecheck-test` (MODULE_NOT_FOUND).
+// Defining PRESETS here keeps the three options declared in exactly one place;
+// the no-drift guard (these must equal the router's AGENT_TIER preset keys)
+// lives in settingsSchema.test.ts.
+export const PRESETS = ["economy", "balanced", "performance"];
 //
 // BET-420 restructured the six flat tabs into eight sections clustered as
 // three ideas:

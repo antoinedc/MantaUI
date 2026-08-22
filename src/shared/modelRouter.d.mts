@@ -8,7 +8,6 @@ import type {
 
 export type Tier = "fast" | "balanced" | "deep";
 
-export const PRESETS: string[];
 export const AGENT_TIER: Record<string, Record<string, Tier>>;
 
 export interface Model {

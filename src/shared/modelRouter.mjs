@@ -39,9 +39,6 @@ import { shouldDerank } from "./toolReliability.mjs";
  * @property {RoutingSignals|null} winner
  */
 
-export const PRESETS = ["economy", "balanced", "performance"];
-
-/** Preferred tier per agent, per preset. Pure lookup table, no inference. */
 export const AGENT_TIER = {
   economy: { build: "balanced", plan: "deep", general: "fast", explore: "fast" },
   balanced: { build: "deep", plan: "deep", general: "balanced", explore: "fast" },
