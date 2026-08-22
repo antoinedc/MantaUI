@@ -92,14 +92,14 @@ test("shipped openrouter descriptor reads the live /api/v1/credits payload (BET-
   // balance = total_credits − total_usage = −0.0717 (overdrawn), and it is the
   // REMAINING balance that routes, not the granted total.
   const overdrawn = { data: { total_credits: 20, total_usage: 20.071752339 } };
-  const snap = readDescriptor(v.descriptor, overdrawn, 0);
+  const snap = readDescriptor(v.descriptor, overdrawn);
   assert.equal(snap.kind, "credit");
   assert.ok(Math.abs(snap.balance - (20 - 20.071752339)) < 1e-9, `expected remaining balance -0.07, got ${snap.balance}`);
   assert.equal(snap.exhausted, true);
   assert.equal(snap.windows[0].pct, 100);
 
   const healthy = { data: { total_credits: 20, total_usage: 5 } };
-  const healthySnap = readDescriptor(v.descriptor, healthy, 0);
+  const healthySnap = readDescriptor(v.descriptor, healthy);
   assert.equal(healthySnap.balance, 15);
   assert.equal(healthySnap.exhausted, undefined);
   assert.equal(healthySnap.windows[0].pct, 25);

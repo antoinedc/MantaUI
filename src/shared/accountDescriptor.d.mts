@@ -37,5 +37,4 @@ export function validateDescriptor(raw: unknown): DescriptorResult;
 export function readDescriptor(
   descriptor: AccountDescriptor,
   payload: unknown,
-  nowMs: number,
 ): Record<string, unknown>;

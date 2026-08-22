@@ -66,9 +66,16 @@ function load(): void {
     });
 }
 
-export function refreshRoutingCatalog(): void {
+// Test seam — same underscore convention as opencodeDb's `_resetDbHandle`.
+// The routing catalogue is cached module-level so re-opening Settings does not
+// re-download it. When a test installs a fresh window.api stub it needs to
+// clear that cache so the next useRoutingCatalog mount re-fetches against the
+// stub; there is no production caller (the old `refreshRoutingCatalog` had
+// none either and is deleted — 7f).
+export function _resetRoutingCatalogCache(): void {
+  cache = { supported: false, matcher: null, entries: [] };
   fetchedAt = 0;
-  if (!inFlight) load();
+  inFlight = null;
 }
 
 export function useRoutingCatalog(): RoutingCatalog {

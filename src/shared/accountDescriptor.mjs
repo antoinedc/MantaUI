@@ -227,11 +227,9 @@ function descriptorWindow(w, get) {
  * overdrawn → `exhausted: true`, and `positive-is-debt` inverts the raw value.
  * @param {object} descriptor  a validated descriptor
  * @param {unknown} payload    the parsed response body
- * @param {number} nowMs       epoch ms (kept for interface parity; window
- *                             timestamps are resolved from the payload)
  * @returns {object} an Omit<UsageSnapshot, "fetchedAt">-compatible object
  */
-export function readDescriptor(descriptor, payload, nowMs) {
+export function readDescriptor(descriptor, payload) {
   const get = (path) => getByPath(payload, path);
 
   const windows = Array.isArray(descriptor.windows)

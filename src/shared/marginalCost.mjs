@@ -127,12 +127,16 @@ function subscriptionWindowCost(win, rate, nowMs) {
  * @param {object} [input.account]  the provider's account state, or null when
  *                                  unknown:
  *   {
- *     kind: "subscription" | "credit" | "none",
+ *     kind: "subscription" | "credit",
  *     windows?: [{ kind, pct, startedAt, resetsAt, binding }],  // subscription
  *     balance?: number,                                          // credit, may be negative
  *     overagePrice?: number,                                     // $ per unit if published
  *     exhausted?: boolean,
  *   }
+ *   `kind: "none"` was removed (7f): accountsFromSnapshots only ever emits
+ *   "subscription" or "credit", so the "none" branch and its `basis: "none"`
+ *   were dead. An absent account already falls through to the no-account
+ *   branch below at blended rate with `basis: "unknown"`.
  * @param {number} input.nowMs
  * @param {object} [input.mix]          token mix for blendedPrice
  * @param {object} [input.reference]    reference price for the implausible-zero rule
@@ -164,24 +168,23 @@ export function marginalCost(input = {}) {
     };
   }
 
-  // --- credit / none ---------------------------------------------------------
-  if (account?.kind === "credit" || account?.kind === "none") {
+  // --- credit ---------------------------------------------------------------
+  // 7f: `kind: "none"` is gone — accountsFromSnapshots emits only credit or
+  // subscription, so the none branch (which priced identically to credit minus
+  // the premium) and its `basis: "none"` were dead. An unknown/absent kind
+  // falls through to the no-account branch below.
+  if (account?.kind === "credit") {
     const blended = dollar(blendedPrice(model, mix, reference).price);
     const factor = depletionFactor(account?.balance);
-    const premium = account?.kind === "credit" ? CREDIT_PREMIUM : 1;
-    const cost = blended * factor * premium;
-    const scarcity =
-      account?.kind === "credit"
-        ? isNum(account?.balance)
-          ? `depletion factor ${factor.toFixed(3)}`
-          : "no balance reading (factor 1)"
-        : "no account — declared rate";
-    const withPremium = account?.kind === "credit" ? `, credit premium ${CREDIT_PREMIUM}` : "";
+    const cost = blended * factor * CREDIT_PREMIUM;
+    const scarcity = isNum(account?.balance)
+      ? `depletion factor ${factor.toFixed(3)}`
+      : "no balance reading (factor 1)";
     return {
       cost,
       exhausted: false,
-      basis: account?.kind === "credit" ? (isNum(account?.balance) ? "credit-depletion" : "credit-flat") : "none",
-      reason: `credit/none: blended $${blended.toFixed(4)} (${scarcity})${withPremium}`,
+      basis: isNum(account?.balance) ? "credit-depletion" : "credit-flat",
+      reason: `credit: blended $${blended.toFixed(4)} (${scarcity}), credit premium ${CREDIT_PREMIUM}`,
     };
   }
 

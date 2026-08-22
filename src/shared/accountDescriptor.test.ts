@@ -28,7 +28,7 @@ describe("validateDescriptor", () => {
     if (!r.valid) return;
     expect(r.descriptor).toEqual(base);
     // A validated descriptor is directly usable for reading.
-    const snap = readDescriptor(r.descriptor, { account: { balance: 42 } }, 0);
+    const snap = readDescriptor(r.descriptor, { account: { balance: 42 } });
     expect(snap.balance).toBe(42);
   });
 
@@ -134,7 +134,6 @@ describe("readDescriptor", () => {
     const snap = readDescriptor(
       d,
       { data: { used: 120, limit: 200, resets_at: 1700000000, started_at: 1699990000 } },
-      0,
     );
     const windows = snap.windows as Array<Record<string, unknown>>;
     expect(windows).toHaveLength(1);

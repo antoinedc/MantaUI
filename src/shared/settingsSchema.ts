@@ -4,6 +4,12 @@
 // complex cards (ModelsCard, the merged Accounts list, plugins, skill-
 // registries list, launcher flags, pairing, box status) stay as per-section
 // custom content rendered alongside the schema-driven fields.
+
+// 7f: the preset options are THE routing presets from the decision core — one
+// source of truth, so a rename in modelRouter can never drift from the schema
+// (the no-drift relationship BET-1232's test pins). Deliberately imported, not
+// re-declared by hand.
+import { PRESETS } from "./modelRouter.mjs";
 //
 // BET-420 restructured the six flat tabs into eight sections clustered as
 // three ideas:
@@ -187,11 +193,10 @@ export const SETTINGS: SettingEntry[] = [
     platform: "desktop",
     default: "balanced",
     group: "Automatic Manta Routing",
-    options: [
-      { value: "economy", label: "Economy" },
-      { value: "balanced", label: "Balanced" },
-      { value: "performance", label: "Performance" },
-    ],
+    options: PRESETS.map((value) => ({
+      value,
+      label: value[0].toUpperCase() + value.slice(1),
+    })),
   },
 
   // ----- sessions (per-session behaviour) -----

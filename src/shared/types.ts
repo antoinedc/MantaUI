@@ -2459,9 +2459,6 @@ export type OpencodeModel = {
     cacheRead?: number; // $ per 1M cached-read tokens
     cacheWrite?: number; // $ per 1M cache-write tokens
   };
-  // `release_date` as reported by the provider; only a non-empty string is
-  // kept (some providers report "").
-  releaseDate?: string;
   // REQUIRED after normalization (always at least `{}`).
   capabilities: OpencodeModelCapabilities;
   variants?: Array<{ id: string }>;

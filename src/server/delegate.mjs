@@ -859,7 +859,7 @@ export async function startJob(input, deps = {}) {
           snapshots: quota,
           providerHealthState: deps.providerHealthState,
           endpointSummary: deps.endpointSummary,
-        });
+        }, nowMs);
       } catch (e) {
         console.error(`[router] routing services degraded, routing on absent context: ${e?.message ?? e}`);
         services = null;
@@ -871,7 +871,7 @@ export async function startJob(input, deps = {}) {
         catalog,
         policy,
         agent: resolveSubagentAgent(input?.subagent_type),
-        nowMs: Date.now(),
+        nowMs,
         services,
       });
     } catch (e) {

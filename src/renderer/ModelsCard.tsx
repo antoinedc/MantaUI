@@ -352,7 +352,7 @@ export function ModelsCard() {
   // the override in opencode:models) so both the table and the composed model
   // catalog reflect the change in the same tick.
   const saveOverride = useCallback(
-    async (key: string, _model: OpencodeModel, override: ModelOverride) => {
+    async (key: string, override: ModelOverride) => {
       if (busy) return;
       setBusy(key);
       await mutate(async () => {
@@ -604,7 +604,7 @@ export function ModelsCard() {
           <EditModelModal
             model={model}
             open={!!target}
-            onSave={(override) => void saveOverride(modelKey(model.providerID, model.id), model, override)}
+            onSave={(override) => void saveOverride(modelKey(model.providerID, model.id), override)}
             onCancel={() => setEditing(null)}
           />
         );

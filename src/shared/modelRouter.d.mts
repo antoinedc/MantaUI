@@ -27,9 +27,9 @@ export interface Model {
 
 export interface TelemetryEntry {
   tokensPerSec?: number;
+  p90TokensPerSec?: number;
   p50Ms?: number;
   p90Ms?: number;
-  latencyMs?: number;
 }
 
 export interface RoutingServices {

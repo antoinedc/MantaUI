@@ -27,9 +27,21 @@
 
 import { endpointKey } from "../shared/endpointKey.mjs";
 import { mixFromCounts } from "../shared/blendedPrice.mjs";
+import { ROUTING_LEDGER_WINDOW_MS } from "./modelLedger.mjs";
 
 const isObj = (v) => v !== null && typeof v === "object";
 const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+
+// 7c: the endpoint-ledger summary is memoised behind a short TTL so every
+// routing decision does not re-scan the whole message history (a JSON.parse
+// per assistant row — every turn boundary and every background-job spawn).
+// There is ONE ledger on the box, so the cache is keyed on nothing but the
+// injected endpointSummary fn (the identity key stops one test's stub leaking
+// into the next; in production it is the same fn every call). A 60s-stale
+// reliability figure cannot change a decision that matters, so deliberately no
+// invalidation protocol, no bus event, no config knob.
+const ROUTING_LEDGER_TTL_MS = 60_000;
+let ledgerCache = null; // { sum, at, value } — one slot, TTL-bounded
 
 // Fold the config's per-endpoint user overrides into the `declared` map the
 // router reads. The config key is modelRouting.declaredModels (see
@@ -145,8 +157,16 @@ export function healthFor(providerIDs, providerHealthState) {
 //   reliability.baseline — per-MODEL aggregate across its endpoints, so a
 //                          single bad endpoint can be told apart from a model
 //                          that is simply hard everywhere
-//   telemetry[key]       — { tokensPerSec, p50Ms, p90Ms, latencyMs }
+//   telemetry[key]       — { tokensPerSec, p90TokensPerSec, p50Ms, p90Ms }
 export function ledgerToServices(stats) {
+  // 7a — separate the ledger's availability flag from its data. `supported:
+  // false` (no DB / failed query) must NOT fold to present-but-empty maps: the
+  // router treats an ABSENT reliability/telemetry as "no evidence, never
+  // derank, measured-average", which is exactly what a missing ledger means. A
+  // supported-but-empty ledger yields present empty maps instead.
+  if (stats?.supported === false) {
+    return { reliability: undefined, telemetry: undefined, mix: undefined, mixDefault: undefined };
+  }
   const samples = {};
   const perModel = new Map(); // modelID -> { requests, errored }
   const telemetry = {};
@@ -154,7 +174,8 @@ export function ledgerToServices(stats) {
   // Aggregate every endpoint's raw token counts so an endpoint with no history
   // of its own is priced on the box's overall measured mix, not a constant.
   let agg = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-  for (const [key, s] of Object.entries(isObj(stats) ? stats : {})) {
+  const endpoints = isObj(stats?.endpoints) ? stats.endpoints : {};
+  for (const [key, s] of Object.entries(endpoints)) {
     const rel = isObj(s?.reliability) ? s.reliability : null;
     if (rel && typeof rel.requests === "number") {
       const requests = rel.requests;
@@ -170,9 +191,9 @@ export function ledgerToServices(stats) {
     const latency = isObj(s?.latency) ? s.latency : {};
     telemetry[key] = {
       ...(typeof speed.p50TokensPerSec === "number" ? { tokensPerSec: speed.p50TokensPerSec } : {}),
+      ...(typeof speed.p90TokensPerSec === "number" ? { p90TokensPerSec: speed.p90TokensPerSec } : {}),
       ...(typeof latency.p50Ms === "number" ? { p50Ms: latency.p50Ms } : {}),
       ...(typeof latency.p90Ms === "number" ? { p90Ms: latency.p90Ms } : {}),
-      ...(typeof latency.p90Ms === "number" ? { latencyMs: latency.p90Ms } : {}),
     };
     if (isObj(s?.mix)) {
       // Convert raw token counts to fractions once, here, so services.mix[key]
@@ -212,13 +233,15 @@ export function ledgerToServices(stats) {
  *   providerIDs health is keyed by) — e.g. listRoutableModels output
  * @param {Array<object>} [deps.snapshots]  usage snapshots (src/server/usage.mjs)
  * @param {Function} [deps.providerHealthState]  (providerID) => state string
- * @param {Function} [deps.endpointSummary]  async () => { supported, ... } —
- *   src/server/modelLedger.mjs endpointSummary
+ * @param {Function} [deps.endpointSummary]  async ({sinceMs}) => { supported, endpoints } —
+ *   src/server/modelLedger.mjs endpointSummary (memoised behind a short TTL)
  * @param {Function} [deps.buildReliabilityBaseline]  optional override for the
  *   reliability/telemetry fold (tests)
+ * @param {number} [nowMs]          injected clock (defaults to Date.now()); the
+ *   rolling-window edge and the leave it as the TTL cache's timestamp
  * @returns {Promise<object>}  the RoutingServices-shaped object
  */
-export async function buildRoutingServices(cfg = {}, deps = {}) {
+export async function buildRoutingServices(cfg = {}, deps = {}, nowMs = Date.now()) {
   const services = {};
   const catalogue = deps.catalogIndex ?? null;
 
@@ -312,8 +335,15 @@ export async function buildRoutingServices(cfg = {}, deps = {}) {
     const fold = typeof deps.buildReliabilityBaseline === "function" ? deps.buildReliabilityBaseline : ledgerToServices;
     let stats = null;
     if (typeof deps.endpointSummary === "function") {
-      stats = await deps.endpointSummary();
-      if (!isObj(stats)) stats = null;
+      if (ledgerCache && ledgerCache.sum === deps.endpointSummary && nowMs - ledgerCache.at < ROUTING_LEDGER_TTL_MS) {
+        stats = ledgerCache.value;
+      } else {
+        // 7b: a rolling window (14 days), not all history since the epoch — a
+        // single bad week eight months ago must not derank an endpoint forever.
+        stats = await deps.endpointSummary({ sinceMs: nowMs - ROUTING_LEDGER_WINDOW_MS });
+        if (isObj(stats)) ledgerCache = { sum: deps.endpointSummary, at: nowMs, value: stats };
+        if (!isObj(stats)) stats = null;
+      }
     }
     if (stats) {
       const { reliability, telemetry, mix, mixDefault } = fold(stats);

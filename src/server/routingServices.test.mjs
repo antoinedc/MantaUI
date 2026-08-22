@@ -13,6 +13,7 @@ import {
   buildRoutingServices,
 } from "./routingServices.mjs";
 import { mixFromCounts } from "../shared/blendedPrice.mjs";
+import { ROUTING_LEDGER_WINDOW_MS } from "./modelLedger.mjs";
 
 test("normalizeDeclared reads modelRouting.declaredModels and passes objects through", () => {
   const out = normalizeDeclared({
@@ -106,17 +107,20 @@ test("healthFor is empty when no state reader is wired", () => {
 
 test("ledgerToServices folds reliability samples, per-model baselines, telemetry and a NORMALISED per-endpoint mix + overall mixDefault", () => {
   const stats = {
-    "anthropic/claude-opus-4": {
-      reliability: { requests: 30, errored: 3, rate: 0.1 },
-      speed: { p50TokensPerSec: 100, p90TokensPerSec: 80 },
-      latency: { p50Ms: 500, p90Ms: 900 },
-      mix: { input: 5, output: 10, cacheRead: 20, cacheWrite: 30 },
-    },
-    "openai/claude-opus-4": {
-      reliability: { requests: 10, errored: 5, rate: 0.5 },
-      speed: { p50TokensPerSec: 60, p90TokensPerSec: 50 },
-      latency: { p50Ms: 700, p90Ms: 1100 },
-      mix: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 },
+    supported: true,
+    endpoints: {
+      "anthropic/claude-opus-4": {
+        reliability: { requests: 30, errored: 3, rate: 0.1 },
+        speed: { p50TokensPerSec: 100, p90TokensPerSec: 80 },
+        latency: { p50Ms: 500, p90Ms: 900 },
+        mix: { input: 5, output: 10, cacheRead: 20, cacheWrite: 30 },
+      },
+      "openai/claude-opus-4": {
+        reliability: { requests: 10, errored: 5, rate: 0.5 },
+        speed: { p50TokensPerSec: 60, p90TokensPerSec: 50 },
+        latency: { p50Ms: 700, p90Ms: 1100 },
+        mix: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 },
+      },
     },
   };
   const { reliability, telemetry, mix, mixDefault } = ledgerToServices(stats);
@@ -124,13 +128,22 @@ test("ledgerToServices folds reliability samples, per-model baselines, telemetry
   assert.deepEqual(reliability.samples["anthropic/claude-opus-4"], { requests: 30, errored: 3, rate: 0.1 });
   // baseline keyed by MODEL id — aggregate across both endpoints of the model
   assert.deepEqual(reliability.baseline["claude-opus-4"], { rate: (3 + 5) / (30 + 10), n: 40 });
-  // telemetry maps the >5-sample percentiles
+  // telemetry maps the >5-sample percentiles; p90 throughput is carried
+  // through and there is NO `latencyMs` (7e — it was a duplicate of p90Ms)
   assert.deepEqual(telemetry["anthropic/claude-opus-4"], {
     tokensPerSec: 100,
+    p90TokensPerSec: 80,
     p50Ms: 500,
     p90Ms: 900,
-    latencyMs: 900,
   });
+  assert.deepEqual(telemetry["openai/claude-opus-4"], {
+    tokensPerSec: 60,
+    p90TokensPerSec: 50,
+    p50Ms: 700,
+    p90Ms: 1100,
+  });
+  // No bogus "supported" endpoint leaks into the telemetry map (7a).
+  assert.deepEqual(Object.keys(telemetry).sort(), ["anthropic/claude-opus-4", "openai/claude-opus-4"]);
   // Mixes are NORMALISED to fractions (mixFromCounts), not raw counts (5a) —
   // an endpoint with no history is then priced on the box's overall mixDefault.
   assert.deepEqual(mix["anthropic/claude-opus-4"], mixFromCounts({ input: 5, output: 10, cacheRead: 20, cacheWrite: 30 }));
@@ -139,11 +152,25 @@ test("ledgerToServices folds reliability samples, per-model baselines, telemetry
 });
 
 test("ledgerToServices is empty-safe and ignores degenerate rows; no mix => no mixDefault", () => {
-  const { reliability, telemetry, mix, mixDefault } = ledgerToServices({});
+  const { reliability, telemetry, mix, mixDefault } = ledgerToServices({ supported: true, endpoints: {} });
   assert.deepEqual(reliability, { samples: {}, baseline: {} });
   assert.deepEqual(telemetry, {});
   assert.deepEqual(mix, {});
   assert.equal(mixDefault, undefined);
+});
+
+test("ledgerToServices: supported:false leaves reliability/telemetry undefined and emits no endpoint named 'supported' (7a)", () => {
+  // An unsupported ledger (no DB) is NOT the same as a ledger with nothing in
+  // it. The first must leave reliability/telemetry ABSENT (router's permissive
+  // "no evidence, never derank" default); only the second yields present-empty.
+  const { reliability, telemetry, mix, mixDefault } = ledgerToServices({ supported: false });
+  assert.equal(reliability, undefined);
+  assert.equal(telemetry, undefined);
+  assert.equal(mix, undefined);
+  assert.equal(mixDefault, undefined);
+  // And a supported ledger with data must never surface an endpoint literally
+  // named "supported" (the 7a bug: Object.entries over the flattened map).
+  assert.equal(("supported" in ledgerToServices({ supported: true, endpoints: {} }).telemetry), false);
 });
 
 test("buildRoutingServices populates referenceByModel from the catalogue's typical input/output rates (5b)", async () => {
@@ -218,11 +245,13 @@ test("buildRoutingServices assembles a full services object from live readers", 
       providerHealthState: (pid) => (pid === "openai" ? "rate-limited" : "ok"),
       endpointSummary: async () => ({
         supported: true,
-        "anthropic/claude-opus-4": {
-          reliability: { requests: 25, errored: 2, rate: 0.08 },
-          speed: { p50TokensPerSec: 90 },
-          latency: { p50Ms: 400, p90Ms: 800 },
-          mix: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 },
+        endpoints: {
+          "anthropic/claude-opus-4": {
+            reliability: { requests: 25, errored: 2, rate: 0.08 },
+            speed: { p50TokensPerSec: 90 },
+            latency: { p50Ms: 400, p90Ms: 800 },
+            mix: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 },
+          },
         },
       }),
     },
@@ -247,6 +276,37 @@ test("buildRoutingServices assembles a full services object from live readers", 
   assert.equal(services.telemetry["anthropic/claude-opus-4"].tokensPerSec, 90);
   assert.deepEqual(services.mix["anthropic/claude-opus-4"], mixFromCounts({ input: 1, output: 2, cacheRead: 3, cacheWrite: 4 }));
   assert.deepEqual(services.mixDefault, mixFromCounts({ input: 1, output: 2, cacheRead: 3, cacheWrite: 4 }));
+});
+
+test("buildRoutingServices reads the ledger over a rolling window, not all history (7b)", async () => {
+  let seenSinceMs = undefined;
+  const now = 2_000_000_000_000;
+  const spy = async ({ sinceMs }) => {
+    seenSinceMs = sinceMs;
+    return { supported: true, endpoints: {} };
+  };
+  await buildRoutingServices({ modelRouting: { preset: "balanced" } }, { endpointSummary: spy }, now);
+  // The window edge is injected nowMs minus the 14-day constant — an all-
+  // history read (sinceMs 0) would never recover from a bad week eight months
+  // ago.
+  assert.equal(seenSinceMs, now - ROUTING_LEDGER_WINDOW_MS);
+});
+
+test("buildRoutingServices memoises the ledger summary behind the TTL: one read per decision (7c)", async () => {
+  let calls = 0;
+  const counting = async () => {
+    calls += 1;
+    return { supported: true, endpoints: {} };
+  };
+  const now = 1_000_000_000_000;
+  // First call populates the cache; a second call inside the 60s TTL reuses it
+  // — two routing decisions must NOT each re-scan the whole message history.
+  await buildRoutingServices({ modelRouting: { preset: "balanced" } }, { endpointSummary: counting }, now);
+  await buildRoutingServices({ modelRouting: { preset: "balanced" } }, { endpointSummary: counting }, now + 30_000);
+  assert.equal(calls, 1);
+  // Outside the TTL → a fresh read.
+  await buildRoutingServices({ modelRouting: { preset: "balanced" } }, { endpointSummary: counting }, now + 60_001);
+  assert.equal(calls, 2);
 });
 
 test("buildRoutingServices safety contract: a throwing reader degrades, never throws", async () => {

@@ -110,7 +110,12 @@ function assess(candidate, { nowMs, replacementCost }, services) {
   // inputs marginalCost handed it — reported verbatim, not recomputed. This is
   // what makes a silently-defaulted mix / absent catalogue visible (BET-1265).
   const bp = blendedPrice(m, perMix, ref);
-  const penalise = shouldDerank(services.reliability?.samples?.[key], services.reliability?.baseline?.[candidate.id]).penalise === true;
+  // 7d: three-valued reliability rank (0 measured, 1 unmeasured, 2 deranked),
+  // NOT the old binary "penalise?" — an unmeasured endpoint is treated as
+  // average, never as good (a binary flag made it identical to a measured-
+  // reliable one).
+  const rank = shouldDerank(services.reliability?.samples?.[key], services.reliability?.baseline?.[candidate.id]).rank;
+  const rankIsNum = typeof rank === "number" && Number.isFinite(rank);
   return {
     key,
     candidate,
@@ -127,7 +132,7 @@ function assess(candidate, { nowMs, replacementCost }, services) {
     reference: bp.reference,
     reliability: services.reliability?.samples?.[key] ? "measured" : "unmeasured",
     telemetry: services.telemetry?.[key] ?? {},
-    penalise,
+    rank: rankIsNum ? rank : 1,
   };
 }
 
@@ -245,16 +250,18 @@ function healthRank(a, services) {
 }
 
 // Soft ordering within a competing set (same model, or a flattened economy
-// set): penalised sorts last; then a soft `failing` health sorts behind a
-// healthy endpoint (BET-1270 6a — placed after reliability, before cost); then
-// cost; then quality, throughput, the latency percentiles, and finally the full
-// provider/model key — deterministic (the model id alone is identical for
-// exactly the endpoints most likely to tie, so the old final tie-break was
-// deterministic by accident).
+// set): reliability RANK sorts first (0 measured-reliable, 1 unmeasured, 2
+// deranked — BET-1270 6a placed reliability before cost); then a soft
+// `failing` health sorts behind a healthy endpoint; then cost; then quality,
+// throughput (p50 then p90), the latency percentiles (p50 then p90), and
+// finally the full provider/model key — deterministic (the model id alone is
+// identical for exactly the endpoints most likely to tie, so the old final
+// tie-break was deterministic by accident). `latencyMs` is gone (7e): it was a
+// duplicate of p90Ms and the p90 throughput the ledger emits was discarded.
 function cmpWithinModel(a, b, services) {
-  const pa = a.penalise ? 1 : 0;
-  const pb = b.penalise ? 1 : 0;
-  if (pa !== pb) return pa - pb;
+  const ra = typeof a.rank === "number" ? a.rank : 1;
+  const rb = typeof b.rank === "number" ? b.rank : 1;
+  if (ra !== rb) return ra - rb;
   const ha = healthRank(a, services);
   const hb = healthRank(b, services);
   if (ha !== hb) return ha - hb;
@@ -265,15 +272,15 @@ function cmpWithinModel(a, b, services) {
   const tsA = num0(ta.tokensPerSec);
   const tsB = num0(tb.tokensPerSec);
   if (tsA !== tsB) return tsB - tsA;
+  const p90tsA = num0(ta.p90TokensPerSec);
+  const p90tsB = num0(tb.p90TokensPerSec);
+  if (p90tsA !== p90tsB) return p90tsB - p90tsA;
   const p50A = numInf(ta.p50Ms);
   const p50B = numInf(tb.p50Ms);
   if (p50A !== p50B) return p50A - p50B;
   const p90A = numInf(ta.p90Ms);
   const p90B = numInf(tb.p90Ms);
   if (p90A !== p90B) return p90A - p90B;
-  const latA = numInf(ta.latencyMs);
-  const latB = numInf(tb.latencyMs);
-  if (latA !== latB) return latA - latB;
   return String(a.key).localeCompare(String(b.key));
 }
 
