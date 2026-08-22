@@ -6,17 +6,23 @@ import Combine
 //
 // Owns the per-SESSION model selection (override + effort variant folded into
 // one JSON blob); the box-wide model list + defaults come from the shared
-// `ChatModelCatalog`, fetched once and mirrored here. The selection is a JSON
-// blob stored under ONE key per session, `manta:chat:<sessionId>:model`,
-// byte-identical in name and shape to the desktop's ModelSelection
-// (src/renderer/chatShared.tsx) — one model per session, plan mode never
-// changes the model.
+// `ChatModelCatalog`, fetched once and mirrored here.
+//
+// BET-1282: the selection is no longer stored in UserDefaults under a
+// per-session key — it now lives in the box store and is mirrored through the
+// shared `ChatModelPrefs` cache (one box-wide fetch, refetched on
+// `model-prefs.updated`), so the same conversation on another device shows the
+// same model and a reinstall keeps the choice. `ChatModelStore` remains the
+// SINGLE place the UI mutates the selection
+// (setOverride/setVariant/apply/setFast/recordCurrentChoice): those mutators
+// update local state immediately AND write the box through the cache — views
+// never talk to `ChatModelPrefs` directly.
 //
 // The catalog is why clearing a session does NOT reload models: the clear
 // rebuilds this store for the new session id, but the list is already loaded
 // and shared, so there is no second fetch. The selection is carried to the new
-// id by `rebind(to:)` (matching the desktop's clear handler, which copies the
-// override into the new session's key).
+// id by `rebind(to:)` — a single write through the box cache, matching the
+// desktop's clear handler which copies the override into the new session's key.
 // ===========================================================================
 
 @MainActor
@@ -37,8 +43,8 @@ final class ChatModelStore: ObservableObject {
     /// changes rather than carried onto a model that has no such setting.
     @Published private(set) var variant: String?
     /// The last 3–5 (model, effort, fast) triples actually used, most recent
-    /// first. Persisted PER BOX (a habit, not a conversation), unlike the
-    /// override/variant above which are per-session.
+    /// first. Persisted in the BOX store (a habit that follows the user across
+    /// devices — BET-1282), unlike the pre-upgrade device-local UserDefaults.
     @Published private(set) var recents: [ModelChoice] = []
     /// "providerID/modelID" keys of deprecated models the user has explicitly
     /// opted back in to (BET-1140). Per box (UserDefaults), like recents — not
@@ -58,17 +64,21 @@ final class ChatModelStore: ObservableObject {
 
     let sessionId: String
     private let catalog: ChatModelCatalog
+    private let prefs: ChatModelPrefs
     private let api: MantaAPIClient
     private var didLoadAgents = false
     private var cancellables: Set<AnyCancellable> = []
 
-    init(sessionId: String, api: MantaAPIClient, catalog: ChatModelCatalog = .shared) {
+    init(sessionId: String, api: MantaAPIClient, catalog: ChatModelCatalog = .shared, prefs: ChatModelPrefs = .shared) {
         self.sessionId = sessionId
         self.catalog = catalog
+        self.prefs = prefs
         self.api = api
         let planOn = UserDefaults.standard.bool(forKey: Self.planKey(for: sessionId))
         self.planOn = planOn
-        let stored = Self.loadSelection(for: sessionId)
+        // The per-session selection now comes from the box store (via the shared
+        // cache), not UserDefaults.
+        let stored = prefs.selection(for: sessionId)
         self.override = stored.map { OpencodeModelID(providerID: $0.providerID, modelID: $0.modelID) }
         self.variant = stored?.variant
         // Clean up the pre-BET-1280 per-mode plan key on first read of a
@@ -83,11 +93,18 @@ final class ChatModelStore: ObservableObject {
         self.defaultModel = catalog.defaultModel
         self.configDefault = catalog.configDefault
         self.loaded = catalog.loaded
-        self.recents = ModelRecents.load()
+        self.recents = prefs.recents
         self.deprecatedOptIns = DeprecatedModelOptIns.load()
         catalog.objectWillChange
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.mirrorCatalog() }
+            .store(in: &cancellables)
+        // Mirror the box prefs cache so a change — this device's write, or one
+        // that arrived from another device via `model-prefs.updated` — lands on
+        // the selection + recents.
+        prefs.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.mirrorPrefs() }
             .store(in: &cancellables)
     }
 
@@ -98,11 +115,11 @@ final class ChatModelStore: ObservableObject {
         loaded = catalog.loaded
     }
 
-    /// The UserDefaults key mirroring the desktop's per-session model key —
-    /// one key per session, holding the whole JSON selection (model + effort).
-    /// Mirrors the desktop key in src/renderer/chatShared.tsx byte-for-byte.
-    static func storageKey(for sessionId: String) -> String {
-        "manta:chat:\(sessionId):model"
+    private func mirrorPrefs() {
+        let stored = prefs.selection(for: sessionId)
+        override = stored.map { OpencodeModelID(providerID: $0.providerID, modelID: $0.modelID) }
+        variant = stored?.variant
+        recents = prefs.recents
     }
 
     /// The per-session plan-mode key (BET-952), a plain Bool — never folded
@@ -126,22 +143,14 @@ final class ChatModelStore: ObservableObject {
         }
     }
 
-    /// Carry the current override + variant to a NEW session id. Called just
-    /// before a clear swaps the id, so the rebuilt store for the new session
-    /// picks up the same model the user had chosen — matching the desktop,
-    /// which copies the override into the new session's key on /clear.
-    ///
-    /// The whole selection (model + variant) is one value under one key, so
-    /// the RAW stored JSON blob is copied. The old session's keys are left
-    /// alone.
+    /// Carry the current selection to a NEW session id. Called just before a
+    /// clear swaps the id, so the rebuilt store for the new session picks up
+    /// the same model the user had chosen — matching the desktop, which copies
+    /// the override into the new session's key on /clear. A SINGLE write
+    /// through the box cache; the old session's record is left alone.
     func rebind(to newSessionId: String) {
         guard newSessionId != sessionId else { return }
-        let defaults = UserDefaults.standard
-        let fromKey = Self.storageKey(for: sessionId)
-        let toKey = Self.storageKey(for: newSessionId)
-        if let raw = defaults.string(forKey: fromKey) {
-            defaults.set(raw, forKey: toKey)
-        }
+        prefs.setSession(prefs.selection(for: sessionId), for: newSessionId)
         if planOn {
             UserDefaults.standard.set(planOn, forKey: Self.planKey(for: newSessionId))
         }
@@ -160,22 +169,18 @@ final class ChatModelStore: ObservableObject {
     }
 
     /// Persist the whole current selection (override + variant) as one JSON
-    /// blob under the single per-session key. No override means the session has
-    /// no explicit model — remove the key (server default applies), mirroring
-    /// the desktop.
+    /// value under the session's box record. No override means the session has
+    /// no explicit model — clear the box record (server default applies),
+    /// mirroring the desktop.
     private func persistSelection() {
-        let defaults = UserDefaults.standard
-        let key = Self.storageKey(for: sessionId)
-        if let override {
-            let selection = ChatModel.ModelSelection(
-                providerID: override.providerID,
-                modelID: override.modelID,
+        let selection: ChatModel.ModelSelection? = override.map {
+            ChatModel.ModelSelection(
+                providerID: $0.providerID,
+                modelID: $0.modelID,
                 variant: variant
             )
-            defaults.set(ChatModel.encode(selection), forKey: key)
-        } else {
-            defaults.removeObject(forKey: key)
         }
+        prefs.setSession(selection, for: sessionId)
     }
 
     /// Set (or clear, with nil) the per-session override. A model change drops
@@ -220,13 +225,14 @@ final class ChatModelStore: ObservableObject {
 
     /// Apply a stored recent choice (base model id + effort + fast) to the
     /// override + variant, then move it to the front of recents. Selecting a
-    /// recent IS the act of using it, so it is recorded on apply.
+    /// recent IS the act of using it, so it is recorded on apply. The recents
+    /// list is written to the box via the shared cache.
     func apply(_ choice: ModelChoice) {
         let targetID = choice.fast ? ChatModel.fastModelID(choice.modelID) : choice.modelID
         setOverride(OpencodeModelID(providerID: choice.providerID, modelID: targetID))
         setVariant(choice.variant)
         recents = ModelRecents.record(choice, into: recents)
-        ModelRecents.save(recents)
+        prefs.setRecents(recents)
     }
 
     /// Record the current effective (model, effort, fast) as a recent — called
@@ -247,7 +253,7 @@ final class ChatModelStore: ObservableObject {
             fast: ChatModel.isFastModelID(active.id)
         )
         recents = ModelRecents.record(choice, into: recents)
-        ModelRecents.save(recents)
+        prefs.setRecents(recents)
     }
 
     /// Flip fast mode on the active model, carrying the current effort across
@@ -290,20 +296,5 @@ final class ChatModelStore: ObservableObject {
     func setPlan(_ on: Bool) {
         planOn = on
         UserDefaults.standard.set(on, forKey: Self.planKey(for: sessionId))
-    }
-
-    /// The remembered per-session selection, or nil when the session has none
-    /// (the server/box default applies).
-    static func loadSelection(for sessionId: String) -> ChatModel.ModelSelection? {
-        let key = storageKey(for: sessionId)
-        if let raw = UserDefaults.standard.string(forKey: key), let decoded = ChatModel.decode(raw) {
-            return decoded
-        }
-        return nil
-    }
-
-    /// The remembered per-session model id, or nil when the session has none.
-    static func loadOverride(for sessionId: String) -> OpencodeModelID? {
-        loadSelection(for: sessionId).map { OpencodeModelID(providerID: $0.providerID, modelID: $0.modelID) }
     }
 }

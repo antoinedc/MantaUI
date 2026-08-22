@@ -22,10 +22,10 @@ import UIKit
 // (S1a reply/reject RPCs). Parent and children are each their own store; a
 // child store is read-only (§8a v1).
 //
-// Deliberately does NOT touch the event store's single-owner `rawFrameHandler`
-// or `resyncHandler`; resync + attention are derived from the @Published stream
-// state and a connectionState transition instead, so the session list's
-// handlers (owned by SessionListStore) are never clobbered.
+// Deliberately does NOT touch the event store's raw-frame handlers
+// (`addRawFrameHandler`) or `resyncHandler`; resync + attention are derived
+// from the @Published stream state and a connectionState transition instead,
+// so the session list's + model-prefs' handlers are never clobbered.
 // ===========================================================================
 
 // ===========================================================================

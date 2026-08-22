@@ -443,12 +443,11 @@ final class ModelRecentsTests: XCTestCase {
 }
 
 // ===========================================================================
-// BET-1280 — ChatModelStore single per-session model: ONE key
-// (`manta:chat:<sid>:model`) holding the whole JSON selection (model + effort),
-// byte-identical in name and shape to the desktop's ModelSelection
-// (src/renderer/chatShared.tsx). Plan mode never changes the model. The literal
-// key string is an assertion because cross-client compatibility depends on it
-// matching the desktop's key byte-for-byte.
+// BET-1282 — ChatModelStore per-session selection: no longer a UserDefaults
+// copy under `manta:chat:<sid>:model`. The selection lives in the box store,
+// mirrored through the shared `ChatModelPrefs` cache. ChatModelStore stays the
+// single place the UI mutates the selection; its mutators update the cache
+// immediately (so these assertions read it synchronously) and write the box.
 // ===========================================================================
 
 @MainActor
@@ -456,27 +455,16 @@ final class ChatModelStoreKeyTests: XCTestCase {
 
     private let sid = "test-session"
     private let otherSid = "test-session-2"
-    private var modelKey: String { ChatModelStore.storageKey(for: sid) }
-    private var otherModelKey: String { ChatModelStore.storageKey(for: otherSid) }
-    private var legacyPlanKey: String { "manta:chat:\(sid):model:plan" }
-    private var workingKeys: [String] {
-        [modelKey, otherModelKey,
-         ChatModelStore.planKey(for: sid), ChatModelStore.planKey(for: otherSid),
-         legacyPlanKey]
-    }
+    private var api = MantaAPIClient(serverURL: URL(string: "https://example.com")!)
+    private var prefs: ChatModelPrefs!
 
     override func setUp() {
         super.setUp()
-        for key in workingKeys { UserDefaults.standard.removeObject(forKey: key) }
-    }
-
-    override func tearDown() {
-        for key in workingKeys { UserDefaults.standard.removeObject(forKey: key) }
-        super.tearDown()
+        prefs = ChatModelPrefs(api: MantaAPIClient(serverURL: URL(string: "https://example.com")!))
     }
 
     private func store(_ id: String) -> ChatModelStore {
-        ChatModelStore(sessionId: id, api: MantaAPIClient(serverURL: URL(string: "https://example.com")!))
+        ChatModelStore(sessionId: id, api: api, catalog: ChatModelCatalog(api: api), prefs: prefs)
     }
 
     private func model(_ m: String) -> OpencodeModelID {
@@ -487,64 +475,45 @@ final class ChatModelStoreKeyTests: XCTestCase {
         ChatModel.ModelSelection(providerID: "anthropic", modelID: m, variant: variant)
     }
 
-    // MARK: - Literal key string (cross-client compatibility)
-
-    func testStorageKeyLiteralString() {
-        XCTAssertEqual(ChatModelStore.storageKey(for: "S"), "manta:chat:S:model")
-    }
-
-    // MARK: - Read
-
-    func testReadWithSelectionStoredReturnsIt() {
-        UserDefaults.standard.set(ChatModel.encode(selection("sonnet", variant: "high")), forKey: modelKey)
-        XCTAssertEqual(ChatModelStore.loadSelection(for: sid), selection("sonnet", variant: "high"))
-        XCTAssertEqual(ChatModelStore.loadOverride(for: sid), model("sonnet"))
-    }
-
-    func testReadWithNothingStoredReturnsNil() {
-        XCTAssertNil(ChatModelStore.loadSelection(for: sid))
-        XCTAssertNil(ChatModelStore.loadOverride(for: sid))
-    }
-
-    // MARK: - setOverride drops the variant; setVariant folds it into the blob
+    // MARK: - setOverride drops the variant; setVariant folds it into the box selection
 
     func testSetOverrideDropsVariant() {
         let s = store(sid)
         s.setOverride(model("sonnet"))
         s.setVariant("high")
-        XCTAssertEqual(ChatModelStore.loadSelection(for: sid), selection("sonnet", variant: "high"))
+        XCTAssertEqual(prefs.selection(for: sid), selection("sonnet", variant: "high"))
 
         s.setOverride(model("opus"))                        // model changed → variant cleared
-        XCTAssertEqual(ChatModelStore.loadSelection(for: sid), selection("opus"))
+        XCTAssertEqual(prefs.selection(for: sid), selection("opus"))
         XCTAssertEqual(s.variant, nil)
     }
 
-    func testSetOverrideNilRemovesKey() {
+    func testSetOverrideNilClearsSelection() {
         let s = store(sid)
         s.setOverride(model("sonnet"))
-        XCTAssertNotNil(UserDefaults.standard.string(forKey: modelKey))
-        XCTAssertEqual(ChatModelStore.loadSelection(for: sid), selection("sonnet"))
+        XCTAssertEqual(prefs.selection(for: sid), selection("sonnet"))
         s.setOverride(nil)
-        XCTAssertNil(UserDefaults.standard.string(forKey: modelKey))
+        XCTAssertNil(prefs.selection(for: sid))
         XCTAssertEqual(s.override, nil)
     }
 
-    // MARK: - rebind copies the ONE key verbatim, leaves the old one alone
+    // MARK: - rebind writes the selection to the new session, leaves the old one alone
 
-    func testRebindCopiesTheSingleKeyAndLeavesOldAlone() {
-        UserDefaults.standard.set(ChatModel.encode(selection("sonnet", variant: "high")), forKey: modelKey)
-        store(sid).rebind(to: otherSid)
+    func testRebindCopiesSelectionAndLeavesOldAlone() {
+        let s = store(sid)
+        s.setOverride(model("sonnet"))
+        s.setVariant("high")
+        s.rebind(to: otherSid)
 
-        // rebind copies the RAW stored value verbatim.
-        XCTAssertEqual(UserDefaults.standard.string(forKey: modelKey), UserDefaults.standard.string(forKey: otherModelKey))
-        XCTAssertEqual(ChatModelStore.loadSelection(for: otherSid), selection("sonnet", variant: "high"))
-        // The source session's key is untouched.
-        XCTAssertEqual(ChatModelStore.loadSelection(for: sid), selection("sonnet", variant: "high"))
+        // rebind carries the current selection to the new session via the box cache.
+        XCTAssertEqual(prefs.selection(for: otherSid), selection("sonnet", variant: "high"))
+        // The source session's selection is untouched.
+        XCTAssertEqual(prefs.selection(for: sid), selection("sonnet", variant: "high"))
     }
 
     func testRebindWithNothingStoredLeavesDestinationAbsent() {
         store(sid).rebind(to: otherSid)
-        XCTAssertNil(UserDefaults.standard.string(forKey: otherModelKey))
+        XCTAssertNil(prefs.selection(for: otherSid))
     }
 
     // MARK: - Plan mode never changes the model
@@ -553,7 +522,7 @@ final class ChatModelStoreKeyTests: XCTestCase {
         let s = store(sid)
 
         s.setOverride(model("sonnet"))
-        XCTAssertEqual(ChatModelStore.loadSelection(for: sid), selection("sonnet"))
+        XCTAssertEqual(prefs.selection(for: sid), selection("sonnet"))
         XCTAssertEqual(s.override, model("sonnet"))
 
         s.setPlan(true)
@@ -561,17 +530,70 @@ final class ChatModelStoreKeyTests: XCTestCase {
 
         s.setPlan(false)
         XCTAssertEqual(s.override, model("sonnet"))
-        // One key, one value throughout — no per-mode key appears.
-        XCTAssertEqual(ChatModelStore.loadSelection(for: sid), selection("sonnet"))
-        XCTAssertNil(UserDefaults.standard.string(forKey: otherModelKey))
-        XCTAssertNil(UserDefaults.standard.string(forKey: legacyPlanKey))
+        // One selection throughout — no per-mode model value appears.
+        XCTAssertEqual(prefs.selection(for: sid), selection("sonnet"))
+        XCTAssertNil(prefs.selection(for: otherSid))
     }
 
     // MARK: - Legacy plan-key cleanup
 
     func testFirstReadDeletesLegacyPlanKey() {
-        UserDefaults.standard.set(ChatModel.encode(selection("plan-model")), forKey: legacyPlanKey)
+        let legacyKey = "manta:chat:\(sid):model:plan"
+        UserDefaults.standard.set(ChatModel.encode(selection("plan-model")), forKey: legacyKey)
+        defer { UserDefaults.standard.removeObject(forKey: legacyKey) }
         _ = store(sid)                                       // constructing the store is the first read
-        XCTAssertNil(UserDefaults.standard.string(forKey: legacyPlanKey))
+        XCTAssertNil(UserDefaults.standard.string(forKey: legacyKey))
+    }
+
+    // MARK: - Recents recorded through the box cache
+
+    func testApplyRecordsSelectionAndRecentsToCache() {
+        let s = store(sid)
+        let choice = ModelChoice(providerID: "anthropic", modelID: "sonnet", variant: "high", fast: false)
+        s.apply(choice)
+        XCTAssertEqual(prefs.selection(for: sid), selection("sonnet", variant: "high"))
+        XCTAssertEqual(prefs.recents, [choice])
+    }
+}
+
+// ===========================================================================
+// BET-1282 — one-shot migration of the old UserDefaults keys into the box
+// store (pure scan, injected lookups).
+// ===========================================================================
+
+@MainActor
+final class ChatModelPrefsMigrationTests: XCTestCase {
+
+    private func choice(_ m: String, variant: String? = nil, fast: Bool = false) -> ModelChoice {
+        ModelChoice(providerID: "anthropic", modelID: m, variant: variant, fast: fast)
+    }
+
+    func testCollectsLegacyModelKeysIntoBoxSessions() {
+        let keys = ["manta:chat:ses_1:model", "manta:chat:ses_2:model", "manta:chat:ses_1:plan"]
+        let stringValue: (String) -> String? = { key in
+            if key == "manta:chat:ses_1:model" { return ChatModel.encode(ChatModel.ModelSelection(providerID: "anthropic", modelID: "opus", variant: "high")) }
+            if key == "manta:chat:ses_2:model" { return ChatModel.encode(ChatModel.ModelSelection(providerID: "anthropic", modelID: "sonnet", variant: nil)) }
+            return nil
+        }
+        let collected = ChatModelPrefs.collectLegacy(keys: keys, stringForKey: stringValue, dataForKey: { _ in nil })
+        XCTAssertEqual(collected.sessions["ses_1"], ChatModel.ModelSelection(providerID: "anthropic", modelID: "opus", variant: "high"))
+        XCTAssertEqual(collected.sessions["ses_2"], ChatModel.ModelSelection(providerID: "anthropic", modelID: "sonnet", variant: nil))
+        // The plan key is NOT a model key — never collected, never removed.
+        XCTAssertEqual(collected.keysToRemove, ["manta:chat:ses_1:model", "manta:chat:ses_2:model"])
+    }
+
+    func testCollectsLegacyRecents() {
+        let data = try! JSONEncoder().encode([choice("opus", variant: "high"), choice("sonnet")])
+        let collected = ChatModelPrefs.collectLegacy(keys: ["manta:model-recents"], stringForKey: { _ in nil }, dataForKey: { _ in data })
+        XCTAssertEqual(collected.recents, [choice("opus", variant: "high"), choice("sonnet")])
+        XCTAssertEqual(collected.keysToRemove, ["manta:model-recents"])
+    }
+
+    func testSkipsMalformedAndEmptyValues() {
+        let keys = ["manta:chat:ses_1:model", "manta:chat::model", "other"]
+        let collected = ChatModelPrefs.collectLegacy(keys: keys, stringForKey: { _ in "not-json" }, dataForKey: { _ in nil })
+        XCTAssertTrue(collected.sessions.isEmpty)
+        XCTAssertTrue(collected.recents.isEmpty)
+        XCTAssertTrue(collected.keysToRemove.isEmpty)
     }
 }

@@ -107,7 +107,7 @@ final class SessionListStore: ObservableObject {
         self.mutations = mutations ?? ServerSessionListMutations(api: api)
         self.eventStore = eventStore
         self.loadConfig()
-        self.eventStore.rawFrameHandler = { [weak self] frame in
+        self.eventStore.addRawFrameHandler { [weak self] frame in
             self?.trackAttention(frame: frame)
             self?.trackProgress(frame: frame)
         }

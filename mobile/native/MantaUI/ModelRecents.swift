@@ -4,16 +4,17 @@ import Foundation
 // BET-825 — the composer model menu's recents: the last 3–5 (model, effort,
 // fast) triples actually used, most recent first.
 //
-// Recents are a HABIT, not a conversation, so they persist PER BOX under a
-// single UserDefaults key — deliberately NOT per session, unlike the model
-// override/variant (which live in ChatModelStore under per-session keys). The
-// store loads them once at init and writes them on every change.
+// Recents are a HABIT, not a conversation. BET-1282 moved their storage from a
+// single UserDefaults key into the box store (via `model-prefs:set { recents }`),
+// so they follow the user between devices and survive a reinstall. The PURE
+// logic here (`record` / `label`) is unchanged and stays client-side — the
+// CLIENT owns ordering + dedupe (cap-at-5 and whole-quad dedupe), and the box
+// stores what it is given.
 //
 // `modelID` in a choice is ALWAYS the base (non-`-fast`) id: fast is an
 // orthogonal mode bit, not a separate model, so the same model at the same
 // effort with fast off/on is a distinct entry. Dedup/ordering/cap logic is
-// pure (mirrors `BranchFreshnessPolicy` in ChatScreen.swift); persistence is a
-// thin pair of helpers beside it.
+// pure (mirrors `BranchFreshnessPolicy` in ChatScreen.swift).
 // ===========================================================================
 
 /// One remembered (model, effort, fast) selection, most recent first.
@@ -30,8 +31,6 @@ struct ModelChoice: Codable, Hashable, Sendable {
 enum ModelRecents {
     /// The recents list is capped at this many entries.
     static let capacity = 5
-    /// Per-box storage key (recents are a habit, not tied to one session).
-    static let storageKey = "manta:model-recents"
 
     /// Insert a choice at the front, de-duplicating on the WHOLE triple. A
     /// choice already in the list is moved to the front without duplicating;
@@ -56,20 +55,5 @@ enum ModelRecents {
         }
         if choice.fast { parts.append("⚡") }
         return parts.joined(separator: " · ")
-    }
-
-    // MARK: - Persistence (per box)
-
-    static func load(_ defaults: UserDefaults = .standard) -> [ModelChoice] {
-        guard let data = defaults.data(forKey: storageKey),
-              let list = try? JSONDecoder().decode([ModelChoice].self, from: data)
-        else { return [] }
-        return list
-    }
-
-    static func save(_ list: [ModelChoice], _ defaults: UserDefaults = .standard) {
-        if let data = try? JSONEncoder().encode(list) {
-            defaults.set(data, forKey: storageKey)
-        }
     }
 }

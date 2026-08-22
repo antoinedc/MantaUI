@@ -1091,7 +1091,9 @@ private struct ChatScreenContent: View {
     /// plan/build mode, falling back to the server default (the plan model is
     /// only ever the composer's active model while plan mode is on).
     private var buildModelName: String {
-        let buildID = ChatModelStore.loadOverride(for: store.sessionId)
+        let buildID = ChatModelPrefs.shared.selection(for: store.sessionId).map {
+            OpencodeModelID(providerID: $0.providerID, modelID: $0.modelID)
+        }
         return ChatModel.label(modelStore.models,
                                override: buildID,
                                configuration: modelStore.configDefault,

@@ -624,6 +624,48 @@ final class MantaAPIClient: Sendable {
         try await call("config:get", args: [], as: [String: JSONValue].self)
     }
 
+    // MARK: - Model prefs (BET-1282)
+
+    /// `model-prefs:get` — the whole box model-prefs store
+    /// (`{ sessions, recents }`), nil when the box doesn't answer. The per-session
+    /// selection + recents used to live in UserDefaults; they now live box-side
+    /// (`src/server/modelPrefs.mjs`, BET-1279) so they follow the user between
+    /// devices. This is the SINGLE read of that store on iOS — the shared
+    /// `ChatModelPrefs` cache fetches it once and refetches on the bus event.
+    func modelPrefsGet() async throws -> ModelPrefsState? {
+        try await call("model-prefs:get", args: [], as: ModelPrefsState.self)
+    }
+
+    /// `model-prefs:set` — mutate the box store. A call may carry a session
+    /// upsert/delete (via `selection`, where an explicit JSON `null` deletes
+    /// the session) and/or a `recents` replace. Mirrors the desktop
+    /// `modelPrefsSet` (`src/renderer/modelPrefs.ts`). Fire-and-forget from
+    /// `ChatModelPrefs`; a client refetching its own write is a harmless no-op.
+    func modelPrefsSet(sessionId: String?, selection: ModelPrefsSelection?, recents: [ModelChoice]?) async throws {
+        var payload: [String: Any] = [:]
+        if let sessionId { payload["sessionId"] = sessionId }
+        if let selection {
+            payload["selection"] = try jsonAny(selection)
+        } else if sessionId != nil {
+            // Explicit JSON null DELETES the session. The box's `{...i}` merge
+            // skips an ABSENT key, so a clear (nil selection) must send null,
+            // not omit the key — otherwise the box treats it as a recents-only call.
+            payload["selection"] = NSNull()
+        }
+        if let recents { payload["recents"] = try jsonAny(recents) }
+        _ = try await callVoid("model-prefs:set", args: [payload])
+    }
+
+    /// `model-prefs:seed` — one-shot, non-destructive migration write
+    /// (`{ sessions?, recents? }`). Used once after the box store ships to seed
+    /// the old device-local values; the server never overwrites an existing key.
+    func modelPrefsSeed(sessions: [String: ModelPrefsSelection], recents: [ModelChoice]) async throws {
+        var payload: [String: Any] = [:]
+        if !sessions.isEmpty { payload["sessions"] = try jsonAny(sessions) }
+        if !recents.isEmpty { payload["recents"] = try jsonAny(recents) }
+        _ = try await callVoid("model-prefs:seed", args: [payload])
+    }
+
     /// `POST /push/register-apns` — hand the APNs device token to the box
     /// (server mirror of the /rpc/push:register-apns channel; both call
     /// push.addApnsToken, see src/server/index.mjs). Fire-and-forget from the
@@ -717,12 +759,19 @@ final class MantaAPIClient: Sendable {
         return try Self.decode(data, as: VoidResult.self)
     }
 
+    /// Encode any `Encodable` to a JSON-compatible object or array (`Any`) for
+    /// an RPC payload. Unlike `jsonObject`, this does not require a top-level
+    /// dictionary, so arrays (e.g. `model-prefs:set` recents) encode too.
+    private func jsonAny(_ value: some Encodable) throws -> Any {
+        let data = try JSONEncoder().encode(value)
+        return try JSONSerialization.jsonObject(with: data)
+    }
+
     /// Encode an `Encodable` payload (e.g. `SecretInput`) back into the
     /// `[String: Any]` JSON-object shape the RPC transport serialises. Nil
     /// optional properties are omitted, matching the box's `{...i}` merge.
     private func jsonObject(_ value: some Encodable) throws -> [String: Any] {
-        let data = try JSONEncoder().encode(value)
-        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        guard let object = try jsonAny(value) as? [String: Any] else {
             throw MantaError.transport("payload is not a JSON object")
         }
         return object
