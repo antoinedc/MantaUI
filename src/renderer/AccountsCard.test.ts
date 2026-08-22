@@ -200,6 +200,41 @@ describe("endpointEligibility (multi-model union — reviewer Question)", () => 
     const { missing } = endpointEligibility(ep([]), {}, null);
     expect(missing).toEqual(expect.arrayContaining([MISSING.IDENTITY]));
   });
+
+  it("an endpoint that reports a price + caching lists only the identity gap, not 'what it costs' (9d)", () => {
+    // The endpoint "told us" its price (free) and caching (none) — the row must
+    // NOT say "Auto needs: what it costs". This is the case the empty-model
+    // eligibility bug (BET-1273 9d) got wrong: it always reported PRICE/CACHING/
+    // QUALITY missing because it judged `{}` instead of the resolved endpoint.
+    const declared = {
+      "voska/m1": { price: "free" as const, caches: false as const },
+    };
+    const { missing } = endpointEligibility(ep(["m1"]), declared, null);
+    expect(missing).toEqual([MISSING.IDENTITY]);
+    expect(missing).not.toContain(MISSING.PRICE);
+    expect(missing).not.toContain(MISSING.CACHING);
+    expect(missing).not.toContain(MISSING.QUALITY);
+  });
+
+  it("a custom endpoint with a declared price does not say 'Auto needs: what it costs'", () => {
+    const declared = {
+      "voska/m1": { price: { input: 0.02, output: 0.08 }, caches: false },
+    };
+    const { missing } = endpointEligibility(ep(["m1"]), declared, null);
+    expect(missing).not.toContain(MISSING.PRICE);
+    const row: AccountRowModel = {
+      id: "voska",
+      className: "Custom",
+      kind: "declared",
+      name: "VoskaAI",
+      connected: true,
+      reading: null,
+      balance: null,
+      health: "unknown",
+      eligibilityMissing: missing,
+    };
+    expect(helpText(row)).not.toContain("what it costs");
+  });
 });
 
 describe("usagePace", () => {
@@ -216,8 +251,55 @@ describe("usagePace", () => {
     expect(usagePace(w(90), now)).toBe("over pace");
   });
 
-  it("falls back to a pct heuristic when no timing is present", () => {
-    expect(usagePace({ pct: 20 } as never, 0)).toBe("on pace");
-    expect(usagePace({ pct: 85 } as never, 0)).toBe("over pace");
+  it("falls back to no pace when no timing is present (9e)", () => {
+    expect(usagePace({ pct: 20 } as never, 0)).toBeNull();
+    expect(usagePace({ pct: 85 } as never, 0)).toBeNull();
+  });
+});
+
+describe("AccountsCard pace clause (9e)", () => {
+  it("a reading with no timing renders the percentage with no pace clause", () => {
+    const st = describeAccountState(
+      subscription({ reading: { label: "Weekly", pct: 85, pace: null } }),
+    );
+    expect(st.text).toBe("Weekly 85%");
+    expect(st.text).not.toContain("pace");
+  });
+
+  it("a reading with timing still renders the pace clause", () => {
+    const st = describeAccountState(
+      subscription({ reading: { label: "5h", pct: 41, pace: "under pace" } }),
+    );
+    expect(st.text).toBe("5h 41% · under pace");
+  });
+});
+
+describe("health unknown is not healthy (9f)", () => {
+  it("an unknown health entry renders the usage state, never 'ok'/'healthy'", () => {
+    const withReading = describeAccountState(
+      subscription({ health: "unknown", reading: { label: "5h", pct: 41, pace: "under pace" } }),
+    );
+    expect(withReading.text).toContain("5h 41%");
+    expect(withReading.text).not.toMatch(/healthy|ok/i);
+
+    const byBalance = describeAccountState(subscription({ health: "unknown", reading: null, balance: 12.5 }));
+    expect(byBalance.text).toBe("$12.50 remaining");
+  });
+
+  it("an unknown health custom row with no data reads 'No usage data', not healthy", () => {
+    const row: AccountRowModel = {
+      id: "voska",
+      className: "Custom",
+      kind: "declared",
+      name: "VoskaAI",
+      connected: true,
+      reading: null,
+      balance: null,
+      health: "unknown",
+      eligibilityMissing: [],
+    };
+    const st = describeAccountState(row);
+    expect(st.text).toBe("No usage data");
+    expect(st.tone).toBe("quiet");
   });
 });
