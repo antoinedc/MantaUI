@@ -468,7 +468,7 @@ enum ChatTranscriptMapper {
     /// concatenated (newline-joined) non-synthetic, non-ignored text parts with
     /// trailing whitespace stripped. Mirrors `concatUserMessageText` in the
     /// desktop, so the claim can never diverge from what the row displays.
-    private static func concatUserMessageText(_ msg: OpencodeMessage) -> String {
+    static func concatUserMessageText(_ msg: OpencodeMessage) -> String {
         let joined = msg.parts.compactMap { part -> String? in
             guard part.type == "text",
                   part.synthetic != true,
@@ -477,6 +477,18 @@ enum ChatTranscriptMapper {
             return t
         }.joined(separator: "\n")
         return joined.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression)
+    }
+
+    /// The chronological user-turn texts for composer history recall
+    /// (BET-1305): filter role == "user", map `concatUserMessageText`, trim
+    /// whitespace+newlines, skip empties. Order preserved (chronological).
+    /// Desktop parity for `useInputHistory`'s transcript derivation — no
+    /// duplicated part-filtering logic anywhere else.
+    static func userTurnTexts(from messages: [OpencodeMessage]) -> [String] {
+        messages
+            .filter { $0.info.role.rawValue == "user" }
+            .map { concatUserMessageText($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
     }
 
     /// A text part is "blank" when it contains no visible content — empty, or

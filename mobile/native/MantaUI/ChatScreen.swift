@@ -438,6 +438,8 @@ private struct ChatScreenContent: View {
                         },
                         onGlassBoxHeightChange: { composerGlassHeight = $0 },
                         sessionDirectory: sessionWindow?.cwd,
+                        historyTmuxSession: sessionWindow?.name,
+                        historyWindowIndex: sessionWindow?.index,
                         onSlashClear: { Task { await clearSession() } },
                         onSlashFork: { Task { await forkSession() } }
                     )
