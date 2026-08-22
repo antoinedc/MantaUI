@@ -15,8 +15,8 @@ final class ComposerHistoryTests: XCTestCase {
     private func makeDefaults() -> UserDefaults {
         let suite = "ComposerHistoryTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
-        addTeardownBlock { [weak defaults] in
-            defaults?.removePersistentDomain(forName: suite)
+        addTeardownBlock {
+            UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite)
         }
         return defaults
     }
