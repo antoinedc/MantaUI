@@ -27,12 +27,13 @@
 // helpers here (describeAccountState, describeMissing, usagePace, helpText)
 // are unit-tested.
 
-import { useCallback, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { X } from "lucide-react";
-import type { ProviderEndpoint, SubscriptionStatus, UsageSnapshot, UsageWindow } from "../shared/types";
+import type { DiscoverResult, ProviderEndpoint, SubscriptionStatus, UsageSnapshot, UsageWindow } from "../shared/types";
 import { autoEligibility, MISSING } from "../shared/autoEligibility.mjs";
 import { providerStateLabel } from "../shared/providerHealthLabel.mjs";
-import { resolveIdentity } from "../shared/modelIdentity.mjs";
+import { resolveIdentity, type ModelDeclaration } from "../shared/modelIdentity.mjs";
+import { qualityScore } from "../shared/modelQuality.mjs";
 import { ConnectProvider } from "./ConnectProvider";
 import { CustomProviderForm } from "./CustomProviderForm";
 import { Checkbox } from "./Checkbox";
@@ -63,11 +64,13 @@ export type AccountRowModel = {
   plan?: string;
   /** credential present (subscription connected / custom has an api key). */
   connected: boolean;
-  /** A usage reading (window label / pct / pace) when one exists. */
-  reading: { label: string; pct: number; pace: string } | null;
+  /** A usage reading (window label / pct / pace) when one exists. `pace` is
+   *  null when the window carries no timing — never a fabricated pace. */
+  reading: { label: string; pct: number; pace: string | null } | null;
   /** Credit balance in dollars, or null when unknown. */
   balance: number | null;
-  health: "ok" | "out-of-credit" | "rate-limited" | "failing";
+  /** `unknown` when no health engine/entry exists — rendered as no state, never as healthy. */
+  health: "ok" | "unknown" | "out-of-credit" | "rate-limited" | "failing";
   /** Remaining rate-limit cooldown, whole minutes (health === "rate-limited"). */
   retryInMinutes?: number;
   /** Machine keys (autoEligibility MISSING) Auto still needs for a custom row. */
@@ -100,7 +103,12 @@ export function describeAccountState(r: AccountRowModel): AccountState {
   if (r.reading) {
     const pct = r.reading.pct;
     const tone: AccountStatus = pct >= 90 ? "danger" : pct >= 70 ? "warn" : "ok";
-    return { text: `${r.reading.label} ${pct}% · ${r.reading.pace}`, tone };
+    // No timing data ⇒ no pace clause: a pace is real or absent, never a guess
+    // (BET-1273 9e).
+    const text = r.reading.pace
+      ? `${r.reading.label} ${pct}% · ${r.reading.pace}`
+      : `${r.reading.label} ${pct}%`;
+    return { text, tone };
   }
   if (typeof r.balance === "number" && Number.isFinite(r.balance)) {
     return {
@@ -122,10 +130,10 @@ export const STATE_TONE_CLASS: Record<AccountStatus, string> = {
 /**
  * Classify a subscription window's pace ("under" / "on" / "over") from how fast
  * it is being consumed against how far through the window we are. Deterministic
- * on (nowMs, window). Falls back to a pct-based heuristic when the window
- * carries no timing.
+ * on (nowMs, window). A window with NO timing carries no pace — a pace invented
+ * from a percentage alone is a false claim (BET-1273 9e), so it returns null.
  */
-export function usagePace(w: UsageWindow, nowMs: number): string {
+export function usagePace(w: UsageWindow, nowMs: number): string | null {
   if (typeof w.startedAt === "number" && typeof w.resetsAt === "number" && w.resetsAt > w.startedAt) {
     const elapsed = (nowMs - w.startedAt) / (w.resetsAt - w.startedAt);
     if (elapsed > 0) {
@@ -135,7 +143,7 @@ export function usagePace(w: UsageWindow, nowMs: number): string {
       return "on pace";
     }
   }
-  return w.pct >= 80 ? "over pace" : "on pace";
+  return null;
 }
 
 // The machine-key → phrase map lives HERE, in the renderer, once. autoEligibility
@@ -189,7 +197,9 @@ function normalizeHealth(h: HealthMap | null | undefined, id: string): {
         : undefined;
     return { health: st, retryInMinutes };
   }
-  return { health: "ok" };
+  // No health entry / engine is UNKNOWN, not healthy — "we have no health data"
+  // must never render as "this provider is fine" (BET-1273 9f).
+  return { health: "unknown" };
 }
 
 function subscriptionReading(snap: UsageSnapshot | undefined, nowMs: number) {
@@ -221,22 +231,36 @@ export function endpointEligibility(
 
   for (const modelId of modelIds) {
     const key = modelId ? `${ep.id}/${modelId}` : null;
-    const decl: DeclaredModel | undefined = key ? declared?.[key] : undefined;
+    const decl = key ? declared?.[key] : undefined;
 
-    let identityKnown = false;
-    if (key) {
-      if (decl?.catalogId) {
-        identityKnown = true;
-      } else if (matcher && modelId) {
-        const id = resolveIdentity({ providerID: ep.id, id: modelId }, undefined, matcher);
-        identityKnown = id.state === "resolved";
-      }
-    }
+    // The candidate — the SAME (provider, model) pair the router judges
+    // (modelRouter assess / incumbentStillEligible). Eligibility is computed
+    // against the RESOLVED endpoint (identity.effective — declaration merged
+    // over the catalogue over the provider's own claims), never an empty
+    // model, so PRICE/CACHING/QUALITY reflect what the endpoint actually told
+    // us (BET-1273 9d). The card and the router answer the same question about
+    // the same object — that is the whole point of sharing the gate.
+    const candidate = { providerID: ep.id, id: modelId ?? "" };
+    const identity = resolveIdentity(
+      candidate,
+      // The renderer's DeclaredModel permits `caches: true`; modelIdentity's
+      // ModelDeclaration types a declaration-noted absence only. Cast (runtime
+      // shape agrees) for reuse of the shared resolver (BET-1273 9d).
+      (decl ?? null) as ModelDeclaration | null,
+      matcher ?? null,
+    );
+    const model = identity.effective ?? candidate;
+    const catalogEntry = (
+      identity.catalogId && matcher ? matcher.lookupModel(identity.catalogId) : null
+      // CatalogEntry.limit is typed `number` in modelQuality but the catalogue
+      // entry carries {context, output}; runtime shape is compatible.
+    ) as unknown as Parameters<typeof qualityScore>[1];
+    const quality = qualityScore(model, catalogEntry, undefined);
 
     const result = autoEligibility({
-      model: {},
-      identity: { known: identityKnown },
-      quality: { known: identityKnown },
+      model,
+      identity: { known: identity.state === "resolved" },
+      quality,
       declared: decl,
       providerClass: "custom",
     });
@@ -405,7 +429,13 @@ export function AccountsCard() {
   const [busy, setBusy] = useState<string | null>(null);
   const [connectingId, setConnectingId] = useState<string | null>(null);
   const [disconnectConfirmId, setDisconnectConfirmId] = useState<string | null>(null);
-  const [retryResult, setRetryResult] = useState<Record<string, string>>({});
+  // Per-endpoint retry verdict: `ok:true` = flag cleared (text-ok), `ok:false` = still refused (text-danger).
+  const [retryResult, setRetryResult] = useState<Record<string, { ok: boolean; message: string }>>({});
+  // Per-endpoint discovery result (BET-1273 9a/9b): the discovered model list
+  // persists so an unticked model stays visible and re-tickable, and the error
+  // string renders in text-danger — both branches reported, never discard.
+  const [discovered, setDiscovered] = useState<Record<string, { id: string }[]>>({});
+  const [discoverError, setDiscoverError] = useState<Record<string, string>>({});
 
   const {
     data,
@@ -505,12 +535,16 @@ export function AccountsCard() {
       setBusy(id);
       try {
         const res = await window.api.accountsRetry(id);
-        setRetryResult((r) => ({ ...r, [id]: res?.message ?? "Retry done." }));
+        const ok = res?.ok === true;
+        setRetryResult((r) => ({
+          ...r,
+          [id]: { ok, message: res?.message ?? (ok ? "Retry done." : "Retry failed — try again.") },
+        }));
         void refresh();
       } catch (e) {
         setRetryResult((r) => ({
           ...r,
-          [id]: e instanceof Error ? e.message : "Retry failed — try again.",
+          [id]: { ok: false, message: e instanceof Error ? e.message : "Retry failed — try again." },
         }));
       } finally {
         setBusy(null);
@@ -518,6 +552,25 @@ export function AccountsCard() {
     },
     [busy, refresh],
   );
+
+  // A retry verdict only explains an out-of-credit row. The moment the row's
+  // health stops being out-of-credit (the retry cleared the flag, or a refetch
+  // shows the meter recovered), the verdict is stale — drop it (BET-1273 9c),
+  // so a lingering "still reports out of credit" can't sit under a healthy row.
+  useEffect(() => {
+    setRetryResult((prev) => {
+      let changed = false;
+      const next: typeof prev = {};
+      for (const [id, v] of Object.entries(prev)) {
+        if (rows.some((r) => r.id === id && r.health === "out-of-credit")) {
+          next[id] = v;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [rows]);
 
   const toggleModel = useCallback(
     async (ep: ProviderEndpoint, modelId: string) => {
@@ -539,18 +592,32 @@ export function AccountsCard() {
     [busy, mutate, refresh],
   );
 
+  // Refresh on a custom endpoint — a read-only probe that reports BOTH
+  // branches (BET-1273 9a): success stores the discovered models (which drives
+  // the real membership test in 9b) + a confirmation naming the count; failure
+  // renders the error in text-danger. Never fire-and-forget, never discard.
   const discover = useCallback(
     async (ep: ProviderEndpoint) => {
       if (busy) return;
       setBusy(ep.id);
+      setDiscoverError((e) => ({ ...e, [ep.id]: "" }));
       try {
-        await window.api.opencodeDiscoverModels(ep.baseURL, "");
-        void refresh();
+        const r: DiscoverResult = await window.api.opencodeDiscoverModels(ep.baseURL, "");
+        if (r.ok) {
+          setDiscovered((d) => ({ ...d, [ep.id]: r.models }));
+        } else {
+          setDiscoverError((e) => ({
+            ...e,
+            [ep.id]: `${r.error}${r.detail ? `: ${r.detail}` : ""}`,
+          }));
+        }
+      } catch (e) {
+        setDiscoverError((er) => ({ ...er, [ep.id]: e instanceof Error ? e.message : String(e) }));
       } finally {
         setBusy(null);
       }
     },
-    [busy, refresh],
+    [busy],
   );
 
   const removeEndpoint = useCallback(
@@ -561,6 +628,14 @@ export function AccountsCard() {
         const res = await window.api.opencodeSetProviders({ remove: [ep.id] });
         if (!res.ok) throw new Error(res.error ?? "Remove failed");
         useStore.getState().setOpencodeRestartNeeded(true);
+        setDiscovered((d) => {
+          const { [ep.id]: _drop, ...rest } = d;
+          return rest;
+        });
+        setDiscoverError((er) => {
+          const { [ep.id]: _drop, ...rest } = er;
+          return rest;
+        });
         void refresh();
       });
       setBusy(null);
@@ -608,22 +683,36 @@ export function AccountsCard() {
                   onRemove={() => ep && void removeEndpoint(ep)}
                 />
                 {retryResult[row.id] && (
-                  <div role="status" className="text-meta text-text-faint pl-[6px] -mt-1">
-                    {retryResult[row.id]}
+                  <div
+                    role="status"
+                    className={`text-meta ${retryResult[row.id].ok ? "text-ok" : "text-danger"} pl-[6px] -mt-1`}
+                  >
+                    {retryResult[row.id].message}
                   </div>
                 )}
                 {ep && (
                   <div className="pl-4 space-y-1">
                     <code className="text-meta text-text-faint truncate block">{ep.baseURL}</code>
-                    {ep.enabledModels.map((m) => (
-                      <div key={m} className="flex items-center gap-2 text-meta">
+                    {discoverError[ep.id] && (
+                      <div role="alert" className="text-meta text-danger break-words">
+                        {discoverError[ep.id]}
+                      </div>
+                    )}
+                    {discovered[ep.id] && discovered[ep.id].length > 0 && (
+                      <div role="status" className="text-meta text-ok">
+                        Discovered {discovered[ep.id].length} model
+                        {discovered[ep.id].length === 1 ? "" : "s"}
+                      </div>
+                    )}
+                    {(discovered[ep.id] ?? ep.enabledModels.map((id) => ({ id }))).map((m) => (
+                      <div key={m.id} className="flex items-center gap-2 text-meta">
                         <Checkbox
-                          checked={ep.enabledModels.includes(m)}
-                          onChange={() => void toggleModel(ep, m)}
-                          ariaLabel={m}
+                          checked={ep.enabledModels.includes(m.id)}
+                          onChange={() => void toggleModel(ep, m.id)}
+                          ariaLabel={m.id}
                           disabled={busy === row.id}
                         />
-                        <span className="text-text-muted">{m}</span>
+                        <span className="text-text-muted">{m.id}</span>
                       </div>
                     ))}
                   </div>
