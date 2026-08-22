@@ -21,8 +21,6 @@
 // the catalogue. Price is always the endpoint's, never the catalogue's — the
 // same model is free on one host and expensive on another.
 
-// The shared modality reader — how the endpoint's declared input modalities
-// are read for matcher corroboration (never re-derived here).
 import { readModalities } from "./modelGuide.mjs";
 
 // A value is "credible" for the limit/context rule: any positive finite
@@ -68,17 +66,6 @@ function mergeCapabilities(providerCaps, catalogueEntry) {
       e.modalities,
       (v) => Array.isArray(v) && v.length > 0,
     ),
-  };
-}
-
-// The endpoint's own declared facts, used to corroborate the matcher's
-// layer-4 inference (BET-1303 5.6). Read modalities through the shared
-// modality reader so nobody re-derives the wire shape.
-function endpointFacts(m) {
-  return {
-    modalities: readModalities(m?.capabilities?.input),
-    context: m?.limit?.context,
-    output: m?.limit?.output,
   };
 }
 
@@ -155,10 +142,16 @@ export function resolveIdentity(model, declared, catalog) {
   let state = "unknown";
   let entry = null;
   let candidates = [];
-  // Carries the matcher's classification through for the Settings UI
-  // (BET-1303 5.6/5.7). Present only when a match produced them.
-  let confidence = undefined;
-  let evidence = undefined;
+  // The matcher's classification, surfaced for the Settings UI (5.7). Present
+  // only when a match produced them.
+  const res =
+    typeof catalog?.matchModel === "function"
+      ? catalog.matchModel(m.id, {
+          modalities: readModalities(m?.capabilities?.input),
+          context: m?.limit?.context,
+          output: m?.limit?.output,
+        })
+      : { kind: "none", candidates: [] };
 
   if (typeof dec.catalogId === "string" && dec.catalogId !== "") {
     // The user told us. Always wins — even over an exact catalogue match.
@@ -170,29 +163,24 @@ export function resolveIdentity(model, declared, catalog) {
     } else {
       entry = null;
     }
-  } else {
+  } else if (res.kind === "exact") {
     // The matcher owns the full layering (catalogue id → handle → weights repo
-    // → digit-anchored structural, corroborated by this endpoint's facts). The
-    // matcher's handle index already groups every same-family size, so a bare
-    // family name still returns them all as `ambiguous` — no second sequencing.
-    const res =
-      typeof catalog?.matchModel === "function"
-        ? catalog.matchModel(m.id, endpointFacts(m))
-        : { kind: "none", candidates: [] };
-    confidence = res.confidence;
-    evidence = res.evidence;
-    if (res.kind === "exact") {
-      entry = res.candidates[0];
-      catalogId = entry?.id;
-      source = "matched";
-      state = "resolved";
-    } else if (res.kind === "ambiguous") {
-      state = "ambiguous";
-      candidates = res.candidates.map((x) => x?.id).filter(Boolean);
-    }
-    // kind === "none" → state stays "unknown".
+    // → digit-anchored structural, corroborated by this endpoint's facts), and
+    // its handle index already groups every same-family size so a bare family
+    // name returns them all as `ambiguous` — no second sequencing.
+    entry = res.candidates[0];
+    catalogId = entry?.id;
+    source = "matched";
+    state = "resolved";
+  } else if (res.kind === "ambiguous") {
+    state = "ambiguous";
+    candidates = res.candidates.map((x) => x?.id).filter(Boolean);
   }
+  // "declared" missing and "none" → state stays "unknown".
 
   const effective = buildEffective(m, dec, entry, catalogId);
-  return { state, catalogId, candidates, source, effective, confidence, evidence };
+  return {
+    state, catalogId, candidates, source, effective,
+    ...(res.kind !== "none" ? { confidence: res.confidence, evidence: res.evidence } : {}),
+  };
 }

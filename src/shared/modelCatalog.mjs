@@ -216,18 +216,28 @@ function editDistance(a, b) {
 
 // Layer 4 (5.4d): the whole-id structural match over the catalogue, then
 // corroboration. Layer 4 is DIGIT-ANCHORED by design (5.3/5.4): a local id
-// with no retained digit token (no version, no size, after date-discard) is a
-// pure-letter id with no structural identity to anchor on — it either resolved
-// through a layer-2 handle (e.g. a bare family name) or is unidentifiable.
-// Requiring at least one digit token here is what keeps opaque no-content
-// aliases like `chat` or `base` from colour-matching real entries (BET-1303 6.2).
-// Without endpoint facts it may only return exact when there is a single
-// admitted candidate (no tie). Returns `{ kind, candidates }`.
+// with no digit token at all is pure decoration with no structural identity to
+// anchor on — it either resolved through a layer-2 handle (e.g. a bare family
+// name) or is unidentifiable. Requiring at least one digit token here is what
+// keeps opaque no-content aliases like `chat` or `base` from colour-matching
+// real entries (BET-1303 6.2).
+//
+// A DATE counts as identity for this gate even though it is excluded from the
+// version/size matching: `-2407` distinguishes one release from another, so a
+// release-stamped id (e.g. a model whose only digit is a date suffix) still has
+// something structural to anchor on. Without endpoint facts layer 4 may only
+// return exact when there is a single admitted candidate (no tie).
 function layer4Match(localId, list, facts) {
-  const local = classifyTokens(tokenizeModelId(localId));
-  if (local.versions.size === 0 && local.sizes.size === 0) {
-    return { kind: "none", candidates: [] };
+  const tokens = tokenizeModelId(localId);
+  let anchored = false;
+  for (const t of tokens) {
+    if (/\d/.test(t)) {
+      anchored = true;
+      break;
+    }
   }
+  if (!anchored) return { kind: "none", candidates: [] };
+  const local = classifyTokens(tokens);
   const admitted = [];
   for (const e of list) {
     if (!e || typeof e.id !== "string") continue;

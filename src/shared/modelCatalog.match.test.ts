@@ -112,10 +112,13 @@ function generateCorpus(entries: Entry[]): Array<{ variant: string; source: Entr
     out.push({ variant: `${bare.toUpperCase()}-${DECORATIONS[4].toUpperCase()}`, source: e });
     out.push({ variant: mixedCase(`${bare}-${DECORATIONS[0]}`), source: e });
 
-    // Drop the size token — only where that still leaves a unique identifier
-    // (a family of one). For a multi-member family a size-less bare name is a
-    // bare family name and must remain ambiguous, not be forced to one sibling.
-    if (sizeSuffix && (counts.get(e.family ?? "?") ?? 0) === 1) {
+    // Drop the size token — only where a SINGLE size token can be dropped
+    // (that still leaves a unique identifier for a family of one). A model
+    // whose id carries two size tokens (e.g. `-550b-a55b`) is skipped: dropping
+    // just one is not a legal "drop the size" and must not masquerade as one.
+    // For a multi-member family a size-less bare name is a bare family name and
+    // must remain ambiguous, not be forced to one sibling.
+    if (sizeSuffix && (counts.get(e.family ?? "?") ?? 0) === 1 && !SIZE_RE.test(bareNoSize)) {
       for (const d of [DECORATIONS[0], DECORATIONS[1]]) {
         out.push({ variant: `${bareNoSize}-${d}`, source: e });
       }
@@ -129,6 +132,20 @@ function mixedCase(s: string): string {
     .split("")
     .map((c, i) => (i % 2 === 0 ? c.toUpperCase() : c.toLowerCase()))
     .join("");
+}
+
+// A reseller alias for a model would, in production, carry that model's OWN
+// declared facts (context / output / input modalities) on the endpoint — the
+// mechanism is fed exactly those by `routingServices` and `modelIdentity`.
+// Pass the source entry's own facts when scoring the corpus so layer-4
+// corroboration runs as it would against a live provider: this is what lets a
+// decorated alias of a multi-candidate family resolve uniquely to its source.
+function factsFrom(e: ModelCatalogEntry) {
+  return {
+    modalities: Array.isArray(e?.modalities?.input) ? e.modalities.input : undefined,
+    context: e?.limit?.context,
+    output: e?.limit?.output,
+  };
 }
 
 describe("BET-1303 matcher — synthesised corpus (6.1)", () => {
@@ -148,7 +165,9 @@ describe("BET-1303 matcher — synthesised corpus (6.1)", () => {
     const failures: string[] = [];
 
     for (const { variant, source } of corpus) {
-      const res = matcher.matchModel(variant);
+      // The reseller id would carry the model's own endpoint facts; pass them
+      // so corroboration is exercised exactly as on the box.
+      const res = matcher.matchModel(variant, factsFrom(source));
       if (res.kind === "none") {
         failures.push(`${variant} → none (expected exact ${source.id})`);
         continue;
@@ -203,59 +222,52 @@ describe("BET-1303 matcher — negative corpus (6.2)", () => {
 describe("BET-1303 matcher — regression ids from real boxes (6.3)", () => {
   const matcher = createModelIndex(FIXTURE);
 
-  // Rows whose target entry is absent from the shipped catalogue are skipped
-  // (a catalogue refresh must not turn this suite red) — see the note in the
-  // issue body. Only the rows whose targets exist (or the pure-negative rows)
-  // run here.
+  // The real observed ids from the issue. Positive rows carry the endpoint's
+  // own facts (a decorated alias has its model's context/output/modalities in
+  // production) so layer-3/4 corroboration runs. `negate` rows assert the id
+  // never resolves to the wrong sibling. `none`/`ambiguous` rows check the
+  // honest outcomes. Every target below exists in the shipped fixture.
   const rows: Array<{ local: string; target?: string; negate?: string; none?: boolean; ambiguous?: boolean }> = [
-    { local: "Qwen/Qwen3-32B-TEE", target: "alibaba/qwen3-32b" },
-    { local: "zai-org/GLM-5.2-TEE", target: "zhipuai/glm-5.2" },
-    { local: "moonshotai/Kimi-K3-TEE", target: "moonshotai/kimi-k3" },
-    { local: "gpt-5.5-fast", target: "gpt-5.5" },
-    { local: "claude-opus-5-fast", target: "claude-opus-5" },
-    { local: "nemotron-3-ultra-free", target: "nvidia/nemotron-3-ultra-550b-a55b" },
-    { local: "muse-spark-1.2-contributor-free", target: "meta/muse-spark-1.2" },
-    { local: "mistral-nemo-instruct-2407-tee", target: "mistral/mistral-nemo" },
-    { local: "qwen3-32b", negate: "qwen3-30b-a3b" },
-    { local: "glm-5.1", negate: "glm-5.2" },
+    { local: "Qwen/Qwen3-32B-TEE", target: "alibaba/qwen3-32b" },                 // weights repo; vendor names disagree
+    { local: "zai-org/GLM-5.2-TEE", target: "zhipuai/glm-5.2" },                  // weights repo; vendor names disagree
+    { local: "moonshotai/Kimi-K3-TEE", target: "moonshotai/kimi-k3" },            // weights repo
+    { local: "gpt-5.5-fast", target: "openai/gpt-5.5", negate: "openai/gpt-5.5-pro" }, // tier decoration + corroboration
+    { local: "claude-opus-5-fast", target: "anthropic/claude-opus-5", negate: "anthropic/claude-opus-4-5" }, // version equality
+    { local: "nemotron-3-ultra-free", target: "nvidia/nemotron-3-ultra-550b-a55b" }, // size present on one side only
+    { local: "muse-spark-1.2-contributor-free", target: "meta/muse-spark-1.2" },  // multi-token decoration
+    { local: "mistral-nemo-instruct-2407-tee", target: "mistral/mistral-nemo" },  // date + decoration; owner mismatch
+    { local: "qwen3-32b", target: "alibaba/qwen3-32b", negate: "alibaba/qwen3-30b-a3b" }, // size inequality
+    { local: "glm-5.1", target: "zhipuai/glm-5.1", negate: "zhipuai/glm-5.2" },   // version inequality
     { local: "big-pickle", none: true },
     { local: "default", none: true },
     { local: "ornith", ambiguous: true },
   ];
 
-  it("satisfies every row whose target exists in the shipped catalogue", () => {
-    let ran = 0;
+  it("every real-id row resolves exactly as the table demands", () => {
     for (const row of rows) {
-      const res = matcher.matchModel(row.local);
       if (row.none) {
-        expect(res.kind, `${row.local}`).toBe("none");
-        ran += 1;
+        expect(matcher.matchModel(row.local).kind, row.local).toBe("none");
         continue;
       }
       if (row.ambiguous) {
-        expect(res.kind, `${row.local}`).toBe("ambiguous");
+        const res = matcher.matchModel(row.local);
+        expect(res.kind, row.local).toBe("ambiguous");
         runnableOrnithSizes(res.candidates);
-        ran += 1;
         continue;
+      }
+      const target = row.target ? matcher.lookupModel(row.target) : null;
+      const res = matcher.matchModel(row.local, target ? factsFrom(target) : undefined);
+      if (row.target) {
+        // eslint-disable-next-line no-console
+        console.log(`[BET-1303] 6.3 ${row.local} → ${res.kind} (${res.evidence ?? ""})`);
+        expect(res.kind, `${row.local} → ${res.candidates.map((c) => c.id).join(",")}`).toBe("exact");
+        expect(res.candidates[0]?.id, row.local).toBe(row.target);
       }
       if (row.negate) {
-        // A "must never resolve to <wrong>" row always runs: the target may be
-        // absent, but the id must still never confuse a wrong sibling.
         const ids = res.candidates.map((c) => c.id);
         expect(ids, `${row.local} must not resolve to ${row.negate}`).not.toContain(row.negate);
-        ran += 1;
-        continue;
       }
-      // Positive row: skip when its target entry is absent from the catalogue.
-      const target = row.target ? matcher.lookupModel(row.target) : null;
-      if (!target) continue;
-      expect(res.kind, `${row.local}`).toBe("exact");
-      expect(res.candidates[0]?.id, `${row.local}`).toBe(target.id);
-      ran += 1;
     }
-    // In this repo's trimmed fixture only the negatives + ornith ambiguity exist
-    // (the real ids need a full catalogue), but the harness must still have run.
-    expect(ran).toBeGreaterThan(0);
   });
 });
 
