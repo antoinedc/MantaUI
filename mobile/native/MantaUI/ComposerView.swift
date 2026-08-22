@@ -82,6 +82,12 @@ struct ComposerView: View {
     /// Performs a `/fork` (BET-749 slash palette). Optional: the chat screen
     /// owns forking + navigation; the composer just triggers it.
     var onSlashFork: (() -> Void)? = nil
+    /// Prompt-history identity (BET-1305): the tmux session + window index the
+    /// persisted history is keyed by (NOT the opencode sessionId — /clear
+    /// swaps the sessionId while the window survives). Both may be nil until
+    /// the session resolves; helpers treat that as "no history".
+    var historyTmuxSession: String? = nil
+    var historyWindowIndex: Int? = nil
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.layoutDirection) private var layoutDirection
     /// Shared glass identity for the composer box ⇄ locked-bar morph. Both
@@ -137,6 +143,15 @@ struct ComposerView: View {
     /// parallel RPCs) + the sequence guard that discards stale responses.
     @State private var fileSearchTask: Task<Void, Never>?
     @State private var fileSearchSeq = 0
+    /// The prompt-history up/down navigator (BET-1305). Re-seeded from the
+    /// merged persisted + transcript history on each recall.
+    @State private var navigator = ComposerHistoryNavigator(entries: [])
+    /// True between "recalled prompt written into the editor" and the next
+    /// `onChange(of: text)` pass — suppresses typeahead/slash detection so a
+    /// recalled prompt containing @ or / never pops a palette.
+    @State private var recallingHistory = false
+    /// Drives the destructive confirm dialog before the existing `/clear` flow.
+    @State private var showClearConfirm = false
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
     /// Whether the layout direction is right-to-left — mirrored for the
     /// slide-to-cancel gesture (the machine + progress helpers mirror dx).
@@ -278,7 +293,18 @@ struct ComposerView: View {
             Task { await processPhotos() }
         }
         .onChange(of: text) { _, newValue in
-            handleTextChange(newValue)
+            // A recalled prompt (↑/↓) must never auto-open the @ or / palette.
+            // The flag is consumed here so the NEXT normal keystroke restores
+            // detection (BET-1305).
+            if recallingHistory {
+                recallingHistory = false
+            } else {
+                // The user edited by typing (not ↑/↓ recall): exit history
+                // cycling so the next ↑ treats the edited text as a fresh
+                // draft instead of resuming the abandoned walk (BET-1305).
+                navigator.reset()
+                handleTextChange(newValue)
+            }
         }
         .animation(.smooth(duration: 0.18), value: typeaheadOpen)
         .onChange(of: store.actionHint) { _, hint in
@@ -292,6 +318,43 @@ struct ComposerView: View {
             // Deliberately NOT focusing the input here: raising the keyboard on
             // entry hides most of the transcript you opened the session to
             // read. Tapping the input is the way in, as in Messages.
+        }
+        // Keyboard-surface toolbar (BET-1305): ↑↓ prompt-history recall, esc
+        // interrupt, @ / palette triggers, and Clear. Attached ONCE on the
+        // composer root — the expanded editor sheet is its own presentation
+        // hierarchy, so it gets no toolbar. Monospaced labels like the
+        // terminal key row.
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Button("↑") { historyUp() }
+                    .font(.system(.body, design: .monospaced))
+                    .accessibilityIdentifier("kb-up")
+                Button("↓") { historyDown() }
+                    .font(.system(.body, design: .monospaced))
+                    .accessibilityIdentifier("kb-down")
+                Button("esc") { if store.running { store.abort() } }
+                    .font(.system(.body, design: .monospaced))
+                    .disabled(!store.running)
+                    .foregroundColor(store.running ? tokens.danger : tokens.tx3)
+                    .accessibilityIdentifier("kb-esc")
+                Button("@") { text += "@" }
+                    .font(.system(.body, design: .monospaced))
+                    .accessibilityIdentifier("kb-at")
+                Button("/") { text += "/" }
+                    .font(.system(.body, design: .monospaced))
+                    .accessibilityIdentifier("kb-slash")
+                Spacer()
+                Button("Clear") { showClearConfirm = true }
+                    .font(.system(.body, design: .monospaced))
+                    .accessibilityIdentifier("kb-clear")
+            }
+        }
+        .confirmationDialog("Clear this session?", isPresented: $showClearConfirm,
+                            titleVisibility: .visible) {
+            Button("Clear", role: .destructive) { onSlashClear?() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Starts a fresh session in this window.")
         }
     }
 
@@ -1135,12 +1198,48 @@ struct ComposerView: View {
             && !attachments.contains { $0.isUploading }
     }
 
+    // MARK: - Prompt history (BET-1305)
+
+    /// Re-seeds the navigator from the merged persisted + live-transcript
+    /// history. The transcript source is the pure ChatTranscriptMapper
+    /// derivation — no duplicated part-filtering logic here.
+    private func refreshHistoryEntries() {
+        let persisted = PromptHistoryStore.read(
+            tmuxSession: historyTmuxSession, windowIndex: historyWindowIndex)
+        let transcript = ChatTranscriptMapper.userTurnTexts(from: store.messages)
+        navigator = ComposerHistoryNavigator(
+            entries: mergePromptHistory(persisted: persisted, transcript: transcript))
+    }
+
+    private func historyUp() {
+        // Only re-seed from persisted + transcript when NOT already cycling:
+        // a fresh navigator starts with index == nil, so reseeding on every
+        // press would reset the walk and repeated ↑ would never advance past
+        // the newest entry. Preserve position once cycling has begun; refresh
+        // on entering cycling so newly-arrived turns are picked up (BET-1305).
+        if navigator.index == nil { refreshHistoryEntries() }
+        guard !navigator.entries.isEmpty else { return }
+        recallingHistory = true
+        if let value = navigator.up(currentDraft: text) { text = value }
+    }
+
+    private func historyDown() {
+        guard navigator.index != nil else { return }
+        recallingHistory = true
+        if let value = navigator.down() { text = value }
+    }
+
     private func submit() {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         // Never send while an attachment is still uploading (the button is
         // disabled too; this guards the non-button paths like voice submit).
         guard (!trimmed.isEmpty || !attachments.isEmpty),
               !attachments.contains(where: { $0.isUploading }) else { return }
+        // Persist the freshly-submitted prompt for ↑/↓ recall. No-op when the
+        // session identity is nil or the text was whitespace-only; collapses a
+        // consecutive duplicate (BET-1305).
+        PromptHistoryStore.append(trimmed, tmuxSession: historyTmuxSession,
+                                  windowIndex: historyWindowIndex)
         let model = modelStore.promptModel
         // canSend gates on no attachment still uploading, so none are dropped
         // here; compactMap keeps the unwrap type-safe.
