@@ -47,6 +47,8 @@ import {
   readProviderApiKey,
   parseProviderOAuthToken,
   readProviderOAuthToken,
+  parseAuthedProviderIds,
+  readAuthedProviderIds,
   opencodeAuthPath,
   completeProviderOauth,
 } from "./opencode.mjs";
@@ -241,6 +243,53 @@ test("readProviderOAuthToken returns \"\" for an api-type entry", async () => {
 
 test("readProviderOAuthToken returns the access token for a valid oauth-type entry", async () => {
   assert.equal(await readOauthVia(OPENAI_OAUTH), "mom-access-token");
+});
+
+// ---------------------------------------------------------------------------
+// parseAuthedProviderIds / readAuthedProviderIds (BET-1319) — the
+// subscription-status reader. Returns the top-level provider ids of
+// opencode's auth store, which is what both connect (PUT /auth/{id}) and
+// disconnect (DELETE /auth/{id}) write — so it reflects a completed
+// disconnect immediately, unlike GET /provider's process-lifetime connected[].
+// Pure parse + injectable-reader IO, never touches a real file.
+// ---------------------------------------------------------------------------
+
+test("parseAuthedProviderIds returns the top-level provider ids of a valid store", () => {
+  const raw = JSON.stringify({ anthropic: { type: "oauth" }, openai: { type: "oauth" } });
+  assert.deepEqual(parseAuthedProviderIds(raw), ["anthropic", "openai"]);
+});
+
+test("parseAuthedProviderIds returns [] for an empty store", () => {
+  assert.deepEqual(parseAuthedProviderIds("{}"), []);
+});
+
+test("parseAuthedProviderIds returns [] for malformed JSON", () => {
+  assert.deepEqual(parseAuthedProviderIds("not json{"), []);
+});
+
+test("parseAuthedProviderIds never echoes any values — returns [] for non-object roots", () => {
+  assert.deepEqual(parseAuthedProviderIds("null"), []);
+  assert.deepEqual(parseAuthedProviderIds("[]"), []);
+  assert.deepEqual(parseAuthedProviderIds('"just a string"'), []);
+});
+
+test("readAuthedProviderIds returns [] when the auth store file is missing (reader throws)", async () => {
+  assert.deepEqual(
+    await readAuthedProviderIds({ readFile: () => { throw new Error("ENOENT"); } }),
+    [],
+  );
+});
+
+test("readAuthedProviderIds returns the provider ids from a populated store", async () => {
+  const raw = JSON.stringify({ openai: { type: "oauth" }, "kimi-for-coding": { type: "api" } });
+  assert.deepEqual(
+    await readAuthedProviderIds({ readFile: () => raw }),
+    ["openai", "kimi-for-coding"],
+  );
+});
+
+test("readAuthedProviderIds returns [] for unparseable JSON", async () => {
+  assert.deepEqual(await readAuthedProviderIds({ readFile: () => "not json{" }), []);
 });
 
 // opencodeAuthPath (review cycle 2 Nit): mirrors messageSearch.mjs's

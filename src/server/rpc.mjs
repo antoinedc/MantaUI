@@ -316,6 +316,12 @@ export function buildHandlers({
   serverVersion,
   opencodeVersion,
   runServerSelfUpdate,
+  // BET-1319: injectable so the disconnect restart is testable without a live
+  // systemd unit. Defaults to the real module import (the `opencode:restart`
+  // channel and claude-login path use the import directly; this is DISCONNECT
+  // only). Production index.mjs does not pass it → the default is used,
+  // identical to before.
+  restartOpencode: restartOpencodeImpl = restartOpencode,
   checkServerUpdate = () => Promise.resolve({ available: false }),
   // Box-side CLI update detector (BET-1096). Null when not wired — the
   // `server:update-check` handler then returns the box verdict WITHOUT
@@ -1316,7 +1322,13 @@ export function buildHandlers({
     "opencode:provider-auth": async (req) => {
       const action = req?.action;
       if (action === "status") {
-        const { connected } = await oc.getProviders();
+        // BET-1319: read connected-state from opencode's OWN auth store, not
+        // from GET /provider. opencode keeps `connected[]` for the process
+        // lifetime, so a completed DELETE /auth/{id} did not show up until a
+        // restart — the disconnect reported success yet the row stayed
+        // "Connected" forever. The auth store is what both connect and
+        // disconnect write, so it reflects the truth immediately.
+        const connected = await oc.readAuthedProviderIds();
         return {
           action: "status",
           providers: subscriptionProviders.subscriptionStatuses(connected),
@@ -1435,11 +1447,30 @@ export function buildHandlers({
       if (action === "disconnect") {
         const id = String(req?.id ?? "");
         const r = await oc.removeProviderAuth(id);
-        return {
-          action: "disconnect",
-          ok: !!r?.ok,
-          error: r?.ok ? undefined : r?.error,
-        };
+        if (!r?.ok) {
+          return {
+            action: "disconnect",
+            ok: false,
+            error: r?.error,
+          };
+        }
+        // BET-1319: the DELETE removed the credential from opencode's auth
+        // store, but opencode keeps the provider loaded in-process until a
+        // restart — its models still appear in the picker. "Disconnected"
+        // must not be reported while opencode still holds the credential, so
+        // bounce opencode and fold the result into the response. This mirrors
+        // the connect side (ConnectProvider restarts opencode and polls to
+        // verify). The /rpc response still returns to the caller because
+        // restartOpencode() restarts the opencode-serve unit, not manta-server.
+        const restart = await restartOpencodeImpl();
+        if (!restart?.ok) {
+          return {
+            action: "disconnect",
+            ok: false,
+            error: restart?.error,
+          };
+        }
+        return { action: "disconnect", ok: true };
       }
       // BET-354: Claude login status check. The renderer's connect card
       // polls this on its 1s tick while in the claude-login phase; the
