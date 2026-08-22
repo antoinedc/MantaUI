@@ -408,36 +408,83 @@ test("tmux:new-window surfaces the created window's sessionId + windowIndex", as
 // These tests assert the end-to-end shape the renderer sees from the rpc
 // channel, with the underlying opencode call stubbed via the `oc` dep.
 
-test("opencode:provider-auth status returns subscriptionStatuses for the connected set", async () => {
+test("opencode:provider-auth status reports connected from the AUTH STORE, not /provider (BET-1319)", async () => {
   const { deps } = makeDeps([]);
-  deps.oc.getProviders = async () => ({
-    connected: ["anthropic", "openai"],
-  });
+  // GET /provider still (incorrectly) reports openai as connected until a
+  // restart — that is exactly the stale-cache bug. The status branch must
+  // read opencode's auth store instead.
+  deps.oc.getProviders = async () => ({ connected: ["anthropic", "openai"] });
+  deps.oc.readAuthedProviderIds = async () => ["anthropic"];
   const handlers = buildHandlers(deps);
   const result = await handlers["opencode:provider-auth"]({ action: "status" });
   assert.equal(result.action, "status");
   assert.ok(Array.isArray(result.providers));
-  // anthropic + openai show as connected; kimi-for-coding is the third
-  // SUBSCRIPTION_PROVIDERS entry — must NOT be connected.
+  // anthropic is in the auth store → connected. openai is in /provider but
+  // NOT in the auth store (a completed DELETE /auth/openai) → disconnected.
   const byId = Object.fromEntries(result.providers.map((p) => [p.id, p.connected]));
   assert.equal(byId.anthropic, true);
-  assert.equal(byId.openai, true);
+  assert.equal(byId.openai, false);
   assert.equal(byId["kimi-for-coding"], false);
 });
 
 test("opencode:provider-auth status rejects with the upstream error (no try/catch in handler)", async () => {
   const { deps } = makeDeps([]);
-  deps.oc.getProviders = async () => { throw new Error("upstream gone"); };
+  deps.oc.readAuthedProviderIds = async () => { throw new Error("upstream gone"); };
   const handlers = buildHandlers(deps);
-  // The status branch awaits `oc.getProviders()` directly (no try/catch in
-  // the handler) — a thrown upstream surfaces as a rejected promise that
-  // the renderer's typed result would treat as an error. Pin the
-  // current behavior so a future "wrap with try/catch" change is a
+  // The status branch awaits `oc.readAuthedProviderIds()` directly (no
+  // try/catch in the handler) — a thrown upstream surfaces as a rejected
+  // promise that the renderer's typed result would treat as an error. Pin
+  // the current behavior so a future "wrap with try/catch" change is a
   // conscious one.
   await assert.rejects(
     () => handlers["opencode:provider-auth"]({ action: "status" }),
     /upstream gone/,
   );
+});
+
+// ---- BET-1319: opencode:provider-auth `disconnect` finishes the job -------
+//
+// A DELETE /auth/{id} removes the credential from opencode's auth store, but
+// opencode keeps the provider loaded in-process (its models still appear in
+// the picker) until a restart. The disconnect branch must bounce opencode and
+// never report success while it still holds the credential. restartOpencode is
+// injected via buildHandlers deps so no systemd unit is touched here.
+
+test("opencode:provider-auth disconnect restarts opencode exactly once on success (BET-1319)", async () => {
+  const { deps } = makeDeps([]);
+  let restarts = 0;
+  deps.oc.removeProviderAuth = async () => ({ ok: true });
+  deps.restartOpencode = async () => { restarts += 1; return { ok: true }; };
+  const handlers = buildHandlers(deps);
+  const result = await handlers["opencode:provider-auth"]({ action: "disconnect", id: "openai" });
+  assert.equal(result.action, "disconnect");
+  assert.equal(result.ok, true);
+  assert.equal(restarts, 1, "restart called exactly once on a successful delete");
+});
+
+test("opencode:provider-auth disconnect does NOT restart when the delete failed (BET-1319)", async () => {
+  const { deps } = makeDeps([]);
+  let restarts = 0;
+  deps.oc.removeProviderAuth = async () => ({ ok: false, error: "upstream rejected" });
+  deps.restartOpencode = async () => { restarts += 1; return { ok: true }; };
+  const handlers = buildHandlers(deps);
+  const result = await handlers["opencode:provider-auth"]({ action: "disconnect", id: "openai" });
+  assert.equal(result.action, "disconnect");
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "upstream rejected");
+  assert.equal(restarts, 0, "no restart when the delete did not succeed");
+});
+
+test("opencode:provider-auth disconnect returns ok:false when the restart fails (BET-1319)", async () => {
+  const { deps } = makeDeps([]);
+  deps.oc.removeProviderAuth = async () => ({ ok: true });
+  deps.restartOpencode = async () => ({ ok: false, error: "unit restart failed" });
+  const handlers = buildHandlers(deps);
+  const result = await handlers["opencode:provider-auth"]({ action: "disconnect", id: "openai" });
+  // Success must NEVER be reported while opencode still holds the credential.
+  assert.equal(result.action, "disconnect");
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "unit restart failed");
 });
 
 // ---- BET-348: pty:spawn forwards tmuxTarget through the rpc envelope -------

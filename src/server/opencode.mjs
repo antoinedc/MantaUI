@@ -1618,6 +1618,65 @@ export async function readProviderOAuthToken(providerId, { readFile = readFileSy
   return parseProviderOAuthToken(raw, providerId);
 }
 
+/**
+ * Pure: return the top-level provider ids present in opencode's auth store
+ * from the ALREADY-READ text of the file. Mirrors `parseProviderApiKey`
+ * above exactly — never throws, returns `[]` for invalid JSON or an
+ * unparseable store.
+ *
+ * This is the truth the subscription status reads: BOTH connect
+ * (`PUT /auth/{id}`) and disconnect (`DELETE /auth/{id}`) write this store,
+ * so its top-level keys reflect a completed disconnect immediately — unlike
+ * opencode's process-lifetime `GET /provider` `connected[]`, which only a
+ * restart clears (BET-1319). The `opencode-claude-auth` plugin DOES re-sync
+ * the `anthropic` entry back in within seconds of a restart, so `anthropic`
+ * is never a reliable subject for this check.
+ *
+ * Separated from the file read below so it's directly unit-testable without
+ * touching a real auth store, the same split `parseProviderApiKey` /
+ * `readProviderApiKey` uses.
+ *
+ * @param {string} rawFileText
+ * @returns {string[]}
+ */
+export function parseAuthedProviderIds(rawFileText) {
+  try {
+    const parsed = JSON.parse(rawFileText);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? Object.keys(parsed)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Read opencode's own auth store and return the provider ids it currently
+ * holds. This is the reader the subscription status uses: both connect and
+ * disconnect write it, so it updates immediately — see
+ * `parseAuthedProviderIds` above for why `GET /provider` cannot be trusted
+ * here.
+ *
+ * Mirrors `readProviderApiKey` above exactly: tolerates a missing file by
+ * returning `[]` — NEVER throws, so a caller can `await` this
+ * unconditionally. The file-read function is injectable (`readFile`),
+ * defaulting to the real `readFileSync`, so tests can drive the
+ * missing-file / unparseable cases with a fake reader and never touch a real
+ * auth store. Reuses `opencodeAuthPath()` — do not compute the path again.
+ *
+ * @param {{ readFile?: (file: string, encoding: string) => string }} [opts]
+ * @returns {Promise<string[]>}
+ */
+export async function readAuthedProviderIds({ readFile = readFileSync } = {}) {
+  let raw;
+  try {
+    raw = readFile(opencodeAuthPath(), "utf-8");
+  } catch {
+    return [];
+  }
+  return parseAuthedProviderIds(raw);
+}
+
 // ---------------------------------------------------------------------------
 // VCS
 // ---------------------------------------------------------------------------
