@@ -506,6 +506,18 @@ struct ComposerView: View {
                                   enabled: true) { showClearConfirm = true }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            // BET-1316: an opaque background band so the keys read as solid
+            // instead of transparent over the transcript scrim. The composer's
+            // outer VStack pads by sp3 horizontally, so bleed past it (and the
+            // matching vertical margin) to make the band reach the composer's
+            // edges rather than float as an inset chip. Mirrors the session
+            // header's `.background(tokens.canvas)` + bottom hairline recipe.
+            .padding(.horizontal, -Metrics.spacing.sp3)
+            .padding(.vertical, -Metrics.spacing.sp2)
+            .background(tokens.canvas)
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(tokens.borderSubtle).frame(height: 1)
+            }
         }
     }
 
