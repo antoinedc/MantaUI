@@ -13,6 +13,12 @@
 // (absence = server default). It has no slot for the desktop "Auto" routing mode
 // (BET-1245), so Auto's flag stays device-local OUTSIDE `manta:chat:` (that
 // namespace is now box-backed; the DoD grep only admits the plan key there).
+// DECIDED END STATE (BET-1287, Option A): Auto is desktop-local BY DESIGN, not a
+// transient split. `kind:"auto"` means the MantaUI ROUTER on this device picks
+// the model, and only the desktop runs that router — the box, iOS and any other
+// client have no router to run, so a box-side `auto` mode would be a value
+// nothing else honors. A second device showing SERVER-DEFAULT for an Auto
+// session is therefore correct, not a bug; do not reconcile it box-side.
 
 import { useEffect, useMemo, useState } from "react";
 import type {
@@ -86,6 +92,9 @@ export function useModelPrefs(): ModelPrefsState {
 // The box cannot represent Auto, so it lives in a short device-local key.
 // Deliberately NOT `manta:chat:`: that namespace is box-backed now, and the
 // one-shot migration scans it for concrete models only. See the header comment.
+// DECIDED END STATE (BET-1287, Option A): Auto is desktop-local by design — only
+// the desktop runs the MantaUI router; a second device showing server-default
+// for an Auto session is correct, not a bug. See the header comment.
 export function sessionAutoKey(sessionId: string): string {
   return `manta:model-auto:${sessionId}`;
 }
