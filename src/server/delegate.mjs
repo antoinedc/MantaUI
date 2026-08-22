@@ -842,6 +842,9 @@ export async function startJob(input, deps = {}) {
     effectiveModel = deliverModel;
   } else {
     const route = deps?.chooseSubagentModel ?? chooseSubagentModel;
+    // One injected clock for this decision (rolling-window edge + TTL timestamp
+    // in buildRoutingServices, and the router's own ordering) — same instant.
+    const nowMs = Date.now();
     // Build the router's RoutingServices context from live box state (BET-1252).
     // `deps.routingServices` (test injection) is used verbatim when present;
     // otherwise the box-side builder assembles catalogue + accounts + health +
