@@ -681,7 +681,7 @@ struct ComposerView: View {
     }
 
     private var activeModel: OpencodeModel? {
-        ChatModel.activeModel(modelStore.models, override: modelStore.override, default: modelStore.defaultModel)
+        ChatModel.activeModel(modelStore.models, override: modelStore.override, configuration: modelStore.configDefault, provider: modelStore.defaultModel)
     }
 
     private var isFastActive: Bool {

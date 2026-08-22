@@ -218,25 +218,27 @@ enum ChatModel {
         isDeprecated(m) && !deprecatedOptIns.contains("\(m.providerID)/\(m.id)")
     }
 
-    /// The effective selection: override wins, else the configured default.
-    static func effective(_ override: OpencodeModelID?, _ defaultModel: OpencodeModelID?) -> OpencodeModelID? {
-        override ?? defaultModel
+    /// The effective selection, identical to the desktop's precedence
+    /// (`src/renderer/ChatPanel.tsx`): the session override wins, else the box
+    /// config's `defaultModel`, else opencode's own provider default.
+    static func effective(_ override: OpencodeModelID?, _ configDefault: OpencodeModelID?, _ providerDefault: OpencodeModelID?) -> OpencodeModelID? {
+        override ?? configDefault ?? providerDefault
     }
 
     /// Resolve the active model object (for the pill's friendly name), or nil
-    /// when neither an override nor the default names a known pickable model.
-    static func activeModel(_ models: [OpencodeModel], override: OpencodeModelID?, default defaultModel: OpencodeModelID?) -> OpencodeModel? {
-        guard let selection = effective(override, defaultModel) else { return nil }
+    /// when no effective selection names a known pickable model.
+    static func activeModel(_ models: [OpencodeModel], override: OpencodeModelID?, configuration configDefault: OpencodeModelID?, provider providerDefault: OpencodeModelID?) -> OpencodeModel? {
+        guard let selection = effective(override, configDefault, providerDefault) else { return nil }
         return models.first { $0.providerID == selection.providerID && $0.id == selection.modelID }
     }
 
     /// The pill's short label: the active model's friendly name, else
     /// "Default" when no effective selection resolves.
-    static func label(_ models: [OpencodeModel], override: OpencodeModelID?, default defaultModel: OpencodeModelID?) -> String {
-        if let active = activeModel(models, override: override, default: defaultModel) {
+    static func label(_ models: [OpencodeModel], override: OpencodeModelID?, configuration configDefault: OpencodeModelID?, provider providerDefault: OpencodeModelID?) -> String {
+        if let active = activeModel(models, override: override, configuration: configDefault, provider: providerDefault) {
             return active.name
         }
-        if override != nil || defaultModel != nil { return "Default" }
+        if override != nil || configDefault != nil || providerDefault != nil { return "Default" }
         return "Default"
     }
 
@@ -426,15 +428,29 @@ enum ChatModel {
         catalogueGroups(models).reduce(0) { $0 + $1.models.count }
     }
 
-    /// Encode a selection as the persisted `providerID/modelID` string.
-    static func encode(_ id: OpencodeModelID) -> String {
-        "\(id.providerID)/\(id.modelID)"
+    /// The persisted selection — byte-identical in shape to the desktop's
+    /// `ModelSelection` (`{ providerID, modelID, variant? }`,
+    /// src/renderer/chatShared.tsx). `variant` is omitted (never null) when
+    /// absent, so the two clients store the same JSON blob under the same key.
+    struct ModelSelection: Codable, Equatable, Sendable {
+        var providerID: String
+        var modelID: String
+        var variant: String?
     }
 
-    /// Decode a persisted override string, or nil when malformed/empty.
-    static func decode(_ raw: String) -> OpencodeModelID? {
-        let parts = raw.split(separator: "/", maxSplits: 1).map(String.init)
-        guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty else { return nil }
-        return OpencodeModelID(providerID: parts[0], modelID: parts[1])
+    /// Encode a selection as the JSON blob stored under the single per-session
+    /// key, mirroring the desktop's `JSON.stringify`. A nil `variant` is
+    /// omitted by the synthesized Codable (encodeIfPresent), never `null`.
+    static func encode(_ selection: ModelSelection) -> String {
+        (try? JSONEncoder().encode(selection)).flatMap { String(data: $0, encoding: .utf8) } ?? ""
+    }
+
+    /// Decode a persisted selection JSON blob, or nil when malformed/empty.
+    static func decode(_ raw: String) -> ModelSelection? {
+        guard let data = raw.data(using: .utf8),
+              let s = try? JSONDecoder().decode(ModelSelection.self, from: data)
+        else { return nil }
+        guard !s.providerID.isEmpty, !s.modelID.isEmpty else { return nil }
+        return s
     }
 }

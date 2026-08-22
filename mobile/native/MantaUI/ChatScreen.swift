@@ -808,12 +808,16 @@ private struct ChatScreenContent: View {
     private var activeModelContextLimit: Double? {
         guard let model = ChatModel.activeModel(modelStore.models,
                                                 override: modelStore.override,
-                                                default: modelStore.defaultModel) else { return nil }
+                                                configuration: modelStore.configDefault,
+                                                provider: modelStore.defaultModel) else { return nil }
         return model.limit?.context
     }
 
     private var activeModelName: String {
-        ChatModel.label(modelStore.models, override: modelStore.override, default: modelStore.defaultModel)
+        ChatModel.label(modelStore.models,
+                        override: modelStore.override,
+                        configuration: modelStore.configDefault,
+                        provider: modelStore.defaultModel)
     }
 
     /// The band colour for the current context reading (strip + sheet).
@@ -1087,8 +1091,11 @@ private struct ChatScreenContent: View {
     /// plan/build mode, falling back to the server default (the plan model is
     /// only ever the composer's active model while plan mode is on).
     private var buildModelName: String {
-        let buildID = ChatModelStore.loadOverride(for: store.sessionId, mode: .build)
-        return ChatModel.label(modelStore.models, override: buildID, default: modelStore.defaultModel)
+        let buildID = ChatModelStore.loadOverride(for: store.sessionId)
+        return ChatModel.label(modelStore.models,
+                               override: buildID,
+                               configuration: modelStore.configDefault,
+                               provider: modelStore.defaultModel)
     }
 
     private func handleBuildHere(_ question: QuestionRequest, feedback: String) {
