@@ -65,6 +65,10 @@ function generateCorpus(entries: Entry[]): Array<{ variant: string; source: Entr
   const otherVendors = ["acme", "reseller"];
 
   for (const e of entries) {
+    // Dated aliases of an existing model and over-collapse guard siblings are
+    // not independent model identities — skip them as alias sources (their
+    // behaviour is pinned by the targeted 6.3 rows / guard block instead).
+    if (e.synthesize === false) continue;
     const id = e.id;
     const owner = id.includes("/") ? id.split("/")[0] : id;
     const bare = id.includes("/") ? id.split("/").pop() as string : id;
@@ -245,6 +249,17 @@ describe("BET-1303 matcher — regression ids from real boxes (6.3)", () => {
     { local: "big-pickle", none: true },
     { local: "default", none: true },
     { local: "ornith", ambiguous: true },
+    // BET-1307 — a model and its own dated alias must collapse to ONE entry
+    // (these rows were silently dropped from §6.3 while the ornith row stayed,
+    // so the suite was green while the defect lived).
+    { local: "claude-opus-4-5", target: "anthropic/claude-opus-4-5", negate: "anthropic/claude-opus-4-5-20251101" },
+    { local: "claude-sonnet-4-5", target: "anthropic/claude-sonnet-4-5", negate: "anthropic/claude-sonnet-4-5-20250929" },
+    { local: "claude-haiku-4-5", target: "anthropic/claude-haiku-4-5", negate: "anthropic/claude-haiku-4-5-20251001" },
+    // Over-collapse guards — distinct products must NOT merge.
+    { local: "glm-5", target: "zhipuai/glm-5", negate: "zhipuai/glm-5-turbo" },
+    { local: "glm-5-turbo", target: "zhipuai/glm-5-turbo", negate: "zhipuai/glm-5" },
+    { local: "kimi-k2.7-code", target: "moonshotai/kimi-k2.7-code", negate: "moonshotai/kimi-k2.7-code-highspeed" },
+    { local: "kimi-k2.7-code-highspeed", target: "moonshotai/kimi-k2.7-code-highspeed", negate: "moonshotai/kimi-k2.7-code" },
   ];
 
   it("every real-id row resolves exactly as the table demands", () => {
@@ -280,6 +295,31 @@ function runnableOrnithSizes(candidates: ModelCatalogEntry[]): void {
   const ids = candidates.map((c) => c.id).sort();
   const ornith = FIXTURE.filter((e) => e.family === "ornith").map((e) => e.id).sort();
   expect(ids).toEqual(ornith);
+}
+
+describe("BET-1307 over-collapse guards — distinct products sharing a handle never merge", () => {
+  const matcher = createModelIndex(FIXTURE);
+
+  it("collapseAliases never merges distinct family members with different soft tokens", () => {
+    // The family handle "glm" addresses ALL glm entries; collapse must keep
+    // each structurally-distinct product separate (glm-5-turbo's `turbo` is an
+    // extra soft token, so it is its own class, never the base).
+    const glmIds = toSortedIds(FIXTURE.filter((e) => e.family === "glm"));
+    const glm = matcher.matchModel("glm");
+    expect(glm.kind).toBe("ambiguous");
+    expect(toSortedIds(glm.candidates)).toEqual(glmIds);
+
+    // Same for kimi — the highspeed sibling is distinct from the base code model.
+    const kimiIds = toSortedIds(FIXTURE.filter((e) => e.family === "kimi"));
+    const kimi = matcher.matchModel("kimi");
+    expect(kimi.kind).toBe("ambiguous");
+    expect(toSortedIds(kimi.candidates)).toEqual(kimiIds);
+  });
+});
+
+// Extract the ids of an entry list as stable sorted ids.
+function toSortedIds(entries: ModelCatalogEntry[]): string[] {
+  return entries.map((e) => e.id).filter((id): id is string => typeof id === "string").sort();
 }
 
 describe("BET-1303 matcher — source gate (6.4)", () => {
