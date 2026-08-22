@@ -104,12 +104,11 @@ struct SessionListView: View {
                         Image(systemName: "gearshape")
                             .foregroundColor(tokens.tx2)
                     }
-                    // The system's own glass BUTTON style, not a plain button
-                    // with a glass effect layered over it: the layered version
-                    // renders correctly but eats the touch, so the button looks
-                    // dead. Both header buttons use the same style so they read
-                    // as a matched pair.
-                    .buttonStyle(.glass)
+                    // Hidden shared background: iOS 26 paints an automatic
+                    // glass capsule behind image bar buttons; suppressing it
+                    // keeps these as bare icons while leaving standard
+                    // toolbar hit-testing untouched.
+                    .sharedBackgroundVisibility(.hidden)
                     .accessibilityLabel("Settings")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
@@ -120,7 +119,7 @@ struct SessionListView: View {
                         Image(systemName: "plus")
                             .foregroundColor(tokens.tx2)
                     }
-                    .buttonStyle(.glass)
+                    .sharedBackgroundVisibility(.hidden)
                     .accessibilityLabel("New session")
                 }
             }
