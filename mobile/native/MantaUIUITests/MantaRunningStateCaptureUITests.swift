@@ -100,12 +100,15 @@ final class MantaRunningStateCaptureUITests: XCTestCase {
     // MARK: - Pairing (idempotent)
 
     private func pairIfNeeded(_ app: XCUIApplication) {
+        let manual = app.buttons["onboarding-manual-toggle"]
+        guard manual.waitForExistence(timeout: 3) else { return }
+        manual.tap()
         let otp = app.textFields["onboarding-otp"]
-        guard otp.waitForExistence(timeout: 3) else { return }
+        XCTAssertTrue(otp.waitForExistence(timeout: 5), "manual setup fields never appeared")
         otp.tap()
         otp.typeText(pairCode)
 
-        let advanced = app.buttons["My box isn't reachable from the internet"]
+        let advanced = app.buttons["onboarding-server-toggle"]
         if advanced.exists { advanced.tap() }
         let serverField = app.textFields["onboarding-server-url"]
         XCTAssertTrue(serverField.waitForExistence(timeout: 5), "server URL field never appeared")

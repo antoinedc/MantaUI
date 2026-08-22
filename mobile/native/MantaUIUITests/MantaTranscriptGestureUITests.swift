@@ -75,11 +75,14 @@ private enum TranscriptGesture {
             return
         }
 
-        let otp = app.textFields["onboarding-otp"]
-        guard otp.waitForExistence(timeout: 15) else {
+        let manual = app.buttons["onboarding-manual-toggle"]
+        guard manual.waitForExistence(timeout: 15) else {
             XCTFail("neither the session list nor the onboarding entry appeared")
             return
         }
+        manual.tap()
+        let otp = app.textFields["onboarding-otp"]
+        XCTAssertTrue(otp.waitForExistence(timeout: 5), "manual setup fields never appeared")
 
         if code.isEmpty || server.isEmpty {
             throw XCTSkip("GESTURE SKIP: no pairing code/server (MantaPairFixture empty, no env)")
@@ -89,7 +92,7 @@ private enum TranscriptGesture {
         otp.tap()
         otp.typeText(code)
 
-        let advanced = app.buttons["My box isn't reachable from the internet"]
+        let advanced = app.buttons["onboarding-server-toggle"]
         if advanced.waitForExistence(timeout: 3) { advanced.tap() }
         let serverField = app.textFields["onboarding-server-url"]
         XCTAssertTrue(serverField.waitForExistence(timeout: 5), "server URL field never appeared")

@@ -239,7 +239,7 @@ final class MantaLiveArtifactsUITests: XCTestCase {
             .matching(NSPredicate(format: "label CONTAINS %@", query))
             .firstMatch
         guard waitExist(row, 20) else {
-            print("RESULT \(query)-row-missing pair=\(waitExist(app.textFields["onboarding-otp"], 1))")
+            print("RESULT \(query)-row-missing pair=\(waitExist(app.buttons["onboarding-manual-toggle"], 1))")
             return false
         }
         // Capture the label BEFORE navigating (after `row.tap()` the element

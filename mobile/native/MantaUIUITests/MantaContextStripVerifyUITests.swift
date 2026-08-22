@@ -97,7 +97,7 @@ final class MantaContextStripVerifyUITests: XCTestCase {
     func testNoMaxContextStateRenders() throws {
         let app = XCUIApplication()
         app.launch()
-        if app.textFields["onboarding-otp"].waitForExistence(timeout: 3) { pair(app) }
+        if app.buttons["onboarding-manual-toggle"].waitForExistence(timeout: 3) { pair(app) }
         openChatWindow(app)
 
         // Keep the no-limit context frame LIVE the whole time — strip capture
@@ -159,11 +159,15 @@ final class MantaContextStripVerifyUITests: XCTestCase {
     private func pair(_ app: XCUIApplication) {
         let pairCode = ProcessInfo.processInfo.environment["MANTA_PAIR_CODE"] ?? "123456"
         let pairServer = ProcessInfo.processInfo.environment["MANTA_PAIR_SERVER"] ?? "http://127.0.0.1:8787"
+        let manual = app.buttons["onboarding-manual-toggle"]
+        XCTAssertTrue(manual.waitForExistence(timeout: 15), "manual setup toggle never appeared")
+        manual.tap()
         let otp = app.textFields["onboarding-otp"]
+        XCTAssertTrue(otp.waitForExistence(timeout: 5), "manual setup fields never appeared")
         otp.tap()
         otp.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 6))
         otp.typeText(pairCode)
-        let advanced = app.buttons["My server isn't reachable from the internet"].firstMatch
+        let advanced = app.buttons["onboarding-server-toggle"].firstMatch
         if advanced.waitForExistence(timeout: 3) { advanced.tap() }
         let serverField = app.textFields["onboarding-server-url"]
         XCTAssertTrue(serverField.waitForExistence(timeout: 5), "server URL field never appeared")

@@ -44,17 +44,21 @@ final class MantaPairingDriverUITests: XCTestCase {
         app.launch()
 
         // Entry screen. A previously-paired install would boot straight into
-        // the session list, so a missing OTP field is a real signal (stale
-        // Keychain credentials) rather than a timing flake.
-        let otp = app.textFields["onboarding-otp"]
-        XCTAssertTrue(otp.waitForExistence(timeout: 15),
+        // the session list, so a missing Manual Setup toggle is a real signal
+        // (stale Keychain credentials) rather than a timing flake.
+        let manual = app.buttons["onboarding-manual-toggle"]
+        XCTAssertTrue(manual.waitForExistence(timeout: 15),
                       "onboarding entry screen never appeared — is the app already paired?")
+        manual.tap()
+
+        let otp = app.textFields["onboarding-otp"]
+        XCTAssertTrue(otp.waitForExistence(timeout: 5), "manual setup fields never appeared")
         otp.tap()
         otp.typeText(code)
 
         // The six-digit code alone cannot address a box; the claim target is
         // the server URL behind the advanced disclosure.
-        let advanced = app.buttons["My server isn't reachable from the internet"]
+        let advanced = app.buttons["onboarding-server-toggle"]
         if advanced.waitForExistence(timeout: 3) { advanced.tap() }
         let serverField = app.textFields["onboarding-server-url"]
         XCTAssertTrue(serverField.waitForExistence(timeout: 5), "server URL field never appeared")

@@ -646,7 +646,9 @@ struct SessionListView: View {
     }
 
     private var loadingState: some View {
-        ProgressView()
+        // The same loader the pairing screen uses — the user lands here right
+        // after pairing, so it must not flip between two different-looking waits.
+        MantaLoader(caption: "Loading sessions…", tokens: tokens, size: .screen)
             .accessibilityIdentifier("sessions-loading")
     }
 

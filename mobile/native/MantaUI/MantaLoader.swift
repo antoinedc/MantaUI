@@ -101,11 +101,22 @@ struct MantaLoader: View {
         }
     }
 
-    /// The REAL Manta mark, the same artwork as the app icon
-    /// (assets/icons/512x512.png, bundled as Resources/logo/manta-logo.png).
-    /// It is deliberately the shipped asset rather than a redrawn approximation
-    /// — a hand-rolled path is a second, drifting copy of the brand.
+    /// The REAL Manta mark, the same artwork as the app icon — one reusable
+    /// view shared by the loader and the onboarding header so the brand is
+    /// drawn from exactly one place (BET-1308).
     private var mark: some View {
+        MantaLogoMark(size: diameter * Self.markRatio)
+    }
+}
+
+/// The bundled Manta logo artwork (assets/icons/512x512.png, bundled as
+/// Resources/logo/manta-logo.png). Deliberately the shipped asset rather than
+/// a redrawn approximation — a hand-rolled path is a second, drifting copy of
+/// the brand.
+struct MantaLogoMark: View {
+    var size: CGFloat
+
+    var body: some View {
         // Loaded by name from the bundle: the PNG is a loose resource, not an
         // asset-catalog entry, so both spellings are tried.
         // The logo is a bundled resource under Resources/logo, not an asset
@@ -114,6 +125,6 @@ struct MantaLoader: View {
         Image(uiImage: UIImage(named: "manta-logo") ?? UIImage(named: "manta-logo.png") ?? UIImage())
             .resizable()
             .scaledToFit()
-            .frame(width: diameter * Self.markRatio, height: diameter * Self.markRatio)
+            .frame(width: size, height: size)
     }
 }

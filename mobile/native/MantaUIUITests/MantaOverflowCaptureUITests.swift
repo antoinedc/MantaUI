@@ -36,12 +36,15 @@ final class MantaOverflowCaptureUITests: XCTestCase {
         app.launch()
 
         // --- Pair if needed (idempotent) -------------------------------------
-        let otp = app.textFields["onboarding-otp"]
-        if otp.waitForExistence(timeout: 3) {
+        let manual = app.buttons["onboarding-manual-toggle"]
+        if manual.waitForExistence(timeout: 3) {
+            manual.tap()
+            let otp = app.textFields["onboarding-otp"]
+            XCTAssertTrue(otp.waitForExistence(timeout: 5), "manual setup fields never appeared")
             otp.tap()
             otp.typeText(code)
 
-            let advanced = app.buttons["My box isn't reachable from the internet"]
+            let advanced = app.buttons["onboarding-server-toggle"]
             if advanced.exists { advanced.tap() }
             let serverField = app.textFields["onboarding-server-url"]
             XCTAssertTrue(serverField.waitForExistence(timeout: 5), "server URL field never appeared")
