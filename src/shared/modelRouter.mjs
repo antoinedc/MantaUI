@@ -87,24 +87,32 @@ function assess(candidate, { nowMs }, services) {
   const key = endpointKey(candidate);
   const dec = services.declared?.[key] ?? null;
   const identity = resolveIdentity(candidate, dec, services.catalogMatcher);
+  // The endpoint AS WE UNDERSTAND IT: the provider's credible claims, with the
+  // catalogue's facts filling the gaps and the user's declaration on top.
+  // Everything downstream judges THIS, never the raw provider payload — which
+  // may report `limit.context: 0` / empty `cost` as false "claims" (BET-1268).
+  // `candidate` stays the identity of the endpoint (winner + endpointKey); only
+  // its description is merged.
+  const m = identity.effective ?? candidate;
   const catalogEntry = typeof services.catalogEntryFor === "function" ? services.catalogEntryFor(candidate) : null;
-  const quality = qualityScore(candidate, catalogEntry, services.qualityField);
+  const quality = qualityScore(m, catalogEntry, services.qualityField);
   const elig = autoEligibility({
-    model: candidate,
+    model: m,
     identity: { known: identity.state === "resolved" },
     quality,
     declared: dec,
     providerClass: services.providerClass?.[candidate.providerID] ?? "supported",
   });
-  const mc = marginalCost({ model: candidate, account: services.accounts?.[candidate.providerID], nowMs, mix: services.mix, reference: services.referenceByModel?.[candidate.id] });
+  const mc = marginalCost({ model: m, account: services.accounts?.[candidate.providerID], nowMs, mix: services.mix, reference: services.referenceByModel?.[candidate.id] });
   // The raw mix/reference flags blendedPrice already computed with the SAME
   // inputs marginalCost handed it — reported verbatim, not recomputed. This is
   // what makes a silently-defaulted mix / absent catalogue visible (BET-1265).
-  const bp = blendedPrice(candidate, services.mix, services.referenceByModel?.[candidate.id]);
+  const bp = blendedPrice(m, services.mix, services.referenceByModel?.[candidate.id]);
   const penalise = shouldDerank(services.reliability?.samples?.[key], services.reliability?.baseline?.[candidate.id]).penalise === true;
   return {
     key,
     candidate,
+    effective: m,
     quality,
     qualityScore: quality.known ? quality.score : 0,
     tier: tierForScore(quality.known ? quality.score : undefined),
@@ -323,7 +331,7 @@ export function chooseModel(input = {}) {
   for (const c of Array.isArray(catalog) ? catalog : []) {
     considered += 1;
     const a = assess(c, { nowMs }, services);
-    const cap = capabilityDrop(c, hardCtx);
+    const cap = capabilityDrop(a.effective ?? a.candidate, hardCtx);
     if ((a.exhausted && !cap) || cap || !a.eligible) {
       const label = bindLabel(a, cap);
       counts[label] = (counts[label] ?? 0) + 1;

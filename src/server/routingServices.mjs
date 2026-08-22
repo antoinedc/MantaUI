@@ -25,6 +25,8 @@
 //   { catalogMatcher, catalogEntryFor, qualityField, declared, providerClass,
 //     accounts, health, reliability, telemetry, mix, referenceByModel }
 
+import { endpointKey } from "../shared/endpointKey.mjs";
+
 const isObj = (v) => v !== null && typeof v === "object";
 const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
 
@@ -200,6 +202,13 @@ export async function buildRoutingServices(cfg = {}, deps = {}) {
       };
       services.catalogEntryFor = (endpoint) => {
         try {
+          // A declared identity always beats a fuzzy match: the user told us
+          // exactly which catalogue model this endpoint is (BET-1268). Fall
+          // back to the fuzzy match only when nothing is declared.
+          const declaredId = services.declared?.[endpointKey(endpoint)]?.catalogId;
+          if (typeof declaredId === "string" && declaredId !== "") {
+            return catalogue.lookupModel(declaredId) ?? null;
+          }
           const match = catalogue.matchModel(endpoint?.id);
           return match?.kind === "exact" ? match.candidates?.[0] ?? null : null;
         } catch {

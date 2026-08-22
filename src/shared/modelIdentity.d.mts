@@ -24,7 +24,6 @@ export interface ModelDeclaration {
   catalogId?: string;
   price?: { input?: number; output?: number } | "free";
   caches?: false | { read?: boolean; write?: boolean };
-  tierOverride?: string;
 }
 
 export interface CatalogueEntry {
@@ -58,7 +57,6 @@ export interface EffectiveModel extends OpencodeModel {
   catalogId?: string;
   benchmarks?: CatalogueEntry["benchmarks"];
   caches?: false | { read?: boolean; write?: boolean };
-  tierOverride?: string;
 }
 
 export function resolveIdentity(

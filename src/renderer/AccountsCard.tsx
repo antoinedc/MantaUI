@@ -51,7 +51,6 @@ export type DeclaredModel = {
   catalogId?: string;
   price?: { input?: number; output?: number } | "free";
   caches?: boolean | { read?: boolean; write?: boolean };
-  tierOverride?: string;
 };
 
 export type AccountRowModel = {

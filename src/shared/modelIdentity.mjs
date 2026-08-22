@@ -121,7 +121,7 @@ function buildEffective(m, dec, entry, catalogId) {
     limit: { context, output },
     cost,
   };
-  for (const key of ["catalogId", "benchmarks", "caches", "tierOverride"]) {
+  for (const key of ["catalogId", "benchmarks", "caches"]) {
     const val =
       key === "catalogId"
         ? catalogId
@@ -141,7 +141,7 @@ function buildEffective(m, dec, entry, catalogId) {
  * @param {object} model      OpencodeModel as normalised from the provider
  * @param {object} declared   the user's declaration for this endpoint key, or null:
  *                            { catalogId?, price?: {input,output}|"free",
- *                              caches?: false|{read,write}, tierOverride? }
+ *                              caches?: false|{read,write} }
  * @param {object} catalog    { lookupModel, matchModel } — injected
  * @returns {{
  *   state: "resolved"|"ambiguous"|"unknown",

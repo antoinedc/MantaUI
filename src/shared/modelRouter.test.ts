@@ -3,13 +3,18 @@ import { chooseModel, AGENT_TIER, PRESETS, type RoutingServices } from "./modelR
 import { endpointKey } from "./endpointKey.mjs";
 import { tierRank } from "./modelGuide.mjs";
 import { AGENT_FLOOR_SCORE } from "./modelQuality.mjs";
-// Standing rule 9: a routing test may not hand-write a candidate literal.
-// Build every candidate through the REAL normaliser (the same seam the
-// BET-1267 cases use) so the fixtures can never drift from what production
-// actually produces.
-// @ts-expect-error — server module has no .d.mts; _normalizeProviderModel is
-// the canonical OpencodeModel producer every routed test builds through.
+// Per standing rule 9, candidates below are built with the REAL normaliser,
+// not a hand-written fixture — a fixture that disagreed with production is how
+// these defects survived a green suite. The services context is likewise built
+// through the REAL box-side assembly (buildRoutingServices) so the
+// declared-catalogId behaviour of catalogEntryFor is the shipped one.
+// The two server .mjs modules have no bundled type declarations (they are
+// consumed from node:test .test.mjs). The seams below are exercised through
+// the real modules — the fixtures are deliberately not hand-typed.
+// @ts-expect-error — server .mjs has no bundled declarations; used for the real normaliser.
 import { _normalizeProviderModel } from "../server/opencode.mjs";
+// @ts-expect-error — server .mjs has no bundled declarations; used for the real services wiring.
+import { buildRoutingServices } from "../server/routingServices.mjs";
 
 // A catalogue entry field that forces a precise, known quality score so tests
 // control the tier band deterministically. qualityScore's benchmark path wins
@@ -434,5 +439,104 @@ describe("chooseModel — decision trace (BET-1265)", () => {
       ]),
     );
     expect(res.trace.intent).toEqual({ contextTokens: 0, needs: { tools: true } });
+  });
+});
+
+describe("chooseModel — judge the resolved endpoint, not the provider's raw claims (BET-1268)", () => {
+  // The two false "claims" modelIdentity exists to refute: an empty cost bag
+  // and a context limit of 0. A provider reporting these is not saying
+  // "unknown" — it is guessing, and both guesses are wrong.
+  const HALLUCINATING = { cost: {}, limit: { context: 0 } };
+
+  // The catalogue's real facts for the model the user declares this endpoint
+  // to be.
+  const DECLARED = {
+    id: "declared-sonnet",
+    family: "sonnet",
+    limit: { context: 262000 },
+    benchmarks: [{ name: "SWE-Bench Verified", score: 0.85 }],
+  };
+  // The entry a fuzzy match on an opaque endpoint id would WRONGLY resolve to.
+  const FUZZY = { id: "fuzzy", family: "haiku", limit: { context: 128000 } };
+
+  const matchModel = (id: string) =>
+    id === "fuzzyable"
+      ? { kind: "exact", candidates: [FUZZY] }
+      : { kind: "none", candidates: [] };
+
+  async   function realServices(declaredModels: Record<string, unknown>): Promise<RoutingServices> {
+    return (await buildRoutingServices(
+      { modelRouting: { preset: "balanced", declaredModels } },
+      {
+        catalogIndex: {
+          lookupModel: (id: string) => (id === "declared-sonnet" ? DECLARED : null),
+          matchModel,
+          allModels: () => [DECLARED],
+        },
+        endpoints: [{ providerID: "p", id: "declared-sonnet" }],
+        snapshots: [],
+        providerHealthState: () => undefined,
+        endpointSummary: async () => ({}),
+      },
+    )) as RoutingServices;
+  }
+
+  it("1. the catalogue's real context limit reaches the headroom filter — a conversation that fits 262k is not dropped", async () => {
+    const services = await realServices({
+      "p/declared-sonnet": { catalogId: "declared-sonnet", price: { input: 2, output: 8 }, caches: false },
+    });
+    const candidate = _normalizeProviderModel("p", "declared-sonnet", HALLUCINATING)!;
+    const res = chooseModel({
+      intent: { kind: "start", agent: "general", needs: {}, contextTokens: 150000 },
+      catalog: [candidate],
+      policy: { preset: "balanced" },
+      services,
+    });
+    // The provider claimed `context: 0`; the catalogue's 262k is what governs.
+    // 150k tokens fit 262k, so the endpoint survives — it is not dropped for
+    // "context headroom".
+    expect(res.model).not.toBeNull();
+    expect(res.model?.id).toBe("declared-sonnet");
+    expect(res.trace.dropped.find((d) => d.reason === "context headroom")).toBeUndefined();
+  });
+
+  it("2. a declared price reaches the cost — trace.winner.cost.value reflects it, not 0", async () => {
+    const services = await realServices({
+      "p/declared-sonnet": { catalogId: "declared-sonnet", price: { input: 2, output: 8 }, caches: false },
+    });
+    const candidate = _normalizeProviderModel("p", "declared-sonnet", HALLUCINATING)!;
+    const res = chooseModel({
+      intent: { kind: "start", agent: "general", needs: {}, contextTokens: 150000 },
+      catalog: [candidate],
+      policy: { preset: "balanced" },
+      services,
+    });
+    const w = res.trace.winner!;
+    expect(w).not.toBeNull();
+    // input 2 / output 8, missing cache rates bill at the input rate under the
+    // default mix: 2*0.08 + 8*0.05 + 2*0.8 + 2*0.07 = 2.30.
+    expect(w.cost.value).toBeGreaterThan(0);
+    expect(w.cost.value).toBeCloseTo(2.3, 9);
+  });
+
+  it("3. a declared catalogId wins over a fuzzy match — quality comes from the declared entry", async () => {
+    const services = await realServices({
+      // `fuzzyable` WOULD fuzzy-match to the haiku entry, but the user declared
+      // it is really the sonnet model.
+      "p/fuzzyable": { catalogId: "declared-sonnet", price: { input: 2, output: 8 }, caches: false },
+    });
+    const candidate = _normalizeProviderModel("p", "fuzzyable", HALLUCINATING)!;
+    const res = chooseModel({
+      intent: { kind: "start", agent: "general", needs: {}, contextTokens: 1000 },
+      catalog: [candidate],
+      policy: { preset: "balanced" },
+      services,
+    });
+    const w = res.trace.winner!;
+    expect(w).not.toBeNull();
+    // The declared catalogue entry carries the benchmark; the fuzzy haiku entry
+    // has none (it would place the endpoint by family instead).
+    expect(w.quality.basis).toBe("benchmark");
+    expect(w.quality.known).toBe(true);
   });
 });
