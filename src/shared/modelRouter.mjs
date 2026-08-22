@@ -211,15 +211,53 @@ function signalsOf(a) {
   };
 }
 
+// BET-1270 6e: is the incumbent still describable by Auto (the completeness
+// gate)? The renderer's hysteresis (shouldSwitch) needs this to force a switch
+// off an incumbent Auto can no longer describe — computed here, server-side,
+// from the SAME assess machinery, so the renderer keeps no eligibility state of
+// its own (one round trip, one source of truth).
+export function incumbentStillEligible(candidate, services) {
+  if (!candidate || typeof candidate !== "object") return true;
+  const key = endpointKey(candidate);
+  const dec = services?.declared?.[key] ?? null;
+  const identity = resolveIdentity(candidate, dec, services?.catalogMatcher);
+  const m = identity.effective ?? candidate;
+  const catalogEntry =
+    typeof services?.catalogEntryFor === "function" ? services.catalogEntryFor(candidate) : null;
+  const quality = qualityScore(m, catalogEntry, services?.qualityField);
+  const elig = autoEligibility({
+    model: m,
+    identity: { known: identity.state === "resolved" },
+    quality,
+    declared: dec,
+    providerClass: services?.providerClass?.[candidate.providerID] ?? "supported",
+  });
+  return elig.eligible;
+}
+
+function healthRank(a, services) {
+  const providerID = a?.candidate?.providerID ?? a?.effective?.providerID;
+  const st = services?.health?.[providerID];
+  // Only `failing` is a soft/deprioritised signal here. `out-of-credit` and
+  // `rate-limited` never reach the ordering — they are EXCLUDED (hard) in
+  // capabilityDrop, so a survivor's health is either ok or failing.
+  return st === "failing" ? 1 : 0;
+}
+
 // Soft ordering within a competing set (same model, or a flattened economy
-// set): penalised sorts last; then cost; then quality, throughput, the
-// latency percentiles, and finally the full provider/model key — deterministic
-// (the model id alone is identical for exactly the endpoints most likely to
-// tie, so the old final tie-break was deterministic by accident).
+// set): penalised sorts last; then a soft `failing` health sorts behind a
+// healthy endpoint (BET-1270 6a — placed after reliability, before cost); then
+// cost; then quality, throughput, the latency percentiles, and finally the full
+// provider/model key — deterministic (the model id alone is identical for
+// exactly the endpoints most likely to tie, so the old final tie-break was
+// deterministic by accident).
 function cmpWithinModel(a, b, services) {
   const pa = a.penalise ? 1 : 0;
   const pb = b.penalise ? 1 : 0;
   if (pa !== pb) return pa - pb;
+  const ha = healthRank(a, services);
+  const hb = healthRank(b, services);
+  if (ha !== hb) return ha - hb;
   if (a.marginalCost !== b.marginalCost) return a.marginalCost - b.marginalCost;
   if (a.qualityScore !== b.qualityScore) return b.qualityScore - a.qualityScore;
   const ta = telemetryOf(a, services);
@@ -399,7 +437,7 @@ export function chooseModel(input = {}) {
     };
   }
 
-  const explored = stage3Order(survivors, { preset: policy?.preset, telemetry: services.telemetry });
+  const explored = stage3Order(survivors, { preset: policy?.preset, telemetry: services.telemetry, health: services.health });
   const band = selectBand(explored, targetRank, agent);
   if (band.length === 0) {
     return {

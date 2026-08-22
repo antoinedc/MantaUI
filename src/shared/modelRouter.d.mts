@@ -99,3 +99,8 @@ export interface ChooseResult {
 }
 
 export function chooseModel(input?: ChooseInput): ChooseResult;
+
+export function incumbentStillEligible(
+  candidate: Model | null | undefined,
+  services?: RoutingServices,
+): boolean;

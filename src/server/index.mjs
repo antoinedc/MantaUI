@@ -46,6 +46,7 @@ import { startStatusPoller } from "./status.mjs";
 import { createSyncState } from "./syncState.mjs";
 import { createStreamInterpreter } from "./streamInterp.mjs";
 import { enrichProviderError } from "../shared/streamInterpretation.mjs";
+import { providerStateLabel } from "../shared/providerHealthLabel.mjs";
 import { startOutboxPoller, pushArtifact, createArtifactSweep } from "./outbox.mjs";
 import { startUploadCleanupPoller } from "./uploads.mjs";
 import {
@@ -433,11 +434,63 @@ const usageStopEngine = createUsageStopEngine({
 // OWN per-session provider cache (getSessionModel — no second cache is built
 // here); observeEvent is fed the opencode pump below alongside the others.
 const providerHealth = createProviderHealth({
-  publish: (evt) => bus.publish(evt),
+  // BET-1270 6d: a provider going out of credit / rate-limited / failing must
+  // SURFACE, not sit unpublished (nobody subscribes to a bus kind that was never
+  // wired to the renderer). Route the ONE transition event through the EXISTING
+  // notification router (fireNotify — informational tier) instead of adding a
+  // second delivery mechanism. The body names the provider + state in the same
+  // words as the Accounts row (shared providerStateLabel), so the two surfaces
+  // cannot disagree.
+  publish: (evt) => {
+    if (evt?.kind === "provider-health.needs-attention") {
+      const { providerID, state } = evt.payload ?? {};
+      const label = providerStateLabel(state);
+      if (providerID && label) {
+        void push.fireNotify({
+          title: "Provider needs attention",
+          message: `${providerID}: ${label}`,
+          urgent: false,
+        });
+        return;
+      }
+    }
+    bus.publish(evt);
+  },
   getSessionModel: (sessionId) => usageStopEngine.getSessionModel(sessionId),
   providerIDForAdapter,
+  // BET-1270 6b: attribute adapter-less (custom / pay-as-you-go) providers by
+  // their failing model's endpoint identity. The map below is the synchronous
+  // modelID -> providerID the health pump reads; refreshed from the opencode
+  // model list (the SAME source the adapters are keyed by).
+  providerForModel: (modelID) => modelProviderIndex.get(modelID) ?? null,
   recheckAtLimit: (adapterId) => recheckAdapterAtLimit(adapterId),
 });
+
+// BET-1270 6b: modelID -> providerID for providers with NO usage adapter. The
+// box cannot ask an adapter-less provider its identity, but it answers "which
+// connected provider exposes this model?" from the opencode model list — first
+// writer wins (stable), refreshed at startup (provider sets change rarely).
+const modelProviderIndex = new Map();
+async function refreshModelProviderIndex() {
+  try {
+    const models = await oc.listModels();
+    for (const m of Array.isArray(models) ? models : []) {
+      const providerID = m?.providerID;
+      const id = m?.id ?? m?.modelID;
+      if (
+        typeof providerID === "string" &&
+        typeof id === "string" &&
+        id !== "" &&
+        !modelProviderIndex.has(id)
+      ) {
+        modelProviderIndex.set(id, providerID);
+      }
+    }
+  } catch {
+    // non-fatal: attribution degrades to the supported-provider path
+  }
+}
+void refreshModelProviderIndex();
 // Recovery path #3 (issue §Three ways the flag clears): a supported provider's
 // reader reporting funds on a normal poll clears its evidence-only
 // out-of-credit flag. Reuses the EXISTING usage poller's `usage.updated`
@@ -1169,7 +1222,15 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
   // existing consumer (renderer banner, push classification, the usage-stop
   // enroller) keeps working unchanged.
   if (evt && evt.type === "session.error" && evt.properties?.error) {
-    evt.properties.error = enrichProviderError(evt.properties.error);
+    // BET-1270 6c: a transport-level 429 (prompt_async POST) carries the
+    // provider's Retry-After but is NOT a session.error on the stream — the
+    // pump bridges it here so the enrichment hands a real retryAfterMs to
+    // providerHealth instead of clamping every rate-limit to the 2-min floor.
+    const refusal = oc.getAndClearSessionRefusal(evt.properties?.sessionID);
+    evt.properties.error = enrichProviderError(
+      evt.properties.error,
+      refusal?.retryAfterMs,
+    );
   }
   // Box-side stream interpretation (BET-551 / §17): derive interpreted events
   // from the raw opencode stream and publish them on the SAME bus (no second

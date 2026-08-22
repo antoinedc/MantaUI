@@ -31,6 +31,7 @@ import { useCallback, useMemo, useState, type ReactNode } from "react";
 import { X } from "lucide-react";
 import type { ProviderEndpoint, SubscriptionStatus, UsageSnapshot, UsageWindow } from "../shared/types";
 import { autoEligibility, MISSING } from "../shared/autoEligibility.mjs";
+import { providerStateLabel } from "../shared/providerHealthLabel.mjs";
 import { resolveIdentity } from "../shared/modelIdentity.mjs";
 import { ConnectProvider } from "./ConnectProvider";
 import { CustomProviderForm } from "./CustomProviderForm";
@@ -87,14 +88,15 @@ const formatDollars = (n: number) => (Number.isFinite(n) ? n.toFixed(2) : String
  * credential absence; then "no usage data".
  */
 export function describeAccountState(r: AccountRowModel): AccountState {
-  if (r.health === "out-of-credit") return { text: "Out of credit", tone: "danger" };
+  if (r.health === "out-of-credit") return { text: providerStateLabel("out-of-credit") ?? "Out of credit", tone: "danger" };
   if (r.health === "rate-limited") {
+    const base = providerStateLabel("rate-limited") ?? "Rate limited";
     return {
-      text: r.retryInMinutes ? `Rate limited · retry in ${r.retryInMinutes}m` : "Rate limited",
+      text: r.retryInMinutes ? `${base} · retry in ${r.retryInMinutes}m` : base,
       tone: "warn",
     };
   }
-  if (r.health === "failing") return { text: "Not responding", tone: "warn" };
+  if (r.health === "failing") return { text: providerStateLabel("failing") ?? "Not responding", tone: "warn" };
   if (r.reading) {
     const pct = r.reading.pct;
     const tone: AccountStatus = pct >= 90 ? "danger" : pct >= 70 ? "warn" : "ok";

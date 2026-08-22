@@ -5,6 +5,7 @@ import {
   parseSseFrame,
   createSession,
   sendPrompt,
+  getAndClearSessionRefusal,
   getSessionAgent,
   listMessages,
   getMessage,
@@ -394,6 +395,37 @@ test("sendPrompt non-2xx carries status + Retry-After (BET-1230)", async () => {
       assert.equal(thrown.status, 429);
       assert.equal(thrown.retryAfterMs, 30_000);
       assert.match(thrown.message, /429/);
+    },
+  );
+});
+
+test("transport refusal records Retry-After per-session for the pump to bridge (BET-1270 6c)", async () => {
+  // The prompt_async POST carries Retry-After but is a THROWN error, not a
+  // session.error SSE event — getAndClearSessionRefusal is how the pump attaches
+  // it to the matching session.error so providerHealth gets a real cooldown.
+  _resetSessionDirectoryCache();
+  await withMockFetch(
+    async (url) => {
+      if (String(url).startsWith("http://127.0.0.1:4096/session?directory=")) {
+        return new Response(
+          JSON.stringify({ id: "ses_rl", title: "t", directory: "/w", projectID: "p" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response("slow down", {
+        status: 429,
+        headers: { "retry-after": "900" },
+      });
+    },
+    async () => {
+      await assert.rejects(() => sendPrompt({ sessionId: "ses_rl", text: "hi" }));
+      const refusal = getAndClearSessionRefusal("ses_rl");
+      // Retry-After: 900 seconds -> 900_000 ms, carried to the pump.
+      assert.deepEqual(refusal, { httpStatus: 429, retryAfterMs: 900_000 });
+      // Read-once: a second read returns undefined (the pump must not re-apply it).
+      assert.equal(getAndClearSessionRefusal("ses_rl"), undefined);
+      // A session with no refusal returns undefined.
+      assert.equal(getAndClearSessionRefusal("ses_other"), undefined);
     },
   );
 });

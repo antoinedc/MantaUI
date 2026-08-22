@@ -37,8 +37,13 @@
 // per-session {adapterId, model} cache built from `session.next.step.ended` in
 // usageStopEnroll.mjs (exposed as getSessionModel) — it does NOT write a
 // second cache. The adapter id is mapped back to an opencode providerID via
-// providerIDForAdapter; a session whose provider was never observed (or a
-// pay-as-you-go key) cannot be attributed and is skipped.
+// providerIDForAdapter. A custom / pay-as-you-go provider has NO usage adapter,
+// so providerIDForAdapter returns null for exactly the case this module exists
+// for (BET-1270 6b): a provider with no meter can still be attributed. Fall
+// back to the failing MODEL's endpoint identity — the session cache carries the
+// model id and a `providerForModel` reader maps it to the connected provider
+// that exposes it. The usage adapter is an unrelated concern and must not gate
+// attribution.
 //
 // Surfacing: per the `NEVER STUB A CONTROL TO DO NOTHING` rule in AGENTS.md an
 // excluded provider must surface, not silently disappear. A needs-attention
@@ -85,6 +90,10 @@ function clampRetryAfterMs(retryAfterMs) {
  *   usageStopEnroll.mjs (BET-1230 exposes it) — reused, never duplicated
  * @param {(adapterId: string) => string|null} [deps.providerIDForAdapter]
  *   adapter id -> opencode providerID (usage.mjs)
+ * @param {(modelID: string) => string|null} [deps.providerForModel]
+ *   model id -> opencode providerID, for a provider with NO usage adapter
+ *   (custom / pay-as-you-go). The failing model's identity is the attribution
+ *   the usage adapter cannot give (BET-1270 6b).
  * @param {(adapterId: string) => Promise<boolean>|boolean} [deps.recheckAtLimit]
  *   wire to recheckAdapterAtLimit — a cheap metadata fetch, ZERO model calls
  * @param {number} [deps.minFailuresToDeprioritize]
@@ -101,6 +110,7 @@ export function createProviderHealth({
   publish = () => {},
   getSessionModel = () => null,
   providerIDForAdapter = () => null,
+  providerForModel = () => null,
   recheckAtLimit = async () => false,
   minFailuresToDeprioritize = MIN_FAILURES_TO_DEPRIORITIZE,
 } = {}) {
@@ -158,9 +168,17 @@ export function createProviderHealth({
 
   function attributedProvider(sessionId) {
     const m = getSessionModel(sessionId);
-    const adapterId = m?.adapterId;
-    if (!adapterId) return null;
-    return providerIDForAdapter(adapterId);
+    if (!m) return null;
+    // A supported provider: the usage adapter IS its identity reader.
+    const viaAdapter = m.adapterId ? providerIDForAdapter(m.adapterId) : null;
+    if (viaAdapter) return viaAdapter;
+    // A custom / pay-as-you-go provider has no usage adapter — attribute by the
+    // failing MODEL's endpoint identity instead. The adapter is unrelated to
+    // which provider refused the turn and must not gate attribution (6b).
+    if (typeof m.model === "string" && m.model !== "") {
+      return providerForModel(m.model);
+    }
+    return null;
   }
 
   function applyFailure(providerID, error) {

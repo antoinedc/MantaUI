@@ -38,7 +38,7 @@ import { toDeliverModel } from "./delegate.mjs";
 import { buildRoutingServices } from "./routingServices.mjs";
 import { restartOpencode, runServerSelfUpdate } from "./opencodeAdmin.mjs";
 import { pollClaudeLogin, claudeCliStatus, listRoutableModels } from "./opencode.mjs";
-import { chooseModel } from "../shared/modelRouter.mjs";
+import { chooseModel, incumbentStillEligible } from "../shared/modelRouter.mjs";
 import { backupClaudeCredentials, CREDENTIALS_PATH } from "./claudeAuth.mjs";
 import { addApnsToken } from "./push.mjs";
 import { getRegistry as pluginsGetRegistry } from "./plugins.mjs";
@@ -869,12 +869,38 @@ export function buildHandlers({
           console.error(`[router] routing services degraded, routing on absent context: ${e?.message ?? e}`);
           services = null;
         }
-        // Normalise the incumbent into catalog shape ({providerID, id}) so the
-        // `changed` comparison inside chooseModel treats a requested model and
-        // a catalog entry of the same model as equal.
-        const catalogIncumbent = incumbent
-          ? { providerID: incumbent.providerID, id: incumbent.modelID ?? incumbent.id }
+        // Resolve the incumbent's FULL catalog endpoint (the normalized
+        // OpencodeModel with cost/capabilities) so the eligibility gate sees the
+        // real endpoint, not a price-less stub. BET-1270 6e reviewer Block: a
+        // stripped {providerID, id} fails autoEligibility's Price/Caching gates,
+        // forcing `incumbent-ineligible` off a perfectly describable incumbent on
+        // every boundary-crossing turn. Fall back to the stripped stub only when
+        // the incumbent is absent from the routable catalog (genuinely not
+        // routable → honestly ineligible).
+        const fullIncumbent = incumbent
+          ? (Array.isArray(catalog) ? catalog : []).find(
+              (c) =>
+                c?.providerID === incumbent.providerID &&
+                String(c?.id ?? c?.modelID ?? "") === String(incumbent.modelID ?? incumbent.id ?? ""),
+            ) ?? null
           : null;
+        const catalogIncumbent =
+          fullIncumbent ??
+          (incumbent
+            ? { providerID: incumbent.providerID, id: incumbent.modelID ?? incumbent.id }
+            : null);
+        // BET-1270 6e: the box-side facts about the incumbent the renderer
+        // sent, reported back on the SAME round trip (no second fetch, no
+        // renderer-held health/eligibility state). `incumbentHealthy` is false
+        // when the incumbent's provider is excluded or failing; `incumbentStillEligible`
+        // is the SAME completeness gate the router uses (autoEligibility), so the
+        // renderer's shouldSwitch can force an ineligible/unhealthy incumbent out.
+        const incumbentHealthy = !["out-of-credit", "rate-limited", "failing"].includes(
+          routingProviderHealthState(incumbent?.providerID) ?? "ok",
+        );
+        const stillEligible = catalogIncumbent
+          ? incumbentStillEligible(catalogIncumbent, services)
+          : true;
         const decision = chooseModel({
           intent: {
             kind: surface === "sub" ? "subagent" : "main",
@@ -919,10 +945,19 @@ export function buildHandlers({
             ? decision.alternatives.map(toDeliverModel).filter(Boolean)
             : [],
           changed: decision?.changed === true,
+          incumbentHealthy,
+          incumbentStillEligible: stillEligible,
         };
       } catch (e) {
         console.warn("[router] routing:choose failed, using incumbent:", e?.message ?? e);
-        return { model: incumbent, reason: "routing unavailable", alternatives: [], changed: false };
+        return {
+          model: incumbent,
+          reason: "routing unavailable",
+          alternatives: [],
+          changed: false,
+          incumbentHealthy: true,
+          incumbentStillEligible: true,
+        };
       }
     },
 
