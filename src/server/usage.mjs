@@ -90,6 +90,7 @@ import { codexAdapter } from "./usageAdapters/codex.mjs";
 import { kimiAdapter } from "./usageAdapters/kimi.mjs";
 import { isUsageAtLimit } from "./usageStopper.mjs";
 import { loadAccountReaders } from "./accountReaders.mjs";
+import { loadAuthFile, DEFAULT_AUTH_PATH } from "./gatewayRegister.mjs";
 
 export { normalizeWindow };
 
@@ -436,4 +437,55 @@ export function startUsagePoller(bus, { intervalMs = POLL_MS } = {}) {
 /** @returns {UsageSnapshot[]} */
 export function listSnapshots() {
   return activePoller ? activePoller.snapshots : [];
+}
+
+// ---------------------------------------------------------------------------
+// Live read for the deck harness (BET-1299) — the running server's poller
+// ---------------------------------------------------------------------------
+//
+// `listSnapshots()` reads the ONE poller instance `startUsagePoller` creates in
+// the running manta-server process. A separate process — the routing replay
+// harness (scripts/routing/deck-a.mjs) — has no poller of its own, so its
+// `listSnapshots()` is always `[]` and every priced endpoint would report a
+// false `cost.basis: unknown` even though production routing prices correctly.
+// This function fetches the SAME in-process cache from the live server over its
+// `usage:list` RPC, so deck checks reflect production truth. Never throws and
+// returns `[]` on any failure — the services contract (a missing account bag
+// must never break a decision) applies identically here.
+
+// The local binding is the direct server process (no Caddy/DNS/TLS hop) — the
+// same box the deck runs on. Same default + env override as index.mjs.
+function localServerBaseUrl() {
+  const port = Number(process.env.MANTA_MOBILE_PORT ?? 8787);
+  return `http://127.0.0.1:${port}`;
+}
+
+/**
+ * Read the live server's polled usage snapshots over its `usage:list` RPC.
+ * @param {{ fetchImpl?: typeof fetch, authPath?: string, baseUrl?: string }} [opts]
+ * @returns {Promise<UsageSnapshot[]>}
+ */
+export async function listLiveSnapshots({
+  fetchImpl = fetch,
+  authPath = DEFAULT_AUTH_PATH,
+  baseUrl = localServerBaseUrl(),
+} = {}) {
+  try {
+    const token = loadAuthFile(authPath)?.box_token;
+    if (!token) return [];
+    const res = await fetchImpl(`${baseUrl}/rpc/${encodeURIComponent("usage:list")}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ args: [] }),
+    });
+    if (!res.ok) return [];
+    const json = await res.json().catch(() => null);
+    const snapshots = json?.result;
+    return Array.isArray(snapshots) ? snapshots : [];
+  } catch {
+    return [];
+  }
 }
