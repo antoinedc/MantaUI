@@ -38,7 +38,7 @@ import { toDeliverModel } from "./delegate.mjs";
 import { buildRoutingServices } from "./routingServices.mjs";
 import { restartOpencode, runServerSelfUpdate } from "./opencodeAdmin.mjs";
 import { pollClaudeLogin, claudeCliStatus, listRoutableModels } from "./opencode.mjs";
-import { chooseModel, incumbentStillEligible } from "../shared/modelRouter.mjs";
+import { chooseModel, incumbentStillEligible, describeDecision } from "../shared/modelRouter.mjs";
 import {
   applyRoutingOverrides,
   resolveNowOverride,
@@ -944,18 +944,10 @@ export function buildHandlers({
           services: effServices,
         });
         // The box-side signal that routing ran (BET-1265). Always logged, no
-        // debug flag: a decision nobody watches is a decision not made. Names
-        // the winner, the cost basis and whether the mix was measured.
-        {
-          const t = decision?.trace;
-          const basis = t?.winner?.cost?.basis ?? "none";
-          const mix = t?.winner?.cost?.mixSource ?? "default";
-          const dropped = Array.isArray(t?.dropped) ? t.dropped.reduce((s, d) => s + d.n, 0) : 0;
-          const w = decision?.model;
-          console.log(
-            `[router] ${surface}/${agent} → ${w?.providerID ?? "-"}/${w?.id ?? "-"} · ${basis} · considered=${t?.considered ?? 0} dropped=${dropped} mix=${mix}`
-          );
-        }
+        // debug flag: a decision nobody watches is a decision not made. One
+        // pure formatter (BET-1301) prints the decision's inputs — the real
+        // conversation size and what the turn needed — alongside its outputs.
+        console.log(describeDecision(decision, { surface, agent }));
         // On the off-path / no-survivors path chooseModel returns the very
         // catalogIncumbent reference it was handed; map that back to the
         // original structured incumbent so the decision stays byte-identical.

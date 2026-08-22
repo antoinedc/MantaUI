@@ -103,3 +103,19 @@ export function incumbentStillEligible(
   candidate: Model | null | undefined,
   services?: RoutingServices,
 ): boolean;
+
+export interface RoutedDecisionInput {
+  model?: Model | null;
+  reason?: string;
+  trace?: {
+    considered?: number;
+    dropped?: { n?: number }[];
+    intent?: { contextTokens?: number; needs?: Record<string, boolean> };
+    winner?: { cost?: { basis?: string; mixSource?: string } } | null;
+  };
+}
+
+export function describeDecision(
+  decision: RoutedDecisionInput | null | undefined,
+  ctx: { surface: "main" | "sub"; agent: string },
+): string;

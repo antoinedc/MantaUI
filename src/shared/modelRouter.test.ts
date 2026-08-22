@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { chooseModel, incumbentStillEligible, AGENT_TIER, type RoutingServices } from "./modelRouter.mjs";
+import { chooseModel, incumbentStillEligible, describeDecision, AGENT_TIER, type RoutingServices } from "./modelRouter.mjs";
 import { endpointKey } from "./endpointKey.mjs";
 import { tierRank } from "./modelGuide.mjs";
 import { AGENT_FLOOR_SCORE } from "./modelQuality.mjs";
@@ -899,5 +899,128 @@ describe("incumbentStillEligible (BET-1270 6e)", () => {
 
   it("returns true for a null / absent incumbent", () => {
     expect(incumbentStillEligible(null, undefined)).toBe(true);
+  });
+});
+
+describe("describeDecision", () => {
+  it("formats a full decision with every field, asserted whole", () => {
+    const decision = {
+      model: { providerID: "anthropic", modelID: "claude-opus-5" },
+      reason: "build → deep tier: anthropic/claude-opus-5",
+      trace: {
+        considered: 10,
+        dropped: [
+          { stage: "capable", reason: "subscription-pace", n: 3 },
+          { stage: "eligible", reason: "no-tools", n: 2 },
+        ],
+        intent: { contextTokens: 142000, needs: { image: true, tools: true } },
+        winner: { cost: { basis: "subscription-pace", mixSource: "measured" } },
+      },
+    };
+    expect(describeDecision(decision, { surface: "main", agent: "build" })).toBe(
+      "[router] main/build → anthropic/claude-opus-5 · ctx=142000 needs=image,tools · considered=10 dropped=5 · subscription-pace mix=measured · build → deep tier: anthropic/claude-opus-5",
+    );
+  });
+
+  it("prints ctx=absent for an undefined context size, never ctx=0", () => {
+    const decision = {
+      model: { providerID: "anthropic", id: "claude-opus-5" },
+      reason: "build → deep tier",
+      trace: {
+        considered: 1,
+        dropped: [],
+        intent: { needs: {} },
+        winner: { cost: {} },
+      },
+    };
+    const line = describeDecision(decision, { surface: "main", agent: "build" });
+    expect(line).toContain("ctx=absent");
+    expect(line).not.toContain("ctx=0");
+  });
+
+  it("keeps a caller's 0 visible as ctx=0", () => {
+    const decision = {
+      model: { providerID: "anthropic", id: "claude-opus-5" },
+      reason: "build → deep tier",
+      trace: {
+        considered: 1,
+        dropped: [],
+        intent: { contextTokens: 0, needs: {} },
+        winner: { cost: {} },
+      },
+    };
+    expect(describeDecision(decision, { surface: "main", agent: "build" })).toContain("ctx=0");
+  });
+
+  it("lists true needs sorted alphabetically, comma-joined without spaces", () => {
+    const decision = {
+      model: { providerID: "anthropic", id: "claude-opus-5" },
+      reason: "x",
+      trace: {
+        considered: 1,
+        dropped: [],
+        intent: { needs: { tools: true, image: true } },
+        winner: { cost: {} },
+      },
+    };
+    expect(describeDecision(decision, { surface: "main", agent: "build" })).toContain("needs=image,tools");
+  });
+
+  it("prints needs=none for empty and absent needs", () => {
+    const empty = {
+      model: { providerID: "anthropic", id: "claude-opus-5" },
+      reason: "x",
+      trace: { considered: 1, dropped: [], intent: { needs: {} }, winner: { cost: {} } },
+    };
+    const absent = {
+      model: { providerID: "anthropic", id: "claude-opus-5" },
+      reason: "x",
+      trace: { considered: 1, dropped: [], intent: {}, winner: { cost: {} } },
+    };
+    expect(describeDecision(empty, { surface: "main", agent: "build" })).toContain("needs=none");
+    expect(describeDecision(absent, { surface: "main", agent: "build" })).toContain("needs=none");
+  });
+
+  it("excludes false-valued needs", () => {
+    const decision = {
+      model: { providerID: "anthropic", id: "claude-opus-5" },
+      reason: "x",
+      trace: {
+        considered: 1,
+        dropped: [],
+        intent: { needs: { image: false, tools: true } },
+        winner: { cost: {} },
+      },
+    };
+    expect(describeDecision(decision, { surface: "main", agent: "build" })).toContain("needs=tools");
+    expect(describeDecision(decision, { surface: "main", agent: "build" })).not.toContain("image");
+  });
+
+  it("prints a dash winner and does not throw when there is no winner", () => {
+    const decision = {
+      model: null,
+      reason: "no build model passes constraints",
+      trace: { considered: 0, dropped: [], intent: { needs: {} }, winner: null },
+    };
+    const line = describeDecision(decision, { surface: "main", agent: "build" });
+    expect(line).toContain("→ -");
+    // no throw
+    expect(line).toContain("· none mix=default · no build model passes constraints");
+  });
+
+  it("formats a null decision as a well-formed line, no throw", () => {
+    const line = describeDecision(null, { surface: "main", agent: "general" });
+    expect(line).toBe(
+      "[router] main/general → - · ctx=absent needs=none · considered=0 dropped=0 · none mix=default · -",
+    );
+  });
+
+  it("uses the sub surface for the subagent call site", () => {
+    const decision = {
+      model: { providerID: "anthropic", id: "claude-sonnet-4" },
+      reason: "explore → fast tier",
+      trace: { considered: 1, dropped: [], intent: { needs: { tools: true } }, winner: { cost: {} } },
+    };
+    expect(describeDecision(decision, { surface: "sub", agent: "explore" })).toMatch(/^\[router\] sub\/explore /);
   });
 });

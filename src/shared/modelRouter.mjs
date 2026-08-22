@@ -469,3 +469,45 @@ export function chooseModel(input = {}) {
     },
   };
 }
+
+/**
+ * The single [router] decision line (BET-1301). Prints the decision's INPUTS
+ * (conversation size + what the turn needed) alongside its outputs, so a
+ * decision is auditable from the log alone. Pure: takes data, returns a
+ * string, no I/O / clock / console. Every field falls back independently —
+ * a partial or null decision yields a well-formed line, never a throw.
+ *
+ * @param {object|null} decision the chooseModel result (or null)
+ * @param {{ surface: "main"|"sub", agent: string }} ctx
+ * @returns {string} the complete line, `[router] ` prefix included
+ */
+export function describeDecision(decision, { surface, agent }) {
+  const trace = decision?.trace;
+  const w = endpointKey(decision?.model) || "-";
+
+  // ctx: print the real conversation size verbatim when it is a number (0
+  // included — a caller bug must stay visible). Never coerce absent to 0.
+  const ctxTokens = trace?.intent?.contextTokens;
+  const ctx = typeof ctxTokens === "number" ? String(ctxTokens) : "absent";
+
+  // needs: the keys whose value is true, sorted alphabetically (deterministic
+  // and testable), comma-joined with no spaces.
+  const needs = trace?.intent?.needs;
+  const needKeys =
+    needs && typeof needs === "object"
+      ? Object.keys(needs)
+          .filter((k) => needs[k] === true)
+          .sort()
+      : [];
+  const needsStr = needKeys.length > 0 ? needKeys.join(",") : "none";
+
+  const considered = trace?.considered ?? 0;
+  const dropped = Array.isArray(trace?.dropped)
+    ? trace.dropped.reduce((sum, d) => sum + (d?.n ?? 0), 0)
+    : 0;
+  const basis = trace?.winner?.cost?.basis ?? "none";
+  const mix = trace?.winner?.cost?.mixSource ?? "default";
+  const reason = decision?.reason || "-";
+
+  return `[router] ${surface}/${agent} → ${w} · ctx=${ctx} needs=${needsStr} · considered=${considered} dropped=${dropped} · ${basis} mix=${mix} · ${reason}`;
+}

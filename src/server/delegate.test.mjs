@@ -920,11 +920,16 @@ test("BET-1275 11a: delegate({}) with subagent_type 'explore' routes with agent=
   assert.equal(out.ok, true);
   assert.equal(h.delivered.length, 1);
   // The requested subagent type IS the intent — the [router] line names the
-  // agent the spawn routed as. Assert the intent, not which model won.
+  // agent the spawn routed as, in the BET-1301 format (sub surface, plus the
+  // decision's inputs: ctx + needs=tools). Assert the intent, not which model
+  // won.
+  const line = lines.find((l) => l.includes("[router]"));
+  assert.ok(line, `expected a [router] line; got: ${lines.join(" | ")}`);
   assert.ok(
-    lines.some((l) => l.includes("[router] subagent agent=explore")),
-    `expected agent=explore in [router] line; got: ${lines.join(" | ")}`,
+    line.startsWith("[router] sub/explore → "),
+    `expected the BET-1301 sub/explore format; got: ${line}`,
   );
+  assert.ok(line.includes("ctx=0 needs=tools"), `expected the turn's inputs; got: ${line}`);
 });
 
 test("BET-1275 11a: an absent/blank subagent_type routes with agent=general", async () => {
@@ -942,11 +947,16 @@ test("BET-1275 11a: an absent/blank subagent_type routes with agent=general", as
   });
   assert.equal(out.ok, true);
   // A blank subagent_type (unknown) must map to the general agent, not leak
-  // through as an empty agent and not crash.
+  // through as an empty agent and not crash. The line is the BET-1301 format
+  // (sub surface) and carries the turn's inputs.
+  assert.equal(h.delivered.length, 1);
+  const line = lines.find((l) => l.includes("[router]"));
+  assert.ok(line, `expected a [router] line; got: ${lines.join(" | ")}`);
   assert.ok(
-    lines.some((l) => l.includes("[router] subagent agent=general")),
-    `expected agent=general in [router] line; got: ${lines.join(" | ")}`,
+    line.startsWith("[router] sub/general → "),
+    `expected the BET-1301 sub/general format; got: ${line}`,
   );
+  assert.ok(line.includes("ctx=0 needs=tools"), `expected the turn's inputs; got: ${line}`);
 });
 
 test("BET-1275: a background job routes from the box config even with no parent-Auto input", async () => {

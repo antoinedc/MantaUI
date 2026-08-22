@@ -1361,10 +1361,19 @@ test("routing:choose logs exactly one well-formed [router] line on a routed deci
     console.log = orig;
   }
   assert.equal(lines.length, 1, "exactly one [router] line, no debug flag");
-  // Deterministic for this injected catalogue: a real winner (sonnet, no
-  // account → cost basis "unknown"), zero drops, mix=default (no measured
-  // ledger mix on today's wiring — the evidence BET-1265 exists to surface).
-  assert.equal(lines[0], "[router] main/build → anthropic/claude-sonnet-4 · unknown · considered=1 dropped=0 mix=default");
+  // BET-1301: the decision line now carries the decision's INPUTS — the real
+  // conversation size (ctx=0, verbatim — a caller bug stays visible) and what
+  // the turn needed (needs=none) — alongside its outputs. Deterministic for
+  // this injected catalogue: a real winner (sonnet, no account → cost basis
+  // "unknown"), zero drops, mix=default (no measured ledger mix on today's
+  // wiring — the evidence BET-1265 exists to surface).
+  assert.ok(
+    lines[0].startsWith(
+      "[router] main/build → anthropic/claude-sonnet-4 · ctx=0 needs=none · considered=1 dropped=0 · unknown mix=default ·",
+    ),
+    `expected the BET-1301 input-carrying format; got: ${lines[0]}`,
+  );
+  assert.ok(/ · [^·]+$/.test(lines[0]), "reason is present and the final field");
 });
 
 // BET-1270 6e: routing:choose reports the box's facts about the incumbent it
