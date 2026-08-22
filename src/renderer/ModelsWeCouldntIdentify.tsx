@@ -321,6 +321,8 @@ export function ModelsWeCouldntIdentify() {
       catalogId: string | null;
       candidates: ModelCatalogEntry[];
       missing: string[];
+      confidence?: "certain" | "probable";
+      evidence?: string;
     }[] = [];
     for (const m of models) {
       const key = modelKey(m.providerID, m.id);
@@ -354,6 +356,8 @@ export function ModelsWeCouldntIdentify() {
           catalogId: id.catalogId,
           candidates: [],
           missing: elig.missing,
+          confidence: id.confidence,
+          evidence: id.evidence,
         });
       } else if (id.state === "ambiguous") {
         const candidates = (id.candidates ?? [])
@@ -459,6 +463,8 @@ function EndpointRow({
     catalogId: string | null;
     candidates: ModelCatalogEntry[];
     missing: string[];
+    confidence?: "certain" | "probable";
+    evidence?: string;
   };
   matcher: ModelCatalog;
   busy: boolean;
@@ -476,12 +482,15 @@ function EndpointRow({
     if (tier) bits.push(tier);
     if (ctx) bits.push(ctx);
     const missing = describeMissing(row.missing);
-    // The row is listed only because something is still missing for Auto; name
-    // that gap so the UI never claims a different thing from what blocks
-    // routing. "what it costs" / "whether it caches" / "how it compares" come
-    // from autoEligibility's MISSING keys via describeMissing.
+    // A layer-1/2/3 exact match is certain — "Matched automatically". A
+    // layer-4 structural match is probable inference, so the sentence names
+    // the evidence and offers a Confirm to lock it in (BET-1303 5.7).
+    const probable = row.confidence === "probable";
     const help =
-      `Matched automatically → ${bits.join(" · ")}` +
+      (probable
+        ? `We think this is ${entry?.name ?? row.catalogId}` +
+          (row.evidence ? ` — ${row.evidence}` : "")
+        : `Matched automatically → ${bits.join(" · ")}`) +
       (missing ? ` — Auto still needs: ${missing}` : "");
     return (
       <SettingsRow name={name} help={help}>
@@ -494,14 +503,26 @@ function EndpointRow({
             onCancel={() => setEditing(false)}
           />
         ) : (
-          <button
-            type="button"
-            onClick={() => setEditing(true)}
-            disabled={busy}
-            className="text-meta text-accent hover:underline disabled:opacity-40"
-          >
-            Change
-          </button>
+          <div className="flex items-center gap-3">
+            {probable && (
+              <button
+                type="button"
+                onClick={() => onDeclare({ catalogId: row.catalogId ?? "" })}
+                disabled={busy}
+                className="text-meta text-accent hover:underline disabled:opacity-40"
+              >
+                Confirm
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setEditing(true)}
+              disabled={busy}
+              className="text-meta text-accent hover:underline disabled:opacity-40"
+            >
+              Change
+            </button>
+          </div>
         )}
       </SettingsRow>
     );
@@ -509,10 +530,11 @@ function EndpointRow({
 
   // ambiguous case — candidate chips, none preselected
   if (row.state === "ambiguous") {
+    const route = row.evidence ? ` — ${row.evidence}` : "";
     return (
       <SettingsRow
         name={name}
-        help={`${row.candidates.length} models share this name — which one is it?`}
+        help={`${row.candidates.length} models share this name — which one is it?${route}`}
       >
         {row.candidates.length > 4 ? (
           <div className="w-[360px]">

@@ -122,11 +122,14 @@ describe("resolveIdentity — declared identity", () => {
     expect(r.effective.catalogId).toBe("some-other-model");
   });
 
-  it("provider that names a full catalogue id self-identifies (source provider)", () => {
+  it("provider that names a full catalogue id self-identifies (matched)", () => {
     const model = { providerID: "chutes", id: "qwen/qwen3.6-27b", family: "" };
     const r = resolveIdentity(model, null, CATALOG);
     expect(r.state).toBe("resolved");
-    expect(r.source).toBe("provider");
+    // The `provider` kind (a second sequencing inside matchProvider) is gone
+    // (BET-1303 5.5); the matcher resolves the full id directly, so the source
+    // is the ordinary matched path.
+    expect(r.source).toBe("matched");
     expect(r.catalogId).toBe("qwen/qwen3.6-27b");
   });
 });

@@ -11,18 +11,31 @@ export interface ModelCatalogEntry {
   tool_call?: boolean;
   modalities?: { input?: string[]; output?: string[] };
   limit?: { context?: number; output?: number };
+  weights?: { label?: string; url?: string }[];
   benchmarks?: { name: string; score: number; metric?: string }[];
+}
+
+// The endpoint's own declared facts, used to corroborate a layer-4 structural
+// match. All optional; absent/zero on either side is no evidence.
+export interface EndpointFacts {
+  modalities?: string[];
+  context?: number;
+  output?: number;
 }
 
 export interface ModelCatalogMatch {
   kind: "exact" | "ambiguous" | "none";
   candidates: ModelCatalogEntry[];
+  // "certain" for the exact-data lookups (layers 1-3); "probable" for layer 4
+  // inference; absent when kind === "none".
+  confidence?: "certain" | "probable";
+  evidence?: string;
 }
 
 export interface ModelCatalog {
   readonly size: number;
   lookupModel(catalogId: string): ModelCatalogEntry | null;
-  matchModel(localModelId: string): ModelCatalogMatch;
+  matchModel(localModelId: string, endpointFacts?: EndpointFacts): ModelCatalogMatch;
   allModels(): ModelCatalogEntry[];
 }
 

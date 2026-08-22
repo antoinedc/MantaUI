@@ -27,6 +27,7 @@
 
 import { endpointKey } from "../shared/endpointKey.mjs";
 import { mixFromCounts } from "../shared/blendedPrice.mjs";
+import { readModalities } from "../shared/modelGuide.mjs";
 import { ROUTING_LEDGER_WINDOW_MS } from "./modelLedger.mjs";
 
 const isObj = (v) => v !== null && typeof v === "object";
@@ -268,7 +269,17 @@ export async function buildRoutingServices(cfg = {}, deps = {}, nowMs = Date.now
           if (typeof declaredId === "string" && declaredId !== "") {
             return catalogue.lookupModel(declaredId) ?? null;
           }
-          const match = catalogue.matchModel(endpoint?.id);
+          const match = catalogue.matchModel(
+            endpoint?.id,
+            // The endpoint's own declared facts corroborate the matcher's
+            // layer-4 inference (BET-1303 5.6); read modalities via the
+            // shared reader, never re-derived.
+            {
+              modalities: readModalities(endpoint?.capabilities?.input),
+              context: endpoint?.limit?.context,
+              output: endpoint?.limit?.output,
+            },
+          );
           return match?.kind === "exact" ? match.candidates?.[0] ?? null : null;
         } catch {
           return null;

@@ -1,5 +1,4 @@
 // modelIdentity.mjs — what model is this opaque endpoint actually serving?
-//
 // Pure, injected inputs only. There is no I/O and nothing is fetched: the
 // catalogue matcher (`{ lookupModel, matchModel }`, the same pair the
 // box-side model catalogue exposes) arrives as an argument. This is the
@@ -21,6 +20,10 @@
 // positive provider value is a real property of that endpoint and wins over
 // the catalogue. Price is always the endpoint's, never the catalogue's — the
 // same model is free on one host and expensive on another.
+
+// The shared modality reader — how the endpoint's declared input modalities
+// are read for matcher corroboration (never re-derived here).
+import { readModalities } from "./modelGuide.mjs";
 
 // A value is "credible" for the limit/context rule: any positive finite
 // number is a real claim about this endpoint; `0`/`""`/`undefined`/`NaN` are
@@ -68,25 +71,15 @@ function mergeCapabilities(providerCaps, catalogueEntry) {
   };
 }
 
-// Resolve the provider's own id/family against the catalogue. id is the
-// more specific signal and is tried first; family is the fallback that lets
-// a bare family name surface every size of it (ambiguously).
-function matchProvider(cat, id, family) {
-  for (const localId of [id, family]) {
-    if (typeof localId !== "string" || localId === "") continue;
-    // A provider that literally names a full catalogue id is self-identifying
-    // — no fuzzy matching needed.
-    if (typeof cat?.lookupModel === "function") {
-      const direct = cat.lookupModel(localId);
-      if (direct) return { kind: "provider", candidates: [direct] };
-    }
-    if (typeof cat?.matchModel === "function") {
-      const r = cat.matchModel(localId);
-      if (r?.kind === "exact") return { kind: "exact", candidates: r.candidates };
-      if (r?.kind === "ambiguous") return { kind: "ambiguous", candidates: r.candidates };
-    }
-  }
-  return { kind: "none", candidates: [] };
+// The endpoint's own declared facts, used to corroborate the matcher's
+// layer-4 inference (BET-1303 5.6). Read modalities through the shared
+// modality reader so nobody re-derives the wire shape.
+function endpointFacts(m) {
+  return {
+    modalities: readModalities(m?.capabilities?.input),
+    context: m?.limit?.context,
+    output: m?.limit?.output,
+  };
 }
 
 // Merge the catalogue entry, then the provider's own credible values, then
@@ -147,8 +140,10 @@ function buildEffective(m, dec, entry, catalogId) {
  *   state: "resolved"|"ambiguous"|"unknown",
  *   catalogId: string|null,
  *   candidates: string[],          // populated only when ambiguous
- *   source: "provider"|"matched"|"declared"|null,
+ *   source: "matched"|"declared"|null,
  *   effective: object,             // the model merged with catalogue + declared facts
+ *   confidence?: "certain"|"probable",   // the matcher's, when a match ran
+ *   evidence?: string,                   // the matcher's route, when a match ran
  * }}
  */
 export function resolveIdentity(model, declared, catalog) {
@@ -160,6 +155,10 @@ export function resolveIdentity(model, declared, catalog) {
   let state = "unknown";
   let entry = null;
   let candidates = [];
+  // Carries the matcher's classification through for the Settings UI
+  // (BET-1303 5.6/5.7). Present only when a match produced them.
+  let confidence = undefined;
+  let evidence = undefined;
 
   if (typeof dec.catalogId === "string" && dec.catalogId !== "") {
     // The user told us. Always wins — even over an exact catalogue match.
@@ -172,12 +171,20 @@ export function resolveIdentity(model, declared, catalog) {
       entry = null;
     }
   } else {
-    const res = matchProvider(catalog, m.id, m.family);
-    if (res.kind === "provider" || res.kind === "exact") {
-      // candidate[0] is the single resolved entry for both kinds.
+    // The matcher owns the full layering (catalogue id → handle → weights repo
+    // → digit-anchored structural, corroborated by this endpoint's facts). The
+    // matcher's handle index already groups every same-family size, so a bare
+    // family name still returns them all as `ambiguous` — no second sequencing.
+    const res =
+      typeof catalog?.matchModel === "function"
+        ? catalog.matchModel(m.id, endpointFacts(m))
+        : { kind: "none", candidates: [] };
+    confidence = res.confidence;
+    evidence = res.evidence;
+    if (res.kind === "exact") {
       entry = res.candidates[0];
       catalogId = entry?.id;
-      source = res.kind === "provider" ? "provider" : "matched";
+      source = "matched";
       state = "resolved";
     } else if (res.kind === "ambiguous") {
       state = "ambiguous";
@@ -187,5 +194,5 @@ export function resolveIdentity(model, declared, catalog) {
   }
 
   const effective = buildEffective(m, dec, entry, catalogId);
-  return { state, catalogId, candidates, source, effective };
+  return { state, catalogId, candidates, source, effective, confidence, evidence };
 }

@@ -103,7 +103,9 @@ test("allModels returns the full catalogue and does not hand out the internal li
 test("normalize collapses separators and case", () => {
   assert.equal(normalize("Qwen3.6-27B"), "qwen3-6-27b");
   assert.equal(normalize("qwen3.6_27b"), "qwen3-6-27b");
-  assert.equal(normalize("minimax/MiniMax-M3"), "minimax-minimax-m3");
+  // The `/` separator is preserved (BET-1303 5.1) so the vendor/model boundary
+  // survives — this behaviour was the bug the old flattening encoded.
+  assert.equal(normalize("minimax/MiniMax-M3"), "minimax/minimax-m3");
   assert.equal(normalize(" default "), "default");
 });
 
