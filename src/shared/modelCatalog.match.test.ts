@@ -391,19 +391,10 @@ describe("BET-1314 — the context veto tolerates representational noise", () =>
     expect(res.candidates[0]?.id).toBe("deepseek/deepseek-v3.2");
   });
 
-  it("existing rows still resolve (non-regression)", () => {
-    const rows = [
-      { local: "claude-opus-5-fast", target: "anthropic/claude-opus-5" },
-      { local: "Qwen/Qwen3-32B-TEE", target: "alibaba/qwen3-32b" },
-      { local: "zai-org/GLM-5.2-TEE", target: "zhipuai/glm-5.2" },
-    ];
-    for (const r of rows) {
-      const target = matcher.lookupModel(r.target);
-      const res = matcher.matchModel(r.local, target ? factsFrom(target) : undefined);
-      expect(res.kind, `${r.local} → ${res.candidates.map((c) => c.id).join(",")}`).toBe("exact");
-      expect(res.candidates[0]?.id, r.local).toBe(r.target);
-    }
-  });
+  // Acceptance §"existing rows still resolve" (claude-opus-5-fast, Qwen/Qwen3-32B-TEE,
+  // zai-org/GLM-5.2-TEE) is already covered verbatim by the BET-1313 block's
+  // "the single-repo path and the other layers are undisturbed" test — not
+  // duplicated here to keep the duplication gate clean.
 });
 
 // Assert an ambiguous result surfaces every sibling size of the family.
