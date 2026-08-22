@@ -1462,6 +1462,12 @@ test("routing:choose reports incumbentStillEligible=true for a describable incum
 // not "production" (the harness / local box), enabledMain restricts the
 // candidate pool to the listed endpoint keys, and accounts/health replace their
 // services keys for ONE call — read-only, side-effect-free.
+const routingFakeCatalog = (entries) => ({
+  matchModel: (id) => ({ kind: "exact", candidates: [{ id, name: id }] }),
+  lookupModel: (id) => ({ id }),
+  allModels: () => entries,
+});
+
 test("routing:choose honours enabledMain by restricting the candidate pool (12a)", async () => {
   const { deps } = makeDeps([]);
   deps.local.configGet = async () => ({
@@ -1478,15 +1484,13 @@ test("routing:choose honours enabledMain by restricting the candidate pool (12a)
     { providerID: "anthropic", id: "claude-opus-4", status: "active", cost: { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 15 } },
     { providerID: "anthropic", id: "claude-sonnet-4", status: "active", cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 } },
   ];
-  const fakeCatalog = {
-    matchModel: (id) => ({ kind: "exact", candidates: [{ id, name: id }] }),
-    lookupModel: (id) => ({ id }),
-    allModels: () => [
+  const handlers = buildHandlers({
+    ...deps,
+    routingCatalogIndex: routingFakeCatalog([
       { id: "claude-opus-4", benchmarks: [{ name: "SWE-Bench Verified", score: 0.95 }] },
       { id: "claude-sonnet-4", benchmarks: [{ name: "SWE-Bench Verified", score: 0.8 }] },
-    ],
-  };
-  const handlers = buildHandlers({ ...deps, routingCatalogIndex: fakeCatalog });
+    ]),
+  });
   // Both are build-qualified (deep); unfiltered the higher-quality opus wins.
   // Restricting the pool to sonnet proves the decision saw ONLY sonnet.
   const out = await handlers["routing:choose"]({
@@ -1499,7 +1503,6 @@ test("routing:choose honours enabledMain by restricting the candidate pool (12a)
     incumbent: { providerID: "anthropic", modelID: "claude-opus-4" },
     overrides: { enabledMain: ["anthropic/claude-sonnet-4"] },
   });
-  console.log("DEBUG12a", JSON.stringify({ model: out.model, reason: out.reason, changed: out.changed }));
   assert.equal(out.changed, true, "switching off the restricted-out incumbent");
   assert.equal(out.model?.modelID, "claude-sonnet-4", "winner must come from the enabledMain pool");
 });
@@ -1538,12 +1541,12 @@ test("routing:choose ignores the overrides bag when NODE_ENV is production (12a 
     { providerID: "anthropic", id: "claude-opus-4", status: "active", cost: { input: 15, output: 75 } },
     { providerID: "anthropic", id: "claude-haiku-4", status: "active", cost: { input: 1, output: 5 } },
   ];
-  const fakeCatalog = {
-    matchModel: (id) => ({ kind: "exact", candidates: [{ id, name: id }] }),
-    lookupModel: (id) => ({ id }),
-    allModels: () => [{ id: "claude-opus-4", benchmarks: [{ name: "SWE-Bench Verified", score: 0.9 }] }],
-  };
-  const handlers = buildHandlers({ ...deps, routingCatalogIndex: fakeCatalog });
+  const handlers = buildHandlers({
+    ...deps,
+    routingCatalogIndex: routingFakeCatalog([
+      { id: "claude-opus-4", benchmarks: [{ name: "SWE-Bench Verified", score: 0.9 }] },
+    ]),
+  });
   const prev = process.env.NODE_ENV;
   process.env.NODE_ENV = "production";
   try {
