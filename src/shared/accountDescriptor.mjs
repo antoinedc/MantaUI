@@ -22,12 +22,14 @@ const TOP_LEVEL_KEYS = [
   "providerIDs",
   "url",
   "auth",
+  "kind",
   "balance",
   "windows",
   "planLabel",
   "overagePrice",
 ];
-const BALANCE_KEYS = ["path", "units", "sign"];
+const BALANCE_KEYS = ["path", "minusPath", "units", "sign"];
+const ACCOUNT_KINDS = ["subscription", "credit"];
 const BALANCE_SIGNS = ["positive-is-credit", "positive-is-debt"];
 const WINDOW_KEYS = [
   "kind",
@@ -123,6 +125,10 @@ export function validateDescriptor(raw) {
     errors.push(raw.auth === undefined ? 'missing required key "auth"' : `unknown auth "${raw.auth}"`);
   }
 
+  if (raw.kind !== undefined && !ACCOUNT_KINDS.includes(raw.kind)) {
+    errors.push(`"kind" must be "subscription" or "credit"`);
+  }
+
   const bal = raw.balance;
   if (!isPlainObject(bal)) {
     errors.push('missing required key "balance"');
@@ -131,6 +137,9 @@ export function validateDescriptor(raw) {
       if (!BALANCE_KEYS.includes(k)) errors.push(`unknown key "balance.${k}"`);
     }
     if (!isNonEmptyString(bal.path)) errors.push('missing required key "balance.path"');
+    if (bal.minusPath !== undefined && !isNonEmptyString(bal.minusPath)) {
+      errors.push('"balance.minusPath" must be a non-empty dot-path string');
+    }
     if (bal.units !== undefined && !isNonEmptyString(bal.units)) errors.push('"balance.units" must be a non-empty string');
     if (!BALANCE_SIGNS.includes(bal.sign)) {
       errors.push('"balance.sign" must be "positive-is-credit" or "positive-is-debt"');
@@ -230,11 +239,19 @@ export function readDescriptor(descriptor, payload, nowMs) {
     : [];
 
   const balanceNum = toFiniteNumber(get(descriptor.balance?.path));
+  let resolvedBalance = balanceNum;
+  // A two-field balance: `value(path) − value(minusPath)`. This is the whole
+  // permitted arithmetic — no expression language (BET-1269 5d). Add nothing
+  // more.
+  if (resolvedBalance !== undefined && descriptor.balance?.minusPath) {
+    const subtract = toFiniteNumber(get(descriptor.balance.minusPath));
+    if (subtract !== undefined) resolvedBalance = resolvedBalance - subtract;
+  }
   const balance =
-    balanceNum !== undefined
+    resolvedBalance !== undefined
       ? descriptor.balance?.sign === "positive-is-debt"
-        ? -balanceNum
-        : balanceNum
+        ? -resolvedBalance
+        : resolvedBalance
       : undefined;
 
   const planLabelRaw = get(descriptor.planLabel);
@@ -248,6 +265,7 @@ export function readDescriptor(descriptor, payload, nowMs) {
   const exhausted = overdrawn || atWindowLimit;
 
   const snap = { provider: descriptor.id, providerIDs: descriptor.providerIDs, windows };
+  if (typeof descriptor.kind === "string" && descriptor.kind) snap.kind = descriptor.kind;
   if (balance !== undefined) snap.balance = balance;
   if (overagePrice !== undefined) snap.overagePrice = overagePrice;
   if (planLabel) snap.planLabel = planLabel;

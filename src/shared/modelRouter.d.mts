@@ -49,8 +49,12 @@ export interface RoutingServices {
     samples?: Record<string, ReliabilitySample>;
     baseline?: Record<string, ReliabilityBaseline>;
   };
-  mix?: unknown;
-  referenceByModel?: Record<string, unknown>;
+  /** Keyed by "providerID/modelID" — the measured token mix per endpoint. */
+  mix?: Record<string, { input?: number; output?: number; cacheRead?: number; cacheWrite?: number }>;
+  /** The box's overall measured mix, for an endpoint with no history of its own. */
+  mixDefault?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
+  /** Keyed by model id — the catalogue's typical input/output rate. */
+  referenceByModel?: Record<string, { input?: number; output?: number }>;
 }
 
 export interface ChooseInput {

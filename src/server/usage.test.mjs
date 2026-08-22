@@ -243,6 +243,30 @@ test("poller drops an adapter whose response has zero usable windows", async () 
   assert.equal(poller.snapshots.length, 0);
 });
 
+test("poller keeps a balance-only snapshot (no windows) — an unfunded credit account is a valid snapshot (5g)", async () => {
+  const balOnly = makeAdapter("cred", {
+    detect: async () => true,
+    fetch: async () => ({ kind: "credit", balance: 0, windows: [] }),
+  });
+  const poller = createUsagePoller({ adapters: [balOnly], now: () => 1000 });
+  await poller.tick();
+  assert.equal(poller.snapshots.length, 1);
+  const snap = poller.snapshots[0];
+  assert.equal(snap.balance, 0);
+  assert.equal(snap.kind, "credit");
+  assert.deepEqual(snap.windows, []);
+});
+
+test("poller carries the adapter-declared kind onto the snapshot (5e)", async () => {
+  const sub = makeAdapter("subprov", {
+    detect: async () => true,
+    fetch: async () => ({ kind: "subscription", balance: 14.2, windows: [{ kind: "session", label: "s", pct: 20 }] }),
+  });
+  const poller = createUsagePoller({ adapters: [sub], now: () => 1000 });
+  await poller.tick();
+  assert.equal(poller.snapshots[0].kind, "subscription");
+});
+
 test("poller: a 429 with Retry-After backs off only that adapter, for exactly that long", async () => {
   let nowMs = 1_700_000_000_000;
   let rlFetchCalls = 0;

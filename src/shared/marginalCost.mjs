@@ -77,15 +77,16 @@ function resetDamp(resetsAt, nowMs) {
   return clamp01(remaining / RESET_RAMP_MS);
 }
 
-// Which figure anchors the subscription exchange rate, in priority order.
-function exchangeRateOf(account, model, mix, reference, replacementCost) {
+// Which figure anchors the subscription's marginal cost. There is deliberately
+// NO list-price fallback (BET-1269 5c): the subscription's fee is already paid,
+// so one more token costs what the cheapest acceptable alternative would charge
+// to do the same work — the replacement cost. With no cash alternative the rate
+// is 0 (a subscription with nothing to compare against is free at the margin).
+function exchangeRateOf(account, replacementCost) {
   if (isNum(account?.overagePrice)) {
     return { rate: dollar(account.overagePrice), source: "published overage price" };
   }
-  if (isNum(replacementCost)) {
-    return { rate: dollar(replacementCost), source: "replacement cost" };
-  }
-  return { rate: blendedPrice(model, mix, reference).price, source: "blended price" };
+  return { rate: dollar(replacementCost), source: "replacement cost" };
 }
 
 // One subscription window, priced by pace vs elapsed, damped near reset.
@@ -143,10 +144,16 @@ export function marginalCost(input = {}) {
 
   // --- Exhausted first -------------------------------------------------------
   const windows = Array.isArray(account?.windows) ? account.windows : [];
+  // A stale reading must never escalate (UsageWindow.stale is set by the usage
+  // poller the moment a window's reset instant passes and the provider has not
+  // published the replacement numbers). A stale window contributes neither
+  // exhaustion nor pace; if every window is stale the account has no usable
+  // reading and is priced as if it had none, not as exhausted (BET-1269 5f).
+  const liveWindows = windows.filter((w) => w?.stale !== true);
   const exhausted =
     account?.exhausted === true ||
     (account?.kind === "credit" && isNum(account?.balance) && account.balance <= 0) ||
-    (account?.kind === "subscription" && windows.some((w) => isNum(w?.pct) && w.pct >= 100));
+    (account?.kind === "subscription" && liveWindows.some((w) => isNum(w?.pct) && w.pct >= 100));
 
   if (exhausted) {
     return {
@@ -180,18 +187,18 @@ export function marginalCost(input = {}) {
 
   // --- subscription ----------------------------------------------------------
   if (account?.kind === "subscription") {
-    const { rate, source } = exchangeRateOf(account, model, mix, reference, replacementCost);
-    if (windows.length === 0) {
+    const { rate, source } = exchangeRateOf(account, replacementCost);
+    if (liveWindows.length === 0) {
       return {
         cost: dollar(rate),
         exhausted: false,
         basis: "subscription-no-window",
-        reason: `subscription, no window data — priced at exchange rate (${source})`,
+        reason: `subscription, no usable window — priced at exchange rate (${source})`,
       };
     }
     let best = 0;
     let bestBasis = "subscription-pace";
-    for (const w of windows) {
+    for (const w of liveWindows) {
       const c = subscriptionWindowCost(w, rate, nowMs);
       if (c.cost > best) {
         best = c.cost;

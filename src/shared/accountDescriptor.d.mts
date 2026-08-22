@@ -21,7 +21,8 @@ export type AccountDescriptor = {
   providerIDs: string[];
   url: string;
   auth: "bearer";
-  balance: { path: string; units: string; sign: BalanceSign };
+  kind?: "subscription" | "credit";
+  balance: { path: string; minusPath?: string; units: string; sign: BalanceSign };
   windows?: DescriptorWindow[];
   planLabel?: string;
   overagePrice?: string;

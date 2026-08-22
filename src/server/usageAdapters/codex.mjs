@@ -103,6 +103,7 @@ export const codexAdapter = {
 
     return {
       provider: "codex",
+      kind: "subscription",
       ...(planLabel ? { planLabel } : {}),
       windows,
       ...(balanceNum !== undefined ? { balance: balanceNum } : {}),

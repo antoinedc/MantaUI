@@ -12,6 +12,7 @@ export interface WindowState {
   startedAt?: number;
   resetsAt?: number;
   binding?: boolean;
+  stale?: boolean;
 }
 
 export interface AccountState {
