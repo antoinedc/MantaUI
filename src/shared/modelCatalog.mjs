@@ -425,9 +425,30 @@ export function createModelIndex(entries) {
 
       // Layer 3 — the id is a weights-repo path of a catalogue entry. Same
       // dated-alias collapse; keeps exact/ambiguous consistent with layer 2.
+      //
+      // When several catalogue entries share the same weights repo (base +
+      // serving-name variants like chat/reasoner, or several sizes), the repo
+      // lookup cannot by itself tell which one the id names — but the endpoint
+      // id usually does: re-run the digit-anchored structural admission
+      // (layer 4) over JUST these repo-mates. The repo identity was a certain
+      // match, so the structural step only picks which repo-mate the id names;
+      // confidence stays "certain". If the id does not distinguish the
+      // repo-mates (same version AND size), layer 4 stays ambiguous and we keep
+      // the honest repo-ambiguous result rather than guessing (BET-1313).
       const repo = layer3Lookup(needle);
       if (repo) {
         const candidates = collapseAliases(repo.candidates);
+        if (candidates.length > 1) {
+          const structural = layer4Match(localModelId, candidates, endpointFacts);
+          if (structural.kind === "exact") {
+            return {
+              kind: "exact",
+              candidates: structural.candidates,
+              confidence: "certain",
+              evidence: structural.evidence ?? `weights repo ${repo.repo}`,
+            };
+          }
+        }
         const kind = candidates.length === 1 ? "exact" : "ambiguous";
         return {
           kind,

@@ -1,413 +1,527 @@
 [
-    {
-        "id": "qwen/qwen3.6-27b",
-        "name": "Qwen3.6-27B",
-        "family": "qwen",
-        "description": "Qwen3.6 tuned for long-context coding (exact-match fixture)",
-        "reasoning": true,
-        "tool_call": true,
-        "modalities": {
-            "input": [
-                "text"
-            ],
-            "output": [
-                "text"
-            ]
-        },
-        "open_weights": true,
-        "limit": {
-            "context": 131072,
-            "output": 8192
-        },
-        "benchmarks": [
-            {
-                "name": "SWE-Bench Verified",
-                "score": 58.4,
-                "metric": "resolved"
-            }
-        ]
+  {
+    "id": "qwen/qwen3.6-27b",
+    "name": "Qwen3.6-27B",
+    "family": "qwen",
+    "description": "Qwen3.6 tuned for long-context coding (exact-match fixture)",
+    "reasoning": true,
+    "tool_call": true,
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
     },
-    {
-        "id": "chutes/Ornith-9B",
-        "name": "Ornith 9B",
-        "family": "ornith",
-        "description": "Ornith family, 9B variant",
-        "reasoning": true,
-        "tool_call": true,
-        "modalities": {
-            "input": [
-                "text"
-            ],
-            "output": [
-                "text"
-            ]
-        },
-        "open_weights": true,
-        "limit": {
-            "context": 32768,
-            "output": 4096
-        }
+    "open_weights": true,
+    "limit": {
+      "context": 131072,
+      "output": 8192
     },
-    {
-        "id": "chutes/Ornith-31B",
-        "name": "Ornith 31B",
-        "family": "ornith",
-        "description": "Ornith family, 31B variant",
-        "reasoning": true,
-        "tool_call": true,
-        "modalities": {
-            "input": [
-                "text"
-            ],
-            "output": [
-                "text"
-            ]
-        },
-        "open_weights": true,
-        "limit": {
-            "context": 65536,
-            "output": 8192
-        }
+    "benchmarks": [
+      {
+        "name": "SWE-Bench Verified",
+        "score": 58.4,
+        "metric": "resolved"
+      }
+    ]
+  },
+  {
+    "id": "chutes/Ornith-9B",
+    "name": "Ornith 9B",
+    "family": "ornith",
+    "description": "Ornith family, 9B variant",
+    "reasoning": true,
+    "tool_call": true,
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
     },
-    {
-        "id": "chutes/Ornith-35B",
-        "name": "Ornith 35B",
-        "family": "ornith",
-        "description": "Ornith family, 35B variant",
-        "reasoning": true,
-        "tool_call": true,
-        "modalities": {
-            "input": [
-                "text"
-            ],
-            "output": [
-                "text"
-            ]
-        },
-        "open_weights": true,
-        "limit": {
-            "context": 65536,
-            "output": 8192
-        }
-    },
-    {
-        "id": "chutes/Ornith-397B",
-        "name": "Ornith 397B",
-        "family": "ornith",
-        "description": "Ornith family, 397B variant",
-        "reasoning": false,
-        "tool_call": true,
-        "modalities": {
-            "input": [
-                "text"
-            ],
-            "output": [
-                "text"
-            ]
-        },
-        "open_weights": true,
-        "limit": {
-            "context": 262144,
-            "output": 32768
-        }
-    },
-    {
-        "id": "minimax/MiniMax-M3",
-        "name": "MiniMax-M3",
-        "family": "minimax",
-        "description": "MiniMax multimodal model for long-context coding, perception, and agent planning",
-        "attachment": true,
-        "reasoning": true,
-        "tool_call": true,
-        "modalities": {
-            "input": [
-                "text",
-                "image",
-                "video"
-            ],
-            "output": [
-                "text"
-            ]
-        },
-        "open_weights": true,
-        "limit": {
-            "context": 512000,
-            "output": 128000
-        },
-        "benchmarks": [
-            {
-                "name": "SWE-Bench Verified",
-                "score": 80.5,
-                "metric": "resolved"
-            }
-        ]
-    },
-    {
-        "id": "deepseek/deepseek-chat",
-        "name": "DeepSeek Chat",
-        "family": "deepseek",
-        "description": "DeepSeek general chat model",
-        "reasoning": false,
-        "tool_call": true,
-        "modalities": {
-            "input": [
-                "text"
-            ],
-            "output": [
-                "text"
-            ]
-        },
-        "open_weights": true,
-        "limit": {
-            "context": 65536,
-            "output": 8192
-        }
-    },
-    {
-        "id": "alibaba/qwen3-32b",
-        "name": "Qwen3 32B",
-        "family": "qwen",
-        "weights": [
-            {
-                "label": "Hugging Face",
-                "url": "https://huggingface.co/Qwen/Qwen3-32B"
-            }
-        ],
-        "limit": {
-            "context": 131072,
-            "output": 16384
-        },
-        "description": "Qwen3 32B, open-weight (exact fixture for release weights repo)"
-    },
-    {
-        "id": "alibaba/qwen3-30b-a3b",
-        "name": "Qwen3 30B A3B",
-        "family": "qwen",
-        "weights": [
-            {
-                "label": "Hugging Face",
-                "url": "https://huggingface.co/Qwen/Qwen3-30B-A3B"
-            }
-        ],
-        "limit": {
-            "context": 65536,
-            "output": 8192
-        },
-        "description": "Qwen3 30B-A3B \u2014 a sibling size that must NOT be conflated with qwen3-32b"
-    },
-    {
-        "id": "zhipuai/glm-5.2",
-        "name": "Glm 5.2",
-        "family": "glm",
-        "weights": [
-            {
-                "label": "Hugging Face",
-                "url": "https://huggingface.co/zai-org/GLM-5.2"
-            }
-        ],
-        "limit": {
-            "context": 131072,
-            "output": 16384
-        },
-        "description": "GLM-5.2; reseller vendor disagrees with the catalogue"
-    },
-    {
-        "id": "zhipuai/glm-5.1",
-        "name": "Glm 5.1",
-        "family": "glm",
-        "weights": [
-            {
-                "label": "Hugging Face",
-                "url": "https://huggingface.co/zai-org/GLM-5.1"
-            }
-        ],
-        "limit": {
-            "context": 131072,
-            "output": 16384
-        },
-        "description": "GLM-5.1 \u2014 must not be conflated with GLM-5.2"
-    },
-    {
-        "id": "moonshotai/kimi-k3",
-        "name": "Kimi K3",
-        "family": "kimi",
-        "weights": [
-            {
-                "label": "Hugging Face",
-                "url": "https://huggingface.co/moonshotai/Kimi-K3"
-            }
-        ],
-        "limit": {
-            "context": 131072,
-            "output": 16384
-        },
-        "description": "Kimi K3, weights repo"
-    },
-    {
-        "id": "openai/gpt-5.5",
-        "name": "Gpt 5.5",
-        "family": "gpt",
-        "limit": {
-            "context": 128000,
-            "output": 16000
-        },
-        "description": "GPT-5.5 \u2014 tier-decoration corroboration fixture"
-    },
-    {
-        "id": "openai/gpt-5.5-pro",
-        "name": "Gpt 5.5 Pro",
-        "family": "gpt",
-        "limit": {
-            "context": 128000,
-            "output": 40000
-        },
-        "description": "GPT-5.5 Pro \u2014 the richer sibling gpt-5.5-fast must NOT hit"
-    },
-    {
-        "id": "anthropic/claude-opus-5",
-        "name": "Claude Opus 5",
-        "family": "claude",
-        "limit": {
-            "context": 200000,
-            "output": 64000
-        },
-        "description": "Claude Opus 5 \u2014 claude-opus-5-fast must resolve here, not 4-5"
-    },
-    {
-        "id": "anthropic/claude-opus-4-5",
-        "name": "Claude Opus 4 5",
-        "family": "claude",
-        "limit": {
-            "context": 200000,
-            "output": 64000
-        },
-        "description": "Claude Opus 4-5 \u2014 version inequality must reject it"
-    },
-    {
-        "id": "nvidia/nemotron-3-ultra-550b-a55b",
-        "name": "Nemotron 3 Ultra 550B A55B",
-        "family": "nemotron",
-        "limit": {
-            "context": 131072,
-            "output": 16384
-        },
-        "description": "Nemotron 3 Ultra 550B-A55B \u2014 size present on one side only"
-    },
-    {
-        "id": "meta/muse-spark-1.2",
-        "name": "Muse Spark 1.2",
-        "family": "muse",
-        "limit": {
-            "context": 32768,
-            "output": 4096
-        },
-        "description": "Muse Spark 1.2 \u2014 multi-token decoration fixture"
-    },
-    {
-        "id": "mistral/mistral-nemo",
-        "name": "Mistral Nemo",
-        "family": "mistral",
-        "limit": {
-            "context": 128000,
-            "output": 16384
-        },
-        "description": "Mistral Nemo \u2014 date-only owner-mismatch fixture"
-    },
-    {
-        "id": "anthropic/claude-opus-4-5-20251101",
-        "name": "Claude Opus 4 5",
-        "family": "claude",
-        "limit": {
-            "context": 200000,
-            "output": 64000
-        },
-        "description": "Dated alias of claude-opus-4-5 (undated name) \u2014 must collapse onto the base (BET-1307)",
-        "synthesize": false
-    },
-    {
-        "id": "anthropic/claude-sonnet-4-5",
-        "name": "Claude Sonnet 4 5",
-        "family": "claude",
-        "limit": {
-            "context": 200000,
-            "output": 64000
-        },
-        "description": "Claude Sonnet 4.5 base \u2014 dated-alias collision fixture (BET-1307)"
-    },
-    {
-        "id": "anthropic/claude-sonnet-4-5-20250929",
-        "name": "Claude Sonnet 4 5",
-        "family": "claude",
-        "limit": {
-            "context": 200000,
-            "output": 64000
-        },
-        "description": "Dated alias of claude-sonnet-4-5 (undated name) \u2014 must collapse onto the base (BET-1307)",
-        "synthesize": false
-    },
-    {
-        "id": "anthropic/claude-haiku-4-5",
-        "name": "Claude Haiku 4 5",
-        "family": "claude",
-        "limit": {
-            "context": 200000,
-            "output": 64000
-        },
-        "description": "Claude Haiku 4.5 base \u2014 dated-alias collision fixture (BET-1307)"
-    },
-    {
-        "id": "anthropic/claude-haiku-4-5-20251001",
-        "name": "Claude Haiku 4 5",
-        "family": "claude",
-        "limit": {
-            "context": 200000,
-            "output": 64000
-        },
-        "description": "Dated alias of claude-haiku-4-5 (undated name) \u2014 must collapse onto the base (BET-1307)",
-        "synthesize": false
-    },
-    {
-        "id": "zhipuai/glm-5",
-        "name": "Glm 5",
-        "family": "glm",
-        "limit": {
-            "context": 131072,
-            "output": 16384
-        },
-        "description": "GLM-5 \u2014 over-collapse guard: distinct from glm-5-turbo (BET-1307)",
-        "synthesize": false
-    },
-    {
-        "id": "zhipuai/glm-5-turbo",
-        "name": "Glm 5 Turbo",
-        "family": "glm",
-        "limit": {
-            "context": 131072,
-            "output": 16384
-        },
-        "description": "GLM-5 turbo \u2014 over-collapse guard: one-word decoration is an extra soft token (BET-1307)",
-        "synthesize": false
-    },
-    {
-        "id": "moonshotai/kimi-k2.7-code",
-        "name": "Kimi K2.7 Code",
-        "family": "kimi",
-        "limit": {
-            "context": 131072,
-            "output": 16384
-        },
-        "description": "Kimi K2.7 Code \u2014 over-collapse guard: distinct from the highspeed sibling (BET-1307)",
-        "synthesize": false
-    },
-    {
-        "id": "moonshotai/kimi-k2.7-code-highspeed",
-        "name": "Kimi K2.7 Code Highspeed",
-        "family": "kimi",
-        "limit": {
-            "context": 131072,
-            "output": 16384
-        },
-        "description": "Kimi K2.7 Code Highspeed \u2014 over-collapse guard: one-word decoration is an extra soft token (BET-1307)",
-        "synthesize": false
+    "open_weights": true,
+    "limit": {
+      "context": 32768,
+      "output": 4096
     }
+  },
+  {
+    "id": "chutes/Ornith-31B",
+    "name": "Ornith 31B",
+    "family": "ornith",
+    "description": "Ornith family, 31B variant",
+    "reasoning": true,
+    "tool_call": true,
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "open_weights": true,
+    "limit": {
+      "context": 65536,
+      "output": 8192
+    }
+  },
+  {
+    "id": "chutes/Ornith-35B",
+    "name": "Ornith 35B",
+    "family": "ornith",
+    "description": "Ornith family, 35B variant",
+    "reasoning": true,
+    "tool_call": true,
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "open_weights": true,
+    "limit": {
+      "context": 65536,
+      "output": 8192
+    }
+  },
+  {
+    "id": "chutes/Ornith-397B",
+    "name": "Ornith 397B",
+    "family": "ornith",
+    "description": "Ornith family, 397B variant",
+    "reasoning": false,
+    "tool_call": true,
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "open_weights": true,
+    "limit": {
+      "context": 262144,
+      "output": 32768
+    }
+  },
+  {
+    "id": "minimax/MiniMax-M3",
+    "name": "MiniMax-M3",
+    "family": "minimax",
+    "description": "MiniMax multimodal model for long-context coding, perception, and agent planning",
+    "attachment": true,
+    "reasoning": true,
+    "tool_call": true,
+    "modalities": {
+      "input": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "open_weights": true,
+    "limit": {
+      "context": 512000,
+      "output": 128000
+    },
+    "benchmarks": [
+      {
+        "name": "SWE-Bench Verified",
+        "score": 80.5,
+        "metric": "resolved"
+      }
+    ]
+  },
+  {
+    "id": "deepseek/deepseek-chat",
+    "name": "DeepSeek Chat",
+    "family": "deepseek",
+    "description": "DeepSeek general chat model",
+    "reasoning": false,
+    "tool_call": true,
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "open_weights": true,
+    "limit": {
+      "context": 65536,
+      "output": 8192
+    },
+    "weights": [
+      {
+        "label": "Hugging Face",
+        "url": "https://huggingface.co/deepseek-ai/DeepSeek-V3.2"
+      }
+    ]
+  },
+  {
+    "id": "alibaba/qwen3-32b",
+    "name": "Qwen3 32B",
+    "family": "qwen",
+    "weights": [
+      {
+        "label": "Hugging Face",
+        "url": "https://huggingface.co/Qwen/Qwen3-32B"
+      }
+    ],
+    "limit": {
+      "context": 131072,
+      "output": 16384
+    },
+    "description": "Qwen3 32B, open-weight (exact fixture for release weights repo)"
+  },
+  {
+    "id": "alibaba/qwen3-30b-a3b",
+    "name": "Qwen3 30B A3B",
+    "family": "qwen",
+    "weights": [
+      {
+        "label": "Hugging Face",
+        "url": "https://huggingface.co/Qwen/Qwen3-30B-A3B"
+      }
+    ],
+    "limit": {
+      "context": 65536,
+      "output": 8192
+    },
+    "description": "Qwen3 30B-A3B \u2014 a sibling size that must NOT be conflated with qwen3-32b"
+  },
+  {
+    "id": "zhipuai/glm-5.2",
+    "name": "Glm 5.2",
+    "family": "glm",
+    "weights": [
+      {
+        "label": "Hugging Face",
+        "url": "https://huggingface.co/zai-org/GLM-5.2"
+      }
+    ],
+    "limit": {
+      "context": 131072,
+      "output": 16384
+    },
+    "description": "GLM-5.2; reseller vendor disagrees with the catalogue"
+  },
+  {
+    "id": "zhipuai/glm-5.1",
+    "name": "Glm 5.1",
+    "family": "glm",
+    "weights": [
+      {
+        "label": "Hugging Face",
+        "url": "https://huggingface.co/zai-org/GLM-5.1"
+      }
+    ],
+    "limit": {
+      "context": 131072,
+      "output": 16384
+    },
+    "description": "GLM-5.1 \u2014 must not be conflated with GLM-5.2"
+  },
+  {
+    "id": "moonshotai/kimi-k3",
+    "name": "Kimi K3",
+    "family": "kimi",
+    "weights": [
+      {
+        "label": "Hugging Face",
+        "url": "https://huggingface.co/moonshotai/Kimi-K3"
+      }
+    ],
+    "limit": {
+      "context": 131072,
+      "output": 16384
+    },
+    "description": "Kimi K3, weights repo"
+  },
+  {
+    "id": "openai/gpt-5.5",
+    "name": "Gpt 5.5",
+    "family": "gpt",
+    "limit": {
+      "context": 128000,
+      "output": 16000
+    },
+    "description": "GPT-5.5 \u2014 tier-decoration corroboration fixture"
+  },
+  {
+    "id": "openai/gpt-5.5-pro",
+    "name": "Gpt 5.5 Pro",
+    "family": "gpt",
+    "limit": {
+      "context": 128000,
+      "output": 40000
+    },
+    "description": "GPT-5.5 Pro \u2014 the richer sibling gpt-5.5-fast must NOT hit"
+  },
+  {
+    "id": "anthropic/claude-opus-5",
+    "name": "Claude Opus 5",
+    "family": "claude",
+    "limit": {
+      "context": 200000,
+      "output": 64000
+    },
+    "description": "Claude Opus 5 \u2014 claude-opus-5-fast must resolve here, not 4-5"
+  },
+  {
+    "id": "anthropic/claude-opus-4-5",
+    "name": "Claude Opus 4 5",
+    "family": "claude",
+    "limit": {
+      "context": 200000,
+      "output": 64000
+    },
+    "description": "Claude Opus 4-5 \u2014 version inequality must reject it"
+  },
+  {
+    "id": "nvidia/nemotron-3-ultra-550b-a55b",
+    "name": "Nemotron 3 Ultra 550B A55B",
+    "family": "nemotron",
+    "limit": {
+      "context": 131072,
+      "output": 16384
+    },
+    "description": "Nemotron 3 Ultra 550B-A55B \u2014 size present on one side only"
+  },
+  {
+    "id": "meta/muse-spark-1.2",
+    "name": "Muse Spark 1.2",
+    "family": "muse",
+    "limit": {
+      "context": 32768,
+      "output": 4096
+    },
+    "description": "Muse Spark 1.2 \u2014 multi-token decoration fixture"
+  },
+  {
+    "id": "mistral/mistral-nemo",
+    "name": "Mistral Nemo",
+    "family": "mistral",
+    "limit": {
+      "context": 128000,
+      "output": 16384
+    },
+    "description": "Mistral Nemo \u2014 date-only owner-mismatch fixture"
+  },
+  {
+    "id": "anthropic/claude-opus-4-5-20251101",
+    "name": "Claude Opus 4 5",
+    "family": "claude",
+    "limit": {
+      "context": 200000,
+      "output": 64000
+    },
+    "description": "Dated alias of claude-opus-4-5 (undated name) \u2014 must collapse onto the base (BET-1307)",
+    "synthesize": false
+  },
+  {
+    "id": "anthropic/claude-sonnet-4-5",
+    "name": "Claude Sonnet 4 5",
+    "family": "claude",
+    "limit": {
+      "context": 200000,
+      "output": 64000
+    },
+    "description": "Claude Sonnet 4.5 base \u2014 dated-alias collision fixture (BET-1307)"
+  },
+  {
+    "id": "anthropic/claude-sonnet-4-5-20250929",
+    "name": "Claude Sonnet 4 5",
+    "family": "claude",
+    "limit": {
+      "context": 200000,
+      "output": 64000
+    },
+    "description": "Dated alias of claude-sonnet-4-5 (undated name) \u2014 must collapse onto the base (BET-1307)",
+    "synthesize": false
+  },
+  {
+    "id": "anthropic/claude-haiku-4-5",
+    "name": "Claude Haiku 4 5",
+    "family": "claude",
+    "limit": {
+      "context": 200000,
+      "output": 64000
+    },
+    "description": "Claude Haiku 4.5 base \u2014 dated-alias collision fixture (BET-1307)"
+  },
+  {
+    "id": "anthropic/claude-haiku-4-5-20251001",
+    "name": "Claude Haiku 4 5",
+    "family": "claude",
+    "limit": {
+      "context": 200000,
+      "output": 64000
+    },
+    "description": "Dated alias of claude-haiku-4-5 (undated name) \u2014 must collapse onto the base (BET-1307)",
+    "synthesize": false
+  },
+  {
+    "id": "zhipuai/glm-5",
+    "name": "Glm 5",
+    "family": "glm",
+    "limit": {
+      "context": 131072,
+      "output": 16384
+    },
+    "description": "GLM-5 \u2014 over-collapse guard: distinct from glm-5-turbo (BET-1307)",
+    "synthesize": false
+  },
+  {
+    "id": "zhipuai/glm-5-turbo",
+    "name": "Glm 5 Turbo",
+    "family": "glm",
+    "limit": {
+      "context": 131072,
+      "output": 16384
+    },
+    "description": "GLM-5 turbo \u2014 over-collapse guard: one-word decoration is an extra soft token (BET-1307)",
+    "synthesize": false
+  },
+  {
+    "id": "moonshotai/kimi-k2.7-code",
+    "name": "Kimi K2.7 Code",
+    "family": "kimi",
+    "limit": {
+      "context": 131072,
+      "output": 16384
+    },
+    "description": "Kimi K2.7 Code \u2014 over-collapse guard: distinct from the highspeed sibling (BET-1307)",
+    "synthesize": false
+  },
+  {
+    "id": "moonshotai/kimi-k2.7-code-highspeed",
+    "name": "Kimi K2.7 Code Highspeed",
+    "family": "kimi",
+    "limit": {
+      "context": 131072,
+      "output": 16384
+    },
+    "description": "Kimi K2.7 Code Highspeed \u2014 over-collapse guard: one-word decoration is an extra soft token (BET-1307)",
+    "synthesize": false
+  },
+  {
+    "id": "deepseek/deepseek-v3.2",
+    "name": "DeepSeek V3.2",
+    "family": "deepseek",
+    "description": "DeepSeek V3.2 general model",
+    "reasoning": false,
+    "tool_call": true,
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "open_weights": true,
+    "weights": [
+      {
+        "label": "Hugging Face",
+        "url": "https://huggingface.co/deepseek-ai/DeepSeek-V3.2"
+      }
+    ],
+    "limit": {
+      "context": 131072,
+      "output": 16384
+    }
+  },
+  {
+    "id": "deepseek/deepseek-reasoner",
+    "name": "DeepSeek Reasoner",
+    "family": "deepseek",
+    "description": "DeepSeek reasoning model",
+    "reasoning": true,
+    "tool_call": true,
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "open_weights": true,
+    "weights": [
+      {
+        "label": "Hugging Face",
+        "url": "https://huggingface.co/deepseek-ai/DeepSeek-V3.2"
+      }
+    ],
+    "limit": {
+      "context": 131072,
+      "output": 16384
+    }
+  },
+  {
+    "id": "acme/synth-alpha-1.0",
+    "name": "Synth Alpha 1.0",
+    "family": "synth",
+    "description": "Synthetic repo-mate for the BET-1313 over-collapse guard",
+    "reasoning": false,
+    "tool_call": true,
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "open_weights": true,
+    "weights": [
+      {
+        "label": "Hugging Face",
+        "url": "https://huggingface.co/acme/Synth-1.0"
+      }
+    ],
+    "limit": {
+      "context": 32768,
+      "output": 8192
+    }
+  },
+  {
+    "id": "acme/synth-beta-1.0",
+    "name": "Synth Beta 1.0",
+    "family": "synth",
+    "description": "Synthetic repo-mate for the BET-1313 over-collapse guard",
+    "reasoning": false,
+    "tool_call": true,
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "open_weights": true,
+    "weights": [
+      {
+        "label": "Hugging Face",
+        "url": "https://huggingface.co/acme/Synth-1.0"
+      }
+    ],
+    "limit": {
+      "context": 32768,
+      "output": 8192
+    }
+  }
 ]
