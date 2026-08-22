@@ -200,6 +200,10 @@ describe("BET-1303 matcher — negative corpus (6.2)", () => {
 
   // Opaque aliases with no content, plus ids absent from the catalogue.
   const opaque = ["default", "standard", "chat", "base", "big-pickle", "zzzz", "xq9f", "abc1234"];
+  // Date-bearing opaque aliases (6.2): a date is a weaker anchor than a
+  // version/size, so a generic soft-only id carrying just a date must NOT
+  // colour-match a real entry (regression locked for `chat-2407`).
+  const datedOpaque = ["chat-2407", "base-2507", "default-20251101", "standard-0731", "big-pickle-2407"];
   // Cross-family shuffles: one entry's soft tokens combined with another
   // entry's version/size. These look plausible and must NOT match.
   const crossFamily = [
@@ -212,7 +216,7 @@ describe("BET-1303 matcher — negative corpus (6.2)", () => {
   ];
 
   it("returns none for every negative id (zero matches)", () => {
-    for (const id of [...opaque, ...crossFamily]) {
+    for (const id of [...opaque, ...datedOpaque, ...crossFamily]) {
       const res = matcher.matchModel(id);
       expect(res.kind, `${id} must not match, got ${res.kind} ${res.candidates.map((c) => c.id).join(",")}`).toBe("none");
     }

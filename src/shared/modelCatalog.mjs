@@ -94,8 +94,10 @@ function classifyTokens(tokens) {
   const versions = new Set();
   const sizes = new Set();
   const soft = new Set();
+  let dated = false;
   for (const t of tokens) {
     if (/^\d+$/.test(t) && (t.length === 4 || t.length === 6 || t.length === 8)) {
+      dated = true;
       continue;
     }
     if (/^a?\d+(\.\d+)?[bmk]$/.test(t)) {
@@ -108,7 +110,7 @@ function classifyTokens(tokens) {
     }
     soft.add(t);
   }
-  return { versions, sizes, soft };
+  return { versions, sizes, soft, dated };
 }
 
 function setEqual(a, b) {
@@ -121,13 +123,14 @@ function setEqual(a, b) {
 // non-empty on BOTH sides, equal; at least one shared soft token. Equality on
 // versions (not subset) is what rejects a same-family id whose version differs
 // from the candidate's.
-function admittedBy(local, entry) {
+function admittedBy(local, entry, minSharedSoft) {
   if (!setEqual(local.versions, entry.versions)) return false;
   if (local.sizes.size > 0 && entry.sizes.size > 0 && !setEqual(local.sizes, entry.sizes)) {
     return false;
   }
-  for (const s of local.soft) if (entry.soft.has(s)) return true;
-  return false;
+  let shared = 0;
+  for (const s of local.soft) if (entry.soft.has(s)) shared++;
+  return shared >= minSharedSoft;
 }
 
 function symmetricDiffSize(a, b) {
@@ -218,31 +221,31 @@ function editDistance(a, b) {
 // corroboration. Layer 4 is DIGIT-ANCHORED by design (5.3/5.4): a local id
 // with no digit token at all is pure decoration with no structural identity to
 // anchor on — it either resolved through a layer-2 handle (e.g. a bare family
-// name) or is unidentifiable. Requiring at least one digit token here is what
-// keeps opaque no-content aliases like `chat` or `base` from colour-matching
-// real entries (BET-1303 6.2).
+// name) or is unidentifiable. Requiring a digit token here is what keeps
+// opaque no-content aliases like `chat` or `base` from colour-matching real
+// entries (BET-1303 6.2).
 //
-// A DATE counts as identity for this gate even though it is excluded from the
-// version/size matching: `-2407` distinguishes one release from another, so a
-// release-stamped id (e.g. a model whose only digit is a date suffix) still has
-// something structural to anchor on. Without endpoint facts layer 4 may only
-// return exact when there is a single admitted candidate (no tie).
+// A DATE counts as an anchor but is weaker than a version/size: `-2407`
+// distinguishes one release from another, yet a pure date must not let a
+// generic soft-only alias re-anchor. So admission for a DATE-ONLY id (no
+// version, no size) requires the candidate to share TWO OR MORE specific soft
+// tokens — a release-stamped open-weight alias sharing its two identity tokens
+// resolves, while a generic soft-only alias carrying just a date stays none.
+// Version/size anchoring keeps the normal single-shared-soft admission, since
+// the digits themselves carry identity. Without endpoint facts layer 4 may
+// only return exact when there is a single admitted candidate (no tie).
 function layer4Match(localId, list, facts) {
-  const tokens = tokenizeModelId(localId);
-  let anchored = false;
-  for (const t of tokens) {
-    if (/\d/.test(t)) {
-      anchored = true;
-      break;
-    }
-  }
-  if (!anchored) return { kind: "none", candidates: [] };
-  const local = classifyTokens(tokens);
+  const local = classifyTokens(tokenizeModelId(localId));
+  const anchoredByVersionOrSize = local.versions.size > 0 || local.sizes.size > 0;
+  if (!anchoredByVersionOrSize && !local.dated) return { kind: "none", candidates: [] };
+  // A date-only id carries no version/size identity, so it must share ≥2 soft
+  // tokens; version/size anchoring keeps the single-soft admission.
+  const minSharedSoft = anchoredByVersionOrSize ? 1 : 2;
   const admitted = [];
   for (const e of list) {
     if (!e || typeof e.id !== "string") continue;
     const entry = classifyTokens(tokenizeModelId(e.id));
-    if (admittedBy(local, entry)) admitted.push(e);
+    if (admittedBy(local, entry, minSharedSoft)) admitted.push(e);
   }
   if (admitted.length === 0) return { kind: "none", candidates: [] };
 
