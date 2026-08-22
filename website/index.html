@@ -79,7 +79,16 @@ h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;backgroun
    channel, so the shadow has to follow the alpha — a box-shadow would draw a
    rectangle behind it. drop-shadow() takes offset/offset/blur/colour, which is
    exactly the shape of --shadow-xl, so this themes itself with the page. */
-.hero-shot img{display:block;width:100%;height:auto;filter:drop-shadow(var(--shadow-xl))}
+.hero-shot img{width:100%;height:auto;filter:drop-shadow(var(--shadow-xl))}
+/* One capture per theme. Keyed on data-theme, NOT prefers-color-scheme: the
+   header's toggle writes that attribute, so a media query would keep showing
+   the OS's theme to anyone who overrode it. Dark is the un-suffixed default so
+   a missing attribute still paints a hero — it matches the head script, whose
+   catch also falls back to dark. */
+.hero-shot .shot-dark{display:block}
+.hero-shot .shot-light{display:none}
+html[data-theme="light"] .hero-shot .shot-dark{display:none}
+html[data-theme="light"] .hero-shot .shot-light{display:block}
 @media(max-width:700px){.hero-shot{margin-top:36px}}
 
 /* ---- pillars ---- */
@@ -323,9 +332,15 @@ h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;backgroun
     </div>
 
     <div class="hero-shot">
-      <img src="/shot-app.webp" srcset="/shot-app.webp 1000w, /shot-app-2x.webp 2000w"
+      <img class="shot-dark" src="/shot-app-dark.webp"
+        srcset="/shot-app-dark.webp 1000w, /shot-app-dark-2x.webp 2000w"
         sizes="(max-width:1040px) 100vw, 1000px" width="1000" height="606"
         fetchpriority="high" decoding="async"
+        alt="Manta UI on macOS: a workspace sidebar listing projects and their sessions, next to an agent transcript, a completed task checklist and the reply composer.">
+      <img class="shot-light" src="/shot-app.webp"
+        srcset="/shot-app.webp 1000w, /shot-app-2x.webp 2000w"
+        sizes="(max-width:1040px) 100vw, 1000px" width="1000" height="606"
+        decoding="async"
         alt="Manta UI on macOS: a workspace sidebar listing projects and their sessions, next to an agent transcript, a completed task checklist and the reply composer.">
     </div>
 
