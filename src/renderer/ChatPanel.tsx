@@ -91,7 +91,6 @@ import { crossesBoundary, shouldSwitch, boundaryPhrase } from "../shared/routing
 import { acceptsModality } from "../shared/modelGuide.mjs";
 import { useModelCatalog } from "./modelCatalog";
 import {
-  readSessionAuto,
   sessionBoxSelection,
   setSessionChoice,
   useSessionModelChoice,

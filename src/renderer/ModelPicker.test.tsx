@@ -339,4 +339,32 @@ describe("ModelPicker — effort/fast write effort, not a model choice (BET-1274
     expect(autoRow).toBeTruthy();
     expect(autoRow?.textContent ?? "").toContain("Balanced · moved: the previous provider ran out");
   });
+
+  it("after a model choice Auto is off and the dropdown has exactly one selected row (BET-1274 test 1)", () => {
+    // The post-pick UI state (BET-1274 10b): non-Auto + an explicit override.
+    // Auto and Server-default rows are deselected; only the picked model row is.
+    h = mount(
+      <ModelPicker
+        modelLabel={null}
+        models={MODELS}
+        modelOverride={{ providerID: "anthropic", modelID: "claude-opus-4-7" }}
+        defaultModel={null}
+        auto={false}
+        onOpen={() => {}}
+        onSelect={() => {}}
+        onSelectEffort={() => {}}
+      />,
+    );
+    // The chip no longer claims Auto — a plain model name.
+    const btn = h.container.querySelector<HTMLElement>(".manta-model-picker-btn");
+    expect(btn?.textContent ?? "").not.toContain("Auto");
+    expect(btn?.textContent ?? "").toContain("Claude Opus 4.7");
+
+    // Open the dropdown: exactly one row is selected (the picked model).
+    act(() => (btn as HTMLButtonElement).click());
+    const menu = document.body.querySelector<HTMLElement>(".manta-model-dropdown");
+    const selected = [...(menu?.querySelectorAll<HTMLElement>('[role="option"][aria-selected="true"]') ?? [])];
+    expect(selected.length).toBe(1);
+    expect(selected[0].textContent ?? "").toContain("Claude Opus 4.7");
+  });
 });

@@ -15,7 +15,7 @@ import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
 import { useStore } from "./store";
 import { refreshModelCatalog } from "./modelCatalog";
 import type { Attachment } from "./chatShared";
-import { sessionAutoKey } from "./modelPrefs";
+import { sessionAutoKey, readSessionAuto } from "./modelPrefs";
 import {
   installMockApi,
   resetStore,
@@ -797,94 +797,26 @@ describe("ChatPanel composer submit", () => {
     el.dispatchEvent(new Event("input", { bubbles: true }));
   }
 
-  it("applies a changed routing decision as the active model for the next prompt (BET-1225)", async () => {
-    ({ api } = installMockApi({
-      opencodePrompt: () => Promise.resolve({ ok: true }),
-      opencodeModelRoute: () =>
-        Promise.resolve({
-          model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
-          reason: "build → balanced tier: anthropic quota ample",
-          incumbent: { providerID: "anthropic", modelID: "claude-opus-4-5" },
-          changed: true,
-        }),
-    }));
-    resetStore();
-    h = mount(<ChatPanel {...PROPS} />);
-    await h.flush();
-
-    // The routing RPC ran once per session start with the session-scoped agent.
-    const routeCalls = api.calls["opencodeModelRoute"] ?? [];
-    expect(routeCalls.length).toBeGreaterThan(0);
-    // No persisted per-session model / config default in the test harness →
-    // the incumbent (the model the session would otherwise use) is null.
-    expect(routeCalls[0][0]).toBeNull();
-
-    const textarea = h.container.querySelector("textarea");
-    await act(async () => {
-      typeInto(textarea as HTMLTextAreaElement, "hello");
-    });
-    await act(async () => {
-      (textarea as HTMLTextAreaElement).dispatchEvent(
-        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
-      );
-    });
-    await h.flush();
-
-    // The routed model is threaded through the existing prompt's modelOverride.
-    const promptCall = api.calls["opencodePrompt"]?.[0];
-    expect(promptCall?.[0]).toBe("ses_test");
-    expect((promptCall?.[2] as { modelID?: string } | undefined)?.modelID).toBe("claude-sonnet-4-6");
-  });
-
-  it("leaves the prompt's model untouched when the decision is a no-op (BET-1225)", async () => {
-    ({ api } = installMockApi({
-      opencodePrompt: () => Promise.resolve({ ok: true }),
-      opencodeModelRoute: () =>
-        Promise.resolve({
-          model: null,
-          reason: "routing not activated for this conversation",
-          incumbent: null,
-          changed: false,
-        }),
-    }));
-    resetStore();
-    h = mount(<ChatPanel {...PROPS} />);
-    await h.flush();
-
-    const textarea = h.container.querySelector("textarea");
-    await act(async () => {
-      typeInto(textarea as HTMLTextAreaElement, "hi");
-    });
-    await act(async () => {
-      (textarea as HTMLTextAreaElement).dispatchEvent(
-        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
-      );
-    });
-    await h.flush();
-
-    const promptCall = api.calls["opencodePrompt"]?.[0];
-    expect(promptCall?.[0]).toBe("ses_test");
-    expect(promptCall?.[2]).toBeUndefined();
-  });
-
-  it("makes no opencodeModelRoute mount call for an Auto session (BET-1255)", async () => {
-    localStorage.setItem(sessionAutoKey("ses_test"), "1");
-    ({ api } = installMockApi({
-      opencodeModelRoute: () =>
-        Promise.resolve({
-          model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
-          reason: "build → balanced tier: anthropic quota ample",
-          incumbent: null,
-          changed: true,
-        }),
-    }));
-    resetStore();
-    h = mount(<ChatPanel {...PROPS} />);
-    await h.flush();
-
-    // Auto's model choice is owned by the boundary router (BET-1248), not this
-    // mount-time "build" route — the RPC must not fire for an Auto session.
-    expect(api.calls["opencodeModelRoute"] ?? []).toHaveLength(0);
+  it("issues no routing RPC on session mount (BET-1274 test 6)", async () => {
+    // Ranging over the choice kinds: Auto (device-local flag on) and
+    // server-default (flag off, no box record). The third kind — an explicit
+    // hand-picked model — is non-Auto by construction, so it can only route
+    // from the boundary router in submit() (never on mount); 10a deleted the
+    // mount-time channel outright. None of the kinds may issue a routing RPC on
+    // mount — that's the whole point of deleting the mount route.
+    for (const auto of [true, false]) {
+      if (auto) localStorage.setItem(sessionAutoKey("ses_test"), "1");
+      else localStorage.removeItem(sessionAutoKey("ses_test"));
+      ({ api } = installMockApi());
+      resetStore();
+      h = mount(<ChatPanel {...PROPS} />);
+      await h.flush();
+      await h.flush();
+      expect(api.calls["routingChoose"] ?? []).toHaveLength(0);
+      expect((api.calls["opencodePrompt"] ?? [])).toHaveLength(0);
+      h?.unmount();
+      h = null;
+    }
   });
 
   it("still routes an Auto session's first turn via the boundary router (BET-1255)", async () => {
@@ -921,6 +853,112 @@ describe("ChatPanel composer submit", () => {
     const promptCall = api.calls["opencodePrompt"]?.[0];
     expect(promptCall?.[0]).toBe("ses_test");
     expect((promptCall?.[2] as { modelID?: string } | undefined)?.modelID).toBe("claude-sonnet-4-6");
+  });
+
+  it("a first routed boundary renders the reason with no undo (no incumbent) (BET-1274 test 5)", async () => {
+    localStorage.setItem(sessionAutoKey("ses_test"), "1");
+    const movedTo = { providerID: "anthropic", modelID: "claude-sonnet-4-6" };
+    ({ api } = installMockApi({
+      opencodePrompt: () => Promise.resolve({ ok: true }),
+      routingChoose: () =>
+        Promise.resolve({
+          model: movedTo,
+          alternatives: [movedTo],
+          reason: "balanced",
+        }),
+    }));
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    const textarea = h.container.querySelector("textarea");
+    await act(async () => {
+      typeInto(textarea as HTMLTextAreaElement, "first turn");
+    });
+    await act(async () => {
+      (textarea as HTMLTextAreaElement).dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      );
+    });
+    await h.flush();
+    // The routed pill says why (the reason applyRouted recorded) — and, with no
+    // prior model to revert to, it renders NO undo action (BET-1274 10e).
+    const text = h?.container.textContent ?? "";
+    expect(text).toContain("balanced");
+    expect(text).not.toContain("undo");
+  });
+
+  it("a routing failure still sends the turn and raises the error banner (BET-1274 test 4)", async () => {
+    localStorage.setItem(sessionAutoKey("ses_test"), "1");
+    ({ api } = installMockApi({
+      opencodePrompt: () => Promise.resolve({ ok: true }),
+      routingChoose: () => Promise.reject(new Error("router unreachable")),
+    }));
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    const textarea = h.container.querySelector("textarea");
+    await act(async () => {
+      typeInto(textarea as HTMLTextAreaElement, "hi");
+    });
+    await act(async () => {
+      (textarea as HTMLTextAreaElement).dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      );
+    });
+    await h.flush();
+
+    // The turn STILL sends (routing never blocks a turn) …
+    const promptCall = api.calls["opencodePrompt"]?.[0];
+    expect(promptCall?.[0]).toBe("ses_test");
+    expect(promptCall?.[1]).toBe("hi");
+    // … and the banner says the router was unreachable instead of pretending it
+    // picked a model.
+    expect(h?.container.textContent ?? "").toContain("Couldn't pick a model");
+  });
+
+  it("picking a model while Auto is on stops the chip saying Auto in the same commit and clears the Auto flag (BET-1274 test 1)", async () => {
+    localStorage.setItem(sessionAutoKey("ses_test"), "1");
+    const model = {
+      id: "claude-opus-4-7",
+      providerID: "anthropic",
+      name: "Claude Opus 4.7",
+      variants: [{ id: "high" }, { id: "low" }],
+    };
+    ({ api } = installMockApi({
+      opencodeModels: () => Promise.resolve([model]),
+    }));
+    // The catalog is a module-level cache served past STALE_MS — force a
+    // refetch so THIS test sees the injected model, not a prior test's `[]`.
+    refreshModelCatalog();
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    await h.flush();
+
+    const pickerBtn = () =>
+      h!.container.querySelector<HTMLElement>(".manta-model-picker-btn");
+    // The catalog has landed (the mock returns a model) and the chip says Auto.
+    expect(pickerBtn()?.textContent).toContain("Auto");
+
+    // Open the dropdown; it portals to document.body.
+    act(() => (pickerBtn() as HTMLButtonElement).click());
+    await h.flush();
+    await h.flush();
+    expect(document.body.querySelector(".manta-model-dropdown")).toBeTruthy();
+    // Click the model row (a role=option whose label is the model's name).
+    const modelRow = [...document.body.querySelectorAll<HTMLElement>('[role="option"]')].find(
+      (o) => (o.textContent ?? "").includes("Claude Opus 4.7"),
+    );
+    expect(modelRow).toBeTruthy();
+    act(() => (modelRow as HTMLElement).click());
+    await h.flush();
+
+    // The chip stops saying Auto in this very commit — a manual model choice is
+    // the off switch for Auto (BET-1274 10b, selectModel → setAutoActive(false))
+    // — and the device-local Auto flag is cleared (the persisted off-switch).
+    expect(pickerBtn()?.textContent).not.toContain("Auto");
+    expect(readSessionAuto("ses_test")).toBe(false);
   });
 });
 
