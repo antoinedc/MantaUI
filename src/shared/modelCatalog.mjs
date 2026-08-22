@@ -181,6 +181,14 @@ function rawScore(local, entry) {
   return score;
 }
 
+// A reseller genuinely cannot serve a model with more context than the model
+// actually has, but a few percent is representational noise (128K = 2^17 =
+// 131072 binary vs the catalogue's 128000 decimal — the same window). The veto
+// must fire only on a MATERIAL over-claim, not on near-equal representations of
+// the same size. 1.025 allows a ~2.5% rounding band while still rejecting a real
+// over-claim (e.g. an endpoint claiming 1M for a 128K model: 1000000 > 131200).
+const TRUST_MARGIN = 1.025;
+
 // Layer 4 corroboration (5.4c) using the endpoint's own declared facts. Absent
 // or zero on either side is no evidence and never counts against a candidate.
 // Returns the adjusted score, or null when the candidate is vetoed.
@@ -194,13 +202,15 @@ function corroborate(entry, facts, score) {
   if (inSet && inSet.size > 0 && candIn.length > 0) {
     for (const m of candIn) if (!inSet.has(m)) return null;
   }
-  // VETO: endpoint's context limit is greater than the candidate's (both positive).
+  // VETO: endpoint's context limit materially exceeds the candidate's (both
+  // positive). The TRUST_MARGIN absorbs the decimal-vs-binary spelling of the
+  // same window (131072 vs 128000) so the veto only fires on a real over-claim.
   const ctx = facts?.context;
   const candCtx = entry?.limit?.context;
   if (
     typeof ctx === "number" && Number.isFinite(ctx) && ctx > 0 &&
     typeof candCtx === "number" && Number.isFinite(candCtx) && candCtx > 0 &&
-    ctx > candCtx
+    ctx > candCtx * TRUST_MARGIN
   ) {
     return null;
   }
