@@ -231,19 +231,27 @@ test("endpointSummary returns { supported:false } with no zeros when the DB is u
   }
 });
 
-test("endpointSummary reads tool calls from the part table so reliability is measured, not uniformly 0 (BET-1297)", async () => {
+test("endpointSummary reads tool calls from the part table so reliability is measured, not uniformly 0 (BET-1297)", async (t) => {
   // opencode stores a message's tool parts in the separate `part` table, not
   // in `message.data` (which has no `parts` array). Before this fix the ledger
   // read `data.parts`, measured zero tool-call requests on every endpoint, and
   // every reliability rate came back 0. This seeds a real DB with tool parts
-  // and asserts they reach aggregateReliability.
+  // and asserts they reach aggregateReliability. It needs node:sqlite (Node
+  // 22.5+); on the CI runtime (Node 20) node:sqlite is absent and the ledger
+  // correctly degrades to { supported:false } — nothing to assert, so skip.
+  let DatabaseSync;
+  try {
+    ({ DatabaseSync } = await import("node:sqlite"));
+  } catch {
+    t.skip("node:sqlite unavailable on this runtime — endpointSummary degrades to unsupported");
+    return;
+  }
   const { mkdtempSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
   const dir = mkdtempSync(join(tmpdir(), "manta-ledger-"));
   const dbPath = join(dir, "opencode.db");
   try {
-    const { DatabaseSync } = await import("node:sqlite");
     const seed = new DatabaseSync(dbPath);
     seed.exec(`
       CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
