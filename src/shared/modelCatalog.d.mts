@@ -13,6 +13,11 @@ export interface ModelCatalogEntry {
   limit?: { context?: number; output?: number };
   weights?: { label?: string; url?: string }[];
   benchmarks?: { name: string; score: number; metric?: string }[];
+  // Test-only: when false, the corpus generator skips this entry as an alias
+  // source. Used for dated aliases of an existing model (the same model) and
+  // for over-collapse guard siblings, which are pinned by targeted rows
+  // instead (BET-1307).
+  synthesize?: boolean;
 }
 
 // The endpoint's own declared facts, used to corroborate a layer-4 structural

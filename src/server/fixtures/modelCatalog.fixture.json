@@ -312,5 +312,102 @@
             "output": 16384
         },
         "description": "Mistral Nemo \u2014 date-only owner-mismatch fixture"
+    },
+    {
+        "id": "anthropic/claude-opus-4-5-20251101",
+        "name": "Claude Opus 4 5",
+        "family": "claude",
+        "limit": {
+            "context": 200000,
+            "output": 64000
+        },
+        "description": "Dated alias of claude-opus-4-5 (undated name) \u2014 must collapse onto the base (BET-1307)",
+        "synthesize": false
+    },
+    {
+        "id": "anthropic/claude-sonnet-4-5",
+        "name": "Claude Sonnet 4 5",
+        "family": "claude",
+        "limit": {
+            "context": 200000,
+            "output": 64000
+        },
+        "description": "Claude Sonnet 4.5 base \u2014 dated-alias collision fixture (BET-1307)"
+    },
+    {
+        "id": "anthropic/claude-sonnet-4-5-20250929",
+        "name": "Claude Sonnet 4 5",
+        "family": "claude",
+        "limit": {
+            "context": 200000,
+            "output": 64000
+        },
+        "description": "Dated alias of claude-sonnet-4-5 (undated name) \u2014 must collapse onto the base (BET-1307)",
+        "synthesize": false
+    },
+    {
+        "id": "anthropic/claude-haiku-4-5",
+        "name": "Claude Haiku 4 5",
+        "family": "claude",
+        "limit": {
+            "context": 200000,
+            "output": 64000
+        },
+        "description": "Claude Haiku 4.5 base \u2014 dated-alias collision fixture (BET-1307)"
+    },
+    {
+        "id": "anthropic/claude-haiku-4-5-20251001",
+        "name": "Claude Haiku 4 5",
+        "family": "claude",
+        "limit": {
+            "context": 200000,
+            "output": 64000
+        },
+        "description": "Dated alias of claude-haiku-4-5 (undated name) \u2014 must collapse onto the base (BET-1307)",
+        "synthesize": false
+    },
+    {
+        "id": "zhipuai/glm-5",
+        "name": "Glm 5",
+        "family": "glm",
+        "limit": {
+            "context": 131072,
+            "output": 16384
+        },
+        "description": "GLM-5 \u2014 over-collapse guard: distinct from glm-5-turbo (BET-1307)",
+        "synthesize": false
+    },
+    {
+        "id": "zhipuai/glm-5-turbo",
+        "name": "Glm 5 Turbo",
+        "family": "glm",
+        "limit": {
+            "context": 131072,
+            "output": 16384
+        },
+        "description": "GLM-5 turbo \u2014 over-collapse guard: one-word decoration is an extra soft token (BET-1307)",
+        "synthesize": false
+    },
+    {
+        "id": "moonshotai/kimi-k2.7-code",
+        "name": "Kimi K2.7 Code",
+        "family": "kimi",
+        "limit": {
+            "context": 131072,
+            "output": 16384
+        },
+        "description": "Kimi K2.7 Code \u2014 over-collapse guard: distinct from the highspeed sibling (BET-1307)",
+        "synthesize": false
+    },
+    {
+        "id": "moonshotai/kimi-k2.7-code-highspeed",
+        "name": "Kimi K2.7 Code Highspeed",
+        "family": "kimi",
+        "limit": {
+            "context": 131072,
+            "output": 16384
+        },
+        "description": "Kimi K2.7 Code Highspeed \u2014 over-collapse guard: one-word decoration is an extra soft token (BET-1307)",
+        "synthesize": false
     }
 ]

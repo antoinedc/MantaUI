@@ -119,6 +119,34 @@ function setEqual(a, b) {
   return true;
 }
 
+// Collapse structurally-identical candidates to one representative (BET-1307).
+// A model and its own dated alias (the same model re-released with a date tail)
+// classify identically because the classifier discards dates, so they must never
+// present as a pair of "Models we couldn't identify" entries. Group by the
+// classification (version / size / soft sets) and keep the representative whose
+// normalized id is shortest — that deterministically drops the date decoration
+// with no name list and no vendor knowledge. Distinct products never share a
+// class: a one-word decoration is an extra soft token, siblings differ in the
+// size set, and different versions or vendors differ in the version / soft
+// sets — so nothing real is ever merged.
+function collapseAliases(candidates) {
+  const reps = new Map();
+  for (const e of candidates) {
+    if (!e || typeof e.id !== "string") continue;
+    const c = classifyTokens(tokenizeModelId(e.id));
+    const sig = [
+      [...c.versions].sort().join(","),
+      [...c.sizes].sort().join(","),
+      [...c.soft].sort().join(","),
+    ].join("|");
+    const cur = reps.get(sig);
+    if (!cur || normalize(e.id).length < normalize(cur.id).length) {
+      reps.set(sig, e);
+    }
+  }
+  return [...reps.values()];
+}
+
 // Layer 4 admission (5.4a): ALL of — version sets equal; size sets, if
 // non-empty on BOTH sides, equal; at least one shared soft token. Equality on
 // versions (not subset) is what rejects a same-family id whose version differs
@@ -250,8 +278,9 @@ function layer4Match(localId, list, facts) {
   if (admitted.length === 0) return { kind: "none", candidates: [] };
 
   if (!facts) {
-    if (admitted.length === 1) return { kind: "exact", candidates: [admitted[0]] };
-    return { kind: "ambiguous", candidates: admitted };
+    const collapsed = collapseAliases(admitted);
+    if (collapsed.length === 1) return { kind: "exact", candidates: collapsed };
+    return { kind: "ambiguous", candidates: collapsed };
   }
 
   const scored = [];
@@ -262,7 +291,14 @@ function layer4Match(localId, list, facts) {
   if (scored.length === 0) return { kind: "none", candidates: [] };
   scored.sort((a, b) => b.score - a.score);
   const max = scored[0].score;
-  const survivors = scored.filter((s) => s.score === max);
+  let survivors = scored.filter((s) => s.score === max);
+  // A dated alias and its base score identically (identical version/size/soft
+  // classes plus the same endpoint facts); collapse them to the canonical base
+  // before the edit-distance tiebreak so the tie never resolves to the alias
+  // on a coin flip (BET-1307).
+  if (survivors.length > 1) {
+    survivors = collapseAliases(survivors.map((s) => s.e)).map((e) => ({ e, score: max }));
+  }
   if (survivors.length === 1) return { kind: "exact", candidates: [survivors[0].e] };
 
   // Tie at the top → smallest edit distance between the normalised ids.
@@ -374,9 +410,12 @@ export function createModelIndex(entries) {
         return { kind: "exact", candidates: [direct], confidence: "certain", evidence: "catalogue id" };
       }
 
-      // Layer 2 — a normalised handle (bare segment / name / family).
+      // Layer 2 — a normalised handle (bare segment / name / family). An entry
+      // and its own dated alias share the bare-segment AND name handle (the
+      // alias's undated name normalizes to the base's key), so the bucket can
+      // hold both — collapse to the canonical base before choosing kind.
       const raw = byHandle.get(needle) ?? [];
-      const canonHandles = [...new Set(raw)];
+      const canonHandles = collapseAliases([...new Set(raw)]);
       if (canonHandles.length === 1) {
         return { kind: "exact", candidates: canonHandles, confidence: "certain", evidence: "model name" };
       }
@@ -384,19 +423,23 @@ export function createModelIndex(entries) {
         return { kind: "ambiguous", candidates: canonHandles, confidence: "certain", evidence: "model name" };
       }
 
-      // Layer 3 — the id is a weights-repo path of a catalogue entry.
+      // Layer 3 — the id is a weights-repo path of a catalogue entry. Same
+      // dated-alias collapse; keeps exact/ambiguous consistent with layer 2.
       const repo = layer3Lookup(needle);
       if (repo) {
-        const kind = repo.candidates.length === 1 ? "exact" : "ambiguous";
+        const candidates = collapseAliases(repo.candidates);
+        const kind = candidates.length === 1 ? "exact" : "ambiguous";
         return {
           kind,
-          candidates: repo.candidates,
+          candidates,
           confidence: "certain",
           evidence: kind === "exact" ? `weights repo ${repo.repo}` : "weights repo",
         };
       }
 
       // Layer 4 — digit-anchored structural match, corroborated by facts.
+      // Layer 4 also collapses dated aliases (see layer4Match), so a model and
+      // its own dated alias resolve to one canonical entry at every layer.
       const structural = layer4Match(localModelId, list, endpointFacts);
       if (structural.kind === "exact" || structural.kind === "ambiguous") {
         const evidence = endpointFacts
