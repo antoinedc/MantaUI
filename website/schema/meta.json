@@ -39,42 +39,34 @@
           "mainEntity": [
             {
               "@type": "Question",
+              "name": "Can I use my existing Claude and Codex subscriptions?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Yes. You log each agent CLI into your own plan once on the server, and Manta runs them side by side. No Manta account, no proxy, no per-seat fee."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "How long does setup actually take?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "About two minutes. Point the desktop app at a server and it installs the runtime, starts the service, gets a certificate and shows a six-digit pairing code for your other devices."
+              }
+            },
+            {
+              "@type": "Question",
               "name": "Does the agent keep running if I close my laptop?",
               "acceptedAnswer": {
                 "@type": "Answer",
-                "text": "Yes. The server runs on your box as a system service and your agents live in real tmux sessions. Every client is disposable, so you can close all of them and the work continues. Reconnect later and the full history is still there."
+                "text": "Yes. Agents live in tmux sessions on the box as system services. Clients are disposable; close them all and the work continues, with full history when you reconnect."
               }
             },
             {
               "@type": "Question",
-              "name": "Do I need Tailscale, a VPN or port forwarding?",
+              "name": "What kind of server do I need?",
               "acceptedAnswer": {
                 "@type": "Answer",
-                "text": "No, and you do not have to decide either. The installer checks whether Tailscale is already running on the box. If it is, your devices connect over your tailnet and nothing is published to the internet. If it is not, the box gets its own hostname and a Let's Encrypt certificate. Either way there is nothing to port-forward and no tunnel to keep alive, and you can force either path if you prefer."
-              }
-            },
-            {
-              "@type": "Question",
-              "name": "Can I really use Claude Code from my phone?",
-              "acceptedAnswer": {
-                "@type": "Answer",
-                "text": "Yes, and the phone app is a full client rather than a status viewer. You get the full transcript, live command output, approvals, dictation and file uploads, in the desktop app and a native iPhone app."
-              }
-            },
-            {
-              "@type": "Question",
-              "name": "I already SSH into a VPS with Termius. Why switch?",
-              "acceptedAnswer": {
-                "@type": "Answer",
-                "text": "You have already solved the part most tools get wrong, which is keeping the agent alive when you walk away. What you do not get is a readable transcript instead of a terminal UI, buttons to approve a command, or a notification when the agent stops and waits for you. Manta runs on the same box and you can still SSH in alongside it."
-              }
-            },
-            {
-              "@type": "Question",
-              "name": "What does it cost?",
-              "acceptedAnswer": {
-                "@type": "Answer",
-                "text": "Nothing. Manta is free and open source. You pay whoever supplies your agent, so an Anthropic subscription or an API key, and you supply the box."
+                "text": "Any always-on Linux box or Apple Silicon Mac. A five dollar VPS is enough. The installer touches no system packages and brings its own runtime."
               }
             },
             {
@@ -82,15 +74,23 @@
               "name": "Does my code leave my box?",
               "acceptedAnswer": {
                 "@type": "Answer",
-                "text": "No. Transcripts, uploads, secrets and configuration stay on your machine. The only outbound traffic is your agent talking to its model provider, plus a small push payload carrying the session name if you turn on phone notifications."
+                "text": "No. Transcripts, uploads, secrets and config stay on the machine. The only outbound traffic is your agent talking to its own provider."
               }
             },
             {
               "@type": "Question",
-              "name": "Which agents does it work with?",
+              "name": "Do I need Tailscale, a VPN or port forwarding?",
               "acceptedAnswer": {
                 "@type": "Answer",
-                "text": "Claude Code and opencode today. Anything that runs in a terminal works in terminal mode, and the chat panel is built on opencode."
+                "text": "No. If Tailscale is already running, devices connect over your tailnet. If not, the box gets its own hostname and certificate. Either way, nothing to port-forward."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Is Manta really open source?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Yes: MIT licensed, client and server both. Read every line, build it yourself, run it with no connection to us. No account, no hosted tier. Telemetry is optional and sends nothing unless you set a token."
               }
             },
             {
@@ -98,7 +98,7 @@
               "name": "Is this an alternative to Conductor or Orca?",
               "acceptedAnswer": {
                 "@type": "Answer",
-                "text": "It overlaps with both, on a different bet. They run agents on your Mac and give you a window onto them. Manta runs agents on a box you own and gives every device the same window, so the work outlives whatever you are holding."
+                "text": "They overlap on a different bet. Those run agents on your Mac; Manta runs them on a server you own and gives every device the same window onto the work."
               }
             }
           ]
@@ -145,7 +145,7 @@
               "name": "Is there a version for Android or other phones?",
               "acceptedAnswer": {
                 "@type": "Answer",
-                "text": "Not yet. The phone client is a native iPhone app; there is no browser client. The desktop app covers macOS and Windows, and your agents run on a Linux box or Mac you own. The remote page covers running the agents on a box."
+                "text": "Not yet. The phone client is a native iPhone app; there is no browser client. The desktop app covers macOS and Windows, and your agents run on any Linux box or Mac you own. The remote page covers running the agents on a box."
               }
             },
             {
@@ -224,7 +224,7 @@
               "name": "What happens when I close my laptop?",
               "acceptedAnswer": {
                 "@type": "Answer",
-                "text": "The agent keeps running, because it lives in a tmux session on the box. The box is a system service. When you open a browser or pair your phone again, the same session is there with the full history. The mobile page covers what the phone sees when this happens."
+                "text": "The agent keeps running, because it lives in a tmux session on the box. The box is a system service. When you pair your phone again, the same session is there with the full history. The mobile page covers what the phone sees when this happens."
               }
             },
             {
@@ -350,7 +350,7 @@
               "name": "Is Manta really free?",
               "acceptedAnswer": {
                 "@type": "Answer",
-                "text": "Yes. The server, the desktop client, the phone client and the install script are MIT licensed and free. There is no paid tier and no per-seat fee. You pay your model provider and you supply the box."
+                "text": "Yes. The server, the desktop client, the phone client and the install script are MIT licensed and free. There is no paid tier and no per-seat fee. A native iPhone app is planned, but the server you self-host stays free. You pay your model provider and you supply the box."
               }
             },
             {
@@ -495,7 +495,7 @@
               "name": "Why is Orca so much more mature?",
               "acceptedAnswer": {
                 "@type": "Answer",
-                "text": "Orca is older, has 29.6k stars on GitHub, and is YC-backed. Manta is a solo project and is younger. Maturity buys you a larger surface today (diff review, an editor, more runtimes, a Windows and Linux desktop) and a smaller backlog. We concede the comparison on maturity plainly."
+                "text": "Orca is older, has 29.6k stars on GitHub, and is YC-backed. Manta is a solo project and is younger. Maturity buys you a larger surface today (diff review, an editor, more runtimes, a Linux desktop) and a smaller backlog. We concede the comparison on maturity plainly."
               }
             },
             {
