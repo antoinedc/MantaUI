@@ -10,12 +10,12 @@
 // This slice only adds the HTTP path. The RPC layer serves both (SSH + HTTP)
 // until SSH is removed.
 
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile, rename } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parse } from "jsonc-parser";
+import { parse, modify, applyEdits } from "jsonc-parser";
 import { reconcileSubagents } from "../shared/subagentSync.mjs";
 import { restartOpencode } from "./opencodeAdmin.mjs";
 
@@ -86,17 +86,51 @@ const normBaseURL = (u) => stripUrlUserinfo(u).replace(/\/$/, "");
 const OPENCODE_JSONC = join(homedir(), ".config", "opencode", "opencode.jsonc");
 const OPENCODE_API = "http://127.0.0.1:4096/global/config";
 
-// opencode's PATCH /global/config has no HTTP delete semantics (it deep-merges
-// objects and rejects `null`), so a `remove` op can't be expressed through the
-// single endpoint. Re-scoped out of BET-1019: setProviders/setSubagents REJECT
-// removes with this message rather than writing the file directly (a direct
-// write behind the endpoint's back is what made memory and disk diverge — a
-// removed key resurrects on the next upsert PATCH). See BET-1033 for restoring
-// deactivation through a vetted mechanism.
-const REMOVE_UNSUPPORTED_MSG =
-  "remove ops are not supported through the config endpoint (PATCH /global/config " +
-  "has no delete semantics). Deactivation is pending a vetted mechanism — " +
-  "nothing was changed.";
+/**
+ * THE single direct-write path for opencode.jsonc, used ONLY for deletions
+ * (opencode's PATCH /global/config cannot express one — it deep-merges and
+ * rejects null). Surgical jsonc-parser edits preserve comments; the mandatory
+ * opencode restart is what stops opencode's in-memory config from diverging
+ * from a file it no longer owns. NEVER use this for an upsert — upserts go
+ * through patchGlobalConfig.
+ *
+ * @param {Array<Array<string>>} paths  e.g. [["provider","voska"],["agent","fast"]]
+ * @param {object} deps  injectable readText/writeText/restart (defaults hit the real box)
+ * @returns {Promise<{ ok: boolean, changed?: boolean, error?: string }>}
+ */
+export async function removeConfigKeys(paths, deps = {}) {
+  const readText = deps.readText ?? (async () => readFile(OPENCODE_JSONC, "utf-8"));
+  const writeText = deps.writeText ?? (async (text) => {
+    await writeFile(`${OPENCODE_JSONC}.tmp`, text, "utf-8");
+    await rename(`${OPENCODE_JSONC}.tmp`, OPENCODE_JSONC);
+  });
+  const restart = deps.restart ?? restartOpencode;
+
+  try {
+    const input = await readText();
+
+    let text = input;
+    for (const path of paths ?? []) {
+      text = applyEdits(text, modify(text, path, undefined, {}));
+    }
+
+    // Nothing matched — deleting something that is not there is a success, not
+    // a reason to interrupt every running session.
+    if (text === input) return { ok: true, changed: false };
+
+    await writeText(text);
+
+    // Never report success when a live opencode still holds the deleted key.
+    const restartResult = await restart();
+    if (!restartResult.ok) {
+      return { ok: false, error: restartResult.error };
+    }
+
+    return { ok: true, changed: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Provider block manipulation (pure)
@@ -365,38 +399,45 @@ export async function patchGlobalConfig(patch) {
 }
 
 /**
- * Shared core for setProviders / setSubagents — both are the same write-through
- * PATCH shape (reject `remove`, upsert each block via a builder, PATCH one
- * config key) with no HTTP delete semantics. `configKey` is "provider" or
+ * Shared core for setProviders / setSubagents. Upserts go through PATCH
+ * /global/config (patchGlobalConfig); removes go through removeConfigKeys (the
+ * surgical JSONC write + mandatory opencode restart). Fixed, deterministic
+ * order: upsert FIRST (and stop if it fails — never delete when the upsert
+ * failed), then remove (stop if it fails). `configKey` is "provider" or
  * "agent"; `keyFor(input)` and `build(input)` produce the per-entry key + block.
  */
 async function patchBlocks(ops, deps, configKey, keyFor, build) {
   const patch = deps?.patch ?? patchGlobalConfig;
+  const remove = deps?.remove ?? removeConfigKeys;
   const upserts = ops?.upsert ?? [];
   const removes = ops?.remove ?? [];
 
-  if (removes.length > 0) {
-    return { ok: false, error: REMOVE_UNSUPPORTED_MSG };
+  if (upserts.length > 0) {
+    const collected = {};
+    for (const input of upserts) {
+      collected[keyFor(input)] = build(input);
+    }
+    const patchResult = await patch({ [configKey]: collected });
+    if (!patchResult.ok) return patchResult;
   }
 
-  if (upserts.length === 0) return { ok: true };
-  const collected = {};
-  for (const input of upserts) {
-    collected[keyFor(input)] = build(input);
+  if (removes.length > 0) {
+    const removeResult = await remove(removes.map((k) => [configKey, k]));
+    if (!removeResult.ok) return removeResult;
   }
-  return patch({ [configKey]: collected });
+
+  return { ok: true };
 }
 
 /**
  * Apply a set of provider mutations through opencode's config endpoint.
  * Upserts go through PATCH /global/config — the single authority that owns
- * both the in-memory config and the file. `remove` ops are NOT supported
- * (the endpoint has no delete semantics over HTTP: it deep-merges objects and
- * rejects `null`, so a key can't be removed through it) and are REJECTED with
- * an explicit error rather than written directly — writing the file behind the
- * endpoint's back would let memory and disk diverge (a removed key resurrects
- * on the next upsert PATCH). Restoring deactivation is tracked as follow-up
- * work. Does NOT restart opencode; the caller decides (prompt-before-restart).
+ * both the in-memory config and the file. `remove` ops (deleting an endpoint)
+ * go through removeConfigKeys: a surgical jsonc-parser edit of opencode.jsonc
+ * followed by a mandatory opencode restart, because the PATCH endpoint has no
+ * HTTP delete semantics (it deep-merges objects and rejects `null`). The
+ * restart is what stops the removed key from resurrecting on a stale
+ * in-memory config / the next upsert PATCH.
  */
 export async function setProviders(ops, deps = {}) {
   return patchBlocks(
@@ -431,12 +472,12 @@ export async function getSubagents(readConfig = readRemoteConfig) {
 /**
  * Apply a set of subagent mutations through opencode's config endpoint.
  * Upserts go through PATCH /global/config — the single authority that owns
- * both the in-memory config and the file. `remove` ops are NOT supported (the
- * endpoint has no delete semantics over HTTP) and are REJECTED with an
- * explicit error rather than written directly — writing the file behind the
- * endpoint's back would let memory and disk diverge (a removed block
- * resurrects on the next upsert PATCH). Restoring deactivation is tracked as
- * follow-up work. Does NOT restart opencode; the caller must do that manually.
+ * both the in-memory config and the file. `remove` ops (deactivating a
+ * subagent) go through removeConfigKeys: a surgical jsonc-parser edit of
+ * opencode.jsonc followed by a mandatory opencode restart, because the PATCH
+ * endpoint has no HTTP delete semantics (it deep-merges objects and rejects
+ * `null`). The restart is what stops the removed block from resurrecting on a
+ * stale in-memory config / the next upsert PATCH.
  */
 export async function setSubagents(ops, deps = {}) {
   return patchBlocks(
@@ -466,9 +507,13 @@ export async function setSkillRegistryUrls(urls = [], deps = {}) {
 }
 
 /**
- * Upsert opencode references (BET-1023) through THE single opencode.jsonc
- * write path — PATCH /global/config (the same `patchGlobalConfig` used by
- * setProviders/setSubagents; never a second writer).
+ * Upsert or remove opencode references (BET-1023). Upserts go through THE
+ * single opencode.jsonc upsert writer — PATCH /global/config (the same
+ * `patchGlobalConfig` used by setProviders/setSubagents; never a second
+ * writer). `remove` ops (deleting a reference alias) go through
+ * removeConfigKeys against the `references` key — a surgical jsonc-parser edit
+ * + mandatory opencode restart — because opencode's PATCH /global/config has
+ * no HTTP delete semantics (it deep-merges objects and rejects `null`).
  *
  * A reference entry is written as an explicit object — either
  *   { path, description? }            for a local directory, or
@@ -476,41 +521,41 @@ export async function setSkillRegistryUrls(urls = [], deps = {}) {
  * — never as a bare shorthand string, so the config stays unambiguous and
  * keyed by the alias the user declared.
  *
- * `remove` ops are REJECTED with an explicit error, mirroring
- * REMOVE_UNSUPPORTED_MSG: opencode's PATCH /global/config has no HTTP delete
- * semantics (it deep-merges objects and rejects `null`), so a reference alias
- * can't be removed through the single endpoint. Restoring removal is tracked
- * as follow-up work alongside BET-1033.
- *
- * `patch` is injectable for unit tests; defaults to patchGlobalConfig.
+ * `patch`/`remove` are injectable for unit tests; defaults to the real writers.
  */
 export async function setReferences(ops, deps = {}) {
   const patch = deps.patch ?? patchGlobalConfig;
+  const remove = deps.remove ?? removeConfigKeys;
   const upserts = ops?.upsert ?? [];
   const removes = ops?.remove ?? [];
 
-  if (removes.length > 0) {
-    return { ok: false, error: REMOVE_UNSUPPORTED_MSG };
-  }
-
-  if (upserts.length === 0) return { ok: true };
-
-  const referencesPatch = {};
-  for (const input of upserts) {
-    const { alias } = input;
-    if (!alias) continue;
-    const entry = {};
-    if (input.repository) {
-      entry.repository = input.repository;
-      if (input.branch) entry.branch = input.branch;
-    } else {
-      entry.path = input.path;
+  if (upserts.length > 0) {
+    const referencesPatch = {};
+    for (const input of upserts) {
+      const { alias } = input;
+      if (!alias) continue;
+      const entry = {};
+      if (input.repository) {
+        entry.repository = input.repository;
+        if (input.branch) entry.branch = input.branch;
+      } else {
+        entry.path = input.path;
+      }
+      if (input.description) entry.description = input.description;
+      referencesPatch[alias] = entry;
     }
-    if (input.description) entry.description = input.description;
-    referencesPatch[alias] = entry;
+    if (Object.keys(referencesPatch).length > 0) {
+      const patchResult = await patch({ references: referencesPatch });
+      if (!patchResult.ok) return patchResult;
+    }
   }
-  if (Object.keys(referencesPatch).length === 0) return { ok: true };
-  return patch({ references: referencesPatch });
+
+  if (removes.length > 0) {
+    const removeResult = await remove(removes.map((alias) => ["references", alias]));
+    if (!removeResult.ok) return removeResult;
+  }
+
+  return { ok: true };
 }
 
 /**

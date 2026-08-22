@@ -13,6 +13,7 @@ import {
   discoverModels,
   discoverModelsForEndpoint,
   setProviders,
+  removeConfigKeys,
   getProviderEndpoints,
   upsertAgentBlock,
   readAgentBlocks,
@@ -515,15 +516,46 @@ describe("setProviders", () => {
     assert.equal(patches[0].provider["other"], undefined, "only the changed provider is patched");
   });
 
-  it("rejects a remove (the endpoint has no delete) without writing the file", async () => {
+  it("routes a remove through removeConfigKeys (no longer rejects)", async () => {
+    let removedPaths = null;
     let patched = false;
     const result = await setProviders(
       { remove: ["voska"] },
-      { patch: async () => { patched = true; return { ok: true }; } },
+      {
+        patch: async () => { patched = true; return { ok: true }; },
+        remove: async (paths) => { removedPaths = paths; return { ok: true, changed: true }; },
+      },
+    );
+    assert.equal(result.ok, true);
+    assert.deepEqual(removedPaths, [["provider", "voska"]]);
+    assert.equal(patched, false, "a pure remove does not PATCH");
+  });
+
+  it("patches before deleting on a mixed upsert+remove batch", async () => {
+    const order = [];
+    const result = await setProviders(
+      { upsert: [{ id: "voska", name: "Voska", baseURL: "https://api.voska.org/v1", apiKey: "sk", enabledModels: [] }], remove: ["old"] },
+      {
+        patch: async () => { order.push("patch"); return { ok: true }; },
+        remove: async () => { order.push("remove"); return { ok: true }; },
+      },
+    );
+    assert.equal(result.ok, true);
+    assert.deepEqual(order, ["patch", "remove"]);
+  });
+
+  it("does not delete when the upsert patch fails", async () => {
+    let removed = false;
+    const result = await setProviders(
+      { upsert: [{ id: "voska", name: "Voska", baseURL: "https://api.voska.org/v1", apiKey: "sk", enabledModels: [] }], remove: ["old"] },
+      {
+        patch: async () => ({ ok: false, error: "boom" }),
+        remove: async () => { removed = true; return { ok: true }; },
+      },
     );
     assert.equal(result.ok, false);
-    assert.match(result.error, /remove/i);
-    assert.equal(patched, false, "no PATCH for a rejected remove op — no file write, no endpoint call");
+    assert.match(result.error, /boom/);
+    assert.equal(removed, false, "must not delete when the upsert patch failed");
   });
 
   it("surfaces an endpoint error to the caller (no file fallback)", async () => {
@@ -779,26 +811,43 @@ describe("setSubagents", () => {
     assert.equal(patches[0].agent["old"], undefined, "only the changed agent is patched");
   });
 
-  it("rejects a remove (the endpoint has no delete) without writing the file", async () => {
+  it("routes a remove through removeConfigKeys against the agent key (no longer rejects)", async () => {
+    let removedPaths = null;
     let patched = false;
     const result = await setSubagents(
       { remove: ["haiku"] },
-      { patch: async () => { patched = true; return { ok: true }; } },
+      {
+        patch: async () => { patched = true; return { ok: true }; },
+        remove: async (paths) => { removedPaths = paths; return { ok: true, changed: true }; },
+      },
     );
-    assert.equal(result.ok, false);
-    assert.match(result.error, /remove/i);
-    assert.equal(patched, false, "no PATCH for a rejected remove op — no file write, no endpoint call");
+    assert.equal(result.ok, true);
+    assert.deepEqual(removedPaths, [["agent", "haiku"]]);
+    assert.equal(patched, false);
   });
 
-  it("rejects a batch that includes a remove before patching (remove unsupported)", async () => {
-    let patched = false;
-    const result = await setSubagents(
+  it("patches before deleting on a mixed upsert+remove batch, and stops when the patch fails", async () => {
+    const order = [];
+    const okResult = await setSubagents(
       { upsert: [{ name: "fast", model: "anthropic/claude-haiku-4", description: "Fast" }], remove: ["haiku"] },
-      { patch: async () => { patched = true; return { ok: true }; } },
+      {
+        patch: async () => { order.push("patch"); return { ok: true }; },
+        remove: async () => { order.push("remove"); return { ok: true }; },
+      },
     );
-    assert.equal(result.ok, false);
-    assert.match(result.error, /remove/i);
-    assert.equal(patched, false, "rejects the batch before any upsert PATCH");
+    assert.equal(okResult.ok, true);
+    assert.deepEqual(order, ["patch", "remove"]);
+
+    let removed = false;
+    const failResult = await setSubagents(
+      { upsert: [{ name: "fast", model: "x", description: "F" }], remove: ["haiku"] },
+      {
+        patch: async () => ({ ok: false, error: "boom" }),
+        remove: async () => { removed = true; return { ok: true }; },
+      },
+    );
+    assert.equal(failResult.ok, false);
+    assert.equal(removed, false, "must not delete when the upsert patch failed");
   });
 });
 
@@ -1118,15 +1167,43 @@ describe("setReferences", () => {
     assert.equal(patches[0].references.docs.path, "../docs");
   });
 
-  it("rejects remove ops with no PATCH write", async () => {
+  it("routes a remove through removeConfigKeys against the references key (no longer rejects)", async () => {
+    let removedPaths = null;
     let patched = false;
     const result = await setReferences(
-      { upsert: [{ alias: "docs", path: "../docs" }], remove: ["docs"] },
-      { patch: async () => { patched = true; return { ok: true }; } },
+      { remove: ["docs"] },
+      {
+        patch: async () => { patched = true; return { ok: true }; },
+        remove: async (paths) => { removedPaths = paths; return { ok: true, changed: true }; },
+      },
     );
-    assert.equal(result.ok, false);
-    assert.match(result.error, /not supported|no delete/);
-    assert.equal(patched, false, "no PATCH for a rejected remove op");
+    assert.equal(result.ok, true);
+    assert.deepEqual(removedPaths, [["references", "docs"]]);
+    assert.equal(patched, false);
+  });
+
+  it("patches before deleting on a mixed batch, and stops when the patch fails", async () => {
+    const order = [];
+    const okResult = await setReferences(
+      { upsert: [{ alias: "docs", path: "../docs" }], remove: ["old"] },
+      {
+        patch: async () => { order.push("patch"); return { ok: true }; },
+        remove: async () => { order.push("remove"); return { ok: true }; },
+      },
+    );
+    assert.equal(okResult.ok, true);
+    assert.deepEqual(order, ["patch", "remove"]);
+
+    let removed = false;
+    const failResult = await setReferences(
+      { upsert: [{ alias: "docs", path: "../docs" }], remove: ["old"] },
+      {
+        patch: async () => ({ ok: false, error: "boom" }),
+        remove: async () => { removed = true; return { ok: true }; },
+      },
+    );
+    assert.equal(failResult.ok, false);
+    assert.equal(removed, false, "must not delete when the upsert patch failed");
   });
 
   it("no-ops when there is nothing to upsert", async () => {
@@ -1146,5 +1223,79 @@ describe("setReferences", () => {
     );
     assert.equal(result.ok, false);
     assert.match(result.error, /500/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// removeConfigKeys — THE single direct-write path (deletions only). Surgical
+// jsonc-parser edits preserve comments; the mandatory opencode restart is
+// what stops memory/disk divergence. All deps are injected — never touches
+// the real opencode.jsonc or systemctl.
+// ---------------------------------------------------------------------------
+
+describe("removeConfigKeys", () => {
+  const SRC = '{\n  // keep me\n  "provider": {\n    "a": {"x":1},\n    "b": {"y":2}\n  },\n  "model": "m"\n}';
+
+  it("deletes a key and leaves a // comment elsewhere intact", async () => {
+    let written = null;
+    let restarts = 0;
+    const result = await removeConfigKeys([["provider", "b"]], {
+      readText: async () => SRC,
+      writeText: async (t) => { written = t; },
+      restart: async () => { restarts++; return { ok: true }; },
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.changed, true);
+    assert.ok(written.includes("// keep me"), "comment preserved");
+    assert.ok(!written.includes('"b"'), "removed key is gone");
+    assert.equal(restarts, 1);
+  });
+
+  it("missing key → ok:true changed:false, writer NOT called, restart NOT called", async () => {
+    let written = false;
+    let restarts = 0;
+    const result = await removeConfigKeys([["provider", "zzz-does-not-exist"]], {
+      readText: async () => SRC,
+      writeText: async () => { written = true; },
+      restart: async () => { restarts++; return { ok: true }; },
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.changed, false);
+    assert.equal(written, false);
+    assert.equal(restarts, 0);
+  });
+
+  it("multi-path call removes all and restarts exactly once", async () => {
+    let written = null;
+    let restarts = 0;
+    const result = await removeConfigKeys([["provider", "a"], ["provider", "b"]], {
+      readText: async () => SRC,
+      writeText: async (t) => { written = t; },
+      restart: async () => { restarts++; return { ok: true }; },
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.changed, true);
+    assert.equal(restarts, 1);
+    assert.ok(!written.includes('"a"') && !written.includes('"b"'));
+    assert.ok(written.includes("// keep me"));
+  });
+
+  it("restart failure → ok:false (never reports success while a live opencode holds the key)", async () => {
+    const result = await removeConfigKeys([["provider", "a"]], {
+      readText: async () => SRC,
+      writeText: async () => {},
+      restart: async () => ({ ok: false, error: "systemctl failed" }),
+    });
+    assert.equal(result.ok, false);
+  });
+
+  it("never throws — a failing read surfaces as ok:false with an error", async () => {
+    const result = await removeConfigKeys([["provider", "a"]], {
+      readText: async () => { throw new Error("ENOENT"); },
+      writeText: async () => {},
+      restart: async () => ({ ok: true }),
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.error, /ENOENT/);
   });
 });
