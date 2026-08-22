@@ -1417,6 +1417,47 @@ test("routing:choose reports incumbentHealthy=true for a healthy incumbent (6e)"
   assert.equal(out.incumbentHealthy, true);
 });
 
+// 6e reviewer Block regression: incumbentStillEligible must be computed from the
+// incumbent's FULL catalog endpoint (cost/capabilities/catalogue identity), not
+// a price-less {providerID,id} stub — otherwise a perfectly describable incumbent
+// reads ineligible and shouldSwitch force-switches every boundary-crossing turn.
+test("routing:choose reports incumbentStillEligible=true for a describable incumbent (6e Block regression)", async () => {
+  const { deps } = makeDeps([]);
+  deps.local.configGet = async () => ({
+    projects: [],
+    modelRouting: {
+      preset: "economy",
+      declaredModels: { "anthropic/claude-sonnet-4": { catalogId: "claude-sonnet-4" } },
+    },
+  });
+  deps.routingListRoutableModels = async () => [
+    {
+      providerID: "anthropic",
+      id: "claude-sonnet-4",
+      status: "active",
+      cost: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 0.5 },
+    },
+  ];
+  // A catalogue index so buildRoutingServices resolves identity + quality (the
+  // SAME seam the BET-1265 log test uses).
+  const fakeCatalog = {
+    matchModel: (id) => ({ kind: "exact", candidates: [{ id, name: id }] }),
+    lookupModel: (id) => ({ id }),
+    allModels: () => [{ id: "claude-sonnet-4", benchmarks: [{ name: "SWE-Bench Verified", score: 0.8 }] }],
+  };
+  const handlers = buildHandlers({ ...deps, routingCatalogIndex: fakeCatalog });
+  const out = await handlers["routing:choose"]({
+    sessionId: "ses_1",
+    directory: "/w",
+    agent: "build",
+    surface: "main",
+    contextTokens: 0,
+    needs: {},
+    incumbent: { providerID: "anthropic", modelID: "claude-sonnet-4" },
+  });
+  assert.equal(out.incumbentStillEligible, true, "a describable incumbent must read eligible");
+});
+
 // accounts:retry always reports an outcome — a non-empty message in BOTH the
 // cleared and not-cleared cases (AGENTS.md: it does the thing and says so,
 // or fails and says why; a swallowed bare return is a dead button).

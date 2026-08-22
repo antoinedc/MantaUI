@@ -869,12 +869,26 @@ export function buildHandlers({
           console.error(`[router] routing services degraded, routing on absent context: ${e?.message ?? e}`);
           services = null;
         }
-        // Normalise the incumbent into catalog shape ({providerID, id}) so the
-        // `changed` comparison inside chooseModel treats a requested model and
-        // a catalog entry of the same model as equal.
-        const catalogIncumbent = incumbent
-          ? { providerID: incumbent.providerID, id: incumbent.modelID ?? incumbent.id }
+        // Resolve the incumbent's FULL catalog endpoint (the normalized
+        // OpencodeModel with cost/capabilities) so the eligibility gate sees the
+        // real endpoint, not a price-less stub. BET-1270 6e reviewer Block: a
+        // stripped {providerID, id} fails autoEligibility's Price/Caching gates,
+        // forcing `incumbent-ineligible` off a perfectly describable incumbent on
+        // every boundary-crossing turn. Fall back to the stripped stub only when
+        // the incumbent is absent from the routable catalog (genuinely not
+        // routable → honestly ineligible).
+        const fullIncumbent = incumbent
+          ? (Array.isArray(catalog) ? catalog : []).find(
+              (c) =>
+                c?.providerID === incumbent.providerID &&
+                String(c?.id ?? c?.modelID ?? "") === String(incumbent.modelID ?? incumbent.id ?? ""),
+            ) ?? null
           : null;
+        const catalogIncumbent =
+          fullIncumbent ??
+          (incumbent
+            ? { providerID: incumbent.providerID, id: incumbent.modelID ?? incumbent.id }
+            : null);
         // BET-1270 6e: the box-side facts about the incumbent the renderer
         // sent, reported back on the SAME round trip (no second fetch, no
         // renderer-held health/eligibility state). `incumbentHealthy` is false
