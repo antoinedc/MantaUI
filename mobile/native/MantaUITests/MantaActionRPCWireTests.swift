@@ -387,6 +387,93 @@ final class MantaActionRPCWireTests: XCTestCase {
             XCTAssertEqual(message, "not found")
         }
     }
+
+    // MARK: - model prefs (BET-1282)
+
+    /// `model-prefs:set` upsert: `args` is a SINGLE payload object carrying
+    /// `sessionId` + the `{providerID, modelID, variant}` selection — never
+    /// `args: [[dict]]`.
+    func testModelPrefsSetSingleWrapsAndCarriesSelection() async throws {
+        let client = makeClient()
+        CapturingURLProtocol.result = #"{"result": null}"#
+        let sel = ModelPrefsSelection(providerID: "anthropic", modelID: "claude-sonnet-4-6", variant: "high")
+        try await client.modelPrefsSet(sessionId: "ses_1", selection: sel, recents: nil)
+        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/model-prefs:set")
+        assertSingleWrapped()
+        let payload = CapturingURLProtocol.lastPayload()
+        XCTAssertEqual(payload?["sessionId"] as? String, "ses_1")
+        let selection = payload?["selection"] as? [String: Any]
+        XCTAssertEqual(selection?["providerID"] as? String, "anthropic")
+        XCTAssertEqual(selection?["modelID"] as? String, "claude-sonnet-4-6")
+        XCTAssertEqual(selection?["variant"] as? String, "high")
+    }
+
+    /// Clearing a session's selection must send an EXPLICIT JSON `null`, not
+    /// omit the key — the box's `{...i}` merge skips an absent `selection`, so
+    /// omitting it would turn a delete into a recents-only no-op.
+    func testModelPrefsSetSendsNullSelectionToDelete() async throws {
+        let client = makeClient()
+        CapturingURLProtocol.result = #"{"result": null}"#
+        try await client.modelPrefsSet(sessionId: "ses_1", selection: nil, recents: nil)
+        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/model-prefs:set")
+        let payload = CapturingURLProtocol.lastPayload()
+        XCTAssertTrue(payload?["selection"] is NSNull, "selection must be JSON null to delete the session")
+        XCTAssertEqual(payload?["sessionId"] as? String, "ses_1")
+    }
+
+    /// `model-prefs:set` recents: a `recents` array arrives as `{providerID,
+    /// modelID, variant?, fast}` — the `ModelChoice` wire shape, which the
+    /// box stores verbatim (BET-1279). A recents-only call omits `sessionId`.
+    func testModelPrefsSetCarriesRecents() async throws {
+        let client = makeClient()
+        CapturingURLProtocol.result = #"{"result": null}"#
+        let choice = ModelChoice(providerID: "anthropic", modelID: "opus", variant: "high", fast: false)
+        try await client.modelPrefsSet(sessionId: nil, selection: nil, recents: [choice])
+        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/model-prefs:set")
+        let payload = CapturingURLProtocol.lastPayload()
+        XCTAssertNil(payload?["sessionId"])
+        XCTAssertNil(payload?["selection"])
+        let recents = payload?["recents"] as? [[String: Any]]
+        let first = recents?.first
+        XCTAssertEqual(first?["providerID"] as? String, "anthropic")
+        XCTAssertEqual(first?["modelID"] as? String, "opus")
+        XCTAssertEqual(first?["variant"] as? String, "high")
+        XCTAssertEqual(first?["fast"] as? Bool, false)
+    }
+
+    /// `model-prefs:seed` — the one-shot migration write, `args` a single
+    /// object carrying `sessions` (keyed by session id) + `recents`.
+    func testModelPrefsSeedSendsSessionsAndRecents() async throws {
+        let client = makeClient()
+        CapturingURLProtocol.result = #"{"result": null}"#
+        let sel = ModelPrefsSelection(providerID: "anthropic", modelID: "opus", variant: nil)
+        let choice = ModelChoice(providerID: "anthropic", modelID: "opus", variant: nil, fast: false)
+        try await client.modelPrefsSeed(sessions: ["ses_1": sel], recents: [choice])
+        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/model-prefs:seed")
+        assertSingleWrapped()
+        let payload = CapturingURLProtocol.lastPayload()
+        let sessions = payload?["sessions"] as? [String: Any]
+        let session1 = sessions?["ses_1"] as? [String: Any]
+        XCTAssertEqual(session1?["providerID"] as? String, "anthropic")
+        XCTAssertEqual(session1?["modelID"] as? String, "opus")
+        XCTAssertNil(session1?["variant"])
+        XCTAssertNotNil(payload?["recents"])
+    }
+
+    /// `model-prefs:get` decodes the box's `{ sessions, recents }` reply — a
+    /// session record carries `updatedAt` (ignored here) and a recent carries
+    /// `fast`. The presence of unknown keys must not fail the decode.
+    func testModelPrefsGetDecodesState() async throws {
+        let client = makeClient()
+        CapturingURLProtocol.result = #"{"result": {"sessions": {"ses_1": {"providerID": "anthropic", "modelID": "opus", "variant": "high", "updatedAt": 1750000000000}}, "recents": [{"providerID": "anthropic", "modelID": "sonnet", "variant": null, "fast": false}]}}"#
+        let state = try await client.modelPrefsGet()
+        XCTAssertEqual(state?.sessions["ses_1"]?.providerID, "anthropic")
+        XCTAssertEqual(state?.sessions["ses_1"]?.modelID, "opus")
+        XCTAssertEqual(state?.sessions["ses_1"]?.variant, "high")
+        XCTAssertEqual(state?.recents.count, 1)
+        XCTAssertEqual(state?.recents.first?.modelID, "sonnet")
+        XCTAssertEqual(state?.recents.first?.fast, false)
+    }
 }
 
 // MARK: - Capturing URLProtocol

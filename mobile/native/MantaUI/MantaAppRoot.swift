@@ -103,6 +103,7 @@ struct MantaAppRoot: View {
                             didFailStale = true
                             _ = PendingPromptStore.failStaleOnLaunch()
                         }
+                        startModelPrefs()
                         store.start()
                     }
                     .task { await sessionStore.refresh() }
@@ -176,9 +177,24 @@ struct MantaAppRoot: View {
                 sessionStore.resetForBoxChange()
             }
             paired = true
+            // Wire the box model-prefs mirror for the newly-paired box (also
+            // runs the one-shot migration of the old device-local keys). The
+            // session-list onAppear starts it again on a normal launch; both
+            // are idempotent, and subscribing before `start()` means no event
+            // can slip past the listener registration.
+            startModelPrefs()
             store.start()
             MantaPushService.registerAfterPairing()
         }
+    }
+
+    /// Fetch the box model-prefs store once, subscribe to its `updated` bus
+    /// event, and run the one-shot migration of the old UserDefaults keys.
+    /// Idempotent — safe to call on every paired launch and after a re-pair.
+    private func startModelPrefs() {
+        ChatModelPrefs.shared.subscribe(to: store)
+        ChatModelPrefs.shared.startIfNeeded()
+        ChatModelPrefs.migrateIfNeeded()
     }
 
     private var currentBoxHost: String {

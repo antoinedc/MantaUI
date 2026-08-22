@@ -393,10 +393,18 @@ final class MantaEventStore: ObservableObject {
     /// questions.
     var resyncHandler: (() -> Void)?
 
-    /// Event frame we do NOT understand from the interpreted stream are still
-    /// delivered here (raw `opencode`, `status`, …) for consumers that want
-    /// them. S1b only binds to interpreted stream state.
-    var rawFrameHandler: ((MantaStreamFrame) -> Void)?
+    /// Event frames we do NOT understand from the interpreted stream are still
+    /// delivered here (raw `opencode`, `status`, `model-prefs.updated`, …) for
+    /// consumers that want them. S1b only binds to interpreted stream state.
+    /// A MULTICAST list rather than a single closure — `SessionListStore` and
+    /// the `ChatModelPrefs` cache each register once; a single-owner closure
+    /// would let the second clobber the first (BET-1282).
+    private var rawFrameHandlers: [(MantaStreamFrame) -> Void] = []
+
+    /// Register a raw (non-`stream`, non-`runningSet`) frame observer.
+    func addRawFrameHandler(_ handler: @escaping (MantaStreamFrame) -> Void) {
+        rawFrameHandlers.append(handler)
+    }
 
     private let controller: any MantaEventStreamControl
     private var lastFrameAt: Date
@@ -503,7 +511,7 @@ final class MantaEventStore: ObservableObject {
         } else if frame.kind == "stream" {
             routeStream(frame)
         } else {
-            rawFrameHandler?(frame)
+            for handler in rawFrameHandlers { handler(frame) }
         }
     }
 

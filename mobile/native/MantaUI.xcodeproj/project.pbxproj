@@ -55,6 +55,7 @@
 		67A2877890E8B008335AD7C0 /* KeychainCredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E08743A649A206BA91EDD67 /* KeychainCredentialStore.swift */; };
 		685261838F0EFABC1AB8B6B1 /* MantaPairingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABB2884AC2B1D0FE1E0DA8EB /* MantaPairingTests.swift */; };
 		68760CC316BA947A82F360EE /* Scrim.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C440016971186430E8C464B /* Scrim.swift */; };
+		68E78394110C12145674525B /* ChatModelPrefs.swift in Sources */ = {isa = PBXBuildFile; fileRef = F23DFA2A87BE93D8DF5472DF /* ChatModelPrefs.swift */; };
 		6A720AF41BDA6F4FC40A5585 /* ChatModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F7631E09B6FF7B150392A83 /* ChatModels.swift */; };
 		6AA12AFE81F85477EBFB3D25 /* MantaTranscriptGestureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7442EBB8ACC827C69BDD2B6E /* MantaTranscriptGestureUITests.swift */; };
 		708332CA7D72971C6626C9FC /* MantaVoiceRecordingUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59B1B02BB0060065B306394F /* MantaVoiceRecordingUITests.swift */; };
@@ -261,6 +262,7 @@
 		ED6ABAA46F1CBD2093D4AC87 /* ComposerTypeahead.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerTypeahead.swift; sourceTree = "<group>"; };
 		EE0504A23AC9360042B3D51B /* ChatStreamMergeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatStreamMergeTests.swift; sourceTree = "<group>"; };
 		EF45305B46745A80925FC1A4 /* MantaEventStreamTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaEventStreamTests.swift; sourceTree = "<group>"; };
+		F23DFA2A87BE93D8DF5472DF /* ChatModelPrefs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatModelPrefs.swift; sourceTree = "<group>"; };
 		F88D3B9B782BF819EEBEBF1D /* TerminalSocket.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSocket.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -376,6 +378,7 @@
 				E0733CF7BEEE1C7B517C4010 /* ChatLoadingSkeleton.swift */,
 				229392FD3405558D301D0809 /* ChatModel.swift */,
 				4098461F579869804595B0A3 /* ChatModelCatalog.swift */,
+				F23DFA2A87BE93D8DF5472DF /* ChatModelPrefs.swift */,
 				4F7631E09B6FF7B150392A83 /* ChatModels.swift */,
 				8A6472C0BC3BDACAC4559198 /* ChatModelStore.swift */,
 				4603364B1845FF6C330EB601 /* ChatOverflowCaptureScene.swift */,
@@ -690,6 +693,7 @@
 				959894A87F301CC717772BD3 /* ChatLoadingSkeleton.swift in Sources */,
 				D776E336456236DC1493565F /* ChatModel.swift in Sources */,
 				E394FF8B718A3D7871EC749C /* ChatModelCatalog.swift in Sources */,
+				68E78394110C12145674525B /* ChatModelPrefs.swift in Sources */,
 				CC6A77686B936B4DB6026466 /* ChatModelStore.swift in Sources */,
 				6A720AF41BDA6F4FC40A5585 /* ChatModels.swift in Sources */,
 				9E9F0CED519AB1DF30516047 /* ChatOverflowCaptureScene.swift in Sources */,
