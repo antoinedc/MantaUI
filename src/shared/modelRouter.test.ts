@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { chooseModel, AGENT_TIER, PRESETS, type RoutingServices } from "./modelRouter.mjs";
+import { chooseModel, incumbentStillEligible, AGENT_TIER, PRESETS, type RoutingServices } from "./modelRouter.mjs";
 import { endpointKey } from "./endpointKey.mjs";
 import { tierRank } from "./modelGuide.mjs";
 import { AGENT_FLOOR_SCORE } from "./modelQuality.mjs";
@@ -766,5 +766,73 @@ describe("chooseModel — the cost stage (BET-1269): measured mix, catalogue ref
     });
     expect(res.model?.providerID).toBe("a");
     expect(res.trace.winner!.cost.basis).toBe("subscription-no-window");
+  });
+});
+
+describe("provider health in routing (BET-1270 6a)", () => {
+  // Two endpoints of the SAME model with IDENTICAL cost/quality — the only
+  // differing signal is provider health. Under economy the set is flattened and
+  // ordered by cmpWithinModel, so a soft `failing` health must sort the failing
+  // endpoint BEHIND the healthy one (placed after reliability, before cost).
+  it("softly deprioritises a failing provider behind a healthy one", () => {
+    const healthy = endpoint("claude-sonnet-4", { providerID: "healthy", tier: "deep", cost: { input: 3, output: 15, cacheRead: 0.5, cacheWrite: 0.5 } });
+    const failing = endpoint("claude-sonnet-4", { providerID: "failing", tier: "deep", cost: { input: 3, output: 15, cacheRead: 0.5, cacheWrite: 0.5 } });
+    const res = route({
+      catalog: [failing, healthy],
+      policy: { preset: "economy" },
+      services: { health: { failing: "failing", healthy: "ok" } },
+    });
+    expect(res.model?.providerID).toBe("healthy");
+    expect(res.alternatives.map((a: any) => a.providerID)).toContain("failing");
+    expect(res.trace.considered).toBe(2);
+  });
+
+  it("NEVER drops a failing provider — only failing candidates still route", () => {
+    const a = endpoint("claude-haiku", { providerID: "x", tier: "deep", cost: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 0.5 } });
+    const b = endpoint("claude-haiku", { providerID: "y", tier: "deep", cost: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 0.5 } });
+    const res = route({
+      catalog: [a, b],
+      policy: { preset: "economy" },
+      services: { health: { x: "failing", y: "failing" } },
+    });
+    expect(res.model).toBeTruthy();
+    expect(res.trace.dropped.length).toBe(0);
+  });
+
+  it("out-of-credit and rate-limited still EXCLUDE (hard), not deprioritise", () => {
+    for (const state of ["out-of-credit", "rate-limited"]) {
+      const res = route({
+        catalog: [endpoint("m", { providerID: "p" })],
+        policy: { preset: "balanced" },
+        services: { health: { p: state } },
+      });
+      expect(res.model).toBeNull();
+      expect(res.reason).toContain("no general model passes constraints");
+    }
+  });
+});
+
+describe("incumbentStillEligible (BET-1270 6e)", () => {
+  it("returns true for a describable incumbent (declared catalogue identity)", () => {
+    const incumbent = endpoint("claude-sonnet-4", { providerID: "anthropic", tier: "deep" });
+    const services = {
+      declared: { "anthropic/claude-sonnet-4": { catalogId: "claude-sonnet-4" } },
+    };
+    expect(incumbentStillEligible(incumbent, services)).toBe(true);
+  });
+
+  it("returns false for an incumbent Auto can no longer describe", () => {
+    const incumbent = endpoint("opaque", { providerID: "custom" });
+    expect(
+      incumbentStillEligible(incumbent, {
+        declared: {},
+        catalogMatcher: { lookupModel: () => null, matchModel: () => ({ kind: "none", candidates: [] }) },
+        catalogEntryFor: () => null,
+      }),
+    ).toBe(false);
+  });
+
+  it("returns true for a null / absent incumbent", () => {
+    expect(incumbentStillEligible(null, undefined)).toBe(true);
   });
 });

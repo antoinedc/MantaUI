@@ -1367,6 +1367,56 @@ test("routing:choose logs exactly one well-formed [router] line on a routed deci
   assert.equal(lines[0], "[router] main/build → anthropic/claude-sonnet-4 · unknown · considered=1 dropped=0 mix=default");
 });
 
+// BET-1270 6e: routing:choose reports the box's facts about the incumbent it
+// was handed — `incumbentHealthy` (its provider not excluded/failing) and
+// `incumbentStillEligible` (the same autoEligibility gate the router uses) — so
+// the renderer's shouldSwitch can force an ineligible/unhealthy incumbent out
+// on the SAME round trip, without holding health state of its own.
+test("routing:choose reports incumbentHealthy=false when the incumbent's provider is failing (6e)", async () => {
+  const { deps } = makeDeps([]);
+  deps.local.configGet = async () => ({ projects: [], modelRouting: { preset: "economy" } });
+  deps.routingListRoutableModels = async () => [
+    { providerID: "anthropic", id: "claude-opus-4", status: "active" },
+  ];
+  deps.routingProviderHealthState = (pid) => (pid === "anthropic" ? "failing" : null);
+  const handlers = buildHandlers(deps);
+  const out = await handlers["routing:choose"]({
+    sessionId: "ses_1",
+    directory: "/w",
+    agent: "build",
+    surface: "main",
+    contextTokens: 0,
+    needs: {},
+    incumbent: { providerID: "anthropic", modelID: "claude-opus-4" },
+  });
+  assert.equal(out.incumbentHealthy, false, "failing provider ⇒ incumbent unhealthy");
+  assert.equal(
+    typeof out.incumbentStillEligible,
+    "boolean",
+    "incumbentStillEligible is reported as a boolean",
+  );
+});
+
+test("routing:choose reports incumbentHealthy=true for a healthy incumbent (6e)", async () => {
+  const { deps } = makeDeps([]);
+  deps.local.configGet = async () => ({ projects: [], modelRouting: { preset: "economy" } });
+  deps.routingListRoutableModels = async () => [
+    { providerID: "anthropic", id: "claude-opus-4", status: "active" },
+  ];
+  deps.routingProviderHealthState = () => null; // provider healthy (absent state)
+  const handlers = buildHandlers(deps);
+  const out = await handlers["routing:choose"]({
+    sessionId: "ses_1",
+    directory: "/w",
+    agent: "build",
+    surface: "main",
+    contextTokens: 0,
+    needs: {},
+    incumbent: { providerID: "anthropic", modelID: "claude-opus-4" },
+  });
+  assert.equal(out.incumbentHealthy, true);
+});
+
 // accounts:retry always reports an outcome — a non-empty message in BOTH the
 // cleared and not-cleared cases (AGENTS.md: it does the thing and says so,
 // or fails and says why; a swallowed bare return is a dead button).

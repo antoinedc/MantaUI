@@ -248,6 +248,45 @@ test("unattributable failures (no session / unknown provider) are ignored", () =
   assert.equal(published.filter((e) => e.kind === "provider-health.needs-attention").length, 0);
 });
 
+test("a provider with NO usage adapter is attributed by its failing model (BET-1270 6b)", () => {
+  // A custom / pay-as-you-go provider has no usage adapter, so
+  // providerIDForAdapter returns null for exactly the case the module exists
+  // for. The failing MODEL's endpoint identity is the attribution — the adapter
+  // is an unrelated concern and must not gate it.
+  const clock = { t: 1000 };
+  const published = [];
+  const engine = createProviderHealth({
+    now: () => clock.t,
+    publish: (evt) => published.push(evt),
+    // The session's provider was never observed via a step event (adapterId null)
+    // — only the model id is known.
+    getSessionModel: (sid) => (sid === "s-payg" ? { adapterId: null, model: "deepseek-chat" } : null),
+    providerIDForAdapter: () => null, // no adapter anywhere
+    providerForModel: (model) => ({ "deepseek-chat": "deepseek" }[model] ?? null),
+    recheckAtLimit: async () => false,
+  });
+  engine.observeEvent({
+    type: "session.error",
+    properties: { sessionID: "s-payg", error: { httpStatus: 402 } },
+  });
+  assert.equal(engine.state("deepseek"), PROVIDER_HEALTH_STATE.OUT_OF_CREDIT);
+  const attention = published.filter((e) => e.kind === "provider-health.needs-attention");
+  assert.equal(attention.length, 1);
+  assert.equal(attention[0].payload.providerID, "deepseek");
+
+  // A provider NOT reachable via adapter OR model stays unattributable.
+  const engine2 = createProviderHealth({
+    now: () => clock.t,
+    publish: () => {},
+    getSessionModel: () => ({ adapterId: null, model: "mystery-model" }),
+    providerIDForAdapter: () => null,
+    providerForModel: () => null,
+    recheckAtLimit: async () => false,
+  });
+  engine2.observeEvent({ type: "session.error", properties: { sessionID: "s-x", error: { httpStatus: 402 } } });
+  assert.deepEqual(engine2.all(), {});
+});
+
 test("retryIn() reports the remaining rate-limit cooldown, then null once it expires (BET-1250)", () => {
   const { engine, error, clock, providerID } = make();
   assert.equal(engine.retryIn(providerID), null, "no cooldown before a 429");
