@@ -83,7 +83,7 @@ function capabilityDrop(m, { contextTokens, needs, health }) {
 
 // Assess one endpoint once — Hard Stage 1 (eligibility), marginal cost and
 // reliability — everything the hard and soft stages read.
-function assess(candidate, { nowMs }, services) {
+function assess(candidate, { nowMs, replacementCost }, services) {
   const key = endpointKey(candidate);
   const dec = services.declared?.[key] ?? null;
   const identity = resolveIdentity(candidate, dec, services.catalogMatcher);
@@ -96,6 +96,8 @@ function assess(candidate, { nowMs }, services) {
   const m = identity.effective ?? candidate;
   const catalogEntry = typeof services.catalogEntryFor === "function" ? services.catalogEntryFor(candidate) : null;
   const quality = qualityScore(m, catalogEntry, services.qualityField);
+  const perMix = mixFor(services, key);
+  const ref = referenceFor(dec, services, candidate);
   const elig = autoEligibility({
     model: m,
     identity: { known: identity.state === "resolved" },
@@ -103,11 +105,11 @@ function assess(candidate, { nowMs }, services) {
     declared: dec,
     providerClass: services.providerClass?.[candidate.providerID] ?? "supported",
   });
-  const mc = marginalCost({ model: m, account: services.accounts?.[candidate.providerID], nowMs, mix: services.mix, reference: services.referenceByModel?.[candidate.id] });
+  const mc = marginalCost({ model: m, account: services.accounts?.[candidate.providerID], nowMs, mix: perMix, reference: ref, replacementCost });
   // The raw mix/reference flags blendedPrice already computed with the SAME
   // inputs marginalCost handed it — reported verbatim, not recomputed. This is
   // what makes a silently-defaulted mix / absent catalogue visible (BET-1265).
-  const bp = blendedPrice(m, services.mix, services.referenceByModel?.[candidate.id]);
+  const bp = blendedPrice(m, perMix, ref);
   const penalise = shouldDerank(services.reliability?.samples?.[key], services.reliability?.baseline?.[candidate.id]).penalise === true;
   return {
     key,
@@ -147,6 +149,38 @@ function bindingReason(counts) {
     if (cv > bestCount) { bestCount = cv; best = label; }
   }
   return best;
+}
+
+// The reference price to judge implausible-zero against, or null when the user
+// has declared a price for this endpoint (a declaration — including "free" —
+// is authoritative; it must not be re-classified by the catalogue).
+function referenceFor(dec, services, endpoint) {
+  return dec?.price !== undefined ? null : services.referenceByModel?.[endpoint?.id];
+}
+
+// The mix for one endpoint: its own measured ledger mix, else the box's overall
+// measured mix, else absent (falls back to DEFAULT_MIX inside blendedPrice).
+function mixFor(services, key) {
+  return services.mix?.[key] ?? services.mixDefault;
+}
+
+// The subscription exchange rate needs "the cheapest acceptable alternative":
+// the minimum blended price across every non-subscription endpoint in the
+// candidate set. Computed once per decision, before the per-candidate loop.
+function computeReplacementCost(catalog, services) {
+  let best = null;
+  for (const c of Array.isArray(catalog) ? catalog : []) {
+    if (c === null || typeof c !== "object") continue;
+    const account = services.accounts?.[c?.providerID] ?? null;
+    if (account?.kind === "subscription") continue;
+    const key = endpointKey(c);
+    const dec = services.declared?.[key] ?? null;
+    const identity = resolveIdentity(c, dec, services.catalogMatcher);
+    const m = identity.effective ?? c;
+    const price = blendedPrice(m, mixFor(services, key), referenceFor(dec, services, c)).price;
+    if (best === null || price < best) best = price;
+  }
+  return best === null ? undefined : best;
 }
 
 const num0 = (v) => (isNum(v) ? v : 0);
@@ -323,6 +357,9 @@ export function chooseModel(input = {}) {
   const counts = {};
   const drops = [];
   let considered = 0;
+  // The subscription exchange rate anchors to the cheapest non-subscription
+  // endpoint's blended price — computed once, before the per-candidate loop.
+  const replacementCost = computeReplacementCost(catalog, services);
   const addDrop = (stage, reason) => {
     const existing = drops.find((d) => d.stage === stage && d.reason === reason);
     if (existing) existing.n += 1;
@@ -330,7 +367,7 @@ export function chooseModel(input = {}) {
   };
   for (const c of Array.isArray(catalog) ? catalog : []) {
     considered += 1;
-    const a = assess(c, { nowMs }, services);
+    const a = assess(c, { nowMs, replacementCost }, services);
     const cap = capabilityDrop(a.effective ?? a.candidate, hardCtx);
     if ((a.exhausted && !cap) || cap || !a.eligible) {
       const label = bindLabel(a, cap);

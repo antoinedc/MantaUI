@@ -104,6 +104,7 @@ export const claudeAdapter = {
 
     return {
       provider: "claude",
+      kind: "subscription",
       windows,
       ...(exhausted ? { exhausted: true } : {}),
       ...(extras.length > 0 ? { extras } : {}),

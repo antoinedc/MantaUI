@@ -1,9 +1,10 @@
 {
   "id": "openrouter",
   "providerIDs": ["openrouter"],
+  "kind": "credit",
   "url": "https://openrouter.ai/api/v1/credits",
   "auth": "bearer",
-  "balance": { "path": "data.total_credits", "units": "dollars", "sign": "positive-is-credit" },
+  "balance": { "path": "data.total_credits", "minusPath": "data.total_usage", "units": "dollars", "sign": "positive-is-credit" },
   "windows": [
     {
       "kind": "credit-limit",

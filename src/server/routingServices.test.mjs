@@ -12,6 +12,7 @@ import {
   ledgerToServices,
   buildRoutingServices,
 } from "./routingServices.mjs";
+import { mixFromCounts } from "../shared/blendedPrice.mjs";
 
 test("normalizeDeclared reads modelRouting.declaredModels and passes objects through", () => {
   const out = normalizeDeclared({
@@ -64,9 +65,24 @@ test("accountsFromSnapshots maps each snapshot to all the providerIDs it covers"
     { provider: "codex", providerIDs: ["openai"], windows: [{ pct: 10 }] },
   ]);
   assert.deepEqual(accounts, {
-    anthropic: { kind: "credit", windows: [{ pct: 90 }], balance: -2, overagePrice: 0.25, exhausted: true },
+    anthropic: { kind: "subscription", windows: [{ pct: 90 }], balance: -2, overagePrice: 0.25, exhausted: true },
     openai: { kind: "subscription", windows: [{ pct: 10 }] },
   });
+});
+
+test("accountsFromSnapshots reads the DECLARED account kind, never the balance inference (5e)", () => {
+  // A subscription that also reports a credit balance (codex) must stay a
+  // subscription — it must not be priced as prepaid credit.
+  const accounts = accountsFromSnapshots([
+    { provider: "codex", providerIDs: ["openai"], kind: "subscription", balance: 14.2, windows: [{ pct: 20 }] },
+    { provider: "openrouter", providerIDs: ["openrouter"], kind: "credit", balance: -0.07, windows: [] },
+    { provider: "legacy", providerIDs: ["legacy"], balance: 5, windows: [] },
+  ]);
+  assert.equal(accounts.openai.kind, "subscription");
+  assert.equal(accounts.openai.balance, 14.2);
+  assert.equal(accounts.openrouter.kind, "credit");
+  // No declared kind + balance-only → credit (the only safe inference).
+  assert.equal(accounts.legacy.kind, "credit");
 });
 
 test("accountsFromSnapshots skips snapshots with no providerIDs and malformed rows", () => {
@@ -88,7 +104,7 @@ test("healthFor is empty when no state reader is wired", () => {
   assert.deepEqual(healthFor(["anthropic"], null), {});
 });
 
-test("ledgerToServices folds reliability samples, per-model baselines and telemetry", () => {
+test("ledgerToServices folds reliability samples, per-model baselines, telemetry and a NORMALISED per-endpoint mix + overall mixDefault", () => {
   const stats = {
     "anthropic/claude-opus-4": {
       reliability: { requests: 30, errored: 3, rate: 0.1 },
@@ -103,7 +119,7 @@ test("ledgerToServices folds reliability samples, per-model baselines and teleme
       mix: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 },
     },
   };
-  const { reliability, telemetry, mix } = ledgerToServices(stats);
+  const { reliability, telemetry, mix, mixDefault } = ledgerToServices(stats);
   // samples keyed by endpoint
   assert.deepEqual(reliability.samples["anthropic/claude-opus-4"], { requests: 30, errored: 3, rate: 0.1 });
   // baseline keyed by MODEL id — aggregate across both endpoints of the model
@@ -115,14 +131,49 @@ test("ledgerToServices folds reliability samples, per-model baselines and teleme
     p90Ms: 900,
     latencyMs: 900,
   });
-  assert.deepEqual(mix["anthropic/claude-opus-4"], { input: 5, output: 10, cacheRead: 20, cacheWrite: 30 });
+  // Mixes are NORMALISED to fractions (mixFromCounts), not raw counts (5a) —
+  // an endpoint with no history is then priced on the box's overall mixDefault.
+  assert.deepEqual(mix["anthropic/claude-opus-4"], mixFromCounts({ input: 5, output: 10, cacheRead: 20, cacheWrite: 30 }));
+  assert.deepEqual(mix["openai/claude-opus-4"], mixFromCounts({ input: 1, output: 2, cacheRead: 3, cacheWrite: 4 }));
+  assert.deepEqual(mixDefault, mixFromCounts({ input: 6, output: 12, cacheRead: 23, cacheWrite: 34 }));
 });
 
-test("ledgerToServices is empty-safe and ignores degenerate rows", () => {
-  const { reliability, telemetry, mix } = ledgerToServices({});
+test("ledgerToServices is empty-safe and ignores degenerate rows; no mix => no mixDefault", () => {
+  const { reliability, telemetry, mix, mixDefault } = ledgerToServices({});
   assert.deepEqual(reliability, { samples: {}, baseline: {} });
   assert.deepEqual(telemetry, {});
   assert.deepEqual(mix, {});
+  assert.equal(mixDefault, undefined);
+});
+
+test("buildRoutingServices populates referenceByModel from the catalogue's typical input/output rates (5b)", async () => {
+  const services = await buildRoutingServices(
+    { modelRouting: { preset: "balanced", declaredModels: { "p/sonnet": { catalogId: "declared-sonnet" }, "p/haiku": { catalogId: "declared-haiku" } } } },
+    {
+      catalogIndex: {
+        lookupModel: (id) =>
+          id === "declared-sonnet"
+            ? { id: "declared-sonnet", cost: { input: 3, output: 15 } }
+            : id === "declared-haiku"
+              ? { id: "declared-haiku", cost: { input: 0, output: 0 } }
+              : null,
+        matchModel: () => ({ kind: "none", candidates: [] }),
+        allModels: () => [],
+      },
+      endpoints: [
+        { providerID: "p", id: "sonnet" },
+        { providerID: "p", id: "haiku" },
+        { providerID: "p", id: "no-entry" },
+      ],
+    },
+  );
+  // Keyed by model id; only endpoint ids that resolve in the catalogue carry a
+  // reference.
+  assert.deepEqual(services.referenceByModel.sonnet, { input: 3, output: 15 });
+  // A genuinely free catalogue model still carries a (zero) reference — the
+  // implausible-zero rule only fires against a reference that costs money.
+  assert.deepEqual(services.referenceByModel.haiku, { input: 0, output: 0 });
+  assert.equal(services.referenceByModel["no-entry"], undefined);
 });
 
 test("buildRoutingServices: catalogEntryFor honours a declared catalogId over a fuzzy match (BET-1268)", async () => {
@@ -192,9 +243,10 @@ test("buildRoutingServices assembles a full services object from live readers", 
   // reliability sample + baseline present
   assert.equal(services.reliability.samples["anthropic/claude-opus-4"].requests, 25);
   assert.ok(services.reliability.baseline["claude-opus-4"]);
-  // telemetry + mix present
+  // telemetry + mix present (mix normalised to fractions, mixDefault from the ledger)
   assert.equal(services.telemetry["anthropic/claude-opus-4"].tokensPerSec, 90);
-  assert.deepEqual(services.mix["anthropic/claude-opus-4"], { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 });
+  assert.deepEqual(services.mix["anthropic/claude-opus-4"], mixFromCounts({ input: 1, output: 2, cacheRead: 3, cacheWrite: 4 }));
+  assert.deepEqual(services.mixDefault, mixFromCounts({ input: 1, output: 2, cacheRead: 3, cacheWrite: 4 }));
 });
 
 test("buildRoutingServices safety contract: a throwing reader degrades, never throws", async () => {

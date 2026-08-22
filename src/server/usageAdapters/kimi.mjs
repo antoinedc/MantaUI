@@ -99,6 +99,6 @@ export const kimiAdapter = {
     // No planLabel on this endpoint — it needs a cookie-auth web API, out of
     // scope per the issue spec.
     const exhausted = isUsageAtLimit(windows);
-    return { provider: "kimi", windows, ...(exhausted ? { exhausted: true } : {}) };
+    return { provider: "kimi", kind: "subscription", windows, ...(exhausted ? { exhausted: true } : {}) };
   },
 };

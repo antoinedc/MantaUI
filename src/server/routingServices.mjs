@@ -26,6 +26,7 @@
 //     accounts, health, reliability, telemetry, mix, referenceByModel }
 
 import { endpointKey } from "../shared/endpointKey.mjs";
+import { mixFromCounts } from "../shared/blendedPrice.mjs";
 
 const isObj = (v) => v !== null && typeof v === "object";
 const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
@@ -93,9 +94,22 @@ export function accountsFromSnapshots(snapshots) {
     if (!isObj(s)) continue;
     const providerIDs = Array.isArray(s.providerIDs) ? s.providerIDs : [];
     if (providerIDs.length === 0) continue;
+    const windows = Array.isArray(s.windows) ? s.windows : [];
+    // The account kind is DECLARED by the adapter/descriptor, never inferred
+    // from `balance` (BET-1269 5e): a subscription that also reports a credit
+    // balance (codex) must not be priced as prepaid credit. A snapshot with no
+    // declared kind falls back to "credit" only when it is structurally a
+    // balance-only account; otherwise the adapter is incomplete and must be
+    // fixed, not guessed around.
+    let kind =
+      typeof s.kind === "string" && (s.kind === "subscription" || s.kind === "credit")
+        ? s.kind
+        : typeof s.balance === "number" && windows.length === 0
+          ? "credit"
+          : "subscription";
     const account = {
-      kind: typeof s.balance === "number" ? "credit" : "subscription",
-      windows: Array.isArray(s.windows) ? s.windows : [],
+      kind,
+      windows,
       ...(typeof s.balance === "number" ? { balance: s.balance } : {}),
       ...(typeof s.overagePrice === "number" ? { overagePrice: s.overagePrice } : {}),
       ...(s.exhausted === true ? { exhausted: true } : {}),
@@ -136,7 +150,10 @@ export function ledgerToServices(stats) {
   const samples = {};
   const perModel = new Map(); // modelID -> { requests, errored }
   const telemetry = {};
-  const mix = {};
+  const mix = {}; // per-endpoint normalised fractions
+  // Aggregate every endpoint's raw token counts so an endpoint with no history
+  // of its own is priced on the box's overall measured mix, not a constant.
+  let agg = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   for (const [key, s] of Object.entries(isObj(stats) ? stats : {})) {
     const rel = isObj(s?.reliability) ? s.reliability : null;
     if (rel && typeof rel.requests === "number") {
@@ -144,10 +161,10 @@ export function ledgerToServices(stats) {
       const errored = num(rel.errored);
       samples[key] = { requests, errored, rate: num(rel.rate) };
       const modelID = key.includes("/") ? key.slice(key.indexOf("/") + 1) : key;
-      const agg = perModel.get(modelID) ?? { requests: 0, errored: 0 };
-      agg.requests += requests;
-      agg.errored += errored;
-      perModel.set(modelID, agg);
+      const agg2 = perModel.get(modelID) ?? { requests: 0, errored: 0 };
+      agg2.requests += requests;
+      agg2.errored += errored;
+      perModel.set(modelID, agg2);
     }
     const speed = isObj(s?.speed) ? s.speed : {};
     const latency = isObj(s?.latency) ? s.latency : {};
@@ -157,16 +174,28 @@ export function ledgerToServices(stats) {
       ...(typeof latency.p90Ms === "number" ? { p90Ms: latency.p90Ms } : {}),
       ...(typeof latency.p90Ms === "number" ? { latencyMs: latency.p90Ms } : {}),
     };
-    if (isObj(s?.mix)) mix[key] = s.mix;
+    if (isObj(s?.mix)) {
+      // Convert raw token counts to fractions once, here, so services.mix[key]
+      // arrives at the router already normalised (BET-1269 5a).
+      mix[key] = mixFromCounts(s.mix);
+      agg.input += num(s.mix.input);
+      agg.output += num(s.mix.output);
+      agg.cacheRead += num(s.mix.cacheRead);
+      agg.cacheWrite += num(s.mix.cacheWrite);
+    }
   }
   const baseline = {};
-  for (const [modelID, agg] of perModel) {
-    baseline[modelID] = { rate: agg.requests ? agg.errored / agg.requests : 0, n: agg.requests };
+  for (const [modelID, ag] of perModel) {
+    baseline[modelID] = { rate: ag.requests ? ag.errored / ag.requests : 0, n: ag.requests };
   }
+  const hasAnyMix = agg.input + agg.output + agg.cacheRead + agg.cacheWrite > 0;
   return {
     reliability: { samples, baseline },
     telemetry,
     mix,
+    ...(hasAnyMix
+      ? { mixDefault: mixFromCounts({ input: agg.input, output: agg.output, cacheRead: agg.cacheRead, cacheWrite: agg.cacheWrite }) }
+      : {}),
   };
 }
 
@@ -234,6 +263,30 @@ export async function buildRoutingServices(cfg = {}, deps = {}) {
     services.declared = {};
   }
 
+  // The implausible-zero reference (BET-1269 5b): each candidate's model priced
+  // by the provider-agnostic catalogue's own typical input/output rates, keyed
+  // by model id. This is what lets a reseller quoting 0/0 for a priced model be
+  // judged against the real rate instead of winning on a made-up number. A
+  // catalogue lookup only — the catalogue is already loaded.
+  try {
+    const refs = {};
+    for (const ep of Array.isArray(deps.endpoints) ? deps.endpoints : []) {
+      if (!ep || typeof ep.id !== "string" || ep.id === "") continue;
+      const entry = typeof services.catalogEntryFor === "function" ? services.catalogEntryFor(ep) : null;
+      const cost = entry && isObj(entry.cost) ? entry.cost : null;
+      if (!cost) continue;
+      const { input, output } = cost;
+      if (typeof input !== "number" && typeof output !== "number") continue;
+      refs[ep.id] = {
+        ...(typeof input === "number" && Number.isFinite(input) ? { input } : {}),
+        ...(typeof output === "number" && Number.isFinite(output) ? { output } : {}),
+      };
+    }
+    if (Object.keys(refs).length > 0) services.referenceByModel = refs;
+  } catch {
+    /* no catalogue → no reference (the implausible-zero rule cannot fire) */
+  }
+
   // Accounts per providerID from the usage snapshots.
   try {
     const accounts = accountsFromSnapshots(deps.snapshots);
@@ -263,10 +316,11 @@ export async function buildRoutingServices(cfg = {}, deps = {}) {
       if (!isObj(stats)) stats = null;
     }
     if (stats) {
-      const { reliability, telemetry, mix } = fold(stats);
+      const { reliability, telemetry, mix, mixDefault } = fold(stats);
       services.reliability = reliability;
       services.telemetry = telemetry;
       if (mix && Object.keys(mix).length > 0) services.mix = mix;
+      if (mixDefault) services.mixDefault = mixDefault;
     }
   } catch {
     /* no ledger → reliability/telemetry absent (never derank, measured speed) */

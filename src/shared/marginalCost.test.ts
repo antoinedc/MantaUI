@@ -38,7 +38,7 @@ const EXCHANGE = 15;
 describe("marginalCost — subscription pacing", () => {
   it("under pace ≈ free: 20% consumed / 60% elapsed → far below the exchange rate", () => {
     // elapsed 0.6, resetsAt = R (damp 1). pace = 0.2/0.6 = 0.333 → cost = 15 * 0.111.
-    const res = marginalCost({ model: MODEL, nowMs: 0, account: sub(w(20, -1.5 * R, R)) });
+    const res = marginalCost({ model: MODEL, nowMs: 0, replacementCost: EXCHANGE, account: sub(w(20, -1.5 * R, R)) });
     expect(res.exhausted).toBe(false);
     expect(res.cost).toBeGreaterThan(0);
     expect(res.cost).toBeLessThan(EXCHANGE * 0.15); // ~1.67, vs exchange 15
@@ -47,8 +47,8 @@ describe("marginalCost — subscription pacing", () => {
 
   it("pace, not fill: same pct at two different elapsed values → materially different costs", () => {
     // pct 60 fixed. elapsed 0.2 → pace 3 (over); elapsed 0.6 → pace 1 (on pace).
-    const fast = marginalCost({ model: MODEL, nowMs: 0, account: sub(w(60, -0.25 * R, R)) });
-    const slow = marginalCost({ model: MODEL, nowMs: 0, account: sub(w(60, -1.5 * R, R)) });
+    const fast = marginalCost({ model: MODEL, nowMs: 0, replacementCost: EXCHANGE, account: sub(w(60, -0.25 * R, R)) });
+    const slow = marginalCost({ model: MODEL, nowMs: 0, replacementCost: EXCHANGE, account: sub(w(60, -1.5 * R, R)) });
     // 15*9 = 135 vs 15*1 = 15 — a gauge reading pct alone would say they're equal.
     expect(fast.cost).toBeGreaterThan(slow.cost * 5);
     expect(slow.cost).toBeCloseTo(EXCHANGE, 3);
@@ -56,14 +56,14 @@ describe("marginalCost — subscription pacing", () => {
 
   it("over pace rises: 80% consumed / 30% elapsed → above the exchange rate", () => {
     // pace = 0.8/0.3 = 2.667 → cost = 15 * 7.11 ≈ 106.7.
-    const res = marginalCost({ model: MODEL, nowMs: 0, account: sub(w(80, -0.4286 * R, R)) });
+    const res = marginalCost({ model: MODEL, nowMs: 0, replacementCost: EXCHANGE, account: sub(w(80, -0.4286 * R, R)) });
     expect(res.cost).toBeGreaterThan(EXCHANGE);
     expect(res.cost).toBeCloseTo(106.7, 1);
   });
 
   it("on pace = exchange rate, within tolerance", () => {
     // pace = 0.6/0.6 = 1 → cost is exactly the exchange rate (15).
-    const res = marginalCost({ model: MODEL, nowMs: 0, account: sub(w(60, -1.5 * R, R)) });
+    const res = marginalCost({ model: MODEL, nowMs: 0, replacementCost: EXCHANGE, account: sub(w(60, -1.5 * R, R)) });
     expect(res.cost).toBeCloseTo(EXCHANGE, 5);
   });
 
@@ -72,6 +72,7 @@ describe("marginalCost — subscription pacing", () => {
     const res = marginalCost({
       model: MODEL,
       nowMs: 0,
+      replacementCost: EXCHANGE,
       account: sub([w(30, -1.5 * R, R), w(80, -0.4286 * R, R)]),
     });
     expect(res.exhausted).toBe(false);
@@ -81,8 +82,8 @@ describe("marginalCost — subscription pacing", () => {
   it("near reset is cheap: same pace, resetsAt imminent → cheaper", () => {
     // Both pace 1 (consumed 0.5 / elapsed 0.5). Far window: damp 1 → 15.
     // Near window: resetsAt = 0.1R → damp 0.1 → 1.5. Same pace, same fill.
-    const far = marginalCost({ model: MODEL, nowMs: 0, account: sub(w(50, -1 * R, R)) });
-    const near = marginalCost({ model: MODEL, nowMs: 0, account: sub(w(50, -0.1 * R, 0.1 * R)) });
+    const far = marginalCost({ model: MODEL, nowMs: 0, replacementCost: EXCHANGE, account: sub(w(50, -1 * R, R)) });
+    const near = marginalCost({ model: MODEL, nowMs: 0, replacementCost: EXCHANGE, account: sub(w(50, -0.1 * R, 0.1 * R)) });
     expect(near.cost).toBeLessThan(far.cost);
     expect(far.cost).toBeCloseTo(EXCHANGE, 3);
     expect(near.cost).toBeCloseTo(EXCHANGE * 0.1, 3);
@@ -92,6 +93,7 @@ describe("marginalCost — subscription pacing", () => {
     const res = marginalCost({
       model: MODEL,
       nowMs: 0,
+      replacementCost: EXCHANGE,
       account: {
         kind: "subscription",
         windows: [{ pct: 50, resetsAt: R }], // no startedAt
@@ -136,7 +138,7 @@ describe("marginalCost — credit", () => {
 describe("marginalCost — the asymmetry (subscription < credit at equal scarcity)", () => {
   it("at equal scarcity a subscription costs less than a credit balance, every time", () => {
     // Subscription on-pace (pace 1) = exchange rate 15.
-    const subRes = marginalCost({ model: MODEL, nowMs: 0, account: sub(w(60, -1.5 * R, R)) });
+    const subRes = marginalCost({ model: MODEL, nowMs: 0, replacementCost: EXCHANGE, account: sub(w(60, -1.5 * R, R)) });
     expect(subRes.cost).toBeCloseTo(EXCHANGE, 5);
 
     // A credit balance, even one at unit depletion (huge balance), must cost more.
@@ -156,7 +158,7 @@ describe("marginalCost — the asymmetry (subscription < credit at equal scarcit
 describe("marginalCost — exhausted first", () => {
   it("each exhausted signal returns exhausted:true and cost Infinity", () => {
     const byFlag = marginalCost({ model: MODEL, nowMs: 0, account: { kind: "credit", balance: 50, exhausted: true } });
-    const byPct = marginalCost({ model: MODEL, nowMs: 0, account: sub(w(100, -1.5 * R, R)) });
+    const byPct = marginalCost({ model: MODEL, nowMs: 0, replacementCost: EXCHANGE, account: sub(w(100, -1.5 * R, R)) });
     const byZero = marginalCost({ model: MODEL, nowMs: 0, account: credit(0) });
     const byNegative = marginalCost({ model: MODEL, nowMs: 0, account: credit(-0.57) });
 
@@ -169,9 +171,9 @@ describe("marginalCost — exhausted first", () => {
 
   it("every non-exhausted return is finite and ≥ 0; Infinity appears only on exhaustion", () => {
     const cases = [
-      marginalCost({ model: MODEL, nowMs: 0, account: sub(w(20, -1.5 * R, R)) }),
-      marginalCost({ model: MODEL, nowMs: 0, account: sub(w(60, -1.5 * R, R)) }),
-      marginalCost({ model: MODEL, nowMs: 0, account: sub(w(80, -0.4286 * R, R)) }),
+      marginalCost({ model: MODEL, nowMs: 0, replacementCost: EXCHANGE, account: sub(w(20, -1.5 * R, R)) }),
+      marginalCost({ model: MODEL, nowMs: 0, replacementCost: EXCHANGE, account: sub(w(60, -1.5 * R, R)) }),
+      marginalCost({ model: MODEL, nowMs: 0, replacementCost: EXCHANGE, account: sub(w(80, -0.4286 * R, R)) }),
       marginalCost({ model: MODEL, nowMs: 0, account: credit(10) }),
       marginalCost({ model: MODEL, nowMs: 0, account: credit() }),
       marginalCost({ model: MODEL, nowMs: 0, account: { kind: "none" } }),

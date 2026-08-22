@@ -64,6 +64,23 @@ describe("validateDescriptor", () => {
     if (r.valid) return;
     expect(r.errors.join("; ")).toContain("positive-is-credit");
   });
+
+  it("accepts kind subscription/credit and rejects other values", () => {
+    const credit = validateDescriptor({ ...base, kind: "credit" });
+    expect(credit.valid).toBe(true);
+    const sub = validateDescriptor({ ...base, kind: "subscription" });
+    expect(sub.valid).toBe(true);
+    const bad = validateDescriptor({ ...base, kind: "prepaid" });
+    expect(bad.valid).toBe(false);
+    if (!bad.valid) expect(bad.errors.join("; ")).toContain('"kind"');
+  });
+
+  it("accepts a balance.minusPath and rejects a non-string one", () => {
+    const ok = validateDescriptor({ ...base, balance: { ...base.balance, minusPath: "data.total_usage" } });
+    expect(ok.valid).toBe(true);
+    const bad = validateDescriptor({ ...base, balance: { ...base.balance, minusPath: 3 } });
+    expect(bad.valid).toBe(false);
+  });
 });
 
 describe("readDescriptor", () => {
@@ -138,5 +155,19 @@ describe("readDescriptor", () => {
     });
     const snap = readDescriptor(d, { w: { pct: 100 } }, 0);
     expect(snap.exhausted).toBe(true);
+  });
+
+  it("balance.minusPath subtracts: balance = value(path) − value(minusPath)", () => {
+    const d = ok({ ...base, balance: { ...base.balance, minusPath: "data.total_usage" } });
+    const snap = readDescriptor(d, { account: { balance: 20 }, data: { total_usage: 20.07 } }, 0);
+    // 20 − 20.07 = −0.07 → overdrawn (negative under positive-is-credit).
+    expect(snap.balance).toBeCloseTo(-0.07, 9);
+    expect(snap.exhausted).toBe(true);
+  });
+
+  it("a declared kind is carried onto the snapshot for accountsFromSnapshots", () => {
+    const d = ok({ ...base, kind: "credit" });
+    const snap = readDescriptor(d, { account: { balance: 5 } }, 0);
+    expect(snap.kind).toBe("credit");
   });
 });

@@ -60,6 +60,10 @@
  *                                  opencode's), so a name-equality match would
  *                                  silently fail for every adapter.
  * @property {string} [planLabel]   "Max 20x", "Pro", "Allegretto".
+ * @property {string} [kind]        "subscription" | "credit" — DECLARED by the
+ *                                  adapter/descriptor, never inferred. A
+ *                                  subscription that also reports a credit
+ *                                  balance (codex) must not be priced as credit.
  * @property {UsageWindow[]} windows
  * @property {{label:string,value:string}[]} [extras]  Credits balance, model pools.
  * @property {number} [balance]    Account credit in dollars. May be NEGATIVE
@@ -287,12 +291,19 @@ export function createUsagePoller({
         try {
           const raw = await adapter.fetch({ fetchImpl, now });
           const windows = Array.isArray(raw?.windows) ? raw.windows.filter(Boolean) : [];
-          if (windows.length === 0) {
+          const hasBalance = typeof raw?.balance === "number";
+          // A snapshot carrying a balance and no windows is VALID — an unfunded
+          // credit account (e.g. OpenRouter with total_credits: 0) must be
+          // distinguishable from "not connected", and a balance-only snapshot is
+          // exactly the shape `accountDescriptor` was written to support
+          // (BET-1269 5g). The throw applies only to a snapshot with neither.
+          if (windows.length === 0 && !hasBalance) {
             throw new Error("adapter returned zero usable windows");
           }
           results.push({
             provider: adapter.id,
             providerIDs: adapter.providerIDs,
+            ...(typeof raw.kind === "string" ? { kind: raw.kind } : {}),
             ...(raw.planLabel ? { planLabel: raw.planLabel } : {}),
             windows,
             ...(Array.isArray(raw.extras) && raw.extras.length > 0 ? { extras: raw.extras } : {}),
