@@ -317,9 +317,9 @@ describe("BET-1307 over-collapse guards — distinct products sharing a handle n
   });
 });
 
-// Extract a model id, or the ids of an entry list, as stable sorted ids.
+// Extract the ids of an entry list as stable sorted ids.
 function toSortedIds(entries: ModelCatalogEntry[]): string[] {
-  return entries.map((e) => e.id).sort();
+  return entries.map((e) => e.id).filter((id): id is string => typeof id === "string").sort();
 }
 
 describe("BET-1303 matcher — source gate (6.4)", () => {
