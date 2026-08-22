@@ -194,7 +194,8 @@ function byCostDesc(a, b) {
  */
 async function assistantRows(db, since) {
   const sql = `
-    SELECT m.data AS msg_data,
+    SELECT m.id AS msg_id,
+           m.data AS msg_data,
            s.parent_id AS parent_id,
            s.agent AS agent,
            s.directory AS directory
@@ -212,6 +213,9 @@ async function assistantRows(db, since) {
     }
     if (!data || typeof data !== "object" || data.role !== "assistant") continue;
     out.push({
+      // The message id is what joins a message to its parts in the `part`
+      // table (opencode stores parts separately — see collectToolParts).
+      id: row.msg_id != null ? String(row.msg_id) : null,
       data,
       parentId: row.parent_id != null ? String(row.parent_id) : null,
       agent: row.agent ?? null,
@@ -219,6 +223,45 @@ async function assistantRows(db, since) {
     });
   }
   return out;
+}
+
+// Collect the parsed `tool`-type parts for a set of message ids from the
+// `part` table. opencode stores a message's parts — including its tool calls —
+// in the separate `part` table, NOT in `message.data` (that row only carries
+// the `finish` summary, e.g. "tool-calls"); `message.data.parts` does not
+// exist, so reading it measured zero tool-call requests on every endpoint and
+// made reliability uniformly 0. Returns a Map<message_id, object[]> of the raw
+// parsed part.data rows. A missing/unqueryable `part` table degrades to "no
+// tool parts" so latency/telemetry below still work — never the whole summary.
+function collectToolParts(db, ids) {
+  const map = new Map();
+  const list = Array.isArray(ids) ? ids : [];
+  if (list.length === 0) return map;
+  const BATCH = 500;
+  for (let i = 0; i < list.length; i += BATCH) {
+    const chunk = list.slice(i, i + BATCH);
+    let rows;
+    try {
+      const ph = chunk.map(() => "?").join(",");
+      rows = db.prepare(`SELECT message_id, data FROM part WHERE message_id IN (${ph})`).all(...chunk);
+    } catch {
+      // No `part` table (older opencode schema) — degrades to "no tool parts",
+      // matching the pre-existing behaviour, never a collapsed summary.
+      return map;
+    }
+    for (const r of rows) {
+      let d;
+      try {
+        d = JSON.parse(r.data);
+      } catch {
+        continue;
+      }
+      if (!d || typeof d !== "object" || d.type !== "tool") continue;
+      if (!map.has(r.message_id)) map.set(r.message_id, []);
+      map.get(r.message_id).push(d);
+    }
+  }
+  return map;
 }
 
 /**
@@ -331,10 +374,16 @@ export async function endpointSummary({ sinceMs = 0 } = {}) {
 
   try {
     const since = num(sinceMs);
+    const assistant = await assistantRows(db, since);
+    // Tool calls come from the `part` table (message.data has no parts array);
+    // fall back to a data-embedded `parts` only where one exists so a message
+    // format that carries them inline still works.
+    const toolParts = collectToolParts(db, assistant.map((r) => r.id));
     const rows = [];
-    for (const { data } of await assistantRows(db, since)) {
+    for (const { id, data } of assistant) {
       const tokens = data.tokens ?? {};
       const cache = tokens.cache ?? {};
+      const parts = toolParts.get(id) ?? [];
       rows.push({
         providerID: data.providerID ?? null,
         modelID: data.modelID ?? null,
@@ -344,7 +393,7 @@ export async function endpointSummary({ sinceMs = 0 } = {}) {
         cacheWrite: cache.write,
         startedMs: data.time?.created,
         completedMs: data.time?.completed,
-        toolCalls: extractToolCalls(data),
+        toolCalls: Array.isArray(data?.parts) && data.parts.length > 0 ? extractToolCalls(data) : extractToolCalls({ parts }),
         tools: extractTools(data),
       });
     }
