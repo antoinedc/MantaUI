@@ -273,6 +273,44 @@ describe("subscriptionStatuses", () => {
     assert.equal(kimi.plan, "Kimi For Coding");
     assert.equal(kimi.console, "https://www.kimi.com/code/console");
   });
+
+  it("omitting the second argument leaves every row managedExternally false", () => {
+    const rows = subscriptionStatuses(["anthropic", "openai", "kimi-for-coding"]);
+    // Not externally managed → the renderer must not treat the row specially,
+    // even though the anthropic entry still carries its registry managedBy.
+    assert.equal(rows.every((r) => r.managedExternally === false), true);
+  });
+
+  it("a non-flagged row still reports its registry managedBy value", () => {
+    const [anthropic, openai] = subscriptionStatuses([]);
+    assert.equal(anthropic.managedExternally, false);
+    assert.equal(anthropic.managedBy, "the Claude CLI on this box");
+    // Providers with no registry managedBy → null.
+    assert.equal(openai.managedBy, null);
+  });
+
+  it("flags a row from the externallyManaged set and names its owner from the registry", () => {
+    const rows = subscriptionStatuses(["anthropic"], new Set(["anthropic"]));
+    const anthropic = rows.find((r) => r.id === "anthropic");
+    assert.equal(anthropic.managedExternally, true);
+    assert.equal(anthropic.managedBy, "the Claude CLI on this box");
+
+    // Openai/Kimi carry no registry managedBy → null, and are NOT flagged.
+    const openai = rows.find((r) => r.id === "openai");
+    assert.equal(openai.managedExternally, false);
+    assert.equal(openai.managedBy, null);
+  });
+
+  it("a connected-but-externally-managed row is both connected and flagged", () => {
+    const [anthropic] = subscriptionStatuses(["anthropic"], new Set(["anthropic"]));
+    assert.equal(anthropic.connected, true);
+    assert.equal(anthropic.managedExternally, true);
+  });
+
+  it("tolerates a non-Set second argument (defensive)", () => {
+    const rows = subscriptionStatuses(["anthropic"], []);
+    assert.equal(rows.every((r) => r.managedExternally === false), true);
+  });
 });
 
 // ---------------------------------------------------------------------------

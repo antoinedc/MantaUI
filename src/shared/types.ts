@@ -2625,6 +2625,10 @@ export type SubscriptionStatus = {
   console: string | null;  // where to mint a key (Kimi), or null
   docs: string;           // canonical setup doc URL
   connected: boolean;     // true iff opencode reports this provider connected
+  // BET-1320: the credential is owned outside Manta (e.g. the Claude CLI), so
+  // a Disconnect cannot be delivered — the UI shows `managedBy` instead.
+  managedExternally: boolean;
+  managedBy: string | null;
 };
 
 export type SubscriptionConnectShape =

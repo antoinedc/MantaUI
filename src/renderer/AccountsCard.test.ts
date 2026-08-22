@@ -88,6 +88,23 @@ describe("describeAccountState", () => {
     expect(st.tone).toBe("quiet");
   });
 
+  it("externally-managed connected row names the owner instead of usage (9g BET-1320)", () => {
+    const st = describeAccountState(
+      subscription({
+        managedExternally: true,
+        managedBy: "the Claude CLI on this box",
+        reading: { label: "5h window", pct: 41, pace: "under pace" },
+      }),
+    );
+    expect(st.text).toBe("connected · signed in with the Claude CLI on this box");
+    expect(st.tone).toBe("ok");
+  });
+
+  it("an externally-managed row without a managedBy owner falls back to today's text", () => {
+    const st = describeAccountState(subscription({ managedExternally: true }));
+    expect(st.text).toBe("No usage data");
+  });
+
   it("out-of-credit shows 'Out of credit' (danger)", () => {
     const st = describeAccountState(subscription({ health: "out-of-credit", balance: 0 }));
     expect(st.text).toBe("Out of credit");
