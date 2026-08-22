@@ -4,8 +4,16 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Manta is open source and self-hosted</title>
-<meta name="description" content="Manta is MIT licensed, self-hosted, and has no account, no telemetry and no seat count.">
-<meta name="theme-color" content="#0B1020">
+<meta name="description" content="Manta is MIT licensed, self-hosted, and has no account and no seat count.">
+<meta name="theme-color" content="#0B0C0E">
+<script>
+/* Stamp the theme before first paint so a light-mode visitor never sees a dark
+   flash (and vice versa). Explicit choice wins; otherwise follow the OS. */
+(function(){try{var t=localStorage.getItem("manta-theme");
+if(t!=="light"&&t!=="dark"){t=window.matchMedia("(prefers-color-scheme: light)").matches?"light":"dark"}
+document.documentElement.setAttribute("data-theme",t)}catch(e){
+document.documentElement.setAttribute("data-theme","dark")}})();
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -26,7 +34,7 @@
 <!-- BEGIN:head-meta -->
 <link rel="canonical" href="https://mantaui.com/open-source">
 <meta property="og:title" content="Manta is open source and self-hosted">
-<meta property="og:description" content="Manta is MIT licensed, self-hosted, and has no account, no telemetry and no seat count.">
+<meta property="og:description" content="Manta is MIT licensed, self-hosted, and has no account and no seat count.">
 <meta property="og:url" content="https://mantaui.com/open-source">
 <meta property="og:type" content="website">
 <meta property="og:image" content="https://mantaui.com/og.png">
@@ -35,7 +43,7 @@
 <meta property="og:site_name" content="Manta UI">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Manta is open source and self-hosted">
-<meta name="twitter:description" content="Manta is MIT licensed, self-hosted, and has no account, no telemetry and no seat count.">
+<meta name="twitter:description" content="Manta is MIT licensed, self-hosted, and has no account and no seat count.">
 <meta name="twitter:image" content="https://mantaui.com/og.png">
 <meta name="twitter:site" content="@mantaui">
 <!-- END:head-meta -->
@@ -103,7 +111,7 @@
       "name": "Does the box phone home?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "Only to your model provider and to APNs, when you have phone notifications turned on. There is no analytics SDK, no telemetry beacon, no usage ping. The pricing page covers what you actually pay for."
+        "text": "Only to your model provider and to APNs, when you have phone notifications turned on. Telemetry is an optional, token-gated log-shipper — nothing leaves the box unless you set a token. The pricing page covers what you actually pay for."
       }
     }
   ]
@@ -118,23 +126,29 @@
     <nav>
       <div class="brand"><img src="manta-logo.png" alt="Manta"><span>Manta<b>UI</b></span></div>
       <div class="navlinks">
-        <a href="/" class="hide-sm">Home</a>
+        <a href="/">Home</a>
+        <a href="/#features" class="hide-sm">Features</a>
         <a href="/vs-orca" class="hide-sm">Compare</a>
         <a href="/claude-code-remote" class="hide-sm">How it works</a>
+        <button class="theme-toggle" type="button" id="themeToggle" aria-label="Switch between light and dark theme">
+          <svg class="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+            stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/></svg>
+          <svg class="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+            stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M4.2 4.2l1.6 1.6M18.2 18.2l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.2 19.8l1.6-1.6M18.2 5.8l1.6-1.6"/></svg>
+        </button>
         <a href="https://github.com/antoinedc/MantaUI" class="btn btn-ghost">GitHub</a>
       </div>
     </nav>
   </div>
 </header>
-
 <div class="hero-comp">
   <div class="wrap">
     <h1>Open source and self-hosted</h1>
-    <p class="lede">Manta is MIT licensed and self-hosted. No account, no telemetry, no vendor, no hosted control plane. You can read every line of the server, the desktop client and the install script before you pipe it into bash. We would rather you did.</p>
+    <p class="lede">Manta is MIT licensed and self-hosted. No account, no vendor, no hosted control plane. Telemetry is optional and off by default. You can read every line of the server, the desktop client and the install script before you pipe it into bash. We would rather you did.</p>
 
     <div class="repoc">
       <div class="rh"><svg viewBox="0 0 24 24"><path d="M21 16V8l-9-5-9 5v8l9 5 9-5z"/><path d="M3.3 7.3L12 12l8.7-4.7M12 12v9.5"/></svg>antoinedc / MantaUI</div>
-      <div class="rd">Open-source, self-hosted Claude Code and opencode client. Agents run in real tmux on your own Linux box or Mac, and you drive them from desktop, phone or browser over HTTPS.</div>
+      <div class="rd">Open-source, self-hosted Claude Code and opencode client. Agents run in real tmux on your own Linux box or Mac, and you drive them from the desktop app or the native iPhone app over HTTPS.</div>
       <div class="rmeta">
         <span><b>MIT</b> licence</span><span><b>TypeScript</b></span><span><b>Node</b> on the box</span><span><b>Electron</b> desktop</span><span><b>React</b> renderer</span>
       </div>
@@ -152,10 +166,10 @@
     </div>
     <ul class="checks">
       <li><span class="ck">✓</span><span><b>MIT licensed.</b> Permissive, friction-free, matches Orca. Fork it, run your own gateway, write your own client, ship a derivative.</span></li>
-      <li><span class="ck">✓</span><span><b>The install script is in the repo.</b> Read <a href="https://github.com/antoinedc/MantaUI/blob/main/install.sh">install.sh</a> before you pipe it into bash. It is roughly two hundred lines of plain bash, with a checksum-verified download.</span></li>
-      <li><span class="ck">✓</span><span><b>The server is open source.</b> Express, the tmux and opencode proxies, push, schedules, webhooks, secrets, peer sessions. Every line.</span></li>
+      <li><span class="ck">✓</span><span><b>The install script is in the repo.</b> Read <a href="https://github.com/antoinedc/MantaUI/blob/main/install.sh">install.sh</a> before you pipe it into bash. It is plain bash with a checksum-verified download.</span></li>
+      <li><span class="ck">✓</span><span><b>The server is open source.</b> A plain Node HTTP server: the tmux and opencode proxies, push, schedules, webhooks, secrets, peer sessions. Every line.</span></li>
       <li><span class="ck">✓</span><span><b>The desktop app is open source.</b> Electron, xterm.js, React. The renderer is a normal npm package. Build it from source if you prefer.</span></li>
-      <li><span class="ck">✓</span><span><b>The phone app is open source.</b> Capacitor shell around the same React client. The native bits are minimal glue.</span></li>
+      <li><span class="ck">✓</span><span><b>The phone app is open source.</b> A native Swift (SwiftUI) iPhone client, source in the repo.</span></li>
     </ul>
   </div>
 </section>
@@ -165,12 +179,12 @@
   <div class="wrap">
     <div class="sec-head">
       <div class="eyebrow">Self-hosted</div>
-      <h2>No account, no telemetry, no seat count</h2>
-      <p>The product runs on hardware you own. There is no hosted control plane to sign up for, no usage telemetry leaving the box, and no seat count to grow into a bill.</p>
+      <h2>No account, no seat count, telemetry optional</h2>
+      <p>The product runs on hardware you own. There is no hosted control plane to sign up for, no seat count to grow into a bill. Telemetry is an optional log-shipper that sends nothing unless you set a token.</p>
     </div>
     <ul class="checks">
       <li><span class="ck">✓</span><span><b>Nothing to sign up for.</b> Pairing is a six-digit code your box generates. Devices exchange tokens, and that is the only credential in the loop.</span></li>
-      <li><span class="ck">✓</span><span><b>No telemetry.</b> The box talks to your model provider and to APNs for push fanout. Nothing else. The repo carries no analytics SDK.</span></li>
+      <li><span class="ck">✓</span><span><b>Telemetry optional.</b> The repo ships a log-shipper that sends nothing unless you set a token. The box talks to your model provider and to APNs for push fanout. Nothing else.</span></li>
       <li><span class="ck">✓</span><span><b>Your code stays on your box.</b> Transcripts, uploads, secrets and configuration live on your machine. The only outbound traffic is your agent talking to its model provider.</span></li>
       <li><span class="ck">✓</span><span><b>No hosted control plane.</b> There is no workspace limit, no seat count, no Pro tier. The product is one binary plus a directory of state.</span></li>
       <li><span class="ck">✓</span><span><b>You can fork the box.</b> Want a different default model, a different push provider, a different default port. Fork the repo, edit the manifest, run the install.</span></li>
@@ -208,7 +222,7 @@
       <div class="q"><h3>What is the licence?</h3><p>MIT. The full text is in the <a href="https://github.com/antoinedc/MantaUI/blob/main/LICENSE">LICENSE</a> file at the root of the repository. It is permissive: fork it, modify it, ship a derivative, keep the copyright notice.</p></div>
       <div class="q"><h3>What stays on my box?</h3><p>Everything. Transcripts, uploads, secrets, configuration, schedules, peer metadata, ingress choice. The only outbound traffic is your agent talking to its model provider, and a small push payload carrying the session name when you turn on phone notifications.</p></div>
       <div class="q"><h3>Can I run my own gateway or push provider?</h3><p>Yes. Fork the repo, point the push routing at your own gateway, edit the manifest. The push and webhook modules are designed to be replaced. The same goes for the install script, the installer, and the desktop app.</p></div>
-      <div class="q"><h3>Does the box phone home?</h3><p>Only to your model provider and to APNs, when you have phone notifications turned on. There is no analytics SDK, no telemetry beacon, no usage ping. <a href="/pricing">The pricing page</a> covers what you actually pay for.</p></div>
+      <div class="q"><h3>Does the box phone home?</h3><p>Only to your model provider and to APNs, when you have phone notifications turned on. Telemetry is an optional, token-gated log-shipper — nothing leaves the box unless you set a token. <a href="/pricing">The pricing page</a> covers what you actually pay for.</p></div>
     </div>
   </div>
 </section>
@@ -240,20 +254,20 @@
         <p style="margin-top:11px;font-size:13px;color:var(--slate-500);max-width:250px">Self-hosted coding agents you can reach from anywhere.</p>
       </div>
       <div><h4>Product</h4><ul>
-        <li><a href="/">Features</a></li><li><a href="/claude-code-mobile">Mobile</a></li>
+        <li><a href="/#features">Features</a></li><li><a href="/claude-code-mobile">Mobile</a></li>
         <li><a href="/open-source">Open source</a></li>
         <li><a href="/claude-code-remote">How it works</a></li></ul></div>
       <div><h4>Compare</h4><ul>
         <li><a href="/vs-orca">vs Orca</a></li>
         <li><a href="/vs-conductor">vs Conductor</a></li>
         <li><a href="/vs-ssh-tmux">vs SSH and tmux</a></li></ul></div>
-      <div><h4>Use cases</h4><ul>
-        <li><a href="/claude-code-web-ui">Claude Code web UI</a></li>
-        <li><a href="/claude-code-mobile">Claude Code on mobile</a></li>
-        <li><a href="/claude-code-remote">Claude Code remote</a></li>
-        <li><a href="/open-source">Open source</a></li></ul></div>
+      <div><h4>Download</h4><ul>
+        <li><a href="/#download">macOS</a></li>
+        <li><a href="/#download">Windows</a></li>
+        <li><a href="/claude-code-mobile">iPhone</a></li></ul></div>
       <div><h4>Resources</h4><ul>
         <li><a href="https://github.com/antoinedc/MantaUI">GitHub</a></li>
+        <li><a href="/pricing">Pricing</a></li>
         <li><a href="/privacy">Privacy</a></li>
         <li><a href="/terms">Terms</a></li></ul></div>
     </div>
@@ -263,6 +277,28 @@
     </div>
   </div>
 </footer>
+
+<script>
+/* Theme toggle. Persists the explicit choice; until the visitor makes one the
+   page keeps following the OS (including a live change while it is open). */
+(function(){
+  var root=document.documentElement, btn=document.getElementById("themeToggle");
+  if(!btn)return;
+  btn.addEventListener("click",function(){
+    var next=root.getAttribute("data-theme")==="light"?"dark":"light";
+    root.setAttribute("data-theme",next);
+    try{localStorage.setItem("manta-theme",next)}catch(e){}
+  });
+  var mq=window.matchMedia("(prefers-color-scheme: light)");
+  var onChange=function(e){
+    var stored=null; try{stored=localStorage.getItem("manta-theme")}catch(err){}
+    if(stored==="light"||stored==="dark")return;
+    root.setAttribute("data-theme",e.matches?"light":"dark");
+  };
+  if(mq.addEventListener)mq.addEventListener("change",onChange);
+  else if(mq.addListener)mq.addListener(onChange);
+})();
+</script>
 
 </body>
 </html>

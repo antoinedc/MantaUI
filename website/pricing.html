@@ -5,7 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Manta pricing: free, MIT, self-hosted</title>
 <meta name="description" content="Manta is free and open source. You pay your model provider and supply the box. There are no tiers and no seat count.">
-<meta name="theme-color" content="#0B1020">
+<meta name="theme-color" content="#0B0C0E">
+<script>
+/* Stamp the theme before first paint so a light-mode visitor never sees a dark
+   flash (and vice versa). Explicit choice wins; otherwise follow the OS. */
+(function(){try{var t=localStorage.getItem("manta-theme");
+if(t!=="light"&&t!=="dark"){t=window.matchMedia("(prefers-color-scheme: light)").matches?"light":"dark"}
+document.documentElement.setAttribute("data-theme",t)}catch(e){
+document.documentElement.setAttribute("data-theme","dark")}})();
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -75,7 +83,7 @@
       "name": "Is Manta really free?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "Yes. The server, the desktop client, the phone client and the install script are MIT licensed and free. There is no paid tier, no Pro feature, no in-app purchase, no upgrade prompt. You pay your model provider and you supply the box."
+        "text": "Yes. The server, the desktop client, the phone client and the install script are MIT licensed and free. There is no paid tier and no per-seat fee. You pay your model provider and you supply the box."
       }
     },
     {
@@ -122,15 +130,21 @@
     <nav>
       <div class="brand"><img src="manta-logo.png" alt="Manta"><span>Manta<b>UI</b></span></div>
       <div class="navlinks">
-        <a href="/" class="hide-sm">Home</a>
+        <a href="/">Home</a>
+        <a href="/#features" class="hide-sm">Features</a>
         <a href="/vs-orca" class="hide-sm">Compare</a>
         <a href="/claude-code-remote" class="hide-sm">How it works</a>
+        <button class="theme-toggle" type="button" id="themeToggle" aria-label="Switch between light and dark theme">
+          <svg class="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+            stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/></svg>
+          <svg class="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+            stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M4.2 4.2l1.6 1.6M18.2 18.2l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.2 19.8l1.6-1.6M18.2 5.8l1.6-1.6"/></svg>
+        </button>
         <a href="https://github.com/antoinedc/MantaUI" class="btn btn-ghost">GitHub</a>
       </div>
     </nav>
   </div>
 </header>
-
 <div class="hero-comp">
   <div class="wrap">
     <h1>Manta is free. You supply the box.</h1>
@@ -145,7 +159,7 @@
           <li><span class="ck">✓</span><span>No seat count</span></li>
           <li><span class="ck">✓</span><span>No workspace limit</span></li>
           <li><span class="ck">✓</span><span>No hosted control plane</span></li>
-          <li><span class="ck">✓</span><span>No telemetry, no analytics</span></li>
+          <li><span class="ck">✓</span><span>Optional telemetry — sends nothing unless you set a token</span></li>
           <li><span class="ck">✓</span><span>No future paid tier</span></li>
         </ul>
       </div>
@@ -186,7 +200,7 @@
     <ul class="checks">
       <li><span class="ck">✓</span><span><b>The server.</b> tmux, opencode, push, schedules, webhooks, secrets, peer sessions, the per-device pairing flow. All of it.</span></li>
       <li><span class="ck">✓</span><span><b>The desktop client.</b> Electron, xterm.js, the React chat panel, the file upload and screenshot detection, voice dictation.</span></li>
-      <li><span class="ck">✓</span><span><b>The phone client.</b> Capacitor shell, the same React code as the desktop, push delivery, dictation.</span></li>
+      <li><span class="ck">✓</span><span><b>The phone client.</b> A native iPhone app, full parity with the desktop, push delivery, dictation.</span></li>
       <li><span class="ck">✓</span><span><b>Updates.</b> Pull from the repo or wait for the in-app update. Both work, both are free.</span></li>
       <li><span class="ck">✓</span><span><b>Future features.</b> Anything that lands in main lands in your box when you update. There is no Pro feature in the roadmap.</span></li>
     </ul>
@@ -234,7 +248,7 @@
       <p>Five questions, answered in full.</p>
     </div>
     <div class="faq">
-      <div class="q"><h3>Is Manta really free?</h3><p>Yes. The server, the desktop client, the phone client and the install script are MIT licensed and free. There is no paid tier, no Pro feature, no in-app purchase, no upgrade prompt. You pay your model provider and you supply the box.</p></div>
+      <div class="q"><h3>Is Manta really free?</h3><p>Yes. The server, the desktop client, the phone client and the install script are MIT licensed and free. There is no paid tier and no per-seat fee. A native iPhone app is planned, but the server you self-host stays free. You pay your model provider and you supply the box.</p></div>
       <div class="q"><h3>What does it cost to run?</h3><p>Whatever you spend on the model and whatever you spend on the box. A $5 VPS is enough to host a single agent for a single user. Most teams reuse hardware they already have, which means the marginal cost is the model spend.</p></div>
       <div class="q"><h3>Will there be paid tiers in the future?</h3><p>No. The product is the binary on GitHub. Anything that lands in main lands in your box when you update. There is no paid feature in the roadmap, and there are no plans to add one.</p></div>
       <div class="q"><h3>Does Manta take a cut of my API spend?</h3><p>No. Manta does not bill you, does not see your API spend, and does not sit between you and your model provider. You give the agent your key, the agent talks to the provider directly, and the bill comes from the provider.</p></div>
@@ -270,20 +284,20 @@
         <p style="margin-top:11px;font-size:13px;color:var(--slate-500);max-width:250px">Self-hosted coding agents you can reach from anywhere.</p>
       </div>
       <div><h4>Product</h4><ul>
-        <li><a href="/">Features</a></li><li><a href="/claude-code-mobile">Mobile</a></li>
+        <li><a href="/#features">Features</a></li><li><a href="/claude-code-mobile">Mobile</a></li>
         <li><a href="/open-source">Open source</a></li>
         <li><a href="/claude-code-remote">How it works</a></li></ul></div>
       <div><h4>Compare</h4><ul>
         <li><a href="/vs-orca">vs Orca</a></li>
         <li><a href="/vs-conductor">vs Conductor</a></li>
         <li><a href="/vs-ssh-tmux">vs SSH and tmux</a></li></ul></div>
-      <div><h4>Use cases</h4><ul>
-        <li><a href="/claude-code-web-ui">Claude Code web UI</a></li>
-        <li><a href="/claude-code-mobile">Claude Code on mobile</a></li>
-        <li><a href="/claude-code-remote">Claude Code remote</a></li>
-        <li><a href="/open-source">Open source</a></li></ul></div>
+      <div><h4>Download</h4><ul>
+        <li><a href="/#download">macOS</a></li>
+        <li><a href="/#download">Windows</a></li>
+        <li><a href="/claude-code-mobile">iPhone</a></li></ul></div>
       <div><h4>Resources</h4><ul>
         <li><a href="https://github.com/antoinedc/MantaUI">GitHub</a></li>
+        <li><a href="/pricing">Pricing</a></li>
         <li><a href="/privacy">Privacy</a></li>
         <li><a href="/terms">Terms</a></li></ul></div>
     </div>
@@ -293,6 +307,28 @@
     </div>
   </div>
 </footer>
+
+<script>
+/* Theme toggle. Persists the explicit choice; until the visitor makes one the
+   page keeps following the OS (including a live change while it is open). */
+(function(){
+  var root=document.documentElement, btn=document.getElementById("themeToggle");
+  if(!btn)return;
+  btn.addEventListener("click",function(){
+    var next=root.getAttribute("data-theme")==="light"?"dark":"light";
+    root.setAttribute("data-theme",next);
+    try{localStorage.setItem("manta-theme",next)}catch(e){}
+  });
+  var mq=window.matchMedia("(prefers-color-scheme: light)");
+  var onChange=function(e){
+    var stored=null; try{stored=localStorage.getItem("manta-theme")}catch(err){}
+    if(stored==="light"||stored==="dark")return;
+    root.setAttribute("data-theme",e.matches?"light":"dark");
+  };
+  if(mq.addEventListener)mq.addEventListener("change",onChange);
+  else if(mq.addListener)mq.addListener(onChange);
+})();
+</script>
 
 </body>
 </html>

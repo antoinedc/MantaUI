@@ -1,0 +1,53 @@
+<footer>
+  <div class="wrap">
+    <div class="fgrid">
+      <div>
+        <div class="fbrand"><img src="manta-logo.png" alt="Manta">Manta<b>UI</b></div>
+        <p style="margin-top:11px;font-size:13px;color:var(--slate-500);max-width:250px">Self-hosted coding agents you can reach from anywhere.</p>
+      </div>
+      <div><h4>Product</h4><ul>
+        <li><a href="/#features">Features</a></li><li><a href="/claude-code-mobile">Mobile</a></li>
+        <li><a href="/open-source">Open source</a></li>
+        <li><a href="/claude-code-remote">How it works</a></li></ul></div>
+      <div><h4>Compare</h4><ul>
+        <li><a href="/vs-orca">vs Orca</a></li>
+        <li><a href="/vs-conductor">vs Conductor</a></li>
+        <li><a href="/vs-ssh-tmux">vs SSH and tmux</a></li></ul></div>
+      <div><h4>Download</h4><ul>
+        <li><a href="/#download">macOS</a></li>
+        <li><a href="/#download">Windows</a></li>
+        <li><a href="/claude-code-mobile">iPhone</a></li></ul></div>
+      <div><h4>Resources</h4><ul>
+        <li><a href="https://github.com/antoinedc/MantaUI">GitHub</a></li>
+        <li><a href="/pricing">Pricing</a></li>
+        <li><a href="/privacy">Privacy</a></li>
+        <li><a href="/terms">Terms</a></li></ul></div>
+    </div>
+    <div class="fbot">
+      <div>MIT licensed. Built for people who pair with agents.</div>
+      <div class="mono" style="font-size:11.5px;color:var(--slate-600)">llms.txt · llms-full.txt · /.well-known/agent-skills</div>
+    </div>
+  </div>
+</footer>
+
+<script>
+/* Theme toggle. Persists the explicit choice; until the visitor makes one the
+   page keeps following the OS (including a live change while it is open). */
+(function(){
+  var root=document.documentElement, btn=document.getElementById("themeToggle");
+  if(!btn)return;
+  btn.addEventListener("click",function(){
+    var next=root.getAttribute("data-theme")==="light"?"dark":"light";
+    root.setAttribute("data-theme",next);
+    try{localStorage.setItem("manta-theme",next)}catch(e){}
+  });
+  var mq=window.matchMedia("(prefers-color-scheme: light)");
+  var onChange=function(e){
+    var stored=null; try{stored=localStorage.getItem("manta-theme")}catch(err){}
+    if(stored==="light"||stored==="dark")return;
+    root.setAttribute("data-theme",e.matches?"light":"dark");
+  };
+  if(mq.addEventListener)mq.addEventListener("change",onChange);
+  else if(mq.addListener)mq.addListener(onChange);
+})();
+</script>

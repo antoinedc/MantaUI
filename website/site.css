@@ -1,31 +1,79 @@
 /* Shared design tokens, reset, and chrome (nav/header, footer) for every
    marketing page. Page-specific sections live in each page's inline <style>
-   block. Source of truth: website/index.html (the superset). */
+   block. Source of truth: website/index.html (the superset).
+
+   THEMING: every page paints from the semantic tokens below. The :root block
+   is the DARK set (unchanged values, so nothing regresses); the light set is
+   one override block further down keyed on html[data-theme="light"]. Both
+   define the SAME names, including the raw navy and slate ramps, because the
+   app-window mockups paint borders and dots directly from those. An inline
+   script in each page's head stamps data-theme before first paint. */
 :root{
-  --navy-950:#0B1020;--navy-900:#0E1326;--navy-850:#12182F;--navy-800:#171F3A;
-  --navy-750:#1D2647;--navy-700:#253055;--navy-600:#33406B;--navy-500:#45537F;
+  color-scheme:dark;
+  --navy-950:#0B0C0E;--navy-900:#101114;--navy-850:#15161A;--navy-800:#1A1B20;
+  --navy-750:#202227;--navy-700:#282A31;--navy-600:#35383F;--navy-500:#4B4F58;
   --blue-300:#8AABFF;--blue-400:#5A88FF;--blue-500:#2E6BFF;--blue-600:#1E52DB;--blue-700:#1740AE;
   --cyan-300:#9BEBFB;--cyan-400:#49D7F5;--cyan-500:#22BEE0;--cyan-600:#1298B8;
-  --slate-50:#F8FAFC;--slate-200:#CBD3E1;--slate-300:#A7B1C4;--slate-400:#7E889D;--slate-500:#5C6578;--slate-600:#434B5E;
+  --slate-50:#F5F6F7;--slate-200:#C6C9CE;--slate-300:#A4A8AF;--slate-400:#7B808A;--slate-500:#5D6169;--slate-600:#45484F;
   --green-500:#22C79A;--amber-500:#F0A934;--red-500:#F0505F;
   --surface-app:var(--navy-950);--surface-sunken:var(--navy-900);--surface-panel:var(--navy-850);
-  --surface-card:var(--navy-800);--surface-raised:var(--navy-750);--surface-inset:#070B17;
-  --border-subtle:#FFFFFF14;--border-default:var(--navy-700);--border-strong:var(--navy-600);
+  --surface-card:var(--navy-800);--surface-raised:var(--navy-750);--surface-inset:#07080A;
+  --border-subtle:#FFFFFF10;--border-default:var(--navy-700);--border-strong:var(--navy-600);
   --text-primary:var(--slate-50);--text-secondary:var(--slate-200);--text-tertiary:var(--slate-400);--text-link:var(--cyan-400);
-  --fill-subtle:#FFFFFF0D;--fill-subtle-hover:#FFFFFF1A;
+  --fill-subtle:#FFFFFF0A;--fill-subtle-hover:#FFFFFF14;
   --font-sans:'Inter',system-ui,-apple-system,'Segoe UI',sans-serif;
   --font-mono:'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace;
   --gradient-brand:linear-gradient(135deg,var(--cyan-400) 0%,var(--blue-500) 100%);
   --glow-cyan:0 0 0 1px rgba(73,215,245,.5),0 0 24px rgba(73,215,245,.35);
-  --shadow-md:0 8px 24px rgba(3,6,15,.55);--shadow-lg:0 18px 48px rgba(3,6,15,.6);--shadow-xl:0 32px 80px rgba(2,4,12,.7);
+  --shadow-md:0 8px 24px rgba(0,0,0,.45);--shadow-lg:0 18px 48px rgba(0,0,0,.5);--shadow-xl:0 32px 80px rgba(0,0,0,.62);
   --radius-md:8px;--radius-lg:12px;--radius-xl:16px;--radius-full:999px;
   --ease-out:cubic-bezier(0.22,1,0.36,1);
   --content-max:1120px;
-  --tile-fill:rgba(255,255,255,.035);
-  --tile-line:rgba(255,255,255,.055);
+  --tile-fill:rgba(255,255,255,.03);
+  --tile-line:rgba(255,255,255,.06);
+  --header-bg:rgba(11,12,14,.72);
+  --cmp-us-bg:#12141a;--cmp-us-head:#141720;--cmp-us-hover:#171a23;
+  --code-bg:#131519;
+}
+
+/* ---- LIGHT ----------------------------------------------------------------
+   The navy ramp is what every panel border, divider and muted dot is painted
+   from, so it is re-pointed at a warm grey ramp rather than left dark: an
+   override that only flipped the semantic tokens would leave black hairlines
+   all over the mockups. Ordering matters — text-primary/secondary alias the
+   slate ramp, so they are restated AFTER it. */
+html[data-theme="light"]{
+  color-scheme:light;
+  --navy-950:#FDFDFC;--navy-900:#F7F7F5;--navy-850:#F1F1EF;--navy-800:#EAEAE8;
+  --navy-750:#E2E2E0;--navy-700:#D8D8D6;--navy-600:#BCBCBA;--navy-500:#96968F;
+  --blue-300:#2456D8;--blue-400:#2E6BFF;--blue-500:#2E6BFF;--blue-600:#1E52DB;--blue-700:#1740AE;
+  --cyan-300:#0A7E9B;--cyan-400:#0C93B4;--cyan-500:#0B8AA8;--cyan-600:#096F88;
+  --slate-50:#FFFFFF;--slate-200:#26282E;--slate-300:#3A3D44;--slate-400:#5C5F66;
+  --slate-500:#77797F;--slate-600:#98999E;
+  --green-500:#0E9F79;--amber-500:#B87514;--red-500:#D93B4B;
+  --surface-app:#FDFDFC;--surface-sunken:#F7F7F5;--surface-panel:#FFFFFF;
+  --surface-card:#FFFFFF;--surface-raised:#F4F4F2;--surface-inset:#F5F5F3;
+  --border-subtle:#14151a14;--border-default:#E7E7E4;--border-strong:#D4D4D1;
+  --text-primary:#16171A;--text-secondary:#33353B;--text-tertiary:#5C5F66;--text-link:#1E52DB;
+  --fill-subtle:#14151a08;--fill-subtle-hover:#14151a10;
+  --shadow-md:0 6px 18px rgba(20,21,26,.06);--shadow-lg:0 14px 38px rgba(20,21,26,.08);
+  --shadow-xl:0 28px 66px rgba(20,21,26,.11);
+  --tile-fill:#14151a06;--tile-line:#14151a12;
+  --glow-cyan:0 0 0 1px rgba(12,147,180,.45),0 0 18px rgba(12,147,180,.18);
+  --header-bg:rgba(253,253,252,.8);
+  --cmp-us-bg:#F3F6FD;--cmp-us-head:#EBF1FE;--cmp-us-hover:#EDF3FF;
+  --code-bg:#F1F2EE;
 }
 *{margin:0;padding:0;box-sizing:border-box}
 html{scroll-behavior:smooth}
+/* Film grain over the whole page. A flat colour field reads as "template";
+   the same field with 3 percent fractal noise on top reads as material.
+   Fixed so it does not scroll with content; pointer-events none so it can
+   never intercept a click. */
+body::after{content:"";position:fixed;inset:0;z-index:2000;pointer-events:none;opacity:.05;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size:240px 240px}
+html[data-theme="light"] body::after{opacity:.035}
 body{background:var(--surface-app);color:var(--text-secondary);font-family:var(--font-sans);font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased;overflow-x:hidden}
 a{color:var(--text-link);text-decoration:none;transition:color .12s var(--ease-out)}
 a:hover{color:var(--cyan-300)}
@@ -34,7 +82,7 @@ a:hover{color:var(--cyan-300)}
 .eyebrow{font-size:11px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan-400)}
 
 /* nav */
-header{position:sticky;top:0;z-index:100;backdrop-filter:blur(12px);background:rgba(11,16,32,.72);border-bottom:1px solid var(--border-subtle)}
+header{position:sticky;top:0;z-index:100;backdrop-filter:blur(12px);background:var(--header-bg);border-bottom:1px solid var(--border-subtle)}
 nav{display:flex;align-items:center;justify-content:space-between;height:60px}
 .brand{display:flex;align-items:center;gap:10px;font-weight:700;color:var(--text-primary);font-size:17px;letter-spacing:-.01em}
 .brand img{width:30px;height:30px;object-fit:contain}
@@ -50,6 +98,18 @@ nav{display:flex;align-items:center;justify-content:space-between;height:60px}
 .btn-ghost{background:var(--fill-subtle);color:var(--text-secondary);border-color:var(--border-default)}
 .btn-ghost:hover{background:var(--fill-subtle-hover);color:var(--text-primary);border-color:var(--border-strong)}
 @media(max-width:720px){.navlinks .hide-sm{display:none}}
+
+/* theme toggle — one button, two glyphs, the inactive one hidden per theme.
+   Rendering both and hiding one keeps the control from resizing on switch. */
+.theme-toggle{width:36px;height:36px;flex:none;display:inline-flex;align-items:center;justify-content:center;
+  border-radius:var(--radius-md);border:1px solid var(--border-default);background:var(--fill-subtle);
+  color:var(--text-tertiary);cursor:pointer;transition:all .12s var(--ease-out);padding:0}
+.theme-toggle:hover{color:var(--text-primary);background:var(--fill-subtle-hover);border-color:var(--border-strong)}
+.theme-toggle svg{width:17px;height:17px;display:block}
+.theme-toggle .i-sun{display:none}
+.theme-toggle .i-moon{display:block}
+html[data-theme="light"] .theme-toggle .i-sun{display:block}
+html[data-theme="light"] .theme-toggle .i-moon{display:none}
 
 /* footer */
 footer{padding:40px 0;border-top:1px solid var(--border-subtle);font-size:13px;color:var(--slate-500)}
@@ -70,14 +130,14 @@ section{position:relative;padding:78px 0}
 .cmp{width:100%;min-width:760px;border-collapse:separate;border-spacing:0;font-size:13px;background:var(--surface-card);
   border:1px solid var(--border-default);border-radius:var(--radius-lg);overflow:hidden}
 .cmp th,.cmp td{padding:11px 14px;text-align:left;border-bottom:1px solid var(--border-subtle);white-space:nowrap}
-.cmp tbody tr:hover td{background:#ffffff06}
-.cmp tbody tr:hover td.us{background:#122040}
+.cmp tbody tr:hover td{background:var(--fill-subtle)}
+.cmp tbody tr:hover td.us{background:var(--cmp-us-hover)}
 .cmp thead th{background:var(--surface-panel);font-size:12.5px;font-weight:700;color:var(--text-primary)}
-.cmp thead th.us{color:var(--cyan-300);background:#0f1c36}
-.cmp td.us{background:#0d1830}
+.cmp thead th.us{color:var(--cyan-300);background:var(--cmp-us-head)}
+.cmp td.us{background:var(--cmp-us-bg)}
 .cmp tbody tr:last-child td{border-bottom:0}
 .cmp tfoot td{border-bottom:0;border-top:1px solid var(--border-default);background:var(--surface-panel);font-size:12.5px;padding-top:13px;padding-bottom:13px}
-.cmp tfoot td.us{background:#0f1c36}
+.cmp tfoot td.us{background:var(--cmp-us-head)}
 .cmp td:first-child{color:var(--slate-300);font-weight:500}
 .cmp .on{color:var(--text-primary);font-weight:600}
 .cmp .off{color:var(--slate-600)}
@@ -93,7 +153,7 @@ section{position:relative;padding:78px 0}
 /* quoted-doc snippet — used by comparison pages to embed verbatim competitor quotes */
 .quotebox{margin-top:22px;background:var(--surface-inset);border:1px solid var(--border-default);border-left:3px solid var(--cyan-400);
   border-radius:var(--radius-md);padding:14px 16px;font-size:13.5px;color:var(--slate-300);line-height:1.6}
-.quotebox q{color:var(--slate-100,#e8edf5);font-style:italic}
+.quotebox q{color:var(--text-primary);font-style:italic}
 .src{font-size:11.5px;color:var(--slate-500);font-family:var(--font-mono);font-style:normal}
 .quotebox .src{display:block;margin-top:8px}
 .quotebox.accent{border-left-color:var(--cyan-400)}
@@ -154,7 +214,7 @@ section{position:relative;padding:78px 0}
 .doc p{margin-bottom:14px;color:var(--text-secondary)}
 .doc ul{margin:0 0 14px 22px;color:var(--text-secondary)}
 .doc li{margin-bottom:6px}
-.doc code{font-family:var(--font-mono);font-size:13px;color:var(--cyan-300);background:#0E1B33;padding:1px 6px;border-radius:4px}
+.doc code{font-family:var(--font-mono);font-size:13px;color:var(--cyan-300);background:var(--code-bg);padding:1px 6px;border-radius:4px}
 .doc hr{border:0;border-top:1px solid var(--border-subtle);margin:32px 0}
 .doc .meta{font-size:13px;color:var(--slate-500);margin-bottom:24px}
 .doc .pill{display:inline-block;font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--amber-500);background:#F0A9341A;border:1px solid #F0A9343d;border-radius:var(--radius-full);padding:2px 10px;margin-bottom:18px}

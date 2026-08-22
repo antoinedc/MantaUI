@@ -5,7 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Claude Code remote: run it on a server you own</title>
 <meta name="description" content="Run Claude Code on a VPS or home server. Real tmux, push notifications, and the work outlives the laptop.">
-<meta name="theme-color" content="#0B1020">
+<meta name="theme-color" content="#0B0C0E">
+<script>
+/* Stamp the theme before first paint so a light-mode visitor never sees a dark
+   flash (and vice versa). Explicit choice wins; otherwise follow the OS. */
+(function(){try{var t=localStorage.getItem("manta-theme");
+if(t!=="light"&&t!=="dark"){t=window.matchMedia("(prefers-color-scheme: light)").matches?"light":"dark"}
+document.documentElement.setAttribute("data-theme",t)}catch(e){
+document.documentElement.setAttribute("data-theme","dark")}})();
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -130,15 +138,21 @@
     <nav>
       <div class="brand"><img src="manta-logo.png" alt="Manta"><span>Manta<b>UI</b></span></div>
       <div class="navlinks">
-        <a href="/" class="hide-sm">Home</a>
+        <a href="/">Home</a>
+        <a href="/#features" class="hide-sm">Features</a>
         <a href="/vs-orca" class="hide-sm">Compare</a>
         <a href="/claude-code-remote" class="hide-sm">How it works</a>
+        <button class="theme-toggle" type="button" id="themeToggle" aria-label="Switch between light and dark theme">
+          <svg class="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+            stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/></svg>
+          <svg class="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+            stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M4.2 4.2l1.6 1.6M18.2 18.2l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.2 19.8l1.6-1.6M18.2 5.8l1.6-1.6"/></svg>
+        </button>
         <a href="https://github.com/antoinedc/MantaUI" class="btn btn-ghost">GitHub</a>
       </div>
     </nav>
   </div>
 </header>
-
 <div class="hero-comp">
   <div class="wrap">
     <h1>Run Claude Code on a server you control</h1>
@@ -149,9 +163,9 @@
       <div class="body">
         <div class="arch">
           <h3>The box is the source of truth</h3>
-<pre>   <span class="hl">Desktop</span>      <span class="hl">Phone</span>      <span class="hl">Browser</span>
-       │            │            │
-       └──── HTTPS ─┴──── HTTPS ─┘
+<pre>   <span class="hl">Desktop</span>      <span class="hl">Phone</span>
+       │            │
+       └──── HTTPS ─┘
                 │
    <span class="hl">&lt;box_id&gt;.boxes.mantaui.com</span>
    <span class="dm">or your tailnet, if Tailscale is up</span>
@@ -199,7 +213,7 @@
       <li><span class="ck">✓</span><span><b>Home server.</b> A Mac mini, a NUC, anything with a static IP and an open port. Tailnet if you already have Tailscale up.</span></li>
       <li><span class="ck">✓</span><span><b>A Mac you own.</b> The same server runs on macOS, with public TLS skipped because there is no need to terminate it for a laptop.</span></li>
       <li><span class="ck">✓</span><span><b>No account required.</b> Pairing is a six-digit code the box prints. Devices exchange tokens, and that is the only credential in the loop.</span></li>
-      <li><span class="ck">✓</span><span><b>No telemetry, no hosted control plane.</b> The box talks to your model provider and to APNs for push fanout. Nothing else.</span></li>
+      <li><span class="ck">✓</span><span><b>Telemetry optional, no hosted control plane.</b> The box talks to your model provider and to APNs for push fanout. The repo's log-shipper sends nothing unless you set a token.</span></li>
     </ul>
   </div>
 </section>
@@ -250,7 +264,7 @@
     <div class="faq">
       <div class="q"><h3>Can I run Claude Code on a VPS?</h3><p>Yes. The installer runs on Debian, Ubuntu and the usual Linux suspects, with Caddy and a Let's Encrypt certificate when you need public ingress. The agent runs in a real tmux session on the box, so it outlives every device that connects to it.</p></div>
       <div class="q"><h3>Do I have to forward a port?</h3><p>No. If Tailscale is already running on the box, devices connect over your tailnet and nothing is published to the internet. If Tailscale is not running, the installer provisions a hostname and a certificate, which is the only public surface. You never forward a port by hand.</p></div>
-      <div class="q"><h3>What happens when I close my laptop?</h3><p>The agent keeps running, because it lives in a tmux session on the box. The box is a system service. When you open a browser or pair your phone again, the same session is there with the full history. <a href="/claude-code-mobile">The mobile page</a> covers what the phone sees when this happens.</p></div>
+      <div class="q"><h3>What happens when I close my laptop?</h3><p>The agent keeps running, because it lives in a tmux session on the box. The box is a system service. When you pair your phone again, the same session is there with the full history. <a href="/claude-code-mobile">The mobile page</a> covers what the phone sees when this happens.</p></div>
       <div class="q"><h3>Does this work without a public DNS record?</h3><p>Yes. Pick the tailnet path at install time and the box has no public DNS, no certificate, and no open port. Devices reach it over your tailnet at a private IPv4.</p></div>
       <div class="q"><h3>Is this self-hosted Claude Code?</h3><p>Yes, and the install script is auditable before you pipe it into bash. The repository is MIT licensed and the server runs on hardware you control. <a href="/open-source">The open source page</a> covers what that means in practice.</p></div>
     </div>
@@ -284,20 +298,20 @@
         <p style="margin-top:11px;font-size:13px;color:var(--slate-500);max-width:250px">Self-hosted coding agents you can reach from anywhere.</p>
       </div>
       <div><h4>Product</h4><ul>
-        <li><a href="/">Features</a></li><li><a href="/claude-code-mobile">Mobile</a></li>
+        <li><a href="/#features">Features</a></li><li><a href="/claude-code-mobile">Mobile</a></li>
         <li><a href="/open-source">Open source</a></li>
         <li><a href="/claude-code-remote">How it works</a></li></ul></div>
       <div><h4>Compare</h4><ul>
         <li><a href="/vs-orca">vs Orca</a></li>
         <li><a href="/vs-conductor">vs Conductor</a></li>
         <li><a href="/vs-ssh-tmux">vs SSH and tmux</a></li></ul></div>
-      <div><h4>Use cases</h4><ul>
-        <li><a href="/claude-code-web-ui">Claude Code web UI</a></li>
-        <li><a href="/claude-code-mobile">Claude Code on mobile</a></li>
-        <li><a href="/claude-code-remote">Claude Code remote</a></li>
-        <li><a href="/open-source">Open source</a></li></ul></div>
+      <div><h4>Download</h4><ul>
+        <li><a href="/#download">macOS</a></li>
+        <li><a href="/#download">Windows</a></li>
+        <li><a href="/claude-code-mobile">iPhone</a></li></ul></div>
       <div><h4>Resources</h4><ul>
         <li><a href="https://github.com/antoinedc/MantaUI">GitHub</a></li>
+        <li><a href="/pricing">Pricing</a></li>
         <li><a href="/privacy">Privacy</a></li>
         <li><a href="/terms">Terms</a></li></ul></div>
     </div>
@@ -307,6 +321,28 @@
     </div>
   </div>
 </footer>
+
+<script>
+/* Theme toggle. Persists the explicit choice; until the visitor makes one the
+   page keeps following the OS (including a live change while it is open). */
+(function(){
+  var root=document.documentElement, btn=document.getElementById("themeToggle");
+  if(!btn)return;
+  btn.addEventListener("click",function(){
+    var next=root.getAttribute("data-theme")==="light"?"dark":"light";
+    root.setAttribute("data-theme",next);
+    try{localStorage.setItem("manta-theme",next)}catch(e){}
+  });
+  var mq=window.matchMedia("(prefers-color-scheme: light)");
+  var onChange=function(e){
+    var stored=null; try{stored=localStorage.getItem("manta-theme")}catch(err){}
+    if(stored==="light"||stored==="dark")return;
+    root.setAttribute("data-theme",e.matches?"light":"dark");
+  };
+  if(mq.addEventListener)mq.addEventListener("change",onChange);
+  else if(mq.addListener)mq.addListener(onChange);
+})();
+</script>
 
 </body>
 </html>
