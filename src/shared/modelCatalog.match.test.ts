@@ -290,6 +290,56 @@ describe("BET-1303 matcher — regression ids from real boxes (6.3)", () => {
   });
 });
 
+// BET-1313 — a weights repo shared by several catalogue entries must pick the
+// one the endpoint id names instead of short-circuiting to ambiguous. The
+// deepseek trio below all point at the same Hugging Face weights repo; the id
+// carries a `3.2` version token only `deepseek/deepseek-v3.2` has, so the
+// structural step (re-run over just the repo-mates) resolves it exactly. The
+// synthetic `synth` pair is the load-bearing over-collapse guard: two
+// repo-mates with the SAME version and size cannot be told apart, so they must
+// stay ambiguous rather than guessing.
+describe("BET-1313 — repo-mates of one weights repo resolve to the entry the id names", () => {
+  const matcher = createModelIndex(FIXTURE);
+
+  it("deepseek-ai/DeepSeek-V3.2-TEE → exact deepseek/deepseek-v3.2, not chat/reasoner", () => {
+    const res = matcher.matchModel("deepseek-ai/DeepSeek-V3.2-TEE");
+    expect(res.kind).toBe("exact");
+    expect(res.candidates[0]?.id).toBe("deepseek/deepseek-v3.2");
+    // Confidence stays "certain": the repo identity was a certain match and the
+    // structural step only chose which repo-mate the id names.
+    expect(res.confidence).toBe("certain");
+    const ids = res.candidates.map((c) => c.id);
+    expect(ids).not.toContain("deepseek/deepseek-chat");
+    expect(ids).not.toContain("deepseek/deepseek-reasoner");
+  });
+
+  it("repo-mates the id cannot distinguish (same version+size) stay ambiguous — no over-collapse", () => {
+    const res = matcher.matchModel("acme/Synth-1.0-TEE");
+    expect(res.kind).toBe("ambiguous");
+    expect(toSortedIds(res.candidates)).toEqual(["acme/synth-alpha-1.0", "acme/synth-beta-1.0"]);
+  });
+
+  it("ornith — a sibling-size family, NOT repo-mates — stays ambiguous x4", () => {
+    const res = matcher.matchModel("ornith");
+    expect(res.kind).toBe("ambiguous");
+    runnableOrnithSizes(res.candidates);
+  });
+
+  it("the single-repo path and the other layers are undisturbed", () => {
+    const rows = [
+      { local: "Qwen/Qwen3-32B-TEE", target: "alibaba/qwen3-32b" },
+      { local: "zai-org/GLM-5.2-TEE", target: "zhipuai/glm-5.2" },
+      { local: "claude-opus-5-fast", target: "anthropic/claude-opus-5" },
+    ];
+    for (const r of rows) {
+      const target = matcher.lookupModel(r.target);
+      const res = matcher.matchModel(r.local, target ? factsFrom(target) : undefined);
+      expect(res.kind, `${r.local} → ${res.candidates.map((c) => c.id).join(",")}`).toBe("exact");
+      expect(res.candidates[0]?.id, r.local).toBe(r.target);
+    }
+  });
+});
+
 // Assert an ambiguous result surfaces every sibling size of the family.
 function runnableOrnithSizes(candidates: ModelCatalogEntry[]): void {
   const ids = candidates.map((c) => c.id).sort();

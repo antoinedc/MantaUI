@@ -161,7 +161,13 @@
         "limit": {
             "context": 65536,
             "output": 8192
-        }
+        },
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/deepseek-ai/DeepSeek-V3.2"
+            }
+        ]
     },
     {
         "id": "alibaba/qwen3-32b",
@@ -409,5 +415,113 @@
         },
         "description": "Kimi K2.7 Code Highspeed \u2014 over-collapse guard: one-word decoration is an extra soft token (BET-1307)",
         "synthesize": false
+    },
+    {
+        "id": "deepseek/deepseek-v3.2",
+        "name": "DeepSeek V3.2",
+        "family": "deepseek",
+        "description": "DeepSeek V3.2 general model",
+        "reasoning": false,
+        "tool_call": true,
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "open_weights": true,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/deepseek-ai/DeepSeek-V3.2"
+            }
+        ],
+        "limit": {
+            "context": 131072,
+            "output": 16384
+        }
+    },
+    {
+        "id": "deepseek/deepseek-reasoner",
+        "name": "DeepSeek Reasoner",
+        "family": "deepseek",
+        "description": "DeepSeek reasoning model",
+        "reasoning": true,
+        "tool_call": true,
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "open_weights": true,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/deepseek-ai/DeepSeek-V3.2"
+            }
+        ],
+        "limit": {
+            "context": 131072,
+            "output": 16384
+        }
+    },
+    {
+        "id": "acme/synth-alpha-1.0",
+        "name": "Synth Alpha 1.0",
+        "family": "synth",
+        "description": "Synthetic repo-mate for the BET-1313 over-collapse guard",
+        "reasoning": false,
+        "tool_call": true,
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "open_weights": true,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/acme/Synth-1.0"
+            }
+        ],
+        "limit": {
+            "context": 32768,
+            "output": 8192
+        }
+    },
+    {
+        "id": "acme/synth-beta-1.0",
+        "name": "Synth Beta 1.0",
+        "family": "synth",
+        "description": "Synthetic repo-mate for the BET-1313 over-collapse guard",
+        "reasoning": false,
+        "tool_call": true,
+        "modalities": {
+            "input": [
+                "text"
+            ],
+            "output": [
+                "text"
+            ]
+        },
+        "open_weights": true,
+        "weights": [
+            {
+                "label": "Hugging Face",
+                "url": "https://huggingface.co/acme/Synth-1.0"
+            }
+        ],
+        "limit": {
+            "context": 32768,
+            "output": 8192
+        }
     }
 ]
