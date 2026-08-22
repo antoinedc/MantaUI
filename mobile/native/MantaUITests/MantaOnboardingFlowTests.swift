@@ -85,6 +85,45 @@ final class MantaOnboardingFlowTests: XCTestCase {
         XCTAssertEqual(requestCount, 1, "the in-flight guard drops the duplicate, so its 403 is never sent")
     }
 
+    /// BET-1309 — lock in the `claimGeneration` staleness guard directly. The
+    /// `claimInFlight` guard serialises claims, so the genuine out-of-order
+    /// interleave is unreachable through `receive` alone; drain it by driving
+    /// `runClaim` with a stale generation and asserting its write is dropped.
+    func testStaleClaimResultDoesNotOverwriteNewerClaim() async throws {
+        var requestCount = 0
+        let success: ([String: Any]) -> (HTTPURLResponse, Data) = { body in
+            let response = HTTPURLResponse(url: URL(string: "https://claim")!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, try! JSONSerialization.data(withJSONObject: body))
+        }
+        MockURLProtocol.handler = { request in
+            requestCount += 1
+            return success(["box_token": self.box, "box_id": self.box, "device_id": "dev_1"])
+        }
+        let flow = makeFlow()
+        let payload = payload()
+
+        // Two sequential claims advance `claimGeneration` to 2; the newest wins.
+        flow.receive(payload: payload)
+        _ = await awaitSettled(flow)
+        flow.receive(payload: payload)
+        _ = await awaitSettled(flow)
+        XCTAssertEqual(flow.phase, .notifications, "the newest claim succeeded")
+
+        // A stale result for the ORIGINAL (generation 1) claim arrives now. It
+        // reaches the network and classifies as .wrongCode, but because its
+        // generation is no longer current it must NOT write .failure(.rejected).
+        MockURLProtocol.handler = { request in
+            requestCount += 1
+            let response = HTTPURLResponse(url: request.url!, statusCode: 403, httpVersion: nil, headerFields: nil)!
+            return (response, Data("{\"error\":\"no\"}".utf8))
+        }
+        await flow.runClaim(payload, generation: 1)
+
+        XCTAssertEqual(requestCount, 3, "the stale claim's request really ran — only its write was suppressed")
+        XCTAssertEqual(flow.phase, .notifications, "a stale claim result must not overwrite a newer claim")
+        XCTAssertFalse(isRejected(flow))
+    }
+
     private func isRejected(_ flow: MantaOnboardingFlow) -> Bool {
         if case .failure(.rejected) = flow.phase { return true }
         return false

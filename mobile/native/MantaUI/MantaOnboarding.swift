@@ -210,7 +210,11 @@ final class MantaOnboardingFlow: ObservableObject {
         Task { await runClaim(payload, generation: generation) }
     }
 
-    private func runClaim(_ payload: MantaPairing.PairPayload, generation: Int) async {
+    /// Runs a claim for `payload` at `generation`. Internal (not private) so
+    /// the staleness-guard unit test can drive a stale generation's result and
+    /// assert its `phase`/`savedCredentials` writes are dropped. In production
+    /// it is only ever invoked by `startLinking` with the current generation.
+    func runClaim(_ payload: MantaPairing.PairPayload, generation: Int) async {
         defer { finishClaim(generation) }
         // The volunteer device-registry name is surfaced server-side so a
         // linked device is identifiable (§6.3).
