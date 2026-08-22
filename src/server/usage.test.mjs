@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { normalizeWindow, createUsagePoller, ADAPTERS, rateLimitBackoffMs, carryForward } from "./usage.mjs";
+import { normalizeWindow, createUsagePoller, ADAPTERS, rateLimitBackoffMs, carryForward, listLiveSnapshots } from "./usage.mjs";
 import { usageWindowLabel } from "./usageAdapters/normalizeWindow.mjs";
 import { claudeAdapter } from "./usageAdapters/claude.mjs";
 import { codexAdapter } from "./usageAdapters/codex.mjs";
@@ -1000,4 +1000,109 @@ test("poller: the retry budget re-arms once the window stops waiting", async () 
   await poller.tick();
   await sleep(60);
   assert.ok(fetchCalls > afterFresh + 1, "a fresh boundary gets a fresh retry budget");
+});
+
+// ----------------------------------------------------------------------------
+// listLiveSnapshots — read the RUNNING server's poller cache over usage:list
+// ----------------------------------------------------------------------------
+
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+function fakeAuthFile({ box_token = "tok123" } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "usage-live-"));
+  const path = join(dir, "auth.json");
+  writeFileSync(path, JSON.stringify({ box_id: "box1", ...(box_token ? { box_token } : {}) }));
+  return { dir, path };
+}
+
+function snap(overrides = {}) {
+  return {
+    provider: "claude",
+    providerIDs: ["anthropic"],
+    kind: "subscription",
+    windows: [{ kind: "weekly", label: "5h", pct: 42 }],
+    fetchedAt: 1000,
+    ...overrides,
+  };
+}
+
+test("listLiveSnapshots: returns the server's polled snapshots from usage:list", async () => {
+  const { dir, path } = fakeAuthFile();
+  try {
+    const expected = [snap()];
+    const out = await listLiveSnapshots({
+      authPath: path,
+      baseUrl: "http://127.0.0.1:8787",
+      fetchImpl: async (url, init) => {
+        assert.match(url, /\/rpc\/usage%3Alist$/);
+        assert.equal(init.method, "POST");
+        assert.equal(init.headers.authorization, "Bearer tok123");
+        return fakeResponse(200, { result: expected });
+      },
+    });
+    assert.deepEqual(out, expected);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("listLiveSnapshots: returns [] when no box_token is present", async () => {
+  const { dir, path } = fakeAuthFile({ box_token: null });
+  try {
+    let called = false;
+    const out = await listLiveSnapshots({
+      authPath: path,
+      fetchImpl: async () => {
+        called = true;
+        return fakeResponse(200, { result: [] });
+      },
+    });
+    assert.deepEqual(out, []);
+    assert.equal(called, false, "no fetch when there is no token");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("listLiveSnapshots: returns [] on a non-2xx response", async () => {
+  const { dir, path } = fakeAuthFile();
+  try {
+    const out = await listLiveSnapshots({
+      authPath: path,
+      fetchImpl: async () => fakeResponse(401, { error: "nope" }),
+    });
+    assert.deepEqual(out, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("listLiveSnapshots: returns [] when the result is not an array", async () => {
+  const { dir, path } = fakeAuthFile();
+  try {
+    const out = await listLiveSnapshots({
+      authPath: path,
+      fetchImpl: async () => fakeResponse(200, { result: { not: "an array" } }),
+    });
+    assert.deepEqual(out, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("listLiveSnapshots: never throws — a rejected fetch returns []", async () => {
+  const { dir, path } = fakeAuthFile();
+  try {
+    const out = await listLiveSnapshots({
+      authPath: path,
+      fetchImpl: async () => {
+        throw new Error("server down");
+      },
+    });
+    assert.deepEqual(out, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

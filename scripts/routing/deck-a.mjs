@@ -25,7 +25,7 @@
 // prompt difficulty — see docs/routing-scenarios.md.
 
 import { configGet } from "../../src/server/local.mjs";
-import { listSnapshots } from "../../src/server/usage.mjs";
+import { listSnapshots, listLiveSnapshots } from "../../src/server/usage.mjs";
 import { listRoutableModels } from "../../src/server/opencode.mjs";
 import { buildRoutingServices } from "../../src/server/routingServices.mjs";
 import { lookupModel, matchModel, allModels } from "../../src/server/modelCatalog.mjs";
@@ -58,6 +58,26 @@ const catalogIndex = { lookupModel, matchModel, allModels };
 const providerHealth = createProviderHealth({});
 const providerHealthState = (pid) => providerHealth.state(pid);
 
+// The deck runs in its own process with NO usage poller of its own, so the
+// in-process `listSnapshots()` is always [] — production truth lives in the
+// RUNNING manta-server's poller. Read that poller's cache over the `usage:list`
+// RPC so the §12d cost checks reflect production (BET-1299); fall back to the
+// local in-process read for the (currently unused) embedded case.
+async function getLiveSnapshots() {
+  try {
+    const live = await listLiveSnapshots();
+    if (Array.isArray(live) && live.length > 0) return live;
+  } catch {
+    /* fall through to the in-process read */
+  }
+  try {
+    const local = listSnapshots();
+    return Array.isArray(local) ? local : [];
+  } catch {
+    return [];
+  }
+}
+
 async function buildBoxContext() {
   const cfg = (await configGet()) ?? {};
   const policy = isObj(cfg?.modelRouting) ? { ...cfg.modelRouting } : {};
@@ -77,14 +97,7 @@ async function runDecision({ cfg, policy, scenario, nowMs }) {
   }
   let services = null;
   try {
-    const snapshotList = (() => {
-      try {
-        const s = listSnapshots();
-        return Array.isArray(s) ? s : [];
-      } catch {
-        return [];
-      }
-    })();
+    const snapshotList = await getLiveSnapshots();
     services = await buildRoutingServices(
       cfg,
       {
@@ -442,14 +455,7 @@ async function inertSignalFindings({ cfg, policy, rows }) {
   let catalog = [];
   let services = {};
   try {
-    const snapshotList = (() => {
-      try {
-        const s = listSnapshots();
-        return Array.isArray(s) ? s : [];
-      } catch {
-        return [];
-      }
-    })();
+    const snapshotList = await getLiveSnapshots();
     catalog = await listRoutableModels("main", cfg);
     services = await buildRoutingServices(
       cfg,
