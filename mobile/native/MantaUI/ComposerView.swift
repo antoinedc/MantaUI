@@ -218,6 +218,7 @@ struct ComposerView: View {
                 )
                 .transition(.opacity)
             }
+            keyboardBarRow
             // ONE glass box, always. The composer stays MOUNTED while the take is
             // HELD (BET-1051) because the mic button owns the in-flight touch — but
             // that mounting lives INSIDE `inputBox`, whose contents swap for the
@@ -318,36 +319,6 @@ struct ComposerView: View {
             // Deliberately NOT focusing the input here: raising the keyboard on
             // entry hides most of the transcript you opened the session to
             // read. Tapping the input is the way in, as in Messages.
-        }
-        // Keyboard-surface toolbar (BET-1305): ↑↓ prompt-history recall, esc
-        // interrupt, @ / palette triggers, and Clear. Attached ONCE on the
-        // composer root — the expanded editor sheet is its own presentation
-        // hierarchy, so it gets no toolbar. Monospaced labels like the
-        // terminal key row.
-        .toolbar {
-            ToolbarItemGroup(placement: .keyboard) {
-                Button("↑") { historyUp() }
-                    .font(.system(.body, design: .monospaced))
-                    .accessibilityIdentifier("kb-up")
-                Button("↓") { historyDown() }
-                    .font(.system(.body, design: .monospaced))
-                    .accessibilityIdentifier("kb-down")
-                Button("esc") { if store.running { store.abort() } }
-                    .font(.system(.body, design: .monospaced))
-                    .disabled(!store.running)
-                    .foregroundColor(store.running ? tokens.danger : tokens.tx3)
-                    .accessibilityIdentifier("kb-esc")
-                Button("@") { text += "@" }
-                    .font(.system(.body, design: .monospaced))
-                    .accessibilityIdentifier("kb-at")
-                Button("/") { text += "/" }
-                    .font(.system(.body, design: .monospaced))
-                    .accessibilityIdentifier("kb-slash")
-                Spacer()
-                Button("Clear") { showClearConfirm = true }
-                    .font(.system(.body, design: .monospaced))
-                    .accessibilityIdentifier("kb-clear")
-            }
         }
         .confirmationDialog("Clear this session?", isPresented: $showClearConfirm,
                             titleVisibility: .visible) {
@@ -502,6 +473,84 @@ struct ComposerView: View {
             }
             sendButton
         }
+    }
+
+    // MARK: - Keyboard bar (BET-1305, relocated)
+
+    /// The composer's key row — prompt-history recall, the interrupt, the two
+    /// palette triggers, and Clear. It used to be a
+    /// `ToolbarItemGroup(placement: .keyboard)`, which handed the row to the
+    /// SYSTEM keyboard bar: system tint, system metrics, none of our tokens.
+    /// It is an ordinary row in the composer stack now, so it is ours to style.
+    ///
+    /// Gated on `inputFocused` alone, which reproduces the old visibility
+    /// exactly: the keyboard placement existed only while the field had focus.
+    /// Do not add further conditions — a second gate is a second thing that can
+    /// disagree with the keyboard.
+    @ViewBuilder
+    private var keyboardBarRow: some View {
+        if inputFocused {
+            HStack(spacing: Metrics.spacing.sp2) {
+                keyboardBarKey("↑", identifier: "kb-up") { historyUp() }
+                keyboardBarKey("↓", identifier: "kb-down") { historyDown() }
+                keyboardBarButton("esc",
+                                  identifier: "kb-esc",
+                                  tint: store.running ? tokens.danger : tokens.tx3,
+                                  enabled: store.running) { store.abort() }
+                keyboardBarKey("@", identifier: "kb-at") { text += "@" }
+                keyboardBarKey("/", identifier: "kb-slash") { text += "/" }
+                Spacer(minLength: 0)
+                keyboardBarButton("Clear",
+                                  identifier: "kb-clear",
+                                  tint: tokens.danger,
+                                  enabled: true) { showClearConfirm = true }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// A filled key: one character the row types or steps with. Square, sized to
+    /// `chatHeaderBtn` like every other button in this composer.
+    private func keyboardBarKey(_ label: String,
+                                identifier: String,
+                                action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(label)
+                .font(.manta(size: Metrics.type.body,
+                             weight: mantaFontWeight(Metrics.type.medium)))
+                .foregroundColor(tokens.tx2)
+                .frame(width: Metrics.type.chatHeaderBtn,
+                       height: Metrics.type.chatHeaderBtn)
+                .background(tokens.fill,
+                            in: RoundedRectangle(cornerRadius: Metrics.radius.md,
+                                                 style: .continuous))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier(identifier)
+    }
+
+    /// A plain word button: no fill, so a word never reads as a key you type.
+    /// `enabled` drives `.disabled`, which is the ONLY gate — the action body
+    /// must not re-check the same condition.
+    private func keyboardBarButton(_ label: String,
+                                   identifier: String,
+                                   tint: Color,
+                                   enabled: Bool,
+                                   action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(label)
+                .font(.manta(size: Metrics.type.body,
+                             weight: mantaFontWeight(Metrics.type.medium)))
+                .foregroundColor(tint)
+                .padding(.horizontal, Metrics.spacing.sp2)
+                .frame(minWidth: Metrics.type.chatHeaderBtn,
+                       minHeight: Metrics.type.chatHeaderBtn)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .accessibilityIdentifier(identifier)
     }
 
     // MARK: - Plan-usage dot (BET-824)
