@@ -104,12 +104,6 @@ struct SessionListView: View {
                         Image(systemName: "gearshape")
                             .foregroundColor(tokens.tx2)
                     }
-                    // The system's own glass BUTTON style, not a plain button
-                    // with a glass effect layered over it: the layered version
-                    // renders correctly but eats the touch, so the button looks
-                    // dead. Both header buttons use the same style so they read
-                    // as a matched pair.
-                    .buttonStyle(.glass)
                     .accessibilityLabel("Settings")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
@@ -120,7 +114,6 @@ struct SessionListView: View {
                         Image(systemName: "plus")
                             .foregroundColor(tokens.tx2)
                     }
-                    .buttonStyle(.glass)
                     .accessibilityLabel("New session")
                 }
             }
