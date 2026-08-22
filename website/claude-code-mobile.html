@@ -5,7 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Claude Code on mobile: full parity iPhone</title>
 <meta name="description" content="Run Claude Code from your phone with full transcript, live tool output, dictation and one-tap approvals.">
-<meta name="theme-color" content="#0B1020">
+<meta name="theme-color" content="#0B0C0E">
+<script>
+/* Stamp the theme before first paint so a light-mode visitor never sees a dark
+   flash (and vice versa). Explicit choice wins; otherwise follow the OS. */
+(function(){try{var t=localStorage.getItem("manta-theme");
+if(t!=="light"&&t!=="dark"){t=window.matchMedia("(prefers-color-scheme: light)").matches?"light":"dark"}
+document.documentElement.setAttribute("data-theme",t)}catch(e){
+document.documentElement.setAttribute("data-theme","dark")}})();
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -90,15 +98,15 @@
       "name": "Is the phone app a viewer or a real client?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "A real client. The iPhone app is the same React code as the desktop, packaged with Capacitor. You get the full transcript, live tool output, approvals, dictation and file upload, not a status page that links out to your laptop."
+        "text": "A real client. The iPhone app is a native app that talks straight to the same box as the desktop. You get the full transcript, live tool output, approvals, dictation and file upload, not a status page that links out to your laptop."
       }
     },
     {
       "@type": "Question",
-      "name": "Does Manta have a phone app for other phones?",
+      "name": "Is there a version for Android or other phones?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "No native app beyond iOS. The browser client works on every phone and serves the same app. You can pin the box's URL to the home screen. The remote page covers the part that does not depend on a phone form factor."
+        "text": "Not yet. The phone client is a native iPhone app; there is no browser client. The desktop app covers macOS and Windows, and your agents run on any Linux box or Mac you own. The remote page covers running the agents on a box."
       }
     },
     {
@@ -114,7 +122,7 @@
       "name": "Can I dictate a reply instead of typing on the phone keyboard?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "Yes. Hold the mic, speak, release. The same command classifier the desktop uses picks dictation from a spoken question. The text lands in the composer ready to send or edit."
+        "text": "Yes. Hold the mic, speak, release, and the transcript lands in the composer ready to send or edit."
       }
     },
     {
@@ -137,19 +145,25 @@
     <nav>
       <div class="brand"><img src="manta-logo.png" alt="Manta"><span>Manta<b>UI</b></span></div>
       <div class="navlinks">
-        <a href="/" class="hide-sm">Home</a>
+        <a href="/">Home</a>
+        <a href="/#features" class="hide-sm">Features</a>
         <a href="/vs-orca" class="hide-sm">Compare</a>
         <a href="/claude-code-remote" class="hide-sm">How it works</a>
+        <button class="theme-toggle" type="button" id="themeToggle" aria-label="Switch between light and dark theme">
+          <svg class="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+            stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/></svg>
+          <svg class="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+            stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M4.2 4.2l1.6 1.6M18.2 18.2l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.2 19.8l1.6-1.6M18.2 5.8l1.6-1.6"/></svg>
+        </button>
         <a href="https://github.com/antoinedc/MantaUI" class="btn btn-ghost">GitHub</a>
       </div>
     </nav>
   </div>
 </header>
-
 <div class="hero-comp">
   <div class="wrap">
     <h1>Claude Code on your phone, with full parity</h1>
-    <p class="lede">Manta's phone app is the same code as the desktop, so you get the full Claude Code transcript on your iPhone, not a status viewer. Read the diff, approve the risky command, dictate what to do next.</p>
+    <p class="lede">Manta's iPhone app is a native client for the same box as the desktop, so you get the full Claude Code transcript on your phone, not a status viewer. Read the diff, approve the risky command, dictate what to do next.</p>
 
     <div class="phwrap">
       <div class="phone">
@@ -184,8 +198,8 @@
   <div class="wrap">
     <div class="sec-head">
       <div class="eyebrow">The client</div>
-      <h2>Same code as the desktop</h2>
-      <p>The phone app is not a viewer for the desktop. It is the desktop app, packaged for a phone, talking to the same box.</p>
+      <h2>Talking to the same box</h2>
+      <p>The phone app is not a viewer for the desktop. It is a native client that talks to the same box and the same sessions, packaged for a phone.</p>
     </div>
     <ul class="checks">
       <li><span class="ck">✓</span><span><b>Full chat transcript.</b> Every user turn, every assistant turn, every tool call. The same scrollback you see on the desktop, on a screen that fits in your hand.</span></li>
@@ -210,7 +224,7 @@
       <li><span class="ck">✓</span><span><b>Working at the desk, phone stays quiet.</b> If the desktop app is foreground and active, the phone does not buzz. The notification surfaces where you are.</span></li>
       <li><span class="ck">✓</span><span><b>Stepped away, desktop gets it first.</b> The desktop rings first, the phone rings ninety seconds later. One or the other reaches you.</span></li>
       <li><span class="ck">✓</span><span><b>Blocking asks hit every device at once.</b> A permission request, a question, an error. The agent is stuck until you say so, so every device you have rings together.</span></li>
-      <li><span class="ck">✓</span><span><b>Native iPhone, any browser elsewhere.</b> A real iOS app for push delivery. Any other phone reaches the same box in a browser, with no installation.</span></li>
+      <li><span class="ck">✓</span><span><b>Native iPhone app.</b> A real iOS app for push delivery and whole-client access, not a status screen.</span></li>
     </ul>
   </div>
 </section>
@@ -220,12 +234,11 @@
   <div class="wrap">
     <div class="sec-head">
       <div class="eyebrow">Where it works</div>
-      <h2>Native iPhone, browser everywhere else</h2>
-      <p>The iPhone app ships in the App Store. Every other phone runs the same client in a browser at the box's per-device URL. The transcript is identical.</p>
+      <h2>A native iPhone app</h2>
+      <p>A native iOS app that pairs straight to your box. No browser tab, no account form — the transcript and approvals live on your phone.</p>
     </div>
     <ul class="checks">
-      <li><span class="ck">✓</span><span><b>Native iOS app.</b> Capacitor shell around the same React client the desktop uses. Pair with a six-digit code, no account in between.</span></li>
-      <li><span class="ck">✓</span><span><b>Any browser on any other phone.</b> The browser client serves the full app. Pin it to the home screen and it behaves like a native shell.</span></li>
+      <li><span class="ck">✓</span><span><b>Native iOS app.</b> An iPhone client that talks to the same box as the desktop. Pair with a six-digit code, no account in between.</span></li>
       <li><span class="ck">✓</span><span><b>The same session on every device.</b> Pick up the phone, finish the thought on the laptop. Both devices show the same transcript, the same tool calls, the same approvals.</span></li>
       <li><span class="ck">✓</span><span><b>No account required.</b> Pairing is a six-digit code your box prints. The phone never signs up, never sees an account form, never talks to anyone but your box.</span></li>
     </ul>
@@ -241,10 +254,10 @@
       <p>Five questions, answered in full.</p>
     </div>
     <div class="faq">
-      <div class="q"><h3>Is the phone app a viewer or a real client?</h3><p>A real client. The iPhone app is the same React code as the desktop, packaged with Capacitor. You get the full transcript, live tool output, approvals, dictation and file upload, not a status page that links out to your laptop.</p></div>
-      <div class="q"><h3>Does Manta have a phone app for other phones?</h3><p>No native app beyond iOS. The browser client works on every phone and serves the same app. You can pin the box's URL to the home screen. <a href="/claude-code-remote">The remote page</a> covers the part that does not depend on a phone form factor.</p></div>
+      <div class="q"><h3>Is the phone app a viewer or a real client?</h3><p>A real client. The iPhone app is a native app that talks straight to the same box as the desktop. You get the full transcript, live tool output, approvals, dictation and file upload, not a status page that links out to your laptop.</p></div>
+      <div class="q"><h3>Is there a version for Android or other phones?</h3><p>Not yet. The phone client is a native iPhone app; there is no browser client. The desktop app covers macOS and Windows, and your agents run on any Linux box or Mac you own. <a href="/claude-code-remote">The remote page</a> covers running the agents on a box.</p></div>
       <div class="q"><h3>Do notifications wake up the phone even when I am at my desk?</h3><p>No. Manta's push routing only sends to the phone when the desktop is not foreground or active. At your desk, the desktop rings. Away from it, the phone rings. Blocking asks like a permission request ring every device at once, because the agent is stuck until you answer.</p></div>
-      <div class="q"><h3>Can I dictate a reply instead of typing on the phone keyboard?</h3><p>Yes. Hold the mic, speak, release. The same command classifier the desktop uses picks dictation from a spoken question. The text lands in the composer ready to send or edit.</p></div>
+      <div class="q"><h3>Can I dictate a reply instead of typing on the phone keyboard?</h3><p>Yes. Hold the mic, speak, release, and the transcript lands in the composer ready to send or edit.</p></div>
       <div class="q"><h3>Does the phone talk to my laptop or straight to the box?</h3><p>Straight to the box. The phone pairs with the box directly over HTTPS, the same way the desktop does. Your laptop does not need to be open. Closing the laptop does not drop the phone.</p></div>
     </div>
   </div>
@@ -277,20 +290,20 @@
         <p style="margin-top:11px;font-size:13px;color:var(--slate-500);max-width:250px">Self-hosted coding agents you can reach from anywhere.</p>
       </div>
       <div><h4>Product</h4><ul>
-        <li><a href="/">Features</a></li><li><a href="/claude-code-mobile">Mobile</a></li>
+        <li><a href="/#features">Features</a></li><li><a href="/claude-code-mobile">Mobile</a></li>
         <li><a href="/open-source">Open source</a></li>
         <li><a href="/claude-code-remote">How it works</a></li></ul></div>
       <div><h4>Compare</h4><ul>
         <li><a href="/vs-orca">vs Orca</a></li>
         <li><a href="/vs-conductor">vs Conductor</a></li>
         <li><a href="/vs-ssh-tmux">vs SSH and tmux</a></li></ul></div>
-      <div><h4>Use cases</h4><ul>
-        <li><a href="/claude-code-web-ui">Claude Code web UI</a></li>
-        <li><a href="/claude-code-mobile">Claude Code on mobile</a></li>
-        <li><a href="/claude-code-remote">Claude Code remote</a></li>
-        <li><a href="/open-source">Open source</a></li></ul></div>
+      <div><h4>Download</h4><ul>
+        <li><a href="/#download">macOS</a></li>
+        <li><a href="/#download">Windows</a></li>
+        <li><a href="/claude-code-mobile">iPhone</a></li></ul></div>
       <div><h4>Resources</h4><ul>
         <li><a href="https://github.com/antoinedc/MantaUI">GitHub</a></li>
+        <li><a href="/pricing">Pricing</a></li>
         <li><a href="/privacy">Privacy</a></li>
         <li><a href="/terms">Terms</a></li></ul></div>
     </div>
@@ -300,6 +313,28 @@
     </div>
   </div>
 </footer>
+
+<script>
+/* Theme toggle. Persists the explicit choice; until the visitor makes one the
+   page keeps following the OS (including a live change while it is open). */
+(function(){
+  var root=document.documentElement, btn=document.getElementById("themeToggle");
+  if(!btn)return;
+  btn.addEventListener("click",function(){
+    var next=root.getAttribute("data-theme")==="light"?"dark":"light";
+    root.setAttribute("data-theme",next);
+    try{localStorage.setItem("manta-theme",next)}catch(e){}
+  });
+  var mq=window.matchMedia("(prefers-color-scheme: light)");
+  var onChange=function(e){
+    var stored=null; try{stored=localStorage.getItem("manta-theme")}catch(err){}
+    if(stored==="light"||stored==="dark")return;
+    root.setAttribute("data-theme",e.matches?"light":"dark");
+  };
+  if(mq.addEventListener)mq.addEventListener("change",onChange);
+  else if(mq.addListener)mq.addListener(onChange);
+})();
+</script>
 
 </body>
 </html>

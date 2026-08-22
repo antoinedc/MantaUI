@@ -5,7 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Manta UI vs Conductor: an honest comparison</title>
 <meta name="description" content="A fair side-by-side of Manta UI and Conductor (conductor.build) on architecture, platforms, sandboxing, diff review, the paid Cloud beta, and licensing.">
-<meta name="theme-color" content="#0B1020">
+<meta name="theme-color" content="#0B0C0E">
+<script>
+/* Stamp the theme before first paint so a light-mode visitor never sees a dark
+   flash (and vice versa). Explicit choice wins; otherwise follow the OS. */
+(function(){try{var t=localStorage.getItem("manta-theme");
+if(t!=="light"&&t!=="dark"){t=window.matchMedia("(prefers-color-scheme: light)").matches?"light":"dark"}
+document.documentElement.setAttribute("data-theme",t)}catch(e){
+document.documentElement.setAttribute("data-theme","dark")}})();
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -106,15 +114,21 @@
     <nav>
       <div class="brand"><img src="manta-logo.png" alt="Manta"><span>Manta<b>UI</b></span></div>
       <div class="navlinks">
-        <a href="/" class="hide-sm">Home</a>
+        <a href="/">Home</a>
+        <a href="/#features" class="hide-sm">Features</a>
         <a href="/vs-orca" class="hide-sm">Compare</a>
         <a href="/claude-code-remote" class="hide-sm">How it works</a>
+        <button class="theme-toggle" type="button" id="themeToggle" aria-label="Switch between light and dark theme">
+          <svg class="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+            stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/></svg>
+          <svg class="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+            stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M4.2 4.2l1.6 1.6M18.2 18.2l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.2 19.8l1.6-1.6M18.2 5.8l1.6-1.6"/></svg>
+        </button>
         <a href="https://github.com/antoinedc/MantaUI" class="btn btn-ghost">GitHub</a>
       </div>
     </nav>
   </div>
 </header>
-
 <div class="hero-comp">
   <div class="wrap">
     <h1>Manta UI vs Conductor</h1>
@@ -125,7 +139,7 @@
       <ul>
         <li><span class="vtag">Pick Conductor</span><span><b>If you live on macOS, want a polished Mac-native IDE with diff review and inline comments back to the agent, and the lack of a phone app is fine.</b> Conductor's Mac app, diff review and PR/merge tail are the strongest parts of the product.</span></li>
         <li><span class="vtag">Pick Manta</span><span><b>If you want agents on a Linux box that outlives the laptop, a phone app that can approve a command, and self-hosted open source with no seat count.</b></span></li>
-        <li><span class="vtag">Overlap</span><span>Both run Claude Code in chat panels with a worktree per session. The trade-off is where the work lives and what happens when you close the lid.</span></li>
+        <li><span class="vtag">Overlap</span><span>Both run Claude Code in chat panels with isolated worktrees for background jobs. The trade-off is where the work lives and what happens when you close the lid.</span></li>
       </ul>
     </div>
   </div>
@@ -154,13 +168,13 @@
           <tr><td>Approve a command from your phone</td><td class="us on">One tap</td><td class="off">No</td></tr>
           <tr><td>Tells you when the agent is blocked</td><td class="us on">Push to the right device</td><td class="off">No</td></tr>
           <tr><td>Remote access</td><td class="us on">Detected and set up</td><td class="mid">Conductor Cloud (beta, Pro, GitHub-only, 10-workspace cap)</td></tr>
-          <tr><td>Platforms</td><td class="us mid">Linux or macOS box, macOS and Windows desktop, iPhone app, browser</td><td class="mid">macOS only. <q>not available for Windows or Linux yet.</q> <span class="src">conductor.build/docs</span></td></tr>
+          <tr><td>Platforms</td><td class="us mid">Linux or macOS box, macOS and Windows desktop, iPhone app</td><td class="mid">macOS only. <q>not available for Windows or Linux yet.</q> <span class="src">conductor.build/docs</span></td></tr>
           <tr><td>Permissions model</td><td class="us on">Explicit permission cards, yolo opt-in</td><td class="off">Agents run without sandboxing</td></tr>
           <tr><td>Sandboxing</td><td class="us on">Commands ask first</td><td class="off">Workspace isolation is development isolation, not a security boundary</td></tr>
           <tr><td>Diff review / inline annotation</td><td class="us off">No</td><td class="on">Yes, with inline comments back to the agent</td></tr>
           <tr><td>Built-in code editor</td><td class="us mid">Terminal + chat only</td><td class="on">Mac-native, polished</td></tr>
-          <tr><td>Agent runtimes supported</td><td class="us mid">2 (Claude Code, opencode)</td><td class="mid">2 (Claude Code)</td></tr>
-          <tr><td>Git worktree per session</td><td class="us on">Yes</td><td class="on">Yes</td></tr>
+          <tr><td>Agent runtimes supported</td><td class="us mid">Claude Code, Codex, Kimi, opencode, plus any CLI agent</td><td class="mid">2 (Claude Code)</td></tr>
+          <tr><td>Git worktree per session</td><td class="us mid">Bg jobs, opt-in per session</td><td class="on">Yes</td></tr>
           <tr><td>Real tmux underneath</td><td class="us on">Yes, you can SSH in</td><td class="off">No</td></tr>
           <tr><td>Agent scheduling, webhooks, secrets</td><td class="us on">Yes</td><td class="off">No</td></tr>
           <tr><td>Linear / GitHub integration depth</td><td class="us mid">Basic</td><td class="on">Deep</td></tr>
@@ -241,9 +255,9 @@
       <div class="arch-card">
         <h3>Manta: the box is the source of truth</h3>
 <pre>   <span class="hl">Linux box or Mac</span>      <span class="dm">← owns tmux, files, agents</span>
-        │      │      │
-   desktop   phone   browser
-<span class="gr">  (full app) (full)  (full)
+        │      │
+   desktop   phone
+<span class="gr">  (full app) (full)
 
   close every client and the
   work continues, on free,
@@ -306,19 +320,20 @@
         <p style="margin-top:11px;font-size:13px;color:var(--slate-500);max-width:250px">Self-hosted coding agents you can reach from anywhere.</p>
       </div>
       <div><h4>Product</h4><ul>
-        <li><a href="/">Features</a></li><li><a href="/claude-code-mobile">Mobile</a></li>
+        <li><a href="/#features">Features</a></li><li><a href="/claude-code-mobile">Mobile</a></li>
         <li><a href="/open-source">Open source</a></li>
         <li><a href="/claude-code-remote">How it works</a></li></ul></div>
       <div><h4>Compare</h4><ul>
         <li><a href="/vs-orca">vs Orca</a></li>
         <li><a href="/vs-conductor">vs Conductor</a></li>
         <li><a href="/vs-ssh-tmux">vs SSH and tmux</a></li></ul></div>
-      <div><h4>Use cases</h4><ul>
-        <li><a href="/claude-code-mobile">Claude Code on mobile</a></li>
-        <li><a href="/claude-code-remote">Claude Code remote</a></li>
-        <li><a href="/">Notifications</a></li></ul></div>
+      <div><h4>Download</h4><ul>
+        <li><a href="/#download">macOS</a></li>
+        <li><a href="/#download">Windows</a></li>
+        <li><a href="/claude-code-mobile">iPhone</a></li></ul></div>
       <div><h4>Resources</h4><ul>
         <li><a href="https://github.com/antoinedc/MantaUI">GitHub</a></li>
+        <li><a href="/pricing">Pricing</a></li>
         <li><a href="/privacy">Privacy</a></li>
         <li><a href="/terms">Terms</a></li></ul></div>
     </div>
@@ -328,6 +343,28 @@
     </div>
   </div>
 </footer>
+
+<script>
+/* Theme toggle. Persists the explicit choice; until the visitor makes one the
+   page keeps following the OS (including a live change while it is open). */
+(function(){
+  var root=document.documentElement, btn=document.getElementById("themeToggle");
+  if(!btn)return;
+  btn.addEventListener("click",function(){
+    var next=root.getAttribute("data-theme")==="light"?"dark":"light";
+    root.setAttribute("data-theme",next);
+    try{localStorage.setItem("manta-theme",next)}catch(e){}
+  });
+  var mq=window.matchMedia("(prefers-color-scheme: light)");
+  var onChange=function(e){
+    var stored=null; try{stored=localStorage.getItem("manta-theme")}catch(err){}
+    if(stored==="light"||stored==="dark")return;
+    root.setAttribute("data-theme",e.matches?"light":"dark");
+  };
+  if(mq.addEventListener)mq.addEventListener("change",onChange);
+  else if(mq.addListener)mq.addListener(onChange);
+})();
+</script>
 
 </body>
 </html>

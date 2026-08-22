@@ -5,7 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Manta UI vs Orca: an honest comparison</title>
 <meta name="description" content="A fair side-by-side of Manta UI and Orca (onorca.dev) on architecture, mobile, remote access, permissions, diff review, agent runtimes, and licensing.">
-<meta name="theme-color" content="#0B1020">
+<meta name="theme-color" content="#0B0C0E">
+<script>
+/* Stamp the theme before first paint so a light-mode visitor never sees a dark
+   flash (and vice versa). Explicit choice wins; otherwise follow the OS. */
+(function(){try{var t=localStorage.getItem("manta-theme");
+if(t!=="light"&&t!=="dark"){t=window.matchMedia("(prefers-color-scheme: light)").matches?"light":"dark"}
+document.documentElement.setAttribute("data-theme",t)}catch(e){
+document.documentElement.setAttribute("data-theme","dark")}})();
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -59,7 +67,7 @@
       "name": "Is Manta a fork of Orca?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "No. They are separate products with separate codebases. Both are MIT, both run Claude Code in a terminal, and the similarity ends there. Orca is desktop-first and ships 34 agent runtimes; Manta is box-first and ships two."
+        "text": "No. They are separate products with separate codebases. Both are MIT, both run Claude Code in a terminal, and the similarity ends there. Orca is desktop-first and ships 34 agent runtimes; Manta is box-first and ships a handful of CLI runtimes."
       }
     },
     {
@@ -67,7 +75,7 @@
       "name": "Does Manta run on any of Orca's agent runtimes?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "No. Manta runs Claude Code and opencode in a real tmux session on your box. Orca's runtime count comes from packaging many agent CLIs into the desktop app; Manta does not do that today and would not benefit from the same approach because it does not own the editor."
+        "text": "No. Manta runs Claude Code, Codex, Kimi and opencode in real tmux sessions on your box. Orca's runtime count comes from packaging many agent CLIs into the desktop app; Manta does not do that today and would not benefit from the same approach because it does not own the editor."
       }
     },
     {
@@ -106,15 +114,21 @@
     <nav>
       <div class="brand"><img src="manta-logo.png" alt="Manta"><span>Manta<b>UI</b></span></div>
       <div class="navlinks">
-        <a href="/" class="hide-sm">Home</a>
+        <a href="/">Home</a>
+        <a href="/#features" class="hide-sm">Features</a>
         <a href="/vs-orca" class="hide-sm">Compare</a>
         <a href="/claude-code-remote" class="hide-sm">How it works</a>
+        <button class="theme-toggle" type="button" id="themeToggle" aria-label="Switch between light and dark theme">
+          <svg class="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+            stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/></svg>
+          <svg class="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+            stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M4.2 4.2l1.6 1.6M18.2 18.2l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.2 19.8l1.6-1.6M18.2 5.8l1.6-1.6"/></svg>
+        </button>
         <a href="https://github.com/antoinedc/MantaUI" class="btn btn-ghost">GitHub</a>
       </div>
     </nav>
   </div>
 </header>
-
 <div class="hero-comp">
   <div class="wrap">
     <h1>Manta UI vs Orca</h1>
@@ -125,7 +139,7 @@
       <ul>
         <li><span class="vtag">Pick Orca</span><span><b>If you want 34 agent runtimes, a Monaco-based editor with Design Mode, and you only need your laptop.</b> Orca is the more mature IDE today, and the only one of the two with a Linux desktop.</span></li>
         <li><span class="vtag">Pick Manta</span><span><b>If your agent should keep running after you close the laptop, your phone should be able to approve a command, and you want one self-hosted box rather than a desktop app you have to keep open.</b></span></li>
-        <li><span class="vtag">Overlap</span><span>Both give you an agent chat panel, a worktree per session, and a real terminal. The trade-off is where the work lives.</span></li>
+        <li><span class="vtag">Overlap</span><span>Both give you an agent chat panel, isolated worktrees for background jobs, and a real terminal. The trade-off is where the work lives.</span></li>
       </ul>
     </div>
   </div>
@@ -158,9 +172,9 @@
           <tr><td>Sandboxing</td><td class="us on">Commands ask first; trust-a-session for speed</td><td class="off">Permission-bypass flag ships pre-checked</td></tr>
           <tr><td>Diff review / inline annotation</td><td class="us off">No</td><td class="on">Yes</td></tr>
           <tr><td>Built-in code editor</td><td class="us mid">Terminal + chat only</td><td class="on">Monaco with Design Mode</td></tr>
-          <tr><td>Agent runtimes supported</td><td class="us mid">2 (Claude Code, opencode)</td><td class="on">34</td></tr>
+          <tr><td>Agent runtimes supported</td><td class="us mid">Claude Code, Codex, Kimi, opencode, plus any CLI agent</td><td class="on">34</td></tr>
           <tr><td>Desktop OS coverage</td><td class="us mid">macOS and Windows desktop, iPhone app (box runs on Linux or macOS)</td><td class="on">macOS, Windows, Linux</td></tr>
-          <tr><td>Git worktree per session</td><td class="us on">Yes</td><td class="on">Yes</td></tr>
+          <tr><td>Git worktree per session</td><td class="us mid">Bg jobs, opt-in per session</td><td class="on">Yes</td></tr>
           <tr><td>Real tmux underneath</td><td class="us on">Yes, you can SSH in</td><td class="off">No</td></tr>
           <tr><td>Agent scheduling, webhooks, secrets</td><td class="us on">Yes</td><td class="off">No</td></tr>
           <tr><td>Account required</td><td class="us on">No</td><td class="mid">For mobile pairing</td></tr>
@@ -186,7 +200,7 @@
       <p>Stated plainly. If any of these is what you need, Orca is the right answer.</p>
     </div>
     <ul class="checks">
-      <li><span class="ck">›</span><span><b>Agent runtime count.</b> Orca ships 34. Manta ships two today (Claude Code and opencode). If you want Cursor, Codex, Aider and the rest of the field on the same desktop, Orca is the answer.</span></li>
+      <li><span class="ck">›</span><span><b>Agent runtime count.</b> Orca ships 34. Manta ships Claude Code, Codex, Kimi and opencode natively (plus any CLI agent in terminal mode). If you want Cursor, Codex, Aider and the rest of the field on the same desktop, Orca is the answer.</span></li>
       <li><span class="ck">›</span><span><b>Built-in editor.</b> Monaco with Design Mode lets you edit, preview and let the agent touch the same file. Manta gives you a terminal and a chat panel; your editor stays your editor.</span></li>
       <li><span class="ck">›</span><span><b>Diff review and inline annotation.</b> Orca's PR/merge tail and inline comments back to the agent are the strongest part of the product. Manta has none of it.</span></li>
       <li><span class="ck">›</span><span><b>A Linux desktop.</b> Orca ships one; Manta does not. Manta's desktop is macOS and Windows, and the box itself runs on Linux or macOS.</span></li>
@@ -237,9 +251,9 @@
       <div class="arch-card">
         <h3>Manta: the box is the source of truth</h3>
 <pre>   <span class="hl">Linux box or Mac</span>      <span class="dm">← owns tmux, files, agents</span>
-        │      │      │
-   desktop   phone   browser
-<span class="gr">  (full app) (full)  (full)
+        │      │
+   desktop   phone
+<span class="gr">  (full app) (full)
 
   close every client and the
   work continues anyway.</span></pre>
@@ -271,8 +285,8 @@
       <p>Five questions, answered in full.</p>
     </div>
     <div class="faq">
-      <div class="q"><h3>Is Manta a fork of Orca?</h3><p>No. They are separate products with separate codebases. Both are MIT, both run Claude Code in a terminal, and the similarity ends there. Orca is desktop-first and ships 34 agent runtimes; Manta is box-first and ships two.</p></div>
-      <div class="q"><h3>Does Manta run on any of Orca's agent runtimes?</h3><p>No. Manta runs Claude Code and opencode in a real tmux session on your box. Orca's runtime count comes from packaging many agent CLIs into the desktop app; Manta does not do that today and would not benefit from the same approach because it does not own the editor.</p></div>
+      <div class="q"><h3>Is Manta a fork of Orca?</h3><p>No. They are separate products with separate codebases. Both are MIT, both run Claude Code in a terminal, and the similarity ends there. Orca is desktop-first and ships 34 agent runtimes; Manta is box-first and ships a handful of CLI runtimes.</p></div>
+      <div class="q"><h3>Does Manta run on any of Orca's agent runtimes?</h3><p>No. Manta runs Claude Code, Codex, Kimi and opencode in real tmux sessions on your box. Orca's runtime count comes from packaging many agent CLIs into the desktop app; Manta does not do that today and would not benefit from the same approach because it does not own the editor.</p></div>
       <div class="q"><h3>Can Manta and Orca share a machine?</h3><p>Yes, on a macOS box. They use different ports and different tmux sessions, so they do not interfere. On a Linux box the same applies; the desktop piece of Orca simply has no Linux desktop binary to launch there.</p></div>
       <div class="q"><h3>Why is Orca so much more mature?</h3><p>Orca is older, has 29.6k stars on GitHub, and is YC-backed. Manta is a solo project and is younger. Maturity buys you a larger surface today (diff review, an editor, more runtimes, a Linux desktop) and a smaller backlog. We concede the comparison on maturity plainly.</p></div>
       <div class="q"><h3>Which one should I pick if my work runs locally?</h3><p>Orca. Manta is for when the work needs to outlive the laptop, or when you want a phone client that can approve a command. If neither matters and your editor matters most, Orca's Monaco integration is the answer.</p></div>
@@ -301,19 +315,20 @@
         <p style="margin-top:11px;font-size:13px;color:var(--slate-500);max-width:250px">Self-hosted coding agents you can reach from anywhere.</p>
       </div>
       <div><h4>Product</h4><ul>
-        <li><a href="/">Features</a></li><li><a href="/claude-code-mobile">Mobile</a></li>
+        <li><a href="/#features">Features</a></li><li><a href="/claude-code-mobile">Mobile</a></li>
         <li><a href="/open-source">Open source</a></li>
         <li><a href="/claude-code-remote">How it works</a></li></ul></div>
       <div><h4>Compare</h4><ul>
         <li><a href="/vs-orca">vs Orca</a></li>
         <li><a href="/vs-conductor">vs Conductor</a></li>
         <li><a href="/vs-ssh-tmux">vs SSH and tmux</a></li></ul></div>
-      <div><h4>Use cases</h4><ul>
-        <li><a href="/claude-code-mobile">Claude Code on mobile</a></li>
-        <li><a href="/claude-code-remote">Claude Code remote</a></li>
-        <li><a href="/">Notifications</a></li></ul></div>
+      <div><h4>Download</h4><ul>
+        <li><a href="/#download">macOS</a></li>
+        <li><a href="/#download">Windows</a></li>
+        <li><a href="/claude-code-mobile">iPhone</a></li></ul></div>
       <div><h4>Resources</h4><ul>
         <li><a href="https://github.com/antoinedc/MantaUI">GitHub</a></li>
+        <li><a href="/pricing">Pricing</a></li>
         <li><a href="/privacy">Privacy</a></li>
         <li><a href="/terms">Terms</a></li></ul></div>
     </div>
@@ -323,6 +338,28 @@
     </div>
   </div>
 </footer>
+
+<script>
+/* Theme toggle. Persists the explicit choice; until the visitor makes one the
+   page keeps following the OS (including a live change while it is open). */
+(function(){
+  var root=document.documentElement, btn=document.getElementById("themeToggle");
+  if(!btn)return;
+  btn.addEventListener("click",function(){
+    var next=root.getAttribute("data-theme")==="light"?"dark":"light";
+    root.setAttribute("data-theme",next);
+    try{localStorage.setItem("manta-theme",next)}catch(e){}
+  });
+  var mq=window.matchMedia("(prefers-color-scheme: light)");
+  var onChange=function(e){
+    var stored=null; try{stored=localStorage.getItem("manta-theme")}catch(err){}
+    if(stored==="light"||stored==="dark")return;
+    root.setAttribute("data-theme",e.matches?"light":"dark");
+  };
+  if(mq.addEventListener)mq.addEventListener("change",onChange);
+  else if(mq.addListener)mq.addListener(onChange);
+})();
+</script>
 
 </body>
 </html>

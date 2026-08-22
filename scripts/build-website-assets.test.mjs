@@ -146,7 +146,6 @@ test("every JSON-LD FAQ entry matches the visible FAQ text on the page", () => {
     "vs-orca.html",
     "vs-conductor.html",
     "vs-ssh-tmux.html",
-    "claude-code-web-ui.html",
     "claude-code-mobile.html",
     "claude-code-remote.html",
     "open-source.html",

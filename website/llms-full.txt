@@ -3,13 +3,15 @@
 MantaMantaUI
 
         [Home](/)
+        [Features](/#features)
         [Compare](/vs-orca)
         [How it works](/claude-code-remote)
+
         [GitHub](https://github.com/antoinedc/MantaUI)
 
     # Claude Code on your phone, with full parity
 
-    Manta's phone app is the same code as the desktop, so you get the full Claude Code transcript on your iPhone, not a status viewer. Read the diff, approve the risky command, dictate what to do next.
+    Manta's iPhone app is a native client for the same box as the desktop, so you get the full Claude Code transcript on your phone, not a status viewer. Read the diff, approve the risky command, dictate what to do next.
 
           ethernal / feat-authbox-fra-1
 
@@ -27,9 +29,9 @@ MantaMantaUI
             Reply to Manta…
 
       The client
-      ## Same code as the desktop
+      ## Talking to the same box
 
-      The phone app is not a viewer for the desktop. It is the desktop app, packaged for a phone, talking to the same box.
+      The phone app is not a viewer for the desktop. It is a native client that talks to the same box and the same sessions, packaged for a phone.
 
       - ✓Full chat transcript. Every user turn, every assistant turn, every tool call. The same scrollback you see on the desktop, on a screen that fits in your hand.
 
@@ -54,16 +56,14 @@ MantaMantaUI
 
       - ✓Blocking asks hit every device at once. A permission request, a question, an error. The agent is stuck until you say so, so every device you have rings together.
 
-      - ✓Native iPhone, any browser elsewhere. A real iOS app for push delivery. Any other phone reaches the same box in a browser, with no installation.
+      - ✓Native iPhone app. A real iOS app for push delivery and whole-client access, not a status screen.
 
       Where it works
-      ## Native iPhone, browser everywhere else
+      ## A native iPhone app
 
-      The iPhone app ships in the App Store. Every other phone runs the same client in a browser at the box's per-device URL. The transcript is identical.
+      A native iOS app that pairs straight to your box. No browser tab, no account form — the transcript and approvals live on your phone.
 
-      - ✓Native iOS app. Capacitor shell around the same React client the desktop uses. Pair with a six-digit code, no account in between.
-
-      - ✓Any browser on any other phone. The browser client serves the full app. Pin it to the home screen and it behaves like a native shell.
+      - ✓Native iOS app. An iPhone client that talks to the same box as the desktop. Pair with a six-digit code, no account in between.
 
       - ✓The same session on every device. Pick up the phone, finish the thought on the laptop. Both devices show the same transcript, the same tool calls, the same approvals.
 
@@ -76,11 +76,11 @@ MantaMantaUI
 
       ### Is the phone app a viewer or a real client?
 
-A real client. The iPhone app is the same React code as the desktop, packaged with Capacitor. You get the full transcript, live tool output, approvals, dictation and file upload, not a status page that links out to your laptop.
+A real client. The iPhone app is a native app that talks straight to the same box as the desktop. You get the full transcript, live tool output, approvals, dictation and file upload, not a status page that links out to your laptop.
 
-      ### Does Manta have a phone app for other phones?
+      ### Is there a version for Android or other phones?
 
-No native app beyond iOS. The browser client works on every phone and serves the same app. You can pin the box's URL to the home screen. [The remote page](/claude-code-remote) covers the part that does not depend on a phone form factor.
+Not yet. The phone client is a native iPhone app; there is no browser client. The desktop app covers macOS and Windows, and your agents run on any Linux box or Mac you own. [The remote page](/claude-code-remote) covers running the agents on a box.
 
       ### Do notifications wake up the phone even when I am at my desk?
 
@@ -88,7 +88,7 @@ No. Manta's push routing only sends to the phone when the desktop is not foregro
 
       ### Can I dictate a reply instead of typing on the phone keyboard?
 
-Yes. Hold the mic, speak, release. The same command classifier the desktop uses picks dictation from a spoken question. The text lands in the composer ready to send or edit.
+Yes. Hold the mic, speak, release, and the transcript lands in the composer ready to send or edit.
 
       ### Does the phone talk to my laptop or straight to the box?
 
@@ -109,7 +109,7 @@ Straight to the box. The phone pairs with the box directly over HTTPS, the same 
 
       #### Product
 
-        - [Features](/)
+        - [Features](/#features)
 - [Mobile](/claude-code-mobile)
 
         - [Open source](/open-source)
@@ -124,19 +124,19 @@ Straight to the box. The phone pairs with the box directly over HTTPS, the same 
 
         - [vs SSH and tmux](/vs-ssh-tmux)
 
-      #### Use cases
+      #### Download
 
-        - [Claude Code web UI](/claude-code-web-ui)
+        - [macOS](/#download)
 
-        - [Claude Code on mobile](/claude-code-mobile)
+        - [Windows](/#download)
 
-        - [Claude Code remote](/claude-code-remote)
-
-        - [Open source](/open-source)
+        - [iPhone](/claude-code-mobile)
 
       #### Resources
 
         - [GitHub](https://github.com/antoinedc/MantaUI)
+
+        - [Pricing](/pricing)
 
         - [Privacy](/privacy)
 
@@ -153,8 +153,10 @@ Straight to the box. The phone pairs with the box directly over HTTPS, the same 
 MantaMantaUI
 
         [Home](/)
+        [Features](/#features)
         [Compare](/vs-orca)
         [How it works](/claude-code-remote)
+
         [GitHub](https://github.com/antoinedc/MantaUI)
 
     # Run Claude Code on a server you control
@@ -166,9 +168,9 @@ MantaMantaUI
           ### The box is the source of truth
 
 ```
-   Desktop      Phone      Browser
-       │            │            │
-       └──── HTTPS ─┴──── HTTPS ─┘
+   Desktop      Phone
+       │            │
+       └──── HTTPS ─┘
                 │
    <box_id>.boxes.mantaui.com
    or your tailnet, if Tailscale is up
@@ -207,7 +209,7 @@ MantaMantaUI
 
       - ✓No account required. Pairing is a six-digit code the box prints. Devices exchange tokens, and that is the only credential in the loop.
 
-      - ✓No telemetry, no hosted control plane. The box talks to your model provider and to APNs for push fanout. Nothing else.
+      - ✓Telemetry optional, no hosted control plane. The box talks to your model provider and to APNs for push fanout. The repo's log-shipper sends nothing unless you set a token.
 
       Ingress
       ## The installer chooses how devices reach the box
@@ -252,7 +254,7 @@ No. If Tailscale is already running on the box, devices connect over your tailne
 
       ### What happens when I close my laptop?
 
-The agent keeps running, because it lives in a tmux session on the box. The box is a system service. When you open a browser or pair your phone again, the same session is there with the full history. [The mobile page](/claude-code-mobile) covers what the phone sees when this happens.
+The agent keeps running, because it lives in a tmux session on the box. The box is a system service. When you pair your phone again, the same session is there with the full history. [The mobile page](/claude-code-mobile) covers what the phone sees when this happens.
 
       ### Does this work without a public DNS record?
 
@@ -277,7 +279,7 @@ Yes, and the install script is auditable before you pipe it into bash. The repos
 
       #### Product
 
-        - [Features](/)
+        - [Features](/#features)
 - [Mobile](/claude-code-mobile)
 
         - [Open source](/open-source)
@@ -292,170 +294,19 @@ Yes, and the install script is auditable before you pipe it into bash. The repos
 
         - [vs SSH and tmux](/vs-ssh-tmux)
 
-      #### Use cases
+      #### Download
 
-        - [Claude Code web UI](/claude-code-web-ui)
+        - [macOS](/#download)
 
-        - [Claude Code on mobile](/claude-code-mobile)
+        - [Windows](/#download)
 
-        - [Claude Code remote](/claude-code-remote)
-
-        - [Open source](/open-source)
+        - [iPhone](/claude-code-mobile)
 
       #### Resources
 
         - [GitHub](https://github.com/antoinedc/MantaUI)
 
-        - [Privacy](/privacy)
-
-        - [Terms](/terms)
-
-      MIT licensed. Built for people who pair with agents.
-      llms.txt · llms-full.txt · /.well-known/agent-skills
-
-
----
-
-# https://mantaui.com/claude-code-web-ui
-
-MantaMantaUI
-
-        [Home](/)
-        [Compare](/vs-orca)
-        [How it works](/claude-code-remote)
-        [GitHub](https://github.com/antoinedc/MantaUI)
-
-    # A self-hosted web UI for Claude Code
-
-    Manta is a web UI for Claude Code that runs on your own box in real tmux. The same transcript, the same live tool output, the same approvals, in any browser on any device, with the same session on every one.
-
-        https://a3f9…b21c.boxes.mantaui.com
-
-          Ethernal
-          feat/auth
-          refactor/db!
-          main
-          Marketing
-          hero-copy
-          Infra
-          deploy
-
-          ethernal / feat/auth · box-fra-1
-          Youadd a device-code pairing flow to the auth module
-          MantaReading the current auth module before I change anything.
-          › read src/server/auth.mjs
-          › edit src/server/auth.mjs +38 −4
-          $ npm test   ✓ 41 passed · 2.1s
-
-      What is on the page
-      ## The full client, in a browser tab
-
-      Everything you can do at the desktop is here, because the browser client is the same React app served from the box.
-
-      - ✓Full chat transcript. Read every turn the agent has produced, scroll back through the whole session, jump to any tool call.
-
-      - ✓Live tool output. Bash stdout streams at roughly four hertz, with the same context bar you see on desktop.
-
-      - ✓Permission cards. Approve, deny, or write a clarification. The same cards, the same buttons.
-
-      - ✓Voice dictation. Hold the mic, dictate a reply. The same command classifier picks dictation from a question.
-
-      - ✓File upload and screenshots. Drag in an image or a log, the agent gets it as a file path.
-
-      - ✓A real tmux terminal. Switch from chat to terminal in the same window, attach to the same session the chat talks to.
-
-      What is on the box
-      ## The same box, real tmux underneath
-
-      A web UI is only useful if the work survives the tab. Here it does, because the agent lives on your hardware and the browser is a client.
-
-      - ✓Real tmux sessions. The server owns tmux. Close the browser, the agent keeps running, and you can SSH in alongside it and attach to the same window.
-
-      - ✓A worktree per session. New sessions in a git repo branch their own sibling worktree, so several agents work in parallel without standing on each other.
-
-      - ✓A system service. The server runs as a systemd user unit, so a reboot does not kill it. There is nothing to keep alive by hand.
-
-      - ✓Schedules, webhooks and secrets. The agent can put work on a timer, wake up when CI finishes, and read secrets by file path without the value ever appearing in the transcript.
-
-      - ✓Peer sessions. Two agents in the same workspace can see each other, so one can warn another before touching a file it is editing.
-
-      How the box reaches you
-      ## You do not pick the transport
-
-      The installer checks whether Tailscale is already running on the box. If it is, your devices connect over your tailnet and nothing is published to the public internet. If it is not, the box gets its own hostname and a Let's Encrypt certificate.
-
-      - ✓Tailnet when Tailscale is already up. Devices reach the box at a tailnet IP over plain HTTP. Caddy, public DNS and Let's Encrypt are skipped entirely.
-
-      - ✓A per-box hostname otherwise. The installer registers <your-box>.boxes.mantaui.com, provisions the certificate, and reloads Caddy.
-
-      - ✓Pair once per device. Each browser pairs with a six-digit code the box prints. The token is stored locally, sent on every request, and rotated by signing out.
-
-      - ✓Forceable either way. Set MANTA_INGRESS=public or MANTA_INGRESS=tailnet at install time if you want a specific path regardless of what is detected.
-
-      FAQ
-      ## Questions about the web UI
-
-      Four questions, answered in full.
-
-      ### Does the web UI work in every browser?
-
-Yes. The browser client is a standard React app served by the box. Chrome, Safari, Firefox and Edge all work. Mobile browsers on iOS and other phones work too. There is no extension to install.
-
-      ### Do I need to expose the box to the internet?
-
-No. The installer detects whether Tailscale is already running and chooses a tailnet path when it can. Nothing is published to the internet in that case. If you do not run Tailscale, the installer provisions a hostname and a Let's Encrypt certificate for you, and that is the only thing that is public.
-
-      ### How is this different from opening Claude Code's local dev server?
-
-Claude Code's local dev server runs on your laptop and dies when the laptop closes. Manta's web UI is served from a server that runs on a box you own, as a system service, and the agent lives in a real tmux session there. The web UI is a client. Close every browser tab and the work continues, because the agent never lived in the tab.
-
-      ### Does the agent keep running if I close the browser?
-
-Yes. The browser is a client to the box, not the place where the agent runs. Close the tab, shut the laptop, lose the connection. When you open a browser again and pair the device, the same session is there with the full history. [The remote page](/claude-code-remote) describes the same property from the server end.
-
-    ## Put it on your own box
-
-    Free, open source, MIT. Runs on a Linux VPS or a Mac you already own.
-
-        `$ curl -fsSL https://mantaui.com/install.sh | bash`
-        this.textContent='Copy',1400)">Copy
-
-      [Open the repo](https://github.com/antoinedc/MantaUI)
-      [Back to the homepage](/)
-
-        MantaMantaUI
-        Self-hosted coding agents you can reach from anywhere.
-
-      #### Product
-
-        - [Features](/)
-- [Mobile](/claude-code-mobile)
-
-        - [Open source](/open-source)
-
-        - [How it works](/claude-code-remote)
-
-      #### Compare
-
-        - [vs Orca](/vs-orca)
-
-        - [vs Conductor](/vs-conductor)
-
-        - [vs SSH and tmux](/vs-ssh-tmux)
-
-      #### Use cases
-
-        - [Claude Code web UI](/claude-code-web-ui)
-
-        - [Claude Code on mobile](/claude-code-mobile)
-
-        - [Claude Code remote](/claude-code-remote)
-
-        - [Open source](/open-source)
-
-      #### Resources
-
-        - [GitHub](https://github.com/antoinedc/MantaUI)
+        - [Pricing](/pricing)
 
         - [Privacy](/privacy)
 
@@ -472,481 +323,233 @@ Yes. The browser is a client to the box, not the place where the agent runs. Clo
 MantaMantaUI
 
         [Home](/)
+        [Features](/#features)
         [Compare](/vs-orca)
         [How it works](/claude-code-remote)
+
         [GitHub](https://github.com/antoinedc/MantaUI)
 
-        # Your agents keep working after you close the laptop
+      # Run every coding agent you pay for on your own server
 
-        Manta is a desktop app for Claude, Codex and Kimi running in real tmux on a Linux box or Mac you own. Start a task at your desk, approve it from your phone, come back to finished work.
+      Manta puts Claude Code, Codex and opencode on a Linux box or Mac you own: your existing subscriptions, running side by side, reachable from your desktop and your phone. Setup takes two minutes.
 
-          [Download for macOS](/downloads/Manta-latest.dmg)
-          [Download for Windows](/downloads/Manta-latest-x64.exe)
+        [Download for macOS](/downloads/Manta-latest.dmg)
+        [Download for Windows](/downloads/Manta-latest-x64.exe)
 
-        Free and open source.
+        Manta UI
 
-  Manta UI
+            Workspace+
+            CLAUDE MAX
+            Deploy billing service4m
+            Fix red CI on main
+              !
+            CODEX
+            Add CSV export2m
+            Refactor auth middleware14m
+            Settings
 
-  Workspace+
+              Deploy billing service
+              feat/orders-csv
 
-    INFRA
+                38%
 
-        Deploy billing service
-        4m
+              Add a `/export.csv` endpoint that streams the result set as CSV.
+              Read(app/routes/orders.py)
+              Read 23 lines
+              Edit(app/routes/orders.py)
+                +38 -4
 
-        Fix red CI on main
-        !
+                11-async def list_orders(status: str | None = None):
+                11+async def list_orders(
+                12+    status: str | None = Query(default=None),
+                13+    created_after: datetime | None = Query(default=None),
+                14+) -> list[dict]:
+                15    query = Order.query(session)
+                16+    return [o.to_dict() for o in (await query.all())]
 
-    ETHERNAL
+              Running command
+              Bash(pytest tests/test_orders.py)
+                running 12s
+              collected 24 items tests/test_orders.py .......
 
-        Add CSV export
-        2m
+                  Permission required Run a shell command?
+                alembic upgrade head
 
-        Refactor auth middleware
-        14m
+                  Allow once
+                  Always allow alembic upgrade *
+                  Reject
 
-        Investigate 500s in /orders
-        1h
+              Reply, or describe the next task
+              Opus 4.7 &#9662;High &#9662;
 
-    MARKETING
+      Bring your own subscriptions
 
-        Landing page copy
-        now
+        Claude CodeCodexopencode
+        Kimi+ any CLI agent
 
-        Build pipeline
-        3h
+        ### All your subscriptions, remote
 
-  Settings
+        Claude Max, ChatGPT Pro, Kimi: logged in once on the server and running side by side, in one searchable place.
 
-  Deploy billing service
-   feat/orders-csv
+        ### Runs on hardware you own
 
-    38%
+        A VPS, a spare Mac mini, a home server. Your code, your keys and every transcript stay on the box. Nothing routes through us.
 
-      Add a `/export.csv` endpoint that streams the result set as CSV.Read(app/routes/orders.py)
-    Read 23 linesEdit(app/routes/orders.py)
-    +38 -4
+        ### Open source, MIT
 
-  11-async def list_orders(status: str | None = None):
-  11+async def list_orders(
-  12+    status: str | None = Query(default=None),
-  13+    created_after: datetime | None = Query(default=None),
-  14+) -> list[dict]:
-  15    query = Order.query(session)
-  16    if status: query = query.filter(Order.status == status)
-  17+    return [o.to_dict() for o in (await query.all())]
-Bash(pytest tests/test_orders.py)
-    running 12s
-    collected 24 items tests/test_orders.py .......
+        Client and server, every line readable on GitHub. No account to create and no hosted tier waiting to upsell you. Telemetry is optional: the box sends nothing unless you set a token.
 
-  !
-    Run a shell command?
-  alembic upgrade head
+        ### Two-minute setup
 
-    Allow once
-    Always allow alembic upgrade *
-    Reject
+        Point the app at a server, it installs itself and hands you a six-digit code. Type the code on your phone and you are done.
 
-  Reply, or describe the next task
+        Setup
+        ## Two minutes, and you never touch it again
 
-    Opus 4.7 &#9662;High &#9662;
+        No terminal, no keys to copy, no tunnel to configure, no ports to forward. The desktop app does the whole install over SSH.
 
-  Permissions on, click to bypass
+          1
+            ### Enter your server
 
-      1.0Install
-        Pick a machine. It sets itself up.
-      2.0Run
-        Chat sessions and real terminals.
-      3.0Leave
-        Close the lid. It carries on.
-      4.0Design
-        Ask for a page. Get a URL.
-      5.0Automate
-        Work that starts without you.
+              Pick a machine from your SSH config, or type a host. Any always-on Linux box or Apple Silicon Mac works.
 
-      Open source, MIT licensed
-      No account, no telemetry
-      Your own Claude, Codex or Kimi plan
-      Sessions live on your box
+          2
+            ### It installs and pairs itself
 
-      The problem
-      ## Three subscriptions, ten tmux windows, and it all dies with the lid.
+              Its own runtime, a system service, a certificate: no system packages touched. Ends with a six-digit code.
 
-      None of that is your agent&#8217;s fault. It is where the agent is running: a laptop that sleeps, that you close, that you carry away from your desk.
+          3
+            ### Connect your subscriptions
 
-      Move it to a machine that is always on and every one of these stops being your problem.
+              Log each agent CLI into the plan you already pay for, once. Every device you pair sees all of them.
 
-      Keeping track of sessions is your jobevery day
-        tmux ls &middot; which window &middot; which branch &middot; reattach &middot; scroll back
-      The lid closes and the agent stops18:40
-        forty minutes of work gone, because you had a train to catch
-      It asked you something an hour ago+1h04
-        idle on one permission prompt &middot; nothing told you
-      Three subscriptions, three windows&times;3
-        claude &middot; codex &middot; kimi &mdash; three histories you cannot search
+          Install on a fresh VPS takes about two minutes, start to finish
 
-    1.0## Install
+        #### Where should your agents run?
 
-    The desktop app installs everything on the machine you choose, over SSH, and pairs itself. No terminal, no keys to copy, no tunnel to configure.
+          Manta found these in your SSH config. It installs everything itself.
 
-    #### Where should your agents run?
+          hetzner-box  Ubuntu 24.04, always on
+          157.90.224.92
 
-      Manta found these in your SSH config. It installs everything itself, nothing to type on the far end.
+          mac-mini  macOS, Apple Siliconlocal network
 
-      hetzner-box  Ubuntu 24.04, always on
-      157.90.224.92
+          Another machinehost or IP
 
-      mac-mini  macOS, Apple Siliconlocal network
+          &check; runtime installed node 24, no system packages touched
+          &check; manta-server running 127.0.0.1:8787
+          &check; reachable over HTTPS certificate issued
+          &rsaquo; waiting for a device&hellip;
 
-      Another machinehost or IP
+            Pairing code
+            419207
 
-      Install and pair
-      Takes about 90 seconds
+          Type it on your phone to add it too.
 
-       runtime installed node 24, no system packages touched
-       manta-server running 127.0.0.1:8787
-       reachable over HTTPS certificate issued
-       waiting for a device&#8230;
+      What you get
+      ## A real client, not a status screen
 
-      Pairing code
+      Everything below works the same on the desktop app, in a browser, and on the iPhone app.
 
-        419207
-      Type it on your phone to add it too. Expires in 5 minutes.
+      ### Readable transcripts
 
-    2.0## Run
+        Diffs inline, tool calls collapsed, live command output as it streams. Not a terminal you have to squint at.
 
-    A readable transcript, the diff inline, one tap to approve a command, and an actual tmux terminal underneath when you want one.
+      ### Approve from anywhere
 
-  Manta UI
+        When an agent asks to run something, you get a button: on whichever device you happen to be holding.
 
-  Workspace+
+      ### Notifications that find you
 
-    INFRA
+        Desktop while you are at the machine, phone push once you walk away. Never both, never for something you are watching.
 
-        Deploy billing service
-        4m
+      ### Real tmux underneath
 
-        Fix red CI on main
-        !
+        Every session is a genuine tmux window. SSH in alongside Manta whenever you want; it is the same box.
 
-    ETHERNAL
+      ### Parallel worktrees
 
-        Add CSV export
-        2m
+        Delegate long jobs to background agents, each in its own git worktree and branch. They never touch your checkout.
 
-        Refactor auth middleware
-        14m
+      ### Search every session
 
-        Investigate 500s in /orders
-        1h
+        One query across the full history of every conversation on the box, whichever agent produced it.
 
-    MARKETING
+      ### Voice, files and screenshots
 
-        Landing page copy
-        now
+        Dictate a prompt, drag a file onto a session, paste a screenshot. It lands on the server, not in a cloud bucket.
 
-        Build pipeline
-        3h
+      ### Scheduled and triggered work
 
-  Settings
+        Run a prompt on a cron, or let CI wake a session by webhook. Work that starts without you being there.
 
-  infra / Deploy billing service
-   feat/orders-csv
+      ### Secrets stay secret
 
-    38%
+        Hand an agent a token by reference, never by value. It uses the credential without it entering the transcript.
 
-      Add a `/export.csv` endpoint that streams the result set as CSV, header row
-    first. Use the streaming helper so we don't hold 100k rows in memory.Read(app/routes/orders.py)
-    Read 23 linesEdit(app/routes/orders.py)
-    +38 -4
+        Open source
+        ## Nothing to trust us with
 
-  11-async def list_orders(status: str | None = None):
-  11+async def list_orders(
-  12+    status: str | None = Query(default=None),
-  13+    created_after: datetime | None = Query(default=None),
-  14+) -> list[dict]:
-  15    query = Order.query(session)
-  16    if status: query = query.filter(Order.status == status)
-  17+    return [o.to_dict() for o in (await query.all())]
-Bash(pytest tests/test_orders.py)
-    running 12s
-    collected 24 items tests/test_orders.py .......
+        Manta is MIT licensed, client and server. There is no Manta account and no hosted tier. Telemetry is an optional log-shipper that sends nothing unless you set a token. Read the code, build it yourself, and run it with no connection to us at all.
 
-  Reply, or describe the next task
+          - &check;Your transcripts, uploads and secrets never leave the box
 
-    Opus 4.7 &#9662;High &#9662;
+          - &check;The only outbound traffic is your agent calling its own provider
 
-  Permissions on, click to bypass
+          - &check;No per-seat pricing, because there are no seats
 
-    3.0## Leave
+          [Read the source](https://github.com/antoinedc/MantaUI)
+          [Why it matters](/open-source)
 
-    Shut the laptop and the work does not stop, because it was never running there. When the agent needs you, the notification finds whichever device you are actually using.
+          antoinedc/MantaUI
 
-      Manta UI (disconnected)
+            TypeScript & SwiftMIT
 
-  Workspace+
+            Desktop, server & iOSone repo
 
-    INFRA
+            Self-updating boxesno lock-in
 
-        Deploy billing service
-        4m
-
-        Fix red CI on main
-        !
-
-    ETHERNAL
-
-        Add CSV export
-        2m
-
-        Refactor auth middleware
-        14m
-
-        Investigate 500s in /orders
-        1h
-
-    MARKETING
-
-        Landing page copy
-        now
-
-        Build pipeline
-        3h
-
-  Settings
-
-  Deploy billing service
-   feat/orders-csv
-
-    38%
-
-          Laptop asleep
-
-      Meanwhile, on the box
-
-      Still running3 sessions
-      infra / Deploy billing service
-        step 4 of 618m
-      ethernal / Add CSV export
-        running tests6m
-      marketing / Landing page copy
-        done, waiting for you
-
-The same session on the MantaUI iPhone app
-
-      The same session, on the phone. It tells you when it needs you.
-
-    4.0## Design
-
-    Ask for a mockup and you get a link, not a file. The agent writes the page on your box, serves it from your own hostname over HTTPS and hands back a URL. Open it on your phone, send it to whoever needs to look at it, then ask for the next revision &mdash; the same link updates.
-
-    Manta UI
-
-        Workspace+
-        ETHERNAL
-        Pricing page ideas1m
-        Add CSV export2m
-        MARKETING
-        Landing page copy3h
-        Settings
-
-          Pricing page ideas
-           main
-
-          Three-tier pricing page, dark, same palette as the app. Show it to me.
-          Built it and put it on your box. I would push the third tier &mdash; it is the only one
-            with the annual discount.
-          serve_page(pricing-v3)1.2s
-
-            &#8599;
-              Your page is live
-            a3f9&hellip;ea650.boxes.mantaui.com/pages/pricing-v3
-
-              Open
-              Copy link
-
-          Make the middle tier the highlighted one
-
-        a3f9&hellip;ea650.boxes.mantaui.com/pages/pricing-v3
-
-        EthernalProduct   Docs   Pricing
-        #### Simple pricing. No surprises.
-
-          Start free. Move up when the team does.
-
-          Solo$0/mo
-            - 1 workspace
-- Community support
-- 7-day history
-
-            Get started
-          Team$24/mo
-            - Unlimited workspaces
-- Shared secrets
-- 90-day history
-
-            Choose Team
-          Scale$79/mo
-            - SSO and audit log
-- Priority support
-- 2 months free yearly
-
-            Talk to us
-
-      Same link, each time you ask:
-      v1v2
-      v3
-
-    It lives on your box
-      Written to your machine and served from the hostname it already holds a certificate for. No third-party host, no account, nothing to deploy.
-
-    Sandboxed, and it expires
-      A page the model wrote is served in a sandbox, so it cannot read your session. It disappears after a day unless you ask for longer.
-
-    5.0## Automate
-
-    An agent can be woken by something happening: a labelled issue, a failed build, a time of day. It works in its own branch and leaves you a pull request.
-
-    Nobody is at the keyboard03:14
-      checks.failed on main
-    &#8595;
-    Your rule decides what happenson your box
-      when CI fails on my branch &#8594; start an agent
-    &#8595;
-    An agent starts in its own copy of the repo
-       manta/fix-orders-csv-flake
-        +18 -3 in 2 files, 6m 41s
-    &#8595;
-    A draft pull request is waiting03:21
-      #412 opened, tests green
-    &#8595;
-
-      infra / Fix red CI on main
-        Done. Draft PR #412 is waiting for review.07:02
-    You were asleep for all of it.
-
-      ### On a timer, too
-
-      Ask once, in plain English.
-
-        Scheduled3
-        every 5 min
-          check the deploy, tell me if it goes red
-          in 2m
-        weekdays 9:00
-          summarise what changed overnight
-          tomorrow
-        Sundays 18:00
-          run the dependency audit
-          in 4d
-
-      ### And it can drive your Mac
-
-      Ask from your phone. Xcode, your simulators and your signing certificates do the work at home.
-
-         build and launch MantaUI on Antoine&#8217;s MacBook Pro
-         xcodebuild&#8230;  48s
-         boot simulator&#8230;  6s
-         the app is open on the simulator
-
-      ## Everything else it does
-
-      It behaves like a machine that is yours and always on, because that is what it is.
-
-        Yours alone
-        No account, no middleman, and nothing of yours anywhere else.
-
-            your box
-            &#215;
-            anyone else
-          Self-HostedRuns on your box. No account, no telemetry, no middleman.
-
-            claude&#10003; your plan
-            codex&#10003; your plan
-            kimi&#10003; your plan
-
-          Bring Your Own PlanThe subscription you already pay for. Nothing resold.
-
-            ~/.manta-secrets/gh_pat
-            ghp_xxxxxxxxxxxx
-          Secret StoreThe agent is handed a file path, never the value.
-
-            win 1win 2win 3
-          Native TerminalsReal tmux sessions. Attach in the app, or SSH in.
-
-        Runs without you
-        The box is awake, so work can start when you are not there.
-
-            issue labeled
-            &#8595;
-            draft PR
-          WebhooksLabel a GitHub issue and an agent picks it up.
-
-            */5 * * * *0 9 * * 1-5
-          Native SchedulerEvery weekday at nine, what changed overnight.
-
-            &#9106; fix-csv-flake&#9106; bump-deps&#9106; backfill-tests
-          Native WorktreesEach job gets its own branch and its own worktree.
-
-            ios-mantauiplugin
-            xcodebuild&#10003; done
-            simctl boot&#8599; on phone
-
-          Mac PluginsXcode, simulators and certificates, driven from your phone.
-
-        Wherever you are
-        It reaches whichever device you happen to be holding.
-
-              Manta
-              Needs you
-            now
-          Push NotificationsDesktop at your desk, phone when you are not.
-
-            AllowReject
-          One-Tap ApprovalsRead the change, allow or reject in one tap.
-
-            &ldquo;allow it&rdquo;
-          Voice SupportDictate a reply, or just say allow.
-
-            screenshot.png &#8593;report.csv &#8595;
-          Artifacts ManagementDrop a screenshot in. Generated files come back.
+        $ curl mantaui.com/install.sh | bash
 
       FAQ
       ## Questions people actually ask
 
-      Each answer is written to be quotable on its own, and each one maps to a page we want to rank for.
+      ### Can I use my existing Claude and Codex subscriptions?
+
+Yes. You log each agent CLI into your own plan once on the server, and Manta runs them side by side. No Manta account, no proxy, no per-seat fee.
+
+      ### How long does setup actually take?
+
+About two minutes. Point the desktop app at a server and it installs the runtime, starts the service, gets a certificate and shows a six-digit pairing code for your other devices.
 
       ### Does the agent keep running if I close my laptop?
 
-Yes. The server runs on your box as a system service and your agents live in real tmux sessions. Every client is disposable, so you can close all of them and the work continues. Reconnect later and the full history is still there.
+Yes. Agents live in tmux sessions on the box as system services. Clients are disposable; close them all and the work continues, with full history when you reconnect.
 
-      ### Do I need Tailscale, a VPN or port forwarding?
+      ### What kind of server do I need?
 
-No, and you do not have to decide either. The installer checks whether Tailscale is already running on the box. If it is, your devices connect over your tailnet and nothing is published to the internet. If it is not, the box gets its own hostname and a Let's Encrypt certificate. Either way there is nothing to port-forward and no tunnel to keep alive, and you can force either path if you prefer.
-
-      ### Can I really use Claude Code from my phone?
-
-Yes, and the phone app is the same app as the desktop rather than a status viewer. You get the full transcript, live command output, approvals, dictation and file uploads, in a native iPhone app or any browser.
-
-      ### I already SSH into a VPS with Termius. Why switch?
-
-You have already solved the part most tools get wrong, which is keeping the agent alive when you walk away. What you do not get is a readable transcript instead of a terminal UI, buttons to approve a command, or a notification when the agent stops and waits for you. Manta runs on the same box and you can still SSH in alongside it.
-
-      ### What does it cost?
-
-Nothing. Manta is free and open source. You pay whoever supplies your agent, so an Anthropic subscription or an API key, and you supply the box.
+Any always-on Linux box or Apple Silicon Mac. A five dollar VPS is enough. The installer touches no system packages and brings its own runtime.
 
       ### Does my code leave my box?
 
-No. Transcripts, uploads, secrets and configuration stay on your machine. The only outbound traffic is your agent talking to its model provider, plus a small push payload carrying the session name if you turn on phone notifications.
+No. Transcripts, uploads, secrets and config stay on the machine. The only outbound traffic is your agent talking to its own provider.
 
-      ### Which agents does it work with?
+      ### Do I need Tailscale, a VPN or port forwarding?
 
-Claude Code and opencode today. Anything that runs in a terminal works in terminal mode, and the chat panel is built on opencode.
+No. If Tailscale is already running, devices connect over your tailnet. If not, the box gets its own hostname and certificate. Either way, nothing to port-forward.
+
+      ### Is Manta really open source?
+
+Yes: MIT licensed, client and server both. Read every line, build it yourself, run it with no connection to us. No account, no hosted tier. Telemetry is optional and sends nothing unless you set a token.
 
       ### Is this an alternative to Conductor or Orca?
 
-It overlaps with both, on a different bet. They run agents on your Mac and give you a window onto them. Manta runs agents on a box you own and gives every device the same window, so the work outlives whatever you are holding.
+They overlap on a different bet. Those run agents on your Mac; Manta runs them on a server you own and gives every device the same window onto the work.
+
+      Get started
+      ## Install the app, point it at a box
+
+      The desktop app sets the server up for you. If you would rather do it yourself, one command does the same thing.
 
       macOS
         Manta-latest.dmg
@@ -955,17 +558,15 @@ It overlaps with both, on a different bet. They run agents on your Mac and give 
         [Download](/downloads/Manta-latest.dmg)
       Windows
         Manta-latest-x64.exe
-        Windows 10 and 11, 64-bit. Not signed yet, so Windows asks you to confirm.
+        Windows 10 and 11, 64-bit.
 
-        [Download](/downloads/Manta-latest-x64.exe)
-      Your box
-        install.sh
-        Linux or a spare Mac. The app can do this for you.
+                [Download](/downloads/Manta-latest-x64.exe)
 
-        [One command](/llms-install.md)
       iPhone
         TestFlight
         Native app. Pairs with the six digits the desktop shows.
+
+        [Available on iPhone](https://testflight.apple.com/join/x84dvX76)
 
     ## Go to bed. It will be done.
 
@@ -978,7 +579,7 @@ It overlaps with both, on a different bet. They run agents on your Mac and give 
 
       #### Product
 
-        - [Features](/)
+        - [Features](/#features)
 - [Mobile](/claude-code-mobile)
 
         - [Open source](/open-source)
@@ -993,15 +594,13 @@ It overlaps with both, on a different bet. They run agents on your Mac and give 
 
         - [vs SSH and tmux](/vs-ssh-tmux)
 
-      #### Use cases
+      #### Download
 
-        - [Claude Code web UI](/claude-code-web-ui)
+        - [macOS](/#download)
 
-        - [Claude Code on mobile](/claude-code-mobile)
+        - [Windows](/#download)
 
-        - [Claude Code remote](/claude-code-remote)
-
-        - [Open source](/open-source)
+        - [iPhone](/claude-code-mobile)
 
       #### Resources
 
@@ -1024,16 +623,18 @@ It overlaps with both, on a different bet. They run agents on your Mac and give 
 MantaMantaUI
 
         [Home](/)
+        [Features](/#features)
         [Compare](/vs-orca)
         [How it works](/claude-code-remote)
+
         [GitHub](https://github.com/antoinedc/MantaUI)
 
     # Open source and self-hosted
 
-    Manta is MIT licensed and self-hosted. No account, no telemetry, no vendor, no hosted control plane. You can read every line of the server, the desktop client and the install script before you pipe it into bash. We would rather you did.
+    Manta is MIT licensed and self-hosted. No account, no vendor, no hosted control plane. Telemetry is optional and off by default. You can read every line of the server, the desktop client and the install script before you pipe it into bash. We would rather you did.
 
       antoinedc / MantaUI
-      Open-source, self-hosted Claude Code and opencode client. Agents run in real tmux on your own Linux box or Mac, and you drive them from desktop, phone or browser over HTTPS.
+      Open-source, self-hosted Claude Code and opencode client. Agents run in real tmux on your own Linux box or Mac, and you drive them from the desktop app or the native iPhone app over HTTPS.
 
         MIT licenceTypeScriptNode on the boxElectron desktopReact renderer
 
@@ -1044,22 +645,22 @@ MantaMantaUI
 
       - ✓MIT licensed. Permissive, friction-free, matches Orca. Fork it, run your own gateway, write your own client, ship a derivative.
 
-      - ✓The install script is in the repo. Read [install.sh](https://github.com/antoinedc/MantaUI/blob/main/install.sh) before you pipe it into bash. It is roughly two hundred lines of plain bash, with a checksum-verified download.
+      - ✓The install script is in the repo. Read [install.sh](https://github.com/antoinedc/MantaUI/blob/main/install.sh) before you pipe it into bash. It is plain bash with a checksum-verified download.
 
-      - ✓The server is open source. Express, the tmux and opencode proxies, push, schedules, webhooks, secrets, peer sessions. Every line.
+      - ✓The server is open source. A plain Node HTTP server: the tmux and opencode proxies, push, schedules, webhooks, secrets, peer sessions. Every line.
 
       - ✓The desktop app is open source. Electron, xterm.js, React. The renderer is a normal npm package. Build it from source if you prefer.
 
-      - ✓The phone app is open source. Capacitor shell around the same React client. The native bits are minimal glue.
+      - ✓The phone app is open source. A native Swift (SwiftUI) iPhone client, source in the repo.
 
       Self-hosted
-      ## No account, no telemetry, no seat count
+      ## No account, no seat count, telemetry optional
 
-      The product runs on hardware you own. There is no hosted control plane to sign up for, no usage telemetry leaving the box, and no seat count to grow into a bill.
+      The product runs on hardware you own. There is no hosted control plane to sign up for, no seat count to grow into a bill. Telemetry is an optional log-shipper that sends nothing unless you set a token.
 
       - ✓Nothing to sign up for. Pairing is a six-digit code your box generates. Devices exchange tokens, and that is the only credential in the loop.
 
-      - ✓No telemetry. The box talks to your model provider and to APNs for push fanout. Nothing else. The repo carries no analytics SDK.
+      - ✓Telemetry optional. The repo ships a log-shipper that sends nothing unless you set a token. The box talks to your model provider and to APNs for push fanout. Nothing else.
 
       - ✓Your code stays on your box. Transcripts, uploads, secrets and configuration live on your machine. The only outbound traffic is your agent talking to its model provider.
 
@@ -1103,7 +704,7 @@ Yes. Fork the repo, point the push routing at your own gateway, edit the manifes
 
       ### Does the box phone home?
 
-Only to your model provider and to APNs, when you have phone notifications turned on. There is no analytics SDK, no telemetry beacon, no usage ping. [The pricing page](/pricing) covers what you actually pay for.
+Only to your model provider and to APNs, when you have phone notifications turned on. Telemetry is an optional, token-gated log-shipper — nothing leaves the box unless you set a token. [The pricing page](/pricing) covers what you actually pay for.
 
     ## Put it on your own box
 
@@ -1120,7 +721,7 @@ Only to your model provider and to APNs, when you have phone notifications turne
 
       #### Product
 
-        - [Features](/)
+        - [Features](/#features)
 - [Mobile](/claude-code-mobile)
 
         - [Open source](/open-source)
@@ -1135,19 +736,19 @@ Only to your model provider and to APNs, when you have phone notifications turne
 
         - [vs SSH and tmux](/vs-ssh-tmux)
 
-      #### Use cases
+      #### Download
 
-        - [Claude Code web UI](/claude-code-web-ui)
+        - [macOS](/#download)
 
-        - [Claude Code on mobile](/claude-code-mobile)
+        - [Windows](/#download)
 
-        - [Claude Code remote](/claude-code-remote)
-
-        - [Open source](/open-source)
+        - [iPhone](/claude-code-mobile)
 
       #### Resources
 
         - [GitHub](https://github.com/antoinedc/MantaUI)
+
+        - [Pricing](/pricing)
 
         - [Privacy](/privacy)
 
@@ -1164,8 +765,10 @@ Only to your model provider and to APNs, when you have phone notifications turne
 MantaMantaUI
 
         [Home](/)
+        [Features](/#features)
         [Compare](/vs-orca)
         [How it works](/claude-code-remote)
+
         [GitHub](https://github.com/antoinedc/MantaUI)
 
     # Manta is free. You supply the box.
@@ -1183,7 +786,7 @@ MantaMantaUI
 
           - ✓No hosted control plane
 
-          - ✓No telemetry, no analytics
+          - ✓Optional telemetry — sends nothing unless you set a token
 
           - ✓No future paid tier
 
@@ -1222,7 +825,7 @@ MantaMantaUI
 
       - ✓The desktop client. Electron, xterm.js, the React chat panel, the file upload and screenshot detection, voice dictation.
 
-      - ✓The phone client. Capacitor shell, the same React code as the desktop, push delivery, dictation.
+      - ✓The phone client. A native iPhone app, full parity with the desktop, push delivery, dictation.
 
       - ✓Updates. Pull from the repo or wait for the in-app update. Both work, both are free.
 
@@ -1257,7 +860,7 @@ MantaMantaUI
 
       ### Is Manta really free?
 
-Yes. The server, the desktop client, the phone client and the install script are MIT licensed and free. There is no paid tier, no Pro feature, no in-app purchase, no upgrade prompt. You pay your model provider and you supply the box.
+Yes. The server, the desktop client, the phone client and the install script are MIT licensed and free. There is no paid tier and no per-seat fee. A native iPhone app is planned, but the server you self-host stays free. You pay your model provider and you supply the box.
 
       ### What does it cost to run?
 
@@ -1290,7 +893,7 @@ The server stops. The data is plain text on the disk, so a reinstall on a new bo
 
       #### Product
 
-        - [Features](/)
+        - [Features](/#features)
 - [Mobile](/claude-code-mobile)
 
         - [Open source](/open-source)
@@ -1305,19 +908,19 @@ The server stops. The data is plain text on the disk, so a reinstall on a new bo
 
         - [vs SSH and tmux](/vs-ssh-tmux)
 
-      #### Use cases
+      #### Download
 
-        - [Claude Code web UI](/claude-code-web-ui)
+        - [macOS](/#download)
 
-        - [Claude Code on mobile](/claude-code-mobile)
+        - [Windows](/#download)
 
-        - [Claude Code remote](/claude-code-remote)
-
-        - [Open source](/open-source)
+        - [iPhone](/claude-code-mobile)
 
       #### Resources
 
         - [GitHub](https://github.com/antoinedc/MantaUI)
+
+        - [Pricing](/pricing)
 
         - [Privacy](/privacy)
 
@@ -1334,6 +937,10 @@ The server stops. The data is plain text on the disk, so a reinstall on a new bo
 MantaMantaUI
 
         [Home](/)
+        [Features](/#features)
+        [Compare](/vs-orca)
+        [How it works](/claude-code-remote)
+
         [GitHub](https://github.com/antoinedc/MantaUI)
 
     # Privacy
@@ -1346,7 +953,7 @@ MantaMantaUI
 
     Manta UI is three surfaces:
 
-      - The desktop app (Electron) and the phone client (native iPhone app, or any browser) are thin clients — chat, terminal, and file browser over HTTPS.
+      - The desktop app (Electron, macOS and Windows) and the phone client (native iPhone app) are thin clients — chat, terminal, and file browser over HTTPS.
 
       - The server runs on your own Linux box. It owns your `tmux` sessions, your `opencode` chat sessions, your file uploads, your schedules, your secrets, your webhooks, and your notifications. Everything lives under `~/.manta/` on that box.
 
@@ -1358,7 +965,7 @@ MantaMantaUI
 
       - Pairing codes — short-lived (5 min), loopback-only, one-time. Mints when you run `npm run pair` or hit `GET /auth/pair` from the box itself.
 
-      - Device tokens — issued to each paired desktop / phone. Stored locally in each app's `config.json`; the box keeps no per-device record beyond "is this token currently valid."
+      - Device tokens — issued to each paired desktop / phone. Stored locally in each app's `config.json`. The box keeps a per-device registry (id, name, last-seen) and the APNs tokens it needs to push to each device.
 
       - Your work — every `tmux` session, every opencode chat, every uploaded file (`~/.manta-uploads/`, hourly auto-clean), every scheduled prompt, every webhook, every secret, every published page.
 
@@ -1404,13 +1011,13 @@ MantaMantaUI
 
     ## Open source
 
-    Manta UI is open source. The server, push gateway, mobile web client, and desktop app are all on [GitHub](https://github.com/antoinedc/MantaUI). The only closed-source piece is the published iOS app (which exists only because the stores require it).
+    Manta UI is open source and MIT licensed. The server, push gateway, desktop app, and native iPhone app are all on [GitHub](https://github.com/antoinedc/MantaUI). The distributed iPhone binary is published through the App Store, but its source is open.
 
     ## Your choices
 
       - Run the server yourself. Every user runs their own server on their own hardware. Chat, terminal, and file traffic never crosses our infrastructure — only native APNs pushes do, and only because Apple's key model makes that structurally necessary.
 
-      - Use the push gateway. When the iOS app is open in the background, native pushes fan out through `gateway.mantaui.com`. Web Push (VAPID, for browser installs) stays box-local and does NOT touch the gateway.
+      - Use the push gateway. When the iOS app is open in the background, native pushes fan out through `gateway.mantaui.com`. There is no web/browser client — push reaches the desktop app and the native iPhone app.
 
       - Delete your data. Uninstalling the desktop or phone app removes its local config. Wiping `~/.manta/` on the box removes identity + work. Asking us to forget a box drops the gateway row.
 
@@ -1422,14 +1029,46 @@ MantaMantaUI
 
     Manta UI is open source; the canonical implementation of everything described here lives in the [README](https://github.com/antoinedc/MantaUI) and [server source](https://github.com/antoinedc/MantaUI/tree/main/src/server).
 
-    MantaMantaUI
+        MantaMantaUI
+        Self-hosted coding agents you can reach from anywhere.
 
-      [Home](/)
-      [Privacy](/privacy)
-      [Terms](/terms)
-      [GitHub](https://github.com/antoinedc/MantaUI)
+      #### Product
 
-    Built for people who pair with agents.
+        - [Features](/#features)
+- [Mobile](/claude-code-mobile)
+
+        - [Open source](/open-source)
+
+        - [How it works](/claude-code-remote)
+
+      #### Compare
+
+        - [vs Orca](/vs-orca)
+
+        - [vs Conductor](/vs-conductor)
+
+        - [vs SSH and tmux](/vs-ssh-tmux)
+
+      #### Download
+
+        - [macOS](/#download)
+
+        - [Windows](/#download)
+
+        - [iPhone](/claude-code-mobile)
+
+      #### Resources
+
+        - [GitHub](https://github.com/antoinedc/MantaUI)
+
+        - [Pricing](/pricing)
+
+        - [Privacy](/privacy)
+
+        - [Terms](/terms)
+
+      MIT licensed. Built for people who pair with agents.
+      llms.txt · llms-full.txt · /.well-known/agent-skills
 
 
 ---
@@ -1439,13 +1078,17 @@ MantaMantaUI
 MantaMantaUI
 
         [Home](/)
+        [Features](/#features)
+        [Compare](/vs-orca)
+        [How it works](/claude-code-remote)
+
         [GitHub](https://github.com/antoinedc/MantaUI)
 
     # Terms
 
     Last updated 17 July 2026 · The short version. Manta UI is open source, your box is yours, and we don't warranty anything — but we'll do our best.
 
-    These terms cover the desktop app, the phone client (native iPhone app, or any browser), and the operated push gateway at `gateway.mantaui.com`. They do not cover anything your AI agent does inside your `tmux` session — that's between you and your model provider.
+    These terms cover the desktop app (macOS and Windows), the phone client (native iPhone app), and the operated push gateway at `gateway.mantaui.com`. They do not cover anything your AI agent does inside your `tmux` session — that's between you and your model provider.
 
     ## Your box is yours
 
@@ -1481,15 +1124,15 @@ MantaMantaUI
 
     Manta UI is provided as is, without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, and noninfringement. In no event shall the authors or copyright holders be liable for any claim, damages, or other liability arising from, out of, or in connection with the software or the use or other dealings in the software.
 
-    The desktop app is unsigned in beta — first launch will be blocked by macOS Gatekeeper. Right-click the `.dmg` in Finder → Open to bypass, or strip the quarantine attribute after install. We are working on signing for the first App Store release.
+    The desktop app is signed and notarized. On macOS, Gatekeeper does not block a standard download — right-click → Open is not required.
 
-    ## Subscription
+    ## No paid tier
 
-    Free during beta. The desktop app, the mobile web client, and the push gateway are free to use during the public beta. When the App Store release ships, the iOS app will require an in-app subscription to cover operated-push and metering costs; the server you self-host will remain free and source-available forever. Subscription terms and pricing will be published here and in the app stores before any paid tier activates.
+    Free to use. The desktop app, the native iPhone app, and the push gateway are free to use, and the self-hosted server is open source (MIT). Manta has no paid tier, no per-seat fee, and no in-app purchase. You pay only your model provider for usage on your own box.
 
     ## Changes to the service
 
-    We may change, suspend, or discontinue the push gateway with reasonable notice (a release note on the GitHub repo and an in-app banner). Self-hosted servers are unaffected — they don't depend on the gateway for the desktop or browser paths (only for native APNs push).
+    We may change, suspend, or discontinue the push gateway with reasonable notice (a release note on the GitHub repo and an in-app banner). Self-hosted servers are unaffected — they don't depend on the gateway for the desktop or iPhone paths (only for native APNs push).
 
     ## Data
 
@@ -1503,14 +1146,46 @@ MantaMantaUI
 
     Questions, takedown requests, abuse reports: [antoine@mantaui.com](mailto:antoine@mantaui.com).
 
-    MantaMantaUI
+        MantaMantaUI
+        Self-hosted coding agents you can reach from anywhere.
 
-      [Home](/)
-      [Privacy](/privacy)
-      [Terms](/terms)
-      [GitHub](https://github.com/antoinedc/MantaUI)
+      #### Product
 
-    Built for people who pair with agents.
+        - [Features](/#features)
+- [Mobile](/claude-code-mobile)
+
+        - [Open source](/open-source)
+
+        - [How it works](/claude-code-remote)
+
+      #### Compare
+
+        - [vs Orca](/vs-orca)
+
+        - [vs Conductor](/vs-conductor)
+
+        - [vs SSH and tmux](/vs-ssh-tmux)
+
+      #### Download
+
+        - [macOS](/#download)
+
+        - [Windows](/#download)
+
+        - [iPhone](/claude-code-mobile)
+
+      #### Resources
+
+        - [GitHub](https://github.com/antoinedc/MantaUI)
+
+        - [Pricing](/pricing)
+
+        - [Privacy](/privacy)
+
+        - [Terms](/terms)
+
+      MIT licensed. Built for people who pair with agents.
+      llms.txt · llms-full.txt · /.well-known/agent-skills
 
 
 ---
@@ -1520,8 +1195,10 @@ MantaMantaUI
 MantaMantaUI
 
         [Home](/)
+        [Features](/#features)
         [Compare](/vs-orca)
         [How it works](/claude-code-remote)
+
         [GitHub](https://github.com/antoinedc/MantaUI)
 
     # Manta UI vs Conductor
@@ -1534,7 +1211,7 @@ MantaMantaUI
 
         - Pick MantaIf you want agents on a Linux box that outlives the laptop, a phone app that can approve a command, and self-hosted open source with no seat count.
 
-        - OverlapBoth run Claude Code in chat panels with a worktree per session. The trade-off is where the work lives and what happens when you close the lid.
+        - OverlapBoth run Claude Code in chat panels with isolated worktrees for background jobs. The trade-off is where the work lives and what happens when you close the lid.
 
       Side by side
       ## What is the same, and what differs
@@ -1551,13 +1228,13 @@ MantaMantaUI
           Approve a command from your phoneOne tapNo
           Tells you when the agent is blockedPush to the right deviceNo
           Remote accessDetected and set upConductor Cloud (beta, Pro, GitHub-only, 10-workspace cap)
-          PlatformsLinux or macOS box, macOS and Windows desktop, iPhone app, browsermacOS only. not available for Windows or Linux yet. conductor.build/docs
+          PlatformsLinux or macOS box, macOS and Windows desktop, iPhone appmacOS only. not available for Windows or Linux yet. conductor.build/docs
           Permissions modelExplicit permission cards, yolo opt-inAgents run without sandboxing
           SandboxingCommands ask firstWorkspace isolation is development isolation, not a security boundary
           Diff review / inline annotationNoYes, with inline comments back to the agent
           Built-in code editorTerminal + chat onlyMac-native, polished
-          Agent runtimes supported2 (Claude Code, opencode)2 (Claude Code)
-          Git worktree per sessionYesYes
+          Agent runtimes supportedClaude Code, Codex, Kimi, opencode, plus any CLI agent2 (Claude Code)
+          Git worktree per sessionBg jobs, opt-in per sessionYes
           Real tmux underneathYes, you can SSH inNo
           Agent scheduling, webhooks, secretsYesNo
           Linear / GitHub integration depthBasicDeep
@@ -1622,9 +1299,9 @@ MantaMantaUI
 
 ```
    Linux box or Mac      ← owns tmux, files, agents
-        │      │      │
-   desktop   phone   browser
-  (full app) (full)  (full)
+        │      │
+   desktop   phone
+  (full app) (full)
 
   close every client and the
   work continues, on free,
@@ -1675,7 +1352,7 @@ Conductor. Its Mac-native editor, diff review with inline comments back to the a
 
       #### Product
 
-        - [Features](/)
+        - [Features](/#features)
 - [Mobile](/claude-code-mobile)
 
         - [Open source](/open-source)
@@ -1690,17 +1367,19 @@ Conductor. Its Mac-native editor, diff review with inline comments back to the a
 
         - [vs SSH and tmux](/vs-ssh-tmux)
 
-      #### Use cases
+      #### Download
 
-        - [Claude Code on mobile](/claude-code-mobile)
+        - [macOS](/#download)
 
-        - [Claude Code remote](/claude-code-remote)
+        - [Windows](/#download)
 
-        - [Notifications](/)
+        - [iPhone](/claude-code-mobile)
 
       #### Resources
 
         - [GitHub](https://github.com/antoinedc/MantaUI)
+
+        - [Pricing](/pricing)
 
         - [Privacy](/privacy)
 
@@ -1717,8 +1396,10 @@ Conductor. Its Mac-native editor, diff review with inline comments back to the a
 MantaMantaUI
 
         [Home](/)
+        [Features](/#features)
         [Compare](/vs-orca)
         [How it works](/claude-code-remote)
+
         [GitHub](https://github.com/antoinedc/MantaUI)
 
     # Manta UI vs Orca
@@ -1731,7 +1412,7 @@ MantaMantaUI
 
         - Pick MantaIf your agent should keep running after you close the laptop, your phone should be able to approve a command, and you want one self-hosted box rather than a desktop app you have to keep open.
 
-        - OverlapBoth give you an agent chat panel, a worktree per session, and a real terminal. The trade-off is where the work lives.
+        - OverlapBoth give you an agent chat panel, isolated worktrees for background jobs, and a real terminal. The trade-off is where the work lives.
 
       Side by side
       ## What is the same, and what differs
@@ -1752,9 +1433,9 @@ MantaMantaUI
           SandboxingCommands ask first; trust-a-session for speedPermission-bypass flag ships pre-checked
           Diff review / inline annotationNoYes
           Built-in code editorTerminal + chat onlyMonaco with Design Mode
-          Agent runtimes supported2 (Claude Code, opencode)34
+          Agent runtimes supportedClaude Code, Codex, Kimi, opencode, plus any CLI agent34
           Desktop OS coveragemacOS and Windows desktop, iPhone app (box runs on Linux or macOS)macOS, Windows, Linux
-          Git worktree per sessionYesYes
+          Git worktree per sessionBg jobs, opt-in per sessionYes
           Real tmux underneathYes, you can SSH inNo
           Agent scheduling, webhooks, secretsYesNo
           Account requiredNoFor mobile pairing
@@ -1770,7 +1451,7 @@ MantaMantaUI
 
       Stated plainly. If any of these is what you need, Orca is the right answer.
 
-      - ›Agent runtime count. Orca ships 34. Manta ships two today (Claude Code and opencode). If you want Cursor, Codex, Aider and the rest of the field on the same desktop, Orca is the answer.
+      - ›Agent runtime count. Orca ships 34. Manta ships Claude Code, Codex, Kimi and opencode natively (plus any CLI agent in terminal mode). If you want Cursor, Codex, Aider and the rest of the field on the same desktop, Orca is the answer.
 
       - ›Built-in editor. Monaco with Design Mode lets you edit, preview and let the agent touch the same file. Manta gives you a terminal and a chat panel; your editor stays your editor.
 
@@ -1815,9 +1496,9 @@ MantaMantaUI
 
 ```
    Linux box or Mac      ← owns tmux, files, agents
-        │      │      │
-   desktop   phone   browser
-  (full app) (full)  (full)
+        │      │
+   desktop   phone
+  (full app) (full)
 
   close every client and the
   work continues anyway.
@@ -1837,11 +1518,11 @@ MantaMantaUI
 
       ### Is Manta a fork of Orca?
 
-No. They are separate products with separate codebases. Both are MIT, both run Claude Code in a terminal, and the similarity ends there. Orca is desktop-first and ships 34 agent runtimes; Manta is box-first and ships two.
+No. They are separate products with separate codebases. Both are MIT, both run Claude Code in a terminal, and the similarity ends there. Orca is desktop-first and ships 34 agent runtimes; Manta is box-first and ships a handful of CLI runtimes.
 
       ### Does Manta run on any of Orca's agent runtimes?
 
-No. Manta runs Claude Code and opencode in a real tmux session on your box. Orca's runtime count comes from packaging many agent CLIs into the desktop app; Manta does not do that today and would not benefit from the same approach because it does not own the editor.
+No. Manta runs Claude Code, Codex, Kimi and opencode in real tmux sessions on your box. Orca's runtime count comes from packaging many agent CLIs into the desktop app; Manta does not do that today and would not benefit from the same approach because it does not own the editor.
 
       ### Can Manta and Orca share a machine?
 
@@ -1867,7 +1548,7 @@ Orca. Manta is for when the work needs to outlive the laptop, or when you want a
 
       #### Product
 
-        - [Features](/)
+        - [Features](/#features)
 - [Mobile](/claude-code-mobile)
 
         - [Open source](/open-source)
@@ -1882,17 +1563,19 @@ Orca. Manta is for when the work needs to outlive the laptop, or when you want a
 
         - [vs SSH and tmux](/vs-ssh-tmux)
 
-      #### Use cases
+      #### Download
 
-        - [Claude Code on mobile](/claude-code-mobile)
+        - [macOS](/#download)
 
-        - [Claude Code remote](/claude-code-remote)
+        - [Windows](/#download)
 
-        - [Notifications](/)
+        - [iPhone](/claude-code-mobile)
 
       #### Resources
 
         - [GitHub](https://github.com/antoinedc/MantaUI)
+
+        - [Pricing](/pricing)
 
         - [Privacy](/privacy)
 
@@ -1909,8 +1592,10 @@ Orca. Manta is for when the work needs to outlive the laptop, or when you want a
 MantaMantaUI
 
         [Home](/)
+        [Features](/#features)
         [Compare](/vs-orca)
         [How it works](/claude-code-remote)
+
         [GitHub](https://github.com/antoinedc/MantaUI)
 
     # Manta UI vs Termius + SSH
@@ -1944,8 +1629,8 @@ MantaMantaUI
           Permissions modelApprove at the terminalPermission cards in the chat panel
           Diff review / inline annotationYour normal git hostNo
           Built-in code editorYour editor over SSHTerminal + chat only
-          Agent runtimes supportedAnything that runs in a terminal2 (Claude Code, opencode)
-          Git worktree per sessionBy handYes
+          Agent runtimes supportedAnything that runs in a terminalClaude Code, Codex, Kimi, opencode, plus any CLI agent
+          Git worktree per sessionBy handBg jobs, opt-in per session
           Real tmux underneathYesYes
           Agent scheduling, webhooks, secretsNoYes
           Account requiredTermius sync is account-bound; SSH itself is notNo
@@ -2013,9 +1698,9 @@ MantaMantaUI
      ├── tmux ── agent sessions (same)
      └── sshd ── still there
 
-        │      │      │
-   desktop   phone   browser
-  (full app) (full)  (full)
+        │      │
+   desktop   phone
+  (full app) (full)
 
   termius, ssh, tmux all
   still work.
@@ -2065,7 +1750,7 @@ If your current setup covers your needs, keep it. Manta is for the cases SSH doe
 
       #### Product
 
-        - [Features](/)
+        - [Features](/#features)
 - [Mobile](/claude-code-mobile)
 
         - [Open source](/open-source)
@@ -2080,17 +1765,19 @@ If your current setup covers your needs, keep it. Manta is for the cases SSH doe
 
         - [vs SSH and tmux](/vs-ssh-tmux)
 
-      #### Use cases
+      #### Download
 
-        - [Claude Code on mobile](/claude-code-mobile)
+        - [macOS](/#download)
 
-        - [Claude Code remote](/claude-code-remote)
+        - [Windows](/#download)
 
-        - [Notifications](/)
+        - [iPhone](/claude-code-mobile)
 
       #### Resources
 
         - [GitHub](https://github.com/antoinedc/MantaUI)
+
+        - [Pricing](/pricing)
 
         - [Privacy](/privacy)
 

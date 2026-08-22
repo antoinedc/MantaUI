@@ -10,10 +10,9 @@
 ## Pages
 
 - [Home](https://mantaui.com/): what Manta is, who it is for, the headline FAQs.
-- [Claude Code web UI](https://mantaui.com/claude-code-web-ui): self-hosted web UI served from your box.
-- [Claude Code on mobile](https://mantaui.com/claude-code-mobile): native iPhone app, browser on every other phone.
+- [Claude Code on mobile](https://mantaui.com/claude-code-mobile): a native iPhone app, full transcript, approvals, dictation.
 - [Claude Code remote](https://mantaui.com/claude-code-remote): running the agent on a VPS or home server.
-- [Open source](https://mantaui.com/open-source): MIT, no account, no telemetry, auditable install.
+- [Open source](https://mantaui.com/open-source): MIT, no account, telemetry optional (sends nothing unless you set a token), auditable install.
 - [Pricing](https://mantaui.com/pricing): free, no tiers, you pay your model provider.
 - [Manta vs Orca](https://mantaui.com/vs-orca): honest side-by-side on architecture, mobile, runtimes.
 - [Manta vs Conductor](https://mantaui.com/vs-conductor): honest side-by-side on architecture, platforms, sandboxing, diff review.

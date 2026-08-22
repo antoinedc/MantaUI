@@ -5,7 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Privacy — Manta UI</title>
 <meta name="description" content="What Manta UI stores on your box and on the push gateway, who sees it, and how to delete it.">
-<meta name="theme-color" content="#0B1020">
+<meta name="theme-color" content="#0B0C0E">
+<script>
+/* Stamp the theme before first paint so a light-mode visitor never sees a dark
+   flash (and vice versa). Explicit choice wins; otherwise follow the OS. */
+(function(){try{var t=localStorage.getItem("manta-theme");
+if(t!=="light"&&t!=="dark"){t=window.matchMedia("(prefers-color-scheme: light)").matches?"light":"dark"}
+document.documentElement.setAttribute("data-theme",t)}catch(e){
+document.documentElement.setAttribute("data-theme","dark")}})();
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -59,12 +67,20 @@
       <div class="brand"><img src="manta-logo.png" alt="Manta"><span>Manta<b>UI</b></span></div>
       <div class="navlinks">
         <a href="/">Home</a>
+        <a href="/#features" class="hide-sm">Features</a>
+        <a href="/vs-orca" class="hide-sm">Compare</a>
+        <a href="/claude-code-remote" class="hide-sm">How it works</a>
+        <button class="theme-toggle" type="button" id="themeToggle" aria-label="Switch between light and dark theme">
+          <svg class="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+            stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/></svg>
+          <svg class="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+            stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M4.2 4.2l1.6 1.6M18.2 18.2l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.2 19.8l1.6-1.6M18.2 5.8l1.6-1.6"/></svg>
+        </button>
         <a href="https://github.com/antoinedc/MantaUI" class="btn btn-ghost">GitHub</a>
       </div>
     </nav>
   </div>
 </header>
-
 <div class="doc">
   <div class="wrap">
     <h1>Privacy</h1>
@@ -74,7 +90,7 @@
     <h2>What runs where</h2>
     <p>Manta UI is three surfaces:</p>
     <ul>
-      <li><b>The desktop app</b> (Electron) and <b>the phone client</b> (native iPhone app, or any browser) are thin clients — chat, terminal, and file browser over HTTPS.</li>
+      <li><b>The desktop app</b> (Electron, macOS and Windows) and <b>the phone client</b> (native iPhone app) are thin clients — chat, terminal, and file browser over HTTPS.</li>
       <li><b>The server</b> runs on your own Linux box. It owns your <code>tmux</code> sessions, your <code>opencode</code> chat sessions, your file uploads, your schedules, your secrets, your webhooks, and your notifications. Everything lives under <code>~/.manta/</code> on that box.</li>
       <li><b>The push gateway</b> (<code>gateway.mantaui.com</code>) is the ONLY thing we still operate. It holds the Apple APNs key (which structurally cannot live on your box) and fans out native pushes on your box's behalf. Devices connect directly to your box at <code>https://&lt;box_id&gt;.boxes.mantaui.com</code> — there is no relay in the path for chat, terminal, or file traffic.</li>
     </ul>
@@ -83,7 +99,7 @@
     <ul>
       <li><b>Box identity</b> — a random <code>box_id</code> (32 hex chars), a <code>box_token</code> (HMAC key), and a <code>gateway_token</code> (bearer credential for the push gateway) under <code>~/.manta/auth.json</code> (<code>0600</code>). The token never leaves the box.</li>
       <li><b>Pairing codes</b> — short-lived (5 min), loopback-only, one-time. Mints when you run <code>npm run pair</code> or hit <code>GET /auth/pair</code> from the box itself.</li>
-      <li><b>Device tokens</b> — issued to each paired desktop / phone. Stored locally in each app's <code>config.json</code>; the box keeps no per-device record beyond "is this token currently valid."</li>
+      <li><b>Device tokens</b> — issued to each paired desktop / phone. Stored locally in each app's <code>config.json</code>. The box keeps a per-device registry (id, name, last-seen) and the APNs tokens it needs to push to each device.</li>
       <li><b>Your work</b> — every <code>tmux</code> session, every opencode chat, every uploaded file (<code>~/.manta-uploads/</code>, hourly auto-clean), every scheduled prompt, every webhook, every secret, every published page.</li>
     </ul>
     <p>Delete any of this by deleting the file. The installer's only hard rule is: <b>never regenerate <code>~/.manta/auth.json</code></b> — that would unpair every device.</p>
@@ -119,12 +135,12 @@
     </ul>
 
     <h2>Open source</h2>
-    <p>Manta UI is open source. The server, push gateway, mobile web client, and desktop app are all on <a href="https://github.com/antoinedc/MantaUI">GitHub</a>. The only closed-source piece is the published iOS app (which exists only because the stores require it).</p>
+    <p>Manta UI is open source and MIT licensed. The server, push gateway, desktop app, and native iPhone app are all on <a href="https://github.com/antoinedc/MantaUI">GitHub</a>. The distributed iPhone binary is published through the App Store, but its source is open.</p>
 
     <h2>Your choices</h2>
     <ul>
       <li><b>Run the server yourself.</b> Every user runs their own server on their own hardware. Chat, terminal, and file traffic never crosses our infrastructure — only native APNs pushes do, and only because Apple's key model makes that structurally necessary.</li>
-      <li><b>Use the push gateway.</b> When the iOS app is open in the background, native pushes fan out through <code>gateway.mantaui.com</code>. Web Push (VAPID, for browser installs) stays box-local and does NOT touch the gateway.</li>
+      <li><b>Use the push gateway.</b> When the iOS app is open in the background, native pushes fan out through <code>gateway.mantaui.com</code>. There is no web/browser client — push reaches the desktop app and the native iPhone app.</li>
       <li><b>Delete your data.</b> Uninstalling the desktop or phone app removes its local config. Wiping <code>~/.manta/</code> on the box removes identity + work. Asking us to forget a box drops the gateway row.</li>
     </ul>
 
@@ -136,17 +152,58 @@
 </div>
 
 <footer>
-  <div class="wrap foot">
-    <div class="brand"><img src="manta-logo.png" alt="Manta"><span>Manta<b style="font-weight:800">UI</b></span></div>
-    <div class="foot-links">
-      <a href="/">Home</a>
-      <a href="/privacy">Privacy</a>
-      <a href="/terms">Terms</a>
-      <a href="https://github.com/antoinedc/MantaUI">GitHub</a>
+  <div class="wrap">
+    <div class="fgrid">
+      <div>
+        <div class="fbrand"><img src="manta-logo.png" alt="Manta">Manta<b>UI</b></div>
+        <p style="margin-top:11px;font-size:13px;color:var(--slate-500);max-width:250px">Self-hosted coding agents you can reach from anywhere.</p>
+      </div>
+      <div><h4>Product</h4><ul>
+        <li><a href="/#features">Features</a></li><li><a href="/claude-code-mobile">Mobile</a></li>
+        <li><a href="/open-source">Open source</a></li>
+        <li><a href="/claude-code-remote">How it works</a></li></ul></div>
+      <div><h4>Compare</h4><ul>
+        <li><a href="/vs-orca">vs Orca</a></li>
+        <li><a href="/vs-conductor">vs Conductor</a></li>
+        <li><a href="/vs-ssh-tmux">vs SSH and tmux</a></li></ul></div>
+      <div><h4>Download</h4><ul>
+        <li><a href="/#download">macOS</a></li>
+        <li><a href="/#download">Windows</a></li>
+        <li><a href="/claude-code-mobile">iPhone</a></li></ul></div>
+      <div><h4>Resources</h4><ul>
+        <li><a href="https://github.com/antoinedc/MantaUI">GitHub</a></li>
+        <li><a href="/pricing">Pricing</a></li>
+        <li><a href="/privacy">Privacy</a></li>
+        <li><a href="/terms">Terms</a></li></ul></div>
     </div>
-    <div>Built for people who pair with agents.</div>
+    <div class="fbot">
+      <div>MIT licensed. Built for people who pair with agents.</div>
+      <div class="mono" style="font-size:11.5px;color:var(--slate-600)">llms.txt · llms-full.txt · /.well-known/agent-skills</div>
+    </div>
   </div>
 </footer>
+
+<script>
+/* Theme toggle. Persists the explicit choice; until the visitor makes one the
+   page keeps following the OS (including a live change while it is open). */
+(function(){
+  var root=document.documentElement, btn=document.getElementById("themeToggle");
+  if(!btn)return;
+  btn.addEventListener("click",function(){
+    var next=root.getAttribute("data-theme")==="light"?"dark":"light";
+    root.setAttribute("data-theme",next);
+    try{localStorage.setItem("manta-theme",next)}catch(e){}
+  });
+  var mq=window.matchMedia("(prefers-color-scheme: light)");
+  var onChange=function(e){
+    var stored=null; try{stored=localStorage.getItem("manta-theme")}catch(err){}
+    if(stored==="light"||stored==="dark")return;
+    root.setAttribute("data-theme",e.matches?"light":"dark");
+  };
+  if(mq.addEventListener)mq.addEventListener("change",onChange);
+  else if(mq.addListener)mq.addListener(onChange);
+})();
+</script>
 
 </body>
 </html>
