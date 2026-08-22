@@ -44,35 +44,53 @@ final class ComposerTests: XCTestCase {
 
     // MARK: - ChatModel.effective
 
-    func testEffectiveOverrideWinsOverDefault() {
+    func testEffectiveOverrideWinsOverDefaults() {
         XCTAssertEqual(
-            ChatModel.effective(selection("anthropic", "sonnet"), selection("anthropic", "opus")),
+            ChatModel.effective(
+                selection("anthropic", "sonnet"),
+                selection("anthropic", "opus"),
+                selection("anthropic", "haiku")
+            ),
             selection("anthropic", "sonnet")
         )
-        XCTAssertEqual(ChatModel.effective(nil, selection("anthropic", "opus")), selection("anthropic", "opus"))
-        XCTAssertNil(ChatModel.effective(nil, nil))
+        XCTAssertEqual(
+            ChatModel.effective(nil, selection("anthropic", "opus"), selection("anthropic", "haiku")),
+            selection("anthropic", "opus")
+        )
+        XCTAssertEqual(
+            ChatModel.effective(nil, nil, selection("anthropic", "haiku")),
+            selection("anthropic", "haiku")
+        )
+        XCTAssertNil(ChatModel.effective(nil, nil, nil))
     }
 
     // MARK: - ChatModel.activeModel + label
 
-    func testActiveModelResolvesOverrideThenDefaultThenNil() {
+    func testActiveModelResolvesOverrideThenDefaultsThenNil() {
         let models = [model("anthropic", "sonnet"), model("anthropic", "opus")]
         XCTAssertEqual(
-            ChatModel.activeModel(models, override: selection("anthropic", "sonnet"), default: selection("anthropic", "opus"))?.id,
+            ChatModel.activeModel(models, override: selection("anthropic", "sonnet"), configuration: selection("anthropic", "opus"), provider: selection("anthropic", "haiku"))?.id,
             "sonnet"
         )
         XCTAssertEqual(
-            ChatModel.activeModel(models, override: nil, default: selection("anthropic", "opus"))?.id,
+            ChatModel.activeModel(models, override: nil, configuration: selection("anthropic", "opus"), provider: selection("anthropic", "haiku"))?.id,
             "opus"
         )
-        XCTAssertEqual(ChatModel.activeModel(models, override: nil, default: selection("other", "x"))?.id, nil)
-        XCTAssertEqual(ChatModel.activeModel(models, override: nil, default: nil), nil)
+        XCTAssertEqual(
+            ChatModel.activeModel(models, override: nil, configuration: nil, provider: selection("anthropic", "opus"))?.id,
+            "opus"
+        )
+        XCTAssertEqual(ChatModel.activeModel(models, override: nil, configuration: selection("other", "x"), provider: nil)?.id, nil)
+        XCTAssertEqual(ChatModel.activeModel(models, override: nil, configuration: nil, provider: nil), nil)
     }
 
     func testLabelUsesFriendlyNameAndDefaults() {
         let models = [model("anthropic", "sonnet", name: "Claude Sonnet 4.6")]
-        XCTAssertEqual(ChatModel.label(models, override: selection("anthropic", "sonnet"), default: nil), "Claude Sonnet 4.6")
-        XCTAssertEqual(ChatModel.label(models, override: nil, default: nil), "Default")
+        XCTAssertEqual(
+            ChatModel.label(models, override: selection("anthropic", "sonnet"), configuration: nil, provider: nil),
+            "Claude Sonnet 4.6"
+        )
+        XCTAssertEqual(ChatModel.label(models, override: nil, configuration: nil, provider: nil), "Default")
     }
 
     // MARK: - ChatModel.findByQuery
@@ -88,10 +106,32 @@ final class ComposerTests: XCTestCase {
     // MARK: - ChatModel.encode/decode
 
     func testOverrideEncodeDecodeRoundTrip() {
-        let id = selection("anthropic", "claude-sonnet-4-6")
-        XCTAssertEqual(ChatModel.decode(ChatModel.encode(id)), id)
+        let selection = ChatModel.ModelSelection(
+            providerID: "anthropic",
+            modelID: "claude-sonnet-4-6",
+            variant: nil
+        )
+        XCTAssertEqual(ChatModel.decode(ChatModel.encode(selection)), selection)
         XCTAssertNil(ChatModel.decode(""))
         XCTAssertNil(ChatModel.decode("no-slash"))
+    }
+
+    func testOverrideEncodeOmitsNilVariant() {
+        let withVariant = ChatModel.ModelSelection(
+            providerID: "anthropic",
+            modelID: "claude-sonnet-4-6",
+            variant: "high"
+        )
+        let encoded = ChatModel.encode(withVariant)
+        XCTAssertTrue(encoded.contains("\"variant\":\"high\""))
+        XCTAssertEqual(ChatModel.decode(encoded)?.variant, "high")
+        // A nil variant is omitted (never "null"), matching the desktop JSON.
+        XCTAssertFalse(ChatModel.encode(ChatModel.ModelSelection(
+            providerID: "anthropic", modelID: "claude-sonnet-4-6", variant: nil
+        )).contains("variant"))
+        XCTAssertFalse(ChatModel.encode(ChatModel.ModelSelection(
+            providerID: "anthropic", modelID: "claude-sonnet-4-6", variant: nil
+        )).contains("null"))
     }
 
     // MARK: - Fast-mode helpers + grouped picker

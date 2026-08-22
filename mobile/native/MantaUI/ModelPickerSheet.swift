@@ -36,7 +36,7 @@ struct ModelPickerSheet: View {
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
 
     private var activeModel: OpencodeModel? {
-        ChatModel.activeModel(modelStore.models, override: modelStore.override, default: modelStore.defaultModel)
+        ChatModel.activeModel(modelStore.models, override: modelStore.override, configuration: modelStore.configDefault, provider: modelStore.defaultModel)
     }
 
     private var fastToggleState: ChatModel.FastToggle {

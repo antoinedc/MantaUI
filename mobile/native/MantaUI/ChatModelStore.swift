@@ -4,25 +4,30 @@ import Combine
 // ===========================================================================
 // S5 — model store for the composer (BET-597).
 //
-// Owns the per-SESSION model override + effort variant; the box-wide model
-// list + server default come from the shared `ChatModelCatalog`, fetched once
-// and mirrored here. The per-session override is a plain `providerID/modelID`
-// string in UserDefaults (NOT a credential — the raw string encodes
-// provider+model ids only), mirroring the desktop's
-// `manta:chat:<sessionId>:model` localStorage key.
+// Owns the per-SESSION model selection (override + effort variant folded into
+// one JSON blob); the box-wide model list + defaults come from the shared
+// `ChatModelCatalog`, fetched once and mirrored here. The selection is a JSON
+// blob stored under ONE key per session, `manta:chat:<sessionId>:model`,
+// byte-identical in name and shape to the desktop's ModelSelection
+// (src/renderer/chatShared.tsx) — one model per session, plan mode never
+// changes the model.
 //
 // The catalog is why clearing a session does NOT reload models: the clear
 // rebuilds this store for the new session id, but the list is already loaded
-// and shared, so there is no second fetch. The override/variant are carried to
-// the new id by `rebind(to:)` (matching the desktop's clear handler, which
-// copies the override into the new session's key).
+// and shared, so there is no second fetch. The selection is carried to the new
+// id by `rebind(to:)` (matching the desktop's clear handler, which copies the
+// override into the new session's key).
 // ===========================================================================
 
 @MainActor
 final class ChatModelStore: ObservableObject {
 
     @Published private(set) var models: [OpencodeModel] = []
+    /// The opencode provider's own default (from `opencode:default-model`).
     @Published private(set) var defaultModel: OpencodeModelID?
+    /// The box config's `defaultModel` entry (`AppConfig.defaultModel` from
+    /// `config:get`), the middle tier of the precedence.
+    @Published private(set) var configDefault: OpencodeModelID?
     @Published private(set) var override: OpencodeModelID?
     /// True once the shared catalog has its list (mirrored from the catalog).
     /// Drives the composer pill's loading state.
@@ -43,7 +48,8 @@ final class ChatModelStore: ObservableObject {
     @Published private(set) var deprecatedOptIns: Set<String> = []
     /// Plan mode is ON for this session (the per-session `manta:chat:<sid>:plan`
     /// boolean — BET-952). A plain Bool, deliberately NOT folded into the model
-    /// blob: iOS stores that as a distinct "providerID/modelID" string.
+    /// blob: plan mode changes the agent, never the model (one model per
+    /// session), so the flag stays separate from the JSON selection.
     @Published private(set) var planOn: Bool
     /// The box's agent list, once fetched (`opencode:agents`). Nil = not loaded
     /// yet (the plan chip shows a loading placeholder); a list with no `plan`
@@ -62,15 +68,20 @@ final class ChatModelStore: ObservableObject {
         self.api = api
         let planOn = UserDefaults.standard.bool(forKey: Self.planKey(for: sessionId))
         self.planOn = planOn
-        self.override = Self.loadOverride(for: sessionId, mode: planOn ? .plan : .build)
-        self.variant = UserDefaults.standard.string(forKey: Self.variantKey(for: sessionId))
+        let stored = Self.loadSelection(for: sessionId)
+        self.override = stored.map { OpencodeModelID(providerID: $0.providerID, modelID: $0.modelID) }
+        self.variant = stored?.variant
+        // Clean up the pre-BET-1280 per-mode plan key on first read of a
+        // session so an upgrading user leaves no litter in UserDefaults.
+        UserDefaults.standard.removeObject(forKey: "manta:chat:\(sessionId):model:plan")
 
-        // Seed + mirror the shared catalog so the box-wide list and default are
+        // Seed + mirror the shared catalog so the box-wide list and defaults are
         // published here (keeps every existing caller reading
         // `modelStore.models` unchanged). A clear rebuilds this store, but the
         // catalog is already loaded, so it seeds instantly — no refetch.
         self.models = catalog.models
         self.defaultModel = catalog.defaultModel
+        self.configDefault = catalog.configDefault
         self.loaded = catalog.loaded
         self.recents = ModelRecents.load()
         self.deprecatedOptIns = DeprecatedModelOptIns.load()
@@ -83,31 +94,15 @@ final class ChatModelStore: ObservableObject {
     private func mirrorCatalog() {
         models = catalog.models
         defaultModel = catalog.defaultModel
+        configDefault = catalog.configDefault
         loaded = catalog.loaded
     }
 
-    /// Which model a session remembers. Plan and build are remembered
-    /// separately so switching modes restores the model the user last chose
-    /// for that mode — and so "Build here" has a build model to return to.
-    /// Mirrors the desktop keys in src/renderer/chatShared.tsx exactly.
-    enum ModelMode: String {
-        case build
-        case plan
-    }
-
     /// The UserDefaults key mirroring the desktop's per-session model key —
-    /// one per mode. `build` uses the original `…:model` key so every
-    /// existing session keeps its model and nothing migrates; `plan` gets its
-    /// own key (`…:model:plan`), same stored shape.
-    static func storageKey(for sessionId: String, mode: ModelMode) -> String {
-        switch mode {
-        case .build: return "manta:chat:\(sessionId):model"
-        case .plan:  return "manta:chat:\(sessionId):model:plan"
-        }
-    }
-
-    static func variantKey(for sessionId: String) -> String {
-        "manta:chat:\(sessionId):variant"
+    /// one key per session, holding the whole JSON selection (model + effort).
+    /// Mirrors the desktop key in src/renderer/chatShared.tsx byte-for-byte.
+    static func storageKey(for sessionId: String) -> String {
+        "manta:chat:\(sessionId):model"
     }
 
     /// The per-session plan-mode key (BET-952), a plain Bool — never folded
@@ -136,33 +131,26 @@ final class ChatModelStore: ObservableObject {
     /// picks up the same model the user had chosen — matching the desktop,
     /// which copies the override into the new session's key on /clear.
     ///
-    /// Copies BOTH per-mode model keys (mirroring the desktop's
-    /// `copySavedModels`), preserving their independence: the RAW stored value
-    /// of each key is copied — not `loadOverride`, whose plan→build fallback
-    /// would stamp the build model into a plan key that was never explicitly
-    /// written — and a plan key absent on the source stays absent on the new
-    /// session. The old session's keys are left alone.
+    /// The whole selection (model + variant) is one value under one key, so
+    /// the RAW stored JSON blob is copied. The old session's keys are left
+    /// alone.
     func rebind(to newSessionId: String) {
         guard newSessionId != sessionId else { return }
         let defaults = UserDefaults.standard
-        for mode in [ModelMode.build, .plan] {
-            let fromKey = Self.storageKey(for: sessionId, mode: mode)
-            let toKey = Self.storageKey(for: newSessionId, mode: mode)
-            if let raw = defaults.string(forKey: fromKey) {
-                defaults.set(raw, forKey: toKey)
-            }
-        }
-        if let variant, !variant.isEmpty {
-            UserDefaults.standard.set(variant, forKey: Self.variantKey(for: newSessionId))
+        let fromKey = Self.storageKey(for: sessionId)
+        let toKey = Self.storageKey(for: newSessionId)
+        if let raw = defaults.string(forKey: fromKey) {
+            defaults.set(raw, forKey: toKey)
         }
         if planOn {
             UserDefaults.standard.set(planOn, forKey: Self.planKey(for: newSessionId))
         }
     }
 
-    /// The effective selection for the next turn: override wins, else default.
+    /// The effective selection for the next turn: override wins, else the box
+    /// config default, else the opencode provider default.
     var active: OpencodeModelID? {
-        ChatModel.effective(override, defaultModel)
+        ChatModel.effective(override, configDefault, defaultModel)
     }
 
     /// The selection to send on `opencode:prompt` (nil = let opencode pick).
@@ -171,40 +159,45 @@ final class ChatModelStore: ObservableObject {
         return SendPromptInput.Model(providerID: active.providerID, modelID: active.modelID, variant: variant)
     }
 
-    /// The mode the session is currently in — drives which per-mode key the
-    /// model selection reads and writes. Plan builds on the plan key; build
-    /// (and the default) use the build key.
-    var mode: ModelMode { planOn ? .plan : .build }
+    /// Persist the whole current selection (override + variant) as one JSON
+    /// blob under the single per-session key. No override means the session has
+    /// no explicit model — remove the key (server default applies), mirroring
+    /// the desktop.
+    private func persistSelection() {
+        let defaults = UserDefaults.standard
+        let key = Self.storageKey(for: sessionId)
+        if let override {
+            let selection = ChatModel.ModelSelection(
+                providerID: override.providerID,
+                modelID: override.modelID,
+                variant: variant
+            )
+            defaults.set(ChatModel.encode(selection), forKey: key)
+        } else {
+            defaults.removeObject(forKey: key)
+        }
+    }
 
-    /// Set (or clear, with nil) the per-session override, persisting it to the
-    /// CURRENT mode's key. A model change drops the effort variant: the levels
-    /// one model offers mean nothing on another, and most models offer none at
-    /// all.
+    /// Set (or clear, with nil) the per-session override. A model change drops
+    /// the effort variant: the levels one model offers mean nothing on another,
+    /// and most models offer none at all. Persisted as the whole selection.
     func setOverride(_ id: OpencodeModelID?) {
         let modelChanged = id != override
         override = id
-        let key = Self.storageKey(for: sessionId, mode: mode)
-        if let id {
-            UserDefaults.standard.set(ChatModel.encode(id), forKey: key)
-        } else {
-            UserDefaults.standard.removeObject(forKey: key)
-        }
-        if modelChanged { setVariant(nil) }
+        if modelChanged { variant = nil }
+        persistSelection()
     }
 
-    /// Set (or clear) the effort variant for the active model.
+    /// Set (or clear) the effort variant for the active model — a rewrite of
+    /// the whole selection (the variant lives inside the JSON blob now).
     func setVariant(_ id: String?) {
         variant = id
-        if let id, !id.isEmpty {
-            UserDefaults.standard.set(id, forKey: Self.variantKey(for: sessionId))
-        } else {
-            UserDefaults.standard.removeObject(forKey: Self.variantKey(for: sessionId))
-        }
+        persistSelection()
     }
 
     /// The effort variants the ACTIVE model offers (empty when it has none).
     var activeVariants: [OpencodeModel.Variant] {
-        ChatModel.activeModel(models, override: override, default: defaultModel)?.variants ?? []
+        ChatModel.activeModel(models, override: override, configuration: configDefault, provider: defaultModel)?.variants ?? []
     }
 
     // MARK: - Recents (BET-825)
@@ -214,7 +207,7 @@ final class ChatModelStore: ObservableObject {
     /// lands on Server default, not on a recent). `modelID` is always the
     /// base id; fast is expressed as the `fast` flag.
     var activeChoice: ModelChoice? {
-        guard let override, let active = ChatModel.activeModel(models, override: override, default: defaultModel) else {
+        guard let override, let active = ChatModel.activeModel(models, override: override, configuration: configDefault, provider: defaultModel) else {
             return nil
         }
         return ModelChoice(
@@ -245,7 +238,7 @@ final class ChatModelStore: ObservableObject {
     func recordCurrentChoice() {
         guard
             let override,
-            let active = ChatModel.activeModel(models, override: override, default: defaultModel)
+            let active = ChatModel.activeModel(models, override: override, configuration: configDefault, provider: defaultModel)
         else { return }
         let choice = ModelChoice(
             providerID: override.providerID,
@@ -261,7 +254,7 @@ final class ChatModelStore: ObservableObject {
     /// (the fast twin keeps the chosen effort, or fast is unavailable). Moved
     /// here from the sheet so the menu and the sheet share one implementation.
     func setFast(_ on: Bool) {
-        guard let active = ChatModel.activeModel(models, override: override, default: defaultModel) else { return }
+        guard let active = ChatModel.activeModel(models, override: override, configuration: configDefault, provider: defaultModel) else { return }
         let f = ChatModel.fastToggle(models: models, active: active, variantId: variant)
         guard let target = f.target else { return }
         let currentVariant = variant
@@ -290,39 +283,27 @@ final class ChatModelStore: ObservableObject {
         ChatModel.planToggle(agents: agents, on: planOn)
     }
 
-    /// Flip plan mode for this session, persisting the boolean. When the mode
-    /// actually changes, the composer's active model becomes the mode being
-    /// entered's remembered model (mirroring `ChatPanel.tsx`'s togglePlan):
-    /// reading plan pulls the plan key, falling back to build; reading build
-    /// never consults the plan key. The model key is NOT written here — only
-    /// on an explicit model pick.
+    /// Flip plan mode for this session, persisting the boolean. Plan mode
+    /// changes the agent, never the model (mirroring the desktop's togglePlan
+    /// at `src/renderer/ChatPanel.tsx`), so this ONLY sets the flag — the model
+    /// key is untouched, exactly as on desktop.
     func setPlan(_ on: Bool) {
-        let modeChanged = on != planOn
         planOn = on
         UserDefaults.standard.set(on, forKey: Self.planKey(for: sessionId))
-        guard modeChanged else { return }
-        let remembered = Self.loadOverride(for: sessionId, mode: mode)
-        if remembered != override {
-            override = remembered
-            setVariant(nil)
-        }
     }
 
-    /// The remembered per-session model for a mode, or nil when the session
-    /// has none (the server default applies). Plan reads the plan key first,
-    /// falling back to the build key when the plan key is absent — that is the
-    /// desktop's asymmetric rule and is what makes a first toggle to plan keep
-    /// the build model until the user picks one while in plan mode. Build never
-    /// falls back to plan. A present-but-malformed value counts as absent for
-    /// the purpose of the fallback.
-    static func loadOverride(for sessionId: String, mode: ModelMode) -> OpencodeModelID? {
-        let key = storageKey(for: sessionId, mode: mode)
+    /// The remembered per-session selection, or nil when the session has none
+    /// (the server/box default applies).
+    static func loadSelection(for sessionId: String) -> ChatModel.ModelSelection? {
+        let key = storageKey(for: sessionId)
         if let raw = UserDefaults.standard.string(forKey: key), let decoded = ChatModel.decode(raw) {
             return decoded
         }
-        if mode == .plan, let build = loadOverride(for: sessionId, mode: .build) {
-            return build
-        }
         return nil
+    }
+
+    /// The remembered per-session model id, or nil when the session has none.
+    static func loadOverride(for sessionId: String) -> OpencodeModelID? {
+        loadSelection(for: sessionId).map { OpencodeModelID(providerID: $0.providerID, modelID: $0.modelID) }
     }
 }

@@ -443,12 +443,12 @@ final class ModelRecentsTests: XCTestCase {
 }
 
 // ===========================================================================
-// BET-1025 — ChatModelStore per-mode model keys. Plan and build are remembered
-// separately (desktop: `manta:chat:<sid>:model` / `…:model:plan`), plan falls
-// back to build when its own key is absent, build never falls back to plan, and
-// toggling modes restores each mode's remembered model with no cross-
-// contamination. The literal key strings are assertions, because cross-client
-// compatibility depends on them matching the desktop's keys byte-for-byte.
+// BET-1280 — ChatModelStore single per-session model: ONE key
+// (`manta:chat:<sid>:model`) holding the whole JSON selection (model + effort),
+// byte-identical in name and shape to the desktop's ModelSelection
+// (src/renderer/chatShared.tsx). Plan mode never changes the model. The literal
+// key string is an assertion because cross-client compatibility depends on it
+// matching the desktop's key byte-for-byte.
 // ===========================================================================
 
 @MainActor
@@ -456,14 +456,13 @@ final class ChatModelStoreKeyTests: XCTestCase {
 
     private let sid = "test-session"
     private let otherSid = "test-session-2"
-    private var buildKey: String { ChatModelStore.storageKey(for: sid, mode: .build) }
-    private var planKey: String { ChatModelStore.storageKey(for: sid, mode: .plan) }
-    private var otherBuildKey: String { ChatModelStore.storageKey(for: otherSid, mode: .build) }
-    private var otherPlanKey: String { ChatModelStore.storageKey(for: otherSid, mode: .plan) }
+    private var modelKey: String { ChatModelStore.storageKey(for: sid) }
+    private var otherModelKey: String { ChatModelStore.storageKey(for: otherSid) }
+    private var legacyPlanKey: String { "manta:chat:\(sid):model:plan" }
     private var workingKeys: [String] {
-        [buildKey, planKey, otherBuildKey, otherPlanKey,
-         ChatModelStore.planKey(for: sid), ChatModelStore.variantKey(for: sid),
-         ChatModelStore.planKey(for: otherSid), ChatModelStore.variantKey(for: otherSid)]
+        [modelKey, otherModelKey,
+         ChatModelStore.planKey(for: sid), ChatModelStore.planKey(for: otherSid),
+         legacyPlanKey]
     }
 
     override func setUp() {
@@ -484,87 +483,95 @@ final class ChatModelStoreKeyTests: XCTestCase {
         OpencodeModelID(providerID: "anthropic", modelID: m)
     }
 
-    // MARK: - Literal key strings (cross-client compatibility)
-
-    func testStorageKeyLiteralStrings() {
-        XCTAssertEqual(ChatModelStore.storageKey(for: "S", mode: .build), "manta:chat:S:model")
-        XCTAssertEqual(ChatModelStore.storageKey(for: "S", mode: .plan), "manta:chat:S:model:plan")
+    private func selection(_ m: String, variant: String? = nil) -> ChatModel.ModelSelection {
+        ChatModel.ModelSelection(providerID: "anthropic", modelID: m, variant: variant)
     }
 
-    // MARK: - Read with fallback
+    // MARK: - Literal key string (cross-client compatibility)
 
-    func testPlanReadWithPlanValueStoredReturnsIt() {
-        UserDefaults.standard.set(ChatModel.encode(model("plan-model")), forKey: planKey)
-        UserDefaults.standard.set(ChatModel.encode(model("build-model")), forKey: buildKey)
-        XCTAssertEqual(ChatModelStore.loadOverride(for: sid, mode: .plan), model("plan-model"))
+    func testStorageKeyLiteralString() {
+        XCTAssertEqual(ChatModelStore.storageKey(for: "S"), "manta:chat:S:model")
     }
 
-    func testPlanReadWithOnlyBuildValueReturnsBuild() {
-        UserDefaults.standard.set(ChatModel.encode(model("build-model")), forKey: buildKey)
-        XCTAssertEqual(ChatModelStore.loadOverride(for: sid, mode: .plan), model("build-model"))
+    // MARK: - Read
+
+    func testReadWithSelectionStoredReturnsIt() {
+        UserDefaults.standard.set(ChatModel.encode(selection("sonnet", variant: "high")), forKey: modelKey)
+        XCTAssertEqual(ChatModelStore.loadSelection(for: sid), selection("sonnet", variant: "high"))
+        XCTAssertEqual(ChatModelStore.loadOverride(for: sid), model("sonnet"))
     }
 
-    func testBuildReadWithOnlyPlanValueReturnsNil() {
-        UserDefaults.standard.set(ChatModel.encode(model("plan-model")), forKey: planKey)
-        XCTAssertNil(ChatModelStore.loadOverride(for: sid, mode: .build))
+    func testReadWithNothingStoredReturnsNil() {
+        XCTAssertNil(ChatModelStore.loadSelection(for: sid))
+        XCTAssertNil(ChatModelStore.loadOverride(for: sid))
     }
 
-    func testPlanReadWithNothingStoredReturnsNil() {
-        XCTAssertNil(ChatModelStore.loadOverride(for: sid, mode: .plan))
-        XCTAssertNil(ChatModelStore.loadOverride(for: sid, mode: .build))
+    // MARK: - setOverride drops the variant; setVariant folds it into the blob
+
+    func testSetOverrideDropsVariant() {
+        let s = store(sid)
+        s.setOverride(model("sonnet"))
+        s.setVariant("high")
+        XCTAssertEqual(ChatModelStore.loadSelection(for: sid), selection("sonnet", variant: "high"))
+
+        s.setOverride(model("opus"))                        // model changed → variant cleared
+        XCTAssertEqual(ChatModelStore.loadSelection(for: sid), selection("opus"))
+        XCTAssertEqual(s.variant, nil)
     }
 
-    // MARK: - rebind copies BOTH keys, leaves the old ones alone
+    func testSetOverrideNilRemovesKey() {
+        let s = store(sid)
+        s.setOverride(model("sonnet"))
+        XCTAssertNotNil(UserDefaults.standard.string(forKey: modelKey))
+        XCTAssertEqual(ChatModelStore.loadSelection(for: sid), selection("sonnet"))
+        s.setOverride(nil)
+        XCTAssertNil(UserDefaults.standard.string(forKey: modelKey))
+        XCTAssertEqual(s.override, nil)
+    }
 
-    func testRebindCopiesBothKeysAndLeavesOldAlone() {
-        UserDefaults.standard.set(ChatModel.encode(model("build-model")), forKey: buildKey)
-        UserDefaults.standard.set(ChatModel.encode(model("plan-model")), forKey: planKey)
+    // MARK: - rebind copies the ONE key verbatim, leaves the old one alone
+
+    func testRebindCopiesTheSingleKeyAndLeavesOldAlone() {
+        UserDefaults.standard.set(ChatModel.encode(selection("sonnet", variant: "high")), forKey: modelKey)
         store(sid).rebind(to: otherSid)
 
-        XCTAssertEqual(UserDefaults.standard.string(forKey: otherBuildKey), ChatModel.encode(model("build-model")))
-        XCTAssertEqual(UserDefaults.standard.string(forKey: otherPlanKey), ChatModel.encode(model("plan-model")))
-        // The source session's keys are untouched.
-        XCTAssertEqual(UserDefaults.standard.string(forKey: buildKey), ChatModel.encode(model("build-model")))
-        XCTAssertEqual(UserDefaults.standard.string(forKey: planKey), ChatModel.encode(model("plan-model")))
+        // rebind copies the RAW stored value verbatim.
+        XCTAssertEqual(UserDefaults.standard.string(forKey: modelKey), UserDefaults.standard.string(forKey: otherModelKey))
+        XCTAssertEqual(ChatModelStore.loadSelection(for: otherSid), selection("sonnet", variant: "high"))
+        // The source session's key is untouched.
+        XCTAssertEqual(ChatModelStore.loadSelection(for: sid), selection("sonnet", variant: "high"))
     }
 
-    func testRebindLeavesAbsentPlanKeyAbsentOnDestination() {
-        // Only a build model stored — the destination must NOT get a plan key
-        // stamped with the build fallback (that would "activate" plan mode).
-        UserDefaults.standard.set(ChatModel.encode(model("build-model")), forKey: buildKey)
+    func testRebindWithNothingStoredLeavesDestinationAbsent() {
         store(sid).rebind(to: otherSid)
-
-        XCTAssertEqual(UserDefaults.standard.string(forKey: otherBuildKey), ChatModel.encode(model("build-model")))
-        XCTAssertNil(UserDefaults.standard.string(forKey: otherPlanKey))
+        XCTAssertNil(UserDefaults.standard.string(forKey: otherModelKey))
     }
 
-    // MARK: - Mode toggle restores each mode's model (no cross-contamination)
+    // MARK: - Plan mode never changes the model
 
-    func testTogglePlanTwiceReturnsOriginalModel() {
+    func testTogglePlanDoesNotChangeTheModel() {
         let s = store(sid)
 
-        s.setOverride(model("build-a"))                    // pick A in build mode
-        XCTAssertEqual(UserDefaults.standard.string(forKey: buildKey), ChatModel.encode(model("build-a")))
-        XCTAssertEqual(s.override, model("build-a"))
+        s.setOverride(model("sonnet"))
+        XCTAssertEqual(ChatModelStore.loadSelection(for: sid), selection("sonnet"))
+        XCTAssertEqual(s.override, model("sonnet"))
 
-        s.setPlan(true)                                    // plan on — plan key absent, falls back to build-a
-        XCTAssertEqual(s.override, model("build-a"))
+        s.setPlan(true)
+        XCTAssertEqual(s.override, model("sonnet"))
 
-        s.setOverride(model("plan-b"))                     // pick B in plan mode
-        XCTAssertEqual(UserDefaults.standard.string(forKey: planKey), ChatModel.encode(model("plan-b")))
-        XCTAssertEqual(s.override, model("plan-b"))
-
-        s.setPlan(false)                                   // plan off — build key holds A again
-        XCTAssertEqual(s.override, model("build-a"))
-
-        s.setPlan(true)                                    // plan on again — plan key holds B
-        XCTAssertEqual(s.override, model("plan-b"))
+        s.setPlan(false)
+        XCTAssertEqual(s.override, model("sonnet"))
+        // One key, one value throughout — no per-mode key appears.
+        XCTAssertEqual(ChatModelStore.loadSelection(for: sid), selection("sonnet"))
+        XCTAssertNil(UserDefaults.standard.string(forKey: otherModelKey))
+        XCTAssertNil(UserDefaults.standard.string(forKey: legacyPlanKey))
     }
 
-    func testModeDoesNotWriteWhenValueUnchanged() {
-        let s = store(sid)
-        s.setPlan(false)                                   // already build — no re-read, no write
-        XCTAssertNil(UserDefaults.standard.string(forKey: buildKey))
-        XCTAssertNil(UserDefaults.standard.string(forKey: planKey))
+    // MARK: - Legacy plan-key cleanup
+
+    func testFirstReadDeletesLegacyPlanKey() {
+        UserDefaults.standard.set(ChatModel.encode(selection("plan-model")), forKey: legacyPlanKey)
+        _ = store(sid)                                       // constructing the store is the first read
+        XCTAssertNil(UserDefaults.standard.string(forKey: legacyPlanKey))
     }
 }
