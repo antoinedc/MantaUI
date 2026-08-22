@@ -148,7 +148,9 @@ describe("ProvidersStep render harness (BET-960)", () => {
       buttonByText(h!, "Probe endpoint")?.click();
     });
     await h.flush();
-    expect(h!.text()).toContain("found");
+    // The probe's model checklist rendered (the counter line that replaces the
+    // removed "{n} models found" header, BET-1312).
+    expect(h!.text()).toContain("selected");
 
     // Save the custom endpoint. onSaved fires the parent refresh (which now
     // hangs), so the loader row must reappear while the list re-probes.

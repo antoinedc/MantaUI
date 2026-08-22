@@ -27,8 +27,8 @@ import {
   customProviderDraftError,
 } from "./chatUtils";
 import { Field } from "./Field";
-import { Checkbox } from "./Checkbox";
 import { Button } from "./Button";
+import { ModelChecklist } from "./ModelChecklist";
 
 type Phase = "editing" | "probing" | "ready";
 
@@ -95,6 +95,14 @@ export function CustomProviderForm({
       if (next.has(id)) next.delete(id);
       else next.add(id);
       return next;
+    });
+  };
+
+  const bulkChange = (ids: string[], next: boolean) => {
+    setChecked((s) => {
+      const out = new Set(s);
+      for (const id of ids) next ? out.add(id) : out.delete(id);
+      return out;
     });
   };
 
@@ -198,11 +206,12 @@ export function CustomProviderForm({
         </div>
       )}
       {phase === "ready" && models && (
-        <ModelList
+        <ModelChecklist
           models={models}
           checked={checked}
           onToggle={toggle}
           disabled={busy}
+          onBulkChange={bulkChange}
         />
       )}
       <div className="flex items-center gap-2">
@@ -227,42 +236,6 @@ export function CustomProviderForm({
             {busy ? "Probing…" : "Probe endpoint"}
           </Button>
         )}
-      </div>
-    </div>
-  );
-}
-
-function ModelList({
-  models,
-  checked,
-  onToggle,
-  disabled,
-}: {
-  models: { id: string }[];
-  checked: Set<string>;
-  onToggle: (id: string) => void;
-  disabled: boolean;
-}) {
-  return (
-    <div className="space-y-1">
-      <div className="text-meta text-text-muted">
-        {models.length} model{models.length === 1 ? "" : "s"} found — uncheck any you don't want.
-      </div>
-      <div className="max-h-40 overflow-auto rounded-xs border border-border bg-bg p-2 space-y-1">
-        {models.map((m) => (
-          <div
-            key={m.id}
-            className="flex items-center gap-2 text-meta"
-          >
-            <Checkbox
-              checked={checked.has(m.id)}
-              onChange={() => onToggle(m.id)}
-              disabled={disabled}
-              ariaLabel={m.id}
-            />
-            <span className="text-text-muted">{m.id}</span>
-          </div>
-        ))}
       </div>
     </div>
   );
