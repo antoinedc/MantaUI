@@ -3,6 +3,7 @@
 // Install on the opencode host (the Linux box that runs manta-server + opencode):
 //   mkdir -p ~/.config/opencode/tools
 //   cp <repo>/docs/opencode-tools/cto.ts ~/.config/opencode/tools/cto.ts
+//   cp <repo>/docs/opencode-tools/manta-auth.ts ~/.config/opencode/tools/manta-auth.ts
 // then `systemctl --user restart opencode-serve` so opencode re-scans tools/.
 // A copy, never a symlink — opencode resolves a tool's imports relative to the
 // file's REAL path, so a symlink back into the repo (no node_modules) fails
@@ -16,9 +17,7 @@
 // stoppedStore; nothing is reimplemented).
 
 import { tool } from "@opencode-ai/plugin";
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { boxToken, authHeaders } from "./manta-auth";
 
 const MANTA_SERVER = process.env.MANTA_SERVER_URL || "http://127.0.0.1:8787";
 
@@ -29,26 +28,6 @@ const CTO_TOOLS =
   "git_branch, git_log, list_models, get_usage, usage_stopped, session_usage, " +
   "context_state, session_plan_mode, get_config, watch, unwatch, " +
   "list_watches";
-
-function boxToken() {
-  const fromEnv = process.env.MANTA_BOX_TOKEN;
-  if (fromEnv) return fromEnv;
-  try {
-    const raw = readFileSync(join(homedir(), ".manta", "auth.json"), "utf-8");
-    const tok = JSON.parse(raw)?.box_token;
-    return typeof tok === "string" && /^[0-9a-f]{32}$/.test(tok) ? tok : null;
-  } catch {
-    return null;
-  }
-}
-
-function authHeaders(body) {
-  const headers = {};
-  if (body) headers["content-type"] = "application/json";
-  const tok = boxToken();
-  if (tok) headers["authorization"] = `Bearer ${tok}`;
-  return headers;
-}
 
 export const cto = tool({
   description: [

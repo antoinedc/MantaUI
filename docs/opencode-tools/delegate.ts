@@ -3,6 +3,7 @@
 // Install on the opencode host (the Linux box that runs manta-server + opencode):
 //   mkdir -p ~/.config/opencode/tools
 //   cp <repo>/docs/opencode-tools/delegate.ts ~/.config/opencode/tools/delegate.ts
+//   cp <repo>/docs/opencode-tools/manta-auth.ts ~/.config/opencode/tools/manta-auth.ts
 // then `systemctl --user restart opencode-serve` so opencode re-scans tools/.
 //
 // This tool is a THIN registrar. It POSTs the request to manta-server
@@ -23,9 +24,8 @@
 // (docs/manta-tools-scheduler.md).
 
 import { tool } from "@opencode-ai/plugin";
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { boxToken, authHeaders } from "./manta-auth";
 
 const MANTA_SERVER = process.env.MANTA_SERVER_URL || "http://127.0.0.1:8787";
 
@@ -35,25 +35,6 @@ const MANTA_SERVER = process.env.MANTA_SERVER_URL || "http://127.0.0.1:8787";
 // own auth store (~/.manta/auth.json, 0600). Re-read on every call (one
 // tiny local file) so a token rotation never requires an opencode-serve
 // restart. MANTA_BOX_TOKEN env overrides for tests/dev.
-function boxToken(): string | null {
-  const fromEnv = process.env.MANTA_BOX_TOKEN;
-  if (fromEnv) return fromEnv;
-  try {
-    const raw = readFileSync(join(homedir(), ".manta", "auth.json"), "utf-8");
-    const tok = JSON.parse(raw)?.box_token;
-    return typeof tok === "string" && /^[0-9a-f]{32}$/.test(tok) ? tok : null;
-  } catch {
-    return null; // no store yet (auth disabled / first run) → send no header
-  }
-}
-
-function authHeaders(body?: unknown): Record<string, string> {
-  const headers: Record<string, string> = {};
-  if (body) headers["content-type"] = "application/json";
-  const tok = boxToken();
-  if (tok) headers["authorization"] = `Bearer ${tok}`;
-  return headers;
-}
 
 const z = tool.schema;
 

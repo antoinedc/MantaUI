@@ -442,6 +442,8 @@ require-confirm toast the user hasn't answered isn't re-offered every 3s.
   `~/.manta-outbox/<sessionID>/` (workspace-linked) and hands it a TTL (default
   7 days, or `ttlHours:0` for never). Install on the remote opencode host:
   `cp <repo>/docs/opencode-tools/send-file.ts ~/.config/opencode/tools/send-file.ts`
+  plus the shared `manta-auth.ts` module it imports
+  (`cp <repo>/docs/opencode-tools/manta-auth.ts ~/.config/opencode/tools/manta-auth.ts`),
   then restart `opencode-serve`. The legacy `/send-file` markdown command
   (`docs/opencode-commands/send-file.md`) still works for a bare `cp` to the
   root, but that path is NOT workspace-linked.
@@ -713,7 +715,10 @@ the reusable "MantaUI tools" pattern (for future tools like `ping`) is in
 
 - **The AI's awareness comes from a GLOBAL opencode custom tool**, not MantaUI code.
   `docs/opencode-tools/schedule.ts` is **COPIED** (not symlinked) into
-  `~/.config/opencode/tools/schedule.ts` on the box; opencode auto-loads it for
+  `~/.config/opencode/tools/schedule.ts` on the box — **alongside the shared
+  `manta-auth.ts` module** it imports
+  (`docs/opencode-tools/manta-auth.ts` → `~/.config/opencode/tools/manta-auth.ts`);
+  opencode auto-loads it for
   EVERY project/session/model. Multiple named exports → tools `schedule_create`,
   `schedule_list`, `schedule_cancel`. A guidance blurb appended to
   `~/.config/opencode/AGENTS.md` (from `docs/opencode-tools/AGENTS.md`) tells the
@@ -773,7 +778,8 @@ generates on the box. Follows the same "MantaUI tools" pattern as the scheduler
 
 - **Global opencode tool**, `docs/opencode-tools/serve-page.ts`, **COPIED** (not
   symlinked — same `@opencode-ai/plugin` import-resolution gotcha as schedule)
-  to `~/.config/opencode/tools/serve-page.ts`. Three named exports → tools
+  to `~/.config/opencode/tools/serve-page.ts`, **plus the shared `manta-auth.ts`
+  module it imports** (`→ ~/.config/opencode/tools/manta-auth.ts`). Three named exports → tools
   `serve_page`, `stop_page`, `list_pages`. Guidance appended to
   `~/.config/opencode/AGENTS.md` from `docs/opencode-tools/AGENTS.md`.
   **Install/update = `systemctl --user restart opencode-serve`.**
@@ -850,7 +856,8 @@ schedule/serve-page (`docs/manta-tools-scheduler.md`). Key facts:
   whose window isn't stamped). `selectPeers` returns the sibling windows.
 - **Global opencode tool**, `docs/opencode-tools/peers.ts`, **COPIED** (not
   symlinked — same `@opencode-ai/plugin` gotcha) to
-  `~/.config/opencode/tools/peers.ts`. Three exports → `peers_list`,
+  `~/.config/opencode/tools/peers.ts`, **plus the shared `manta-auth.ts` module
+  it imports** (`→ ~/.config/opencode/tools/manta-auth.ts`). Three exports → `peers_list`,
   `peers_inspect`, `peers_message`. Guidance appended to
   `~/.config/opencode/AGENTS.md`.
   **Install/update = `systemctl --user restart opencode-serve`.**
@@ -953,7 +960,8 @@ routing matrix + scenarios in `docs/manta-tools-notify.md`. Key facts:
 - **Blocking tier is unchanged:** both devices immediately, mobile suppressed
   only when the phone is foregrounded on that same session.
 - **The `notify` tool** (`docs/opencode-tools/notify.ts`, COPIED to
-  `~/.config/opencode/tools/`, restart `opencode-serve`) is a thin registrar →
+  `~/.config/opencode/tools/` plus the shared `manta-auth.ts` module it imports,
+  restart `opencode-serve`) is a thin registrar →
   `POST /api/notify {message, title?, urgent?, sessionID}` → `fireNotify`.
   Session-tied: carries `context.sessionID` so it deep-links + dedupes
   (`tag:"notify-<sid>"`). The model does NOT pick the device — the router does.
@@ -985,7 +993,8 @@ peers/notify. Key facts:
   implement the resolution; session wins over shared.
 - **Global opencode tool**, `docs/opencode-tools/secrets.ts`, **COPIED** (not
   symlinked — same `@opencode-ai/plugin` gotcha) to
-  `~/.config/opencode/tools/secrets.ts`. Two exports → `secret_list`,
+  `~/.config/opencode/tools/secrets.ts`, **plus the shared `manta-auth.ts` module
+  it imports** (`→ ~/.config/opencode/tools/manta-auth.ts`). Two exports → `secret_list`,
   `secret_provide`. Guidance appended to `~/.config/opencode/AGENTS.md` from
   `docs/opencode-tools/AGENTS.md` (## MantaUI secrets). **Install/update =
   `systemctl --user restart opencode-serve`.**
@@ -1051,7 +1060,8 @@ and worktree all belong to it.
 
 - **Global opencode tool**, `docs/opencode-tools/delegate.ts`, **COPIED** (not
   symlinked — same `@opencode-ai/plugin` gotcha) to
-  `~/.config/opencode/tools/delegate.ts`. Three exports → `delegate`,
+  `~/.config/opencode/tools/delegate.ts`, **plus the shared `manta-auth.ts` module
+  it imports** (`→ ~/.config/opencode/tools/manta-auth.ts`). Three exports → `delegate`,
   `delegate_list`, `delegate_stop`. Guidance appended to
   `~/.config/opencode/AGENTS.md` from `docs/opencode-tools/AGENTS.md`
   (## MantaUI background delegation). **Install/update =
@@ -1112,7 +1122,8 @@ consumes the bus envelopes in the renderer.
 
 - **Global opencode tool**, `docs/opencode-tools/manta-app.ts`, **COPIED** (not
   symlinked — same `@opencode-ai/plugin` gotcha) to
-  `~/.config/opencode/tools/manta-app.ts`. Four exports → `manta_compact_session`,
+  `~/.config/opencode/tools/manta-app.ts`, **plus the shared `manta-auth.ts` module
+  it imports** (`→ ~/.config/opencode/tools/manta-auth.ts`). Four exports → `manta_compact_session`,
   `manta_switch_model`, `manta_rename_session`, `manta_list_sessions`. Guidance
   appended to `~/.config/opencode/AGENTS.md`. **Install/update =
   `systemctl --user restart opencode-serve`.**

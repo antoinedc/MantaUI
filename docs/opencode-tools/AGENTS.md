@@ -8,6 +8,26 @@
   (Strip this HTML comment if you like; opencode reads the file as plain text.)
 -->
 
+## Shared auth module — `manta-auth.ts`
+
+Every MantaUI tool (`docs/opencode-tools/*.ts`) reaches manta-server's
+`/api/*` routes with `Authorization: Bearer <box_token>` (M1 auth gate). The
+`boxToken()` / `authHeaders()` helpers are **one shared source**,
+`docs/opencode-tools/manta-auth.ts` (BET-1330). Tools import them:
+
+```ts
+import { boxToken, authHeaders } from "./manta-auth";
+```
+
+Do NOT hand-copy these helpers into a new tool. Because opencode resolves a
+tool's imports relative to the file's REAL path under
+`~/.config/opencode/tools/` (which has no `node_modules`), `manta-auth.ts`
+must be **copied alongside** as a sibling of every tool that imports it —
+each tool's install instructions include the extra
+`cp <repo>/docs/opencode-tools/manta-auth.ts ~/.config/opencode/tools/manta-auth.ts`.
+Forgetting it makes the tool silently fail to register with
+`Cannot find module './manta-auth'`.
+
 ## manta scheduled tasks
 
 You have a `schedule_create` tool that runs a prompt later in this same chat
@@ -350,6 +370,8 @@ create a PR, only the human-facing app is confirmed by the human's click.)
 
 **Install/update is a COPY, never a symlink.** Copy
 `docs/opencode-tools/delegate.ts` to `~/.config/opencode/tools/delegate.ts`
+**and** `docs/opencode-tools/manta-auth.ts` to
+`~/.config/opencode/tools/manta-auth.ts` (the shared `./manta-auth` import)
 and run `systemctl --user restart opencode-serve`. A symlinked tool fails
 to resolve `@opencode-ai/plugin` and silently never registers.
 
@@ -382,6 +404,8 @@ try to route around them with the other tools.
 
 Install/update is a COPY, never a symlink: copy
 `docs/opencode-tools/manta-app.ts` to `~/.config/opencode/tools/manta-app.ts`
+and `docs/opencode-tools/manta-auth.ts` to
+`~/.config/opencode/tools/manta-auth.ts` (the shared `./manta-auth` import)
 then `systemctl --user restart opencode-serve`. A symlink fails to resolve
 `@opencode-ai/plugin` and the tool silently never registers.
 
@@ -401,7 +425,10 @@ It is NOT a one-shot mailbox:
   it, so users can re-download any time before then.
 
 Install: `cp <repo>/docs/opencode-tools/send-file.ts
-~/.config/opencode/tools/send-file.ts` and restart `opencode-serve`.
+~/.config/opencode/tools/send-file.ts` and `cp
+<repo>/docs/opencode-tools/manta-auth.ts
+~/.config/opencode/tools/manta-auth.ts` (the shared `./manta-auth` import),
+then restart `opencode-serve`.
 **Install/update is a COPY, never a symlink** (same `@opencode-ai/plugin`
 resolution gotcha as the other manta tools).
 
@@ -451,7 +478,10 @@ the same handle once the file exists. A `media_begin` with no following
 `media_show` fails after 10 minutes (the placeholder is dropped). All three
 forward the current session + message id so the placeholder and artifact land
 on this turn. Install: `cp <repo>/docs/opencode-tools/media.ts
-~/.config/opencode/tools/media.ts` then restart `opencode-serve`.
+~/.config/opencode/tools/media.ts` and `cp
+<repo>/docs/opencode-tools/manta-auth.ts
+~/.config/opencode/tools/manta-auth.ts` (the shared `./manta-auth` import),
+then restart `opencode-serve`.
 
 ## manta on-call CTO reads
 
@@ -468,7 +498,10 @@ stopped conversations?", "is <session> in plan mode?", or "context state of
 the empty state, never fabricate. The `cto` opencode agent (selectable as a
 normal chat session) is pre-wired to use this belt. Install/update is a COPY,
 never a symlink: `cp <repo>/docs/opencode-tools/cto.ts
-~/.config/opencode/tools/cto.ts` then `systemctl --user restart
+~/.config/opencode/tools/cto.ts` and `cp
+<repo>/docs/opencode-tools/manta-auth.ts
+~/.config/opencode/tools/manta-auth.ts` (the shared `./manta-auth` import)
+then `systemctl --user restart
 opencode-serve`. The engine lives in `src/server/cto.mjs` (see there).
 
 ## manta on-call CTO inbound — `send_to_cto` + watchers (BET-1165)
@@ -491,7 +524,9 @@ Two companion capabilities to the `cto` read belt, both global opencode tools.
   on "no").
 
 Install/update each tool as a COPY (`cp docs/opencode-tools/{send-to-cto,cto}.ts
-~/.config/opencode/tools/`) then `systemctl --user restart opencode-serve`. The
+~/.config/opencode/tools/` **plus** `cp docs/opencode-tools/manta-auth.ts
+~/.config/opencode/tools/manta-auth.ts` — the shared `./manta-auth` import)
+then `systemctl --user restart opencode-serve`. The
 engine + routers live in `src/server/cto.mjs` (createCtoEngine / createCtoInbound /
 createWatcherPoller).
 
@@ -514,7 +549,10 @@ box and rendered by the client inside a sandboxed frame:
   by default (`ttlHours: 0` = never).
 
 Install: `cp <repo>/docs/opencode-tools/widget.ts`
-`~/.config/opencode/tools/widget.ts` then `systemctl --user restart
+`~/.config/opencode/tools/widget.ts` and `cp
+<repo>/docs/opencode-tools/manta-auth.ts
+~/.config/opencode/tools/manta-auth.ts` (the shared `./manta-auth` import),
+then `systemctl --user restart
 opencode-serve`. **Install/update is a COPY, never a symlink** (a symlink
 fails to resolve `@opencode-ai/plugin` and the tool silently never registers).
 
@@ -547,6 +585,9 @@ inline here; there is deliberately no measurement script in the repo.
 
 Install/update is a COPY, never a symlink:
 `cp <repo>/docs/opencode-tools/widget.ts
-~/.config/opencode/tools/widget.ts` then `systemctl --user restart
+~/.config/opencode/tools/widget.ts` and `cp
+<repo>/docs/opencode-tools/manta-auth.ts
+~/.config/opencode/tools/manta-auth.ts` (the shared `./manta-auth` import),
+then `systemctl --user restart
 opencode-serve` (see the section above for the `@opencode-ai/plugin`
 resolution gotcha).
