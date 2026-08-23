@@ -99,6 +99,8 @@ import {
   filePartToMediaEntry,
   applyMediaEvent,
   dispatchMedia,
+  applyWidgetEvent,
+  dispatchWidget,
   previewLanguage,
   previewOriginWord,
   decodeDataUri,
@@ -5758,6 +5760,70 @@ describe("applyMediaEvent", () => {
     expect(e.meta.width).toBe(800);
     expect(e.meta.height).toBe(600);
     expect(e.meta.kind).toBe("image");
+  });
+});
+
+describe("applyWidgetEvent", () => {
+  // The wire shape the box spine (src/server/widgets.mjs) publishes: sessionId /
+  // messageId (lowercase `d`) — deliberately different casing from the media kind.
+  const show = {
+    action: "show",
+    id: "w1",
+    url: "https://g1.boxes.mantaui.com/widgets/w1",
+    title: "Revenue by quarter",
+    width: 800,
+    height: 600,
+    sessionId: "s",
+    messageId: "m",
+  } as const;
+
+  it("show creates a ready entry with the reserved-box metadata", () => {
+    const e = applyWidgetEvent(undefined, show);
+    expect(e.state).toBe("ready");
+    expect(e.meta.id).toBe("w1");
+    expect(e.meta.url).toBe("https://g1.boxes.mantaui.com/widgets/w1");
+    expect(e.meta.title).toBe("Revenue by quarter");
+    expect(e.meta.width).toBe(800);
+    expect(e.meta.height).toBe(600);
+    expect(e.meta.aspectRatio).toBeNull();
+  });
+
+  it("a repeat show for the same id is idempotent", () => {
+    const first = applyWidgetEvent(undefined, show);
+    const second = applyWidgetEvent(first, show);
+    expect(second.state).toBe("ready");
+    expect(second).toEqual(first);
+  });
+
+  it("fail marks the entry degraded, preserving the reserved-box metadata", () => {
+    const prev = applyWidgetEvent(undefined, show);
+    const e = applyWidgetEvent(prev, { action: "fail", id: "w1" });
+    expect(e.state).toBe("failed");
+    expect(e.meta.width).toBe(800);
+    expect(e.meta.height).toBe(600);
+    expect(e.meta.url).toBe("https://g1.boxes.mantaui.com/widgets/w1");
+  });
+
+  it("an unknown action is a no-op (and dispatching it calls no handler)", () => {
+    const prev = applyWidgetEvent(undefined, show);
+    expect(applyWidgetEvent(prev, { action: "banana" })).toEqual(prev);
+
+    // Mirrors the media dispatcher contract: an unsupported action routes to
+    // no handler. The "unknown session ignored" guard lives at the App-level
+    // onWidget subscription (drops events with empty sessionId/messageId
+    // before they reach the reducer), so routing here is purely by `action`.
+    let called: string[] = [];
+    dispatchWidget({ action: "show", id: "w1" }, {
+      show: () => called.push("show"),
+      fail: () => called.push("fail"),
+    });
+    expect(called).toEqual(["show"]);
+
+    dispatchWidget({ action: "nope" }, {
+      show: () => called.push("show"),
+      fail: () => called.push("fail"),
+    });
+    expect(called).toEqual(["show"]);
   });
 });
 

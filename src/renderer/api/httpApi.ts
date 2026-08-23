@@ -25,6 +25,7 @@ import {
   type VoiceUploadNoteResult,
   type AppControlPayload,
   type MediaEventPayload,
+  type WidgetEventPayload,
 } from "../../shared/types.js";
 import type { Api, SyncDelta } from "../../shared/api.js";
 // BET-559: httpApi used to pull these claim helpers through the (now-retired)
@@ -369,6 +370,7 @@ type Kind =
   | "progress.updated"
   | "appControl"
   | "media"
+  | "widget"
   | "stream"
   | "sync";
 
@@ -392,6 +394,7 @@ const listeners: Record<Kind, Set<(p: unknown) => void>> = {
   "progress.updated": new Set(),
   appControl: new Set(),
   media: new Set(),
+  widget: new Set(),
   stream: new Set(),
   sync: new Set(),
 };
@@ -1196,6 +1199,12 @@ export const httpApi: Api = {
   // client-visible effect. The payload IS the full event — the renderer
   // switches on `action` directly, no refetch.
   onMedia: (cb) => on<MediaEventPayload>("media", cb),
+
+  // BET-1325: the box spine publishes ONE `widget` bus kind with an `action`
+  // discriminator (today `show`; future `fail`) whenever a widget lands a
+  // client-visible effect. The payload IS the full event — the renderer
+  // switches on `action` directly, no refetch. Mirrors the `media` path.
+  onWidget: (cb) => on<WidgetEventPayload>("widget", cb),
 
   // -- APNs native-push registration (BET-181) --
   // iOS Capacitor app registers its APNs device token via the standard 6-site

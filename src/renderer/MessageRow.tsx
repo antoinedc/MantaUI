@@ -33,7 +33,8 @@ import {
 import { pastVerbFor } from "./chatShared";
 import { AssistantPart } from "./ToolCall";
 import { MediaBody } from "./MediaBody";
-import type { MediaEntry } from "./chatUtils";
+import { WidgetBody } from "./WidgetBody";
+import type { MediaEntry, WidgetEntry } from "./chatUtils";
 import { MantaMark } from "./MantaLoader";
 import { MessageBubble } from "./MessageBubble";
 import { VoicePlayer } from "./VoiceNote";
@@ -256,6 +257,7 @@ export const MessageRow = memo(function MessageRow({
   commandInfo,
   voiceNote = null,
   media = null,
+  widget = null,
   entering = false,
 }: {
   msg: OpencodeMessage;
@@ -295,6 +297,12 @@ export const MessageRow = memo(function MessageRow({
   // a `fail` ends it as a labelled placeholder. Stable reference from a panel
   // memo, so the MessageRow memo chain is untouched.
   media?: MediaEntry | null;
+  // BET-1325: the inline-widget entry (from the `widget` bus events) this
+  // assistant message owns, keyed by messageId. When set, the row renders the
+  // WidgetBody card — a sandboxed <iframe> in a ToolCard shell, reserved to
+  // the widget's declared aspect box. Stable reference from a panel memo, so
+  // the MessageRow memo chain is untouched.
+  widget?: WidgetEntry | null;
   // True when this message ARRIVED while the user was watching, as opposed to
   // being part of the transcript they loaded (transcript-motion). Decided once
   // in Transcript by `updateEntryMotion` and sticky for the row's whole life —
@@ -436,6 +444,7 @@ export const MessageRow = memo(function MessageRow({
   return stampedRow(
     <div className="flex flex-col" style={{ gap: "var(--block-gap)" }}>
       {media != null && !isUser && <MediaBody entry={media} />}
+      {widget != null && !isUser && <WidgetBody entry={widget} />}
       {visibleParts.map((p) => (
         <AssistantPart
           key={p.id}

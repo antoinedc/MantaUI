@@ -360,6 +360,9 @@ export type TranscriptProps = {
   // BET-1148: messageID → inline media entry (from the `media` bus events),
   // memoized at ChatPanel scope like the other per-message maps.
   mediaByMessageId: Map<string, import("./chatUtils").MediaEntry>;
+  // BET-1325: messageId → inline widget entry (from the `widget` bus events),
+  // memoized at ChatPanel scope. Mirrors mediaByMessageId.
+  widgetsByMessageId: Map<string, import("./chatUtils").WidgetEntry>;
   pendingVoiceNote: PendingVoiceNote | null;
   onRetryVoiceNote: (noteId: string) => void;
   onReplyQuestion: (q: QuestionRequest, answers: string[][]) => void;
@@ -400,6 +403,7 @@ export function Transcript({
   userCommandInfo,
   voiceNoteByMessageId,
   mediaByMessageId,
+  widgetsByMessageId,
   pendingVoiceNote,
   onRetryVoiceNote,
   onReplyQuestion,
@@ -679,6 +683,11 @@ export function Transcript({
                       m.info.role === "user"
                         ? null
                         : mediaByMessageId.get(m.info.id) ?? null
+                    }
+                    widget={
+                      m.info.role === "user"
+                        ? null
+                        : widgetsByMessageId.get(m.info.id) ?? null
                     }
                     entering={entryMotion.entering.has(m.info.id)}
                   />

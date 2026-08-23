@@ -24,7 +24,7 @@ import {
 } from "./chatShared";
 import { setSessionChoice } from "./modelPrefs";
 import type { SyncPayload } from "../shared/api";
-import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, pruneVisitedSessions, registerMountedTerminal, shouldResyncWindowsForJobs, dispatchAppControl, dispatchMedia, applyMediaEvent, formatResetAt, voiceUi, boxUpgradeLanded, type AppControlHandlers, type MountedTerminal } from "./chatUtils";
+import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, pruneVisitedSessions, registerMountedTerminal, shouldResyncWindowsForJobs, dispatchAppControl, dispatchMedia, applyMediaEvent, dispatchWidget, applyWidgetEvent, formatResetAt, voiceUi, boxUpgradeLanded, type AppControlHandlers, type MountedTerminal } from "./chatUtils";
 import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
 import { UpdateBar } from "./UpdateBar";
 import { ConfirmModal } from "./ConfirmModal";
@@ -46,6 +46,7 @@ import type {
   AvailableLauncher,
   MediaEventPayload,
   UpdateTarget,
+  WidgetEventPayload,
 } from "../shared/types";
 import {
   buildLimitMessage,
@@ -1210,6 +1211,29 @@ function Shell() {
         st.setMediaEntry(sessionID, messageID, applyMediaEvent(prev, p));
       };
       dispatchMedia(payload, { begin: reduce, show: reduce, fail: reduce });
+    });
+    return off;
+  }, [apiGeneration]);
+
+  // Inline widget bus (BET-1325). The box spine publishes ONE `widget` kind
+  // with an `action` discriminator (today `show`; future `fail`) whenever a
+  // widget is registered. Subscribe ONCE here (not from inside ChatPanel —
+  // panels mount/unmount per session) and route the state into the store keyed
+  // sessionId → messageId, exactly mirroring the `media` path above. The
+  // entries are derived by the pure `applyWidgetEvent` reducer, so no logic
+  // lives in the subscription callback.
+  useEffect(() => {
+    if (!window.api.onWidget) return;
+    const off = window.api.onWidget((payload) => {
+      const sessionId = payload.sessionId ?? "";
+      const messageId = payload.messageId ?? "";
+      if (!sessionId || !messageId) return;
+      const reduce = (p: WidgetEventPayload) => {
+        const st = useStore.getState();
+        const prev = st.inlineWidgets[sessionId]?.[messageId];
+        st.setWidgetEntry(sessionId, messageId, applyWidgetEvent(prev, p));
+      };
+      dispatchWidget(payload, { show: reduce, fail: reduce });
     });
     return off;
   }, [apiGeneration]);

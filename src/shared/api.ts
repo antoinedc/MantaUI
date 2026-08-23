@@ -87,6 +87,7 @@ import type {
   LedgerSummary,
   AppControlPayload,
   MediaEventPayload,
+  WidgetEventPayload,
 } from "./types.js";
 import type { ClaimOutcome } from "./claim.mjs";
 
@@ -610,6 +611,11 @@ export interface Api {
   // and switches on `action`. No-op on the preload bridge and on demoApi
   // (Proxy fallback returns a no-op unsubscribe).
   onMedia(cb: (payload: MediaEventPayload) => void): () => void;
+
+  // Inline widgets (BET-1325). The box spine publishes ONE `widget` bus kind
+  // with an `action` discriminator (today `show`; future `fail`); the desktop
+  // subscribes once and switches on `action`, exactly like `onMedia`.
+  onWidget(cb: (payload: WidgetEventPayload) => void): () => void;
 
   // Secrets (manta-server owned; desktop reaches it over -L 18787). list returns
   // METADATA ONLY (never values). set carries the value renderer → box (never

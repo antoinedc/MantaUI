@@ -90,6 +90,7 @@ function props(messages: OpencodeMessage[], running = false): TranscriptProps {
     userCommandInfo: new Map(),
     voiceNoteByMessageId: new Map(),
     mediaByMessageId: new Map(),
+    widgetsByMessageId: new Map(),
     pendingVoiceNote: null,
     onRetryVoiceNote: () => {},
     onReplyQuestion: () => {},
