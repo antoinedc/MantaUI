@@ -1,0 +1,580 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Mockup — Inline HTML widgets (desktop + iOS)</title>
+
+<!--
+  THE SPEC for inline sandboxed HTML widgets. This file is the design contract,
+  not a picture of one. Read docs/visual-verification.md before editing.
+
+  ===========================================================================
+  THE ONE RULE THAT MAKES THIS CHEAP TO BUILD
+  ===========================================================================
+  A widget card is NOT a new component. It is the EXISTING `ToolCard` shell
+  (src/renderer/ToolCard.tsx) with an `OutputWell variant="attached"` body —
+  exactly as `MediaBody` (BET-1148) already does for images and video.
+
+  Every part of the frame drawn below maps 1:1 onto a ToolCard slot:
+
+    mockup class        ToolCard slot        real classes
+    -----------------   ------------------   ---------------------------------
+    .mk-shell           SHELL                rounded-md border border-border-subtle bg-bg-elev
+    .mk-head            HEADER               flex items-center gap-2 px-3 py-[9px]
+                                             text-[12.5px] leading-none font-mono text-text-muted
+    .mk-dot             tone -> StatusDot    <StatusDot tone=… />
+    .mk-name            name                 text-text font-semibold
+    .mk-arg             arg                  text-text-faint min-w-0 truncate
+    .mk-meta            meta                 ml-auto flex items-center gap-2
+                                             text-[11px] text-text-quiet
+    .mk-act             chevron/action slot  shrink-0 text-text-faint hover:text-text -my-1 p-1 rounded-xs
+    .mk-body            children             <OutputWell variant="attached">
+
+  If you find yourself writing a new card shell, new header, new border or new
+  radius, STOP — you have drifted. The only genuinely new thing in this design
+  is what goes INSIDE the well (a sandboxed frame instead of an <img>) and the
+  four lifecycle states the meta slot names.
+
+  Consequence: the CSS in the "widget frame" block below is a REPLICA of
+  ToolCard's Tailwind classes, written as raw CSS only because a mockup cannot
+  import React. It exists so the design can be seen, NOT so it can be copied
+  into the app. Copying it into the app is the failure mode this note prevents.
+
+  ===========================================================================
+  TOKENS
+  ===========================================================================
+  Loads the app's REAL token stylesheet, so every colour, spacing step, radius,
+  shadow and type step resolves to the same variable the app uses at runtime.
+  A mockup that hardcodes its own hexes is not a spec — it is a picture, and it
+  drifts the moment a token is retuned.
+
+  This design introduces exactly TWO new tokens (both added to
+  src/renderer/tokens.css by the implementing issue, both justified because
+  they are read by MORE THAN ONE consumer — which is the entire reason
+  tokens.css exists):
+
+    --inline-max-w            520px  reading-width cap for any inline embed.
+                                     REPLACES the `MEDIA_MAX_W = 520` constant
+                                     in MediaBody.tsx, which is deleted. One
+                                     value, two renderers, plus the generated
+                                     Swift theme.
+    --widget-dormant-opacity  0.5    dim applied to a dormant widget's snapshot.
+                                     Desktop and iOS must dim identically; a
+                                     hardcoded 0.5 in each would drift.
+
+  Everything else below resolves to a token that ALREADY EXISTS. If you need a
+  value that is not here, snap to the nearest existing token first and only add
+  a new one if that is genuinely wrong — and then say why in the PR.
+
+  ===========================================================================
+  SCOPE — what in this file is NOT the design
+  ===========================================================================
+  The "MOCKUP-ONLY SCAFFOLDING" CSS block is page furniture: the page heading,
+  the theme toggle, the phone bezel, the fake nav bar and composer, the section
+  labels and the callout list. None of it is implementable and none of it is a
+  conformance target. It exists to give the widget states a believable stage.
+
+  Conformance regions (for scripts/visual/screens.mjs):
+    .mk-desktop      desktop transcript, two live widgets
+    .mk-anatomy      the frame, annotated
+    .mk-ios-live     iOS live window (live / snapshot / placeholder)
+    .mk-ios-sheet    iOS expanded sheet
+    .mk-ios-degraded iOS degraded states
+-->
+
+<link rel="stylesheet" href="/src/renderer/tokens.css" />
+<link rel="stylesheet" href="/node_modules/@fontsource-variable/inter/index.css" />
+<link rel="stylesheet" href="/node_modules/@fontsource-variable/jetbrains-mono/index.css" />
+
+<style>
+/* The two tokens this design adds. Delete this block when they land in
+   tokens.css — it is here only so the mockup renders before that PR merges. */
+:root{
+  --inline-max-w:520px;
+  --widget-dormant-opacity:.5;
+}
+
+/* =======================================================================
+   THE WIDGET FRAME — the design. A raw-CSS replica of ToolCard + OutputWell.
+   Do not copy into the app; use the components.
+   ======================================================================= */
+.mk-shell{
+  border-radius:var(--r-md);
+  border:1px solid var(--border-subtle);
+  background:var(--panel);              /* bg-bg-elev */
+  overflow:hidden;
+  max-width:var(--inline-max-w);
+}
+.mk-head{
+  display:flex;align-items:center;gap:var(--sp-2);
+  padding:9px var(--sp-3);              /* px-3 py-[9px] — ToolCard's off-grid chrome */
+  font-family:var(--font-mono);font-size:12.5px;line-height:1;
+  color:var(--tx2);                     /* text-text-muted */
+}
+.mk-dot{width:var(--step-dot);height:var(--step-dot);border-radius:50%;flex:none;background:var(--tx4)}
+.mk-dot.ok{background:var(--ok)}
+.mk-dot.running{background:var(--accent)}
+.mk-dot.error{background:var(--danger)}
+.mk-name{color:var(--tx1);font-weight:var(--weight-semibold)}   /* text-text font-semibold */
+.mk-arg{color:var(--tx3);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mk-meta{margin-left:auto;display:flex;align-items:center;gap:var(--sp-2);
+  font-size:var(--font-size-2xs);color:var(--tx4)}               /* text-[11px] text-text-quiet */
+.mk-act{flex:none;color:var(--tx3);background:none;border:0;padding:var(--sp-1);margin:-4px 0;
+  border-radius:var(--r-xs);cursor:pointer;display:grid;place-items:center}
+.mk-act:hover{color:var(--tx1)}
+/* OutputWell variant="attached" — top border only, square corners, inset surface */
+.mk-body{background:var(--inset);border-top:1px solid var(--border-subtle);padding:var(--sp-2) var(--sp-3)}
+/* The sandboxed frame itself. In the app this is the <iframe> (desktop) or the
+   WKWebView (iOS). Height comes from the DECLARED aspect — never from content. */
+.mk-frame{display:block;width:100%;border:0;border-radius:var(--r-xs);overflow:hidden;position:relative}
+
+/* --- lifecycle states, all at IDENTICAL box height --- */
+.mk-dormant .mk-snap{opacity:var(--widget-dormant-opacity);filter:saturate(.6)}
+.mk-veil{position:absolute;inset:0;display:grid;place-items:center}
+.mk-chip{display:inline-flex;align-items:center;gap:var(--sp-1);
+  background:var(--panel);border:1px solid var(--border-strong);color:var(--tx1);
+  border-radius:var(--r-full);padding:var(--sp-1) var(--sp-3);
+  font-size:var(--font-size-xs);font-weight:var(--weight-medium);box-shadow:var(--shadow-md)}
+.mk-skel{display:flex;flex-direction:column;gap:var(--sp-2);justify-content:center;height:100%;padding:0 var(--sp-3)}
+.mk-skelbar{height:var(--sp-2);border-radius:var(--r-full);background:var(--fill-active)}
+.mk-degraded{display:grid;place-items:center;align-content:center;gap:var(--sp-2);height:100%;text-align:center;padding:var(--sp-3)}
+.mk-degraded p{margin:0;font-size:var(--font-size-xs);color:var(--tx3);line-height:var(--ui-lh);font-family:var(--font-sans)}
+
+/* =======================================================================
+   UNTRUSTED CONTENT — drawn only so the states have something to show.
+   This is what the MODEL authored. Nothing here is implementable.
+   ======================================================================= */
+.demo{height:100%;padding:var(--sp-3) var(--sp-4);font-family:var(--font-sans);background:var(--inset)}
+.demo-t{font-size:var(--font-size-small);font-weight:var(--weight-semibold);color:var(--tx1);margin:0 0 2px}
+.demo-s{font-size:var(--font-size-2xs);color:var(--tx3);margin:0 0 var(--sp-3)}
+.bars{display:flex;align-items:flex-end;gap:var(--sp-3);height:104px;padding-top:var(--sp-2)}
+.bar{flex:1;border-radius:var(--r-xs) var(--r-xs) 0 0;position:relative;
+  background:linear-gradient(180deg,var(--accent),var(--accent-soft))}
+.bar span{position:absolute;top:-14px;left:0;right:0;text-align:center;
+  font-size:10px;color:var(--tx3);font-family:var(--font-mono)}
+.barlabels{display:flex;gap:var(--sp-3);margin-top:var(--sp-2)}
+.barlabels div{flex:1;text-align:center;font-size:10px;color:var(--tx4);font-family:var(--font-mono)}
+.cards{display:flex;gap:var(--sp-2)}
+.pcard{flex:1;border:1px solid var(--border);border-radius:var(--r-md);padding:var(--sp-3);background:var(--card)}
+.pcard.hot{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg)}
+.pcard h4{margin:0 0 var(--sp-2);font-size:var(--font-size-2xs);text-transform:uppercase;
+  letter-spacing:.08em;color:var(--tx4)}
+.price{font-size:22px;font-weight:var(--weight-semibold);color:var(--tx1);letter-spacing:-.02em}
+.price i{font-size:var(--font-size-2xs);font-style:normal;color:var(--tx4);font-weight:400}
+.plist{margin:var(--sp-2) 0 0;padding:0;list-style:none}
+.plist li{font-size:var(--font-size-2xs);color:var(--tx3);padding:3px 0 3px var(--sp-3);position:relative}
+.plist li:before{content:"";position:absolute;left:0;top:9px;width:5px;height:5px;border-radius:50%;background:var(--ok)}
+.pbtn{margin-top:var(--sp-3);width:100%;border:0;border-radius:var(--r-sm);padding:var(--sp-2);
+  font:inherit;font-size:var(--font-size-2xs);font-weight:var(--weight-semibold);background:var(--fill);color:var(--tx2)}
+.pbtn.solid{background:var(--accent-solid);color:var(--on-accent)}
+
+/* =======================================================================
+   MOCKUP-ONLY SCAFFOLDING — page furniture. NOT the design, NOT conformance.
+   ======================================================================= */
+*{box-sizing:border-box}
+body{margin:0;background:var(--canvas);color:var(--tx1);font-family:var(--font-sans);
+  line-height:var(--ui-lh);-webkit-font-smoothing:antialiased}
+.page{max-width:1180px;margin:0 auto;padding:var(--sp-10) var(--sp-6) var(--sp-12)}
+.pagehead{display:flex;align-items:flex-start;justify-content:space-between;gap:var(--sp-6);margin-bottom:var(--sp-4)}
+h1{font-size:22px;font-weight:var(--weight-semibold);letter-spacing:-.01em;margin:0 0 var(--sp-2)}
+.sub{color:var(--tx3);font-size:var(--font-size-small);max-width:74ch;margin:0}
+.themebtn{background:var(--fill);border:1px solid var(--border);color:var(--tx2);border-radius:var(--r-full);
+  padding:var(--sp-2) var(--sp-4);font:inherit;font-size:var(--font-size-xs);cursor:pointer;white-space:nowrap}
+.themebtn:hover{background:var(--fill-hover);color:var(--tx1)}
+h2{font-size:var(--font-size-xs);font-weight:var(--weight-semibold);letter-spacing:.09em;text-transform:uppercase;
+  color:var(--tx4);margin:var(--sp-12) 0 var(--sp-4);padding-bottom:var(--sp-2);border-bottom:1px solid var(--border-subtle)}
+.note{color:var(--tx3);font-size:var(--font-size-small);max-width:78ch;margin:0 0 var(--sp-5)}
+.note b{color:var(--tx2);font-weight:var(--weight-medium)}
+.note code{font-family:var(--font-mono);font-size:var(--font-size-xs);color:var(--tx2)}
+.transcript{background:var(--canvas);border:1px solid var(--border-subtle);border-radius:var(--r-lg);
+  padding:var(--sp-6) var(--transcript-inset);display:flex;flex-direction:column;gap:var(--turn-gap)}
+.turn{display:flex;flex-direction:column;gap:var(--block-gap)}
+.prose{font-size:var(--font-size-body);line-height:var(--prose-lh);color:var(--tx1);margin:0}
+.userbubble{align-self:flex-end;max-width:60ch;background:var(--raised);border:1px solid var(--border-subtle);
+  border-radius:var(--r-lg);padding:var(--sp-3) var(--sp-4);font-size:var(--font-size-body)}
+.phones{display:flex;gap:var(--sp-6);flex-wrap:wrap}
+.phonewrap{width:314px}
+.phonecap{font-size:var(--font-size-xs);color:var(--tx3);margin:var(--sp-3) 0 0;line-height:1.55}
+.phonecap b{color:var(--tx2);font-weight:var(--weight-semibold);display:block;font-size:var(--font-size-small)}
+.phone{width:314px;height:640px;border-radius:38px;background:var(--canvas);border:1px solid var(--border);
+  box-shadow:var(--shadow-md);padding:var(--sp-2);position:relative;overflow:hidden}
+.screen{width:100%;height:100%;border-radius:31px;overflow:hidden;position:relative;
+  display:flex;flex-direction:column;border:1px solid var(--border-subtle)}
+.island{position:absolute;top:14px;left:50%;transform:translateX(-50%);width:88px;height:24px;
+  border-radius:var(--r-full);background:var(--inset);z-index:5}
+.navbar{height:52px;flex:none;display:flex;align-items:flex-end;gap:var(--sp-2);
+  padding:34px var(--sp-4) var(--sp-2);border-bottom:1px solid var(--border-subtle);
+  background:var(--panel);box-sizing:content-box}
+.navtitle{font-size:var(--font-size-chat-title);font-weight:var(--weight-semibold);color:var(--tx1)}
+.navdot{width:var(--step-dot);height:var(--step-dot);border-radius:50%;background:var(--ok);margin-bottom:5px}
+.navsp{margin-left:auto;color:var(--tx4);margin-bottom:2px}
+.iosscroll{flex:1;overflow:hidden;padding:var(--sp-4) var(--sp-3);display:flex;flex-direction:column;gap:var(--sp-4)}
+.iosprose{font-size:14px;line-height:var(--prose-lh);color:var(--tx1);margin:0}
+.composer{flex:none;border-top:1px solid var(--border-subtle);background:var(--panel);
+  padding:var(--sp-3);display:flex;gap:var(--sp-2)}
+.cinput{flex:1;height:34px;border-radius:var(--r-full);border:1px solid var(--border);background:var(--card);
+  display:flex;align-items:center;padding:0 var(--sp-3);font-size:var(--font-size-small);color:var(--tx4)}
+.csend{width:34px;height:34px;border-radius:50%;background:var(--accent-solid);color:var(--on-accent);
+  display:grid;place-items:center;flex:none}
+.sheet{position:absolute;inset:26px 0 0;background:var(--panel);border-radius:var(--r-xl) var(--r-xl) 0 0;
+  border:1px solid var(--border);border-bottom:0;box-shadow:var(--shadow-lg);display:flex;flex-direction:column;z-index:6}
+.grabber{width:34px;height:4px;border-radius:var(--r-full);background:var(--border-strong);margin:9px auto 0;flex:none}
+.sheethead{display:flex;align-items:center;gap:var(--sp-2);padding:var(--sp-3) var(--sp-4);flex:none}
+.sheettitle{font-size:var(--font-size-body);font-weight:var(--weight-semibold);color:var(--tx1)}
+.sheetclose{margin-left:auto;width:28px;height:28px;border-radius:50%;background:var(--fill);color:var(--tx3);
+  display:grid;place-items:center}
+.sheetbody{flex:1;margin:0 var(--sp-3) var(--sp-3);border:1px solid var(--border-subtle);border-radius:var(--r-sm);
+  background:var(--inset);overflow:hidden}
+.sheetfoot{flex:none;padding:0 var(--sp-4) var(--sp-5);font-family:var(--font-mono);
+  font-size:var(--font-size-2xs);color:var(--tx4)}
+.backdrop{position:absolute;inset:0;background:rgb(0 0 0 / .45);z-index:5}
+.anatomy{display:grid;grid-template-columns:1.1fr .9fr;gap:var(--sp-8);align-items:start}
+.callouts{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:var(--sp-4)}
+.callouts li{display:flex;gap:var(--sp-3);align-items:flex-start}
+.num{flex:none;width:20px;height:20px;border-radius:50%;background:var(--accent-soft);color:var(--tx1);
+  display:grid;place-items:center;font-size:10px;font-weight:var(--weight-semibold);margin-top:1px}
+[data-theme="light"] .num{color:var(--accent-tx)}
+.callouts h4{margin:0 0 3px;font-size:var(--font-size-small);font-weight:var(--weight-semibold);color:var(--tx1)}
+.callouts p{margin:0;font-size:var(--font-size-xs);color:var(--tx3);line-height:1.55}
+@media (max-width:900px){.anatomy{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="pagehead">
+    <div>
+      <h1>Inline HTML widgets</h1>
+      <p class="sub">Sandboxed, model-authored HTML rendered in the transcript. The card is the existing
+      <code>ToolCard</code> shell — the only new thing is what sits inside the well, and the four lifecycle
+      states the meta slot names.</p>
+    </div>
+    <button class="themebtn" onclick="document.documentElement.dataset.theme=document.documentElement.dataset.theme==='dark'?'light':'dark'">◐ Toggle theme</button>
+  </div>
+
+  <!-- ==================== DESKTOP ==================== -->
+  <h2>Desktop — inline, live</h2>
+  <p class="note">Two widgets in one turn. The header strip is <b>drawn by the app, outside the frame</b> — the
+  widget cannot paint into it. That is the trust boundary, and it is why the guarantee
+  (<code>sandboxed · no network</code>) lives there and nowhere else.</p>
+  <p class="note">The only header action on desktop is <b>ToolCard's existing collapse chevron</b> — there is no
+  expand affordance, because a desktop widget already renders at reading width and there is no sheet to expand
+  into. The expand-arrows button appears on iOS only.</p>
+
+  <div class="mk-desktop transcript">
+    <div class="turn">
+      <div class="userbubble">Chart our quarterly revenue and mock up the new pricing tiers.</div>
+    </div>
+
+    <div class="turn">
+      <p class="prose">Here's the quarterly trend — Q3 is where self-serve overtakes sales-led.</p>
+
+      <div class="mk-shell">
+        <div class="mk-head">
+          <span class="mk-dot ok"></span>
+          <span class="mk-name">Widget</span>
+          <span class="mk-arg">Revenue by quarter</span>
+          <span class="mk-meta">sandboxed · no network</span>
+          <button class="mk-act" title="Collapse">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" style="transform:rotate(90deg)"><path d="M6 3l5 5-5 5"/></svg>
+          </button>
+        </div>
+        <div class="mk-body">
+          <div class="mk-frame" style="height:196px">
+            <div class="demo">
+              <p class="demo-t">Net revenue, FY25</p>
+              <p class="demo-s">USD, thousands</p>
+              <div class="bars">
+                <div class="bar" style="height:38%"><span>412</span></div>
+                <div class="bar" style="height:52%"><span>560</span></div>
+                <div class="bar" style="height:71%"><span>773</span></div>
+                <div class="bar" style="height:96%"><span>1,041</span></div>
+              </div>
+              <div class="barlabels"><div>Q1</div><div>Q2</div><div>Q3</div><div>Q4</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <p class="prose">And the three tiers, using the current palette:</p>
+
+      <div class="mk-shell">
+        <div class="mk-head">
+          <span class="mk-dot ok"></span>
+          <span class="mk-name">Widget</span>
+          <span class="mk-arg">Pricing tiers — concept A</span>
+          <span class="mk-meta">sandboxed · no network</span>
+          <button class="mk-act" title="Collapse">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" style="transform:rotate(90deg)"><path d="M6 3l5 5-5 5"/></svg>
+          </button>
+        </div>
+        <div class="mk-body">
+          <div class="mk-frame" style="height:212px">
+            <div class="demo">
+              <div class="cards">
+                <div class="pcard"><h4>Solo</h4><div class="price">$12<i>/mo</i></div>
+                  <ul class="plist"><li>1 box</li><li>Community support</li></ul>
+                  <button class="pbtn">Choose</button></div>
+                <div class="pcard hot"><h4>Team</h4><div class="price">$40<i>/mo</i></div>
+                  <ul class="plist"><li>5 boxes</li><li>Shared secrets</li><li>Priority support</li></ul>
+                  <button class="pbtn solid">Choose</button></div>
+                <div class="pcard"><h4>Scale</h4><div class="price">$—<i>talk</i></div>
+                  <ul class="plist"><li>Unlimited</li><li>SSO &amp; audit</li></ul>
+                  <button class="pbtn">Contact</button></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== iOS ==================== -->
+  <h2>iOS — the live window</h2>
+  <p class="note">Newest widget is live; older ones fall back to a captured bitmap; one that never rendered shows
+  a skeleton at its declared size. <b>All three occupy an identical box</b>, so nothing reflows when a widget
+  activates, dies or is restored. The meta slot names the state — a dimmed bitmap must never be mistakable for a
+  working widget.</p>
+
+  <div class="phones">
+
+    <!-- PHONE 1 -->
+    <div class="phonewrap">
+      <div class="mk-ios-live phone">
+        <div class="island"></div>
+        <div class="screen">
+          <div class="navbar"><div class="navdot"></div><div class="navtitle">revenue-analysis</div><div class="navsp">⋯</div></div>
+          <div class="iosscroll">
+
+            <div class="mk-shell">
+              <div class="mk-head">
+                <span class="mk-dot"></span><span class="mk-name">Widget</span>
+                <span class="mk-arg">Cohort retention</span>
+                <span class="mk-meta">placeholder</span>
+              </div>
+              <div class="mk-body">
+                <div class="mk-frame" style="height:88px">
+                  <div class="mk-skel">
+                    <div class="mk-skelbar" style="width:42%"></div>
+                    <div class="mk-skelbar" style="width:78%"></div>
+                    <div class="mk-skelbar" style="width:61%"></div>
+                  </div>
+                  <div class="mk-veil"><span class="mk-chip">Tap to load</span></div>
+                </div>
+              </div>
+            </div>
+
+            <p class="iosprose">Retention holds above 60% past week 8. Revenue below:</p>
+
+            <div class="mk-shell mk-dormant">
+              <div class="mk-head">
+                <span class="mk-dot"></span><span class="mk-name">Widget</span>
+                <span class="mk-arg">Revenue by quarter</span>
+                <span class="mk-meta">snapshot</span>
+              </div>
+              <div class="mk-body">
+                <div class="mk-frame" style="height:120px">
+                  <div class="demo mk-snap" style="padding:var(--sp-2) var(--sp-3)">
+                    <p class="demo-t" style="font-size:var(--font-size-2xs)">Net revenue, FY25</p>
+                    <div class="bars" style="height:64px;gap:var(--sp-2)">
+                      <div class="bar" style="height:38%"></div><div class="bar" style="height:52%"></div>
+                      <div class="bar" style="height:71%"></div><div class="bar" style="height:96%"></div>
+                    </div>
+                    <div class="barlabels" style="gap:var(--sp-2)"><div>Q1</div><div>Q2</div><div>Q3</div><div>Q4</div></div>
+                  </div>
+                  <div class="mk-veil"><span class="mk-chip">
+                    <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M5 3l8 5-8 5z"/></svg>
+                    Tap to activate</span></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="mk-shell">
+              <div class="mk-head">
+                <span class="mk-dot running"></span><span class="mk-name">Widget</span>
+                <span class="mk-arg">Mix shift</span>
+                <span class="mk-meta">live</span>
+                <button class="mk-act">
+                  <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M6 2H2v4M10 14h4v-4"/></svg>
+                </button>
+              </div>
+              <div class="mk-body">
+                <div class="mk-frame" style="height:130px">
+                  <div class="demo" style="padding:var(--sp-2) var(--sp-3)">
+                    <p class="demo-t" style="font-size:var(--font-size-2xs)">Self-serve vs sales-led</p>
+                    <svg viewBox="0 0 260 96" width="100%" height="98" preserveAspectRatio="none">
+                      <defs><linearGradient id="g1" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stop-color="var(--accent)" stop-opacity=".45"/>
+                        <stop offset="100%" stop-color="var(--accent)" stop-opacity="0"/></linearGradient></defs>
+                      <path d="M0 78 L52 70 L104 58 L156 34 L208 22 L260 8 L260 96 L0 96Z" fill="url(#g1)"/>
+                      <path d="M0 78 L52 70 L104 58 L156 34 L208 22 L260 8" fill="none" stroke="var(--accent)" stroke-width="2"/>
+                      <path d="M0 40 L52 44 L104 52 L156 60 L208 68 L260 76" fill="none" stroke="var(--tx4)" stroke-width="1.5" stroke-dasharray="3 3"/>
+                      <circle cx="260" cy="8" r="3" fill="var(--accent)"/>
+                    </svg>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+          </div>
+          <div class="composer"><div class="cinput">Message…</div><div class="csend">↑</div></div>
+        </div>
+      </div>
+      <p class="phonecap"><b>1 · The live window</b>
+      Newest live, older a snapshot, oldest never rendered. Identical box height in all three.</p>
+    </div>
+
+    <!-- PHONE 2 -->
+    <div class="phonewrap">
+      <div class="mk-ios-sheet phone">
+        <div class="island"></div>
+        <div class="screen">
+          <div class="navbar"><div class="navdot"></div><div class="navtitle">revenue-analysis</div><div class="navsp">⋯</div></div>
+          <div class="iosscroll">
+            <p class="iosprose">Retention holds above 60% past week 8.</p>
+            <div class="mk-shell"><div class="mk-head"><span class="mk-dot"></span>
+              <span class="mk-name">Widget</span><span class="mk-arg">Revenue by quarter</span>
+              <span class="mk-meta">snapshot</span></div>
+              <div class="mk-body"><div class="mk-frame" style="height:56px"></div></div></div>
+          </div>
+          <div class="backdrop"></div>
+          <div class="sheet">
+            <div class="grabber"></div>
+            <div class="sheethead">
+              <div class="sheettitle">Mix shift</div><div class="sheetclose">✕</div>
+            </div>
+            <div class="sheetbody">
+              <div class="demo" style="padding:var(--sp-4)">
+                <p class="demo-t">Self-serve vs sales-led, FY25</p>
+                <p class="demo-s">% of net new ARR</p>
+                <svg viewBox="0 0 260 150" width="100%" height="290" preserveAspectRatio="none">
+                  <defs><linearGradient id="g2" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stop-color="var(--accent)" stop-opacity=".45"/>
+                    <stop offset="100%" stop-color="var(--accent)" stop-opacity="0"/></linearGradient></defs>
+                  <path d="M0 122 L52 110 L104 90 L156 54 L208 34 L260 12 L260 150 L0 150Z" fill="url(#g2)"/>
+                  <path d="M0 122 L52 110 L104 90 L156 54 L208 34 L260 12" fill="none" stroke="var(--accent)" stroke-width="2.5"/>
+                  <path d="M0 62 L52 68 L104 80 L156 94 L208 106 L260 118" fill="none" stroke="var(--tx4)" stroke-width="1.5" stroke-dasharray="4 4"/>
+                  <circle cx="260" cy="12" r="4" fill="var(--accent)"/>
+                </svg>
+                <div class="barlabels" style="margin-top:var(--sp-3)"><div>Q1</div><div>Q2</div><div>Q3</div><div>Q4</div></div>
+              </div>
+            </div>
+            <div class="sheetfoot">sandboxed · no network · scrollable here</div>
+          </div>
+        </div>
+      </div>
+      <p class="phonecap"><b>2 · Tap to expand</b>
+      The sheet is the ONLY place a widget scrolls or takes real interaction. Inline, its own scrolling is off —
+      which is what stops it fighting the transcript for gestures.</p>
+    </div>
+
+    <!-- PHONE 3 -->
+    <div class="phonewrap">
+      <div class="mk-ios-degraded phone">
+        <div class="island"></div>
+        <div class="screen">
+          <div class="navbar"><div class="navdot"></div><div class="navtitle">revenue-analysis</div><div class="navsp">⋯</div></div>
+          <div class="iosscroll">
+
+            <div class="mk-shell">
+              <div class="mk-head">
+                <span class="mk-dot error"></span><span class="mk-name">Widget</span>
+                <span class="mk-arg">Mix shift</span>
+                <span class="mk-meta">stopped</span>
+              </div>
+              <div class="mk-body">
+                <div class="mk-frame" style="height:130px">
+                  <div class="mk-degraded">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="var(--warn)" stroke-width="1.5" stroke-linecap="round">
+                      <path d="M8 1.5l6.2 11H1.8z"/><path d="M8 6.2v3.1"/><circle cx="8" cy="11.1" r=".7" fill="var(--warn)" stroke="none"/></svg>
+                    <p>Widget stopped while the app was in the background.</p>
+                    <span class="mk-chip">Tap to reload</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <p class="iosprose">Retention holds above 60% past week 8. Revenue below:</p>
+
+            <div class="mk-shell mk-dormant">
+              <div class="mk-head">
+                <span class="mk-dot"></span><span class="mk-name">Widget</span>
+                <span class="mk-arg">Revenue by quarter</span>
+                <span class="mk-meta">snapshot</span>
+              </div>
+              <div class="mk-body">
+                <div class="mk-frame" style="height:120px">
+                  <div class="demo mk-snap" style="padding:var(--sp-2) var(--sp-3)">
+                    <p class="demo-t" style="font-size:var(--font-size-2xs)">Net revenue, FY25</p>
+                    <div class="bars" style="height:64px;gap:var(--sp-2)">
+                      <div class="bar" style="height:38%"></div><div class="bar" style="height:52%"></div>
+                      <div class="bar" style="height:71%"></div><div class="bar" style="height:96%"></div>
+                    </div>
+                    <div class="barlabels" style="gap:var(--sp-2)"><div>Q1</div><div>Q2</div><div>Q3</div><div>Q4</div></div>
+                  </div>
+                  <div class="mk-veil"><span class="mk-chip">Tap to activate</span></div>
+                </div>
+              </div>
+            </div>
+
+          </div>
+          <div class="composer"><div class="cinput">Message…</div><div class="csend">↑</div></div>
+        </div>
+      </div>
+      <p class="phonecap"><b>3 · Degraded states</b>
+      iOS kills web content processes in the background and under memory pressure. This is what that must look
+      like — labelled and recoverable. The default failure is a blank white rectangle.</p>
+    </div>
+
+  </div>
+
+  <!-- ==================== ANATOMY ==================== -->
+  <h2>Why the frame looks like this</h2>
+
+  <div class="mk-anatomy anatomy">
+    <div class="mk-shell">
+      <div class="mk-head">
+        <span class="mk-dot ok"></span>
+        <span class="mk-name">Widget</span>
+        <span class="mk-arg">Revenue by quarter</span>
+        <span class="mk-meta">sandboxed · no network</span>
+        <button class="mk-act" title="Collapse">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" style="transform:rotate(90deg)"><path d="M6 3l5 5-5 5"/></svg>
+        </button>
+      </div>
+      <div class="mk-body">
+        <div class="mk-frame" style="height:140px">
+          <div class="demo" style="display:grid;place-items:center">
+            <span style="font-family:var(--font-mono);font-size:var(--font-size-2xs);color:var(--tx4)">untrusted content — model-authored</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <ul class="callouts">
+      <li><span class="num">1</span><div>
+        <h4>The header strip is unreachable</h4>
+        <p>A widget paints arbitrary pixels — including a convincing fake permission prompt. The strip is drawn
+        by the app outside the frame, so there is always one band of the card the content provably did not
+        author. This is why the frame can never be borderless or headerless.</p></div></li>
+      <li><span class="num">2</span><div>
+        <h4>The guarantee is stated, not implied</h4>
+        <p><code>sandboxed · no network</code> is the literal policy being enforced, rendered in ToolCard's
+        existing meta slot. It reads as a label; it is really the security posture, in the one place someone
+        would look for it.</p></div></li>
+      <li><span class="num">3</span><div>
+        <h4>State is never inferred from appearance</h4>
+        <p>live / snapshot / placeholder / stopped are named in the meta slot. Without that, a dimmed bitmap of a
+        chart and a working chart look the same, and people tap a picture expecting it to respond.</p></div></li>
+      <li><span class="num">4</span><div>
+        <h4>Height comes from declared dimensions</h4>
+        <p>Every state occupies the identical box — the same rule inline media already follows. Nothing reflows
+        when a widget activates, dies or restores, so the transcript's pin-to-bottom logic never sees a height
+        change under the reader.</p></div></li>
+    </ul>
+  </div>
+
+</div>
+</body>
+</html>
