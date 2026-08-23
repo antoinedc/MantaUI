@@ -19,6 +19,14 @@ import { join, dirname } from "node:path";
 import { statePath } from "../shared/paths.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 import { startPoller } from "./startPoller.mjs";
+import { sandboxedHtmlHeaders } from "./htmlHeaders.mjs";
+
+// servePage's long-standing sandbox policy. Kept as its own exact string —
+// without `allow-same-origin`, so the page lives in an opaque origin and its
+// scripts cannot read the box_token out of the app's localStorage on this
+// shared origin. Pinned by test (the absence of `allow-same-origin` is the
+// point); do not retune it here.
+const SERVE_PAGE_CSP = "sandbox allow-scripts allow-forms allow-popups allow-modals";
 
 const STORE_PATH = statePath("serve-page.json");
 const PAGES_DIR = statePath("pages");
@@ -246,17 +254,14 @@ export async function readPage(
 // ---------------------------------------------------------------------------
 // Response headers — sandboxed + opaque-origin so a hosted page can't read
 // the box_token out of the app's localStorage (which lives on the SAME
-// origin now that pages share the hostname with the SPA).
+// origin now that pages share the hostname with the SPA). The header set is
+// built once in htmlHeaders.mjs (sandboxedHtmlHeaders); servePage keeps its
+// exact long-standing CSP and delegates the whitelist to that shared helper.
+// widgets.mjs is the other caller. There is exactly one header builder.
 // ---------------------------------------------------------------------------
 
 export function pageResponseHeaders() {
-  return {
-    "Content-Type": "text/html; charset=utf-8",
-    "Cache-Control": "no-store",
-    "X-Content-Type-Options": "nosniff",
-    "Referrer-Policy": "no-referrer",
-    "Content-Security-Policy": "sandbox allow-scripts allow-forms allow-popups allow-modals",
-  };
+  return sandboxedHtmlHeaders(SERVE_PAGE_CSP);
 }
 
 // ---------------------------------------------------------------------------

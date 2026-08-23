@@ -134,6 +134,14 @@ export function isExemptPath(path) {
   if (path === "/pair" || path === "/pair/qr.png" || path === "/pair/logo.png") return true;
   if (path === "/hook/" || path.startsWith("/hook/")) return true;
   if (path === "/pages/" || path.startsWith("/pages/")) return true;
+  // /widgets/<id> — inline widget (AI `widget_show` tool). AUTH-EXEMPT by
+  // design: an iframe/webview that renders the widget cannot send an
+  // `Authorization` header, and the id is 256 bits of unguessable entropy, so
+  // a visitor by definition holds no token and cannot guess one. The widget's
+  // own CSP (WIDGET_CSP) keeps it in an opaque origin with no network, so it
+  // can never reach the box_token (which is why the box token must NEVER go in
+  // the widget URL either). The management API /api/widgets is NOT exempt.
+  if (path === "/widgets/" || path.startsWith("/widgets/")) return true;
   return false;
 }
 
