@@ -79,7 +79,7 @@ const bwState = vi.hoisted(() => {
       for (const fn of this.listeners.get(event) ?? []) fn();
     }
     get webContents() {
-      return { setWindowOpenHandler() {}, loadURL() {}, loadFile() {} };
+      return { on() {}, setWindowOpenHandler() {}, loadURL() {}, loadFile() {} };
     }
   }
   return { BrowserWindow };

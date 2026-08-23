@@ -7,6 +7,10 @@
       content="width=device-width, initial-scale=1.0"
     />
     <title>On-call CTO</title>
+    <!-- BET-1324: identical CSP to index.html — an identical string in both
+         files is worth more than a bespoke one ("why do these differ?" is a
+         question nobody will answer correctly later). -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self' ws: http: https:; frame-src https:;" />
     <link rel="stylesheet" href="./tokens.css" />
     <link rel="stylesheet" href="./call/call.css" />
   </head>

@@ -38,6 +38,10 @@ import {
 } from "./screenshotDetector.js";
 import { checkForUpdates } from "./autoUpdate.js";
 import { titleBarOptions } from "./windowChrome.js";
+import {
+  shouldAllowNavigation,
+  externalUrlOrNull,
+} from "./windowSecurity.js";
 import { downloadFileToDownloads } from "./download.js";
 import { createCallWindowController } from "./callWindow.js";
 import { registerInstallerHandlers } from "./installer/handlers.js";
@@ -92,8 +96,18 @@ function createWindow(): void {
     },
   });
 
+  // BET-1324: deny any top-level navigation that leaves the app's own page
+  // (a foreign URL replacing the whole window), and only hand http:/https:
+  // URLs to the OS via openExternal. Shared with the call window — see
+  // windowSecurity.ts.
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    if (!shouldAllowNavigation(mainWindow!.webContents.getURL(), url)) {
+      event.preventDefault();
+    }
+  });
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    const external = externalUrlOrNull(url);
+    if (external) shell.openExternal(external.href);
     return { action: "deny" };
   });
 

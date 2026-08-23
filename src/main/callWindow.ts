@@ -15,6 +15,10 @@
 
 import { BrowserWindow, shell } from "electron";
 import { join } from "node:path";
+import {
+  shouldAllowNavigation,
+  externalUrlOrNull,
+} from "./windowSecurity.js";
 
 // A short-lived "opening" size if we have no saved bounds.
 const DEFAULT_BOUNDS = { x: undefined, y: undefined, width: 380, height: 560 };
@@ -66,8 +70,16 @@ export function createCallWindowController(deps: Deps): CallWindowController {
       },
     });
 
+    // BET-1324: same window-hardening as the main window (see windowSecurity.ts)
+    // — deny navigation away from the app's own page and only openExternal http/https.
+    callWindow.webContents.on("will-navigate", (event, url) => {
+      if (!shouldAllowNavigation(callWindow!.webContents.getURL(), url)) {
+        event.preventDefault();
+      }
+    });
     callWindow.webContents.setWindowOpenHandler(({ url }) => {
-      shell.openExternal(url);
+      const external = externalUrlOrNull(url);
+      if (external) shell.openExternal(external.href);
       return { action: "deny" };
     });
 
