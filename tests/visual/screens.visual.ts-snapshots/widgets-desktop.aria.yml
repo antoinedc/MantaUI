@@ -1,0 +1,31 @@
+- text: Chart our quarterly revenue and mock up the new pricing tiers.
+- paragraph: Here's the quarterly trend — Q3 is where self-serve overtakes sales-led.
+- text: Widget Revenue by quarter sandboxed · no network
+- button "Collapse":
+  - img
+- paragraph: Net revenue, FY25
+- paragraph: USD, thousands
+- text: /\d+ \d+ \d+ \d+,\d+ Q1 Q2 Q3 Q4/
+- paragraph: "And the three tiers, using the current palette:"
+- text: Widget Pricing tiers — concept A sandboxed · no network
+- button "Collapse":
+  - img
+- heading "Solo" [level=4]
+- text: /\$\d+\/mo/
+- list:
+  - listitem: 1 box
+  - listitem: Community support
+- button "Choose"
+- heading "Team" [level=4]
+- text: /\$\d+\/mo/
+- list:
+  - listitem: 5 boxes
+  - listitem: Shared secrets
+  - listitem: Priority support
+- button "Choose"
+- heading "Scale" [level=4]
+- text: $—talk
+- list:
+  - listitem: Unlimited
+  - listitem: SSO & audit
+- button "Contact"
