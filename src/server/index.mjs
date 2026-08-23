@@ -88,6 +88,14 @@ import {
   pageResponseHeaders,
   isValidSubdomain,
 } from "./servePage.mjs";
+import { sandboxedHtmlHeaders } from "./htmlHeaders.mjs";
+import {
+  WIDGET_CSP,
+  isValidWidgetId,
+  registerWidget,
+  readWidget,
+  startCleanupPoller as startWidgetCleanupPoller,
+} from "./widgets.mjs";
 import { publishPlanBundle } from "./planRender.mjs";
 import { listPeers, inspectPeer, sendPeerMessage, resolveWorkspace } from "./peers.mjs";
 import { upsertStopped, markStoppedRan, bumpStoppedAttempts, listStopped } from "./stoppedStore.mjs";
@@ -1007,6 +1015,11 @@ const { stop: stopServerUpdatePoller, check: checkServerUpdate } =
 // eslint-disable-next-line no-unused-vars
 const { stop: stopServePageCleanup } = startCleanupPoller();
 
+// Cleanup sweep for expired widgets (runs every 5 min). Same startPoller
+// shape as servePage's — immediate first tick, inFlight guard, timer.unref().
+// eslint-disable-next-line no-unused-vars
+const { stop: stopWidgetCleanup } = startWidgetCleanupPoller();
+
 // Best-effort install of the MantaUI-owned `manta-plan` primary agent (BET-984).
 // Reads ~/.config/opencode/opencode.jsonc; writes the manta-plan agent block
 // (mode "primary", plan_enter/plan_exit allow) via the existing writer and
@@ -1873,6 +1886,35 @@ const handleRequest = async (req, res) => {
       return;
     }
     res.writeHead(200, pageResponseHeaders());
+    res.end(result.html);
+    return;
+  }
+
+  // ---------- Inline widgets (PUBLIC, sandboxed) ----------
+  // GET /widgets/<id>  or  GET /widgets/<id>/  — one index.html per widget.
+  // The widget's CSP (WIDGET_CSP) sandboxes the document into an opaque
+  // origin with no network (`connect-src 'none'`) and no same-origin, so a
+  // malicious widget cannot read the box_token nor exfiltrate anything. The
+  // route is auth-EXEMPT (see isExemptPath): an iframe/webview cannot send an
+  // `Authorization` header, and the id is 256 bits of unguessable entropy, so
+  // a visitor by definition holds no token and cannot guess one. NEVER put the
+  // box token in the widget URL — a widget's own scripts can read
+  // `document.location`, which would hand the model's HTML the user's box
+  // credentials. See src/server/widgets.mjs.
+  if (req.method === "GET" && path.startsWith("/widgets/")) {
+    const id = path.slice("/widgets/".length).replace(/\/+$/, "");
+    // Sub-paths (/widgets/a/b) → 404 JSON. isValidWidgetId concurrently guards
+    // the registry key and the filesystem traversal.
+    if (!id || id.includes("/") || !isValidWidgetId(id)) {
+      respondJson(res, 404, { error: "not found" });
+      return;
+    }
+    const result = await readWidget(id);
+    if (!result.ok) {
+      respondJson(res, 404, { error: `widget "${id}" not found` });
+      return;
+    }
+    res.writeHead(200, sandboxedHtmlHeaders(WIDGET_CSP));
     res.end(result.html);
     return;
   }
@@ -2929,6 +2971,53 @@ const handleRequest = async (req, res) => {
     } catch (e) {
       // Errors return a message the model can act on, never a bare 500.
       respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // ---------- Inline widgets ----------
+  // POST /api/widgets  body {html, title, width, height, aspectRatio, ttlHours,
+  //                         sessionID, messageID}
+  //   → {ok:true, id, url}  (400 {ok:false, error} on a bad request)
+  // Created by the remote AI's global opencode `widget_show` tool. The model
+  // authors a full standalone HTML document (the widget's code is all inline —
+  // it has NO network access, WIDGET_CSP's `connect-src 'none'` is the whole
+  // exfiltration defence). The HTML is stored under ~/.manta/widgets/<id>/
+  // and served from GET /widgets/<id> under the box's own hostname. Clients
+  // are told about it on the bus as ONE kind, `widget`, with an `action`
+  // discriminator — mirroring media.mjs's announcement. Behind the /api/* gate
+  // (no exemption; pinned by test). See src/server/widgets.mjs.
+  if (path === "/api/widgets") {
+    try {
+      if (req.method === "POST") {
+        const body = await readJsonBody(req);
+        const baseUrl = publicBaseUrl();
+        const result = await registerWidget(
+          {
+            html: body?.html,
+            title: body?.title,
+            width: body?.width,
+            height: body?.height,
+            aspectRatio: body?.aspectRatio,
+            ttlHours: body?.ttlHours,
+            sessionId: body?.sessionID,
+            messageId: body?.messageID,
+          },
+          {
+            publish: (payload) => bus.publish({ kind: "widget", payload }),
+            baseUrl,
+          },
+        );
+        if (!result.ok) {
+          respondJson(res, 400, { ok: false, error: result.error });
+          return;
+        }
+        respondJson(res, 200, { ok: true, id: result.id, url: result.url });
+        return;
+      }
+      respondJson(res, 405, { error: "method not allowed" });
+    } catch (e) {
+      respondJson(res, 500, { ok: false, error: String(e?.message ?? e) });
     }
     return;
   }

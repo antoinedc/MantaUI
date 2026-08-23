@@ -103,15 +103,22 @@ test("isExemptPath exempts only /auth pairing + /pair onboarding + /hook deliver
   assert.equal(isExemptPath("/pages/foo"), true);
   assert.equal(isExemptPath("/pages/"), true);
   assert.equal(isExemptPath("/pages/my-design"), true);
+  // /widgets/<id> — inline widget (AI `widget_show` tool). Auth-exempt by
+  // design: an iframe/webview cannot send an Authorization header, and the id
+  // is 256 bits of unguessable entropy. The management API is NOT exempt.
+  assert.equal(isExemptPath("/widgets/" + "a".repeat(64)), true);
+  assert.equal(isExemptPath("/widgets/"), true);
   // NOT exempt — these must be gated
   assert.equal(isExemptPath("/auth/status"), false);
   assert.equal(isExemptPath("/api/projects"), false);
   assert.equal(isExemptPath("/api/serve-page"), false); // management API is gated
+  assert.equal(isExemptPath("/api/widgets"), false);    // management API is gated
   assert.equal(isExemptPath("/rpc/tmux"), false);
   assert.equal(isExemptPath("/events"), false);
   assert.equal(isExemptPath("/pair/other"), false); // narrow exemption: only the 3 exact paths
   assert.equal(isExemptPath("/pairx"), false);      // prefix attack guard
   assert.equal(isExemptPath("/pagesx"), false);     // prefix attack guard
+  assert.equal(isExemptPath("/widgetsx"), false);   // prefix attack guard
   assert.equal(isExemptPath("/"), false);
   assert.equal(isExemptPath(null), false);
 });
@@ -405,6 +412,7 @@ test("authorize allows exempt + preflight + public-asset paths without a token",
   assert.equal(eng.authorize({ method: "GET", path: "/pair/logo.png" }).ok, true);
   assert.equal(eng.authorize({ method: "POST", path: "/hook/abcd" }).ok, true);
   assert.equal(eng.authorize({ method: "GET", path: "/pages/foo" }).ok, true);
+  assert.equal(eng.authorize({ method: "GET", path: "/widgets/" + "a".repeat(64) }).ok, true);
   // BET-559: the web/PWA client is retired, so the SPA shell ("/") and its
   // Vite /assets/* bundle are no longer public assets — they are gated now.
   assert.equal(eng.authorize({ method: "GET", path: "/" }).ok, false);
@@ -415,6 +423,8 @@ test("authorize allows exempt + preflight + public-asset paths without a token",
   assert.equal(eng.authorize({ method: "GET", path: "/pair/other" }).ok, false);
   // /api/serve-page is NOT exempt — management API must be gated
   assert.equal(eng.authorize({ method: "GET", path: "/api/serve-page" }).ok, false);
+  // /api/widgets is NOT exempt — management API must be gated
+  assert.equal(eng.authorize({ method: "POST", path: "/api/widgets" }).ok, false);
   // a POST to an asset-looking path is still gated (assets are GET-only)
   assert.equal(eng.authorize({ method: "POST", path: "/assets/x.js" }).ok, false);
 });

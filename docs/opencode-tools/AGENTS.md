@@ -494,3 +494,26 @@ Install/update each tool as a COPY (`cp docs/opencode-tools/{send-to-cto,cto}.ts
 ~/.config/opencode/tools/`) then `systemctl --user restart opencode-serve`. The
 engine + routers live in `src/server/cto.mjs` (createCtoEngine / createCtoInbound /
 createWatcherPoller).
+
+## MantaUI inline widgets
+
+You have a `widget_show` tool to store a self-contained inline HTML widget in
+the chat transcript — a chart, a mini-app, an interactive visual — authored
+entirely by you. The widget is a FULL standalone HTML document stored on the
+box and rendered by the client inside a sandboxed frame:
+
+- **Author everything inline.** The widget has **no network access**
+  (`connect-src 'none'`) and lives in an opaque, same-origin-less sandbox. Any
+  CSS, JS, or chart/library code must be embedded directly in the HTML you
+  write — nothing can be fetched, and the widget can never read the user's box
+  token or exfiltrate data. This is deliberate; do not ask for an exception.
+- **Declare `width`/`height` (or `aspectRatio`)** so the client can reserve
+  that box before the widget loads.
+- `widget_show(html, width?/height?/aspectRatio?, title?, ttlHours?)` ->
+  "Widget registered at <url>". Returns promptly; the widget expires after 24h
+  by default (`ttlHours: 0` = never).
+
+Install: `cp <repo>/docs/opencode-tools/widget.ts`
+`~/.config/opencode/tools/widget.ts` then `systemctl --user restart
+opencode-serve`. **Install/update is a COPY, never a symlink** (a symlink
+fails to resolve `@opencode-ai/plugin` and the tool silently never registers).
