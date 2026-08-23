@@ -8,6 +8,10 @@
 // ({ kind:"media", payload }) is added by index.mjs; each function here calls
 // its injected `publish` with the bare payload.
 //
+// Routing fields published here are sessionID / messageID (uppercase `ID`) —
+// see the shared bus routing-field casing contract in src/shared/types.ts
+// (BET-1328). The sibling `widget` kind deliberately uses lowercase `d`.
+//
 // Three tools, locked (do not redesign):
 //   - media_save  — the model has media in *some* form (base64 blob, or a file
 //                   it downloaded with curl). Writes it into the artifact

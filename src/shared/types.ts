@@ -989,6 +989,26 @@ export type AppControlPayload = {
   name?: string;
 };
 
+// ── Bus routing-field casing contract (BET-1328) ─────────────────────────────
+// The `media` and `widget` bus kinds both carry routing fields that key
+// per-session placeholder state in the renderer: which session owns the box and
+// which message produced it. Those fields use DIFFERENT casing on the wire:
+//
+//   media   → sessionID / messageID   (uppercase `ID`), src/server/media.mjs
+//   widget  → sessionId / messageId   (lowercase `d`),  src/server/widgets.mjs
+//
+// The difference is real and deliberate per kind — the box spine publishes each
+// kind in its own casing and the renderer reads exactly that casing. It is
+// deliberately NOT normalised (a wire change would be breaking across server +
+// clients), so THIS comment is the single source of truth for the routing-field
+// names. Every payload type below, and every publisher / reader that emits or
+// consumes routing fields, REFERENCES this contract rather than restating the
+// naming. If you add a THIRD bus kind with routing fields, reference this
+// contract too and type it to EXACTLY the casing the publisher emits — never
+// copy the case off a sibling type, or you inherit that kind's casing by
+// accident.
+// ─────────────────────────────────────────────────────────────────────────────
+
 // BET-1148: inline media bus events (src/server/media.mjs). ONE `media` bus
 // kind with an `action` discriminator, published when the media tools land a
 // client-visible effect:
@@ -998,7 +1018,8 @@ export type AppControlPayload = {
 //           placeholder ends as a labelled failure.
 // The renderer routes by (sessionID, messageID) and keys its per-session
 // placeholder state on `messageID`. Client-agnostic so the native client can
-// adopt the same bus kind later.
+// adopt the same bus kind later. Routing-field casing: upper `ID` per the
+// shared contract above.
 export type MediaEventPayload = {
   action: string;
   handle?: string | null;
@@ -1022,10 +1043,9 @@ export type MediaEventPayload = {
 // dimension fields the media kind uses. The renderer routes by (sessionId,
 // messageId) and keys its per-session placeholder state on `messageId`.
 //
-// NOTE the field casing (sessionId / messageId, lowercase `d`) deliberately
-// differs from MediaEventPayload's uppercase `ID` — that is the actual wire
-// shape the box spine publishes, so this type mirrors reality; the renderer
-// reads the same casing here.
+// Routing-field casing: lowercase `d` (sessionId / messageId) — NOT the media
+// kind's uppercase `ID`. See the shared contract above (BET-1328); this type
+// mirrors exactly what src/server/widgets.mjs publishes.
 export type WidgetEventPayload = {
   action: string;
   id?: string | null;

@@ -140,6 +140,9 @@ function numOrNull(v) {
 // CRUD — injectable via {load, save, publish, baseUrl}
 // ---------------------------------------------------------------------------
 
+// Routing fields published here are sessionId / messageId (lowercase `d`) —
+// see the shared bus routing-field casing contract in src/shared/types.ts
+// (BET-1328). The sibling `media` kind deliberately uses uppercase `ID`.
 export async function registerWidget(
   { html, title, width, height, aspectRatio, ttlHours, sessionId, messageId },
   { load = loadWidgets, save = saveWidgets, publish, baseUrl } = {},
