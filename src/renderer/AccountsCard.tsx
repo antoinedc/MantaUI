@@ -34,6 +34,7 @@ import { autoEligibility, MISSING } from "../shared/autoEligibility.mjs";
 import { providerStateLabel } from "../shared/providerHealthLabel.mjs";
 import { resolveIdentity, type ModelDeclaration } from "../shared/modelIdentity.mjs";
 import { qualityScore } from "../shared/modelQuality.mjs";
+import { ConfirmInline } from "./ConfirmInline";
 import { ConnectProvider } from "./ConnectProvider";
 import { CustomProviderForm } from "./CustomProviderForm";
 import { ModelChecklist } from "./ModelChecklist";
@@ -64,6 +65,11 @@ export type AccountRowModel = {
   plan?: string;
   /** credential present (subscription connected / custom has an api key). */
   connected: boolean;
+  /** The credential is owned outside Manta (e.g. the Claude CLI) — Manta
+   *  cannot deliver a Disconnect for it, so the row says so instead. */
+  managedExternally?: boolean;
+  /** Who owns the credential, e.g. "the Claude CLI on this box". */
+  managedBy?: string | null;
   /** A usage reading (window label / pct / pace) when one exists. `pace` is
    *  null when the window carries no timing — never a fabricated pace. */
   reading: { label: string; pct: number; pace: string | null } | null;
@@ -100,6 +106,12 @@ export function describeAccountState(r: AccountRowModel): AccountState {
     };
   }
   if (r.health === "failing") return { text: providerStateLabel("failing") ?? "Not responding", tone: "warn" };
+  // BET-1320: a connected row whose credential Manta does not own (e.g. the
+  // Claude CLI) can't show a Disconnect — say who owns it instead of offering
+  // a button that can never succeed.
+  if (r.connected && r.managedExternally && r.managedBy) {
+    return { text: `connected · signed in with ${r.managedBy}`, tone: "ok" };
+  }
   if (r.reading) {
     const pct = r.reading.pct;
     const tone: AccountStatus = pct >= 90 ? "danger" : pct >= 70 ? "warn" : "ok";
@@ -296,8 +308,10 @@ function AccountRow({
   connectState: {
     connectingId: string | null;
     disconnectConfirmId: string | null;
+    removeConfirmId: string | null;
     setConnectingId: (id: string | null) => void;
     setDisconnectConfirmId: (id: string | null) => void;
+    setRemoveConfirmId: (id: string | null) => void;
   };
   onConnectChange: (id: string, label: string) => void;
   onDisconnect: (id: string) => void;
@@ -307,7 +321,33 @@ function AccountRow({
 }) {
   const state = describeAccountState(row);
   const isBusy = busy === row.id;
-  const { connectingId, disconnectConfirmId, setConnectingId, setDisconnectConfirmId } = connectState;
+  const {
+    connectingId,
+    disconnectConfirmId,
+    removeConfirmId,
+    setConnectingId,
+    setDisconnectConfirmId,
+    setRemoveConfirmId,
+  } = connectState;
+
+  // Server-owned destructive action (remove / disconnect) now restarts
+  // opencode on the box, interrupting every running session — the confirm
+  // spells that consequence out (BET-1320). Rendered inline, not a modal.
+  const confirmBlock = (label: string, confirm: () => void, cancel: () => void) => (
+    <div className="space-y-1">
+      <div className="inline-flex items-center gap-2">
+        <ConfirmInline
+          label={label}
+          busy={isBusy}
+          onConfirm={confirm}
+          onCancel={cancel}
+        />
+      </div>
+      <div className="text-meta text-text-muted">
+        This restarts opencode and interrupts every running session.
+      </div>
+    </div>
+  );
 
   let control: ReactNode;
 
@@ -334,42 +374,46 @@ function AccountRow({
       <>
         <span className={STATE_TONE_CLASS[state.tone]}>{state.text}</span>
         {row.className === "Custom" ? (
-          <>
-            <button
-              onClick={() => onDiscover(row.id)}
-              disabled={isBusy}
-              className="px-2 py-1 text-meta bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text disabled:opacity-40"
-            >
-              {isBusy ? "…" : "Refresh"}
-            </button>
-            <button
-              onClick={() => onRemove(row.id)}
-              disabled={isBusy}
-              className="text-meta text-text-faint hover:text-text px-1 inline-flex items-center"
-              title="Remove endpoint"
-              aria-label={`Remove ${row.name}`}
-            >
-              <X size={14} aria-hidden="true" />
-            </button>
-          </>
-        ) : row.connected ? (
-          disconnectConfirmId === row.id ? (
+          removeConfirmId === row.id ? (
+            confirmBlock(
+              "Remove",
+              () => onRemove(row.id),
+              () => setRemoveConfirmId(null),
+            )
+          ) : (
             <>
               <button
-                onClick={() => onDisconnect(row.id)}
-                disabled={busy !== null}
-                className="px-2 py-1 text-meta bg-danger-bg border border-danger rounded-xs text-danger hover:text-danger disabled:opacity-40"
+                onClick={() => onDiscover(row.id)}
+                disabled={isBusy}
+                className="px-2 py-1 text-meta bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text disabled:opacity-40"
               >
-                {busy === row.id ? "…" : "Disconnect"}
+                {isBusy ? "…" : "Refresh"}
               </button>
               <button
-                onClick={() => setDisconnectConfirmId(null)}
+                onClick={() => {
+                  if (busy !== null) return;
+                  setRemoveConfirmId(row.id);
+                }}
                 disabled={busy !== null}
-                className="px-2 py-1 text-meta text-text-faint hover:text-text disabled:opacity-40"
+                className="text-meta text-text-faint hover:text-text px-1 inline-flex items-center"
+                title="Remove endpoint"
+                aria-label={`Remove ${row.name}`}
               >
-                Cancel
+                <X size={14} aria-hidden="true" />
               </button>
             </>
+          )
+        ) : row.connected && row.managedExternally ? (
+          // Credential owned by the Claude CLI — no Disconnect Manta can
+          // deliver; the state text already says who owns it (BET-1320).
+          null
+        ) : row.connected ? (
+          disconnectConfirmId === row.id ? (
+            confirmBlock(
+              "Disconnect",
+              () => onDisconnect(row.id),
+              () => setDisconnectConfirmId(null),
+            )
           ) : (
             <button
               onClick={() => setDisconnectConfirmId(row.id)}
@@ -429,6 +473,7 @@ export function AccountsCard() {
   const [busy, setBusy] = useState<string | null>(null);
   const [connectingId, setConnectingId] = useState<string | null>(null);
   const [disconnectConfirmId, setDisconnectConfirmId] = useState<string | null>(null);
+  const [removeConfirmId, setRemoveConfirmId] = useState<string | null>(null);
   // Per-endpoint retry verdict: `ok:true` = flag cleared (text-ok), `ok:false` = still refused (text-danger).
   const [retryResult, setRetryResult] = useState<Record<string, { ok: boolean; message: string }>>({});
   // Per-endpoint discovery result (BET-1273 9a/9b): the discovered model list
@@ -476,6 +521,8 @@ export function AccountsCard() {
         name: s.label,
         plan: s.plan,
         connected: s.connected,
+        managedExternally: s.managedExternally,
+        managedBy: s.managedBy,
         reading,
         balance,
         health: effectiveHealth,
@@ -627,7 +674,10 @@ export function AccountsCard() {
       await mutate(async () => {
         const res = await window.api.opencodeSetProviders({ remove: [ep.id] });
         if (!res.ok) throw new Error(res.error ?? "Remove failed");
-        useStore.getState().setOpencodeRestartNeeded(true);
+        // BET-1318: the server restarts opencode itself as part of the remove
+        // op — do NOT raise the shared restart banner here (it would ask the
+        // user to do something already done). Keep the removed endpoint's
+        // discovery state cleared.
         setDiscovered((d) => {
           const { [ep.id]: _drop, ...rest } = d;
           return rest;
@@ -639,6 +689,7 @@ export function AccountsCard() {
         void refresh();
       });
       setBusy(null);
+      setRemoveConfirmId(null);
     },
     [busy, mutate, refresh],
   );
@@ -673,8 +724,10 @@ export function AccountsCard() {
                   connectState={{
                     connectingId,
                     disconnectConfirmId,
+                    removeConfirmId,
                     setConnectingId,
                     setDisconnectConfirmId,
+                    setRemoveConfirmId,
                   }}
                   onConnectChange={onConnectChange}
                   onDisconnect={(id) => void disconnect(id)}

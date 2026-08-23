@@ -241,6 +241,98 @@ describe("AccountsCard Try-again tone by outcome (9c)", () => {
   });
 });
 
+describe("AccountsCard Disconnect gating (9g BET-1320)", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  function setupManaged(statuses: Record<string, unknown>[]) {
+    return installMockApi({
+      opencodeProviderAuth: () =>
+        Promise.resolve({ action: "status" as const, providers: statuses }),
+      opencodeGetProviders: () => Promise.resolve([]),
+      accountHealth: () => Promise.resolve({}),
+      configGet: () => Promise.resolve({}),
+      opencodeSetProviders: () => Promise.resolve({ ok: true }),
+      opencodeDiscoverModels: () => Promise.resolve({ ok: true, models: [] }),
+      accountsRetry: () => Promise.resolve({ ok: true, state: "ok", message: "x" }),
+    });
+  }
+
+  it("a plain connected row keeps a Disconnect button", async () => {
+    setupManaged([{ id: "anthropic", label: "Claude", plan: "Max 20x", console: null, docs: "", connected: true }]);
+    h = mount(<AccountsCard />);
+    await h.flush();
+    expect(buttonByText(h, "Disconnect")).toBeTruthy();
+  });
+
+  it("a connected + managedExternally row shows no Disconnect and names the owner", async () => {
+    setupManaged([
+      {
+        id: "anthropic",
+        label: "Claude",
+        plan: "Max 20x",
+        console: null,
+        docs: "",
+        connected: true,
+        managedExternally: true,
+        managedBy: "the Claude CLI on this box",
+      },
+    ]);
+    h = mount(<AccountsCard />);
+    await h.flush();
+    expect(buttonByText(h, "Disconnect")).toBeNull();
+    expect(h.container.textContent).toContain("connected · signed in with the Claude CLI on this box");
+  });
+});
+
+describe("AccountsCard remove confirm (BET-1320)", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  it("the ✕ does not call opencodeSetProviders until the confirm is pressed", async () => {
+    const s = customProviderSetup();
+    h = s.h;
+    await h.flush();
+
+    const removeBtn = h.container.querySelector('button[aria-label="Remove VoskaAI"]');
+    expect(removeBtn).toBeTruthy();
+    // The confirm button must not exist yet — and nothing has been written.
+    expect(buttonByText(h, "Remove")).toBeNull();
+    expect(JSON.stringify(s.api.calls.opencodeSetProviders ?? [])).toBe("[]");
+
+    removeBtn!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    await h.flush();
+    // Confirm + Cancel now render; still nothing written.
+    expect(buttonByText(h, "Remove")).toBeTruthy();
+    expect(buttonByText(h, "Cancel")).toBeTruthy();
+    expect(JSON.stringify(s.api.calls.opencodeSetProviders ?? [])).toBe("[]");
+
+    // Cancel abandons without writing.
+    buttonByText(h, "Cancel")!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    await h.flush();
+    expect(buttonByText(h, "Remove")).toBeNull();
+    expect(JSON.stringify(s.api.calls.opencodeSetProviders ?? [])).toBe("[]");
+
+    // Re-open and press the confirm → the remove op reaches the box once.
+    h.container.querySelector('button[aria-label="Remove VoskaAI"]')!.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, cancelable: true }),
+    );
+    await h.flush();
+    buttonByText(h, "Remove")!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    await h.flush();
+    expect(s.api.calls.opencodeSetProviders ?? []).toHaveLength(1);
+    expect(s.api.calls.opencodeSetProviders![0][0]).toEqual({ remove: ["voska"] });
+    h.unmount();
+    h = null;
+  });
+});
+
 describe("AccountsCard Try-again verdict clears on recovery (9c)", () => {
   it("drops the verdict once a refetch shows the row recovered", async () => {
     // Cold-start the "accounts" cache so the mount fetch actually reads health.
