@@ -1194,7 +1194,9 @@ function Shell() {
   // state into the store keyed sessionId → messageID so the owning panel's
   // transcript draws the media card. The entries are derived by the pure
   // `applyMediaEvent` reducer (preserves prior reserved-box metadata across
-  // begin → show / begin → fail).
+  // begin → show / begin → fail). Routing fields are sessionID / messageID
+  // (upper `ID`), per the shared casing contract in src/shared/types.ts
+  // (BET-1328).
   useEffect(() => {
     if (!window.api.onMedia) return;
     const off = window.api.onMedia((payload) => {
@@ -1221,7 +1223,9 @@ function Shell() {
   // panels mount/unmount per session) and route the state into the store keyed
   // sessionId → messageId, exactly mirroring the `media` path above. The
   // entries are derived by the pure `applyWidgetEvent` reducer, so no logic
-  // lives in the subscription callback.
+  // lives in the subscription callback. Routing fields are sessionId /
+  // messageId (lowercase `d`, NOT the media kind's upper `ID`) per the shared
+  // casing contract in src/shared/types.ts (BET-1328).
   useEffect(() => {
     if (!window.api.onWidget) return;
     const off = window.api.onWidget((payload) => {
