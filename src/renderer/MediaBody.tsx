@@ -23,34 +23,23 @@
 //   - pending shows a skeleton + elapsed clock + the declared title; it never
 //     fabricates a percentage (the server sends none).
 
-import { memo, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { Loader2, Download } from "lucide-react";
 import { ToolCard } from "./ToolCard";
 import { OutputWell } from "./OutputWell";
 import { type Artifact } from "./artifacts";
 import { ArtifactPreview } from "./ArtifactPreview";
 import { clientToken, serverBase, authHeaders } from "./api/httpApi";
+import { boxStyle, DegradedBox, TILE_CLS } from "./inlineEmbed";
 import {
   type MediaEntry,
   formatDuration,
   isWithinPreviewSize,
   mediaGrid,
   mediaKindFromMime,
-  resolveMediaAspect,
 } from "./chatUtils";
 import { saveToDownloads } from "./downloadFeedback";
 import { useClockTick, WORKING_TICK_MS, nowMs } from "./clock";
-
-// The reserved box is capped at a sane reading width so a huge aspect never
-// opens at full-column width; the finished media uses the SAME cap and aspect,
-// so swap-in never changes the box. The cap is the --inline-max-w token
-// (tokens.css) so the Swift theme and widget embeds resolve the same value.
-function boxStyle(entry: MediaEntry): CSSProperties {
-  return { aspectRatio: `${resolveMediaAspect(entry.meta)}`, maxWidth: "var(--inline-max-w)" };
-}
-
-const TILE_CLS =
-  "rounded-md border border-border-subtle bg-inset flex items-center justify-center overflow-hidden relative";
 
 function TileIndex({ n }: { n: number }) {
   return (
@@ -79,14 +68,14 @@ function PendingBox({ entry }: { entry: MediaEntry }) {
           style={{ gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}
         >
           {Array.from({ length: grid.tiles }).map((_, i) => (
-            <div key={i} className={TILE_CLS} style={boxStyle(entry)} data-media-box>
+            <div key={i} className={TILE_CLS} style={boxStyle(entry.meta)} data-media-box>
               <TileIndex n={i + 1} />
               <Loader2 className="animate-spin text-text-faint" size={18} aria-hidden="true" />
             </div>
           ))}
         </div>
       ) : (
-        <div className={TILE_CLS} style={boxStyle(entry)} data-media-box>
+        <div className={TILE_CLS} style={boxStyle(entry.meta)} data-media-box>
           <Loader2 className="animate-spin text-text-faint" size={18} aria-hidden="true" />
         </div>
       )}
@@ -97,17 +86,6 @@ function PendingBox({ entry }: { entry: MediaEntry }) {
         <span className="text-text">{label}</span>
         {elapsed && <span className="tabular-nums text-text-faint">{elapsed}</span>}
         <span className="text-text-quiet">· this usually takes a few seconds</span>
-      </div>
-    </div>
-  );
-}
-
-function DegradedBox({ entry }: { entry: MediaEntry }) {
-  const label = entry.state === "expired" ? "This media expired" : "The media failed to generate";
-  return (
-    <div className="w-full" style={boxStyle(entry)} data-media-box>
-      <div className="h-full w-full rounded-md border border-border-subtle bg-inset grid place-items-center text-label text-text-muted">
-        <span>⚠ {label}</span>
       </div>
     </div>
   );
@@ -212,7 +190,7 @@ function ReadyMedia({ entry }: { entry: MediaEntry }) {
     <>
       <div
         className="w-full relative group"
-        style={boxStyle(entry)}
+        style={boxStyle(entry.meta)}
         onClick={openPreview}
         onKeyDown={onKeyDown}
         role="button"
@@ -282,7 +260,8 @@ function ReadyMedia({ entry }: { entry: MediaEntry }) {
 function MediaContent({ entry }: { entry: MediaEntry }) {
   if (entry.state === "pending") return <PendingBox entry={entry} />;
   if (entry.state === "ready") return <ReadyMedia entry={entry} />;
-  return <DegradedBox entry={entry} />;
+  const label = entry.state === "expired" ? "This media expired" : "The media failed to generate";
+  return <DegradedBox label={label} dims={entry.meta} />;
 }
 
 /**

@@ -1015,6 +1015,29 @@ export type MediaEventPayload = {
   size?: number | null;
 };
 
+// Inline widgets (BET-1325) — the `widget` bus kind the renderer mirrors from
+// `media`. The box spine (src/server/widgets.mjs BET-1323) publishes ONE
+// `widget` kind with an `action` discriminator (today only `show`; future
+// `fail`) carrying the widget's served URL plus the same reserved-box
+// dimension fields the media kind uses. The renderer routes by (sessionId,
+// messageId) and keys its per-session placeholder state on `messageId`.
+//
+// NOTE the field casing (sessionId / messageId, lowercase `d`) deliberately
+// differs from MediaEventPayload's uppercase `ID` — that is the actual wire
+// shape the box spine publishes, so this type mirrors reality; the renderer
+// reads the same casing here.
+export type WidgetEventPayload = {
+  action: string;
+  id?: string | null;
+  url?: string | null;
+  title?: string | null;
+  width?: number | null;
+  height?: number | null;
+  aspectRatio?: number | null;
+  sessionId?: string | null;
+  messageId?: string | null;
+};
+
 // SSH installer (BET-355) — push-event shape + state snapshot. These types
 // are declared in src/shared/types.ts so both the preload runtime (which
 // imports them into src/preload/index.ts) AND the renderer-side accessor

@@ -98,6 +98,7 @@ export const DEMO_UNIMPLEMENTED = [
   "onSyncDelta",
   "onUsageStoppedUpdated",
   "onUsageUpdated",
+  "onWidget",
   "openExternal",
   "opencodeAbort",
   "opencodeAgents",

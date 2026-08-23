@@ -5,7 +5,7 @@
 // without DOM/Electron/network).
 import type { ReactNode } from "react";
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { AppControlPayload, CheckRollup, DelegateApprovalTool, ForgeCheckRun, ForgeInboxItem, InboxReason, MediaEventPayload, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, PermissionRequest, ProgressRecord, ProgressState, Project, PullRequest, QuestionRequest, RepoHit, TmuxWindow, UpdateTarget, UsageSnapshot, UsageWindow } from "../shared/types";
+import type { AppControlPayload, CheckRollup, DelegateApprovalTool, ForgeCheckRun, ForgeInboxItem, InboxReason, MediaEventPayload, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, PermissionRequest, ProgressRecord, ProgressState, Project, PullRequest, QuestionRequest, RepoHit, TmuxWindow, UpdateTarget, UsageSnapshot, UsageWindow, WidgetEventPayload } from "../shared/types";
 import type { SessionMode } from "./chatShared";
 import type { VoiceNoteRecord } from "../shared/types";
 // Value import — `isClientTooOld` is the pure semver compare that drives
@@ -4152,6 +4152,105 @@ export function dispatchMedia(payload: unknown, handlers: MediaHandlers): void {
     handlers.begin?.(p);
     return;
   }
+  if (p.action === "show") {
+    handlers.show?.(p);
+    return;
+  }
+  if (p.action === "fail") {
+    handlers.fail?.(p);
+    return;
+  }
+}
+
+// =============================================================================
+// Inline widgets (BET-1325) — pure model for the transcript widget renderer.
+//
+// Mirrors the inline-media model (BET-1148) above at every level: the box
+// spine (src/server/widgets.mjs) publishes ONE `widget` bus kind with an
+// `action` discriminator, the renderer keeps a per-session map of entries
+// keyed by messageId (store `inlineWidgets`, fed by the single App-level
+// `onWidget` listener), and the memoized `WidgetBody` draws them. Everything
+// derivable is kept pure and tested here so the component stays a thin
+// presenter.
+//
+// The load-bearing invariant matches the media spec: the widget reserves its
+// final aspect box (the same width/height/aspectRatio fields the media kind
+// carries) so every render state occupies an identical box and the
+// transcript's pin-to-bottom logic never sees a height change. `resolveMediaAspect`
+// is reused as the single source of that box. Widgets arrive on the bus
+// (never through markdown — see the "Do not touch" contract), so there is no
+// renderer-side raw-HTML path to guard.
+// =============================================================================
+
+/** The render states a widget entry can be in (shared vocabulary with media). */
+export type WidgetState = "pending" | "ready" | "failed" | "expired";
+
+/** Resolved presentational metadata for a widget. Width/height/aspectRatio are
+ *  the "reserve the final box" inputs, exactly like the media meta. */
+export type WidgetMeta = {
+  id: string | null;
+  /** Absolute widget URL (ready only) served by the box at GET /widgets/<id>. */
+  url: string | null;
+  title: string | null;
+  width: number | null;
+  height: number | null;
+  aspectRatio: number | null;
+};
+
+/** One widget entry, keyed by messageId within a session. */
+export type WidgetEntry = {
+  state: WidgetState;
+  meta: WidgetMeta;
+};
+
+function baseWidgetMeta(): WidgetMeta {
+  return { id: null, url: null, title: null, width: null, height: null, aspectRatio: null };
+}
+
+/** State derivation from the widget bus events. `prev` is the entry already
+ *  stored for this messageId (undefined on first sight). The box spine
+ *  currently publishes `show` (ready) only; `fail` is accepted so a later
+ *  degrade path can mark a never-shown entry as a labelled placeholder,
+ *  keeping whatever reserved-box metadata it declared so the box stays the
+ *  same size. Unknown actions leave the prior entry untouched. */
+export function applyWidgetEvent(
+  prev: WidgetEntry | undefined,
+  payload: WidgetEventPayload,
+): WidgetEntry {
+  const action = payload.action;
+  if (action === "show") {
+    const prevMeta = prev?.meta ?? baseWidgetMeta();
+    return {
+      state: "ready",
+      meta: {
+        id: strOrNull(payload.id) ?? prevMeta.id,
+        url: strOrNull(payload.url) ?? prevMeta.url,
+        title: strOrNull(payload.title) ?? prevMeta.title,
+        width: numOrNull(payload.width),
+        height: numOrNull(payload.height),
+        aspectRatio: numOrNull(payload.aspectRatio),
+      },
+    };
+  }
+  if (action === "fail") {
+    const meta = prev?.meta ?? baseWidgetMeta();
+    return { state: "failed", meta };
+  }
+  // Unknown action: leave whatever was there (or a neutral pending box).
+  return prev ?? { state: "pending", meta: baseWidgetMeta() };
+}
+
+/** The one-switch widget dispatcher (mirrors dispatchMedia). The App-level
+ *  `onWidget` listener hands it the raw payload; it routes to the matching
+ *  handler so call sites never switch on `action` themselves. */
+export type WidgetHandlers = {
+  show?: (p: WidgetEventPayload) => void;
+  fail?: (p: WidgetEventPayload) => void;
+};
+
+export function dispatchWidget(payload: unknown, handlers: WidgetHandlers): void {
+  if (!payload || typeof payload !== "object") return;
+  const p = payload as WidgetEventPayload;
   if (p.action === "show") {
     handlers.show?.(p);
     return;

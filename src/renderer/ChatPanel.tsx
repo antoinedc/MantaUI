@@ -2625,6 +2625,17 @@ export function ChatPanel({
     [inlineMedia],
   );
 
+  // BET-1325: inline widget entries for THIS session (keyed by messageId),
+  // fed by the App-level `widget` bus listener. Same stability shape as the
+  // media map above — the map only re-renders when this session's widgets
+  // change, so a keystroke in the composer re-renders the panel but not the
+  // individual memoized WidgetBody leaves.
+  const inlineWidgets = useStore((s) => s.inlineWidgets[sessionId]);
+  const widgetsByMessageId = useMemo(
+    () => new Map(Object.entries(inlineWidgets ?? {})),
+    [inlineWidgets],
+  );
+
   // Retry transcription for a note whose transcript came back empty (the 409
   // send path). On success append the (now-transcribed) record and clear the
   // pending row; the transcript flows through as a normal user message exactly
@@ -3229,6 +3240,7 @@ export function ChatPanel({
             userCommandInfo={userCommandInfo}
             voiceNoteByMessageId={voiceNoteByMessageId}
             mediaByMessageId={mediaByMessageId}
+            widgetsByMessageId={widgetsByMessageId}
             pendingVoiceNote={pendingVoiceNote}
             onRetryVoiceNote={retryVoiceNote}
             onReplyQuestion={replyQuestion}

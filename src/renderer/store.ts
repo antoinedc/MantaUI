@@ -14,7 +14,7 @@ import type {
 import type { ConnectionState } from "../shared/net/state.js";
 import type { SyncPayload } from "../shared/api.js";
 import { clientToken } from "./api/httpApi";
-import { isAssistantTurnInProgress, runWithConcurrency, type MediaEntry } from "./chatUtils";
+import { isAssistantTurnInProgress, runWithConcurrency, type MediaEntry, type WidgetEntry } from "./chatUtils";
 import { applyTheme, type ThemePref } from "./theme";
 import type { ToastItem } from "./Toast";
 import {
@@ -710,6 +710,12 @@ type State = {
   // it as a labelled placeholder).
   inlineMedia: Record<string, Record<string, MediaEntry>>;
   setMediaEntry: (sessionId: string, messageID: string, entry: MediaEntry) => void;
+  // BET-1325: inline widget state, keyed sessionId → messageId. Fed by the
+  // single App-level `widget` bus listener (App.tsx) via `window.api.onWidget`;
+  // ChatPanel reads its own session's slice so the widget card for a messageId
+  // renders in the transcript. Mirrors inlineMedia above.
+  inlineWidgets: Record<string, Record<string, WidgetEntry>>;
+  setWidgetEntry: (sessionId: string, messageId: string, entry: WidgetEntry) => void;
   // One-shot startup replay of chat-mode attention. opencode's SSE stream is
   // forward-only — it does NOT re-emit `question.asked` / `permission.asked`
   // for requests that were already pending when the app (re)connected. So on
@@ -825,6 +831,7 @@ export const useStore = create<State>((set, get) => ({
   lastLookedStopped: null,
   chatMessages: {},
   inlineMedia: {},
+  inlineWidgets: {},
   pendingScreenshots: [],
   agentFileToast: null,
   appToasts: [],
@@ -1415,6 +1422,18 @@ export const useStore = create<State>((set, get) => ({
         inlineMedia: {
           ...prev.inlineMedia,
           [sessionId]: { ...session, [messageID]: entry },
+        },
+      };
+    }),
+
+  setWidgetEntry: (sessionId, messageId, entry) =>
+    set((prev) => {
+      const session = prev.inlineWidgets[sessionId] ?? {};
+      if (session[messageId] === entry) return prev;
+      return {
+        inlineWidgets: {
+          ...prev.inlineWidgets,
+          [sessionId]: { ...session, [messageId]: entry },
         },
       };
     }),
