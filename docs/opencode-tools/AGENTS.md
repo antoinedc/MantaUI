@@ -517,3 +517,36 @@ Install: `cp <repo>/docs/opencode-tools/widget.ts`
 `~/.config/opencode/tools/widget.ts` then `systemctl --user restart
 opencode-serve`. **Install/update is a COPY, never a symlink** (a symlink
 fails to resolve `@opencode-ai/plugin` and the tool silently never registers).
+
+## MantaUI inline widgets — sizing is a hard constraint
+
+`widget_show` (thin registrar → `POST /api/widgets`) stores a self-contained
+inline HTML widget in the chat and returns promptly; the store + serving +
+TTL expiry all live server-side (`~/.manta/widgets/<id>/`, served at
+`/widgets/<id>`). Before you author one, decide: **you are designing a
+fixed-size card, not a web page.** The `width`/`height` (or `aspectRatio`)
+you declare is a HARD CONSTRAINT — the host reserves exactly those pixels,
+never measures your HTML, and never resizes to fit. Content taller than the
+box is clipped or scrolls inside it; content shorter leaves dead space. So
+pick the box first, then design to fill it exactly.
+
+Two invariance rules keep any declared box correct. **Height must not vary
+with state** — reserve space for elements that appear later with
+`visibility:hidden`, never `display:none`. **Height must not vary with
+width** — chrome that could wrap must be `nowrap` with ellipsis or horizontal
+scroll, never wrapping. If the height changes with either, no declared box
+can be right. Give the document `html,body{height:100%;overflow:hidden}` and
+a flex column with exactly one region at `flex:1 1 auto` to absorb slack.
+
+Measure the height, don't estimate it. Playwright is already a devDependency
+(1.61.1). Load the document, neutralise the fill rules with an injected style
+(`html,body{height:auto!important;overflow:visible!important}`), read
+`document.body.scrollHeight`, and sweep the widths and states the widget will
+actually render at — declare the largest stable number. The recipe belongs
+inline here; there is deliberately no measurement script in the repo.
+
+Install/update is a COPY, never a symlink:
+`cp <repo>/docs/opencode-tools/widget.ts
+~/.config/opencode/tools/widget.ts` then `systemctl --user restart
+opencode-serve` (see the section above for the `@opencode-ai/plugin`
+resolution gotcha).

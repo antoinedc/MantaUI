@@ -69,16 +69,26 @@ async function call(method: string, path: string, body?: unknown): Promise<any> 
 
 export const widget_show = tool({
   description: [
-    "Store and display an inline widget in the chat: you author a FULL, ",
+    "Store and display an inline widget in the chat. You author a FULL, ",
     "self-contained standalone HTML document (a single <html> document with ",
     "everything it needs inline — CSS, JS, chart libraries all embedded, ",
     "because the widget has NO network access and cannot fetch anything). ",
-    "Declare width/height (or aspectRatio) so the client can reserve that box ",
-    "before the widget loads. The widget runs sandboxed in an opaque origin ",
-    "with no network (connect-src 'none') and no same-origin, so it can never ",
-    "read the user's box token or exfiltrate data — keep all rendering logic ",
-    "inside the authored HTML. A widget_show call returns promptly; the widget ",
-    "is stored on the box (default 24h TTL, or ttlHours:0 for no expiry).",
+    "YOU ARE DESIGNING A FIXED-SIZE SURFACE — a card, not a web page. The ",
+    "box you declare is a HARD CONSTRAINT: the host reserves exactly those ",
+    "pixels and NEVER measures your HTML or resizes to fit it. Content taller ",
+    "than the box is clipped or scrolls inside it; content shorter leaves dead ",
+    "space. Decide the box first, then design to fit it: give the document ",
+    "html,body{height:100%;overflow:hidden} and a flex column with exactly one ",
+    "region at flex:1 1 auto to absorb slack. The content height must be a ",
+    "SINGLE number — it must not change with state (reserve space with ",
+    "visibility:hidden, never display:none) nor with width (chrome must be ",
+    "nowrap with ellipsis or horizontal scroll, never wrapping). If the height ",
+    "varies, no declared box can be correct. The widget runs sandboxed in an ",
+    "opaque origin with no network (connect-src 'none') and no same-origin, so ",
+    "it can never read the user's box token or exfiltrate data — keep all ",
+    "rendering logic inside the authored HTML. A widget_show call returns ",
+    "promptly; the widget is stored on the box (default 24h TTL, or ",
+    "ttlHours:0 for no expiry).",
   ].join(" "),
   args: {
     html: z
@@ -96,18 +106,24 @@ export const widget_show = tool({
       .int()
       .positive()
       .optional()
-      .describe("Desired width in px for the reserved box."),
+      .describe(
+        "Width in px of the reserved box. A HARD constraint, not a hint — the host reserves exactly this and never measures your HTML.",
+      ),
     height: z
       .number()
       .int()
       .positive()
       .optional()
-      .describe("Desired height in px for the reserved box."),
+      .describe(
+        "Height in px of the reserved box. A HARD constraint, not a hint: content taller than this is clipped or scrolls, content shorter leaves dead space. Measure the document's real height rather than estimating it.",
+      ),
     aspectRatio: z
       .number()
       .positive()
       .optional()
-      .describe("Desired aspect ratio (width/height) when exact px are unknown."),
+      .describe(
+        "Aspect ratio (width/height) for when exact px are unknown. Same hard-constraint semantics as width/height — the host never measures your HTML.",
+      ),
     ttlHours: z
       .number()
       .optional()
