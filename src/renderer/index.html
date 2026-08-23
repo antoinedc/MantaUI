@@ -18,7 +18,12 @@
          channel (httpApi `voiceFetchNote`) and handed to the player as an
          object URL, so blob: here is our own already-authorised bytes — never a
          remote origin, and never a `?token=` URL. -->
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self' ws: http: https:;" />
+    <!-- BET-1324: `frame-src https:` is added so the desktop widget renderer can
+         frame a URL served by the box (https://<box_id>.boxes.mantaui.com). The
+         box origin is per-install and cannot be enumerated in a static CSP, so we
+         permit https: for frame-src ONLY — default-src, script-src and
+         connect-src are deliberately not widened. -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self' ws: http: https:; frame-src https:;" />
     <!-- BET-559: the PWA (manifest, apple-touch-icon, install meta, home-screen
          decoration) was the web-mobile-client surface and is retired with it.
          The renderer is the desktop Electron app — none of these PWA bits apply. -->
