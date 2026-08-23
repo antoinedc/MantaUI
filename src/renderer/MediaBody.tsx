@@ -43,11 +43,10 @@ import { useClockTick, WORKING_TICK_MS, nowMs } from "./clock";
 
 // The reserved box is capped at a sane reading width so a huge aspect never
 // opens at full-column width; the finished media uses the SAME cap and aspect,
-// so swap-in never changes the box.
-const MEDIA_MAX_W = 520;
-
+// so swap-in never changes the box. The cap is the --inline-max-w token
+// (tokens.css) so the Swift theme and widget embeds resolve the same value.
 function boxStyle(entry: MediaEntry): CSSProperties {
-  return { aspectRatio: `${resolveMediaAspect(entry.meta)}`, maxWidth: MEDIA_MAX_W };
+  return { aspectRatio: `${resolveMediaAspect(entry.meta)}`, maxWidth: "var(--inline-max-w)" };
 }
 
 const TILE_CLS =

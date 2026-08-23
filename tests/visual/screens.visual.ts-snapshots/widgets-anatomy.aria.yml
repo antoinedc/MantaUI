@@ -1,0 +1,23 @@
+- text: Widget Revenue by quarter sandboxed · no network
+- button "Collapse":
+  - img
+- text: untrusted content — model-authored
+- list:
+  - listitem:
+    - text: "1"
+    - heading "The header strip is unreachable" [level=4]
+    - paragraph: A widget paints arbitrary pixels — including a convincing fake permission prompt. The strip is drawn by the app outside the frame, so there is always one band of the card the content provably did not author. This is why the frame can never be borderless or headerless.
+  - listitem:
+    - text: "2"
+    - heading "The guarantee is stated, not implied" [level=4]
+    - paragraph:
+      - code: sandboxed · no network
+      - text: is the literal policy being enforced, rendered in ToolCard's existing meta slot. It reads as a label; it is really the security posture, in the one place someone would look for it.
+  - listitem:
+    - text: "3"
+    - heading "State is never inferred from appearance" [level=4]
+    - paragraph: live / snapshot / placeholder / stopped are named in the meta slot. Without that, a dimmed bitmap of a chart and a working chart look the same, and people tap a picture expecting it to respond.
+  - listitem:
+    - text: "4"
+    - heading "Height comes from declared dimensions" [level=4]
+    - paragraph: Every state occupies the identical box — the same rule inline media already follows. Nothing reflows when a widget activates, dies or restores, so the transcript's pin-to-bottom logic never sees a height change under the reader.

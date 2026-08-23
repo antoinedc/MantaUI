@@ -580,6 +580,66 @@ export const SCREENS = [
       "manta-session-menu-trigger",
     ],
   },
+  // BET-1322: the inline-widget design's conformance regions. BOTH renderers
+  // (desktop React, iOS Swift) are stage 2 — there is no app demo route yet,
+  // so these are MOCKUP-ONLY rows: they capture the design itself (docs/screens/
+  // widgets/mockup.html, served from the repo root) rather than a real screen.
+  // Each row's `url`/`ready`/`region` point at the mockup's conformance region
+  // declared in its header comment. When a renderer lands, a follow-up replaces
+  // `url`/`ready`/`region` with the app's real demo state — do not invent an
+  // app route here (BET-1322). The rows pin the mockup so the region is
+  // registered, captured and reviewed; `mockupRegion` is omitted because the
+  // region IS the mockup (compare.mjs has nothing separate to diff against).
+  {
+    id: "widgets-desktop",
+    title: "Widget design — desktop transcript, two live widgets (mockup-only, stage 2)",
+    url: "/docs/screens/widgets/mockup.html",
+    ready: ".mk-desktop",
+    region: ".mk-desktop",
+    viewport: DESKTOP_VIEWPORT,
+    mockup: "docs/screens/widgets/mockup.html",
+    surfacesClosed: [],
+  },
+  {
+    id: "widgets-anatomy",
+    title: "Widget design — the frame, annotated (mockup-only, stage 2)",
+    url: "/docs/screens/widgets/mockup.html",
+    ready: ".mk-anatomy",
+    region: ".mk-anatomy",
+    viewport: DESKTOP_VIEWPORT,
+    mockup: "docs/screens/widgets/mockup.html",
+    surfacesClosed: [],
+  },
+  {
+    id: "widgets-ios-live",
+    title: "Widget design — iOS live window, live/snapshot/placeholder (mockup-only, stage 2)",
+    url: "/docs/screens/widgets/mockup.html",
+    ready: ".mk-ios-live",
+    region: ".mk-ios-live",
+    viewport: DESKTOP_VIEWPORT,
+    mockup: "docs/screens/widgets/mockup.html",
+    surfacesClosed: [],
+  },
+  {
+    id: "widgets-ios-sheet",
+    title: "Widget design — iOS expanded sheet (mockup-only, stage 2)",
+    url: "/docs/screens/widgets/mockup.html",
+    ready: ".mk-ios-sheet",
+    region: ".mk-ios-sheet",
+    viewport: DESKTOP_VIEWPORT,
+    mockup: "docs/screens/widgets/mockup.html",
+    surfacesClosed: [],
+  },
+  {
+    id: "widgets-ios-degraded",
+    title: "Widget design — iOS degraded states (mockup-only, stage 2)",
+    url: "/docs/screens/widgets/mockup.html",
+    ready: ".mk-ios-degraded",
+    region: ".mk-ios-degraded",
+    viewport: DESKTOP_VIEWPORT,
+    mockup: "docs/screens/widgets/mockup.html",
+    surfacesClosed: [],
+  },
 ];
 
 /** Look up one screen by id, or throw with the list of valid ids. */

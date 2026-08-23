@@ -1,0 +1,7 @@
+- text: revenue-analysis ⋯
+- paragraph: /Retention holds above \d+% past week 8\./
+- text: Widget Revenue by quarter snapshot Mix shift ✕
+- paragraph: Self-serve vs sales-led, FY25
+- paragraph: "% of net new ARR"
+- img
+- text: Q1 Q2 Q3 Q4 sandboxed · no network · scrollable here

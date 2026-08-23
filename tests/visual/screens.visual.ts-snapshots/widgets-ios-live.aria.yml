@@ -1,0 +1,12 @@
+- text: revenue-analysis ⋯ Widget Cohort retention placeholder Tap to load
+- paragraph: /Retention holds above \d+% past week 8\. Revenue below:/
+- text: Widget Revenue by quarter snapshot
+- paragraph: Net revenue, FY25
+- text: Q1 Q2 Q3 Q4
+- img
+- text: Tap to activate Widget Mix shift live
+- button:
+  - img
+- paragraph: Self-serve vs sales-led
+- img
+- text: Message… ↑

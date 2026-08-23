@@ -167,6 +167,15 @@
   --motion-base: 200ms;   /* modals, cards, toasts */
   --motion-slow: 300ms;   /* message entry, panel slides, onboarding */
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+
+  /* Reading-width cap for any inline embed (media, widgets). Cross-consumer:
+     MediaBody, WidgetBody, and the generated Swift theme all read it, which is
+     why it is a token and not a per-file constant. */
+  --inline-max-w: 520px;
+
+  /* Dim applied to a dormant widget's captured snapshot. Desktop and iOS must
+     dim identically; a hardcoded 0.5 in each would drift. */
+  --widget-dormant-opacity: 0.5;
 }
 
 /* Density scope (BET-544). Session-row metrics live on [data-density], NOT
