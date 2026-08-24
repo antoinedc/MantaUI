@@ -60,7 +60,7 @@ export function mergeBufferedDeltas<
   buffer: Map<string, PendingDelta>,
 ): { messages: M[] | null | undefined; unmatched: string[] };
 
-export function selectCacheTtlMs(ttlMs: number | null | undefined): number;
+export function selectCacheTtlMs(ttl: "5m" | "1h"): number;
 
 export function classifyCacheAge(
   lastMessageAt: number,

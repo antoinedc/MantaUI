@@ -190,6 +190,33 @@ export type AppConfig = {
   // every deprecated model stays disabled. Do NOT conflate with the
   // deactivated sets — those hide/remove; this ENABLES a deprecated default.
   optInModels?: string[];
+  // Anthropic prompt cache TTL. Used ONLY to predict when a chat session has
+  // gone stale (cache expired → the next user turn re-bills the entire cached
+  // prefix as cache_creation_input_tokens at full rate + surcharge). manta
+  // does NOT set `cache_control.ttl` on any request.
+  //
+  // DEFAULT IS "5m" BECAUSE THAT IS WHAT OPENCODE ACTUALLY SENDS, MEASURED —
+  // not a preference. opencode's applyCaching() stamps its cache breakpoints
+  // `{type:"ephemeral"}` with NO ttl field, so Anthropic applies its default
+  // 5-minute TTL. Verified on the wire against /v1/messages (1.18.22): the
+  // response's `usage.cache_creation` put every created token in
+  // `ephemeral_5m_input_tokens`, with `ephemeral_1h_input_tokens` at 0.
+  // The previous "1h" default was a guess, and it silently under-warned for
+  // every idle gap between 5 and 60 minutes: the pill read "warm" while the
+  // user was in fact paying a full cache re-write on their next message.
+  //
+  // "1h" remains selectable for a box whose requests are rewritten in front
+  // of opencode (a proxy or a future opencode that exposes a TTL knob) — it
+  // makes the prediction match that setup. On a stock box it is wrong; see
+  // AGENTS.md "Stale prompt-cache" for the upstream gap and the one config
+  // path that does change the wire TTL (and why it is not wired to this).
+  cacheTtl?: "5m" | "1h";
+  // Internal marker (NOT a Settings entry): set once the box has rewritten a
+  // persisted `cacheTtl: "1h"` — the old, never-true default — to "5m". Its
+  // whole job is to make that correction one-time, so a user who deliberately
+  // re-selects "1h" afterwards keeps it. See migrateCacheTtlDefault in
+  // shared/configMigration.mjs.
+  cacheTtlDefaultMigrated?: boolean;
   // ----- Voice / speech-to-text (Groq) -----
   // API key for api.groq.com. Stored plaintext in config.json, same as other
   // manta credentials (ssh identity path, opencode auth). Settings UI shows
@@ -1844,11 +1871,9 @@ export type LedgerSummary = {
 // Crosses the wire, so it lives in shared/types. `totals`/`cacheShare` reuse
 // the ledger `aggregate` shape; `dailySeries` is a zero-filled local-day
 // tokensSent graph over `windowDays`, oldest→newest; `bySession` is the top 20
-// sessions by cost. `ttl` is the measured effective prompt-cache TTL (BET-1334:
-// `{ms, confidence:"default"|"measured", observations}`), `counterfactual`/
-// `windows` are placeholders that Optimizer children 3–4 fill — they stay
-// present (null) so the renderer contract is stable. `supported:false` = the
-// box can't read opencode.db.
+// sessions by cost. `ttl`/`counterfactual`/`windows` are placeholders that
+// Optimizer children 2–4 fill — they stay present (null) so the renderer
+// contract is stable. `supported:false` = the box can't read opencode.db.
 export type OptimizerSummary = {
   supported: boolean;
   windowDays: number;
@@ -1856,7 +1881,7 @@ export type OptimizerSummary = {
   cacheShare: { output: number; cacheRead: number; cacheWrite: number; input: number };
   dailySeries: { day: string; tokensSent: number }[]; // "YYYY-MM-DD", oldest→newest
   bySession: { sessionID: string | null; turns: number; cost: number; tokensSent: number }[];
-  ttl: { ms: number; confidence: "default" | "measured"; observations: number };
+  ttl: null;
   counterfactual: null;
   windows: null;
 };

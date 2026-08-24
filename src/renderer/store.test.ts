@@ -6,7 +6,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { loadPersistedSnapshot, resolveSessionOwner, useStore } from "./store";
 import { writeSavedActiveSession } from "./chatShared";
-import type { Project } from "../shared/types";
+import type { AppConfig, Project } from "../shared/types";
 
 function proj(over: Partial<Project> & { tmuxSession: string }): Project {
   return {
@@ -1201,3 +1201,33 @@ describe("app toasts (BET-723)", () => {
   });
 });
 
+describe("applyConfig cacheTtl coercion", () => {
+  // Regression: the coercion used to be `c.cacheTtl === "5m" ? "5m" : "1h"`,
+  // so a config with no cacheTtl (every user who never opened Settings)
+  // predicted a 1-hour prompt cache. opencode sends its cache breakpoints with
+  // no ttl, so Anthropic applies its 5-minute default — measured on the wire.
+  // The 1h fallback meant the context pill read "warm" for 5-60 minute idle
+  // gaps while the next message was in fact re-billing the whole prefix.
+  const cfg = (over: Partial<AppConfig> = {}): AppConfig =>
+    ({ projects: [], ...over }) as AppConfig;
+
+  it("defaults to 5m when the config has no cacheTtl", () => {
+    useStore.getState().applyConfig(cfg());
+    expect(useStore.getState().cacheTtl).toBe("5m");
+  });
+
+  it("defaults to 5m for an unrecognised value", () => {
+    useStore.getState().applyConfig(cfg({ cacheTtl: "2h" as never }));
+    expect(useStore.getState().cacheTtl).toBe("5m");
+  });
+
+  it("keeps an explicit 1h opt-in", () => {
+    useStore.getState().applyConfig(cfg({ cacheTtl: "1h" }));
+    expect(useStore.getState().cacheTtl).toBe("1h");
+  });
+
+  it("keeps an explicit 5m", () => {
+    useStore.getState().applyConfig(cfg({ cacheTtl: "5m" }));
+    expect(useStore.getState().cacheTtl).toBe("5m");
+  });
+});

@@ -16,6 +16,7 @@ export const SETTING_SECTIONS = [
   { id: "voice", label: "Voice", group: "AGENT" },
 ];
 export const SETTINGS = [
+  { id: "cacheTtl", section: "models", label: "Prompt cache TTL", help: "Warm cache.", control: "segmented", configKey: "cacheTtl", platform: "both", default: "1h", options: [{ value: "5m", label: "5 minutes" }, { value: "1h", label: "1 hour" }] },
   { id: "autoRenameSessions", section: "sessions", label: "Auto-rename", help: "Renames.", control: "toggle", configKey: "autoRenameSessions", platform: "both", default: false },
   { id: "serverUrlMobile", section: "box", label: "Server URL", help: "Override.", control: "text", configKey: null, platform: "mobile", default: "", placeholder: "https://manta.example.com" },
   { id: "uploadCleanupHours", section: "files", label: "Upload cleanup", help: "Hours.", control: "segmented", configKey: "uploadCleanupHours", platform: "both", default: 24, options: [{ value: "24", label: "24 hours" }, { value: "0", label: "Never" }] },
@@ -60,6 +61,7 @@ function harness({ committed, writeSpy = () => {} }) {
 }
 
 test("generated schema contains only mobile-visible entries in schema order", () => {
+  assert.ok(SAMPLE_OUT.includes('id: "cacheTtl"'));
   assert.ok(SAMPLE_OUT.includes('id: "autoRenameSessions"'));
   assert.ok(SAMPLE_OUT.includes('id: "serverUrlMobile"'));
   assert.ok(SAMPLE_OUT.includes('id: "uploadCleanupHours"'));
@@ -77,12 +79,15 @@ test("section list omits sections with no mobile-visible entries", () => {
 });
 
 test("typed defaults, options, commitOnBlur, placeholder and configKey are emitted", () => {
+  assert.ok(SAMPLE_OUT.includes('defaultString: "1h"'));
   assert.ok(SAMPLE_OUT.includes('defaultBool: false'));
   assert.ok(SAMPLE_OUT.includes('defaultNumber: 24'));
+  assert.ok(SAMPLE_OUT.includes('configKey: "cacheTtl"'));
   assert.ok(SAMPLE_OUT.includes('configKey: nil'));
   assert.ok(SAMPLE_OUT.includes('commitOnBlur: true'));
   assert.ok(SAMPLE_OUT.includes('commitOnBlur: false'));
   assert.ok(SAMPLE_OUT.includes('placeholder: "gsk_…"'));
+  assert.ok(SAMPLE_OUT.includes('SettingOption(value: "5m", label: "5 minutes")'));
 });
 
 test("an unsupported (non-primitive) default fails loudly", () => {

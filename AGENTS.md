@@ -1199,7 +1199,7 @@ Backup at `~/.tmux.conf.pre-MantaUI` on the remote if it was ever modified.
 ## State
 
 - **Source of truth**: tmux on the remote. `tmux list-sessions` + `list-windows -a`.
-- **Local config** (`<userData>/config.json`): `{serverUrl, boxId, boxToken, projects[{tmuxSession, defaultCwd}], chatAutoAllow, defaultModel, skillRegistryUrls}`.
+- **Local config** (`<userData>/config.json`): `{serverUrl, boxId, boxToken, projects[{tmuxSession, defaultCwd}], chatAutoAllow, defaultModel, skillRegistryUrls, cacheTtl}`.
 - **No local sessions table.** Project = tmux session, app session = tmux window.
 
 ## Patterns worth knowing
@@ -1584,17 +1584,14 @@ writer. The default
 registry
 (`https://antoinedc.github.io/manta-skills`) ships in the opencode binary once
 the upstream PR (anomalyco/opencode#28068) lands; these are user-added extras.
-The prompt-cache TTL is MEASURED server-side from the message ledger
-(`src/server/optimizer/ttl.mjs`, surfaced via the `optimizer:summary` RPC) and
-feeds the stale-cache threshold on the SessionHeader context pill (a stale
-cache tints that pill warn and shows a Clear-session block in its popover —
-there is no separate cache pill; see the "Stale prompt-cache" section below).
-MantaUI does NOT set `cache_control.ttl` on any request. opencode sends its
-cache breakpoints with no ttl field, so Anthropic applies its default 5-minute
-TTL; the measured value (falling back to that 5-minute default when there is
-not enough ledger data) is what the pill uses. The old user-facing `cacheTtl`
-setting was removed in BET-1334 — it asked users to guess opencode's internals
-and guessed wrong.
+`cacheTtl: "5m" | "1h"` — Anthropic prompt cache TTL (default `"5m"`).
+Display-only: drives the stale-cache threshold on the SessionHeader context
+pill (a stale cache tints that pill warn and shows a Clear-session block in
+its popover — there is no separate cache pill; see the "Stale prompt-cache"
+section below). MantaUI does NOT set `cache_control.ttl` on any request.
+**The default is `"5m"` because that is what opencode measurably sends** —
+not a preference. See "Stale prompt-cache" for the wire evidence and the
+one config path that does change the real TTL (and why it is not wired here).
 
 **v2-only endpoints** (used alongside the v1 base):
 - `GET /question` — list pending Question tool requests
@@ -1734,11 +1731,8 @@ renders when stale by flipping its pill tone from neutral to `warn` and, in
 the popover, showing a "cache went stale … clearing saves Nk tokens" block
 with a **Clear session** button. The warn state matches when:
 `!running && idleMs >= ttlMs && cachedTokens >= STALE_CACHE_MIN_TOKENS`
-(5k). The TTL is **NOT set by MantaUI and is no longer user-configurable**
-(BET-1334 removed the `cacheTtl` setting): it is MEASURED server-side from the
-message ledger (`src/server/optimizer/ttl.mjs`, surfaced via
-`optimizer:summary`) and fed into the pill, falling back to Anthropic's
-standard 5-minute default when the ledger lacks enough observations.
+(5k). The TTL is **NOT set by MantaUI** — MantaUI only predicts staleness
+from `AppConfig.cacheTtl` ("5m" | "1h", default **"5m"**, in Settings).
 
 **The real TTL is 5 minutes, measured — and no opencode config changes it
 (1.18.22, checked 2026-08-24).** opencode's `applyCaching()`
@@ -1747,10 +1741,10 @@ standard 5-minute default when the ledger lacks enough observations.
 default 5m TTL. Confirmed on the wire against `/v1/messages`: a request
 shaped the way opencode shapes one reported
 `usage.cache_creation.ephemeral_5m_input_tokens: 4421` with
-`ephemeral_1h_input_tokens: 0`. The old setting therefore **defaulted to a
-value that was never true** — for any idle gap between 5 and 60 minutes the
-pill read "warm" while the next message re-billed the whole prefix. It was
-removed rather than re-guided; re-measure instead.
+`ephemeral_1h_input_tokens: 0`. The setting therefore **defaulted to a value
+that was never true** — for any idle gap between 5 and 60 minutes the pill
+read "warm" while the next message re-billed the whole prefix. Do not
+re-guess this default; re-measure it.
 
 **There IS a config path that changes the wire TTL, and it is deliberately
 NOT wired to this setting.** Setting `options.cacheControl = {type:

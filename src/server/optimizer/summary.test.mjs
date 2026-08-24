@@ -35,10 +35,8 @@ test("buildOptimizerSummary returns the full shape with the three null placehold
   // dailySeries/bySession derived from the same rows.
   assert.equal(s.dailySeries.length, WINDOW_DAYS);
   assert.equal(s.bySession[0].sessionID, "s1");
-  // ttl is measured from the same rows (BET-1334): a single row yields no
-  // consecutive pairs → the default prediction. counterfactual/windows remain
-  // blank placeholders for children 3–4.
-  assert.deepEqual(s.ttl, { ms: 300_000, confidence: "default", observations: 0 });
+  // The three placeholders children 2–4 fill, kept for a stable contract.
+  assert.equal(s.ttl, null);
   assert.equal(s.counterfactual, null);
   assert.equal(s.windows, null);
 });

@@ -54,6 +54,7 @@ running on the box.
 | Subagent model | Sonnet-class |
 | `worktreePerSession` | `true` |
 | `worktreeCleanOnClose` | `true` |
+| `cacheTtl` | `"5m"` (what opencode actually requests — see AGENTS.md) |
 | `autoRenameSessions` | `true` |
 | `chatAutoAllow` | `true` |
 
