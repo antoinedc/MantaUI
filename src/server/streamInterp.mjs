@@ -45,7 +45,10 @@ import {
 import { planModeFromToolPart } from "../shared/planMode.mjs";
 import { createSeenIdFilter } from "./seenIds.mjs";
 
-const TTL_DEFAULT = "1h";
+// opencode stamps its cache breakpoints with no `ttl`, so Anthropic applies
+// its default 5-minute TTL — measured on the wire, see AppConfig.cacheTtl.
+// This is the fallback the device stream predicts staleness against.
+const TTL_DEFAULT = "5m";
 
 // Per-tool cap for the live tool-output tail (server half, BET-745). Once a
 // single tool has streamed this many characters to the device, further output

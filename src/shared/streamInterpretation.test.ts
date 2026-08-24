@@ -516,6 +516,17 @@ describe("selectCacheTtlMs", () => {
   it("returns 1 hour for '1h'", () => {
     expect(selectCacheTtlMs("1h")).toBe(60 * 60 * 1000);
   });
+
+  // opencode stamps its cache breakpoints `{type:"ephemeral"}` with no ttl,
+  // so Anthropic applies its default 5-minute TTL (measured on the wire:
+  // usage.cache_creation lands entirely in ephemeral_5m_input_tokens).
+  // Anything unset/unknown must therefore predict 5m, never 1h — a 1h
+  // prediction silently under-warns for every 5-60 minute idle gap.
+  it("falls back to 5 minutes for an unset or unknown TTL", () => {
+    expect(selectCacheTtlMs(undefined as unknown as "5m")).toBe(5 * 60 * 1000);
+    expect(selectCacheTtlMs("" as unknown as "5m")).toBe(5 * 60 * 1000);
+    expect(selectCacheTtlMs("2h" as unknown as "5m")).toBe(5 * 60 * 1000);
+  });
 });
 
 describe("selectLastAssistantCompletion", () => {

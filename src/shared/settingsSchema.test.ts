@@ -239,7 +239,7 @@ describe("sectionIsModified", () => {
 describe("resetAllPayload", () => {
   it("returns every configKey set to its default", () => {
     const payload = resetAllPayload(ALL);
-    expect(payload.cacheTtl).toBe("1h");
+    expect(payload.cacheTtl).toBe("5m");
     expect(payload.theme).toBe("system");
     expect(payload.groqApiKey).toBe("");
     expect(payload.autoRenameSessions).toBe(false);

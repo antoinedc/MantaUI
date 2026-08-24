@@ -19,6 +19,7 @@ import { slugifyProjectName, uniqueSessionName } from "../shared/projectName.mjs
 import { detectForge, repoKey } from "../shared/forge.mjs";
 import { runLoginShell } from "./launchers.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
+import { migrateCacheTtlDefault } from "../shared/configMigration.mjs";
 
 // ============================================================
 // Config persistence (real implementation — renderer depends on it)
@@ -95,7 +96,11 @@ async function getConfig() {
         return { tmuxSession: p.name ?? "untitled", defaultCwd: p.defaultCwd ?? "~" };
       });
     }
-    _config = { ...DEFAULT_CONFIG, ...parsed };
+    // One-time correction of the wrong "1h" prompt-cache default (opencode
+    // measurably requests 5m). Pure logic + rationale live in
+    // shared/configMigration.mjs; it is idempotent and self-marking, so it is
+    // safe to run on every load and a later deliberate "1h" pick sticks.
+    _config = { ...DEFAULT_CONFIG, ...migrateCacheTtlDefault(parsed) };
   } else {
     _config = { ...DEFAULT_CONFIG };
   }

@@ -165,11 +165,11 @@ export const SETTINGS: SettingEntry[] = [
     id: "cacheTtl",
     section: "models",
     label: "Prompt cache TTL",
-    help: "How long Anthropic keeps a session's prompt cache warm. Must match opencode's cache_control.ttl — Manta only uses this to predict when a chat has gone stale.",
+    help: "How long Anthropic keeps a session's prompt cache warm. opencode always requests the 5-minute TTL, so leave this at 5 minutes — Manta only uses it to predict when a chat has gone cold.",
     control: "segmented",
     configKey: "cacheTtl",
     platform: "both",
-    default: "1h",
+    default: "5m",
     group: "Requests",
     options: [
       { value: "5m", label: "5 minutes" },

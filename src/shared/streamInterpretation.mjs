@@ -424,10 +424,12 @@ export function mergeBufferedDeltas(messages, buffer) {
 // or 2× input rate (1h TTL). For long sessions with a deep cached prefix,
 // this can be 100k+ tokens of "wasted" spend just to warm the cache back up.
 //
-// `selectCacheTtlMs(ttl)` returns the TTL in milliseconds. The TTL value
-// itself is configured per-request by opencode (NOT by manta); the setting
-// here is the user's claim about what opencode is sending, used solely to
-// predict when to show the "/clear to save Nk tokens" pill.
+// `selectCacheTtlMs(ttl)` returns the TTL in milliseconds. manta never sets
+// `cache_control.ttl` on a request — this is purely the prediction input for
+// the "/clear to save Nk tokens" pill. opencode sends its cache breakpoints
+// with no ttl field, so the real, measured TTL is Anthropic's 5-minute
+// default; "5m" is therefore the default and the correct value on a stock
+// box. See AppConfig.cacheTtl for the wire evidence.
 export function selectCacheTtlMs(ttl) {
   return ttl === "1h" ? 60 * 60_000 : 5 * 60_000;
 }
