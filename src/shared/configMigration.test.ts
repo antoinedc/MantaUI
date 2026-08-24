@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { migrateCacheTtlDefault, migrateLegacyCapConfig } from "./configMigration.mjs";
+import { migrateLegacyCapConfig } from "./configMigration.mjs";
 
 describe("migrateLegacyCapConfig", () => {
   it("empty input → {}", () => {
@@ -68,58 +68,6 @@ describe("migrateLegacyCapConfig", () => {
     const input = { capExecutorEnabled: true };
     const snapshot = JSON.stringify(input);
     migrateLegacyCapConfig(input);
-    expect(JSON.stringify(input)).toBe(snapshot);
-  });
-});
-
-describe("migrateCacheTtlDefault", () => {
-  // "1h" was the shipped default and is provably wrong on a stock box:
-  // opencode sends its cache breakpoints with no ttl, so Anthropic applies
-  // its 5-minute default (measured: usage.cache_creation lands entirely in
-  // ephemeral_5m_input_tokens). A persisted "1h" therefore has to be
-  // corrected, or every existing box keeps under-warning.
-  it("rewrites a persisted 1h to 5m and marks the correction", () => {
-    const r = migrateCacheTtlDefault({ cacheTtl: "1h" });
-    expect(r.cacheTtl).toBe("5m");
-    expect(r.cacheTtlDefaultMigrated).toBe(true);
-  });
-
-  it("is one-time — a deliberate 1h re-pick survives", () => {
-    const r = migrateCacheTtlDefault({ cacheTtl: "1h", cacheTtlDefaultMigrated: true });
-    expect(r.cacheTtl).toBe("1h");
-  });
-
-  it("is idempotent (running it on its own output is a no-op)", () => {
-    const once = migrateCacheTtlDefault({ cacheTtl: "1h" });
-    expect(migrateCacheTtlDefault(once)).toEqual(once);
-  });
-
-  it("leaves an explicit 5m alone", () => {
-    expect(migrateCacheTtlDefault({ cacheTtl: "5m" }).cacheTtl).toBe("5m");
-  });
-
-  it("leaves an absent cacheTtl absent (the schema default applies)", () => {
-    const r = migrateCacheTtlDefault({ chatAutoAllow: true });
-    expect("cacheTtl" in r).toBe(false);
-    expect(r.chatAutoAllow).toBe(true);
-  });
-
-  it("null/non-object input → {}", () => {
-    expect(migrateCacheTtlDefault(null)).toEqual({});
-    expect(migrateCacheTtlDefault(undefined)).toEqual({});
-    expect(migrateCacheTtlDefault("nope" as never)).toEqual({});
-  });
-
-  it("preserves unrelated config fields", () => {
-    const r = migrateCacheTtlDefault({ cacheTtl: "1h", groqApiKey: "k", projects: [] });
-    expect(r.groqApiKey).toBe("k");
-    expect(r.projects).toEqual([]);
-  });
-
-  it("does not mutate the input", () => {
-    const input = { cacheTtl: "1h" };
-    const snapshot = JSON.stringify(input);
-    migrateCacheTtlDefault(input);
     expect(JSON.stringify(input)).toBe(snapshot);
   });
 });

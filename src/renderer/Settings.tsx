@@ -454,7 +454,6 @@ export function Settings({
 }) {
   // BET-730: per-field selectors, never a bare useStore() — a no-selector
   // destructure re-renders the whole Settings tree on every store write.
-  const cacheTtl = useStore((s) => s.cacheTtl);
   const groqApiKey = useStore((s) => s.groqApiKey);
   const voiceTranscriptionModel = useStore((s) => s.voiceTranscriptionModel);
   const openaiApiKey = useStore((s) => s.openaiApiKey);
@@ -518,7 +517,6 @@ export function Settings({
   // store (NO local field state → no stomping bug).
   const values: Record<string, unknown> = useMemo(
     () => ({
-      cacheTtl,
       groqApiKey,
       voiceTranscriptionModel,
       openaiApiKey,
@@ -537,7 +535,7 @@ export function Settings({
       "cto.alwaysListening": cto?.alwaysListening ?? false,
       "modelRouting.preset": modelRouting?.preset ?? "balanced",
     }),
-    [cacheTtl, groqApiKey, voiceTranscriptionModel, openaiApiKey, allowAgentPush, downloadsDir, worktreePerSession, worktreeCleanOnClose, uploadCleanupHours, voiceNoteTtlHours, theme, autoRenameSessions, alwaysShowUsage, cto, modelRouting],
+    [groqApiKey, voiceTranscriptionModel, openaiApiKey, allowAgentPush, downloadsDir, worktreePerSession, worktreeCleanOnClose, uploadCleanupHours, voiceNoteTtlHours, theme, autoRenameSessions, alwaysShowUsage, cto, modelRouting],
   );
 
   const commitKey = async (entry: SettingEntry, nextValue: unknown) => {
