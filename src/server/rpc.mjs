@@ -50,16 +50,9 @@ import { addApnsToken } from "./push.mjs";
 import { getRegistry as pluginsGetRegistry } from "./plugins.mjs";
 import { searchMessages } from "./messageSearch.mjs";
 import { ledgerSummary } from "./modelLedger.mjs";
-import { getDb } from "./opencodeDb.mjs";
-import { createOptimizerSummary } from "./optimizer/summary.mjs";
 import { allModels as catalogAllModels } from "./modelCatalog.mjs";
 import { MIN_CLIENT } from "./version.mjs";
 import { forgeDiffForCwd, forgeStatus, pullRequestForCwd, shipPullRequest, shipPreview, mergePullRequest, draftGetForCwd, draftCommentForCwd, draftSubmitForCwd, replyThreadForCwd, forgeInbox, forgeDeviceStart, forgeDevicePoll, forgeDeviceCancel, forgeListRepos, forgeCloneStart, forgeCloneStatus, forgeCloneCancel } from "./forge/index.mjs";
-
-// BET-1333: the Optimizer's memoized `optimizer:summary` read model. Created
-// once at module scope so the 60s memo + in-flight guard are shared across
-// RPC calls — the same single-slot cache pattern as routingServices.mjs.
-const optimizerSummary = createOptimizerSummary({ getDb });
 import { listRules as forgeListRules, formatIssueRef, parseIssueRef } from "./forgeRules.mjs";
 import { clearStoredToken } from "./forge/auth.mjs";
 import { parseRules as parseForgeRules } from "../shared/forgeRules.mjs";
@@ -412,7 +405,46 @@ export function buildHandlers({
     // ---- local channels (config/git/fs/clipboard/transport/tmux-config) ----
 
     // preload: ipcRenderer.invoke(IPC.configGet)  → no args
-    "config:get": () => local.configGet(),
+    //
+    // cacheTtl is reconciled against opencode's OWN config on read, so the two
+    // can never drift into Settings showing a TTL the box does not request.
+    //
+    // The direction rule matters. Manta's stored value is the user's INTENT;
+    // opencode's config is the mechanism. So:
+    //   - stored "1h", opencode has none → apply the intent (a pure upsert,
+    //     hot-applies, no restart). This is what carries a user who chose 1h
+    //     before the setting was wired through, without them re-picking it.
+    //   - otherwise they disagree in the direction that would need a REMOVAL,
+    //     and a removal restarts opencode and kills in-flight turns — far too
+    //     rude for a read. Adopt opencode's value into the mirror instead; the
+    //     user can change it explicitly, which confirms first.
+    //
+    // Non-fatal throughout: `readCacheTtl` returns null on any failure and the
+    // stored mirror is used unchanged rather than showing the user a guess.
+    "config:get": async () => {
+      const cfg = await local.configGet();
+      try {
+        const live = await providers.readCacheTtl({ listProviders: oc.getProviders });
+        if (live && live !== cfg.cacheTtl) {
+          if (cfg.cacheTtl === "1h") {
+            const applied = await providers.syncCacheTtl(
+              { ttl: "1h" },
+              { listProviders: oc.getProviders },
+            );
+            if (applied.ok) {
+              console.log("[config] applied stored cacheTtl=1h to opencode");
+              return cfg;
+            }
+            console.warn("[config] could not apply stored cacheTtl:", applied.error);
+          }
+          await local.configUpdate({ cacheTtl: live });
+          return { ...cfg, cacheTtl: live };
+        }
+      } catch (e) {
+        console.warn("[config] cacheTtl reconcile skipped:", e instanceof Error ? e.message : e);
+      }
+      return cfg;
+    },
 
     // preload: ipcRenderer.invoke(IPC.configUpdate, patch)  → args[0] = patch (Partial<AppConfig>)
     // BET-675: after a successful write, push the new config into syncState so
@@ -425,9 +457,30 @@ export function buildHandlers({
     // that can't reach opencode fails loudly (renderer reverts + errors)
     // instead of "appears to save but does nothing". opencode re-reads
     // `skills` at startup, like subagents.
+    // BET-1336: cacheTtl is the SECOND field that must reach opencode itself,
+    // and for the same reason as skillRegistryUrls — the setting is real, not
+    // a display preference. "1h" writes `options.cacheControl` onto every
+    // Anthropic-SDK model of the connected providers, which opencode turns
+    // into a top-level `cache_control` on the request (verified on the wire);
+    // "5m" removes it, restoring opencode's native breakpoint caching, which
+    // Anthropic already defaults to 5 minutes.
+    //
+    // Written to opencode FIRST: only on success is config.json persisted, so
+    // a TTL change that can't reach opencode fails loudly instead of leaving
+    // the mirror claiming something the box does not do. NOTE the 1h→5m
+    // direction restarts opencode (a removal must, or the deleted key lives on
+    // in its in-memory config) and therefore ends in-flight turns — the UI
+    // confirms before sending it.
     "config:update": async (patch) => {
       if (Array.isArray(patch?.skillRegistryUrls)) {
         const applied = await providers.setSkillRegistryUrls(patch.skillRegistryUrls);
+        if (!applied.ok) throw new Error(applied.error);
+      }
+      if (patch?.cacheTtl === "5m" || patch?.cacheTtl === "1h") {
+        const applied = await providers.syncCacheTtl(
+          { ttl: patch.cacheTtl },
+          { listProviders: oc.getProviders },
+        );
         if (!applied.ok) throw new Error(applied.error);
       }
       const next = await local.configUpdate(patch);
@@ -1224,12 +1277,6 @@ export function buildHandlers({
     // routing, no behaviour change. Degrades to { supported:false } on a
     // box that hasn't taken the Node 24 runtime yet / has no opencode.db.
     "ledger:summary": (opts) => ledgerSummary(opts ?? {}),
-
-    // BET-1333: the Optimizer's memoized read model over the ledger
-    // (optimizer/summary.mjs). No arguments. Memoized server-side behind a
-    // 60s TTL with an in-flight guard. Degrades to { supported:false } on a
-    // box that hasn't taken the Node 24 runtime yet / has no opencode.db.
-    "optimizer:summary": () => optimizerSummary(),
 
     // preload: ipcRenderer.invoke(IPC.opencodeRunCommand, { sessionId, command, arguments, model?, attachments? })
     // → args[0] = that object; opencode.mjs runCommand expects same shape

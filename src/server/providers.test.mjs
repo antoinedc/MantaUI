@@ -24,6 +24,11 @@ import {
   setReferences,
   mantaPlanAgentBlock,
   ensureMantaPlanAgent,
+  selectCacheTtlTargets,
+  resolveCacheTtlFromConfig,
+  planCacheTtlOps,
+  syncCacheTtl,
+  readCacheTtl,
 } from "./providers.mjs";
 
 // ---------------------------------------------------------------------------
@@ -1297,5 +1302,264 @@ describe("removeConfigKeys", () => {
     });
     assert.equal(result.ok, false);
     assert.match(result.error, /ENOENT/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Prompt-cache TTL → opencode config (BET-1336)
+// ---------------------------------------------------------------------------
+
+const PROVIDERS_FIXTURE = {
+  connected: ["anthropic", "openai"],
+  all: [
+    {
+      id: "anthropic",
+      models: {
+        "claude-opus-4-8": { api: { npm: "@ai-sdk/anthropic" } },
+        "claude-sonnet-4-5": { api: { npm: "@ai-sdk/anthropic" } },
+      },
+    },
+    // connected, but its SDK does not take cacheControl
+    { id: "openai", models: { "gpt-5": { api: { npm: "@ai-sdk/openai" } } } },
+    // qualifying SDK but NOT connected — must be ignored
+    {
+      id: "google-vertex-anthropic",
+      models: { "claude-x": { api: { npm: "@ai-sdk/google-vertex/anthropic" } } },
+    },
+  ],
+};
+
+describe("selectCacheTtlTargets", () => {
+  it("selects only Anthropic-SDK models of CONNECTED providers", () => {
+    assert.deepEqual(selectCacheTtlTargets(PROVIDERS_FIXTURE), [
+      { providerID: "anthropic", modelID: "claude-opus-4-8" },
+      { providerID: "anthropic", modelID: "claude-sonnet-4-5" },
+    ]);
+  });
+
+  it("takes google-vertex/anthropic when it is connected", () => {
+    const r = selectCacheTtlTargets({
+      connected: ["google-vertex-anthropic"],
+      all: [
+        {
+          id: "google-vertex-anthropic",
+          models: { "claude-x": { api: { npm: "@ai-sdk/google-vertex/anthropic" } } },
+        },
+      ],
+    });
+    assert.deepEqual(r, [{ providerID: "google-vertex-anthropic", modelID: "claude-x" }]);
+  });
+
+  it("empty/garbage input → []", () => {
+    assert.deepEqual(selectCacheTtlTargets(), []);
+    assert.deepEqual(selectCacheTtlTargets({ all: [null], connected: [] }), []);
+  });
+});
+
+describe("resolveCacheTtlFromConfig", () => {
+  const targets = [{ providerID: "anthropic", modelID: "m1" }];
+
+  it("reads 1h back off a configured model", () => {
+    const cfg = {
+      provider: {
+        anthropic: {
+          models: { m1: { options: { cacheControl: { type: "ephemeral", ttl: "1h" } } } },
+        },
+      },
+    };
+    assert.equal(resolveCacheTtlFromConfig(cfg, targets), "1h");
+  });
+
+  // Absent is not "unknown" — it is opencode's native breakpoint caching,
+  // which Anthropic defaults to 5 minutes (measured on the wire).
+  it("absent cacheControl → 5m", () => {
+    assert.equal(resolveCacheTtlFromConfig({}, targets), "5m");
+    assert.equal(resolveCacheTtlFromConfig({ provider: { anthropic: { models: { m1: {} } } } }, targets), "5m");
+  });
+});
+
+describe("planCacheTtlOps", () => {
+  const targets = [
+    { providerID: "anthropic", modelID: "m1" },
+    { providerID: "anthropic", modelID: "m2" },
+  ];
+
+  it("1h upserts cacheControl for every target", () => {
+    const { patch, remove } = planCacheTtlOps({ targets, ttl: "1h", cfg: {} });
+    assert.deepEqual(remove, []);
+    assert.deepEqual(patch.provider.anthropic.models.m1.options.cacheControl, {
+      type: "ephemeral",
+      ttl: "1h",
+    });
+    assert.equal(patch.provider.anthropic.models.m2.options.cacheControl.ttl, "1h");
+  });
+
+  // The no-op guard is what keeps a re-save from triggering a pointless write,
+  // and (in the 5m direction) a pointless opencode restart.
+  it("1h is a no-op when already 1h", () => {
+    const cfg = {
+      provider: {
+        anthropic: {
+          models: {
+            m1: { options: { cacheControl: { type: "ephemeral", ttl: "1h" } } },
+            m2: { options: { cacheControl: { type: "ephemeral", ttl: "1h" } } },
+          },
+        },
+      },
+    };
+    const { patch, remove } = planCacheTtlOps({ targets, ttl: "1h", cfg });
+    assert.equal(patch.provider, undefined);
+    assert.deepEqual(remove, []);
+  });
+
+  // 5m must be the key being ABSENT, never an explicit ttl:"5m" — writing one
+  // would flip opencode into Anthropic automatic caching for a user who never
+  // asked, changing the caching strategy rather than just the TTL.
+  it("5m removes the key rather than writing ttl:5m", () => {
+    const cfg = {
+      provider: {
+        anthropic: {
+          models: { m1: { options: { cacheControl: { type: "ephemeral", ttl: "1h" } } } },
+        },
+      },
+    };
+    const { patch, remove } = planCacheTtlOps({ targets, ttl: "5m", cfg });
+    assert.equal(patch.provider, undefined);
+    assert.deepEqual(remove, [["provider", "anthropic", "models", "m1", "options", "cacheControl"]]);
+  });
+
+  it("5m is a no-op when nothing is configured", () => {
+    const { patch, remove } = planCacheTtlOps({ targets, ttl: "5m", cfg: {} });
+    assert.equal(patch.provider, undefined);
+    assert.deepEqual(remove, []);
+  });
+});
+
+describe("syncCacheTtl", () => {
+  const targets = [{ providerID: "anthropic", modelID: "m1" }];
+
+  it("1h patches and never restarts", async () => {
+    const patched = [];
+    const removed = [];
+    const r = await syncCacheTtl(
+      { ttl: "1h", targets },
+      {
+        readConfig: async () => ({}),
+        patch: async (p) => (patched.push(p), { ok: true }),
+        remove: async (p) => (removed.push(p), { ok: true, changed: true }),
+      },
+    );
+    assert.deepEqual(r, { ok: true, ttl: "1h", changed: true, restarted: false });
+    assert.equal(patched.length, 1);
+    assert.equal(removed.length, 0);
+  });
+
+  it("5m removes and reports the restart it caused", async () => {
+    const cfg = {
+      provider: { anthropic: { models: { m1: { options: { cacheControl: { ttl: "1h" } } } } } },
+    };
+    const r = await syncCacheTtl(
+      { ttl: "5m", targets },
+      {
+        readConfig: async () => cfg,
+        patch: async () => ({ ok: true }),
+        remove: async () => ({ ok: true, changed: true }),
+      },
+    );
+    assert.deepEqual(r, { ok: true, ttl: "5m", changed: true, restarted: true });
+  });
+
+  it("no-op reports changed:false and touches nothing", async () => {
+    let calls = 0;
+    const r = await syncCacheTtl(
+      { ttl: "5m", targets },
+      {
+        readConfig: async () => ({}),
+        patch: async () => (calls++, { ok: true }),
+        remove: async () => (calls++, { ok: true }),
+      },
+    );
+    assert.deepEqual(r, { ok: true, ttl: "5m", changed: false, restarted: false });
+    assert.equal(calls, 0);
+  });
+
+  it("surfaces a failed patch instead of reporting success", async () => {
+    const r = await syncCacheTtl(
+      { ttl: "1h", targets },
+      { readConfig: async () => ({}), patch: async () => ({ ok: false, error: "boom" }) },
+    );
+    assert.equal(r.ok, false);
+    assert.equal(r.error, "boom");
+  });
+
+  it("rejects an unknown ttl by name", async () => {
+    const r = await syncCacheTtl({ ttl: "2h", targets }, { readConfig: async () => ({}) });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /unknown cacheTtl: 2h/);
+  });
+
+  it("resolves targets from the provider list when not supplied", async () => {
+    const patched = [];
+    const r = await syncCacheTtl(
+      { ttl: "1h" },
+      {
+        listProviders: async () => PROVIDERS_FIXTURE,
+        readConfig: async () => ({}),
+        patch: async (p) => (patched.push(p), { ok: true }),
+      },
+    );
+    assert.equal(r.ok, true);
+    // only the two connected Anthropic-SDK models, not gpt-5
+    assert.deepEqual(Object.keys(patched[0].provider.anthropic.models), [
+      "claude-opus-4-8",
+      "claude-sonnet-4-5",
+    ]);
+  });
+
+  it("an unreadable config is an error, not a silent success", async () => {
+    const r = await syncCacheTtl(
+      { ttl: "1h", targets },
+      {
+        readConfig: async () => {
+          throw new Error("unparseable");
+        },
+      },
+    );
+    assert.equal(r.ok, false);
+    assert.match(r.error, /unparseable/);
+  });
+});
+
+describe("readCacheTtl", () => {
+  it("reports the ttl opencode is configured for", async () => {
+    const cfg = {
+      provider: {
+        anthropic: {
+          models: { "claude-opus-4-8": { options: { cacheControl: { ttl: "1h" } } } },
+        },
+      },
+    };
+    const r = await readCacheTtl({
+      listProviders: async () => PROVIDERS_FIXTURE,
+      readConfig: async () => cfg,
+    });
+    assert.equal(r, "1h");
+  });
+
+  it("returns null (not a guess) when opencode can't be read", async () => {
+    const r = await readCacheTtl({
+      listProviders: async () => {
+        throw new Error("down");
+      },
+    });
+    assert.equal(r, null);
+  });
+
+  it("returns null when there are no Anthropic-SDK models at all", async () => {
+    const r = await readCacheTtl({
+      listProviders: async () => ({ connected: ["openai"], all: [{ id: "openai", models: {} }] }),
+      readConfig: async () => ({}),
+    });
+    assert.equal(r, null);
   });
 });

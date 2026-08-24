@@ -1589,9 +1589,12 @@ Display-only: drives the stale-cache threshold on the SessionHeader context
 pill (a stale cache tints that pill warn and shows a Clear-session block in
 its popover — there is no separate cache pill; see the "Stale prompt-cache"
 section below). MantaUI does NOT set `cache_control.ttl` on any request.
-**The default is `"5m"` because that is what opencode measurably sends** —
-not a preference. See "Stale prompt-cache" for the wire evidence and the
-one config path that does change the real TTL (and why it is not wired here).
+**NOT display-only: it changes the real wire TTL** by writing
+`options.cacheControl` into opencode's own config. The default is `"5m"`
+because that is what opencode sends when the key is absent, measured. Going
+1h→5m RESTARTS opencode and ends in-flight turns; going to 1h does not. See
+"Stale prompt-cache" for the wire evidence and the four opencode properties
+the implementation depends on.
 
 **v2-only endpoints** (used alongside the v1 base):
 - `GET /question` — list pending Question tool requests
@@ -1734,43 +1737,66 @@ with a **Clear session** button. The warn state matches when:
 (5k). The TTL is **NOT set by MantaUI** — MantaUI only predicts staleness
 from `AppConfig.cacheTtl` ("5m" | "1h", default **"5m"**, in Settings).
 
-**The real TTL is 5 minutes, measured — and no opencode config changes it
-(1.18.22, checked 2026-08-24).** opencode's `applyCaching()`
-(`packages/opencode/src/provider/transform.ts`) stamps its cache breakpoints
-`{type:"ephemeral"}` with **no `ttl` field**, so Anthropic applies its
-default 5m TTL. Confirmed on the wire against `/v1/messages`: a request
-shaped the way opencode shapes one reported
-`usage.cache_creation.ephemeral_5m_input_tokens: 4421` with
-`ephemeral_1h_input_tokens: 0`. The setting therefore **defaulted to a value
-that was never true** — for any idle gap between 5 and 60 minutes the pill
-read "warm" while the next message re-billed the whole prefix. Do not
-re-guess this default; re-measure it.
+**cacheTtl is a REAL setting — it changes what Anthropic is asked for, not
+just what the pill predicts (BET-1336).** opencode's `applyCaching()`
+(`packages/opencode/src/provider/transform.ts`) stamps its own cache
+breakpoints `{type:"ephemeral"}` with **no `ttl` field**, so left alone
+Anthropic applies its default 5-minute TTL — measured on the wire:
+`usage.cache_creation.ephemeral_5m_input_tokens: 4421`,
+`ephemeral_1h_input_tokens: 0`. That is why **"5m" is the default and is
+expressed as the config key being ABSENT**.
 
-**There IS a config path that changes the wire TTL, and it is deliberately
-NOT wired to this setting.** Setting `options.cacheControl = {type:
-"ephemeral", ttl:"1h"}` on a model (`provider.<id>.models.<id>.options`, or
-an agent's `options`) is passed through to the SDK as a **top-level**
-`cache_control`, which Anthropic honours — verified:
-`ephemeral_1h_input_tokens: 4431`, no beta header needed. Three reasons it
-is not the hotfix, all of which need deciding before anyone wires it:
-1. It is a **caching-MODE switch, not a TTL field.** `usesAnthropicAutomaticCaching`
-   (`transform.ts`, gated on `options.cacheControl !== undefined` +
-   `@ai-sdk/anthropic`) SKIPS opencode's manual breakpoints entirely and
-   hands breakpoint placement to Anthropic. Selecting "5m" would change
-   caching behaviour for every default user, which a display setting must not.
-2. **It is per-model / per-agent, not global.** `ProviderTransform.options()`
-   does not pass provider-level options through, so a global setting would
-   have to fan out an `options` block onto every Anthropic-SDK model.
-3. **Turning it back off requires a DELETE**, i.e. the `removeConfigKeys` +
-   mandatory-opencode-restart path — and that restart kills every in-flight
-   turn box-wide. There is no "off" value (`null` would leave opencode in
-   automatic-caching mode with no `cache_control` on the wire — no caching
-   at all).
+**"1h" is applied by writing `options.cacheControl` into opencode's own
+config**, which opencode turns into a **top-level** `cache_control` on the
+request. Verified end-to-end through a real opencode turn (isolated proxy
+provider, 1.18.22): `TOP-LEVEL cache_control={"type":"ephemeral","ttl":"1h"}`,
+and Anthropic bills the write to `ephemeral_1h_input_tokens`. No beta header
+needed. The machinery is `selectCacheTtlTargets` / `planCacheTtlOps` /
+`syncCacheTtl` / `readCacheTtl` in `src/server/providers.mjs`, driven from the
+`config:update` and `config:get` channels in `rpc.mjs`.
 
-**The clean fix is upstream**: `applyCaching()` should accept a configurable
-`ttl` on the breakpoints it already writes (a one-line change plus a config
-key). Until then this setting is a prediction knob only; "1h" stays
-selectable for a box whose requests are rewritten in front of opencode.
+Four properties of opencode's logic that the implementation is shaped around —
+change any of them and this breaks:
+
+1. **`cacheControl` is a caching-MODE switch, not a TTL field.**
+   `usesAnthropicAutomaticCaching` (gated on `options.cacheControl !== undefined`
+   + `@ai-sdk/anthropic`) makes opencode SKIP its own breakpoints and hand
+   placement to Anthropic — measured as `block_breakpoints=0` on the wire.
+   **So "5m" must REMOVE the key, never write `ttl:"5m"`** — an explicit 5m
+   would silently flip every default user into automatic caching. There is
+   likewise no "off" value: `null` leaves opencode in automatic mode with no
+   `cache_control` on the wire, i.e. no caching at all.
+2. **The option is per-MODEL.** `ProviderTransform.options()` does not pass
+   provider-level options through, so there is no single global key; the
+   setting fans out over the Anthropic-SDK models of the CONNECTED providers
+   (15 on a stock Anthropic box). Only `@ai-sdk/anthropic` and
+   `@ai-sdk/google-vertex/anthropic` honour it — anything else would be a stray
+   option under the wrong providerOptions namespace, so the target set is exact.
+3. **Writing hot-applies; removing RESTARTS opencode.** `PATCH /global/config`
+   lands in the live config with no restart (verified). A removal has to go
+   through `removeConfigKeys`, which restarts `opencode-serve` — otherwise the
+   deleted key survives in opencode's in-memory config. That restart **ends
+   every in-flight turn box-wide**, so 1h→5m confirms with the user first and
+   `syncCacheTtl` reports `restarted` so a caller can say so. (Not theoretical:
+   it killed an agent's own turn mid-call during development.)
+4. **Reconciliation has a DIRECTION rule.** manta's stored value is the user's
+   INTENT, opencode's config is the mechanism. On read (`config:get`), stored
+   "1h" with opencode unset is APPLIED (a pure upsert, no restart) — that is
+   what carries a user who chose 1h before the setting was wired through.
+   Any other disagreement adopts opencode's value into the mirror, because
+   resolving it the other way would mean a restart, which a read must never do.
+
+**Still worth fixing upstream**: `applyCaching()` should accept a configurable
+`ttl` on the breakpoints it already writes, which would give a real TTL knob
+without the mode switch in (1) or the per-model fan-out in (2).
+
+**History note:** BET-1334 deleted this setting and replaced it with a TTL
+measured from the message ledger, on the reasoning that it asked users to
+guess another program's internals. That reasoning applied to the OLD
+display-only control and no longer holds — the control now SETS those
+internals rather than guessing them. BET-1336 reverted that removal and wired
+the control for real; do not re-remove it without a way for a user to actually
+choose a 1-hour cache.
 
 The predicate (`computeStaleCache`), TTL → ms (`selectCacheTtlMs`), and
 "last assistant completion" selector (`selectLastAssistantCompletion`)
