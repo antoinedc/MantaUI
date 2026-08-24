@@ -18,6 +18,7 @@
 // hard invariant — the shared read-only handle from opencodeDb.mjs is used.
 
 import { aggregate, aggregateBySession, aggregateDailySeries, fetchLedgerRows } from "../modelLedger.mjs";
+import { measureEffectiveTtl } from "./ttl.mjs";
 
 const WINDOW_DAYS = 30;
 const TTL_MS = 60_000;
@@ -27,8 +28,9 @@ export { WINDOW_DAYS };
 /**
  * PURE. Build the optimizer summary over the last WINDOW_DAYS of ledger rows
  * (fetched via the injected `fetchRows(sinceMs)`). `totals`/`cacheShare` reuse
- * the existing `aggregate` — no re-derivation. The three `ttl`/`counterfactual`/
- * `windows` keys are `null` placeholders children 2–4 fill.
+ * the existing `aggregate` — no re-derivation. `ttl` is measured from the same
+ * rows (BET-1334); `counterfactual`/`windows` are `null` placeholders children
+ * 3–4 fill.
  */
 export async function buildOptimizerSummary({ fetchRows, now = Date.now() }) {
   const nowMs = num(now);
@@ -42,9 +44,9 @@ export async function buildOptimizerSummary({ fetchRows, now = Date.now() }) {
     cacheShare,
     dailySeries: aggregateDailySeries(rows, WINDOW_DAYS, nowMs),
     bySession: aggregateBySession(rows),
-    ttl: null,
     counterfactual: null,
     windows: null,
+    ttl: measureEffectiveTtl(rows, nowMs),
   };
 }
 

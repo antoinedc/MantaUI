@@ -227,7 +227,6 @@ export function resetStore(
       chatAutoAllow: false,
       autoRenameSessions: false,
       defaultModel: null,
-      cacheTtl: "1h",
       groqApiKey: "",
       pendingScreenshots: [],
       agentFileToast: null,

@@ -424,14 +424,17 @@ export function mergeBufferedDeltas(messages, buffer) {
 // or 2× input rate (1h TTL). For long sessions with a deep cached prefix,
 // this can be 100k+ tokens of "wasted" spend just to warm the cache back up.
 //
-// `selectCacheTtlMs(ttl)` returns the TTL in milliseconds. manta never sets
-// `cache_control.ttl` on a request — this is purely the prediction input for
-// the "/clear to save Nk tokens" pill. opencode sends its cache breakpoints
-// with no ttl field, so the real, measured TTL is Anthropic's 5-minute
-// default; "5m" is therefore the default and the correct value on a stock
-// box. See AppConfig.cacheTtl for the wire evidence.
-export function selectCacheTtlMs(ttl) {
-  return ttl === "1h" ? 60 * 60_000 : 5 * 60_000;
+// `selectCacheTtlMs(ttlMs)` returns the effective TTL in milliseconds. manta
+// never sets `cache_control.ttl` on a request — opencode sends its cache
+// breakpoints with no ttl field, so the real TTL is Anthropic's default 5
+// minutes unless a box in front of opencode rewrites requests. Since BET-1334
+// the `/clear to save Nk tokens` pill no longer trusts a user setting: the TTL
+// is MEASURED server-side from the ledger (`src/server/optimizer/ttl.mjs`,
+// surfaced via the `optimizer:summary` RPC) and passed in. `null`/`undefined`
+// (no measurement available) falls back to the measured-on-the-wire 5-minute
+// default.
+export function selectCacheTtlMs(ttlMs) {
+  return ttlMs ?? 5 * 60_000;
 }
 
 // Classifies elapsed-since-last-message against the prompt-cache TTL so the

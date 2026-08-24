@@ -632,7 +632,7 @@ function ContextPill({
         aria-expanded={open}
         title={
           stale
-            ? `Cache cold — ${formatTokensCompact(staleCache.staleTokens)} tokens re-billed on your next message. Click for details`
+            ? `Cache cold — ${formatTokensCompact(staleCache.staleTokens)} tokens re-billed on your next message. TTL measured from your own usage. Click for details`
             : "Context usage — click for details"
         }
       >

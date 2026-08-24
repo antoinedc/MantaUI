@@ -6,9 +6,3 @@
 export function migrateLegacyCapConfig(
   raw: Record<string, unknown> | null | undefined,
 ): Record<string, unknown>;
-
-// One-time correction of the wrong `cacheTtl: "1h"` default → "5m", marked by
-// `cacheTtlDefaultMigrated` so a deliberate re-pick of "1h" sticks.
-export function migrateCacheTtlDefault(
-  raw: Record<string, unknown> | null | undefined,
-): Record<string, unknown>;

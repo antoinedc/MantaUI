@@ -389,11 +389,6 @@ type State = {
   optInModels: string[];
   // User-added skill registry URLs (written to remote opencode.jsonc on save).
   skillRegistryUrls: string[];
-  // Anthropic prompt cache TTL — drives the "/clear to save Nk tokens"
-  // pill in ChatPanel's footer. Display-only (manta doesn't set the actual
-  // cache_control.ttl on requests — opencode does); must match opencode's
-  // setting. Defaults to "1h".
-  cacheTtl: "5m" | "1h";
   // Per-launcher CLI flag overrides for AI CLI TUI launch modes (BET-138
   // refinement). Keyed by launcher id, then flag key; missing keys fall back
   // to the launcher's registry default (see resolveLauncherFlags). Empty
@@ -806,7 +801,6 @@ export const useStore = create<State>((set, get) => ({
   deactivatedMainModels: [],
   optInModels: [],
   skillRegistryUrls: [],
-  cacheTtl: "5m",
   launcherFlags: {},
   groqApiKey: "",
   voiceTranscriptionModel: "",
@@ -1087,9 +1081,6 @@ export const useStore = create<State>((set, get) => ({
       deactivatedMainModels: c.deactivatedMainModels ?? [],
       optInModels: Array.isArray(c.optInModels) ? c.optInModels : [],
       skillRegistryUrls: c.skillRegistryUrls ?? [],
-      // Absent/unknown → "5m": opencode always requests Anthropic's default
-      // 5-minute TTL (see AppConfig.cacheTtl), so 5m is the honest fallback.
-      cacheTtl: c.cacheTtl === "1h" ? "1h" : "5m",
       launcherFlags: c.launcherFlags ?? {},
       groqApiKey: c.groqApiKey ?? "",
       voiceTranscriptionModel: c.voiceTranscriptionModel ?? "",

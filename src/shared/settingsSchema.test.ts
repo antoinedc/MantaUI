@@ -73,13 +73,11 @@ describe("settingsSchema shape", () => {
 describe("settingsForPlatform", () => {
   it("includes 'both' entries on desktop", () => {
     const desktop = settingsForPlatform(ALL, "desktop");
-    expect(desktop.some((e) => e.id === "cacheTtl")).toBe(true); // both
     expect(desktop.some((e) => e.id === "autoRenameSessions")).toBe(true); // both
   });
 
   it("includes 'both' entries on mobile", () => {
     const mobile = settingsForPlatform(ALL, "mobile");
-    expect(mobile.some((e) => e.id === "cacheTtl")).toBe(true);
     expect(mobile.some((e) => e.id === "autoRenameSessions")).toBe(true);
   });
 
@@ -239,7 +237,6 @@ describe("sectionIsModified", () => {
 describe("resetAllPayload", () => {
   it("returns every configKey set to its default", () => {
     const payload = resetAllPayload(ALL);
-    expect(payload.cacheTtl).toBe("5m");
     expect(payload.theme).toBe("system");
     expect(payload.groqApiKey).toBe("");
     expect(payload.autoRenameSessions).toBe(false);

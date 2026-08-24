@@ -49,13 +49,14 @@ export function UsageResumeModal({
   const records = useStore((s) => s.usageStopped);
   const lastLooked = useStore((s) => s.lastLookedStopped);
   const usage = useStore((s) => s.usage);
-  const cacheTtl = useStore((s) => s.cacheTtl);
 
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [snippets, setSnippets] = useState<Record<string, string | null>>({});
 
   const nowMs = Date.now();
-  const ttlMs = selectCacheTtlMs(cacheTtl);
+  // Effective prompt-cache TTL is measured server-side (BET-1334); the
+  // cold-vs-warm estimate falls back to the 5-minute default.
+  const ttlMs = selectCacheTtlMs(null);
 
   const costs = useMemo(() => resumeCosts(records, usage, nowMs, ttlMs), [records, usage, nowMs, ttlMs]);
   const summary = useMemo(() => selectionSummary(records, selected, costs), [records, selected, costs]);
