@@ -1329,6 +1329,30 @@ const PROVIDERS_FIXTURE = {
   ],
 };
 
+// Config fixture: the models that carry a cacheControl, by id. Factored out
+// because every case below needs the same 5-deep provider→models→options
+// shape and repeating it inline is both noisy and a duplication-gate clone.
+function ttlCfg(...modelIDs) {
+  const models = {};
+  for (const id of modelIDs) {
+    models[id] = { options: { cacheControl: { type: "ephemeral", ttl: "1h" } } };
+  }
+  return { provider: { anthropic: { models } } };
+}
+
+// syncCacheTtl deps with recording stubs; `cfg` is what readConfig returns.
+function ttlDeps({ cfg = {}, patchResult = { ok: true }, removeResult = { ok: true, changed: true } } = {}) {
+  const calls = { patch: [], remove: [] };
+  return {
+    calls,
+    deps: {
+      readConfig: async () => cfg,
+      patch: async (p) => (calls.patch.push(p), patchResult),
+      remove: async (p) => (calls.remove.push(p), removeResult),
+    },
+  };
+}
+
 describe("selectCacheTtlTargets", () => {
   it("selects only Anthropic-SDK models of CONNECTED providers", () => {
     assert.deepEqual(selectCacheTtlTargets(PROVIDERS_FIXTURE), [
@@ -1360,14 +1384,7 @@ describe("resolveCacheTtlFromConfig", () => {
   const targets = [{ providerID: "anthropic", modelID: "m1" }];
 
   it("reads 1h back off a configured model", () => {
-    const cfg = {
-      provider: {
-        anthropic: {
-          models: { m1: { options: { cacheControl: { type: "ephemeral", ttl: "1h" } } } },
-        },
-      },
-    };
-    assert.equal(resolveCacheTtlFromConfig(cfg, targets), "1h");
+    assert.equal(resolveCacheTtlFromConfig(ttlCfg("m1"), targets), "1h");
   });
 
   // Absent is not "unknown" — it is opencode's native breakpoint caching,
@@ -1397,17 +1414,7 @@ describe("planCacheTtlOps", () => {
   // The no-op guard is what keeps a re-save from triggering a pointless write,
   // and (in the 5m direction) a pointless opencode restart.
   it("1h is a no-op when already 1h", () => {
-    const cfg = {
-      provider: {
-        anthropic: {
-          models: {
-            m1: { options: { cacheControl: { type: "ephemeral", ttl: "1h" } } },
-            m2: { options: { cacheControl: { type: "ephemeral", ttl: "1h" } } },
-          },
-        },
-      },
-    };
-    const { patch, remove } = planCacheTtlOps({ targets, ttl: "1h", cfg });
+    const { patch, remove } = planCacheTtlOps({ targets, ttl: "1h", cfg: ttlCfg("m1", "m2") });
     assert.equal(patch.provider, undefined);
     assert.deepEqual(remove, []);
   });
@@ -1416,14 +1423,7 @@ describe("planCacheTtlOps", () => {
   // would flip opencode into Anthropic automatic caching for a user who never
   // asked, changing the caching strategy rather than just the TTL.
   it("5m removes the key rather than writing ttl:5m", () => {
-    const cfg = {
-      provider: {
-        anthropic: {
-          models: { m1: { options: { cacheControl: { type: "ephemeral", ttl: "1h" } } } },
-        },
-      },
-    };
-    const { patch, remove } = planCacheTtlOps({ targets, ttl: "5m", cfg });
+    const { patch, remove } = planCacheTtlOps({ targets, ttl: "5m", cfg: ttlCfg("m1") });
     assert.equal(patch.provider, undefined);
     assert.deepEqual(remove, [["provider", "anthropic", "models", "m1", "options", "cacheControl"]]);
   });
@@ -1439,55 +1439,29 @@ describe("syncCacheTtl", () => {
   const targets = [{ providerID: "anthropic", modelID: "m1" }];
 
   it("1h patches and never restarts", async () => {
-    const patched = [];
-    const removed = [];
-    const r = await syncCacheTtl(
-      { ttl: "1h", targets },
-      {
-        readConfig: async () => ({}),
-        patch: async (p) => (patched.push(p), { ok: true }),
-        remove: async (p) => (removed.push(p), { ok: true, changed: true }),
-      },
-    );
+    const { calls, deps } = ttlDeps();
+    const r = await syncCacheTtl({ ttl: "1h", targets }, deps);
     assert.deepEqual(r, { ok: true, ttl: "1h", changed: true, restarted: false });
-    assert.equal(patched.length, 1);
-    assert.equal(removed.length, 0);
+    assert.equal(calls.patch.length, 1);
+    assert.equal(calls.remove.length, 0);
   });
 
   it("5m removes and reports the restart it caused", async () => {
-    const cfg = {
-      provider: { anthropic: { models: { m1: { options: { cacheControl: { ttl: "1h" } } } } } },
-    };
-    const r = await syncCacheTtl(
-      { ttl: "5m", targets },
-      {
-        readConfig: async () => cfg,
-        patch: async () => ({ ok: true }),
-        remove: async () => ({ ok: true, changed: true }),
-      },
-    );
+    const { deps } = ttlDeps({ cfg: ttlCfg("m1") });
+    const r = await syncCacheTtl({ ttl: "5m", targets }, deps);
     assert.deepEqual(r, { ok: true, ttl: "5m", changed: true, restarted: true });
   });
 
   it("no-op reports changed:false and touches nothing", async () => {
-    let calls = 0;
-    const r = await syncCacheTtl(
-      { ttl: "5m", targets },
-      {
-        readConfig: async () => ({}),
-        patch: async () => (calls++, { ok: true }),
-        remove: async () => (calls++, { ok: true }),
-      },
-    );
+    const { calls, deps } = ttlDeps();
+    const r = await syncCacheTtl({ ttl: "5m", targets }, deps);
     assert.deepEqual(r, { ok: true, ttl: "5m", changed: false, restarted: false });
-    assert.equal(calls, 0);
+    assert.equal(calls.patch.length + calls.remove.length, 0);
   });
 
   it("surfaces a failed patch instead of reporting success", async () => {
-    const r = await syncCacheTtl(
-      { ttl: "1h", targets },
-      { readConfig: async () => ({}), patch: async () => ({ ok: false, error: "boom" }) },
-    );
+    const { deps } = ttlDeps({ patchResult: { ok: false, error: "boom" } });
+    const r = await syncCacheTtl({ ttl: "1h", targets }, deps);
     assert.equal(r.ok, false);
     assert.equal(r.error, "boom");
   });
@@ -1499,18 +1473,14 @@ describe("syncCacheTtl", () => {
   });
 
   it("resolves targets from the provider list when not supplied", async () => {
-    const patched = [];
+    const { calls, deps } = ttlDeps();
     const r = await syncCacheTtl(
       { ttl: "1h" },
-      {
-        listProviders: async () => PROVIDERS_FIXTURE,
-        readConfig: async () => ({}),
-        patch: async (p) => (patched.push(p), { ok: true }),
-      },
+      { ...deps, listProviders: async () => PROVIDERS_FIXTURE },
     );
     assert.equal(r.ok, true);
     // only the two connected Anthropic-SDK models, not gpt-5
-    assert.deepEqual(Object.keys(patched[0].provider.anthropic.models), [
+    assert.deepEqual(Object.keys(calls.patch[0].provider.anthropic.models), [
       "claude-opus-4-8",
       "claude-sonnet-4-5",
     ]);
@@ -1532,16 +1502,9 @@ describe("syncCacheTtl", () => {
 
 describe("readCacheTtl", () => {
   it("reports the ttl opencode is configured for", async () => {
-    const cfg = {
-      provider: {
-        anthropic: {
-          models: { "claude-opus-4-8": { options: { cacheControl: { ttl: "1h" } } } },
-        },
-      },
-    };
     const r = await readCacheTtl({
       listProviders: async () => PROVIDERS_FIXTURE,
-      readConfig: async () => cfg,
+      readConfig: async () => ttlCfg("claude-opus-4-8"),
     });
     assert.equal(r, "1h");
   });
