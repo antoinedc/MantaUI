@@ -16,14 +16,6 @@ final class MantaSettingsLogicTests: XCTestCase {
         SettingsSchema.entries.first { $0.id == id }!
     }
 
-    func testDefaultValueIsModified() {
-        let cacheTtl = entry(id: "cacheTtl")
-        // Default is "5m" — the TTL opencode actually requests on the wire.
-        XCTAssertEqual(MantaSettingsLogic.defaultValue(of: cacheTtl), .string("5m"))
-        XCTAssertFalse(MantaSettingsLogic.isModified(cacheTtl, .string("5m")))
-        XCTAssertTrue(MantaSettingsLogic.isModified(cacheTtl, .string("1h")))
-    }
-
     func testToggleBoolModified() {
         let autoRename = entry(id: "autoRenameSessions")
         XCTAssertEqual(MantaSettingsLogic.defaultValue(of: autoRename), .bool(false))
@@ -37,8 +29,6 @@ final class MantaSettingsLogicTests: XCTestCase {
         // Segmented emits a string option value; numeric default coerces to a number.
         let coerced = MantaSettingsLogic.coerce(upload, .string("168"))
         XCTAssertEqual(coerced, .number(168))
-        // Non-numeric defaults pass through unchanged.
-        XCTAssertEqual(MantaSettingsLogic.coerce(entry(id: "cacheTtl"), .string("5m")), .string("5m"))
     }
 
     func testDeviceLocalEntryIsNotModifiedByDefaultValueSurface() {
@@ -77,19 +67,17 @@ final class MantaSettingsLogicTests: XCTestCase {
         XCTAssertTrue(SettingsSchema.search("groq").contains { $0.id == "groqApiKey" })
         XCTAssertTrue(SettingsSchema.search("permission").contains { $0.id == "chatAutoAllow" })
         XCTAssertTrue(SettingsSchema.search("   ").isEmpty)
-        XCTAssertFalse(SettingsSchema.search("zzznothing").contains { $0.id == "cacheTtl" })
+        XCTAssertTrue(SettingsSchema.search("zzznothing").isEmpty)
     }
 
     func testGeneratedInventoryHasExpectedMobileControls() {
         let byID = Dictionary(uniqueKeysWithValues: SettingsSchema.entries.map { ($0.id, $0) })
-        XCTAssertEqual(byID["cacheTtl"]?.control, .segmented)
         XCTAssertEqual(byID["autoRenameSessions"]?.control, .toggle)
         XCTAssertEqual(byID["chatAutoAllow"]?.control, .toggle)
         XCTAssertEqual(byID["uploadCleanupHours"]?.control, .segmented)
         XCTAssertEqual(byID["groqApiKey"]?.control, .password)
         XCTAssertTrue(byID["groqApiKey"]?.commitOnBlur == true)
         XCTAssertNil(byID["serverUrlMobile"]?.configKey)
-        XCTAssertEqual(byID["cacheTtl"]?.configKey, "cacheTtl")
     }
 }
 
@@ -141,15 +129,15 @@ final class MantaSettingsStoreTests: XCTestCase {
     }
 
     func testLoadSeedsConfigDrivenAndDeviceLocal() async {
-        // Non-default on purpose ("5m" is the schema default) so this proves the
+        // Non-default on purpose (the schema default is 24) so this proves the
         // stored value is read rather than the default being echoed back.
-        fake.stored["cacheTtl"] = .string("1h")
+        fake.stored["uploadCleanupHours"] = .number(168)
         fake.stored["autoRenameSessions"] = .bool(true)
         defaults.set("https://custom.example.com", forKey: "manta.settings.local.serverUrlMobile")
 
         await store.load()
 
-        XCTAssertEqual(store.current(entry(id: "cacheTtl")), .string("1h"))
+        XCTAssertEqual(store.current(entry(id: "uploadCleanupHours")), .number(168))
         XCTAssertEqual(store.current(entry(id: "autoRenameSessions")), .bool(true))
         XCTAssertEqual(store.current(entry(id: "serverUrlMobile")), .string("https://custom.example.com"))
         // Unset config-driven entries fall back to their schema default.
@@ -179,18 +167,18 @@ final class MantaSettingsStoreTests: XCTestCase {
     func testResetSectionIsUndoable() async throws {
         await store.load()
         // Commit the NON-default value so the reset below has something to undo.
-        store.commit(entry(id: "cacheTtl"), .string("1h"))
-        try? await Task.sleep(nanoseconds: 20_000_000)
+        store.commit(entry(id: "alwaysShowUsage"), .bool(true))
+        try? await Task.sleep(nanoseconds: 50_000_000)
         fake.updates.removeAll()
 
         store.resetSection("models")
         try? await Task.sleep(nanoseconds: 50_000_000)
-        XCTAssertEqual(store.current(entry(id: "cacheTtl")), .string("5m"))
+        XCTAssertEqual(store.current(entry(id: "alwaysShowUsage")), .bool(false))
         XCTAssertNotNil(store.undoMessage)
 
         store.undoLastReset()
         try? await Task.sleep(nanoseconds: 50_000_000)
-        XCTAssertEqual(store.current(entry(id: "cacheTtl")), .string("1h"))
+        XCTAssertEqual(store.current(entry(id: "alwaysShowUsage")), .bool(true))
         XCTAssertNil(store.undoMessage)
     }
 
