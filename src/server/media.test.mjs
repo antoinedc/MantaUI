@@ -315,13 +315,19 @@ test("beginMedia: rejects a non image/video kind", async () => {
 // ---------------------------------------------------------------------------
 
 test("sweepPendingMedia: returns only entries older than 10 minutes", () => {
+  // Pin the clock. This used to call Date.now() once per entry and again for
+  // the sweep, so a millisecond ticking over between the "border" entry and
+  // the sweep made that entry strictly older than 10 minutes and swept it —
+  // a real, rare red on an unrelated PR. The boundary is exactly what this
+  // test asserts, so it has to be measured against a single instant.
+  const now = Date.now();
   const pending = createPendingMediaStore();
   const age = (ms) => ({ createdAt: ms, sessionID: "s" });
-  pending.set("old", age(Date.now() - 11 * 60 * 1000));
-  pending.set("border", age(Date.now() - 10 * 60 * 1000));
-  pending.set("fresh", age(Date.now() - 1000));
+  pending.set("old", age(now - 11 * 60 * 1000));
+  pending.set("border", age(now - 10 * 60 * 1000));
+  pending.set("fresh", age(now - 1000));
 
-  const expired = sweepPendingMedia(Date.now(), pending);
+  const expired = sweepPendingMedia(now, pending);
   assert.deepEqual([...expired].sort(), ["old"]);
 });
 

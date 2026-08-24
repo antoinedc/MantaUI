@@ -50,6 +50,31 @@ import { createSeenIdFilter } from "./seenIds.mjs";
 // This is the fallback the device stream predicts staleness against.
 const TTL_DEFAULT = "5m";
 
+// Recompute the cached-prefix size from a usage payload and publish the
+// staleness verdict for a session.
+//
+// Two call sites need this: the transcript-derived context emit and the
+// step-ended usage emit. They must agree byte-for-byte — including WHICH TTL
+// is predicted — or the device's cache pill flickers between two verdicts
+// depending on which event arrived last. Keeping it in one function is also
+// what stops the TTL constant being read in two places and drifting, which is
+// the shape of the bug this fallback exists to fix.
+//
+// The `|| st.cachedTokens` fallback is deliberate: a usage payload with no
+// cache buckets (0 + 0) means "this event carries no cache information",
+// not "the cache is now empty" — so the last known size is retained.
+function emitCacheStaleness(emit, sid, st, tokens, nowMs) {
+  st.cachedTokens =
+    (tokens?.cache?.read ?? 0) + (tokens?.cache?.write ?? 0) || st.cachedTokens;
+  emit(sid, "cache", computeStaleCache({
+    lastCompleted: st.lastCompleted,
+    now: nowMs,
+    ttlMs: selectCacheTtlMs(TTL_DEFAULT),
+    cachedTokens: st.cachedTokens,
+    running: st.running,
+  }));
+}
+
 // Per-tool cap for the live tool-output tail (server half, BET-745). Once a
 // single tool has streamed this many characters to the device, further output
 // is dropped for that tool and a single "...truncated" marker is emitted so an
@@ -429,16 +454,7 @@ export function createStreamInterpreter({
             ) {
               st.contextEmitted = { totalInput, limit };
               emit(sid, "context", computeContextBreakdown(tokens, limit));
-              st.cachedTokens =
-                (tokens?.cache?.read ?? 0) + (tokens?.cache?.write ?? 0) ||
-                st.cachedTokens;
-              emit(sid, "cache", computeStaleCache({
-                lastCompleted: st.lastCompleted,
-                now: now(),
-                ttlMs: selectCacheTtlMs(TTL_DEFAULT),
-                cachedTokens: st.cachedTokens,
-                running: st.running,
-              }));
+              emitCacheStaleness(emit, sid, st, tokens, now());
             }
           }
         }
@@ -539,16 +555,7 @@ export function createStreamInterpreter({
         if (tokens) {
           emit(sid, "context", computeContextBreakdown(tokens, contextLimitFor(props.providerID, props.modelID)));
           // cache staleness: cachedTokens ~ cached prefix size
-          st.cachedTokens =
-            (tokens?.cache?.read ?? 0) + (tokens?.cache?.write ?? 0) ||
-            st.cachedTokens;
-          emit(sid, "cache", computeStaleCache({
-            lastCompleted: st.lastCompleted,
-            now: now(),
-            ttlMs: selectCacheTtlMs(TTL_DEFAULT),
-            cachedTokens: st.cachedTokens,
-            running: st.running,
-          }));
+          emitCacheStaleness(emit, sid, st, tokens, now());
         }
         return;
       }
