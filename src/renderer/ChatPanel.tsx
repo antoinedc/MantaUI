@@ -220,28 +220,11 @@ export function ChatPanel({
   // BET-789: the "Connect GitHub…" offer's per-box dismissal flag. Once set,
   // the offer never re-appears until the config flag is cleared.
   const forgeConnectOfferDismissed = useStore((s) => s.forgeConnectOfferDismissed);
-  // Effective Anthropic prompt-cache TTL, MEASURED server-side from the
-  // message ledger (`src/server/optimizer/ttl.mjs`, surfaced via the
-  // `optimizer:summary` RPC). It drives the "/clear to save Nk tokens" pill
-  // when the session has been idle past the TTL. manta doesn't set the real
-  // cache_control.ttl on requests; opencode sends none, so the measured value
-  // (falling back to Anthropic's 5-minute default) is the honest prediction.
-  const [measuredTtlMs, setMeasuredTtlMs] = useState<number | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    setMeasuredTtlMs(null);
-    window.api
-      .optimizerSummary()
-      .then((s) => {
-        if (!cancelled) setMeasuredTtlMs(s && s.supported ? s.ttl?.ms ?? null : null);
-      })
-      .catch(() => {
-        if (!cancelled) setMeasuredTtlMs(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [sessionId]);
+  // User-configured Anthropic prompt cache TTL — drives the "/clear to
+  // save Nk tokens" pill when the session has been idle past this TTL.
+  // manta doesn't set the real cache_control.ttl on requests; this is the
+  // user's claim about what opencode is sending. See AppConfig comment.
+  const cacheTtl = useStore((s) => s.cacheTtl);
   // Server-owned resource cards (⏰ schedules, 🔑 secrets, 🪝 webhooks) —
   // state, refresh callbacks, poll effects, session resets, and the mobile
   // `manta-open-*` window-event bridges. Extracted to a self-contained hook
@@ -2410,7 +2393,7 @@ export function ChatPanel({
   const cachedTokens = latestTokens
     ? (latestTokens.cache?.read ?? 0) + (latestTokens.cache?.write ?? 0)
     : 0;
-  const ttlMs = selectCacheTtlMs(measuredTtlMs);
+  const ttlMs = selectCacheTtlMs(cacheTtl);
   // Tick state — re-render every 10s when we have a completed turn and
   // we're not running. The interval is deliberately scope-gated to avoid
   // burning a wakeup every 10s on idle apps with no completed turns.

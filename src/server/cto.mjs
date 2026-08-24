@@ -546,6 +546,12 @@ export function createCtoEngine(deps = {}) {
       const last = (Array.isArray(messages) ? messages : []).slice(-1)[0];
       const lastTime = last?.time ?? s?.time?.updated ?? null;
       const idleMs = typeof lastTime === "number" && lastTime > 0 ? Math.max(0, now() - lastTime) : null;
+      let cfg = {};
+      try {
+        cfg = (await configGet()) ?? {};
+      } catch {
+        cfg = {};
+      }
       return {
         ok: true,
         data: {
@@ -554,6 +560,7 @@ export function createCtoEngine(deps = {}) {
           contextLimit: model?.limit?.context ?? null,
           lastTokens: last?.tokens ?? null,
           idleMs,
+          cacheTtlMs: cacheTtlMs(cfg?.cacheTtl),
         },
       };
     },
@@ -791,6 +798,12 @@ function clampInt(v, dflt, min, max) {
   const n = Number(v);
   if (!Number.isFinite(n)) return dflt;
   return Math.max(min, Math.min(max, Math.floor(n)));
+}
+
+function cacheTtlMs(ttl) {
+  if (ttl === "5m") return 5 * 60_000;
+  if (ttl === "1h") return 60 * 60_000;
+  return null;
 }
 
 // First meaningful text from an opencode message part, capped. Real content,

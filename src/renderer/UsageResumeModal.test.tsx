@@ -57,6 +57,7 @@ describe("UsageResumeModal — indicator → modal → armed record", () => {
       usageStoppedStampLastLooked: stamp,
       opencodeMessages: async () => [],
     });
+    resetStore({ cacheTtl: "1h" });
   });
 
   afterEach(() => {

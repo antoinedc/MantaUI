@@ -811,3 +811,197 @@ export async function ensureCtoAgent(deps = {}) {
     log,
   });
 }
+
+// ---------------------------------------------------------------------------
+// Prompt-cache TTL (cacheTtl → opencode's real wire TTL)
+// ---------------------------------------------------------------------------
+//
+// Manta's `cacheTtl` setting is REAL: it changes what Anthropic is asked for,
+// not just what the context pill predicts. The mechanism, verified end-to-end
+// against opencode 1.18.22 (a real turn, captured on the wire):
+//
+//   provider.<id>.models.<modelID>.options.cacheControl = {type:"ephemeral", ttl:"1h"}
+//     → request body carries a TOP-LEVEL `cache_control` with that ttl
+//     → Anthropic bills the write to `usage.cache_creation.ephemeral_1h_input_tokens`
+//
+// Two consequences of opencode's own logic that shape everything below:
+//
+//  1. Setting `cacheControl` flips opencode into Anthropic's AUTOMATIC caching
+//     (`usesAnthropicAutomaticCaching` in provider/transform.ts) and it stops
+//     writing its own breakpoints — measured: `block_breakpoints=0` on the
+//     wire. So "5m" must be expressed as the key being ABSENT, not as an
+//     explicit ttl:"5m": absent keeps opencode's native breakpoint caching,
+//     which Anthropic already defaults to a 5-minute TTL. Writing ttl:"5m"
+//     would silently change the caching STRATEGY for users who never asked.
+//
+//  2. The option is per-MODEL. `ProviderTransform.options()` does not pass
+//     provider-level options through to the request, so there is no single
+//     global key — the setting fans out over the Anthropic-SDK models of the
+//     CONNECTED providers (the same set `listModels` walks).
+//
+// Only these two SDKs take the option; anything else would be a stray option
+// under the wrong providerOptions namespace, so the target set is exact.
+export const ANTHROPIC_SDK_NPM = Object.freeze([
+  "@ai-sdk/anthropic",
+  "@ai-sdk/google-vertex/anthropic",
+]);
+
+export const CACHE_CONTROL_1H = Object.freeze({ type: "ephemeral", ttl: "1h" });
+
+/**
+ * The (providerID, modelID) pairs the TTL applies to: every model of a
+ * CONNECTED provider whose SDK actually honours `cacheControl`. Pure — takes
+ * the `/provider` payload shape ({ all, connected }).
+ */
+export function selectCacheTtlTargets({ all = [], connected = [] } = {}) {
+  const live = new Set(connected);
+  const out = [];
+  for (const p of all) {
+    if (!p?.id || !live.has(p.id)) continue;
+    for (const [modelID, m] of Object.entries(p.models ?? {})) {
+      const npm = m?.api?.npm;
+      if (typeof npm === "string" && ANTHROPIC_SDK_NPM.includes(npm)) {
+        out.push({ providerID: p.id, modelID });
+      }
+    }
+  }
+  return out;
+}
+
+// The ttl currently configured in opencode, read back from its own config so
+// opencode — not manta's mirror — is the source of truth. Any target carrying
+// a 1h cacheControl means the box is on 1h; absent everywhere means 5m (which
+// is opencode's native, measured behaviour).
+export function resolveCacheTtlFromConfig(cfg, targets = []) {
+  for (const { providerID, modelID } of targets) {
+    const ttl =
+      cfg?.provider?.[providerID]?.models?.[modelID]?.options?.cacheControl?.ttl;
+    if (ttl === "1h") return "1h";
+  }
+  return "5m";
+}
+
+/**
+ * Diff the desired ttl against what opencode's config already says.
+ *
+ * Returns `{ patch, remove }` where `patch` is a config-shaped object for
+ * PATCH /global/config (hot-applies, no restart — verified) and `remove` is a
+ * list of key paths for removeConfigKeys (which DOES restart opencode, so it
+ * must only be produced when a key genuinely has to go).
+ *
+ * Both are empty when the config already matches — this is the no-op guard
+ * that keeps the setting idempotent and stops a needless restart.
+ */
+export function planCacheTtlOps({ targets = [], ttl = "5m", cfg = {} } = {}) {
+  const patch = {};
+  const remove = [];
+
+  for (const { providerID, modelID } of targets) {
+    const current =
+      cfg?.provider?.[providerID]?.models?.[modelID]?.options?.cacheControl;
+    if (ttl === "1h") {
+      if (current?.ttl === "1h" && current?.type === "ephemeral") continue;
+      patch.provider ??= {};
+      patch.provider[providerID] ??= { models: {} };
+      patch.provider[providerID].models ??= {};
+      patch.provider[providerID].models[modelID] = {
+        id: modelID,
+        options: { cacheControl: { ...CACHE_CONTROL_1H } },
+      };
+    } else if (current !== undefined) {
+      // Back to 5m = opencode's native breakpoint caching = key absent.
+      remove.push([
+        "provider",
+        providerID,
+        "models",
+        modelID,
+        "options",
+        "cacheControl",
+      ]);
+    }
+  }
+
+  return { patch, remove };
+}
+
+/**
+ * Apply `ttl` to opencode's config. I/O wrapper over the pure planner, in the
+ * shape of syncSubagents: injected deps so the suite never touches a real
+ * opencode.
+ *
+ * Returns `{ ok, ttl, changed, restarted, error? }`. `restarted` is true only
+ * when a removal ran — going 1h→5m interrupts every in-flight opencode turn,
+ * so the caller is expected to have confirmed with the user first. Going to 1h
+ * never restarts.
+ */
+export async function syncCacheTtl({ ttl = "5m", targets } = {}, deps = {}) {
+  const {
+    readConfig = readRemoteConfig,
+    patch = patchGlobalConfig,
+    remove = removeConfigKeys,
+    listProviders,
+  } = deps;
+
+  if (ttl !== "5m" && ttl !== "1h") {
+    return { ok: false, ttl, changed: false, restarted: false, error: `unknown cacheTtl: ${ttl}` };
+  }
+
+  let resolvedTargets = targets;
+  if (!resolvedTargets) {
+    if (typeof listProviders !== "function") {
+      return { ok: false, ttl, changed: false, restarted: false, error: "no provider source" };
+    }
+    try {
+      resolvedTargets = selectCacheTtlTargets(await listProviders());
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return { ok: false, ttl, changed: false, restarted: false, error: msg };
+    }
+  }
+
+  let cfg;
+  try {
+    cfg = await readConfig();
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { ok: false, ttl, changed: false, restarted: false, error: msg };
+  }
+
+  const { patch: body, remove: paths } = planCacheTtlOps({ targets: resolvedTargets, ttl, cfg });
+  if (!body.provider && paths.length === 0) {
+    return { ok: true, ttl, changed: false, restarted: false };
+  }
+
+  // Upsert first, then remove — same fixed order as patchBlocks, so a failed
+  // write never leaves the config half-deleted.
+  if (body.provider) {
+    const r = await patch(body);
+    if (!r.ok) return { ok: false, ttl, changed: false, restarted: false, error: r.error };
+  }
+  if (paths.length > 0) {
+    const r = await remove(paths);
+    if (!r.ok) return { ok: false, ttl, changed: true, restarted: false, error: r.error };
+    return { ok: true, ttl, changed: true, restarted: r.changed !== false };
+  }
+
+  return { ok: true, ttl, changed: true, restarted: false };
+}
+
+/**
+ * Read the ttl opencode is actually configured for. Non-fatal: any failure
+ * returns null so a caller can fall back to its stored mirror rather than
+ * showing the user a wrong value.
+ */
+export async function readCacheTtl(deps = {}) {
+  const { readConfig = readRemoteConfig, listProviders } = deps;
+  try {
+    const targets =
+      typeof listProviders === "function"
+        ? selectCacheTtlTargets(await listProviders())
+        : [];
+    if (targets.length === 0) return null;
+    return resolveCacheTtlFromConfig(await readConfig(), targets);
+  } catch {
+    return null;
+  }
+}

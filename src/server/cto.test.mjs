@@ -204,6 +204,7 @@ test("get_config scrubs secrets and supports dot-path access", async () => {
       groqApiKey: "SECRET",
       boxToken: "SECRET2",
       defaultModel: { providerID: "anthropic", modelID: "claude-opus-4-7" },
+      cacheTtl: "1h",
     }),
   });
   const full = await engine.dispatch("get_config", {}, {});
@@ -211,6 +212,7 @@ test("get_config scrubs secrets and supports dot-path access", async () => {
   assert.equal(full.data.config.defaultModel.modelID, "claude-opus-4-7");
   assert.equal(full.data.config.groqApiKey, undefined);
   assert.equal(full.data.config.boxToken, undefined);
+  assert.equal(full.data.config.cacheTtl, "1h");
 
   const partial = await engine.dispatch("get_config", { path: "defaultModel" }, {});
   assert.equal(partial.ok, true);

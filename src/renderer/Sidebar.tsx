@@ -1101,9 +1101,7 @@ function dotFor(status: WindowStatusUI | undefined): { variant: SessionStatus; t
 // (mono / tabular / right / min-width) lives in SessionRow — this hook only
 // produces the content.
 function useAge(status: WindowStatusUI | undefined): { text: string | undefined; stale: boolean } {
-  // The effective prompt-cache TTL is measured server-side (BET-1334); the
-  // sidebar's age-staleness colouring uses the measured-else-default value.
-  const ttl = selectCacheTtlMs(null);
+  const cacheTtl = useStore((s) => s.cacheTtl);
   // Subscribe to the shared ticker so the label advances on its own (1m → 2m)
   // instead of only when an unrelated event happens to re-render the sidebar.
   // Called BEFORE the early return below — hook order must not depend on
@@ -1113,6 +1111,7 @@ function useAge(status: WindowStatusUI | undefined): { text: string | undefined;
   const showAge = last != null && !status?.running && !status?.attention;
   if (!showAge) return { text: undefined, stale: false };
   const now = nowMs();
+  const ttl = selectCacheTtlMs(cacheTtl);
   const stale = classifyCacheAge(last, now, ttl) === "stale";
   return { text: formatAge(now - last), stale };
 }

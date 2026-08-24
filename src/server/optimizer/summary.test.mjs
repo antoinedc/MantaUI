@@ -6,7 +6,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildOptimizerSummary, createOptimizerSummary, WINDOW_DAYS } from "./summary.mjs";
-import { createCounterfactualStore } from "./counterfactual.mjs";
 
 function row(over = {}) {
   return {
@@ -21,18 +20,7 @@ function row(over = {}) {
   };
 }
 
-function memStore(now, seed = {}) {
-  let state = seed;
-  return createCounterfactualStore({
-    load: async () => state,
-    save: async (s) => {
-      state = s;
-    },
-    now,
-  });
-}
-
-test("buildOptimizerSummary returns the full shape with empty counterfactual, reusing aggregate totals/cacheShare", async () => {
+test("buildOptimizerSummary returns the full shape with the three null placeholders, reusing aggregate totals/cacheShare", async () => {
   const now = new Date(2026, 7, 24, 12, 0, 0).getTime();
   const rows = [row({ cost: 5, input: 1, cacheRead: 2, cacheWrite: 3, output: 4, startedMs: now })];
   const fetchRows = async () => rows;
@@ -47,52 +35,10 @@ test("buildOptimizerSummary returns the full shape with empty counterfactual, re
   // dailySeries/bySession derived from the same rows.
   assert.equal(s.dailySeries.length, WINDOW_DAYS);
   assert.equal(s.bySession[0].sessionID, "s1");
-  // ttl is measured from the same rows (BET-1334): a single row yields no
-  // consecutive pairs → the default prediction.
-  assert.deepEqual(s.ttl, { ms: 300_000, confidence: "default", observations: 0 });
-  // No counterfactualStore wired → counterfactual is empty: maskedTokens 0 on
-  // every day, savedPct 0 on every session, the counterfactual key null.
+  // The three placeholders children 2–4 fill, kept for a stable contract.
+  assert.equal(s.ttl, null);
   assert.equal(s.counterfactual, null);
   assert.equal(s.windows, null);
-  assert.ok(s.dailySeries.every((d) => d.maskedTokens === 0));
-  assert.ok(s.bySession.every((e) => e.savedPct === 0));
-});
-
-test("buildOptimizerSummary merges the counterfactual into dailySeries + bySession and fills the counterfactual key", async () => {
-  const now = new Date(2026, 7, 24, 12, 0, 0).getTime();
-  // tokensSent = 1+2+3+4 = 10 for s1.
-  const rows = [row({ cost: 5, input: 1, cacheRead: 2, cacheWrite: 3, output: 4, startedMs: now })];
-  const fetchRows = async () => rows;
-  const store = memStore(now);
-  assert.equal((await store.record({ sessionID: "s1", maskedTokens: 5, maskedParts: 1, ts: now })).ok, true);
-
-  const s = await buildOptimizerSummary({ fetchRows, now, counterfactualStore: store });
-
-  // The day of `now` holds s1's maskedTokens (5); every other day is 0.
-  const today = new Date(now);
-  const key = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
-  const todayEntry = s.dailySeries.find((d) => d.day === key);
-  assert.equal(todayEntry.maskedTokens, 5);
-  assert.ok(s.dailySeries.filter((d) => d.day !== key).every((d) => d.maskedTokens === 0));
-  // savedPct = 5 / (5 + 10) = 1/3 on the s1 bySession entry.
-  assert.equal(s.bySession.length, 1);
-  assert.equal(s.bySession[0].savedPct, 5 / 15);
-  // The counterfactual placeholder is now populated with the raw store fields.
-  assert.deepEqual(s.counterfactual.bySession, { s1: { maskedTokens: 5 } });
-  assert.equal(s.counterfactual.dailySeries.find((d) => d.day === key).maskedTokens, 5);
-});
-
-test("buildOptimizerSummary: savedPct is 0 when a session has no counterfactual", async () => {
-  const now = new Date(2026, 7, 24, 12, 0, 0).getTime();
-  const rows = [row({ sessionID: "s1", input: 1, cacheRead: 2, cacheWrite: 3, output: 4, startedMs: now })];
-  const fetchRows = async () => rows;
-  const store = memStore(now);
-  // A report for a DIFFERENT session — s1 has no counterfactual.
-  await store.record({ sessionID: "other", maskedTokens: 9, maskedParts: 1, ts: now });
-
-  const s = await buildOptimizerSummary({ fetchRows, now, counterfactualStore: store });
-  assert.equal(s.bySession[0].sessionID, "s1");
-  assert.equal(s.bySession[0].savedPct, 0);
 });
 
 test("createOptimizerSummary returns { supported:false } when getDb resolves null", async () => {

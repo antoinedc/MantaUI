@@ -94,6 +94,7 @@ export const demoAppConfig: AppConfig = {
   deactivatedMainModels: [],
   optInModels: [],
   skillRegistryUrls: ["https://example.com/manta-skills-extra.json"],
+  cacheTtl: "1h",
   launcherFlags: {},
   groqApiKey: "",
   voiceTranscriptionModel: "",

@@ -509,23 +509,23 @@ describe("mergeBufferedDeltas", () => {
 });
 
 describe("selectCacheTtlMs", () => {
+  it("returns 5 minutes for '5m'", () => {
+    expect(selectCacheTtlMs("5m")).toBe(5 * 60 * 1000);
+  });
+
+  it("returns 1 hour for '1h'", () => {
+    expect(selectCacheTtlMs("1h")).toBe(60 * 60 * 1000);
+  });
+
   // opencode stamps its cache breakpoints `{type:"ephemeral"}` with no ttl,
   // so Anthropic applies its default 5-minute TTL (measured on the wire:
-  // usage.cache_creation lands entirely in ephemeral_5m_input_tokens). Since
-  // BET-1334 the pill's TTL is MEASURED server-side; `selectCacheTtlMs` is now
-  // a pure passthrough with a 5-minute fallback for a missing measurement.
-  it("returns the 5-minute default when passed null or undefined", () => {
-    expect(selectCacheTtlMs(null)).toBe(5 * 60 * 1000);
-    expect(selectCacheTtlMs(undefined)).toBe(5 * 60 * 1000);
-  });
-
-  it("passes an explicit measured value through unchanged", () => {
-    expect(selectCacheTtlMs(60 * 60 * 1000)).toBe(60 * 60 * 1000);
-    expect(selectCacheTtlMs(1_000)).toBe(1_000);
-  });
-
-  it("honours 0 (a real measurement) over the fallback", () => {
-    expect(selectCacheTtlMs(0)).toBe(0);
+  // usage.cache_creation lands entirely in ephemeral_5m_input_tokens).
+  // Anything unset/unknown must therefore predict 5m, never 1h — a 1h
+  // prediction silently under-warns for every 5-60 minute idle gap.
+  it("falls back to 5 minutes for an unset or unknown TTL", () => {
+    expect(selectCacheTtlMs(undefined as unknown as "5m")).toBe(5 * 60 * 1000);
+    expect(selectCacheTtlMs("" as unknown as "5m")).toBe(5 * 60 * 1000);
+    expect(selectCacheTtlMs("2h" as unknown as "5m")).toBe(5 * 60 * 1000);
   });
 });
 

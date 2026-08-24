@@ -46,10 +46,9 @@ import { planModeFromToolPart } from "../shared/planMode.mjs";
 import { createSeenIdFilter } from "./seenIds.mjs";
 
 // opencode stamps its cache breakpoints with no `ttl`, so Anthropic applies
-// its default 5-minute TTL — measured on the wire. This is the fallback the
-// device stream predicts staleness against (the server-measured TTL is
-// surfaced separately via `optimizer:summary`, BET-1334).
-const TTL_DEFAULT_MS = 5 * 60_000;
+// its default 5-minute TTL — measured on the wire, see AppConfig.cacheTtl.
+// This is the fallback the device stream predicts staleness against.
+const TTL_DEFAULT = "5m";
 
 // Recompute the cached-prefix size from a usage payload and publish the
 // staleness verdict for a session.
@@ -70,7 +69,7 @@ function emitCacheStaleness(emit, sid, st, tokens, nowMs) {
   emit(sid, "cache", computeStaleCache({
     lastCompleted: st.lastCompleted,
     now: nowMs,
-    ttlMs: selectCacheTtlMs(TTL_DEFAULT_MS),
+    ttlMs: selectCacheTtlMs(TTL_DEFAULT),
     cachedTokens: st.cachedTokens,
     running: st.running,
   }));

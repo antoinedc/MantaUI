@@ -13,11 +13,9 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, extname, normalize, resolve, basename } from "node:path";
 import { homedir, hostname } from "node:os";
 import { pipeline } from "node:stream/promises";
-import { uploadRoot, statePath } from "../shared/paths.mjs";
+import { uploadRoot } from "../shared/paths.mjs";
 import { synthesizeSpeech } from "../shared/groq.mjs";
 import { WebSocketServer } from "ws";
-import { createCounterfactualStore, validateCounterfactualReport } from "./optimizer/counterfactual.mjs";
-import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 import * as tmux from "./tmux.mjs";
 import * as oc from "./opencode.mjs";
 import * as pty from "./pty.mjs";
@@ -908,19 +906,6 @@ const SERVER_VERSION = await readServerVersion(PROJECT_ROOT);
 // response + `/api/version` body as `version` + `minClient` — no new IPC
 // channel; Settings → About reads it in the single getServerVersion trip.
 const OPENCODE_VERSION = readOpencodeVersion();
-
-// BET-1335: the observe-mode masking counterfactual store. Reads/writes
-// `optimizer-counterfactual.json` through the shared jsonStore atomic writer
-// (the same temp-file-then-rename primitive schedule.mjs reuses — already a
-// single shared source, no duplicate to extract). Wired into buildHandlers so
-// the `optimizer:summary` read model merges the counterfactual, and used by
-// the POST /api/optimizer/counterfactual ingest route below.
-const optimizerCounterfactual = createCounterfactualStore({
-  load: () => readJsonSync(statePath("optimizer-counterfactual.json"), {}),
-  save: (s) => writeJsonAtomic(statePath("optimizer-counterfactual.json"), JSON.stringify(s, null, 2)),
-  now: Date.now,
-});
-
 rpcHandlers = buildHandlers({
   tmux,
   oc,
@@ -942,9 +927,6 @@ rpcHandlers = buildHandlers({
   // BET-1244: the provider-health engine itself, for the Accounts "Try again"
   // action (accounts:retry delegates to providerHealth.retry).
   providerHealth,
-  // BET-1335: the observe-mode counterfactual store for the optimizer:summary
-  // read model.
-  counterfactualStore: optimizerCounterfactual,
   // BET-790: renderer read channel for a session's progress record (the
   // server store from src/server/progress.mjs). The write side is the AI's
   // progress_report tool → POST /api/progress.
@@ -2735,34 +2717,6 @@ const handleRequest = async (req, res) => {
           urgent: !!body?.urgent,
           sessionID: body?.sessionID,
         });
-        respondJson(res, 200, { ok: true });
-        return;
-      }
-      respondJson(res, 405, { error: "method not allowed" });
-    } catch (e) {
-      respondJson(res, 500, { error: String(e?.message ?? e) });
-    }
-    return;
-  }
-
-  // ---------- Optimizer counterfactual ingest (OBSERVE-ONLY) ----------
-  // POST /api/optimizer/counterfactual  body {sessionID, maskedTokens,
-  //   maskedParts, ts} → {ok:true}  (400 {error:"invalid"} on bad shape)
-  // The manta-optimizer opencode plugin (docs/opencode-tools/
-  // manta-optimizer-plugin.ts) reports what manta WOULD trim — read + report
-  // only, it never mutates the message history. The store REPLACES the
-  // session's latest counterfactual (each report is a full would-mask, not an
-  // increment). Behind the /api/* Bearer gate (no exemption). The validator is
-  // the shared PURE one from counterfactual.mjs, so the route stays ~5 lines.
-  if (path === "/api/optimizer/counterfactual") {
-    try {
-      if (req.method === "POST") {
-        const body = await readJsonBody(req);
-        if (validateCounterfactualReport(body)) {
-          respondJson(res, 400, { error: "invalid" });
-          return;
-        }
-        await optimizerCounterfactual.record(body);
         respondJson(res, 200, { ok: true });
         return;
       }

@@ -28,7 +28,6 @@ import {
   detectCommandFromText,
   MIN_COMMAND_PREFIX_LEN,
   formatAge,
-  selectCacheTtlMs,
   shouldAbortForQueuedDrain,
   isToolStepBoundary,
   isDrainAbortError,
@@ -598,19 +597,6 @@ describe("moveMenuHighlight", () => {
 
 
 // ===== selectCacheTtlMs =====
-
-describe("selectCacheTtlMs", () => {
-  // BET-1334: the prompt-cache TTL is now MEASURED server-side and passed in as
-  // a number; `selectCacheTtlMs` is a passthrough with a 5-minute fallback.
-  it("defaults to 300000 for a missing measurement", () => {
-    expect(selectCacheTtlMs(null)).toBe(300_000);
-    expect(selectCacheTtlMs(undefined)).toBe(300_000);
-  });
-
-  it("passes an explicit measured value through", () => {
-    expect(selectCacheTtlMs(3_600_000)).toBe(3_600_000);
-  });
-});
 
 
 // ===== selectLastAssistantCompletion =====

@@ -627,7 +627,7 @@ and writes `generated/swift/SettingsSchema.swift`. It runs on the CI Node 20
 | Section | Schema-driven entries (from the generated schema) |
 |---|---|
 | Box | `serverUrlMobile` (device-local, configKey nil) |
-| Models | `alwaysShowUsage` (toggle) |
+| Models | `cacheTtl` (segmented) |
 | Sessions | `autoRenameSessions`, `chatAutoAllow` (toggles) |
 | Files | `uploadCleanupHours` (segmented, numeric coerced) |
 | Voice | `groqApiKey` (password, commit-on-blur), `voiceTranscriptionModel` |

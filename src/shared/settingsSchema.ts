@@ -160,7 +160,22 @@ export const SETTINGS: SettingEntry[] = [
     default: null,
   },
 
-  // ----- models (default/main/sub table) -----
+  // ----- models (default/main/sub table + cache TTL) -----
+  {
+    id: "cacheTtl",
+    section: "models",
+    label: "Prompt cache TTL",
+    help: "How long Anthropic keeps a session's prompt cache warm. 1 hour costs more per cache write but avoids re-paying for the whole conversation after a long break. Switching back to 5 minutes restarts opencode and ends any running turn.",
+    control: "segmented",
+    configKey: "cacheTtl",
+    platform: "both",
+    default: "5m",
+    group: "Requests",
+    options: [
+      { value: "5m", label: "5 minutes" },
+      { value: "1h", label: "1 hour" },
+    ],
+  },
   {
     id: "alwaysShowUsage",
     section: "models",
