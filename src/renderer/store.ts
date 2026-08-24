@@ -806,7 +806,7 @@ export const useStore = create<State>((set, get) => ({
   deactivatedMainModels: [],
   optInModels: [],
   skillRegistryUrls: [],
-  cacheTtl: "1h",
+  cacheTtl: "5m",
   launcherFlags: {},
   groqApiKey: "",
   voiceTranscriptionModel: "",
@@ -1087,7 +1087,9 @@ export const useStore = create<State>((set, get) => ({
       deactivatedMainModels: c.deactivatedMainModels ?? [],
       optInModels: Array.isArray(c.optInModels) ? c.optInModels : [],
       skillRegistryUrls: c.skillRegistryUrls ?? [],
-      cacheTtl: c.cacheTtl === "5m" ? "5m" : "1h",
+      // Absent/unknown → "5m": opencode always requests Anthropic's default
+      // 5-minute TTL (see AppConfig.cacheTtl), so 5m is the honest fallback.
+      cacheTtl: c.cacheTtl === "1h" ? "1h" : "5m",
       launcherFlags: c.launcherFlags ?? {},
       groqApiKey: c.groqApiKey ?? "",
       voiceTranscriptionModel: c.voiceTranscriptionModel ?? "",

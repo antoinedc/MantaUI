@@ -18,9 +18,10 @@ final class MantaSettingsLogicTests: XCTestCase {
 
     func testDefaultValueIsModified() {
         let cacheTtl = entry(id: "cacheTtl")
-        XCTAssertEqual(MantaSettingsLogic.defaultValue(of: cacheTtl), .string("1h"))
-        XCTAssertFalse(MantaSettingsLogic.isModified(cacheTtl, .string("1h")))
-        XCTAssertTrue(MantaSettingsLogic.isModified(cacheTtl, .string("5m")))
+        // Default is "5m" — the TTL opencode actually requests on the wire.
+        XCTAssertEqual(MantaSettingsLogic.defaultValue(of: cacheTtl), .string("5m"))
+        XCTAssertFalse(MantaSettingsLogic.isModified(cacheTtl, .string("5m")))
+        XCTAssertTrue(MantaSettingsLogic.isModified(cacheTtl, .string("1h")))
     }
 
     func testToggleBoolModified() {
@@ -140,13 +141,15 @@ final class MantaSettingsStoreTests: XCTestCase {
     }
 
     func testLoadSeedsConfigDrivenAndDeviceLocal() async {
-        fake.stored["cacheTtl"] = .string("5m")
+        // Non-default on purpose ("5m" is the schema default) so this proves the
+        // stored value is read rather than the default being echoed back.
+        fake.stored["cacheTtl"] = .string("1h")
         fake.stored["autoRenameSessions"] = .bool(true)
         defaults.set("https://custom.example.com", forKey: "manta.settings.local.serverUrlMobile")
 
         await store.load()
 
-        XCTAssertEqual(store.current(entry(id: "cacheTtl")), .string("5m"))
+        XCTAssertEqual(store.current(entry(id: "cacheTtl")), .string("1h"))
         XCTAssertEqual(store.current(entry(id: "autoRenameSessions")), .bool(true))
         XCTAssertEqual(store.current(entry(id: "serverUrlMobile")), .string("https://custom.example.com"))
         // Unset config-driven entries fall back to their schema default.
@@ -175,18 +178,19 @@ final class MantaSettingsStoreTests: XCTestCase {
 
     func testResetSectionIsUndoable() async throws {
         await store.load()
-        store.commit(entry(id: "cacheTtl"), .string("5m"))
+        // Commit the NON-default value so the reset below has something to undo.
+        store.commit(entry(id: "cacheTtl"), .string("1h"))
         try? await Task.sleep(nanoseconds: 20_000_000)
         fake.updates.removeAll()
 
         store.resetSection("models")
         try? await Task.sleep(nanoseconds: 50_000_000)
-        XCTAssertEqual(store.current(entry(id: "cacheTtl")), .string("1h"))
+        XCTAssertEqual(store.current(entry(id: "cacheTtl")), .string("5m"))
         XCTAssertNotNil(store.undoMessage)
 
         store.undoLastReset()
         try? await Task.sleep(nanoseconds: 50_000_000)
-        XCTAssertEqual(store.current(entry(id: "cacheTtl")), .string("5m"))
+        XCTAssertEqual(store.current(entry(id: "cacheTtl")), .string("1h"))
         XCTAssertNil(store.undoMessage)
     }
 

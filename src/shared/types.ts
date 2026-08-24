@@ -190,21 +190,33 @@ export type AppConfig = {
   // every deprecated model stays disabled. Do NOT conflate with the
   // deactivated sets — those hide/remove; this ENABLES a deprecated default.
   optInModels?: string[];
-  // Anthropic prompt cache TTL used by opencode. Used ONLY to predict when
-  // a chat session has gone stale (cache expired → the next user turn
-  // would re-bill the entire cached prefix as cache_creation_input_tokens
-  // at full rate + surcharge). manta does NOT itself set
-  // `cache_control.ttl` — opencode does. This setting must match what
-  // opencode is configured to send, otherwise the "/clear to save Nk
-  // tokens" pill will fire either too eagerly (configured 1h, opencode
-  // sending 5m) or too late (vice versa). Anthropic supports two values:
-  //   - "5m" → default sliding 5-minute TTL, 1.25× write cost
-  //   - "1h" → opt-in 1-hour TTL via `cache_control.ttl: "1h"`, 2× write
-  //            cost. Best fit for manta's "step away to read code / run a
-  //            build / take a meeting" usage pattern.
-  // Defaults to "1h" because that matches manta's typical multi-minute idle
-  // pattern; cost-sensitive users can switch to "5m" in Settings.
+  // Anthropic prompt cache TTL. Used ONLY to predict when a chat session has
+  // gone stale (cache expired → the next user turn re-bills the entire cached
+  // prefix as cache_creation_input_tokens at full rate + surcharge). manta
+  // does NOT set `cache_control.ttl` on any request.
+  //
+  // DEFAULT IS "5m" BECAUSE THAT IS WHAT OPENCODE ACTUALLY SENDS, MEASURED —
+  // not a preference. opencode's applyCaching() stamps its cache breakpoints
+  // `{type:"ephemeral"}` with NO ttl field, so Anthropic applies its default
+  // 5-minute TTL. Verified on the wire against /v1/messages (1.18.22): the
+  // response's `usage.cache_creation` put every created token in
+  // `ephemeral_5m_input_tokens`, with `ephemeral_1h_input_tokens` at 0.
+  // The previous "1h" default was a guess, and it silently under-warned for
+  // every idle gap between 5 and 60 minutes: the pill read "warm" while the
+  // user was in fact paying a full cache re-write on their next message.
+  //
+  // "1h" remains selectable for a box whose requests are rewritten in front
+  // of opencode (a proxy or a future opencode that exposes a TTL knob) — it
+  // makes the prediction match that setup. On a stock box it is wrong; see
+  // AGENTS.md "Stale prompt-cache" for the upstream gap and the one config
+  // path that does change the wire TTL (and why it is not wired to this).
   cacheTtl?: "5m" | "1h";
+  // Internal marker (NOT a Settings entry): set once the box has rewritten a
+  // persisted `cacheTtl: "1h"` — the old, never-true default — to "5m". Its
+  // whole job is to make that correction one-time, so a user who deliberately
+  // re-selects "1h" afterwards keeps it. See migrateCacheTtlDefault in
+  // shared/configMigration.mjs.
+  cacheTtlDefaultMigrated?: boolean;
   // ----- Voice / speech-to-text (Groq) -----
   // API key for api.groq.com. Stored plaintext in config.json, same as other
   // manta credentials (ssh identity path, opencode auth). Settings UI shows
