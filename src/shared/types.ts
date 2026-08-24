@@ -1455,6 +1455,9 @@ export const IPC = {
   // BET-1219: read-only spend/latency ledger over opencode's store.
   // Returns { supported, ...LedgerSummary }.
   ledgerSummary: "ledger:summary",
+  // BET-1333: the Optimizer's memoized read model over the ledger. Returns
+  // { supported, ...OptimizerSummary }.
+  optimizerSummary: "optimizer:summary",
   // Slash-command execution: invokes POST /session/{id}/command. Distinct
   // from opencode:prompt — the server treats commands specially (templates,
   // configured agent/model, etc.).
@@ -1850,6 +1853,25 @@ export type LedgerSummary = {
   }[];
   byAgent: { agent: string | null; isChild: boolean; turns: number; cost: number; costPerTurn: number }[];
   byProject: { directory: string; turns: number; cost: number }[];
+};
+
+// BET-1333: the Manta Optimizer's P1.1 read model (`optimizer:summary` RPC).
+// Crosses the wire, so it lives in shared/types. `totals`/`cacheShare` reuse
+// the ledger `aggregate` shape; `dailySeries` is a zero-filled local-day
+// tokensSent graph over `windowDays`, oldest→newest; `bySession` is the top 20
+// sessions by cost. `ttl`/`counterfactual`/`windows` are placeholders that
+// Optimizer children 2–4 fill — they stay present (null) so the renderer
+// contract is stable. `supported:false` = the box can't read opencode.db.
+export type OptimizerSummary = {
+  supported: boolean;
+  windowDays: number;
+  totals: { turns: number; cost: number; input: number; output: number; cacheRead: number; cacheWrite: number };
+  cacheShare: { output: number; cacheRead: number; cacheWrite: number; input: number };
+  dailySeries: { day: string; tokensSent: number }[]; // "YYYY-MM-DD", oldest→newest
+  bySession: { sessionID: string | null; turns: number; cost: number; tokensSent: number }[];
+  ttl: null;
+  counterfactual: null;
+  windows: null;
 };
 
 // A secret's METADATA — what the UI and `secret_list` see. NEVER carries the

@@ -186,6 +186,64 @@ function byCostDesc(a, b) {
   return num(b.cost) - num(a.cost);
 }
 
+// Local-calendar day key "YYYY-MM-DD" for a timestamp. Rows are bucketed into
+// the user's local day, matching how the dashboard graph is read.
+function dayKey(ms) {
+  const d = new Date(num(ms));
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/**
+ * PURE. Per-session spend over `rows` (flat ledger rows from
+ * `fetchLedgerRows`), top 20 sessions by cost descending. `sessionID` is the
+ * opencode session id (may be null for unjoined rows — collapsed to a single
+ * bucket so no spend is dropped). `tokensSent` is the total context processed
+ * (input + cacheRead + cacheWrite + output), not billing-weighted cost.
+ */
+export function aggregateBySession(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  const map = new Map();
+  for (const r of list) {
+    const sessionID = r.sessionID ?? null;
+    const key = sessionID === null ? "__null__" : sessionID;
+    let e = map.get(key);
+    if (!e) {
+      e = { sessionID, turns: 0, cost: 0, tokensSent: 0 };
+      map.set(key, e);
+    }
+    e.turns += 1;
+    e.cost += num(r.cost);
+    e.tokensSent += tokensSent(r);
+  }
+  return [...map.values()].sort(byCostDesc).slice(0, 20);
+}
+
+/**
+ * PURE. Daily `tokensSent` series over the last `days` days ending at `now`,
+ * oldest→newest, ZERO-FILLED for days with no rows. Each entry is a local
+ * calendar day. `days` defaults to 30.
+ */
+export function aggregateDailySeries(rows, days = 30, now = Date.now()) {
+  const list = Array.isArray(rows) ? rows : [];
+  const n = Math.max(1, Math.floor(num(days)) || 1);
+  const byDay = new Map();
+  for (const r of list) {
+    const key = dayKey(r.startedMs);
+    byDay.set(key, (byDay.get(key) || 0) + tokensSent(r));
+  }
+  const out = [];
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(num(now));
+    d.setDate(d.getDate() - i);
+    const key = dayKey(d.getTime());
+    out.push({ day: key, tokensSent: byDay.get(key) || 0 });
+  }
+  return out;
+}
+
 /**
  * I/O. Reads the raw assistant message rows over the rolling window via the
  * shared getDb() handle. Shared by `ledgerSummary` and `endpointSummary` so
@@ -196,6 +254,7 @@ async function assistantRows(db, since) {
   const sql = `
     SELECT m.id AS msg_id,
            m.data AS msg_data,
+           s.id AS session_id,
            s.parent_id AS parent_id,
            s.agent AS agent,
            s.directory AS directory
@@ -216,6 +275,7 @@ async function assistantRows(db, since) {
       // The message id is what joins a message to its parts in the `part`
       // table (opencode stores parts separately — see collectToolParts).
       id: row.msg_id != null ? String(row.msg_id) : null,
+      sessionId: row.session_id != null ? String(row.session_id) : null,
       data,
       parentId: row.parent_id != null ? String(row.parent_id) : null,
       agent: row.agent ?? null,
@@ -223,6 +283,45 @@ async function assistantRows(db, since) {
     });
   }
   return out;
+}
+
+// tokensSent counts total context processed through the model (all input buckets + output), not billing-weighted cost — the dashboard graph shows weight, the Saved stat shows money.
+function tokensSent(row) {
+  return num(row.input) + num(row.cacheRead) + num(row.cacheWrite) + num(row.output);
+}
+
+/**
+ * I/O. The ONE ledger row query. Extracts the flat ledger row shape (the
+ * `aggregate`/aggregate* fold inputs) from assistant messages over `sinceMs`,
+ * via the shared SQL in `assistantRows`. Both `ledgerSummary` and the
+ * optimizer summary consume this — a single query path, no duplicated SQL.
+ * Returns the parsed, role-filtered flat rows. Never throws on a malformed
+ * row (those are skipped); query/parse scaffolding lives in the callers.
+ */
+export async function fetchLedgerRows(db, sinceMs) {
+  const since = num(sinceMs);
+  const rows = [];
+  for (const { data, sessionId, parentId, agent, directory } of await assistantRows(db, since)) {
+    const tokens = data.tokens ?? {};
+    const cache = tokens.cache ?? {};
+    rows.push({
+      providerID: data.providerID ?? null,
+      modelID: data.modelID ?? null,
+      sessionID: sessionId,
+      agent,
+      parentId,
+      directory,
+      cost: data.cost,
+      input: tokens.input,
+      output: tokens.output,
+      reasoning: tokens.reasoning,
+      cacheRead: cache.read,
+      cacheWrite: cache.write,
+      startedMs: data.time?.created,
+      completedMs: data.time?.completed,
+    });
+  }
+  return rows;
 }
 
 // Collect the parsed `tool`-type parts for a set of message ids from the
@@ -423,27 +522,7 @@ export async function ledgerSummary({ sinceMs = 0 } = {}) {
   if (!db) return { supported: false };
 
   try {
-    const since = num(sinceMs);
-    const rows = [];
-    for (const { data, parentId, agent, directory } of await assistantRows(db, since)) {
-      const tokens = data.tokens ?? {};
-      const cache = tokens.cache ?? {};
-      rows.push({
-        providerID: data.providerID ?? null,
-        modelID: data.modelID ?? null,
-        agent,
-        parentId,
-        directory,
-        cost: data.cost,
-        input: tokens.input,
-        output: tokens.output,
-        reasoning: tokens.reasoning,
-        cacheRead: cache.read,
-        cacheWrite: cache.write,
-        startedMs: data.time?.created,
-        completedMs: data.time?.completed,
-      });
-    }
+    const rows = await fetchLedgerRows(db, sinceMs);
     return { supported: true, ...aggregate(rows) };
   } catch (e) {
     // Query error: log once, drop the handle so the next call reopens, and
