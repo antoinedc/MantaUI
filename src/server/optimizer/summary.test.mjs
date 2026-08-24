@@ -52,7 +52,8 @@ test("buildOptimizerSummary returns the full shape with empty counterfactual, re
   // every day, savedPct 0 on every session, the counterfactual key null.
   assert.equal(s.ttl, null);
   assert.equal(s.counterfactual, null);
-  assert.equal(s.windows, null);
+  // No usage snapshots wired → windows is empty (P1.4: the quota-window slice).
+  assert.deepEqual(s.windows, []);
   assert.ok(s.dailySeries.every((d) => d.maskedTokens === 0));
   assert.ok(s.bySession.every((e) => e.savedPct === 0));
 });
@@ -144,4 +145,53 @@ test("createOptimizerSummary in-flight guard shares one build across concurrent 
 
   assert.equal(r1, r2);
   assert.equal(resolves, 1, "concurrent calls must share a single in-flight build");
+});
+
+test("buildOptimizerSummary: windows slice maps stored snapshots + forecast-at-reset (BET-1336)", async () => {
+  const now = new Date(2026, 7, 24, 12, 0, 0).getTime();
+  const rows = [row({ cost: 1, input: 1, cacheRead: 1, cacheWrite: 1, output: 1, startedMs: now })];
+  const fetchRows = async () => rows;
+
+  const H = 3_600_000;
+  // Two snapshots, each with a session+weekly window (shortest-first order).
+  const snapshots = [
+    {
+      provider: "claude",
+      planLabel: "Max 20x",
+      fetchedAt: now,
+      windows: [
+        { kind: "session", label: "5h", pct: 30, resetsAt: now + 50 * H },
+        { kind: "weekly", label: "week", pct: 40, resetsAt: now + 100 * H },
+      ],
+    },
+    { provider: "codex", fetchedAt: now, windows: [{ kind: "session", label: "5h", pct: 20, resetsAt: now + 50 * H }] },
+  ];
+  // History: enough +1/hr observations for the first snapshot's session window
+  // to produce a forecast; nothing for the others → their forecastPct is null.
+  const history = {
+    "claude:session": [0, 1, 2, 3, 4, 5, 6, 7, 8].map((pct, i) => ({ ts: now - (8 - i) * H, pct })),
+  };
+
+  const s = await buildOptimizerSummary({ fetchRows, now, usageSnapshots: () => snapshots, usageHistory: () => history });
+
+  assert.equal(s.windows.length, 3);
+  // The popover order: snapshot order, each snapshot's windows shortest-first.
+  assert.deepEqual(
+    s.windows.map((w) => [w.provider, w.windowLabel]),
+    [
+      ["claude", "5h"],
+      ["claude", "week"],
+      ["codex", "5h"],
+    ],
+  );
+  // First window: 9 observations of +1/hr → median 1; resetsAt 50h away from
+  // now, currentPct 30 → 30 + 1*50 = 80.
+  assert.equal(s.windows[0].forecastPct, 80);
+  assert.equal(s.windows[0].pct, 30);
+  assert.equal(s.windows[0].resetsAt, now + 50 * H);
+  assert.equal(s.windows[0].planLabel, "Max 20x");
+  // No history for the others → forecastPct null, resetsAt preserved.
+  assert.equal(s.windows[1].forecastPct, null);
+  assert.equal(s.windows[1].resetsAt, now + 100 * H);
+  assert.equal(s.windows[2].forecastPct, null);
 });

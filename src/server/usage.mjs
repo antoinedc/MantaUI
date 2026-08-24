@@ -91,6 +91,9 @@ import { kimiAdapter } from "./usageAdapters/kimi.mjs";
 import { isUsageAtLimit } from "./usageStopper.mjs";
 import { loadAccountReaders } from "./accountReaders.mjs";
 import { loadAuthFile, DEFAULT_AUTH_PATH } from "./gatewayRegister.mjs";
+import { statePath } from "../shared/paths.mjs";
+import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
+import { appendObservation } from "./optimizer/forecast.mjs";
 
 export { normalizeWindow };
 
@@ -234,6 +237,10 @@ export function createUsagePoller({
   fetchImpl = fetch,
   now = () => Date.now(),
   publish,
+  // BET-1336: observation tap at the publish point — called with the published
+  // UsageSnapshot[] whenever the content actually changes. Null in tests /
+  // direct users → no history recording.
+  observe = null,
   staleRetryMs = STALE_RETRY_MS,
 } = {}) {
   let snapshots = [];
@@ -379,6 +386,7 @@ export function createUsagePoller({
       const key = contentKey(results);
       if (key !== lastContentKey) {
         lastContentKey = key;
+        observe?.(results);
         publish?.({ kind: "usage.updated", payload: { snapshots: results } });
       }
     } finally {
@@ -417,7 +425,10 @@ let activePoller = null;
  * @returns {{ stop: () => void }}
  */
 export function startUsagePoller(bus, { intervalMs = POLL_MS } = {}) {
-  const poller = createUsagePoller({ publish: (evt) => bus.publish(evt) });
+  const poller = createUsagePoller({
+    publish: (evt) => bus.publish(evt),
+    observe: recordWindowObservations,
+  });
   activePoller = poller;
   const p = startPoller(() => poller.tick(), { intervalMs, label: "usage" });
   return {
@@ -437,6 +448,68 @@ export function startUsagePoller(bus, { intervalMs = POLL_MS } = {}) {
 /** @returns {UsageSnapshot[]} */
 export function listSnapshots() {
   return activePoller ? activePoller.snapshots : [];
+}
+
+// ---------------------------------------------------------------------------
+// Quota-window observation history + forecast-at-reset (BET-1336, P1.4)
+// ---------------------------------------------------------------------------
+//
+// Pure OBSERVATION — the dashboard's fuel gauges show a tick at the forecasted
+// pct at the current window's reset. Nothing here paces or routes work (that
+// is phase 2). The single observation tap is at the poller's publish point
+// (createUsagePoller's `observe` hook — wired to `recordWindowObservations` in
+// startUsagePoller below), so there is no second poller and no adapter change.
+// History is persisted at `statePath("usage-history.json")` via the shared
+// jsonStore atomic writer; loaded once lazily and saved on a single debounced
+// 30s timer so the poll loop never hammers the disk.
+const HISTORY_PATH = statePath("usage-history.json");
+const HISTORY_SAVE_DEBOUNCE_MS = 30_000;
+
+// Lazily loaded `{[key]: [{ts, pct}]}` (key = "<provider>:<window.kind>").
+let usageHistory = null;
+let historySaveTimer = null;
+
+/** @returns {Record<string, Array<{ts:number, pct:number}>>} */
+export function getUsageHistory() {
+  if (usageHistory === null) usageHistory = readJsonSync(HISTORY_PATH, {});
+  return usageHistory;
+}
+
+// One debounced 30s save timer (single timer, unref'd so it never holds the
+// process open). Writing the current in-memory state is idempotent and tiny.
+function scheduleHistorySave() {
+  if (historySaveTimer) return;
+  historySaveTimer = setTimeout(() => {
+    historySaveTimer = null;
+    const snapshot = usageHistory;
+    if (snapshot == null) return;
+    writeJsonAtomic(HISTORY_PATH, JSON.stringify(snapshot, null, 2)).catch((e) =>
+      console.warn("[usage] history save failed:", e?.message ?? e),
+    );
+  }, HISTORY_SAVE_DEBOUNCE_MS);
+  historySaveTimer?.unref?.();
+}
+
+/**
+ * Tap the poller's publish point: record one observation per snapshot window
+ * with `key = "<provider>:<window.kind>"`. Pure appendObservation handles the
+ * min-interval dedupe + max-age prune; this is only the iteration + persistence
+ * glue. `snapshots` is the published UsageSnapshot[].
+ * @param {UsageSnapshot[]} snapshots
+ */
+export function recordWindowObservations(snapshots) {
+  if (!Array.isArray(snapshots) || snapshots.length === 0) return;
+  const history = getUsageHistory();
+  for (const snap of snapshots) {
+    for (const w of snap.windows ?? []) {
+      appendObservation(history, {
+        ts: snap.fetchedAt,
+        key: `${snap.provider}:${w.kind}`,
+        pct: w.pct,
+      });
+    }
+  }
+  scheduleHistorySave();
 }
 
 // ---------------------------------------------------------------------------

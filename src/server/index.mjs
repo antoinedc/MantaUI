@@ -62,7 +62,7 @@ import { startServerUpdatePoller, createOpencodeUpdateForwarder } from "./server
 import { createCliDetector, upgradeCli } from "./cliUpdates.mjs";
 import { runServerSelfUpdate } from "./opencodeAdmin.mjs";
 import { startSchedulePoller, createJob, listJobs, deleteJob } from "./schedule.mjs";
-import { startUsagePoller, recheckAdapterAtLimit, providerIDForAdapter, listSnapshots } from "./usage.mjs";
+import { startUsagePoller, recheckAdapterAtLimit, providerIDForAdapter, listSnapshots, getUsageHistory } from "./usage.mjs";
 import {
   createCapJob,
   getJob,
@@ -945,6 +945,11 @@ rpcHandlers = buildHandlers({
   // BET-1335: the observe-mode counterfactual store for the optimizer:summary
   // read model.
   counterfactualStore: optimizerCounterfactual,
+  // BET-1336: quota-window forecast-at-reset read sources for the
+  // optimizer:summary `windows` slice — the live polled snapshots + the
+  // persisted observation history.
+  usageSnapshots: listSnapshots,
+  usageHistory: getUsageHistory,
   // BET-790: renderer read channel for a session's progress record (the
   // server store from src/server/progress.mjs). The write side is the AI's
   // progress_report tool → POST /api/progress.
