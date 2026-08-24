@@ -85,6 +85,7 @@ import type {
   PluginRegistryRow,
   TranscriptHit,
   LedgerSummary,
+  OptimizerSummary,
   AppControlPayload,
   MediaEventPayload,
   WidgetEventPayload,
@@ -740,6 +741,10 @@ export interface Api {
   // all). Measurement only — no routing. `supported:false` = the box can't
   // read opencode.db (needs the Node 24 runtime).
   ledgerSummary(opts?: { sinceMs?: number }): Promise<LedgerSummary | { supported: false }>;
+  // BET-1333: the Optimizer's memoized read model over the ledger
+  // (`optimizer:summary` RPC). No arguments. `supported:false` = the box can't
+  // read opencode.db (needs the Node 24 runtime).
+  optimizerSummary(): Promise<OptimizerSummary | { supported: false }>;
 
   // Slash-command execution.
   opencodeRunCommand(input: {

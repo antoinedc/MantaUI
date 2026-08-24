@@ -129,6 +129,7 @@ export const DEMO_UNIMPLEMENTED = [
   "opencodeSetReferences",
   "opencodeSetSubagents",
   "opencodeSyncSubagents",
+  "optimizerSummary",
   "peekRemoteFile",
   "pluginsRegistry",
    "progressGet",

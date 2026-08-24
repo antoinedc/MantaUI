@@ -50,9 +50,16 @@ import { addApnsToken } from "./push.mjs";
 import { getRegistry as pluginsGetRegistry } from "./plugins.mjs";
 import { searchMessages } from "./messageSearch.mjs";
 import { ledgerSummary } from "./modelLedger.mjs";
+import { getDb } from "./opencodeDb.mjs";
+import { createOptimizerSummary } from "./optimizer/summary.mjs";
 import { allModels as catalogAllModels } from "./modelCatalog.mjs";
 import { MIN_CLIENT } from "./version.mjs";
 import { forgeDiffForCwd, forgeStatus, pullRequestForCwd, shipPullRequest, shipPreview, mergePullRequest, draftGetForCwd, draftCommentForCwd, draftSubmitForCwd, replyThreadForCwd, forgeInbox, forgeDeviceStart, forgeDevicePoll, forgeDeviceCancel, forgeListRepos, forgeCloneStart, forgeCloneStatus, forgeCloneCancel } from "./forge/index.mjs";
+
+// BET-1333: the Optimizer's memoized `optimizer:summary` read model. Created
+// once at module scope so the 60s memo + in-flight guard are shared across
+// RPC calls — the same single-slot cache pattern as routingServices.mjs.
+const optimizerSummary = createOptimizerSummary({ getDb });
 import { listRules as forgeListRules, formatIssueRef, parseIssueRef } from "./forgeRules.mjs";
 import { clearStoredToken } from "./forge/auth.mjs";
 import { parseRules as parseForgeRules } from "../shared/forgeRules.mjs";
@@ -1217,6 +1224,12 @@ export function buildHandlers({
     // routing, no behaviour change. Degrades to { supported:false } on a
     // box that hasn't taken the Node 24 runtime yet / has no opencode.db.
     "ledger:summary": (opts) => ledgerSummary(opts ?? {}),
+
+    // BET-1333: the Optimizer's memoized read model over the ledger
+    // (optimizer/summary.mjs). No arguments. Memoized server-side behind a
+    // 60s TTL with an in-flight guard. Degrades to { supported:false } on a
+    // box that hasn't taken the Node 24 runtime yet / has no opencode.db.
+    "optimizer:summary": () => optimizerSummary(),
 
     // preload: ipcRenderer.invoke(IPC.opencodeRunCommand, { sessionId, command, arguments, model?, attachments? })
     // → args[0] = that object; opencode.mjs runCommand expects same shape

@@ -4,7 +4,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { aggregate, aggregateEndpointStats, endpointSummary } from "./modelLedger.mjs";
+import { aggregate, aggregateEndpointStats, aggregateBySession, aggregateDailySeries, endpointSummary } from "./modelLedger.mjs";
 import { _resetDbHandle } from "./opencodeDb.mjs";
 
 // Fixture builder. Fill only the fields a test cares about.
@@ -153,6 +153,100 @@ test("every array is sorted by cost descending", () => {
   assert.ok(desc(ledger.byAgent, (a) => a.cost));
   assert.ok(desc(ledger.byProject, (p) => p.cost));
   assert.equal(ledger.byModel[0].key, "a/b");
+});
+
+// ---- aggregateBySession (Optimizer P1.1) ----
+// Rows are the flat ledger rows from fetchLedgerRows (sessionID + tokens).
+
+function srow(over = {}) {
+  return {
+    sessionID: "s1",
+    cost: 0,
+    input: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    output: 0,
+    startedMs: 0,
+    ...over,
+  };
+}
+
+test("aggregateBySession orders by cost descending and caps at the top 20", () => {
+  // 25 sessions, all cost 1 except the first two (higher cost) — expect the
+  // highest-cost one first, then exactly 20 entries.
+  const rows = [];
+  for (let i = 0; i < 25; i++) {
+    rows.push(srow({ sessionID: `s${String(i).padStart(2, "0")}`, cost: 1 }));
+  }
+  rows.push(srow({ sessionID: "hot", cost: 50 }));
+  rows.push(srow({ sessionID: "warm", cost: 30 }));
+
+  const out = aggregateBySession(rows);
+  assert.equal(out.length, 20);
+  assert.equal(out[0].sessionID, "hot");
+  assert.equal(out[1].sessionID, "warm");
+  // The rest are descending by cost, all equal (1).
+  for (let i = 1; i < out.length - 1; i++) {
+    assert.ok(out[i].cost >= out[i + 1].cost, "cost must be non-increasing");
+  }
+});
+
+test("aggregateBySession folds tokensSent = input + cacheRead + cacheWrite + output and collapses null session", () => {
+  const out = aggregateBySession([
+    srow({ sessionID: "a", input: 1, cacheRead: 2, cacheWrite: 3, output: 4, cost: 5 }),
+    srow({ sessionID: "a", input: 10, cacheRead: 0, cacheWrite: 0, output: 0, cost: 1 }),
+    srow({ sessionID: null, input: 100, cacheRead: 0, cacheWrite: 0, output: 0, cost: 2 }),
+    srow({ sessionID: null, input: 0, cacheRead: 0, cacheWrite: 0, output: 50, cost: 2 }),
+  ]);
+  const a = out.find((e) => e.sessionID === "a");
+  const nul = out.find((e) => e.sessionID === null);
+  assert.deepEqual(a, { sessionID: "a", turns: 2, cost: 6, tokensSent: 20 });
+  // null sessions collapse into ONE bucket so spend is never dropped.
+  assert.deepEqual(nul, { sessionID: null, turns: 2, cost: 4, tokensSent: 150 });
+});
+
+// ---- aggregateDailySeries (Optimizer P1.1) ----
+
+test("aggregateDailySeries zero-fills days with no rows, oldest→newest", () => {
+  // now = a known local date; put one row on today and one 2 days ago.
+  const now = new Date(2026, 7, 24, 12, 0, 0).getTime(); // Aug 24 2026
+  const twoDaysAgo = new Date(2026, 7, 22, 12, 0, 0).getTime();
+  const out = aggregateDailySeries(
+    [
+      srow({ startedMs: now, input: 1, cacheRead: 0, cacheWrite: 0, output: 9 }),
+      srow({ startedMs: twoDaysAgo, input: 5, cacheRead: 5, cacheWrite: 5, output: 5 }),
+    ],
+    5,
+    now,
+  );
+  assert.equal(out.length, 5);
+  assert.equal(out[0].day, "2026-08-20");
+  assert.equal(out[0].tokensSent, 0); // no row
+  assert.equal(out[2].day, "2026-08-22");
+  assert.equal(out[2].tokensSent, 20); // 5+5+5+5
+  assert.equal(out[4].day, "2026-08-24");
+  assert.equal(out[4].tokensSent, 10); // 1+9
+  // oldest→newest
+  for (let i = 0; i < out.length - 1; i++) assert.ok(out[i].day < out[i + 1].day);
+});
+
+test("aggregateDailySeries default window is 30 days", () => {
+  const now = new Date(2026, 0, 5).getTime();
+  const out = aggregateDailySeries([], 30, now);
+  assert.equal(out.length, 30);
+  assert.equal(out[0].day, "2025-12-07");
+  assert.equal(out[29].day, "2026-01-05");
+});
+
+test("aggregateDailySeries tokensSent formula: input=1,cacheRead=2,cacheWrite=3,output=4 → 10", () => {
+  const now = new Date(2026, 7, 24, 12, 0, 0).getTime();
+  const out = aggregateDailySeries(
+    [srow({ startedMs: now, input: 1, cacheRead: 2, cacheWrite: 3, output: 4 })],
+    1,
+    now,
+  );
+  assert.equal(out.length, 1);
+  assert.equal(out[0].tokensSent, 10);
 });
 
 // ---- aggregateEndpointStats (per-endpoint reliability/speed/latency/mix) ----
