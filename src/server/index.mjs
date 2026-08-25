@@ -42,6 +42,7 @@ import * as pty from "./pty.mjs";
 import * as local from "./local.mjs";
 import { createPeekHandler } from "./peek.mjs";
 import { createLogShipper, captureConsole, resolveAxiomConfig } from "../shared/logShip.mjs";
+import { setTelemetrySink, shipCtxEvent } from "./optimizer/telemetry.mjs";
 
 // BET-187: ship every console.* (and any startup banner / poller log) to
 // Axiom when MANTA_AXIOM_TOKEN is set in env AND AppConfig.shareAnalytics
@@ -55,7 +56,12 @@ import { createLogShipper, captureConsole, resolveAxiomConfig } from "../shared/
 {
   const axiomCfg = resolveAxiomConfig({ env: process.env, config: await local.configGet() });
   if (axiomCfg) {
-    captureConsole(createLogShipper({ ...axiomCfg, source: "server", device: hostname() }));
+    // The SINGLE log shipper on the box. captureConsole wraps console.* with
+    // it; BET-1347 ALSO hands it to the optimizer's context telemetry as a
+    // reference (setTelemetrySink) — deliberately not a second instance.
+    const shipper = createLogShipper({ ...axiomCfg, source: "server", device: hostname() });
+    captureConsole(shipper);
+    setTelemetrySink(shipper);
   }
 }
 import { createBus, handleEventsRequest, attachEventsWs } from "./events.mjs";
@@ -1183,6 +1189,17 @@ const compactionScheduler = createCompactionScheduler({
       });
     } catch (e) {
       console.warn("[optimizer] compaction activity append failed:", e?.message ?? e);
+    }
+    // Context telemetry (counts only): a background compaction shipped with its
+    // before/after token sizes when known; no session titles, no content.
+    try {
+      shipCtxEvent({
+        kind: "compaction",
+        beforeTokens: typeof contextTokens === "number" && Number.isFinite(contextTokens) ? contextTokens : null,
+        background: 1,
+      });
+    } catch {
+      /* telemetry never throws */
     }
   },
   enabled: async () => (await local.configGet())?.optimizerEnabled === true,
@@ -3142,6 +3159,20 @@ const handleRequest = async (req, res) => {
           return;
         }
         await optimizerCounterfactual.record(body);
+        // Context telemetry — a mask application reported by the plugin. Counts
+        // only; `sessionID` is the opaque id (never a title or content).
+        try {
+          shipCtxEvent({
+            kind: "mask",
+            maskedTokens: typeof body.maskedTokens === "number" && Number.isFinite(body.maskedTokens) ? body.maskedTokens : null,
+            maskedParts: typeof body.maskedParts === "number" && Number.isFinite(body.maskedParts) ? body.maskedParts : null,
+            applied: body.applied === true ? 1 : 0,
+            mode: body.mode ?? "observe",
+            sessionID: body.sessionID,
+          });
+        } catch {
+          /* telemetry never throws */
+        }
         respondJson(res, 200, { ok: true });
         return;
       }

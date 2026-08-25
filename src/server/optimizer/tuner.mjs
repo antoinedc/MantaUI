@@ -29,6 +29,7 @@
 
 import { statePath } from "../../shared/paths.mjs";
 import { readJsonSync, writeJsonAtomic } from "../jsonStore.mjs";
+import { shipCtxEvent } from "./telemetry.mjs";
 
 // Event trigger: at least this many NEW sessions since the last change.
 export const TUNE_MIN_NEW_SESSIONS = 20;
@@ -289,6 +290,8 @@ export function createTuner({
     s.lastChangeAt = t;
     s.lastSessionCount = sessions;
     await persistState();
+    // Context telemetry: a tune step was applied (counts + knob values only).
+    shipCtxEvent({ kind: "tune", param: step.param, from: step.from, to: step.to, verdict: "applied" });
   }
 
   async function keep(s, t, sessions) {
@@ -307,6 +310,7 @@ export function createTuner({
     s.lastSessionCount = sessions;
     s.pending = null;
     await persistState();
+    shipCtxEvent({ kind: "tune", param: p.param, from: p.from, to: p.to, verdict: "kept" });
   }
 
   async function revert(s, guardrail, t, sessions) {
@@ -331,6 +335,7 @@ export function createTuner({
     s.lastSessionCount = sessions;
     s.pending = null;
     await persistState();
+    shipCtxEvent({ kind: "tune", param: p.param, from: p.from, to: p.from, verdict: "rolled-back" });
   }
 
   async function shouldTune({ newSessions, ecoChanged, quotaReset }) {
