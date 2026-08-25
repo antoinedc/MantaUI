@@ -118,7 +118,7 @@ import {
 } from "./media.mjs";
 import { setSecret, deleteSecret, listSecrets, provideSecret } from "./secrets.mjs";
 import { createPromptDelivery } from "./promptDelivery.mjs";
-import { ensureMantaPlanAgent, ensureCtoAgent } from "./providers.mjs";
+import { ensureMantaPlanAgent, ensureCtoAgent, readCacheTtl as readProvidersCacheTtl } from "./providers.mjs";
 import {
   createWebhookEngine,
   createHook,
@@ -218,6 +218,10 @@ function contextLimitFor(providerID, modelID) {
 const streamInterp = createStreamInterpreter({
   publish: (evt) => bus.publish(evt),
   contextLimitFor,
+  // The device stream predicts cache staleness against the SAME TTL opencode
+  // actually sends (providers.readCacheTtl) that the desktop pill reads, so
+  // the device cache pill matches on a 1h box instead of always assuming 5m.
+  readCacheTtl: () => readProvidersCacheTtl({ listProviders: oc.getProviders }),
 });
 // BET-913 + BET-916 + BET-922: when a client (re)connects mid-state, replay the
 // current edge-only state so frames that only fire on an edge aren't lost —

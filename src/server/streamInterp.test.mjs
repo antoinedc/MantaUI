@@ -969,6 +969,35 @@ test("the same event also emits a cache frame", () => {
   assert.equal(events.filter((e) => e.sub === "cache").length, 1);
 });
 
+test("cache staleness predicts against the configured TTL, falling back to 5m", async () => {
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+  // opencode configured to send 1h -> the device pill uses 1h (matches the
+  // desktop SessionHeader pill) rather than always assuming opencode's 5m
+  // default.
+  const oneHour = [];
+  const interp1h = createStreamInterpreter({
+    publish: (e) => oneHour.push(e),
+    readCacheTtl: async () => "1h",
+  });
+  await flush(); // let the background TTL resolution land
+  interp1h.interpret(updatedWith(ASSISTANT_MSG));
+  const cache1h = oneHour.find((e) => e.sub === "cache");
+  assert.ok(cache1h, "a cache frame was emitted");
+  assert.equal(cache1h.payload.ttlMs, 3_600_000);
+
+  // no readCacheTtl / nothing readable -> 5m default fallback preserved
+  const fiveMin = [];
+  const interp5m = createStreamInterpreter({
+    publish: (e) => fiveMin.push(e),
+    readCacheTtl: async () => null,
+  });
+  await flush();
+  interp5m.interpret(updatedWith(ASSISTANT_MSG));
+  const cache5m = fiveMin.find((e) => e.sub === "cache");
+  assert.ok(cache5m, "a cache frame was emitted");
+  assert.equal(cache5m.payload.ttlMs, 5 * 60_000);
+});
+
 test("a completed plan_exit tool part emits one planMode {on:false} frame", () => {
   const { interp, events } = make();
   interp.interpret({
