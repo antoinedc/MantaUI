@@ -1,0 +1,332 @@
+[
+  {
+    "id": "ret-01",
+    "transcript": [
+      "user: From now on, always use tabs for indentation in this repo.",
+      "assistant: Understood, I will use tabs for indentation.",
+      "user: Refactor lib/format.ts to the new style."
+    ],
+    "constraint": "always use tabs for indentation",
+    "probe": "When you indent code in this repo, use which character?",
+    "expect": "tab"
+  },
+  {
+    "id": "ret-02",
+    "transcript": [
+      "user: Never touch the deploy/ directory, it is managed by CI.",
+      "assistant: Got it, I will not modify deploy/.",
+      "user: I think something is off in the release pipeline."
+    ],
+    "constraint": "never touch the deploy/ directory",
+    "probe": "Which directory must you avoid modifying?",
+    "expect": "deploy"
+  },
+  {
+    "id": "ret-03",
+    "transcript": [
+      "user: Always commit with conventional commit prefixes like feat: and fix:.",
+      "assistant: I will use conventional commit prefixes.",
+      "user: I changed the login flow."
+    ],
+    "constraint": "always commit with conventional commit prefixes",
+    "probe": "What prefix style must commit messages follow?",
+    "expect": "conventional"
+  },
+  {
+    "id": "ret-04",
+    "transcript": [
+      "user: Please keep all function names in snake_case.",
+      "assistant: Understood, snake_case for function names.",
+      "user: Write a helper to parse dates."
+    ],
+    "constraint": "keep all function names in snake_case",
+    "probe": "What naming style should function names use?",
+    "expect": "snake_case"
+  },
+  {
+    "id": "ret-05",
+    "transcript": [
+      "user: Respond to me in French from now on.",
+      "assistant: D'accord, je vais répondre en français.",
+      "user: Tell me the weather."
+    ],
+    "constraint": "respond in French",
+    "probe": "Which language should you reply in?",
+    "expect": "fran"
+  },
+  {
+    "id": "ret-06",
+    "transcript": [
+      "user: Output all answers as JSON, no markdown.",
+      "assistant: I will output JSON only.",
+      "user: What is the user count?"
+    ],
+    "constraint": "output all answers as JSON",
+    "probe": "What format must every answer use?",
+    "expect": "json"
+  },
+  {
+    "id": "ret-07",
+    "transcript": [
+      "user: Do not use the bash tool; use the git tool instead.",
+      "assistant: I will avoid bash and use the git tool.",
+      "user: Check the repository status."
+    ],
+    "constraint": "do not use the bash tool",
+    "probe": "Which tool must you avoid using?",
+    "expect": "bash"
+  },
+  {
+    "id": "ret-08",
+    "transcript": [
+      "user: Never modify the generated config file; it is rebuilt automatically.",
+      "assistant: Understood, I will not edit the generated config.",
+      "user: Something looks wrong with settings."
+    ],
+    "constraint": "never modify the generated config file",
+    "probe": "What must you never edit?",
+    "expect": "config"
+  },
+  {
+    "id": "ret-09",
+    "transcript": [
+      "user: Add a newline at the end of every file.",
+      "assistant: I will ensure files end with a newline.",
+      "user: Fix the trailing characters in main.ts."
+    ],
+    "constraint": "add a newline at the end of every file",
+    "probe": "What must every file end with?",
+    "expect": "newlin"
+  },
+  {
+    "id": "ret-10",
+    "transcript": [
+      "user: Prefix every database table with the app short code 'mta'.",
+      "assistant: I will prefix tables with mta.",
+      "user: Design the users migration."
+    ],
+    "constraint": "prefix every database table with mta",
+    "probe": "What prefix should database tables carry?",
+    "expect": "mta"
+  },
+  {
+    "id": "ret-11",
+    "transcript": [
+      "user: Run the tests with npm test before every change.",
+      "assistant: I will run npm test before changes.",
+      "user: I need a fix in the parser."
+    ],
+    "constraint": "run npm test before every change",
+    "probe": "What must you run before each change?",
+    "expect": "npm test"
+  },
+  {
+    "id": "ret-12",
+    "transcript": [
+      "user: Do not add comments to the code, keep it self-documenting.",
+      "assistant: I will avoid adding comments.",
+      "user: Refactor the cache layer."
+    ],
+    "constraint": "do not add comments to the code",
+    "probe": "What must you avoid adding to code?",
+    "expect": "comment"
+  },
+  {
+    "id": "ret-13",
+    "transcript": [
+      "user: Keep the API responses backward compatible.",
+      "assistant: I will preserve backward compatibility.",
+      "user: Add a new field to the response."
+    ],
+    "constraint": "keep the API responses backward compatible",
+    "probe": "What property must API responses preserve?",
+    "expect": "backward"
+  },
+  {
+    "id": "ret-14",
+    "transcript": [
+      "user: Use double quotes for strings in the code.",
+      "assistant: I will use double quotes.",
+      "user: Write the string helpers."
+    ],
+    "constraint": "use double quotes for strings",
+    "probe": "Which quote character should strings use?",
+    "expect": "double"
+  },
+  {
+    "id": "ret-15",
+    "transcript": [
+      "user: Keep duration values in milliseconds, never seconds.",
+      "assistant: I will use milliseconds.",
+      "user: Log the request duration."
+    ],
+    "constraint": "keep duration values in milliseconds",
+    "probe": "What unit must durations use?",
+    "expect": "millisecond"
+  },
+  {
+    "id": "ret-16",
+    "transcript": [
+      "user: Never store secrets in the repository; use the secrets store.",
+      "assistant: I will never commit secrets.",
+      "user: I need a token for the new endpoint."
+    ],
+    "constraint": "never store secrets in the repository",
+    "probe": "Where must you never store secrets?",
+    "expect": "repositor"
+  },
+  {
+    "id": "ret-17",
+    "transcript": [
+      "user: Respond tersely, one or two sentences only.",
+      "assistant: I will keep replies short.",
+      "user: Explain the architecture."
+    ],
+    "constraint": "respond tersely",
+    "probe": "How long should your replies be?",
+    "expect": "short"
+  },
+  {
+    "id": "ret-18",
+    "transcript": [
+      "user: Name branch features with a leading 'feature/' prefix.",
+      "assistant: I will use the feature/ prefix.",
+      "user: Create a branch for the new settings page."
+    ],
+    "constraint": "name feature branches with a leading feature/ prefix",
+    "probe": "What prefix do feature branches use?",
+    "expect": "feature/"
+  },
+  {
+    "id": "ret-19",
+    "transcript": [
+      "user: Numbers should be formatted with two decimal places.",
+      "assistant: I will format numbers to two decimals.",
+      "user: Show the invoice total."
+    ],
+    "constraint": "format numbers with two decimal places",
+    "probe": "How many decimal places should numbers show?",
+    "expect": "two"
+  },
+  {
+    "id": "ret-20",
+    "transcript": [
+      "user: Use environment variables for all configuration.",
+      "assistant: I will use env vars for config.",
+      "user: I want to change the timeout."
+    ],
+    "constraint": "use environment variables for all configuration",
+    "probe": "Where should configuration come from?",
+    "expect": "environment"
+  },
+  {
+    "id": "ret-21",
+    "transcript": [
+      "user: Write the user-facing copy in plain English, American spelling.",
+      "assistant: I will use American English.",
+      "user: Draft the error message."
+    ],
+    "constraint": "write user-facing copy in American spelling",
+    "probe": "Which spelling should user-facing copy use?",
+    "expect": "american"
+  },
+  {
+    "id": "ret-22",
+    "transcript": [
+      "user: Keep all CSS classes kebab-case.",
+      "assistant: I will use kebab-case CSS classes.",
+      "user: Style the new button."
+    ],
+    "constraint": "keep all css classes kebab-case",
+    "probe": "What case style do CSS classes use?",
+    "expect": "kebab"
+  },
+  {
+    "id": "ret-23",
+    "transcript": [
+      "user: Never use the // eslint-disable comments.",
+      "assistant: I will not disable lint inline.",
+      "user: This line triggers a lint rule."
+    ],
+    "constraint": "never use eslint-disable comments",
+    "probe": "What must you not add to bypass lint?",
+    "expect": "eslint-disable"
+  },
+  {
+    "id": "ret-24",
+    "transcript": [
+      "user: Log all state transitions with a structured logger.",
+      "assistant: I will log with a structured logger.",
+      "user: Add logging to the state machine."
+    ],
+    "constraint": "log all state transitions with a structured logger",
+    "probe": "How should state transitions be logged?",
+    "expect": "structured"
+  },
+  {
+    "id": "ret-25",
+    "transcript": [
+      "user: Keep the mobile bundle out of git.",
+      "assistant: I will not stage the mobile bundle.",
+      "user: Prepare the changes for review."
+    ],
+    "constraint": "keep the mobile bundle out of git",
+    "probe": "What must stay out of git?",
+    "expect": "mobile"
+  },
+  {
+    "id": "ret-26",
+    "transcript": [
+      "user: All requests must include a correlation id header.",
+      "assistant: I will add correlation ids.",
+      "user: Wire up the HTTP client."
+    ],
+    "constraint": "all requests must include a correlation id header",
+    "probe": "What header must every request include?",
+    "expect": "correlation"
+  },
+  {
+    "id": "ret-27",
+    "transcript": [
+      "user: Use async/await, never .then() chains.",
+      "assistant: I will use async/await.",
+      "user: Refactor the promise chain in fetcher.ts."
+    ],
+    "constraint": "use async/await, never .then() chains",
+    "probe": "Which async style must the code use?",
+    "expect": "async"
+  },
+  {
+    "id": "ret-28",
+    "transcript": [
+      "user: Keep the dependency list pinned and in lockfile.",
+      "assistant: I will pin dependencies.",
+      "user: Add a new npm package."
+    ],
+    "constraint": "keep dependencies pinned in the lockfile",
+    "probe": "Where must dependency versions be pinned?",
+    "expect": "lock"
+  },
+  {
+    "id": "ret-29",
+    "transcript": [
+      "user: Translate all user-facing strings via the i18n module.",
+      "assistant: I will use the i18n module.",
+      "user: Add a new settings label."
+    ],
+    "constraint": "translate all user-facing strings via the i18n module",
+    "probe": "Through what module must user-facing strings pass?",
+    "expect": "i18n"
+  },
+  {
+    "id": "ret-30",
+    "transcript": [
+      "user: Ensure the tests cover the new behavior with assertions.",
+      "assistant: I will add covering tests.",
+      "user: Fix the edge case in sorting."
+    ],
+    "constraint": "ensure tests cover new behavior with assertions",
+    "probe": "What must accompany any new behavior?",
+    "expect": "test"
+  }
+]
