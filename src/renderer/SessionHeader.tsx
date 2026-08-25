@@ -53,9 +53,11 @@ import { Popover } from "./Popover";
 import { MarqueeLabel } from "./MarqueeLabel";
 import { ConfirmModal } from "./ConfirmModal";
 
-// Cache-segment colors for the header pill.
-const CACHE_WRITE_COLOR = cssVar("--warn");
-const CACHE_READ_COLOR = cssVar("--info");
+// Cache-segment colors for the header pill. Consumed from the semantic tokens
+// (BET-408 / BET-1337 D2) so the header bar and the OptimizerCard share one
+// source of truth for the read/write cache hues.
+const CACHE_WRITE_COLOR = cssVar("--cache-write");
+const CACHE_READ_COLOR = cssVar("--cache-read");
 
 function formatTokensCompact(n: number): string {
   if (n < 1000) return String(n);
@@ -648,7 +650,7 @@ function ContextPill({
               />
               <span
                 className="tabular-nums font-mono font-semibold"
-                style={{ color: stale ? CACHE_WRITE_COLOR : fill }}
+                style={{ color: stale ? cssVar("--warn") : fill }}
               >
                 {pct}%
               </span>

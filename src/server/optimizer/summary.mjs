@@ -72,12 +72,14 @@ export async function buildOptimizerSummary({
     savedPct: savedPctFor(e, cf?.bySession),
   }));
 
-  // BET-1340: `ttl` is a DIAGNOSTIC, never user-facing in P1 (the renderer
-  // deliberately does not render it — see OptimizerCard). It carries the
-  // measured effective TTL plus, when the measurement is conclusive and a
-  // configured TTL is readable, whether it matches what opencode is set to
-  // send. A mismatch is logged once as an [optimizer] line: config and
-  // measured reality have drifted apart.
+  // BET-1340: `ttl` carries the measured effective TTL plus, when the
+  // measurement is conclusive and a configured TTL is readable, whether it
+  // matches what opencode is set to send. A mismatch is logged once as an
+  // [optimizer] line: config and measured reality have drifted apart. The
+  // renderer consumes `measuredMs` + `confidence` to draw the OptimizerCard
+  // Cache-hit TTL detail ("TTL 5m measured" / "TTL 1h measured" / "TTL 5m
+  // default", BET-1341); `observations`/`configuredMs`/`matched` stay as
+  // diagnostic surface for the verifier.
   const measured = measureEffectiveTtl(rows, nowMs);
   let configuredTtl = null;
   try {

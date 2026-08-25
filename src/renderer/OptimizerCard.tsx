@@ -27,6 +27,15 @@ type OptimizerData = OptimizerSummary | { supported: false };
 
 const wholePct = (v: number): string => `${Math.round(v)}%`;
 
+// Anthropic prompt-cache TTL label for the Cache-hit detail line — matches the
+// BET-1337 spec's "5m" / "1h" wording (a default confidence still shows the
+// 5-minute baseline, e.g. "TTL 5m default").
+function ttlLabel(ms: number): string {
+  if (ms === 3_600_000) return "1h";
+  if (ms === 300_000) return "5m";
+  return `${Math.round(ms / 60_000)}m`;
+}
+
 // Gauge fill colour thresholds (BET-1337): <60 ok, 60–84 warn, ≥85 danger.
 function gaugeColor(pct: number): string {
   if (pct >= 85) return "var(--danger)";
@@ -248,10 +257,12 @@ export function OptimizerCard() {
         <div className="opt-stat">
           <div className="opt-stat-l">Cache hit</div>
           <div className="opt-stat-v">{wholePct(cacheHitPct)}</div>
-          {/* TTL detail is intentionally absent: optimizer:summary.ttl is a
-              DIAGNOSTIC value (measured effective TTL + verifier comparison,
-              BET-1340), never user-facing in P1. Render nothing. */}
-          <div className="opt-stat-d" />
+          {/* TTL detail (BET-1341) drawn from the measured effective TTL's
+              label + confidence — "TTL 5m measured" / "TTL 1h measured" /
+              "TTL 5m default" per the BET-1337 spec. */}
+          <div className="opt-stat-d">
+            {d.ttl ? `TTL ${ttlLabel(d.ttl.measuredMs)} ${d.ttl.confidence}` : ""}
+          </div>
         </div>
         <div className="opt-stat">
           <div className="opt-stat-l">Cost / turn</div>
