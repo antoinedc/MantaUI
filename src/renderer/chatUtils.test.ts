@@ -7,6 +7,7 @@ import {
   computeTurnInfo,
   computeLiveTurn,
   formatTokens,
+  buildCumulativePath,
   formatBytes,
   describeSavedFile,
   voiceUiEnabled,
@@ -268,6 +269,42 @@ describe("formatTokens", () => {
     expect(formatTokens(100_000)).toBe("100k tokens");
     expect(formatTokens(123_456)).toBe("123k tokens");
     expect(formatTokens(200_000)).toBe("200k tokens");
+  });
+});
+
+// ===== buildCumulativePath (BET-1337) =====
+
+describe("buildCumulativePath", () => {
+  it("returns empty string for empty or non-array input", () => {
+    expect(buildCumulativePath([], 100, 200, 10)).toBe("");
+    expect(buildCumulativePath(undefined as never, 100, 200, 10)).toBe("");
+  });
+
+  it("renders a single value as one point at the origin (x=0)", () => {
+    // cum = 5 of max 10 on a 200px tall surface → y = 200 - (5/10)*200 = 100
+    expect(buildCumulativePath([5], 100, 200, 10)).toBe("M 0.00 100.00");
+  });
+
+  it("is cumulative and monotonic (running sum only grows)", () => {
+    const p = buildCumulativePath([2, 3, 1], 200, 100, 10);
+    // cumulative sums: 2, 5, 6 → y = 100 - sum/10*100 = 80, 50, 40
+    expect(p).toBe("M 0.00 80.00 L 100.00 50.00 L 200.00 40.00");
+  });
+
+  it("maps a cumulative sum equal to max to the very top (y=0)", () => {
+    expect(buildCumulativePath([10], 100, 200, 10)).toBe("M 0.00 0.00");
+  });
+
+  it("rounds coordinates to 2 decimals", () => {
+    // 3 values, width 100 → x = 0, 50, 100 exactly; y from a fractional sum
+    expect(buildCumulativePath([1, 2, 3], 100, 99, 7)).toBe(
+      "M 0.00 84.86 L 50.00 56.57 L 100.00 14.14",
+    );
+  });
+
+  it("falls back to the top of the surface when max is not positive", () => {
+    // no positive max → every point sits at y = height (bottom)
+    expect(buildCumulativePath([1, 2], 100, 200, 0)).toBe("M 0.00 200.00 L 100.00 200.00");
   });
 });
 

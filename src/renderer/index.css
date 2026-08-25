@@ -412,3 +412,34 @@ html, body, #root {
     mask-image: none;
   }
 }
+
+/* OptimizerCard (phase 1) — Settings → Models "Token optimizer" card (BET-1337).
+   Read-only observe surface. Tokens only — no new hex literals. The gauge /
+   tick / SVG chrome is hand-written because Tailwind utilities don't cleanly
+   express the proportional fill + absolute-positioned forecast tick; the rest
+   of the card uses existing Tailwind utilities (see OptimizerCard.tsx). */
+/* Window fuel-gauge grid — 3 up, wrapping on narrow cards. */
+.opt-wins{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--sp-3)}
+.opt-win{background:var(--card);border:1px solid var(--border-subtle);border-radius:var(--r-lg);padding:var(--sp-3) var(--sp-4)}
+.opt-win-t{display:flex;justify-content:space-between;align-items:baseline;gap:var(--sp-2)}
+.opt-win-t b{color:var(--tx1);font-size:12.5px;font-weight:600}
+.opt-win-reset{font-size:11px;color:var(--tx4);white-space:nowrap}
+.opt-sub{font-size:11.5px;color:var(--tx4);margin:var(--sp-px) 0 var(--sp-3)}
+.opt-gauge{height:8px;border-radius:var(--r-full);background:var(--inset);margin:var(--sp-2) 0 var(--sp-px);position:relative;overflow:visible}
+.opt-gauge-fill{height:100%;border-radius:var(--r-full);position:absolute;left:0;top:0}
+.opt-gauge-fc{position:absolute;top:-3px;width:2px;height:14px;background:var(--tx4)}
+.opt-gauge-fc.warn{background:var(--warn)}
+.opt-win-meta{display:flex;justify-content:space-between;font-size:10.5px;color:var(--tx4);margin-top:var(--sp-px)}
+/* Consumption chart. */
+.opt-chart-head{font-size:13.5px;color:var(--tx1);font-weight:600;margin-top:var(--sp-6)}
+.opt-chart{display:block;width:100%;height:auto;margin-top:var(--sp-2)}
+.opt-legend{display:flex;gap:var(--sp-4);font-size:11px;color:var(--tx3);margin-top:var(--sp-px);flex-wrap:wrap}
+.opt-legend i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:5px;vertical-align:1px}
+/* 5-up stats row. */
+.opt-stats{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:var(--sp-3);margin-top:var(--sp-6)}
+.opt-stat{background:var(--card);border:1px solid var(--border-subtle);border-radius:var(--r-md);padding:var(--sp-2) var(--sp-3)}
+.opt-stat-l{color:var(--tx4);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em}
+.opt-stat-v{color:var(--tx1);font-family:var(--font-mono);font-size:16px;margin-top:var(--sp-px)}
+.opt-stat-v.ok{color:var(--ok)}
+.opt-stat-d{font-size:11px;color:var(--tx3);margin-top:2px;min-height:1em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media (max-width:720px){.opt-wins{grid-template-columns:1fr}.opt-stats{grid-template-columns:repeat(2,minmax(0,1fr))}}

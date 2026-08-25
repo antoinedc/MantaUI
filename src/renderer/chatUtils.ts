@@ -218,6 +218,32 @@ export function formatTokens(n: number): string {
   return `${Math.round(n / 1000)}k tokens`;
 }
 
+// Build an SVG path string for a CUMULATIVE series over `values` (oldest →
+// newest), for the Optimizer's "sent vs raw counterfactual" consumption chart
+// (BET-1337). Each point's x is spaced linearly across `width`; its y is the
+// running sum, inverted (larger = higher up = smaller y) and scaled by `max`
+// against `height` so `max` maps to the very top (y=0). Coordinates are
+// quantized to 2 decimal places so repeated renders are byte-stable. empty input → ""
+// so callers can render nothing rather than an "M x y" with no points.
+export function buildCumulativePath(
+  values: number[],
+  width: number,
+  height: number,
+  max: number,
+): string {
+  if (!Array.isArray(values) || values.length === 0) return "";
+  let cum = 0;
+  const parts: string[] = [];
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i];
+    cum += typeof v === "number" && Number.isFinite(v) ? v : 0;
+    const x = i === 0 ? 0 : (i / (values.length - 1)) * width;
+    const y = max > 0 ? height - (cum / max) * height : height;
+    parts.push(`${x.toFixed(2)} ${y.toFixed(2)}`);
+  }
+  return `M ${parts.join(" L ")}`;
+}
+
 // Human-readable file size for the agent-file toast. Binary units (KiB-style
 // thresholds) but SI-ish labels (KB/MB/GB) to match what users expect from a
 // download chip. 0 / unknown → "" so the caller can omit the size entirely.

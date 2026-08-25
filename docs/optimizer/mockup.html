@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Optimizer dashboard — phase 1 mockup</title>
+<link rel="stylesheet" href="../../src/renderer/tokens.css">
+<style>
+body{margin:0;background:var(--canvas);color:var(--tx2);font-family:var(--font-sans);font-size:15px;line-height:1.55}
+.wrap{max-width:900px;margin:0 auto;padding:48px 28px}
+.frame{background:var(--panel);border:1px solid var(--border-subtle);border-radius:var(--r-xl);padding:22px;box-shadow:var(--shadow-sm)}
+.mono{font-family:var(--font-mono)}
+.wins{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
+.win{background:var(--card);border:1px solid var(--border-subtle);border-radius:var(--r-lg);padding:14px 16px}
+.win .t{display:flex;justify-content:space-between;align-items:baseline}
+.win .t b{color:var(--tx1);font-size:12.5px}
+.win .t span{font-size:11px;color:var(--tx4)}
+.gauge{height:8px;border-radius:4px;background:var(--inset);margin:10px 0 4px;position:relative;overflow:visible}
+.gauge .fill{height:100%;border-radius:4px;position:absolute;left:0;top:0}
+.gauge .fc{position:absolute;top:-3px;width:2px;height:14px;background:var(--tx4)}
+.gauge .fc.warn{background:var(--warn)}
+.win .meta{display:flex;justify-content:space-between;font-size:10.5px;color:var(--tx4);margin-top:6px}
+.stats{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-top:22px}
+.stat{background:var(--card);border:1px solid var(--border-subtle);border-radius:var(--r-md);padding:10px 12px}
+.stat .l{color:var(--tx4);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em}
+.stat .v{color:var(--tx1);font-family:var(--font-mono);font-size:16px;margin-top:3px}
+.stat .v.ok{color:var(--ok)}
+.stat .d{font-size:11px;color:var(--tx3);margin-top:2px}
+.legend{display:flex;gap:16px;font-size:11px;color:var(--tx3);margin-top:2px}
+.legend i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:5px;vertical-align:1px}
+</style>
+</head>
+<body><div class="wrap"><div class="frame">
+  <b style="color:var(--tx1);font-size:13.5px">Subscription windows</b>
+  <p style="font-size:11.5px;color:var(--tx4);margin:2px 0 12px">Forecast from your recent usage. Tick = forecast at reset (hidden until enough history).</p>
+  <div class="wins">
+    <div class="win"><div class="t"><b>Claude Max — weekly</b><span>resets Sun 09:00</span></div>
+      <div class="gauge"><span class="fill" style="width:71%;background:var(--warn)"></span><span class="fc warn" style="left:88%"></span></div>
+      <div class="meta"><span>71% used</span><span>forecast 88%</span></div></div>
+    <div class="win"><div class="t"><b>Claude Max — 5h session</b><span>resets 17:40</span></div>
+      <div class="gauge"><span class="fill" style="width:34%;background:var(--ok)"></span><span class="fc" style="left:52%"></span></div>
+      <div class="meta"><span>34% used</span><span>forecast 52%</span></div></div>
+    <div class="win"><div class="t"><b>Kimi — weekly</b><span>resets Wed 00:00</span></div>
+      <div class="gauge"><span class="fill" style="width:18%;background:var(--ok)"></span></div>
+      <div class="meta"><span>18% used</span><span>gathering history…</span></div></div>
+  </div>
+  <div style="height:22px"></div>
+  <b style="color:var(--tx1);font-size:13.5px">Token consumption — with &amp; without optimization</b>
+  <svg viewBox="0 0 860 240" width="100%" height="240" style="margin-top:8px">
+    <line x1="46" y1="10" x2="46" y2="206" stroke="var(--border-subtle)"/>
+    <line x1="46" y1="206" x2="850" y2="206" stroke="var(--border-subtle)"/>
+    <line x1="46" y1="140" x2="850" y2="140" stroke="var(--border-subtle)" stroke-dasharray="2 5" opacity=".6"/>
+    <line x1="46" y1="74" x2="850" y2="74" stroke="var(--border-subtle)" stroke-dasharray="2 5" opacity=".6"/>
+    <text x="40" y="210" text-anchor="end" fill="var(--tx4)" font-size="10" font-family="JetBrains Mono,monospace">0</text>
+    <text x="40" y="144" text-anchor="end" fill="var(--tx4)" font-size="10" font-family="JetBrains Mono,monospace">14M</text>
+    <text x="40" y="78" text-anchor="end" fill="var(--tx4)" font-size="10" font-family="JetBrains Mono,monospace">28M</text>
+    <path d="M46 204 L206 190 L366 168 L526 138 L686 104 L850 64" fill="none" stroke="var(--tx4)" stroke-width="2" stroke-dasharray="5 4"/>
+    <path d="M46 204 L206 194 L366 180 L526 162 L686 144 L850 128" fill="none" stroke="var(--accent)" stroke-width="2.5"/>
+    <path d="M46 204 L206 194 L366 180 L526 162 L686 144 L850 128 L850 206 L46 206 Z" fill="rgb(var(--accent-rgb) / 0.08)" stroke="none"/>
+    <line x1="850" y1="64" x2="850" y2="128" stroke="var(--ok)" stroke-width="1"/>
+    <text x="844" y="100" text-anchor="end" fill="var(--ok)" font-size="10" font-family="JetBrains Mono,monospace">−17.2M · ≈ $61 est.</text>
+  </svg>
+  <div class="legend">
+    <span><i style="background:var(--accent)"></i>sent</span>
+    <span><i style="background:var(--tx4)"></i>raw counterfactual — same turns, nothing trimmed (est.)</span>
+  </div>
+  <div class="stats">
+    <div class="stat"><div class="l">Sent (30d)</div><div class="v">11.2M</div><div class="d">28.4M raw</div></div>
+    <div class="stat"><div class="l">Saved</div><div class="v ok">≈ $61</div><div class="d">est. · counterfactual</div></div>
+    <div class="stat"><div class="l">Cache hit</div><div class="v">74%</div><div class="d">reads billed at 0.1×</div></div>
+    <div class="stat"><div class="l">Cost / turn</div><div class="v">$0.31</div><div class="d">30d average</div></div>
+    <div class="stat"><div class="l">Sessions</div><div class="v">63</div><div class="d">30d</div></div>
+  </div>
+</div></div></body></html>
