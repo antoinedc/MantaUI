@@ -18,6 +18,7 @@ import { synthesizeSpeech } from "../shared/groq.mjs";
 import { WebSocketServer } from "ws";
 import { createCounterfactualStore, validateCounterfactualReport } from "./optimizer/counterfactual.mjs";
 import { createOptimizerSummary } from "./optimizer/summary.mjs";
+import { createActivityLog } from "./optimizer/activityLog.mjs";
 import { createPacingState } from "./optimizer/pacing.mjs";
 import {
   createCompactionScheduler,
@@ -969,6 +970,16 @@ const optimizerCounterfactual = createCounterfactualStore({
   now: Date.now,
 });
 
+// Optimizer P2.5 (BET-1347): the activity log store — the trust surface that
+// lists every parameter change the optimizer made on its own. Wired so the
+// tuner, the compaction scheduler and the eco recorder can append, and exposed
+// on the `optimizer:summary` read model's `activity` slice.
+const optimizerActivity = createActivityLog({
+  load: () => readJsonSync(statePath("optimizer-log.json"), []),
+  save: (s) => writeJsonAtomic(statePath("optimizer-log.json"), JSON.stringify(s, null, 2)),
+  now: Date.now,
+});
+
 // BET-1343: the memoized `optimizer:summary` read model, created ONCE at module
 // scope here (not inside buildHandlers) so the SAME 60s memo + in-flight guard
 // is shared by the RPC `optimizer:summary` channel and the GET
@@ -981,6 +992,7 @@ const optimizerSummary = createOptimizerSummary({
   usageSnapshots: listSnapshots,
   usageHistory: getUsageHistory,
   readCacheTtl: () => readProvidersCacheTtl({ listProviders: oc.getProviders }),
+  activityStore: optimizerActivity,
 });
 
 // ---------------------------------------------------------------------------

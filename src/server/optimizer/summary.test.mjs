@@ -281,3 +281,19 @@ test("buildOptimizerSummary: no mismatch log when the verifier has nothing concl
   assert.equal(s.ttl.configuredMs, null);
   assert.equal(s.ttl.matched, null);
 });
+
+test("buildOptimizerSummary: activity slice surfaces the store's newest entries, empty without a store (BET-1347)", async () => {
+  const now = new Date(2026, 7, 24, 12, 0, 0).getTime();
+  const fetchRows = async () => [row({ startedMs: now })];
+  // No store wired → empty feed (the documented empty state), never a zero.
+  const noStore = await buildOptimizerSummary({ fetchRows, now });
+  assert.deepEqual(noStore.activity, { entries: [] });
+
+  const activityStore = {
+    recent: async (n) =>
+      [{ id: "abc12345", ts: now, kind: "tune", subject: "x", verdict: "kept", evidence: { turns: 5 } }],
+  };
+  const withStore = await buildOptimizerSummary({ fetchRows, now, activityStore });
+  assert.equal(withStore.activity.entries.length, 1);
+  assert.equal(withStore.activity.entries[0].kind, "tune");
+});

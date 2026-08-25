@@ -21,6 +21,7 @@ import { aggregate, aggregateBySession, aggregateDailySeries, fetchLedgerRows } 
 import { summaryFields } from "./counterfactual.mjs";
 import { forecastAtReset } from "./forecast.mjs";
 import { measureEffectiveTtl, verifyCacheTtl, cacheTtlLabelMs } from "./ttl.mjs";
+import { SUMMARY_ACTIVITY_CAP } from "./activityLog.mjs";
 
 const WINDOW_DAYS = 30;
 const TTL_MS = 60_000;
@@ -54,6 +55,11 @@ export async function buildOptimizerSummary({
   // so the verifier stays testable; the 60s memo in createOptimizerSummary
   // bounds this I/O to one call per window, so it is null-cost to wire.
   readCacheTtl = async () => null,
+  // BET-1347: the activity log store (optimizer/activityLog.mjs). The
+  // summary exposes the newest SUMMARY_ACTIVITY_CAP entries so the dashboard
+  // renders the trust surface without a second fetch. Null when not wired →
+  // an empty feed (the documented empty state), never a fabricated zero.
+  activityStore = null,
 } = {}) {
   const nowMs = num(now);
   const raw = await fetchRows(nowMs - WINDOW_DAYS * 86_400_000);
@@ -111,7 +117,21 @@ export async function buildOptimizerSummary({
     ttl,
     counterfactual: cf ? { dailySeries: cf.dailySeries, bySession: cf.bySession } : null,
     windows: windowsFor(usageSnapshots(), usageHistory(), nowMs),
+    activity: await activityFor(activityStore),
   };
+}
+
+// The activity slice for the summary: the newest SUMMARY_ACTIVITY_CAP entries,
+// most recent first, or an EMPTY feed when no store is wired (the documented
+// empty state). Never a fabricated zero.
+async function activityFor(activityStore) {
+  if (!activityStore || typeof activityStore.recent !== "function") return { entries: [] };
+  try {
+    const entries = await activityStore.recent(SUMMARY_ACTIVITY_CAP);
+    return { entries: Array.isArray(entries) ? entries : [] };
+  } catch {
+    return { entries: [] };
+  }
 }
 
 // Map the current stored usage snapshots to the summary's `windows` slice —
@@ -167,7 +187,7 @@ let inflight = null;
  * summary then degrades to empty counterfactual). The returned async
  * function memoizes the built summary for TTL_MS with an in-flight guard.
  */
-export function createOptimizerSummary({ getDb, now, counterfactualStore = null, usageSnapshots, usageHistory, readCacheTtl }) {
+export function createOptimizerSummary({ getDb, now, counterfactualStore = null, usageSnapshots, usageHistory, readCacheTtl, activityStore = null }) {
   const nowMs = () => (typeof now === "function" ? num(now()) : num(now ?? Date.now()));
   return async function optimizerSummary() {
     const t = nowMs();
@@ -184,6 +204,7 @@ export function createOptimizerSummary({ getDb, now, counterfactualStore = null,
           usageSnapshots,
           usageHistory,
           readCacheTtl,
+          activityStore,
         });
         cache = { at: t, value };
         return value;

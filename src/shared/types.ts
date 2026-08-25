@@ -1920,6 +1920,21 @@ export type OptimizerSummary = {
     resetsAt: number | null;
     forecastPct: number | null;
   }[];
+  // BET-1347: the optimizer's trust surface — every parameter change it made
+  // on its own, with the evidence used. Most recent first, capped at 50.
+  activity: {
+    entries: {
+      id: string;
+      ts: number;
+      kind: "tune" | "eco" | "compaction" | "guardrail";
+      subject: string;
+      from?: string | number;
+      to?: string | number;
+      verdict: "kept" | "rolled-back" | "applied";
+      evidence: Record<string, string | number>;
+      revertedAt?: number;
+    }[];
+  };
 };
 
 // A secret's METADATA — what the UI and `secret_list` see. NEVER carries the
