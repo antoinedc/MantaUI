@@ -117,6 +117,9 @@ function normalizeState(raw) {
  *     activity fallback) + the firehose-stamped lastActivityAt map, and the
  *     shared optimizer summary for the effective cache TTL.
  *   compact(sessionId) — async — the already-wired oc.compactSession call.
+ *     May return the post-compaction token count (`afterTokens`) so the
+ *     one-liner can show "before → after"; undefined/null is fine (→ no count).
+ *     BET-1356 wires the production `compact` to measure the retained history.
  *   isBusy(sessionId) — the shared promptDelivery busy gate (grep-verified:
  *     INJECTED here, never re-implemented).
  *   now — number or zero-arg fn (the clock).
@@ -125,9 +128,12 @@ function normalizeState(raw) {
  *     "optimizer-compaction.json"); injected so tests stub them.
  *   enabled — boolean or zero-arg fn; read per tick so flipping the switch
  *     takes effect without a restart.
- *   onCompacted — (info) => void (async ok): called after a compact succeeds
- *     with { sessionID, contextTokens, contextLimit }. BET-1347 wires this to
- *     append a `compaction` entry to the activity log (the trust surface).
+ *  onCompacted — (info) => void (async ok): called after a compact succeeds
+ *     with { sessionID, contextTokens, afterTokens, contextLimit }. BET-1347
+ *     wires this to append a `compaction` entry to the activity log (the trust
+ *     surface). BET-1356 adds `afterTokens`: the post-compaction context the
+ *     injected `compact` returned (null when unknown), so the one-liner can
+ *     show the before → after figure.
  *
  * The three guards, all required:
  *   1. an in-memory Set of sessionIds with a compaction in flight; a session
@@ -239,14 +245,22 @@ export function createCompactionScheduler({
         console.log(
           `[optimizer] precompact session=${c.sessionID} ctx=${pct}% idle=${Math.round(idleMs / 60_000)}m`,
         );
-        await compact(c.sessionID);
+        // BET-1356: capture the post-compaction context the injected `compact`
+        // returns (null/undefined when unknown) so onCompacted can surface the
+        // one-liner's "before → after" figure.
+        const afterTokens = await compact(c.sessionID);
         entry.lastResult = "ok";
         compacted.push(c.sessionID);
         tally.background++;
         console.log(`[optimizer] compacted session=${c.sessionID} ctx=${pct}% idle=${Math.round(idleMs / 60_000)}m`);
         if (typeof onCompacted === "function") {
           try {
-            await onCompacted({ sessionID: c.sessionID, contextTokens: c.contextTokens, contextLimit: c.contextLimit });
+            await onCompacted({
+              sessionID: c.sessionID,
+              contextTokens: c.contextTokens,
+              afterTokens: typeof afterTokens === "number" && Number.isFinite(afterTokens) && afterTokens > 0 ? afterTokens : null,
+              contextLimit: c.contextLimit,
+            });
           } catch (e) {
             console.warn("[optimizer] compact onCompacted failed:", e?.message ?? e);
           }

@@ -39,6 +39,7 @@ import {
   getProviders,
   getDefaultModel,
   generateSessionTitle,
+  estimateMessageListTokens,
   listModels,
   listRoutableModels,
   _normalizeProviderModel,
@@ -2613,4 +2614,41 @@ test("completeProviderOauth includes code in the body when passed a real code (o
       assert.deepEqual(captured.body, { method: 1, code: "ABCD-1234" });
     },
   );
+});
+
+// BET-1356: post-compaction context estimate for the one-liner's "before →
+// after" figure. Pure over the message list; numbers/structural keys are not
+// content and never inflate the estimate.
+test("estimateMessageListTokens: 0 for empty/missing input", () => {
+  assert.equal(estimateMessageListTokens(undefined), 0);
+  assert.equal(estimateMessageListTokens(null), 0);
+  assert.equal(estimateMessageListTokens([]), 0);
+});
+
+test("estimateMessageListTokens: sums part text with ~4 chars/token", () => {
+  const messages = [
+    {
+      info: { role: "assistant", id: "m1", tokens: { input: 128_000, cache: { write: 0 } } },
+      parts: [
+        { type: "text", text: "this is a summary of the whole conversation" },
+        { type: "tool", state: { title: "Bash", output: "hello world one two" } },
+      ],
+    },
+    {
+      info: { role: "user", id: "m2" },
+      parts: [{ type: "text", text: "short user reply" }],
+    },
+  ];
+  // chars of all string values ÷ 4, ceil
+  const chars = "this is a summary of the whole conversation".length
+    + "Bash".length
+    + "hello world one two".length
+    + "short user reply".length;
+  assert.equal(estimateMessageListTokens(messages), Math.ceil(chars / 4));
+  // Asserts the big numeric token count does NOT inflate the estimate.
+  assert.ok(estimateMessageListTokens(messages) < 128_000);
+});
+
+test("estimateMessageListTokens: a single empty text message yields 0 not a tiny-to-inflate artifact", () => {
+  assert.equal(estimateMessageListTokens([{ info: { role: "user" }, parts: [{ type: "text", text: "" }] }]), 0);
 });
