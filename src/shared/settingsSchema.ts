@@ -188,19 +188,15 @@ export const SETTINGS: SettingEntry[] = [
     group: "Plan usage",
   },
   {
-    id: "modelRoutingPreset",
+    id: "optimizerEnabled",
     section: "models",
-    label: "Balance",
-    help: "Economy favours the cheapest model that still clears the quality floor for each kind of work. Performance favours the strongest. Each kind of work has a floor that Economy will not go below.",
-    control: "segmented",
-    configKey: "modelRouting.preset",
-    platform: "desktop",
-    default: "balanced",
+    label: "Manta optimized token usage",
+    help: "Manta trims, paces and compacts your conversations to make a plan last longer. It never changes a model you picked by hand, and everything it changes is listed in the activity log.",
+    control: "toggle",
+    configKey: "optimizerEnabled",
+    platform: "both",
+    default: false,
     group: "Automatic Manta Routing",
-    options: PRESETS.map((value) => ({
-      value,
-      label: value[0].toUpperCase() + value.slice(1),
-    })),
   },
 
   // ----- sessions (per-session behaviour) -----
