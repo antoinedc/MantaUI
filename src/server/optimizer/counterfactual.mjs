@@ -58,6 +58,9 @@ function normalizeState(raw) {
  * the `/api/optimizer/counterfactual` route (so the route stays ~5 lines):
  *   sessionID — non-empty string, ≤128 chars
  *   maskedTokens / maskedParts / ts — finite numbers ≥ 0
+ *   applied — optional boolean (BET-1344: whether the mutation was performed)
+ *   mode — optional "observe" | "act" (BET-1344). Both are OPTIONAL so a
+ *     not-yet-updated observe-only plugin still validates.
  */
 export function validateCounterfactualReport(report) {
   const r = report ?? {};
@@ -72,6 +75,8 @@ export function validateCounterfactualReport(report) {
     const v = r[k];
     if (typeof v !== "number" || !Number.isFinite(v) || v < 0) return k;
   }
+  if (r.applied !== undefined && typeof r.applied !== "boolean") return "applied";
+  if (r.mode !== undefined && r.mode !== "observe" && r.mode !== "act") return "mode";
   return null;
 }
 
@@ -143,11 +148,16 @@ export function createCounterfactualStore({ load, save, now }) {
     const today = dayKey(t);
     // REPLACE the session's counterfactual (each report is the full would-mask
     // for that session's current history, not an increment).
-    s.sessions[report.sessionID] = {
+    const session = {
       maskedTokens: num(report.maskedTokens),
       maskedParts: num(report.maskedParts),
       lastTs: num(report.ts),
     };
+    // BET-1344: keep the actuation telemetry when supplied (both optional, so
+    // an observe-only plugin's report still merges cleanly).
+    if (report.applied !== undefined) session.applied = report.applied;
+    if (report.mode !== undefined) session.mode = report.mode;
+    s.sessions[report.sessionID] = session;
     capSessions(s.sessions);
     // Retention: drop day entries older than RETAIN_DAYS (ISO keys compare
     // lexicographically).
