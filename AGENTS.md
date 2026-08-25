@@ -1164,6 +1164,59 @@ consumes the bus envelopes in the renderer.
   validation accept/reject, unknown-action rejection, bus payload shape for
   both publishing actions — pure/injected only, no live HTTP/tmux).
 
+## Manta Optimizer (`src/server/optimizer/`) — phase 1 shipped, phase 2 in flight
+
+The optimizer makes a paid plan last longer: it trims dead weight out of a
+conversation's history, paces spending against the quota windows that actually
+reset, compacts long-idle conversations before the user comes back to them, and
+folds all of that into the model router's existing cost stage. **Phase 1
+(BET-1332, merged) is OBSERVE-ONLY and always on**; phase 2 (BET-1346) is what
+actuates, and it is gated behind ONE user-facing switch.
+
+**Metrics are always on; actuation is not.** With the switch off the box still
+measures everything — the ledger read model, the masking counterfactual, the
+quota-window forecast, the measured cache TTL — so the dashboard has real
+numbers to show BEFORE the user ever turns anything on. That asymmetry is
+deliberate: an optimizer that can only prove its value after you trust it never
+earns the trust.
+
+**Phase 1 surface (shipped):**
+- `optimizer:summary` (`src/server/optimizer/summary.mjs`) — a memoized (60s,
+  in-flight-guarded) read model over the opencode message ledger. Degrades to
+  `{supported:false}` on a box with no Node 24 / no `opencode.db`, exactly like
+  `modelLedger`.
+- `counterfactual.mjs` + `POST /api/optimizer/counterfactual` — the
+  observe-mode masking store. A report REPLACES a session's entry (each report
+  is the full would-mask for that history, never an increment).
+- `forecast.mjs` — quota-window observation history + forecast-at-reset, tapped
+  at the usage poller's single publish point.
+- `ttl.mjs` — the measured effective prompt-cache TTL, and the verifier that
+  compares it against what opencode is CONFIGURED to send.
+- `OptimizerCard` in Settings → Models; the visual spec is committed at
+  `docs/optimizer/mockup.html` and is the artifact the UI is implemented
+  against, not a screenshot taken afterwards.
+
+**The switch (phase 2): "Manta optimized token usage", Settings → Models,
+DEFAULT OFF.** It replaces the three-way routing-preset control, and it gates
+ONLY the phase-2 behaviours. **It does NOT gate Auto routing.** Routing
+activation is `modelRouting.preset`, which the server defaults to `"balanced"`
+(`src/server/local.mjs`), so every box has routing active today; wiring the new
+switch into `routingActive()` would silently turn Auto OFF for everyone the
+moment the default-off switch shipped. The preset config key is retained and
+pinned at `"balanced"` precisely so that cannot happen — what used to be the
+`economy` preset is now reached dynamically through the eco level below.
+
+**The one user override is the model pick.** The existing manual-pick-beats-Auto
+contract is the whole override surface: no per-knob editing, no reset buttons,
+no approval queue. Changes that could affect answer quality ship inside their
+own guardrails (constraint-retention checks, re-fetch-churn limits) rather than
+behind a human confirmation, and the activity log is the trust surface —
+including the entries where the optimizer rolled its own change back.
+
+**Nothing phones home.** There are no fleet priors and no shared telemetry of
+any kind; every parameter the tuner learns is learned from this box's own
+history and stays on it.
+
 ## Mouse mode — design decision, do not re-litigate
 
 **Mouse is ON through the whole pipeline (tmux + claude).** This matches what
