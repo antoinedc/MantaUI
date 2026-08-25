@@ -50,6 +50,8 @@ import { addApnsToken } from "./push.mjs";
 import { getRegistry as pluginsGetRegistry } from "./plugins.mjs";
 import { searchMessages } from "./messageSearch.mjs";
 import { ledgerSummary } from "./modelLedger.mjs";
+import { getDb } from "./opencodeDb.mjs";
+import { createOptimizerSummary } from "./optimizer/summary.mjs";
 import { allModels as catalogAllModels } from "./modelCatalog.mjs";
 import { MIN_CLIENT } from "./version.mjs";
 import { forgeDiffForCwd, forgeStatus, pullRequestForCwd, shipPullRequest, shipPreview, mergePullRequest, draftGetForCwd, draftCommentForCwd, draftSubmitForCwd, replyThreadForCwd, forgeInbox, forgeDeviceStart, forgeDevicePoll, forgeDeviceCancel, forgeListRepos, forgeCloneStart, forgeCloneStatus, forgeCloneCancel } from "./forge/index.mjs";
@@ -354,6 +356,10 @@ export function buildHandlers({
   // `retry` for the Accounts "Try again" action. Null when not wired → the
   // accounts:retry channel answers a non-empty failure message, never a throw.
   providerHealth = null,
+  // BET-1335: the observe-mode masking counterfactual store (optimizer/
+  // counterfactual.mjs), created + wired in index.mjs. Null when not wired →
+  // the optimizer:summary degrades to empty counterfactual fields.
+  counterfactualStore = null,
 }) {
   // The sole resolver for project cwd — no longer mirrored to a desktop-main
   // copy (the src/main/index.ts duplicate was retired in the HTTP-only
@@ -400,6 +406,14 @@ export function buildHandlers({
       return null;
     }
   }
+
+  // BET-1333: the memoized `optimizer:summary` read model. Built once per
+  // buildHandlers (single production instance) so the 60s memo + in-flight
+  // guard share across RPC calls — the same single-slot cache pattern as
+  // routingServices.mjs. `getDb` is the module-scope handle from
+  // opencodeDb.mjs; `counterfactualStore` is injected (BET-1335) so the
+  // summary merges the observe-mode counterfactual when one is wired.
+  const optimizerSummary = createOptimizerSummary({ getDb, counterfactualStore });
 
   return {
     // ---- local channels (config/git/fs/clipboard/transport/tmux-config) ----
@@ -1277,6 +1291,12 @@ export function buildHandlers({
     // routing, no behaviour change. Degrades to { supported:false } on a
     // box that hasn't taken the Node 24 runtime yet / has no opencode.db.
     "ledger:summary": (opts) => ledgerSummary(opts ?? {}),
+
+    // BET-1333: the Optimizer's memoized read model over the ledger
+    // (optimizer/summary.mjs). No arguments. Memoized server-side behind a
+    // 60s TTL with an in-flight guard. Degrades to { supported:false } on a
+    // box that hasn't taken the Node 24 runtime yet / has no opencode.db.
+    "optimizer:summary": () => optimizerSummary(),
 
     // preload: ipcRenderer.invoke(IPC.opencodeRunCommand, { sessionId, command, arguments, model?, attachments? })
     // → args[0] = that object; opencode.mjs runCommand expects same shape

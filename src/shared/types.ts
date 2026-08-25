@@ -1871,18 +1871,26 @@ export type LedgerSummary = {
 // Crosses the wire, so it lives in shared/types. `totals`/`cacheShare` reuse
 // the ledger `aggregate` shape; `dailySeries` is a zero-filled local-day
 // tokensSent graph over `windowDays`, oldest→newest; `bySession` is the top 20
-// sessions by cost. `ttl`/`counterfactual`/`windows` are placeholders that
-// Optimizer children 2–4 fill — they stay present (null) so the renderer
-// contract is stable. `supported:false` = the box can't read opencode.db.
+// sessions by cost. BET-1335 fills the `counterfactual` placeholder: each
+// `dailySeries` day gains a `maskedTokens` (0 where no counterfactual) = the
+// observe-mode "what manta WOULD trim" line; each top-20 `bySession` entry
+// gains `savedPct`; and the `counterfactual` key itself holds the raw store
+// fields. `windows` stays a `null` placeholder child 4 fills. `ttl` stays null
+// in phase 1 — the hotfix (#1339) made the cacheTtl setting WRITE the real
+// opencode TTL, so measurement returns later as its verifier.
+// `supported:false` = the box can't read opencode.db.
 export type OptimizerSummary = {
   supported: boolean;
   windowDays: number;
   totals: { turns: number; cost: number; input: number; output: number; cacheRead: number; cacheWrite: number };
   cacheShare: { output: number; cacheRead: number; cacheWrite: number; input: number };
-  dailySeries: { day: string; tokensSent: number }[]; // "YYYY-MM-DD", oldest→newest
-  bySession: { sessionID: string | null; turns: number; cost: number; tokensSent: number }[];
+  dailySeries: { day: string; tokensSent: number; maskedTokens: number }[]; // "YYYY-MM-DD", oldest→newest
+  bySession: { sessionID: string | null; turns: number; cost: number; tokensSent: number; savedPct: number }[];
   ttl: null;
-  counterfactual: null;
+  counterfactual: {
+    dailySeries: { day: string; maskedTokens: number }[];
+    bySession: Record<string, { maskedTokens: number }>;
+  } | null;
   windows: null;
 };
 
