@@ -81,7 +81,6 @@ final class SessionListStore: ObservableObject {
     private let api: MantaAPIClient
     private let mutations: SessionListMutationAPI
     private let eventStore: MantaEventStore
-    private var attentionSessions: Set<String> = []
     /// opencodeSessionID → lightweight per-session metadata resolved from the
     /// opencode session list (BET-897). One dictionary replaces the old separate
     /// `modelLabels` map and feeds both the running subtitle and the new idle
@@ -108,7 +107,6 @@ final class SessionListStore: ObservableObject {
         self.eventStore = eventStore
         self.loadConfig()
         self.eventStore.addRawFrameHandler { [weak self] frame in
-            self?.trackAttention(frame: frame)
             self?.trackProgress(frame: frame)
         }
     }
@@ -251,14 +249,17 @@ final class SessionListStore: ObservableObject {
     // MARK: - Row status (reads the S1b store)
 
     /// The window's live status, merging the box's stream state with the
-    /// attention set. Pure inputs; presentation decided in SessionModels.
+    /// attention derived from its pending questions/permissions. Pure inputs;
+    /// presentation decided in SessionModels.
     func rowStatus(for window: MantaWindow) -> SessionRowStatus {
         let sid = window.opencodeSessionId ?? ""
         let stream = eventStore.sessionStates[sid]
         let running = stream?.running == true
+        let attention = !(stream?.questions?.questions.isEmpty ?? true)
+            || !(stream?.permissions?.permissions.isEmpty ?? true)
         return SessionRowStatus(
             running: running,
-            attention: attentionSessions.contains(sid),
+            attention: attention,
             backgroundJobs: backgroundJobsBySession[sid] ?? 0,
             modelLabel: sessionMeta[sid]?.modelLabel,
             progressLabel: progressBySession[sid],
@@ -274,48 +275,14 @@ final class SessionListStore: ObservableObject {
         visibleWindows(in: project).filter { rowStatus(for: $0).running }.count
     }
 
-    // MARK: - Attention (needs-you dot / subtitle)
-
-    /// Track `question.*` / `permission.*` request/response frames as a per-
-    /// session "needs you" signal for the §7.1 warn dot + §7.1a subtitle.
-    private func trackAttention(frame: MantaStreamFrame) {
-        guard let kind = kind(frame), let sid = frame.sessionId else { return }
-        // Compute the new value first and publish ONLY when it actually differs
-        // from the stored one (BET-672): the raw frame surface carries a row
-        // for every raw event, so an unconditional `objectWillChange.send()`
-        // re-rendered the whole session list per frame even when the attention
-        // set did not change.
-        var changed = false
-        if kind == "question.asked" || kind == "permission.asked" {
-            if !attentionSessions.contains(sid) {
-                attentionSessions.insert(sid)
-                changed = true
-            }
-        } else if kind == "question.replied" || kind == "question.rejected"
-            || kind == "permission.replied" || kind == "permission.rejected" {
-            changed = attentionSessions.remove(sid) != nil
-        }
-        if changed { objectWillChange.send() }
-    }
-
-    private func kind(_ frame: MantaStreamFrame) -> String? {
-        guard case .object(let obj) = frame.payload ?? .object([:]) else {
-            return frame.kind
-        }
-        // Raw opencode events carry `kind` at the top frame level; fall back
-        // to the envelope kind.
-        if case .string(let s)? = obj["kind"] { return s }
-        return frame.kind
-    }
-
     // MARK: - Progress (BET-791)
 
     /// Track `progress.updated` frames: refetch that session's progress record
     /// (the frame carries only a {sessionID} hint) and stash the working label
     /// so the row subtitle can show it. Published only when the label actually
-    /// differs (mirrors trackAttention's BET-672 re-render guard).
+    /// differs (mirrors the old trackAttention's BET-672 re-render guard).
     private func trackProgress(frame: MantaStreamFrame) {
-        guard kind(frame) == "progress.updated", let sid = frame.sessionId else { return }
+        guard let kind = frame.eventType ?? frame.kind, kind == "progress.updated", let sid = frame.sessionId else { return }
         Task { [weak self] in
             let label = await self?.workingProgressLabel(sessionID: sid)
             guard let self else { return }
@@ -492,7 +459,6 @@ final class SessionListStore: ObservableObject {
         loadError = nil
         loadedOnce = false
         pendingDeletes = [:]
-        attentionSessions = []
         sessionMeta = [:]
         progressBySession = [:]
         delegateJobs = [:]
