@@ -109,6 +109,13 @@ struct MantaStreamFrame: Equatable, Sendable {
     var sub: String?
     var sessionId: String?
     var payload: JSONValue?
+    /// The event's TYPE, resolved once at parse time so consumers never
+    /// re-derive it. For RAW opencode events it is `payload.type` (with a
+    /// `payload.kind` fallback for older boxes); typed `stream` frames carry
+    /// no payload-level type, so it is nil there and the `sub` drives
+    /// interpretation. This is the SINGLE place the app resolves an event's
+    /// type (BET-1348).
+    var eventType: String?
 
     var isHeartbeat: Bool { kind == "heartbeat" }
 
@@ -132,11 +139,42 @@ struct MantaStreamFrame: Equatable, Sendable {
         guard let kind = string("kind") else {
             throw MantaError.transport("event frame missing kind")
         }
+        func nonEmpty(_ key: String, in dict: [String: JSONValue]) -> String? {
+            if case .string(let s)? = dict[key], !s.isEmpty { return s }
+            return nil
+        }
+        let rawPayload: [String: JSONValue] = {
+            if case .object(let p)? = obj["payload"] { return p }
+            return [:]
+        }()
+        // sessionId: envelope key first; when absent or empty, fall back to
+        // `payload.sessionID`, then `payload.sessionId`, then the same two keys
+        // under `payload.properties` (the box nests it there for raw opencode
+        // events). First non-empty wins.
+        let properties: [String: JSONValue] = {
+            if case .object(let p)? = rawPayload["properties"] { return p }
+            return [:]
+        }()
+        let envelopeSession = string("sessionId")
+        let sessionId: String?
+        if let envelopeSession, !envelopeSession.isEmpty {
+            sessionId = envelopeSession
+        } else {
+            sessionId = nonEmpty("sessionID", in: rawPayload)
+                ?? nonEmpty("sessionId", in: rawPayload)
+                ?? nonEmpty("sessionID", in: properties)
+                ?? nonEmpty("sessionId", in: properties)
+        }
+        // eventType: `payload.type` if a non-empty string, else `payload.kind`.
+        // The envelope `kind` is intentionally LEFT untouched (it stays the
+        // box's frame kind).
+        let eventType = nonEmpty("type", in: rawPayload) ?? nonEmpty("kind", in: rawPayload)
         return MantaStreamFrame(
             kind: kind,
             sub: string("sub"),
-            sessionId: string("sessionId"),
-            payload: obj["payload"]
+            sessionId: sessionId,
+            payload: obj["payload"],
+            eventType: eventType
         )
     }
 }

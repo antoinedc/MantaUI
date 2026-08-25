@@ -117,6 +117,63 @@ final class MantaEventStreamModelTests: XCTestCase {
         XCTAssertNil(f.payload)
     }
 
+    // MARK: - sessionId / eventType resolution (BET-1348)
+
+    /// Raw opencode events carry the session id inside the payload (the box
+    /// envelope has none). The parser must fall back to it.
+    func testParseTakesSessionIDFromPayloadWhenEnvelopeHasNone() throws {
+        let f = try frame(#"{"kind":"opencode","payload":{"sessionID":"ses_payload"}}"#)
+        XCTAssertEqual(f.sessionId, "ses_payload")
+        XCTAssertNil(f.eventType)
+    }
+
+    /// The session id can also sit under payload.properties (the box nests it
+    /// there for raw opencode events). The parser must descend into it.
+    func testParseTakesSessionIDFromPayloadProperties() throws {
+        let f = try frame(#"{"kind":"opencode","payload":{"properties":{"sessionID":"ses_1"}}}"#)
+        XCTAssertEqual(f.sessionId, "ses_1")
+    }
+
+    /// The envelope key wins when both are present.
+    func testParsePrefersEnvelopeSessionIDOverPayload() throws {
+        let f = try frame(#"{"kind":"stream","sessionId":"ses_env","payload":{"sessionID":"ses_payload"}}"#)
+        XCTAssertEqual(f.sessionId, "ses_env")
+    }
+
+    /// No session id anywhere -> nil, not a crash.
+    func testParseReturnsNilSessionIDWhenNeitherExists() throws {
+        let f = try frame(#"{"kind":"opencode","payload":{"type":"question.asked"}}"#)
+        XCTAssertNil(f.sessionId)
+    }
+
+    /// The event type lives at payload.type for raw opencode frames.
+    func testParseResolvesEventTypeFromPayloadType() throws {
+        let f = try frame(#"{"kind":"opencode","payload":{"type":"question.asked"}}"#)
+        XCTAssertEqual(f.eventType, "question.asked")
+    }
+
+    /// Older boxes put the type at payload.kind; that is the fallback.
+    func testParseFallsBackEventTypeToPayloadKind() throws {
+        let f = try frame(#"{"kind":"opencode","payload":{"kind":"permission.asked"}}"#)
+        XCTAssertEqual(f.eventType, "permission.asked")
+    }
+
+    /// No type anywhere -> eventType nil.
+    func testParseReturnsNilEventTypeWhenNeitherExists() throws {
+        let f = try frame(#"{"kind":"opencode","payload":{"properties":{"foo":"bar"}}}"#)
+        XCTAssertNil(f.eventType)
+    }
+
+    /// REGRESSION — the literal frame that ships the needs-you dot. Both the
+    /// session id (from payload.sessionID) and the type (from payload.type)
+    /// must resolve, because the box envelope carries neither.
+    func testParseQuestionAskedFrameResolvesSessionAndType() throws {
+        let f = try frame(#"{"kind":"opencode","payload":{"type":"question.asked","properties":{"sessionID":"ses_1"}}}"#)
+        XCTAssertEqual(f.sessionId, "ses_1")
+        XCTAssertEqual(f.eventType, "question.asked")
+        XCTAssertEqual(f.kind, "opencode")
+    }
+
     func testParsesRunningPayload() throws {
         let f = try frame(#"{"kind":"stream","sub":"running","sessionId":"ses_1","payload":{"running":true}}"#)
         let p = try XCTUnwrap(f.decodedPayload(StreamRunningPayload.self))
@@ -521,6 +578,36 @@ final class MantaEventStreamRouterTests: XCTestCase {
         )
         XCTAssertEqual(next["ses_1"]?.running, true)
         XCTAssertEqual(next["ses_1"]?.runningSince, Date(timeIntervalSince1970: 1234))
+    }
+
+    /// REGRESSION (BET-1348): the connect snapshot re-emits a `questions` /
+    /// `permissions` frame only for sessions whose list is NON-empty, so a
+    /// card answered while the device was disconnected would otherwise stay
+    /// latched forever. The running set must clear both so the snapshot is
+    /// authoritative for pending cards — on a session absent from the set.
+    func testRunningSetClearsQuestionsAndPermissionsAbsentFromTheSet() {
+        var s = MantaSessionStreamState(sessionId: "ses_1")
+        s.questions = StreamQuestionsPayload(questions: [])
+        s.permissions = StreamPermissionsPayload(permissions: [])
+        let next = MantaStreamRouter.applyingRunningSet(
+            StreamRunningSetPayload(sessions: []), to: ["ses_1": s]
+        )
+        XCTAssertNil(next["ses_1"]?.questions)
+        XCTAssertNil(next["ses_1"]?.permissions)
+    }
+
+    /// ... and on a session PRESENT in the running set (its still-pending
+    /// cards are restored by the snapshot's own frames that follow).
+    func testRunningSetClearsQuestionsAndPermissionsPresentInTheSet() {
+        var s = MantaSessionStreamState(sessionId: "ses_1")
+        s.questions = StreamQuestionsPayload(questions: [])
+        s.permissions = StreamPermissionsPayload(permissions: [])
+        let next = MantaStreamRouter.applyingRunningSet(
+            StreamRunningSetPayload(sessions: [.init(sessionId: "ses_1", since: nil, type: nil)]),
+            to: ["ses_1": s]
+        )
+        XCTAssertNil(next["ses_1"]?.questions)
+        XCTAssertNil(next["ses_1"]?.permissions)
     }
 
     // MARK: - Subagent upsert (BET-672)

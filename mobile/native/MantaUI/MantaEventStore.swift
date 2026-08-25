@@ -278,10 +278,12 @@ enum MantaStreamRouter {
 
     /// Replace running state across ALL known sessions from the box's
     /// authoritative set. A session absent from the set is not running.
-    /// Only `running` / `runningSince` are touched — `turnComplete`, `chunks`
-    /// and `tools` are deliberately left alone (turn retirement + tool rows are
-    /// owned by the reconnect transcript refetch; synthesising `turnComplete`
-    /// here would double-fire the completion haptic).
+    /// `running` / `runningSince` are reconciled as authoritative, AND
+    /// `questions` / `permissions` are cleared so the snapshot (which only
+    /// re-emits non-empty lists) can reconcile pending cards (BET-1348).
+    /// `turnComplete`, `chunks` and `tools` are deliberately left alone (turn
+    /// retirement + tool rows are owned by the reconnect transcript refetch;
+    /// synthesising `turnComplete` here would double-fire the completion haptic).
     static func applyingRunningSet(
         _ payload: StreamRunningSetPayload,
         to states: [String: MantaSessionStreamState]
@@ -292,6 +294,15 @@ enum MantaStreamRouter {
             let entry = bySession[sid]
             s.running = entry != nil
             s.runningSince = resolveRunningSetSince(entry, current: s.runningSince)
+            // An authoritative replay starts here (BET-1348): the box's connect
+            // snapshot only emits a `questions` / `permissions` frame for
+            // sessions whose list is NON-empty, so a card answered while the
+            // device was disconnected would otherwise stay latched forever.
+            // Clearing both makes the snapshot authoritative for pending cards,
+            // exactly as `running` is — the snapshot's own frames repopulate
+            // whatever is still pending. Same-path, correctly-ordered marker.
+            s.questions = nil
+            s.permissions = nil
             next[sid] = s
         }
         // A session the device has never seen a frame for can still be running.
