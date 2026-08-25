@@ -24,6 +24,7 @@ import { AccountsCard } from "./AccountsCard";
 import { ModelsWeCouldntIdentify } from "./ModelsWeCouldntIdentify";
 import { ModelsCard } from "./ModelsCard";
 import { ModelLedgerCard } from "./ModelLedgerCard";
+import { OptimizerCard } from "./OptimizerCard";
 import { AddPhonePanel } from "./AddPhonePanel";
 import { getMantaPreload } from "./preloadAccess";
 import { resolveLauncherFlags } from "./chatShared";
@@ -1096,6 +1097,7 @@ export function Settings({
           <GroupCard title="Models">
             <ModelsCard />
             <ModelLedgerCard />
+            <OptimizerCard />
           </GroupCard>
         </>
       );

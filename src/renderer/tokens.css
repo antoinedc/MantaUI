@@ -253,6 +253,8 @@
   --warn: #FACC15;
   --danger: #FF6B7A;
   --info: #49D7F5;
+  --cache-read: #0ea5a4;
+  --cache-write: #f59e0b;
   --ok-bg: #3DD9A41f;
   --warn-bg: #FACC151f;
   --danger-bg: #FF6B7A1f;
@@ -329,6 +331,8 @@
   --warn: #6E6200;
   --danger: #BE2F3C;
   --info: #0B6E85;
+  --cache-read: #0ea5a4;
+  --cache-write: #f59e0b;
   --ok-bg: #0A7A5314;
   --warn-bg: #6E620014;
   --danger-bg: #BE2F3C14;
