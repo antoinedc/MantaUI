@@ -20,6 +20,7 @@
 import { aggregate, aggregateBySession, aggregateDailySeries, fetchLedgerRows } from "../modelLedger.mjs";
 import { summaryFields } from "./counterfactual.mjs";
 import { forecastAtReset } from "./forecast.mjs";
+import { measureEffectiveTtl, verifyCacheTtl, cacheTtlLabelMs } from "./ttl.mjs";
 
 const WINDOW_DAYS = 30;
 const TTL_MS = 60_000;
@@ -48,6 +49,11 @@ export async function buildOptimizerSummary({
   // `{[key]: [{ts,pct}]}` (production wires usage.mjs getUsageHistory).
   usageSnapshots = () => [],
   usageHistory = () => ({}),
+  // BET-1340: injected read of what opencode is CONFIGURED to send for the
+  // cache TTL ("5m" | "1h"). null on any failure. Injected (like fetchRows)
+  // so the verifier stays testable; the 60s memo in createOptimizerSummary
+  // bounds this I/O to one call per window, so it is null-cost to wire.
+  readCacheTtl = async () => null,
 } = {}) {
   const nowMs = num(now);
   const raw = await fetchRows(nowMs - WINDOW_DAYS * 86_400_000);
@@ -65,6 +71,34 @@ export async function buildOptimizerSummary({
     ...e,
     savedPct: savedPctFor(e, cf?.bySession),
   }));
+
+  // BET-1340: `ttl` is a DIAGNOSTIC, never user-facing in P1 (the renderer
+  // deliberately does not render it — see OptimizerCard). It carries the
+  // measured effective TTL plus, when the measurement is conclusive and a
+  // configured TTL is readable, whether it matches what opencode is set to
+  // send. A mismatch is logged once as an [optimizer] line: config and
+  // measured reality have drifted apart.
+  const measured = measureEffectiveTtl(rows, nowMs);
+  let configuredTtl = null;
+  try {
+    configuredTtl = (await readCacheTtl()) ?? null;
+  } catch (e) {
+    console.warn("[optimizer] cache-TTL read failed:", e?.message ?? e);
+  }
+  const verification = verifyCacheTtl(measured, configuredTtl);
+  if (verification && !verification.matched) {
+    console.warn(
+      `[optimizer] cache-TTL mismatch: measured ${cacheTtlLabelMs(verification.measuredMs)} vs configured ${cacheTtlLabelMs(verification.configuredMs)}`,
+    );
+  }
+  const ttl = {
+    measuredMs: measured.ms,
+    confidence: measured.confidence,
+    observations: measured.observations,
+    configuredMs: verification ? verification.configuredMs : null,
+    matched: verification ? verification.matched : null,
+  };
+
   return {
     supported: true,
     windowDays: WINDOW_DAYS,
@@ -72,7 +106,7 @@ export async function buildOptimizerSummary({
     cacheShare,
     dailySeries,
     bySession,
-    ttl: null,
+    ttl,
     counterfactual: cf ? { dailySeries: cf.dailySeries, bySession: cf.bySession } : null,
     windows: windowsFor(usageSnapshots(), usageHistory(), nowMs),
   };
@@ -131,7 +165,7 @@ let inflight = null;
  * summary then degrades to empty counterfactual). The returned async
  * function memoizes the built summary for TTL_MS with an in-flight guard.
  */
-export function createOptimizerSummary({ getDb, now, counterfactualStore = null, usageSnapshots, usageHistory }) {
+export function createOptimizerSummary({ getDb, now, counterfactualStore = null, usageSnapshots, usageHistory, readCacheTtl }) {
   const nowMs = () => (typeof now === "function" ? num(now()) : num(now ?? Date.now()));
   return async function optimizerSummary() {
     const t = nowMs();
@@ -147,6 +181,7 @@ export function createOptimizerSummary({ getDb, now, counterfactualStore = null,
           counterfactualStore,
           usageSnapshots,
           usageHistory,
+          readCacheTtl,
         });
         cache = { at: t, value };
         return value;

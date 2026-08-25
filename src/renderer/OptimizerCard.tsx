@@ -248,9 +248,9 @@ export function OptimizerCard() {
         <div className="opt-stat">
           <div className="opt-stat-l">Cache hit</div>
           <div className="opt-stat-v">{wholePct(cacheHitPct)}</div>
-          {/* TTL detail is intentionally absent: optimizer:summary.ttl is null on
-              current runtimes (the measured-TTL feature was reverted; see
-              BET-1334/#1339). Render nothing rather than a fabricated TTL. */}
+          {/* TTL detail is intentionally absent: optimizer:summary.ttl is a
+              DIAGNOSTIC value (measured effective TTL + verifier comparison,
+              BET-1340), never user-facing in P1. Render nothing. */}
           <div className="opt-stat-d" />
         </div>
         <div className="opt-stat">

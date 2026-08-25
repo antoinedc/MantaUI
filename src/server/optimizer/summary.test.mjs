@@ -17,8 +17,33 @@ function row(over = {}) {
     cacheWrite: 0,
     output: 0,
     startedMs: 0,
+    completedMs: 0,
     ...over,
   };
+}
+
+// Build `count` consecutive turns in one session, each `gapMs` after the
+// previous completion — deterministic consecutive pairs for the TTL verifier.
+// Every pair is cold (cacheRead 0) and well-clear of the 5000-ctx floor, so a
+// `count` >= 7 yields a conclusive "measured 5m" verdict.
+function sessionTurns({ count, gapMs = 10 * 60_000 }) {
+  const rows = [];
+  let start = 1_750_000_000_000;
+  for (let i = 0; i < count; i++) {
+    const completed = start + 10_000;
+    rows.push(
+      row({
+        sessionID: "s1",
+        startedMs: start,
+        completedMs: completed,
+        input: 10_000,
+        cacheRead: 0,
+        cacheWrite: 0,
+      }),
+    );
+    start = completed + gapMs;
+  }
+  return rows;
 }
 
 function memStore(now, seed = {}) {
@@ -50,7 +75,16 @@ test("buildOptimizerSummary returns the full shape with empty counterfactual, re
   // The placeholders children 4 fills, kept for a stable contract. No
   // counterfactualStore wired → counterfactual is empty: maskedTokens 0 on
   // every day, savedPct 0 on every session, the counterfactual key null.
-  assert.equal(s.ttl, null);
+  // `ttl` (BET-1340): a single row yields no consecutive pairs → the default
+  // measurement; no configured TTL readable (readCacheTtl → null) → no
+  // verification. Diagnostic only, never user-facing in P1.
+  assert.deepEqual(s.ttl, {
+    measuredMs: 300_000,
+    confidence: "default",
+    observations: 0,
+    configuredMs: null,
+    matched: null,
+  });
   assert.equal(s.counterfactual, null);
   // No usage snapshots wired → windows is empty (P1.4: the quota-window slice).
   assert.deepEqual(s.windows, []);
@@ -194,4 +228,56 @@ test("buildOptimizerSummary: windows slice maps stored snapshots + forecast-at-r
   assert.equal(s.windows[1].forecastPct, null);
   assert.equal(s.windows[1].resetsAt, now + 100 * H);
   assert.equal(s.windows[2].forecastPct, null);
+});
+
+test("buildOptimizerSummary: measured 5m vs configured 1h logs one [optimizer] mismatch line (BET-1340)", async () => {
+  const now = new Date(2026, 7, 24, 12, 0, 0).getTime();
+  // 8 turns → 7 conclusive cold pairs → measured 5m with confidence "measured".
+  const rows = sessionTurns({ count: 8 });
+  const fetchRows = async () => rows;
+  const readCacheTtl = async () => "1h"; // opencode configured to SEND 1h
+
+  const warns = [];
+  const originalWarn = console.warn;
+  console.warn = (m) => warns.push(String(m));
+  let s;
+  try {
+    s = await buildOptimizerSummary({ fetchRows, now, readCacheTtl });
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  // One [optimizer] mismatch line is logged.
+  const mismatch = warns.filter((m) => m.includes("[optimizer] cache-TTL mismatch"));
+  assert.equal(mismatch.length, 1);
+  assert.match(mismatch[0], /measured 5m vs configured 1h/);
+
+  // The diagnostic entry reflects the disagreement.
+  assert.equal(s.ttl.measuredMs, 300_000);
+  assert.equal(s.ttl.confidence, "measured");
+  assert.equal(s.ttl.configuredMs, 3_600_000);
+  assert.equal(s.ttl.matched, false);
+});
+
+test("buildOptimizerSummary: no mismatch log when the verifier has nothing conclusive", async () => {
+  const now = new Date(2026, 7, 24, 12, 0, 0).getTime();
+  // A single row → 0 observations → confidence "default" → verifyCacheTtl
+  // returns null, so nothing is logged even when configured is 1h.
+  const fetchRows = async () => [row({ startedMs: now })];
+  const readCacheTtl = async () => "1h";
+
+  const warns = [];
+  const originalWarn = console.warn;
+  console.warn = (m) => warns.push(String(m));
+  let s;
+  try {
+    s = await buildOptimizerSummary({ fetchRows, now, readCacheTtl });
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  assert.ok(warns.every((m) => !m.includes("[optimizer] cache-TTL mismatch")), "no mismatch line expected");
+  assert.equal(s.ttl.confidence, "default");
+  assert.equal(s.ttl.configuredMs, null);
+  assert.equal(s.ttl.matched, null);
 });

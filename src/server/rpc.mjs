@@ -420,7 +420,15 @@ export function buildHandlers({
   // routingServices.mjs. `getDb` is the module-scope handle from
   // opencodeDb.mjs; `counterfactualStore` is injected (BET-1335) so the
   // summary merges the observe-mode counterfactual when one is wired.
-  const optimizerSummary = createOptimizerSummary({ getDb, counterfactualStore, usageSnapshots, usageHistory });
+  // BET-1340: `readCacheTtl` feeds the summary's TTL verifier — what opencode
+  // is configured to send, compared against the measured effective TTL.
+  const optimizerSummary = createOptimizerSummary({
+    getDb,
+    counterfactualStore,
+    usageSnapshots,
+    usageHistory,
+    readCacheTtl: () => providers.readCacheTtl({ listProviders: oc.getProviders }),
+  });
 
   return {
     // ---- local channels (config/git/fs/clipboard/transport/tmux-config) ----
