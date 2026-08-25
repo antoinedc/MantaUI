@@ -282,7 +282,7 @@ final class SessionListStore: ObservableObject {
     /// so the row subtitle can show it. Published only when the label actually
     /// differs (mirrors the old trackAttention's BET-672 re-render guard).
     private func trackProgress(frame: MantaStreamFrame) {
-        guard let kind = frame.eventType ?? frame.kind, kind == "progress.updated", let sid = frame.sessionId else { return }
+        guard (frame.eventType ?? frame.kind) == "progress.updated", let sid = frame.sessionId else { return }
         Task { [weak self] in
             let label = await self?.workingProgressLabel(sessionID: sid)
             guard let self else { return }
