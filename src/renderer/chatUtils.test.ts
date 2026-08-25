@@ -29,6 +29,11 @@ import {
   detectCommandFromText,
   MIN_COMMAND_PREFIX_LEN,
   formatAge,
+  QUOTE_MAX,
+  QUOTE_HEAD,
+  QUOTE_TAIL,
+  truncateMiddle,
+  buildQuoteBlock,
   shouldAbortForQueuedDrain,
   isToolStepBoundary,
   isDrainAbortError,
@@ -667,6 +672,58 @@ describe("formatAge", () => {
   it("treats negative/NaN input as 'now'", () => {
     expect(formatAge(-1000)).toBe("now");
     expect(formatAge(NaN)).toBe("now");
+  });
+});
+
+// ===== truncateMiddle / buildQuoteBlock (BET-1351) =====
+
+describe("truncateMiddle", () => {
+  it("returns text unchanged at and below max", () => {
+    const text = "a".repeat(QUOTE_MAX);
+    expect(truncateMiddle(text, QUOTE_MAX, QUOTE_HEAD, QUOTE_TAIL)).toBe(text);
+    expect(truncateMiddle("short", QUOTE_MAX, QUOTE_HEAD, QUOTE_TAIL)).toBe("short");
+  });
+
+  it("produces `head … tail` above max and is shorter than the input", () => {
+    const text = "x".repeat(QUOTE_MAX + 50);
+    const out = truncateMiddle(text, QUOTE_MAX, QUOTE_HEAD, QUOTE_TAIL);
+    expect(out).toBe(`${"x".repeat(QUOTE_HEAD)} … ${"x".repeat(QUOTE_TAIL)}`);
+    expect(out.length).toBeLessThan(text.length);
+    expect(out.length).toBeLessThanOrEqual(QUOTE_MAX);
+  });
+
+  it("uses a single U+2026 with one space each side", () => {
+    const text = "a".repeat(QUOTE_MAX + 10);
+    const out = truncateMiddle(text, QUOTE_MAX, QUOTE_HEAD, QUOTE_TAIL);
+    expect(out).toContain(" \u2026 ");
+    expect(out.split("\u2026")).toHaveLength(2);
+    expect(out).not.toContain("...");
+  });
+});
+
+describe("buildQuoteBlock", () => {
+  it("collapses newlines and runs of spaces to single spaces and trims", () => {
+    const out = buildQuoteBlock("  hello   world\n\nsecond  line  ", QUOTE_MAX, QUOTE_HEAD, QUOTE_TAIL);
+    expect(out).toBe("> hello world second line\n\n");
+  });
+
+  it("returns null for empty and whitespace-only input", () => {
+    expect(buildQuoteBlock("", QUOTE_MAX, QUOTE_HEAD, QUOTE_TAIL)).toBeNull();
+    expect(buildQuoteBlock("   \n\t  ", QUOTE_MAX, QUOTE_HEAD, QUOTE_TAIL)).toBeNull();
+  });
+
+  it("prefixes exactly '> ' and ends with exactly '\\n\\n'", () => {
+    const out = buildQuoteBlock("hello", QUOTE_MAX, QUOTE_HEAD, QUOTE_TAIL);
+    expect(out).toMatch(/^> /);
+    expect(out!.endsWith("\n\n")).toBe(true);
+  });
+
+  it("reduces a long multi-paragraph selection to one line with exactly one ellipsis", () => {
+    const paragraph = "word ".repeat(120).trim();
+    const multi = `${paragraph}\n\n${paragraph}`;
+    const out = buildQuoteBlock(multi, QUOTE_MAX, QUOTE_HEAD, QUOTE_TAIL)!;
+    expect(out.trim().split("\n")).toHaveLength(1);
+    expect(out.split(" \u2026 ")).toHaveLength(2);
   });
 });
 

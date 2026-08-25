@@ -419,6 +419,42 @@ export function formatAge(elapsedMs: number): string {
   return `${days}d`;
 }
 
+// ===== Quote selection → composer (BET-1351) =====
+//
+// Normalises a transcript selection into ONE middle-truncated blockquote line
+// (`"> ...\n\n"`) that gets PREPENDED to whatever is already in the composer.
+// There is deliberately no hidden payload / chip / extra composer state: the
+// model already holds the full transcript in its context, so the quote only
+// has to be a locatable pointer. Collapsing to a single line also kills the
+// class of bug where a selection spanning several flex-laid-out paragraph
+// blocks serialises without its newlines.
+
+/** Longest quoted line, in chars. */
+export const QUOTE_MAX = 240;
+/** Chars kept from the head of a quote that exceeds `QUOTE_MAX`. */
+export const QUOTE_HEAD = 140;
+/** Chars kept from the tail of a quote that exceeds `QUOTE_MAX`. */
+export const QUOTE_TAIL = 80;
+
+/** "beginning … end". Returns `text` unchanged when it fits within `max`. */
+export function truncateMiddle(text: string, max: number, head: number, tail: number): string {
+  if (text.length <= max) return text;
+  return text.slice(0, head).trimEnd() + " \u2026 " + text.slice(text.length - tail).trimStart();
+}
+
+/**
+ * Selection → the exact string to prepend to the composer, or null when the
+ * selection has no usable text. Whitespace runs collapse to a single space,
+ * the result is trimmed, truncated, then prefixed with `"> "` and suffixed
+ * with a blank line (`"\n\n"`).
+ */
+export function buildQuoteBlock(selection: string, max: number, head: number, tail: number): string | null {
+  const collapsed = selection.replace(/\s+/g, " ").trim();
+  if (!collapsed) return null;
+  const truncated = truncateMiddle(collapsed, max, head, tail);
+  return "> " + truncated + "\n\n";
+}
+
 export type TypeaheadCommandRow = {
   name: string;
   description?: string;

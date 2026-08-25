@@ -105,11 +105,13 @@ import { CardStack, type PinnedCardRender } from "./components/CardStack";
 import { useSessionResources } from "./hooks/useSessionResources";
 import { useInputHistory } from "./hooks/useInputHistory";
 import { useTranscriptState } from "./hooks/useTranscriptState";
+import { useTranscriptSelection } from "./hooks/useTranscriptSelection";
 import { useSseBus } from "./hooks/useSseBus";
 import { useVoice } from "./hooks/useVoice";
 import { useTypeahead } from "./hooks/useTypeahead";
 import { VoicePlaybackProvider } from "./hooks/useVoicePlayback";
 import { Transcript } from "./Transcript";
+import { QuoteToolbar } from "./QuoteToolbar";
 import { Composer } from "./Composer";
 import { SessionHeader } from "./SessionHeader";
 import { Modal } from "./Modal";
@@ -301,6 +303,7 @@ export function ChatPanel({
 
   const projects = useStore((s) => s.projects);
   const setActive = useStore((s) => s.setActive);
+  const activateWindow = useStore((s) => s.activateWindow);
 
   const inputRef = useRef<HTMLTextAreaElement>(null);
   // Per-child debounce timers for refetching child transcripts when their
@@ -1780,25 +1783,39 @@ export function ChatPanel({
   // project list automatically via the next refresh / sync delta call.
   const refresh = useStore((s) => s.refresh);
 
-  const forkSession = useCallback(async () => {
-    if (!tmuxSession) return;
-    setSendError(null);
-    try {
-      const baseName = windowIndex != null ? `fork-${windowIndex}` : "fork";
-      const windowName = `${baseName}-${Date.now().toString(36).slice(-4)}`;
-      await window.api.opencodeForkSession({
-        sessionId,
-        sessionName: tmuxSession,
-        windowName,
-        // Empty string signals the main handler to resolve from the project's
-        // stored defaultCwd (see resolveProjectCwd in src/main/index.ts).
-        cwd: cwd ?? "",
-      });
-      await refresh();
-    } catch (e) {
-      setSendError(String((e as Error)?.message ?? e));
-    }
-  }, [sessionId, tmuxSession, windowIndex, cwd, refresh]);
+  const forkSession = useCallback(
+    async (seedText?: string) => {
+      if (!tmuxSession) return;
+      setSendError(null);
+      try {
+        const baseName = windowIndex != null ? `fork-${windowIndex}` : "fork";
+        const windowName = `${baseName}-${Date.now().toString(36).slice(-4)}`;
+        const { newSessionId, projects } = await window.api.opencodeForkSession({
+          sessionId,
+          sessionName: tmuxSession,
+          windowName,
+          // Empty string signals the main handler to resolve from the project's
+          // stored defaultCwd (see resolveProjectCwd in src/main/index.ts).
+          cwd: cwd ?? "",
+        });
+        await refresh();
+        // BET-1351 "Quote in new session": seed the fork's composer with the
+        // quote (a truncated pointer only resolvable in a session that carries
+        // the transcript it points into) and land the user in the fork. Same
+        // activate-then-seed pattern as InboxPalette's "Start a session".
+        if (seedText) {
+          useStore.getState().setSeedPrompt({ sid: newSessionId, text: seedText });
+          const win = projects
+            .flatMap((p) => p.windows)
+            .find((w) => w.opencodeSessionId === newSessionId);
+          if (win) await activateWindow(tmuxSession, win.index);
+        }
+      } catch (e) {
+        setSendError(String((e as Error)?.message ?? e));
+      }
+    },
+    [sessionId, tmuxSession, windowIndex, cwd, refresh, activateWindow],
+  );
 
   const compactSession = useCallback(async () => {
     setSendError(null);
@@ -2298,6 +2315,37 @@ export function ChatPanel({
     tmuxSession,
     windowIndex,
     historyEpoch,
+  });
+
+  // BET-1351 — transcript quote bar. The hook is event-driven/one-shot: it
+  // shows on pointerup / shift-arrow keyup, captures the selection position
+  // once, and hides on the next scroll / pointerdown / Escape / action / session
+  // change (see useTranscriptSelection). "Quote" prepends the blockquote line
+  // to the composer; "Quote in new session" forks and seeds the fork's composer.
+  const quoteToolbarRef = useRef<HTMLDivElement | null>(null);
+  const { quote, quoteNow, quoteNewSessionNow } = useTranscriptSelection({
+    scrollerRef: scrollerElRef,
+    toolbarRef: quoteToolbarRef,
+    sessionId,
+    onQuote: useCallback(
+      (block: string) => {
+        updateInputWithHistoryReset(block + input);
+        requestAnimationFrame(() => {
+          const el = inputRef.current;
+          if (!el) return;
+          el.focus();
+          const end = (block + input).length;
+          el.setSelectionRange(end, end);
+        });
+      },
+      [updateInputWithHistoryReset, input],
+    ),
+    onQuoteNewSession: useCallback(
+      (block: string) => {
+        void forkSession(block);
+      },
+      [forkSession],
+    ),
   });
 
   // Model line: last assistant message's modelID (provider/model).
@@ -3216,6 +3264,12 @@ export function ChatPanel({
           jump-to-latest button floats at the BOTTOM OF THE TRANSCRIPT — above
           the card stack and the composer, both of which change height. */}
       <div className="relative flex-1 min-h-0 flex flex-col">
+        <QuoteToolbar
+          quote={quote}
+          toolbarRef={quoteToolbarRef}
+          onQuote={quoteNow}
+          onQuoteNewSession={quoteNewSessionNow}
+        />
         <VoicePlaybackProvider active={isActive}>
           <Transcript
             messages={messages}

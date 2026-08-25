@@ -177,6 +177,50 @@ html, body, #root {
   .manta-jump-latest { transition: none; }
 }
 
+/* Quote toolbar (BET-1351). Floating action bar shown when the user finishes
+   selecting text in the transcript — "Quote" seeds the composer, "Quote in
+   new session" forks with the quote. `position: fixed`, clamped into the
+   viewport (Popover arithmetic), and rendered in ChatPanel's transcript
+   wrapper, NOT the Virtuoso root (whose overflow-x-hidden would clip it).
+
+   Tokens only — the same floating-surface trio .manta-jump-latest uses
+   (--card / --border / --shadow-md), --r-md radius, --sp-* padding. Button
+   text is text-label in --tx2 with the --accent-tx hover and the --accent
+   focus ring pair. No new custom property, no new Tailwind token. */
+.manta-quote-toolbar {
+  position: fixed;
+  z-index: 40;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: var(--sp-1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--card);
+  color: var(--tx2);
+  box-shadow: var(--shadow-md);
+}
+.manta-quote-toolbar button {
+  padding: var(--sp-2) var(--sp-3);
+  border: none;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--tx2);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color var(--motion-fast) var(--ease-out);
+}
+.manta-quote-toolbar button:hover {
+  color: var(--accent-tx);
+}
+.manta-quote-toolbar button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .manta-quote-toolbar button { transition: none; }
+}
+
 /* MantaLoader — the two counter-rotating arcs (src/renderer/MantaLoader.tsx).
    Speeds are the native client's, verbatim: 0.9s clockwise outer, 1.4s
    anticlockwise inner. The mismatched periods are what stop the pair reading
