@@ -29,21 +29,34 @@ const policy = {
 // Wall-clock for the pure plan: fixed so the cache-freshness gate is deterministic.
 const NOW = 1_000_000_000_000;
 
-function toolPart(tool, output, input) {
+type TestPart = {
+  type: string;
+  tool?: string;
+  text?: string;
+  state?: { status: string; input?: unknown; output: string };
+};
+
+function toolPart(tool: string, output: string, input?: unknown): TestPart {
   return { type: "tool", tool, state: { status: "completed", input, output } };
 }
 
-function textPart(text) {
+function textPart(text: string): TestPart {
   return { type: "text", text };
 }
 
-function msg(parts, opts = {}) {
-  const info = { role: opts.role ?? "user", time: { created: opts.created ?? 0 } };
+function msg(
+  parts: TestPart[],
+  opts: { role?: string; created?: number; completed?: number } = {},
+) {
+  const info: { role: string; time: { created: number; completed?: number } } = {
+    role: opts.role ?? "user",
+    time: { created: opts.created ?? 0 },
+  };
   if (opts.completed !== undefined) info.time.completed = opts.completed;
   return { info, parts };
 }
 
-function assistantMsg(completed) {
+function assistantMsg(completed: number) {
   return msg([], { role: "assistant", completed });
 }
 
@@ -206,7 +219,7 @@ describe("renderPlaceholder", () => {
   });
 
   it("renders '{}' for a circular input instead of throwing", () => {
-    const circular = {};
+    const circular: Record<string, unknown> = {};
     circular.self = circular;
     const ph = renderPlaceholder("bash", circular, policy.placeholderFormat);
     expect(ph).toContain(" with {}");
