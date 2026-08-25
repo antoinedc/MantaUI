@@ -179,23 +179,86 @@ final class SessionModelsTests: XCTestCase {
     }
 
     func testSessionRowAgeGate() {
+        let ttl = 100_000_000.0 // effectively unbounded — TTL-specific cases live in testSessionRowAgeTTL
         let activity = now.addingTimeInterval(-3600)
         // Running rows show no age even with activity known (the dot is the signal).
         let running = SessionRowStatus(running: true, attention: false, backgroundJobs: 0,
                                        modelLabel: nil, lastActivity: activity)
-        XCTAssertNil(SessionRowAge.text(for: running, now: now))
+        XCTAssertNil(SessionRowAge.text(for: running, now: now, ttlMs: ttl))
         // Attention rows likewise.
         let attention = SessionRowStatus(running: false, attention: true, backgroundJobs: 0,
                                          modelLabel: nil, lastActivity: activity)
-        XCTAssertNil(SessionRowAge.text(for: attention, now: now))
+        XCTAssertNil(SessionRowAge.text(for: attention, now: now, ttlMs: ttl))
         // No known activity → no age.
         let none = SessionRowStatus(running: false, attention: false, backgroundJobs: 0,
                                     modelLabel: nil, lastActivity: nil)
-        XCTAssertNil(SessionRowAge.text(for: none, now: now))
+        XCTAssertNil(SessionRowAge.text(for: none, now: now, ttlMs: ttl))
         // A plain idle row with activity → the formatted age.
         let idle = SessionRowStatus(running: false, attention: false, backgroundJobs: 0,
                                     modelLabel: "opus 4.8", lastActivity: activity)
-        XCTAssertEqual(SessionRowAge.text(for: idle, now: now), "1h")
+        XCTAssertEqual(SessionRowAge.text(for: idle, now: now, ttlMs: ttl), "1h")
+    }
+
+    // MARK: - BET-1349 recency (TTL-bounded age chip + All/Recent filter)
+
+    private func recencyStatus(running: Bool = false, attention: Bool = false, lastActivity: Date? = nil) -> SessionRowStatus {
+        SessionRowStatus(running: running, attention: attention, backgroundJobs: 0,
+                         modelLabel: nil, lastActivity: lastActivity)
+    }
+
+    func testRecencyRunningAlwaysRecent() {
+        // A very old lastActivity must not matter — the dot is the signal.
+        let s = recencyStatus(running: true, lastActivity: now.addingTimeInterval(-86_400))
+        XCTAssertTrue(SessionRecency.isRecent(s, now: now, ttlMs: 300_000))
+    }
+
+    func testRecencyAttentionAlwaysRecent() {
+        let s = recencyStatus(attention: true, lastActivity: now.addingTimeInterval(-86_400))
+        XCTAssertTrue(SessionRecency.isRecent(s, now: now, ttlMs: 300_000))
+    }
+
+    func testRecencyNilActivityNotRecent() {
+        XCTAssertFalse(SessionRecency.isRecent(recencyStatus(), now: now, ttlMs: 300_000))
+    }
+
+    func testRecencyInsideTTL() {
+        let s = recencyStatus(lastActivity: now.addingTimeInterval(-60))
+        XCTAssertTrue(SessionRecency.isRecent(s, now: now, ttlMs: 300_000))
+    }
+
+    func testRecencyExactlyAtTTLNotRecent() {
+        // 300 s inside a 300_000 ms TTL is the boundary — not recent.
+        let s = recencyStatus(lastActivity: now.addingTimeInterval(-300))
+        XCTAssertFalse(SessionRecency.isRecent(s, now: now, ttlMs: 300_000))
+    }
+
+    func testRecencyPastTTLNotRecent() {
+        let s = recencyStatus(lastActivity: now.addingTimeInterval(-3600))
+        XCTAssertFalse(SessionRecency.isRecent(s, now: now, ttlMs: 300_000))
+    }
+
+    func testCacheTtlMapping() {
+        XCTAssertEqual(SessionCacheTtl.ms(for: "5m"), 300_000)
+        XCTAssertEqual(SessionCacheTtl.ms(for: "1h"), 3_600_000)
+        XCTAssertEqual(SessionCacheTtl.ms(for: "garbage"), 300_000)
+        XCTAssertEqual(SessionCacheTtl.ms(for: nil), 300_000)
+    }
+
+    func testSessionRowAgeTTL() {
+        let ttl = 3_600_000.0 // 1h
+        // Inside the TTL → a formatted value.
+        let inside = recencyStatus(lastActivity: now.addingTimeInterval(-60))
+        XCTAssertEqual(SessionRowAge.text(for: inside, now: now, ttlMs: ttl), "1m")
+        // Exactly at the TTL → nil.
+        let at = recencyStatus(lastActivity: now.addingTimeInterval(-3600))
+        XCTAssertNil(SessionRowAge.text(for: at, now: now, ttlMs: ttl))
+        // Past the TTL → nil.
+        let past = recencyStatus(lastActivity: now.addingTimeInterval(-7200))
+        XCTAssertNil(SessionRowAge.text(for: past, now: now, ttlMs: ttl))
+        // Running / attention / nil-activity still nil regardless of TTL.
+        XCTAssertNil(SessionRowAge.text(for: recencyStatus(running: true, lastActivity: now), now: now, ttlMs: ttl))
+        XCTAssertNil(SessionRowAge.text(for: recencyStatus(attention: true, lastActivity: now), now: now, ttlMs: ttl))
+        XCTAssertNil(SessionRowAge.text(for: recencyStatus(), now: now, ttlMs: ttl))
     }
 
     // MARK: - BET-897 idle subtitle (model only)

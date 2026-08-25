@@ -77,6 +77,10 @@ final class SessionListStore: ObservableObject {
     /// and that must leave the list fully visible with no counts (a missing job
     /// list is missing decoration, never missing sessions).
     @Published private(set) var delegateJobs: [String: DelegateJob] = [:]
+    /// The box's prompt-cache TTL in milliseconds (`"5m"` → 300_000, `"1h"` →
+    /// 3_600_000, anything else/absent → 300_000). Drives the age chip cutoff
+    /// and the Recent filter (BET-1349).
+    @Published private(set) var cacheTtlMs: Double = SessionCacheTtl.defaultMs
 
     private let api: MantaAPIClient
     private let mutations: SessionListMutationAPI
@@ -100,6 +104,12 @@ final class SessionListStore: ObservableObject {
     /// the foreground/reconnect refresh that raced the launch fetch simply
     /// vanished and the list stayed on whatever the first one returned.
     private var refreshQueued = false
+    /// The set of opencode session ids seen running on the last `$sessionStates`
+    /// tick (BET-1349). Diffed against the current tick so a turn ENDING —
+    /// running→idle — triggers a refresh that re-fetches the authoritative
+    /// `time.updated` for the age chip at the exact moment it becomes eligible.
+    private var previouslyRunning: Set<String> = []
+    private var cancellables: Set<AnyCancellable> = []
 
     init(api: MantaAPIClient = MantaAPIClient.live(), eventStore: MantaEventStore, mutations: SessionListMutationAPI? = nil) {
         self.api = api
@@ -109,6 +119,30 @@ final class SessionListStore: ObservableObject {
         self.eventStore.addRawFrameHandler { [weak self] frame in
             self?.trackProgress(frame: frame)
         }
+        // A turn completing is the moment the age chip becomes eligible
+        // (`!running`), and it is precisely when the cached `lastActivity` is
+        // stale. This sink diffs only a small running-id set — it never calls
+        // `objectWillChange.send()` and never mutates published state, so the
+        // hot per-frame `$sessionStates` stream cannot re-render the whole list.
+        self.eventStore.$sessionStates
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] states in
+                self?.trackRunningTransitions(states)
+            }
+            .store(in: &cancellables)
+    }
+
+    /// The set diff that notices a turn just ended (BET-1349). A running→idle
+    /// edge triggers a coalescing `refresh()` so the list re-fetches the box's
+    /// authoritative `time.updated` rather than stamping the device clock
+    /// (mirrors the "NEVER fabricate the local clock" rule at
+    /// `MantaEventStore.swift:260-272`).
+    private func trackRunningTransitions(_ states: [String: MantaSessionStreamState]) {
+        let runningNow = Set(states.filter { $0.value.running == true }.map(\.key))
+        let stopped = previouslyRunning.subtracting(runningNow)
+        previouslyRunning = runningNow
+        guard !stopped.isEmpty else { return }
+        Task { await refresh() }
     }
 
     /// When this window's running turn started, as reported by the box.
@@ -435,6 +469,11 @@ final class SessionListStore: ObservableObject {
             if case .bool(let h)? = config["hapticsEnabled"] {
                 hapticsEnabled = h
             }
+            if case .string(let ttl)? = config["cacheTtl"] {
+                cacheTtlMs = SessionCacheTtl.ms(for: ttl)
+            } else {
+                cacheTtlMs = SessionCacheTtl.ms(for: nil)
+            }
         }
     }
 
@@ -466,5 +505,6 @@ final class SessionListStore: ObservableObject {
         hiddenByProject = [:]
         pinnedWindows = []
         hapticsEnabled = true
+        previouslyRunning = []
     }
 }
