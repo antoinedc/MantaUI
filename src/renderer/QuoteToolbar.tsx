@@ -7,7 +7,7 @@
 // whose overflow-x-hidden would clip it. It is deliberately NOT built on
 // Popover: Popover needs a real anchorRef element and a selection only has a
 // rectangle.
-import { useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useState } from "react";
 import type { QuoteSelection } from "./hooks/useTranscriptSelection";
 
 export function QuoteToolbar(props: {
@@ -39,7 +39,7 @@ export function QuoteToolbar(props: {
 
   return (
     <div
-      ref={toolbarRef}
+      ref={toolbarRef as React.RefObject<HTMLDivElement>}
       className="manta-quote-toolbar"
       style={pos ? { top: pos.top, left: pos.left } : { top: -9999, left: -9999 }}
       role="toolbar"

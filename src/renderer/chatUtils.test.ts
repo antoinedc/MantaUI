@@ -696,8 +696,8 @@ describe("truncateMiddle", () => {
     const text = "a".repeat(QUOTE_MAX + 10);
     const out = truncateMiddle(text, QUOTE_MAX, QUOTE_HEAD, QUOTE_TAIL);
     expect(out).toContain(" \u2026 ");
-    expect(out).not.toContain("… ");
-    expect(out).not.toContain(" …");
+    expect(out.split("\u2026")).toHaveLength(2);
+    expect(out).not.toContain("...");
   });
 });
 
