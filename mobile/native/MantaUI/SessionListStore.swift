@@ -109,6 +109,13 @@ final class SessionListStore: ObservableObject {
     /// running→idle — triggers a refresh that re-fetches the authoritative
     /// `time.updated` for the age chip at the exact moment it becomes eligible.
     private var previouslyRunning: Set<String> = []
+    /// `tmuxSession#windowIndex` -> live tmux-poller status for TERMINAL
+    /// windows (BET-1350). Chat-mode windows are NOT in here: their status
+    /// comes from the interpreted stream, and the box's pane scrape cannot see
+    /// them anyway (a chat window's pane runs `sleep infinity`, so
+    /// capture-pane returns blank). Read by `rowStatus` for terminal windows
+    /// only; one source per window type, no merging.
+    private(set) var terminalStatus: [String: WindowPollStatus] = [:]
     private var cancellables: Set<AnyCancellable> = []
 
     init(api: MantaAPIClient = MantaAPIClient.live(), eventStore: MantaEventStore, mutations: SessionListMutationAPI? = nil) {
@@ -118,6 +125,7 @@ final class SessionListStore: ObservableObject {
         self.loadConfig()
         self.eventStore.addRawFrameHandler { [weak self] frame in
             self?.trackProgress(frame: frame)
+            self?.trackStatus(frame: frame)
         }
         // A turn completing is the moment the age chip becomes eligible
         // (`!running`), and it is precisely when the cached `lastActivity` is
@@ -287,10 +295,22 @@ final class SessionListStore: ObservableObject {
     /// presentation decided in SessionModels.
     func rowStatus(for window: MantaWindow) -> SessionRowStatus {
         let sid = window.opencodeSessionId ?? ""
+        let isTerminal = window.opencodeSessionId == nil
         let stream = eventStore.sessionStates[sid]
-        let running = stream?.running == true
+        var running = stream?.running == true
         let attention = !(stream?.questions?.questions.isEmpty ?? true)
             || !(stream?.permissions?.permissions.isEmpty ?? true)
+        if isTerminal,
+           let project = projects.first(where: { $0.windows.contains(window) }),
+           let polled = terminalStatus[Self.terminalKey(project: project.tmuxSession, windowIndex: window.index)] {
+            // A terminal window's running status comes ONLY from the box's
+            // tmux poller (BET-1350). The interpreted stream cannot see it (a
+            // terminal pane runs claude's TUI, not an opencode session), so the
+            // poller is this window type's single source — deliberately no
+            // fallback to the stream. Chat windows are untouched (the branch is
+            // terminal-only; one source per window type, no merging).
+            running = polled.running
+        }
         return SessionRowStatus(
             running: running,
             attention: attention,
@@ -298,7 +318,7 @@ final class SessionListStore: ObservableObject {
             modelLabel: sessionMeta[sid]?.modelLabel,
             progressLabel: progressBySession[sid],
             lastActivity: sessionMeta[sid]?.lastActivity,
-            isTerminal: window.opencodeSessionId == nil
+            isTerminal: isTerminal
         )
     }
 
@@ -333,6 +353,52 @@ final class SessionListStore: ObservableObject {
     private func workingProgressLabel(sessionID: String) async -> String? {
         guard let record = try? await api.progressGet(sessionID: sessionID) else { return nil }
         return record.workingLabel
+    }
+
+    // MARK: - Terminal-window status (BET-1350)
+
+    /// The `tmuxSession#windowIndex` composite key for terminal-window poller
+    /// status. REUSES the existing id shape — `SessionRowEntry.id` is the
+    /// `"\(project)#\(windowIndex)"` composite already used for a row's
+    /// `project#window` identity (`SessionListView.swift`); this is the SAME
+    /// composite, not a third id format. `SessionPinID.window` (a `/`
+    /// separator, pin identity) is a different shape and is deliberately not
+    /// used here.
+    static func terminalKey(project: String, windowIndex: Int) -> String {
+        "\(project)#\(windowIndex)"
+    }
+
+    /// The wire shape of one `kind: "status"` payload entry. The payload is a
+    /// JSON ARRAY of these (per `src/server/status.mjs`), e.g.
+    /// `[{"session":"proj","windowIndex":2,"running":true,"subagents":0}]`.
+    private struct TerminalStatusFrame: Decodable {
+        var session: String
+        var windowIndex: Int
+        var running: Bool
+        var subagents: Int
+    }
+
+    /// Consume `kind: "status"` frames (the box's 2s tmux activity poller,
+    /// `src/server/status.mjs`) for TERMINAL windows. Each batch REPLACES the
+    /// entries for the windows it names; a window absent from a batch keeps
+    /// its previous value (the batch is per-tick and complete for live
+    /// windows; a vanished window is cleaned up by the next `refresh()`
+    /// dropping the row). Publishes only on an actual change so a 2s tick
+    /// cannot re-render the whole list unconditionally (the guard that
+    /// `applyJobs` / `trackRunningTransitions` already follow).
+    private func trackStatus(frame: MantaStreamFrame) {
+        guard frame.kind == "status",
+              let entries = try? frame.decodedPayload([TerminalStatusFrame].self),
+              !entries.isEmpty else { return }
+        var next = terminalStatus
+        for e in entries {
+            next[Self.terminalKey(project: e.session, windowIndex: e.windowIndex)] =
+                WindowPollStatus(running: e.running, subagents: e.subagents)
+        }
+        if next != terminalStatus {
+            terminalStatus = next
+            objectWillChange.send()
+        }
     }
 
     // MARK: - Pin (§7.2 swipe-right)
@@ -506,5 +572,6 @@ final class SessionListStore: ObservableObject {
         pinnedWindows = []
         hapticsEnabled = true
         previouslyRunning = []
+        terminalStatus = [:]
     }
 }

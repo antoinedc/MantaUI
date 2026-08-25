@@ -747,3 +747,110 @@ final class SessionListJobToleranceTests: XCTestCase {
         XCTAssertNil(store.loadError)
     }
 }
+
+// MARK: - BET-1350 terminal-window running status (tmux poller frames)
+
+@MainActor
+final class TerminalStatusTests: XCTestCase {
+
+    /// Minimal injectable stream so `kind: "status"` frames can be pushed
+    /// straight through the store's raw-frame path — no live socket (mirrors
+    /// the suite's other `MantaEventStreamControl` fakes).
+    @MainActor
+    private final class Stream: MantaEventStreamControl {
+        var onState: ((MantaConnectionState) -> Void)?
+        var onMessage: ((String) -> Void)?
+        var onReconnect: (() -> Void)?
+        var onConfigError: ((Error) -> Void)?
+        var hasConnectedOnce = false
+        var currentState: MantaConnectionState = .idle
+        func ensure() {}
+        func markReconnectAndEnsure() {}
+        func retryNow() {}
+        func forceReconnect() {}
+        func close(reason: String) {}
+        func inject(_ text: String) { onMessage?(text) }
+    }
+
+    private func makeStore() -> (store: SessionListStore, stream: Stream) {
+        let stream = Stream()
+        let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
+        let store = SessionListStore(
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1:1")!),
+            eventStore: eventStore
+        )
+        return (store, stream)
+    }
+
+    private func project(_ session: String, _ window: MantaWindow) -> MantaProject {
+        MantaProject(tmuxSession: session, defaultCwd: "/tmp", windows: [window], attached: false, mantaOwned: nil)
+    }
+
+    private func terminalWindow(_ index: Int) -> MantaWindow {
+        MantaWindow(index: index, name: "dev", active: false, paneCurrentPath: "/x", opencodeSessionId: nil, worktreePath: nil)
+    }
+
+    private func chatWindow(_ index: Int, sid: String) -> MantaWindow {
+        MantaWindow(index: index, name: "chat", active: false, paneCurrentPath: "/x", opencodeSessionId: sid, worktreePath: nil)
+    }
+
+    private func statusFrame(session: String, windowIndex: Int, running: Bool) -> String {
+        #"{"kind":"status","payload":[{"session":"\#(session)","windowIndex":\#(windowIndex),"running":\#(running),"subagents":0}]}"#
+    }
+
+    func testStatusFrameDecodesToSingleEntryKeyedProjectHashWindow() {
+        let (store, stream) = makeStore()
+
+        stream.inject(#"{"kind":"status","payload":[{"session":"proj","windowIndex":2,"running":true,"subagents":0}]}"#)
+
+        XCTAssertEqual(store.terminalStatus.count, 1)
+        XCTAssertEqual(Set(store.terminalStatus.keys), ["proj#2"])
+        XCTAssertEqual(store.terminalStatus["proj#2"]?.running, true)
+        XCTAssertEqual(store.terminalStatus["proj#2"]?.subagents, 0)
+    }
+
+    func testTerminalRowWithRunningPollerEntryIsRunningWithRunningDotAndSubtitle() {
+        let (store, stream) = makeStore()
+        let w = terminalWindow(2)
+        store.applyProjects([project("proj", w)])
+
+        stream.inject(statusFrame(session: "proj", windowIndex: 2, running: true))
+
+        let status = store.rowStatus(for: w)
+        XCTAssertTrue(status.isTerminal)
+        XCTAssertTrue(status.running)
+        XCTAssertEqual(SessionDotState.forRow(status), .running)
+        // A running terminal row falls into the running subtitle branch and
+        // reads "running" (no model label, so not the "running · model" variant).
+        XCTAssertEqual(SessionRowSubtitle.text(for: status), "running")
+    }
+
+    func testChatWindowUnaffectedByPollerEntryNamingItsWindowIndex() {
+        let (store, stream) = makeStore()
+        let w = chatWindow(2, sid: "ses-1")
+        store.applyProjects([project("proj", w)])
+
+        // The poller names this chat window's index — it must be ignored; the
+        // window's status still comes from the stream (no entry → idle).
+        stream.inject(statusFrame(session: "proj", windowIndex: 2, running: true))
+
+        let status = store.rowStatus(for: w)
+        XCTAssertFalse(status.isTerminal)
+        XCTAssertFalse(status.running)
+        XCTAssertEqual(SessionDotState.forRow(status), .idle)
+    }
+
+    func testLaterBatchReportingWindowIdleFlipsTerminalRowBack() {
+        let (store, stream) = makeStore()
+        let w = terminalWindow(2)
+        store.applyProjects([project("proj", w)])
+
+        stream.inject(statusFrame(session: "proj", windowIndex: 2, running: true))
+        XCTAssertTrue(store.rowStatus(for: w).running)
+
+        stream.inject(statusFrame(session: "proj", windowIndex: 2, running: false))
+        let status = store.rowStatus(for: w)
+        XCTAssertFalse(status.running)
+        XCTAssertEqual(SessionDotState.forRow(status), .idle)
+    }
+}
