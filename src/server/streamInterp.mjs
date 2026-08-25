@@ -47,33 +47,10 @@ import { createSeenIdFilter } from "./seenIds.mjs";
 
 // opencode stamps its cache breakpoints with no `ttl`, so Anthropic applies
 // its default 5-minute TTL — measured on the wire, see AppConfig.cacheTtl.
-// This is the fallback the device stream predicts staleness against.
+// This is the fallback the device stream predicts staleness against, used only
+// while/unless the interpreter resolves the TTL opencode is actually
+// configured to send (see `readCacheTtl` in createStreamInterpreter below).
 const TTL_DEFAULT = "5m";
-
-// Recompute the cached-prefix size from a usage payload and publish the
-// staleness verdict for a session.
-//
-// Two call sites need this: the transcript-derived context emit and the
-// step-ended usage emit. They must agree byte-for-byte — including WHICH TTL
-// is predicted — or the device's cache pill flickers between two verdicts
-// depending on which event arrived last. Keeping it in one function is also
-// what stops the TTL constant being read in two places and drifting, which is
-// the shape of the bug this fallback exists to fix.
-//
-// The `|| st.cachedTokens` fallback is deliberate: a usage payload with no
-// cache buckets (0 + 0) means "this event carries no cache information",
-// not "the cache is now empty" — so the last known size is retained.
-function emitCacheStaleness(emit, sid, st, tokens, nowMs) {
-  st.cachedTokens =
-    (tokens?.cache?.read ?? 0) + (tokens?.cache?.write ?? 0) || st.cachedTokens;
-  emit(sid, "cache", computeStaleCache({
-    lastCompleted: st.lastCompleted,
-    now: nowMs,
-    ttlMs: selectCacheTtlMs(TTL_DEFAULT),
-    cachedTokens: st.cachedTokens,
-    running: st.running,
-  }));
-}
 
 // Per-tool cap for the live tool-output tail (server half, BET-745). Once a
 // single tool has streamed this many characters to the device, further output
@@ -264,6 +241,13 @@ export function createStreamInterpreter({
   publish,
   now = () => Date.now(),
   contextLimitFor = () => null,
+  // Resolves the cache TTL opencode is actually configured to send ("5m" |
+  // "1h"), or null when nothing is set / it can't be read (non-fatal). Injected
+  // like contextLimitFor so the interpreter stays pure/testable; production
+  // wires providers.readCacheTtl. The device stream predicts staleness against
+  // this — the SAME value the desktop SessionHeader pill reads — so the two
+  // pills agree on a 1h box instead of the device always assuming 5m.
+  readCacheTtl = async () => null,
 }) {
   const sessions = new Map();
   // The same opencode event is delivered on BOTH the global stream and the
@@ -273,12 +257,50 @@ export function createStreamInterpreter({
   // Events carry a unique id; remember a bounded window of them (shared filter,
   // lifted from this inline block so push.mjs can reuse the same guard).
   const seenEventIds = createSeenIdFilter();
+  // Configured cache TTL resolved once, non-blocking. Fetching it is async I/O
+  // (providers.readCacheTtl reads opencode's config) while `interpret` is
+  // synchronous, so resolve it in the background and read the memoized label
+  // here; "5m" stays the fallback until/unless a configured value lands.
+  let cacheTtlLabel = null;
+  void (async () => {
+    try {
+      const label = await readCacheTtl();
+      if (typeof label === "string" && label.length > 0) cacheTtlLabel = label;
+    } catch {
+      /* non-fatal: fall back to the 5m default */
+    }
+  })();
   function state(sid) {
     if (!sessions.has(sid)) sessions.set(sid, newSessionState());
     return sessions.get(sid);
   }
   function emit(sid, sub, payload) {
     publish({ kind: "stream", sub, sessionId: sid, payload });
+  }
+
+  // Recompute the cached-prefix size from a usage payload and publish the
+  // staleness verdict for a session.
+  //
+  // Two call sites need this: the transcript-derived context emit and the
+  // step-ended usage emit. They must agree byte-for-byte — including WHICH TTL
+  // is predicted — or the device's cache pill flickers between two verdicts
+  // depending on which event arrived last. Keeping it in one function is also
+  // what stops the TTL constant being read in two places and drifting, which is
+  // the shape of the bug this fallback exists to fix.
+  //
+  // The `|| st.cachedTokens` fallback is deliberate: a usage payload with no
+  // cache buckets (0 + 0) means "this event carries no cache information",
+  // not "the cache is now empty" — so the last known size is retained.
+  function emitCacheStaleness(emit, sid, st, tokens, nowMs) {
+    st.cachedTokens =
+      (tokens?.cache?.read ?? 0) + (tokens?.cache?.write ?? 0) || st.cachedTokens;
+    emit(sid, "cache", computeStaleCache({
+      lastCompleted: st.lastCompleted,
+      now: nowMs,
+      ttlMs: selectCacheTtlMs(cacheTtlLabel ?? TTL_DEFAULT),
+      cachedTokens: st.cachedTokens,
+      running: st.running,
+    }));
   }
 
   // The single place `running` changes. Stamps the idle->busy EDGE only, so a
