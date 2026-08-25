@@ -167,3 +167,77 @@ test("record is idempotent per report (same report twice → same state)", async
   assert.deepEqual(get(), first);
   assert.equal(get().days[today].maskedTokens, 42);
 });
+
+// ----- BET-1344: applied / mode on the report -----
+
+test("validation: applied/mode accepted when present, optional when absent", () => {
+  assert.equal(
+    validateCounterfactualReport({
+      sessionID: "abc",
+      maskedTokens: 1,
+      maskedParts: 2,
+      ts: 3,
+      applied: true,
+      mode: "act",
+    }),
+    null,
+    "valid report with applied + mode passes",
+  );
+  assert.equal(
+    validateCounterfactualReport({
+      sessionID: "abc",
+      maskedTokens: 1,
+      maskedParts: 2,
+      ts: 3,
+      applied: false,
+      mode: "observe",
+    }),
+    null,
+  );
+  // Both absent (observe-only plugin) → still valid.
+  assert.equal(
+    validateCounterfactualReport({ sessionID: "abc", maskedTokens: 1, maskedParts: 2, ts: 3 }),
+    null,
+  );
+});
+
+test("validation: applied must be a boolean, mode must be observe|act (rejected by field name)", () => {
+  assert.equal(
+    validateCounterfactualReport({
+      sessionID: "abc", maskedTokens: 1, maskedParts: 1, ts: 1, applied: "yes",
+    }),
+    "applied",
+  );
+  assert.equal(
+    validateCounterfactualReport({
+      sessionID: "abc", maskedTokens: 1, maskedParts: 1, ts: 1, applied: 1,
+    }),
+    "applied",
+  );
+  assert.equal(
+    validateCounterfactualReport({
+      sessionID: "abc", maskedTokens: 1, maskedParts: 1, ts: 1, mode: "bogus",
+    }),
+    "mode",
+  );
+  assert.equal(
+    validateCounterfactualReport({
+      sessionID: "abc", maskedTokens: 1, maskedParts: 1, ts: 1, mode: "observe",
+    }),
+    null,
+  );
+});
+
+test("store.record persists applied/mode on the session entry, and omits them when absent", async () => {
+  const t = new Date(2026, 7, 24, 12, 0, 0).getTime();
+  const { store, get } = makeStore({ now: fixed(t) });
+
+  await store.record({ sessionID: "s1", maskedTokens: 100, maskedParts: 3, ts: t, applied: true, mode: "act" });
+  assert.equal(get().sessions.s1.applied, true);
+  assert.equal(get().sessions.s1.mode, "act");
+
+  // A report without applied/mode does not resurrect them as undefined keys.
+  await store.record({ sessionID: "s2", maskedTokens: 50, maskedParts: 1, ts: t });
+  assert.equal(Object.hasOwn(get().sessions.s2, "applied"), false);
+  assert.equal(Object.hasOwn(get().sessions.s2, "mode"), false);
+});
