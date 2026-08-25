@@ -262,6 +262,89 @@ function applyMask(messages: any[], eligible: any[], format: string): void {
   }
 }
 
+//
+// Constraint pinning (BET-1346) — DUPLICATED from src/shared/constraintPin.mjs
+// (the single source of truth). A plugin at ~/.config/opencode/plugins/ cannot
+// resolve the repo, same accepted duplication as the policy constants above.
+// The user's standing instructions must survive a background compaction;
+// opencode's own compaction prompt has no idea they exist, so on the
+// `experimental.session.compacting` hook we fetch the instructions that were
+// extracted from the session BEFORE compaction (GET /api/optimizer/constraints)
+// and APPEND them to the compaction prompt (append ONLY — replacing opencode's
+// prompt is how a summariser silently loses everything it was not told to keep).
+//
+
+const CONSTRAINT_CACHE_MS = 60_000
+const MAX_CONSTRAINTS = 20
+const MAX_CONSTRAINT_CHARS = 300
+
+function parseConstraints(raw: unknown): string[] {
+  if (typeof raw !== "string") return []
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const line of raw.split("\n")) {
+    let s = line.trim()
+    s = s.replace(/^[-\*\+•]\s*/, "")
+    s = s.replace(/^(?:\d+[\.\):]|\(\d+\))\s*/, "")
+    const cleaned = s.trim()
+    if (cleaned === "") continue
+    if (out.length >= MAX_CONSTRAINTS) break
+    const capped = cleaned.length > MAX_CONSTRAINT_CHARS ? cleaned.slice(0, MAX_CONSTRAINT_CHARS) : cleaned
+    const key = capped.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(capped)
+  }
+  return out
+}
+
+function renderConstraintBlock(constraints: string[]): string {
+  const list = (constraints ?? []).filter((c) => typeof c === "string" && c.trim() !== "")
+  if (list.length === 0) return ""
+  return (
+    "\n\nStanding instructions from the user, preserved verbatim across compaction:\n" +
+    list.map((c) => "- " + c).join("\n")
+  )
+}
+
+function buildCompactionPrompt(basePrompt: string, constraints: string[]): string {
+  return (typeof basePrompt === "string" ? basePrompt : "") + renderConstraintBlock(constraints)
+}
+
+// Non-blocking 60s-cache, identical discipline to the policy lookup above: a
+// fresh same-session result (<60s) is used as-is; otherwise the cached-stale
+// value (or []) is used AND a background refresh fires that is NEVER awaited.
+// A failed refresh leaves the previous value; a cold cache means [] — fail-open.
+let constraintCache: { constraints: string[]; at: number; sessionID: string } | null = null
+
+function refreshConstraints(sessionID: string): void {
+  void fetch(`${SERVER}/api/optimizer/constraints?sessionID=${encodeURIComponent(sessionID)}`, {
+    headers: authHeaders(),
+    signal: AbortSignal.timeout(1500),
+  })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((p) => {
+      if (p && Array.isArray(p.constraints)) {
+        constraintCache = { constraints: p.constraints, at: Date.now(), sessionID }
+      }
+    })
+    .catch(() => {})
+}
+
+function resolveCachedConstraints(sessionID: string): string[] {
+  const cached = constraintCache
+  const nowMs = Date.now()
+  if (cached && cached.sessionID === sessionID && nowMs - cached.at < CONSTRAINT_CACHE_MS) {
+    return cached.constraints
+  }
+  if (cached && cached.sessionID === sessionID) {
+    refreshConstraints(sessionID) // stale for this session → use stale, refresh
+    return cached.constraints
+  }
+  refreshConstraints(sessionID) // cold → [], refresh
+  return []
+}
+
 export const MantaOptimizerMask: Plugin = async () => {
   return {
     "experimental.chat.messages.transform": async (_input: any, output: any) => {
@@ -303,6 +386,33 @@ export const MantaOptimizerMask: Plugin = async () => {
       } catch {
         /* fail open — a masking bug must degrade to "we did not trim",
            never to a broken turn */
+      }
+    },
+    "experimental.session.compacting": async (input: any, output: any) => {
+      // GUARDRAIL (BET-1346): the constraint-injection below is shipped BEHIND
+      // scripts/optimizer/retention-eval.mjs — the seeded-retention eval that
+      // must pass 30/30 before this prompt change is considered enabled. It is
+      // run BY HAND (it costs real model calls) and is NOT part of `npm test`.
+      // Until 30/30 is verified, treat this hook as inert: any failure or an
+      // eval below 30/30 hands the prompt through untouched.
+      try {
+        const sessionID = String(input?.sessionID ?? input?.session?.id ?? "")
+        if (!sessionID) return output
+        // NEVER awaited on the hook path — the same non-blocking discipline as
+        // the policy lookup.
+        const constraints = resolveCachedConstraints(sessionID)
+        if (constraints.length === 0) return output
+        const base =
+          typeof output === "string" ? output : typeof output?.prompt === "string" ? output.prompt : ""
+        if (base === "") return output
+        const appended = buildCompactionPrompt(base, constraints)
+        if (typeof output === "string") return appended
+        if (output && typeof output === "object") {
+          return { ...output, prompt: appended }
+        }
+        return output
+      } catch {
+        return output // fail open — hand the prompt through untouched
       }
     },
   }

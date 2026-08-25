@@ -19,6 +19,14 @@ import { WebSocketServer } from "ws";
 import { createCounterfactualStore, validateCounterfactualReport } from "./optimizer/counterfactual.mjs";
 import { createOptimizerSummary } from "./optimizer/summary.mjs";
 import { createPacingState } from "./optimizer/pacing.mjs";
+import {
+  createCompactionScheduler,
+  COMPACT_POLL_MS,
+  COMPACT_CACHE_TTL_FALLBACK_MS,
+} from "./optimizer/compaction.mjs";
+import { createConstraintStore, extractionInstruction, transcriptText } from "./optimizer/constraints.mjs";
+import { parseConstraints } from "../shared/constraintPin.mjs";
+import { startPoller } from "./startPoller.mjs";
 import { getDb } from "./opencodeDb.mjs";
 import {
   resolvePolicy,
@@ -115,7 +123,7 @@ import { createProviderHealth } from "./providerHealth.mjs";
 import {
   startModelCatalogPoller as startRoutingModelCatalog,
 } from "./modelCatalog.mjs";
-import { endpointSummary as routingEndpointSummary, providerTokenTotals, ROUTING_LEDGER_WINDOW_MS } from "./modelLedger.mjs";
+import { endpointSummary as routingEndpointSummary, providerTokenTotals, ROUTING_LEDGER_WINDOW_MS, fetchLedgerRows } from "./modelLedger.mjs";
 import * as appControl from "./appControl.mjs";
 import * as cto from "./cto.mjs";
 import { searchMessages } from "./messageSearch.mjs";
@@ -975,6 +983,131 @@ const optimizerSummary = createOptimizerSummary({
   readCacheTtl: () => readProvidersCacheTtl({ listProviders: oc.getProviders }),
 });
 
+// ---------------------------------------------------------------------------
+// Optimizer P2.4 (BET-1346) — background compaction scheduler + constraint
+// pinning wiring.
+//
+// `sessionLastActivityAt` maps opencode sessionID → last-activity epoch ms,
+// stamped at the SAME firehose tap that feeds promptDelivery.observeEvent (in
+// the pump below). It answers "has THIS conversation been quiet for 10
+// minutes" — the per-session idle signal desktop presence cannot (a user with
+// eight conversations open is "present" while seven are idle). Cleared when a
+// session is deleted so the map cannot grow unbounded.
+// ---------------------------------------------------------------------------
+const sessionLastActivityAt = new Map();
+
+// The constraints store: the standing instructions extracted from a session
+// BEFORE it is compacted, keyed by the session being compacted. The optimizer
+// plugin's `experimental.session.compacting` hook reads them (via
+// GET /api/optimizer/constraints) and appends them to the compaction prompt.
+const optimizerConstraints = createConstraintStore({
+  load: () => readJsonSync(statePath("optimizer-constraints.json"), {}),
+  save: (s) => writeJsonAtomic(statePath("optimizer-constraints.json"), JSON.stringify(s, null, 2)),
+  now: Date.now,
+});
+
+// Extract the standing instructions from a session's FULL history (before the
+// compaction rewrites it) and store them. Reuses opencode's throwaway-session
+// cheap-agent mechanism (oc.runThrowawayAgent — the SAME one generateSessionTitle
+// uses) with the title-style cheap agent; no second mechanism is built.
+// Best-effort: any failure leaves the store without constraints for this
+// session, and the plugin then hands the compaction prompt through untouched.
+async function extractAndStoreConstraints(sessionID) {
+  if (typeof sessionID !== "string" || sessionID === "") return;
+  try {
+    let dir = "";
+    try {
+      dir = await oc.getSessionDirectory(sessionID);
+    } catch {
+      /* directory lookup is best-effort — a miss yields the prompt alone */
+    }
+    let raw = "";
+    if (dir) {
+      const msgs = await oc.listMessages(sessionID);
+      const instruction = extractionInstruction(transcriptText(msgs));
+      raw = await oc.runThrowawayAgent({ directory: dir, instruction, agent: "title" });
+    }
+    await optimizerConstraints.set(sessionID, parseConstraints(raw));
+  } catch (e) {
+    console.warn(`[optimizer] constraint extraction failed session=${sessionID}:`, e?.message ?? e);
+  }
+}
+
+// Enumerate the compaction candidates: the sessions the box already knows
+// about (its MODEL LEDGER — the durable record of sessions it has run turns
+// in, cold-start safe across restarts), with the per-session facts the
+// scheduler cannot derive itself. This never lists every opencode session on
+// every tick (no listSessions call). The ledger yields context tokens + the
+// newest completedMs (the documented cold-start idle fallback); the
+// firehose-stamped lastActivityAt overrides it while live; contextLimit is
+// the interpreter's cached model-context lookup; cacheTtlMs is the shared
+// optimizer summary's effective TTL (never re-measured here).
+async function compactionCandidates() {
+  const t = Date.now();
+  let cacheTtlMs = COMPACT_CACHE_TTL_FALLBACK_MS;
+  try {
+    cacheTtlMs = optimizerCacheTtlMs((await optimizerSummary())?.ttl ?? null);
+  } catch {
+    /* keep the fallback */
+  }
+  const db = await getDb();
+  let rows = [];
+  if (db) {
+    try {
+      rows = await fetchLedgerRows(db, t - 7 * 86_400_000);
+    } catch {
+      rows = [];
+    }
+  }
+  const latest = new Map(); // sessionID -> { tokens, completedMs, providerID, modelID }
+  for (const r of rows) {
+    if (!r.sessionID || typeof r.sessionID !== "string") continue;
+    const prev = latest.get(r.sessionID);
+    const completed = typeof r.completedMs === "number" ? r.completedMs : 0;
+    if (!prev || completed >= (prev.completedMs ?? 0)) {
+      latest.set(r.sessionID, {
+        tokens: (r.input ?? 0) + (r.cacheRead ?? 0) + (r.cacheWrite ?? 0),
+        completedMs: completed,
+        providerID: r.providerID ?? null,
+        modelID: r.modelID ?? null,
+      });
+    }
+  }
+  const out = [];
+  for (const [sid, l] of latest) {
+    const contextLimit = l.providerID && l.modelID ? (contextLimitFor(l.providerID, l.modelID) ?? 0) : 0;
+    const lastActivityMs = sessionLastActivityAt.get(sid) ?? l.completedMs ?? 0;
+    out.push({ sessionID: sid, contextTokens: l.tokens ?? 0, contextLimit, lastActivityMs, cacheTtlMs });
+  }
+  return out;
+}
+
+// The scheduler. `isBusy` is the SHARED promptDelivery busy gate — INJECTED
+// here, never re-implemented (grep hygiene). `compact` runs constellation
+// extraction BEFORE oc.compactSession (the already-wired, already-tested call
+// — no second endpoint). `enabled` is read per tick from the optimizer switch
+// so flipping it takes effect without a restart. Three idempotency guards live
+// inside the scheduler (in-flight set, persisted cooldown, isBusy re-check).
+const compactionScheduler = createCompactionScheduler({
+  listCandidates: compactionCandidates,
+  compact: async (sessionID) => {
+    await extractAndStoreConstraints(sessionID);
+    await oc.compactSession(sessionID);
+  },
+  isBusy: (sid) => promptDelivery.isBusy(sid),
+  now: Date.now,
+  load: () => readJsonSync(statePath("optimizer-compaction.json"), {}),
+  save: (s) => writeJsonAtomic(statePath("optimizer-compaction.json"), JSON.stringify(s, null, 2)),
+  enabled: async () => (await local.configGet())?.optimizerEnabled === true,
+});
+
+const stopCompactionScheduler = startPoller(() => compactionScheduler.tick(), {
+  intervalMs: COMPACT_POLL_MS,
+  label: "optimizer-compaction",
+});
+// eslint-disable-next-line no-unused-vars
+void stopCompactionScheduler;
+
 rpcHandlers = buildHandlers({
   tmux,
   oc,
@@ -1345,6 +1478,21 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
     promptDelivery.observeEvent(evt);
   } catch (e) {
     console.warn("[promptDelivery] observeEvent failed:", e?.message ?? e);
+  }
+  // Optimizer P2.4 (BET-1346): per-session idle tracking for the background
+  // compaction scheduler — stamped at the SAME tap that feeds
+  // promptDelivery.observeEvent. Any firehose event carrying a sessionID is
+  // activity; the entry is deleted when its session is deleted so the map
+  // cannot grow unbounded. Never throws into the pump.
+  try {
+    const asid = evt?.properties?.sessionID;
+    if (typeof asid === "string" && asid) sessionLastActivityAt.set(asid, Date.now());
+    if (evt?.type === "session.deleted") {
+      const dsid = evt?.properties?.sessionID;
+      if (typeof dsid === "string") sessionLastActivityAt.delete(dsid);
+    }
+  } catch (e) {
+    console.warn("[optimizer] lastActivity stamp failed:", e?.message ?? e);
   }
   try {
     webhookEngine.observeEvent(evt);
@@ -2862,6 +3010,30 @@ const handleRequest = async (req, res) => {
         const config = await local.configGet();
         const policy = resolvePolicy({ config, repoTable, directory, cacheTtlMs });
         respondJson(res, 200, { ...policy, sessionID });
+        return;
+      }
+      respondJson(res, 405, { error: "method not allowed" });
+    } catch (e) {
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // ---------- Optimizer constraints (BET-1346, constraint pinning) ----------
+  // GET /api/optimizer/constraints?sessionID= → { constraints: string[] } — the
+  // standing instructions extracted from a session BEFORE it was compacted,
+  // stored in optimizer-constraints.json. [] when absent or never extracted.
+  // Read by the optimizer plugin's `experimental.session.compacting` hook via
+  // the same non-blocking cache discipline as the policy route, so it must
+  // answer fast (a single in-memory store read). Behind the /api/* Bearer gate
+  // (no exemption). This stage records the fact; the "while you were away"
+  // wording and the foreground/background stat are stage 5.
+  if (path === "/api/optimizer/constraints") {
+    try {
+      if (req.method === "GET") {
+        const sessionID = url.searchParams.get("sessionID") || "";
+        const constraints = await optimizerConstraints.get(sessionID);
+        respondJson(res, 200, { constraints });
         return;
       }
       respondJson(res, 405, { error: "method not allowed" });
