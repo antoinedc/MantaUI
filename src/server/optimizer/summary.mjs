@@ -21,6 +21,7 @@ import { aggregate, aggregateBySession, aggregateDailySeries, fetchLedgerRows } 
 import { summaryFields } from "./counterfactual.mjs";
 import { forecastAtReset } from "./forecast.mjs";
 import { measureEffectiveTtl, verifyCacheTtl, cacheTtlLabelMs } from "./ttl.mjs";
+import { SUMMARY_ACTIVITY_CAP } from "./activityLog.mjs";
 
 const WINDOW_DAYS = 30;
 const TTL_MS = 60_000;
@@ -54,6 +55,21 @@ export async function buildOptimizerSummary({
   // so the verifier stays testable; the 60s memo in createOptimizerSummary
   // bounds this I/O to one call per window, so it is null-cost to wire.
   readCacheTtl = async () => null,
+  // BET-1347: the activity log store (optimizer/activityLog.mjs). The
+  // summary exposes the newest SUMMARY_ACTIVITY_CAP entries so the dashboard
+  // renders the trust surface without a second fetch. Null when not wired →
+  // an empty feed (the documented empty state), never a fabricated zero.
+  activityStore = null,
+  // BET-1347: per-window pacing pressure `{ "<provider>:<kind>": { deficit,
+  // tokensPerPct } }` for the pressure chips under each gauge. Null/incomplete
+  // → the chip renders its neutral "no pressure signal yet" state.
+  pressureWindows = async () => ({}),
+  // BET-1347: the compaction scheduler's "X of Y in background" stat, or null
+  // until the scheduler has attempted anything.
+  compactionStat = async () => null,
+  // BET-1347: metered (pay-per-token) endpoints, rendered as a slim role+price
+  // row (no gauge). [] → the section is absent.
+  meteredEndpoints = async () => [],
 } = {}) {
   const nowMs = num(now);
   const raw = await fetchRows(nowMs - WINDOW_DAYS * 86_400_000);
@@ -110,8 +126,49 @@ export async function buildOptimizerSummary({
     bySession,
     ttl,
     counterfactual: cf ? { dailySeries: cf.dailySeries, bySession: cf.bySession } : null,
-    windows: windowsFor(usageSnapshots(), usageHistory(), nowMs),
+    windows: windowsFor(usageSnapshots(), usageHistory(), nowMs, await pressureWindows()),
+    activity: await activityFor(activityStore),
+    compaction: await compactionFor(compactionStat),
+    metered: await meteredFor(meteredEndpoints),
   };
+}
+
+// The compaction "X of Y in background" stat, or null when the scheduler has
+// nothing to report (never a fabricated zero).
+async function compactionFor(compactionStat) {
+  if (typeof compactionStat !== "function") return null;
+  try {
+    const s = await compactionStat();
+    if (!s || typeof s.total !== "number" || s.total <= 0) return null;
+    return { background: typeof s.background === "number" ? s.background : 0, total: s.total };
+  } catch {
+    return null;
+  }
+}
+
+// The metered-endpoints row, or [] when none are wired (the section is then
+// absent — "never render a control whose backing data isn't there").
+async function meteredFor(meteredEndpoints) {
+  if (typeof meteredEndpoints !== "function") return [];
+  try {
+    const m = await meteredEndpoints();
+    return Array.isArray(m) ? m : [];
+  } catch {
+    return [];
+  }
+}
+
+// The activity slice for the summary: the newest SUMMARY_ACTIVITY_CAP entries,
+// most recent first, or an EMPTY feed when no store is wired (the documented
+// empty state). Never a fabricated zero.
+async function activityFor(activityStore) {
+  if (!activityStore || typeof activityStore.recent !== "function") return { entries: [] };
+  try {
+    const entries = await activityStore.recent(SUMMARY_ACTIVITY_CAP);
+    return { entries: Array.isArray(entries) ? entries : [] };
+  } catch {
+    return { entries: [] };
+  }
 }
 
 // Map the current stored usage snapshots to the summary's `windows` slice —
@@ -119,22 +176,32 @@ export async function buildOptimizerSummary({
 // them (each snapshot's `windows` array is already shortest-first, and
 // snapshots are iterated in provider order). `forecastPct` is the forecast-at-
 // reset from history, or null when there isn't enough history to trust it (the
-// UI then hides the tick).
-function windowsFor(snapshots, history, nowMs) {
+// UI then hides the tick). `pressureMap` (`{ "<provider>:<kind>": { deficit,
+// tokensPerPct } }`) supplies the pacing pressure the chips render; it may be
+// incomplete or empty (the chip then shows its neutral "no pressure signal"
+// state).
+function windowsFor(snapshots, history, nowMs, pressureMap = {}) {
   const out = [];
   for (const snap of snapshots ?? []) {
     for (const w of snap.windows ?? []) {
+      const key = `${snap.provider}:${w.kind}`;
+      const pressure = pressureMap?.[key] ?? null;
       out.push({
         provider: snap.provider,
         planLabel: typeof snap.planLabel === "string" ? snap.planLabel : undefined,
         windowLabel: w.label,
+        kind: w.kind ?? undefined,
         pct: w.pct,
         resetsAt: Number.isFinite(w.resetsAt) ? w.resetsAt : null,
-        forecastPct: forecastAtReset(history, `${snap.provider}:${w.kind}`, {
+        forecastPct: forecastAtReset(history, key, {
           now: nowMs,
           resetsAt: Number.isFinite(w.resetsAt) ? w.resetsAt : undefined,
           currentPct: w.pct,
         }),
+        // BET-1347: pacing pressure for the chip. `tokensPerPct` is the
+        // measured signal; null means no pressure signal yet (neutral chip).
+        deficit: pressure && typeof pressure.deficit === "number" ? pressure.deficit : null,
+        tokensPerPct: pressure && typeof pressure.tokensPerPct === "number" ? pressure.tokensPerPct : null,
       });
     }
   }
@@ -167,7 +234,7 @@ let inflight = null;
  * summary then degrades to empty counterfactual). The returned async
  * function memoizes the built summary for TTL_MS with an in-flight guard.
  */
-export function createOptimizerSummary({ getDb, now, counterfactualStore = null, usageSnapshots, usageHistory, readCacheTtl }) {
+export function createOptimizerSummary({ getDb, now, counterfactualStore = null, usageSnapshots, usageHistory, readCacheTtl, activityStore = null, pressureWindows, compactionStat, meteredEndpoints }) {
   const nowMs = () => (typeof now === "function" ? num(now()) : num(now ?? Date.now()));
   return async function optimizerSummary() {
     const t = nowMs();
@@ -184,6 +251,10 @@ export function createOptimizerSummary({ getDb, now, counterfactualStore = null,
           usageSnapshots,
           usageHistory,
           readCacheTtl,
+          activityStore,
+          pressureWindows,
+          compactionStat,
+          meteredEndpoints,
         });
         cache = { at: t, value };
         return value;

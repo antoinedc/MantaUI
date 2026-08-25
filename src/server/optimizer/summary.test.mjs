@@ -22,6 +22,26 @@ function row(over = {}) {
   };
 }
 
+// The canonical one-row fixture used by several breakdown assertions — the
+// same row object, so any shared behaviour runs against the same shape.
+function baseRows(now) {
+  return [row({ cost: 5, input: 1, cacheRead: 2, cacheWrite: 3, output: 4, startedMs: now })];
+}
+
+// Runs `fn` with console.warn captured, restoring it afterwards; returns the
+// captured lines. Two tests assert on the [optimizer] TTL-verifier log.
+async function captureWarns(fn) {
+  const warns = [];
+  const originalWarn = console.warn;
+  console.warn = (m) => warns.push(String(m));
+  try {
+    await fn();
+  } finally {
+    console.warn = originalWarn;
+  }
+  return warns;
+}
+
 // Build `count` consecutive turns in one session, each `gapMs` after the
 // previous completion — deterministic consecutive pairs for the TTL verifier.
 // Every pair is cold (cacheRead 0) and well-clear of the 5000-ctx floor, so a
@@ -59,7 +79,7 @@ function memStore(now, seed = {}) {
 
 test("buildOptimizerSummary returns the full shape with empty counterfactual, reusing aggregate totals/cacheShare", async () => {
   const now = new Date(2026, 7, 24, 12, 0, 0).getTime();
-  const rows = [row({ cost: 5, input: 1, cacheRead: 2, cacheWrite: 3, output: 4, startedMs: now })];
+  const rows = baseRows(now);
   const fetchRows = async () => rows;
 
   const s = await buildOptimizerSummary({ fetchRows, now });
@@ -95,7 +115,7 @@ test("buildOptimizerSummary returns the full shape with empty counterfactual, re
 test("buildOptimizerSummary merges the counterfactual into dailySeries + bySession and fills the counterfactual key", async () => {
   const now = new Date(2026, 7, 24, 12, 0, 0).getTime();
   // tokensSent = 1+2+3+4 = 10 for s1.
-  const rows = [row({ cost: 5, input: 1, cacheRead: 2, cacheWrite: 3, output: 4, startedMs: now })];
+  const rows = baseRows(now);
   const fetchRows = async () => rows;
   const store = memStore(now);
   assert.equal((await store.record({ sessionID: "s1", maskedTokens: 5, maskedParts: 1, ts: now })).ok, true);
@@ -237,15 +257,10 @@ test("buildOptimizerSummary: measured 5m vs configured 1h logs one [optimizer] m
   const fetchRows = async () => rows;
   const readCacheTtl = async () => "1h"; // opencode configured to SEND 1h
 
-  const warns = [];
-  const originalWarn = console.warn;
-  console.warn = (m) => warns.push(String(m));
   let s;
-  try {
+  const warns = await captureWarns(async () => {
     s = await buildOptimizerSummary({ fetchRows, now, readCacheTtl });
-  } finally {
-    console.warn = originalWarn;
-  }
+  });
 
   // One [optimizer] mismatch line is logged.
   const mismatch = warns.filter((m) => m.includes("[optimizer] cache-TTL mismatch"));
@@ -266,18 +281,29 @@ test("buildOptimizerSummary: no mismatch log when the verifier has nothing concl
   const fetchRows = async () => [row({ startedMs: now })];
   const readCacheTtl = async () => "1h";
 
-  const warns = [];
-  const originalWarn = console.warn;
-  console.warn = (m) => warns.push(String(m));
   let s;
-  try {
+  const warns = await captureWarns(async () => {
     s = await buildOptimizerSummary({ fetchRows, now, readCacheTtl });
-  } finally {
-    console.warn = originalWarn;
-  }
+  });
 
   assert.ok(warns.every((m) => !m.includes("[optimizer] cache-TTL mismatch")), "no mismatch line expected");
   assert.equal(s.ttl.confidence, "default");
   assert.equal(s.ttl.configuredMs, null);
   assert.equal(s.ttl.matched, null);
+});
+
+test("buildOptimizerSummary: activity slice surfaces the store's newest entries, empty without a store (BET-1347)", async () => {
+  const now = new Date(2026, 7, 24, 12, 0, 0).getTime();
+  const fetchRows = async () => [row({ startedMs: now })];
+  // No store wired → empty feed (the documented empty state), never a zero.
+  const noStore = await buildOptimizerSummary({ fetchRows, now });
+  assert.deepEqual(noStore.activity, { entries: [] });
+
+  const activityStore = {
+    recent: async (n) =>
+      [{ id: "abc12345", ts: now, kind: "tune", subject: "x", verdict: "kept", evidence: { turns: 5 } }],
+  };
+  const withStore = await buildOptimizerSummary({ fetchRows, now, activityStore });
+  assert.equal(withStore.activity.entries.length, 1);
+  assert.equal(withStore.activity.entries[0].kind, "tune");
 });

@@ -1,26 +1,39 @@
-// ===== OptimizerCard (BET-1337) =====
+// ===== OptimizerCard (BET-1337 + P2.5 BET-1347) =====
 //
-// Read-only phase-1 "Observe" card in Settings → Models: the quota-window
-// fuel gauges (with their forecast-at-reset tick), the "sent vs raw
-// counterfactual" consumption chart, and the 30-day stats row. EVERYTHING it
-// renders is backed by the `optimizer:summary` read model (BET-1333 + children
-// 2–4). It renders NOTHING from phase 2 — no switch, no activity feed, no
-// pressure chips, no metered endpoints, no "optimizer on" graph marker.
-// Observe and report only; nothing actuates.
+// Phase-1 "Observe" card in Settings → Models (quota-window fuel gauges,
+// forecast-at-reset tick, sent-vs-raw consumption chart, 30-day stats), now
+// extended by BET-1347 with the legibility surfaces: the switch card's
+// read-only status sub-rows, pressure chips under each gauge, the metered-
+// endpoints slim row (role + crossover price, DELIBERATELY no gauge — a
+// metered endpoint has no window and never resets, so there is nothing to
+// fill), and the activity feed that is the optimizer's trust surface.
 //
-// State handling mirrors ModelLedgerCard exactly (BET-1221):
+// EVERYTHING renders from the `optimizer:summary` read model (BET-1333 +
+// children). AGENTS.md "NEVER STUB A CONTROL TO DO NOTHING": a status sub-row
+// appears only when its backing subsystem reports data; absent data renders the
+// documented empty state, never a fabricated zero. The editable switch toggle
+// is the schema-driven `optimizerEnabled` control (BET-1343) rendered by the
+// settings form above this card — this card shows its current state, never a
+// second toggle for the same setting.
+//
+// State handling mirrors ModelLedgerCard / the phase-1 card, unchanged:
 //   - loading  → "Reading your history…"
-//   - fetch rejected (network) → render nothing (hide the card entirely; a
-//     transient glitch must not read as "your runtime is outdated")
+//   - fetch rejected → hide the card (a transient glitch must not read as
+//     "your runtime is outdated")
 //   - { supported:false } → "…needs a newer box runtime." — NO zeros.
 //   - loaded   → the card.
-//
-// Fetches once on mount (the Models section mounts this card only when it
-// becomes visible). No polling — the server memoizes the summary for 60s.
 
 import { useEffect, useState } from "react";
 import { Card } from "./Card";
-import { buildCumulativePath, formatResetAt, formatTokens } from "./chatUtils";
+import { useStore } from "./store";
+import {
+  buildCumulativePath,
+  formatResetAt,
+  formatTokens,
+  formatClockTime,
+  describePressure,
+  describeActivityEntry,
+} from "./chatUtils";
 import type { OptimizerSummary } from "../shared/types";
 
 type OptimizerData = OptimizerSummary | { supported: false };
@@ -62,6 +75,7 @@ function axisTokens(v: number): string {
 const CHART = { left: 50, top: 6, width: 600, height: 200 };
 
 export function OptimizerCard() {
+  const optimizerEnabled = useStore((s) => s.optimizerEnabled);
   const [state, setState] = useState<{
     loading: boolean;
     data: OptimizerData | null;
@@ -76,9 +90,6 @@ export function OptimizerCard() {
         if (alive) setState({ loading: false, data: r, fetchError: false });
       })
       .catch(() => {
-        // Fetch failed (not "unsupported" — that returns as a resolved
-        // { supported:false }). Hide the card, don't mislead into an upgrade
-        // sentence for a transient network problem.
         if (alive) setState({ loading: false, data: null, fetchError: true });
       });
     return () => {
@@ -123,6 +134,7 @@ export function OptimizerCard() {
   const sent30d = d.dailySeries.reduce((s, e) => s + (e.tokensSent || 0), 0);
   const masked30d = d.dailySeries.reduce((s, e) => s + (e.maskedTokens || 0), 0);
   const raw30d = sent30d + masked30d;
+  const trimmedPct = raw30d > 0 ? (masked30d / raw30d) * 100 : 0;
 
   // Consumption chart series (cumulative), scaled together by the peak.
   const maxTokens = Math.max(raw30d, 1);
@@ -148,20 +160,97 @@ export function OptimizerCard() {
 
   const costPerTurn = d.totals.turns > 0 ? `$${(d.totals.cost / d.totals.turns).toFixed(2)}` : "—";
 
+  // BET-1347 slices.
+  const activity = Array.isArray(d.activity?.entries) ? d.activity.entries : [];
+  const compaction = d.compaction && d.compaction.total > 0 ? d.compaction : null;
+  const metered = Array.isArray(d.metered) ? d.metered : [];
+  // Pacing is "reporting" when any window carries a pressure signal.
+  const pacingActive = windows.some((w) => typeof w.tokensPerPct === "number");
+  const worstWindow = windows.reduce<(typeof windows)[number] | null>(
+    (worst, w) => (w.tokensPerPct != null && (worst == null || (w.deficit ?? 0) > (worst.deficit ?? 0)) ? w : worst),
+    null,
+  );
+  const pacingChip = pacingActive && worstWindow ? describePressure(worstWindow.deficit ?? 0, true) : null;
+
   return (
     <Card header={header}>
+      {/* ── Switch card: the read-only status sub-rows (BET-1347) ────────── */}
+      <div className="opt-switch">
+        <div className="opt-switch-head">
+          <div className="opt-switch-txt">
+            <b>Manta optimized token usage</b>
+            <p>
+              Manta trims, paces and compacts your conversations to make a plan last
+              longer. It never changes which model you picked by hand. Everything it
+              changes is listed below.
+            </p>
+          </div>
+          {/* The state indicator reflects the schema-driven optimizerEnabled
+              toggle (BET-1343) rendered above this card — this is its status,
+              not a second edit control for the same setting. */}
+          <span className={`opt-switch-state${optimizerEnabled ? " on" : ""}`}>
+            {optimizerEnabled ? "On" : "Off"}
+          </span>
+        </div>
+        <div className="opt-subrows">
+          {trimmedPct > 0 && (
+            <div className="opt-subrow">
+              <span className="opt-subrow-n">Trimming</span>
+              <span className="opt-subrow-v">
+                Old tool output is replaced by a one-line placeholder after a few newer
+                tool uses. The last 40k tokens are never touched.
+              </span>
+              <span className="opt-subrow-k">−{Math.round(trimmedPct)}% sent</span>
+            </div>
+          )}
+          {pacingActive && pacingChip && (
+            <div className="opt-subrow">
+              <span className="opt-subrow-n">Pacing</span>
+              <span className="opt-subrow-v">
+                Cheaper models while a plan window is ahead of pace. Build and plan work
+                keeps its quality floor.
+              </span>
+              <span className="opt-subrow-k">eco · {pacingChip.text}</span>
+            </div>
+          )}
+          {compaction && (
+            <div className="opt-subrow">
+              <span className="opt-subrow-n">Compacting</span>
+              <span className="opt-subrow-v">
+                Long idle conversations are summarized in the background, before you come
+                back to them.
+              </span>
+              <span className="opt-subrow-k">
+                {compaction.background} of {compaction.total} in background
+              </span>
+            </div>
+          )}
+          <div className="opt-subrow">
+            <span className="opt-subrow-n">Prompt cache</span>
+            <span className="opt-subrow-v">
+              Reads billed at 0.1×; TTL {d.ttl ? ttlLabel(d.ttl.measuredMs) : "5m"} measured.
+            </span>
+            <span className="opt-subrow-k">{wholePct(cacheHitPct)} hit</span>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Subscription windows + pressure chips ────────────────────────── */}
       {hasWindows && (
         <>
-          <div className="text-label text-text">Subscription windows</div>
+          <div className="text-label text-text" style={{ marginTop: "var(--sp-6)" }}>
+            Subscription windows
+          </div>
           <p className="opt-sub">
-            Forecast from your recent usage. Tick = forecast at reset (hidden until enough
-            history).
+            Forecast from your recent usage. Tick = forecast at reset. Pressure chip = how
+            far ahead of pace this window is right now.
           </p>
           <div className="opt-wins">
             {windows.map((w) => {
               const title = [w.planLabel, w.windowLabel].filter(Boolean).join(" — ");
               const pct = Number.isFinite(w.pct) ? w.pct : 0;
               const fp = typeof w.forecastPct === "number" ? w.forecastPct : null;
+              const chip = describePressure(w.deficit ?? 0, typeof w.tokensPerPct === "number");
               return (
                 <div className="opt-win" key={`${w.provider}:${w.windowLabel}`}>
                   <div className="opt-win-t">
@@ -186,6 +275,9 @@ export function OptimizerCard() {
                     <span>{wholePct(pct)} used</span>
                     <span>{fp != null ? `forecast ${wholePct(fp)}` : "gathering history…"}</span>
                   </div>
+                  <div style={{ marginTop: "var(--sp-2)" }}>
+                    <span className={`opt-chip ${chip.tone}`}>{chip.text}</span>
+                  </div>
                 </div>
               );
             })}
@@ -193,9 +285,8 @@ export function OptimizerCard() {
         </>
       )}
 
-      <div className="opt-chart-head">
-        Token consumption — with &amp; without optimization
-      </div>
+      {/* ── Consumption chart (phase 1, unchanged) ───────────────────────── */}
+      <div className="opt-chart-head">Token consumption — with &amp; without optimization</div>
       <svg
         className="opt-chart"
         viewBox={`0 0 ${CHART.left + CHART.width + 6} ${CHART.top + CHART.height + 18}`}
@@ -203,19 +294,15 @@ export function OptimizerCard() {
         aria-label="Token consumption with and without optimization"
       >
         <g transform={`translate(${CHART.left} ${CHART.top})`}>
-          {/* Baseline (zero) + dashed gridlines at half and full scale. */}
           <line x1="0" y1={CHART.height} x2={CHART.width} y2={CHART.height} stroke="var(--border-subtle)" />
           <line x1="0" y1={CHART.height / 2} x2={CHART.width} y2={CHART.height / 2} stroke="var(--border-subtle)" strokeDasharray="2 5" opacity=".6" />
           <line x1="0" y1="0" x2={CHART.width} y2="0" stroke="var(--border-subtle)" strokeDasharray="2 5" opacity=".6" />
-          {/* Y-axis (left edge of the plot). */}
           <line x1="0" y1="0" x2="0" y2={CHART.height} stroke="var(--border-subtle)" />
 
-          {/* Axis labels — tokens only, inline mono, 10px. */}
           <text x="-8" y={CHART.height + 12} textAnchor="end" fill="var(--tx4)" fontSize="10" fontFamily="var(--font-mono)">0</text>
           <text x="-8" y={CHART.height / 2 + 4} textAnchor="end" fill="var(--tx4)" fontSize="10" fontFamily="var(--font-mono)">{axisTokens(maxTokens / 2)}</text>
           <text x="-8" y="4" textAnchor="end" fill="var(--tx4)" fontSize="10" fontFamily="var(--font-mono)">{axisTokens(maxTokens)}</text>
 
-          {/* Raw counterfactual line (dashed) + sent line (accent) + area fill. */}
           <path d={rawPath} fill="none" stroke="var(--tx4)" strokeWidth="2" strokeDasharray="5 4" />
           <path d={sentPath} fill="none" stroke="var(--accent)" strokeWidth="2.5" />
           <path
@@ -224,7 +311,6 @@ export function OptimizerCard() {
             stroke="none"
           />
 
-          {/* Saving annotation — the vertical gap is masked tokens. */}
           {masked30d > 0 && (
             <text x={CHART.width} y="24" textAnchor="end" fill="var(--ok)" fontSize="10" fontFamily="var(--font-mono)">
               −{formatTokens(masked30d)} · ≈ ${saved} est.
@@ -257,9 +343,6 @@ export function OptimizerCard() {
         <div className="opt-stat">
           <div className="opt-stat-l">Cache hit</div>
           <div className="opt-stat-v">{wholePct(cacheHitPct)}</div>
-          {/* TTL detail (BET-1341) drawn from the measured effective TTL's
-              label + confidence — "TTL 5m measured" / "TTL 1h measured" /
-              "TTL 5m default" per the BET-1337 spec. */}
           <div className="opt-stat-d">
             {d.ttl ? `TTL ${ttlLabel(d.ttl.measuredMs)} ${d.ttl.confidence}` : ""}
           </div>
@@ -272,9 +355,63 @@ export function OptimizerCard() {
         <div className="opt-stat">
           <div className="opt-stat-l">Sessions</div>
           <div className="opt-stat-v">{d.bySession.length}</div>
-          <div className="opt-stat-d">30d</div>
+          {compaction ? (
+            <div className="opt-stat-d" data-testid="compaction-bg">
+              {compaction.background} of {compaction.total} in background
+            </div>
+          ) : (
+            <div className="opt-stat-d">30d</div>
+          )}
         </div>
       </div>
+
+      {/* ── Metered endpoints: slim role + crossover price, NO gauge ─────── */}
+      {metered.length > 0 && (
+        <div className="opt-meter">
+          <div className="opt-chart-head">Metered endpoints</div>
+          <p className="opt-sub">
+            Pay-per-token endpoints have no window and never reset, so there is nothing to
+            fill — only a role and the price at which they beat the subscription.
+          </p>
+          {metered.map((m) => (
+            <div className="opt-meter-row" key={m.name}>
+              <b>{m.name}</b>
+              <span className="opt-meter-role">{m.role}</span>
+              <span className="opt-meter-px">{m.price}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* ── Activity feed: the trust surface ─────────────────────────────── */}
+      <div className="opt-chart-head" style={{ marginTop: "var(--sp-6)" }}>
+        Activity
+      </div>
+      <p className="opt-sub">
+        Every parameter change the optimizer made on its own, with the evidence it used.
+        Rolled-back entries stay — that is the point.
+      </p>
+      {activity.length === 0 ? (
+        <div className="opt-empty">
+          Nothing changed yet. Manta needs a few days of your usage before it starts tuning
+          anything.
+        </div>
+      ) : (
+        <div className="opt-feed">
+          {activity.map((e) => {
+            const { headline, detail } = describeActivityEntry(e);
+            return (
+              <div className={`opt-ev${e.verdict === "rolled-back" ? " rb" : ""}`} key={e.id}>
+                <span className="opt-ev-when">{formatClockTime(e.ts)}</span>
+                <div className="opt-ev-body">
+                  <div className="opt-ev-hd">{headline}</div>
+                  {detail && <div className="opt-ev-why">{detail}</div>}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </Card>
   );
 }

@@ -166,6 +166,10 @@ export function InputArea({
   onSelectModel,
   onSelectEffort,
   presetLabel,
+  // BET-1347: this conversation's optimizer savings (savedPct × 100, 0..100)
+  // for the "↓ N% this conversation" pill next to the usage dial. null/absent
+  // → the pill is not rendered (never a fabricated 0).
+  optSavingPct,
   scheduleCount,
   onSchedules,
   onSecrets,
@@ -250,6 +254,8 @@ export function InputArea({
   onSelectEffort: (m: ModelSelection) => void;
   // BET-1274 10d: the routing preset's display label for the Auto row.
   presetLabel?: string;
+  // BET-1347: this conversation's optimizer savings pct for the composer pill.
+  optSavingPct?: number | null;
   // Plan-mode chip (BET-949): the resolved toggle state + the flip handler.
   plan: PlanToggleState;
   onTogglePlan: () => void;
@@ -622,6 +628,11 @@ export function InputArea({
             spaced run instead of a detached dial 12px off the group. */}
         <span className="shrink-0 flex items-center gap-2 flex-wrap">
           <UsageDial providerID={activeProviderID} />
+          {typeof optSavingPct === "number" && optSavingPct > 0 && (
+            <span className="composer-saving-pill">
+              ↓ {Math.round(optSavingPct)}% <span className="tx-faint">this conversation</span>
+            </span>
+          )}
           <SessionToolbar
             scheduleCount={scheduleCount}
             onSchedules={onSchedules}

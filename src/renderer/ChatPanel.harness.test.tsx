@@ -108,6 +108,31 @@ describe("ChatPanel render harness", () => {
     expect(h.text().toLowerCase()).toMatch(/allow|permission|run command/);
   });
 
+  it("renders the background-compaction one-liner (BET-1347)", async () => {
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    expect(h.text()).not.toContain("Compacted");
+    await emitStreamAndFlush(bus, h, {
+      sub: "optimizer.compacted",
+      sessionId: "ses_test",
+      payload: { beforeTokens: 128_000, afterTokens: 31_000, away: true },
+    });
+    expect(h.text()).toContain("Compacted while you were away");
+    expect(h.text()).toContain("128k");
+    expect(h.text()).toContain("31k");
+  });
+
+  it("falls back to background wording (no after-token count / not away) (BET-1347)", async () => {
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    await emitStreamAndFlush(bus, h, {
+      sub: "optimizer.compacted",
+      sessionId: "ses_test",
+      payload: { beforeTokens: 90_000, afterTokens: null, away: false },
+    });
+    expect(h.text()).toContain("Compacted in the background");
+  });
+
   it("ignores events for a different session id", async () => {
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();

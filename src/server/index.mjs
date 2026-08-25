@@ -18,6 +18,7 @@ import { synthesizeSpeech } from "../shared/groq.mjs";
 import { WebSocketServer } from "ws";
 import { createCounterfactualStore, validateCounterfactualReport } from "./optimizer/counterfactual.mjs";
 import { createOptimizerSummary } from "./optimizer/summary.mjs";
+import { createActivityLog } from "./optimizer/activityLog.mjs";
 import { createPacingState } from "./optimizer/pacing.mjs";
 import {
   createCompactionScheduler,
@@ -25,6 +26,7 @@ import {
   COMPACT_CACHE_TTL_FALLBACK_MS,
 } from "./optimizer/compaction.mjs";
 import { createConstraintStore, extractionInstruction, transcriptText } from "./optimizer/constraints.mjs";
+import { createTuner, TUNE_IDLE_SWEEP_MS, GUARD_CACHE_HIT_DROP_PTS, GUARD_SUSTAIN_MS } from "./optimizer/tuner.mjs";
 import { parseConstraints } from "../shared/constraintPin.mjs";
 import { startPoller } from "./startPoller.mjs";
 import { getDb } from "./opencodeDb.mjs";
@@ -40,6 +42,8 @@ import * as pty from "./pty.mjs";
 import * as local from "./local.mjs";
 import { createPeekHandler } from "./peek.mjs";
 import { createLogShipper, captureConsole, resolveAxiomConfig } from "../shared/logShip.mjs";
+import { setTelemetrySink, shipCtxEvent } from "./optimizer/telemetry.mjs";
+import { blendedPrice } from "../shared/blendedPrice.mjs";
 
 // BET-187: ship every console.* (and any startup banner / poller log) to
 // Axiom when MANTA_AXIOM_TOKEN is set in env AND AppConfig.shareAnalytics
@@ -53,7 +57,12 @@ import { createLogShipper, captureConsole, resolveAxiomConfig } from "../shared/
 {
   const axiomCfg = resolveAxiomConfig({ env: process.env, config: await local.configGet() });
   if (axiomCfg) {
-    captureConsole(createLogShipper({ ...axiomCfg, source: "server", device: hostname() }));
+    // The SINGLE log shipper on the box. captureConsole wraps console.* with
+    // it; BET-1347 ALSO hands it to the optimizer's context telemetry as a
+    // reference (setTelemetrySink) — deliberately not a second instance.
+    const shipper = createLogShipper({ ...axiomCfg, source: "server", device: hostname() });
+    captureConsole(shipper);
+    setTelemetrySink(shipper);
   }
 }
 import { createBus, handleEventsRequest, attachEventsWs } from "./events.mjs";
@@ -969,6 +978,61 @@ const optimizerCounterfactual = createCounterfactualStore({
   now: Date.now,
 });
 
+// Optimizer P2.5 (BET-1347): the activity log store — the trust surface that
+// lists every parameter change the optimizer made on its own. Wired so the
+// tuner, the compaction scheduler and the eco recorder can append, and exposed
+// on the `optimizer:summary` read model's `activity` slice.
+const optimizerActivity = createActivityLog({
+  load: () => readJsonSync(statePath("optimizer-log.json"), []),
+  save: (s) => writeJsonAtomic(statePath("optimizer-log.json"), JSON.stringify(s, null, 2)),
+  now: Date.now,
+});
+
+// The metered (pay-per-token) endpoints for the dashboard's slim row: models in
+// the routing catalog that are NOT covered by a subscription quota window, with
+// their blended $/Mtok from the SHARED blendedPrice (never a guess — a model
+// with no price is skipped). A metered endpoint has no window and never resets,
+// so there is nothing to fill — the row is deliberately role+price, no gauge.
+// [] when the catalog or pricing is unavailable (the section is then absent).
+async function readMeteredEndpoints() {
+  try {
+    const summary = await optimizerSummary();
+    const subProviders = new Set((summary?.windows ?? []).map((w) => w.provider));
+    const cs = summary?.cacheShare ?? {};
+    const denom = (cs.input ?? 0) + (cs.output ?? 0) + (cs.cacheRead ?? 0) + (cs.cacheWrite ?? 0);
+    const mix =
+      denom > 0
+        ? {
+            input: (cs.input ?? 0) / denom,
+            output: (cs.output ?? 0) / denom,
+            cacheRead: (cs.cacheRead ?? 0) / denom,
+            cacheWrite: (cs.cacheWrite ?? 0) / denom,
+          }
+        : { input: 0.5, output: 0.5, cacheRead: 0, cacheWrite: 0 };
+    let models = [];
+    try {
+      models = Array.isArray(routingCatalogIndex.allModels()) ? routingCatalogIndex.allModels() : [];
+    } catch {
+      models = [];
+    }
+    const rows = [];
+    for (const model of models) {
+      const prov = typeof model?.providerID === "string" ? model.providerID : null;
+      if (!prov || subProviders.has(prov)) continue;
+      const bp = blendedPrice(model, mix, model?.cost ?? null);
+      if (!bp || bp.known !== true) continue;
+      rows.push({
+        name: `${prov} · ${typeof model.id === "string" ? model.id : ""}`,
+        role: "pay-per-token endpoint",
+        price: `$${bp.price.toFixed(2)} / Mtok blended`,
+      });
+    }
+    return rows.slice(0, 8);
+  } catch {
+    return [];
+  }
+}
+
 // BET-1343: the memoized `optimizer:summary` read model, created ONCE at module
 // scope here (not inside buildHandlers) so the SAME 60s memo + in-flight guard
 // is shared by the RPC `optimizer:summary` channel and the GET
@@ -981,6 +1045,25 @@ const optimizerSummary = createOptimizerSummary({
   usageSnapshots: listSnapshots,
   usageHistory: getUsageHistory,
   readCacheTtl: () => readProvidersCacheTtl({ listProviders: oc.getProviders }),
+  activityStore: optimizerActivity,
+  // BET-1347: per-window pacing pressure (deficit / tokens-per-pct) for the
+  // chips under each gauge.
+  pressureWindows: async () => {
+    try {
+      return await optimizerPacing.pressureWindows();
+    } catch {
+      return {};
+    }
+  },
+  // BET-1347: the compaction scheduler's "X of Y in background" stat.
+  compactionStat: async () => {
+    try {
+      return compactionScheduler.stat();
+    } catch {
+      return null;
+    }
+  },
+  meteredEndpoints: readMeteredEndpoints,
 });
 
 // ---------------------------------------------------------------------------
@@ -1154,6 +1237,56 @@ const compactionScheduler = createCompactionScheduler({
   now: Date.now,
   load: () => readJsonSync(statePath("optimizer-compaction.json"), {}),
   save: (s) => writeJsonAtomic(statePath("optimizer-compaction.json"), JSON.stringify(s, null, 2)),
+  // BET-1347: record each background compaction on the activity log — the
+  // trust surface lists what the optimizer did, including compactions. Counts
+  // only: context tokens, never conversation content.
+  onCompacted: async ({ sessionID, contextTokens }) => {
+    try {
+      await optimizerActivity.append({
+        kind: "compaction",
+        subject: "background compaction",
+        verdict: "applied",
+        evidence: {
+          background: 1,
+          beforeTokens: typeof contextTokens === "number" && Number.isFinite(contextTokens) ? contextTokens : undefined,
+        },
+      });
+    } catch (e) {
+      console.warn("[optimizer] compaction activity append failed:", e?.message ?? e);
+    }
+    // Context telemetry (counts only): a background compaction shipped with its
+    // before/after token sizes when known; no session titles, no content.
+    try {
+      shipCtxEvent({
+        kind: "compaction",
+        beforeTokens: typeof contextTokens === "number" && Number.isFinite(contextTokens) ? contextTokens : null,
+        background: 1,
+      });
+    } catch {
+      /* telemetry never throws */
+    }
+    // Notify the OPEN conversation that it was compacted in the background —
+    // a pass-by transcript one-liner. Carried on the `stream` channel so the
+    // renderer's scoped stream handler (useSseBus) routes it to the active
+    // session. `away` is the box's presence verdict at compaction time
+    // (server-side, not guessed); beforeTokens is the pre-compaction context;
+    // afterTokens is not yet surfaced by the compaction call (null → the
+    // renderer falls back to the wording that needs no count).
+    try {
+      bus.publish({
+        kind: "stream",
+        sub: "optimizer.compacted",
+        sessionId: sessionID,
+        payload: {
+          beforeTokens: typeof contextTokens === "number" && Number.isFinite(contextTokens) ? contextTokens : null,
+          afterTokens: null,
+          away: push.desktopState(push.getDesktopPresence(), Date.now()) === "away",
+        },
+      });
+    } catch (e) {
+      console.warn("[optimizer] compaction notice publish failed:", e?.message ?? e);
+    }
+  },
   enabled: async () => (await local.configGet())?.optimizerEnabled === true,
 });
 
@@ -1163,6 +1296,83 @@ const stopCompactionScheduler = startPoller(() => compactionScheduler.tick(), {
 });
 // eslint-disable-next-line no-unused-vars
 void stopCompactionScheduler;
+
+// ---------------------------------------------------------------------------
+// Optimizer P2.5 (BET-1347) — the tuner + guardrails + telemetry wiring.
+//
+// The tuner is the conservative bandit that earns its own parameter changes.
+// It ONLY runs when the optimizer switch is on; with it off it neither
+// observes nor writes (`createTuner` guards this internally). It is the ONLY
+// writer of `optimizer-policy.json`. Guardrails trip -> instant revert + a
+// rolled-back activity entry naming which.
+// ---------------------------------------------------------------------------
+
+// Cache-hit guardrail reader. Tracks a rolling per-hour history of the
+// summary's cache-hit %; trips when the CURRENT rate has fallen more than
+// GUARD_CACHE_HIT_DROP_PTS below the value ~GUARD_SUSTAIN_MS ago, sustained.
+// Churn and cost-per-turn guardrails are not derived here — the ledger/parts
+// the plugin would need to report do not exist on the server yet, so those
+// two default to no-trip (fail-open: the bandit only acts on evidence).
+const cacheHitHistory = []; // { at, pct }
+function readGuardrails() {
+  const summary = optimizerSummaryCached();
+  let hitPct = null;
+  try {
+    const s = summary?.cacheShare;
+    const denom = (s?.cacheRead ?? 0) + (s?.cacheWrite ?? 0) + (s?.input ?? 0);
+    if (denom > 0) hitPct = ((s.cacheRead ?? 0) / denom) * 100;
+  } catch {
+    hitPct = null;
+  }
+  const t = Date.now();
+  if (typeof hitPct === "number") {
+    cacheHitHistory.push({ at: t, pct: hitPct });
+    while (cacheHitHistory.length && t - cacheHitHistory[0].at > GUARD_SUSTAIN_MS * 4) cacheHitHistory.shift();
+    const earlier = cacheHitHistory.find((e) => t - e.at >= GUARD_SUSTAIN_MS - 5_000);
+    if (earlier && earlier.pct - hitPct >= GUARD_CACHE_HIT_DROP_PTS) {
+      return { tripped: true, which: "cache-hit", evidence: { hitDropPts: Math.round((earlier.pct - hitPct) * 10) / 10 } };
+    }
+  }
+  return null;
+}
+let optimizerSummaryCachedValue = null;
+function optimizerSummaryCached() {
+  return optimizerSummaryCachedValue;
+}
+
+// The repo the tuner tunes: the box's primary project directory (config's
+// first project), or "" -> no tuning. Single-primary on a single-user box; the
+// policy route reads this same repo table by directory.
+const tunerDirectory = ((await local.configGet())?.projects?.[0]?.defaultCwd ?? "").trim();
+
+const optimizerTuner = createTuner({
+  directory: tunerDirectory,
+  enabled: async () => (await local.configGet())?.optimizerEnabled === true,
+  now: Date.now,
+  activityLog: optimizerActivity,
+  sessionCount: async () => (await optimizerSummary())?.bySession?.length ?? 0,
+  observeGuardrails: readGuardrails,
+  loadTunerState: () => readJsonSync(statePath("optimizer-tuner.json"), {}),
+  saveTunerState: (s) => writeJsonAtomic(statePath("optimizer-tuner.json"), JSON.stringify(s, null, 2)),
+});
+
+// Backstop sweep only — the event-driven triggers (new sessions, regime change,
+// guardrail trip) also call tune() from their publish points; this is just the
+// floor that guarantees a box seeing none of them still gets evaluated.
+const stopTuner = startPoller(async () => {
+  // Refresh the cached summary the guardrail reader peeks at.
+  try {
+    optimizerSummaryCachedValue = await optimizerSummary();
+  } catch {
+    optimizerSummaryCachedValue = null;
+  }
+  await optimizerTuner.tune();
+}, {
+  intervalMs: TUNE_IDLE_SWEEP_MS,
+  label: "optimizer-tuner",
+});
+// eslint-disable-next-line no-unused-vars
+void stopTuner;
 
 rpcHandlers = buildHandlers({
   tmux,
@@ -3034,6 +3244,20 @@ const handleRequest = async (req, res) => {
           return;
         }
         await optimizerCounterfactual.record(body);
+        // Context telemetry — a mask application reported by the plugin. Counts
+        // only; `sessionID` is the opaque id (never a title or content).
+        try {
+          shipCtxEvent({
+            kind: "mask",
+            maskedTokens: typeof body.maskedTokens === "number" && Number.isFinite(body.maskedTokens) ? body.maskedTokens : null,
+            maskedParts: typeof body.maskedParts === "number" && Number.isFinite(body.maskedParts) ? body.maskedParts : null,
+            applied: body.applied === true ? 1 : 0,
+            mode: body.mode ?? "observe",
+            sessionID: body.sessionID,
+          });
+        } catch {
+          /* telemetry never throws */
+        }
         respondJson(res, 200, { ok: true });
         return;
       }

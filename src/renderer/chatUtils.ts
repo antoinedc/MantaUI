@@ -218,6 +218,93 @@ export function formatTokens(n: number): string {
   return `${Math.round(n / 1000)}k tokens`;
 }
 
+// Compact token figure for inline surfaces (the compaction saving pill / the
+// "128k → 31k" one-liner). Built on formatTokens — never a second formatter —
+// with the " tokens" suffix stripped.
+function formatTokensCompact(n: number): string {
+  return formatTokens(n).replace(/\s+tokens$/, "");
+}
+
+// ---- Optimizer P2.5 (BET-1347) pure formatters ------------------------------
+
+export type PressureTone = "neutral" | "ok" | "warn";
+
+/**
+ * Describe a subscription window's pacing pressure for the pressure chip that
+ * sits under its gauge. `hasSignal` is false when there is no pressure signal
+ * yet (tokensPerPct is null or there are too few samples) — that renders the
+ * documented NEUTRAL state, never a fabricated pace.
+ *
+ *   hasSignal=false        -> "no pressure signal yet"      (neutral)
+ *   hasSignal, deficit<=0  -> "on pace"                     (ok)
+ *   hasSignal, deficit>0   -> "+N pts ahead of pace"        (warn)
+ */
+export function describePressure(deficit: number, hasSignal: boolean): { text: string; tone: PressureTone } {
+  if (!hasSignal) return { text: "no pressure signal yet", tone: "neutral" };
+  const pts = Math.round(deficit);
+  if (deficit > 0) return { text: `+${pts} pts ahead of pace`, tone: "warn" };
+  return { text: "on pace", tone: "ok" };
+}
+
+export type ActivityEntry = {
+  id?: string;
+  ts?: number;
+  kind: string;
+  subject?: string;
+  from?: string | number;
+  to?: string | number;
+  verdict: string;
+  evidence?: Record<string, string | number>;
+  revertedAt?: number;
+};
+
+const VERDICT_WORD: Record<string, string> = {
+  kept: "Kept",
+  "rolled-back": "Rolled back",
+  applied: "Applied",
+};
+
+// A compact evidence line: "62 turns · hit 74.1% · churn 0.4%" — joined from
+// the counts/measurements, never content.
+function evidenceLine(evidence?: Record<string, string | number>): string {
+  if (!evidence) return "";
+  const parts: string[] = [];
+  for (const [k, v] of Object.entries(evidence)) {
+    if (v === undefined || v === null || String(v) === "") continue;
+    const label = k.replace(/([A-Z])/g, " $1").replace(/^[a-z]/g, (c) => c.toUpperCase()).trim();
+    parts.push(`${label} ${v}`);
+  }
+  return parts.join(" · ");
+}
+
+/**
+ * Describe one activity-log entry for the feed: a headline (the verdict with
+ * the change it describes) and the evidence line. The prefix is derived from
+ * `verdict` (so a rolled-back entry is visually distinct); `subject` is the
+ * change itself.
+ */
+export function describeActivityEntry(entry: ActivityEntry): { headline: string; detail: string } {
+  const word = VERDICT_WORD[entry.verdict] ?? entry.verdict ?? "Changed";
+  const subject = typeof entry.subject === "string" && entry.subject ? entry.subject : "optimizer change";
+  return {
+    headline: `${word} — ${subject}`,
+    detail: evidenceLine(entry.evidence),
+  };
+}
+
+/**
+ * Format a compaction's before/after token sizes for the "⟳ Compacted ... ·
+ * 128k → 31k" one-liner. Returns the arrowed savings when the compaction
+ * actually shrank the context, or "0" when there was no reduction (before and
+ * after equal or after > before) — never fabricates a saving.
+ */
+export function formatCompactionSaving(before: number, after: number): string {
+  const isNum = (n: number): boolean => typeof n === "number" && Number.isFinite(n) && n > 0;
+  if (!isNum(before) || !isNum(after)) return "0";
+  if (after >= before) return "0";
+  return `${formatTokensCompact(before)} → ${formatTokensCompact(after)}`;
+}
+
 // Build an SVG path string for a CUMULATIVE series over `values` (oldest →
 // newest), for the Optimizer's "sent vs raw counterfactual" consumption chart
 // (BET-1337). Each point's x is spaced linearly across `width`; its y is the

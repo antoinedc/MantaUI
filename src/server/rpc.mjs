@@ -53,6 +53,7 @@ import { searchMessages } from "./messageSearch.mjs";
 import { ledgerSummary } from "./modelLedger.mjs";
 import { getDb } from "./opencodeDb.mjs";
 import { createOptimizerSummary } from "./optimizer/summary.mjs";
+import { shipCtxEvent } from "./optimizer/telemetry.mjs";
 import { allModels as catalogAllModels } from "./modelCatalog.mjs";
 import { MIN_CLIENT } from "./version.mjs";
 import { forgeDiffForCwd, forgeStatus, pullRequestForCwd, shipPullRequest, shipPreview, mergePullRequest, draftGetForCwd, draftCommentForCwd, draftSubmitForCwd, replyThreadForCwd, forgeInbox, forgeDeviceStart, forgeDevicePoll, forgeDeviceCancel, forgeListRepos, forgeCloneStart, forgeCloneStatus, forgeCloneCancel } from "./forge/index.mjs";
@@ -1056,6 +1057,33 @@ export function buildHandlers({
         // pure formatter (BET-1301) prints the decision's inputs — the real
         // conversation size and what the turn needed — alongside its outputs.
         console.log(describeDecision(decision, { surface, agent }));
+        // Optimizer P2.5 (BET-1347): context telemetry for a routing decision
+        // under pressure — counts/knobs only (lambda, deficit, ecoLevel,
+        // switched), NEVER content. Emitted only when pressure is actually
+        // applied (an eco tier above 0, or the winner's provider carrying a
+        // shadow price), so the stream stays decision-shaped and quiet when
+        // nothing is constrained. `rewarmSkipped` is a RENDERER-side decision
+        // (shouldSwitch's rewarm hysteresis), not visible here — it is omitted
+        // rather than fabricated.
+        {
+          let winnerProvider = null;
+          if (decision?.model === catalogIncumbent) winnerProvider = incumbent?.providerID ?? null;
+          else winnerProvider = decision?.model?.providerID ?? null;
+          const pressure = winnerProvider ? effServices?.pressure?.[winnerProvider] : null;
+          const underPressure = (effServices?.ecoLevel ?? 0) > 0 || !!pressure;
+          if (underPressure) {
+            shipCtxEvent({
+              kind: "routing",
+              switched: decision?.changed === true ? 1 : 0,
+              lambda: pressure?.lambda ?? null,
+              deficit: pressure?.deficit ?? null,
+              ecoLevel: effServices?.ecoLevel ?? 0,
+              routing: winnerProvider ?? null,
+              surface,
+              agent,
+            });
+          }
+        }
         // On the off-path / no-survivors path chooseModel returns the very
         // catalogIncumbent reference it was handed; map that back to the
         // original structured incumbent so the decision stays byte-identical.
