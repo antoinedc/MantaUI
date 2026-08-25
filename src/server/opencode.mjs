@@ -863,13 +863,16 @@ export async function compactSession(sessionId) {
  * Sums the characters of every text-bearing STRING value in the messages
  * (part text, tool inputs/outputs, etc.) and applies a 4 chars/token heuristic
  * — matching how opencode estimates context for its own compaction retention
- * (Token.estimate over the serialized messages). Numbers (token counts, ids,
- * timestamps) and structural keys are not content and are skipped, so the
- * compaction summary's large `tokens.input` never inflates the "after" figure.
- * Input-robust: any shape degrades to a sane number, never throws.
+ * (Token.estimate over the serialized messages). Structural keys (type/role/id/
+ * status/index/timestamps) are not content and are skipped, so they add no
+ * per-message noise, and the compaction summary's large `tokens.input` (a
+ * number) never inflates the "after" figure. Input-robust: any shape degrades
+ * to a sane number, never throws.
  * @param {unknown[]} [messages] opencode SessionV1.WithParts list
  * @returns {number} estimated context tokens (0 for empty/missing)
  */
+const NON_CONTENT_KEYS = new Set(["type", "role", "id", "status", "index"]);
+
 export function estimateMessageListTokens(messages) {
   if (!Array.isArray(messages)) return 0;
   const acc = { chars: 0 };
@@ -879,13 +882,22 @@ export function estimateMessageListTokens(messages) {
   return Math.ceil(acc.chars / 4);
 }
 
+function isNonContentKey(key) {
+  if (NON_CONTENT_KEYS.has(key)) return true;
+  const lower = String(key).toLowerCase();
+  return lower === "id" || lower.endsWith("id") || lower === "created" || lower === "completed" || lower === "started";
+}
+
 function collectTextChars(node, acc) {
   if (Array.isArray(node)) {
     for (const v of node) collectTextChars(v, acc);
     return;
   }
   if (node && typeof node === "object") {
-    for (const v of Object.values(node)) collectTextChars(v, acc);
+    for (const [key, v] of Object.entries(node)) {
+      if (isNonContentKey(key)) continue;
+      collectTextChars(v, acc);
+    }
     return;
   }
   if (typeof node === "string" && node.length > 0) {
