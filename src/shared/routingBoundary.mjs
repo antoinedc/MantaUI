@@ -31,6 +31,16 @@ import { endpointKey } from "./endpointKey.mjs";
 // declared modalities = allow, never "supports nothing" (BET-1267 3e).
 import { acceptsModality } from "./modelGuide.mjs";
 
+// Optimizer P2.3 (BET-1345): the rewarm hysteresis term. Switching model
+// mid-conversation discards the prompt cache and re-bills the whole prefix, so
+// a switch that contention alone would allow may not be worth it if the winner's
+// savings over the next few turns do not pay for re-warming the winner's cache
+// prefix. `savingsPerTurn * HORIZON_TURNS <= BETA * rewarmCost` → the savings
+// won't recover the rewarm cost within the horizon → DON'T switch.
+export const ROUTING_REWARM_BETA = 1.0;
+export const ROUTING_REWARM_HORIZON_TURNS = 10;
+export const CACHE_WRITE_MULTIPLIER = 1.25;
+
 /**
  * Does this turn cross a decision point?
  *
@@ -159,6 +169,12 @@ function incumbentIndex(incumbent, ranked) {
  * @param {boolean}     input.incumbentStillCapable   does it still fit the turn
  * @param {boolean}     input.incumbentHealthy        is its provider available
  * @param {number}      [input.topN]             contention window (default 3)
+ * @param {number}      [input.savingsPerTurn]   $ the winner saves per turn over
+ *   the incumbent (server-priced; null when the incumbent didn't survive routing)
+ * @param {number}      [input.rewarmCost]       $ to re-warm the winner's cache
+ *   prefix (server-priced; null when the write rate is unknown)
+ * @param {boolean}     [input.freeSwitch]       true at post-compaction / dead
+ *   cache — a free moment with no prefix to re-warm, so no rewarm term applies
  * @returns {{ switch: boolean, why: string }}
  */
 export function shouldSwitch(input = {}) {
@@ -169,6 +185,9 @@ export function shouldSwitch(input = {}) {
     incumbentStillCapable = true,
     incumbentHealthy = true,
     topN = 3,
+    savingsPerTurn,
+    rewarmCost,
+    freeSwitch,
   } = input;
 
   if (incumbentStillEligible === false) {
@@ -182,7 +201,24 @@ export function shouldSwitch(input = {}) {
   }
 
   const pos = incumbentIndex(incumbent, ranked);
-  if (pos === -1 || pos >= topN) {
+  const droppedOut = pos === -1 || pos >= topN;
+  if (droppedOut) {
+    // The rewarm term can ONLY PREVENT a switch that contention alone would
+    // have allowed; it can never force one. `freeSwitch` (post-compaction /
+    // dead-cache) is a free moment with no prefix to re-warm → keep today's
+    // switch. Either price absent → today's behaviour.
+    const pricesKnown =
+      typeof savingsPerTurn === "number" &&
+      Number.isFinite(savingsPerTurn) &&
+      typeof rewarmCost === "number" &&
+      Number.isFinite(rewarmCost);
+    if (
+      freeSwitch !== true &&
+      pricesKnown &&
+      savingsPerTurn * ROUTING_REWARM_HORIZON_TURNS <= ROUTING_REWARM_BETA * rewarmCost
+    ) {
+      return { switch: false, why: "rewarm-not-worth-it" };
+    }
     return { switch: true, why: "incumbent-dropped-out" };
   }
   return { switch: false, why: "incumbent-retained" };

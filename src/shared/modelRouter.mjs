@@ -79,8 +79,10 @@ function capabilityDrop(m, { contextTokens, needs, health }) {
 }
 
 // Assess one endpoint once — Hard Stage 1 (eligibility), marginal cost and
-// reliability — everything the hard and soft stages read.
-function assess(candidate, { nowMs, replacementCost }, services) {
+// reliability — everything the hard and soft stages read. The shadow price is
+// folded in HERE (the full `services` bag is visible), never inside the
+// comparator, which only sees the reduced {preset, telemetry, health} object.
+function assess(candidate, { nowMs, replacementCost, expectedTurnTokens, isLowStakes }, services) {
   const key = endpointKey(candidate);
   const dec = services.declared?.[key] ?? null;
   const identity = resolveIdentity(candidate, dec, services.catalogMatcher);
@@ -102,7 +104,20 @@ function assess(candidate, { nowMs, replacementCost }, services) {
     declared: dec,
     providerClass: services.providerClass?.[candidate.providerID] ?? "supported",
   });
-  const mc = marginalCost({ model: m, account: services.accounts?.[candidate.providerID], nowMs, mix: perMix, reference: ref, replacementCost });
+  const mc = marginalCost({
+    model: m,
+    account: services.accounts?.[candidate.providerID],
+    nowMs,
+    mix: perMix,
+    reference: ref,
+    replacementCost,
+    // Optimizer P2.3 (BET-1345): the pacing shadow price for THIS provider,
+    // additive on top of the subscription pace curve. Absent → marginalCost
+    // prices exactly as today (the whole on/under-pace regime is preserved).
+    expectedTurnTokens,
+    isLowStakes,
+    shadowPrice: services.pressure?.[candidate.providerID],
+  });
   // The raw mix/reference flags blendedPrice already computed with the SAME
   // inputs marginalCost handed it — reported verbatim, not recomputed. This is
   // what makes a silently-defaulted mix / absent catalogue visible (BET-1265).
@@ -188,6 +203,17 @@ function computeReplacementCost(catalog, services) {
 const num0 = (v) => (isNum(v) ? v : 0);
 const numInf = (v) => (isNum(v) ? v : Infinity);
 const telemetryOf = (a, services) => services.telemetry?.[a.key] ?? {};
+
+// The winner's cache-WRITE price per token, taken from the SAME cost rates
+// blendedPrice reads (a missing cacheWrite bills at the input rate — BET-1269 5a
+// semantics). Returns null when neither rate is a finite number (price unknown →
+// the rewarm cost is unknown → the rewarm hysteresis term is skipped).
+function cacheWritePriceOf(model) {
+  const cost = model && typeof model.cost === "object" ? model.cost : null;
+  if (!cost) return null;
+  if (isNum(cost.cacheWrite)) return cost.cacheWrite;
+  return isNum(cost.input) ? cost.input : null;
+}
 
 // The winner's inspectable signals, read off the assessed entry — every value
 // was already computed during assess(); nothing new is derived here.
@@ -402,6 +428,14 @@ export function chooseModel(input = {}) {
   // The subscription exchange rate anchors to the cheapest non-subscription
   // endpoint's blended price — computed once, before the per-candidate loop.
   const replacementCost = computeReplacementCost(catalog, services);
+  // Optimizer P2.3 (BET-1345): the pacing shadow price is sized by the turn's
+  // expected tokens and stakes. `expectedTurnTokens` is the real conversation
+  // size when it is a finite number, else omitted → no pressure. A "low-stakes"
+  // turn (general/explore) is the one the newsvendor protection multiplier can
+  // inflate — build/plan work keeps its quality floor regardless of pressure.
+  const expectedTurnTokens =
+    isNum(intent?.contextTokens) && intent.contextTokens > 0 ? intent.contextTokens : undefined;
+  const isLowStakes = agent === "general" || agent === "explore";
   const addDrop = (stage, reason) => {
     const existing = drops.find((d) => d.stage === stage && d.reason === reason);
     if (existing) existing.n += 1;
@@ -409,7 +443,7 @@ export function chooseModel(input = {}) {
   };
   for (const c of Array.isArray(catalog) ? catalog : []) {
     considered += 1;
-    const a = assess(c, { nowMs, replacementCost }, services);
+    const a = assess(c, { nowMs, replacementCost, expectedTurnTokens, isLowStakes }, services);
     const cap = capabilityDrop(a.effective ?? a.candidate, hardCtx);
     if ((a.exhausted && !cap) || cap || !a.eligible) {
       const label = bindLabel(a, cap);
@@ -422,13 +456,23 @@ export function chooseModel(input = {}) {
     survivors.push(a);
   }
 
-  const targetRaw = policy?.perAgent?.[agent] ?? AGENT_TIER?.[policy?.preset]?.[agent] ?? "balanced";
+  // Eco (Optimizer P2.3): `policy.preset` stays whatever config holds
+  // ("balanced" — the preset key is retained + pinned, never removed). The
+  // EFFECTIVE preset is "economy" only while the box is under eco pressure
+  // (services.ecoLevel >= 2), which moves the TARGET tier (and stage3Order's
+  // flattening) down for cheap endpoints — but it NEVER relaxes AGENT_FLOOR_SCORE
+  // / meetsFloor: build and plan keep their quality floor no matter how much
+  // pressure the box is under. Eco moves the target, never the floor.
+  const ecoLevel = services.ecoLevel ?? 0;
+  const effectivePreset = ecoLevel >= 2 ? "economy" : policy?.preset;
+  const targetRaw = policy?.perAgent?.[agent] ?? AGENT_TIER?.[effectivePreset]?.[agent] ?? "balanced";
   const floorScore = AGENT_FLOOR_SCORE[agent] ?? 0;
   const targetRank = Math.max(tierRank(targetRaw), tierRank(tierForScore(floorScore)));
   const targetTrace = {
     tier: TIER_BY_RANK[targetRank],
     floorTier: tierForScore(floorScore),
     widened: false,
+    eco: ecoLevel,
   };
 
   if (survivors.length === 0) {
@@ -441,7 +485,7 @@ export function chooseModel(input = {}) {
     };
   }
 
-  const explored = stage3Order(survivors, { preset: policy?.preset, telemetry: services.telemetry, health: services.health });
+  const explored = stage3Order(survivors, { preset: effectivePreset, telemetry: services.telemetry, health: services.health });
   const band = selectBand(explored, targetRank, agent);
   if (band.length === 0) {
     return {
@@ -453,13 +497,26 @@ export function chooseModel(input = {}) {
     };
   }
 
-  const winner = band[0].candidate;
-  const winnerKey = band[0].key;
+  const winnerEntry = band[0];
+  const winner = winnerEntry.candidate;
+  const winnerKey = winnerEntry.key;
+  // Optimizer P2.3 (BET-1345): a minimal COST accessor so the wiring can
+  // report savingsPerTurn / rewarmCost WITHOUT re-running assess(). `incumbent`
+  // is the catalogIncumbent projection; when it survived routing it has an
+  // assessed cost here, else null (shouldSwitch will have forced the switch).
+  const incumbentEntry = incumbent
+    ? (survivors.find((a) => endpointKey(a.candidate) === endpointKey(incumbent)) ?? null)
+    : null;
   return {
     model: winner,
-    reason: explain({ agent, tierName: TIER_BY_RANK[tierRank(band[0].tier)], preset: policy?.preset, winner, cost: band[0].marginalCost }),
+    reason: explain({ agent, tierName: TIER_BY_RANK[tierRank(band[0].tier)], preset: effectivePreset, winner, cost: winnerEntry.marginalCost }),
     alternatives: band.slice(1, 4).map((a) => a.candidate),
     changed: !incumbent || endpointKey(incumbent) !== winnerKey,
+    costs: {
+      winner: winnerEntry.marginalCost,
+      incumbent: incumbentEntry ? incumbentEntry.marginalCost : null,
+      winnerCacheWritePrice: cacheWritePriceOf(winnerEntry.effective ?? winnerEntry.candidate),
+    },
     trace: {
       considered,
       dropped: drops,

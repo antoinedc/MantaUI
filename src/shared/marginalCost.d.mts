@@ -34,6 +34,15 @@ export interface MarginalCostResult {
   reason: string;
 }
 
+/** Optimizer P2.3 (BET-1345): the pacing shadow price, additive on the
+ *  subscription pace curve. Absent on a credit account and anywhere the deficit
+ *  queue does not exist. */
+export interface ShadowPriceInput {
+  lambda: number;
+  tokensPerPct: number | null;
+  protection?: boolean;
+}
+
 export function depletionFactor(balance: number | undefined): number;
 
 export function marginalCost(input: {
@@ -43,4 +52,7 @@ export function marginalCost(input: {
   mix?: unknown;
   reference?: unknown;
   replacementCost?: number;
+  expectedTurnTokens?: number;
+  isLowStakes?: boolean;
+  shadowPrice?: ShadowPriceInput;
 }): MarginalCostResult;

@@ -3,6 +3,7 @@ import { chooseModel, incumbentStillEligible, describeDecision, AGENT_TIER, type
 import { endpointKey } from "./endpointKey.mjs";
 import { tierRank } from "./modelGuide.mjs";
 import { AGENT_FLOOR_SCORE } from "./modelQuality.mjs";
+import { RESET_RAMP_MS } from "./marginalCost.mjs";
 // Per standing rule 9, candidates below are built with the REAL normaliser,
 // not a hand-written fixture — a fixture that disagreed with production is how
 // these defects survived a green suite. The services context is likewise built
@@ -1022,5 +1023,84 @@ describe("describeDecision", () => {
       trace: { considered: 1, dropped: [], intent: { needs: { tools: true } }, winner: { cost: {} } },
     };
     expect(describeDecision(decision, { surface: "sub", agent: "explore" })).toMatch(/^\[router\] sub\/explore /);
+  });
+});
+
+// --- Optimizer P2.3: pressure + eco (BET-1345) ------------------------------
+// The R constant matches marginalCost's RESET_RAMP_MS so an on-pace window
+// prices at exactly the exchange/overage rate.
+const R = RESET_RAMP_MS;
+
+// An on-pace subscription account at a published overage price: cost = rate.
+function subAccount(overagePrice: number): Record<string, unknown> {
+  return {
+    kind: "subscription",
+    windows: [{ kind: "session", pct: 60, startedAt: -1.5 * R, resetsAt: R }],
+    overagePrice,
+  };
+}
+
+describe("modelRouter — pacing pressure (shadow price)", () => {
+  // Both endpoints are the same model on two subscription providers; the
+  // within-model contest is decided purely by marginal cost, so a shadow price
+  // on A deterministically flips the winner to B.
+  const a = () => endpoint("m", { providerID: "a", cost: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 } });
+  const b = () => endpoint("m", { providerID: "b", cost: { input: 10, output: 10, cacheRead: 10, cacheWrite: 10 } });
+  const POLICY = { preset: "balanced" };
+  const services = (extra: Record<string, unknown> = {}) => ({ accounts: { a: subAccount(1), b: subAccount(105) }, ...extra });
+
+  it("pressure absent → routing is byte-identical to today (regression pin)", () => {
+    const catalog = [a(), b()];
+    const base = route({ catalog, intent: { contextTokens: 20_000 }, policy: POLICY, services: services() });
+    // eco defaults to 0 → the configured preset is used verbatim, no flattening.
+    expect(base.trace.target.eco).toBe(0);
+    expect(base.trace.winner!.cost.basis).not.toContain("pressure");
+    expect(base.model?.providerID).toBe("a");
+    // A shadowPrice marginalCost skips (lambda 0 / null tokensPerPct) is identical.
+    const inert = route({
+      catalog,
+      intent: { contextTokens: 20_000 },
+      policy: POLICY,
+      services: services({ pressure: { a: { lambda: 0, tokensPerPct: null, deficit: 0, ecoLevel: 0, protection: false } } }),
+    });
+    expect(inert.model?.providerID).toBe("a");
+    expect(inert.trace.winner!.cost.basis).toBe(base.trace.winner!.cost.basis);
+  });
+
+  it("pressure on provider A flips an endpoint on provider B to win where A won before", () => {
+    const catalog = [a(), b()];
+    const base = route({ catalog, intent: { contextTokens: 20_000 }, policy: POLICY, services: services() });
+    expect(base.model?.providerID).toBe("a");
+    const pressured = route({
+      catalog,
+      intent: { contextTokens: 20_000 },
+      policy: POLICY,
+      services: services({ pressure: { a: { lambda: 1, tokensPerPct: 100, deficit: 25, ecoLevel: 1, protection: false } } }),
+    });
+    // pressure on a = 1*(20000/100)*1 = 200 → a's cost 201 > b's 105.
+    expect(pressured.model?.providerID).toBe("b");
+  });
+});
+
+describe("modelRouter — eco level moves the target, never the floor", () => {
+  it("ecoLevel >= 2 flattens the model partition even while preset is 'balanced'", () => {
+    const strong = endpoint("strong", { tier: "balanced", score: 0.6, providerID: "a", cost: { input: 100, output: 100, cacheRead: 50, cacheWrite: 50 } });
+    const weak = endpoint("weak", { tier: "balanced", score: 0.45, providerID: "b", cost: { input: 1, output: 1, cacheRead: 0.5, cacheWrite: 0.5 } });
+    // Without eco, "balanced" keeps the partition: strong wins.
+    const baseline = route({ catalog: [strong, weak], policy: { preset: "balanced" } });
+    expect(baseline.model?.id).toBe("strong");
+    // At eco level 3 the effective preset becomes economy → cheap weak wins.
+    const res = route({ catalog: [strong, weak], policy: { preset: "balanced" }, services: { ecoLevel: 3 } });
+    expect(res.model?.id).toBe("weak");
+    expect(res.reason.toLowerCase()).toContain("economy");
+  });
+
+  it("meetsFloor still rejects a below-floor model for build at eco level 3", () => {
+    // build's floor is >= balanced (0.4); a fast (0.25) model never passes it.
+    const fast = endpoint("below-floor", { tier: "fast", providerID: "a" });
+    const res = route({ catalog: [fast], intent: { agent: "build" }, services: { ecoLevel: 3 } });
+    // Eco relaxed the TARGET tier (economy/build → balanced) but the floor held:
+    // the only candidate is below the floor, so no model is offered.
+    expect(res.model).toBeNull();
   });
 });

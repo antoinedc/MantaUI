@@ -356,3 +356,33 @@ test("buildRoutingServices safety contract: a throwing reader degrades, never th
   assert.equal(throwing.health, undefined);
   assert.equal(throwing.reliability, undefined);
 });
+
+test("optimizerEnabled gates pacing pressure + eco: off → absent, on → populated (BET-1345)", async () => {
+  const pacing = {
+    pressureFor: async () => ({ lambda: 1, tokensPerPct: 100, deficit: 30, ecoLevel: 2, protection: false }),
+  };
+  const deps = {
+    endpoints: [{ providerID: "anthropic", id: "claude-opus-4" }],
+    snapshots: [{ provider: "claude", providerIDs: ["anthropic"], exhausted: false, windows: [] }],
+    pacing,
+  };
+  // Switch OFF → nothing reaches the services bag: route exactly as today.
+  const off = await buildRoutingServices({ modelRouting: { preset: "balanced" }, optimizerEnabled: false }, deps, 0);
+  assert.equal(off.pressure, undefined);
+  assert.equal(off.ecoLevel, undefined);
+  // Switch ON → per-provider pressure + the max eco level across providers.
+  const on = await buildRoutingServices({ modelRouting: { preset: "balanced" }, optimizerEnabled: true }, deps, 0);
+  assert.equal(on.pressure.anthropic.lambda, 1);
+  assert.equal(on.pressure.anthropic.ecoLevel, 2);
+  assert.equal(on.ecoLevel, 2);
+});
+
+test("optimizer on but no pacing reader → pressure absent, eco 0 (never a guess)", async () => {
+  const s = await buildRoutingServices(
+    { modelRouting: { preset: "balanced" }, optimizerEnabled: true },
+    { endpoints: [{ providerID: "anthropic", id: "x" }] },
+    0,
+  );
+  assert.equal(s.pressure, undefined);
+  assert.equal(s.ecoLevel, 0);
+});

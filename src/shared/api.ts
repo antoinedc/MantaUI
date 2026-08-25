@@ -111,6 +111,15 @@ type RoutingChooseDecision = {
   // gate (autoEligibility).
   incumbentHealthy: boolean;
   incumbentStillEligible: boolean;
+  // Optimizer P2.3 (BET-1345): the server-priced numbers for the rewarm
+  // hysteresis. `savingsPerTurn` is the winner's assessed $ saving over the
+  // incumbent (null when the incumbent didn't survive routing — the switch was
+  // forced anyway); `rewarmCost` is the $ to re-warm the winner's cache prefix
+  // (null when the write rate is unknown). `trace.target.eco` drives the
+  // Auto-row "Eco" label.
+  savingsPerTurn: number | null;
+  rewarmCost: number | null;
+  trace: { target?: { eco?: number } } | null;
 };
 // BET-1249: a provider-agnostic catalogue entry as served by
 // `opencode:model-catalog` (models.dev view). Consumed by the renderer's
@@ -451,6 +460,9 @@ export interface Api {
     contextTokens?: number;
     needs?: { tools?: boolean; image?: boolean; pdf?: boolean };
     incumbent: PromptModel | null;
+    // Optimizer P2.3 (BET-1345): the cached prefix size the renderer already
+    // holds (latestTokensRef.cache.read), so the BOX can price the rewarm cost.
+    cachedPrefixTokens?: number;
   }): Promise<RoutingChooseDecision>;
   // BET-1244: the Accounts "Try again" action — clears the out-of-credit
   // evidence-only flag for a provider, delegated to server-side provider

@@ -421,13 +421,19 @@ let activePoller = null;
 
 /**
  * @param {{ publish: (evt: object) => void }} bus
- * @param {{ intervalMs?: number }} [opts]
+ * @param {{ intervalMs?: number, pacing?: object }} [opts]
+ *   `pacing` is the optimizer pacing state (src/server/optimizer/pacing.mjs),
+ *   observed from the SAME tap as recordWindowObservations — no second poller,
+ *   no adapter change.
  * @returns {{ stop: () => void }}
  */
-export function startUsagePoller(bus, { intervalMs = POLL_MS } = {}) {
+export function startUsagePoller(bus, { intervalMs = POLL_MS, pacing = null } = {}) {
   const poller = createUsagePoller({
     publish: (evt) => bus.publish(evt),
-    observe: recordWindowObservations,
+    observe: (results) => {
+      recordWindowObservations(results);
+      pacing?.observe?.(results);
+    },
   });
   activePoller = poller;
   const p = startPoller(() => poller.tick(), { intervalMs, label: "usage" });
