@@ -2,7 +2,7 @@
 <html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Optimizer dashboard — phase 1 mockup</title>
+<title>Optimizer dashboard — phase 1 shipped + phase 2 target</title>
 <link rel="stylesheet" href="../../src/renderer/tokens.css">
 <style>
 body{margin:0;background:var(--canvas);color:var(--tx2);font-family:var(--font-sans);font-size:15px;line-height:1.55}
@@ -27,21 +27,61 @@ body{margin:0;background:var(--canvas);color:var(--tx2);font-family:var(--font-s
 .stat .d{font-size:11px;color:var(--tx3);margin-top:2px}
 .legend{display:flex;gap:16px;font-size:11px;color:var(--tx3);margin-top:2px}
 .legend i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:5px;vertical-align:1px}
+
+/* ---- phase 2 ---- */
+.phase{font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--tx4);margin:34px 0 10px;display:flex;align-items:center;gap:10px}
+.phase::after{content:"";flex:1;height:1px;background:var(--border-subtle)}
+.sw{display:flex;align-items:flex-start;gap:14px}
+.sw .txt{flex:1}
+.sw b{color:var(--tx1);font-size:13.5px}
+.sw p{font-size:11.5px;color:var(--tx4);margin:3px 0 0;max-width:60ch}
+.toggle{width:38px;height:22px;border-radius:var(--r-full);background:var(--accent-solid);position:relative;flex:none;margin-top:2px}
+.toggle.off{background:var(--inset)}
+.toggle i{position:absolute;top:3px;left:19px;width:16px;height:16px;border-radius:var(--r-full);background:var(--on-accent)}
+.toggle.off i{left:3px;background:var(--tx4)}
+.subrows{margin-top:14px;border-top:1px solid var(--border-subtle)}
+.subrow{display:flex;align-items:baseline;gap:12px;padding:9px 0;border-bottom:1px solid var(--border-subtle);font-size:12px}
+.subrow .n{color:var(--tx2);width:132px;flex:none}
+.subrow .v{color:var(--tx3);flex:1}
+.subrow .k{font-family:var(--font-mono);font-size:11px;color:var(--tx4)}
+.chip{display:inline-block;font-size:10.5px;padding:1px 7px;border-radius:var(--r-full);border:1px solid var(--border-subtle);color:var(--tx3);background:var(--inset)}
+.chip.warn{color:var(--warn);border-color:rgb(var(--warn-rgb) / 0.4);background:var(--warn-bg)}
+.chip.ok{color:var(--ok);border-color:rgb(var(--ok-rgb) / 0.4);background:var(--ok-bg)}
+.chip.accent{color:var(--accent);border-color:rgb(var(--accent-rgb) / 0.4);background:var(--accent-bg)}
+.meter{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border-subtle);font-size:12px}
+.meter b{color:var(--tx1);font-size:12.5px;width:190px;flex:none;font-weight:var(--weight-medium)}
+.meter .role{color:var(--tx3);flex:1}
+.meter .px{font-family:var(--font-mono);font-size:11.5px;color:var(--tx4)}
+.feed{margin-top:8px}
+.ev{display:flex;gap:12px;padding:11px 0;border-bottom:1px solid var(--border-subtle)}
+.ev .when{font-family:var(--font-mono);font-size:10.5px;color:var(--tx4);width:74px;flex:none;padding-top:2px}
+.ev .body{flex:1}
+.ev .hd{color:var(--tx1);font-size:12.5px}
+.ev .why{color:var(--tx3);font-size:11.5px;margin-top:3px}
+.ev .why em{color:var(--tx4);font-style:normal;font-family:var(--font-mono);font-size:10.5px}
+.empty{color:var(--tx4);font-size:12px;padding:22px 0;text-align:center}
+.conv{background:var(--card);border:1px solid var(--border-subtle);border-radius:var(--r-lg);padding:16px 18px;margin-top:12px}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:11px;padding:2px 9px;border-radius:var(--r-full);background:var(--inset);color:var(--tx3);border:1px solid var(--border-subtle)}
+.away{font-size:11.5px;color:var(--tx4);font-family:var(--font-mono);padding:8px 0}
 </style>
 </head>
 <body><div class="wrap"><div class="frame">
   <b style="color:var(--tx1);font-size:13.5px">Subscription windows</b>
-  <p style="font-size:11.5px;color:var(--tx4);margin:2px 0 12px">Forecast from your recent usage. Tick = forecast at reset (hidden until enough history).</p>
+  <p style="font-size:11.5px;color:var(--tx4);margin:2px 0 12px">Forecast from your recent usage. Tick = forecast at reset (hidden until enough history).
+    <span style="color:var(--tx4)">Pressure chip = how far ahead of pace this window is right now (phase 2).</span></p>
   <div class="wins">
     <div class="win"><div class="t"><b>Claude Max — weekly</b><span>resets Sun 09:00</span></div>
       <div class="gauge"><span class="fill" style="width:71%;background:var(--warn)"></span><span class="fc warn" style="left:88%"></span></div>
-      <div class="meta"><span>71% used</span><span>forecast 88%</span></div></div>
+      <div class="meta"><span>71% used</span><span>forecast 88%</span></div>
+      <div style="margin-top:8px"><span class="chip warn">+23 pts ahead of pace</span></div></div>
     <div class="win"><div class="t"><b>Claude Max — 5h session</b><span>resets 17:40</span></div>
       <div class="gauge"><span class="fill" style="width:34%;background:var(--ok)"></span><span class="fc" style="left:52%"></span></div>
-      <div class="meta"><span>34% used</span><span>forecast 52%</span></div></div>
+      <div class="meta"><span>34% used</span><span>forecast 52%</span></div>
+      <div style="margin-top:8px"><span class="chip ok">on pace</span></div></div>
     <div class="win"><div class="t"><b>Kimi — weekly</b><span>resets Wed 00:00</span></div>
       <div class="gauge"><span class="fill" style="width:18%;background:var(--ok)"></span></div>
-      <div class="meta"><span>18% used</span><span>gathering history…</span></div></div>
+      <div class="meta"><span>18% used</span><span>gathering history…</span></div>
+      <div style="margin-top:8px"><span class="chip">no pressure signal yet</span></div></div>
   </div>
   <div style="height:22px"></div>
   <b style="color:var(--tx1);font-size:13.5px">Token consumption — with &amp; without optimization</b>
@@ -70,4 +110,69 @@ body{margin:0;background:var(--canvas);color:var(--tx2);font-family:var(--font-s
     <div class="stat"><div class="l">Cost / turn</div><div class="v">$0.31</div><div class="d">30d average</div></div>
     <div class="stat"><div class="l">Sessions</div><div class="v">63</div><div class="d">30d</div></div>
   </div>
-</div></div></body></html>
+
+  <!-- ===================== PHASE 2 ADDITIONS ===================== -->
+
+  <div class="phase">Metered endpoints</div>
+  <p style="font-size:11.5px;color:var(--tx4);margin:0 0 6px">Pay-per-token endpoints have no window and never reset, so there is nothing to fill —
+    only a role and the price at which they beat the subscription. Deliberately a slim row, not a gauge.</p>
+  <div class="meter"><b>OpenAI · gpt-5.2</b><span class="role">fallback when the weekly window is over pace</span><span class="px">$2.40 / Mtok blended · beats sub above 74% pace</span></div>
+  <div class="meter"><b>Groq · llama-4-70b</b><span class="role">explore + title work</span><span class="px">$0.31 / Mtok blended · always cheaper</span></div>
+  <div class="meter" style="border-bottom:none"><b>Local · qwen3-32b</b><span class="role">not routed — quality floor</span><span class="px">$0.00 / Mtok · below the build floor</span></div>
+</div>
+
+<div class="frame" style="margin-top:20px">
+  <div class="sw">
+    <div class="txt">
+      <b>Manta optimized token usage</b>
+      <p>Manta trims, paces and compacts your conversations to make a plan last longer. It never changes which model you picked by hand.
+        Everything it changes is listed below and in the activity log.</p>
+    </div>
+    <div class="toggle"><i></i></div>
+  </div>
+  <div class="subrows">
+    <div class="subrow"><span class="n">Trimming</span><span class="v">Old tool output is replaced by a one-line placeholder after 12 newer tool uses. Last 40k tokens are never touched.</span><span class="k">−18% sent</span></div>
+    <div class="subrow"><span class="n">Pacing</span><span class="v">Cheaper models while a plan window is ahead of pace. Build and plan work keeps its quality floor.</span><span class="k">eco · +23 pts</span></div>
+    <div class="subrow"><span class="n">Compacting</span><span class="v">Long idle conversations are summarized in the background, before you come back to them.</span><span class="k">6 of 7 in background</span></div>
+    <div class="subrow" style="border-bottom:none"><span class="n">Prompt cache</span><span class="v">1 hour, measured. Reads are billed at 0.1×.</span><span class="k">74% hit</span></div>
+  </div>
+  <p style="font-size:11px;color:var(--tx4);margin:12px 0 0">Rows appear only for subsystems that are actually shipped and running. A row is never rendered for something that does nothing.</p>
+</div>
+
+<div class="frame" style="margin-top:20px">
+  <b style="color:var(--tx1);font-size:13.5px">Activity</b>
+  <p style="font-size:11.5px;color:var(--tx4);margin:2px 0 0">Every parameter change the optimizer made on its own, with the evidence it used. Rolled-back entries stay — that is the point.</p>
+  <div class="feed">
+    <div class="ev"><span class="when">14:02</span><div class="body">
+      <div class="hd">Kept — trim threshold 16 → 12 tool uses</div>
+      <div class="why">Cache hit held at 74% over 62 turns and re-fetch churn stayed at 0.4%.
+        <em>evidence: 62 turns · hit 74.1% (was 74.6%) · churn 0.4% · cost/turn −6%</em></div></div></div>
+    <div class="ev"><span class="when">Mon 09:41</span><div class="body">
+      <div class="hd">Rolled back — protected tail 40k → 24k</div>
+      <div class="why">Re-fetch churn rose to 3.1% of masked parts, over the 2% guardrail. Reverted after 41 minutes; the old value is back.
+        <em>evidence: 38 turns · churn 3.1% (limit 2%) · 12 tools re-run · reverted 10:22</em></div></div></div>
+    <div class="ev" style="border-bottom:none"><span class="when">Sun 22:15</span><div class="body">
+      <div class="hd">Kept — eco level 0 → 2 while the weekly window is over pace</div>
+      <div class="why">Weekly window ran 23 points ahead of pace with 4 days left. Explore and general work moved down one tier; build and plan kept their floor.
+        <em>evidence: deficit +23 pts · forecast 88% at reset · build/plan floor unchanged</em></div></div></div>
+  </div>
+</div>
+
+<div class="frame" style="margin-top:20px">
+  <b style="color:var(--tx1);font-size:13.5px">Activity — empty state</b>
+  <div class="empty">Nothing changed yet. Manta needs a few days of your usage before it starts tuning anything.</div>
+</div>
+
+<div class="phase">In-conversation surfaces</div>
+<div class="conv">
+  <div style="font-size:11px;color:var(--tx4);margin-bottom:8px">Composer meta row — the saving pill sits next to the usage dial</div>
+  <span class="pill">↓ 18% <span style="color:var(--tx4)">this conversation</span></span>
+  <span class="pill accent" style="margin-left:8px">Auto <span style="color:var(--tx4)">· eco</span></span>
+  <p style="font-size:11px;color:var(--tx4);margin:10px 0 0">The <b style="color:var(--tx3)">· eco</b> suffix appears on the Auto chip only while a window is over pace, and disappears on its own when the window resets. It is not a mode the user sets.</p>
+</div>
+<div class="conv">
+  <div style="font-size:11px;color:var(--tx4);margin-bottom:6px">Transcript — one line, where the compaction happened</div>
+  <div class="away">⟳ Compacted while you were away · 128k → 31k</div>
+</div>
+
+</div></body></html>
