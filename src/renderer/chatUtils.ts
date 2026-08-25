@@ -223,7 +223,7 @@ export function formatTokens(n: number): string {
 // (BET-1337). Each point's x is spaced linearly across `width`; its y is the
 // running sum, inverted (larger = higher up = smaller y) and scaled by `max`
 // against `height` so `max` maps to the very top (y=0). Coordinates are
-// rounded to 2 decimals so repeated renders are byte-stable. empty input → ""
+// quantized to 2 decimal places so repeated renders are byte-stable. empty input → ""
 // so callers can render nothing rather than an "M x y" with no points.
 export function buildCumulativePath(
   values: number[],
