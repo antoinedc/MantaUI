@@ -122,9 +122,16 @@ final class MantaEventStreamModelTests: XCTestCase {
     /// Raw opencode events carry the session id inside the payload (the box
     /// envelope has none). The parser must fall back to it.
     func testParseTakesSessionIDFromPayloadWhenEnvelopeHasNone() throws {
-        let f = try frame(#"{"kind":"opencode","payload":{"type":"question.asked","sessionID":"ses_payload"}}"#)
+        let f = try frame(#"{"kind":"opencode","payload":{"sessionID":"ses_payload"}}"#)
         XCTAssertEqual(f.sessionId, "ses_payload")
         XCTAssertNil(f.eventType)
+    }
+
+    /// The session id can also sit under payload.properties (the box nests it
+    /// there for raw opencode events). The parser must descend into it.
+    func testParseTakesSessionIDFromPayloadProperties() throws {
+        let f = try frame(#"{"kind":"opencode","payload":{"properties":{"sessionID":"ses_1"}}}"#)
+        XCTAssertEqual(f.sessionId, "ses_1")
     }
 
     /// The envelope key wins when both are present.

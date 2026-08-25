@@ -148,7 +148,13 @@ struct MantaStreamFrame: Equatable, Sendable {
             return [:]
         }()
         // sessionId: envelope key first; when absent or empty, fall back to
-        // `payload.sessionID`, then `payload.sessionId`. First non-empty wins.
+        // `payload.sessionID`, then `payload.sessionId`, then the same two keys
+        // under `payload.properties` (the box nests it there for raw opencode
+        // events). First non-empty wins.
+        let properties: [String: JSONValue] = {
+            if case .object(let p)? = rawPayload["properties"] { return p }
+            return [:]
+        }()
         let envelopeSession = string("sessionId")
         let sessionId: String?
         if let envelopeSession, !envelopeSession.isEmpty {
@@ -156,6 +162,8 @@ struct MantaStreamFrame: Equatable, Sendable {
         } else {
             sessionId = nonEmpty("sessionID", in: rawPayload)
                 ?? nonEmpty("sessionId", in: rawPayload)
+                ?? nonEmpty("sessionID", in: properties)
+                ?? nonEmpty("sessionId", in: properties)
         }
         // eventType: `payload.type` if a non-empty string, else `payload.kind`.
         // The envelope `kind` is intentionally LEFT untouched (it stays the
