@@ -123,6 +123,9 @@ export type SseBus = {
   setStepTokens: React.Dispatch<React.SetStateAction<(TokenUsage & { cost: number }) | null>>;
   compactionState: { reason: string; text: string; phase: "running" | "done" } | null;
   setCompactionState: React.Dispatch<React.SetStateAction<{ reason: string; text: string; phase: "running" | "done" } | null>>;
+  // BET-1347: the box compacted this conversation in the background — a
+  // transient transcript one-liner (away + token sizes when known).
+  compactionNotice: { beforeTokens: number | null; afterTokens: number | null; away: boolean } | null;
   liveTodos: Array<{ content: string; status: string; priority: string }> | null;
   setLiveTodos: React.Dispatch<React.SetStateAction<Array<{ content: string; status: string; priority: string }> | null>>;
   todosDismissed: boolean;
@@ -253,6 +256,22 @@ export function useSseBus(params: {
     phase: "running" | "done";
   } | null>(null);
   const compactionClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // BET-1347: a background compaction the BOX did while this conversation was
+  // open, surfaced as a transient transcript one-liner. Set server-side on
+  // compaction; cleared after a short display window so it reads as a pass-by
+  // note, not a permanent fixture. `away` is the server's presence verdict at
+  // compaction time; before/after are token sizes when known.
+  const [compactionNotice, setCompactionNotice] = useState<{
+    beforeTokens: number | null;
+    afterTokens: number | null;
+    away: boolean;
+  } | null>(null);
+  const compactionNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const armCompactionNotice = (n: { beforeTokens: number | null; afterTokens: number | null; away: boolean }) => {
+    setCompactionNotice(n);
+    if (compactionNoticeTimer.current) clearTimeout(compactionNoticeTimer.current);
+    compactionNoticeTimer.current = setTimeout(() => setCompactionNotice(null), 10_000);
+  };
   // Timer arming the delayed running→false flip on a `turnComplete` whose
   // running flag is not yet authoritative (see TURN_SETTLE_MS). Any other
   // writer of `running` cancels it first, so a stale settle never lands on a
@@ -823,6 +842,19 @@ export function useSseBus(params: {
           if (childSessionId) childSessionIds.current.add(childSessionId);
           return;
         }
+        // BET-1347: the box compacted this conversation in the background.
+        // Server-side onCompacted publishes `optimizer.compacted` on the
+        // stream channel (scoped to the session, guarded by the early-return
+        // above); we surface it as the transcript one-liner.
+        case "optimizer.compacted": {
+          const p = ev.payload as { beforeTokens?: number; afterTokens?: number; away?: boolean };
+          armCompactionNotice({
+            beforeTokens: typeof p?.beforeTokens === "number" ? p.beforeTokens : null,
+            afterTokens: typeof p?.afterTokens === "number" ? p.afterTokens : null,
+            away: p?.away === true,
+          });
+          return;
+        }
         default:
           // context / cache / subagent / autoRename — consumed by other
           // surfaces, not this panel's live transcript state.
@@ -835,6 +867,7 @@ export function useSseBus(params: {
       offStream();
       cancelTurnSettle();
       if (compactionClearTimer.current) clearTimeout(compactionClearTimer.current);
+      if (compactionNoticeTimer.current) clearTimeout(compactionNoticeTimer.current);
     };
   }, [sessionId]);
 
@@ -878,6 +911,7 @@ export function useSseBus(params: {
     setStepTokens,
     compactionState,
     setCompactionState,
+    compactionNotice,
     liveTodos,
     setLiveTodos,
     todosDismissed,

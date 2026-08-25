@@ -66,6 +66,7 @@ import {
   extractPlanData,
   selectableModelGroups,
   titleCase,
+  formatCompactionSaving,
 } from "./chatUtils";
 import { isPlanAgent, planPageUrl } from "../shared/planMode.mjs";
 import { serverBase } from "./api/httpApi";
@@ -629,6 +630,7 @@ export function ChatPanel({
     finishByMessageId,
     retryInfo,
     compactionState,
+    compactionNotice,
     rejectAllPendingQuestions,
     refreshPermissions,
     refreshQuestions,
@@ -2849,6 +2851,7 @@ export function ChatPanel({
     compaction: { order: 6, label: "↧ compaction" },
     "send-error": { order: 5, label: "⚠ error" },
     queued: { order: 4, label: "⏳ queued" },
+    "compaction-notice": { order: 3, label: "⟳ compaction" },
     schedules: { order: 3, label: "⏰ schedule" },
     secrets: { order: 2, label: "🔑 secret" },
     webhooks: { order: 1, label: "🪝 webhook" },
@@ -3108,6 +3111,19 @@ export function ChatPanel({
       <div className="shrink-0 px-4 pt-2"><RetryCard info={retryInfo} /></div>));
     if (compactionState) list.push(amb("compaction",
       <div className="shrink-0 px-4 pt-2"><CompactionCard state={compactionState} /></div>));
+    // BET-1347: the box compacted this conversation in the background — one
+    // pass-by line, not a card. "while you were away" only when the box's
+    // presence said away at compaction time; otherwise the background wording.
+    if (compactionNotice) {
+      const saving = formatCompactionSaving(compactionNotice.beforeTokens ?? 0, compactionNotice.afterTokens ?? 0);
+      const base = compactionNotice.away
+        ? "⟳ Compacted while you were away"
+        : "⟳ Compacted in the background";
+      list.push(amb("compaction-notice",
+        <div className="shrink-0 px-4 pt-2">
+          <div className="opt-compact-line">{saving === "0" ? base : `${base} · ${saving}`}</div>
+        </div>));
+    }
     if (sendError) list.push(amb("send-error",
       <div className="shrink-0 mx-4 mb-1 px-2 py-1 text-meta text-danger bg-danger-bg border border-danger/30 rounded-xs break-words flex items-start gap-2">
         <span className="flex-1">⚠ {sendError}</span>
@@ -3189,7 +3205,7 @@ export function ChatPanel({
         </div>));
     }
     return list;
-  }, [jobOwnership, permissions, pendingApproval, retryInfo, compactionState, sendError, authReconnect, running, messageQueue, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setMessageQueue, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipProposal, shipBusy, shipError, liveProgress]);
+  }, [jobOwnership, permissions, pendingApproval, retryInfo, compactionState, compactionNotice, sendError, authReconnect, running, messageQueue, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setMessageQueue, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipProposal, shipBusy, shipError, liveProgress]);
 
 
   if (error || transcriptLoadError) {

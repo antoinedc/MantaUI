@@ -1265,6 +1265,27 @@ const compactionScheduler = createCompactionScheduler({
     } catch {
       /* telemetry never throws */
     }
+    // Notify the OPEN conversation that it was compacted in the background —
+    // a pass-by transcript one-liner. Carried on the `stream` channel so the
+    // renderer's scoped stream handler (useSseBus) routes it to the active
+    // session. `away` is the box's presence verdict at compaction time
+    // (server-side, not guessed); beforeTokens is the pre-compaction context;
+    // afterTokens is not yet surfaced by the compaction call (null → the
+    // renderer falls back to the wording that needs no count).
+    try {
+      bus.publish({
+        kind: "stream",
+        sub: "optimizer.compacted",
+        sessionId: sessionID,
+        payload: {
+          beforeTokens: typeof contextTokens === "number" && Number.isFinite(contextTokens) ? contextTokens : null,
+          afterTokens: null,
+          away: push.desktopState(push.getDesktopPresence(), Date.now()) === "away",
+        },
+      });
+    } catch (e) {
+      console.warn("[optimizer] compaction notice publish failed:", e?.message ?? e);
+    }
   },
   enabled: async () => (await local.configGet())?.optimizerEnabled === true,
 });

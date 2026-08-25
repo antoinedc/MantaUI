@@ -520,3 +520,4 @@ html, body, #root {
 .opt-empty{color:var(--tx4);font-size:12px;padding:22px 0;text-align:center}
 .composer-saving-pill{display:inline-flex;align-items:center;gap:5px;font-size:11px;padding:2px 9px;border-radius:var(--r-full);background:var(--accent-bg);color:var(--accent);border:1px solid rgb(var(--accent-rgb) / 0.4);white-space:nowrap}
 .composer-saving-pill .tx-faint{color:var(--tx4);font-weight:400}
+.opt-compact-line{font-size:11.5px;color:var(--tx4);font-family:var(--font-mono);padding:8px 12px;border:1px solid var(--border-subtle);border-radius:var(--r-lg);background:var(--card)}

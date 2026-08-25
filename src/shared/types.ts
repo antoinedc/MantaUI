@@ -2453,7 +2453,8 @@ export type StreamEnvelope = {
     | "subagent"
     | "context"
     | "cache"
-    | "autoRename";
+    | "autoRename"
+    | "optimizer.compacted";
   sessionId: string;
   payload: unknown;
 };
