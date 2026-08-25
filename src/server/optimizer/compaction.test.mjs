@@ -204,3 +204,56 @@ test("scheduler: the in-flight set blocks a re-entrant tick", async () => {
   await Promise.all([t1, t2]);
   assert.deepEqual(calls, ["compact"], "the same in-flight session must not be compacted twice");
 });
+
+// BET-1356: the injected `compact` may return the post-compaction token count,
+// and the scheduler must flow it through to onCompacted (and pass null when it
+// returns nothing, so callers fall back to the no-count wording).
+test("scheduler: forwards compact's post-compaction token count to onCompacted", async () => {
+  let notified = null;
+  const scheduler = createCompactionScheduler({
+    listCandidates: async () => [candidate("s1")],
+    compact: async () => 31_000,
+    isBusy: () => false,
+    now: () => NOW,
+    load: async () => ({ sessions: {} }),
+    save: async () => {},
+    enabled: () => true,
+    onCompacted: async (info) => { notified = info; },
+  });
+  await scheduler.tick();
+  assert.equal(notified.sessionID, "s1");
+  assert.equal(notified.contextTokens, 90_000, "before stays contextTokens");
+  assert.equal(notified.afterTokens, 31_000, "after is compact's return value");
+});
+
+test("scheduler: onCompacted gets afterTokens null when compact returns nothing", async () => {
+  let notified = null;
+  const scheduler = createCompactionScheduler({
+    listCandidates: async () => [candidate("s1")],
+    compact: async () => undefined, // legacy/no-measure stub
+    isBusy: () => false,
+    now: () => NOW,
+    load: async () => ({ sessions: {} }),
+    save: async () => {},
+    enabled: () => true,
+    onCompacted: async (info) => { notified = info; },
+  });
+  await scheduler.tick();
+  assert.equal(notified.afterTokens, null, "unknown after → null (renderer falls back)");
+});
+
+test("scheduler: non-finite/zero compact return is coerced to null", async () => {
+  let notified = null;
+  const scheduler = createCompactionScheduler({
+    listCandidates: async () => [candidate("s1")],
+    compact: async () => Number.NaN,
+    isBusy: () => false,
+    now: () => NOW,
+    load: async () => ({ sessions: {} }),
+    save: async () => {},
+    enabled: () => true,
+    onCompacted: async (info) => { notified = info; },
+  });
+  await scheduler.tick();
+  assert.equal(notified.afterTokens, null);
+});

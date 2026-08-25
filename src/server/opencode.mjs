@@ -848,6 +848,76 @@ export async function compactSession(sessionId) {
   }
 }
 
+// BET-1356: the background-compaction one-liner's "before → after" figure.
+// opencode's compact/summarize endpoint returns no token count (its success
+// body is just `true`), so the post-compaction context (`afterTokens`) has to
+// be measured from the retained history. `estimateMessageListTokens` is the
+// PURE estimate (chars of every text-bearing value ÷ 4, the same ~4
+// chars/token heuristic opencode's own compaction retention uses);
+// `measureSessionContextTokens` is the I/O wrapper that fetches the session's
+// messages post-compaction and hands them to it. Degrades to null so the
+// renderer falls back to the no-count wording rather than a wrong number.
+
+/**
+ * PURE. Estimate a session's context-token footprint from its message list.
+ * Sums the characters of every text-bearing STRING value in the messages
+ * (part text, tool inputs/outputs, etc.) and applies a 4 chars/token heuristic
+ * — matching how opencode estimates context for its own compaction retention
+ * (Token.estimate over the serialized messages). Structural keys (type/role/id/
+ * status/index/timestamps) are not content and are skipped, so they add no
+ * per-message noise, and the compaction summary's large `tokens.input` (a
+ * number) never inflates the "after" figure. Input-robust: any shape degrades
+ * to a sane number, never throws.
+ * @param {unknown[]} [messages] opencode SessionV1.WithParts list
+ * @returns {number} estimated context tokens (0 for empty/missing)
+ */
+const NON_CONTENT_KEYS = new Set(["type", "role", "id", "status", "index"]);
+
+export function estimateMessageListTokens(messages) {
+  if (!Array.isArray(messages)) return 0;
+  const acc = { chars: 0 };
+  for (const m of messages) {
+    if (m && typeof m === "object") collectTextChars(m, acc);
+  }
+  return Math.ceil(acc.chars / 4);
+}
+
+function isNonContentKey(key) {
+  if (NON_CONTENT_KEYS.has(key)) return true;
+  const lower = String(key).toLowerCase();
+  return lower === "id" || lower.endsWith("id") || lower === "created" || lower === "completed" || lower === "started";
+}
+
+function collectTextChars(node, acc) {
+  if (Array.isArray(node)) {
+    for (const v of node) collectTextChars(v, acc);
+    return;
+  }
+  if (node && typeof node === "object") {
+    for (const [key, v] of Object.entries(node)) {
+      if (isNonContentKey(key)) continue;
+      collectTextChars(v, acc);
+    }
+    return;
+  }
+  if (typeof node === "string" && node.length > 0) {
+    acc.chars += node.length;
+  }
+}
+
+/** I/O. Measure a session's current (post-compaction) context tokens, best
+ *  effort — returns null when the session can't be read so callers fall back
+ *  to the no-count wording. @param {string} sessionId @returns {Promise<number|null>}
+ */
+export async function measureSessionContextTokens(sessionId) {
+  try {
+    const messages = await listMessages(sessionId);
+    return estimateMessageListTokens(messages);
+  } catch {
+    return null;
+  }
+}
+
 /** Delete a session and its messages on the opencode server.
  *  Named deleteSessionRaw to distinguish from any local session cleanup.
  *  @param {string} sessionId

@@ -1232,6 +1232,12 @@ const compactionScheduler = createCompactionScheduler({
   compact: async (sessionID) => {
     await extractAndStoreConstraints(sessionID);
     await oc.compactSession(sessionID);
+    // BET-1356: surface the post-compaction context so the one-liner can show
+    // "before → after". opencode's compact endpoint returns no token count, so
+    // we measure the retained history's size from the session messages
+    // post-compaction (null when unreadable → renderer uses the no-count
+    // wording).
+    return await oc.measureSessionContextTokens(sessionID);
   },
   isBusy: (sid) => promptDelivery.isBusy(sid),
   now: Date.now,
@@ -1240,7 +1246,9 @@ const compactionScheduler = createCompactionScheduler({
   // BET-1347: record each background compaction on the activity log — the
   // trust surface lists what the optimizer did, including compactions. Counts
   // only: context tokens, never conversation content.
-  onCompacted: async ({ sessionID, contextTokens }) => {
+  onCompacted: async ({ sessionID, contextTokens, afterTokens }) => {
+    const before = typeof contextTokens === "number" && Number.isFinite(contextTokens) ? contextTokens : undefined;
+    const after = typeof afterTokens === "number" && Number.isFinite(afterTokens) ? afterTokens : undefined;
     try {
       await optimizerActivity.append({
         kind: "compaction",
@@ -1248,7 +1256,8 @@ const compactionScheduler = createCompactionScheduler({
         verdict: "applied",
         evidence: {
           background: 1,
-          beforeTokens: typeof contextTokens === "number" && Number.isFinite(contextTokens) ? contextTokens : undefined,
+          beforeTokens: before,
+          afterTokens: after,
         },
       });
     } catch (e) {
@@ -1259,7 +1268,8 @@ const compactionScheduler = createCompactionScheduler({
     try {
       shipCtxEvent({
         kind: "compaction",
-        beforeTokens: typeof contextTokens === "number" && Number.isFinite(contextTokens) ? contextTokens : null,
+        beforeTokens: before ?? null,
+        afterTokens: after ?? null,
         background: 1,
       });
     } catch {
@@ -1269,18 +1279,21 @@ const compactionScheduler = createCompactionScheduler({
     // a pass-by transcript one-liner. Carried on the `stream` channel so the
     // renderer's scoped stream handler (useSseBus) routes it to the active
     // session. `away` is the box's presence verdict at compaction time
-    // (server-side, not guessed); beforeTokens is the pre-compaction context;
-    // afterTokens is not yet surfaced by the compaction call (null → the
-    // renderer falls back to the wording that needs no count).
+    // (server-side, not guessed) — the "while you were away" wording holds when
+    // presence was away OR gone (BET-1356), never for a present user. before/
+    // afterTokens are the context sizes when known (nulls → the renderer falls
+    // back to the wording that needs no count).
     try {
+      const presence = push.desktopState(push.getDesktopPresence(), Date.now());
+      const away = presence === "away" || presence === "gone";
       bus.publish({
         kind: "stream",
         sub: "optimizer.compacted",
         sessionId: sessionID,
         payload: {
-          beforeTokens: typeof contextTokens === "number" && Number.isFinite(contextTokens) ? contextTokens : null,
-          afterTokens: null,
-          away: push.desktopState(push.getDesktopPresence(), Date.now()) === "away",
+          beforeTokens: before ?? null,
+          afterTokens: after ?? null,
+          away,
         },
       });
     } catch (e) {
