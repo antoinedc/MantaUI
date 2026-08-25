@@ -1034,14 +1034,17 @@ async function extractAndStoreConstraints(sessionID) {
 }
 
 // Enumerate the compaction candidates: the sessions the box already knows
-// about (its MODEL LEDGER — the durable record of sessions it has run turns
-// in, cold-start safe across restarts), with the per-session facts the
-// scheduler cannot derive itself. This never lists every opencode session on
-// every tick (no listSessions call). The ledger yields context tokens + the
-// newest completedMs (the documented cold-start idle fallback); the
-// firehose-stamped lastActivityAt overrides it while live; contextLimit is
-// the interpreter's cached model-context lookup; cacheTtlMs is the shared
-// optimizer summary's effective TTL (never re-measured here).
+// about — the SAME source the pump uses (tmux projects' windows, each chat
+// window stamped with `@manta-session-id` → opencodeSessionId). This is
+// deliberately NOT "every opencode session on every tick" (no listSessions
+// call) and NOT the model ledger, which would silently drop long-idle
+// high-context sessions once their newest row aged out of a ledger window —
+// those are the exact compaction targets. The ledger is used only for what the
+// spec assigns it: per-session context tokens + the newest completedMs idle
+// fallback for a cold start (the firehose-stamped lastActivityAt overrides it
+// while live). contextLimit is the interpreter's cached model-context lookup;
+// cacheTtlMs is the shared optimizer summary's effective TTL (never
+// re-measured here).
 async function compactionCandidates() {
   const t = Date.now();
   let cacheTtlMs = COMPACT_CACHE_TTL_FALLBACK_MS;
@@ -1050,34 +1053,87 @@ async function compactionCandidates() {
   } catch {
     /* keep the fallback */
   }
-  const db = await getDb();
-  let rows = [];
-  if (db) {
+
+  // Candidate set = the box's own known sessions (pump source). A chat window
+  // that is open but idle for weeks is STILL a candidate here — its context is
+  // read from the ledger below at any age, so its high-context/cache-dead state
+  // is not lost behind a ledger cutoff.
+  let sessionIds = [];
+  try {
+    const projects = await tmux.listProjects();
+    const seen = new Set();
+    for (const p of projects ?? []) {
+      for (const w of p?.windows ?? []) {
+        const sid = w?.opencodeSessionId;
+        if (typeof sid === "string" && sid && !seen.has(sid)) {
+          seen.add(sid);
+          sessionIds.push(sid);
+        }
+      }
+    }
+  } catch (e) {
+    console.warn("[optimizer] compaction tmux listProjects failed:", e?.message ?? e);
+  }
+  // Cold-start fallback: if tmux reported no chat windows (the pump has not
+  // established them yet right after a restart), fall back to the ledger's
+  // session ids so a freshly-restarted box still compacts its sessions. The
+  // model ledger is ONLY this fallback (for candidacy) + the context/idle
+  // source below — never the primary candidate set.
+  if (sessionIds.length === 0) {
     try {
-      rows = await fetchLedgerRows(db, t - 7 * 86_400_000);
-    } catch {
-      rows = [];
+      const db = await getDb();
+      if (db) {
+        const rows = await fetchLedgerRows(db, 0);
+        const seen = new Set();
+        for (const r of rows) {
+          if (typeof r.sessionID !== "string" || !r.sessionID || seen.has(r.sessionID)) continue;
+          seen.add(r.sessionID);
+          sessionIds.push(r.sessionID);
+        }
+      }
+    } catch (e) {
+      console.warn("[optimizer] compaction ledger fallback failed:", e?.message ?? e);
     }
   }
+
+  // Per-candidate context + cold-start idle fallback from the ledger, at ANY
+  // age (no cutoff): the latest row per candidate session drives contextTokens /
+  // contextLimit / the completedMs idle fallback. Only the box's own candidate
+  // sessions are retained, so memory stays bounded by that small set during the
+  // scan.
+  const want = new Set(sessionIds);
   const latest = new Map(); // sessionID -> { tokens, completedMs, providerID, modelID }
-  for (const r of rows) {
-    if (!r.sessionID || typeof r.sessionID !== "string") continue;
-    const prev = latest.get(r.sessionID);
-    const completed = typeof r.completedMs === "number" ? r.completedMs : 0;
-    if (!prev || completed >= (prev.completedMs ?? 0)) {
-      latest.set(r.sessionID, {
-        tokens: (r.input ?? 0) + (r.cacheRead ?? 0) + (r.cacheWrite ?? 0),
-        completedMs: completed,
-        providerID: r.providerID ?? null,
-        modelID: r.modelID ?? null,
-      });
+  if (want.size > 0) {
+    const db = await getDb();
+    let rows = [];
+    if (db) {
+      try {
+        rows = await fetchLedgerRows(db, 0);
+      } catch (e) {
+        rows = [];
+      }
+    }
+    for (const r of rows) {
+      if (!r.sessionID || !want.has(r.sessionID)) continue;
+      const prev = latest.get(r.sessionID);
+      const completed = typeof r.completedMs === "number" ? r.completedMs : 0;
+      if (!prev || completed >= (prev.completedMs ?? 0)) {
+        latest.set(r.sessionID, {
+          tokens: (r.input ?? 0) + (r.cacheRead ?? 0) + (r.cacheWrite ?? 0),
+          completedMs: completed,
+          providerID: r.providerID ?? null,
+          modelID: r.modelID ?? null,
+        });
+      }
     }
   }
   const out = [];
-  for (const [sid, l] of latest) {
-    const contextLimit = l.providerID && l.modelID ? (contextLimitFor(l.providerID, l.modelID) ?? 0) : 0;
-    const lastActivityMs = sessionLastActivityAt.get(sid) ?? l.completedMs ?? 0;
-    out.push({ sessionID: sid, contextTokens: l.tokens ?? 0, contextLimit, lastActivityMs, cacheTtlMs });
+  for (const sid of sessionIds) {
+    const l = latest.get(sid);
+    const contextTokens = l?.tokens ?? 0;
+    const contextLimit = l && l.providerID && l.modelID ? (contextLimitFor(l.providerID, l.modelID) ?? 0) : 0;
+    const lastActivityMs = sessionLastActivityAt.get(sid) ?? l?.completedMs ?? 0;
+    out.push({ sessionID: sid, contextTokens, contextLimit, lastActivityMs, cacheTtlMs });
   }
   return out;
 }
