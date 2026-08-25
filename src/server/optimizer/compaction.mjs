@@ -125,6 +125,9 @@ function normalizeState(raw) {
  *     "optimizer-compaction.json"); injected so tests stub them.
  *   enabled — boolean or zero-arg fn; read per tick so flipping the switch
  *     takes effect without a restart.
+ *   onCompacted — (info) => void (async ok): called after a compact succeeds
+ *     with { sessionID, contextTokens, contextLimit }. BET-1347 wires this to
+ *     append a `compaction` entry to the activity log (the trust surface).
  *
  * The three guards, all required:
  *   1. an in-memory Set of sessionIds with a compaction in flight; a session
@@ -145,6 +148,7 @@ export function createCompactionScheduler({
   load,
   save,
   enabled = () => true,
+  onCompacted = null,
 } = {}) {
   const inflight = new Set();
   let state = null;
@@ -234,6 +238,13 @@ export function createCompactionScheduler({
         entry.lastResult = "ok";
         compacted.push(c.sessionID);
         console.log(`[optimizer] compacted session=${c.sessionID} ctx=${pct}% idle=${Math.round(idleMs / 60_000)}m`);
+        if (typeof onCompacted === "function") {
+          try {
+            await onCompacted({ sessionID: c.sessionID, contextTokens: c.contextTokens, contextLimit: c.contextLimit });
+          } catch (e) {
+            console.warn("[optimizer] compact onCompacted failed:", e?.message ?? e);
+          }
+        }
       } catch (e) {
         entry.lastResult = "error";
         console.warn(

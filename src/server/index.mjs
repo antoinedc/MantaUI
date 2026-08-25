@@ -26,6 +26,7 @@ import {
   COMPACT_CACHE_TTL_FALLBACK_MS,
 } from "./optimizer/compaction.mjs";
 import { createConstraintStore, extractionInstruction, transcriptText } from "./optimizer/constraints.mjs";
+import { createTuner, TUNE_IDLE_SWEEP_MS, GUARD_CACHE_HIT_DROP_PTS, GUARD_SUSTAIN_MS } from "./optimizer/tuner.mjs";
 import { parseConstraints } from "../shared/constraintPin.mjs";
 import { startPoller } from "./startPoller.mjs";
 import { getDb } from "./opencodeDb.mjs";
@@ -1166,6 +1167,24 @@ const compactionScheduler = createCompactionScheduler({
   now: Date.now,
   load: () => readJsonSync(statePath("optimizer-compaction.json"), {}),
   save: (s) => writeJsonAtomic(statePath("optimizer-compaction.json"), JSON.stringify(s, null, 2)),
+  // BET-1347: record each background compaction on the activity log — the
+  // trust surface lists what the optimizer did, including compactions. Counts
+  // only: context tokens, never conversation content.
+  onCompacted: async ({ sessionID, contextTokens }) => {
+    try {
+      await optimizerActivity.append({
+        kind: "compaction",
+        subject: "background compaction",
+        verdict: "applied",
+        evidence: {
+          background: 1,
+          beforeTokens: typeof contextTokens === "number" && Number.isFinite(contextTokens) ? contextTokens : undefined,
+        },
+      });
+    } catch (e) {
+      console.warn("[optimizer] compaction activity append failed:", e?.message ?? e);
+    }
+  },
   enabled: async () => (await local.configGet())?.optimizerEnabled === true,
 });
 
@@ -1175,6 +1194,83 @@ const stopCompactionScheduler = startPoller(() => compactionScheduler.tick(), {
 });
 // eslint-disable-next-line no-unused-vars
 void stopCompactionScheduler;
+
+// ---------------------------------------------------------------------------
+// Optimizer P2.5 (BET-1347) — the tuner + guardrails + telemetry wiring.
+//
+// The tuner is the conservative bandit that earns its own parameter changes.
+// It ONLY runs when the optimizer switch is on; with it off it neither
+// observes nor writes (`createTuner` guards this internally). It is the ONLY
+// writer of `optimizer-policy.json`. Guardrails trip -> instant revert + a
+// rolled-back activity entry naming which.
+// ---------------------------------------------------------------------------
+
+// Cache-hit guardrail reader. Tracks a rolling per-hour history of the
+// summary's cache-hit %; trips when the CURRENT rate has fallen more than
+// GUARD_CACHE_HIT_DROP_PTS below the value ~GUARD_SUSTAIN_MS ago, sustained.
+// Churn and cost-per-turn guardrails are not derived here — the ledger/parts
+// the plugin would need to report do not exist on the server yet, so those
+// two default to no-trip (fail-open: the bandit only acts on evidence).
+const cacheHitHistory = []; // { at, pct }
+function readGuardrails() {
+  const summary = optimizerSummaryCached();
+  let hitPct = null;
+  try {
+    const s = summary?.cacheShare;
+    const denom = (s?.cacheRead ?? 0) + (s?.cacheWrite ?? 0) + (s?.input ?? 0);
+    if (denom > 0) hitPct = ((s.cacheRead ?? 0) / denom) * 100;
+  } catch {
+    hitPct = null;
+  }
+  const t = Date.now();
+  if (typeof hitPct === "number") {
+    cacheHitHistory.push({ at: t, pct: hitPct });
+    while (cacheHitHistory.length && t - cacheHitHistory[0].at > GUARD_SUSTAIN_MS * 4) cacheHitHistory.shift();
+    const earlier = cacheHitHistory.find((e) => t - e.at >= GUARD_SUSTAIN_MS - 5_000);
+    if (earlier && earlier.pct - hitPct >= GUARD_CACHE_HIT_DROP_PTS) {
+      return { tripped: true, which: "cache-hit", evidence: { hitDropPts: Math.round((earlier.pct - hitPct) * 10) / 10 } };
+    }
+  }
+  return null;
+}
+let optimizerSummaryCachedValue = null;
+function optimizerSummaryCached() {
+  return optimizerSummaryCachedValue;
+}
+
+// The repo the tuner tunes: the box's primary project directory (config's
+// first project), or "" -> no tuning. Single-primary on a single-user box; the
+// policy route reads this same repo table by directory.
+const tunerDirectory = ((await local.configGet())?.projects?.[0]?.defaultCwd ?? "").trim();
+
+const optimizerTuner = createTuner({
+  directory: tunerDirectory,
+  enabled: async () => (await local.configGet())?.optimizerEnabled === true,
+  now: Date.now,
+  activityLog: optimizerActivity,
+  sessionCount: async () => (await optimizerSummary())?.bySession?.length ?? 0,
+  observeGuardrails: readGuardrails,
+  loadTunerState: () => readJsonSync(statePath("optimizer-tuner.json"), {}),
+  saveTunerState: (s) => writeJsonAtomic(statePath("optimizer-tuner.json"), JSON.stringify(s, null, 2)),
+});
+
+// Backstop sweep only — the event-driven triggers (new sessions, regime change,
+// guardrail trip) also call tune() from their publish points; this is just the
+// floor that guarantees a box seeing none of them still gets evaluated.
+const stopTuner = startPoller(async () => {
+  // Refresh the cached summary the guardrail reader peeks at.
+  try {
+    optimizerSummaryCachedValue = await optimizerSummary();
+  } catch {
+    optimizerSummaryCachedValue = null;
+  }
+  await optimizerTuner.tune();
+}, {
+  intervalMs: TUNE_IDLE_SWEEP_MS,
+  label: "optimizer-tuner",
+});
+// eslint-disable-next-line no-unused-vars
+void stopTuner;
 
 rpcHandlers = buildHandlers({
   tmux,
