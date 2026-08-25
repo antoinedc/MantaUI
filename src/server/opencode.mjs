@@ -865,8 +865,33 @@ export async function deleteSessionRaw(sessionId) {
 // opencode has no one-shot completion endpoint, so we create→prompt→poll→delete
 // a hidden session. Returns the RAW model reply; the renderer sanitizes it.
 // Returns "" on timeout/failure so the caller skips the rename rather than
-// erroring.
-export async function generateSessionTitle({ directory, instruction }) {
+// erroring. Reuses runThrowawayAgent — the ONE throwaway-session cheap-agent
+// mechanism (also used by the optimizer's constraint extraction, BET-1346).
+export function generateSessionTitle({ directory, instruction }) {
+  return runThrowawayAgent({ directory, instruction, agent: "title", title: "manta-auto-title" });
+}
+
+/**
+ * The THROWAWAY-SESSION cheap-agent call: create a hidden session in
+ * `directory`, prompt it on a cheap agent (default `title`) with an
+ * `instruction`, poll for the assistant reply for up to ~30s, then delete the
+ * session. Returns the RAW assistant text; "" on any failure/timeout so the
+ * caller can skip rather than error.
+ *
+ * This is the ONE such mechanism — auto-rename (BET-1018) and the optimizer's
+ * constraint extraction (BET-1346) both use it; a second copy must not be
+ * built. NOTE: do NOT add structured output (a JSON schema format) to the
+ * prompt_async body — it is ACCEPTED by opencode but makes its reader reject
+ * the whole session's message list with a permanent HTTP 400.
+ *
+ * @param {object} a
+ * @param {string} a.directory  absolute session directory
+ * @param {string} a.instruction  the prompt text
+ * @param {string} [a.agent]  agent to run on (default "title" — the cheap model)
+ * @param {string} [a.title]  creation title tag for the hidden session
+ * @returns {Promise<string>}
+ */
+export async function runThrowawayAgent({ directory, instruction, agent = "title", title = "manta-throwaway" }) {
   const absDir = expandTilde(directory);
 
   let sid = null;
@@ -876,7 +901,7 @@ export async function generateSessionTitle({ directory, instruction }) {
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ title: "manta-auto-title" }),
+        body: JSON.stringify({ title }),
       },
     );
     if (!createRes.ok) {
@@ -885,16 +910,7 @@ export async function generateSessionTitle({ directory, instruction }) {
     }
     sid = (await createRes.json()).id;
 
-    // Run the retitle on opencode's own "title" agent: it uses its cheap
-    // naming model (instead of our main model) and returns a clean short name
-    // with no prose. sanitizeGeneratedTitle stays as a safety net.
-    //
-    // DO NOT add structured output here. Passing
-    // {"format":{"type":"json_schema",...}} to prompt_async is ACCEPTED on
-    // opencode 1.18.10, but opencode defaults `retryCount` and its own reader
-    // then rejects the whole session's message list with HTTP 400 forever —
-    // the entire transcript becomes unreadable, not just this message.
-    const promptBody = { parts: [{ type: "text", text: instruction }], agent: "title" };
+    const promptBody = { parts: [{ type: "text", text: instruction }], agent };
     const promptRes = await ocFetch(
       apiUrl(
         `/session/${encodeURIComponent(sid)}/prompt_async?directory=${encodeURIComponent(absDir)}`,
