@@ -112,6 +112,9 @@ import {
   decodeDataUri,
   fetchTranscriptWithRetry,
   selectUsageSnapshot,
+  describePressure,
+  describeActivityEntry,
+  formatCompactionSaving,
   usageDialState,
   formatWindowReset,
   formatResetAt,
@@ -5967,5 +5970,62 @@ describe("dispatchMedia", () => {
 
   it("still routes when only some handlers are supplied", () => {
     expect(() => dispatchMedia({ action: "show" }, {})).not.toThrow();
+  });
+});
+
+// ===== Optimizer P2.5 formatters (BET-1347) =====
+
+describe("describePressure", () => {
+  it("renders the neutral 'no pressure signal yet' with no signal, and NO warn", () => {
+    expect(describePressure(0, false)).toEqual({ text: "no pressure signal yet", tone: "neutral" });
+    expect(describePressure(40, false)).toEqual({ text: "no pressure signal yet", tone: "neutral" });
+  });
+  it("renders 'on pace' (ok) when on or below pace", () => {
+    expect(describePressure(0, true)).toEqual({ text: "on pace", tone: "ok" });
+    expect(describePressure(-5, true)).toEqual({ text: "on pace", tone: "ok" });
+  });
+  it("renders '+N pts ahead of pace' (warn) when ahead of pace", () => {
+    expect(describePressure(23, true)).toEqual({ text: "+23 pts ahead of pace", tone: "warn" });
+    expect(describePressure(0.4, true)).toEqual({ text: "+0 pts ahead of pace", tone: "warn" });
+  });
+});
+
+describe("describeActivityEntry", () => {
+  it("builds a headline from verdict + subject and an evidence line", () => {
+    const entry = {
+      kind: "tune",
+      subject: "trim threshold 16 → 12 tool uses",
+      from: 16,
+      to: 12,
+      verdict: "kept",
+      evidence: { turns: 62, hit: 74.1, churn: 0.4 },
+    };
+    const out = describeActivityEntry(entry);
+    expect(out.headline).toBe("Kept — trim threshold 16 → 12 tool uses");
+    expect(out.detail).toContain("62");
+    expect(out.detail).toContain("74.1");
+  });
+  it("marks a rolled-back entry distinctly", () => {
+    const out = describeActivityEntry({ kind: "tune", subject: "protected tail", verdict: "rolled-back", evidence: {} });
+    expect(out.headline).toBe("Rolled back — protected tail");
+  });
+  it("falls back to a safe headline when subject/verdict are absent", () => {
+    const out = describeActivityEntry({ kind: "tune", verdict: "kept" });
+    expect(out.headline).toContain("optimizer change");
+  });
+});
+
+describe("formatCompactionSaving", () => {
+  it("renders the arrowed before -> after saving", () => {
+    expect(formatCompactionSaving(128_000, 31_000)).toBe("128k → 31k");
+    expect(formatCompactionSaving(10_000, 2000)).toBe("10k → 2k");
+  });
+  it("returns '0' when there is no saving (before == after, or after > before)", () => {
+    expect(formatCompactionSaving(128_000, 128_000)).toBe("0");
+    expect(formatCompactionSaving(10_000, 20_000)).toBe("0");
+  });
+  it("returns '0' for missing/non-finite inputs", () => {
+    expect(formatCompactionSaving(0, 0)).toBe("0");
+    expect(formatCompactionSaving(Number.NaN, 1000)).toBe("0");
   });
 });

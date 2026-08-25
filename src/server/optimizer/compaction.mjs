@@ -152,6 +152,10 @@ export function createCompactionScheduler({
 } = {}) {
   const inflight = new Set();
   let state = null;
+  // BET-1347: running tally of this-process compaction attempts for the
+  // "X of Y in background" stat. `background` counts the scheduler's own
+  // successful background compactions; `total` every attempted compaction.
+  const tally = { background: 0, total: 0 };
 
   const nowMs = () => (typeof now === "function" ? (now() ?? 0) : (now ?? Date.now()));
 
@@ -220,6 +224,7 @@ export function createCompactionScheduler({
       // in a finally so a throw can never leave a session stuck in-flight.
       inflight.add(c.sessionID);
       attempted++;
+      tally.total++;
       try {
         // Guard 3 (isBusy re-check immediately before the call): a turn can
         // start between evaluation and here — firing under a live turn is a
@@ -237,6 +242,7 @@ export function createCompactionScheduler({
         await compact(c.sessionID);
         entry.lastResult = "ok";
         compacted.push(c.sessionID);
+        tally.background++;
         console.log(`[optimizer] compacted session=${c.sessionID} ctx=${pct}% idle=${Math.round(idleMs / 60_000)}m`);
         if (typeof onCompacted === "function") {
           try {
@@ -260,7 +266,14 @@ export function createCompactionScheduler({
     return { compacted, attempted };
   }
 
-  return { tick };
+  // BET-1347: the "X of Y in background" stat. Absent until the scheduler has
+  // attempted at least one compaction (never a fabricated zero).
+  function stat() {
+    if (tally.total === 0) return null;
+    return { background: tally.background, total: tally.total };
+  }
+
+  return { tick, stat };
 }
 
 // The context % for a log line (0..~100). Guarded: a non-finite limit yields 0.

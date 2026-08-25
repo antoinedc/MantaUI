@@ -265,5 +265,24 @@ export function createPacingState({ load, save, now, ledgerTokens, tokenTtlMs = 
     return ensureLoaded();
   }
 
-  return { observe, pressureFor, tokensPerPct, snapshot };
+  // BET-1347: per-window pressure for the dashboard's pressure chips —
+  // `{ "<provider>:<kind>": { deficit, ecoLevel, tokensPerPct } }`. `tokensPerPct`
+  // is the measured signal (null → no pressure signal yet → the neutral chip).
+  async function pressureWindows() {
+    const s = await ensureLoaded();
+    const out = {};
+    for (const [key, win] of Object.entries(s.windows ?? {})) {
+      if (!win || typeof win !== "object") continue;
+      const deficit = num(win.deficit);
+      const tokens = await sumTokens(Array.isArray(win.providerIDs) ? win.providerIDs : []);
+      out[key] = {
+        deficit,
+        ecoLevel: ecoLevel(deficit),
+        tokensPerPct: tokensPerPct(key, { ledgerTokensSince: tokens, state: s }),
+      };
+    }
+    return out;
+  }
+
+  return { observe, pressureFor, tokensPerPct, snapshot, pressureWindows };
 }

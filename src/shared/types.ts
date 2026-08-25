@@ -1916,9 +1916,14 @@ export type OptimizerSummary = {
     provider: string;
     planLabel?: string;
     windowLabel: string;
+    kind?: string;
     pct: number;
     resetsAt: number | null;
     forecastPct: number | null;
+    // BET-1347: per-window pacing pressure for the chip under the gauge.
+    // `tokensPerPct` null → no pressure signal yet (neutral chip).
+    deficit: number | null;
+    tokensPerPct: number | null;
   }[];
   // BET-1347: the optimizer's trust surface — every parameter change it made
   // on its own, with the evidence used. Most recent first, capped at 50.
@@ -1935,6 +1940,17 @@ export type OptimizerSummary = {
       revertedAt?: number;
     }[];
   };
+  // BET-1347: the "X of Y in background" compaction stat, or null until the
+  // scheduler has attempted a compaction (never a fabricated zero).
+  compaction: { background: number; total: number } | null;
+  // BET-1347: metered (pay-per-token) endpoints — a slim role+price row with
+  // NO gauge (a metered endpoint has no window and never resets, so there is
+  // nothing to fill). [] → the section is absent.
+  metered: {
+    name: string;
+    role: string;
+    price: string;
+  }[];
 };
 
 // A secret's METADATA — what the UI and `secret_list` see. NEVER carries the

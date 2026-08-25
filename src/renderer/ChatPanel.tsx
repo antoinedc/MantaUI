@@ -24,6 +24,7 @@ import type {
   DelegateApprovalTool,
   ForgeCheckRun,
   OpencodeModel,
+  OptimizerSummary,
   ProgressRecord,
   PullRequest,
   QuestionRequest,
@@ -223,6 +224,32 @@ export function ChatPanel({
   // key itself stays pinned at "balanced" in config; eco is runtime routing
   // state, never a config change.
   const [routingEco, setRoutingEco] = useState<number>(0);
+  // BET-1347: this conversation's optimizer savings %, for the "↓ N% this
+  // conversation" pill next to the usage dial. Fetched once per conversation
+  // from the shared summary (bySession.savedPct is a 0..1 fraction); null when
+  // absent → the pill is not rendered.
+  const [optSavingPct, setOptSavingPct] = useState<number | null>(null);
+  // Fetch this conversation's optimizer savings once per switch into it. The
+  // summary is memoized server-side (60s), so this is cheap and bounded.
+  useEffect(() => {
+    let alive = true;
+    setOptSavingPct(null);
+    window.api
+      .optimizerSummary()
+      .then((s: OptimizerSummary | { supported: false }) => {
+        if (!alive || !s || !s.supported) return;
+        const row = (s.bySession ?? []).find((e) => e.sessionID === sessionId);
+        if (row && typeof row.savedPct === "number" && row.savedPct > 0) {
+          setOptSavingPct(Math.round(row.savedPct * 100));
+        }
+      })
+      .catch(() => {
+        /* silent — absent savings never hides the pill with a fake 0 */
+      });
+    return () => {
+      alive = false;
+    };
+  }, [sessionId]);
   const hiddenStatusItems = useStore((s) => s.hiddenStatusItems);
   // BET-789: the "Connect GitHub…" offer's per-box dismissal flag. Once set,
   // the offer never re-appears until the config flag is cleared.
@@ -3432,7 +3459,8 @@ export function ChatPanel({
         onOpenModels={ensureModels}
         onSelectModel={selectModel}
         onSelectEffort={onSelectEffort}
-        presetLabel={routingEco >= 1 ? "Eco" : routingPreset ? titleCase(routingPreset) : undefined}
+        presetLabel={routingPreset ? `${titleCase(routingPreset)}${routingEco >= 1 ? " · eco" : ""}` : undefined}
+        optSavingPct={optSavingPct}
         scheduleCount={schedules.length}
         onSchedules={() => togglePanel("schedules")}
         onSecrets={() => togglePanel("secrets")}

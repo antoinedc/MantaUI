@@ -43,6 +43,7 @@ import * as local from "./local.mjs";
 import { createPeekHandler } from "./peek.mjs";
 import { createLogShipper, captureConsole, resolveAxiomConfig } from "../shared/logShip.mjs";
 import { setTelemetrySink, shipCtxEvent } from "./optimizer/telemetry.mjs";
+import { blendedPrice } from "../shared/blendedPrice.mjs";
 
 // BET-187: ship every console.* (and any startup banner / poller log) to
 // Axiom when MANTA_AXIOM_TOKEN is set in env AND AppConfig.shareAnalytics
@@ -987,6 +988,51 @@ const optimizerActivity = createActivityLog({
   now: Date.now,
 });
 
+// The metered (pay-per-token) endpoints for the dashboard's slim row: models in
+// the routing catalog that are NOT covered by a subscription quota window, with
+// their blended $/Mtok from the SHARED blendedPrice (never a guess — a model
+// with no price is skipped). A metered endpoint has no window and never resets,
+// so there is nothing to fill — the row is deliberately role+price, no gauge.
+// [] when the catalog or pricing is unavailable (the section is then absent).
+async function readMeteredEndpoints() {
+  try {
+    const summary = await optimizerSummary();
+    const subProviders = new Set((summary?.windows ?? []).map((w) => w.provider));
+    const cs = summary?.cacheShare ?? {};
+    const denom = (cs.input ?? 0) + (cs.output ?? 0) + (cs.cacheRead ?? 0) + (cs.cacheWrite ?? 0);
+    const mix =
+      denom > 0
+        ? {
+            input: (cs.input ?? 0) / denom,
+            output: (cs.output ?? 0) / denom,
+            cacheRead: (cs.cacheRead ?? 0) / denom,
+            cacheWrite: (cs.cacheWrite ?? 0) / denom,
+          }
+        : { input: 0.5, output: 0.5, cacheRead: 0, cacheWrite: 0 };
+    let models = [];
+    try {
+      models = Array.isArray(routingCatalogIndex.allModels()) ? routingCatalogIndex.allModels() : [];
+    } catch {
+      models = [];
+    }
+    const rows = [];
+    for (const model of models) {
+      const prov = typeof model?.providerID === "string" ? model.providerID : null;
+      if (!prov || subProviders.has(prov)) continue;
+      const bp = blendedPrice(model, mix, model?.cost ?? null);
+      if (!bp || bp.known !== true) continue;
+      rows.push({
+        name: `${prov} · ${typeof model.id === "string" ? model.id : ""}`,
+        role: "pay-per-token endpoint",
+        price: `$${bp.price.toFixed(2)} / Mtok blended`,
+      });
+    }
+    return rows.slice(0, 8);
+  } catch {
+    return [];
+  }
+}
+
 // BET-1343: the memoized `optimizer:summary` read model, created ONCE at module
 // scope here (not inside buildHandlers) so the SAME 60s memo + in-flight guard
 // is shared by the RPC `optimizer:summary` channel and the GET
@@ -1000,6 +1046,24 @@ const optimizerSummary = createOptimizerSummary({
   usageHistory: getUsageHistory,
   readCacheTtl: () => readProvidersCacheTtl({ listProviders: oc.getProviders }),
   activityStore: optimizerActivity,
+  // BET-1347: per-window pacing pressure (deficit / tokens-per-pct) for the
+  // chips under each gauge.
+  pressureWindows: async () => {
+    try {
+      return await optimizerPacing.pressureWindows();
+    } catch {
+      return {};
+    }
+  },
+  // BET-1347: the compaction scheduler's "X of Y in background" stat.
+  compactionStat: async () => {
+    try {
+      return compactionScheduler.stat();
+    } catch {
+      return null;
+    }
+  },
+  meteredEndpoints: readMeteredEndpoints,
 });
 
 // ---------------------------------------------------------------------------
