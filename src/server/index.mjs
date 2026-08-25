@@ -640,6 +640,12 @@ const delegateEngine = createDelegateEngine({
   catalogIndex: routingCatalogIndex,
   providerHealthState: (providerID) => providerHealth.state(providerID),
   endpointSummary: routingEndpointSummary,
+  // Optimizer P2.3 (BET-1345): pass the pacing state through to startJob's
+  // buildRoutingServices so the subagent model router sees the pacing shadow
+  // price when the optimizer switch is on. Null/absent → pressure absent → the
+  // subagent spawn routes exactly as today (behavior-neutral until the switch is
+  // on, mirroring the main-panel routing:choose wiring in rpc.mjs).
+  pacing: optimizerPacing,
   abortSession: (sid) => oc.abortSession(sid),
   // BET-418 §B: detect a running job whose parent opencode session is gone so
   // the sweeper can stop + clean it up (nobody left to report to).
