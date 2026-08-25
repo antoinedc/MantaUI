@@ -195,3 +195,76 @@ describe("marginalCost — exhausted first", () => {
     expect(res.cost).toBeGreaterThanOrEqual(0);
   });
 });
+
+// --- Optimizer P2.3: the pacing shadow price (BET-1345) --------------------
+// The on-pace subscription window used throughout: consumed 0.6 / elapsed 0.6,
+// pace 1 → cost is exactly the exchange rate (15), far from reset (damp 1).
+const PACE_SUB = () => ({
+  model: MODEL,
+  nowMs: 0,
+  replacementCost: EXCHANGE,
+  account: sub(w(60, -1.5 * R, R)),
+});
+
+const SHADOW = { lambda: 1, tokensPerPct: 1000, protection: false };
+
+describe("marginalCost — pacing shadow price (regression pins)", () => {
+  it("absent shadowPrice → byte-identical cost + basis to today", () => {
+    const baseline = marginalCost(PACE_SUB());
+    const res = marginalCost({ ...PACE_SUB(), shadowPrice: undefined });
+    expect(res.cost).toBe(baseline.cost);
+    expect(res.basis).toBe(baseline.basis);
+    expect(res.basis).toBe("subscription-pace");
+  });
+
+  it("lambda: 0 → identical (on/under-pace regime is byte-identical)", () => {
+    const baseline = marginalCost(PACE_SUB());
+    const res = marginalCost({ ...PACE_SUB(), expectedTurnTokens: 20_000, isLowStakes: true, shadowPrice: { ...SHADOW, lambda: 0 } });
+    expect(res.cost).toBe(baseline.cost);
+    expect(res.basis).toBe(baseline.basis);
+  });
+
+  it("tokensPerPct: null → identical (no measured conversion → no pressure)", () => {
+    const baseline = marginalCost(PACE_SUB());
+    const res = marginalCost({ ...PACE_SUB(), expectedTurnTokens: 20_000, isLowStakes: true, shadowPrice: { ...SHADOW, tokensPerPct: null } });
+    expect(res.cost).toBe(baseline.cost);
+    expect(res.basis).toBe(baseline.basis);
+  });
+
+  it("expectedTurnTokens absent / non-positive → identical", () => {
+    const baseline = marginalCost(PACE_SUB());
+    const absent = marginalCost({ ...PACE_SUB(), isLowStakes: true, shadowPrice: SHADOW });
+    const zero = marginalCost({ ...PACE_SUB(), expectedTurnTokens: 0, isLowStakes: true, shadowPrice: SHADOW });
+    expect(absent.cost).toBe(baseline.cost);
+    expect(absent.basis).toBe(baseline.basis);
+    expect(zero.cost).toBe(baseline.cost);
+  });
+
+  it("a real shadow price raises cost and flips basis", () => {
+    const baseline = marginalCost(PACE_SUB());
+    const res = marginalCost({ ...PACE_SUB(), expectedTurnTokens: 20_000, isLowStakes: false, shadowPrice: SHADOW });
+    // pressure = 1 * (20000/1000) * 15 * 1 = 300 on top of the pace anchor 15.
+    expect(res.cost).toBeGreaterThan(baseline.cost);
+    expect(res.cost).toBeCloseTo(EXCHANGE + 300, 6);
+    expect(res.basis).toBe("subscription-pace+pressure");
+  });
+
+  it("the protection multiplier applies only when isLowStakes", () => {
+    const low = marginalCost({ ...PACE_SUB(), expectedTurnTokens: 20_000, isLowStakes: true, shadowPrice: { ...SHADOW, protection: true } });
+    const high = marginalCost({ ...PACE_SUB(), expectedTurnTokens: 20_000, isLowStakes: false, shadowPrice: { ...SHADOW, protection: true } });
+    const base = EXCHANGE + 1 * (20_000 / 1000) * EXCHANGE; // no multiplier
+    expect(high.cost).toBeCloseTo(base, 6);
+    expect(low.cost).toBeCloseTo(EXCHANGE + 1 * (20_000 / 1000) * EXCHANGE * 3, 6);
+    expect(low.cost).toBeGreaterThan(high.cost);
+    expect(high.basis).toBe("subscription-pace+pressure");
+    expect(low.basis).toBe("subscription-pace+pressure");
+  });
+
+  it("credit account gets NO shadow price — depletionFactor remains its only scarcity signal", () => {
+    const baseline = marginalCost({ model: MODEL, nowMs: 0, account: credit(10) });
+    const res = marginalCost({ model: MODEL, nowMs: 0, account: credit(10), expectedTurnTokens: 20_000, isLowStakes: true, shadowPrice: SHADOW });
+    expect(res.cost).toBe(baseline.cost);
+    expect(res.basis).toBe(baseline.basis);
+    expect(res.basis).toBe("credit-depletion");
+  });
+});

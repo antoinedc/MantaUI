@@ -6,6 +6,10 @@ export const BOUNDARY: {
   USER: string;
 };
 
+export const ROUTING_REWARM_BETA: number;
+export const ROUTING_REWARM_HORIZON_TURNS: number;
+export const CACHE_WRITE_MULTIPLIER: number;
+
 /**
  * A routed endpoint as it crosses the RPC boundary: the RPC/deliver shape uses
  * `modelID`, the router's internal catalogue shape uses `id`. `endpointKey`
@@ -54,6 +58,12 @@ export interface ShouldSwitchInput {
   incumbentStillCapable: boolean;
   incumbentHealthy: boolean;
   topN?: number;
+  // Optimizer P2.3 (BET-1345): the rewarm hysteresis. Server-priced $ values;
+  // when either is absent, or `freeSwitch` is true (post-compaction / dead
+  // cache), the rewarm term is skipped and today's contention answer stands.
+  savingsPerTurn?: number;
+  rewarmCost?: number;
+  freeSwitch?: boolean;
 }
 
 export interface ShouldSwitchResult {

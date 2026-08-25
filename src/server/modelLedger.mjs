@@ -536,3 +536,40 @@ export async function ledgerSummary({ sinceMs = 0 } = {}) {
     return { supported: false };
   }
 }
+
+/**
+ * I/O. The optimizer's MEASURED tokens-per-pct conversion (Optimizer P2.3,
+ * BET-1345) needs a token total per opencode providerID. This sums
+ * `tokensSent` (input + cacheRead + cacheWrite + output — all context that
+ * passed through the model) across ledger rows per providerID, over the same
+ * rolling-window rows the rest of the ledger reads. The pacing state reads the
+ * total for a window's providerIDs at its mark and again later, and derives
+ * tokens-per-pct from the delta — so the conversion is MEASURED on the box, not
+ * assumed, and self-corrects.
+ *
+ * Returns { byProvider: { "<providerID>": total } } or `null` when the ledger
+ * is unavailable (the caller then reports no pacing pressure — fail-open).
+ * Never throws.
+ */
+export async function providerTokenTotals({ sinceMs = 0 } = {}) {
+  const db = await getDb();
+  if (!db) return null;
+  try {
+    const rows = await fetchLedgerRows(db, num(sinceMs));
+    const byProvider = {};
+    for (const r of rows) {
+      if (!r.providerID) continue;
+      byProvider[r.providerID] = (byProvider[r.providerID] ?? 0) + tokensSent(r);
+    }
+    return { byProvider };
+  } catch (e) {
+    // Query error: same degrade contract as the rest of the ledger.
+    console.error("[modelLedger] provider token query failed:", e?.message ?? e);
+    try {
+      db.close();
+    } catch {
+      /* already closed */
+    }
+    return null;
+  }
+}

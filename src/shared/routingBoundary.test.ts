@@ -351,3 +351,68 @@ describe("boundaryPhrase", () => {
     expect(boundaryPhrase("nope")).toBe("");
   });
 });
+
+// --- Optimizer P2.3: the rewarm hysteresis term (BET-1345) ------------------
+describe("shouldSwitch — rewarm hysteresis", () => {
+  // The incumbent is at index 3 (>= topN 3) → dropped out, so the contention
+  // answer would be "switch"; the rewarm term may then prevent it.
+  const base = {
+    incumbent: ep("anthropic", "a"),
+    ranked: [ep("openai", "b"), ep("deepseek", "c"), ep("groq", "d"), ep("anthropic", "a")],
+    incumbentStillEligible: true,
+    incumbentStillCapable: true,
+    incumbentHealthy: true,
+  };
+
+  it("all four forced branches still fire even with a huge rewarmCost", () => {
+    expect(shouldSwitch({ ...base, incumbentStillEligible: false, savingsPerTurn: 0, rewarmCost: 1e9 })).toEqual({
+      switch: true,
+      why: "incumbent-ineligible",
+    });
+    expect(shouldSwitch({ ...base, incumbentStillCapable: false, savingsPerTurn: 0, rewarmCost: 1e9 })).toEqual({
+      switch: true,
+      why: "incumbent-incapable",
+    });
+    expect(shouldSwitch({ ...base, incumbentHealthy: false, savingsPerTurn: 0, rewarmCost: 1e9 })).toEqual({
+      switch: true,
+      why: "incumbent-unhealthy",
+    });
+  });
+
+  it("freeSwitch:true bypasses the rewarm term (post-compaction is a free moment)", () => {
+    expect(shouldSwitch({ ...base, freeSwitch: true, savingsPerTurn: 0, rewarmCost: 1e9 })).toEqual({
+      switch: true,
+      why: "incumbent-dropped-out",
+    });
+  });
+
+  it("savings under the bar -> rewarm-not-worth-it (switch prevented)", () => {
+    // 0.001 * 10 = 0.01 <= 1 * 1 → the savings never recover the rewarm cost.
+    expect(shouldSwitch({ ...base, savingsPerTurn: 0.001, rewarmCost: 1 })).toEqual({
+      switch: false,
+      why: "rewarm-not-worth-it",
+    });
+  });
+
+  it("savings over the bar -> switches (dropped-out)", () => {
+    // 1 * 10 = 10 > 1 * 1 → worth it.
+    expect(shouldSwitch({ ...base, savingsPerTurn: 1, rewarmCost: 1 })).toEqual({
+      switch: true,
+      why: "incumbent-dropped-out",
+    });
+  });
+
+  it("either input absent -> today's answer (dropped-out)", () => {
+    expect(shouldSwitch({ ...base, rewarmCost: 1 })).toEqual({ switch: true, why: "incumbent-dropped-out" });
+    expect(shouldSwitch({ ...base, savingsPerTurn: 0.001 })).toEqual({ switch: true, why: "incumbent-dropped-out" });
+    expect(shouldSwitch({ ...base })).toEqual({ switch: true, why: "incumbent-dropped-out" });
+  });
+
+  it("the rewarm term never forces a switch: an incumbent still in top-N is retained", () => {
+    const kept = { ...base, ranked: [ep("anthropic", "a"), ep("openai", "b"), ep("deepseek", "c")] };
+    expect(shouldSwitch({ ...kept, savingsPerTurn: 100, rewarmCost: 1 })).toEqual({
+      switch: false,
+      why: "incumbent-retained",
+    });
+  });
+});

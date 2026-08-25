@@ -40,6 +40,7 @@ import { buildRoutingServices } from "./routingServices.mjs";
 import { restartOpencode, runServerSelfUpdate } from "./opencodeAdmin.mjs";
 import { pollClaudeLogin, claudeCliStatus, listRoutableModels } from "./opencode.mjs";
 import { chooseModel, incumbentStillEligible, describeDecision } from "../shared/modelRouter.mjs";
+import { CACHE_WRITE_MULTIPLIER } from "../shared/routingBoundary.mjs";
 import {
   applyRoutingOverrides,
   resolveNowOverride,
@@ -348,6 +349,11 @@ export function buildHandlers({
   routingCatalogIndex = null,
   routingProviderHealthState = () => null,
   routingEndpointSummary = () => null,
+  // Optimizer P2.3 (BET-1345): the optimizer pacing state
+  // (src/server/optimizer/pacing.mjs). Plugged into buildRoutingServices so the
+  // router's cost stage sees the pacing shadow price when the optimizer switch
+  // is on. Null/absent → pressure absent → route exactly as today.
+  routingPacing = null,
   // BET-1244: the filtered catalogue for routing:choose — listRoutableModels
   // (S1c) is the ONE place routing consent is computed; routing:choose gets the
   // filtered catalogue from it, never a second filter. Injectable for tests.
@@ -974,6 +980,7 @@ export function buildHandlers({
             snapshots: quota,
             providerHealthState: routingProviderHealthState,
             endpointSummary: routingEndpointSummary,
+            pacing: routingPacing,
           }, nowMs);
         } catch (e) {
           // 11e: a silently-degrading services build is how "no model passes
@@ -1053,6 +1060,26 @@ export function buildHandlers({
         // catalogIncumbent reference it was handed; map that back to the
         // original structured incumbent so the decision stays byte-identical.
         // A real winner / alternative is normalised into {providerID, modelID}.
+        // Optimizer P2.3 (BET-1345): the two server-priced numbers the renderer
+        // feeds the rewarm hysteresis in shouldSwitch. `savingsPerTurn` is the
+        // winner's assessed cost saving over the incumbent in $ (null when the
+        // incumbent did not survive routing — shouldSwitch already forced that
+        // switch). `rewarmCost` is what re-writing the winner's cache prefix
+        // costs, from the SAME blended-price inputs assess used (never a second
+        // price computation here).
+        const costs = decision?.costs;
+        const cachedPrefixTokens =
+          typeof input?.cachedPrefixTokens === "number" && Number.isFinite(input.cachedPrefixTokens)
+            ? input.cachedPrefixTokens
+            : null;
+        const savingsPerTurn =
+          costs && typeof costs.incumbent === "number" && typeof costs.winner === "number"
+            ? costs.incumbent - costs.winner
+            : null;
+        const rewarmCost =
+          costs && typeof costs.winnerCacheWritePrice === "number" && cachedPrefixTokens !== null
+            ? cachedPrefixTokens * CACHE_WRITE_MULTIPLIER * costs.winnerCacheWritePrice
+            : null;
         return {
           model:
             decision?.model === catalogIncumbent
@@ -1065,6 +1092,9 @@ export function buildHandlers({
           changed: decision?.changed === true,
           incumbentHealthy,
           incumbentStillEligible: stillEligible,
+          trace: decision?.trace ?? null,
+          savingsPerTurn,
+          rewarmCost,
         };
       } catch (e) {
         console.warn("[router] routing:choose failed, using incumbent:", e?.message ?? e);
@@ -1075,6 +1105,8 @@ export function buildHandlers({
           changed: false,
           incumbentHealthy: true,
           incumbentStillEligible: true,
+          savingsPerTurn: null,
+          rewarmCost: null,
         };
       }
     },

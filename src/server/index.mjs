@@ -18,6 +18,7 @@ import { synthesizeSpeech } from "../shared/groq.mjs";
 import { WebSocketServer } from "ws";
 import { createCounterfactualStore, validateCounterfactualReport } from "./optimizer/counterfactual.mjs";
 import { createOptimizerSummary } from "./optimizer/summary.mjs";
+import { createPacingState } from "./optimizer/pacing.mjs";
 import { getDb } from "./opencodeDb.mjs";
 import {
   resolvePolicy,
@@ -114,7 +115,7 @@ import { createProviderHealth } from "./providerHealth.mjs";
 import {
   startModelCatalogPoller as startRoutingModelCatalog,
 } from "./modelCatalog.mjs";
-import { endpointSummary as routingEndpointSummary } from "./modelLedger.mjs";
+import { endpointSummary as routingEndpointSummary, providerTokenTotals, ROUTING_LEDGER_WINDOW_MS } from "./modelLedger.mjs";
 import * as appControl from "./appControl.mjs";
 import * as cto from "./cto.mjs";
 import { searchMessages } from "./messageSearch.mjs";
@@ -388,7 +389,27 @@ const { stop: stopDeferredMobilePoller } = push.startDeferredMobilePoller();
 // (src/server/rpc.mjs → usage.mjs listSnapshots()). NOT the context-window
 // indicator — see src/server/usage.mjs for that boundary.
 // eslint-disable-next-line no-unused-vars
-const { stop: stopUsagePoller, tick: usagePollerTick } = startUsagePoller(bus);
+const { stop: stopUsagePoller, tick: usagePollerTick } = startUsagePoller(bus, {
+  // Optimizer P2.3 (BET-1345): the pacing controller observes the SAME publish
+  // point as recordWindowObservations — no second poller, no adapter change.
+  pacing: optimizerPacing,
+});
+
+// Optimizer P2.3 (BET-1345): the pacing state. Reads/writes
+// `optimizer-pacing.json` through the shared jsonStore atomic writer; observes
+// the usage poller's publish point (wired above) to accumulate a deficit queue
+// per quota window, and serves the per-provider shadow price the router folds
+// in. `ledgerTokens` is the MEASURED token total per provider (modelLedger),
+// memoised behind a short TTL inside the pacing state — a null ledger read
+// means NO pacing pressure (fail-open, never a guess). Created before the usage
+// poller and buildHandlers so both share one instance.
+const optimizerPacing = createPacingState({
+  load: () => readJsonSync(statePath("optimizer-pacing.json"), {}),
+  save: (s) => writeJsonAtomic(statePath("optimizer-pacing.json"), JSON.stringify(s, null, 2)),
+  now: Date.now,
+  ledgerTokens: async () =>
+    providerTokenTotals({ sinceMs: Date.now() - ROUTING_LEDGER_WINDOW_MS }),
+});
 
 // Usage-stop resume engine (BET-1048): watches the ARMED entries in the
 // usage-stopped record and resumes them once their provider's usage genuinely
@@ -964,6 +985,10 @@ rpcHandlers = buildHandlers({
   routingCatalogIndex,
   routingProviderHealthState: (providerID) => providerHealth.state(providerID),
   routingEndpointSummary,
+  // Optimizer P2.3 (BET-1345): the pacing state for the routing:choose round
+  // trip — the router's cost stage reads services.pressure from it when the
+  // optimizer switch is on. Absent → pressure absent → route exactly as today.
+  routingPacing: optimizerPacing,
   // BET-1244: the provider-health engine itself, for the Accounts "Try again"
   // action (accounts:retry delegates to providerHealth.retry).
   providerHealth,

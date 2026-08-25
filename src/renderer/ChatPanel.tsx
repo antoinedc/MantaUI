@@ -87,7 +87,7 @@ import {
   type TaskContextValue,
   type TokenUsage,
 } from "./chatShared";
-import { crossesBoundary, shouldSwitch, boundaryPhrase } from "../shared/routingBoundary.mjs";
+import { crossesBoundary, shouldSwitch, boundaryPhrase, BOUNDARY } from "../shared/routingBoundary.mjs";
 import { acceptsModality } from "../shared/modelGuide.mjs";
 import { useModelCatalog } from "./modelCatalog";
 import {
@@ -218,6 +218,11 @@ export function ChatPanel({
   // BET-1274 10d: the routing preset drives the Auto row's display label; the
   // value lives on the same store block Settings writes (modelRouting.preset).
   const routingPreset = useStore((s) => s.modelRouting?.preset);
+  // Optimizer P2.3 (BET-1345): the eco level the last routing decision
+  // reported (trace.target.eco). Drives the Auto-row label ("Eco") — the preset
+  // key itself stays pinned at "balanced" in config; eco is runtime routing
+  // state, never a config change.
+  const [routingEco, setRoutingEco] = useState<number>(0);
   const hiddenStatusItems = useStore((s) => s.hiddenStatusItems);
   // BET-789: the "Connect GitHub…" offer's per-box dismissal flag. Once set,
   // the offer never re-appears until the config flag is cleared.
@@ -1369,11 +1374,18 @@ export function ChatPanel({
               pdf: readyAttachments.some((a) => mimeToInputMode(a.mime) === "pdf"),
             },
             incumbent,
+            // Optimizer P2.3 (BET-1345): the renderer reports the cached prefix
+            // size it already has (latestTokensRef.cache.read) so the BOX can
+            // price the rewarm cost — all pricing stays server-side.
+            cachedPrefixTokens: latestTokensRef.current?.cache?.read ?? undefined,
           });
           // Remember the box's answer about the incumbent for the NEXT turn's
           // crossesBoundary (so an outage fires a CONSTRAINT boundary even before
           // this turn switches). Defaults healthy when the box didn't report.
           incumbentHealthRef.current = decision.incumbentHealthy !== false;
+          // Optimizer P2.3: the decision's eco level feeds the Auto-row label
+          // ("Eco" while the box moves the target tier under pressure).
+          setRoutingEco(decision?.trace?.target?.eco ?? 0);
           const ranked = decision.model
             ? [decision.model, ...decision.alternatives]
             : decision.alternatives;
@@ -1389,6 +1401,13 @@ export function ChatPanel({
               incumbentStillEligible: decision.incumbentStillEligible !== false,
               incumbentStillCapable: stillCapable,
               incumbentHealthy: decision.incumbentHealthy !== false,
+              // Optimizer P2.3: the rewarm hysteresis — server-priced savings vs
+              // the cost of re-warming the winner's cache prefix. Only prevents
+              // a switch; never forces one. freeSwitch (post-compaction) is a
+              // free moment with no prefix to re-warm.
+              savingsPerTurn: decision.savingsPerTurn ?? undefined,
+              rewarmCost: decision.rewarmCost ?? undefined,
+              freeSwitch: boundary === BOUNDARY.COMPACTED,
             }).switch
           ) {
             const reason = decision.reason + (boundary ? ` · ${boundaryPhrase(boundary)}` : "");
@@ -3413,7 +3432,7 @@ export function ChatPanel({
         onOpenModels={ensureModels}
         onSelectModel={selectModel}
         onSelectEffort={onSelectEffort}
-        presetLabel={routingPreset ? titleCase(routingPreset) : undefined}
+        presetLabel={routingEco >= 1 ? "Eco" : routingPreset ? titleCase(routingPreset) : undefined}
         scheduleCount={schedules.length}
         onSchedules={() => togglePanel("schedules")}
         onSecrets={() => togglePanel("secrets")}

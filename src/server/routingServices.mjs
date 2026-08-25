@@ -241,10 +241,14 @@ export function ledgerToServices(stats) {
  *   providerIDs health is keyed by) — e.g. listRoutableModels output
  * @param {Array<object>} [deps.snapshots]  usage snapshots (src/server/usage.mjs)
  * @param {Function} [deps.providerHealthState]  (providerID) => state string
- * @param {Function} [deps.endpointSummary]  async ({sinceMs}) => { supported, endpoints } —
+ * @param {object}  [deps.endpointSummary]  async ({sinceMs}) => { supported, endpoints } —
  *   src/server/modelLedger.mjs endpointSummary (memoised behind a short TTL)
  * @param {Function} [deps.buildReliabilityBaseline]  optional override for the
  *   reliability/telemetry fold (tests)
+ * @param {object}  [deps.pacing]  the optimizer pacing state
+ *   (src/server/optimizer/pacing.mjs) exposing `pressureFor(providerID)`.
+ *   Populates `services.pressure` + `services.ecoLevel` ONLY when
+ *   `cfg.optimizerEnabled === true`; absent/degraded → route exactly as today.
  * @param {number} [nowMs]          injected clock (defaults to Date.now()); the
  *   rolling-window edge and the leave it as the TTL cache's timestamp
  * @returns {Promise<object>}  the RoutingServices-shaped object
@@ -372,6 +376,45 @@ export async function buildRoutingServices(cfg = {}, deps = {}, nowMs = Date.now
     }
   } catch {
     /* no ledger → reliability/telemetry absent (never derank, measured speed) */
+  }
+
+  // Optimizer P2.3 (BET-1345): the pacing pressure + eco level. BOTH are gated
+  // on the optimizer switch — `optimizerEnabled === true` and nothing else. With
+  // the switch off this block contributes NOTHING (absent pressure / absent eco
+  // = route exactly as today), and it never touches routingActive or the
+  // modelRouting.preset default. Each field has its own guard so a failing
+  // pressure reader degrades to absent without breaking the build.
+  const pacingProviderIDs = [
+    ...(Array.isArray(deps.endpoints) ? deps.endpoints.map((m) => m?.providerID) : []),
+    ...(Array.isArray(deps.snapshots) ? deps.snapshots.flatMap((s) => (Array.isArray(s?.providerIDs) ? s.providerIDs : [])) : []),
+  ];
+  if (cfg?.optimizerEnabled === true) {
+    try {
+      if (deps.pacing && typeof deps.pacing.pressureFor === "function") {
+        const pressure = {};
+        for (const pid of new Set(pacingProviderIDs)) {
+          if (typeof pid !== "string" || !pid) continue;
+          try {
+            const p = await deps.pacing.pressureFor(pid);
+            if (p) pressure[pid] = p;
+          } catch {
+            // one provider's pressure must never break the build for the rest
+          }
+        }
+        if (Object.keys(pressure).length > 0) services.pressure = pressure;
+      }
+    } catch {
+      /* pressure absent → route exactly as today */
+    }
+    try {
+      let eco = 0;
+      for (const p of Object.values(services.pressure ?? {})) {
+        if (p && typeof p.ecoLevel === "number" && p.ecoLevel > eco) eco = p.ecoLevel;
+      }
+      services.ecoLevel = eco;
+    } catch {
+      /* eco absent → the configured preset is used verbatim */
+    }
   }
 
   return services;

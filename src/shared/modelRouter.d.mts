@@ -54,6 +54,17 @@ export interface RoutingServices {
   mixDefault?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
   /** Keyed by model id — the catalogue's typical input/output rate. */
   referenceByModel?: Record<string, { input?: number; output?: number }>;
+  /** Optimizer P2.3 (BET-1345) — keyed by providerID. The pacing shadow price
+   *  per provider, folded into marginalCost's subscription branch. Absent →
+   *  route exactly as today. */
+  pressure?: Record<
+    string,
+    { lambda: number; tokensPerPct: number | null; deficit: number; ecoLevel: number; protection: boolean }
+  >;
+  /** Optimizer P2.3 (BET-1345) — the max eco level across providers (0-3).
+   *  >= 2 moves the effective preset to "economy" (target tier only, never the
+   *  quality floor). Absent → the configured preset is used verbatim. */
+  ecoLevel?: number;
 }
 
 export interface ChooseInput {
@@ -85,7 +96,7 @@ export interface RoutingTrace {
   considered: number;
   dropped: { stage: "eligible" | "capable"; reason: string; n: number }[];
   intent: { contextTokens: number; needs: { tools: boolean; image: boolean; pdf: boolean } };
-  target: { tier: string; floorTier: string; widened: boolean };
+  target: { tier: string; floorTier: string; widened: boolean; eco?: number };
   winner: RoutingSignals | null;
 }
 
@@ -94,6 +105,14 @@ export interface ChooseResult {
   reason: string;
   alternatives: Model[];
   changed: boolean;
+  /** Optimizer P2.3 (BET-1345) — the assessed-cost accessor for the wiring
+   *  (savingsPerTurn / rewarmCost) without a second assess() call. Present on
+   *  the win-and-switch path; absent elsewhere. */
+  costs?: {
+    winner: number;
+    incumbent: number | null;
+    winnerCacheWritePrice: number | null;
+  };
   trace: RoutingTrace;
 }
 

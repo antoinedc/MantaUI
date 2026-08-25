@@ -11,6 +11,7 @@
 // it now, which is about consumed-vs-elapsed, not pct alone).
 
 import { blendedPrice } from "./blendedPrice.mjs";
+import { PROTECTION_LAMBDA_MULTIPLIER } from "./quotaPressure.mjs";
 
 // --- Asymmetry: subscription < credit at equal scarcity ---------------------
 // A subscription's unused quota expires worthless; unused credit carries over
@@ -141,10 +142,21 @@ function subscriptionWindowCost(win, rate, nowMs) {
  * @param {object} [input.mix]          token mix for blendedPrice
  * @param {object} [input.reference]    reference price for the implausible-zero rule
  * @param {number} [input.replacementCost]  $ of the cheapest acceptable alternative
+ * @param {number} [input.expectedTurnTokens]  expected tokens in THIS turn (the
+ *   routing-decision input) — only the subscription branch consumes it, to size
+ *   the pacing pressure
+ * @param {boolean} [input.isLowStakes]  true for general/explore turns (the
+ *   protection multiplier applies only to these)
+ * @param {object} [input.shadowPrice]  the pacing controller's shadow price:
+ *   { lambda, tokensPerPct, protection } — ADDITIVE on top of the pace curve in
+ *   the subscription branch only. Absent / zero-lambda / null-tokensPerPct /
+ *   non-finite non-positive expectedTurnTokens → SKIPPED, cost + basis unchanged
+ *   (the on-or-under-pace regime stays byte-identical to today; the two terms
+ *   only coexist over pace).
  * @returns {{ cost: number, exhausted: boolean, basis: string, reason: string }}
  */
 export function marginalCost(input = {}) {
-  const { model, account, nowMs = 0, mix, reference, replacementCost } = input || {};
+  const { model, account, nowMs = 0, mix, reference, replacementCost, expectedTurnTokens, isLowStakes = false, shadowPrice } = input || {};
 
   // --- Exhausted first -------------------------------------------------------
   const windows = Array.isArray(account?.windows) ? account.windows : [];
@@ -208,11 +220,35 @@ export function marginalCost(input = {}) {
         bestBasis = c.basis;
       }
     }
+    // The pacing shadow price, ADDITIVE on top of the pace curve (Optimizer
+    // P2.3, BET-1345). `max(0, Q_w)` is zero in the on/under-pace regime, so
+    // today's arithmetic — including the under-pace discount that drives work
+    // onto a subscription you already paid for — is preserved byte-for-byte
+    // there. The pressure is skipped entirely (cost + basis unchanged) when any
+    // of its inputs is unusable: a missing shadowPrice, lambda <= 0, a null
+    // tokensPerPct, or a non-finite non-positive expectedTurnTokens. CREDIT
+    // accounts get NO shadow price — a credit balance has no reset window, so
+    // there is no deficit queue for it.
+    let cost = dollar(best);
+    let basis = bestBasis;
+    const sp = shadowPrice;
+    const tokensPerPctValid = sp && isNum(sp.tokensPerPct) && sp.tokensPerPct > 0;
+    const lambdaValid = sp && isNum(sp.lambda) && sp.lambda > 0;
+    const turnValid = isNum(expectedTurnTokens) && expectedTurnTokens > 0;
+    if (lambdaValid && tokensPerPctValid && turnValid) {
+      const protectionMult =
+        sp.protection === true && isLowStakes === true ? PROTECTION_LAMBDA_MULTIPLIER : 1;
+      const pressure = sp.lambda * (expectedTurnTokens / sp.tokensPerPct) * rate * protectionMult;
+      cost = dollar(best) + pressure;
+      basis = "subscription-pace+pressure";
+    }
     return {
-      cost: dollar(best),
+      cost,
       exhausted: false,
-      basis: bestBasis,
-      reason: `subscription priced by pace at exchange rate ${source}`,
+      basis,
+      reason:
+        `subscription priced by pace at exchange rate ${source}` +
+        (basis === "subscription-pace+pressure" ? " + pacing pressure" : ""),
     };
   }
 
