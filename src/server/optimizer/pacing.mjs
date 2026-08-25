@@ -42,6 +42,22 @@ const TOKEN_TTL_MS = 60_000;
 const isNum = (v) => typeof v === "number" && Number.isFinite(v);
 const num = (v) => (isNum(v) ? v : 0);
 
+// Both the reset and cold-start branches re-seed a window's accumulator from
+// the closed form (never assume Q = 0). Shared so the two paths stay in lockstep.
+function seedWindow({ pctNum, startedAt, resetsAt, at, tokens, providerIDs }) {
+  return {
+    deficit: seedDeficit({ pct: pctNum, startedAt, resetsAt, now: at }),
+    pct: pctNum,
+    at,
+    tokensAtMark: tokens,
+    pctAtMark: pctNum,
+    rates: [],
+    providerIDs,
+    ...(startedAt != null ? { startedAt } : {}),
+    ...(resetsAt != null ? { resetsAt } : {}),
+  };
+}
+
 function normalizeState(raw) {
   const s = raw && typeof raw === "object" ? raw : {};
   const windows = {};
@@ -157,34 +173,14 @@ export function createPacingState({ load, save, now, ledgerTokens, tokenTtlMs = 
     // form so a box that restarts / a window that turns over does not carry a
     // stale queue.
     if (hasPrev && pctNum < prev.pct + RESET_DELTA) {
-      s.windows[key] = {
-        deficit: seedDeficit({ pct: pctNum, startedAt, resetsAt, now: at }),
-        pct: pctNum,
-        at,
-        tokensAtMark: tokens,
-        pctAtMark: pctNum,
-        rates: [],
-        providerIDs,
-        ...(startedAt != null ? { startedAt } : {}),
-        ...(resetsAt != null ? { resetsAt } : {}),
-      };
+      s.windows[key] = seedWindow({ pctNum, startedAt, resetsAt, at, tokens, providerIDs });
       return;
     }
 
     // First sight of this window: seed from the closed form (never assume
     // Q = 0 on a cold start).
     if (!hasPrev) {
-      s.windows[key] = {
-        deficit: seedDeficit({ pct: pctNum, startedAt, resetsAt, now: at }),
-        pct: pctNum,
-        at,
-        tokensAtMark: tokens,
-        pctAtMark: pctNum,
-        rates: [],
-        providerIDs,
-        ...(startedAt != null ? { startedAt } : {}),
-        ...(resetsAt != null ? { resetsAt } : {}),
-      };
+      s.windows[key] = seedWindow({ pctNum, startedAt, resetsAt, at, tokens, providerIDs });
       return;
     }
 
