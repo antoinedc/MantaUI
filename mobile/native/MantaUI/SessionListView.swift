@@ -64,6 +64,9 @@ struct SessionListView: View {
     /// is computed from `now` in the body; without a tick nothing re-renders it
     /// after the initial layout, so ages froze at whatever they showed on load.
     @State private var now = Date()
+    /// The All / Recent filter (BET-1349). Not persisted — resets to All on
+    /// launch.
+    @State private var filter: SessionFilter = .all
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -118,7 +121,7 @@ struct SessionListView: View {
                 }
             }
             .refreshable { await store.refresh() }
-            .safeAreaInset(edge: .bottom) { searchBar }
+            .safeAreaInset(edge: .bottom) { filterAndSearchBar }
             .overlay(alignment: .top) { errorBanner }
             .navigationDestination(for: SessionOpenTarget.self) { target in
                 if let sessionId = target.sessionId, !sessionId.isEmpty {
@@ -274,12 +277,20 @@ struct SessionListView: View {
     }
 
     private var filteredProjects: [MantaProject] {
-        guard !searchText.isEmpty else { return sorted(store.projects) }
+        let searched = searchFiltered(store.projects)
+        let recencyFiltered = applyRecencyFilter(searched)
+        return sorted(recencyFiltered)
+    }
+
+    /// The name search — a project-name match keeps the whole group; matching
+    /// window names only means typing the name of the project you were looking
+    /// at would empty the screen. BET-1349 runs the recency filter AFTER this,
+    /// and still applies it inside a name-matched group (a project match is
+    /// about names, not liveness).
+    private func searchFiltered(_ projects: [MantaProject]) -> [MantaProject] {
+        guard !searchText.isEmpty else { return projects }
         let q = searchText.lowercased()
-        let matched = store.projects.compactMap { p -> MantaProject? in
-            // A project-name match keeps the whole group. Matching window names
-            // only meant typing the name of the project you were looking at
-            // emptied the screen.
+        return projects.compactMap { p -> MantaProject? in
             if p.tmuxSession.lowercased().contains(q) { return p }
             let kept = p.windows.filter { $0.name.lowercased().contains(q) }
             guard !kept.isEmpty else { return nil }
@@ -287,7 +298,22 @@ struct SessionListView: View {
             copy.windows = kept
             return copy
         }
-        return sorted(matched)
+    }
+
+    /// The Recent filter (BET-1349): drop windows that fail the recency
+    /// predicate, and drop a project entirely when it has no surviving windows.
+    /// `.all` is an exact no-op on the input.
+    private func applyRecencyFilter(_ projects: [MantaProject]) -> [MantaProject] {
+        guard filter == .recent else { return projects }
+        return projects.compactMap { p -> MantaProject? in
+            let kept = p.windows.filter {
+                SessionRecency.isRecent(store.rowStatus(for: $0), now: now, ttlMs: store.cacheTtlMs)
+            }
+            guard !kept.isEmpty else { return nil }
+            var copy = p
+            copy.windows = kept
+            return copy
+        }
     }
 
     /// Pinned windows to the top of their project — the ONE place a project's
@@ -397,7 +423,7 @@ struct SessionListView: View {
     }
 
     private func ageText(_ window: MantaWindow, now: Date) -> String? {
-        SessionRowAge.text(for: store.rowStatus(for: window), now: now)
+        SessionRowAge.text(for: store.rowStatus(for: window), now: now, ttlMs: store.cacheTtlMs)
     }
 
     private func subtitle(for window: MantaWindow) -> String {
@@ -560,6 +586,32 @@ struct SessionListView: View {
     // That button now lives in the navigation bar, so the container has a
     // single child and is deleted with it: a container whose whole job is to
     // relate two glass shapes is noise once there is only one.
+    //
+    // The All/Recent filter row (BET-1349) sits DIRECTLY above the search
+    // field inside the same bottom safe-area inset, sharing its horizontal
+    // padding — one thumb-reachable control cluster with no new surface.
+    private var filterAndSearchBar: some View {
+        VStack(spacing: Metrics.spacing.sp2) {
+            filterRow
+            searchBar
+        }
+    }
+
+    private var filterRow: some View {
+        HStack(spacing: Metrics.spacing.sp2) {
+            ModelChip(title: "All", selected: filter == .all, tokens: tokens,
+                      accessibilityIdentifier: "session-filter-all") {
+                filter = .all
+            }
+            ModelChip(title: "Recent", selected: filter == .recent, tokens: tokens,
+                      accessibilityIdentifier: "session-filter-recent") {
+                filter = .recent
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, Metrics.spacing.sp3)
+    }
+
     private var searchBar: some View {
         HStack(spacing: Metrics.spacing.sp2) {
             Image(systemName: "magnifyingglass")

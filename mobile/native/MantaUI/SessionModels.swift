@@ -243,12 +243,50 @@ enum SessionRowSubtitle {
     }
 }
 
+/// The single definition of "recent" (BET-1349) — the age chip and the Recent
+/// filter both read it, so they can never disagree. A row is RECENT when it is
+/// mid-turn, or its last activity is inside the prompt-cache TTL.
+enum SessionRecency {
+    static func isRecent(_ s: SessionRowStatus, now: Date, ttlMs: Double) -> Bool {
+        if s.running { return true }
+        if s.attention { return true }
+        guard let last = s.lastActivity else { return false }
+        return now.timeIntervalSince(last) * 1000 < ttlMs
+    }
+}
+
+/// The All / Recent filter row (BET-1349). Not persisted — resets to `.all` on
+/// launch.
+enum SessionFilter: String {
+    case all
+    case recent
+}
+
+/// Maps the box's `cacheTtl` config string to milliseconds, mirroring the
+/// desktop `selectCacheTtlMs` (src/renderer/chatUtils.ts). Values are `"5m"`
+/// and `"1h"`; anything else — or absent — means `"5m"`.
+enum SessionCacheTtl {
+    static let defaultMs: Double = 300_000
+    static let oneHourMs: Double = 3_600_000
+
+    static func ms(for configValue: String?) -> Double {
+        switch configValue {
+        case "1h": return oneHourMs
+        default: return defaultMs // "5m", anything else, or absent
+        }
+    }
+}
+
 /// The row's trailing age slot (BET-1084): a pure gate mirroring the desktop
 /// sidebar's `useAge` (src/renderer/Sidebar.tsx) — running / attention rows and
-/// unknown-activity rows show no age; their dot is the signal.
+/// unknown-activity rows show no age; their dot is the signal. Past the
+/// prompt-cache TTL the chip also disappears (BET-1349) — there is no hover on
+/// a phone to hide a stale age behind.
 enum SessionRowAge {
-    static func text(for s: SessionRowStatus, now: Date) -> String? {
+    static func text(for s: SessionRowStatus, now: Date, ttlMs: Double) -> String? {
         guard !s.running, !s.attention, let last = s.lastActivity else { return nil }
+        let elapsedMs = now.timeIntervalSince(last) * 1000
+        guard elapsedMs < ttlMs else { return nil }
         return SessionTimerFormat.age(now.timeIntervalSince(last))
     }
 }
