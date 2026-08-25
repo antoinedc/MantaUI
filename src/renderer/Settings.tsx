@@ -467,9 +467,9 @@ export function Settings({
   const voiceNoteTtlHours = useStore((s) => s.voiceNoteTtlHours);
   const autoRenameSessions = useStore((s) => s.autoRenameSessions);
   const alwaysShowUsage = useStore((s) => s.alwaysShowUsage);
+  const optimizerEnabled = useStore((s) => s.optimizerEnabled);
   const theme = useStore((s) => s.theme);
   const cto = useStore((s) => s.cto);
-  const modelRouting = useStore((s) => s.modelRouting);
   const skillRegistryUrls = useStore((s) => s.skillRegistryUrls);
   const launcherFlags = useStore((s) => s.launcherFlags);
   const updatePrompt = useStore((s) => s.updatePrompt);
@@ -532,13 +532,13 @@ export function Settings({
       theme,
       autoRenameSessions,
       alwaysShowUsage,
+      optimizerEnabled,
       "cto.enabled": cto?.enabled ?? false,
       "cto.model": cto?.model ?? "",
       "cto.voice": cto?.voice ?? "",
       "cto.alwaysListening": cto?.alwaysListening ?? false,
-      "modelRouting.preset": modelRouting?.preset ?? "balanced",
     }),
-    [cacheTtl, groqApiKey, voiceTranscriptionModel, openaiApiKey, allowAgentPush, downloadsDir, worktreePerSession, worktreeCleanOnClose, uploadCleanupHours, voiceNoteTtlHours, theme, autoRenameSessions, alwaysShowUsage, cto, modelRouting],
+    [cacheTtl, groqApiKey, voiceTranscriptionModel, openaiApiKey, allowAgentPush, downloadsDir, worktreePerSession, worktreeCleanOnClose, uploadCleanupHours, voiceNoteTtlHours, theme, autoRenameSessions, alwaysShowUsage, optimizerEnabled, cto],
   );
 
   const commitKey = async (entry: SettingEntry, nextValue: unknown) => {

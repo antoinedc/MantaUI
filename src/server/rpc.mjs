@@ -367,6 +367,9 @@ export function buildHandlers({
   // `windows` is empty, matching the pre-P1.4 placeholder.
   usageSnapshots = () => [],
   usageHistory = () => ({}),
+  // BET-1343: the shared memoized `optimizer:summary` read model, hoisted to
+  // index.mjs. Null when not injected → this builds its own (tests / fallback).
+  optimizerSummary = null,
 }) {
   // The sole resolver for project cwd — no longer mirrored to a desktop-main
   // copy (the src/main/index.ts duplicate was retired in the HTTP-only
@@ -414,15 +417,17 @@ export function buildHandlers({
     }
   }
 
-  // BET-1333: the memoized `optimizer:summary` read model. Built once per
-  // buildHandlers (single production instance) so the 60s memo + in-flight
-  // guard share across RPC calls — the same single-slot cache pattern as
-  // routingServices.mjs. `getDb` is the module-scope handle from
-  // opencodeDb.mjs; `counterfactualStore` is injected (BET-1335) so the
-  // summary merges the observe-mode counterfactual when one is wired.
-  // BET-1340: `readCacheTtl` feeds the summary's TTL verifier — what opencode
-  // is configured to send, compared against the measured effective TTL.
-  const optimizerSummary = createOptimizerSummary({
+  // BET-1333: the memoized `optimizer:summary` read model. BET-1343 hoisted the
+  // single production instance to index.mjs so the RPC channel and the GET
+  // /api/optimizer/policy route share ONE 60s memo + in-flight guard (no second
+  // DB query). When not injected (tests / other buildHandlers callers) this
+  // falls back to constructing the same instance here, identical to before.
+  // `getDb` is the module-scope handle from opencodeDb.mjs; `counterfactualStore`
+  // is injected (BET-1335) so the summary merges the observe-mode counterfactual
+  // when one is wired. BET-1340: `readCacheTtl` feeds the summary's TTL
+  // verifier — what opencode is configured to send, compared against the
+  // measured effective TTL.
+  const optimizerSummaryFn = optimizerSummary ?? createOptimizerSummary({
     getDb,
     counterfactualStore,
     usageSnapshots,
@@ -1311,7 +1316,7 @@ export function buildHandlers({
     // (optimizer/summary.mjs). No arguments. Memoized server-side behind a
     // 60s TTL with an in-flight guard. Degrades to { supported:false } on a
     // box that hasn't taken the Node 24 runtime yet / has no opencode.db.
-    "optimizer:summary": () => optimizerSummary(),
+    "optimizer:summary": () => optimizerSummaryFn(),
 
     // preload: ipcRenderer.invoke(IPC.opencodeRunCommand, { sessionId, command, arguments, model?, attachments? })
     // → args[0] = that object; opencode.mjs runCommand expects same shape

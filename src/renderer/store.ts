@@ -348,6 +348,12 @@ type State = {
   // 70% (the dial's normal "quiet unless it matters" threshold). Settings-
   // only — rides the generic configUpdate path. See AppConfig.alwaysShowUsage.
   alwaysShowUsage: boolean;
+  // BET-1343: master switch for the Manta Optimizer. Default OFF — with it
+  // off (the default) the optimizer changes nothing. Rides the generic
+  // configUpdate path like every other AppConfig-back flag. It does NOT gate
+  // Automatic Manta Routing (that stays per-conversation). See
+  // AppConfig.optimizerEnabled.
+  optimizerEnabled: boolean;
   // BET-782: ids of session-header status items the user has permanently
   // hidden (never rendered in the bar or the overflow dropdown). Mirror of
   // AppConfig.hiddenStatusItems; read by SessionHeader's registry.
@@ -794,6 +800,7 @@ export const useStore = create<State>((set, get) => ({
   chatAutoAllow: false,
   autoRenameSessions: false,
   alwaysShowUsage: false,
+  optimizerEnabled: false,
   hiddenStatusItems: [],
   forgeConnectOfferDismissed: false,
   allowAgentPush: false,
@@ -1075,6 +1082,7 @@ export const useStore = create<State>((set, get) => ({
       chatAutoAllow: c.chatAutoAllow ?? false,
       autoRenameSessions: c.autoRenameSessions ?? false,
       alwaysShowUsage: c.alwaysShowUsage ?? false,
+      optimizerEnabled: c.optimizerEnabled === true,
       hiddenStatusItems: Array.isArray(c.hiddenStatusItems) ? c.hiddenStatusItems : [],
       forgeConnectOfferDismissed: c.forgeConnectOfferDismissed ?? false,
       allowAgentPush: c.allowAgentPush ?? false,

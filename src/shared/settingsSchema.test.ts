@@ -133,9 +133,7 @@ describe("uploadCleanupHours (BET-427)", () => {
   });
 });
 
-describe("model routing entries (BET-1218)", () => {
-  const preset = ALL.find((e) => e.id === "modelRoutingPreset");
-
+describe("model routing + optimizer entries (BET-1218 / BET-1343)", () => {
   it("the enabled toggle no longer exists (routing is per-conversation only)", () => {
     // The global toggle was deleted: routing is activated per conversation from
     // the composer's model picker, so a global consent switch would be a second
@@ -143,32 +141,29 @@ describe("model routing entries (BET-1218)", () => {
     expect(ALL.find((e) => e.id === "modelRoutingEnabled")).toBeUndefined();
   });
 
-  it("the preset is present in the models section for desktop", () => {
-    const desktop = settingsForSection(ALL, "models", "desktop");
-    expect(preset).toBeDefined();
-    expect(desktop.some((e) => e.id === "modelRoutingPreset")).toBe(true);
+  it("the routing-preset control is retired (BET-1343)", () => {
+    // The three-way Balance dial is gone from Settings. The preset itself stays
+    // pinned at "balanced" in config and the router keeps reading it — only the
+    // UI control is retired.
+    expect(ALL.find((e) => e.id === "modelRoutingPreset")).toBeUndefined();
   });
 
-  it("the preset is desktop-only (never rendered on mobile)", () => {
-    const mobile = settingsForPlatform(ALL, "mobile");
-    expect(mobile.some((e) => e.id === "modelRoutingPreset")).toBe(false);
-  });
-
-  it("the preset renders in the Automatic Manta Routing group", () => {
-    expect(preset!.control).toBe("segmented");
-    expect(preset!.configKey).toBe("modelRouting.preset");
-    expect(preset!.default).toBe("balanced");
-    expect(preset!.group).toBe("Automatic Manta Routing");
-  });
-
-  it("the preset uses the schema's PRESETS values and they match the router's AGENT_TIER keys (no drift)", () => {
-    expect(preset!.control).toBe("segmented");
-    expect(preset!.configKey).toBe("modelRouting.preset");
-    expect(preset!.default).toBe("balanced");
-    const values = preset!.options?.map((o) => o.value);
-    expect(values).toEqual(PRESETS);
-    // No drift with the decision core: every schema preset is a router preset.
+  it("the PRESETS vocabulary still matches the router's AGENT_TIER keys (no drift)", () => {
+    // BET-1343 keeps this guard: AGENT_TIER is still keyed by preset and the
+    // router still reads modelRouting.preset (pinned at "balanced"), so the
+    // schema's preset vocabulary must never drift from the decision core.
     expect([...PRESETS].sort()).toEqual(Object.keys(AGENT_TIER).sort());
+  });
+
+  it("optimizerEnabled is present with default false (BET-1343)", () => {
+    const opt = ALL.find((e) => e.id === "optimizerEnabled");
+    expect(opt).toBeDefined();
+    expect(opt!.section).toBe("models");
+    expect(opt!.control).toBe("toggle");
+    expect(opt!.configKey).toBe("optimizerEnabled");
+    expect(opt!.default).toBe(false);
+    expect(opt!.platform).toBe("both");
+    expect(opt!.group).toBe("Automatic Manta Routing");
   });
 });
 

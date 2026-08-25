@@ -294,6 +294,13 @@ export type AppConfig = {
     // Whether the call window listens continuously (Issue 3). Default false.
     alwaysListening?: boolean;
   };
+  // ----- Manta Optimizer (BET-1342 / Phase 2) -----
+  // Master switch for the optimizer. DEFAULT FALSE. Opt-in: with it OFF the
+  // optimizer changes nothing. It does NOT gate Automatic Manta Routing —
+  // routing is gated per-conversation by the composer's model picker
+  // (modelRouting.preset stays pinned at "balanced" regardless of this flag).
+  // The switch being ON changes NO behaviour until the actuation stages land.
+  optimizerEnabled?: boolean;
   // ----- Model routing (BET-1215) -----
   // Manta picks the model for a conversation while Auto is on (the per-session
   // gate). Config carries the balance dial; the Auto on/off switch is the

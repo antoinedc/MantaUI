@@ -17,6 +17,13 @@ import { uploadRoot, statePath } from "../shared/paths.mjs";
 import { synthesizeSpeech } from "../shared/groq.mjs";
 import { WebSocketServer } from "ws";
 import { createCounterfactualStore, validateCounterfactualReport } from "./optimizer/counterfactual.mjs";
+import { createOptimizerSummary } from "./optimizer/summary.mjs";
+import { getDb } from "./opencodeDb.mjs";
+import {
+  resolvePolicy,
+  validateRepoTable,
+  optimizerCacheTtlMs,
+} from "../shared/optimizerPolicy.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 import * as tmux from "./tmux.mjs";
 import * as oc from "./opencode.mjs";
@@ -925,6 +932,20 @@ const optimizerCounterfactual = createCounterfactualStore({
   now: Date.now,
 });
 
+// BET-1343: the memoized `optimizer:summary` read model, created ONCE at module
+// scope here (not inside buildHandlers) so the SAME 60s memo + in-flight guard
+// is shared by the RPC `optimizer:summary` channel and the GET
+// /api/optimizer/policy route. Same wiring as the pre-BET-1343 internal
+// construction: getDb + the observe-mode counterfactual + the quota-window
+// forecast sources + the configured cache-TTL read.
+const optimizerSummary = createOptimizerSummary({
+  getDb,
+  counterfactualStore: optimizerCounterfactual,
+  usageSnapshots: listSnapshots,
+  usageHistory: getUsageHistory,
+  readCacheTtl: () => readProvidersCacheTtl({ listProviders: oc.getProviders }),
+});
+
 rpcHandlers = buildHandlers({
   tmux,
   oc,
@@ -949,6 +970,10 @@ rpcHandlers = buildHandlers({
   // BET-1335: the observe-mode counterfactual store for the optimizer:summary
   // read model.
   counterfactualStore: optimizerCounterfactual,
+  // BET-1343: the single shared memoized `optimizer:summary` read model, built
+  // above so the RPC channel and the GET /api/optimizer/policy route share one
+  // 60s memo + in-flight guard (no second DB query).
+  optimizerSummary,
   // BET-1336: quota-window forecast-at-reset read sources for the
   // optimizer:summary `windows` slice — the live polled snapshots + the
   // persisted observation history.
@@ -2773,6 +2798,37 @@ const handleRequest = async (req, res) => {
         }
         await optimizerCounterfactual.record(body);
         respondJson(res, 200, { ok: true });
+        return;
+      }
+      respondJson(res, 405, { error: "method not allowed" });
+    } catch (e) {
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // ---------- Optimizer policy (BET-1343, READ-ONLY) ----------
+  // GET /api/optimizer/policy?sessionID=&directory= → the resolved policy
+  // (resolvePolicy result) plus `sessionID` echoed back. The route is on the
+  // observe plugin's refresh path, so it must answer in single-digit ms:
+  // `cacheTtlMs` is read from the SHARED memoized optimizer:summary's `ttl`
+  // slice (never re-measured, never a DB query here), config is the in-memory
+  // AppConfig, and the per-repo tuner table is a tiny `optimizer-policy.json`
+  // read through the shared readJsonSync. `directory` (empty allowed) is used
+  // only as the repo-table key. An absent file is the normal case and is
+  // silent (validateRepoTable → {repos:{}}). Nothing writes the table in this
+  // stage. Behind the /api/* Bearer gate (no exemption).
+  if (path === "/api/optimizer/policy") {
+    try {
+      if (req.method === "GET") {
+        const sessionID = url.searchParams.get("sessionID") || "";
+        const directory = url.searchParams.get("directory") || undefined;
+        const summary = await optimizerSummary();
+        const cacheTtlMs = optimizerCacheTtlMs(summary?.ttl ?? null);
+        const repoTable = validateRepoTable(readJsonSync(statePath("optimizer-policy.json"), {}));
+        const config = await local.configGet();
+        const policy = resolvePolicy({ config, repoTable, directory, cacheTtlMs });
+        respondJson(res, 200, { ...policy, sessionID });
         return;
       }
       respondJson(res, 405, { error: "method not allowed" });
