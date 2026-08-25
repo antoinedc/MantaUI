@@ -360,6 +360,13 @@ export function buildHandlers({
   // counterfactual.mjs), created + wired in index.mjs. Null when not wired →
   // the optimizer:summary degrades to empty counterfactual fields.
   counterfactualStore = null,
+  // BET-1336: the quota-window forecast-at-reset read sources. `usageSnapshots`
+  // returns the current usage snapshot set (index.mjs wires usage.mjs
+  // listSnapshots); `usageHistory` returns the observation history (index.mjs
+  // wires usage.mjs getUsageHistory). Null/none when not wired → the summary's
+  // `windows` is empty, matching the pre-P1.4 placeholder.
+  usageSnapshots = () => [],
+  usageHistory = () => ({}),
 }) {
   // The sole resolver for project cwd — no longer mirrored to a desktop-main
   // copy (the src/main/index.ts duplicate was retired in the HTTP-only
@@ -413,7 +420,7 @@ export function buildHandlers({
   // routingServices.mjs. `getDb` is the module-scope handle from
   // opencodeDb.mjs; `counterfactualStore` is injected (BET-1335) so the
   // summary merges the observe-mode counterfactual when one is wired.
-  const optimizerSummary = createOptimizerSummary({ getDb, counterfactualStore });
+  const optimizerSummary = createOptimizerSummary({ getDb, counterfactualStore, usageSnapshots, usageHistory });
 
   return {
     // ---- local channels (config/git/fs/clipboard/transport/tmux-config) ----

@@ -1875,10 +1875,11 @@ export type LedgerSummary = {
 // `dailySeries` day gains a `maskedTokens` (0 where no counterfactual) = the
 // observe-mode "what manta WOULD trim" line; each top-20 `bySession` entry
 // gains `savedPct`; and the `counterfactual` key itself holds the raw store
-// fields. `windows` stays a `null` placeholder child 4 fills. `ttl` stays null
-// in phase 1 — the hotfix (#1339) made the cacheTtl setting WRITE the real
-// opencode TTL, so measurement returns later as its verifier.
-// `supported:false` = the box can't read opencode.db.
+// fields. BET-1336 fills the `windows` placeholder: the quota-window usage
+// list with a per-window `forecastPct` (the forecast-at-reset tick; null when
+// history is too thin). `ttl` stays null in phase 1 — the hotfix (#1339) made
+// the cacheTtl setting WRITE the real opencode TTL, so measurement returns
+// later as its verifier. `supported:false` = the box can't read opencode.db.
 export type OptimizerSummary = {
   supported: boolean;
   windowDays: number;
@@ -1891,7 +1892,14 @@ export type OptimizerSummary = {
     dailySeries: { day: string; maskedTokens: number }[];
     bySession: Record<string, { maskedTokens: number }>;
   } | null;
-  windows: null;
+  windows: {
+    provider: string;
+    planLabel?: string;
+    windowLabel: string;
+    pct: number;
+    resetsAt: number | null;
+    forecastPct: number | null;
+  }[];
 };
 
 // A secret's METADATA — what the UI and `secret_list` see. NEVER carries the

@@ -19,6 +19,7 @@
 
 import { aggregate, aggregateBySession, aggregateDailySeries, fetchLedgerRows } from "../modelLedger.mjs";
 import { summaryFields } from "./counterfactual.mjs";
+import { forecastAtReset } from "./forecast.mjs";
 
 const WINDOW_DAYS = 30;
 const TTL_MS = 60_000;
@@ -36,7 +37,18 @@ export { WINDOW_DAYS };
  * no counterfactual), and by populating the `counterfactual` key itself with
  * the raw store fields.
  */
-export async function buildOptimizerSummary({ fetchRows, now = Date.now(), counterfactualStore = null }) {
+export async function buildOptimizerSummary({
+  fetchRows,
+  now = Date.now(),
+  counterfactualStore = null,
+  // BET-1336: the quota-window forecast-at-reset lives here. Injected, like
+  // fetchRows/counterfactualStore, so the arithmetic stays pure. `usageSnapshots`
+  // returns the CURRENT stored UsageSnapshot[] (production wires usage.mjs
+  // listSnapshots); `usageHistory` returns the observation history
+  // `{[key]: [{ts,pct}]}` (production wires usage.mjs getUsageHistory).
+  usageSnapshots = () => [],
+  usageHistory = () => ({}),
+} = {}) {
   const nowMs = num(now);
   const raw = await fetchRows(nowMs - WINDOW_DAYS * 86_400_000);
   const rows = Array.isArray(raw) ? raw : [];
@@ -62,8 +74,35 @@ export async function buildOptimizerSummary({ fetchRows, now = Date.now(), count
     bySession,
     ttl: null,
     counterfactual: cf ? { dailySeries: cf.dailySeries, bySession: cf.bySession } : null,
-    windows: null,
+    windows: windowsFor(usageSnapshots(), usageHistory(), nowMs),
   };
+}
+
+// Map the current stored usage snapshots to the summary's `windows` slice —
+// one entry per quota window, in the same order the UsageDial popover lists
+// them (each snapshot's `windows` array is already shortest-first, and
+// snapshots are iterated in provider order). `forecastPct` is the forecast-at-
+// reset from history, or null when there isn't enough history to trust it (the
+// UI then hides the tick).
+function windowsFor(snapshots, history, nowMs) {
+  const out = [];
+  for (const snap of snapshots ?? []) {
+    for (const w of snap.windows ?? []) {
+      out.push({
+        provider: snap.provider,
+        planLabel: typeof snap.planLabel === "string" ? snap.planLabel : undefined,
+        windowLabel: w.label,
+        pct: w.pct,
+        resetsAt: Number.isFinite(w.resetsAt) ? w.resetsAt : null,
+        forecastPct: forecastAtReset(history, `${snap.provider}:${w.kind}`, {
+          now: nowMs,
+          resetsAt: Number.isFinite(w.resetsAt) ? w.resetsAt : undefined,
+          currentPct: w.pct,
+        }),
+      });
+    }
+  }
+  return out;
 }
 
 // savedPct = maskedTokens / (maskedTokens + tokensSent), 0 when there is no
@@ -92,7 +131,7 @@ let inflight = null;
  * summary then degrades to empty counterfactual). The returned async
  * function memoizes the built summary for TTL_MS with an in-flight guard.
  */
-export function createOptimizerSummary({ getDb, now, counterfactualStore = null }) {
+export function createOptimizerSummary({ getDb, now, counterfactualStore = null, usageSnapshots, usageHistory }) {
   const nowMs = () => (typeof now === "function" ? num(now()) : num(now ?? Date.now()));
   return async function optimizerSummary() {
     const t = nowMs();
@@ -106,6 +145,8 @@ export function createOptimizerSummary({ getDb, now, counterfactualStore = null 
           fetchRows: (since) => fetchLedgerRows(db, since),
           now: t,
           counterfactualStore,
+          usageSnapshots,
+          usageHistory,
         });
         cache = { at: t, value };
         return value;
