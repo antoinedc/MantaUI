@@ -1877,9 +1877,16 @@ export type LedgerSummary = {
 // gains `savedPct`; and the `counterfactual` key itself holds the raw store
 // fields. BET-1336 fills the `windows` placeholder: the quota-window usage
 // list with a per-window `forecastPct` (the forecast-at-reset tick; null when
-// history is too thin). `ttl` stays null in phase 1 — the hotfix (#1339) made
-// the cacheTtl setting WRITE the real opencode TTL, so measurement returns
-// later as its verifier. `supported:false` = the box can't read opencode.db.
+// history is too thin). `ttl` is the measured effective Anthropic prompt-cache
+// TTL (BET-1340): `measuredMs` is what the ledger shows actually happened,
+// `confidence` is "measured" when enough idle-gap observations exist and
+// "default" otherwise, `observations` is how many pairs the measurement used,
+// and `configuredMs`/`matched` compare it against what opencode is set to
+// send (null when there is no readable configured TTL). The renderer shows the
+// Cache-hit detail ("TTL 5m measured" / "TTL 1h measured" / "TTL 5m default")
+// from `measuredMs` + `confidence` (BET-1341). `ttl` is null only when the
+// summary builder has no measurement at all.
+// `supported:false` = the box can't read opencode.db.
 export type OptimizerSummary = {
   supported: boolean;
   windowDays: number;
@@ -1887,7 +1894,13 @@ export type OptimizerSummary = {
   cacheShare: { output: number; cacheRead: number; cacheWrite: number; input: number };
   dailySeries: { day: string; tokensSent: number; maskedTokens: number }[]; // "YYYY-MM-DD", oldest→newest
   bySession: { sessionID: string | null; turns: number; cost: number; tokensSent: number; savedPct: number }[];
-  ttl: null;
+  ttl: {
+    measuredMs: number;
+    confidence: "default" | "measured";
+    observations: number;
+    configuredMs: number | null;
+    matched: boolean | null;
+  } | null;
   counterfactual: {
     dailySeries: { day: string; maskedTokens: number }[];
     bySession: Record<string, { maskedTokens: number }>;
