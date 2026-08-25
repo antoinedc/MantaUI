@@ -747,6 +747,62 @@ test("startJob routes to the non-deranked sibling when an endpoint is reliabilit
   assert.deepEqual(h.delivered[0].model, { providerID: "openai", modelID: "claude-sonnet-4" });
 });
 
+// BET-1354 — the pacing reader passed via `deps.pacing` reaches
+// buildRoutingServices and actually influences the subagent decision: with the
+// optimizer switch on, an ecoLevel >= 2 forces the effective preset to economy,
+// moving the build agent's TARGET tier from deep (opus-4) down to balanced
+// (sonnet-4) — the floor, which eco may move the target toward but never below.
+// Without a pacing reader (or with the switch off) the subagent routes exactly
+// as today. This is the subagent side of the main-panel routing:choose pacing
+// wiring (BET-1345).
+test("startJob applies optimizer pacing pressure to the subagent decision (BET-1354)", async () => {
+  const liveReaders = () => {
+    const h = startHarness("child_pacing");
+    h.deps.configGet = async () => ({ modelRouting: { preset: "balanced" }, optimizerEnabled: true });
+    h.deps.listSnapshots = () => [];
+    const models = [
+      normalize("anthropic", "claude-opus-4", rawProviderModel({ id: "claude-opus-4", cost: { input: 15, output: 75, cache: { read: 1.5, write: 22.5 } }, capabilities: { reasoning: true, toolcall: true } })),
+      normalize("anthropic", "claude-sonnet-4", rawProviderModel({ id: "claude-sonnet-4", cost: { input: 3, output: 15, cache: { read: 0.3, write: 4.5 } }, capabilities: { reasoning: true, toolcall: true } })),
+      normalize("anthropic", "claude-haiku-4", rawProviderModel({ id: "claude-haiku-4", cost: { input: 1, output: 5, cache: { read: 0.1, write: 1.5 } }, capabilities: { toolcall: true } })),
+    ];
+    h.deps.listModels = async () => models;
+    const cat = (id) => ({ id, family: familyKey(id) });
+    h.deps.catalogIndex = {
+      lookupModel: (id) => cat(id),
+      matchModel: (id) => ({ kind: "exact", candidates: [cat(id)] }),
+      allModels: () => [],
+    };
+    h.deps.providerHealthState = () => "ok";
+    h.deps.endpointSummary = async () => ({ supported: true, endpoints: {} });
+    return h;
+  };
+
+  // No pacing reader: optimizer is on but pressure is absent -> eco 0 -> the
+  // balanced preset stands, build targets "deep" -> opus-4 wins.
+  const noPacing = liveReaders();
+  const balanced = await startJob(
+    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo", subagent_type: "build" },
+    noPacing.deps,
+  );
+  assert.equal(balanced.ok, true);
+  assert.deepEqual(noPacing.delivered[0].model, { providerID: "anthropic", modelID: "claude-opus-4" });
+
+  // With pacing pressure at ecoLevel 2 the effective preset becomes economy ->
+  // build targets "balanced" (its floor) -> sonnet-4 wins. This proves
+  // deps.pacing reached the router and moved the decision, not just that the
+  // builder was called.
+  const withPacing = liveReaders();
+  withPacing.deps.pacing = {
+    pressureFor: async () => ({ lambda: 1, tokensPerPct: 100, deficit: 30, ecoLevel: 2, protection: false }),
+  };
+  const eco = await startJob(
+    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo", subagent_type: "build" },
+    withPacing.deps,
+  );
+  assert.equal(eco.ok, true);
+  assert.deepEqual(withPacing.delivered[0].model, { providerID: "anthropic", modelID: "claude-sonnet-4" });
+});
+
 test("startJob ignores the stale modelRouter key and delivers the incumbent (BET-1227)", async () => {
   const h = startHarness("child_stale_key");
   // The wrong, never-written key must NOT activate routing — a preset under

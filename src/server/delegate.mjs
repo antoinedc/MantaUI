@@ -665,9 +665,9 @@ export function chooseSubagentModel({
  *        PR, `{issue?, pr?}` shape) a forge-triggered delegate carries so the
  *        progress sink addresses the linked issue/PR. Stored on the job record.
  * @param {object} deps injected I/O (load/save/publish/deliver/listProjects/
- *        newWindow/gitAddWorktree/gitRun/oc listMessages/listModels/now;
- *        routingServices/catalogIndex/providerHealthState/endpointSummary for
- *        the router; chooseSubagentModel only as a test seam)
+  *        newWindow/gitAddWorktree/gitRun/oc listMessages/listModels/now;
+  *        routingServices/catalogIndex/providerHealthState/endpointSummary/pacing
+  *        for the router; chooseSubagentModel only as a test seam)
  */
 export async function startJob(input, deps = {}) {
   const { deliver, listModels, configGet = async () => ({}), listSnapshots = () => [] } = deps;
@@ -861,6 +861,7 @@ export async function startJob(input, deps = {}) {
           snapshots: quota,
           providerHealthState: deps.providerHealthState,
           endpointSummary: deps.endpointSummary,
+          pacing: deps.pacing,
         }, nowMs);
       } catch (e) {
         console.error(`[router] routing services degraded, routing on absent context: ${e?.message ?? e}`);
