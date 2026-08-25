@@ -27,6 +27,7 @@ struct UserBand: View {
 
     var body: some View {
         Text(text)
+            .textSelection(.enabled)
             .font(.manta(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
             .foregroundColor(tokens.tx1)
             .lineSpacing(pointsFor(multiplier: 1.5, size: MantaDynamicType.scaled(Metrics.type.body)))
@@ -69,7 +70,7 @@ struct MantaProse: View {
     let tokens: Tokens
 
     var body: some View {
-        MarkdownView(text)
+        MarkdownText(text)
             .font(.manta(size: Metrics.type.body), for: .body)
             .font(.manta(size: Metrics.type.body + 4, weight: .semibold), for: .h1)
             .font(.manta(size: Metrics.type.body + 2, weight: .semibold), for: .h2)
@@ -122,6 +123,7 @@ struct LiveProseTail: View {
 
     var body: some View {
         Text(text)
+            .textSelection(.enabled)
             .font(.system(size: Metrics.type.body))
             .foregroundColor(tokens.tx1)
             .lineSpacing(pointsFor(multiplier: Metrics.type.proseLineHeight, size: Metrics.type.body))
@@ -409,6 +411,7 @@ struct StepRowView: View {
 
             if expanded, let output = step.output {
                 Text(ToolOutputPreview.tail(output))
+                    .textSelection(.enabled)
                     .font(.manta(size: Metrics.type.xs, design: .monospaced))
                     .foregroundColor(tokens.tx3)
                     .fixedSize(horizontal: false, vertical: true)
