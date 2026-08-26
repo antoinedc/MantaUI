@@ -96,7 +96,13 @@ struct ComposerView: View {
     /// the held→locked transition instead of cutting or stacking (BET-1089).
     @Namespace private var composerGlass
 
-    @State private var text = ""
+    /// The composer draft (BET-1353). Promoted from `@State` to a `@Binding`
+    /// so the quote actions — which live on the transcript, in ChatScreen —
+    /// can PREPEND a blockquote to whatever is already here. Storage moved up
+    /// to ChatScreen's single `composerText`; every existing writer of `text`
+    /// inside this view (keyboard `@`/`/`, voice, caret insert, history,
+    /// submit, file select, slash) writes through the binding unchanged.
+    @Binding var text: String
     @State private var attachments: [ComposerAttachment] = []
     @State private var showPhotoPicker = false
     @State private var showDocPicker = false
@@ -110,7 +116,11 @@ struct ComposerView: View {
     @State private var micTranslation: CGSize = .zero
     @State private var hint: String?
     @State private var showHint = false
-    @FocusState private var inputFocused: Bool
+    /// The composer field's focus (BET-1353). Promoted from `@FocusState` to a
+    /// `FocusState.Binding` owned by ChatScreen so the quote actions can focus
+    /// the composer after prepending a blockquote; reading it here stays legal
+    /// (a `FocusState.Binding.wrappedValue` is a live Bool).
+    var inputFocused: FocusState<Bool>.Binding
     @StateObject private var recorder = VoiceRecorder()
     /// The transient composer-state row for a voice take: shown while it
     /// uploads + transcribes, and kept (in place of discarding the recording)
@@ -489,7 +499,7 @@ struct ComposerView: View {
     /// disagree with the keyboard.
     @ViewBuilder
     private var keyboardBarRow: some View {
-        if inputFocused {
+        if inputFocused.wrappedValue {
             HStack(spacing: Metrics.spacing.sp2) {
                 keyboardBarKey("↑", identifier: "kb-up") { historyUp() }
                 keyboardBarKey("↓", identifier: "kb-down") { historyDown() }
@@ -666,7 +676,7 @@ struct ComposerView: View {
                 .frame(minHeight: lineHeight + Metrics.spacing.sp2,
                        maxHeight: lineHeight * 6)
                 .fixedSize(horizontal: false, vertical: true)
-                .focused($inputFocused)
+                .focused(inputFocused)
                 .accessibilityIdentifier("composer-input")
                 // `onGeometryChange` rather than a PreferenceKey +
                 // `onPreferenceChange`: under Swift 6 that pair reports the
@@ -1325,7 +1335,7 @@ struct ComposerView: View {
         // later — long enough for the box to sit stacked and empty after a
         // send, which reads as the composer being stuck.
         withAnimation(.smooth(duration: 0.22)) { isTall = false }
-        inputFocused = true
+        inputFocused.wrappedValue = true
     }
 
     // MARK: - @-file typeahead + / slash palette (BET-749 gap #10)
@@ -1467,7 +1477,7 @@ struct ComposerView: View {
         activeMention = nil
         fileResults = []
         fileSearchTask?.cancel()
-        inputFocused = true
+        inputFocused.wrappedValue = true
     }
 
     /// Perform a `/` palette selection: route to the corresponding existing
@@ -1490,7 +1500,7 @@ struct ComposerView: View {
         activeMention = nil
         fileResults = []
         fileSearchTask?.cancel()
-        inputFocused = true
+        inputFocused.wrappedValue = true
     }
 
     // MARK: - Mic availability (Groq key gate)

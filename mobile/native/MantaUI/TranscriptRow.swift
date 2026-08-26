@@ -141,6 +141,10 @@ final class TranscriptCardActions {
     let onBuildHere: (QuestionRequest, String) -> Void
     let onKeepPlanning: (QuestionRequest, String) -> Void
     let onOpenPage: () -> Void
+    /// Quote a transcript block into a composer destination (BET-1353). Rides
+    /// this same environment value — the fallback selection branch attaches a
+    /// `.contextMenu` to the row and calls this with the whole block's text.
+    let onQuote: (String, QuoteDestination) -> Void
 
     init(
         messages: [OpencodeMessage],
@@ -151,7 +155,8 @@ final class TranscriptCardActions {
         onQuestionReject: @escaping (QuestionRequest) -> Void,
         onBuildHere: @escaping (QuestionRequest, String) -> Void,
         onKeepPlanning: @escaping (QuestionRequest, String) -> Void,
-        onOpenPage: @escaping () -> Void
+        onOpenPage: @escaping () -> Void,
+        onQuote: @escaping (String, QuoteDestination) -> Void
     ) {
         self.messages = messages
         self.buildModelName = buildModelName
@@ -162,6 +167,7 @@ final class TranscriptCardActions {
         self.onBuildHere = onBuildHere
         self.onKeepPlanning = onKeepPlanning
         self.onOpenPage = onOpenPage
+        self.onQuote = onQuote
     }
 }
 
@@ -273,10 +279,27 @@ private struct TranscriptCellReveal: View {
     @MainActor
     @ViewBuilder
     private var cellContent: some View {
-        if case .prose(let text, nil) = item.block {
-            LiveProseTail(text: text, tokens: tokens)
+        let content: some View = {
+            if case .prose(let text, nil) = item.block {
+                LiveProseTail(text: text, tokens: tokens)
+            } else {
+                transcriptBlockView(item.block, tokens: tokens, cards: cardActions, onRetry: onRetry)
+            }
+        }()
+        // BET-1353 — the fallback selection branch. The MarkdownText renderer
+        // exposes no hook into the system edit menu (BET-1352's finding), so
+        // the two quote actions attach as a `.contextMenu` on the row, quoting
+        // the WHOLE block's text (`.user`/`.prose`) rather than a sub-selection.
+        // The callback rides the existing `transcriptCardActions` environment —
+        // no second delivery mechanism. Read-only surfaces (nil actions) and
+        // non-quotable blocks (steps/file/…) get no menu.
+        if let quoteText = item.block.quoteText, let actions = cardActions {
+            content.contextMenu {
+                Button("Quote") { actions.onQuote(quoteText, .thisSession) }
+                Button("Quote in new session") { actions.onQuote(quoteText, .newSession) }
+            }
         } else {
-            transcriptBlockView(item.block, tokens: tokens, cards: cardActions, onRetry: onRetry)
+            content
         }
     }
 }
@@ -304,7 +327,8 @@ func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens, cards: Transc
         onQuestionReject: { _ in },
         onBuildHere: { _, _ in },
         onKeepPlanning: { _, _ in },
-        onOpenPage: {}
+        onOpenPage: {},
+        onQuote: { _, _ in }
     )
     switch block {
     case .user(let text, _):
