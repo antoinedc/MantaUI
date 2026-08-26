@@ -210,6 +210,16 @@ struct SessionRowStatus: Equatable, Sendable {
     var isTerminal: Bool = false
 }
 
+/// Per-window live status for a TERMINAL window, as reported by the box's
+/// tmux activity poller (`src/server/status.mjs`) on `kind: "status"` frames
+/// (BET-1350). Chat-mode windows never populate this — their status comes
+/// from the interpreted stream, and the pane scrape can't see them anyway
+/// (a chat window's pane runs `sleep infinity`, so capture-pane is blank).
+struct WindowPollStatus: Equatable, Sendable {
+    var running: Bool
+    var subagents: Int
+}
+
 enum SessionRowSubtitle {
     /// §7.1a subtitle table — precedence: background jobs, then the working
     /// progress label, then running, then blocked, then (idle) model. The
