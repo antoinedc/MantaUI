@@ -95,8 +95,6 @@ struct SessionListView: View {
             }
             .navigationTitle("Sessions")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackgroundVisibility(.visible, for: .navigationBar)
-            .toolbarBackground(tokens.canvas, for: .navigationBar)
             .mantaNavigationBarBackground(tokens)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -121,7 +119,8 @@ struct SessionListView: View {
                 }
             }
             .refreshable { await store.refresh() }
-            .safeAreaInset(edge: .bottom) { filterAndSearchBar }
+            .safeAreaInset(edge: .bottom) { searchBar }
+            .safeAreaInset(edge: .top) { filterRow }
             .overlay(alignment: .top) { errorBanner }
             .navigationDestination(for: SessionOpenTarget.self) { target in
                 if let sessionId = target.sessionId, !sessionId.isEmpty {
@@ -587,16 +586,9 @@ struct SessionListView: View {
     // single child and is deleted with it: a container whose whole job is to
     // relate two glass shapes is noise once there is only one.
     //
-    // The All/Recent filter row (BET-1349) sits DIRECTLY above the search
-    // field inside the same bottom safe-area inset, sharing its horizontal
-    // padding — one thumb-reachable control cluster with no new surface.
-    private var filterAndSearchBar: some View {
-        VStack(spacing: Metrics.spacing.sp2) {
-            filterRow
-            searchBar
-        }
-    }
-
+    // The All/Recent filter (BET-1349) lives in a pinned strip under the nav
+    // bar (see `filterRow`), not floating over the list — so rows scroll past
+    // it without colliding, and the unselected chip keeps a real pill.
     private var filterRow: some View {
         HStack(spacing: Metrics.spacing.sp2) {
             ModelChip(title: "All", selected: filter == .all, tokens: tokens,
@@ -608,8 +600,15 @@ struct SessionListView: View {
                 filter = .recent
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        // Pinned top strip. The `tokens.canvas` background is what stops list
+        // rows scrolling behind the chips from showing through — do not remove
+        // it as redundant paint; without it the strip is transparent. Pad, then
+        // expand, then paint, so the background covers the padding.
         .padding(.horizontal, Metrics.spacing.sp3)
+        .padding(.top, Metrics.spacing.sp1)
+        .padding(.bottom, Metrics.spacing.sp2)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(tokens.canvas)
     }
 
     private var searchBar: some View {
