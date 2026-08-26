@@ -49,21 +49,26 @@ final class WidgetSchemeHandler: NSObject, WKURLSchemeHandler {
 
     func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
         let box = WidgetSchemeTaskBox(urlSchemeTask)
-        let requestURL = urlSchemeTask.request.url
-            ?? URL(string: "manta-widget://\(webView.tag)")!
-        guard let id = urlSchemeTask.request.url?.host, !id.isEmpty,
-              let server = serverURL,
+        guard let server = serverURL,
+              let requestURL = urlSchemeTask.request.url,
+              let id = requestURL.host, !id.isEmpty,
               let target = Self.widgetURL(server: server, id: id) else {
-            deliver(
-                .failure(MantaError.transport("bad widget request")),
-                url: requestURL,
-                box: box
-            )
+            fail(urlSchemeTask, box: box)
             return
         }
         Task { @MainActor in
             let result = await Self.fetch(target)
             self.deliver(result, url: requestURL, box: box)
+        }
+    }
+
+    /// Fail a malformed scheme request without fabricating a URL (the request
+    /// against the __box__ is what needs the real id; a bad one just errors).
+    private func fail(_ task: WKURLSchemeTask, box: WidgetSchemeTaskBox) {
+        if let url = task.request.url {
+            deliver(.failure(MantaError.transport("bad widget request")), url: url, box: box)
+        } else {
+            box.task.didFailWithError(self.boxed(MantaError.transport("bad widget request")))
         }
     }
 
@@ -144,7 +149,7 @@ final class WidgetWebViewController: UIViewController {
     /// content process dies. Nil on read-only surfaces where nothing should
     /// mutate shared live state.
     let liveStore: WidgetLiveStore?
-    private(set) var webView: WKWebView!
+    private(set) var webView: WKWebView?
     /// Inline (transcript) webviews disable their own scrolling so they never
     /// fight the transcript's pan; the expand sheet is the one place a widget
     /// scrolls, and re-creates its controller with `scrollEnabled = true`.
@@ -184,7 +189,7 @@ final class WidgetWebViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         if let url = URL(string: "manta-widget://\(ref.id)") {
-            webView.load(URLRequest(url: url))
+            webView?.load(URLRequest(url: url))
         }
     }
 

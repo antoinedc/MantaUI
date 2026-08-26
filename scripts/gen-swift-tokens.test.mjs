@@ -43,6 +43,10 @@ const ROOT_VARIABLES = [
   // test fixture.
   ["font-size-chat-title", "14.5px"], ["tracking-chat-title", "-0.01"],
   ["chat-header-btn", "38px"],
+  // Inline embed + widget tokens (widgets epic, BET-1326) — must track
+  // gen-swift-tokens.mjs LAYOUT_MAP so the widened generator's lookups resolve
+  // in the test fixture.
+  ["inline-max-w", "520px"], ["widget-dormant-opacity", "0.5"],
 ];
 
 function cssFor(prefix) {
