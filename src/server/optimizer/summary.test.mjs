@@ -5,7 +5,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildOptimizerSummary, createOptimizerSummary, WINDOW_DAYS, BUILD_BUDGET_MS, _resetSummaryMemo } from "./summary.mjs";
+import { buildOptimizerSummary, createOptimizerSummary, WINDOW_DAYS, BUILD_BUDGET_MS, TTL_MS, _resetSummaryMemo } from "./summary.mjs";
 import { createCounterfactualStore } from "./counterfactual.mjs";
 
 // A promise plus the resolve/reject to settle it on demand — lets tests drive

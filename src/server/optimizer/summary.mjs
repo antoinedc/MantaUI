@@ -33,7 +33,7 @@ const TTL_MS = 60_000;
 // full build). Do not tighten it to chase measured latency.
 const BUILD_BUDGET_MS = 10_000;
 
-export { WINDOW_DAYS, BUILD_BUDGET_MS };
+export { WINDOW_DAYS, BUILD_BUDGET_MS, TTL_MS };
 
 /**
  * PURE. Build the optimizer summary over the last WINDOW_DAYS of ledger rows

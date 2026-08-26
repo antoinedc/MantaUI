@@ -52,7 +52,7 @@ test("BET-1360: getDb issues PRAGMA busy_timeout = 5000 exactly once on open", a
   _resetDbHandle();
   const execCalls = [];
   _setSqliteModuleOverride({
-    DatabaseSync: () => fakeHandle((sql) => execCalls.push(sql)),
+    DatabaseSync: function () { return fakeHandle((sql) => execCalls.push(sql)); },
   });
   process.env.MANTA_OPENCODE_DB = "/fake/db/opencode.db";
   try {
@@ -72,7 +72,7 @@ test("BET-1360: getDb issues PRAGMA busy_timeout = 5000 exactly once on open", a
 test("BET-1360: a failing busy_timeout pragma is non-fatal (handle returned, warns once)", async () => {
   _resetDbHandle();
   _setSqliteModuleOverride({
-    DatabaseSync: () => fakeHandle(() => { throw new Error("pragma boom"); }),
+    DatabaseSync: function () { return fakeHandle(() => { throw new Error("pragma boom"); }); },
   });
   process.env.MANTA_OPENCODE_DB = "/fake/db/opencode.db";
   const warns = [];
