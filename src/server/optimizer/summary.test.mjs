@@ -5,8 +5,16 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildOptimizerSummary, createOptimizerSummary, WINDOW_DAYS, _resetSummaryMemo } from "./summary.mjs";
+import { buildOptimizerSummary, createOptimizerSummary, WINDOW_DAYS, BUILD_BUDGET_MS, TTL_MS, _resetSummaryMemo } from "./summary.mjs";
 import { createCounterfactualStore } from "./counterfactual.mjs";
+
+// A promise plus the resolve/reject to settle it on demand — lets tests drive
+// a never-resolving build deterministically without real sleeps (BET-1360).
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
 
 function row(over = {}) {
   return {
@@ -452,4 +460,131 @@ test("BET-1359: _resetSummaryMemo clears the cache so the next build re-queries"
   const second = await summary();
   assert.equal(prepares, 2, "after reset the next build must re-query");
   assert.notEqual(second, first);
+});
+
+// BET-1360 — bounded build budget. All tests drive time with an injected
+// mutable `now` and inject controllable builds (deferred getDb) so nothing
+// sleeps for real seconds.
+
+test("BET-1360: a wedged build yields {supported:false} within the budget instead of hanging", async () => {
+  _resetSummaryMemo();
+  let t = 1_000_000;
+  const hung = deferred();
+  const summary = createOptimizerSummary({ getDb: () => hung.promise, now: () => t });
+  const first = summary(); // starts an in-flight build at t=1_000_000
+  // Advance the clock past the budget: the caller must resolve, not hang.
+  t = 1_000_000 + BUILD_BUDGET_MS + 1;
+  const result = await withTimeout(summary(), 2000);
+  assert.deepEqual(result, { supported: false });
+  hung.resolve(null); // let the wedged build settle before the test ends
+  await withTimeout(first, 2000);
+});
+
+test("BET-1360: no stampede — concurrent callers never start a second build", async () => {
+  _resetSummaryMemo();
+  let t = 1_000_000;
+  let getDbCalls = 0;
+  const hung = deferred();
+  const summary = createOptimizerSummary({
+    getDb: () => { getDbCalls += 1; return hung.promise; },
+    now: () => t,
+  });
+  const first = summary();
+  t = 1_000_000 + BUILD_BUDGET_MS + 1;
+  const results = await Promise.all(Array.from({ length: 10 }, () => summary()));
+  for (const r of results) assert.deepEqual(r, { supported: false });
+  assert.equal(getDbCalls, 1, "only the first caller may start a build");
+  hung.resolve(null);
+  await withTimeout(first, 2000);
+});
+
+test("BET-1360: self-heal — a build that finishes after the budget still populates the cache", async () => {
+  _resetSummaryMemo();
+  let t = 1_000_000;
+  const nowDate = new Date(2026, 7, 24, 12, 0, 0).getTime();
+  const late = deferred();
+  const summary = createOptimizerSummary({
+    getDb: () => late.promise.then(() => ({ prepare() { return { all: () => [row({ startedMs: nowDate }) ] }; }, close() {} })),
+    now: () => t,
+  });
+  const first = summary();
+  t = 1_000_000 + BUILD_BUDGET_MS + 1;
+  const degraded = await withTimeout(summary(), 2000);
+  assert.deepEqual(degraded, { supported: false });
+  // The slow build finally settles — it populates the cache, it is not a trip.
+  late.resolve();
+  await withTimeout(first, 2000);
+  const healed = await summary();
+  assert.equal(healed.supported, true, "a slow build that settles after the budget is not sticky");
+});
+
+test("BET-1360: no cross-clearing — a stale build never clears a newer in-flight slot", async () => {
+  _resetSummaryMemo();
+  let t = 1_000_000;
+  const firstDb = deferred();
+  const secondDb = deferred();
+  let getDbCalls = 0;
+  const summary = createOptimizerSummary({
+    getDb: () => {
+      getDbCalls += 1;
+      return getDbCalls === 1 ? firstDb.promise : secondDb.promise;
+    },
+    now: () => t,
+  });
+  const a = summary(); // build A, in flight
+  assert.equal(getDbCalls, 1);
+  t = 1_000_000 + BUILD_BUDGET_MS + 1;
+  await summary(); // degraded against A; no second build
+  assert.equal(getDbCalls, 1);
+
+  firstDb.resolve({ prepare() { return { all: () => [] }; }, close() {} }); // A settles, clears itself
+  await withTimeout(a, 2000);
+
+  t = 1_000_000 + BUILD_BUDGET_MS + TTL_MS + 1; // past A's TTL → build B
+  const b = summary();
+  assert.equal(getDbCalls, 2, "B must start after A clears and the cache expires");
+  t = t + BUILD_BUDGET_MS + 1;
+  await summary();
+  await summary();
+  assert.equal(getDbCalls, 2, "no third build may be started while B is in flight");
+  secondDb.resolve({ prepare() { return { all: () => [] }; }, close() {} });
+  await withTimeout(b, 2000);
+});
+
+test("BET-1360: fast path unchanged — normal build memoizes for TTL_MS with one query", async () => {
+  _resetSummaryMemo();
+  let t = 1_000_000;
+  let prepares = 0;
+  const nowDate = new Date(2026, 7, 24, 12, 0, 0).getTime();
+  const summary = createOptimizerSummary({
+    getDb: async () => ({ prepare() { prepares += 1; return { all: () => [row({ startedMs: nowDate }) ] }; }, close() {} }),
+    now: () => t,
+  });
+  const first = await withTimeout(summary(), 2000);
+  assert.equal(first.supported, true);
+  assert.equal(prepares, 1);
+  t += 1; // still inside TTL
+  const second = await summary();
+  assert.equal(second, first, "within TTL the memoized value is returned");
+  assert.equal(prepares, 1, "one query for two calls within the window");
+});
+
+test("BET-1360: a rejecting build degrades to {supported:false} and never caches an error", async () => {
+  _resetSummaryMemo();
+  let t = 1_000_000;
+  const summary = createOptimizerSummary({
+    getDb: async () => { throw new Error("db open boom"); },
+    now: () => t,
+  });
+  const r1 = await withTimeout(summary(), 2000);
+  assert.deepEqual(r1, { supported: false });
+  t += 1;
+  const r2 = await summary();
+  assert.deepEqual(r2, { supported: false });
+  assert.equal(r2.value, undefined, "an error must never be cached");
+});
+
+test("BET-1360: BUILD_BUDGET_MS is exported so tests reference it, not a magic number", () => {
+  assert.equal(typeof BUILD_BUDGET_MS, "number");
+  assert.ok(BUILD_BUDGET_MS > 0);
 });

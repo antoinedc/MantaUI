@@ -25,8 +25,15 @@ import { SUMMARY_ACTIVITY_CAP } from "./activityLog.mjs";
 
 const WINDOW_DAYS = 30;
 const TTL_MS = 60_000;
+// BET-1360: the memo's in-flight build budget. A wedged dependency (a fetch or
+// DB read that never settles) must never block a caller past this, and must
+// never hold the single memo slot forever — callers stop waiting at the budget
+// while the slow build may still finish and populate the cache. Deliberately a
+// source constant, not user-tunable; keep it wide (~16× the observed ~620 ms
+// full build). Do not tighten it to chase measured latency.
+const BUILD_BUDGET_MS = 10_000;
 
-export { WINDOW_DAYS };
+export { WINDOW_DAYS, BUILD_BUDGET_MS, TTL_MS };
 
 /**
  * PURE. Build the optimizer summary over the last WINDOW_DAYS of ledger rows
@@ -227,9 +234,12 @@ function num(v) {
 
 // Memo slot — mirrors the routing-services cache shape (single slot, one ledger
 // on the box, keyed on nothing) with an added in-flight guard so concurrent
-// calls share one build instead of stampeding the DB.
+// calls share one build instead of stampeding the DB. BET-1360 bounds that
+// in-flight slot: `building` carries the startedAt so callers never wait past
+// BUILD_BUDGET_MS, and the `building === b` guard stops a stale build's finally
+// from clearing a newer slot (no cross-clearing).
 let cache = null; // { at, value }
-let inflight = null;
+let building = null; // { startedAt, promise } — the in-flight build, if any
 
 /**
  * I/O. Wrapper factory. `getDb` resolves the read-only opencode.db handle
@@ -242,7 +252,7 @@ let inflight = null;
 // Clears the memo + in-flight slot. Test-only: not part of the runtime API.
 export function _resetSummaryMemo() {
   cache = null;
-  inflight = null;
+  building = null;
 }
 
 export function createOptimizerSummary({ getDb, now, counterfactualStore = null, usageSnapshots, usageHistory, readCacheTtl, activityStore = null, pressureWindows, compactionStat, meteredEndpoints }) {
@@ -250,8 +260,10 @@ export function createOptimizerSummary({ getDb, now, counterfactualStore = null,
   return async function optimizerSummary() {
     const t = nowMs();
     if (cache && t - cache.at < TTL_MS) return cache.value;
-    if (inflight) return inflight;
-    inflight = (async () => {
+    if (building) return raceBudget(building, t);
+
+    const b = { startedAt: t, promise: null };
+    b.promise = (async () => {
       const db = await getDb();
       if (!db) return { supported: false };
       try {
@@ -276,8 +288,30 @@ export function createOptimizerSummary({ getDb, now, counterfactualStore = null,
         return { supported: false };
       }
     })().finally(() => {
-      inflight = null;
+      // Only clear the slot if it is still OURS — a stale build must never
+      // clear a newer one (BET-1360: no cross-clearing).
+      if (building === b) building = null;
     });
-    return inflight;
+    building = b;
+    return raceBudget(b, t);
   };
+}
+
+// Share the in-flight build, but never wait past its budget. A build that
+// blows the budget keeps running (it may still populate the cache and clear
+// its own slot); callers just stop waiting on it (BET-1360).
+function raceBudget(b, t) {
+  const remaining = b.startedAt + BUILD_BUDGET_MS - t;
+  if (remaining <= 0) return Promise.resolve({ supported: false });
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      console.error("[optimizer] summary build exceeded budget; degrading to unsupported");
+      resolve({ supported: false });
+    }, remaining);
+    timer.unref?.();
+    b.promise.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      () => { clearTimeout(timer); resolve({ supported: false }); },
+    );
+  });
 }
