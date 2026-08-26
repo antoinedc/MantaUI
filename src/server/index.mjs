@@ -994,11 +994,13 @@ const optimizerActivity = createActivityLog({
 // with no price is skipped). A metered endpoint has no window and never resets,
 // so there is nothing to fill — the row is deliberately role+price, no gauge.
 // [] when the catalog or pricing is unavailable (the section is then absent).
-async function readMeteredEndpoints() {
+async function readMeteredEndpoints({ windows = [], cacheShare = {} } = {}) {
   try {
-    const summary = await optimizerSummary();
-    const subProviders = new Set((summary?.windows ?? []).map((w) => w.provider));
-    const cs = summary?.cacheShare ?? {};
+    // BET-1359: consume the windows/cacheShare the summary already computed,
+    // instead of re-awaiting optimizerSummary() — reading the summary it is a
+    // dependency of was a self-await deadlock.
+    const subProviders = new Set((windows ?? []).map((w) => w.provider));
+    const cs = cacheShare ?? {};
     const denom = (cs.input ?? 0) + (cs.output ?? 0) + (cs.cacheRead ?? 0) + (cs.cacheWrite ?? 0);
     const mix =
       denom > 0
