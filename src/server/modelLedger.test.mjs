@@ -4,7 +4,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { aggregate, aggregateEndpointStats, aggregateBySession, aggregateDailySeries, endpointSummary } from "./modelLedger.mjs";
+import { aggregate, aggregateEndpointStats, aggregateBySession, aggregateDailySeries, endpointSummary, fetchLedgerRows } from "./modelLedger.mjs";
 import { _resetDbHandle } from "./opencodeDb.mjs";
 
 // Fixture builder. Fill only the fields a test cares about.
@@ -380,6 +380,165 @@ test("endpointSummary reads tool calls from the part table so reliability is mea
       if (prev === undefined) delete process.env.MANTA_OPENCODE_DB;
       else process.env.MANTA_OPENCODE_DB = prev;
       _resetDbHandle();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---- fetchLedgerRows projected-query parity (BET-1358) ----
+//
+// fetchLedgerRows was optimized from "stream full `data` blobs + JSON.parse +
+// role-filter in JS" to a SQL json_extract projection. These DB-backed tests
+// prove the projected rows are the exact same flat SHAPE the old JS-parse path
+// produced (deep-compare on well-formed rows) and that aggregate() totals are
+// byte-identical even with absent/null cost+token fields and missing time —
+// while a non-assistant (and a malformed-JSON) message stays excluded.
+//
+// Reference: the pre-BET-1358 fetchLedgerRows (assistantRows + JSON.parse +
+// role filter + JS shape mapping). Mirrors the removed implementation so the
+// new SQL projection can be compared against "what it used to produce".
+async function legacyFetchLedgerRows(db, sinceMs) {
+  const sql = `
+    SELECT m.id AS msg_id, m.data AS msg_data,
+           s.id AS session_id, s.parent_id AS parent_id,
+           s.agent AS agent, s.directory AS directory
+    FROM message m JOIN session s ON s.id = m.session_id
+    WHERE m.time_created >= ?`;
+  const stmt = db.prepare(sql);
+  const out = [];
+  for (const row of stmt.all(sinceMs)) {
+    let data;
+    try {
+      data = JSON.parse(row.msg_data);
+    } catch {
+      continue;
+    }
+    if (!data || typeof data !== "object" || data.role !== "assistant") continue;
+    const tokens = data.tokens ?? {};
+    const cache = tokens.cache ?? {};
+    out.push({
+      providerID: data.providerID ?? null,
+      modelID: data.modelID ?? null,
+      sessionID: row.session_id != null ? String(row.session_id) : null,
+      agent: row.agent ?? null,
+      parentId: row.parent_id != null ? String(row.parent_id) : null,
+      directory: row.directory ?? null,
+      cost: data.cost,
+      input: tokens.input,
+      output: tokens.output,
+      reasoning: tokens.reasoning,
+      cacheRead: cache.read,
+      cacheWrite: cache.write,
+      startedMs: data.time?.created,
+      completedMs: data.time?.completed,
+    });
+  }
+  return out;
+}
+
+// Open an opencode-shaped read-only DB seeded from raw message `data` strings
+// (so a test can plant genuinely malformed JSON, not just JSON-encoded values).
+function openLedgerFixture(DatabaseSync, dbPath, messages, sessions) {
+  const seed = new DatabaseSync(dbPath);
+  seed.exec(`
+    CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+    CREATE TABLE session (id TEXT, parent_id TEXT, agent TEXT, directory TEXT);
+  `);
+  const insSess = seed.prepare("INSERT INTO session (id, parent_id, agent, directory) VALUES (?,?,?,?)");
+  for (const s of sessions) insSess.run(s.id, s.parentId ?? null, s.agent ?? null, s.directory ?? null);
+  const insMsg = seed.prepare("INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?)");
+  for (const m of messages) insMsg.run(m.id, m.sessionId, m.ts, m.ts, m.data);
+  seed.close();
+  return new DatabaseSync(dbPath, { readOnly: true });
+}
+
+test("fetchLedgerRows projected query deep-compares to the legacy JS-parse shape on well-formed rows (BET-1358)", async (t) => {
+  let DatabaseSync;
+  try {
+    ({ DatabaseSync } = await import("node:sqlite"));
+  } catch {
+    t.skip("node:sqlite unavailable on this runtime");
+    return;
+  }
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "manta-ledger-shape-"));
+  const now = Date.now();
+  const messages = [
+    { id: "a1", sessionId: "s1", ts: now - 5000, data: JSON.stringify({ role: "assistant", providerID: "anthropic", modelID: "claude-sonnet", cost: 0.05, tokens: { input: 100, output: 50, reasoning: 10, cache: { read: 200, write: 300 } }, time: { created: now - 4000, completed: now - 3900 } }) },
+    { id: "a2", sessionId: "s2", ts: now - 3000, data: JSON.stringify({ role: "assistant", providerID: "openai", modelID: "gpt-4o", cost: 0.2, tokens: { input: 500, output: 100, reasoning: 0, cache: { read: 0, write: 0 } }, time: { created: now - 2000, completed: now - 1800 } }) },
+    { id: "u1", sessionId: "s1", ts: now - 2000, data: JSON.stringify({ role: "user", content: "hi" }) },
+    { id: "bad", sessionId: "s1", ts: now - 1000, data: "{not json" },
+  ];
+  const sessions = [
+    { id: "s1", parentId: null, agent: "build", directory: "/w1" },
+    { id: "s2", parentId: "child-of-s1", agent: "build", directory: "/w2" },
+  ];
+  try {
+    const db = openLedgerFixture(DatabaseSync, join(dir, "opencode.db"), messages, sessions);
+    try {
+      const projected = await fetchLedgerRows(db, now - 60_000);
+      const legacy = await legacyFetchLedgerRows(db, now - 60_000);
+      assert.deepEqual(projected, legacy);
+      assert.equal(projected.length, 2);
+    } finally {
+      db.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("fetchLedgerRows: absent/null cost+token fields aggregate to 0 exactly as today; non-assistant and malformed rows excluded (BET-1358)", async (t) => {
+  let DatabaseSync;
+  try {
+    ({ DatabaseSync } = await import("node:sqlite"));
+  } catch {
+    t.skip("node:sqlite unavailable on this runtime");
+    return;
+  }
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "manta-ledger-mixed-"));
+  const now = Date.now();
+  const messages = [
+    // Full row: only this one carries cost and cache.
+    { id: "a1", sessionId: "s1", ts: now - 5000, data: JSON.stringify({ role: "assistant", providerID: "anthropic", modelID: "claude-sonnet", cost: 0.5, tokens: { input: 100, output: 50, reasoning: 10, cache: { read: 200, write: 300 } }, time: { created: now - 4000, completed: now - 3900 } }) },
+    // No cost, no tokens, only a start time (no completion).
+    { id: "a2", sessionId: "s2", ts: now - 4000, data: JSON.stringify({ role: "assistant", providerID: "openai", modelID: "gpt-4o", time: { created: now - 3000 } }) },
+    // No cache object, explicit null cost.
+    { id: "a3", sessionId: "s2", ts: now - 3000, data: JSON.stringify({ role: "assistant", providerID: "anthropic", modelID: "claude-haiku", cost: null, tokens: { input: 7, output: 8 } }) },
+    // Non-assistant message in the window — must be excluded.
+    { id: "u1", sessionId: "s1", ts: now - 2000, data: JSON.stringify({ role: "user", content: "hello" }) },
+    // Malformed JSON — must be skipped, never throw.
+    { id: "bad", sessionId: "s1", ts: now - 1000, data: "{not json" },
+  ];
+  const sessions = [
+    { id: "s1", parentId: null, agent: "build", directory: "/w1" },
+    { id: "s2", parentId: null, agent: "build", directory: "/w2" },
+  ];
+  try {
+    const db = openLedgerFixture(DatabaseSync, join(dir, "opencode.db"), messages, sessions);
+    try {
+      const projected = await fetchLedgerRows(db, now - 60_000);
+      const legacy = await legacyFetchLedgerRows(db, now - 60_000);
+      assert.equal(projected.length, 3);
+      assert.equal(legacy.length, 3);
+      // Both implementations must fold to byte-identical aggregate totals
+      // (absent/null cost+token leaves become 0 via num(), as they always did).
+      assert.deepEqual(aggregate(projected), aggregate(legacy));
+      const totals = aggregate(projected).totals;
+      assert.equal(totals.turns, 3);
+      assert.equal(totals.cost, 0.5);
+      assert.equal(totals.input, 107); // 100 + 0 + 7
+      assert.equal(totals.output, 58); // 50 + 0 + 8
+      assert.equal(totals.cacheRead, 200);
+      assert.equal(totals.cacheWrite, 300);
+    } finally {
+      db.close();
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });

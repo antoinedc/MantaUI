@@ -292,33 +292,64 @@ function tokensSent(row) {
 
 /**
  * I/O. The ONE ledger row query. Extracts the flat ledger row shape (the
- * `aggregate`/aggregate* fold inputs) from assistant messages over `sinceMs`,
- * via the shared SQL in `assistantRows`. Both `ledgerSummary` and the
- * optimizer summary consume this — a single query path, no duplicated SQL.
- * Returns the parsed, role-filtered flat rows. Never throws on a malformed
- * row (those are skipped); query/parse scaffolding lives in the callers.
+ * `aggregate`/aggregate* fold inputs) from assistant messages over `sinceMs`.
+ * Projected query: the role filter + JSON parsing run in SQLite via
+ * `json_extract`, so the SELECT streams only the fields the flat shape needs
+ * instead of the full `data` blob (which kept `assistantRows`'s parse+filter
+ * at ~3 s on a cold 30-day read). Returns the role-filtered flat rows, mapped
+ * into the exact same shape the old JS-parse path produced (same field names,
+ * same typing) so `aggregate`, `aggregateBySession`, `aggregateDailySeries`,
+ * `measureEffectiveTtl` and the routing fold consume them unchanged.
+ *
+ * `assistantRows` is deliberately NOT used here (it stays for
+ * `aggregateEndpointStats`, which needs the raw `data` blob + the `part` join
+ * for tool reliability). Degradation matches the old path: a row whose `data`
+ * is malformed JSON or lacks `role === "assistant"` is skipped silently. The
+ * `json_valid(m.data)` guard filters malformed rows out BEFORE `json_extract`
+ * runs (json_extract throws on invalid JSON rather than returning NULL, so the
+ * guard is what keeps a single bad row from failing the whole query); rows
+ * that are valid JSON but not an assistant message are excluded by the
+ * `= 'assistant'` predicate. Never throws. Query/parse scaffolding lives in
+ * the callers.
  */
 export async function fetchLedgerRows(db, sinceMs) {
   const since = num(sinceMs);
+  const sql = `
+    SELECT m.id AS msg_id,
+           s.id AS session_id,
+           s.parent_id AS parent_id, s.agent AS agent, s.directory AS directory,
+           json_extract(m.data,'$.providerID')           AS providerID,
+           json_extract(m.data,'$.modelID')              AS modelID,
+           json_extract(m.data,'$.cost')                 AS cost,
+           json_extract(m.data,'$.tokens.input')         AS input,
+           json_extract(m.data,'$.tokens.output')        AS output,
+           json_extract(m.data,'$.tokens.reasoning')     AS reasoning,
+           json_extract(m.data,'$.tokens.cache.read')    AS cacheRead,
+           json_extract(m.data,'$.tokens.cache.write')   AS cacheWrite,
+           json_extract(m.data,'$.time.created')         AS startedMs,
+           json_extract(m.data,'$.time.completed')       AS completedMs
+    FROM message m JOIN session s ON s.id = m.session_id
+    WHERE m.time_created >= ?
+      AND json_valid(m.data) = 1
+      AND json_extract(m.data,'$.role') = 'assistant'`;
+  const stmt = db.prepare(sql);
   const rows = [];
-  for (const { data, sessionId, parentId, agent, directory } of await assistantRows(db, since)) {
-    const tokens = data.tokens ?? {};
-    const cache = tokens.cache ?? {};
+  for (const row of stmt.all(since)) {
     rows.push({
-      providerID: data.providerID ?? null,
-      modelID: data.modelID ?? null,
-      sessionID: sessionId,
-      agent,
-      parentId,
-      directory,
-      cost: data.cost,
-      input: tokens.input,
-      output: tokens.output,
-      reasoning: tokens.reasoning,
-      cacheRead: cache.read,
-      cacheWrite: cache.write,
-      startedMs: data.time?.created,
-      completedMs: data.time?.completed,
+      providerID: row.providerID ?? null,
+      modelID: row.modelID ?? null,
+      sessionID: row.session_id != null ? String(row.session_id) : null,
+      agent: row.agent ?? null,
+      parentId: row.parent_id != null ? String(row.parent_id) : null,
+      directory: row.directory ?? null,
+      cost: row.cost,
+      input: row.input,
+      output: row.output,
+      reasoning: row.reasoning,
+      cacheRead: row.cacheRead,
+      cacheWrite: row.cacheWrite,
+      startedMs: row.startedMs,
+      completedMs: row.completedMs,
     });
   }
   return rows;
