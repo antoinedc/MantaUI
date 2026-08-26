@@ -5,7 +5,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildOptimizerSummary, createOptimizerSummary, WINDOW_DAYS } from "./summary.mjs";
+import { buildOptimizerSummary, createOptimizerSummary, WINDOW_DAYS, _resetSummaryMemo } from "./summary.mjs";
 import { createCounterfactualStore } from "./counterfactual.mjs";
 
 function row(over = {}) {
@@ -306,4 +306,150 @@ test("buildOptimizerSummary: activity slice surfaces the store's newest entries,
   const withStore = await buildOptimizerSummary({ fetchRows, now, activityStore });
   assert.equal(withStore.activity.entries.length, 1);
   assert.equal(withStore.activity.entries[0].kind, "tune");
+});
+
+// Races `promise` against a short timer so a deadlock fails the suite instead
+// of hanging CI. BET-1359: the old self-await wiring never settled.
+function withTimeout(promise, ms) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`BET-1359: expected resolution within ${ms}ms, hung`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+test("BET-1359: meteredEndpoints that reads its injected ctx resolves (no self-await deadlock)", async () => {
+  _resetSummaryMemo();
+  const now = new Date(2026, 7, 24, 12, 0, 0).getTime();
+  let received = null;
+  const summary = createOptimizerSummary({
+    getDb: async () => ({ prepare() { return { all: () => [row({ startedMs: now }) ] }; }, close() {} }),
+    now: () => 3_000_000,
+    meteredEndpoints: async (ctx) => {
+      received = ctx;
+      return [{ name: "openai · gpt-4o", role: "pay-per-token endpoint", price: "$5.00 / Mtok blended" }];
+    },
+  });
+
+  const s = await withTimeout(summary(), 2000);
+  assert.equal(s.supported, true);
+  assert.equal(s.metered.length, 1);
+  assert.ok(received, "meteredEndpoints must have been invoked with the context");
+});
+
+test("BET-1359: meteredEndpoints is handed a ctx object, never the summary function", async () => {
+  _resetSummaryMemo();
+  const now = new Date(2026, 7, 24, 12, 0, 0).getTime();
+  let arg = "unset";
+  const summary = createOptimizerSummary({
+    getDb: async () => ({ prepare() { return { all: () => [row({ startedMs: now }) ] }; }, close() {} }),
+    now: () => 4_000_000,
+    meteredEndpoints: async (ctx) => {
+      arg = ctx;
+      return [];
+    },
+  });
+
+  const s = await summary();
+  assert.equal(s.supported, true);
+  assert.equal(typeof arg, "object");
+  assert.ok(Array.isArray(arg.windows), "ctx must carry a windows array");
+  assert.ok(typeof arg.cacheShare === "object" && arg.cacheShare !== null, "ctx must carry a cacheShare object");
+  assert.notEqual(arg, summary, "meteredEndpoints must never receive the summary function");
+  assert.notEqual(arg, s, "meteredEndpoints must never receive the whole summary");
+});
+
+test("BET-1359: meteredEndpoints receives the SAME windows + cacheShare the summary returns", async () => {
+  _resetSummaryMemo();
+  const now = new Date(2026, 7, 24, 12, 0, 0).getTime();
+  const H = 3_600_000;
+  const snapshots = [
+    {
+      provider: "claude",
+      planLabel: "Max 20x",
+      fetchedAt: now,
+      windows: [{ kind: "session", label: "5h", pct: 30, resetsAt: now + 50 * H }],
+    },
+  ];
+  const rows = [row({ cost: 5, input: 1, cacheRead: 2, cacheWrite: 3, output: 4, startedMs: now })];
+  let ctx = null;
+  const summary = createOptimizerSummary({
+    getDb: async () => ({ prepare() { return { all: () => rows }; }, close() {} }),
+    now: () => now,
+    usageSnapshots: () => snapshots,
+    usageHistory: () => ({}),
+    meteredEndpoints: async (c) => {
+      ctx = c;
+      return [];
+    },
+  });
+
+  const s = await summary();
+  assert.equal(s.supported, true);
+  assert.ok(ctx, "meteredEndpoints must have been invoked");
+  // The context is the very objects the summary returns — plumbing, not a copy.
+  assert.equal(ctx.windows, s.windows);
+  assert.equal(ctx.cacheShare, s.cacheShare);
+  // Sanity: the context genuinely carries the known window + cacheShare.
+  assert.equal(s.windows.length, 1);
+  assert.equal(s.windows[0].provider, "claude");
+  assert.deepEqual(ctx.windows, s.windows);
+  assert.deepEqual(ctx.cacheShare, s.cacheShare);
+});
+
+test("BET-1359: metered row lands in summary.metered", async () => {
+  _resetSummaryMemo();
+  const now = new Date(2026, 7, 24, 12, 0, 0).getTime();
+  const s = await buildOptimizerSummary({
+    fetchRows: async () => [row({ startedMs: now })],
+    now,
+    meteredEndpoints: async () => [{ name: "openai · gpt-4o", role: "pay-per-token endpoint", price: "$5.00 / Mtok blended" }],
+  });
+  assert.equal(s.metered.length, 1);
+  assert.equal(s.metered[0].name, "openai · gpt-4o");
+});
+
+test("BET-1359: metered degradation unchanged (throw / non-array / not-a-function → [])", async () => {
+  _resetSummaryMemo();
+  const now = new Date(2026, 7, 24, 12, 0, 0).getTime();
+  const fetchRows = async () => [row({ startedMs: now })];
+
+  const throwing = await buildOptimizerSummary({
+    fetchRows,
+    now,
+    meteredEndpoints: async () => {
+      throw new Error("boom");
+    },
+  });
+  assert.deepEqual(throwing.metered, []);
+
+  const nonArray = await buildOptimizerSummary({ fetchRows, now, meteredEndpoints: async () => ({ not: "array" }) });
+  assert.deepEqual(nonArray.metered, []);
+
+  const notFn = await buildOptimizerSummary({ fetchRows, now, meteredEndpoints: "not-a-function" });
+  assert.deepEqual(notFn.metered, []);
+});
+
+test("BET-1359: _resetSummaryMemo clears the cache so the next build re-queries", async () => {
+  _resetSummaryMemo();
+  let prepares = 0;
+  const stubDb = {
+    prepare() {
+      prepares += 1;
+      return { all: () => [] };
+    },
+    close() {},
+  };
+  const summary = createOptimizerSummary({ getDb: async () => stubDb, now: () => 9_000_000 });
+
+  const first = await summary();
+  assert.equal(prepares, 1);
+  // Within TTL → memoized, no re-query.
+  await summary();
+  assert.equal(prepares, 1);
+
+  _resetSummaryMemo();
+  const second = await summary();
+  assert.equal(prepares, 2, "after reset the next build must re-query");
+  assert.notEqual(second, first);
 });

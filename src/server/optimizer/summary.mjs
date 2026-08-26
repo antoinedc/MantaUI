@@ -117,6 +117,8 @@ export async function buildOptimizerSummary({
     matched: verification ? verification.matched : null,
   };
 
+  const windows = windowsFor(usageSnapshots(), usageHistory(), nowMs, await pressureWindows());
+
   return {
     supported: true,
     windowDays: WINDOW_DAYS,
@@ -126,10 +128,10 @@ export async function buildOptimizerSummary({
     bySession,
     ttl,
     counterfactual: cf ? { dailySeries: cf.dailySeries, bySession: cf.bySession } : null,
-    windows: windowsFor(usageSnapshots(), usageHistory(), nowMs, await pressureWindows()),
+    windows,
     activity: await activityFor(activityStore),
     compaction: await compactionFor(compactionStat),
-    metered: await meteredFor(meteredEndpoints),
+    metered: await meteredFor(meteredEndpoints, { windows, cacheShare }),
   };
 }
 
@@ -147,11 +149,14 @@ async function compactionFor(compactionStat) {
 }
 
 // The metered-endpoints row, or [] when none are wired (the section is then
-// absent — "never render a control whose backing data isn't there").
-async function meteredFor(meteredEndpoints) {
+// absent — "never render a control whose backing data isn't there"). `ctx`
+// carries the context the summary already computed (`{ windows, cacheShare }`)
+// so the metered-read does NOT re-await the summary it is a dependency of
+// (BET-1359: that re-entry was a self-await deadlock).
+async function meteredFor(meteredEndpoints, ctx) {
   if (typeof meteredEndpoints !== "function") return [];
   try {
-    const m = await meteredEndpoints();
+    const m = await meteredEndpoints(ctx);
     return Array.isArray(m) ? m : [];
   } catch {
     return [];
@@ -234,6 +239,12 @@ let inflight = null;
  * summary then degrades to empty counterfactual). The returned async
  * function memoizes the built summary for TTL_MS with an in-flight guard.
  */
+// Clears the memo + in-flight slot. Test-only: not part of the runtime API.
+export function _resetSummaryMemo() {
+  cache = null;
+  inflight = null;
+}
+
 export function createOptimizerSummary({ getDb, now, counterfactualStore = null, usageSnapshots, usageHistory, readCacheTtl, activityStore = null, pressureWindows, compactionStat, meteredEndpoints }) {
   const nowMs = () => (typeof now === "function" ? num(now()) : num(now ?? Date.now()));
   return async function optimizerSummary() {
