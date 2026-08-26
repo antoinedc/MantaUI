@@ -144,6 +144,11 @@ final class ChatSessionStore: ObservableObject {
     /// `buildVoiceNoteMap`, so a dictated note renders its player bubble in the
     /// transcript under the message it became (BET-1029).
     @Published private(set) var voiceNotes: [VoiceNote] = []
+    /// The widget refs announced on the bus for THIS session, merged into the
+    /// transcript as `.file(.widget(...))` attachments (BET-1326). Mirrors the
+    /// voice-notes side channel: refs come out-of-band, claimed onto the
+    /// message that produced each widget.
+    @Published private(set) var widgets: [WidgetRef] = []
     /// The LAST fetched raw transcript (`opencode:messages`), kept alongside the
     /// rendered `transcript` blocks so the plan card can run its exact
     /// derivation (`isPlanExitQuestion` / `extractPlanData` need the raw tool
@@ -219,6 +224,10 @@ final class ChatSessionStore: ObservableObject {
 
     private let api: MantaAPIClient
     private let eventStore: MantaEventStore
+    /// The box-wide live store this session's widgets are read from (nil on a
+    /// read-only surface, where no widget is ever live). Kept so the session
+    /// can sink on its own widget announcements (BET-1326).
+    private let widgetLiveStore: WidgetLiveStore?
     private var cancellables: Set<AnyCancellable> = []
     private var runningSince: Date?
     /// Stable id for the streaming `.prose` tail, fixed for the life of one
@@ -311,11 +320,13 @@ final class ChatSessionStore: ObservableObject {
         sessionId: String,
         eventStore: MantaEventStore,
         api: MantaAPIClient,
+        widgetLiveStore: WidgetLiveStore? = nil,
         isReadOnly: Bool = false
     ) {
         self.sessionId = sessionId
         self.eventStore = eventStore
         self.api = api
+        self.widgetLiveStore = widgetLiveStore
         self.isReadOnly = isReadOnly
 
         // Per-session subscription (BET-672): sink on THIS session's state
@@ -344,6 +355,18 @@ final class ChatSessionStore: ObservableObject {
             .removeDuplicates()
             .sink { [weak self] d in self?.degraded = d }
             .store(in: &cancellables)
+
+        // A new widget announced for this session (route through the box-wide
+        // store) re-merges the transcript. The store's `$widgets` replays its
+        // current value on subscribe, so an open session picks up widgets that
+        // arrived before it was created.
+        if let widgetLiveStore {
+            widgetLiveStore.$widgets
+                .receive(on: DispatchQueue.main)
+                .removeDuplicates()
+                .sink { [weak self] _ in self?.refreshWidgets() }
+                .store(in: &cancellables)
+        }
     }
 
     // MARK: - Lifecycle
@@ -805,7 +828,7 @@ final class ChatSessionStore: ObservableObject {
                     // (self.messages), not the shadowed local.
                     self.messages = loaded
                     voiceNoteMap = ChatTranscriptMapper.buildVoiceNoteMap(messages: loaded, notes: voiceNotes)
-                    transcript = ChatTranscriptMapper.blocks(from: loaded, voiceNotes: voiceNotes)
+                    transcript = ChatTranscriptMapper.blocks(from: loaded, voiceNotes: voiceNotes, widgets: widgets)
                     // The transcript now carries these messages, so any live
                     // copy of them is a duplicate — retire it BEFORE rebuilding
                     // or the finished answer renders twice, once from each
@@ -852,7 +875,7 @@ final class ChatSessionStore: ObservableObject {
     func refreshVoiceNotes() async {
         let notes = (try? await api.voiceNotes(sessionId: sessionId)) ?? []
         await MainActor.run {
-            let remapped = ChatTranscriptMapper.blocks(from: messages, voiceNotes: notes)
+            let remapped = ChatTranscriptMapper.blocks(from: messages, voiceNotes: notes, widgets: widgets)
             voiceNotes = notes
             voiceNoteMap = ChatTranscriptMapper.buildVoiceNoteMap(messages: messages, notes: notes)
             // Defensive, mirrors BET-1125's fetch guard: never let a voice-notes
@@ -867,6 +890,22 @@ final class ChatSessionStore: ObservableObject {
             }
             rebuildBlocks()
         }
+    }
+
+    // MARK: - Widgets (BET-1326)
+
+    /// Fold the box-wide store's announced widgets for THIS session into the
+    /// transcript as `.file(.widget(...))` blocks. Called when the store's
+    /// widgets change; the same no-blank-clobber guard as voice notes.
+    func refreshWidgets() {
+        let sessionWidgets = widgetLiveStore?.widgets.values.filter { $0.sessionId == sessionId } ?? []
+        guard sessionWidgets != widgets else { return }
+        widgets = sessionWidgets
+        let remapped = ChatTranscriptMapper.blocks(from: messages, voiceNotes: voiceNotes, widgets: widgets)
+        if !(remapped.isEmpty && !transcript.isEmpty) {
+            transcript = remapped
+        }
+        rebuildBlocks()
     }
 
     // MARK: - Answers (wire from the phone, S1a)

@@ -816,12 +816,18 @@ enum TranscriptBlock: Equatable {
 }
 
 /// A file/attachment reference carried by a `.file` transcript block. Only the
-/// `.voiceNote` flavour renders today; image and generic-file rendering are
-/// deliberately not implemented yet (BET-1029) — a file part that is not a
-/// voice note renders nothing, exactly as it did before.
+/// `.voiceNote` and `.widget` flavours render today; image and generic-file
+/// rendering are deliberately not implemented yet (BET-1029) — a file part
+/// that is not one of those renders nothing, exactly as it did before.
 struct TranscriptAttachment: Equatable {
     enum Kinds: Equatable {
         case voiceNote(VoiceNote)
+        /// A referenced, rendered-inline widget (BET-1326). A widget is an
+        /// artifact referenced by the transcript, which is exactly what `.file`
+        /// means — deliberately NOT a new `TranscriptBlock` case (a new case
+        /// would fork the row-identity logic). Its `WidgetRef.id` is the
+        /// deterministic row identity.
+        case widget(WidgetRef)
     }
     let kind: Kinds
 }

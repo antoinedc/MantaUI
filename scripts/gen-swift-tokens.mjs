@@ -108,6 +108,10 @@ const LAYOUT_MAP = {
   listRowMinH: "list-row-min-h", listRowRadius: "list-row-radius",
   listRowMargin: "list-row-margin",
   listGroupAbove: "list-group-above", listGroupBelow: "list-group-below",
+  // Inline embed width cap + dormant opacity (widgets epic). Cross-consumer:
+  // the reading-width cap bounds inline media/widgets; the opacity dims a
+  // dormant widget's captured snapshot on BOTH clients identically.
+  inlineMaxW: "inline-max-w", widgetDormantOpacity: "widget-dormant-opacity",
 };
 
 // CSS allows a leading-dot decimal (".035"); Swift requires a leading zero
