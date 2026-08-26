@@ -75,6 +75,10 @@ extension TranscriptBlock {
 private func attachmentIdentity(_ attachment: TranscriptAttachment) -> String {
     switch attachment.kind {
     case .voiceNote(let note): return "voice:\(note.id)"
+    // The widget's OWN id from the bus event — the deterministic, reproducible
+    // row identity (never an index, never a render-time UUID). A refetch of the
+    // same window re-derives the same id, so TiledView updates the row in place.
+    case .widget(let ref): return "widget:\(ref.id)"
     }
 }
 
@@ -420,9 +424,13 @@ func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens, cards: Transc
     }
 }
 
-/// Render a `.file` attachment block. ONLY the voice-note flavour renders — an
-/// image or generic-file part is deliberately NOT implemented yet (BET-1029);
-/// it would return nothing here, exactly as it did before this case existed.
+/// Render a `.file` attachment block. ONLY the voice-note and widget flavours
+/// render — an image or generic-file part is deliberately NOT implemented yet
+/// (BET-1029); it would return nothing here, exactly as it did before this
+/// case existed. The widget store comes through the SwiftUI environment (a
+/// `@MainActor` reference type, like `transcriptCardActions`), so a read-only
+/// surface (subagent drill-in, capture fixture) leaves it unset and a widget
+/// renders its inert placeholder with no live wiring.
 @ViewBuilder
 private func attachmentView(_ attachment: TranscriptAttachment, tokens: Tokens) -> some View {
     switch attachment.kind {
@@ -430,6 +438,10 @@ private func attachmentView(_ attachment: TranscriptAttachment, tokens: Tokens) 
         VoiceNotePlayerRow(note: note, tokens: tokens)
             .padding(.horizontal, Metrics.spacing.sp3)
             .padding(.bottom, Metrics.spacing.sp4)
+    case .widget(let ref):
+        WidgetCardView(ref: ref, tokens: tokens)
+            .padding(.horizontal, Metrics.spacing.sp3)
+            .padding(.bottom, Metrics.spacing.sp3)
     }
 }
 

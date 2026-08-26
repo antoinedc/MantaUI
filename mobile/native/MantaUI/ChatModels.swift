@@ -261,7 +261,18 @@ enum ChatTranscriptMapper {
     }
 
     static func blocks(from messages: [OpencodeMessage], voiceNotes: [VoiceNote]) -> [TranscriptBlock] {
+        blocks(from: messages, voiceNotes: voiceNotes, widgets: [])
+    }
+
+    /// Map the canonical transcript onto blocks, then merge the two
+    /// side-channel collections the box announces on the bus — voice notes
+    /// (BET-1029) and widgets (BET-1326). Both arrive out-of-band and are
+    /// claimed onto the message that produced them, so a widget renders as a
+    /// `.file` attachment right where its turn landed without inventing any
+    /// new row identity.
+    static func blocks(from messages: [OpencodeMessage], voiceNotes: [VoiceNote], widgets: [WidgetRef]) -> [TranscriptBlock] {
         let voiceMap = buildVoiceNoteMap(messages: messages, notes: voiceNotes)
+        let widgetMap = buildWidgetMap(widgets)
         var blocks: [TranscriptBlock] = []
         var pending: [StepGroupRow] = []
 
@@ -280,6 +291,7 @@ enum ChatTranscriptMapper {
                     if let note = voiceMap[msg.info.id] {
                         blocks.append(.file(TranscriptAttachment(kind: .voiceNote(note))))
                     }
+                    appendWidgets(widgetMap[msg.info.id], into: &blocks)
                 }
             case "assistant":
                 // An assistant message still streaming (time.completed == nil)
@@ -293,12 +305,35 @@ enum ChatTranscriptMapper {
                     process(part, index: index, at: at, pending: &pending, blocks: &blocks)
                 }
                 flush(&pending, into: &blocks)
+                // A turn's widgets follow its steps/prose: the model rendered
+                // them as part of that assistant message.
+                appendWidgets(widgetMap[msg.info.id], into: &blocks)
             default:
                 break
             }
         }
         flush(&pending, into: &blocks)
         return blocks
+    }
+
+    /// messageId → widgets claimed onto that message. A widget whose message is
+    /// outside the loaded window (or missing) is dropped, exactly like a voice
+    /// note that matches nothing — it carries no id-based claim of its own.
+    static func buildWidgetMap(_ widgets: [WidgetRef]) -> [String: [WidgetRef]] {
+        var map: [String: [WidgetRef]] = [:]
+        for w in widgets {
+            if let mid = w.messageId, !mid.isEmpty {
+                map[mid, default: []].append(w)
+            }
+        }
+        return map
+    }
+
+    private static func appendWidgets(_ widgets: [WidgetRef]?, into blocks: inout [TranscriptBlock]) {
+        guard let widgets, !widgets.isEmpty else { return }
+        for w in widgets {
+            blocks.append(.file(TranscriptAttachment(kind: .widget(w))))
+        }
     }
 
     /// Append the still-running LIVE tools AND live subagents (streamed mid-turn

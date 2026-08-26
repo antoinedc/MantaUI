@@ -30,6 +30,9 @@ struct MantaUIApp: App {
         let event = MantaEventStore()
         _store = StateObject(wrappedValue: event)
         _sessionStore = StateObject(wrappedValue: SessionListStore(eventStore: event))
+        // The box-wide widget live store consumes `kind: "widget"` frames off
+        // the same /events stream (registered once, idempotently).
+        WidgetLiveStore.shared.bind(eventStore: event)
     }
 
     var body: some Scene {

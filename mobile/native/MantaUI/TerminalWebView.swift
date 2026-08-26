@@ -548,12 +548,6 @@ extension TerminalContainerController: WKScriptMessageHandler, WKNavigationDeleg
         webViewDidFinish(webView)
     }
 
-    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
-                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        if let url = navigationAction.request.url { UIApplication.shared.open(url) }
-        return nil
-    }
-
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
         true

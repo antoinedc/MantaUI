@@ -242,7 +242,8 @@ private struct ChatScreenContent: View {
         _store = StateObject(wrappedValue: ChatSessionStore(
             sessionId: sessionId,
             eventStore: eventStore,
-            api: api
+            api: api,
+            widgetLiveStore: WidgetLiveStore.shared
         ))
         _modelStore = StateObject(wrappedValue: ChatModelStore(sessionId: sessionId, api: api))
         _settingsStore = StateObject(wrappedValue: MantaSettingsStore())
@@ -809,6 +810,9 @@ private struct ChatScreenContent: View {
         // Deliver the blocking-card actions to the transcript cells via the
         // SwiftUI environment (BET-1214). The subagent drill-in keeps `nil`.
         .environment(\.transcriptCardActions, cardActions)
+        // Deliver the box-wide widget live store to widget cards so liveness
+        // can ride on the store rather than the cell (BET-1326).
+        .environment(\.widgetLiveStore, WidgetLiveStore.shared)
     }
     /// How far above the bottom the user must scroll for the down-arrow to
     /// appear. Same magnitude MessagingUI uses internally for its own "near
