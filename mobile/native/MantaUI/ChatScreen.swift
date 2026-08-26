@@ -109,6 +109,9 @@ struct ChatScreen: View {
     @ObservedObject var eventStore: MantaEventStore
     @Binding var path: NavigationPath
     @State private var currentSessionId: String?
+    /// "Quote in new session" composer seed, forwarded to the content screen
+    /// (BET-1353). Empty for every normal open.
+    let seed: String?
 
     var body: some View {
         let sid = currentSessionId ?? sessionId
@@ -118,7 +121,8 @@ struct ChatScreen: View {
             projectName: projectName,
             eventStore: eventStore,
             path: $path,
-            onCleared: { newId in currentSessionId = newId }
+            onCleared: { newId in currentSessionId = newId },
+            seed: seed ?? ""
         )
         .id(sid)
     }
@@ -203,6 +207,17 @@ private struct ChatScreenContent: View {
     /// above the glass box and must stay undimmed).
     @State private var composerGlassHeight: CGFloat = 0
 
+    /// The composer draft, owned HERE so quote actions (which live on the
+    /// transcript, outside ComposerView) can prepend to it, and passed down to
+    /// ComposerView as a binding (BET-1353). Seeded from `seed` when this
+    /// screen opens a "quote in new session" fork.
+    @State private var composerText = ""
+
+    /// Focus for the composer field. Lifter to this level (from ComposerView's
+    /// internal `@FocusState`) so a quote action can focus the composer after
+    /// prepending (BET-1353).
+    @FocusState private var composerFocused: Bool
+
     /// How far the under-composer scrim reaches past the safe area, so content
     /// scrolling into the home-indicator strip stays dimmed too.
     private static let scrimOverhang: CGFloat = 44
@@ -213,12 +228,15 @@ private struct ChatScreenContent: View {
     /// stores and used by the plan card to build the deterministic plan-page URL.
     private let api: MantaAPIClient
 
-    init(sessionId: String, title: String, projectName: String, eventStore: MantaEventStore, path: Binding<NavigationPath>, onCleared: @escaping (String) -> Void) {
+    init(sessionId: String, title: String, projectName: String, eventStore: MantaEventStore, path: Binding<NavigationPath>, onCleared: @escaping (String) -> Void, seed: String = "") {
         self.title = title
         self.projectName = projectName
         self.eventStore = eventStore
         self._path = path
         self.onCleared = onCleared
+        // Seed the composer draft for a "quote in new session" fork (BET-1353);
+        // empty for every normal open, which leaves the draft empty.
+        _composerText = State(initialValue: seed)
         let api = MantaAPIClient.live()
         self.api = api
         _store = StateObject(wrappedValue: ChatSessionStore(
@@ -441,7 +459,9 @@ private struct ChatScreenContent: View {
                         onSlashClear: { Task { await clearSession() } },
                         onSlashFork: { Task { await forkSession() } },
                         historyTmuxSession: sessionWindow?.name,
-                        historyWindowIndex: sessionWindow?.index
+                        historyWindowIndex: sessionWindow?.index,
+                        text: $composerText,
+                        inputFocused: $composerFocused
                     )
                 }
                 // Feeds the transcript's bottom content inset its height. Safe
@@ -698,7 +718,10 @@ private struct ChatScreenContent: View {
         await MainActor.run { onCleared(newId) }
     }
 
-    private func forkSession() async {
+    /// Fork this session into a fresh window and open the fork. `seed`, when
+    /// present ("Quote in new session", BET-1353), is the composer draft the
+    /// fork opens with — carried across the route via `SessionOpenTarget.seed`.
+    private func forkSession(seed: String? = nil) async {
         guard let w = sessionWindow else {
             store.actionHint = "Can't fork — session's window not found. Go back and reopen from the list."
             return
@@ -721,7 +744,24 @@ private struct ChatScreenContent: View {
         // present, so it opens the forked chat). The original stays one pop
         // back. windowIndex is not used when sessionId is set.
         await MainActor.run {
-            path.append(SessionOpenTarget(project: projectName, windowIndex: w.index, name: "\(title) fork", sessionId: newSessionId))
+            path.append(SessionOpenTarget(project: projectName, windowIndex: w.index, name: "\(title) fork", sessionId: newSessionId, seed: seed))
+        }
+    }
+
+    /// The single quote path (BET-1353): "Quote" prepends the built blockquote
+    /// to THIS session's composer; "Quote in new session" seeds a fork's
+    /// composer and opens it. Both run through `QuoteText.buildQuoteBlock`, so
+    /// whatever lands in the composer is exactly the sent form.
+    private func quote(_ selection: String, into destination: QuoteDestination) async {
+        guard let block = QuoteText.buildQuoteBlock(selection) else { return }
+        switch destination {
+        case .thisSession:
+            await MainActor.run {
+                composerText = block + composerText
+                composerFocused = true
+            }
+        case .newSession:
+            await forkSession(seed: block)
         }
     }
 
@@ -1068,7 +1108,10 @@ private struct ChatScreenContent: View {
             onKeepPlanning: { question, feedback in
                 store.keepPlanning(question: question, feedback: feedback)
             },
-            onOpenPage: { openPlanPage() }
+            onOpenPage: { openPlanPage() },
+            onQuote: { selection, destination in
+                Task { await quote(selection, into: destination) }
+            }
         )
     }
 

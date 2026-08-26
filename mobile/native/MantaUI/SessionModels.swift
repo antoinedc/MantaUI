@@ -600,3 +600,61 @@ enum SessionCreateFailure {
         }
     }
 }
+
+// ===========================================================================
+// Quote selection → composer (BET-1353).
+//
+// Pure Swift ports of the desktop `truncateMiddle` / `buildQuoteBlock`
+// (src/renderer/chatUtils.ts, BET-1351), with a narrower phone-composer
+// budget. A selection is normalised into ONE middle-truncated blockquote line
+// (`"> …\n\n"`) that gets PREPENDED to whatever is already in the composer.
+// There is deliberately no hidden payload / chip / extra composer state: the
+// model already holds the full transcript in its context, so the quote only
+// has to be a locatable pointer. Collapsing to a single line also kills the
+// class of bug where a selection spanning several rendered blocks serialises
+// without its newlines.
+// ===========================================================================
+
+/// Where a quote should land (BET-1353).
+enum QuoteDestination {
+    /// Quote into THIS session's composer.
+    case thisSession
+    /// Fork this session, seed the fork's composer, and open the fork.
+    case newSession
+}
+
+/// Pure quote-building helpers, ported 1:1 from `chatUtils.ts` (BET-1351) with
+/// the phone-composer budget (`max`/`head`/`tail`).
+enum QuoteText {
+    /// Longest quoted line, in characters.
+    static let max = 160
+    /// Characters kept from the head of a quote that exceeds `max`.
+    static let head = 95
+    /// Characters kept from the tail of a quote that exceeds `max`.
+    static let tail = 55
+
+    /// "beginning … end". Returns `text` unchanged when it fits within `max`.
+    /// Counts CHARACTERS (grapheme clusters), never UTF-16 code units, so an
+    /// emoji or accented character is never split. The ellipsis is ONE U+2026
+    /// with a single space either side.
+    static func truncateMiddle(_ text: String, max: Int, head: Int, tail: Int) -> String {
+        let chars = Array(text)
+        if chars.count <= max { return text }
+        let headPart = String(chars[0..<head]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let tailPart = String(chars[(chars.count - tail)...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return headPart + " \u{2026} " + tailPart
+    }
+
+    /// Selection → the exact string to prepend to the composer, or nil when the
+    /// selection has no usable text. Whitespace runs collapse to a single
+    /// space, the result is trimmed, truncated, then prefixed with `"> "` and
+    /// suffixed with a blank line (`"\n\n"`).
+    static func buildQuoteBlock(_ selection: String) -> String? {
+        let collapsed = selection
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !collapsed.isEmpty else { return nil }
+        let truncated = truncateMiddle(collapsed, max: max, head: head, tail: tail)
+        return "> " + truncated + "\n\n"
+    }
+}

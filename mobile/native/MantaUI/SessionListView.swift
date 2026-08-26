@@ -125,7 +125,7 @@ struct SessionListView: View {
             .overlay(alignment: .top) { errorBanner }
             .navigationDestination(for: SessionOpenTarget.self) { target in
                 if let sessionId = target.sessionId, !sessionId.isEmpty {
-                    ChatScreen(sessionId: sessionId, title: target.name, projectName: target.project, eventStore: eventStore, path: $path)
+                    ChatScreen(sessionId: sessionId, title: target.name, projectName: target.project, eventStore: eventStore, path: $path, seed: target.seed ?? "")
                 } else if let project = store.projects.first(where: { $0.tmuxSession == target.project }),
                           let window = project.windows.first(where: { $0.index == target.windowIndex }) {
                     // S6 (BET-598): a non-chat window opens the native
@@ -964,6 +964,11 @@ struct SessionOpenTarget: Hashable {
     let windowIndex: Int
     let name: String
     let sessionId: String?
+    /// "Quote in new session" fork composer seed (BET-1353). Deliberately NOT
+    /// part of identity: two pushes to the same session are the same
+    /// destination regardless of seed (a seed only ever travels with a fresh
+    /// fork, which already has its own sessionId).
+    var seed: String? = nil
 
     static func == (lhs: SessionOpenTarget, rhs: SessionOpenTarget) -> Bool {
         lhs.project == rhs.project && lhs.windowIndex == rhs.windowIndex && lhs.sessionId == rhs.sessionId

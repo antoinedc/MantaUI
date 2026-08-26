@@ -853,4 +853,67 @@ final class TerminalStatusTests: XCTestCase {
         XCTAssertFalse(status.running)
         XCTAssertEqual(SessionDotState.forRow(status), .idle)
     }
+
+    // MARK: - QuoteText (BET-1353) — ports of chatUtils truncateMiddle / buildQuoteBlock
+
+    func testTruncateMiddleReturnsUnchangedAtAndBelowMax() {
+        let atMax = String(repeating: "a", count: QuoteText.max)
+        XCTAssertEqual(QuoteText.truncateMiddle(atMax, max: QuoteText.max, head: QuoteText.head, tail: QuoteText.tail), atMax)
+        XCTAssertEqual(QuoteText.truncateMiddle("short", max: QuoteText.max, head: QuoteText.head, tail: QuoteText.tail), "short")
+    }
+
+    func testTruncateMiddleProducesHeadEllipsisTailAboveMaxAndIsShorter() {
+        let text = String(repeating: "x", count: QuoteText.max + 50)
+        let out = QuoteText.truncateMiddle(text, max: QuoteText.max, head: QuoteText.head, tail: QuoteText.tail)
+        let expected = String(repeating: "x", count: QuoteText.head) + " \u{2026} " + String(repeating: "x", count: QuoteText.tail)
+        XCTAssertEqual(out, expected)
+        XCTAssertLessThan(out.count, text.count)
+        XCTAssertLessThanOrEqual(out.count, QuoteText.max)
+    }
+
+    func testTruncateMiddleUsesSingleU2026WithOneSpaceEachSide() {
+        let text = String(repeating: "a", count: QuoteText.max + 10)
+        let out = QuoteText.truncateMiddle(text, max: QuoteText.max, head: QuoteText.head, tail: QuoteText.tail)
+        XCTAssertTrue(out.contains(" \u{2026} "))
+        XCTAssertEqual(out.components(separatedBy: "\u{2026}").count, 2)
+        XCTAssertFalse(out.contains("..."))
+    }
+
+    func testTruncateMiddleNeverSplitsACharacter() {
+        let emoji = String(repeating: "\u{1F600}", count: QuoteText.max + 20)
+        let out = QuoteText.truncateMiddle(emoji, max: QuoteText.max, head: QuoteText.head, tail: QuoteText.tail)
+        // Head + tail of whole grapheme clusters, joined by one " … ".
+        XCTAssertEqual(out.count, QuoteText.head + QuoteText.tail + 3)
+        XCTAssertTrue(out.allSatisfy { $0 == "\u{1F600}" || $0 == " " || $0 == "\u{2026}" })
+    }
+
+    func testBuildQuoteBlockCollapsesWhitespaceAndTrims() {
+        XCTAssertEqual(QuoteText.buildQuoteBlock("  hello   world\n\nsecond  line  "), "> hello world second line\n\n")
+    }
+
+    func testBuildQuoteBlockNilForEmptyAndWhitespaceOnly() {
+        XCTAssertNil(QuoteText.buildQuoteBlock(""))
+        XCTAssertNil(QuoteText.buildQuoteBlock("   \n\t  "))
+    }
+
+    func testBuildQuoteBlockPrefixesExactlyQuoteAndEndsWithBlankLine() {
+        XCTAssertEqual(QuoteText.buildQuoteBlock("hello"), "> hello\n\n")
+    }
+
+    func testBuildQuoteBlockReducesLongMultiParagraphToOneLineWithOneEllipsis() {
+        let paragraph = Array(repeating: "word ", count: 120).joined().trimmingCharacters(in: .whitespacesAndNewlines)
+        let multi = "\(paragraph)\n\n\(paragraph)"
+        let out = QuoteText.buildQuoteBlock(multi)!
+        XCTAssertEqual(out.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: "\n").count, 1)
+        XCTAssertEqual(out.components(separatedBy: " \u{2026} ").count, 2)
+    }
+
+    func testBuildQuoteBlockEmojiSelectionNeverSplitsACharacter() {
+        let selection = String(repeating: "\u{1F600}", count: QuoteText.max + 60)
+        let out = QuoteText.buildQuoteBlock(selection)!
+        // "> " (2) + head + " … " (3) + tail + "\n\n" (2) = head + tail + 7.
+        XCTAssertEqual(out.count, QuoteText.head + QuoteText.tail + 7)
+        let body = out.dropFirst(2).dropLast(2)
+        XCTAssertTrue(body.allSatisfy { $0 == "\u{1F600}" || $0 == " " || $0 == "\u{2026}" })
+    }
 }
