@@ -279,13 +279,6 @@ private struct TranscriptCellReveal: View {
     @MainActor
     @ViewBuilder
     private var cellContent: some View {
-        let content: some View = {
-            if case .prose(let text, nil) = item.block {
-                LiveProseTail(text: text, tokens: tokens)
-            } else {
-                transcriptBlockView(item.block, tokens: tokens, cards: cardActions, onRetry: onRetry)
-            }
-        }()
         // BET-1353 — the fallback selection branch. The MarkdownText renderer
         // exposes no hook into the system edit menu (BET-1352's finding), so
         // the two quote actions attach as a `.contextMenu` on the row, quoting
@@ -294,12 +287,27 @@ private struct TranscriptCellReveal: View {
         // no second delivery mechanism. Read-only surfaces (nil actions) and
         // non-quotable blocks (steps/file/…) get no menu.
         if let quoteText = item.block.quoteText, let actions = cardActions {
-            content.contextMenu {
-                Button("Quote") { actions.onQuote(quoteText, .thisSession) }
-                Button("Quote in new session") { actions.onQuote(quoteText, .newSession) }
-            }
+            baseContent
+                .contextMenu {
+                    Button("Quote") { actions.onQuote(quoteText, .thisSession) }
+                    Button("Quote in new session") { actions.onQuote(quoteText, .newSession) }
+                }
         } else {
-            content
+            baseContent
+        }
+    }
+
+    /// The row's ordinary content: the live streaming prose tail, or the shared
+    /// block renderer for everything else. Own @ViewBuilder so its if/else
+    /// branches unify (a bare `some View = { … }()` closure cannot — the two
+    /// branches are distinct `View` types, BET-1353).
+    @MainActor
+    @ViewBuilder
+    private var baseContent: some View {
+        if case .prose(let text, nil) = item.block {
+            LiveProseTail(text: text, tokens: tokens)
+        } else {
+            transcriptBlockView(item.block, tokens: tokens, cards: cardActions, onRetry: onRetry)
         }
     }
 }
