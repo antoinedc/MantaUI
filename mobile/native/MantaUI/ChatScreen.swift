@@ -448,8 +448,6 @@ private struct ChatScreenContent: View {
                         store: store,
                         modelStore: modelStore,
                         usageStore: usageStore,
-                        text: $composerText,
-                        inputFocused: $composerFocused,
                         onShowUsage: { showUsageSheet = true },
                         showScrollToBottom: showScrollToBottom,
                         onScrollToBottom: {
@@ -461,7 +459,9 @@ private struct ChatScreenContent: View {
                         onSlashClear: { Task { await clearSession() } },
                         onSlashFork: { Task { await forkSession() } },
                         historyTmuxSession: sessionWindow?.name,
-                        historyWindowIndex: sessionWindow?.index
+                        historyWindowIndex: sessionWindow?.index,
+                        text: $composerText,
+                        inputFocused: $composerFocused
                     )
                 }
                 // Feeds the transcript's bottom content inset its height. Safe
