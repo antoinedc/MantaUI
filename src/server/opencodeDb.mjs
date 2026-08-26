@@ -14,6 +14,12 @@ import { join } from "node:path";
 import { existsSync } from "node:fs";
 
 let dbHandle = null;
+// Test-only: a substitute for the node:sqlite module, so tests can fake a
+// DatabaseSync without ever opening the real opencode.db. Not runtime API.
+let _modOverride = null;
+export function _setSqliteModuleOverride(mod) {
+  _modOverride = mod;
+}
 
 // Resolve opencode's SQLite path. First existing wins; a test/override hook
 // (`MANTA_OPENCODE_DB`) is used as-is. null → the box cannot search.
@@ -39,8 +45,17 @@ export async function getDb() {
   const path = resolveDbPath();
   if (!path) return null;
   try {
-    const { DatabaseSync } = await import("node:sqlite");
-    dbHandle = new DatabaseSync(path, { readOnly: true });
+    const mod = _modOverride ?? (await import("node:sqlite"));
+    dbHandle = new mod.DatabaseSync(path, { readOnly: true });
+    try {
+      // BET-1360: bounded wait for a WAL-checkpoint-locked page, so a reader
+      // that meets a busy handle waits at most 5000ms instead of failing
+      // immediately (SQLite default) or blocking forever.
+      dbHandle.exec("PRAGMA busy_timeout = 5000");
+    } catch (e) {
+      // Non-fatal: a handle without the pragma is still usable.
+      console.warn("[opencodeDb] busy_timeout pragma failed:", e?.message ?? e);
+    }
     return dbHandle;
   } catch (e) {
     console.warn("[opencodeDb] node:sqlite unavailable:", e?.message ?? e);

@@ -42,6 +42,11 @@ const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
 // reliability figure cannot change a decision that matters, so deliberately no
 // invalidation protocol, no bus event, no config knob.
 const ROUTING_LEDGER_TTL_MS = 60_000;
+// Deliberately value-only: this cache memos a SETTLED summary, never an
+// in-flight promise. A hanging endpointSummary blocks that one caller but
+// cannot poison later ones (no shared never-settling slot), so it is immune
+// to the BET-1359/BET-1360 memo-wedge failure mode — it is NOT given a build
+// budget or startedAt. It still inherits the shared opencodeDb busy_timeout.
 let ledgerCache = null; // { sum, at, value } — one slot, TTL-bounded
 
 // Fold the config's per-endpoint user overrides into the `declared` map the
