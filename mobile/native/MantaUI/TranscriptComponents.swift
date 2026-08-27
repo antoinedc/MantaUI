@@ -816,17 +816,6 @@ enum TranscriptBlock: Equatable {
         case .steps, .file, .notice, .queuedPrompt, .permission, .planExit, .question: return nil
         }
     }
-
-    /// The quote-able raw markdown of a user or assistant-prose block, nil for
-    /// every other block type (BET-1353). The fallback selection-menu branch
-    /// quotes the WHOLE block's text — there is no sub-selection on this
-    /// rendering stack, so this is the maximum fidelity available.
-    var quoteText: String? {
-        switch self {
-        case .user(let text, _), .prose(let text, _): return text
-        case .steps, .file, .notice, .queuedPrompt, .permission, .planExit, .question: return nil
-        }
-    }
 }
 
 /// A file/attachment reference carried by a `.file` transcript block. Only the
