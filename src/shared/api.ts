@@ -86,6 +86,8 @@ import type {
   TranscriptHit,
   LedgerSummary,
   OptimizerSummary,
+  OptimizerRange,
+  OptimizerSeries,
   AppControlPayload,
   MediaEventPayload,
   WidgetEventPayload,
@@ -757,6 +759,11 @@ export interface Api {
   // (`optimizer:summary` RPC). No arguments. `supported:false` = the box can't
   // read opencode.db (needs the Node 24 runtime).
   optimizerSummary(): Promise<OptimizerSummary | { supported: false }>;
+  // BET-1369: the Optimizer's WINDOWED consumption read (`optimizer:series`
+  // RPC). The window is PER-CALL (24h/7d/30d); `optimizer:summary` remains the
+  // fixed-30-day shared read whose memo must not be perturbed by the card's
+  // selector. `supported:false` = the box can't read opencode.db.
+  optimizerSeries(range: OptimizerRange): Promise<OptimizerSeries | { supported: false }>;
 
   // Slash-command execution.
   opencodeRunCommand(input: {

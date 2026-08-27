@@ -17,7 +17,7 @@
 
 import { getDb } from "./opencodeDb.mjs";
 import { aggregateReliability } from "../shared/toolReliability.mjs";
-import { dayKey, recentBucketKeys } from "../shared/timeBuckets.mjs";
+import { dayKey, hourKey, recentBucketKeys } from "../shared/timeBuckets.mjs";
 
 // Turns longer than this are excluded from TIMING only (still counted for
 // cost) — the spec cap is 600s of wall-clock.
@@ -223,16 +223,37 @@ export function aggregateBySession(rows) {
  * calendar day. `days` defaults to 30.
  */
 export function aggregateDailySeries(rows, days = 30, now = Date.now()) {
+  return aggregateSeriesByBucket(rows, "day", days, now).map(({ key, tokensSent }) => ({ day: key, tokensSent }));
+}
+
+/**
+ * PURE. Hourly `tokensSent` series over the last `hours` local-calendar hours
+ * ending at `now`, oldest→newest, ZERO-FILLED. Entry shape { hour, tokensSent }.
+ * Ledger rows already carry a per-message timestamp, so this works
+ * retroactively over all existing history — no migration, no schema change.
+ */
+export function aggregateHourlySeries(rows, hours = 24, now = Date.now()) {
+  return aggregateSeriesByBucket(rows, "hour", hours, now).map(({ key, tokensSent }) => ({ hour: key, tokensSent }));
+}
+
+// PURE core shared by the two named series above: buckets `rows` by local
+// calendar bucket (day/hour via the shared timeBuckets key builders), sums
+// `tokensSent` per bucket, and zero-fills the `count` most recent buckets
+// ending at `now`, oldest→newest. Returns [{ key, tokensSent }]; the two
+// exported wrappers differ only in the key NAME (`day` vs `hour`) and the
+// bucket size — one loop, not two.
+function aggregateSeriesByBucket(rows, bucket, count, now) {
   const list = Array.isArray(rows) ? rows : [];
-  const n = Math.max(1, Math.floor(num(days)) || 1);
-  const byDay = new Map();
+  const n = Math.max(1, Math.floor(num(count)) || 1);
+  const keyOf = bucket === "hour" ? hourKey : dayKey;
+  const byBucket = new Map();
   for (const r of list) {
-    const key = dayKey(r.startedMs);
-    byDay.set(key, (byDay.get(key) || 0) + tokensSent(r));
+    const key = keyOf(r.startedMs);
+    byBucket.set(key, (byBucket.get(key) || 0) + tokensSent(r));
   }
   const out = [];
-  for (const key of recentBucketKeys("day", n, now)) {
-    out.push({ day: key, tokensSent: byDay.get(key) || 0 });
+  for (const key of recentBucketKeys(bucket, n, now)) {
+    out.push({ key, tokensSent: byBucket.get(key) || 0 });
   }
   return out;
 }

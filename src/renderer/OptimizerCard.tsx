@@ -25,6 +25,7 @@
 
 import { useEffect, useState } from "react";
 import { Card } from "./Card";
+import { ChipGroup } from "./Chip";
 import { useStore } from "./store";
 import {
   buildCumulativePath,
@@ -35,9 +36,10 @@ import {
   describePressure,
   describeActivityEntry,
 } from "./chatUtils";
-import type { OptimizerSummary } from "../shared/types";
+import type { OptimizerSummary, OptimizerRange, OptimizerSeries } from "../shared/types";
 
 type OptimizerData = OptimizerSummary | { supported: false };
+type OptimizerSeriesData = OptimizerSeries | { supported: false };
 
 const wholePct = (v: number): string => `${Math.round(v)}%`;
 
@@ -75,6 +77,31 @@ function axisTokens(v: number): string {
 // (max) and y=H the bottom (zero), then translated into the SVG.
 const CHART = { left: 50, top: 6, width: 600, height: 200 };
 
+// The range selector's options (BET-1369). Single source of truth beside the
+// label suffix lookup below, so the chip set and the stat labels can't drift.
+const RANGE_OPTIONS: { value: OptimizerRange; label: string }[] = [
+  { value: "24h", label: "24h" },
+  { value: "7d", label: "7d" },
+  { value: "30d", label: "30d" },
+];
+
+// The human suffix used in range-scoped stat labels ("Sent (24h)", "24h average").
+const RANGE_LABEL: Record<OptimizerRange, string> = {
+  "24h": "24h",
+  "7d": "7d",
+  "30d": "30d",
+};
+
+// The muted explanation line under the legend when no counterfactual was
+// recorded in the window (BET-1369). Both states are real and reachable.
+function noCounterfactualText(range: OptimizerRange): string {
+  return range === "24h" ? "Hourly comparison starts collecting today." : "No trimming recorded in this window.";
+}
+
+function emptyWindowText(range: OptimizerRange): string {
+  return `No model activity in the last ${range}.`;
+}
+
 export function OptimizerCard() {
   const optimizerEnabled = useStore((s) => s.optimizerEnabled);
   const [state, setState] = useState<{
@@ -82,6 +109,15 @@ export function OptimizerCard() {
     data: OptimizerData | null;
     fetchError: boolean;
   }>({ loading: true, data: null, fetchError: false });
+  // BET-1369: the window selector + the windowed series read. The summary
+  // drives the rest of the card (cache, sessions, windows, activity); the
+  // chart + the range-scoped stats read exclusively from this series.
+  const [range, setRange] = useState<OptimizerRange>("24h");
+  const [series, setSeries] = useState<{
+    loading: boolean;
+    data: OptimizerSeriesData | null;
+    loadError: boolean;
+  }>({ loading: true, data: null, loadError: false });
 
   useEffect(() => {
     let alive = true;
@@ -97,6 +133,22 @@ export function OptimizerCard() {
       alive = false;
     };
   }, []);
+
+  useEffect(() => {
+    let alive = true;
+    setSeries((s) => ({ ...s, loading: true }));
+    window.api
+      .optimizerSeries(range)
+      .then((r: OptimizerSeriesData) => {
+        if (alive) setSeries({ loading: false, data: r, loadError: false });
+      })
+      .catch(() => {
+        if (alive) setSeries((s) => ({ ...s, loading: false, loadError: true }));
+      });
+    return () => {
+      alive = false;
+    };
+  }, [range]);
 
   const header = (
     <span className="text-micro uppercase text-text-faint">Token optimizer</span>
@@ -131,44 +183,48 @@ export function OptimizerCard() {
   const windows = Array.isArray(d.windows) ? d.windows : [];
   const hasWindows = windows.length > 0;
 
-  // 30-day aggregates over the zero-filled daily series.
-  const sent30d = d.dailySeries.reduce((s, e) => s + (e.tokensSent || 0), 0);
-  const masked30d = d.dailySeries.reduce((s, e) => s + (e.maskedTokens || 0), 0);
-  const raw30d = sent30d + masked30d;
-  const trimmedPct = raw30d > 0 ? (masked30d / raw30d) * 100 : 0;
+  // ---- BET-1369: the WINDOWED series drives the consumption chart and the
+  // range-scoped stats below. The summary drives everything else on the card.
+  // While a range fetch is in flight we keep the previous chart (opacity-60);
+  // if the series read is unsupported/rejected, only the chart block degrades.
+  const seriesUnsupported = series.loadError || (series.data ? !series.data.supported : false);
+  const sd = !seriesUnsupported && series.data && series.data.supported ? (series.data as OptimizerSeries) : null;
+
+  // Range-scoped totals (0 until the series is readable).
+  const sentTotal = sd ? sd.totals.tokensSent : 0;
+  const maskedTotal = sd ? sd.totals.maskedTokens : 0;
+  const rawTotal = sentTotal + maskedTotal;
+  const trimmedPct = rawTotal > 0 ? (maskedTotal / rawTotal) * 100 : 0;
+
+  // Flat $3/Mtok counterfactual saving estimate (refined per-model in phase 2) —
+  // computation unchanged, now scoped to the window.
+  const saved = Math.round((maskedTotal * 3) / 1_000_000);
 
   // Consumption chart series (cumulative), scaled together by the peak.
-  const maxTokens = Math.max(raw30d, 1);
+  const maxTokens = Math.max(rawTotal, 1);
   const sentPath = buildCumulativePath(
-    d.dailySeries.map((e) => e.tokensSent || 0),
+    sd ? sd.series.map((p) => p.tokensSent || 0) : [],
     CHART.width,
     CHART.height,
     maxTokens,
   );
   const rawPath = buildCumulativePath(
-    d.dailySeries.map((e) => (e.tokensSent || 0) + (e.maskedTokens || 0)),
+    sd ? sd.series.map((p) => (p.tokensSent || 0) + (p.maskedTokens || 0)) : [],
     CHART.width,
     CHART.height,
     maxTokens,
   );
 
-  // X-axis ticks for the consumption chart (BET-1366): evenly spaced, at most
-  // 4 for "day", always pinned to index 0 and the last index. An all-zero
-  // series and a bare solid line must not be confused — guards in the JSX
-  // below.
-  const seriesTs = d.dailySeries.map((e) => new Date(`${e.day}T00:00:00`).getTime());
-  const axisTicks = chartAxisTicks(seriesTs, "day");
-  const hasCounterfactual = masked30d > 0;
-  const noActivity = sent30d === 0 && masked30d === 0;
-
-  // Flat $3/Mtok counterfactual saving estimate (refined per-model in phase 2).
-  const saved = Math.round((masked30d * 3) / 1_000_000);
+  // X-axis ticks (BET-1366): bucket-start epoch ms, per the range's bucket.
+  const axisTicks = sd ? chartAxisTicks(sd.series.map((p) => p.t), sd.bucket) : [];
+  const hasCounterfactual = sd ? sd.counterfactualAvailable : false;
+  const noActivity = sd ? sentTotal === 0 && maskedTotal === 0 : false;
 
   const cs = d.cacheShare;
   const hitDenom = cs.cacheRead + cs.cacheWrite + cs.input;
   const cacheHitPct = hitDenom > 0 ? (cs.cacheRead / hitDenom) * 100 : 0;
 
-  const costPerTurn = d.totals.turns > 0 ? `$${(d.totals.cost / d.totals.turns).toFixed(2)}` : "—";
+  const costPerTurn = sd && sd.totals.turns > 0 ? `$${(sd.totals.cost / sd.totals.turns).toFixed(2)}` : "—";
 
   // BET-1347 slices.
   const activity = Array.isArray(d.activity?.entries) ? d.activity.entries : [];
@@ -295,108 +351,121 @@ export function OptimizerCard() {
         </>
       )}
 
-      {/* ── Consumption chart (phase 1, unchanged) ───────────────────────── */}
+      {/* ── Consumption chart + range selector (BET-1369) ────────────────── */}
       <div className="flex items-baseline justify-between gap-3">
         <div className="opt-chart-head">Token consumption — with &amp; without optimization</div>
-        <span className="text-micro text-text-faint">last 30 days</span>
+        <ChipGroup label="Consumption window" value={range} options={RANGE_OPTIONS} onChange={setRange} />
       </div>
-      {noActivity ? (
-        <div className="opt-empty">No model activity in the last 30 days.</div>
+      {seriesUnsupported ? (
+        <div className="text-meta text-text-faint">
+          Spend history needs a newer box runtime.
+        </div>
+      ) : !sd ? (
+        <div className="text-meta text-text-faint">Reading your history…</div>
       ) : (
-        <>
-          <svg
-            className="opt-chart"
-            viewBox={`0 0 ${CHART.left + CHART.width + 6} ${CHART.top + CHART.height + 18}`}
-            role="img"
-            aria-label="Token consumption with and without optimization"
-          >
-            <g transform={`translate(${CHART.left} ${CHART.top})`}>
-              <line x1="0" y1={CHART.height} x2={CHART.width} y2={CHART.height} stroke="var(--border-subtle)" />
-              <line x1="0" y1={CHART.height / 2} x2={CHART.width} y2={CHART.height / 2} stroke="var(--border-subtle)" strokeDasharray="2 5" opacity=".6" />
-              <line x1="0" y1="0" x2={CHART.width} y2="0" stroke="var(--border-subtle)" strokeDasharray="2 5" opacity=".6" />
-              <line x1="0" y1="0" x2="0" y2={CHART.height} stroke="var(--border-subtle)" />
-
-              <text x="-8" y={CHART.height + 12} textAnchor="end" fill="var(--tx4)" fontSize="10" fontFamily="var(--font-mono)">0</text>
-              <text x="-8" y={CHART.height / 2 + 4} textAnchor="end" fill="var(--tx4)" fontSize="10" fontFamily="var(--font-mono)">{axisTokens(maxTokens / 2)}</text>
-              <text x="-8" y="4" textAnchor="end" fill="var(--tx4)" fontSize="10" fontFamily="var(--font-mono)">{axisTokens(maxTokens)}</text>
-
-              {axisTicks.map((t) => {
-                const isFirst = t.index === 0;
-                const isLast = t.index === d.dailySeries.length - 1;
-                const anchor = isFirst ? "start" : isLast ? "end" : "middle";
-                const x = axisTicks.length > 1 ? (t.index / (d.dailySeries.length - 1)) * CHART.width : 0;
-                return (
-                  <text key={t.index} x={x} y={CHART.height + 14} textAnchor={anchor} fill="var(--tx4)" fontSize="10" fontFamily="var(--font-mono)">
-                    {t.label}
-                  </text>
-                );
-              })}
-
-              {hasCounterfactual && <path d={rawPath} fill="none" stroke="var(--tx4)" strokeWidth="2" strokeDasharray="5 4" />}
-              <path d={sentPath} fill="none" stroke="var(--accent)" strokeWidth="2.5" />
-              <path
-                d={`${sentPath} L ${CHART.width} ${CHART.height} L 0 ${CHART.height} Z`}
-                fill="rgb(var(--accent-rgb) / 0.08)"
-                stroke="none"
-              />
-
-              {masked30d > 0 && (
-                <text x={CHART.width} y="24" textAnchor="end" fill="var(--ok)" fontSize="10" fontFamily="var(--font-mono)">
-                  −{formatTokens(masked30d)} · ≈ ${saved} est.
-                </text>
-              )}
-            </g>
-          </svg>
-          <div className="opt-legend">
-            <span className="opt-legend-item">
-              <i style={{ background: "var(--accent)" }} />
-              sent
-            </span>
-            {hasCounterfactual && (
-              <span className="opt-legend-item">
-                <i style={{ background: "var(--tx4)" }} />
-                raw counterfactual — same turns, nothing trimmed (est.)
-              </span>
-            )}
-          </div>
-        </>
-      )}
-
-      <div className="opt-stats">
-        <div className="opt-stat">
-          <div className="opt-stat-l">Sent (30d)</div>
-          <div className="opt-stat-v">{formatTokens(sent30d)}</div>
-          <div className="opt-stat-d">raw {formatTokens(raw30d)}</div>
-        </div>
-        <div className="opt-stat">
-          <div className="opt-stat-l">Saved</div>
-          <div className="opt-stat-v ok">≈ ${saved}</div>
-          <div className="opt-stat-d">est. · counterfactual</div>
-        </div>
-        <div className="opt-stat">
-          <div className="opt-stat-l">Cache hit</div>
-          <div className="opt-stat-v">{wholePct(cacheHitPct)}</div>
-          <div className="opt-stat-d">
-            {d.ttl ? `TTL ${ttlLabel(d.ttl.measuredMs)} ${d.ttl.confidence}` : ""}
-          </div>
-        </div>
-        <div className="opt-stat">
-          <div className="opt-stat-l">Cost / turn</div>
-          <div className="opt-stat-v">{costPerTurn}</div>
-          <div className="opt-stat-d">30d average</div>
-        </div>
-        <div className="opt-stat">
-          <div className="opt-stat-l">Sessions</div>
-          <div className="opt-stat-v">{d.bySession.length}</div>
-          {compaction ? (
-            <div className="opt-stat-d" data-testid="compaction-bg">
-              {compaction.background} of {compaction.total} in background
-            </div>
+        <div className={series.loading ? "opacity-60" : undefined}>
+          {noActivity ? (
+            <div className="opt-empty">{emptyWindowText(range)}</div>
           ) : (
-            <div className="opt-stat-d">30d</div>
+            <>
+              <svg
+                className="opt-chart"
+                viewBox={`0 0 ${CHART.left + CHART.width + 6} ${CHART.top + CHART.height + 18}`}
+                role="img"
+                aria-label="Token consumption with and without optimization"
+              >
+                <g transform={`translate(${CHART.left} ${CHART.top})`}>
+                  <line x1="0" y1={CHART.height} x2={CHART.width} y2={CHART.height} stroke="var(--border-subtle)" />
+                  <line x1="0" y1={CHART.height / 2} x2={CHART.width} y2={CHART.height / 2} stroke="var(--border-subtle)" strokeDasharray="2 5" opacity=".6" />
+                  <line x1="0" y1="0" x2={CHART.width} y2="0" stroke="var(--border-subtle)" strokeDasharray="2 5" opacity=".6" />
+                  <line x1="0" y1="0" x2="0" y2={CHART.height} stroke="var(--border-subtle)" />
+
+                  <text x="-8" y={CHART.height + 12} textAnchor="end" fill="var(--tx4)" fontSize="10" fontFamily="var(--font-mono)">0</text>
+                  <text x="-8" y={CHART.height / 2 + 4} textAnchor="end" fill="var(--tx4)" fontSize="10" fontFamily="var(--font-mono)">{axisTokens(maxTokens / 2)}</text>
+                  <text x="-8" y="4" textAnchor="end" fill="var(--tx4)" fontSize="10" fontFamily="var(--font-mono)">{axisTokens(maxTokens)}</text>
+
+                  {axisTicks.map((t) => {
+                    const isFirst = t.index === 0;
+                    const isLast = t.index === sd.series.length - 1;
+                    const anchor = isFirst ? "start" : isLast ? "end" : "middle";
+                    const x = axisTicks.length > 1 ? (t.index / (sd.series.length - 1)) * CHART.width : 0;
+                    return (
+                      <text key={t.index} x={x} y={CHART.height + 14} textAnchor={anchor} fill="var(--tx4)" fontSize="10" fontFamily="var(--font-mono)">
+                        {t.label}
+                      </text>
+                    );
+                  })}
+
+                  {hasCounterfactual && <path d={rawPath} fill="none" stroke="var(--tx4)" strokeWidth="2" strokeDasharray="5 4" />}
+                  <path d={sentPath} fill="none" stroke="var(--accent)" strokeWidth="2.5" />
+                  <path
+                    d={`${sentPath} L ${CHART.width} ${CHART.height} L 0 ${CHART.height} Z`}
+                    fill="rgb(var(--accent-rgb) / 0.08)"
+                    stroke="none"
+                  />
+
+                  {maskedTotal > 0 && (
+                    <text x={CHART.width} y="24" textAnchor="end" fill="var(--ok)" fontSize="10" fontFamily="var(--font-mono)">
+                      −{formatTokens(maskedTotal)} · ≈ ${saved} est.
+                    </text>
+                  )}
+                </g>
+              </svg>
+              <div className="opt-legend">
+                <span className="opt-legend-item">
+                  <i style={{ background: "var(--accent)" }} />
+                  sent
+                </span>
+                {hasCounterfactual && (
+                  <span className="opt-legend-item">
+                    <i style={{ background: "var(--tx4)" }} />
+                    raw counterfactual — same turns, nothing trimmed (est.)
+                  </span>
+                )}
+                {!hasCounterfactual && (
+                  <span className="text-text-faint">{noCounterfactualText(range)}</span>
+                )}
+              </div>
+            </>
           )}
+
+          <div className="opt-stats">
+            <div className="opt-stat">
+              <div className="opt-stat-l">Sent ({RANGE_LABEL[range]})</div>
+              <div className="opt-stat-v">{formatTokens(sentTotal)}</div>
+              <div className="opt-stat-d">raw {formatTokens(rawTotal)}</div>
+            </div>
+            <div className="opt-stat">
+              <div className="opt-stat-l">Saved</div>
+              <div className="opt-stat-v ok">≈ ${saved}</div>
+              <div className="opt-stat-d">est. · counterfactual</div>
+            </div>
+            <div className="opt-stat">
+              <div className="opt-stat-l">Cache hit</div>
+              <div className="opt-stat-v">{wholePct(cacheHitPct)}</div>
+              <div className="opt-stat-d">
+                {`${d.ttl ? `TTL ${ttlLabel(d.ttl.measuredMs)} ${d.ttl.confidence}` : ""} · 30d`}
+              </div>
+            </div>
+            <div className="opt-stat">
+              <div className="opt-stat-l">Cost / turn</div>
+              <div className="opt-stat-v">{costPerTurn}</div>
+              <div className="opt-stat-d">{RANGE_LABEL[range]} average</div>
+            </div>
+            <div className="opt-stat">
+              <div className="opt-stat-l">Sessions</div>
+              <div className="opt-stat-v">{d.bySession.length}</div>
+              {compaction ? (
+                <div className="opt-stat-d" data-testid="compaction-bg">
+                  {compaction.background} of {compaction.total} in background · 30d
+                </div>
+              ) : (
+                <div className="opt-stat-d">30d</div>
+              )}
+            </div>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* ── Metered endpoints: slim role + crossover price, NO gauge ─────── */}
       {metered.length > 0 && (

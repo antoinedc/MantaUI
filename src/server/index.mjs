@@ -18,6 +18,7 @@ import { synthesizeSpeech } from "../shared/groq.mjs";
 import { WebSocketServer } from "ws";
 import { createCounterfactualStore, validateCounterfactualReport } from "./optimizer/counterfactual.mjs";
 import { createOptimizerSummary } from "./optimizer/summary.mjs";
+import { createOptimizerSeries } from "./optimizer/series.mjs";
 import { createActivityLog } from "./optimizer/activityLog.mjs";
 import { createPacingState } from "./optimizer/pacing.mjs";
 import {
@@ -1096,6 +1097,16 @@ const optimizerSummary = createOptimizerSummary({
   meteredEndpoints: readMeteredEndpoints,
 });
 
+// BET-1369: the windowed `optimizer:series` read model, created ONCE at module
+// scope (like optimizerSummary) so the card's per-range selector shares one
+// 60s memo per range. DIFFERENT read from optimizerSummary on purpose: a 24h
+// window must read one day of ledger rows and must not perturb the shared
+// 30-day `optimizer:summary` memo (four other consumers read that).
+const optimizerSeries = createOptimizerSeries({
+  getDb,
+  counterfactualStore: optimizerCounterfactual,
+});
+
 // ---------------------------------------------------------------------------
 // Optimizer P2.4 (BET-1346) — background compaction scheduler + constraint
 // pinning wiring.
@@ -1449,6 +1460,9 @@ rpcHandlers = buildHandlers({
   // above so the RPC channel and the GET /api/optimizer/policy route share one
   // 60s memo + in-flight guard (no second DB query).
   optimizerSummary,
+  // BET-1369: the single shared windowed `optimizer:series` read model, built
+  // above — per-range 60s memo, shared by the RPC channel (the card's selector).
+  optimizerSeries,
   // BET-1336: quota-window forecast-at-reset read sources for the
   // optimizer:summary `windows` slice — the live polled snapshots + the
   // persisted observation history.

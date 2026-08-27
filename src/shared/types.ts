@@ -1477,6 +1477,10 @@ export const IPC = {
   // BET-1333: the Optimizer's memoized read model over the ledger. Returns
   // { supported, ...OptimizerSummary }.
   optimizerSummary: "optimizer:summary",
+  // BET-1369: the Optimizer's WINDOWED consumption read. The window is
+  // PER-CALL (24h/7d/30d) — `optimizer:summary` remains the fixed-30-day
+  // shared read whose memo must not be perturbed by the card's selector.
+  optimizerSeries: "optimizer:series",
   // Slash-command execution: invokes POST /session/{id}/command. Distinct
   // from opencode:prompt — the server treats commands specially (templates,
   // configured agent/model, etc.).
@@ -1951,6 +1955,29 @@ export type OptimizerSummary = {
     role: string;
     price: string;
   }[];
+};
+
+// BET-1369: the window selector on the optimizer card. The window is PER-CALL:
+// `optimizer:series` reads only the requested span — it does NOT parameterise
+// `optimizer:summary` (whose single 60s memo is shared by four consumers
+// besides this card).
+export type OptimizerRange = "24h" | "7d" | "30d";
+
+// BET-1369: the windowed consumption series (`optimizer:series` RPC), matched
+// to optimizer/series.mjs's buildOptimizerSeries return. `series` is zipped on
+// bucket key so the sent/counterfactual lines are always the same length;
+// `t` is the epoch-ms START of each bucket (the renderer never re-parses a
+// date string). `counterfactualAvailable` is true when any bucket has
+// maskedTokens > 0. `supported:false` = the box can't read opencode.db.
+export type OptimizerSeries = {
+  supported: boolean;
+  range: OptimizerRange;
+  bucket: "hour" | "day";
+  startMs: number;
+  endMs: number;
+  series: { t: number; tokensSent: number; maskedTokens: number }[];
+  counterfactualAvailable: boolean;
+  totals: { turns: number; cost: number; tokensSent: number; maskedTokens: number };
 };
 
 // A secret's METADATA — what the UI and `secret_list` see. NEVER carries the
