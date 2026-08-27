@@ -27,7 +27,7 @@ import {
   type MediaEventPayload,
   type WidgetEventPayload,
 } from "../../shared/types.js";
-import type { Api, SyncDelta } from "../../shared/api.js";
+import type { Api, SyncDelta, CtoState } from "../../shared/api.js";
 // BET-559: httpApi used to pull these claim helpers through the (now-retired)
 // mobile shell's pairingLogic re-export. The shared, process-boundary-safe
 // origin is src/shared/claim.mjs — desktop main (src/main/auth.ts) and the
@@ -372,7 +372,8 @@ type Kind =
   | "media"
   | "widget"
   | "stream"
-  | "sync";
+  | "sync"
+  | "ctoState";
 
 // Stream-kind listeners receive the DERIVED envelope `{sub, sessionId, payload}`
 // (see dispatchFrame), not just `payload` — the bus event carries the extra
@@ -397,6 +398,7 @@ const listeners: Record<Kind, Set<(p: unknown) => void>> = {
   widget: new Set(),
   stream: new Set(),
   sync: new Set(),
+  ctoState: new Set(),
 };
 
 // The live event stream is a WebSocket (not SSE/EventSource): iOS standalone
@@ -1506,6 +1508,43 @@ export const httpApi: Api = {
   // that case anyway).
   connectionRetryNow: () => {
     if (_controller) _controller.retryNow();
+  },
+
+  // -- adaptive CTO (BET-1384) --
+  // The engine publishes `{kind:"ctoState"}` on the /events WS on every state
+  // change; the sidebar badge/dot, the Digest-now spinner and the tonight line
+  // all render from this ONE event (§10.1). No polling.
+  onCtoState: (cb) => on<CtoState>("ctoState", cb),
+
+  // GET /api/cto/state — the initial-mount read of the same shape the bus
+  // event carries (§10.1). A rejected promise (server down / incompatible)
+  // degrades to "no known state" (inert dot, no badge) via the caller's catch.
+  ctoStateGet: async (): Promise<CtoState> => {
+    const url = `${serverBase()}/api/cto/state`;
+    const res = await fetch(url, { method: "GET", headers: authHeaders(clientToken()) });
+    if (res.status === 401) throw new AuthRequiredError();
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return (await res.json()) as CtoState;
+  },
+
+  // POST /api/cto/digest — joins or starts the §5.5 single-flight generation
+  // (server interplay keeps two views/devices from double-generating). The
+  // renderer reflects the server's `generationInFlight` as the button spinner.
+  // Failure returns {ok:false, error} (never a throw) so the pane can toast the
+  // cause per §10.2.
+  ctoDigestNow: async (): Promise<{ ok: boolean; error?: string }> => {
+    const url = `${serverBase()}/api/cto/digest`;
+    let res: Response;
+    try {
+      res = await fetch(url, { method: "POST", headers: authHeaders(clientToken()) });
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+    if (res.status === 401) throw new AuthRequiredError();
+    let json: { ok?: boolean; error?: string } = {};
+    try { json = (await res.json()) as typeof json; } catch { /* non-JSON body */ }
+    if (!res.ok) return { ok: false, error: json.error ?? `HTTP ${res.status}` };
+    return { ok: json.ok !== false, error: json.error };
   },
 };
 

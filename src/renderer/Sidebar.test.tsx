@@ -58,7 +58,14 @@ describe("Sidebar — nested-control keydown guard (BET-726 review cycle 1 Block
 
   function mountSidebar(): Harness {
     h = mount(
-      <Sidebar onOpenSettings={() => {}} onNewProject={() => {}} onNewSessionInProject={() => {}} onOpenResumeModal={() => {}} />,
+      <Sidebar
+        onOpenSettings={() => {}}
+        onNewProject={() => {}}
+        onNewSessionInProject={() => {}}
+        onOpenResumeModal={() => {}}
+        onOpenCto={() => {}}
+        ctoState={null}
+      />,
     );
     return h;
   }
@@ -160,7 +167,14 @@ describe("Sidebar — destructive-key modifier gate + Home/End (BET-937)", () =>
 
   function mountSidebar(): Harness {
     h = mount(
-      <Sidebar onOpenSettings={() => {}} onNewProject={() => {}} onNewSessionInProject={() => {}} onOpenResumeModal={() => {}} />,
+      <Sidebar
+        onOpenSettings={() => {}}
+        onNewProject={() => {}}
+        onNewSessionInProject={() => {}}
+        onOpenResumeModal={() => {}}
+        onOpenCto={() => {}}
+        ctoState={null}
+      />,
     );
     return h;
   }
@@ -243,7 +257,14 @@ describe("Sidebar — project close worktree-cleanup + toast path (killProject, 
 
   function mountSidebar(): Harness {
     h = mount(
-      <Sidebar onOpenSettings={() => {}} onNewProject={() => {}} onNewSessionInProject={() => {}} onOpenResumeModal={() => {}} />,
+      <Sidebar
+        onOpenSettings={() => {}}
+        onNewProject={() => {}}
+        onNewSessionInProject={() => {}}
+        onOpenResumeModal={() => {}}
+        onOpenCto={() => {}}
+        ctoState={null}
+      />,
     );
     return h;
   }
@@ -466,7 +487,14 @@ describe("Sidebar — only the active draft is highlighted (BET-1088)", () => {
       ],
     });
     h = mount(
-      <Sidebar onOpenSettings={() => {}} onNewProject={() => {}} onNewSessionInProject={() => {}} onOpenResumeModal={() => {}} />,
+      <Sidebar
+        onOpenSettings={() => {}}
+        onNewProject={() => {}}
+        onNewSessionInProject={() => {}}
+        onOpenResumeModal={() => {}}
+        onOpenCto={() => {}}
+        ctoState={null}
+      />,
     );
     await h.flush();
 
