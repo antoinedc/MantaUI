@@ -177,6 +177,17 @@ export function parseProgressLine(line) {
   return { step, total, label: m[3].trim() };
 }
 
+// Strip SGR colour codes and a leading status glyph from a self-update log
+// line. The shell helpers in scripts/self-update.sh colour their output and
+// prefix a glyph; both are noise once the text is interpolated into the UI
+// banner, where "Update failed: ✗ …" reads as a doubled error.
+function cleanLogLine(line) {
+  return line
+    .replace(/\x1b\[[0-9;]*m/g, "")
+    .replace(/^[✗✓!▸]\s*/, "")
+    .trim();
+}
+
 // Last non-empty line of the self-update log, or a fallback derived from the
 // error/exit that triggered the failure report. Never throws.
 function lastLogLine(logPath, err) {
@@ -184,7 +195,7 @@ function lastLogLine(logPath, err) {
   try {
     const lines = readFileSync(logPath, "utf8")
       .split(/\r?\n/)
-      .map((l) => l.trim())
+      .map(cleanLogLine)
       .filter((l) => l.length > 0);
     return lines.length > 0 ? lines[lines.length - 1] : fallback;
   } catch {

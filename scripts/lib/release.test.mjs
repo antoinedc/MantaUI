@@ -379,6 +379,89 @@ test("replace_release_payload: signals when it swapped node_modules from the pay
   rmSync(dest, { recursive: true, force: true });
 });
 
+// A package whose payload owns exactly ONE path: `runtime`. Keeps the low-disk
+// / copy-failure cases deterministic — the first (and only) staged copy is
+// always `runtime`, so assertions on `/copy failed for runtime/` are stable.
+function makeRuntimeOnlyPkg() {
+  const pkg = mkdtempSync(join(tmpdir(), "manta-rel-pkg-"));
+  writeFileSync(
+    join(pkg, "RELEASE.json"),
+    JSON.stringify({ name: "manta", version: "2.0.0", includes: ["runtime"] }),
+  );
+  writeTree(pkg, { "runtime/node/bin/node": "new node binary" });
+  return pkg;
+}
+
+test("replace_release_payload: copy failure carries the underlying reason", () => {
+  // The regression: the swap used to die with only "<rel> copy failed" — the
+  // actionable half ("No space left on device") lived on the cp stderr line
+  // BEFORE the die line, which the caller surfaces last and therefore threw
+  // away. Folding cp_err into the die message fixes diagnosability.
+  const pkg = makeRuntimeOnlyPkg();
+  const dest = makeInstalledDest();
+  writeTree(dest, { "runtime/node/bin/node": "old node binary" });
+  try {
+    const r = sourceAndRun(`
+      cp() { echo "cp: cannot create regular file: No space left on device" >&2; return 1; }
+      replace_release_payload '${pkg}' '${dest}' '${NODE_CMD}'
+    `);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stdout, /copy failed for runtime: /);
+    assert.match(r.stdout, /No space left on device/);
+  } finally {
+    rmSync(pkg, { recursive: true, force: true });
+    rmSync(dest, { recursive: true, force: true });
+  }
+});
+
+test("replace_release_payload: preflight refuses when disk is short, mutating nothing", () => {
+  // available (1000 KB) < needed (500000 KB) → refuse before ANY staged copy.
+  // The "nothing was mutated" half is the point: not a .new dir, not a
+  // touched original.
+  const pkg = makeRuntimeOnlyPkg();
+  const dest = makeInstalledDest();
+  writeTree(dest, { "runtime/node/bin/node": "old node binary" });
+  const before = JSON.stringify(readTree(dest));
+  try {
+    const r = sourceAndRun(`
+      du() { echo "500000 $2"; }
+      df() { printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\n/dev/x 100 100 1000 99%% /\\n'; }
+      replace_release_payload '${pkg}' '${dest}' '${NODE_CMD}'
+    `);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stdout, /not enough disk space/);
+    const after = readTree(dest);
+    assert.equal(JSON.stringify(after), before, "dest must be untouched when refused");
+    for (const rel of allPaths(dest)) {
+      assert.ok(!rel.endsWith(".new"), `staging dir survived: ${rel}`);
+      assert.ok(!rel.includes(".new/"), `staging dir survived: ${rel}`);
+    }
+  } finally {
+    rmSync(pkg, { recursive: true, force: true });
+    rmSync(dest, { recursive: true, force: true });
+  }
+});
+
+test("replace_release_payload: preflight stays out of the way when a probe fails", () => {
+  // du returning 1 (no `du`, unusual mount) must NOT become a new way for a
+  // healthy update to fail: require_free_space is non-fatal and the swap
+  // proceeds exactly as it does today.
+  const pkg = makeRuntimeOnlyPkg();
+  const dest = makeInstalledDest();
+  writeTree(dest, { "runtime/node/bin/node": "old node binary" });
+  try {
+    const r = sourceAndRun(`
+      du() { return 1; }
+      replace_release_payload '${pkg}' '${dest}' '${NODE_CMD}'
+    `);
+    assert.equal(r.status, 0, r.stdout);
+    assert.equal(readTree(dest)["runtime/node/bin/node"], "new node binary");
+  } finally {
+    rmSync(pkg, { recursive: true, force: true });
+    rmSync(dest, { recursive: true, force: true });
+  }
+});
+
 // --- release_is_current: the updater's skip decision ------------------------
 //
 // The regression this pins: the check used to compare `version` only, so a

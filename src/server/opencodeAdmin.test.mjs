@@ -130,7 +130,38 @@ describe("runServerSelfUpdate", () => {
       timeoutMs: 500,
     });
     assert.equal(result.ok, false);
-    assert.equal(result.error, "✗ self-update: manifest fetch failed: https://mantaui.com/releases/");
+    assert.equal(result.error, "self-update: manifest fetch failed: https://mantaui.com/releases/");
+  });
+
+  it("strips SGR colour codes and the leading status glyph from the last log line", async () => {
+    // The self-update shell helpers colour their output and prefix a glyph;
+    // lastLogLine is the one point every consumer of the banner flows through.
+    // A coloured+glyph failure line must reach the banner clean: no escape
+    // bytes, no leading ✗ (which would read as a doubled error under
+    // "Update failed: …").
+    const logPath = statePath("self-update.log");
+    mkdirSync(dirname(logPath), { recursive: true });
+    writeFileSync(
+      logPath,
+      "\u001b[31m✗ release payload: copy failed for runtime: cp: No space left on device\u001b[0m\n",
+    );
+
+    const child = new EventEmitter();
+    child.pid = 4242;
+    child.unref = () => {};
+    const spawn = () => {
+      setImmediate(() => setTimeout(() => child.emit("exit", 1), 0));
+      return child;
+    };
+    const result = await runServerSelfUpdate("/abs/scripts/self-update.sh", spawn, {
+      timeoutMs: 500,
+    });
+    assert.equal(result.ok, false);
+    assert.ok(!/\u001b/.test(result.error), "no escape bytes may reach the banner");
+    assert.equal(
+      result.error,
+      "release payload: copy failed for runtime: cp: No space left on device",
+    );
   });
 
   it("resolves ok:true when the child exits zero fast", async () => {
