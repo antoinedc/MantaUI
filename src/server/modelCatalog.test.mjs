@@ -140,10 +140,11 @@ function stagedFetch({ catBody = FIXTURE, priceBody, priceOk = true } = {}) {
 }
 
 // Mirrors the REAL api.json shape: per-model fields live under `cost`, and the
-// models object keys are INCONSISTENT across providers — `qwen`/`anthropic` use
-// bare keys (`qwen3.6-27b`, `claude-opus-4-7`), while `hpc-ai` keys its
-// deepseek models with an already-qualified id (`deepseek/…`). Neither field
-// placement nor key convention can be assumed.
+// models object keys are INCONSISTENT across providers — `deepseek`/`qwen` use
+// bare keys (`deepseek-chat`), `nvidia` uses qualified keys (`nvidia/…`), and
+// resellers key THE SAME model under a cross-provider id (`deepseek/…` under a
+// non-deepseek section). Neither cost placement nor key convention can be
+// assumed, and the first-party rate must always win.
 const PRICE_PAYLOAD = {
   qwen: {
     models: {
@@ -152,14 +153,20 @@ const PRICE_PAYLOAD = {
   },
   anthropic: {
     models: {
-      "claude-opus-4-7": { cost: { input: 5, output: 25 } },
+      "claude-opus-4-5": { cost: { input: 3, output: 15 } },
     },
   },
-  // Already-qualified object key: must join as `deepseek/deepseek-v4-flash`,
-  // never double-prefixed to `hpc-ai/deepseek/…`.
-  "hpc-ai": {
+  deepseek: {
     models: {
-      "deepseek/deepseek-v4-flash": { cost: { input: 0.003 } },
+      "deepseek-chat": { cost: { input: 0.4, output: 1.3 } },
+    },
+  },
+  nvidia: {
+    models: {
+      // Qualified key under its own provider → used as-is.
+      "nvidia/nemotron-3-ultra-550b-a55b": { cost: { input: 0.5, output: 2.2 } },
+      // Qualified under a DIFFERENT provider (deepseek-ai) → reseller, skipped.
+      "deepseek-ai/deepseek-v4-pro": { cost: { input: 1.0, output: 2.5 } },
     },
   },
   min: {
@@ -171,11 +178,12 @@ const PRICE_PAYLOAD = {
   },
 };
 
-test("buildPriceMap joins bare and already-qualified api.json keys, pruning to knownIds", () => {
+test("buildPriceMap prices each entry's own first-party id (bare → prefixed, own-qualified → as-is, cross → skipped)", () => {
   const map = buildPriceMap(PRICE_PAYLOAD, new Set([
-    "qwen/qwen3.6-27b", // bare object key → provider-prefixed form
-    "anthropic/claude-opus-4-7", // bare object key → provider-prefixed form
-    "deepseek/deepseek-v4-flash", // already-qualified object key → as-is
+    "qwen/qwen3.6-27b", // bare object key → provider-prefixed
+    "anthropic/claude-opus-4-5", // bare object key → provider-prefixed
+    "deepseek/deepseek-chat", // bare object key → provider-prefixed
+    "nvidia/nemotron-3-ultra-550b-a55b", // already its own provider's id
   ]));
   assert.deepEqual(map.get("qwen/qwen3.6-27b"), {
     input: 0.002,
@@ -183,13 +191,37 @@ test("buildPriceMap joins bare and already-qualified api.json keys, pruning to k
     cacheRead: 0.001,
     cacheWrite: 0.00125,
   });
-  assert.deepEqual(map.get("anthropic/claude-opus-4-7"), { input: 5, output: 25 });
-  // An already-qualified object key is never double-prefixed or re-keyed.
-  assert.deepEqual(map.get("deepseek/deepseek-v4-flash"), { input: 0.003 });
-  assert.equal(map.get("hpc-ai/deepseek/deepseek-v4-flash"), undefined);
-  assert.equal(map.get("hpc-ai/deepseek-v4-flash"), undefined);
+  assert.deepEqual(map.get("anthropic/claude-opus-4-5"), { input: 3, output: 15 });
+  assert.deepEqual(map.get("deepseek/deepseek-chat"), { input: 0.4, output: 1.3 });
+  assert.deepEqual(map.get("nvidia/nemotron-3-ultra-550b-a55b"), { input: 0.5, output: 2.2 });
+  // A cross-provider-qualified key never attaches any price.
+  assert.equal(map.has("deepseek-ai/deepseek-v4-pro"), false);
+  assert.equal(map.has("nvidia/deepseek-ai/deepseek-v4-pro"), false);
   // A knownId with no matching provider/model is simply absent.
   assert.equal(map.has("minimax/MiniMax-M3"), false);
+});
+
+test("buildPriceMap never lets a reseller's qualified key overwrite the first-party reference", () => {
+  // The BET-1367 contamination case, with the real cited numbers: deepseek's
+  // own page quotes `deepseek-v4-pro` at 0.435/0.87, but `novita-ai` (and many
+  // resellers) also key `deepseek/deepseek-v4-pro` at 1.6/3.2. The landed
+  // reference must be the FIRST-PARTY rate, never the reseller's — that is the
+  // circularity the router's guard exists to prevent.
+  const resellerPayload = {
+    deepseek: {
+      models: { "deepseek-v4-pro": { cost: { input: 0.435, output: 0.87, cache_read: 0.003625 } } },
+    },
+    "novita-ai": {
+      models: { "deepseek/deepseek-v4-pro": { cost: { input: 1.6, output: 3.2 } } },
+    },
+  };
+  const map = buildPriceMap(resellerPayload, new Set(["deepseek/deepseek-v4-pro"]));
+  assert.deepEqual(map.get("deepseek/deepseek-v4-pro"), {
+    input: 0.435,
+    output: 0.87,
+    cacheRead: 0.003625,
+  });
+  assert.equal(map.has("novita-ai/deepseek/deepseek-v4-pro"), false);
 });
 
 test("buildPriceMap drops tiers/context and maps unknown rates to undefined (never 0)", () => {

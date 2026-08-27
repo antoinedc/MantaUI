@@ -96,10 +96,13 @@ export function normalizePayload(payload) {
  * finite number >= 0 becomes `undefined`, NEVER 0 (unknown and free are
  * different). Upstream `tiers` / `context_over_200k` / audio / reasoning rates
  * are deliberately DROPPED — context-tiered pricing is not modelled anywhere in
- * this codebase and a partial model would be worse than none. A model is keyed
- * by whichever of its own ids (the api.json object key, or the
- * provider-prefixed form) is present in the catalogue — never double-prefixed,
- * never re-keyed.
+ * this codebase and a partial model would be worse than none. Each entry may
+ * price ONLY its own first-party catalogue id: a bare object key is prefixed
+ * with its own provider (`deepseek-v4-pro` → `deepseek/deepseek-v4-pro`), a key
+ * already qualified under its own provider is used as-is (`nvidia/…`), and a
+ * key qualified under a DIFFERENT provider — a reseller keying
+ * `deepseek/…` — is SKIPPED so an arbitrary reseller can never overwrite the
+ * real owner's authoritative rate.
  */
 export function buildPriceMap(payload, knownIds) {
   const known = knownIds instanceof Set ? knownIds : new Set([]);
@@ -109,6 +112,7 @@ export function buildPriceMap(payload, knownIds) {
   for (const [providerId, provider] of Object.entries(payload ?? {})) {
     const models = provider && typeof provider === "object" ? provider.models : null;
     if (!models || typeof models !== "object") continue;
+    const prefix = `${providerId}/`;
     for (const [modelKey, m] of Object.entries(models)) {
       if (m === null || typeof m !== "object") continue;
       const cost = m.cost && typeof m.cost === "object" ? m.cost : null;
@@ -120,23 +124,29 @@ export function buildPriceMap(payload, knownIds) {
       if (input === undefined && output === undefined && cacheRead === undefined && cacheWrite === undefined) {
         continue;
       }
-      const priced = {
+      // Each entry may price ONLY its own first-party catalogue id. api.json
+      // object keys are inconsistent: some are bare (`deepseek-v4-pro` under
+      // `deepseek`), some qualified under their own provider (`nvidia/…` under
+      // `nvidia`), and many are qualified under a DIFFERENT provider (a
+      // reseller keying `deepseek/deepseek-v4-pro`). The authoritative
+      // reference is the first-party rate — so a cross-provider key is SKIPPED,
+      // never used to price another provider's catalogue id (that overwrites
+      // the real owner's rate with an arbitrary reseller's).
+      let key;
+      if (modelKey.startsWith(prefix)) {
+        key = modelKey; // already this provider's qualified id
+      } else if (modelKey.includes("/")) {
+        continue; // qualified under a different provider → reseller, skip
+      } else {
+        key = `${providerId}/${modelKey}`;
+      }
+      if (!known.has(key)) continue;
+      prices.set(key, {
         ...(input !== undefined ? { input } : {}),
         ...(output !== undefined ? { output } : {}),
         ...(cacheRead !== undefined ? { cacheRead } : {}),
         ...(cacheWrite !== undefined ? { cacheWrite } : {}),
-      };
-      // Key construction is deliberately data-agnostic. api.json keys are
-      // inconsistent across providers: some are already fully qualified
-      // (`nvidia/llama-3.3-…`), some bare (`claude-opus-4-7` under `anthropic`),
-      // some carry a different provider's prefix (`hpc-ai` → `deepseek/…`). Try
-      // the object key first, then the provider-prefixed form; attach under
-      // whichever of the entry's own ids is actually present in the catalogue.
-      // Never double-prefix (`nvidia/nvidia/…`) and never hunt across providers.
-      let key = modelKey;
-      if (!known.has(key)) key = `${providerId}/${modelKey}`;
-      if (!known.has(key)) continue;
-      prices.set(key, priced);
+      });
     }
   }
   return prices;
