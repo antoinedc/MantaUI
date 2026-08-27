@@ -81,6 +81,11 @@ const DEFAULT_CONFIG = {
   modelRouting: {
     preset: "balanced",
   },
+  // Adaptive CTO (BET-1376). Top-level master switch for the background
+  // engine; DISTINCT from the nested on-call CTO `cto.enabled` above (that
+  // gates the voice call window / read belt). Default false until the system
+  // ships. With it off the engine reports `disabled` and starts no work.
+  ctoEnabled: false,
 };
 
 let _config = null;

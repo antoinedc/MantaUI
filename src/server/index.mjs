@@ -136,6 +136,8 @@ import {
 import { endpointSummary as routingEndpointSummary, providerTokenTotals, ROUTING_LEDGER_WINDOW_MS, fetchLedgerRows } from "./modelLedger.mjs";
 import * as appControl from "./appControl.mjs";
 import * as cto from "./cto.mjs";
+import * as ctoEngine from "./ctoEngine.mjs";
+import { ledgerStore, engineStateStore } from "./ctoStores.mjs";
 import { searchMessages } from "./messageSearch.mjs";
 import {
   dispatch as mediaDispatch,
@@ -1648,6 +1650,39 @@ async function maybeEnsureCtoAgent() {
 }
 void maybeEnsureCtoAgent();
 
+// ----- Adaptive CTO engine (BET-1376) -----
+// The background engine (spec §3, §10.1, §13.3). Created + started ALWAYS so
+// `/api/cto/state` answers and the sidebar dot reflects config live; actual
+// work is gated INSIDE the engine on the top-level `ctoEnabled` config field
+// (default false). It publishes `{kind:"ctoState"}` on the shared bus on every
+// state change (needs-you count, status dot, generation-in-flight, tonight
+// count); the renderer subscribes over /events, with `GET /api/cto/state` for
+// initial mount. The watchdog timer below is a SEPARATE deterministic monitor
+// (§13.3) — deliberately registered here, NOT inside the engine.
+const adaptiveCto = ctoEngine.createCtoEngine({
+  configGet: () => local.configGet(),
+  ledger: ledgerStore,
+  engineState: engineStateStore,
+  publish: (evt) => bus.publish(evt),
+});
+adaptiveCto.start();
+
+// Watchdog (§13.3): checks engine liveness + ambient spend rate; > 2× expected
+// hourly burn → auto-thrifty, > 4× → auto-pause + blocker card. Spend is not
+// measured yet (the budget reading lands with a later pipeline issue), so the
+// defaults are 0/0 → never trips and never pauses; the pure logic is wired so
+// a real spend source simply slots in.
+const adaptiveCtoWatchdog = ctoEngine.createWatchdog({
+  engine: adaptiveCto,
+  getSpendPerHour: async () => 0,
+  expectedHourlyBurn: async () => 0,
+});
+const stopAdaptiveCtoWatchdog = startPoller(adaptiveCtoWatchdog.tick, {
+  intervalMs: ctoEngine.TICK_INTERVAL_MS,
+  label: "cto-watchdog",
+});
+void stopAdaptiveCtoWatchdog;
+
 // On-call CTO inbound funnel (Issue 2): the single place a CTO-bound event
 // enters the box. Producers (the send_to_cto tool, the watcher poller, a
 // scheduled prompt targeting the CTO, a webhook routed to the CTO) all call
@@ -1861,6 +1896,13 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
     delegateEngine.observeEvent(evt);
   } catch (e) {
     console.warn("[delegate] observeEvent failed:", e?.message ?? e);
+  }
+  // Adaptive CTO engine (BET-1376): event ingestion. The one CTO consumer that
+  // keeps running while paused (§10.6-5). Never throws into the pump.
+  try {
+    adaptiveCto.observeEvent(evt);
+  } catch (e) {
+    console.warn("[cto-engine] observeEvent failed:", e?.message ?? e);
   }
   try {
     usageStopEngine.observeEvent(evt);
@@ -3555,6 +3597,24 @@ const handleRequest = async (req, res) => {
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
       // Errors return a message the model can act on, never a bare 500.
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // ---------- Adaptive CTO (BET-1376) ----------
+  // GET /api/cto/state → {enabled, dot, needsYouCount, generationInFlight, tonightCount}
+  // The renderer's initial-mount read (§10.1); live updates ride the
+  // `{kind:"ctoState"}` bus event over /events. Behind the /api/* Bearer gate.
+  if (path === "/api/cto/state") {
+    try {
+      if (req.method === "GET") {
+        const state = await adaptiveCto.getState();
+        respondJson(res, 200, state);
+        return;
+      }
+      respondJson(res, 405, { error: "method not allowed" });
+    } catch (e) {
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
