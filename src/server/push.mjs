@@ -201,6 +201,12 @@ export function setDesktopPresence({ idleSeconds, lockedSeconds } = {}, now = Da
 export function getDesktopPresence() {
   return _desktop;
 }
+// Minimal read hook for the Adaptive CTO evidence layer (§5.4): the epoch-ms
+// of the last desktop heartbeat (0 before the first beat). Purely additive —
+// the CTO reads this, it never writes the shared store.
+export function getLastDesktopHeartbeat() {
+  return _desktop.lastSeen;
+}
 /** The epoch-ms instant at which this desktop is "away". Two conditions, ONE
  * answer (min): whichever trips first wins, so a machine that locks after 2 min
  * crosses at lock+5min and idle+10min never fires separately. Infinity when

@@ -49,6 +49,16 @@ import {
   cardsStore,
 } from "./ctoStores.mjs";
 import { startPoller } from "./startPoller.mjs";
+import { createSeenIdFilter } from "./seenIds.mjs";
+import { getDesktopPresence as pushGetDesktopPresence } from "./push.mjs";
+import {
+  CHANNEL_EVENT,
+  computeLastSeen,
+  eventSessionID,
+  isUserPromptEvent,
+  normalizeEvidence,
+  presenceState,
+} from "./ctoEvidence.mjs";
 
 // Actor tag stamped on every engine RPC call / ledger row (spec §3.3).
 export const ACTOR = "cto";
@@ -187,6 +197,10 @@ export function createCtoEngine(deps = {}) {
     tickIntervalMs = TICK_INTERVAL_MS,
     getCounts = defaultGetCounts,
     track = createRateTracker({ now }),
+    // A5 evidence/presence seams (injected I/O — nothing here touches tmux /
+    // push directly; index.mjs supplies the real resolvers).
+    getSessionInfo = async () => ({ owner: "user", project: undefined }),
+    getDesktopPresence = pushGetDesktopPresence,
   } = deps;
 
   let disposed = false;
@@ -196,6 +210,14 @@ export function createCtoEngine(deps = {}) {
   let heartbeatAt = now();
   let tickHandle = null;
   let lastPublishedSerialized = null;
+
+  // A5 presence inputs (spec §5.4): lastSeen = max(desktop heartbeat, app
+  // open, user prompt). The desktop heartbeat is read live via
+  // getDesktopPresence(); prompts are stamped here from the event stream. The
+  // seenId filter folds global + scoped-stream duplicates into one evidence
+  // row (createSeenIdFilter — the event id, "", rolls a cache of seen ids).
+  const seen = createSeenIdFilter();
+  let promptTs = 0;
 
   // Ledger writes are best-effort: a ledger I/O failure must never take the
   // engine (and its state machine) down with it.
@@ -412,12 +434,67 @@ export function createCtoEngine(deps = {}) {
   }
 
   // Event ingestion — the ONE thing that keeps running while paused (§10.6-5).
-  // Driven from index.mjs's event pump (not a timer). The skeleton ingests
-  // nothing yet; this is the seam later pipeline stages (facts, segmentation,
-  // presence) subscribe at. Deterministic — never throws into the pump.
-  function observeEvent() {
+  // Driven from index.mjs's event pump (not a timer); the engine is just
+  // another consumer (§4.1). Consumes the opencode stream into normalized
+  // evidence rows appended to the A1 ledger (deduped, pipeline-scoped), and
+  // stamps prompt activity for presence. Deterministic — never throws into
+  // the pump.
+  function observeEvent(evt) {
     if (disposed) return;
     heartbeatAt = now();
+    if (!evt || typeof evt !== "object") return;
+    // Presence (§5.4): a user prompt submission proves the user is at the desk.
+    if (isUserPromptEvent(evt)) {
+      const t = now();
+      if (t > promptTs) promptTs = t;
+    }
+    // The SAME opencode event arrives on both the global and the per-directory
+    // scoped stream — fold the duplicate so it counts once.
+    const id = evt?.id;
+    if (typeof id === "string" && id && seen.seen(id)) return;
+    // Evidence append is best-effort I/O; never let it throw into the pump.
+    void (async () => {
+      try {
+        let owner = "user";
+        let project;
+        const sid = eventSessionID(evt);
+        if (sid) {
+          const info = await getSessionInfo(sid);
+          owner = info?.owner ?? "user";
+          project = info?.project;
+        }
+        const row = normalizeEvidence(evt, { owner, project, now: now() });
+        if (!row) return;
+        await ledgerLog({
+          channel: CHANNEL_EVENT,
+          sessionID: row.sessionID,
+          project: row.project,
+          kind: row.kind,
+          salience: row.salience,
+          refs: row.refs,
+        });
+      } catch {
+        /* best-effort, never throw into the pump */
+      }
+    })();
+  }
+
+  // Presence/absence (§5.4): current state + lastSeen + how long the user has
+  // been absent (now − lastSeen). Desktop heartbeat is read live; prompts come
+  // from observedEvent stamping. Exposed to later pipeline consumers.
+  function getPresence() {
+    const t = now();
+    const desktop = getDesktopPresence();
+    const lastSeen = computeLastSeen({
+      desktopHeartbeatTs: desktop?.lastSeen ?? 0,
+      appOpenTs: 0,
+      promptTs,
+    });
+    return {
+      state: presenceState({ heartbeats: desktop, lastSeen, now: t }),
+      lastSeen,
+      absenceDelta: Math.max(0, t - lastSeen),
+    };
   }
 
   function start() {
@@ -455,6 +532,7 @@ export function createCtoEngine(deps = {}) {
     beginEphemeral,
     beginDelegateJob,
     observeEvent,
+    getPresence,
     getState,
     lastHeartbeat,
     get rateTracker() {

@@ -1659,11 +1659,53 @@ void maybeEnsureCtoAgent();
 // count); the renderer subscribes over /events, with `GET /api/cto/state` for
 // initial mount. The watchdog timer below is a SEPARATE deterministic monitor
 // (§13.3) — deliberately registered here, NOT inside the engine.
+
+// A5 evidence ingestion: resolve an opencode session's owner (user/job/cto)
+// + owning project from tmux, then cache per-session (owner is stable for a
+// session's life — delegate jobs are stamped `job` at start, the CTO's own
+// sessions `cto`, everything else `user`). Only the engine's evidence
+// ingestion calls it (~once per new session), so the tmux cost is bounded and
+// the cache is trimmed to keep a long-lived process from growing unbounded.
+const sessionInfoCache = new Map();
+async function resolveSessionInfo(sessionID) {
+  if (!sessionID || typeof sessionID !== "string") {
+    return { owner: "user", project: undefined };
+  }
+  const hit = sessionInfoCache.get(sessionID);
+  if (hit) return hit;
+  let owner = "user";
+  let project;
+  try {
+    const projects = await tmux.listProjects();
+    outer: for (const p of projects) {
+      for (const w of p.windows || []) {
+        if (w.opencodeSessionId === sessionID) {
+          owner = w.owner ?? "user";
+          project = p.tmuxSession;
+          break outer;
+        }
+      }
+    }
+  } catch {
+    /* unreadable owner → the spec's "user" default */
+  }
+  if (sessionInfoCache.size > 4096) {
+    let toDrop = sessionInfoCache.size - 2048;
+    for (const key of sessionInfoCache.keys()) {
+      if (toDrop-- <= 0) break;
+      sessionInfoCache.delete(key);
+    }
+  }
+  sessionInfoCache.set(sessionID, { owner, project });
+  return { owner, project };
+}
+
 const adaptiveCto = ctoEngine.createCtoEngine({
   configGet: () => local.configGet(),
   ledger: ledgerStore,
   engineState: engineStateStore,
   publish: (evt) => bus.publish(evt),
+  getSessionInfo: resolveSessionInfo,
 });
 adaptiveCto.start();
 
