@@ -217,6 +217,36 @@ test("buildOptimizerSeries: nothing applied (observe/flags off) → usd 0 while 
   assert.ok(out.saved.potentialUsd > 0, "potential still shows what it would save");
 });
 
+test("buildOptimizerSeries: mixed known+unknown tokens + re-warm → partial basis, weighted-average pricing, subtracted re-warm", async () => {
+  const nowMs = new Date(2026, 7, 24, 12, 0, 0).getTime();
+  const todayLoc = new Date(2026, 7, 24, 0, 0, 0);
+  const store = fakeStore({
+    days: {
+      [localDay(todayLoc)]: {
+        maskedTokens: 3000,
+        appliedTokens: 3000,
+        rewarmTokens: 1000, // 1k re-warm at cacheWrite−cacheRead = 2.7/Mtok
+        byModel: { "claude/sonnet": 1000, unknown: 2000 },
+      },
+    },
+  });
+  const out = await buildOptimizerSeries({
+    range: "7d",
+    fetchRows: async () => [],
+    now: nowMs,
+    counterfactualStore: store,
+    modelRates: async () => ({ "claude/sonnet": SONNET_COST }),
+  });
+  const sonnet = promptSideRate(SONNET_COST);
+  // known 1000 @ sonnet + unknown 2000 at the weighted average (= sonnet, the
+  // only known rate), minus re-warm 1000/Mtok × (cacheWrite − cacheRead).
+  const expected = (3000 / 1e6) * sonnet.rate - (1000 / 1e6) * (sonnet.cacheWrite - sonnet.cacheRead);
+  assert.ok(Math.abs(out.saved.usd - expected) < 1e-9);
+  assert.equal(out.saved.potentialUsd, out.saved.usd); // all applied
+  assert.equal(out.saved.basis, "partial");
+  assert.ok(Math.abs(out.saved.pricedShare - 1 / 3) < 1e-9);
+});
+
 test("buildOptimizerSeries: tokens exist but no pricing available → usd null, unpriced", async () => {
   const nowMs = new Date(2026, 7, 24, 12, 0, 0).getTime();
   const todayLoc = new Date(2026, 7, 24, 0, 0, 0);

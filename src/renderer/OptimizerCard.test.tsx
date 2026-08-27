@@ -242,6 +242,15 @@ describe("OptimizerCard — BET-1369 range selector + windowed stats", () => {
     expect(h.text()).not.toContain("not priced");
   });
 
+  it("a sub-dollar saving renders two decimals (≈ $0.37), never rounded to $0", async () => {
+    const saved: OptimizerSeries["saved"] = { usd: 0.37, potentialUsd: 0.4, basis: "measured", pricedShare: 1 };
+    setApi({ optimizerSeries: (range) => Promise.resolve(seriesFixture({ range, saved })) });
+    h = mount(<OptimizerCard />);
+    await h.flush();
+    expect(h.text()).toContain("≈ $0.37");
+    expect(h.text()).not.toContain("≈ $0\n"); // no whole-dollar "$0"
+  });
+
   it("no counterfactual in a 24h window shows the hourly explanation under the legend", async () => {
     setApi();
     h = mount(<OptimizerCard />);

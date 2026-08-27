@@ -198,10 +198,10 @@ export function OptimizerCard() {
 
   // BET-1370: the window's savings now come from the SERIES — real per-model
   // prompt-side pricing minus the cache re-warm the mask forced, computed
-  // server-side — not a flat $3/Mtok counterfactual guess. `usd` is null when
-  // the applied turns aren't priceable ("not priced"); negative when the
-  // re-warm cost exceeded the saving (never clamped). While the series is
-  // in flight / unsupported, fall back to the unpriced state.
+  // server-side (the old whole-dollar per-million-token guess is gone). `usd`
+  // is null when the applied turns aren't priceable ("not priced"); negative
+  // when the re-warm cost exceeded the saving (never clamped). While the series
+  // is in flight / unsupported, fall back to the unpriced state.
   const savedUsd = sd ? sd.saved.usd : null;
   const savedBasis = sd ? sd.saved.basis : "unpriced";
   const savedPricedShare = sd ? sd.saved.pricedShare : 0;
