@@ -294,6 +294,12 @@ export type AppConfig = {
     // Whether the call window listens continuously (Issue 3). Default false.
     alwaysListening?: boolean;
   };
+  // ----- Adaptive CTO (BET-1376) -----
+  // Top-level master switch for the background engine. DISTINCT from the
+  // nested on-call CTO `cto.enabled` above (that gates the voice call window /
+  // read belt). Default false until the system is shipped. With it OFF the
+  // engine reports `disabled` and starts no work.
+  ctoEnabled?: boolean;
   // ----- Manta Optimizer (BET-1342 / Phase 2) -----
   // Master switch for the optimizer. DEFAULT FALSE. Opt-in: with it OFF the
   // optimizer changes nothing. It does NOT gate Automatic Manta Routing —
