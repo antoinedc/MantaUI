@@ -42,6 +42,12 @@ export { normalize, entryHandles, createModelIndex } from "../shared/modelCatalo
 // consumed indirectly via opencode's `/provider`; this one is not.
 export const CATALOG_URL = "https://models.dev/models.json";
 
+// The provider-keyed view of models.dev. Fetched ONLY for its per-model
+// `cost`, which the provider-agnostic models.json does not carry. The
+// entries themselves still come from CATALOG_URL — this is a merge, never a
+// source swap, because the entry ids/handles drive identity resolution.
+export const CATALOG_PRICE_URL = "https://models.dev/api.json";
+
 // Cache last-good copy to state – `statePath` lands inside the box's state
 // dir (or the test sandbox when MANTA_STATE_HOME is set).
 export const CACHE_PATH = statePath("model-catalog.json");
@@ -75,6 +81,75 @@ export function normalizePayload(payload) {
       .filter((e) => e !== null);
   }
   return [];
+}
+
+// ---------------------------------------------------------------------------
+// Price map (BET-1367): models.dev api.json per-model cost, keyed by catalogue id
+// ---------------------------------------------------------------------------
+
+/**
+ * PURE. Build a `Map<"<provider>/<model>", {input, output, cacheRead, cacheWrite}>`
+ * price map from the models.dev api.json payload, restricted to the ids in
+ * `knownIds`. Each model's `cost` object's snake-cased fields
+ * (`input`/`output`/`cache_read`/`cache_write`) are canonicalised to the same
+ * camel shape opencode's `_normalizePrice` produces; a value that is not a
+ * finite number >= 0 becomes `undefined`, NEVER 0 (unknown and free are
+ * different). Upstream `tiers` / `context_over_200k` / audio / reasoning rates
+ * are deliberately DROPPED — context-tiered pricing is not modelled anywhere in
+ * this codebase and a partial model would be worse than none. Each entry may
+ * price ONLY its own first-party catalogue id: a bare object key is prefixed
+ * with its own provider (`deepseek-v4-pro` → `deepseek/deepseek-v4-pro`), a key
+ * already qualified under its own provider is used as-is (`nvidia/…`), and a
+ * key qualified under a DIFFERENT provider — a reseller keying
+ * `deepseek/…` — is SKIPPED so an arbitrary reseller can never overwrite the
+ * real owner's authoritative rate.
+ */
+export function buildPriceMap(payload, knownIds) {
+  const known = knownIds instanceof Set ? knownIds : new Set([]);
+  const prices = new Map();
+  const norm = (v) =>
+    typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined;
+  for (const [providerId, provider] of Object.entries(payload ?? {})) {
+    const models = provider && typeof provider === "object" ? provider.models : null;
+    if (!models || typeof models !== "object") continue;
+    const prefix = `${providerId}/`;
+    for (const [modelKey, m] of Object.entries(models)) {
+      if (m === null || typeof m !== "object") continue;
+      const cost = m.cost && typeof m.cost === "object" ? m.cost : null;
+      if (!cost) continue;
+      const input = norm(cost.input);
+      const output = norm(cost.output);
+      const cacheRead = norm(cost.cache_read);
+      const cacheWrite = norm(cost.cache_write);
+      if (input === undefined && output === undefined && cacheRead === undefined && cacheWrite === undefined) {
+        continue;
+      }
+      // Each entry may price ONLY its own first-party catalogue id. api.json
+      // object keys are inconsistent: some are bare (`deepseek-v4-pro` under
+      // `deepseek`), some qualified under their own provider (`nvidia/…` under
+      // `nvidia`), and many are qualified under a DIFFERENT provider (a
+      // reseller keying `deepseek/deepseek-v4-pro`). The authoritative
+      // reference is the first-party rate — so a cross-provider key is SKIPPED,
+      // never used to price another provider's catalogue id (that overwrites
+      // the real owner's rate with an arbitrary reseller's).
+      let key;
+      if (modelKey.startsWith(prefix)) {
+        key = modelKey; // already this provider's qualified id
+      } else if (modelKey.includes("/")) {
+        continue; // qualified under a different provider → reseller, skip
+      } else {
+        key = `${providerId}/${modelKey}`;
+      }
+      if (!known.has(key)) continue;
+      prices.set(key, {
+        ...(input !== undefined ? { input } : {}),
+        ...(output !== undefined ? { output } : {}),
+        ...(cacheRead !== undefined ? { cacheRead } : {}),
+        ...(cacheWrite !== undefined ? { cacheWrite } : {}),
+      });
+    }
+  }
+  return prices;
 }
 
 // ---------------------------------------------------------------------------
@@ -114,9 +189,28 @@ export function createModelCatalogController({
       const payload = await res.json();
       const next = normalizePayload(payload);
       if (next.length === 0) throw new Error("model catalog empty");
-      catalog = createModelIndex(next);
-      await writeJsonAtomic(cachePath, JSON.stringify(payload), { mode: 0o600 });
-      return { ok: true, size: next.length };
+      // BET-1367: merge the per-model cost from the provider-keyed api.json
+      // into the catalogue. Non-fatal: a failed price fetch leaves the entries
+      // exactly as models.json served them (today's behaviour), never blanks a
+      // working catalogue. The merge is additive only — an entry that already
+      // has a `cost` is never overwritten, and no entry is dropped or re-keyed.
+      let priced = next;
+      try {
+        const pRes = await doFetch(CATALOG_PRICE_URL);
+        if (pRes && pRes.ok) {
+          const prices = buildPriceMap(await pRes.json(), new Set(next.map((e) => e.id)));
+          if (prices.size > 0) {
+            priced = next.map((e) =>
+              prices.has(e.id) && !e.cost ? { ...e, cost: prices.get(e.id) } : e,
+            );
+          }
+        }
+      } catch (e) {
+        console.warn("[model-catalog] price merge skipped:", e?.message ?? e);
+      }
+      catalog = createModelIndex(priced);
+      await writeJsonAtomic(cachePath, JSON.stringify(priced), { mode: 0o600 });
+      return { ok: true, size: priced.length };
     } catch (e) {
       return { ok: false, error: e?.message ?? String(e) };
     }

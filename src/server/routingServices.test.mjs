@@ -12,7 +12,7 @@ import {
   ledgerToServices,
   buildRoutingServices,
 } from "./routingServices.mjs";
-import { mixFromCounts } from "../shared/blendedPrice.mjs";
+import { mixFromCounts, blendedPrice } from "../shared/blendedPrice.mjs";
 import { ROUTING_LEDGER_WINDOW_MS } from "./modelLedger.mjs";
 
 test("normalizeDeclared reads modelRouting.declaredModels and passes objects through", () => {
@@ -385,4 +385,33 @@ test("optimizer on but no pacing reader → pressure absent, eco 0 (never a gues
   );
   assert.equal(s.pressure, undefined);
   assert.equal(s.ecoLevel, 0);
+});
+
+// ---------------------------------------------------------------------------
+// BET-1367: with a priced catalogue the implausible-zero guard actually fires
+// ---------------------------------------------------------------------------
+
+test("buildRoutingServices: an endpoint declaring 0/0 for a catalogue-priced model is no longer priced at 0", async () => {
+  // The endpoint quotes $0/0 but the catalogue (now carrying `cost`) says the
+  // model normally costs money. `referenceByModel` must be populated with that
+  // reference, and blendedPrice must reject the made-up zero (known:false).
+  const services = await buildRoutingServices(
+    { modelRouting: { preset: "balanced" } },
+    {
+      catalogIndex: {
+        lookupModel: () => null,
+        matchModel: () => ({
+          kind: "exact",
+          candidates: [{ id: "qwen/qwen3.6-27b", cost: { input: 0.002, output: 0.006 } }],
+        }),
+        allModels: () => [],
+      },
+      endpoints: [{ providerID: "qwen", id: "qwen3.6-27b", cost: { input: 0, output: 0 } }],
+    },
+  );
+  const ref = services.referenceByModel["qwen3.6-27b"];
+  assert.deepEqual(ref, { input: 0.002, output: 0.006 });
+  // The reference quotes a positive rate, so the declared 0/0 is rejected.
+  const bp = blendedPrice({ cost: { input: 0, output: 0 } }, { input: 0.5, output: 0.5, cacheRead: 0, cacheWrite: 0 }, ref);
+  assert.equal(bp.known, false);
 });

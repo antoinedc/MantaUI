@@ -988,12 +988,14 @@ const optimizerActivity = createActivityLog({
   now: Date.now,
 });
 
-// The metered (pay-per-token) endpoints for the dashboard's slim row: models in
-// the routing catalog that are NOT covered by a subscription quota window, with
-// their blended $/Mtok from the SHARED blendedPrice (never a guess — a model
-// with no price is skipped). A metered endpoint has no window and never resets,
-// so there is nothing to fill — the row is deliberately role+price, no gauge.
-// [] when the catalog or pricing is unavailable (the section is then absent).
+// The metered (pay-per-token) endpoints for the dashboard's slim row: the
+// user's OWN endpoints (opencode's live per-provider view) that are NOT covered
+// by a subscription quota window, with their blended $/Mtok from the SHARED
+// blendedPrice (never a guess — a model with no price is skipped). A metered
+// endpoint has no window and never resets, so there is nothing to fill — the
+// row is deliberately role+price, no gauge.
+// [] when the provider list or pricing is unavailable (the section is then
+// absent).
 async function readMeteredEndpoints({ windows = [], cacheShare = {} } = {}) {
   try {
     // BET-1359: consume the windows/cacheShare the summary already computed,
@@ -1011,25 +1013,51 @@ async function readMeteredEndpoints({ windows = [], cacheShare = {} } = {}) {
             cacheWrite: (cs.cacheWrite ?? 0) / denom,
           }
         : { input: 0.5, output: 0.5, cacheRead: 0, cacheWrite: 0 };
-    let models = [];
+    // BET-1367: "metered endpoints" means the USER'S OWN pay-per-token
+    // endpoints — opencode's per-provider /provider view — NOT the
+    // provider-agnostic models.dev catalogue (which listed ~360 models the
+    // user may never have configured, and carried no pricing). Flatten
+    // connected providers → models; each already carries `providerID` and a
+    // normalised camelCase `cost`.
+    const models = [];
     try {
-      models = Array.isArray(routingCatalogIndex.allModels()) ? routingCatalogIndex.allModels() : [];
+      const { connected: connectedIds, all } = await oc.getProviders();
+      const connected = new Set(Array.isArray(connectedIds) ? connectedIds : []);
+      for (const p of Array.isArray(all) ? all : []) {
+        if (!p || typeof p.id !== "string" || !connected.has(p.id)) continue;
+        const pModels = p.models && typeof p.models === "object" ? p.models : {};
+        for (const modelId of Object.keys(pModels)) {
+          const m = oc._normalizeProviderModel(p.id, modelId, pModels[modelId]);
+          if (m) models.push(m);
+        }
+      }
     } catch {
-      models = [];
+      /* provider list unavailable → no metered rows (the section is absent) */
     }
+    const seen = new Set();
     const rows = [];
     for (const model of models) {
-      const prov = typeof model?.providerID === "string" ? model.providerID : null;
+      const prov = typeof model?.providerID === "string" ? model.providerID : "";
       if (!prov || subProviders.has(prov)) continue;
-      const bp = blendedPrice(model, mix, model?.cost ?? null);
+      const id = typeof model?.id === "string" ? model.id : "";
+      if (!id) continue;
+      // The 3rd arg is a reference for judging a suspicious ZERO during
+      // ROUTING; here an unpriced endpoint is simply not listed, so pass null.
+      const bp = blendedPrice(model, mix, null);
       if (!bp || bp.known !== true) continue;
+      const key = `${prov}/${id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
       rows.push({
-        name: `${prov} · ${typeof model.id === "string" ? model.id : ""}`,
+        name: `${prov} · ${id}`,
         role: "pay-per-token endpoint",
         price: `$${bp.price.toFixed(2)} / Mtok blended`,
+        _price: bp.price,
       });
     }
-    return rows.slice(0, 8);
+    // Show the eight most expensive — otherwise which eight appear is arbitrary.
+    rows.sort((a, b) => b._price - a._price);
+    return rows.slice(0, 8).map(({ _price, ...rest }) => rest);
   } catch {
     return [];
   }

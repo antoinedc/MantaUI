@@ -20,6 +20,7 @@ import {
   lookupModel,
   matchModel,
   allModels,
+  buildPriceMap,
 } from "./modelCatalog.mjs";
 
 const FIXTURE = JSON.parse(
@@ -120,6 +121,166 @@ test("normalizePayload accepts both the array and the id-keyed-object shape", ()
   // Garbage → empty, never throws.
   assert.deepEqual(normalizePayload(null), []);
   assert.deepEqual(normalizePayload("nope"), []);
+});
+
+// ---------------------------------------------------------------------------
+// BET-1367: the price map (buildPriceMap) and its merge in refresh()
+// ---------------------------------------------------------------------------
+
+// A fetch stub that serves the catalogue from `catBody` and the price ledger
+// from `priceBody` (differentiated by the api.json URL), so a merge test can
+// drive each fetch independently without a network connection.
+function stagedFetch({ catBody = FIXTURE, priceBody, priceOk = true } = {}) {
+  return async (url) => {
+    if (String(url).includes("api.json")) {
+      return { ok: priceOk, status: priceOk ? 200 : 500, json: async () => priceBody };
+    }
+    return { ok: true, status: 200, json: async () => catBody };
+  };
+}
+
+// Mirrors the REAL api.json shape: per-model fields live under `cost`, and the
+// models object keys are INCONSISTENT across providers — `deepseek`/`qwen` use
+// bare keys (`deepseek-chat`), `nvidia` uses qualified keys (`nvidia/…`), and
+// resellers key THE SAME model under a cross-provider id (`deepseek/…` under a
+// non-deepseek section). Neither cost placement nor key convention can be
+// assumed, and the first-party rate must always win.
+const PRICE_PAYLOAD = {
+  qwen: {
+    models: {
+      "qwen3.6-27b": { cost: { input: 0.002, output: 0.006, cache_read: 0.001, cache_write: 0.00125 } },
+    },
+  },
+  anthropic: {
+    models: {
+      "claude-opus-4-5": { cost: { input: 3, output: 15 } },
+    },
+  },
+  deepseek: {
+    models: {
+      "deepseek-chat": { cost: { input: 0.4, output: 1.3 } },
+    },
+  },
+  nvidia: {
+    models: {
+      // Qualified key under its own provider → used as-is.
+      "nvidia/nemotron-3-ultra-550b-a55b": { cost: { input: 0.5, output: 2.2 } },
+      // Qualified under a DIFFERENT provider (deepseek-ai) → reseller, skipped.
+      "deepseek-ai/deepseek-v4-pro": { cost: { input: 1.0, output: 2.5 } },
+    },
+  },
+  min: {
+    models: {
+      "neg-rate": { cost: { input: -1, output: 2 } }, // negative → undefined, never 0
+      "non-num": { cost: { input: "x", output: 1 } },
+      "tiered": { cost: { input: 2 }, tiers: { "1k": { input: 0.1 } }, context_over_200k: { input: 0.1 } },
+    },
+  },
+};
+
+test("buildPriceMap prices each entry's own first-party id (bare → prefixed, own-qualified → as-is, cross → skipped)", () => {
+  const map = buildPriceMap(PRICE_PAYLOAD, new Set([
+    "qwen/qwen3.6-27b", // bare object key → provider-prefixed
+    "anthropic/claude-opus-4-5", // bare object key → provider-prefixed
+    "deepseek/deepseek-chat", // bare object key → provider-prefixed
+    "nvidia/nemotron-3-ultra-550b-a55b", // already its own provider's id
+  ]));
+  assert.deepEqual(map.get("qwen/qwen3.6-27b"), {
+    input: 0.002,
+    output: 0.006,
+    cacheRead: 0.001,
+    cacheWrite: 0.00125,
+  });
+  assert.deepEqual(map.get("anthropic/claude-opus-4-5"), { input: 3, output: 15 });
+  assert.deepEqual(map.get("deepseek/deepseek-chat"), { input: 0.4, output: 1.3 });
+  assert.deepEqual(map.get("nvidia/nemotron-3-ultra-550b-a55b"), { input: 0.5, output: 2.2 });
+  // A cross-provider-qualified key never attaches any price.
+  assert.equal(map.has("deepseek-ai/deepseek-v4-pro"), false);
+  assert.equal(map.has("nvidia/deepseek-ai/deepseek-v4-pro"), false);
+  // A knownId with no matching provider/model is simply absent.
+  assert.equal(map.has("minimax/MiniMax-M3"), false);
+});
+
+test("buildPriceMap never lets a reseller's qualified key overwrite the first-party reference", () => {
+  // The BET-1367 contamination case, with the real cited numbers: deepseek's
+  // own page quotes `deepseek-v4-pro` at 0.435/0.87, but `novita-ai` (and many
+  // resellers) also key `deepseek/deepseek-v4-pro` at 1.6/3.2. The landed
+  // reference must be the FIRST-PARTY rate, never the reseller's — that is the
+  // circularity the router's guard exists to prevent.
+  const resellerPayload = {
+    deepseek: {
+      models: { "deepseek-v4-pro": { cost: { input: 0.435, output: 0.87, cache_read: 0.003625 } } },
+    },
+    "novita-ai": {
+      models: { "deepseek/deepseek-v4-pro": { cost: { input: 1.6, output: 3.2 } } },
+    },
+  };
+  const map = buildPriceMap(resellerPayload, new Set(["deepseek/deepseek-v4-pro"]));
+  assert.deepEqual(map.get("deepseek/deepseek-v4-pro"), {
+    input: 0.435,
+    output: 0.87,
+    cacheRead: 0.003625,
+  });
+  assert.equal(map.has("novita-ai/deepseek/deepseek-v4-pro"), false);
+});
+
+test("buildPriceMap drops tiers/context and maps unknown rates to undefined (never 0)", () => {
+  const map = buildPriceMap(PRICE_PAYLOAD, new Set(["min/neg-rate", "min/non-num", "min/tiered"]));
+  // Negative and non-numeric rates become undefined and are omitted, never 0.
+  assert.deepEqual(map.get("min/neg-rate"), { output: 2 });
+  assert.deepEqual(map.get("min/non-num"), { output: 1 });
+  // tiers / context_over_200k rates are deliberately dropped.
+  assert.deepEqual(map.get("min/tiered"), { input: 2 });
+});
+
+test("buildPriceMap empty payload yields an empty map", () => {
+  assert.equal(buildPriceMap({}, new Set(["a/b"])).size, 0);
+  assert.equal(buildPriceMap(null, new Set(["a/b"])).size, 0);
+  assert.equal(buildPriceMap({ qwen: { models: {} } }, new Set(["qwen/x"])).size, 0);
+});
+
+test("refresh merges catalogue prices and never drops/re-keys entries", async () => {
+  const cachePath = statePath("model-catalog.test-priced.json");
+  const ctl = createModelCatalogController({
+    fetchImpl: stagedFetch({ priceBody: PRICE_PAYLOAD }),
+    cachePath,
+  });
+  const res = await ctl.refresh();
+  assert.equal(res.ok, true);
+  assert.equal(res.size, FIXTURE.length);
+  // The qwen entry picked up its cost; ids and count are unchanged.
+  const pricedEntry = ctl.lookupModel("qwen/qwen3.6-27b");
+  assert.deepEqual(pricedEntry.cost, { input: 0.002, output: 0.006, cacheRead: 0.001, cacheWrite: 0.00125 });
+  assert.equal(ctl.allModels().length, FIXTURE.length);
+  assert.equal(ctl.lookupModel("minimax/MiniMax-M3").cost, undefined);
+});
+
+test("refresh does not overwrite an entry that already has a cost", async () => {
+  const catBody = FIXTURE.map((e) =>
+    e.id === "qwen/qwen3.6-27b" ? { ...e, cost: { input: 9, output: 9 } } : e,
+  );
+  const cachePath = statePath("model-catalog.test-preexisting.json");
+  const ctl = createModelCatalogController({
+    fetchImpl: stagedFetch({ catBody, priceBody: PRICE_PAYLOAD }),
+    cachePath,
+  });
+  const res = await ctl.refresh();
+  assert.equal(res.ok, true);
+  assert.deepEqual(ctl.lookupModel("qwen/qwen3.6-27b").cost, { input: 9, output: 9 });
+});
+
+test("a failing price fetch leaves entries byte-identical to the models.json result", async () => {
+  const cachePath = statePath("model-catalog.test-pricefail.json");
+  const ctl = createModelCatalogController({
+    fetchImpl: stagedFetch({ priceBody: PRICE_PAYLOAD, priceOk: false }),
+    cachePath,
+  });
+  const res = await ctl.refresh();
+  assert.equal(res.ok, true);
+  assert.equal(res.size, FIXTURE.length);
+  // Deep equality against the pristine fixture — the price-fetch failure must
+  // not touch a single entry (this is the regression that matters).
+  assert.deepEqual(ctl.allModels(), FIXTURE);
 });
 
 // ---------------------------------------------------------------------------
