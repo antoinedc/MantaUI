@@ -926,6 +926,7 @@ export function Settings({
 
   const schemaEntries = settingsForSection(SETTINGS, activeTab, PLATFORM);
   const simpleEntries = schemaEntries.filter((e) => e.control !== "custom");
+  const wideSection = SETTING_SECTIONS.find((s) => s.id === activeTab)?.wide === true;
 
   const renderField = (entry: SettingEntry): ReactNode => {
     if (entry.id === "pluginsEnabled") {
@@ -1419,7 +1420,7 @@ export function Settings({
               )}
             </div>
           ) : (
-            <div role="tabpanel" id={`panel-${activeTab}`} aria-labelledby={`tab-${activeTab}`} className="max-w-2xl space-y-6">
+            <div role="tabpanel" id={`panel-${activeTab}`} aria-labelledby={`tab-${activeTab}`} className={`${wideSection ? "max-w-[1100px]" : "max-w-2xl"} space-y-6`}>
               {renderSection(activeTab)}
             </div>
           )}
