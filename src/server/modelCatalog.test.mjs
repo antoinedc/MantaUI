@@ -139,39 +139,55 @@ function stagedFetch({ catBody = FIXTURE, priceBody, priceOk = true } = {}) {
   };
 }
 
+// Mirrors the REAL api.json shape: per-model fields live under `cost`, and the
+// models object keys are INCONSISTENT across providers — `qwen`/`anthropic` use
+// bare keys (`qwen3.6-27b`, `claude-opus-4-7`), while `hpc-ai` keys its
+// deepseek models with an already-qualified id (`deepseek/…`). Neither field
+// placement nor key convention can be assumed.
 const PRICE_PAYLOAD = {
   qwen: {
     models: {
-      "qwen3.6-27b": { input: 0.002, output: 0.006, cache_read: 0.001, cache_write: 0.00125 },
+      "qwen3.6-27b": { cost: { input: 0.002, output: 0.006, cache_read: 0.001, cache_write: 0.00125 } },
     },
   },
-  // Object key ≠ model.id: the entry is keyed by `hpc-ai/deepseek-v4-flash`,
-  // never by the model's own id "deepseek/deepseek-v4-flash".
+  anthropic: {
+    models: {
+      "claude-opus-4-7": { cost: { input: 5, output: 25 } },
+    },
+  },
+  // Already-qualified object key: must join as `deepseek/deepseek-v4-flash`,
+  // never double-prefixed to `hpc-ai/deepseek/…`.
   "hpc-ai": {
     models: {
-      "deepseek-v4-flash": { id: "deepseek/deepseek-v4-flash", input: 0.003 },
+      "deepseek/deepseek-v4-flash": { cost: { input: 0.003 } },
     },
   },
   min: {
     models: {
-      "neg-rate": { input: -1, output: 2 }, // negative → undefined, never 0
-      "non-num": { input: "x", output: 1 },
-      "tiered": { input: 2, tiers: { "1k": { input: 0.1 } }, context_over_200k: { input: 0.1 } },
+      "neg-rate": { cost: { input: -1, output: 2 } }, // negative → undefined, never 0
+      "non-num": { cost: { input: "x", output: 1 } },
+      "tiered": { cost: { input: 2 }, tiers: { "1k": { input: 0.1 } }, context_over_200k: { input: 0.1 } },
     },
   },
 };
 
-test("buildPriceMap keys by provider/objectKey (not model.id) and prunes to knownIds", () => {
-  const map = buildPriceMap(PRICE_PAYLOAD, new Set(["qwen/qwen3.6-27b", "hpc-ai/deepseek-v4-flash"]));
-  // The hpc-ai entry is keyed by the OBJECT KEY, not its model.id.
-  assert.equal(map.has("hpc-ai/deepseek-v4-flash"), true);
-  assert.equal(map.has("deepseek/deepseek-v4-flash"), false);
+test("buildPriceMap joins bare and already-qualified api.json keys, pruning to knownIds", () => {
+  const map = buildPriceMap(PRICE_PAYLOAD, new Set([
+    "qwen/qwen3.6-27b", // bare object key → provider-prefixed form
+    "anthropic/claude-opus-4-7", // bare object key → provider-prefixed form
+    "deepseek/deepseek-v4-flash", // already-qualified object key → as-is
+  ]));
   assert.deepEqual(map.get("qwen/qwen3.6-27b"), {
     input: 0.002,
     output: 0.006,
     cacheRead: 0.001,
     cacheWrite: 0.00125,
   });
+  assert.deepEqual(map.get("anthropic/claude-opus-4-7"), { input: 5, output: 25 });
+  // An already-qualified object key is never double-prefixed or re-keyed.
+  assert.deepEqual(map.get("deepseek/deepseek-v4-flash"), { input: 0.003 });
+  assert.equal(map.get("hpc-ai/deepseek/deepseek-v4-flash"), undefined);
+  assert.equal(map.get("hpc-ai/deepseek-v4-flash"), undefined);
   // A knownId with no matching provider/model is simply absent.
   assert.equal(map.has("minimax/MiniMax-M3"), false);
 });

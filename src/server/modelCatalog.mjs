@@ -90,12 +90,16 @@ export function normalizePayload(payload) {
 /**
  * PURE. Build a `Map<"<provider>/<model>", {input, output, cacheRead, cacheWrite}>`
  * price map from the models.dev api.json payload, restricted to the ids in
- * `knownIds`. Snake-cased upstream fields are canonicalised to the same camel
- * shape opencode's `_normalizePrice` produces; a value that is not a finite
- * number >= 0 becomes `undefined`, NEVER 0 (unknown and free are different).
- * Upstream `tiers` / `context_over_200k` / audio / reasoning rates are
- * deliberately DROPPED — context-tiered pricing is not modelled anywhere in
- * this codebase and a partial model would be worse than none.
+ * `knownIds`. Each model's `cost` object's snake-cased fields
+ * (`input`/`output`/`cache_read`/`cache_write`) are canonicalised to the same
+ * camel shape opencode's `_normalizePrice` produces; a value that is not a
+ * finite number >= 0 becomes `undefined`, NEVER 0 (unknown and free are
+ * different). Upstream `tiers` / `context_over_200k` / audio / reasoning rates
+ * are deliberately DROPPED — context-tiered pricing is not modelled anywhere in
+ * this codebase and a partial model would be worse than none. A model is keyed
+ * by whichever of its own ids (the api.json object key, or the
+ * provider-prefixed form) is present in the catalogue — never double-prefixed,
+ * never re-keyed.
  */
 export function buildPriceMap(payload, knownIds) {
   const known = knownIds instanceof Set ? knownIds : new Set([]);
@@ -107,23 +111,32 @@ export function buildPriceMap(payload, knownIds) {
     if (!models || typeof models !== "object") continue;
     for (const [modelKey, m] of Object.entries(models)) {
       if (m === null || typeof m !== "object") continue;
-      const key = `${providerId}/${modelKey}`;
-      // Direct provider/model join only — the reference must be the
-      // authoritative first-party rate, never a cross-provider fallback.
-      if (!known.has(key)) continue;
-      const input = norm(m.input);
-      const output = norm(m.output);
-      const cacheRead = norm(m.cache_read);
-      const cacheWrite = norm(m.cache_write);
+      const cost = m.cost && typeof m.cost === "object" ? m.cost : null;
+      if (!cost) continue;
+      const input = norm(cost.input);
+      const output = norm(cost.output);
+      const cacheRead = norm(cost.cache_read);
+      const cacheWrite = norm(cost.cache_write);
       if (input === undefined && output === undefined && cacheRead === undefined && cacheWrite === undefined) {
         continue;
       }
-      prices.set(key, {
+      const priced = {
         ...(input !== undefined ? { input } : {}),
         ...(output !== undefined ? { output } : {}),
         ...(cacheRead !== undefined ? { cacheRead } : {}),
         ...(cacheWrite !== undefined ? { cacheWrite } : {}),
-      });
+      };
+      // Key construction is deliberately data-agnostic. api.json keys are
+      // inconsistent across providers: some are already fully qualified
+      // (`nvidia/llama-3.3-…`), some bare (`claude-opus-4-7` under `anthropic`),
+      // some carry a different provider's prefix (`hpc-ai` → `deepseek/…`). Try
+      // the object key first, then the provider-prefixed form; attach under
+      // whichever of the entry's own ids is actually present in the catalogue.
+      // Never double-prefix (`nvidia/nvidia/…`) and never hunt across providers.
+      let key = modelKey;
+      if (!known.has(key)) key = `${providerId}/${modelKey}`;
+      if (!known.has(key)) continue;
+      prices.set(key, priced);
     }
   }
   return prices;
