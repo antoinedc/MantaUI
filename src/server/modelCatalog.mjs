@@ -42,6 +42,14 @@ export { normalize, entryHandles, createModelIndex } from "../shared/modelCatalo
 // consumed indirectly via opencode's `/provider`; this one is not.
 export const CATALOG_URL = "https://models.dev/models.json";
 
+// The litellm price ledger — the catalogue's companion (~¥3.2k models, each
+// with per-token $ figures). models.dev identities the models; this file prices
+// them. Fetched alongside the catalogue and merged in `refresh()` so routing's
+// implausible-zero reference can price every priced model even when the
+// per-provider view (the box's own endpoints) quotes 0/0.
+export const CATALOG_PRICE_URL =
+  "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
+
 // Cache last-good copy to state – `statePath` lands inside the box's state
 // dir (or the test sandbox when MANTA_STATE_HOME is set).
 export const CACHE_PATH = statePath("model-catalog.json");
@@ -78,6 +86,58 @@ export function normalizePayload(payload) {
 }
 
 // ---------------------------------------------------------------------------
+// Price map (BET-1367): litellm's per-token $ figures, keyed by model id
+// ---------------------------------------------------------------------------
+
+// Convert the litellm price payload ($/token, keyed by model id) into a
+// $/Mtok price map. Direct input/output figures map to `input`/`output`; the
+// cache-read rate maps to `cacheRead` (the cache-creation / write rate is
+// deliberately dropped — the blended blend never prices it). Per-token figures
+// are scaled ×1000 to Mtok to match every other rate in the box. Pure: a
+// single pass, no I/O; models with no usable price are omitted entirely.
+export function buildPriceMap(payload) {
+  const prices = {};
+  const scale = (v) =>
+    typeof v === "number" && Number.isFinite(v) && v >= 0 ? v * 1000 : undefined;
+  for (const e of normalizePayload(payload)) {
+    if (typeof e?.id !== "string" || e.id === "") continue;
+    const input = scale(e.input_cost_per_token);
+    const output = scale(e.output_cost_per_token);
+    const cacheRead = scale(e.cache_read_input_token_cost);
+    if (input === undefined && output === undefined && cacheRead === undefined) continue;
+    prices[e.id] = {
+      ...(input !== undefined ? { input } : {}),
+      ...(output !== undefined ? { output } : {}),
+      ...(cacheRead !== undefined ? { cacheRead } : {}),
+    };
+  }
+  return prices;
+}
+
+// Merge a price map into a catalogue entry list by exact model id: for every
+// entry whose id is priced, fold the price's `input`/`output`/`cacheRead` into
+// the entry's `cost`, keeping any cost fields the entry already had. Entries
+// with no matching price (and ids only in the map, not the catalogue) are left
+// untouched. PURE — returns a NEW array, never mutates the input.
+export function mergePriceMap(entries, priceMap) {
+  const map = priceMap && typeof priceMap === "object" ? priceMap : {};
+  return (Array.isArray(entries) ? entries : []).map((e) => {
+    if (!e || typeof e !== "object") return e;
+    const price = map[e.id];
+    if (!price || typeof price !== "object") return e;
+    const cost = { ...(e.cost && typeof e.cost === "object" ? e.cost : {}) };
+    let wrote = false;
+    for (const key of ["input", "output", "cacheRead"]) {
+      if (typeof price[key] === "number" && Number.isFinite(price[key])) {
+        cost[key] = price[key];
+        wrote = true;
+      }
+    }
+    return wrote ? { ...e, cost } : e;
+  });
+}
+
+// ---------------------------------------------------------------------------
 // I/O: fetch → cache → degrade
 // ---------------------------------------------------------------------------
 
@@ -93,6 +153,9 @@ export function normalizePayload(payload) {
  *
  * @param {object} [opts]
  * @param {typeof globalThis.fetch} [opts.fetchImpl]
+ * @param {typeof globalThis.fetch} [opts.priceFetchImpl] defaults to `fetchImpl`;
+ *   a separate stub lets price-fetch failures be exercised without failing the
+ *   catalogue itself
  * @param {string} [opts.cachePath] defaults to `CACHE_PATH`
  * @param {number} [opts.intervalMs]
  */
@@ -100,20 +163,35 @@ export function createModelCatalogController({
   fetchImpl,
   cachePath = CACHE_PATH,
   intervalMs = DEFAULT_POLL_MS,
+  priceFetchImpl,
 } = {}) {
   const cached = readJsonSync(cachePath, null);
   let catalog = createModelIndex(normalizePayload(cached));
 
   async function refresh() {
     const doFetch = fetchImpl ?? globalThis.fetch;
+    const doPriceFetch = priceFetchImpl ?? doFetch;
     try {
       const res = await doFetch(CATALOG_URL);
       if (!res || !res.ok) {
         throw new Error(`model catalog fetch failed: ${res?.status ?? "no response"}`);
       }
       const payload = await res.json();
-      const next = normalizePayload(payload);
+      let next = normalizePayload(payload);
       if (next.length === 0) throw new Error("model catalog empty");
+      // BET-1367: fetch the litellm price ledger and merge the matching
+      // entries' input/output/cacheRead ($/Mtok) into the catalogue so routing
+      // can price every priced model. A price-fetch failure is NON-fatal — the
+      // catalogue itself is still good; the models just go unpriced.
+      try {
+        const priceRes = await doPriceFetch(CATALOG_PRICE_URL);
+        if (priceRes && priceRes.ok) {
+          const merged = mergePriceMap(next, buildPriceMap(await priceRes.json()));
+          if (merged.length > 0) next = merged;
+        }
+      } catch {
+        /* no prices → the catalogue stands alone */
+      }
       catalog = createModelIndex(next);
       await writeJsonAtomic(cachePath, JSON.stringify(payload), { mode: 0o600 });
       return { ok: true, size: next.length };

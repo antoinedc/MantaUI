@@ -26,7 +26,7 @@
 //     accounts, health, reliability, telemetry, mix, referenceByModel }
 
 import { endpointKey } from "../shared/endpointKey.mjs";
-import { mixFromCounts } from "../shared/blendedPrice.mjs";
+import { mixFromCounts, blendedPrice } from "../shared/blendedPrice.mjs";
 import { readModalities } from "../shared/modelGuide.mjs";
 import { ROUTING_LEDGER_WINDOW_MS } from "./modelLedger.mjs";
 
@@ -62,6 +62,95 @@ export function normalizeDeclared(cfg, declaredModelsKey = "declaredModels") {
     if (isObj(decl)) out[key] = decl;
   }
   return out;
+}
+
+// Build the per-endpoint catalogue resolver the router's identity stage AND
+// the implausible-zero reference cross one code path through (BET-1268/1303):
+// a declared `catalogId` wins outright, else the corroborated fuzzy match.
+// `getDeclared` is late-bound (a getter) so config assembled after this can
+// still feed it. Pure — the catalogue is an injected read-only index.
+export function catalogEntryForBuilder(catalogue, getDeclared) {
+  return (endpoint) => {
+    try {
+      const declared =
+        typeof getDeclared === "function" ? getDeclared() : getDeclared ?? {};
+      const declaredId = declared?.[endpointKey(endpoint)]?.catalogId;
+      if (typeof declaredId === "string" && declaredId !== "") {
+        return catalogue?.lookupModel?.(declaredId) ?? null;
+      }
+      const match = catalogue?.matchModel?.(endpoint?.id, {
+        modalities: readModalities(endpoint?.capabilities?.input),
+        context: endpoint?.limit?.context,
+        output: endpoint?.limit?.output,
+      });
+      return match?.kind === "exact" ? match.candidates?.[0] ?? null : null;
+    } catch {
+      return null;
+    }
+  };
+}
+
+// The implausible-zero reference for an endpoint: the typical input/output
+// $/Mtok of its catalogue entry (BET-1269 5b). Null when the endpoint resolves
+// to no catalogue entry, or that entry carries no usable price. This is what
+// `blendedPrice` compares a suspicious 0/0 quote against — so it must come
+// from the CATALOGUE, never from the endpoint's own (possibly-absent) cost.
+export function referenceForEndpoint(catalogEntryFor, endpoint) {
+  if (typeof catalogEntryFor !== "function") return null;
+  const entry = catalogEntryFor(endpoint);
+  const cost = entry && isObj(entry.cost) ? entry.cost : null;
+  if (!cost) return null;
+  const ref = {};
+  if (typeof cost.input === "number" && Number.isFinite(cost.input)) ref.input = cost.input;
+  if (typeof cost.output === "number" && Number.isFinite(cost.output)) ref.output = cost.output;
+  return Object.keys(ref).length > 0 ? ref : null;
+}
+
+// Build the dashboard's "pay-per-token endpoint" rows (BET-1367) from the
+// user's OWN endpoints — opencode's /provider view flattened into models that
+// each carry `providerID` + a normalised camelCase `cost` — priced by the
+// SHARED blendedPrice. Exclusions mirror the old catalogue path: skip any
+// model whose provider is covered by a subscription window (`subProviders`),
+// skip cost-less models (blendedPrice.known ≠ true), de-dupe by
+// `${providerID}/${id}`, cap at `cap` rows. The implausible-zero reference is
+// a catalogue lookup on each flattened endpoint via `catalogEntryFor` (never
+// the endpoint's own cost). PURE — models/inputs all arrive as arguments.
+export function buildMeteredEndpoints({
+  models = [],
+  mix,
+  subProviders = new Set(),
+  cap = 8,
+  catalogEntryFor,
+} = {}) {
+  const sub = subProviders instanceof Set ? subProviders : new Set(Array.isArray(subProviders) ? subProviders : []);
+  const seen = new Set();
+  const rows = [];
+  for (const model of Array.isArray(models) ? models : []) {
+    const prov = typeof model?.providerID === "string" ? model.providerID : "";
+    if (!prov || sub.has(prov)) continue;
+    const id = typeof model?.id === "string" ? model.id : "";
+    if (!id) continue;
+    const key = `${prov}/${id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const bp = blendedPrice(
+      model,
+      mix,
+      referenceForEndpoint(catalogEntryFor, {
+        providerID: prov,
+        id,
+        limit: model.limit,
+        capabilities: model.capabilities,
+      }),
+    );
+    if (!bp || bp.known !== true) continue;
+    rows.push({
+      name: `${prov} · ${id}`,
+      role: "pay-per-token endpoint",
+      price: `$${bp.price.toFixed(2)} / Mtok blended`,
+    });
+  }
+  return rows.slice(0, cap);
 }
 
 // The percentile ranking helper the router's quality stage needs. A benchmark
@@ -269,31 +358,7 @@ export async function buildRoutingServices(cfg = {}, deps = {}, nowMs = Date.now
         lookupModel: (id) => catalogue.lookupModel(id),
         matchModel: (id) => catalogue.matchModel(id),
       };
-      services.catalogEntryFor = (endpoint) => {
-        try {
-          // A declared identity always beats a fuzzy match: the user told us
-          // exactly which catalogue model this endpoint is (BET-1268). Fall
-          // back to the fuzzy match only when nothing is declared.
-          const declaredId = services.declared?.[endpointKey(endpoint)]?.catalogId;
-          if (typeof declaredId === "string" && declaredId !== "") {
-            return catalogue.lookupModel(declaredId) ?? null;
-          }
-          const match = catalogue.matchModel(
-            endpoint?.id,
-            // The endpoint's own declared facts corroborate the matcher's
-            // layer-4 inference (BET-1303 5.6); read modalities via the
-            // shared reader, never re-derived.
-            {
-              modalities: readModalities(endpoint?.capabilities?.input),
-              context: endpoint?.limit?.context,
-              output: endpoint?.limit?.output,
-            },
-          );
-          return match?.kind === "exact" ? match.candidates?.[0] ?? null : null;
-        } catch {
-          return null;
-        }
-      };
+      services.catalogEntryFor = catalogEntryForBuilder(catalogue, () => services.declared);
     }
   } catch {
     /* catalogue absent → identity/quality degrade to structural — safe */
@@ -322,15 +387,8 @@ export async function buildRoutingServices(cfg = {}, deps = {}, nowMs = Date.now
     const refs = {};
     for (const ep of Array.isArray(deps.endpoints) ? deps.endpoints : []) {
       if (!ep || typeof ep.id !== "string" || ep.id === "") continue;
-      const entry = typeof services.catalogEntryFor === "function" ? services.catalogEntryFor(ep) : null;
-      const cost = entry && isObj(entry.cost) ? entry.cost : null;
-      if (!cost) continue;
-      const { input, output } = cost;
-      if (typeof input !== "number" && typeof output !== "number") continue;
-      refs[ep.id] = {
-        ...(typeof input === "number" && Number.isFinite(input) ? { input } : {}),
-        ...(typeof output === "number" && Number.isFinite(output) ? { output } : {}),
-      };
+      const ref = referenceForEndpoint(services.catalogEntryFor, ep);
+      if (ref) refs[ep.id] = ref;
     }
     if (Object.keys(refs).length > 0) services.referenceByModel = refs;
   } catch {

@@ -43,7 +43,7 @@ import * as local from "./local.mjs";
 import { createPeekHandler } from "./peek.mjs";
 import { createLogShipper, captureConsole, resolveAxiomConfig } from "../shared/logShip.mjs";
 import { setTelemetrySink, shipCtxEvent } from "./optimizer/telemetry.mjs";
-import { blendedPrice } from "../shared/blendedPrice.mjs";
+import { buildMeteredEndpoints, catalogEntryForBuilder } from "./routingServices.mjs";
 
 // BET-187: ship every console.* (and any startup banner / poller log) to
 // Axiom when MANTA_AXIOM_TOKEN is set in env AND AppConfig.shareAnalytics
@@ -988,12 +988,14 @@ const optimizerActivity = createActivityLog({
   now: Date.now,
 });
 
-// The metered (pay-per-token) endpoints for the dashboard's slim row: models in
-// the routing catalog that are NOT covered by a subscription quota window, with
-// their blended $/Mtok from the SHARED blendedPrice (never a guess — a model
-// with no price is skipped). A metered endpoint has no window and never resets,
-// so there is nothing to fill — the row is deliberately role+price, no gauge.
-// [] when the catalog or pricing is unavailable (the section is then absent).
+// The metered (pay-per-token) endpoints for the dashboard's slim row: the
+// USER'S OWN endpoints (opencode's live per-provider view) that are NOT
+// covered by a subscription quota window, with their blended $/Mtok from the
+// SHARED blendedPrice (never a guess — a model with no price is skipped). A
+// metered endpoint has no window and never resets, so there is nothing to fill
+// — the row is deliberately role+price, no gauge.
+// [] when the provider list or pricing is unavailable (the section is then
+// absent).
 async function readMeteredEndpoints({ windows = [], cacheShare = {} } = {}) {
   try {
     // BET-1359: consume the windows/cacheShare the summary already computed,
@@ -1011,25 +1013,34 @@ async function readMeteredEndpoints({ windows = [], cacheShare = {} } = {}) {
             cacheWrite: (cs.cacheWrite ?? 0) / denom,
           }
         : { input: 0.5, output: 0.5, cacheRead: 0, cacheWrite: 0 };
+    // BET-1367: source the rows from the user's own endpoints — opencode's
+    // per-provider /provider view — NOT the provider-agnostic models.dev
+    // catalogue (which listed hundreds of models the user never configured).
+    // Flatten connected providers → models; each already carries providerID and
+    // a normalised camelCase cost via _normalizeProviderModel.
     let models = [];
     try {
-      models = Array.isArray(routingCatalogIndex.allModels()) ? routingCatalogIndex.allModels() : [];
+      const { connected: connectedIds, all } = await oc.getProviders();
+      const connected = new Set(Array.isArray(connectedIds) ? connectedIds : []);
+      for (const p of Array.isArray(all) ? all : []) {
+        if (!p || typeof p.id !== "string" || !connected.has(p.id)) continue;
+        const pModels = p.models && typeof p.models === "object" ? p.models : {};
+        for (const modelId of Object.keys(pModels)) {
+          const m = oc._normalizeProviderModel(p.id, modelId, pModels[modelId]);
+          if (m) models.push(m);
+        }
+      }
     } catch {
       models = [];
     }
-    const rows = [];
-    for (const model of models) {
-      const prov = typeof model?.providerID === "string" ? model.providerID : null;
-      if (!prov || subProviders.has(prov)) continue;
-      const bp = blendedPrice(model, mix, model?.cost ?? null);
-      if (!bp || bp.known !== true) continue;
-      rows.push({
-        name: `${prov} · ${typeof model.id === "string" ? model.id : ""}`,
-        role: "pay-per-token endpoint",
-        price: `$${bp.price.toFixed(2)} / Mtok blended`,
-      });
-    }
-    return rows.slice(0, 8);
+    return buildMeteredEndpoints({
+      models,
+      mix,
+      subProviders,
+      // The implausible-zero reference comes from the catalogue (reusing the
+      // router's resolver), never the endpoint's own possibly-absent cost.
+      catalogEntryFor: catalogEntryForBuilder(routingCatalogIndex, () => ({})),
+    });
   } catch {
     return [];
   }

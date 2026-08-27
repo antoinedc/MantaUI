@@ -20,6 +20,8 @@ import {
   lookupModel,
   matchModel,
   allModels,
+  buildPriceMap,
+  mergePriceMap,
 } from "./modelCatalog.mjs";
 
 const FIXTURE = JSON.parse(
@@ -120,6 +122,100 @@ test("normalizePayload accepts both the array and the id-keyed-object shape", ()
   // Garbage → empty, never throws.
   assert.deepEqual(normalizePayload(null), []);
   assert.deepEqual(normalizePayload("nope"), []);
+});
+
+// ---------------------------------------------------------------------------
+// BET-1367: the litellm price map — build + merge
+// ---------------------------------------------------------------------------
+
+test("buildPriceMap converts litellm $/token into a $/Mtok map keyed by id", () => {
+  const map = buildPriceMap({
+    "qwen/qwen3.6-27b": {
+      id: "qwen/qwen3.6-27b",
+      input_cost_per_token: 2e-6,
+      output_cost_per_token: 6e-6,
+      cache_read_input_token_cost: 1e-6,
+      cache_creation_input_token_cost: 1.25e-6,
+    },
+    "deepseek/deepseek-chat": {
+      id: "deepseek/deepseek-chat",
+      input_cost_per_token: 0.000000268,
+      output_cost_per_token: 0.00000107,
+    },
+    // No pricing at all → absent from the map.
+    "meta/muse-spark-1.2": { id: "meta/muse-spark-1.2" },
+    // cacheWrite (cache_creation) is intentionally NOT carried.
+  });
+  assert.deepEqual(map["qwen/qwen3.6-27b"], {
+    input: 0.002,
+    output: 0.006,
+    cacheRead: 0.001,
+  });
+  assert.deepEqual(map["deepseek/deepseek-chat"], { input: 0.000268, output: 0.00107 });
+  assert.equal(map["meta/muse-spark-1.2"], undefined);
+});
+
+test("buildPriceMap handles the array shape and garbage without throwing", () => {
+  const map = buildPriceMap([
+    { id: "a/b", input_cost_per_token: 1e-6 },
+    { id: "c/d", output_cost_per_token: 2e-6 },
+  ]);
+  assert.deepEqual(map["a/b"], { input: 0.001 });
+  assert.deepEqual(map["c/d"], { output: 0.002 });
+  assert.deepEqual(buildPriceMap(null), {});
+  assert.deepEqual(buildPriceMap("nope"), {});
+});
+
+test("mergePriceMap folds input/output/cacheRead into matching catalogue entries by id, untouched otherwise", () => {
+  const entries = [
+    { id: "qwen/qwen3.6-27b", name: "Qwen", cost: { custom: 1 } },
+    { id: "minimax/MiniMax-M3", name: "MiniMax" },
+  ];
+  const merged = mergePriceMap(entries, {
+    "qwen/qwen3.6-27b": { input: 0.002, output: 0.006, cacheRead: 0.0001 },
+    // id present only in the map, not the catalogue → ignored.
+    "nope/not-in-catalogue": { input: 1 },
+  });
+  // A NEW array; the input is never mutated.
+  assert.notEqual(merged, entries);
+  assert.equal(entries[0].cost.custom, 1, "input must not be mutated");
+  assert.deepEqual(merged[0].cost, { custom: 1, input: 0.002, output: 0.006, cacheRead: 0.0001 });
+  assert.deepEqual(merged[1], { id: "minimax/MiniMax-M3", name: "MiniMax" });
+});
+
+test("a successful refresh merges catalogue prices and writes the cache copy", async () => {
+  const cachePath = statePath("model-catalog.test-priced.json");
+  const priced = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      [FIXTURE[0].id]: { input_cost_per_token: 2e-6, output_cost_per_token: 6e-6 },
+    }),
+  });
+  const ctl = createModelCatalogController({ fetchImpl: stubFetch(), cachePath, priceFetchImpl: priced });
+  const res = await ctl.refresh();
+  assert.equal(res.ok, true);
+  assert.equal(res.size, FIXTURE.length);
+  // The first fixture entry carries the merged price (input/output in $/Mtok).
+  const mergedEntry = ctl.lookupModel(FIXTURE[0].id);
+  assert.equal(mergedEntry.cost.input, 0.002);
+  assert.equal(mergedEntry.cost.output, 0.006);
+});
+
+test("a price-fetch failure is non-fatal: the catalogue still serves, unpriced", async () => {
+  const cachePath = statePath("model-catalog.test-pricefail.json");
+  const ctl = createModelCatalogController({
+    fetchImpl: stubFetch(),
+    cachePath,
+    priceFetchImpl: async () => {
+      throw new Error("prices down");
+    },
+  });
+  const res = await ctl.refresh();
+  assert.equal(res.ok, true);
+  assert.equal(res.size, FIXTURE.length);
+  assert.equal(ctl.status().supported, true);
+  assert.equal(ctl.lookupModel(FIXTURE[0].id).cost, undefined);
 });
 
 // ---------------------------------------------------------------------------
