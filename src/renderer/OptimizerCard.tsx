@@ -196,9 +196,16 @@ export function OptimizerCard() {
   const rawTotal = sentTotal + maskedTotal;
   const trimmedPct = rawTotal > 0 ? (maskedTotal / rawTotal) * 100 : 0;
 
-  // Flat $3/Mtok counterfactual saving estimate (refined per-model in phase 2) —
-  // computation unchanged, now scoped to the window.
-  const saved = Math.round((maskedTotal * 3) / 1_000_000);
+  // BET-1370: the window's savings now come from the SERIES — real per-model
+  // prompt-side pricing minus the cache re-warm the mask forced, computed
+  // server-side — not a flat $3/Mtok counterfactual guess. `usd` is null when
+  // the applied turns aren't priceable ("not priced"); negative when the
+  // re-warm cost exceeded the saving (never clamped). While the series is
+  // in flight / unsupported, fall back to the unpriced state.
+  const savedUsd = sd ? sd.saved.usd : null;
+  const savedBasis = sd ? sd.saved.basis : "unpriced";
+  const savedPricedShare = sd ? sd.saved.pricedShare : 0;
+  const potentialUsd = sd ? sd.saved.potentialUsd : null;
 
   // Consumption chart series (cumulative), scaled together by the peak.
   const maxTokens = Math.max(rawTotal, 1);
@@ -406,7 +413,8 @@ export function OptimizerCard() {
 
                   {maskedTotal > 0 && (
                     <text x={CHART.width} y="24" textAnchor="end" fill="var(--ok)" fontSize="10" fontFamily="var(--font-mono)">
-                      −{formatTokens(maskedTotal)} · ≈ ${saved} est.
+                      −{formatTokens(maskedTotal)}
+                      {savedUsd !== null ? ` · ≈ $${savedUsd.toFixed(2)} est.` : ""}
                     </text>
                   )}
                 </g>
@@ -437,8 +445,26 @@ export function OptimizerCard() {
             </div>
             <div className="opt-stat">
               <div className="opt-stat-l">Saved</div>
-              <div className="opt-stat-v ok">≈ ${saved}</div>
-              <div className="opt-stat-d">est. · counterfactual</div>
+              {savedBasis === "unpriced" ? (
+                <>
+                  <div className="opt-stat-v">not priced</div>
+                  <div className="opt-stat-d">these endpoints declare no price</div>
+                </>
+              ) : savedUsd !== null && savedUsd < 0 ? (
+                <>
+                  <div className="opt-stat-v warn">−${(-savedUsd).toFixed(2)}</div>
+                  <div className="opt-stat-d">re-warm cost exceeded the saving</div>
+                </>
+              ) : (
+                <>
+                  <div className="opt-stat-v ok">≈ ${savedUsd !== null ? savedUsd.toFixed(2) : "0.00"}</div>
+                  <div className="opt-stat-d">
+                    {savedBasis === "partial"
+                      ? `≈$${potentialUsd !== null ? potentialUsd.toFixed(2) : "0.00"} potential · ${Math.round(savedPricedShare * 100)}% priced`
+                      : `≈$${potentialUsd !== null ? potentialUsd.toFixed(2) : "0.00"} potential`}
+                  </div>
+                </>
+              )}
             </div>
             <div className="opt-stat">
               <div className="opt-stat-l">Cache hit</div>

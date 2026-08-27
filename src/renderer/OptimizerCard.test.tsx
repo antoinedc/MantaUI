@@ -63,6 +63,7 @@ function seriesFixture(over: Partial<OptimizerSeries> = {}): OptimizerSeries {
     ],
     counterfactualAvailable: false,
     totals: { turns: 100, cost: 12.34, tokensSent: 30, maskedTokens: 0 },
+    saved: { usd: 0, potentialUsd: 0, basis: "measured", pricedShare: 1 },
     ...over,
   };
 }
@@ -166,14 +167,16 @@ describe("OptimizerCard — BET-1369 range selector + windowed stats", () => {
             ],
             counterfactualAvailable: true,
             totals: { turns: 10, cost: 2, tokensSent: 2000, maskedTokens: 1000 },
+            saved: { usd: 0.37, potentialUsd: 0.37, basis: "measured", pricedShare: 1 },
           }),
         ),
     });
     h = mount(<OptimizerCard />);
     await h.flush();
     // maskedTotal 1000 → the chart overlay shows the masked total + the est.
-    // saved figure, and the counterfactual legend line appears.
-    expect(h.text()).toContain("−1k tokens · ≈ $0 est.");
+    // figure (two decimals from saved.usd), and the counterfactual legend line
+    // appears.
+    expect(h.text()).toContain("−1k tokens · ≈ $0.37 est.");
     expect(h.text()).toContain("raw counterfactual");
   });
 
@@ -189,6 +192,54 @@ describe("OptimizerCard — BET-1369 range selector + windowed stats", () => {
     expect(text).toContain("TTL 5m default");
     // Sessions stat detail reads 30d (no compaction in fixture).
     expect(h.container.textContent).toContain("30d");
+  });
+
+  it("an unpriced Saved stat renders 'not priced' with the documented detail", async () => {
+    setApi({
+      optimizerSeries: (range) =>
+        Promise.resolve(seriesFixture({ range, saved: { usd: null, potentialUsd: null, basis: "unpriced", pricedShare: 0 } })),
+    });
+    h = mount(<OptimizerCard />);
+    await h.flush();
+    expect(h.text()).toContain("not priced");
+    expect(h.text()).toContain("these endpoints declare no price");
+  });
+
+  it("a negative Saved stat renders a warn −$ figure and the re-warm detail", async () => {
+    const saved: OptimizerSeries["saved"] = { usd: -0.43, potentialUsd: 0.2, basis: "measured", pricedShare: 1 };
+    setApi({ optimizerSeries: (range) => Promise.resolve(seriesFixture({ range, saved })) });
+    h = mount(<OptimizerCard />);
+    await h.flush();
+    expect(h.text()).toContain("−$0.43");
+    expect(h.text()).toContain("re-warm cost exceeded the saving");
+    expect(h.container.querySelector(".opt-stat-v.warn")).toBeTruthy();
+  });
+
+  it("a measured positive Saved stat renders two-decimal ≈ $X.XX and the potential detail", async () => {
+    const saved: OptimizerSeries["saved"] = { usd: 1.234, potentialUsd: 1.25, basis: "measured", pricedShare: 1 };
+    setApi({ optimizerSeries: (range) => Promise.resolve(seriesFixture({ range, saved })) });
+    h = mount(<OptimizerCard />);
+    await h.flush();
+    expect(h.text()).toContain("≈ $1.23");
+    expect(h.text()).toContain("≈$1.25 potential");
+  });
+
+  it("a partial Saved stat shows potential · % priced on the detail line", async () => {
+    const saved: OptimizerSeries["saved"] = { usd: 2.4, potentialUsd: 3.6, basis: "partial", pricedShare: 0.5 };
+    setApi({ optimizerSeries: (range) => Promise.resolve(seriesFixture({ range, saved })) });
+    h = mount(<OptimizerCard />);
+    await h.flush();
+    expect(h.text()).toContain("≈ $2.40");
+    expect(h.text()).toContain("≈$3.60 potential · 50% priced");
+  });
+
+  it("an optimizer-off window (nothing applied) renders Saved as ≈ $0.00, not 'not priced'", async () => {
+    const saved: OptimizerSeries["saved"] = { usd: 0, potentialUsd: 1.25, basis: "measured", pricedShare: 1 };
+    setApi({ optimizerSeries: (range) => Promise.resolve(seriesFixture({ range, saved })) });
+    h = mount(<OptimizerCard />);
+    await h.flush();
+    expect(h.text()).toContain("≈ $0.00");
+    expect(h.text()).not.toContain("not priced");
   });
 
   it("no counterfactual in a 24h window shows the hourly explanation under the legend", async () => {
