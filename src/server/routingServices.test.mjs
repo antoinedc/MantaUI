@@ -11,9 +11,8 @@ import {
   healthFor,
   ledgerToServices,
   buildRoutingServices,
-  buildMeteredEndpoints,
 } from "./routingServices.mjs";
-import { mixFromCounts } from "../shared/blendedPrice.mjs";
+import { mixFromCounts, blendedPrice } from "../shared/blendedPrice.mjs";
 import { ROUTING_LEDGER_WINDOW_MS } from "./modelLedger.mjs";
 
 test("normalizeDeclared reads modelRouting.declaredModels and passes objects through", () => {
@@ -389,75 +388,30 @@ test("optimizer on but no pacing reader → pressure absent, eco 0 (never a gues
 });
 
 // ---------------------------------------------------------------------------
-// BET-1367: metered endpoints from the user's own endpoints + catalogue ref
+// BET-1367: with a priced catalogue the implausible-zero guard actually fires
 // ---------------------------------------------------------------------------
 
-test("buildMeteredEndpoints prices the user's own endpoints, excludes subscription providers, caps at 8", () => {
-  const rows = buildMeteredEndpoints({
-    models: [
-      { providerID: "meta", id: "Meta-Llama-3.1-405B-Instruct-Turbo", cost: { input: 0.9, output: 0.9 } },
-      { providerID: "qwen", id: "qwen3.6-27b", cost: { input: 1, output: 2 } },
-      { providerID: "anthropic", id: "claude-opus-4", cost: { input: 5, output: 15 } },
-    ],
-    mix: { input: 0.5, output: 0.5, cacheRead: 0, cacheWrite: 0 },
-    subProviders: new Set(["anthropic"]),
-    catalogEntryFor: () => null,
-  });
-  // The subscription-covered provider is dropped; the two metered ones remain.
-  assert.equal(rows.length, 2);
-  assert.ok(rows.some((r) => r.name === "qwen · qwen3.6-27b"));
-  assert.ok(rows.some((r) => r.name === "meta · Meta-Llama-3.1-405B-Instruct-Turbo"));
-  assert.ok(!rows.some((r) => r.name.includes("claude-opus-4")));
-  for (const r of rows) {
-    assert.equal(r.role, "pay-per-token endpoint");
-    assert.match(r.price, /\$[\d.]+ \/ Mtok blended$/);
-  }
-});
-
-test("buildMeteredEndpoints drops a 0/0 endpoint the catalogue prices (implausible zero, catalogue ref)", () => {
-  // The metered source is the user's endpoint, which quotes 0/0 for the META
-  // model; the CATALOGUE says that model costs money. The invariant-zero rule
-  // must fire from the catalogue reference (not the endpoint's own cost — it
-  // has none), so the 0/0 row is dropped rather than shown as "free".
-  const rows = buildMeteredEndpoints({
-    models: [
-      { providerID: "meta", id: "Meta-Llama-3.1-405B-Instruct-Turbo", cost: { input: 0, output: 0 } },
-      { providerID: "qwen", id: "qwen3.6-27b", cost: { input: 1, output: 2 } },
-    ],
-    mix: { input: 0.5, output: 0.5, cacheRead: 0, cacheWrite: 0 },
-    subProviders: new Set(["anthropic"]),
-    catalogEntryFor: (ep) =>
-      ep?.id === "Meta-Llama-3.1-405B-Instruct-Turbo"
-        ? { id: "meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo", cost: { input: 0.9, output: 0.9 } }
-        : null,
-  });
-  assert.equal(rows.length, 1);
-  assert.ok(rows.some((r) => r.name.startsWith("qwen")));
-  assert.ok(!rows.some((r) => r.name.startsWith("meta")));
-});
-
-test("buildRoutingServices builds the catalogue-backed reference for the META model (routeable endpoint id)", async () => {
+test("buildRoutingServices: an endpoint declaring 0/0 for a catalogue-priced model is no longer priced at 0", async () => {
+  // The endpoint quotes $0/0 but the catalogue (now carrying `cost`) says the
+  // model normally costs money. `referenceByModel` must be populated with that
+  // reference, and blendedPrice must reject the made-up zero (known:false).
   const services = await buildRoutingServices(
-    {},
+    { modelRouting: { preset: "balanced" } },
     {
       catalogIndex: {
         lookupModel: () => null,
-        matchModel: (id) =>
-          /Meta-Llama/i.test(String(id))
-            ? {
-                kind: "exact",
-                candidates: [
-                  { id: "meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo", cost: { input: 0.9, output: 0.9 } },
-                ],
-              }
-            : { kind: "none", candidates: [] },
+        matchModel: () => ({
+          kind: "exact",
+          candidates: [{ id: "qwen/qwen3.6-27b", cost: { input: 0.002, output: 0.006 } }],
+        }),
         allModels: () => [],
       },
-      endpoints: [{ providerID: "meta", id: "Meta-Llama-3.1-405B-Instruct-Turbo" }],
+      endpoints: [{ providerID: "qwen", id: "qwen3.6-27b", cost: { input: 0, output: 0 } }],
     },
   );
-  assert.deepEqual(services.referenceByModel["Meta-Llama-3.1-405B-Instruct-Turbo"], {
-    input: 0.9,
-    output: 0.9,
-  });
+  const ref = services.referenceByModel["qwen3.6-27b"];
+  assert.deepEqual(ref, { input: 0.002, output: 0.006 });
+  // The reference quotes a positive rate, so the declared 0/0 is rejected.
+  const bp = blendedPrice({ cost: { input: 0, output: 0 } }, { input: 0.5, output: 0.5, cacheRead: 0, cacheWrite: 0 }, ref);
+  assert.equal(bp.known, false);
 });

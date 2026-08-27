@@ -43,7 +43,7 @@ import * as local from "./local.mjs";
 import { createPeekHandler } from "./peek.mjs";
 import { createLogShipper, captureConsole, resolveAxiomConfig } from "../shared/logShip.mjs";
 import { setTelemetrySink, shipCtxEvent } from "./optimizer/telemetry.mjs";
-import { buildMeteredEndpoints, catalogEntryForBuilder } from "./routingServices.mjs";
+import { blendedPrice } from "../shared/blendedPrice.mjs";
 
 // BET-187: ship every console.* (and any startup banner / poller log) to
 // Axiom when MANTA_AXIOM_TOKEN is set in env AND AppConfig.shareAnalytics
@@ -989,11 +989,11 @@ const optimizerActivity = createActivityLog({
 });
 
 // The metered (pay-per-token) endpoints for the dashboard's slim row: the
-// USER'S OWN endpoints (opencode's live per-provider view) that are NOT
-// covered by a subscription quota window, with their blended $/Mtok from the
-// SHARED blendedPrice (never a guess — a model with no price is skipped). A
-// metered endpoint has no window and never resets, so there is nothing to fill
-// — the row is deliberately role+price, no gauge.
+// user's OWN endpoints (opencode's live per-provider view) that are NOT covered
+// by a subscription quota window, with their blended $/Mtok from the SHARED
+// blendedPrice (never a guess — a model with no price is skipped). A metered
+// endpoint has no window and never resets, so there is nothing to fill — the
+// row is deliberately role+price, no gauge.
 // [] when the provider list or pricing is unavailable (the section is then
 // absent).
 async function readMeteredEndpoints({ windows = [], cacheShare = {} } = {}) {
@@ -1013,12 +1013,13 @@ async function readMeteredEndpoints({ windows = [], cacheShare = {} } = {}) {
             cacheWrite: (cs.cacheWrite ?? 0) / denom,
           }
         : { input: 0.5, output: 0.5, cacheRead: 0, cacheWrite: 0 };
-    // BET-1367: source the rows from the user's own endpoints — opencode's
-    // per-provider /provider view — NOT the provider-agnostic models.dev
-    // catalogue (which listed hundreds of models the user never configured).
-    // Flatten connected providers → models; each already carries providerID and
-    // a normalised camelCase cost via _normalizeProviderModel.
-    let models = [];
+    // BET-1367: "metered endpoints" means the USER'S OWN pay-per-token
+    // endpoints — opencode's per-provider /provider view — NOT the
+    // provider-agnostic models.dev catalogue (which listed ~360 models the
+    // user may never have configured, and carried no pricing). Flatten
+    // connected providers → models; each already carries `providerID` and a
+    // normalised camelCase `cost`.
+    const models = [];
     try {
       const { connected: connectedIds, all } = await oc.getProviders();
       const connected = new Set(Array.isArray(connectedIds) ? connectedIds : []);
@@ -1031,16 +1032,32 @@ async function readMeteredEndpoints({ windows = [], cacheShare = {} } = {}) {
         }
       }
     } catch {
-      models = [];
+      /* provider list unavailable → no metered rows (the section is absent) */
     }
-    return buildMeteredEndpoints({
-      models,
-      mix,
-      subProviders,
-      // The implausible-zero reference comes from the catalogue (reusing the
-      // router's resolver), never the endpoint's own possibly-absent cost.
-      catalogEntryFor: catalogEntryForBuilder(routingCatalogIndex, () => ({})),
-    });
+    const seen = new Set();
+    const rows = [];
+    for (const model of models) {
+      const prov = typeof model?.providerID === "string" ? model.providerID : "";
+      if (!prov || subProviders.has(prov)) continue;
+      const id = typeof model?.id === "string" ? model.id : "";
+      if (!id) continue;
+      // The 3rd arg is a reference for judging a suspicious ZERO during
+      // ROUTING; here an unpriced endpoint is simply not listed, so pass null.
+      const bp = blendedPrice(model, mix, null);
+      if (!bp || bp.known !== true) continue;
+      const key = `${prov}/${id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rows.push({
+        name: `${prov} · ${id}`,
+        role: "pay-per-token endpoint",
+        price: `$${bp.price.toFixed(2)} / Mtok blended`,
+        _price: bp.price,
+      });
+    }
+    // Show the eight most expensive — otherwise which eight appear is arbitrary.
+    rows.sort((a, b) => b._price - a._price);
+    return rows.slice(0, 8).map(({ _price, ...rest }) => rest);
   } catch {
     return [];
   }

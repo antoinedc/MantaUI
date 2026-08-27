@@ -21,7 +21,6 @@ import {
   matchModel,
   allModels,
   buildPriceMap,
-  mergePriceMap,
 } from "./modelCatalog.mjs";
 
 const FIXTURE = JSON.parse(
@@ -125,97 +124,121 @@ test("normalizePayload accepts both the array and the id-keyed-object shape", ()
 });
 
 // ---------------------------------------------------------------------------
-// BET-1367: the litellm price map — build + merge
+// BET-1367: the price map (buildPriceMap) and its merge in refresh()
 // ---------------------------------------------------------------------------
 
-test("buildPriceMap converts litellm $/token into a $/Mtok map keyed by id", () => {
-  const map = buildPriceMap({
-    "qwen/qwen3.6-27b": {
-      id: "qwen/qwen3.6-27b",
-      input_cost_per_token: 2e-6,
-      output_cost_per_token: 6e-6,
-      cache_read_input_token_cost: 1e-6,
-      cache_creation_input_token_cost: 1.25e-6,
+// A fetch stub that serves the catalogue from `catBody` and the price ledger
+// from `priceBody` (differentiated by the api.json URL), so a merge test can
+// drive each fetch independently without a network connection.
+function stagedFetch({ catBody = FIXTURE, priceBody, priceOk = true } = {}) {
+  return async (url) => {
+    if (String(url).includes("api.json")) {
+      return { ok: priceOk, status: priceOk ? 200 : 500, json: async () => priceBody };
+    }
+    return { ok: true, status: 200, json: async () => catBody };
+  };
+}
+
+const PRICE_PAYLOAD = {
+  qwen: {
+    models: {
+      "qwen3.6-27b": { input: 0.002, output: 0.006, cache_read: 0.001, cache_write: 0.00125 },
     },
-    "deepseek/deepseek-chat": {
-      id: "deepseek/deepseek-chat",
-      input_cost_per_token: 0.000000268,
-      output_cost_per_token: 0.00000107,
+  },
+  // Object key ≠ model.id: the entry is keyed by `hpc-ai/deepseek-v4-flash`,
+  // never by the model's own id "deepseek/deepseek-v4-flash".
+  "hpc-ai": {
+    models: {
+      "deepseek-v4-flash": { id: "deepseek/deepseek-v4-flash", input: 0.003 },
     },
-    // No pricing at all → absent from the map.
-    "meta/muse-spark-1.2": { id: "meta/muse-spark-1.2" },
-    // cacheWrite (cache_creation) is intentionally NOT carried.
-  });
-  assert.deepEqual(map["qwen/qwen3.6-27b"], {
+  },
+  min: {
+    models: {
+      "neg-rate": { input: -1, output: 2 }, // negative → undefined, never 0
+      "non-num": { input: "x", output: 1 },
+      "tiered": { input: 2, tiers: { "1k": { input: 0.1 } }, context_over_200k: { input: 0.1 } },
+    },
+  },
+};
+
+test("buildPriceMap keys by provider/objectKey (not model.id) and prunes to knownIds", () => {
+  const map = buildPriceMap(PRICE_PAYLOAD, new Set(["qwen/qwen3.6-27b", "hpc-ai/deepseek-v4-flash"]));
+  // The hpc-ai entry is keyed by the OBJECT KEY, not its model.id.
+  assert.equal(map.has("hpc-ai/deepseek-v4-flash"), true);
+  assert.equal(map.has("deepseek/deepseek-v4-flash"), false);
+  assert.deepEqual(map.get("qwen/qwen3.6-27b"), {
     input: 0.002,
     output: 0.006,
     cacheRead: 0.001,
+    cacheWrite: 0.00125,
   });
-  assert.deepEqual(map["deepseek/deepseek-chat"], { input: 0.000268, output: 0.00107 });
-  assert.equal(map["meta/muse-spark-1.2"], undefined);
+  // A knownId with no matching provider/model is simply absent.
+  assert.equal(map.has("minimax/MiniMax-M3"), false);
 });
 
-test("buildPriceMap handles the array shape and garbage without throwing", () => {
-  const map = buildPriceMap([
-    { id: "a/b", input_cost_per_token: 1e-6 },
-    { id: "c/d", output_cost_per_token: 2e-6 },
-  ]);
-  assert.deepEqual(map["a/b"], { input: 0.001 });
-  assert.deepEqual(map["c/d"], { output: 0.002 });
-  assert.deepEqual(buildPriceMap(null), {});
-  assert.deepEqual(buildPriceMap("nope"), {});
+test("buildPriceMap drops tiers/context and maps unknown rates to undefined (never 0)", () => {
+  const map = buildPriceMap(PRICE_PAYLOAD, new Set(["min/neg-rate", "min/non-num", "min/tiered"]));
+  // Negative and non-numeric rates become undefined and are omitted, never 0.
+  assert.deepEqual(map.get("min/neg-rate"), { output: 2 });
+  assert.deepEqual(map.get("min/non-num"), { output: 1 });
+  // tiers / context_over_200k rates are deliberately dropped.
+  assert.deepEqual(map.get("min/tiered"), { input: 2 });
 });
 
-test("mergePriceMap folds input/output/cacheRead into matching catalogue entries by id, untouched otherwise", () => {
-  const entries = [
-    { id: "qwen/qwen3.6-27b", name: "Qwen", cost: { custom: 1 } },
-    { id: "minimax/MiniMax-M3", name: "MiniMax" },
-  ];
-  const merged = mergePriceMap(entries, {
-    "qwen/qwen3.6-27b": { input: 0.002, output: 0.006, cacheRead: 0.0001 },
-    // id present only in the map, not the catalogue → ignored.
-    "nope/not-in-catalogue": { input: 1 },
-  });
-  // A NEW array; the input is never mutated.
-  assert.notEqual(merged, entries);
-  assert.equal(entries[0].cost.custom, 1, "input must not be mutated");
-  assert.deepEqual(merged[0].cost, { custom: 1, input: 0.002, output: 0.006, cacheRead: 0.0001 });
-  assert.deepEqual(merged[1], { id: "minimax/MiniMax-M3", name: "MiniMax" });
+test("buildPriceMap empty payload yields an empty map", () => {
+  assert.equal(buildPriceMap({}, new Set(["a/b"])).size, 0);
+  assert.equal(buildPriceMap(null, new Set(["a/b"])).size, 0);
+  assert.equal(buildPriceMap({ qwen: { models: {} } }, new Set(["qwen/x"])).size, 0);
 });
 
-test("a successful refresh merges catalogue prices and writes the cache copy", async () => {
+test("refresh merges catalogue prices and never drops/re-keys entries", async () => {
   const cachePath = statePath("model-catalog.test-priced.json");
-  const priced = async () => ({
-    ok: true,
-    status: 200,
-    json: async () => ({
-      [FIXTURE[0].id]: { input_cost_per_token: 2e-6, output_cost_per_token: 6e-6 },
-    }),
+  const ctl = createModelCatalogController({
+    fetchImpl: stagedFetch({ priceBody: PRICE_PAYLOAD }),
+    cachePath,
   });
-  const ctl = createModelCatalogController({ fetchImpl: stubFetch(), cachePath, priceFetchImpl: priced });
   const res = await ctl.refresh();
   assert.equal(res.ok, true);
   assert.equal(res.size, FIXTURE.length);
-  // The first fixture entry carries the merged price (input/output in $/Mtok).
-  const mergedEntry = ctl.lookupModel(FIXTURE[0].id);
-  assert.equal(mergedEntry.cost.input, 0.002);
-  assert.equal(mergedEntry.cost.output, 0.006);
+  // The qwen entry picked up its cost; ids and count are unchanged.
+  const pricedEntry = ctl.lookupModel("qwen/qwen3.6-27b");
+  assert.deepEqual(pricedEntry.cost, { input: 0.002, output: 0.006, cacheRead: 0.001, cacheWrite: 0.00125 });
+  assert.equal(ctl.allModels().length, FIXTURE.length);
+  assert.equal(ctl.lookupModel("minimax/MiniMax-M3").cost, undefined);
 });
 
-test("a price-fetch failure is non-fatal: the catalogue still serves, unpriced", async () => {
+test("refresh does not overwrite an entry that already has a cost", async () => {
+  const catBody = FIXTURE.map((e) =>
+    e.id === "qwen/qwen3.6-27b" ? { ...e, cost: { input: 9, output: 9 } } : e,
+  );
+  const cachePath = statePath("model-catalog.test-preexisting.json");
+  const ctl = createModelCatalogController({
+    fetchImpl: stagedFetch({ catBody, priceBody: PRICE_PAYLOAD }),
+    cachePath,
+  });
+  const res = await ctl.refresh();
+  assert.equal(res.ok, true);
+  assert.deepEqual(ctl.lookupModel("qwen/qwen3.6-27b").cost, { input: 9, output: 9 });
+});
+
+test("a failing price fetch leaves entries byte-identical to the models.json result", async () => {
   const cachePath = statePath("model-catalog.test-pricefail.json");
   const ctl = createModelCatalogController({
-    fetchImpl: stubFetch(),
+    fetchImpl: stagedFetch({ priceBody: PRICE_PAYLOAD, priceOk: false }),
     cachePath,
-    priceFetchImpl: async () => {
-      throw new Error("prices down");
-    },
   });
   const res = await ctl.refresh();
   assert.equal(res.ok, true);
   assert.equal(res.size, FIXTURE.length);
-  assert.equal(ctl.status().supported, true);
-  assert.equal(ctl.lookupModel(FIXTURE[0].id).cost, undefined);
+  const unpriced = ctl.allModels();
+  assert.equal(unpriced.length, FIXTURE.length);
+  // Deep equality against the pristine fixture — the price-fetch failure must
+  // not touch a single entry (this is the regression that matters).
+  assert.deepEqual(
+    unpriced.map((e) => e.id),
+    FIXTURE.map((e) => e.id),
+  );
+  assert.ok(unpriced.every((e) => e.cost === undefined));
 });
 
 // ---------------------------------------------------------------------------
