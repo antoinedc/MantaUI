@@ -398,3 +398,44 @@ A1→A2→A4→A6→A7→A9→A11.
    fully + P2/P3 as epics-with-children `blocked` on their real
    dependencies — the sweeps handle dispatch, and later bodies can absorb
    anything P1 implementation teaches us before their turn comes.
+
+## Filed (2026-08-27)
+
+Project: Adaptive CTO. Key map:
+
+```
+EPIC-A  BET-1372
+EPIC-B  BET-1373
+EPIC-C  BET-1374
+A1      BET-1375
+A2      BET-1376
+A3      BET-1377
+A4      BET-1378
+A5      BET-1379
+A6      BET-1380
+A7      BET-1381
+A8      BET-1382
+A9      BET-1383
+A10     BET-1384
+A11     BET-1385
+A12     BET-1386
+A13     BET-1387
+A14     BET-1388
+B1      BET-1389
+B2      BET-1390
+B3      BET-1391
+B4      BET-1392
+B5      BET-1393
+B6      BET-1394
+B7      BET-1395
+B8      BET-1396
+B9      BET-1397
+B10     BET-1398
+B11     BET-1399
+C1      BET-1400
+C2      BET-1401
+C3      BET-1402
+C4      BET-1403
+C5      BET-1404
+C6      BET-1405
+```
