@@ -116,10 +116,31 @@ detect_install_kind() { # $1=has_release_json $2=has_git
 # open binary's inode survives until the process exits) and the caller restarts
 # the server at the end of the update.
 #
+# require_free_space <pkg-dir> <dest-dir>
+#
+# Refuse the payload swap when <dest-dir> cannot hold another copy of the
+# extracted payload. replace_release_payload stages each path as `<rel>.new`
+# BEFORE deleting the old one, so an update transiently needs roughly the
+# payload's size in free space on top of what is already installed. Without
+# this the swap dies halfway through with an ENOSPC from `cp`.
+#
+# Deliberately NON-FATAL when either probe fails (no `du`, no `df`, an unusual
+# mount): a preflight must never become a new way for a healthy update to fail.
+# Both probes are asked for KB so the units already agree.
+require_free_space() {
+  local pkg="$1" dest="$2" need avail
+  need="$(du -sk "$pkg" 2>/dev/null | awk '{print $1}')"
+  avail="$(df -Pk "$dest" 2>/dev/null | awk 'NR==2 {print $4}')"
+  [ -n "$need" ] && [ -n "$avail" ] || return 0
+  case "$need" in *[!0-9]*) return 0 ;; esac
+  case "$avail" in *[!0-9]*) return 0 ;; esac
+  [ "$avail" -ge "$need" ] || die "release payload: not enough disk space at $dest — need $((need / 1024)) MB free, have $((avail / 1024)) MB. Free up space and run the update again."
+}
+
 # node-bin is passed in rather than read from a global so this function has no
 # dependency on the caller's variable names.
 replace_release_payload() {
-  local pkg="$1" dest="$2" node_bin="$3" rel includes
+  local pkg="$1" dest="$2" node_bin="$3" rel includes cp_err mv_err
   # Tells install_prod_deps whether this run already installed a prebuilt,
   # build-time-verified node_modules from the payload. Reset per call so a
   # caller can never inherit a stale "yes" from an earlier invocation.
@@ -127,14 +148,15 @@ replace_release_payload() {
   includes="$("$node_bin" -e 'const i=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).includes||[]; process.stdout.write(i.join("\n"))' "$pkg/RELEASE.json")" \
     || die "release payload: cannot read includes from $pkg/RELEASE.json"
   [ -n "$includes" ] || die "release payload: $pkg/RELEASE.json has an empty includes list"
+  require_free_space "$pkg" "$dest"
   for rel in $includes; do
     [ -n "$rel" ] || continue
     [ -e "$pkg/$rel" ] || die "release payload: tarball is missing $rel"
     rm -rf "$dest/$rel.new"
     mkdir -p "$(dirname "$dest/$rel")"
-    cp -R "$pkg/$rel" "$dest/$rel.new" || die "release payload: copy failed for $rel"
+    cp_err="$(cp -R "$pkg/$rel" "$dest/$rel.new" 2>&1)" || die "release payload: copy failed for $rel: $cp_err"
     rm -rf "$dest/$rel"
-    mv "$dest/$rel.new" "$dest/$rel" || die "release payload: swap failed for $rel"
+    mv_err="$(mv "$dest/$rel.new" "$dest/$rel" 2>&1)" || die "release payload: swap failed for $rel: $mv_err"
     [ "$rel" = "node_modules" ] && REPLACED_NODE_MODULES=1
   done
   cp "$pkg/RELEASE.json" "$dest/RELEASE.json"
