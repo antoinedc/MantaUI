@@ -37,10 +37,12 @@ final class TranscriptEditMenuDelegate: NSObject, UITextViewDelegate {
 
     /// Obj-C message forwarding so the library's own delegate keeps receiving
     /// everything it did before this delegate was interposed.
+    // swiftlint:disable:next implicitly_unwrapped_optional
     override func responds(to aSelector: Selector!) -> Bool {
         super.responds(to: aSelector) || (wrapped?.responds(to: aSelector) ?? false)
     }
 
+    // swiftlint:disable:next implicitly_unwrapped_optional
     override func forwardingTarget(for aSelector: Selector!) -> Any? {
         wrapped
     }
