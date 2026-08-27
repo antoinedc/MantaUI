@@ -23,6 +23,11 @@ import {
   tickActivity,
   chooseSubagentModel,
   resolveNamedModel,
+  pauseJob,
+  resumeJob,
+  runningJobCount,
+  reconcileJobsOnBoot,
+  isToolStepBoundary,
 } from "./delegate.mjs";
 import { familyKey } from "../shared/modelGuide.mjs";
 // Per standing rule 9: a routing test may not hand-write a candidate literal.
@@ -2122,4 +2127,222 @@ test("finishJob clears the child's progress record (BET-790)", async () => {
   h.deps.clearProgress = async (sid) => { cleared.push(sid); return { ok: true, deleted: true }; };
   await finishJob(h.jobs[0], "done", null, h.deps, new Map());
   assert.deepEqual(cleared, ["child1"]);
+});
+
+// ----------------------------------------------------------------------------
+// 11. Pause / resume / reconciliation (spec §11.6)
+// ----------------------------------------------------------------------------
+
+test("isToolStepBoundary: true only for tool parts at completed/error", () => {
+  assert.equal(isToolStepBoundary({ type: "tool", state: { status: "completed" } }), true);
+  assert.equal(isToolStepBoundary({ type: "tool", state: { status: "error" } }), true);
+  assert.equal(isToolStepBoundary({ type: "tool", state: { status: "running" } }), false);
+  assert.equal(isToolStepBoundary({ type: "tool", state: { status: "pending" } }), false);
+  assert.equal(isToolStepBoundary({ type: "text", state: { status: "completed" } }), false);
+  assert.equal(isToolStepBoundary({ type: "reasoning", state: { status: "completed" } }), false);
+  assert.equal(isToolStepBoundary(null), false);
+});
+
+test("pauseJob flags a running job but leaves status running (transition at boundary)", async () => {
+  const h = harness([runningObserverJob()]);
+  const res = await pauseJob("j1", h.deps);
+  assert.equal(res.ok, true);
+  assert.equal(h.jobs[0].status, "running");
+  assert.equal(h.jobs[0].pauseRequested, true);
+  const evt = h.published.find((e) => e.kind === "delegate.updated");
+  assert.equal(evt.payload.pauseRequested, true);
+});
+
+test("pauseJob refuses a non-running or missing job", async () => {
+  const h = harness([{ ...runningObserverJob(), id: "done-job", status: "done" }]);
+  const notRunning = await pauseJob("done-job", h.deps);
+  assert.equal(notRunning.ok, false);
+  assert.equal(notRunning.status, "done");
+  assert.equal((await pauseJob("nope", h.deps)).ok, false);
+});
+
+test("pauseJob then a completed-tool-part boundary aborts + pauses, worktree kept", async () => {
+  const h = harness([{
+    ...runningObserverJob(), id: "p1", worktree: "/repo/wt-p", branch: "fix-p",
+  }]);
+  const aborted = [];
+  h.deps.abortSession = async (sid) => { aborted.push(sid); };
+  const sawBusy = new Map();
+  await pauseJob("p1", h.deps);
+  await observeEvent({
+    type: "message.part.updated",
+    properties: { sessionID: "child", part: { type: "tool", state: { status: "completed" } } },
+  }, h.deps, sawBusy);
+  assert.deepEqual(aborted, ["child"]);
+  assert.equal(h.jobs[0].status, "paused");
+  assert.equal(h.jobs[0].pauseRequested, false);
+  assert.equal(h.jobs[0].pausedAt, 1_700_000_000_000);
+  // worktree + branch kept for a later resume
+  assert.equal(h.jobs[0].worktree, "/repo/wt-p");
+  assert.equal(h.jobs[0].branch, "fix-p");
+});
+
+test("a non-boundary tool part does NOT pause a pauseRequested job", async () => {
+  const h = harness([{ ...runningObserverJob(), id: "p2", pauseRequested: true }]);
+  h.deps.abortSession = async () => {};
+  const sawBusy = new Map();
+  await observeEvent({
+    type: "message.part.updated",
+    properties: { sessionID: "child", part: { type: "tool", state: { status: "running" } } },
+  }, h.deps, sawBusy);
+  assert.equal(h.jobs[0].status, "running");
+  assert.equal(h.jobs[0].pauseRequested, true);
+});
+
+test("paused jobs do not count against the running cap (runningJobCount)", async () => {
+  const h = harness([
+    { ...runningObserverJob(), id: "a" },
+    { ...runningObserverJob(), id: "b" },
+    { ...runningObserverJob(), id: "p", status: "paused", pausedAt: 1 },
+  ]);
+  assert.equal(await runningJobCount(h.deps), 2);
+});
+
+test("resumeJob at cap: stays paused, returns retriable CAP_ERROR", async () => {
+  const running = Array.from({ length: MAX_RUNNING_JOBS }, (_, i) =>
+    ({ ...runningObserverJob(), id: `r${i}` }));
+  const paused = {
+    ...runningObserverJob(), id: "paused1", status: "paused", pausedAt: 1,
+    worktree: "/wt", branch: "b",
+  };
+  const h = harness([...running, paused]);
+  h.deps.listProjects = async () => [];
+  const res = await resumeJob("paused1", h.deps);
+  assert.equal(res.ok, false);
+  assert.equal(res.retriable, true);
+  assert.equal(res.error, CAP_ERROR);
+  assert.equal(h.jobs.find((j) => j.id === "paused1").status, "paused");
+});
+
+test("resumeJob refuses to resume a non-paused job", async () => {
+  const h = harness([{ ...runningObserverJob(), id: "running1" }]);
+  const res = await resumeJob("running1", h.deps);
+  assert.equal(res.ok, false);
+  assert.equal(res.error, "job not paused");
+});
+
+test("resumeJob starts a fresh session in the SAME worktree with resume context", async () => {
+  const job = {
+    ...runningObserverJob(), id: "paused1", status: "paused", pausedAt: 1,
+    worktree: "/repo/wt-r", branch: "fix-r", parentSessionID: "parent",
+  };
+  const h = harness([job]);
+  const parentWin = { index: 1, opencodeSessionId: "parent" };
+  h.deps.listProjects = async () => [{ tmuxSession: "s", windows: [parentWin] }];
+  const newWindows = [];
+  h.deps.newWindow = async (input) => {
+    newWindows.push(input);
+    return { sessionId: "child-resumed", windowIndex: 9 };
+  };
+  const killed = [];
+  h.deps.killWindow = async (input) => { killed.push(input); };
+  const stamps = [];
+  h.deps.stampOwner = async (s, i, o) => { stamps.push({ s, i, o }); };
+  h.deps.readProgress = async () => ({ label: "wiring the handler", step: 3, total: 5 });
+  h.deps.gitRun = async (args) => {
+    if (args.includes("log")) return { stdout: "abc123 fix thing\n" };
+    if (args.includes("status")) return { stdout: " M src/x.js\n" };
+    return { stdout: "" };
+  };
+
+  const res = await resumeJob("paused1", h.deps);
+  assert.equal(res.ok, true);
+  assert.equal(res.job.status, "running");
+  assert.equal(res.job.childSessionID, "child-resumed");
+  assert.equal(res.job.windowIndex, 9);
+  assert.equal(res.job.pauseRequested, false);
+  assert.equal(res.job.pausedAt, null);
+  // fresh startedAt resets the running-timeout window ("like a fresh start")
+  assert.equal(res.job.startedAt, 1_700_000_000_000);
+
+  // SAME worktree reused (no new gitAddWorktree), old window killed, owner stamped
+  assert.equal(newWindows[0].cwd, "/repo/wt-r");
+  assert.equal(newWindows[0].worktreePath, "/repo/wt-r");
+  assert.equal(newWindows[0].existingSessionId, undefined);
+  assert.deepEqual(killed, [{ sessionName: "s", windowIndex: 1 }]);
+  assert.deepEqual(stamps, [{ s: "s", i: 9, o: "job" }]);
+
+  // delivered resume context: original prompt + git log + status + progress
+  assert.equal(h.delivered.length, 1);
+  assert.equal(h.delivered[0].sessionId, "child-resumed");
+  assert.match(h.delivered[0].text, /^p/); // original prompt leads
+  assert.ok(h.delivered[0].text.includes("abc123 fix thing"));
+  assert.ok(h.delivered[0].text.includes(" M src/x.js"));
+  assert.ok(h.delivered[0].text.includes("step 3 of 5"));
+});
+
+test("sweeper uses the job's sweepAllowanceMs (CTO overnight), not the 30-min default", async () => {
+  const started = 1_700_000_000_000;
+  const h = harness([{
+    ...runningObserverJob(), id: "cto", startedAt: started, actor: "cto",
+    sweepAllowanceMs: 24 * 60 * 60_000,
+  }], started + 31 * 60_000);
+  h.deps.gitRun = async () => ({ stdout: "" });
+  await sweepDelegateJobs(h.deps);
+  assert.equal(h.jobs[0].status, "running");
+  assert.equal(h.delivered.length, 0);
+});
+
+test("sweeper fails a job past its sweepAllowanceMs with an allowance-accurate message", async () => {
+  const started = 1_700_000_000_000;
+  const h = harness([{
+    ...runningObserverJob(), id: "cto2", startedAt: started, actor: "cto",
+    sweepAllowanceMs: 5 * 60_000,
+  }], started + 10 * 60_000);
+  h.deps.gitRun = async () => ({ stdout: "" });
+  await sweepDelegateJobs(h.deps);
+  assert.equal(h.jobs[0].status, "failed");
+  assert.equal(h.jobs[0].error, "timed out after 5 minutes");
+});
+
+test("sweeper stops a paused job older than 7 days", async () => {
+  const pausedAt = 1_700_000_000_000;
+  const h = harness([{
+    ...runningObserverJob(), id: "oldpaused", status: "paused", pausedAt,
+    worktree: "/wt-old", branch: "b", tmuxSession: "s", windowIndex: 3,
+  }], pausedAt + 7 * 24 * 60 * 60_000 + 1);
+  h.deps.gitRemoveWorktree = async () => ({ removed: true });
+  await sweepDelegateJobs(h.deps);
+  const j = h.jobs[0];
+  assert.equal(j.status, "stopped");
+  assert.equal(j.error, "paused for over 7 days, stopped");
+  assert.equal(j.cleanedUp, true);
+});
+
+test("sweeper leaves a young paused job paused", async () => {
+  const pausedAt = 1_700_000_000_000;
+  const h = harness([{ ...runningObserverJob(), id: "youngpa", status: "paused", pausedAt }],
+    pausedAt + 60_000);
+  await sweepDelegateJobs(h.deps);
+  assert.equal(h.jobs[0].status, "paused");
+});
+
+test("reconcileJobsOnBoot parks a running job whose session is gone as paused", async () => {
+  const h = harness([{ ...runningObserverJob(), id: "gone", childSessionID: "dead" }]);
+  h.deps.sessionExists = async (sid) => sid !== "dead";
+  const res = await reconcileJobsOnBoot(h.deps);
+  assert.equal(res.reconciled, 1);
+  assert.equal(h.jobs[0].status, "paused");
+  assert.equal(h.jobs[0].pausedAt, 1_700_000_000_000);
+  assert.equal(h.jobs[0].worktree, null); // non-worktree job still parks
+});
+
+test("reconcileJobsOnBoot leaves a live running job untouched", async () => {
+  const h = harness([{ ...runningObserverJob(), id: "alive", childSessionID: "child" }]);
+  h.deps.sessionExists = async () => true;
+  const res = await reconcileJobsOnBoot(h.deps);
+  assert.equal(res.reconciled, 0);
+  assert.equal(h.jobs[0].status, "running");
+});
+
+test("reconcileJobsOnBoot is a no-op without a sessionExists dep", async () => {
+  const h = harness([{ ...runningObserverJob(), id: "x" }]);
+  const res = await reconcileJobsOnBoot(h.deps);
+  assert.equal(res.reconciled, 0);
+  assert.equal(h.jobs[0].status, "running");
 });
