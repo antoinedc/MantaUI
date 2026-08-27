@@ -25,6 +25,45 @@
 	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>Scan the pairing code shown by the Manta desktop app.</string>
+	<!-- Private-server reachability. The pairing flow explicitly supports a box
+	     that is NOT on the public internet (the "My server isn't reachable from
+	     the internet" field and the QR's `server=` param, both gated by
+	     isPrivateServerURL to LAN/tailnet families). That listener is plain
+	     http:// — TLS only exists on the public gateway hostname. Without the
+	     two keys below, iOS itself refuses those connections while Safari on
+	     the SAME phone succeeds (Safari is exempt from app ATS and holds its
+	     own Local Network grant), so every private-URL claim died in
+	     URLSession, was classified `.network`, and rendered as "Can't reach
+	     your server" even though the box was up:
+	       • ATS blocks cleartext http to a QUALIFIED hostname → the
+	         `ts.net` exception covers tailnet MagicDNS names
+	         (http://mybox.tailXXXX.ts.net:8787). IP literals and .local are
+	         ATS-exempt since iOS 10; NSAllowsLocalNetworking is belt-and-braces
+	         for those, and deliberately NOT NSAllowsArbitraryLoads — public
+	         traffic stays HTTPS-only.
+	       • Local Network privacy denies LAN connections (192.168.x / 10.x)
+	         outright when NSLocalNetworkUsageDescription is absent — the
+	         permission prompt can never even appear.
+	     Tests never caught this: the claim tests mock the HTTP layer and the
+	     capture harness pairs against 127.0.0.1 in the simulator, where
+	     neither policy applies. Verify on a REAL device. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+		<key>NSExceptionDomains</key>
+		<dict>
+			<key>ts.net</key>
+			<dict>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+				<key>NSIncludesSubdomains</key>
+				<true/>
+			</dict>
+		</dict>
+	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>MantaUI connects directly to your Manta server when it is on your local network or private tailnet.</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
