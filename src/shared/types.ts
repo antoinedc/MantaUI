@@ -1978,6 +1978,18 @@ export type OptimizerSeries = {
   series: { t: number; tokensSent: number; maskedTokens: number }[];
   counterfactualAvailable: boolean;
   totals: { turns: number; cost: number; tokensSent: number; maskedTokens: number };
+  // BET-1370: the window's savings, priced at REAL per-model prompt-side rates
+  // (not a flat per-million guess) minus the cache re-warm the mask forced.
+  // `usd` is null when the window's applied turns have no known price ("not
+  // priced"); otherwise it may be negative (re-warm exceeded the saving) and is
+  // never clamped. `potentialUsd` prices the full WOULD-mask set. `basis` /
+  // `pricedShare` describe how completely the APPLIED set was priced.
+  saved: {
+    usd: number | null;
+    potentialUsd: number | null;
+    basis: "measured" | "partial" | "unpriced";
+    pricedShare: number;
+  };
 };
 
 // A secret's METADATA — what the UI and `secret_list` see. NEVER carries the

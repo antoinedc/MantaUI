@@ -7,6 +7,7 @@ import {
   RANGES,
   _resetSeriesMemo,
 } from "./series.mjs";
+import { promptSideRate } from "../../shared/optimizerSavings.mjs";
 
 // Ledger row fixture — the fields `aggregate` / the series bucket agg read.
 function row(over = {}) {
@@ -141,6 +142,134 @@ test("buildOptimizerSeries: totals fold turns/cost from the window's rows", asyn
   assert.equal(out.totals.cost, 3.0);
   assert.equal(out.totals.tokensSent, 20);
   assert.equal(out.totals.maskedTokens, 0);
+});
+
+// ---- BET-1370: the window's `saved` figure (per-model pricing vs re-warm) ----
+
+const localDay = (d) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+const SONNET_COST = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 };
+
+test("buildOptimizerSeries: with a counterfactual store and no rates, `saved` is a zero/empty set (not a crash)", async () => {
+  const nowMs = new Date(2026, 7, 24, 12, 0, 0).getTime();
+  const out = await buildOptimizerSeries({
+    range: "7d",
+    fetchRows: async () => [],
+    now: nowMs,
+    counterfactualStore: null, // no store at all
+  });
+  assert.equal(out.saved.usd, 0);
+  assert.equal(out.saved.potentialUsd, 0);
+  assert.equal(out.saved.basis, "measured");
+  assert.equal(out.saved.pricedShare, 1);
+});
+
+test("buildOptimizerSeries: applied window prices tokens at the model's prompt-side rate", async () => {
+  const nowMs = new Date(2026, 7, 24, 12, 0, 0).getTime();
+  const todayLoc = new Date(2026, 7, 24, 0, 0, 0);
+  const store = fakeStore({
+    days: {
+      [localDay(todayLoc)]: {
+        maskedTokens: 1000,
+        appliedTokens: 1000, // everything applied → usd == potential
+        rewarmTokens: 0,
+        byModel: { "claude/sonnet": 1000 },
+      },
+    },
+  });
+  const out = await buildOptimizerSeries({
+    range: "7d",
+    fetchRows: async () => [],
+    now: nowMs,
+    counterfactualStore: store,
+    modelRates: async () => ({ "claude/sonnet": SONNET_COST }),
+  });
+  const expected = promptSideRate(SONNET_COST).rate * (1000 / 1e6);
+  assert.ok(out.saved.usd > 0, "a priced applied window has a positive figure");
+  assert.ok(Math.abs(out.saved.usd - expected) < 1e-9);
+  assert.equal(out.saved.potentialUsd, out.saved.usd, "all applied → potential == actual");
+  assert.equal(out.saved.basis, "measured");
+  assert.equal(out.saved.pricedShare, 1);
+});
+
+test("buildOptimizerSeries: nothing applied (observe/flags off) → usd 0 while potentialUsd is positive", async () => {
+  const nowMs = new Date(2026, 7, 24, 12, 0, 0).getTime();
+  const todayLoc = new Date(2026, 7, 24, 0, 0, 0);
+  const store = fakeStore({
+    days: {
+      [localDay(todayLoc)]: {
+        maskedTokens: 1000,
+        appliedTokens: 0, // nothing applied — the optimizer is off
+        rewarmTokens: 0,
+        byModel: { "claude/sonnet": 1000 },
+      },
+    },
+  });
+  const out = await buildOptimizerSeries({
+    range: "7d",
+    fetchRows: async () => [],
+    now: nowMs,
+    counterfactualStore: store,
+    modelRates: async () => ({ "claude/sonnet": SONNET_COST }),
+  });
+  assert.equal(out.saved.usd, 0, "off → it saved nothing");
+  assert.ok(out.saved.potentialUsd > 0, "potential still shows what it would save");
+});
+
+test("buildOptimizerSeries: mixed known+unknown tokens + re-warm → partial basis, weighted-average pricing, subtracted re-warm", async () => {
+  const nowMs = new Date(2026, 7, 24, 12, 0, 0).getTime();
+  const todayLoc = new Date(2026, 7, 24, 0, 0, 0);
+  const store = fakeStore({
+    days: {
+      [localDay(todayLoc)]: {
+        maskedTokens: 3000,
+        appliedTokens: 3000,
+        rewarmTokens: 1000, // 1k re-warm at cacheWrite−cacheRead = 2.7/Mtok
+        byModel: { "claude/sonnet": 1000, unknown: 2000 },
+      },
+    },
+  });
+  const out = await buildOptimizerSeries({
+    range: "7d",
+    fetchRows: async () => [],
+    now: nowMs,
+    counterfactualStore: store,
+    modelRates: async () => ({ "claude/sonnet": SONNET_COST }),
+  });
+  const sonnet = promptSideRate(SONNET_COST);
+  // known 1000 @ sonnet + unknown 2000 at the weighted average (= sonnet, the
+  // only known rate), minus re-warm 1000/Mtok × (cacheWrite − cacheRead).
+  const expected = (3000 / 1e6) * sonnet.rate - (1000 / 1e6) * (sonnet.cacheWrite - sonnet.cacheRead);
+  assert.ok(Math.abs(out.saved.usd - expected) < 1e-9);
+  assert.equal(out.saved.potentialUsd, out.saved.usd); // all applied
+  assert.equal(out.saved.basis, "partial");
+  assert.ok(Math.abs(out.saved.pricedShare - 1 / 3) < 1e-9);
+});
+
+test("buildOptimizerSeries: tokens exist but no pricing available → usd null, unpriced", async () => {
+  const nowMs = new Date(2026, 7, 24, 12, 0, 0).getTime();
+  const todayLoc = new Date(2026, 7, 24, 0, 0, 0);
+  const store = fakeStore({
+    days: {
+      [localDay(todayLoc)]: {
+        maskedTokens: 1000,
+        appliedTokens: 1000,
+        rewarmTokens: 0,
+        byModel: { "unknown": 1000 }, // no model identity → nothing priceable
+      },
+    },
+  });
+  const out = await buildOptimizerSeries({
+    range: "7d",
+    fetchRows: async () => [],
+    now: nowMs,
+    counterfactualStore: store,
+    modelRates: async () => ({}), // box can't read providers
+  });
+  assert.equal(out.saved.usd, null);
+  assert.equal(out.saved.potentialUsd, null);
+  assert.equal(out.saved.basis, "unpriced");
 });
 
 // ---- createOptimizerSeries (memo + in-flight + degradation) ----

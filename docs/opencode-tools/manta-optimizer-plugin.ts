@@ -118,6 +118,7 @@ function scanEligible(
   let maskedTokens = 0
   let maskedParts = 0
   let partsSeen = 0
+  let maxTailAtMask = 0
   const eligible: any[] = []
   const t0 = budget ? budget.t0 : 0
   const budgetMs = budget ? budget.budgetMs : 0
@@ -127,7 +128,7 @@ function scanEligible(
     for (let i = parts.length - 1; i >= 0; i--) {
       partsSeen++
       if (checkEvery > 0 && partsSeen % checkEvery === 0 && budget!.now() - t0 > budgetMs) {
-        return { bailed: "budget", maskedTokens, maskedParts, eligible }
+        return { bailed: "budget", maskedTokens, maskedParts, eligible, maxTailAtMask }
       }
       const part = parts[i]
       const isTool = part?.type === "tool"
@@ -142,6 +143,10 @@ function scanEligible(
       if (isTool && done && !isSkill && !alreadyPlaceholder && !protectedByTail && !protectedByRecency) {
         maskedTokens += estTokens(out)
         maskedParts++
+        // The spot this mask is inserted rewrites the cache for everything
+        // AFTER it — track the largest tail re-warmed by any mask (the full
+        // prompt tail that follows the mask point), for the re-warm cost.
+        if (tailTokens > maxTailAtMask) maxTailAtMask = tailTokens
         eligible.push({
           m,
           i,
@@ -152,7 +157,7 @@ function scanEligible(
       }
     }
   }
-  return { bailed: null, maskedTokens, maskedParts, eligible }
+  return { bailed: null, maskedTokens, maskedParts, eligible, maxTailAtMask }
 }
 
 function decideApply(a: {
@@ -175,6 +180,7 @@ function planMask(a: { messages: any[]; policy: any; now?: () => number }): any 
     return {
       bailed: "parts", apply: false, maskedTokens: 0, maskedParts: 0,
       eligible: [], reclaimable: 0, cacheDead: false, lastAssistantCompletedMs: 0,
+      rewarmTokens: 0,
     }
   }
   const t0 = now()
@@ -185,6 +191,7 @@ function planMask(a: { messages: any[]; policy: any; now?: () => number }): any 
     return {
       bailed: "budget", apply: false, maskedTokens: 0, maskedParts: 0,
       eligible: [], reclaimable: 0, cacheDead: false, lastAssistantCompletedMs: 0,
+      rewarmTokens: 0,
     }
   }
   const lastAssistantCompletedMs = lastAssistantCompleted(messages)
@@ -199,6 +206,10 @@ function planMask(a: { messages: any[]; policy: any; now?: () => number }): any 
     bailed: null, apply, cacheDead, lastAssistantCompletedMs,
     maskedTokens: scan.maskedTokens, maskedParts: scan.maskedParts,
     eligible: scan.eligible, reclaimable: scan.maskedTokens,
+    // Rewarm tokens the trimming would cause: the tail rewritten after the mask
+    // point. A dead cache means that tail was being re-written ANYWAY, so there
+    // is no NEW re-warm to charge — only a live cache has a re-warm cost.
+    rewarmTokens: cacheDead ? 0 : scan.maxTailAtMask,
   }
 }
 
@@ -260,6 +271,31 @@ function applyMask(messages: any[], eligible: any[], format: string): void {
     if (!part || part.type !== "tool" || !part.state) continue
     part.state.output = renderPlaceholder(e.tool, e.input, format)
   }
+}
+
+// BET-1370: the model whose tokens we are masking, for per-model savings
+// pricing. Source 1 is the transform's own input (the request carries
+// providerID/modelID); source 2 is a backwards scan of the messages for the
+// last entry that recorded them on its info. Both must be present to attribute
+// the tokens (missing either → {} — the report then carries no model and the
+// window is priced as unknown).
+function resolveModel(messages: any[], input: any): { providerID?: string; modelID?: string } {
+  if (
+    typeof input?.providerID === "string" && input.providerID !== "" &&
+    typeof input?.modelID === "string" && input.modelID !== ""
+  ) {
+    return { providerID: input.providerID, modelID: input.modelID }
+  }
+  for (let m = messages.length - 1; m >= 0; m--) {
+    const info = messages[m]?.info
+    if (
+      typeof info?.providerID === "string" && info.providerID !== "" &&
+      typeof info?.modelID === "string" && info.modelID !== ""
+    ) {
+      return { providerID: info.providerID, modelID: info.modelID }
+    }
+  }
+  return {}
 }
 
 //
@@ -347,7 +383,7 @@ function resolveCachedConstraints(sessionID: string): string[] {
 
 export const MantaOptimizerMask: Plugin = async () => {
   return {
-    "experimental.chat.messages.transform": async (_input: any, output: any) => {
+    "experimental.chat.messages.transform": async (input: any, output: any) => {
       try {
         const messages: any[] = output?.messages ?? []
         const sessionID: string = messages[0]?.info?.sessionID ?? ""
@@ -371,16 +407,26 @@ export const MantaOptimizerMask: Plugin = async () => {
           applied = true
         }
 
+        // BET-1370: attribute the masked tokens to a model so the savings can be
+        // priced per model. Report only when BOTH identity fields resolve — a
+        // bare `modelID` is not a usable key.
+        const model = resolveModel(messages, input)
+        const modelFields =
+          model.providerID && model.modelID ? { providerID: model.providerID, modelID: model.modelID } : {}
+
         // Report actual AND counterfactual — not awaited. maskedTokens /
         // maskedParts are the full would-mask computed identically whether the
         // policy is on or off, so the observe line stays byte-identical to
-        // phase 1 (which reported only above MIN_BATCH_TOKENS == batchTokens).
-        if (plan.maskedTokens >= policy.batchTokens) {
+        // phase 1. BET-1370 widened the trigger from >= batchTokens to > 0 and
+        // carries the re-warm tokens + model identity.
+        if (plan.maskedTokens > 0) {
           reportCounterfactual(sessionID, {
             maskedTokens: plan.maskedTokens,
             maskedParts: plan.maskedParts,
+            rewarmTokens: plan.rewarmTokens,
             applied,
             mode,
+            ...modelFields,
           })
         }
       } catch {

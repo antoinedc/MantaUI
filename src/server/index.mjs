@@ -1108,6 +1108,30 @@ const optimizerSummary = createOptimizerSummary({
 const optimizerSeries = createOptimizerSeries({
   getDb,
   counterfactualStore: optimizerCounterfactual,
+  // BET-1370: the per-model cost reader that prices the window's savings. Built
+  // from oc.getProviders — each model already carries a normalised camelCase
+  // `cost` ({ input, output, cacheRead, cacheWrite } in $/Mtok) — keyed
+  // `"<providerID>/<modelID>"`, EXACTLY the key the counterfactual store's
+  // byModel split uses. Never throws: an unreadable provider list just means no
+  // window is priceable (the card renders "not priced").
+  modelRates: async () => {
+    try {
+      const { all } = await oc.getProviders();
+      const out = {};
+      for (const p of Array.isArray(all) ? all : []) {
+        if (!p || typeof p.id !== "string") continue;
+        const pModels = p.models && typeof p.models === "object" ? p.models : {};
+        for (const modelId of Object.keys(pModels)) {
+          const m = oc._normalizeProviderModel(p.id, modelId, pModels[modelId]);
+          if (!m || typeof m.id !== "string") continue;
+          out[`${p.id}/${m.id}`] = m.cost;
+        }
+      }
+      return out;
+    } catch {
+      return {};
+    }
+  },
 });
 
 // ---------------------------------------------------------------------------

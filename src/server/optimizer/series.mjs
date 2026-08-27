@@ -23,6 +23,8 @@
 import { aggregate, aggregateDailySeries, aggregateHourlySeries, fetchLedgerRows } from "../modelLedger.mjs";
 import { bucketSeries } from "./counterfactual.mjs";
 import { bucketKeyToMs } from "../../shared/timeBuckets.mjs";
+import { mixFromCounts } from "../../shared/blendedPrice.mjs";
+import { promptSideRate, savedUsd } from "../../shared/optimizerSavings.mjs";
 
 // The supported ranges and their bucketing. Bucket keys zip the sent series
 // (from the ledger) with the counterfactual series (from the store) — both are
@@ -57,8 +59,20 @@ function normalizeRange(range) {
  * injected store (a null store yields zeros, never a throw). The two are zipped
  * on the bucket KEY so they are always the same length and aligned, even when
  * the two sources have different sparse keys.
+ *
+ * `modelRates` is an injected async reader (like summary.mjs's readCacheTtl)
+ * returning `{ "<providerID>/<modelID>": normalizedCost }` — the per-model cost
+ * map used to price the window's savings (BET-1370). It may resolve to {} (the
+ * box can't read opencode's provider list) and any missing model simply is not
+ * priceable.
  */
-export async function buildOptimizerSeries({ range, fetchRows, counterfactualStore = null, now = Date.now() }) {
+export async function buildOptimizerSeries({
+  range,
+  fetchRows,
+  counterfactualStore = null,
+  now = Date.now(),
+  modelRates = async () => ({}),
+}) {
   const r = normalizeRange(range);
   const { bucket, count } = RANGES[r];
   const nowMs = num(now);
@@ -93,8 +107,49 @@ export async function buildOptimizerSeries({ range, fetchRows, counterfactualSto
   const tokensSent = series.reduce((s, p) => s + p.tokensSent, 0);
   const maskedTokens = series.reduce((s, p) => s + p.maskedTokens, 0);
 
+  // ---- BET-1370: price the window's savings (real per-model rates, not a
+  // flat per-million guess). The counterfactual store's buckets carry the
+  // token-turn sums and the per-model split; sum them across the window. ----
+  let appliedTokens = 0;
+  let rewarmTokens = 0;
+  const maskedByModel = {};
+  for (const b of Array.isArray(cf) ? cf : []) {
+    appliedTokens += num(b.appliedTokens);
+    rewarmTokens += num(b.rewarmTokens);
+    if (b.byModel && typeof b.byModel === "object") {
+      for (const [mk, tok] of Object.entries(b.byModel)) {
+        maskedByModel[mk] = (maskedByModel[mk] ?? 0) + num(tok);
+      }
+    }
+  }
+
+  // The store keys byModel on the full WOULD-mask set (every report, applied or
+  // not); there is no separate applied split. Derive the applied set by scaling
+  // the would-mask split by the applied/masked ratio: nothing applied → empty
+  // (usd 0, the optimizer is off); everything applied → equal to potential.
+  const ratio = maskedTokens > 0 ? appliedTokens / maskedTokens : 0;
+  const appliedByModel = {};
+  for (const [mk, tok] of Object.entries(maskedByModel)) appliedByModel[mk] = tok * ratio;
+  const appliedRewarm = rewarmTokens * ratio;
+
   // turns/cost reuse the existing aggregate over exactly the window's rows.
-  const { totals } = aggregate(rows);
+  const { totals, cacheShare } = aggregate(rows);
+
+  // Measured cache mix over the window (all-zero → DEFAULT_MIX via
+  // mixFromCounts — the single shared default, never a second one here).
+  const mix = mixFromCounts(cacheShare);
+
+  // Build the per-model prompt-side rates from the injected reader.
+  const modelCosts = await modelRates();
+  const rates = {};
+  if (modelCosts && typeof modelCosts === "object") {
+    for (const [mk, cost] of Object.entries(modelCosts)) rates[mk] = promptSideRate(cost, mix);
+  }
+
+  // potential: the full would-mask set (what trimming WOULD save); applied: the
+  // subset actually masked (what it DID save — 0 when the optimizer is off).
+  const applied = savedUsd({ byModel: appliedByModel, rewarmTokens: appliedRewarm, rates });
+  const potential = savedUsd({ byModel: maskedByModel, rewarmTokens, rates });
 
   return {
     supported: true,
@@ -109,6 +164,12 @@ export async function buildOptimizerSeries({ range, fetchRows, counterfactualSto
       cost: totals.cost,
       tokensSent,
       maskedTokens,
+    },
+    saved: {
+      usd: applied.usd,
+      potentialUsd: potential.usd,
+      basis: applied.basis,
+      pricedShare: applied.pricedShare,
     },
   };
 }
@@ -128,11 +189,13 @@ export function _resetSeriesMemo() {
 /**
  * I/O. Wrapper factory. `getDb` resolves the read-only opencode.db handle
  * (null → { supported:false }); `counterfactualStore` is the observe-mode store
- * from counterfactual.mjs (null when not wired); `now` (a number or a zero-arg
- * fn, for tests) is the clock. The returned async function takes a range and
- * memoizes the built series per range for TTL_MS with an in-flight guard.
+ * from counterfactual.mjs (null when not wired); `modelRates` is the injected
+ * per-model cost reader (built from oc.getProviders in index.mjs); `now` (a
+ * number or a zero-arg fn, for tests) is the clock. The returned async function
+ * takes a range and memoizes the built series per range for TTL_MS with an
+ * in-flight guard.
  */
-export function createOptimizerSeries({ getDb, counterfactualStore = null, now }) {
+export function createOptimizerSeries({ getDb, counterfactualStore = null, modelRates, now }) {
   const nowMs = () => (typeof now === "function" ? num(now()) : num(now ?? Date.now()));
   return function optimizerSeries(range) {
     const r = normalizeRange(range);
@@ -151,6 +214,7 @@ export function createOptimizerSeries({ getDb, counterfactualStore = null, now }
           range: r,
           fetchRows: (since) => fetchLedgerRows(db, since),
           counterfactualStore,
+          modelRates,
           now: t,
         });
         memo.set(r, { at: t, value });
