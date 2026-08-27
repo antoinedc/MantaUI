@@ -26,7 +26,7 @@ const ROW =
   "flex items-start gap-5 py-3 border-b border-border-subtle last:border-b-0";
 const LAB = "flex-1 min-w-0";
 const NAME = "block text-body font-medium text-text";
-const HELP = "block text-[12.5px] leading-[1.5] text-text-faint mt-[3px]";
+const HELP = "block text-[12.5px] leading-[1.5] text-text-faint mt-[3px] max-w-[62ch]";
 const CTL = "shrink-0 flex items-center gap-2 pt-[2px]";
 
 export function SettingsRow({

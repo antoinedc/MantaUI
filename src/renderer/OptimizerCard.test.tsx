@@ -149,4 +149,43 @@ describe("OptimizerCard — P2.5 legibility surfaces", () => {
     await h.flush();
     expect(h.text()).toContain("6 of 7 in background");
   });
+
+  it("renders x-axis tick <text> labels for the daily series", async () => {
+    installMockApi({ optimizerSummary: () => Promise.resolve(fixture()) });
+    h = mount(<OptimizerCard />);
+    await h.flush();
+    // The fixture's two-day series → 2 ticks, pinned at index 0 and the last.
+    const texts = [...h.container.querySelectorAll("svg.opt-chart text")].map((t) => t.textContent ?? "");
+    expect(texts).toContain("Aug 1");
+    expect(texts).toContain("Aug 2");
+  });
+
+  it("renders the 'last 30 days' range label in the chart heading row", async () => {
+    installMockApi({ optimizerSummary: () => Promise.resolve(fixture()) });
+    h = mount(<OptimizerCard />);
+    await h.flush();
+    expect(h.text()).toContain("last 30 days");
+  });
+
+  it("with no counterfactual draws NO dashed path and NO 'raw counterfactual' legend text", async () => {
+    // Default fixture has maskedTokens all 0 → masked30d === 0.
+    installMockApi({ optimizerSummary: () => Promise.resolve(fixture()) });
+    h = mount(<OptimizerCard />);
+    await h.flush();
+    expect(h.container.querySelectorAll("svg.opt-chart path[stroke-dasharray]").length).toBe(0);
+    expect(h.text()).not.toContain("raw counterfactual");
+  });
+
+  it("with all-zero activity renders the no-activity empty state and NO chart", async () => {
+    installMockApi({
+      optimizerSummary: () =>
+        Promise.resolve(
+          fixture({ dailySeries: [{ day: "2026-08-01", tokensSent: 0, maskedTokens: 0 }] }),
+        ),
+    });
+    h = mount(<OptimizerCard />);
+    await h.flush();
+    expect(h.text()).toContain("No model activity in the last 30 days.");
+    expect(h.container.querySelectorAll("svg.opt-chart").length).toBe(0);
+  });
 });

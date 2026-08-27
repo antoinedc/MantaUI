@@ -8,6 +8,7 @@ import {
   computeLiveTurn,
   formatTokens,
   buildCumulativePath,
+  chartAxisTicks,
   formatBytes,
   describeSavedFile,
   voiceUiEnabled,
@@ -6012,6 +6013,62 @@ describe("describeActivityEntry", () => {
   it("falls back to a safe headline when subject/verdict are absent", () => {
     const out = describeActivityEntry({ kind: "tune", verdict: "kept" });
     expect(out.headline).toContain("optimizer change");
+  });
+});
+
+describe("chartAxisTicks", () => {
+  const day = (n: number) => new Date(`2026-08-${String(n).padStart(2, "0")}T00:00:00`).getTime();
+
+  it("returns [] for empty input", () => {
+    expect(chartAxisTicks([], "day")).toEqual([]);
+    expect(chartAxisTicks([], "hour")).toEqual([]);
+  });
+
+  it("fewer points than budget → one tick per point", () => {
+    const ticks = chartAxisTicks([day(1), day(2)], "day");
+    expect(ticks).toEqual([
+      { index: 0, label: "Aug 1" },
+      { index: 1, label: "Aug 2" },
+    ]);
+  });
+
+  it("exactly the budget → one tick per point, all indices present", () => {
+    const ts = [day(1), day(2), day(3), day(4)];
+    const ticks = chartAxisTicks(ts, "day");
+    expect(ticks.map((t) => t.index)).toEqual([0, 1, 2, 3]);
+  });
+
+  it("30 day points → 4 ticks with first index 0 and last index 29, no duplicate indices", () => {
+    const ts = Array.from({ length: 30 }, (_, i) => day(i + 1));
+    const ticks = chartAxisTicks(ts, "day");
+    expect(ticks.length).toBe(4);
+    expect(ticks[0].index).toBe(0);
+    expect(ticks[ticks.length - 1].index).toBe(29);
+    const idx = ticks.map((t) => t.index);
+    expect(new Set(idx).size).toBe(idx.length);
+  });
+
+  it("24 hour points → 5 ticks, monotonic indices, last index 23", () => {
+    const ts = Array.from({ length: 24 }, (_, i) => new Date(`2026-08-01T${String(i).padStart(2, "0")}:00:00`).getTime());
+    const ticks = chartAxisTicks(ts, "hour");
+    expect(ticks.length).toBe(5);
+    expect(ticks[0].index).toBe(0);
+    expect(ticks[ticks.length - 1].index).toBe(23);
+    const idx = ticks.map((t) => t.index);
+    expect(idx).toEqual([...idx].sort((a, b) => a - b));
+  });
+
+  it("formats day labels as en-US short month + numeric day", () => {
+    const ticks = chartAxisTicks([day(3), day(15)], "day");
+    expect(ticks[0].label).toBe("Aug 3");
+    expect(ticks[1].label).toBe("Aug 15");
+  });
+
+  it("formats hour labels as 2-digit local hour", () => {
+    const ts = [new Date("2026-08-01T14:37:00").getTime(), new Date("2026-08-01T09:05:00").getTime()];
+    const ticks = chartAxisTicks(ts, "hour");
+    expect(ticks[0].label).toBe("14:00");
+    expect(ticks[1].label).toBe("09:00");
   });
 });
 

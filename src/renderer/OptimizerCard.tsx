@@ -28,6 +28,7 @@ import { Card } from "./Card";
 import { useStore } from "./store";
 import {
   buildCumulativePath,
+  chartAxisTicks,
   formatResetAt,
   formatTokens,
   formatClockTime,
@@ -150,6 +151,15 @@ export function OptimizerCard() {
     CHART.height,
     maxTokens,
   );
+
+  // X-axis ticks for the consumption chart (BET-1366): evenly spaced, at most
+  // 4 for "day", always pinned to index 0 and the last index. An all-zero
+  // series and a bare solid line must not be confused — guards in the JSX
+  // below.
+  const seriesTs = d.dailySeries.map((e) => new Date(`${e.day}T00:00:00`).getTime());
+  const axisTicks = chartAxisTicks(seriesTs, "day");
+  const hasCounterfactual = masked30d > 0;
+  const noActivity = sent30d === 0 && masked30d === 0;
 
   // Flat $3/Mtok counterfactual saving estimate (refined per-model in phase 2).
   const saved = Math.round((masked30d * 3) / 1_000_000);
@@ -286,48 +296,71 @@ export function OptimizerCard() {
       )}
 
       {/* ── Consumption chart (phase 1, unchanged) ───────────────────────── */}
-      <div className="opt-chart-head">Token consumption — with &amp; without optimization</div>
-      <svg
-        className="opt-chart"
-        viewBox={`0 0 ${CHART.left + CHART.width + 6} ${CHART.top + CHART.height + 18}`}
-        role="img"
-        aria-label="Token consumption with and without optimization"
-      >
-        <g transform={`translate(${CHART.left} ${CHART.top})`}>
-          <line x1="0" y1={CHART.height} x2={CHART.width} y2={CHART.height} stroke="var(--border-subtle)" />
-          <line x1="0" y1={CHART.height / 2} x2={CHART.width} y2={CHART.height / 2} stroke="var(--border-subtle)" strokeDasharray="2 5" opacity=".6" />
-          <line x1="0" y1="0" x2={CHART.width} y2="0" stroke="var(--border-subtle)" strokeDasharray="2 5" opacity=".6" />
-          <line x1="0" y1="0" x2="0" y2={CHART.height} stroke="var(--border-subtle)" />
-
-          <text x="-8" y={CHART.height + 12} textAnchor="end" fill="var(--tx4)" fontSize="10" fontFamily="var(--font-mono)">0</text>
-          <text x="-8" y={CHART.height / 2 + 4} textAnchor="end" fill="var(--tx4)" fontSize="10" fontFamily="var(--font-mono)">{axisTokens(maxTokens / 2)}</text>
-          <text x="-8" y="4" textAnchor="end" fill="var(--tx4)" fontSize="10" fontFamily="var(--font-mono)">{axisTokens(maxTokens)}</text>
-
-          <path d={rawPath} fill="none" stroke="var(--tx4)" strokeWidth="2" strokeDasharray="5 4" />
-          <path d={sentPath} fill="none" stroke="var(--accent)" strokeWidth="2.5" />
-          <path
-            d={`${sentPath} L ${CHART.width} ${CHART.height} L 0 ${CHART.height} Z`}
-            fill="rgb(var(--accent-rgb) / 0.08)"
-            stroke="none"
-          />
-
-          {masked30d > 0 && (
-            <text x={CHART.width} y="24" textAnchor="end" fill="var(--ok)" fontSize="10" fontFamily="var(--font-mono)">
-              −{formatTokens(masked30d)} · ≈ ${saved} est.
-            </text>
-          )}
-        </g>
-      </svg>
-      <div className="opt-legend">
-        <span className="opt-legend-item">
-          <i style={{ background: "var(--accent)" }} />
-          sent
-        </span>
-        <span className="opt-legend-item">
-          <i style={{ background: "var(--tx4)" }} />
-          raw counterfactual — same turns, nothing trimmed (est.)
-        </span>
+      <div className="flex items-baseline justify-between gap-3">
+        <div className="opt-chart-head">Token consumption — with &amp; without optimization</div>
+        <span className="text-micro text-text-faint">last 30 days</span>
       </div>
+      {noActivity ? (
+        <div className="opt-empty">No model activity in the last 30 days.</div>
+      ) : (
+        <>
+          <svg
+            className="opt-chart"
+            viewBox={`0 0 ${CHART.left + CHART.width + 6} ${CHART.top + CHART.height + 18}`}
+            role="img"
+            aria-label="Token consumption with and without optimization"
+          >
+            <g transform={`translate(${CHART.left} ${CHART.top})`}>
+              <line x1="0" y1={CHART.height} x2={CHART.width} y2={CHART.height} stroke="var(--border-subtle)" />
+              <line x1="0" y1={CHART.height / 2} x2={CHART.width} y2={CHART.height / 2} stroke="var(--border-subtle)" strokeDasharray="2 5" opacity=".6" />
+              <line x1="0" y1="0" x2={CHART.width} y2="0" stroke="var(--border-subtle)" strokeDasharray="2 5" opacity=".6" />
+              <line x1="0" y1="0" x2="0" y2={CHART.height} stroke="var(--border-subtle)" />
+
+              <text x="-8" y={CHART.height + 12} textAnchor="end" fill="var(--tx4)" fontSize="10" fontFamily="var(--font-mono)">0</text>
+              <text x="-8" y={CHART.height / 2 + 4} textAnchor="end" fill="var(--tx4)" fontSize="10" fontFamily="var(--font-mono)">{axisTokens(maxTokens / 2)}</text>
+              <text x="-8" y="4" textAnchor="end" fill="var(--tx4)" fontSize="10" fontFamily="var(--font-mono)">{axisTokens(maxTokens)}</text>
+
+              {axisTicks.map((t) => {
+                const isFirst = t.index === 0;
+                const isLast = t.index === d.dailySeries.length - 1;
+                const anchor = isFirst ? "start" : isLast ? "end" : "middle";
+                const x = axisTicks.length > 1 ? (t.index / (d.dailySeries.length - 1)) * CHART.width : 0;
+                return (
+                  <text key={t.index} x={x} y={CHART.height + 14} textAnchor={anchor} fill="var(--tx4)" fontSize="10" fontFamily="var(--font-mono)">
+                    {t.label}
+                  </text>
+                );
+              })}
+
+              {hasCounterfactual && <path d={rawPath} fill="none" stroke="var(--tx4)" strokeWidth="2" strokeDasharray="5 4" />}
+              <path d={sentPath} fill="none" stroke="var(--accent)" strokeWidth="2.5" />
+              <path
+                d={`${sentPath} L ${CHART.width} ${CHART.height} L 0 ${CHART.height} Z`}
+                fill="rgb(var(--accent-rgb) / 0.08)"
+                stroke="none"
+              />
+
+              {masked30d > 0 && (
+                <text x={CHART.width} y="24" textAnchor="end" fill="var(--ok)" fontSize="10" fontFamily="var(--font-mono)">
+                  −{formatTokens(masked30d)} · ≈ ${saved} est.
+                </text>
+              )}
+            </g>
+          </svg>
+          <div className="opt-legend">
+            <span className="opt-legend-item">
+              <i style={{ background: "var(--accent)" }} />
+              sent
+            </span>
+            {hasCounterfactual && (
+              <span className="opt-legend-item">
+                <i style={{ background: "var(--tx4)" }} />
+                raw counterfactual — same turns, nothing trimmed (est.)
+              </span>
+            )}
+          </div>
+        </>
+      )}
 
       <div className="opt-stats">
         <div className="opt-stat">

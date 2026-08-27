@@ -334,6 +334,45 @@ export function buildCumulativePath(
 // Human-readable file size for the agent-file toast. Binary units (KiB-style
 // thresholds) but SI-ish labels (KB/MB/GB) to match what users expect from a
 // download chip. 0 / unknown → "" so the caller can omit the size entirely.
+/**
+ * Evenly-spaced x-axis ticks for the optimizer consumption chart.
+ *
+ * `tsMs` is the bucket-start timestamp of every point, oldest→newest.
+ * Returns at most 4 ticks for "day" and at most 5 for "hour", ALWAYS
+ * including index 0 and the last index. Fewer points than the tick budget →
+ * one tick per point. Empty input → [].
+ *
+ * Labels: "day" → "Aug 3" (en-US short month + numeric day, local time);
+ *         "hour" → "14:00" (2-digit local hour).
+ */
+export function chartAxisTicks(
+  tsMs: number[],
+  bucket: "hour" | "day",
+): { index: number; label: string }[] {
+  const budget = bucket === "hour" ? 5 : 4;
+  if (tsMs.length === 0) return [];
+  if (tsMs.length <= budget) {
+    return tsMs.map((t, index) => ({ index, label: tickLabel(t, bucket) }));
+  }
+  const out: { index: number; label: string }[] = [];
+  const seen = new Set<number>();
+  for (let i = 0; i < budget; i++) {
+    const index = Math.round((i * (tsMs.length - 1)) / (budget - 1));
+    if (seen.has(index)) continue;
+    seen.add(index);
+    out.push({ index, label: tickLabel(tsMs[index], bucket) });
+  }
+  return out;
+}
+
+function tickLabel(t: number, bucket: "hour" | "day"): string {
+  const d = new Date(t);
+  if (bucket === "hour") {
+    return `${String(d.getHours()).padStart(2, "0")}:00`;
+  }
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
 export function formatBytes(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return "";
   if (n < 1024) return `${n} B`;

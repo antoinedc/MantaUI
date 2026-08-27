@@ -61,6 +61,10 @@ export type SettingSection = {
   label: string;
   /** Optional cluster divider rendered above this entry in the nav. */
   group?: "SETUP" | "AGENT";
+  /** When true this section's panel is not capped at the reading measure —
+   *  it renders wide (used by Models, whose chart and endpoint tables need
+   *  the space). Every other section stays capped. */
+  wide?: boolean;
 };
 
 export type SettingEntry = {
@@ -95,7 +99,7 @@ export const SETTING_SECTIONS: SettingSection[] = [
   { id: "general", label: "General" },
   { id: "box", label: "Box", group: "SETUP" },
   { id: "accounts", label: "Accounts", group: "SETUP" },
-  { id: "models", label: "Models", group: "SETUP" },
+  { id: "models", label: "Models", group: "SETUP", wide: true },
   { id: "sessions", label: "Sessions", group: "AGENT" },
   { id: "files", label: "Files", group: "AGENT" },
   { id: "extensions", label: "Extensions", group: "AGENT" },
