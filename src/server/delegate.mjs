@@ -346,6 +346,7 @@ async function registerJob(
     save = saveJobs,
     publish,
     newWindow,
+    stampOwner,
     listProjects,
     gitRemoveWorktree,
     oc,
@@ -387,6 +388,21 @@ async function registerJob(
       }
     }
     return { ok: false, error: String(e?.message ?? e) };
+  }
+
+  // BET-1377: stamp the window's owner as "job" now that it exists, so the
+  // CTO digest (and any other consumer of listProjects) can tell a delegate
+  // job's window apart from a user's window. Mirror of the @manta-session-id
+  // stamp — a separate option (@manta-owner) so the two never collide. This
+  // is advisory metadata: a stamp failure must not fail the job start (absent
+  // option ⇒ "user"), so it is best-effort and never rolled back.
+  if (stampOwner) {
+    try {
+      await stampOwner(tmuxSession, windowIndex, "job");
+    } catch {
+      /* best-effort; the window already exists and the job record below is
+         the source of truth for the job's own lifecycle */
+    }
   }
 
   // Persist the record with status "running", startedAt = now.

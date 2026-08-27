@@ -494,6 +494,43 @@ test("startJob leaves the link null when none is provided", async () => {
   assert.equal(job.link, null);
 });
 
+// BET-1377: @manta-owner. startJob stamps the created window's owner as "job"
+// (absent ⇒ "user"), so listProjects can tell a delegate job's window from a
+// user's window for the CTO digest. Best-effort — a stamp failure must not
+// fail the job start.
+test("startJob stamps the new window's owner as job (BET-1377)", async () => {
+  const h = harness([]);
+  h.deps.gitAddWorktree = async () => { throw new Error("not a git repository"); };
+  const parentWin = { index: 1, name: "p", opencodeSessionId: "parent", paneCurrentPath: "/repo" };
+  h.deps.listProjects = async () => [{ tmuxSession: "s", windows: [parentWin] }];
+  h.deps.newWindow = async () => ({ sessionId: "child_owner", windowIndex: 4 });
+  const stamps = [];
+  h.deps.stampOwner = async (sessionName, windowIndex, owner) => {
+    stamps.push({ sessionName, windowIndex, owner });
+  };
+  const res = await startJob(
+    { prompt: "delegate work", parentSessionID: "parent", parentDirectory: "/repo" },
+    h.deps,
+  );
+  assert.equal(res.ok, true);
+  assert.deepEqual(stamps, [{ sessionName: "s", windowIndex: 4, owner: "job" }]);
+});
+
+test("startJob still succeeds when the owner stamp fails (best-effort)", async () => {
+  const h = harness([]);
+  h.deps.gitAddWorktree = async () => { throw new Error("not a git repository"); };
+  const parentWin = { index: 1, name: "p", opencodeSessionId: "parent", paneCurrentPath: "/repo" };
+  h.deps.listProjects = async () => [{ tmuxSession: "s", windows: [parentWin] }];
+  h.deps.newWindow = async () => ({ sessionId: "child_owner_fail", windowIndex: 2 });
+  h.deps.stampOwner = async () => { throw new Error("tmux exploded"); };
+  const res = await startJob(
+    { prompt: "delegate work", parentSessionID: "parent", parentDirectory: "/repo" },
+    h.deps,
+  );
+  assert.equal(res.ok, true);
+  assert.ok(h.jobs.some((j) => j.childSessionID === "child_owner_fail"), "job persisted");
+});
+
 // ----------------------------------------------------------------------------
 // BET-947 — startJob model threading (structured, free text, no-match, none)
 // ----------------------------------------------------------------------------

@@ -638,6 +638,9 @@ const delegateEngine = createDelegateEngine({
   listProjects: () => tmux.listProjects(),
   newWindow: (input) => tmux.newWindow(input),
   killWindow: (input) => tmux.killWindow(input),
+  // BET-1377: stamp the job's window owner as "job" (see tmux.stampOwner).
+  stampOwner: (sessionName, windowIndex, owner) =>
+    tmux.stampOwner(sessionName, windowIndex, owner),
   gitAddWorktree: (input) => local.gitAddWorktree(input),
   gitRemoveWorktree: (input) => local.gitRemoveWorktree(input),
   gitRun: (args) => tmux.run("git", args),
