@@ -230,15 +230,9 @@ test("a failing price fetch leaves entries byte-identical to the models.json res
   const res = await ctl.refresh();
   assert.equal(res.ok, true);
   assert.equal(res.size, FIXTURE.length);
-  const unpriced = ctl.allModels();
-  assert.equal(unpriced.length, FIXTURE.length);
   // Deep equality against the pristine fixture — the price-fetch failure must
   // not touch a single entry (this is the regression that matters).
-  assert.deepEqual(
-    unpriced.map((e) => e.id),
-    FIXTURE.map((e) => e.id),
-  );
-  assert.ok(unpriced.every((e) => e.cost === undefined));
+  assert.deepEqual(ctl.allModels(), FIXTURE);
 });
 
 // ---------------------------------------------------------------------------
