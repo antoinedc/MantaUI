@@ -17,6 +17,7 @@
 
 import { getDb } from "./opencodeDb.mjs";
 import { aggregateReliability } from "../shared/toolReliability.mjs";
+import { dayKey, recentBucketKeys } from "../shared/timeBuckets.mjs";
 
 // Turns longer than this are excluded from TIMING only (still counted for
 // cost) — the spec cap is 600s of wall-clock.
@@ -187,14 +188,9 @@ function byCostDesc(a, b) {
 }
 
 // Local-calendar day key "YYYY-MM-DD" for a timestamp. Rows are bucketed into
-// the user's local day, matching how the dashboard graph is read.
-function dayKey(ms) {
-  const d = new Date(num(ms));
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
+// the user's local day, matching how the dashboard graph is read. Shared:
+// `dayKey` / `recentBucketKeys` come from src/shared/timeBuckets.mjs — the
+// same single definition the optimizer counterfactual store uses.
 
 /**
  * PURE. Per-session spend over `rows` (flat ledger rows from
@@ -235,10 +231,7 @@ export function aggregateDailySeries(rows, days = 30, now = Date.now()) {
     byDay.set(key, (byDay.get(key) || 0) + tokensSent(r));
   }
   const out = [];
-  for (let i = n - 1; i >= 0; i--) {
-    const d = new Date(num(now));
-    d.setDate(d.getDate() - i);
-    const key = dayKey(d.getTime());
+  for (const key of recentBucketKeys("day", n, now)) {
     out.push({ day: key, tokensSent: byDay.get(key) || 0 });
   }
   return out;
