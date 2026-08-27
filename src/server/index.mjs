@@ -682,6 +682,14 @@ const delegateEngine = createDelegateEngine({
   readProgress: (sid) => readProgressRecord(sid),
   clearProgress: (sid) => clearProgress(sid),
 });
+// Restart reconciliation (spec §11.6-5): a job recorded `running` whose opencode
+// child session did not survive the box restart is parked as `paused` (its
+// worktree + branch persist, so it can be resumed). Best-effort, non-blocking;
+// a healthy box reconciles nothing. The CTO engine also calls this on its own
+// boot (C3).
+delegateEngine.reconcileJobsOnBoot().catch((e) =>
+  console.warn("[delegate] boot reconciliation failed:", e?.message ?? e),
+);
 // eslint-disable-next-line no-unused-vars
 const { stop: stopDelegateSweeper } = delegateEngine.startSweeper();
 // eslint-disable-next-line no-unused-vars

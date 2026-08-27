@@ -71,6 +71,10 @@ export const CAP_ERROR =
   "too many background jobs running (5). Do not retry — either wait for one to finish, or do this work yourself.";
 // `running` jobs older than this → `failed "timed out after 30 minutes"`.
 const RUNNING_TIMEOUT_MS = 30 * 60_000;
+// `paused` jobs are kept this long before the sweeper stops them (spec §11.6
+// "[sweep] paused > 7 days → stopped"). A paused job's worktree persists, so
+// the pause window is generous.
+const PAUSE_KEEP_MS = 7 * 24 * 60 * 60_000;
 // Terminal jobs are retained this long, OR until 50 records, whichever bites
 // first. The window + worktree are NEVER removed by the sweeper — only by an
 // explicit delete.
@@ -166,6 +170,16 @@ export function buildCompletionText(job) {
     lines.push(String(job?.result ?? ""));
   }
   return lines.join("\n");
+}
+
+// Mirrors the renderer's isToolStepBoundary (chatUtils.ts) exactly: a tool
+// part that has reached `completed` or `error`. This is the step boundary at
+// which a `pauseRequested` job's session is safely drain-aborted — the current
+// tool has already finished, so no tool's half-written work is lost (spec
+// §11.6-1: "aborted ... at its next completed-tool-part boundary"). Pure.
+export function isToolStepBoundary(part) {
+  if (!part || typeof part !== "object") return false;
+  return part.type === "tool" && (part.state?.status === "completed" || part.state?.status === "error");
 }
 
 // Derive the job name from the first four whitespace-separated words of the
@@ -338,6 +352,8 @@ async function registerJob(
     origin,
     permission,
     link,
+    actor,
+    sweepAllowanceMs,
   },
   deps = {},
 ) {
@@ -432,6 +448,17 @@ async function registerJob(
     // the triggering issue — with no per-feature plumbing. A forge-triggered
     // delegate sets this at dispatch; a user delegate leaves it null.
     link: link ?? null,
+    // Who started the job ("user" default; "cto" for the adaptive-CTO engine).
+    // Persisted so the CTO engine can reason about its own jobs across restarts.
+    actor: actor ?? "user",
+    // Running-sweep allowance (ms) this job gets; absent ⇒ the 30-min default.
+    // The CTO engine passes overnightWindowRemainingMs for its overnight sweep.
+    // Persisted so a resumed or restarted job keeps the same allowance.
+    sweepAllowanceMs: sweepAllowanceMs ?? null,
+    // The permission ruleset the job's session was created with, persisted so a
+    // RESUME (a fresh session in the same worktree) is re-scoped and never
+    // silently falls back to an unscoped session that could prompt the user.
+    permission: permission ?? null,
     status: "running",
     activity: null,
     createdAt: now(),
@@ -832,6 +859,8 @@ export async function startJob(input, deps = {}) {
         origin: "delegate",
         permission: input?.permission,
         link: input?.link,
+        actor: input?.actor,
+        sweepAllowanceMs: input?.sweepAllowanceMs,
       },
       deps,
     );
@@ -1050,6 +1079,24 @@ export async function observeEvent(evt, deps = {}, sawBusy = new Map()) {
     // completed by a stale idle. (Session ids are unique per opencode
     // session, so this is defensive only.)
     return;
+  }
+
+  // Pause (spec §11.6-1): pauseJob set `pauseRequested`; the actual transition
+  // to `paused` happens HERE at the next completed-tool-part boundary — the
+  // current tool has finished, so drain-aborting the session loses no
+  // half-written tool work. The window + worktree + branch are KEPT so
+  // resumeJob can spin up a fresh session in the same worktree later.
+  if (job.pauseRequested) {
+    const boundary =
+      evt.type === "message.part.updated" && isToolStepBoundary(evt?.properties?.part);
+    if (boundary) {
+      await pauseAtBoundary(job, deps);
+      // After the drain-abort the aborting opencode session emits a
+      // MessageAbortedError (ignored) then an idle; by then this job is
+      // `paused`, so those events find no `running` job and are no-ops. Deliberately
+      // do NOT fall through to the completion handlers below.
+      return;
+    }
   }
 
   if (evt.type === "session.error") {
@@ -1412,16 +1459,29 @@ export async function sweepDelegateJobs(deps = {}) {
 
     const transitioned = [];
     for (const job of jobs) {
-      if (
-        job.status === "running" &&
-        job.startedAt != null &&
-        nowMs - job.startedAt > RUNNING_TIMEOUT_MS
-      ) {
-        transitioned.push(job);
+      if (job.status === "running" && job.startedAt != null) {
+        // Per-job running-sweep allowance: default 30 min, or the caller's
+        // sweepAllowanceMs (spec §11.6-4 — CTO overnight jobs pass
+        // overnightWindowRemainingMs). User-started jobs keep the 30-min rule.
+        const allowance = job.sweepAllowanceMs ?? RUNNING_TIMEOUT_MS;
+        if (nowMs - job.startedAt > allowance) {
+          transitioned.push({ job, allowance });
+        }
       }
     }
 
-    if (transitioned.length === 0 && orphaned.length === 0) {
+    // spec §11.6: `paused` jobs older than 7 days → `stopped` (terminal, with
+    // the same keep-on-dirty cleanup). Silent: the job has been idle for a week
+    // and the parent session is likely long gone, so no completion is
+    // delivered — matching how a long-stopped background run fades out.
+    const pausedExpired = [];
+    for (const job of jobs) {
+      if (job.status === "paused" && job.pausedAt != null && nowMs - job.pausedAt > PAUSE_KEEP_MS) {
+        pausedExpired.push(job);
+      }
+    }
+
+    if (transitioned.length === 0 && orphaned.length === 0 && pausedExpired.length === 0) {
       await persistRetention({ load, save }, nowMs);
       return;
     }
@@ -1435,14 +1495,65 @@ export async function sweepDelegateJobs(deps = {}) {
       await stopJob(job.id, { load, save, publish, deliver, abortSession, now, killWindow: deps.killWindow, gitRemoveWorktree: deps.gitRemoveWorktree });
     }
     // Timed-out jobs → failed. Pass the FULL deps so finishJob's terminal
-    // cleanup (killWindow + gitRemoveWorktree) actually runs.
-    for (const job of transitioned) {
-      await finishJob(job, "failed", "timed out after 30 minutes", deps, new Map());
+    // cleanup (killWindow + gitRemoveWorktree) actually runs. The error
+    // reflects the job's own allowance, so the default path stays byte-for-byte
+    // the legacy "timed out after 30 minutes".
+    for (const { job, allowance } of transitioned) {
+      const mins = Math.round(allowance / 60_000);
+      await finishJob(job, "failed", `timed out after ${mins} minutes`, deps, new Map());
+    }
+    // Paused-expired jobs → stopped.
+    for (const job of pausedExpired) {
+      await stopExpiredPausedJob(job, {
+        load, save, publish, now,
+        killWindow: deps.killWindow,
+        gitRemoveWorktree: deps.gitRemoveWorktree,
+      });
     }
     await persistRetention({ load, save }, nowMs);
   } catch (e) {
     console.warn("[delegate] sweep failed:", e?.message ?? e);
   }
+}
+
+/**
+ * Terminal transition for a `paused` job that exceeded PAUSE_KEEP_MS: mark it
+ * `stopped` and run the standard keep-on-dirty terminal cleanup (the dirty
+ * worktree survives; the record is retained via the cleanedUp=false stamp).
+ */
+async function stopExpiredPausedJob(job, deps = {}) {
+  const { load = loadJobs, save = saveJobs, publish, now = () => Date.now(), killWindow, gitRemoveWorktree } = deps;
+  return jobsLock.runExclusive(async () => {
+    const jobs = await load();
+    const idx = jobs.findIndex((j) => j.id === job.id);
+    if (idx === -1) return;
+    const live = jobs[idx];
+    if (live.status !== "paused") return; // a writer already resumed/stopped it
+    const stopped = {
+      ...live,
+      status: "stopped",
+      error: "paused for over 7 days, stopped",
+      finishedAt: now(),
+    };
+    jobs[idx] = stopped;
+    await save(jobs);
+    publish?.({ kind: "delegate.updated", payload: { id: stopped.id, status: "stopped" } });
+    let cleanedUp = false;
+    try {
+      const res = await cleanupTerminalJob(stopped, { killWindow, gitRemoveWorktree });
+      cleanedUp = !!res.cleanedUp;
+    } catch (e) {
+      console.warn(`[delegate] paused-expiry cleanup failed for ${job.id}:`, e?.message ?? e);
+    }
+    {
+      const jobs2 = await load();
+      const i2 = jobs2.findIndex((j) => j.id === job.id);
+      if (i2 !== -1) {
+        jobs2[i2] = { ...jobs2[i2], cleanedUp };
+        await save(jobs2);
+      }
+    }
+  });
 }
 
 // Retention prune under the jobs-store lock: re-read the store fresh so the
@@ -1635,6 +1746,316 @@ export async function deleteJob(id, deps = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// Pausing, resuming, reconciliation (spec §11.6)
+//
+// `paused` is a distinct, non-terminal state. A paused job keeps its window,
+// worktree and branch; only its opencode child session is aborted. Paused jobs
+// do NOT count against the global running cap (MAX_RUNNING_JOBS counts only
+// `running`), so parking a job frees a slot while keeping its work intact.
+//
+// pause → at the next completed-tool-part boundary, the child session is
+//   drain-aborted (see observeEvent) and the job flips to `paused`.
+// resume → a FRESH opencode session is started in the SAME worktree/branch
+//   (never a new worktree), re-acquiring a cap slot like a fresh start, and
+//   seeded with the original prompt plus git log / git status / last progress.
+// ---------------------------------------------------------------------------
+
+/**
+ * Request a pause. Only flags the job — the actual transition to `paused`
+ * happens in observeEvent at the job's next completed-tool-part boundary, so
+ * an in-flight tool is never interrupted mid-write. Idempotent for a running
+ * job (re-sets the flag).
+ */
+export async function pauseJob(id, deps = {}) {
+  const { load = loadJobs, save = saveJobs, publish } = deps;
+  return jobsLock.runExclusive(async () => {
+    const jobs = await load();
+    const idx = jobs.findIndex((j) => j.id === id);
+    if (idx === -1) return { ok: false, error: "not found" };
+    const job = jobs[idx];
+    if (job.status !== "running") {
+      return { ok: false, error: "job not running", status: job.status };
+    }
+    const updated = { ...job, pauseRequested: true };
+    jobs[idx] = updated;
+    await save(jobs);
+    // Status stays "running" until pauseAtBoundary flips it to `paused`; the
+    // flag is what observeEvent acts on.
+    publish?.({
+      kind: "delegate.updated",
+      payload: { id: updated.id, status: updated.status, pauseRequested: true },
+    });
+    return { ok: true, job: updated };
+  });
+}
+
+/**
+ * The drain-abort + state flip that completes a pause request, run by
+ * observeEvent at a completed-tool-part boundary. The window + worktree +
+ * branch are deliberately KEPT (resumeJob reuses them).
+ */
+async function pauseAtBoundary(job, deps = {}) {
+  const {
+    load = loadJobs,
+    save = saveJobs,
+    publish,
+    abortSession,
+    now = () => Date.now(),
+  } = deps;
+  if (abortSession && job.childSessionID) {
+    try {
+      await abortSession(job.childSessionID);
+    } catch (e) {
+      console.warn(`[delegate] pause abortSession failed for ${job.id}:`, e?.message ?? e);
+    }
+  }
+  // Under the jobs-store lock: re-read so a concurrent writer that already
+  // resumed/stopped this job is not clobbered.
+  return jobsLock.runExclusive(async () => {
+    const jobs = await load();
+    const idx = jobs.findIndex((j) => j.id === job.id);
+    if (idx === -1) return { ok: true };
+    const live = jobs[idx];
+    if (live.status !== "running" || !live.pauseRequested) return { ok: true };
+    const paused = { ...live, status: "paused", pauseRequested: false, pausedAt: now() };
+    jobs[idx] = paused;
+    await save(jobs);
+    publish?.({
+      kind: "delegate.updated",
+      payload: { id: paused.id, status: "paused" },
+    });
+    return { ok: true, job: paused };
+  });
+}
+
+/**
+ * @returns {Promise<number>} the box-wide count of currently `running` jobs.
+ * Paused jobs are excluded (they do not consume a cap slot). Exposed for the
+ * CTO engine's own sub-cap accounting, which needs the global running read.
+ */
+export async function runningJobCount(deps = {}) {
+  const { load = loadJobs } = deps;
+  const jobs = await load();
+  return jobs.filter((j) => j.status === "running").length;
+}
+
+/**
+ * Build the opening prompt for a RESUME: the original prompt plus context that
+ * lets a fresh session pick up where the aborted one left off in the SAME
+ * worktree/branch — the last ~20 commits, the porcelain status, and the job's
+ * last progress report (read from the OLD child session, before it is replaced).
+ */
+async function buildResumePrompt(job, deps, childSessionID) {
+  const { gitRun, readProgress } = deps;
+  const blocks = [String(job.prompt ?? "").trim()];
+  if (job.worktree && gitRun) {
+    try {
+      const { stdout } = await gitRun(["-C", job.worktree, "log", "--oneline", "-20"]);
+      // trimEnd (NOT trim): porcelain-style output preserves a meaningful
+      // leading column, and the log is a list we never want right-padded.
+      const log = String(stdout ?? "").trimEnd();
+      blocks.push(`Recent commit history (branch ${job.branch ?? job.worktree}):\n${log || "(no commits yet)"}`);
+    } catch {
+      /* best-effort */
+    }
+    try {
+      const { stdout } = await gitRun(["-C", job.worktree, "status", "--porcelain"]);
+      // trimEnd, not trim: git status --porcelain uses a leading two-column
+      // status (index/worktree) whose first character can be a space — trimming
+      // the head would silently corrupt the per-file status of the first entry.
+      const st = String(stdout ?? "").trimEnd();
+      blocks.push(`Working tree status:\n${st || "(clean)"}`);
+    } catch {
+      /* best-effort */
+    }
+  }
+  if (readProgress && childSessionID) {
+    try {
+      const rec = await readProgress(childSessionID);
+      if (rec) {
+        const bits = [];
+        if (rec.label) bits.push(String(rec.label));
+        if (rec.step != null) {
+          const total = rec.total != null ? ` of ${rec.total}` : "";
+          bits.push(`step ${rec.step}${total}`);
+        }
+        if (rec.state) bits.push(String(rec.state));
+        if (rec.detail) bits.push(String(rec.detail));
+        blocks.push(`Last progress report:\n${bits.length ? bits.join(" — ") : "(none)"}`);
+      }
+    } catch {
+      /* best-effort */
+    }
+  }
+  return blocks.filter((b) => b && b.trim()).join("\n\n---\n\n");
+}
+
+/**
+ * Resume a paused job: start a FRESH opencode session in the SAME worktree +
+ * branch, re-acquiring a cap slot like a fresh start, and deliver the resume
+ * context. If the cap is full the job stays `paused` and the call is retriable
+ * ({ok:false, error:CAP_ERROR, retriable:true}).
+ */
+export async function resumeJob(id, deps = {}) {
+  const {
+    load = loadJobs,
+    save = saveJobs,
+    publish,
+    newWindow,
+    stampOwner,
+    killWindow,
+    listProjects,
+    deliver,
+    now = () => Date.now(),
+  } = deps;
+
+  const reg = await jobsLock.runExclusive(async () => {
+    const jobs = await load();
+    const idx = jobs.findIndex((j) => j.id === id);
+    if (idx === -1) return { ok: false, error: "not found" };
+    const job = jobs[idx];
+    if (job.status !== "paused") {
+      return { ok: false, error: "job not paused", status: job.status };
+    }
+    // Re-acquire a cap slot like a fresh start; `paused` is not counted by the
+    // cap, but the resumed job needs a free slot to run. Cap full → stay
+    // paused and let the caller retry.
+    const running = jobs.filter((j) => j.status === "running").length;
+    if (running >= MAX_RUNNING_JOBS) {
+      return { ok: false, error: CAP_ERROR, retriable: true };
+    }
+
+    const oldChildSessionID = job.childSessionID;
+    const oldWindow = { sessionName: job.tmuxSession, windowIndex: job.windowIndex };
+    let newChildSessionID = null;
+    let newWindowIndex = null;
+    let ownerSession = null;
+    try {
+      const owner = resolveOwner(await listProjects(), job.parentSessionID);
+      if (!owner) throw new Error(`could not resolve the tmux session owning ${job.parentSessionID}`);
+      ownerSession = owner.tmuxSession;
+      const cwd = job.worktree || job.parentDirectory;
+      const created = await newWindow({
+        sessionName: ownerSession,
+        windowName: job.name,
+        cwd: cwd || null,
+        chatMode: true,
+        existingSessionId: undefined,
+        worktreePath: job.worktree,
+        oc: deps.oc,
+        permission: job.permission,
+      });
+      newChildSessionID = created.sessionId ?? null;
+      newWindowIndex = created.windowIndex ?? null;
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+    if (!newChildSessionID) {
+      return { ok: false, error: "could not create a session to resume into" };
+    }
+
+    // Advisory owner stamp on the fresh window (best-effort, mirrors
+    // registerJob's BET-1377 stamp).
+    if (stampOwner && newWindowIndex != null) {
+      try {
+        await stampOwner(ownerSession, newWindowIndex, "job");
+      } catch {
+        /* best-effort */
+      }
+    }
+    // Best-effort remove the OLD aborted window; the worktree is what persists.
+    if (killWindow && oldWindow.sessionName != null && oldWindow.windowIndex != null) {
+      try {
+        await killWindow(oldWindow);
+      } catch (e) {
+        console.warn(`[delegate] resume killWindow failed for ${id}:`, e?.message ?? e);
+      }
+    }
+
+    const updated = {
+      ...job,
+      status: "running",
+      childSessionID: newChildSessionID,
+      tmuxSession: ownerSession ?? job.tmuxSession,
+      windowIndex: newWindowIndex ?? job.windowIndex,
+      pauseRequested: false,
+      pausedAt: null,
+      // Reset the running-timeout clock: a resumed job re-acquires a cap slot
+      // AND a fresh allowance window "like a fresh start" — otherwise a job
+      // paused for days would trip the running-sweep on its first tick back.
+      startedAt: now(),
+    };
+    jobs[idx] = updated;
+    await save(jobs);
+    publish?.({
+      kind: "delegate.updated",
+      payload: { id: updated.id, status: "running" },
+    });
+    return { ok: true, job: updated, oldChildSessionID };
+  });
+
+  if (!reg.ok) return reg;
+  // Build + deliver the resume prompt to the fresh session. The progress read
+  // targets the OLD (aborted) child session, captured before the record's
+  // childSessionID was overwritten.
+  const resumeText = buildJobPrompt({
+    prompt: await buildResumePrompt(reg.job, deps, reg.oldChildSessionID),
+    worktree: reg.job.worktree,
+    branch: reg.job.branch,
+  });
+  if (deliver) {
+    try {
+      await deliver({ sessionId: reg.job.childSessionID, text: resumeText });
+    } catch (e) {
+      console.warn(`[delegate] resume prompt delivery failed for ${id}:`, e?.message ?? e);
+    }
+  }
+  return { ok: true, job: reg.job };
+}
+
+// ---------------------------------------------------------------------------
+// Restart reconciliation (spec §11.6-5)
+//
+// A job recorded `running` whose child session no longer exists (the box
+// restarted; opencode sessions are not durable across a reboot) is parked as
+// `paused` — its worktree + branch persist, so it can be resumed. This runs
+// once at delegate-engine boot. Exported for the CTO engine (C3) to call too.
+// ---------------------------------------------------------------------------
+
+/**
+ * @returns {Promise<{ok:true, reconciled:number}>} count of jobs flipped
+ * running → paused. Skips reconciliation when `sessionExists` is absent.
+ */
+export async function reconcileJobsOnBoot(deps = {}) {
+  const { load = loadJobs, save = saveJobs, publish, sessionExists, now = () => Date.now() } = deps;
+  if (typeof sessionExists !== "function") return { ok: true, reconciled: 0 };
+  return jobsLock.runExclusive(async () => {
+    const jobs = await load();
+    let reconciled = 0;
+    const next = [];
+    for (const job of jobs) {
+      if (job.status === "running" && job.childSessionID) {
+        let alive = true;
+        try {
+          alive = await sessionExists(job.childSessionID);
+        } catch {
+          alive = true; // transient blip → don't park a healthy job
+        }
+        if (!alive) {
+          next.push({ ...job, status: "paused", pauseRequested: false, pausedAt: now() });
+          publish?.({ kind: "delegate.updated", payload: { id: job.id, status: "paused" } });
+          reconciled += 1;
+          continue;
+        }
+      }
+      next.push(job);
+    }
+    if (reconciled > 0) await save(next);
+    return { ok: true, reconciled };
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Pre-flight approval (BET-418 §A)
 //
 // When trust mode is OFF and the model declared `tools`, the `delegate` call
@@ -1763,6 +2184,10 @@ export function createDelegateEngine(deps) {
     startJobWithApproval,
     stopJob: (id) => stopJob(id, deps),
     deleteJob: (id) => deleteJob(id, deps),
+    pauseJob: (id) => pauseJob(id, deps),
+    resumeJob: (id) => resumeJob(id, deps),
+    runningJobCount: () => runningJobCount(deps),
+    reconcileJobsOnBoot: () => reconcileJobsOnBoot(deps),
     observeEvent: (evt) => {
       const sid = evt?.properties?.sessionID;
       if (typeof sid !== "string" || !sid) {
