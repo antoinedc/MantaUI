@@ -13,9 +13,8 @@ import UIKit
 //
 // This file installs our OWN forwarding delegate on that `UITextView` at
 // runtime: every message is forwarded to whatever delegate was already there
-// (so the library keeps working) and exactly one method is implemented on top
-// — `textView(_:editMenuForTextInRanges:suggestedActions:)` — to append the
-// two quote actions.
+// (so the library keeps working) and the edit-menu methods are implemented on
+// top to append the two quote actions.
 //
 // Scope (deliberate): assistant prose (`MantaProse`) ONLY. User bands, the
 // live streaming tail and step-row tool output are plain SwiftUI `Text` with
@@ -46,9 +45,9 @@ final class TranscriptEditMenuDelegate: NSObject, UITextViewDelegate {
         wrapped
     }
 
-    /// The ONE method this delegate implements itself: adds `Quote` and
-    /// `Quote in new session` to the selection menu, appended AFTER the system
-    /// suggested actions.
+    /// The multiple-ranges edit-menu variant (iOS 26). UIKit prefers this when
+    /// the delegate implements it and only falls back to the single-range
+    /// variant when it does not, so this is the primary path.
     func textView(_ textView: UITextView,
                   editMenuForTextInRanges ranges: [NSValue],
                   suggestedActions: [UIMenuElement]) -> UIMenu? {
@@ -56,8 +55,22 @@ final class TranscriptEditMenuDelegate: NSObject, UITextViewDelegate {
             .compactMap { Range($0.rangeValue, in: textView.text) }
             .map { String(textView.text[$0]) }
             .joined(separator: " ")
+        return editMenu(for: selection, suggestedActions: suggestedActions)
+    }
 
-        // Empty / whitespace-only selection → show the default system menu.
+    /// The single-range edit-menu variant (16.0+). Implemented alongside the
+    /// ranges variant so the two items appear regardless of which selector
+    /// UIKit dispatches on a given OS/selection mode.
+    func textView(_ textView: UITextView,
+                  editMenuForTextIn range: NSRange,
+                  suggestedActions: [UIMenuElement]) -> UIMenu? {
+        guard let swiftRange = Range(range, in: textView.text) else { return nil }
+        return editMenu(for: String(textView.text[swiftRange]), suggestedActions: suggestedActions)
+    }
+
+    private func editMenu(for selection: String, suggestedActions: [UIMenuElement]) -> UIMenu? {
+        // Empty / whitespace-only selection → show the default system menu
+        // (returning nil; an empty UIMenu would suppress the menu entirely).
         guard QuoteText.buildQuoteBlock(selection) != nil else { return nil }
 
         let quoteAction = UIAction(title: "Quote") { [onQuote] _ in
@@ -86,23 +99,71 @@ struct TranscriptEditMenuAttachment: UIViewRepresentable {
         /// menu silently never appears).
         private var delegate: TranscriptEditMenuDelegate?
         private let onQuote: (String, QuoteDestination) -> Void
+        private weak var probe: ProbeView?
+        private var firstAttempt: Date?
+        private let maxTriesMilliseconds: TimeInterval = 5_000
 
         init(onQuote: @escaping (String, QuoteDestination) -> Void) {
             self.onQuote = onQuote
         }
 
         func attach(in probe: ProbeView?) {
-            guard let probe, let textView = Self.firstTextView(from: probe) else { return }
+            self.probe = probe
+            let now = Date()
+            if firstAttempt == nil { firstAttempt = now }
+            tryAttach()
+        }
+
+        /// One install attempt. Idempotent (an already-installed delegate is
+        /// left alone). If no text view is found yet — RichText lays its text
+        /// view into the hierarchy asynchronously after the probe's own
+        /// `didMoveToWindow`/`layoutSubviews` fire — schedules a bounded retry;
+        /// the probe's subsequent layout passes also re-invoke `attach`.
+        private func tryAttach() {
+            guard let probe, let textView = Self.firstTextView(from: probe) else {
+                scheduleRetryIfNeeded()
+                return
+            }
             // Idempotent: leave an already-installed delegate alone.
             guard !(textView.delegate is TranscriptEditMenuDelegate) else { return }
-            let delegate = TranscriptEditMenuDelegate(wrapping: textView.delegate, onQuote: onQuote)
+            let original = textView.delegate
+            let delegate = TranscriptEditMenuDelegate(wrapping: original, onQuote: onQuote)
             textView.delegate = delegate
             self.delegate = delegate
+            // Single line of runtime evidence: which text view we attached to,
+            // so a sighted/on-device check can confirm it is the assistant-prose
+            // text view (and that we wrapped RichText's own delegate).
+            NSLog("[BET1364] attached edit-menu delegate to \(type(of: textView)) frame=\(textView.frame) wrapped=\(String(describing: type(of: original)))")
+        }
+
+        /// Bounded retry backstop for the async text-view appear: retry with a
+        /// short backoff while the probe is still in a window and within a
+        /// generous time budget, stopping as soon as the delegate is attached.
+        /// Not a polling loop — finite (time-bounded), and each pass returns
+        /// immediately once attached.
+        private func scheduleRetryIfNeeded() {
+            guard let probe, probe.window != nil else { return }
+            guard let firstAttempt else { return }
+            let elapsed = Date().timeIntervalSince(firstAttempt) * 1_000
+            guard elapsed < maxTriesMilliseconds else { return }
+            let delay = min(pow(1.3, CGFloat(retryStep())), 0.5)
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                self?.tryAttach()
+            }
+        }
+
+        private var retryStepValue = 0
+        private func retryStep() -> Int {
+            retryStepValue += 1
+            return retryStepValue
         }
 
         /// Search: starting at the probe, walk up at most 8 superviews; at each
         /// node breadth-first search its subtree for the first `UITextView`;
-        /// stop at the first one found. If none is found, do nothing silently.
+        /// stop at the first one found. If none is found, do nothing silently —
+        /// the stock menu still works and a missing quote item is not worth a
+        /// crash or log spam.
         private static func firstTextView(from start: UIView) -> UITextView? {
             var node: UIView? = start
             var steps = 0
