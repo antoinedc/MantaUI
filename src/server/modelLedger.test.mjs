@@ -4,7 +4,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { aggregate, aggregateEndpointStats, aggregateBySession, aggregateDailySeries, endpointSummary, fetchLedgerRows } from "./modelLedger.mjs";
+import { aggregate, aggregateEndpointStats, aggregateBySession, aggregateDailySeries, aggregateHourlySeries, endpointSummary, fetchLedgerRows } from "./modelLedger.mjs";
 import { _resetDbHandle } from "./opencodeDb.mjs";
 
 // Fixture builder. Fill only the fields a test cares about.
@@ -247,6 +247,68 @@ test("aggregateDailySeries tokensSent formula: input=1,cacheRead=2,cacheWrite=3,
   );
   assert.equal(out.length, 1);
   assert.equal(out[0].tokensSent, 10);
+});
+
+// ---- aggregateHourlySeries (BET-1369) ----
+
+test("aggregateHourlySeries zero-fills hours with no rows, oldest→newest", () => {
+  // now = a known local time; put one row on the current hour and one 2h prior.
+  const now = new Date(2026, 7, 24, 14, 30, 0).getTime(); // Aug 24 2026 14:30
+  const twoHoursAgo = new Date(2026, 7, 24, 12, 45, 0).getTime();
+  const out = aggregateHourlySeries(
+    [
+      srow({ startedMs: now, input: 1, cacheRead: 0, cacheWrite: 0, output: 9 }),
+      srow({ startedMs: twoHoursAgo, input: 5, cacheRead: 5, cacheWrite: 5, output: 5 }),
+    ],
+    24,
+    now,
+  );
+  assert.equal(out.length, 24);
+  assert.equal(out[0].hour, "2026-08-23T15"); // oldest bucket is 23h before now
+  assert.equal(out[0].tokensSent, 0); // no row in the oldest hour
+  assert.equal(out[2].hour, "2026-08-23T17");
+  assert.equal(out[2].tokensSent, 0); // no row
+  assert.equal(out[23].hour, "2026-08-24T14"); // newest = the current hour
+  assert.equal(out[23].tokensSent, 10); // 1+9
+  assert.equal(out[21].hour, "2026-08-24T12");
+  assert.equal(out[21].tokensSent, 20); // 5+5+5+5
+  // oldest→newest
+  for (let i = 0; i < out.length - 1; i++) assert.ok(out[i].hour < out[i + 1].hour);
+});
+
+test("aggregateHourlySeries default window is 24 hours", () => {
+  const now = new Date(2026, 0, 5, 9, 0, 0).getTime();
+  const out = aggregateHourlySeries([], 24, now);
+  assert.equal(out.length, 24);
+  assert.equal(out[0].hour, "2026-01-04T10");
+  assert.equal(out[23].hour, "2026-01-05T09");
+});
+
+test("aggregateHourlySeries bucket boundary: a row at a fractional minute lands in its own hour", () => {
+  const now = new Date(2026, 0, 5, 12, 0, 0).getTime();
+  const rowMs = new Date(2026, 0, 5, 10, 59, 0).getTime();
+  const out = aggregateHourlySeries([srow({ startedMs: rowMs, input: 3 })], 24, now);
+  // out[23] is the hour of `now` (12:00) → 11; the row at 10:59 belongs to the
+  // 10:00 hour, which is 2 buckets before 12:00 → out[21].
+  assert.equal(out[23].hour, "2026-01-05T12");
+  assert.equal(out[22].hour, "2026-01-05T11");
+  assert.equal(out[22].tokensSent, 0);
+  assert.equal(out[21].hour, "2026-01-05T10");
+  assert.equal(out[21].tokensSent, 3);
+});
+
+test("aggregateHourlySeries over a DST 'spring forward' day yields exactly 24 buckets", () => {
+  // 2026-03-08 12:00 local (US DST spring-forward, a 23-hour day).
+  // recentBucketKeys walks with setHours, so the 23-hour day neither duplicates
+  // nor skips a bucket — it yields exactly 24 strictly-increasing hour keys.
+  const now = new Date(2026, 2, 8, 12, 0, 0).getTime();
+  const out = aggregateHourlySeries([], 24, now);
+  assert.equal(out.length, 24);
+  // i=0 → the hour of `now`; i=23 → setHours(12-23=-11) wraps to 2026-03-07T13
+  // (23 real hours back across the 23-hour day).
+  assert.equal(out[0].hour, "2026-03-07T13");
+  assert.equal(out[23].hour, "2026-03-08T12");
+  for (let i = 0; i < out.length - 1; i++) assert.ok(out[i].hour < out[i + 1].hour);
 });
 
 // ---- aggregateEndpointStats (per-endpoint reliability/speed/latency/mix) ----

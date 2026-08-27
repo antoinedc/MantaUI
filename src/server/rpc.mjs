@@ -53,6 +53,7 @@ import { searchMessages } from "./messageSearch.mjs";
 import { ledgerSummary } from "./modelLedger.mjs";
 import { getDb } from "./opencodeDb.mjs";
 import { createOptimizerSummary } from "./optimizer/summary.mjs";
+import { createOptimizerSeries } from "./optimizer/series.mjs";
 import { shipCtxEvent } from "./optimizer/telemetry.mjs";
 import { allModels as catalogAllModels } from "./modelCatalog.mjs";
 import { MIN_CLIENT } from "./version.mjs";
@@ -377,6 +378,9 @@ export function buildHandlers({
   // BET-1343: the shared memoized `optimizer:summary` read model, hoisted to
   // index.mjs. Null when not injected → this builds its own (tests / fallback).
   optimizerSummary = null,
+  // BET-1369: the shared windowed `optimizer:series` read model, hoisted to
+  // index.mjs. Null when not injected → this builds its own (tests / fallback).
+  optimizerSeries = null,
 }) {
   // The sole resolver for project cwd — no longer mirrored to a desktop-main
   // copy (the src/main/index.ts duplicate was retired in the HTTP-only
@@ -440,6 +444,15 @@ export function buildHandlers({
     usageSnapshots,
     usageHistory,
     readCacheTtl: () => providers.readCacheTtl({ listProviders: oc.getProviders }),
+  });
+
+  // BET-1369: the windowed `optimizer:series` read model. Like optimizerSummary,
+  // the production instance is hoisted to index.mjs; when not injected (tests /
+  // other buildHandlers callers) this constructs the same instance here. Each
+  // range has its OWN 60s memo — a 7d call never returns a cached 24h value.
+  const optimizerSeriesFn = optimizerSeries ?? createOptimizerSeries({
+    getDb,
+    counterfactualStore,
   });
 
   return {
@@ -1377,6 +1390,13 @@ export function buildHandlers({
     // 60s TTL with an in-flight guard. Degrades to { supported:false } on a
     // box that hasn't taken the Node 24 runtime yet / has no opencode.db.
     "optimizer:summary": () => optimizerSummaryFn(),
+
+    // BET-1369: the windowed consumption read (optimizer/series.mjs). One
+    // argument: the OPTIONAL range ("24h" | "7d" | "30d"; unknown → 24h). The
+    // window is per-call and does NOT touch the optimizer:summary memo.
+    // Memoized per range behind a 60s TTL. Degrades to { supported:false } on
+    // a box without the Node 24 runtime / opencode.db.
+    "optimizer:series": (opts) => optimizerSeriesFn(opts?.range),
 
     // preload: ipcRenderer.invoke(IPC.opencodeRunCommand, { sessionId, command, arguments, model?, attachments? })
     // → args[0] = that object; opencode.mjs runCommand expects same shape
