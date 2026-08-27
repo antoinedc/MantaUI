@@ -22,6 +22,8 @@ import {
   listProjects,
   setWindowOption,
   getWindowOption,
+  stampOwner,
+  resolveOwner,
   findWindowForCwd,
   killSession,
   renameSession,
@@ -710,6 +712,34 @@ test("parseSessions stamps mantaOwned from the provided owned set", () => {
   assert.equal(byName.gamma, true, "gamma is owned");
 });
 
+// BET-1377: @manta-owner — absent ⇒ "user", never backfilled; resolved owner
+test("parseSessions resolves @manta-owner with a user default", () => {
+  const sess = "Capo\t1";
+  // 8 columns now: session, index, name, active, pane, @manta-session-id,
+  // @manta-worktree-path, @manta-owner
+  const wins =
+    "Capo\t1\tmain\t0\t/home/dev/projects/capo\t\t\t\n" +      // absent owner -> user
+    "Capo\t2\tjob\t0\t/home/dev/projects/capo\tses_job\t\tjob\n" + // delegate job
+    "Capo\t3\tcto\t0\t/home/dev/projects/capo\tses_cto\t\tcto\n" + // reserved cto
+    "Capo\t4\tweird\t0\t/home/dev/projects/capo\t\t\tgarbage";     // unrecognized -> user
+  const out = parseSessions(sess, wins);
+  const cap = out.find((p) => p.tmuxSession === "Capo");
+  assert.equal(cap.windows.find((w) => w.index === 1).owner, "user");
+  assert.equal(cap.windows.find((w) => w.index === 2).owner, "job");
+  assert.equal(cap.windows.find((w) => w.index === 3).owner, "cto");
+  assert.equal(cap.windows.find((w) => w.index === 4).owner, "user");
+});
+
+test("resolveOwner defaults to user for absent, empty and unrecognized values", () => {
+  assert.equal(resolveOwner(undefined), "user");
+  assert.equal(resolveOwner(""), "user");
+  assert.equal(resolveOwner("  "), "user");
+  assert.equal(resolveOwner("User"), "user"); // case-sensitive
+  assert.equal(resolveOwner("user"), "user");
+  assert.equal(resolveOwner("job"), "job");
+  assert.equal(resolveOwner("cto"), "cto");
+});
+
 test("parseSessions defaults mantaOwned to false when no owned set is passed", () => {
   // Existing callers + tests that pass 2 args must keep working — and
   // the new field must default to false so the renderer treats unknown
@@ -916,6 +946,24 @@ test("setWindowOption issues the single set-window-option command", async () => 
   assert.ok(cmd, "set-window-option issued");
   assert.deepEqual(cmd.args, [
     "set-window-option", "-t", "proj:2", "@manta-forge-issue", "github.com/acme/widget#412",
+  ]);
+});
+
+test("stampOwner issues the single set-window-option command for @manta-owner", async () => {
+  const cmds = [];
+  _setRun(async (cmd, args) => {
+    cmds.push({ cmd, args });
+    return { stdout: "", stderr: "" };
+  });
+  try {
+    await stampOwner("proj", 3, "job");
+  } finally {
+    _setRun(null);
+  }
+  const cmd = cmds.find((c) => c.args.includes("set-window-option"));
+  assert.ok(cmd, "set-window-option issued");
+  assert.deepEqual(cmd.args, [
+    "set-window-option", "-t", "proj:3", "@manta-owner", "job",
   ]);
 });
 
