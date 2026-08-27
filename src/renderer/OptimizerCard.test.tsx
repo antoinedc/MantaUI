@@ -68,7 +68,10 @@ function seriesFixture(over: Partial<OptimizerSeries> = {}): OptimizerSeries {
 }
 
 // Install both reads with sane defaults; tests override specifics per-case.
-function setApi(overrides: { optimizerSummary?: () => Promise<OptimizerSummary>; optimizerSeries?: (range: OptimizerRange) => Promise<OptimizerSeries> } = {}) {
+function setApi(overrides: {
+  optimizerSummary?: () => Promise<OptimizerSummary>;
+  optimizerSeries?: (range: OptimizerRange) => Promise<OptimizerSeries | { supported: false }>;
+} = {}) {
   return installMockApi({
     optimizerSummary: () => Promise.resolve(summaryFixture()),
     optimizerSeries: (range: OptimizerRange) => Promise.resolve(seriesFixture({ range })),
@@ -168,9 +171,9 @@ describe("OptimizerCard — BET-1369 range selector + windowed stats", () => {
     });
     h = mount(<OptimizerCard />);
     await h.flush();
-    // maskedTotal 1000 → saved = round(1000*3/1e6) = 0; overlay shows the
-    // masked total and the Saved stat reads the same estimate.
-    expect(h.text()).toContain("−1.0k");
+    // maskedTotal 1000 → the chart overlay shows the masked total + the est.
+    // saved figure, and the counterfactual legend line appears.
+    expect(h.text()).toContain("−1k tokens · ≈ $0 est.");
     expect(h.text()).toContain("raw counterfactual");
   });
 
