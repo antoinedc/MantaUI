@@ -696,14 +696,14 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
           <button
             type="button"
             onClick={onOpenCto}
-            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium text-text hover:bg-fill-hover"
+            className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-sm font-medium text-text hover:bg-fill-hover"
             title="Adaptive CTO — what needs you, what's going on"
             aria-label="Open the CTO overview"
           >
             <StatusDot tone={dotTone(ctoState?.dot)} />
             <span className="flex-1 text-left">CTO</span>
             {badgeLabel(ctoState) != null && (
-              <span className="rounded-full bg-danger px-1.5 text-[11px] font-semibold leading-5 text-white">
+              <span className="rounded-full bg-danger px-1 text-[11px] font-semibold leading-5 text-white">
                 {badgeLabel(ctoState)}
               </span>
             )}

@@ -62,7 +62,7 @@ export function CtoPanel({
             type="button"
             onClick={() => void onDigestNow()}
             disabled={busy}
-            className="inline-flex items-center gap-2 rounded-md border border-border bg-bg-elev px-3 py-1.5 text-sm font-medium text-text hover:bg-fill-hover disabled:cursor-not-allowed disabled:opacity-60"
+            className="inline-flex items-center gap-2 rounded-md border border-border bg-bg-elev px-3 py-2 text-sm font-medium text-text hover:bg-fill-hover disabled:cursor-not-allowed disabled:opacity-60"
             title={
               busy
                 ? "A digest is already being generated"
@@ -97,7 +97,7 @@ export function CtoPanel({
             rendered when the needs-you count is zero; with open needs-you
             items the (not-yet-shipped) needs-you section takes over. */}
         {(state?.needsYouCount ?? 0) === 0 && (
-          <div ref={restingRef} className="flex flex-col items-center gap-1 py-16">
+          <div ref={restingRef} className="flex flex-col items-center gap-1 py-12">
             <div className="text-text-muted">
               Nothing needs you <span aria-hidden>✓</span>
             </div>
