@@ -49,7 +49,6 @@ import {
   rollupsStore,
   segmentsStore,
   factsStore,
-  engineStateStore,
 } from "./ctoStores.mjs";
 import { DEFAULT_G_MINUTES, minutesToMs } from "./ctoSegments.mjs";
 import { startPoller } from "./startPoller.mjs";
@@ -473,8 +472,6 @@ export function createCtoDigest(deps = {}) {
     rolled = rollupsStore,
     facts = factsStore,
     ledger = ledgerStore,
-    engineState = engineStateStore,
-    engineStateKey = "digest", // key under engine-state for opens/learned times
     presence = null, // { get(): {lastSeen, absenceDelta} } | null
     getGMinutes = () => DEFAULT_G_MINUTES,
     listOpenCards = async () => [], // A8 open needs-you items
@@ -526,32 +523,30 @@ export function createCtoDigest(deps = {}) {
     return `digest:${lastSeen == null ? "none" : lastSeen}`;
   }
 
-  // ---- learned timing persistence (engine-state) ----
+  // ---- learned timing (§5.5/D9) ----
+  // The learned median of observed digest-open times comes from the §14.1
+  // ledger instrumentation rows (`cto.digest_opened`), filtered to the
+  // trailing LEARNED_WINDOW_DAYS, used once ≥ LEARNED_MIN_OPENS opens exist.
+  // The ledger is the single source of truth for open times — no parallel
+  // engine-state array.
   async function loadOpens() {
-    let payload;
+    let rows = [];
     try {
-      payload = await engineState.load();
+      rows = await ledger.read();
     } catch {
-      payload = {};
+      rows = [];
     }
-    const arr = Array.isArray(payload?.[engineStateKey]?.opens) ? payload[engineStateKey].opens : [];
     const cutoff = now() - LEARNED_WINDOW_DAYS * DAY_MS;
-    return arr.filter((t) => typeof t === "number" && t >= cutoff);
+    return rows
+      .filter((r) => r?.kind === "cto.digest_opened" && typeof r?.ts === "number" && r.ts >= cutoff)
+      .map((r) => r.ts);
   }
 
+  // View-open: records the §14.1 `cto.digest_opened` instrumentation row,
+  // which both feeds the learned timing scheduler (via loadOpens above) and
+  // the usage instrumentation.
   async function recordOpen() {
     const t = now();
-    const opens = await loadOpens();
-    opens.push(t);
-    let payload;
-    try {
-      payload = (await engineState.load()) || {};
-    } catch {
-      payload = {};
-    }
-    const cur = payload[engineStateKey] || {};
-    await engineState.save({ ...payload, [engineStateKey]: { ...cur, opens } });
-    // §14.1 instrumentation: the digest was viewed/open.
     await ledgerLog({ kind: "cto.digest_opened", ts: t, windowEnd: t });
   }
 

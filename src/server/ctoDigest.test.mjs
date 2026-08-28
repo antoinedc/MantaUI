@@ -334,22 +334,15 @@ async function waitFor(fn, timeout = 2000) {
 
 function makeEngine(overrides = {}) {
   const store = overrides.store ?? makeDigestStore();
-  const state = new Map();
   const ledgerRows = [];
   const engine = createCtoDigest({
     now: () => REF,
     presence: { get: () => ({ lastSeen: REF - 2 * DAY_MS, absenceDelta: 2 * DAY_MS }) },
     getGMinutes: () => G,
     digests: store,
-    ledger: { append: async (e) => ledgerRows.push(e) },
-    engineState: {
-      load: async () => {
-        const raw = state.get("v");
-        return raw === undefined ? {} : raw;
-      },
-      save: async (d) => {
-        state.set("v", d);
-      },
+    ledger: {
+      append: async (e) => ledgerRows.push(e),
+      read: async () => [...ledgerRows],
     },
     listOpenCards: async () => [],
     factsChanged: async () => [],
@@ -363,7 +356,7 @@ function makeEngine(overrides = {}) {
     },
     ...overrides,
   });
-  return { engine, store, state, ledgerRows };
+  return { engine, store, ledgerRows };
 }
 
 test("generateDigest: single-flight — concurrent triggers join one generation", async () => {
@@ -428,16 +421,39 @@ test("getLatest: returns the newest valid digest from the store", async () => {
   assert.equal(validateDigest(d), true);
 });
 
-test("recordOpen: persisted opens drive the scheduler's learned path", async () => {
-  const { engine } = makeEngine({ runEphemeral: null });
-  // <7 opens → no learned component → scheduler falls to the default
-  for (let i = 0; i < 6; i++) await engine.recordOpen();
-  const before = await engine.nextScheduledAt();
-  // ≥7 opens → learned median kicks in; still a valid future epoch
-  for (let i = 0; i < 2; i++) await engine.recordOpen();
-  const after = await engine.nextScheduledAt();
-  assert.ok(typeof before === "number" && before > REF);
-  assert.ok(typeof after === "number" && after > REF);
+test("recordOpen: learned timing reads cto.digest_opened rows from the LEDGER (single source of truth)", async () => {
+  // Seed the ledger with ≥7 cto.digest_opened rows, all at 07:00 into-day.
+  const ledgerRows = [];
+  const openTs = startOfDay(REF) + 7 * HOUR_MS; // well within the trailing 14d
+  for (let i = 0; i < 8; i++) ledgerRows.push({ kind: "cto.digest_opened", ts: openTs });
+  const { engine } = makeEngine({
+    runEphemeral: null,
+    ledger: {
+      append: async (e) => ledgerRows.push(e),
+      read: async () => [...ledgerRows],
+    },
+  });
+  // Learned median = 07:00 (≥7 opens) → next day 07:00 (REF is midday).
+  const due = await engine.nextScheduledAt();
+  assert.equal(due, startOfDay(REF) + DAY_MS + 7 * HOUR_MS);
+
+  // With fewer than LEARNED_MIN_OPENS opens the learned path is not taken.
+  const fewRows = [];
+  for (let i = 0; i < 6; i++) fewRows.push({ kind: "cto.digest_opened", ts: openTs });
+  const few = makeEngine({
+    runEphemeral: null,
+    ledger: { append: async (e) => fewRows.push(e), read: async () => [...fewRows] },
+  });
+  const dueFew = await few.engine.nextScheduledAt();
+  assert.equal(dueFew, startOfDay(REF) + DAY_MS + DEFAULT_DIGEST_MS_INTO_DAY); // falls to box-local 09:00
+});
+
+test("recordOpen: appends a cto.digest_opened ledger row (feeds learned timing + §14.1)", async () => {
+  const { engine, ledgerRows } = makeEngine({ runEphemeral: null });
+  await engine.recordOpen();
+  const opened = ledgerRows.find((r) => r.kind === "cto.digest_opened");
+  assert.ok(opened, "recordOpen must write the ledger instrumentation row");
+  assert.equal(typeof opened.ts, "number");
 });
 
 test("digest-push: fires only when the §10.5 toggle is on AND reason is scheduled", async () => {
