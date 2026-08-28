@@ -139,6 +139,7 @@ import * as cto from "./cto.mjs";
 import * as ctoEngine from "./ctoEngine.mjs";
 import { ledgerStore, engineStateStore } from "./ctoStores.mjs";
 import { runEphemeral, createEphemeralReaper } from "./ctoSessions.mjs";
+import { createCtoDigest, STALE_MS } from "./ctoDigest.mjs";
 import {
   parseSegmentSummaryText,
   validateSegmentSummary,
@@ -1814,8 +1815,81 @@ const adaptiveCto = ctoEngine.createCtoEngine({
   summarize: segmentSummarize,
   computeOneLiner: segmentOneLiner,
   reaper: ctoEphemeralReaper,
+  // BET-1383 (A9): fold the digest engine's generation-in-flight into the
+  // ctoState dot so the sidebar reflects live digest generation (§5.5). The
+  // digest engine is created below, so this reads it lazily through
+  // `adaptiveCtoDigest` (declared with `let` after the line that uses it).
+  getCounts: async () => {
+    const base = await ctoEngine.defaultGetCounts();
+    return {
+      ...base,
+      generationInFlight: adaptiveCtoDigest ? await adaptiveCtoDigest.isGenerating() : false,
+    };
+  },
 });
 adaptiveCto.start();
+
+// BET-1383 digest engine (A9, §5.4–5.5): composes the "here's what happened
+// while you were away" digest on view-open (when stale), on Digest-now, and on
+// the learned/rising-edge schedule. One mid-class `digest-compose` call at
+// generation time, gated on the §3.3 ephemeral rate gate like any other model
+// spend. Read seams: presence + fitted G from the engine, open needs-you cards
+// from its card machinery, the top-level ctoEnabled gate for the scheduler.
+// Generation state rides the bus as `{kind:"digestState"}`.
+let adaptiveCtoDigest = null;
+{
+  async function gatedDigestCompose(opts) {
+    const gate = await adaptiveCto.beginEphemeral();
+    if (!gate?.ok) return { ok: false, gated: true, error: gate?.error };
+    try {
+      return await runEphemeral({
+        ...opts,
+        deps: {
+          ...(opts?.deps || {}),
+          oc: { runEphemeralSession: oc.runSynchronousSession },
+          configGet: () => local.configGet(),
+        },
+      });
+    } finally {
+      gate.release?.();
+    }
+  }
+  adaptiveCtoDigest = createCtoDigest({
+    publish: (evt) => bus.publish(evt),
+    runEphemeral: gatedDigestCompose,
+    presence: { get: () => adaptiveCto.getPresence() },
+    getGMinutes: async () => adaptiveCto.segmenter?.getGMinutes?.() ?? null,
+    listOpenCards: async () => (await adaptiveCto.cards?.listOpen?.()) ?? [],
+    getEnabled: async () => {
+      try {
+        return (await local.configGet())?.ctoEnabled === true;
+      } catch {
+        return false;
+      }
+    },
+    // §5.5 digest push — gated on `ctoDigestPush` (default false; the "Push
+    // digest to phone" toggle UI is explicitly out of scope). After a
+    // SCHEDULED pre-generation it fires ONE informational-tier notification
+    // through the existing router (push.fireNotify) — which inherits the
+    // router's deferral semantics untouched (desktop-first ladder).
+    digestPushEnabled: async () => {
+      try {
+        return (await local.configGet())?.ctoDigestPush === true;
+      } catch {
+        return false;
+      }
+    },
+    pushDigest: async ({ digest }) => {
+      const items = Array.isArray(digest?.items) ? digest.items : [];
+      const head = items[0];
+      const body = items.length
+        ? `${items.length} item${items.length === 1 ? "" : "s"} while you were away${head?.text ? `: ${head.text}` : ""}`
+        : "Nothing important happened while you were away.";
+      await push.fireNotify({ title: "Your digest", message: body, urgent: false });
+    },
+  });
+  adaptiveCtoDigest.start();
+}
 
 // Watchdog (§13.3): checks engine liveness + ambient spend rate; > 2× expected
 // hourly burn → auto-thrifty, > 4× → auto-pause + blocker card. Spend is not
@@ -3761,6 +3835,60 @@ const handleRequest = async (req, res) => {
       if (req.method === "GET") {
         const state = await adaptiveCto.getState();
         respondJson(res, 200, state);
+        return;
+      }
+      respondJson(res, 405, { error: "method not allowed" });
+    } catch (e) {
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // ---------- Adaptive CTO digest (BET-1383, A9) ----------
+  // §5.5 triggers are ONE bearer-gated endpoint, POST /api/cto/digest: the
+  // renderer calls it on view-open (regenerates when the stored digest is
+  // stale > STALE_MS) and on Digest-now (body {force: true} — always
+  // regenerate). Both hit the same single-flight lock keyed by absence-window
+  // id, so concurrent triggers join instead of doubling model spend. GET
+  // /api/cto/digest is the view read from `digests/` (last 30 retained by the
+  // A1 store sweep). POST /api/cto/digest/opened is §14.1 per-item
+  // open/expand instrumentation. Generation state rides `{kind:"digestState"}`
+  // and the ctoState `generationInFlight` fold (via the engine's getCounts).
+  if (path === "/api/cto/digest") {
+    try {
+      if (req.method === "GET") {
+        const digest = await adaptiveCtoDigest.getLatest();
+        respondJson(res, 200, { digest, stale: digest ? Date.now() - digest.generated > STALE_MS : true });
+        return;
+      }
+      if (req.method === "POST") {
+        const body = await readJsonBody(req);
+        await adaptiveCtoDigest.recordOpen();
+        const force = body?.force === true;
+        const latest = await adaptiveCtoDigest.getLatest();
+        const stale = !latest || Date.now() - latest.generated > STALE_MS;
+        if (force || stale) void adaptiveCtoDigest.generateDigest({ reason: "manual" }).catch(() => {});
+        respondJson(res, 200, { ...(await adaptiveCtoDigest.getState()), generated: force || stale });
+        return;
+      }
+      respondJson(res, 405, { error: "method not allowed" });
+    } catch (e) {
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // §14.1 instrumentation: per-item open / expand (called by the UI).
+  if (path === "/api/cto/digest/opened") {
+    try {
+      if (req.method === "POST") {
+        const body = await readJsonBody(req);
+        await adaptiveCtoDigest.recordItemEvent({
+          item: typeof body?.item === "string" ? body.item : null,
+          expand: body?.expand === true,
+          digestId: typeof body?.digestId === "string" ? body.digestId : null,
+        });
+        respondJson(res, 200, { ok: true });
         return;
       }
       respondJson(res, 405, { error: "method not allowed" });

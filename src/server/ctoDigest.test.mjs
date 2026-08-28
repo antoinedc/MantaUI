@@ -36,6 +36,7 @@ import {
   RISING_EDGE_LEAD_MS,
 } from "./ctoDigest.mjs";
 import { startOfDay } from "./ctoDigest.mjs";
+import { DIGESTS_KEEP } from "./ctoStores.mjs";
 
 const G = 45; // minutes
 
@@ -466,4 +467,34 @@ test("digest-push: toggle off → never pushes even on scheduled generation", as
   });
   await engine.generateDigest({ reason: "scheduled" });
   assert.equal(pushed, 0);
+});
+
+// §13.1 "digests/ keep last 30" — the retention sweep lives in ctoStores
+// (sweepDigests trims to DIGESTS_KEEP); pin the governing constant here.
+test("digests/ retention keeps the last 30 (DIGESTS_KEEP == 30)", () => {
+  assert.equal(DIGESTS_KEEP, 30);
+});
+
+test("recordOpen + recordItemEvent emit §14.1 instrumentation ledger rows", async () => {
+  const { engine, ledgerRows } = makeEngine({ runEphemeral: null });
+  await engine.recordOpen();
+  await engine.recordItemEvent({ item: "shipped the parser", digestId: "123" });
+  await engine.recordItemEvent({ item: "deep log", expand: true, digestId: "123" });
+  const kinds = ledgerRows.map((r) => r.kind);
+  assert.ok(kinds.includes("cto.digest_opened"));
+  assert.ok(kinds.includes("cto.digest_item_opened"));
+  assert.ok(kinds.includes("cto.digest_expanded"));
+  const expanded = ledgerRows.find((r) => r.kind === "cto.digest_expanded");
+  assert.equal(expanded.digestId, "123");
+});
+
+test("generateDigest: successful model path emits cto.digest_generated", async () => {
+  const { engine, ledgerRows } = makeEngine({
+    runEphemeral: async () => ({ text: JSON.stringify({ items: [{ tier: "progress", text: "x", refs: [] }] }) }),
+  });
+  await engine.generateDigest({ reason: "manual" });
+  const generated = ledgerRows.find((r) => r.kind === "cto.digest_generated");
+  assert.ok(generated);
+  assert.equal(generated.reason, "manual");
+  assert.equal(generated.items, 1);
 });

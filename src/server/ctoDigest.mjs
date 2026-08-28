@@ -294,7 +294,9 @@ export function buildDigestContext({ granularity, window, slice, needsYou, facts
       `Produce ${DIGEST_MIN_ITEMS}-${DIGEST_MAX_ITEMS} concrete, factual items. If nothing important ` +
       `happened, output {"items":[]} (the resting state is legal). ` +
       `Each item may carry refs to evidence (segment/rollup ids). "deep" must be present when an item ` +
-      `summarizes technical work (the expandable technical layer); "sub" is an optional secondary line.`,
+      `summarizes technical work (the expandable technical layer); "sub" is an optional secondary line. ` +
+      `When a change OVERTURNS a previously-held fact, phrase it as a subordinate clause on the owning item ` +
+      `(e.g. a "sub" like "this overturns the earlier priority"), NEVER as a separate section or item.`,
   });
   if (needsYou && needsYou.length) {
     blocks.push({
@@ -549,6 +551,18 @@ export function createCtoDigest(deps = {}) {
     }
     const cur = payload[engineStateKey] || {};
     await engineState.save({ ...payload, [engineStateKey]: { ...cur, opens } });
+    // §14.1 instrumentation: the digest was viewed/open.
+    await ledgerLog({ kind: "cto.digest_opened", ts: t, windowEnd: t });
+  }
+
+  // §14.1 instrumentation: per-item open / expand (the UI issue calls this via
+  // POST /api/cto/digest/opened).
+  async function recordItemEvent({ item, expand, digestId } = {}) {
+    await ledgerLog({
+      kind: expand ? "cto.digest_expanded" : "cto.digest_item_opened",
+      item: typeof item === "string" ? item : null,
+      digestId: digestId ?? null,
+    });
   }
 
   async function nextScheduledAt() {
@@ -620,7 +634,7 @@ export function createCtoDigest(deps = {}) {
     lastGenerated = t;
     lastDigestId = id;
 
-    await ledgerLog({ kind: "cto.digest_written", id, granularity: granularity.reads, items: digest.items.length, reason });
+    await ledgerLog({ kind: "cto.digest_generated", id, granularity: granularity.reads, items: digest.items.length, reason });
 
     if (reason === "scheduled") {
       const pushOn = await safe(digestPushEnabled);
@@ -715,6 +729,7 @@ export function createCtoDigest(deps = {}) {
     isGenerating: () => generating,
     getState,
     recordOpen,
+    recordItemEvent,
     nextScheduledAt,
     // exposed for tests / diagnostics
     _now: now,

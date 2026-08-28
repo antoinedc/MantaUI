@@ -829,6 +829,9 @@ export function createCtoEngine(deps = {}) {
     get segmenter() {
       return segmenter;
     },
+    get cards() {
+      return cards;
+    },
     get rollupRunner() {
       return getRollupRunner();
     },

@@ -28,11 +28,13 @@
 
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { promises as fsp } from "node:fs";
 import { statePath } from "../shared/paths.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 import { describeModel } from "../shared/modelGuide.mjs";
 import { createSeenIdFilter } from "./seenIds.mjs";
 import { startPoller } from "./startPoller.mjs";
+import { rollupsStore, ledgerStore, ROLLUP_LEVELS } from "./ctoStores.mjs";
 
 export const CTO_STORE_PATH = statePath("cto.json");
 
@@ -455,6 +457,88 @@ export function createCtoEngine(deps = {}) {
         };
       });
       return { ok: true, data: { models: data } };
+    },
+  });
+
+  register({
+    name: "read_rollups",
+    description:
+      "Read the Adaptive CTO's stored work rollups (spec §5.2/§13.1, the P1 evidence " +
+      "slice the digest engine summarizes). Read-only. Returns up to a handful of " +
+      "rollups at a given level (hour/day/week) whose window overlaps [start, end], " +
+      "each with id, window and its bullets (truncated). Defaults to recent day " +
+      "rollups.",
+    params: {
+      level: "day",
+      start: null,
+      end: null,
+    },
+    run: async (ctx, args) => {
+      const level = ROLLUP_LEVELS.includes(args?.level) ? args.level : "day";
+      const from = typeof args?.start === "number" ? args.start : 0;
+      const to = typeof args?.end === "number" ? args.end : Date.now();
+      const dir = rollupsStore.dirFor(level);
+      let names = [];
+      try {
+        names = await fsp.readdir(dir);
+      } catch {
+        names = [];
+      }
+      const out = [];
+      for (const name of names) {
+        if (!name.endsWith(".json")) continue;
+        const id = name.slice(0, -5);
+        let r;
+        try {
+          r = await rollupsStore.load(level, id);
+        } catch {
+          continue;
+        }
+        if (!r || !Array.isArray(r?.window) || r.window[1] < from || r.window[0] > to) continue;
+        out.push({
+          id,
+          level,
+          window: r.window,
+          project: r.project ?? null,
+          bullets: (Array.isArray(r.bullets) ? r.bullets : []).slice(0, 5).map((b) => ({
+            text: String(b?.text ?? "").slice(0, 160),
+            refs: Array.isArray(b?.refs) ? b.refs.slice(0, 8) : [],
+          })),
+        });
+        if (out.length >= 8) break;
+      }
+      out.sort((a, b) => a.window[0] - b.window[0]);
+      return { ok: true, data: { level, rollups: out } };
+    },
+  });
+
+  register({
+    name: "read_ledger",
+    description:
+      "Read the Adaptive CTO's append-only ledger (spec §13.1) — the raw evidence + " +
+      "instrumentation rows the engine writes. Read-only. Returns the most recent " +
+      "`limit` (default 50) rows, optionally filtered to `kind` (e.g. " +
+      "cto.digest_generated, cto.digest_opened, cto.segment_*).",
+    params: {
+      limit: 50,
+      kind: null,
+    },
+    run: async (ctx, args) => {
+      const rows = await ledgerStore.read();
+      const limit = Math.max(1, Math.min(500, Number(args?.limit) || 50));
+      const kind = typeof args?.kind === "string" && args.kind ? args.kind : null;
+      const filtered = kind ? rows.filter((r) => r?.kind === kind) : rows;
+      const tail = filtered.slice(-limit);
+      const shown = tail.map((r) => ({
+        ts: r?.ts ?? null,
+        kind: r?.kind ?? null,
+        ...(r?.id !== undefined ? { id: r.id } : {}),
+        ...(r?.granularity !== undefined ? { granularity: r.granularity } : {}),
+        ...(r?.message !== undefined ? { message: String(r.message).slice(0, 160) } : {}),
+        ...(r?.project !== undefined ? { project: r.project } : {}),
+        ...(r?.item !== undefined ? { item: r.item } : {}),
+      }));
+      return { ok: true, data: { count: filtered.length, rows: shown } };
     },
   });
 

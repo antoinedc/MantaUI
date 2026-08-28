@@ -26,8 +26,8 @@ const MANTA_SERVER = process.env.MANTA_SERVER_URL || "http://127.0.0.1:8787";
 const CTO_TOOLS =
   "list_sessions, list_projects, read_transcript, search_messages, git_status, " +
   "git_branch, git_log, list_models, get_usage, usage_stopped, session_usage, " +
-  "context_state, session_plan_mode, get_config, watch, unwatch, " +
-  "list_watches";
+  "context_state, session_plan_mode, get_config, read_rollups, read_ledger, " +
+  "watch, unwatch, list_watches";
 
 export const cto = tool({
   description: [
