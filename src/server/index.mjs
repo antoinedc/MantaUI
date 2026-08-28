@@ -140,6 +140,7 @@ import * as ctoEngine from "./ctoEngine.mjs";
 import * as ctoBudget from "./ctoBudget.mjs";
 import { ledgerStore, engineStateStore, budgetStore, segmentsStore, verdictsStore } from "./ctoStores.mjs";
 import { computeHealthStats } from "./ctoHealth.mjs";
+import { composeProfileRender } from "./ctoProfile.mjs";
 import { runEphemeral, createEphemeralReaper } from "./ctoSessions.mjs";
 import { createCtoDigest, STALE_MS } from "./ctoDigest.mjs";
 import {
@@ -3986,6 +3987,101 @@ const handleRequest = async (req, res) => {
         return;
       }
       respondJson(res, 405, { error: "method not allowed" });
+    } catch (e) {
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // ---------- Adaptive CTO Profile & journal (§8.5 / §3.2, BET-1394) ----------
+  // Settings → Internals → Profile & rhythm, now rendered. The flagship read is
+  // GET /api/cto/profile — the FULL render model composed server-side (σ bands
+  // + top-3 evidence per skill with stated-wins resolved, the 24-bin rhythm
+  // histogram + TZ, interaction stats, and the sensitive-inference flags with
+  // suppressed classes already omitted). The renderer does no math. Journal
+  // entries ride along, listed newest-first with per-entry delete.
+
+  if (path === "/api/cto/profile") {
+    try {
+      const profileState = (await adaptiveCto.profile?.get?.()) || {};
+      const journal = (await adaptiveCto.journal?.list?.()) || [];
+      const render = composeProfileRender(profileState, { nowMs: Date.now() });
+      const entries = [...journal]
+        .sort((a, b) => (b?.created ?? 0) - (a?.created ?? 0))
+        .map((e) => ({ id: e.id, text: e.text, refs: e.refs ?? [], created: e.created }));
+      respondJson(res, 200, { ...render, journal: entries });
+      return;
+    } catch (e) {
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // POST /api/cto/profile/edit — an inline profile edit: resolves to a stated
+  // value that wins over inference for that dimension (§8.5), and routes to the
+  // B3 verdict ledger as a `correct` verdict on the dimension (profile edits
+  // and deletions are correct verdicts). Returns the fresh render model.
+  if (path === "/api/cto/profile/edit") {
+    try {
+      const body = await readJsonBody(req);
+      const dimension = typeof body?.dimension === "string" ? body.dimension.trim() : "";
+      const resEdit = await adaptiveCto.profile?.setStated?.({
+        dimension,
+        value: body?.value,
+        label: typeof body?.label === "string" ? body.label : undefined,
+      });
+      if (!resEdit || !resEdit.ok) {
+        respondJson(res, 400, resEdit || { ok: false, error: "edit failed" });
+        return;
+      }
+      await adaptiveCto
+        .recordVerdict({ subject: { type: "profile_dimension", id: dimension }, verdict: "correct" })
+        .catch(() => {});
+      const render = composeProfileRender((await adaptiveCto.profile?.get?.()) || {});
+      respondJson(res, 200, { ok: true, ...render });
+      return;
+    } catch (e) {
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // POST /api/cto/profile/suppress — delete a sensitive inference: suppresses
+  // that inference CLASS for 90 days, server-enforced (§8.5). Also a `correct`
+  // verdict on the class. Returns the fresh render model without the class.
+  if (path === "/api/cto/profile/suppress") {
+    try {
+      const body = await readJsonBody(req);
+      const cls = typeof body?.inference === "string" ? body.inference.trim() : "";
+      const resSup = await adaptiveCto.profile?.suppressInference?.(cls);
+      if (!resSup || !resSup.ok) {
+        respondJson(res, 400, resSup || { ok: false, error: "suppress failed" });
+        return;
+      }
+      await adaptiveCto
+        .recordVerdict({ subject: { type: "profile_inference", id: cls }, verdict: "correct" })
+        .catch(() => {});
+      const render = composeProfileRender((await adaptiveCto.profile?.get?.()) || {});
+      respondJson(res, 200, { ok: true, ...render });
+      return;
+    } catch (e) {
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // POST /api/cto/journal/delete — per-entry delete (§3.2 journal tab).
+  if (path === "/api/cto/journal/delete") {
+    try {
+      const body = await readJsonBody(req);
+      const id = typeof body?.id === "string" ? body.id : "";
+      if (!id) {
+        respondJson(res, 400, { ok: false, error: "id is required" });
+        return;
+      }
+      const resDel = await adaptiveCto.journal?.removeById?.(id);
+      respondJson(res, resDel?.ok ? 200 : 404, resDel ?? { ok: false, error: "not found" });
+      return;
     } catch (e) {
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
