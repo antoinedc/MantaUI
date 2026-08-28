@@ -31,13 +31,14 @@
 // registered from src/server/index.mjs (also §13.3), can write it without
 // this module cooperating.
 //
-// Timer discipline: the engine owns exactly one timer today — the liveness /
-// kill-switch / state-refresh tick — via startPoller (timer.unref() + inFlight
-// guard). It is stopped on pause and restarted on resume. Event ingestion
-// (observeEvent) is NOT a timer: it is driven from index.mjs's event pump and
-// keeps running while paused (§10.6-5). Future work timers (probes, overnight,
-// backfill) register through the same start/stop surface so pause halts them
-// too; they are out of scope for this skeleton.
+// Timer discipline: the engine owns exactly two timers — the liveness /
+// kill-switch / state-refresh tick and the ephemeral-session reaper (§3.1,
+// BET-1378) — via startPoller (timer.unref() + inFlight guard). Both are
+// stopped on pause and restarted on resume. Event ingestion (observeEvent) is
+// NOT a timer: it is driven from index.mjs's event pump and keeps running
+// while paused (§10.6-5). Future work timers (probes, overnight, backfill)
+// register through the same start/stop surface so pause halts them too;
+// they are out of scope for this skeleton.
 
 import { promises as fsp } from "node:fs";
 import { dirname } from "node:path";
@@ -205,6 +206,7 @@ export function createCtoEngine(deps = {}) {
     getSessionInfo = async () => ({ owner: "user", project: undefined }),
     getDesktopPresence = pushGetDesktopPresence,
     getLastDesktopHeartbeat = pushGetLastDesktopHeartbeat,
+    reaper = null, // { start() -> {stop} } | null — the §3.1 ephemeral-session reaper (ctoSessions)
   } = deps;
 
   let disposed = false;
@@ -213,6 +215,7 @@ export function createCtoEngine(deps = {}) {
   let enabled = false;
   let heartbeatAt = now();
   let tickHandle = null;
+  let reaperHandle = null;
   let lastPublishedSerialized = null;
 
   // A5 presence inputs (spec §5.4): lastSeen = max(desktop heartbeat, app
@@ -325,6 +328,10 @@ export function createCtoEngine(deps = {}) {
       tickHandle.stop();
       tickHandle = null;
     }
+    if (reaperHandle) {
+      reaperHandle.stop();
+      reaperHandle = null;
+    }
   }
 
   function startTimers() {
@@ -334,6 +341,11 @@ export function createCtoEngine(deps = {}) {
       label: "cto-engine",
       immediate: false,
     });
+    // The §3.1 reaper is a work timer like any other: started with the engine,
+    // halted on pause (event ingestion alone keeps running while paused).
+    if (reaper && !reaperHandle && typeof reaper.start === "function") {
+      reaperHandle = reaper.start();
+    }
   }
 
   // §10.6-5: pausing stops all engine timers (event ingestion is not a timer
