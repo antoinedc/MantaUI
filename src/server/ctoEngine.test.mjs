@@ -9,6 +9,7 @@ import {
   DOT,
   HOUR_MS,
   RATE_LIMITS,
+  buildFactsContext,
 } from "./ctoEngine.mjs";
 import { createSegmenter } from "./ctoSegments.mjs";
 import { createFactsEngine } from "./ctoFacts.mjs";
@@ -562,4 +563,97 @@ test("engine exposes .facts and pumps proposals on tick (%40 enabled)", async ()
   await harness.engine.tick();
   const saved = inmemory.get("alpha")?.facts ?? [];
   assert.equal(saved.filter((f) => !f.superseded_by).length, 1);
+});
+
+test("proposeFact enqueues, resolves via the gatekeeper, and reports the verdict", async () => {
+  const inmemory = new Map();
+  const fstate = { v: 1 };
+  const facts = createFactsEngine({
+    engineState: {
+      load: async () => ({ ...fstate }),
+      save: async (s) => {
+        Object.keys(fstate).forEach((k) => delete fstate[k]);
+        Object.assign(fstate, s);
+      },
+    },
+    facts: { load: async (p) => inmemory.get(p) ?? { v: 1, facts: [] }, save: async (p, d) => inmemory.set(p, d), dir: "x" },
+    archive: { load: async (p) => inmemory.get("a" + p) ?? { v: 1, entries: [] }, save: async (p, d) => inmemory.set("a" + p, d) },
+  });
+  const harness = makeHarness({ ctoEnabled: true, facts });
+  await harness.engine.resume();
+
+  // zero-ref is rejected with the attach-evidence message, never enqueued
+  const rejected = await harness.engine.proposeFact({
+    project: "alpha",
+    kind: "status",
+    statement: "no evidence",
+    refs: [],
+    sessionID: "ses_1",
+  });
+  assert.equal(rejected.ok, false);
+  assert.match(rejected.error ?? "", /attach evidence/i);
+
+  // a valid proposal resolves (degraded gatekeeper → add) with an idempotent id
+  const first = await harness.engine.proposeFact({
+    project: "alpha",
+    kind: "decision",
+    statement: "moved to postgres",
+    refs: ["m1"],
+    sessionID: "ses_1",
+  });
+  assert.equal(first.ok, true);
+  assert.equal(first.applied, true);
+  assert.equal(first.outcome.action, "add");
+  assert.ok(first.proposalId && first.proposalId.startsWith("cto:"));
+
+  // same-content re-submission is idempotent: same proposalId, not re-applied
+  const again = await harness.engine.proposeFact({
+    project: "alpha",
+    kind: "decision",
+    statement: "moved to postgres",
+    refs: ["m1"],
+    sessionID: "ses_1",
+  });
+  assert.equal(again.proposalId, first.proposalId);
+  assert.equal(again.applied, false, "idempotent — an already-applied proposal is not applied twice");
+  assert.equal(again.outcome.action, "add");
+});
+
+// ---------------------------------------------------------------------------
+// buildFactsContext (BET-1390 / §6.9) — spawn-context facts seed
+// ---------------------------------------------------------------------------
+
+test("buildFactsContext returns null without project or providers", async () => {
+  assert.equal(await buildFactsContext({}), null);
+  assert.equal(await buildFactsContext({ project: "alpha" }), null);
+  assert.equal(
+    await buildFactsContext({ project: "alpha", getTopFacts: async () => [], touchFacts: async () => ({}) }),
+    null,
+  );
+});
+
+test("buildFactsContext formats the block, caps at K, and touches only surfaced facts", async () => {
+  const nowMs = 5000 * 3600_000;
+  const many = Array.from({ length: 20 }, (_, i) => ({
+    id: `cto:${i}`,
+    kind: "status",
+    statement: `fact ${i}`,
+    created: nowMs - 3600_000,
+    retention: 20 - i,
+  }));
+  const touched = [];
+  const block = await buildFactsContext({
+    project: "alpha",
+    cap: 15,
+    nowMs,
+    getTopFacts: async (project, k) => many, // provider is sloppy: returns more than K
+    touchFacts: async ({ project, ids }) => touched.push({ project, ids }),
+  });
+  assert.ok(block);
+  assert.equal(block.priority, 60);
+  const lines = block.text.split("\n").filter((l) => l.startsWith("- ["));
+  assert.equal(lines.length, 15, "block is capped at K even when the provider over-returns");
+  assert.ok(touched.length === 1 && touched[0].project === "alpha");
+  assert.equal(touched[0].ids.length, 15, "touch records exactly the surfaced facts");
+  assert.ok(touched[0].ids.includes("cto:0") && touched[0].ids.includes("cto:14"), "touches the highest-retention facts");
 });

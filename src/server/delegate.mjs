@@ -124,15 +124,20 @@ function genId() {
  * omitted entirely when `worktree` is null (parent cwd was not a repo). Do not
  * add anything else and do not make it configurable.
  */
-export function buildJobPrompt({ prompt, worktree, branch }) {
+export function buildJobPrompt({ prompt, worktree, branch, facts }) {
   const head = String(prompt ?? "").trim();
+  const factsSection =
+    facts && String(facts).trim().length > 0
+      ? "\n\n---\nRelevant project context (from the CTO blackboard):\n" + String(facts).trim() + "\n"
+      : "";
   if (!worktree) {
     return (
       head +
       "\n\n---\n" +
       "You are running as a background job. The user is not watching this session and\n" +
       "cannot see your intermediate output — only your final message is reported back.\n\n" +
-      "When you are done, end with a short summary of what you changed and why."
+      "When you are done, end with a short summary of what you changed and why." +
+      factsSection
     );
   }
   return (
@@ -144,7 +149,8 @@ export function buildJobPrompt({ prompt, worktree, branch }) {
     "Commit your work to that branch before you finish. You may open a draft pull\n" +
     "request for it (never a non-draft one without a human confirming), but you may\n" +
     "never merge, never force-push, and never touch any other checkout.\n\n" +
-    "When you are done, end with a short summary of what you changed and why."
+    "When you are done, end with a short summary of what you changed and why." +
+    factsSection
   );
 }
 

@@ -150,6 +150,30 @@ test("buildJobPrompt omits the git paragraph when there is no worktree", () => {
   assert.ok(out.includes("When you are done, end with a short summary"));
 });
 
+test("buildJobPrompt is unchanged-by-default (no facts injected)", () => {
+  const base = buildJobPrompt({ prompt: "Fix it", worktree: "/wt", branch: "b" });
+  const noFacts = buildJobPrompt({ prompt: "Fix it", worktree: "/wt", branch: "b", facts: undefined });
+  const emptyFacts = buildJobPrompt({ prompt: "Fix it", worktree: "/wt", branch: "b", facts: "" });
+  assert.equal(noFacts, base);
+  assert.equal(emptyFacts, base);
+  assert.ok(!base.includes("CTO blackboard"));
+});
+
+test("buildJobPrompt appends the facts section when the caller supplies one", () => {
+  const expected = "- [blocker] build is red (2h)\n- [decision] moved to postgres (5h)";
+  const out = buildJobPrompt({
+    prompt: "Investigate the deploy",
+    worktree: "/wt",
+    branch: "b",
+    facts: expected,
+  });
+  assert.ok(out.includes("Relevant project context (from the CTO blackboard):"));
+  assert.ok(out.includes(expected));
+  // the git/background contract paragraph is untouched
+  assert.ok(out.includes("never merge"));
+  assert.ok(out.includes("When you are done, end with a short summary"));
+});
+
 // ----------------------------------------------------------------------------
 // 2. buildCompletionText — done, failed, stopped, no-worktree
 // ----------------------------------------------------------------------------

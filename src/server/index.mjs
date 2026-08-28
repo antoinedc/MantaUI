@@ -3906,6 +3906,37 @@ const handleRequest = async (req, res) => {
   // on-call CTO agent. dispatch wraps every tool so a quiet box / bad engine
   // returns a structured error, never a throw. `ctx.onNarrate` is a server-side
   // seam (wired by issue 3's voice window), never read off the HTTP body.
+  // ---------- cto_fact blackboard ingestion (BET-1390 / §6.2) ----------
+  // POST /api/cto/facts  body {project, kind, statement, refs, valid_until?,
+  //                            supersedes?, sessionID?} → the gatekeeper
+  //   verdict for the proposal (add/update/supersede/reject), or `{queued:
+  //   true}` if the gatekeeper hasn't resolved within ~10s (the durable queue
+  //   + tick pump still resolve it). Called by the global `cto_fact` opencode
+  //   tool. Bearer-gated with the rest of /api/*.
+  if (path === "/api/cto/facts") {
+    try {
+      if (req.method === "POST") {
+        const body = await readJsonBody(req);
+        const result = await adaptiveCto.proposeFact({
+          project: body?.project,
+          kind: body?.kind,
+          statement: body?.statement,
+          refs: body?.refs,
+          valid_until: body?.valid_until,
+          supersedes: body?.supersedes,
+          proposalId: body?.proposalId,
+          sessionID: body?.sessionID,
+        });
+        respondJson(res, result.ok ? 200 : 400, result);
+        return;
+      }
+      respondJson(res, 405, { error: "method not allowed" });
+    } catch (e) {
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
   // ---------- On-call CTO inbound (Issue 2) ----------
   // POST /api/cto/inbound  body {surface?, payload, seenId?} → {ok:true, ...}
   // The single entry point for CTO-bound events. Producers: the global

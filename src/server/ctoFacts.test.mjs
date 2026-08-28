@@ -16,6 +16,7 @@ import {
   retentionOf,
   lowestRetention,
   validateProposal,
+  buildFactProposal,
   enqueueProposal,
   popProposal,
   markApplied,
@@ -107,6 +108,105 @@ test("senderReliability is the Beta(confirmed+1, rejected+1) mean", () => {
   assert.equal(senderReliability({ confirmed: 0, rejected: 0 }), 0.5);
   assert.equal(senderReliability({ confirmed: 2, rejected: 0 }), 0.75);
   assert.equal(senderReliability({ confirmed: 0, rejected: 4 }), 1 / 6);
+});
+
+test("buildFactProposal shapes the registrar payload (project/kind/statement/refs/sender)", () => {
+  const { proposal } = buildFactProposal({
+    project: "alpha",
+    kind: "blocker",
+    statement: "build is red after the deploy",
+    refs: ["m1", "a1b2c3"],
+    valid_until: "2026-12-01T00:00:00Z",
+    supersedes: "cto:abc",
+    sessionID: "ses_1",
+  });
+  assert.ok(proposal);
+  assert.equal(proposal.project, "alpha");
+  assert.equal(proposal.kind, "blocker");
+  assert.equal(proposal.statement, "build is red after the deploy");
+  assert.deepEqual(proposal.refs, ["m1", "a1b2c3"]);
+  assert.equal(proposal.valid_until, "2026-12-01T00:00:00Z");
+  assert.equal(proposal.supersedes, "cto:abc");
+  assert.deepEqual(proposal.sender, { sessionID: "ses_1" });
+  // it produces a proposalId you can enqueue
+  assert.ok(typeof proposal.proposalId === "string" && proposal.proposalId.startsWith("cto:"));
+});
+
+test("buildFactProposal derives an idempotent proposalId from content + session", () => {
+  const base = { project: "alpha", kind: "status", statement: "api is healthy", refs: ["m9"], sessionID: "s1" };
+  const a = buildFactProposal(base).proposal.proposalId;
+  const b = buildFactProposal(base).proposal.proposalId;
+  assert.equal(a, b);
+  // changing evidence or session changes the id, so genuine updates are distinct
+  assert.notEqual(a, buildFactProposal({ ...base, refs: ["m10"] }).proposal.proposalId);
+  assert.notEqual(a, buildFactProposal({ ...base, sessionID: "s2" }).proposal.proposalId);
+});
+
+test("buildFactProposal rejects zero refs with an attach-evidence message", () => {
+  const res = buildFactProposal({ project: "alpha", kind: "status", statement: "x", refs: [], sessionID: "s1" });
+  assert.ok(!res.proposal);
+  assert.match(res.error ?? "", /attach evidence/i);
+  assert.match(res.error ?? "", /refs/i);
+});
+
+test("buildFactProposal trims statement, rejects empty/missing project, bad kind, over-limit", () => {
+  assert.ok(buildFactProposal({ kind: "status", statement: "x", refs: ["r"], sessionID: "s" }).error);
+  assert.match(
+    buildFactProposal({ project: "alpha", kind: "bogus", statement: "x", refs: ["r"] }).error ?? "",
+    /kind/,
+  );
+  assert.ok(buildFactProposal({ project: "alpha", kind: "status", statement: "  ", refs: ["r"] }).error);
+  assert.ok(
+    buildFactProposal({ project: "alpha", kind: "status", statement: "x".repeat(300), refs: ["r"] }).error,
+  );
+  // valid stays valid, statement trimmed
+  assert.equal(
+    buildFactProposal({ project: "alpha", kind: "status", statement: "  ok  ", refs: ["r"] }).proposal.statement,
+    "ok",
+  );
+});
+
+test("buildFactProposal defaults sender to cto when no sessionID is supplied", () => {
+  const { proposal } = buildFactProposal({ project: "alpha", kind: "status", statement: "ok", refs: ["r"] });
+  assert.equal(proposal.sender, "cto");
+});
+
+test("topFacts ranks active facts by retention and applies the K cap", async () => {
+  const { engine, facts } = makeEngine({ nowMs: 5 * D });
+  const fresh = makeFact({
+    id: "cto:fresh",
+    kind: "decision",
+    statement: "we moved to postgres",
+    refs: ["m2"],
+    created: 4.9 * D,
+    last_accessed: 4.9 * D,
+    access_count: 3,
+    sender: "cto",
+  });
+  const stale = makeFact({
+    id: "cto:stale",
+    kind: "decision",
+    statement: "old call path",
+    refs: ["m1"],
+    created: 0,
+    last_accessed: 0,
+    access_count: 0,
+    sender: "cto",
+  });
+  await facts.save("alpha", { v: 1, facts: [stale, fresh] });
+
+  const top1 = await engine.topFacts("alpha", { k: 1, nowMs: 5 * D });
+  assert.equal(top1.length, 1);
+  assert.equal(top1[0].id, "cto:fresh");
+
+  const topAll = await engine.topFacts("alpha", { k: 10, nowMs: 5 * D });
+  assert.deepEqual(
+    topAll.map((f) => f.id),
+    ["cto:fresh", "cto:stale"],
+  );
+
+  assert.deepEqual(await engine.topFacts("", { k: 10 }), []);
+  assert.deepEqual(await engine.topFacts("nope", { k: 10 }), []);
 });
 
 test("retention: decay halves after one half-life", () => {

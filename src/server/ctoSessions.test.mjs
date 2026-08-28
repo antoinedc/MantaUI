@@ -11,6 +11,8 @@ import {
   escalateTier,
   estimateTokens,
   assembleContext,
+  formatFactsBlock,
+  factAgeLabel,
   addActive,
   removeActive,
   sessionCreatedMs,
@@ -105,6 +107,47 @@ test("estimateTokens is 4 chars per token", () => {
   assert.equal(estimateTokens("12345678"), 2);
   assert.equal(estimateTokens(""), 0);
 });
+
+test("factAgeLabel renders hours/days/months/years", () => {
+  const now = Date.UTC(2026, 0, 2, 0, 0, 0);
+  assert.equal(factAgeLabel(now - 3 * 3600_000, now), "3h");
+  assert.equal(factAgeLabel(now - 2 * 24 * 3600_000, now), "2d");
+  assert.equal(factAgeLabel(now - 45 * 24 * 3600_000, now), "1mo");
+  assert.equal(factAgeLabel(now - 14 * 30 * 24 * 3600_000, now), "1y");
+});
+
+test("formatFactsBlock renders kind + statement + age lines under a header", () => {
+  const now = 1000 * 3600_000;
+  const block = formatFactsBlock(
+    [
+      { id: "cto:a", kind: "blocker", statement: "build is red", created: now - 2 * 3600_000, retention: 0.9 },
+      { id: "cto:b", kind: "decision", statement: "moved to postgres", created: now - 5 * 3600_000, retention: 0.5 },
+    ],
+    { nowMs: now },
+  );
+  assert.ok(block);
+  assert.equal(block.priority, 60);
+  assert.ok(block.text.includes("[blocker] build is red (2h)"));
+  assert.ok(block.text.includes("[decision] moved to postgres (5h)"));
+  assert.ok(block.text.startsWith("Relevant project facts"));
+});
+
+test("formatFactsBlock sorts by retention desc, caps, and returns null on empty", () => {
+  const now = 1000 * 3600_000;
+  const many = Array.from({ length: 20 }, (_, i) => ({
+    id: `cto:${i}`,
+    kind: "status",
+    statement: `fact ${i}`,
+    created: now - 3600_000,
+    retention: 20 - i,
+  }));
+  const block = formatFactsBlock(many, { cap: 15, nowMs: now });
+  assert.equal(block.text.split("\n").filter((l) => l.startsWith("- [")).length, 15);
+  assert.ok(block.text.indexOf("fact 19") < block.text.indexOf("fact 0"), "highest retention first");
+  assert.equal(formatFactsBlock([], { nowMs: now }), null);
+  assert.equal(formatFactsBlock([{ id: "x", kind: "status", statement: "", created: now }], { nowMs: now }), null);
+});
+
 
 // ---------------------------------------------------------------------------
 // Active-set bookkeeping
