@@ -226,7 +226,12 @@ export function upsertWatchers(watchers, candidates, { now = Date.now() } = {}) 
   const updated = [];
   for (const cand of Array.isArray(candidates) ? candidates : []) {
     if (!cand || !cand.patternSignature) continue;
-    const built = makeWatcher({ predicate: cand.predicate, source: cand.source || "auto", now });
+    const built = makeWatcher({
+      predicate: cand.predicate,
+      source: cand.source || "auto",
+      patternSignature: cand.patternSignature,
+      now,
+    });
     if (!built.ok) continue;
     const idx = next.findIndex((w) => w && w.patternSignature === cand.patternSignature);
     if (idx === -1) {
@@ -244,22 +249,28 @@ export function upsertWatchers(watchers, candidates, { now = Date.now() } = {}) 
 }
 
 // Retire watchers that have gone quiet (no hit for `inactiveAfterMs`) or whose
-// patternSignature is in the archived set. Best-effort per watcher — a bad
-// record is skipped, never thrown.
+// patternSignature is in the archived set. A retired watcher is flagged
+// `retired: true` and kept (so an auto-created theme that resurfaces on a later
+// day rollup re-arms in place — see upsertWatchers) but is skipped by evidence
+// evaluation. Best-effort per watcher — a bad record is skipped, never thrown.
+// Retired watchers are also passed back in `retired` for logging.
 export function retireWatchers(watchers, { nowMs = Date.now(), inactiveAfterMs = RETIRE_AFTER_MS, archivedSignatures = [] } = {}) {
   const archived = new Set(Array.isArray(archivedSignatures) ? archivedSignatures : []);
   const next = [];
   const retired = [];
   for (const w of Array.isArray(watchers) ? watchers : []) {
-    if (!w || w.retired) {
-      if (w) next.push(w);
+    if (!w) continue;
+    if (w.retired) {
+      next.push(w);
       continue;
     }
-    const quiet = nowMs - (typeof w.lastHit === "number" && w.lastHit > 0 ? w.lastHit : w.created ?? 0) >= inactiveAfterMs;
+    const last = typeof w.lastHit === "number" && w.lastHit > 0 ? w.lastHit : w.created ?? 0;
+    const quiet = nowMs - last >= inactiveAfterMs;
     const archivedAway = w.patternSignature != null && archived.has(w.patternSignature);
     if (quiet || archivedAway) {
+      next.push({ ...w, retired: true, retiredAt: nowMs, retiredReason: archivedAway ? "archived" : "inactive" });
       retired.push({ id: w.id, patternSignature: w.patternSignature, reason: archivedAway ? "archived" : "inactive" });
-      continue; // retired watchers are dropped (they can be re-armed by upsert)
+      continue;
     }
     next.push(w);
   }
@@ -280,7 +291,7 @@ function significantKeywords(text) {
   const words = text
     .toLowerCase()
     .split(/[^a-z0-9]+/)
-    .filter((w) => w.length >= 4 && !STOP.get(w));
+    .filter((w) => w.length >= 4 && !STOP.has(w));
   return [...new Set(words)];
 }
 
@@ -371,7 +382,10 @@ export function extractRecurringThemes(dayRollups, { minOccurrences = AUTO_MIN_O
   }
   const candidates = [];
   for (const [norm, info] of count) {
-    if (info.bullets.size < minOccurrences) continue; // >=2 bullets (distinct days) share the theme
+    // `occurrences` == number of distinct bullets that contain the signifier
+    // (extractSignifiers dedupes per bullet), so >= minOccurrences means at
+    // least that many rollup bullets in the last 7 days feature the pattern.
+    if (info.occurrences < minOccurrences) continue;
     candidates.push({
       patternSignature: norm,
       predicate: { kind: EVENT_PATTERN, params: { pattern: escapeRegex(norm), fields: "both" } },
@@ -390,7 +404,7 @@ export function extractRecurringThemes(dayRollups, { minOccurrences = AUTO_MIN_O
 // The high-salience evidence payload appended to the A1 ledger for a hit. The
 // predicate-kind drives the B4 sourceKind: a rate-threshold watch that trips
 // earns the steep-decay notify rule (`watcher-hit-rate`).
-export function watcherHitPayload(watch, event = {}, { now = Date.now() } = {}) {
+export function watcherHitPayload(watch, event = {}, { now = Date.now } = {}) {
   const pk = watch?.predicate?.kind;
   return {
     kind: WATCHER_HIT_KIND,

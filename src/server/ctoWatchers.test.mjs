@@ -159,7 +159,7 @@ test("event-pattern watcher hit becomes a high-salience evidence event", async (
   const hits = deps.ledgerRows.filter((r) => r.kind === "watcher.hit");
   assert.equal(hits.length, 1);
   assert.equal(hits[0].salience, "high");
-  assert.equal(hits[0].refs, "a,b", "refs carried through");
+  assert.deepEqual(hits[0].refs, ["a", "b"], "refs carried through");
 });
 
 // ---------------------------------------------------------------------------
@@ -175,26 +175,35 @@ test("upsertWatchers keys by patternSignature — never duplicates, re-arms a re
   const second = upsertWatchers(next, [{ patternSignature: "bet_123", predicate: { kind: EVENT_PATTERN, params: { pattern: "BET-123" } }, source: "auto" }], { now: () => t });
   assert.equal(second.added.length, 0);
   assert.equal(second.next.length, 1);
-  // retirement then resurface re-arms
-  const { next: retiredNext } = retireWatchers(second.next, { nowMs: t + 100_000_000 });
-  assert.equal(retiredNext.length, 0);
+  // retirement then resurface re-arms in place (retired watcher kept, flagged)
+  const { next: retiredNext } = retireWatchers(second.next, { nowMs: 1 + 31 * 24 * 3_600_000 });
+  assert.equal(retiredNext.length, 1);
+  assert.equal(retiredNext[0].retired, true);
   const rearm = upsertWatchers(retiredNext, [{ patternSignature: "bet_123", predicate: { kind: EVENT_PATTERN, params: { pattern: "BET-123" } }, source: "auto" }], { now: () => t + 1 });
   assert.equal(rearm.updated[0].rearmed, true);
   assert.equal(rearm.next[0].retired, false);
 });
 
 test("retireWatchers retires inactive watchers and archived signatures", () => {
-  const nowMs = 1_000_000;
+  const nowMs = 3_000_000_000_000;
+  const DAY = 86_400_000;
   const list = [
-    { id: "w1", patternSignature: "s1", created: nowMs - 10, lastHit: nowMs - 100_000_000, retired: false }, // inactive
+    { id: "w1", patternSignature: "s1", created: nowMs - 60 * DAY, lastHit: nowMs - 40 * DAY, retired: false }, // inactive (40d)
     { id: "w2", patternSignature: "s2", created: nowMs - 10, lastHit: nowMs - 5, retired: false }, // active
     { id: "w3", patternSignature: "s3", created: nowMs, lastHit: null, retired: false }, // archived signature
   ];
   const { next, retired } = retireWatchers(list, { nowMs, archivedSignatures: ["s3"] });
-  const ids = next.map((w) => w.id).sort();
-  assert.deepEqual(ids, ["w2"]);
+  // w2 stays active; w1/w3 stay present but flagged retired.
+  assert.deepEqual(next.map((w) => w.id).sort(), ["w1", "w2", "w3"]);
+  assert.deepEqual(
+    next
+      .filter((w) => !w.retired)
+      .map((w) => w.id),
+    ["w2"],
+  );
   assert.deepEqual(retired.map((r) => r.id).sort(), ["w1", "w3"]);
   assert.equal(retired.find((r) => r.id === "w3").reason, "archived");
+  assert.equal(next.find((w) => w.id === "w1").retired, true);
 });
 
 // ---------------------------------------------------------------------------
