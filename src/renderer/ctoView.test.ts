@@ -14,6 +14,8 @@ import {
   digestExpandable,
   resting,
   stateTone,
+  nowCostLabel,
+  nowRailMeta,
   type CtoState,
   type CtoHealthStat,
 } from "./ctoView";
@@ -307,5 +309,34 @@ describe("stateTone (§10.4 Now blocked chip)", () => {
   });
   it("working → ok", () => {
     expect(stateTone("working")).toBe("ok");
+  });
+});
+
+describe("nowCostLabel (§10.4 Now cost format)", () => {
+  it("formats a positive cost to two decimals", () => {
+    expect(nowCostLabel(1.5)).toBe("$1.50");
+    expect(nowCostLabel(0.42)).toBe("$0.42");
+    expect(nowCostLabel(12)).toBe("$12.00");
+  });
+  it("returns null when absent", () => {
+    expect(nowCostLabel(undefined)).toBeNull();
+    expect(nowCostLabel(null)).toBeNull();
+  });
+  it("returns null for zero or NaN", () => {
+    expect(nowCostLabel(0)).toBeNull();
+    expect(nowCostLabel(Number.NaN)).toBeNull();
+  });
+});
+
+describe("nowRailMeta (§10.4 project · cost · elapsed)", () => {
+  it("places cost between project and elapsed", () => {
+    expect(nowRailMeta("bui", "$1.50", "5m")).toBe("bui · $1.50 · 5m");
+  });
+  it("drops the cost segment when absent (no double separator)", () => {
+    expect(nowRailMeta("bui", null, "5m")).toBe("bui · 5m");
+    expect(nowRailMeta("bui", null, null)).toBe("bui");
+  });
+  it("drops empty-string segments", () => {
+    expect(nowRailMeta("bui", "", "5m")).toBe("bui · 5m");
   });
 });

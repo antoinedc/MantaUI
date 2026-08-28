@@ -37,6 +37,7 @@ import {
   formatEta,
   showPausedBanner,
   statDisplay,
+  nowCostLabel,
   type BlockerCard,
   type CtoState,
   type CtoHealthStat,
@@ -137,6 +138,7 @@ export function CtoPanel({
   // Store-derived live state for the Now rail + answer-now routing.
   const projects = useStore((s) => s.projects);
   const status = useStore((s) => s.status);
+  const sessionCost = useStore((s) => s.sessionCost);
 
   // §10.3 target resolution: is a card's owning session still present?
   const knownSessions = useMemo(
@@ -192,12 +194,15 @@ export function CtoPanel({
         if (!active) continue;
         const sessionId = w.opencodeSessionId;
         const elapsed = typeof st.lastMessageAt === "number" ? relativeTime(st.lastMessageAt, Date.now()) : null;
+        const cost = sessionId ? nowCostLabel(sessionCost[sessionId]) : null;
         out.push({
           id: sessionId ?? `${p.tmuxSession}-${w.index}`,
           name: w.name,
           state: blocked ? "blocked" : "working",
           step: st.progressLabel ?? null,
-          meta: elapsed ? `${p.tmuxSession} · ${elapsed}` : p.tmuxSession,
+          project: p.tmuxSession,
+          cost,
+          elapsed,
           onClick: () => {
             if (sessionId) onOpenSession(sessionId);
           },
