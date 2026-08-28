@@ -557,8 +557,10 @@ export function createStandingQueryEngine(deps = {}) {
   }
 
   // Evaluates windowed kinds (usage-burn) + retirement, driven from the engine
-  // tick (a work timer — already gated by pause).
-  async function runTick() {
+  // tick (a work timer — already gated by pause). `archivedSignatures` (the
+  // normalized patterns of newly-archived underlying facts) retires matching
+  // watchers (§13.4 "or the underlying fact archived").
+  async function runTick({ archivedSignatures = [] } = {}) {
     let all;
     try {
       all = await loadAll();
@@ -587,7 +589,7 @@ export function createStandingQueryEngine(deps = {}) {
     }
     // Retirement is cheap to run here too (once per tick).
     try {
-      const { next, retired } = retireWatchers(all, { nowMs: t });
+      const { next, retired } = retireWatchers(all, { nowMs: t, archivedSignatures });
       if (retired.length > 0) {
         await saveAll(next);
       }

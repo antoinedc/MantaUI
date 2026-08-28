@@ -53,6 +53,7 @@ import {
   inboxStore,
   verdictsStore,
   watchersStore,
+  factsArchiveStore,
   purgeExpiredInbox,
 } from "./ctoStores.mjs";
 import { createVerdictEngine } from "./ctoVerdicts.mjs";
@@ -99,7 +100,7 @@ import {
 } from "./ctoBudget.mjs";
 // BET-1398 standing-query watchers (§4.3/§13.4): the event-driven watcher
 // engine hosted by the adaptive engine. Supersedes the old cto.json poller.
-import { createStandingQueryEngine } from "./ctoWatchers.mjs";
+import { createStandingQueryEngine, extractSignifiers, patternSignatureFor } from "./ctoWatchers.mjs";
 
 // Actor tag stamped on every engine RPC call / ledger row (spec §3.3).
 export const ACTOR = "cto";
@@ -966,13 +967,46 @@ export function createCtoEngine(deps = {}) {
     return out;
   }
 
+  // §13.4 "or the underlying fact archived": collect the normalized patterns of
+  // superseded/archived facts so a watcher whose theme is archived retires.
+  // Best-effort — an unreadable archive yields no signatures.
+  async function archivedWatcherSignatures() {
+    const out = new Set();
+    try {
+      const dir = factsArchiveStore.dir;
+      let names = [];
+      if (typeof dir === "string" && dir) {
+        names = (await fsp.readdir(dir).catch(() => [])) ?? [];
+      }
+      for (const name of names) {
+        const project = String(name).endsWith(".json") ? String(name).slice(0, -5) : String(name);
+        let p;
+        try {
+          p = await factsArchiveStore.load(project);
+        } catch {
+          continue;
+        }
+        for (const f of Array.isArray(p?.entries) ? p.entries : []) {
+          for (const sig of extractSignifiers(f?.statement)) {
+            const norm = patternSignatureFor(sig);
+            if (norm) out.add(norm);
+          }
+        }
+      }
+    } catch {
+      /* best-effort */
+    }
+    return [...out];
+  }
+
   // Watcher run growth per tick (enabled-gated, §13.4): evaluate the windowed
   // kinds (usage-burn) + retirement, and after a new day rollup has landed run
   // the auto-creation scan once per day (guarded by a day marker so it doesn't
   // re-run every tick). Best-effort — never throws into the poller.
   async function watcherTick() {
     try {
-      await getWatchers().runTick();
+      const archivedSig = await archivedWatcherSignatures();
+      await getWatchers().runTick({ archivedSignatures: archivedSig });
       const es = (await engineState.load()) ?? {};
       const lastAutoDay = es?.watchers?.lastAutoDay ?? null;
       const todayKey = budgetDayKey(now());
