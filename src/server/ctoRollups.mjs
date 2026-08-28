@@ -25,17 +25,17 @@
 // Pure logic + injected I/O in the style of delegate.mjs / ctoEngine.mjs — no
 // live tmux/opencode/network in tests. All model + store + presence seams are
 // injected (`runEphemeral`, `rollups`, `loadInputs`, `loadPreceding`, `exists`,
-// `presenceCheck`, `factsStore`, `resolveSegment`, `now`).
+// `presenceCheck`, `submitProposal`, `resolveSegment`, `now`).
 //
-// Fact sync (P1, §5.3 "ADD/UPDATE/NOOP"): after each day-level reduce the
-// engine applies a deterministic ADD/UPDATE/NOOP against the project's facts
-// store (§6) DIRECTLY from the rollup — single-writer, the engine itself (§15).
-// This is deliberately isolated in one exported function, `syncFactsFromRollup`,
-// so a later P2 collaborative gatekeeper can delete it cleanly.
+// Fact sync (P2, §6.2 / D10): after each day-level reduce the runner does NOT
+// write facts directly. It maps each bullet to a per-project blackboard
+// PROPOSAL (sender "cto") and submits it to the B1 gatekeeper queue — the
+// gatekeeper is the single writer (§6.2). This is the one and only engine
+// write path to the blackboard; it goes through the queue like every producer.
 
 import { promises as fsp } from "node:fs";
 import { createHash } from "node:crypto";
-import { rollupsStore, segmentsStore, factsStore, ledgerStore } from "./ctoStores.mjs";
+import { rollupsStore, segmentsStore, ledgerStore } from "./ctoStores.mjs";
 
 export const ROLLUP_VERSION = 1;
 export const ROLLUP_LEVELS = Object.freeze(["hour", "day", "week"]);
@@ -261,117 +261,59 @@ export function degradedRollup({ level, window, inputs, refs } = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// Fact sync (P1, isolated — see module header). After a day-level reduce the
-// engine applies ADD/UPDATE/NOOP against each project's facts store, grouped
-// per project by resolving each bullet's refs → segment → project. Deterministic
-// and small; a later P2 collaborative gatekeeper replaces this direct path.
+// Fact sync (P2, §6.2 / D10 — no direct writes). After a day-level reduce the
+// runner maps each bullet to {project, statement, refs} by resolving refs →
+// segment → project (unattributable bullets are skipped — never fabricate a
+// project) and SUBMITS each as a blackboard PROPOSAL to the per-project
+// gatekeeper queue (sender "cto"). The gatekeeper is the single writer (§6.2) —
+// this is the only engine write path and it goes through the queue like every
+// other producer. Proposal ids are deterministic so a re-sync of the same day
+// is idempotent (re-enqueue of an applied id is a no-op).
 // ---------------------------------------------------------------------------
 
-export function normalizeStatement(text) {
-  return String(text || "").trim().replace(/\s+/g, " ").toLowerCase();
-}
-
-export function refSignature(refs) {
-  return (Array.isArray(refs) ? [...refs] : []).sort().join("|");
-}
-
-// Deterministic ADD/UPDATE/NOOP decision against an existing fact list.
-//   - NOOP:   an active fact with the same normalized statement already exists.
-//   - UPDATE: an active fact from a prior rollup sync shares the same ref
-//             signature but a different statement — supersede it, add the new.
-//   - ADD:    otherwise (new news).
-// Returns { action, existing? }.
-export function decideFactAction(existing, statement, refs) {
-  const norm = normalizeStatement(statement);
-  const sig = refSignature(refs);
-  if (!norm) return { action: "noop" };
-  for (const f of existing) {
-    if (f?.superseded_by || f?.valid_until) continue; // inactive → can't block
-    if (normalizeStatement(f?.statement) === norm) return { action: "noop", existing: f };
-  }
-  for (const f of existing) {
-    if (f?.superseded_by || f?.valid_until) continue;
-    if (f?.sender?.sessionID === undefined && refSignature(f?.refs) === sig && sig) {
-      return { action: "update", existing: f };
-    }
-  }
-  return { action: "add" };
-}
-
-// The isolated P1 fact-sync entry point. `dayRollup` is a validated day-level
-// rollup; `resolveSegment` maps a segment id to `{ project, ... }` (or null);
-// `factsStore` is the per-project facts store ({load(project), save(project,data)}).
-// Applies ADD/UPDATE/NOOP per project and returns a tally.
-export async function syncFactsFromRollup(dayRollup, { resolveSegment, facts = factsStore, sender = "cto", now = Date.now() } = {}) {
-  if (!dayRollup || dayRollup.level !== "day" || !Array.isArray(dayRollup.bullets)) {
-    return { applied: 0, added: 0, updated: 0, noop: 0 };
-  }
-  const byProject = new Map();
+// Map a validated day rollup to per-project proposal descriptors. Pure.
+export async function proposalsFromRollup(dayRollup, { resolveSegment } = {}) {
+  if (!dayRollup || dayRollup.level !== "day" || !Array.isArray(dayRollup.bullets)) return [];
+  const out = [];
   for (const b of dayRollup.bullets) {
     if (!b || typeof b.text !== "string" || !b.text.trim()) continue;
     const refs = Array.isArray(b.refs) ? b.refs.filter((r) => typeof r === "string") : [];
+    if (refs.length === 0) continue; // zero-refs proposals are rejected by the gatekeeper anyway
     let project = null;
     for (const ref of refs) {
+      let seg = null;
       try {
-        const seg = await resolveSegment(ref);
-        if (seg?.project) {
-          project = seg.project;
-          break;
-        }
+        seg = resolveSegment ? await resolveSegment(ref) : null;
       } catch {
-        /* resolve a single ref fails → try the next */
+        seg = null;
+      }
+      if (seg?.project) {
+        project = seg.project;
+        break;
       }
     }
     if (!project) continue; // can't attribute → skip (never fabricate a project)
-    if (!byProject.has(project)) byProject.set(project, []);
-    byProject.get(project).push({ text: b.text, refs });
+    out.push({ project, kind: "decision", statement: b.text.slice(0, 200), refs });
   }
+  return out;
+}
 
-  const tally = { applied: 0, added: 0, updated: 0, noop: 0 };
-  for (const [project, bullets] of byProject) {
-    let payload;
+// The runner's day-level fact-sync hook: submit each proposal descriptor to the
+// blackboard queue (sender "cto") with a deterministic proposal id derived from
+// (project, statement, refs). Returns a tally. `submitProposal` is injected by
+// the engine (the facts engine's enqueue); it degrades to a no-op when absent.
+export async function submitFactsFromRollup(dayRollup, { resolveSegment, submitProposal = async () => ({ ok: false }), now = Date.now() } = {}) {
+  const proposals = await proposalsFromRollup(dayRollup, { resolveSegment });
+  const tally = { applied: 0, failed: 0 };
+  for (const p of proposals) {
+    const proposalId =
+      "rollup:" + createHash("sha1").update(`${p.project}|${p.statement}|${(p.refs || []).join(",")}`).digest("hex").slice(0, 12);
     try {
-      payload = await facts.load(project);
+      const res = await submitProposal({ proposalId, ...p, sender: "cto" });
+      if (res?.ok || res?.added) tally.applied += 1;
+      else tally.failed += 1;
     } catch {
-      payload = { facts: [] };
-    }
-    const existing = Array.isArray(payload?.facts) ? payload.facts : [];
-    const factsOut = [...existing];
-    const ts = now();
-    for (const b of bullets) {
-      const { action, existing: hit } = decideFactAction(existing, b.text, b.refs);
-      if (action === "noop") {
-        tally.noop += 1;
-        if (hit) {
-          hit.last_accessed = ts;
-          hit.access_count = (hit.access_count || 0) + 1;
-        }
-        continue;
-      }
-      if (action === "update" && hit) {
-        hit.superseded_by = "cto:" + createHash("sha1").update(b.text).digest("hex").slice(0, 12);
-      }
-      const fact = {
-        v: 1,
-        id: "cto:" + createHash("sha1").update(`${project}|${b.text}|${refSignature(b.refs)}`).digest("hex").slice(0, 12),
-        kind: "decision",
-        statement: b.text.slice(0, 200),
-        refs: b.refs,
-        confidence: 0.5,
-        created: ts,
-        last_accessed: ts,
-        access_count: 1,
-        sender,
-      };
-      factsOut.push(fact);
-      tally.applied += 1;
-      if (action === "update") tally.updated += 1;
-      else tally.added += 1;
-    }
-    try {
-      await facts.save(project, { facts: factsOut });
-    } catch {
-      /* facts persistence is best-effort — never throw into the reduce */
+      tally.failed += 1;
     }
   }
   return tally;
@@ -399,8 +341,11 @@ export async function syncFactsFromRollup(dayRollup, { resolveSegment, facts = f
 //                    true iff a stored payload already carries `bullets`.
 //   presenceCheck  — async () => bool — true when the user is present; the batch
 //                    stops after the in-flight reduce call.
-//   facts, resolveSegment — for day-level fact sync (default factsStore + a
-//                    segments-store-backed resolver when `segments` provided).
+//   resolveSegment — async (segmentId) => {project} | null — attribution for the
+//                    day-level fact sync.
+//   submitProposal — async (proposal) => {ok} — the blackboard proposal enqueue
+//                    (the facts engine's submitProposal); day-level reduce calls
+//                    it for each attributable bullet (sender "cto").
 //   now            — () => epoch ms.
 //   ledger         — A1 ledger {append} (best-effort).
 
@@ -490,8 +435,8 @@ export function createRollupRunner(deps = {}) {
     loadPreceding,
     exists,
     presenceCheck = async () => false,
-    facts = factsStore,
     resolveSegment,
+    submitProposal,
     now = () => Date.now(),
     ledger = ledgerStore,
   } = deps;
@@ -558,12 +503,13 @@ export function createRollupRunner(deps = {}) {
 
     let factTally = null;
     if (level === "day") {
-      factTally = await syncFactsFromRollup(rollup, {
+      // P2 (§6.2): submit each attributable bullet as a blackboard proposal
+      // (sender "cto") — the gatekeeper decides. NEVER a direct facts write.
+      factTally = await submitFactsFromRollup(rollup, {
         resolveSegment: resolveSegmentFn,
-        facts,
-        now,
+        submitProposal,
       }).catch(() => null);
-      if (factTally) await ledgerLog({ kind: "cto.facts_synced", id, ...factTally });
+      if (factTally) await ledgerLog({ kind: "cto.facts_proposed", id, ...factTally });
     }
     return { saved: true, level, window, id, factTally };
   }

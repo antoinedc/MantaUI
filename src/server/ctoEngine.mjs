@@ -78,6 +78,7 @@ import {
   ROLLUP_LEVELS,
   windowFor as rollupWindowFor,
 } from "./ctoRollups.mjs";
+import { createFactsEngine, VERIFY_CYCLE_MS } from "./ctoFacts.mjs";
 
 // Actor tag stamped on every engine RPC call / ledger row (spec §3.3).
 export const ACTOR = "cto";
@@ -100,6 +101,8 @@ export const CARD_CHECK_INTERVAL_MS = 60_000;
 // Work-segmentation G refit cadence (§5.1-d): monthly, on the box's own
 // inter-arrival times.
 export const G_REFIT_INTERVAL_MS = 30 * 24 * HOUR_MS;
+// §6.8 monthly half-life tuning cadence (a work timer, halted on pause).
+export const MONTHLY_TUNE_INTERVAL_MS = 30 * 24 * HOUR_MS;
 
 export const DOT = Object.freeze({
   ACTIVE: "active",
@@ -248,6 +251,14 @@ export function createCtoEngine(deps = {}) {
     // may inject a pre-built rollup runner instead.
     runEphemeral = null,
     rollups = null, // optional pre-built rollup runner override
+    // BET-1389 blackboard (§6): optional pre-built facts engine (else one is
+    // constructed below from engineState/ledger/runEphemeral/presence), plus
+    // the opportunistic checkable-verify + trace seams (null defaults → no
+    // verification surface, nothing gets stamped checkable).
+    facts = null,
+    factSurfaceExists = async () => false,
+    factVerify = async () => ({ ok: true }),
+    factResolveRef = null,
   } = deps;
 
   let disposed = false;
@@ -261,6 +272,9 @@ export function createCtoEngine(deps = {}) {
   let refitHandle = null;
   let lastPublishedSerialized = null;
   let rollupRunner = null;
+  let factsEngine = null;
+  let verifyHandle = null;
+  let tuneHandle = null;
 
   // A5 presence inputs (spec §5.4): lastSeen = max(desktop heartbeat, app
   // open, user prompt). The desktop heartbeat is read live via
@@ -364,6 +378,8 @@ export function createCtoEngine(deps = {}) {
       // §5.3 rollups — ambient background work, gated on enabled like any other.
       if (enabledNow) {
         await finalizeRollups();
+        // §6.2 blackboard: pump the per-project proposal queue (gatekeeper).
+        await pumpFacts();
       }
       await syncState();
     } catch {
@@ -384,6 +400,14 @@ export function createCtoEngine(deps = {}) {
       refitHandle.stop();
       refitHandle = null;
     }
+    if (verifyHandle) {
+      verifyHandle.stop();
+      verifyHandle = null;
+    }
+    if (tuneHandle) {
+      tuneHandle.stop();
+      tuneHandle = null;
+    }
   }
 
   function startTimers() {
@@ -403,6 +427,20 @@ export function createCtoEngine(deps = {}) {
       refitHandle = startPoller(
         () => segmenter.monthlyRefit().catch(() => {}),
         { intervalMs: G_REFIT_INTERVAL_MS, label: "cto-g-refit", immediate: false },
+      );
+    }
+    // §6.7 checkable-verify cycle (6h, no model cost) — a work timer.
+    if (!verifyHandle) {
+      verifyHandle = startPoller(
+        () => getFactsEngine().verifyDue().catch(() => {}),
+        { intervalMs: VERIFY_CYCLE_MS, label: "cto-facts-verify", immediate: false },
+      );
+    }
+    // §6.8 monthly half-life tuning — a work timer, halted on pause like the rest.
+    if (!tuneHandle) {
+      tuneHandle = startPoller(
+        () => getFactsEngine().recomputeHalfLives().catch(() => {}),
+        { intervalMs: MONTHLY_TUNE_INTERVAL_MS, label: "cto-facts-tune", immediate: false },
       );
     }
   }
@@ -587,6 +625,19 @@ export function createCtoEngine(deps = {}) {
   // the cursor?" and hands the due windows to the rollup runner. Defaulting the
   // cursor to the CURRENT window start on first sight means the past is never
   // backfilled — a window only gets rolled up once it has actually closed.
+  // One shared ephemeral-rate wrapper (§3.3) used by both the rollup runner and
+  // the facts gatekeeper — every model-bound CTO step goes through the same
+  // per-session creation gate (D10's writer discipline).
+  const gatedRunEphemeral = async (data) => {
+    const gate = await beginEphemeral();
+    if (!gate.ok) return { ok: false, gated: true, error: gate.error };
+    try {
+      return runEphemeral ? await runEphemeral(data) : { ok: false, gated: true };
+    } finally {
+      gate.release?.();
+    }
+  };
+
   function getRollupRunner() {
     if (rollupRunner) return rollupRunner;
     if (deps.rollups) {
@@ -597,21 +648,47 @@ export function createCtoEngine(deps = {}) {
     // no model spend. Stay inert (and never touch the real stores) until a
     // runEphemeral is supplied.
     if (!runEphemeral) return null;
-    const gatedRunEphemeral = async (data) => {
-      const gate = await beginEphemeral();
-      if (!gate.ok) return { ok: false, gated: true, error: gate.error };
-      try {
-        return runEphemeral ? await runEphemeral(data) : { ok: false, gated: true };
-      } finally {
-        gate.release?.();
-      }
-    };
     rollupRunner = createRollupRunner({
       runEphemeral: gatedRunEphemeral,
       presenceCheck: () => engine.getPresence().state === "present",
       now,
+      // P2 (§6.2): rollup fact-sync submits blackboard proposals to the queue.
+      submitProposal: async (proposal) => (await getFactsEngine()).submitProposal(proposal),
     });
     return rollupRunner;
+  }
+
+  // Lazy-construct the blackboard facts engine (BET-1389 / §6). Mirrors the
+  // rollup-runner pattern: degraded (deterministic gatekeeper) when no model
+  // runner is wired, always useful, never throws. The engine owns the queue
+  // pump (per-project, on tick) + the 6h verify + monthly tuning timers.
+  function getFactsEngine() {
+    if (factsEngine) return factsEngine;
+    if (facts) {
+      factsEngine = facts;
+      return factsEngine;
+    }
+    factsEngine = createFactsEngine({
+      engineState,
+      ledger,
+      runEphemeral: runEphemeral ? gatedRunEphemeral : null,
+      now,
+      presenceCheck: () => engine.getPresence().state === "present",
+      surfaceExists: factSurfaceExists,
+      verify: factVerify,
+      resolveRef: factResolveRef,
+    });
+    return factsEngine;
+  }
+
+  // Pump the blackboard proposal queue (per-project, single writer). Driven
+  // from the tick when enabled; best-effort, never throws into the poller.
+  async function pumpFacts() {
+    try {
+      await getFactsEngine().pump();
+    } catch {
+      /* facts are best-effort — never take the engine down */
+    }
   }
 
   // Fold any closed windows into rollups (respecting enabled/paused via the
@@ -831,6 +908,9 @@ export function createCtoEngine(deps = {}) {
     },
     get rollupRunner() {
       return getRollupRunner();
+    },
+    get facts() {
+      return getFactsEngine();
     },
   };
 
