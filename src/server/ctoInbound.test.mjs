@@ -1,11 +1,13 @@
 // ctoInbound.test.mjs — On-call CTO inbound feed (BET-1165, issue 2/3).
 // Pure logic + injected I/O, no live tmux / opencode / multica / push:
 //   - inbound routing (live flag off → park; live on → inject; dedupe via seenId)
-//   - watcher tick with injected reads (fires on new + matching, no re-fire)
 //   - watch registry CRUD (engine confirm-gated, cto.json atomic store round-trip)
 //   - gate: confirm → allow via trustedActions; untrusted → needConfirmation;
 //     text-loop approve / reject re-dispatch
-//   - pure helpers (conditionKeywords / defaultConditionMatches / seenId / preview)
+//   - pure helpers (seenId / preview)
+//
+// The old watcher poller tests were removed in BET-1398 — the poller is
+// superseded by the event-driven standing-query engine (ctoWatchers.mjs).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -14,13 +16,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createCtoInbound,
-  createWatcherPoller,
   createCtoEngine,
   loadCtoStore,
   saveCtoStore,
-  conditionKeywords,
-  defaultConditionMatches,
-  defaultComputeSurfaceSeenId,
   computeConfirmId,
   buildPreview,
   stableHash,
@@ -180,15 +178,39 @@ function makeEngine(overrides = {}) {
 // Gate that reports confirm only for `watch` (the confirm-mode tool).
 const gate = (name) => (name === "watch" ? "confirm" : "allow");
 
+// BET-1398: the read gateway's watch verbs proxy to the standing-query engine
+// registry via the injected `watchers` seam. A small in-memory fake stands in
+// for the adaptive engine's persistent registry in these gate tests.
+function makeWatcherSeam(store) {
+  return {
+    register: async (input) => {
+      const watch = {
+        id: "w" + (store.length + 1),
+        ...input,
+        created: 1,
+        lastHit: null,
+        hits: 0,
+        retired: false,
+      };
+      store.push(watch);
+      return { ok: true, data: { watch } };
+    },
+    unregister: async (id) => {
+      const i = store.findIndex((w) => w.id === id);
+      if (i === -1) return { ok: true, data: { removed: false } };
+      store.splice(i, 1);
+      return { ok: true, data: { removed: true } };
+    },
+    list: async () => store,
+  };
+}
+
+const WATCH_ARGS = { kind: "event-pattern", pattern: "P0" };
+
 test("untrusted confirm-mode tool returns needConfirmation + preview and does NOT act", async () => {
   const watchers = [];
-  const engine = makeEngine({
-    loadWatches: async () => watchers,
-    saveWatches: async (w) => {
-      watchers.splice(0, watchers.length, ...w);
-    },
-  });
-  const res = await engine.dispatch("watch", { surface: "multica", query: "q", condition: "a P0 opens" }, { gate });
+  const engine = makeEngine({ watchers: makeWatcherSeam(watchers) });
+  const res = await engine.dispatch("watch", WATCH_ARGS, { gate });
   assert.equal(res.ok, true);
   assert.equal(res.needConfirmation, true);
   assert.equal(res.tool, "watch");
@@ -199,55 +221,34 @@ test("untrusted confirm-mode tool returns needConfirmation + preview and does NO
 
 test("a trusted action in trustedActions runs without confirmation", async () => {
   const watchers = [];
-  const engine = makeEngine({
-    loadWatches: async () => watchers,
-    saveWatches: async (w) => {
-      watchers.splice(0, watchers.length, ...w);
-    },
-  });
-  const res = await engine.dispatch(
-    "watch",
-    { surface: "multica", query: "q", condition: "a P0 opens" },
-    { gate, trustedActions: ["watch"] },
-  );
+  const engine = makeEngine({ watchers: makeWatcherSeam(watchers) });
+  const res = await engine.dispatch("watch", WATCH_ARGS, { gate, trustedActions: ["watch"] });
   assert.equal(res.ok, true);
   assert.equal(res.needConfirmation, undefined);
   assert.equal(watchers.length, 1);
-  assert.equal(watchers[0].surface, "multica");
+  assert.equal(watchers[0].predicate.kind, "event-pattern");
 });
 
 test("text loop: approveConfirm(id) then re-dispatch of the same tool+args runs it", async () => {
   const watchers = [];
-  const engine = makeEngine({
-    loadWatches: async () => watchers,
-    saveWatches: async (w) => {
-      watchers.splice(0, watchers.length, ...w);
-    },
-  });
-  const args = { surface: "multica", query: "q", condition: "a P0 opens" };
-  const first = await engine.dispatch("watch", args, { gate });
+  const engine = makeEngine({ watchers: makeWatcherSeam(watchers) });
+  const first = await engine.dispatch("watch", WATCH_ARGS, { gate });
   assert.equal(first.needConfirmation, true);
   assert.equal(watchers.length, 0);
   // user says "go ahead"
   assert.equal(engine.approveConfirm(first.id), true);
-  const second = await engine.dispatch("watch", args, { gate });
+  const second = await engine.dispatch("watch", WATCH_ARGS, { gate });
   assert.equal(second.needConfirmation, undefined);
   assert.equal(watchers.length, 1);
 });
 
 test("text loop: rejectConfirm(id) aborts and the tool stays blocked until approved again", async () => {
   const watchers = [];
-  const engine = makeEngine({
-    loadWatches: async () => watchers,
-    saveWatches: async (w) => {
-      watchers.splice(0, watchers.length, ...w);
-    },
-  });
-  const args = { surface: "multica", query: "q", condition: "a P0 opens" };
-  const first = await engine.dispatch("watch", args, { gate });
+  const engine = makeEngine({ watchers: makeWatcherSeam(watchers) });
+  const first = await engine.dispatch("watch", WATCH_ARGS, { gate });
   // user says "no"
   assert.equal(engine.rejectConfirm(first.id), true);
-  const second = await engine.dispatch("watch", args, { gate });
+  const second = await engine.dispatch("watch", WATCH_ARGS, { gate });
   assert.equal(second.needConfirmation, true); // still blocked
   assert.equal(watchers.length, 0);
 });
@@ -258,19 +259,15 @@ test("text loop: rejectConfirm(id) aborts and the tool stays blocked until appro
 
 test("watch registry CRUD through the engine (watch / list_watches / unwatch)", async () => {
   const watchers = [];
-  const engine = makeEngine({
-    loadWatches: async () => watchers,
-    saveWatches: async (w) => {
-      watchers.splice(0, watchers.length, ...w);
-    },
-  });
+  const engine = makeEngine({ watchers: makeWatcherSeam(watchers) });
   const gated = { gate, trustedActions: ["watch"] };
-  const added = await engine.dispatch("watch", { surface: "multica", query: "q", condition: "a P0 opens" }, gated);
+  const added = await engine.dispatch("watch", WATCH_ARGS, gated);
   assert.equal(added.ok, true);
   const id = added.data.watch.id;
   assert.equal(watchers.length, 1);
-  assert.equal(watchers[0].active, true);
-  assert.equal(watchers[0].lastFiredAt, null);
+  assert.equal(watchers[0].predicate.kind, "event-pattern");
+  assert.equal(watchers[0].hits, 0);
+  assert.equal(watchers[0].lastHit, null);
 
   const list = await engine.dispatch("list_watches", {});
   assert.equal(list.data.watches.length, 1);
@@ -323,105 +320,8 @@ test("read_inbox returns the inbox (filterable) without marking read or writing"
 });
 
 // ---------------------------------------------------------------------------
-// Watcher poller with injected reads
-// ---------------------------------------------------------------------------
-
-test("watcher tick fires inbound when condition matches and seenId is new; no re-fire on the same read", async () => {
-  const readOnce = { ok: true, data: { issues: [{ identifier: "BET-1", status: "critical", title: "P0 outage" }] } };
-  const fired = [];
-  const poller = createWatcherPoller({
-    loadWatches: async () => [
-      { id: "w1", surface: "multica", query: "q", condition: "a P0 opens", active: true, lastFiredAt: null },
-    ],
-    saveWatches: async () => {},
-    readSurface: async () => readOnce,
-    sendToInbound: async (input) => fired.push(input),
-  });
-  await poller.tick();
-  assert.equal(fired.length, 1);
-  assert.equal(fired[0].surface, "multica");
-  assert.equal(typeof fired[0].seenId, "string");
-  assert.ok(fired[0].payload.message.includes("P0"), "message carries the matching snippet");
-  // Same (unchanged) read on the next tick → seenId unchanged → no re-fire.
-  await poller.tick();
-  assert.equal(fired.length, 1);
-});
-
-test("watcher tick respects an inactive/disabled watch", async () => {
-  const fired = [];
-  const poller = createWatcherPoller({
-    loadWatches: async () => [
-      { id: "w1", surface: "multica", query: "q", condition: "a P0 opens", active: false, lastFiredAt: null },
-    ],
-    saveWatches: async () => {},
-    readSurface: async () => ({ ok: true, data: { issues: [{ identifier: "BET-1", status: "critical", title: "P0 outage" }] } }),
-    sendToInbound: async (input) => fired.push(input),
-  });
-  await poller.tick();
-  assert.equal(fired.length, 0);
-});
-
-test("watcher tick does not fire when the condition does not match", async () => {
-  const fired = [];
-  // read has no P0 and no keyword from the condition ("P0")
-  const poller = createWatcherPoller({
-    loadWatches: async () => [
-      { id: "w1", surface: "multica", query: "q", condition: "a P0 opens", active: true, lastFiredAt: null },
-    ],
-    saveWatches: async () => {},
-    readSurface: async () => ({ ok: true, data: { issues: [{ identifier: "BET-2", status: "todo", title: "chore" }] } }),
-    sendToInbound: async (input) => fired.push(input),
-  });
-  await poller.tick();
-  assert.equal(fired.length, 0);
-});
-
-test("watcher tick survives a failed surface read (skips the watch, keeps going)", async () => {
-  const fired = [];
-  let calls = 0;
-  const poller = createWatcherPoller({
-    loadWatches: async () => [
-      { id: "w1", surface: "multica", query: "q", condition: "a P0 opens", active: true, lastFiredAt: null },
-      { id: "w2", surface: "multica", query: "q2", condition: "a P0 opens", active: true, lastFiredAt: null },
-    ],
-    saveWatches: async () => {},
-    readSurface: async () => {
-      calls += 1;
-      if (calls === 1) throw new Error("surface down");
-      return { ok: true, data: { issues: [{ identifier: "BET-1", status: "critical", title: "P0 outage" }] } };
-    },
-    sendToInbound: async (input) => fired.push(input),
-  });
-  await poller.tick();
-  // w1's read threw (skipped, no throw out of the tick); w2's read succeeded.
-  assert.equal(fired.length, 1);
-});
-
-// ---------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------
-
-test("conditionKeywords strips stopwords and normalizes case", () => {
-  assert.deepEqual(conditionKeywords("a P0 opens"), ["p0"]);
-  assert.deepEqual(conditionKeywords("deploy failed"), ["deploy", "failed"]);
-  assert.deepEqual(conditionKeywords(""), []);
-});
-
-test("defaultConditionMatches is a keyword hit (case-insensitive) or true on empty condition", () => {
-  const read = { data: { issues: [{ identifier: "BET-1", title: "P0 Outage" }] } };
-  assert.equal(defaultConditionMatches("a P0 opens", read), true);
-  assert.equal(defaultConditionMatches("deploy failed", read), false);
-  assert.equal(defaultConditionMatches("", read), true);
-});
-
-test("defaultComputeSurfaceSeenId is stable for identical reads, differs for changed ones", () => {
-  const readA = { data: { issues: [{ identifier: "BET-1" }] } };
-  const readB = { data: { issues: [{ identifier: "BET-1" }, { identifier: "BET-2" }] } };
-  assert.equal(defaultComputeSurfaceSeenId(readA), defaultComputeSurfaceSeenId(readA));
-  assert.notEqual(defaultComputeSurfaceSeenId(readA), defaultComputeSurfaceSeenId(readB));
-  // An explicit seenId on the read always wins.
-  assert.equal(defaultComputeSurfaceSeenId({ seenId: "abc" }), "abc");
-});
 
 test("computeConfirmId is deterministic per (tool, args) and buildPreview summarizes", () => {
   assert.equal(computeConfirmId("watch", { surface: "multica" }), computeConfirmId("watch", { surface: "multica" }));
