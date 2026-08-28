@@ -490,6 +490,7 @@ export function createCtoDigest(deps = {}) {
     getEnabled = async () => false, // top-level ctoEnabled gate for the scheduler
     digestPushEnabled = async () => false, // §10.5 toggle (ships A12) — off by default
     pushDigest = async () => {}, // informational notification honoring router deferral
+    drain = async () => {}, // BET-1397: call engine.drainInbox() so unread inbox notes become evidence before composing
     intervalMs = SCHEDULER_INTERVAL_MS,
     fs = fsp,
   } = deps;
@@ -585,6 +586,9 @@ export function createCtoDigest(deps = {}) {
   async function doGenerate({ reason = "manual", presenceOf } = {}) {
     const t = now();
     if (!presenceOf) return null;
+    // BET-1397 digest-generation breakpoint: fold unread inbox notes into
+    // evidence before composing (best-effort — never blocks the digest).
+    await safe(drain);
     const gMinutes = (await safe(getGMinutes)) ?? DEFAULT_G_MINUTES;
     const lastSeen = typeof presenceOf.lastSeen === "number" ? presenceOf.lastSeen : t;
     const delta = typeof presenceOf.absenceDelta === "number" ? presenceOf.absenceDelta : Math.max(0, t - lastSeen);

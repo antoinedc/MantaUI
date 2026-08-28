@@ -1878,6 +1878,9 @@ let adaptiveCtoDigest = null;
   adaptiveCtoDigest = createCtoDigest({
     publish: (evt) => bus.publish(evt),
     runEphemeral: gatedDigestCompose,
+    // BET-1397: the digest-generation breakpoint drains the CTO inbox — unread
+    // notes become evidence folded into the composed digest, then marked read.
+    drain: () => adaptiveCto.drainInbox(),
     presence: { get: () => adaptiveCto.getPresence() },
     getGMinutes: async () => adaptiveCto.segmenter?.getGMinutes?.() ?? null,
     listOpenCards: async () => (await adaptiveCto.cards?.listOpen?.()) ?? [],
