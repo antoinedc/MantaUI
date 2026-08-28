@@ -27,7 +27,7 @@ import {
   type MediaEventPayload,
   type WidgetEventPayload,
 } from "../../shared/types.js";
-import type { Api, SyncDelta, CtoState } from "../../shared/api.js";
+import type { Api, SyncDelta, CtoState, CtoHealthStat, CtoLedgerRow, CtoLedgerPage } from "../../shared/api.js";
 // BET-559: httpApi used to pull these claim helpers through the (now-retired)
 // mobile shell's pairingLogic re-export. The shared, process-boundary-safe
 // origin is src/shared/claim.mjs — desktop main (src/main/auth.ts) and the
@@ -1545,6 +1545,84 @@ export const httpApi: Api = {
     try { json = (await res.json()) as typeof json; } catch { /* non-JSON body */ }
     if (!res.ok) return { ok: false, error: json.error ?? `HTTP ${res.status}` };
     return { ok: json.ok !== false, error: json.error };
+  },
+
+  // GET /api/cto/health (A12, §10.5 card 2) — the P1 Health-card stats. Read
+  // on settings-open (no polling). A rejection degrades to empty stats so the
+  // card renders collecting rows rather than crashing.
+  ctoHealthGet: async (): Promise<{ stats: CtoHealthStat[] }> => {
+    const url = `${serverBase()}/api/cto/health`;
+    let res: Response;
+    try {
+      res = await fetch(url, { method: "GET", headers: authHeaders(clientToken()) });
+    } catch {
+      return { stats: [] };
+    }
+    if (res.status === 401) throw new AuthRequiredError();
+    if (!res.ok) return { stats: [] };
+    let json: { stats?: CtoHealthStat[] } = {};
+    try { json = (await res.json()) as typeof json; } catch { /* non-JSON */ }
+    return { stats: Array.isArray(json?.stats) ? json.stats : [] };
+  },
+
+  // GET /api/cto/ledger (A12) — reverse-chron Activity-ledger page, cursor-
+  // paginated with `before` and filterable. `limit` clamped to avoid absurd
+  // responses. A rejection (no ledger yet / server down) → empty page.
+  ctoLedgerGet: async (opts: {
+    before?: number;
+    actor?: string;
+    kind?: string;
+    limit?: number;
+  } = {}): Promise<CtoLedgerPage> => {
+    const qp = new URLSearchParams();
+    if (opts.before != null) qp.set("before", String(opts.before));
+    if (opts.actor) qp.set("actor", opts.actor);
+    if (opts.kind) qp.set("kind", opts.kind);
+    const limit = Math.min(Math.max(1, opts.limit ?? 100), 500);
+    qp.set("limit", String(limit));
+    const url = `${serverBase()}/api/cto/ledger?${qp.toString()}`;
+    let res: Response;
+    try {
+      res = await fetch(url, { method: "GET", headers: authHeaders(clientToken()) });
+    } catch {
+      return { rows: [], nextBefore: null };
+    }
+    if (res.status === 401) throw new AuthRequiredError();
+    if (!res.ok) return { rows: [], nextBefore: null };
+    let json: { rows?: CtoLedgerRow[]; nextBefore?: number | null } = {};
+    try { json = (await res.json()) as typeof json; } catch { /* non-JSON */ }
+    return {
+      rows: Array.isArray(json?.rows) ? json.rows : [],
+      nextBefore: json?.nextBefore ?? null,
+    };
+  },
+
+  // POST /api/cto/pause — the §10.6-5 kill switch. Idempotent; mirrors
+  // ctoDigestNow's {ok, error} (never throws). The engine publishes a fresh
+  // ctoState (dot → paused) that the pane re-renders from.
+  ctoPause: async (): Promise<{ ok: boolean; error?: string }> => {
+    const res = await fetch(`${serverBase()}/api/cto/pause`, {
+      method: "POST",
+      headers: authHeaders(clientToken()),
+    });
+    if (res.status === 401) throw new AuthRequiredError();
+    let json: { error?: string } = {};
+    try { json = (await res.json()) as typeof json; } catch { /* non-JSON */ }
+    if (!res.ok) return { ok: false, error: json.error ?? `HTTP ${res.status}` };
+    return { ok: true };
+  },
+
+  // POST /api/cto/resume — lift the kill switch. Idempotent.
+  ctoResume: async (): Promise<{ ok: boolean; error?: string }> => {
+    const res = await fetch(`${serverBase()}/api/cto/resume`, {
+      method: "POST",
+      headers: authHeaders(clientToken()),
+    });
+    if (res.status === 401) throw new AuthRequiredError();
+    let json: { error?: string } = {};
+    try { json = (await res.json()) as typeof json; } catch { /* non-JSON */ }
+    if (!res.ok) return { ok: false, error: json.error ?? `HTTP ${res.status}` };
+    return { ok: true };
   },
 };
 

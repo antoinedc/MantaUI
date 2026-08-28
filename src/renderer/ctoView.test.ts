@@ -3,12 +3,15 @@ import {
   dotTone,
   badgeLabel,
   digestBusy,
+  statDisplay,
   type CtoState,
+  type CtoHealthStat,
 } from "./ctoView";
 
 const base: CtoState = {
   enabled: true,
   dot: "active",
+  pausedAt: null,
   needsYouCount: 0,
   generationInFlight: false,
   tonightCount: 0,
@@ -56,5 +59,40 @@ describe("digestBusy (§10.2 Digest-now single-flight spinner)", () => {
   });
   it("treats null state as idle", () => {
     expect(digestBusy(null)).toBe(false);
+  });
+});
+
+describe("statDisplay (§10.5 stat min-sample collecting)", () => {
+  const stat = (over: Partial<CtoHealthStat>): CtoHealthStat => ({
+    id: "digestOpens",
+    label: "Digest opens · 7d",
+    value: null,
+    n: 0,
+    min: 7,
+    ...over,
+  });
+
+  it("renders collecting (n/k) below the minimum sample size", () => {
+    const out = statDisplay(stat({ n: 3, value: "$0.42 of $2.50 / day" }));
+    expect(out.ready).toBe(false);
+    expect(out.text).toBe("collecting (3 / 7)");
+  });
+
+  it("renders the value once the minimum sample size is reached", () => {
+    const out = statDisplay(stat({ n: 7, value: "7 opens · median 09:00" }));
+    expect(out.ready).toBe(true);
+    expect(out.text).toBe("7 opens · median 09:00");
+  });
+
+  it("never shows a value for a stat with a sample count but no value", () => {
+    const out = statDisplay(stat({ n: 10, value: null }));
+    expect(out.ready).toBe(false);
+    expect(out.text).toBe("collecting (10 / 7)");
+  });
+
+  it("tolerates a malformed/missing stat row", () => {
+    const out = statDisplay(undefined as unknown as CtoHealthStat);
+    expect(out.ready).toBe(false);
+    expect(out.text).toBe("collecting (0 / 0)");
   });
 });

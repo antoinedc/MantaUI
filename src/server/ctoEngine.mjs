@@ -129,6 +129,17 @@ export function createKillSwitch({ path = ctoPath("paused"), fs = fsp } = {}) {
       return false;
     }
   }
+  // The epoch-ms the kill switch was thrown (the file body is the write time),
+  // for the §10.6-5 paused banner's "paused at" line. null when not paused.
+  async function pausedAt() {
+    try {
+      const raw = await fs.readFile(path, "utf8");
+      const ms = Number(raw);
+      return Number.isFinite(ms) && ms > 0 ? ms : null;
+    } catch {
+      return null;
+    }
+  }
   async function pause() {
     await fs.mkdir(dirname(path), { recursive: true });
     await fs.writeFile(path, String(Date.now()), { mode: 0o600 });
@@ -136,7 +147,7 @@ export function createKillSwitch({ path = ctoPath("paused"), fs = fsp } = {}) {
   async function resume() {
     await fs.rm(path, { force: true });
   }
-  return { isPaused, pause, resume };
+  return { isPaused, pausedAt, pause, resume };
 }
 
 // ---------------------------------------------------------------------------
@@ -328,16 +339,18 @@ export function createCtoEngine(deps = {}) {
     }
     enabled = enabledNow;
     let paused = selfPaused;
+    let pausedAt = null;
     try {
       paused = paused || (await killSwitch.isPaused());
+      if (paused) pausedAt = await killSwitch.pausedAt();
     } catch {
       /* flag read failure → treat as not paused */
     }
-    return { enabled: enabledNow, paused };
+    return { enabled: enabledNow, paused, pausedAt };
   }
 
   async function readState() {
-    const { enabled: enabledNow, paused } = await gateContext();
+    const { enabled: enabledNow, paused, pausedAt } = await gateContext();
     let counts = { needsYouCount: 0, generationInFlight: false, tonightCount: 0 };
     try {
       counts = (await getCounts()) ?? counts;
@@ -347,6 +360,7 @@ export function createCtoEngine(deps = {}) {
     return {
       enabled: enabledNow,
       dot: computeDot({ enabled: enabledNow, paused, thrifty }),
+      pausedAt: paused ? pausedAt : null,
       needsYouCount: counts.needsYouCount ?? 0,
       generationInFlight: !!counts.generationInFlight,
       tonightCount: counts.tonightCount ?? 0,
@@ -881,6 +895,31 @@ export function createCtoEngine(deps = {}) {
     return syncState();
   }
 
+  // Activity-ledger drill-down reader (A12). Reverse-chron over the A1 ledger,
+  // cursor-paginated with `before` (exclusive ts) and filterable by actor and
+  // kind. Reads are best-effort: an unreadable ledger returns [].
+  async function readLedger({ before, actor, kind, limit = 100 } = {}) {
+    let rows = [];
+    try {
+      rows = (await ledger.read()) ?? [];
+    } catch {
+      return { rows: [], nextBefore: null };
+    }
+    const out = rows
+      .filter((r) => {
+        if (before !== undefined && before !== null && !(typeof r?.ts === "number" && r.ts < before)) {
+          return false;
+        }
+        if (actor && r?.actor !== actor) return false;
+        if (kind && r?.kind !== kind) return false;
+        return true;
+      })
+      .sort((a, b) => (b?.ts ?? 0) - (a?.ts ?? 0));
+    const sliced = out.slice(0, limit);
+    const last = sliced.length ? sliced[sliced.length - 1] : null;
+    return { rows: sliced, nextBefore: typeof last?.ts === "number" ? last.ts : null };
+  }
+
   function lastHeartbeat() {
     return heartbeatAt;
   }
@@ -945,6 +984,7 @@ export function createCtoEngine(deps = {}) {
     observeEvent,
     getPresence,
     getState,
+    readLedger,
     lastHeartbeat,
     proposeFact,
     factsContextBlock,

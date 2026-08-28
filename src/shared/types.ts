@@ -300,6 +300,17 @@ export type AppConfig = {
   // read belt). Default false until the system is shipped. With it OFF the
   // engine reports `disabled` and starts no work.
   ctoEnabled?: boolean;
+  // Adaptive CTO (BET-1386): the §12.1 / D12 user effort dial — Low / Medium
+  // / High. Defaults to Low. Enforcement (which feature classes run) rides the
+  // engine in a later effort-routing issue; the setting itself persists here.
+  ctoEffort?: "low" | "medium" | "high";
+  // Adaptive CTO (BET-1386): hard daily ambient cap in $ (D12 — independent of
+  // the effort dial). Behavior-card editor + Health "ambient spend today / cap"
+  // row. Default 2.5.
+  ctoAmbientCap?: number;
+  // Adaptive CTO (BET-1386): push the pre-generated digest to the phone (§5.5
+  // notify). Off by default.
+  ctoDigestPush?: boolean;
   // ----- Manta Optimizer (BET-1342 / Phase 2) -----
   // Master switch for the optimizer. DEFAULT FALSE. Opt-in: with it OFF the
   // optimizer changes nothing. It does NOT gate Automatic Manta Routing —
