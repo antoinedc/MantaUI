@@ -184,6 +184,9 @@ function createDirJsonStore(name, dirPart) {
 export const factsStore = createDirJsonStore("facts", "facts");
 export const factsArchiveStore = createDirJsonStore("facts-archive", "facts-archive");
 export const digestsStore = createDirJsonStore("digests", "digests");
+// Segments store — the read-layer work episodes (spec §5.1), one JSON file per
+// segment, swept 30d by sweepSegments(). Owned by the segmentation issue (A6).
+export const segmentsStore = createDirJsonStore("segments", "segments");
 
 // ---------------------------------------------------------------------------
 // Rollups: `rollups/<hour|day|week>/<id>.json` — one JSON file per rollup.
