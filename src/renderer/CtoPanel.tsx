@@ -970,6 +970,18 @@ function ProfileView({
     void refresh();
   };
 
+  // Deep-link an evidence ref. Refs are bare provenance strings in the render
+  // model (no server-side resolver), so the action is to put the ref on the
+  // clipboard for the user to navigate to — each top-3 ref is its own chip.
+  const copyRef = async (ref: string) => {
+    try {
+      await navigator.clipboard.writeText(ref);
+    } catch {
+      /* clipboard can be denied in the sandbox; the chip still responds */
+    }
+    pushToast({ id: `cto-ev-${ref}`, message: `Copied evidence ref: ${ref}` });
+  };
+
   const empty = !render || (render.skills.length === 0 && render.journal.length === 0 && render.sensitive.length === 0);
   const hist = render?.rhythm?.histogram ?? [];
   const maxH = hist.length ? Math.max(...hist, 1) : 1;
@@ -1049,7 +1061,11 @@ function ProfileView({
               ) : (
                 <ul className="mt-2 space-y-3">
                   {render?.skills.map((s) => {
-                    const width = Math.min(100, Math.max(2, s.expertise * 100));
+                    const muPct = Math.min(100, Math.max(0, s.mu * 100));
+                    const sigmaPct = s.sigma * 100;
+                    const bandLo = Math.max(0, muPct - sigmaPct);
+                    const bandHi = Math.min(100, muPct + sigmaPct);
+                    const expertisePct = Math.min(100, Math.max(2, s.expertise * 100));
                     return (
                       <li key={s.dimension} className="flex items-center gap-3">
                         <div className="w-40 shrink-0">
@@ -1057,20 +1073,45 @@ function ProfileView({
                           <div className="text-xs text-text-faint">{s.label}</div>
                         </div>
                         <div className="min-w-0 flex-1">
-                          <div className="h-2 rounded-full bg-fill-active">
-                            <div className="h-2 rounded-full bg-accent" style={{ width: `${width}%` }} />
+                          {/* σ confidence band (§8.5): translucent μ±σ band, solid
+                              expertise fill (μ−2σ), and a tick at the μ estimate. */}
+                          <div className="relative h-2 rounded-full bg-fill-active">
+                            {sigmaPct > 0 && (
+                              <div
+                                className="absolute h-2 rounded-full bg-accent/15"
+                                style={{ left: `${bandLo}%`, width: `${Math.max(0, bandHi - bandLo)}%` }}
+                              />
+                            )}
+                            <div className="absolute h-2 rounded-full bg-accent" style={{ width: `${expertisePct}%` }} />
+                            <div
+                              className="absolute top-0 h-2 w-px bg-text"
+                              style={{ left: `${muPct}%` }}
+                              title={`μ ${s.mu.toFixed(2)}`}
+                            />
                           </div>
-                          <div className="mt-1 truncate text-[11px] text-text-faint">
+                          <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1 text-[11px]">
                             {s.source === "stated" ? (
                               <span className="text-text">stated: {s.statedValue}</span>
-                            ) : s.topEvidence.length ? (
-                              s.topEvidence.slice(0, 2).join(" · ")
+                            ) : s.topEvidence && s.topEvidence.length ? (
+                              s.topEvidence.slice(0, 3).map((ref) => (
+                                <button
+                                  key={ref}
+                                  type="button"
+                                  onClick={() => void copyRef(ref)}
+                                  title={`Copy evidence ref ${ref}`}
+                                  className="max-w-44 truncate rounded-md border border-border-subtle px-2 py-1 text-text-muted hover:border-border hover:text-text"
+                                >
+                                  {ref}
+                                </button>
+                              ))
                             ) : (
-                              "no evidence yet"
+                              <span className="text-text-faint">no evidence yet</span>
                             )}
                           </div>
                         </div>
-                        <span className="shrink-0 font-mono text-xs text-text-muted">μ{s.mu.toFixed(2)}</span>
+                        <span className="shrink-0 font-mono text-xs text-text-muted">
+                          μ{s.mu.toFixed(2)} σ{s.sigma.toFixed(2)}
+                        </span>
                         <div className="shrink-0">
                           {editDim === s.dimension ? (
                             <form
@@ -1184,6 +1225,21 @@ function ProfileView({
                   {render?.rhythm.dayCount === 1 ? "" : "s"}
                   {render?.rhythm.lowConfidence ? " — low confidence until 14 days" : ""}
                 </p>
+                {/* Inferred workday components (§8.2): each detected peak hour + weight. */}
+                {render?.rhythm.components && render.rhythm.components.length > 0 && (
+                  <div className="mt-2 flex flex-wrap items-center gap-1 text-[11px]">
+                    <span className="text-text-faint">Workday peaks:</span>
+                    {render.rhythm.components.map((c, i) => (
+                      <span
+                        key={i}
+                        className="rounded-md border border-border-subtle px-2 py-1 text-text-muted"
+                        title={`peak ≈ ${c.mu_hour.toFixed(1)}:00 · concentration ${c.kappa?.toFixed(2) ?? "—"} · weight ${c.w?.toFixed(2) ?? "—"}`}
+                      >
+                        ~{normalizeHour(c.mu_hour)}:00 · w{(c.w ?? 0).toFixed(2)}
+                      </span>
+                    ))}
+                  </div>
+                )}
                 <div className="mt-2 flex h-16 items-end gap-1">
                   {hist.map((c: number, i: number) => (
                     <div
@@ -1269,4 +1325,10 @@ function verbosityLabel(value: number): string {
   if (value <= -0.2) return "terse";
   if (value >= 0.2) return "thorough";
   return "balanced";
+}
+
+// Normalize a (possibly fractional, possibly 24-boundary) hour into 0-23 for display.
+function normalizeHour(h: number): number {
+  const m = ((Math.round(h) % 24) + 24) % 24;
+  return m === 0 ? 0 : m;
 }
