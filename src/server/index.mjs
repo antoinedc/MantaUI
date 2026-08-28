@@ -138,6 +138,12 @@ import * as appControl from "./appControl.mjs";
 import * as cto from "./cto.mjs";
 import * as ctoEngine from "./ctoEngine.mjs";
 import { ledgerStore, engineStateStore } from "./ctoStores.mjs";
+import { runEphemeral, createEphemeralReaper } from "./ctoSessions.mjs";
+import {
+  parseSegmentSummaryText,
+  validateSegmentSummary,
+  validOneLiner,
+} from "./ctoSegments.mjs";
 import { searchMessages } from "./messageSearch.mjs";
 import {
   dispatch as mediaDispatch,
@@ -1609,10 +1615,10 @@ void ensureMantaPlanAgent().catch((e) => console.error("[manta-plan] ensure fail
 // real engines (all read-only). The engine's `dispatch` seam is what the
 // `/api/cto` route (and, later, issues 2/3) consume. Building lazily keeps it
 // off the hot startup path and lets every dep resolve after module init.
-let ctoEngine = null;
+let adaptiveCtoInstance = null;
 function getCtoEngine() {
-  if (!ctoEngine) {
-    ctoEngine = cto.createCtoEngine({
+  if (!adaptiveCtoInstance) {
+    adaptiveCtoInstance = cto.createCtoEngine({
       listProjects: () => tmux.listProjects(),
       listSessions: (dir) => oc.listSessions(dir),
       listMessages: (sid, opts) => oc.listMessages(sid, opts),
@@ -1624,7 +1630,7 @@ function getCtoEngine() {
       configGet: () => local.configGet(),
     });
   }
-  return ctoEngine;
+  return adaptiveCtoInstance;
 }
 
 // Best-effort install of the `cto` primary agent (BET-1164) — ONLY when the
@@ -1700,12 +1706,114 @@ async function resolveSessionInfo(sessionID) {
   return { owner, project };
 }
 
+// ----- CTO work-segmentation model seams (BET-1408) -----
+// The engine's segmenter (spec §5.1/§5.2) is model-agnostic; these two seams
+// are the box's real model-backed producers. Each runs ONE `ambient-summarize`
+// headless ephemeral session over the observed activity (the same
+// runSynchronousSession primitive the optimizer/auto-rename use) and returns
+// the validated result. The engine wraps them in its §3.3 ephemeral rate gate,
+// so a disabled/paused/at-cap engine never spends here — the segmenter falls
+// back to a degraded summary. Offline → same graceful degradation. Never throw.
+
+// §5.2 segment summary: produce one validated segment-summary object.
+async function segmentSummarize(data = {}) {
+  const context = [
+    {
+      priority: 100,
+      text:
+        "You are a work-segmentation summarizer. Given a recording of an agent's " +
+        "activity on one session, emit ONLY a single JSON object with EXACTLY this " +
+        'shape (no prose, no code fences): {"v":1,"sessionID":"...","project":"...",' +
+        '"window":[<startMs>,<endMs>],"intent":"<one sentence>",' +
+        '"outcome":"done|failed|blocked|in-progress",' +
+        '"key_events":[{"t":<ms>,"text":"<event>"}],' +
+        '"files_touched":["..."],"prs":["..."],"importance":<1-10>,' +
+        '"one_liner":"<≤140 chars>"}',
+    },
+    {
+      priority: 50,
+      text: `Session: ${data.sessionID} project=${data.project ?? ""} window=[${data.start}, ${data.end}]`,
+    },
+  ];
+  if (data.lastUserPrompt) {
+    context.push({ priority: 40, text: `Last user prompt: ${data.lastUserPrompt}` });
+  }
+  if (data.oneLiner) {
+    context.push({ priority: 40, text: `Working one-liner: ${data.oneLiner}` });
+  }
+  if (Array.isArray(data.events) && data.events.length) {
+    context.push({
+      priority: 30,
+      text: "Events (chronological):\n" + data.events.map((e) => (e && e.t != null ? `  [${e.t}] ${e.kind}${e.refs?.length ? ` ${e.refs.join(",")}` : ""}` : String(e))).join("\n"),
+    });
+  }
+  const validate = async (out) => validateSegmentSummary(parseSegmentSummaryText(out?.text));
+  try {
+    const res = await runEphemeral({
+      taskClass: "ambient-summarize",
+      context,
+      deps: {
+        oc: { runEphemeralSession: oc.runSynchronousSession },
+        configGet: () => local.configGet(),
+        validate,
+      },
+    });
+    const summary = parseSegmentSummaryText(res?.text);
+    if (!validateSegmentSummary(summary)) return { ok: false, gated: false };
+    return { ok: true, summary };
+  } catch {
+    return { ok: false, gated: false };
+  }
+}
+
+// §5.2 one-liner at turn completion: a short plain-text summary line.
+async function segmentOneLiner(data = {}) {
+  const context = [
+    {
+      priority: 100,
+      text: "Given the activity below, reply with ONE short plain-text summary line (≤140 chars, no JSON, no quotes).",
+    },
+  ];
+  if (data.lastUserPrompt) {
+    context.push({ priority: 50, text: `Last user prompt: ${data.lastUserPrompt}` });
+  }
+  if (Array.isArray(data.events) && data.events.length) {
+    context.push({
+      priority: 30,
+      text: "Events (chronological):\n" + data.events.map((e) => (e && e.t != null ? `  [${e.t}] ${e.kind}${e.refs?.length ? ` ${e.refs.join(",")}` : ""}` : String(e))).join("\n"),
+    });
+  }
+  try {
+    const res = await runEphemeral({
+      taskClass: "ambient-summarize",
+      context,
+      deps: {
+        oc: { runEphemeralSession: oc.runSynchronousSession },
+        configGet: () => local.configGet(),
+        validate: async (out) => validOneLiner(out?.text) !== null,
+      },
+    });
+    return validOneLiner(res?.text);
+  } catch {
+    return null;
+  }
+}
+
+// §3.1 ephemeral-session reaper (BET-1378): sweeps orphaned `cto:` sessions.
+// Same `oc` adapter as the seams, adapted to the reaper's list/delete contract.
+const ctoEphemeralReaper = createEphemeralReaper({
+  oc: { listSessions: oc.listSessions, deleteSession: oc.deleteSessionRaw },
+});
+
 const adaptiveCto = ctoEngine.createCtoEngine({
   configGet: () => local.configGet(),
   ledger: ledgerStore,
   engineState: engineStateStore,
   publish: (evt) => bus.publish(evt),
   getSessionInfo: resolveSessionInfo,
+  summarize: segmentSummarize,
+  computeOneLiner: segmentOneLiner,
+  reaper: ctoEphemeralReaper,
 });
 adaptiveCto.start();
 
