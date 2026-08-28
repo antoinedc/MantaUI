@@ -183,10 +183,24 @@ test("graded: ±dir move mu oppositely; magnitude scales with weight", () => {
   assert.ok(close(zero.mu, 0.5));
 });
 
-test("applyAtom: graded numeric direction", () => {
+test("graded: numeric graded direction", () => {
   const base = { mu: 0.5, sigma: 1.0, evidence: [], updated: 0 };
   const graded = applyAtom(base, { dimension: "api-design", direction: 0.6, weight: 1, ref: "seg1" });
   assert.ok(graded.mu > 0.5);
+});
+
+test("graded: harder-evidence-moves-more (difficulty = own-μ prior, not constant)", () => {
+  // Same dir/weight/sigma, differing only in the dimension's own mu — the
+  // higher-μ (harder) topic must receive a larger |move| (§8.2 property).
+  const low = trueSkillUpdate(0.3, 1.0, { dir: 0.4, weight: 1 });
+  const high = trueSkillUpdate(0.7, 1.0, { dir: 0.4, weight: 1 });
+  const lowMove = low.mu - 0.3;
+  const highMove = high.mu - 0.7;
+  assert.ok(highMove > lowMove, `highMove=${highMove} should exceed lowMove=${lowMove}`);
+  // and the dependency on mu is real, not a fixed difficulty:
+  const constBias = trueSkillUpdate(0.3, 1.0, { dir: 0.4, weight: 1 });
+  const constDiff = trueSkillUpdate(0.3, 1.0, { dir: 0.4, weight: 1, diff: 1.2 });
+  assert.ok(constDiff.mu > constBias.mu, "raising the diff baseline increases the move");
 });
 
 // ---------------------------------------------------------------------------
@@ -359,6 +373,26 @@ test("engine: weekly decay erodes repo familiarity from others' edits", async ()
   const expectErode = 0.12 * Math.log(3);
   assert.ok(after.repo_familiarity.manta.doa <= beforeErode - expectErode + 1e-6);
   assert.ok(store.saved, "persisted on decay");
+});
+
+test("engine: weekly decay tracks per-dimension weeks_idle (not a fixed 1w)", async () => {
+  let clock = 1_000_000;
+  const store = { load: async () => ({}), save: async () => {} };
+  const p = createCtoProfile({ store, now: () => clock });
+  await p.init();
+  await p.applySegmentSummary({ atoms: [{ dimension: "idle", direction: "up", weight: 1, ref: "a" }], window: [0, 60000] });
+  await p.applySegmentSummary({ atoms: [{ dimension: "fresh", direction: "up", weight: 1, ref: "b" }], window: [0, 60000] });
+  // 5 weeks pass, then the weekly tick fires.
+  clock += 5 * 7 * 86_400_000;
+  p.get().skills.fresh.updated = clock - 1000; // evidence moments before the tick
+  // idle.updated remains 5 weeks back → should decay far more than fresh.
+  const idleBefore = p.get().skills.idle.sigma;
+  const freshBefore = p.get().skills.fresh.sigma;
+  await p.decayWeekly();
+  const idleDelta = p.get().skills.idle.sigma - idleBefore;
+  const freshDelta = p.get().skills.fresh.sigma - freshBefore;
+  assert.ok(idleDelta > 0, `idle decayed up, idleDelta=${idleDelta}`);
+  assert.ok(idleDelta > freshDelta + 1e-6, `idle ${idleDelta} should decay more than fresh ${freshDelta}`);
 });
 
 test("engine: audience consumer + rising edge + deviations work end-to-end", async () => {

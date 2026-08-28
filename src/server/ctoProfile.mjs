@@ -246,15 +246,18 @@ export function bktUpdate(
 }
 
 // A graded atom moves mu with TrueSkill's μ ± (σ²/c)·v(t) shape. `dir` is a
-// signed magnitude in [-1,1]; `diff` = the topic-difficulty opponent (own-μ
-// prior). sigma shrinks on evidence (uncertainty → confidence).
+// signed magnitude in [-1,1]. `diff` = the topic-difficulty opponent, which
+// per BET-1393 IS the dimension's own μ prior: difficulty = diff + mu. Because
+// the difficulty scales the move, a higher-μ (harder, more-demanded) topic
+// receives LARGER evidence moves — the required "harder-evidence-moves-more"
+// property (§8.2). sigma shrinks on evidence (uncertainty → confidence).
 export function trueSkillUpdate(
   mu,
   sigma,
   { dir = 0, weight = 1, c = TRUESKILL_C, diff = DIFF_PRIOR, minSigma = MIN_SIGMA } = {},
 ) {
   if (!dir || !weight) return { mu, sigma };
-  const difficulty = diff + mu * 0; // opponent = own-μ prior, folded in by caller
+  const difficulty = diff + mu; // opponent = own-μ prior (harder topic ⇒ moves more)
   const magnitude = Math.min(1, Math.abs(dir) + 0.0001);
   const move = ((sigma * sigma) / c) * Math.sign(dir) * magnitude * weight * difficulty;
   const sigma2 = Math.sqrt(Math.max(minSigma * minSigma, sigma * sigma - weight * 0.5 * Math.min(0.25, sigma)));
@@ -618,12 +621,20 @@ export function createCtoProfile(deps = {}) {
       await flush();
     },
 
-    // §8.2 numeric decay — weekly tick (called by the engine).
+    // §8.2 numeric decay — weekly tick (called by the engine). Tracks actual
+    // per-dimension idle: weeks_idle = weeks since that dimension's last
+    // evidence (d.updated), so a dimension untouched for many weeks decays
+    // that many weeks' worth on the tick. `d.updated` is reset to `t` each
+    // tick so the next tick measures fresh idle (an evidence update midway
+    // between ticks correctly restarts that dimension's decay clock).
     async decayWeekly() {
       const t = now();
+      const weekMs = 7 * DAY_MS;
       for (const d of Object.values(state.skills)) {
         if (!d) continue;
-        d.sigma = sigmaDecay(d.sigma, 1, { c: WEEKLY_DECAY_C });
+        const last = typeof d.updated === "number" ? d.updated : t;
+        const weeksIdle = Math.max(0, (t - last) / weekMs);
+        d.sigma = sigmaDecay(d.sigma, weeksIdle, { c: WEEKLY_DECAY_C });
         d.updated = t;
       }
       for (const [repo, r] of Object.entries(state.repo_familiarity)) {
