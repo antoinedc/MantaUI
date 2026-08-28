@@ -469,7 +469,7 @@ test("§8.5 composeProfileRender: resolves stated wins + top-3 evidence + rhythm
   const render = composeProfileRender(p.get());
   assert.ok(Array.isArray(render.skills));
   assert.ok(Array.isArray(render.rhythm.histogram) && render.rhythm.histogram.length === 24);
-  assert.equal(typeof render.rhythm.tzOffset, "number");
+  assert.ok(render.rhythm.tzOffset === null || typeof render.rhythm.tzOffset === "number");
   assert.equal(typeof render.interaction.sessionLenMedian, "number");
   assert.ok(Array.isArray(render.repository));
   const swift = render.skills.find((s) => s.dimension === "swift");

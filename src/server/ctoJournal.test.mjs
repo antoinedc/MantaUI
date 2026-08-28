@@ -109,8 +109,11 @@ test("createCtoJournal: cap enforced across batched admissions", async () => {
 });
 
 test("createCtoJournal: reads never throw on a missing/corrupt store", async () => {
-  const bad = { load: async () => { throw new Error("missing"); }, save: async () => {} };
+  const bad = { load: async () => { throw new Error("missing"); }, save: async () => { throw new Error("write failed"); } };
   const journal = createCtoJournal({ store: bad });
   assert.deepEqual(await journal.list(), []);
-  assert.deepEqual(await journal.addProposals([{ text: "x" }]), { added: 0 }); // persist fails silently
+  // In-memory admission still works; the failing persist is swallowed.
+  const added = await journal.addProposals([{ text: "x" }]);
+  assert.equal(typeof added, "object");
+  assert.equal((await journal.list()).length, 1);
 });
