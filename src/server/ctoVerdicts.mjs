@@ -244,8 +244,9 @@ export function createVerdictEngine(deps = {}) {
       ...(never === true ? { never: true } : {}),
     };
 
-    const entries = await loadEntries();
-    await verdicts.save({ entries: [...entries, entry] });
+    const payload = await verdicts.load().catch(() => null);
+    const entries = Array.isArray(payload?.entries) ? payload.entries : [];
+    await verdicts.save({ ...(payload ?? {}), entries: [...entries, entry] });
 
     const effects = effectsForVerdict(verdict, never);
     registry.dispatch(effects, entry);
