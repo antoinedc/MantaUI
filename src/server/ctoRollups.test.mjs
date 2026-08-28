@@ -11,9 +11,8 @@ import {
   windowFor,
   windowId,
   previousWindow,
-  syncFactsFromRollup,
-  decideFactAction,
-  normalizeStatement,
+  proposalsFromRollup,
+  submitFactsFromRollup,
   HOUR_MS,
   DAY_MS,
   WEEK_MS,
@@ -41,17 +40,6 @@ function fakeExists(store) {
   };
 }
 
-function makeFactsStore() {
-  const map = new Map();
-  return {
-    map,
-    load: async (project) => map.get(project) ?? { facts: [] },
-    save: async (project, data) => {
-      map.set(project, data);
-    },
-  };
-}
-
 // A runEphemeral + loadInputs harness that records reduce calls and returns
 // controllable model output. `inputs` may be a function of ({level, window}).
 function makeRunner({ inputs = [], modelText = null, preceding = null, presence = () => false } = {}) {
@@ -68,7 +56,6 @@ function makeRunner({ inputs = [], modelText = null, preceding = null, presence 
     loadPreceding: async ({ level, window }) => preceding,
     exists: fakeExists(store),
     presenceCheck: presence,
-    facts: makeFactsStore(),
   });
   return { runner, store, calls };
 }
@@ -293,22 +280,11 @@ test("a present user from the start means the batch does not start", async () =>
 });
 
 // ---------------------------------------------------------------------------
-// Fact sync (P1, isolated)
+// Fact sync (P2 — proposals, §6.2; no direct writes)
 // ---------------------------------------------------------------------------
 
-test("decideFactAction maps NOOP on identical statement, UPDATE on same refs, ADD otherwise", () => {
-  const existing = [
-    { statement: "shipped rollups", refs: ["s1"], sender: "cto" },
-    { statement: "old claim", refs: ["s2", "s3"], sender: "cto" },
-  ];
-  assert.equal(decideFactAction(existing, "SHIPPED ROLLUPS", ["s1"]).action, "noop");
-  assert.equal(decideFactAction(existing, "shipped rollups too", ["s1"]).action, "update");
-  assert.equal(decideFactAction(existing, "brand new news", ["s9"]).action, "add");
-});
-
-test("syncFactsFromRollup groups bullets by project and applies ADD/UPDATE/NOOP", async () => {
+test("proposalsFromRollup groups bullets per project (skips unattributable)", async () => {
   const day = windowFor("day", baseDay());
-  const facts = makeFactsStore();
   const segments = new Map([
     ["s1", { project: "alpha" }],
     ["s2", { project: "alpha" }],
@@ -322,37 +298,51 @@ test("syncFactsFromRollup groups bullets by project and applies ADD/UPDATE/NOOP"
       { text: "did A", refs: ["s1"] },
       { text: "did B", refs: ["s2"] },
       { text: "did C (beta)", refs: ["s3"] },
+      { text: "orphan", refs: ["missing"] }, // cannot attribute → dropped, never fabricated
     ],
   };
-  const t1 = await syncFactsFromRollup(rollup, {
+  const props = await proposalsFromRollup(rollup, {
     resolveSegment: async (id) => segments.get(id) ?? null,
-    facts,
-    now: () => 111,
   });
-  assert.equal(t1.added, 3);
-  assert.equal(facts.map.get("alpha").facts.length, 2);
-  assert.equal(facts.map.get("beta").facts.length, 1);
-
-  // Re-sync the same rollup → all NOOP (news never re-reported), store unchanged.
-  const t2 = await syncFactsFromRollup(rollup, {
-    resolveSegment: async (id) => segments.get(id) ?? null,
-    facts,
-    now: () => 222,
-  });
-  assert.equal(t2.noop, 3);
-  assert.equal(t2.added, 0);
-  assert.equal(facts.map.get("alpha").facts.length, 2);
+  assert.equal(props.length, 3);
+  assert.equal(props.filter((p) => p.project === "alpha").length, 2);
+  assert.equal(props.filter((p) => p.project === "beta").length, 1);
+  assert.ok(props.every((p) => p.kind === "decision"));
 });
 
-test("syncFactsFromRollup skips bullets it cannot attribute to a project", async () => {
-  const day = windowFor("day", baseDay());
-  const facts = makeFactsStore();
-  const t = await syncFactsFromRollup(
-    { v: ROLLUP_VERSION, level: "day", window: day, bullets: [{ text: "orphan", refs: ["missing"] }] },
-    { resolveSegment: async () => null, facts },
+test("proposalsFromRollup is empty for non-day / empty rollups", async () => {
+  assert.deepEqual(await proposalsFromRollup({ level: "hour", bullets: [] }), []);
+  assert.deepEqual(await proposalsFromRollup(null), []);
+  assert.deepEqual(
+    await proposalsFromRollup({ level: "day", bullets: [{ text: "no ev", refs: [] }] }),
+    [],
   );
-  assert.equal(t.added, 0);
-  assert.equal(facts.map.size, 0);
+});
+
+test("submitFactsFromRollup enqueues deterministic proposals (sender cto, idempotent ids)", async () => {
+  const day = windowFor("day", baseDay());
+  const segments = new Map([["s1", { project: "alpha" }]]);
+  const seen = new Map();
+  const rollup = {
+    v: ROLLUP_VERSION,
+    level: "day",
+    window: day,
+    bullets: [{ text: "shipped things", refs: ["s1"] }],
+  };
+  const submit = async (p) => {
+    seen.set(p.proposalId, p);
+    return { ok: true };
+  };
+  const t1 = await submitFactsFromRollup(rollup, { resolveSegment: async (id) => segments.get(id) ?? null, submitProposal: submit });
+  assert.equal(t1.applied, 1);
+  const [p] = [...seen.values()];
+  assert.equal(p.sender, "cto");
+  assert.equal(p.project, "alpha");
+  assert.match(p.proposalId, /^rollup:/);
+  // Re-submit the same day → the same deterministic proposal id (queue dedupes).
+  const t2 = await submitFactsFromRollup(rollup, { resolveSegment: async (id) => segments.get(id) ?? null, submitProposal: submit });
+  assert.equal(t2.applied, 1);
+  assert.equal(seen.size, 1, "deterministic id — re-sync is idempotent");
 });
 
 // ---------------------------------------------------------------------------

@@ -11,13 +11,14 @@ import {
   RATE_LIMITS,
 } from "./ctoEngine.mjs";
 import { createSegmenter } from "./ctoSegments.mjs";
+import { createFactsEngine } from "./ctoFacts.mjs";
 import { windowFor } from "./ctoRollups.mjs";
 
 // Build a fully-injected engine harness: no real fs, no real stores, a fake
 // clock we can advance. Everything the engine touches goes through these
 // seams, so the tests assert pure behavior. `clock` is shared so the watchdog
 // and the engine observe the same time.
-function makeHarness({ ctoEnabled = false, counts = {}, rollups } = {}) {
+function makeHarness({ ctoEnabled = false, counts = {}, rollups, facts } = {}) {
   const clock = { ms: 1_000_000 };
   const now = () => clock.ms;
   const ledgerRows = [];
@@ -70,6 +71,7 @@ function makeHarness({ ctoEnabled = false, counts = {}, rollups } = {}) {
       ...counts,
     }),
     ...(rollups ? { rollups } : {}),
+    ...(facts ? { facts } : {}),
   });
 
   return {
@@ -529,4 +531,35 @@ test("rollups do not run while paused", async () => {
   const before = received.length;
   await h.engine.tick();
   assert.equal(received.length, before);
+});
+
+
+// ---------------------------------------------------------------------------
+// BET-1389 blackboard wiring: the engine exposes a facts engine and pumps the
+// proposal queue on tick. Uses an injected in-memory facts engine so no real
+// store is touched.
+// ---------------------------------------------------------------------------
+
+test("engine exposes .facts and pumps proposals on tick (%40 enabled)", async () => {
+  const inmemory = new Map();
+  const fstate = { v: 1 };
+  const facts = createFactsEngine({
+    engineState: {
+      load: async () => ({ ...fstate }),
+      save: async (s) => {
+        Object.keys(fstate).forEach((k) => delete fstate[k]);
+        Object.assign(fstate, s);
+      },
+    },
+    facts: { load: async (p) => inmemory.get(p) ?? { v: 1, facts: [] }, save: async (p, d) => inmemory.set(p, d), dir: "x" },
+    archive: { load: async (p) => inmemory.get("a" + p) ?? { v: 1, entries: [] }, save: async (p, d) => inmemory.set("a" + p, d) },
+  });
+  const harness = makeHarness({ ctoEnabled: true, facts });
+  // Enable + a proposal for alpha, then a tick should drain it into the store.
+  await harness.engine.resume();
+  await facts.submitProposal({ proposalId: "ep", project: "alpha", kind: "status", statement: "engine wired", refs: ["r1"], sender: "cto" });
+  assert.equal(harness.engine.facts, facts);
+  await harness.engine.tick();
+  const saved = inmemory.get("alpha")?.facts ?? [];
+  assert.equal(saved.filter((f) => !f.superseded_by).length, 1);
 });
