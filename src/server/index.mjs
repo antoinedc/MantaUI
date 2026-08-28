@@ -3924,6 +3924,73 @@ const handleRequest = async (req, res) => {
     return;
   }
 
+  // ---------- CTO overview reads (BET-1385) ----------
+  // GET /api/cto/cards → {cards, count} — the open needs-you cards (§10.3),
+  // thin read of the A8 card store. Backs the Blocker section. The renderer
+  // gets the live count over `{kind:"ctoState"}`; this read supplies the rows.
+  if (path === "/api/cto/cards") {
+    try {
+      if (req.method === "GET") {
+        const cards = (await adaptiveCto.cards?.listOpen?.()) ?? [];
+        respondJson(res, 200, { cards, count: cards.length });
+        return;
+      }
+      respondJson(res, 405, { error: "method not allowed" });
+    } catch (e) {
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // GET /api/cto/finished → {items} — the Just-finished rail (§10.4): latest
+  // completed turns (A6 cached one-liners) + finished CTO jobs (delegate store,
+  // D21), capped 6, 24h window, most recent first. Abort exclusion is inherent:
+  // aborted turns never cache a one-liner (A6).
+  if (path === "/api/cto/finished") {
+    try {
+      if (req.method === "GET") {
+        const now = Date.now();
+        const withinMs = 24 * 60 * 60 * 1000;
+        const oneLiners =
+          (await adaptiveCto.segmenter?.listRecentOneLiners?.({ withinMs, cap: 6 })) ?? [];
+        const { jobs = [] } = await delegateEngine.listJobs();
+        const jobItems = jobs
+          .filter(
+            (j) =>
+              (j.status === "done" || j.status === "failed") &&
+              j.finishedAt != null &&
+              now - j.finishedAt <= withinMs,
+          )
+          .map((j) => ({
+            kind: "job",
+            id: j.id,
+            name: j.name,
+            status: j.status,
+            branch: j.branch ?? null,
+            sessionID: j.childSessionID,
+            // BET-1385 review: the gate-failed Logs action shows this detail
+            // (the failure / stop reason) in an inline logs surface.
+            detail: j.status === "failed" ? (j.error ?? null) : (j.result ?? null),
+            ts: j.finishedAt,
+          }));
+        const turnItems = oneLiners.map((o) => ({
+          kind: "turn",
+          sessionID: o.sessionID,
+          name: o.sessionID,
+          oneLiner: o.oneLiner,
+          ts: o.ts,
+        }));
+        const items = [...turnItems, ...jobItems].sort((a, b) => b.ts - a.ts).slice(0, 6);
+        respondJson(res, 200, { items });
+        return;
+      }
+      respondJson(res, 405, { error: "method not allowed" });
+    } catch (e) {
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
   // ---------- On-call CTO (BET-1164) ----------
   // POST /api/cto  body {tool, args, sessionID, directory}
   //   → 200 {ok:true, data} or 400 {ok:false, error}.

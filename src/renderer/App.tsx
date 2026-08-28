@@ -293,6 +293,18 @@ function Shell() {
     },
     [activateWindow],
   );
+  // BET-1385: the CTO overview pane routes session navigation here — resolve an
+  // opencode session id to its owning tmux window, activate it, and close the
+  // CTO pane (selecting a session closes the overview, §10.2).
+  const onOpenSessionFromCto = useCallback(
+    (sessionId: string) => {
+      const owner = resolveSessionOwner(projects, sessionId);
+      if (!owner) return;
+      void activateWindow(owner.tmuxSession, owner.windowIndex).catch(() => {});
+      setCtoOpen(false);
+    },
+    [projects, activateWindow],
+  );
   // Section the Settings modal lands on when the `manta-open-settings` bridge
   // fires (e.g. "Manage models…" → Models). The modal re-targets to it on
   // mount and on every later request.
@@ -2174,7 +2186,7 @@ function Shell() {
                   panels above are suppressed while it is open (their `active`
                   flips on !ctoOpen). Selecting a session closes it. */}
               <PanelShell key="cto" active={ctoOpen}>
-                <CtoPanel state={ctoState} />
+                <CtoPanel state={ctoState} onOpenSession={onOpenSessionFromCto} />
               </PanelShell>
               {/* New-session DRAFT layer: shown over the always-mounted
                   session panels when a draft is the active view (user hit +

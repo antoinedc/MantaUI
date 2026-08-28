@@ -338,6 +338,53 @@ test("a failed/absent one-liner degrades to the truncated last user prompt", asy
   assert.equal(h.seg.getOneLiner("s1"), "do the thing now", "fallback is the truncated prompt");
 });
 
+test("listRecentOneLiners returns completed-turn one-liners most-recent-first, capped & windowed (§10.4 Just-finished)", async () => {
+  const h = makeSeg({
+    computeOneLiner: async () => "Fixed the login redirect",
+  });
+  // s1 completes a turn earliest; s2 completes later; s3 aborts (no cache).
+  h.set(10_000);
+  h.seg.observe(prompt("a", "s1"), { sessionID: "s1", project: "p", ts: h.now() });
+  h.set(15_000);
+  h.seg.observe(busy("s1"), { sessionID: "s1", ts: h.now() });
+  h.set(20_000);
+  h.seg.observe(idle("s1"), { sessionID: "s1", ts: h.now() });
+  await flushTurns(h.seg, "s1");
+  await flushClose(h.seg, "s1");
+
+  h.set(40_000);
+  h.seg.observe(prompt("b", "s2"), { sessionID: "s2", project: "p", ts: h.now() });
+  h.set(45_000);
+  h.seg.observe(busy("s2"), { sessionID: "s2", ts: h.now() });
+  h.set(50_000);
+  h.seg.observe(idle("s2"), { sessionID: "s2", ts: h.now() });
+  await flushTurns(h.seg, "s2");
+  await flushClose(h.seg, "s2");
+
+  h.set(60_000);
+  h.seg.observe(prompt("c", "s3"), { sessionID: "s3", project: "p", ts: h.now() });
+  h.set(65_000);
+  h.seg.observe(busy("s3"), { sessionID: "s3", ts: h.now() });
+  h.set(70_000);
+  h.seg.observe(abort("s3"), { sessionID: "s3", ts: h.now() });
+  await flushTurns(h.seg, "s3");
+  await flushClose(h.seg, "s3");
+
+  const all = h.seg.listRecentOneLiners();
+  assert.equal(all.length, 2, "aborted turn never caches a one-liner (abort exclusion)");
+  assert.equal(all[0].sessionID, "s2", "most recent first");
+  assert.equal(all[1].sessionID, "s1");
+  assert.equal(all[0].ts, 50_000);
+  assert.equal(all[1].ts, 20_000);
+
+  const windowed = h.seg.listRecentOneLiners({ withinMs: 25_000, cap: 10 });
+  assert.deepEqual(windowed.map((o) => o.sessionID), ["s2"], "older one-liner outside the window excluded");
+
+  const cappedSingle = h.seg.listRecentOneLiners({ withinMs: 100_000, cap: 1 });
+  assert.equal(cappedSingle.length, 1);
+  assert.equal(cappedSingle[0].sessionID, "s2", "cap honoured");
+});
+
 // ---------------------------------------------------------------------------
 // Summary failure handling (§5.2)
 // ---------------------------------------------------------------------------
