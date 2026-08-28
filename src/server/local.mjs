@@ -86,6 +86,18 @@ const DEFAULT_CONFIG = {
   // gates the voice call window / read belt). Default false until the system
   // ships. With it off the engine reports `disabled` and starts no work.
   ctoEnabled: false,
+  // Adaptive CTO (BET-1386): the §12.1 / D12 user effort dial — Low / Medium /
+  // High. Defaults to Low. Enforcement rides the engine in a later
+  // effort-routing issue; the setting persists here.
+  ctoTier: "low",
+  // Adaptive CTO (BET-1386): hard daily ambient cap in $ (D12 — independent of
+  // the effort dial; the B1 metering that enforces it ships in the economics
+  // issue). The Behavior-card editor + Health "ambient spend today / cap" row
+  // read this.
+  ctoAmbientCap: 2.5,
+  // Adaptive CTO (BET-1386): push the pre-generated digest to the phone (§5.5
+  // notify). Off by default.
+  ctoDigestPush: false,
 };
 
 let _config = null;

@@ -20,6 +20,7 @@ export type BackfillState = {
 export type CtoState = {
   enabled: boolean;
   dot: CtoDot;
+  pausedAt: number | null;
   needsYouCount: number;
   generationInFlight: boolean;
   tonightCount: number;
@@ -36,6 +37,41 @@ export const idleBackfill: BackfillState = {
   stoppedAtDepthDays: null,
   active: false,
 };
+
+// A Health-card P1 row (§10.5 card 2). `n` = samples seen, `min` = minimum
+// sample size before the value may be trusted. While `n < min` the renderer
+// shows `collecting (n/k)` and never the number — a stat never displays noise
+// as signal.
+export type CtoHealthStat = {
+  id: "ambientSpendToday" | "digestOpens" | "pipelineLag";
+  label: string;
+  value: string | null;
+  n: number;
+  min: number;
+};
+
+// Pure stat-display selector (§10.5): when a stat has not reached its minimum
+// sample size, render `collecting (n / min)` instead of the (possibly noisy)
+// value. Returns the ready flag so the caller can de-emphasize collecting rows.
+export function statDisplay(stat: CtoHealthStat): { text: string; ready: boolean } {
+  const ready = stat?.n >= stat?.min && typeof stat?.value === "string" && stat.value !== "";
+  if (!ready) {
+    return {
+      text: `collecting (${stat?.n ?? 0} / ${stat?.min ?? 0})`,
+      ready: false,
+    };
+  }
+  return { text: stat.value as string, ready: true };
+}
+
+// Pure state→banner selector (§10.6-5): the paused banner (paused-at time +
+// "no probes, no jobs…" + Resume) REPLACES the overview header exactly when
+// the engine reports the kill switch is active (`dot === "paused"`). A null /
+// pre-pairing state (dot undefined) is never paused. `pausedAt` is the
+// epoch-ms the kill switch was thrown, for the banner's "paused at" line.
+export function showPausedBanner(state: CtoState | null): boolean {
+  return state?.dot === "paused";
+}
 
 // State-dot tone (§10.1): active/disabled/thrifty/paused → ok/tx4/warn/danger.
 // StatusDot's tones are ok/running/error/warn/idle; disabled maps to idle

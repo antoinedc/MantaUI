@@ -169,6 +169,9 @@ export type CtoState = {
   enabled: boolean;
   // State-machine dot (§10.6): active / disabled / thrifty / paused.
   dot: "active" | "disabled" | "thrifty" | "paused";
+  // Epoch-ms the kill switch was thrown (§10.6-5 paused banner "paused at"
+  // line); null when not paused.
+  pausedAt: number | null;
   // Count of OPEN needs-you items only (D17) — drives the red sidebar badge.
   needsYouCount: number;
   // True while a digest regeneration is in flight (the §5.5 single-flight
@@ -249,6 +252,38 @@ export type CtoDigest = {
   nothingHappened?: boolean;
   refs?: string[];
 };
+
+// A single Health-card row (§10.5 card 2, P1 only). `n` is samples seen so
+// far, `min` the minimum sample size before the value may be trusted. While
+// `n < min` the renderer shows `collecting (n/min)` and never the number — a
+// stat never displays noise as signal.
+export type CtoHealthStat = {
+  id: "ambientSpendToday" | "digestOpens" | "pipelineLag";
+  label: string;
+  value: string | null;
+  n: number;
+  min: number;
+};
+
+// A raw Activity-ledger row (A12 drill-down). Append-only; reverse-chron view.
+export type CtoLedgerRow = {
+  ts: number;
+  actor?: string;
+  kind?: string;
+  reason?: string;
+  source?: string;
+  sessionID?: string;
+  project?: string;
+  [key: string]: unknown;
+};
+
+export type CtoLedgerPage = {
+  rows: CtoLedgerRow[];
+  // Cursor for the next page (the oldest row's ts); null when there are no
+  // more rows to page into.
+  nextBefore: number | null;
+};
+
 
 /**
  * The full `window.api` contract.
@@ -1002,7 +1037,23 @@ export interface Api {
   ctoStateGet(): Promise<CtoState>;
   // POST /api/cto/digest — joins or starts the §5.5 single-flight generation.
   // Returns `{ok:false, error}` on failure so the pane can toast the cause.
-  ctoDigestNow(): Promise<{ ok: boolean; error?: string }>;
+   ctoDigestNow(): Promise<{ ok: boolean; error?: string }>;
+  // GET /api/cto/health — the §10.5 Health-card P1 stats (composed by the
+  // engine from the ledger + budget + segment stores). Read on settings-open.
+  ctoHealthGet(): Promise<{ stats: CtoHealthStat[] }>;
+  // GET /api/cto/ledger — reverse-chron Activity-ledger drill-down (A12),
+  // cursor-paginated with `before` (exclusive ts) and filterable by actor/kind.
+  ctoLedgerGet(opts?: {
+    before?: number;
+    actor?: string;
+    kind?: string;
+    limit?: number;
+  }): Promise<CtoLedgerPage>;
+  // POST /api/cto/pause — the §10.6-5 kill switch (manual "Pause everything
+  // now"). Idempotent. Returns `{ok:false, error}` on failure.
+  ctoPause(): Promise<{ ok: boolean; error?: string }>;
+  // POST /api/cto/resume — lift the kill switch. Idempotent.
+  ctoResume(): Promise<{ ok: boolean; error?: string }>;
   // GET /api/cto/digest — the view read of the latest stored digest (§5.5);
   // `{digest, stale}`. The digest section renders from this.
   ctoDigestGet(): Promise<{ digest: CtoDigest | null; stale: boolean }>;

@@ -7,7 +7,7 @@
 // one less auth surface.
 
 import { createServer } from "node:http";
-import { readFile, stat, mkdir, rm } from "node:fs/promises";
+import { readFile, stat, mkdir, rm, readdir } from "node:fs/promises";
 import { createWriteStream, createReadStream } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, extname, normalize, resolve, basename } from "node:path";
@@ -137,7 +137,8 @@ import { endpointSummary as routingEndpointSummary, providerTokenTotals, ROUTING
 import * as appControl from "./appControl.mjs";
 import * as cto from "./cto.mjs";
 import * as ctoEngine from "./ctoEngine.mjs";
-import { ledgerStore, engineStateStore } from "./ctoStores.mjs";
+import { ledgerStore, engineStateStore, budgetStore, segmentsStore } from "./ctoStores.mjs";
+import { computeHealthStats } from "./ctoHealth.mjs";
 import { runEphemeral, createEphemeralReaper } from "./ctoSessions.mjs";
 import { createCtoDigest, STALE_MS } from "./ctoDigest.mjs";
 import {
@@ -3869,6 +3870,91 @@ const handleRequest = async (req, res) => {
       if (req.method === "GET") {
         const state = await adaptiveCto.getState();
         respondJson(res, 200, state);
+        return;
+      }
+      respondJson(res, 405, { error: "method not allowed" });
+    } catch (e) {
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // ---------- Adaptive CTO Settings & health (BET-1386, A12) ----------
+  // The `⚙` pane's four surfaces: the §10.6-5 kill switch (Pause / Resume),
+  // the §10.5 Health-card P1 stats, and the A12 Activity-ledger drill-down.
+
+  // POST /api/cto/pause — the manual "Pause everything now" kill switch.
+  // POST /api/cto/resume — lift it. Both are idempotent; the engine publishes
+  // a fresh `{kind:"ctoState"}` (dot → paused / active) the pane renders from.
+  if (path === "/api/cto/pause" || path === "/api/cto/resume") {
+    try {
+      if (req.method === "POST") {
+        const result =
+          path === "/api/cto/pause"
+            ? await adaptiveCto.pause({ reason: "manual", source: "settings" })
+            : await adaptiveCto.resume({ reason: "manual" });
+        respondJson(res, result.ok ? 200 : 400, result);
+        return;
+      }
+      respondJson(res, 405, { error: "method not allowed" });
+    } catch (e) {
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // GET /api/cto/health — the §10.5 Health-card P1 stats, composed by the
+  // engine from the ledger + budget + segment stores. Read on settings-open,
+  // never polled. Each stat carries `n` samples seen and `min` minimum — the
+  // renderer shows `collecting (n/k)` below `min`, never the number.
+  if (path === "/api/cto/health") {
+    try {
+      if (req.method === "GET") {
+        const cfg = await local.configGet();
+        const result = await computeHealthStats({
+          ctoAmbientCap: typeof cfg?.ctoAmbientCap === "number" ? cfg.ctoAmbientCap : 2.5,
+          ledgerRead: () => ledgerStore.read(),
+          budgetRead: () => budgetStore.load(),
+          listSegments: async () => {
+            const rows = [];
+            try {
+              for (const name of await readdir(segmentsStore.dir)) {
+                if (!name.endsWith(".json")) continue;
+                const seg = await segmentsStore.load(name.replace(/\.json$/, ""));
+                if (seg && typeof seg === "object") rows.push(seg);
+              }
+            } catch {
+              /* segments dir absent → no samples */
+            }
+            return rows;
+          },
+        });
+        respondJson(res, 200, result);
+        return;
+      }
+      respondJson(res, 405, { error: "method not allowed" });
+    } catch (e) {
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // GET /api/cto/ledger — the A12 Activity-ledger drill-down. Reverse-chron,
+  // cursor-paginated (`before` = exclusive ts), filterable by actor and kind,
+  // clampable limit (default 100). Append-only — there is no POST here.
+  if (path === "/api/cto/ledger") {
+    try {
+      if (req.method === "GET") {
+        const before = url.searchParams.get("before");
+        const limitRaw = url.searchParams.get("limit");
+        const limit = Math.min(Math.max(1, Number(limitRaw) || 100), 500);
+        const page = await adaptiveCto.readLedger({
+          before: before !== null && before !== "" ? Number(before) : undefined,
+          actor: url.searchParams.get("actor") ?? undefined,
+          kind: url.searchParams.get("kind") ?? undefined,
+          limit,
+        });
+        respondJson(res, 200, page);
         return;
       }
       respondJson(res, 405, { error: "method not allowed" });

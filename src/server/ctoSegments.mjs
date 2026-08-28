@@ -545,6 +545,7 @@ export function createSegmenter(deps = {}) {
         project: seg.project,
         window: summary.window,
         ts: seg.end,
+        summarizedAt: now(), // when the summary was persisted (health §10.5 pipeline-lag measurement)
         summary,
       });
     } catch {
