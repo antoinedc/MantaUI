@@ -48,7 +48,10 @@ import {
   ledgerStore,
   engineStateStore,
   cardsStore,
+  segmentsStore,
+  rollupsStore,
 } from "./ctoStores.mjs";
+import { createCtoBackfill } from "./ctoBackfill.mjs";
 import { startPoller } from "./startPoller.mjs";
 import { createSeenIdFilter } from "./seenIds.mjs";
 import {
@@ -260,6 +263,14 @@ export function createCtoEngine(deps = {}) {
     factSurfaceExists = async () => false,
     factVerify = async () => ({ ok: true }),
     factResolveRef = null,
+    // BET-1387 cold-start backfill (§10.6-4): the read-only opencode db handle
+    // (index.mjs supplies the real one via opencodeDb) + a runEphemeral the
+    // backfill's A7 rollup reduces may use. The backfill has its OWN spend
+    // bound, so it must NOT go through the §3.3 rate gate — it uses these raw
+    // seams directly and governs cost itself.
+    getDb = null,
+    backfillRunEphemeral = runEphemeral,
+    backfill = null, // optional pre-built backfill override (tests)
   } = deps;
 
   let disposed = false;
@@ -276,6 +287,7 @@ export function createCtoEngine(deps = {}) {
   let factsEngine = null;
   let verifyHandle = null;
   let tuneHandle = null;
+  let builtInBackfill = null;
 
   // A5 presence inputs (spec §5.4): lastSeen = max(desktop heartbeat, app
   // open, user prompt). The desktop heartbeat is read live via
@@ -344,12 +356,32 @@ export function createCtoEngine(deps = {}) {
     } catch {
       /* best-effort */
     }
+    // Backfill progress for the learning card (§10.6-4) — informational, not a
+    // needs-you item. Reads engine-state progress; absent = idle.
+    let backfill = { done: 0, total: 0, stopped: false, active: false };
+    try {
+      const es = (await engineState.load()) || {};
+      const p = es.backfillProgress;
+      backfill = {
+        done: p && Array.isArray(p.processedSessions) ? p.processedSessions.length : 0,
+        total: p?.total ?? 0,
+        startedAt: p?.startedAt ?? null,
+        stopped: !!es.backfillStopped,
+        reason: es.backfillStopped?.reason ?? null,
+        stoppedAtDepthDays: es.backfillStopped?.stoppedAtDepthDays ?? null,
+        // active = started (watermark recorded) but not yet finished.
+        active: !!es.backfillStartInstant && es.backfillDone !== true,
+      };
+    } catch {
+      /* best-effort */
+    }
     return {
       enabled: enabledNow,
       dot: computeDot({ enabled: enabledNow, paused, thrifty }),
       needsYouCount: counts.needsYouCount ?? 0,
       generationInFlight: !!counts.generationInFlight,
       tonightCount: counts.tonightCount ?? 0,
+      backfill,
     };
   }
 
@@ -381,6 +413,11 @@ export function createCtoEngine(deps = {}) {
         await finalizeRollups();
         // §6.2 blackboard: pump the per-project proposal queue (gatekeeper).
         await pumpFacts();
+      }
+      // §10.6-4 cold-start backfill — also ambient, gated on enabled. Its own
+      // drained state marker makes it run at most once per box.
+      if (enabledNow) {
+        await backfillStep();
       }
       await syncState();
     } catch {
@@ -628,7 +665,7 @@ export function createCtoEngine(deps = {}) {
   // backfilled — a window only gets rolled up once it has actually closed.
   // One shared ephemeral-rate wrapper (§3.3) used by both the rollup runner and
   // the facts gatekeeper — every model-bound CTO step goes through the same
-  // per-session creation gate (D10's writer discipline).
+  // per-session creation gate (D10's "well-maintained" writer discipline).
   const gatedRunEphemeral = async (data) => {
     const gate = await beginEphemeral();
     if (!gate.ok) return { ok: false, gated: true, error: gate.error };
@@ -737,6 +774,39 @@ export function createCtoEngine(deps = {}) {
       }
     } catch {
       /* rollups are best-effort — never take the engine down */
+    }
+  }
+
+  // Lazy-construct the cold-start backfill (§10.6-4). Mirrors the rollup/facts
+  // pattern: degenerate to the real store-backed module; tests inject an
+  // override. The backfill governs its own one-time spend bound + batch-priority
+  // (presence) internally and NEVER touches the engine's §3.3 rate tracker.
+  function getBackfill() {
+    if (builtInBackfill) return builtInBackfill;
+    builtInBackfill = backfill ?? createCtoBackfill({
+      configGet,
+      engineState,
+      ledger,
+      segments: segmentsStore,
+      rollups: rollupsStore,
+      summarize, // raw seam — the backfill owns its own budget, no rate gate
+      computeOneLiner,
+      runEphemeral: backfillRunEphemeral,
+      getDb: getDb ?? (async () => null),
+      presenceCheck: () => engine.getPresence().state === "present",
+      now,
+    });
+    return builtInBackfill;
+  }
+
+  // One incremental backfill batch per tick (segments/rollups), oldest-first,
+  // batch-priority. Once-per-box is enforced by the module's engine-state
+  // marker. Never throws into the poller.
+  async function backfillStep() {
+    try {
+      await getBackfill().step();
+    } catch {
+      /* backfill is best-effort — never take the engine down */
     }
   }
 
@@ -962,6 +1032,9 @@ export function createCtoEngine(deps = {}) {
     },
     get facts() {
       return getFactsEngine();
+    },
+    get backfill() {
+      return getBackfill();
     },
   };
 
