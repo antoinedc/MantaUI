@@ -489,6 +489,13 @@ export function createCtoBudget({
   } = {}) {
     const t = typeof now === "function" ? now() : typeof now === "number" ? now : Date.now();
     if (!windowed) {
+      let conf = {};
+      try {
+        conf = (await cfg()) ?? {};
+      } catch {
+        conf = {};
+      }
+      if (!conf || typeof conf !== "object") conf = {};
       return {
         provider,
         windowed: false,
@@ -497,7 +504,7 @@ export function createCtoBudget({
         spendable: null,
         remainingFrac: null,
         historyDays: 0,
-        nightCapUsd: nightCapUsd(cfg() ?? {}),
+        nightCapUsd: nightCapUsd(conf),
       };
     }
     const hist = (await history().catch(() => ({}))) ?? {};

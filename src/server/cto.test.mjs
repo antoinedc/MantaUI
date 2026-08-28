@@ -128,28 +128,35 @@ test("a confirm tool still returns needConfirmation (does NOT act)", async () =>
   const engine = makeEngine();
   const gate = () => "confirm";
   // `watch` is the one confirm-mode tool. A confirm gate on it pauses.
-  const result = await engine.dispatch("watch", { surface: "schedule" }, { gate });
+  const result = await engine.dispatch("watch", { kind: "event-pattern", pattern: "P0" }, { gate });
   assert.equal(result.ok, true);
   assert.equal(result.needConfirmation, true);
   assert.equal(typeof result.preview, "string");
 });
 
 test("a confirm tool pauses by default (no gate) and trustedActions bypasses it", async () => {
-  const saved = [];
+  const registered = [];
   const engine = makeEngine({
-    loadWatches: async () => [],
-    saveWatches: async (w) => saved.push(w),
+    watchers: {
+      register: async (input) => {
+        registered.push(input);
+        return { ok: true, data: { watch: { id: "w1", ...input, created: 1 } } };
+      },
+      unregister: async () => ({ ok: true, data: { removed: true } }),
+      list: async () => registered,
+    },
   });
   // Default (DEFAULT_GATE = allow) still pauses a confirm tool — mode is what
   // decides, not the gate.
-  const paused = await engine.dispatch("watch", { surface: "schedule" }, {});
+  const paused = await engine.dispatch("watch", { kind: "event-pattern", pattern: "P0" }, {});
   assert.equal(paused.ok, true);
   assert.equal(paused.needConfirmation, true);
+  assert.equal(registered.length, 0, "paused confirm tool did not register");
   // trustedActions bypasses the pause for a confirm tool.
-  const run = await engine.dispatch("watch", { surface: "schedule" }, { trustedActions: ["watch"] });
+  const run = await engine.dispatch("watch", { kind: "event-pattern", pattern: "P0" }, { trustedActions: ["watch"] });
   assert.equal(run.ok, true);
   assert.equal(run.needConfirmation, undefined);
-  assert.ok(saved.length > 0, "trusted confirm tool actually ran (watcher saved)");
+  assert.ok(registered.length > 0, "trusted confirm tool actually ran (watcher registered)");
 });
 
 test("default gate returns allow for every tool (Issue 1 ships auto)", async () => {
