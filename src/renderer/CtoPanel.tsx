@@ -93,15 +93,19 @@ export function CtoPanel({
         <div className="space-y-8" />
 
         {/* Resting state (§10.6-1): no needs-you items → a single centered
-            "Nothing needs you ✓" line with a one-line context summary. */}
-        <div ref={restingRef} className="flex flex-col items-center gap-1 py-16">
-          <div className="text-text-muted">
-            Nothing needs you <span aria-hidden>✓</span>
+            "Nothing needs you ✓" line with a one-line context summary. Only
+            rendered when the needs-you count is zero; with open needs-you
+            items the (not-yet-shipped) needs-you section takes over. */}
+        {(state?.needsYouCount ?? 0) === 0 && (
+          <div ref={restingRef} className="flex flex-col items-center gap-1 py-16">
+            <div className="text-text-muted">
+              Nothing needs you <span aria-hidden>✓</span>
+            </div>
+            <div className="text-sm text-text-faint">
+              I&rsquo;ll surface anything that needs your attention here.
+            </div>
           </div>
-          <div className="text-sm text-text-faint">
-            I&rsquo;ll surface anything that needs your attention here.
-          </div>
-        </div>
+        )}
       </div>
     </div>
   );
