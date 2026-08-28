@@ -11,14 +11,17 @@
 // registers.
 //
 // PURPOSE: let ANY session report something to the on-call CTO. This is a THIN
-// registrar: `execute` POSTs `{surface:"session", sessionID, message, ...opts}`
-// to manta-server's /api/cto/inbound (same box, no SSH hop) and returns
-// immediately. manta-server owns the routing (dedupe + live-vs-parked), NOT
-// this tool. See src/server/cto.mjs (createCtoInbound).
+// registrar: `execute` POSTs `{surface:"session", sessionID, kind?, message,
+// refs?, tag?, title?}` to manta-server's /api/cto/inbound (same box, no SSH
+// hop) and returns immediately. manta-server owns the routing (dedupe +
+// live-vs-parked + the inbox store, spec §4.4), NOT this tool. See
+// src/server/cto.mjs (createCtoInbound).
 //
-// When no "call is live" flag is set (this issue), the message routes to the
-// PARKED path and the user gets a push/notify. Once Issue 3 flips the live
-// flag, the message is injected into the CTO session as a turn instead.
+// BET-1397 supersession: the note lands in the durable CTR inbox (sender
+// identity, dedupe by tag, kind, TTL); a bare {message} maps to `blocker`.
+// Only `blocker` kinds fire the immediate blocking-tier notification. When no
+// "call is live" flag is set (this issue), the note persists to the inbox and
+// the CTO reads it via the `read_inbox` verb.
 
 import { tool } from "@opencode-ai/plugin";
 import { boxToken, authHeaders } from "./manta-auth";
@@ -55,43 +58,57 @@ async function call(method: string, path: string, body?: unknown): Promise<any> 
 
 export const send_to_cto = tool({
   description: [
-    "Send a message to the on-call CTO. Any session can call this: it reports a",
-    "note up to the CTO, who has a read-only tool belt over what's running, the",
-    "Multica board, usage, and more. The message is surfaced to the user: when",
-    "the CTO call is not live it arrives as a push/notify; once the call-window",
-    "feature ships it is injected into the CTO conversation as a turn. Use this",
-    "to flag something the CTO should know (a new P0, a blocker, a request to",
-    "call you back). It returns immediately — the box owns routing.",
+    "Report a note to the on-call CTO. Any session can call this: it appends a",
+    "note to the durable CTO inbox (the CTO reads it via the read_inbox verb).",
+    "One verb, one routing rule: a bare {message} is treated as a blocker and",
+    "fires the immediate blocking-tier notification the same way a question",
+    "waiting does; a non-blocker kind is silent — it sits in the inbox until the",
+    "CTO drains it. You should give the message some context (what happened, why",
+    "it matters), and pass refs (a new P0 issue, a blocker, a failing check) so",
+    "the CTO can jump to it. This supersedes every earlier send_to_cto spelling.",
   ].join(" "),
   args: {
     message: z
       .string()
-      .describe("What to report to the CTO. Be concrete: the fact, not the process."),
-    title: z
+      .describe("What to report. Be concrete: the fact, the impact, what the CTO should know."),
+    kind: z
+      .enum(["fyi", "finding", "blocker", "handoff", "anomaly"])
+      .optional()
+      .describe(
+        "The note's kind. Default (and bare {message}) is `blocker`, which is the only " +
+          "kind that fires the immediate blocking-tier notification. fyi/finding/handoff/" +
+          "anomaly are silent — they land in the inbox unread and surface via read_inbox.",
+      ),
+    refs: z
+      .array(z.string())
+      .optional()
+      .describe("Optional refs for the note — issue/PR keys, check names, surface ids — so the CTO can jump to them."),
+    tag: z
       .string()
       .optional()
       .describe(
-        "Optional short title for the surfaced notification. Defaults to the sender's " +
-          "session label.",
+        "Optional dedupe tag: two notes with the same tag coalesce into one inbox entry " +
+          "(refs union, timestamp refreshed, count bumped) instead of creating a duplicate.",
       ),
-    urgent: z
-      .boolean()
+    title: z
+      .string()
       .optional()
-      .describe(
-        "If true, deliver to every device immediately (blocking tier). Use sparingly — " +
-          "only for something the CTO must see right now.",
-      ),
+      .describe("Optional short title for the surfaced notification. Defaults to the sender's session label."),
   },
   async execute(args, context) {
     const result = await call("POST", "/api/cto/inbound", {
       surface: "session",
       sessionID: context.sessionID,
+      kind: args.kind,
       message: args.message,
+      refs: args.refs,
+      tag: args.tag,
       title: args.title,
-      urgent: !!args.urgent,
     });
-    return result.parked
-      ? "Reported to the CTO (no live call — surfaced as a notification)."
-      : "Reported to the CTO.";
+    const blocker = result.parked && args.kind !== "fyi" && args.kind !== "finding" &&
+      args.kind !== "handoff" && args.kind !== "anomaly" && (args.kind === "blocker" || !args.kind);
+    return blocker
+      ? "Flagged to the CTO as a blocker (immediate notification + inbox note)."
+      : "Reported to the CTO inbox (silent — surfaces via read_inbox).";
   },
 });

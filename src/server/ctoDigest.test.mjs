@@ -542,3 +542,11 @@ test("generateDigest: successful model path emits cto.digest_generated", async (
   assert.equal(generated.reason, "manual");
   assert.equal(generated.items, 1);
 });
+
+test("BET-1397: digest generation drains the CTO inbox before composing", async () => {
+  let drained = 0;
+  const model = async () => ({ text: JSON.stringify({ items: [{ tier: "progress", text: "shipped", refs: [] }] }) });
+  const { engine } = makeEngine({ runEphemeral: model, drain: async () => { drained += 1; } });
+  await engine.generateDigest({ reason: "scheduled" });
+  assert.equal(drained, 1);
+});

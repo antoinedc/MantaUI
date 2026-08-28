@@ -63,6 +63,11 @@ export const CARD_DISMISSED = "card.dismissed";
 // Blocker source discriminator for health/watchdog escalations (distinct from
 // the question|permission worker-ask source kinds).
 export const HEALTH_SOURCE_KIND = "health";
+// Source (3): an inbox note of kind `blocker` sent via send_to_cto (BET-1397 /
+// spec §4.4). It becomes an A8 blocker-card source — the blocking-tier
+// notification fires IMMEDIATELY through the existing router (the same one
+// source 1 relies on), and the card appears at > 10 min via promoteDue.
+export const INBOX_SOURCE_KIND = "inbox";
 
 // Stable, collision-resistant card id. Re-detection of the same (sourceKind,
 // sourceId) yields the same id → upsert in place, never a duplicate.
@@ -119,12 +124,14 @@ export function askResolveInfo(evt) {
 export function blockerTitle(kind) {
   if (kind === "permission") return "Permission needed";
   if (kind === "question") return "Question waiting";
+  if (kind === "inbox") return "Blocker flagged for CTO";
   return "Health check";
 }
 
 export function blockerBody(kind, text) {
   if (kind === "permission") return text || "Claude needs permission to run a tool.";
   if (kind === "question") return text || "Claude is waiting on an answer.";
+  if (kind === "inbox") return text || "A session flagged a blocker for the CTO.";
   return text || "The CTO paused itself — review the health state.";
 }
 
@@ -147,6 +154,10 @@ export function createCtoCards(deps = {}) {
     cardStore = cardsStore,
     engineState = engineStateStore,
     ledger = ledgerStore,
+    // Source (3) router (BET-1397): the existing blocking-tier notification
+    // router (push.mjs fireNotify). Only `onInboxBlocker` uses it — worker-ask
+    // and health cards keep the "no notification path" invariant.
+    fireNotify = async () => {},
     now = () => Date.now(),
   } = deps;
 
@@ -154,6 +165,41 @@ export function createCtoCards(deps = {}) {
   // body, askedAt }. Kept in memory (derived from the live event stream); once
   // promoted, the card itself is durable in cards.json.
   const pendingAsks = new Map();
+
+  // Source (3): a `blocker` inbox note (BET-1397 / spec §4.4). This is the ONE
+  // notification path for inbox notes: fires the blocking-tier notify through
+  // the injected router exactly once, and registers a pending blocker so the
+  // card timer (promoteDue) promotes it at > 10 min like any ask. Read-only on
+  // the inbox itself — the inbound funnel already persisted the entry.
+  async function onInboxBlocker({ message, title, refs = [], tag, sessionID, ts = now() } = {}) {
+    const text = typeof message === "string" ? message.trim() : "";
+    if (!text) return { changed: false, notified: false };
+    // Blocking-tier notification — exactly one, via the shared router.
+    try {
+      await fireNotify({
+        message: text,
+        title: typeof title === "string" && title ? title : undefined,
+        urgent: true,
+        sessionID: typeof sessionID === "string" ? sessionID : undefined,
+      });
+    } catch (e) {
+      console.warn("[cto] inbox blocker notify failed:", e?.message ?? e);
+    }
+    // Register a pending blocker so the card appears at > 10 min. Key by the
+    // sending session when known, else by a stable hash of the tag/message;
+    // the card id stays stable across re-reports of the same note (upsert).
+    const sourceId = stableCardId(INBOX_SOURCE_KIND, tag || text);
+    const key = typeof sessionID === "string" && sessionID ? sessionID : sourceId;
+    pendingAsks.set(key, {
+      sourceKind: INBOX_SOURCE_KIND,
+      sourceId,
+      sessionID: typeof sessionID === "string" ? sessionID : undefined,
+      body: text,
+      refs: Array.isArray(refs) ? refs : [],
+      askedAt: ts,
+    });
+    return { changed: true, notified: true };
+  }
 
   async function ledgerAppend(entry) {
     try {
@@ -291,7 +337,7 @@ export function createCtoCards(deps = {}) {
         sessionID: ask.sessionID,
         title: blockerTitle(ask.sourceKind),
         body: blockerBody(ask.sourceKind, ask.body),
-        refs: ask.sessionID ? [ask.sessionID] : [],
+        refs: Array.isArray(ask.refs) && ask.refs.length ? ask.refs : ask.sessionID ? [ask.sessionID] : [],
         ts: nowMs,
         pendingSince: ask.askedAt,
       });
@@ -381,6 +427,7 @@ export function createCtoCards(deps = {}) {
   return {
     onAskStart,
     onAskResolved,
+    onInboxBlocker,
     promoteDue,
     ingestHealthEscalations,
     onHealthRecovered,

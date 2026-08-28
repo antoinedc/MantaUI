@@ -26,14 +26,15 @@ const MANTA_SERVER = process.env.MANTA_SERVER_URL || "http://127.0.0.1:8787";
 const CTO_TOOLS =
   "list_sessions, list_projects, read_transcript, search_messages, git_status, " +
   "git_branch, git_log, list_models, get_usage, usage_stopped, session_usage, " +
-  "context_state, session_plan_mode, get_config, read_rollups, read_ledger, " +
-  "watch, unwatch, list_watches";
+  "context_state, session_plan_mode, get_config, read_rollups, read_ledger, read_inbox, watch, unwatch, " +
+  "list_watches";
 
 export const cto = tool({
   description: [
     "Deterministic on-call CTO tools: inspect what's running on this box,",
     "read chat transcripts, search messages, git state, models, plan usage,",
-    "stopped conversations, per-session cost/context/plan-mode, and config. Reads",
+    "stopped conversations, per-session cost/context/plan-mode, config, and the",
+    "CTO inbox (read_inbox — the notes any session sent via send_to_cto). Reads",
     "never mutate anything. The watch/unwatch/list_watches",
     "tools register watchers (watch is a confirm-mode action).",
     `Pick \`tool\` from: ${CTO_TOOLS}.`,

@@ -50,6 +50,8 @@ import {
   cardsStore,
   segmentsStore,
   rollupsStore,
+  inboxStore,
+  purgeExpiredInbox,
 } from "./ctoStores.mjs";
 import { createCtoBackfill } from "./ctoBackfill.mjs";
 import { startPoller } from "./startPoller.mjs";
@@ -82,7 +84,7 @@ import {
   ROLLUP_LEVELS,
   windowFor as rollupWindowFor,
 } from "./ctoRollups.mjs";
-import { buildFactProposal, createFactsEngine, VERIFY_CYCLE_MS } from "./ctoFacts.mjs";
+import { buildFactProposal, createFactsEngine, VERIFY_CYCLE_MS, senderKey, senderReliability } from "./ctoFacts.mjs";
 import { formatFactsBlock } from "./ctoSessions.mjs";
 
 // Actor tag stamped on every engine RPC call / ledger row (spec §3.3).
@@ -248,7 +250,11 @@ export function createCtoEngine(deps = {}) {
     // BET-1382 needs-you card machinery (blocker cards). Defaults to the real
     // stores; tests inject a fake. Cards are about the user's own blockers,
     // not autonomous CTO work, so this is wired regardless of enabled state.
-    cards = createCtoCards({}),
+    // BET-1397: the internal cards manager gets the blocking-tier router
+    // (`cardFireNotify`) so an inbox `blocker` note (source 3) fires the one
+    // notification on the live box.
+    cardFireNotify = async () => {},
+    cards = createCtoCards({ fireNotify: cardFireNotify }),
     // A5 evidence/presence seams (injected I/O — nothing here touches tmux /
     // push directly; index.mjs supplies the real resolvers).
     getSessionInfo = async () => ({ owner: "user", project: undefined }),
@@ -287,6 +293,9 @@ export function createCtoEngine(deps = {}) {
     // §8 profile (BET-1393): optional pre-built profile engine (else one is
     // constructed from the shared profileStore — deterministic, never throws).
     profile = null,
+    // BET-1397 CTO inbox (§4.4): the durable inbox.json store + seam, so drain
+    // is unit-testable without touching the real fs. Defaults to the real store.
+    inbox = null,
   } = deps;
 
   let disposed = false;
@@ -817,6 +826,9 @@ export function createCtoEngine(deps = {}) {
       if (changed) {
         await engineState.save({ ...payload, rollupCursor: cursor });
       }
+      // BET-1397 breakpoint drain (rollup close): fold unread inbox notes into
+      // evidence. Best-effort — never blocks or breaks the rollup fold.
+      await drainInbox();
     } catch {
       /* rollups are best-effort — never take the engine down */
     }
@@ -852,6 +864,58 @@ export function createCtoEngine(deps = {}) {
       await getBackfill().step();
     } catch {
       /* backfill is best-effort — never take the engine down */
+    }
+  }
+
+  // BET-1397 inbox drain (§4.4): at breakpoints (rollup close; digest /
+  // overnight planning land with later issues and hook the same method) every
+  // UNREAD inbox note becomes a high-salience evidence event on the A1 ledger,
+  // weighted by the B1 sender-reliability (Beta mean) of the sending session,
+  // and is then marked read. Inbox content rides as untrusted data — it is
+  // written verbatim to the ledger, never treated as instructions. Silent:
+  // expired entries are dropped (`purgeExpiredInbox`) with no trace.
+  async function drainInbox() {
+    try {
+      const store = inbox ?? inboxStore;
+      const payload = await store.load();
+      const entries = Array.isArray(payload?.entries) ? payload.entries : [];
+      if (entries.length === 0) return { drained: 0 };
+      const { keep } = purgeExpiredInbox(entries, { nowMs: now() });
+      const unread = keep.filter((e) => !e?.read);
+      if (unread.length === 0) {
+        if (keep.length !== entries.length) await store.save({ ...payload, entries: keep });
+        return { drained: 0 };
+      }
+      // Per-sender reliability (Beta mean, §6.4 / B1); unseen senders default
+      // to neutral (1).
+      let rel = {};
+      try {
+        rel = (await getFactsEngine().getState())?.senderReliability ?? {};
+      } catch {
+        rel = {};
+      }
+      const next = keep.map((e) => {
+        if (e?.read) return e;
+        const weight = senderReliability(rel[senderKey(e?.sender)] ?? {});
+        const refs = Array.isArray(e?.refs) ? e.refs.slice() : [];
+        if (e?.sender?.sessionID) refs.push(e.sender.sessionID);
+        void ledgerLog({
+          channel: CHANNEL_EVENT,
+          sessionID: e?.sender?.sessionID ?? undefined,
+          kind: `inbox.${e?.kind ?? "note"}`,
+          salience: "high",
+          senderReliability: weight,
+          refs,
+          message: e?.message,
+          tag: e?.tag,
+        });
+        return { ...e, read: true };
+      });
+      await store.save({ ...payload, entries: next });
+      return { drained: unread.length };
+    } catch {
+      /* inbox drain is best-effort — never takes the engine down */
+      return { drained: 0 };
     }
   }
 
@@ -1093,6 +1157,7 @@ export function createCtoEngine(deps = {}) {
     beginEphemeral,
     beginDelegateJob,
     observeEvent,
+    drainInbox,
     getPresence,
     getState,
     readLedger,
@@ -1119,6 +1184,9 @@ export function createCtoEngine(deps = {}) {
     },
     get profile() {
       return getProfile();
+    },
+    get cards() {
+      return cards;
     },
   };
 

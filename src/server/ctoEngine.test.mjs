@@ -657,3 +657,63 @@ test("buildFactsContext formats the block, caps at K, and touches only surfaced 
   assert.equal(touched[0].ids.length, 15, "touch records exactly the surfaced facts");
   assert.ok(touched[0].ids.includes("cto:0") && touched[0].ids.includes("cto:14"), "touches the highest-retention facts");
 });
+
+// ---------------------------------------------------------------------------
+// BET-1397 inbox drain (unread notes → evidence, marked read, B1-weighted)
+// ---------------------------------------------------------------------------
+
+test("drainInbox folds unread notes into high-salience B1-weighted evidence and marks them read", async () => {
+  const clock = { ms: 1_000_000 };
+  const ledgerRows = [];
+  const state = { v: 1, entries: [] };
+  const store = {
+    load: async () => state,
+    save: async (s) => {
+      state.entries = s?.entries ?? [];
+    },
+  };
+  // Low-reliability sender (0 confirmed / 5 rejected → Beta mean 1/7) and a
+  // neutral one (0/0 → 1/2). Keys match `senderKey` (session:<id>) so the
+  // drain's reliability lookup resolves them.
+  const rel = {
+    "session:low-ses": { confirmed: 0, rejected: 5 },
+    "session:neutral-ses": { confirmed: 0, rejected: 0 },
+  };
+  const facts = { getState: async () => ({ senderReliability: rel }) };
+  state.entries = [
+    { id: "a", kind: "finding", message: "flaky", refs: ["BET-1"], sender: { sessionID: "low-ses" }, tag: null, read: false, count: 1, expires: clock.ms + 1000 },
+    { id: "b", kind: "fyi", message: "heads up", refs: [], sender: { sessionID: "neutral-ses" }, tag: null, read: false, count: 1, expires: clock.ms + 1000 },
+    { id: "c", kind: "blocker", message: "already seen", refs: [], sender: null, tag: null, read: true, count: 1, expires: clock.ms + 1000 },
+  ];
+
+  const engine = createCtoEngine({
+    configGet: async () => ({ ctoEnabled: true }),
+    ledger: { append: async (row) => ledgerRows.push(row) },
+    engineState: { load: async () => ({ v: 1, entries: [] }), save: async () => {} },
+    cards: {},
+    inbox: store,
+    facts,
+    now: () => clock.ms,
+    publish: () => {},
+  });
+
+  const r = await engine.drainInbox();
+  assert.equal(r.drained, 2); // a + b drained; c was already read
+
+  // Both unread entries marked read in the persisted store.
+  assert.equal(state.entries.find((e) => e.id === "a").read, true);
+  assert.equal(state.entries.find((e) => e.id === "b").read, true);
+
+  // High-salience inbox.* evidence rows emitted with B1 weights applied.
+  const rows = ledgerRows.filter((row) => String(row.kind).startsWith("inbox."));
+  assert.equal(rows.length, 2);
+  const rowA = rows.find((row) => row.message === "flaky");
+  assert.equal(rowA.kind, "inbox.finding");
+  assert.equal(rowA.salience, "high");
+  assert.ok(Math.abs(rowA.senderReliability - 1 / 7) < 1e-9, "low-reliability sender weighted");
+  assert.deepEqual(rowA.refs, ["BET-1", "low-ses"]); // note refs + sender sessionID
+  const rowB = rows.find((row) => row.message === "heads up");
+  assert.ok(Math.abs(rowB.senderReliability - 1 / 2) < 1e-9, "neutral sender weighted 1/2");
+  // No evidence for the already-read entry.
+  assert.ok(!rows.some((row) => row.message === "already seen"));
+});
