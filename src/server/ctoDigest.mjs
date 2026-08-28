@@ -560,13 +560,12 @@ export function createCtoDigest(deps = {}) {
 
   // §14.1 instrumentation: per-item open / expand (the UI issue calls this via
   // POST /api/cto/digest/opened).
-  async function recordItemEvent({ item, expand, digestId } = {}) {
-    await ledgerLog({
-      kind: expand ? "cto.digest_expanded" : "cto.digest_item_opened",
-      item: typeof item === "string" ? item : null,
-      digestId: digestId ?? null,
-    });
-  }
+  //
+  // BET-1391: the per-item OPEN path moved into the verdict ledger — the
+  // `/opened` route now calls `recordVerdict({...verdict:"open"})` (one path),
+  // and this direct ledger write is deleted. Only the whole-digest view-open
+  // (`recordOpen` → `cto.digest_opened`, which the learned-timing scheduler
+  // reads) remains recorded here.
 
   async function nextScheduledAt() {
     const opens = await loadOpens();
@@ -757,7 +756,6 @@ export function createCtoDigest(deps = {}) {
     isGenerating: () => generating,
     getState,
     recordOpen,
-    recordItemEvent,
     nextScheduledAt,
     // exposed for tests / diagnostics
     _now: now,

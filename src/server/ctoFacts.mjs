@@ -856,6 +856,14 @@ export function createFactsEngine(deps = {}) {
     disposed = true;
   }
 
+  // BET-1391: the verdict-ledger facts sink drives sender reliability counters
+  // through this seam (success → confirmed, rejection → rejected). Public
+  // because the verdict engine in ctoEngine consumes it; a synth sender with
+  // no nested session identity is a no-op (senderKey returns null).
+  async function noteReliability(sender, delta) {
+    await bumpReliability(sender, delta);
+  }
+
   return {
     submitProposal,
     pump,
@@ -867,6 +875,7 @@ export function createFactsEngine(deps = {}) {
     topFacts,
     listFacts: (project) => loadFacts(project).then((arr) => arr.filter(isActiveFact)),
     listProjects: listKnownProjects,
+    noteReliability,
     dispose,
   };
 }

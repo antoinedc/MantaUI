@@ -51,8 +51,10 @@ import {
   segmentsStore,
   rollupsStore,
   inboxStore,
+  verdictsStore,
   purgeExpiredInbox,
 } from "./ctoStores.mjs";
+import { createVerdictEngine } from "./ctoVerdicts.mjs";
 import { createCtoBackfill } from "./ctoBackfill.mjs";
 import { startPoller } from "./startPoller.mjs";
 import { createSeenIdFilter } from "./seenIds.mjs";
@@ -296,6 +298,10 @@ export function createCtoEngine(deps = {}) {
     // BET-1397 CTO inbox (§4.4): the durable inbox.json store + seam, so drain
     // is unit-testable without touching the real fs. Defaults to the real store.
     inbox = null,
+    // BET-1391 verdict ledger (§9.5): optional pre-built verdicts store (else
+    // the shared `verdicts.json` store). The verdict engine + facts sink are
+    // constructed below from it.
+    verdicts = verdictsStore,
   } = deps;
 
   let disposed = false;
@@ -315,6 +321,7 @@ export function createCtoEngine(deps = {}) {
   let tuneHandle = null;
   let builtInBackfill = null;
   let profileDecayHandle = null;
+  let verdictsEngine = null;
 
   // A5 presence inputs (spec §5.4): lastSeen = max(desktop heartbeat, app
   // open, user prompt). The desktop heartbeat is read live via
@@ -773,6 +780,36 @@ export function createCtoEngine(deps = {}) {
     return factsEngine;
   }
 
+  // BET-1391 verdict ledger (§9.5): lazy single instance over the injectable
+  // verdicts store. The facts counter-sink is registered ONCE at construction
+  // so every recorded verdict routes its §9.5 effects to the sender-reliability
+  // counters (B1) — and is removed by the engine's dispose below.
+  function getVerdictsEngine() {
+    if (verdictsEngine) return verdictsEngine;
+    verdictsEngine = createVerdictEngine({ verdicts, now });
+    verdictsEngine.registerCounterSink(factsCounterSink);
+    return verdictsEngine;
+  }
+
+  // The facts sink (BET-1391 / §9.5): map verdict acceptance/rejection effects
+  // on fact subjects back onto the fact sender's reliability counters — success
+  // → confirmed, rejection → rejected. `open`/`expire` (importance/retention
+  // effects only) never touch acceptance counters, matching the mapping table.
+  // Best-effort (a reliability write failing never breaks verdict recording).
+  function factsCounterSink(effects, entry) {
+    if (entry?.subject?.type !== "fact") return;
+    const sender = entry.subject.sender;
+    if (sender == null) return;
+    const delta = {};
+    if (effects.success) delta.confirmed = 1;
+    if (effects.rejection) delta.rejected = 1;
+    if (!delta.confirmed && !delta.rejected) return;
+    const fe = getFactsEngine();
+    if (fe && typeof fe.noteReliability === "function") {
+      void fe.noteReliability(sender, delta).catch(() => {});
+    }
+  }
+
   // Pump the blackboard proposal queue (per-project, single writer). Driven
   // from the tick when enabled; best-effort, never throws into the poller.
   async function pumpFacts() {
@@ -1164,6 +1201,11 @@ export function createCtoEngine(deps = {}) {
     lastHeartbeat,
     proposeFact,
     factsContextBlock,
+    // BET-1391 verdict ledger (§9.5): record + read the verdict ledger (the
+    // opencode `cto_verdict` tool + the digest-opened rewire + the health card
+    // all reach one path through these).
+    recordVerdict: (input) => getVerdictsEngine().recordVerdict(input),
+    listVerdicts: () => getVerdictsEngine().listVerdicts(),
     get rateTracker() {
       return track;
     },

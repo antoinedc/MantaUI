@@ -43,7 +43,7 @@ export const idleBackfill: BackfillState = {
 // shows `collecting (n/k)` and never the number — a stat never displays noise
 // as signal.
 export type CtoHealthStat = {
-  id: "ambientSpendToday" | "digestOpens" | "pipelineLag";
+  id: "ambientSpendToday" | "digestOpens" | "pipelineLag" | "suggestionAcceptance";
   label: string;
   value: string | null;
   n: number;

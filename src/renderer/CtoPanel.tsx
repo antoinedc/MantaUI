@@ -685,7 +685,9 @@ function SettingsView({
                       ? "Ambient spend today"
                       : id === "digestOpens"
                       ? "Digest opens · 7d"
-                      : "Pipeline lag (close → summary)",
+                      : id === "pipelineLag"
+                      ? "Pipeline lag (close → summary)"
+                      : "Suggestion acceptance · 30d",
                   value: null,
                   n: 0,
                   min: 1,
@@ -726,7 +728,7 @@ function SettingsView({
   );
 }
 
-const HEALTH_ROW_ORDER = ["ambientSpendToday", "digestOpens", "pipelineLag"] as const;
+const HEALTH_ROW_ORDER = ["ambientSpendToday", "digestOpens", "pipelineLag", "suggestionAcceptance"] as const;
 
 // ---------------------------------------------------------------------------
 // Activity ledger drill-down (A12)
