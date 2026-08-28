@@ -388,6 +388,26 @@ test("validateSegmentSummary accepts a well-formed summary and rejects bad ones"
   assert.ok(!validateSegmentSummary(null));
 });
 
+test("atoms: valid atoms accepted, invalid ones rejected, omitted atoms fine (§8.2)", () => {
+  assert.ok(validateSegmentSummary(validSummary()));
+  assert.ok(validateSegmentSummary(validSummary({ atoms: [] })));
+  assert.ok(
+    validateSegmentSummary(validSummary({ atoms: [{ dimension: "swift", direction: "up", weight: 0.8, ref: "r1" }] })),
+  );
+  assert.ok(
+    validateSegmentSummary(validSummary({ atoms: [{ dimension: "api-design", direction: 0.6, weight: 1 }] })),
+  );
+  assert.ok(
+    validateSegmentSummary(validSummary({ atoms: [{ dimension: "electron-ipc", direction: "down", weight: 0.5 }] })),
+  );
+  // >20 atoms, bad direction, missing dimension, weight out of (0,1]
+  assert.ok(!validateSegmentSummary(validSummary({ atoms: Array.from({ length: 21 }, () => ({ dimension: "x", direction: "up" })) })));
+  assert.ok(!validateSegmentSummary(validSummary({ atoms: [{ dimension: "x", direction: "sideways" }] })));
+  assert.ok(!validateSegmentSummary(validSummary({ atoms: [{ direction: "up" }] })));
+  assert.ok(!validateSegmentSummary(validSummary({ atoms: [{ dimension: "x", direction: "up", weight: 2 }] })));
+  assert.ok(!validateSegmentSummary(validSummary({ atoms: "not-an-array" })));
+});
+
 test("parseSegmentSummaryText extracts JSON from fenced/prose model output", () => {
   const obj = parseSegmentSummaryText('Here you go:\n```json\n{"v":1,"sessionID":"s1"}\n```');
   assert.equal(obj.sessionID, "s1");

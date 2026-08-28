@@ -271,7 +271,7 @@ export function nextDigestMs({
 // Context assembly — the `digest-compose` model input (≤12k ctx, §12.3)
 // ---------------------------------------------------------------------------
 
-export function buildDigestContext({ granularity, window, slice, needsYou, factsChanged, probes, gMinutes } = {}) {
+export function buildDigestContext({ granularity, window, slice, needsYou, factsChanged, probes, gMinutes, audience } = {}) {
   const [ws, we] = window;
   const blocks = [];
 
@@ -323,6 +323,11 @@ export function buildDigestContext({ granularity, window, slice, needsYou, facts
       priority: "medium",
       text: "Facts changed in this window:\n" + factsChanged.map((f) => `- [${f.id}] ${f.statement}`).join("\n"),
     });
+  }
+  // §8.4 profile audience block — adapt per-item technicality (μ−2σ + depth
+  // pref). Never injected when absent; blockers stay non-technical regardless.
+  if (audience && typeof audience.text === "string") {
+    blocks.push({ priority: "medium", text: audience.text });
   }
   if (probes && probes.length) {
     blocks.push({
@@ -480,6 +485,8 @@ export function createCtoDigest(deps = {}) {
     loadSlice = null, // async ({granularity, window}) => slice
     getRisingEdge = async () => null, // ms-into-day of dominant workday rising edge (§8.2) | null
     getInferredTz = async () => null, // {utcOffsetHours, confidence} | null
+    getAudience = async () => null, // §8.4 async ({topics}) => audience block | null
+    getDeviations = async () => [], // §8.4 deviation-from-baseline asides (user-only)
     getEnabled = async () => false, // top-level ctoEnabled gate for the scheduler
     digestPushEnabled = async () => false, // §10.5 toggle (ships A12) — off by default
     pushDigest = async () => {}, // informational notification honoring router deferral
@@ -589,8 +596,11 @@ export function createCtoDigest(deps = {}) {
     const factFn = factsChanged ?? defaultFactsChanged({ window, facts, fs });
     const fChanged = await factFn({ window }).catch(() => []);
     const probes = await safe(probeFindings) ?? [];
+    // §8.4 profile audience block (μ−2σ + depth pref over the slice's topics).
+    const topics = [...new Set((slice || []).map((it) => it.project).filter(Boolean))];
+    const audience = await safe(getAudience, { topics });
 
-    const context = buildDigestContext({ granularity, window, slice: slice || [], needsYou, factsChanged: fChanged, probes, gMinutes });
+    const context = buildDigestContext({ granularity, window, slice: slice || [], needsYou, factsChanged: fChanged, probes, gMinutes, audience });
 
     let digest = null;
     if (runEphemeral) {
@@ -618,6 +628,25 @@ export function createCtoDigest(deps = {}) {
       const degraded = degradedDigest({ granularity, window, slice: slice || [], generated: t, gMinutes });
       digest = { ...degraded, nothingHappened: degraded.items.length === 0, refs: collectDigestRefs(degraded.items) };
       await ledgerLog({ kind: "cto.digest_degraded", granularity: granularity.reads, window });
+    }
+
+    // §8.4 deviation-from-baseline asides — surfaced ONLY as progress-tier
+    // digest items for the user, never in any shared artifact (facts/rollups).
+    // Deduped against existing items so a digest never carries a repeated
+    // aside; `nothingHappened` is left untouched (an aside is not work).
+    if (validateDigest(digest)) {
+      const deviations = (await safe(getDeviations)) || [];
+      if (deviations.length) {
+        const extant = new Set(digest.items.map((i) => `${i.tier || ""}:${i.text || ""}`));
+        for (const d of deviations) {
+          if (!d || !d.text) continue;
+          const key = `progress:${d.text}`;
+          if (extant.has(key)) continue;
+          digest.items.push({ tier: "progress", text: d.text });
+          extant.add(key);
+        }
+        digest.refs = collectDigestRefs(digest.items);
+      }
     }
 
     const id = String(t);

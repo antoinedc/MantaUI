@@ -54,6 +54,7 @@ import {
 import { createCtoBackfill } from "./ctoBackfill.mjs";
 import { startPoller } from "./startPoller.mjs";
 import { createSeenIdFilter } from "./seenIds.mjs";
+import { createCtoProfile, DAY_MS } from "./ctoProfile.mjs";
 import {
   getDesktopPresence as pushGetDesktopPresence,
   getLastDesktopHeartbeat as pushGetLastDesktopHeartbeat,
@@ -74,7 +75,7 @@ import {
   createCtoCards,
   isAskResolveEvent,
 } from "./ctoCards.mjs";
-import { createSegmenter } from "./ctoSegments.mjs";
+import { createSegmenter, segmentEventKind } from "./ctoSegments.mjs";
 import {
   createRollupRunner,
   LEVEL_MS as ROLLUP_LEVEL_MS,
@@ -105,6 +106,7 @@ export const CARD_CHECK_INTERVAL_MS = 60_000;
 // Work-segmentation G refit cadence (§5.1-d): monthly, on the box's own
 // inter-arrival times.
 export const G_REFIT_INTERVAL_MS = 30 * 24 * HOUR_MS;
+export const PROFILE_DECAY_INTERVAL_MS = 7 * DAY_MS; // §8.2 weekly sigma/repo decay tick
 // §6.8 monthly half-life tuning cadence (a work timer, halted on pause).
 export const MONTHLY_TUNE_INTERVAL_MS = 30 * 24 * HOUR_MS;
 
@@ -271,6 +273,9 @@ export function createCtoEngine(deps = {}) {
     getDb = null,
     backfillRunEphemeral = runEphemeral,
     backfill = null, // optional pre-built backfill override (tests)
+    // §8 profile (BET-1393): optional pre-built profile engine (else one is
+    // constructed from the shared profileStore — deterministic, never throws).
+    profile = null,
   } = deps;
 
   let disposed = false;
@@ -285,9 +290,11 @@ export function createCtoEngine(deps = {}) {
   let lastPublishedSerialized = null;
   let rollupRunner = null;
   let factsEngine = null;
+  let profileEngine = null;
   let verifyHandle = null;
   let tuneHandle = null;
   let builtInBackfill = null;
+  let profileDecayHandle = null;
 
   // A5 presence inputs (spec §5.4): lastSeen = max(desktop heartbeat, app
   // open, user prompt). The desktop heartbeat is read live via
@@ -446,6 +453,10 @@ export function createCtoEngine(deps = {}) {
       tuneHandle.stop();
       tuneHandle = null;
     }
+    if (profileDecayHandle) {
+      profileDecayHandle.stop();
+      profileDecayHandle = null;
+    }
   }
 
   function startTimers() {
@@ -479,6 +490,13 @@ export function createCtoEngine(deps = {}) {
       tuneHandle = startPoller(
         () => getFactsEngine().recomputeHalfLives().catch(() => {}),
         { intervalMs: MONTHLY_TUNE_INTERVAL_MS, label: "cto-facts-tune", immediate: false },
+      );
+    }
+    // §8.2 weekly numeric decay — a work timer, halted on pause like the rest.
+    if (!profileDecayHandle) {
+      profileDecayHandle = startPoller(
+        () => getProfile().decayWeekly().catch(() => {}),
+        { intervalMs: PROFILE_DECAY_INTERVAL_MS, label: "cto-profile-decay", immediate: false },
       );
     }
   }
@@ -654,6 +672,9 @@ export function createCtoEngine(deps = {}) {
       summarize: gatedSummarize,
       computeOneLiner: gatedOneLiner,
       now,
+      // §8.2 profile feed: every closed segment's atoms/session-length/project
+      // go to the profile engine in the same pass (no second model call).
+      onSummary: async (summary) => getProfile().applySegmentSummary(summary),
     });
 
   // ----- BET-1381 rollups (§5.3) -----
@@ -694,6 +715,16 @@ export function createCtoEngine(deps = {}) {
       submitProposal: async (proposal) => (await getFactsEngine()).submitProposal(proposal),
     });
     return rollupRunner;
+  }
+
+  // Lazy-construct the profile engine (BET-1393 / §8). Pure deterministic
+  // module with injected store; always inert-safe, never throws. The engine
+  // owns its lifecycle: init on start, per-event feeding, the weekly decay
+  // tick, and the segment-summary atom feed (via the segmenter's onSummary).
+  function getProfile() {
+    if (profileEngine) return profileEngine;
+    profileEngine = deps.profile ?? createCtoProfile({ now });
+    return profileEngine;
   }
 
   // Lazy-construct the blackboard facts engine (BET-1389 / §6). Mirrors the
@@ -850,6 +881,14 @@ export function createCtoEngine(deps = {}) {
             /* best-effort — segmentation must never break ingestion */
           }
         }
+        // §8.2 profile feed — deterministic per-event temporal/interaction
+        // evidence. Best-effort; profile updates never throw into the pump.
+        try {
+          const k = segmentEventKind(evt);
+          if (k) getProfile().observeEvent({ kind: k, ts: now(), project });
+        } catch {
+          /* best-effort — profile must never break ingestion */
+        }
         const row = normalizeEvidence(evt, { owner, project, now: now() });
         if (!row) return;
         await ledgerLog({
@@ -933,6 +972,8 @@ export function createCtoEngine(deps = {}) {
     if (segmenter && typeof segmenter.boot === "function") {
       void segmenter.boot().catch(() => {});
     }
+    // Load the persisted profile (§8.1) — deterministic, lazy, best-effort.
+    void getProfile().init().catch(() => {});
     startTimers();
     startCardTimer();
     // Publish the initial state once (fire-and-forget) so a subscriber that
@@ -1035,6 +1076,9 @@ export function createCtoEngine(deps = {}) {
     },
     get backfill() {
       return getBackfill();
+    },
+    get profile() {
+      return getProfile();
     },
   };
 
