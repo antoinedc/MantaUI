@@ -141,6 +141,32 @@ export function classifyEvent(evt) {
   return null;
 }
 
+// Best-effort free-text hint for an evidence row (BET-1398). The A5 stream is
+// primarily structured (`kind`), but the standing-query engine's
+// `event-pattern` predicate matches "evidence text" too — pull a snippet from
+// the raw event when it has one (error messages, permission texts, part text).
+// Never fabricates; returns undefined when the event carries no readable text.
+export function evidenceText(evt) {
+  if (!evt || typeof evt !== "object") return undefined;
+  for (const key of ["message", "error", "title", "text"]) {
+    const v = evt[key];
+    if (typeof v === "string" && v.trim()) return v.slice(0, 512);
+  }
+  const props = evt.properties;
+  if (props && typeof props === "object") {
+    for (const key of ["message", "error", "level", "title", "text"]) {
+      const v = props[key];
+      if (typeof v === "string" && v.trim()) return v.slice(0, 512);
+      if (v && typeof v === "object" && typeof v.message === "string" && v.message.trim()) {
+        return v.message.slice(0, 512);
+      }
+    }
+  }
+  const text = evt.text;
+  if (typeof text === "string" && text.trim()) return text.slice(0, 512);
+  return undefined;
+}
+
 // Full evidence-row normalization: applies the pipeline-scope rule (cto-owned
 // → null) then classifies. Pure — `now` injected for determinism.
 export function normalizeEvidence(
@@ -157,5 +183,6 @@ export function normalizeEvidence(
     kind: classified.kind,
     salience: classified.salience,
     refs: classified.refs ?? [],
+    text: evidenceText(evt),
   };
 }

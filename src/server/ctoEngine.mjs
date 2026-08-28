@@ -52,6 +52,7 @@ import {
   rollupsStore,
   inboxStore,
   verdictsStore,
+  watchersStore,
   purgeExpiredInbox,
 } from "./ctoStores.mjs";
 import { createVerdictEngine } from "./ctoVerdicts.mjs";
@@ -96,6 +97,9 @@ import {
   isWorkShedInThrifty,
   tierAllows as budgetTierAllows,
 } from "./ctoBudget.mjs";
+// BET-1398 standing-query watchers (§4.3/§13.4): the event-driven watcher
+// engine hosted by the adaptive engine. Supersedes the old cto.json poller.
+import { createStandingQueryEngine } from "./ctoWatchers.mjs";
 
 // Actor tag stamped on every engine RPC call / ledger row (spec §3.3).
 export const ACTOR = "cto";
@@ -317,6 +321,13 @@ export function createCtoEngine(deps = {}) {
     // thrifty when the cap is crossed. `tier` is the A12 dial (default low).
     budget = createCtoBudget(),
     tierGet = async () => "low",
+    // BET-1398 standing-query watchers (§4.3/§13.4): optional pre-built
+    // watcher engine (else one is constructed below from watchersStore/ledger/
+    // engineState/budget). `legacyWatchesLoader` is the one-time source for
+    // migrating the superseded cto.json poller watches (index.mjs wires the
+    // real loader; default none → no migration).
+    watchers = null,
+    legacyWatchesLoader = async () => [],
   } = deps;
 
   let disposed = false;
@@ -339,6 +350,7 @@ export function createCtoEngine(deps = {}) {
   let builtInBackfill = null;
   let profileDecayHandle = null;
   let verdictsEngine = null;
+  let watcherEngine = null;
 
   // A5 presence inputs (spec §5.4): lastSeen = max(desktop heartbeat, app
   // open, user prompt). The desktop heartbeat is read live via
@@ -469,6 +481,9 @@ export function createCtoEngine(deps = {}) {
         await finalizeRollups();
         // §6.2 blackboard: pump the per-project proposal queue (gatekeeper).
         await pumpFacts();
+        // §4.3/§13.4 standing-query watchers: windowed kinds + retirement, and
+        // auto-created watchers after a new day rollup lands.
+        await watcherTick();
       }
       // §10.6-4 cold-start backfill — also ambient, gated on enabled. Its own
       // drained state marker makes it run at most once per box.
@@ -892,6 +907,87 @@ export function createCtoEngine(deps = {}) {
     return verdictsEngine;
   }
 
+  // BET-1398 standing-query watchers (§4.3/§13.4): lazy single instance over
+  // the shared watchers store. Injected seams for usage-burn evaluation read
+  // today's ambient spend pace and the daily cap from the budget engine — the
+  // same sources the §13.3 watchdog consults — so a `usage-burn` watcher fires
+  // when the ambient burn is running hot relative to the cap fraction.
+  function getWatchers() {
+    if (watcherEngine) return watcherEngine;
+    watcherEngine = watchers ?? createStandingQueryEngine({
+      store: watchersStore,
+      ledger,
+      engineState,
+      now,
+      publish,
+      getSpendInWindow: async (windowMs) => {
+        const perHour =
+          budget && typeof budget.spendPerHourUsd === "function" ? await budget.spendPerHourUsd() : 0;
+        return perHour * (windowMs / HOUR_MS);
+      },
+      getCapUsd: async () => {
+        let cap = budgetAmbientCapUsd({});
+        try {
+          cap = budgetAmbientCapUsd((await configGet()) ?? {});
+        } catch {
+          /* keep default */
+        }
+        return cap;
+      },
+    });
+    return watcherEngine;
+  }
+
+  // Load the last `windowDays` (default 7, §13.4) day rollups so the watcher
+  // auto-creator can scan them for recurring themes. Reverse-chron, already
+  // oldest-first — the themes extractor filters by window start itself.
+  async function loadRecentDayRollups(windowDays = 7) {
+    const since = now() - windowDays * 24 * HOUR_MS;
+    let names = [];
+    try {
+      names = await fsp.readdir(rollupsStore.dirFor("day"));
+    } catch {
+      return [];
+    }
+    const out = [];
+    for (const name of names) {
+      if (!name.endsWith(".json")) continue;
+      let r;
+      try {
+        r = await rollupsStore.load("day", name.slice(0, -5));
+      } catch {
+        continue;
+      }
+      if (r && Array.isArray(r?.window) && typeof r.window[0] === "number" && r.window[0] >= since) {
+        out.push(r);
+      }
+    }
+    out.sort((a, b) => a.window[0] - b.window[0]);
+    return out;
+  }
+
+  // Watcher run growth per tick (enabled-gated, §13.4): evaluate the windowed
+  // kinds (usage-burn) + retirement, and after a new day rollup has landed run
+  // the auto-creation scan once per day (guarded by a day marker so it doesn't
+  // re-run every tick). Best-effort — never throws into the poller.
+  async function watcherTick() {
+    try {
+      await getWatchers().runTick();
+      const es = (await engineState.load()) ?? {};
+      const lastAutoDay = es?.watchers?.lastAutoDay ?? null;
+      const todayKey = budgetDayKey(now());
+      if (lastAutoDay === todayKey) return;
+      const dayRollups = await loadRecentDayRollups();
+      const result = await getWatchers().autoCreate(dayRollups);
+      await engineState.save({ ...es, watchers: { ...(es?.watchers || {}), lastAutoDay: todayKey } });
+      if (result.added.length > 0) {
+        await ledgerLog({ kind: "watcher.auto_created", count: result.added.length, signatures: result.added.map((a) => a.patternSignature) });
+      }
+    } catch {
+      /* watchers are best-effort — never take the engine down */
+    }
+  }
+
   // The facts sink (BET-1391 / §9.5): map verdict acceptance/rejection effects
   // on fact subjects back onto the fact sender's reliability counters — success
   // → confirmed, rejection → rejected. `open`/`expire` (importance/retention
@@ -1124,7 +1220,15 @@ export function createCtoEngine(deps = {}) {
           kind: row.kind,
           salience: row.salience,
           refs: row.refs,
+          ...(row.text ? { text: row.text } : {}),
         });
+        // §4.3/§13.4 standing-query watchers: evaluate the standing queries
+        // against this evidence event. Event-driven (NOT a poll loop); a match
+        // becomes a high-salience `watcher.hit` evidence event + B4 source.
+        // Fire-and-forget — a watcher must never break ingestion into the pump.
+        void getWatchers()
+          .evaluateEvent(row)
+          .catch(() => {});
       } catch {
         /* best-effort, never throw into the pump */
       }
@@ -1200,6 +1304,19 @@ export function createCtoEngine(deps = {}) {
     }
     // Load the persisted profile (§8.1) — deterministic, lazy, best-effort.
     void getProfile().init().catch(() => {});
+    // BET-1398: one-time migration of the superseded cto.json watcher poller's
+    // watches into the standing-query engine (idempotent — a marker in
+    // engine-state.json makes a re-deploy a no-op). Best-effort.
+    if (typeof legacyWatchesLoader === "function") {
+      void (async () => {
+        try {
+          const legacy = await legacyWatchesLoader();
+          await getWatchers().migrateLegacy(Array.isArray(legacy) ? legacy : []);
+        } catch {
+          /* best-effort */
+        }
+      })();
+    }
     startTimers();
     startCardTimer();
     // Publish the initial state once (fire-and-forget) so a subscriber that
@@ -1344,6 +1461,12 @@ export function createCtoEngine(deps = {}) {
     },
     get journal() {
       return getJournal();
+    },
+    // BET-1398 standing-query watchers: expose the engine's register/unregister/
+    // list so the on-call CTO read gateway re-points its watch/unwatch/
+    // list_watches verbs here (same confirm-mode contract for `watch`).
+    get watchers() {
+      return getWatchers();
     },
     get cards() {
       return cards;

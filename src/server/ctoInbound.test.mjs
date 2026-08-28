@@ -1,11 +1,13 @@
 // ctoInbound.test.mjs — On-call CTO inbound feed (BET-1165, issue 2/3).
 // Pure logic + injected I/O, no live tmux / opencode / multica / push:
 //   - inbound routing (live flag off → park; live on → inject; dedupe via seenId)
-//   - watcher tick with injected reads (fires on new + matching, no re-fire)
 //   - watch registry CRUD (engine confirm-gated, cto.json atomic store round-trip)
 //   - gate: confirm → allow via trustedActions; untrusted → needConfirmation;
 //     text-loop approve / reject re-dispatch
-//   - pure helpers (conditionKeywords / defaultConditionMatches / seenId / preview)
+//   - pure helpers (seenId / preview)
+//
+// The old watcher poller tests were removed in BET-1398 — the poller is
+// superseded by the event-driven standing-query engine (ctoWatchers.mjs).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -14,13 +16,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createCtoInbound,
-  createWatcherPoller,
   createCtoEngine,
   loadCtoStore,
   saveCtoStore,
-  conditionKeywords,
-  defaultConditionMatches,
-  defaultComputeSurfaceSeenId,
   computeConfirmId,
   buildPreview,
   stableHash,
@@ -323,105 +321,8 @@ test("read_inbox returns the inbox (filterable) without marking read or writing"
 });
 
 // ---------------------------------------------------------------------------
-// Watcher poller with injected reads
-// ---------------------------------------------------------------------------
-
-test("watcher tick fires inbound when condition matches and seenId is new; no re-fire on the same read", async () => {
-  const readOnce = { ok: true, data: { issues: [{ identifier: "BET-1", status: "critical", title: "P0 outage" }] } };
-  const fired = [];
-  const poller = createWatcherPoller({
-    loadWatches: async () => [
-      { id: "w1", surface: "multica", query: "q", condition: "a P0 opens", active: true, lastFiredAt: null },
-    ],
-    saveWatches: async () => {},
-    readSurface: async () => readOnce,
-    sendToInbound: async (input) => fired.push(input),
-  });
-  await poller.tick();
-  assert.equal(fired.length, 1);
-  assert.equal(fired[0].surface, "multica");
-  assert.equal(typeof fired[0].seenId, "string");
-  assert.ok(fired[0].payload.message.includes("P0"), "message carries the matching snippet");
-  // Same (unchanged) read on the next tick → seenId unchanged → no re-fire.
-  await poller.tick();
-  assert.equal(fired.length, 1);
-});
-
-test("watcher tick respects an inactive/disabled watch", async () => {
-  const fired = [];
-  const poller = createWatcherPoller({
-    loadWatches: async () => [
-      { id: "w1", surface: "multica", query: "q", condition: "a P0 opens", active: false, lastFiredAt: null },
-    ],
-    saveWatches: async () => {},
-    readSurface: async () => ({ ok: true, data: { issues: [{ identifier: "BET-1", status: "critical", title: "P0 outage" }] } }),
-    sendToInbound: async (input) => fired.push(input),
-  });
-  await poller.tick();
-  assert.equal(fired.length, 0);
-});
-
-test("watcher tick does not fire when the condition does not match", async () => {
-  const fired = [];
-  // read has no P0 and no keyword from the condition ("P0")
-  const poller = createWatcherPoller({
-    loadWatches: async () => [
-      { id: "w1", surface: "multica", query: "q", condition: "a P0 opens", active: true, lastFiredAt: null },
-    ],
-    saveWatches: async () => {},
-    readSurface: async () => ({ ok: true, data: { issues: [{ identifier: "BET-2", status: "todo", title: "chore" }] } }),
-    sendToInbound: async (input) => fired.push(input),
-  });
-  await poller.tick();
-  assert.equal(fired.length, 0);
-});
-
-test("watcher tick survives a failed surface read (skips the watch, keeps going)", async () => {
-  const fired = [];
-  let calls = 0;
-  const poller = createWatcherPoller({
-    loadWatches: async () => [
-      { id: "w1", surface: "multica", query: "q", condition: "a P0 opens", active: true, lastFiredAt: null },
-      { id: "w2", surface: "multica", query: "q2", condition: "a P0 opens", active: true, lastFiredAt: null },
-    ],
-    saveWatches: async () => {},
-    readSurface: async () => {
-      calls += 1;
-      if (calls === 1) throw new Error("surface down");
-      return { ok: true, data: { issues: [{ identifier: "BET-1", status: "critical", title: "P0 outage" }] } };
-    },
-    sendToInbound: async (input) => fired.push(input),
-  });
-  await poller.tick();
-  // w1's read threw (skipped, no throw out of the tick); w2's read succeeded.
-  assert.equal(fired.length, 1);
-});
-
-// ---------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------
-
-test("conditionKeywords strips stopwords and normalizes case", () => {
-  assert.deepEqual(conditionKeywords("a P0 opens"), ["p0"]);
-  assert.deepEqual(conditionKeywords("deploy failed"), ["deploy", "failed"]);
-  assert.deepEqual(conditionKeywords(""), []);
-});
-
-test("defaultConditionMatches is a keyword hit (case-insensitive) or true on empty condition", () => {
-  const read = { data: { issues: [{ identifier: "BET-1", title: "P0 Outage" }] } };
-  assert.equal(defaultConditionMatches("a P0 opens", read), true);
-  assert.equal(defaultConditionMatches("deploy failed", read), false);
-  assert.equal(defaultConditionMatches("", read), true);
-});
-
-test("defaultComputeSurfaceSeenId is stable for identical reads, differs for changed ones", () => {
-  const readA = { data: { issues: [{ identifier: "BET-1" }] } };
-  const readB = { data: { issues: [{ identifier: "BET-1" }, { identifier: "BET-2" }] } };
-  assert.equal(defaultComputeSurfaceSeenId(readA), defaultComputeSurfaceSeenId(readA));
-  assert.notEqual(defaultComputeSurfaceSeenId(readA), defaultComputeSurfaceSeenId(readB));
-  // An explicit seenId on the read always wins.
-  assert.equal(defaultComputeSurfaceSeenId({ seenId: "abc" }), "abc");
-});
 
 test("computeConfirmId is deterministic per (tool, args) and buildPreview summarizes", () => {
   assert.equal(computeConfirmId("watch", { surface: "multica" }), computeConfirmId("watch", { surface: "multica" }));

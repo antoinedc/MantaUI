@@ -64,6 +64,8 @@ function windowFromDetail(detail, kind, label) {
 export const kimiAdapter = {
   id: "kimi",
   providerIDs: [PROVIDER_ID],
+  // BET-1400 (§11.2): has plan windows (5h session + weekly) — reserve applies.
+  windowed: true,
 
   async detect({ readKey = defaultReadKey } = {}) {
     const key = await readKey();

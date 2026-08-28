@@ -1623,7 +1623,7 @@ void ensureMantaPlanAgent().catch((e) => console.error("[manta-plan] ensure fail
 let adaptiveCtoInstance = null;
 function getCtoEngine() {
   if (!adaptiveCtoInstance) {
-    adaptiveCtoInstance = cto.createCtoEngine({
+    const engine = cto.createCtoEngine({
       listProjects: () => tmux.listProjects(),
       listSessions: (dir) => oc.listSessions(dir),
       listMessages: (sid, opts) => oc.listMessages(sid, opts),
@@ -1633,7 +1633,17 @@ function getCtoEngine() {
       listStopped,
       searchMessages,
       configGet: () => local.configGet(),
+      // BET-1398: the read gateway's watch/unwatch/list_watches verbs re-point
+      // to the adaptive engine's standing-query watchers (persistent,
+      // event-driven over the evidence stream). `adaptiveCto` is created
+      // later in module scope; these closures only run at dispatch time.
+      watchers: {
+        register: (input) => adaptiveCto.watchers.register(input),
+        unregister: (id) => adaptiveCto.watchers.unregister(id),
+        list: () => adaptiveCto.watchers.list(),
+      },
     });
+    adaptiveCtoInstance = engine;
   }
   return adaptiveCtoInstance;
 }
@@ -1864,6 +1874,10 @@ const adaptiveCto = ctoEngine.createCtoEngine({
   getDb,
   backfillRunEphemeral: runEphemeral,
   cardFireNotify: (args) => push.fireNotify(args),
+  // BET-1398: one-time migration of the superseded cto.json watcher poller's
+  // watches into the standing-query engine (idempotent, marker-guarded).
+  legacyWatchesLoader: async () =>
+    Array.isArray(cto.loadCtoStore()?.watches) ? cto.loadCtoStore().watches : [],
 });
 adaptiveCto.start();
 
@@ -2096,36 +2110,10 @@ function setCallActive(active, engine) {
 // callWs.mjs where it is unit-testable.
 const callRegistry = createCallRegistry();
 
-// Which read a watcher's surface maps to. NATIVE surfaces (schedule, delegate)
-// go through the box's own stores. `session` needs no poller read — session
-// events arrive directly via send_to_cto.
-async function ctoSurfaceRead(surface, query) {
-  switch (surface) {
-    case "schedule":
-      return { ok: true, data: { jobs: await listJobs() } };
-    case "delegate":
-      return { ok: true, data: { jobs: await loadDelegateJobs() } };
-    case "session":
-    default:
-      return { ok: true, data: {} };
-  }
-}
-
-// Watcher poller (Issue 2): probes each active watch against its surface's
-// existing read and routes a matching + unseen event into the inbound funnel.
-// In-flight-guarded + timer.unref(), mirroring the schedule/delegate pollers.
-const watcherPoller = cto.createWatcherPoller({
-  loadWatches: async () => Array.isArray(cto.loadCtoStore()?.watches) ? cto.loadCtoStore().watches : [],
-  saveWatches: async (watches) => {
-    const store = cto.loadCtoStore();
-    store.watches = Array.isArray(watches) ? watches : [];
-    await cto.saveCtoStore(store);
-  },
-  readSurface: ctoSurfaceRead,
-  sendToInbound: (input) => ctoInbound.inbound(input),
-});
-// eslint-disable-next-line no-unused-vars
-const stopWatcherPoller = watcherPoller.start({ intervalMs: 15_000 });
+// BET-1398: the old surface-probing watcher poller is removed — watchers are
+// now the standing-query engine evaluated over the CTO's evidence stream (see
+// ctoWatchers.mjs / the adaptive engine's `watchers`). `send_to_cto` notes
+// still flow through createCtoInbound().inbound directly.
 
 // Sweep expired artifact-mailbox files (TTL past) every 5 min — non-destructive
 // otherwise: downloads do not delete, the sweep is what reclaims disk.
