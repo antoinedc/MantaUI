@@ -614,33 +614,6 @@ export function createCtoEngine(deps = {}) {
     return rollupRunner;
   }
 
-  // Compute, per level, the windows whose close was discovered since the last
-  // finalized cursor (a window closes once now ≥ its end). Returns { level: [windows] }.
-  async function dueRollupWindows() {
-    let payload;
-    try {
-      payload = await engineState.load();
-    } catch {
-      payload = null;
-    }
-    const cursor = payload?.rollupCursor ?? {};
-    const t = now();
-    const due = {};
-    for (const level of ROLLUP_LEVELS) {
-      const duration = ROLLUP_LEVEL_MS[level];
-      let start = cursor[level] != null ? cursor[level] : rollupWindowFor(level, t)[0];
-      const list = [];
-      let guard = 0;
-      while (start + duration <= t && guard < 2000) {
-        list.push(rollupWindowFor(level, start));
-        start += duration;
-        guard += 1;
-      }
-      due[level] = list;
-    }
-    return due;
-  }
-
   // Fold any closed windows into rollups (respecting enabled/paused via the
   // tick's gate, and preempting the batch between calls when the user is
   // present). Advances the persisted cursor only across windows actually
@@ -650,18 +623,32 @@ export function createCtoEngine(deps = {}) {
     try {
       const runner = getRollupRunner();
       if (!runner) return;
-      const due = await dueRollupWindows();
       const payload = (await engineState.load()) || {};
       const cursor = { ...(payload.rollupCursor ?? {}) };
-      let changed = false;
+      const t = now();
+      let cursorInit = false;
       for (const level of ROLLUP_LEVELS) {
-        const windows = due[level];
-        if (!windows || windows.length === 0) continue;
-        const outcomes = await runner.processDue(windows.map((w) => ({ level, window: w })));
+        if (cursor[level] == null) {
+          cursor[level] = rollupWindowFor(level, t)[0];
+          cursorInit = true;
+        }
+      }
+      let changed = cursorInit;
+      for (const level of ROLLUP_LEVELS) {
+        const duration = ROLLUP_LEVEL_MS[level];
+        let start = cursor[level];
+        const list = [];
+        let guard = 0;
+        while (start + duration <= t && guard < 2000) {
+          list.push(rollupWindowFor(level, start));
+          start += duration;
+          guard += 1;
+        }
+        if (list.length === 0) continue;
+        const outcomes = await runner.processDue(list.map((w) => ({ level, window: w })));
         if (outcomes && outcomes.length > 0) {
-          const last = outcomes[outcomes.length - 1];
-          const next = last.window[1];
-          if (cursor[level] === undefined || next > cursor[level]) {
+          const next = outcomes[outcomes.length - 1].window[1];
+          if (next > cursor[level]) {
             cursor[level] = next;
             changed = true;
           }

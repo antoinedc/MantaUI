@@ -11,12 +11,13 @@ import {
   RATE_LIMITS,
 } from "./ctoEngine.mjs";
 import { createSegmenter } from "./ctoSegments.mjs";
+import { windowFor } from "./ctoRollups.mjs";
 
 // Build a fully-injected engine harness: no real fs, no real stores, a fake
 // clock we can advance. Everything the engine touches goes through these
 // seams, so the tests assert pure behavior. `clock` is shared so the watchdog
 // and the engine observe the same time.
-function makeHarness({ ctoEnabled = false, counts = {} } = {}) {
+function makeHarness({ ctoEnabled = false, counts = {}, rollups } = {}) {
   const clock = { ms: 1_000_000 };
   const now = () => clock.ms;
   const ledgerRows = [];
@@ -25,6 +26,7 @@ function makeHarness({ ctoEnabled = false, counts = {} } = {}) {
   let published = [];
   let currentConfig = { ctoEnabled };
   const cardCalls = [];
+  const state = { v: 1, pendingBlockers: [] };
 
   const engine = createCtoEngine({
     configGet: async () => ({ ...currentConfig }),
@@ -40,11 +42,14 @@ function makeHarness({ ctoEnabled = false, counts = {} } = {}) {
       ingestHealthEscalations: async () => ({}),
     },
     engineState: {
-      load: async () => ({ v: 1, pendingBlockers }),
+      load: async () => ({ ...state }),
       save: async (payload) => {
         pendingBlockers = Array.isArray(payload?.pendingBlockers)
           ? payload.pendingBlockers
           : [];
+        state.pendingBlockers = pendingBlockers;
+        if (payload?.rollupCursor) state.rollupCursor = payload.rollupCursor;
+        if (payload?.segmentGMinutes != null) state.segmentGMinutes = payload.segmentGMinutes;
       },
     },
     killSwitch: {
@@ -64,6 +69,7 @@ function makeHarness({ ctoEnabled = false, counts = {} } = {}) {
       tonightCount: 0,
       ...counts,
     }),
+    ...(rollups ? { rollups } : {}),
   });
 
   return {
@@ -72,6 +78,7 @@ function makeHarness({ ctoEnabled = false, counts = {} } = {}) {
     ledgerRows,
     published,
     cardCalls,
+    state,
     get pendingBlockers() {
       return pendingBlockers;
     },
@@ -475,3 +482,59 @@ test("cto-owned sessions are never segmented", async () => {
   assert.equal(stores.map.size, 0, "cto-owned work is excluded from segmentation");
 });
 
+
+// ---------------------------------------------------------------------------
+// BET-1381 §5.3 rollups — window-close timers + persisted cursor on the tick
+// ---------------------------------------------------------------------------
+
+test("tick folds a closed hour window into the rollup runner and persists the cursor", async () => {
+  const d = windowFor("day", Date.UTC(2026, 0, 15, 12, 0, 0))[0];
+  const processed = [];
+  const runner = {
+    processDue: async (windows) => {
+      processed.push(...windows);
+      // mark every window finalized
+      return windows.map((w) => ({ saved: true, level: w.level, window: w.window, id: String(w.window[0]) }));
+    },
+  };
+  const h = makeHarness({ ctoEnabled: true, rollups: runner });
+  // Position the clock at the top of an hour; cursor defaults there (nothing due).
+  h.clock.ms = windowFor("hour", d)[0];
+  await h.engine.tick();
+  assert.equal(processed.length, 0, "current (not-yet-closed) window is not due");
+
+  // Advance 90 minutes → the first hour has closed → exactly one hour is due.
+  h.advance(90 * 60_000);
+  await h.engine.tick();
+  assert.equal(processed.length, 1);
+  assert.equal(processed[0].level, "hour");
+  assert.equal(processed[0].window[0], windowFor("hour", d)[0]);
+
+  // The cursor advanced to the closed hour's end; the next tick yields nothing new.
+  assert.equal(h.state.rollupCursor.hour, windowFor("hour", d)[1]);
+  await h.engine.tick();
+  assert.equal(processed.length, 1);
+});
+
+test("rollups do not run while paused", async () => {
+  const d = windowFor("day", Date.UTC(2026, 0, 15, 12, 0, 0))[0];
+  let ran = false;
+  const runner = {
+    processDue: async (windows) => (windows.length ? ((ran = true), windows) : []),
+  };
+  const h = makeHarness({ ctoEnabled: true, rollups: runner });
+  // Tick at the top of the hour so the cursor initializes and persists.
+  h.clock.ms = windowFor("hour", d)[0];
+  await h.engine.tick();
+  // Advance an hour → the first hour has closed → rollups run.
+  h.advance(60 * 60_000);
+  await h.engine.tick();
+  assert.equal(ran, true);
+
+  // Now pause, advance another hour, tick → no rollup runs.
+  await h.engine.hardPause({ reason: "test" });
+  h.advance(60 * 60_000);
+  ran = false;
+  await h.engine.tick();
+  assert.equal(ran, false);
+});
