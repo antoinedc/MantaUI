@@ -916,4 +916,172 @@ final class TerminalStatusTests: XCTestCase {
         let body = out.dropFirst(2).dropLast(2)
         XCTAssertTrue(body.allSatisfy { $0 == "\u{1F600}" || $0 == " " || $0 == "\u{2026}" })
     }
+
+    // MARK: - MarkdownBlockSplitter (block-level quoting)
+    //
+    // The splitter is the pure core of block-level quoting: it cuts an assistant
+    // message into top-level blocks, marking the atomic (non-selectable) ones
+    // (quotes / fenced code / GFM tables) so MantaProse can give them their own
+    // long-press menu. The two invariants every test leans on: block kinds are
+    // correctly attributed, and concatenating every block's source reconstructs
+    // the original exactly (the round-trip).
+
+    private func blocks(_ markdown: String) -> [MarkdownProseBlock] {
+        MarkdownBlockSplitter.split(markdown)
+    }
+
+    private func assertRoundTrip(_ markdown: String, file: StaticString = #filePath, line: UInt = #line) {
+        let joined = MarkdownBlockSplitter.split(markdown).map(\.source).joined()
+        XCTAssertEqual(joined, markdown, "blocks must reconstruct the source exactly", file: file, line: line)
+    }
+
+    func testSplitterPlainProseOnlyIsOneProseRun() {
+        let source = "First paragraph.\n\nSecond paragraph with **bold** and `code`.\n\n- one\n- two\n"
+        let out = blocks(source)
+        XCTAssertEqual(out.count, 1)
+        XCTAssertEqual(out.first?.kind, .prose)
+        XCTAssertEqual(out.first?.source, source)
+        assertRoundTrip(source)
+    }
+
+    func testSplitterProseOnlyNoTrailingNewline() {
+        let source = "just one line"
+        let out = blocks(source)
+        XCTAssertEqual(out.count, 1)
+        XCTAssertEqual(out.first?.kind, .prose)
+        assertRoundTrip(source)
+    }
+
+    func testSplitterQuoteBetweenTwoParagraphs() {
+        let source = "para one\n\n> quoted text\n\npara two"
+        let out = blocks(source)
+        XCTAssertEqual(out.count, 3)
+        XCTAssertEqual(out[0].kind, .prose)
+        XCTAssertEqual(out[1].kind, .atomic(.blockQuote))
+        XCTAssertTrue(out[1].source.contains("> quoted text"))
+        XCTAssertEqual(out[2].kind, .prose)
+        assertRoundTrip(source)
+    }
+
+    func testSplitterFencedCodeBlock() {
+        let source = "intro\n\n```swift\nlet a = 1\n```\n\noutro"
+        let out = blocks(source)
+        XCTAssertEqual(out.count, 3)
+        XCTAssertEqual(out[0].kind, .prose)
+        XCTAssertEqual(out[1].kind, .atomic(.codeBlock))
+        XCTAssertEqual(out[1].source, "```swift\nlet a = 1\n```\n")
+        XCTAssertEqual(out[2].kind, .prose)
+        assertRoundTrip(source)
+    }
+
+    func testSplitterTildeFencedCodeBlock() {
+        let source = "intro\n\n~~~\n> inside a tilde fence\n~~~\n"
+        let out = blocks(source)
+        XCTAssertEqual(out.count, 2)
+        XCTAssertEqual(out[0].kind, .prose)
+        XCTAssertEqual(out[1].kind, .atomic(.codeBlock))
+        XCTAssertTrue(out[1].source.hasPrefix("~~~"))
+        XCTAssertTrue(out[1].source.hasSuffix("~~~\n"))
+        assertRoundTrip(source)
+    }
+
+    func testSplitterTable() {
+        let source = "before\n\n| Latency | On-device |\n|---|---|\n| record | live |\n\nafter"
+        let out = blocks(source)
+        XCTAssertEqual(out.count, 3)
+        XCTAssertEqual(out[0].kind, .prose)
+        XCTAssertEqual(out[1].kind, .atomic(.table))
+        XCTAssertEqual(out[1].source, "| Latency | On-device |\n|---|---|\n| record | live |\n")
+        XCTAssertEqual(out[2].kind, .prose)
+        assertRoundTrip(source)
+    }
+
+    func testSplitterTableWithAlignmentDelimiter() {
+        let source = "| a | b |\n|:---:|:---:|\n| 1 | 2 |"
+        let out = blocks(source)
+        XCTAssertEqual(out.count, 1)
+        XCTAssertEqual(out.first?.kind, .atomic(.table))
+        assertRoundTrip(source)
+    }
+
+    func testSplitterQuoteLineInsideFenceDoesNotSplit() {
+        let source = "```\n> not a quote\n```\n\nafter"
+        let out = blocks(source)
+        XCTAssertEqual(out.count, 2)
+        XCTAssertEqual(out[0].kind, .atomic(.codeBlock))
+        XCTAssertTrue(out[0].source.contains("> not a quote"))
+        XCTAssertEqual(out[1].kind, .prose)
+        XCTAssertFalse(out.contains { $0.kind == .atomic(.blockQuote) })
+        assertRoundTrip(source)
+    }
+
+    func testSplitterPipeLineInsideFenceDoesNotSplitIntoTable() {
+        let source = "```\n| not a table |\n|---|---|\n```\n\nx"
+        let out = blocks(source)
+        XCTAssertEqual(out.count, 2)
+        XCTAssertEqual(out[0].kind, .atomic(.codeBlock))
+        XCTAssertTrue(out[0].source.contains("| not a table |"))
+        XCTAssertEqual(out[1].kind, .prose)
+        XCTAssertFalse(out.contains { $0.kind == .atomic(.table) })
+        assertRoundTrip(source)
+    }
+
+    func testSplitterConsecutiveQuotesAreOneBlock() {
+        let source = "> one\n> two\n\npara"
+        let out = blocks(source)
+        XCTAssertEqual(out.count, 2)
+        XCTAssertEqual(out[0].kind, .atomic(.blockQuote))
+        XCTAssertEqual(out[0].source, "> one\n> two\n")
+        XCTAssertEqual(out[1].kind, .prose)
+        assertRoundTrip(source)
+    }
+
+    func testSplitterNestedQuoteStillOneBlock() {
+        let source = "> outer\n>> inner\n\npara"
+        let out = blocks(source)
+        XCTAssertEqual(out.count, 2)
+        XCTAssertEqual(out[0].kind, .atomic(.blockQuote))
+        XCTAssertEqual(out[0].source, "> outer\n>> inner\n")
+        XCTAssertEqual(out[1].kind, .prose)
+        assertRoundTrip(source)
+    }
+
+    func testSplitterLazyQuoteContinuationBecomesProse() {
+        // A non-`>` continuation line following a quote is NOT part of the quote
+        // block under this splitter's literal definition (runs of lines starting
+        // with up-to-3 spaces then `>`). It becomes prose. This is a documented
+        // limitation of the top-level recognizer.
+        let source = "> quoted\nlazy continuation\n\npara"
+        let out = blocks(source)
+        XCTAssertEqual(out.count, 2)
+        XCTAssertEqual(out[0].kind, .atomic(.blockQuote))
+        XCTAssertEqual(out[0].source, "> quoted\n")
+        // The non-`>` continuation and everything after it coalesce into ONE
+        // prose run (prose is only broken by an atomic block).
+        XCTAssertEqual(out[1].kind, .prose)
+        XCTAssertEqual(out[1].source, "lazy continuation\n\npara")
+        assertRoundTrip(source)
+    }
+
+    func testSplitterEmptyString() {
+        XCTAssertEqual(blocks(""), [])
+        XCTAssertEqual(blocks("").map(\.source).joined(), "")
+    }
+
+    func testSplitterRoundTripPropertyOverFixtures() {
+        let fixtures = [
+            "First paragraph.\n\nSecond paragraph **bold** `code`.\n\n- one\n- two\n",
+            "para one\n\n> quoted text\n\npara two",
+            "intro\n\n```swift\nlet a = 1\n```\n\noutro",
+            "before\n\n| Latency | On-device |\n|---|---|\n| record | live |\n\nafter",
+            "```\n> not a quote\n```\n\nafter",
+            "```\n| not a table |\n|---|---|\n```\n\nx",
+            "> one\n> two\n\npara",
+            "> outer\n>> inner\n\npara",
+            "mixed\n\n> a quote\n\n```js\nfunction f() { return 1 }\n```\n\n| c1 | c2 |\n|---|---|\n| v1 | v2 |\n\ntail"
+        ]
+        for fixture in fixtures {
+            assertRoundTrip(fixture)
+        }
+    }
 }

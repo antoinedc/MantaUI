@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import MarkdownView
+import UIKit
 
 // Shared helper: map a generated font-weight metric (500 / 600 from
 // --weight-medium / --weight-semibold) onto the nearest Font.Weight. The
@@ -68,9 +69,73 @@ struct UserBand: View {
 struct MantaProse: View {
     let text: String
     let tokens: Tokens
+    /// Block-quote routing. Atomic blocks (quotes / code / tables — which the
+    /// library renders as opaque single characters, so their text can't be
+    /// selected the way a paragraph can) get a long-press context menu with a
+    /// "Quote" / "Quote in new session" item when this is non-nil. Read-only
+    /// surfaces pass nil, which renders atomic blocks with NO context menu.
+    let onQuote: ((String, QuoteDestination) -> Void)?
+
+    init(text: String, tokens: Tokens, onQuote: ((String, QuoteDestination) -> Void)? = nil) {
+        self.text = text
+        self.tokens = tokens
+        self.onQuote = onQuote
+    }
 
     var body: some View {
-        MarkdownText(text)
+        // Split the message into top-level blocks and stack them. The library
+        // already emits its own block spacing, so the stack uses spacing 0 and
+        // relies on each block's own padding — a single MarkdownText in the
+        // prose-only case is unchanged, and atomic blocks render identically to
+        // prose but inside a container we own (which is what carries the
+        // context menu).
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(MarkdownBlockSplitter.split(text).enumerated()), id: \.offset) { _, block in
+                blockView(block)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, Metrics.spacing.sp3)
+        .padding(.bottom, Metrics.spacing.sp3)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("assistant-prose")
+    }
+
+    @ViewBuilder
+    private func blockView(_ block: MarkdownProseBlock) -> some View {
+        switch block.kind {
+        case .prose:
+            // Prose stays fully selectable and gets no context menu.
+            markdownBody(block.source)
+        case .atomic:
+            // GESTURE HAZARD: the block renders inside the library's text view,
+            // which owns its own long-press text-selection gesture. We wrap it
+            // in a container WE own and disable hit testing on the INNER
+            // MarkdownText, so a long-press passes through to the container and
+            // the context menu wins over the library's selection gesture. This
+            // is an accepted trade-off: it disables link taps inside quotes /
+            // code blocks / tables.
+            if let onQuote {
+                VStack(alignment: .leading, spacing: 0) {
+                    markdownBody(block.source)
+                        .allowsHitTesting(false)
+                }
+                .contentShape(Rectangle())
+                .contextMenu { atomicMenu(block.source, onQuote: onQuote) }
+            } else {
+                VStack(alignment: .leading, spacing: 0) {
+                    markdownBody(block.source)
+                        .allowsHitTesting(false)
+                }
+                .contentShape(Rectangle())
+            }
+        }
+    }
+
+    /// The exact modifier chain the single MarkdownText used, applied to one
+    /// block's source so styling is identical to the pre-split renderer.
+    private func markdownBody(_ source: String) -> some View {
+        MarkdownText(source)
             .font(.manta(size: Metrics.type.body), for: .body)
             .font(.manta(size: Metrics.type.body + 4, weight: .semibold), for: .h1)
             .font(.manta(size: Metrics.type.body + 2, weight: .semibold), for: .h2)
@@ -98,10 +163,27 @@ struct MantaProse: View {
             .tint(tokens.border, for: .blockQuote)
             .markdownTableStyle(MantaMarkdownTableStyle(tokens: tokens))
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, Metrics.spacing.sp3)
-            .padding(.bottom, Metrics.spacing.sp3)
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("assistant-prose")
+    }
+
+    @ViewBuilder
+    private func atomicMenu(_ source: String, onQuote: @escaping (String, QuoteDestination) -> Void) -> some View {
+        // The RAW source substring is passed; ChatScreen.quote(_:into:) already
+        // runs it through QuoteText.buildQuoteBlock.
+        Button {
+            UIPasteboard.general.string = source
+        } label: {
+            Label("Copy", systemImage: "doc.on.doc")
+        }
+        Button {
+            onQuote(source, .thisSession)
+        } label: {
+            Label("Quote", systemImage: "text.quote")
+        }
+        Button {
+            onQuote(source, .newSession)
+        } label: {
+            Label("Quote in new session", systemImage: "arrow.triangle.branch")
+        }
     }
 }
 

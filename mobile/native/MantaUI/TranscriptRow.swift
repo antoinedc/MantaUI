@@ -320,7 +320,10 @@ func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens, cards: Transc
         UserBand(text: text, tokens: tokens)
             .padding(.bottom, Metrics.spacing.sp4)
     case .prose(let text, _):
-        MantaProse(text: text, tokens: tokens)
+        // Pass the OPTIONAL onQuote (not the inert fallback `actions`) so
+        // read-only surfaces (subagent drill-in, capture fixture) attach no
+        // context menu to atomic blocks — there is no composer to quote into.
+        MantaProse(text: text, tokens: tokens, onQuote: cards?.onQuote)
     case .file(let attachment):
         // The voice-note player sits directly under the user band it belongs
         // to: 12px horizontal, 14px below. Image and generic-file rendering are
