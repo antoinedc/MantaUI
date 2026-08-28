@@ -160,10 +160,12 @@ export async function computeHealthStats({
   for (const v of verdicts) {
     if (v?.ts == null || v.ts < verdictCutoff) continue;
     const e = effectsForVerdict(v.verdict, v.never === true);
-    if (e.success || e.rejection) {
-      decided += 1;
-      if (e.success) accepted += 1;
-    }
+    if (!(e.success || e.rejection)) continue;
+    // A rejection signal (incl. a `never`-flagged verdict) is decided but NOT
+    // accepted; only an unambiguous success (+ no rejection) counts as accepted,
+    // so a never-again judgment never reads as a confirm.
+    decided += 1;
+    if (e.success && !e.rejection) accepted += 1;
   }
   const acceptRate = decided > 0 ? accepted / decided : 0;
   stats.push({
