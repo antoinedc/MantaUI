@@ -235,7 +235,7 @@ struct SessionListView: View {
 
     private var list: some View {
         List {
-            ForEach(filteredProjects) { project in
+            ForEach(Array(filteredProjects.enumerated()), id: \.element.id) { index, project in
                 Section {
                     ForEach(rowEntries(project)) { entry in
                         row(project: project, entry: entry)
@@ -251,12 +251,21 @@ struct SessionListView: View {
                             )
                     }
                 } header: {
-                    groupHeader(project)
+                    groupHeader(project, isFirst: index == 0)
                 }
             }
         }
         .listStyle(.plain)
-        .listSectionSpacing(Metrics.spacing.sp6)
+        // Group separation is owned by `groupHeader`, NOT by the list. A
+        // `listSectionSpacing` of sp6 also applies ABOVE THE FIRST section, so a
+        // value whose job is "distance between two groups" was doubling as
+        // padding at the top of the list — measured 51pt of dead canvas between
+        // the pinned filter strip and the first group header. Setting it to 0
+        // and paying the gap per-header (every group except the first) keeps the
+        // between-group rhythm identical while letting the first header sit up
+        // under the header block.
+        .listSectionSpacing(0)
+        .contentMargins(.top, 0, for: .scrollContent)
         .scrollContentBackground(.hidden)
         .background(tokens.canvas)
         .environment(\.defaultMinListRowHeight, Metrics.type.listRowMinH)
@@ -326,7 +335,7 @@ struct SessionListView: View {
     }
 
     @ViewBuilder
-    private func groupHeader(_ project: MantaProject) -> some View {
+    private func groupHeader(_ project: MantaProject, isFirst: Bool) -> some View {
         let running = store.runningCount(in: project)
         // The total chip counts VISIBLE windows: hidden background-job rows are
         // no longer counted, matching the running chip (BET-1213).
@@ -342,7 +351,10 @@ struct SessionListView: View {
             }
             chip("\(visibleCount)", fg: tokens.tx4, bg: tokens.fill)
         }
-        .padding(.top, Metrics.type.listGroupAbove)
+        // `isFirst` carries the former list-level section spacing: every group
+        // but the first keeps the sp6 separation from the group above it, while
+        // the first sits flush under the pinned filter strip.
+        .padding(.top, Metrics.type.listGroupAbove + (isFirst ? 0 : Metrics.spacing.sp6))
         .padding(.bottom, Metrics.type.listGroupBelow)
         .padding(.horizontal, Metrics.spacing.sp3)
         .frame(maxWidth: .infinity, alignment: .leading)
