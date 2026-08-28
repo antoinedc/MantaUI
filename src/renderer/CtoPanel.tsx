@@ -134,7 +134,7 @@ function BackfillCard({ state }: { state: CtoState | null }) {
       data-cto-card="learning"
     >
       <div className="flex items-center gap-2">
-        <span className="rounded-full bg-inset px-2 py-0.5 text-xs font-medium text-text-muted">
+        <span className="rounded-full bg-fill px-2 py-1 text-xs font-medium text-text-muted">
           learning
         </span>
         {view.stopped ? (
@@ -163,7 +163,7 @@ function BackfillCard({ state }: { state: CtoState | null }) {
             aria-valuenow={Math.round(view.pct * 100)}
             aria-valuemin={0}
             aria-valuemax={100}
-            className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-inset"
+            className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-fill"
           >
             <div
               className="h-full rounded-full bg-info"
