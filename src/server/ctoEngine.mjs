@@ -88,6 +88,13 @@ import {
 } from "./ctoRollups.mjs";
 import { buildFactProposal, createFactsEngine, VERIFY_CYCLE_MS, senderKey, senderReliability } from "./ctoFacts.mjs";
 import { formatFactsBlock } from "./ctoSessions.mjs";
+import {
+  ambientCapUsd as budgetAmbientCapUsd,
+  createCtoBudget,
+  dayKey as budgetDayKey,
+  isWorkShedInThrifty,
+  tierAllows as budgetTierAllows,
+} from "./ctoBudget.mjs";
 
 // Actor tag stamped on every engine RPC call / ledger row (spec §3.3).
 export const ACTOR = "cto";
@@ -302,10 +309,18 @@ export function createCtoEngine(deps = {}) {
     // the shared `verdicts.json` store). The verdict engine + facts sink are
     // constructed below from it.
     verdicts = verdictsStore,
+    // BET-1388 economics (§10.6-6/§12.1/§12.2/§13.3): the ambient-spend budget
+    // accessor (defaults to the real budget.json store via createCtoBudget).
+    // beginEphemeral consults it for the independent HARD CAP before every
+    // ambient model call; reportAmbientSpend records each run's spend and flips
+    // thrifty when the cap is crossed. `tier` is the A12 dial (default low).
+    budget = createCtoBudget(),
+    tierGet = async () => "low",
   } = deps;
 
   let disposed = false;
   let thrifty = false;
+  let thriftyAtDay = null; // local-day key thrifty was set on (BET-1388 auto-clear)
   let selfPaused = false;
   let enabled = false;
   let heartbeatAt = now();
@@ -445,6 +460,8 @@ export function createCtoEngine(deps = {}) {
         await syncState();
         return;
       }
+      // §10.6-6 BET-1388: thrifty auto-clears at the daily budget reset.
+      await maybeClearThrifty();
       // §5.3 rollups — ambient background work, gated on enabled like any other.
       if (enabledNow) {
         await finalizeRollups();
@@ -609,6 +626,7 @@ export function createCtoEngine(deps = {}) {
     const next = !!value;
     const changed = next !== thrifty;
     thrifty = next;
+    thriftyAtDay = next ? budgetDayKey(now()) : thriftyAtDay;
     if (changed) {
       await ledgerLog({
         kind: next ? "cto.thrifty_on" : "cto.thrifty_off",
@@ -618,6 +636,41 @@ export function createCtoEngine(deps = {}) {
     }
     await syncState();
     return { ok: true, changed };
+  }
+
+  // BET-1388 (§10.6-6/§12.1): record an ambient model call's spend into budget
+  // (wired as runEphemeral's reportCost seam), and flip thrifty if the record
+  // crosses today's cap — shedding starts even if no further call is blocked.
+  // Metering is best-effort: a budget failure never breaks the run.
+  async function reportAmbientSpend({ model, tokens } = {}) {
+    try {
+      await budget.record({ model, tokens, nowMs: now() });
+    } catch {
+      /* best-effort */
+    }
+    let cap = budgetAmbientCapUsd({});
+    try {
+      cap = budgetAmbientCapUsd((await configGet()) ?? {});
+    } catch {
+      /* keep default */
+    }
+    try {
+      if (await budget.isCapHit(cap)) {
+        await setThrifty(true, { reason: "cap_hit", source: "cap" });
+      }
+    } catch {
+      /* best-effort */
+    }
+    return { ok: true };
+  }
+
+  // BET-1388 (§10.6-6): auto-clear thrifty once a local midnight passes since
+  // it was set (the daily budget reset). Runs from the tick.
+  async function maybeClearThrifty() {
+    if (!thrifty || !thriftyAtDay) return;
+    if (budgetDayKey(now()) !== thriftyAtDay) {
+      await setThrifty(false, { reason: "daily_reset", source: "engine" });
+    }
   }
 
   // Exceeding a rate limit pauses the engine + raises a health warning (§3.3
@@ -650,6 +703,27 @@ export function createCtoEngine(deps = {}) {
     const { enabled: enabledNow, paused } = await gateContext();
     if (!enabledNow) return { ok: false, error: "cto_disabled" };
     if (paused) return { ok: false, error: "cto_paused" };
+    // BET-1388 (§12.1): the independent HARD CAP — checked before EVERY ambient
+    // model call, at every tier, regardless of the tier dial. Once today's
+    // ambient spend reaches the cap, no new ambient session is created (even
+    // the "kept to the last token" work stops at the cap). A cap hit also flips
+    // the engine thrifty (§10.6-6). A budget read failure never opens an
+    // unchecked writer — we default to the configured cap and treat a failed
+    // read as non-hit (the run proceeds; the meter stays best-effort).
+    let cap = budgetAmbientCapUsd({});
+    try {
+      cap = budgetAmbientCapUsd((await configGet()) ?? {});
+    } catch {
+      /* keep default */
+    }
+    try {
+      if (await budget.isCapHit(cap)) {
+        await setThrifty(true, { reason: "cap_hit", source: "cap" });
+        return { ok: false, error: "cto_cap_hit" };
+      }
+    } catch {
+      /* a failed cap read must not block ambient work */
+    }
     if (track.ephemeral >= rateLimits.concurrentEphemeral) {
       await exceedRateLimit("concurrentEphemeral");
       return { ok: false, error: "rate_limit:concurrentEphemeral" };
@@ -721,7 +795,16 @@ export function createCtoEngine(deps = {}) {
     const gate = await beginEphemeral();
     if (!gate.ok) return { ok: false, gated: true, error: gate.error };
     try {
-      return runEphemeral ? await runEphemeral(data) : { ok: false, gated: true };
+      // BET-1388: the engine-wrapped ambient model calls report their spend to
+      // the budget via reportAmbientSpend. The rollup runner / facts engine
+      // call runEphemeral without their own deps, so the reportCost seam is
+      // injected here.
+      return runEphemeral
+        ? await runEphemeral({
+            ...data,
+            deps: { ...(data?.deps || {}), reportCost: reportAmbientSpend },
+          })
+        : { ok: false, gated: true };
     } finally {
       gate.release?.();
     }
@@ -840,6 +923,8 @@ export function createCtoEngine(deps = {}) {
         }
       }
       let changed = cursorInit;
+      // BET-1388 §12.2 rung 4: shed hourly rollups while thrifty (§10.6-6).
+      const shedHourly = thrifty;
       for (const level of ROLLUP_LEVELS) {
         const duration = ROLLUP_LEVEL_MS[level];
         let start = cursor[level];
@@ -851,6 +936,14 @@ export function createCtoEngine(deps = {}) {
           guard += 1;
         }
         if (list.length === 0) continue;
+        if (shedHourly && level === "hour") {
+          // No hour reduces while thrifty; advance the cursor across the closed
+          // windows so they are never re-attempted later. The next DAY reduce
+          // reconstructs the missing hours from segments (ctoRollups).
+          cursor[level] = list[list.length - 1].window[1];
+          changed = true;
+          continue;
+        }
         const outcomes = await runner.processDue(list.map((w) => ({ level, window: w })));
         if (outcomes && outcomes.length > 0) {
           const next = outcomes[outcomes.length - 1].window[1];
@@ -1193,6 +1286,10 @@ export function createCtoEngine(deps = {}) {
     checkCanCreateSession,
     beginEphemeral,
     beginDelegateJob,
+    reportAmbientSpend,
+    // BET-1388 tier gating (§3.3): pure consult; reads the A12 dial via the
+    // injected tierGet (default low). Exposed so P2 features gate on it.
+    tierAllowsFeature: async (feature) => budgetTierAllows(await tierGet(), feature),
     observeEvent,
     drainInbox,
     getPresence,

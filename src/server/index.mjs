@@ -137,6 +137,7 @@ import { endpointSummary as routingEndpointSummary, providerTokenTotals, ROUTING
 import * as appControl from "./appControl.mjs";
 import * as cto from "./cto.mjs";
 import * as ctoEngine from "./ctoEngine.mjs";
+import * as ctoBudget from "./ctoBudget.mjs";
 import { ledgerStore, engineStateStore, budgetStore, segmentsStore, verdictsStore } from "./ctoStores.mjs";
 import { computeHealthStats } from "./ctoHealth.mjs";
 import { runEphemeral, createEphemeralReaper } from "./ctoSessions.mjs";
@@ -1773,6 +1774,9 @@ async function segmentSummarize(data = {}) {
         oc: { runEphemeralSession: oc.runSynchronousSession },
         configGet: () => local.configGet(),
         validate,
+        // BET-1388: segments are summarized (kept to the last token) but still
+        // consume budget — report their spend so the ambient cap counts them.
+        reportCost: (c) => adaptiveCto?.reportAmbientSpend?.(c),
       },
     });
     const summary = parseSegmentSummaryText(res?.text);
@@ -1808,6 +1812,7 @@ async function segmentOneLiner(data = {}) {
         oc: { runEphemeralSession: oc.runSynchronousSession },
         configGet: () => local.configGet(),
         validate: async (out) => validOneLiner(out?.text) !== null,
+        reportCost: (c) => adaptiveCto?.reportAmbientSpend?.(c),
       },
     });
     return validOneLiner(res?.text);
@@ -1842,6 +1847,15 @@ const adaptiveCto = ctoEngine.createCtoEngine({
       generationInFlight: adaptiveCtoDigest ? await adaptiveCtoDigest.isGenerating() : false,
     };
   },
+  // BET-1388 tier gating (§3.3): the A12 dial writes `ctoTier` to config
+  // (default low). tierAllowsFeature consults it.
+  tierGet: async () => {
+    try {
+      return (await local.configGet())?.ctoTier ?? "low";
+    } catch {
+      return "low";
+    }
+  },
   // BET-1387 cold-start backfill: the read-only opencode db handle (⌘F search's
   // source) + the A7 rollup reduce producer. The backfill pays for these out of
   // its own one-time spend bound, so they bypass the engine's §3.3 rate gate.
@@ -1870,6 +1884,9 @@ let adaptiveCtoDigest = null;
           ...(opts?.deps || {}),
           oc: { runEphemeralSession: oc.runSynchronousSession },
           configGet: () => local.configGet(),
+          // BET-1388: the digest is kept to the last token but still consumes
+          // budget — report its spend to the ambient cap.
+          reportCost: (c) => adaptiveCto.reportAmbientSpend(c),
         },
       });
     } finally {
@@ -1923,14 +1940,24 @@ let adaptiveCtoDigest = null;
 }
 
 // Watchdog (§13.3): checks engine liveness + ambient spend rate; > 2× expected
-// hourly burn → auto-thrifty, > 4× → auto-pause + blocker card. Spend is not
-// measured yet (the budget reading lands with a later pipeline issue), so the
-// defaults are 0/0 → never trips and never pauses; the pure logic is wired so
-// a real spend source simply slots in.
+// hourly burn → auto-thrifty, > 4× → auto-pause + blocker card. The expected
+// hourly burn derives from the trailing 7-day ambient spend (BET-1388 —
+// replaces the placeholder 0/0 that could never trip), and the measured
+// per-hour burn is today's budget spend / hours elapsed. Both read the real
+// budget.json store via ctoBudget.
+const adaptiveCtoBudget = ctoBudget.createCtoBudget();
 const adaptiveCtoWatchdog = ctoEngine.createWatchdog({
   engine: adaptiveCto,
-  getSpendPerHour: async () => 0,
-  expectedHourlyBurn: async () => 0,
+  getSpendPerHour: async () => adaptiveCtoBudget.spendPerHourUsd(),
+  expectedHourlyBurn: async () => {
+    let cap = ctoBudget.DEFAULT_AMBIENT_CAP_USD;
+    try {
+      cap = ctoBudget.ambientCapUsd(await local.configGet());
+    } catch {
+      /* keep default */
+    }
+    return adaptiveCtoBudget.expectedHourlyBurnUsd({ capUsd: cap });
+  },
 });
 const stopAdaptiveCtoWatchdog = startPoller(adaptiveCtoWatchdog.tick, {
   intervalMs: ctoEngine.TICK_INTERVAL_MS,
