@@ -397,7 +397,7 @@ function SettingsView({
                   <button
                     type="button"
                     onClick={onResume}
-                    className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-text hover:bg-fill-hover"
+                    className="rounded-md border border-border px-3 py-2 text-sm font-medium text-text hover:bg-fill-hover"
                   >
                     Resume
                   </button>
@@ -406,7 +406,7 @@ function SettingsView({
                     type="button"
                     onClick={() => void doPause()}
                     disabled={busyPause}
-                    className="rounded-md border border-danger/40 px-3 py-1.5 text-sm font-medium text-danger hover:bg-danger/10 disabled:opacity-50"
+                    className="rounded-md border border-danger/40 px-3 py-2 text-sm font-medium text-danger hover:bg-danger/10 disabled:opacity-50"
                   >
                     Pause now
                   </button>
@@ -574,7 +574,7 @@ function LedgerView({
             type="button"
             onClick={() => void loadPage(nextBefore)}
             disabled={loading}
-            className="mt-4 rounded-md border border-border px-3 py-1.5 text-sm text-text hover:bg-fill-hover disabled:opacity-50"
+            className="mt-4 rounded-md border border-border px-3 py-2 text-sm text-text hover:bg-fill-hover disabled:opacity-50"
           >
             {loading ? "Loading…" : "Load more"}
           </button>
