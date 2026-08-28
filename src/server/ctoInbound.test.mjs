@@ -178,15 +178,39 @@ function makeEngine(overrides = {}) {
 // Gate that reports confirm only for `watch` (the confirm-mode tool).
 const gate = (name) => (name === "watch" ? "confirm" : "allow");
 
+// BET-1398: the read gateway's watch verbs proxy to the standing-query engine
+// registry via the injected `watchers` seam. A small in-memory fake stands in
+// for the adaptive engine's persistent registry in these gate tests.
+function makeWatcherSeam(store) {
+  return {
+    register: async (input) => {
+      const watch = {
+        id: "w" + (store.length + 1),
+        ...input,
+        created: 1,
+        lastHit: null,
+        hits: 0,
+        retired: false,
+      };
+      store.push(watch);
+      return { ok: true, data: { watch } };
+    },
+    unregister: async (id) => {
+      const i = store.findIndex((w) => w.id === id);
+      if (i === -1) return { ok: true, data: { removed: false } };
+      store.splice(i, 1);
+      return { ok: true, data: { removed: true } };
+    },
+    list: async () => store,
+  };
+}
+
+const WATCH_ARGS = { kind: "event-pattern", pattern: "P0" };
+
 test("untrusted confirm-mode tool returns needConfirmation + preview and does NOT act", async () => {
   const watchers = [];
-  const engine = makeEngine({
-    loadWatches: async () => watchers,
-    saveWatches: async (w) => {
-      watchers.splice(0, watchers.length, ...w);
-    },
-  });
-  const res = await engine.dispatch("watch", { surface: "multica", query: "q", condition: "a P0 opens" }, { gate });
+  const engine = makeEngine({ watchers: makeWatcherSeam(watchers) });
+  const res = await engine.dispatch("watch", WATCH_ARGS, { gate });
   assert.equal(res.ok, true);
   assert.equal(res.needConfirmation, true);
   assert.equal(res.tool, "watch");
@@ -197,55 +221,34 @@ test("untrusted confirm-mode tool returns needConfirmation + preview and does NO
 
 test("a trusted action in trustedActions runs without confirmation", async () => {
   const watchers = [];
-  const engine = makeEngine({
-    loadWatches: async () => watchers,
-    saveWatches: async (w) => {
-      watchers.splice(0, watchers.length, ...w);
-    },
-  });
-  const res = await engine.dispatch(
-    "watch",
-    { surface: "multica", query: "q", condition: "a P0 opens" },
-    { gate, trustedActions: ["watch"] },
-  );
+  const engine = makeEngine({ watchers: makeWatcherSeam(watchers) });
+  const res = await engine.dispatch("watch", WATCH_ARGS, { gate, trustedActions: ["watch"] });
   assert.equal(res.ok, true);
   assert.equal(res.needConfirmation, undefined);
   assert.equal(watchers.length, 1);
-  assert.equal(watchers[0].surface, "multica");
+  assert.equal(watchers[0].predicate.kind, "event-pattern");
 });
 
 test("text loop: approveConfirm(id) then re-dispatch of the same tool+args runs it", async () => {
   const watchers = [];
-  const engine = makeEngine({
-    loadWatches: async () => watchers,
-    saveWatches: async (w) => {
-      watchers.splice(0, watchers.length, ...w);
-    },
-  });
-  const args = { surface: "multica", query: "q", condition: "a P0 opens" };
-  const first = await engine.dispatch("watch", args, { gate });
+  const engine = makeEngine({ watchers: makeWatcherSeam(watchers) });
+  const first = await engine.dispatch("watch", WATCH_ARGS, { gate });
   assert.equal(first.needConfirmation, true);
   assert.equal(watchers.length, 0);
   // user says "go ahead"
   assert.equal(engine.approveConfirm(first.id), true);
-  const second = await engine.dispatch("watch", args, { gate });
+  const second = await engine.dispatch("watch", WATCH_ARGS, { gate });
   assert.equal(second.needConfirmation, undefined);
   assert.equal(watchers.length, 1);
 });
 
 test("text loop: rejectConfirm(id) aborts and the tool stays blocked until approved again", async () => {
   const watchers = [];
-  const engine = makeEngine({
-    loadWatches: async () => watchers,
-    saveWatches: async (w) => {
-      watchers.splice(0, watchers.length, ...w);
-    },
-  });
-  const args = { surface: "multica", query: "q", condition: "a P0 opens" };
-  const first = await engine.dispatch("watch", args, { gate });
+  const engine = makeEngine({ watchers: makeWatcherSeam(watchers) });
+  const first = await engine.dispatch("watch", WATCH_ARGS, { gate });
   // user says "no"
   assert.equal(engine.rejectConfirm(first.id), true);
-  const second = await engine.dispatch("watch", args, { gate });
+  const second = await engine.dispatch("watch", WATCH_ARGS, { gate });
   assert.equal(second.needConfirmation, true); // still blocked
   assert.equal(watchers.length, 0);
 });
@@ -256,19 +259,15 @@ test("text loop: rejectConfirm(id) aborts and the tool stays blocked until appro
 
 test("watch registry CRUD through the engine (watch / list_watches / unwatch)", async () => {
   const watchers = [];
-  const engine = makeEngine({
-    loadWatches: async () => watchers,
-    saveWatches: async (w) => {
-      watchers.splice(0, watchers.length, ...w);
-    },
-  });
+  const engine = makeEngine({ watchers: makeWatcherSeam(watchers) });
   const gated = { gate, trustedActions: ["watch"] };
-  const added = await engine.dispatch("watch", { surface: "multica", query: "q", condition: "a P0 opens" }, gated);
+  const added = await engine.dispatch("watch", WATCH_ARGS, gated);
   assert.equal(added.ok, true);
   const id = added.data.watch.id;
   assert.equal(watchers.length, 1);
-  assert.equal(watchers[0].active, true);
-  assert.equal(watchers[0].lastFiredAt, null);
+  assert.equal(watchers[0].predicate.kind, "event-pattern");
+  assert.equal(watchers[0].hits, 0);
+  assert.equal(watchers[0].lastHit, null);
 
   const list = await engine.dispatch("list_watches", {});
   assert.equal(list.data.watches.length, 1);

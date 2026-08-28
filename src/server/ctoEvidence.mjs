@@ -176,6 +176,7 @@ export function normalizeEvidence(
   if (!isPipelineSession(owner)) return null;
   const classified = classifyEvent(evt);
   if (!classified) return null;
+  const text = evidenceText(evt);
   return {
     ts: now,
     sessionID: classified.sessionID || undefined,
@@ -183,6 +184,9 @@ export function normalizeEvidence(
     kind: classified.kind,
     salience: classified.salience,
     refs: classified.refs ?? [],
-    text: evidenceText(evt),
+    // Best-effort free-text hint (BET-1398) for latent watcher matching.
+    // Omitted when the event carries no readable text so existing rows stay
+    // shape-identical.
+    ...(text ? { text } : {}),
   };
 }
