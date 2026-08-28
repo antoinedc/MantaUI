@@ -88,12 +88,13 @@ struct MantaProse: View {
     }
 
     var body: some View {
-        // Split the message into top-level blocks and stack them. The library
-        // already emits its own block spacing, so the stack uses spacing 0 and
-        // relies on each block's own padding — a single MarkdownText in the
-        // prose-only case is unchanged, and atomic blocks render identically to
-        // prose but inside a container we own (which is what carries the
-        // context menu).
+        // Split the message into top-level blocks and stack them. Stacking
+        // separate MarkdownTexts at spacing 0 removes the inter-block spacing
+        // the library used to emit between blocks, so each ATOMIC block
+        // (quote / code / table) adds its own vertical padding in blockView
+        // for breathing room and to keep tables clear of adjacent text. Prose
+        // runs get no extra padding, so paragraph-to-paragraph flow is
+        // unchanged from the pre-split renderer.
         VStack(alignment: .leading, spacing: 0) {
             ForEach(Array(MarkdownBlockSplitter.split(text).enumerated()), id: \.offset) { _, block in
                 blockView(block)
@@ -137,6 +138,7 @@ struct MantaProse: View {
                     menuItems: { atomicMenu(block.source, onQuote: onQuote) },
                     preview: { atomicPreview(block.source) }
                 )
+                .padding(.vertical, Metrics.spacing.sp3)
             } else {
                 // Read-only surface (subagent drill-in, capture fixture): there
                 // is no composer to quote into, so this block must not eat
@@ -144,6 +146,7 @@ struct MantaProse: View {
                 // prose — full hit testing (links inside quotes / code blocks /
                 // tables stay tappable), no contentShape, no context menu.
                 markdownBody(block.source)
+                    .padding(.vertical, Metrics.spacing.sp3)
             }
         }
     }

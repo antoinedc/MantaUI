@@ -100,7 +100,7 @@
      value: it is multi-consumer (BET-516 generates a Swift theme from this
      file) and it still governs the composer and the user bubble. */
   --measure: 80ch;
-  --prose-lh: 1.55;
+  --prose-lh: 1.65;
   --ui-lh: 1.45;
 
   /* Type stacks (BET-451). These MIRROR tailwind.config.js `fontFamily` — the

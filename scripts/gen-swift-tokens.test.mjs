@@ -28,7 +28,7 @@ const ROOT_VARIABLES = [
   // TYPE_MAP so the widened generator's lookups resolve in the test fixture.
   ["font-size-display", "28px"], ["font-size-confirm", "40px"], ["font-size-otp", "26px"],
   ["weight-medium", "500"], ["weight-semibold", "600"],
-  ["prose-lh", "1.55"], ["ui-lh", "1.45"],
+  ["prose-lh", "1.65"], ["ui-lh", "1.45"],
   ["step-row-y", "7px"], ["step-dot", "6px"],
   // §7 session-list metrics (BET-595) — must track gen-swift-tokens.mjs
   // TYPE_MAP/LAYOUT_MAP so the widened generator's lookups resolve in the
