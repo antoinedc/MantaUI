@@ -625,6 +625,19 @@ export function createCtoEngine(deps = {}) {
   // the cursor?" and hands the due windows to the rollup runner. Defaulting the
   // cursor to the CURRENT window start on first sight means the past is never
   // backfilled — a window only gets rolled up once it has actually closed.
+  // One shared ephemeral-rate wrapper (§3.3) used by both the rollup runner and
+  // the facts gatekeeper — every model-bound CTO step goes through the same
+  // per-session creation gate (D10's writer discipline).
+  const gatedRunEphemeral = async (data) => {
+    const gate = await beginEphemeral();
+    if (!gate.ok) return { ok: false, gated: true, error: gate.error };
+    try {
+      return runEphemeral ? await runEphemeral(data) : { ok: false, gated: true };
+    } finally {
+      gate.release?.();
+    }
+  };
+
   function getRollupRunner() {
     if (rollupRunner) return rollupRunner;
     if (deps.rollups) {
@@ -635,15 +648,6 @@ export function createCtoEngine(deps = {}) {
     // no model spend. Stay inert (and never touch the real stores) until a
     // runEphemeral is supplied.
     if (!runEphemeral) return null;
-    const gatedRunEphemeral = async (data) => {
-      const gate = await beginEphemeral();
-      if (!gate.ok) return { ok: false, gated: true, error: gate.error };
-      try {
-        return runEphemeral ? await runEphemeral(data) : { ok: false, gated: true };
-      } finally {
-        gate.release?.();
-      }
-    };
     rollupRunner = createRollupRunner({
       runEphemeral: gatedRunEphemeral,
       presenceCheck: () => engine.getPresence().state === "present",
@@ -664,15 +668,6 @@ export function createCtoEngine(deps = {}) {
       factsEngine = facts;
       return factsEngine;
     }
-    const gatedRunEphemeral = async (data) => {
-      const gate = await beginEphemeral();
-      if (!gate.ok) return { ok: false, gated: true, error: gate.error };
-      try {
-        return runEphemeral ? await runEphemeral(data) : { ok: false, gated: true };
-      } finally {
-        gate.release?.();
-      }
-    };
     factsEngine = createFactsEngine({
       engineState,
       ledger,

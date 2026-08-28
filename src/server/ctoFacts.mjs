@@ -125,7 +125,7 @@ export function senderReliability({ confirmed = 0, rejected = 0 } = {}) {
   return (confirmed + 1) / (confirmed + rejected + 2);
 }
 
-export function retentionOf(fact, { nowMs, halfLives = HALF_LIVES_POLICY, weights = KIND_WEIGHTS, reliability = 1 } = {}) {
+export function retentionOf(fact, { nowMs, halfLives = HALF_LIVES_POLICY, weights = KIND_WEIGHTS, reliability = 1, reliabilityOf } = {}) {
   if (!fact) return 0;
   const t = nowMs ?? Date.now();
   if (fact.valid_until != null && t >= fact.valid_until) return 0;
@@ -142,7 +142,11 @@ export function retentionOf(fact, { nowMs, halfLives = HALF_LIVES_POLICY, weight
     decay = Math.pow(0.5, hours / hl);
   }
   const access = 1 + Math.log(1 + (fact.access_count ?? 0));
-  return weight * decay * access * reliability;
+  // §6.4's `. reliability` term: a per-fact resolver (engine feeds it the
+  // sender's Beta reliability) wins over the flat default, so cap-displacement
+  // actually ranks low-reliability senders lower (reviewer Block 1).
+  const rel = typeof reliabilityOf === "function" ? (reliabilityOf(fact) ?? reliability) : reliability;
+  return weight * decay * access * rel;
 }
 
 export function lowestRetention(activeFacts, opts) {
@@ -348,11 +352,11 @@ export function applyResolution(proposal, decision, activeFacts, { nowMs = Date.
   return { action, facts, factId: id, targetId: target ? target.id : null };
 }
 
-export function enforceCap(activeFacts, { cap = CAP_ACTIVE, nowMs, halfLives, weights } = {}) {
+export function enforceCap(activeFacts, { cap = CAP_ACTIVE, nowMs, halfLives, weights, reliabilityOf } = {}) {
   const facts = Array.isArray(activeFacts) ? activeFacts.slice() : [];
   const displaced = [];
   while (facts.filter(isActiveFact).length > cap) {
-    const low = lowestRetention(facts, { nowMs, halfLives, weights });
+    const low = lowestRetention(facts, { nowMs, halfLives, weights, reliabilityOf });
     if (!low.fact) break;
     const i = facts.findIndex((f) => f.id === low.fact.id);
     if (i < 0) break;
@@ -562,6 +566,14 @@ export function createFactsEngine(deps = {}) {
     let state = await loadState();
     const tally = { processed: 0, byAction: {} };
     const relDeltas = new Map(); // senderKey -> {confirmed, rejected}
+    // §6.4: per-fact sender reliability (Beta mean) feeds the retention/displacement
+    // ranking. Unseen senders default to 1 (neutral) until they earn counters.
+    const relOf = (fact) => {
+      const k = senderKey(fact?.sender);
+      if (!k) return 1;
+      const c = state.factReliability?.[k];
+      return c ? senderReliability(c) : 1;
+    };
     const noteRel = (sender, delta) => {
       const key = senderKey(sender);
       if (!key) return;
@@ -588,7 +600,7 @@ export function createFactsEngine(deps = {}) {
           noteRel(proposal.sender, { rejected: 1 });
           await log({ kind: "cto.fact_reject", project: proj, proposalId: proposal.proposalId, reason: result.reason });
         } else {
-          const capRes = enforceCap(result.facts, { cap: CAP_ACTIVE, nowMs: now(), halfLives: halfLivesNow });
+          const capRes = enforceCap(result.facts, { cap: CAP_ACTIVE, nowMs: now(), halfLives: halfLivesNow, reliabilityOf: relOf });
           if (capRes.displaced.length > 0) {
             const entries = await loadArchive(proj);
             await saveArchive(proj, [...entries, ...capRes.displaced.map((f) => archiveEntry(f, now()))]);
@@ -613,7 +625,7 @@ export function createFactsEngine(deps = {}) {
               await saveState({ ...st, factTuning: { ...(st.factTuning ?? {}), lifespans } });
             }
             if (old && now() - (old.created ?? 0) < OVERTURN_WINDOW_MS) {
-              await bumpReliability(old.sender, { rejected: 1 });
+              noteRel(old.sender, { rejected: 1 });
             }
           }
         }
@@ -655,6 +667,17 @@ export function createFactsEngine(deps = {}) {
     let checked = 0;
     let superseded = 0;
     let seq = 0;
+    let state = await loadState();
+    const relDeltas = new Map();
+    const noteRel = (sender, delta) => {
+      const key = senderKey(sender);
+      if (!key) return;
+      const e = relDeltas.get(key) ?? { confirmed: 0, rejected: 0 };
+      relDeltas.set(key, {
+        confirmed: e.confirmed + (delta.confirmed ?? 0),
+        rejected: e.rejected + (delta.rejected ?? 0),
+      });
+    };
     for (const proj of await listKnownProjects()) {
       let working = await loadFacts(proj);
       let changed = false;
@@ -676,7 +699,11 @@ export function createFactsEngine(deps = {}) {
         checked += 1;
         working[i] = { ...f, checkable: { ...f.checkable, last_checked: t, result: ok ? "ok" : "failed" } };
         failed.push({ f: working[i], ok });
-        if (ok) changed = true;
+        if (ok) {
+          changed = true;
+          // §6.6: a verify-pass is a confirmed instance of the origin sender.
+          noteRel(f.sender, { confirmed: 1 });
+        }
       }
       for (const { f, ok } of failed) {
         if (ok) continue;
@@ -708,6 +735,10 @@ export function createFactsEngine(deps = {}) {
       }
       if (changed) await saveFacts(proj, working);
     }
+    for (const [key, delta] of relDeltas) {
+      state = mergeReliability(state, key, delta);
+    }
+    if (relDeltas.size > 0) await saveState(state);
     return { checked, superseded };
   }
 

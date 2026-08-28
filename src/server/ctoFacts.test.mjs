@@ -337,3 +337,58 @@ test("touchFacts bumps last_accessed + access_count on retrieval", async () => {
   assert.equal(f.access_count, 1);
   assert.equal(typeof f.last_accessed, "number");
 });
+
+// ---------------------------------------------------------------------------
+// §6.4 / §6.6 reliability fixes (reviewer Blocks, attempt 2)
+// ---------------------------------------------------------------------------
+
+test("retention honors per-fact sender reliability (reliabilityOf resolver)", () => {
+  const reliable = makeFact({ id: "r", last_accessed: 0, access_count: 0 });
+  const shaky = makeFact({ id: "s", last_accessed: 0, access_count: 0, sender: "low" });
+  const relOf = (f) => (f.id === "s" ? 0.1 : 1);
+  const sr = retentionOf(reliable, { nowMs: 0, reliabilityOf: relOf });
+  const ss = retentionOf(shaky, { nowMs: 0, reliabilityOf: relOf });
+  assert.ok(ss < sr, "low-reliability sender scores lower");
+  const { fact } = lowestRetention([reliable, shaky], { nowMs: 0, reliabilityOf: relOf });
+  assert.equal(fact.id, "s");
+});
+
+test("enforceCap displaces the low-sender-reliability fact under equivalent retention", () => {
+  const a = makeFact({ id: "a", created: 0, last_accessed: 0, sender: "high" });
+  const b = makeFact({ id: "b", created: 0, last_accessed: 0, sender: "high" });
+  const c = makeFact({ id: "c", created: 0, last_accessed: 0, sender: "low" });
+  const relOf = (f) => (f.sender === "low" ? 0.1 : 1);
+  const { facts, displaced } = enforceCap([a, b, c], { cap: 2, nowMs: 0, reliabilityOf: relOf });
+  assert.equal(displaced.length, 1);
+  assert.equal(displaced[0].id, "c");
+  assert.equal(facts.filter(isActiveFact).length, 2);
+});
+
+test("pump feeds per-sender reliability into cap displacement", async () => {
+  const { engine, facts, archive, states } = makeEngine();
+  states.factReliability = { low: { confirmed: 0, rejected: 9 } };
+  for (let i = 0; i < CAP_ACTIVE + 1; i++) {
+    const sender = i % 2 === 0 ? "cto" : "low";
+    await engine.submitProposal({ proposalId: `pc${i}`, project: "alpha", kind: "status", statement: `fact ${i}`, refs: [`r${i}`], sender });
+  }
+  await engine.pump();
+  const active = (await facts.load("alpha")).facts.filter(isActiveFact);
+  assert.equal(active.length, CAP_ACTIVE);
+  // Same recency/decay: the poor-reliability "low" sender is preferentially
+  // displaced over "cto". No cto-sender fact may be lost this round.
+  assert.ok(active.some((f) => f.sender === "cto"), "a reliable sender survived the cap");
+  const arch = (await archive.load("alpha")).entries;
+  assert.ok(arch.some((e) => e.sender === "low"), "a low-reliability sender was displaced");
+});
+
+test("verify-pass confirms the origin sender (§6.6, Block 2)", async () => {
+  const { engine, states } = makeEngine({ surfaceExists: async (s) => s === "git", verify: async () => ({ ok: true }) });
+  await engine.submitProposal({ proposalId: "cv", project: "alpha", kind: "status", statement: "branch fix/a is merged", refs: ["r1"], sender: "a-sender" });
+  await engine.pump();
+  const f = (await engine.listFacts("alpha"))[0];
+  assert.ok(f.checkable, "stamped because the git surface exists");
+  const v = await engine.verifyDue();
+  assert.equal(v.checked, 1);
+  assert.equal(v.superseded, 0);
+  assert.ok((states.factReliability["a-sender"]?.confirmed ?? 0) >= 1, "confirmed incremented on verify-pass");
+});
