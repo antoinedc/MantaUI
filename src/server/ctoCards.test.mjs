@@ -245,3 +245,47 @@ test("countOpen reflects only open cards", async () => {
   await h.cards.onAskResolved({ sessionID: "sC" });
   assert.equal(await h.cards.countOpen(), 0);
 });
+
+test("BET-1397 source 3: an inbox blocker fires the blocking-tier notify exactly once and promotes a card", async () => {
+  const clock = { ms: 1_000_000 };
+  let cardPayload = { v: 1, cards: [] };
+  const ledgerRows = [];
+  const notified = [];
+  const cards = createCtoCards({
+    cardStore: {
+      load: async () => cardPayload,
+      save: async (p) => {
+        cardPayload = p;
+      },
+    },
+    engineState: { load: async () => ({ v: 1 }), save: async () => {} },
+    ledger: { append: async (row) => ledgerRows.push(row) },
+    fireNotify: async (a) => notified.push(a),
+    now: () => clock.ms,
+  });
+
+  const r = await cards.onInboxBlocker({
+    message: "build is red",
+    title: "CI broken",
+    refs: ["BET-777"],
+    tag: "ci",
+    sessionID: "ses-9",
+    ts: clock.ms,
+  });
+  assert.equal(r.notified, true);
+  // Exactly ONE notification, blocking tier, via the shared router.
+  assert.equal(notified.length, 1);
+  assert.equal(notified[0].message, "build is red");
+  assert.equal(notified[0].title, "CI broken");
+  assert.equal(notified[0].urgent, true);
+  assert.equal(notified[0].sessionID, "ses-9");
+
+  // The inbox blocker becomes a card at > 10 min like any ask.
+  clock.ms += BLOCKER_AFTER_MS;
+  const p = await cards.promoteDue();
+  assert.equal(p.changed, true);
+  const open = cardPayload.cards.filter((c) => c.state === "open");
+  assert.equal(open.length, 1);
+  assert.equal(open[0].sourceKind, "inbox");
+  assert.deepEqual(open[0].refs, ["BET-777"]);
+});

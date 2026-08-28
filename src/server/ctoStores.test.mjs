@@ -26,6 +26,10 @@ import {
   rollupsStore,
   probesStore,
   sweepAllStores,
+  INBOX_KINDS,
+  INBOX_TTL_MS,
+  inboxExpiresAt,
+  purgeExpiredInbox,
 } from "./ctoStores.mjs";
 
 const NOW_MS = 1_000_000_000_000;
@@ -252,4 +256,28 @@ test("sweepAllStores trims the ledger and caps the archive (integration)", async
 
   const { rm } = await import("node:fs/promises");
   await rm(freshRollup);
+});
+
+test("inboxExpiresAt: fyi is 48h, every other kind (and unknown) is 7 days", () => {
+  // TTL map is closed over every declared kind.
+  for (const k of INBOX_KINDS) assert.ok(INBOX_TTL_MS[k] !== undefined, `TTL set for ${k}`);
+  assert.equal(inboxExpiresAt("fyi", 1000) - 1000, 2 * DAY);
+  assert.equal(inboxExpiresAt("blocker", 1000) - 1000, 7 * DAY);
+  assert.equal(inboxExpiresAt("finding", 1000) - 1000, 7 * DAY);
+  assert.equal(inboxExpiresAt("handoff", 1000) - 1000, 7 * DAY);
+  assert.equal(inboxExpiresAt("anomaly", 1000) - 1000, 7 * DAY);
+  assert.equal(inboxExpiresAt("weird", 1000) - 1000, 7 * DAY); // unknown → 7d general case
+});
+
+test("purgeExpiredInbox drops only expired entries, silently (no trace)", () => {
+  const nowMs = 1000;
+  const entries = [
+    { id: "a", expires: 500 }, // expired
+    { id: "b", expires: 1000 }, // boundary (<= now) → expired
+    { id: "c", expires: 1500 }, // keep
+    { id: "d" }, // no expires → keep
+  ];
+  const { keep, dropped } = purgeExpiredInbox(entries, { nowMs });
+  assert.deepEqual(keep.map((e) => e.id), ["c", "d"]);
+  assert.deepEqual(dropped.map((e) => e.id), ["a", "b"]);
 });
