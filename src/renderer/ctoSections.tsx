@@ -15,7 +15,9 @@ import {
   digestExpandable,
   finishedVariant,
   nowRailMeta,
+  runnableSuggestionOption,
   type BlockerCard,
+  type DecisionCardRow,
   type FinishedVariant,
 } from "./ctoView";
 import type { CtoFinishedItem, CtoDigest } from "../shared/api.js";
@@ -159,6 +161,198 @@ export const JobLogsModal = memo(function JobLogsModal({
 });
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Suggestion / decision-card section (§9.1 + §10.3)
+// ---------------------------------------------------------------------------
+
+export type SuggestionOption = NonNullable<DecisionCardRow["options"]>[number];
+
+// The §9.1 decision card. Accent edge (vs the Blocker's danger edge), a
+// one-paragraph `why`, the bound-action option buttons (only runnable ones —
+// queue-tonight / tool-write have no P2 executor → no dead control), a
+// dismiss button (→ §9.5 verdict) and the "evidence ▸" expander. A
+// `config-change` option opens a confirm modal showing payload.diff before the
+// executor runs (no silent side-effecting config writes).
+export const SuggestionSection = memo(function SuggestionSection({
+  cards,
+  onAction,
+  onDismiss,
+}: {
+  cards: DecisionCardRow[];
+  onAction: (card: DecisionCardRow, option: SuggestionOption) => void;
+  onDismiss: (card: DecisionCardRow) => void;
+}) {
+  if (cards.length === 0) return null;
+  return (
+    <section className="space-y-2">
+      <h2 className="text-sm font-semibold uppercase tracking-wide text-text-muted">Suggestions</h2>
+      <div className="space-y-2">
+        {cards.map((card) => (
+          <SuggestionCard key={card.id} card={card} onAction={onAction} onDismiss={onDismiss} />
+        ))}
+      </div>
+    </section>
+  );
+});
+
+function SuggestionCard({
+  card,
+  onAction,
+  onDismiss,
+}: {
+  card: DecisionCardRow;
+  onAction: (card: DecisionCardRow, option: SuggestionOption) => void;
+  onDismiss: (card: DecisionCardRow) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [confirmOption, setConfirmOption] = useState<SuggestionOption | null>(null);
+  const options = (card.options ?? []).filter((o) => runnableSuggestionOption(o));
+  const needsConfirm = (o: SuggestionOption) => o.action?.type === "config-change";
+  const evidence = Array.isArray(card.evidence) ? card.evidence : Array.isArray(card.refs) ? card.refs : [];
+
+  const handleOption = (o: SuggestionOption) => {
+    if (needsConfirm(o)) {
+      setConfirmOption(o);
+      return;
+    }
+    onAction(card, o);
+  };
+
+  return (
+    <>
+      <div
+        className="rounded-md border border-strong bg-fill px-3 py-3"
+        style={{
+          borderLeftWidth: "var(--need-edge-w)",
+          borderLeftColor: "color-mix(in srgb, var(--accent) 55%, transparent)",
+        }}
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <span className="font-medium text-text">{card.title}</span>
+              {card.capped === true ? (
+                <span className="rounded-full bg-fill-active px-2 py-1 text-[11px] font-medium text-text-faint" title="Cold-start learning">
+                  learning
+                </span>
+              ) : null}
+            </div>
+            {card.why ? <p className="mt-1 text-sm text-text-muted">{card.why}</p> : null}
+          </div>
+          <button
+            type="button"
+            onClick={() => onDismiss(card)}
+            className="shrink-0 rounded-md px-2 py-1 text-sm text-text-faint hover:bg-fill-hover hover:text-text"
+            aria-label={`Dismiss suggestion: ${card.title}`}
+          >
+            Dismiss
+          </button>
+        </div>
+        {options.length > 0 ? (
+          <div className="mt-2 flex flex-wrap gap-2">
+            {options.map((o, i) => (
+              <button
+                key={`${o.label}-${i}`}
+                type="button"
+                onClick={() => handleOption(o)}
+                className="rounded-md bg-accent-solid px-3 py-1 text-sm font-medium text-white hover:opacity-90"
+              >
+                {o.label}
+              </button>
+            ))}
+          </div>
+        ) : null}
+        <div className="mt-2 flex items-center gap-2">
+          {evidence.length > 0 ? (
+            <button
+              type="button"
+              onClick={() => setExpanded((e) => !e)}
+              className="rounded-md bg-fill-active px-2 py-1 text-[11px] text-text-muted hover:text-text"
+              aria-expanded={expanded}
+            >
+              evidence {expanded ? "▾" : "▸"} ({evidence.length})
+            </button>
+          ) : null}
+          {card.cls && typeof card.score === "number" ? (
+            <span className="text-[11px] text-text-faint">
+              {card.cls} · {(card.score * 100).toFixed(0)}%
+            </span>
+          ) : null}
+        </div>
+        {expanded && evidence.length > 0 ? (
+          <pre className="mt-1 whitespace-pre-wrap rounded-md bg-fill-active p-2 text-xs text-text-muted">
+            {evidence.join("\n")}
+          </pre>
+        ) : null}
+      </div>
+      {confirmOption ? (
+        <ConfigConfirmModal
+          card={card}
+          option={confirmOption}
+          onConfirm={() => {
+            onAction(card, confirmOption);
+            setConfirmOption(null);
+          }}
+          onClose={() => setConfirmOption(null)}
+        />
+      ) : null}
+    </>
+  );
+}
+
+// Config-change confirm modal (§10.3 no-dead/silent-write rule): shows the
+// payload.diff before the executor runs `configUpdate`.
+export const ConfigConfirmModal = memo(function ConfigConfirmModal({
+  card,
+  option,
+  onConfirm,
+  onClose,
+}: {
+  card: DecisionCardRow;
+  option: SuggestionOption;
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  const diff = typeof option.action?.payload?.diff === "string" ? (option.action.payload.diff as string) : "…";
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ background: "rgba(0, 0, 0, 0.4)" }}
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Confirm config change: ${option.label}`}
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-md rounded-lg border border-strong bg-bg p-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="text-sm font-semibold text-text">Apply config change?</h3>
+        <p className="mt-1 text-sm text-text-muted">“{card.title}”</p>
+        <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap rounded-md bg-fill-active p-2 text-xs text-text-muted">
+          {diff}
+        </pre>
+        <div className="mt-3 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md px-2 py-1 text-sm text-text hover:bg-fill-hover"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            className="rounded-md bg-accent-solid px-3 py-1 text-sm font-medium text-white hover:opacity-90"
+          >
+            Apply
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+});
+
 // Now rail (§10.4)
 // ---------------------------------------------------------------------------
 
@@ -283,15 +477,20 @@ export const DigestSection = memo(function DigestSection({
   onRegen,
   onItemOpen,
   onItemExpand,
+  onOpenHeld,
 }: {
   digest: CtoDigest | null;
   busy: boolean;
   onRegen: () => void;
   onItemOpen: (item: { id: string; text: string; refs?: string[] }) => void;
   onItemExpand: (item: { id: string }) => void;
+  // §14.3 silence audit: opens the gated-out held-list modal. Rendered as an
+  // in-digest aside when the digest carried held suggestions (§9.1 held rows).
+  onOpenHeld?: () => void;
 }) {
   if (!digest) return null;
   const items = Array.isArray(digest.items) ? digest.items : [];
+  const held = Number.isFinite(digest.heldSuggestions) ? (digest.heldSuggestions as number) : 0;
   return (
     <section>
       <div className="flex items-center gap-2">
@@ -311,6 +510,20 @@ export const DigestSection = memo(function DigestSection({
         {items.map((item, i) => (
           <DigestRow key={`${item.text}-${i}`} item={item} onOpen={onItemOpen} onExpand={onItemExpand} />
         ))}
+        {held > 0 ? (
+          <div className="flex items-center gap-2 rounded-md border border-strong bg-fill px-3 py-2">
+            <span className="text-sm text-text-muted">I held back {held} suggestion{held === 1 ? "" : "s"} while you were away.</span>
+            {onOpenHeld ? (
+              <button
+                type="button"
+                onClick={onOpenHeld}
+                className="rounded-md bg-fill-active px-2 py-1 text-xs font-medium text-text hover:bg-fill-hover"
+              >
+                review →
+              </button>
+            ) : null}
+          </div>
+        ) : null}
       </div>
     </section>
   );

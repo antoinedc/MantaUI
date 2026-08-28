@@ -293,3 +293,112 @@ export function nowCostLabel(cost: number | null | undefined): string | null {
 export function nowRailMeta(project: string, cost: string | null, elapsed: string | null): string {
   return [project, cost, elapsed].filter((s): s is string => Boolean(s && s.length > 0)).join(" · ");
 }
+
+// ---------------------------------------------------------------------------
+// BET-1392 — decision cards (§9.1 / §10.3) + the §14.3 silence audit
+// ---------------------------------------------------------------------------
+
+// The closed enum of bound-action option types (§9.1).
+export type SuggestionActionType =
+  | "config-change"
+  | "queue-tonight"
+  | "start-job"
+  | "tool-write"
+  | "record-decision";
+
+// A structural subset of the wire `CtoCard` for the decision card — the
+// component + tests don't need every card field.
+export type DecisionCardRow = {
+  id: string;
+  variant: "decision";
+  title: string;
+  why?: string;
+  cls?: string;
+  score?: number;
+  capped?: boolean;
+  options?: { label: string; action: { type: string; payload: Record<string, unknown> } }[];
+  evidence?: string[];
+  refs?: string[];
+};
+
+// §9.1 worthiness gate (server-computed). A capped card was surfaced during
+// cold start; surfaced with a ≥ p_ask probability.
+export function suggestionConfidence(card: DecisionCardRow): number | null {
+  const s = card?.score;
+  return Number.isFinite(s) ? (s as number) : null;
+}
+
+// Selector: the open decision cards among the wire cards (the rest of the
+// store stays the Blocker section's).
+export function decisionCards(cards: ReadonlyArray<Record<string, unknown>>): DecisionCardRow[] {
+  return (cards ?? []).filter((c) => c?.variant === "decision") as DecisionCardRow[];
+}
+
+// §9.1 P2 option viability: which action types have a runnable executor in P2.
+const RUNNABLE_TYPES: Record<string, boolean> = {
+  "config-change": true,
+  "start-job": true,
+  "record-decision": true,
+  "queue-tonight": false,
+  "tool-write": false,
+};
+
+export function runnableSuggestionOption(option: {
+  action?: { type?: string };
+} | null | undefined): boolean {
+  return RUNNABLE_TYPES[option?.action?.type ?? ""] === true;
+}
+
+// The minimal renderer API surface the option executors need — injected so the
+// executors stay pure + testable (no window.api import here).
+export type SuggestionApi = {
+  configUpdate(patch: Record<string, unknown>): Promise<unknown>;
+  delegateStart(input: { prompt: string; sessionID: string; directory: string; model?: unknown }): Promise<{ ok?: boolean; error?: string }>;
+  ctoFact(input: { kind?: string; statement: string; refs?: string[] }): Promise<{ ok?: boolean; error?: string }>;
+};
+
+// Execute one bound action. Confirmation (the config-change diff modal) is a
+// UI concern the caller resolves BEFORE calling this — this is pure side-effect
+// execution, reported `{ok, error}` for the toast. Non-runnable types fail
+// closed (never a dead silent no-op).
+export async function executeSuggestionOption({
+  option,
+  api,
+}: {
+  option: { label?: string; action?: { type?: string; payload?: Record<string, unknown> } };
+  api: SuggestionApi;
+}): Promise<{ ok: boolean; error?: string }> {
+  const type = option?.action?.type as SuggestionActionType | undefined;
+  const payload: Record<string, unknown> = option?.action?.payload ?? {};
+  try {
+    switch (type) {
+      case "config-change": {
+        const patch = (payload.patch ?? {}) as Record<string, unknown>;
+        if (!patch || typeof patch !== "object") return { ok: false, error: "config-change needs a patch payload" };
+        await api.configUpdate(patch);
+        return { ok: true };
+      }
+      case "start-job": {
+        const prompt = typeof payload.prompt === "string" && payload.prompt ? payload.prompt : "";
+        const sessionID = typeof payload.sessionID === "string" ? payload.sessionID : "";
+        const directory = typeof payload.directory === "string" ? payload.directory : "";
+        if (!prompt || !sessionID || !directory) return { ok: false, error: "start-job needs prompt, sessionID and directory payload" };
+        const input: { prompt: string; sessionID: string; directory: string; model?: unknown } = { prompt, sessionID, directory };
+        if (payload.model && typeof payload.model === "object") input.model = payload.model;
+        await api.delegateStart(input);
+        return { ok: true };
+      }
+      case "record-decision": {
+        const statement = typeof payload.statement === "string" && payload.statement ? payload.statement : "";
+        if (!statement) return { ok: false, error: "record-decision needs a statement payload" };
+        const refs = Array.isArray(payload.refs) ? (payload.refs as string[]) : [];
+        const r = await api.ctoFact({ kind: "decision", statement, refs });
+        return r?.ok ? { ok: true } : { ok: false, error: r?.error ?? "record-decision failed" };
+      }
+      default:
+        return { ok: false, error: `unsupported action type: ${String(type ?? "")}` };
+    }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}

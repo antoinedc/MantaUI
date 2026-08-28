@@ -487,6 +487,7 @@ export function createCtoDigest(deps = {}) {
     getInferredTz = async () => null, // {utcOffsetHours, confidence} | null
     getAudience = async () => null, // §8.4 async ({topics}) => audience block | null
     getDeviations = async () => [], // §8.4 deviation-from-baseline asides (user-only)
+    getHeldSuggestionCount = async () => 0, // §14.3 silence audit: held suggestion rows (default none)
     getEnabled = async () => false, // top-level ctoEnabled gate for the scheduler
     digestPushEnabled = async () => false, // §10.5 toggle (ships A12) — off by default
     pushDigest = async () => {}, // informational notification honoring router deferral
@@ -654,6 +655,11 @@ export function createCtoDigest(deps = {}) {
 
     const id = String(t);
     try {
+      // §14.3 silence audit: the digest carries how many suggestions the CTO
+      // held back, so the DigestSection can render the "I held back N — review"
+      // aside linking to the gated-out list view (in-digest, not overview).
+      const held = await safe(getHeldSuggestionCount);
+      if (typeof held === "number" && held > 0) digest.heldSuggestions = held;
       await digests.save(id, digest);
     } catch {
       /* best-effort */

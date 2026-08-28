@@ -209,6 +209,31 @@ export type CtoCard = {
   pendingSince: number;
   created: number;
   state: "open" | "resolved" | "dismissed";
+  // BET-1392 decision cards (§9.1) — present only when variant === "decision".
+  // `why` is the one-paragraph rationale; `options` are the bound-action
+  // buttons (closed ACTION_TYPES enum); `evidence` feeds the "evidence ▸"
+  // expander; `cls` is the gating action-class; `score`/`capped` surface the
+  // worthiness probability + cold-start cap for the health stat.
+  why?: string;
+  cls?: string;
+  score?: number;
+  capped?: boolean;
+  options?: {
+    label: string;
+    action: { type: string; payload: Record<string, unknown> };
+  }[];
+  evidence?: string[];
+};
+
+// A held (silent-logged) suggestion row for the §14.3 silence audit.
+export type CtoHeldRow = {
+  id: string;
+  class: string;
+  score: number;
+  reason: string;
+  sourceKind: string;
+  text: string;
+  ts: number;
 };
 
 // A Just-finished rail entry (§10.4), from GET /api/cto/finished — either a
@@ -251,6 +276,10 @@ export type CtoDigest = {
   }>;
   nothingHappened?: boolean;
   refs?: string[];
+  // §14.3 silence audit: how many suggestions the CTO silently held back this
+  // cycle. When > 0 the DigestSection renders an "I held back N — review"
+  // aside linking to the gated-out held list (BET-1392).
+  heldSuggestions?: number;
 };
 
 // A single Health-card row (§10.5 card 2, P1 only). `n` is samples seen so
@@ -1160,6 +1189,31 @@ export interface Api {
   ctoProfileSuppress(input: { inference: string }): Promise<CtoProfileRender & { ok: boolean; error?: string }>;
   // POST /api/cto/journal/delete — §3.2 per-entry journal delete.
   ctoJournalDelete(input: { id: string }): Promise<{ ok: boolean }>;
+  // POST /api/cto/facts — §8.2 fact proposal. Used by the decision-card
+  // `record-decision` option executor: writes a `decision` fact from the card
+  // payload through the gatekeeper so it is a first-class, supersedable fact.
+  ctoFact(input: {
+    project?: string | null;
+    kind?: string;
+    statement: string;
+    refs?: string[];
+    valid_until?: string | null;
+    supersedes?: string | null;
+  }): Promise<{ ok: boolean; error?: string }>;
+  // GET /api/cto/suggest/held — §14.3 silence audit: the held (silent-log)
+  // suggestion rows the monthly digest's "I held back N items — review?"
+  // aside links to. Reverse-chron, cursor + limit optional.
+  ctoHeldList(input?: {
+    before?: number;
+    limit?: number;
+  }): Promise<{ rows: CtoHeldRow[]; count: number }>;
+  // POST /api/cto/suggest/held — a judgment on a held suggestion through the
+  // B3 verdict route (accept → success/access, dismiss → rejection).
+  ctoHeldVerdict(input: {
+    id: string;
+    verdict: "accept" | "dismiss";
+    never?: boolean;
+  }): Promise<{ ok: boolean; error?: string }>;
 }
 
 /**
