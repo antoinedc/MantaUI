@@ -1130,6 +1130,48 @@ function ProfileView({
               )}
             </section>
 
+            {/* Interaction — §8.4 stats (prompt frequency, session length, mix). */}
+            {render && (render.interaction.sessionLenMedian != null || render.interaction.promptFreqEwma != null) && (
+              <section className="rounded-lg border border-border-subtle p-4">
+                <h3 className="text-sm font-semibold text-text">Interaction</h3>
+                <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+                  {render.interaction.promptFreqEwma != null && (
+                    <div>
+                      <dt className="text-xs text-text-faint">Prompt frequency</dt>
+                      <dd className="text-text">{render.interaction.promptFreqEwma.toFixed(2)} /h</dd>
+                    </div>
+                  )}
+                  {render.interaction.sessionLenMedian != null && (
+                    <div>
+                      <dt className="text-xs text-text-faint">Session length (median)</dt>
+                      <dd className="text-text">{formatDuration(render.interaction.sessionLenMedian)}</dd>
+                    </div>
+                  )}
+                  {render.interaction.questionMix && Object.keys(render.interaction.questionMix).length > 0 && (
+                    <div>
+                      <dt className="text-xs text-text-faint">Question mix</dt>
+                      <dd className="text-text">{formatQuestionMix(render.interaction.questionMix)}</dd>
+                    </div>
+                  )}
+                  {render.interaction.correctionRate && render.interaction.correctionRate.total > 0 && (
+                    <div>
+                      <dt className="text-xs text-text-faint">Correction rate</dt>
+                      <dd className="text-text">
+                        {render.interaction.correctionRate.corrected}/{render.interaction.correctionRate.total}
+                        {" "}({Math.round((render.interaction.correctionRate.corrected / render.interaction.correctionRate.total) * 100)}%)
+                      </dd>
+                    </div>
+                  )}
+                  {render.interaction.verbosityPref && render.interaction.verbosityPref.source === "inferred" && (
+                    <div>
+                      <dt className="text-xs text-text-faint">Verbosity pref</dt>
+                      <dd className="text-text">{verbosityLabel(render.interaction.verbosityPref.value)}</dd>
+                    </div>
+                  )}
+                </dl>
+              </section>
+            )}
+
             {/* Rhythm — §8.2 24-bin histogram + inferred TZ. */}
             {(render?.rhythm?.dayCount ?? 0) > 0 && (
               <section className="rounded-lg border border-border-subtle p-4">
@@ -1202,4 +1244,29 @@ function JournalTab({
       ))}
     </ul>
   );
+}
+
+// Small profile-interaction formatters (§8.4). Kept tiny because they are
+// pure presentation over the server-composed render model.
+function formatDuration(ms: number | null): string {
+  if (ms == null) return "—";
+  const m = Math.round(ms / 60_000);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  const min = m % 60;
+  return min ? `${h}h ${min}m` : `${h}h`;
+}
+
+function formatQuestionMix(mix: Record<string, number>): string {
+  const sorted = Object.entries(mix)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([k]) => k);
+  return sorted.length ? sorted.join(" · ") : "—";
+}
+
+function verbosityLabel(value: number): string {
+  if (value <= -0.2) return "terse";
+  if (value >= 0.2) return "thorough";
+  return "balanced";
 }
