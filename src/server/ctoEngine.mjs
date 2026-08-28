@@ -72,6 +72,12 @@ import {
   isAskResolveEvent,
 } from "./ctoCards.mjs";
 import { createSegmenter } from "./ctoSegments.mjs";
+import {
+  createRollupRunner,
+  LEVEL_MS as ROLLUP_LEVEL_MS,
+  ROLLUP_LEVELS,
+  windowFor as rollupWindowFor,
+} from "./ctoRollups.mjs";
 
 // Actor tag stamped on every engine RPC call / ledger row (spec §3.3).
 export const ACTOR = "cto";
@@ -236,6 +242,12 @@ export function createCtoEngine(deps = {}) {
     summarize = async () => ({ ok: false, gated: false }),
     computeOneLiner = async () => null,
     segmenterOverride = null, // optional pre-built segmenter (else one is constructed below)
+    // BET-1381 rollups (§5.3): the `ambient-summarize` reduce producer,
+    // wrapped by the engine in the §3.3 ephemeral rate gate (defaults to a
+    // no-op → the runner persists degraded rollups, no model spend). A caller
+    // may inject a pre-built rollup runner instead.
+    runEphemeral = null,
+    rollups = null, // optional pre-built rollup runner override
   } = deps;
 
   let disposed = false;
@@ -248,6 +260,7 @@ export function createCtoEngine(deps = {}) {
   let reaperHandle = null;
   let refitHandle = null;
   let lastPublishedSerialized = null;
+  let rollupRunner = null;
 
   // A5 presence inputs (spec §5.4): lastSeen = max(desktop heartbeat, app
   // open, user prompt). The desktop heartbeat is read live via
@@ -343,10 +356,14 @@ export function createCtoEngine(deps = {}) {
     if (disposed) return;
     heartbeatAt = now();
     try {
-      const { paused } = await gateContext();
+      const { enabled: enabledNow, paused } = await gateContext();
       if (paused) {
         await syncState();
         return;
+      }
+      // §5.3 rollups — ambient background work, gated on enabled like any other.
+      if (enabledNow) {
+        await finalizeRollups();
       }
       await syncState();
     } catch {
@@ -563,6 +580,101 @@ export function createCtoEngine(deps = {}) {
       now,
     });
 
+  // ----- BET-1381 rollups (§5.3) -----
+  // Window-close TIMERS live here on the engine tick. The task list tracked a
+  // per-level cursor (the start of the last FINALIZED window) persisted in
+  // engine-state; each 1-min tick asks "has a window of this level closed since
+  // the cursor?" and hands the due windows to the rollup runner. Defaulting the
+  // cursor to the CURRENT window start on first sight means the past is never
+  // backfilled — a window only gets rolled up once it has actually closed.
+  function getRollupRunner() {
+    if (rollupRunner) return rollupRunner;
+    if (deps.rollups) {
+      rollupRunner = deps.rollups;
+      return rollupRunner;
+    }
+    // No reduce producer wired → rolling up would only write degraded data with
+    // no model spend. Stay inert (and never touch the real stores) until a
+    // runEphemeral is supplied.
+    if (!runEphemeral) return null;
+    const gatedRunEphemeral = async (data) => {
+      const gate = await beginEphemeral();
+      if (!gate.ok) return { ok: false, gated: true, error: gate.error };
+      try {
+        return runEphemeral ? await runEphemeral(data) : { ok: false, gated: true };
+      } finally {
+        gate.release?.();
+      }
+    };
+    rollupRunner = createRollupRunner({
+      runEphemeral: gatedRunEphemeral,
+      presenceCheck: () => engine.getPresence().state === "present",
+      now,
+    });
+    return rollupRunner;
+  }
+
+  // Compute, per level, the windows whose close was discovered since the last
+  // finalized cursor (a window closes once now ≥ its end). Returns { level: [windows] }.
+  async function dueRollupWindows() {
+    let payload;
+    try {
+      payload = await engineState.load();
+    } catch {
+      payload = null;
+    }
+    const cursor = payload?.rollupCursor ?? {};
+    const t = now();
+    const due = {};
+    for (const level of ROLLUP_LEVELS) {
+      const duration = ROLLUP_LEVEL_MS[level];
+      let start = cursor[level] != null ? cursor[level] : rollupWindowFor(level, t)[0];
+      const list = [];
+      let guard = 0;
+      while (start + duration <= t && guard < 2000) {
+        list.push(rollupWindowFor(level, start));
+        start += duration;
+        guard += 1;
+      }
+      due[level] = list;
+    }
+    return due;
+  }
+
+  // Fold any closed windows into rollups (respecting enabled/paused via the
+  // tick's gate, and preempting the batch between calls when the user is
+  // present). Advances the persisted cursor only across windows actually
+  // finalized, so a preempted batch re-runs the remainder next tick. Never
+  // throws into the poller.
+  async function finalizeRollups() {
+    try {
+      const runner = getRollupRunner();
+      if (!runner) return;
+      const due = await dueRollupWindows();
+      const payload = (await engineState.load()) || {};
+      const cursor = { ...(payload.rollupCursor ?? {}) };
+      let changed = false;
+      for (const level of ROLLUP_LEVELS) {
+        const windows = due[level];
+        if (!windows || windows.length === 0) continue;
+        const outcomes = await runner.processDue(windows.map((w) => ({ level, window: w })));
+        if (outcomes && outcomes.length > 0) {
+          const last = outcomes[outcomes.length - 1];
+          const next = last.window[1];
+          if (cursor[level] === undefined || next > cursor[level]) {
+            cursor[level] = next;
+            changed = true;
+          }
+        }
+      }
+      if (changed) {
+        await engineState.save({ ...payload, rollupCursor: cursor });
+      }
+    } catch {
+      /* rollups are best-effort — never take the engine down */
+    }
+  }
+
   // Event ingestion — the ONE thing that keeps running while paused (§10.6-5).
   // Driven from index.mjs's event pump (not a timer); the engine is just
   // another consumer (§4.1). Consumes the opencode stream into normalized
@@ -729,6 +841,9 @@ export function createCtoEngine(deps = {}) {
     },
     get segmenter() {
       return segmenter;
+    },
+    get rollupRunner() {
+      return getRollupRunner();
     },
   };
 
