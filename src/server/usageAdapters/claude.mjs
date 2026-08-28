@@ -45,6 +45,9 @@ function extraFor(pool, label) {
 export const claudeAdapter = {
   id: "claude",
   providerIDs: ["anthropic"],
+  // BET-1400 (§11.2): has plan windows (5h session + 7d weekly) — the reserve
+  // math applies and spendable is measured in fraction-of-window units.
+  windowed: true,
 
   async detect({ readCredentials = defaultReadCredentials } = {}) {
     const creds = await readCredentials();

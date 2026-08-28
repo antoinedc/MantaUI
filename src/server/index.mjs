@@ -1516,6 +1516,18 @@ rpcHandlers = buildHandlers({
   // persisted observation history.
   usageSnapshots: listSnapshots,
   usageHistory: getUsageHistory,
+  // BET-1400: quota forecast + reserve - drive a per-provider re-evaluation
+  // (C3's 30-min overnight re-eval calls `quota:evaluate`; the health card
+  // reads the persisted budget.quota via `quota:read`), and record a user
+  // cap-hit (sect11.3) through `quota:capHit`. A missing provider errors
+  // before any state is touched (an absent input would otherwise persist a
+  // `quota.undefined` row).
+  "quota:evaluate": (input) => {
+    if (typeof input?.provider !== "string" || !input.provider.trim()) throw new Error("quota:evaluate requires a provider");
+    return adaptiveCtoBudget.computeSpendable(input);
+  },
+  "quota:capHit": (input) => adaptiveCtoBudget.recordCapHit(input ?? {}),
+  "quota:read": () => adaptiveCtoBudget.payload(),
   // BET-790: renderer read channel for a session's progress record (the
   // server store from src/server/progress.mjs). The write side is the AI's
   // progress_report tool → POST /api/progress.
@@ -2045,7 +2057,22 @@ const SUGGEST_INTERVAL_MS = 30 * 60_000;
 // replaces the placeholder 0/0 that could never trip), and the measured
 // per-hour burn is today's budget spend / hours elapsed. Both read the real
 // budget.json store via ctoBudget.
-const adaptiveCtoBudget = ctoBudget.createCtoBudget();
+const adaptiveCtoBudget = ctoBudget.createCtoBudget({
+  // BET-1400: the reserve/forecast runs over the poller's pct observation
+  // history (BET-1336), records cap-hits + fractile notches to the sect14.5
+  // ledger, and reads the user's config (ctoNightCapUsd) for the windowless
+  // bound. getUsageHistory returns { "<provider>:<window.kind>": [{ts,pct}] }.
+  history: getUsageHistory,
+  historyKey: (provider, kind = "session") => `${provider}:${kind}`,
+  ledger: ledgerStore,
+  cfg: async () => {
+    try {
+      return await local.configGet();
+    } catch {
+      return {};
+    }
+  },
+});
 const adaptiveCtoWatchdog = ctoEngine.createWatchdog({
   engine: adaptiveCto,
   getSpendPerHour: async () => adaptiveCtoBudget.spendPerHourUsd(),

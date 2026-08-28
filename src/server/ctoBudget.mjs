@@ -28,11 +28,60 @@
 // model (no cost data) prices at 0 — honest: we cannot charge what we cannot
 // measure.
 
+// ---------------------------------------------------------------------------
+// Reserve & spendable (§11.2, §11.3) — BET-1400
+// ---------------------------------------------------------------------------
+//
+// The overnight CTO reserves a slice of each WINDOWED provider's plan window
+// against the user's own near-term demand, so overnight autonomy never starves
+// the user's interactive work. Everything here lives in FRACTION-OF-WINDOW
+// space (Option A — see ctoForecast.mjs for the units decision):
+//
+//   reserve   = newsvendor fractile of next-day forecast demand (fraction),
+//               or the §11.3 pre-forecast fallback max(observed daily max,
+//               60% of window) under 14 days of history.
+//   spendable = remaining − reserve, floored at 0.  (created/spendable)
+//
+// The fractile initializes at P95 and NOTCHES across the ladder
+// [P90, P95, P99]: up (≤ P99) on each user cap-hit; down (≥ P90) after 30
+// clean days. Notching is active only once ≥ 14 days of history exist — the
+// pre-forecast fallback is not a fractile and never notches.
+//
+// Clean-day / cap-hit definitions (BET-1400 blocker resolution): a cap-hit =
+// the user's plan window is exhausted (an adapter reports a window at/over
+// its limit, `pct >= 100`); a clean day = no cap-hit AND no forecast-exceeding
+// spend that day. Both are recorded as §14.5 ledger rows by the accessor.
+//
+// WINDOWLESS / NO-ADAPTER (§11.2): the reserve math is disabled (there is
+// nothing to reserve) and overnight spend is bounded by an absolute $ budget,
+// `ctoNightCapUsd` (user-set in Behavior, default $5/night). The forecaster
+// still runs to feed the Health card, but produces no reserve.
+
 import { budgetStore } from "./ctoStores.mjs";
 import { startOfDay } from "./ctoRollups.mjs";
 import { blendedPrice } from "../shared/blendedPrice.mjs";
+import {
+  forecastNextDayFraction,
+  forecastMape,
+  trailingDailySeries,
+  dailyUsageFractions,
+} from "./ctoForecast.mjs";
 
+export const DEFAULT_NIGHT_CAP_USD = 5;
 export const DEFAULT_AMBIENT_CAP_USD = 2.5;
+
+// The fractile notch ladder — P95 init, P99 ceiling, P90 floor (§11.3).
+export const FRACTILE_LADDER = Object.freeze([0.9, 0.95, 0.99]);
+export const FRACTILE_INIT = 0.95;
+// ≥ this many days of history activates notching (the pre-forecast fallback —
+// which is not a fractile — never notches).
+export const RESERVE_ACTIVATE_DAYS = 14;
+// This many consecutive clean days lower the fractile one notch (§11.3).
+export const RESERVE_CLEAN_DAYS = 30;
+// The §11.3 fallback floor: 60% of the window.
+export const RESERVE_FALLBACK_FLOOR = 0.6;
+// Rolling look-back for the daily series — 8 weeks.
+export const RESERVE_FORECAST_DAYS = 56;
 export const BURN_HISTORY_DAYS = 7;
 export const HOUR_MS = 3_600_000;
 
@@ -234,20 +283,171 @@ export function tierAllows(tier, feature) {
   return tierIdx !== -1 && reqIdx !== -1 && tierIdx >= reqIdx;
 }
 
+function clamp01(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0;
+}
+
+/** The configured nightly $ bound for windowless/no-adapter overnight work
+ *  (config `ctoNightCapUsd`, default $5/night, §11.2). */
+export function nightCapUsd(cfg) {
+  const c = cfg && typeof cfg === "object" ? cfg.ctoNightCapUsd : undefined;
+  return typeof c === "number" && Number.isFinite(c) && c >= 0 ? c : DEFAULT_NIGHT_CAP_USD;
+}
+
+/** A fresh per-provider reserve-quota state row (stored under `budget.quota`). */
+export function defaultQuotaState(provider = null) {
+  return {
+    provider,
+    fractile: FRACTILE_INIT,
+    activated: false,
+    cleanDays: 0,
+    mode: null,
+    reserve: 0,
+    spendable: 0,
+    maxObserved: 0,
+    historyDays: 0,
+    remainingFrac: 0,
+    mape14: null,
+    updatedMs: null,
+  };
+}
+
+/** Normalise a stored budget payload defensively, preserving the `quota` bag. */
+export function normalizeQuota(payload) {
+  const p = normalizeBudget(payload);
+  const quota = p.quota && typeof p.quota === "object" ? p.quota : {};
+  return { ...p, quota };
+}
+
+/** Move a fractile one ladder notch up (+1) or down (−1), clamped to the
+ *  ladder [P90, P95, P99]. Unknown current values normalise to the P95 init
+ *  before stepping. */
+export function notchFractile(current, direction) {
+  let idx = FRACTILE_LADDER.indexOf(current);
+  if (idx === -1) idx = FRACTILE_LADDER.indexOf(FRACTILE_INIT);
+  const target = Math.max(0, Math.min(FRACTILE_LADDER.length - 1, idx + (direction > 0 ? 1 : direction < 0 ? -1 : 0)));
+  return FRACTILE_LADDER[target];
+}
+
+/**
+ * Fold cap-hit / clean-day signals into a quota state (pure). Notching is only
+ * applied once `activated` (≥ 14 days of history — the caller decides, since
+ * only it knows the history length):
+ *   - each cap-hit raises the fractile one notch (already clamped to ≤ P99),
+ *   - `RESERVE_CLEAN_DAYS` accumulated clean days lower it one notch, then
+ *     reset the clean streak (a clean day = no cap-hit AND no
+ *     forecast-exceeding spend).
+ * Returns a new state; the input is never mutated.
+ */
+export function foldQuotaState(state, { capHits = 0, earnedCleanDays = 0, activated = false } = {}) {
+  const s = state && typeof state === "object" ? { ...state } : defaultQuotaState(null);
+  let fractile = s.fractile ?? FRACTILE_INIT;
+  let cleanDays = s.cleanDays ?? 0;
+  if (activated) {
+    cleanDays = Math.max(0, cleanDays) + Math.max(0, Number.isFinite(Number(earnedCleanDays)) ? earnedCleanDays | 0 : 0);
+    const hits = Math.max(0, Number(Number(capHits) | 0));
+    for (let i = 0; i < hits; i++) fractile = notchFractile(fractile, +1);
+    if (cleanDays >= RESERVE_CLEAN_DAYS) {
+      fractile = notchFractile(fractile, -1);
+      cleanDays = 0;
+    }
+  }
+  return { ...s, fractile, cleanDays, activated: !!activated };
+}
+
+/**
+ * The §11.3 reserve + spendable for one provider's plan window (pure). `series`
+ * is the contiguous trailing daily fraction series (oldest→newest, from the
+ * forecast module); `forecast` is a `({series, fractile}) => {mode, value}`
+ * function (default: the HW/quantile forecast — injectable for tests). Below
+ * the 14-day activation gate (or when the forecaster has insufficient data) it
+ * returns the pre-forecast fallback `max(observed daily max, 60% of window)`
+ * at the P95 init fractile — which never notches.
+ */
+export function planReserve({
+  state = defaultQuotaState(),
+  series,
+  remainingPct,
+  forecast = ({ fractile } = {}) => forecastNextDayFraction({ series, fractile }),
+  fallbackFloor = RESERVE_FALLBACK_FLOOR,
+} = {}) {
+  const vals = Array.isArray(series) ? series.filter(Number.isFinite) : [];
+  const maxObserved = vals.length ? Math.max(0, ...vals) : 0;
+  const historyDays = vals.filter((v) => v > 0).length;
+  const activated = !!state?.activated || historyDays >= RESERVE_ACTIVATE_DAYS;
+  const fractile = activated ? (state?.fractile ?? FRACTILE_INIT) : FRACTILE_INIT;
+
+  let mode;
+  let reserve;
+  let point = null;
+  let sigma = null;
+  if (!activated) {
+    mode = "fallback";
+    reserve = Math.max(maxObserved, fallbackFloor);
+  } else {
+    const fc = forecast({ series, fractile }) ?? { mode: "fallback", value: null };
+    if (fc?.mode === "forecast" && typeof fc.value === "number") {
+      mode = "forecast";
+      reserve = fc.value;
+      point = fc.point ?? null;
+      sigma = fc.sigma ?? null;
+    } else {
+      mode = "fallback";
+      reserve = Math.max(maxObserved, fallbackFloor);
+    }
+  }
+  reserve = clamp01(reserve);
+  const remainingFrac = clamp01((Number(remainingPct) || 0) / 100);
+  const spendableFrac = Math.max(0, remainingFrac - reserve);
+  return {
+    mode,
+    activated,
+    fractile,
+    reserve,
+    maxObserved,
+    historyDays,
+    remainingFrac,
+    spendableFrac,
+    point,
+    sigma,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // The I/O accessor the engine consumes (injected store + seams).
 // ---------------------------------------------------------------------------
 
-export function createCtoBudget({ store = budgetStore, price = priceTokens, now = Date.now } = {}) {
+export function createCtoBudget({
+  store = budgetStore,
+  price = priceTokens,
+  now = Date.now,
+  // BET-1400 seams (all injectable for sandboxed tests; index.mjs wires the
+  // real usage-history + §14.5 ledger):
+  history = async () => ({}), // () => { "<provider>:<kind>": [{ts,pct}] }
+  historyKey = (provider, kind) => `${provider}:${kind}`,
+  buildSeries = (obs, t) => trailingDailySeries(dailyUsageFractions(obs), { now: t, days: RESERVE_FORECAST_DAYS }),
+  forecast = ({ series, fractile }) => forecastNextDayFraction({ series, fractile }),
+  mapeFn = forecastMape,
+  cfg = () => ({}), // () => config object (ctoNightCapUsd read here)
+  ledger = null, // optional { append(row) } — the §14.5 activity ledger
+} = {}) {
   async function load() {
     try {
-      return normalizeBudget(await store.load());
+      return normalizeQuota(await store.load());
     } catch {
-      return defaultBudgetPayload();
+      return normalizeQuota(defaultBudgetPayload());
     }
   }
   async function save(payload) {
-    await store.save(normalizeBudget(payload));
+    await store.save(normalizeQuota(payload));
+  }
+  async function ledgerAppend(row) {
+    try {
+      if (ledger && typeof ledger.append === "function") await ledger.append(row);
+    } catch {
+      /* ledger is best-effort — never fail quota evaluation on a ledger write */
+    }
   }
   async function record({ model, tokens, nowMs } = {}) {
     const t = typeof nowMs === "number" && Number.isFinite(nowMs) ? nowMs : now();
@@ -263,6 +463,133 @@ export function createCtoBudget({ store = budgetStore, price = priceTokens, now 
       return { usd, dayKey: dayKey(t), ok: false };
     }
   }
+
+  /**
+   * Re-evaluate one provider's reserve + spendable (§11.3): read the provider's
+   * pct observation history, fold cap-hit/clean-day signals into its quota
+   * state, compute the reserve at the active fractile (or the pre-forecast
+   * fallback), persist the quota row + the §14.5 forecast cache, and return the
+   * plan. This is the function C3's overnight scheduler calls on its 30-min
+   * re-evaluation; the Health card reads the persisted `budget.quota`.
+   *
+   * `windowed: false` (a windowless provider or one with no adapter, §11.2)
+   * disables the reserve — it returns the same key set as the windowed plan
+   * (`spendableFrac: null`, `reserve: 0`, `mode: 'windowless'`, plus
+   * `nightCapUsd`) and bounds overnight spend by the absolute
+   * `ctoNightCapUsd` budget instead. The forecaster still runs (§11.2): the
+   * pct series is built, `mape14` computed (null without usable history) and
+   * persisted in the quota row for the Health card.
+   */
+  async function computeSpendable({
+    provider,
+    remainingPct,
+    windowKind = "session",
+    windowed = true,
+    capHitsSince = 0,
+    earnedCleanDays = 0,
+  } = {}) {
+    const t = typeof now === "function" ? now() : typeof now === "number" ? now : Date.now();
+    if (!windowed) {
+      let conf = {};
+      try {
+        conf = (await cfg()) ?? {};
+      } catch {
+        conf = {};
+      }
+      if (!conf || typeof conf !== "object") conf = {};
+      // §11.2: reserve disabled, but the forecaster still runs to feed the
+      // Health card — build the same pct-history series the windowed path
+      // uses and persist a quota row carrying `mape14` (reserve stays 0;
+      // overnight spend is bounded by the absolute `ctoNightCapUsd` instead).
+      const hist = (await history().catch(() => ({}))) ?? {};
+      const obs = hist[historyKey(provider, windowKind)] ?? [];
+      const { series, historyDays, maxObserved } = buildSeries(obs, t);
+      const mape14 = mapeFn({ series, tailDays: 14 });
+      const payload = await load();
+      const quota = {
+        ...defaultQuotaState(provider),
+        mode: "windowless",
+        reserve: 0,
+        spendable: null,
+        maxObserved,
+        historyDays,
+        remainingFrac: null,
+        mape14,
+        updatedMs: t,
+      };
+      const nextPayload = { ...payload, quota: { ...payload.quota, [provider]: quota } };
+      try {
+        await save(nextPayload);
+      } catch {
+        /* quota persistence is best-effort */
+      }
+      await ledgerAppend({ kind: "cto.reserve", ts: t, provider, reserve: 0, spendable: null, fractile: quota.fractile, mode: "windowless" });
+      // Same key set as the windowed plan below — C3's re-evaluation seam
+      // consumes both modes uniformly (null where the concept doesn't apply).
+      return {
+        provider,
+        windowed: false,
+        mode: "windowless",
+        activated: false,
+        fractile: quota.fractile,
+        reserve: 0,
+        maxObserved,
+        historyDays,
+        remainingFrac: null,
+        spendableFrac: null,
+        point: null,
+        sigma: null,
+        mape14,
+        nightCapUsd: nightCapUsd(conf),
+      };
+    }
+    const hist = (await history().catch(() => ({}))) ?? {};
+    const obs = hist[historyKey(provider, windowKind)] ?? [];
+    const { series, historyDays, maxObserved } = buildSeries(obs, t);
+
+    const payload = await load();
+    const prev = payload.quota?.[provider] ?? defaultQuotaState(provider);
+    const activated = !!prev.activated || historyDays >= RESERVE_ACTIVATE_DAYS;
+    const folded = foldQuotaState(prev, { capHits: capHitsSince, earnedCleanDays, activated });
+    const plan = planReserve({ state: folded, series, remainingPct, forecast });
+    const quota = {
+      ...folded,
+      provider,
+      mode: plan.mode,
+      reserve: plan.reserve,
+      spendable: plan.spendableFrac,
+      maxObserved: plan.maxObserved,
+      historyDays: plan.historyDays,
+      remainingFrac: plan.remainingFrac,
+      mape14: mapeFn({ series, tailDays: 14 }),
+      updatedMs: t,
+    };
+    const nextPayload = { ...payload, quota: { ...payload.quota, [provider]: quota } };
+    try {
+      await save(nextPayload);
+    } catch {
+      /* quota persistence is best-effort */
+    }
+    // §14.5 ledger rows: a fractile notch and a spendable-reserve line.
+    if (folded.fractile !== (prev.fractile ?? FRACTILE_INIT)) {
+      await ledgerAppend({ kind: "cto.reserve.fractile", ts: t, provider, from: prev.fractile ?? FRACTILE_INIT, to: folded.fractile });
+    }
+    await ledgerAppend({ kind: "cto.reserve", ts: t, provider, reserve: plan.reserve, spendable: plan.spendableFrac, fractile: plan.fractile, mode: plan.mode });
+    return { provider, windowed: true, ...plan, mape14: quota.mape14 };
+  }
+
+  /**
+   * Record a user cap-hit (the provider's plan window exhausted, `pct >= 100`)
+   * as a §14.5 ledger row. Does not itself notch — the next evaluate folds the
+   * cap-hit into the quota state. Purely a recording seam for the poller/engine
+   * that observes the exhaustion.
+   */
+  async function recordCapHit({ provider, tsMs, pct } = {}) {
+    const t = typeof tsMs === "number" && Number.isFinite(tsMs) ? tsMs : (typeof now === "function" ? now() : Date.now());
+    await ledgerAppend({ kind: "cto.cap_hit", ts: t, provider, pct });
+    return { ok: true };
+  }
+
   return {
     record,
     payload: load,
@@ -271,5 +598,7 @@ export function createCtoBudget({ store = budgetStore, price = priceTokens, now 
     spendPerHourUsd: async () => spendPerHourNow(await load(), now()),
     expectedHourlyBurnUsd: async ({ capUsd } = {}) => expectedHourlyBurnUsd(await load(), { now: now(), capUsd }),
     didDayRoll: async () => didDayRoll(await load(), now()),
+    computeSpendable,
+    recordCapHit,
   };
 }

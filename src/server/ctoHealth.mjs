@@ -24,6 +24,9 @@ export const HEALTH_STAT_MIN = Object.freeze({
   digestOpens: 7,
   pipelineLag: 7,
   suggestionAcceptance: 10,
+  forecastAccuracy: 1,
+  capHitsCaused: 1,
+  reserveFractile: 1,
 });
 
 function medianOf(values) {
@@ -177,6 +180,51 @@ export async function computeHealthStats({
       decided >= HEALTH_STAT_MIN.suggestionAcceptance
         ? `${Math.round(acceptRate * 100)}% accepted`
         : null,
+  });
+
+  // 5. Forecast accuracy (MAPE 14d, §14.5) — the best available cached
+  //    per-provider 14-day MAPE from the budget's quota/forecast cache
+  //    (BET-1400 recomputes each provider's MAPE on every quota evaluation).
+  //    The first quota row carrying a numeric MAPE speaks for the box.
+  let quota = null;
+  try {
+    quota = (await budgetRead())?.quota ?? null;
+  } catch {
+    quota = null;
+  }
+  const quotaRows = quota && typeof quota === "object" ? Object.values(quota) : [];
+  const withMape = quotaRows.find((q) => typeof q?.mape14 === "number" && Number.isFinite(q.mape14));
+  stats.push({
+    id: "forecastAccuracy",
+    label: "Forecast accuracy · MAPE 14d",
+    min: HEALTH_STAT_MIN.forecastAccuracy,
+    n: withMape ? 1 : 0,
+    value: withMape ? `${withMape.mape14.toFixed(1)}%` : null,
+  });
+
+  // 6. Cap-hits caused (30d, §14.5) — count of `cto.cap_hit` §14.5 ledger rows
+  //    (the user's plan window exhausted) in the last 30 days.
+  const capCutoff = t - 30 * DAY_MS;
+  const capHits = rows.filter((r) => r?.kind === "cto.cap_hit" && typeof r?.ts === "number" && r.ts >= capCutoff).length;
+  stats.push({
+    id: "capHitsCaused",
+    label: "Cap-hits caused · 30d",
+    min: HEALTH_STAT_MIN.capHitsCaused,
+    n: capHits,
+    value: capHits >= HEALTH_STAT_MIN.capHitsCaused ? `${capHits} window(s) hit` : null,
+  });
+
+  // 7. Reserve fractile (§11.3) — the current per-provider fractile, for the
+  //    Tonight's-budget reserve line (§10.5-3). The fractile *history* is
+  //    ledgered (§14.5); this row is the live value for the gauge.
+  const withFractile = quotaRows.find((q) => typeof q?.fractile === "number");
+  const fractileLabel = withFractile != null ? `P${Math.round(withFractile.fractile * 100)}` : null;
+  stats.push({
+    id: "reserveFractile",
+    label: "Reserve fractile",
+    min: HEALTH_STAT_MIN.reserveFractile,
+    n: withFractile ? 1 : 0,
+    value: withFractile && fractileLabel ? `${fractileLabel} · ${withFractile.provider ?? "provider"}` : null,
   });
 
   return { stats, generatedAt: t };
