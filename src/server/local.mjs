@@ -89,7 +89,7 @@ const DEFAULT_CONFIG = {
   // Adaptive CTO (BET-1386): the §12.1 / D12 user effort dial — Low / Medium /
   // High. Defaults to Low. Enforcement rides the engine in a later
   // effort-routing issue; the setting persists here.
-  ctoEffort: "low",
+  ctoTier: "low",
   // Adaptive CTO (BET-1386): hard daily ambient cap in $ (D12 — independent of
   // the effort dial; the B1 metering that enforces it ships in the economics
   // issue). The Behavior-card editor + Health "ambient spend today / cap" row

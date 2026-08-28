@@ -10,14 +10,14 @@
 // ledger GETs — the engine publishes a fresh `{kind:"ctoState"}` on pause /
 // resume so the banner reflects it.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { digestBusy, statDisplay, type CtoState } from "./ctoView";
+import { digestBusy, showPausedBanner, statDisplay, type CtoState } from "./ctoView";
 import type { CtoHealthStat, CtoLedgerPage, CtoLedgerRow } from "../shared/api.js";
 import { Toggle } from "./Toggle";
 import { useStore } from "./store";
 
 type Config = {
   ctoEnabled?: boolean;
-  ctoEffort?: "low" | "medium" | "high";
+  ctoTier?: "low" | "medium" | "high";
   ctoAmbientCap?: number;
   ctoDigestPush?: boolean;
 };
@@ -79,7 +79,9 @@ export function CtoPanel({ state }: { state: CtoState | null }) {
     }
   }, [busy]);
 
-  const paused = state?.dot === "paused";
+  // §10.6-5: the kill switch being active drives the banner via the pure
+  // state→banner selector (tested in ctoView.test.ts).
+  const paused = showPausedBanner(state);
 
   const openSettings = () => setView("settings");
   const openOverview = () => setView("overview");
@@ -212,7 +214,7 @@ function SettingsView({
     let alive = true;
     void window.api.configGet().then((c) => {
       if (!alive) return;
-      setConfig({ ctoEnabled: !!c?.ctoEnabled, ctoEffort: c?.ctoEffort, ctoAmbientCap: c?.ctoAmbientCap, ctoDigestPush: !!c?.ctoDigestPush });
+      setConfig({ ctoEnabled: !!c?.ctoEnabled, ctoTier: c?.ctoTier, ctoAmbientCap: c?.ctoAmbientCap, ctoDigestPush: !!c?.ctoDigestPush });
       setCapText(String(c?.ctoAmbientCap ?? 2.5));
     });
     void window.api.ctoHealthGet().then((h) => {
@@ -320,7 +322,7 @@ function SettingsView({
                       key={lv.value}
                       className={
                         "cursor-pointer rounded-md border p-3 text-sm " +
-                        ((config?.ctoEffort ?? "low") === lv.value
+                        ((config?.ctoTier ?? "low") === lv.value
                           ? "border-accent bg-fill-hover"
                           : "border-border-subtle")
                       }
@@ -330,8 +332,8 @@ function SettingsView({
                           type="radio"
                           name="cto-effort"
                           value={lv.value}
-                          checked={(config?.ctoEffort ?? "low") === lv.value}
-                          onChange={() => void applyConfig({ ctoEffort: lv.value })}
+                          checked={(config?.ctoTier ?? "low") === lv.value}
+                          onChange={() => void applyConfig({ ctoTier: lv.value })}
                           className="accent-accent"
                         />
                         <span className="font-medium text-text">{lv.title}</span>

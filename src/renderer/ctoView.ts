@@ -40,6 +40,15 @@ export function statDisplay(stat: CtoHealthStat): { text: string; ready: boolean
   return { text: stat.value as string, ready: true };
 }
 
+// Pure state→banner selector (§10.6-5): the paused banner (paused-at time +
+// "no probes, no jobs…" + Resume) REPLACES the overview header exactly when
+// the engine reports the kill switch is active (`dot === "paused"`). A null /
+// pre-pairing state (dot undefined) is never paused. `pausedAt` is the
+// epoch-ms the kill switch was thrown, for the banner's "paused at" line.
+export function showPausedBanner(state: CtoState | null): boolean {
+  return state?.dot === "paused";
+}
+
 // State-dot tone (§10.1): active/disabled/thrifty/paused → ok/tx4/warn/danger.
 // StatusDot's tones are ok/running/error/warn/idle; disabled maps to idle
 // (bg-text-quiet = the quiet text tier), which is the tx4 analogue.

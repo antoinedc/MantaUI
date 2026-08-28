@@ -4,6 +4,7 @@ import {
   badgeLabel,
   digestBusy,
   statDisplay,
+  showPausedBanner,
   type CtoState,
   type CtoHealthStat,
 } from "./ctoView";
@@ -94,5 +95,24 @@ describe("statDisplay (§10.5 stat min-sample collecting)", () => {
     const out = statDisplay(undefined as unknown as CtoHealthStat);
     expect(out.ready).toBe(false);
     expect(out.text).toBe("collecting (0 / 0)");
+  });
+});
+
+describe("showPausedBanner (§10.6-5 kill switch → banner)", () => {
+  it("shows the banner exactly when the dot is paused", () => {
+    expect(showPausedBanner({ ...base, dot: "paused", pausedAt: 1234 })).toBe(true);
+  });
+  it("does NOT show it for active / thrifty / disabled states", () => {
+    expect(showPausedBanner({ ...base, dot: "active" })).toBe(false);
+    expect(showPausedBanner({ ...base, dot: "thrifty" })).toBe(false);
+    expect(showPausedBanner({ ...base, dot: "disabled" })).toBe(false);
+  });
+  it("treats a null / not-yet-loaded state as not paused", () => {
+    expect(showPausedBanner(null)).toBe(false);
+  });
+  it("carries the paused-at timestamp through the state", () => {
+    const s = { ...base, dot: "paused" as const, pausedAt: 1_700_000_000_000 };
+    expect(showPausedBanner(s)).toBe(true);
+    expect(s.pausedAt).toBe(1_700_000_000_000);
   });
 });

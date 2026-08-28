@@ -303,7 +303,7 @@ export type AppConfig = {
   // Adaptive CTO (BET-1386): the §12.1 / D12 user effort dial — Low / Medium
   // / High. Defaults to Low. Enforcement (which feature classes run) rides the
   // engine in a later effort-routing issue; the setting itself persists here.
-  ctoEffort?: "low" | "medium" | "high";
+  ctoTier?: "low" | "medium" | "high";
   // Adaptive CTO (BET-1386): hard daily ambient cap in $ (D12 — independent of
   // the effort dial). Behavior-card editor + Health "ambient spend today / cap"
   // row. Default 2.5.

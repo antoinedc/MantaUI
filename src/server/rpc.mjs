@@ -26,6 +26,8 @@ import { getModelPrefs as modelPrefsGetStore, setModelPrefs as modelPrefsSetStor
 import { listHooks as webhookListHooks, deleteHook as webhookDeleteHook } from "./webhooks.mjs";
 import { listPages as servePageListStore } from "./servePage.mjs";
 import { listOutbox } from "./outbox.mjs";import { publicBaseUrl } from "./gatewayRegister.mjs";
+import { ledgerStore } from "./ctoStores.mjs";
+import { tierChangeLedgerEntry } from "./ctoTier.mjs";
 import {
   listSecrets as secretsListStore,
   setSecret as secretsSetStore,
@@ -537,7 +539,21 @@ export function buildHandlers({
         );
         if (!applied.ok) throw new Error(applied.error);
       }
+      const prev = await local.configGet();
       const next = await local.configUpdate(patch);
+      // BET-1386 §10.5 card 1: the effort dial is a real, persisted selection
+      // AND ledgered on change — only an ACTUAL Low/Med/High switch appends an
+      // Activity-ledger row (pure decision in ctoTier.mjs, tested) so the A12
+      // ledger is the audit trail of the user's effort. Best-effort: a failed
+      // append must not fail the save.
+      const tierEntry = tierChangeLedgerEntry({ prev, next });
+      if (tierEntry) {
+        try {
+          await ledgerStore.append({ ...tierEntry, ts: Date.now() });
+        } catch {
+          /* best-effort audit trail */
+        }
+      }
       syncState.applyConfig(next);
       return next;
     },
