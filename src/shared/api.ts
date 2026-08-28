@@ -163,6 +163,21 @@ export type SyncDelta =
   | SyncPayload
   | { resync: true };
 
+// Adaptive CTO state (§10.1/§10.6). The engine's `{kind:"ctoState"}` bus
+// event and `GET /api/cto/state` both carry this exact shape.
+export type CtoState = {
+  enabled: boolean;
+  // State-machine dot (§10.6): active / disabled / thrifty / paused.
+  dot: "active" | "disabled" | "thrifty" | "paused";
+  // Count of OPEN needs-you items only (D17) — drives the red sidebar badge.
+  needsYouCount: number;
+  // True while a digest regeneration is in flight (the §5.5 single-flight
+  // gate) — the Digest-now button renders this as its spinner.
+  generationInFlight: boolean;
+  // Number of tasks queued for tonight's window — the muted Tonight line.
+  tonightCount: number;
+};
+
 /**
  * The full `window.api` contract.
  *
@@ -902,6 +917,20 @@ export interface Api {
   // manifests come back with `valid: false` + an `error` string so the UI
   // can show the user why their YAML didn't load.
   pluginsRegistry(): Promise<PluginRegistryRow[]>;
+
+  // ---- Adaptive CTO (BET-1384) ----
+  // The engine publishes ONE `{kind:"ctoState"}` bus event on every change
+  // (§10.1); the sidebar badge/dot, the Digest-now spinner and the tonight
+  // line all render from it, with GET /api/cto/state only for initial mount.
+  // No polling.
+  onCtoState(cb: (state: CtoState) => void): () => void;
+  // GET /api/cto/state — initial-mount read of the same shape the bus event
+  // carries. Rejects with nothing on failure; the caller treats a rejection
+  // as "no known state" (inert dot, no badge).
+  ctoStateGet(): Promise<CtoState>;
+  // POST /api/cto/digest — joins or starts the §5.5 single-flight generation.
+  // Returns `{ok:false, error}` on failure so the pane can toast the cause.
+  ctoDigestNow(): Promise<{ ok: boolean; error?: string }>;
 }
 
 /**

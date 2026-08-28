@@ -7,6 +7,7 @@ import { ChatPanel } from "./ChatPanel";
 import { ArtifactsPanel } from "./ArtifactsPanel";
 import { GlobalToasts } from "./GlobalToasts";
 import { Settings } from "./Settings";
+import { CtoPanel } from "./CtoPanel";
 import { SearchPalette } from "./SearchPalette";
 import { SETTING_SECTIONS, type SettingSectionId } from "../shared/settingsSchema";
 import { Onboarding } from "./Onboarding";
@@ -23,7 +24,7 @@ import {
   resolveLauncherFlags,
 } from "./chatShared";
 import { setSessionChoice } from "./modelPrefs";
-import type { SyncPayload } from "../shared/api";
+import type { SyncPayload, CtoState } from "../shared/api";
 import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, pruneVisitedSessions, registerMountedTerminal, shouldResyncWindowsForJobs, dispatchAppControl, dispatchMedia, applyMediaEvent, dispatchWidget, applyWidgetEvent, formatResetAt, voiceUi, boxUpgradeLanded, type AppControlHandlers, type MountedTerminal } from "./chatUtils";
 import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
 import { UpdateBar } from "./UpdateBar";
@@ -272,6 +273,13 @@ function Shell() {
     return () => window.removeEventListener("manta-api-installed", bump);
   }, []);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // BET-1384: the Adaptive CTO overview pane (replaces the active session
+  // panel in the main content area, mirroring how Settings opens from the
+  // sidebar). Selecting any session closes it again.
+  const [ctoOpen, setCtoOpen] = useState(false);
+  // Live CTO state, held here so the always-mounted Sidebar badge/dot and the
+  // CtoPanel share ONE subscription + initial GET (no per-consumer polling).
+  const [ctoState, setCtoState] = useState<CtoState | null>(null);
   // ⌘F conversation search palette (SearchPalette). Only reachable in chat
   // mode with an active session (see the keydown handler).
   const [searchOpen, setSearchOpen] = useState(false);
@@ -696,6 +704,28 @@ function Shell() {
       void pullUsageStopped();
     });
   }, [apiGeneration, pullUsageStopped]);
+
+  // ---- Adaptive CTO state (BET-1384) ----
+  // One subscription to the `{kind:"ctoState"}` bus event + a `GET
+  // /api/cto/state` read on mount (no polling). Held at App so the always-
+  // mounted Sidebar badge/dot and the CtoPanel share the same value.
+  useEffect(() => {
+    if (window.api.ctoStateGet) {
+      void window.api.ctoStateGet().then(setCtoState).catch(() => {});
+    }
+    if (!window.api.onCtoState) return;
+    return window.api.onCtoState((s) => setCtoState(s));
+  }, [apiGeneration]);
+
+  // Selecting any session closes the CTO pane (it "replaces the active
+  // session panel", so leaving to a session must reveal that panel again).
+  const prevActiveProject = useRef(activeProjectName);
+  useEffect(() => {
+    if (activeProjectName !== prevActiveProject.current) {
+      prevActiveProject.current = activeProjectName;
+      if (activeProjectName) setCtoOpen(false);
+    }
+  }, [activeProjectName]);
 
   // ---- Subscription usage escalation (BET-739) ----
   // The warn (>=90%) / limit (>=100%) toasts, pushed through the existing
@@ -1851,6 +1881,8 @@ function Shell() {
         onNewProject={openNewProject}
         onNewSessionInProject={openNewSessionInProject}
         onOpenResumeModal={() => setResumeModalOpen(true)}
+        onOpenCto={() => setCtoOpen(true)}
+        ctoState={ctoState}
       />
       <main className="flex-1 flex flex-col min-w-0">
         {/* At most ONE full-width bar (BET-416 §E). `activeBanner` is the
@@ -2076,6 +2108,7 @@ function Shell() {
                   share this loop — `tmuxTarget` is the only diff (BET-347). */}
               {[...visitedModes.current.entries()].map(([key, m]) => {
                 const isActiveThisMode =
+                  !ctoOpen &&
                   activeProjectName === m.tmuxSession &&
                   activeWin?.index === m.windowIndex &&
                   mode === (m.modeId === "terminal" ? "terminal" : `tui:${m.modeId}`);
@@ -2105,7 +2138,7 @@ function Shell() {
                 // still has the panel mounted — fork/delete buttons
                 // gracefully no-op then.
                 const owner = resolveSessionOwner(projects, sid);
-                const isActiveChat = sid === activeChatSessionId && mode === "chat";
+                const isActiveChat = !ctoOpen && sid === activeChatSessionId && mode === "chat";
                 const ownerWinName = owner
                   ? (projects
                       .find((p) => p.tmuxSession === owner.tmuxSession)
@@ -2136,13 +2169,20 @@ function Shell() {
                   </PanelShell>
                 );
               })}
+              {/* Adaptive CTO overview pane (BET-1384 / §10). Replaces the
+                  active session panel in the main content area; the session
+                  panels above are suppressed while it is open (their `active`
+                  flips on !ctoOpen). Selecting a session closes it. */}
+              <PanelShell key="cto" active={ctoOpen}>
+                <CtoPanel state={ctoState} />
+              </PanelShell>
               {/* New-session DRAFT layer: shown over the always-mounted
                   session panels when a draft is the active view (user hit +
                   / Cmd+N/T). The session panels below stay mounted, so
                   switching back to a real session (setActive clears
                   activeDraftId) reveals it with state intact. The sidebar
                   stays visible so the user can click another session. */}
-              {activeDraft && (
+              {activeDraft && !ctoOpen && (
                 <div className="absolute inset-0 z-30 bg-bg">
                   <NewSessionScreen draftId={activeDraft.id} />
                 </div>

@@ -176,6 +176,13 @@
   /* Dim applied to a dormant widget's captured snapshot. Desktop and iOS must
      dim identically; a hardcoded 0.5 in each would drift. */
   --widget-dormant-opacity: 0.5;
+
+  /* Adaptive CTO pane & sidebar (§10). Dimensional and theme-shared — no
+     per-theme values, so nothing is needed in the theme blocks. See §10.7. */
+  --cto-card-min-w: 230px;  /* Now / Just-finished rail card minimum */
+  --cto-col-max-w: 960px;   /* overview page column */
+  --need-edge-w: 3px;       /* needs-you card left edge */
+  --tier-col-w: 76px;       /* digest tier-chip column */
 }
 
 /* Density scope (BET-544). Session-row metrics live on [data-density], NOT
