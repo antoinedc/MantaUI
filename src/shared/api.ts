@@ -176,6 +176,18 @@ export type CtoState = {
   generationInFlight: boolean;
   // Number of tasks queued for tonight's window — the muted Tonight line.
   tonightCount: number;
+  // Cold-start backfill (§10.6-4): informational learning-card progress. Not a
+  // needs-you item — never counted into the sidebar badge. Optional so older
+  // bridges (absent field) still typecheck as idle.
+  backfill?: {
+    done: number;
+    total: number;
+    startedAt: number | null;
+    stopped: boolean;
+    reason: string | null;
+    stoppedAtDepthDays: number | null;
+    active: boolean;
+  };
 };
 
 /**

@@ -3,6 +3,8 @@ import {
   dotTone,
   badgeLabel,
   digestBusy,
+  backfillCardView,
+  formatEta,
   type CtoState,
 } from "./ctoView";
 
@@ -56,5 +58,55 @@ describe("digestBusy (§10.2 Digest-now single-flight spinner)", () => {
   });
   it("treats null state as idle", () => {
     expect(digestBusy(null)).toBe(false);
+  });
+});
+
+describe("backfillCardView (§10.6-4 learning card)", () => {
+  it("renders nothing when there is no backfill field (older bridge)", () => {
+    expect(backfillCardView(base)).toBeNull();
+  });
+  it("shows an active running backfill with pct + ETA", () => {
+    const startedAt = Date.now() - 60_000;
+    const view = backfillCardView({
+      ...base,
+      backfill: { done: 2, total: 10, startedAt, stopped: false, reason: null, stoppedAtDepthDays: null, active: true },
+    });
+    expect(view?.show).toBe(true);
+    expect(view?.done).toBe(2);
+    expect(view?.total).toBe(10);
+    expect(view?.pct).toBeCloseTo(0.2, 5);
+    // 2 items over 60s → rate 30000ms/item, 8 left → 240000ms
+    expect(view?.etaMs).toBe(240000);
+  });
+  it("still shows a budget-stopped backfill with the reason", () => {
+    const view = backfillCardView({
+      ...base,
+      backfill: { done: 5, total: 200, startedAt: null, stopped: true, reason: "budget", stoppedAtDepthDays: 12, active: false },
+    });
+    expect(view?.show).toBe(true);
+    expect(view?.stopped).toBe(true);
+    expect(view?.reason).toBe("budget");
+    expect(view?.stoppedAtDepthDays).toBe(12);
+  });
+  it("hides a cleanly completed backfill", () => {
+    const view = backfillCardView({
+      ...base,
+      backfill: { done: 10, total: 10, startedAt: null, stopped: false, reason: null, stoppedAtDepthDays: null, active: false },
+    });
+    expect(view?.show).toBe(false);
+  });
+});
+
+describe("formatEta (§10.6-4 ETA label)", () => {
+  it("formats minutes", () => {
+    expect(formatEta(120_000)).toBe("~2m");
+  });
+  it("formats hours + minutes", () => {
+    expect(formatEta(4_500_000)).toBe("~1h 15m");
+  });
+  it("returns null for null/zero/NaN", () => {
+    expect(formatEta(null)).toBeNull();
+    expect(formatEta(0)).toBeNull();
+    expect(formatEta(NaN)).toBeNull();
   });
 });

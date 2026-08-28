@@ -1826,6 +1826,11 @@ const adaptiveCto = ctoEngine.createCtoEngine({
       generationInFlight: adaptiveCtoDigest ? await adaptiveCtoDigest.isGenerating() : false,
     };
   },
+  // BET-1387 cold-start backfill: the read-only opencode db handle (⌘F search's
+  // source) + the A7 rollup reduce producer. The backfill pays for these out of
+  // its own one-time spend bound, so they bypass the engine's §3.3 rate gate.
+  getDb,
+  backfillRunEphemeral: runEphemeral,
 });
 adaptiveCto.start();
 

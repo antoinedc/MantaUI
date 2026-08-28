@@ -16,7 +16,7 @@
 // line on generation-completion below still reacts to the server's real
 // `generationInFlight` (covers server-initiated regeneration).
 import { useEffect, useRef, useState } from "react";
-import { digestBusy } from "./ctoView";
+import { backfillCardView, digestBusy, formatEta } from "./ctoView";
 import type { CtoState } from "../shared/api.js";
 
 export function CtoPanel({
@@ -92,7 +92,12 @@ export function CtoPanel({
 
         {/* §10.2 section scaffolds — each collapses to nothing when empty; the
             actual cards/rails land in later issues. */}
-        <div className="space-y-8" />
+        <div className="space-y-8">
+          {/* Learning card (§10.6-4): cold-start backfill progress. Reuses the
+              needs-you card's neutral-surface styling with a `learning` chip —
+              informational, so it never counts into the sidebar badge. */}
+          <BackfillCard state={state} />
+        </div>
 
         {/* Resting state (§10.6-1): no needs-you items → a single centered
             "Nothing needs you ✓" line with a one-line context summary. Only
@@ -109,6 +114,68 @@ export function CtoPanel({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// The cold-start learning card (§10.6-4). Renders only while a backfill is
+// running or was stopped by its spend bound. Neutral border (informational —
+// NOT a needs-you item, so it does not count into the sidebar badge).
+function BackfillCard({ state }: { state: CtoState | null }) {
+  const view = backfillCardView(state);
+  if (!view || !view.show) return null;
+  const eta = formatEta(view.etaMs);
+  const pctLabel =
+    view.total > 0 ? Math.round(view.pct * 100) + "%" : view.done > 0 ? "100%" : "…";
+
+  return (
+    <div
+      className="rounded-lg border border-border-subtle bg-bg-soft p-4"
+      data-cto-card="learning"
+    >
+      <div className="flex items-center gap-2">
+        <span className="rounded-full bg-fill px-2 py-1 text-xs font-medium text-text-muted">
+          learning
+        </span>
+        {view.stopped ? (
+          <span className="text-sm font-medium text-text">Backfill stopped</span>
+        ) : (
+          <span className="text-sm font-medium text-text">Backfilling history</span>
+        )}
+      </div>
+
+      {view.stopped ? (
+        <p className="mt-2 text-sm text-text-faint">
+          {view.reason === "budget"
+            ? `Reached the one-time spend cap at ~${view.stoppedAtDepthDays ?? "some"} days of history (${view.done} of ${view.total} sessions processed).`
+            : "History backfilling was interrupted."}
+        </p>
+      ) : (
+        <div className="mt-2">
+          <div className="flex items-baseline justify-between text-sm">
+            <span className="text-text-muted">
+              Session {view.done} of {view.total} · {pctLabel}
+            </span>
+            {eta && <span className="text-text-faint">ETA {eta}</span>}
+          </div>
+          <div
+            role="progressbar"
+            aria-valuenow={Math.round(view.pct * 100)}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-fill"
+          >
+            <div
+              className="h-full rounded-full bg-info"
+              style={{ width: `${Math.max(0, Math.min(100, view.pct * 100))}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      <p className="mt-2 text-xs text-text-faint">
+        Ask-only while learning — I&rsquo;ll suggest, not act, until there&rsquo;s a track record.
+      </p>
     </div>
   );
 }
