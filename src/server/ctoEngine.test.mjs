@@ -23,10 +23,21 @@ function makeHarness({ ctoEnabled = false, counts = {} } = {}) {
   let killSwitchPaused = false;
   let published = [];
   let currentConfig = { ctoEnabled };
+  const cardCalls = [];
 
   const engine = createCtoEngine({
     configGet: async () => ({ ...currentConfig }),
     ledger: { append: async (row) => ledgerRows.push(row) },
+    cards: {
+      onAskStart: (...a) => (cardCalls.push({ fn: "onAskStart", args: a }), Promise.resolve()),
+      onAskResolved: (...a) => (
+        cardCalls.push({ fn: "onAskResolved", args: a }),
+        Promise.resolve({ changed: false })
+      ),
+      onHealthRecovered: (...a) => (cardCalls.push({ fn: "onHealthRecovered", args: a }), Promise.resolve()),
+      promoteDue: async () => ({}),
+      ingestHealthEscalations: async () => ({}),
+    },
     engineState: {
       load: async () => ({ v: 1, pendingBlockers }),
       save: async (payload) => {
@@ -59,6 +70,7 @@ function makeHarness({ ctoEnabled = false, counts = {} } = {}) {
     clock,
     ledgerRows,
     published,
+    cardCalls,
     get pendingBlockers() {
       return pendingBlockers;
     },
@@ -302,4 +314,69 @@ test("createKillSwitch uses a real flag file (sandboxed state home)", async () =
   assert.equal(await ks.isPaused(), true);
   await ks.resume();
   assert.equal(await ks.isPaused(), false);
+});
+
+test("observeEvent: question.asked registers a pending blocker card (no notify)", async () => {
+  const h = makeHarness({ ctoEnabled: true });
+  h.engine.observeEvent({
+    type: "question.asked",
+    id: "evt_q1",
+    properties: { sessionID: "s1", id: "que_1", questions: [{ question: "Pick a file?" }] },
+  });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(h.cardCalls.some((c) => c.fn === "onAskStart"));
+  const call = h.cardCalls.find((c) => c.fn === "onAskStart");
+  assert.equal(call.args[0].sourceKind, "question");
+  assert.equal(call.args[0].sessionID, "s1");
+  // The engine/card path never produces a notification — observeEvent only
+  // forwards to the card machinery.
+  assert.ok(h.ledgerRows.every((r) => !String(r.kind).toLowerCase().includes("notify")));
+});
+
+test("observeEvent: permission.replied resolves the open card for that session", async () => {
+  const h = makeHarness({ ctoEnabled: true });
+  h.engine.observeEvent({
+    type: "permission.replied",
+    id: "evt_p1",
+    properties: { sessionID: "s2" },
+  });
+  await new Promise((r) => setTimeout(r, 0));
+  const call = h.cardCalls.find((c) => c.fn === "onAskResolved");
+  assert.ok(call, "permission.replied forwards to onAskResolved");
+  assert.equal(call.args[0].sessionID, "s2");
+});
+
+test("observeEvent: session.deleted (abort) resolves the open card", async () => {
+  const h = makeHarness({ ctoEnabled: true });
+  h.engine.observeEvent({
+    type: "session.deleted",
+    id: "evt_del",
+    properties: { sessionID: "s3" },
+  });
+  await new Promise((r) => setTimeout(r, 0));
+  const call = h.cardCalls.find((c) => c.fn === "onAskResolved");
+  assert.ok(call, "session.deleted forwards to onAskResolved");
+  assert.equal(call.args[0].sessionID, "s3");
+});
+
+test("resume() clears health-escalation blocker cards (health recovered)", async () => {
+  const h = makeHarness({ ctoEnabled: true });
+  await h.engine.resume();
+  assert.ok(h.cardCalls.some((c) => c.fn === "onHealthRecovered"));
+});
+
+test("defaultGetCounts counts open cards from the real cards store", async () => {
+  const { defaultGetCounts } = await import("./ctoEngine.mjs");
+  const { cardsStore } = await import("./ctoStores.mjs");
+  // The real cards store resolves under the test-sandbox state home; write a
+  // card there and confirm it is counted only while open.
+  await cardsStore.save({ v: 1, cards: [
+    { id: "a", state: "open" },
+    { id: "b", state: "resolved" },
+  ] });
+  assert.deepEqual(await defaultGetCounts(), {
+    needsYouCount: 1,
+    generationInFlight: false,
+    tonightCount: 0,
+  });
 });

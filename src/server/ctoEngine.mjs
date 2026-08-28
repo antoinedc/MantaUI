@@ -63,6 +63,13 @@ import {
   normalizeEvidence,
   presenceState,
 } from "./ctoEvidence.mjs";
+import {
+  askStartInfo,
+  askResolveInfo,
+  askQuestionText,
+  createCtoCards,
+  isAskResolveEvent,
+} from "./ctoCards.mjs";
 
 // Actor tag stamped on every engine RPC call / ledger row (spec §3.3).
 export const ACTOR = "cto";
@@ -77,6 +84,11 @@ export const RATE_LIMITS = Object.freeze({
 
 export const HOUR_MS = 3_600_000;
 export const TICK_INTERVAL_MS = 60_000;
+
+// The card timer's cadence (BET-1382): it inspects pending asks / health
+// escalations once a minute and promotes any ask past BLOCKER_AFTER_MS into a
+// blocker card. The card threshold itself (10 min) lives in ctoCards.mjs.
+export const CARD_CHECK_INTERVAL_MS = 60_000;
 
 export const DOT = Object.freeze({
   ACTIVE: "active",
@@ -169,16 +181,16 @@ export function computeDot({ enabled, paused, thrifty }) {
 }
 
 // Default counts producer: needs-you count from the A1 cards store, digest /
-// tonight counts not populated until later pipeline issues. Defensive — a
-// malformed or missing store yields zeros, never a throw.
+// tonight counts not populated until later pipeline issues. Wired to the real
+// cards schema (BET-1382): an open card (state === "open") is a needs-you item;
+// resolved/dismissed cards have already moved off cards.json into the ledger.
+// Defensive — a malformed or missing store yields zeros, never a throw.
 export async function defaultGetCounts() {
   let needsYouCount = 0;
   try {
     const cards = await cardsStore.load();
     const arr = Array.isArray(cards?.cards) ? cards.cards : [];
-    needsYouCount = arr.filter(
-      (c) => c && c.needsYou === true && c.resolved !== true,
-    ).length;
+    needsYouCount = arr.filter((c) => c && c.state === "open").length;
   } catch {
     needsYouCount = 0;
   }
@@ -199,8 +211,13 @@ export function createCtoEngine(deps = {}) {
     now = () => Date.now(),
     rates: rateLimits = RATE_LIMITS,
     tickIntervalMs = TICK_INTERVAL_MS,
+    cardCheckIntervalMs = CARD_CHECK_INTERVAL_MS,
     getCounts = defaultGetCounts,
     track = createRateTracker({ now }),
+    // BET-1382 needs-you card machinery (blocker cards). Defaults to the real
+    // stores; tests inject a fake. Cards are about the user's own blockers,
+    // not autonomous CTO work, so this is wired regardless of enabled state.
+    cards = createCtoCards({}),
     // A5 evidence/presence seams (injected I/O — nothing here touches tmux /
     // push directly; index.mjs supplies the real resolvers).
     getSessionInfo = async () => ({ owner: "user", project: undefined }),
@@ -215,6 +232,7 @@ export function createCtoEngine(deps = {}) {
   let enabled = false;
   let heartbeatAt = now();
   let tickHandle = null;
+  let cardTickHandle = null;
   let reaperHandle = null;
   let lastPublishedSerialized = null;
 
@@ -348,6 +366,40 @@ export function createCtoEngine(deps = {}) {
     }
   }
 
+  // The card timer (BET-1382): promotes pending worker asks past the 10-min
+  // threshold into blocker cards and ingests the watchdog's health escalations,
+  // then re-publishes state if the needs-you count changed. Unlike the tick
+  // this runs even while paused/disabled — blocker cards are the user's own
+  // "needs you" surface (spec §10.3, §9.2), not autonomous CTO work, so it
+  // keeps serving even when the engine's timers are stopped (§10.6-5's
+  // "event ingestion keeps running" spirit). Stopped only on dispose.
+  async function cardTick() {
+    if (disposed) return;
+    try {
+      await cards.promoteDue();
+      await cards.ingestHealthEscalations();
+      await syncState();
+    } catch {
+      /* never throw into the poller */
+    }
+  }
+
+  function stopCardTimer() {
+    if (cardTickHandle) {
+      cardTickHandle.stop();
+      cardTickHandle = null;
+    }
+  }
+
+  function startCardTimer() {
+    if (cardTickHandle || disposed) return;
+    cardTickHandle = startPoller(cardTick, {
+      intervalMs: cardCheckIntervalMs,
+      label: "cto-cards",
+      immediate: false,
+    });
+  }
+
   // §10.6-5: pausing stops all engine timers (event ingestion is not a timer
   // and is unaffected). The kill-switch flag is the persisted, external mark.
   async function pause({ reason = "manual", source = "engine" } = {}) {
@@ -363,6 +415,13 @@ export function createCtoEngine(deps = {}) {
     await killSwitch.resume();
     selfPaused = false;
     startTimers();
+    // Resuming a health-paused engine = "health recovered" → its blocker cards
+    // resolve (liveness predicate false, §10.3). Best-effort.
+    try {
+      await cards.onHealthRecovered();
+    } catch {
+      /* best-effort */
+    }
     await ledgerLog({ kind: "cto.resume", reason });
     await syncState();
     return { ok: true };
@@ -493,6 +552,42 @@ export function createCtoEngine(deps = {}) {
         /* best-effort, never throw into the pump */
       }
     })();
+    // BET-1382 blocker-card wiring: the same events that already produced an
+    // IMMEDIATE blocking-tier notification (the router in push.mjs, untouched)
+    // feed the card machinery — a question/permission ask registers a pending
+    // blocker that the card timer promotes into a card at > 10 min; an answer
+    // / rejection / abort clears it and resolves the card (liveness §10.3).
+    // No notification is fired here; the card is the only new artifact.
+    const askStart = askStartInfo(evt);
+    if (askStart && askStart.sessionID) {
+      void cards
+        .onAskStart({
+          sourceKind: askStart.sourceKind,
+          sourceId: askStart.sourceId,
+          sessionID: askStart.sessionID,
+          body: askQuestionText(evt),
+          ts: now(),
+        })
+        .catch(() => {});
+    } else if (isAskResolveEvent(evt)) {
+      const info = askResolveInfo(evt);
+      if (info?.sessionID) {
+        void cards
+          .onAskResolved({ sessionID: info.sessionID, ts: now() })
+          .then((r) => (r?.changed ? syncState() : null))
+          .catch(() => {});
+      }
+    } else if (evt?.type === "session.deleted") {
+      // A blocked session being deleted is an abort — the ask can never be
+      // answered, so the card resolves.
+      const sid = eventSessionID(evt);
+      if (sid) {
+        void cards
+          .onAskResolved({ sessionID: sid, ts: now() })
+          .then((r) => (r?.changed ? syncState() : null))
+          .catch(() => {});
+      }
+    }
   }
 
   // Presence/absence (§5.4): current state + lastSeen + how long the user has
@@ -523,6 +618,7 @@ export function createCtoEngine(deps = {}) {
   function start() {
     if (disposed) throw new Error("cto engine already disposed");
     startTimers();
+    startCardTimer();
     // Publish the initial state once (fire-and-forget) so a subscriber that
     // mounts before the first tick still sees a ctoState event.
     void syncState().catch(() => {});
@@ -532,6 +628,7 @@ export function createCtoEngine(deps = {}) {
   function dispose() {
     disposed = true;
     stopTimers();
+    stopCardTimer();
   }
 
   async function getState() {
