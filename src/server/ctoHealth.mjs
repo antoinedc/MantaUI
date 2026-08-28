@@ -217,8 +217,19 @@ export async function computeHealthStats({
   // 7. Reserve fractile (§11.3) — the current per-provider fractile, for the
   //    Tonight's-budget reserve line (§10.5-3). The fractile *history* is
   //    ledgered (§14.5); this row is the live value for the gauge.
-  const withFractile = quotaRows.find((q) => typeof q?.fractile === "number");
-  const fractileLabel = withFractile != null ? `P${Math.round(withFractile.fractile * 100)}` : null;
+  //    Windowless providers disable the reserve (§11.2) yet still persist
+  //    their P95-init `fractile` on the quota row (BET-1400's windowless
+  //    row), so the row must never present that init value as a live reserve:
+  //    prefer reserve-enabled (windowed) rows, and when only a windowless row
+  //    exists, surface the mode in the value instead of a bare fractile.
+  const withFractile =
+    quotaRows.find((q) => q?.mode !== "windowless" && typeof q?.fractile === "number") ??
+    quotaRows.find((q) => q?.mode === "windowless" && typeof q?.fractile === "number");
+  const reserveDisabled = withFractile?.mode === "windowless";
+  const fractileLabel =
+    withFractile != null
+      ? `P${Math.round(withFractile.fractile * 100)}${reserveDisabled ? " (windowless — reserve off)" : ""}`
+      : null;
   stats.push({
     id: "reserveFractile",
     label: "Reserve fractile",
