@@ -10,6 +10,7 @@ import {
   HOUR_MS,
   RATE_LIMITS,
 } from "./ctoEngine.mjs";
+import { createSegmenter } from "./ctoSegments.mjs";
 
 // Build a fully-injected engine harness: no real fs, no real stores, a fake
 // clock we can advance. Everything the engine touches goes through these
@@ -379,4 +380,98 @@ test("defaultGetCounts counts open cards from the real cards store", async () =>
     generationInFlight: false,
     tonightCount: 0,
   });
+// ---------------------------------------------------------------------------
 });
+// A6 segmentation wiring (observeEvent → segmenter) (§5.1)
+// ---------------------------------------------------------------------------
+
+function fakeSegStores() {
+  const map = new Map();
+  const ledger = [];
+  return {
+    map,
+    segments: {
+      name: "segments",
+      pathFor: (id) => id,
+      async load(id) {
+        return map.get(id) ?? { v: 1 };
+      },
+      async save(id, data) {
+        map.set(id, data);
+      },
+    },
+    ledger: { append: async (r) => ledger.push(r) },
+    peekLedger: () => ledger,
+  };
+}
+
+test("observeEvent feeds pipeline (user) sessions into the segmenter", async () => {
+  const stores = fakeSegStores();
+  let t = 0;
+  const seg = createSegmenter({
+    segments: stores.segments,
+    ledger: stores.ledger,
+    engineState: { load: async () => ({}), save: async () => {} },
+    summarize: async () => ({ ok: false, gated: false }),
+    computeOneLiner: async () => null,
+    now: () => t,
+  });
+  const harness = makeHarness({ ctoEnabled: false });
+  const engine = createCtoEngine({
+    configGet: async () => ({ ctoEnabled: false }),
+    ledger: { append: async () => {} },
+    engineState: { load: async () => ({ v: 1, pendingBlockers: [] }), save: async () => {} },
+    publish: () => {},
+    now: () => t,
+    segmenterOverride: seg,
+  });
+
+  const prompt = (text, sid) => ({
+    type: "user.message.created",
+    id: `id-${text}-${t}`,
+    properties: { sessionID: sid, message: { role: "user", text } },
+  });
+  const idle = (sid, idSuffix) => ({
+    type: "session.idle",
+    id: `idle-${idSuffix}`,
+    properties: { sessionID: sid },
+  });
+
+  engine.observeEvent(prompt("first task", "s-user"));
+  engine.observeEvent(idle("s-user", 1));
+  await new Promise((r) => setTimeout(r, 10)); // let the async owner-resolve + feed land
+  const st = seg._sessions.get("s-user");
+  await st?.closeChain;
+  assert.equal(stores.map.size, 1, "a pipeline session's work is segmented");
+});
+
+test("cto-owned sessions are never segmented", async () => {
+  const stores = fakeSegStores();
+  let t = 0;
+  const seg = createSegmenter({
+    segments: stores.segments,
+    ledger: stores.ledger,
+    engineState: { load: async () => ({}), save: async () => {} },
+    summarize: async () => ({ ok: false, gated: false }),
+    computeOneLiner: async () => null,
+    now: () => t,
+  });
+  const engine = createCtoEngine({
+    configGet: async () => ({ ctoEnabled: false }),
+    ledger: { append: async () => {} },
+    engineState: { load: async () => ({ v: 1, pendingBlockers: [] }), save: async () => {} },
+    publish: () => {},
+    now: () => t,
+    segmenterOverride: seg,
+    getSessionInfo: async () => ({ owner: "cto", project: undefined }),
+  });
+  const evt = {
+    type: "user.message.created",
+    id: "cto-evt-1",
+    properties: { sessionID: "s-cto", message: { role: "user", text: "x" } },
+  };
+  engine.observeEvent(evt);
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(stores.map.size, 0, "cto-owned work is excluded from segmentation");
+});
+

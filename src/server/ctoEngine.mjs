@@ -59,6 +59,7 @@ import {
   CHANNEL_EVENT,
   computeLastSeen,
   eventSessionID,
+  isPipelineSession,
   isUserPromptEvent,
   normalizeEvidence,
   presenceState,
@@ -70,6 +71,7 @@ import {
   createCtoCards,
   isAskResolveEvent,
 } from "./ctoCards.mjs";
+import { createSegmenter } from "./ctoSegments.mjs";
 
 // Actor tag stamped on every engine RPC call / ledger row (spec §3.3).
 export const ACTOR = "cto";
@@ -89,6 +91,9 @@ export const TICK_INTERVAL_MS = 60_000;
 // escalations once a minute and promotes any ask past BLOCKER_AFTER_MS into a
 // blocker card. The card threshold itself (10 min) lives in ctoCards.mjs.
 export const CARD_CHECK_INTERVAL_MS = 60_000;
+// Work-segmentation G refit cadence (§5.1-d): monthly, on the box's own
+// inter-arrival times.
+export const G_REFIT_INTERVAL_MS = 30 * 24 * HOUR_MS;
 
 export const DOT = Object.freeze({
   ACTIVE: "active",
@@ -224,6 +229,13 @@ export function createCtoEngine(deps = {}) {
     getDesktopPresence = pushGetDesktopPresence,
     getLastDesktopHeartbeat = pushGetLastDesktopHeartbeat,
     reaper = null, // { start() -> {stop} } | null — the §3.1 ephemeral-session reaper (ctoSessions)
+    // A6 segmentation seams (§5.1/§5.2): the model-backed summary producers
+    // (wired to runEphemeral in index.mjs; defaults degrade to a truncated
+    // prompt). The engine wraps them in the §3.3 ephemeral rate gate so a
+    // summary call is a normal rate-limited session creation.
+    summarize = async () => ({ ok: false, gated: false }),
+    computeOneLiner = async () => null,
+    segmenterOverride = null, // optional pre-built segmenter (else one is constructed below)
   } = deps;
 
   let disposed = false;
@@ -234,6 +246,7 @@ export function createCtoEngine(deps = {}) {
   let tickHandle = null;
   let cardTickHandle = null;
   let reaperHandle = null;
+  let refitHandle = null;
   let lastPublishedSerialized = null;
 
   // A5 presence inputs (spec §5.4): lastSeen = max(desktop heartbeat, app
@@ -350,6 +363,10 @@ export function createCtoEngine(deps = {}) {
       reaperHandle.stop();
       reaperHandle = null;
     }
+    if (refitHandle) {
+      refitHandle.stop();
+      refitHandle = null;
+    }
   }
 
   function startTimers() {
@@ -363,6 +380,13 @@ export function createCtoEngine(deps = {}) {
     // halted on pause (event ingestion alone keeps running while paused).
     if (reaper && !reaperHandle && typeof reaper.start === "function") {
       reaperHandle = reaper.start();
+    }
+    // §5.1-d monthly G refit — a work timer, halted on pause like the rest.
+    if (segmenter && !refitHandle) {
+      refitHandle = startPoller(
+        () => segmenter.monthlyRefit().catch(() => {}),
+        { intervalMs: G_REFIT_INTERVAL_MS, label: "cto-g-refit", immediate: false },
+      );
     }
   }
 
@@ -508,6 +532,37 @@ export function createCtoEngine(deps = {}) {
     return { ok: true, release };
   }
 
+  // ----- A6 work segmentation (§5.1/§5.2) -----
+  // The segmenter's model-backed seams are wrapped in the §3.3 ephemeral rate
+  // gate so each segment summary / one-liner is a normal rate-limited session
+  // creation — disabled/paused/at-cap → gated → the segmenter persists a
+  // degraded summary with no model spend.
+  const gatedSummarize = async (data) => {
+    const gate = await beginEphemeral();
+    if (!gate.ok) return { ok: false, gated: true, error: gate.error };
+    try {
+      return await summarize(data);
+    } finally {
+      gate.release?.();
+    }
+  };
+  const gatedOneLiner = async (data) => {
+    const gate = await beginEphemeral();
+    if (!gate.ok) return null;
+    try {
+      return await computeOneLiner(data);
+    } finally {
+      gate.release?.();
+    }
+  };
+  const segmenter =
+    segmenterOverride ??
+    createSegmenter({
+      summarize: gatedSummarize,
+      computeOneLiner: gatedOneLiner,
+      now,
+    });
+
   // Event ingestion — the ONE thing that keeps running while paused (§10.6-5).
   // Driven from index.mjs's event pump (not a timer); the engine is just
   // another consumer (§4.1). Consumes the opencode stream into normalized
@@ -537,6 +592,16 @@ export function createCtoEngine(deps = {}) {
           const info = await getSessionInfo(sid);
           owner = info?.owner ?? "user";
           project = info?.project;
+        }
+        // A6 segmentation — feed pipeline (user|job) sessions into the
+        // segmenter's online state machine. Never throws into the pump;
+        // G refit / summaries happen on their own async paths.
+        if (segmenter && sid && isPipelineSession(owner)) {
+          try {
+            segmenter.observe(evt, { sessionID: sid, project, ts: now() });
+          } catch {
+            /* best-effort — segmentation must never break ingestion */
+          }
         }
         const row = normalizeEvidence(evt, { owner, project, now: now() });
         if (!row) return;
@@ -617,6 +682,10 @@ export function createCtoEngine(deps = {}) {
 
   function start() {
     if (disposed) throw new Error("cto engine already disposed");
+    // Load the persisted segmentation G (minutes) from engine-state (§5.1-d).
+    if (segmenter && typeof segmenter.boot === "function") {
+      void segmenter.boot().catch(() => {});
+    }
     startTimers();
     startCardTimer();
     // Publish the initial state once (fire-and-forget) so a subscriber that
@@ -657,6 +726,9 @@ export function createCtoEngine(deps = {}) {
     lastHeartbeat,
     get rateTracker() {
       return track;
+    },
+    get segmenter() {
+      return segmenter;
     },
   };
 
