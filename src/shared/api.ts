@@ -179,6 +179,78 @@ export type CtoState = {
   generationInFlight: boolean;
   // Number of tasks queued for tonight's window — the muted Tonight line.
   tonightCount: number;
+  // Cold-start backfill (§10.6-4): informational learning-card progress. Not a
+  // needs-you item — never counted into the sidebar badge. Optional so older
+  // bridges (absent field) still typecheck as idle.
+  backfill?: {
+    done: number;
+    total: number;
+    startedAt: number | null;
+    stopped: boolean;
+    reason: string | null;
+    stoppedAtDepthDays: number | null;
+    active: boolean;
+  };
+};
+
+// An open needs-you card row (§10.3), as served by GET /api/cto/cards (a thin
+// read of the A8 card store). Only `blocker` variant rows are written today;
+// the decision/veto/connect variants are reserved for later writers (§13.1).
+export type CtoCard = {
+  id: string;
+  variant: "blocker" | "decision" | "veto" | "connect";
+  title: string;
+  body: string;
+  refs: string[];
+  // "question" | "permission" | "inbox" | "health" — drives Answer-now routing.
+  sourceKind: string;
+  sourceId: string | null;
+  sessionID: string | null;
+  pendingSince: number;
+  created: number;
+  state: "open" | "resolved" | "dismissed";
+};
+
+// A Just-finished rail entry (§10.4), from GET /api/cto/finished — either a
+// completed user turn (cached A6 one-liner) or a finished CTO job (D21).
+export type CtoFinishedItem =
+  | {
+      kind: "turn";
+      sessionID: string;
+      name: string;
+      oneLiner: string;
+      ts: number;
+    }
+  | {
+      kind: "job";
+      id: string;
+      name: string;
+      status: "done" | "failed";
+      branch: string | null;
+      sessionID: string | null;
+      // failure / stop reason for failed jobs (drives the Logs surface),
+      // or the assistant result for done jobs.
+      detail: string | null;
+      ts: number;
+    };
+
+// The stored digest (§5.5), as served by GET /api/cto/digest. `id` is the
+// storage key (= `String(generated)`), which the /opened instrumentation needs.
+export type CtoDigest = {
+  id?: string;
+  v: number;
+  granularity?: unknown;
+  window: [number, number];
+  generated: number;
+  items: Array<{
+    tier: string;
+    text: string;
+    sub?: string;
+    refs?: string[];
+    deep?: string;
+  }>;
+  nothingHappened?: boolean;
+  refs?: string[];
 };
 
 // A single Health-card row (§10.5 card 2, P1 only). `n` is samples seen so
@@ -965,7 +1037,7 @@ export interface Api {
   ctoStateGet(): Promise<CtoState>;
   // POST /api/cto/digest — joins or starts the §5.5 single-flight generation.
   // Returns `{ok:false, error}` on failure so the pane can toast the cause.
-  ctoDigestNow(): Promise<{ ok: boolean; error?: string }>;
+   ctoDigestNow(): Promise<{ ok: boolean; error?: string }>;
   // GET /api/cto/health — the §10.5 Health-card P1 stats (composed by the
   // engine from the ledger + budget + segment stores). Read on settings-open.
   ctoHealthGet(): Promise<{ stats: CtoHealthStat[] }>;
@@ -982,6 +1054,21 @@ export interface Api {
   ctoPause(): Promise<{ ok: boolean; error?: string }>;
   // POST /api/cto/resume — lift the kill switch. Idempotent.
   ctoResume(): Promise<{ ok: boolean; error?: string }>;
+  // GET /api/cto/digest — the view read of the latest stored digest (§5.5);
+  // `{digest, stale}`. The digest section renders from this.
+  ctoDigestGet(): Promise<{ digest: CtoDigest | null; stale: boolean }>;
+  // GET /api/cto/cards — the open needs-you cards (§10.3). Backs the Blocker
+  // section; the live count rides the ctoState bus event.
+  ctoCardsGet(): Promise<{ cards: CtoCard[]; count: number }>;
+  // GET /api/cto/finished — the Just-finished rail (§10.4): latest completed
+  // turns (A6 one-liners) + finished CTO jobs (D21), cap 6, 24h, newest first.
+  ctoFinishedGet(): Promise<{ items: CtoFinishedItem[] }>;
+  // POST /api/cto/digest/opened — §14.1 per-item open/expand instrumentation.
+  ctoDigestOpened(input: {
+    item: string;
+    expand?: boolean;
+    digestId?: string | null;
+  }): Promise<{ ok: boolean }>;
 }
 
 /**

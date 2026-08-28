@@ -48,9 +48,13 @@ import {
   ledgerStore,
   engineStateStore,
   cardsStore,
+  segmentsStore,
+  rollupsStore,
 } from "./ctoStores.mjs";
+import { createCtoBackfill } from "./ctoBackfill.mjs";
 import { startPoller } from "./startPoller.mjs";
 import { createSeenIdFilter } from "./seenIds.mjs";
+import { createCtoProfile, DAY_MS } from "./ctoProfile.mjs";
 import {
   getDesktopPresence as pushGetDesktopPresence,
   getLastDesktopHeartbeat as pushGetLastDesktopHeartbeat,
@@ -71,7 +75,7 @@ import {
   createCtoCards,
   isAskResolveEvent,
 } from "./ctoCards.mjs";
-import { createSegmenter } from "./ctoSegments.mjs";
+import { createSegmenter, segmentEventKind } from "./ctoSegments.mjs";
 import {
   createRollupRunner,
   LEVEL_MS as ROLLUP_LEVEL_MS,
@@ -102,6 +106,7 @@ export const CARD_CHECK_INTERVAL_MS = 60_000;
 // Work-segmentation G refit cadence (§5.1-d): monthly, on the box's own
 // inter-arrival times.
 export const G_REFIT_INTERVAL_MS = 30 * 24 * HOUR_MS;
+export const PROFILE_DECAY_INTERVAL_MS = 7 * DAY_MS; // §8.2 weekly sigma/repo decay tick
 // §6.8 monthly half-life tuning cadence (a work timer, halted on pause).
 export const MONTHLY_TUNE_INTERVAL_MS = 30 * 24 * HOUR_MS;
 
@@ -271,6 +276,17 @@ export function createCtoEngine(deps = {}) {
     factSurfaceExists = async () => false,
     factVerify = async () => ({ ok: true }),
     factResolveRef = null,
+    // BET-1387 cold-start backfill (§10.6-4): the read-only opencode db handle
+    // (index.mjs supplies the real one via opencodeDb) + a runEphemeral the
+    // backfill's A7 rollup reduces may use. The backfill has its OWN spend
+    // bound, so it must NOT go through the §3.3 rate gate — it uses these raw
+    // seams directly and governs cost itself.
+    getDb = null,
+    backfillRunEphemeral = runEphemeral,
+    backfill = null, // optional pre-built backfill override (tests)
+    // §8 profile (BET-1393): optional pre-built profile engine (else one is
+    // constructed from the shared profileStore — deterministic, never throws).
+    profile = null,
   } = deps;
 
   let disposed = false;
@@ -285,8 +301,11 @@ export function createCtoEngine(deps = {}) {
   let lastPublishedSerialized = null;
   let rollupRunner = null;
   let factsEngine = null;
+  let profileEngine = null;
   let verifyHandle = null;
   let tuneHandle = null;
+  let builtInBackfill = null;
+  let profileDecayHandle = null;
 
   // A5 presence inputs (spec §5.4): lastSeen = max(desktop heartbeat, app
   // open, user prompt). The desktop heartbeat is read live via
@@ -357,6 +376,25 @@ export function createCtoEngine(deps = {}) {
     } catch {
       /* best-effort */
     }
+    // Backfill progress for the learning card (§10.6-4) — informational, not a
+    // needs-you item. Reads engine-state progress; absent = idle.
+    let backfill = { done: 0, total: 0, stopped: false, active: false };
+    try {
+      const es = (await engineState.load()) || {};
+      const p = es.backfillProgress;
+      backfill = {
+        done: p && Array.isArray(p.processedSessions) ? p.processedSessions.length : 0,
+        total: p?.total ?? 0,
+        startedAt: p?.startedAt ?? null,
+        stopped: !!es.backfillStopped,
+        reason: es.backfillStopped?.reason ?? null,
+        stoppedAtDepthDays: es.backfillStopped?.stoppedAtDepthDays ?? null,
+        // active = started (watermark recorded) but not yet finished.
+        active: !!es.backfillStartInstant && es.backfillDone !== true,
+      };
+    } catch {
+      /* best-effort */
+    }
     return {
       enabled: enabledNow,
       dot: computeDot({ enabled: enabledNow, paused, thrifty }),
@@ -364,6 +402,7 @@ export function createCtoEngine(deps = {}) {
       needsYouCount: counts.needsYouCount ?? 0,
       generationInFlight: !!counts.generationInFlight,
       tonightCount: counts.tonightCount ?? 0,
+      backfill,
     };
   }
 
@@ -396,6 +435,11 @@ export function createCtoEngine(deps = {}) {
         // §6.2 blackboard: pump the per-project proposal queue (gatekeeper).
         await pumpFacts();
       }
+      // §10.6-4 cold-start backfill — also ambient, gated on enabled. Its own
+      // drained state marker makes it run at most once per box.
+      if (enabledNow) {
+        await backfillStep();
+      }
       await syncState();
     } catch {
       /* never throw into the poller */
@@ -422,6 +466,10 @@ export function createCtoEngine(deps = {}) {
     if (tuneHandle) {
       tuneHandle.stop();
       tuneHandle = null;
+    }
+    if (profileDecayHandle) {
+      profileDecayHandle.stop();
+      profileDecayHandle = null;
     }
   }
 
@@ -456,6 +504,13 @@ export function createCtoEngine(deps = {}) {
       tuneHandle = startPoller(
         () => getFactsEngine().recomputeHalfLives().catch(() => {}),
         { intervalMs: MONTHLY_TUNE_INTERVAL_MS, label: "cto-facts-tune", immediate: false },
+      );
+    }
+    // §8.2 weekly numeric decay — a work timer, halted on pause like the rest.
+    if (!profileDecayHandle) {
+      profileDecayHandle = startPoller(
+        () => getProfile().decayWeekly().catch(() => {}),
+        { intervalMs: PROFILE_DECAY_INTERVAL_MS, label: "cto-profile-decay", immediate: false },
       );
     }
   }
@@ -631,6 +686,9 @@ export function createCtoEngine(deps = {}) {
       summarize: gatedSummarize,
       computeOneLiner: gatedOneLiner,
       now,
+      // §8.2 profile feed: every closed segment's atoms/session-length/project
+      // go to the profile engine in the same pass (no second model call).
+      onSummary: async (summary) => getProfile().applySegmentSummary(summary),
     });
 
   // ----- BET-1381 rollups (§5.3) -----
@@ -642,7 +700,7 @@ export function createCtoEngine(deps = {}) {
   // backfilled — a window only gets rolled up once it has actually closed.
   // One shared ephemeral-rate wrapper (§3.3) used by both the rollup runner and
   // the facts gatekeeper — every model-bound CTO step goes through the same
-  // per-session creation gate (D10's writer discipline).
+  // per-session creation gate (D10's "well-maintained" writer discipline).
   const gatedRunEphemeral = async (data) => {
     const gate = await beginEphemeral();
     if (!gate.ok) return { ok: false, gated: true, error: gate.error };
@@ -671,6 +729,16 @@ export function createCtoEngine(deps = {}) {
       submitProposal: async (proposal) => (await getFactsEngine()).submitProposal(proposal),
     });
     return rollupRunner;
+  }
+
+  // Lazy-construct the profile engine (BET-1393 / §8). Pure deterministic
+  // module with injected store; always inert-safe, never throws. The engine
+  // owns its lifecycle: init on start, per-event feeding, the weekly decay
+  // tick, and the segment-summary atom feed (via the segmenter's onSummary).
+  function getProfile() {
+    if (profileEngine) return profileEngine;
+    profileEngine = deps.profile ?? createCtoProfile({ now });
+    return profileEngine;
   }
 
   // Lazy-construct the blackboard facts engine (BET-1389 / §6). Mirrors the
@@ -754,6 +822,39 @@ export function createCtoEngine(deps = {}) {
     }
   }
 
+  // Lazy-construct the cold-start backfill (§10.6-4). Mirrors the rollup/facts
+  // pattern: degenerate to the real store-backed module; tests inject an
+  // override. The backfill governs its own one-time spend bound + batch-priority
+  // (presence) internally and NEVER touches the engine's §3.3 rate tracker.
+  function getBackfill() {
+    if (builtInBackfill) return builtInBackfill;
+    builtInBackfill = backfill ?? createCtoBackfill({
+      configGet,
+      engineState,
+      ledger,
+      segments: segmentsStore,
+      rollups: rollupsStore,
+      summarize, // raw seam — the backfill owns its own budget, no rate gate
+      computeOneLiner,
+      runEphemeral: backfillRunEphemeral,
+      getDb: getDb ?? (async () => null),
+      presenceCheck: () => engine.getPresence().state === "present",
+      now,
+    });
+    return builtInBackfill;
+  }
+
+  // One incremental backfill batch per tick (segments/rollups), oldest-first,
+  // batch-priority. Once-per-box is enforced by the module's engine-state
+  // marker. Never throws into the poller.
+  async function backfillStep() {
+    try {
+      await getBackfill().step();
+    } catch {
+      /* backfill is best-effort — never take the engine down */
+    }
+  }
+
   // Event ingestion — the ONE thing that keeps running while paused (§10.6-5).
   // Driven from index.mjs's event pump (not a timer); the engine is just
   // another consumer (§4.1). Consumes the opencode stream into normalized
@@ -793,6 +894,14 @@ export function createCtoEngine(deps = {}) {
           } catch {
             /* best-effort — segmentation must never break ingestion */
           }
+        }
+        // §8.2 profile feed — deterministic per-event temporal/interaction
+        // evidence. Best-effort; profile updates never throw into the pump.
+        try {
+          const k = segmentEventKind(evt);
+          if (k) getProfile().observeEvent({ kind: k, ts: now(), project });
+        } catch {
+          /* best-effort — profile must never break ingestion */
         }
         const row = normalizeEvidence(evt, { owner, project, now: now() });
         if (!row) return;
@@ -877,6 +986,8 @@ export function createCtoEngine(deps = {}) {
     if (segmenter && typeof segmenter.boot === "function") {
       void segmenter.boot().catch(() => {});
     }
+    // Load the persisted profile (§8.1) — deterministic, lazy, best-effort.
+    void getProfile().init().catch(() => {});
     startTimers();
     startCardTimer();
     // Publish the initial state once (fire-and-forget) so a subscriber that
@@ -1002,6 +1113,12 @@ export function createCtoEngine(deps = {}) {
     },
     get facts() {
       return getFactsEngine();
+    },
+    get backfill() {
+      return getBackfill();
+    },
+    get profile() {
+      return getProfile();
     },
   };
 

@@ -242,6 +242,20 @@ test("buildDigestContext: includes all input blocks and the legal-empty instruct
   assert.match(joined, /Blockers are NOT digest items/);
 });
 
+test("buildDigestContext: injects the §8.4 audience block when provided (§8.4)", () => {
+  const ctx = buildDigestContext({
+    granularity: selectGranularity(2 * DAY_MS, { gMinutes: G }),
+    window: [1, 200],
+    slice: [],
+    audience: { text: "Audience: technical. Blockers stay non-technical regardless." },
+  });
+  const joined = ctx.map((b) => b.text).join("\n");
+  assert.match(joined, /Audience: technical\./);
+  // omitted audience → no block
+  const none = buildDigestContext({ granularity: selectGranularity(2 * DAY_MS, { gMinutes: G }), window: [1, 200], slice: [] });
+  assert.ok(!none.some((b) => b.text.includes("Audience")));
+});
+
 // ---------------------------------------------------------------------------
 // Timing fallback chain (§5.5, D9)
 // ---------------------------------------------------------------------------
@@ -411,6 +425,20 @@ test("generateDigest: without a model call → degraded truthful digest, persist
   assert.equal(store.map.size, 1);
   const latest = await engine.getLatest();
   assert.equal(latest.generated, digest.generated);
+});
+
+test("generateDigest: §8.4 audience + deviation asides are applied (user-only asides)", async () => {
+  const model = async () => ({ text: JSON.stringify({ items: [{ tier: "progress", text: "shipped", refs: ["a"] }] }) });
+  const { engine } = makeEngine({
+    runEphemeral: model,
+    getAudience: async ({ topics }) => ({ text: `Audience: ${topics.length ? topics.join(",") : "n/a"}` }),
+    getDeviations: async () => [{ type: "off-hours", text: "You're active unusually late." }],
+  });
+  const digest = await engine.generateDigest({ reason: "manual" });
+  assert.ok(digest.items.some((i) => i.tier === "progress" && i.text.includes("unusually late")));
+  // nothingHappened reflects real work (the "shipped" item), not the aside
+  assert.equal(digest.nothingHappened, false);
+  assert.equal(validateDigest(digest), true);
 });
 
 test("getLatest: returns the newest valid digest from the store", async () => {

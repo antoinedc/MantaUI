@@ -27,7 +27,17 @@ import {
   type MediaEventPayload,
   type WidgetEventPayload,
 } from "../../shared/types.js";
-import type { Api, SyncDelta, CtoState, CtoHealthStat, CtoLedgerRow, CtoLedgerPage } from "../../shared/api.js";
+import type {
+  Api,
+  SyncDelta,
+  CtoState,
+  CtoCard,
+  CtoFinishedItem,
+  CtoDigest,
+  CtoHealthStat,
+  CtoLedgerRow,
+  CtoLedgerPage,
+} from "../../shared/api.js";
 // BET-559: httpApi used to pull these claim helpers through the (now-retired)
 // mobile shell's pairingLogic re-export. The shared, process-boundary-safe
 // origin is src/shared/claim.mjs — desktop main (src/main/auth.ts) and the
@@ -1623,6 +1633,68 @@ export const httpApi: Api = {
     try { json = (await res.json()) as typeof json; } catch { /* non-JSON */ }
     if (!res.ok) return { ok: false, error: json.error ?? `HTTP ${res.status}` };
     return { ok: true };
+  },
+
+  // GET /api/cto/digest — the view read of the latest stored digest (§5.5).
+  // `digest` is null when nothing has been generated yet; `stale` mirrors the
+  // server's own staleness check so the section can badge "needs regenerating".
+  ctoDigestGet: async (): Promise<{ digest: CtoDigest | null; stale: boolean }> => {
+    const url = `${serverBase()}/api/cto/digest`;
+    const res = await fetch(url, { method: "GET", headers: authHeaders(clientToken()) });
+    if (res.status === 401) throw new AuthRequiredError();
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = (await res.json()) as { digest: CtoDigest | null; stale: boolean };
+    if (json.digest && typeof json.digest.generated === "number") {
+      json.digest.id = String(json.digest.generated);
+    }
+    return json;
+  },
+
+  // GET /api/cto/cards — the open needs-you cards (§10.3). Backs the Blocker
+  // section; the live open count rides the `{kind:"ctoState"}` bus event.
+  ctoCardsGet: async (): Promise<{ cards: CtoCard[]; count: number }> => {
+    const url = `${serverBase()}/api/cto/cards`;
+    const res = await fetch(url, { method: "GET", headers: authHeaders(clientToken()) });
+    if (res.status === 401) throw new AuthRequiredError();
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return (await res.json()) as { cards: CtoCard[]; count: number };
+  },
+
+  // GET /api/cto/finished — the Just-finished rail (§10.4): latest completed
+  // turns (A6 cached one-liners) + finished CTO jobs (D21), cap 6, 24h window,
+  // most recent first.
+  ctoFinishedGet: async (): Promise<{ items: CtoFinishedItem[] }> => {
+    const url = `${serverBase()}/api/cto/finished`;
+    const res = await fetch(url, { method: "GET", headers: authHeaders(clientToken()) });
+    if (res.status === 401) throw new AuthRequiredError();
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return (await res.json()) as { items: CtoFinishedItem[] };
+  },
+
+  // POST /api/cto/digest/opened — §14.1 per-item open / expand instrumentation
+  // (feeds the importance-learning ledger). Best-effort: a failure is swallowed
+  // (the ledger is non-critical to rendering).
+  ctoDigestOpened: async (input: {
+    item: string;
+    expand?: boolean;
+    digestId?: string | null;
+  }): Promise<{ ok: boolean }> => {
+    const url = `${serverBase()}/api/cto/digest/opened`;
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { ...authHeaders(clientToken()), "Content-Type": "application/json" },
+        body: JSON.stringify({
+          item: input.item,
+          expand: input.expand === true,
+          digestId: input.digestId ?? null,
+        }),
+      });
+      if (res.status === 401) throw new AuthRequiredError();
+      return { ok: res.ok };
+    } catch {
+      return { ok: false };
+    }
   },
 };
 
