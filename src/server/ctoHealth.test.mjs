@@ -222,7 +222,7 @@ test("BET-1417: windowless-first box labels the mode — never a bare fractile f
     }),
   });
   const r = stats.find((s) => s.id === "reserveFractile");
-  assert.equal(r.value, "P95 · claude (windowless — reserve off)");
+  assert.equal(r.value, "P95 (windowless — reserve off) · claude");
 });
 
 test("BET-1417: a windowless row never shadows a reserve-enabled provider's fractile", async () => {
