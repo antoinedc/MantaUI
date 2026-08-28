@@ -373,6 +373,50 @@ export function capArchive(entries, { cap = ARCHIVE_CAP, timeField = "ts" } = {}
 }
 
 // ---------------------------------------------------------------------------
+// CTO inbox TTL (BET-1397 / spec §4.4). The `inbox.json` store carries one
+// entry per inbound note; unread entries expire SILENTLY once past their TTL
+// (never surfaced to the user — the inbox is a queue, not a notification
+// system). `fyi` notes are ephemeral (48h); every other kind (and the bare
+// `blocker` default) keeps a week.
+// ---------------------------------------------------------------------------
+
+export const INBOX_KINDS = Object.freeze(["fyi", "finding", "blocker", "handoff", "anomaly"]);
+export const INBOX_TTL_MS = Object.freeze({
+  fyi: 2 * DAY_MS,
+  blocker: 7 * DAY_MS,
+  finding: 7 * DAY_MS,
+  handoff: 7 * DAY_MS,
+  anomaly: 7 * DAY_MS,
+});
+
+// The TTL for an inbox kind (defaults to the 7d general case for unknown).
+export function inboxExpiresAt(kind, ts, { now = () => Date.now() } = {}) {
+  const t = typeof ts === "number" && Number.isFinite(ts) ? ts : now();
+  return t + (INBOX_TTL_MS[kind] ?? INBOX_TTL_MS.blocker);
+}
+
+// Pure filter: drop inbox entries whose `expires` (epoch ms) is past `nowMs`.
+// Silent by design (§4.4) — expiry produces nothing, no notification.
+export function purgeExpiredInbox(entries, { nowMs = Date.now(), expiresField = "expires" } = {}) {
+  const keep = [];
+  const dropped = [];
+  for (const e of entries) {
+    const expires = e?.[expiresField];
+    if (typeof expires === "number" && expires <= nowMs) dropped.push(e);
+    else keep.push(e);
+  }
+  return { keep, dropped };
+}
+
+export async function sweepInbox(nowMs = Date.now()) {
+  const payload = await inboxStore.load();
+  const entries = Array.isArray(payload?.entries) ? payload.entries : [];
+  if (entries.length === 0) return;
+  const { keep } = purgeExpiredInbox(entries, { nowMs });
+  if (keep.length !== entries.length) await inboxStore.save({ ...payload, entries: keep });
+}
+
+// ---------------------------------------------------------------------------
 // Sweep wiring (copies the createCleanupSweep shape from servePage.mjs).
 // I/O is the real fs but every path resolves under ctoPath() → the sandbox in
 // tests, so running the sweep in a test never touches a live box.
@@ -480,6 +524,7 @@ export async function sweepAllStores({ nowMs = Date.now() } = {}) {
     sweepSegments(nowMs),
     sweepDigests(),
     sweepArchiveCaps(),
+    sweepInbox(nowMs),
   ]);
 }
 

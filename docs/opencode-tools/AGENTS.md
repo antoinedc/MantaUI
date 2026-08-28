@@ -533,11 +533,22 @@ durable queue and the gatekeeper, and returns the gatekeeper verdict (or a
 
 Two companion capabilities to the `cto` read belt, both global opencode tools.
 
-- **`send_to_cto(message, opts?)`** (global tool, `docs/opencode-tools/send-to-cto.ts`):
-  report a note up to the CTO from ANY session. With no live call it is surfaced
-  to the user as a notification; once the call-window feature ships it is injected
-  into the CTO conversation as a turn. Use it to flag something the CTO should know
-  (a new P0, a blocker, a call-back request). Thin registrar → `POST /api/cto/inbound`.
+- **`send_to_cto({kind?, message, refs?, tag?, title?})`** (global tool,
+  `docs/opencode-tools/send-to-cto.ts`): report a note to the CTO inbox from
+  ANY session (spec §4.4). One verb, one routing rule: a bare `{message}` maps
+  to `kind: "blocker"` and fires the immediate blocking-tier notification (the
+  same router a waiting-question uses); every other kind (`fyi`/`finding`/
+  `handoff`/`anomaly`) is SILENT — it lands in the durable
+  `~/.manta/cto/inbox.json` store unread and surfaces only via `read_inbox`
+  (or the engine drain). Dedupe: notes sharing a `tag` coalesce into one entry
+  (refs union, timestamp refreshed). Give each note context and passing `refs`
+  so the CTO can jump to it. This supersedes all earlier send_to_cto spellings.
+  Thin registrar → `POST /api/cto/inbound`.
+- **`read_inbox({kind?, read?, tag?})`** (via the `cto` tool,
+  `docs/opencode-tools/cto.ts`): read the CTO inbox — the queue of notes any
+  session sent via send_to_cto — optionally filtered. READ-ONLY: it never
+  marks notes read (the engine drain does, at rollup-close breakpoints) and
+  never writes.
 - **`watch(surface, condition)`** + `unwatch` / `list_watches` (via the `cto` tool,
   `docs/opencode-tools/cto.ts`): register a recurring probe against a surface
   (`schedule`, `delegate`, ...). The box runs the watch's condition

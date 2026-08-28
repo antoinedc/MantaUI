@@ -27,31 +27,90 @@ import {
 } from "./cto.mjs";
 
 // ---------------------------------------------------------------------------
-// Inbound routing + dedupe
+// Inbound routing + dedupe (BET-1397: parked notes persist to the inbox store;
+// only a `blocker` kind enters the A8 card path via registerBlocker)
 // ---------------------------------------------------------------------------
 
-test("inbound parks when the call flag is off and surfaces via fireNotify", async () => {
-  const notified = [];
-  const inbound = createCtoInbound({ fireNotify: async (a) => notified.push(a) });
-  const res = await inbound.inbound({ surface: "session", payload: { message: "hey", urgent: true } });
+function memInbox() {
+  const state = { v: 1, entries: [] };
+  return {
+    load: async () => state,
+    save: async (s) => {
+      state.entries = s?.entries ?? [];
+    },
+    entries: () => state.entries,
+  };
+}
+
+test("inbound parks a bare {message} as a blocker: persisted to the inbox + routed to the blocker card (one path)", async () => {
+  const inbox = memInbox();
+  const blockers = [];
+  const inbound = createCtoInbound({
+    loadInbox: inbox.load,
+    saveInbox: inbox.save,
+    registerBlocker: async (e) => blockers.push(e),
+  });
+  const res = await inbound.inbound({ surface: "session", payload: { message: "hey", sessionID: "ses-1" } });
   assert.equal(res.ok, true);
   assert.equal(res.parked, true);
-  assert.equal(res.live, undefined);
-  assert.equal(notified.length, 1);
-  assert.equal(notified[0].message, "hey");
-  assert.equal(notified[0].urgent, true);
+  assert.equal(res.kind, "blocker"); // bare {message} → blocker default
+  assert.equal(inbox.entries().length, 1);
+  assert.equal(inbox.entries()[0].kind, "blocker");
+  assert.equal(blockers.length, 1);
+  assert.equal(blockers[0].message, "hey");
 });
 
-test("inbound drops a re-delivered event with an already-seen seenId (dedupe)", async () => {
-  const notified = [];
-  const inbound = createCtoInbound({ fireNotify: async (a) => notified.push(a) });
+test("inbound persists a non-blocker kind silently (no card, no notify)", async () => {
+  const inbox = memInbox();
+  let blockers = 0;
+  const inbound = createCtoInbound({
+    loadInbox: inbox.load,
+    saveInbox: inbox.save,
+    registerBlocker: async () => {
+      blockers += 1;
+    },
+  });
+  const res = await inbound.inbound({ surface: "session", payload: { kind: "fyi", message: "heads up" } });
+  assert.equal(res.parked, true);
+  assert.equal(res.kind, "fyi");
+  assert.equal(inbox.entries().length, 1);
+  assert.equal(inbox.entries()[0].kind, "fyi");
+  assert.equal(blockers, 0);
+});
+
+test("inbound dedupes a re-delivered event with an already-seen seenId; no-seenId never swallows", async () => {
+  const inbox = memInbox();
+  const inbound = createCtoInbound({
+    loadInbox: inbox.load,
+    saveInbox: inbox.save,
+  });
   await inbound.inbound({ surface: "session", payload: { message: "a" }, seenId: "evt-1" });
   const second = await inbound.inbound({ surface: "session", payload: { message: "b" }, seenId: "evt-1" });
   assert.equal(second.deduped, true);
-  assert.equal(notified.length, 1); // only the first surfaced
-  // An event with no seenId is never swallowed.
+  assert.equal(inbox.entries().length, 1); // only the first persisted
   await inbound.inbound({ surface: "session", payload: { message: "c" } });
-  assert.equal(notified.length, 2);
+  assert.equal(inbox.entries().length, 2);
+});
+
+test("inbound coalesces notes sharing a tag into one entry (refs union, count bumped)", async () => {
+  const inbox = memInbox();
+  const inbound = createCtoInbound({
+    loadInbox: inbox.load,
+    saveInbox: inbox.save,
+  });
+  await inbound.inbound({
+    surface: "session",
+    payload: { kind: "finding", message: "deploy flaky", tag: "deploy", refs: ["BET-1"], sessionID: "s1" },
+  });
+  const res = await inbound.inbound({
+    surface: "session",
+    payload: { kind: "finding", message: "deploy flaky again", tag: "deploy", refs: ["BET-2", "BET-1"], sessionID: "s2" },
+  });
+  assert.equal(res.coalesced, true);
+  const entries = inbox.entries();
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].count, 2);
+  assert.deepEqual(entries[0].refs, ["BET-1", "BET-2"]);
 });
 
 test("inbound live route injects into the CTO session when the flag is on (stub seam)", async () => {
@@ -60,7 +119,6 @@ test("inbound live route injects into the CTO session when the flag is on (stub 
     isCallActive: () => true,
     ctoSessionID: "cto-ses",
     sendPrompt: async (a) => sent.push(a),
-    fireNotify: async () => {},
   });
   const res = await inbound.inbound({ surface: "session", payload: { message: "live" } });
   assert.equal(res.live, true);
@@ -69,13 +127,31 @@ test("inbound live route injects into the CTO session when the flag is on (stub 
   assert.equal(sent[0].text, "live");
 });
 
-test("inbound with no message and no live call surfaces nothing but resolves ok", async () => {
-  const notified = [];
-  const inbound = createCtoInbound({ fireNotify: async (a) => notified.push(a) });
+test("inbound with no message and no live call writes nothing but resolves ok", async () => {
+  const inbox = memInbox();
+  const inbound = createCtoInbound({ loadInbox: inbox.load, saveInbox: inbox.save });
   const res = await inbound.inbound({ surface: "multica", payload: {} });
   assert.equal(res.ok, true);
   assert.equal(res.parked, true);
-  assert.equal(notified.length, 0);
+  assert.equal(res.dropped, true);
+  assert.equal(inbox.entries().length, 0);
+});
+
+test("normalizeInboxKind maps unknown/bare to blocker; coalesceInboxEntry unions refs + bumps count", async () => {
+  const { normalizeInboxKind, coalesceInboxEntry } = await import("./cto.mjs");
+  assert.equal(normalizeInboxKind("finding"), "finding");
+  assert.equal(normalizeInboxKind("blocker"), "blocker");
+  assert.equal(normalizeInboxKind(undefined), "blocker");
+  assert.equal(normalizeInboxKind("weird"), "blocker");
+  const merged = coalesceInboxEntry(
+    { refs: ["a"], count: 1, message: "x", read: true },
+    { refs: ["b", "a"], message: "y" },
+    100,
+  );
+  assert.deepEqual(merged.refs, ["a", "b"]);
+  assert.equal(merged.count, 2);
+  assert.equal(merged.ts, 100);
+  assert.equal(merged.read, false);
 });
 
 // ---------------------------------------------------------------------------
@@ -217,6 +293,33 @@ test("cto.json store load/save round-trips watches atomically", async () => {
   const reloaded = loadCtoStore(path);
   assert.equal(reloaded.watches.length, 1);
   assert.equal(reloaded.watches[0].surface, "multica");
+});
+
+test("read_inbox returns the inbox (filterable) without marking read or writing", async () => {
+  const state = {
+    v: 1,
+    entries: [
+      { id: "a", kind: "fyi", message: "heads up", tag: null, read: false, ts: 1, count: 1, expires: 500 },
+      { id: "b", kind: "blocker", message: "stop", tag: "t", read: true, ts: 2, count: 1, expires: 500 },
+      { id: "c", kind: "fyi", message: "expired", read: false, ts: 0, count: 1, expires: 10 },
+    ],
+  };
+  const engine = makeEngine({
+    loadInbox: async () => state,
+    now: () => 100,
+  });
+  const all = await engine.dispatch("read_inbox", {});
+  assert.equal(all.ok, true);
+  // The expired note (expires 10 < now 100) is absent from the view.
+  assert.deepEqual(all.data.entries.map((e) => e.id).sort(), ["a", "b"]);
+  // Filter by kind.
+  const fyi = await engine.dispatch("read_inbox", { kind: "fyi" });
+  assert.deepEqual(fyi.data.entries.map((e) => e.id), ["a"]);
+  // Filter by read state.
+  const unread = await engine.dispatch("read_inbox", { read: false });
+  assert.deepEqual(unread.data.entries.map((e) => e.id), ["a"]);
+  // READ-ONLY: the store was not written (entries untouched, ids keep read=false).
+  assert.equal(state.entries.find((e) => e.id === "a").read, false);
 });
 
 // ---------------------------------------------------------------------------

@@ -34,7 +34,15 @@ import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 import { describeModel } from "../shared/modelGuide.mjs";
 import { createSeenIdFilter } from "./seenIds.mjs";
 import { startPoller } from "./startPoller.mjs";
-import { rollupsStore, ledgerStore, ROLLUP_LEVELS } from "./ctoStores.mjs";
+import {
+  rollupsStore,
+  ledgerStore,
+  ROLLUP_LEVELS,
+  inboxStore,
+  INBOX_KINDS,
+  inboxExpiresAt,
+  purgeExpiredInbox,
+} from "./ctoStores.mjs";
 
 export const CTO_STORE_PATH = statePath("cto.json");
 
@@ -124,6 +132,8 @@ export function createCtoEngine(deps = {}) {
       store.watches = Array.isArray(watches) ? watches : [];
       await saveCtoStore(store);
     },
+    loadInbox = async () => inboxStore.load(),
+    saveInbox = async (data) => inboxStore.save(data),
     now = () => Date.now(),
   } = deps;
 
@@ -772,6 +782,42 @@ export function createCtoEngine(deps = {}) {
     run: async () => ({ ok: true, data: { watches: await loadWatches() } }),
   });
 
+  register({
+    name: "read_inbox",
+    description: "Read the on-call CTO inbox (spec §4.4) — the durable queue of notes any " +
+      "session sent via send_to_cto. Returns each note's kind (fyi|finding|blocker|" +
+      "handoff|anomaly), message, tag, refs, sender, ts, read state, and count. " +
+      "READ-ONLY: it does not mark notes read (the engine drain does at breakpoints) " +
+      "and it never writes. Optionally filter by kind, read state, or tag. " +
+      "An expired note is absent from the view.",
+    params: {
+      kind: { type: "string", description: "Only notes of this kind (fyi|finding|blocker|handoff|anomaly)." },
+      read: { type: "boolean", description: "Only notes with this read state (true/false)." },
+      tag: { type: "string", description: "Only notes carrying this dedupe tag." },
+    },
+    run: async (ctx, args) => {
+      let data;
+      try {
+        data = await loadInbox();
+      } catch {
+        data = {};
+      }
+      let entries = Array.isArray(data?.entries) ? data.entries : [];
+      const { keep } = purgeExpiredInbox(entries, { nowMs: now() });
+      entries = keep;
+      if (args && typeof args.kind === "string" && args.kind) {
+        entries = entries.filter((e) => e?.kind === args.kind);
+      }
+      if (args && typeof args.read === "boolean") {
+        entries = entries.filter((e) => e?.read === args.read);
+      }
+      if (args && typeof args.tag === "string" && args.tag) {
+        entries = entries.filter((e) => e?.tag === args.tag);
+      }
+      return { ok: true, data: { entries } };
+    },
+  });
+
   // -------------------------------------------------------------------------
   // Dispatch
   // -------------------------------------------------------------------------
@@ -936,21 +982,26 @@ async function remoteGitLog(cwd, { n = 10, oneline = true } = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// Inbound funnel (Issue 2) — createCtoInbound
+// Inbound funnel (superseded by BET-1397) — createCtoInbound
 // ---------------------------------------------------------------------------
 // The single place a CTO-bound event enters the box. Producers (the
 // send_to_cto tool, the watcher poller, a scheduled prompt, a webhook) all
 // call `inbound({ surface, payload, seenId })`. Live vs parked is decided by
 // the server-side "call active" flag (Issue 3 sets it; this issue it is
 // always false, so every event takes the parked route). Parked events are
-// de-duped by seenId and surfaced through the EXISTING notification router
-// (push.mjs fireNotify) — no second notify path.
+// de-duped by seenId, persisted to the inbox.json store (spec §4.4), and only
+// a `blocker` kind additionally enters the A8 card path (which fires the ONE
+// blocking-tier notification through the existing router). The old direct
+// blanket-notify branch is deleted — non-blocker notes are silent.
 export function createCtoInbound({
   seenFilter = createSeenIdFilter(),
   isCallActive = () => false,
   ctoSessionID = null,
-  fireNotify = async () => {},
   sendPrompt = async () => {},
+  loadInbox = async () => inboxStore.load(),
+  saveInbox = async (data) => inboxStore.save(data),
+  registerBlocker = async () => {},
+  now = () => Date.now(),
 } = {}) {
   async function inbound({ surface = "session", payload = {}, seenId } = {}) {
     // De-dupe: an event whose seenId was already handled is a re-delivery
@@ -969,23 +1020,97 @@ export function createCtoInbound({
       }
       return { ok: true, live: true };
     }
-    // PARKED route: surface via the existing notification router.
+    // PARKED route: write the inbox store. A bare {message} maps to the
+    // `blocker` default (§4.4) — the current urgent semantics preserved.
+    const kind = normalizeInboxKind(payload?.kind);
     const message = typeof payload?.message === "string" ? payload.message.trim() : "";
-    if (message) {
+    if (!message) {
+      // Nothing meaningful to persist — resolve without writing or notifying.
+      return { ok: true, parked: true, dropped: true };
+    }
+    const ts = now();
+    const tag = typeof payload?.tag === "string" && payload.tag ? payload.tag : null;
+    const sender = {
+      sessionID: typeof payload?.sessionID === "string" && payload.sessionID ? payload.sessionID : null,
+      name: typeof payload?.senderName === "string" && payload.senderName ? payload.senderName : null,
+    };
+    const entry = {
+      id: tag ? stableHash(`tag:${tag}`) : stableHash(randomBytes(16).toString("hex")),
+      kind,
+      message,
+      refs: Array.isArray(payload?.refs) ? payload.refs.filter((r) => typeof r === "string") : [],
+      tag,
+      sender,
+      title: typeof payload?.title === "string" && payload.title ? payload.title : undefined,
+      ts,
+      read: false,
+      count: 1,
+      expires: inboxExpiresAt(kind, ts, { now }),
+    };
+
+    // Load (silently dropping expired), dedupe by tag (coalesce) else append.
+    let data;
+    try {
+      data = await loadInbox();
+    } catch {
+      data = {};
+    }
+    let entries = Array.isArray(data?.entries) ? data.entries : [];
+    const { keep } = purgeExpiredInbox(entries, { nowMs: ts });
+    entries = keep;
+    let coalesced = false;
+    if (tag) {
+      const idx = entries.findIndex((e) => e?.tag === tag);
+      if (idx >= 0) {
+        entries[idx] = coalesceInboxEntry(entries[idx], entry, ts);
+        coalesced = true;
+      } else {
+        entries.push(entry);
+      }
+    } else {
+      entries.push(entry);
+    }
+    const effective = coalesced ? entries.find((e) => e?.tag === tag) : entry;
+    try {
+      await saveInbox({ ...data, entries });
+    } catch (e) {
+      console.warn("[cto] inbox save failed:", e?.message ?? e);
+    }
+
+    // blocker → the A8 card path (source 3), which fires the single
+    // blocking-tier notification through the existing router. Other kinds are
+    // silent — they surface later only via read_inbox / the engine drain.
+    if (kind === "blocker") {
       try {
-        await fireNotify({
-          message,
-          title: typeof payload?.title === "string" && payload.title ? payload.title : undefined,
-          urgent: !!payload?.urgent,
-          sessionID: typeof payload?.sessionID === "string" ? payload.sessionID : undefined,
-        });
+        await registerBlocker(effective);
       } catch (e) {
-        console.warn("[cto] inbound notify failed:", e?.message ?? e);
+        console.warn("[cto] inbox blocker card failed:", e?.message ?? e);
       }
     }
-    return { ok: true, parked: true };
+    return { ok: true, parked: true, kind, tag, coalesced, entryId: effective.id };
   }
   return { inbound };
+}
+
+// Map a supplied kind to a valid inbox kind; anything unrecognised (or a bare
+// {message}) is the `blocker` default — the prior urgent semantics, preserved.
+export function normalizeInboxKind(kind) {
+  return typeof kind === "string" && INBOX_KINDS.includes(kind) ? kind : "blocker";
+}
+
+// Coalesce a re-tagged note into its existing entry (spec §4.4): refs union,
+// timestamp refreshed, count incremented; the merged note is unread until
+// drained.
+export function coalesceInboxEntry(existing, incoming, ts) {
+  const refs = Array.from(new Set([...(existing?.refs ?? []), ...(incoming?.refs ?? [])]));
+  return {
+    ...existing,
+    ...incoming,
+    refs,
+    ts,
+    count: (typeof existing?.count === "number" ? existing.count : 1) + 1,
+    read: false,
+  };
 }
 
 // ---------------------------------------------------------------------------
