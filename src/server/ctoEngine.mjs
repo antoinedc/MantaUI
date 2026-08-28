@@ -904,8 +904,6 @@ export function createCtoEngine(deps = {}) {
       return { drained: 0 };
     }
   }
-    }
-  }
 
   // Event ingestion — the ONE thing that keeps running while paused (§10.6-5).
   // Driven from index.mjs's event pump (not a timer); the engine is just
