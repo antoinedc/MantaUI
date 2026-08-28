@@ -51,7 +51,7 @@ import {
   DigestSection,
   type NowCard,
 } from "./ctoSections";
-import type { CtoCard, CtoFinishedItem, CtoDigest, CtoLedgerPage, CtoLedgerRow } from "../shared/api.js";
+import type { CtoCard, CtoFinishedItem, CtoDigest, CtoLedgerPage, CtoLedgerRow, CtoProfileRender, CtoSkill } from "../shared/api.js";
 import { Toggle } from "./Toggle";
 
 // The effort-dial options (§12.1, D12). Plain-language scope per tier. Medium
@@ -106,7 +106,7 @@ export function CtoPanel({
   state: CtoState | null;
   onOpenSession: (sessionId: string) => void;
 }) {
-  const [view, setView] = useState<"overview" | "settings" | "ledger">("overview");
+  const [view, setView] = useState<"overview" | "settings" | "ledger" | "profile">("overview");
   const pushToast = useStore((s) => s.pushAppToast);
 
   // --- data reads ---------------------------------------------------------
@@ -278,12 +278,16 @@ export function CtoPanel({
         pausedAt={state?.pausedAt ?? null}
         onBack={() => setView("overview")}
         onLedger={() => setView("ledger")}
+        onProfile={() => setView("profile")}
         onResume={() => void resumeCto()}
       />
     );
   }
   if (view === "ledger") {
     return <LedgerView onBack={() => setView("settings")} pushToast={pushToast} />;
+  }
+  if (view === "profile") {
+    return <ProfileView onBack={() => setView("settings")} pushToast={pushToast} />;
   }
 
   return (
@@ -446,12 +450,14 @@ function SettingsView({
   pausedAt,
   onBack,
   onLedger,
+  onProfile,
   onResume,
 }: {
   paused: boolean;
   pausedAt: number | null;
   onBack: () => void;
   onLedger: () => void;
+  onProfile: () => void;
   onResume: () => void;
 }) {
   const pushToast = useStore((s) => s.pushAppToast);
@@ -710,9 +716,22 @@ function SettingsView({
             </ul>
           </section>
 
-          {/* ---------- Internals: Activity ledger entry point ---------- */}
+          {/* ---------- Internals: Profile & rhythm + Activity ledger ---------- */}
           <section className="rounded-lg border border-border-subtle p-4">
             <h3 className="text-sm font-semibold text-text">Internals</h3>
+            <button
+              type="button"
+              onClick={onProfile}
+              className="mt-2 flex w-full items-center justify-between rounded-md border border-border-subtle px-3 py-2 text-left hover:bg-fill-hover"
+            >
+              <span>
+                <span className="block text-sm font-medium text-text">Profile &amp; rhythm</span>
+                <span className="block text-xs text-text-muted">
+                  What the CTO believes about you — skills, sleep window, journal.
+                </span>
+              </span>
+              <span className="text-text-muted">›</span>
+            </button>
             <button
               type="button"
               onClick={onLedger}
@@ -882,5 +901,305 @@ function LedgerView({
         )}
       </div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Profile & rhythm drill-down (BET-1394) — Settings → Internals → Profile.
+// Reads the server-composed render model (§8.5) + journal (§3.2).
+// ---------------------------------------------------------------------------
+
+type ProfileTab = "profile" | "journal";
+
+function ProfileView({
+  onBack,
+  pushToast,
+}: {
+  onBack: () => void;
+  pushToast: (t: { id: string; message: string }) => void;
+}) {
+  const [tab, setTab] = useState<ProfileTab>("profile");
+  const [render, setRender] = useState<CtoProfileRender | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [editDim, setEditDim] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+
+  const refresh = useCallback(async () => {
+    const r = await window.api.ctoProfileGet();
+    setRender(r);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const saveEdit = async (skill: CtoSkill) => {
+    const value = Number(draft);
+    if (!Number.isFinite(value)) {
+      pushToast({ id: `cto-edit-inv-${skill.dimension}`, message: "Enter a number between 0 and 1" });
+      return;
+    }
+    const clamped = Math.min(1, Math.max(0, value));
+    const res = await window.api.ctoProfileEdit({ dimension: skill.dimension, value: clamped });
+    if (!res.ok) {
+      pushToast({ id: `cto-edit-fail-${skill.dimension}`, message: res.error ?? "Edit failed" });
+      return;
+    }
+    setRender(res);
+    setEditDim(null);
+    pushToast({ id: `cto-edit-ok-${skill.dimension}`, message: `Stated ${skill.dimension} as ${clamped}` });
+  };
+
+  const suppress = async (cls: string) => {
+    const res = await window.api.ctoProfileSuppress({ inference: cls });
+    if (!res.ok) {
+      pushToast({ id: `cto-sup-fail-${cls}`, message: res.error ?? "Couldn't delete" });
+      return;
+    }
+    setRender(res);
+    pushToast({ id: `cto-sup-ok-${cls}`, message: "Sensitive inference deleted for 90 days" });
+  };
+
+  const delJournal = async (id: string) => {
+    const res = await window.api.ctoJournalDelete({ id });
+    if (!res.ok) {
+      pushToast({ id: `cto-jdel-${id}`, message: "Couldn't delete the entry" });
+      return;
+    }
+    void refresh();
+  };
+
+  const empty = !render || (render.skills.length === 0 && render.journal.length === 0 && render.sensitive.length === 0);
+  const hist = render?.rhythm?.histogram ?? [];
+  const maxH = hist.length ? Math.max(...hist, 1) : 1;
+
+  return (
+    <div className="h-full w-full overflow-y-auto bg-bg">
+      <div className="mx-auto px-6 py-8" style={{ maxWidth: "var(--cto-col-max-w)" }}>
+        <div className="flex items-center gap-2 pb-4">
+          <button
+            type="button"
+            onClick={onBack}
+            className="rounded-md px-2 py-1 text-text-muted hover:bg-fill-hover hover:text-text"
+            aria-label="Back"
+          >
+            ‹
+          </button>
+          <h1 className="text-lg font-semibold text-text">Profile &amp; rhythm</h1>
+          <div className="flex-1" />
+          <div className="flex gap-1 rounded-md border border-border-subtle p-1">
+            <button
+              type="button"
+              onClick={() => setTab("profile")}
+              className={"rounded-md px-2 py-1 text-xs " + (tab === "profile" ? "bg-fill-hover text-text" : "text-text-muted")}
+            >
+              Profile
+            </button>
+            <button
+              type="button"
+              onClick={() => setTab("journal")}
+              className={"rounded-md px-2 py-1 text-xs " + (tab === "journal" ? "bg-fill-hover text-text" : "text-text-muted")}
+            >
+              Journal{render && render.journal.length > 0 ? ` (${render.journal.length})` : ""}
+            </button>
+          </div>
+        </div>
+
+        {loading ? (
+          <p className="text-sm text-text-faint">Loading…</p>
+        ) : tab === "journal" ? (
+          <JournalTab render={render} delJournal={delJournal} />
+        ) : (
+          <div className="flex flex-col gap-4">
+            {/* Sensitive inferences — §8.5, deletable (90d suppression). */}
+            {render && render.sensitive.length > 0 && (
+              <section className="rounded-lg border border-border-subtle p-4">
+                <h3 className="text-sm font-semibold text-text">Sensitive</h3>
+                <p className="text-xs text-text-muted">
+                  Inferred, not stored against you — shown only here, deletable. A deletion suppresses that
+                  inference for 90 days.
+                </p>
+                <ul className="mt-2 divide-y divide-border-subtle">
+                  {render.sensitive.map((s) => (
+                    <li key={s.class} className="flex items-start justify-between gap-3 py-2">
+                      <div className="min-w-0">
+                        <span className="inline-block rounded-full bg-fill-active px-2 py-1 text-xs text-text">{s.label}</span>
+                        <p className="mt-1 text-sm text-text">{s.text}</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void suppress(s.class)}
+                        className="shrink-0 rounded-md border border-border-subtle px-2 py-1 text-xs text-text-muted hover:bg-fill-hover hover:text-text"
+                        title="Delete this inference (90-day suppression)"
+                      >
+                        Delete
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
+
+            {/* Skills — §8.1 σ bands + top-3 evidence + stated-wins inline edit. */}
+            <section className="rounded-lg border border-border-subtle p-4">
+              <h3 className="text-sm font-semibold text-text">Skills</h3>
+              {render && render.skills.length === 0 ? (
+                <p className="mt-2 text-sm text-text-faint">No skills inferred yet — they appear after the CTO has seen your work.</p>
+              ) : (
+                <ul className="mt-2 space-y-3">
+                  {render?.skills.map((s) => {
+                    const width = Math.min(100, Math.max(2, s.expertise * 100));
+                    return (
+                      <li key={s.dimension} className="flex items-center gap-3">
+                        <div className="w-40 shrink-0">
+                          <div className="truncate text-sm text-text">{s.dimension}</div>
+                          <div className="text-xs text-text-faint">{s.label}</div>
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="h-2 rounded-full bg-fill-active">
+                            <div className="h-2 rounded-full bg-accent" style={{ width: `${width}%` }} />
+                          </div>
+                          <div className="mt-1 truncate text-[11px] text-text-faint">
+                            {s.source === "stated" ? (
+                              <span className="text-text">stated: {s.statedValue}</span>
+                            ) : s.topEvidence.length ? (
+                              s.topEvidence.slice(0, 2).join(" · ")
+                            ) : (
+                              "no evidence yet"
+                            )}
+                          </div>
+                        </div>
+                        <span className="shrink-0 font-mono text-xs text-text-muted">μ{s.mu.toFixed(2)}</span>
+                        <div className="shrink-0">
+                          {editDim === s.dimension ? (
+                            <form
+                              onSubmit={(ev) => {
+                                ev.preventDefault();
+                                void saveEdit(s);
+                              }}
+                              className="flex items-center gap-1"
+                            >
+                              <input
+                                autoFocus
+                                type="number"
+                                min={0}
+                                max={1}
+                                step={0.05}
+                                value={draft}
+                                onChange={(ev) => setDraft(ev.target.value)}
+                                className="w-16 rounded-md border border-border bg-bg px-1 py-1 text-xs text-text"
+                              />
+                              <button type="submit" className="rounded-md border border-border px-2 py-1 text-xs text-text hover:bg-fill-hover">
+                                ✓
+                              </button>
+                              <button type="button" onClick={() => setEditDim(null)} className="rounded-md border border-border px-2 py-1 text-xs text-text-muted">
+                                ✕
+                              </button>
+                            </form>
+                          ) : s.source === "stated" ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditDim(s.dimension);
+                                setDraft(String(s.statedValue ?? s.mu));
+                              }}
+                              className="rounded-md border border-border px-2 py-1 text-xs text-text hover:bg-fill-hover"
+                              title="Edit stated value"
+                            >
+                              Edit
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditDim(s.dimension);
+                                setDraft(String(s.expertise.toFixed(2)));
+                              }}
+                              className="rounded-md border border-border px-2 py-1 text-xs text-text-muted hover:bg-fill-hover hover:text-text"
+                              title="State a value (wins over inference)"
+                            >
+                              State
+                            </button>
+                          )}
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </section>
+
+            {/* Rhythm — §8.2 24-bin histogram + inferred TZ. */}
+            {(render?.rhythm?.dayCount ?? 0) > 0 && (
+              <section className="rounded-lg border border-border-subtle p-4">
+                <h3 className="text-sm font-semibold text-text">Rhythm</h3>
+                <p className="text-xs text-text-muted">
+                  {render?.rhythm.tzOffset != null
+                    ? `Inferred timezone UTC${render.rhythm.tzOffset >= 0 ? "+" : ""}${render.rhythm.tzOffset}·${Math.round((render.rhythm.tzConfidence ?? 0) * 100)}% confidence`
+                    : "No timezone inferred yet"}{" "}
+                  · {render?.rhythm.dayCount} activity {"day"}
+                  {render?.rhythm.dayCount === 1 ? "" : "s"}
+                  {render?.rhythm.lowConfidence ? " — low confidence until 14 days" : ""}
+                </p>
+                <div className="mt-2 flex h-16 items-end gap-1">
+                  {hist.map((c: number, i: number) => (
+                    <div
+                      key={i}
+                      className="flex-1 rounded-sm bg-accent/30"
+                      style={{ height: `${Math.max(2, (c / maxH) * 100)}%` }}
+                      title={`${i}:00 − ${c}`}
+                    />
+                  ))}
+                </div>
+                <div className="mt-1 flex justify-between text-[10px] text-text-faint">
+                  <span>0:00</span>
+                  <span>12:00</span>
+                  <span>24:00</span>
+                </div>
+              </section>
+            )}
+          </div>
+        )}
+
+        {!loading && empty && <p className="mt-8 text-sm text-text-faint">Nothing here yet — the CTO fills this in as it learns.</p>}
+      </div>
+    </div>
+  );
+}
+
+function JournalTab({
+  render,
+  delJournal,
+}: {
+  render: CtoProfileRender | null;
+  delJournal: (id: string) => void;
+}) {
+  const entries = render?.journal ?? [];
+  if (entries.length === 0) {
+    return <p className="mt-8 text-sm text-text-faint">No journal entries yet.</p>;
+  }
+  return (
+    <ul className="mt-2 divide-y divide-border-subtle">
+      {entries.map((e) => (
+        <li key={e.id} className="flex items-start justify-between gap-3 py-2">
+          <div className="min-w-0">
+            <p className="text-sm text-text">{e.text}</p>
+            <div className="mt-1 text-xs text-text-faint">
+              {relativeTime(e.created, Date.now())}
+              {e.refs.length > 0 ? ` · ${e.refs.slice(0, 3).join(" · ")}` : ""}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => delJournal(e.id)}
+            className="shrink-0 rounded-md border border-border-subtle px-2 py-1 text-xs text-text-muted hover:bg-fill-hover hover:text-text"
+            title="Delete this journal entry"
+          >
+            ✕
+          </button>
+        </li>
+      ))}
+    </ul>
   );
 }

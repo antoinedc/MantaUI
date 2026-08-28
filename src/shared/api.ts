@@ -284,6 +284,65 @@ export type CtoLedgerPage = {
   nextBefore: number | null;
 };
 
+// §8.5 profile & journal drill-down (BET-1394) — the full render model the
+// box composes server-side (the renderer does no math).
+
+export type CtoSkill = {
+  dimension: string;
+  mu: number;
+  sigma: number;
+  expertise: number; // μ−2σ, clamped [0,1]
+  label: string; // novice | balanced | strong | expert
+  // "stated" after an inline edit (§8.5); "inferred" otherwise. A stated value
+  // wins over every inferred one until re-edited.
+  source: "stated" | "inferred";
+  statedValue?: number | string | null;
+  updated: number | null;
+  topEvidence: string[]; // top-3 provenance refs
+};
+
+export type CtoSensitiveInference = {
+  class: string; // "sleep_window" | "overwork" (suppressible for 90d)
+  label: string;
+  text: string;
+  confidence: number | null;
+};
+
+export type CtoJournalEntry = {
+  id: string;
+  text: string;
+  refs: string[];
+  created: number;
+};
+
+export type CtoProfileRender = {
+  compiledAt: number;
+  skills: CtoSkill[];
+  rhythm: {
+    tzOffset: number | null;
+    tzConfidence: number;
+    lowConfidence: boolean;
+    dayCount: number;
+    histogram: number[]; // 24 bins
+    components: Array<{ mu_hour: number; kappa: number; w: number }>;
+    rBar: number;
+    weekendRatio: number;
+  };
+  interaction: {
+    promptFreqEwma: number | null;
+    sessionLenMedian: number | null;
+    questionMix: Record<string, number>;
+    correctionRate: { corrected: number; total: number };
+    verbosityPref: { value: number; source: string };
+    depthPref: { value: number; source: string };
+  };
+  repository: Array<{ repo: string; doa: number; doi: number }>;
+  // Sensitive inferences — suppressed classes already omitted server-side.
+  sensitive: CtoSensitiveInference[];
+  // The §3.2 journal, newest-first, with per-entry delete.
+  journal: CtoJournalEntry[];
+};
+
 
 /**
  * The full `window.api` contract.
@@ -1084,6 +1143,23 @@ export interface Api {
       | "open";
     never?: boolean;
   }): Promise<{ ok: boolean; error?: string; effects?: { success?: boolean; rejection?: boolean; access?: boolean; decay?: boolean } }>;
+  // GET /api/cto/profile — the §8.5 profile & §3.2 journal drill-down render
+  // model, composed server-side (Settings → Internals → Profile & rhythm).
+  ctoProfileGet(): Promise<CtoProfileRender>;
+  // POST /api/cto/profile/edit — inline profile edit: writes a `stated` value
+  // that wins over inference for that dimension (§8.5) + a `correct` verdict.
+  // Resolves with the fresh render model (or `{ok:false,error}` on a 400).
+  ctoProfileEdit(input: {
+    dimension: string;
+    value: number | string;
+    label?: string;
+  }): Promise<CtoProfileRender & { ok: boolean; error?: string }>;
+  // POST /api/cto/profile/suppress — delete a sensitive inference: suppresses
+  // that inference class for 90 days (§8.5). Resolves with the fresh render
+  // model without the suppressed class.
+  ctoProfileSuppress(input: { inference: string }): Promise<CtoProfileRender & { ok: boolean; error?: string }>;
+  // POST /api/cto/journal/delete — §3.2 per-entry journal delete.
+  ctoJournalDelete(input: { id: string }): Promise<{ ok: boolean }>;
 }
 
 /**

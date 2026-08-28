@@ -37,6 +37,7 @@ import type {
   CtoHealthStat,
   CtoLedgerRow,
   CtoLedgerPage,
+  CtoProfileRender,
 } from "../../shared/api.js";
 // BET-559: httpApi used to pull these claim helpers through the (now-retired)
 // mobile shell's pairingLogic re-export. The shared, process-boundary-safe
@@ -1733,7 +1734,117 @@ export const httpApi: Api = {
       return { ok: false };
     }
   },
+
+  // GET /api/cto/profile — the §8.5 profile & §3.2 journal drill-down render
+  // model, composed server-side (Settings → Internals → Profile & rhythm).
+  // A rejection (engine off / server down) degrades to an empty model so the
+  // drill-down renders an "inert / no data yet" state rather than crashing.
+  ctoProfileGet: async (): Promise<CtoProfileRender> => {
+    const url = `${serverBase()}/api/cto/profile`;
+    let res: Response;
+    try {
+      res = await fetch(url, { method: "GET", headers: authHeaders(clientToken()) });
+    } catch {
+      return emptyProfileRender();
+    }
+    if (res.status === 401) throw new AuthRequiredError();
+    if (!res.ok) return emptyProfileRender();
+    let json: CtoProfileRender = emptyProfileRender();
+    try { json = (await res.json()) as CtoProfileRender; } catch { /* non-JSON */ }
+    return json;
+  },
+
+  // POST /api/cto/profile/edit — inline profile edit (stated wins, §8.5).
+  ctoProfileEdit: async (input: {
+    dimension: string;
+    value: number | string;
+    label?: string;
+  }): Promise<CtoProfileRender & { ok: boolean; error?: string }> => {
+    const url = `${serverBase()}/api/cto/profile/edit`;
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: { ...authHeaders(clientToken()), "Content-Type": "application/json" },
+        body: JSON.stringify({ dimension: input.dimension, value: input.value, ...(input.label ? { label: input.label } : {}) }),
+      });
+    } catch {
+      return { ...emptyProfileRender(), ok: false, error: "network error" };
+    }
+    if (res.status === 401) throw new AuthRequiredError();
+    let json: CtoProfileRender & { ok?: boolean; error?: string } = { ...emptyProfileRender(), ok: false, error: `HTTP ${res.status}` };
+    try { json = (await res.json()) as typeof json; } catch { /* non-JSON */ }
+    return { ...emptyProfileRender(), ...json, ok: json.ok !== false };
+  },
+
+  // POST /api/cto/profile/suppress — delete a sensitive inference (90d
+  // suppression, §8.5). Resolves with the fresh render model, class omitted.
+  ctoProfileSuppress: async (input: {
+    inference: string;
+  }): Promise<CtoProfileRender & { ok: boolean; error?: string }> => {
+    const url = `${serverBase()}/api/cto/profile/suppress`;
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: { ...authHeaders(clientToken()), "Content-Type": "application/json" },
+        body: JSON.stringify({ inference: input.inference }),
+      });
+    } catch {
+      return { ...emptyProfileRender(), ok: false, error: "network error" };
+    }
+    if (res.status === 401) throw new AuthRequiredError();
+    let json: CtoProfileRender & { ok?: boolean; error?: string } = { ...emptyProfileRender(), ok: false, error: `HTTP ${res.status}` };
+    try { json = (await res.json()) as typeof json; } catch { /* non-JSON */ }
+    return { ...emptyProfileRender(), ...json, ok: json.ok !== false };
+  },
+
+  // POST /api/cto/journal/delete — §3.2 per-entry journal delete.
+  ctoJournalDelete: async (input: { id: string }): Promise<{ ok: boolean }> => {
+    const url = `${serverBase()}/api/cto/journal/delete`;
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { ...authHeaders(clientToken()), "Content-Type": "application/json" },
+        body: JSON.stringify({ id: input.id }),
+      });
+      if (res.status === 401) throw new AuthRequiredError();
+      return { ok: res.ok };
+    } catch {
+      return { ok: false };
+    }
+  },
 };
+
+// A safe all-empty default so the profile drill-down renders an inert state
+// (and never crashes) while the engine has no data or the box is offline.
+function emptyProfileRender(): CtoProfileRender {
+  return {
+    compiledAt: 0,
+    skills: [],
+    rhythm: {
+      tzOffset: null,
+      tzConfidence: 0,
+      lowConfidence: true,
+      dayCount: 0,
+      histogram: [],
+      components: [],
+      rBar: 0,
+      weekendRatio: 0,
+    },
+    interaction: {
+      promptFreqEwma: null,
+      sessionLenMedian: null,
+      questionMix: {},
+      correctionRate: { corrected: 0, total: 0 },
+      verbosityPref: { value: 0, source: "inferred" },
+      depthPref: { value: 0, source: "inferred" },
+    },
+    repository: [],
+    sensitive: [],
+    journal: [],
+  };
+}
 
 // Base64-encode an ArrayBuffer in chunks. `btoa(String.fromCharCode(...))`
 // blows the call stack past ~125k bytes; chunked apply keeps it safe for
