@@ -138,7 +138,8 @@ struct MantaProse: View {
                     menuItems: { atomicMenu(block.source, onQuote: onQuote) },
                     preview: { atomicPreview(block.source) }
                 )
-                .padding(.vertical, Metrics.spacing.sp3)
+                .padding(.top, Metrics.spacing.sp5)
+                .padding(.bottom, Metrics.spacing.sp3)
             } else {
                 // Read-only surface (subagent drill-in, capture fixture): there
                 // is no composer to quote into, so this block must not eat
@@ -146,7 +147,8 @@ struct MantaProse: View {
                 // prose — full hit testing (links inside quotes / code blocks /
                 // tables stay tappable), no contentShape, no context menu.
                 markdownBody(block.source)
-                    .padding(.vertical, Metrics.spacing.sp3)
+                    .padding(.top, Metrics.spacing.sp5)
+                    .padding(.bottom, Metrics.spacing.sp3)
             }
         }
     }
