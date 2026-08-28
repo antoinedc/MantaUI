@@ -417,8 +417,6 @@ export function planReserve({
 // ---------------------------------------------------------------------------
 // The I/O accessor the engine consumes (injected store + seams).
 // ---------------------------------------------------------------------------
-// The I/O accessor the engine consumes (injected store + seams).
-// ---------------------------------------------------------------------------
 
 export function createCtoBudget({
   store = budgetStore,
@@ -475,9 +473,12 @@ export function createCtoBudget({
    * re-evaluation; the Health card reads the persisted `budget.quota`.
    *
    * `windowed: false` (a windowless provider or one with no adapter, §11.2)
-   * disables the reserve: it returns `{windowed:false, mode:'windowless',
-   * spendable:null, reserve:0, nightCapUsd}` and bounds overnight spend by the
-   * absolute `ctoNightCapUsd` budget instead.
+   * disables the reserve — it returns the same key set as the windowed plan
+   * (`spendableFrac: null`, `reserve: 0`, `mode: 'windowless'`, plus
+   * `nightCapUsd`) and bounds overnight spend by the absolute
+   * `ctoNightCapUsd` budget instead. The forecaster still runs (§11.2): the
+   * pct series is built, `mape14` computed (null without usable history) and
+   * persisted in the quota row for the Health card.
    */
   async function computeSpendable({
     provider,
@@ -496,14 +497,49 @@ export function createCtoBudget({
         conf = {};
       }
       if (!conf || typeof conf !== "object") conf = {};
+      // §11.2: reserve disabled, but the forecaster still runs to feed the
+      // Health card — build the same pct-history series the windowed path
+      // uses and persist a quota row carrying `mape14` (reserve stays 0;
+      // overnight spend is bounded by the absolute `ctoNightCapUsd` instead).
+      const hist = (await history().catch(() => ({}))) ?? {};
+      const obs = hist[historyKey(provider, windowKind)] ?? [];
+      const { series, historyDays, maxObserved } = buildSeries(obs, t);
+      const mape14 = mapeFn({ series, tailDays: 14 });
+      const payload = await load();
+      const quota = {
+        ...defaultQuotaState(provider),
+        mode: "windowless",
+        reserve: 0,
+        spendable: null,
+        maxObserved,
+        historyDays,
+        remainingFrac: null,
+        mape14,
+        updatedMs: t,
+      };
+      const nextPayload = { ...payload, quota: { ...payload.quota, [provider]: quota } };
+      try {
+        await save(nextPayload);
+      } catch {
+        /* quota persistence is best-effort */
+      }
+      await ledgerAppend({ kind: "cto.reserve", ts: t, provider, reserve: 0, spendable: null, fractile: quota.fractile, mode: "windowless" });
+      // Same key set as the windowed plan below — C3's re-evaluation seam
+      // consumes both modes uniformly (null where the concept doesn't apply).
       return {
         provider,
         windowed: false,
         mode: "windowless",
+        activated: false,
+        fractile: quota.fractile,
         reserve: 0,
-        spendable: null,
+        maxObserved,
+        historyDays,
         remainingFrac: null,
-        historyDays: 0,
+        spendableFrac: null,
+        point: null,
+        sigma: null,
+        mape14,
         nightCapUsd: nightCapUsd(conf),
       };
     }

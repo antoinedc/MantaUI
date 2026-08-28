@@ -1519,8 +1519,13 @@ rpcHandlers = buildHandlers({
   // BET-1400: quota forecast + reserve - drive a per-provider re-evaluation
   // (C3's 30-min overnight re-eval calls `quota:evaluate`; the health card
   // reads the persisted budget.quota via `quota:read`), and record a user
-  // cap-hit (sect11.3) through `quota:capHit`.
-  "quota:evaluate": (input) => adaptiveCtoBudget.computeSpendable(input ?? {}),
+  // cap-hit (sect11.3) through `quota:capHit`. A missing provider errors
+  // before any state is touched (an absent input would otherwise persist a
+  // `quota.undefined` row).
+  "quota:evaluate": (input) => {
+    if (typeof input?.provider !== "string" || !input.provider.trim()) throw new Error("quota:evaluate requires a provider");
+    return adaptiveCtoBudget.computeSpendable(input);
+  },
   "quota:capHit": (input) => adaptiveCtoBudget.recordCapHit(input ?? {}),
   "quota:read": () => adaptiveCtoBudget.payload(),
   // BET-790: renderer read channel for a session's progress record (the

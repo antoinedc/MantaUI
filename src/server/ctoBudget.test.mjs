@@ -115,7 +115,6 @@ test("expected hourly burn derives from trailing 7-day spend", () => {
   assert.ok(Math.abs(burn - 0.1) < 1e-9);
   // Old spend ages out of the 7-day window: the day-7 bucket alone, /168h.
   const onlyRecent = defaultBudgetPayload();
-  expectedHourlyBurnUsd;
   const p2 = recordSpend(defaultBudgetPayload(), { now: MIDNIGHT + 6 * 86_400_000 + 1000, usd: 1.68 });
   const burn2 = expectedHourlyBurnUsd(p2, { now: MIDNIGHT + 6 * 86_400_000 + 5000, capUsd: 2.5 });
   assert.ok(Math.abs(burn2 - 1.68 / 168) < 1e-9);
@@ -303,14 +302,58 @@ test("planReserve: forecast that returns fallback still degrades to the fallback
   assert.equal(plan.reserve, 0.6);
 });
 
-test("computeSpendable: windowless/no-adapter routes to the $ bound (no reserve)", async () => {
-  const budget = createCtoBudget({ store: { load: async () => ({}), save: async () => {} }, cfg: () => ({ ctoNightCapUsd: 3 }) });
+test("computeSpendable: windowless/no-adapter routes to the $ bound (no reserve, no history → no MAPE)", async () => {
+  let saved = null;
+  const ledgerRows = [];
+  const budget = createCtoBudget({
+    store: { load: async () => ({}), save: async (p) => (saved = p) },
+    cfg: () => ({ ctoNightCapUsd: 3 }),
+    ledger: { append: (r) => ledgerRows.push(r) },
+  });
   const plan = await budget.computeSpendable({ provider: "someone", windowed: false });
   assert.equal(plan.mode, "windowless");
   assert.equal(plan.windowed, false);
-  assert.equal(plan.spendable, null);
+  assert.equal(plan.spendableFrac, null);
   assert.equal(plan.reserve, 0);
   assert.equal(plan.nightCapUsd, 3);
+  // no usable history → the forecaster yields no MAPE, but the key set still
+  // matches the windowed plan (uniform seam for C3)
+  assert.equal(plan.mape14, null);
+  assert.equal(plan.historyDays, 0);
+  assert.equal(plan.maxObserved, 0);
+  assert.equal(plan.remainingFrac, null);
+  // a quota row is still persisted (mode windowless, reserve 0)
+  assert.equal(saved.quota.someone.mode, "windowless");
+  assert.equal(saved.quota.someone.reserve, 0);
+  assert.ok(ledgerRows.some((r) => r.kind === "cto.reserve" && r.mode === "windowless"));
+});
+
+test("computeSpendable: windowless still computes the forecast for the health card (§11.2)", async () => {
+  let saved = null;
+  const ledgerRows = [];
+  const budget = createCtoBudget({
+    store: { load: async () => ({}), save: async (p) => (saved = p) },
+    now: () => NOON,
+    history: async () => ({ "kimi:session": [{ ts: NOON, pct: 10 }] }),
+    buildSeries: () => ({ series: Array(14).fill(0.1), historyDays: 14, maxObserved: 0.1 }),
+    mapeFn: () => 7.5,
+    ledger: { append: (r) => ledgerRows.push(r) },
+    cfg: () => ({ ctoNightCapUsd: 3 }),
+  });
+  const plan = await budget.computeSpendable({ provider: "kimi", windowed: false });
+  assert.equal(plan.windowed, false);
+  assert.equal(plan.mode, "windowless");
+  assert.equal(plan.reserve, 0);
+  assert.equal(plan.spendableFrac, null);
+  assert.equal(plan.mape14, 7.5); // the forecaster ran — the health card is fed
+  assert.equal(plan.historyDays, 14);
+  assert.ok(Math.abs(plan.maxObserved - 0.1) < 1e-9);
+  assert.equal(plan.nightCapUsd, 3);
+  // the persisted row carries the MAPE and no reserve
+  assert.equal(saved.quota.kimi.mape14, 7.5);
+  assert.equal(saved.quota.kimi.reserve, 0);
+  assert.equal(saved.quota.kimi.mode, "windowless");
+  assert.ok(ledgerRows.some((r) => r.kind === "cto.reserve" && r.mode === "windowless"));
 });
 
 test("computeSpendable: windowed persists quota + attaches §14.5 ledger rows", async () => {
