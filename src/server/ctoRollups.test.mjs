@@ -1,0 +1,385 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import {
+  createRollupRunner,
+  selectReduceInputs,
+  collectRefs,
+  validateRollup,
+  parseRollupText,
+  buildReduceContext,
+  degradedRollup,
+  windowFor,
+  windowId,
+  previousWindow,
+  syncFactsFromRollup,
+  decideFactAction,
+  normalizeStatement,
+  HOUR_MS,
+  DAY_MS,
+  WEEK_MS,
+  ROLLUP_VERSION,
+} from "./ctoRollups.mjs";
+
+// In-memory rollups store shaped like rollupsStore {load, save}. A written
+// rollup always carries a `bullets` array; the default write-once detector
+// keys off that, mirroring the real store.
+function makeRollupsStore() {
+  const map = new Map();
+  return {
+    map,
+    load: async (level, id) => map.get(`${level}/${id}`) ?? { v: 1 },
+    save: async (level, id, data) => {
+      map.set(`${level}/${id}`, data);
+    },
+  };
+}
+
+function fakeExists(store) {
+  return async ({ level, id } = {}) => {
+    const p = store.map.get(`${level}/${id}`);
+    return !!(p && typeof p === "object" && "bullets" in p);
+  };
+}
+
+function makeFactsStore() {
+  const map = new Map();
+  return {
+    map,
+    load: async (project) => map.get(project) ?? { facts: [] },
+    save: async (project, data) => {
+      map.set(project, data);
+    },
+  };
+}
+
+// A runEphemeral + loadInputs harness that records reduce calls and returns
+// controllable model output. `inputs` may be a function of ({level, window}).
+function makeRunner({ inputs = [], modelText = null, preceding = null, presence = () => false } = {}) {
+  const store = makeRollupsStore();
+  const calls = [];
+  const runner = createRollupRunner({
+    runEphemeral: async (data) => {
+      calls.push({ fn: "runEphemeral", data });
+      return modelText ? { ok: true, text: modelText } : { ok: false, gated: true };
+    },
+    rollups: store,
+    loadInputs: async ({ level, window }) =>
+      typeof inputs === "function" ? inputs({ level, window }) : inputs,
+    loadPreceding: async ({ level, window }) => preceding,
+    exists: fakeExists(store),
+    presenceCheck: presence,
+    facts: makeFactsStore(),
+  });
+  return { runner, store, calls };
+}
+
+// A valid day/second-hour-window timestamp basis (start of a local day).
+function baseDay() {
+  return windowFor("day", Date.UTC(2026, 0, 15, 12, 0, 0))[0];
+}
+
+function seg(id, start, extra = {}) {
+  return { id, window: [start, start + 1], summary: { one_liner: `work in ${id}`, ...extra } };
+}
+
+function hourRollup(id, start, bullets) {
+  return { id, window: [start, start + HOUR_MS], bullets };
+}
+
+// ---------------------------------------------------------------------------
+// Window math + input selection
+// ---------------------------------------------------------------------------
+
+test("windowFor partitions the day into contiguous hour windows", () => {
+  const d = Date.UTC(2026, 0, 15, 12, 30, 0);
+  const w = windowFor("hour", d);
+  assert.equal(w[1] - w[0], HOUR_MS);
+  assert.equal(new Date(w[0]).getUTCMinutes(), 0);
+  const day = windowFor("day", d);
+  assert.equal(day[1] - day[0], DAY_MS);
+  assert.equal(new Date(day[0]).getUTCHours(), 0);
+  const week = windowFor("week", d);
+  assert.equal(week[1] - week[0], WEEK_MS);
+  // Jan 15 2026 is a Thursday → Monday is Jan 12.
+  assert.equal(new Date(week[0]).getUTCDay(), 1);
+  assert.equal(windowId(w), String(w[0]));
+});
+
+test("previousWindow returns the same-level window immediately before", () => {
+  const d = Date.UTC(2026, 0, 15, 12, 30, 0);
+  const w = windowFor("hour", d);
+  const prev = previousWindow(w, "hour");
+  assert.equal(prev[1], w[0]);
+  assert.equal(prev[1] - prev[0], HOUR_MS);
+});
+
+test("selectReduceInputs assigns items to the window containing their start (hour)", () => {
+  const d = baseDay();
+  const w0 = windowFor("hour", d);
+  const w1 = windowFor("hour", d + HOUR_MS);
+  const items = [seg("a", w0[0] + 10000), seg("b", w1[0] + 10000), seg("c", w0[0] + 20000)];
+  const in0 = selectReduceInputs("hour", w0, items);
+  assert.deepEqual(in0.map((i) => i.id).sort(), ["a", "c"]);
+  const in1 = selectReduceInputs("hour", w1, items);
+  assert.deepEqual(in1.map((i) => i.id), ["b"]);
+});
+
+test("selectReduceInputs reads only the level below per level (day/week too)", () => {
+  const d = baseDay();
+  const day = windowFor("day", d);
+  const day1 = windowFor("day", d + DAY_MS);
+  const hours = [hourRollup("h1", day[0], []), hourRollup("h2", day1[0], [])];
+  assert.deepEqual(selectReduceInputs("day", day, hours).map((i) => i.id), ["h1"]);
+  const week = windowFor("week", d);
+  const week1 = windowFor("week", d + WEEK_MS);
+  const days = [hourRollup("d1", week[0], []), hourRollup("d2", week1[0], [])];
+  assert.deepEqual(selectReduceInputs("week", week, days).map((i) => i.id), ["d1"]);
+});
+
+test("selectReduceInputs sorts by window start", () => {
+  const d = baseDay();
+  const w0 = windowFor("hour", d);
+  const items = [seg("late", w0[0] + 50000), seg("early", w0[0] + 100), seg("mid", w0[0] + 20000)];
+  assert.deepEqual(selectReduceInputs("hour", w0, items).map((i) => i.id), ["early", "mid", "late"]);
+});
+
+// ---------------------------------------------------------------------------
+// Ref propagation
+// ---------------------------------------------------------------------------
+
+test("hour refs are leaf segment ids; day/week refs union the level-below bullet refs", () => {
+  const d = baseDay();
+  const h = windowFor("hour", d);
+  const segs = [seg("s1", h[0]), seg("s2", h[0] + 1000)];
+  assert.deepEqual(collectRefs("hour", segs), ["s1", "s2"]);
+  const dayInputs = [
+    { id: "hx", bullets: [{ text: "a", refs: ["s1"] }, { text: "b", refs: ["s1", "s2"] }] },
+    { id: "hy", bullets: [{ text: "c", refs: ["s3"] }] },
+  ];
+  assert.deepEqual(collectRefs("day", dayInputs), ["s1", "s2", "s3"]);
+});
+
+// ---------------------------------------------------------------------------
+// Validation + parsing
+// ---------------------------------------------------------------------------
+
+test("validateRollup accepts a well-formed rollup and rejects malformed ones", () => {
+  const d = baseDay();
+  const w = windowFor("hour", d);
+  const good = { v: ROLLUP_VERSION, level: "hour", window: w, bullets: [{ text: "did a thing", refs: ["s1"] }] };
+  assert.equal(validateRollup(good), true);
+  assert.equal(validateRollup({ ...good, v: 99 }), false);
+  assert.equal(validateRollup({ ...good, level: "week" }), false); // wrong window span for week
+  assert.equal(validateRollup({ ...good, window: [w[0], w[0] + 5000] }), false);
+  assert.equal(validateRollup({ ...good, bullets: [{ text: "" }] }), false);
+  assert.equal(validateRollup({ ...good, bullets: [{ text: "x", refs: ["ok", 5] }] }), false);
+});
+
+test("parseRollupText extracts JSON from wrapped prose", () => {
+  const out = parseRollupText('Here you go:\n{"bullets":[{"text":"a","refs":["s1"]}]}\nthanks');
+  assert.deepEqual(out, { bullets: [{ text: "a", refs: ["s1"] }] });
+  assert.equal(parseRollupText("no json here"), null);
+});
+
+// ---------------------------------------------------------------------------
+// Running-context threading
+// ---------------------------------------------------------------------------
+
+test("reduce threads preceding same-level rollup into the running context", async () => {
+  const d = baseDay();
+  const w = windowFor("hour", d);
+  const prev = { v: ROLLUP_VERSION, level: "hour", window: previousWindow(w, "hour"), bullets: [{ text: "PREVIOUS HOUR WORK", refs: ["s0"] }] };
+  const { runner, calls } = makeRunner({
+    inputs: [seg("s1", w[0])],
+    preceding: prev,
+    modelText: JSON.stringify({ bullets: [{ text: "NEW HOUR WORK", refs: ["s1"] }] }),
+  });
+  const res = await runner.reduceWindow("hour", w);
+  assert.equal(res.saved, true);
+  const ctx = calls[0].data.context;
+  const all = ctx.map((b) => b.text).join("\n");
+  assert.match(all, /PREVIOUS HOUR WORK/); // running context present
+  assert.match(all, /work in s1/); // level-below input present
+  assert.match(all, /s1/); // ref pointer present
+  assert.equal(ctx[0].priority, "high");
+});
+
+// ---------------------------------------------------------------------------
+// Write-once
+// ---------------------------------------------------------------------------
+
+test("a reduce into an existing window throws (write-once)", async () => {
+  const d = baseDay();
+  const w = windowFor("hour", d);
+  const { runner, store } = makeRunner({ inputs: [seg("s1", w[0])] });
+  await runner.reduceWindow("hour", w);
+  await assert.rejects(() => runner.reduceWindow("hour", w), /already exists/);
+  assert.equal([...store.map.keys()].filter((k) => k.startsWith("hour/")).length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// Quiet-window no-op
+// ---------------------------------------------------------------------------
+
+test("a quiet window (zero inputs) writes NOTHING", async () => {
+  const d = baseDay();
+  const w = windowFor("hour", d);
+  const { runner, store } = makeRunner({ inputs: [] });
+  const res = await runner.reduceWindow("hour", w);
+  assert.equal(res.skipped, true);
+  assert.equal(store.map.size, 0);
+  assert.equal([...store.map.keys()].length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Degraded fallback
+// ---------------------------------------------------------------------------
+
+test("a gated/unavailable model persists a degraded rollup with correct refs", async () => {
+  const d = baseDay();
+  const w = windowFor("hour", d);
+  const { runner, store } = makeRunner({ inputs: [seg("s1", w[0]), seg("s2", w[0] + 1000)] });
+  const res = await runner.reduceWindow("hour", w);
+  assert.equal(res.saved, true);
+  const saved = store.map.get(`hour/${w[0]}`);
+  assert.equal(validateRollup(saved), true);
+  assert.deepEqual(saved.bullets.map((b) => b.refs), [["s1"], ["s2"]]);
+});
+
+test("day reduce from hour rollups: degraded keeps propagated leaf refs", async () => {
+  const d = baseDay();
+  const day = windowFor("day", d);
+  const dayInputs = [
+    { id: "h1", window: [day[0], day[0] + HOUR_MS], bullets: [{ text: "H1", refs: ["s1"] }, { text: "H2", refs: ["s2"] }] },
+  ];
+  const { runner, store } = makeRunner({ inputs: dayInputs });
+  await runner.reduceWindow("day", day);
+  const saved = store.map.get(`day/${day[0]}`);
+  assert.deepEqual(saved.bullets.map((b) => b.refs), [["s1"], ["s2"]]);
+  assert.deepEqual([...new Set(saved.bullets.flatMap((b) => b.refs))].sort(), ["s1", "s2"]);
+});
+
+// ---------------------------------------------------------------------------
+// Preemption
+// ---------------------------------------------------------------------------
+
+test("preemption stops the batch BETWEEN reduce calls, not during a call", async () => {
+  const d = baseDay();
+  const w0 = windowFor("hour", d);
+  const windows = [w0, windowFor("hour", d + HOUR_MS), windowFor("hour", d + 2 * HOUR_MS)];
+  // presence flips to TRUE only after the first reduce has saved a rollup (i.e.
+  // after the in-flight call completes) → the batch must stop between calls.
+  const { runner, store } = makeRunner({
+    inputs: ({ window }) => [seg(`s${window[0]}`, window[0])],
+    presence: () => [...store.map.keys()].length > 0,
+  });
+  const outcomes = await runner.processDue(windows.map((w) => ({ level: "hour", window: w })));
+  assert.equal(outcomes.length, 1); // only the first window was reduced
+  assert.deepEqual(outcomes[0].window, w0);
+  const savedHours = [...store.map.keys()].filter((k) => k.startsWith("hour/"));
+  assert.equal(savedHours.length, 1); // no further rollups written after the stop
+});
+
+test("a present user from the start means the batch does not start", async () => {
+  const d = baseDay();
+  const w = windowFor("hour", d);
+  const { runner, store } = makeRunner({
+    inputs: [seg("s1", w[0])],
+    presence: () => true,
+  });
+  const outcomes = await runner.processDue([{ level: "hour", window: w }]);
+  assert.equal(outcomes.length, 0);
+  assert.equal(store.map.size, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Fact sync (P1, isolated)
+// ---------------------------------------------------------------------------
+
+test("decideFactAction maps NOOP on identical statement, UPDATE on same refs, ADD otherwise", () => {
+  const existing = [
+    { statement: "shipped rollups", refs: ["s1"], sender: "cto" },
+    { statement: "old claim", refs: ["s2", "s3"], sender: "cto" },
+  ];
+  assert.equal(decideFactAction(existing, "SHIPPED ROLLUPS", ["s1"]).action, "noop");
+  assert.equal(decideFactAction(existing, "shipped rollups too", ["s1"]).action, "update");
+  assert.equal(decideFactAction(existing, "brand new news", ["s9"]).action, "add");
+});
+
+test("syncFactsFromRollup groups bullets by project and applies ADD/UPDATE/NOOP", async () => {
+  const day = windowFor("day", baseDay());
+  const facts = makeFactsStore();
+  const segments = new Map([
+    ["s1", { project: "alpha" }],
+    ["s2", { project: "alpha" }],
+    ["s3", { project: "beta" }],
+  ]);
+  const rollup = {
+    v: ROLLUP_VERSION,
+    level: "day",
+    window: day,
+    bullets: [
+      { text: "did A", refs: ["s1"] },
+      { text: "did B", refs: ["s2"] },
+      { text: "did C (beta)", refs: ["s3"] },
+    ],
+  };
+  const t1 = await syncFactsFromRollup(rollup, {
+    resolveSegment: async (id) => segments.get(id) ?? null,
+    facts,
+    now: () => 111,
+  });
+  assert.equal(t1.added, 3);
+  assert.equal(facts.map.get("alpha").facts.length, 2);
+  assert.equal(facts.map.get("beta").facts.length, 1);
+
+  // Re-sync the same rollup → all NOOP (news never re-reported), store unchanged.
+  const t2 = await syncFactsFromRollup(rollup, {
+    resolveSegment: async (id) => segments.get(id) ?? null,
+    facts,
+    now: () => 222,
+  });
+  assert.equal(t2.noop, 3);
+  assert.equal(t2.added, 0);
+  assert.equal(facts.map.get("alpha").facts.length, 2);
+});
+
+test("syncFactsFromRollup skips bullets it cannot attribute to a project", async () => {
+  const day = windowFor("day", baseDay());
+  const facts = makeFactsStore();
+  const t = await syncFactsFromRollup(
+    { v: ROLLUP_VERSION, level: "day", window: day, bullets: [{ text: "orphan", refs: ["missing"] }] },
+    { resolveSegment: async () => null, facts },
+  );
+  assert.equal(t.added, 0);
+  assert.equal(facts.map.size, 0);
+});
+
+// ---------------------------------------------------------------------------
+// buildReduceContext sanity
+// ---------------------------------------------------------------------------
+
+test("buildReduceContext orders high instruction first and includes ref pointer", () => {
+  const d = baseDay();
+  const w = windowFor("hour", d);
+  const blocks = buildReduceContext({
+    level: "hour",
+    window: w,
+    inputs: [seg("s1", w[0])],
+    refs: ["s1"],
+    preceding: null,
+  });
+  assert.equal(blocks[0].priority, "high");
+  assert.match(blocks[0].text, /hourly rollup/);
+  assert.ok(blocks.some((b) => /Leaf segment ids/.test(b.text)));
+});
+
+// ---------------------------------------------------------------------------
+// createRollupRunner exported seams present
+// ---------------------------------------------------------------------------
+
+test("createRollupRunner exposes reduceWindow and processDue", () => {
+  const { runner } = makeRunner();
+  assert.equal(typeof runner.reduceWindow, "function");
+  assert.equal(typeof runner.processDue, "function");
+});

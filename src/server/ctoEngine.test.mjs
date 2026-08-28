@@ -11,12 +11,13 @@ import {
   RATE_LIMITS,
 } from "./ctoEngine.mjs";
 import { createSegmenter } from "./ctoSegments.mjs";
+import { windowFor } from "./ctoRollups.mjs";
 
 // Build a fully-injected engine harness: no real fs, no real stores, a fake
 // clock we can advance. Everything the engine touches goes through these
 // seams, so the tests assert pure behavior. `clock` is shared so the watchdog
 // and the engine observe the same time.
-function makeHarness({ ctoEnabled = false, counts = {} } = {}) {
+function makeHarness({ ctoEnabled = false, counts = {}, rollups } = {}) {
   const clock = { ms: 1_000_000 };
   const now = () => clock.ms;
   const ledgerRows = [];
@@ -25,6 +26,7 @@ function makeHarness({ ctoEnabled = false, counts = {} } = {}) {
   let published = [];
   let currentConfig = { ctoEnabled };
   const cardCalls = [];
+  const state = { v: 1, pendingBlockers: [] };
 
   const engine = createCtoEngine({
     configGet: async () => ({ ...currentConfig }),
@@ -40,11 +42,14 @@ function makeHarness({ ctoEnabled = false, counts = {} } = {}) {
       ingestHealthEscalations: async () => ({}),
     },
     engineState: {
-      load: async () => ({ v: 1, pendingBlockers }),
+      load: async () => ({ ...state }),
       save: async (payload) => {
         pendingBlockers = Array.isArray(payload?.pendingBlockers)
           ? payload.pendingBlockers
           : [];
+        state.pendingBlockers = pendingBlockers;
+        if (payload?.rollupCursor) state.rollupCursor = payload.rollupCursor;
+        if (payload?.segmentGMinutes != null) state.segmentGMinutes = payload.segmentGMinutes;
       },
     },
     killSwitch: {
@@ -64,6 +69,7 @@ function makeHarness({ ctoEnabled = false, counts = {} } = {}) {
       tonightCount: 0,
       ...counts,
     }),
+    ...(rollups ? { rollups } : {}),
   });
 
   return {
@@ -72,6 +78,7 @@ function makeHarness({ ctoEnabled = false, counts = {} } = {}) {
     ledgerRows,
     published,
     cardCalls,
+    state,
     get pendingBlockers() {
       return pendingBlockers;
     },
@@ -405,30 +412,31 @@ function fakeSegStores() {
   };
 }
 
-test("observeEvent feeds pipeline (user) sessions into the segmenter", async () => {
+// Shared A6 segmenter-wiring setup: fake stores + a real segmenter + an engine
+// wired to it, plus event builders. `owner` optionally sets getSessionInfo so
+// cto-owned sessions exercise the exclusion path.
+function makeSegEngine({ owner } = {}) {
   const stores = fakeSegStores();
-  let t = 0;
   const seg = createSegmenter({
     segments: stores.segments,
     ledger: stores.ledger,
     engineState: { load: async () => ({}), save: async () => {} },
     summarize: async () => ({ ok: false, gated: false }),
     computeOneLiner: async () => null,
-    now: () => t,
+    now: () => 0,
   });
-  const harness = makeHarness({ ctoEnabled: false });
   const engine = createCtoEngine({
     configGet: async () => ({ ctoEnabled: false }),
     ledger: { append: async () => {} },
     engineState: { load: async () => ({ v: 1, pendingBlockers: [] }), save: async () => {} },
     publish: () => {},
-    now: () => t,
+    now: () => 0,
     segmenterOverride: seg,
+    ...(owner ? { getSessionInfo: async () => ({ owner, project: undefined }) } : {}),
   });
-
   const prompt = (text, sid) => ({
     type: "user.message.created",
-    id: `id-${text}-${t}`,
+    id: `id-${text}-0`,
     properties: { sessionID: sid, message: { role: "user", text } },
   });
   const idle = (sid, idSuffix) => ({
@@ -436,7 +444,11 @@ test("observeEvent feeds pipeline (user) sessions into the segmenter", async () 
     id: `idle-${idSuffix}`,
     properties: { sessionID: sid },
   });
+  return { stores, engine, seg, prompt, idle };
+}
 
+test("observeEvent feeds pipeline (user) sessions into the segmenter", async () => {
+  const { stores, engine, seg, prompt, idle } = makeSegEngine();
   engine.observeEvent(prompt("first task", "s-user"));
   engine.observeEvent(idle("s-user", 1));
   await new Promise((r) => setTimeout(r, 10)); // let the async owner-resolve + feed land
@@ -446,32 +458,75 @@ test("observeEvent feeds pipeline (user) sessions into the segmenter", async () 
 });
 
 test("cto-owned sessions are never segmented", async () => {
-  const stores = fakeSegStores();
-  let t = 0;
-  const seg = createSegmenter({
-    segments: stores.segments,
-    ledger: stores.ledger,
-    engineState: { load: async () => ({}), save: async () => {} },
-    summarize: async () => ({ ok: false, gated: false }),
-    computeOneLiner: async () => null,
-    now: () => t,
-  });
-  const engine = createCtoEngine({
-    configGet: async () => ({ ctoEnabled: false }),
-    ledger: { append: async () => {} },
-    engineState: { load: async () => ({ v: 1, pendingBlockers: [] }), save: async () => {} },
-    publish: () => {},
-    now: () => t,
-    segmenterOverride: seg,
-    getSessionInfo: async () => ({ owner: "cto", project: undefined }),
-  });
-  const evt = {
+  const { stores, engine } = makeSegEngine({ owner: "cto" });
+  engine.observeEvent({
     type: "user.message.created",
     id: "cto-evt-1",
     properties: { sessionID: "s-cto", message: { role: "user", text: "x" } },
-  };
-  engine.observeEvent(evt);
+  });
   await new Promise((r) => setTimeout(r, 10));
   assert.equal(stores.map.size, 0, "cto-owned work is excluded from segmentation");
 });
 
+
+// ---------------------------------------------------------------------------
+// BET-1381 §5.3 rollups — window-close timers + persisted cursor on the tick
+// ---------------------------------------------------------------------------
+
+// A rollup-enabled engine harness with an injected runner that records every
+// window passed to processDue (and a stub which marks it finalized). Shared by
+// the rollup tick tests so the boilerplate lives in one place.
+function makeRollupHarness() {
+  const d = windowFor("day", Date.UTC(2026, 0, 15, 12, 0, 0))[0];
+  const received = [];
+  const runner = {
+    processDue: async (windows) => {
+      received.push(...windows);
+      return windows.map((w) => ({ saved: true, level: w.level, window: w.window, id: String(w.window[0]) }));
+    },
+  };
+  const h = makeHarness({ ctoEnabled: true, rollups: runner });
+  h.clock.ms = windowFor("hour", d)[0];
+  return {
+    h,
+    d,
+    runner,
+    get received() {
+      return received;
+    },
+  };
+}
+
+test("tick folds a closed hour window into the rollup runner and persists the cursor", async () => {
+  const { h, d, received } = makeRollupHarness();
+  // First tick at the top of an hour: cursor persists there; nothing due.
+  await h.engine.tick();
+  assert.equal(received.length, 0, "current (not-yet-closed) window is not due");
+
+  // Advance 90 minutes → the first hour has closed → exactly one hour is due.
+  h.advance(90 * 60_000);
+  await h.engine.tick();
+  assert.equal(received.length, 1);
+  assert.equal(received[0].level, "hour");
+  assert.equal(received[0].window[0], windowFor("hour", d)[0]);
+
+  // The cursor advanced to the closed hour's end; the next tick yields nothing new.
+  assert.equal(h.state.rollupCursor.hour, windowFor("hour", d)[1]);
+  await h.engine.tick();
+  assert.equal(received.length, 1);
+});
+
+test("rollups do not run while paused", async () => {
+  const { h, received } = makeRollupHarness();
+  await h.engine.tick(); // cursor initializes + persists
+  h.advance(60 * 60_000);
+  await h.engine.tick(); // hour closed → rollup runs
+  assert.equal(received.length, 1);
+
+  // Now paused: advancing another hour does not fold a rollup.
+  await h.engine.hardPause({ reason: "test" });
+  h.advance(60 * 60_000);
+  const before = received.length;
+  await h.engine.tick();
+  assert.equal(received.length, before);
+});
