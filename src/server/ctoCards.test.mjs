@@ -289,3 +289,54 @@ test("BET-1397 source 3: an inbox blocker fires the blocking-tier notify exactly
   assert.equal(open[0].sourceKind, "inbox");
   assert.deepEqual(open[0].refs, ["BET-777"]);
 });
+
+test("upsertDecision: writes a decision card, and regenerating the same id upserts (no duplicate)", async () => {
+  const clock = { ms: 1_000_000 };
+  let cardPayload = { v: 1, cards: [] };
+  const ledgerRows = [];
+  const cards = createCtoCards({
+    cardStore: {
+      load: async () => cardPayload,
+      save: async (p) => {
+        cardPayload = p;
+      },
+    },
+    engineState: { load: async () => ({ v: 1 }), save: async () => {} },
+    ledger: { append: async (row) => ledgerRows.push(row) },
+    now: () => clock.ms,
+  });
+
+  const first = await cards.upsertDecision({
+    id: "sugg-1",
+    title: "Restart the stuck build",
+    why: "Start-job: the build has been red for hours.",
+    refs: ["c1"],
+    sourceKind: "failure-recurrence",
+    cls: "start-job",
+    score: 0.7,
+    options: [{ label: "Kick", action: { type: "start-job", payload: { prompt: "retry" } } }],
+  });
+  assert.equal(first.changed, true);
+  assert.equal(first.isNew, true);
+  assert.equal(openCardCount({ store: () => cardPayload }), 1);
+
+  // regeneration with the same stable id — updates in place, no second card
+  clock.ms += 1000;
+  const regen = await cards.upsertDecision({
+    id: "sugg-1",
+    title: "Restart the stuck build (still red)",
+    why: "Updated why.",
+    refs: ["c1", "c2"],
+    sourceKind: "failure-recurrence",
+    cls: "start-job",
+    score: 0.9,
+    options: [{ label: "Kick", action: { type: "start-job", payload: { prompt: "retry-again" } } }],
+  });
+  assert.equal(regen.changed, true);
+  assert.equal(regen.isNew, false);
+  assert.equal(openCardCount({ store: () => cardPayload }), 1);
+  const open = cardPayload.cards.filter((c) => c.state === "open");
+  assert.equal(open[0].title, "Restart the stuck build (still red)");
+  assert.equal(open[0].created, 1_000_000); // created preserved across regeneration
+  assert.equal(open[0].variant, "decision");
+});

@@ -38,9 +38,12 @@ import {
   showPausedBanner,
   statDisplay,
   nowCostLabel,
+  decisionCards,
+  executeSuggestionOption,
   type BlockerCard,
   type CtoState,
   type CtoHealthStat,
+  type DecisionCardRow,
 } from "./ctoView";
 import {
   BlockerSection,
@@ -49,9 +52,11 @@ import {
   NowRail,
   JustFinishedRail,
   DigestSection,
+  SuggestionSection,
   type NowCard,
+  type SuggestionOption,
 } from "./ctoSections";
-import type { CtoCard, CtoFinishedItem, CtoDigest, CtoLedgerPage, CtoLedgerRow, CtoProfileRender, CtoSkill } from "../shared/api.js";
+import type { CtoCard, CtoFinishedItem, CtoDigest, CtoHeldRow, CtoLedgerPage, CtoLedgerRow, CtoProfileRender, CtoSkill } from "../shared/api.js";
 import { Toggle } from "./Toggle";
 
 // The effort-dial options (§12.1, D12). Plain-language scope per tier. Medium
@@ -115,6 +120,14 @@ export function CtoPanel({
   const [finished, setFinished] = useState<CtoFinishedItem[]>([]);
   const [ledgerCard, setLedgerCard] = useState<BlockerCard | null>(null);
   const [logsItem, setLogsItem] = useState<CtoFinishedItem | null>(null);
+
+  // BET-1392: decision cards (§9.1) render in their own section; the Blocker
+  // section keeps the ask/health cards only. The held (silent-log) list backs
+  // the §14.3 silence-audit "review held" modal (opened from the digest aside).
+  const [heldOpen, setHeldOpen] = useState(false);
+  const [heldRows, setHeldRows] = useState<CtoHeldRow[]>([]);
+  const blockerCards = useMemo(() => cards.filter((c) => c.variant !== "decision"), [cards]);
+  const suggestionCards = useMemo(() => decisionCards(cards), [cards]);
 
   const busy = digestBusy(state);
   const busyRef = useRef(busy);
@@ -241,6 +254,65 @@ export function CtoPanel({
   const handleRegen = () => {
     void window.api?.ctoDigestNow?.();
   };
+
+  // BET-1392 decision-card actions (§9.1). The existing renderer api surface is
+  // injected into the pure executor: config-change → configUpdate, start-job →
+  // delegate, record-decision → the facts route. Outcome is reported (toast on
+  // failure); a successful execution is a positive judgment → verdict accept.
+  const suggestionApi = useMemo(
+    () => ({
+      configUpdate: (patch: Record<string, unknown>) => window.api?.configUpdate?.(patch) ?? Promise.resolve({}),
+      delegateStart: (input: { prompt: string; sessionID: string; directory: string; model?: unknown }) =>
+        rendererDelegateStart(input),
+      ctoFact: (input: { kind?: string; statement: string; refs?: string[] }) =>
+        window.api?.ctoFact?.(input) ?? Promise.resolve({ ok: false, error: "facts unavailable" }),
+    }),
+    [],
+  );
+
+  const refreshCards = useCallback(() => {
+    void window.api?.ctoCardsGet?.().then((r) => setCards(r.cards)).catch(() => {});
+  }, []);
+
+  const handleSuggestionAction = useCallback(
+    (card: DecisionCardRow, option: SuggestionOption) => {
+      void (async () => {
+        const r = await executeSuggestionOption({ option, api: suggestionApi });
+        if (r.ok) {
+          // acted-on = accept judgment through the B3 verdict route.
+          void window.api?.ctoVerdict?.({ subject: { type: "suggestion", id: card.id, class: option.action?.type }, verdict: "accept" }).catch(() => {});
+          pushToast({ id: `sugg-${Date.now()}`, message: `Applied: ${option.label}` });
+          refreshCards();
+        } else {
+          pushToast({ id: `sugg-fail-${Date.now()}`, message: `Couldn't apply “${option.label ?? ""}”: ${r.error ?? "unknown error"}` });
+        }
+      })();
+    },
+    [suggestionApi, pushToast, refreshCards],
+  );
+
+  const handleSuggestionDismiss = useCallback(
+    (card: DecisionCardRow) => {
+      void window.api?.ctoVerdict?.({ subject: { type: "suggestion", id: card.id }, verdict: "dismiss" }).catch(() => {});
+      refreshCards();
+    },
+    [refreshCards],
+  );
+
+  // §14.3 silence audit: open / refresh the held list (from the digest aside).
+  const openHeld = useCallback(() => {
+    void window.api?.ctoHeldList?.().then((r) => setHeldRows(r.rows)).catch(() => setHeldRows([])).finally(() => setHeldOpen(true));
+  }, []);
+  const handleHeldVerdict = useCallback(
+    (row: CtoHeldRow, verdict: "accept" | "dismiss") => {
+      void (async () => {
+        const r = await window.api?.ctoHeldVerdict?.({ id: row.id, verdict });
+        if (!r?.ok) pushToast({ id: `held-${Date.now()}`, message: `Couldn't ${verdict} held suggestion: ${r?.error ?? "unknown"}` });
+        setHeldRows((prev) => prev.filter((x) => x.id !== row.id));
+      })();
+    },
+    [pushToast],
+  );
   const handleItemOpen = (item: { id: string; text: string; refs?: string[] }) => {
     void window.api?.ctoDigestOpened?.({ item: item.id, expand: false, digestId: digest?.id ?? null }).catch(() => {});
   };
@@ -343,7 +415,8 @@ export function CtoPanel({
           {/* Learning card (§10.6-4): cold-start backfill progress (BET-1387).
               Informational — never counts into the sidebar badge. */}
           <BackfillCard state={state} />
-          <BlockerSection cards={cards} now={Date.now()} onAnswer={handleAnswer} />
+          <BlockerSection cards={blockerCards} now={Date.now()} onAnswer={handleAnswer} />
+          <SuggestionSection cards={suggestionCards} onAction={handleSuggestionAction} onDismiss={handleSuggestionDismiss} />
           <NowRail cards={nowCards} />
           <JustFinishedRail items={finished} now={Date.now()} onOpen={handleOpenFinished} />
           <DigestSection
@@ -352,6 +425,7 @@ export function CtoPanel({
             onRegen={handleRegen}
             onItemOpen={handleItemOpen}
             onItemExpand={handleItemExpand}
+            onOpenHeld={openHeld}
           />
         </div>
 
@@ -374,6 +448,14 @@ export function CtoPanel({
           name={logsItem.name}
           detail={logsItem.detail}
           onClose={() => setLogsItem(null)}
+        />
+      )}
+      {heldOpen && (
+        <HeldListModal
+          rows={heldRows}
+          onClose={() => setHeldOpen(false)}
+          onRefresh={() => openHeld()}
+          onVerdict={handleHeldVerdict}
         />
       )}
     </div>
@@ -1331,4 +1413,106 @@ function verbosityLabel(value: number): string {
 function normalizeHour(h: number): number {
   const m = ((Math.round(h) % 24) + 24) % 24;
   return m === 0 ? 0 : m;
+}
+
+// BET-1392: the suggestion option executors run against the renderer api
+// surface. `delegateStart` needs the fuller DelegateStartInput; the executor
+// produces a compatible shape (prompt/sessionID/directory) that we hand off.
+function rendererDelegateStart(input: {
+  prompt: string;
+  sessionID: string;
+  directory: string;
+  model?: unknown;
+}): Promise<{ ok?: boolean; error?: string }> {
+  if (!window.api?.delegateStart) return Promise.resolve({ ok: false, error: "delegate unavailable" });
+  return window.api.delegateStart(input as never);
+}
+
+// §14.3 held-list modal: the silent-logged (below-worthiness) suggestions the
+// pipeline held back. Each row takes an accept/dismiss judgment through the B3
+// verdict route so the pipeline learns. Opened from the in-digest "I held back
+// N — review" aside.
+function HeldListModal({
+  rows,
+  onClose,
+  onRefresh,
+  onVerdict,
+}: {
+  rows: CtoHeldRow[];
+  onClose: () => void;
+  onRefresh: () => void;
+  onVerdict: (row: CtoHeldRow, verdict: "accept" | "dismiss") => void;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ background: "rgba(0, 0, 0, 0.4)" }}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Held suggestions"
+      onClick={onClose}
+    >
+      <div
+        className="flex max-h-[80vh] w-full max-w-lg flex-col rounded-lg border border-strong bg-bg p-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center gap-2">
+          <h3 className="text-sm font-semibold text-text">Held suggestions</h3>
+          <span className="rounded-full bg-fill-active px-2 py-1 text-[11px] text-text-muted">{rows.length}</span>
+          <div className="flex-1" />
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md px-2 py-1 text-sm text-text hover:bg-fill-hover"
+          >
+            Close
+          </button>
+        </div>
+        <p className="mt-1 text-xs text-text-faint">
+          Suggestions the CTO held back below its bar — accept or dismiss so it learns.
+        </p>
+        <div className="mt-2 flex-1 space-y-2 overflow-auto">
+          {rows.length === 0 ? (
+            <div className="py-6 text-center text-sm text-text-faint">Nothing held back.</div>
+          ) : (
+            rows.map((row) => (
+              <div key={row.id} className="rounded-md border border-strong bg-fill px-3 py-2">
+                <div className="text-sm text-text">{row.text}</div>
+                <div className="mt-1 text-[11px] text-text-faint">
+                  {row.class} · {((row.score ?? 0) * 100).toFixed(0)}% · {row.reason} · {relativeTime(row.ts ?? Date.now(), Date.now())}
+                </div>
+                <div className="mt-2 flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => onVerdict(row, "accept")}
+                    className="rounded-md bg-accent-solid px-2 py-1 text-xs font-medium text-white hover:opacity-90"
+                  >
+                    Accept
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onVerdict(row, "dismiss")}
+                    className="rounded-md bg-fill-active px-2 py-1 text-xs font-medium text-text hover:bg-fill-hover"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+        {rows.length === 0 ? (
+          <div className="mt-2 flex justify-end">
+            <button
+              type="button"
+              onClick={onRefresh}
+              className="rounded-md px-2 py-1 text-sm text-text hover:bg-fill-hover"
+            >
+              Refresh
+            </button>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
 }

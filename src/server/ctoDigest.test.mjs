@@ -554,3 +554,19 @@ test("BET-1397: digest generation drains the CTO inbox before composing", async 
   await engine.generateDigest({ reason: "scheduled" });
   assert.equal(drained, 1);
 });
+
+test("generateDigest: §14.3 held-suggestion count is carried as the silence-audit aside", async () => {
+  const model = async () => ({ text: JSON.stringify({ items: [{ tier: "progress", text: "shipped", refs: [] }] }) });
+  const { engine, store } = makeEngine({ runEphemeral: model, getHeldSuggestionCount: async () => 3 });
+  const digest = await engine.generateDigest({ reason: "manual" });
+  assert.equal(digest.heldSuggestions, 3, "digest carries the held-suggestion count for the in-digest aside");
+  const saved = await store.load(String(digest.generated));
+  assert.equal(saved.heldSuggestions, 3, "persisted digest retains the held-suggestion count");
+});
+
+test("generateDigest: zero held suggestions → no heldSuggestions field (no aside)", async () => {
+  const model = async () => ({ text: JSON.stringify({ items: [{ tier: "progress", text: "shipped", refs: [] }] }) });
+  const { engine } = makeEngine({ runEphemeral: model, getHeldSuggestionCount: async () => 0 });
+  const digest = await engine.generateDigest({ reason: "manual" });
+  assert.equal(digest.heldSuggestions, undefined, "no held count → no aside field");
+});

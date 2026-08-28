@@ -32,6 +32,7 @@ import type {
   SyncDelta,
   CtoState,
   CtoCard,
+  CtoHeldRow,
   CtoFinishedItem,
   CtoDigest,
   CtoHealthStat,
@@ -1732,6 +1733,80 @@ export const httpApi: Api = {
       return { ok: false, error: json.error ?? `HTTP ${res.status}`, effects: json.effects };
     } catch {
       return { ok: false };
+    }
+  },
+
+  // POST /api/cto/facts — the §8.2 fact proposal route (BET-1392 decision-card
+  // `record-decision` executor). Writes a gatekeeper-reviewed fact.
+  ctoFact: async (input: {
+    project?: string | null;
+    kind?: string;
+    statement: string;
+    refs?: string[];
+    valid_until?: string | null;
+    supersedes?: string | null;
+  }): Promise<{ ok: boolean; error?: string }> => {
+    const url = `${serverBase()}/api/cto/facts`;
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { ...authHeaders(clientToken()), "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...(input.project !== undefined ? { project: input.project } : {}),
+          kind: input.kind ?? "decision",
+          statement: input.statement,
+          ...(Array.isArray(input.refs) ? { refs: input.refs } : {}),
+          ...(input.valid_until != null ? { valid_until: input.valid_until } : {}),
+          ...(input.supersedes != null ? { supersedes: input.supersedes } : {}),
+        }),
+      });
+      if (res.status === 401) throw new AuthRequiredError();
+      if (res.ok) return { ok: true };
+      let json: { error?: string } = {};
+      try { json = (await res.json()) as typeof json; } catch { /* non-JSON */ }
+      return { ok: false, error: json.error ?? `HTTP ${res.status}` };
+    } catch (e) {
+      if (e instanceof AuthRequiredError) throw e;
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  // GET /api/cto/suggest/held — §14.3 silence audit read.
+  ctoHeldList: async (input?: { before?: number; limit?: number }): Promise<{ rows: CtoHeldRow[]; count: number }> => {
+    const qp = new URLSearchParams();
+    if (input?.before != null) qp.set("before", String(input.before));
+    if (input?.limit != null) qp.set("limit", String(input.limit));
+    const qs = qp.toString();
+    try {
+      const res = await fetch(`${serverBase()}/api/cto/suggest/held${qs ? `?${qs}` : ""}`, {
+        headers: authHeaders(clientToken()),
+      });
+      if (res.status === 401) throw new AuthRequiredError();
+      const json = (await res.json()) as { rows?: CtoHeldRow[]; count?: number };
+      return { rows: json.rows ?? [], count: json.count ?? 0 };
+    } catch (e) {
+      if (e instanceof AuthRequiredError) throw e;
+      return { rows: [], count: 0 };
+    }
+  },
+
+  // POST /api/cto/suggest/held — a judgment on a held suggestion.
+  ctoHeldVerdict: async (input: { id: string; verdict: "accept" | "dismiss"; never?: boolean }): Promise<{ ok: boolean; error?: string }> => {
+    const url = `${serverBase()}/api/cto/suggest/held`;
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { ...authHeaders(clientToken()), "Content-Type": "application/json" },
+        body: JSON.stringify({ id: input.id, verdict: input.verdict, ...(input.never !== undefined ? { never: input.never } : {}) }),
+      });
+      if (res.status === 401) throw new AuthRequiredError();
+      if (res.ok) return { ok: true };
+      let json: { error?: string } = {};
+      try { json = (await res.json()) as typeof json; } catch { /* non-JSON */ }
+      return { ok: false, error: json.error ?? `HTTP ${res.status}` };
+    } catch (e) {
+      if (e instanceof AuthRequiredError) throw e;
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
   },
 

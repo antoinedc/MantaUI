@@ -408,6 +408,55 @@ export function createCtoCards(deps = {}) {
     return { changed: true, card: { ...card, state: "dismissed", dismissedAt: ts, dismissedReason: reason } };
   }
 
+  // Decision-card writer (BET-1392 / §9.1 decision cards, §10.3). Upserts by
+  // the candidate's stable id (hash(findingId, class)) — a regeneration
+  // updates the existing open card in place (title/why/options/evidence
+  // refresh; created + carried-forward open-verdict count preserved), never
+  // duplicates. Option `action` types use the closed ACTION_TYPES enum; RPC is
+  // deliberately out of scope for the server — option execution is the
+  // renderer's job (§9.1 "option buttons execute a bound action").
+  async function upsertDecision({ id, title, why, options = [], refs = [], evidence = [], sourceKind, cls, score, capped = false, ts = now() } = {}) {
+    if (!id || typeof id !== "string") return { changed: false, isNew: false };
+    const { payload, cards } = await openCards();
+    const existing = cards.find((c) => c?.id === id && c?.state === "open");
+    const created = existing?.created ?? ts;
+    const card = {
+      id,
+      variant: "decision",
+      title: typeof title === "string" && title ? title : "CTO suggestion",
+      why: typeof why === "string" && why ? why : title ?? "",
+      refs: Array.isArray(refs) ? refs : [],
+      evidence: Array.isArray(evidence) && evidence.length ? evidence : Array.isArray(refs) ? refs : [],
+      options: Array.isArray(options) ? options : [],
+      sourceKind,
+      cls,
+      score: typeof score === "number" ? score : undefined,
+      capped: capped === true,
+      // openness count carried forward on regeneration (§9.1 never-dup).
+      openCount: existing?.openCount ?? 0,
+      created,
+      updatedAt: ts,
+      state: "open",
+    };
+    if (existing) {
+      const idx = cards.indexOf(existing);
+      cards[idx] = { ...existing, ...card, created, updatedAt: ts };
+    } else {
+      cards.push(card);
+    }
+    await cardStore.save({ ...payload, cards });
+    await ledgerAppend({
+      kind: CARD_CREATED,
+      cardId: id,
+      variant: "decision",
+      sourceKind,
+      refs: card.refs,
+      cls,
+      score: card.score,
+    });
+    return { changed: true, isNew: !existing };
+  }
+
   // needs-you surface: only open cards count (§10.3 — resolved/dismissed cards
   // left cards.json for the ledger).
   async function countOpen() {
@@ -433,6 +482,7 @@ export function createCtoCards(deps = {}) {
     onHealthRecovered,
     resolveById,
     dismissById,
+    upsertDecision,
     countOpen,
     listOpen,
   };

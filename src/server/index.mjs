@@ -138,11 +138,12 @@ import * as appControl from "./appControl.mjs";
 import * as cto from "./cto.mjs";
 import * as ctoEngine from "./ctoEngine.mjs";
 import * as ctoBudget from "./ctoBudget.mjs";
-import { ledgerStore, engineStateStore, budgetStore, segmentsStore, verdictsStore } from "./ctoStores.mjs";
+import { ledgerStore, engineStateStore, budgetStore, segmentsStore, verdictsStore, digestsStore, factsStore } from "./ctoStores.mjs";
 import { computeHealthStats } from "./ctoHealth.mjs";
 import { composeProfileRender } from "./ctoProfile.mjs";
 import { runEphemeral, createEphemeralReaper } from "./ctoSessions.mjs";
 import { createCtoDigest, STALE_MS } from "./ctoDigest.mjs";
+import { createCtoSuggest } from "./ctoSuggest.mjs";
 import {
   parseSegmentSummaryText,
   validateSegmentSummary,
@@ -1909,6 +1910,16 @@ let adaptiveCtoDigest = null;
     getInferredTz: async () => adaptiveCto.profile?.getInferredTz?.() ?? null,
     getAudience: async ({ topics } = {}) => adaptiveCto.profile?.getAudience?.({ topics }) ?? null,
     getDeviations: async () => adaptiveCto.profile?.getDeviations?.() ?? [],
+    // §14.3 silence audit: how many suggestions the CTO silently held back —
+    // drives the in-digest "I held back N — review" aside (lazy: the suggest
+    // engine is defined later in this module; resolution happens at generate).
+    getHeldSuggestionCount: async () => {
+      try {
+        return (await adaptiveCtoSuggest?.listHeld?.({ limit: 1 }).catch(() => [])).length ?? 0;
+      } catch {
+        return 0;
+      }
+    },
     getEnabled: async () => {
       try {
         return (await local.configGet())?.ctoEnabled === true;
@@ -1938,6 +1949,80 @@ let adaptiveCtoDigest = null;
     },
   });
   adaptiveCtoDigest.start();
+}
+
+// BET-1392 suggestion engine (A10, §9.1 + §14.3): the worthiness-gated
+// suggestion pipeline. P2 sources = digest-detected recurrences + fact
+// anomalies (watcher hits arrive in a later issue). Runs only at Medium/High
+// tier (§12.1 — Low tier is "no suggestions"). Model spend goes through the
+// §3.3 ephemeral rate gate (gatedSuggestionEphemeral), the SAME as
+// digest-compose; worthiness is nano tier, the generator mid tier.
+// Notifications, when the steep-decay rule matches, go through the
+// informational router (fireNotify).
+async function gatedSuggestionEphemeral(taskClass, opts) {
+  const gate = await adaptiveCto.beginEphemeral();
+  if (!gate?.ok) return { ok: false, gated: true, error: gate?.error };
+  try {
+    return await runEphemeral({
+      ...opts,
+      deps: {
+        configGet: () => local.configGet(),
+        oc: { runEphemeralSession: oc.runSynchronousSession },
+      },
+    });
+  } finally {
+    gate.release?.();
+  }
+}
+const adaptiveCtoSuggest = createCtoSuggest({
+  now: () => Date.now(),
+  publish: (evt) => bus.publish(evt),
+  ledger: ledgerStore,
+  engineState: engineStateStore,
+  verdicts: verdictsStore,
+  digests: digestsStore,
+  facts: factsStore,
+  configGet: () => local.configGet(),
+  cards: adaptiveCto.cards,
+  // B3 verdict route shared with the opencode `cto_verdict` tool + the engine.
+  recordVerdict: (input) => adaptiveCto.recordVerdict(input),
+  getWriteRingTools: async () => [], // §7.4 tool registry (P2-later) — empty → tool-write unreachable
+  capabilities: { queueTonight: false, toolWrite: false }, // tonight-queue (P3) off
+  fireNotify: (args) => push.fireNotify(args),
+  // §9.1 sender reliability. Findings here come from the box's OWN engine
+  // (digest-detected recurrences, fact anomalies), not an external sender —
+  // a trusted internal source, so reliability approaches 1.0. With the max
+  // class prior (0.6) a score-1.0 candidate yields p = 0.6 ≥ p_ask 0.4, so a
+  // genuinely high-worthiness suggestion CAN surface (decision-reachability
+  // was dead under the old 0.5 factor — §9.1 review Block 1).
+  senderReliability: async () => 1.0,
+  runSuggest: (opts) => gatedSuggestionEphemeral("suggest", opts),
+  runWorthiness: (opts) => gatedSuggestionEphemeral("worthiness", opts),
+});
+// Poller: run the suggestion pass periodically, only when suggestions are
+// enabled (Medium/High tier + ctoEnabled).
+const SUGGEST_INTERVAL_MS = 30 * 60_000;
+{
+  let lastPass = 0;
+  async function ctoSuggestTick() {
+    try {
+      const cfg = await local.configGet();
+      if (cfg?.ctoEnabled !== true) return;
+      const tier = String(cfg?.ctoTier ?? "low").toLowerCase();
+      if (tier === "low") return; // §12.1: Low tier has no suggestions
+      const nowMs = Date.now();
+      if (nowMs - lastPass < SUGGEST_INTERVAL_MS) return;
+      lastPass = nowMs;
+      await adaptiveCtoSuggest.runPass({ nowMs });
+    } catch (e) {
+      console.warn("[cto-suggest] pass failed:", e?.message ?? e);
+    }
+  }
+  const stopCtoSuggest = startPoller(ctoSuggestTick, {
+    intervalMs: ctoEngine.TICK_INTERVAL_MS,
+    label: "cto-suggest",
+  });
+  void stopCtoSuggest;
 }
 
 // Watchdog (§13.3): checks engine liveness + ambient spend rate; > 2× expected
@@ -4163,6 +4248,57 @@ const handleRequest = async (req, res) => {
           subject,
           verdict,
           ...(never !== undefined ? { never } : {}),
+        });
+        // §9.1 resolution path (review Block 2): a judgment on a SUGGESTION
+        // must also close the open decision card — accept → resolve, dismiss →
+        // dismiss — so an acted-on / declined card is not left open forever.
+        // Best-effort; the verdict is the source of truth, card close is
+        // cosmetic bookkeeping.
+        if (result.ok && subject?.type === "suggestion" && typeof subject.id === "string") {
+          try {
+            const resolved = (await adaptiveCto.cards[verdict === "dismiss" ? "dismissById" : "resolveById"](subject.id)).changed === true;
+            if (resolved) void bus.publish({ kind: "ctoState" });
+          } catch {
+            /* best-effort */
+          }
+        }
+        respondJson(res, result.ok ? 200 : 400, result);
+        return;
+      }
+      respondJson(res, 405, { error: "method not allowed" });
+    } catch (e) {
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // ---------- Suggestion engine reads (BET-1392, §9.1 + §14.3) ----------
+  // GET /api/cto/suggest/held → the held (silent-log) rows the silence audit's
+  // "I held back N items — review?" aside links to. POST /api/cto/suggest/held
+  //   body {id, verdict, never?} → a judgment on a held item through the B3
+  //   verdict route (accept → success/access counters, dismiss → rejection).
+  if (path === "/api/cto/suggest/held") {
+    try {
+      if (req.method === "GET") {
+        const url = new URL(req.url, "http://x");
+        const before = url.searchParams.get("before") != null ? Number(url.searchParams.get("before")) : undefined;
+        const limit = url.searchParams.get("limit") != null ? Number(url.searchParams.get("limit")) : 100;
+        const rows = await adaptiveCtoSuggest.listHeld({ before, limit });
+        respondJson(res, 200, { rows, count: rows.length });
+        return;
+      }
+      if (req.method === "POST") {
+        const body = await readJsonBody(req);
+        const id = typeof body?.id === "string" ? body.id : null;
+        const verdict = typeof body?.verdict === "string" ? body.verdict : null;
+        if (!id || !verdict) {
+          respondJson(res, 400, { ok: false, error: "id and verdict required" });
+          return;
+        }
+        const result = await adaptiveCtoSuggest.verdictHeld({
+          id,
+          verdict,
+          ...(body?.never !== undefined ? { never: body.never } : {}),
         });
         respondJson(res, result.ok ? 200 : 400, result);
         return;

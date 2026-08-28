@@ -340,3 +340,96 @@ describe("nowRailMeta (§10.4 project · cost · elapsed)", () => {
     expect(nowRailMeta("bui", "", "5m")).toBe("bui · 5m");
   });
 });
+
+// ---------------------------------------------------------------------------
+// BET-1392 — decision cards + silence audit (§9.1)
+// ---------------------------------------------------------------------------
+
+import {
+  decisionCards,
+  executeSuggestionOption,
+  runnableSuggestionOption,
+  suggestionConfidence,
+} from "./ctoView";
+
+it("decisionCards: selects decision-variant cards only", () => {
+  const cards = [
+    { id: "b1", variant: "blocker", title: "blk" },
+    { id: "d1", variant: "decision", title: "dec", options: [] },
+    { id: "c1", variant: "connect", title: "con" },
+  ];
+  const out = decisionCards(cards as unknown as Record<string, unknown>[]);
+  expect(out.length).toBe(1);
+  expect(out[0].id).toBe("d1");
+});
+
+it("runnableSuggestionOption: P2 runs config-change/start-job/record-decision; not queue-tonight/tool-write", () => {
+  expect(runnableSuggestionOption({ action: { type: "config-change" } })).toBe(true);
+  expect(runnableSuggestionOption({ action: { type: "start-job" } })).toBe(true);
+  expect(runnableSuggestionOption({ action: { type: "record-decision" } })).toBe(true);
+  expect(runnableSuggestionOption({ action: { type: "queue-tonight" } })).toBe(false);
+  expect(runnableSuggestionOption({ action: { type: "tool-write" } })).toBe(false);
+  expect(runnableSuggestionOption(null)).toBe(false);
+  expect(runnableSuggestionOption({ action: { type: "bogus" } })).toBe(false);
+});
+
+it("suggestionConfidence: exposes the worthiness probability or null", () => {
+  const card = { id: "x", variant: "decision", title: "t" } as const;
+  expect(suggestionConfidence({ ...card, score: 0.7 })).toBe(0.7);
+  expect(suggestionConfidence({ ...card, score: NaN })).toBeNull();
+  expect(suggestionConfidence(card)).toBeNull();
+});
+
+it("executeSuggestionOption: config-change calls configUpdate with the patch", async () => {
+  let got: unknown = null;
+  const api = { configUpdate: async (p: unknown) => { got = p; return {}; } };
+  const r = await executeSuggestionOption({
+    option: { action: { type: "config-change", payload: { patch: { ctoTier: "high" } } } },
+    api: api as never,
+  });
+  expect(r.ok).toBe(true);
+  expect(got).toEqual({ ctoTier: "high" });
+});
+
+it("executeSuggestionOption: start-job calls delegateStart with prompt/sessionID/directory", async () => {
+  let got: unknown = null;
+  const api = { delegateStart: async (input: unknown) => { got = input; return { ok: true }; } };
+  const r = await executeSuggestionOption({
+    option: { action: { type: "start-job", payload: { prompt: "investigate", sessionID: "s1", directory: "/work" } } },
+    api: api as never,
+  });
+  expect(r.ok).toBe(true);
+  expect(got).toEqual({ prompt: "investigate", sessionID: "s1", directory: "/work" });
+});
+
+it("executeSuggestionOption: start-job without a target fails closed", async () => {
+  const api = { delegateStart: async () => ({ ok: true }) } as never;
+  const r = await executeSuggestionOption({ option: { action: { type: "start-job", payload: { prompt: "p" } } }, api });
+  expect(r.ok).toBe(false);
+  expect(r.error ?? "").toMatch(/sessionID/);
+});
+
+it("executeSuggestionOption: record-decision posts a decision fact", async () => {
+  let got: unknown = null;
+  const api = { ctoFact: async (input: unknown) => { got = input; return { ok: true }; } };
+  const r = await executeSuggestionOption({
+    option: { action: { type: "record-decision", payload: { statement: "Ship it", refs: ["BET-1"] } } },
+    api: api as never,
+  });
+  expect(r.ok).toBe(true);
+  expect(got).toEqual({ kind: "decision", statement: "Ship it", refs: ["BET-1"] });
+});
+
+it("executeSuggestionOption: non-runnable type fails closed", async () => {
+  const api = { configUpdate: async () => ({}) } as never;
+  const r = await executeSuggestionOption({ option: { action: { type: "tool-write", payload: {} } }, api });
+  expect(r.ok).toBe(false);
+  expect(r.error ?? "").toMatch(/unsupported/);
+});
+
+it("executeSuggestionOption: failure is reported (not swallowed)", async () => {
+  const api = { configUpdate: async () => { throw new Error("boom"); } } as never;
+  const r = await executeSuggestionOption({ option: { action: { type: "config-change", payload: { patch: {} } } }, api });
+  expect(r.ok).toBe(false);
+  expect(r.error ?? "").toMatch(/boom/);
+});
