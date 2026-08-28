@@ -23,6 +23,7 @@ function makeHarness({ owner = "user", project = "proj" } = {}) {
     now: () => clock.ms,
     getSessionInfo: async () => ({ owner, project }),
     getDesktopPresence: () => ({ lastSeen: 0, idleSeconds: 0, lockedSeconds: null, awayAt: Infinity }),
+    getLastDesktopHeartbeat: () => 0,
   });
   return { engine, ledgerRows, clock };
 }

@@ -50,7 +50,10 @@ import {
 } from "./ctoStores.mjs";
 import { startPoller } from "./startPoller.mjs";
 import { createSeenIdFilter } from "./seenIds.mjs";
-import { getDesktopPresence as pushGetDesktopPresence } from "./push.mjs";
+import {
+  getDesktopPresence as pushGetDesktopPresence,
+  getLastDesktopHeartbeat as pushGetLastDesktopHeartbeat,
+} from "./push.mjs";
 import {
   CHANNEL_EVENT,
   computeLastSeen,
@@ -201,6 +204,7 @@ export function createCtoEngine(deps = {}) {
     // push directly; index.mjs supplies the real resolvers).
     getSessionInfo = async () => ({ owner: "user", project: undefined }),
     getDesktopPresence = pushGetDesktopPresence,
+    getLastDesktopHeartbeat = pushGetLastDesktopHeartbeat,
   } = deps;
 
   let disposed = false;
@@ -482,12 +486,19 @@ export function createCtoEngine(deps = {}) {
   // Presence/absence (§5.4): current state + lastSeen + how long the user has
   // been absent (now − lastSeen). Desktop heartbeat is read live; prompts come
   // from observedEvent stamping. Exposed to later pipeline consumers.
+  //
+  // D6 app-open note: "app open/focus events" are a named last_seen input, but
+  // there is no timestamped app-open event source on the box today, and on a
+  // desktop box the 30s presence heartbeat already proves the app is running —
+  // an app-open signal would be subsumed by it. So lastSeen is fed by the
+  // desktop heartbeat (desktop boxes) + user prompt submissions (proves the
+  // user is here on any box). computeLastSeen still accepts appOpenTs, so a
+  // real app-open producer can be added without touching this contract.
   function getPresence() {
     const t = now();
     const desktop = getDesktopPresence();
     const lastSeen = computeLastSeen({
-      desktopHeartbeatTs: desktop?.lastSeen ?? 0,
-      appOpenTs: 0,
+      desktopHeartbeatTs: getLastDesktopHeartbeat(),
       promptTs,
     });
     return {
