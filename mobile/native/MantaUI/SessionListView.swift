@@ -614,7 +614,15 @@ struct SessionListView: View {
         .padding(.top, Metrics.spacing.sp1)
         .padding(.bottom, Metrics.spacing.sp2)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(tokens.canvas)
+        // The paint OVERHANGS the strip's bottom edge by sp2 without adding any
+        // layout height. The list pins its section headers ~8pt below the
+        // strip's bottom, and that band was left unpainted — so scrolling rows
+        // were visible sliding through a slot between the strip and the pinned
+        // header. Growing the strip instead would push the list's content area
+        // down and take the gap with it; a negative padding on the BACKGROUND
+        // paints over the band while the strip's own height (and therefore the
+        // pin position) stays exactly where it is.
+        .background(tokens.canvas.padding(.bottom, -Metrics.spacing.sp2))
     }
 
     private var searchBar: some View {
