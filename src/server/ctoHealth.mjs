@@ -8,6 +8,8 @@
 // that produce their data (rule 4 in the decomposition) — they are NOT
 // rendered here.
 
+import { effectsForVerdict } from "./ctoVerdicts.mjs";
+
 const DAY_MS = 86_400_000;
 
 // Minimum sample sizes (samples, not days). Chosen so a median is meaningful:
@@ -15,10 +17,13 @@ const DAY_MS = 86_400_000;
 // segments for the pipeline-lag median, and at least one budget meter reading
 // for the ambient-spend row (the B1 metering that feeds it lands in a later
 // economics issue — until then this row honestly reports `collecting (0/1)`).
+// Suggestion acceptance needs ≥ 10 acceptance-deciding verdicts (BET-1391) so
+// a thumb of a few verdicts never reads as signal.
 export const HEALTH_STAT_MIN = Object.freeze({
   ambientSpendToday: 1,
   digestOpens: 7,
   pipelineLag: 7,
+  suggestionAcceptance: 10,
 });
 
 function medianOf(values) {
@@ -58,6 +63,7 @@ export async function computeHealthStats({
   ledgerRead = async () => [],
   budgetRead = async () => null,
   listSegments = async () => [],
+  verdictsRead = async () => [],
   ctoAmbientCap = 2.5,
 } = {}) {
   const t = now();
@@ -134,6 +140,40 @@ export async function computeHealthStats({
     value:
       lags.length >= HEALTH_STAT_MIN.pipelineLag && medianLag != null
         ? `${Math.round(medianLag / 60_000)} min median`
+        : null,
+  });
+
+  // 4. Suggestion acceptance (30d) — the share of the last 30 days'
+  //    acceptance-deciding verdicts that were accepted (accept/edit = success;
+  //    dismiss/veto/correct/never = rejection). `open`/`expire` never enter
+  //    the acceptance counters (§9.5 — routed through the same single mapping
+  //    table the verdict router consumes). Collecting until ≥ 10 verdicts.
+  let verdicts = [];
+  try {
+    verdicts = (await verdictsRead()) ?? [];
+  } catch {
+    verdicts = [];
+  }
+  const verdictCutoff = t - 30 * DAY_MS;
+  let decided = 0;
+  let accepted = 0;
+  for (const v of verdicts) {
+    if (v?.ts == null || v.ts < verdictCutoff) continue;
+    const e = effectsForVerdict(v.verdict, v.never === true);
+    if (e.success || e.rejection) {
+      decided += 1;
+      if (e.success) accepted += 1;
+    }
+  }
+  const acceptRate = decided > 0 ? accepted / decided : 0;
+  stats.push({
+    id: "suggestionAcceptance",
+    label: "Suggestion acceptance · 30d",
+    min: HEALTH_STAT_MIN.suggestionAcceptance,
+    n: decided,
+    value:
+      decided >= HEALTH_STAT_MIN.suggestionAcceptance
+        ? `${Math.round(acceptRate * 100)}% accepted`
         : null,
   });
 

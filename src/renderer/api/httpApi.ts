@@ -1696,6 +1696,43 @@ export const httpApi: Api = {
       return { ok: false };
     }
   },
+
+  // POST /api/cto/verdict — the §9.5 verdict-ledger write (BET-1391). One
+  // append-only path the opencode `cto_verdict` tool and the engine both reach
+  // (digest-opened rewires here too). Returns `{ok:false,error}` on invalid
+  // input (400); a network failure degrades to `{ok:false}`.
+  ctoVerdict: async (input: {
+    subject: { type: string; id: string; class?: string; sender?: string | { sessionID: string } };
+    verdict:
+      | "accept"
+      | "dismiss"
+      | "edit"
+      | "veto"
+      | "expire"
+      | "correct"
+      | "open";
+    never?: boolean;
+  }): Promise<{ ok: boolean; error?: string; effects?: { success?: boolean; rejection?: boolean; access?: boolean; decay?: boolean } }> => {
+    const url = `${serverBase()}/api/cto/verdict`;
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { ...authHeaders(clientToken()), "Content-Type": "application/json" },
+        body: JSON.stringify({
+          subject: input.subject,
+          verdict: input.verdict,
+          ...(input.never !== undefined ? { never: input.never } : {}),
+        }),
+      });
+      if (res.status === 401) throw new AuthRequiredError();
+      if (res.ok) return { ok: true };
+      let json: { error?: string; effects?: { success?: boolean; rejection?: boolean; access?: boolean; decay?: boolean } } = {};
+      try { json = (await res.json()) as typeof json; } catch { /* non-JSON */ }
+      return { ok: false, error: json.error ?? `HTTP ${res.status}`, effects: json.effects };
+    } catch {
+      return { ok: false };
+    }
+  },
 };
 
 // Base64-encode an ArrayBuffer in chunks. `btoa(String.fromCharCode(...))`

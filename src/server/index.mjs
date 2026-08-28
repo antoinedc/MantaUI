@@ -137,7 +137,7 @@ import { endpointSummary as routingEndpointSummary, providerTokenTotals, ROUTING
 import * as appControl from "./appControl.mjs";
 import * as cto from "./cto.mjs";
 import * as ctoEngine from "./ctoEngine.mjs";
-import { ledgerStore, engineStateStore, budgetStore, segmentsStore } from "./ctoStores.mjs";
+import { ledgerStore, engineStateStore, budgetStore, segmentsStore, verdictsStore } from "./ctoStores.mjs";
 import { computeHealthStats } from "./ctoHealth.mjs";
 import { runEphemeral, createEphemeralReaper } from "./ctoSessions.mjs";
 import { createCtoDigest, STALE_MS } from "./ctoDigest.mjs";
@@ -3913,21 +3913,22 @@ const handleRequest = async (req, res) => {
         const cfg = await local.configGet();
         const result = await computeHealthStats({
           ctoAmbientCap: typeof cfg?.ctoAmbientCap === "number" ? cfg.ctoAmbientCap : 2.5,
-          ledgerRead: () => ledgerStore.read(),
-          budgetRead: () => budgetStore.load(),
-          listSegments: async () => {
-            const rows = [];
-            try {
-              for (const name of await readdir(segmentsStore.dir)) {
-                if (!name.endsWith(".json")) continue;
-                const seg = await segmentsStore.load(name.replace(/\.json$/, ""));
-                if (seg && typeof seg === "object") rows.push(seg);
-              }
-            } catch {
-              /* segments dir absent → no samples */
-            }
-            return rows;
-          },
+      ledgerRead: () => ledgerStore.read(),
+      budgetRead: () => budgetStore.load(),
+      listSegments: async () => {
+        const rows = [];
+        try {
+          for (const name of await readdir(segmentsStore.dir)) {
+            if (!name.endsWith(".json")) continue;
+            const seg = await segmentsStore.load(name.replace(/\.json$/, ""));
+            if (seg && typeof seg === "object") rows.push(seg);
+          }
+        } catch {
+          /* segments dir absent → no samples */
+        }
+        return rows;
+      },
+      verdictsRead: async () => (await verdictsStore.load())?.entries ?? [],
         });
         respondJson(res, 200, result);
         return;
@@ -3998,17 +3999,49 @@ const handleRequest = async (req, res) => {
     return;
   }
 
-  // §14.1 instrumentation: per-item open / expand (called by the UI).
+  // §9.5 verdict instrumentation — per-item open/expand (called by the UI).
+  // BET-1391: REWIRED to the verdict ledger (one path) — this records an
+  // `open` verdict on the digest item (feeds importance/access) instead of
+  // writing its own ledger row; the engine's direct per-item write is gone.
   if (path === "/api/cto/digest/opened") {
     try {
       if (req.method === "POST") {
         const body = await readJsonBody(req);
-        await adaptiveCtoDigest.recordItemEvent({
-          item: typeof body?.item === "string" ? body.item : null,
-          expand: body?.expand === true,
-          digestId: typeof body?.digestId === "string" ? body.digestId : null,
-        });
+        const item = typeof body?.item === "string" && body.item ? body.item : null;
+        if (item) {
+          await adaptiveCto.recordVerdict({
+            subject: { type: "digest_item", id: item },
+            verdict: "open",
+          });
+        }
         respondJson(res, 200, { ok: true });
+        return;
+      }
+      respondJson(res, 405, { error: "method not allowed" });
+    } catch (e) {
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // POST /api/cto/verdict — the §9.5 verdict ledger write (BET-1391). One
+  // append-only path the opencode `cto_verdict` tool and the running engine
+  // both reach: records the verdict to `verdicts.json` and routes its counter
+  // effects to the registered sinks (facts sender reliability, later trust /
+  // tool counters). Invalid input → 400; never throws.
+  if (path === "/api/cto/verdict") {
+    try {
+      if (req.method === "POST") {
+        const body = await readJsonBody(req);
+        const subject = body?.subject ?? null;
+        const verdict = typeof body?.verdict === "string" ? body.verdict : null;
+        const never = body?.never;
+        const result = await adaptiveCto.recordVerdict({
+          subject,
+          verdict,
+          ...(never !== undefined ? { never } : {}),
+        });
+        respondJson(res, result.ok ? 200 : 400, result);
         return;
       }
       respondJson(res, 405, { error: "method not allowed" });

@@ -258,7 +258,7 @@ export type CtoDigest = {
 // `n < min` the renderer shows `collecting (n/min)` and never the number — a
 // stat never displays noise as signal.
 export type CtoHealthStat = {
-  id: "ambientSpendToday" | "digestOpens" | "pipelineLag";
+  id: "ambientSpendToday" | "digestOpens" | "pipelineLag" | "suggestionAcceptance";
   label: string;
   value: string | null;
   n: number;
@@ -1069,6 +1069,21 @@ export interface Api {
     expand?: boolean;
     digestId?: string | null;
   }): Promise<{ ok: boolean }>;
+  // POST /api/cto/verdict — §9.5 verdict-ledger write (BET-1391). One path the
+  // opencode `cto_verdict` tool and the engine both reach: appends to
+  // `verdicts.json` and routes counter effects to the registered sinks.
+  ctoVerdict(input: {
+    subject: { type: string; id: string; class?: string; sender?: string | { sessionID: string } };
+    verdict:
+      | "accept"
+      | "dismiss"
+      | "edit"
+      | "veto"
+      | "expire"
+      | "correct"
+      | "open";
+    never?: boolean;
+  }): Promise<{ ok: boolean; error?: string; effects?: { success?: boolean; rejection?: boolean; access?: boolean; decay?: boolean } }>;
 }
 
 /**

@@ -519,17 +519,21 @@ test("digests/ retention keeps the last 30 (DIGESTS_KEEP == 30)", () => {
   assert.equal(DIGESTS_KEEP, 30);
 });
 
-test("recordOpen + recordItemEvent emit §14.1 instrumentation ledger rows", async () => {
+test("recordOpen emits the §14.1 digest view-open ledger row", async () => {
   const { engine, ledgerRows } = makeEngine({ runEphemeral: null });
   await engine.recordOpen();
-  await engine.recordItemEvent({ item: "shipped the parser", digestId: "123" });
-  await engine.recordItemEvent({ item: "deep log", expand: true, digestId: "123" });
   const kinds = ledgerRows.map((r) => r.kind);
   assert.ok(kinds.includes("cto.digest_opened"));
-  assert.ok(kinds.includes("cto.digest_item_opened"));
-  assert.ok(kinds.includes("cto.digest_expanded"));
-  const expanded = ledgerRows.find((r) => r.kind === "cto.digest_expanded");
-  assert.equal(expanded.digestId, "123");
+});
+
+// BET-1391: the per-item OPEN path moved into the verdict ledger (§9.5) — the
+// `/opened` route calls `recordVerdict({verdict:"open"})` (one path) and the
+// digest engine no longer writes its own `cto.digest_item_opened` /
+// `cto.digest_expanded` ledger rows. Keep a guard so a future re-add has to
+// justify itself here.
+test("BET-1391: digest engine no longer has a direct per-item ledger write", async () => {
+  const { engine } = makeEngine({ runEphemeral: null });
+  assert.equal(typeof engine.recordItemEvent, "undefined");
 });
 
 test("generateDigest: successful model path emits cto.digest_generated", async () => {
