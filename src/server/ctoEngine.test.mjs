@@ -12,6 +12,7 @@ import {
   buildFactsContext,
 } from "./ctoEngine.mjs";
 import { createSegmenter } from "./ctoSegments.mjs";
+import { startOfDay } from "./ctoRollups.mjs";
 import { createFactsEngine } from "./ctoFacts.mjs";
 import { windowFor } from "./ctoRollups.mjs";
 
@@ -29,6 +30,7 @@ function makeHarness({ ctoEnabled = false, counts = {}, rollups, facts } = {}) {
   let currentConfig = { ctoEnabled };
   const cardCalls = [];
   const state = { v: 1, pendingBlockers: [] };
+  const budgetCfg = { budgetIsHit: false, tier: "low" };
 
   const engine = createCtoEngine({
     configGet: async () => ({ ...currentConfig }),
@@ -71,6 +73,13 @@ function makeHarness({ ctoEnabled = false, counts = {}, rollups, facts } = {}) {
       tonightCount: 0,
       ...counts,
     }),
+    // BET-1388: hermetic budget for all engine tests (never touches the real
+    // budget.json). Cap tests override `budgetCfg.budget`.
+    budget: {
+      isCapHit: async () => budgetCfg.budgetIsHit,
+      record: async () => ({ usd: 0, dayKey: "0" }),
+    },
+    tierGet: async () => budgetCfg.tier,
     ...(rollups ? { rollups } : {}),
     ...(facts ? { facts } : {}),
   });
@@ -82,6 +91,7 @@ function makeHarness({ ctoEnabled = false, counts = {}, rollups, facts } = {}) {
     published,
     cardCalls,
     state,
+    budgetCfg,
     get pendingBlockers() {
       return pendingBlockers;
     },
@@ -261,6 +271,79 @@ test("computeDot maps the four states", () => {
   assert.equal(computeDot({ enabled: false, paused: false, thrifty: false }), "disabled");
   assert.equal(computeDot({ enabled: true, paused: true, thrifty: false }), "paused");
   assert.equal(computeDot({ enabled: true, paused: false, thrifty: true }), "thrifty");
+});
+
+test("BET-1388: hard cap blocks beginEphemeral (cap hit → cto_cap_hit + thrifty)", async () => {
+  const h = makeHarness({ ctoEnabled: true });
+  assert.equal((await h.engine.beginEphemeral()).ok, true);
+  h.budgetCfg.budgetIsHit = true;
+  const gate = await h.engine.beginEphemeral();
+  assert.equal(gate.ok, false);
+  assert.equal(gate.error, "cto_cap_hit");
+  // cap-hit flips thrifty (§10.6-6)
+  assert.equal((await h.engine.getState()).dot, DOT.THRIFTY);
+  assert.ok(h.ledgerRows.find((r) => r.kind === "cto.thrifty_on" && r.source === "cap"));
+});
+
+test("BET-1388: reportAmbientSpend records spend and flips thrifty on cap", async () => {
+  const h = makeHarness({ ctoEnabled: true });
+  await h.engine.reportAmbientSpend({ model: {}, tokens: 1000 });
+  assert.equal((await h.engine.getState()).dot, DOT.ACTIVE);
+  h.budgetCfg.budgetIsHit = true;
+  await h.engine.reportAmbientSpend({ model: {}, tokens: 1000 });
+  assert.equal((await h.engine.getState()).dot, DOT.THRIFTY);
+});
+
+test("BET-1388: thrifty auto-clears at the daily reset", async () => {
+  const h = makeHarness({ ctoEnabled: true });
+  const sod = startOfDay(h.clock.ms);
+  h.clock.ms = sod + 60_000; // just past local midnight
+  await h.engine.setThrifty(true, { reason: "cap_hit", source: "cap" });
+  assert.equal((await h.engine.getState()).dot, DOT.THRIFTY);
+  // advance into the next local day, then tick → thrifty cleared
+  h.clock.ms = sod + 86_400_000 + 60_000;
+  await h.engine.tick();
+  assert.equal((await h.engine.getState()).dot, DOT.ACTIVE);
+  assert.ok(h.ledgerRows.find((r) => r.kind === "cto.thrifty_off" && r.reason === "daily_reset"));
+});
+
+test("BET-1388: tierAllowsFeature reads the A12 dial and gates features", async () => {
+  const h = makeHarness({ ctoEnabled: true });
+  // default low tier
+  assert.equal(await h.engine.tierAllowsFeature("rollups"), true);
+  assert.equal(await h.engine.tierAllowsFeature("suggestion"), false);
+  assert.equal(await h.engine.tierAllowsFeature("overnight"), false);
+  h.budgetCfg.tier = "high";
+  assert.equal(await h.engine.tierAllowsFeature("overnight"), true);
+  assert.equal(await h.engine.tierAllowsFeature("probe"), true);
+});
+
+test("BET-1388: thrifty sheds hourly rollups (§12.2 rung 4) — no hour reduces", async () => {
+  const levelsCalled = [];
+  const rollups = {
+    processDue: async (items) => {
+      for (const it of items || []) levelsCalled.push(it.level);
+      return (items || []).map((it) => ({ level: it.level, window: it.window, saved: true }));
+    },
+  };
+
+  const h = makeHarness({ ctoEnabled: true, rollups });
+  // First tick: initialize the rollup cursor.
+  await h.engine.tick();
+  levelsCalled.length = 0;
+
+  // Normal mode: 3 closed hours → hour reduces run.
+  h.advance(3 * HOUR_MS);
+  await h.engine.tick();
+  assert.ok(levelsCalled.includes("hour"), "hour reduces run when not thrifty");
+
+  // Thrifty mode: the same 3 closed hours are shed (no hour reduces), cursor
+  // advances past them so they are never re-attempted.
+  levelsCalled.length = 0;
+  h.advance(3 * HOUR_MS);
+  await h.engine.setThrifty(true, { reason: "cap_hit", source: "cap" });
+  await h.engine.tick();
+  assert.ok(!levelsCalled.includes("hour"), "hour reduces shed while thrifty");
 });
 
 test("watchdog: > 2x expected burn → auto-thrifty", async () => {

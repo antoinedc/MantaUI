@@ -260,6 +260,22 @@ export function degradedRollup({ level, window, inputs, refs } = {}) {
   return { v: ROLLUP_VERSION, level, window, bullets };
 }
 
+// BET-1388 (§12.2 rung 4): reconstruct ONE absent hour rollup from its segment
+// summaries (one bullet per segment, each carrying the leaf segment id). The
+// day reduce uses this to fold hours that were shed while the CTO was thrifty
+// — segments are still summarized (that work is "kept to the last token"), so
+// a missing hour is never silent at the day level. Mirrors degradedRollup's
+// hour branch. Returns `null` when the hour has nothing to fold.
+export function reconstructHour({ window, segments = [] } = {}) {
+  const segs = Array.isArray(segments) ? segments : [];
+  if (!segs.length) return null;
+  const bullets = segs.map((it) => {
+    const s = it?.summary || {};
+    return { text: s.one_liner || s.intent || "unspecified work", refs: it.id ? [it.id] : [] };
+  });
+  return { id: String(window && window[0] != null ? window[0] : ""), window, bullets };
+}
+
 // ---------------------------------------------------------------------------
 // Fact sync (P2, §6.2 / D10 — no direct writes). After a day-level reduce the
 // runner maps each bullet to {project, statement, refs} by resolving refs →
@@ -405,9 +421,10 @@ export function defaultLoadInputs({ fs = fsp, rollups = rollupsStore, segments =
     try {
       names = await fs.readdir(dir);
     } catch {
-      return [];
+      names = [];
     }
-    const out = [];
+    // Existing level-below rollups within this window (write-once artifacts).
+    const byStart = new Map();
     for (const name of names) {
       if (!name.endsWith(".json")) continue;
       const id = name.slice(0, -5);
@@ -418,8 +435,52 @@ export function defaultLoadInputs({ fs = fsp, rollups = rollupsStore, segments =
         continue;
       }
       if (r && Array.isArray(r.window) && r.window[0] >= ws && r.window[0] < we) {
-        out.push({ id, window: r.window, bullets: Array.isArray(r.bullets) ? r.bullets : [] });
+        byStart.set(r.window[0], {
+          id,
+          window: r.window,
+          bullets: Array.isArray(r.bullets) ? r.bullets : [],
+        });
       }
+    }
+    // BET-1388 (§12.2 rung 4) — hour-gap reconstruction. When the CTO is
+    // thrifty, hourly rollups are shed (no hour reduce runs); the DAY reduce
+    // must still be able to fold those hours. Segments are still summarized
+    // ("kept to the last token"), so for every hour that has segments but no
+    // hour rollup we synthesize a reconstructed hour from its segment summaries.
+    let out = Array.from(byStart.values());
+    if (level === "day") {
+      const segsDir = segments.dir;
+      const byHour = new Map();
+      let segNames = [];
+      try {
+        segNames = await fs.readdir(segsDir);
+      } catch {
+        segNames = [];
+      }
+      for (const name of segNames) {
+        if (!name.endsWith(".json")) continue;
+        const id = name.slice(0, -5);
+        let sg;
+        try {
+          sg = await segments.load(id);
+        } catch {
+          continue;
+        }
+        if (sg && Array.isArray(sg.window) && sg.window[0] >= ws && sg.window[0] < we) {
+          const hourStart = startOfHour(sg.window[0]);
+          if (!byHour.has(hourStart)) byHour.set(hourStart, []);
+          byHour.get(hourStart).push({ id, window: sg.window, ts: sg.ts, summary: sg.summary });
+        }
+      }
+      const covered = new Set(out.map((o) => o.window && o.window[0]));
+      const reconstructed = [];
+      for (let hourStart = ws; hourStart < we; hourStart += HOUR_MS) {
+        if (covered.has(hourStart)) continue;
+        const segs = (byHour.get(hourStart) || []).sort((a, b) => a.window[0] - b.window[0]);
+        const recon = reconstructHour({ window: [hourStart, hourStart + HOUR_MS], segments: segs });
+        if (recon) reconstructed.push(recon);
+      }
+      out = out.concat(reconstructed);
     }
     return out.sort((a, b) => a.window[0] - b.window[0]);
   };

@@ -13,6 +13,9 @@ import {
   previousWindow,
   proposalsFromRollup,
   submitFactsFromRollup,
+  reconstructHour,
+  defaultLoadInputs,
+  startOfHour,
   HOUR_MS,
   DAY_MS,
   WEEK_MS,
@@ -244,6 +247,76 @@ test("day reduce from hour rollups: degraded keeps propagated leaf refs", async 
   const saved = store.map.get(`day/${day[0]}`);
   assert.deepEqual(saved.bullets.map((b) => b.refs), [["s1"], ["s2"]]);
   assert.deepEqual([...new Set(saved.bullets.flatMap((b) => b.refs))].sort(), ["s1", "s2"]);
+});
+
+test("reconstructHour folds a shed hour's segments into bullets with leaf refs", () => {
+  const window = [startOfHour(Date.now()), startOfHour(Date.now()) + HOUR_MS];
+  const recon = reconstructHour({
+    window,
+    segments: [
+      { id: "s1", summary: { one_liner: "wired auth" } },
+      { id: "s2", summary: { intent: "refactor" } },
+      { id: "s3", summary: {} },
+    ],
+  });
+  assert.equal(recon.id, String(window[0]));
+  assert.deepEqual(recon.window, window);
+  assert.deepEqual(recon.bullets, [
+    { text: "wired auth", refs: ["s1"] },
+    { text: "refactor", refs: ["s2"] },
+    { text: "unspecified work", refs: ["s3"] },
+  ]);
+});
+
+test("reconstructHour returns null when the hour has no segments", () => {
+  assert.equal(reconstructHour({ window: [0, HOUR_MS], segments: [] }), null);
+});
+
+test("defaultLoadInputs day: reconstructs missing hours from segments (thrifty gap)", async () => {
+  // A fake fs over a rollups/hour dir + a segments dir.
+  const rollupFiles = ["hExisting.json"];
+  const segFiles = ["s1.json", "s2.json", "s3.json"];
+  const dayStart = new Date(2026, 7, 28, 0, 0, 0, 0).getTime();
+  const h = (i) => dayStart + i * HOUR_MS; // hour i start
+  const rollups = {
+    dirFor: () => "rollups/hour",
+    load: async (level, id) => {
+      if (id === "hExisting")
+        return { v: 1, level: "hour", window: [h(0), h(1)], bullets: [{ text: "H0", refs: ["s0"] }] };
+      return { v: 1 };
+    },
+  };
+  const segments = {
+    dir: "segments",
+    load: async (id) => {
+      const map = {
+        s1: { v: 1, window: [h(1), h(1) + HOUR_MS], ts: h(1), summary: { one_liner: "A" } },
+        s2: { v: 1, window: [h(1), h(1) + HOUR_MS], ts: h(1) + 1, summary: { one_liner: "B" } },
+        s3: { v: 1, window: [h(2), h(2) + HOUR_MS], ts: h(2), summary: { intent: "C" } },
+      };
+      return map[id] ?? { v: 1 };
+    },
+  };
+  const fs = {
+    readdir: async (dir) => (dir === "rollups/hour" ? rollupFiles : dir === "segments" ? segFiles : []),
+  };
+  const loadInputs = defaultLoadInputs({ fs, rollups, segments });
+  const day = windowFor("day", dayStart);
+  const items = await loadInputs({ level: "day", window: day });
+
+  // h0: existing hour rollup; h1 + h2 reconstructed from segments; h3.. empty.
+  const byStart = new Map(items.map((it) => [it.window[0], it]));
+  assert.equal(byStart.get(h(0)).id, "hExisting");
+  assert.equal(byStart.get(h(0)).bullets[0].text, "H0");
+  // h1 reconstructed from two segments (leaf refs s1, s2)
+  const h1 = byStart.get(h(1));
+  assert.equal(h1.id, String(h(1)));
+  assert.deepEqual(h1.bullets.map((b) => b.refs), [["s1"], ["s2"]]);
+  assert.deepEqual(h1.bullets.map((b) => b.text), ["A", "B"]);
+  // h2 reconstructed from one segment
+  assert.deepEqual(byStart.get(h(2)).bullets.map((b) => b.text), ["C"]);
+  // items sorted by start
+  assert.deepEqual(items.map((it) => it.window[0]), [h(0), h(1), h(2)]);
 });
 
 // ---------------------------------------------------------------------------

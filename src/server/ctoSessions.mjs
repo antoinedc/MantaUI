@@ -209,6 +209,8 @@ async function activeRemove(sid, { engineState }) {
  * @param {Function} [a.deps.resolveModel]  async ({taskClass,tier,meta,configGet}) -> model|null
  * @param {Function} [a.deps.configGet]  async () -> AppConfig (for model routing)
  * @param {Function} [a.deps.validate]  async (result) => bool — structured-output check; triggers the cascade
+ * @param {Function} [a.deps.reportCost]  async ({taskClass,tier,model,tokens}) => void — BET-1388 metering
+ *   hook; every run reports its estimated token cost (default no-op). The engine wires it to the budget.
  * @returns {Promise<{text:string, taskClass:string, tier:string}>}
  */
 export async function runEphemeral({ taskClass, context = [], directory = "~", deps = {} } = {}) {
@@ -238,6 +240,7 @@ async function runOnce({ taskClass, meta, tier, context, directory, deps }) {
     engineState = engineStateStore,
     resolveModel = defaultResolveModel,
     configGet,
+    reportCost = async () => {},
   } = deps;
   if (!oc || typeof oc.runEphemeralSession !== "function") {
     throw new Error("runEphemeral requires deps.oc with runEphemeralSession()");
@@ -259,6 +262,19 @@ async function runOnce({ taskClass, meta, tier, context, directory, deps }) {
         await activeAdd(s, { engineState });
       },
     });
+    // BET-1388 (§12.1): every ambient model call reports its token cost into
+    // budget.json. Best-effort — a metering failure must never mask the run.
+    // The engine wires this to the budget's record(); the default is a no-op.
+    try {
+      await reportCost({
+        taskClass,
+        tier,
+        model,
+        tokens: estimateTokens(instruction) + estimateTokens(res?.text ?? ""),
+      });
+    } catch {
+      /* metering is best-effort */
+    }
     return { text: res?.text ?? "", taskClass, tier, sid: res?.sid ?? sid };
   } finally {
     // Remove from the active set even when the run errored (finally).
@@ -325,7 +341,7 @@ export async function defaultResolveModel({ taskClass, tier, meta, configGet }) 
   }
 
   try {
-    return chooseSubagentModel({
+    const chosen = chooseSubagentModel({
       incumbent: null,
       catalog,
       policy: forcedPolicy,
@@ -334,6 +350,17 @@ export async function defaultResolveModel({ taskClass, tier, meta, configGet }) 
       contextTokens: meta?.contextBudget ?? undefined,
       services,
     });
+    // BET-1388 (§12.1 / §13.3): attach the catalogue's pricing data (`cost`) to
+    // the resolved model so the budget can price the turn. chooseSubagentModel
+    // returns a provider/model id only; the run does not need cost, but the
+    // spend meter prices on it. Unknown → the model is unpriceable (prices 0).
+    if (chosen && chosen.providerID && chosen.modelID) {
+      const priced = catalog.find(
+        (x) => x && x.providerID === chosen.providerID && x.id === chosen.modelID,
+      );
+      if (priced && priced.cost) return { ...chosen, cost: priced.cost };
+    }
+    return chosen;
   } catch {
     return null;
   }
