@@ -656,6 +656,25 @@ export function createSegmenter(deps = {}) {
     return oneLiners.get(sessionID)?.oneLiner ?? null;
   }
 
+  // BET-1385: recent completed-turn one-liners for the Just-finished rail
+  // (§10.4). Reads the cached one-liner map (A6) — aborted turns never cache a
+  // one-liner, so abort exclusion is inherent, not an extra filter. Most recent
+  // first, capped.
+  function listRecentOneLiners({ withinMs = 24 * 60 * 60 * 1000, cap = 6 } = {}) {
+    if (typeof withinMs !== "number" || withinMs <= 0) withinMs = 24 * 60 * 60 * 1000;
+    if (typeof cap !== "number" || cap <= 0) cap = 6;
+    const t = now();
+    const out = [];
+    for (const [sessionID, entry] of oneLiners) {
+      if (!entry || typeof entry.ts !== "number") continue;
+      if (t - entry.ts > withinMs) continue;
+      if (typeof entry.oneLiner !== "string" || !entry.oneLiner) continue;
+      out.push({ sessionID, oneLiner: entry.oneLiner, ts: entry.ts });
+    }
+    out.sort((a, b) => b.ts - a.ts);
+    return out.slice(0, cap);
+  }
+
   function getGMinutes() {
     return gMinutes;
   }
@@ -666,6 +685,7 @@ export function createSegmenter(deps = {}) {
     boot,
     getGMinutes,
     getOneLiner,
+    listRecentOneLiners,
     get gapSampleCount() {
       return gapSamples.length;
     },
