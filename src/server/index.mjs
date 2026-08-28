@@ -1846,6 +1846,7 @@ const adaptiveCto = ctoEngine.createCtoEngine({
   // its own one-time spend bound, so they bypass the engine's §3.3 rate gate.
   getDb,
   backfillRunEphemeral: runEphemeral,
+  cardFireNotify: (args) => push.fireNotify(args),
 });
 adaptiveCto.start();
 
@@ -1942,7 +1943,11 @@ void stopAdaptiveCtoWatchdog;
 const ctoInbound = cto.createCtoInbound({
   isCallActive: () => callActive,
   ctoSessionID: null, // issue 3 wires the live route below via the active call engine
-  fireNotify: (args) => push.fireNotify(args),
+  // BET-1397: a `blocker` inbox note enters the A8 blocker-card path (source
+  // 3), which fires the single blocking-tier notification through the existing
+  // router and promotes a card at > 10 min. The old direct blanket-notify
+  // branch is gone — non-blocker notes are silent in the inbox.
+  registerBlocker: (entry) => adaptiveCto.cards.onInboxBlocker(entry),
   sendPrompt: async ({ text }) => {
     // LIVE route (issue 3): while a call is open, inject the inbound event as
     // a turn into the active Realtime session so the CTO speaks it. Parked
@@ -3974,10 +3979,23 @@ const handleRequest = async (req, res) => {
     try {
       if (req.method === "POST") {
         const body = await readJsonBody(req);
+        // The send_to_cto tool posts kind/message/refs/tag/title/urgent/sessionID
+        // at the TOP level (many also carry a nested `payload`); merge both so
+        // the inbox sees the note either way.
         const result = await ctoInbound.inbound({
           surface: body?.surface,
-          payload: body?.payload ?? {},
           seenId: body?.seenId,
+          payload: {
+            ...(body?.payload ?? {}),
+            kind: body?.kind,
+            message: body?.message,
+            refs: body?.refs,
+            tag: body?.tag,
+            title: body?.title,
+            urgent: body?.urgent,
+            sessionID: body?.sessionID,
+            senderName: body?.senderName,
+          },
         });
         respondJson(res, result.ok ? 200 : 400, result);
         return;
