@@ -78,7 +78,8 @@ import {
   ROLLUP_LEVELS,
   windowFor as rollupWindowFor,
 } from "./ctoRollups.mjs";
-import { createFactsEngine, VERIFY_CYCLE_MS } from "./ctoFacts.mjs";
+import { buildFactProposal, createFactsEngine, VERIFY_CYCLE_MS } from "./ctoFacts.mjs";
+import { formatFactsBlock } from "./ctoSessions.mjs";
 
 // Actor tag stamped on every engine RPC call / ledger row (spec §3.3).
 export const ACTOR = "cto";
@@ -884,6 +885,51 @@ export function createCtoEngine(deps = {}) {
     return heartbeatAt;
   }
 
+  // cto_fact route handler (BET-1390 / §6.2): turn tool input into a
+  // validated proposal, enqueue it on the blackboard's single-writer queue,
+  // then await the gatekeeper's resolution for up to 10s so the caller gets
+  // the verdict when it resolves fast. If resolution is still pending we
+  // return `queued:true` — the durable queue + the tick's pump guarantee the
+  // proposal is still resolved (nothing is lost by returning early).
+  async function proposeFact(input = {}) {
+    const built = buildFactProposal(input);
+    if (built.error) return { ok: false, error: built.error };
+    const fe = getFactsEngine();
+    const id = built.proposal.proposalId;
+    const submitted = await fe.submitProposal(built.proposal);
+    if (!submitted.ok) {
+      // Not newly added: either already applied (idempotent re-delivery) or
+      // still queued from a prior enqueue. Report the known outcome when there
+      // is one.
+      const existing = await fe.proposalOutcome(id);
+      if (existing) return { ok: true, proposalId: id, applied: false, outcome: existing };
+      return { ok: true, proposalId: id, applied: false, queued: true };
+    }
+    await Promise.race([
+      fe.pump(built.proposal.project).catch(() => {}),
+      new Promise((r) => setTimeout(r, 10000)),
+    ]);
+    const outcome = await fe.proposalOutcome(id);
+    if (!outcome) return { ok: true, proposalId: id, applied: true, queued: true };
+    return { ok: true, proposalId: id, applied: true, outcome };
+  }
+
+  // Spawn-context facts seed for a project (§6.9): pull the top-K facts by
+  // retention, format them into a context block, and record the access so the
+  // retention clock reflects "this fact was actually surfaced". Returns null
+  // when there is nothing to seed (callers omit the block entirely).
+  async function factsContextBlock(project, { cap = 15, nowMs } = {}) {
+    if (!project || !getFactsEngine()) return null;
+    const fe = getFactsEngine();
+    return buildFactsContext({
+      project,
+      cap,
+      nowMs,
+      getTopFacts: (p, k) => fe.topFacts(p, { k, nowMs }),
+      touchFacts: (opts) => fe.touchFacts(opts),
+    });
+  }
+
   const engine = {
     actor: ACTOR,
     start,
@@ -900,6 +946,8 @@ export function createCtoEngine(deps = {}) {
     getPresence,
     getState,
     lastHeartbeat,
+    proposeFact,
+    factsContextBlock,
     get rateTracker() {
       return track;
     },
@@ -918,6 +966,23 @@ export function createCtoEngine(deps = {}) {
   };
 
   return engine;
+}
+
+// ---------------------------------------------------------------------------
+// Spawn-context facts seed (BET-1390 / §6.9) — pure orchestration over
+// injected providers so it is testable without a live facts engine. Pulls
+// top-K facts for a project, formats them into a `{priority,text}` context
+// block, and records a retention touch on exactly the facts that were
+// surfaced. Returns null when there is nothing to seed.
+// ---------------------------------------------------------------------------
+export async function buildFactsContext({ project, cap = 15, nowMs, getTopFacts, touchFacts } = {}) {
+  if (!project || typeof getTopFacts !== "function" || typeof touchFacts !== "function") return null;
+  const facts = await getTopFacts(project, cap);
+  const block = formatFactsBlock(facts, { cap, nowMs });
+  if (!block) return null;
+  const ids = (Array.isArray(facts) ? facts : []).slice(0, cap).map((f) => f?.id).filter(Boolean);
+  if (ids.length > 0) await touchFacts({ project, ids });
+  return block;
 }
 
 // ---------------------------------------------------------------------------

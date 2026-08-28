@@ -504,6 +504,31 @@ never a symlink: `cp <repo>/docs/opencode-tools/cto.ts
 then `systemctl --user restart
 opencode-serve`. The engine lives in `src/server/cto.mjs` (see there).
 
+## manta cto_fact — Adaptive CTO blackboard (BET-1390)
+
+You have a `cto_fact` tool (global opencode custom tool) that proposes a
+short, evidence-backed *fact* about a project onto the Adaptive CTO blackboard
+(spec §6.2). Facts are the CTO's durable cross-session memory — they are
+surfaced later to new sessions and delegate jobs as §6.9 spawn-context, so
+recording a root cause, a settled decision, or a blocker you hit makes it
+survive your session ending. Install/update is a COPY, never a symlink:
+`cp <repo>/docs/opencode-tools/cto-fact.ts ~/.config/opencode/tools/cto-fact.ts`
+and `cp <repo>/docs/opencode-tools/manta-auth.ts
+~/.config/opencode/tools/manta-auth.ts` (the shared `./manta-auth` import),
+then `systemctl --user restart opencode-serve`.
+
+Reach for `cto_fact` when a concrete fact about the project is worth
+preserving: the current state of a subsystem, a blocker with its cause, a
+decision and why, a theory to track, something that must not regress, or an
+anomaly you saw. Use concise kinds (`status` / `blocker` / `decision` /
+`theory` / `invariant` / `anomaly`). **Every proposal requires at least one
+`refs` evidence pointer** (a message id, commit sha, file path, or issue key) —
+a proposal with no refs is rejected, so attach evidence to your claim.
+`supersedes` lets you state that a new fact revises an earlier one; keep
+statements ≤ 200 characters. It is a thin registrar: the server owns the
+durable queue and the gatekeeper, and returns the gatekeeper verdict (or a
+"queued" note when the judge is still deciding — it resolves regardless).
+
 ## manta on-call CTO inbound — `send_to_cto` + watchers (BET-1165)
 
 Two companion capabilities to the `cto` read belt, both global opencode tools.

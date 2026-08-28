@@ -175,6 +175,61 @@ export function validateProposal(p) {
   return true;
 }
 
+// Build a validated proposal from the `cto_fact` tool's raw input (§6.2).
+// The registrar-side contract, kept pure and testable:
+//   - zero `refs` is rejected here (the client tool also checks, but the
+//     server is the backstop) with a message telling the agent to attach
+//     evidence;
+//   - a proposalId is DERIVED deterministically from (project, kind,
+//     statement, refs, sessionID) when the client didn't supply one, which is
+//     what makes the at-least-once queue idempotent: re-delivering the same
+//     proposal from the same session collapses to one application;
+//   - the sender defaults to {sessionID} so the blackboard can track
+//     per-sender reliability (§6.4) instead of lumping every tool call under
+//     "cto".
+export function buildFactProposal(input = {}) {
+  const refs = Array.isArray(input.refs) ? input.refs : [];
+  if (refs.length === 0) {
+    return {
+      error:
+        "Rejected: a fact proposal requires at least one `refs` entry (an evidence pointer such as a message id, commit sha, or file path). Attach evidence to your claim and retry.",
+    };
+  }
+  const project = typeof input.project === "string" ? input.project.trim() : "";
+  if (!project) return { error: "Rejected: `project` is required." };
+  if (!KINDS.includes(input.kind)) {
+    return { error: `Rejected: \`kind\` must be one of ${KINDS.join(", ")}.` };
+  }
+  const statement = typeof input.statement === "string" ? input.statement.trim() : "";
+  if (!statement) return { error: "Rejected: `statement` is required." };
+  if (statement.length > STATEMENT_LIMIT) {
+    return { error: `Rejected: \`statement\` must be ≤ ${STATEMENT_LIMIT} characters.` };
+  }
+  const sessionID = typeof input.sessionID === "string" ? input.sessionID : "";
+  const proposalId =
+    (typeof input.proposalId === "string" && input.proposalId.length > 0
+      ? input.proposalId
+      : "cto:" +
+        createHash("sha1")
+          .update([project, input.kind, statement, ...refs, sessionID].join("|"))
+          .digest("hex")
+          .slice(0, 16));
+  const sender = input.sender ?? (sessionID ? { sessionID } : "cto");
+  const proposal = {
+    proposalId,
+    project,
+    kind: input.kind,
+    statement,
+    refs,
+    sender,
+  };
+  if (typeof input.confidence === "number") proposal.confidence = input.confidence;
+  if (typeof input.valid_until === "string" && input.valid_until.length > 0) proposal.valid_until = input.valid_until;
+  if (typeof input.supersedes === "string" && input.supersedes.length > 0) proposal.supersedes = input.supersedes;
+  if (!validateProposal(proposal)) return { error: "Rejected: invalid proposal." };
+  return { proposal };
+}
+
 export function enqueueProposal(state, proposal) {
   if (!validateProposal(proposal)) return { state, added: false, reason: "invalid" };
   const s = state ?? {};
@@ -765,6 +820,38 @@ export function createFactsEngine(deps = {}) {
     };
   }
 
+  // Top-K active facts for a project ranked by retention (§6.4) — the
+  // ordering the spawn-context seed uses (BET-1390 / §6.9). The same
+  // reliability-aware ranking as pump's displacement, so the facts that
+  // survive the cap are the ones surfaced to new sessions.
+  async function topFacts(project, { k = 15, nowMs } = {}) {
+    if (!project || project.length === 0) return [];
+    const t = nowMs ?? now();
+    const active = await loadFacts(project);
+    const state = await loadState();
+    const halfLives = currentHalfLives(state.factTuning ?? {});
+    const relOf = (fact) => {
+      const key = senderKey(fact?.sender);
+      if (!key) return 1;
+      const c = state.factReliability?.[key];
+      return c ? senderReliability(c) : 1;
+    };
+    return active
+      .map((fact) => ({ fact, retention: retentionOf(fact, { nowMs: t, halfLives, weights: KIND_WEIGHTS, reliabilityOf: relOf }) }))
+      .sort((a, b) => b.retention - a.retention)
+      .slice(0, k)
+      .map((x) => x.fact);
+  }
+
+  // Read the applied outcome for a proposalId from the durable idempotency
+  // record — lets the `cto_fact` route report the gatekeeper verdict (or
+  // "queued"/already-applied) instead of just "submitted".
+  async function proposalOutcome(proposalId) {
+    if (!proposalId) return null;
+    const s = await loadState();
+    return s.appliedProposals?.[proposalId] ?? null;
+  }
+
   function dispose() {
     disposed = true;
   }
@@ -776,6 +863,8 @@ export function createFactsEngine(deps = {}) {
     verifyDue,
     recomputeHalfLives: recomputeHalfLivesNow,
     getState,
+    proposalOutcome,
+    topFacts,
     listFacts: (project) => loadFacts(project).then((arr) => arr.filter(isActiveFact)),
     listProjects: listKnownProjects,
     dispose,

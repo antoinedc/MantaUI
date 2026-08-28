@@ -108,6 +108,37 @@ export function assembleContext(context = [], { taskClass } = {}) {
   return kept.join("\n\n");
 }
 
+// Human-readable age label for a fact, used in the spawn-context seed.
+export function factAgeLabel(created, nowMs = Date.now()) {
+  const ms = Math.max(0, (nowMs ?? Date.now()) - Number(created) || 0);
+  const hours = Math.floor(ms / 3_600_000);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `${months}mo`;
+  return `${Math.floor(months / 12)}y`;
+}
+
+// Pure formatter for the spawn-context facts block (BET-1390 / §6.9). Takes
+// the top-K facts already ranked by retention and renders a single
+// `{ priority, text }` context block: one `- [kind] statement (age)` line per
+// fact under a short header. Returns `null` when there is nothing to seed, so
+// callers can omit the block entirely. `cap` is a defensive upper bound — the
+// caller's top-K provider is expected to rank, this still slices.
+export function formatFactsBlock(facts = [], { cap = 15, nowMs = Date.now() } = {}) {
+  const ranked = (Array.isArray(facts) ? facts : [])
+    .filter((f) => f && typeof f.statement === "string" && f.statement.length > 0)
+    .sort((a, b) => (Number(b?.retention) || -1) - (Number(a?.retention) || -1))
+    .slice(0, cap);
+  if (ranked.length === 0) return null;
+  const lines = ranked.map(
+    (f) => `- [${f.kind}] ${f.statement} (${factAgeLabel(f.created, nowMs)})`,
+  );
+  const text = ["Relevant project facts (from the CTO blackboard):", ...lines].join("\n");
+  return { priority: 60, text };
+}
+
 // ---------------------------------------------------------------------------
 // Active-set bookkeeping (engine-state.json `activeEphemeral`, A1 store).
 // The active set protects a mid-flight session from the reaper.
