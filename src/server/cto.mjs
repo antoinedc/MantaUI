@@ -33,7 +33,6 @@ import { statePath } from "../shared/paths.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 import { describeModel } from "../shared/modelGuide.mjs";
 import { createSeenIdFilter } from "./seenIds.mjs";
-import { startPoller } from "./startPoller.mjs";
 import {
   rollupsStore,
   ledgerStore,
@@ -43,6 +42,7 @@ import {
   inboxExpiresAt,
   purgeExpiredInbox,
 } from "./ctoStores.mjs";
+import { makeWatcher as buildWatcher, validatePredicate } from "./ctoWatchers.mjs";
 
 export const CTO_STORE_PATH = statePath("cto.json");
 
@@ -126,12 +126,10 @@ export function createCtoEngine(deps = {}) {
     gitBranch = remoteGitBranch,
     gitLog = remoteGitLog,
     isPlanAgent = (name) => name === "plan" || name === "manta-plan",
-    loadWatches = async () => Array.isArray(loadCtoStore()?.watches) ? loadCtoStore().watches : [],
-    saveWatches = async (watches) => {
-      const store = loadCtoStore();
-      store.watches = Array.isArray(watches) ? watches : [];
-      await saveCtoStore(store);
-    },
+    // BET-1398 standing-query watchers (supersedes the cto.json poller). Empty
+    // default keeps the read gateway resolving standalone; index.mjs wires this
+    // to the adaptive engine's event-driven `watchers`.
+    watchers = null,
     loadInbox = async () => inboxStore.load(),
     saveInbox = async (data) => inboxStore.save(data),
     now = () => Date.now(),
@@ -147,6 +145,31 @@ export function createCtoEngine(deps = {}) {
       run: def.run,
     });
   };
+
+  // BET-1398: resolve the standing-query watcher registry. The adaptive
+  // engine's persistent, event-driven engine is preferred; standalone, fall
+  // back to a self-contained in-memory registry so the read gateway keeps
+  // resolving (e.g. in isolation tests).
+  let memWatcherStore = null;
+  function resolveWatchers() {
+    if (watchers) return watchers;
+    if (!memWatcherStore) memWatcherStore = [];
+    return {
+      register: async (input) => {
+        const built = buildWatcher({ ...input, now });
+        if (!built.ok) return { ok: false, error: built.error };
+        memWatcherStore.push(built.watch);
+        return { ok: true, data: { watch: built.watch } };
+      },
+      unregister: async (id) => {
+        const i = memWatcherStore.findIndex((w) => w && w.id === id);
+        if (i === -1) return { ok: true, data: { removed: false } };
+        memWatcherStore.splice(i, 1);
+        return { ok: true, data: { removed: true } };
+      },
+      list: async () => memWatcherStore,
+    };
+  }
 
   // Best-effort branch resolver: one git call per distinct directory, cached.
   // Shared by list_sessions / list_projects so the per-project git state is
@@ -716,46 +739,52 @@ export function createCtoEngine(deps = {}) {
   });
 
   // -------------------------------------------------------------------------
-  // Watchers (Issue 2) — watch / unwatch / list_watches
+  // Watchers (BET-1398) — watch / unwatch / list_watches
   // -------------------------------------------------------------------------
-  // A watch registers a recurring probe against a SURFACE (schedule,
-  // delegate, session…). The watcher poller (createWatcherPoller below) runs
-  // each active watch's query against the surface's existing read and, when
-  // its condition matches AND its seenId is new, calls cto.inbound with that
-  // surface. `watch` is a CONFIRM-mode tool: registering a repeat probe is a
-  // side effect, so it needs the user's go-ahead (see the gate dispatch below).
+  // A watch registers a STANDING QUERY evaluated over the CTO's evidence
+  // stream (spec §4.3/§13.4): an event-driven predicate, not a surface poll.
+  // `watch` takes a predicate `{kind, params}` — kind ∈ {event-pattern,
+  // rate-threshold, usage-burn} — via flat args below. `watch` is a
+  // CONFIRM-mode tool: registering a recurring probe is a side effect, so it
+  // needs the user's go-ahead (see the gate dispatch below).
   register({
     name: "watch",
     description:
-      "Register a watcher that probes a surface and surfaces a notification when its " +
-      "condition matches. `surface` is one of: schedule, " +
-      "delegate, or session. `query` names what to read on that surface (for schedule, " +
-      "e.g. the job id or 'read from the board'); `condition` is a natural-language " +
-      "phrase describing the trigger (e.g. 'a P0 opens'). The watcher poller runs it " +
-      "periodically via the surface's existing read. NOTE: this is a confirm-mode " +
-      "action — it registers a recurring probe, so it needs your go-ahead before it takes " +
-      "effect.",
+      "Register a standing-query watcher evaluated over the CTO's evidence stream. " +
+      "The wire runs the three predicate kinds (closed set): event-pattern (a regex " +
+      "matched against evidence text/kind), rate-threshold (count of matching events " +
+      "in a window >= threshold), or usage-burn (ambient spend pace vs the daily cap " +
+      "fraction). A matching evidence event becomes a high-salience watcher hit that " +
+      "feeds the suggestion engine. NOTE: this is a confirm-mode action — it registers " +
+      "a recurring probe, so it needs your go-ahead before it takes effect.",
     params: {
-      surface: { type: "string", description: "The surface to watch: schedule, delegate, or session." },
-      query: { type: "string", description: "What to query on that surface (informational)." },
-      condition: { type: "string", description: "Natural-language condition for when to trigger." },
+      kind: {
+        type: "string",
+        description: "Predicate kind: event-pattern | rate-threshold | usage-burn.",
+      },
+      pattern: { type: "string", description: "Regex (event-pattern, or a rate-threshold filter)." },
+      eventKind: { type: "string", description: "Limit matches to this evidence kind (optional)." },
+      threshold: { type: "number", description: "Count to trigger (rate-threshold)." },
+      windowMs: { type: "number", description: "Window ms (rate-threshold / usage-burn)." },
+      capFraction: { type: "number", description: "Daily-cap fraction (usage-burn)." },
     },
     mode: "confirm",
     run: async (ctx, args) => {
-      const surface = String(args?.surface ?? "").trim();
-      if (!surface) return { ok: false, error: "surface is required (schedule, delegate, session)" };
-      const watch = {
-        id: randomBytes(4).toString("hex"),
-        surface,
-        query: String(args?.query ?? "").trim(),
-        condition: String(args?.condition ?? "").trim(),
-        active: true,
-        lastFiredAt: null,
-        createdAt: now(),
+      const predicate = {
+        kind: String(args?.kind ?? "").trim(),
+        params: {
+          ...(args?.pattern != null ? { pattern: String(args.pattern) } : {}),
+          ...(args?.eventKind != null ? { eventKind: String(args.eventKind) } : {}),
+          ...(args?.threshold != null ? { threshold: args.threshold } : {}),
+          ...(args?.windowMs != null ? { windowMs: args.windowMs } : {}),
+          ...(args?.capFraction != null ? { capFraction: args.capFraction } : {}),
+        },
       };
-      const watches = await loadWatches();
-      await saveWatches([...watches, watch]);
-      return { ok: true, data: { watch } };
+      const v = validatePredicate(predicate);
+      if (!v.ok) return { ok: false, error: v.error };
+      const res = await resolveWatchers().register({ predicate, source: "user" });
+      if (!res.ok) return { ok: false, error: res.error };
+      return { ok: true, data: { watch: res.data.watch } };
     },
   });
 
@@ -766,20 +795,21 @@ export function createCtoEngine(deps = {}) {
     params: { id: { type: "string", description: "The watcher id to remove." } },
     run: async (ctx, args) => {
       const id = String(args?.id ?? "");
-      const watches = await loadWatches();
-      const next = (watches ?? []).filter((w) => w?.id !== id);
-      if (next.length === (watches ?? []).length) return { ok: true, data: { removed: false } };
-      await saveWatches(next);
-      return { ok: true, data: { removed: true } };
+      const res = await resolveWatchers().unregister(id);
+      if (!res.ok) return { ok: false, error: res.error };
+      return { ok: true, data: { removed: res.data.removed } };
     },
   });
 
   register({
     name: "list_watches",
-    description: "List every registered watcher: id, surface, query, condition, active," +
-      " and when it last fired. Read-only.",
+    description: "List every registered watcher: id, predicate kind, pattern signature," +
+      " source, created, lastHit and hit count. Read-only.",
     params: {},
-    run: async () => ({ ok: true, data: { watches: await loadWatches() } }),
+    run: async () => {
+      const watchList = await resolveWatchers().list();
+      return { ok: true, data: { watches: Array.isArray(watchList) ? watchList : [] } };
+    },
   });
 
   register({
@@ -1114,83 +1144,11 @@ export function coalesceInboxEntry(existing, incoming, ts) {
 }
 
 // ---------------------------------------------------------------------------
-// Watcher poller (Issue 2) — createWatcherPoller
-// ---------------------------------------------------------------------------
-// For each ACTIVE watch it runs the surface's existing read, computes a stable
-// seenId, and when the seenId is new AND the condition matches it calls the
-// inbound funnel with that surface. In-flight-guarded + timer.unref(), mirroring
-// the schedule/delegate pollers. The read + the seenId + the condition matcher
-// are all injected so the tick is unit-testable with no live engines.
-//
-// A watch whose surface read fails is skipped (logged, never wedges the loop);
-// a watch is only re-armed once its seenId moves, so a constantly-matching
-// read doesn't re-fire every tick.
-export function createWatcherPoller({
-  loadWatches,
-  saveWatches,
-  readSurface,
-  seenFilter = createSeenIdFilter(),
-  sendToInbound,
-  conditionMatches = defaultConditionMatches,
-  computeSeenId = defaultComputeSurfaceSeenId,
-  messageFor = defaultWatchMessage,
-  now = () => Date.now(),
-} = {}) {
-  let inFlight = false;
-
-  async function tick() {
-    if (inFlight) return;
-    inFlight = true;
-    try {
-      const watches = await loadWatches();
-      let mutated = false;
-      const snapshot = Array.isArray(watches) ? watches : [];
-      for (const watch of snapshot) {
-        if (!watch || watch.active === false || watch.disabled) continue;
-        if (!watch.surface) continue;
-        let read;
-        try {
-          read = await readSurface(watch.surface, watch.query);
-        } catch (e) {
-          console.warn(`[cto] watch ${watch.id} surface "${watch.surface}" read failed:`, e?.message ?? e);
-          continue;
-        }
-        const seenId = computeSeenId(read);
-        if (seenFilter.seen(seenId)) continue; // no new content since last tick
-        if (!conditionMatches(watch.condition, read)) continue; // not a trigger
-        await sendToInbound({ surface: watch.surface, payload: { message: messageFor(watch, read) }, seenId });
-        watch.lastFiredAt = now();
-        mutated = true;
-      }
-      if (mutated) await saveWatches(snapshot);
-    } catch (e) {
-      console.warn("[cto] watcher tick failed:", e?.message ?? e);
-    } finally {
-      inFlight = false;
-    }
-  }
-
-  return {
-    tick,
-    start: ({ intervalMs = 15_000 } = {}) => startPoller(tick, { intervalMs, label: "cto-watcher", immediate: true }),
-  };
-}
-
-// Build the notification message for a fired watch. Falls back to a clear
-// "condition matched on <surface>" line when the read carries no snippet.
-export function defaultWatchMessage(watch, read) {
-  const condition =
-    typeof watch?.condition === "string" && watch.condition ? ` (${watch.condition})` : "";
-  const snippet = firstSnippet(read?.data ?? read);
-  const base = `CTO watch on ${watch?.surface ?? "?"}${condition} matched`;
-  return snippet ? `${base}: ${snippet}` : base;
-}
-
 // ---------------------------------------------------------------------------
 // Pure helpers (injectable wires, unit-tested)
 // ---------------------------------------------------------------------------
 
-// Stable short hash of a string (used for confirm ids and surface seen ids).
+// Stable short hash of a string (used for confirm ids).
 export function stableHash(str) {
   let h = 2166136261;
   const s = String(str ?? "");
@@ -1223,56 +1181,4 @@ export function buildPreview(def, args) {
   return header.join(" ");
 }
 
-const CONDITION_STOPWORDS = new Set([
-  "a", "an", "the", "of", "to", "in", "on", "for", "and", "or", "with",
-  "when", "if", "is", "are", "was", "were", "new", "opens", "open", "appears",
-  "shows", "changes", "has", "have", "any", "that", "this", "there", "it",
-]);
 
-// Keywords of a natural-language condition (lowercased tokens minus stopwords) —
-// the deterministic v1 condition evaluator. Issue 3 may replace this with an
-// LLM/narration judgement; until then a keyword hit is the honest seam.
-export function conditionKeywords(condition) {
-  if (typeof condition !== "string") return [];
-  return condition
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter((t) => t.length > 0 && !CONDITION_STOPWORDS.has(t));
-}
-
-// Default condition evaluator: matches when any keyword from the condition is
-// present in the serialized read, or when the condition is empty/no keywords
-// (treat any new content as a trigger). Lowercased case-insensitive match.
-export function defaultConditionMatches(condition, read) {
-  const keywords = conditionKeywords(condition);
-  if (keywords.length === 0) return true;
-  const haystack = JSON.stringify(read ?? {}).toLowerCase();
-  return keywords.some((k) => haystack.includes(k));
-}
-
-// A stable seenId for a surface read. Prefers an explicit `seenId` on the read
-// (readers may stamp one, e.g. the newest issue id), else hashes a stable
-// serialization of the whole read. Two identical reads hash identically, so
-// the poller does not re-fire until content actually changes.
-export function defaultComputeSurfaceSeenId(read) {
-  if (read && typeof read === "object" && typeof read.seenId === "string" && read.seenId) {
-    return read.seenId;
-  }
-  return stableHash(JSON.stringify(read ?? {}));
-}
-
-// First short text snippet from a read for the watch notification message.
-function firstSnippet(data) {
-  if (!data) return null;
-  if (typeof data === "string") return data.slice(0, 140);
-  const issues = Array.isArray(data?.issues) ? data.issues : null;
-  if (issues) {
-    const first = issues.find((i) => i && (i.identifier || i.title));
-    if (first) {
-      const label = [first.identifier, first.status, first.title].filter(Boolean).join(" · ");
-      return label.slice(0, 140);
-    }
-  }
-  const text = JSON.stringify(data);
-  return text && text !== "{}" && text !== "[]" ? text.slice(0, 140) : null;
-}

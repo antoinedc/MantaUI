@@ -39,6 +39,7 @@ import {
   digestsStore,
   factsStore,
 } from "./ctoStores.mjs";
+import { collectWatcherHitsFromLedger } from "./ctoWatchers.mjs";
 
 export const SUGGEST_VERSION = 1;
 
@@ -53,7 +54,10 @@ export const ACTION_TYPES = Object.freeze([
 
 // Steep-decay source kinds that earn the `notify` (informational router call)
 // variant alongside the decision card. Deterministic rule, not a learned flag.
-export const NOTIFY_RECURRENCE_KINDS = Object.freeze(["failure-recurrence"]);
+// BET-1398: a watcher whose predicate was rate-threshold carries sourceKind
+// `watcher-hit-rate` and earns the notify variant (a burst-trip is a steep
+// signal); a plain `watcher-hit` (event-pattern / usage-burn) does not.
+export const NOTIFY_RECURRENCE_KINDS = Object.freeze(["failure-recurrence", "watcher-hit-rate"]);
 
 // §9.2 class priors — the per-class `p(want | class)` used in worthiness
 // calibration. Flat defaults; callers may override per class via config.
@@ -199,8 +203,8 @@ export function normalizeCandidates(parsed, findingId) {
 }
 
 // ---------------------------------------------------------------------------
-// P2 findings sources — digest-detected recurrences + fact anomalies.
-// (Watcher hits arrive in a later issue.)
+// P2 findings sources — digest-detected recurrences + fact anomalies
+// + watcher hits (BET-1398).
 // ---------------------------------------------------------------------------
 
 // A failure-tier digest item that recurs across digests is a high-salience
@@ -258,6 +262,10 @@ export function collectFindings(digests = [], facts = [], opts = {}) {
   return [
     ...collectFailuresFromDigests(digests, opts),
     ...collectAnomaliesFromFacts(facts, opts),
+    // BET-1398 watcher hits as a candidate source: high-salience `watcher.hit`
+    // evidence rows. `sourceKind` is `watcher-hit`, or `watcher-hit-rate` for a
+    // rate-threshold watcher (which earns the steep-decay notify variant).
+    ...collectWatcherHitsFromLedger(opts?.ledgerRows),
   ];
 }
 
@@ -420,6 +428,16 @@ export function createCtoSuggest(deps = {}) {
     }
   }
 
+  // BET-1398: the raw A1 ledger rows so the watcher-hit candidate source can
+  // be collected from them. Best-effort — an unreadable ledger yields [].
+  async function loadLedgerRows() {
+    try {
+      return (await ledger.read()) ?? [];
+    } catch {
+      return [];
+    }
+  }
+
   async function loadFacts() {
     const out = [];
     try {
@@ -560,8 +578,8 @@ export function createCtoSuggest(deps = {}) {
     const cfg = await configGet();
     const tier = String(cfg?.ctoTier ?? "low").toLowerCase();
     const coldStart = (await countVerdicts()) < VERDICT_MIN;
-    const [digestsArr, factsArr] = await Promise.all([loadDigests(), loadFacts()]);
-    const findings = collectFindings(digestsArr, factsArr, { nowMs });
+    const [digestsArr, factsArr, ledgerRows] = await Promise.all([loadDigests(), loadFacts(), loadLedgerRows()]);
+    const findings = collectFindings(digestsArr, factsArr, { nowMs, ledgerRows });
     let surfaced = 0;
     let silent = 0;
     for (const f of findings) {

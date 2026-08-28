@@ -146,6 +146,10 @@ export const toolRegistryStore = createCtoJsonStore("tool-registry", ctoPath("to
 export const toolUsageStore = createCtoJsonStore("tool-usage", ctoPath("tool-usage.json"));
 export const verdictsStore = createCtoJsonStore("verdicts", ctoPath("verdicts.json"));
 export const budgetStore = createCtoJsonStore("budget", ctoPath("budget.json"));
+// BET-1398 standing-query watchers (supersedes the cto.json watcher poller).
+// Payload shape: `{ watchers: [{ id, patternSignature, predicate, source,
+// created, lastHit, hits, retired? }] }`. Owned by ctoWatchers.mjs.
+export const watchersStore = createCtoJsonStore("watchers", ctoPath("watchers.json"));
 export const engineStateStore = createCtoJsonStore("engine-state", ctoPath("engine-state.json"));
 
 // ---------------------------------------------------------------------------
