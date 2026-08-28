@@ -2174,13 +2174,7 @@ function Shell() {
                   panels above are suppressed while it is open (their `active`
                   flips on !ctoOpen). Selecting a session closes it. */}
               <PanelShell key="cto" active={ctoOpen}>
-                <CtoPanel
-                  state={ctoState}
-                  onOpenSettings={() => {
-                    setSettingsOpen(true);
-                    setSettingsSection("general");
-                  }}
-                />
+                <CtoPanel state={ctoState} />
               </PanelShell>
               {/* New-session DRAFT layer: shown over the always-mounted
                   session panels when a draft is the active view (user hit +
