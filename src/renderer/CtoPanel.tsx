@@ -480,6 +480,7 @@ function LedgerView({
   const [rows, setRows] = useState<CtoLedgerRow[]>([]);
   const [nextBefore, setNextBefore] = useState<number | null>(null);
   const [actor, setActor] = useState<string>("");
+  const [kind, setKind] = useState<string>("");
   const [loading, setLoading] = useState(false);
 
   const loadPage = useCallback(
@@ -489,6 +490,7 @@ function LedgerView({
         const page: CtoLedgerPage = await window.api.ctoLedgerGet({
           before,
           actor: actor || undefined,
+          kind: kind || undefined,
           limit: 100,
         });
         setRows((prev) => (replace ? page.rows : [...prev, ...page.rows]));
@@ -502,14 +504,19 @@ function LedgerView({
         setLoading(false);
       }
     },
-    [actor, pushToast],
+    [actor, kind, pushToast],
   );
 
   // Reload when a filter changes (first page, replacing).
   useEffect(() => {
     void loadPage(undefined, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [actor]);
+  }, [actor, kind]);
+
+  // Distinct kinds across the rows loaded so far, for the §10.5 card-4
+  // "filter by type" chips (a kind chip that's been paged past stays selectable
+  // on the next page too, since we always pass the current filter to the box).
+  const kinds = Array.from(new Set(rows.map((r) => r.kind).filter((k): k is string => !!k))).sort();
 
   return (
     <div className="h-full w-full overflow-y-auto bg-bg">
@@ -526,6 +533,7 @@ function LedgerView({
 
         {/* Filter chips by actor */}
         <div className="mt-3 flex flex-wrap items-center gap-2">
+          <span className="text-xs uppercase tracking-wide text-text-faint">Actor</span>
           <button
             type="button"
             onClick={() => setActor("")}
@@ -545,9 +553,33 @@ function LedgerView({
           ))}
         </div>
 
+        {/* Filter chips by type (kind) */}
+        {kinds.length > 0 && (
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <span className="text-xs uppercase tracking-wide text-text-faint">Type</span>
+            <button
+              type="button"
+              onClick={() => setKind("")}
+              className={"rounded-full border px-3 py-1 text-xs " + (kind === "" ? "border-accent bg-fill-hover text-text" : "border-border-subtle text-text-muted")}
+            >
+              All
+            </button>
+            {kinds.map((k) => (
+              <button
+                key={k}
+                type="button"
+                onClick={() => setKind(kind === k ? "" : k)}
+                className={"rounded-full border px-3 py-1 font-mono text-xs " + (kind === k ? "border-accent bg-fill-hover text-text" : "border-border-subtle text-text-muted")}
+              >
+                {k}
+              </button>
+            ))}
+          </div>
+        )}
+
         {rows.length === 0 && !loading ? (
           <p className="mt-8 text-sm text-text-faint">
-            No activity recorded yet{actor ? ` for "${actor}"` : ""}.
+            No activity recorded yet{actor || kind ? ` for "${[actor, kind].filter(Boolean).join(" / ")}"` : ""}.
           </p>
         ) : (
           <ul className="mt-4 divide-y divide-border-subtle">
