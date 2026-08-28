@@ -942,26 +942,48 @@ export function generateSessionTitle({ directory, instruction }) {
 }
 
 /**
- * The THROWAWAY-SESSION cheap-agent call: create a hidden session in
- * `directory`, prompt it on a cheap agent (default `title`) with an
- * `instruction`, poll for the assistant reply for up to ~30s, then delete the
- * session. Returns the RAW assistant text; "" on any failure/timeout so the
- * caller can skip rather than error.
+ * The THROWAWAY-SESSION synchronous mechanism: create a hidden session in
+ * `directory`, prompt it (optionally on a given agent with a routed model)
+ * with an `instruction`, poll the assistant reply from the raw message list
+ * for up to ~`maxAttempts * pollIntervalMs`, then delete the session — all
+ * WITHOUT subscribing to a scoped SSE stream and WITHOUT registering the
+ * session directory (avoids the documented scoped-stream trap in the CTO
+ * spec §3.1). Returns `{ text, sid }`; `text` is "" on any failure/timeout so
+ * a caller can skip rather than error.
  *
- * This is the ONE such mechanism — auto-rename (BET-1018) and the optimizer's
- * constraint extraction (BET-1346) both use it; a second copy must not be
- * built. NOTE: do NOT add structured output (a JSON schema format) to the
- * prompt_async body — it is ACCEPTED by opencode but makes its reader reject
- * the whole session's message list with a permanent HTTP 400.
+ * The ONE non-SSE create→prompt→poll→read→delete primitive — auto-rename
+ * (BET-1018), the optimizer's constraint extraction (BET-1346) and the
+ * Adaptive CTO's ephemeral sessions (BET-1378) all go through it; a second
+ * copy must not be built. NOTE: do NOT add structured output (a JSON schema
+ * format) to the prompt_async body — it is ACCEPTED by opencode but makes its
+ * reader reject the whole session's message list with a permanent HTTP 400.
+ *
+ * `onCreated(sid)` (optional) is awaited right AFTER create and BEFORE the
+ * prompt is sent, so a caller that must track the session while it runs (the
+ * CTO's `activeEphemeral` set, BET-1378) can record it before the model
+ * starts, and clean it up in its own finally around this call.
  *
  * @param {object} a
  * @param {string} a.directory  absolute session directory
  * @param {string} a.instruction  the prompt text
  * @param {string} [a.agent]  agent to run on (default "title" — the cheap model)
+ * @param {object} [a.model]  structured { providerID, modelID, variant? } to pin (null/absent → box default)
  * @param {string} [a.title]  creation title tag for the hidden session
- * @returns {Promise<string>}
+ * @param {number} [a.pollIntervalMs]  ms between message-list polls (default 1000)
+ * @param {number} [a.maxAttempts]  max polls before giving up (default 30)
+ * @param {Function} [a.onCreated]  async (sid) => {} — called after create, before prompt
+ * @returns {Promise<{text: string, sid: string|null}>}
  */
-export async function runThrowawayAgent({ directory, instruction, agent = "title", title = "manta-throwaway" }) {
+export async function runSynchronousSession({
+  directory,
+  instruction,
+  agent = "title",
+  model,
+  title = "manta-throwaway",
+  pollIntervalMs = 1000,
+  maxAttempts = 30,
+  onCreated,
+}) {
   const absDir = expandTilde(directory);
 
   let sid = null;
@@ -976,11 +998,22 @@ export async function runThrowawayAgent({ directory, instruction, agent = "title
     );
     if (!createRes.ok) {
       await discardBody(createRes);
-      return "";
+      return { text: "", sid: null };
     }
     sid = (await createRes.json()).id;
+    if (typeof onCreated === "function") {
+      try {
+        await onCreated(sid);
+      } catch {
+        /* a failed tracker must not block the run (BET-1378 active set is best-effort) */
+      }
+    }
 
     const promptBody = { parts: [{ type: "text", text: instruction }], agent };
+    if (model && model.providerID && model.modelID) {
+      promptBody.model = { providerID: model.providerID, modelID: model.modelID };
+      if (model.variant) promptBody.variant = model.variant;
+    }
     const promptRes = await ocFetch(
       apiUrl(
         `/session/${encodeURIComponent(sid)}/prompt_async?directory=${encodeURIComponent(absDir)}`,
@@ -993,12 +1026,12 @@ export async function runThrowawayAgent({ directory, instruction, agent = "title
     );
     if (!promptRes.ok) {
       await discardBody(promptRes);
-      return "";
+      return { text: "", sid };
     }
 
     const msgUrl = apiUrl(`/session/${encodeURIComponent(sid)}/message`);
-    for (let i = 0; i < 30; i++) {
-      await new Promise((r) => setTimeout(r, 1000));
+    for (let i = 0; i < maxAttempts; i++) {
+      await new Promise((r) => setTimeout(r, pollIntervalMs));
       const r = await ocFetch(msgUrl);
       if (!r.ok) {
         await discardBody(r);
@@ -1006,11 +1039,11 @@ export async function runThrowawayAgent({ directory, instruction, agent = "title
       }
       const msgs = await r.json();
       const text = extractAssistantText(msgs);
-      if (text) return text;
+      if (text) return { text, sid };
     }
-    return "";
+    return { text: "", sid };
   } catch {
-    return "";
+    return { text: "", sid };
   } finally {
     if (sid) {
       try {
@@ -1020,6 +1053,24 @@ export async function runThrowawayAgent({ directory, instruction, agent = "title
       }
     }
   }
+}
+
+/**
+ * The THROWAWAY-SESSION cheap-agent call: run runSynchronousSession on a cheap
+ * agent (default `title`), returning the RAW assistant text; "" on any
+ * failure/timeout so the caller can skip rather than error. Thin wrapper over
+ * runSynchronousSession — the single source of truth for this mechanism.
+ *
+ * @param {object} a
+ * @param {string} a.directory  absolute session directory
+ * @param {string} a.instruction  the prompt text
+ * @param {string} [a.agent]  agent to run on (default "title" — the cheap model)
+ * @param {string} [a.title]  creation title tag for the hidden session
+ * @returns {Promise<string>}
+ */
+export async function runThrowawayAgent({ directory, instruction, agent = "title", title = "manta-throwaway" }) {
+  const { text } = await runSynchronousSession({ directory, instruction, agent, title });
+  return text;
 }
 
 function extractAssistantText(msgs) {

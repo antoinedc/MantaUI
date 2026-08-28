@@ -28,6 +28,9 @@ import {
 } from "./chatUtils";
 import { IS_WINDOWS, MOD_KEY } from "./platform";
 import { SessionRow as RailSessionRow, type SessionStatus } from "./SessionRow";
+import { StatusDot } from "./StatusDot";
+import { dotTone, badgeLabel } from "./ctoView";
+import type { CtoState } from "../shared/api.js";
 import { useRailGlide } from "./RailGlide";
 import { ConfirmModal } from "./ConfirmModal";
 import { Modal } from "./Modal";
@@ -70,10 +73,18 @@ type Props = {
   // BET-1049: open the "resume after limit reset" modal from the sidebar
   // header pill (the durable indicator of stopped conversations).
   onOpenResumeModal: () => void;
+  // BET-1384: the Adaptive CTO entry (§10.1) — pinned above the project list.
+  // Clicking opens the CTO pane in the main content area (replaces the active
+  // session panel).
+  onOpenCto: () => void;
+  // Live `{kind:"ctoState"}` state (held in App): drives the status dot and
+  // the needs-you badge. Passed in so the sidebar shares ONE subscription +
+  // GET with the pane instead of a second copy.
+  ctoState: CtoState | null;
 };
 
 export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
-  { onOpenSettings, onNewProject, onNewSessionInProject, onOpenResumeModal },
+  { onOpenSettings, onNewProject, onNewSessionInProject, onOpenResumeModal, onOpenCto, ctoState },
   ref,
 ) {
   // BET-730: per-field selectors, never a bare useStore() — a no-selector
@@ -677,6 +688,27 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
         {...railGlide.containerProps}
       >
         {railGlide.glide}
+        {/* Adaptive CTO entry (BET-1384 / §10.1) — pinned above the project
+            list, global scope. Status dot reflects the §10.6 state machine;
+            the red badge shows the count of open needs-you items, hidden at
+            zero. Clicking opens the CTO pane. */}
+        <div className="px-1 pb-1">
+          <button
+            type="button"
+            onClick={onOpenCto}
+            className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-sm font-medium text-text hover:bg-fill-hover"
+            title="Adaptive CTO — what needs you, what's going on"
+            aria-label="Open the CTO overview"
+          >
+            <StatusDot tone={dotTone(ctoState?.dot)} />
+            <span className="flex-1 text-left">CTO</span>
+            {badgeLabel(ctoState) != null && (
+              <span className="rounded-full bg-danger px-1 text-[11px] font-semibold leading-5 text-white">
+                {badgeLabel(ctoState)}
+              </span>
+            )}
+          </button>
+        </div>
         <RailCreateRow label="New workspace" shortcut={`${MOD_KEY}N`} onClick={onNewProject} />
         {/* New-session drafts whose mode is "new-project" live directly beneath
             the New workspace row that created them — they belong to no project.
