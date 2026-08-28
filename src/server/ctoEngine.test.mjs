@@ -565,6 +565,60 @@ test("engine exposes .facts and pumps proposals on tick (%40 enabled)", async ()
   assert.equal(saved.filter((f) => !f.superseded_by).length, 1);
 });
 
+test("proposeFact enqueues, resolves via the gatekeeper, and reports the verdict", async () => {
+  const inmemory = new Map();
+  const fstate = { v: 1 };
+  const facts = createFactsEngine({
+    engineState: {
+      load: async () => ({ ...fstate }),
+      save: async (s) => {
+        Object.keys(fstate).forEach((k) => delete fstate[k]);
+        Object.assign(fstate, s);
+      },
+    },
+    facts: { load: async (p) => inmemory.get(p) ?? { v: 1, facts: [] }, save: async (p, d) => inmemory.set(p, d), dir: "x" },
+    archive: { load: async (p) => inmemory.get("a" + p) ?? { v: 1, entries: [] }, save: async (p, d) => inmemory.set("a" + p, d) },
+  });
+  const harness = makeHarness({ ctoEnabled: true, facts });
+  await harness.engine.resume();
+
+  // zero-ref is rejected with the attach-evidence message, never enqueued
+  const rejected = await harness.engine.proposeFact({
+    project: "alpha",
+    kind: "status",
+    statement: "no evidence",
+    refs: [],
+    sessionID: "ses_1",
+  });
+  assert.equal(rejected.ok, false);
+  assert.match(rejected.error ?? "", /attach evidence/i);
+
+  // a valid proposal resolves (degraded gatekeeper → add) with an idempotent id
+  const first = await harness.engine.proposeFact({
+    project: "alpha",
+    kind: "decision",
+    statement: "moved to postgres",
+    refs: ["m1"],
+    sessionID: "ses_1",
+  });
+  assert.equal(first.ok, true);
+  assert.equal(first.applied, true);
+  assert.equal(first.outcome.action, "add");
+  assert.ok(first.proposalId && first.proposalId.startsWith("cto:"));
+
+  // same-content re-submission is idempotent: same proposalId, not re-applied
+  const again = await harness.engine.proposeFact({
+    project: "alpha",
+    kind: "decision",
+    statement: "moved to postgres",
+    refs: ["m1"],
+    sessionID: "ses_1",
+  });
+  assert.equal(again.proposalId, first.proposalId);
+  assert.equal(again.applied, false, "idempotent — an already-applied proposal is not applied twice");
+  assert.equal(again.outcome.action, "add");
+});
+
 // ---------------------------------------------------------------------------
 // buildFactsContext (BET-1390 / §6.9) — spawn-context facts seed
 // ---------------------------------------------------------------------------
