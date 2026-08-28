@@ -14,6 +14,7 @@ import {
   relativeTime,
   digestExpandable,
   finishedVariant,
+  nowRailMeta,
   type BlockerCard,
   type FinishedVariant,
 } from "./ctoView";
@@ -166,7 +167,9 @@ export type NowCard = {
   name: string;
   state: "working" | "blocked";
   step: string | null;
-  meta: string; // "project · elapsed"
+  project: string;
+  cost: string | null;
+  elapsed: string | null;
   onClick: () => void;
 };
 
@@ -200,7 +203,7 @@ export const NowRail = memo(function NowRail({ cards }: { cards: NowCard[] }) {
             ) : card.step ? (
               <span className="truncate text-xs text-text-muted">{card.step}</span>
             ) : (
-              <span className="truncate text-xs text-text-faint">{card.meta}</span>
+              <span className="truncate text-xs text-text-faint">{nowRailMeta(card.project, card.cost, card.elapsed)}</span>
             )}
           </button>
         ))}

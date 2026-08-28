@@ -460,6 +460,11 @@ type State = {
   seedPrompt: { sid: string; text: string } | null;
   // sessionName -> windowIndex -> status
   status: Record<string, Record<number, WindowStatusUI>>;
+  // opencode sessionId -> accumulated cost (USD), read off the same
+  // `opencodeListSessions` response as the `lastMessageAt` backfill. Feeds the
+  // CTO panel's Now-rail `project · cost · elapsed` line (§10.4). Absent when
+  // the box hasn't reported a cost yet — the renderer omits the segment.
+  sessionCost: Record<string, number | undefined>;
   // Background-delegation jobs keyed by childSessionID (BET-381). Drives the
   // sidebar's per-row activity second line (desktop + mobile). Fed by the
   // single app-level 10s poll — see JobRow comment above.
@@ -832,6 +837,7 @@ export const useStore = create<State>((set, get) => ({
   autoSubmitPrompt: null,
   seedPrompt: null,
   status: {},
+  sessionCost: {},
   jobs: {},
   usage: [],
   usageStopped: [],
@@ -1544,6 +1550,7 @@ export const useStore = create<State>((set, get) => ({
     if (dirs.size === 0) return;
     if (!window.api.opencodeListSessions) return;
     const updatedBySessionId = new Map<string, number>();
+    const costBySessionId = new Map<string, number | undefined>();
     await runWithConcurrency(
       [...dirs],
       OPENCODE_FANOUT_CONCURRENCY,
@@ -1555,13 +1562,16 @@ export const useStore = create<State>((set, get) => ({
             if (typeof updated === "number" && updated > 0) {
               updatedBySessionId.set(s.id, updated);
             }
+            if (typeof s.cost === "number" && Number.isFinite(s.cost)) {
+              costBySessionId.set(s.id, s.cost);
+            }
           }
         } catch {
           // Per-directory failure is non-fatal — best-effort backfill.
         }
       },
     );
-    if (updatedBySessionId.size === 0) return;
+    if (updatedBySessionId.size === 0 && costBySessionId.size === 0) return;
     set((prev) => {
       let changed = false;
       const next: Record<string, Record<number, WindowStatusUI>> = {
@@ -1589,7 +1599,12 @@ export const useStore = create<State>((set, get) => ({
           changed = true;
         }
       }
-      return changed ? { status: next } : prev;
+      const sessionCost = costBySessionId.size
+        ? { ...prev.sessionCost, ...Object.fromEntries(costBySessionId) }
+        : prev.sessionCost;
+      const costChanged = costBySessionId.size > 0;
+      changed = changed || costChanged;
+      return changed ? { status: next, ...(costChanged ? { sessionCost } : {}) } : prev;
     });
   },
 

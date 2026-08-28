@@ -278,3 +278,18 @@ export function resting(
 export function stateTone(state: "working" | "blocked"): "ok" | "warn" {
   return state === "blocked" ? "warn" : "ok";
 }
+
+// Now-rail cost formatting (§10.4). A session's accumulated cost (USD) as a
+// short `$X.XX` label, or null when absent/zero/NaN so the caller can omit the
+// segment entirely (component may also choose how granular to show it).
+export function nowCostLabel(cost: number | null | undefined): string | null {
+  if (typeof cost !== "number" || !Number.isFinite(cost) || cost <= 0) return null;
+  return `$${cost.toFixed(2)}`;
+}
+
+// Now-rail meta composition (§10.4): `project · cost · elapsed`. The cost
+// segment sits between the project name and the elapsed time and is dropped
+// when absent (no `· ·` gap in the line). Pure + deterministic for tests.
+export function nowRailMeta(project: string, cost: string | null, elapsed: string | null): string {
+  return [project, cost, elapsed].filter((s): s is string => Boolean(s && s.length > 0)).join(" · ");
+}
