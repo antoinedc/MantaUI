@@ -76,6 +76,11 @@ struct MantaProse: View {
     /// surfaces pass nil, which renders atomic blocks with NO context menu.
     let onQuote: ((String, QuoteDestination) -> Void)?
 
+    /// The on-screen width of the enclosing atomic-block container, measured
+    /// once and reused as the context-menu preview's width so the lifted block
+    /// sits at the same width as the block it came from. Nil until measured.
+    @State private var previewWidth: CGFloat?
+
     init(text: String, tokens: Tokens, onQuote: ((String, QuoteDestination) -> Void)? = nil) {
         self.text = text
         self.tokens = tokens
@@ -101,6 +106,12 @@ struct MantaProse: View {
         .accessibilityIdentifier("assistant-prose")
     }
 
+    /// Height cap for a tall atomic block's context-menu preview. This is a
+    /// PREVIEW CONTAINMENT value — so a lifted block can never overlap the
+    /// composer at the bottom of the screen — not a layout/typography metric.
+    /// Do not reuse it as real spacing.
+    private static let atomicPreviewMaxHeight: CGFloat = 340
+
     @ViewBuilder
     private func blockView(_ block: MarkdownProseBlock) -> some View {
         switch block.kind {
@@ -121,13 +132,18 @@ struct MantaProse: View {
                         .allowsHitTesting(false)
                 }
                 .contentShape(Rectangle())
-                .contextMenu { atomicMenu(block.source, onQuote: onQuote) }
+                .background(previewWidthReader)
+                .contextMenu(
+                    menuItems: { atomicMenu(block.source, onQuote: onQuote) },
+                    preview: { atomicPreview(block.source) }
+                )
             } else {
-                VStack(alignment: .leading, spacing: 0) {
-                    markdownBody(block.source)
-                        .allowsHitTesting(false)
-                }
-                .contentShape(Rectangle())
+                // Read-only surface (subagent drill-in, capture fixture): there
+                // is no composer to quote into, so this block must not eat
+                // touches and offer nothing in exchange. Render it EXACTLY as
+                // prose — full hit testing (links inside quotes / code blocks /
+                // tables stay tappable), no contentShape, no context menu.
+                markdownBody(block.source)
             }
         }
     }
@@ -163,6 +179,33 @@ struct MantaProse: View {
             .tint(tokens.border, for: .blockQuote)
             .markdownTableStyle(MantaMarkdownTableStyle(tokens: tokens))
             .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The lifted preview shown while the atomic-block context menu is open.
+    /// Renders the block's own markdown on an opaque design-token backdrop
+    /// (`tokens.panel` — `bg` does not exist on `Tokens`), pinned to the
+    /// block's measured on-screen width, and height-capped so a tall block can
+    /// never overlap the composer at the bottom of the screen.
+    private func atomicPreview(_ source: String) -> some View {
+        markdownBody(source)
+            .padding(Metrics.spacing.sp3)
+            .frame(width: previewWidth, alignment: .leading)
+            .frame(maxHeight: Self.atomicPreviewMaxHeight, alignment: .top)
+            .background(tokens.panel)
+            .clipped()
+    }
+
+    /// Measures the atomic block container's width (once) so the lifted
+    /// context-menu preview can be pinned to the same width as the block on
+    /// screen.
+    private var previewWidthReader: some View {
+        GeometryReader { geo in
+            Color.clear.onAppear {
+                if previewWidth == nil, geo.size.width > 0 {
+                    previewWidth = geo.size.width
+                }
+            }
+        }
     }
 
     @ViewBuilder
