@@ -33,7 +33,7 @@ function makeEngine(overrides = {}) {
   return engine;
 }
 
-const TOOL_COUNT = 17; // 14 reads (BET-1164) + 3 watcher tools watch/unwatch/list_watches (BET-1165)
+const TOOL_COUNT = 19; // 16 reads (BET-1164 + BET-1383 read_rollups/read_ledger) + 3 watcher tools watch/unwatch/list_watches (BET-1165)
 
 // ---------------------------------------------------------------------------
 // Registry integrity
@@ -61,6 +61,8 @@ test("registry exposes every cto read tool with a complete shape, all mode auto"
       "context_state",
       "session_plan_mode",
       "get_config",
+      "read_rollups",
+      "read_ledger",
       "watch",
       "unwatch",
       "list_watches",
@@ -324,4 +326,19 @@ test("appendCtoAudit appends a timestamped entry and persists via injected save"
   assert.equal(store.audit[0].tool, "list_sessions");
   // persisted
   assert.equal(state.audit.length, 1);
+});
+
+// BET-1383 (A9): the P1 evidence-read verbs read_rollups + read_ledger. Against
+// the sandboxed (empty) stores they return structured, never-throwing results.
+test("read_rollups + read_ledger return structured ok results from empty stores", async () => {
+  const engine = makeEngine();
+  const r1 = await engine.dispatch("read_rollups", { level: "day" }, {});
+  assert.equal(r1.ok, true);
+  assert.equal(r1.error, undefined);
+  assert.deepEqual(r1.data.rollups, []);
+  const r2 = await engine.dispatch("read_ledger", {}, {});
+  assert.equal(r2.ok, true);
+  assert.equal(r2.error, undefined);
+  assert.deepEqual(r2.data.rows, []);
+  assert.equal(r2.data.count, 0);
 });
