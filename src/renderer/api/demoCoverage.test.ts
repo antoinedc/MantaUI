@@ -55,6 +55,7 @@ export const DEMO_UNIMPLEMENTED = [
   "ctoPause",
   "ctoResume",
   "ctoStateGet",
+  "ctoVerdict",
   "delegateApprove",
   "delegateDecline",
   "delegateDelete",
