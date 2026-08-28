@@ -455,6 +455,22 @@ test("atoms: valid atoms accepted, invalid ones rejected, omitted atoms fine (§
   assert.ok(!validateSegmentSummary(validSummary({ atoms: "not-an-array" })));
 });
 
+// BET-1394 (§3.2): journal proposals ride in the A4/§5.2 summary output.
+test("journalProposals: optional field, validated like a proposal list", () => {
+  assert.ok(validateSegmentSummary(validSummary({ journalProposals: [] })));
+  assert.ok(
+    validateSegmentSummary(validSummary({ journalProposals: [{ text: "tends to batch small commits" }] })),
+  );
+  assert.ok(
+    validateSegmentSummary(
+      validSummary({ journalProposals: [{ text: "prefers async", refs: ["m1"] }, { text: "second" }] }),
+    ),
+  );
+  assert.ok(!validateSegmentSummary(validSummary({ journalProposals: "nope" })));
+  assert.ok(!validateSegmentSummary(validSummary({ journalProposals: [{ noText: true }] })));
+  assert.ok(!validateSegmentSummary(validSummary({ journalProposals: Array.from({ length: 21 }, () => ({ text: "x" })) })));
+});
+
 test("parseSegmentSummaryText extracts JSON from fenced/prose model output", () => {
   const obj = parseSegmentSummaryText('Here you go:\n```json\n{"v":1,"sessionID":"s1"}\n```');
   assert.equal(obj.sessionID, "s1");

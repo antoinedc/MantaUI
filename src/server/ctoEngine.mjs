@@ -59,6 +59,7 @@ import { createCtoBackfill } from "./ctoBackfill.mjs";
 import { startPoller } from "./startPoller.mjs";
 import { createSeenIdFilter } from "./seenIds.mjs";
 import { createCtoProfile, DAY_MS } from "./ctoProfile.mjs";
+import { createCtoJournal } from "./ctoJournal.mjs";
 import {
   getDesktopPresence as pushGetDesktopPresence,
   getLastDesktopHeartbeat as pushGetLastDesktopHeartbeat,
@@ -332,6 +333,7 @@ export function createCtoEngine(deps = {}) {
   let rollupRunner = null;
   let factsEngine = null;
   let profileEngine = null;
+  let journalEngine = null;
   let verifyHandle = null;
   let tuneHandle = null;
   let builtInBackfill = null;
@@ -778,7 +780,13 @@ export function createCtoEngine(deps = {}) {
       now,
       // §8.2 profile feed: every closed segment's atoms/session-length/project
       // go to the profile engine in the same pass (no second model call).
-      onSummary: async (summary) => getProfile().applySegmentSummary(summary),
+      // §3.2 journal feed: any `journalProposals` in the same A4 output are
+      // written by the engine (cap-50, eviction at admission).
+      onSummary: async (summary) => {
+        getProfile().applySegmentSummary(summary);
+        const jp = Array.isArray(summary?.journalProposals) ? summary.journalProposals : [];
+        if (jp.length > 0) await getJournal().addProposals(jp).catch(() => {});
+      },
     });
 
   // ----- BET-1381 rollups (§5.3) -----
@@ -838,6 +846,16 @@ export function createCtoEngine(deps = {}) {
     if (profileEngine) return profileEngine;
     profileEngine = deps.profile ?? createCtoProfile({ now });
     return profileEngine;
+  }
+
+  // Lazy-construct the journal (§3.2, BET-1394). Pure module over the injected
+  // store; inert-safe and never throws. The engine owns the only write path
+  // (ephemeral-session `journalProposals` via the segmenter's onSummary) and
+  // exposes it for the render-model read under Settings → Internals.
+  function getJournal() {
+    if (journalEngine) return journalEngine;
+    journalEngine = deps.journal ?? createCtoJournal({});
+    return journalEngine;
   }
 
   // Lazy-construct the blackboard facts engine (BET-1389 / §6). Mirrors the
@@ -1323,6 +1341,9 @@ export function createCtoEngine(deps = {}) {
     },
     get profile() {
       return getProfile();
+    },
+    get journal() {
+      return getJournal();
     },
     get cards() {
       return cards;

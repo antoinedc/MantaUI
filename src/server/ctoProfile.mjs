@@ -81,6 +81,7 @@ export const RESERVOIR_CAP = 200; // session-length reservoir (§8.2)
 export const TZ_MIN_DAYS = 14; // §8.2: TZ flagged low-confidence until 14 days
 export const TZ_NIGHT_HOUR = 4; // activity trough is assumed to be local ~4:00
 export const TZ_CONF_HIGH = 0.65; // digest's inferred-TZ branch threshold
+export const SUPPRESSION_MS = 90 * DAY_MS; // §8.5 sensitive-inference suppression TTL
 
 // --- consumers (μ−2σ) --------------------------------------------------------
 export const EXPERTISE_NOVICE = 0.33;
@@ -426,7 +427,7 @@ export function capDimensions(skills = {}, { max = SKILL_DIM_MAX } = {}) {
 function defaultProfile() {
   return {
     v: 1,
-    identity: { stated: {} },
+    identity: { stated: {}, suppressed: {} },
     skills: {},
     repo_familiarity: {},
     temporal: {
@@ -476,6 +477,7 @@ export function createCtoProfile(deps = {}) {
         state = { ...defaultProfile(), ...raw };
         state.interaction = { ...defaultProfile().interaction, ...(raw.interaction || {}) };
         state.temporal = { ...defaultProfile().temporal, ...(raw.temporal || {}) };
+        state.identity = { stated: {}, suppressed: {}, ...(raw.identity || {}) };
         sessionLenReservoir._seed(raw._meta?.reservoir || []);
       }
     } catch {
@@ -676,5 +678,136 @@ export function createCtoProfile(deps = {}) {
       const flag = offHoursDeviation({ hour: h, components: state.temporal.workday.components });
       return flag ? [{ ...flag }] : [];
     },
+
+    // §8.5 stated wins: an inline edit writes `source: stated`, which beats
+    // every inferred value for that dimension until it is re-edited (the render
+    // model resolves `source` + `value` here, nothing client-side decides it).
+    // `value` is the displayed value (a number for skills, or any label).
+    async setStated({ dimension, value, label } = {}) {
+      if (typeof dimension !== "string" || !dimension.trim()) {
+        return { ok: false, error: "dimension is required" };
+      }
+      if (value == null || value === "") {
+        return { ok: false, error: "value is required" };
+      }
+      state.identity = { stated: {}, suppressed: {}, ...(state.identity || {}) };
+      state.identity.stated = state.identity.stated || {};
+      state.identity.stated[dimension] = { value, label: label ?? null, ts: now() };
+      markDirty();
+      await flush();
+      return { ok: true };
+    },
+
+    // §8.5 sensitive-inference suppression: deleting a sensitive inference (in
+    // this drill-down) suppresses that inference CLASS for 90 days, server-side
+    // — the render model omits a suppressed class entirely until it expires.
+    async suppressInference(cls) {
+      if (typeof cls !== "string" || !cls) {
+        return { ok: false, error: "inference class is required" };
+      }
+      state.identity = { stated: {}, suppressed: {}, ...(state.identity || {}) };
+      state.identity.suppressed = state.identity.suppressed || {};
+      state.identity.suppressed[cls] = now() + SUPPRESSION_MS;
+      markDirty();
+      await flush();
+      return { ok: true };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// §8.5 sensitive inferences + the render model — pure, server-side composition.
+// The renderer does NO math: GET /api/cto/profile returns exactly this.
+// ---------------------------------------------------------------------------
+
+export function boxLocalHourOf(ts) {
+  const d = new Date(ts);
+  return d.getHours() + d.getMinutes() / 60 + d.getSeconds() / 3600;
+}
+
+// A sensitive inference class is suppressed while its tombstone is in the
+// future (90d TTL). Server-enforced: the render model never emits a suppressed
+// class, so the client cannot show what the user asked to hide.
+export function isSuppressed(profile, cls, { nowMs = Date.now() } = {}) {
+  const suppressed = profile?.identity?.suppressed ?? {};
+  return (suppressed[cls] ?? 0) > nowMs;
+}
+
+// The currently-surfaceable sensitive inferences (sleep window, overwork).
+// Both derive from EXISTING stored signal (tz inference + the §8 deviation
+// flag) — this is presentation, never new inference (B5 owns that).
+export function sensitiveInferences(profile = {}, { nowMs = Date.now() } = {}) {
+  const out = [];
+  const tz = profile.temporal?.tz_offset;
+  if (tz?.value != null && !isSuppressed(profile, "sleep_window", { nowMs })) {
+    const off = tz.value;
+    const sign = off >= 0 ? "+" : "-";
+    out.push({
+      class: "sleep_window",
+      label: "Sleep window",
+      text: `Inferred timezone UTC${sign}${Math.abs(off)}:00 from your activity trough (confidence ${Math.round((tz.confidence ?? 0) * 100)}%).`,
+      confidence: tz.confidence ?? 0,
+    });
+  }
+  const dev = offHoursDeviation({
+    hour: boxLocalHourOf(nowMs),
+    components: profile.temporal?.workday?.components ?? [],
+  });
+  if (dev && !isSuppressed(profile, "overwork", { nowMs })) {
+    out.push({ class: "overwork", label: "Overwork pattern", text: dev.text, confidence: null });
+  }
+  return out;
+}
+
+// The full render model the drill-down draws from: σ bands + top-3 evidence
+// refs per skill (stated wins resolved HERE), the 24-bin rhythm histogram +
+// TZ, interaction stats, repository familiarity, and the sensitive-inference
+// flags (suppressed classes already omitted).
+export function composeProfileRender(profile = {}, { nowMs = Date.now() } = {}) {
+  const stated = profile.identity?.stated ?? {};
+  const skills = Object.entries(profile.skills ?? {})
+    .map(([dimension, d]) => {
+      const st = stated[dimension];
+      const exp = expertiseOf(d);
+      return {
+        dimension,
+        mu: d.mu,
+        sigma: d.sigma,
+        expertise: exp,
+        label: expertiseLabel(exp),
+        source: st ? "stated" : "inferred",
+        statedValue: st ? st.value : null,
+        updated: d.updated ?? null,
+        topEvidence: Array.isArray(d.evidence) ? d.evidence.slice(0, 3) : [],
+      };
+    })
+    .sort((a, b) => b.expertise - a.expertise);
+  const temporal = profile.temporal ?? {};
+  const tz = temporal.tz_offset ?? { value: null, confidence: 0 };
+  return {
+    compiledAt: nowMs,
+    skills,
+    rhythm: {
+      tzOffset: tz.value,
+      tzConfidence: tz.confidence,
+      lowConfidence: (temporal.dayCount ?? 0) < TZ_MIN_DAYS,
+      dayCount: temporal.dayCount ?? 0,
+      histogram: Array.isArray(temporal.histogram) ? temporal.histogram : new Array(24).fill(0),
+      components: temporal.workday?.components ?? [],
+      rBar: temporal.workday?.r_bar ?? 0,
+      weekendRatio: temporal.workday?.weekend_ratio ?? 0,
+    },
+    interaction: {
+      promptFreqEwma: profile.interaction?.prompt_freq_ewma ?? null,
+      sessionLenMedian: profile.interaction?.session_len_median ?? null,
+      questionMix: profile.interaction?.question_mix ?? {},
+      correctionRate: profile.interaction?.correction_rate ?? { corrected: 0, total: 0 },
+      verbosityPref: profile.interaction?.verbosity_pref ?? { value: 0, source: "inferred" },
+      depthPref: profile.interaction?.depth_pref ?? { value: 0, source: "inferred" },
+    },
+    repository: Object.entries(profile.repo_familiarity ?? {})
+      .map(([repo, r]) => ({ repo, doa: r.doa ?? 0, doi: r.doi ?? 0 }))
+      .sort((a, b) => b.doa - a.doa),
+    sensitive: sensitiveInferences(profile, { nowMs }),
   };
 }

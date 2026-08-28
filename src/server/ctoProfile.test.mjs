@@ -33,6 +33,8 @@ import {
   risingEdgeMsIntoDay,
   offHoursDeviation,
   capDimensions,
+  composeProfileRender,
+  sensitiveInferences,
   BKT,
   MIN_SIGMA,
   SIGMA0,
@@ -406,3 +408,71 @@ test("engine: audience consumer + rising edge + deviations work end-to-end", asy
   assert.ok(p.getRisingEdgeMsIntoDay() === null || typeof p.getRisingEdgeMsIntoDay() === "number");
   assert.ok(Array.isArray(p.getDeviations({ hour: 12 })));
 });
+
+// ---------------------------------------------------------------------------
+// BET-1394 — §8.5 stated-wins, sensitive-inference suppression, render model.
+// ---------------------------------------------------------------------------
+
+function profileStoreWith(saveSpy) {
+  return { load: async () => ({}), save: async (d) => (saveSpy ? (saveSpy.saved = d) : undefined) };
+}
+
+test("§8.5 setStated: stated wins over inferred in the render model", async () => {
+  const spy = { saved: null };
+  const p = createCtoProfile({ store: profileStoreWith(spy), now: () => 0 });
+  await p.init();
+  await p.applySegmentSummary({ atoms: [{ dimension: "rust", direction: "up", weight: 1, ref: "s1" }], window: [0, 60000] });
+  await p.setStated({ dimension: "rust", value: 0.95 });
+  const render = composeProfileRender(p.get());
+  const skill = render.skills.find((s) => s.dimension === "rust");
+  assert.ok(skill, "dimension present");
+  assert.equal(skill.source, "stated", "stated beats inferred");
+  assert.equal(skill.statedValue, 0.95);
+  assert.ok(spy.saved, "persisted on edit");
+});
+
+test("§8.5 suppressInference: suppresses the class for 90 days, then expires", async () => {
+  let clock = 1_000_000;
+  const p = createCtoProfile({ store: { load: async () => ({}), save: async () => {} }, now: () => clock });
+  await p.init();
+  // seed an inferred tz so the sleep_window inference is surfaceable
+  p.observeEvent({ kind: "prompt", ts: 12 * 3_600_000 });
+  p.observeEvent({ kind: "prompt", ts: 12 * 3_600_000 + 3_600_000 });
+  p.get().temporal.tz_offset = { value: 1, confidence: 0.8 }; // force an inference
+  const before = sensitiveInferences(p.get(), { nowMs: clock });
+  assert.ok(before.some((s) => s.class === "sleep_window"), "sleep_window surfaceable before suppression");
+
+  await p.suppressInference("sleep_window");
+  const after = sensitiveInferences(p.get(), { nowMs: clock });
+  assert.ok(!after.some((s) => s.class === "sleep_window"), "suppressed class omitted");
+
+  // 90 days later it is gone from the suppression list → resurfaceable
+  const renderAfter = composeProfileRender(p.get(), { nowMs: clock });
+  assert.ok(!renderAfter.sensitive.some((s) => s.class === "sleep_window"));
+  clock += 91 * 86_400_000;
+  const expired = sensitiveInferences(p.get(), { nowMs: clock });
+  assert.ok(expired.some((s) => s.class === "sleep_window"), "resurfaces after 90d");
+});
+
+test("§8.5 composeProfileRender: resolves stated wins + top-3 evidence + rhythm", async () => {
+  const p = createCtoProfile({ store: { load: async () => ({}), save: async () => {} }, now: () => 0 });
+  await p.init();
+  await p.applySegmentSummary({
+    project: "manta",
+    atoms: [
+      { dimension: "swift", direction: "up", weight: 1, ref: "m1" },
+      { dimension: "swift", direction: "down", weight: 1, ref: "m2" },
+      { dimension: "typescript", direction: 0.5, weight: 0.8, ref: "m3" },
+    ],
+    window: [0, 60_000],
+  });
+  const render = composeProfileRender(p.get());
+  assert.ok(Array.isArray(render.skills));
+  assert.ok(Array.isArray(render.rhythm.histogram) && render.rhythm.histogram.length === 24);
+  assert.ok(render.rhythm.tzOffset === null || typeof render.rhythm.tzOffset === "number");
+  assert.equal(typeof render.interaction.sessionLenMedian, "number");
+  assert.ok(Array.isArray(render.repository));
+  const swift = render.skills.find((s) => s.dimension === "swift");
+  assert.ok(swift.topEvidence.length >= 1 && swift.topEvidence.length <= 3);
+});
+

@@ -34,6 +34,7 @@
 
 import { engineStateStore, segmentsStore, ledgerStore } from "./ctoStores.mjs";
 import { isUserPromptEvent } from "./ctoEvidence.mjs";
+import { validateProposalList } from "./ctoJournal.mjs";
 
 export const DEFAULT_G_MINUTES = 45;
 export const G_MIN = 20;
@@ -246,6 +247,9 @@ export function validateSegmentSummary(obj) {
   if (obj.atoms !== undefined && !validateAtoms(obj.atoms)) {
     return false;
   }
+  if (obj.journalProposals !== undefined && !validateProposalList(obj.journalProposals)) {
+    return false;
+  }
   return true;
 }
 
@@ -263,6 +267,7 @@ export function degradedSegmentSummary({ sessionID, project, start, end, lastUse
     importance: 1,
     one_liner: truncatePrompt(lastUserPrompt),
     atoms: [],
+    journalProposals: [],
   };
 }
 
