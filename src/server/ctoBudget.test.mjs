@@ -2,17 +2,24 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   DEFAULT_AMBIENT_CAP_USD,
+  DEFAULT_NIGHT_CAP_USD,
+  FRACTILE_INIT,
   THRIFTY_SHED_ORDER,
   THRIFTY_KEEP,
   createCtoBudget,
   ambientCapUsd,
   dayKey,
   defaultBudgetPayload,
+  defaultQuotaState,
   didDayRoll,
   expectedHourlyBurnUsd,
+  foldQuotaState,
   hoursIntoLocalDay,
   isAmbientCapHit,
   isWorkShedInThrifty,
+  nightCapUsd,
+  notchFractile,
+  planReserve,
   priceTokens,
   recordSpend,
   spendForDay,
@@ -201,4 +208,157 @@ test("createCtoBudget degrades safely when the store is down", async () => {
   assert.equal(await budget.isCapHit(2.5), false);
   await budget.record({ model: {}, tokens: 1000 }); // must not throw
   assert.equal(await budget.expectedHourlyBurnUsd({ capUsd: 2.5 }), 2.5 / 24);
+});
+
+// ---------------------------------------------------------------------------
+// BET-1400 — reserve & spendable (§11.2, §11.3)
+// ---------------------------------------------------------------------------
+
+test("nightCapUsd defaults to $5 and honors ctoNightCapUsd", () => {
+  assert.equal(nightCapUsd({}), DEFAULT_NIGHT_CAP_USD);
+  assert.equal(nightCapUsd({ ctoNightCapUsd: 3 }), 3);
+  assert.equal(nightCapUsd({ ctoNightCapUsd: 0 }), 0);
+  assert.equal(nightCapUsd({ ctoNightCapUsd: -1 }), DEFAULT_NIGHT_CAP_USD);
+});
+
+test("notchFractile walks the [P90,P95,P99] ladder and clamps", () => {
+  assert.equal(notchFractile(0.95, +1), 0.99);
+  assert.equal(notchFractile(0.99, +1), 0.99); // max P99
+  assert.equal(notchFractile(0.95, -1), 0.9);
+  assert.equal(notchFractile(0.9, -1), 0.9); // min P90
+  assert.equal(notchFractile(999, +1), 0.99); // unknown normalises from P95 init
+});
+
+test("foldQuotaState: no notching before activation (>= 14 days)", () => {
+  const s = foldQuotaState(defaultQuotaState(), { capHits: 5, earnedCleanDays: 60, activated: false });
+  assert.equal(s.fractile, FRACTILE_INIT);
+  assert.equal(s.cleanDays, 0);
+  assert.equal(s.activated, false);
+});
+
+test("foldQuotaState: cap-hits raise the fractile one notch (max P99)", () => {
+  const s = foldQuotaState(defaultQuotaState(), { capHits: 1, activated: true });
+  assert.equal(s.fractile, 0.99);
+  // a second hit stays clamped at P99
+  const s2 = foldQuotaState(defaultQuotaState(), { capHits: 2, activated: true });
+  assert.equal(s2.fractile, 0.99);
+  // from P90 a single hit climbs one rung
+  const s3 = foldQuotaState({ ...defaultQuotaState(), fractile: 0.9 }, { capHits: 1, activated: true });
+  assert.equal(s3.fractile, 0.95);
+});
+
+test("foldQuotaState: 30 clean days lower the fractile one notch (min P90)", () => {
+  const s = foldQuotaState(defaultQuotaState(), { earnedCleanDays: 30, activated: true });
+  assert.equal(s.fractile, 0.9);
+  assert.equal(s.cleanDays, 0); // streak reset after the notch
+  // 60 clean days still notch only once per fold
+  const s2 = foldQuotaState(defaultQuotaState(), { earnedCleanDays: 60, activated: true });
+  assert.equal(s2.fractile, 0.9);
+  // from 0.99 one clean month steps down to 0.95
+  const s3 = foldQuotaState({ ...defaultQuotaState(), fractile: 0.99 }, { earnedCleanDays: 30, activated: true });
+  assert.equal(s3.fractile, 0.95);
+});
+
+test("planReserve: pre-forecast fallback below 14 days uses max(observed, 60% window)", () => {
+  const plan = planReserve({ state: defaultQuotaState(), series: [0.1, 0.1, 0.1], remainingPct: 50 });
+  assert.equal(plan.mode, "fallback");
+  assert.equal(plan.activated, false);
+  assert.equal(plan.fractile, FRACTILE_INIT);
+  assert.equal(plan.reserve, 0.6); // max(0.1, 0.6)
+  assert.equal(plan.spendableFrac, 0); // remaining(0.5) < reserve(0.6) → floored at 0
+});
+
+test("planReserve: forecast mode above the gate; spendable = remaining − reserve", () => {
+  const series = Array(14).fill(0.1);
+  const plan = planReserve({
+    state: defaultQuotaState(),
+    series,
+    remainingPct: 90,
+    forecast: () => ({ mode: "forecast", value: 0.3, point: 0.25, sigma: 0.05 }),
+  });
+  assert.equal(plan.mode, "forecast");
+  assert.equal(plan.activated, true);
+  assert.ok(Math.abs(plan.reserve - 0.3) < 1e-9);
+  assert.ok(Math.abs(plan.spendableFrac - 0.6) < 1e-9);
+});
+
+test("planReserve: spendable floored at 0 when remaining < reserve", () => {
+  const plan = planReserve({
+    state: { ...defaultQuotaState(), activated: true },
+    series: Array(14).fill(0.1),
+    remainingPct: 20,
+    forecast: () => ({ mode: "forecast", value: 0.3 }),
+  });
+  assert.equal(plan.spendableFrac, 0);
+});
+
+test("planReserve: forecast that returns fallback still degrades to the fallback", () => {
+  const plan = planReserve({
+    state: { ...defaultQuotaState(), activated: true },
+    series: Array(14).fill(0.1),
+    remainingPct: 80,
+    forecast: () => ({ mode: "fallback", value: null }),
+  });
+  assert.equal(plan.mode, "fallback");
+  assert.equal(plan.reserve, 0.6);
+});
+
+test("computeSpendable: windowless/no-adapter routes to the $ bound (no reserve)", async () => {
+  const budget = createCtoBudget({ store: { load: async () => ({}), save: async () => {} }, cfg: () => ({ ctoNightCapUsd: 3 }) });
+  const plan = await budget.computeSpendable({ provider: "someone", windowed: false });
+  assert.equal(plan.mode, "windowless");
+  assert.equal(plan.windowed, false);
+  assert.equal(plan.spendable, null);
+  assert.equal(plan.reserve, 0);
+  assert.equal(plan.nightCapUsd, 3);
+});
+
+test("computeSpendable: windowed persists quota + attaches §14.5 ledger rows", async () => {
+  let saved = null;
+  const ledgerRows = [];
+  const store = {
+    load: async () => ({}),
+    save: async (p) => {
+      saved = p;
+    },
+  };
+  const budget = createCtoBudget({
+    store,
+    now: () => NOON,
+    history: async () => ({ "claude:session": [{ ts: NOON, pct: 10 }] }),
+    buildSeries: (obs, t) => ({ series: Array(14).fill(0.1), historyDays: 14, maxObserved: 0.1 }),
+    forecast: () => ({ mode: "forecast", value: 0.25, point: 0.2, sigma: 0.05 }),
+    mapeFn: () => 5,
+    ledger: { append: (r) => ledgerRows.push(r) },
+  });
+  const plan = await budget.computeSpendable({ provider: "claude", remainingPct: 80, windowed: true, capHitsSince: 1 });
+  assert.equal(plan.windowed, true);
+  assert.equal(plan.reserve, 0.25);
+  assert.ok(Math.abs(plan.spendableFrac - 0.55) < 1e-9); // 0.8 − 0.25
+  assert.equal(plan.fractile, 0.99); // capHitsSince 1 notched up
+  assert.equal(plan.mape14, 5);
+  // persisted quota row reflects the plan
+  assert.equal(saved.quota.claude.reserve, 0.25);
+  assert.equal(saved.quota.claude.activated, true);
+  // fractile change + reserve line both ledgered
+  const kinds = ledgerRows.map((r) => r.kind);
+  assert.ok(kinds.includes("cto.reserve.fractile"));
+  assert.ok(kinds.includes("cto.reserve"));
+  const fracRow = ledgerRows.find((r) => r.kind === "cto.reserve.fractile");
+  assert.equal(fracRow.from, 0.95);
+  assert.equal(fracRow.to, 0.99);
+});
+
+test("recordCapHit writes a cto.cap_hit ledger row", async () => {
+  const ledgerRows = [];
+  const budget = createCtoBudget({
+    store: { load: async () => ({}), save: async () => {} },
+    now: () => NOON,
+    ledger: { append: (r) => ledgerRows.push(r) },
+  });
+  await budget.recordCapHit({ provider: "claude", pct: 100 });
+  assert.equal(ledgerRows.length, 1);
+  assert.equal(ledgerRows[0].kind, "cto.cap_hit");
+  assert.equal(ledgerRows[0].provider, "claude");
+  assert.equal(ledgerRows[0].pct, 100);
 });

@@ -178,3 +178,35 @@ test("suggestion acceptance: verdicts older than 30d are excluded", async () => 
   const s = stats.find((x) => x.id === "suggestionAcceptance");
   assert.equal(s.n, 10);
 });
+
+test("BET-1400: forecast accuracy row reflects the cached quota MAPE", async () => {
+  const { stats } = await computeHealthStats({
+    now: () => NOW,
+    budgetRead: async () => ({ quota: { claude: { provider: "claude", mape14: 12.4, fractile: 0.95 } } }),
+  });
+  const f = stats.find((s) => s.id === "forecastAccuracy");
+  assert.equal(f.value, "12.4%");
+  assert.equal(f.n, 1);
+  // no quota row with a numeric MAPE -> collecting
+  const { stats: empty } = await computeHealthStats({ now: () => NOW, budgetRead: async () => ({ quota: {} }) });
+  assert.equal(empty.find((s) => s.id === "forecastAccuracy").n, 0);
+});
+
+test("BET-1400: cap-hits-caused counts §14.5 rows in the last 30 days only", async () => {
+  const capAt = (offsetDays) => ({ kind: "cto.cap_hit", ts: NOW - offsetDays * DAY });
+  const { stats } = await computeHealthStats({
+    now: () => NOW,
+    ledgerRead: async () => [capAt(1), capAt(5), capAt(45)],
+  });
+  const c = stats.find((s) => s.id === "capHitsCaused");
+  assert.equal(c.value, "2 window(s) hit"); // 45 days ago excluded
+});
+
+test("BET-1400: reserve fractile row surfaces the primary quota fractile", async () => {
+  const { stats } = await computeHealthStats({
+    now: () => NOW,
+    budgetRead: async () => ({ quota: { claude: { provider: "claude", fractile: 0.99 } } }),
+  });
+  const r = stats.find((s) => s.id === "reserveFractile");
+  assert.equal(r.value, "P99 · claude");
+});

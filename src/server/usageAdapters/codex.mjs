@@ -47,6 +47,8 @@ function resolveResetsAt(win, nowMs) {
 export const codexAdapter = {
   id: "codex",
   providerIDs: ["openai"],
+  // BET-1400 (§11.2): has plan windows (session + weekly) — reserve applies.
+  windowed: true,
 
   async detect({ readToken = defaultReadToken } = {}) {
     const token = await readToken();
