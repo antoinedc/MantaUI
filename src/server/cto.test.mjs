@@ -33,7 +33,7 @@ function makeEngine(overrides = {}) {
   return engine;
 }
 
-const TOOL_COUNT = 19; // 16 reads (BET-1164 + BET-1383 read_rollups/read_ledger) + 3 watcher tools watch/unwatch/list_watches (BET-1165)
+const TOOL_COUNT = 20; // 16 reads (BET-1164 + BET-1383 read_rollups/read_ledger) + read_inbox (BET-1397) + 3 watcher tools (BET-1165)
 
 // ---------------------------------------------------------------------------
 // Registry integrity
@@ -63,6 +63,7 @@ test("registry exposes every cto read tool with a complete shape, all mode auto"
       "get_config",
       "read_rollups",
       "read_ledger",
+      "read_inbox",
       "watch",
       "unwatch",
       "list_watches",
