@@ -171,6 +171,29 @@ export function validOneLiner(text) {
 // §5.2 segment-summary schema validation + degraded fallback
 // ---------------------------------------------------------------------------
 
+// §8.2 evidence-atom validity. This is the A6/P2 extension point: the profile
+// engine (BET-1393) consumes atoms produced in the SAME §5.2 summary pass — no
+// second model call. `direction` is "up"|"down" (binary BKT) or a signed
+// magnitude in [-1,1] (graded TrueSkill); `weight` is optional in (0,1];
+// `dimension` is required; `ref` is an optional provenance string.
+export function validateAtoms(atoms) {
+  if (!Array.isArray(atoms)) return false;
+  if (atoms.length > 20) return false;
+  return atoms.every(
+    (a) =>
+      a &&
+      typeof a === "object" &&
+      typeof a.dimension === "string" &&
+      !!a.dimension &&
+      (a.direction === "up" ||
+        a.direction === "down" ||
+        (typeof a.direction === "number" && a.direction >= -1 && a.direction <= 1)) &&
+      (a.weight === undefined ||
+        (typeof a.weight === "number" && a.weight > 0 && a.weight <= 1)) &&
+      (a.ref === undefined || typeof a.ref === "string"),
+  );
+}
+
 export function validateSegmentSummary(obj) {
   if (!obj || typeof obj !== "object") return false;
   if (obj.v !== SEGMENT_SUMMARY_VERSION) return false;
@@ -220,6 +243,9 @@ export function validateSegmentSummary(obj) {
   if (typeof obj.one_liner !== "string" || obj.one_liner.length > ONE_LINER_MAX) {
     return false;
   }
+  if (obj.atoms !== undefined && !validateAtoms(obj.atoms)) {
+    return false;
+  }
   return true;
 }
 
@@ -236,6 +262,7 @@ export function degradedSegmentSummary({ sessionID, project, start, end, lastUse
     prs: [],
     importance: 1,
     one_liner: truncatePrompt(lastUserPrompt),
+    atoms: [],
   };
 }
 
@@ -426,6 +453,10 @@ export function createSegmenter(deps = {}) {
     computeOneLiner = async () => null,
     now = () => Date.now(),
     initialGMinutes = DEFAULT_G_MINUTES,
+    // §8.2 profile feed (BET-1393): invoked with every produced summary (valid
+    // or degraded) so the profile engine ingests its atoms / session length /
+    // project in the same pass — no second model call, best-effort.
+    onSummary = async () => {},
   } = deps;
 
   let gMinutes = initialGMinutes;
@@ -518,6 +549,11 @@ export function createSegmenter(deps = {}) {
       });
     } catch {
       /* persistence is best-effort */
+    }
+    try {
+      await onSummary(summary);
+    } catch {
+      /* profile feed is best-effort */
     }
     return summary;
   }

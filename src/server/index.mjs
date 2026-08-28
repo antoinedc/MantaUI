@@ -1729,7 +1729,22 @@ async function segmentSummarize(data = {}) {
         '"outcome":"done|failed|blocked|in-progress",' +
         '"key_events":[{"t":<ms>,"text":"<event>"}],' +
         '"files_touched":["..."],"prs":["..."],"importance":<1-10>,' +
-        '"one_liner":"<≤140 chars>"}',
+        '"one_liner":"<≤140 chars>",' +
+        '"atoms":[{"dimension":"<skill/area>","direction":"up|down or a number -1..1","weight":<0..1>,"ref":"<event ref>"}]}',
+    },
+    {
+      priority: 80,
+      text:
+        "A single atom is one closed, verifiable observation about the user's skill in a " +
+        "dimension. Emit atoms ONLY when the session yields a genuine, attributable signal " +
+        "(a non-trivial fix = up; a hard-fought struggle that resolved = graded number; a " +
+        "repeated mistake / regression = down; a pattern in a named area = a dimension for " +
+        "that area). Prefer few, high-confidence atoms (≤5). `dimension` = a short, stable, " +
+        "hyphenated skill/area name (e.g. \"swift\", \"api-design\", \"electron-ipc\"). " +
+        "`direction`: \"up\"/\"down\" for binary evidence; a number in [-1,1] for graded " +
+        "(positive = proficiency, negative = weakness, magnitude = strength of evidence). " +
+        "`weight` = confidence in this atom (0..1). `ref` = a short evidence reference " +
+        "(e.g. a file path or PR). If no dimension is genuinely evidenced, omit `atoms`.",
     },
     {
       priority: 50,
@@ -1865,6 +1880,12 @@ let adaptiveCtoDigest = null;
     presence: { get: () => adaptiveCto.getPresence() },
     getGMinutes: async () => adaptiveCto.segmenter?.getGMinutes?.() ?? null,
     listOpenCards: async () => (await adaptiveCto.cards?.listOpen?.()) ?? [],
+    // §8.4 profile consumers (BET-1393): the digest's audience block + the
+    // timing scheduler's rising-edge / inferred-TZ branch read the profile.
+    getRisingEdge: async () => adaptiveCto.profile?.getRisingEdgeMsIntoDay?.() ?? null,
+    getInferredTz: async () => adaptiveCto.profile?.getInferredTz?.() ?? null,
+    getAudience: async ({ topics } = {}) => adaptiveCto.profile?.getAudience?.({ topics }) ?? null,
+    getDeviations: async () => adaptiveCto.profile?.getDeviations?.() ?? [],
     getEnabled: async () => {
       try {
         return (await local.configGet())?.ctoEnabled === true;
