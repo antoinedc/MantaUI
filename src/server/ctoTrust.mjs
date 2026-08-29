@@ -160,9 +160,16 @@ export function createCtoTrust(deps = {}) {
     };
   }
 
-  async function saveState(es, st) {
+  async function saveState(_esSnapshot, st) {
+    // Re-read the engine state AT SAVE TIME and merge only the `trust` key:
+    // the trust engine writes fire-and-forget (§9.5 sink dispatch), so an
+    // es snapshot taken at load would clobber keys another writer changed in
+    // between (e.g. a tonight-queue edit landing while a verdict's trust
+    // fold is in flight — the stale-snapshot class of bug). The snapshot
+    // parameter stays for call-site compatibility but is never spread.
     try {
-      await engineState.save({ ...es, trust: st });
+      const fresh = (await engineState.load().catch(() => null)) ?? {};
+      await engineState.save({ ...fresh, trust: st });
     } catch {
       /* best-effort */
     }

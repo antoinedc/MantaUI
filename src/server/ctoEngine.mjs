@@ -1373,6 +1373,12 @@ export function createCtoEngine(deps = {}) {
       if (stale) {
         const fulfilled = win.state === "open" && win.countdown == null;
         await cards.resolveById(stale.id, { reason: fulfilled ? "window opened" : "countdown elapsed unmet" }).catch(() => {});
+        if (fulfilled) {
+          // BET-1403 §9.4: the announced window elapsed UNcancelled and the
+          // overnight run opened — the veto-window record's acceptance, feeding
+          // the veto→act promotion bar under the canonical action class.
+          void getTrust().noteVetoOutcome("queue-tonight", { accepted: true }).catch(() => {});
+        }
       }
     }
   }
@@ -1565,9 +1571,16 @@ export function createCtoEngine(deps = {}) {
     const stale = open.find((c) => c?.id === VETO_CARD_ID && c?.variant === "veto");
     if (stale) await cards.resolveById(stale.id, { reason: "canceled by user" }).catch(() => {});
     await ledgerLog({ kind: "cto.overnight.veto", ts: now() });
+    // BET-1403 §9.4: a cancel IS the veto-window record's rejection. The
+    // canonical action class is "queue-tonight" (the §9.3 eligibility map's
+    // class — the overnight veto window guards tonight's queued tasks); the
+    // UI's veto-verdict subject carries the same stamp. Single writer: the
+    // trust sink ignores veto-window subjects, so the record is fed exactly
+    // once per resolved window (cancel here, executed-open in the veto card).
     void getVerdictsEngine()
-      .recordVerdict({ subject: { type: "veto-window", id: VETO_CARD_ID, class: "overnight" }, verdict: "veto" })
+      .recordVerdict({ subject: { type: "veto-window", id: VETO_CARD_ID, class: "queue-tonight" }, verdict: "veto" })
       .catch(() => {});
+    void getTrust().noteVetoOutcome("queue-tonight", { accepted: false }).catch(() => {});
     await syncState().catch(() => {});
     return { ok: true };
   }
