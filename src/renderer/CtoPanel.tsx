@@ -71,7 +71,7 @@ import {
   type NowCard,
   type SuggestionOption,
 } from "./ctoSections";
-import type { CtoCard, CtoFinishedItem, CtoDigest, CtoHeldRow, CtoLedgerPage, CtoLedgerRow, CtoProfileRender, CtoSkill, CtoTonightTask, CtoFactsRender, CtoFactRow, CtoFactsArchivePage, CtoToolsRender, CtoToolRegistryRow } from "../shared/api.js";
+import type { CtoCard, CtoFinishedItem, CtoDigest, CtoHeldRow, CtoLedgerPage, CtoLedgerRow, CtoProfileRender, CtoSkill, CtoTonightTask, CtoFactsRender, CtoFactRow, CtoToolsRender, CtoToolRegistryRow } from "../shared/api.js";
 import { formatAge } from "./chatUtils";
 import { Toggle } from "./Toggle";
 
@@ -136,7 +136,7 @@ export function CtoPanel({
   state: CtoState | null;
   onOpenSession: (sessionId: string) => void;
 }) {
-  const [view, setView] = useState<"overview" | "settings" | "ledger" | "profile">("overview");
+  const [view, setView] = useState<"overview" | "settings" | "ledger" | "profile" | "blackboard" | "tools">("overview");
   const pushToast = useStore((s) => s.pushAppToast);
 
   // --- data reads ---------------------------------------------------------
@@ -533,6 +533,8 @@ export function CtoPanel({
         onBack={() => setView("overview")}
         onLedger={() => setView("ledger")}
         onProfile={() => setView("profile")}
+        onBlackboard={() => setView("blackboard")}
+        onTools={() => setView("tools")}
         onResume={() => void resumeCto()}
       />
     );
@@ -542,6 +544,12 @@ export function CtoPanel({
   }
   if (view === "profile") {
     return <ProfileView onBack={() => setView("settings")} pushToast={pushToast} />;
+  }
+  if (view === "blackboard") {
+    return <BlackboardView onBack={() => setView("settings")} pushToast={pushToast} />;
+  }
+  if (view === "tools") {
+    return <ToolIntegrationsView onBack={() => setView("settings")} pushToast={pushToast} />;
   }
 
   return (
@@ -732,6 +740,8 @@ function SettingsView({
   onBack,
   onLedger,
   onProfile,
+  onBlackboard,
+  onTools,
   onResume,
 }: {
   paused: boolean;
@@ -739,6 +749,8 @@ function SettingsView({
   onBack: () => void;
   onLedger: () => void;
   onProfile: () => void;
+  onBlackboard: () => void;
+  onTools: () => void;
   onResume: () => void;
 }) {
   const pushToast = useStore((s) => s.pushAppToast);
@@ -1100,9 +1112,22 @@ function SettingsView({
             usageSnaps={usageSnaps}
           />
 
-          {/* ---------- Internals: Profile & rhythm + Activity ledger ---------- */}
+          {/* ---------- Internals: rows 1-4 of the §10.5 drill-down list ---------- */}
           <section className="rounded-lg border border-border-subtle p-4">
             <h3 className="text-sm font-semibold text-text">Internals</h3>
+            <button
+              type="button"
+              onClick={onBlackboard}
+              className="mt-2 flex w-full items-center justify-between rounded-md border border-border-subtle px-3 py-2 text-left hover:bg-fill-hover"
+            >
+              <span>
+                <span className="block text-sm font-medium text-text">Blackboard</span>
+                <span className="block text-xs text-text-muted">
+                  Facts per project — confidence, supersession, archive.
+                </span>
+              </span>
+              <span className="text-text-muted">›</span>
+            </button>
             <button
               type="button"
               onClick={onProfile}
@@ -1112,6 +1137,19 @@ function SettingsView({
                 <span className="block text-sm font-medium text-text">Profile &amp; rhythm</span>
                 <span className="block text-xs text-text-muted">
                   What the CTO believes about you — skills, sleep window, journal.
+                </span>
+              </span>
+              <span className="text-text-muted">›</span>
+            </button>
+            <button
+              type="button"
+              onClick={onTools}
+              className="mt-2 flex w-full items-center justify-between rounded-md border border-border-subtle px-3 py-2 text-left hover:bg-fill-hover"
+            >
+              <span>
+                <span className="block text-sm font-medium text-text">Tool integrations</span>
+                <span className="block text-xs text-text-muted">
+                  External tools — role, engagement, consent, probes.
                 </span>
               </span>
               <span className="text-text-muted">›</span>
