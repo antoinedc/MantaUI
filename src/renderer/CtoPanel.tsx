@@ -951,8 +951,8 @@ function SettingsView({
                     </div>
                   </div>
                   <Toggle
-                    checked={!!config?.ctoOvernightEnabled}
-                    onChange={(v) => void applyConfig({ ctoOvernightEnabled: v })}
+                    checked={!!config?.ctoOvernight}
+                    onChange={(v) => void applyConfig({ ctoOvernight: v })}
                     ariaLabel="Overnight work enabled"
                   />
                 </div>

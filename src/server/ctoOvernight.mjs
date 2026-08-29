@@ -144,6 +144,11 @@ export function normalizeWindow(prev) {
     // Manual pin (input consent): when set, this exact order governs the
     // window's plan for its whole life — exempt from re-scoring.
     pinnedOrder: Array.isArray(w.pinnedOrder) ? w.pinnedOrder.filter((x) => typeof x === "string") : null,
+    // §9.2 veto stamp: the trough start whose run the user canceled. The open
+    // path refuses to AUTO-open this trough again (run-now still overrides —
+    // explicit consent after a cancel). It expires naturally when the next
+    // trough has a different startMs, so a veto never suppresses tomorrow.
+    vetoedTroughStartMs: finiteOrNull(w.vetoedTroughStartMs),
     countdown,
     lastEvaluatedMs: finiteOrNull(w.lastEvaluatedMs),
   };
@@ -241,7 +246,16 @@ export function evaluateWindow(prev, input) {
     const freshUserEvent =
       finiteOrNull(input?.lastUserEventMs) !== null && input.lastUserEventMs > w.openedMs;
     const presenceReturn = presence === "present" && !w.openedDuringPresence;
-    if (troughContains(w.openedMs, trough) && now >= trough.endMs) {
+    // Trough-shift guard: the profile can re-derive the trough mid-window (a
+    // G refit moves the quiet hours), which would make the trough-end close
+    // below unreachable (the re-derived trough never contains openedMs). A
+    // window the trough signal opened must never outlive its trough — close
+    // it the moment the current trough no longer contains its opening. Run-now
+    // windows are exempt: they open outside any trough on explicit consent and
+    // close on the user's return/fresh event.
+    const troughShifted =
+      w.openedBy !== "run-now" && trough != null && !troughContains(w.openedMs, trough);
+    if ((troughContains(w.openedMs, trough) && now >= trough.endMs) || troughShifted) {
       rows.push(ledgerRow("cto.overnight.close", now, { reason: "trough-end", openedMs: w.openedMs }));
       return {
         window: normalizeWindow({ ...w, state: "closed", closedMs: now, closeReason: "trough-end", countdown, pinnedOrder: null }),
@@ -275,7 +289,16 @@ export function evaluateWindow(prev, input) {
     return { window: normalizeWindow({ ...w, countdown, lastEvaluatedMs: now }), ledgerRows: rows };
   }
 
-  const mayOpen = runNow || (inTrough && signal !== null);
+  // §9.2 veto: a user cancel for THIS trough (vetoedTroughStartMs === the
+  // trough's start) blocks the auto-open — the run was canceled, not postponed.
+  // run-now overrides it (explicit consent after a cancel); the next trough
+  // has a different startMs, so the stamp never suppresses a later night.
+  const vetoedTrough =
+    w.vetoedTroughStartMs != null &&
+    trough != null &&
+    finiteOrNull(trough.startMs) === w.vetoedTroughStartMs;
+
+  const mayOpen = runNow || (!vetoedTrough && inTrough && signal !== null);
   if (!mayOpen) {
     return { window: normalizeWindow({ ...w, countdown, lastEvaluatedMs: now }), ledgerRows: rows };
   }
@@ -297,6 +320,7 @@ export function evaluateWindow(prev, input) {
       openedBy: runNow ? "run-now" : signal,
       openedDuringPresence,
       countdown: null, // an open fulfills any pending countdown
+      vetoedTroughStartMs: null, // an open supersedes any same-night veto stamp
       lastEvaluatedMs: now,
     }),
     ledgerRows: rows,

@@ -520,3 +520,49 @@ test("closing the window clears the manual pin — the pin governs one window on
   assert.equal(saved().window.state, "closed");
   assert.equal(saved().window.pinnedOrder, null);
 });
+
+// ---------------------------------------------------------------------------
+// §9.2 — the per-trough veto stamp (BET-1419 review fix)
+// ---------------------------------------------------------------------------
+
+test("a per-trough veto stamp blocks the auto-open for that trough; run-now overrides; the next trough is unaffected", () => {
+  // The user canceled: the window row carries vetoedTroughStartMs = TROUGH.startMs.
+  const vetoed = normalizeWindow({ state: "closed", vetoedTroughStartMs: TROUGH.startMs });
+  assert.equal(vetoed.vetoedTroughStartMs, TROUGH.startMs, "normalizeWindow preserves the stamp");
+
+  const refused = evaluateWindow(vetoed, tickInput({ now: T0 + H, lastUserEventMs: T0 - 2 * H }));
+  assert.equal(refused.window.state, "closed", "the machine refuses to auto-open a vetoed trough");
+  assert.equal(refused.ledgerRows.length, 0, "silently closed — no open row, no dispatch");
+
+  // run-now is explicit consent AFTER the cancel — it overrides the stamp,
+  // and the open supersedes it (a fresh window is not a vetoed one).
+  const rn = evaluateWindow(vetoed, tickInput({ now: T0 + H, runNow: true }));
+  assert.equal(rn.window.state, "open");
+  assert.equal(rn.window.vetoedTroughStartMs, null, "an open clears the veto stamp");
+
+  // A different trough (tomorrow) does not inherit the stamp — it expires
+  // naturally with the trough it named.
+  const tomorrow = evaluateWindow(
+    vetoed,
+    tickInput({ now: T0 + 24 * H, trough: { startMs: T0 + 24 * H, endMs: T0 + 30 * H }, lastUserEventMs: T0 + 22 * H }),
+  );
+  assert.equal(tomorrow.window.state, "open", "the stamp never suppresses a later night");
+});
+
+test("a trough-opened window closes when the profile re-derives the trough away from its opening (trough-shift guard)", () => {
+  const { window } = evaluateWindow(null, tickInput({ now: T0 + H }));
+  assert.equal(window.state, "open");
+
+  // The G refit moves the quiet trough forward — it no longer contains
+  // openedMs, which would make the trough-end close unreachable.
+  const shifted = { startMs: T0 + 24 * H, endMs: T0 + 30 * H };
+  const { window: closed, ledgerRows } = evaluateWindow(window, tickInput({ now: T0 + 2 * H, trough: shifted }));
+  assert.equal(closed.state, "closed");
+  assert.equal(closed.closeReason, "trough-end");
+  assert.ok(ledgerRows.some((r) => r.kind === "cto.overnight.close" && r.reason === "trough-end"));
+
+  // run-now windows are exempt — they open outside any trough on explicit
+  // consent and close on the user's return / fresh event, not on re-derivation.
+  const rn = evaluateWindow(null, tickInput({ now: T0 + 2 * H, trough: shifted, runNow: true }));
+  assert.equal(rn.window.state, "open");
+});

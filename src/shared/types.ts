@@ -313,11 +313,11 @@ export type AppConfig = {
   ctoDigestPush?: boolean;
   // Adaptive CTO (BET-1405): the §11 Overnight-work switch — gates the entire
   // overnight pool; only visible/effective at High (§10.5 card 1). Default off.
-  // NOTE: the Behavior-card control ships with the §11 overnight wiring
-  // (BET-1419); the config key + the Tonight's-budget card's read of it land
-  // here first so both runs converge on the same key.
   ctoOvernight?: boolean;
-  // Adaptive CTO (BET-1400): the windowless/night $ pool (§11.2). Default 5.
+  // Adaptive CTO (BET-1419, §11.2): absolute overnight budget in $ for
+  // windowless providers (no usage-window adapter). Default $5/night (the
+  // budget module's DEFAULT_NIGHT_CAP_USD); once tonight's estimated
+  // overnight spend reaches it, no further overnight jobs are selected.
   ctoNightCapUsd?: number;
   // ----- Manta Optimizer (BET-1342 / Phase 2) -----
   // Master switch for the optimizer. DEFAULT FALSE. Opt-in: with it OFF the

@@ -19,6 +19,7 @@ import {
   isWorkShedInThrifty,
   nightCapUsd,
   notchFractile,
+  overnightSpendUsd,
   planReserve,
   priceTokens,
   recordSpend,
@@ -670,4 +671,55 @@ test("pending rows past the retention horizon are dropped", async () => {
   await store.save(payload);
   await budget.refreshRoi();
   assert.equal(payload.roi.pending.length, 0); // counted stale row swept
+});
+
+test("overnightSpendUsd prices today's job_started estTokens at the model cost (§11.2)", () => {
+  const cost = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 }; // 1.4925 $/Mtok blended
+  const rows = [
+    { kind: "cto.overnight.job_started", ts: NOON, estTokens: 1_000_000 },
+    { kind: "cto.overnight.job_started", ts: NOON + 60_000, estTokens: 500_000 },
+    { kind: "cto.overnight.job_started", ts: dayStart(-1), estTokens: 10_000_000 }, // yesterday — ignored
+    { kind: "cto.overnight.close", ts: NOON, estTokens: 99 }, // other kind — ignored
+    { kind: "cto.overnight.job_started", ts: NOON }, // no estTokens — ignored
+    { kind: "cto.overnight.job_started", ts: NOON, estTokens: -5 }, // junk — ignored
+  ];
+  // 1.5M priceable tokens → 1.5 × 1.4925 = 2.23875
+  assert.ok(Math.abs(overnightSpendUsd(rows, { now: NOON, modelCost: cost }) - 2.23875) < 1e-9);
+  // Unpriceable model → $0 (the cap cannot trip on an unknown model).
+  assert.equal(overnightSpendUsd(rows, { now: NOON, modelCost: null }), 0);
+  // Junk rows shape → 0, never throws.
+  assert.equal(overnightSpendUsd(null, { now: NOON, modelCost: cost }), 0);
+});
+
+test("computeSpendable windowless: the $ night cap flips spendableFrac to 0 when tonight's spend reaches it (§11.2)", async () => {
+  let saved = null;
+  const ledgerRows = [];
+  const cost = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 };
+  // 2M priceable tokens × 1.4925 $/Mtok = 2.985 spent; cap 3 not yet reached.
+  const underCap = [
+    { kind: "cto.overnight.job_started", ts: NOON, estTokens: 2_000_000 },
+  ];
+  const overCap = [...underCap, { kind: "cto.overnight.job_started", ts: NOON + 1, estTokens: 100_000 }];
+  const budget = createCtoBudget({
+    store: { load: async () => ({}), save: async (p) => (saved = p) },
+    now: () => NOON,
+    cfg: () => ({ ctoNightCapUsd: 3 }),
+    ledger: { append: (r) => ledgerRows.push(r) },
+  });
+
+  const under = await budget.computeSpendable({
+    provider: "someone", windowed: false, overnightRows: underCap, overnightModelCost: cost,
+  });
+  assert.equal(under.spendableFrac, null, "under the cap → no fractional reserve (λ=0)");
+  assert.equal(under.overnightCapHit, false);
+  assert.ok(Math.abs(under.overnightSpentUsd - 2.985) < 1e-9);
+
+  const over = await budget.computeSpendable({
+    provider: "someone", windowed: false, overnightRows: overCap, overnightModelCost: cost,
+  });
+  assert.equal(over.spendableFrac, 0, "cap exhausted → the machine selects nothing further");
+  assert.equal(over.overnightCapHit, true);
+  assert.equal(over.nightCapUsd, 3);
+  // The caller ledgers the cap-hit; the budget itself only reports it.
+  assert.ok(!ledgerRows.some((r) => r.kind === "cto.overnight.night_cap_hit"));
 });

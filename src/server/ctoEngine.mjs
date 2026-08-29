@@ -90,7 +90,7 @@ import {
   windowFor as rollupWindowFor,
 } from "./ctoRollups.mjs";
 import { buildFactProposal, createFactsEngine, VERIFY_CYCLE_MS, senderKey, senderReliability } from "./ctoFacts.mjs";
-import { formatFactsBlock } from "./ctoSessions.mjs";
+import { formatFactsBlock, estimateTokens } from "./ctoSessions.mjs";
 import {
   ambientCapUsd as budgetAmbientCapUsd,
   createCtoBudget,
@@ -1110,7 +1110,7 @@ export function createCtoEngine(deps = {}) {
   // sub-cap of 2 enforced by beginDelegateJob), preempt everything on the
   // user's return (§11.6), and arm/fulfill/cancel the veto countdown card
   // (§10.3). Nothing runs unless the engine is enabled, the Overnight switch
-  // is on (config `ctoOvernightEnabled`), the tier is High, and the scheduler
+  // is on (config `ctoOvernight`), the tier is High, and the scheduler
   // was injected.
   // ---------------------------------------------------------------------------
 
@@ -1123,7 +1123,7 @@ export function createCtoEngine(deps = {}) {
     if (disposed || !overnight) return false;
     try {
       const cfg = (await configGet()) ?? {};
-      if (cfg.ctoOvernightEnabled !== true) return false;
+      if (cfg.ctoOvernight !== true) return false;
       return (await tierGet()) === "high";
     } catch {
       return false;
@@ -1223,13 +1223,18 @@ export function createCtoEngine(deps = {}) {
   }
 
   // Dispatch the selected plan (§11.5 execution contract). The §3.3 concurrent
-  // delegate sub-cap (RATE_LIMITS.concurrentDelegate = 2) is enforced by
-  // beginDelegateJob — the overnight scheduler never bypasses it. Each start
-  // removes its queue entry (a queued task that started is no longer queued);
-  // failures ledger and leave the entry queued for the next tick/night.
-  // Candidates whose job already started in this window are skipped (the
-  // ledger's job_started rows are the dedupe record — a watcher hit stays in
-  // the ledger and would otherwise re-run every tick of the same window).
+  // delegate sub-cap (RATE_LIMITS.concurrentDelegate = 2) is enforced HERE, by
+  // counting still-running cto-actor jobs (the same rows preemption reads) +
+  // starts accepted in this dispatch against the cap — `beginDelegateJob`'s
+  // transient tracker is not consulted on this path and the delegate engine
+  // only enforces the box-wide cap of 5. Each start removes its queue entry (a
+  // queued task that started is no longer queued); failures ledger and leave
+  // the entry queued for the next tick/night. Candidates whose job already
+  // started in this window are skipped (the ledger's job_started rows are the
+  // dedupe record — a watcher hit stays in the ledger and would otherwise
+  // re-run every tick of the same window). Each job_started row carries
+  // `estTokens` (the prompt-size estimate, §12.1 metering style) so the
+  // windowless night-cap bound can price tonight's spend from the ledger.
   async function dispatchPlan({ plan, trough, projects, ledgerRows, windowOpenedMs }) {
     let started = 0;
     const startedIds = new Set(
@@ -1238,11 +1243,21 @@ export function createCtoEngine(deps = {}) {
         .filter((r) => (windowOpenedMs == null ? true : r.ts >= windowOpenedMs))
         .map((r) => r.id),
     );
+    const runningCto = (await runningCtoJobs()).length;
+    let startedThisDispatch = 0;
     for (const cand of plan?.selected ?? []) {
-      const release = track.beginDelegate();
       try {
         if (!cand || typeof cand.id !== "string" || startedIds.has(cand.id)) continue;
         if (typeof startDelegateJob !== "function") break;
+        if (runningCto + startedThisDispatch >= rateLimits.concurrentDelegate) {
+          await ledgerLog({
+            kind: "cto.overnight.skip",
+            id: cand.id,
+            reason: "rate_limit:concurrentDelegate",
+            running: runningCto + startedThisDispatch,
+          });
+          continue;
+        }
         const task = (await tonightQueueRows()).find((r) => r?.id === cand.id) ?? null;
         const project = cand.project ?? task?.project;
         const parent =
@@ -1256,12 +1271,13 @@ export function createCtoEngine(deps = {}) {
           });
           continue;
         }
+        const prompt =
+          cand.prompt ??
+          task?.prompt ??
+          `${cand.name ?? "overnight"} — investigate and report a draft summary with refs.`;
         const res = await startDelegateJob({
           name: cand.name ?? task?.name ?? `overnight:${cand.category}`,
-          prompt:
-            cand.prompt ??
-            task?.prompt ??
-            `${cand.name ?? "overnight"} — investigate and report a draft summary with refs.`,
+          prompt,
           parentSessionID: parent.parentSessionID,
           parentDirectory: project,
           sweepAllowanceMs: trough ? Math.max(0, trough.endMs - now()) : undefined,
@@ -1271,12 +1287,14 @@ export function createCtoEngine(deps = {}) {
           continue;
         }
         started += 1;
+        startedThisDispatch += 1;
         await ledgerLog({
           kind: "cto.overnight.job_started",
           id: cand.id,
           jobId: res?.job?.id ?? null,
           project,
           category: cand.category,
+          estTokens: estimateTokens(prompt),
         });
         if (task) {
           const rows = await tonightQueueRows();
@@ -1284,8 +1302,6 @@ export function createCtoEngine(deps = {}) {
         }
       } catch {
         /* keep dispatching the remaining selected jobs */
-      } finally {
-        release();
       }
     }
     return started;
@@ -1301,7 +1317,10 @@ export function createCtoEngine(deps = {}) {
     if (!win) return;
     const due = trough ? trough.startMs : null;
     const imminent = due != null && t >= due - VETO_LEAD_MS && t < due;
-    if (imminent && win.state !== "open" && !win.countdown && win.closeReason !== "veto" && candidateCount > 0) {
+    // §9.2: never re-announce a trough the user vetoed — the stamp from
+    // tonightCancel suppresses both the countdown re-arm and the card.
+    const vetoed = win.vetoedTroughStartMs != null && win.vetoedTroughStartMs === due;
+    if (imminent && win.state !== "open" && !win.countdown && !vetoed && candidateCount > 0) {
       await overnight
         .updateWindow((prev) => scheduleCountdown(prev, { now: t, dueMs: due }))
         .catch(() => {});
@@ -1499,14 +1518,24 @@ export function createCtoEngine(deps = {}) {
   // Cancel tonight (veto card "Cancel tonight" / drill-down "Cancel tonight").
   // Pauses running CTO jobs + closes the window (or clears the countdown),
   // resolves the veto card, records the §9.5 veto verdict. The window row
-  // keeps `closeReason: "veto"` so the arming logic does not re-announce the
-  // same night — a veto is a veto, not a countdown reset.
+  // keeps `vetoedTroughStartMs` = the current trough's start so the machine's
+  // open path refuses to auto-open this trough again — a veto is a veto, not a
+  // countdown reset. The stamp is per-trough: the next trough has a different
+  // startMs, so it never suppresses a later night (and run-now overrides it).
   async function tonightCancel() {
-    const prevWin = overnight ? await overnight.readWindow().catch(() => null) : null;
+    const trough = typeof profile?.getQuietTrough === "function" ? profile.getQuietTrough() : null;
     await preemptOvernight("veto");
-    if (overnight && prevWin && prevWin.state !== "open") {
+    if (overnight) {
       await overnight
-        .updateWindow((prev) => (prev ? normalizeWindow({ ...normalizeWindow(prev), closeReason: "veto", countdown: null }) : null))
+        .updateWindow((prev) =>
+          prev
+            ? normalizeWindow({
+                ...normalizeWindow(prev),
+                ...(trough?.startMs != null ? { vetoedTroughStartMs: trough.startMs } : {}),
+                countdown: null,
+              })
+            : null,
+        )
         .catch(() => {});
     }
     const open = (await cards.listOpen().catch(() => [])) ?? [];

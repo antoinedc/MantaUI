@@ -12,7 +12,7 @@ const HOUR = 3_600_000;
 // Minimal harness: fake clock, in-memory stores, injected delegate seams +
 // overnight scheduler. Presence is "gone" (stale desktop beat), profile seam
 // returns a caller-controlled trough, and the queue pre-seeds engine-state.
-function makeHarness({ trough = null, queue = [], projects = [], tier = "high", overnightEnabled = true } = {}) {
+function makeHarness({ trough = null, queue = [], projects = [], tier = "high", overnightEnabled = true, budgetPlan = null } = {}) {
   const clock = { ms: 1_700_000_000_000 };
   const now = () => clock.ms;
   const ledgerRows = [];
@@ -23,7 +23,8 @@ function makeHarness({ trough = null, queue = [], projects = [], tier = "high", 
   const pausedJobs = [];
   const listedJobs = [];
   const vetoCards = [];
-  const config = { ctoEnabled: true, ctoTier: tier, ctoOvernightEnabled: overnightEnabled };
+  const config = { ctoEnabled: true, ctoTier: tier, ctoOvernight: overnightEnabled };
+  let curTrough = trough;
 
   const overnight = createOvernightScheduler({
     store: {
@@ -34,7 +35,7 @@ function makeHarness({ trough = null, queue = [], projects = [], tier = "high", 
       },
     },
     now,
-    budget: async () => null,
+    budget: async () => budgetPlan,
     ledger: { append: async (row) => ledgerRows.push(row) },
   });
 
@@ -90,7 +91,7 @@ function makeHarness({ trough = null, queue = [], projects = [], tier = "high", 
     getDesktopPresence: () => ({ lastSeen: clock.ms - 10 * 60_000 }),
     getLastDesktopHeartbeat: () => clock.ms - 10 * 60_000,
     // BET-1419: the trough seam the tests control.
-    profile: { getQuietTrough: () => trough },
+    profile: { getQuietTrough: () => curTrough },
     overnight,
     startDelegateJob: async (input) => {
       startedJobs.push(input);
@@ -119,6 +120,9 @@ function makeHarness({ trough = null, queue = [], projects = [], tier = "high", 
     overnightStoreObj,
     setQueue(rows) {
       engineStateObj.tonightQueue = rows;
+    },
+    setTrough(t) {
+      curTrough = t;
     },
     advance(ms) {
       clock.ms += ms;
@@ -153,7 +157,7 @@ test("overnight: window opens in the trough while absent → dispatches via the 
   assert.ok(job.sweepAllowanceMs > 0 && job.sweepAllowanceMs <= TROUGH.endMs - h.now(), "sweep allowance = window remaining");
   assert.match(job.prompt, /Reconcile the ledger/);
   assert.deepEqual(h.engineStateObj.tonightQueue, [], "a started task leaves the queue");
-  assert.ok(h.ledgerRows.some((r) => r.kind === "cto.overnight.job_started" && r.id === "tq:1"));
+  assert.ok(h.ledgerRows.some((r) => r.kind === "cto.overnight.job_started" && r.id === "tq:1" && r.estTokens > 0));
   assert.equal(h.overnightStoreObj.window?.state, "open");
 
   const s = await h.engine.getState();
@@ -184,7 +188,7 @@ test("overnight: a candidate with no tracked project session is skipped and ledg
   assert.deepEqual(h.engineStateObj.tonightQueue, [QUEUE_TASK], "the queued task survives a skip");
 });
 
-test("overnight: dispatch honors the §3.3 concurrent sub-cap (2) via the rate tracker", async () => {
+test("overnight: dispatch enforces the §3.3 concurrent sub-cap (2) by counting running cto jobs + accepted starts", async () => {
   const tasks = [];
   for (let i = 0; i < 5; i++) {
     tasks.push({ ...QUEUE_TASK, id: `tq:${i}`, project: `/repo${i}` });
@@ -194,9 +198,36 @@ test("overnight: dispatch honors the §3.3 concurrent sub-cap (2) via the rate t
     defaultCwd: `/repo${i}`,
     windows: [{ opencodeSessionId: `sess-${i}` }],
   }));
-  const h = makeHarness({ trough: TROUGH, queue: tasks, projects });
-  await h.engine.tick();
-  assert.ok(h.startedJobs.length <= 2, `at most 2 concurrent overnight starts (got ${h.startedJobs.length})`);
+  // A fat budget seam (spendableFrac 5) lets the plan select all 5 candidates
+  // in ONE tick — the cap must still hold at dispatch time, not in the plan.
+  // Two cto-actor jobs are already running → zero new starts, each blocked
+  // candidate ledgered for the next tick, queue untouched.
+  const capped = makeHarness({ trough: TROUGH, queue: tasks, projects, budgetPlan: { spendableFrac: 5 } });
+  capped.listedJobs.push({ id: "r1", actor: "cto", status: "running" }, { id: "r2", actor: "cto", status: "running" });
+  await capped.engine.tick();
+  assert.equal(capped.startedJobs.length, 0, "2 running cto jobs → the sub-cap of 2 allows no new start");
+  assert.ok(
+    capped.ledgerRows.filter((r) => r.kind === "cto.overnight.skip" && r.reason === "rate_limit:concurrentDelegate").length >= 1,
+    "each blocked candidate is ledgered for the next tick",
+  );
+  assert.deepEqual(
+    capped.engineStateObj.tonightQueue.map((t) => t.id),
+    tasks.map((t) => t.id),
+    "queued tasks survive a cap-blocked dispatch",
+  );
+
+  // One running cto job → exactly one accepted start; the rest wait.
+  const one = makeHarness({ trough: TROUGH, queue: tasks, projects, budgetPlan: { spendableFrac: 5 } });
+  one.listedJobs.push({ id: "r1", actor: "cto", status: "running" });
+  await one.engine.tick();
+  assert.equal(one.startedJobs.length, 1, "one free sub-cap slot → exactly one start");
+  assert.ok(one.ledgerRows.some((r) => r.kind === "cto.overnight.skip" && r.reason === "rate_limit:concurrentDelegate"));
+
+  // user-actor running jobs don't consume the cto sub-cap.
+  const userJobs = makeHarness({ trough: TROUGH, queue: tasks, projects, budgetPlan: { spendableFrac: 5 } });
+  userJobs.listedJobs.push({ id: "u1", actor: "user", status: "running" }, { id: "u2", actor: "user", status: "running" });
+  await userJobs.engine.tick();
+  assert.equal(userJobs.startedJobs.length, 2, "user jobs don't count against the cto sub-cap");
 });
 
 test("overnight: user prompt preempts — running cto jobs paused and the window closes (§11.6)", async () => {
@@ -226,15 +257,42 @@ test("overnight: veto card arms 30 min before the trough, cancels on the veto ve
   assert.equal(h.vetoCards[0].dueMs, due);
   assert.ok(h.ledgerRows.some((r) => r.kind === "cto.overnight.veto_card"));
 
-  // Cancel tonight → countdown cleared, card resolved, veto verdict recorded.
+  // Cancel tonight → countdown cleared, card resolved, veto verdict recorded,
+  // and the veto stamp lands on THIS trough (the machine's open path reads it).
   const r = await h.engine.tonightCancel();
   assert.equal(r.ok, true);
   assert.equal(h.overnightStoreObj.window?.countdown ?? null, null);
+  assert.equal(h.overnightStoreObj.window?.vetoedTroughStartMs, due, "the veto stamp names this trough");
   assert.equal(h.vetoCards.length, 0, "the veto card resolved on cancel");
   assert.ok(h.ledgerRows.some((row) => row.kind === "cto.overnight.veto"));
 
-  // A later tick with the window OPEN resolves a lingering card, not a new one.
+  // Still in the pre-window: the veto suppresses BOTH the card re-arm and the
+  // countdown — a cancel is not a countdown reset (§9.2).
+  h.advance(5 * 60_000);
   await h.engine.tick();
+  assert.equal(h.overnightStoreObj.window?.countdown ?? null, null, "no countdown re-arm after a veto");
+  assert.equal(h.vetoCards.length, 0, "no veto card re-arm after a veto");
+
+  // THE §9.2 CONTRACT: the clock advances INTO the trough while the user is
+  // absent — the window must NOT re-open and nothing may execute unannounced.
+  h.advance(30 * 60_000);
+  await h.engine.tick();
+  assert.notEqual(h.overnightStoreObj.window?.state, "open", "a vetoed trough never re-opens");
+  assert.equal(h.startedJobs.length, 0, "a canceled night runs nothing");
+
+  // The stamp is per-trough: tomorrow's trough arms a fresh veto card again.
+  const next = { startMs: due + 24 * HOUR, endMs: due + 30 * HOUR };
+  h.setTrough(next);
+  h.advance(24 * HOUR - 20 * 60_000);
+  await h.engine.tick();
+  assert.equal(h.vetoCards.length, 1, "the next night arms a fresh veto card — the veto expired with its trough");
+
+  // A later tick with the window OPEN resolves a lingering card, not a new one.
+  const openTrough = { startMs: h.now(), endMs: h.now() + 6 * HOUR };
+  h.setTrough(openTrough);
+  h.advance(60 * 60_000);
+  await h.engine.tick();
+  assert.equal(h.overnightStoreObj.window?.state, "open", "the fresh trough opens normally (absent, in trough)");
   assert.equal(h.vetoCards.length, 0);
 });
 
@@ -292,3 +350,22 @@ test("overnight: queue-tonight verdicts fold into the overnight Thompson counter
 function h0() {
   return { startMs: 1_700_000_000_000 + 6 * HOUR, endMs: 1_700_000_000_000 + 12 * HOUR };
 }
+
+test("overnight: canceling mid-run pauses the job and vetoes the rest of the trough", async () => {
+  const h = makeHarness({ trough: TROUGH, queue: [QUEUE_TASK], projects: [PROJECT_ROW] });
+  await h.engine.tick();
+  assert.equal(h.overnightStoreObj.window?.state, "open");
+  assert.equal(h.startedJobs.length, 1);
+  h.listedJobs.push({ id: "job-1", actor: "cto", status: "running" });
+
+  const r = await h.engine.tonightCancel();
+  assert.equal(r.ok, true);
+  assert.deepEqual(h.pausedJobs, ["job-1"], "the running cto job is paused");
+  assert.equal(h.overnightStoreObj.window?.state, "closed", "the window closes on cancel");
+  assert.equal(h.overnightStoreObj.window?.vetoedTroughStartMs, TROUGH.startMs, "the rest of tonight is vetoed too");
+
+  h.advance(30 * 60_000);
+  await h.engine.tick();
+  assert.notEqual(h.overnightStoreObj.window?.state, "open", "no re-open after a mid-run cancel");
+  assert.equal(h.startedJobs.length, 1, "no further dispatch on a vetoed trough");
+});

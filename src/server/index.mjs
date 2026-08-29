@@ -1859,9 +1859,45 @@ const ctoEphemeralReaper = createEphemeralReaper({
 // on the machine's 30-min cadence: the windowed provider with the most
 // session headroom (§11.2 prefers the batch pool), else the windowless path
 // bounded by `ctoNightCapUsd`. With neither (no snapshot, no cap) it returns
-// null → the machine runs its λ=0 fat-budget default. `adaptiveCtoBudget` is
-// declared later in this module; the closure only dereferences it at tick
-// time, mirroring the `adaptiveCtoDigest` lazy-reference pattern above.
+//   null → the machine runs its λ=0 fat-budget default. `adaptiveCtoBudget` is
+//   declared later in this module; the closure only dereferences it at tick
+//   time, mirroring the `adaptiveCtoDigest` lazy-reference pattern above.
+//
+// `nightModelCost` prices the §11.2 windowless bound at the box's default
+// model's catalogue `cost` (the same normalized shape the optimizer's
+// modelRates reader builds from oc.getProviders). Memoized 10 min — the seam
+// runs on the machine's tick cadence and the catalogue rarely changes. null
+// (unreadable catalogue) prices the estimate at $0: the cap cannot trip on an
+// unknown model rather than blocking the night on a pricing outage.
+const nightModelCostCache = { at: 0, cost: null };
+async function nightModelCost() {
+  const t = Date.now();
+  if (t - nightModelCostCache.at < 10 * 60_000) return nightModelCostCache.cost;
+  try {
+    const cfgRow = await local.configGet().catch(() => ({}));
+    const dm = cfgRow?.defaultModel ?? null;
+    const { all } = await oc.getProviders();
+    let cost = null;
+    for (const p of Array.isArray(all) ? all : []) {
+      if (!p || typeof p.id !== "string") continue;
+      if (dm?.providerID && p.id !== dm.providerID) continue;
+      const pModels = p.models && typeof p.models === "object" ? p.models : {};
+      const wanted = dm?.modelID && pModels[dm.modelID] ? dm.modelID : Object.keys(pModels)[0];
+      if (!wanted) continue;
+      const m = oc._normalizeProviderModel(p.id, wanted, pModels[wanted]);
+      if (m?.cost && typeof m.cost === "object") {
+        cost = m.cost;
+        break;
+      }
+      if (dm?.providerID) break; // the configured provider had no priceable model
+    }
+    nightModelCostCache.at = t;
+    nightModelCostCache.cost = cost;
+    return cost;
+  } catch {
+    return nightModelCostCache.cost; // keep the last known price on a blip
+  }
+}
 const adaptiveCtoOvernight = ctoOvernight.createOvernightScheduler({
   now: () => Date.now(),
   ledger: ledgerStore,
@@ -1885,14 +1921,32 @@ const adaptiveCtoOvernight = ctoOvernight.createOvernightScheduler({
         });
       }
       const cfg = await local.configGet().catch(() => ({}));
-      const nightCap = Number(cfg?.ctoNightCapUsd);
-      if (!Number.isFinite(nightCap) || nightCap <= 0) return null;
       const windowless = (Array.isArray(snaps) ? snaps : []).find((s) => s?.windowed === false);
-      return await adaptiveCtoBudget.computeSpendable({
+      // §11.2 absolute $ bound (BET-1419 review fix): tonight's overnight
+      // spend is priced from the ledger's job_started estTokens at the default
+      // model's catalogue cost; computeSpendable flips spendableFrac to 0 once
+      // the cap is exhausted, and the cap-hit is ledgered once per day.
+      const dayStart = new Date();
+      dayStart.setHours(0, 0, 0, 0);
+      const rows = (await ledgerStore.read({ from: dayStart.getTime() }).catch(() => [])) ?? [];
+      const plan = await adaptiveCtoBudget.computeSpendable({
         provider: windowless?.provider ?? "anthropic",
         remainingPct: null,
         windowed: false,
+        overnightRows: rows,
+        overnightModelCost: await nightModelCost(),
       });
+      if (plan?.overnightCapHit && !rows.some((r) => r?.kind === "cto.overnight.night_cap_hit")) {
+        await ledgerStore
+          .append({
+            kind: "cto.overnight.night_cap_hit",
+            ts: Date.now(),
+            spentUsd: plan.overnightSpentUsd,
+            capUsd: plan.nightCapUsd,
+          })
+          .catch(() => {});
+      }
+      return plan;
     } catch {
       return null;
     }

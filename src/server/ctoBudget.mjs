@@ -179,6 +179,28 @@ export function priceTokens({ model, tokens, mix } = {}) {
   return dollar((num(tokens) / 1_000_000) * perMillion);
 }
 
+/**
+ * Tonight's estimated overnight spend, priced from the cto ledger (§11.2): the
+ * sum of `priceTokens` over TODAY's `cto.overnight.job_started` rows' estTokens
+ * (the prompt-size estimate the engine records at dispatch — §12.1 metering
+ * style). Rows from other days, other kinds, or without a usable estTokens are
+ * ignored; an unpriceable `modelCost` (null / no cost rates) prices at 0, so
+ * the night cap cannot trip from an unknown model — pass a priceable cost.
+ */
+export function overnightSpendUsd(rows, { now, modelCost = null } = {}) {
+  const t = typeof now === "number" && Number.isFinite(now) ? now : Date.now();
+  const key = dayKey(t);
+  let total = 0;
+  for (const r of Array.isArray(rows) ? rows : []) {
+    if (r?.kind !== "cto.overnight.job_started") continue;
+    if (typeof r?.ts !== "number" || !Number.isFinite(r.ts) || dayKey(r.ts) !== key) continue;
+    const toks = Number(r?.estTokens);
+    if (!Number.isFinite(toks) || toks <= 0) continue;
+    total += priceTokens({ model: { cost: modelCost }, tokens: toks });
+  }
+  return dollar(total);
+}
+
 // ---------------------------------------------------------------------------
 // Expected hourly burn — A2 watchdog figure (§13.3 / BET-1385 placeholder).
 // ---------------------------------------------------------------------------
@@ -652,9 +674,16 @@ export function createCtoBudget({
    * disables the reserve — it returns the same key set as the windowed plan
    * (`spendableFrac: null`, `reserve: 0`, `mode: 'windowless'`, plus
    * `nightCapUsd`) and bounds overnight spend by the absolute
-   * `ctoNightCapUsd` budget instead. The forecaster still runs (§11.2): the
-   * pct series is built, `mape14` computed (null without usable history) and
-   * persisted in the quota row for the Health card.
+   * `ctoNightCapUsd` budget instead: pass the day's ledger rows via
+   * `overnightRows` and the overnight model's catalogue `cost` via
+   * `overnightModelCost`, and once tonight's estimated overnight spend
+   * (`overnightSpendUsd`) reaches the cap the plan's `spendableFrac` flips to
+   * 0 (the machine's budgetFrac 0 selects nothing further) with
+   * `overnightCapHit: true` — the caller ledgers the cap-hit. An unpriceable
+   * model (no `cost`) estimates $0, so the cap cannot trip — the caller
+   * should pass a priceable cost object. The forecaster still runs (§11.2):
+   * the pct series is built, `mape14` computed (null without usable history)
+   * and persisted in the quota row for the Health card.
    */
   async function computeSpendable({
     provider,
@@ -663,6 +692,8 @@ export function createCtoBudget({
     windowed = true,
     capHitsSince = 0,
     earnedCleanDays = 0,
+    overnightRows,
+    overnightModelCost = null,
   } = {}) {
     const t = typeof now === "function" ? now() : typeof now === "number" ? now : Date.now();
     if (!windowed) {
@@ -702,6 +733,11 @@ export function createCtoBudget({
       await ledgerAppend({ kind: "cto.reserve", ts: t, provider, reserve: 0, spendable: null, fractile: quota.fractile, mode: "windowless" });
       // Same key set as the windowed plan below — C3's re-evaluation seam
       // consumes both modes uniformly (null where the concept doesn't apply).
+      // §11.2 absolute $ bound: tonight's estimated overnight spend priced
+      // from the ledger's job_started rows; cap exhausted → spendableFrac 0.
+      const cap = nightCapUsd(conf);
+      const spent = overnightSpendUsd(overnightRows, { now: t, modelCost: overnightModelCost });
+      const capHit = cap > 0 && spent >= cap;
       return {
         provider,
         windowed: false,
@@ -712,11 +748,13 @@ export function createCtoBudget({
         maxObserved,
         historyDays,
         remainingFrac: null,
-        spendableFrac: null,
+        spendableFrac: capHit ? 0 : null,
         point: null,
         sigma: null,
         mape14,
-        nightCapUsd: nightCapUsd(conf),
+        overnightSpentUsd: spent,
+        overnightCapHit: capHit,
+        nightCapUsd: cap,
       };
     }
     const hist = (await history().catch(() => ({}))) ?? {};
