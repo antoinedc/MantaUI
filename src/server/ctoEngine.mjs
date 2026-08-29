@@ -122,6 +122,14 @@ import { resolveForgeOwner } from "./delegate.mjs";
 // Actor tag stamped on every engine RPC call / ledger row (spec §3.3).
 export const ACTOR = "cto";
 
+// The single definition of a "running CTO job row" (BET-1427): the persisted
+// delegate-job rows the §3.3 concurrent cap (act path) and the overnight
+// dispatch / preemption counts (engine path) must agree on. If the definition
+// of "running" ever changes (new status, grace window), change it HERE only.
+export function isRunningCtoRow(row) {
+  return row?.actor === ACTOR && row?.status === "running";
+}
+
 // Rate limits (spec §3.3): exceed any one and the engine pauses itself and
 // raises a health warning (§10.6-7).
 export const RATE_LIMITS = Object.freeze({
@@ -1225,7 +1233,7 @@ export function createCtoEngine(deps = {}) {
     if (typeof listDelegateJobs !== "function") return [];
     try {
       const jobs = await listDelegateJobs();
-      return (Array.isArray(jobs) ? jobs : []).filter((j) => j?.actor === "cto" && j?.status === "running");
+      return (Array.isArray(jobs) ? jobs : []).filter(isRunningCtoRow);
     } catch {
       return [];
     }

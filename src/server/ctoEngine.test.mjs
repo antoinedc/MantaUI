@@ -9,6 +9,7 @@ import {
   DOT,
   HOUR_MS,
   RATE_LIMITS,
+  isRunningCtoRow,
   buildFactsContext,
 } from "./ctoEngine.mjs";
 import { createSegmenter } from "./ctoSegments.mjs";
@@ -799,4 +800,16 @@ test("drainInbox folds unread notes into high-salience B1-weighted evidence and 
   assert.ok(Math.abs(rowB.senderReliability - 1 / 2) < 1e-9, "neutral sender weighted 1/2");
   // No evidence for the already-read entry.
   assert.ok(!rows.some((row) => row.message === "already seen"));
+});
+
+test("isRunningCtoRow: single shared definition of a running CTO job row (BET-1427)", () => {
+  assert.equal(isRunningCtoRow({ actor: "cto", status: "running" }), true);
+  assert.equal(isRunningCtoRow({ actor: "cto", status: "paused" }), false);
+  assert.equal(isRunningCtoRow({ actor: "cto", status: "done" }), false);
+  assert.equal(isRunningCtoRow({ actor: "user", status: "running" }), false);
+  assert.equal(isRunningCtoRow({ status: "running" }), false);
+  assert.equal(isRunningCtoRow({ actor: "cto" }), false);
+  assert.equal(isRunningCtoRow(null), false);
+  assert.equal(isRunningCtoRow(undefined), false);
+  assert.equal(isRunningCtoRow("cto/running"), false);
 });
