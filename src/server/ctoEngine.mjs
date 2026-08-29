@@ -55,6 +55,7 @@ import {
   verdictsStore,
   watchersStore,
   factsArchiveStore,
+  probeStateStore,
   patchEngineState,
   purgeExpiredInbox,
 } from "./ctoStores.mjs";
@@ -88,6 +89,7 @@ import {
   createCtoCards,
   isAskResolveEvent,
 } from "./ctoCards.mjs";
+import { createProbes } from "./ctoProbes.mjs";
 import { createSegmenter, segmentEventKind } from "./ctoSegments.mjs";
 import {
   createRollupRunner,
@@ -415,6 +417,7 @@ export function createCtoEngine(deps = {}) {
   let trustEngine = null;
   let watcherEngine = null;
   let toolEngine = null;
+  let probesEngine = null;
   let lastToolScanDay = null;
 
   // A5 presence inputs (spec §5.4): lastSeen = max(desktop heartbeat, app
@@ -568,6 +571,8 @@ export function createCtoEngine(deps = {}) {
         // §7 tool discovery: the daily evidence scan + lifecycle + connect
         // asks (BET-1395). Once per UTC day; self-paced inside the registry.
         await toolsTick();
+        // §7.5 probe runner (BET-1396): due probes + weekly relevance.
+        await probesTick();
       }
       // §10.6-4 cold-start backfill — also ambient, gated on enabled. Its own
       // drained state marker makes it run at most once per box.
@@ -1076,8 +1081,65 @@ export function createCtoEngine(deps = {}) {
         collectSurfaces: toolsGetSurfaces,
         backfillStartInstant,
         recordVerdict: (input) => getVerdictsEngine().recordVerdict(input),
+        // §7.5 BET-1396: the consent path authors the tool's probe-spec
+        // template through the probes engine (late-bound — the probes engine
+        // is constructed just below with THIS registry as its registry dep).
+        scaffoldProbes: (toolId, opts) => getProbes().scaffoldSpec(toolId, opts),
       });
+    getProbes();
     return toolEngine;
+  }
+
+  // §7.5 probe runner (BET-1396). Built lazily next to the registry it reads.
+  // `toolsRunEphemeral` is the §3.3-gated classifier seam (the SAME gate the
+  // registry's LLM fallback rides) — relevance's weekly nano score rides it
+  // too, so an ungated ambient call path never exists. `isThrifty` reads the
+  // engine's LIVE thrifty flag (the §12.2 shed ladder's rung 2).
+  function getProbes() {
+    if (probesEngine) return probesEngine;
+    if (!tools && !toolEngine) getTools();
+    if (!toolEngine) return null;
+    probesEngine = createProbes({
+      registry: toolEngine,
+      stateStore: probeStateStore,
+      cards,
+      ledger,
+      now,
+      isThrifty: () => thrifty,
+      listProjects: () => getFactsEngine().listProjects(),
+      getTopFacts: (project, k) => getFactsEngine().topFacts(project, { k }),
+      getRollups: probesRollupLines,
+      runEphemeral: toolsRunEphemeral ?? null,
+    });
+    return probesEngine;
+  }
+
+  // §7.6 relevance context: the most recent day-rollup's bullet lines (the
+  // blackboard's freshest summarized work). Cross-project attribution of
+  // rollup bullets needs segment resolution (ctoRollups' proposal mapper) —
+  // deliberately not paid for a nano context; the project's own top facts
+  // (which rollups are fused into) carry the per-project signal.
+  async function probesRollupLines() {
+    try {
+      const rollups = await loadRecentDayRollups(7);
+      const latest = rollups[rollups.length - 1];
+      return (latest?.bullets ?? [])
+        .map((b) => (typeof b?.text === "string" ? b.text.trim() : ""))
+        .filter(Boolean)
+        .slice(0, 5)
+        .join("\n");
+    } catch {
+      return "";
+    }
+  }
+
+  // The §7.5 probe tick (BET-1396): due probes + weekly relevance, behind the
+  // master toggle, thrifty-shed, paused with the rest of the tick.
+  async function probesTick() {
+    const eng = getProbes();
+    if (!eng) return;
+    await eng.runDue().catch(() => {});
+    await eng.relevanceScan().catch(() => {});
   }
 
   // §7.1-2: the daily batch's db seam — tool-call part rows in the scan
@@ -2252,6 +2314,8 @@ export function createCtoEngine(deps = {}) {
     lastHeartbeat,
     proposeFact,
     factsContextBlock,
+    // BET-1396 (§7.5/§10.5): the A12 health endpoint's probe-health reader.
+    probeHealth: () => getProbes()?.healthSnapshot() ?? { tools: 0, probes: 0, healthy: 0, authFailed: 0, lastRunAt: null },
     // BET-1391 verdict ledger (§9.5): record + read the verdict ledger (the
     // opencode `cto_verdict` tool + the digest-opened rewire + the health card
     // all reach one path through these).

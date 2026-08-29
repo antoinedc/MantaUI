@@ -4388,6 +4388,14 @@ const handleRequest = async (req, res) => {
         }
         return adaptiveCtoBudget.roiSnapshot();
       },
+      probesRead: async () => {
+        try {
+          return await adaptiveCto.probeHealth();
+        } catch {
+          /* the probe row degrades to collecting — never fail the health read */
+          return null;
+        }
+      },
         });
         respondJson(res, 200, result);
         return;

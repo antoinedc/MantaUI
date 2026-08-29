@@ -254,6 +254,11 @@ function createDirJsonStore(name, dirPart) {
 export const factsStore = createDirJsonStore("facts", "facts");
 export const factsArchiveStore = createDirJsonStore("facts-archive", "facts-archive");
 export const digestsStore = createDirJsonStore("digests", "digests");
+// BET-1396 probe runner state: one JSON file per tool —
+// `{ probes: { <probe>: { nextRunAt, fails, authFails, cardOpen, lastOk, … } } }`.
+// The §7.5 cadence schedule + consecutive-failure escalation counters must
+// survive restarts; `_relevance.json` carries the §7.6 weekly watermarks.
+export const probeStateStore = createDirJsonStore("probe-state", "probe-state");
 // Segments store — the read-layer work episodes (spec §5.1), one JSON file per
 // segment, swept 30d by sweepSegments(). Owned by the segmentation issue (A6).
 export const segmentsStore = createDirJsonStore("segments", "segments");
@@ -366,6 +371,27 @@ export const probesStore = {
   pathFor: (tool) => {
     assertSafeName(tool, "probes");
     return ctoPath("probes", `${tool}.yaml`);
+  },
+  // Tools that have a spec on disk (strip the `.yaml` suffix; skips other
+  // files defensively). BET-1396: the probe runner enumerates from here.
+  list: async () => {
+    let entries;
+    try {
+      entries = await readdir(ctoPath("probes"), { withFileTypes: true });
+    } catch {
+      return [];
+    }
+    return entries
+      .filter((e) => e.isFile() && e.name.endsWith(".yaml"))
+      .map((e) => e.name.slice(0, -".yaml".length))
+      .filter((t) => {
+        try {
+          assertSafeName(t, "probes");
+          return true;
+        } catch {
+          return false;
+        }
+      });
   },
   loadSync: (tool) => {
     assertSafeName(tool, "probes");
