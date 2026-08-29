@@ -26,7 +26,7 @@
 
 import { DAY_MS, HOUR_MS, WEEK_MS, createRollupRunner, defaultExists, startOfDay, startOfHour, startOfWeek, windowFor, windowId } from "./ctoRollups.mjs";
 import { createSegmenter } from "./ctoSegments.mjs";
-import { engineStateStore, segmentsStore, rollupsStore, ledgerStore } from "./ctoStores.mjs";
+import { engineStateStore, segmentsStore, rollupsStore, ledgerStore, patchEngineState } from "./ctoStores.mjs";
 import { fetchLedgerRows } from "./modelLedger.mjs";
 
 export const DEFAULT_BACKFILL_CAP_USD = 3;
@@ -172,8 +172,9 @@ export function createCtoBackfill(deps = {}) {
     return st && typeof st === "object" ? st : {};
   }
   async function saveState(patch) {
-    const cur = await readState();
-    await engineState.save({ ...cur, ...patch });
+    // BET-1425: per-key RMW — patches carry only backfill-owned keys, so a
+    // concurrent writer's keys survive this save.
+    await patchEngineState(patch, { engineState });
   }
 
   // The A7 rollup runner is constructed lazily + cached; it reduces past

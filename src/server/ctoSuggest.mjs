@@ -416,14 +416,6 @@ export function createCtoSuggest(deps = {}) {
     return { es, st, thresholds: th, used };
   }
 
-  async function saveState(es, st) {
-    try {
-      await engineState.save({ ...es, suggest: st });
-    } catch {
-      /* best-effort */
-    }
-  }
-
   async function getThresholds() {
     const { thresholds: th } = await loadState();
     return { ...(thresholds || {}), ...th };

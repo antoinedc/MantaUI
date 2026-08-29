@@ -27,7 +27,7 @@ import { readFile, writeFile, appendFile, mkdir, rm, readdir } from "node:fs/pro
 import { dirname, join } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { statePath } from "../shared/paths.mjs";
-import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
+import { readJsonSync, writeJsonAtomic, createMutex } from "./jsonStore.mjs";
 import { startPoller } from "./startPoller.mjs";
 
 const MODE = 0o600;
@@ -157,6 +157,53 @@ export const engineStateStore = createCtoJsonStore("engine-state", ctoPath("engi
 // so it moved to a dedicated file no other writer touches. ctoTrust.mjs
 // migrates a legacy `es.trust` payload on first load.
 export const trustStore = createCtoJsonStore("trust", ctoPath("trust.json"));
+
+// ---------------------------------------------------------------------------
+// BET-1425 engine-state write hygiene — per-key read-modify-write.
+//
+// `engineStateStore.save(data)` writes the WHOLE file, so a writer that spreads
+// a load-time snapshot (`{ ...es, myKey }`) silently reverts every other key
+// another writer changed between its load and its save (the resurrect/clobber
+// demonstrated in the BET-1403 review). The durability invariant: a key's
+// value must survive any concurrent writer that does not own that key.
+//
+// `patchEngineState` is the one sanctioned save path for engine-state writers:
+// under a process-wide mutex it loads FRESH, applies only the patch keys the
+// writer owns, and atomically saves. The mutex serializes the whole
+// load→merge→save sequence (the path mutex inside writeJsonAtomic only covers
+// the rename, not the read — a different mutex, so no nesting deadlock), so
+// two concurrent patches each re-derive from the other's committed state.
+//
+// `mutation` is either a static patch object (keys owned by the writer) or a
+// `(fresh) => patch` function for writers whose value derives from state
+// (array pushes, sub-key merges like `watchers.lastAutoDay` vs the
+// `watchers` migration marker). Setting a patch key to `undefined` deletes it.
+// ---------------------------------------------------------------------------
+
+const engineStateWriteLock = createMutex();
+
+export async function patchEngineState(mutation, { engineState = engineStateStore } = {}) {
+  if (
+    typeof mutation !== "function" &&
+    (mutation === null || typeof mutation !== "object" || Array.isArray(mutation))
+  ) {
+    throw new Error("engine-state patch must be a plain object or a (fresh) => patch function");
+  }
+  return engineStateWriteLock.runExclusive(async () => {
+    const fresh = (await engineState.load()) ?? {};
+    const patch = typeof mutation === "function" ? await mutation(fresh) : mutation;
+    if (patch === null || typeof patch !== "object" || Array.isArray(patch)) {
+      throw new Error("engine-state patch must resolve to a plain object");
+    }
+    const next = { ...fresh };
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === undefined) delete next[key];
+      else next[key] = value;
+    }
+    await engineState.save(next);
+    return next;
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Single-level directory JSON stores: one file per id, e.g. `facts/<project>.json`

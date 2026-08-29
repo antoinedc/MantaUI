@@ -28,7 +28,7 @@
 
 import { readdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { factsStore, factsArchiveStore, ledgerStore, engineStateStore } from "./ctoStores.mjs";
+import { factsStore, factsArchiveStore, ledgerStore, engineStateStore, patchEngineState } from "./ctoStores.mjs";
 
 export const FACT_VERSION = 1;
 
@@ -497,6 +497,11 @@ export function createFactsEngine(deps = {}) {
     } catch {}
   }
 
+  // The engine-state keys this engine owns (BET-1425): the threaded `state`
+  // object starts as a full engine-state load, but ONLY these keys may be
+  // written back — a stale snapshot must never spread another writer's keys.
+  const FACTS_STATE_KEYS = ["factReliability", "factQueue", "appliedProposals", "factTuning"];
+
   async function loadState() {
     try {
       const s = await engineState.load();
@@ -507,7 +512,12 @@ export function createFactsEngine(deps = {}) {
   }
   async function saveState(s) {
     try {
-      await engineState.save({ ...s, v: 1 });
+      const patch = {};
+      for (const key of FACTS_STATE_KEYS) {
+        if (key in s) patch[key] = s[key];
+      }
+      // BET-1425: per-key RMW (load-fresh → merge owned keys → atomic save).
+      await patchEngineState(patch, { engineState });
     } catch {}
   }
 
