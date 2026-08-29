@@ -85,9 +85,14 @@ export const AUTH_FAIL_ESCALATE = 3;
 // §7.3 cadence adaptation band (daily ↔ weekly on observed inflow).
 export const CADENCE_DAILY_MS = 24 * 3_600_000;
 export const CADENCE_WEEKLY_MS = 7 * 24 * 3_600_000;
-// §7.6: one relevance call per (tool, project) per week, paced per day.
+// §7.6: one relevance call per (tool, project) per week, paced per day. The
+// daily budget bounds ATTEMPTS, not successes — a failed or unparseable nano
+// call consumes the day's pacing AND sets a short retry watermark, so a
+// persistently failing/gated model makes at most RELEVANCE_PER_DAY attempts
+// per day instead of spinning one attempt per due pair per minute-tick.
 export const RELEVANCE_WEEK_MS = 7 * 24 * 3_600_000;
 export const RELEVANCE_PER_DAY = 6;
+export const RELEVANCE_FAILURE_RETRY_MS = 3_600_000;
 export const RELEVANCE_TASK_CLASS = "ambient-summarize";
 
 // Consent rings (D13). Probes only ever declare metadata | deep_read — the
@@ -342,6 +347,12 @@ export function validateProbeSpec(spec, { tool, allowedHosts = [], consentedRing
       if (typeof spec.auth.header !== "string") {
         push("auth.header", `"auth.header" must be a header template string`);
       } else {
+        if (!spec.auth.header.includes(":")) {
+          // A colon-less template would mangle the header NAME at run time
+          // (everything before the first ":" becomes the name) and 401 into a
+          // misleading rotated-key card — catch it at authoring time.
+          push("auth.header", `"auth.header" must be a full header line "Name: value template" (missing ":")`);
+        }
         const count = spec.auth.header.split(SECRET_PLACEHOLDER).length - 1;
         if (count !== 1) {
           push("auth.header", `"auth.header" must contain exactly one ${SECRET_PLACEHOLDER} placeholder (found ${count})`);
@@ -935,15 +946,20 @@ export function createProbes(deps = {}) {
   /**
    * Weekly per consented tool × active project: one nano call matching the
    * tool's data domain against the project's top facts + recent rollups →
-   * `relevance[project] ∈ [0,1]`. Paced at RELEVANCE_PER_DAY calls/day.
+   * `relevance[project] ∈ [0,1]`. Pacing bounds ATTEMPTS: every call —
+   * success or failure — consumes the RELEVANCE_PER_DAY budget, and a failed
+   * call also sets a RELEVANCE_FAILURE_RETRY_MS watermark so a persistently
+   * failing or gate-rejecting model cannot retry one pair per minute-tick
+   * indefinitely (review cycle 1, Question 1). Successful pairs then rest
+   * for the week.
    */
   async function relevanceScan({ ts = now(), todayKey = dayKeyOf(ts) } = {}) {
-    if (typeof runEphemeral !== "function") return { ran: 0, skipped: "no-ephemeral" };
+    if (typeof runEphemeral !== "function") return { ran: 0, attempts: 0, skipped: "no-ephemeral" };
     let tools;
     try {
       tools = await probes.list();
     } catch {
-      return { ran: 0 };
+      return { ran: 0, attempts: 0 };
     }
     let projects = [];
     try {
@@ -951,7 +967,7 @@ export function createProbes(deps = {}) {
     } catch {
       projects = [];
     }
-    if (tools.length === 0 || projects.length === 0) return { ran: 0 };
+    if (tools.length === 0 || projects.length === 0) return { ran: 0, attempts: 0 };
     let st;
     try {
       st = (await state.load("_relevance")) ?? {};
@@ -964,6 +980,7 @@ export function createProbes(deps = {}) {
     }
     let budget = RELEVANCE_PER_DAY - (st.todayCount ?? 0);
     let ran = 0;
+    let attempts = 0;
     for (const tool of tools) {
       if (budget <= 0) break;
       if ((await registry.consentFor(tool, "metadata")) !== "yes") continue;
@@ -975,20 +992,23 @@ export function createProbes(deps = {}) {
       let toolTouched = false;
       for (const project of projects) {
         if (budget <= 0) break;
-        if (typeof relAt[project] === "number" && ts - relAt[project] < RELEVANCE_WEEK_MS) continue;
+        const entry = relAt[project];
+        const restMs = entry?.ok ? RELEVANCE_WEEK_MS : RELEVANCE_FAILURE_RETRY_MS;
+        if (entry && typeof entry.at === "number" && ts - entry.at < restMs) continue;
         const facts = await getTopFacts(project, 5).catch(() => []);
         const rollups = await getRollups(project).catch(() => "");
         if (!factLines(facts) && !rollupLines(rollups)) {
-          relAt[project] = ts; // nothing to match against — do not retry all week
+          relAt[project] = { at: ts, ok: true }; // nothing to match against — do not retry all week
           toolTouched = true;
           continue;
         }
-        const score = await scoreRelevance({ tool, domain, project, facts, rollups });
-        if (score === null) continue; // model/parse failure → retry next scan
-        relAt[project] = ts;
-        budget -= 1;
-        ran += 1;
+        budget -= 1; // the attempt itself is the paced resource
+        attempts += 1;
         toolTouched = true;
+        const score = await scoreRelevance({ tool, domain, project, facts, rollups });
+        relAt[project] = { at: ts, ok: score !== null };
+        if (score === null) continue; // retried after the failure watermark, still budget-bounded
+        ran += 1;
         try {
           await registry.applyRelevance(tool, project, score);
         } catch {
@@ -1003,11 +1023,11 @@ export function createProbes(deps = {}) {
       st.relAt = { ...(st.relAt ?? {}), [tool]: relAt };
       if (toolTouched) await saveToolState("_relevance", st);
     }
-    if (ran > 0) {
-      st.todayCount = (st.todayCount ?? 0) + ran;
+    if (attempts > 0) {
+      st.todayCount = (st.todayCount ?? 0) + attempts;
       await saveToolState("_relevance", st);
     }
-    return { ran };
+    return { ran, attempts };
   }
 
   function factLines(facts) {

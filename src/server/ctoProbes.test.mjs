@@ -243,7 +243,7 @@ test("validateProbeSpec: sub-5m cadence fails by name", () => {
   assert.ok(r.errors.some((e) => e.key === "probes[0].cadence" && e.message.includes("5m floor")));
 });
 
-test("validateProbeSpec: auth template must hold exactly one {secret}; secret must be a KEY NAME", () => {
+test("validateProbeSpec: auth template must hold exactly one {secret}; secret must be a KEY NAME; header must be Name: value", () => {
   const spec = githubSpec();
   spec.auth = { secret: "GITHUB_TOKEN", header: "Authorization: Bearer" };
   let r = validateProbeSpec(spec, { tool: "github" });
@@ -253,6 +253,14 @@ test("validateProbeSpec: auth template must hold exactly one {secret}; secret mu
   r = validateProbeSpec(spec, { tool: "github" });
   assert.equal(r.ok, false);
   assert.ok(r.errors.some((e) => e.key === "auth.secret"));
+});
+
+test("validateProbeSpec: colon-less auth.header fails at authoring time (nit: mangled header name)", () => {
+  const spec = githubSpec();
+  spec.auth = { secret: "GITHUB_TOKEN", header: "Bearer {secret}" };
+  const r = validateProbeSpec(spec, { tool: "github", allowedHosts: ["api.github.com"], consentedRing: "metadata" });
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => e.key === "auth.header" && e.message.includes('missing ":"')));
 });
 
 test("validateProbeSpec: tool mismatch fails by name", () => {
@@ -706,9 +714,37 @@ test("relevanceScan: out-of-range model output is clamped, parse failure retries
   await eng.relevanceScan({ ts: 1_700_000_000_000 });
   assert.equal(rows[0].relevance.proj, 1, "1.7 clamps to 1");
   await eng.relevanceScan({ ts: 1_700_000_000_000 + 8 * 24 * 3_600_000 });
-  assert.equal(rows[0].relevance.proj, 1, "garbage → null → watermark not set");
+  assert.equal(rows[0].relevance.proj, 1, "garbage → null → value unchanged");
   await eng.relevanceScan({ ts: 1_700_000_000_000 + 9 * 24 * 3_600_000 });
   assert.equal(rows[0].relevance.proj, 0.25);
+});
+
+test("relevanceScan: failed attempts consume the day budget AND rest on a short failure watermark (no per-minute spin)", async () => {
+  const rows = [consentedTool()];
+  let calls = 0;
+  const eng = build({
+    rows,
+    projects: ["p1", "p2", "p3", "p4"],
+    runEphemeral: async () => {
+      calls += 1;
+      throw new Error("provider down");
+    },
+  });
+  const t0 = 1_700_000_000_000;
+  const MIN = 60_000;
+  let r = await eng.relevanceScan({ ts: t0 });
+  assert.equal(r.attempts, 4, "first scan attempts all four pairs");
+  r = await eng.relevanceScan({ ts: t0 + 1 * MIN });
+  assert.equal(r.attempts, 0, "failure watermark suppresses the next minute-tick");
+  r = await eng.relevanceScan({ ts: t0 + 2 * MIN });
+  assert.equal(r.attempts, 0, "still suppressed");
+  r = await eng.relevanceScan({ ts: t0 + 61 * MIN });
+  assert.equal(r.attempts, 2, "after the 1h watermark the remaining day budget (6-4) bounds retries to 2");
+  r = await eng.relevanceScan({ ts: t0 + 62 * MIN });
+  assert.equal(r.attempts, 0, "day budget exhausted");
+  assert.equal(calls, 6, "a persistently failing model makes exactly 6 attempts per day, not one per tick");
+  r = await eng.relevanceScan({ ts: t0 + 24 * 3_600_000 });
+  assert.equal(r.attempts, 4, "a fresh day gets a fresh attempt budget (4 pairs exist)");
 });
 
 test("relevanceScan: projects with nothing on the blackboard are watermarked, not retried", async () => {
@@ -876,17 +912,19 @@ test("registry applyProbeResult: unknown tool is rejected; relevance + evidence 
 // defaultHttpRequest connect path — pinned lookup reaches the validated host
 // ---------------------------------------------------------------------------
 
-test("defaultHttpRequest: the pinned lookup is used and the request carries the hostname SNI/Host", async () => {
-  // No real server: we assert only that the transport wires the pinned lookup
-  // (the connect fails fast against a public-but-dead address; the error is a
-  // socket error, NOT dns_private — proving the DNS validation passed).
+test("defaultHttpRequest: the pinned lookup is consulted (spy) and connect failures are socket/timeout — never a private-DNS miss", async () => {
+  const looked = [];
   await assert.rejects(
     defaultHttpRequest({
       url: "https://93.184.216.34.nip.io/x",
-      dnsLookup: (h, o, cb) => cb(null, [{ address: "93.184.216.34", family: 4 }]),
+      dnsLookup: (h, o, cb) => {
+        looked.push(h);
+        cb(null, [{ address: "93.184.216.34", family: 4 }]);
+      },
     }),
     (e) => ["socket", "timeout"].includes(e.code),
   );
+  assert.deepEqual(looked, ["93.184.216.34.nip.io"], "the pinned custom lookup was consulted exactly once");
 });
 
 // ---------------------------------------------------------------------------
