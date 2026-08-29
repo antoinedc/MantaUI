@@ -265,6 +265,7 @@ test("resolveForgeOwner finds the project that owns the repo checkout (BET-844)"
   assert.deepEqual(resolveForgeOwner(projects, "/repo"), {
     parentSessionID: "ses_parent",
     tmuxSession: "forge-work",
+    defaultCwd: "/repo",
   });
 });
 
@@ -279,6 +280,7 @@ test("resolveForgeOwner matches a window whose cwd is nested inside the checkout
   const owner = resolveForgeOwner(projects, "/repo");
   assert.equal(owner.parentSessionID, "ses_par");
   assert.equal(owner.tmuxSession, "repo-project");
+  assert.equal(owner.defaultCwd, "/");
 });
 
 test("resolveForgeOwner returns null when no project wraps the directory", () => {

@@ -275,9 +275,11 @@ export function resolveOwner(projects, sessionID) {
 // Resolve the real parent for a forge-triggered delegate job (BET-844, spec
 // §3.4⑥). A forge event has no user session to inherit from, so the job's
 // window must land in the tmux project on this box that OWNS the repo checkout
-// being branched off. Returns { parentSessionID, tmuxSession } — the opencode
-// session id to place the job window under, plus the owning project — or null
-// when no tracked project wraps that directory. Pure.
+// being branched off. Returns { parentSessionID, tmuxSession, defaultCwd } —
+// the opencode session id to place the job window under, the owning project,
+// and the project's canonical directory (BET-1426: lets callers store the
+// canonical cwd instead of the raw matched path) — or null when no tracked
+// project wraps that directory. Pure.
 export function resolveForgeOwner(projects, parentDirectory) {
   if (!Array.isArray(projects) || typeof parentDirectory !== "string" || !parentDirectory) return null;
   for (const p of projects) {
@@ -292,7 +294,11 @@ export function resolveForgeOwner(projects, parentDirectory) {
     if (!ownsDir) continue;
     const win = windows.find((w) => w?.opencodeSessionId) ?? windows[0];
     if (!win?.opencodeSessionId) return null;
-    return { parentSessionID: win.opencodeSessionId, tmuxSession: p.tmuxSession };
+    return {
+      parentSessionID: win.opencodeSessionId,
+      tmuxSession: p.tmuxSession,
+      defaultCwd: typeof p.defaultCwd === "string" && p.defaultCwd ? p.defaultCwd : null,
+    };
   }
   return null;
 }
