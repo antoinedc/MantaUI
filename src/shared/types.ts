@@ -311,6 +311,14 @@ export type AppConfig = {
   // Adaptive CTO (BET-1386): push the pre-generated digest to the phone (§5.5
   // notify). Off by default.
   ctoDigestPush?: boolean;
+  // Adaptive CTO (BET-1405): the §11 Overnight-work switch — gates the entire
+  // overnight pool; only visible/effective at High (§10.5 card 1). Default off.
+  // NOTE: the Behavior-card control ships with the §11 overnight wiring
+  // (BET-1419); the config key + the Tonight's-budget card's read of it land
+  // here first so both runs converge on the same key.
+  ctoOvernight?: boolean;
+  // Adaptive CTO (BET-1400): the windowless/night $ pool (§11.2). Default 5.
+  ctoNightCapUsd?: number;
   // ----- Manta Optimizer (BET-1342 / Phase 2) -----
   // Master switch for the optimizer. DEFAULT FALSE. Opt-in: with it OFF the
   // optimizer changes nothing. It does NOT gate Automatic Manta Routing —

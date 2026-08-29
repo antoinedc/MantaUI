@@ -9,16 +9,16 @@
 // rendered here.
 
 import { effectsForVerdict } from "./ctoVerdicts.mjs";
+import { todaySpend, roiMonthKey } from "./ctoBudget.mjs";
 
 const DAY_MS = 86_400_000;
 
 // Minimum sample sizes (samples, not days). Chosen so a median is meaningful:
 // a week of observed opens for the digest median, a week of summarized
 // segments for the pipeline-lag median, and at least one budget meter reading
-// for the ambient-spend row (the B1 metering that feeds it lands in a later
-// economics issue — until then this row honestly reports `collecting (0/1)`).
-// Suggestion acceptance needs ≥ 10 acceptance-deciding verdicts (BET-1391) so
-// a thumb of a few verdicts never reads as signal.
+// for the ambient-spend row. Suggestion acceptance needs ≥ 10
+// acceptance-deciding verdicts (BET-1391) so a thumb of a few verdicts never
+// reads as signal.
 export const HEALTH_STAT_MIN = Object.freeze({
   ambientSpendToday: 1,
   digestOpens: 7,
@@ -27,7 +27,23 @@ export const HEALTH_STAT_MIN = Object.freeze({
   forecastAccuracy: 1,
   capHitsCaused: 1,
   reserveFractile: 1,
+  roi: 1,
 });
+
+// EN month labels for ROI row copy — deterministic (server locale must not
+// leak into stat text the desktop + mobile render identically).
+const MONTH_LABELS = Object.freeze([
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+]);
+
+/** "2026-07" → "Jul 2026"; anything else → the key unchanged. */
+export function roiMonthLabel(key) {
+  const m = /^(\d{4})-(\d{2})$/.exec(String(key ?? ""));
+  if (!m) return String(key ?? "");
+  const idx = Number(m[2]) - 1;
+  return idx >= 0 && idx < 12 ? `${MONTH_LABELS[idx]} ${m[1]}` : String(key);
+}
 
 function medianOf(values) {
   if (!values.length) return null;
@@ -68,6 +84,9 @@ export async function computeHealthStats({
   listSegments = async () => [],
   verdictsRead = async () => [],
   ctoAmbientCap = 2.5,
+  // BET-1405 (§12.4): async () => { month, roll, collectingUntil } — the
+  // monthly ROI roll; the endpoint refreshes it before this read.
+  roiRead = async () => null,
 } = {}) {
   const t = now();
   const stats = [];
@@ -79,15 +98,19 @@ export async function computeHealthStats({
   } catch {
     budget = null;
   }
-  const todaySpend = budget?.today?.spend;
-  const hasSpend = typeof todaySpend === "number" && Number.isFinite(todaySpend);
+  // The meter is live when the budget store holds any recorded activity —
+  // a quiet today then honestly reads "$0.00 of $2.50 / day".
+  const todaySpent = budget ? todaySpend(budget, t) : 0;
+  const budgetLive =
+    budget != null &&
+    (budget.updatedMs != null || Object.keys(budget.days ?? {}).length > 0);
   stats.push({
     id: "ambientSpendToday",
     label: "Ambient spend today",
     min: HEALTH_STAT_MIN.ambientSpendToday,
-    n: hasSpend ? 1 : 0,
-    value: hasSpend
-      ? `$${todaySpend.toFixed(2)} of $${Number(ctoAmbientCap).toFixed(2)} / day`
+    n: budgetLive ? 1 : 0,
+    value: budgetLive
+      ? `$${todaySpent.toFixed(2)} of $${Number(ctoAmbientCap).toFixed(2)} / day`
       : null,
   });
 
@@ -237,6 +260,44 @@ export async function computeHealthStats({
     n: withFractile ? 1 : 0,
     value: withFractile && fractileLabel ? `${fractileLabel} · ${withFractile.provider ?? "provider"}` : null,
   });
+
+  // 8. ROI self-report (§12.4, BET-1405) — the monthly roll: total CTO spend
+  //    vs counted outcomes + a copy-only tier recommendation. Until the first
+  //    monthly boundary passes the row renders `collecting — first report
+  //    <date>`; the recommendation NEVER writes the dial.
+  let roi = null;
+  try {
+    roi = (await roiRead()) ?? null;
+  } catch {
+    roi = null;
+  }
+  if (roi && roi.roll) {
+    const r = roi.roll;
+    const rec = r.recommendation ?? { tier: "stay", reason: "" };
+    stats.push({
+      id: "roi",
+      label: `ROI · ${roiMonthLabel(roi.month ?? r.month)}`,
+      min: HEALTH_STAT_MIN.roi,
+      n: 1,
+      value: `$${Number(r.spendUsd ?? 0).toFixed(2)} · ${r.accepted ?? 0} accepted · ${r.merged ?? 0} merged · ${r.incidents ?? 0} pre-surfaced — recommend ${rec.tier}: ${rec.reason}`,
+    });
+  } else {
+    const firstReport =
+      roi?.collectingUntil != null
+        ? new Date(roi.collectingUntil)
+        : null;
+    const firstReportText = firstReport
+      ? `${MONTH_LABELS[firstReport.getMonth()]} ${firstReport.getDate()}`
+      : null;
+    stats.push({
+      id: "roi",
+      label: "ROI · self-report",
+      min: HEALTH_STAT_MIN.roi,
+      n: 0,
+      value: null,
+      collectingText: firstReportText ? `collecting — first report ${firstReportText}` : "collecting",
+    });
+  }
 
   return { stats, generatedAt: t };
 }

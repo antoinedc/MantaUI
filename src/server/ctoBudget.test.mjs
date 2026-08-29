@@ -405,3 +405,269 @@ test("recordCapHit writes a cto.cap_hit ledger row", async () => {
   assert.equal(ledgerRows[0].provider, "claude");
   assert.equal(ledgerRows[0].pct, 100);
 });
+
+// ---------------------------------------------------------------------------
+// BET-1405 — ROI monthly roll (§12.4)
+// ---------------------------------------------------------------------------
+
+import {
+  ROI_MIN_OUTCOMES_RAISE,
+  ROI_MIN_SPEND_USD_LOWER,
+  ROI_PENDING_RETENTION_MS,
+  roiMonthKey,
+  monthWindow,
+  monthSpendUsd,
+  acceptedSuggestions,
+  preSurfacedIncidents,
+  isJobMerged,
+  roiRecommendation,
+} from "./ctoBudget.mjs";
+
+const AUG_KEY = roiMonthKey(MIDNIGHT); // 2026-08 local
+const JUL_KEY = "2026-07";
+
+test("roiMonthKey + monthWindow are local-month consistent", () => {
+  assert.equal(AUG_KEY, "2026-08");
+  const w = monthWindow(AUG_KEY);
+  assert.equal(w.startTs, new Date(2026, 7, 1).getTime()); // Aug 1, local
+  assert.equal(w.endTs, monthWindow("2026-09").startTs); // Aug has 31 days
+  assert.equal(monthWindow("nope"), null);
+  assert.equal(monthWindow("2026-13"), null);
+  assert.equal(monthWindow(undefined), null);
+});
+
+test("monthSpendUsd sums only the buckets inside the month window", () => {
+  let p = defaultBudgetPayload();
+  p = recordSpend(p, { now: MIDNIGHT + 3_600_000, usd: 1.25 }); // Aug 28
+  p = recordSpend(p, { now: dayStart(-5) + 3_600_000, usd: 0.75 }); // Aug 23
+  p = recordSpend(p, { now: dayStart(-40) + 3_600_000, usd: 9.99 }); // July
+  assert.equal(monthSpendUsd(p, monthWindow(AUG_KEY)), 2.0);
+  assert.equal(monthSpendUsd(p, monthWindow(JUL_KEY)), 9.99);
+  assert.equal(monthSpendUsd(p, null), 0);
+});
+
+test("acceptedSuggestions reuses the §9.5 verdict mapping (never-flag ≠ accept)", () => {
+  const w = monthWindow(AUG_KEY);
+  const rows = [
+    { verdict: "accept", ts: MIDNIGHT + 1_000 },
+    { verdict: "edit", ts: MIDNIGHT + 2_000 },
+    { verdict: "dismiss", ts: MIDNIGHT + 3_000 },
+    { verdict: "accept", never: true, ts: MIDNIGHT + 4_000 },
+    { verdict: "accept", ts: dayStart(-40) }, // outside window
+    { verdict: "accept", ts: undefined },
+  ];
+  assert.equal(acceptedSuggestions(rows, w), 2);
+  assert.equal(acceptedSuggestions([], w), 0);
+  assert.equal(acceptedSuggestions(rows, null), 0);
+});
+
+test("preSurfacedIncidents: resolved blocker whose source event predates any user prompt on the session counts", () => {
+  const w = monthWindow(AUG_KEY);
+  const resolvedRows = [
+    { kind: "card.resolved", variant: "blocker", cardId: "c1", sessionID: "s1", ts: MIDNIGHT + 2 * 86_400_000 },
+    { kind: "card.resolved", variant: "blocker", cardId: "c2", sessionID: "s2", ts: MIDNIGHT + 2 * 86_400_000 },
+    { kind: "card.resolved", variant: "blocker", cardId: "c3", sessionID: null, ts: MIDNIGHT + 2 * 86_400_000 }, // health — no sessionID, excluded
+    { kind: "card.resolved", variant: "question", cardId: "c4", sessionID: "s4", ts: MIDNIGHT + 2 * 86_400_000 }, // not a blocker
+    { kind: "card.resolved", variant: "blocker", cardId: "c5", sessionID: "s5", ts: dayStart(-40) }, // outside window
+  ];
+  const createdTsByCardId = { c1: MIDNIGHT + 1 * 86_400_000, c2: MIDNIGHT - 10 * 86_400_000, c5: dayStart(-40) };
+  const promptTsBySession = new Map([
+    // s1: no prompt before the card existed → counts
+    // s2: user was already on the session 12 days before the card → does NOT count
+    ["s2", [MIDNIGHT - 12 * 86_400_000]],
+  ]);
+  assert.equal(
+    preSurfacedIncidents({ resolvedRows, createdTsByCardId, promptTsBySession, window: w }),
+    1,
+  );
+});
+
+test("preSurfacedIncidents: missing creation row falls back to the resolution ts", () => {
+  const w = monthWindow(AUG_KEY);
+  const count = preSurfacedIncidents({
+    resolvedRows: [{ kind: "card.resolved", variant: "blocker", cardId: "cx", sessionID: "sx", ts: MIDNIGHT + 86_400_000 }],
+    createdTsByCardId: {},
+    promptTsBySession: new Map([["sx", [MIDNIGHT + 86_400_000 - 1]]]),
+    window: w,
+  });
+  assert.equal(count, 0); // a prompt one ms before the fallback source ts disqualifies
+});
+
+test("isJobMerged: branch gone counts as merged; present needs merge-base ancestry", () => {
+  assert.equal(isJobMerged({ exists: false, isAncestor: false }), true);
+  assert.equal(isJobMerged({ exists: true, isAncestor: true }), true);
+  assert.equal(isJobMerged({ exists: true, isAncestor: false }), false);
+  assert.equal(isJobMerged({ exists: true }), false);
+  assert.equal(isJobMerged(null), false);
+  assert.equal(isJobMerged(undefined), false);
+});
+
+test("roiRecommendation rules: stay / lower / raise / hold", () => {
+  assert.deepEqual(roiRecommendation({ spendUsd: 0, accepted: 0, merged: 0, incidents: 0 }), {
+    tier: "stay",
+    reason: "no spend and no counted outcomes yet",
+  });
+  assert.deepEqual(roiRecommendation({ spendUsd: 1.5, accepted: 0, merged: 0, incidents: 0 }), {
+    tier: "lower",
+    reason: "$1.50 spent with no counted outcomes",
+  });
+  assert.deepEqual(roiRecommendation({ spendUsd: 0.2, accepted: 0, merged: 0, incidents: 0 }), {
+    tier: "stay",
+    reason: "0 outcomes for $0.20 — holding",
+  });
+  assert.equal(
+    roiRecommendation({ spendUsd: 3, accepted: ROI_MIN_OUTCOMES_RAISE - 1, merged: 1, incidents: 0 }).tier,
+    "raise",
+  );
+  assert.equal(
+    roiRecommendation({ spendUsd: 3, accepted: 2, merged: 0, incidents: 0 }).tier,
+    "stay",
+  );
+  assert.equal(ROI_MIN_SPEND_USD_LOWER, 1);
+});
+
+test("refreshRoi: samples terminal CTO jobs, probes merges, persists months + pending", async () => {
+  let payload = recordSpend(defaultBudgetPayload(), { now: dayStart(-40), usd: 0.5 }); // July activity
+  const store = {
+    load: async () => payload,
+    save: async (p) => {
+      payload = p;
+    },
+  };
+  const jobs = [
+    { id: "j1", actor: "cto", status: "done", branch: "cto/j1", cwd: "/proj", finishedAt: MIDNIGHT + 86_400_000 },
+    { id: "j2", actor: "cto", status: "done", branch: "cto/j2", cwd: "/proj", finishedAt: MIDNIGHT + 86_400_000 },
+    { id: "j3", actor: "user", status: "done", branch: "u/j3", cwd: "/proj", finishedAt: MIDNIGHT + 86_400_000 }, // not CTO
+    { id: "j4", actor: "cto", status: "running", branch: "cto/j4", cwd: "/proj", finishedAt: null }, // not terminal
+    { id: "j5", actor: "cto", status: "done", branch: null, finishedAt: MIDNIGHT + 86_400_000 }, // no branch
+  ];
+  const probes = {
+    "cto/j1": { exists: false, isAncestor: false }, // deleted-on-merge
+    "cto/j2": { exists: true, isAncestor: false }, // not merged (yet)
+  };
+  const budget = createCtoBudget({
+    store,
+    jobsRead: async () => jobs,
+    gitProbe: async ({ branch }) => probes[branch] ?? { exists: true, isAncestor: false },
+    ledgerRead: async () => [],
+    verdictsRead: async () => [],
+    segmentsRead: async () => [],
+    now: () => MIDNIGHT + 2 * 86_400_000,
+  });
+  const r1 = await budget.refreshRoi();
+  assert.equal(r1.pending.length, 2); // j1, j2 sampled
+  assert.equal(r1.months[AUG_KEY].merged, 1); // j1 merged
+  const r2 = await budget.refreshRoi();
+  assert.equal(r2.pending.length, 2);
+  assert.equal(r2.months[AUG_KEY].merged, 1); // idempotent — j1 not double-counted
+  // The Health row renders the latest CLOSED month (July — its spend only),
+  // while August's accumulator keeps the merged count for its own roll.
+  const snap = await budget.roiSnapshot();
+  assert.equal(snap.month, JUL_KEY);
+  assert.equal(snap.roll.merged, 0);
+  assert.equal(snap.roll.spendUsd, 0.5);
+  assert.equal(snap.roll.recommendation.tier, "stay"); // $0.50 with no outcomes — below the $1 lower bar
+  assert.equal(snap.collectingUntil, monthWindow(JUL_KEY).endTs); // first report passed
+});
+
+test("refreshRoi: recomputes the previous month once after it closes, then freezes", async () => {
+  let payload = defaultBudgetPayload();
+  const store = {
+    load: async () => payload,
+    save: async (p) => {
+      payload = p;
+    },
+  };
+  let ledger = [
+    { kind: "card.created", cardId: "c9", ts: dayStart(-40) + 1_000 },
+    { kind: "card.resolved", variant: "blocker", cardId: "c9", sessionID: "s9", ts: dayStart(-40) + 2_000 },
+  ];
+  const budget = createCtoBudget({
+    store,
+    ledgerRead: async () => ledger,
+    verdictsRead: async () => [],
+    segmentsRead: async () => [],
+    jobsRead: async () => [],
+    gitProbe: async () => ({ exists: false, isAncestor: false }),
+    now: () => MIDNIGHT, // Aug 28 — July is closed
+  });
+  await budget.refreshRoi();
+  const july1 = payload.roi.months[JUL_KEY];
+  assert.equal(july1.incidents, 1);
+  assert.equal(july1.frozen, true);
+
+  // A later data change must NOT rewrite a frozen month.
+  ledger = [];
+  await budget.refreshRoi();
+  const july2 = payload.roi.months[JUL_KEY];
+  assert.equal(july2.incidents, 1);
+  assert.equal(july2.frozen, true);
+
+  // The current (open) month recomputes every refresh.
+  const aug = payload.roi.months[AUG_KEY];
+  assert.equal(aug.frozen, false);
+});
+
+test("refreshRoi: store and probe failures degrade without throwing (no frozen zeros)", async () => {
+  const budget = createCtoBudget({
+    store: { load: async () => { throw new Error("disk"); }, save: async () => { throw new Error("disk"); } },
+    jobsRead: async () => { throw new Error("jobs"); },
+    gitProbe: async () => { throw new Error("git"); },
+    ledgerRead: async () => { throw new Error("ledger"); },
+    verdictsRead: async () => { throw new Error("verdicts"); },
+    segmentsRead: async () => { throw new Error("segments"); },
+    now: () => MIDNIGHT,
+  });
+  const r = await budget.refreshRoi();
+  assert.deepEqual(r.months, {}); // failed months are never persisted as zeros
+  const snap = await budget.roiSnapshot();
+  assert.equal(snap.roll, null);
+  assert.equal(snap.collectingUntil, null);
+});
+
+test("roiSnapshot: collectingUntil is the first month's end from the day buckets", async () => {
+  let payload = recordSpend(defaultBudgetPayload(), { now: dayStart(-40), usd: 0.5 });
+  const store = { load: async () => payload, save: async (p) => (payload = p) };
+  const budget = createCtoBudget({
+    store,
+    jobsRead: async () => [],
+    gitProbe: async () => ({ exists: false, isAncestor: false }),
+    ledgerRead: async () => [],
+    verdictsRead: async () => [],
+    segmentsRead: async () => [],
+    now: () => MIDNIGHT,
+  });
+  const snap = await budget.roiSnapshot();
+  assert.equal(snap.roll, null); // no refresh ran → no roll stored
+  assert.equal(snap.collectingUntil, monthWindow(JUL_KEY).endTs);
+});
+
+test("pending rows past the retention horizon are dropped", async () => {
+  let payload = defaultBudgetPayload();
+  const store = { load: async () => payload, save: async (p) => (payload = p) };
+  // A stateful jobs reader: the job exists only on the first refresh (the
+  // jobs store sweeps terminal records after 7 days — long before the 60d
+  // pending-retention horizon drops a counted row, so a counted job can
+  // never be re-sampled in reality).
+  let jobsVisible = true;
+  const budget = createCtoBudget({
+    store,
+    jobsRead: async () => {
+      if (!jobsVisible) return [];
+      jobsVisible = false;
+      return [{ id: "old", actor: "cto", status: "done", branch: "cto/old", cwd: "/p", finishedAt: MIDNIGHT - ROI_PENDING_RETENTION_MS - 1 }];
+    },
+    gitProbe: async () => ({ exists: true, isAncestor: false }), // never merges
+    ledgerRead: async () => [],
+    verdictsRead: async () => [],
+    segmentsRead: async () => [],
+    now: () => MIDNIGHT,
+  });
+  await budget.refreshRoi();
+  await budget.refreshRoi();
+  assert.equal(payload.roi.pending.length, 1); // uncounted row is kept for later probes
+  payload.roi.pending[0].counted = true;
+  await store.save(payload);
+  await budget.refreshRoi();
+  assert.equal(payload.roi.pending.length, 0); // counted stale row swept
+});

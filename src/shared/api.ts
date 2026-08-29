@@ -284,14 +284,23 @@ export type CtoDigest = {
 
 // A single Health-card row (§10.5 card 2, P1 only). `n` is samples seen so
 // far, `min` the minimum sample size before the value may be trusted. While
-// `n < min` the renderer shows `collecting (n/min)` and never the number — a
-// stat never displays noise as signal.
+// `n < min` the renderer shows `collecting (n/min)` — or the row's own
+// `collectingText` when the server supplies one — and never the number.
 export type CtoHealthStat = {
-  id: "ambientSpendToday" | "digestOpens" | "pipelineLag" | "suggestionAcceptance";
+  id:
+    | "ambientSpendToday"
+    | "digestOpens"
+    | "pipelineLag"
+    | "suggestionAcceptance"
+    | "forecastAccuracy"
+    | "capHitsCaused"
+    | "reserveFractile"
+    | "roi";
   label: string;
   value: string | null;
   n: number;
   min: number;
+  collectingText?: string;
 };
 
 // A raw Activity-ledger row (A12 drill-down). Append-only; reverse-chron view.
@@ -1129,6 +1138,16 @@ export interface Api {
   // GET /api/cto/health — the §10.5 Health-card P1 stats (composed by the
   // engine from the ledger + budget + segment stores). Read on settings-open.
   ctoHealthGet(): Promise<{ stats: CtoHealthStat[] }>;
+  // RPC `quota:read` — the persisted budget payload (day buckets + §11.3
+  // per-provider quota cache). Read-only; feeds the Tonight's-budget card
+  // (§10.5 card 3, BET-1405).
+  ctoQuotaRead(): Promise<{
+    days?: Record<string, { usd?: number; calls?: number } | undefined>;
+    quota?: Record<
+      string,
+      { provider?: string; mode?: string | null; reserve?: number | null; spendable?: number | null; mape14?: number | null } | undefined
+    >;
+  } | null>;
   // GET /api/cto/ledger — reverse-chron Activity-ledger drill-down (A12),
   // cursor-paginated with `before` (exclusive ts) and filterable by actor/kind.
   ctoLedgerGet(opts?: {

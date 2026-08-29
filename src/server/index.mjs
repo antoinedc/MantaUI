@@ -7,6 +7,8 @@
 // one less auth surface.
 
 import { createServer } from "node:http";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { readFile, stat, mkdir, rm, readdir } from "node:fs/promises";
 import { createWriteStream, createReadStream } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -2072,6 +2074,52 @@ const adaptiveCtoBudget = ctoBudget.createCtoBudget({
       return {};
     }
   },
+  // BET-1405 ROI roll seams (§12.4): terminal delegate jobs (sampled into
+  // budget.roi.pending before the 7-day jobs sweep), the project repo's git
+  // read (merged-branch detection), verdicts, segments (user-prompt history
+  // for the incidents heuristic) and the §14.5 ledger.
+  jobsRead: async () => {
+    try {
+      const { jobs = [] } = await delegateEngine.listJobs();
+      return jobs;
+    } catch {
+      return [];
+    }
+  },
+  gitProbe: async ({ cwd, branch }) => {
+    const dir = typeof cwd === "string" && cwd ? cwd : null;
+    if (!dir || typeof branch !== "string" || !branch) return { exists: false, isAncestor: false };
+    const runGit = async (args) => {
+      const { stdout } = await promisify(execFile)("git", ["-C", dir, ...args], { timeout: 5000 });
+      return stdout;
+    };
+    try {
+      await runGit(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]);
+    } catch {
+      return { exists: false, isAncestor: false };
+    }
+    try {
+      await runGit(["merge-base", "--is-ancestor", branch, "HEAD"]);
+      return { exists: true, isAncestor: true };
+    } catch {
+      return { exists: true, isAncestor: false };
+    }
+  },
+  verdictsRead: async () => (await verdictsStore.load())?.entries ?? [],
+  segmentsRead: async () => {
+    const rows = [];
+    try {
+      for (const name of await readdir(segmentsStore.dir)) {
+        if (!name.endsWith(".json")) continue;
+        const seg = await segmentsStore.load(name.replace(/\.json$/, ""));
+        if (seg && typeof seg === "object") rows.push(seg);
+      }
+    } catch {
+      /* segments dir absent → no prompt history */
+    }
+    return rows;
+  },
+  ledgerRead: () => ledgerStore.read(),
 });
 const adaptiveCtoWatchdog = ctoEngine.createWatchdog({
   engine: adaptiveCto,
@@ -4057,6 +4105,14 @@ const handleRequest = async (req, res) => {
         return rows;
       },
       verdictsRead: async () => (await verdictsStore.load())?.entries ?? [],
+      roiRead: async () => {
+        try {
+          await adaptiveCtoBudget.refreshRoi();
+        } catch {
+          /* the roll degrades to collecting — never fail the health read */
+        }
+        return adaptiveCtoBudget.roiSnapshot();
+      },
         });
         respondJson(res, 200, result);
         return;

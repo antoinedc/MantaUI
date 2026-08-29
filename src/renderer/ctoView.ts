@@ -43,21 +43,37 @@ export const idleBackfill: BackfillState = {
 // shows `collecting (n/k)` and never the number — a stat never displays noise
 // as signal.
 export type CtoHealthStat = {
-  id: "ambientSpendToday" | "digestOpens" | "pipelineLag" | "suggestionAcceptance";
+  id:
+    | "ambientSpendToday"
+    | "digestOpens"
+    | "pipelineLag"
+    | "suggestionAcceptance"
+    // BET-1400 rows (rendered since their server stats landed):
+    | "forecastAccuracy"
+    | "capHitsCaused"
+    | "reserveFractile"
+    // BET-1405 (§12.4): the monthly ROI self-report roll.
+    | "roi";
   label: string;
   value: string | null;
   n: number;
   min: number;
+  // BET-1405: when a not-ready row needs a specific collecting sentence
+  // (e.g. the ROI row's `collecting — first report <date>`), the server
+  // supplies it verbatim; otherwise the generic `collecting (n / min)` renders.
+  collectingText?: string;
 };
 
 // Pure stat-display selector (§10.5): when a stat has not reached its minimum
-// sample size, render `collecting (n / min)` instead of the (possibly noisy)
-// value. Returns the ready flag so the caller can de-emphasize collecting rows.
+// sample size, render `collecting (n / min)` — or the stat's own
+// `collectingText` when the server supplied one — instead of the (possibly
+// noisy) value. Returns the ready flag so the caller can de-emphasize
+// collecting rows.
 export function statDisplay(stat: CtoHealthStat): { text: string; ready: boolean } {
   const ready = stat?.n >= stat?.min && typeof stat?.value === "string" && stat.value !== "";
   if (!ready) {
     return {
-      text: `collecting (${stat?.n ?? 0} / ${stat?.min ?? 0})`,
+      text: stat?.collectingText ?? `collecting (${stat?.n ?? 0} / ${stat?.min ?? 0})`,
       ready: false,
     };
   }
@@ -71,6 +87,133 @@ export function statDisplay(stat: CtoHealthStat): { text: string; ready: boolean
 // epoch-ms the kill switch was thrown, for the banner's "paused at" line.
 export function showPausedBanner(state: CtoState | null): boolean {
   return state?.dot === "paused";
+}
+
+// ---------------------------------------------------------------------------
+// Tonight's-budget card (§10.5 card 3) — BET-1405. Pure selectors over the
+// config + budget payload + usage snapshots; the card component renders them.
+// ---------------------------------------------------------------------------
+
+export type TonightBudgetMode = "full" | "ambient";
+
+export type TonightBudgetGate = {
+  tier?: "low" | "medium" | "high" | null;
+  overnightOn?: boolean | null;
+};
+
+// Render-mode selection (§10.5 card 3): the full gauge (night pool, planned
+// tonight, reserve line) renders ONLY at High with Overnight on. Below that,
+// the card shows ambient spend vs cap only — never a gauge for a pool that
+// cannot run (overnight is off, there is no pool to spend).
+export function tonightBudgetMode(gate: TonightBudgetGate | null): TonightBudgetMode {
+  return gate?.tier === "high" && gate?.overnightOn === true ? "full" : "ambient";
+}
+
+export type NightGaugeInput = {
+  nightCapUsd: number;
+  usedTodayUsd: number;
+  plannedTonightUsd: number | null;
+  reserveFrac: number | null;
+};
+
+export type NightGauge = {
+  poolUsd: number;
+  usedUsd: number;
+  plannedUsd: number;
+  reserveLineUsd: number | null;
+  overflow: boolean;
+};
+
+/**
+ * The night-pool gauge (§10.5 card 3): axis $0 → `ctoNightCapUsd`; segments
+ * [used today][planned tonight] and the reserve line at the fractile — the
+ * pool share held back at the binding provider's active reserve (null when no
+ * windowed reserve exists). All inputs clamp into the pool; `overflow` flags
+ * a used+planned that exceeds it (the gauge never silently truncates).
+ */
+export function nightGauge(input: NightGaugeInput): NightGauge {
+  const pool = Math.max(0, Number(input?.nightCapUsd) || 0);
+  const used = Math.max(0, Number(input?.usedTodayUsd) || 0);
+  const planned = input?.plannedTonightUsd != null ? Math.max(0, Number(input.plannedTonightUsd) || 0) : 0;
+  const overflow = used + planned > pool + 1e-9;
+  const usedClamped = Math.min(used, pool);
+  const plannedClamped = Math.min(planned, Math.max(0, pool - usedClamped));
+  const reserveRaw = Number(input?.reserveFrac);
+  const reserveLineUsd =
+    input?.reserveFrac != null && Number.isFinite(reserveRaw) ? Math.max(0, Math.min(1, reserveRaw)) * pool : null;
+  return { poolUsd: pool, usedUsd: usedClamped, plannedUsd: plannedClamped, reserveLineUsd, overflow };
+}
+
+/** Today's spend from the budget payload (the same day buckets the server
+ *  meters into; day rolls at the viewer's local midnight). */
+export function budgetTodayUsd(
+  payload: { days?: Record<string, { usd?: number } | undefined> } | null | undefined,
+  now = Date.now(),
+): number {
+  const d = new Date(now);
+  const key = String(new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime());
+  const usd = Number(payload?.days?.[key]?.usd);
+  return Number.isFinite(usd) && usd > 0 ? usd : 0;
+}
+
+/** The binding windowed reserve (fraction) — the largest reserve among the
+ *  persisted quota rows with an active reserve; null when none (windowless
+ *  providers hold no reserve — no line renders). */
+export function bindingReserveFrac(
+  quotaRows: Record<string, { provider?: string; mode?: string | null; reserve?: number | null } | undefined> | null | undefined,
+): number | null {
+  if (!quotaRows || typeof quotaRows !== "object") return null;
+  let best: number | null = null;
+  for (const q of Object.values(quotaRows)) {
+    if (!q || q.mode === "windowless") continue;
+    const r = Number(q.reserve);
+    if (!Number.isFinite(r)) continue;
+    if (best == null || r > best) best = r;
+  }
+  return best;
+}
+
+export type ProviderWindowNote = { provider: string; label: string; resetsAt: number | null };
+export type UsageWindowLike = { kind?: string; label?: string; resetsAt?: number | null };
+export type UsageSnapshotLike = { provider?: string; windows?: UsageWindowLike[] | null };
+
+/** Per-provider plan-window notes for the card's legend (§10.5 card 3):
+ *  window label + reset instant from the usage poller's snapshots. Capped at
+ *  `max` notes to keep the card a card. */
+export function providerWindowNotes(snapshots: UsageSnapshotLike[] | null | undefined, max = 6): ProviderWindowNote[] {
+  const snaps = Array.isArray(snapshots) ? snapshots : [];
+  const notes: ProviderWindowNote[] = [];
+  for (const s of snaps) {
+    const provider = typeof s?.provider === "string" && s.provider ? s.provider : null;
+    if (!provider) continue;
+    const windows = Array.isArray(s?.windows) ? s.windows : [];
+    for (const w of windows) {
+      if (!w) continue;
+      const label = typeof w.label === "string" && w.label ? w.label : typeof w.kind === "string" ? w.kind : "";
+      notes.push({ provider, label, resetsAt: typeof w.resetsAt === "number" ? w.resetsAt : null });
+    }
+  }
+  return notes.slice(0, Math.max(0, max));
+}
+
+export type ForecastAccuracyRow = { provider: string; mape14: number };
+
+/** Forecast-accuracy rows (§14.5 cache) from the persisted quota state — only
+ *  providers with a numeric 14-day MAPE speak; the rest are absent (never
+ *  rendered as 0%). */
+export function forecastAccuracyRows(
+  quotaRows: Record<string, { provider?: string; mape14?: number | null } | undefined> | null | undefined,
+): ForecastAccuracyRow[] {
+  if (!quotaRows || typeof quotaRows !== "object") return [];
+  const rows: ForecastAccuracyRow[] = [];
+  for (const q of Object.values(quotaRows)) {
+    if (!q || typeof q.provider !== "string" || !q.provider) continue;
+    // typeof guard, not Number(): Number(null) === 0 would render an absent
+    // forecast as a perfect 0% MAPE.
+    if (typeof q.mape14 !== "number" || !Number.isFinite(q.mape14)) continue;
+    rows.push({ provider: q.provider, mape14: q.mape14 });
+  }
+  return rows;
 }
 
 // State-dot tone (§10.1): active/disabled/thrifty/paused → ok/tx4/warn/danger.
