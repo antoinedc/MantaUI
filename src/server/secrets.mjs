@@ -33,6 +33,7 @@ import { randomBytes } from "node:crypto";
 import { join, dirname } from "node:path";
 import { statePath, secretsRoot } from "../shared/paths.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
+import { toolUsageStore } from "./ctoStores.mjs";
 
 const STORE_PATH = statePath("secrets.json");
 // Where `secret_provide` writes the materialized value files. Shared secrets go
@@ -254,9 +255,15 @@ export function listSecrets({ sessionID, project, includeAll = false } = {}, { l
 // ~/.manta-secrets/, and return { ok, path, key, hint }. The VALUE IS NEVER
 // RETURNED — only the path, so nothing secret reaches the transcript. The
 // caller (secret_provide tool) instructs the agent to use $(cat <path>).
+//
+// BET-1395 (Adaptive CTO §7.1 channel 1): every successful provide appends
+// `{channel:"secret", key, sessionID, project, ts}` to the CTO tool-usage
+// store (`~/.manta/cto/tool-usage.json`) — exact credential usage, zero
+// parsing, zero value exposure (the key NAME is not secret). Best-effort: a
+// ledger failure never blocks or breaks a provide.
 export async function provideSecret(
   { key, sessionID, project, dir = SECRETS_DIR },
-  { load = loadSecrets } = {},
+  { load = loadSecrets, recordUsage = recordSecretUsage } = {},
 ) {
   if (!isValidKey(key)) {
     return { ok: false, error: `Invalid key "${key}".` };
@@ -272,5 +279,30 @@ export async function provideSecret(
   await chmod(dir, 0o700).catch(() => {});
   await writeFile(path, entry.value, { mode: 0o600 });
   await chmod(path, 0o600).catch(() => {});
+  if (typeof recordUsage === "function") {
+    await recordUsage({ key: entry.key, sessionID: sessionID ?? null, project: project ?? null }).catch(() => {});
+  }
   return { ok: true, path, key: entry.key, hint: entry.hint ?? "" };
+}
+
+// The §7.1 channel-1 writer: append one usage row to the A1 tool-usage store
+// (ctoStores' toolUsageStore — the same store the daily tool scan fuses from).
+// Injected as the default `recordUsage` dep so tests can swap it.
+export async function recordSecretUsage({ key, sessionID, project, ts = Date.now() } = {}) {
+  try {
+    const payload = (await toolUsageStore.load()) ?? {};
+    const rows = Array.isArray(payload.rows) ? payload.rows : [];
+    rows.push({
+      channel: "secret",
+      identity: typeof key === "string" ? key.toLowerCase() : null,
+      source: "raw",
+      detail: `secret:${key}`,
+      ts,
+      sessionID: sessionID ?? null,
+      project: project ?? null,
+    });
+    await toolUsageStore.save({ ...payload, rows: rows.slice(-4000) });
+  } catch {
+    /* best-effort — usage bookkeeping never breaks a provide */
+  }
 }

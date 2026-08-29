@@ -15,6 +15,7 @@ import {
   deleteSecret,
   listSecrets,
   provideSecret,
+  recordSecretUsage,
 } from "./secrets.mjs";
 
 // ----------------------------------------------------------------------------
@@ -371,6 +372,49 @@ test("provideSecret fails for a key not visible to the session", async () => {
   const r = await provideSecret({ key: "OTHER", sessionID: "ses_1", dir }, { load });
   assert.equal(r.ok, false);
   await rm(dir, { recursive: true, force: true });
+});
+
+// BET-1395 (Adaptive CTO §7.1 channel 1): every successful provide appends a
+// {channel:"secret", key, sessionID, project, ts} row to the tool-usage
+// store — exact usage, zero parsing, zero value exposure. Best-effort: a
+// failing usage writer never breaks or blocks the provide.
+test("provideSecret records usage on the tool-usage ledger (channel 1)", async () => {
+  const { dir } = await tmpStore();
+  const store = [
+    { id: "1", key: "STRIPE_KEY", value: "sk_live_x", scope: "shared", sessionID: null, hint: "" },
+  ];
+  const load = () => store;
+  const recorded = [];
+  const recordUsage = async (input) => {
+    recorded.push(input);
+  };
+
+  const r = await provideSecret({ key: "STRIPE_KEY", sessionID: "ses_1", project: "manta", dir }, { load, recordUsage });
+  assert.equal(r.ok, true);
+  assert.deepEqual(recorded, [{ key: "STRIPE_KEY", sessionID: "ses_1", project: "manta" }]);
+
+  // The value never reaches the usage row (the writer decides what to store;
+  // the provide hands over only non-secret fields).
+  const r2 = await provideSecret({ key: "STRIPE_KEY", sessionID: "ses_2", dir }, { load, recordUsage: async () => { throw new Error("ledger down"); } });
+  assert.equal(r2.ok, true, "a failing usage writer must not break the provide");
+  assert.equal(recorded.length, 1);
+  await rm(dir, { recursive: true, force: true });
+});
+
+test("recordSecretUsage appends to the A1 tool-usage store (never the value)", async () => {
+  const { toolUsageStore } = await import("./ctoStores.mjs");
+  await recordSecretUsage({ key: "GITHUB_PAT", sessionID: "ses_a", project: "p", ts: 123 });
+  await recordSecretUsage({ key: "has space?", sessionID: null, project: null, ts: 124 });
+  const payload = await toolUsageStore.load();
+  const rows = (payload?.rows ?? []).slice(-2);
+  assert.deepEqual(
+    rows.map((r) => [r.channel, r.identity, r.detail, r.ts, r.project]),
+    [
+      ["secret", "github_pat", "secret:GITHUB_PAT", 123, "p"],
+      ["secret", "has space?", "secret:has space?", 124, null],
+    ],
+  );
+  for (const r of rows) assert.equal(r.value, undefined, "the secret value must never be recorded");
 });
 
 // --- tiny file-backed helpers for the round-trip tests above ---

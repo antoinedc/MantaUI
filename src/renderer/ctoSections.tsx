@@ -18,6 +18,7 @@ import {
   nowRailMeta,
   runnableSuggestionOption,
   type BlockerCard,
+  type ConnectCardRow,
   type DecisionCardRow,
   type FinishedVariant,
   type VetoCardRow,
@@ -673,6 +674,93 @@ export const VetoSection = memo(function VetoSection({
     </section>
   );
 });
+
+// The §10.3 connect-ask card (BET-1395, §7.4): the tool name, the why (usage
+// evidence + credential presence), the three-way answer — Connect read-only
+// (grants the metadata consent ring) / Not now (30-day re-arm) / Never for
+// this tool (suppresses every ring) — and the "evidence ▸" expander. All
+// three answers are registry writes (always runnable — no-dead-controls
+// rule). Accent edge like the decision cards.
+export const ConnectSection = memo(function ConnectSection({
+  cards,
+  onAnswer,
+}: {
+  cards: ConnectCardRow[];
+  onAnswer: (card: ConnectCardRow, answer: string) => void;
+}) {
+  if (cards.length === 0) return null;
+  return (
+    <section className="space-y-2">
+      <h2 className="text-sm font-semibold uppercase tracking-wide text-text-muted">Connect</h2>
+      <div className="space-y-2">
+        {cards.map((card) => (
+          <ConnectCard key={card.id} card={card} onAnswer={onAnswer} />
+        ))}
+      </div>
+    </section>
+  );
+});
+
+function ConnectCard({
+  card,
+  onAnswer,
+}: {
+  card: ConnectCardRow;
+  onAnswer: (card: ConnectCardRow, answer: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const evidence = Array.isArray(card.evidence) ? card.evidence : [];
+  const answers = (card.options ?? []).filter((o) => o?.answer);
+  return (
+    <div
+      className="rounded-md border border-strong bg-fill px-3 py-3"
+      style={{
+        borderLeftWidth: "var(--need-edge-w)",
+        borderLeftColor: "color-mix(in srgb, var(--accent) 55%, transparent)",
+      }}
+    >
+      <div className="flex items-start gap-2">
+        <span className="font-medium text-text">{card.title}</span>
+      </div>
+      {card.body ? <p className="mt-1 text-sm text-text-muted">{card.body}</p> : null}
+      {answers.length > 0 ? (
+        <div className="mt-2 flex flex-wrap gap-2">
+          {answers.map((o, i) => (
+            <button
+              key={`${o.answer}-${i}`}
+              type="button"
+              onClick={() => onAnswer(card, o.answer)}
+              className={
+                o.answer === "connect"
+                  ? "rounded-md bg-accent-solid px-3 py-1 text-sm font-medium text-white hover:opacity-90"
+                  : "rounded-md px-3 py-1 text-sm text-text-muted hover:bg-fill-hover hover:text-text"
+              }
+            >
+              {o.label || o.answer}
+            </button>
+          ))}
+        </div>
+      ) : null}
+      {evidence.length > 0 ? (
+        <div className="mt-2">
+          <button
+            type="button"
+            onClick={() => setExpanded((e) => !e)}
+            className="rounded-md bg-fill-active px-2 py-1 text-[11px] text-text-muted hover:text-text"
+            aria-expanded={expanded}
+          >
+            evidence {expanded ? "▾" : "▸"} ({evidence.length})
+          </button>
+          {expanded ? (
+            <pre className="mt-1 whitespace-pre-wrap rounded-md bg-fill-active p-2 text-xs text-text-muted">
+              {evidence.join("\n")}
+            </pre>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 // The Tonight one-line + opt-in drill-down (§10.4). The parent fetches the
 // task list when expanded (ctoTonightGet). A manual reorder PINS the order

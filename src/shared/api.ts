@@ -1290,6 +1290,14 @@ export interface Api {
     id?: string;
     ids?: string[];
   }): Promise<{ ok: boolean; error?: string; task?: CtoTonightTask; pinned?: string[] }>;
+  // POST /api/cto/tools/connect — BET-1395 (§7.4): the connect-ask three-way.
+  // "connect" grants the tool's metadata consent ring (read-only), "not-now"
+  // declines with a 30-day re-arm, "never" suppresses every ring for the
+  // tool. Also closes the open connect card + writes the §9.5 verdict.
+  ctoToolConnect(input: {
+    tool: string;
+    answer: "connect" | "not-now" | "never";
+  }): Promise<{ ok: boolean; error?: string; tool?: string; answer?: string }>;
 }
 
 /**

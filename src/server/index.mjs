@@ -161,7 +161,12 @@ import {
 } from "./media.mjs";
 import { setSecret, deleteSecret, listSecrets, provideSecret } from "./secrets.mjs";
 import { createPromptDelivery } from "./promptDelivery.mjs";
-import { ensureMantaPlanAgent, ensureCtoAgent, readCacheTtl as readProvidersCacheTtl } from "./providers.mjs";
+import {
+  ensureMantaPlanAgent,
+  ensureCtoAgent,
+  readCacheTtl as readProvidersCacheTtl,
+  readOpencodeConfig,
+} from "./providers.mjs";
 import {
   createWebhookEngine,
   createHook,
@@ -1963,6 +1968,33 @@ const adaptiveCtoOvernight = ctoOvernight.createOvernightScheduler({
   },
 });
 
+// BET-1395 (§7.1-3): one git remote per tmux project → [{project, url}].
+// Best-effort (a 5s timeout, non-git dirs skipped) — channel-3 evidence only.
+async function collectGitRemotes() {
+  let projects = [];
+  try {
+    projects = await tmux.listProjects();
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const p of Array.isArray(projects) ? projects : []) {
+    const cwd = typeof p?.cwd === "string" ? p.cwd : "";
+    const name = typeof p?.tmuxSession === "string" ? p.tmuxSession : null;
+    if (!cwd || !name) continue;
+    try {
+      const { stdout } = await promisify(execFile)("git", ["-C", cwd, "remote", "get-url", "origin"], {
+        timeout: 5000,
+      });
+      const url = String(stdout).trim();
+      if (url) out.push({ project: name, url });
+    } catch {
+      /* non-git or no origin — skip */
+    }
+  }
+  return out;
+}
+
 const adaptiveCto = ctoEngine.createCtoEngine({
   configGet: () => local.configGet(),
   ledger: ledgerStore,
@@ -2031,6 +2063,44 @@ const adaptiveCto = ctoEngine.createCtoEngine({
   // watches into the standing-query engine (idempotent, marker-guarded).
   legacyWatchesLoader: async () =>
     Array.isArray(cto.loadCtoStore()?.watches) ? cto.loadCtoStore().watches : [],
+  // BET-1395 tool discovery (§7). The LLM fallback classifier rides the
+  // §3.3 ephemeral rate gate exactly like the suggest engine's runners; the
+  // channel-3 surfaces are the already-read config shapes (mcp/forge/
+  // webhooks/git remotes/schedules) — each surface best-effort, failures
+  // yield empty, never a throw into the scan.
+  toolsRunEphemeral: async (opts) => {
+    const gate = await adaptiveCto.beginEphemeral();
+    if (!gate?.ok) return { ok: false, gated: true, error: gate?.error };
+    try {
+      return await runEphemeral({
+        ...opts,
+        deps: {
+          configGet: () => local.configGet(),
+          oc: { runEphemeralSession: oc.runSynchronousSession },
+        },
+      });
+    } finally {
+      gate.release?.();
+    }
+  },
+  toolsGetSurfaces: async () => {
+    const [config, rules, hooks, jobs, gitRemotes] = await Promise.all([
+      readOpencodeConfig().catch(() => ({})),
+      forgeListRules().catch(() => []),
+      listHooks(null).catch(() => []),
+      loadJobs().catch(() => []),
+      collectGitRemotes().catch(() => []),
+    ]);
+    return {
+      config: config ?? {},
+      forgeRepos: (Array.isArray(rules) ? rules : []).map((r) => r?.repoKey).filter(Boolean),
+      webhooks: Array.isArray(hooks) ? hooks : [],
+      schedules: (Array.isArray(jobs) ? jobs : [])
+        .map((j) => ({ label: j?.label ?? j?.name ?? "" }))
+        .filter((s) => s.label),
+      gitRemotes,
+    };
+  },
 });
 adaptiveCto.start();
 
@@ -4571,6 +4641,31 @@ const handleRequest = async (req, res) => {
           }
         }
         respondJson(res, result.ok ? 200 : 400, result);
+        return;
+      }
+      respondJson(res, 405, { error: "method not allowed" });
+    } catch (e) {
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // ---------- Tool discovery (BET-1395, §7) ----------
+  // POST /api/cto/tools/connect {tool, answer} — the connect-ask three-way
+  // (§7.4): "connect" grants the metadata consent ring, "not-now" declines
+  // with a 30-day re-arm, "never" kills every ring for that tool. The
+  // registry writes the consent + the §9.5 verdict and resolves the open
+  // connect card. Invalid input → 400; never throws.
+  if (path === "/api/cto/tools/connect") {
+    try {
+      if (req.method === "POST") {
+        const body = await readJsonBody(req);
+        const result = await adaptiveCto.tools.resolveConnect({
+          tool: body?.tool,
+          answer: body?.answer,
+        });
+        if (result?.ok) void bus.publish({ kind: "ctoState" });
+        respondJson(res, result?.ok ? 200 : 400, result);
         return;
       }
       respondJson(res, 405, { error: "method not allowed" });

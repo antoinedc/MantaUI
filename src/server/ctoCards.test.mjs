@@ -383,3 +383,60 @@ test("upsertVeto: refuses a missing id", async () => {
   assert.equal(r.changed, false);
   assert.equal(openCardCount(h), 0);
 });
+
+// ---------------------------------------------------------------------------
+// BET-1395 connect-ask cards (§7.4 / §10.3 connect variant)
+// ---------------------------------------------------------------------------
+
+test("upsertConnect: writes a variant=connect card with the three bound answers", async () => {
+  const h = makeHarness();
+  const r = await h.cards.upsertConnect({
+    toolId: "vercel",
+    title: "Connect Vercel (read-only)?",
+    body: "Vercel showed up 3× across 2 week(s) of agent work",
+    evidence: ["transcript: cli:vercel", "secret: VERCEL_TOKEN"],
+    refs: ["vercel"],
+  });
+  assert.equal(r.changed, true);
+  assert.equal(r.isNew, true);
+  const card = h.store().cards.find((c) => c.variant === "connect");
+  assert.ok(card);
+  assert.equal(card.sourceKind, "tool");
+  assert.equal(card.sourceId, "vercel");
+  assert.deepEqual(card.refs, ["vercel"]);
+  assert.deepEqual(
+    card.options.map((o) => o.answer),
+    ["connect", "not-now", "never"],
+  );
+  for (const o of card.options) {
+    assert.equal(o.action.type, "tool-connect");
+    assert.deepEqual(o.action.payload, { tool: "vercel", answer: o.answer });
+  }
+  assert.ok(h.ledgerRows.some((row) => row.kind === CARD_CREATED && row.variant === "connect"));
+});
+
+test("upsertConnect: re-raising the same tool upserts in place (no dup)", async () => {
+  const h = makeHarness();
+  await h.cards.upsertConnect({ toolId: "vercel", title: "first", refs: ["vercel"] });
+  h.advance(1000);
+  const r = await h.cards.upsertConnect({ toolId: "vercel", title: "second", refs: ["vercel"] });
+  assert.equal(r.isNew, false);
+  const open = h.store().cards.filter((c) => c.variant === "connect" && c.state === "open");
+  assert.equal(open.length, 1);
+  assert.equal(open[0].title, "second");
+});
+
+test("resolveConnectCards: resolves the open card for the tool and writes the ledger row", async () => {
+  const h = makeHarness();
+  await h.cards.upsertConnect({ toolId: "vercel", title: "t", refs: ["vercel"] });
+  await h.cards.upsertConnect({ toolId: "stripe", title: "t2", refs: ["stripe"] });
+  const r = await h.cards.resolveConnectCards("vercel", "connect answer: connect");
+  assert.equal(r.changed, true);
+  const open = h.store().cards.filter((c) => c.state === "open");
+  assert.equal(open.length, 1);
+  assert.equal(open[0].sourceId, "stripe");
+  assert.ok(h.ledgerRows.some((row) => row.kind === CARD_RESOLVED && row.sourceId === "vercel"));
+  // Resolving an absent tool changes nothing.
+  const r2 = await h.cards.resolveConnectCards("ghost", "no-op");
+  assert.equal(r2.changed, false);
+});

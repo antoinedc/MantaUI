@@ -68,6 +68,9 @@ export const HEALTH_SOURCE_KIND = "health";
 // notification fires IMMEDIATELY through the existing router (the same one
 // source 1 relies on), and the card appears at > 10 min via promoteDue.
 export const INBOX_SOURCE_KIND = "inbox";
+// Connect-ask cards (BET-1395 / §7.4): one §7.2 tool identity per card, keyed
+// by the tool id.
+export const CONNECT_SOURCE_KIND = "tool";
 
 // Stable, collision-resistant card id. Re-detection of the same (sourceKind,
 // sourceId) yields the same id → upsert in place, never a duplicate.
@@ -513,6 +516,89 @@ export function createCtoCards(deps = {}) {
     return { changed: true, isNew: !existing };
   }
 
+  // Connect-ask card writer (BET-1395 / §7.4 one connect ask, §10.3
+  // connect-ask variant). Upserts by the tool's stable id — re-raising the
+  // same tool's ask (re-arm path) updates the card in place, never dups.
+  // The three-way answer is bound at generation time to the tool identity;
+  // resolution runs through the registry (POST /api/cto/tools/connect),
+  // which writes the consent ring + the §9.5 verdict and calls
+  // resolveConnectCards. No notification path — like decision cards, this is
+  // a resting needs-you surface.
+  async function upsertConnect({ toolId, title, body, evidence = [], refs = [], ts = now() } = {}) {
+    if (!toolId || typeof toolId !== "string") return { changed: false, isNew: false };
+    const sourceId = toolId;
+    const id = stableCardId(CONNECT_SOURCE_KIND, sourceId);
+    const { payload, cards: list } = await openCards();
+    const existing = list.find((c) => c?.id === id && c?.state === "open");
+    const created = existing?.created ?? ts;
+    const options = [
+      { label: "Connect read-only", answer: "connect" },
+      { label: "Not now", answer: "not-now" },
+      { label: "Never for this tool", answer: "never" },
+    ].map((o) => ({
+      ...o,
+      action: { type: "tool-connect", payload: { tool: toolId, answer: o.answer } },
+    }));
+    const card = {
+      id,
+      variant: "connect",
+      title: typeof title === "string" && title ? title : `Connect ${toolId} (read-only)?`,
+      body: typeof body === "string" ? body : "",
+      evidence: Array.isArray(evidence) ? evidence : [],
+      options,
+      refs: Array.isArray(refs) && refs.length ? refs : [toolId],
+      sourceKind: CONNECT_SOURCE_KIND,
+      sourceId,
+      sessionID: null,
+      created,
+      updatedAt: ts,
+      state: "open",
+    };
+    if (existing) {
+      const idx = list.indexOf(existing);
+      list[idx] = { ...existing, ...card, created, updatedAt: ts };
+    } else {
+      list.push(card);
+    }
+    await cardStore.save({ ...payload, cards: list });
+    await ledgerAppend({
+      kind: CARD_CREATED,
+      cardId: id,
+      variant: "connect",
+      sourceKind: CONNECT_SOURCE_KIND,
+      sourceId,
+      refs: card.refs,
+    });
+    return { changed: true, isNew: !existing };
+  }
+
+  // Resolve every open connect-ask card for one tool (the registry's
+  // three-way answer is the resolution predicate's only false-path). Returns
+  // `{changed}` for tests/diagnostics.
+  async function resolveConnectCards(toolId, reason, ts = now()) {
+    const { payload, cards: list } = await openCards();
+    const open = list.filter(
+      (c) => c?.state === "open" && c?.variant === "connect" && (c?.sourceId === toolId || c?.refs?.includes(toolId)),
+    );
+    let changed = false;
+    for (const card of open) {
+      const idx = list.indexOf(card);
+      list.splice(idx, 1);
+      await ledgerAppend({
+        kind: CARD_RESOLVED,
+        cardId: card.id,
+        variant: card.variant,
+        sourceKind: card.sourceKind,
+        sourceId: card.sourceId,
+        refs: card.refs,
+        reason,
+      });
+      changed = true;
+    }
+    if (changed) await cardStore.save({ ...payload, cards: list });
+    return { changed };
+  }
+
   async function listOpen() {
     const { cards } = await openCards();
     return cards.filter((c) => c && c.state === "open");
@@ -529,6 +615,8 @@ export function createCtoCards(deps = {}) {
     dismissById,
     upsertDecision,
     upsertVeto,
+    upsertConnect,
+    resolveConnectCards,
     countOpen,
     listOpen,
   };
