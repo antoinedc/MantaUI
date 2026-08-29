@@ -489,10 +489,11 @@ test("pipeline: veto-window tier surfaces the veto verb; missing veto writer deg
       load: async () => ({ entries: Array(VERDICT_MIN).fill({}) }),
       save: async () => {},
     },
-    engineState: {
-      load: async () => ({ v: 1, trust: { tiers: { "record-decision": "veto-window" } } }),
+    trustStore: {
+      load: async () => ({ v: 1, tiers: { "record-decision": "veto-window" } }),
       save: async () => {},
     },
+    engineState: { load: async () => ({ v: 1 }), save: async () => {} },
     digests: { list: async () => [], load: async () => null },
     facts: { list: async () => [], load: async () => null },
     configGet: async () => ({ ctoTier: "medium" }),
@@ -527,10 +528,11 @@ test("pipeline: veto-window verb writes the veto card when the writer exists", a
       load: async () => ({ entries: Array(VERDICT_MIN).fill({}) }),
       save: async () => {},
     },
-    engineState: {
-      load: async () => ({ v: 1, trust: { tiers: { "record-decision": "veto-window" } } }),
+    trustStore: {
+      load: async () => ({ v: 1, tiers: { "record-decision": "veto-window" } }),
       save: async () => {},
     },
+    engineState: { load: async () => ({ v: 1 }), save: async () => {} },
     digests: { list: async () => [], load: async () => null },
     facts: { list: async () => [], load: async () => null },
     configGet: async () => ({ ctoTier: "medium" }),
@@ -561,7 +563,7 @@ test("pipeline: veto-window verb writes the veto card when the writer exists", a
 test("pipeline: act tier + executable action executes, ledgers, and queues the digest report", async () => {
   const h = makeHarness();
   const executed = [];
-  let es = { v: 1, trust: { tiers: { "record-decision": "act" } } }; // memory-backed: recordAct persists the pending report
+  let es = { v: 1, tiers: { "record-decision": "act" } }; // memory-backed trust store: recordAct persists the pending report
   const sug2 = createCtoSuggest({
     now: () => h.clock.ms,
     publish: () => {},
@@ -570,12 +572,13 @@ test("pipeline: act tier + executable action executes, ledgers, and queues the d
       load: async () => ({ entries: Array(VERDICT_MIN).fill({}) }),
       save: async () => {},
     },
-    engineState: {
+    trustStore: {
       load: async () => es,
       save: async (p) => {
         es = p;
       },
     },
+    engineState: { load: async () => ({ v: 1 }), save: async () => {} },
     digests: { list: async () => [], load: async () => null },
     facts: { list: async () => [], load: async () => null },
     configGet: async () => ({ ctoTier: "medium" }),
@@ -619,10 +622,11 @@ test("pipeline: act tier + unexecutable action degrades to the veto-window verb 
       load: async () => ({ entries: Array(VERDICT_MIN).fill({}) }),
       save: async () => {},
     },
-    engineState: {
-      load: async () => ({ v: 1, trust: { tiers: { "start-job": "act" } } }),
+    trustStore: {
+      load: async () => ({ v: 1, tiers: { "start-job": "act" } }),
       save: async () => {},
     },
+    engineState: { load: async () => ({ v: 1 }), save: async () => {} },
     digests: { list: async () => [], load: async () => null },
     facts: { list: async () => [], load: async () => null },
     configGet: async () => ({ ctoTier: "medium" }),
@@ -654,10 +658,11 @@ test("pipeline: cold start keeps an act-tier class capped at the ask verb (§10.
     publish: () => {},
     ledger: { append: async (r) => h.ledgerRows.push(r), read: async () => h.ledgerRows },
     verdicts: { load: async () => ({ entries: [] }), save: async () => {} }, // cold start
-    engineState: {
-      load: async () => ({ v: 1, trust: { tiers: { "record-decision": "act" } } }),
+    trustStore: {
+      load: async () => ({ v: 1, tiers: { "record-decision": "act" } }),
       save: async () => {},
     },
+    engineState: { load: async () => ({ v: 1 }), save: async () => {} },
     digests: { list: async () => [], load: async () => null },
     facts: { list: async () => [], load: async () => null },
     configGet: async () => ({ ctoTier: "medium" }),

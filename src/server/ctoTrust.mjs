@@ -12,18 +12,21 @@
 //     Beta tail bar (P(acceptance > 0.9) > 0.95 with ≥ 8 observations, via
 //     B3's `betaTailAbove`), demotion on any 2 rejections in a rolling 10,
 //     the §10.6-4 global cold-start gate dominating every promotion.
-//   - `createCtoTrust` — the stateful engine over the shared engine-state
-//     (`es.trust`): per-class tiers + Beta counters + rolling outcome window,
-//     the B3 verdict-sink target (`noteVerdictEffects`), the veto-window
-//     record (`noteVetoOutcome`), and the act-and-report ledger + digest
-//     announcement queue (`recordAct` / `listAnnouncements` /
+//   - `createCtoTrust` — the stateful engine over its OWN store file
+//     (`trust.json` via ctoStores): per-class tiers + Beta counters + rolling
+//     outcome window, the B3 verdict-sink target (`noteVerdictEffects`), the
+//     veto-window record (`noteVetoOutcome`), and the act-and-report ledger +
+//     digest announcement queue (`recordAct` / `listAnnouncements` /
 //     `markAnnounced`). Tier changes and acts are ledgered (A1 rows) AND
-//     queued as pending progress asides for the next digest (§9.4).
+//     queued as pending progress asides for the next digest (§9.4). A legacy
+//     `es.trust` payload is migrated once on first load (review cycle 4:
+//     shared-file writers could revert trust keys — trust now lives where no
+//     snapshot-spreading writer can reach it).
 //
 // Pure over injected stores + a now() clock — testable without a live box.
 
 import { betaTailAbove } from "./ctoVerdicts.mjs";
-import { appendLedgerBestEffort, engineStateStore, ledgerStore, verdictsStore } from "./ctoStores.mjs";
+import { appendLedgerBestEffort, engineStateStore, ledgerStore, trustStore, verdictsStore } from "./ctoStores.mjs";
 
 // The §3.5 ladder rungs, lowest → highest. `ask` covers the ask verbs
 // (silent-log / inbox card / notify — ctoSuggest picks within the rung);
@@ -127,7 +130,8 @@ function actReportText(cls, text) {
 
 export function createCtoTrust(deps = {}) {
   const {
-    engineState = engineStateStore,
+    store = trustStore, // the trust ladder's own file — no other writer touches it
+    legacy = engineStateStore, // one-time migration source: the old `es.trust` payload
     ledger = ledgerStore,
     verdicts = verdictsStore,
     now = () => Date.now(),
@@ -144,15 +148,33 @@ export function createCtoTrust(deps = {}) {
   }
 
   async function loadState() {
-    let es = {};
+    let st = null;
     try {
-      es = (await engineState.load()) || {};
+      st = (await store.load()) ?? null;
     } catch {
-      es = {};
+      st = null;
     }
-    const st = (es.trust && typeof es.trust === "object") ? es.trust : {};
+    // One-time migration (review cycle 4): trust used to live under the
+    // shared engine-state file's `trust` key. If the dedicated store is
+    // still fresh and a legacy payload exists, adopt it — after the first
+    // write the dedicated store is authoritative and `es.trust` becomes a
+    // harmless fossil no reader consults. Idempotent: the store being
+    // non-empty short-circuits the legacy read entirely.
+    if (!st || typeof st !== "object" || (!st.v && !st.tiers && !st.stats && !st.pending)) {
+      let es = {};
+      try {
+        es = (await legacy?.load?.()) ?? {};
+      } catch {
+        es = {};
+      }
+      if (es.trust && typeof es.trust === "object" && (es.trust.tiers || es.trust.stats || es.trust.pending)) {
+        st = es.trust;
+        await store.save(st).catch(() => {});
+      } else {
+        st = {};
+      }
+    }
     return {
-      es,
       st,
       tiers: (st.tiers && typeof st.tiers === "object") ? st.tiers : {},
       stats: (st.stats && typeof st.stats === "object") ? st.stats : {},
@@ -160,16 +182,15 @@ export function createCtoTrust(deps = {}) {
     };
   }
 
-  async function saveState(_esSnapshot, st) {
-    // Re-read the engine state AT SAVE TIME and merge only the `trust` key:
-    // the trust engine writes fire-and-forget (§9.5 sink dispatch), so an
-    // es snapshot taken at load would clobber keys another writer changed in
-    // between (e.g. a tonight-queue edit landing while a verdict's trust
-    // fold is in flight — the stale-snapshot class of bug). The snapshot
-    // parameter stays for call-site compatibility but is never spread.
+  async function saveState(_snapshot, st) {
+    // Trust persists to its OWN file — the durability invariant (review
+    // cycle 4): no engine-state writer shape (snapshot-spread or otherwise)
+    // can revert tiers/counters/pending, because no engine-state writer
+    // touches this file. Callers pass a legacy snapshot for compatibility;
+    // it is never spread. `v` stamps the payload so a later load treats the
+    // store as authoritative even when it only holds the pending queue.
     try {
-      const fresh = (await engineState.load().catch(() => null)) ?? {};
-      await engineState.save({ ...fresh, trust: st });
+      await store.save({ ...(st ?? {}), v: st?.v ?? 1 });
     } catch {
       /* best-effort */
     }
@@ -205,7 +226,7 @@ export function createCtoTrust(deps = {}) {
   // non-counter outcome (e.g. a veto cancel when already at act) in the
   // rolling window without touching either Beta.
   async function applyOutcome(cls, { field = null, ok }) {
-    const { es, st, tiers, stats, pending } = await loadState();
+    const { st, tiers, stats, pending } = await loadState();
     const tier0 = TIERS.includes(tiers[cls]) ? tiers[cls] : TIER_ASK;
     const s = stats[cls] && typeof stats[cls] === "object" ? { ...blankStats(), ...stats[cls] } : blankStats();
     if (field) s[field] = (s[field] || 0) + 1;
@@ -245,7 +266,7 @@ export function createCtoTrust(deps = {}) {
       });
     }
     stats[cls] = s;
-    await saveState(es, { ...st, tiers, stats, pending: nextPending.slice(-PENDING_CAP) });
+    await saveState(null, { ...st, tiers, stats, pending: nextPending.slice(-PENDING_CAP) });
     return { tier: ev.tier, changed: ev.changed === true };
   }
 
@@ -280,7 +301,7 @@ export function createCtoTrust(deps = {}) {
   // act-tier execution is the top rung, not an acceptance input.
   async function recordAct({ cls, text, refs = [], action = null } = {}) {
     if (!cls || typeof cls !== "string") return { ok: false };
-    const { es, st, pending } = await loadState();
+    const { st, pending } = await loadState();
     const t = now();
     const row = {
       id: `act-${t}-${Math.random().toString(36).slice(2, 8)}`,
@@ -292,7 +313,7 @@ export function createCtoTrust(deps = {}) {
       actionType: action?.type ?? null,
     };
     await ledgerAppend({ kind: "trust.act", cls, text: row.text, refs: row.refs, actionType: row.actionType });
-    await saveState(es, { ...st, pending: [...pending, row].slice(-PENDING_CAP) });
+    await saveState(null, { ...st, pending: [...pending, row].slice(-PENDING_CAP) });
     return { ok: true, id: row.id };
   }
 
@@ -305,9 +326,9 @@ export function createCtoTrust(deps = {}) {
 
   async function markAnnounced(ids = []) {
     if (!Array.isArray(ids) || ids.length === 0) return { removed: 0 };
-    const { es, st, pending } = await loadState();
+    const { st, pending } = await loadState();
     const keep = pending.filter((r) => !ids.includes(r?.id));
-    await saveState(es, { ...st, pending: keep });
+    await saveState(null, { ...st, pending: keep });
     return { removed: pending.length - keep.length };
   }
 

@@ -36,6 +36,7 @@ import {
   appendLedgerBestEffort,
   ledgerStore,
   engineStateStore,
+  trustStore,
   verdictsStore,
   digestsStore,
   factsStore,
@@ -364,6 +365,7 @@ export function createCtoSuggest(deps = {}) {
     publish = () => {},
     ledger = ledgerStore,
     engineState = engineStateStore,
+    trustStore: trustStoreDep = trustStore, // BET-1403: the trust ladder's own file (isolated from engine-state writers)
     verdicts = verdictsStore,
     digests = digestsStore,
     facts = factsStore,
@@ -382,10 +384,11 @@ export function createCtoSuggest(deps = {}) {
   } = deps;
 
   const priors = { ...DEFAULT_CLASS_PRIORS, ...classPriors };
-  // BET-1403: the earned-trust engine over the same injected stores (engine
-  // state persists `es.trust` — tiers, Beta counters, rolling windows, and
-  // the pending digest-announcement queue).
-  const trust = createCtoTrust({ engineState, ledger, verdicts, now });
+  // BET-1403: the earned-trust engine over its own store file (tiers, Beta
+  // counters, rolling windows, and the pending digest-announcement queue) —
+  // isolated from engine-state writers; a legacy `es.trust` payload migrates
+  // on first load.
+  const trust = createCtoTrust({ store: trustStoreDep, legacy: engineState, ledger, verdicts, now });
 
   // Trust consult for one candidate class — never throws, defaults to ask.
   async function trustConsult(cls, coldStart) {

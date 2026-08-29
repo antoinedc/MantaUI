@@ -23,11 +23,14 @@ import {
 // ---------------------------------------------------------------------------
 
 function memoryStore(initial = {}) {
-  let data = initial;
+  // Deep-copy at the boundary like the real jsonStore (a parsed clone per
+  // load/save) — aliasing the live object would fake both migrations and
+  // clobbers.
+  let data = JSON.parse(JSON.stringify(initial ?? {}));
   return {
-    load: async () => data,
+    load: async () => JSON.parse(JSON.stringify(data)),
     save: async (p) => {
-      data = p;
+      data = JSON.parse(JSON.stringify(p));
     },
   };
 }
@@ -36,7 +39,10 @@ function makeTrust({ engineState = {}, verdictCount = 0 } = {}) {
   const ledgerRows = [];
   const verdictEntries = Array.from({ length: verdictCount }, (_, i) => ({ ts: i, subject: { type: "suggestion", id: `s${i}`, class: "start-job" }, verdict: "accept" }));
   const stores = {
-    engineState: memoryStore({ v: 1, ...engineState }),
+    // The trust ladder's own file — fresh unless a test seeds it directly.
+    store: memoryStore({}),
+    // The legacy engine-state file (the old `es.trust` home) — migration source.
+    legacy: memoryStore({ v: 1, ...engineState }),
     ledger: { append: async (r) => ledgerRows.push(r), read: async () => ledgerRows },
     verdicts: memoryStore({ v: 1, entries: verdictEntries }),
   };
@@ -158,6 +164,39 @@ test("evaluateTier: demotion is evaluated before promotion (rejection pressure w
 // ---------------------------------------------------------------------------
 // The trust engine
 // ---------------------------------------------------------------------------
+
+test("persistence: a legacy es.trust payload migrates into the dedicated store on first load (review cycle 4)", async () => {
+  const h = makeTrust({ engineState: { trust: { tiers: { "start-job": TIER_VETO_WINDOW }, stats: { "start-job": { a: 40, b: 1, va: 3, vb: 0, recent: [] } } } } });
+  // First read adopts the legacy payload…
+  const st = await h.trust.getState();
+  assert.equal(st.tiers["start-job"], TIER_VETO_WINDOW);
+  assert.equal(st.stats["start-job"]?.a, 40);
+  // …the dedicated store now holds it…
+  const inStore = await h.stores.store.load();
+  assert.equal(inStore.tiers["start-job"], TIER_VETO_WINDOW);
+  // …and a subsequent write goes to the dedicated store, never back into
+  // the engine-state snapshot.
+  await h.trust.noteVetoOutcome("start-job", { accepted: true });
+  const after = await h.stores.store.load();
+  assert.equal(after.stats["start-job"]?.va, 4);
+  // The legacy file keeps its fossil untouched by design (no engine-state
+  // writes from the trust engine) — readers never consult it again once the
+  // dedicated store is non-empty.
+  assert.equal((await h.stores.legacy.load()).trust.stats["start-job"]?.va, 3);
+});
+
+test("durability: a stale full-engine-state save cannot revert trust keys (the mirrored clobber direction)", async () => {
+  const h = makeTrust({ verdictCount: VERDICT_MIN });
+  await h.trust.noteVerdictEffects({ success: true }, { subject: { type: "suggestion", id: "x", class: "queue-tonight" }, verdict: "accept" });
+  const before = await h.trust.getState();
+  assert.equal(before.stats["queue-tonight"]?.a, 1);
+  // The old writer shape: a whole-file engine-state save spreading a STALE
+  // snapshot — even one that still carries an `es.trust` key (pre-migration
+  // fossil). Trust lives in its own file; this cannot reach it.
+  await h.stores.legacy.save({ v: 1, trust: { tiers: {}, stats: {} }, tonightQueue: [{ id: "tq:1" }] });
+  const after = await h.trust.getState();
+  assert.equal(after.stats["queue-tonight"]?.a, 1, "the trust fold survived the hostile engine-state save");
+});
 
 test("consult: default ask; cold-start caps a promoted tier at ask (§10.6-4 dominance)", async () => {
   const h = makeTrust({ engineState: { trust: { tiers: { "start-job": TIER_VETO_WINDOW } } } });

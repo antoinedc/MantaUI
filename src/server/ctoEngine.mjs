@@ -47,6 +47,7 @@ import {
   ctoPath,
   ledgerStore,
   engineStateStore,
+  trustStore,
   cardsStore,
   segmentsStore,
   rollupsStore,
@@ -275,6 +276,9 @@ export function createCtoEngine(deps = {}) {
     configGet = async () => ({}), // → { ctoEnabled?: boolean }
     ledger = ledgerStore, // A1 ledger writer { append }
     engineState = engineStateStore, // { load, save } (engine-state.json)
+    // BET-1403: the trust ladder's own file — isolated from engine-state
+    // writers so no snapshot-spread save can revert tiers/counters/pending.
+    trustStore: trustStoreDep = trustStore,
     killSwitch = createKillSwitch(),
     publish = () => {}, // (evt: {kind:"ctoState", payload}) => void
     now = () => Date.now(),
@@ -980,13 +984,14 @@ export function createCtoEngine(deps = {}) {
       .catch(() => {});
   }
 
-  // BET-1403: the earned-trust engine over the shared stores (engine state
-  // persists `es.trust`). One instance per engine; the suggest module keeps
+  // BET-1403: the earned-trust engine over its own store file (trust.json —
+  // a legacy `es.trust` payload migrates on first load). One instance per
+  // engine; the suggest module keeps
   // its own over the same stores — both are stateless facades whose every
   // op loads fresh, mutates, and saves.
   function getTrust() {
     if (trustEngine) return trustEngine;
-    trustEngine = createCtoTrust({ engineState, ledger, verdicts, now });
+    trustEngine = createCtoTrust({ store: trustStoreDep, legacy: engineState, ledger, verdicts, now });
     return trustEngine;
   }
 
