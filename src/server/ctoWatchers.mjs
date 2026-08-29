@@ -419,6 +419,11 @@ export function watcherHitPayload(watch, event = {}, { now = Date.now } = {}) {
         ? event.text.slice(0, 512)
         : `Watcher ${watch?.id} matched`,
     refs: Array.isArray(event?.refs) ? event.refs : [],
+    // BET-1428: keep the evidence event's project — the overnight dispatcher
+    // hosts a watcher-driven investigation in the project that produced the
+    // hit. Omitted when the event carries none so existing rows stay
+    // shape-identical.
+    ...(typeof event?.project === "string" && event.project ? { project: event.project } : {}),
     ts: now(),
   };
 }
@@ -443,6 +448,9 @@ export function collectWatcherHitsFromLedger(rows) {
       ts: typeof r.ts === "number" ? r.ts : 0,
       watcherId: r.watcherId,
       patternSignature: r.patternSignature,
+      // BET-1428: the hosting project captured at hit time (undefined when the
+      // hit row predates it or the evidence event had no project).
+      project: typeof r.project === "string" && r.project ? r.project : undefined,
     });
   }
   return out;

@@ -1219,6 +1219,10 @@ export function createCtoEngine(deps = {}) {
         id: hit.id,
         name: hit.text,
         category: "watcher",
+        // BET-1428: the project whose evidence produced the hit — without it
+        // the §11.5 dispatch can never host the job and re-skips the hit on
+        // every tick of the open window.
+        project: typeof hit.project === "string" ? hit.project : undefined,
         value: 2,
         confidence: 0.8,
         predictedCost: 1,
@@ -1277,15 +1281,25 @@ export function createCtoEngine(deps = {}) {
   // the entry queued for the next tick/night. Candidates whose job already
   // started in this window are skipped (the ledger's job_started rows are the
   // dedupe record — a watcher hit stays in the ledger and would otherwise
-  // re-run every tick of the same window). Each job_started row carries
-  // `estTokens` (the prompt-size estimate, §12.1 metering style) so the
-  // windowless night-cap bound can price tonight's spend from the ledger.
+  // re-run every tick of the same window). BET-1428: the same ledger records
+  // the skip dedupe — a candidate whose dispatch already logged a skip row in
+  // this window re-runs silently (a freed cap or a newly opened project
+  // session can still start it), it just stops re-writing the row. Each
+  // job_started row carries `estTokens` (the prompt-size estimate, §12.1
+  // metering style) so the windowless night-cap bound can price tonight's
+  // spend from the ledger.
   async function dispatchPlan({ plan, trough, projects, ledgerRows, windowOpenedMs }) {
     let started = 0;
+    const inWindow = (r) =>
+      typeof r?.ts === "number" && (windowOpenedMs == null ? true : r.ts >= windowOpenedMs);
     const startedIds = new Set(
       (Array.isArray(ledgerRows) ? ledgerRows : [])
-        .filter((r) => r?.kind === "cto.overnight.job_started" && typeof r?.ts === "number")
-        .filter((r) => (windowOpenedMs == null ? true : r.ts >= windowOpenedMs))
+        .filter((r) => r?.kind === "cto.overnight.job_started" && inWindow(r))
+        .map((r) => r.id),
+    );
+    const skippedIds = new Set(
+      (Array.isArray(ledgerRows) ? ledgerRows : [])
+        .filter((r) => r?.kind === "cto.overnight.skip" && inWindow(r))
         .map((r) => r.id),
     );
     const runningCto = (await runningCtoJobs()).length;
@@ -1295,12 +1309,17 @@ export function createCtoEngine(deps = {}) {
         if (!cand || typeof cand.id !== "string" || startedIds.has(cand.id)) continue;
         if (typeof startDelegateJob !== "function") break;
         if (runningCto + startedThisDispatch >= rateLimits.concurrentDelegate) {
-          await ledgerLog({
-            kind: "cto.overnight.skip",
-            id: cand.id,
-            reason: "rate_limit:concurrentDelegate",
-            running: runningCto + startedThisDispatch,
-          });
+          // BET-1428: one skip row per candidate per window — the retry stays
+          // live (a freed slot starts it on a later tick), only the repeated
+          // row is suppressed.
+          if (!skippedIds.has(cand.id)) {
+            await ledgerLog({
+              kind: "cto.overnight.skip",
+              id: cand.id,
+              reason: "rate_limit:concurrentDelegate",
+              running: runningCto + startedThisDispatch,
+            });
+          }
           continue;
         }
         const task = (await tonightQueueRows()).find((r) => r?.id === cand.id) ?? null;
@@ -1338,12 +1357,19 @@ export function createCtoEngine(deps = {}) {
               `Tonight task "${task.name ?? cand.id}" was removed — no tracked project session could host it.`,
             );
           } else {
-            await ledgerLog({
-              kind: "cto.overnight.skip",
-              id: cand.id,
-              reason: "no tracked project session to host the job",
-              project,
-            });
+            // BET-1428: a candidate with no queue row to remove (a watcher
+            // hit) or no readable project list stays in play, but its skip row
+            // is written once per window, not once per tick — the retry stays
+            // live (a project session opened mid-window starts it), only the
+            // repeated row is suppressed.
+            if (!skippedIds.has(cand.id)) {
+              await ledgerLog({
+                kind: "cto.overnight.skip",
+                id: cand.id,
+                reason: "no tracked project session to host the job",
+                project,
+              });
+            }
           }
           continue;
         }
@@ -1359,7 +1385,11 @@ export function createCtoEngine(deps = {}) {
           sweepAllowanceMs: trough ? Math.max(0, trough.endMs - now()) : undefined,
         });
         if (res?.ok === false) {
-          await ledgerLog({ kind: "cto.overnight.skip", id: cand.id, reason: res.error ?? "delegate start refused", project });
+          // BET-1428: same per-window dedupe — the refusal is retried on the
+          // next tick, only the repeated row is suppressed.
+          if (!skippedIds.has(cand.id)) {
+            await ledgerLog({ kind: "cto.overnight.skip", id: cand.id, reason: res.error ?? "delegate start refused", project });
+          }
           continue;
         }
         started += 1;
