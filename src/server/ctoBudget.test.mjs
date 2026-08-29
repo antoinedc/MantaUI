@@ -38,12 +38,19 @@ function dayStart(offsetDays = 0) {
 const MIDNIGHT = dayStart(0);
 const NOON = MIDNIGHT + 12 * 3_600_000;
 
-test("cap defaults to $2.50 and honors ctoAmbientCapUsd", () => {
+test("cap defaults to $2.50 and honors ctoAmbientCap", () => {
   assert.equal(ambientCapUsd({}), DEFAULT_AMBIENT_CAP_USD);
+  assert.equal(ambientCapUsd({ ctoAmbientCap: 1.25 }), 1.25);
+  assert.equal(ambientCapUsd({ ctoAmbientCap: 0 }), 0);
+  assert.equal(ambientCapUsd({ ctoAmbientCap: -3 }), DEFAULT_AMBIENT_CAP_USD);
+  assert.equal(ambientCapUsd({ ctoAmbientCap: "x" }), DEFAULT_AMBIENT_CAP_USD);
+  // Retired spelling kept as a one-release fallback for stale configs.
   assert.equal(ambientCapUsd({ ctoAmbientCapUsd: 1.25 }), 1.25);
-  assert.equal(ambientCapUsd({ ctoAmbientCapUsd: 0 }), 0);
-  assert.equal(ambientCapUsd({ ctoAmbientCapUsd: -3 }), DEFAULT_AMBIENT_CAP_USD);
-  assert.equal(ambientCapUsd({ ctoAmbientCapUsd: "x" }), DEFAULT_AMBIENT_CAP_USD);
+  // Canonical key wins when both spellings are present.
+  assert.equal(ambientCapUsd({ ctoAmbientCap: 5, ctoAmbientCapUsd: 1.25 }), 5);
+  // Malformed canonical falls through to a well-formed legacy alias, then default.
+  assert.equal(ambientCapUsd({ ctoAmbientCap: "x", ctoAmbientCapUsd: 1.25 }), 1.25);
+  assert.equal(ambientCapUsd({ ctoAmbientCap: -3, ctoAmbientCapUsd: 1.25 }), 1.25);
 });
 
 test("day rolls at local midnight (spend lands in separate day buckets)", () => {

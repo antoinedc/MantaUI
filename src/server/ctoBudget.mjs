@@ -6,7 +6,7 @@
 // What lives here:
 //   - Per-day ambient spend accumulation into budget.json (day rolls at local
 //     midnight — same local-midnight clock as the rollups layer, reused below).
-//   - The independent HARD CAP (`ctoAmbientCapUsd`, default $2.50 / day): a
+//   - The independent HARD CAP (`ctoAmbientCap`, default $2.50 / day): a
 //     ceiling on ambient spend that the engine consults BEFORE every ambient
 //     model call, at every tier, regardless of the A12 tier dial.
 //   - THRIFTY mode (§10.6-6 / §12.2): a numbered capability-shed ladder the
@@ -132,10 +132,16 @@ export function todaySpend(payload, now) {
 }
 
 // The configured per-day ambient cap; falls back to the default when absent or
-// malformed. `ctoAmbientCapUsd` is the config key (§12.1).
+// malformed. `ctoAmbientCap` is the config key (§12.1) — the same key the UI
+// writes. `ctoAmbientCapUsd` is a retired spelling kept as a one-release
+// fallback for stale configs; the canonical key wins when both are present.
 export function ambientCapUsd(cfg) {
-  const c = cfg && typeof cfg === "object" ? cfg.ctoAmbientCapUsd : undefined;
-  return typeof c === "number" && Number.isFinite(c) && c >= 0 ? c : DEFAULT_AMBIENT_CAP_USD;
+  const c = cfg && typeof cfg === "object" ? cfg.ctoAmbientCap : undefined;
+  if (typeof c === "number" && Number.isFinite(c) && c >= 0) return c;
+  const legacy = cfg && typeof cfg === "object" ? cfg.ctoAmbientCapUsd : undefined;
+  return typeof legacy === "number" && Number.isFinite(legacy) && legacy >= 0
+    ? legacy
+    : DEFAULT_AMBIENT_CAP_USD;
 }
 
 // True once today's spend reaches the cap. Boundary: spends == cap counts as a
