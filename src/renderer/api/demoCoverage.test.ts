@@ -60,6 +60,7 @@ export const DEMO_UNIMPLEMENTED = [
   "ctoProfileEdit",
   "ctoProfileGet",
   "ctoProfileSuppress",
+  "ctoQuotaRead",
   "ctoResume",
   "ctoStateGet",
   "ctoVerdict",

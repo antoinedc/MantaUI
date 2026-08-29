@@ -1011,7 +1011,7 @@ function TonightBudgetCard({ tier, overnightOn, ambientCapUsd, nightCapUsd, budg
       {notes.length > 0 && (
         <div className="mt-3">
           <div className="text-xs font-medium text-text-muted">Provider windows</div>
-          <ul className="mt-1 space-y-0.5 text-xs text-text-faint">
+          <ul className="mt-1 space-y-1 text-xs text-text-faint">
             {notes.map((n, i) => (
               <li key={`${n.provider}-${i}`}>
                 <span className="text-text-muted">{n.provider}</span> · {n.label || "window"}
@@ -1028,7 +1028,7 @@ function TonightBudgetCard({ tier, overnightOn, ambientCapUsd, nightCapUsd, budg
         {accuracy.length === 0 ? (
           <div className="mt-1 text-xs text-text-faint">collecting — no provider forecast history yet</div>
         ) : (
-          <ul className="mt-1 space-y-0.5 text-xs text-text-faint">
+          <ul className="mt-1 space-y-1 text-xs text-text-faint">
             {accuracy.map((a) => (
               <li key={a.provider}>
                 <span className="text-text-muted">{a.provider}</span> · {Math.round(a.mape14 * 100)}%
