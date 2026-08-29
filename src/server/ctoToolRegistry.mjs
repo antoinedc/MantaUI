@@ -66,6 +66,10 @@ export function emptyConsent() {
   return { metadata: null, deep_read: null, write: null };
 }
 
+export function emptyVitality() {
+  return { last_event: null, inflow_rate: null, ewma: null, last_probed: null };
+}
+
 // ISO week bucket (year-Www) — the ≥2-weeks engagement bar's unit.
 export function weekKey(ts) {
   const d = new Date(ts);
@@ -133,6 +137,28 @@ export function hasCredential(tool) {
 // The engagement bar (§7.4).
 export function engagementBarMet(tool) {
   return (tool?.uses ?? 0) >= ENGAGEMENT_MIN_USES && (tool?.weeksActive ?? 0) >= ENGAGEMENT_MIN_WEEKS;
+}
+
+// §7.3 quadrant role (D13), derived at read time for the §10.5 row-4 drill-
+// down — "high engagement" = the engagement bar (§7.4), "high vitality" = a
+// live inflow (EWMA > 0) or a recent probe-reported event. Low on both axes
+// WITH prior engagement is the dead-tool candidate the drill-down flags.
+// Display-only: the stored `role` field stays the registry's own (null until
+// a later issue writes it).
+export const VITALITY_RECENT_MS = 14 * DAY_MS;
+
+export function deriveRole(tool, { nowMs = Date.now() } = {}) {
+  const engHigh = engagementBarMet(tool);
+  const vit = tool?.vitality ?? {};
+  const ewmaLive = (typeof vit.ewma === "number" && vit.ewma > 0) || (typeof vit.inflow_rate === "number" && vit.inflow_rate > 0);
+  const recentEvent =
+    typeof vit.last_event === "number" && typeof nowMs === "number" && nowMs - vit.last_event < VITALITY_RECENT_MS;
+  const vitHigh = ewmaLive || recentEvent;
+  if (engHigh && vitHigh) return "both";
+  if (engHigh) return "workflow";
+  if (vitHigh) return "data-source";
+  if ((tool?.uses ?? 0) > 0) return "dead";
+  return null;
 }
 
 // Either axis crossed its bar (§7.4 observed → candidate).
@@ -647,6 +673,29 @@ export function createToolRegistry(deps = {}) {
     return { ok: true, tool: id };
   }
 
+  // §10.5 row-4 per-ring revoke (§7.4 "consent rings … revocable"): writes
+  // the ring to "no". Revoking metadata stops the §7.5 probes for the tool
+  // automatically (consentContext requires metadata=yes) — no extra wiring.
+  // Revoking a ring that was never granted (or that is "never"-ring-killed)
+  // is a no-op error, not a silent pass — the drill-down disables the button
+  // for those states, and the server is the backstop.
+  async function revokeConsent(toolId, ring) {
+    const id = typeof toolId === "string" ? toolId.trim().toLowerCase() : "";
+    if (!id) return { ok: false, error: "missing tool" };
+    if (ring !== "metadata" && ring !== "deep_read" && ring !== "write") {
+      return { ok: false, error: `ring must be one of metadata, deep_read, write` };
+    }
+    const payload = await loadPayload();
+    const t = payload.tools.find((x) => x?.tool === id);
+    if (!t) return { ok: false, error: `unknown tool "${id}"` };
+    const cur = { ...emptyConsent(), ...(t.consent ?? {}) };
+    if (cur[ring] !== "yes") return { ok: false, error: `ring "${ring}" is not granted for "${id}"` };
+    t.consent = { ...cur, [ring]: "no" };
+    await savePayload(payload);
+    await ledgerLog({ kind: "cto.tool.consent", tool: id, ring, value: "no" });
+    return { ok: true, tool: id, ring, value: "no" };
+  }
+
   // Read a consent ring for the future probe / tool-write gates (§7.4:
   // "metadata consent ≠ deep-read consent ≠ write").
   async function consentFor(tool, ring = "metadata") {
@@ -750,27 +799,38 @@ export function createToolRegistry(deps = {}) {
   }
 
   // Registry view for the §10.5 tool surfaces (read-only, stable shape).
-  async function listTools() {
+  // BET-1399: also copies the §7.2 vitality axis and derives the §7.3
+  // quadrant role at read time (display-only — the stored `role` is written
+  // by a later issue; deriving here keeps the drill-down honest without a
+  // schema write on every read).
+  async function listTools({ nowMs } = {}) {
+    const t = Number.isFinite(nowMs) ? nowMs : now();
     const payload = await loadPayload();
-    return payload.tools.map((t) => ({
-      tool: t.tool,
-      displayName: t.displayName ?? humanize(t.tool),
-      status: t.status ?? "observed",
-      role: t.role ?? null,
-      uses: t.uses ?? 0,
-      weeksActive: t.weeksActive ?? 0,
-      ewmaPerWeek: Math.round((t.engagement?.ewma_per_week ?? 0) * 100) / 100,
-      lastSeenTs: t.engagement?.last_used ?? null,
-      firstSeenTs: t.firstSeenTs ?? null,
-      consent: { ...emptyConsent(), ...(t.consent ?? {}) },
-      askRound: t.askRound ?? 0,
-    }));
+    return payload.tools.map((row) => {
+      const vitality = { ...emptyVitality(), ...(row.vitality ?? {}) };
+      return {
+        tool: row.tool,
+        displayName: row.displayName ?? humanize(row.tool),
+        status: row.status ?? "observed",
+        role: row.role ?? null,
+        derivedRole: deriveRole(row, { nowMs: t }),
+        uses: row.uses ?? 0,
+        weeksActive: row.weeksActive ?? 0,
+        ewmaPerWeek: Math.round((row.engagement?.ewma_per_week ?? 0) * 100) / 100,
+        lastSeenTs: row.engagement?.last_used ?? null,
+        firstSeenTs: row.firstSeenTs ?? null,
+        vitality,
+        consent: { ...emptyConsent(), ...(row.consent ?? {}) },
+        askRound: row.askRound ?? 0,
+      };
+    });
   }
 
   return {
     dailyScan: () => serialized(dailyScan),
     resolveConnect: (input) => serialized(() => resolveConnect(input)),
     unNever: (toolId) => serialized(() => unNever(toolId)),
+    revokeConsent: (toolId, ring) => serialized(() => revokeConsent(toolId, ring)),
     consentFor,
     listTools,
     appendUsage,

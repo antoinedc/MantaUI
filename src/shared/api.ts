@@ -416,6 +416,96 @@ export type CtoProfileRender = {
   journal: CtoJournalEntry[];
 };
 
+// ---------- Adaptive CTO drill-downs (BET-1399, §10.5 rows 1+4) ----------
+
+// One rendered Blackboard fact row (§10.5 row 1): kind chip + confidence bar +
+// statement + ref chips + sender + age. Superseded rows carry `supersededBy`
+// (their chain head) and render struck-through; archive rows add `archivedAt`.
+export type CtoFactRow = {
+  id: string;
+  kind: string;
+  statement: string;
+  refs: string[];
+  confidence: number;
+  created: number;
+  ageMs: number;
+  senderKey: string | null;
+  senderLabel: string;
+  supersededBy: string | null;
+  validUntil: number | null;
+  expired: boolean;
+  checkable: string | null;
+  archivedAt?: number;
+};
+
+// GET /api/cto/facts — the Blackboard drill-down render, composed server-side.
+// With `asOf` the active/superseded lists become the believed-at-T
+// reconstruction (bi-temporal read, §4.5).
+export type CtoFactsRender = {
+  compiledAt: number;
+  project: string | null;
+  projects: string[];
+  asOf: number | null;
+  active: CtoFactRow[];
+  superseded: CtoFactRow[];
+};
+
+// GET /api/cto/facts/archive — read-only paginated archive browser (§6.3).
+export type CtoFactsArchivePage = {
+  ok: boolean;
+  error?: string;
+  project?: string;
+  entries: CtoFactRow[];
+  nextBefore: number | null;
+  total: number;
+};
+
+// One §7.5 probe's declared/effective cadence + last result (§10.5 row 4).
+export type CtoToolProbeSummary = {
+  tool: string;
+  consented: boolean;
+  configured: boolean;
+  probes: Array<{
+    name: string;
+    cadenceMs: number | null;
+    effectiveMs: number | null;
+    lastAt: number | null;
+    lastOk: boolean | null;
+    lastError: string | null;
+    lastStatus: number | null;
+    nextRunAt: number | null;
+    fails: number;
+    authFails: number;
+  }>;
+};
+
+// GET /api/cto/tools — the tool-integrations drill-down render: the §7.2
+// registry rows joined with §7.5 probe summaries; `never` is the never'd
+// subset (§7.4).
+export type CtoToolRegistryRow = {
+  tool: string;
+  displayName: string;
+  status: string;
+  role: string | null;
+  derivedRole: string | null;
+  uses: number;
+  weeksActive: number;
+  ewmaPerWeek: number;
+  lastSeenTs: number | null;
+  firstSeenTs: number | null;
+  vitality: { last_event: number | null; inflow_rate: number | null; ewma: number | null; last_probed: number | null };
+  consent: { metadata: string | null; deep_read: string | null; write: string | null };
+  askRound: number;
+  probes: CtoToolProbeSummary;
+};
+
+export type CtoToolsRender = {
+  compiledAt: number;
+  tools: CtoToolRegistryRow[];
+  never: CtoToolRegistryRow[];
+};
+
+
 
 /**
  * The full `window.api` contract.
@@ -1243,6 +1333,34 @@ export interface Api {
   ctoProfileSuppress(input: { inference: string }): Promise<CtoProfileRender & { ok: boolean; error?: string }>;
   // POST /api/cto/journal/delete — §3.2 per-entry journal delete.
   ctoJournalDelete(input: { id: string }): Promise<{ ok: boolean }>;
+  // GET /api/cto/facts — the Blackboard drill-down render (§10.5 row 1):
+  // facts per project, active + superseded struck-through, optional
+  // bi-temporal asOf. A missing project selects the first known one.
+  ctoFactsGet(input?: { project?: string | null; asOf?: number | null }): Promise<CtoFactsRender>;
+  // GET /api/cto/facts/archive — read-only paginated archive browser (§6.3).
+  ctoFactsArchiveGet(input?: { project?: string | null; before?: number | null; limit?: number }): Promise<CtoFactsArchivePage>;
+  // POST /api/cto/facts/correct — the `wrong` action: queues a user
+  // supersession (auto-accepted — the user is authoritative) and writes the
+  // `correct` verdict on the fact's sender.
+  ctoFactCorrect(input: { project: string; factId: string; statement: string }): Promise<{
+    ok: boolean;
+    error?: string;
+    proposalId?: string;
+    queued?: boolean;
+    supersededBy?: string | null;
+  }>;
+  // POST /api/cto/facts/pin — the `pin` action: resets the fact's access
+  // clock (touchFacts, §6.4).
+  ctoFactPin(input: { project: string; factId: string }): Promise<{ ok: boolean; error?: string; touched?: number }>;
+  // GET /api/cto/tools — the tool-integrations drill-down render (§10.5
+  // row 4): registry + probes joined, plus the never list.
+  ctoToolsGet(): Promise<CtoToolsRender>;
+  // POST /api/cto/tools/revoke — per-ring revoke (ring → "no"; metadata
+  // revoke stops that tool's probes via the consent gate).
+  ctoToolRevoke(input: { tool: string; ring: "metadata" | "deep_read" | "write" }): Promise<{ ok: boolean; error?: string; tool?: string; ring?: string; value?: string }>;
+  // POST /api/cto/tools/unnever — clear the never verdict; the tool
+  // re-enters the lifecycle at observed (§7.4).
+  ctoToolUnnever(input: { tool: string }): Promise<{ ok: boolean; error?: string; tool?: string }>;
   // POST /api/cto/facts — §8.2 fact proposal. Used by the decision-card
   // `record-decision` option executor: writes a `decision` fact from the card
   // payload through the gatekeeper so it is a first-class, supersedable fact.

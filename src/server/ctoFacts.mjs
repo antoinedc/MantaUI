@@ -121,6 +121,135 @@ export function archiveEntry(fact, nowMs) {
   return { ...fact, ts: nowMs };
 }
 
+// ---------------------------------------------------------------------------
+// Blackboard drill-down (BET-1399 / §10.5 row 1) — pure render helpers.
+// ---------------------------------------------------------------------------
+
+// Human-facing label for a fact's sender (§6.1 `sender: {sessionID | "cto" |
+// "user"}`). Session senders render as `session <short-id>`; the user renders
+// as "you" (the drill-down is read by the user).
+export function senderLabelOf(sender) {
+  if (sender && typeof sender === "object" && sender.sessionID) {
+    const id = String(sender.sessionID);
+    return `session ${id.length > 8 ? id.slice(0, 8) : id}`;
+  }
+  if (sender === "user") return "you";
+  if (typeof sender === "string" && sender.length > 0) return sender;
+  return "unknown";
+}
+
+// Bi-temporal read (§4.5 `read_facts` asOf / §10.5 archive): reconstruct the
+// live set at time T from the supersession chain. A fact F is *believed at T*
+// iff it existed at T (`F.created <= T`) and its chain's successor was created
+// AFTER T (or it has no successor in this array). Everything else inside the
+// window is struck-through history. A fact whose successor was displaced to
+// the archive (so the successor is not in the array) is treated as believed at
+// T — the honest reconstruction from the data we still have.
+export function believedFactsAt(facts, asOfMs) {
+  const arr = Array.isArray(facts) ? facts : [];
+  const byId = new Map(arr.map((f) => [f?.id, f]));
+  const believed = [];
+  const struck = [];
+  for (const f of arr) {
+    if (!f || typeof f.created !== "number" || f.created > asOfMs) continue;
+    let cur = f;
+    let guard = 0;
+    while (cur?.superseded_by && guard < 1024) {
+      const next = byId.get(cur.superseded_by);
+      // Missing successor (displaced) or not-yet-created successor stops the walk.
+      if (!next || typeof next.created !== "number" || next.created > asOfMs) break;
+      cur = next;
+      guard += 1;
+    }
+    if (cur === f) believed.push(f);
+    else struck.push(f);
+  }
+  return { believed, struck };
+}
+
+// One rendered fact row (§10.5 row 1: kind chip, confidence, statement, refs,
+// sender, age — superseded rows additionally carry `supersededBy`).
+export function factViewRow(fact, { nowMs } = {}) {
+  const t = nowMs ?? Date.now();
+  const created = typeof fact?.created === "number" ? fact.created : 0;
+  return {
+    id: fact?.id ?? "",
+    kind: fact?.kind ?? "status",
+    statement: typeof fact?.statement === "string" ? fact.statement : "",
+    refs: Array.isArray(fact?.refs) ? fact.refs : [],
+    confidence: typeof fact?.confidence === "number" ? fact.confidence : 0.5,
+    created,
+    ageMs: Math.max(0, t - created),
+    senderKey: senderKey(fact?.sender),
+    senderLabel: senderLabelOf(fact?.sender),
+    supersededBy: fact?.superseded_by ?? null,
+    validUntil: fact?.valid_until ?? null,
+    expired: fact?.valid_until != null && t >= fact.valid_until,
+    checkable: fact?.checkable ?? null,
+  };
+}
+
+// The Blackboard drill-down render model (§10.5 row 1): active facts per
+// project (newest first) + the superseded chain struck-through. With `asOfMs`
+// the two lists become the believed-at-T reconstruction instead of the current
+// view. Pure over the loaded data — the engine feeds it from stores.
+export function composeFactsRender({ facts, projects, nowMs, asOfMs = null, project = null } = {}) {
+  const t = nowMs ?? Date.now();
+  const active = [];
+  const superseded = [];
+  if (Array.isArray(facts)) {
+    if (asOfMs != null) {
+      const r = believedFactsAt(facts, asOfMs);
+      for (const f of r.believed) active.push(factViewRow(f, { nowMs: t }));
+      for (const f of r.struck) superseded.push(factViewRow(f, { nowMs: t }));
+    } else {
+      for (const f of facts) {
+        if (!f) continue;
+        if (isActiveFact(f)) active.push(factViewRow(f, { nowMs: t }));
+        else superseded.push(factViewRow(f, { nowMs: t }));
+      }
+    }
+  }
+  active.sort((a, b) => b.created - a.created);
+  superseded.sort((a, b) => b.created - a.created);
+  return {
+    compiledAt: t,
+    project,
+    projects: Array.isArray(projects) ? projects : [],
+    asOf: asOfMs ?? null,
+    active,
+    superseded,
+  };
+}
+
+// Build the auto-accepted user supersession proposal (§10.5 row 1 `wrong`):
+// sender "user", confidence 1 (user-stated wins), ref-carrying (the original
+// fact's own evidence pointers — the user's correction does not need fresh
+// tracing), targeting the fact. Pure; the engine enqueues + pumps it.
+export function buildUserSupersession(fact, statement, { nowMs, project } = {}) {
+  if (!fact || !fact.id) return { error: "fact not found" };
+  const s = typeof statement === "string" ? statement.trim() : "";
+  if (!s) return { error: "statement is required" };
+  if (s.length > STATEMENT_LIMIT) return { error: `statement must be ≤ ${STATEMENT_LIMIT} characters` };
+  return {
+    proposal: {
+      proposalId:
+        "user:" +
+        createHash("sha1")
+          .update([project ?? fact.project ?? "", fact.id, s, nowMs ?? 0].join("|"))
+          .digest("hex")
+          .slice(0, 16),
+      project: project ?? "",
+      kind: fact.kind,
+      statement: s,
+      refs: Array.isArray(fact.refs) && fact.refs.length > 0 ? fact.refs : ["user-correction"],
+      sender: "user",
+      confidence: 1,
+      supersedes: fact.id,
+    },
+  };
+}
+
 export function senderReliability({ confirmed = 0, rejected = 0 } = {}) {
   return (confirmed + 1) / (confirmed + rejected + 2);
 }
@@ -590,10 +719,18 @@ export function createFactsEngine(deps = {}) {
   }
 
   async function resolveOne(proposal, activeFacts) {
-    const pre = await gatekeeperPrecheck(proposal, activeFacts, { resolveRef, traceRefs });
+    // §10.5 row-1 `wrong` (BET-1399): a user supersession proposal is
+    // authoritative — the gatekeeper auto-accepts it as a supersede without
+    // a model call, and the original fact's own refs (which ride along) are
+    // NOT re-traced (they may have gone stale; the user's statement is the
+    // evidence). The supersede-target rule (live head only) still applies.
+    const isUserSupersession = proposal?.sender === "user" && typeof proposal?.supersedes === "string" && proposal.supersedes.length > 0;
+    const pre = await gatekeeperPrecheck(proposal, activeFacts, { resolveRef, traceRefs: traceRefs && !isUserSupersession });
     if (!pre.ok) return { action: "reject", reason: pre.reason, reject: true };
     let decision = null;
-    if (runEphemeral) {
+    if (isUserSupersession) {
+      decision = { action: "supersede", targetId: pre.targetId, reason: "user correction (authoritative)" };
+    } else if (runEphemeral) {
       try {
         const res = await runEphemeral({
           taskClass: "gatekeeper",
@@ -862,6 +999,78 @@ export function createFactsEngine(deps = {}) {
     return s.appliedProposals?.[proposalId] ?? null;
   }
 
+  // ---- Blackboard drill-down (BET-1399 / §10.5 row 1) ----------------------
+
+  // The drill-down read: facts for one project, active + superseded
+  // (struck-through), optional bi-temporal asOf (§4.5 read_facts). Touches
+  // the rendered active facts — access into a drill-down view counts (§6.4).
+  async function viewRender(project, { asOfMs = null, touch = true } = {}) {
+    const projects = await listKnownProjects();
+    const t = now();
+    const proj = typeof project === "string" && project.length > 0 && projects.includes(project) ? project : projects[0] ?? null;
+    const raw = proj ? await loadFacts(proj) : [];
+    const render = composeFactsRender({ facts: raw, projects, nowMs: t, asOfMs, project: proj });
+    if (touch && proj && render.active.length > 0) {
+      try {
+        await touchFacts({ project: proj, ids: render.active.map((r) => r.id) });
+      } catch {}
+    }
+    return render;
+  }
+
+  // Read-only, paginated archive browser (§6.3 / §10.5 row 1). Newest-first
+  // with a `before`-cursor (exclusive ts) so "Load more" is stateless.
+  async function archivePage(project, { limit = 50, before = null } = {}) {
+    const proj = typeof project === "string" ? project.trim() : "";
+    if (!proj) return { ok: false, error: "project is required" };
+    const t = now();
+    const entries = await loadArchive(proj);
+    const sorted = entries.filter((e) => e && typeof e.ts === "number").sort((a, b) => b.ts - a.ts);
+    const filtered = before != null ? sorted.filter((e) => e.ts < before) : sorted;
+    const lim = Math.max(1, Math.min(200, Number.isFinite(limit) ? Math.floor(limit) : 50));
+    const page = filtered.slice(0, lim);
+    return {
+      ok: true,
+      project: proj,
+      entries: page.map((e) => ({ ...factViewRow(e, { nowMs: t }), archivedAt: e.ts })),
+      nextBefore: page.length > 0 && filtered.length > page.length ? page[page.length - 1].ts : null,
+      total: sorted.length,
+    };
+  }
+
+  // The `wrong` action (§10.5 row 1): the user marks an active fact wrong and
+  // supplies the correct statement. Enqueues a user supersession proposal
+  // (sender "user" — auto-accepted by the gatekeeper, see resolveOne) and
+  // pumps it synchronously so the correction lands before the response.
+  // Idempotent on (fact, statement): a retry resolves to the same proposalId.
+  async function correctFact({ project, factId, statement } = {}) {
+    const proj = typeof project === "string" ? project.trim() : "";
+    const fid = typeof factId === "string" ? factId.trim() : "";
+    if (!proj || !fid) return { ok: false, error: "project and factId are required" };
+    const facts = await loadFacts(proj);
+    const fact = facts.find((f) => f?.id === fid);
+    if (!fact) return { ok: false, error: "fact not found" };
+    if (!isActiveFact(fact)) {
+      const byId = Object.fromEntries(facts.map((f) => [f.id, f]));
+      return { ok: false, error: "fact is already superseded", headId: liveHeadOf(fact, byId)?.id ?? null };
+    }
+    const built = buildUserSupersession(fact, statement, { project: proj, nowMs: now() });
+    if (built.error) return { ok: false, error: built.error };
+    const state = await loadState();
+    const enq = enqueueProposal(state, built.proposal);
+    if (!enq.added && enq.reason !== "already-queued") {
+      return { ok: false, error: enq.reason ?? "proposal not queued" };
+    }
+    if (enq.added) await saveState(enq.state);
+    await pump(proj).catch(() => {});
+    const outcome = await proposalOutcome(built.proposal.proposalId);
+    if (!outcome) return { ok: true, queued: true, proposalId: built.proposal.proposalId };
+    if (outcome.action === "supersede") {
+      return { ok: true, proposalId: built.proposal.proposalId, supersededBy: outcome.factId ?? null, sender: fact.sender };
+    }
+    return { ok: true, proposalId: built.proposal.proposalId, outcome, sender: fact.sender };
+  }
+
   function dispose() {
     disposed = true;
   }
@@ -883,6 +1092,11 @@ export function createFactsEngine(deps = {}) {
     getState,
     proposalOutcome,
     topFacts,
+    // BET-1399 (§10.5 row 1): drill-down read + archive browser + the
+    // user's `wrong` correction. touchFacts (above) is the `pin` verb.
+    viewRender,
+    archivePage,
+    correctFact,
     listFacts: (project) => loadFacts(project).then((arr) => arr.filter(isActiveFact)),
     listProjects: listKnownProjects,
     noteReliability,

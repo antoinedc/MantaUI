@@ -673,6 +673,52 @@ export function createProbes(deps = {}) {
     return { consentedRing, allowedHosts: [...hosts], row };
   }
 
+  // §10.5 row-4 drill-down read (BET-1399): per-probe cadence + last result
+  // for one tool. Reads the spec (declared cadence) + the per-probe state
+  // (last result, effective next run, escalation counters). Probes only run
+  // while metadata consent is "yes" — a consent-off tool reports
+  // `consented: false` with an empty probe list so the drill-down can say why
+  // nothing runs. Read-only: never writes state or raises asks.
+  async function probeSummary(toolId) {
+    const tool = typeof toolId === "string" ? toolId.trim().toLowerCase() : "";
+    if (!tool) return { tool: "", consented: false, configured: false, probes: [] };
+    let consented = false;
+    try {
+      consented = (await registry.consentFor(tool, "metadata")) === "yes";
+    } catch {
+      consented = false;
+    }
+    const specInfo = consented ? await validSpecFor(tool) : null;
+    if (!specInfo) return { tool, consented, configured: false, probes: [] };
+    let vit = null;
+    try {
+      vit = registry.toolRow ? await registry.toolRow(tool) : null;
+    } catch {
+      vit = null;
+    }
+    const st = await loadToolState(tool);
+    const rows = (Array.isArray(specInfo.spec.probes) ? specInfo.spec.probes : [])
+      .filter((p) => p && typeof p.name === "string" && p.name.length > 0)
+      .map((p) => {
+        const declared = cadenceMs(p.cadence);
+        const pst = st?.probes?.[p.name] ?? null;
+        return {
+          name: p.name,
+          cadenceMs: declared,
+          effectiveMs: effectiveCadenceMs(declared, vit?.vitality),
+          lastAt: pst?.lastAt ?? null,
+          lastOk: pst?.lastOk ?? null,
+          lastError: pst?.lastError ?? null,
+          lastStatus: pst?.lastStatus ?? null,
+          nextRunAt: pst?.nextRunAt ?? null,
+          fails: pst?.fails ?? 0,
+          authFails: pst?.authFails ?? 0,
+        };
+      });
+    return { tool, consented, configured: rows.length > 0, probes: rows };
+  }
+
+
   async function validSpecFor(tool) {
     let raw;
     try {
@@ -1086,5 +1132,5 @@ export function createProbes(deps = {}) {
     return Math.max(0, Math.min(1, n));
   }
 
-  return { scaffoldSpec, writeSpec, runDue, relevanceScan, healthSnapshot, probeKey, consentContext, loadToolState };
+  return { scaffoldSpec, writeSpec, runDue, relevanceScan, healthSnapshot, probeKey, consentContext, loadToolState, probeSummary };
 }

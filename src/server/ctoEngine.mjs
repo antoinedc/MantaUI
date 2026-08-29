@@ -2290,6 +2290,87 @@ export function createCtoEngine(deps = {}) {
     });
   }
 
+  // ---- §10.5 drill-down render routes (BET-1399) ---------------------------
+
+  // Row 1 — Blackboard drill-down render: facts per project, active +
+  // superseded (struck-through), optional bi-temporal asOf. Read-only except
+  // the §6.4 access touch the facts engine performs on what it renders.
+  async function factsView(project, { asOfMs = null } = {}) {
+    const fe = getFactsEngine();
+    if (!fe) return { compiledAt: Date.now(), project: null, projects: [], asOf: asOfMs ?? null, active: [], superseded: [] };
+    let asOf = null;
+    if (typeof asOfMs === "number" && Number.isFinite(asOfMs) && asOfMs > 0) asOf = asOfMs;
+    return fe.viewRender(project, { asOfMs: asOf });
+  }
+
+  // Row 1 — read-only, paginated archive browser (§6.3).
+  async function factsArchive(project, { limit = 50, before = null } = {}) {
+    const fe = getFactsEngine();
+    if (!fe) return { ok: false, error: "facts engine unavailable" };
+    const lim = Number.isFinite(limit) ? Math.floor(limit) : 50;
+    const cur = typeof before === "number" && Number.isFinite(before) ? before : null;
+    return fe.archivePage(project, { limit: lim, before: cur });
+  }
+
+  // Row 1 — `wrong`: user supersession proposal (auto-accepted, §10.5) plus
+  // the ONE §9.5 verdict — `correct` on the fact's sender (highest weight;
+  // the facts counter-sink dings the sender's reliability counters).
+  async function correctFact(input = {}) {
+    const fe = getFactsEngine();
+    if (!fe) return { ok: false, error: "facts engine unavailable" };
+    const r = await fe.correctFact(input);
+    if (r?.ok && r.sender) {
+      void getVerdictsEngine()
+        .recordVerdict({
+          subject: { type: "fact", id: input?.factId, sender: r.sender },
+          verdict: "correct",
+        })
+        .catch(() => {});
+    }
+    return r;
+  }
+
+  // Row 1 — `pin`: resets the fact's access clock (touchFacts, §6.4). No
+  // verdict — pinning is retrieval, not a judgment (§9.5).
+  async function factPin(input = {}) {
+    const fe = getFactsEngine();
+    if (!fe) return { ok: false, error: "facts engine unavailable" };
+    const fid = typeof input?.factId === "string" ? input.factId.trim() : "";
+    if (!fid) return { ok: false, error: "factId is required" };
+    const r = await fe.touchFacts({ project: typeof input?.project === "string" ? input.project : null, ids: [fid] });
+    if (!r?.touched) return { ok: false, error: "fact not found or not live" };
+    return { ok: true, touched: r.touched };
+  }
+
+  // Row 4 — tool-integrations drill-down render: the §7.2 registry rows
+  // (engagement, vitality, derived §7.3 role) joined with the §7.5 probe
+  // summaries (declared + effective cadence, last result). Never list is the
+  // subset of rows whose metadata ring is "never" (§7.4).
+  async function toolsView() {
+    const reg = getTools();
+    if (!reg) return { compiledAt: Date.now(), tools: [], never: [] };
+    const rows = await reg.listTools().catch(() => []);
+    const probes = getProbes();
+    const summaries = new Map();
+    if (probes?.probeSummary) {
+      await Promise.all(
+        rows.map(async (row) => {
+          try {
+            summaries.set(row.tool, await probes.probeSummary(row.tool));
+          } catch {
+            summaries.set(row.tool, { tool: row.tool, consented: false, configured: false, probes: [] });
+          }
+        }),
+      );
+    }
+    const tools = rows.map((row) => ({
+      ...row,
+      probes: summaries.get(row.tool) ?? { tool: row.tool, consented: false, configured: false, probes: [] },
+    }));
+    const never = tools.filter((row) => row.consent?.metadata === "never");
+    return { compiledAt: Date.now(), tools, never };
+  }
+
   const engine = {
     actor: ACTOR,
     start,
@@ -2314,6 +2395,14 @@ export function createCtoEngine(deps = {}) {
     lastHeartbeat,
     proposeFact,
     factsContextBlock,
+    // BET-1399 (§10.5 rows 1+4): drill-down render routes + the row-1 fact
+    // actions (wrong → correctFact; pin → factPin). Tools actions ride the
+    // `tools` getter (revokeConsent / unNever).
+    factsView,
+    factsArchive,
+    correctFact,
+    factPin,
+    toolsView,
     // BET-1396 (§7.5/§10.5): the A12 health endpoint's probe-health reader.
     probeHealth: () => getProbes()?.healthSnapshot() ?? { tools: 0, probes: 0, healthy: 0, authFailed: 0, lastRunAt: null },
     // BET-1391 verdict ledger (§9.5): record + read the verdict ledger (the
