@@ -914,8 +914,16 @@ export function createCtoBudget({
     };
   }
 
-  /**
-   * Advance the monthly roll (§12.4). Idempotent per refresh; safe to call on
+/** A well-formed forge PR reference ({repoKey, number}) — or null. */
+function validPrRef(ref) {
+  if (!ref || typeof ref !== "object") return null;
+  if (typeof ref.repoKey !== "string" || !ref.repoKey) return null;
+  if (!Number.isInteger(ref.number) || ref.number < 1) return null;
+  return ref;
+}
+
+/**
+ * Advance the monthly roll (§12.4). Idempotent per refresh; safe to call on
    * every health read. Samples fresh terminal CTO jobs into `roi.pending`
    * (the jobs store sweeps after 7 days — the branch names are the durable
    * record), probes pending branches against the project repo and — for
@@ -985,13 +993,15 @@ export function createCtoBudget({
         continue;
       }
       // The local-git signals can never fire for a squash merge: resolve the
-      // job's PR on the forge (once — a definitive no-PR is marked so a
-      // PR-less job never re-queries; an unconsultable forge leaves both
-      // markers unset so the next refresh retries), then probe its state.
-      if (row.prTried !== true && typeof discoverJobPr === "function") {
+      // job's PR on the forge (once — a resolved PR or a definitive no-PR is
+      // persisted on the row so neither is ever re-queried; an unconsultable
+      // forge leaves both markers unset so the next refresh retries), then
+      // probe its state.
+      const havePr = validPrRef(row.pr);
+      if (!havePr && row.prTried !== true && typeof discoverJobPr === "function") {
         try {
           const pr = await discoverJobPr({ cwd: row.cwd, branch: row.branch });
-          if (pr && typeof pr.repoKey === "string" && pr.repoKey && Number.isInteger(pr.number) && pr.number >= 1) {
+          if (validPrRef(pr)) {
             row.pr = { repoKey: pr.repoKey, number: pr.number };
           } else {
             row.prTried = true;
@@ -1000,10 +1010,8 @@ export function createCtoBudget({
           /* transient — retried on a later refresh */
         }
       }
-      const pr = row.pr && typeof row.pr === "object" ? row.pr : null;
-      if (!pr || typeof pr.repoKey !== "string" || !pr.repoKey || !Number.isInteger(pr.number) || pr.number < 1) {
-        continue;
-      }
+      const pr = validPrRef(row.pr);
+      if (!pr) continue;
       let prMerged = null;
       try {
         prMerged = await forgeProbe({ repoKey: pr.repoKey, number: pr.number, head: row.branch });
