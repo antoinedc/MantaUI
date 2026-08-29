@@ -147,6 +147,7 @@ import { composeProfileRender } from "./ctoProfile.mjs";
 import { runEphemeral, createEphemeralReaper } from "./ctoSessions.mjs";
 import { createCtoDigest, STALE_MS } from "./ctoDigest.mjs";
 import { createCtoSuggest } from "./ctoSuggest.mjs";
+import { createCtoActExecutor } from "./ctoAct.mjs";
 import {
   parseSegmentSummaryText,
   validateSegmentSummary,
@@ -2134,6 +2135,26 @@ async function gatedSuggestionEphemeral(taskClass, opts) {
     gate.release?.();
   }
 }
+// BET-1424 (§9.2/§9.3): the act-and-report executors for the §9.3-eligible
+// classes, wired to the live box subsystems. Refusals (and the still-unwired
+// config-change / tool-write classes) return {ok:false} so the suggest engine
+// degrades the act verb to the veto-window card — act-and-report never
+// silently no-ops.
+const ctoActExecutor = createCtoActExecutor({
+  proposeFact: (input) => adaptiveCto.proposeFact(input),
+  tonightAdd: (task) => adaptiveCto.tonightAdd(task),
+  beginDelegateJob: () => adaptiveCto.beginDelegateJob(),
+  listProjects: () => tmux.listProjects(),
+  startDelegateJob: async ({ prompt, model, parentSessionID, parentDirectory, actor } = {}) =>
+    delegateEngine.startJob({ prompt, model, parentSessionID, parentDirectory, actor }),
+  listDelegateJobs: async () => {
+    try {
+      return await loadDelegateJobs();
+    } catch {
+      return [];
+    }
+  },
+});
 const adaptiveCtoSuggest = createCtoSuggest({
   now: () => Date.now(),
   publish: (evt) => bus.publish(evt),
@@ -2153,24 +2174,14 @@ const adaptiveCtoSuggest = createCtoSuggest({
   // remains data-unreachable until B7 lands (the ring is the real gate).
   // BET-1403 (§9.2/§9.3): act-and-report executors. The trust ladder only
   // lets §9.3-eligible classes reach the act verb; this seam decides whether
-  // the concrete bound action is machine-executable. Only record-decision is
-  // wired (a validated, gatekeeper-checked fact proposal on the CTO's own
-  // blackboard); unwired action types refuse → the verb degrades to the
-  // veto-window card. Never throws (ctoSuggest catches).
-  executeAction: async ({ cls, action, candidate }) => {
-    if (cls !== "record-decision" || action?.type !== "record-decision") {
-      return { ok: false, reason: "no-executor" };
-    }
-    const payload = action?.payload && typeof action.payload === "object" ? action.payload : {};
-    const statement = typeof payload.statement === "string" ? payload.statement.trim() : "";
-    const project = typeof payload.project === "string" ? payload.project.trim() : "";
-    const refs = Array.isArray(payload.refs) && payload.refs.length
-      ? payload.refs.filter((r) => typeof r === "string")
-      : (Array.isArray(candidate?.finding?.refs) ? candidate.finding.refs.filter((r) => typeof r === "string") : []);
-    if (!statement || !project || refs.length === 0) return { ok: false, reason: "incomplete-payload" };
-    const result = await adaptiveCto.proposeFact({ project, kind: "decision", statement, refs, sender: "cto" });
-    return result?.ok === true ? { ok: true, detail: "decision fact proposed" } : { ok: false, reason: result?.error ?? "propose-failed" };
-  },
+  // the concrete bound action is machine-executable. BET-1424: all three
+  // §9.3-eligible classes are wired in ctoAct.mjs — record-decision (a
+  // validated, gatekeeper-checked fact proposal on the CTO's own blackboard),
+  // queue-tonight (the engine's tonightAdd) and start-job (a worktree-isolated
+  // delegate job as actor "cto" under the §3.3 gate). Anything unwired or
+  // refused → {ok:false} → the verb degrades to the veto-window card (the
+  // human-in-the-loop fallback). Never throws (ctoSuggest catches).
+  executeAction: ctoActExecutor,
   getWriteRingTools: async () => [], // §7.4 tool registry (P2-later) — empty → tool-write unreachable
   capabilities: { queueTonight: true, toolWrite: true },
   fireNotify: (args) => push.fireNotify(args),
