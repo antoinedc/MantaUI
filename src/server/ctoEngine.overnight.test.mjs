@@ -251,6 +251,131 @@ test("overnight: a queue entry with no tracked project session is removed on the
   );
 });
 
+// A watcher hit ledger row as the standing-query engine writes it (the
+// BET-1428 shape carries the hosting project; older rows don't).
+function watcherHitRow(overrides = {}) {
+  return {
+    kind: "watcher.hit",
+    salience: "high",
+    watcherId: "w1",
+    predicateKind: "event-pattern",
+    text: "P0 cluster in the deploy logs",
+    refs: [],
+    ts: 0,
+    ...overrides,
+  };
+}
+
+test("overnight: a watcher hit with a tracked project hosts the investigation there and runs once per window (BET-1428)", async () => {
+  const h = makeHarness({ trough: TROUGH, projects: [PROJECT_ROW] });
+  h.ledgerRows.push(watcherHitRow({ ts: h.now() - 60_000, project: "/repo" }));
+  await h.engine.tick();
+
+  assert.equal(h.startedJobs.length, 1, "the watcher-driven investigation starts");
+  assert.equal(h.startedJobs[0].parentSessionID, "sess-1", "hosted in the project that produced the hit");
+  assert.equal(h.startedJobs[0].parentDirectory, "/repo");
+  assert.match(h.startedJobs[0].prompt, /P0 cluster/, "the hit text becomes the investigation prompt");
+  const startedRow = h.ledgerRows.find((r) => r.kind === "cto.overnight.job_started" && r.id === "wh:w1");
+  assert.ok(startedRow, "the job_started row is keyed by the watcher-hit id");
+  assert.equal(startedRow.project, "/repo");
+  assert.equal(startedRow.category, "watcher");
+
+  // The hit stays in the trailing-24h ledger — the startedIds dedupe keeps
+  // the next tick of the open window from re-running it.
+  h.advance(60 * 1000);
+  await h.engine.tick();
+  assert.equal(h.startedJobs.length, 1, "no re-run on the next tick");
+  assert.equal(
+    h.ledgerRows.filter((r) => r.kind === "cto.overnight.job_started" && r.id === "wh:w1").length,
+    1,
+  );
+});
+
+test("overnight: a watcher hit with no hostable project skips ONCE per window, not per tick (BET-1428)", async () => {
+  const h = makeHarness({ trough: TROUGH, projects: [PROJECT_ROW] });
+  h.ledgerRows.push(watcherHitRow({ watcherId: "w2", ts: h.now() - 60_000 }));
+  await h.engine.tick();
+  assert.equal(h.startedJobs.length, 0);
+  assert.equal(
+    h.ledgerRows.filter((r) => r.kind === "cto.overnight.skip" && r.id === "wh:w2").length,
+    1,
+    "one skip row for the unhostable hit",
+  );
+
+  // The hit remains a candidate for the whole 24h collection window; the
+  // per-window skip dedupe keeps the ledger quiet while the retry stays live.
+  h.advance(60 * 1000);
+  await h.engine.tick();
+  h.advance(60 * 1000);
+  await h.engine.tick();
+  assert.equal(
+    h.ledgerRows.filter((r) => r.kind === "cto.overnight.skip" && r.id === "wh:w2").length,
+    1,
+    "still one skip row after two more ticks",
+  );
+  assert.equal(h.startedJobs.length, 0);
+});
+
+test("overnight: a hit whose project no longer resolves skips once per window, and a mid-window session opens the retry (BET-1428)", async () => {
+  const h = makeHarness({ trough: TROUGH, projects: [PROJECT_ROW] });
+  h.ledgerRows.push(watcherHitRow({ watcherId: "w3", ts: h.now() - 60_000, project: "/gone" }));
+  await h.engine.tick();
+  assert.equal(h.startedJobs.length, 0);
+  assert.equal(
+    h.ledgerRows.filter((r) => r.kind === "cto.overnight.skip" && r.id === "wh:w3").length,
+    1,
+  );
+  h.advance(60 * 1000);
+  await h.engine.tick();
+  assert.equal(
+    h.ledgerRows.filter((r) => r.kind === "cto.overnight.skip" && r.id === "wh:w3").length,
+    1,
+    "no repeated row while /gone stays untracked",
+  );
+
+  // A project session for /gone opens → the retry starts it; the dedupe
+  // suppressed rows, never the candidate.
+  const grown = makeHarness({ trough: TROUGH, projects: [PROJECT_ROW, { tmuxSession: "s2", defaultCwd: "/gone", windows: [{ opencodeSessionId: "sess-2" }] }] });
+  grown.ledgerRows.push(watcherHitRow({ watcherId: "w3", ts: grown.now() - 60_000, project: "/gone" }));
+  await grown.engine.tick();
+  assert.equal(grown.startedJobs.length, 1, "the retry runs once the project resolves");
+  assert.equal(grown.startedJobs[0].parentDirectory, "/gone");
+});
+
+test("overnight: cap-blocked candidates re-skip silently — one row per candidate per window, retries stay live (BET-1428)", async () => {
+  const tasks = [];
+  for (let i = 0; i < 4; i++) tasks.push({ ...QUEUE_TASK, id: `tq:${i}`, project: `/repo${i}` });
+  const projects = tasks.map((t, i) => ({
+    tmuxSession: `s${i}`,
+    defaultCwd: `/repo${i}`,
+    windows: [{ opencodeSessionId: `sess-${i}` }],
+  }));
+  const h = makeHarness({ trough: TROUGH, queue: tasks, projects, budgetPlan: { spendableFrac: 4 } });
+  h.listedJobs.push({ id: "r1", actor: "cto", status: "running" }, { id: "r2", actor: "cto", status: "running" });
+  await h.engine.tick();
+  assert.equal(h.startedJobs.length, 0, "the sub-cap of 2 is already full");
+  assert.equal(
+    h.ledgerRows.filter((r) => r.kind === "cto.overnight.skip" && r.reason === "rate_limit:concurrentDelegate").length,
+    4,
+    "one cap-skip row per candidate",
+  );
+
+  h.advance(60 * 1000);
+  await h.engine.tick();
+  assert.equal(
+    h.ledgerRows.filter((r) => r.kind === "cto.overnight.skip" && r.reason === "rate_limit:concurrentDelegate").length,
+    4,
+    "retries are silent while the cap stays full",
+  );
+
+  // A freed slot starts the retried candidate — the dedupe suppressed rows,
+  // never the retry.
+  h.listedJobs.length = 0;
+  h.advance(60 * 1000);
+  await h.engine.tick();
+  assert.equal(h.startedJobs.length, 2, "a freed sub-cap slot starts candidates on a later tick");
+});
+
 test("overnight: dispatch enforces the §3.3 concurrent sub-cap (2) by counting running cto jobs + accepted starts", async () => {
   const tasks = [];
   for (let i = 0; i < 5; i++) {

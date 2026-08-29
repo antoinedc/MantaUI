@@ -286,6 +286,14 @@ test("watcherHitPayload carries predicate-kind → sourceKind mapping", () => {
   assert.equal(watcherHitPayload(rt, {}).sourceKind, "watcher-hit-rate");
 });
 
+test("watcherHitPayload keeps the evidence event's project (BET-1428), omits it when absent", () => {
+  const ep = makeWatcher({ predicate: { kind: EVENT_PATTERN, params: { pattern: "x" } }, now: () => 1 }).watch;
+  assert.equal(watcherHitPayload(ep, { project: "/repo" }).project, "/repo");
+  assert.equal("project" in watcherHitPayload(ep, {}), false, "no project → no key (existing rows stay shape-identical)");
+  assert.equal("project" in watcherHitPayload(ep, { project: "" }), false);
+  assert.equal("project" in watcherHitPayload(ep, { project: 7 }), false);
+});
+
 test("collectWatcherHitsFromLedger produces B4 findings (rate-threshold → watcher-hit-rate)", () => {
   const rows = [
     { kind: "watcher.hit", salience: "high", watcherId: "w1", predicateKind: RATE_THRESHOLD, text: "burst of failures", ts: 1 },
@@ -296,6 +304,28 @@ test("collectWatcherHitsFromLedger produces B4 findings (rate-threshold → watc
   assert.equal(findings.length, 2);
   assert.deepEqual(findings.map((f) => f.sourceKind).sort(), ["watcher-hit", "watcher-hit-rate"]);
   assert.deepEqual(findings.map((f) => f.id).sort(), ["wh:w1", "wh:w2"]);
+});
+
+test("collectWatcherHitsFromLedger passes the hit row's hosting project through (BET-1428)", () => {
+  const rows = [
+    { kind: "watcher.hit", salience: "high", watcherId: "w1", predicateKind: RATE_THRESHOLD, text: "burst", project: "/repo", ts: 1 },
+    { kind: "watcher.hit", salience: "high", watcherId: "w2", predicateKind: EVENT_PATTERN, text: "theme", ts: 2 },
+    { kind: "watcher.hit", salience: "high", watcherId: "w3", predicateKind: EVENT_PATTERN, text: "bad", project: 42, ts: 3 },
+  ];
+  const findings = collectWatcherHitsFromLedger(rows);
+  assert.equal(findings[0].project, "/repo");
+  assert.equal(findings[1].project, undefined);
+  assert.equal(findings[2].project, undefined, "non-string project degrades to undefined");
+});
+
+test("an evidence event's project rides the hit into the ledger (BET-1428)", async () => {
+  const deps = makeEngineDeps();
+  const eng = createStandingQueryEngine(deps);
+  await eng.register({ predicate: { kind: EVENT_PATTERN, params: { pattern: "boom" } } });
+  await eng.evaluateEvent({ text: "boom", kind: "prompt", project: "/repo" });
+  const hit = deps.ledgerRows.find((r) => r.kind === "watcher.hit");
+  assert.ok(hit, "one hit row");
+  assert.equal(hit.project, "/repo", "the hosting project is captured at hit time");
 });
 
 test("the steep-decay notify rule set gained watcher-hit-rate", () => {
