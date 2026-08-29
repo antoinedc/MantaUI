@@ -968,17 +968,31 @@ overnight path and never bypasses its $ bound.
 
 ### 11.3 Reserve
 
-Forecast tomorrow's own demand per provider: Holt-Winters (damped trend,
-weekly seasonality) over a rolling 8 weeks of the box's usage ledger; under
-14 days of history, fall back to `reserve = max(observed daily max, 60% of
-window)`. Reserve = P95 of forecast demand (newsvendor fractile with
-C_u ≫ C_o). `spendable = remaining − reserve`, floored at 0. Every user
-cap-hit event raises the fractile one notch (max P99); 30 clean days lower it
-one notch (min P90). The fractile initializes at P95; notch adaptation begins
-only once the forecaster is active (≥ 14 days) — the pre-forecast fallback is
-not a fractile and does not notch. Re-evaluated every 30 min during the
-window; a shrinking spendable stops task starts and preempts at boundaries if
-already negative.
+Reserve and spendable are **fractions of the plan window**, not token or $
+amounts: the windowed adapters report `remaining` only as a fraction of the
+window and expose no window capacity in ledger units, so the reserve lives in
+that same fractional space — otherwise `remaining − reserve` compares
+incomparable units. Forecast tomorrow's own demand per provider: Holt-Winters
+(damped trend, weekly seasonality) over a rolling 8 weeks of the daily demand
+series derived from the per-provider **usage-observation history** (the pct
+observations the usage poller persists): a day's demand is the pct delta
+accumulated across that local day within one window cycle — a positive pct
+delta is consumption, a window reset shows as a pct drop and contributes 0.
+Under 14 days of history, fall back to `reserve = max(observed daily max,
+60% of window)` — both terms in the same fraction-of-window space. Reserve =
+P95 of forecast demand (newsvendor fractile with C_u ≫ C_o).
+`spendable = remaining − reserve`, floored at 0.
+
+Two event definitions feed the notch state machine, both ledgered per §14.5:
+a **cap-hit** = the provider's plan window exhausted — an adapter snapshot
+reporting the window at/over its limit (pct ≥ 100); a **clean day** = a day
+with no cap-hit and no forecast-exceeding spend. Every user cap-hit event
+raises the fractile one notch (max P99); 30 clean days lower it one notch
+(min P90). The fractile initializes at P95; notch adaptation begins only once
+the forecaster is active (≥ 14 days) — the pre-forecast fallback is not a
+fractile and does not notch. Re-evaluated every 30 min during the window; a
+shrinking spendable stops task starts and preempts at boundaries if already
+negative.
 
 ### 11.4 Task portfolio
 
