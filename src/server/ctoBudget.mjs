@@ -555,17 +555,23 @@ export function preSurfacedIncidents({ resolvedRows, createdTsByCardId, promptTs
 
 /**
  * A delegate record's branch merged — pure predicate over the injected git
- * probe of the project repo:
+ * probe of the project repo plus the injected forge probe (BET-1422):
  *   - branch gone (`exists === false`) → merged: the cleanup path deletes
  *     with `git branch -d`, which only succeeds on merged branches — the
  *     deletion is the merge's fingerprint;
  *   - branch present and `merge-base --is-ancestor` true → merged locally;
- *   - otherwise (including a probe failure) → not merged.
+ *   - branch present but not an ancestor, and the PR the forge carries for
+ *     the branch reports merged (`prMerged === true`) → merged: a squash
+ *     merge creates a NEW commit, so the local branch tip is never an
+ *     ancestor of HEAD and the two local-git signals cannot see it;
+ *   - otherwise (including a probe failure or an unknown forge answer) →
+ *     not merged.
  */
 export function isJobMerged(probe) {
   if (!probe || typeof probe !== "object") return false;
   if (probe.exists === false) return true;
-  return probe.isAncestor === true;
+  if (probe.isAncestor === true) return true;
+  return probe.prMerged === true;
 }
 
 /** The monthly recommendation. Copy-only; the dial is never written. */
@@ -632,6 +638,18 @@ export function createCtoBudget({
   // delegate jobs, the project's git read, verdicts, segments and ledger):
   jobsRead = async () => [], // () => [{id, actor, status, branch, cwd, finishedAt}]
   gitProbe = async () => ({ exists: false, isAncestor: false }), // ({cwd, branch}) => {exists, isAncestor}
+  // BET-1422 forge seams — the squash-merge signal a local git probe cannot
+  // see (a squash creates a NEW commit, so the branch tip never becomes an
+  // ancestor of HEAD). discoverJobPr resolves the job's own PR on the forge
+  // by its branch head, open OR merged; null = the forge answered and no PR
+  // matches (definitive — the roll stops re-asking), a THROW = the forge was
+  // not consultable (transient — the roll retries on a later refresh).
+  // forgeProbe answers that PR's merged state: true/false/null (unknown —
+  // the row stays uncounted and is retried later).
+  discoverJobPr = async () => {
+    throw new Error("discoverJobPr not wired");
+  }, // ({cwd, branch}) => {repoKey, number} | null (null = definitive no-PR)
+  forgeProbe = async () => null, // ({repoKey, number, head}) => boolean | null
   verdictsRead = async () => [], // () => [{verdict, never, ts}]
   segmentsRead = async () => [], // () => [{sessionID, events: [{t, kind}]}]
   ledgerRead = async () => [], // () => ledger rows [{kind, ts, ...}]
@@ -900,7 +918,11 @@ export function createCtoBudget({
    * Advance the monthly roll (§12.4). Idempotent per refresh; safe to call on
    * every health read. Samples fresh terminal CTO jobs into `roi.pending`
    * (the jobs store sweeps after 7 days — the branch names are the durable
-   * record), probes pending branches against the project repo, and recomputes
+   * record), probes pending branches against the project repo and — for
+   * branches still present and not an ancestor of HEAD, which is what a
+   * squash merge leaves behind (BET-1422) — against the forge: the job's PR
+   * is resolved by branch head once (`prTried` marks a definitive no-PR so
+   * PR-less jobs never re-query), then its merged state is probed. Recomputes
    * the store-derived counters: the current month on every refresh, the
    * previous month once after it closes (frozen thereafter). Persisted
    * best-effort — a store failure degrades the report, never the caller.
@@ -915,6 +937,13 @@ export function createCtoBudget({
     }
     const months = { ...payload.roi.months };
     const pending = payload.roi.pending.map((j) => ({ ...j }));
+    const countMerged = (row) => {
+      const key = roiMonthKey(typeof row.finishedAt === "number" ? row.finishedAt : t);
+      const acc = monthAccumulator(months, key);
+      acc.merged += 1;
+      months[key] = acc;
+      row.counted = true;
+    };
 
     // 1. Sample terminal CTO-actor jobs not yet snapshotted.
     let jobs = [];
@@ -940,8 +969,9 @@ export function createCtoBudget({
     }
 
     // 2. Probe pending branches (merged = branch deleted-on-merge, or present
-    //    and an ancestor of the project's HEAD). Probe failures leave the row
-    //    uncounted for a later refresh.
+    //    and an ancestor of the project's HEAD, or its forge PR reports
+    //    merged — the squash-merge case, BET-1422). Probe failures leave the
+    //    row uncounted for a later refresh.
     for (const row of pending) {
       if (row.counted === true) continue;
       let probe = { exists: false, isAncestor: false };
@@ -951,12 +981,36 @@ export function createCtoBudget({
         probe = { exists: false, isAncestor: false };
       }
       if (isJobMerged(probe)) {
-        const key = roiMonthKey(typeof row.finishedAt === "number" ? row.finishedAt : t);
-        const acc = monthAccumulator(months, key);
-        acc.merged += 1;
-        months[key] = acc;
-        row.counted = true;
+        countMerged(row);
+        continue;
       }
+      // The local-git signals can never fire for a squash merge: resolve the
+      // job's PR on the forge (once — a definitive no-PR is marked so a
+      // PR-less job never re-queries; an unconsultable forge leaves both
+      // markers unset so the next refresh retries), then probe its state.
+      if (row.prTried !== true && typeof discoverJobPr === "function") {
+        try {
+          const pr = await discoverJobPr({ cwd: row.cwd, branch: row.branch });
+          if (pr && typeof pr.repoKey === "string" && pr.repoKey && Number.isInteger(pr.number) && pr.number >= 1) {
+            row.pr = { repoKey: pr.repoKey, number: pr.number };
+          } else {
+            row.prTried = true;
+          }
+        } catch {
+          /* transient — retried on a later refresh */
+        }
+      }
+      const pr = row.pr && typeof row.pr === "object" ? row.pr : null;
+      if (!pr || typeof pr.repoKey !== "string" || !pr.repoKey || !Number.isInteger(pr.number) || pr.number < 1) {
+        continue;
+      }
+      let prMerged = null;
+      try {
+        prMerged = await forgeProbe({ repoKey: pr.repoKey, number: pr.number, head: row.branch });
+      } catch {
+        prMerged = null;
+      }
+      if (isJobMerged({ ...probe, prMerged })) countMerged(row);
     }
 
     // 3. Recompute the store-derived counters: current month every refresh;

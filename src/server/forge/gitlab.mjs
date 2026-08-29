@@ -312,7 +312,13 @@ export function createGitlabAdapter(request, requestWrite, requestText = request
     kind: "gitlab",
 
     async listPullRequests(repo, filter = {}) {
-      const url = `${apiBase}${projectPath(repo)}/merge_requests${qs({ state: stateFilter(filter.state ?? "opened") })}`;
+      // `head` narrows the list to MRs whose source branch matches (BET-1422
+      // — resolving a job's own MR by its branch); GitLab names the param
+      // `source_branch`.
+      const url = `${apiBase}${projectPath(repo)}/merge_requests${qs({
+        state: stateFilter(filter.state ?? "opened"),
+        source_branch: filter.head || undefined,
+      })}`;
       const { data, stale } = await request(url);
       const raw = Array.isArray(data) ? data : [];
       return { data: raw.map((m) => normalizeMr(m)), stale };
