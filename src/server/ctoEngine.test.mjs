@@ -625,7 +625,10 @@ test("rollups do not run while paused", async () => {
 // store is touched.
 // ---------------------------------------------------------------------------
 
-test("engine exposes .facts and pumps proposals on tick (%40 enabled)", async () => {
+// Local facts-engine fixture: in-memory stores for facts + archive and a
+// persisted engineState, so no real store is touched. Returns the engine plus
+// the raw inmemory map for assertions.
+function makeFactsFixture() {
   const inmemory = new Map();
   const fstate = { v: 1 };
   const facts = createFactsEngine({
@@ -639,6 +642,11 @@ test("engine exposes .facts and pumps proposals on tick (%40 enabled)", async ()
     facts: { load: async (p) => inmemory.get(p) ?? { v: 1, facts: [] }, save: async (p, d) => inmemory.set(p, d), dir: "x" },
     archive: { load: async (p) => inmemory.get("a" + p) ?? { v: 1, entries: [] }, save: async (p, d) => inmemory.set("a" + p, d) },
   });
+  return { facts, inmemory, fstate };
+}
+
+test("engine exposes .facts and pumps proposals on tick (%40 enabled)", async () => {
+  const { facts, inmemory } = makeFactsFixture();
   const harness = makeHarness({ ctoEnabled: true, facts });
   // Enable + a proposal for alpha, then a tick should drain it into the store.
   await harness.engine.resume();
@@ -650,19 +658,7 @@ test("engine exposes .facts and pumps proposals on tick (%40 enabled)", async ()
 });
 
 test("proposeFact enqueues, resolves via the gatekeeper, and reports the verdict", async () => {
-  const inmemory = new Map();
-  const fstate = { v: 1 };
-  const facts = createFactsEngine({
-    engineState: {
-      load: async () => ({ ...fstate }),
-      save: async (s) => {
-        Object.keys(fstate).forEach((k) => delete fstate[k]);
-        Object.assign(fstate, s);
-      },
-    },
-    facts: { load: async (p) => inmemory.get(p) ?? { v: 1, facts: [] }, save: async (p, d) => inmemory.set(p, d), dir: "x" },
-    archive: { load: async (p) => inmemory.get("a" + p) ?? { v: 1, entries: [] }, save: async (p, d) => inmemory.set("a" + p, d) },
-  });
+  const { facts } = makeFactsFixture();
   const harness = makeHarness({ ctoEnabled: true, facts });
   await harness.engine.resume();
 
