@@ -693,6 +693,7 @@ export function createCtoDigest(deps = {}) {
     }
 
     const id = String(t);
+    let persisted = false;
     try {
       // §14.3 silence audit: the digest carries how many suggestions the CTO
       // held back, so the DigestSection can render the "I held back N — review"
@@ -700,10 +701,13 @@ export function createCtoDigest(deps = {}) {
       const held = await safe(getHeldSuggestionCount);
       if (typeof held === "number" && held > 0) digest.heldSuggestions = held;
       await digests.save(id, digest);
+      persisted = true;
     } catch {
-      /* best-effort */
+      /* best-effort — but the trust queue below is NOT consumed on a failed
+         save: an announcement consumed without its digest persisting would
+         lose the mandatory act report (§9.2 invariant 1) forever. */
     }
-    if (trust && announcedIds.length) await safe(trust.markAnnounced, announcedIds);
+    if (persisted && trust && announcedIds.length) await safe(trust.markAnnounced, announcedIds);
     lastGenerated = t;
     lastDigestId = id;
 

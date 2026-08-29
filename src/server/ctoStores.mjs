@@ -156,6 +156,19 @@ export const engineStateStore = createCtoJsonStore("engine-state", ctoPath("engi
 // Single-level directory JSON stores: one file per id, e.g. `facts/<project>.json`
 // ---------------------------------------------------------------------------
 
+// Best-effort A1 ledger append shared by the cto engines (extracted for
+// BET-1403 — see the duplication-gate report): observability must never take
+// the caller down, so a ledger failure is swallowed, not thrown. Returns true
+// when the row landed. `ts` is an epoch-ms number.
+export async function appendLedgerBestEffort(ledger, ts, entry) {
+  try {
+    await ledger.append({ actor: "cto", ts, ...entry });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function createDirJsonStore(name, dirPart) {
   const filePath = (id) => ctoPath(dirPart, `${id}.json`);
   return {

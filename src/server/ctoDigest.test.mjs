@@ -646,3 +646,25 @@ test("generateDigest: trust asides survive a degraded digest (MUST appear, even 
   const digest = await engine.generateDigest({ reason: "manual" });
   assert.ok(digest.items.some((i) => i.tier === "progress" && i.text === "Acted on my own (record-decision): Adopt pact"));
 });
+
+test("generateDigest: a failed save does NOT consume the trust queue — the mandatory act report re-announces (§9.2 invariant 1)", async () => {
+  const marked = [];
+  const trust = {
+    listAnnouncements: async () => [{ id: "a1", ts: 900, kind: "act", text: "Acted on my own (record-decision): Adopt pact", refs: [] }],
+    markAnnounced: async (ids) => marked.push(...ids),
+  };
+  // First generation: the digest composes (with the report appended) but the
+  // save throws — the announcement queue must stay intact.
+  const failing = { ...makeDigestStore(), save: async () => { throw new Error("disk full"); } };
+  const { engine } = makeEngine({ runEphemeral: async () => ({ text: JSON.stringify({ items: [{ tier: "progress", text: "shipped", refs: [] }] }) }), trust, digests: failing });
+  const failed = await engine.generateDigest({ reason: "manual" });
+  assert.ok(failed.items.some((i) => i.tier === "progress" && i.text === "Acted on my own (record-decision): Adopt pact"));
+  assert.deepEqual(marked, [], "a failed save must not consume the announcements");
+
+  // Next generation (save works again): the same report re-announces and is
+  // then consumed exactly once.
+  const { engine: engine2 } = makeEngine({ runEphemeral: async () => ({ text: JSON.stringify({ items: [{ tier: "progress", text: "shipped", refs: [] }] }) }), trust });
+  const next = await engine2.generateDigest({ reason: "manual" });
+  assert.equal(next.items.filter((i) => i.text === "Acted on my own (record-decision): Adopt pact").length, 1);
+  assert.deepEqual(marked, ["a1"]);
+});

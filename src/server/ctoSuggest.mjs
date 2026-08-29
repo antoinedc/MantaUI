@@ -33,6 +33,7 @@
 
 import { createHash } from "node:crypto";
 import {
+  appendLedgerBestEffort,
   ledgerStore,
   engineStateStore,
   verdictsStore,
@@ -396,11 +397,7 @@ export function createCtoSuggest(deps = {}) {
   }
 
   async function ledgerAppend(entry) {
-    try {
-      await ledger.append({ actor: "cto", ts: now(), ...entry });
-    } catch {
-      /* best-effort — a ledger failure never takes suggestions down */
-    }
+    return appendLedgerBestEffort(ledger, now(), entry);
   }
 
   async function loadState() {

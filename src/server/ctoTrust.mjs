@@ -23,7 +23,7 @@
 // Pure over injected stores + a now() clock — testable without a live box.
 
 import { betaTailAbove } from "./ctoVerdicts.mjs";
-import { engineStateStore, ledgerStore, verdictsStore } from "./ctoStores.mjs";
+import { appendLedgerBestEffort, engineStateStore, ledgerStore, verdictsStore } from "./ctoStores.mjs";
 
 // The §3.5 ladder rungs, lowest → highest. `ask` covers the ask verbs
 // (silent-log / inbox card / notify — ctoSuggest picks within the rung);
@@ -140,11 +140,7 @@ export function createCtoTrust(deps = {}) {
   }
 
   async function ledgerAppend(entry) {
-    try {
-      await ledger.append({ actor: "cto", ts: now(), ...entry });
-    } catch {
-      /* best-effort */
-    }
+    return appendLedgerBestEffort(ledger, now(), entry);
   }
 
   async function loadState() {
