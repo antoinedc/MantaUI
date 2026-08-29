@@ -1,5 +1,5 @@
 // ctoToolRegistry.mjs — §7.2 registry + fusion + lifecycle + connect asks
-// (BET-1395).
+// (BET-1395) + the §7.3 vitality / §7.6 relevance axes (BET-1396).
 //
 // The registry fuses the four §7.1 evidence channels into ONE row per tool
 // identity ("one identity, one row"), derives engagement, runs the two
@@ -8,8 +8,8 @@
 //   observed (evidence accumulates) → candidate (either axis crosses its bar:
 //     engagement ≥3 uses across ≥2 weeks; OR the vitality path — a credential
 //     exists at all) → ONE connect ask (Connect read-only / Not now / Never)
-//     → integrated (probes run — §7.5, a later issue; this module only grants
-//     the metadata consent ring).
+//     → integrated (the FIRST successful §7.5 probe run flips it here;
+//     applyProbeResult does the flip).
 //
 // Raw evidence (unknown CLIs/hosts/keys) is classified by the LLM fallback at
 // most ONCE per identity — the model's judgment is cached in the registry
@@ -29,6 +29,9 @@ import {
   collectConfigEvidence,
   SCAN_ROW_CAP,
 } from "./ctoToolScan.mjs";
+// One-way dep (ctoProbes never imports this module): the §7.2 well-known
+// vitality pair {last_event, inflow_rate} pulled from a probe's extract map.
+import { vitalityOf } from "./ctoProbes.mjs";
 
 export const TOOL_REGISTRY_VERSION = 1;
 export const ACTOR = "cto";
@@ -56,6 +59,7 @@ export const REARM_FRESH_USES = 2;
 export const TOOL_CLASSIFY_TASK_CLASS = "ambient-summarize";
 
 const DAY_MS = 24 * 3_600_000;
+const WEEK_MS = 7 * DAY_MS;
 const EWMA_TAU_DAYS = 7; // engagement EWMA decay constant (1-week τ)
 
 export function emptyConsent() {
@@ -268,6 +272,11 @@ export function createToolRegistry(deps = {}) {
     collectDb = null, // async ({sinceTs, untilTs, cap}) => db part rows
     collectSurfaces = null, // async () => {config, forgeRepos, webhooks, gitRemotes, schedules}
     backfillStartInstant = null, // first-scan lower bound (the backfill range)
+    // BET-1396 §7.5: async (toolId, {secret}) — the probe runner's
+    // scaffoldSpec; called at consent time so the ENGINE authors the tool's
+    // probe-spec template (AI-authored content goes through the runner's
+    // validated writeSpec; no other writer touches probes/<tool>.yaml).
+    scaffoldProbes = null,
   } = deps;
 
   async function loadPayload() {
@@ -561,11 +570,19 @@ export function createToolRegistry(deps = {}) {
     const nowMs = now();
     t.consent = t.consent ?? emptyConsent();
     if (answer === "connect") {
-      // The metadata ring is granted. Status stays `candidate` until probes
-      // actually run (§7.5 flips it to `integrated` in a later issue).
+      // The metadata ring is granted. Status stays `candidate` until the
+      // first §7.5 probe actually runs (applyProbeResult flips it).
       t.consent.metadata = "yes";
       t.reArmAt = null;
       await ledgerLog({ kind: "cto.tool.consent", tool: id, ring: "metadata", value: "yes" });
+      // §7.5 BET-1396: the ENGINE authors the tool's probe-spec template at
+      // consent time, filled with the evidenced credential key (if any). The
+      // file is engine-written; its content is completed through the runner's
+      // validated writeSpec path. Best-effort — consent never depends on it.
+      if (typeof scaffoldProbes === "function") {
+        const secretRow = (t.evidence ?? []).find((e) => e?.channel === "secret" && typeof e?.detail === "string" && e.detail.startsWith("secret:"));
+        await scaffoldProbes(id, { secret: secretRow ? secretRow.detail.slice("secret:".length) : null }).catch(() => {});
+      }
     } else if (answer === "not-now") {
       t.consent.metadata = "no";
       t.reArmAt = nowMs + NOT_NOW_REARM_MS;
@@ -640,6 +657,98 @@ export function createToolRegistry(deps = {}) {
     return t ? (t.consent?.[ring] ?? null) : null;
   }
 
+  // ---------------------------------------------------------------------------
+  // BET-1396 — §7.3 vitality / §7.6 relevance / §7.4 lifecycle. All mutating
+  // writers go through `serialized` (the whole-payload store's lost-update
+  // guard, same as the scan/connect writers).
+  // ---------------------------------------------------------------------------
+
+  // The full row for one tool (probe runner reads evidence hosts + vitality;
+  // the probe spec's host allowlist is derived from this). null when unknown.
+  async function toolRow(toolId) {
+    const id = typeof toolId === "string" ? toolId.trim().toLowerCase() : "";
+    if (!id) return null;
+    const payload = await loadPayload();
+    return payload.tools.find((x) => x?.tool === id) ?? null;
+  }
+
+  // §7.3 vitality: fold ONE successful metadata probe's extract into the
+  // vitality axis. `fields` is the probe's extract map (untrusted but tiny);
+  // only the §7.2 well-known pair {last_event, inflow_rate} is consumed.
+  // `inflow_rate` semantics: the RAW count of new items since the previous
+  // probe, normalized to a per-week rate against elapsed wall time
+  // (cadence-independent; the spec cadence covers the very first sample).
+  // The rate is EWMA-smoothed (τ = 7d, the engagement axis's constant) into
+  // `vitality.ewma` — the runner reads it for the daily↔weekly adaptation.
+  // First success also flips §7.4 candidate → integrated (probes ran).
+  // NOTE: the body does NOT self-serialize — the exported wrapper already
+  // routes through `serialized` (nesting would deadlock the write chain).
+  async function applyProbeResult(toolId, { fields, probedAt, cadenceMs } = {}) {
+    const id = typeof toolId === "string" ? toolId.trim().toLowerCase() : "";
+    if (!id) return { ok: false, error: "missing tool" };
+    const payload = await loadPayload();
+    const t = payload.tools.find((x) => x?.tool === id);
+    if (!t) return { ok: false, error: `unknown tool "${id}"` };
+    const vit = vitalityOf(fields);
+    t.vitality = t.vitality ?? { last_event: null, inflow_rate: null, ewma: null, last_probed: null };
+    const v = t.vitality;
+    const ts = typeof probedAt === "number" ? probedAt : now();
+    if (vit.last_event !== undefined) v.last_event = vit.last_event;
+    if (vit.inflow_rate !== undefined) {
+      const cad = Number.isFinite(cadenceMs) && cadenceMs > 0 ? cadenceMs : WEEK_MS;
+      const elapsed = Number.isFinite(v.last_probed) ? Math.max(ts - v.last_probed, 1) : cad;
+      const ratePerWeek = (vit.inflow_rate * WEEK_MS) / elapsed;
+      const decay = Math.exp(-(elapsed / DAY_MS) / EWMA_TAU_DAYS);
+      v.ewma = v.ewma == null ? ratePerWeek : v.ewma * decay + ratePerWeek * (1 - decay);
+      v.inflow_rate = vit.inflow_rate;
+    }
+    v.last_probed = ts;
+    let flipped = false;
+    if (t.status === "candidate") {
+      t.status = "integrated";
+      flipped = true;
+    }
+    await savePayload(payload);
+    if (flipped) {
+      await ledgerLog({ kind: "cto.tool.integrated", tool: id });
+    }
+    return { ok: true, vitality: { ...v }, flipped };
+  }
+
+  // §7.6 relevance: persist the weekly nano-score for one (tool, project)
+  // pair into the row's `relevance[project]` (clamped to [0,1]).
+  async function applyRelevance(toolId, project, score) {
+    const id = typeof toolId === "string" ? toolId.trim().toLowerCase() : "";
+    if (!id || typeof project !== "string" || !project) return { ok: false, error: "missing tool/project" };
+    const s = Number(score);
+    if (!Number.isFinite(s)) return { ok: false, error: "invalid score" };
+    const payload = await loadPayload();
+    const t = payload.tools.find((x) => x?.tool === id);
+    if (!t) return { ok: false, error: `unknown tool "${id}"` };
+    t.relevance = { ...(t.relevance ?? {}), [project]: Math.max(0, Math.min(1, s)) };
+    await savePayload(payload);
+    return { ok: true };
+  }
+
+  // One evidence row on the tool's trail (probe failures; §7.2 evidence
+  // shape). Deduped on (channel, detail); capped at EVIDENCE_CAP.
+  async function appendEvidence(toolId, entry) {
+    const id = typeof toolId === "string" ? toolId.trim().toLowerCase() : "";
+    if (!id || !entry || typeof entry.channel !== "string" || typeof entry.detail !== "string") {
+      return { ok: false, error: "missing tool/evidence" };
+    }
+    const payload = await loadPayload();
+    const t = payload.tools.find((x) => x?.tool === id);
+    if (!t) return { ok: false, error: `unknown tool "${id}"` };
+    const row = { channel: entry.channel, detail: entry.detail, ts: Number.isFinite(entry.ts) ? entry.ts : now() };
+    const exists = (t.evidence ?? []).some((e) => e?.channel === row.channel && e?.detail === row.detail);
+    if (exists) return { ok: true, changed: false };
+    t.evidence = [...(t.evidence ?? []), row];
+    if (t.evidence.length > EVIDENCE_CAP) t.evidence.splice(0, t.evidence.length - EVIDENCE_CAP);
+    await savePayload(payload);
+    return { ok: true, changed: true };
+  }
+
   // Registry view for the §10.5 tool surfaces (read-only, stable shape).
   async function listTools() {
     const payload = await loadPayload();
@@ -665,6 +774,13 @@ export function createToolRegistry(deps = {}) {
     consentFor,
     listTools,
     appendUsage,
+    // BET-1396: §7.5 probe-runner surface (read the row, fold vitality /
+    // relevance, append failure evidence). toolRow is a pure read — no
+    // serialization (it must never queue behind an in-flight scan).
+    toolRow,
+    applyProbeResult: (toolId, input) => serialized(() => applyProbeResult(toolId, input)),
+    applyRelevance: (toolId, project, score) => serialized(() => applyRelevance(toolId, project, score)),
+    appendEvidence: (toolId, entry) => serialized(() => appendEvidence(toolId, entry)),
   };
 }
 

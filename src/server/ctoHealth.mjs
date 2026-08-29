@@ -28,6 +28,7 @@ export const HEALTH_STAT_MIN = Object.freeze({
   capHitsCaused: 1,
   reserveFractile: 1,
   roi: 1,
+  probeHealth: 1,
 });
 
 // EN month labels for ROI row copy — deterministic (server locale must not
@@ -87,6 +88,9 @@ export async function computeHealthStats({
   // BET-1405 (§12.4): async () => { month, roll, collectingUntil } — the
   // monthly ROI roll; the endpoint refreshes it before this read.
   roiRead = async () => null,
+  // BET-1396 (§7.5/§10.5): async () => { tools, probes, healthy, authFailed,
+  // lastRunAt } — the probe runner's snapshot over consented tools.
+  probesRead = async () => null,
 } = {}) {
   const t = now();
   const stats = [];
@@ -298,6 +302,32 @@ export async function computeHealthStats({
       collectingText: firstReportText ? `collecting — first report ${firstReportText}` : "collecting",
     });
   }
+
+  // 9. Probe health (BET-1396, §7.5/§10.5 "probe health per consented tool")
+  //    — how many §7.5 metadata probes are configured and how many reported
+  //    healthy on their last run. Auth-failed probes surface separately (they
+  //    carry their own §10.6-7 blocker card); a probe that never ran keeps
+  //    the row collecting (n counts configured probes, value needs a run).
+  let probes = null;
+  try {
+    probes = (await probesRead()) ?? null;
+  } catch {
+    probes = null;
+  }
+  const probeCount = Number(probes?.probes ?? 0);
+  const probeRan = Number(probes?.lastRunAt ?? 0) > 0;
+  const probeAuth = Number(probes?.authFailed ?? 0);
+  stats.push({
+    id: "probeHealth",
+    label: "Probe health",
+    min: HEALTH_STAT_MIN.probeHealth,
+    n: probeCount,
+    value:
+      probeCount >= HEALTH_STAT_MIN.probeHealth && probeRan
+        ? `${Number(probes.healthy ?? 0)}/${probeCount} probes healthy${probeAuth > 0 ? ` · ${probeAuth} auth-failed` : ""}`
+        : null,
+    ...(probeCount > 0 && !probeRan ? { collectingText: "configured — waiting for first run" } : {}),
+  });
 
   return { stats, generatedAt: t };
 }

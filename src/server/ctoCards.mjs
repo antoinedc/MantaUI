@@ -71,6 +71,24 @@ export const INBOX_SOURCE_KIND = "inbox";
 // Connect-ask cards (BET-1395 / §7.4): one §7.2 tool identity per card, keyed
 // by the tool id.
 export const CONNECT_SOURCE_KIND = "tool";
+// Probe-failure blocker cards (BET-1396 / §10.6-7): an auth-shaped probe
+// failure that degraded the digest. Keyed by `<tool>/<probe>`; the body
+// deep-links (in copy) to the secrets surface — the fix is a rotated key.
+export const PROBE_SOURCE_KIND = "probe";
+
+// §10.6-7 probe-auth-failure card copy (3 consecutive auth failures — the
+// runner's AUTH_FAIL_ESCALATE). `secretKey` is the vault KEY NAME (not a
+// value) when the spec declared one — naming the exact key the user should
+// update is the deep-link to the secrets surface in words.
+export function probeBlockerCopy(tool, probeName, secretKey = null) {
+  const secret = secretKey
+    ? ` If the key was rotated, update "${secretKey}" on the secrets surface (⚙ Settings → Secrets).`
+    : " Check the tool's credential on the secrets surface (⚙ Settings → Secrets).";
+  return {
+    title: `Probe failing — ${tool} key may have been rotated`,
+    body: `The "${probeName}" probe for ${tool} failed auth 3 times in a row (HTTP 401/403 or the credential is gone), so the digest's view of ${tool} is degraded.${secret}`,
+  };
+}
 
 // Stable, collision-resistant card id. Re-detection of the same (sourceKind,
 // sourceId) yields the same id → upsert in place, never a duplicate.
