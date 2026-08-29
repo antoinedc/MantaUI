@@ -195,6 +195,20 @@ test("listPullRequests normalises an array of PRs with draft handling", async ()
   assert.equal(prs[1].draft, true);
 });
 
+test("listPullRequests head filter narrows the request to owner:branch (BET-1422)", async () => {
+  const url = "https://api.github.com/repos/acme/widget/pulls?state=all&head=acme%3Acto-branch";
+  const adapter = createGithubAdapter(
+    fakeRequest({
+      [url]: [{ ...PR_FIXTURE, number: 11, state: "closed", merged: true, head: { ref: "cto-branch", sha: "1" }, base: { ref: "main", sha: "2" } }],
+    }),
+  );
+  const { data: prs } = await adapter.listPullRequests(REPO, { state: "all", head: "cto-branch" });
+  assert.equal(prs.length, 1);
+  assert.equal(prs[0].number, 11);
+  assert.equal(prs[0].state, "merged");
+  assert.equal(prs[0].headRef, "cto-branch");
+});
+
 // ---------------------------------------------------------------------------
 // Write path (BET-794): createPullRequest + merge
 // ---------------------------------------------------------------------------

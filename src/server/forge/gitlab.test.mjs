@@ -98,6 +98,18 @@ test("a subgroup project path encodes the FULL owner/repo, never the segments", 
   assert.ok(!seen[0].includes("/group/sub/"), "slashes must be encoded, not raw");
 });
 
+test("listPullRequests head filter narrows the request to the source branch (BET-1422)", async () => {
+  const url = `${projectBase(REPO)}/merge_requests?state=all&source_branch=cto-branch`;
+  const adapter = createGitlabAdapter(
+    fakeRequest({
+      [url]: [MR_FIXTURE],
+    }),
+  );
+  const { data: mrs } = await adapter.listPullRequests(REPO, { state: "all", head: "cto-branch" });
+  assert.equal(mrs.length, 1);
+  assert.equal(mrs[0].headRef, "feature/forge");
+});
+
 // ---- Mismatch #3: opened, not open -----------------------------------------
 
 test('"opened" → "open" and "locked" is handled', async () => {

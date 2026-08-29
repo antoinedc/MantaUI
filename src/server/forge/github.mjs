@@ -396,13 +396,19 @@ export function createGithubAdapter(request, requestWrite, requestText = request
     kind: "github",
 
     /**
-     * GET /repos/{o}/{r}/pulls — the open PRs for a repo.
+     * GET /repos/{o}/{r}/pulls — the PRs for a repo, defaulting to open.
+     * `head` narrows the list to PRs whose head branch matches (BET-1422 —
+     * resolving a job's own PR by its branch): GitHub takes `head` as
+     * `owner:branch`.
      * @param {{ owner: string, repo: string }} repo
-     * @param {{ state?: string }} [filter]
+     * @param {{ state?: string, head?: string }} [filter]
      * @returns {Promise<{ data: import("./index.mjs").PullRequestLike[], stale: boolean }>}
      */
     async listPullRequests(repo, filter = {}) {
-      const url = `${apiBase}${issuePath(repo)}/pulls${qs({ state: filter.state ?? "open" })}`;
+      const url = `${apiBase}${issuePath(repo)}/pulls${qs({
+        state: filter.state ?? "open",
+        head: filter.head ? `${repo.owner}:${filter.head}` : undefined,
+      })}`;
       const { data, stale } = await request(url);
       const raw = Array.isArray(data) ? data : [];
       return { data: raw.map((p) => normalizePr(p)), stale };

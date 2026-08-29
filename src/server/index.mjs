@@ -924,6 +924,15 @@ async function resolveForgeParentDirectory(repoKey) {
   }
 }
 
+// BET-1422: parse a repoKey into the forge context the adapters take — the
+// same detectForgeUrl resolution resolveForgeSinkTarget does. Null when the
+// key is not a known forge.
+function forgeContextForRepoKey(repoKey) {
+  const parts = typeof repoKey === "string" ? forgeParseRepoKey(repoKey) : null;
+  if (!parts) return null;
+  return detectForgeUrl(`https://${parts.host}/${parts.owner}/${parts.repo}`);
+}
+
 // Resolve the forge progress sink target from the session-link primitive
 // (spec §3.4⑥, BET-844): the LINKED pull request or issue on the job's own
 // session record — the triggering issue. Replaces the BET-798 stopgap that
@@ -2272,6 +2281,47 @@ const adaptiveCtoBudget = ctoBudget.createCtoBudget({
     } catch {
       return { exists: true, isAncestor: false };
     }
+  },
+  // BET-1422: the forge signal for squash-merged PRs — a squash merge
+  // creates a NEW commit, so the local branch tip never becomes an ancestor
+  // of HEAD and the two local-git signals above cannot see the merge.
+  // discoverJobPr resolves the job's own PR by branch head (open OR merged —
+  // the roll may first run after the merge); null = the forge answered with
+  // no match (definitive — the roll stops re-asking), a THROW = the forge
+  // was not consultable or the repo walk was incomplete (the roll retries on
+  // a later refresh, never marking a no-PR). probeForgePrMerged verifies the
+  // PR's head branch matches the job's branch (identity anchor — a number
+  // alone could name someone else's PR) and answers its merged state;
+  // null = unknown, retry later.
+  discoverJobPr: async ({ cwd, branch } = {}) => {
+    if (typeof cwd !== "string" || !cwd || typeof branch !== "string" || !branch) return null;
+    // The cached 60s walk (one box) — at most one filesystem scan per minute
+    // no matter how many pending rows lack a resolved PR.
+    const walk = await local.forgeProbe();
+    const repoKey = (walk?.repos ?? []).find((r) => r?.path === cwd)?.repoKey ?? null;
+    // A partial walk (timeout/cap) cannot prove a repo forge-less, and a
+    // cwd the walk has not surfaced yet may surface later: in both cases the
+    // row must stay retriable — throw, never stamp a definitive no-PR on
+    // incomplete evidence.
+    if (!repoKey) throw new Error(walk?.partial ? "repo walk partial" : `no scanned repo at ${cwd}`);
+    const forge = forgeContextForRepoKey(repoKey);
+    if (!forge) return null;
+    const tok = await forgeResolveToken(forge.host).catch(() => null);
+    if (!tok) throw new Error("forge token not available");
+    const adapter = getAdapter(forge.kind, tok.token);
+    const { data } = await adapter.listPullRequests({ owner: forge.owner, repo: forge.repo }, { state: "all", head: branch });
+    const hit = (Array.isArray(data) ? data : []).find((p) => p?.headRef === branch);
+    return hit?.number ? { repoKey, number: hit.number } : null;
+  },
+  probeForgePrMerged: async ({ repoKey, number, head } = {}) => {
+    const forge = forgeContextForRepoKey(repoKey);
+    if (!forge) return null;
+    const tok = await forgeResolveToken(forge.host).catch(() => null);
+    if (!tok) return null;
+    const adapter = getAdapter(forge.kind, tok.token);
+    const { data } = await adapter.getPullRequest({ owner: forge.owner, repo: forge.repo }, number);
+    if (!data || data.headRef !== head) return false;
+    return data.state === "merged";
   },
   verdictsRead: async () => (await verdictsStore.load())?.entries ?? [],
   segmentsRead: async () => {

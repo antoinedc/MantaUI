@@ -501,13 +501,21 @@ test("preSurfacedIncidents: missing creation row falls back to the resolution ts
   assert.equal(count, 0); // a prompt one ms before the fallback source ts disqualifies
 });
 
-test("isJobMerged: branch gone counts as merged; present needs merge-base ancestry", () => {
+test("isJobMerged: branch gone counts as merged; present needs merge-base ancestry; squash-merged PR counts (BET-1422)", () => {
   assert.equal(isJobMerged({ exists: false, isAncestor: false }), true);
   assert.equal(isJobMerged({ exists: true, isAncestor: true }), true);
   assert.equal(isJobMerged({ exists: true, isAncestor: false }), false);
   assert.equal(isJobMerged({ exists: true }), false);
   assert.equal(isJobMerged(null), false);
   assert.equal(isJobMerged(undefined), false);
+  // The squash-merge signal: branch still present and not an ancestor, but
+  // the forge reports its PR merged.
+  assert.equal(isJobMerged({ exists: true, isAncestor: false, prMerged: true }), true);
+  assert.equal(isJobMerged({ exists: true, isAncestor: false, prMerged: false }), false);
+  assert.equal(isJobMerged({ exists: true, isAncestor: false, prMerged: null }), false);
+  // The local signals keep precedence over the forge signal.
+  assert.equal(isJobMerged({ exists: false, prMerged: false }), true);
+  assert.equal(isJobMerged({ exists: true, isAncestor: true, prMerged: false }), true);
 });
 
 test("roiRecommendation rules: stay / lower / raise / hold", () => {
@@ -576,6 +584,61 @@ test("refreshRoi: samples terminal CTO jobs, probes merges, persists months + pe
   assert.equal(snap.roll.spendUsd, 0.5);
   assert.equal(snap.roll.recommendation.tier, "stay"); // $0.50 with no outcomes — below the $1 lower bar
   assert.equal(snap.collectingUntil, monthWindow(JUL_KEY).endTs); // first report passed
+});
+
+test("refreshRoi: counts a squash-merged PR the local git signals cannot see (BET-1422)", async () => {
+  let payload = defaultBudgetPayload();
+  const store = { load: async () => payload, save: async (p) => (payload = p) };
+  // A squash merge creates a NEW commit, so every branch here reads "present,
+  // not an ancestor" — the two local-git signals can never fire for these.
+  const jobs = [
+    { id: "j1", actor: "cto", status: "done", branch: "cto/j1", cwd: "/proj", finishedAt: MIDNIGHT + 86_400_000 }, // PR #11 squash-merged
+    { id: "j2", actor: "cto", status: "done", branch: "cto/j2", cwd: "/proj", finishedAt: MIDNIGHT + 86_400_000 }, // PR #12 still open
+    { id: "j3", actor: "cto", status: "done", branch: "cto/j3", cwd: "/proj", finishedAt: MIDNIGHT + 86_400_000 }, // never had a PR
+    { id: "j4", actor: "cto", status: "done", branch: "cto/j4", cwd: "/proj", finishedAt: MIDNIGHT + 86_400_000 }, // forge unreachable on refresh 1
+  ];
+  const asked = [];
+  let forgeUp = false; // j4's forge is down on refresh 1, back on refresh 2
+  const budget = createCtoBudget({
+    store,
+    jobsRead: async () => jobs,
+    gitProbe: async () => ({ exists: true, isAncestor: false }),
+    discoverJobPr: async ({ branch }) => {
+      asked.push(branch);
+      if (branch === "cto/j1") return { repoKey: "github.com/o/r", number: 11 };
+      if (branch === "cto/j2") return { repoKey: "github.com/o/r", number: 12 };
+      if (branch === "cto/j3") return null; // the forge answered — definitively no PR
+      if (!forgeUp) throw new Error("forge down"); // j4 — not consultable (transient)
+      return null;
+    },
+    forgeProbe: async ({ number }) => (number === 11 ? true : number === 12 ? false : null),
+    ledgerRead: async () => [],
+    verdictsRead: async () => [],
+    segmentsRead: async () => [],
+    now: () => MIDNIGHT + 2 * 86_400_000,
+  });
+  await budget.refreshRoi();
+  assert.deepEqual(asked, ["cto/j1", "cto/j2", "cto/j3", "cto/j4"]);
+  const rows = () => Object.fromEntries(payload.roi.pending.map((j) => [j.id, j]));
+  assert.equal(payload.roi.months[AUG_KEY].merged, 1); // only the squash-merged j1
+  assert.equal(rows().j1.counted, true);
+  assert.deepEqual(rows().j1.pr, { repoKey: "github.com/o/r", number: 11 });
+  assert.equal(rows().j2.counted, false);
+  assert.deepEqual(rows().j2.pr, { repoKey: "github.com/o/r", number: 12 }); // resolution persisted
+  assert.equal(rows().j3.counted, false);
+  assert.equal(rows().j3.prTried, true); // definitive no-PR — never re-asked
+  assert.equal(rows().j4.counted, false);
+  assert.equal(rows().j4.prTried, undefined); // transient failure — retried
+
+  // Refresh 2: idempotent count; j2/j3 are not re-asked (pr resolved /
+  // prTried); j4 retries and, the forge now answering, is marked definitively.
+  forgeUp = true;
+  await budget.refreshRoi();
+  assert.deepEqual(asked.filter((b) => b === "cto/j4").length, 2);
+  assert.deepEqual(asked.filter((b) => b === "cto/j2").length, 1);
+  assert.deepEqual(asked.filter((b) => b === "cto/j3").length, 1);
+  assert.equal(payload.roi.months[AUG_KEY].merged, 1);
+  assert.equal(rows().j4.prTried, true);
 });
 
 test("refreshRoi: recomputes the previous month once after it closes, then freezes", async () => {
