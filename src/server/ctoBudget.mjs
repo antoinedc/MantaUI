@@ -60,6 +60,7 @@
 import { budgetStore } from "./ctoStores.mjs";
 import { startOfDay } from "./ctoRollups.mjs";
 import { blendedPrice } from "../shared/blendedPrice.mjs";
+import { effectsForVerdict } from "./ctoVerdicts.mjs";
 import {
   forecastNextDayFraction,
   forecastMape,
@@ -415,6 +416,172 @@ export function planReserve({
 }
 
 // ---------------------------------------------------------------------------
+// ROI self-report (§12.4) — BET-1405
+// ---------------------------------------------------------------------------
+//
+// A MONTHLY ledger roll: total CTO spend vs counted outcomes (accepted
+// suggestions, merged CTO branches, incidents where a blocker surfaced before
+// the user hit them) + a tier recommendation. Copy-only — the recommendation
+// never writes the dial; the Health row renders it and the user decides.
+//
+// Data durability drives the shape. The three outcome counters differ:
+//   - spend: budget.json day buckets (durable, indefinite),
+//   - accepted suggestions + incidents: verdicts.json (180d) and the §14.5
+//     ledger (180d) — recomputable for any month inside retention,
+//   - merged branches: delegate jobs are swept after 7 days, so the month's
+//     job list cannot be re-read at month end. Instead every terminal CTO job
+//     is SAMPLED into `budget.roi.pending` (branch + project dir + finish ts)
+//     while the record is fresh; each later refresh probes the project repo
+//     (the existing git read of the project) and counts the merge. A merge
+//     discovered late (the branch was cleaned up days later) still lands on
+//     its finish month.
+//
+// Recommendation rules (deterministic, documented — the roll is labeled
+// self-reported and imperfect counts are acceptable):
+//   - no spend and no outcomes           → stay ("nothing to judge yet")
+//   - spend ≥ $1 and zero outcomes       → lower (money without results)
+//   - outcomes ≥ ROI_MIN_OUTCOMES_RAISE  → raise (earning its keep)
+//   - otherwise                          → stay (hold the current tier)
+
+export const ROI_MIN_OUTCOMES_RAISE = 5;
+export const ROI_MIN_SPEND_USD_LOWER = 1;
+
+export function roiMonthKey(t) {
+  const ts = typeof t === "number" && Number.isFinite(t) ? t : Date.now();
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+/** "YYYY-MM" → { startTs, endTs } in local time; endTs exclusive. Bad keys → null. */
+export function monthWindow(key) {
+  const m = /^(\d{4})-(\d{2})$/.exec(String(key ?? ""));
+  if (!m) return null;
+  const year = Number(m[1]);
+  const month0 = Number(m[2]) - 1;
+  if (month0 < 0 || month0 > 11) return null;
+  const startTs = new Date(year, month0, 1, 0, 0, 0, 0).getTime();
+  const endTs = new Date(year, month0 + 1, 1, 0, 0, 0, 0).getTime();
+  return { startTs, endTs };
+}
+
+/** Sum of the day buckets inside a month window (the month's total CTO spend —
+ *  ambient and overnight both meter into the same buckets). */
+export function monthSpendUsd(payload, window) {
+  const startTs = window?.startTs;
+  const endTs = window?.endTs;
+  if (!Number.isFinite(startTs) || !Number.isFinite(endTs)) return 0;
+  const days = normalizeBudget(payload).days;
+  let total = 0;
+  for (const key of Object.keys(days)) {
+    const ts = Number(key);
+    if (!Number.isFinite(ts) || ts < startTs || ts >= endTs) continue;
+    total += dollar(days[key]?.usd);
+  }
+  return dollar(total);
+}
+
+/** Accepted suggestions in a window — the SAME single mapping table the §9.5
+ *  router and the Health acceptance row read, so the roll can never drift
+ *  from what the rest of the system calls "accepted". */
+export function acceptedSuggestions(verdictRows, window) {
+  const startTs = window?.startTs;
+  const endTs = window?.endTs;
+  if (!Number.isFinite(startTs) || !Number.isFinite(endTs)) return 0;
+  const rows = Array.isArray(verdictRows) ? verdictRows : [];
+  return rows.filter((v) => {
+    const ts = typeof v?.ts === "number" && Number.isFinite(v.ts) ? v.ts : NaN;
+    if (!Number.isFinite(ts) || ts < startTs || ts >= endTs) return false;
+    const fx = effectsForVerdict(v.verdict, v.never === true);
+    return fx.success === true && fx.rejection !== true;
+  }).length;
+}
+
+/**
+ * Incidents surfaced before the user hit them (§12.4) — deterministic over
+ * the ledger + segments: a resolved blocker card counts when its card's
+ * source event predates ANY user prompt on the owning session (the segments
+ * store's 30-day retention is the observation horizon). Cards without a
+ * sessionID (health watchdog escalations) cannot be evaluated — excluded,
+ * a documented limitation of this self-reported counter.
+ */
+export function preSurfacedIncidents({ resolvedRows, createdTsByCardId, promptTsBySession, window } = {}) {
+  const startTs = window?.startTs;
+  const endTs = window?.endTs;
+  if (!Number.isFinite(startTs) || !Number.isFinite(endTs)) return 0;
+  const rows = Array.isArray(resolvedRows) ? resolvedRows : [];
+  let count = 0;
+  for (const r of rows) {
+    const ts = typeof r?.ts === "number" && Number.isFinite(r.ts) ? r.ts : NaN;
+    if (!Number.isFinite(ts) || ts < startTs || ts >= endTs) continue;
+    if (r?.kind !== "card.resolved" || r?.variant !== "blocker") continue;
+    const sessionID = typeof r?.sessionID === "string" && r.sessionID ? r.sessionID : null;
+    if (!sessionID) continue;
+    const createdTs = createdTsByCardId?.[r.cardId];
+    const sourceTs = typeof createdTs === "number" && Number.isFinite(createdTs) ? createdTs : ts;
+    const prompts = promptTsBySession?.get?.(sessionID) ?? [];
+    const anyPrior = prompts.some((p) => typeof p === "number" && Number.isFinite(p) && p < sourceTs);
+    if (!anyPrior) count += 1;
+  }
+  return count;
+}
+
+/**
+ * A delegate record's branch merged — pure predicate over the injected git
+ * probe of the project repo:
+ *   - branch gone (`exists === false`) → merged: the cleanup path deletes
+ *     with `git branch -d`, which only succeeds on merged branches — the
+ *     deletion is the merge's fingerprint;
+ *   - branch present and `merge-base --is-ancestor` true → merged locally;
+ *   - otherwise (including a probe failure) → not merged.
+ */
+export function isJobMerged(probe) {
+  if (!probe || typeof probe !== "object") return false;
+  if (probe.exists === false) return true;
+  return probe.isAncestor === true;
+}
+
+/** The monthly recommendation. Copy-only; the dial is never written. */
+export function roiRecommendation({ spendUsd, accepted, merged, incidents } = {}) {
+  const spend = dollar(spendUsd);
+  const outcomes =
+    Math.max(0, Math.trunc(Number(accepted) || 0)) +
+    Math.max(0, Math.trunc(Number(merged) || 0)) +
+    Math.max(0, Math.trunc(Number(incidents) || 0));
+  if (outcomes <= 0 && spend <= 0) return { tier: "stay", reason: "no spend and no counted outcomes yet" };
+  if (outcomes <= 0) return { tier: "lower", reason: `$${spend.toFixed(2)} spent with no counted outcomes` };
+  if (outcomes >= ROI_MIN_OUTCOMES_RAISE) return { tier: "raise", reason: `${outcomes} counted outcomes this month` };
+  return {
+    tier: "stay",
+    reason: `${outcomes} outcome${outcomes === 1 ? "" : "s"} for $${spend.toFixed(2)} — holding`,
+  };
+}
+
+function normalizeRoi(payload) {
+  const p = normalizeQuota(payload);
+  const roi = p.roi && typeof p.roi === "object" ? p.roi : {};
+  const months = roi.months && typeof roi.months === "object" ? roi.months : {};
+  const pending = Array.isArray(roi.pending) ? roi.pending.filter((j) => j && typeof j === "object") : [];
+  return { ...p, roi: { months, pending } };
+}
+
+function monthAccumulator(months, key) {
+  const prev = months[key] && typeof months[key] === "object" ? months[key] : {};
+  return {
+    month: key,
+    spendUsd: dollar(prev.spendUsd),
+    accepted: Math.max(0, Math.trunc(Number(prev.accepted) || 0)),
+    merged: Math.max(0, Math.trunc(Number(prev.merged) || 0)),
+    incidents: Math.max(0, Math.trunc(Number(prev.incidents) || 0)),
+    computedAt: typeof prev.computedAt === "number" && Number.isFinite(prev.computedAt) ? prev.computedAt : 0,
+    frozen: prev.frozen === true,
+  };
+}
+
+// Pending rows older than this are dropped (bounded growth; a merge that
+// surfaced 60 days late is beyond the report's honest horizon).
+export const ROI_PENDING_RETENTION_MS = 60 * 24 * HOUR_MS;
+
+// ---------------------------------------------------------------------------
 // The I/O accessor the engine consumes (injected store + seams).
 // ---------------------------------------------------------------------------
 
@@ -431,6 +598,13 @@ export function createCtoBudget({
   mapeFn = forecastMape,
   cfg = () => ({}), // () => config object (ctoNightCapUsd read here)
   ledger = null, // optional { append(row) } — the §14.5 activity ledger
+  // BET-1405 ROI seams (§12.4 — all injectable; index.mjs wires the real
+  // delegate jobs, the project's git read, verdicts, segments and ledger):
+  jobsRead = async () => [], // () => [{id, actor, status, branch, cwd, finishedAt}]
+  gitProbe = async () => ({ exists: false, isAncestor: false }), // ({cwd, branch}) => {exists, isAncestor}
+  verdictsRead = async () => [], // () => [{verdict, never, ts}]
+  segmentsRead = async () => [], // () => [{sessionID, events: [{t, kind}]}]
+  ledgerRead = async () => [], // () => ledger rows [{kind, ts, ...}]
 } = {}) {
   async function load() {
     try {
@@ -590,6 +764,200 @@ export function createCtoBudget({
     return { ok: true };
   }
 
+  // --- ROI self-report (§12.4, BET-1405) ---------------------------------
+
+  // Per-session user prompt timestamps from the segments store (30d horizon —
+  // the observation window the incidents heuristic is honest about).
+  async function promptTsBySession() {
+    let segments = [];
+    try {
+      segments = (await segmentsRead()) ?? [];
+    } catch {
+      segments = [];
+    }
+    const bySession = new Map();
+    for (const s of segments) {
+      if (!s || typeof s.sessionID !== "string" || !s.sessionID) continue;
+      const events = Array.isArray(s.events) ? s.events : [];
+      const list = bySession.get(s.sessionID) ?? [];
+      for (const ev of events) {
+        if (ev?.kind !== "prompt") continue;
+        const t = typeof ev.t === "number" && Number.isFinite(ev.t) ? ev.t : NaN;
+        if (Number.isFinite(t)) list.push(t);
+      }
+      bySession.set(s.sessionID, list);
+    }
+    return bySession;
+  }
+
+  // Recompute one month's store-derived counters (spend/accepted/incidents)
+  // and attach the accumulated merged count + the copy-only recommendation.
+  async function computeMonth(acc, t) {
+    const window = monthWindow(acc.month);
+    if (!window) return acc;
+    let payload = null;
+    try {
+      payload = await load();
+    } catch {
+      payload = normalizeQuota(defaultBudgetPayload());
+    }
+    let verdicts = [];
+    try {
+      verdicts = (await verdictsRead()) ?? [];
+    } catch {
+      verdicts = [];
+    }
+    let ledgerRows = [];
+    try {
+      ledgerRows = (await ledgerRead()) ?? [];
+    } catch {
+      ledgerRows = [];
+    }
+    const createdTsByCardId = {};
+    for (const r of ledgerRows) {
+      if (r?.kind === "card.created" && typeof r?.cardId === "string" && typeof r?.ts === "number" && Number.isFinite(r.ts)) {
+        const prev = createdTsByCardId[r.cardId];
+        createdTsByCardId[r.cardId] = typeof prev === "number" ? Math.min(prev, r.ts) : r.ts;
+      }
+    }
+    const prompts = await promptTsBySession();
+    const resolved = ledgerRows.filter((r) => r?.kind === "card.resolved");
+    const spend = monthSpendUsd(payload, window);
+    const accepted = acceptedSuggestions(verdicts, window);
+    const incidents = preSurfacedIncidents({
+      resolvedRows: resolved,
+      createdTsByCardId,
+      promptTsBySession: prompts,
+      window,
+    });
+    const merged = acc.merged;
+    return {
+      ...acc,
+      spendUsd: spend,
+      accepted,
+      incidents,
+      merged,
+      recommendation: roiRecommendation({ spendUsd: spend, accepted, merged, incidents }),
+      computedAt: t,
+    };
+  }
+
+  /**
+   * Advance the monthly roll (§12.4). Idempotent per refresh; safe to call on
+   * every health read. Samples fresh terminal CTO jobs into `roi.pending`
+   * (the jobs store sweeps after 7 days — the branch names are the durable
+   * record), probes pending branches against the project repo, and recomputes
+   * the store-derived counters: the current month on every refresh, the
+   * previous month once after it closes (frozen thereafter). Persisted
+   * best-effort — a store failure degrades the report, never the caller.
+   */
+  async function refreshRoi() {
+    const t = typeof now === "function" ? now() : Date.now();
+    let payload;
+    try {
+      payload = normalizeRoi(await store.load());
+    } catch {
+      payload = normalizeRoi(defaultBudgetPayload());
+    }
+    const months = { ...payload.roi.months };
+    const pending = payload.roi.pending.map((j) => ({ ...j }));
+
+    // 1. Sample terminal CTO-actor jobs not yet snapshotted.
+    let jobs = [];
+    try {
+      jobs = (await jobsRead()) ?? [];
+    } catch {
+      jobs = [];
+    }
+    const known = new Set(pending.filter((j) => j.counted !== true).map((j) => j.id));
+    for (const j of jobs) {
+      if (!j || j.actor !== "cto" || j.status !== "done") continue;
+      if (typeof j.branch !== "string" || !j.branch) continue;
+      if (typeof j.id !== "string" || !j.id || known.has(j.id)) continue;
+      pending.push({
+        id: j.id,
+        branch: j.branch,
+        cwd: typeof j.cwd === "string" ? j.cwd : "",
+        finishedAt: typeof j.finishedAt === "number" && Number.isFinite(j.finishedAt) ? j.finishedAt : null,
+        counted: false,
+      });
+    }
+
+    // 2. Probe pending branches (merged = branch deleted-on-merge, or present
+    //    and an ancestor of the project's HEAD). Probe failures leave the row
+    //    uncounted for a later refresh.
+    for (const row of pending) {
+      if (row.counted === true) continue;
+      let probe = { exists: false, isAncestor: false };
+      try {
+        probe = (await gitProbe({ cwd: row.cwd, branch: row.branch })) ?? probe;
+      } catch {
+        probe = { exists: false, isAncestor: false };
+      }
+      if (isJobMerged(probe)) {
+        const key = roiMonthKey(typeof row.finishedAt === "number" ? row.finishedAt : t);
+        const acc = monthAccumulator(months, key);
+        acc.merged += 1;
+        months[key] = acc;
+        row.counted = true;
+      }
+    }
+
+    // 3. Recompute the store-derived counters: current month every refresh;
+    //    the previous month once after it closes, then frozen.
+    const currentKey = roiMonthKey(t);
+    const currentWindow = monthWindow(currentKey);
+    const prevKey = currentWindow ? roiMonthKey(currentWindow.startTs - 1) : null;
+    const toCompute = [currentKey];
+    if (prevKey && months[prevKey]?.frozen !== true) toCompute.push(prevKey);
+    for (const key of toCompute) {
+      const acc = monthAccumulator(months, key);
+      const isCurrent = key === currentKey;
+      months[key] = await computeMonth({ ...acc, frozen: !isCurrent }, t);
+    }
+
+    // 4. Hygiene: drop stale pending rows.
+    const cutoff = t - ROI_PENDING_RETENTION_MS;
+    const kept = pending.filter((j) => j.counted === true ? (typeof j.finishedAt === "number" ? j.finishedAt >= cutoff : true) : true);
+    const trimmed = kept.slice(-200);
+
+    try {
+      await save({ ...payload, roi: { months, pending: trimmed } });
+    } catch {
+      /* ROI persistence is best-effort */
+    }
+    return { months, pending: trimmed };
+  }
+
+  /** The render model for the Health ROI row (§12.4): the most recent CLOSED
+   *  month's roll, or `collecting — first report <date>` until the first
+   *  monthly roll lands (the end of the month of first recorded spend). */
+  async function roiSnapshot() {
+    const t = typeof now === "function" ? now() : Date.now();
+    let payload;
+    try {
+      payload = normalizeRoi(await store.load());
+    } catch {
+      payload = normalizeRoi(defaultBudgetPayload());
+    }
+    const months = payload.roi.months;
+    const dayKeys = Object.keys(payload.days)
+      .map((k) => Number(k))
+      .filter((n) => Number.isFinite(n))
+      .sort((a, b) => a - b);
+    const firstActivityTs = dayKeys.length ? dayKeys[0] : null;
+    const currentKey = roiMonthKey(t);
+    const currentWindow = monthWindow(currentKey);
+    const prevKey = currentWindow ? roiMonthKey(currentWindow.startTs - 1) : null;
+    const roll = prevKey ? (months[prevKey] ?? null) : null;
+    return {
+      month: roll ? prevKey : null,
+      roll,
+      collectingUntil:
+        firstActivityTs != null ? (monthWindow(roiMonthKey(firstActivityTs))?.endTs ?? null) : null,
+    };
+  }
+
   return {
     record,
     payload: load,
@@ -600,5 +968,7 @@ export function createCtoBudget({
     didDayRoll: async () => didDayRoll(await load(), now()),
     computeSpendable,
     recordCapHit,
+    refreshRoi,
+    roiSnapshot,
   };
 }

@@ -1573,8 +1573,25 @@ export const httpApi: Api = {
     if (res.status === 401) throw new AuthRequiredError();
     if (!res.ok) return { stats: [] };
     let json: { stats?: CtoHealthStat[] } = {};
-    try { json = (await res.json()) as typeof json; } catch { /* non-JSON */ }
+    try { json = await res.json() as typeof json; } catch { /* non-JSON */ }
     return { stats: Array.isArray(json?.stats) ? json.stats : [] };
+  },
+
+  // RPC `quota:read` (BET-1405) — the persisted budget payload (day buckets +
+  // §11.3 quota cache) for the Tonight's-budget card (§10.5 card 3).
+  ctoQuotaRead: async (): Promise<{
+    days?: Record<string, { usd?: number; calls?: number } | undefined>;
+    quota?: Record<
+      string,
+      { provider?: string; mode?: string | null; reserve?: number | null; spendable?: number | null; mape14?: number | null } | undefined
+    >;
+  } | null> => {
+    try {
+      return await rpc("quota:read");
+    } catch (e) {
+      if (e instanceof AuthRequiredError) throw e;
+      return null;
+    }
   },
 
   // GET /api/cto/ledger (A12) — reverse-chron Activity-ledger page, cursor-

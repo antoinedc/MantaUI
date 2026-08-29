@@ -40,6 +40,12 @@ import {
   nowCostLabel,
   decisionCards,
   executeSuggestionOption,
+  tonightBudgetMode,
+  nightGauge,
+  providerWindowNotes,
+  forecastAccuracyRows,
+  bindingReserveFrac,
+  budgetTodayUsd,
   type BlockerCard,
   type CtoState,
   type CtoHealthStat,
@@ -102,7 +108,16 @@ type CtoSettingsConfig = {
   ctoTier?: "low" | "medium" | "high";
   ctoAmbientCap?: number;
   ctoDigestPush?: boolean;
+  // BET-1405: the Overnight switch + night pool live in the Behavior card
+  // (shipped with the §11 overnight wiring). The Tonight's-budget card reads
+  // both — the full render is gated on High + Overnight on (§10.5 card 3).
+  ctoOvernight?: boolean;
+  ctoNightCapUsd?: number;
 };
+
+// §11.2 defaults — the same constants ctoBudget.mjs enforces server-side.
+const DEFAULT_AMBIENT_CAP_USD = 2.5;
+const DEFAULT_NIGHT_CAP_USD = 5;
 
 export function CtoPanel({
   state,
@@ -549,16 +564,36 @@ function SettingsView({
   const [capText, setCapText] = useState("");
   const [health, setHealth] = useState<CtoHealthStat[]>([]);
   const [busyPause, setBusyPause] = useState(false);
+  // BET-1405 (§10.5 card 3): budget payload (day buckets + quota cache) and
+  // usage snapshots (provider window notes), read once on settings-open.
+  const [budget, setBudget] = useState<{ days?: Record<string, { usd?: number } | undefined>; quota?: Record<string, { provider?: string; mode?: string | null; reserve?: number | null; mape14?: number | null } | undefined> } | null>(null);
+  const [usageSnaps, setUsageSnaps] = useState<{ provider?: string; windows?: { kind?: string; label?: string; resetsAt?: number | null }[] | null }[]>([]);
 
   useEffect(() => {
     let alive = true;
     void window.api.configGet().then((c) => {
       if (!alive) return;
-      setConfig({ ctoEnabled: !!c?.ctoEnabled, ctoTier: c?.ctoTier, ctoAmbientCap: c?.ctoAmbientCap, ctoDigestPush: !!c?.ctoDigestPush });
-      setCapText(String(c?.ctoAmbientCap ?? 2.5));
+      setConfig({
+        ctoEnabled: !!c?.ctoEnabled,
+        ctoTier: c?.ctoTier,
+        ctoAmbientCap: c?.ctoAmbientCap,
+        ctoDigestPush: !!c?.ctoDigestPush,
+        ctoOvernight: !!c?.ctoOvernight,
+        ctoNightCapUsd: c?.ctoNightCapUsd,
+      });
+      setCapText(String(c?.ctoAmbientCap ?? DEFAULT_AMBIENT_CAP_USD));
     });
     void window.api.ctoHealthGet().then((h) => {
       if (alive) setHealth(h.stats);
+    });
+    // BET-1405 (§10.5 card 3): the persisted budget payload (day buckets +
+    // quota cache) and the usage snapshots (provider window notes) — one read
+    // on settings-open, never polled. Rejections degrade to absent data.
+    void window.api.ctoQuotaRead().then((b) => {
+      if (alive) setBudget(b ?? null);
+    });
+    void window.api.usageList().then((snaps) => {
+      if (alive) setUsageSnaps(Array.isArray(snaps) ? snaps : []);
     });
     return () => {
       alive = false;
@@ -766,7 +801,7 @@ function SettingsView({
             </div>
           </section>
 
-          {/* ---------- Health card (§10.5 card 2, P1 rows) ---------- */}
+          {/* ---------- Health card (§10.5 card 2) ---------- */}
           <section className="rounded-lg border border-border-subtle p-4">
             <h3 className="text-sm font-semibold text-text">Health</h3>
             <ul className="mt-3 divide-y divide-border-subtle">
@@ -780,7 +815,15 @@ function SettingsView({
                       ? "Digest opens · 7d"
                       : id === "pipelineLag"
                       ? "Pipeline lag (close → summary)"
-                      : "Suggestion acceptance · 30d",
+                      : id === "suggestionAcceptance"
+                      ? "Suggestion acceptance · 30d"
+                      : id === "forecastAccuracy"
+                      ? "Forecast accuracy · MAPE 14d"
+                      : id === "capHitsCaused"
+                      ? "Cap-hits caused · 30d"
+                      : id === "reserveFractile"
+                      ? "Reserve fractile"
+                      : "ROI · self-report",
                   value: null,
                   n: 0,
                   min: 1,
@@ -797,6 +840,16 @@ function SettingsView({
               })}
             </ul>
           </section>
+
+          {/* ---------- Tonight's budget (§10.5 card 3, BET-1405) ---------- */}
+          <TonightBudgetCard
+            tier={config?.ctoTier ?? "low"}
+            overnightOn={!!config?.ctoOvernight}
+            ambientCapUsd={config?.ctoAmbientCap ?? DEFAULT_AMBIENT_CAP_USD}
+            nightCapUsd={config?.ctoNightCapUsd ?? DEFAULT_NIGHT_CAP_USD}
+            budget={budget}
+            usageSnaps={usageSnaps}
+          />
 
           {/* ---------- Internals: Profile & rhythm + Activity ledger ---------- */}
           <section className="rounded-lg border border-border-subtle p-4">
@@ -834,7 +887,161 @@ function SettingsView({
   );
 }
 
-const HEALTH_ROW_ORDER = ["ambientSpendToday", "digestOpens", "pipelineLag", "suggestionAcceptance"] as const;
+// §10.5 card 2 render order. BET-1400's forecast/cap-hit/reserve rows and
+// BET-1405's ROI row (last — the self-report closes the list).
+const HEALTH_ROW_ORDER = [
+  "ambientSpendToday",
+  "digestOpens",
+  "pipelineLag",
+  "suggestionAcceptance",
+  "forecastAccuracy",
+  "capHitsCaused",
+  "reserveFractile",
+  "roi",
+] as const;
+
+// ---------------------------------------------------------------------------
+// Tonight's-budget card (§10.5 card 3, BET-1405)
+// ---------------------------------------------------------------------------
+type TonightBudgetProps = {
+  tier: "low" | "medium" | "high";
+  overnightOn: boolean;
+  ambientCapUsd: number;
+  nightCapUsd: number;
+  budget: { days?: Record<string, { usd?: number } | undefined>; quota?: Record<string, { provider?: string; mode?: string | null; reserve?: number | null; mape14?: number | null } | undefined> } | null;
+  usageSnaps: { provider?: string; windows?: { kind?: string; label?: string; resetsAt?: number | null }[] | null }[];
+};
+
+function formatResetNote(resetsAt: number | null): string {
+  if (resetsAt == null) return "";
+  const diff = resetsAt - Date.now();
+  if (diff <= 0) return "resetting…";
+  const mins = Math.round(diff / 60_000);
+  if (mins < 60) return `resets in ${mins}m`;
+  const hours = Math.round(mins / 60);
+  return `resets in ${hours}h`;
+}
+
+function TonightBudgetCard({ tier, overnightOn, ambientCapUsd, nightCapUsd, budget, usageSnaps }: TonightBudgetProps) {
+  const mode = tonightBudgetMode({ tier, overnightOn });
+  const usedTodayUsd = budgetTodayUsd(budget ?? null);
+  const notes = providerWindowNotes(usageSnaps);
+  const accuracy = forecastAccuracyRows(budget?.quota ?? null);
+
+  if (mode === "ambient") {
+    return (
+      <section className="rounded-lg border border-border-subtle p-4">
+        <h3 className="text-sm font-semibold text-text">Tonight&apos;s budget</h3>
+        <div className="mt-3 flex items-baseline justify-between gap-3">
+          <span className="text-sm text-text-muted">Ambient spend today</span>
+          <span className="font-mono text-sm text-text">
+            ${usedTodayUsd.toFixed(2)} of ${Number(ambientCapUsd).toFixed(2)} cap
+          </span>
+        </div>
+        <p className="mt-2 text-xs text-text-faint">
+          Overnight work is {overnightOn ? "below the High tier" : "off"} — there is no night pool to gauge.
+        </p>
+        <p className="mt-2 text-xs text-text-faint">Plan editing lives in the tonight drill-down.</p>
+      </section>
+    );
+  }
+
+  // Full render (High + Overnight on): the night-pool gauge with used /
+  // planned segments + the reserve line, legend, window notes, accuracy.
+  const plannedTonightUsd: number | null = null; // §10.4 plan portfolio — wired when the tonight plan lands
+  const reserveFrac = bindingReserveFrac(budget?.quota ?? null);
+  const gauge = nightGauge({ nightCapUsd, usedTodayUsd, plannedTonightUsd, reserveFrac });
+  const usedPct = gauge.poolUsd > 0 ? (gauge.usedUsd / gauge.poolUsd) * 100 : 0;
+  const plannedPct = gauge.poolUsd > 0 ? (gauge.plannedUsd / gauge.poolUsd) * 100 : 0;
+  const reservePct = gauge.reserveLineUsd != null && gauge.poolUsd > 0 ? (gauge.reserveLineUsd / gauge.poolUsd) * 100 : null;
+
+  return (
+    <section className="rounded-lg border border-border-subtle p-4">
+      <h3 className="text-sm font-semibold text-text">Tonight&apos;s budget</h3>
+
+      <div className="mt-3">
+        <div className="relative h-4 w-full overflow-hidden rounded-full bg-fill-active">
+          <div className="absolute inset-y-0 left-0 bg-accent/25" style={{ width: `${Math.min(100, usedPct)}%` }} />
+          <div
+            className="absolute inset-y-0 bg-accent/60"
+            style={{ left: `${Math.min(100, usedPct)}%`, width: `${Math.min(100 - Math.min(100, usedPct), plannedPct)}%` }}
+          />
+          {reservePct != null && (
+            <div
+              className="absolute inset-y-0 w-0.5 bg-warn"
+              style={{ left: `${Math.min(100, reservePct)}%` }}
+              aria-hidden="true"
+            />
+          )}
+        </div>
+        <div className="mt-2 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 text-xs text-text-muted">
+          <span>
+            Used today <span className="font-mono text-text">${gauge.usedUsd.toFixed(2)}</span>
+          </span>
+          <span>
+            Planned tonight{" "}
+            <span className="font-mono text-text">
+              {plannedTonightUsd != null ? `$${gauge.plannedUsd.toFixed(2)}` : "no plan queued"}
+            </span>
+          </span>
+          <span>
+            Night pool <span className="font-mono text-text">${gauge.poolUsd.toFixed(2)}</span>
+            {gauge.overflow ? " · over pool" : ""}
+          </span>
+        </div>
+      </div>
+
+      {/* Legend (§10.5 card 3) */}
+      <ul className="mt-3 space-y-1 text-xs text-text-faint">
+        <li>
+          <span className="mr-1 inline-block h-2 w-4 rounded-sm bg-accent/25 align-middle" /> used today — ambient +
+          overnight spend metered into the same daily buckets
+        </li>
+        <li>
+          <span className="mr-1 inline-block h-2 w-4 rounded-sm bg-accent/60 align-middle" /> planned tonight — the
+          queued plan&apos;s spend estimate
+        </li>
+        <li>
+          <span className="mr-1 inline-block h-2 w-0.5 bg-warn align-middle" /> reserve line — the pool share held
+          back at the active fractile{reserveFrac != null ? ` (P${Math.round(reserveFrac * 100)})` : " (no windowed reserve)"}
+        </li>
+      </ul>
+
+      {/* Provider window notes (§11.2 adapters, via the usage poller) */}
+      {notes.length > 0 && (
+        <div className="mt-3">
+          <div className="text-xs font-medium text-text-muted">Provider windows</div>
+          <ul className="mt-1 space-y-0.5 text-xs text-text-faint">
+            {notes.map((n, i) => (
+              <li key={`${n.provider}-${i}`}>
+                <span className="text-text-muted">{n.provider}</span> · {n.label || "window"}
+                {n.resetsAt != null ? ` · ${formatResetNote(n.resetsAt)}` : ""}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Forecast accuracy (§14.5 cache) */}
+      <div className="mt-3">
+        <div className="text-xs font-medium text-text-muted">Forecast accuracy · MAPE 14d</div>
+        {accuracy.length === 0 ? (
+          <div className="mt-1 text-xs text-text-faint">collecting — no provider forecast history yet</div>
+        ) : (
+          <ul className="mt-1 space-y-0.5 text-xs text-text-faint">
+            {accuracy.map((a) => (
+              <li key={a.provider}>
+                <span className="text-text-muted">{a.provider}</span> · {Math.round(a.mape14 * 100)}%
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <p className="mt-3 text-xs text-text-faint">Read-only — plan editing lives in the tonight drill-down.</p>
+    </section>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Activity ledger drill-down (A12)
