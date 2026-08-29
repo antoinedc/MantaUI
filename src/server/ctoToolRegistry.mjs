@@ -78,6 +78,10 @@ function humanize(identity) {
   return catalogDisplayName(identity);
 }
 
+// §7.2 schema (verbatim axes) + the lifecycle bookkeeping the engine needs
+// on top: engagement/vitality are the spec'd axes; uses/weeksActive/weeks are
+// derived counters (the bar's inputs); askRound/askAtUses/reArmAt/
+// unneverAtUses drive the §7.4 ask gate.
 function baseTool(identity, ts) {
   return {
     tool: identity,
@@ -86,13 +90,14 @@ function baseTool(identity, ts) {
     raw: false,
     unclassifiable: false,
     firstSeenTs: ts,
-    lastSeenTs: ts,
-    ewmaAt: ts,
+    // §7.2 engagement axis.
+    engagement: { ewma_per_week: 0, last_used: ts, per_project: {} },
+    // §7.2 vitality axis — §7.5 probes are the only writer; empty until then.
+    vitality: { last_event: null, inflow_rate: null, ewma: null, last_probed: null },
+    ewmaAt: ts, // EWMA decay watermark (internal, single-application)
     uses: 0,
     weeksActive: 0,
     weeks: [],
-    perProject: {},
-    ewmaPerWeek: 0,
     evidence: [],
     status: "observed",
     role: null, // §7.3 quadrants need vitality probes (§7.5) — derived later
@@ -100,6 +105,7 @@ function baseTool(identity, ts) {
     askRound: 0,
     askAtUses: 0,
     reArmAt: null,
+    unneverAtUses: null,
     llmAt: null,
     relevance: {}, // §7.6 blackboard match — refreshed weekly (later issue)
     as_source: { reports: 0, accepted: 0 }, // §7.2 counters — fed by §9.5 later
@@ -110,10 +116,10 @@ function baseTool(identity, ts) {
 // Engagement EWMA decay applied lazily (single application via the `ewmaAt`
 // watermark): `ewma *= exp(-Δdays/τ)`.
 export function decayEwma(tool, nowMs) {
-  const from = tool?.ewmaAt ?? tool?.lastSeenTs ?? nowMs;
+  const from = tool?.ewmaAt ?? tool?.engagement?.last_used ?? nowMs;
   const deltaDays = (nowMs - from) / DAY_MS;
-  if (!(deltaDays > 0)) return tool?.ewmaPerWeek ?? 0;
-  return (tool?.ewmaPerWeek ?? 0) * Math.exp(-deltaDays / EWMA_TAU_DAYS);
+  if (!(deltaDays > 0)) return tool?.engagement?.ewma_per_week ?? 0;
+  return (tool?.engagement?.ewma_per_week ?? 0) * Math.exp(-deltaDays / EWMA_TAU_DAYS);
 }
 
 export function hasCredential(tool) {
@@ -203,13 +209,14 @@ export function fuseRow(tools, row, { nowMs } = {}) {
     tool.source = tool.raw ? "raw" : "catalog";
     arr.push(tool);
   }
-  const prevEwmaAt = tool.ewmaAt ?? tool.lastSeenTs ?? ts;
+  const prevEwmaAt = tool.ewmaAt ?? tool.engagement?.last_used ?? ts;
   const deltaDays = Math.max(0, ts - prevEwmaAt) / DAY_MS;
-  tool.ewmaPerWeek = (tool.ewmaPerWeek ?? 0) * Math.exp(-deltaDays / EWMA_TAU_DAYS) + 1;
+  tool.engagement = tool.engagement ?? { ewma_per_week: 0, last_used: ts, per_project: {} };
+  tool.engagement.ewma_per_week = (tool.engagement.ewma_per_week ?? 0) * Math.exp(-deltaDays / EWMA_TAU_DAYS) + 1;
+  tool.engagement.last_used = Math.max(tool.engagement.last_used ?? ts, ts);
   tool.ewmaAt = Math.max(prevEwmaAt, ts);
   tool.uses += 1;
-  tool.lastSeenTs = Math.max(tool.lastSeenTs ?? ts, ts);
-  if (project) tool.perProject[project] = (tool.perProject[project] ?? 0) + 1;
+  if (project) tool.engagement.per_project[project] = (tool.engagement.per_project[project] ?? 0) + 1;
   const wk = weekKey(ts);
   if (wk && !tool.weeks.includes(wk)) {
     tool.weeks.push(wk);
@@ -280,6 +287,25 @@ export function createToolRegistry(deps = {}) {
 
   async function savePayload(payload) {
     await registryStore.save(payload);
+  }
+
+  // Serializes the registry's mutating writers (dailyScan / resolveConnect /
+  // unNever) — all load→mutate→save the same whole-payload store, and the
+  // scan holds its snapshot across seconds-long awaits (db batch, LLM
+  // classification). Without the guard, a connect answer landing mid-scan is
+  // silently overwritten by the scan's stale save — the user's explicit
+  // "never" reverting (lost update; the same snapshot-spreading-writer class
+  // BET-1425 fixed for engine-state). Writers queue behind the in-flight one
+  // (the established in-flight-guard pattern); each mutation is short except
+  // the scan, whose internal failures never leave the queue stuck.
+  let writeChain = Promise.resolve();
+  function serialized(fn) {
+    const run = writeChain.then(fn, fn);
+    writeChain = run.then(
+      () => {},
+      () => {},
+    );
+    return run;
   }
 
   async function ledgerLog(entry) {
@@ -362,11 +388,11 @@ export function createToolRegistry(deps = {}) {
         payload.tools.push(canon);
       }
       canon.uses += target.uses;
-      canon.lastSeenTs = Math.max(canon.lastSeenTs ?? 0, target.lastSeenTs ?? 0);
+      canon.engagement.last_used = Math.max(canon.engagement?.last_used ?? 0, target.engagement?.last_used ?? 0);
       canon.firstSeenTs = Math.min(canon.firstSeenTs ?? Infinity, target.firstSeenTs ?? Infinity);
-      canon.ewmaPerWeek = (canon.ewmaPerWeek ?? 0) + (target.ewmaPerWeek ?? 0);
-      for (const [p, n] of Object.entries(target.perProject ?? {})) {
-        canon.perProject[p] = (canon.perProject[p] ?? 0) + n;
+      canon.engagement.ewma_per_week = (canon.engagement?.ewma_per_week ?? 0) + (target.engagement?.ewma_per_week ?? 0);
+      for (const [p, n] of Object.entries(target.engagement?.per_project ?? {})) {
+        canon.engagement.per_project[p] = (canon.engagement.per_project[p] ?? 0) + n;
       }
       for (const wk of target.weeks ?? []) {
         if (!canon.weeks.includes(wk)) canon.weeks.push(wk);
@@ -398,21 +424,26 @@ export function createToolRegistry(deps = {}) {
 
     // Decay every tool's engagement EWMA to now (single lazy application).
     for (const t of payload.tools) {
-      const deltaDays = (nowMs - (t?.ewmaAt ?? t?.lastSeenTs ?? nowMs)) / DAY_MS;
+      const deltaDays = (nowMs - (t?.ewmaAt ?? t?.engagement?.last_used ?? nowMs)) / DAY_MS;
       if (deltaDays > 0) {
-        t.ewmaPerWeek = (t?.ewmaPerWeek ?? 0) * Math.exp(-deltaDays / EWMA_TAU_DAYS);
+        t.engagement.ewma_per_week = (t?.engagement?.ewma_per_week ?? 0) * Math.exp(-deltaDays / EWMA_TAU_DAYS);
         t.ewmaAt = nowMs;
         changed = true;
       }
     }
 
-    // Promote observed → candidate when either axis crosses its bar.
+    // Promote observed → candidate when either axis crosses its bar. After an
+    // un-never (§7.4: "returns the tool to observed; a new ask still requires
+    // a fresh bar crossing") the promotion needs NEW engagement beyond the
+    // un-never snapshot — barCrossed is monotone in uses, so without the
+    // snapshot a just-un-never'd tool would instantly re-promote and re-ask.
     for (const t of payload.tools) {
-      if (t?.status === "observed" && barCrossed(t)) {
-        t.status = "candidate";
-        changed = true;
-        await ledgerLog({ kind: "cto.tool.candidate", tool: t.tool, uses: t.uses, weeksActive: t.weeksActive });
-      }
+      if (t?.status !== "observed" || !barCrossed(t)) continue;
+      if (t.unneverAtUses != null && (t?.uses ?? 0) <= t.unneverAtUses + REARM_FRESH_USES) continue;
+      t.unneverAtUses = null;
+      t.status = "candidate";
+      changed = true;
+      await ledgerLog({ kind: "cto.tool.candidate", tool: t.tool, uses: t.uses, weeksActive: t.weeksActive });
     }
 
     // Connect-ask gate (§7.4): candidate + no consent yet + askRound < 3 +
@@ -435,7 +466,11 @@ export function createToolRegistry(deps = {}) {
           if (consent.metadata === "yes" || consent.metadata === "never") return false;
           if ((t?.askRound ?? 0) >= MAX_ASK_ROUNDS) return false;
           if (consent.metadata === "no") {
-            const fresh = (t?.uses ?? 0) > (t?.askAtUses ?? 0) + REARM_FRESH_USES;
+            // §7.4 re-arm semantics: 30 days, or a fresh axis-bar crossing —
+            // BUT the fresh-crossing path exists only on the engagement axis
+            // (a credential-exists bar cannot re-cross, so on the vitality
+            // path the 30-day timer is the only re-arm).
+            const fresh = engagementBarMet(t) && (t?.uses ?? 0) > (t?.askAtUses ?? 0) + REARM_FRESH_USES;
             const timer = t?.reArmAt != null && nowMs >= t.reArmAt;
             if (!timer && !fresh) return false;
           }
@@ -571,6 +606,30 @@ export function createToolRegistry(deps = {}) {
     return { ok: true, tool: id, answer };
   }
 
+  // §7.4 "Un-never" (the tool drill-down, B11, calls this): returns the tool
+  // to `observed`, clears the never-suppression on every ring, and requires a
+  // FRESH bar crossing before the next ask — enforced by the `unneverAtUses`
+  // snapshot the promotion gate checks (barCrossed is monotone in uses, so
+  // without the snapshot the tool would instantly re-promote and re-ask,
+  // exactly the immediate re-prompt the spec's fresh-crossing requirement
+  // exists to prevent). The server rule ships here; the drill-down UI/route
+  // is B11's.
+  async function unNever(toolId) {
+    const id = typeof toolId === "string" ? toolId.trim().toLowerCase() : "";
+    if (!id) return { ok: false, error: "missing tool" };
+    const payload = await loadPayload();
+    const t = payload.tools.find((x) => x?.tool === id);
+    if (!t) return { ok: false, error: `unknown tool "${id}"` };
+    if (t.consent?.metadata !== "never") return { ok: false, error: `tool "${id}" is not never'd` };
+    t.consent = emptyConsent();
+    t.status = "observed";
+    t.unneverAtUses = t.uses ?? 0;
+    t.reArmAt = null;
+    await savePayload(payload);
+    await ledgerLog({ kind: "cto.tool.unnever", tool: id, uses: t.uses });
+    return { ok: true, tool: id };
+  }
+
   // Read a consent ring for the future probe / tool-write gates (§7.4:
   // "metadata consent ≠ deep-read consent ≠ write").
   async function consentFor(tool, ring = "metadata") {
@@ -591,15 +650,22 @@ export function createToolRegistry(deps = {}) {
       role: t.role ?? null,
       uses: t.uses ?? 0,
       weeksActive: t.weeksActive ?? 0,
-      ewmaPerWeek: Math.round((t.ewmaPerWeek ?? 0) * 100) / 100,
-      lastSeenTs: t.lastSeenTs ?? null,
+      ewmaPerWeek: Math.round((t.engagement?.ewma_per_week ?? 0) * 100) / 100,
+      lastSeenTs: t.engagement?.last_used ?? null,
       firstSeenTs: t.firstSeenTs ?? null,
       consent: { ...emptyConsent(), ...(t.consent ?? {}) },
       askRound: t.askRound ?? 0,
     }));
   }
 
-  return { dailyScan, resolveConnect, consentFor, listTools, appendUsage };
+  return {
+    dailyScan: () => serialized(dailyScan),
+    resolveConnect: (input) => serialized(() => resolveConnect(input)),
+    unNever: (toolId) => serialized(() => unNever(toolId)),
+    consentFor,
+    listTools,
+    appendUsage,
+  };
 }
 
 // Re-exported for callers that build rows by hand (tests, index.mjs wiring).

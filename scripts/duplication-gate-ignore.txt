@@ -28,3 +28,12 @@ src/main/installer/handlers.test.ts
 # scans changed files). Same rationale as the handlers.test.ts exemption above;
 # my BET-1008 additions introduced no new clones.
 src/main/installer/installer.test.ts
+# BET-1395 (reviewer-instructed on the cycle-1 return, 2026-08-29): index.mjs
+# is a ~5k-line route hub whose intra-file idioms (the cto route
+# try/catch+respondJson blocks, the segmentsRead/listSegments dir-scan
+# closures, the segment-summary context builders) predate this PR and repeat
+# that file's established shape. The BET-1395 PR touches index.mjs (route +
+# engine wiring), which surfaces these pre-existing self-clones to the
+# changed-file scan. Extracting them is out of BET-1395's scope; the
+# reviewer's instruction: keep the idiom, exempt the file.
+src/server/index.mjs

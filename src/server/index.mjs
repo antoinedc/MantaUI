@@ -2064,25 +2064,12 @@ const adaptiveCto = ctoEngine.createCtoEngine({
   legacyWatchesLoader: async () =>
     Array.isArray(cto.loadCtoStore()?.watches) ? cto.loadCtoStore().watches : [],
   // BET-1395 tool discovery (§7). The LLM fallback classifier rides the
-  // §3.3 ephemeral rate gate exactly like the suggest engine's runners; the
-  // channel-3 surfaces are the already-read config shapes (mcp/forge/
-  // webhooks/git remotes/schedules) — each surface best-effort, failures
-  // yield empty, never a throw into the scan.
-  toolsRunEphemeral: async (opts) => {
-    const gate = await adaptiveCto.beginEphemeral();
-    if (!gate?.ok) return { ok: false, gated: true, error: gate?.error };
-    try {
-      return await runEphemeral({
-        ...opts,
-        deps: {
-          configGet: () => local.configGet(),
-          oc: { runEphemeralSession: oc.runSynchronousSession },
-        },
-      });
-    } finally {
-      gate.release?.();
-    }
-  },
+  // §3.3 ephemeral rate gate through the SAME gated runner the suggest engine
+  // uses (one gate implementation); the channel-3 surfaces are the
+  // already-read config shapes (mcp/forge/webhooks/git remotes/schedules) —
+  // each surface best-effort, failures yield empty, never a throw into the
+  // scan.
+  toolsRunEphemeral: (opts) => gatedSuggestionEphemeral(opts?.taskClass ?? "ambient-summarize", opts),
   toolsGetSurfaces: async () => {
     const [config, rules, hooks, jobs, gitRemotes] = await Promise.all([
       readOpencodeConfig().catch(() => ({})),

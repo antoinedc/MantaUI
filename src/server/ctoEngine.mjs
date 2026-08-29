@@ -1092,7 +1092,6 @@ export function createCtoEngine(deps = {}) {
   async function toolsTick() {
     const day = new Date(now()).toISOString().slice(0, 10);
     if (lastToolScanDay === day) return;
-    lastToolScanDay = day;
     let backfillStartInstant = null;
     try {
       const es = (await engineState.load()) ?? {};
@@ -1101,6 +1100,10 @@ export function createCtoEngine(deps = {}) {
       /* best-effort — the registry falls back to its own 30-day window */
     }
     await getTools({ backfillStartInstant }).dailyScan();
+    // Stamp the day only AFTER a successful scan — a failed scan retries on
+    // the next tick instead of waiting until tomorrow (the registry's own
+    // watermarks keep the retry idempotent).
+    lastToolScanDay = day;
   }
 
   // Load the last `windowDays` (default 7, §13.4) day rollups so the watcher

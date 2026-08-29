@@ -54,6 +54,7 @@ import {
   type CtoState,
   type CtoHealthStat,
   type DecisionCardRow,
+  type SuggestionApi,
   type VetoCardRow,
 } from "./ctoView";
 import {
@@ -291,27 +292,16 @@ export function CtoPanel({
   // injected into the pure executor: config-change → configUpdate, start-job →
   // delegate, record-decision → the facts route. Outcome is reported (toast on
   // failure); a successful execution is a positive judgment → verdict accept.
-  const suggestionApi = useMemo(
+  // Typed as SuggestionApi (shared/api is the single source for the shapes).
+  const suggestionApi = useMemo<SuggestionApi>(
     () => ({
-      configUpdate: (patch: Record<string, unknown>) => window.api?.configUpdate?.(patch) ?? Promise.resolve({}),
-      delegateStart: (input: { prompt: string; sessionID: string; directory: string; model?: unknown }) =>
-        rendererDelegateStart(input),
-      ctoFact: (input: { kind?: string; statement: string; refs?: string[] }) =>
-        window.api?.ctoFact?.(input) ?? Promise.resolve({ ok: false, error: "facts unavailable" }),
-      ctoTonightAct: (input: {
-        action: "add" | "remove" | "reorder" | "cancel" | "run-now";
-        task?: {
-          name: string;
-          prompt?: string;
-          project?: string | null;
-          value?: number;
-          confidence?: number;
-          predictedCost?: number;
-          refs?: string[];
-          cls?: string;
-          originId?: string | null;
-        };
-      }) => window.api?.ctoTonightAct?.(input) ?? Promise.resolve({ ok: false, error: "tonight unavailable" }),
+      configUpdate: (patch) => window.api?.configUpdate?.(patch) ?? Promise.resolve({}),
+      delegateStart: async (input) => {
+        const r = await rendererDelegateStart(input);
+        return { ok: !!r?.ok, error: r?.error };
+      },
+      ctoFact: (input) => window.api?.ctoFact?.(input) ?? Promise.resolve({ ok: false, error: "facts unavailable" }),
+      ctoTonightAct: (input) => window.api?.ctoTonightAct?.(input) ?? Promise.resolve({ ok: false, error: "tonight unavailable" }),
     }),
     [],
   );

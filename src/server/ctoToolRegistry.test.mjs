@@ -61,6 +61,19 @@ function fakeLedger() {
   };
 }
 
+// A next-day scan over the SAME persisted registry store (fresh registry
+// instance, shared state) — the common shape of the lifecycle timing tests.
+function nextDay(registryStore, cards, dayMs, rows, overrides = {}) {
+  return createToolRegistry({
+    registryStore,
+    usageStore: memStore({ rows }),
+    cards,
+    ledger: fakeLedger(),
+    now: () => dayMs,
+    ...overrides,
+  });
+}
+
 function makeRegistry({ usageRows = [], cards = fakeCards(), runEphemeral = null, nowMs = W0, collectDb = null, collectSurfaces = null } = {}) {
   const registryStore = memStore();
   const usageStore = memStore({ rows: [...usageRows] });
@@ -140,11 +153,25 @@ test("EWMA decays toward zero with inactivity (single application)", () => {
   let tools = [];
   tools = fuseRow(tools, { channel: "transcript", identity: "x", detail: "cli:x", ts: W0 });
   tools = fuseRow(tools, { channel: "transcript", identity: "x", detail: "cli:x", ts: W0 + 1 * DAY });
-  const before = tools[0].ewmaPerWeek;
+  const before = tools[0].engagement.ewma_per_week;
   tools = fuseRow(tools, { channel: "transcript", identity: "x", detail: "cli:x", ts: W0 + 8 * DAY });
-  const after = tools[0].ewmaPerWeek;
+  const after = tools[0].engagement.ewma_per_week;
   assert.ok(after < before, "a week-old gap must decay the EWMA");
   assert.ok(after >= 1, "each use adds exactly 1 after decay");
+});
+
+test("fused rows carry the §7.2 schema axes verbatim (engagement nested, vitality present)", () => {
+  const tools = fuseRow([], { channel: "transcript", identity: "vercel", detail: "cli:vercel", ts: W0, project: "manta" });
+  const t = tools[0];
+  assert.deepEqual(
+    Object.keys(t).filter((k) => ["engagement", "vitality", "evidence", "consent", "status", "role", "relevance", "as_source", "as_workflow", "tool"].includes(k)).sort(),
+    ["as_source", "as_workflow", "consent", "engagement", "evidence", "relevance", "role", "status", "tool", "vitality"],
+  );
+  assert.equal(t.engagement.ewma_per_week, 1);
+  assert.equal(t.engagement.last_used, W0);
+  assert.deepEqual(t.engagement.per_project, { manta: 1 });
+  // Vitality is the §7.5 probes' axis — present but empty until they run.
+  assert.deepEqual(t.vitality, { last_event: null, inflow_rate: null, ewma: null, last_probed: null });
 });
 
 test("parseClassification accepts one kebab-case line, rejects junk", () => {
@@ -251,13 +278,7 @@ test("ask pacing: at most one NEW ask per day, and askRound < 3 forever", async 
   // Next day: the second tool asks (round 1 each) — vercel's ask card is
   // still open, so the gate skips it and picks stripe.
   const day2 = W0 + 10 * DAY;
-  const reg2 = createToolRegistry({
-    registryStore,
-    usageStore: memStore({ rows: [...usageRows, mk("vercel", day2), mk("stripe", day2)] }),
-    cards,
-    ledger: fakeLedger(),
-    now: () => day2,
-  });
+  const reg2 = nextDay(registryStore, cards, day2, [...usageRows, mk("vercel", day2), mk("stripe", day2)]);
   await reg2.dailyScan();
   assert.equal(cards.calls.upserts.length, 2);
   assert.equal(cards.calls.upserts[1].toolId, "stripe");
@@ -267,19 +288,13 @@ test("ask pacing: at most one NEW ask per day, and askRound < 3 forever", async 
   for (const t of state.tools) t.askRound = 3;
   await registryStore.save(state);
   const day3 = W0 + 11 * DAY;
-  const reg3 = createToolRegistry({
-    registryStore,
-    usageStore: memStore({ rows: [...usageRows, mk("vercel", day3), mk("stripe", day3)] }),
-    cards,
-    ledger: fakeLedger(),
-    now: () => day3,
-  });
+  const reg3 = nextDay(registryStore, cards, day3, [...usageRows, mk("vercel", day3), mk("stripe", day3)]);
   const res3 = await reg3.dailyScan();
   assert.equal(res3.asked, null);
   assert.equal(cards.calls.upserts.length, 2);
 });
 
-test("not-now declines with a 30-day re-arm; a fresh bar crossing re-arms early", async () => {
+test("not-now declines with a 30-day re-arm; a fresh bar crossing re-arms early — engagement path only", async () => {
   const cards = fakeCards();
   const mk = (ts) => ({ channel: "transcript", identity: "stripe", detail: "cli:stripe", ts, source: "catalog" });
   const usageRows = [mk(W0), mk(W0 + 2 * DAY), mk(W0 + 8 * DAY)];
@@ -292,25 +307,14 @@ test("not-now declines with a 30-day re-arm; a fresh bar crossing re-arms early"
 
   // Same day again → no new ask (reArmAt in the future, no fresh uses).
   const day2 = W0 + 10 * DAY;
-  const reg2 = createToolRegistry({
-    registryStore,
-    usageStore: memStore({ rows: [mk(day2)] }),
-    cards,
-    ledger: fakeLedger(),
-    now: () => day2,
-  });
+  const reg2 = nextDay(registryStore, cards, day2, [mk(day2)]);
   const res2 = await reg2.dailyScan();
   assert.equal(res2.asked, null);
 
-  // Fresh engagement (2+ uses beyond the ask-time snapshot) re-arms early.
+  // Fresh engagement (2+ uses beyond the ask-time snapshot) re-arms early —
+  // this tool crossed the ENGAGEMENT bar, so the fresh-crossing path applies.
   const day3 = W0 + 11 * DAY;
-  const reg3 = createToolRegistry({
-    registryStore,
-    usageStore: memStore({ rows: [mk(day3), mk(day3 + 1000)] }),
-    cards,
-    ledger: fakeLedger(),
-    now: () => day3,
-  });
+  const reg3 = nextDay(registryStore, cards, day3, [mk(day3), mk(day3 + 1000)]);
   const res3 = await reg3.dailyScan();
   assert.equal(res3.asked, "stripe");
   t = registryStore._state().tools.find((x) => x.tool === "stripe");
@@ -318,10 +322,50 @@ test("not-now declines with a 30-day re-arm; a fresh bar crossing re-arms early"
   assert.equal(t.askRound, 2);
 });
 
-test("never kills every ring and suppresses future asks", async () => {
+test("§7.4 carve-out: a credential-only tool declined 'not now' re-arms ONLY at the 30-day timer", async () => {
+  const cards = fakeCards();
+  const secret = (ts) => ({ channel: "secret", identity: "github_pat", detail: "secret:GITHUB_PAT", ts, source: "raw" });
+  const { registry, registryStore } = makeRegistry({ cards, usageRows: [secret(W0)], nowMs: W0 + DAY });
+  await registry.dailyScan();
+  await registry.resolveConnect({ tool: "github_pat", answer: "not-now" });
+  let t = registryStore._state().tools.find((x) => x.tool === "github_pat");
+  assert.equal(t.consent.metadata, "no");
+  assert.equal(t.reArmAt, W0 + DAY + 30 * DAY);
+  assert.equal(engagementBarMet(t), false, "the tool is vitality-path only");
+
+  // Fresh CLI uses arrive well inside the 30 days — the vitality path's bar
+  // (a credential exists) cannot re-cross, so NO early re-arm.
+  const day5 = W0 + 5 * DAY;
+  const reg2 = nextDay(registryStore, cards, day5, [secret(day5), secret(day5 + 1000), secret(day5 + 2000)]);
+  const res2 = await reg2.dailyScan();
+  assert.equal(res2.asked, null, "fresh uses must not re-arm a vitality-path decline");
+  t = registryStore._state().tools.find((x) => x.tool === "github_pat");
+  assert.equal(t.consent.metadata, "no");
+
+  // Only the 30-day timer re-arms.
+  const day32 = W0 + 32 * DAY;
+  const reg3 = createToolRegistry({
+    registryStore,
+    usageStore: memStore({ rows: [] }),
+    cards,
+    ledger: fakeLedger(),
+    now: () => day32,
+  });
+  const res3 = await reg3.dailyScan();
+  assert.equal(res3.asked, "github_pat");
+});
+
+// The aws fixture: a tool at the engagement bar (3 uses across 2 weeks),
+// scanned at day 9 — the common setup of the never/un-never lifecycle tests.
+function awsSetup() {
   const cards = fakeCards();
   const mk = (ts) => ({ channel: "transcript", identity: "aws", detail: "cli:aws", ts, source: "catalog" });
   const { registry, registryStore } = makeRegistry({ cards, usageRows: [mk(W0), mk(W0 + 2 * DAY), mk(W0 + 8 * DAY)], nowMs: W0 + 9 * DAY });
+  return { cards, mk, registry, registryStore };
+}
+
+test("never kills every ring and suppresses future asks", async () => {
+  const { cards, mk, registry, registryStore } = awsSetup();
   await registry.dailyScan();
   const res = await registry.resolveConnect({ tool: "aws", answer: "never" });
   assert.equal(res.ok, true);
@@ -330,16 +374,82 @@ test("never kills every ring and suppresses future asks", async () => {
 
   // Even with fresh evidence, never a new ask.
   const day2 = W0 + 40 * DAY;
-  const reg2 = createToolRegistry({
-    registryStore,
-    usageStore: memStore({ rows: [mk(day2), mk(day2 + 1000), mk(day2 + 2000)] }),
-    cards,
-    ledger: fakeLedger(),
-    now: () => day2,
-  });
+  const reg2 = nextDay(registryStore, cards, day2, [mk(day2), mk(day2 + 1000), mk(day2 + 2000)]);
   const res2 = await reg2.dailyScan();
   assert.equal(res2.asked, null);
   assert.equal(cards.calls.upserts.length, 1);
+});
+
+test("§7.4 un-never: returns the tool to observed; a fresh bar crossing is required before the next ask", async () => {
+  const { cards, mk, registry, registryStore } = awsSetup();
+  await registry.dailyScan();
+  await registry.resolveConnect({ tool: "aws", answer: "never" });
+
+  // Un-never (what B11's drill-down will call): back to observed, rings cleared.
+  const un = await registry.unNever("aws");
+  assert.equal(un.ok, true);
+  let t = registryStore._state().tools.find((x) => x.tool === "aws");
+  assert.deepEqual(t.consent, { metadata: null, deep_read: null, write: null });
+  assert.equal(t.status, "observed");
+  assert.equal(t.unneverAtUses, t.uses);
+
+  // The bar is still crossed (monotone uses) — but the next scan must NOT
+  // immediately re-promote + re-ask: no fresh crossing since the snapshot.
+  const day2 = W0 + 10 * DAY;
+  const reg2 = nextDay(registryStore, cards, day2, [mk(day2)]);
+  const res2 = await reg2.dailyScan();
+  assert.equal(res2.asked, null, "an un-never'd tool must not re-ask without a fresh bar crossing");
+  t = registryStore._state().tools.find((x) => x.tool === "aws");
+  assert.equal(t.status, "observed", "still observed — the fresh-crossing gate holds");
+
+  // Fresh engagement beyond the snapshot (2+ new uses) re-promotes → re-asks.
+  const day3 = W0 + 11 * DAY;
+  const reg3 = nextDay(registryStore, cards, day3, [mk(day3), mk(day3 + 1000)]);
+  const res3 = await reg3.dailyScan();
+  assert.equal(res3.asked, "aws");
+  t = registryStore._state().tools.find((x) => x.tool === "aws");
+  assert.equal(t.status, "candidate");
+  assert.equal(t.unneverAtUses, null);
+
+  // Un-nevering a tool that was never never'd is a clean error.
+  assert.equal((await registry.unNever("ghost")).ok, false);
+});
+
+test("a connect answer landing mid-scan is not lost (writers serialized)", async () => {
+  const cards = fakeCards();
+  const mk = (ts) => ({ channel: "transcript", identity: "vercel", detail: "cli:vercel", ts, source: "catalog" });
+  // One registry instance — the writer mutex is per-instance, matching
+  // production (the engine owns one registry). The db seam blocks on its
+  // SECOND call (the seconds-long await window where the stale-save clobber
+  // used to happen).
+  let blockSecond = null;
+  let releaseDb = () => {};
+  const { registry, registryStore } = makeRegistry({
+    cards,
+    usageRows: [mk(W0), mk(W0 + 2 * DAY), mk(W0 + 8 * DAY)],
+    nowMs: W0 + 9 * DAY,
+    collectDb: async () => {
+      if (blockSecond) await blockSecond;
+      return [];
+    },
+  });
+  await registry.dailyScan(); // scan 1: raises the ask (candidate)
+  await registry.resolveConnect({ tool: "vercel", answer: "connect" });
+
+  // Scan 2 starts and blocks inside its db batch.
+  blockSecond = new Promise((resolve) => (releaseDb = resolve));
+  const scanDone = registry.dailyScan();
+  await new Promise((r) => setTimeout(r, 25)); // let the scan reach the blocked await
+  // The user answers "never" DURING the scan. With serialized writers it
+  // queues behind the scan and its save lands LAST.
+  const answerDone = registry.resolveConnect({ tool: "vercel", answer: "never" });
+  releaseDb();
+  const [scanRes, answerRes] = await Promise.all([scanDone, answerDone]);
+  assert.equal(scanRes.ok, true);
+  assert.equal(answerRes.ok, true);
+  const t = registryStore._state().tools.find((x) => x.tool === "vercel");
+  assert.equal(t.consent.metadata, "never", "the mid-scan answer must survive the scan's save");
+  assert.deepEqual(t.consent, { metadata: "never", deep_read: "never", write: "never" });
 });
 
 test("LLM fallback classifies an unknown identity at most once and merges it", async () => {

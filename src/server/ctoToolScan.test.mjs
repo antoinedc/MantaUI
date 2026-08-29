@@ -1,6 +1,5 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DatabaseSync } from "node:sqlite";
 import {
   parseToolPart,
   cliTokens,
@@ -139,8 +138,27 @@ test("extractFromDbRows maps part rows → evidence, skipping malformed rows", (
   );
 });
 
-test("collectDbRows queries the part table in the half-open window", async () => {
+// A memory-backed SQLite fixture (node:sqlite). Returns { db, close } or null
+// when node:sqlite is unavailable (degrade the db tests to skip) — same
+// pattern as ctoBackfill.test.mjs. CI's Node 20 lacks node:sqlite.
+async function openFixture() {
+  let DatabaseSync;
+  try {
+    ({ DatabaseSync } = await import("node:sqlite"));
+  } catch {
+    return null;
+  }
   const db = new DatabaseSync(":memory:");
+  return { db, close: () => db.close() };
+}
+
+test("collectDbRows queries the part table in the half-open window", async () => {
+  const fx = await openFixture();
+  if (!fx) {
+    test.skip("node:sqlite unavailable on this runtime");
+    return;
+  }
+  const { db } = fx;
   db.exec(
     "CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)",
   );
