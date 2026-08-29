@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   dotTone,
   badgeLabel,
@@ -133,17 +133,25 @@ describe("backfillCardView (§10.6-4 learning card)", () => {
     expect(backfillCardView(base)).toBeNull();
   });
   it("shows an active running backfill with pct + ETA", () => {
-    const startedAt = Date.now() - 60_000;
-    const view = backfillCardView({
-      ...base,
-      backfill: { done: 2, total: 10, startedAt, stopped: false, reason: null, stoppedAtDepthDays: null, active: true },
-    });
-    expect(view?.show).toBe(true);
-    expect(view?.done).toBe(2);
-    expect(view?.total).toBe(10);
-    expect(view?.pct).toBeCloseTo(0.2, 5);
-    // 2 items over 60s → rate 30000ms/item, 8 left → 240000ms
-    expect(view?.etaMs).toBe(240000);
+    // BET-1418: backfillCardView reads Date.now() twice (guard + elapsed), the
+    // test reads it once for startedAt — a real ms tick between reads shifted
+    // the exact ETA assertion. Freeze the clock so every read sees one instant.
+    vi.useFakeTimers();
+    try {
+      const startedAt = Date.now() - 60_000;
+      const view = backfillCardView({
+        ...base,
+        backfill: { done: 2, total: 10, startedAt, stopped: false, reason: null, stoppedAtDepthDays: null, active: true },
+      });
+      expect(view?.show).toBe(true);
+      expect(view?.done).toBe(2);
+      expect(view?.total).toBe(10);
+      expect(view?.pct).toBeCloseTo(0.2, 5);
+      // 2 items over exactly 60s → rate 30000ms/item, 8 left → exactly 240000ms
+      expect(view?.etaMs).toBe(240000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
   it("still shows a budget-stopped backfill with the reason", () => {
     const view = backfillCardView({
