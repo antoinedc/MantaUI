@@ -210,3 +210,46 @@ test("BET-1400: reserve fractile row surfaces the primary quota fractile", async
   const r = stats.find((s) => s.id === "reserveFractile");
   assert.equal(r.value, "P99 · claude");
 });
+
+test("BET-1417: windowless-first box labels the mode — never a bare fractile for a reserve-disabled provider", async () => {
+  // BET-1400's windowless quota row persists the P95-init fractile with
+  // reserve disabled (§11.2); the row must surface the mode, not imply a
+  // reserve exists at that fractile.
+  const { stats } = await computeHealthStats({
+    now: () => NOW,
+    budgetRead: async () => ({
+      quota: { claude: { provider: "claude", mode: "windowless", reserve: 0, fractile: 0.95 } },
+    }),
+  });
+  const r = stats.find((s) => s.id === "reserveFractile");
+  assert.equal(r.value, "P95 (windowless — reserve off) · claude");
+});
+
+test("BET-1417: a windowless row never shadows a reserve-enabled provider's fractile", async () => {
+  // Mixed box: the windowless provider is iterated first, but the live
+  // reserve fractile belongs to the windowed one.
+  const { stats } = await computeHealthStats({
+    now: () => NOW,
+    budgetRead: async () => ({
+      quota: {
+        gpt: { provider: "gpt", mode: "windowless", reserve: 0, fractile: 0.95 },
+        claude: { provider: "claude", mode: "forecast", fractile: 0.99 },
+      },
+    }),
+  });
+  const r = stats.find((s) => s.id === "reserveFractile");
+  assert.equal(r.value, "P99 · claude");
+});
+
+test("BET-1417: windowed row behavior unchanged (mode not surfaced in the value)", async () => {
+  for (const mode of ["forecast", "fallback", null, undefined]) {
+    const { stats } = await computeHealthStats({
+      now: () => NOW,
+      budgetRead: async () => ({
+        quota: { claude: { provider: "claude", mode, fractile: 0.9 } },
+      }),
+    });
+    const r = stats.find((s) => s.id === "reserveFractile");
+    assert.equal(r.value, "P90 · claude");
+  }
+});
