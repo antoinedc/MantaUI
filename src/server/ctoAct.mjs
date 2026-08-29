@@ -34,7 +34,7 @@
 //
 // Pure over injected I/O — testable without a live tmux/opencode/delegate.
 
-import { ACTOR, RATE_LIMITS } from "./ctoEngine.mjs";
+import { ACTOR, RATE_LIMITS, isRunningCtoRow } from "./ctoEngine.mjs";
 import { resolveForgeOwner } from "./delegate.mjs";
 
 // ---------------------------------------------------------------------------
@@ -172,14 +172,15 @@ export function createCtoActExecutor(deps = {}) {
       const p = normalizeStartJobPayload(payload);
       if (!p) return { ok: false, reason: "incomplete-payload" };
       // §3.3 concurrent delegate sub-cap: count RUNNING cto-actor rows — the
-      // persistent source the overnight dispatch counts too. The gate's
-      // transient tracker only spans the start call itself, so the running
-      // rows are the real concurrency bound; the gate below still supplies
-      // the kill switch / pause checks + the cto.delegate_begin ledger row.
+      // shared isRunningCtoRow definition the overnight dispatch counts too
+      // (BET-1427). The gate's transient tracker only spans the start call
+      // itself, so the running rows are the real concurrency bound; the gate
+      // below still supplies the kill switch / pause checks + the
+      // cto.delegate_begin ledger row.
       let running = 0;
       try {
         const jobs = await listDelegateJobs();
-        running = (Array.isArray(jobs) ? jobs : []).filter((j) => j?.actor === ACTOR && j?.status === "running").length;
+        running = (Array.isArray(jobs) ? jobs : []).filter(isRunningCtoRow).length;
       } catch {
         running = 0;
       }
