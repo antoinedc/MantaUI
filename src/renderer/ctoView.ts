@@ -208,9 +208,10 @@ export function forecastAccuracyRows(
   const rows: ForecastAccuracyRow[] = [];
   for (const q of Object.values(quotaRows)) {
     if (!q || typeof q.provider !== "string" || !q.provider) continue;
-    const mape = Number(q.mape14);
-    if (!Number.isFinite(mape)) continue;
-    rows.push({ provider: q.provider, mape14: mape });
+    // typeof guard, not Number(): Number(null) === 0 would render an absent
+    // forecast as a perfect 0% MAPE.
+    if (typeof q.mape14 !== "number" || !Number.isFinite(q.mape14)) continue;
+    rows.push({ provider: q.provider, mape14: q.mape14 });
   }
   return rows;
 }

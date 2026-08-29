@@ -548,7 +548,9 @@ export function roiRecommendation({ spendUsd, accepted, merged, incidents } = {}
     Math.max(0, Math.trunc(Number(merged) || 0)) +
     Math.max(0, Math.trunc(Number(incidents) || 0));
   if (outcomes <= 0 && spend <= 0) return { tier: "stay", reason: "no spend and no counted outcomes yet" };
-  if (outcomes <= 0) return { tier: "lower", reason: `$${spend.toFixed(2)} spent with no counted outcomes` };
+  if (outcomes <= 0 && spend >= ROI_MIN_SPEND_USD_LOWER) {
+    return { tier: "lower", reason: `$${spend.toFixed(2)} spent with no counted outcomes` };
+  }
   if (outcomes >= ROI_MIN_OUTCOMES_RAISE) return { tier: "raise", reason: `${outcomes} counted outcomes this month` };
   return {
     tier: "stay",
@@ -792,27 +794,36 @@ export function createCtoBudget({
 
   // Recompute one month's store-derived counters (spend/accepted/incidents)
   // and attach the accumulated merged count + the copy-only recommendation.
+  // Returns null when ANY source read failed — a month whose sources could
+  // not be read must never persist as frozen zeros (noise as signal).
   async function computeMonth(acc, t) {
     const window = monthWindow(acc.month);
-    if (!window) return acc;
+    if (!window) return null;
     let payload = null;
+    let verdicts = null;
+    let ledgerRows = null;
+    let prompts = null;
     try {
       payload = await load();
     } catch {
-      payload = normalizeQuota(defaultBudgetPayload());
+      payload = null;
     }
-    let verdicts = [];
     try {
       verdicts = (await verdictsRead()) ?? [];
     } catch {
-      verdicts = [];
+      verdicts = null;
     }
-    let ledgerRows = [];
     try {
       ledgerRows = (await ledgerRead()) ?? [];
     } catch {
-      ledgerRows = [];
+      ledgerRows = null;
     }
+    try {
+      prompts = await promptTsBySession();
+    } catch {
+      prompts = null;
+    }
+    if (!payload || verdicts == null || ledgerRows == null || prompts == null) return null;
     const createdTsByCardId = {};
     for (const r of ledgerRows) {
       if (r?.kind === "card.created" && typeof r?.cardId === "string" && typeof r?.ts === "number" && Number.isFinite(r.ts)) {
@@ -820,7 +831,6 @@ export function createCtoBudget({
         createdTsByCardId[r.cardId] = typeof prev === "number" ? Math.min(prev, r.ts) : r.ts;
       }
     }
-    const prompts = await promptTsBySession();
     const resolved = ledgerRows.filter((r) => r?.kind === "card.resolved");
     const spend = monthSpendUsd(payload, window);
     const accepted = acceptedSuggestions(verdicts, window);
@@ -869,7 +879,9 @@ export function createCtoBudget({
     } catch {
       jobs = [];
     }
-    const known = new Set(pending.filter((j) => j.counted !== true).map((j) => j.id));
+    // Every pending id — counted or not — is a dedupe fingerprint: a job
+    // already snapshotted (and probed) must never re-sample.
+    const known = new Set(pending.map((j) => j.id));
     for (const j of jobs) {
       if (!j || j.actor !== "cto" || j.status !== "done") continue;
       if (typeof j.branch !== "string" || !j.branch) continue;
@@ -913,7 +925,8 @@ export function createCtoBudget({
     for (const key of toCompute) {
       const acc = monthAccumulator(months, key);
       const isCurrent = key === currentKey;
-      months[key] = await computeMonth({ ...acc, frozen: !isCurrent }, t);
+      const computed = await computeMonth({ ...acc, frozen: !isCurrent }, t);
+      if (computed) months[key] = computed;
     }
 
     // 4. Hygiene: drop stale pending rows.

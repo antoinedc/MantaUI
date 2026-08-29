@@ -441,3 +441,106 @@ it("executeSuggestionOption: failure is reported (not swallowed)", async () => {
   expect(r.ok).toBe(false);
   expect(r.error ?? "").toMatch(/boom/);
 });
+
+// --- BET-1405: Tonight's-budget card selectors (§10.5 card 3) --------------
+
+import {
+  tonightBudgetMode,
+  nightGauge,
+  budgetTodayUsd,
+  bindingReserveFrac,
+  providerWindowNotes,
+  forecastAccuracyRows,
+} from "./ctoView";
+
+describe("tonightBudgetMode", () => {
+  it("is full only at High with Overnight on", () => {
+    expect(tonightBudgetMode({ tier: "high", overnightOn: true })).toBe("full");
+    expect(tonightBudgetMode({ tier: "high", overnightOn: false })).toBe("ambient");
+    expect(tonightBudgetMode({ tier: "medium", overnightOn: true })).toBe("ambient");
+    expect(tonightBudgetMode({ tier: "low", overnightOn: true })).toBe("ambient");
+    expect(tonightBudgetMode(null)).toBe("ambient");
+    expect(tonightBudgetMode({ tier: null, overnightOn: true })).toBe("ambient");
+  });
+});
+
+describe("nightGauge", () => {
+  it("clamps segments into the pool and places the reserve line", () => {
+    const g = nightGauge({ nightCapUsd: 5, usedTodayUsd: 1.5, plannedTonightUsd: 2, reserveFrac: 0.95 });
+    expect(g.poolUsd).toBe(5);
+    expect(g.usedUsd).toBe(1.5);
+    expect(g.plannedUsd).toBe(2);
+    expect(g.reserveLineUsd).toBeCloseTo(4.75);
+    expect(g.overflow).toBe(false);
+  });
+
+  it("flags overflow instead of silently truncating", () => {
+    const g = nightGauge({ nightCapUsd: 5, usedTodayUsd: 4.5, plannedTonightUsd: 2, reserveFrac: null });
+    expect(g.overflow).toBe(true);
+    expect(g.usedUsd).toBe(4.5);
+    expect(g.plannedUsd).toBe(0.5); // clamped to what remains
+  });
+
+  it("handles a zero pool and absent inputs honestly", () => {
+    const g = nightGauge({ nightCapUsd: 0, usedTodayUsd: 3, plannedTonightUsd: null, reserveFrac: null });
+    expect(g.poolUsd).toBe(0);
+    expect(g.usedUsd).toBe(0);
+    expect(g.reserveLineUsd).toBe(null);
+    expect(g.overflow).toBe(true);
+  });
+});
+
+describe("budgetTodayUsd", () => {
+  it("reads today's local-midnight bucket", () => {
+    const d = new Date(2026, 7, 28, 15, 30);
+    const key = String(new Date(2026, 7, 28).getTime());
+    expect(
+      budgetTodayUsd({ days: { [key]: { usd: 1.25 } } }, d.getTime()),
+    ).toBe(1.25);
+    expect(budgetTodayUsd({ days: {} }, d.getTime())).toBe(0);
+    expect(budgetTodayUsd(null, d.getTime())).toBe(0);
+  });
+});
+
+describe("bindingReserveFrac", () => {
+  it("takes the largest windowed reserve and ignores windowless rows", () => {
+    expect(
+      bindingReserveFrac({
+        a: { provider: "a", mode: "forecast", reserve: 0.9 },
+        b: { provider: "b", mode: "forecast", reserve: 0.99 },
+        c: { provider: "c", mode: "windowless", reserve: 1.5 },
+      }),
+    ).toBe(0.99);
+    expect(bindingReserveFrac({ c: { provider: "c", mode: "windowless", reserve: 1.5 } })).toBe(null);
+    expect(bindingReserveFrac(null)).toBe(null);
+  });
+});
+
+describe("providerWindowNotes", () => {
+  it("flattens windows with labels and resets, capped", () => {
+    const notes = providerWindowNotes(
+      [
+        { provider: "claude", windows: [{ kind: "session", label: "5h", resetsAt: 123 }, { kind: "weekly", label: "7d" }] },
+        { provider: "kimi", windows: null },
+        { provider: "", windows: [{ label: "x" }] },
+      ],
+      2,
+    );
+    expect(notes).toHaveLength(2);
+    expect(notes[0]).toEqual({ provider: "claude", label: "5h", resetsAt: 123 });
+    expect(notes[1]).toEqual({ provider: "claude", label: "7d", resetsAt: null });
+  });
+});
+
+describe("forecastAccuracyRows", () => {
+  it("emits only providers with a numeric MAPE", () => {
+    expect(
+      forecastAccuracyRows({
+        a: { provider: "a", mape14: 0.23 },
+        b: { provider: "b", mape14: null },
+        c: { provider: "c" },
+      }),
+    ).toEqual([{ provider: "a", mape14: 0.23 }]);
+    expect(forecastAccuracyRows(null)).toEqual([]);
+  });
+});

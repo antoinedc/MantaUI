@@ -59,14 +59,34 @@ test("ambient spend: budget absent or unpopulated → collecting (0/1)", async (
   assert.equal(s.value, null);
 });
 
+// The budget payload's real shape: day buckets keyed by local-midnight ms
+// (BET-1405 fixed the read — it used to look for a `today` key that never
+// existed, so the row rendered `collecting` forever).
+function localDayKey(ts) {
+  const d = new Date(ts);
+  return String(new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime());
+}
+
 test("ambient spend: with a reading, value renders spend vs cap", async () => {
   const { stats } = await computeHealthStats({
+    now: () => NOW,
     ctoAmbientCap: 2.5,
-    budgetRead: async () => ({ today: { spend: 0.42 } }),
+    budgetRead: async () => ({ days: { [localDayKey(NOW)]: { usd: 0.42, calls: 2 } }, updatedMs: NOW }),
   });
   const s = stats.find((x) => x.id === "ambientSpendToday");
   assert.equal(s.n, 1);
   assert.equal(s.value, "$0.42 of $2.50 / day");
+});
+
+test("ambient spend: live meter with a quiet today renders $0.00", async () => {
+  const { stats } = await computeHealthStats({
+    now: () => NOW,
+    ctoAmbientCap: 2.5,
+    budgetRead: async () => ({ days: { [localDayKey(NOW - 3 * DAY)]: { usd: 1.1, calls: 4 } }, updatedMs: NOW - 3 * DAY }),
+  });
+  const s = stats.find((x) => x.id === "ambientSpendToday");
+  assert.equal(s.n, 1);
+  assert.equal(s.value, "$0.00 of $2.50 / day");
 });
 
 test("pipeline lag: collecting until summarized segments accrue", async () => {
@@ -252,4 +272,65 @@ test("BET-1417: windowed row behavior unchanged (mode not surfaced in the value)
     const r = stats.find((s) => s.id === "reserveFractile");
     assert.equal(r.value, "P90 · claude");
   }
+});
+
+// --- BET-1405: the ROI self-report row (§12.4) -----------------------------
+
+test("ROI row: collecting — first report <date> until the first monthly roll", async () => {
+  const { stats } = await computeHealthStats({
+    now: () => NOW,
+    roiRead: async () => ({ month: null, roll: null, collectingUntil: NOW + 9 * DAY }),
+  });
+  const r = stats.find((s) => s.id === "roi");
+  assert.equal(r.n, 0);
+  assert.equal(r.min, 1);
+  assert.equal(r.value, null);
+  assert.match(r.collectingText, /^collecting — first report \w+ \d+$/);
+});
+
+test("ROI row: no activity yet → plain collecting (no fabricated date)", async () => {
+  const { stats } = await computeHealthStats({
+    now: () => NOW,
+    roiRead: async () => ({ month: null, roll: null, collectingUntil: null }),
+  });
+  const r = stats.find((s) => s.id === "roi");
+  assert.equal(r.value, null);
+  assert.equal(r.collectingText, "collecting");
+});
+
+test("ROI row: renders the month roll with spend, outcomes and recommendation", async () => {
+  const { stats } = await computeHealthStats({
+    now: () => NOW,
+    roiRead: async () => ({
+      month: "2026-07",
+      roll: {
+        month: "2026-07",
+        spendUsd: 4.12,
+        accepted: 2,
+        merged: 1,
+        incidents: 0,
+        recommendation: { tier: "stay", reason: "3 outcomes for $4.12 — holding" },
+      },
+      collectingUntil: null,
+    }),
+  });
+  const r = stats.find((s) => s.id === "roi");
+  assert.equal(r.n, 1);
+  assert.equal(r.label, "ROI · Jul 2026");
+  assert.equal(
+    r.value,
+    "$4.12 · 2 accepted · 1 merged · 0 pre-surfaced — recommend stay: 3 outcomes for $4.12 — holding",
+  );
+});
+
+test("ROI row: roiRead failure degrades to collecting, never throws", async () => {
+  const { stats } = await computeHealthStats({
+    now: () => NOW,
+    roiRead: async () => {
+      throw new Error("store down");
+    },
+  });
+  const r = stats.find((s) => s.id === "roi");
+  assert.equal(r.value, null);
+  assert.equal(r.collectingText, "collecting");
 });
