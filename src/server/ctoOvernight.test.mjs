@@ -1,0 +1,463 @@
+// src/server/ctoOvernight.test.mjs
+// BET-1402 — pure-logic tests for the overnight scheduler CORE (node:test,
+// injected I/O only — no live tmux/opencode/network).
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+
+import {
+  ABSENCE_SILENCE_MIN_MS,
+  CANDIDATE_CATEGORIES,
+  CONFIDENCE_LATTICE,
+  COUNTDOWN_ABANDON_GRACE_MS,
+  DEFAULT_PREDICTED_COST,
+  HYGIENE_FLOOR_SHARE,
+  VALUE_LATTICE,
+  absenceSignal,
+  createOvernightScheduler,
+  decayFactor,
+  evaluateGates,
+  evaluateWindow,
+  expireDrafts,
+  foldVerdictIntoCounters,
+  gitOnlyJobRule,
+  lambdaFromSpendable,
+  normalizeWindow,
+  preemptOnReturn,
+  reconcileOnRestart,
+  routeRequestShaped,
+  scheduleCountdown,
+  scoreCandidates,
+  selectPortfolio,
+  snapToLattice,
+  thompsonMultiplier,
+} from "./ctoOvernight.mjs";
+
+const H = 3_600_000;
+const T0 = 1_800_000_000_000; // arbitrary fixed epoch
+const TROUGH = { startMs: T0, endMs: T0 + 6 * H };
+
+function tickInput(over = {}) {
+  return {
+    now: T0 + H,
+    trough: TROUGH,
+    presence: "gone",
+    hasDesktop: true,
+    lastUserEventMs: T0 - H,
+    candidateCount: 3,
+    ...over,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// §11.1 — window state machine
+// ---------------------------------------------------------------------------
+
+test("window opens on presence-gone inside the trough", () => {
+  const { window, ledgerRows } = evaluateWindow(null, tickInput());
+  assert.equal(window.state, "open");
+  assert.equal(window.openedBy, "presence-gone");
+  assert.equal(window.openedMs, T0 + H);
+  assert.ok(ledgerRows.some((r) => r.kind === "cto.overnight.open"));
+});
+
+test("window opens on ≥60 min of zero user events inside the trough (no-desktop box)", () => {
+  const { window } = evaluateWindow(
+    null,
+    tickInput({ presence: null, hasDesktop: false, now: T0 + ABSENCE_SILENCE_MIN_MS + 1, lastUserEventMs: T0 - 5 * 60_000 }),
+  );
+  assert.equal(window.state, "open");
+  assert.equal(window.openedBy, "event-silence");
+});
+
+test("pre-trough quiet does not count toward the 60-min silence (signal must be inside the trough)", () => {
+  // Last user event 2h before the trough; only 30 min of trough-internal silence.
+  const { window } = evaluateWindow(null, tickInput({ presence: null, hasDesktop: false, now: T0 + 30 * 60_000, lastUserEventMs: T0 - 2 * H }));
+  assert.equal(window.state, "closed");
+});
+
+test("sub-60-min silence never opens (no-desktop box)", () => {
+  const { window } = evaluateWindow(
+    null,
+    tickInput({ presence: null, hasDesktop: false, now: T0 + 59 * 60_000, lastUserEventMs: T0 }),
+  );
+  assert.equal(window.state, "closed");
+});
+
+test("prolonged signal ABSENCE alone never opens (desktop box, presence unknown/present)", () => {
+  for (const presence of [null, "present"]) {
+    const { window } = evaluateWindow(null, tickInput({ presence, lastUserEventMs: T0 - 48 * H }));
+    assert.equal(window.state, "closed", `presence=${presence}`);
+    assert.equal(absenceSignal({ now: T0 + H, presence, hasDesktop: true, lastUserEventMs: T0 - 48 * H }), null);
+  }
+});
+
+test("window closes at trough end", () => {
+  const { window } = evaluateWindow(null, tickInput({ now: T0 + H }));
+  const { window: closed, ledgerRows } = evaluateWindow(window, tickInput({ now: TROUGH.endMs }));
+  assert.equal(closed.state, "closed");
+  assert.equal(closed.closeReason, "trough-end");
+  assert.ok(ledgerRows.some((r) => r.kind === "cto.overnight.close" && r.reason === "trough-end"));
+});
+
+test("window closes on user return (presence flip)", () => {
+  const { window } = evaluateWindow(null, tickInput({ now: T0 + H }));
+  const { window: closed, ledgerRows } = evaluateWindow(window, tickInput({ now: T0 + 2 * H, presence: "present" }));
+  assert.equal(closed.state, "closed");
+  assert.equal(closed.closeReason, "user-return");
+  assert.ok(ledgerRows.some((r) => r.kind === "cto.overnight.close" && r.reason === "user-return"));
+});
+
+test("window closes on a fresh user-originated event after open", () => {
+  const { window } = evaluateWindow(null, tickInput({ now: T0 + H }));
+  const { window: closed } = evaluateWindow(window, tickInput({ now: T0 + 90 * 60_000, lastUserEventMs: T0 + 80 * 60_000 }));
+  assert.equal(closed.state, "closed");
+  assert.equal(closed.closeReason, "user-event");
+});
+
+test("run-now override opens immediately, even outside the trough", () => {
+  const { window, ledgerRows } = evaluateWindow(null, tickInput({ now: T0 - 3 * H, trough: null, runNow: true }));
+  assert.equal(window.state, "open");
+  assert.equal(window.openedBy, "run-now");
+  assert.ok(ledgerRows.some((r) => r.kind === "cto.overnight.open"));
+});
+
+test("a run-now window opened while the user is present is NOT closed by presence alone — the next user event closes it", () => {
+  const { window } = evaluateWindow(null, tickInput({ presence: "present", runNow: true }));
+  assert.equal(window.openedDuringPresence, true);
+  const stillOpen = evaluateWindow(window, tickInput({ presence: "present", runNow: true, now: T0 + 2 * H }));
+  assert.equal(stillOpen.window.state, "open");
+  const closed = evaluateWindow(window, tickInput({ presence: "present", runNow: true, now: T0 + 2 * H, lastUserEventMs: T0 + 2 * H }));
+  assert.equal(closed.window.state, "closed");
+  assert.equal(closed.window.closeReason, "user-event");
+});
+
+test("zero candidates → no window at all (§11.4 graceful-empty), even on run-now", () => {
+  for (const runNow of [false, true]) {
+    const { window, ledgerRows } = evaluateWindow(null, tickInput({ candidateCount: 0, runNow }));
+    assert.equal(window.state, "closed", `runNow=${runNow}`);
+    assert.ok(ledgerRows.some((r) => r.kind === "cto.overnight.no-candidates"), `runNow=${runNow}`);
+  }
+});
+
+test("a fulfilled veto countdown is cleared by the open it announced", () => {
+  const due = T0 + 30 * 60_000;
+  let window = scheduleCountdown(null, { now: T0, dueMs: due });
+  assert.equal(window.countdown.dueMs, due);
+  const { window: opened } = evaluateWindow(window, tickInput({ now: due + 60_000 }));
+  assert.equal(opened.state, "open");
+  assert.equal(opened.countdown, null);
+});
+
+test("a veto countdown elapsed unmet past the grace window is abandoned + ledgered, never executed late", () => {
+  const due = T0 + 30 * 60_000;
+  const window = scheduleCountdown(null, { now: T0, dueMs: due });
+  // Due passed, but the box was down: no trough membership now (or no signal).
+  const { window: after, ledgerRows } = evaluateWindow(window, tickInput({ now: due + COUNTDOWN_ABANDON_GRACE_MS + 60_000, trough: null }));
+  assert.equal(after.state, "closed");
+  assert.equal(after.countdown, null);
+  assert.ok(ledgerRows.some((r) => r.kind === "cto.overnight.countdown-abandoned"));
+});
+
+test("restart mid-window: window re-derived and kept, spendable recompute required", () => {
+  const { window } = evaluateWindow(null, tickInput({ now: T0 + H }));
+  const { window: after, recomputeSpendable, ledgerRows } = reconcileOnRestart(window, { now: T0 + 2 * H, trough: TROUGH });
+  assert.equal(after.state, "open");
+  assert.equal(after.openedMs, T0 + H);
+  assert.equal(recomputeSpendable, true);
+  assert.ok(ledgerRows.some((r) => r.kind === "cto.overnight.restart"));
+});
+
+test("restart with the window's trough fully elapsed: skipped, never run retroactively (no-catch-up)", () => {
+  const { window } = evaluateWindow(null, tickInput({ now: T0 + H }));
+  const { window: after, recomputeSpendable, ledgerRows } = reconcileOnRestart(window, { now: TROUGH.endMs + 3 * H, trough: TROUGH });
+  assert.equal(after.state, "closed");
+  assert.equal(recomputeSpendable, false);
+  assert.ok(ledgerRows.some((r) => r.kind === "cto.overnight.close" && r.reason === "trough-end"));
+  assert.ok(ledgerRows.some((r) => r.kind === "cto.overnight.no-catch-up"));
+});
+
+test("restart with an elapsed pending veto countdown abandons it", () => {
+  const due = T0 + 30 * 60_000;
+  const window = scheduleCountdown(null, { now: T0, dueMs: due });
+  const { window: after, ledgerRows } = reconcileOnRestart(window, { now: due + 2 * H, trough: TROUGH });
+  assert.equal(after.countdown, null);
+  assert.ok(ledgerRows.some((r) => r.kind === "cto.overnight.countdown-abandoned"));
+});
+
+test("normalizeWindow never throws on garbage and degrades to a closed window", () => {
+  for (const garbage of [null, undefined, 42, "x", { state: "bogus" }, { state: "open" }]) {
+    const w = normalizeWindow(garbage);
+    assert.equal(w.state, garbage?.state === "open" ? "open" : "closed");
+    assert.equal(Array.isArray(w.pinnedOrder) || w.pinnedOrder === null, true);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// §11.4 — portfolio scorer
+// ---------------------------------------------------------------------------
+
+const FAT = { spendableFrac: 0.8, remainingFrac: 0.9 };
+const THIN = { spendableFrac: 0.25, remainingFrac: 0.4 };
+
+function candidate(over = {}) {
+  return {
+    id: over.id ?? "c1",
+    category: "suggestion",
+    value: 2,
+    confidence: 1.0,
+    pUse: 1,
+    predictedCost: 2,
+    lastTouchedMs: T0 + H, // fresh → decay 1
+    ...over,
+  };
+}
+
+test("Score = p_use · Value · Confidence · Decay / (λ·PredictedCost), formula verbatim (fat budget → λ=0, no counters → θ=0.5)", () => {
+  const [scored] = scoreCandidates([candidate()], { now: T0 + H, spendable: FAT });
+  // λ=0 → denominator resolved to 1; numerator = 1·2·1·1·0.5
+  assert.equal(scored.lambda, 0);
+  assert.equal(scored.thompson, 0.5);
+  assert.ok(Math.abs(scored.score - 1) < 1e-12);
+});
+
+test("Thompson blend uses the category's acceptance posterior (all-success → 1, all-rejection → 0)", () => {
+  const c = [candidate()];
+  const yes = scoreCandidates(c, { now: T0 + H, spendable: FAT, counters: { suggestion: { alpha: 4, beta: 0 } } });
+  const no = scoreCandidates(c, { now: T0 + H, spendable: FAT, counters: { suggestion: { alpha: 0, beta: 4 } } });
+  assert.equal(yes[0].thompson, 1);
+  assert.equal(no[0].thompson, 0);
+  assert.ok(yes[0].score > no[0].score);
+});
+
+test("Value and Confidence snap to the coarse lattices; unscoreable candidates are dropped", () => {
+  assert.deepEqual(snapToLattice(2.4, VALUE_LATTICE), 2);
+  assert.deepEqual(snapToLattice(0.9, VALUE_LATTICE), 1);
+  assert.deepEqual(snapToLattice(0.75, CONFIDENCE_LATTICE), 0.8);
+  assert.equal(snapToLattice("high", VALUE_LATTICE), null);
+  const scored = scoreCandidates([candidate({ id: "good", value: 2.4, confidence: 0.75 }), candidate({ id: "bad", value: "huge" })], {
+    now: T0 + H,
+    spendable: FAT,
+  });
+  assert.deepEqual(scored.map((c) => c.id), ["good"]);
+  assert.equal(scored[0].value, 2);
+  assert.equal(scored[0].confidence, 0.8);
+});
+
+test("missing/invalid predictedCost falls back to the default (unknown-cost maintenance stays scoreable)", () => {
+  const [scored] = scoreCandidates([candidate({ category: "maintenance", predictedCost: null })], { now: T0 + H, spendable: THIN });
+  assert.equal(scored.predictedCost, DEFAULT_PREDICTED_COST);
+});
+
+test("λ rises as spendable thins; a thin budget makes the cheap job win near dawn", () => {
+  assert.equal(lambdaFromSpendable({ spendableFrac: 0.5 }), 0);
+  assert.equal(lambdaFromSpendable({ spendableFrac: 0.25 }), 5);
+  assert.equal(lambdaFromSpendable({ spendableFrac: 0 }), 10);
+  assert.equal(lambdaFromSpendable({ spendableFrac: null }), 0); // windowless → no shadow price
+  assert.equal(lambdaFromSpendable({}), 0); // unreadable budget → graceful fat default
+
+  const expensive = candidate({ id: "expensive", value: 3, confidence: 1.0, predictedCost: 8 });
+  const cheap = candidate({ id: "cheap", value: 1, confidence: 1.0, predictedCost: 1 });
+  const fat = scoreCandidates([expensive, cheap], { now: T0 + H, spendable: FAT });
+  assert.deepEqual(fat.map((c) => c.id), ["expensive", "cheap"]); // one expensive high-value job wins early
+  const thin = scoreCandidates([expensive, cheap], { now: T0 + H, spendable: THIN });
+  assert.deepEqual(thin.map((c) => c.id), ["cheap", "expensive"]); // cheap jobs win near dawn
+});
+
+test("Decay: staleness per-category τ, rising-urgency boost for untouched projects", () => {
+  const stale = candidate({ lastTouchedMs: T0 + H - 4 * 24 * H }); // 4 days old
+  const freshTau = decayFactor(stale, { now: T0 + H }); // suggestion τ = 3d
+  assert.ok(freshTau < 1 && freshTau > 0);
+  const urgent = decayFactor({ ...stale, untouchedProjectDays: 9 }, { now: T0 + H });
+  assert.ok(Math.abs(urgent - freshTau * 1.5) < 1e-12);
+  const noAge = decayFactor(candidate({ lastTouchedMs: null }), { now: T0 + H });
+  assert.equal(noAge, 1); // no staleness evidence is not staleness
+});
+
+test("hygiene floor: maintenance is guaranteed 20% of the night's budget when maintenance candidates exist", () => {
+  const ranked = [
+    candidate({ id: "g1", predictedCost: 0.5 }),
+    candidate({ id: "g2", predictedCost: 0.5 }),
+    candidate({ id: "m1", category: "maintenance", predictedCost: 0.2, value: 0.25 }),
+  ];
+  const plan = selectPortfolio(ranked, { budgetFrac: 1 });
+  assert.equal(plan.hasMaintenance, true);
+  assert.equal(plan.floorFrac, HYGIENE_FLOOR_SHARE);
+  const ids = plan.selected.map((c) => c.id);
+  assert.ok(ids.includes("m1"), "the maintenance candidate is selected despite the low score");
+  assert.ok(!ids.includes("g2"), "a general job is shed to honor the floor");
+  assert.ok(plan.reservedMaintenanceFrac > 0);
+});
+
+test("hygiene floor applies only when maintenance candidates exist", () => {
+  const plan = selectPortfolio([candidate({ predictedCost: 0.6 }), candidate({ id: "c2", predictedCost: 0.4 })], { budgetFrac: 1 });
+  assert.equal(plan.hasMaintenance, false);
+  assert.equal(plan.floorFrac, 0);
+  assert.equal(plan.selected.length, 2);
+});
+
+test("graceful-empty everywhere: empty classes allocate nothing; empty in → empty out", () => {
+  assert.deepEqual(scoreCandidates([], { now: T0 + H, spendable: FAT }), []);
+  const plan = selectPortfolio([], { budgetFrac: 1 });
+  assert.deepEqual(plan.selected, []);
+  assert.equal(plan.hasMaintenance, false);
+});
+
+test("a manual pinnedOrder pins that order for the window, exempt from re-scoring", () => {
+  const ranked = [candidate({ id: "a" }), candidate({ id: "b", value: 3 }), candidate({ id: "c", value: 0.5 })];
+  const plan = selectPortfolio(ranked, { budgetFrac: 10, pinnedOrder: ["c", "a", "b"] });
+  assert.deepEqual(plan.selected.map((x) => x.id), ["c", "a", "b"]);
+  // The pin survives re-scoring with different inputs (the window machine
+  // carries pinnedOrder; selectPortfolio keeps honoring it).
+  const rescored = scoreCandidates(ranked, { now: T0 + 2 * H, spendable: THIN, counters: { suggestion: { alpha: 9, beta: 0 } } });
+  const plan2 = selectPortfolio(rescored, { budgetFrac: 10, pinnedOrder: ["c", "a", "b"] });
+  assert.deepEqual(plan2.selected.map((x) => x.id), ["c", "a", "b"]);
+});
+
+test("the window state carries the pin across ticks", () => {
+  const { window } = evaluateWindow(null, tickInput());
+  const pinned = normalizeWindow({ ...window, pinnedOrder: ["c", "a"] });
+  assert.deepEqual(pinned.pinnedOrder, ["c", "a"]);
+});
+
+test("candidate categories are the spec's five classes; unknown categories fall back to suggestion", () => {
+  assert.deepEqual([...CANDIDATE_CATEGORIES], ["queue-tonight", "suggestion", "data-source", "maintenance", "watcher"]);
+  const [s] = scoreCandidates([candidate({ category: "mystery" })], { now: T0 + H, spendable: FAT });
+  assert.equal(s.category, "suggestion");
+});
+
+test("foldVerdictIntoCounters feeds the two counters per category from verdicts", () => {
+  let counters = {};
+  counters = foldVerdictIntoCounters(counters, { category: "queue-tonight", verdict: "accept" });
+  counters = foldVerdictIntoCounters(counters, { category: "queue-tonight", verdict: "edit" });
+  counters = foldVerdictIntoCounters(counters, { category: "queue-tonight", verdict: "veto" });
+  counters = foldVerdictIntoCounters(counters, { category: "queue-tonight", verdict: "open", never: true });
+  assert.deepEqual(counters["queue-tonight"], { alpha: 2, beta: 2 });
+  // thompsonMultiplier consumes the same shape.
+  assert.equal(thompsonMultiplier({ queueTonightX: { alpha: 1, beta: 0 } }, "nope"), 0.5);
+});
+
+// ---------------------------------------------------------------------------
+// §11.5 — execution-contract helpers
+// ---------------------------------------------------------------------------
+
+test("empty gate set passes with a `no-gates` note; defined gates list their names", () => {
+  const empty = evaluateGates({});
+  assert.deepEqual(empty, { pass: true, gates: [], note: "no-gates" });
+  const none = evaluateGates(null);
+  assert.equal(none.note, "no-gates");
+  const full = evaluateGates({ gates: { typecheck: "npm run typecheck", tests: "npm test", lint: null } });
+  assert.deepEqual(full, { pass: true, gates: ["typecheck", "tests"], note: null });
+});
+
+test("git-only rule: non-git projects never receive file-editing jobs; read-only work is fine", () => {
+  assert.deepEqual(gitOnlyJobRule({ git: false }, { fileEditing: true }), { allowed: false, reason: "non-git" });
+  assert.deepEqual(gitOnlyJobRule({}, { fileEditing: true }), { allowed: false, reason: "non-git" });
+  assert.deepEqual(gitOnlyJobRule({ git: false }, { fileEditing: false }), { allowed: true, reason: null });
+  assert.deepEqual(gitOnlyJobRule({ git: true }, { fileEditing: true }), { allowed: true, reason: null });
+});
+
+test("batch-flagged request-shaped tasks route to a batch pool only where the adapter reports one", () => {
+  const providers = { anthropic: { batchPool: true }, groq: {} };
+  assert.deepEqual(routeRequestShaped({ provider: "anthropic", requestShaped: true }, providers), { provider: "anthropic", pool: "batch", reason: null });
+  assert.deepEqual(routeRequestShaped({ provider: "groq", requestShaped: true }, providers).pool, "interactive");
+  assert.deepEqual(routeRequestShaped({ provider: "anthropic", requestShaped: false }, providers).pool, "interactive");
+  assert.deepEqual(routeRequestShaped({ provider: "unknown", requestShaped: true }, providers).pool, "interactive");
+  assert.equal(routeRequestShaped({}, providers).provider, null);
+});
+
+test("draft expiry: unreviewed 7d → closed with an `expire` verdict + one-line digest note", () => {
+  const old = { id: "d1", title: "old draft", createdMs: T0 - 7 * 24 * H };
+  const fresh = { id: "d2", createdMs: T0 - 6 * 24 * H };
+  const reviewed = { id: "d3", createdMs: T0 - 30 * 24 * H, reviewed: true };
+  const { expired, keep } = expireDrafts([old, fresh, reviewed, null], T0);
+  assert.equal(expired.length, 1);
+  assert.equal(expired[0].draft.id, "d1");
+  assert.equal(expired[0].verdict, "expire");
+  assert.match(expired[0].digestNote, /old draft/);
+  assert.deepEqual(keep.map((d) => d?.id ?? null), ["d2", "d3", null]);
+});
+
+test("preempt-on-return: present flip → pause list + window close; run-now-during-presence windows are exempt", () => {
+  const { window } = evaluateWindow(null, tickInput({ now: T0 + H }));
+  const decision = preemptOnReturn({ presence: "present", window, runningJobs: ["j1", "j2", 7] });
+  assert.equal(decision.shouldPause, true);
+  assert.equal(decision.closeWindow, true);
+  assert.deepEqual(decision.pauseJobs, ["j1", "j2"]);
+
+  const runNowOpen = evaluateWindow(null, tickInput({ presence: "present", runNow: true })).window;
+  const exempt = preemptOnReturn({ presence: "present", window: runNowOpen, runningJobs: ["j1"] });
+  assert.equal(exempt.shouldPause, false);
+
+  const closedWindow = normalizeWindow({ ...window, state: "closed" });
+  assert.equal(preemptOnReturn({ presence: "present", window: closedWindow }).shouldPause, false);
+  assert.equal(preemptOnReturn({ presence: "gone", window }).shouldPause, false);
+});
+
+// ---------------------------------------------------------------------------
+// The accessor (injected I/O, end-to-end pure-logic glue)
+// ---------------------------------------------------------------------------
+
+function memoryScheduler(over = {}) {
+  let saved = { v: 1, window: null };
+  const ledgerRows = [];
+  const scheduler = createOvernightScheduler({
+    store: {
+      load: async () => saved,
+      save: async (d) => {
+        saved = d;
+      },
+    },
+    now: () => T0 + H,
+    budget: over.budget ?? (async () => FAT),
+    ledger: { append: async (row) => ledgerRows.push(row) },
+    ...over,
+  });
+  return { scheduler, saved: () => saved, ledgerRows };
+}
+
+test("tick: opens on the absence signal, scores + selects the plan under the live spendable, persists", async () => {
+  const { scheduler, saved, ledgerRows } = memoryScheduler();
+  const out = await scheduler.tick(tickInput({ candidates: [candidate({ id: "a", predictedCost: 0.5 }), candidate({ id: "b", predictedCost: 0.3 })] }));
+  assert.equal(out.window.state, "open");
+  assert.deepEqual(out.plan.selected.map((c) => c.id), ["a", "b"]);
+  assert.equal(out.plan.budgetFrac, FAT.spendableFrac);
+  assert.equal(saved().window.state, "open");
+  assert.ok(ledgerRows.some((r) => r.kind === "cto.overnight.open"));
+
+  // The user returns → the next tick closes the window (and the plan is gone).
+  const closed = await scheduler.tick(tickInput({ now: T0 + 2 * H, presence: "present", candidates: [] }));
+  assert.equal(closed.window.state, "closed");
+  assert.equal(closed.plan, null);
+});
+
+test("tick with an unreadable budget still plans (graceful λ=0 fat default)", async () => {
+  const { scheduler } = memoryScheduler({ budget: async () => { throw new Error("budget down"); } });
+  const out = await scheduler.tick(tickInput({ candidates: [candidate({ predictedCost: 0.5 })] }));
+  assert.equal(out.window.state, "open");
+  assert.equal(out.plan.selected.length, 1);
+  assert.equal(out.plan.selected[0].lambda, 0);
+});
+
+test("reconcile persists the re-derived window and reports the spendable recompute", async () => {
+  const { scheduler, saved } = memoryScheduler();
+  await scheduler.tick(tickInput({ candidates: [candidate()] }));
+  const out = await scheduler.reconcile({ now: T0 + 2 * H, trough: TROUGH });
+  assert.equal(out.window.state, "open");
+  assert.equal(out.recomputeSpendable, true);
+  assert.equal(saved().window.state, "open");
+});
+
+test("every pure entry point survives garbage input (graceful, never throws)", () => {
+  assert.doesNotThrow(() => evaluateWindow(undefined, undefined));
+  assert.doesNotThrow(() => scoreCandidates(undefined, undefined));
+  assert.doesNotThrow(() => selectPortfolio(undefined, undefined));
+  assert.doesNotThrow(() => expireDrafts(undefined, undefined));
+  assert.doesNotThrow(() => reconcileOnRestart(null, null));
+  assert.doesNotThrow(() => lambdaFromSpendable(null));
+  assert.doesNotThrow(() => betaMeanGuards());
+  function betaMeanGuards() {
+    // imported indirectly through the module — presence checked via thompson path
+    thompsonMultiplier(null, null, () => 0.5);
+  }
+});
