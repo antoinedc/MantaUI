@@ -596,10 +596,11 @@ test("correctFact queues a user supersession that the gatekeeper auto-accepts (n
   assert.equal(newFact.statement, "actually the build is green");
   assert.deepEqual(newFact.refs, ["s1"], "the original fact's refs ride along");
 
-  // Idempotent retry: same (fact, statement) resolves to the same outcome.
+  // Idempotent retry: same (fact, statement) lands on the already-superseded
+  // guard pointing at the replacement — no second queue entry, no double write.
   const retry = await engine.correctFact({ project: "alpha", factId: "cto:old", statement: "actually the build is green" });
-  assert.equal(retry.ok, true);
-  assert.equal(retry.proposalId, undefined, "already-superseded target returns the guard, not a new queue entry");
+  assert.equal(retry.ok, false);
+  assert.equal(retry.headId, res.supersededBy);
 });
 
 test("correctFact guards: unknown fact, already-superseded, blank/overlong statement", async () => {
@@ -641,7 +642,7 @@ test("archivePage paginates newest-first with an exclusive before-cursor", async
 
 test("viewRender picks the first project when none given, sorts rows, and touches the rendered facts (§6.4 access)", async () => {
   const { engine, inmemory } = makeEngine({ nowMs: 10 * D });
-  await inmemory.set("f:beta", {
+  await inmemory.set("f:alpha", {
     v: 1,
     facts: [
       makeFact({ id: "cto:young", created: 9 * D, last_accessed: 1 * D, access_count: 1 }),
@@ -650,17 +651,16 @@ test("viewRender picks the first project when none given, sorts rows, and touche
   });
 
   const view = await engine.viewRender(null);
-  assert.equal(view.project, "beta");
+  assert.equal(view.project, "alpha", "no project → the first known one");
   assert.deepEqual(view.projects, ["alpha", "beta"]);
   assert.deepEqual(view.active.map((f) => f.id), ["cto:young"], "newest first");
   assert.deepEqual(view.superseded.map((f) => f.id), ["cto:old"]);
 
-  const young = inmemory.get("f:beta").facts.find((f) => f.id === "cto:young");
+  const young = inmemory.get("f:alpha").facts.find((f) => f.id === "cto:young");
   assert.equal(young.access_count, 2, "rendering into a drill-down view counts as access");
   assert.equal(young.last_accessed, 10 * D);
 
   // touch: false skips the access write (e.g. cheap re-reads).
-  const untouched = inmemory.get("f:beta").facts.find((f) => f.id === "cto:young");
   await engine.viewRender(null, { touch: false });
-  assert.equal(inmemory.get("f:beta").facts.find((f) => f.id === "cto:young").access_count, untouched.access_count);
+  assert.equal(inmemory.get("f:alpha").facts.find((f) => f.id === "cto:young").access_count, young.access_count);
 });

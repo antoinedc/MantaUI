@@ -2038,7 +2038,7 @@ function FactRow({ row, struck }: { row: CtoFactRow; struck?: boolean }) {
   return (
     <div className="rounded-md border border-border-subtle px-3 py-2">
       <div className="flex items-center gap-2">
-        <span className={"rounded border px-1.5 py-0.5 text-[10px] font-medium capitalize " + factKindChip(row.kind)}>
+        <span className={"rounded-md border px-2 py-1 text-[10px] font-medium capitalize " + factKindChip(row.kind)}>
           {row.kind}
         </span>
         <span className="min-w-0 flex-1 truncate text-sm text-text" style={struck ? { textDecoration: "line-through", opacity: 0.65 } : undefined}>
@@ -2048,16 +2048,16 @@ function FactRow({ row, struck }: { row: CtoFactRow; struck?: boolean }) {
           {pct}%
         </span>
       </div>
-      <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-fill-active">
+      <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-fill-active">
         <div className="h-full rounded-full bg-accent" style={{ width: `${pct}%` }} />
       </div>
-      <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-text-faint">
+      <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-text-faint">
         <span>{row.senderLabel}</span>
         <span>· {formatAge(row.ageMs)} old</span>
         {row.expired ? <span className="text-text-muted">· expired</span> : null}
         {struck && row.supersededBy ? <span>· superseded by {row.supersededBy}</span> : null}
         {row.refs.map((ref) => (
-          <span key={ref} className="truncate rounded bg-fill-active px-1.5 py-0.5 text-[10px] text-text-muted" title={ref}>
+          <span key={ref} className="truncate rounded-md bg-fill-active px-2 py-1 text-[10px] text-text-muted" title={ref}>
             {ref}
           </span>
         ))}
@@ -2156,13 +2156,13 @@ function BlackboardView({
         </button>
         <div className="mt-4 flex items-center justify-between">
           <h2 className="text-lg font-semibold text-text">Blackboard</h2>
-          <div className="flex gap-1 rounded-md border border-border-subtle p-0.5">
+          <div className="flex gap-1 rounded-md border border-border-subtle p-1">
             {(["facts", "archive"] as const).map((t) => (
               <button
                 key={t}
                 type="button"
                 onClick={() => (t === "archive" ? openArchive() : setTab("facts"))}
-                className={"rounded px-2.5 py-1 text-xs capitalize " + (tab === t ? "bg-fill-active text-text" : "text-text-muted")}
+                className={"rounded-md px-3 py-1 text-xs capitalize " + (tab === t ? "bg-fill-active text-text" : "text-text-muted")}
               >
                 {t}
               </button>
@@ -2196,14 +2196,14 @@ function BlackboardView({
                   <div key={row.id}>
                     <FactRow row={row} />
                     {correcting === row.id ? (
-                      <div className="mt-1.5 rounded-md border border-border-subtle bg-fill px-3 py-2">
+                      <div className="mt-2 rounded-md border border-border-subtle bg-fill px-3 py-2">
                         <input
                           type="text"
                           value={correction}
                           onChange={(e) => setCorrection(e.target.value)}
                           placeholder="The correct statement…"
                           maxLength={200}
-                          className="w-full rounded border border-border-subtle bg-bg px-2 py-1 text-sm text-text"
+                          className="w-full rounded-md border border-border-subtle bg-bg px-2 py-1 text-sm text-text"
                           autoFocus
                         />
                         <div className="mt-2 flex gap-2">
@@ -2211,7 +2211,7 @@ function BlackboardView({
                             type="button"
                             onClick={() => void submitCorrection(row)}
                             disabled={!correction.trim()}
-                            className="rounded-md bg-accent px-2.5 py-1 text-xs font-medium text-text disabled:opacity-40"
+                            className="rounded-md bg-accent px-3 py-1 text-xs font-medium text-text disabled:opacity-40"
                           >
                             Supersede
                           </button>
@@ -2221,7 +2221,7 @@ function BlackboardView({
                               setCorrecting(null);
                               setCorrection("");
                             }}
-                            className="rounded-md border border-border-subtle px-2.5 py-1 text-xs text-text-muted"
+                            className="rounded-md border border-border-subtle px-3 py-1 text-xs text-text-muted"
                           >
                             Cancel
                           </button>
@@ -2232,14 +2232,14 @@ function BlackboardView({
                       <button
                         type="button"
                         onClick={() => setCorrecting(correcting === row.id ? null : row.id)}
-                        className="rounded-md border border-border-subtle px-2 py-0.5 text-[11px] text-text-muted hover:text-text"
+                        className="rounded-md border border-border-subtle px-2 py-1 text-[11px] text-text-muted hover:text-text"
                       >
                         Wrong?
                       </button>
                       <button
                         type="button"
                         onClick={() => void pin(row)}
-                        className="rounded-md border border-border-subtle px-2 py-0.5 text-[11px] text-text-muted hover:text-text"
+                        className="rounded-md border border-border-subtle px-2 py-1 text-[11px] text-text-muted hover:text-text"
                       >
                         Pin
                       </button>
@@ -2277,7 +2277,7 @@ function BlackboardView({
               <button
                 type="button"
                 onClick={() => void loadArchive(render?.project ?? null, nextBefore)}
-                className="mt-3 rounded-md border border-border-subtle px-3 py-1.5 text-xs text-text-muted hover:text-text"
+                className="mt-3 rounded-md border border-border-subtle px-3 py-2 text-xs text-text-muted hover:text-text"
               >
                 Load more
               </button>
@@ -2360,11 +2360,11 @@ function ToolIntegrationsView({
     <div key={row.tool} className="rounded-md border border-border-subtle px-3 py-2">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-sm font-medium text-text">{row.displayName}</span>
-        <span className="rounded border border-border-subtle px-1.5 py-0.5 text-[10px] capitalize text-text-muted">{row.status}</span>
+        <span className="rounded-md border border-border-subtle px-2 py-1 text-[10px] capitalize text-text-muted">{row.status}</span>
         {row.derivedRole ? (
           <span
             className={
-              "rounded border px-1.5 py-0.5 text-[10px] " +
+              "rounded-md border px-2 py-1 text-[10px] " +
               (row.derivedRole === "dead" ? "border-accent text-accent" : "border-border-subtle text-text-muted")
             }
           >
@@ -2375,7 +2375,7 @@ function ToolIntegrationsView({
           {row.uses} uses · {row.weeksActive} wk active · ewma {row.ewmaPerWeek}/wk
         </span>
       </div>
-      <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] text-text-faint">
+      <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-text-faint">
         <span>
           vitality:{" "}
           {row.vitality.ewma != null
@@ -2390,7 +2390,7 @@ function ToolIntegrationsView({
         {RING_LABELS.map(({ ring, label }) => {
           const value = row.consent[ring];
           return (
-            <span key={ring} className="flex items-center gap-1 rounded-md border border-border-subtle px-2 py-0.5 text-[11px]">
+            <span key={ring} className="flex items-center gap-1 rounded-md border border-border-subtle px-2 py-1 text-[11px]">
               <span className="text-text-muted">{label}</span>
               <span className={value === "yes" ? "font-medium text-accent" : value === "never" ? "font-medium text-text" : "text-text-faint"}>
                 {value ?? "—"}
@@ -2400,7 +2400,7 @@ function ToolIntegrationsView({
                   type="button"
                   disabled={busyTool === row.tool}
                   onClick={() => void revoke(row, ring)}
-                  className="ml-0.5 text-[10px] text-text-faint hover:text-text"
+                  className="ml-1 text-[10px] text-text-faint hover:text-text"
                   title={`Revoke ${label} consent (writes the ring to no)`}
                 >
                   revoke
@@ -2469,7 +2469,7 @@ function ToolIntegrationsView({
                         type="button"
                         disabled={busyTool === row.tool}
                         onClick={() => void unnever(row)}
-                        className="rounded-md border border-border-subtle px-2.5 py-1 text-[11px] text-text-muted hover:text-text"
+                        className="rounded-md border border-border-subtle px-3 py-1 text-[11px] text-text-muted hover:text-text"
                         title="Clear the never verdict — the tool re-enters the lifecycle at observed"
                       >
                         Un-never

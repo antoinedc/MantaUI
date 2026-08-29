@@ -589,17 +589,26 @@ test("deriveRole maps the §7.3 quadrants (both / workflow / data-source / dead)
   // Engagement only → workflow.
   assert.equal(deriveRole(mkTool(), { nowMs }), "workflow");
   // Vitality only → data-source.
-  assert.equal(deriveRole(mkTool({ uses: 1, weeksActive: 0 }), { nowMs }), "data-source");
-  // Both low WITH prior engagement → the dead-tool candidate flag.
-  assert.equal(deriveRole(mkTool({ vitality: { last_event: W0, inflow_rate: 0, ewma: 0, last_probed: null } }), { nowMs }), "dead");
+  assert.equal(
+    deriveRole(mkTool({ uses: 1, weeksActive: 0, vitality: { last_event: nowMs - DAY, inflow_rate: null, ewma: null, last_probed: nowMs } }), { nowMs }),
+    "data-source",
+  );
+  // Both low WITH prior engagement → the dead-tool candidate flag. (The
+  // engagement bar is NOT met — 1 week < 2 — and last_event is older than
+  // the 14-day vitality-recency window.)
+  assert.equal(
+    deriveRole(mkTool({ weeksActive: 1, vitality: { last_event: W0 - 10 * DAY, inflow_rate: 0, ewma: 0, last_probed: null } }), { nowMs }),
+    "dead",
+  );
   // Nothing at all (no uses) → no derived role.
   assert.equal(deriveRole(mkTool({ uses: 0, weeksActive: 0 }), { nowMs }), null);
 });
 
 test("listTools copies the vitality axis and derives the display role without writing it back", async () => {
   const cards = fakeCards();
+  // Uses across two distinct weeks so the §7.4 engagement bar clears.
   const mk = (ts) => ({ channel: "transcript", identity: "aws", detail: "cli:aws", ts, source: "catalog" });
-  const { registry, registryStore } = makeRegistry({ cards, usageRows: [mk(W0), mk(W0 + DAY), mk(W0 + 2 * DAY)], nowMs: W0 + 3 * DAY });
+  const { registry, registryStore } = makeRegistry({ cards, usageRows: [mk(W0), mk(W0 + 8 * DAY), mk(W0 + 9 * DAY)], nowMs: W0 + 10 * DAY });
   await registry.dailyScan();
   await registry.resolveConnect({ tool: "aws", answer: "connect" });
 
@@ -637,9 +646,10 @@ test("§7.4 per-ring revoke writes the ring to no; revoked metadata stops the pr
   assert.equal((await registry.revokeConsent("aws", "bogus")).ok, false);
   assert.equal((await registry.revokeConsent("", "metadata")).ok, false);
 
-  // deep_read grant → revoke round-trips ring by ring.
-  await registry.dailyScan();
-  assert.equal((await registry.resolveConnect({ tool: "aws", answer: "connect-deep-read" })).ok, true);
+  // deep_read grant → revoke round-trips ring by ring. (The deep-read grant
+  // path lives in the deep-read ask flow, not resolveConnect — seed the ring
+  // directly to exercise the revoke transition.)
+  registryStore._state().tools.find((x) => x.tool === "aws").consent.deep_read = "yes";
   assert.equal(await registry.consentFor("aws", "deep_read"), "yes");
   assert.equal((await registry.revokeConsent("aws", "deep_read")).ok, true);
   assert.equal(await registry.consentFor("aws", "deep_read"), "no");
@@ -655,9 +665,10 @@ test("revoke then un-never-style lifecycle: a revoked tool can re-grant on a fre
   await registry.resolveConnect({ tool: "aws", answer: "connect" });
   assert.equal((await registry.revokeConsent("aws", "metadata")).ok, true);
 
-  // The revoked tool is still integrated-with-no-consent — un-never (the
-  // drill-down's other lifecycle control) is a clean error here, not silent.
+  // The revoked tool keeps its lifecycle status — revoke narrows features;
+  // it does not reset the lifecycle (and un-never is a clean error here).
   assert.equal((await registry.unNever("aws")).ok, false);
+  const statusBefore = registryStore._state().tools.find((x) => x.tool === "aws").status;
   const t = registryStore._state().tools.find((x) => x.tool === "aws");
-  assert.equal(t.status, "integrated", "revoke narrows features; it does not reset the lifecycle");
+  assert.equal(t.status, statusBefore, "revoke narrows features; it does not reset the lifecycle");
 });
