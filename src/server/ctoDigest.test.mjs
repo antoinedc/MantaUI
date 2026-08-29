@@ -570,3 +570,101 @@ test("generateDigest: zero held suggestions → no heldSuggestions field (no asi
   const digest = await engine.generateDigest({ reason: "manual" });
   assert.equal(digest.heldSuggestions, undefined, "no held count → no aside field");
 });
+
+// ---------------------------------------------------------------------------
+// BET-1403 — trust asides: act-and-report lines + tier changes (§9.2/§9.4)
+// ---------------------------------------------------------------------------
+
+test("buildDigestContext: trust reports are injected as a high-priority input block", () => {
+  const g = selectGranularity(2 * DAY_MS, { gMinutes: G });
+  const plain = buildDigestContext({ granularity: g, window: [1, 200], slice: [] });
+  const withReports = buildDigestContext({
+    granularity: g,
+    window: [1, 200],
+    slice: [],
+    reports: [{ kind: "act", text: "Acted on my own (record-decision): Adopt pact", refs: ["msg:1"] }],
+  });
+  assert.equal(withReports.length, plain.length + 1);
+  const block = withReports[withReports.length - 1];
+  assert.equal(block.priority, "high");
+  assert.match(block.text, /MUST appear as a progress-tier item/);
+  assert.match(block.text, /Acted on my own/);
+});
+
+test("generateDigest: act reports reach the model input AND land as deterministic progress asides; announced exactly once", async () => {
+  let sawContext = null;
+  const model = async ({ context } = {}) => {
+    sawContext = context;
+    return { text: JSON.stringify({ items: [{ tier: "progress", text: "shipped", refs: [] }] }) };
+  };
+  const marked = [];
+  const trust = {
+    listAnnouncements: async () => [
+      { id: "a1", ts: 900, kind: "act", text: "Acted on my own (record-decision): Adopt pact", refs: ["msg:1"] },
+      { id: "a2", ts: 950, kind: "promoted", text: 'Trust promoted: the "start-job" class may now use the veto-window verb.', refs: [] },
+    ],
+    markAnnounced: async (ids) => {
+      marked.push(...ids);
+    },
+  };
+  const { engine, store } = makeEngine({ runEphemeral: model, trust });
+  const digest = await engine.generateDigest({ reason: "manual" });
+  const texts = digest.items.map((i) => `${i.tier}:${i.text}`);
+  // Both announcements deterministically present as progress items.
+  assert.ok(texts.includes("progress:Acted on my own (record-decision): Adopt pact"));
+  assert.ok(texts.some((t) => t.startsWith("progress:Trust promoted:")));
+  // The act line was injected into the model input too (the mandatory report).
+  const inputBlock = (Array.isArray(sawContext) ? sawContext : (sawContext?.blocks ?? [])).find((b) => /Acted on my own/.test(b.text || ""));
+  assert.ok(inputBlock, "act report injected into the digest input");
+  // Consumed exactly once — not re-announced on the next generation.
+  assert.deepEqual(marked.sort(), ["a1", "a2"]);
+  assert.equal(store.map.get(String(digest.generated)).items.length, digest.items.length);
+});
+
+test("generateDigest: a model item already reporting the act is not duplicated by the aside", async () => {
+  const model = async () => ({
+    text: JSON.stringify({ items: [{ tier: "progress", text: "Acted on my own (record-decision): Adopt pact", refs: ["msg:1"] }] }),
+  });
+  const marked = [];
+  const trust = {
+    listAnnouncements: async () => [{ id: "a1", ts: 900, kind: "act", text: "Acted on my own (record-decision): Adopt pact", refs: ["msg:1"] }],
+    markAnnounced: async (ids) => marked.push(...ids),
+  };
+  const { engine } = makeEngine({ runEphemeral: model, trust });
+  const digest = await engine.generateDigest({ reason: "manual" });
+  const matches = digest.items.filter((i) => i.text === "Acted on my own (record-decision): Adopt pact");
+  assert.equal(matches.length, 1); // deduped — the model's item wins
+  assert.deepEqual(marked, ["a1"]); // still consumed
+});
+
+test("generateDigest: trust asides survive a degraded digest (MUST appear, even when the model fails)", async () => {
+  const trust = {
+    listAnnouncements: async () => [{ id: "a1", ts: 900, kind: "act", text: "Acted on my own (record-decision): Adopt pact", refs: [] }],
+    markAnnounced: async () => {},
+  };
+  const { engine } = makeEngine({ runEphemeral: null, trust }); // no model → degraded path
+  const digest = await engine.generateDigest({ reason: "manual" });
+  assert.ok(digest.items.some((i) => i.tier === "progress" && i.text === "Acted on my own (record-decision): Adopt pact"));
+});
+
+test("generateDigest: a failed save does NOT consume the trust queue — the mandatory act report re-announces (§9.2 invariant 1)", async () => {
+  const marked = [];
+  const trust = {
+    listAnnouncements: async () => [{ id: "a1", ts: 900, kind: "act", text: "Acted on my own (record-decision): Adopt pact", refs: [] }],
+    markAnnounced: async (ids) => marked.push(...ids),
+  };
+  // First generation: the digest composes (with the report appended) but the
+  // save throws — the announcement queue must stay intact.
+  const failing = { ...makeDigestStore(), save: async () => { throw new Error("disk full"); } };
+  const { engine } = makeEngine({ runEphemeral: async () => ({ text: JSON.stringify({ items: [{ tier: "progress", text: "shipped", refs: [] }] }) }), trust, digests: failing });
+  const failed = await engine.generateDigest({ reason: "manual" });
+  assert.ok(failed.items.some((i) => i.tier === "progress" && i.text === "Acted on my own (record-decision): Adopt pact"));
+  assert.deepEqual(marked, [], "a failed save must not consume the announcements");
+
+  // Next generation (save works again): the same report re-announces and is
+  // then consumed exactly once.
+  const { engine: engine2 } = makeEngine({ runEphemeral: async () => ({ text: JSON.stringify({ items: [{ tier: "progress", text: "shipped", refs: [] }] }) }), trust });
+  const next = await engine2.generateDigest({ reason: "manual" });
+  assert.equal(next.items.filter((i) => i.text === "Acted on my own (record-decision): Adopt pact").length, 1);
+  assert.deepEqual(marked, ["a1"]);
+});

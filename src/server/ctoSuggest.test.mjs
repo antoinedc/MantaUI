@@ -109,8 +109,23 @@ test("decideVerb: p between p_ask and p_act → decision (no notify unless recur
   assert.deepEqual(decideVerb({ p: 0.8, sourceKind: "fact-anomaly" }), { verb: "decision", notify: false });
 });
 
-test("decideVerb: act branch is unreachable in P2 — throws on p >= p_act", () => {
-  assert.throws(() => decideVerb({ p: 0.99 }), /nothing acts in P2/);
+test("decideVerb: act branch without trust — throws on p >= p_act (BET-1403: ask-tier hold)", () => {
+  assert.throws(() => decideVerb({ p: 0.99 }), /class not trusted/);
+  // Eligibility gates the climb (§9.3): an ask-capped class never leaves the
+  // ask verbs even when its tier record somehow reads promoted.
+  assert.throws(() => decideVerb({ p: 0.99, tier: "act", eligible: false }), /class not trusted/);
+});
+
+test("decideVerb: trust ladder raises the ceiling (§9.2/§9.4)", () => {
+  // veto-window tier: p >= p_ask surfaces the veto-window verb.
+  assert.deepEqual(decideVerb({ p: 0.6, tier: "veto-window", eligible: true }), { verb: "veto-window", notify: false });
+  // act tier but below the act bar → still the veto-window verb.
+  assert.deepEqual(decideVerb({ p: 0.6, tier: "act", eligible: true }), { verb: "veto-window", notify: false });
+  // act tier + p >= p_act → the act verb fires.
+  assert.deepEqual(decideVerb({ p: 0.99, tier: "act", eligible: true }), { verb: "act", notify: false });
+  assert.deepEqual(decideVerb({ p: 0.99, tier: "act", eligible: true, sourceKind: "watcher-hit-rate" }), { verb: "act", notify: true });
+  // cold-start dominates the ladder (§10.6-4): capped at ask whatever the tier.
+  assert.deepEqual(decideVerb({ p: 0.99, coldStart: true, tier: "act", eligible: true }), { verb: "decision", capped: true, notify: false });
 });
 
 test("decideVerb: cold-start caps high-score candidates at the ask verb (no throw)", () => {
@@ -455,4 +470,296 @@ test("production wiring can surface a decision card: reliability 1.0 × prior 0.
   assert.equal(r.surfaced, 1);
   assert.equal(h.cardPayload.cards.length, 1);
   assert.equal(h.cardPayload.cards[0].variant, "decision");
+});
+
+// ---------------------------------------------------------------------------
+// BET-1403 — the trust ladder in the pipeline (§9.2/§9.3/§9.4)
+// ---------------------------------------------------------------------------
+
+test("pipeline: veto-window tier surfaces the veto verb; missing veto writer degrades to the decision card", async () => {
+  const h = makeHarness();
+  // Promote the class by seeding the trust state directly (same store the
+  // suggest engine consults), with a non-cold-start verdict ledger.
+  await h.setEngineState({ v: 1, trust: { tiers: { "record-decision": "veto-window" } } });
+  const sug2 = createCtoSuggest({
+    now: () => h.clock.ms,
+    publish: () => {},
+    ledger: { append: async (r) => h.ledgerRows.push(r), read: async () => h.ledgerRows },
+    verdicts: {
+      load: async () => ({ entries: Array(VERDICT_MIN).fill({}) }),
+      save: async () => {},
+    },
+    trustStore: {
+      load: async () => ({ v: 1, tiers: { "record-decision": "veto-window" } }),
+      save: async () => {},
+    },
+    engineState: { load: async () => ({ v: 1 }), save: async () => {} },
+    digests: { list: async () => [], load: async () => null },
+    facts: { list: async () => [], load: async () => null },
+    configGet: async () => ({ ctoTier: "medium" }),
+    cards: {
+      upsertDecision: async (c) => {
+        h.cardPayload.cards.push(c);
+        return { changed: true, isNew: true };
+      },
+      // no upsertVeto — BET-1419 ships it; the verb must degrade, not vanish
+    },
+    runSuggest: async () => ({
+      text: JSON.stringify({ candidates: [{ class: "record-decision", finding: { text: "a", refs: [] }, options: [{ label: "Go", action: { type: "record-decision", payload: {} } }] }] }),
+    }),
+    runWorthiness: async () => ({ text: "0.9" }),
+    senderReliability: async () => 1.0,
+  });
+  const r = await sug2.processFinding({ id: "rec:vd", sourceKind: "fact-anomaly", text: "a", refs: [] }, { coldStart: false, tier: "medium" });
+  assert.equal(r.surfaced, 1);
+  assert.equal(h.cardPayload.cards.length, 1);
+  assert.equal(h.cardPayload.cards[0].variant, "decision"); // degraded veto verb
+  assert.ok(h.ledgerRows.some((x) => x.kind === "suggest.presented" && x.variant === "decision"));
+});
+
+test("pipeline: veto-window verb writes the veto card when the writer exists", async () => {
+  const h = makeHarness();
+  const vetoCards = [];
+  const sug2 = createCtoSuggest({
+    now: () => h.clock.ms,
+    publish: () => {},
+    ledger: { append: async (r) => h.ledgerRows.push(r), read: async () => h.ledgerRows },
+    verdicts: {
+      load: async () => ({ entries: Array(VERDICT_MIN).fill({}) }),
+      save: async () => {},
+    },
+    trustStore: {
+      load: async () => ({ v: 1, tiers: { "record-decision": "veto-window" } }),
+      save: async () => {},
+    },
+    engineState: { load: async () => ({ v: 1 }), save: async () => {} },
+    digests: { list: async () => [], load: async () => null },
+    facts: { list: async () => [], load: async () => null },
+    configGet: async () => ({ ctoTier: "medium" }),
+    cards: {
+      upsertDecision: async (c) => {
+        h.cardPayload.cards.push(c);
+        return { changed: true, isNew: true };
+      },
+      upsertVeto: async (c) => {
+        vetoCards.push(c);
+        return { changed: true, isNew: true };
+      },
+    },
+    runSuggest: async () => ({
+      text: JSON.stringify({ candidates: [{ class: "record-decision", finding: { text: "a", refs: [] }, options: [{ label: "Go", action: { type: "record-decision", payload: {} } }] }] }),
+    }),
+    runWorthiness: async () => ({ text: "0.9" }),
+    senderReliability: async () => 1.0,
+  });
+  const r = await sug2.processFinding({ id: "rec:vv", sourceKind: "fact-anomaly", text: "a", refs: [] }, { coldStart: false, tier: "medium" });
+  assert.equal(r.surfaced, 1);
+  assert.equal(vetoCards.length, 1);
+  assert.equal(vetoCards[0].variant, "veto");
+  assert.equal(h.cardPayload.cards.length, 0); // no ask-card fallback
+  assert.ok(h.ledgerRows.some((x) => x.kind === "suggest.presented" && x.variant === "veto"));
+});
+
+test("pipeline: act tier + executable action executes, ledgers, and queues the digest report", async () => {
+  const h = makeHarness();
+  const executed = [];
+  let es = { v: 1, tiers: { "record-decision": "act" } }; // memory-backed trust store: recordAct persists the pending report
+  const sug2 = createCtoSuggest({
+    now: () => h.clock.ms,
+    publish: () => {},
+    ledger: { append: async (r) => h.ledgerRows.push(r), read: async () => h.ledgerRows },
+    verdicts: {
+      load: async () => ({ entries: Array(VERDICT_MIN).fill({}) }),
+      save: async () => {},
+    },
+    trustStore: {
+      load: async () => es,
+      save: async (p) => {
+        es = p;
+      },
+    },
+    engineState: { load: async () => ({ v: 1 }), save: async () => {} },
+    digests: { list: async () => [], load: async () => null },
+    facts: { list: async () => [], load: async () => null },
+    configGet: async () => ({ ctoTier: "medium" }),
+    cards: {
+      upsertDecision: async (c) => {
+        h.cardPayload.cards.push(c);
+        return { changed: true, isNew: true };
+      },
+    },
+    executeAction: async ({ cls, action }) => {
+      executed.push({ cls, action });
+      return { ok: true };
+    },
+    runSuggest: async () => ({
+      text: JSON.stringify({ candidates: [{ class: "record-decision", finding: { text: "Adopt pact", refs: ["msg:1"] }, options: [{ label: "Record", action: { type: "record-decision", payload: { statement: "x" } } }] }] }),
+    }),
+    runWorthiness: async () => ({ text: "1.0" }), // p = 1.0 × 1.0 (prior override) ≥ p_act → act verb
+    senderReliability: async () => 1.0,
+    classPriors: { "record-decision": 1.0 },
+  });
+  const r = await sug2.processFinding({ id: "rec:aa", sourceKind: "fact-anomaly", text: "a", refs: [] }, { coldStart: false, tier: "medium" });
+  assert.equal(r.surfaced, 1);
+  assert.equal(executed.length, 1);
+  assert.equal(executed[0].action.type, "record-decision");
+  assert.equal(h.cardPayload.cards.length, 0); // no card — it acted
+  assert.ok(h.ledgerRows.some((x) => x.kind === "suggest.acted" && x.class === "record-decision"));
+  // The mandatory report (§9.2 invariant 1) is queued for the next digest.
+  const pending = await sug2._trust.listAnnouncements();
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].kind, "act");
+  assert.match(pending[0].text, /^Acted on my own \(record-decision\)/);
+});
+
+test("pipeline: act tier + unexecutable action degrades to the veto-window verb (never silently acts)", async () => {
+  const h = makeHarness();
+  const sug2 = createCtoSuggest({
+    now: () => h.clock.ms,
+    publish: () => {},
+    ledger: { append: async (r) => h.ledgerRows.push(r), read: async () => h.ledgerRows },
+    verdicts: {
+      load: async () => ({ entries: Array(VERDICT_MIN).fill({}) }),
+      save: async () => {},
+    },
+    trustStore: {
+      load: async () => ({ v: 1, tiers: { "start-job": "act" } }),
+      save: async () => {},
+    },
+    engineState: { load: async () => ({ v: 1 }), save: async () => {} },
+    digests: { list: async () => [], load: async () => null },
+    facts: { list: async () => [], load: async () => null },
+    configGet: async () => ({ ctoTier: "medium" }),
+    cards: {
+      upsertDecision: async (c) => {
+        h.cardPayload.cards.push(c);
+        return { changed: true, isNew: true };
+      },
+    },
+    // no executeAction seam wired for this class → refuse
+    runSuggest: async () => ({
+      text: JSON.stringify({ candidates: [{ class: "start-job", finding: { text: "a", refs: [] }, options: [{ label: "Go", action: { type: "start-job", payload: {} } }] }] }),
+    }),
+    runWorthiness: async () => ({ text: "1.0" }),
+    senderReliability: async () => 1.0,
+  });
+  const r = await sug2.processFinding({ id: "rec:de", sourceKind: "fact-anomaly", text: "a", refs: [] }, { coldStart: false, tier: "medium" });
+  assert.equal(r.surfaced, 1);
+  assert.equal(h.cardPayload.cards.length, 1); // degraded to the ask card (no veto writer)
+  assert.equal(h.ledgerRows.filter((x) => x.kind === "suggest.acted").length, 0);
+  assert.equal((await sug2._trust.listAnnouncements()).length, 0);
+});
+
+test("pipeline: cold start keeps an act-tier class capped at the ask verb (§10.6-4 dominance)", async () => {
+  const h = makeHarness();
+  const executed = [];
+  const sug2 = createCtoSuggest({
+    now: () => h.clock.ms,
+    publish: () => {},
+    ledger: { append: async (r) => h.ledgerRows.push(r), read: async () => h.ledgerRows },
+    verdicts: { load: async () => ({ entries: [] }), save: async () => {} }, // cold start
+    trustStore: {
+      load: async () => ({ v: 1, tiers: { "record-decision": "act" } }),
+      save: async () => {},
+    },
+    engineState: { load: async () => ({ v: 1 }), save: async () => {} },
+    digests: { list: async () => [], load: async () => null },
+    facts: { list: async () => [], load: async () => null },
+    configGet: async () => ({ ctoTier: "medium" }),
+    cards: {
+      upsertDecision: async (c) => {
+        h.cardPayload.cards.push(c);
+        return { changed: true, isNew: true };
+      },
+    },
+    executeAction: async ({ cls, action }) => {
+      executed.push({ cls, action });
+      return { ok: true };
+    },
+    runSuggest: async () => ({
+      text: JSON.stringify({ candidates: [{ class: "record-decision", finding: { text: "a", refs: [] }, options: [{ label: "Go", action: { type: "record-decision", payload: {} } }] }] }),
+    }),
+    runWorthiness: async () => ({ text: "1.0" }),
+    senderReliability: async () => 1.0,
+  });
+  const r = await sug2.processFinding({ id: "rec:cs", sourceKind: "fact-anomaly", text: "a", refs: [] }, { coldStart: true, tier: "medium" });
+  assert.equal(r.surfaced, 1);
+  assert.equal(executed.length, 0); // never acts under the cold-start gate
+  assert.equal(h.cardPayload.cards[0].capped, true);
+});
+
+test("pipeline: an act-tier ask-capped class still throws into the hold (§9.3 eligibility)", async () => {
+  const h = makeHarness();
+  const sug2 = createCtoSuggest({
+    now: () => h.clock.ms,
+    publish: () => {},
+    ledger: { append: async (r) => h.ledgerRows.push(r), read: async () => h.ledgerRows },
+    verdicts: {
+      load: async () => ({ entries: Array(VERDICT_MIN).fill({}) }),
+      save: async () => {},
+    },
+    engineState: {
+      // config-change is §9.3-capped; even a corrupt/foreign "act" tier row
+      // must never raise the ceiling — decideVerb throws, the pipeline holds.
+      load: async () => ({ v: 1, trust: { tiers: { "config-change": "act" } } }),
+      save: async () => {},
+    },
+    digests: { list: async () => [], load: async () => null },
+    facts: { list: async () => [], load: async () => null },
+    configGet: async () => ({ ctoTier: "medium" }),
+    cards: { upsertDecision: async () => ({ changed: true }) },
+    executeAction: async () => ({ ok: true }),
+    runSuggest: async () => ({
+      text: JSON.stringify({ candidates: [{ class: "config-change", finding: { text: "a", refs: [] }, options: [{ label: "Go", action: { type: "config-change", payload: {} } }] }] }),
+    }),
+    runWorthiness: async () => ({ text: "1.0" }), // p = 1.0 ≥ p_act — the act branch, refused for a capped class
+    senderReliability: async () => 1.0,
+    classPriors: { "config-change": 1.0 },
+  });
+  const r = await sug2.processFinding({ id: "rec:cc", sourceKind: "fact-anomaly", text: "a", refs: [] }, { coldStart: false, tier: "medium" });
+  assert.equal(r.surfaced, 0);
+  assert.equal(r.silent, 1);
+  assert.ok(h.ledgerRows.some((x) => x.kind === "suggest.silent" && x.reason === "act-not-trusted"));
+});
+
+test("verdictHeld stamps the held row's class onto the subject (§9.4 attribution)", async () => {
+  const h = makeHarness();
+  const sug1 = createCtoSuggest({
+    now: () => h.clock.ms,
+    publish: () => {},
+    ledger: { append: async (r) => h.ledgerRows.push(r), read: async () => h.ledgerRows },
+    verdicts: h.verdicts,
+    engineState: { load: async () => ({}), save: async () => {} },
+    digests: { list: async () => [], load: async () => null },
+    facts: { list: async () => [], load: async () => null },
+    configGet: async () => ({}),
+    runSuggest: async () => ({
+      text: JSON.stringify({ candidates: [{ class: "start-job", finding: { text: "a", refs: [] }, options: [{ label: "Go", action: { type: "start-job", payload: {} } }] }] }),
+    }),
+    runWorthiness: async () => ({ text: "0.1" }), // p below p_ask → silent-log (a HELD row)
+    senderReliability: async () => 1.0,
+  });
+  await sug1.processFinding(
+    { id: "rec:h1", sourceKind: "fact-anomaly", text: "a", refs: [] },
+    { coldStart: false, tier: "medium" }
+  );
+  const sid = stableSuggestionId("rec:h1", "start-job");
+  const recorded = [];
+  const sug2 = createCtoSuggest({
+    now: () => h.clock.ms,
+    publish: () => {},
+    ledger: { append: async (r) => h.ledgerRows.push(r), read: async () => h.ledgerRows },
+    verdicts: h.verdicts,
+    engineState: { load: async () => ({}), save: async () => {} },
+    digests: { list: async () => [], load: async () => null },
+    facts: { list: async () => [], load: async () => null },
+    configGet: async () => ({}),
+    recordVerdict: async ({ subject, verdict }) => {
+      recorded.push({ subject, verdict });
+      return { ok: true };
+    },
+  });
+  await sug2.verdictHeld({ id: sid, verdict: "accept" });
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0].subject.class, "start-job");
 });

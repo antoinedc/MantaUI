@@ -151,10 +151,29 @@ export const budgetStore = createCtoJsonStore("budget", ctoPath("budget.json"));
 // created, lastHit, hits, retired? }] }`. Owned by ctoWatchers.mjs.
 export const watchersStore = createCtoJsonStore("watchers", ctoPath("watchers.json"));
 export const engineStateStore = createCtoJsonStore("engine-state", ctoPath("engine-state.json"));
+// BET-1403 (review cycle 4): the trust ladder's own store. Trust state lived
+// under `es.trust` until the durability review showed ANY snapshot-spreading
+// engine-state writer could silently revert tiers/counters/announcements —
+// so it moved to a dedicated file no other writer touches. ctoTrust.mjs
+// migrates a legacy `es.trust` payload on first load.
+export const trustStore = createCtoJsonStore("trust", ctoPath("trust.json"));
 
 // ---------------------------------------------------------------------------
 // Single-level directory JSON stores: one file per id, e.g. `facts/<project>.json`
 // ---------------------------------------------------------------------------
+
+// Best-effort A1 ledger append shared by the cto engines (extracted for
+// BET-1403 — see the duplication-gate report): observability must never take
+// the caller down, so a ledger failure is swallowed, not thrown. Returns true
+// when the row landed. `ts` is an epoch-ms number.
+export async function appendLedgerBestEffort(ledger, ts, entry) {
+  try {
+    await ledger.append({ actor: "cto", ts, ...entry });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function createDirJsonStore(name, dirPart) {
   const filePath = (id) => ctoPath(dirPart, `${id}.json`);

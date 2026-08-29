@@ -47,6 +47,7 @@ import {
   ctoPath,
   ledgerStore,
   engineStateStore,
+  trustStore,
   cardsStore,
   segmentsStore,
   rollupsStore,
@@ -57,6 +58,10 @@ import {
   purgeExpiredInbox,
 } from "./ctoStores.mjs";
 import { createVerdictEngine } from "./ctoVerdicts.mjs";
+// BET-1403: the earned-trust ladder (§9.3/§9.4). Its per-class Beta counters
+// ride the §9.5 verdict sink registry below; the digest announces acts and
+// tier changes through the same engine.
+import { createCtoTrust } from "./ctoTrust.mjs";
 import { createCtoBackfill } from "./ctoBackfill.mjs";
 import { startPoller } from "./startPoller.mjs";
 import { createSeenIdFilter } from "./seenIds.mjs";
@@ -271,6 +276,9 @@ export function createCtoEngine(deps = {}) {
     configGet = async () => ({}), // → { ctoEnabled?: boolean }
     ledger = ledgerStore, // A1 ledger writer { append }
     engineState = engineStateStore, // { load, save } (engine-state.json)
+    // BET-1403: the trust ladder's own file — isolated from engine-state
+    // writers so no snapshot-spread save can revert tiers/counters/pending.
+    trustStore: trustStoreDep = trustStore,
     killSwitch = createKillSwitch(),
     publish = () => {}, // (evt: {kind:"ctoState", payload}) => void
     now = () => Date.now(),
@@ -381,6 +389,7 @@ export function createCtoEngine(deps = {}) {
   let builtInBackfill = null;
   let profileDecayHandle = null;
   let verdictsEngine = null;
+  let trustEngine = null;
   let watcherEngine = null;
 
   // A5 presence inputs (spec §5.4): lastSeen = max(desktop heartbeat, app
@@ -950,6 +959,14 @@ export function createCtoEngine(deps = {}) {
     verdictsEngine = createVerdictEngine({ verdicts, now });
     verdictsEngine.registerCounterSink(factsCounterSink);
     verdictsEngine.registerCounterSink(tonightCounterSink);
+    // BET-1403 (§9.4): the trust counters ride the same §9.5 sink registry —
+    // per-action-class Beta counters over class-attributed suggestion
+    // verdicts. Best-effort like every sink: a failure never breaks verdict
+    // recording.
+    const t = getTrust();
+    verdictsEngine.registerCounterSink((effects, entry) => {
+      void t.noteVerdictEffects(effects, entry).catch(() => {});
+    });
     return verdictsEngine;
   }
 
@@ -965,6 +982,17 @@ export function createCtoEngine(deps = {}) {
     void overnight
       .foldCounters({ category: "queue-tonight", verdict: entry?.verdict, never: entry?.never === true })
       .catch(() => {});
+  }
+
+  // BET-1403: the earned-trust engine over its own store file (trust.json —
+  // a legacy `es.trust` payload migrates on first load). One instance per
+  // engine; the suggest module keeps
+  // its own over the same stores — both are stateless facades whose every
+  // op loads fresh, mutates, and saves.
+  function getTrust() {
+    if (trustEngine) return trustEngine;
+    trustEngine = createCtoTrust({ store: trustStoreDep, legacy: engineState, ledger, verdicts, now });
+    return trustEngine;
   }
 
   // BET-1398 standing-query watchers (§4.3/§13.4): lazy single instance over
@@ -1350,6 +1378,12 @@ export function createCtoEngine(deps = {}) {
       if (stale) {
         const fulfilled = win.state === "open" && win.countdown == null;
         await cards.resolveById(stale.id, { reason: fulfilled ? "window opened" : "countdown elapsed unmet" }).catch(() => {});
+        if (fulfilled) {
+          // BET-1403 §9.4: the announced window elapsed UNcancelled and the
+          // overnight run opened — the veto-window record's acceptance, feeding
+          // the veto→act promotion bar under the canonical action class.
+          void getTrust().noteVetoOutcome("queue-tonight", { accepted: true }).catch(() => {});
+        }
       }
     }
   }
@@ -1542,9 +1576,16 @@ export function createCtoEngine(deps = {}) {
     const stale = open.find((c) => c?.id === VETO_CARD_ID && c?.variant === "veto");
     if (stale) await cards.resolveById(stale.id, { reason: "canceled by user" }).catch(() => {});
     await ledgerLog({ kind: "cto.overnight.veto", ts: now() });
+    // BET-1403 §9.4: a cancel IS the veto-window record's rejection. The
+    // canonical action class is "queue-tonight" (the §9.3 eligibility map's
+    // class — the overnight veto window guards tonight's queued tasks); the
+    // UI's veto-verdict subject carries the same stamp. Single writer: the
+    // trust sink ignores veto-window subjects, so the record is fed exactly
+    // once per resolved window (cancel here, executed-open in the veto card).
     void getVerdictsEngine()
-      .recordVerdict({ subject: { type: "veto-window", id: VETO_CARD_ID, class: "overnight" }, verdict: "veto" })
+      .recordVerdict({ subject: { type: "veto-window", id: VETO_CARD_ID, class: "queue-tonight" }, verdict: "veto" })
       .catch(() => {});
+    void getTrust().noteVetoOutcome("queue-tonight", { accepted: false }).catch(() => {});
     await syncState().catch(() => {});
     return { ok: true };
   }
@@ -1997,6 +2038,9 @@ export function createCtoEngine(deps = {}) {
     // all reach one path through these).
     recordVerdict: (input) => getVerdictsEngine().recordVerdict(input),
     listVerdicts: () => getVerdictsEngine().listVerdicts(),
+    // BET-1403: trust engine — consult tiers, act-and-report bookkeeping, and
+    // the digest announcement queue (index.mjs wires the digest seam to it).
+    trust: getTrust(),
     get rateTracker() {
       return track;
     },

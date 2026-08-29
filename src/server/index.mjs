@@ -2067,6 +2067,9 @@ let adaptiveCtoDigest = null;
     getInferredTz: async () => adaptiveCto.profile?.getInferredTz?.() ?? null,
     getAudience: async ({ topics } = {}) => adaptiveCto.profile?.getAudience?.({ topics }) ?? null,
     getDeviations: async () => adaptiveCto.profile?.getDeviations?.() ?? [],
+    // BET-1403 (§9.2/§9.4): the trust engine's announcement queue — act-and-
+    // report lines + tier changes, announced as progress asides.
+    trust: adaptiveCto.trust,
     // §14.3 silence audit: how many suggestions the CTO silently held back —
     // drives the in-digest "I held back N — review" aside (lazy: the suggest
     // engine is defined later in this module; resolution happens at generate).
@@ -2148,6 +2151,26 @@ const adaptiveCtoSuggest = createCtoSuggest({
   // tool-write's capability gate is on too, but the §7.4 tool registry
   // (P2-later) still feeds an empty write ring below, so a tool-write option
   // remains data-unreachable until B7 lands (the ring is the real gate).
+  // BET-1403 (§9.2/§9.3): act-and-report executors. The trust ladder only
+  // lets §9.3-eligible classes reach the act verb; this seam decides whether
+  // the concrete bound action is machine-executable. Only record-decision is
+  // wired (a validated, gatekeeper-checked fact proposal on the CTO's own
+  // blackboard); unwired action types refuse → the verb degrades to the
+  // veto-window card. Never throws (ctoSuggest catches).
+  executeAction: async ({ cls, action, candidate }) => {
+    if (cls !== "record-decision" || action?.type !== "record-decision") {
+      return { ok: false, reason: "no-executor" };
+    }
+    const payload = action?.payload && typeof action.payload === "object" ? action.payload : {};
+    const statement = typeof payload.statement === "string" ? payload.statement.trim() : "";
+    const project = typeof payload.project === "string" ? payload.project.trim() : "";
+    const refs = Array.isArray(payload.refs) && payload.refs.length
+      ? payload.refs.filter((r) => typeof r === "string")
+      : (Array.isArray(candidate?.finding?.refs) ? candidate.finding.refs.filter((r) => typeof r === "string") : []);
+    if (!statement || !project || refs.length === 0) return { ok: false, reason: "incomplete-payload" };
+    const result = await adaptiveCto.proposeFact({ project, kind: "decision", statement, refs, sender: "cto" });
+    return result?.ok === true ? { ok: true, detail: "decision fact proposed" } : { ok: false, reason: result?.error ?? "propose-failed" };
+  },
   getWriteRingTools: async () => [], // §7.4 tool registry (P2-later) — empty → tool-write unreachable
   capabilities: { queueTonight: true, toolWrite: true },
   fireNotify: (args) => push.fireNotify(args),
@@ -4446,7 +4469,20 @@ const handleRequest = async (req, res) => {
     try {
       if (req.method === "POST") {
         const body = await readJsonBody(req);
-        const subject = body?.subject ?? null;
+        let subject = body?.subject ?? null;
+        // BET-1403 (§9.4): stamp the action class from the open decision card
+        // so the verdict's trust-counter effects are attributable — the
+        // renderer doesn't know the class; the card is the source of truth.
+        // Best-effort: an unattributable verdict simply advances no counters.
+        if (subject?.type === "suggestion" && typeof subject.id === "string" && subject.class == null) {
+          try {
+            const open = (await adaptiveCto.cards?.listOpen?.()) ?? [];
+            const card = open.find((c) => c?.id === subject.id);
+            if (card?.cls) subject = { ...subject, class: card.cls };
+          } catch {
+            /* best-effort */
+          }
+        }
         const verdict = typeof body?.verdict === "string" ? body.verdict : null;
         const never = body?.never;
         // BET-1419 (§9.2): a veto verdict on the veto-window subject IS the

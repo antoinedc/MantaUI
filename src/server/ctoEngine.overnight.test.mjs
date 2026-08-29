@@ -18,11 +18,25 @@ function makeHarness({ trough = null, queue = [], projects = [], tier = "high", 
   const ledgerRows = [];
   const engineStateObj = { v: 1, pendingBlockers: [], tonightQueue: JSON.parse(JSON.stringify(queue)) };
   const overnightStoreObj = { v: 1, window: null };
+  const verdictsObj = { v: 1, entries: [] };
+  const trustObj = { v: 1, tiers: {}, stats: {}, pending: [] };
   const published = [];
   const startedJobs = [];
   const pausedJobs = [];
   const listedJobs = [];
   const vetoCards = [];
+
+  // Raw engine-state writer (the shared shape of the production writers).
+  // BET-1403 (cycle 4): a `trust` key in the payload is IGNORED — the trust
+  // ladder persists to its own store, so a stale snapshot-spread save can no
+  // longer carry trust state in or out of this file.
+  function saveEngineStateRaw(payload = {}) {
+    if (Array.isArray(payload?.tonightQueue)) engineStateObj.tonightQueue = payload.tonightQueue;
+    if (payload?.pendingBlockers) engineStateObj.pendingBlockers = payload.pendingBlockers;
+    if (payload?.rollupCursor) engineStateObj.rollupCursor = payload.rollupCursor;
+    if (payload?.backfillProgress) engineStateObj.backfillProgress = payload.backfillProgress;
+    if (payload?.backfillStartInstant !== undefined) engineStateObj.backfillStartInstant = payload.backfillStartInstant;
+  }
   const config = { ctoEnabled: true, ctoTier: tier, ctoOvernight: overnightEnabled };
   let curTrough = trough;
 
@@ -43,19 +57,33 @@ function makeHarness({ trough = null, queue = [], projects = [], tier = "high", 
     configGet: async () => ({ ...config }),
     tierGet: async () => config.ctoTier,
     now,
+    // §9.5 verdict ledger, in-memory so tests never share the sandboxed file.
+    verdicts: {
+      load: async () => JSON.parse(JSON.stringify(verdictsObj)),
+      save: async (payload) => {
+        verdictsObj.v = payload?.v ?? 1;
+        verdictsObj.entries = Array.isArray(payload?.entries) ? JSON.parse(JSON.stringify(payload.entries)) : [];
+      },
+    },
+    // BET-1403: the trust ladder's own store (in-memory, isolated from
+    // engine-state writers).
+    trustStore: {
+      load: async () => JSON.parse(JSON.stringify(trustObj)),
+      save: async (payload) => {
+        const copy = JSON.parse(JSON.stringify(payload ?? {}));
+        trustObj.v = copy.v ?? 1;
+        trustObj.tiers = copy.tiers ?? {};
+        trustObj.stats = copy.stats ?? {};
+        trustObj.pending = Array.isArray(copy.pending) ? copy.pending : [];
+      },
+    },
     ledger: {
       append: async (row) => ledgerRows.push(row),
       read: async () => [...ledgerRows],
     },
     engineState: {
       load: async () => JSON.parse(JSON.stringify(engineStateObj)),
-      save: async (payload) => {
-        if (Array.isArray(payload?.tonightQueue)) engineStateObj.tonightQueue = payload.tonightQueue;
-        if (payload?.pendingBlockers) engineStateObj.pendingBlockers = payload.pendingBlockers;
-        if (payload?.rollupCursor) engineStateObj.rollupCursor = payload.rollupCursor;
-        if (payload?.backfillProgress) engineStateObj.backfillProgress = payload.backfillProgress;
-        if (payload?.backfillStartInstant !== undefined) engineStateObj.backfillStartInstant = payload.backfillStartInstant;
-      },
+      save: saveEngineStateRaw,
     },
     killSwitch: {
       isPaused: async () => false,
@@ -124,6 +152,9 @@ function makeHarness({ trough = null, queue = [], projects = [], tier = "high", 
     setTrough(t) {
       curTrough = t;
     },
+    // Test seam: a raw engine-state write (the hostile snapshot-spread shape
+    // from the pre-cycle-4 writers).
+    engineStateSave: saveEngineStateRaw,
     advance(ms) {
       clock.ms += ms;
     },
@@ -266,6 +297,16 @@ test("overnight: veto card arms 30 min before the trough, cancels on the veto ve
   assert.equal(h.vetoCards.length, 0, "the veto card resolved on cancel");
   assert.ok(h.ledgerRows.some((row) => row.kind === "cto.overnight.veto"));
 
+  // BET-1403 §9.4: the cancel verdict is stamped with the canonical action
+  // class the veto window guards (queue-tonight — the §9.3 eligibility map's
+  // class), and the veto-window record's rejection advanced exactly once.
+  const verdicts = (await h.engine.listVerdicts()).filter((v) => v?.subject?.type === "veto-window");
+  assert.equal(verdicts.length, 1);
+  assert.equal(verdicts[0].subject.class, "queue-tonight", "the veto verdict carries the canonical action class");
+  const trustAfterCancel = await h.engine.trust.getState();
+  assert.equal(trustAfterCancel.stats["queue-tonight"]?.vb, 1, "a cancel feeds the veto record's rejection");
+  assert.equal(trustAfterCancel.stats["queue-tonight"]?.va ?? 0, 0);
+
   // Still in the pre-window: the veto suppresses BOTH the card re-arm and the
   // countdown — a cancel is not a countdown reset (§9.2).
   h.advance(5 * 60_000);
@@ -294,6 +335,51 @@ test("overnight: veto card arms 30 min before the trough, cancels on the veto ve
   await h.engine.tick();
   assert.equal(h.overnightStoreObj.window?.state, "open", "the fresh trough opens normally (absent, in trough)");
   assert.equal(h.vetoCards.length, 0);
+
+  // BET-1403 §9.4: that resolution was the EXECUTED path — the announced
+  // window elapsed uncancelled and the run opened, so the veto record's
+  // acceptance advanced (the va side of the veto→act bar). Both sides of the
+  // record are now fed by the same machinery, exactly once per window.
+  const trustAfterOpen = await h.engine.trust.getState();
+  assert.equal(trustAfterOpen.stats["queue-tonight"]?.va, 1, "the executed window feeds the veto record's acceptance");
+  assert.equal(trustAfterOpen.stats["queue-tonight"]?.vb, 1, "the earlier cancel is still on the record");
+});
+
+test("overnight: an executed window feeds the veto record's acceptance (BET-1403 §9.4 veto→act bar)", async () => {
+  const due = h0().startMs;
+  const h = makeHarness({ trough: { startMs: due, endMs: due + 6 * HOUR }, queue: [QUEUE_TASK], projects: [] });
+
+  // Arm the veto card in the pre-window (no cancel this time).
+  h.clock.ms = due - 20 * 60_000;
+  await h.engine.tick();
+  assert.equal(h.vetoCards.length, 1);
+
+  // The clock enters the trough while the user is absent: the window opens
+  // (the machine's open path fulfils the countdown) and the next tick resolves
+  // the lingering veto card as fulfilled.
+  h.advance(25 * 60_000);
+  await h.engine.tick();
+  await h.engine.tick();
+  assert.equal(h.overnightStoreObj.window?.state, "open", "the unannounced-veto window opened");
+  assert.equal(h.vetoCards.length, 0, "the veto card resolved once the window opened");
+
+  // The veto-window record's acceptance advanced under the canonical class —
+  // the va/vb pair the veto→act promotion bar (§9.4) reads.
+  const st = await h.engine.trust.getState();
+  assert.equal(st.stats["queue-tonight"]?.va, 1, "an executed window feeds the veto record's acceptance");
+  assert.equal(st.stats["queue-tonight"]?.vb ?? 0, 0);
+
+  // And a cancel on a LATER night demotes the rolling pressure the same way —
+  // both sides of the record are fed by the same machinery.
+  const nextDue = due + 24 * HOUR;
+  h.setTrough({ startMs: nextDue, endMs: nextDue + 6 * HOUR });
+  h.advance(24 * HOUR - 25 * 60_000);
+  await h.engine.tick(); // arm tomorrow's card
+  assert.equal(h.vetoCards.length, 1, "the next night arms a fresh veto card");
+  await h.engine.tonightCancel();
+  const st2 = await h.engine.trust.getState();
+  assert.equal(st2.stats["queue-tonight"]?.va, 1);
+  assert.equal(st2.stats["queue-tonight"]?.vb, 1, "the later cancel feeds the rejection side too");
 });
 
 test("overnight: run-now opens the window outside the trough and dispatches", async () => {
@@ -332,9 +418,14 @@ test("tonight verbs: add gates on the switch, caps at 12, remove + reorder pin t
   assert.equal(pinned.ok, true);
   assert.equal(h.overnightStoreObj.window?.pinnedOrder?.length, 12);
 
-  // Remove drops the entry AND its pinned slot.
+  // Remove drops the entry AND its pinned slot. Drain first: the remove's
+  // §9.5 verdict fires its counter sinks fire-and-forget, and a best-effort
+  // engine-state write from an in-flight sink must settle before the store is
+  // read (a stale full-state snapshot would otherwise clobber the queue row).
   const removed = await h.engine.tonightRemove(h.engineStateObj.tonightQueue[0].id);
   assert.equal(removed.ok, true);
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(h.engineStateObj.tonightQueue.length, 11);
 });
 
@@ -344,6 +435,34 @@ test("overnight: queue-tonight verdicts fold into the overnight Thompson counter
   await new Promise((r) => setImmediate(r));
   const counters = await h.overnight.readCounters();
   assert.equal(counters?.["queue-tonight"]?.alpha, 1, "accept folds a success counter");
+});
+
+test("durability: a trust fold survives a queue-edit save landing after it (mirrored-order regression, BET-1403 cycle 4)", async () => {
+  const h = makeHarness({ trough: TROUGH, queue: [QUEUE_TASK], projects: [] });
+
+  // The trust fold lands first (a verdict's fire-and-forget sink writes the
+  // trust ladder's own store).
+  await h.engine.recordVerdict({ subject: { type: "suggestion", id: "card-2", class: "queue-tonight" }, verdict: "accept" });
+  await new Promise((r) => setImmediate(r));
+  const afterFold = await h.engine.trust.getState();
+  assert.equal(afterFold.stats["queue-tonight"]?.a, 1);
+
+  // Then a queue edit lands — AND the hostile old writer shape runs: a whole
+  // engine-state save spreading a STALE pre-fold snapshot that still carries
+  // an `es.trust` fossil key. When trust lived under es.trust this reverted
+  // the fold; with the dedicated store the tier/counter change survives and
+  // the queue edit lands normally.
+  const removed = await h.engine.tonightRemove(h.engineStateObj.tonightQueue[0].id);
+  assert.equal(removed.ok, true);
+  await h.engineStateSave({ v: 1, trust: { tiers: {}, stats: {} }, tonightQueue: [{ id: "tq:stale" }] });
+  await new Promise((r) => setImmediate(r));
+
+  const after = await h.engine.trust.getState();
+  // Two folds landed: the accept verdict (a=1) and the remove's own edit
+  // verdict (a=2) — BOTH survived the hostile stale engine-state save, which
+  // under es.trust would have reverted the record to the pre-fold snapshot.
+  assert.equal(after.stats["queue-tonight"]?.a, 2, "the trust folds survived the stale engine-state save");
+  assert.deepEqual(h.engineStateObj.tonightQueue, [{ id: "tq:stale" }], "the queue edit landed");
 });
 
 // Fixed trough helper for the veto-card test (a window that starts "now").

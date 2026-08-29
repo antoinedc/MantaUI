@@ -364,7 +364,10 @@ export function CtoPanel({
   const handleVetoCancel = useCallback(
     (card: VetoCardRow) => {
       void window.api
-        ?.ctoVerdict?.({ subject: { type: "veto-window", id: card.id, class: "overnight" }, verdict: "veto" })
+        // BET-1403: the class stamp is the canonical §9.3 action class the
+        // veto window guards (queue-tonight) — it must agree with the trust
+        // record's consumer, not name the feature.
+        ?.ctoVerdict?.({ subject: { type: "veto-window", id: card.id, class: "queue-tonight" }, verdict: "veto" })
         .then((r) => {
           if (!r?.ok) pushToast({ id: `veto-${Date.now()}`, message: `Couldn't cancel tonight: ${r?.error ?? "unknown"}` });
         })

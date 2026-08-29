@@ -33,13 +33,18 @@
 
 import { createHash } from "node:crypto";
 import {
+  appendLedgerBestEffort,
   ledgerStore,
   engineStateStore,
+  trustStore,
   verdictsStore,
   digestsStore,
   factsStore,
 } from "./ctoStores.mjs";
 import { collectWatcherHitsFromLedger } from "./ctoWatchers.mjs";
+// BET-1403: the earned-trust ladder (§9.3/§9.4) consults per-class tiers for
+// verb selection; VERDICT_MIN (the §10.6-4 cold-start gate) is owned here.
+import { createCtoTrust, VERDICT_MIN as TRUST_VERDICT_MIN } from "./ctoTrust.mjs";
 
 export const SUGGEST_VERSION = 1;
 
@@ -70,7 +75,8 @@ export const DEFAULT_CLASS_PRIORS = Object.freeze({
 });
 
 // Cold-start: below this many verdicts every candidate is capped at ask verbs.
-export const VERDICT_MIN = 15;
+// Owned by ctoTrust (§10.6-4) since BET-1403 — re-exported for callers.
+export const VERDICT_MIN = TRUST_VERDICT_MIN;
 
 // §9.1 default gate thresholds (engine-state overrides).
 export function defaultThresholds() {
@@ -123,11 +129,16 @@ export function worthinessProbability(score, prior = 0.5, senderReliability = 0.
   return Math.min(1, s * p * r);
 }
 
-// §9.1 surface-verb selection for one candidate. NOTHING acts in P2.
+// §9.1/§9.2 surface-verb selection for one candidate.
 //   - coldStart (`verdicts < VERDICT_MIN`): capped at the ask verb regardless
-//     of score — the act branch is simply never considered.
-//   - p >= p_act (outside cold-start): the act branch is reached → throw
-//     (the guard that nothing acts in P2; unreachable by a correct pipeline).
+//     of score or trust tier — the §10.6-4 global gate dominates (§9.4).
+//   - The class's trust tier raises the ceiling (§9.4): at the veto-window
+//     tier the veto-window verb is reachable; at the act tier the act verb
+//     becomes reachable once p >= p_act (below it the class still surfaces
+//     the veto-window verb). Eligibility (§9.3) gates the climb — an
+//     ask-capped class never leaves the ask verbs whatever its counters say.
+//   - p >= p_act on an un-promoted (ask-tier) class: the act branch is
+//     reached without trust → throw (the guard that nothing acts unearned).
 //   - p >= p_ask: DECISION card; `notify` true when the decay rule matches.
 //   - else: SILENT-LOG (ledger row for the §14.3 audit).
 export function decideVerb({
@@ -135,17 +146,24 @@ export function decideVerb({
   thresholds = defaultThresholds(),
   coldStart = false,
   sourceKind = null,
+  tier = "ask",
+  eligible = false,
 } = {}) {
   const th = { ...defaultThresholds(), ...(thresholds || {}) };
   const pAct = Number.isFinite(th.p_act) ? th.p_act : 0.95;
   const pAsk = Number.isFinite(th.p_ask) ? th.p_ask : 0.4;
   const notify = NOTIFY_RECURRENCE_KINDS.includes(sourceKind);
   if (p < pAsk) return { verb: "silent-log" };
-  // p >= p_ask → ask verb (decision card). Cold-start CAPS the ceiling at ask
-  // "regardless of scores": the act branch is never considered (no throw).
+  // p >= p_ask → at least the ask verb (decision card). Cold-start CAPS the
+  // ceiling at ask "regardless of scores": the act branch is never considered.
   if (coldStart) return { verb: "decision", capped: true, notify };
+  // §9.4 ladder: a promoted, eligible class may surface the higher verbs.
+  if (eligible && (tier === "veto-window" || tier === "act")) {
+    if (tier === "act" && p >= pAct) return { verb: "act", notify };
+    return { verb: "veto-window", notify };
+  }
   if (p >= pAct) {
-    throw new Error("suggest: act branch reached — nothing acts in P2");
+    throw new Error("suggest: act branch reached — class not trusted (ask-tier hold)");
   }
   return { verb: "decision", notify };
 }
@@ -347,6 +365,7 @@ export function createCtoSuggest(deps = {}) {
     publish = () => {},
     ledger = ledgerStore,
     engineState = engineStateStore,
+    trustStore: trustStoreDep = trustStore, // BET-1403: the trust ladder's own file (isolated from engine-state writers)
     verdicts = verdictsStore,
     digests = digestsStore,
     facts = factsStore,
@@ -361,16 +380,27 @@ export function createCtoSuggest(deps = {}) {
     classPriors = {}, // overrides for DEFAULT_CLASS_PRIORS
     thresholds = null, // in-memory engine-state thresholds (lazy)
     recordVerdict = null, // async ({subject, verdict, never}) => {ok} — B3 verdict route
+    executeAction = null, // BET-1403: async ({cls, action, candidate}) => {ok, ...} — act-and-report executors; null/unexecutable → verb degrades to veto-window
   } = deps;
 
   const priors = { ...DEFAULT_CLASS_PRIORS, ...classPriors };
+  // BET-1403: the earned-trust engine over its own store file (tiers, Beta
+  // counters, rolling windows, and the pending digest-announcement queue) —
+  // isolated from engine-state writers; a legacy `es.trust` payload migrates
+  // on first load.
+  const trust = createCtoTrust({ store: trustStoreDep, legacy: engineState, ledger, verdicts, now });
+
+  // Trust consult for one candidate class — never throws, defaults to ask.
+  async function trustConsult(cls, coldStart) {
+    try {
+      return await trust.consult(cls, { coldStart });
+    } catch {
+      return { tier: "ask", eligible: false, capped: coldStart };
+    }
+  }
 
   async function ledgerAppend(entry) {
-    try {
-      await ledger.append({ actor: "cto", ts: now(), ...entry });
-    } catch {
-      /* best-effort — a ledger failure never takes suggestions down */
-    }
+    return appendLedgerBestEffort(ledger, now(), entry);
   }
 
   async function loadState() {
@@ -507,12 +537,14 @@ export function createCtoSuggest(deps = {}) {
         }
       }
       const p = worthinessProbability(score, priors[c.class], reliability);
+      // §9.4: verb selection consults the class's earned-trust tier.
+      const trustInfo = await trustConsult(c.class, coldStart);
       let decision;
       try {
-        decision = decideVerb({ p, thresholds: th, coldStart, sourceKind: finding.sourceKind });
+        decision = decideVerb({ p, thresholds: th, coldStart, sourceKind: finding.sourceKind, tier: trustInfo.tier, eligible: trustInfo.eligible });
       } catch {
-        // act branch is unreachable in P2 — log as a held item, never act.
-        await ledgerAppend({ kind: "suggest.silent", id: c.id, class: c.class, score: p, reason: "act-unreachable-p2", sourceKind: finding.sourceKind, text: c.finding.text });
+        // act branch reached without trust — log as a held item, never act.
+        await ledgerAppend({ kind: "suggest.silent", id: c.id, class: c.class, score: p, reason: "act-not-trusted", sourceKind: finding.sourceKind, text: c.finding.text });
         silent += 1;
         continue;
       }
@@ -523,10 +555,8 @@ export function createCtoSuggest(deps = {}) {
         continue;
       }
 
-      // decision verb → write (or upsert) the decision card.
-      const card = {
+      const baseCard = {
         id: c.id,
-        variant: "decision",
         title: c.finding.text || "CTO suggestion",
         why: `Suggested as "${c.class}": ${c.finding.text}`,
         sourceKind: finding.sourceKind,
@@ -537,22 +567,73 @@ export function createCtoSuggest(deps = {}) {
         score: p,
         capped: decision.capped === true,
       };
-      let wrote = false;
-      if (cards && typeof cards.upsertDecision === "function") {
-        try {
-          wrote = (await cards.upsertDecision({ ...card, ts: now() })).changed === true;
-        } catch {
-          wrote = false;
+      let surfacedKind = null;
+
+      // §9.2 act-and-report: the bound action of the primary option executes
+      // immediately; the ledger row + digest report are written by the trust
+      // engine. An unexecutable action (no executor wired, executor refused,
+      // no primary option) is a data gate — the verb degrades to the
+      // veto-window card, never silently acts.
+      if (decision.verb === "act") {
+        const action = options[0]?.action ?? null;
+        let exec = { ok: false, reason: "no-executor" };
+        if (action && typeof executeAction === "function") {
+          try {
+            exec = (await executeAction({ cls: c.class, action, candidate: c })) ?? { ok: false };
+          } catch {
+            exec = { ok: false };
+          }
+        }
+        if (exec?.ok === true) {
+          await trust.recordAct({ cls: c.class, text: c.finding.text, refs: c.finding.refs, action }).catch(() => {});
+          await ledgerAppend({ kind: "suggest.acted", cardId: c.id, class: c.class, actionType: action?.type, score: p, sourceKind: finding.sourceKind });
+          surfaced += 1;
+          continue;
+        }
+        decision = { ...decision, verb: "veto-window" };
+      }
+
+      // §9.2 veto-window verb: a card with a countdown that executes unless
+      // cancelled (the cancel is a verdict, §9.4). BET-1419 ships the veto
+      // card writer; until it lands the verb degrades to the ask card.
+      if (decision.verb === "veto-window") {
+        let wrote = false;
+        if (cards && typeof cards.upsertVeto === "function") {
+          try {
+            wrote = (await cards.upsertVeto({ ...baseCard, variant: "veto", ts: now() })).changed === true;
+          } catch {
+            wrote = false;
+          }
+        }
+        if (wrote) {
+          await ledgerAppend({ kind: "suggest.presented", cardId: c.id, class: c.class, variant: "veto", score: p, sourceKind: finding.sourceKind });
+          surfaced += 1;
+          surfacedKind = "veto";
+        } else {
+          decision = { ...decision, verb: "decision" };
         }
       }
-      if (wrote) {
-        await ledgerAppend({ kind: "suggest.presented", cardId: c.id, class: c.class, score: p, sourceKind: finding.sourceKind });
-        surfaced += 1;
-      } else {
-        // No card machinery (or it failed) → hold instead of acting.
-        await ledgerAppend({ kind: "suggest.silent", id: c.id, class: c.class, score: p, reason: "no-card-path", sourceKind: finding.sourceKind, text: c.finding.text });
-        silent += 1;
-        continue;
+
+      // ask verb → write (or upsert) the decision card.
+      if (!surfacedKind) {
+        const card = { ...baseCard, variant: "decision" };
+        let wrote = false;
+        if (cards && typeof cards.upsertDecision === "function") {
+          try {
+            wrote = (await cards.upsertDecision({ ...card, ts: now() })).changed === true;
+          } catch {
+            wrote = false;
+          }
+        }
+        if (wrote) {
+          await ledgerAppend({ kind: "suggest.presented", cardId: c.id, class: c.class, variant: "decision", score: p, sourceKind: finding.sourceKind });
+          surfaced += 1;
+        } else {
+          // No card machinery (or it failed) → hold instead of acting.
+          await ledgerAppend({ kind: "suggest.silent", id: c.id, class: c.class, score: p, reason: "no-card-path", sourceKind: finding.sourceKind, text: c.finding.text });
+          silent += 1;
+          continue;
+        }
       }
 
       // notify variant: informational-tier router call when the decay rule
@@ -610,9 +691,18 @@ export function createCtoSuggest(deps = {}) {
 
   // A judgment on a held item → the B3 verdict route (§9.5). `accept` records
   // an accept verdict (success/access counters); `dismiss` records a dismiss
-  // (rejection counter). Returns {ok} — a missing verdicts path degrades.
+  // (rejection counter). The held row's action class is stamped onto the
+  // subject so the §9.4 trust counters can attribute the verdict. Returns
+  // {ok} — a missing verdicts path degrades.
   async function verdictHeld({ id, verdict, never } = {}) {
-    const subject = { type: "suggestion", id: String(id || "") };
+    const sid = String(id || "");
+    let cls;
+    try {
+      cls = (await listHeld({ limit: 500 })).find((r) => r?.id === sid)?.class;
+    } catch {
+      /* best-effort attribution */
+    }
+    const subject = { type: "suggestion", id: sid, ...(cls ? { class: cls } : {}) };
     if (typeof recordVerdict === "function") {
       const r = await recordVerdict({ subject, verdict, never });
       return { ok: r?.ok === true, error: r?.error };
@@ -635,5 +725,6 @@ export function createCtoSuggest(deps = {}) {
     // exposed for tests / diagnostics
     _priors: priors,
     _filterOptionsByData: filterOptionsByData,
+    _trust: trust,
   };
 }

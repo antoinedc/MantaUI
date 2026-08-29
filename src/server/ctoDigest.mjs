@@ -271,7 +271,7 @@ export function nextDigestMs({
 // Context assembly — the `digest-compose` model input (≤12k ctx, §12.3)
 // ---------------------------------------------------------------------------
 
-export function buildDigestContext({ granularity, window, slice, needsYou, factsChanged, probes, gMinutes, audience } = {}) {
+export function buildDigestContext({ granularity, window, slice, needsYou, factsChanged, probes, gMinutes, audience, reports } = {}) {
   const [ws, we] = window;
   const blocks = [];
 
@@ -297,6 +297,18 @@ export function buildDigestContext({ granularity, window, slice, needsYou, facts
       `When a change OVERTURNS a previously-held fact, phrase it as a subordinate clause on the owning item ` +
       `(e.g. a "sub" like "this overturns the earlier priority"), NEVER as a separate section or item.`,
   });
+  if (Array.isArray(reports) && reports.length) {
+    // BET-1403 (§9.2 invariant 1): actions the CTO executed on its own are
+    // injected into the digest input — the model must report each as a
+    // progress item; the deterministic aside below guarantees appearance.
+    blocks.push({
+      priority: "high",
+      text:
+        `The CTO executed the following actions on its own since the last digest ` +
+        `(each MUST appear as a progress-tier item, phrased as a factual report of what was done):\n` +
+        reports.map((r) => `- ${typeof r === "string" ? r : r.text}`).join("\n"),
+    });
+  }
   if (needsYou && needsYou.length) {
     blocks.push({
       priority: "medium",
@@ -487,6 +499,7 @@ export function createCtoDigest(deps = {}) {
     getInferredTz = async () => null, // {utcOffsetHours, confidence} | null
     getAudience = async () => null, // §8.4 async ({topics}) => audience block | null
     getDeviations = async () => [], // §8.4 deviation-from-baseline asides (user-only)
+    trust = null, // BET-1403: trust engine — act-and-report lines (mandatory report, §9.2) + tier changes, announced as progress asides
     getHeldSuggestionCount = async () => 0, // §14.3 silence audit: held suggestion rows (default none)
     getEnabled = async () => false, // top-level ctoEnabled gate for the scheduler
     digestPushEnabled = async () => false, // §10.5 toggle (ships A12) — off by default
@@ -604,7 +617,13 @@ export function createCtoDigest(deps = {}) {
     const topics = [...new Set((slice || []).map((it) => it.project).filter(Boolean))];
     const audience = await safe(getAudience, { topics });
 
-    const context = buildDigestContext({ granularity, window, slice: slice || [], needsYou, factsChanged: fChanged, probes, gMinutes, audience });
+    // BET-1403: pending trust announcements — act-and-report lines (the
+    // mandatory report, §9.2 invariant 1) + tier changes (§9.4). Acts are
+    // also injected into the digest input; every row is deterministically
+    // appended as a progress aside below so appearance is guaranteed.
+    const trustAsides = trust ? ((await safe(trust.listAnnouncements)) ?? []) : [];
+
+    const context = buildDigestContext({ granularity, window, slice: slice || [], needsYou, factsChanged: fChanged, probes, gMinutes, audience, reports: trustAsides.filter((a) => a?.kind === "act") });
 
     let digest = null;
     if (runEphemeral) {
@@ -653,7 +672,28 @@ export function createCtoDigest(deps = {}) {
       }
     }
 
+    // BET-1403: trust asides — act-and-report lines (the mandatory report,
+    // §9.2 invariant 1) + trust-tier changes (§9.4) appended as progress-tier
+    // items, same treatment as the §8.4 deviations. Marked announced only
+    // after the digest is persisted, so a failed save re-announces next time.
+    const announcedIds = [];
+    if (validateDigest(digest) && trustAsides.length) {
+      const extant = new Set(digest.items.map((i) => `${i.tier || ""}:${i.text || ""}`));
+      for (const a of trustAsides) {
+        if (!a || !a.text || !a.id) continue;
+        if (extant.has(`progress:${a.text}`)) {
+          announcedIds.push(a.id); // already reported (model picked it up)
+          continue;
+        }
+        digest.items.push({ tier: "progress", text: a.text, ...(Array.isArray(a.refs) && a.refs.length ? { refs: a.refs } : {}) });
+        extant.add(`progress:${a.text}`);
+        announcedIds.push(a.id);
+      }
+      digest.refs = collectDigestRefs(digest.items);
+    }
+
     const id = String(t);
+    let persisted = false;
     try {
       // §14.3 silence audit: the digest carries how many suggestions the CTO
       // held back, so the DigestSection can render the "I held back N — review"
@@ -661,9 +701,13 @@ export function createCtoDigest(deps = {}) {
       const held = await safe(getHeldSuggestionCount);
       if (typeof held === "number" && held > 0) digest.heldSuggestions = held;
       await digests.save(id, digest);
+      persisted = true;
     } catch {
-      /* best-effort */
+      /* best-effort — but the trust queue below is NOT consumed on a failed
+         save: an announcement consumed without its digest persisting would
+         lose the mandatory act report (§9.2 invariant 1) forever. */
     }
+    if (persisted && trust && announcedIds.length) await safe(trust.markAnnounced, announcedIds);
     lastGenerated = t;
     lastDigestId = id;
 
