@@ -1301,7 +1301,7 @@ export function createCtoEngine(deps = {}) {
     if (!win) return;
     const due = trough ? trough.startMs : null;
     const imminent = due != null && t >= due - VETO_LEAD_MS && t < due;
-    if (imminent && win.state !== "open" && !win.countdown && candidateCount > 0) {
+    if (imminent && win.state !== "open" && !win.countdown && win.closeReason !== "veto" && candidateCount > 0) {
       await overnight
         .updateWindow((prev) => scheduleCountdown(prev, { now: t, dueMs: due }))
         .catch(() => {});
@@ -1498,9 +1498,17 @@ export function createCtoEngine(deps = {}) {
 
   // Cancel tonight (veto card "Cancel tonight" / drill-down "Cancel tonight").
   // Pauses running CTO jobs + closes the window (or clears the countdown),
-  // resolves the veto card, records the §9.5 veto verdict.
+  // resolves the veto card, records the §9.5 veto verdict. The window row
+  // keeps `closeReason: "veto"` so the arming logic does not re-announce the
+  // same night — a veto is a veto, not a countdown reset.
   async function tonightCancel() {
+    const prevWin = overnight ? await overnight.readWindow().catch(() => null) : null;
     await preemptOvernight("veto");
+    if (overnight && prevWin && prevWin.state !== "open") {
+      await overnight
+        .updateWindow((prev) => (prev ? normalizeWindow({ ...normalizeWindow(prev), closeReason: "veto", countdown: null }) : null))
+        .catch(() => {});
+    }
     const open = (await cards.listOpen().catch(() => [])) ?? [];
     const stale = open.find((c) => c?.id === VETO_CARD_ID && c?.variant === "veto");
     if (stale) await cards.resolveById(stale.id, { reason: "canceled by user" }).catch(() => {});

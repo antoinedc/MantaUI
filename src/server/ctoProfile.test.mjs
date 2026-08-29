@@ -31,6 +31,8 @@ import {
   computeAudience,
   dominantComponent,
   risingEdgeMsIntoDay,
+  quietTroughStartHour,
+  quietTroughWindow,
   offHoursDeviation,
   capDimensions,
   composeProfileRender,
@@ -119,6 +121,49 @@ test("histogramPeaks: dominantWorkdays weights + rising edge", () => {
 
 test("risingEdgeMsIntoDay: no components → null", () => {
   assert.equal(risingEdgeMsIntoDay({ components: [] }), null);
+});
+
+// ---------------------------------------------------------------------------
+// BET-1419 (§11.1): the quiet trough — the overnight window opens here
+// ---------------------------------------------------------------------------
+
+test("quietTroughStartHour: the antipode (peak + 12h) of the dominant component, box-local", () => {
+  // Dominant peak 15h box-local → trough center 03h → 6h window starts at 00h.
+  const startHour = quietTroughStartHour({
+    components: [
+      { mu_hour: 10, kappa: 2, weight: 0.3 },
+      { mu_hour: 15, kappa: 3, weight: 0.7 },
+    ],
+    tzOffset: 0,
+    boxUtcOffsetHours: 0,
+  });
+  assert.ok(close(startHour, 0), `startHour=${startHour}`);
+});
+
+test("quietTroughStartHour: no learned components → the 01:00–07:00 bootstrap default", () => {
+  const startHour = quietTroughStartHour({ components: [], tzOffset: 0, boxUtcOffsetHours: 0 });
+  // Default center 04h → window start 01h.
+  assert.ok(close(startHour, 1), `startHour=${startHour}`);
+});
+
+test("quietTroughWindow: the next concrete occurrence (inside now wins, else tomorrow)", () => {
+  // Fixed epoch: 2023-11-14T12:00:00Z, box = UTC.
+  const NOON = Date.UTC(2023, 10, 14, 12, 0, 0);
+  // Trough 00:00–06:00 box-local (peak antipode from 15h, same tz).
+  const components = [{ mu_hour: 15, kappa: 3, weight: 1 }];
+  // Noon is AFTER today's trough end (06:00) → next occurrence is tomorrow 00:00.
+  const next = quietTroughWindow({ components, tzOffset: 0, nowMs: NOON });
+  assert.equal(next.startMs, Date.UTC(2023, 10, 15, 0, 0, 0));
+  assert.equal(next.endMs, Date.UTC(2023, 10, 15, 6, 0, 0));
+  // Inside the trough → the occurrence CONTAINING now is returned.
+  const inside = quietTroughWindow({ components, tzOffset: 0, nowMs: Date.UTC(2023, 10, 15, 3, 0, 0) });
+  assert.equal(inside.startMs, Date.UTC(2023, 10, 15, 0, 0, 0));
+  // end > start always (troughContains requires it).
+  assert.ok(inside.endMs > inside.startMs);
+  // The 01:00–07:00 default when nothing is learned yet.
+  const fallback = quietTroughWindow({ components: [], tzOffset: 0, nowMs: NOON });
+  assert.equal(fallback.startMs, Date.UTC(2023, 10, 15, 1, 0, 0));
+  assert.equal(fallback.endMs, Date.UTC(2023, 10, 15, 7, 0, 0));
 });
 
 // ---------------------------------------------------------------------------

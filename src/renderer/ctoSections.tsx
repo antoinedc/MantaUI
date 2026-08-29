@@ -738,7 +738,7 @@ export const TonightSection = memo(function TonightSection({
                 type="button"
                 onClick={() => onMove(t.id, -1)}
                 disabled={i === 0}
-                className="rounded px-1 text-xs text-text-faint hover:bg-fill-hover disabled:opacity-30"
+                className="rounded-xs px-1 text-xs text-text-faint hover:bg-fill-hover disabled:opacity-30"
                 aria-label={`Move ${t.name} earlier`}
               >
                 ↑
@@ -747,7 +747,7 @@ export const TonightSection = memo(function TonightSection({
                 type="button"
                 onClick={() => onMove(t.id, 1)}
                 disabled={i === tasks.length - 1}
-                className="rounded px-1 text-xs text-text-faint hover:bg-fill-hover disabled:opacity-30"
+                className="rounded-xs px-1 text-xs text-text-faint hover:bg-fill-hover disabled:opacity-30"
                 aria-label={`Move ${t.name} later`}
               >
                 ↓

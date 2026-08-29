@@ -461,3 +461,62 @@ test("every pure entry point survives garbage input (graceful, never throws)", (
     thompsonMultiplier(null, null, () => 0.5);
   }
 });
+
+// ---------------------------------------------------------------------------
+// BET-1419: the scheduler mutators the engine's tonight verbs ride on
+// ---------------------------------------------------------------------------
+
+test("readWindow returns the persisted row (null before anything was written)", async () => {
+  const { scheduler } = memoryScheduler();
+  assert.equal(await scheduler.readWindow(), null);
+  await scheduler.tick(tickInput({ candidates: [candidate()] }));
+  assert.equal((await scheduler.readWindow()).state, "open");
+});
+
+test("updateWindow applies a pure transition (arm/clear/pin) and persists it", async () => {
+  const { scheduler, saved } = memoryScheduler();
+  const armed = await scheduler.updateWindow((prev) =>
+    scheduleCountdown(prev, { now: T0 - 30 * 60_000, dueMs: T0 }),
+  );
+  assert.equal(armed.countdown.dueMs, T0);
+  assert.equal(saved().window.countdown.dueMs, T0);
+
+  const cleared = await scheduler.updateWindow((prev) =>
+    normalizeWindow({ ...normalizeWindow(prev), countdown: null }),
+  );
+  assert.equal(cleared.countdown, null);
+  assert.equal(saved().window.countdown, null);
+
+  // A no-op (null) mutator writes nothing.
+  const noop = await scheduler.updateWindow(() => null);
+  assert.equal(noop, null);
+});
+
+test("foldCounters folds a verdict into the persisted Thompson counters; readCounters reads them back", async () => {
+  const { scheduler, saved } = memoryScheduler();
+  const c1 = await scheduler.foldCounters({ category: "queue-tonight", verdict: "accept" });
+  assert.deepEqual(c1["queue-tonight"], { alpha: 1, beta: 0 });
+  const c2 = await scheduler.foldCounters({ category: "queue-tonight", verdict: "veto" });
+  assert.deepEqual(c2["queue-tonight"], { alpha: 1, beta: 1 });
+  assert.deepEqual(saved().counters["queue-tonight"], { alpha: 1, beta: 1 });
+  const back = await scheduler.readCounters();
+  assert.deepEqual(back["queue-tonight"], { alpha: 1, beta: 1 });
+});
+
+test("closing the window clears the manual pin — the pin governs one window only (§10.4)", async () => {
+  const clock = { ms: T0 + H };
+  const { scheduler, saved } = memoryScheduler({ now: () => clock.ms });
+  // Open on the trough signal.
+  await scheduler.tick(tickInput({ candidates: [candidate()] }));
+  assert.equal(saved().window.state, "open");
+  // Pin an order mid-window.
+  await scheduler.updateWindow((prev) =>
+    normalizeWindow({ ...normalizeWindow(prev), pinnedOrder: ["b", "a"] }),
+  );
+  assert.deepEqual(saved().window.pinnedOrder, ["b", "a"]);
+  // The trough ends → close clears the pin.
+  clock.ms = TROUGH.endMs + 1;
+  await scheduler.tick(tickInput({ candidates: [candidate()] }));
+  assert.equal(saved().window.state, "closed");
+  assert.equal(saved().window.pinnedOrder, null);
+});

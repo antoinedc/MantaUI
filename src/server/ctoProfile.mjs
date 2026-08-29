@@ -407,10 +407,11 @@ export function quietTroughStartHour({
   centerHour = QUIET_TROUGH_DEFAULT_CENTER_H,
 } = {}) {
   const dom = dominantComponent(components);
-  const peakBoxHour = dom
-    ? ((dom.mu_hour - tzOffset + boxUtcOffsetHours) % 24 + 24) % 24
+  // With learned components the trough is the peak's antipode (peak + 12h);
+  // without them the default center IS the trough center (not a peak).
+  const troughCenter = dom
+    ? (((dom.mu_hour - tzOffset + boxUtcOffsetHours) % 24 + 24) % 24 + 12) % 24
     : centerHour;
-  const troughCenter = (peakBoxHour + 12) % 24;
   return ((troughCenter - QUIET_TROUGH_HOURS / 2) % 24 + 24) % 24;
 }
 
