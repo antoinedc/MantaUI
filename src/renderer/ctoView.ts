@@ -500,6 +500,37 @@ export function vetoCards(cards: ReadonlyArray<Record<string, unknown>>): VetoCa
   }));
 }
 
+// BET-1395: the open connect-ask cards (§10.3 connect variant) among the wire
+// cards — tool name + why + evidence trail + the three-way answer bound as
+// `tool-connect` actions (the registry is the executor, always runnable).
+export type ConnectCardRow = {
+  id: string;
+  title: string;
+  body: string;
+  evidence?: string[];
+  options: { label: string; answer: string; action: { type: string; payload: Record<string, unknown> } }[];
+};
+
+export function connectCards(cards: ReadonlyArray<Record<string, unknown>>): ConnectCardRow[] {
+  return (cards ?? [])
+    .filter((c) => c?.variant === "connect")
+    .map((c) => ({
+      id: String(c.id ?? ""),
+      title: String(c.title ?? ""),
+      body: String(c.body ?? ""),
+      evidence: Array.isArray(c.evidence) ? (c.evidence as string[]) : [],
+      options: Array.isArray(c.options)
+        ? (c.options as { label?: string; answer?: string; action?: { type?: string; payload?: Record<string, unknown> } }[]).map(
+            (o) => ({
+              label: String(o?.label ?? ""),
+              answer: String(o?.answer ?? ""),
+              action: { type: String(o?.action?.type ?? ""), payload: (o?.action?.payload ?? {}) as Record<string, unknown> },
+            }),
+          )
+        : [],
+    }));
+}
+
 // Live countdown to a veto card's `dueMs`: the ms remaining (≥ 0), or null
 // when there is no due time or it already elapsed (the card resolves server-
 // side; the client just hides the countdown rather than reading negative).
