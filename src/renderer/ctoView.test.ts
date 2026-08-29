@@ -358,6 +358,9 @@ import {
   executeSuggestionOption,
   runnableSuggestionOption,
   suggestionConfidence,
+  vetoCards,
+  countdownRemaining,
+  tonightVisible,
 } from "./ctoView";
 
 it("decisionCards: selects decision-variant cards only", () => {
@@ -371,11 +374,11 @@ it("decisionCards: selects decision-variant cards only", () => {
   expect(out[0].id).toBe("d1");
 });
 
-it("runnableSuggestionOption: P2 runs config-change/start-job/record-decision; not queue-tonight/tool-write", () => {
+it("runnableSuggestionOption: BET-1419 runs config-change/start-job/record-decision/queue-tonight; not tool-write", () => {
   expect(runnableSuggestionOption({ action: { type: "config-change" } })).toBe(true);
   expect(runnableSuggestionOption({ action: { type: "start-job" } })).toBe(true);
   expect(runnableSuggestionOption({ action: { type: "record-decision" } })).toBe(true);
-  expect(runnableSuggestionOption({ action: { type: "queue-tonight" } })).toBe(false);
+  expect(runnableSuggestionOption({ action: { type: "queue-tonight" } })).toBe(true);
   expect(runnableSuggestionOption({ action: { type: "tool-write" } })).toBe(false);
   expect(runnableSuggestionOption(null)).toBe(false);
   expect(runnableSuggestionOption({ action: { type: "bogus" } })).toBe(false);
@@ -433,6 +436,78 @@ it("executeSuggestionOption: non-runnable type fails closed", async () => {
   const r = await executeSuggestionOption({ option: { action: { type: "tool-write", payload: {} } }, api });
   expect(r.ok).toBe(false);
   expect(r.error ?? "").toMatch(/unsupported/);
+});
+
+it("executeSuggestionOption: queue-tonight queues the task with the card's context (BET-1419)", async () => {
+  let got: unknown = null;
+  const api = { ctoTonightAct: async (input: unknown) => { got = input; return { ok: true }; } };
+  const r = await executeSuggestionOption({
+    option: {
+      label: "Queue: reconcile ledger",
+      action: { type: "queue-tonight", payload: { name: "Reconcile ledger", prompt: "do it", refs: ["BET-9"] } },
+    },
+    api: api as never,
+  });
+  expect(r.ok).toBe(true);
+  expect(got).toEqual({
+    action: "add",
+    task: {
+      name: "Reconcile ledger",
+      prompt: "do it",
+      project: null,
+      value: undefined,
+      confidence: undefined,
+      predictedCost: undefined,
+      refs: ["BET-9"],
+      cls: "queue-tonight",
+    },
+  });
+});
+
+it("executeSuggestionOption: queue-tonight falls back to the label and fails closed without a name", async () => {
+  let got: unknown = null;
+  const api = { ctoTonightAct: async (input: unknown) => { got = input; return { ok: true }; } };
+  const r = await executeSuggestionOption({
+    option: { label: "Queue the sweep", action: { type: "queue-tonight", payload: {} } },
+    api: api as never,
+  });
+  expect(r.ok).toBe(true);
+  expect((got as { task: { name: string } }).task.name).toBe("Queue the sweep");
+
+  const r2 = await executeSuggestionOption({
+    option: { label: "", action: { type: "queue-tonight", payload: {} } },
+    api: api as never,
+  });
+  expect(r2.ok).toBe(false);
+  expect(r2.error ?? "").toMatch(/name/);
+});
+
+it("vetoCards: selects veto-variant cards with the countdown fields", () => {
+  const cards = [
+    { id: "b1", variant: "blocker", title: "blk" },
+    { id: "overnight:veto", variant: "veto", title: "Overnight run planned", body: "3 tasks", dueMs: 5000, options: [{ label: "Cancel tonight", action: { type: "veto-cancel", payload: {} } }] },
+  ];
+  const out = vetoCards(cards as unknown as ReadonlyArray<Record<string, unknown>>);
+  expect(out.length).toBe(1);
+  expect(out[0].id).toBe("overnight:veto");
+  expect(out[0].dueMs).toBe(5000);
+  expect(out[0].options[0].action.type).toBe("veto-cancel");
+});
+
+it("countdownRemaining: ms left, null once due or without a dueMs", () => {
+  expect(countdownRemaining(10_000, 4_000)).toBe(6_000);
+  expect(countdownRemaining(4_000, 4_000)).toBeNull();
+  expect(countdownRemaining(3_000, 4_000)).toBeNull();
+  expect(countdownRemaining(null, 4_000)).toBeNull();
+  expect(countdownRemaining(Number.NaN, 4_000)).toBeNull();
+});
+
+it("tonightVisible: hidden when zero or tier below high", () => {
+  expect(tonightVisible(0, "high")).toBe(false);
+  expect(tonightVisible(3, "high")).toBe(true);
+  expect(tonightVisible(3, "medium")).toBe(false);
+  expect(tonightVisible(3, undefined)).toBe(false);
+  expect(tonightVisible(undefined, "high")).toBe(false);
 });
 
 it("executeSuggestionOption: failure is reported (not swallowed)", async () => {

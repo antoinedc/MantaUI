@@ -90,6 +90,14 @@ export const RISING_MARGIN_KAPPAS = 1.5; // rising edge sits margin hours before
 export const RISING_MARGIN_MIN_H = 0.25;
 export const RISING_MARGIN_MAX_H = 2.0;
 
+// BET-1419 (§11.1): the overnight window opens at the start of the profile's
+// quiet trough — the antipode (peak + 12h) of the dominant workday component.
+// A half-window of 3h brackets it, so the learned trough is 6h wide. Until the
+// profile has learned any workday component the default trough is 01:00–07:00
+// box-local (a fixed bootstrap center of 04:00).
+export const QUIET_TROUGH_HOURS = 6;
+export const QUIET_TROUGH_DEFAULT_CENTER_H = 4;
+
 export function clamp01(x) {
   return Math.max(0, Math.min(1, x));
 }
@@ -387,6 +395,47 @@ export function risingEdgeMsIntoDay({
   return Math.round(edgeHour * HOUR_MS);
 }
 
+// BET-1419: the quiet trough in box-local hours-into-day (§11.1). The center
+// is the dominant workday component's antipode (peak + 12h) translated to
+// box-local; with no learned components it falls back to the fixed 04:00
+// bootstrap center. Returns the NON-wrapped start hour (in [0,24)) plus the
+// window width; the ms-window builder picks the next concrete occurrence.
+export function quietTroughStartHour({
+  components = [],
+  tzOffset = 0,
+  boxUtcOffsetHours = 0,
+  centerHour = QUIET_TROUGH_DEFAULT_CENTER_H,
+} = {}) {
+  const dom = dominantComponent(components);
+  // With learned components the trough is the peak's antipode (peak + 12h);
+  // without them the default center IS the trough center (not a peak).
+  const troughCenter = dom
+    ? (((dom.mu_hour - tzOffset + boxUtcOffsetHours) % 24 + 24) % 24 + 12) % 24
+    : centerHour;
+  return ((troughCenter - QUIET_TROUGH_HOURS / 2) % 24 + 24) % 24;
+}
+
+// BET-1419: the NEXT concrete quiet-trough occurrence containing `now` if
+// `now` is inside one, else the next one after it. Returns the §11.1
+// {startMs, endMs} the overnight scheduler consumes (end > start always —
+// `troughContains` requires that), or null when the clock is unusable.
+export function quietTroughWindow({ components = [], tzOffset = 0, nowMs, now = () => Date.now() } = {}) {
+  const t = typeof nowMs === "number" && Number.isFinite(nowMs) ? nowMs : now();
+  if (!Number.isFinite(t)) return null;
+  const boxUtcOffsetHours = boxUtcOffsetHoursOf(t);
+  const startHour = quietTroughStartHour({ components, tzOffset, boxUtcOffsetHours });
+  const widthMs = QUIET_TROUGH_HOURS * HOUR_MS;
+  // ms-into-day of the trough start in box-local time.
+  const d = new Date(t);
+  const dayStartMs = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const startIntoDay = Math.round(startHour * HOUR_MS);
+  // Candidate occurrences: today and tomorrow (one of these always covers
+  // "inside now" or "next"). Pick the latest start whose END is in the future.
+  let startMs = dayStartMs + startIntoDay;
+  if (startMs + widthMs <= t) startMs += 24 * HOUR_MS;
+  return { startMs, endMs: startMs + widthMs };
+}
+
 // Deviation-from-own-baseline: activity far outside the user's typical workday
 // (e.g. a 3am session for a 10–18h user) → {type,text}. Surfaced ONLY as a
 // digest progress-tier aside, never in any shared artifact (§8.4).
@@ -670,6 +719,17 @@ export function createCtoProfile(deps = {}) {
         components: state.temporal.workday.components,
         tzOffset: state.temporal.tz_offset?.value ?? 0,
         boxUtcOffsetHours: boxUtcOffsetHoursOf(now()),
+      });
+    },
+
+    // BET-1419 (§11.1): the next quiet-trough occurrence as {startMs, endMs} —
+    // the overnight window opens here (the antipode of the learned workday
+    // peak; the 01:00–07:00 box-local default until components exist).
+    getQuietTrough() {
+      return quietTroughWindow({
+        components: state.temporal.workday.components,
+        tzOffset: state.temporal.tz_offset?.value ?? 0,
+        nowMs: now(),
       });
     },
 

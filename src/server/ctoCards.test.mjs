@@ -340,3 +340,46 @@ test("upsertDecision: writes a decision card, and regenerating the same id upser
   assert.equal(open[0].created, 1_000_000); // created preserved across regeneration
   assert.equal(open[0].variant, "decision");
 });
+
+// ---------------------------------------------------------------------------
+// BET-1419 — the veto-window card (§9.2/§10.3)
+// ---------------------------------------------------------------------------
+
+test("upsertVeto: writes a variant=veto card with the countdown dueMs", async () => {
+  const h = makeHarness();
+  const r = await h.cards.upsertVeto({
+    id: "overnight:veto",
+    title: "Overnight run planned",
+    body: "3 tasks queued for tonight's window.",
+    dueMs: 2_000_000,
+    options: [{ label: "Cancel tonight", action: { type: "veto-cancel", payload: {} } }],
+  });
+  assert.equal(r.changed, true);
+  assert.equal(r.isNew, true);
+  const rows = h.store().cards.filter((c) => c.state === "open");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].variant, "veto");
+  assert.equal(rows[0].dueMs, 2_000_000);
+  assert.equal(rows[0].sourceKind, "overnight");
+  assert.ok(h.ledgerRows.some((row) => row.kind === CARD_CREATED && row.variant === "veto"));
+});
+
+test("upsertVeto: re-arming updates in place (never dups), created preserved", async () => {
+  const h = makeHarness();
+  await h.cards.upsertVeto({ id: "overnight:veto", title: "t1", dueMs: 2_000_000 });
+  h.advance(5_000);
+  const r2 = await h.cards.upsertVeto({ id: "overnight:veto", title: "t2", dueMs: 3_000_000 });
+  assert.equal(r2.isNew, false);
+  const open = h.store().cards.filter((c) => c.state === "open");
+  assert.equal(open.length, 1, "one open veto card at a time");
+  assert.equal(open[0].title, "t2");
+  assert.equal(open[0].dueMs, 3_000_000);
+  assert.equal(open[0].created, 1_000_000, "created preserved across re-arm");
+});
+
+test("upsertVeto: refuses a missing id", async () => {
+  const h = makeHarness();
+  const r = await h.cards.upsertVeto({ title: "no id" });
+  assert.equal(r.changed, false);
+  assert.equal(openCardCount(h), 0);
+});

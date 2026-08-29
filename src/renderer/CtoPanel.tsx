@@ -39,6 +39,8 @@ import {
   statDisplay,
   nowCostLabel,
   decisionCards,
+  vetoCards,
+  tonightVisible,
   executeSuggestionOption,
   tonightBudgetMode,
   nightGauge,
@@ -50,6 +52,7 @@ import {
   type CtoState,
   type CtoHealthStat,
   type DecisionCardRow,
+  type VetoCardRow,
 } from "./ctoView";
 import {
   BlockerSection,
@@ -59,10 +62,12 @@ import {
   JustFinishedRail,
   DigestSection,
   SuggestionSection,
+  VetoSection,
+  TonightSection,
   type NowCard,
   type SuggestionOption,
 } from "./ctoSections";
-import type { CtoCard, CtoFinishedItem, CtoDigest, CtoHeldRow, CtoLedgerPage, CtoLedgerRow, CtoProfileRender, CtoSkill } from "../shared/api.js";
+import type { CtoCard, CtoFinishedItem, CtoDigest, CtoHeldRow, CtoLedgerPage, CtoLedgerRow, CtoProfileRender, CtoSkill, CtoTonightTask } from "../shared/api.js";
 import { Toggle } from "./Toggle";
 
 // The effort-dial options (§12.1, D12). Plain-language scope per tier. Medium
@@ -141,8 +146,16 @@ export function CtoPanel({
   // the §14.3 silence-audit "review held" modal (opened from the digest aside).
   const [heldOpen, setHeldOpen] = useState(false);
   const [heldRows, setHeldRows] = useState<CtoHeldRow[]>([]);
-  const blockerCards = useMemo(() => cards.filter((c) => c.variant !== "decision"), [cards]);
+  // BET-1419: veto cards (§9.2) render in their own Overnight section; the
+  // Tonight drill-down (§10.4) fetches its task list when expanded.
+  const [tonightExpanded, setTonightExpanded] = useState(false);
+  const [tonightTasks, setTonightTasks] = useState<CtoTonightTask[]>([]);
+  const [tonightLoading, setTonightLoading] = useState(false);
+  const [tonightPinned, setTonightPinned] = useState(false);
+  const [tonightWindowOpen, setTonightWindowOpen] = useState(false);
+  const blockerCards = useMemo(() => cards.filter((c) => c.variant !== "decision" && c.variant !== "veto"), [cards]);
   const suggestionCards = useMemo(() => decisionCards(cards), [cards]);
+  const vetoList = useMemo(() => vetoCards(cards as unknown as ReadonlyArray<Record<string, unknown>>), [cards]);
 
   const busy = digestBusy(state);
   const busyRef = useRef(busy);
@@ -281,6 +294,20 @@ export function CtoPanel({
         rendererDelegateStart(input),
       ctoFact: (input: { kind?: string; statement: string; refs?: string[] }) =>
         window.api?.ctoFact?.(input) ?? Promise.resolve({ ok: false, error: "facts unavailable" }),
+      ctoTonightAct: (input: {
+        action: "add" | "remove" | "reorder" | "cancel" | "run-now";
+        task?: {
+          name: string;
+          prompt?: string;
+          project?: string | null;
+          value?: number;
+          confidence?: number;
+          predictedCost?: number;
+          refs?: string[];
+          cls?: string;
+          originId?: string | null;
+        };
+      }) => window.api?.ctoTonightAct?.(input) ?? Promise.resolve({ ok: false, error: "tonight unavailable" }),
     }),
     [],
   );
@@ -313,6 +340,118 @@ export function CtoPanel({
     },
     [refreshCards],
   );
+
+  // BET-1419 tonight + veto actions (§9.2/§10.4). The veto card's Cancel
+  // tonight is a veto VERDICT on the veto-window subject — the server route
+  // performs the actual cancel (pause + close) before recording it. Run-now
+  // and the drill-down edits go through the tonight verb route.
+  const refreshTonight = useCallback(() => {
+    setTonightLoading(true);
+    void window.api
+      ?.ctoTonightGet?.()
+      .then((r) => {
+        setTonightTasks(r.tasks ?? []);
+        setTonightPinned(Array.isArray(r.window?.pinnedOrder) && r.window.pinnedOrder.length > 0);
+        setTonightWindowOpen(r.window?.state === "open");
+      })
+      .catch(() => {
+        setTonightTasks([]);
+        setTonightWindowOpen(false);
+      })
+      .finally(() => setTonightLoading(false));
+  }, []);
+
+  const handleVetoCancel = useCallback(
+    (card: VetoCardRow) => {
+      void window.api
+        ?.ctoVerdict?.({ subject: { type: "veto-window", id: card.id, class: "overnight" }, verdict: "veto" })
+        .then((r) => {
+          if (!r?.ok) pushToast({ id: `veto-${Date.now()}`, message: `Couldn't cancel tonight: ${r?.error ?? "unknown"}` });
+        })
+        .catch(() => {})
+        .finally(refreshCards);
+    },
+    [pushToast, refreshCards],
+  );
+
+  const handleVetoEditPlan = useCallback(() => {
+    setTonightExpanded(true);
+    refreshTonight();
+  }, [refreshTonight]);
+
+  const handleVetoRunNow = useCallback(
+    () => {
+      void window.api
+        ?.ctoTonightAct?.({ action: "run-now" })
+        .then((r) => {
+          if (!r?.ok) pushToast({ id: `runnow-${Date.now()}`, message: `Couldn't start overnight now: ${r?.error ?? "unknown"}` });
+          else pushToast({ id: `runnow-${Date.now()}`, message: "Overnight run starting" });
+        })
+        .catch(() => {})
+        .finally(refreshCards);
+    },
+    [pushToast, refreshCards],
+  );
+
+  const handleTonightToggle = useCallback(() => {
+    setTonightExpanded((prev) => {
+      if (!prev) refreshTonight();
+      return !prev;
+    });
+  }, [refreshTonight]);
+
+  const handleTonightCancel = useCallback(() => {
+    void window.api
+      ?.ctoTonightAct?.({ action: "cancel" })
+      .then((r) => {
+        if (!r?.ok) pushToast({ id: `tonight-${Date.now()}`, message: `Couldn't cancel tonight: ${r?.error ?? "unknown"}` });
+      })
+      .catch(() => {})
+      .finally(() => {
+        refreshCards();
+        refreshTonight();
+      });
+  }, [pushToast, refreshCards, refreshTonight]);
+
+  const handleTonightRemove = useCallback(
+    (id: string) => {
+      void window.api
+        ?.ctoTonightAct?.({ action: "remove", id })
+        .then((r) => {
+          if (!r?.ok) pushToast({ id: `tonight-${Date.now()}`, message: `Couldn't remove the task: ${r?.error ?? "unknown"}` });
+        })
+        .catch(() => {})
+        .finally(refreshTonight);
+    },
+    [pushToast, refreshTonight],
+  );
+
+  // Reorder via the up/down arrows — PINS the order for the current window
+  // (exempt from re-scoring; cleared when the window closes, §10.4).
+  const handleTonightMove = useCallback(
+    (id: string, dir: -1 | 1) => {
+      const ids = tonightTasks.map((t) => t.id);
+      const i = ids.indexOf(id);
+      const j = i + dir;
+      if (i < 0 || j < 0 || j >= ids.length) return;
+      [ids[i], ids[j]] = [ids[j], ids[i]];
+      void window.api
+        ?.ctoTonightAct?.({ action: "reorder", ids })
+        .then((r) => {
+          if (!r?.ok) pushToast({ id: `tonight-${Date.now()}`, message: `Couldn't reorder: ${r?.error ?? "unknown"}` });
+        })
+        .catch(() => {})
+        .finally(refreshTonight);
+    },
+    [tonightTasks, pushToast, refreshTonight],
+  );
+
+  // Keep the veto countdown live between state events.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const h = setInterval(() => setTick((t) => t + 1), 30_000);
+    return () => clearInterval(h);
+  }, []);
 
   // §14.3 silence audit: open / refresh the held list (from the digest aside).
   const openHeld = useCallback(() => {
@@ -431,6 +570,7 @@ export function CtoPanel({
               Informational — never counts into the sidebar badge. */}
           <BackfillCard state={state} />
           <BlockerSection cards={blockerCards} now={Date.now()} onAnswer={handleAnswer} />
+          <VetoSection cards={vetoList} now={Date.now()} onCancel={handleVetoCancel} onEditPlan={handleVetoEditPlan} onRunNow={handleVetoRunNow} />
           <SuggestionSection cards={suggestionCards} onAction={handleSuggestionAction} onDismiss={handleSuggestionDismiss} />
           <NowRail cards={nowCards} />
           <JustFinishedRail items={finished} now={Date.now()} onOpen={handleOpenFinished} />
@@ -442,6 +582,21 @@ export function CtoPanel({
             onItemExpand={handleItemExpand}
             onOpenHeld={openHeld}
           />
+          {tonightVisible(state?.tonightCount, state?.tier ?? undefined) ? (
+            <TonightSection
+              count={state?.tonightCount ?? 0}
+              expanded={tonightExpanded}
+              onToggle={handleTonightToggle}
+              tasks={tonightTasks}
+              tasksLoading={tonightLoading}
+              pinned={tonightPinned}
+              windowOpen={tonightWindowOpen}
+              onCancelTonight={handleTonightCancel}
+              onRemove={handleTonightRemove}
+              onMove={handleTonightMove}
+              onOpenSettings={() => setView("settings")}
+            />
+          ) : null}
         </div>
 
         {/* Resting state (§10.6-1): only when every section is empty. */}
@@ -562,6 +717,7 @@ function SettingsView({
   // controls reflect the box; edits write through configUpdate (instant-apply).
   const [config, setConfig] = useState<CtoSettingsConfig | null>(null);
   const [capText, setCapText] = useState("");
+  const [nightCapText, setNightCapText] = useState("");
   const [health, setHealth] = useState<CtoHealthStat[]>([]);
   const [busyPause, setBusyPause] = useState(false);
   // BET-1405 (§10.5 card 3): budget payload (day buckets + quota cache) and
@@ -582,6 +738,7 @@ function SettingsView({
         ctoNightCapUsd: c?.ctoNightCapUsd,
       });
       setCapText(String(c?.ctoAmbientCap ?? DEFAULT_AMBIENT_CAP_USD));
+      setNightCapText(c?.ctoNightCapUsd != null ? String(c.ctoNightCapUsd) : "");
     });
     void window.api.ctoHealthGet().then((h) => {
       if (alive) setHealth(h.stats);
@@ -626,6 +783,22 @@ function SettingsView({
     }
     void applyConfig({ ctoAmbientCap: Math.round(n * 100) / 100 });
   }, [capText, applyConfig, pushToast]);
+
+  // BET-1419 (§11.2): the windowless providers' absolute night budget. Empty
+  // clears the bound (windowless providers then get no overnight budget seam).
+  const saveNightCap = useCallback(() => {
+    const text = nightCapText.trim();
+    if (text === "") {
+      void applyConfig({ ctoNightCapUsd: undefined });
+      return;
+    }
+    const n = Number(text);
+    if (!Number.isFinite(n) || n < 0) {
+      pushToast({ id: `nightcap-${Date.now()}`, message: "Night cap must be a non-negative dollar amount (or empty)." });
+      return;
+    }
+    void applyConfig({ ctoNightCapUsd: Math.round(n * 100) / 100 });
+  }, [nightCapText, applyConfig, pushToast]);
 
   const doPause = useCallback(async () => {
     setBusyPause(true);
@@ -766,6 +939,53 @@ function SettingsView({
                   ariaLabel="Push digest to phone"
                 />
               </div>
+
+              {/* BET-1419 Overnight switch (§11.1 consent) — High tier only. */}
+              {(config?.ctoTier ?? "low") === "high" ? (
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-medium text-text">Overnight work</div>
+                    <div className="text-sm text-text-muted">
+                      Let the CTO run queued work unattended in the quiet trough (you get a
+                      30-min veto card first).
+                    </div>
+                  </div>
+                  <Toggle
+                    checked={!!config?.ctoOvernight}
+                    onChange={(v) => void applyConfig({ ctoOvernight: v })}
+                    ariaLabel="Overnight work enabled"
+                  />
+                </div>
+              ) : null}
+
+              {/* BET-1419 night cap (§11.2): the windowless providers' bound. */}
+              {(config?.ctoTier ?? "low") === "high" ? (
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-medium text-text">Overnight cap (no usage window)</div>
+                    <div className="text-sm text-text-muted">
+                      Absolute dollar bound for providers without a usage window (empty = no
+                      overnight budget for them).
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-text-muted">$</span>
+                    <input
+                      type="number"
+                      min={0}
+                      step={0.25}
+                      value={nightCapText}
+                      onChange={(e) => setNightCapText(e.target.value)}
+                      onBlur={saveNightCap}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") saveNightCap();
+                      }}
+                      className="w-20 rounded-md border border-border bg-bg px-2 py-1 text-sm text-text"
+                      aria-label="Overnight cap for windowless providers in dollars"
+                    />
+                  </div>
+                </div>
+              ) : null}
 
               {/* Pause / Resume (§10.6-5 kill switch) */}
               <div className="flex items-center justify-between gap-3 border-t border-border-subtle pt-4">

@@ -24,6 +24,9 @@ export type CtoState = {
   needsYouCount: number;
   generationInFlight: boolean;
   tonightCount: number;
+  // The A12 tier dial (§12.1) — BET-1419: tier-gated surfaces (the Tonight
+  // line shows only at High) read it straight off the state event.
+  tier?: string | null;
   backfill?: BackfillState;
 };
 
@@ -477,12 +480,52 @@ export function decisionCards(cards: ReadonlyArray<Record<string, unknown>>): De
   return (cards ?? []).filter((c) => c?.variant === "decision") as DecisionCardRow[];
 }
 
+// BET-1419: the open veto card (§10.3) among the wire cards — the overnight
+// run's 30-min countdown. Structural subset of the wire CtoCard.
+export type VetoCardRow = {
+  id: string;
+  title: string;
+  body: string;
+  dueMs: number | null;
+  options: { label: string; action: { type: string; payload: Record<string, unknown> } }[];
+};
+
+export function vetoCards(cards: ReadonlyArray<Record<string, unknown>>): VetoCardRow[] {
+  return (cards ?? []).filter((c) => c?.variant === "veto").map((c) => ({
+    id: String(c.id ?? ""),
+    title: String(c.title ?? ""),
+    body: String(c.body ?? ""),
+    dueMs: Number.isFinite(c.dueMs) ? (c.dueMs as number) : null,
+    options: Array.isArray(c.options) ? (c.options as VetoCardRow["options"]) : [],
+  }));
+}
+
+// Live countdown to a veto card's `dueMs`: the ms remaining (≥ 0), or null
+// when there is no due time or it already elapsed (the card resolves server-
+// side; the client just hides the countdown rather than reading negative).
+export function countdownRemaining(dueMs: unknown, now: number): number | null {
+  if (!Number.isFinite(dueMs) || !Number.isFinite(now)) return null;
+  const d = (dueMs as number) - now;
+  return d > 0 ? d : null;
+}
+
+// §10.4 Tonight line visibility: hidden entirely when nothing is queued or
+// High tier is off. Pure so the component + tests share one rule.
+export function tonightVisible(tonightCount: number | undefined, tier: string | undefined): boolean {
+  if (!Number.isFinite(tonightCount) || (tonightCount as number) <= 0) return false;
+  return tier === "high";
+}
+
 // §9.1 P2 option viability: which action types have a runnable executor in P2.
+// BET-1419: `queue-tonight` is now runnable (the tonight queue + §11 overnight
+// execution are wired). `tool-write` stays non-runnable until the §7.4 tool
+// registry lands — with the empty write ring the server never emits one, so
+// no dead control is ever rendered.
 const RUNNABLE_TYPES: Record<string, boolean> = {
   "config-change": true,
   "start-job": true,
   "record-decision": true,
-  "queue-tonight": false,
+  "queue-tonight": true,
   "tool-write": false,
 };
 
@@ -498,6 +541,20 @@ export type SuggestionApi = {
   configUpdate(patch: Record<string, unknown>): Promise<unknown>;
   delegateStart(input: { prompt: string; sessionID: string; directory: string; model?: unknown }): Promise<{ ok?: boolean; error?: string }>;
   ctoFact(input: { kind?: string; statement: string; refs?: string[] }): Promise<{ ok?: boolean; error?: string }>;
+  ctoTonightAct(input: {
+    action: "add" | "remove" | "reorder" | "cancel" | "run-now";
+    task?: {
+      name: string;
+      prompt?: string;
+      project?: string | null;
+      value?: number;
+      confidence?: number;
+      predictedCost?: number;
+      refs?: string[];
+      cls?: string;
+      originId?: string | null;
+    };
+  }): Promise<{ ok?: boolean; error?: string }>;
 };
 
 // Execute one bound action. Confirmation (the config-change diff modal) is a
@@ -537,6 +594,27 @@ export async function executeSuggestionOption({
         const refs = Array.isArray(payload.refs) ? (payload.refs as string[]) : [];
         const r = await api.ctoFact({ kind: "decision", statement, refs });
         return r?.ok ? { ok: true } : { ok: false, error: r?.error ?? "record-decision failed" };
+      }
+      case "queue-tonight": {
+        // BET-1419: queue the task for tonight (§10.4). The card's context
+        // (cls/score) is captured at accept time so the overnight portfolio
+        // scores it without re-asking the generator.
+        const name = typeof payload.name === "string" && payload.name ? payload.name : option?.label ?? "";
+        if (!name) return { ok: false, error: "queue-tonight needs a name payload" };
+        const r = await api.ctoTonightAct({
+          action: "add",
+          task: {
+            name,
+            prompt: typeof payload.prompt === "string" && payload.prompt ? payload.prompt : name,
+            project: typeof payload.project === "string" ? payload.project : null,
+            value: typeof payload.value === "number" ? payload.value : undefined,
+            confidence: typeof payload.confidence === "number" ? payload.confidence : undefined,
+            predictedCost: typeof payload.cost === "number" ? payload.cost : undefined,
+            refs: Array.isArray(payload.refs) ? (payload.refs as string[]) : [],
+            cls: typeof payload.cls === "string" ? payload.cls : "queue-tonight",
+          },
+        });
+        return r?.ok ? { ok: true } : { ok: false, error: r?.error ?? "queue-tonight failed" };
       }
       default:
         return { ok: false, error: `unsupported action type: ${String(type ?? "")}` };

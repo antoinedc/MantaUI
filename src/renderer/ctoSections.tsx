@@ -12,6 +12,7 @@
 import { memo, useState } from "react";
 import {
   relativeTime,
+  countdownRemaining,
   digestExpandable,
   finishedVariant,
   nowRailMeta,
@@ -19,8 +20,9 @@ import {
   type BlockerCard,
   type DecisionCardRow,
   type FinishedVariant,
+  type VetoCardRow,
 } from "./ctoView";
-import type { CtoFinishedItem, CtoDigest } from "../shared/api.js";
+import type { CtoFinishedItem, CtoDigest, CtoTonightTask } from "../shared/api.js";
 
 // ---------------------------------------------------------------------------
 // Blocker section (§10.3)
@@ -585,5 +587,199 @@ const DigestRow = memo(function DigestRow({
         ) : null}
       </div>
     </div>
+  );
+});
+
+// ---------------------------------------------------------------------------
+// BET-1419 — Overnight surfaces (§10.3 veto card + §10.4 Tonight line)
+// ---------------------------------------------------------------------------
+
+// The veto-window card: tonight's run announced ~30 min ahead with a live
+// countdown. Three actions (§9.2): Cancel tonight (veto verdict), Edit plan
+// (opens the Tonight drill-down below), Run now instead (override).
+export const VetoSection = memo(function VetoSection({
+  cards,
+  now,
+  onCancel,
+  onEditPlan,
+  onRunNow,
+}: {
+  cards: VetoCardRow[];
+  now: number;
+  onCancel: (card: VetoCardRow) => void;
+  onEditPlan: (card: VetoCardRow) => void;
+  onRunNow: (card: VetoCardRow) => void;
+}) {
+  if (cards.length === 0) return null;
+  return (
+    <section className="space-y-2">
+      <h2 className="text-sm font-semibold uppercase tracking-wide text-text-muted">Overnight</h2>
+      <div className="space-y-2">
+        {cards.map((card) => {
+          const remaining = countdownRemaining(card.dueMs, now);
+          const min = remaining != null ? Math.max(1, Math.round(remaining / 60000)) : null;
+          return (
+            <div
+              key={card.id}
+              className="rounded-md border border-strong bg-fill px-3 py-3"
+              style={{
+                borderLeftWidth: "var(--need-edge-w)",
+                borderLeftColor: "color-mix(in srgb, var(--warn) 55%, transparent)",
+              }}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 text-sm">
+                    <span className="font-medium text-text">{card.title}</span>
+                    {min != null ? (
+                      <span
+                        className="rounded-full bg-fill-active px-2 py-1 text-[11px] font-medium text-text-faint"
+                        title="Time until the overnight window opens"
+                      >
+                        opens in ~{min}m
+                      </span>
+                    ) : null}
+                  </div>
+                  {card.body ? <p className="mt-1 text-sm text-text-muted">{card.body}</p> : null}
+                </div>
+              </div>
+              <div className="mt-2 flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => onCancel(card)}
+                  className="rounded-md px-2 py-1 text-sm font-medium text-text hover:bg-fill-hover"
+                >
+                  Cancel tonight
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onEditPlan(card)}
+                  className="rounded-md px-2 py-1 text-sm text-text-muted hover:bg-fill-hover"
+                >
+                  Edit plan
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onRunNow(card)}
+                  className="rounded-md px-2 py-1 text-sm text-text-muted hover:bg-fill-hover"
+                >
+                  Run now instead
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+});
+
+// The Tonight one-line + opt-in drill-down (§10.4). The parent fetches the
+// task list when expanded (ctoTonightGet). A manual reorder PINS the order
+// for the current window (exempt from re-scoring) and every edit is a
+// verdict; "budget & forecast in ⚙" points at the settings card.
+export const TonightSection = memo(function TonightSection({
+  count,
+  expanded,
+  onToggle,
+  tasks,
+  tasksLoading,
+  pinned,
+  windowOpen,
+  onCancelTonight,
+  onRemove,
+  onMove,
+  onOpenSettings,
+}: {
+  count: number;
+  expanded: boolean;
+  onToggle: () => void;
+  tasks: CtoTonightTask[];
+  tasksLoading: boolean;
+  pinned: boolean;
+  windowOpen: boolean;
+  onCancelTonight: () => void;
+  onRemove: (id: string) => void;
+  onMove: (id: string, dir: -1 | 1) => void;
+  onOpenSettings?: () => void;
+}) {
+  if (count <= 0) return null;
+  return (
+    <section className="space-y-2">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex w-full items-center gap-2 rounded-md px-1 py-1 text-left text-sm text-text-muted hover:bg-fill-hover"
+        aria-expanded={expanded}
+      >
+        <span aria-hidden>🌙</span>
+        <span>
+          {count} task{count === 1 ? "" : "s"} queued for tonight {windowOpen ? "(running now)" : "(window)"}
+        </span>
+        {pinned ? (
+          <span className="rounded-full bg-fill-active px-2 py-1 text-[11px] font-medium text-text-faint" title="Manual order pinned for this window">
+            order pinned
+          </span>
+        ) : null}
+        <span className="ml-auto text-xs text-text-faint">{expanded ? "▲" : "▼"}</span>
+      </button>
+      {expanded ? (
+        <div className="space-y-2 rounded-md border border-strong bg-fill px-3 py-3">
+          {tasksLoading ? <p className="text-sm text-text-faint">Loading…</p> : null}
+          {!tasksLoading && tasks.length === 0 ? <p className="text-sm text-text-faint">Nothing queued.</p> : null}
+          {tasks.map((t, i) => (
+            <div key={t.id} className="flex items-center gap-2 text-sm">
+              <span className="text-xs text-text-faint">{i + 1}.</span>
+              <span className="min-w-0 flex-1 truncate text-text" title={t.prompt}>
+                {t.name}
+              </span>
+              <span className="rounded-full bg-fill-active px-2 py-1 text-[11px] font-medium text-text-faint">{t.cls}</span>
+              <button
+                type="button"
+                onClick={() => onMove(t.id, -1)}
+                disabled={i === 0}
+                className="rounded-xs px-1 text-xs text-text-faint hover:bg-fill-hover disabled:opacity-30"
+                aria-label={`Move ${t.name} earlier`}
+              >
+                ↑
+              </button>
+              <button
+                type="button"
+                onClick={() => onMove(t.id, 1)}
+                disabled={i === tasks.length - 1}
+                className="rounded-xs px-1 text-xs text-text-faint hover:bg-fill-hover disabled:opacity-30"
+                aria-label={`Move ${t.name} later`}
+              >
+                ↓
+              </button>
+              <button
+                type="button"
+                onClick={() => onRemove(t.id)}
+                className="rounded-md px-2 py-1 text-xs text-text-muted hover:bg-fill-hover"
+              >
+                Remove
+              </button>
+            </div>
+          ))}
+          <div className="flex items-center justify-between pt-1">
+            <button
+              type="button"
+              onClick={onCancelTonight}
+              className="rounded-md px-2 py-1 text-sm font-medium text-text hover:bg-fill-hover"
+            >
+              Cancel tonight
+            </button>
+            <button
+              type="button"
+              onClick={onOpenSettings}
+              className="text-xs text-text-faint hover:text-text"
+              title="Overnight budget & forecast live in Settings → Adaptive CTO → Behavior"
+            >
+              budget &amp; forecast in ⚙
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </section>
   );
 });

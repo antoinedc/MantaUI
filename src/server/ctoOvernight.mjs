@@ -144,6 +144,11 @@ export function normalizeWindow(prev) {
     // Manual pin (input consent): when set, this exact order governs the
     // window's plan for its whole life — exempt from re-scoring.
     pinnedOrder: Array.isArray(w.pinnedOrder) ? w.pinnedOrder.filter((x) => typeof x === "string") : null,
+    // §9.2 veto stamp: the trough start whose run the user canceled. The open
+    // path refuses to AUTO-open this trough again (run-now still overrides —
+    // explicit consent after a cancel). It expires naturally when the next
+    // trough has a different startMs, so a veto never suppresses tomorrow.
+    vetoedTroughStartMs: finiteOrNull(w.vetoedTroughStartMs),
     countdown,
     lastEvaluatedMs: finiteOrNull(w.lastEvaluatedMs),
   };
@@ -241,10 +246,19 @@ export function evaluateWindow(prev, input) {
     const freshUserEvent =
       finiteOrNull(input?.lastUserEventMs) !== null && input.lastUserEventMs > w.openedMs;
     const presenceReturn = presence === "present" && !w.openedDuringPresence;
-    if (troughContains(w.openedMs, trough) && now >= trough.endMs) {
+    // Trough-shift guard: the profile can re-derive the trough mid-window (a
+    // G refit moves the quiet hours), which would make the trough-end close
+    // below unreachable (the re-derived trough never contains openedMs). A
+    // window the trough signal opened must never outlive its trough — close
+    // it the moment the current trough no longer contains its opening. Run-now
+    // windows are exempt: they open outside any trough on explicit consent and
+    // close on the user's return/fresh event.
+    const troughShifted =
+      w.openedBy !== "run-now" && trough != null && !troughContains(w.openedMs, trough);
+    if ((troughContains(w.openedMs, trough) && now >= trough.endMs) || troughShifted) {
       rows.push(ledgerRow("cto.overnight.close", now, { reason: "trough-end", openedMs: w.openedMs }));
       return {
-        window: normalizeWindow({ ...w, state: "closed", closedMs: now, closeReason: "trough-end", countdown }),
+        window: normalizeWindow({ ...w, state: "closed", closedMs: now, closeReason: "trough-end", countdown, pinnedOrder: null }),
         ledgerRows: rows,
       };
     }
@@ -252,7 +266,7 @@ export function evaluateWindow(prev, input) {
       const reason = freshUserEvent ? "user-event" : "user-return";
       rows.push(ledgerRow("cto.overnight.close", now, { reason, openedMs: w.openedMs }));
       return {
-        window: normalizeWindow({ ...w, state: "closed", closedMs: now, closeReason: reason, countdown }),
+        window: normalizeWindow({ ...w, state: "closed", closedMs: now, closeReason: reason, countdown, pinnedOrder: null }),
         ledgerRows: rows,
       };
     }
@@ -275,7 +289,16 @@ export function evaluateWindow(prev, input) {
     return { window: normalizeWindow({ ...w, countdown, lastEvaluatedMs: now }), ledgerRows: rows };
   }
 
-  const mayOpen = runNow || (inTrough && signal !== null);
+  // §9.2 veto: a user cancel for THIS trough (vetoedTroughStartMs === the
+  // trough's start) blocks the auto-open — the run was canceled, not postponed.
+  // run-now overrides it (explicit consent after a cancel); the next trough
+  // has a different startMs, so the stamp never suppresses a later night.
+  const vetoedTrough =
+    w.vetoedTroughStartMs != null &&
+    trough != null &&
+    finiteOrNull(trough.startMs) === w.vetoedTroughStartMs;
+
+  const mayOpen = runNow || (!vetoedTrough && inTrough && signal !== null);
   if (!mayOpen) {
     return { window: normalizeWindow({ ...w, countdown, lastEvaluatedMs: now }), ledgerRows: rows };
   }
@@ -297,6 +320,7 @@ export function evaluateWindow(prev, input) {
       openedBy: runNow ? "run-now" : signal,
       openedDuringPresence,
       countdown: null, // an open fulfills any pending countdown
+      vetoedTroughStartMs: null, // an open supersedes any same-night veto stamp
       lastEvaluatedMs: now,
     }),
     ledgerRows: rows,
@@ -357,7 +381,7 @@ export function reconcileOnRestart(prev, input) {
           reason: "window missed entirely while the box was down; skipped, never run retroactively",
         }),
       );
-      window = normalizeWindow({ ...window, state: "closed", closedMs: now, closeReason: "trough-end" });
+      window = normalizeWindow({ ...window, state: "closed", closedMs: now, closeReason: "trough-end", pinnedOrder: null });
     } else {
       // Still inside its trough: re-derived, kept — but the reserve math must
       // run again before anything new starts (§11.6 "re-runs the reserve
@@ -754,6 +778,49 @@ export function createOvernightScheduler({ store = defaultOvernightStore(), now 
       await store.save({ ...payload, window }).catch(() => {});
       await ledgerAppend(ledgerRows);
       return { window, recomputeSpendable, ledgerRows };
+    },
+
+    /**
+     * Read the current window state without ticking (BET-1419 verbs read it
+     * for copy/preempt decisions). Null when no window was ever persisted.
+     */
+    async readWindow() {
+      const payload = await store.load().catch(() => null);
+      return payload?.window ?? null;
+    },
+
+    /**
+     * BET-1419 verb seam: apply a pure window transition (from the §11
+     * machine's helpers — scheduleCountdown / normalizeWindow) and persist.
+     * The mutator receives the previous window (or null) and returns the next
+     * normalized one; returning null is a no-op. The ENGINE decides WHEN these
+     * run (arming the veto countdown, canceling tonight, pinning an edit) —
+     * the scheduler only owns the store.
+     */
+    async updateWindow(mutator) {
+      if (typeof mutator !== "function") return null;
+      const payload = await store.load().catch(() => ({ v: 1, window: null }));
+      const next = mutator(payload?.window ?? null);
+      if (!next) return null;
+      await store.save({ ...payload, window: next }).catch(() => {});
+      return next;
+    },
+
+    /**
+     * BET-1419: fold a verdict into the Thompson acceptance counters the
+     * portfolio samples from (the queue-tonight verdict sink). Counters live
+     * beside the window in the same overnight store so one save stays atomic.
+     */
+    async foldCounters({ category, verdict, never } = {}) {
+      const payload = await store.load().catch(() => ({ v: 1 }));
+      const counters = foldVerdictIntoCounters(payload?.counters, { category, verdict, never });
+      await store.save({ ...payload, counters }).catch(() => {});
+      return counters;
+    },
+
+    async readCounters() {
+      const payload = await store.load().catch(() => null);
+      return payload?.counters ?? null;
     },
   };
 }
