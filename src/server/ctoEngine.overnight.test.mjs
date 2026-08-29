@@ -12,7 +12,7 @@ const HOUR = 3_600_000;
 // Minimal harness: fake clock, in-memory stores, injected delegate seams +
 // overnight scheduler. Presence is "gone" (stale desktop beat), profile seam
 // returns a caller-controlled trough, and the queue pre-seeds engine-state.
-function makeHarness({ trough = null, queue = [], projects = [], tier = "high", overnightEnabled = true, budgetPlan = null } = {}) {
+function makeHarness({ trough = null, queue = [], projects = [], tier = "high", overnightEnabled = true, budgetPlan = null, listProjectsFn = null } = {}) {
   const clock = { ms: 1_700_000_000_000 };
   const now = () => clock.ms;
   const ledgerRows = [];
@@ -130,7 +130,7 @@ function makeHarness({ trough = null, queue = [], projects = [], tier = "high", 
       pausedJobs.push(id);
       return { ok: true };
     },
-    listProjects: async () => projects,
+    listProjects: listProjectsFn ?? (async () => projects),
   });
 
   return {
@@ -211,12 +211,44 @@ test("overnight: no window without the trough or the Overnight switch (or at tie
   assert.deepEqual(switchOff.engineStateObj.tonightQueue, [QUEUE_TASK]);
 });
 
-test("overnight: a candidate with no tracked project session is skipped and ledgered, not dropped", async () => {
-  const h = makeHarness({ trough: TROUGH, queue: [QUEUE_TASK], projects: [] });
+test("overnight: an unreadable project list skips + retains the queue row (transient, not a verdict)", async () => {
+  const h = makeHarness({ trough: TROUGH, queue: [QUEUE_TASK], listProjectsFn: async () => {
+    throw new Error("tmux down");
+  } });
   await h.engine.tick();
   assert.equal(h.startedJobs.length, 0);
   assert.ok(h.ledgerRows.some((r) => r.kind === "cto.overnight.skip" && r.reason?.includes("no tracked project session")));
-  assert.deepEqual(h.engineStateObj.tonightQueue, [QUEUE_TASK], "the queued task survives a skip");
+  assert.deepEqual(h.engineStateObj.tonightQueue, [QUEUE_TASK], "a transient project-list failure retains the row");
+  assert.equal(h.engineStateObj.pendingBlockers.length, 0, "no needs-you item for a transient failure");
+});
+
+test("overnight: a queue entry with no tracked project session is removed on the FIRST skip (one final row + needs-you), never re-skipped (BET-1426)", async () => {
+  const h = makeHarness({ trough: TROUGH, queue: [QUEUE_TASK], projects: [] });
+  await h.engine.tick();
+  assert.equal(h.startedJobs.length, 0);
+  const final = h.ledgerRows.find((r) => r.kind === "cto.overnight.skip" && r.id === "tq:1");
+  assert.ok(final, "one final skip row for the removed entry");
+  assert.ok(final.reason?.includes("no tracked project session"));
+  assert.equal(final.removed, true, "the row records the removal");
+  assert.deepEqual(h.engineStateObj.tonightQueue, [], "the unresolvable entry leaves the queue");
+  assert.ok(
+    h.engineStateObj.pendingBlockers.some((b) => b.reason?.includes("Reconcile the ledger")),
+    "a needs-you blocker records the removal",
+  );
+
+  // §10.4: the tonight count reflects the removal.
+  const s = await h.engine.getState();
+  assert.equal(s.tonightCount, 0);
+
+  // The next tick of the open window writes NO further skip rows for the
+  // removed entry — the repeated-skip loop is gone.
+  h.advance(60 * 1000);
+  await h.engine.tick();
+  assert.equal(
+    h.ledgerRows.filter((r) => r.kind === "cto.overnight.skip" && r.id === "tq:1").length,
+    1,
+    "no re-skip for the removed entry on the next tick",
+  );
 });
 
 test("overnight: dispatch enforces the §3.3 concurrent sub-cap (2) by counting running cto jobs + accepted starts", async () => {
@@ -370,8 +402,11 @@ test("overnight: an executed window feeds the veto record's acceptance (BET-1403
   assert.equal(st.stats["queue-tonight"]?.vb ?? 0, 0);
 
   // And a cancel on a LATER night demotes the rolling pressure the same way —
-  // both sides of the record are fed by the same machinery.
+  // both sides of the record are fed by the same machinery. BET-1426: night 1
+  // consumed (removed) the unresolvable queue row, so a fresh accepted task
+  // backs tomorrow's candidates — an empty queue arms no veto card.
   const nextDue = due + 24 * HOUR;
+  h.setQueue([{ ...QUEUE_TASK, id: "tq:next" }]);
   h.setTrough({ startMs: nextDue, endMs: nextDue + 6 * HOUR });
   h.advance(24 * HOUR - 25 * 60_000);
   await h.engine.tick(); // arm tomorrow's card
@@ -397,10 +432,14 @@ test("tonight verbs: add gates on the switch, caps at 12, remove + reorder pin t
   assert.equal(denied.ok, false, "overnight switch off → refused");
   assert.equal(offSwitch.engineStateObj.tonightQueue.length, 0);
 
-  const h = makeHarness({ trough: TROUGH, projects: [] });
+  // BET-1426: adds resolve against the tracked projects — one hostable
+  // project auto-resolves a project-less add; the named "/repo" matches.
+  const h = makeHarness({ trough: TROUGH, projects: [PROJECT_ROW] });
   const ok = await h.engine.tonightAdd({ name: "Nightly sweep", prompt: "sweep", project: "/repo", value: 1, confidence: 0.8 });
   assert.equal(ok.ok, true);
   assert.equal(ok.task.cls, "queue-tonight");
+  assert.equal(ok.task.project, "/repo");
+  assert.equal(ok.projectResolved, "explicit");
   assert.deepEqual(h.engineStateObj.tonightQueue.map((t) => t.name), ["Nightly sweep"]);
 
   const noName = await h.engine.tonightAdd({ name: "   " });
@@ -427,6 +466,72 @@ test("tonight verbs: add gates on the switch, caps at 12, remove + reorder pin t
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(h.engineStateObj.tonightQueue.length, 11);
+});
+
+test("tonightAdd project resolution (BET-1426): explicit canonicalize, auto-resolve on a single hostable project, refuse otherwise", async () => {
+  // Explicit: the named dir resolves → stored (canonicalized to the owning
+  // project's defaultCwd when they differ).
+  const two = makeHarness({
+    trough: TROUGH,
+    projects: [
+      PROJECT_ROW,
+      { tmuxSession: "s2", defaultCwd: "/other", windows: [{ opencodeSessionId: "sess-2" }] },
+    ],
+  });
+  const explicit = await two.engine.tonightAdd({ name: "A", project: "/repo" });
+  assert.equal(explicit.ok, true);
+  assert.equal(explicit.projectResolved, "explicit");
+  assert.equal(explicit.task.project, "/repo");
+  assert.ok(two.ledgerRows.some((r) => r.kind === "cto.overnight.queue_add" && r.id === explicit.task.id && r.resolved === "explicit" && r.project === "/repo"));
+
+  // A subdir that matches via a window path canonicalizes to defaultCwd.
+  const winRow = { tmuxSession: "s3", defaultCwd: "/canonical", windows: [{ opencodeSessionId: "sess-3", paneCurrentPath: "/canonical/sub" }] };
+  const win = makeHarness({ trough: TROUGH, projects: [winRow] });
+  const canon = await win.engine.tonightAdd({ name: "E", project: "/canonical/sub" });
+  assert.equal(canon.ok, true);
+  assert.equal(canon.task.project, "/canonical", "the canonical project dir is stored, not the raw match path");
+
+  // Ambiguous: two hostable projects, the named project unresolvable → refuse.
+  const ambiguous = await two.engine.tonightAdd({ name: "B", project: "/nowhere" });
+  assert.equal(ambiguous.ok, false);
+  assert.match(ambiguous.error ?? "", /project/);
+
+  // Ambiguous: no project named at all → refuse (can't pick a host).
+  const noName2 = await two.engine.tonightAdd({ name: "B2" });
+  assert.equal(noName2.ok, false);
+  assert.match(noName2.error ?? "", /project/);
+
+  // Auto-resolve: missing project + exactly one hostable project → queued
+  // under it, noted in the ack and the ledger row.
+  const single = makeHarness({ trough: TROUGH, projects: [PROJECT_ROW] });
+  const auto = await single.engine.tonightAdd({ name: "C" });
+  assert.equal(auto.ok, true);
+  assert.equal(auto.projectResolved, "auto");
+  assert.equal(auto.task.project, "/repo");
+  assert.ok(single.ledgerRows.some((r) => r.kind === "cto.overnight.queue_add" && r.id === auto.task.id && r.resolved === "auto" && r.project === "/repo"));
+
+  // Auto-resolve also rescues a NAMED-but-unresolvable project when exactly
+  // one hostable project exists (the triage's missing-or-unresolvable branch).
+  const auto2 = await single.engine.tonightAdd({ name: "C2", project: "/ghost" });
+  assert.equal(auto2.ok, true);
+  assert.equal(auto2.projectResolved, "auto");
+  assert.equal(auto2.task.project, "/repo");
+
+  // Refuse: zero hostable projects (nothing can ever host the job).
+  const none = makeHarness({ trough: TROUGH, projects: [] });
+  const refused = await none.engine.tonightAdd({ name: "D" });
+  assert.equal(refused.ok, false);
+  assert.match(refused.error ?? "", /no tracked project session/);
+
+  // Refuse: an unreadable project list cannot verify resolvability — the
+  // queue only ever holds runnable rows, so the add fails loudly.
+  const unreadable = makeHarness({ trough: TROUGH, projects: [], listProjectsFn: async () => {
+    throw new Error("tmux down");
+  } });
+  const unverifiable = await unreadable.engine.tonightAdd({ name: "F", project: "/repo" });
+  assert.equal(unverifiable.ok, false);
+  assert.match(unverifiable.error ?? "", /cannot verify/);
+  assert.equal(unreadable.engineStateObj.tonightQueue.length, 0);
 });
 
 test("overnight: queue-tonight verdicts fold into the overnight Thompson counters", async () => {

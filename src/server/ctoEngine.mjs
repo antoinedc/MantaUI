@@ -1291,12 +1291,43 @@ export function createCtoEngine(deps = {}) {
         const parent =
           typeof project === "string" && project ? resolveForgeOwner(projects, project) : null;
         if (!parent?.parentSessionID) {
-          await ledgerLog({
-            kind: "cto.overnight.skip",
-            id: cand.id,
-            reason: "no tracked project session to host the job",
-            project,
-          });
+          // BET-1426: an unresolvable project can never host the job — re-skip
+          // per tick would pollute the ledger forever. When the project list
+          // was READABLE (a null/throw is a transient read failure, not a
+          // verdict) and the candidate is a queue row, remove the entry on the
+          // first skip: one final skip row + a needs-you blocker. Rows queued
+          // before the add-time validation are cleaned here too.
+          if (Array.isArray(projects) && task) {
+            const rows = await tonightQueueRows();
+            await saveTonightQueueRows(rows.filter((r) => r?.id !== task.id));
+            if (overnight) {
+              await overnight
+                .updateWindow((prev) =>
+                  prev?.pinnedOrder?.length
+                    ? normalizeWindow({ ...normalizeWindow(prev), pinnedOrder: prev.pinnedOrder.filter((pid) => pid !== task.id) })
+                    : null,
+                )
+                .catch(() => {});
+            }
+            await ledgerLog({
+              kind: "cto.overnight.skip",
+              id: cand.id,
+              reason: "no tracked project session to host the job — entry removed from tonight's queue",
+              project,
+              removed: true,
+            });
+            await recordBlocker(
+              "overnight_queue",
+              `Tonight task "${task.name ?? cand.id}" was removed — no tracked project session could host it.`,
+            );
+          } else {
+            await ledgerLog({
+              kind: "cto.overnight.skip",
+              id: cand.id,
+              reason: "no tracked project session to host the job",
+              project,
+            });
+          }
           continue;
         }
         const prompt =
@@ -1467,9 +1498,28 @@ export function createCtoEngine(deps = {}) {
     return { tasks, window: win };
   }
 
+  // A project can host an overnight job only when one of its windows carries
+  // a live opencode session — the same shape resolveForgeOwner returns an
+  // owner for (BET-1426 add-time validation + dispatch backstop).
+  function hostableProjects(projects) {
+    if (!Array.isArray(projects)) return [];
+    return projects.filter(
+      (p) =>
+        Array.isArray(p?.windows) &&
+        p.windows.some((w) => typeof w?.opencodeSessionId === "string" && w.opencodeSessionId),
+    );
+  }
+
   // Queue a task for tonight (the `queue-tonight` decision-card option
   // executor). Gated: engine enabled, High tier, Overnight switch, injected
   // scheduler. A 13th add is refused with a note (never silent truncation).
+  // BET-1426: the task's project is resolved HERE, at add time — both add
+  // paths (renderer ask, act executor) funnel into this one point, so the
+  // queue only ever holds rows the §11.5 dispatch can host. A payload without
+  // a resolvable project auto-resolves to the single tracked project session
+  // when there is exactly one (noted in the ack + ledger row) and is refused
+  // otherwise — an unresolvable row would otherwise skip on every overnight
+  // tick forever.
   async function tonightAdd(task = {}) {
     if (!(await overnightGate())) return { ok: false, error: "overnight is not enabled (High tier + Overnight switch)" };
     const name = typeof task.name === "string" ? task.name.trim() : "";
@@ -1478,11 +1528,46 @@ export function createCtoEngine(deps = {}) {
     if (rows.length >= TONIGHT_QUEUE_MAX) {
       return { ok: false, error: `tonight's queue is full (${TONIGHT_QUEUE_MAX}) — cancel or edit first` };
     }
+    let project = typeof task.project === "string" && task.project ? task.project : null;
+    let projectResolved = "explicit";
+    let projects = null;
+    if (typeof listProjects === "function") {
+      try {
+        projects = await listProjects();
+      } catch {
+        projects = null;
+      }
+    }
+    if (!Array.isArray(projects)) {
+      return { ok: false, error: "cannot verify the task's project (project list unavailable) — try again" };
+    }
+    if (project) {
+      const owner = resolveForgeOwner(projects, project);
+      if (owner?.parentSessionID) {
+        // Canonicalize to the owning project's directory so the row keeps
+        // resolving by exact match even when window paths churn.
+        if (owner.defaultCwd) project = owner.defaultCwd;
+      } else {
+        project = null; // named but unresolvable → fall through to auto/refuse
+      }
+    }
+    if (!project) {
+      const hostable = hostableProjects(projects);
+      if (hostable.length === 1) {
+        project = typeof hostable[0].defaultCwd === "string" && hostable[0].defaultCwd ? hostable[0].defaultCwd : null;
+        if (!project) return { ok: false, error: "the only tracked project session has no project directory to host the task" };
+        projectResolved = "auto";
+      } else if (hostable.length === 0) {
+        return { ok: false, error: "no tracked project session to host the task — open a project session first" };
+      } else {
+        return { ok: false, error: "no resolvable project for the task — name one of the open project sessions" };
+      }
+    }
     const entry = {
       id: `tq:${nextId()}`,
       name: name.slice(0, 200),
       prompt: typeof task.prompt === "string" && task.prompt.trim() ? task.prompt.trim() : name,
-      project: typeof task.project === "string" && task.project ? task.project : null,
+      project,
       value: Number.isFinite(task.value) ? task.value : 1,
       confidence: Number.isFinite(task.confidence) ? task.confidence : 0.8,
       predictedCost: Number.isFinite(task.predictedCost) ? task.predictedCost : 1,
@@ -1492,9 +1577,9 @@ export function createCtoEngine(deps = {}) {
       addedMs: now(),
     };
     await saveTonightQueueRows([...rows, entry]);
-    await ledgerLog({ kind: "cto.overnight.queue_add", id: entry.id, name: entry.name });
+    await ledgerLog({ kind: "cto.overnight.queue_add", id: entry.id, name: entry.name, project: entry.project, resolved: projectResolved });
     await syncState().catch(() => {});
-    return { ok: true, task: entry };
+    return { ok: true, task: entry, projectResolved };
   }
 
   // Remove one task (a Tonight drill-down edit — itself a verdict, §10.4).
