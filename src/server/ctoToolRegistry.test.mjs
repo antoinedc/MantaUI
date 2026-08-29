@@ -7,6 +7,7 @@ import {
   barCrossed,
   engagementBarMet,
   hasCredential,
+  deriveRole,
   parseClassification,
   findHostParent,
   RAW_CLASSIFY_MIN_USES,
@@ -558,4 +559,105 @@ test("thresholds match the spec bars", () => {
   assert.equal(ENGAGEMENT_MIN_USES, 3);
   assert.equal(ENGAGEMENT_MIN_WEEKS, 2);
   assert.equal(RAW_CLASSIFY_MIN_USES, 2);
+});
+
+// ---------------------------------------------------------------------------
+// BET-1399 — §10.5 row 4: derived §7.3 role (dead-tool flag) and the §7.4
+// consent-ring revoke. Display-role derivation is read-time-only: the stored
+// `role` field stays null until a later issue writes it.
+// ---------------------------------------------------------------------------
+
+function mkTool(over = {}) {
+  return {
+    tool: "aws",
+    status: "integrated",
+    uses: 5,
+    weeksActive: 3,
+    engagement: { ewma_per_week: 2.5, last_used: W0 },
+    vitality: { last_event: null, inflow_rate: null, ewma: null, last_probed: null },
+    ...over,
+  };
+}
+
+test("deriveRole maps the §7.3 quadrants (both / workflow / data-source / dead) at read time", () => {
+  const nowMs = W0 + 10 * DAY;
+  // Both bars high → both.
+  assert.equal(
+    deriveRole(mkTool({ vitality: { last_event: nowMs - DAY, inflow_rate: null, ewma: null, last_probed: nowMs } }), { nowMs }),
+    "both",
+  );
+  // Engagement only → workflow.
+  assert.equal(deriveRole(mkTool(), { nowMs }), "workflow");
+  // Vitality only → data-source.
+  assert.equal(deriveRole(mkTool({ uses: 1, weeksActive: 0 }), { nowMs }), "data-source");
+  // Both low WITH prior engagement → the dead-tool candidate flag.
+  assert.equal(deriveRole(mkTool({ vitality: { last_event: W0, inflow_rate: 0, ewma: 0, last_probed: null } }), { nowMs }), "dead");
+  // Nothing at all (no uses) → no derived role.
+  assert.equal(deriveRole(mkTool({ uses: 0, weeksActive: 0 }), { nowMs }), null);
+});
+
+test("listTools copies the vitality axis and derives the display role without writing it back", async () => {
+  const cards = fakeCards();
+  const mk = (ts) => ({ channel: "transcript", identity: "aws", detail: "cli:aws", ts, source: "catalog" });
+  const { registry, registryStore } = makeRegistry({ cards, usageRows: [mk(W0), mk(W0 + DAY), mk(W0 + 2 * DAY)], nowMs: W0 + 3 * DAY });
+  await registry.dailyScan();
+  await registry.resolveConnect({ tool: "aws", answer: "connect" });
+
+  const rows = await registry.listTools({ nowMs: W0 + 4 * DAY });
+  const aws = rows.find((r) => r.tool === "aws");
+  assert.ok(aws, "the observed tool is listed");
+  assert.equal(aws.derivedRole, "workflow", "3 uses in 3 weeks clears the engagement bar");
+  assert.deepEqual(aws.vitality.last_event, null, "vitality axis rides along");
+  assert.equal(aws.role, null, "the stored role is untouched (read-time derivation only)");
+  const stored = registryStore._state().tools.find((x) => x.tool === "aws");
+  assert.equal(stored.role ?? null, null);
+});
+
+test("§7.4 per-ring revoke writes the ring to no; revoked metadata stops the probe consent gate", async () => {
+  const cards = fakeCards();
+  const mk = (ts) => ({ channel: "transcript", identity: "aws", detail: "cli:aws", ts, source: "catalog" });
+  const { registry, registryStore, ledger } = makeRegistry({ cards, usageRows: [mk(W0), mk(W0 + DAY), mk(W0 + 2 * DAY)], nowMs: W0 + 3 * DAY });
+  await registry.dailyScan();
+  assert.equal((await registry.resolveConnect({ tool: "aws", answer: "connect" })).ok, true);
+  assert.equal(await registry.consentFor("aws", "metadata"), "yes");
+
+  // Revoking the metadata ring stops the probes (consentFor flips to no).
+  const rev = await registry.revokeConsent("aws", "metadata");
+  assert.equal(rev.ok, true);
+  assert.equal(rev.value, "no");
+  assert.equal(await registry.consentFor("aws", "metadata"), "no");
+  let t = registryStore._state().tools.find((x) => x.tool === "aws");
+  assert.equal(t.consent.metadata, "no");
+  assert.ok(ledger.rows.some((r) => r.kind === "cto.tool.consent" && r.ring === "metadata" && r.value === "no"), "the revoke is ledgered");
+
+  // A non-granted ring cannot be revoked (server-side backstop).
+  assert.equal((await registry.revokeConsent("aws", "deep_read")).ok, false);
+  assert.equal((await registry.revokeConsent("aws", "write")).ok, false);
+  assert.equal((await registry.revokeConsent("ghost", "metadata")).ok, false);
+  assert.equal((await registry.revokeConsent("aws", "bogus")).ok, false);
+  assert.equal((await registry.revokeConsent("", "metadata")).ok, false);
+
+  // deep_read grant → revoke round-trips ring by ring.
+  await registry.dailyScan();
+  assert.equal((await registry.resolveConnect({ tool: "aws", answer: "connect-deep-read" })).ok, true);
+  assert.equal(await registry.consentFor("aws", "deep_read"), "yes");
+  assert.equal((await registry.revokeConsent("aws", "deep_read")).ok, true);
+  assert.equal(await registry.consentFor("aws", "deep_read"), "no");
+  t = registryStore._state().tools.find((x) => x.tool === "aws");
+  assert.equal(t.consent.metadata, "no", "other rings untouched");
+});
+
+test("revoke then un-never-style lifecycle: a revoked tool can re-grant on a fresh ask", async () => {
+  const cards = fakeCards();
+  const mk = (ts) => ({ channel: "transcript", identity: "aws", detail: "cli:aws", ts, source: "catalog" });
+  const { registry, registryStore } = makeRegistry({ cards, usageRows: [mk(W0), mk(W0 + DAY), mk(W0 + 2 * DAY)], nowMs: W0 + 3 * DAY });
+  await registry.dailyScan();
+  await registry.resolveConnect({ tool: "aws", answer: "connect" });
+  assert.equal((await registry.revokeConsent("aws", "metadata")).ok, true);
+
+  // The revoked tool is still integrated-with-no-consent — un-never (the
+  // drill-down's other lifecycle control) is a clean error here, not silent.
+  assert.equal((await registry.unNever("aws")).ok, false);
+  const t = registryStore._state().tools.find((x) => x.tool === "aws");
+  assert.equal(t.status, "integrated", "revoke narrows features; it does not reset the lifecycle");
 });

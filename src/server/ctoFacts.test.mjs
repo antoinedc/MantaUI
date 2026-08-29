@@ -29,6 +29,9 @@ import {
   matchCheckable,
   recomputeHalfLives,
   median,
+  believedFactsAt,
+  composeFactsRender,
+  buildUserSupersession,
   createFactsEngine,
 } from "./ctoFacts.mjs";
 
@@ -491,4 +494,173 @@ test("verify-pass confirms the origin sender (§6.6, Block 2)", async () => {
   assert.equal(v.checked, 1);
   assert.equal(v.superseded, 0);
   assert.ok((states.factReliability["a-sender"]?.confirmed ?? 0) >= 1, "confirmed incremented on verify-pass");
+});
+
+// ---------------------------------------------------------------------------
+// BET-1399 — Blackboard drill-down: bi-temporal asOf, user supersession
+// (auto-accepted), archive pagination, view render + access touch.
+// ---------------------------------------------------------------------------
+
+test("believedFactsAt reconstructs the live set at T from the supersession chain", () => {
+  // A -> B -> C chain: A created at 1*D, B at 5*D, C at 9*D.
+  const A = makeFact({ id: "A", created: 1 * D, superseded_by: "B" });
+  const B = makeFact({ id: "B", created: 5 * D, superseded_by: "C" });
+  const C = makeFact({ id: "C", created: 9 * D });
+  const facts = [A, B, C];
+
+  // Before B exists, A is believed.
+  let r = believedFactsAt(facts, 3 * D);
+  assert.deepEqual(r.believed.map((f) => f.id), ["A"]);
+  assert.deepEqual(r.struck, []);
+
+  // Between B and C, B is the head; A is struck-through history.
+  r = believedFactsAt(facts, 6 * D);
+  assert.deepEqual(r.believed.map((f) => f.id), ["B"]);
+  assert.deepEqual(r.struck.map((f) => f.id), ["A"]);
+
+  // After C, only C is believed.
+  r = believedFactsAt(facts, 12 * D);
+  assert.deepEqual(r.believed.map((f) => f.id), ["C"]);
+  assert.deepEqual(r.struck.map((f) => f.id), ["A", "B"]);
+
+  // Facts that do not exist yet at T are absent entirely.
+  r = believedFactsAt(facts, 0.5 * D);
+  assert.deepEqual(r.believed, []);
+  assert.deepEqual(r.struck, []);
+
+  // A displaced successor (not in the array) is treated as believed-at-T —
+  // the honest reconstruction from the data we still have.
+  const lone = makeFact({ id: "L", created: 2 * D, superseded_by: "gone" });
+  r = believedFactsAt([lone], 10 * D);
+  assert.deepEqual(r.believed.map((f) => f.id), ["L"]);
+});
+
+test("composeFactsRender splits active/superseded, sorts newest-first, and honors asOf", () => {
+  const live = makeFact({ id: "live", created: 8 * D });
+  const old = makeFact({ id: "old", created: 2 * D, superseded_by: "live" });
+  const render = composeFactsRender({
+    facts: [old, live],
+    projects: ["alpha"],
+    nowMs: 9 * D,
+    project: "alpha",
+  });
+  assert.equal(render.project, "alpha");
+  assert.deepEqual(render.projects, ["alpha"]);
+  assert.equal(render.asOf, null);
+  assert.deepEqual(render.active.map((f) => f.id), ["live"]);
+  assert.deepEqual(render.superseded.map((f) => f.id), ["old"]);
+  assert.equal(render.superseded[0].supersededBy, "live");
+
+  // asOf before the supersession: both were believed then.
+  const asOf = composeFactsRender({ facts: [old, live], projects: ["alpha"], nowMs: 9 * D, asOfMs: 3 * D });
+  assert.equal(asOf.asOf, 3 * D);
+  assert.deepEqual(asOf.active.map((f) => f.id), ["old"]);
+  assert.deepEqual(asOf.superseded, []);
+
+  // Row shape: kind chip / confidence / sender / age fields present.
+  const row = asOf.active[0];
+  assert.equal(row.kind, "status");
+  assert.equal(row.confidence, 0.8);
+  assert.equal(row.senderLabel, "cto");
+  assert.equal(row.ageMs, 7 * D);
+  assert.deepEqual(row.refs, ["s1"]);
+});
+
+test("correctFact queues a user supersession that the gatekeeper auto-accepts (no model call)", async () => {
+  let modelCalls = 0;
+  const { engine, inmemory } = makeEngine({
+    runEphemeral: async () => {
+      modelCalls += 1;
+      throw new Error("the gatekeeper must not run a model call for user corrections");
+    },
+  });
+  await inmemory.set("f:alpha", {
+    v: 1,
+    facts: [
+      makeFact({ id: "cto:old", created: 1 * D, last_accessed: 1 * D, sender: { sessionID: "sess1" } }),
+    ],
+  });
+
+  const res = await engine.correctFact({ project: "alpha", factId: "cto:old", statement: "actually the build is green" });
+  assert.equal(res.ok, true);
+  assert.equal(modelCalls, 0, "user corrections are authoritative — the gatekeeper auto-accepts");
+  assert.ok(res.supersededBy, "the old fact now points at its replacement");
+  assert.equal(res.sender.sessionID, "sess1", "the caller gets the original sender for the verdict route");
+
+  const store = inmemory.get("f:alpha");
+  const oldFact = store.facts.find((f) => f.id === "cto:old");
+  const newFact = store.facts.find((f) => f.id === res.supersededBy);
+  assert.equal(oldFact.superseded_by, newFact.id);
+  assert.equal(newFact.sender, "user");
+  assert.equal(newFact.confidence, 1);
+  assert.equal(newFact.statement, "actually the build is green");
+  assert.deepEqual(newFact.refs, ["s1"], "the original fact's refs ride along");
+
+  // Idempotent retry: same (fact, statement) resolves to the same outcome.
+  const retry = await engine.correctFact({ project: "alpha", factId: "cto:old", statement: "actually the build is green" });
+  assert.equal(retry.ok, true);
+  assert.equal(retry.proposalId, undefined, "already-superseded target returns the guard, not a new queue entry");
+});
+
+test("correctFact guards: unknown fact, already-superseded, blank/overlong statement", async () => {
+  const { engine, inmemory } = makeEngine({});
+  await inmemory.set("f:alpha", {
+    v: 1,
+    facts: [
+      makeFact({ id: "cto:live", created: 1 * D }),
+      makeFact({ id: "cto:dead", created: 1 * D, superseded_by: "cto:live" }),
+    ],
+  });
+  assert.equal((await engine.correctFact({ project: "alpha", factId: "nope", statement: "x" })).ok, false);
+  const dead = await engine.correctFact({ project: "alpha", factId: "cto:dead", statement: "x" });
+  assert.equal(dead.ok, false);
+  assert.equal(dead.headId, "cto:live");
+  assert.equal((await engine.correctFact({ project: "alpha", factId: "cto:live", statement: "   " })).ok, false);
+  assert.equal((await engine.correctFact({ project: "alpha", factId: "cto:live", statement: "x".repeat(300) })).ok, false);
+  assert.equal((await engine.correctFact({ factId: "cto:live", statement: "x" })).ok, false);
+});
+
+test("archivePage paginates newest-first with an exclusive before-cursor", async () => {
+  const { engine, inmemory } = makeEngine({});
+  const entries = [3, 2, 1].map((i) => ({ ...makeFact({ id: `arc${i}`, created: i * D }), ts: i * D }));
+  await inmemory.set("a:alpha", { v: 1, entries });
+
+  const page1 = await engine.archivePage("alpha", { limit: 2 });
+  assert.equal(page1.ok, true);
+  assert.deepEqual(page1.entries.map((e) => e.id), ["arc3", "arc2"]);
+  assert.equal(page1.nextBefore, 2 * D);
+  assert.equal(page1.total, 3);
+
+  const page2 = await engine.archivePage("alpha", { limit: 2, before: page1.nextBefore });
+  assert.deepEqual(page2.entries.map((e) => e.id), ["arc1"]);
+  assert.equal(page2.nextBefore, null, "exhausted page has no cursor");
+  assert.equal(page2.entries[0].archivedAt, 1 * D);
+
+  assert.equal((await engine.archivePage("", {})).ok, false);
+});
+
+test("viewRender picks the first project when none given, sorts rows, and touches the rendered facts (§6.4 access)", async () => {
+  const { engine, inmemory } = makeEngine({ nowMs: 10 * D });
+  await inmemory.set("f:beta", {
+    v: 1,
+    facts: [
+      makeFact({ id: "cto:young", created: 9 * D, last_accessed: 1 * D, access_count: 1 }),
+      makeFact({ id: "cto:old", created: 2 * D, last_accessed: 1 * D, access_count: 1, superseded_by: "cto:young" }),
+    ],
+  });
+
+  const view = await engine.viewRender(null);
+  assert.equal(view.project, "beta");
+  assert.deepEqual(view.projects, ["alpha", "beta"]);
+  assert.deepEqual(view.active.map((f) => f.id), ["cto:young"], "newest first");
+  assert.deepEqual(view.superseded.map((f) => f.id), ["cto:old"]);
+
+  const young = inmemory.get("f:beta").facts.find((f) => f.id === "cto:young");
+  assert.equal(young.access_count, 2, "rendering into a drill-down view counts as access");
+  assert.equal(young.last_accessed, 10 * D);
+
+  // touch: false skips the access write (e.g. cheap re-reads).
+  const untouched = inmemory.get("f:beta").facts.find((f) => f.id === "cto:young");
+  await engine.viewRender(null, { touch: false });
+  assert.equal(inmemory.get("f:beta").facts.find((f) => f.id === "cto:young").access_count, untouched.access_count);
 });
