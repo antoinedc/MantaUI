@@ -244,7 +244,7 @@ export function evaluateWindow(prev, input) {
     if (troughContains(w.openedMs, trough) && now >= trough.endMs) {
       rows.push(ledgerRow("cto.overnight.close", now, { reason: "trough-end", openedMs: w.openedMs }));
       return {
-        window: normalizeWindow({ ...w, state: "closed", closedMs: now, closeReason: "trough-end", countdown }),
+        window: normalizeWindow({ ...w, state: "closed", closedMs: now, closeReason: "trough-end", countdown, pinnedOrder: null }),
         ledgerRows: rows,
       };
     }
@@ -252,7 +252,7 @@ export function evaluateWindow(prev, input) {
       const reason = freshUserEvent ? "user-event" : "user-return";
       rows.push(ledgerRow("cto.overnight.close", now, { reason, openedMs: w.openedMs }));
       return {
-        window: normalizeWindow({ ...w, state: "closed", closedMs: now, closeReason: reason, countdown }),
+        window: normalizeWindow({ ...w, state: "closed", closedMs: now, closeReason: reason, countdown, pinnedOrder: null }),
         ledgerRows: rows,
       };
     }
@@ -357,7 +357,7 @@ export function reconcileOnRestart(prev, input) {
           reason: "window missed entirely while the box was down; skipped, never run retroactively",
         }),
       );
-      window = normalizeWindow({ ...window, state: "closed", closedMs: now, closeReason: "trough-end" });
+      window = normalizeWindow({ ...window, state: "closed", closedMs: now, closeReason: "trough-end", pinnedOrder: null });
     } else {
       // Still inside its trough: re-derived, kept — but the reserve math must
       // run again before anything new starts (§11.6 "re-runs the reserve
@@ -754,6 +754,49 @@ export function createOvernightScheduler({ store = defaultOvernightStore(), now 
       await store.save({ ...payload, window }).catch(() => {});
       await ledgerAppend(ledgerRows);
       return { window, recomputeSpendable, ledgerRows };
+    },
+
+    /**
+     * Read the current window state without ticking (BET-1419 verbs read it
+     * for copy/preempt decisions). Null when no window was ever persisted.
+     */
+    async readWindow() {
+      const payload = await store.load().catch(() => null);
+      return payload?.window ?? null;
+    },
+
+    /**
+     * BET-1419 verb seam: apply a pure window transition (from the §11
+     * machine's helpers — scheduleCountdown / normalizeWindow) and persist.
+     * The mutator receives the previous window (or null) and returns the next
+     * normalized one; returning null is a no-op. The ENGINE decides WHEN these
+     * run (arming the veto countdown, canceling tonight, pinning an edit) —
+     * the scheduler only owns the store.
+     */
+    async updateWindow(mutator) {
+      if (typeof mutator !== "function") return null;
+      const payload = await store.load().catch(() => ({ v: 1, window: null }));
+      const next = mutator(payload?.window ?? null);
+      if (!next) return null;
+      await store.save({ ...payload, window: next }).catch(() => {});
+      return next;
+    },
+
+    /**
+     * BET-1419: fold a verdict into the Thompson acceptance counters the
+     * portfolio samples from (the queue-tonight verdict sink). Counters live
+     * beside the window in the same overnight store so one save stays atomic.
+     */
+    async foldCounters({ category, verdict, never } = {}) {
+      const payload = await store.load().catch(() => ({ v: 1 }));
+      const counters = foldVerdictIntoCounters(payload?.counters, { category, verdict, never });
+      await store.save({ ...payload, counters }).catch(() => {});
+      return counters;
+    },
+
+    async readCounters() {
+      const payload = await store.load().catch(() => null);
+      return payload?.counters ?? null;
     },
   };
 }

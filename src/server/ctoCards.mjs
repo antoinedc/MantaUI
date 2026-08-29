@@ -468,6 +468,51 @@ export function createCtoCards(deps = {}) {
     }
   }
 
+  // BET-1419 (§9.2/§10.3): the veto-window card — announce tonight's run 30
+  // min ahead with a live countdown. One open veto card at a time (the
+  // overnight countdown is unique per window): re-arming upserts by id so the
+  // countdown updates in place, never dups. `dueMs` is the open the countdown
+  // points at; the engine resolves the card when the window opens (fulfilled),
+  // cancels it (veto verdict) or abandons it (missed, §11.6).
+  async function upsertVeto({ id, title, body, dueMs, options = [], refs = [], ts = now() } = {}) {
+    if (!id || typeof id !== "string") return { changed: false, isNew: false };
+    const { payload, cards } = await openCards();
+    const existing = cards.find((c) => c?.id === id && c?.state === "open");
+    const created = existing?.created ?? ts;
+    const card = {
+      id,
+      variant: "veto",
+      title: typeof title === "string" && title ? title : "Overnight run planned",
+      body: typeof body === "string" && body ? body : "",
+      dueMs: Number.isFinite(dueMs) ? dueMs : null,
+      options: Array.isArray(options) ? options : [],
+      sourceKind: "overnight",
+      sourceId: null,
+      sessionID: null,
+      pendingSince: existing?.pendingSince ?? ts,
+      refs: Array.isArray(refs) ? refs : [],
+      created,
+      updatedAt: ts,
+      state: "open",
+    };
+    if (existing) {
+      const idx = cards.indexOf(existing);
+      cards[idx] = { ...existing, ...card, created, updatedAt: ts };
+    } else {
+      cards.push(card);
+    }
+    await cardStore.save({ ...payload, cards });
+    await ledgerAppend({
+      kind: CARD_CREATED,
+      cardId: id,
+      variant: "veto",
+      sourceKind: "overnight",
+      refs: card.refs,
+      dueMs: card.dueMs,
+    });
+    return { changed: true, isNew: !existing };
+  }
+
   async function listOpen() {
     const { cards } = await openCards();
     return cards.filter((c) => c && c.state === "open");
@@ -483,6 +528,7 @@ export function createCtoCards(deps = {}) {
     resolveById,
     dismissById,
     upsertDecision,
+    upsertVeto,
     countOpen,
     listOpen,
   };

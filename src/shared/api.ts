@@ -179,6 +179,9 @@ export type CtoState = {
   generationInFlight: boolean;
   // Number of tasks queued for tonight's window — the muted Tonight line.
   tonightCount: number;
+  // The A12 tier dial (§12.1), surfaced so tier-gated surfaces (the Tonight
+  // line shows only at High) hide without an extra read. null when unreadable.
+  tier: string | null;
   // Cold-start backfill (§10.6-4): informational learning-card progress. Not a
   // needs-you item — never counted into the sidebar badge. Optional so older
   // bridges (absent field) still typecheck as idle.
@@ -223,7 +226,39 @@ export type CtoCard = {
     action: { type: string; payload: Record<string, unknown> };
   }[];
   evidence?: string[];
+  // BET-1419 veto cards (§9.2) — present only when variant === "veto": the
+  // open the live countdown points at (the window's planned trough start).
+  dueMs?: number | null;
 };
+
+// BET-1419 tonight queue (§10.4/§11.4): one accepted `queue-tonight` entry.
+export type CtoTonightTask = {
+  id: string;
+  name: string;
+  prompt: string;
+  project: string | null;
+  value: number;
+  confidence: number;
+  predictedCost: number;
+  refs: string[];
+  cls: string;
+  originId: string | null;
+  addedMs: number;
+};
+
+// The overnight window state machine row (BET-1402 §11.1) as surfaced by
+// GET /api/cto/tonight.
+export type CtoTonightWindow = {
+  state: "closed" | "open";
+  openedMs: number | null;
+  closedMs: number | null;
+  closeReason: string | null;
+  openedBy: string | null;
+  openedDuringPresence: boolean;
+  countdown: { dueMs: number; armedMs: number } | null;
+  lastEvaluatedMs: number | null;
+  pinnedOrder: string[] | null;
+} | null;
 
 // A held (silent-logged) suggestion row for the §14.3 silence audit.
 export type CtoHeldRow = {
@@ -1233,6 +1268,28 @@ export interface Api {
     verdict: "accept" | "dismiss";
     never?: boolean;
   }): Promise<{ ok: boolean; error?: string }>;
+  // GET /api/cto/tonight — BET-1419 (§10.4/§11.4): tonight's queue + the
+  // window state machine's current row, for the Tonight drill-down.
+  ctoTonightGet(): Promise<{ tasks: CtoTonightTask[]; window: CtoTonightWindow }>;
+  // POST /api/cto/tonight — the tonight verbs: add (the queue-tonight option
+  // executor), remove, reorder (PINS the order for this window), cancel
+  // (Cancel tonight — veto verdict), run-now ("run now instead" override).
+  ctoTonightAct(input: {
+    action: "add" | "remove" | "reorder" | "cancel" | "run-now";
+    task?: {
+      name: string;
+      prompt?: string;
+      project?: string | null;
+      value?: number;
+      confidence?: number;
+      predictedCost?: number;
+      refs?: string[];
+      cls?: string;
+      originId?: string | null;
+    };
+    id?: string;
+    ids?: string[];
+  }): Promise<{ ok: boolean; error?: string; task?: CtoTonightTask; pinned?: string[] }>;
 }
 
 /**

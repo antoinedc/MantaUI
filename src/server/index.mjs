@@ -101,7 +101,7 @@ import {
   startCapSweeper,
 } from "./capabilities.mjs";
 import { notifyCapSession } from "./capNotifier.mjs";
-import { createDelegateEngine, buildPermissionRuleset as delegateBuildPermissionRuleset, resolveForgeOwner, loadJobs as loadDelegateJobs } from "./delegate.mjs";
+import { createDelegateEngine, buildPermissionRuleset as delegateBuildPermissionRuleset, resolveForgeOwner, loadJobs as loadDelegateJobs, pauseJob as delegatePauseJob } from "./delegate.mjs";
 import {
   reportProgress,
   readProgressRecord,
@@ -141,6 +141,7 @@ import * as cto from "./cto.mjs";
 import * as ctoEngine from "./ctoEngine.mjs";
 import * as ctoBudget from "./ctoBudget.mjs";
 import { ledgerStore, engineStateStore, budgetStore, segmentsStore, verdictsStore, digestsStore, factsStore } from "./ctoStores.mjs";
+import * as ctoOvernight from "./ctoOvernight.mjs";
 import { computeHealthStats } from "./ctoHealth.mjs";
 import { composeProfileRender } from "./ctoProfile.mjs";
 import { runEphemeral, createEphemeralReaper } from "./ctoSessions.mjs";
@@ -1853,6 +1854,51 @@ const ctoEphemeralReaper = createEphemeralReaper({
   oc: { listSessions: oc.listSessions, deleteSession: oc.deleteSessionRaw },
 });
 
+// BET-1419 overnight scheduler (§11): the window machine + portfolio over
+// overnight.json. The budget seam re-evaluates the overnight pool's spendable
+// on the machine's 30-min cadence: the windowed provider with the most
+// session headroom (§11.2 prefers the batch pool), else the windowless path
+// bounded by `ctoNightCapUsd`. With neither (no snapshot, no cap) it returns
+// null → the machine runs its λ=0 fat-budget default. `adaptiveCtoBudget` is
+// declared later in this module; the closure only dereferences it at tick
+// time, mirroring the `adaptiveCtoDigest` lazy-reference pattern above.
+const adaptiveCtoOvernight = ctoOvernight.createOvernightScheduler({
+  now: () => Date.now(),
+  ledger: ledgerStore,
+  budget: async () => {
+    try {
+      const snaps = listSnapshots() ?? [];
+      let best = null;
+      for (const s of Array.isArray(snaps) ? snaps : []) {
+        if (s?.windowed !== true) continue;
+        const win =
+          (Array.isArray(s.windows) ? s.windows : []).find((w) => w && Number.isFinite(w.pct)) ?? null;
+        if (!win) continue;
+        if (!best || win.pct > best.pct) best = { provider: s.provider, pct: win.pct, kind: win.kind ?? "session" };
+      }
+      if (best) {
+        return await adaptiveCtoBudget.computeSpendable({
+          provider: best.provider,
+          remainingPct: best.pct,
+          windowKind: best.kind,
+          windowed: true,
+        });
+      }
+      const cfg = await local.configGet().catch(() => ({}));
+      const nightCap = Number(cfg?.ctoNightCapUsd);
+      if (!Number.isFinite(nightCap) || nightCap <= 0) return null;
+      const windowless = (Array.isArray(snaps) ? snaps : []).find((s) => s?.windowed === false);
+      return await adaptiveCtoBudget.computeSpendable({
+        provider: windowless?.provider ?? "anthropic",
+        remainingPct: null,
+        windowed: false,
+      });
+    } catch {
+      return null;
+    }
+  },
+});
+
 const adaptiveCto = ctoEngine.createCtoEngine({
   configGet: () => local.configGet(),
   ledger: ledgerStore,
@@ -1862,6 +1908,35 @@ const adaptiveCto = ctoEngine.createCtoEngine({
   summarize: segmentSummarize,
   computeOneLiner: segmentOneLiner,
   reaper: ctoEphemeralReaper,
+  // BET-1419: the overnight scheduler + its delegate seams (§11). The parent
+  // session/directory are resolved by the engine (resolveForgeOwner over
+  // listProjects); this wrapper bakes in the "cto" actor, and the sweep
+  // allowance (window remaining) is passed per-start by the engine.
+  overnight: adaptiveCtoOvernight,
+  startDelegateJob: async ({ name, prompt, parentSessionID, parentDirectory, sweepAllowanceMs } = {}) =>
+    delegateEngine.startJob({
+      prompt,
+      name,
+      parentSessionID,
+      parentDirectory,
+      actor: "cto",
+      sweepAllowanceMs,
+    }),
+  listDelegateJobs: async () => {
+    try {
+      return await loadDelegateJobs();
+    } catch {
+      return [];
+    }
+  },
+  pauseDelegateJob: async (id) => {
+    try {
+      return await delegatePauseJob(id);
+    } catch {
+      return { ok: false, error: "pause failed" };
+    }
+  },
+  listProjects: () => tmux.listProjects(),
   // BET-1383 (A9): fold the digest engine's generation-in-flight into the
   // ctoState dot so the sidebar reflects live digest generation (§5.5). The
   // digest engine is created below, so this reads it lazily through
@@ -2014,8 +2089,13 @@ const adaptiveCtoSuggest = createCtoSuggest({
   cards: adaptiveCto.cards,
   // B3 verdict route shared with the opencode `cto_verdict` tool + the engine.
   recordVerdict: (input) => adaptiveCto.recordVerdict(input),
+  // BET-1419: the overnight queue (BET-1402 core + engine wiring in this
+  // issue) is live — queue-tonight options are now emittable at High tier.
+  // tool-write's capability gate is on too, but the §7.4 tool registry
+  // (P2-later) still feeds an empty write ring below, so a tool-write option
+  // remains data-unreachable until B7 lands (the ring is the real gate).
   getWriteRingTools: async () => [], // §7.4 tool registry (P2-later) — empty → tool-write unreachable
-  capabilities: { queueTonight: false, toolWrite: false }, // tonight-queue (P3) off
+  capabilities: { queueTonight: true, toolWrite: true },
   fireNotify: (args) => push.fireNotify(args),
   // §9.1 sender reliability. Findings here come from the box's OWN engine
   // (digest-detected recurrences, fact anomalies), not an external sender —
@@ -4315,6 +4395,12 @@ const handleRequest = async (req, res) => {
         const subject = body?.subject ?? null;
         const verdict = typeof body?.verdict === "string" ? body.verdict : null;
         const never = body?.never;
+        // BET-1419 (§9.2): a veto verdict on the veto-window subject IS the
+        // cancel-tonight action — pause running CTO jobs + close the window
+        // (or clear the countdown) before the verdict is recorded.
+        if (subject?.type === "veto-window" && verdict === "veto") {
+          await adaptiveCto.tonightCancel().catch(() => {});
+        }
         const result = await adaptiveCto.recordVerdict({
           subject,
           verdict,
@@ -4334,6 +4420,37 @@ const handleRequest = async (req, res) => {
           }
         }
         respondJson(res, result.ok ? 200 : 400, result);
+        return;
+      }
+      respondJson(res, 405, { error: "method not allowed" });
+    } catch (e) {
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // ---------- Tonight (BET-1419, §10.4 drill-down + §9.2 veto card) ----------
+  // GET /api/cto/tonight → { tasks, window } — the queue + the window state
+  // machine's current row. POST /api/cto/tonight {action, ...} → the tonight
+  // verbs: add / remove / reorder (pins the order) / cancel / run-now.
+  if (path === "/api/cto/tonight") {
+    try {
+      if (req.method === "GET") {
+        const out = await adaptiveCto.tonightList();
+        respondJson(res, 200, out);
+        return;
+      }
+      if (req.method === "POST") {
+        const body = await readJsonBody(req);
+        const action = typeof body?.action === "string" ? body.action : "";
+        let result;
+        if (action === "add") result = await adaptiveCto.tonightAdd(body?.task);
+        else if (action === "remove") result = await adaptiveCto.tonightRemove(body?.id);
+        else if (action === "reorder") result = await adaptiveCto.tonightReorder(body?.ids);
+        else if (action === "cancel") result = await adaptiveCto.tonightCancel();
+        else if (action === "run-now") result = await adaptiveCto.tonightRunNow();
+        else result = { ok: false, error: "unknown action" };
+        respondJson(res, result?.ok ? 200 : 400, result);
         return;
       }
       respondJson(res, 405, { error: "method not allowed" });

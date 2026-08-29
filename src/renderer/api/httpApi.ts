@@ -34,6 +34,8 @@ import type {
   CtoCard,
   CtoHeldRow,
   CtoFinishedItem,
+  CtoTonightTask,
+  CtoTonightWindow,
   CtoDigest,
   CtoHealthStat,
   CtoLedgerRow,
@@ -1821,6 +1823,55 @@ export const httpApi: Api = {
       let json: { error?: string } = {};
       try { json = (await res.json()) as typeof json; } catch { /* non-JSON */ }
       return { ok: false, error: json.error ?? `HTTP ${res.status}` };
+    } catch (e) {
+      if (e instanceof AuthRequiredError) throw e;
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  // GET /api/cto/tonight — BET-1419 (§10.4/§11.4): tonight's queue + the
+  // window state machine's current row.
+  ctoTonightGet: async (): Promise<{ tasks: CtoTonightTask[]; window: CtoTonightWindow }> => {
+    const url = `${serverBase()}/api/cto/tonight`;
+    try {
+      const res = await fetch(url, { headers: authHeaders(clientToken()) });
+      if (res.status === 401) throw new AuthRequiredError();
+      if (!res.ok) return { tasks: [], window: null };
+      return (await res.json()) as { tasks: CtoTonightTask[]; window: CtoTonightWindow };
+    } catch (e) {
+      if (e instanceof AuthRequiredError) throw e;
+      return { tasks: [], window: null };
+    }
+  },
+
+  // POST /api/cto/tonight — the tonight verbs (add/remove/reorder/cancel/
+  // run-now). A 400 carries the server's refusal reason.
+  ctoTonightAct: async (input: {
+    action: "add" | "remove" | "reorder" | "cancel" | "run-now";
+    task?: {
+      name: string;
+      prompt?: string;
+      project?: string | null;
+      value?: number;
+      confidence?: number;
+      predictedCost?: number;
+      refs?: string[];
+      cls?: string;
+      originId?: string | null;
+    };
+    id?: string;
+    ids?: string[];
+  }): Promise<{ ok: boolean; error?: string; task?: CtoTonightTask; pinned?: string[] }> => {
+    const url = `${serverBase()}/api/cto/tonight`;
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { ...authHeaders(clientToken()), "Content-Type": "application/json" },
+        body: JSON.stringify(input),
+      });
+      if (res.status === 401) throw new AuthRequiredError();
+      const json = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; task?: CtoTonightTask; pinned?: string[] };
+      return { ok: !!json.ok, error: json.error, task: json.task, pinned: json.pinned };
     } catch (e) {
       if (e instanceof AuthRequiredError) throw e;
       return { ok: false, error: e instanceof Error ? e.message : String(e) };

@@ -100,7 +100,18 @@ import {
 } from "./ctoBudget.mjs";
 // BET-1398 standing-query watchers (§4.3/§13.4): the event-driven watcher
 // engine hosted by the adaptive engine. Supersedes the old cto.json poller.
-import { createStandingQueryEngine, extractSignifiers, patternSignatureFor } from "./ctoWatchers.mjs";
+import {
+  collectWatcherHitsFromLedger,
+  createStandingQueryEngine,
+  extractSignifiers,
+  patternSignatureFor,
+} from "./ctoWatchers.mjs";
+
+// BET-1419 overnight execution (§11): the pure window/portfolio machine
+// (BET-1402) back the engine's veto/tonight verbs; resolveForgeOwner is the
+// pure project→job-parent resolver shared with forge dispatch.
+import { createOvernightScheduler, normalizeWindow, scheduleCountdown } from "./ctoOvernight.mjs";
+import { resolveForgeOwner } from "./delegate.mjs";
 
 // Actor tag stamped on every engine RPC call / ledger row (spec §3.3).
 export const ACTOR = "cto";
@@ -126,6 +137,12 @@ export const G_REFIT_INTERVAL_MS = 30 * 24 * HOUR_MS;
 export const PROFILE_DECAY_INTERVAL_MS = 7 * DAY_MS; // §8.2 weekly sigma/repo decay tick
 // §6.8 monthly half-life tuning cadence (a work timer, halted on pause).
 export const MONTHLY_TUNE_INTERVAL_MS = 30 * 24 * HOUR_MS;
+// BET-1419 (§11.1/§10.3): the veto card announces the window VETO_LEAD_MS
+// before the trough's start, so the countdown reads ~30 min.
+export const VETO_LEAD_MS = 30 * 60_000;
+// BET-1419 (§10.4): a hard cap on tonight's queue; further adds are refused
+// with a "cancel or edit first" note (never silent truncation).
+export const TONIGHT_QUEUE_MAX = 12;
 
 export const DOT = Object.freeze({
   ACTIVE: "active",
@@ -329,6 +346,19 @@ export function createCtoEngine(deps = {}) {
     // real loader; default none → no migration).
     watchers = null,
     legacyWatchesLoader = async () => [],
+    // BET-1419 overnight execution (§11): the injected scheduler owns the
+    // window state machine + portfolio over overnight.json (index.mjs
+    // constructs it with the budget seam). The delegate seams keep the engine
+    // free of tmux/delegate-store I/O: `startDelegateJob` starts one job
+    // (actor "cto" + sweepAllowance are baked in by index.mjs),
+    // `listDelegateJobs`/`pauseDelegateJob` back §11.6 preemption, and
+    // `listProjects` resolves a candidate's project to a job parent. All
+    // default to null → overnight stays disabled even at High tier.
+    overnight = null,
+    startDelegateJob = null,
+    listDelegateJobs = null,
+    pauseDelegateJob = null,
+    listProjects = null,
   } = deps;
 
   let disposed = false;
@@ -438,8 +468,19 @@ export function createCtoEngine(deps = {}) {
         // active = started (watermark recorded) but not yet finished.
         active: !!es.backfillStartInstant && es.backfillDone !== true,
       };
+      // BET-1419: tonight's queue size (§10.4 line) — the engine owns the
+      // queue, so it overrides the counts fold's zero when tasks exist.
+      if (Array.isArray(es.tonightQueue)) {
+        counts.tonightCount = es.tonightQueue.filter((t) => t && typeof t.id === "string").length;
+      }
     } catch {
       /* best-effort */
+    }
+    let tier = null;
+    try {
+      tier = await tierGet();
+    } catch {
+      tier = null;
     }
     return {
       enabled: enabledNow,
@@ -448,6 +489,7 @@ export function createCtoEngine(deps = {}) {
       needsYouCount: counts.needsYouCount ?? 0,
       generationInFlight: !!counts.generationInFlight,
       tonightCount: counts.tonightCount ?? 0,
+      tier,
       backfill,
     };
   }
@@ -485,6 +527,8 @@ export function createCtoEngine(deps = {}) {
         // §4.3/§13.4 standing-query watchers: windowed kinds + retirement, and
         // auto-created watchers after a new day rollup lands.
         await watcherTick();
+        // §11 overnight: window state machine + plan dispatch (BET-1419).
+        await overnightTick();
       }
       // §10.6-4 cold-start backfill — also ambient, gated on enabled. Its own
       // drained state marker makes it run at most once per box.
@@ -905,7 +949,22 @@ export function createCtoEngine(deps = {}) {
     if (verdictsEngine) return verdictsEngine;
     verdictsEngine = createVerdictEngine({ verdicts, now });
     verdictsEngine.registerCounterSink(factsCounterSink);
+    verdictsEngine.registerCounterSink(tonightCounterSink);
     return verdictsEngine;
+  }
+
+  // BET-1419 queue-tonight counter sink (§11.4): fold queue-tonight verdicts
+  // into the overnight Thompson acceptance counters (two per category, read
+  // by the portfolio's next sample). Only the suggestion-subject verdicts
+  // with class `queue-tonight` count — the veto card's own verdicts are user
+  // consent, not task acceptance. The fold maps the verdict's §9.5 effects
+  // (accept → success, reject/veto → rejection) internally. Best-effort.
+  function tonightCounterSink(effects, entry) {
+    if (!overnight) return;
+    if (entry?.subject?.type !== "suggestion" || entry?.subject?.class !== "queue-tonight") return;
+    void overnight
+      .foldCounters({ category: "queue-tonight", verdict: entry?.verdict, never: entry?.never === true })
+      .catch(() => {});
   }
 
   // BET-1398 standing-query watchers (§4.3/§13.4): lazy single instance over
@@ -1040,6 +1099,430 @@ export function createCtoEngine(deps = {}) {
       void fe.noteReliability(sender, delta).catch(() => {});
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // BET-1419 — Overnight execution wiring (§11). The pure machine (window
+  // state machine, portfolio scorer, execution contract) lives in
+  // ctoOvernight.mjs; this block is the wiring: feed the machine each tick
+  // (quiet trough from the profile, presence, candidates from the tonight
+  // queue + watcher hits), dispatch the selected plan through the injected
+  // delegate seams (actor "cto", sweepAllowance = window remaining, the §3.3
+  // sub-cap of 2 enforced by beginDelegateJob), preempt everything on the
+  // user's return (§11.6), and arm/fulfill/cancel the veto countdown card
+  // (§10.3). Nothing runs unless the engine is enabled, the Overnight switch
+  // is on (config `ctoOvernightEnabled`), the tier is High, and the scheduler
+  // was injected.
+  // ---------------------------------------------------------------------------
+
+  const VETO_CARD_ID = "overnight:veto";
+  // One-shot "run now instead" consent set by the veto card / tonight verb;
+  // consumed by the next overnight tick.
+  let pendingRunNow = false;
+
+  async function overnightGate() {
+    if (disposed || !overnight) return false;
+    try {
+      const cfg = (await configGet()) ?? {};
+      if (cfg.ctoOvernightEnabled !== true) return false;
+      return (await tierGet()) === "high";
+    } catch {
+      return false;
+    }
+  }
+
+  // The §11.4 candidate sources this issue wires: accepted `queue-tonight`
+  // entries (the tonight queue) + watcher-driven investigations (the standing
+  // queries' hits). Queue entries carry the value/confidence captured at
+  // accept time; watcher hits degrade to mid-lattice defaults.
+  async function tonightQueueRows() {
+    try {
+      const es = (await engineState.load()) ?? {};
+      return Array.isArray(es.tonightQueue) ? es.tonightQueue : [];
+    } catch {
+      return [];
+    }
+  }
+
+  async function saveTonightQueueRows(rows) {
+    const es = (await engineState.load()) ?? {};
+    await engineState.save({ ...es, tonightQueue: rows });
+  }
+
+  function queueCandidatesFromRows(rows) {
+    const out = [];
+    for (const t of Array.isArray(rows) ? rows : []) {
+      if (!t || typeof t !== "object" || typeof t.id !== "string" || !t.id) continue;
+      out.push({
+        id: t.id,
+        name: typeof t.name === "string" ? t.name : undefined,
+        prompt: typeof t.prompt === "string" ? t.prompt : undefined,
+        project: typeof t.project === "string" ? t.project : undefined,
+        category: "queue-tonight",
+        value: Number.isFinite(t.value) ? t.value : 1,
+        confidence: Number.isFinite(t.confidence) ? t.confidence : 0.8,
+        predictedCost: Number.isFinite(t.predictedCost) ? t.predictedCost : 1,
+        refs: Array.isArray(t.refs) ? t.refs : [],
+      });
+    }
+    return out;
+  }
+
+  function watcherCandidatesFromRows(rows) {
+    const out = [];
+    for (const hit of collectWatcherHitsFromLedger(rows)) {
+      out.push({
+        id: hit.id,
+        name: hit.text,
+        category: "watcher",
+        value: 2,
+        confidence: 0.8,
+        predictedCost: 1,
+        refs: Array.isArray(hit.refs) ? hit.refs : [],
+      });
+    }
+    return out;
+  }
+
+  // Read the running delegate jobs this engine may preempt (actor "cto" only).
+  async function runningCtoJobs() {
+    if (typeof listDelegateJobs !== "function") return [];
+    try {
+      const jobs = await listDelegateJobs();
+      return (Array.isArray(jobs) ? jobs : []).filter((j) => j?.actor === "cto" && j?.status === "running");
+    } catch {
+      return [];
+    }
+  }
+
+  // §11.6 preemption: pause every running CTO job, then close the window (or
+  // clear an armed countdown). Best-effort — a failing pause seam must never
+  // break the close; the delegate sweeper still drains a missed pause flag.
+  async function preemptOvernight(reason) {
+    for (const j of await runningCtoJobs()) {
+      try {
+        await pauseDelegateJob?.(j.id);
+        await ledgerLog({ kind: "cto.overnight.preempt", jobId: j.id, reason });
+      } catch {
+        /* the sweeper still drains it; preemption is best-effort */
+      }
+    }
+    if (!overnight) return;
+    const t = now();
+    await overnight
+      .updateWindow((prev) =>
+        prev
+          ? normalizeWindow({
+              ...normalizeWindow(prev),
+              ...(prev.state === "open"
+                ? { state: "closed", closedMs: t, closeReason: reason, pinnedOrder: null }
+                : { countdown: null }),
+            })
+          : null,
+      )
+      .catch(() => {});
+  }
+
+  // Dispatch the selected plan (§11.5 execution contract). The §3.3 concurrent
+  // delegate sub-cap (RATE_LIMITS.concurrentDelegate = 2) is enforced by
+  // beginDelegateJob — the overnight scheduler never bypasses it. Each start
+  // removes its queue entry (a queued task that started is no longer queued);
+  // failures ledger and leave the entry queued for the next tick/night.
+  // Candidates whose job already started in this window are skipped (the
+  // ledger's job_started rows are the dedupe record — a watcher hit stays in
+  // the ledger and would otherwise re-run every tick of the same window).
+  async function dispatchPlan({ plan, trough, projects, ledgerRows, windowOpenedMs }) {
+    let started = 0;
+    const startedIds = new Set(
+      (Array.isArray(ledgerRows) ? ledgerRows : [])
+        .filter((r) => r?.kind === "cto.overnight.job_started" && typeof r?.ts === "number")
+        .filter((r) => (windowOpenedMs == null ? true : r.ts >= windowOpenedMs))
+        .map((r) => r.id),
+    );
+    for (const cand of plan?.selected ?? []) {
+      const release = track.beginDelegate();
+      try {
+        if (!cand || typeof cand.id !== "string" || startedIds.has(cand.id)) continue;
+        if (typeof startDelegateJob !== "function") break;
+        const task = (await tonightQueueRows()).find((r) => r?.id === cand.id) ?? null;
+        const project = cand.project ?? task?.project;
+        const parent =
+          typeof project === "string" && project ? resolveForgeOwner(projects, project) : null;
+        if (!parent?.parentSessionID) {
+          await ledgerLog({
+            kind: "cto.overnight.skip",
+            id: cand.id,
+            reason: "no tracked project session to host the job",
+            project,
+          });
+          continue;
+        }
+        const res = await startDelegateJob({
+          name: cand.name ?? task?.name ?? `overnight:${cand.category}`,
+          prompt:
+            cand.prompt ??
+            task?.prompt ??
+            `${cand.name ?? "overnight"} — investigate and report a draft summary with refs.`,
+          parentSessionID: parent.parentSessionID,
+          parentDirectory: project,
+          sweepAllowanceMs: trough ? Math.max(0, trough.endMs - now()) : undefined,
+        });
+        if (res?.ok === false) {
+          await ledgerLog({ kind: "cto.overnight.skip", id: cand.id, reason: res.error ?? "delegate start refused", project });
+          continue;
+        }
+        started += 1;
+        await ledgerLog({
+          kind: "cto.overnight.job_started",
+          id: cand.id,
+          jobId: res?.job?.id ?? null,
+          project,
+          category: cand.category,
+        });
+        if (task) {
+          const rows = await tonightQueueRows();
+          await saveTonightQueueRows(rows.filter((r) => r?.id !== task.id));
+        }
+      } catch {
+        /* keep dispatching the remaining selected jobs */
+      } finally {
+        release();
+      }
+    }
+    return started;
+  }
+
+  // §9.2 veto card: armed once per imminent window (trough start − 30 min),
+  // fulfilled by its own open, canceled by the user, abandoned when it
+  // elapses unmet (the machine already ledgers the abandon on tick).
+  async function overnightVetoCard({ trough, candidateCount }) {
+    if (!overnight || !cards || typeof cards.upsertVeto !== "function") return;
+    const t = now();
+    const win = await overnight.readWindow();
+    if (!win) return;
+    const due = trough ? trough.startMs : null;
+    const imminent = due != null && t >= due - VETO_LEAD_MS && t < due;
+    if (imminent && win.state !== "open" && !win.countdown && candidateCount > 0) {
+      await overnight
+        .updateWindow((prev) => scheduleCountdown(prev, { now: t, dueMs: due }))
+        .catch(() => {});
+      const tasks = (await tonightQueueRows()).filter((r) => r && typeof r.id === "string");
+      await cards
+        .upsertVeto({
+          id: VETO_CARD_ID,
+          title: "Overnight run planned",
+          body: `The CTO queued ${tasks.length} task${tasks.length === 1 ? "" : "s"} for tonight's window. It runs unattended unless you cancel.`,
+          dueMs: due,
+          options: [
+            { label: "Cancel tonight", action: { type: "veto-cancel", payload: {} } },
+            { label: "Edit plan", action: { type: "veto-edit", payload: {} } },
+            { label: "Run now instead", action: { type: "veto-run-now", payload: {} } },
+          ],
+        })
+        .catch(() => {});
+      await ledgerLog({ kind: "cto.overnight.veto_card", dueMs: due, tasks: tasks.length });
+      return;
+    }
+    if (win.state === "open" || !imminent) {
+      // Fulfilled (its own open cleared the countdown), canceled, or long
+      // gone: resolve any still-open veto card so the countdown cannot linger
+      // (§10.3 liveness).
+      const open = (await cards.listOpen().catch(() => [])) ?? [];
+      const stale = open.find((c) => c?.id === VETO_CARD_ID && c?.variant === "veto");
+      if (stale) {
+        const fulfilled = win.state === "open" && win.countdown == null;
+        await cards.resolveById(stale.id, { reason: fulfilled ? "window opened" : "countdown elapsed unmet" }).catch(() => {});
+      }
+    }
+  }
+
+  // The overnight slice of the engine tick. Gated like every other work
+  // branch; every step is best-effort — the machine's ledger rows record what
+  // actually happened (§14.5), and this block never throws into the poller.
+  async function overnightTick() {
+    if (!(await overnightGate())) return;
+    const t = now();
+    const presence = getPresence().state;
+    const hasDesktop = getLastDesktopHeartbeat() > 0;
+    const lastUserEventMs = promptTs > 0 ? promptTs : null;
+    const trough = typeof profile?.getQuietTrough === "function" ? profile.getQuietTrough() : null;
+    const runNow = pendingRunNow;
+    pendingRunNow = false;
+    let ledgerRowsAll = [];
+    try {
+      ledgerRowsAll = (await ledger.read()) ?? [];
+    } catch {
+      ledgerRowsAll = [];
+    }
+    const recentLedger = ledgerRowsAll.filter(
+      (r) => typeof r?.ts !== "number" || r.ts >= t - 24 * HOUR_MS,
+    );
+    const candidates = [
+      ...queueCandidatesFromRows(await tonightQueueRows()),
+      ...watcherCandidatesFromRows(recentLedger),
+    ];
+    let out = null;
+    try {
+      out = await overnight.tick({
+        now: t,
+        trough,
+        presence,
+        hasDesktop,
+        lastUserEventMs,
+        runNow,
+        candidates,
+      });
+    } catch {
+      return; // the persisted window state is authoritative; skip this tick
+    }
+    if (Array.isArray(out?.ledgerRows) && out.ledgerRows.length) {
+      for (const row of out.ledgerRows) {
+        await ledgerLog({ ...row, ts: row?.ts ?? t }).catch(() => {});
+      }
+      // A fold that just closed the window also released the §11.6 preemption
+      // (presence return / fresh user event) — the delegate jobs need the
+      // pause flag set now, not on the next tick.
+      if (out.ledgerRows.some((r) => r?.kind === "cto.overnight.close" && r?.reason !== "trough-end")) {
+        await preemptOvernight("user-return");
+      }
+    }
+    const win = out?.window ?? null;
+    if (win?.state === "open" && out.plan?.selected?.length) {
+      let projects = null;
+      try {
+        projects = await listProjects();
+      } catch {
+        projects = null;
+      }
+      await dispatchPlan({
+        plan: out.plan,
+        trough,
+        projects,
+        ledgerRows: ledgerRowsAll,
+        windowOpenedMs: win.openedMs,
+      }).catch(() => {});
+    }
+    await overnightVetoCard({ trough, candidateCount: candidates.length }).catch(() => {});
+    await syncState().catch(() => {});
+  }
+
+  // ---- Tonight verbs (§10.4 drill-down + §9.2 veto card actions) ----------
+
+  // List the queue + the current window state for the Tonight drill-down.
+  async function tonightList() {
+    const tasks = await tonightQueueRows();
+    const win = overnight ? await overnight.readWindow().catch(() => null) : null;
+    return { tasks, window: win };
+  }
+
+  // Queue a task for tonight (the `queue-tonight` decision-card option
+  // executor). Gated: engine enabled, High tier, Overnight switch, injected
+  // scheduler. A 13th add is refused with a note (never silent truncation).
+  async function tonightAdd(task = {}) {
+    if (!(await overnightGate())) return { ok: false, error: "overnight is not enabled (High tier + Overnight switch)" };
+    const name = typeof task.name === "string" ? task.name.trim() : "";
+    if (!name) return { ok: false, error: "name is required" };
+    const rows = await tonightQueueRows();
+    if (rows.length >= TONIGHT_QUEUE_MAX) {
+      return { ok: false, error: `tonight's queue is full (${TONIGHT_QUEUE_MAX}) — cancel or edit first` };
+    }
+    const entry = {
+      id: `tq:${nextId()}`,
+      name: name.slice(0, 200),
+      prompt: typeof task.prompt === "string" && task.prompt.trim() ? task.prompt.trim() : name,
+      project: typeof task.project === "string" && task.project ? task.project : null,
+      value: Number.isFinite(task.value) ? task.value : 1,
+      confidence: Number.isFinite(task.confidence) ? task.confidence : 0.8,
+      predictedCost: Number.isFinite(task.predictedCost) ? task.predictedCost : 1,
+      refs: Array.isArray(task.refs) ? task.refs : [],
+      cls: typeof task.cls === "string" ? task.cls : "queue-tonight",
+      originId: typeof task.originId === "string" ? task.originId : null,
+      addedMs: now(),
+    };
+    await saveTonightQueueRows([...rows, entry]);
+    await ledgerLog({ kind: "cto.overnight.queue_add", id: entry.id, name: entry.name });
+    await syncState().catch(() => {});
+    return { ok: true, task: entry };
+  }
+
+  // Remove one task (a Tonight drill-down edit — itself a verdict, §10.4).
+  async function tonightRemove(id) {
+    if (typeof id !== "string" || !id) return { ok: false, error: "id is required" };
+    const rows = await tonightQueueRows();
+    const next = rows.filter((r) => r?.id !== id);
+    if (next.length === rows.length) return { ok: false, error: "not found" };
+    await saveTonightQueueRows(next);
+    // Drop the task from a pinned order too — a removed task can no longer
+    // pin a slot.
+    if (overnight) {
+      await overnight
+        .updateWindow((prev) =>
+          prev?.pinnedOrder?.length
+            ? normalizeWindow({ ...normalizeWindow(prev), pinnedOrder: prev.pinnedOrder.filter((pid) => pid !== id) })
+            : null,
+        )
+        .catch(() => {});
+    }
+    const removed = rows.find((r) => r?.id === id);
+    await ledgerLog({ kind: "cto.overnight.queue_edit", edit: "remove", id });
+    void getVerdictsEngine()
+      .recordVerdict({
+        subject: { type: "suggestion", id: removed?.originId ?? id, class: "queue-tonight" },
+        verdict: "edit",
+      })
+      .catch(() => {});
+    await syncState().catch(() => {});
+    return { ok: true };
+  }
+
+  // Reorder the queue — PINS the order for the current window (exempt from
+  // the 30-min re-scoring; cleared again when the window closes, §10.4).
+  async function tonightReorder(ids) {
+    if (!Array.isArray(ids)) return { ok: false, error: "ids array is required" };
+    if (!overnight) return { ok: false, error: "overnight is not enabled" };
+    const rows = await tonightQueueRows();
+    const known = new Set(rows.map((r) => r?.id).filter(Boolean));
+    const pinned = ids.filter((i) => typeof i === "string" && known.has(i));
+    if (pinned.length === 0) return { ok: false, error: "no known task ids in order" };
+    await overnight
+      .updateWindow((prev) => normalizeWindow({ ...normalizeWindow(prev), pinnedOrder: pinned }))
+      .catch(() => {});
+    await ledgerLog({ kind: "cto.overnight.queue_edit", edit: "reorder", order: pinned });
+    void getVerdictsEngine()
+      .recordVerdict({
+        subject: { type: "suggestion", id: rows.find((r) => r?.id === pinned[0])?.originId ?? pinned[0], class: "queue-tonight" },
+        verdict: "edit",
+      })
+      .catch(() => {});
+    return { ok: true, pinned };
+  }
+
+  // Cancel tonight (veto card "Cancel tonight" / drill-down "Cancel tonight").
+  // Pauses running CTO jobs + closes the window (or clears the countdown),
+  // resolves the veto card, records the §9.5 veto verdict.
+  async function tonightCancel() {
+    await preemptOvernight("veto");
+    const open = (await cards.listOpen().catch(() => [])) ?? [];
+    const stale = open.find((c) => c?.id === VETO_CARD_ID && c?.variant === "veto");
+    if (stale) await cards.resolveById(stale.id, { reason: "canceled by user" }).catch(() => {});
+    await ledgerLog({ kind: "cto.overnight.veto", ts: now() });
+    void getVerdictsEngine()
+      .recordVerdict({ subject: { type: "veto-window", id: VETO_CARD_ID, class: "overnight" }, verdict: "veto" })
+      .catch(() => {});
+    await syncState().catch(() => {});
+    return { ok: true };
+  }
+
+  // "Run now instead" (§9.2): one-shot consent the next overnight tick
+  // consumes — it opens the window even outside the trough (the machine's
+  // `runNow` branch; zero candidates still opens nothing, §11.4).
+  async function tonightRunNow() {
+    if (!(await overnightGate())) return { ok: false, error: "overnight is not enabled (High tier + Overnight switch)" };
+    pendingRunNow = true;
+    await ledgerLog({ kind: "cto.overnight.run_now", ts: now() });
+    return { ok: true };
+  }
+
+  // ---------------------------------------------------------------------------
 
   // Pump the blackboard proposal queue (per-project, single writer). Driven
   // from the tick when enabled; best-effort, never throws into the poller.
@@ -1211,6 +1694,11 @@ export function createCtoEngine(deps = {}) {
     if (isUserPromptEvent(evt)) {
       const t = now();
       if (t > promptTs) promptTs = t;
+      // §11.6 preemption on the user's return: an open overnight window closes
+      // and its running CTO jobs are paused at their next tool-call boundary —
+      // immediately, not at the next tick. Fire-and-forget; the next tick's
+      // evaluateWindow would reach the same close regardless.
+      void preemptOvernight("user-return").catch(() => {});
     }
     // The SAME opencode event arrives on both the global and the per-directory
     // scoped stream — fold the duplicate so it counts once.
@@ -1505,6 +1993,13 @@ export function createCtoEngine(deps = {}) {
     get cards() {
       return cards;
     },
+    // BET-1419 tonight verbs (§10.4 drill-down + §9.2 veto card actions).
+    tonightList,
+    tonightAdd,
+    tonightRemove,
+    tonightReorder,
+    tonightCancel,
+    tonightRunNow,
   };
 
   return engine;
