@@ -57,6 +57,10 @@ import {
   purgeExpiredInbox,
 } from "./ctoStores.mjs";
 import { createVerdictEngine } from "./ctoVerdicts.mjs";
+// BET-1403: the earned-trust ladder (§9.3/§9.4). Its per-class Beta counters
+// ride the §9.5 verdict sink registry below; the digest announces acts and
+// tier changes through the same engine.
+import { createCtoTrust } from "./ctoTrust.mjs";
 import { createCtoBackfill } from "./ctoBackfill.mjs";
 import { startPoller } from "./startPoller.mjs";
 import { createSeenIdFilter } from "./seenIds.mjs";
@@ -381,6 +385,7 @@ export function createCtoEngine(deps = {}) {
   let builtInBackfill = null;
   let profileDecayHandle = null;
   let verdictsEngine = null;
+  let trustEngine = null;
   let watcherEngine = null;
 
   // A5 presence inputs (spec §5.4): lastSeen = max(desktop heartbeat, app
@@ -950,6 +955,14 @@ export function createCtoEngine(deps = {}) {
     verdictsEngine = createVerdictEngine({ verdicts, now });
     verdictsEngine.registerCounterSink(factsCounterSink);
     verdictsEngine.registerCounterSink(tonightCounterSink);
+    // BET-1403 (§9.4): the trust counters ride the same §9.5 sink registry —
+    // per-action-class Beta counters over class-attributed suggestion
+    // verdicts. Best-effort like every sink: a failure never breaks verdict
+    // recording.
+    const t = getTrust();
+    verdictsEngine.registerCounterSink((effects, entry) => {
+      void t.noteVerdictEffects(effects, entry).catch(() => {});
+    });
     return verdictsEngine;
   }
 
@@ -965,6 +978,16 @@ export function createCtoEngine(deps = {}) {
     void overnight
       .foldCounters({ category: "queue-tonight", verdict: entry?.verdict, never: entry?.never === true })
       .catch(() => {});
+  }
+
+  // BET-1403: the earned-trust engine over the shared stores (engine state
+  // persists `es.trust`). One instance per engine; the suggest module keeps
+  // its own over the same stores — both are stateless facades whose every
+  // op loads fresh, mutates, and saves.
+  function getTrust() {
+    if (trustEngine) return trustEngine;
+    trustEngine = createCtoTrust({ engineState, ledger, verdicts, now });
+    return trustEngine;
   }
 
   // BET-1398 standing-query watchers (§4.3/§13.4): lazy single instance over
@@ -1997,6 +2020,9 @@ export function createCtoEngine(deps = {}) {
     // all reach one path through these).
     recordVerdict: (input) => getVerdictsEngine().recordVerdict(input),
     listVerdicts: () => getVerdictsEngine().listVerdicts(),
+    // BET-1403: trust engine — consult tiers, act-and-report bookkeeping, and
+    // the digest announcement queue (index.mjs wires the digest seam to it).
+    trust: getTrust(),
     get rateTracker() {
       return track;
     },

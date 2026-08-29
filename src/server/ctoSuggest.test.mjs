@@ -109,8 +109,23 @@ test("decideVerb: p between p_ask and p_act → decision (no notify unless recur
   assert.deepEqual(decideVerb({ p: 0.8, sourceKind: "fact-anomaly" }), { verb: "decision", notify: false });
 });
 
-test("decideVerb: act branch is unreachable in P2 — throws on p >= p_act", () => {
-  assert.throws(() => decideVerb({ p: 0.99 }), /nothing acts in P2/);
+test("decideVerb: act branch without trust — throws on p >= p_act (BET-1403: ask-tier hold)", () => {
+  assert.throws(() => decideVerb({ p: 0.99 }), /class not trusted/);
+  // Eligibility gates the climb (§9.3): an ask-capped class never leaves the
+  // ask verbs even when its tier record somehow reads promoted.
+  assert.throws(() => decideVerb({ p: 0.99, tier: "act", eligible: false }), /class not trusted/);
+});
+
+test("decideVerb: trust ladder raises the ceiling (§9.2/§9.4)", () => {
+  // veto-window tier: p >= p_ask surfaces the veto-window verb.
+  assert.deepEqual(decideVerb({ p: 0.6, tier: "veto-window", eligible: true }), { verb: "veto-window", notify: false });
+  // act tier but below the act bar → still the veto-window verb.
+  assert.deepEqual(decideVerb({ p: 0.6, tier: "act", eligible: true }), { verb: "veto-window", notify: false });
+  // act tier + p >= p_act → the act verb fires.
+  assert.deepEqual(decideVerb({ p: 0.99, tier: "act", eligible: true }), { verb: "act", notify: false });
+  assert.deepEqual(decideVerb({ p: 0.99, tier: "act", eligible: true, sourceKind: "watcher-hit-rate" }), { verb: "act", notify: true });
+  // cold-start dominates the ladder (§10.6-4): capped at ask whatever the tier.
+  assert.deepEqual(decideVerb({ p: 0.99, coldStart: true, tier: "act", eligible: true }), { verb: "decision", capped: true, notify: false });
 });
 
 test("decideVerb: cold-start caps high-score candidates at the ask verb (no throw)", () => {
