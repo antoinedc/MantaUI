@@ -268,6 +268,13 @@ async function readRemoteConfig() {
   return parsed;
 }
 
+// BET-1395 (Adaptive CTO §7.1-3): the tool scan's config-surface seam reads
+// opencode.jsonc for MCP servers — same reader, exported so the scan doesn't
+// grow a second jsonc parser.
+export async function readOpencodeConfig() {
+  return readRemoteConfig();
+}
+
 /**
  * Read opencode.jsonc from the box and project it into the ProviderEndpoint[]
  * shape the Settings ProvidersCard form expects. This is the config-reading

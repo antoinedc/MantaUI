@@ -16,10 +16,11 @@ import {
 
 // A fully-injected card harness: real in-memory card store, engine-state,
 // ledger and a clock we control. No real fs — pure behavior.
-function makeHarness({ pendingBlockers = [] } = {}) {
+function makeHarness({ pendingBlockers = [], fireNotify = false } = {}) {
   const clock = { ms: 1_000_000 };
   let cardPayload = { v: 1, cards: [] };
   const ledgerRows = [];
+  const notified = [];
   let engineState = { v: 1, pendingBlockers: [...pendingBlockers] };
 
   const cards = createCtoCards({
@@ -36,6 +37,7 @@ function makeHarness({ pendingBlockers = [] } = {}) {
       },
     },
     ledger: { append: async (row) => ledgerRows.push(row) },
+    ...(fireNotify ? { fireNotify: async (a) => notified.push(a) } : {}),
     now: () => clock.ms,
   });
 
@@ -43,6 +45,7 @@ function makeHarness({ pendingBlockers = [] } = {}) {
     cards,
     clock,
     ledgerRows,
+    notified,
     store: () => cardPayload,
     setCardPayload(p) {
       cardPayload = p;
@@ -247,66 +250,36 @@ test("countOpen reflects only open cards", async () => {
 });
 
 test("BET-1397 source 3: an inbox blocker fires the blocking-tier notify exactly once and promotes a card", async () => {
-  const clock = { ms: 1_000_000 };
-  let cardPayload = { v: 1, cards: [] };
-  const ledgerRows = [];
-  const notified = [];
-  const cards = createCtoCards({
-    cardStore: {
-      load: async () => cardPayload,
-      save: async (p) => {
-        cardPayload = p;
-      },
-    },
-    engineState: { load: async () => ({ v: 1 }), save: async () => {} },
-    ledger: { append: async (row) => ledgerRows.push(row) },
-    fireNotify: async (a) => notified.push(a),
-    now: () => clock.ms,
-  });
-
-  const r = await cards.onInboxBlocker({
+  const h = makeHarness({ fireNotify: true });
+  const r = await h.cards.onInboxBlocker({
     message: "build is red",
     title: "CI broken",
     refs: ["BET-777"],
     tag: "ci",
     sessionID: "ses-9",
-    ts: clock.ms,
+    ts: h.clock.ms,
   });
   assert.equal(r.notified, true);
   // Exactly ONE notification, blocking tier, via the shared router.
-  assert.equal(notified.length, 1);
-  assert.equal(notified[0].message, "build is red");
-  assert.equal(notified[0].title, "CI broken");
-  assert.equal(notified[0].urgent, true);
-  assert.equal(notified[0].sessionID, "ses-9");
+  assert.equal(h.notified.length, 1);
+  assert.equal(h.notified[0].message, "build is red");
+  assert.equal(h.notified[0].title, "CI broken");
+  assert.equal(h.notified[0].urgent, true);
+  assert.equal(h.notified[0].sessionID, "ses-9");
 
   // The inbox blocker becomes a card at > 10 min like any ask.
-  clock.ms += BLOCKER_AFTER_MS;
-  const p = await cards.promoteDue();
+  h.advance(BLOCKER_AFTER_MS);
+  const p = await h.cards.promoteDue();
   assert.equal(p.changed, true);
-  const open = cardPayload.cards.filter((c) => c.state === "open");
+  const open = h.store().cards.filter((c) => c.state === "open");
   assert.equal(open.length, 1);
   assert.equal(open[0].sourceKind, "inbox");
   assert.deepEqual(open[0].refs, ["BET-777"]);
 });
 
 test("upsertDecision: writes a decision card, and regenerating the same id upserts (no duplicate)", async () => {
-  const clock = { ms: 1_000_000 };
-  let cardPayload = { v: 1, cards: [] };
-  const ledgerRows = [];
-  const cards = createCtoCards({
-    cardStore: {
-      load: async () => cardPayload,
-      save: async (p) => {
-        cardPayload = p;
-      },
-    },
-    engineState: { load: async () => ({ v: 1 }), save: async () => {} },
-    ledger: { append: async (row) => ledgerRows.push(row) },
-    now: () => clock.ms,
-  });
-
-  const first = await cards.upsertDecision({
+  const h = makeHarness();
+  const first = await h.cards.upsertDecision({
     id: "sugg-1",
     title: "Restart the stuck build",
     why: "Start-job: the build has been red for hours.",
@@ -318,11 +291,11 @@ test("upsertDecision: writes a decision card, and regenerating the same id upser
   });
   assert.equal(first.changed, true);
   assert.equal(first.isNew, true);
-  assert.equal(openCardCount({ store: () => cardPayload }), 1);
+  assert.equal(openCardCount(h), 1);
 
   // regeneration with the same stable id — updates in place, no second card
-  clock.ms += 1000;
-  const regen = await cards.upsertDecision({
+  h.advance(1000);
+  const regen = await h.cards.upsertDecision({
     id: "sugg-1",
     title: "Restart the stuck build (still red)",
     why: "Updated why.",
@@ -334,8 +307,8 @@ test("upsertDecision: writes a decision card, and regenerating the same id upser
   });
   assert.equal(regen.changed, true);
   assert.equal(regen.isNew, false);
-  assert.equal(openCardCount({ store: () => cardPayload }), 1);
-  const open = cardPayload.cards.filter((c) => c.state === "open");
+  assert.equal(openCardCount(h), 1);
+  const open = h.store().cards.filter((c) => c.state === "open");
   assert.equal(open[0].title, "Restart the stuck build (still red)");
   assert.equal(open[0].created, 1_000_000); // created preserved across regeneration
   assert.equal(open[0].variant, "decision");
@@ -382,4 +355,61 @@ test("upsertVeto: refuses a missing id", async () => {
   const r = await h.cards.upsertVeto({ title: "no id" });
   assert.equal(r.changed, false);
   assert.equal(openCardCount(h), 0);
+});
+
+// ---------------------------------------------------------------------------
+// BET-1395 connect-ask cards (§7.4 / §10.3 connect variant)
+// ---------------------------------------------------------------------------
+
+test("upsertConnect: writes a variant=connect card with the three bound answers", async () => {
+  const h = makeHarness();
+  const r = await h.cards.upsertConnect({
+    toolId: "vercel",
+    title: "Connect Vercel (read-only)?",
+    body: "Vercel showed up 3× across 2 week(s) of agent work",
+    evidence: ["transcript: cli:vercel", "secret: VERCEL_TOKEN"],
+    refs: ["vercel"],
+  });
+  assert.equal(r.changed, true);
+  assert.equal(r.isNew, true);
+  const card = h.store().cards.find((c) => c.variant === "connect");
+  assert.ok(card);
+  assert.equal(card.sourceKind, "tool");
+  assert.equal(card.sourceId, "vercel");
+  assert.deepEqual(card.refs, ["vercel"]);
+  assert.deepEqual(
+    card.options.map((o) => o.answer),
+    ["connect", "not-now", "never"],
+  );
+  for (const o of card.options) {
+    assert.equal(o.action.type, "tool-connect");
+    assert.deepEqual(o.action.payload, { tool: "vercel", answer: o.answer });
+  }
+  assert.ok(h.ledgerRows.some((row) => row.kind === CARD_CREATED && row.variant === "connect"));
+});
+
+test("upsertConnect: re-raising the same tool upserts in place (no dup)", async () => {
+  const h = makeHarness();
+  await h.cards.upsertConnect({ toolId: "vercel", title: "first", refs: ["vercel"] });
+  h.advance(1000);
+  const r = await h.cards.upsertConnect({ toolId: "vercel", title: "second", refs: ["vercel"] });
+  assert.equal(r.isNew, false);
+  const open = h.store().cards.filter((c) => c.variant === "connect" && c.state === "open");
+  assert.equal(open.length, 1);
+  assert.equal(open[0].title, "second");
+});
+
+test("resolveConnectCards: resolves the open card for the tool and writes the ledger row", async () => {
+  const h = makeHarness();
+  await h.cards.upsertConnect({ toolId: "vercel", title: "t", refs: ["vercel"] });
+  await h.cards.upsertConnect({ toolId: "stripe", title: "t2", refs: ["stripe"] });
+  const r = await h.cards.resolveConnectCards("vercel", "connect answer: connect");
+  assert.equal(r.changed, true);
+  const open = h.store().cards.filter((c) => c.state === "open");
+  assert.equal(open.length, 1);
+  assert.equal(open[0].sourceId, "stripe");
+  assert.ok(h.ledgerRows.some((row) => row.kind === CARD_RESOLVED && row.sourceId === "vercel"));
+  // Resolving an absent tool changes nothing.
+  const r2 = await h.cards.resolveConnectCards("ghost", "no-op");
+  assert.equal(r2.changed, false);
 });

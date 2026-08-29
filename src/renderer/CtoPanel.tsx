@@ -40,6 +40,7 @@ import {
   nowCostLabel,
   decisionCards,
   vetoCards,
+  connectCards,
   tonightVisible,
   executeSuggestionOption,
   tonightBudgetMode,
@@ -49,9 +50,11 @@ import {
   bindingReserveFrac,
   budgetTodayUsd,
   type BlockerCard,
+  type ConnectCardRow,
   type CtoState,
   type CtoHealthStat,
   type DecisionCardRow,
+  type SuggestionApi,
   type VetoCardRow,
 } from "./ctoView";
 import {
@@ -61,6 +64,7 @@ import {
   NowRail,
   JustFinishedRail,
   DigestSection,
+  ConnectSection,
   SuggestionSection,
   VetoSection,
   TonightSection,
@@ -156,6 +160,7 @@ export function CtoPanel({
   const blockerCards = useMemo(() => cards.filter((c) => c.variant !== "decision" && c.variant !== "veto"), [cards]);
   const suggestionCards = useMemo(() => decisionCards(cards), [cards]);
   const vetoList = useMemo(() => vetoCards(cards as unknown as ReadonlyArray<Record<string, unknown>>), [cards]);
+  const connectList = useMemo(() => connectCards(cards as unknown as ReadonlyArray<Record<string, unknown>>), [cards]);
 
   const busy = digestBusy(state);
   const busyRef = useRef(busy);
@@ -287,27 +292,16 @@ export function CtoPanel({
   // injected into the pure executor: config-change → configUpdate, start-job →
   // delegate, record-decision → the facts route. Outcome is reported (toast on
   // failure); a successful execution is a positive judgment → verdict accept.
-  const suggestionApi = useMemo(
+  // Typed as SuggestionApi (shared/api is the single source for the shapes).
+  const suggestionApi = useMemo<SuggestionApi>(
     () => ({
-      configUpdate: (patch: Record<string, unknown>) => window.api?.configUpdate?.(patch) ?? Promise.resolve({}),
-      delegateStart: (input: { prompt: string; sessionID: string; directory: string; model?: unknown }) =>
-        rendererDelegateStart(input),
-      ctoFact: (input: { kind?: string; statement: string; refs?: string[] }) =>
-        window.api?.ctoFact?.(input) ?? Promise.resolve({ ok: false, error: "facts unavailable" }),
-      ctoTonightAct: (input: {
-        action: "add" | "remove" | "reorder" | "cancel" | "run-now";
-        task?: {
-          name: string;
-          prompt?: string;
-          project?: string | null;
-          value?: number;
-          confidence?: number;
-          predictedCost?: number;
-          refs?: string[];
-          cls?: string;
-          originId?: string | null;
-        };
-      }) => window.api?.ctoTonightAct?.(input) ?? Promise.resolve({ ok: false, error: "tonight unavailable" }),
+      configUpdate: (patch) => window.api?.configUpdate?.(patch) ?? Promise.resolve({}),
+      delegateStart: async (input) => {
+        const r = await rendererDelegateStart(input);
+        return { ok: !!r?.ok, error: r?.error };
+      },
+      ctoFact: (input) => window.api?.ctoFact?.(input) ?? Promise.resolve({ ok: false, error: "facts unavailable" }),
+      ctoTonightAct: (input) => window.api?.ctoTonightAct?.(input) ?? Promise.resolve({ ok: false, error: "tonight unavailable" }),
     }),
     [],
   );
@@ -339,6 +333,36 @@ export function CtoPanel({
       refreshCards();
     },
     [refreshCards],
+  );
+
+  // BET-1395 connect asks (§7.4): the three-way answer is a registry write
+  // (consent ring + §9.5 verdict + card resolution) — the server route does
+  // all three; the client toasts the outcome and refreshes the cards.
+  const handleConnectAnswer = useCallback(
+    (card: ConnectCardRow, answer: string) => {
+      const tool = (card.options ?? []).find((o) => o.answer === answer)?.action?.payload?.tool;
+      const toolId = typeof tool === "string" ? tool : card.id;
+      void window.api
+        ?.ctoToolConnect?.({ tool: toolId, answer: answer as "connect" | "not-now" | "never" })
+        .then((r) => {
+          if (r?.ok) {
+            pushToast({
+              id: `connect-${Date.now()}`,
+              message:
+                answer === "connect"
+                  ? "Connected read-only — metadata consent granted"
+                  : answer === "never"
+                    ? "Will not connect to this tool"
+                    : "Not now — I'll ask again later",
+            });
+          } else {
+            pushToast({ id: `connect-fail-${Date.now()}`, message: `Couldn't record answer: ${r?.error ?? "unknown"}` });
+          }
+        })
+        .catch(() => {})
+        .finally(refreshCards);
+    },
+    [pushToast, refreshCards],
   );
 
   // BET-1419 tonight + veto actions (§9.2/§10.4). The veto card's Cancel
@@ -574,6 +598,7 @@ export function CtoPanel({
           <BackfillCard state={state} />
           <BlockerSection cards={blockerCards} now={Date.now()} onAnswer={handleAnswer} />
           <VetoSection cards={vetoList} now={Date.now()} onCancel={handleVetoCancel} onEditPlan={handleVetoEditPlan} onRunNow={handleVetoRunNow} />
+          <ConnectSection cards={connectList} onAnswer={handleConnectAnswer} />
           <SuggestionSection cards={suggestionCards} onAction={handleSuggestionAction} onDismiss={handleSuggestionDismiss} />
           <NowRail cards={nowCards} />
           <JustFinishedRail items={finished} now={Date.now()} onOpen={handleOpenFinished} />

@@ -119,6 +119,10 @@ import {
 import { createOvernightScheduler, normalizeWindow, scheduleCountdown } from "./ctoOvernight.mjs";
 import { resolveForgeOwner } from "./delegate.mjs";
 
+// BET-1395 tool discovery (§7): the registry engine — fusion of the four
+// evidence channels, the two lifecycle bars, and the connect-ask gate.
+import { createToolRegistry } from "./ctoToolRegistry.mjs";
+
 // Actor tag stamped on every engine RPC call / ledger row (spec §3.3).
 export const ACTOR = "cto";
 
@@ -376,6 +380,16 @@ export function createCtoEngine(deps = {}) {
     listDelegateJobs = null,
     pauseDelegateJob = null,
     listProjects = null,
+    // BET-1395 tool discovery (§7): optional pre-built registry engine (else
+    // one is constructed below from the shared tool stores + cards).
+    // `toolsRunEphemeral` is the classifier's LLM seam, PRE-GATED by
+    // index.mjs through the §3.3 ephemeral rate gate (like the suggest
+    // engine's runSuggest); `toolsGetSurfaces` is the channel-3 seam (the
+    // already-read config surfaces). Defaults null → no LLM fallback and no
+    // config evidence; channel 1 (secret ledger) still fuses.
+    tools = null,
+    toolsRunEphemeral = null,
+    toolsGetSurfaces = null,
   } = deps;
 
   let disposed = false;
@@ -400,6 +414,8 @@ export function createCtoEngine(deps = {}) {
   let verdictsEngine = null;
   let trustEngine = null;
   let watcherEngine = null;
+  let toolEngine = null;
+  let lastToolScanDay = null;
 
   // A5 presence inputs (spec §5.4): lastSeen = max(desktop heartbeat, app
   // open, user prompt). The desktop heartbeat is read live via
@@ -549,6 +565,9 @@ export function createCtoEngine(deps = {}) {
         await watcherTick();
         // §11 overnight: window state machine + plan dispatch (BET-1419).
         await overnightTick();
+        // §7 tool discovery: the daily evidence scan + lifecycle + connect
+        // asks (BET-1395). Once per UTC day; self-paced inside the registry.
+        await toolsTick();
       }
       // §10.6-4 cold-start backfill — also ambient, gated on enabled. Its own
       // drained state marker makes it run at most once per box.
@@ -1035,6 +1054,64 @@ export function createCtoEngine(deps = {}) {
       },
     });
     return watcherEngine;
+  }
+
+  // BET-1395 tool discovery (§7): lazy single instance over the shared tool
+  // registry/usage stores + the A1 card machinery. `runEphemeral` is the
+  // rate-gated LLM seam (wired by index.mjs) — the LLM fallback classification
+  // rides the §3.3 ephemeral rate gate exactly like a digest compose. The
+  // db/surface collection seams are injected (index.mjs supplies the live
+  // opencodeDb read handle + config readers); defaults null → channels 2/3
+  // contribute nothing, channel 1 (secret ledger) still fuses.
+  function getTools({ backfillStartInstant = null } = {}) {
+    if (toolEngine) return toolEngine;
+    toolEngine =
+      tools ??
+      createToolRegistry({
+        cards,
+        ledger,
+        now,
+        runEphemeral: toolsRunEphemeral ?? runEphemeral,
+        collectDb: toolsCollectDb,
+        collectSurfaces: toolsGetSurfaces,
+        backfillStartInstant,
+        recordVerdict: (input) => getVerdictsEngine().recordVerdict(input),
+      });
+    return toolEngine;
+  }
+
+  // §7.1-2: the daily batch's db seam — tool-call part rows in the scan
+  // window, via the injected opencodeDb read handle (same async supplier the
+  // backfill uses; a missing handle yields no rows, never a throw).
+  async function toolsCollectDb({ sinceTs, untilTs, cap }) {
+    if (typeof getDb !== "function") return [];
+    const db = await getDb().catch(() => null);
+    if (!db) return [];
+    const { collectDbRows } = await import("./ctoToolScan.mjs");
+    return collectDbRows(db, { sinceTs, untilTs, cap });
+  }
+
+  // The daily tool scan (§7.3): once per UTC day, inside the tick's enabled
+  // gate. Restart-safe — the registry's own watermarks (lastScanTs/lastAskDay)
+  // make a repeat scan idempotent and keep ask pacing ≤1/day durable. The
+  // first scan after install runs over the cold-start backfill range
+  // (engine-state backfillStartInstant), satisfying §7.1-2's "also runs over
+  // the backfill range once".
+  async function toolsTick() {
+    const day = new Date(now()).toISOString().slice(0, 10);
+    if (lastToolScanDay === day) return;
+    let backfillStartInstant = null;
+    try {
+      const es = (await engineState.load()) ?? {};
+      if (Number.isFinite(es.backfillStartInstant)) backfillStartInstant = es.backfillStartInstant;
+    } catch {
+      /* best-effort — the registry falls back to its own 30-day window */
+    }
+    await getTools({ backfillStartInstant }).dailyScan();
+    // Stamp the day only AFTER a successful scan — a failed scan retries on
+    // the next tick instead of waiting until tomorrow (the registry's own
+    // watermarks keep the retry idempotent).
+    lastToolScanDay = day;
   }
 
   // Load the last `windowDays` (default 7, §13.4) day rollups so the watcher
@@ -2213,6 +2290,13 @@ export function createCtoEngine(deps = {}) {
     get watchers() {
       return getWatchers();
     },
+    // BET-1395 tool discovery (§7): the registry engine (resolveConnect feeds
+    // the /api/cto/tools/connect route; listTools the §10.5 surfaces) plus the
+    // manual dailyScan trigger for diagnostics/tests.
+    get tools() {
+      return getTools();
+    },
+    toolsScan: () => toolsTick(),
     get cards() {
       return cards;
     },

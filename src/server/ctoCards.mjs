@@ -68,6 +68,9 @@ export const HEALTH_SOURCE_KIND = "health";
 // notification fires IMMEDIATELY through the existing router (the same one
 // source 1 relies on), and the card appears at > 10 min via promoteDue.
 export const INBOX_SOURCE_KIND = "inbox";
+// Connect-ask cards (BET-1395 / §7.4): one §7.2 tool identity per card, keyed
+// by the tool id.
+export const CONNECT_SOURCE_KIND = "tool";
 
 // Stable, collision-resistant card id. Re-detection of the same (sourceKind,
 // sourceId) yields the same id → upsert in place, never a duplicate.
@@ -278,16 +281,16 @@ export function createCtoCards(deps = {}) {
     return { changed: true, isNew: !existing };
   }
 
-  // Resolve one open card by id → `resolved` state + a card.resolved ACTIVITY
-  // entry (never a verdict), and move it out of cards.json into the ledger.
-  async function resolveById(id, { reason, ts = now() } = {}) {
+  // Shared close-path for resolve/dismiss: remove one open card by id, save,
+  // and write the ledger row with the close kind (resolved vs dismissed).
+  async function closeOpenCard(id, kind, reason, ts = now()) {
     const { payload, cards } = await openCards();
     const idx = cards.findIndex((c) => c?.id === id && c?.state === "open");
     if (idx < 0) return { changed: false };
     const [card] = cards.splice(idx, 1);
     await cardStore.save({ ...payload, cards });
     await ledgerAppend({
-      kind: CARD_RESOLVED,
+      kind,
       cardId: id,
       variant: card.variant,
       sourceKind: card.sourceKind,
@@ -295,7 +298,15 @@ export function createCtoCards(deps = {}) {
       sessionID: card.sessionID,
       reason,
     });
-    return { changed: true, card: { ...card, state: "resolved", resolvedAt: ts, resolvedReason: reason } };
+    return { changed: true, card };
+  }
+
+  // Resolve one open card by id → `resolved` state + a card.resolved ACTIVITY
+  // entry (never a verdict), and move it out of cards.json into the ledger.
+  async function resolveById(id, { reason, ts = now() } = {}) {
+    const r = await closeOpenCard(id, CARD_RESOLVED, reason, ts);
+    if (!r.changed) return r;
+    return { changed: true, card: { ...r.card, state: "resolved", resolvedAt: ts, resolvedReason: reason } };
   }
 
   // Register a worker is now blocked on an ask. No card yet — the card appears
@@ -391,21 +402,9 @@ export function createCtoCards(deps = {}) {
   // Explicit user dismissal → same ledger discipline as resolution, but the
   // state is `dismissed` (a user choice, distinct from self-resolution).
   async function dismissById(id, { reason, ts = now() } = {}) {
-    const { payload, cards } = await openCards();
-    const idx = cards.findIndex((c) => c?.id === id && c?.state === "open");
-    if (idx < 0) return { changed: false };
-    const [card] = cards.splice(idx, 1);
-    await cardStore.save({ ...payload, cards });
-    await ledgerAppend({
-      kind: CARD_DISMISSED,
-      cardId: id,
-      variant: card.variant,
-      sourceKind: card.sourceKind,
-      refs: card.refs,
-      sessionID: card.sessionID,
-      reason,
-    });
-    return { changed: true, card: { ...card, state: "dismissed", dismissedAt: ts, dismissedReason: reason } };
+    const r = await closeOpenCard(id, CARD_DISMISSED, reason, ts);
+    if (!r.changed) return r;
+    return { changed: true, card: { ...r.card, state: "dismissed", dismissedAt: ts, dismissedReason: reason } };
   }
 
   // Decision-card writer (BET-1392 / §9.1 decision cards, §10.3). Upserts by
@@ -417,42 +416,61 @@ export function createCtoCards(deps = {}) {
   // renderer's job (§9.1 "option buttons execute a bound action").
   async function upsertDecision({ id, title, why, options = [], refs = [], evidence = [], sourceKind, cls, score, capped = false, ts = now() } = {}) {
     if (!id || typeof id !== "string") return { changed: false, isNew: false };
-    const { payload, cards } = await openCards();
-    const existing = cards.find((c) => c?.id === id && c?.state === "open");
-    const created = existing?.created ?? ts;
-    const card = {
+    return upsertOpenCard({
       id,
       variant: "decision",
-      title: typeof title === "string" && title ? title : "CTO suggestion",
-      why: typeof why === "string" && why ? why : title ?? "",
-      refs: Array.isArray(refs) ? refs : [],
-      evidence: Array.isArray(evidence) && evidence.length ? evidence : Array.isArray(refs) ? refs : [],
-      options: Array.isArray(options) ? options : [],
       sourceKind,
-      cls,
-      score: typeof score === "number" ? score : undefined,
-      capped: capped === true,
-      // openness count carried forward on regeneration (§9.1 never-dup).
-      openCount: existing?.openCount ?? 0,
+      ts,
+      ledger: { cls, score: typeof score === "number" ? score : undefined },
+      build: ({ existing }) => ({
+        title: typeof title === "string" && title ? title : "CTO suggestion",
+        why: typeof why === "string" && why ? why : title ?? "",
+        refs: Array.isArray(refs) ? refs : [],
+        evidence: Array.isArray(evidence) && evidence.length ? evidence : Array.isArray(refs) ? refs : [],
+        options: Array.isArray(options) ? options : [],
+        cls,
+        score: typeof score === "number" ? score : undefined,
+        capped: capped === true,
+        // openness count carried forward on regeneration (§9.1 never-dup).
+        openCount: existing?.openCount ?? 0,
+      }),
+    });
+  }
+
+  // Shared card-writer core: ONE load/find/merge-or-push/save/ledger path
+  // for every variant writer (decision/veto/connect). `build` returns the
+  // variant-specific fields given { existing, created, ts }; the helper adds
+  // the identity/lifecycle envelope, upserts by stable id (regeneration
+  // updates in place, never dups), saves, and writes the CARD_CREATED row.
+  async function upsertOpenCard({ id, variant, sourceKind = null, sourceId = null, ts = now(), ledger = {}, build }) {
+    const { payload, cards: list } = await openCards();
+    const existing = list.find((c) => c?.id === id && c?.state === "open");
+    const created = existing?.created ?? ts;
+    const card = {
+      ...build({ existing, created, ts }),
+      id,
+      variant,
+      sourceKind,
+      sourceId,
       created,
       updatedAt: ts,
       state: "open",
     };
     if (existing) {
-      const idx = cards.indexOf(existing);
-      cards[idx] = { ...existing, ...card, created, updatedAt: ts };
+      const idx = list.indexOf(existing);
+      list[idx] = { ...existing, ...card, created, updatedAt: ts };
     } else {
-      cards.push(card);
+      list.push(card);
     }
-    await cardStore.save({ ...payload, cards });
+    await cardStore.save({ ...payload, cards: list });
     await ledgerAppend({
       kind: CARD_CREATED,
       cardId: id,
-      variant: "decision",
+      variant,
       sourceKind,
+      sourceId,
       refs: card.refs,
-      cls,
-      score: card.score,
+      ...ledger,
     });
     return { changed: true, isNew: !existing };
   }
@@ -476,41 +494,84 @@ export function createCtoCards(deps = {}) {
   // cancels it (veto verdict) or abandons it (missed, §11.6).
   async function upsertVeto({ id, title, body, dueMs, options = [], refs = [], ts = now() } = {}) {
     if (!id || typeof id !== "string") return { changed: false, isNew: false };
-    const { payload, cards } = await openCards();
-    const existing = cards.find((c) => c?.id === id && c?.state === "open");
-    const created = existing?.created ?? ts;
-    const card = {
+    return upsertOpenCard({
       id,
       variant: "veto",
-      title: typeof title === "string" && title ? title : "Overnight run planned",
-      body: typeof body === "string" && body ? body : "",
-      dueMs: Number.isFinite(dueMs) ? dueMs : null,
-      options: Array.isArray(options) ? options : [],
       sourceKind: "overnight",
       sourceId: null,
-      sessionID: null,
-      pendingSince: existing?.pendingSince ?? ts,
-      refs: Array.isArray(refs) ? refs : [],
-      created,
-      updatedAt: ts,
-      state: "open",
-    };
-    if (existing) {
-      const idx = cards.indexOf(existing);
-      cards[idx] = { ...existing, ...card, created, updatedAt: ts };
-    } else {
-      cards.push(card);
-    }
-    await cardStore.save({ ...payload, cards });
-    await ledgerAppend({
-      kind: CARD_CREATED,
-      cardId: id,
-      variant: "veto",
-      sourceKind: "overnight",
-      refs: card.refs,
-      dueMs: card.dueMs,
+      ts,
+      ledger: { dueMs: Number.isFinite(dueMs) ? dueMs : null },
+      build: ({ existing }) => ({
+        title: typeof title === "string" && title ? title : "Overnight run planned",
+        body: typeof body === "string" && body ? body : "",
+        dueMs: Number.isFinite(dueMs) ? dueMs : null,
+        options: Array.isArray(options) ? options : [],
+        sessionID: null,
+        pendingSince: existing?.pendingSince ?? ts,
+        refs: Array.isArray(refs) ? refs : [],
+      }),
     });
-    return { changed: true, isNew: !existing };
+  }
+
+  // Connect-ask card writer (BET-1395 / §7.4 one connect ask, §10.3
+  // connect-ask variant). Upserts by the tool's stable id — re-raising the
+  // same tool's ask (re-arm path) updates the card in place, never dups.
+  // The three-way answer is bound at generation time to the tool identity;
+  // resolution runs through the registry (POST /api/cto/tools/connect),
+  // which writes the consent ring + the §9.5 verdict and calls
+  // resolveConnectCards. No notification path — like decision cards, this is
+  // a resting needs-you surface.
+  async function upsertConnect({ toolId, title, body, evidence = [], refs = [], ts = now() } = {}) {
+    if (!toolId || typeof toolId !== "string") return { changed: false, isNew: false };
+    return upsertOpenCard({
+      id: stableCardId(CONNECT_SOURCE_KIND, toolId),
+      variant: "connect",
+      sourceKind: CONNECT_SOURCE_KIND,
+      sourceId: toolId,
+      ts,
+      build: () => ({
+        title: typeof title === "string" && title ? title : `Connect ${toolId} (read-only)?`,
+        body: typeof body === "string" ? body : "",
+        evidence: Array.isArray(evidence) ? evidence : [],
+        options: [
+          { label: "Connect read-only", answer: "connect" },
+          { label: "Not now", answer: "not-now" },
+          { label: "Never for this tool", answer: "never" },
+        ].map((o) => ({
+          ...o,
+          action: { type: "tool-connect", payload: { tool: toolId, answer: o.answer } },
+        })),
+        refs: Array.isArray(refs) && refs.length ? refs : [toolId],
+        sessionID: null,
+      }),
+    });
+  }
+
+  // Resolve every open connect-ask card for one tool (the registry's
+  // three-way answer is the resolution predicate's only false-path). Returns
+  // `{changed}` for tests/diagnostics.
+  async function resolveConnectCards(toolId, reason, ts = now()) {
+    const { payload, cards: list } = await openCards();
+    const open = list.filter(
+      (c) => c?.state === "open" && c?.variant === "connect" && (c?.sourceId === toolId || c?.refs?.includes(toolId)),
+    );
+    let changed = false;
+    for (const card of open) {
+      const idx = list.indexOf(card);
+      list.splice(idx, 1);
+      await ledgerAppend({
+        kind: CARD_RESOLVED,
+        cardId: card.id,
+        variant: card.variant,
+        sourceKind: card.sourceKind,
+        sourceId: card.sourceId,
+        refs: card.refs,
+        reason,
+      });
+      changed = true;
+    }
+    if (changed) await cardStore.save({ ...payload, cards: list });
+    return { changed };
   }
 
   async function listOpen() {
@@ -529,6 +590,8 @@ export function createCtoCards(deps = {}) {
     dismissById,
     upsertDecision,
     upsertVeto,
+    upsertConnect,
+    resolveConnectCards,
     countOpen,
     listOpen,
   };

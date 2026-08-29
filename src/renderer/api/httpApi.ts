@@ -1878,6 +1878,29 @@ export const httpApi: Api = {
     }
   },
 
+  // POST /api/cto/tools/connect — BET-1395 (§7.4): the connect-ask three-way
+  // (grant read-only ring / not-now / never). The server writes the consent
+  // ring + verdict + closes the open connect card.
+  ctoToolConnect: async (input: {
+    tool: string;
+    answer: "connect" | "not-now" | "never";
+  }): Promise<{ ok: boolean; error?: string; tool?: string; answer?: string }> => {
+    const url = `${serverBase()}/api/cto/tools/connect`;
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { ...authHeaders(clientToken()), "Content-Type": "application/json" },
+        body: JSON.stringify(input),
+      });
+      if (res.status === 401) throw new AuthRequiredError();
+      const json = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; tool?: string; answer?: string };
+      return { ok: !!json.ok, error: json.error, tool: json.tool, answer: json.answer };
+    } catch (e) {
+      if (e instanceof AuthRequiredError) throw e;
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
   // GET /api/cto/profile — the §8.5 profile & §3.2 journal drill-down render
   // model, composed server-side (Settings → Internals → Profile & rhythm).
   // A rejection (engine off / server down) degrades to an empty model so the

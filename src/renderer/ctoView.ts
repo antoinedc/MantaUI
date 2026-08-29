@@ -2,6 +2,8 @@
 // The CTO pane (§10) renders from a single `{kind:"ctoState"}` bus event
 // (payload shape below) plus a `GET /api/cto/state` initial read. This module
 // holds only deterministic mapping — no window.api, no React.
+import type { Api } from "../shared/api";
+import type { DelegateStartInput } from "../shared/types";
 
 export type CtoDot = "active" | "disabled" | "thrifty" | "paused";
 
@@ -500,6 +502,37 @@ export function vetoCards(cards: ReadonlyArray<Record<string, unknown>>): VetoCa
   }));
 }
 
+// BET-1395: the open connect-ask cards (§10.3 connect variant) among the wire
+// cards — tool name + why + evidence trail + the three-way answer bound as
+// `tool-connect` actions (the registry is the executor, always runnable).
+export type ConnectCardRow = {
+  id: string;
+  title: string;
+  body: string;
+  evidence?: string[];
+  options: { label: string; answer: string; action: { type: string; payload: Record<string, unknown> } }[];
+};
+
+export function connectCards(cards: ReadonlyArray<Record<string, unknown>>): ConnectCardRow[] {
+  return (cards ?? [])
+    .filter((c) => c?.variant === "connect")
+    .map((c) => ({
+      id: String(c.id ?? ""),
+      title: String(c.title ?? ""),
+      body: String(c.body ?? ""),
+      evidence: Array.isArray(c.evidence) ? (c.evidence as string[]) : [],
+      options: Array.isArray(c.options)
+        ? (c.options as { label?: string; answer?: string; action?: { type?: string; payload?: Record<string, unknown> } }[]).map(
+            (o) => ({
+              label: String(o?.label ?? ""),
+              answer: String(o?.answer ?? ""),
+              action: { type: String(o?.action?.type ?? ""), payload: (o?.action?.payload ?? {}) as Record<string, unknown> },
+            }),
+          )
+        : [],
+    }));
+}
+
 // Live countdown to a veto card's `dueMs`: the ms remaining (≥ 0), or null
 // when there is no due time or it already elapsed (the card resolves server-
 // side; the client just hides the countdown rather than reading negative).
@@ -536,26 +569,10 @@ export function runnableSuggestionOption(option: {
 }
 
 // The minimal renderer API surface the option executors need — injected so the
-// executors stay pure + testable (no window.api import here).
-export type SuggestionApi = {
-  configUpdate(patch: Record<string, unknown>): Promise<unknown>;
-  delegateStart(input: { prompt: string; sessionID: string; directory: string; model?: unknown }): Promise<{ ok?: boolean; error?: string }>;
-  ctoFact(input: { kind?: string; statement: string; refs?: string[] }): Promise<{ ok?: boolean; error?: string }>;
-  ctoTonightAct(input: {
-    action: "add" | "remove" | "reorder" | "cancel" | "run-now";
-    task?: {
-      name: string;
-      prompt?: string;
-      project?: string | null;
-      value?: number;
-      confidence?: number;
-      predictedCost?: number;
-      refs?: string[];
-      cls?: string;
-      originId?: string | null;
-    };
-  }): Promise<{ ok?: boolean; error?: string }>;
-};
+// executors stay pure + testable (no window.api import here). Derived from the
+// shared Api type (single source of truth — the method shapes live only in
+// shared/api.ts).
+export type SuggestionApi = Pick<Api, "configUpdate" | "delegateStart" | "ctoFact" | "ctoTonightAct">;
 
 // Execute one bound action. Confirmation (the config-change diff modal) is a
 // UI concern the caller resolves BEFORE calling this — this is pure side-effect
@@ -583,8 +600,16 @@ export async function executeSuggestionOption({
         const sessionID = typeof payload.sessionID === "string" ? payload.sessionID : "";
         const directory = typeof payload.directory === "string" ? payload.directory : "";
         if (!prompt || !sessionID || !directory) return { ok: false, error: "start-job needs prompt, sessionID and directory payload" };
-        const input: { prompt: string; sessionID: string; directory: string; model?: unknown } = { prompt, sessionID, directory };
-        if (payload.model && typeof payload.model === "object") input.model = payload.model;
+        const input: DelegateStartInput = { prompt, sessionID, directory };
+        if (payload.model && typeof payload.model === "object") {
+          // Runtime-shaped coercion: the bound payload is untyped JSON, the
+          // shared input type is not (model: {providerID?, modelID?} | null).
+          const m = payload.model as { providerID?: unknown; modelID?: unknown };
+          input.model = {
+            ...(typeof m.providerID === "string" ? { providerID: m.providerID } : {}),
+            ...(typeof m.modelID === "string" ? { modelID: m.modelID } : {}),
+          };
+        }
         await api.delegateStart(input);
         return { ok: true };
       }
