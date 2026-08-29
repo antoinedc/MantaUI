@@ -30,7 +30,10 @@ import {
   INBOX_TTL_MS,
   inboxExpiresAt,
   purgeExpiredInbox,
+  engineStateStore,
+  patchEngineState,
 } from "./ctoStores.mjs";
+import { createStandingQueryEngine, WATCHER_MIGRATION_KEY } from "./ctoWatchers.mjs";
 
 const NOW_MS = 1_000_000_000_000;
 const DAY = 86_400_000;
@@ -280,4 +283,164 @@ test("purgeExpiredInbox drops only expired entries, silently (no trace)", () => 
   const { keep, dropped } = purgeExpiredInbox(entries, { nowMs });
   assert.deepEqual(keep.map((e) => e.id), ["c", "d"]);
   assert.deepEqual(dropped.map((e) => e.id), ["a", "b"]);
+});
+
+// ---------------------------------------------------------------------------
+// BET-1425 engine-state write hygiene — per-key read-modify-write.
+//
+// The durability invariant (BET-1403 review, carried into BET-1425): a key's
+// value must survive any concurrent writer that does not own that key. The
+// pre-1425 writer shape — load once, then `save({ ...snapshot, myKey })` —
+// spread the whole load-time snapshot back over the file, resurrecting or
+// clobbering every other writer's keys. `patchEngineState` is the sanctioned
+// per-key RMW: under a process-wide mutex it loads FRESH, merges only the
+// patch keys, and atomically saves.
+//
+// Interleaving regressions reuse the mirrored-order pattern from
+// ctoTrust.test.mjs ("stale full-engine-state save cannot revert trust
+// keys"), applied to engine-state keys — including the real shared-sub-key
+// collision on `watchers` (the engine's `lastAutoDay` day marker vs the
+// standing-query engine's migration marker).
+// ---------------------------------------------------------------------------
+
+// Deep-copy at the boundary like the real jsonStore (a parsed clone per
+// load/save) — aliasing the live object would fake both stale snapshots and
+// clobbers. Same shape as the memoryStore fixture in ctoTrust.test.mjs.
+function memoryStore(initial = {}) {
+  let data = JSON.parse(JSON.stringify(initial ?? {}));
+  return {
+    load: async () => JSON.parse(JSON.stringify(data)),
+    save: async (p) => {
+      data = JSON.parse(JSON.stringify(p));
+    },
+  };
+}
+
+async function seedEngineState(payload) {
+  await engineStateStore.save({ v: 1, ...payload });
+}
+
+test("patchEngineState: a static patch merges only its keys — a concurrent writer's key survives (both orders)", async () => {
+  // Order 1: A (owns X) lands first, then B — whose patch was computed from a
+  // STALE snapshot still carrying old X — saves Y. The old spread shape would
+  // resurrect old X; the per-key patch cannot.
+  await seedEngineState({ X: "old" });
+  const stale = await engineStateStore.load(); // B's stale snapshot: X=old
+  await patchEngineState({ X: "new" }); // A commits X=new
+  await patchEngineState({ Y: 42 }, { engineState: engineStateStore }); // B saves (stale-derived) Y
+  const after1 = await engineStateStore.load();
+  assert.equal(after1.X, "new", "X survived B's stale-snapshot save");
+  assert.equal(after1.Y, 42, "Y landed");
+
+  // Order 2 (mirrored): B's Y lands first, then A's X.
+  await seedEngineState({ X: "old" });
+  await patchEngineState({ Y: 42 });
+  await patchEngineState({ X: "new" });
+  const after2 = await engineStateStore.load();
+  assert.equal(after2.X, "new");
+  assert.equal(after2.Y, 42);
+  assert.ok(stale, "the stale snapshot was taken (test hygiene)");
+});
+
+test("patchEngineState: parallel patches compose — every key lands (the mutex, not the rename, is the guard)", async () => {
+  await seedEngineState({});
+  // Without the RMW mutex all three would load the same fresh state and the
+  // last atomic rename would win with a single key — two writers' keys lost.
+  await Promise.all([
+    patchEngineState({ a: 1 }),
+    patchEngineState({ b: 2 }),
+    patchEngineState({ c: 3 }),
+  ]);
+  const after = await engineStateStore.load();
+  assert.equal(after.a, 1);
+  assert.equal(after.b, 2);
+  assert.equal(after.c, 3);
+});
+
+test("patchEngineState: a (fresh) => patch mutation derives from the state as of ITS save, so read-modify-writes compose", async () => {
+  await seedEngineState({ count: 1 });
+  // Two concurrent incrementers: each must read the other's committed value.
+  await Promise.all([
+    patchEngineState((fresh) => ({ count: (fresh.count ?? 0) + 1 })),
+    patchEngineState((fresh) => ({ count: (fresh.count ?? 0) + 1 })),
+  ]);
+  const after = await engineStateStore.load();
+  assert.equal(after.count, 3, "both increments landed on each other's committed state");
+});
+
+test("patchEngineState: setting a key to undefined deletes it; other keys survive", async () => {
+  await seedEngineState({ keep: "yes", drop: "gone" });
+  await patchEngineState({ drop: undefined });
+  const after = await engineStateStore.load();
+  assert.equal(after.keep, "yes");
+  assert.equal("drop" in after, false);
+});
+
+test("patchEngineState: rejects a non-object, non-function mutation and a function resolving to one", async () => {
+  await seedEngineState({});
+  await assert.rejects(() => patchEngineState(null), /plain object/);
+  await assert.rejects(() => patchEngineState([1, 2]), /plain object/);
+  await assert.rejects(() => patchEngineState(() => [1, 2]), /plain object/);
+  await assert.rejects(() => patchEngineState(() => null), /plain object/);
+});
+
+// Shared-sub-key regression: `watchers` is written by TWO engines (the
+// engine's per-day auto-create marker and the standing-query engine's one-time
+// migration marker). Pre-1425 each wrote the whole `watchers` object from its
+// own stale snapshot, so whichever landed second resurrected/clobbered the
+// other's sub-key. Both now merge their sub-key onto the FRESH object.
+
+function makeWatchersHarness() {
+  return createStandingQueryEngine({
+    store: memoryStore({ watchers: [] }),
+    ledger: { append: async () => {} },
+    engineState: engineStateStore,
+    now: () => 1_000_000,
+  });
+}
+
+async function writeDayMarker() {
+  // The engine's watcherTick write shape: `watchers.lastAutoDay` merged onto
+  // the FRESH `watchers` object.
+  await patchEngineState(
+    (fresh) => ({ watchers: { ...(fresh?.watchers || {}), lastAutoDay: "2026-08-29" } }),
+    { engineState: engineStateStore },
+  );
+}
+
+test("durability: the watchers day marker and the migration marker coexist regardless of landing order", async () => {
+  // Order 1: migration first, then the day marker.
+  await seedEngineState({});
+  const migA = await makeWatchersHarness().migrateLegacy([{ patternSignature: "sig-1" }]);
+  assert.equal(migA.migrated, true);
+  await writeDayMarker();
+  const afterA = await engineStateStore.load();
+  assert.equal(afterA.watchers.migrated, true, "migration marker survived the day marker");
+  assert.equal(afterA.watchers.lastAutoDay, "2026-08-29", "day marker landed");
+
+  // Order 2 (mirrored): day marker first, then migration — the pre-1425
+  // migration save spread a stale `meta` snapshot and reverted lastAutoDay.
+  await seedEngineState({});
+  await writeDayMarker();
+  const migB = await makeWatchersHarness().migrateLegacy([]);
+  assert.equal(migB.migrated, true);
+  const afterB = await engineStateStore.load();
+  assert.equal(afterB.watchers.lastAutoDay, "2026-08-29", "day marker survived the migration save");
+  assert.equal(afterB.watchers.migrated, true);
+  assert.equal(WATCHER_MIGRATION_KEY, "watchers");
+});
+
+test("durability: an engine-state writer that does not own tonightQueue cannot revert it (the BET-1403 resurrect shape, engine-state keys)", async () => {
+  // The original report: a tonight-queue removal resurrected by a late writer
+  // spreading a pre-edit snapshot. With per-key writers the queue removal and
+  // unrelated writers' patches compose in both orders.
+  const queue = [{ id: "tq:1", name: "n" }];
+  await seedEngineState({ tonightQueue: queue });
+  await patchEngineState({ pendingBlockers: [{ id: "b1" }] }); // unrelated writer
+  await patchEngineState({ tonightQueue: [] }); // the removal, from a stale read of the queue
+  await patchEngineState({ segmentGMinutes: 7 }); // another unrelated writer, late
+  const after = await engineStateStore.load();
+  assert.deepEqual(after.tonightQueue, [], "the removal landed");
+  assert.deepEqual(after.pendingBlockers, [{ id: "b1" }], "the blocker survived both saves");
+  assert.equal(after.segmentGMinutes, 7, "the late writer's key landed");
 });

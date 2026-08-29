@@ -55,6 +55,7 @@ import {
   verdictsStore,
   watchersStore,
   factsArchiveStore,
+  patchEngineState,
   purgeExpiredInbox,
 } from "./ctoStores.mjs";
 import { createVerdictEngine } from "./ctoVerdicts.mjs";
@@ -414,19 +415,21 @@ export function createCtoEngine(deps = {}) {
   // into engine-state.json. Best-effort — the health record never throws.
   async function recordBlocker(source, reason) {
     try {
-      const payload = await engineState.load();
-      const pending = Array.isArray(payload?.pendingBlockers)
-        ? payload.pendingBlockers
-        : [];
-      pending.push({
+      const blocker = {
         id: nextId(),
         kind: "blocker",
         source,
         reason,
         ts: now(),
         resolved: false,
-      });
-      await engineState.save({ ...payload, pendingBlockers: pending });
+      };
+      // BET-1425: per-key RMW — an array push derived from the FRESH state, so
+      // a concurrent writer's keys survive this save.
+      await patchEngineState((fresh) => {
+        const pending = Array.isArray(fresh?.pendingBlockers) ? [...fresh.pendingBlockers] : [];
+        pending.push(blocker);
+        return { pendingBlockers: pending };
+      }, { engineState });
     } catch {
       /* best-effort */
     }
@@ -1100,7 +1103,13 @@ export function createCtoEngine(deps = {}) {
       if (lastAutoDay === todayKey) return;
       const dayRollups = await loadRecentDayRollups();
       const result = await getWatchers().autoCreate(dayRollups);
-      await engineState.save({ ...es, watchers: { ...(es?.watchers || {}), lastAutoDay: todayKey } });
+      // BET-1425: sub-key merge on `watchers` from the FRESH state — this key
+      // is shared with ctoWatchers' migration marker, so a stale spread would
+      // resurrect/clobber the other writer's marker.
+      await patchEngineState(
+        (fresh) => ({ watchers: { ...(fresh?.watchers || {}), lastAutoDay: todayKey } }),
+        { engineState },
+      );
       if (result.added.length > 0) {
         await ledgerLog({ kind: "watcher.auto_created", count: result.added.length, signatures: result.added.map((a) => a.patternSignature) });
       }
@@ -1172,8 +1181,8 @@ export function createCtoEngine(deps = {}) {
   }
 
   async function saveTonightQueueRows(rows) {
-    const es = (await engineState.load()) ?? {};
-    await engineState.save({ ...es, tonightQueue: rows });
+    // BET-1425: per-key RMW — the rows are the only key this writer owns.
+    await patchEngineState({ tonightQueue: rows }, { engineState });
   }
 
   function queueCandidatesFromRows(rows) {
@@ -1708,11 +1717,16 @@ export function createCtoEngine(deps = {}) {
       if (!runner) return;
       const payload = (await engineState.load()) || {};
       const cursor = { ...(payload.rollupCursor ?? {}) };
+      // BET-1425: per-level cursor deltas, saved per-key at the end — the old
+      // shape spread the whole load-time `payload` back after minutes of
+      // rollup processing, resurrecting every other writer's keys.
+      const cursorUpdates = {};
       const t = now();
       let cursorInit = false;
       for (const level of ROLLUP_LEVELS) {
         if (cursor[level] == null) {
           cursor[level] = rollupWindowFor(level, t)[0];
+          cursorUpdates[level] = cursor[level];
           cursorInit = true;
         }
       }
@@ -1735,6 +1749,7 @@ export function createCtoEngine(deps = {}) {
           // windows so they are never re-attempted later. The next DAY reduce
           // reconstructs the missing hours from segments (ctoRollups).
           cursor[level] = list[list.length - 1].window[1];
+          cursorUpdates[level] = cursor[level];
           changed = true;
           continue;
         }
@@ -1743,12 +1758,16 @@ export function createCtoEngine(deps = {}) {
           const next = outcomes[outcomes.length - 1].window[1];
           if (next > cursor[level]) {
             cursor[level] = next;
+            cursorUpdates[level] = cursor[level];
             changed = true;
           }
         }
       }
       if (changed) {
-        await engineState.save({ ...payload, rollupCursor: cursor });
+        await patchEngineState(
+          (fresh) => ({ rollupCursor: { ...(fresh?.rollupCursor || {}), ...cursorUpdates } }),
+          { engineState },
+        );
       }
       // BET-1397 breakpoint drain (rollup close): fold unread inbox notes into
       // evidence. Best-effort — never blocks or breaks the rollup fold.

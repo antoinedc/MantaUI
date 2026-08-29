@@ -32,7 +32,7 @@
 //   - Segments persist 30d in the segments area of the rollups store (A1),
 //     swept by ctoStores.sweepSegments.
 
-import { engineStateStore, segmentsStore, ledgerStore } from "./ctoStores.mjs";
+import { engineStateStore, segmentsStore, ledgerStore, patchEngineState } from "./ctoStores.mjs";
 import { isUserPromptEvent } from "./ctoEvidence.mjs";
 import { validateProposalList } from "./ctoJournal.mjs";
 
@@ -479,8 +479,8 @@ export function createSegmenter(deps = {}) {
 
   async function persistG(nextMinutes) {
     try {
-      const p = await engineState.load();
-      await engineState.save({ ...p, segmentGMinutes: nextMinutes });
+      // BET-1425: per-key RMW — only `segmentGMinutes` is owned here.
+      await patchEngineState({ segmentGMinutes: nextMinutes }, { engineState });
     } catch {
       /* best-effort */
     }

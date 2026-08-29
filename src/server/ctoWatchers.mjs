@@ -38,6 +38,7 @@
 // without a hit, or when the underlying fact/pattern is archived.
 
 import { randomBytes } from "node:crypto";
+import { patchEngineState } from "./ctoStores.mjs";
 
 // Closed set of predicate kinds (spec §13.4). Adding a kind is a spec change.
 export const PREDICATE_KINDS = Object.freeze(["event-pattern", "rate-threshold", "usage-burn"]);
@@ -668,10 +669,15 @@ export function createStandingQueryEngine(deps = {}) {
       await saveAll([...all, ...fresh]);
     }
     try {
-      await engineState.save({
-        ...meta,
-        [WATCHER_MIGRATION_KEY]: { ...(meta?.[WATCHER_MIGRATION_KEY] || {}), migrated: true, at: now() },
-      });
+      // BET-1425: sub-key merge on `watchers` from the FRESH state — this key
+      // is shared with the engine's `watchers.lastAutoDay` day marker, so a
+      // stale spread would resurrect/clobber the other writer's sub-key.
+      await patchEngineState(
+        (fresh) => ({
+          [WATCHER_MIGRATION_KEY]: { ...(fresh?.[WATCHER_MIGRATION_KEY] || {}), migrated: true, at: now() },
+        }),
+        { engineState },
+      );
     } catch {
       /* best-effort */
     }

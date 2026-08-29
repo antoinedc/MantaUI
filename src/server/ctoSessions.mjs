@@ -8,7 +8,7 @@
 // tmux/opencode/network in tests.
 
 import { startPoller } from "./startPoller.mjs";
-import { engineStateStore } from "./ctoStores.mjs";
+import { engineStateStore, patchEngineState } from "./ctoStores.mjs";
 import { listRoutableModels } from "./opencode.mjs";
 import { buildRoutingServices } from "./routingServices.mjs";
 import { lookupModel, matchModel, allModels } from "./modelCatalog.mjs";
@@ -154,29 +154,20 @@ export function removeActive(set, id) {
   return (Array.isArray(set) ? set : []).filter((x) => x !== id);
 }
 
-async function loadActivePayload(engineState) {
-  try {
-    const p = await engineState.load();
-    return p && typeof p === "object" ? p : {};
-  } catch {
-    return {};
-  }
-}
-
 async function activeAdd(sid, { engineState }) {
-  const payload = await loadActivePayload(engineState);
-  await engineState.save({
-    ...payload,
-    activeEphemeral: addActive(payload.activeEphemeral, sid),
-  });
+  // BET-1425: per-key RMW — the add/remove is derived from the FRESH
+  // activeEphemeral, so a concurrent writer's keys survive this save.
+  await patchEngineState(
+    (fresh) => ({ activeEphemeral: addActive(fresh?.activeEphemeral, sid) }),
+    { engineState },
+  );
 }
 
 async function activeRemove(sid, { engineState }) {
-  const payload = await loadActivePayload(engineState);
-  await engineState.save({
-    ...payload,
-    activeEphemeral: removeActive(payload.activeEphemeral, sid),
-  });
+  await patchEngineState(
+    (fresh) => ({ activeEphemeral: removeActive(fresh?.activeEphemeral, sid) }),
+    { engineState },
+  );
 }
 
 // ---------------------------------------------------------------------------
