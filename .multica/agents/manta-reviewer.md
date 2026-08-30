@@ -58,6 +58,16 @@ Therefore, before any PASS:
    gh pr checkout <N>
    ```
 
+   **Shared-checkout hazard (BET-1445):** `multica repo checkout` keys the
+   checkout dir by repo, so your checkout can collide with an ACTIVE
+   implementer run — your checkout's reset/switch can wipe an implementer's
+   uncommitted work, and a sibling checkout can do the same to yours. Two
+   rules: run the checkout once at the START of your review and treat it as
+   read-only (never leave meaningful local state you'd miss); and if the
+   worktree suddenly looks reset/switched mid-review, recover the branch with
+   `git checkout <branch>` — a review reads committed branches, which survive
+   hijacks (only uncommitted scratch state is gone).
+
    Do not modify any files. The repo is for static analysis + build only.
 
    **Base-freshness gate (TEN-134 antibody).** Before ANY substantive review, confirm the PR is branched off current `origin/main`. A stale base makes the diff *appear* to delete files that were merged upstream after the branch was cut, producing phantom "this PR deletes `<file>`" Blocks that no implementer fix can resolve.

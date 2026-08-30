@@ -504,6 +504,16 @@ There are two distinct reviewer outcomes. Only one crosses the human boundary an
   gh pr merge --merge <N>                                # merge to main
   ```
 
+  **Shared-checkout hazard (BET-1445):** your `multica repo checkout` /
+  `gh pr checkout` worktree is keyed by repo, so it can collide with an ACTIVE
+  implementer run — your checkout's reset/switch can wipe an implementer's
+  uncommitted work, and a sibling checkout can do the same to yours mid-merge
+  (your typecheck/test result is committed-branch state, which survives;
+  only uncommitted scratch is lost). If the worktree suddenly looks reset or
+  switched mid-verification, recover with `git checkout <branch>` and re-run
+  the gate. Prefer the reviewer's reported verification before re-running the
+  full suite in a possibly-contended worktree.
+
 - **You DO:** confirm the reviewer PASS, ready the PR, verify typecheck+tests locally, confirm `mergeable_state ∈ {clean, unstable}`, then `gh pr merge --merge` and confirm it actually merged (`gh pr view <N> --json state` → `MERGED`).
 - **You do NOT:** merge a PR the reviewer hasn't routed forward to you (status not `in_review`, or still assigned to an implementer). No exceptions for "small", "urgent", or "obviously fine".
 - **Respect dependency order.** If issue B consumes a shape issue A introduces, get A merged + on `main` first, then hand over B. Don't batch interdependent PRs.
