@@ -105,8 +105,37 @@ starts from zero. Therefore:
    a specific reason to look at CI, take ONE snapshot (`gh pr checks <n>`
    without `--watch`), say what it showed, and continue or hand off. Never loop.
 
-   Observed live 2026-08-01: BET-472 died twice this way, ~45 minutes of wall
-   clock, both times with the work already pushed and the PR already green.
+    Observed live 2026-08-01: BET-472 died twice this way, ~45 minutes of wall
+    clock, both times with the work already pushed and the PR already green.
+
+6. **Worktree hijack — a sibling checkout can hard-reset YOUR worktree mid-run
+   (BET-1445).** `multica repo checkout` keys its checkout directory by REPO,
+   not per run: a sibling session's checkout can resolve to the same worktree
+   you are actively editing and run `git fetch && git reset --hard origin/main
+   && git checkout -b …` inside it — discarding your uncommitted edits and
+   switching your branch out from under you. This killed the BET-1439 rerun
+   mid-implementation (~45 min lost). The mechanic that makes recovery
+   possible: checkouts are **git worktrees of the daemon's bare clone cache —
+   all worktrees share the object store**, so branch refs live in the shared
+   repo. **Committed work on your named branch survives a hijack; only
+   uncommitted work is lost.** Two defenses:
+
+   - **Commit incrementally — tighter than rule 2 above.** While implementing,
+     commit to your `multica/BET-<N>-…` task branch after every coherent unit,
+     and never leave more than a few minutes of work uncommitted. The unit of
+     safety is the COMMIT, not the run: a hijack between your commits costs
+     minutes, a hijack before one costs the whole implementation.
+   - **Hijack recovery — don't assume loss, recover the branch.** If your
+     worktree suddenly looks reset or switched (unexpected `origin/main` HEAD,
+     a foreign branch checked out, your in-progress edits gone):
+     1. `git branch --show-current` — see where you actually are.
+     2. Your task branch lives in the shared repo. Recover it IN PLACE with
+        `git checkout multica/BET-<N>-…`, or in a fresh worktree with
+        `git worktree add /tmp/recovery multica/BET-<N>-…` if the in-place
+        checkout is disturbed.
+     3. `git log --oneline -5` — verify your commits are all still there (they
+        will be, if you committed them). Only the uncommitted delta since your
+        last commit is gone; redo just that and continue.
 
 ## Coding Standards
 

@@ -40,6 +40,22 @@ The standard implementer workflow for the MANTA agents.
 
 5. Implement. Add or update tests under `tests/` or `__tests__/`.
 
+5b. **Commit incrementally while you implement (BET-1445 — worktree-hijack
+    insurance).** A sibling session's `multica repo checkout` can resolve to
+    YOUR worktree mid-run and hard-reset it (`git reset --hard origin/main` +
+    branch switch), destroying uncommitted edits (killed the BET-1439 rerun,
+    ~45 min). Checkouts are git worktrees of a shared bare clone, so
+    **committed work on your task branch survives a hijack — only the
+    uncommitted delta is lost.** So: commit to your task branch after every
+    coherent unit and never leave more than a few minutes of work uncommitted
+    (then push per step 8). And if your worktree suddenly looks reset/switched
+    (unexpected origin/main HEAD, foreign branch, edits gone): run
+    `git branch --show-current`, then recover — `git checkout
+    multica/BET-N-<slug>` in place (or `git worktree add <dir>
+    multica/BET-N-<slug>` if checkout is disturbed) — verify with `git log`
+    that your commits are intact, redo only the lost delta, and CONTINUE. Do
+    not assume the work is lost and restart from zero.
+
 6. Run `npm run typecheck && npm test`. Both must pass.
 
 7. Commit with `feat(scope): …` / `fix(scope): …` / `refactor(scope): …`
