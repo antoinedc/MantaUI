@@ -500,3 +500,84 @@ describe("Settings — Backup section (BET-1455)", () => {
     expect(disclosure).toContain("tmux exploded");
   });
 });
+
+// In-flight (state 4) + the server-said-no branch: the button goes
+// loading+disabled while the restore is awaited, and an `ok:false` RESULT
+// (not a throw) still routes through the error disclosure.
+describe("Settings — Backup restore in-flight + ok:false (BET-1455)", () => {
+  let h: Harness | null = null;
+
+  const preview = {
+    available: true as const,
+    capturedAt: Date.parse("2026-08-30T20:00:00Z"),
+    ops: [
+      { kind: "create-window" as const, tmuxSession: "proj-a", mantaOwned: true, index: 1, name: "w1", opencodeSessionId: "oc-1", cwd: "/tmp/a", worktreePath: null },
+    ],
+    skipped: [],
+    restorable: 1,
+  };
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+    useStore.setState({ appToasts: [] });
+  });
+
+  it("while the restore is in flight the button renders loading and disabled", async () => {
+    let resolveRestore: (v: unknown) => void = () => {};
+    installMockApi({
+      configGet: () => Promise.resolve({}),
+      getClientVersion: () => Promise.resolve({ version: "0.0.0-test" }),
+      getServerVersion: () => Promise.resolve({ version: "0.0.0-test" }),
+      tmuxRestorePreview: () => Promise.resolve(preview),
+      tmuxRestoreTopology: () => new Promise((res) => { resolveRestore = res; }),
+    });
+    h = mount(<Settings onClose={() => {}} />);
+    await h.flush();
+    await h.flush();
+
+    const btn = [...h.container.querySelectorAll("button")].find(
+      (b) => (b.textContent ?? "").trim() === "Restore windows",
+    ) as HTMLButtonElement;
+    act(() => btn.click());
+    await h.flush();
+
+    const inFlight = [...h.container.querySelectorAll("button")].find(
+      (b) => (b.textContent ?? "").trim() === "Restore windows",
+    ) as HTMLButtonElement;
+    expect(inFlight.disabled, "disabled while in flight").toBe(true);
+    expect(inFlight.getAttribute("aria-busy"), "the primitive's loading state").toBe("true");
+
+    act(() => resolveRestore({ ok: true, created: 1, failed: 0, message: "Restored 1 window." }));
+    await h.flush();
+    await h.flush();
+  });
+
+  it("an ok:false result pushes the error disclosure with the server's error string", async () => {
+    installMockApi({
+      configGet: () => Promise.resolve({}),
+      getClientVersion: () => Promise.resolve({ version: "0.0.0-test" }),
+      getServerVersion: () => Promise.resolve({ version: "0.0.0-test" }),
+      tmuxRestorePreview: () => Promise.resolve(preview),
+      tmuxRestoreTopology: () => Promise.resolve({ ok: false, error: "No saved window layout to restore from.", created: 0, failed: 0 }),
+    });
+    h = mount(<Settings onClose={() => {}} />);
+    await h.flush();
+    await h.flush();
+
+    const btn = [...h.container.querySelectorAll("button")].find(
+      (b) => (b.textContent ?? "").trim() === "Restore windows",
+    ) as HTMLButtonElement;
+    act(() => btn.click());
+    await h.flush();
+    await h.flush();
+
+    const toast = useStore.getState().appToasts.find((t) => String(t.id).startsWith("err-restore-"));
+    expect(toast, "error toast for ok:false").toBeTruthy();
+    const disclosure = renderToStaticMarkup(
+      toast!.message as unknown as Parameters<typeof renderToStaticMarkup>[0],
+    );
+    expect(disclosure).toContain("restore your windows.");
+    expect(disclosure).toContain("No saved window layout to restore from.");
+  });
+});
