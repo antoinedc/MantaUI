@@ -323,3 +323,261 @@ describe("Settings — schema-driven toasts are error-only (BET-1055)", () => {
     expect(api.calls.configUpdate ?? []).toHaveLength(1);
   });
 });
+
+// BET-1455 — Settings > General > Backup, the one user-facing affordance for
+// topology restore (the server side shipped in BET-1452/1453). Pins the four
+// preview states and the "never a dead control" rule: hidden when there is no
+// backup, disabled-with-title when nothing is restorable, enabled + loading
+// when it is, and both toast branches on completion.
+describe("Settings — Backup section (BET-1455)", () => {
+  let h: Harness | null = null;
+
+  const previewStub = (response: unknown) => {
+    let current = response;
+    const { api } = installMockApi({
+      configGet: () => Promise.resolve({}),
+      getClientVersion: () => Promise.resolve({ version: "0.0.0-test" }),
+      getServerVersion: () => Promise.resolve({ version: "0.0.0-test" }),
+      tmuxRestorePreview: () => Promise.resolve(current),
+      tmuxRestoreTopology: () => Promise.resolve({ ok: true, created: 2, failed: 0, message: "Restored 2 windows." }),
+    });
+    return {
+      api,
+      setPreview: (next: unknown) => { current = next; },
+    };
+  };
+
+  const restoreButton = (): HTMLButtonElement | undefined =>
+    [...h!.container.querySelectorAll("button")].find(
+      (b) => (b.textContent ?? "").trim() === "Restore windows",
+    ) as HTMLButtonElement | undefined;
+
+  const generalText = (): string => (h!.container.querySelector('[role="tabpanel"]')?.textContent ?? "");
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+    useStore.setState({ appToasts: [] });
+  });
+
+  it("state 1 — available:false shows the no-backup copy and NO button (not a disabled dead control)", async () => {
+    previewStub({ available: false, capturedAt: null, ops: [], skipped: [], restorable: 0 });
+    h = mount(<Settings onClose={() => {}} />);
+    await h.flush();
+    await h.flush();
+
+    expect(generalText()).toContain("No backup yet. Manta saves your window layout automatically as you work.");
+    expect(restoreButton(), "Restore windows must not render without a backup").toBeUndefined();
+  });
+
+  it("state 3 — restorable>0 shows the timestamp census line and an enabled button", async () => {
+    const capturedAt = Date.parse("2026-08-30T20:00:00Z");
+    previewStub({
+      available: true,
+      capturedAt,
+      ops: [
+        { kind: "create-session", tmuxSession: "proj-a", mantaOwned: true, index: 0, name: "w0", opencodeSessionId: "oc-1", cwd: "/tmp/a", worktreePath: null },
+        { kind: "create-window", tmuxSession: "proj-a", mantaOwned: true, index: 2, name: "w2", opencodeSessionId: "oc-2", cwd: "/tmp/a", worktreePath: null },
+        { kind: "create-window", tmuxSession: "proj-b", mantaOwned: true, index: 1, name: "w1", opencodeSessionId: "oc-3", cwd: "/tmp/b", worktreePath: null },
+      ],
+      skipped: [
+        { tmuxSession: "proj-b", index: 3, name: "w3", opencodeSessionId: "oc-4", reason: "index-occupied" },
+      ],
+      restorable: 3,
+    });
+    h = mount(<Settings onClose={() => {}} />);
+    await h.flush();
+    await h.flush();
+
+    const text = generalText();
+    expect(text).toContain("Manta saves your chat window layout");
+    expect(text).toContain("3 window(s) can be restored.");
+    // W/P census derives from the ONE preview response: ops+skipped = 4 windows
+    // across the 2 distinct tmux sessions.
+    expect(text).toContain("4 windows across 2 projects");
+    const btn = restoreButton();
+    expect(btn, "Restore windows button").toBeTruthy();
+    expect(btn!.disabled, "enabled when something is restorable").toBe(false);
+    expect(btn!.getAttribute("title")).toBeNull();
+  });
+
+  it("state 2 — restorable===0 renders the button disabled with the nothing-to-restore title", async () => {
+    previewStub({
+      available: true,
+      capturedAt: Date.parse("2026-08-30T20:00:00Z"),
+      ops: [],
+      skipped: [
+        { tmuxSession: "proj-a", index: 0, name: "w0", opencodeSessionId: "oc-1", reason: "already-restored" },
+      ],
+      restorable: 0,
+    });
+    h = mount(<Settings onClose={() => {}} />);
+    await h.flush();
+    await h.flush();
+
+    expect(generalText()).toContain("Every saved window is already open.");
+    const btn = restoreButton();
+    expect(btn, "button still renders (never a hidden no-op)").toBeTruthy();
+    expect(btn!.disabled, "disabled when nothing is restorable").toBe(true);
+    expect(btn!.getAttribute("title")).toBe("Nothing to restore — every saved window is already open.");
+  });
+
+  it("restore reports success via the server's describeRestore copy, then re-previews in place", async () => {
+    const capturedAt = Date.parse("2026-08-30T20:00:00Z");
+    const { api, setPreview } = previewStub({
+      available: true,
+      capturedAt,
+      ops: [
+        { kind: "create-window", tmuxSession: "proj-a", mantaOwned: true, index: 1, name: "w1", opencodeSessionId: "oc-1", cwd: "/tmp/a", worktreePath: null },
+      ],
+      skipped: [],
+      restorable: 1,
+    });
+    h = mount(<Settings onClose={() => {}} />);
+    await h.flush();
+    await h.flush();
+    expect((api.calls.tmuxRestorePreview ?? []).length, "one preview on entering General").toBe(1);
+
+    // By the time the post-restore re-preview runs, the restored windows are
+    // live — the stub models that world so the in-place flip is observable.
+    setPreview({
+      available: true,
+      capturedAt,
+      ops: [],
+      skipped: [
+        { tmuxSession: "proj-a", index: 1, name: "w1", opencodeSessionId: "oc-1", reason: "already-restored" },
+      ],
+      restorable: 0,
+    });
+    act(() => restoreButton()!.click());
+    await h.flush();
+    await h.flush();
+
+    expect(api.calls.tmuxRestoreTopology ?? []).toHaveLength(1);
+    const toast = useStore.getState().appToasts.find((t) => String(t.id).startsWith("restore-"));
+    expect(toast, "success toast").toBeTruthy();
+    expect(String(toast!.message)).toContain("Restored 2 windows.");
+
+    // The section re-previewed AFTER the restore (2nd call) and flipped to the
+    // nothing-to-restore state in place — the server plan is now empty.
+    expect((api.calls.tmuxRestorePreview ?? []).length, "preview re-run after restore").toBe(2);
+    expect(generalText()).toContain("Every saved window is already open.");
+  });
+
+  it("restore reports failure through the error disclosure when the call throws or returns ok:false", async () => {
+    const capturedAt = Date.parse("2026-08-30T20:00:00Z");
+    const preview = {
+      available: true as const,
+      capturedAt,
+      ops: [
+        { kind: "create-window" as const, tmuxSession: "proj-a", mantaOwned: true, index: 1, name: "w1", opencodeSessionId: "oc-1", cwd: "/tmp/a", worktreePath: null },
+      ],
+      skipped: [],
+      restorable: 1,
+    };
+    installMockApi({
+      configGet: () => Promise.resolve({}),
+      getClientVersion: () => Promise.resolve({ version: "0.0.0-test" }),
+      getServerVersion: () => Promise.resolve({ version: "0.0.0-test" }),
+      tmuxRestorePreview: () => Promise.resolve(preview),
+      tmuxRestoreTopology: () => Promise.reject(new Error("tmux exploded")),
+    });
+    h = mount(<Settings onClose={() => {}} />);
+    await h.flush();
+    await h.flush();
+
+    act(() => restoreButton()!.click());
+    await h.flush();
+    await h.flush();
+
+    const toast = useStore.getState().appToasts.find((t) => String(t.id).startsWith("err-restore-"));
+    expect(toast, "error toast").toBeTruthy();
+    const disclosure = renderToStaticMarkup(
+      toast!.message as unknown as Parameters<typeof renderToStaticMarkup>[0],
+    );
+    // renderToStaticMarkup HTML-escapes the apostrophe in the headline.
+    expect(disclosure).toContain("restore your windows.");
+    expect(disclosure).toContain("tmux exploded");
+  });
+});
+
+// In-flight (state 4) + the server-said-no branch: the button goes
+// loading+disabled while the restore is awaited, and an `ok:false` RESULT
+// (not a throw) still routes through the error disclosure.
+describe("Settings — Backup restore in-flight + ok:false (BET-1455)", () => {
+  let h: Harness | null = null;
+
+  const preview = {
+    available: true as const,
+    capturedAt: Date.parse("2026-08-30T20:00:00Z"),
+    ops: [
+      { kind: "create-window" as const, tmuxSession: "proj-a", mantaOwned: true, index: 1, name: "w1", opencodeSessionId: "oc-1", cwd: "/tmp/a", worktreePath: null },
+    ],
+    skipped: [],
+    restorable: 1,
+  };
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+    useStore.setState({ appToasts: [] });
+  });
+
+  it("while the restore is in flight the button renders loading and disabled", async () => {
+    let resolveRestore: (v: unknown) => void = () => {};
+    installMockApi({
+      configGet: () => Promise.resolve({}),
+      getClientVersion: () => Promise.resolve({ version: "0.0.0-test" }),
+      getServerVersion: () => Promise.resolve({ version: "0.0.0-test" }),
+      tmuxRestorePreview: () => Promise.resolve(preview),
+      tmuxRestoreTopology: () => new Promise((res) => { resolveRestore = res; }),
+    });
+    h = mount(<Settings onClose={() => {}} />);
+    await h.flush();
+    await h.flush();
+
+    const btn = [...h.container.querySelectorAll("button")].find(
+      (b) => (b.textContent ?? "").trim() === "Restore windows",
+    ) as HTMLButtonElement;
+    act(() => btn.click());
+    await h.flush();
+
+    const inFlight = [...h.container.querySelectorAll("button")].find(
+      (b) => (b.textContent ?? "").trim() === "Restore windows",
+    ) as HTMLButtonElement;
+    expect(inFlight.disabled, "disabled while in flight").toBe(true);
+    expect(inFlight.getAttribute("aria-busy"), "the primitive's loading state").toBe("true");
+
+    act(() => resolveRestore({ ok: true, created: 1, failed: 0, message: "Restored 1 window." }));
+    await h.flush();
+    await h.flush();
+  });
+
+  it("an ok:false result pushes the error disclosure with the server's error string", async () => {
+    installMockApi({
+      configGet: () => Promise.resolve({}),
+      getClientVersion: () => Promise.resolve({ version: "0.0.0-test" }),
+      getServerVersion: () => Promise.resolve({ version: "0.0.0-test" }),
+      tmuxRestorePreview: () => Promise.resolve(preview),
+      tmuxRestoreTopology: () => Promise.resolve({ ok: false, error: "No saved window layout to restore from.", created: 0, failed: 0 }),
+    });
+    h = mount(<Settings onClose={() => {}} />);
+    await h.flush();
+    await h.flush();
+
+    const btn = [...h.container.querySelectorAll("button")].find(
+      (b) => (b.textContent ?? "").trim() === "Restore windows",
+    ) as HTMLButtonElement;
+    act(() => btn.click());
+    await h.flush();
+    await h.flush();
+
+    const toast = useStore.getState().appToasts.find((t) => String(t.id).startsWith("err-restore-"));
+    expect(toast, "error toast for ok:false").toBeTruthy();
+    const disclosure = renderToStaticMarkup(
+      toast!.message as unknown as Parameters<typeof renderToStaticMarkup>[0],
+    );
+    expect(disclosure).toContain("restore your windows.");
+    expect(disclosure).toContain("No saved window layout to restore from.");
+  });
+});

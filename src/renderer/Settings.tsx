@@ -56,6 +56,7 @@ import type {
   OpencodeReference,
   UpdateTarget,
 } from "../shared/types";
+import type { TopologyRestorePreview } from "../shared/api";
 import {
   SETTINGS,
   SETTING_SECTIONS,
@@ -603,6 +604,52 @@ export function Settings({
     }
   };
 
+  // ===== Backup (BET-1455) — the ONLY user-facing affordance for topology
+  // restore. The box snapshots the chat-window layout continuously (BET-1452)
+  // and can rebuild it at the exact indices (BET-1453); this section previews
+  // that snapshot read-only and triggers the restore. Restore is NEVER
+  // automatic (parent decision 1) and is additive — no destructive op exists
+  // on the wire.
+  //
+  // The READ-ONLY preview runs on entering the General section, and again
+  // after a restore completes (`backupTick`), so the section updates in place
+  // from the same channel. A failed/absent preview renders no status at all —
+  // "No backup yet" would assert a fact we could not verify.
+  const [backupPreview, setBackupPreview] = useState<TopologyRestorePreview | null>(null);
+  const [restoring, setRestoring] = useState(false);
+  const [backupTick, setBackupTick] = useState(0);
+  useEffect(() => {
+    if (activeTab !== "general") return;
+    let cancelled = false;
+    window.api.tmuxRestorePreview()
+      .then((p) => { if (!cancelled) setBackupPreview(p ?? null); })
+      .catch(() => { if (!cancelled) setBackupPreview(null); });
+    return () => { cancelled = true; };
+  }, [activeTab, backupTick]);
+
+  const restoreTopology = async () => {
+    if (restoring) return;
+    setRestoring(true);
+    try {
+      // Awaited, never void-and-forget: the toast IS the feedback path, and
+      // the server's `message` (describeRestore) already covers both the
+      // created and the nothing-to-do outcomes in human copy.
+      const result = await window.api.tmuxRestoreTopology();
+      if (result.ok) {
+        push({ id: `restore-${Date.now()}`, message: result.message ?? "Windows restored." });
+      } else {
+        push({ id: `err-restore-${Date.now()}`, message: errorDisclosure("Couldn't restore your windows.", result.error ?? "unknown error") });
+      }
+    } catch (e) {
+      push({ id: `err-restore-${Date.now()}`, message: errorDisclosure("Couldn't restore your windows.", e) });
+    } finally {
+      setRestoring(false);
+      // Re-run the preview so the section reflects the post-restore world
+      // without waiting for the user to leave and re-enter General.
+      setBackupTick((t) => t + 1);
+    }
+  };
+
   // One row per target (BET-1099): the list below maps over the canonical
   // `updateTargets` in its fixed display order, so Settings and the banner
   // always describe the same state. The two bespoke per-leg blocks they
@@ -958,6 +1005,17 @@ export function Settings({
   // Per-section custom content (cards/lists the schema doesn't describe).
   const renderCustom = (section: SettingSectionId): ReactNode => {
     if (section === "general") {
+      // Backup W/P derive from the ONE preview response — no second call.
+      // Every saved window is either planned for restore (`ops`) or explains
+      // itself in `skipped`, so ops+skipped IS the backup's window census, and
+      // the distinct tmux sessions across both are its project census.
+      const backupOps = backupPreview?.ops ?? [];
+      const backupSkipped = backupPreview?.skipped ?? [];
+      const backupWindows = backupOps.length + backupSkipped.length;
+      const backupProjects = new Set([...backupOps, ...backupSkipped].map((w) => w.tmuxSession)).size;
+      const backupAvailable = backupPreview?.available === true;
+      const backupRestorable = backupPreview?.restorable ?? 0;
+      const backupCapturedAt = backupPreview?.capturedAt ?? null;
       return (
         <>
           <GroupCard title="About">
@@ -998,6 +1056,42 @@ export function Settings({
                   error={targetUpdateErrors[t.id] ?? null}
                 />
               ))}
+            </div>
+          </GroupCard>
+          <GroupCard title="Backup">
+            <div className="space-y-3">
+              {/* This recovers a tmux SERVER death (parent scope table) — never
+                  promise undo-close: a deliberately closed window is gone, the
+                  next listing overwrote the snapshot. */}
+              <div className="text-body text-text-faint">Manta saves your chat window layout — names, order and grouping — so it can be rebuilt if the box's terminal server restarts. Your conversations are stored separately and are never affected.</div>
+              {backupAvailable && (
+                <div className="flex items-center gap-3">
+                  <Button
+                    onClick={() => void restoreTopology()}
+                    disabled={restoring || backupRestorable === 0}
+                    loading={restoring}
+                    title={backupRestorable === 0 ? "Nothing to restore — every saved window is already open." : undefined}
+                    tone="default"
+                  >
+                    Restore windows
+                  </Button>
+                  {backupCapturedAt != null && (
+                    <span className="text-meta text-text-faint">
+                      Last backup {new Date(backupCapturedAt).toLocaleString()} · {backupWindows} windows across {backupProjects} projects
+                    </span>
+                  )}
+                </div>
+              )}
+              {backupAvailable && (
+                <div className="text-body text-text-faint">
+                  {backupRestorable > 0
+                    ? `${backupRestorable} window(s) can be restored.`
+                    : "Every saved window is already open."}
+                </div>
+              )}
+              {backupPreview?.available === false && (
+                <div className="text-body text-text-faint">No backup yet. Manta saves your window layout automatically as you work.</div>
+              )}
             </div>
           </GroupCard>
           <GroupCard title="Danger zone" danger>
