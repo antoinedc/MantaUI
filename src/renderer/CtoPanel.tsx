@@ -49,8 +49,8 @@ import {
   forecastAccuracyRows,
   bindingReserveFrac,
   budgetTodayUsd,
-  refChipAction,
   digestEvidenceAction,
+  evidenceExpansion,
   type BlockerCard,
   type ConnectCardRow,
   type CtoState,
@@ -2086,16 +2086,19 @@ function FactRow({
   row,
   struck,
   onOpenSession,
-  onOpenRef,
+  onCopyRef,
   openableSessions,
 }: {
   row: CtoFactRow;
   struck?: boolean;
   onOpenSession?: (sessionId: string) => void;
-  onOpenRef?: (ref: string) => void;
+  onCopyRef?: (ref: string) => void;
   openableSessions?: Set<string>;
 }) {
   const pct = Math.round(Math.min(1, Math.max(0, row.confidence)) * 100);
+  const chips = evidenceExpansion(row.refs, openableSessions);
+  const hasExpandable = chips.some((chip) => chip.kind === "copy");
+  const [expanded, setExpanded] = useState(false);
   return (
     <div className="rounded-md border border-border-subtle px-3 py-2">
       <div className="flex items-center gap-2">
@@ -2117,31 +2120,63 @@ function FactRow({
         <span>· {formatAge(row.ageMs)} old</span>
         {row.expired ? <span className="text-text-muted">· expired</span> : null}
         {struck && row.supersededBy ? <span>· superseded by {row.supersededBy}</span> : null}
-        {row.refs.map((ref) => {
-          const chip = refChipAction(ref, openableSessions);
-          return chip.kind === "jump" ? (
+        {chips.map((chip) =>
+          chip.kind === "jump" ? (
             <button
-              key={ref}
+              key={chip.ref}
               type="button"
-              onClick={() => onOpenSession?.(ref)}
+              onClick={() => onOpenSession?.(chip.ref)}
               className="truncate rounded-md bg-fill-active px-2 py-1 text-[10px] text-accent underline decoration-dotted underline-offset-2 hover:text-accent-strong focus-visible:outline focus-visible:outline-1 focus-visible:outline-accent"
               title={chip.title}
             >
-              {ref}
+              {chip.ref}
             </button>
           ) : (
             <button
-              key={ref}
+              key={chip.ref}
               type="button"
-              onClick={() => onOpenRef?.(ref)}
-              className="truncate rounded-md bg-fill-active px-2 py-1 text-[10px] text-text-muted hover:text-text focus-visible:outline focus-visible:outline-1 focus-visible:outline-accent"
-              title={chip.title}
+              aria-expanded={expanded}
+              onClick={() => setExpanded((v) => !v)}
+              className={
+                "truncate rounded-md bg-fill-active px-2 py-1 text-[10px] underline decoration-dotted underline-offset-2 focus-visible:outline focus-visible:outline-1 focus-visible:outline-accent " +
+                (expanded ? "text-accent hover:text-accent-strong" : "text-text-muted hover:text-text")
+              }
+              title={expanded ? `Hide evidence for ${chip.ref}` : `Show evidence for ${chip.ref}`}
             >
-              {ref}
+              {chip.ref}
             </button>
-          );
-        })}
+          ),
+        )}
       </div>
+      {expanded && hasExpandable ? (
+        <div className="mt-2 rounded-md border border-border-subtle bg-fill px-3 py-2">
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-text-faint">Evidence</div>
+          {chips.map((chip) => (
+            <div key={chip.ref} className="mt-1 flex items-start gap-2">
+              <code className="min-w-0 flex-1 break-all font-mono text-[11px] text-text-muted">{chip.ref}</code>
+              {chip.kind === "jump" ? (
+                <button
+                  type="button"
+                  onClick={() => onOpenSession?.(chip.ref)}
+                  className="shrink-0 rounded-md border border-border-subtle px-2 py-1 text-[10px] text-accent hover:text-accent-strong focus-visible:outline focus-visible:outline-1 focus-visible:outline-accent"
+                  title={chip.title}
+                >
+                  open
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => onCopyRef?.(chip.ref)}
+                  className="shrink-0 rounded-md border border-border-subtle px-2 py-1 text-[10px] text-text-muted hover:text-text focus-visible:outline focus-visible:outline-1 focus-visible:outline-accent"
+                  title={`Copy ${chip.ref}`}
+                >
+                  copy
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -2158,8 +2193,9 @@ function BlackboardView({
   openableSessions: Set<string>;
 }) {
   // Non-session refs have no server-side resolver (§6.1 bare provenance) —
-  // the honest action is copy-to-clipboard, same as the Profile view's
-  // evidence chips. Every chip responds; none is a dead control.
+  // BET-1442: they fall back to inline evidence expansion in the row (§10.3
+  // "evidence ▸ expands the refs list inline"), with copy affordances inside
+  // the expanded panel. Every chip responds; none is a dead control.
   const copyRef = useCallback(
     async (ref: string) => {
       try {
@@ -2292,7 +2328,7 @@ function BlackboardView({
               <div className="mt-4 space-y-2">
                 {render.active.map((row) => (
                   <div key={row.id}>
-                    <FactRow row={row} onOpenSession={onOpenSession} onOpenRef={(r) => void copyRef(r)} openableSessions={openableSessions} />
+                    <FactRow row={row} onOpenSession={onOpenSession} onCopyRef={(r) => void copyRef(r)} openableSessions={openableSessions} />
                     {correcting === row.id ? (
                       <div className="mt-2 rounded-md border border-border-subtle bg-fill px-3 py-2">
                         <input
@@ -2354,7 +2390,7 @@ function BlackboardView({
                 <h3 className="text-xs font-semibold uppercase tracking-wide text-text-faint">Superseded</h3>
                 <div className="mt-2 space-y-2">
                   {render.superseded.map((row) => (
-                    <FactRow key={row.id} row={row} struck onOpenSession={onOpenSession} onOpenRef={(r) => void copyRef(r)} openableSessions={openableSessions} />
+                    <FactRow key={row.id} row={row} struck onOpenSession={onOpenSession} onCopyRef={(r) => void copyRef(r)} openableSessions={openableSessions} />
                   ))}
                 </div>
               </div>
@@ -2368,7 +2404,7 @@ function BlackboardView({
             <div className="mt-4 text-xs text-text-faint">Displaced facts, newest first ({archiveTotal} total).</div>
             <div className="mt-2 space-y-2">
               {archive.map((row) => (
-                <FactRow key={`${row.id}-${row.archivedAt}`} row={row} struck onOpenSession={onOpenSession} onOpenRef={(r) => void copyRef(r)} openableSessions={openableSessions} />
+                <FactRow key={`${row.id}-${row.archivedAt}`} row={row} struck onOpenSession={onOpenSession} onCopyRef={(r) => void copyRef(r)} openableSessions={openableSessions} />
               ))}
             </div>
             {nextBefore != null ? (

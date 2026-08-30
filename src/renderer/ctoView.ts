@@ -706,3 +706,22 @@ export function digestEvidenceAction(
   }
   return { kind: "copy", ref: list[0] ?? fallback ?? "" };
 }
+
+// BET-1442: refs the shared surface cannot open (bare provenance: message
+// ids, probe ids, commit shas, file paths) fall back to inline expansion in
+// the row (§10.3: "evidence ▸ expands the refs list inline; each ref
+// deep-links"). The expansion content is the full refs list, each entry
+// carrying its shared-surface action: jump-kind refs stay session buttons,
+// copy-kind refs render in full with a copy affordance of their own.
+export type EvidenceExpansionRow = { ref: string; kind: "jump" | "copy"; title: string };
+
+export function evidenceExpansion(
+  refs: string[] | undefined,
+  openableSessions?: Set<string>,
+): EvidenceExpansionRow[] {
+  const list = Array.isArray(refs) ? refs : [];
+  return list.map((ref) => {
+    const action = refChipAction(ref, openableSessions);
+    return { ref, kind: action.kind, title: action.title };
+  });
+}
