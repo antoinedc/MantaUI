@@ -630,6 +630,88 @@ export function routeRequestShaped(candidate, providers = {}) {
 }
 
 /**
+ * §7.6 data-source candidates (BET-1404): ONE per deep-consented,
+ * chain-untripped, integrated tool, targeting the argmax-relevance project —
+ * emitted only when a relevance score exists. `p_use = vitality.ewma ×
+ * max(relevance)` (the scoring composition the issue fixes; selectivity
+ * lives here, value stays mid-lattice). `requestShaped: true` so §11.2
+ * batch routing picks them up where a provider adapter supports a batch
+ * pool. Experiment-first: a tool with zero as_source reports runs a forced-
+ * small first analysis (single probe window, halved context budget — carried
+ * in the prompt contract and a 0.5 predicted cost); its verdict seeds the
+ * as_source counters via the §9.5 sink.
+ * @param {Array<{tool: string, displayName?: string, status?: string,
+ *   consent?: {deep_read?: string|null}, asSourceDecayed?: boolean,
+ *   as_source?: {reports?: number, accepted?: number}, relevance?: Object,
+ *   vitality?: {ewma?: number|null}}>} tools registry projections (listTools)
+ */
+export function dataAnalysisCandidatesFromTools(tools) {
+  const out = [];
+  for (const t of Array.isArray(tools) ? tools : []) {
+    if (!t || typeof t !== "object" || typeof t.tool !== "string" || !t.tool) continue;
+    if (t.consent?.deep_read !== "yes") continue; // deep-consented only
+    if (t.status !== "integrated") continue; // probes actually ran
+    if (t.asSourceDecayed === true) continue; // chain tripped → analyses stopped
+    let project = null;
+    let best = 0;
+    for (const [p, r] of Object.entries(t.relevance ?? {})) {
+      const s = Number(r);
+      if (Number.isFinite(s) && s > best) {
+        best = s;
+        project = p;
+      }
+    }
+    if (project === null || !(best > 0)) continue; // only when a relevance score exists
+    const ewma = Number(t.vitality?.ewma);
+    if (!(Number.isFinite(ewma) && ewma > 0)) continue; // no live vitality → nothing fresh to mine
+    const name = t.displayName ?? t.tool;
+    const experiment = (t.asSource?.reports ?? t.as_source?.reports ?? 0) === 0;
+    const pUse = Math.max(0, Math.min(1, ewma * best));
+    out.push({
+      id: `data-source:${t.tool}`,
+      name: `Analyze ${name}'s data (overnight report)`,
+      prompt: dataAnalysisPrompt(name, project, { experiment }),
+      project,
+      category: "data-source",
+      pUse,
+      value: 1,
+      confidence: 0.5,
+      predictedCost: experiment ? 0.5 : 1,
+      requestShaped: true,
+      refs: [t.tool],
+    });
+  }
+  return out;
+}
+
+/**
+ * The data-analysis job's prompt contract (§11.5): read-only analysis of the
+ * tool's collected probe data, output = a draft REPORT markdown artifact in
+ * the worktree root, no code changes — a report runs no gates, so the
+ * standard no-gates note applies. Experiment-first appends the forced-small
+ * constraints (single most-recent probe window, ~half the context budget).
+ */
+export function dataAnalysisPrompt(name, project, { experiment = false } = {}) {
+  const slug = String(name ?? "tool")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  const lines = [
+    `You are the Adaptive CTO's overnight analyst. Draft a findings REPORT on ${name}'s data for the "${project}" project.`,
+    ``,
+    `Read-only analysis: use the probe data the CTO already collected for ${name} (~/.manta/cto/probe-state/ and the tool registry) — no new credentials, no new API access beyond what the probes already cover, and NO code changes.`,
+    `Output: write your findings to REPORT-${slug || "tool"}.md in the worktree root — markdown, what the data shows, 3-5 concrete observations, any anomalies, one recommended next step. This is a report job: it runs no code gates and must leave the project untouched.`,
+  ];
+  if (experiment === true) {
+    lines.push(
+      ``,
+      `EXPERIMENT-FIRST CONSTRAINTS (first analysis for this tool): keep it deliberately small — use ONLY the single most recent probe window of data, spend no more than about half the normal context budget, and end with a one-line verdict on whether a deeper analysis looks worthwhile.`,
+    );
+  }
+  return lines.join("\n");
+}
+
+/**
  * §11.5 draft expiry: unreviewed drafts close after 7 days with an `expire`
  * verdict and a one-line digest note. Returns the expired drafts (each with
  * its verdict row) and the survivors. Never throws; garbage entries are kept

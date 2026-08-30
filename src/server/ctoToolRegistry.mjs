@@ -1035,6 +1035,9 @@ export function createToolRegistry(deps = {}) {
         // the surface can explain why deep analyses stopped — no dead state.
         asSource: { ...(row.as_source ?? { reports: 0, accepted: 0 }) },
         asSourceDecayed: row.asSourceDecayed === true,
+        // §7.6 relevance map (BET-1404 overnight candidates read it through
+        // this projection; also drives the drill-down's relevance display).
+        relevance: { ...(row.relevance ?? {}) },
       };
     });
   }
