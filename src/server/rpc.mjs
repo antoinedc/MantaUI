@@ -54,6 +54,7 @@ import { getRegistry as pluginsGetRegistry } from "./plugins.mjs";
 import { searchMessages } from "./messageSearch.mjs";
 import { ledgerSummary } from "./modelLedger.mjs";
 import { getDb } from "./opencodeDb.mjs";
+import { loadTopology, planRestore, executeRestore, describeRestore } from "./topology.mjs";
 import { createOptimizerSummary } from "./optimizer/summary.mjs";
 import { createOptimizerSeries } from "./optimizer/series.mjs";
 import { shipCtxEvent } from "./optimizer/telemetry.mjs";
@@ -310,6 +311,19 @@ function withCliProbeTimeout(promise, timeoutMs) {
       },
     );
   });
+}
+
+// BET-1453: the opencode session ids that actually exist on the box, for
+// planRestore's gone-session filter. The `null` is LOAD-BEARING: returning an
+// EMPTY SET for an unreachable opencode would make planRestore discard the
+// user's entire restore. Unknown must mean "do not filter", never "nothing
+// survives".
+async function knownOpencodeSessionIds(oc) {
+  try {
+    const sessions = await oc.listSessions();
+    if (!Array.isArray(sessions)) return null;
+    return new Set(sessions.map((s) => s?.id).filter(Boolean));
+  } catch { return null; }
 }
 
 export function buildHandlers({
@@ -809,6 +823,75 @@ export function buildHandlers({
         await syncState.refreshNow();
       }
       return syncState.payloadSince(sinceSeq, sinceGen);
+    },
+    // BET-1453: topology restore — rebuild the saved chat-window layout after
+    // a tmux server death, at the ORIGINAL indices (a surviving sidebar pin is
+    // `<tmuxSession>/<windowIndex>`; reproducing the exact pair is the point).
+    // NO opencode session is created — the ids in the snapshot are EXISTING
+    // sessions being re-adopted. Restore is NEVER automatic: these channels
+    // are user-initiated (Settings > General > Backup, S3).
+    //
+    // The live list feeds planRestore's idempotency checks. A dead tmux server
+    // is the headline restore scenario, so a failed listing plans against an
+    // EMPTY live tree ("nothing is live") instead of throwing — the honest
+    // basis when the box has nothing running.
+    //
+    // READ-ONLY. Same planRestore the apply channel runs, so the preview can
+    // never disagree with what apply does. Mutates NOTHING.
+    "tmux:restore-preview": async () => {
+      const snapshot = await loadTopology();
+      if (!snapshot) {
+        return { available: false, capturedAt: null, ops: [], skipped: [], restorable: 0 };
+      }
+      let liveProjects = [];
+      try {
+        liveProjects = await tmux.listProjects();
+      } catch {
+        liveProjects = [];
+      }
+      const known = await knownOpencodeSessionIds(oc);
+      const plan = planRestore(snapshot, liveProjects, known);
+      return {
+        available: true,
+        capturedAt: snapshot.capturedAt ?? null,
+        ops: plan.ops,
+        skipped: plan.skipped,
+        restorable: plan.ops.length,
+      };
+    },
+    // Apply the SAME plan the preview shows. One tmux op per window (a restore
+    // can take a while); a per-window throw is recorded, the rest proceed.
+    // refreshNow (which swallows into `stale`, never throws) pushes the
+    // restored windows to the sidebar without waiting for the 2s poll tick.
+    "tmux:restore-topology": async () => {
+      const snapshot = await loadTopology();
+      if (!snapshot) {
+        return { ok: false, error: "No saved window layout to restore from.", created: 0, failed: 0 };
+      }
+      let liveProjects = [];
+      try {
+        liveProjects = await tmux.listProjects();
+      } catch {
+        liveProjects = [];
+      }
+      const known = await knownOpencodeSessionIds(oc);
+      const plan = planRestore(snapshot, liveProjects, known);
+      const result = await executeRestore(plan, (op) =>
+        // Field-name adapter: plan ops carry the snapshot's vocabulary
+        // (tmuxSession/index/name); restoreChatWindow speaks tmux's
+        // (sessionName/windowIndex/windowName).
+        tmux.restoreChatWindow({
+          createSession: op.kind === "create-session",
+          sessionName: op.tmuxSession,
+          windowIndex: op.index,
+          windowName: op.name,
+          cwd: op.cwd,
+          opencodeSessionId: op.opencodeSessionId,
+          worktreePath: op.worktreePath,
+          mantaOwned: op.mantaOwned,
+        }));
+      await syncState.refreshNow();
+      return { ok: true, ...result, message: describeRestore(result) };
     },
     // chatMode (BET-113): when the new-session dialog's "chat mode (opencode)"
     // toggle is on, tmux.newSession must create an opencode session, launch a
@@ -1434,10 +1517,11 @@ export function buildHandlers({
       const resolvedCwd = await resolveProjectCwd(sessionName, cwd);
       const windowIndex = await tmux.newWindowGetIndex(sessionName, windowName, resolvedCwd);
       await tmux.restampSessionId(sessionName, windowIndex, forked.id);
-      const projects = await tmux.listProjects();
-      // BET-675: refresh materialized state so the new window's delta publishes now.
+      // BET-1454: refreshNow() materializes the refreshed tree — read it from
+      // the snapshot instead of a second listProjects() shell-out whose
+      // transient tmux fault would throw and forward raw stderr to the client.
       await syncState.refreshNow();
-      return { newSessionId: forked.id, projects };
+      return { newSessionId: forked.id, projects: syncState.snapshot().projects };
     },
 
     // opencode:clear-session
@@ -1451,10 +1535,9 @@ export function buildHandlers({
       const directory = await resolveProjectCwd(sessionName, cwd);
       const sess = await oc.createSession({ directory, title });
       await tmux.restampSessionId(sessionName, windowIndex, sess.id);
-      const projects = await tmux.listProjects();
-      // BET-675: refresh materialized state so the change publishes now.
+      // BET-1454: snapshot, not a second shell-out (see fork-session above).
       await syncState.refreshNow();
-      return { newSessionId: sess.id, projects };
+      return { newSessionId: sess.id, projects: syncState.snapshot().projects };
     },
 
     // opencode:delete-session
@@ -1467,10 +1550,9 @@ export function buildHandlers({
     "opencode:delete-session": async ({ sessionId, sessionName, windowIndex }) => {
       await oc.deleteSessionRaw(sessionId);
       await tmux.killWindow({ sessionName, windowIndex }).catch(() => {});
-      const projects = await tmux.listProjects();
-      // BET-675: refresh materialized state so the removed window publishes now.
+      // BET-1454: snapshot, not a second shell-out (see fork-session above).
       await syncState.refreshNow();
-      return projects;
+      return syncState.snapshot().projects;
     },
 
     // BET-421: bare session lifecycle for the onboarding verifier. create

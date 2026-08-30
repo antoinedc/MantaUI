@@ -728,6 +728,13 @@ export const httpApi: Api = {
   tmuxKillWindow: (input) => rpc(IPC.tmuxKillWindow, input),
   tmuxSelectWindow: (input) => rpc(IPC.tmuxSelectWindow, input),
 
+  // BET-1453: topology restore (S2a). No fail-fast timeout on purpose —
+  // apply runs one tmux op per window and preview shells out to tmux + the
+  // opencode session list, both of which can legitimately take seconds on a
+  // waking box. The affordance is S3's Settings > General > Backup section.
+  tmuxRestorePreview: () => rpc(IPC.tmuxRestorePreview),
+  tmuxRestoreTopology: () => rpc(IPC.tmuxRestoreTopology),
+
   // -- git --
   gitListWorktrees: (cwd) => rpc(IPC.gitListWorktrees, cwd),
   // BET-246: auto-create a sibling git worktree for a new chat session.

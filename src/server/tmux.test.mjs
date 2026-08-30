@@ -370,6 +370,14 @@ test("resolveCwdOrThrow: '~/<existing dir>' resolves under os.homedir()", async 
 // that genuinely has no sessions, so the phone showed the inviting "No
 // sessions yet. Tap + to create one." for a box full of work, and the
 // ownership sidecar was reconciled to nothing against the phantom empty list.
+//
+// BET-1454 twist: the classifier now swallows the two GENUINE no-server
+// stderrs (`no server running on`, and the never-created-socket ENOENT) into
+// that same successful-empty shape — that is correct, a box with no tmux
+// server really has no sessions. But a swallowed listing is NOT a genuine
+// listing, so listProjects must skip the reconcile/prune in that case (the
+// phantom-empty shape returns again, and this time it must not wipe the
+// sidecar). Both behaviours are pinned below.
 // ---------------------------------------------------------------------------
 
 test("isNoTmuxServerError separates 'no tmux server' from a real fault", () => {
@@ -377,11 +385,20 @@ test("isNoTmuxServerError separates 'no tmux server' from a real fault", () => {
     isNoTmuxServerError(new Error("tmux exited 1: no server running on /tmp/tmux-1000/default")),
     true,
   );
-  // BET-675: "error connecting … (No such file or directory)" / "Connection
-  // refused" indicate a restarted server / socket race, NOT a genuinely empty
-  // box — so they are no longer treated as "no tmux server".
+  // BET-1454: "error connecting … (No such file or directory)" means the
+  // socket was NEVER there — a fresh or dead box genuinely has no tmux
+  // server. Commit 4b5a95db had removed it on the false premise that ENOENT
+  // indicated a restarted server / socket race; that state actually produces
+  // `no server running on` (tmux unlinks the stale socket and says so).
   assert.equal(
     isNoTmuxServerError(new Error("tmux exited 1: error connecting to /tmp/tmux-1000/default (No such file or directory)")),
+    true,
+  );
+  // A stale socket that still answers with Connection refused IS a restart
+  // race (modern tmux self-cleans it into `no server running on`) — keep it
+  // a fault so a transient restart can never masquerade as an empty box.
+  assert.equal(
+    isNoTmuxServerError(new Error("tmux exited 1: error connecting to /tmp/tmux-1000/default: Connection refused")),
     false,
   );
   assert.equal(isNoTmuxServerError(new Error("tmux exited 1: no sessions")), true);
@@ -404,6 +421,22 @@ test("listProjects returns [] when tmux genuinely has no server", async () => {
   }
 });
 
+// BET-1454: same swallow for the never-created socket — the (No such file
+// or directory) stderr means "no tmux server exists right now", which is a
+// true empty box, not a fault.
+test("listProjects returns [] when the tmux socket never existed (ENOENT swallow)", async () => {
+  _resetOwnedSessionsCache();
+  _setRun(async () => {
+    throw new Error("tmux exited 1: error connecting to /tmp/tmux-1000/default (No such file or directory)");
+  });
+  try {
+    assert.deepEqual(await listProjects(), []);
+  } finally {
+    _setRun(null);
+    _resetOwnedSessionsCache();
+  }
+});
+
 test("listProjects THROWS on a tmux fault rather than reporting zero sessions", async () => {
   _resetOwnedSessionsCache();
   _setRun(async () => {
@@ -417,16 +450,17 @@ test("listProjects THROWS on a tmux fault rather than reporting zero sessions", 
   }
 });
 
-// BET-675: a socket race ("error connecting … (No such file or directory)")
-// is a FAULT, not an empty box — it must throw out of listProjects, never
-// quietly return an empty list.
+// BET-675: a socket race ("error connecting …: Connection refused") is a
+// FAULT, not an empty box — it must throw out of listProjects, never
+// quietly return an empty list. (The never-created-socket ENOENT variant IS
+// a genuine empty box now — see the ENOENT swallow test above.)
 test("listProjects THROWS on a tmux socket-race fault, not empty", async () => {
   _resetOwnedSessionsCache();
   _setRun(async () => {
-    throw new Error("tmux exited 1: error connecting to /tmp/tmux-1000/default (No such file or directory)");
+    throw new Error("tmux exited 1: error connecting to /tmp/tmux-1000/default: Connection refused");
   });
   try {
-    await assert.rejects(() => listProjects(), /No such file or directory/);
+    await assert.rejects(() => listProjects(), /Connection refused/);
   } finally {
     _setRun(null);
     _resetOwnedSessionsCache();
@@ -466,6 +500,41 @@ test("a tmux fault does not prune the owned-session sidecar", async () => {
     assert.deepEqual(await loadOwnedSessions(path), ["alpha"]);
   } finally {
     _resetOwnedSessionsCache();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// BET-1454: the ENOENT swallow makes a dead box return [] SUCCESSFULLY —
+// which is exactly the phantom-empty shape that used to wipe the sidecar
+// (BET-675's incident). A swallowed listing is NOT a genuine listing, so the
+// reconcile/prune must be skipped entirely: the sidecar survives verbatim
+// (including entries that may look stale) until the next GENUINE listing
+// reconciles it.
+test("a swallowed no-server listing does not prune the owned-session sidecar", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "tmux-swallow-"));
+  const path = join(dir, "tmux-sessions.json");
+  try {
+    _resetOwnedSessionsCache();
+    _setOwnedSessionsPath(path);
+    await addOwnedSession("alpha", { path });
+    await addOwnedSession("ghost", { path });
+    _setRun(async () => {
+      throw new Error("tmux exited 1: error connecting to /tmp/tmux-1000/default (No such file or directory)");
+    });
+    try {
+      // Swallowed → resolves (not throws) with the phantom-empty list.
+      assert.deepEqual(await listProjects(), []);
+    } finally {
+      _setRun(null);
+    }
+    assert.deepEqual(
+      await loadOwnedSessions(path),
+      ["alpha", "ghost"],
+      "a swallowed listing must never reconcile/prune the sidecar",
+    );
+  } finally {
+    _resetOwnedSessionsCache();
+    _setOwnedSessionsPath(null);
     await rm(dir, { recursive: true, force: true });
   }
 });

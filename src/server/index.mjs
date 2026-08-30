@@ -3360,7 +3360,11 @@ const handleRequest = async (req, res) => {
       const projects = await tmux.listProjects();
       respondJson(res, 200, projects);
     } catch (e) {
-      respondJson(res, 500, { error: String(e?.message ?? e) });
+      // BET-1454: never forward raw tmux stderr to a client-facing body —
+      // the desktop chat panel renders `error` verbatim in a banner. Log the
+      // fault server-side and return a safe, human message instead.
+      console.warn("[api/projects] tmux listing failed:", e?.message ?? e);
+      respondJson(res, 500, { error: "Couldn't reach tmux on the box." });
     }
     return;
   }

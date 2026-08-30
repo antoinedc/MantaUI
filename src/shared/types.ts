@@ -1221,6 +1221,12 @@ export const IPC = {
   // BET-678: sync cursor snapshot/delta RPC (the single bootstrap + resync).
   syncSnapshot: "sync:snapshot",
 
+  // BET-1453: topology restore (S2a) — read-only preview + apply of the saved
+  // chat-window layout (rebuild at the ORIGINAL tmux indices). The only
+  // affordance is S3's Settings > General > Backup section.
+  tmuxRestorePreview: "tmux:restore-preview",
+  tmuxRestoreTopology: "tmux:restore-topology",
+
   // Project metadata (local-only)
   projectMetaDelete: "project:meta:delete",
 

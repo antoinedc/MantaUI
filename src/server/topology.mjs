@@ -27,6 +27,13 @@
 // functions that touch disk by default are loadTopology / saveTopology,
 // both of which accept an `io` override for tests — the suite never writes
 // production data (see the MANTA_STATE_HOME note in src/shared/paths.mjs).
+//
+// BET-1453 (Stage 2a) adds the restore half: planRestore / executeRestore /
+// describeRestore turn a snapshot back into tmux windows AT THEIR ORIGINAL
+// INDICES. The exact index is load-bearing, not cosmetic — a sidebar pin is
+// `<tmuxSession>/<windowIndex>` persisted in config.json and it SURVIVES the
+// crash, so appending rebuilt windows elsewhere would silently reattach a
+// surviving pin to whatever now occupies that slot: the wrong conversation.
 
 import { readFile } from "node:fs/promises";
 import { atomicWrite } from "./storeUtils.mjs";
@@ -181,4 +188,171 @@ export function createTopologyPersister({ save, load, now } = {}) {
     lastSessionsJson = nextSessionsJson;
     return { persisted: true, reason: "written" };
   };
+}
+
+// ---------------------------------------------------------------------------
+// BET-1453 — restore planning + execution (pure)
+// ---------------------------------------------------------------------------
+
+// True when `projects` (a listProjects() tree) has a live window at
+// (tmuxSession, index). ANY window occupies an index — chat or claude-TUI —
+// because the pin pair names the slot, not the kind of window in it.
+function liveIndexSet(liveProjects) {
+  const occupied = new Set();
+  for (const p of liveProjects ?? []) {
+    for (const w of p?.windows ?? []) {
+      if (p?.tmuxSession != null && w?.index != null) occupied.add(`${p.tmuxSession}/${w.index}`);
+    }
+  }
+  return occupied;
+}
+
+// The set of opencode session ids already stamped on ANY live window across
+// ALL sessions — an id restored under a different session than the snapshot
+// recorded still means "this conversation already has a window".
+function liveStampedIdSet(liveProjects) {
+  const stamped = new Set();
+  for (const p of liveProjects ?? []) {
+    for (const w of p?.windows ?? []) {
+      if (typeof w?.opencodeSessionId === "string" && w.opencodeSessionId !== "") {
+        stamped.add(w.opencodeSessionId);
+      }
+    }
+  }
+  return stamped;
+}
+
+// Plan the restore of a saved snapshot against the live tree. Pure.
+//
+// Emits ONLY creation ops — never a kill, rename, restamp or reorder — so
+// running the plan after a partial recovery is safe: whatever a previous run
+// managed to create is skipped, the remainder is completed.
+//
+// Per-window skip rules (checked in this order):
+//   - `opencode-session-gone` — `knownSessionIds` is a Set and the window's
+//     id is absent from it. Restoring one would produce a sidebar row that
+//     opens onto nothing. When `knownSessionIds` is null the filter is OFF
+//     (an unreachable opencode must mean "do not filter", never "drop all").
+//   - `already-restored` — the window's opencodeSessionId is already stamped
+//     on any live window (including under a different session), or the same
+//     id was claimed by an earlier op in THIS plan, so a duplicate id inside
+//     one snapshot cannot be created twice.
+//   - `index-occupied` — a live window already sits at (tmuxSession, index).
+//
+// Each session's windows are sorted ascending by index; the first op for a
+// session that does not exist live is `create-session` (tmux's new-session
+// cannot pick its first window's index — the caller moves it into place),
+// the rest are `create-window` (new-window -t accepts an explicit index and
+// works out of order). Tolerates null / `{sessions: []}` input.
+export function planRestore(snapshot, liveProjects, knownSessionIds = null) {
+  const occupied = liveIndexSet(liveProjects);
+  const stamped = liveStampedIdSet(liveProjects);
+  const ops = [];
+  const skipped = [];
+  const claimedIds = new Set();
+  for (const session of snapshot?.sessions ?? []) {
+    const tmuxSession = session?.tmuxSession;
+    if (tmuxSession == null) continue;
+    const windows = [...(session.windows ?? [])]
+      .filter((w) => w && w.index != null)
+      .sort((a, b) => a.index - b.index);
+    const sessionLive = (liveProjects ?? []).some((p) => p?.tmuxSession === tmuxSession);
+    let first = true;
+    for (const w of windows) {
+      const base = {
+        tmuxSession,
+        mantaOwned: session.mantaOwned === true,
+        index: w.index,
+        name: w.name,
+        opencodeSessionId: w.opencodeSessionId,
+        cwd: w.cwd,
+        worktreePath: w.worktreePath ?? null,
+      };
+      if (knownSessionIds instanceof Set && !knownSessionIds.has(w.opencodeSessionId)) {
+        skipped.push({ ...base, reason: "opencode-session-gone" });
+        continue;
+      }
+      // Stamp check BEFORE the index check on purpose: a window a previous
+      // restore run created is both stamped AND sits at its (reproduced)
+      // index — the truthful reason it is skipped is "already-restored",
+      // not the alarming "index-occupied".
+      if (stamped.has(w.opencodeSessionId) || claimedIds.has(w.opencodeSessionId)) {
+        skipped.push({ ...base, reason: "already-restored" });
+        continue;
+      }
+      if (occupied.has(`${tmuxSession}/${w.index}`)) {
+        skipped.push({ ...base, reason: "index-occupied" });
+        continue;
+      }
+      claimedIds.add(w.opencodeSessionId);
+      ops.push({
+        kind: !sessionLive && first ? "create-session" : "create-window",
+        ...base,
+      });
+      first = false;
+    }
+  }
+  return { ops, skipped };
+}
+
+// Execute a plan by awaiting `restoreWindow(op)` for each op IN ORDER. The
+// only I/O is the injected callback — pure for tests.
+//
+// A per-op throw is caught and recorded in `failures`; the loop CONTINUES
+// (parent decision 3: a window that cannot be rebuilt fails alone). EXCEPT
+// when a `create-session` op fails: the remaining ops for THAT tmux session
+// are failed immediately with "skipped — its tmux session could not be
+// created" — every one of them targets a session that does not exist, so
+// continuing would only bury the real cause under identical errors.
+//
+// Returns { created, failed, skipped, windows, failures }: `created` +
+// `failed` always equals the number of planned window ops (session-skipped
+// windows count as failed), `windows` lists the created identities, and
+// `skipped` carries the plan's pre-filtered entries through untouched.
+export async function executeRestore(plan, restoreWindow) {
+  const windows = [];
+  const failures = [];
+  const skippedSessions = new Set();
+  let created = 0;
+  let failed = 0;
+  for (const op of plan?.ops ?? []) {
+    const identity = {
+      tmuxSession: op.tmuxSession,
+      index: op.index,
+      name: op.name,
+      opencodeSessionId: op.opencodeSessionId,
+    };
+    if (skippedSessions.has(op.tmuxSession)) {
+      failed++;
+      failures.push({
+        ...identity,
+        error: "skipped — its tmux session could not be created",
+      });
+      continue;
+    }
+    try {
+      await restoreWindow(op);
+      created++;
+      windows.push(identity);
+    } catch (e) {
+      failed++;
+      failures.push({ ...identity, error: e?.message ?? String(e) });
+      if (op.kind === "create-session") skippedSessions.add(op.tmuxSession);
+    }
+  }
+  return { created, failed, skipped: plan?.skipped ?? [], windows, failures };
+}
+
+// One human line for the restore result. `created` and `failed` both zero
+// means every saved window was already open (the fully-restored box) — say
+// THAT rather than "Restored 0 windows", which reads like a malfunction.
+export function describeRestore(result) {
+  const created = result?.created ?? 0;
+  const failed = result?.failed ?? 0;
+  if (created === 0 && failed === 0) {
+    return "Nothing to restore — every saved window is already open.";
+  }
+  const noun = created === 1 ? "window" : "windows";
+  if (failed === 0) return `Restored ${created} ${noun}.`;
+  return `Restored ${created} ${noun} · ${failed} failed.`;
 }
