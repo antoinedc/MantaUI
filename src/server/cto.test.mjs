@@ -33,7 +33,7 @@ function makeEngine(overrides = {}) {
   return engine;
 }
 
-const TOOL_COUNT = 20; // 16 reads (BET-1164 + BET-1383 read_rollups/read_ledger) + read_inbox (BET-1397) + 3 watcher tools (BET-1165)
+const TOOL_COUNT = 23; // 16 reads (BET-1164 + BET-1383 read_rollups/read_ledger) + read_inbox (BET-1397) + 3 watcher tools (BET-1165) + 3 drill-down read verbs (BET-1399)
 
 // ---------------------------------------------------------------------------
 // Registry integrity
@@ -63,6 +63,9 @@ test("registry exposes every cto read tool with a complete shape, all mode auto"
       "get_config",
       "read_rollups",
       "read_ledger",
+      "read_facts",
+      "read_profile",
+      "read_toolregistry",
       "read_inbox",
       "watch",
       "unwatch",
@@ -349,4 +352,62 @@ test("read_rollups + read_ledger return structured ok results from empty stores"
   assert.equal(r2.error, undefined);
   assert.deepEqual(r2.data.rows, []);
   assert.equal(r2.data.count, 0);
+});
+
+// ---------------------------------------------------------------------------
+// BET-1399 (§4.5): the remaining read verbs — read_facts / read_profile /
+// read_toolregistry. Wired through the injected adaptive-engine renderers;
+// unwired they report a structured error (never throw).
+// ---------------------------------------------------------------------------
+test("read_facts/read_profile/read_toolregistry report not-wired when deps are absent", async () => {
+  const engine = makeEngine();
+  for (const verb of ["read_facts", "read_profile", "read_toolregistry"]) {
+    const r = await engine.dispatch(verb, {}, {});
+    assert.equal(r.ok, false, `${verb} without a wired dep must degrade`);
+    assert.match(r.error, /not wired/);
+  }
+});
+
+test("read_facts passes project + asOf through and returns the render model", async () => {
+  const calls = [];
+  const engine = makeEngine({
+    readFacts: async (input) => {
+      calls.push(input);
+      return {
+        project: input?.project ?? "alpha",
+        projects: ["alpha"],
+        asOf: input?.asOfMs ?? null,
+        active: [{ id: "cto:x", kind: "status", statement: "s", refs: [], confidence: 0.8, created: 5, ageMs: 1, senderKey: "cto", senderLabel: "cto", supersededBy: null, validUntil: null, expired: false, checkable: null }],
+        superseded: [],
+      };
+    },
+  });
+  const r = await engine.dispatch("read_facts", { project: "alpha", asOf: 1234 }, {});
+  assert.equal(r.ok, true);
+  assert.equal(r.data.project, "alpha");
+  assert.equal(r.data.asOf, 1234);
+  assert.equal(r.data.active.length, 1);
+  assert.deepEqual(calls, [{ project: "alpha", asOfMs: 1234 }]);
+  // No project → the discovery read still resolves (project null).
+  const r2 = await engine.dispatch("read_facts", {}, {});
+  assert.equal(r2.ok, true);
+  assert.deepEqual(calls[1], { project: null, asOfMs: null });
+});
+
+test("read_profile and read_toolregistry surface the injected renderer payloads", async () => {
+  const engine = makeEngine({
+    readProfile: async () => ({ compiledAt: 7, skills: [] }),
+    readToolRegistry: async () => ({ compiledAt: 7, tools: [], never: [] }),
+  });
+  const r1 = await engine.dispatch("read_profile", {}, {});
+  assert.equal(r1.ok, true);
+  assert.equal(r1.data.compiledAt, 7);
+  const r2 = await engine.dispatch("read_toolregistry", {}, {});
+  assert.equal(r2.ok, true);
+  assert.deepEqual(r2.data.never, []);
+  // Engine-level failures degrade to structured errors, never throw.
+  const engine2 = makeEngine({ readProfile: async () => { throw new Error("boom"); } });
+  const r3 = await engine2.dispatch("read_profile", {}, {});
+  assert.equal(r3.ok, false);
+  assert.match(r3.error, /profile read failed/);
 });

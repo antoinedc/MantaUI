@@ -1672,6 +1672,13 @@ function getCtoEngine() {
         unregister: (id) => adaptiveCto.watchers.unregister(id),
         list: () => adaptiveCto.watchers.list(),
       },
+      // BET-1399 (§4.5): the remaining read verbs — Blackboard / profile /
+      // tool-registry drill-down renderers, resolved lazily like `watchers`
+      // (the adaptive engine is created later in module scope).
+      readFacts: async (input) => adaptiveCto.factsView(input?.project, { asOfMs: input?.asOfMs }),
+      readProfile: async () =>
+        composeProfileRender((await adaptiveCto.profile?.get?.()) || {}, { nowMs: Date.now() }),
+      readToolRegistry: async () => adaptiveCto.toolsView(),
     });
     adaptiveCtoInstance = engine;
   }
@@ -4701,7 +4708,100 @@ const handleRequest = async (req, res) => {
     return;
   }
 
-  // ---------- Suggestion engine reads (BET-1392, §9.1 + §14.3) ----------
+  // ---------- Blackboard drill-down (BET-1399, §10.5 row 1) ----------
+  // GET /api/cto/facts?project=&asOf= → the drill-down render model (active +
+  // superseded struck-through; asOf = bi-temporal reconstruction). The facts
+  // engine touches the active facts it renders (§6.4 access).
+  // GET /api/cto/facts/archive?project=&before=&limit= → read-only paginated
+  //   archive browser (§6.3), newest-first with a `before` cursor.
+  if (path === "/api/cto/facts/archive" || (path === "/api/cto/facts" && req.method === "GET")) {
+    try {
+      const url = new URL(req.url, "http://x");
+      const project = url.searchParams.get("project") ?? null;
+      if (path === "/api/cto/facts/archive") {
+        const before = url.searchParams.get("before") != null ? Number(url.searchParams.get("before")) : null;
+        const limit = url.searchParams.get("limit") != null ? Number(url.searchParams.get("limit")) : 50;
+        const out = await adaptiveCto.factsArchive(project, { before, limit });
+        respondJson(res, out?.ok ? 200 : 400, out);
+        return;
+      }
+      const asOfRaw = url.searchParams.get("asOf");
+      const asOfMs = asOfRaw != null && asOfRaw !== "" ? Number(asOfRaw) : null;
+      const out = await adaptiveCto.factsView(project, { asOfMs });
+      respondJson(res, 200, out);
+      return;
+    } catch (e) {
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // POST /api/cto/facts/correct {project, factId, statement} — the `wrong`
+  // action: queues a user supersession (gatekeeper auto-accepts — the user is
+  // authoritative) and writes the `correct` verdict on the fact's sender.
+  // POST /api/cto/facts/pin {project, factId} — the `pin` action: resets the
+  //   fact's access clock (§6.4). No verdict.
+  if (path === "/api/cto/facts/correct" || path === "/api/cto/facts/pin") {
+    try {
+      if (req.method !== "POST") {
+        respondJson(res, 405, { error: "method not allowed" });
+        return;
+      }
+      const body = await readJsonBody(req);
+      const result =
+        path === "/api/cto/facts/correct"
+          ? await adaptiveCto.correctFact(body)
+          : await adaptiveCto.factPin(body);
+      respondJson(res, result?.ok ? 200 : 400, result);
+      return;
+    } catch (e) {
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // ---------- Tool-integrations drill-down (BET-1399, §10.5 row 4) ----------
+  // GET /api/cto/tools → the registry table (tool, status, engagement,
+  //   vitality, derived role, consent rings, probe cadence + last result) +
+  //   the never list.
+  // POST /api/cto/tools/revoke {tool, ring} — per-ring revoke (writes the
+  //   ring to "no"; revoking metadata stops that tool's probes via the
+  //   consent gate). Every action reports its outcome.
+  // POST /api/cto/tools/unnever {tool} — clear the never verdict so the tool
+  //   re-enters the lifecycle at observed (§7.4).
+  if (path === "/api/cto/tools") {
+    try {
+      if (req.method !== "GET") {
+        respondJson(res, 405, { error: "method not allowed" });
+        return;
+      }
+      respondJson(res, 200, await adaptiveCto.toolsView());
+      return;
+    } catch (e) {
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+  if (path === "/api/cto/tools/revoke" || path === "/api/cto/tools/unnever") {
+    try {
+      if (req.method !== "POST") {
+        respondJson(res, 405, { error: "method not allowed" });
+        return;
+      }
+      const body = await readJsonBody(req);
+      const result =
+        path === "/api/cto/tools/revoke"
+          ? await adaptiveCto.tools?.revokeConsent(body?.tool, body?.ring)
+          : await adaptiveCto.tools?.unNever(body?.tool);
+      if (result?.ok) void bus.publish({ kind: "ctoState" });
+      respondJson(res, result?.ok ? 200 : 400, result);
+      return;
+    } catch (e) {
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
   // GET /api/cto/suggest/held → the held (silent-log) rows the silence audit's
   // "I held back N items — review?" aside links to. POST /api/cto/suggest/held
   //   body {id, verdict, never?} → a judgment on a held item through the B3

@@ -27,7 +27,7 @@ const CTO_TOOLS =
   "list_sessions, list_projects, read_transcript, search_messages, git_status, " +
   "git_branch, git_log, list_models, get_usage, usage_stopped, session_usage, " +
   "context_state, session_plan_mode, get_config, read_rollups, read_ledger, read_inbox, watch, unwatch, " +
-  "list_watches";
+  "list_watches, read_facts, read_profile, read_toolregistry";
 
 export const cto = tool({
   description: [
@@ -37,6 +37,14 @@ export const cto = tool({
     "CTO inbox (read_inbox — the notes any session sent via send_to_cto). Reads",
     "never mutate anything. The watch/unwatch/list_watches",
     "tools register watchers (watch is a confirm-mode action).",
+    "The Adaptive CTO's own state is readable too (read verbs, all read-only):",
+    "read_facts {project, asOf?} returns a project's Blackboard facts (kind,",
+    "statement, refs, confidence, sender, age) plus the superseded chain —",
+    "asOf (unix ms) reconstructs the live set at that time; omit project to",
+    "list projects. read_profile returns the editable user profile (§8).",
+    "read_toolregistry returns the external-tool registry (§7): status,",
+    "engagement/vitality, derived role, consent rings, probe cadence + last",
+    "result, and the never list.",
     `Pick \`tool\` from: ${CTO_TOOLS}.`,
     "Pass that tool's arguments as a free-form object in \`args\`",
     "(e.g. {tool:\"read_transcript\", args:{sessionID:\"ses_...\"}}).",

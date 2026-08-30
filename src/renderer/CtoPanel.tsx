@@ -71,7 +71,8 @@ import {
   type NowCard,
   type SuggestionOption,
 } from "./ctoSections";
-import type { CtoCard, CtoFinishedItem, CtoDigest, CtoHeldRow, CtoLedgerPage, CtoLedgerRow, CtoProfileRender, CtoSkill, CtoTonightTask } from "../shared/api.js";
+import type { CtoCard, CtoFinishedItem, CtoDigest, CtoHeldRow, CtoLedgerPage, CtoLedgerRow, CtoProfileRender, CtoSkill, CtoTonightTask, CtoFactsRender, CtoFactRow, CtoToolsRender, CtoToolRegistryRow } from "../shared/api.js";
+import { formatAge } from "./chatUtils";
 import { Toggle } from "./Toggle";
 
 // The effort-dial options (§12.1, D12). Plain-language scope per tier. Medium
@@ -135,7 +136,7 @@ export function CtoPanel({
   state: CtoState | null;
   onOpenSession: (sessionId: string) => void;
 }) {
-  const [view, setView] = useState<"overview" | "settings" | "ledger" | "profile">("overview");
+  const [view, setView] = useState<"overview" | "settings" | "ledger" | "profile" | "blackboard" | "tools">("overview");
   const pushToast = useStore((s) => s.pushAppToast);
 
   // --- data reads ---------------------------------------------------------
@@ -532,6 +533,8 @@ export function CtoPanel({
         onBack={() => setView("overview")}
         onLedger={() => setView("ledger")}
         onProfile={() => setView("profile")}
+        onBlackboard={() => setView("blackboard")}
+        onTools={() => setView("tools")}
         onResume={() => void resumeCto()}
       />
     );
@@ -541,6 +544,19 @@ export function CtoPanel({
   }
   if (view === "profile") {
     return <ProfileView onBack={() => setView("settings")} pushToast={pushToast} />;
+  }
+  if (view === "blackboard") {
+    return (
+      <BlackboardView
+        onBack={() => setView("settings")}
+        pushToast={pushToast}
+        onOpenSession={onOpenSession}
+        openableSessions={knownSessions}
+      />
+    );
+  }
+  if (view === "tools") {
+    return <ToolIntegrationsView onBack={() => setView("settings")} pushToast={pushToast} />;
   }
 
   return (
@@ -731,6 +747,8 @@ function SettingsView({
   onBack,
   onLedger,
   onProfile,
+  onBlackboard,
+  onTools,
   onResume,
 }: {
   paused: boolean;
@@ -738,6 +756,8 @@ function SettingsView({
   onBack: () => void;
   onLedger: () => void;
   onProfile: () => void;
+  onBlackboard: () => void;
+  onTools: () => void;
   onResume: () => void;
 }) {
   const pushToast = useStore((s) => s.pushAppToast);
@@ -1099,9 +1119,22 @@ function SettingsView({
             usageSnaps={usageSnaps}
           />
 
-          {/* ---------- Internals: Profile & rhythm + Activity ledger ---------- */}
+          {/* ---------- Internals: rows 1-4 of the §10.5 drill-down list ---------- */}
           <section className="rounded-lg border border-border-subtle p-4">
             <h3 className="text-sm font-semibold text-text">Internals</h3>
+            <button
+              type="button"
+              onClick={onBlackboard}
+              className="mt-2 flex w-full items-center justify-between rounded-md border border-border-subtle px-3 py-2 text-left hover:bg-fill-hover"
+            >
+              <span>
+                <span className="block text-sm font-medium text-text">Blackboard</span>
+                <span className="block text-xs text-text-muted">
+                  Facts per project — confidence, supersession, archive.
+                </span>
+              </span>
+              <span className="text-text-muted">›</span>
+            </button>
             <button
               type="button"
               onClick={onProfile}
@@ -1111,6 +1144,19 @@ function SettingsView({
                 <span className="block text-sm font-medium text-text">Profile &amp; rhythm</span>
                 <span className="block text-xs text-text-muted">
                   What the CTO believes about you — skills, sleep window, journal.
+                </span>
+              </span>
+              <span className="text-text-muted">›</span>
+            </button>
+            <button
+              type="button"
+              onClick={onTools}
+              className="mt-2 flex w-full items-center justify-between rounded-md border border-border-subtle px-3 py-2 text-left hover:bg-fill-hover"
+            >
+              <span>
+                <span className="block text-sm font-medium text-text">Tool integrations</span>
+                <span className="block text-xs text-text-muted">
+                  External tools — role, engagement, consent, probes.
                 </span>
               </span>
               <span className="text-text-muted">›</span>
@@ -1967,6 +2013,512 @@ function HeldListModal({
             </button>
           </div>
         ) : null}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Blackboard drill-down (BET-1399, §10.5 row 1)
+// ---------------------------------------------------------------------------
+// Facts per project: kind chip + confidence bar + statement + ref chips +
+// sender + age; the superseded chain struck-through; per-fact actions
+// wrong (user supersession, auto-accepted) + pin (touchFacts); and the
+// read-only paginated archive browser (§6.3).
+
+const FACT_KINDS = ["status", "decision", "preference", "event", "insight"] as const;
+
+function factKindChip(kind: string): string {
+  const k = (FACT_KINDS as readonly string[]).includes(kind) ? kind : "status";
+  const map: Record<string, string> = {
+    status: "border-border-subtle text-text-muted",
+    decision: "border-accent text-accent",
+    preference: "border-border-strong text-text",
+    event: "border-border-strong text-text-muted",
+    insight: "border-border-strong text-accent",
+  };
+  return map[k] ?? map.status;
+}
+
+function FactRow({
+  row,
+  struck,
+  onOpenSession,
+  openableSessions,
+}: {
+  row: CtoFactRow;
+  struck?: boolean;
+  onOpenSession?: (sessionId: string) => void;
+  openableSessions?: Set<string>;
+}) {
+  const pct = Math.round(Math.min(1, Math.max(0, row.confidence)) * 100);
+  return (
+    <div className="rounded-md border border-border-subtle px-3 py-2">
+      <div className="flex items-center gap-2">
+        <span className={"rounded-md border px-2 py-1 text-[10px] font-medium capitalize " + factKindChip(row.kind)}>
+          {row.kind}
+        </span>
+        <span className="min-w-0 flex-1 truncate text-sm text-text" style={struck ? { textDecoration: "line-through", opacity: 0.65 } : undefined}>
+          {row.statement}
+        </span>
+        <span className="shrink-0 text-[11px] text-text-faint" title={`confidence ${pct}%`}>
+          {pct}%
+        </span>
+      </div>
+      <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-fill-active">
+        <div className="h-full rounded-full bg-accent" style={{ width: `${pct}%` }} />
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-text-faint">
+        <span>{row.senderLabel}</span>
+        <span>· {formatAge(row.ageMs)} old</span>
+        {row.expired ? <span className="text-text-muted">· expired</span> : null}
+        {struck && row.supersededBy ? <span>· superseded by {row.supersededBy}</span> : null}
+        {row.refs.map((ref) => {
+          const openable = onOpenSession != null && openableSessions?.has(ref);
+          return openable ? (
+            <button
+              key={ref}
+              type="button"
+              onClick={() => onOpenSession(ref)}
+              className="truncate rounded-md bg-fill-active px-2 py-1 text-[10px] text-accent underline decoration-dotted underline-offset-2 hover:text-accent-strong focus-visible:outline focus-visible:outline-1 focus-visible:outline-accent"
+              title={`Open session ${ref}`}
+            >
+              {ref}
+            </button>
+          ) : (
+            <span key={ref} className="truncate rounded-md bg-fill-active px-2 py-1 text-[10px] text-text-muted" title={ref}>
+              {ref}
+            </span>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function BlackboardView({
+  onBack,
+  pushToast,
+  onOpenSession,
+  openableSessions,
+}: {
+  onBack: () => void;
+  pushToast: (t: { id: string; message: string }) => void;
+  onOpenSession: (sessionId: string) => void;
+  openableSessions: Set<string>;
+}) {
+  const [render, setRender] = useState<CtoFactsRender | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [tab, setTab] = useState<"facts" | "archive">("facts");
+  const [archive, setArchive] = useState<CtoFactRow[]>([]);
+  const [archiveTotal, setArchiveTotal] = useState(0);
+  const [nextBefore, setNextBefore] = useState<number | null>(null);
+  const [correcting, setCorrecting] = useState<string | null>(null);
+  const [correction, setCorrection] = useState("");
+
+  const refresh = useCallback(async () => {
+    const r = await window.api.ctoFactsGet({});
+    setRender(r);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const loadArchive = useCallback(
+    async (project: string | null, before?: number) => {
+      const page = await window.api.ctoFactsArchiveGet({ project, before });
+      if (!page.ok) {
+        pushToast({ id: `bb-arc-${Date.now()}`, message: page.error ?? "Couldn't load the archive" });
+        return;
+      }
+      setArchiveTotal(page.total);
+      setNextBefore(page.nextBefore);
+      setArchive((prev) => (before == null ? page.entries : [...prev, ...page.entries]));
+    },
+    [pushToast],
+  );
+
+  const openArchive = () => {
+    setTab("archive");
+    if (archive.length === 0) void loadArchive(render?.project ?? null);
+  };
+
+  const switchProject = async (project: string) => {
+    const r = await window.api.ctoFactsGet({ project });
+    setRender(r);
+    setArchive([]);
+    setArchiveTotal(0);
+    setNextBefore(null);
+    if (tab === "archive") void loadArchive(project);
+  };
+
+  const pin = async (row: CtoFactRow) => {
+    if (!render?.project) return;
+    const res = await window.api.ctoFactPin({ project: render.project, factId: row.id });
+    pushToast(
+      res.ok
+        ? { id: `bb-pin-${row.id}`, message: "Pinned — the access clock was reset" }
+        : { id: `bb-pin-err-${row.id}`, message: res.error ?? "Pin failed" },
+    );
+  };
+
+  const submitCorrection = async (row: CtoFactRow) => {
+    if (!render?.project) return;
+    const res = await window.api.ctoFactCorrect({ project: render.project, factId: row.id, statement: correction });
+    if (!res.ok) {
+      pushToast({ id: `bb-corr-err-${row.id}`, message: res.error ?? "Correction failed" });
+      return;
+    }
+    setCorrecting(null);
+    setCorrection("");
+    pushToast({ id: `bb-corr-${row.id}`, message: "Correction applied — the fact was superseded" });
+    void refresh();
+  };
+
+  return (
+    <div className="h-full w-full overflow-y-auto bg-bg">
+      <div className="mx-auto px-6 py-8" style={{ maxWidth: "var(--cto-col-max-w)" }}>
+        <button
+          type="button"
+          onClick={onBack}
+          className="rounded-md p-2 text-text-muted hover:bg-fill-hover hover:text-text"
+          aria-label="Back to CTO settings"
+        >
+          ← Back to settings
+        </button>
+        <div className="mt-4 flex items-center justify-between">
+          <h2 className="text-lg font-semibold text-text">Blackboard</h2>
+          <div className="flex gap-1 rounded-md border border-border-subtle p-1">
+            {(["facts", "archive"] as const).map((t) => (
+              <button
+                key={t}
+                type="button"
+                onClick={() => (t === "archive" ? openArchive() : setTab("facts"))}
+                className={"rounded-md px-3 py-1 text-xs capitalize " + (tab === t ? "bg-fill-active text-text" : "text-text-muted")}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {render && render.projects.length > 0 ? (
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <span className="text-xs uppercase tracking-wide text-text-faint">Project</span>
+            {render.projects.map((p) => (
+              <button
+                key={p}
+                type="button"
+                onClick={() => void switchProject(p)}
+                className={"max-w-56 truncate rounded-full border px-3 py-1 text-xs " + (render.project === p ? "border-accent bg-fill-hover text-text" : "border-border-subtle text-text-muted")}
+              >
+                {p}
+              </button>
+            ))}
+          </div>
+        ) : null}
+
+        {loading ? (
+          <div className="mt-4 text-sm text-text-muted">Loading…</div>
+        ) : tab === "facts" ? (
+          <>
+            {render && render.active.length > 0 ? (
+              <div className="mt-4 space-y-2">
+                {render.active.map((row) => (
+                  <div key={row.id}>
+                    <FactRow row={row} onOpenSession={onOpenSession} openableSessions={openableSessions} />
+                    {correcting === row.id ? (
+                      <div className="mt-2 rounded-md border border-border-subtle bg-fill px-3 py-2">
+                        <input
+                          type="text"
+                          value={correction}
+                          onChange={(e) => setCorrection(e.target.value)}
+                          placeholder="The correct statement…"
+                          maxLength={200}
+                          className="w-full rounded-md border border-border-subtle bg-bg px-2 py-1 text-sm text-text"
+                          autoFocus
+                        />
+                        <div className="mt-2 flex gap-2">
+                          <button
+                            type="button"
+                            onClick={() => void submitCorrection(row)}
+                            disabled={!correction.trim()}
+                            className="rounded-md bg-accent px-3 py-1 text-xs font-medium text-text disabled:opacity-40"
+                          >
+                            Supersede
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCorrecting(null);
+                              setCorrection("");
+                            }}
+                            className="rounded-md border border-border-subtle px-3 py-1 text-xs text-text-muted"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+                    <div className="mt-1 flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setCorrecting(correcting === row.id ? null : row.id)}
+                        className="rounded-md border border-border-subtle px-2 py-1 text-[11px] text-text-muted hover:text-text"
+                      >
+                        Wrong?
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void pin(row)}
+                        className="rounded-md border border-border-subtle px-2 py-1 text-[11px] text-text-muted hover:text-text"
+                      >
+                        Pin
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="mt-4 text-sm text-text-muted">No facts for this project yet.</div>
+            )}
+
+            {render && render.superseded.length > 0 ? (
+              <div className="mt-6">
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-text-faint">Superseded</h3>
+                <div className="mt-2 space-y-2">
+                  {render.superseded.map((row) => (
+                    <FactRow key={row.id} row={row} struck onOpenSession={onOpenSession} openableSessions={openableSessions} />
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            <p className="mt-4 text-xs text-text-faint">
+              Wrong? sends a correction — the CTO treats your statement as authoritative. Pin resets a fact&apos;s decay clock.
+            </p>
+          </>
+        ) : (
+          <>
+            <div className="mt-4 text-xs text-text-faint">Displaced facts, newest first ({archiveTotal} total).</div>
+            <div className="mt-2 space-y-2">
+              {archive.map((row) => (
+                <FactRow key={`${row.id}-${row.archivedAt}`} row={row} struck onOpenSession={onOpenSession} openableSessions={openableSessions} />
+              ))}
+            </div>
+            {nextBefore != null ? (
+              <button
+                type="button"
+                onClick={() => void loadArchive(render?.project ?? null, nextBefore)}
+                className="mt-3 rounded-md border border-border-subtle px-3 py-2 text-xs text-text-muted hover:text-text"
+              >
+                Load more
+              </button>
+            ) : null}
+            {archive.length === 0 ? <div className="mt-2 text-sm text-text-muted">The archive is empty.</div> : null}
+            <p className="mt-4 text-xs text-text-faint">Read-only — displaced facts stay out of the live board.</p>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tool integrations drill-down (BET-1399, §10.5 row 4)
+// ---------------------------------------------------------------------------
+// The §7.2 registry table: tool, derived §7.3 role (dead-tool flagged),
+// engagement + vitality axes, consent rings with per-ring revoke, §7.5 probe
+// cadence + last result, and the never list with un-never (§7.4).
+
+const RING_LABELS: Array<{ ring: "metadata" | "deep_read" | "write"; label: string }> = [
+  { ring: "metadata", label: "metadata" },
+  { ring: "deep_read", label: "deep read" },
+  { ring: "write", label: "write" },
+];
+
+const ROLE_LABELS: Record<string, string> = {
+  both: "workflow + data source",
+  workflow: "workflow",
+  "data-source": "data source",
+  dead: "dead — candidates for retirement",
+};
+
+function ToolIntegrationsView({
+  onBack,
+  pushToast,
+}: {
+  onBack: () => void;
+  pushToast: (t: { id: string; message: string }) => void;
+}) {
+  const [render, setRender] = useState<CtoToolsRender | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busyTool, setBusyTool] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    const r = await window.api.ctoToolsGet();
+    setRender(r);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const revoke = async (row: CtoToolRegistryRow, ring: "metadata" | "deep_read" | "write") => {
+    setBusyTool(row.tool);
+    const res = await window.api.ctoToolRevoke({ tool: row.tool, ring });
+    pushToast(
+      res.ok
+        ? { id: `ti-rev-${row.tool}-${ring}`, message: `Revoked ${ring.replace("_", " ")} consent for ${row.displayName}` }
+        : { id: `ti-rev-err-${row.tool}-${ring}`, message: res.error ?? "Revoke failed" },
+    );
+    setBusyTool(null);
+    if (res.ok) void refresh();
+  };
+
+  const unnever = async (row: CtoToolRegistryRow) => {
+    setBusyTool(row.tool);
+    const res = await window.api.ctoToolUnnever({ tool: row.tool });
+    pushToast(
+      res.ok
+        ? { id: `ti-un-${row.tool}`, message: `${row.displayName} re-enters the lifecycle at observed` }
+        : { id: `ti-un-err-${row.tool}`, message: res.error ?? "Un-never failed" },
+    );
+    setBusyTool(null);
+    if (res.ok) void refresh();
+  };
+
+  const toolBlock = (row: CtoToolRegistryRow) => (
+    <div key={row.tool} className="rounded-md border border-border-subtle px-3 py-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-sm font-medium text-text">{row.displayName}</span>
+        <span className="rounded-md border border-border-subtle px-2 py-1 text-[10px] capitalize text-text-muted">{row.status}</span>
+        {row.derivedRole ? (
+          <span
+            className={
+              "rounded-md border px-2 py-1 text-[10px] " +
+              (row.derivedRole === "dead" ? "border-accent text-accent" : "border-border-subtle text-text-muted")
+            }
+          >
+            {ROLE_LABELS[row.derivedRole] ?? row.derivedRole}
+          </span>
+        ) : null}
+        <span className="ml-auto text-[11px] text-text-faint">
+          {row.uses} uses · {row.weeksActive} wk active · ewma {row.ewmaPerWeek}/wk
+        </span>
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-text-faint">
+        <span>
+          vitality:{" "}
+          {row.vitality.ewma != null
+            ? `${Math.round(row.vitality.ewma * 100) / 100} inflow ewma`
+            : row.vitality.last_event != null
+              ? "probed, no inflow fields"
+              : "no probe data"}
+        </span>
+        {row.vitality.last_event != null ? <span>· last event {formatAge(Math.max(0, Date.now() - row.vitality.last_event))} ago</span> : null}
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        {RING_LABELS.map(({ ring, label }) => {
+          const value = row.consent[ring];
+          return (
+            <span key={ring} className="flex items-center gap-1 rounded-md border border-border-subtle px-2 py-1 text-[11px]">
+              <span className="text-text-muted">{label}</span>
+              <span className={value === "yes" ? "font-medium text-accent" : value === "never" ? "font-medium text-text" : "text-text-faint"}>
+                {value ?? "—"}
+              </span>
+              {value === "yes" ? (
+                <button
+                  type="button"
+                  disabled={busyTool === row.tool}
+                  onClick={() => void revoke(row, ring)}
+                  className="ml-1 text-[10px] text-text-faint hover:text-text"
+                  title={`Revoke ${label} consent (writes the ring to no)`}
+                >
+                  revoke
+                </button>
+              ) : null}
+            </span>
+          );
+        })}
+      </div>
+      <div className="mt-2 text-[11px] text-text-faint">
+        {row.probes.configured ? (
+          <span>
+            probes:{" "}
+            {row.probes.probes
+              .map((p) => {
+                const cadence = p.effectiveMs != null ? formatAge(p.effectiveMs) : "?";
+                const last = p.lastAt != null ? (p.lastOk ? `ok ${formatAge(Math.max(0, Date.now() - p.lastAt))} ago` : `fail: ${p.lastError ?? p.lastStatus ?? "?"}`) : "never run";
+                return `${p.name} every ${cadence} (${last})`;
+              })
+              .join("; ")}
+          </span>
+        ) : row.probes.consented ? (
+          <span>probes: consented, no spec written yet</span>
+        ) : (
+          <span>probes: paused — no metadata consent</span>
+        )}
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="h-full w-full overflow-y-auto bg-bg">
+      <div className="mx-auto px-6 py-8" style={{ maxWidth: "var(--cto-col-max-w)" }}>
+        <button
+          type="button"
+          onClick={onBack}
+          className="rounded-md p-2 text-text-muted hover:bg-fill-hover hover:text-text"
+          aria-label="Back to CTO settings"
+        >
+          ← Back to settings
+        </button>
+        <h2 className="mt-4 text-lg font-semibold text-text">Tool integrations</h2>
+
+        {loading ? (
+          <div className="mt-4 text-sm text-text-muted">Loading…</div>
+        ) : (
+          <>
+            {render && render.tools.length > 0 ? (
+              <div className="mt-4 space-y-2">
+                {render.tools.map((row) => toolBlock(row))}
+              </div>
+            ) : (
+              <div className="mt-4 text-sm text-text-muted">
+                No external tools observed yet — they appear here as evidence accumulates.
+              </div>
+            )}
+
+            {render && render.never.length > 0 ? (
+              <div className="mt-6">
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-text-faint">Never</h3>
+                <div className="mt-2 space-y-2">
+                  {render.never.map((row) => (
+                    <div key={row.tool} className="flex items-center justify-between rounded-md border border-border-subtle px-3 py-2">
+                      <span className="text-sm text-text-muted">{row.displayName}</span>
+                      <button
+                        type="button"
+                        disabled={busyTool === row.tool}
+                        onClick={() => void unnever(row)}
+                        className="rounded-md border border-border-subtle px-3 py-1 text-[11px] text-text-muted hover:text-text"
+                        title="Clear the never verdict — the tool re-enters the lifecycle at observed"
+                      >
+                        Un-never
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            <p className="mt-4 text-xs text-text-faint">
+              Revoking a ring is legal anytime — features that depended on it simply narrow. Dead-flagged tools have
+              prior engagement but no live engagement or vitality; candidates for retirement.
+            </p>
+          </>
+        )}
       </div>
     </div>
   );

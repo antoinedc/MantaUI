@@ -130,6 +130,12 @@ export function createCtoEngine(deps = {}) {
     // default keeps the read gateway resolving standalone; index.mjs wires this
     // to the adaptive engine's event-driven `watchers`.
     watchers = null,
+    // BET-1399 (§4.5): the remaining read verbs — the adaptive engine's
+    // drill-down renderers. Null defaults keep standalone tests honest (the
+    // tools report "not wired" rather than pretending to read nothing).
+    readFacts = null,
+    readProfile = null,
+    readToolRegistry = null,
     loadInbox = async () => inboxStore.load(),
     saveInbox = async (data) => inboxStore.save(data),
     now = () => Date.now(),
@@ -590,6 +596,74 @@ export function createCtoEngine(deps = {}) {
         return { ok: false, error: `usage read failed: ${e?.message ?? e}` };
       }
       return { ok: true, data: { snapshots: (Array.isArray(snaps) ? snaps : []).map((s) => ({ ...s })) } };
+    },
+  });
+
+  register({
+    name: "read_facts",
+    description:
+      "Read the Adaptive CTO's Blackboard facts for one project (spec §4.5/§6, BET-1399). " +
+      "Read-only. Returns the project's active facts (id, kind, statement, refs, " +
+      "confidence, sender, age) plus the superseded chain shown struck-through. " +
+      "`asOf` (unix ms) reconstructs the live set at that time by walking the " +
+      "supersession chain (bi-temporal read). Omitting `project` lists the " +
+      "known projects (discovery read).",
+    params: { project: null, asOf: null },
+    run: async (ctx, args) => {
+      if (typeof readFacts !== "function") return { ok: false, error: "read_facts is not wired" };
+      const asOf = typeof args?.asOf === "number" && Number.isFinite(args.asOf) && args.asOf > 0 ? args.asOf : null;
+      const project = typeof args?.project === "string" && args.project ? args.project : null;
+      try {
+        const view = await readFacts({ project, asOfMs: asOf });
+        return {
+          ok: true,
+          data: {
+            projects: view?.projects ?? [],
+            project: view?.project ?? null,
+            asOf: view?.asOf ?? null,
+            active: view?.active ?? [],
+            superseded: view?.superseded ?? [],
+          },
+        };
+      } catch (e) {
+        return { ok: false, error: `facts read failed: ${e?.message ?? e}` };
+      }
+    },
+  });
+
+  register({
+    name: "read_profile",
+    description:
+      "Read the Adaptive CTO's editable user profile (spec §4.5/§8, BET-1394). " +
+      "Read-only. Returns the per-dimension profile — stated values and inferences " +
+      "with statements, refs and confidence — as the drill-down render model.",
+    params: {},
+    run: async () => {
+      if (typeof readProfile !== "function") return { ok: false, error: "read_profile is not wired" };
+      try {
+        return { ok: true, data: await readProfile() };
+      } catch (e) {
+        return { ok: false, error: `profile read failed: ${e?.message ?? e}` };
+      }
+    },
+  });
+
+  register({
+    name: "read_toolregistry",
+    description:
+      "Read the Adaptive CTO's external-tool registry (spec §4.5/§7, BET-1399). " +
+      "Read-only. Per tool: lifecycle status, the §7.2 engagement + vitality axes, " +
+      "the derived §7.3 quadrant role (both / workflow / data-source / dead), the " +
+      "§7.4 consent rings, and the §7.5 probe cadence + last result; plus the " +
+      "never list (and what un-nevering would do).",
+    params: {},
+    run: async () => {
+      if (typeof readToolRegistry !== "function") return { ok: false, error: "read_toolregistry is not wired" };
+      try {
+        return { ok: true, data: await readToolRegistry() };
+      } catch (e) {
+        return { ok: false, error: `tool registry read failed: ${e?.message ?? e}` };
+      }
     },
   });
 
