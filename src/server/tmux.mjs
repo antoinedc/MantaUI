@@ -308,11 +308,26 @@ export function resolveOwner(raw) {
 // (or no session) to talk to — i.e. the box really does have zero sessions.
 // Anything else is a FAULT and must not be reported as "zero sessions".
 //
-// We deliberately match ONLY "no server running" and "no sessions". The
-// `error connecting to … (No such file or directory)` / `Connection refused`
-// variants are NOT genuine-empty: they indicate a restarted server or a
-// socket race, so they must surface as a fault (throw) rather than masquerade
-// as an empty box (BET-675).
+// Verified on tmux 3.4 (BET-1454). Do NOT re-tighten this a third time — this
+// is the second classifier regression already:
+//
+// | Box state                              | tmux stderr                                        | Truth       |
+// |----------------------------------------|----------------------------------------------------|-------------|
+// | socket never existed (fresh/dead box)  | `error connecting to <sock> (No such file or ...)` | no server   |
+// | socket left behind, server died        | `no server running on <sock>`                      | no server   |
+// | server alive, zero sessions            | (empty stdout, exit 0)                             | no sessions |
+//
+// Commit 688221fb matched the ENOENT row; commit 4b5a95db removed it on the
+// reasoning that ENOENT indicated "a restarted server or a socket race". That
+// premise is false: a restarted/dead server produces `no server running on`
+// (tmux unlinks the stale socket and says so); ENOENT means the socket was
+// never there — you cannot have sessions on a box whose tmux socket does not
+// exist. The no-server-shaped stderr we deliberately REJECT as a fault:
+// `error connecting to <sock>: Connection refused` (a stale socket that a
+// modern tmux would have self-cleaned — treated as a restart race, must
+// surface as a fault, never as a phantom empty box), `spawn tmux ENOENT`
+// (the tmux BINARY itself is missing) and hard-fault wording like
+// `lost server`.
 //
 // Pure + exported for tests.
 export function isNoTmuxServerError(err) {
@@ -320,7 +335,8 @@ export function isNoTmuxServerError(err) {
   if (!msg) return false;
   return (
     /no server running on/i.test(msg) ||
-    /no sessions?$/im.test(msg)
+    /no sessions?$/im.test(msg) ||
+    /error connecting to .*no such file or directory/i.test(msg)
   );
 }
 
@@ -333,12 +349,18 @@ export function isNoTmuxServerError(err) {
 // has no sessions, so the phone showed "No sessions yet. Tap + to create one."
 // with no error, and (worse) `reconcileOwnedSessions` pruned the ownership
 // sidecar against that phantom empty list. A fault must surface as a fault.
+//
+// Returns `{ stdout, swallowed }`. `swallowed: true` means the no-server
+// error was converted to an empty listing — i.e. this is NOT a genuine
+// listing of a live server, and consumers that prune state against the
+// result (see `listProjects` / `reconcileOwnedSessions`) must skip the
+// prune (BET-1454).
 async function tmuxListOutput(args) {
   try {
     const { stdout } = await run("tmux", args);
-    return stdout;
+    return { stdout, swallowed: false };
   } catch (e) {
-    if (isNoTmuxServerError(e)) return "";
+    if (isNoTmuxServerError(e)) return { stdout: "", swallowed: true };
     throw e;
   }
 }
@@ -346,16 +368,26 @@ async function tmuxListOutput(args) {
 export async function listProjects(installHome = INSTALL_HOME) {
   const sessFmt = `#{session_name}${FS}#{?session_attached,1,0}`;
   const winFmt = `#{session_name}${FS}#{window_index}${FS}#{window_name}${FS}#{?window_active,1,0}${FS}#{pane_current_path}${FS}#{@manta-session-id}${FS}#{@manta-worktree-path}${FS}#{@manta-owner}`;
-  const sess = { stdout: await tmuxListOutput(["list-sessions", "-F", sessFmt]) };
-  const wins = { stdout: await tmuxListOutput(["list-windows", "-a", "-F", winFmt]) };
+  const sess = await tmuxListOutput(["list-sessions", "-F", sessFmt]);
+  const wins = await tmuxListOutput(["list-windows", "-a", "-F", winFmt]);
   // BET-348: build the owned set from the cache (hydrated on first call),
   // reconcile it against the LIVE tmux session list — anything in the
   // sidecar that no longer exists gets pruned before we serve the listing,
   // so the renderer can't see a session that "remembers ownership" of a
   // session that was killed. Then stamp each session with mantaOwned.
+  //
+  // BET-1454: a swallowed listing (no tmux server — dead box, fresh boot) is
+  // NOT a genuine empty box. reconcileOwnedSessions prunes every sidecar
+  // entry not in the live list, so pruning against the phantom `[]` would
+  // wipe `~/.manta/tmux-sessions.json` on exactly the event the topology
+  // epic exists to survive. Skip the prune entirely and stamp `mantaOwned`
+  // from the unpruned cache instead; the next GENUINE listing reconciles
+  // as before.
   const parsedSess = parseSessions(sess.stdout, "");
   const liveNames = parsedSess.map((p) => p.tmuxSession);
-  const owned = await reconcileOwnedSessions(liveNames);
+  const owned = sess.swallowed
+    ? await getOwnedSessions(ownedSessionsCachePath)
+    : await reconcileOwnedSessions(liveNames);
   const projects = parseSessions(sess.stdout, wins.stdout, owned);
   // BET-995: the box runs its own session FROM its install dir, so that dir
   // surfaces as an "available project" in onboarding. Never offer the server's
@@ -688,7 +720,7 @@ export async function stampOwner(sessionName, windowIndex, owner) {
 export async function findWindowForCwd(cwd) {
   const dir = expandTilde(cwd ?? "");
   if (!dir) return null;
-  const stdout = await tmuxListOutput([
+  const { stdout } = await tmuxListOutput([
     "list-windows", "-a",
     "-F", `#{session_name}${FS}#{window_index}${FS}#{pane_current_path}`,
   ]);
