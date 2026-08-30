@@ -49,6 +49,7 @@ import {
   forecastAccuracyRows,
   bindingReserveFrac,
   budgetTodayUsd,
+  refChipAction,
   type BlockerCard,
   type ConnectCardRow,
   type CtoState,
@@ -2066,11 +2067,13 @@ function FactRow({
   row,
   struck,
   onOpenSession,
+  onOpenRef,
   openableSessions,
 }: {
   row: CtoFactRow;
   struck?: boolean;
   onOpenSession?: (sessionId: string) => void;
+  onOpenRef?: (ref: string) => void;
   openableSessions?: Set<string>;
 }) {
   const pct = Math.round(Math.min(1, Math.max(0, row.confidence)) * 100);
@@ -2096,21 +2099,27 @@ function FactRow({
         {row.expired ? <span className="text-text-muted">· expired</span> : null}
         {struck && row.supersededBy ? <span>· superseded by {row.supersededBy}</span> : null}
         {row.refs.map((ref) => {
-          const openable = onOpenSession != null && openableSessions?.has(ref);
-          return openable ? (
+          const chip = refChipAction(ref, openableSessions);
+          return chip.kind === "jump" ? (
             <button
               key={ref}
               type="button"
-              onClick={() => onOpenSession(ref)}
+              onClick={() => onOpenSession?.(ref)}
               className="truncate rounded-md bg-fill-active px-2 py-1 text-[10px] text-accent underline decoration-dotted underline-offset-2 hover:text-accent-strong focus-visible:outline focus-visible:outline-1 focus-visible:outline-accent"
-              title={`Open session ${ref}`}
+              title={chip.title}
             >
               {ref}
             </button>
           ) : (
-            <span key={ref} className="truncate rounded-md bg-fill-active px-2 py-1 text-[10px] text-text-muted" title={ref}>
+            <button
+              key={ref}
+              type="button"
+              onClick={() => onOpenRef?.(ref)}
+              className="truncate rounded-md bg-fill-active px-2 py-1 text-[10px] text-text-muted hover:text-text focus-visible:outline focus-visible:outline-1 focus-visible:outline-accent"
+              title={chip.title}
+            >
               {ref}
-            </span>
+            </button>
           );
         })}
       </div>
@@ -2129,6 +2138,20 @@ function BlackboardView({
   onOpenSession: (sessionId: string) => void;
   openableSessions: Set<string>;
 }) {
+  // Non-session refs have no server-side resolver (§6.1 bare provenance) —
+  // the honest action is copy-to-clipboard, same as the Profile view's
+  // evidence chips. Every chip responds; none is a dead control.
+  const copyRef = useCallback(
+    async (ref: string) => {
+      try {
+        await navigator.clipboard.writeText(ref);
+      } catch {
+        /* clipboard can be denied; the chip still responds */
+      }
+      pushToast({ id: `bb-ref-${ref}`, message: `Copied evidence ref: ${ref}` });
+    },
+    [pushToast],
+  );
   const [render, setRender] = useState<CtoFactsRender | null>(null);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<"facts" | "archive">("facts");
@@ -2250,7 +2273,7 @@ function BlackboardView({
               <div className="mt-4 space-y-2">
                 {render.active.map((row) => (
                   <div key={row.id}>
-                    <FactRow row={row} onOpenSession={onOpenSession} openableSessions={openableSessions} />
+                    <FactRow row={row} onOpenSession={onOpenSession} onOpenRef={(r) => void copyRef(r)} openableSessions={openableSessions} />
                     {correcting === row.id ? (
                       <div className="mt-2 rounded-md border border-border-subtle bg-fill px-3 py-2">
                         <input
@@ -2312,7 +2335,7 @@ function BlackboardView({
                 <h3 className="text-xs font-semibold uppercase tracking-wide text-text-faint">Superseded</h3>
                 <div className="mt-2 space-y-2">
                   {render.superseded.map((row) => (
-                    <FactRow key={row.id} row={row} struck onOpenSession={onOpenSession} openableSessions={openableSessions} />
+                    <FactRow key={row.id} row={row} struck onOpenSession={onOpenSession} onOpenRef={(r) => void copyRef(r)} openableSessions={openableSessions} />
                   ))}
                 </div>
               </div>
@@ -2326,7 +2349,7 @@ function BlackboardView({
             <div className="mt-4 text-xs text-text-faint">Displaced facts, newest first ({archiveTotal} total).</div>
             <div className="mt-2 space-y-2">
               {archive.map((row) => (
-                <FactRow key={`${row.id}-${row.archivedAt}`} row={row} struck onOpenSession={onOpenSession} openableSessions={openableSessions} />
+                <FactRow key={`${row.id}-${row.archivedAt}`} row={row} struck onOpenSession={onOpenSession} onOpenRef={(r) => void copyRef(r)} openableSessions={openableSessions} />
               ))}
             </div>
             {nextBefore != null ? (
