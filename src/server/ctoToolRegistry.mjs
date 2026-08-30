@@ -324,6 +324,19 @@ export function createToolRegistry(deps = {}) {
     await registryStore.save(payload);
   }
 
+  // Shared preamble for the tool-scoped writers: normalize the toolId, load
+  // the whole-payload store, find the row. Returns `{ ok: false, error }` on
+  // failure or `{ ok: true, id, payload, t }` on success. Single source for
+  // the block the duplication gate flagged file↔file (BET-1440).
+  async function resolveToolRow(toolId) {
+    const id = typeof toolId === "string" ? toolId.trim().toLowerCase() : "";
+    if (!id) return { ok: false, error: "missing tool" };
+    const payload = await loadPayload();
+    const t = payload.tools.find((x) => x?.tool === id);
+    if (!t) return { ok: false, error: `unknown tool "${id}"` };
+    return { ok: true, id, payload, t };
+  }
+
   // Serializes the registry's mutating writers (dailyScan / resolveConnect /
   // unNever) — all load→mutate→save the same whole-payload store, and the
   // scan holds its snapshot across seconds-long awaits (db batch, LLM
@@ -658,11 +671,9 @@ export function createToolRegistry(deps = {}) {
   // exists to prevent). The server rule ships here; the drill-down UI/route
   // is B11's.
   async function unNever(toolId) {
-    const id = typeof toolId === "string" ? toolId.trim().toLowerCase() : "";
-    if (!id) return { ok: false, error: "missing tool" };
-    const payload = await loadPayload();
-    const t = payload.tools.find((x) => x?.tool === id);
-    if (!t) return { ok: false, error: `unknown tool "${id}"` };
+    const r = await resolveToolRow(toolId);
+    if (!r.ok) return r;
+    const { id, payload, t } = r;
     if (t.consent?.metadata !== "never") return { ok: false, error: `tool "${id}" is not never'd` };
     t.consent = emptyConsent();
     t.status = "observed";
@@ -733,11 +744,9 @@ export function createToolRegistry(deps = {}) {
   // NOTE: the body does NOT self-serialize — the exported wrapper already
   // routes through `serialized` (nesting would deadlock the write chain).
   async function applyProbeResult(toolId, { fields, probedAt, cadenceMs } = {}) {
-    const id = typeof toolId === "string" ? toolId.trim().toLowerCase() : "";
-    if (!id) return { ok: false, error: "missing tool" };
-    const payload = await loadPayload();
-    const t = payload.tools.find((x) => x?.tool === id);
-    if (!t) return { ok: false, error: `unknown tool "${id}"` };
+    const r = await resolveToolRow(toolId);
+    if (!r.ok) return r;
+    const { id, payload, t } = r;
     const vit = vitalityOf(fields);
     t.vitality = t.vitality ?? { last_event: null, inflow_rate: null, ewma: null, last_probed: null };
     const v = t.vitality;
