@@ -846,7 +846,18 @@ export function createProbes(deps = {}) {
     }
 
     const vit = registry.toolRow ? await registry.toolRow(tool) : null;
-    const cadence = effectiveCadenceMs(cadenceMs(probe.cadence), vit?.vitality);
+    let cadence = effectiveCadenceMs(cadenceMs(probe.cadence), vit?.vitality);
+    // §7.6 decay chain (BET-1404, Q2 cascade): a chain-tripped tool probes at
+    // most weekly — the registry is the chain's source of truth, the runner
+    // just asks. The cap only ever slows probing down (max, never min).
+    if (registry.probeCadenceCapMs) {
+      try {
+        const cap = await registry.probeCadenceCapMs(tool);
+        if (Number.isFinite(cap) && cap > 0) cadence = Math.max(cadence, cap);
+      } catch {
+        /* best-effort — the standard cadence stands */
+      }
+    }
 
     if (ok) {
       // Vitality + adaptive cadence + lifecycle (§7.3, §7.4).
@@ -974,6 +985,20 @@ export function createProbes(deps = {}) {
           (typeof pst.nextRunAt === "number" && pst.nextRunAt <= ts);
         if (!due) continue;
         if (thrifty && !exempt.has(probeKey(tool, probe.name))) continue;
+        // Deep-ring probes run only while the tool's deep_read consent is
+        // CURRENTLY "yes" (BET-1404). The authoring gate validated the spec
+        // against the ring at write time; this re-checks the live source of
+        // truth so a revocation stops deep probes on the next tick without
+        // invalidating the tool's metadata probes.
+        if (probe.ring === "deep_read") {
+          let deepOk = false;
+          try {
+            deepOk = (await registry.consentFor(tool, "deep_read")) === "yes";
+          } catch {
+            deepOk = false;
+          }
+          if (!deepOk) continue;
+        }
         results.push(await runOne(tool, spec, probe, st, { ts }));
         touched = true;
       }
