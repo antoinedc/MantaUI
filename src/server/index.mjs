@@ -74,6 +74,7 @@ import { attachCallWs, createCallRegistry } from "./callWs.mjs";
 import { buildHandlers, handleRpcRequest } from "./rpc.mjs";
 import { startStatusPoller } from "./status.mjs";
 import { createSyncState } from "./syncState.mjs";
+import { createTopologyPersister } from "./topology.mjs";
 import { createStreamInterpreter } from "./streamInterp.mjs";
 import { enrichProviderError } from "../shared/streamInterpretation.mjs";
 import { providerStateLabel } from "../shared/providerHealthLabel.mjs";
@@ -292,8 +293,20 @@ const BUS_PUBLISH_DEPS = { publish: (evt) => bus.publish(evt) };
 // published on the bus as state changes so clients can recover just what they
 // missed. `refreshNow()` is driven by the poller below; `tmux:list` lazily
 // guarantees a first tick before serving anything.
+// BET-1452: durable chat-window topology snapshot (~/.manta/topology.json) —
+// hydrated by a later stage across box-server restarts. Wrapping the
+// `listProjects` DEP (not the poller) means every refresh path — the startup
+// lazy tick, the 2s poller, the rename-session re-materialize — snapshots the
+// exact same tree syncState applies, including a tmux fault aborting before
+// any persist (the dep throws first). A persist failure is swallowed so it
+// can never flip refreshNow into stale=true.
+const persistTopology = createTopologyPersister({});
 const syncState = createSyncState({
-  listProjects: () => tmux.listProjects(),
+  listProjects: async () => {
+    const projects = await tmux.listProjects();
+    await persistTopology(projects).catch(() => {});
+    return projects;
+  },
   publish: (env) => bus.publish(env),
 });
 // Seed the config baseline at startup so the first snapshot already carries it.
