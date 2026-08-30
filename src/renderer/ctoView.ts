@@ -668,3 +668,23 @@ export async function executeSuggestionOption({
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
 }
+
+// ---------------------------------------------------------------------------
+// Blackboard fact-ref chips (BET-1441, §10.5 row 1 + §6.1)
+// ---------------------------------------------------------------------------
+// A fact's refs are bare provenance strings (§6.1): some are opencode session
+// ids (jumpable), the rest have no server-side resolver in the render model —
+// same precedent as the Profile view's top-3 evidence chips. Every chip still
+// responds: jump when the target session exists, copy-the-ref otherwise —
+// never a dead control.
+
+export type RefChipAction =
+  | { kind: "jump"; title: string }
+  | { kind: "copy"; title: string };
+
+export function refChipAction(ref: string, openableSessions?: Set<string>): RefChipAction {
+  if (ref && openableSessions?.has(ref)) {
+    return { kind: "jump", title: `Open session ${ref}` };
+  }
+  return { kind: "copy", title: ref };
+}

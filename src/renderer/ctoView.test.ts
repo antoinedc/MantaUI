@@ -644,3 +644,58 @@ describe("forecastAccuracyRows", () => {
     expect(forecastAccuracyRows(null)).toEqual([]);
   });
 });
+
+describe("refChipAction (BET-1441 — blackboard fact-ref chips)", () => {
+  const sessions = new Set(["ses_1", "ses_2"]);
+
+  it("jumps when the ref is a known openable session", () => {
+    expect(refChipAction("ses_1", sessions)).toEqual({
+      kind: "jump",
+      title: "Open session ses_1",
+    });
+  });
+
+  it("copies when the ref is bare provenance (msg:/ref:/file paths)", () => {
+    expect(refChipAction("msg:12", sessions)).toEqual({ kind: "copy", title: "msg:12" });
+    expect(refChipAction("ref:9", sessions)).toEqual({ kind: "copy", title: "ref:9" });
+    expect(refChipAction("/srv/app/src/x.ts", sessions)).toEqual({
+      kind: "copy",
+      title: "/srv/app/src/x.ts",
+    });
+  });
+
+  it("copies when no openable-session set is provided", () => {
+    expect(refChipAction("ses_1", undefined)).toEqual({ kind: "copy", title: "ses_1" });
+    expect(refChipAction("ses_1", new Set())).toEqual({ kind: "copy", title: "ses_1" });
+  });
+
+  it("never jumps on an empty ref", () => {
+    expect(refChipAction("", sessions).kind).toBe("copy");
+  });
+});
+
+// --- BET-1441: blackboard fact-ref chip decisions --------------------------
+
+import { refChipAction } from "./ctoView";
+
+describe("refChipAction", () => {
+  const sessions = new Set(["ses_1", "ses_2"]);
+  it("jumps when the ref is a known openable session", () => {
+    expect(refChipAction("ses_1", sessions)).toEqual({
+      kind: "jump",
+      title: "Open session ses_1",
+    });
+  });
+  it("copies bare provenance refs (no server-side resolver)", () => {
+    expect(refChipAction("msg:12", sessions)).toEqual({ kind: "copy", title: "msg:12" });
+    expect(refChipAction("ref:9", sessions)).toEqual({ kind: "copy", title: "ref:9" });
+    expect(refChipAction("/srv/x.ts", sessions)).toEqual({ kind: "copy", title: "/srv/x.ts" });
+  });
+  it("copies when no session set is provided", () => {
+    expect(refChipAction("ses_1").kind).toBe("copy");
+    expect(refChipAction("ses_1", new Set()).kind).toBe("copy");
+  });
+  it("never jumps on an empty ref", () => {
+    expect(refChipAction("", sessions).kind).toBe("copy");
+  });
+});
