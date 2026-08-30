@@ -847,6 +847,19 @@ test("probeBlockerCopy names the key + the secrets surface; titles name the rota
   assert.ok(!noKey.body.includes("GITHUB_TOKEN"), "no cross-tool key leakage");
 });
 
+test("probeBlockerCopy names the REAL secrets surface (the chat SecretsCard), never Settings → Secrets (BET-1443)", () => {
+  const withKey = probeBlockerCopy("github", "repo_events", "GITHUB_TOKEN");
+  const noKey = probeBlockerCopy("gitlab", "issues");
+  for (const copy of [withKey, noKey]) {
+    // The real surface: the 🔑 secrets card in the chat session (the
+    // BET-1437 deep-link target — probeSecretKey still parses the key name
+    // from the "on the secrets surface" phrase).
+    assert.match(copy.body, /secrets card/);
+    assert.match(copy.body, /chat session/);
+    assert.ok(!copy.body.includes("Settings"), "no phantom Settings → Secrets section");
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Registry vitality fold (§7.3 math) — through the real registry
 // ---------------------------------------------------------------------------
