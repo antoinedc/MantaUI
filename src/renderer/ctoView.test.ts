@@ -19,6 +19,7 @@ import {
   nowRailMeta,
   digestEvidenceAction,
   refChipAction,
+  evidenceExpansion,
   type CtoState,
   type CtoHealthStat,
 } from "./ctoView";
@@ -703,4 +704,38 @@ describe("digestEvidenceAction (BET-1447 — digest 'view evidence' chips)", () 
     expect(digestEvidenceAction(["", "ses_1"], sessions)).toEqual({ kind: "jump", ref: "ses_1" });
   });
 });
+
+describe("evidenceExpansion (BET-1442 — probe/statement refs fall back to inline evidence)", () => {
+  const sessions = new Set(["ses_1", "ses_2"]);
+
+  it("routes every ref through refChipAction, preserving order", () => {
+    expect(evidenceExpansion(["ses_1", "msg:12", "a1b2c3d"], sessions)).toEqual([
+      { ref: "ses_1", kind: "jump", title: "Open session ses_1" },
+      { ref: "msg:12", kind: "copy", title: "msg:12" },
+      { ref: "a1b2c3d", kind: "copy", title: "a1b2c3d" },
+    ]);
+  });
+
+  it("marks probe-style refs (commit shas, file paths, probe ids) as expandable", () => {
+    const chips = evidenceExpansion(["1a2b3c4d7e8f", "/etc/manta/config.json", "probe_7f3a"], new Set());
+    expect(chips.every((chip) => chip.kind === "copy")).toBe(true);
+  });
+
+  it("falls back to inline expansion when no session set is provided", () => {
+    expect(evidenceExpansion(["ses_1"], undefined)).toEqual([
+      { ref: "ses_1", kind: "copy", title: "ses_1" },
+    ]);
+  });
+
+  it("returns empty expansion for empty or missing refs", () => {
+    expect(evidenceExpansion(undefined, sessions)).toEqual([]);
+    expect(evidenceExpansion([], sessions)).toEqual([]);
+  });
+
+  it("never marks the empty ref as expandable evidence", () => {
+    const chips = evidenceExpansion([""], sessions);
+    expect(chips).toEqual([{ ref: "", kind: "copy", title: "" }]);
+  });
+});
+
 
