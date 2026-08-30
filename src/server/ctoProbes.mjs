@@ -1406,7 +1406,7 @@ export function createProbes(deps = {}) {
       `Tool "${tool}" provides external data (evidence: ${domain}).`,
       `Project "${project}" blackboard facts:`,
       factLines(facts) || "(none)",
-      rollupLines(rollups) ? `Recent rollups:\n${rollupLines(rollups)}` : "",
+      rollupLines(rollups) ? `Recent rollups for this project:\n${rollupLines(rollups)}` : "",
       "",
       "Score how relevant this tool's data domain is to the project's active work: 0.0 (unrelated) to 1.0 (core data source for this work).",
       "Reply with ONLY the number.",
