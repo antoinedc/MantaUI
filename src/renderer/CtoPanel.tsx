@@ -546,7 +546,14 @@ export function CtoPanel({
     return <ProfileView onBack={() => setView("settings")} pushToast={pushToast} />;
   }
   if (view === "blackboard") {
-    return <BlackboardView onBack={() => setView("settings")} pushToast={pushToast} />;
+    return (
+      <BlackboardView
+        onBack={() => setView("settings")}
+        pushToast={pushToast}
+        onOpenSession={onOpenSession}
+        openableSessions={knownSessions}
+      />
+    );
   }
   if (view === "tools") {
     return <ToolIntegrationsView onBack={() => setView("settings")} pushToast={pushToast} />;
@@ -2033,7 +2040,17 @@ function factKindChip(kind: string): string {
   return map[k] ?? map.status;
 }
 
-function FactRow({ row, struck }: { row: CtoFactRow; struck?: boolean }) {
+function FactRow({
+  row,
+  struck,
+  onOpenSession,
+  openableSessions,
+}: {
+  row: CtoFactRow;
+  struck?: boolean;
+  onOpenSession?: (sessionId: string) => void;
+  openableSessions?: Set<string>;
+}) {
   const pct = Math.round(Math.min(1, Math.max(0, row.confidence)) * 100);
   return (
     <div className="rounded-md border border-border-subtle px-3 py-2">
@@ -2056,11 +2073,24 @@ function FactRow({ row, struck }: { row: CtoFactRow; struck?: boolean }) {
         <span>· {formatAge(row.ageMs)} old</span>
         {row.expired ? <span className="text-text-muted">· expired</span> : null}
         {struck && row.supersededBy ? <span>· superseded by {row.supersededBy}</span> : null}
-        {row.refs.map((ref) => (
-          <span key={ref} className="truncate rounded-md bg-fill-active px-2 py-1 text-[10px] text-text-muted" title={ref}>
-            {ref}
-          </span>
-        ))}
+        {row.refs.map((ref) => {
+          const openable = onOpenSession != null && openableSessions?.has(ref);
+          return openable ? (
+            <button
+              key={ref}
+              type="button"
+              onClick={() => onOpenSession(ref)}
+              className="truncate rounded-md bg-fill-active px-2 py-1 text-[10px] text-accent underline decoration-dotted underline-offset-2 hover:text-accent-strong focus-visible:outline focus-visible:outline-1 focus-visible:outline-accent"
+              title={`Open session ${ref}`}
+            >
+              {ref}
+            </button>
+          ) : (
+            <span key={ref} className="truncate rounded-md bg-fill-active px-2 py-1 text-[10px] text-text-muted" title={ref}>
+              {ref}
+            </span>
+          );
+        })}
       </div>
     </div>
   );
@@ -2069,9 +2099,13 @@ function FactRow({ row, struck }: { row: CtoFactRow; struck?: boolean }) {
 function BlackboardView({
   onBack,
   pushToast,
+  onOpenSession,
+  openableSessions,
 }: {
   onBack: () => void;
   pushToast: (t: { id: string; message: string }) => void;
+  onOpenSession: (sessionId: string) => void;
+  openableSessions: Set<string>;
 }) {
   const [render, setRender] = useState<CtoFactsRender | null>(null);
   const [loading, setLoading] = useState(true);
@@ -2194,7 +2228,7 @@ function BlackboardView({
               <div className="mt-4 space-y-2">
                 {render.active.map((row) => (
                   <div key={row.id}>
-                    <FactRow row={row} />
+                    <FactRow row={row} onOpenSession={onOpenSession} openableSessions={openableSessions} />
                     {correcting === row.id ? (
                       <div className="mt-2 rounded-md border border-border-subtle bg-fill px-3 py-2">
                         <input
@@ -2256,7 +2290,7 @@ function BlackboardView({
                 <h3 className="text-xs font-semibold uppercase tracking-wide text-text-faint">Superseded</h3>
                 <div className="mt-2 space-y-2">
                   {render.superseded.map((row) => (
-                    <FactRow key={row.id} row={row} struck />
+                    <FactRow key={row.id} row={row} struck onOpenSession={onOpenSession} openableSessions={openableSessions} />
                   ))}
                 </div>
               </div>
@@ -2270,7 +2304,7 @@ function BlackboardView({
             <div className="mt-4 text-xs text-text-faint">Displaced facts, newest first ({archiveTotal} total).</div>
             <div className="mt-2 space-y-2">
               {archive.map((row) => (
-                <FactRow key={`${row.id}-${row.archivedAt}`} row={row} struck />
+                <FactRow key={`${row.id}-${row.archivedAt}`} row={row} struck onOpenSession={onOpenSession} openableSessions={openableSessions} />
               ))}
             </div>
             {nextBefore != null ? (
