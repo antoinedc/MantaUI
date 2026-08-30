@@ -729,7 +729,16 @@ export function createProbes(deps = {}) {
     if (!raw || typeof raw !== "object") return null;
     const ctx = await consentContext(tool);
     const check = validateProbeSpec(raw, { tool, allowedHosts: ctx.allowedHosts, consentedRing: ctx.consentedRing });
-    return check.ok ? { spec: raw, ctx } : null;
+    if (check.ok) return { spec: raw, ctx };
+    // A consent REVOCATION narrows the tool's ring after authoring: ring-
+    // escalation errors drop just those probes (the tool's metadata probes
+    // keep running — losing deep_read must not invalidate the whole spec).
+    // Any other validation failure still does.
+    const escalated = new Set(check.errors.filter((e) => typeof e?.key === "string" && e.key.endsWith(".ring")).map((e) => e.key));
+    if (escalated.size === 0 || check.errors.length > escalated.size) return null;
+    const kept = (Array.isArray(raw.probes) ? raw.probes : []).filter((_, i) => !escalated.has(`probes[${i}].ring`));
+    if (kept.length === 0) return null;
+    return { spec: { ...raw, probes: kept }, ctx };
   }
 
   // ---- spec authoring (engine-written; the AI's content goes through here) —

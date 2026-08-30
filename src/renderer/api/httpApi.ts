@@ -1887,6 +1887,7 @@ export const httpApi: Api = {
   ctoToolConnect: async (input: {
     tool: string;
     answer: "connect" | "not-now" | "never";
+    ring?: "metadata" | "deep_read";
   }): Promise<{ ok: boolean; error?: string; tool?: string; answer?: string }> => {
     const url = `${serverBase()}/api/cto/tools/connect`;
     try {

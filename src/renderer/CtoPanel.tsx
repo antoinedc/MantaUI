@@ -354,17 +354,26 @@ export function CtoPanel({
   // all three; the client toasts the outcome and refreshes the cards.
   const handleConnectAnswer = useCallback(
     (card: ConnectCardRow, answer: string) => {
-      const tool = (card.options ?? []).find((o) => o.answer === answer)?.action?.payload?.tool;
+      const option = (card.options ?? []).find((o) => o.answer === answer);
+      const tool = option?.action?.payload?.tool;
       const toolId = typeof tool === "string" ? tool : card.id;
+      const ring = option?.action?.payload?.ring;
+      const deepRead = ring === "deep_read";
       void window.api
-        ?.ctoToolConnect?.({ tool: toolId, answer: answer as "connect" | "not-now" | "never" })
+        ?.ctoToolConnect?.({
+          tool: toolId,
+          answer: answer as "connect" | "not-now" | "never",
+          ...(deepRead ? { ring: "deep_read" as const } : {}),
+        })
         .then((r) => {
           if (r?.ok) {
             pushToast({
               id: `connect-${Date.now()}`,
               message:
                 answer === "connect"
-                  ? "Connected read-only — metadata consent granted"
+                  ? deepRead
+                    ? "Connected — deep read access granted"
+                    : "Connected read-only — metadata consent granted"
                   : answer === "never"
                     ? "Will not connect to this tool"
                     : "Not now — I'll ask again later",
