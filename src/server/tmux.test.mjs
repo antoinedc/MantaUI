@@ -394,12 +394,14 @@ test("isNoTmuxServerError separates 'no tmux server' from a real fault", () => {
     isNoTmuxServerError(new Error("tmux exited 1: error connecting to /tmp/tmux-1000/default (No such file or directory)")),
     true,
   );
-  // A stale socket that still answers with Connection refused IS a restart
-  // race (modern tmux self-cleans it into `no server running on`) — keep it
-  // a fault so a transient restart can never masquerade as an empty box.
+  // Connection refused: the issue's pinned spec classifies the whole
+  // `error connecting to …` family as no-server. Measured on this box's
+  // tmux 3.4 a stale socket (true ECONNREFUSED) is self-cleaned by tmux into
+  // `no server running on` — so this arm is belt-and-braces for builds that
+  // emit the literal stderr, and harmless to swallow either way.
   assert.equal(
     isNoTmuxServerError(new Error("tmux exited 1: error connecting to /tmp/tmux-1000/default: Connection refused")),
-    false,
+    true,
   );
   assert.equal(isNoTmuxServerError(new Error("tmux exited 1: no sessions")), true);
   assert.equal(isNoTmuxServerError(new Error("spawn tmux ENOENT")), false);
@@ -450,17 +452,31 @@ test("listProjects THROWS on a tmux fault rather than reporting zero sessions", 
   }
 });
 
-// BET-675: a socket race ("error connecting …: Connection refused") is a
-// FAULT, not an empty box — it must throw out of listProjects, never
-// quietly return an empty list. (The never-created-socket ENOENT variant IS
-// a genuine empty box now — see the ENOENT swallow test above.)
-test("listProjects THROWS on a tmux socket-race fault, not empty", async () => {
+// BET-1454 review: `Connection refused` is part of the pinned no-server
+// family (the issue's Change-1 clause) — same swallow as ENOENT. Real tmux
+// 3.4 usually self-cleans a stale socket into `no server running on`, so
+// this arm rarely fires; either way it must not throw a phantom fault.
+test("listProjects returns [] on a Connection-refused stderr (no-server family)", async () => {
   _resetOwnedSessionsCache();
   _setRun(async () => {
     throw new Error("tmux exited 1: error connecting to /tmp/tmux-1000/default: Connection refused");
   });
   try {
-    await assert.rejects(() => listProjects(), /Connection refused/);
+    assert.deepEqual(await listProjects(), []);
+  } finally {
+    _setRun(null);
+    _resetOwnedSessionsCache();
+  }
+});
+
+// A genuine fault must still throw, never masquerade as an empty box.
+test("listProjects THROWS on a tmux lost-server fault, not empty", async () => {
+  _resetOwnedSessionsCache();
+  _setRun(async () => {
+    throw new Error("tmux exited 1: lost server");
+  });
+  try {
+    await assert.rejects(() => listProjects(), /lost server/);
   } finally {
     _setRun(null);
     _resetOwnedSessionsCache();

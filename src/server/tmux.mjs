@@ -322,12 +322,14 @@ export function resolveOwner(raw) {
 // premise is false: a restarted/dead server produces `no server running on`
 // (tmux unlinks the stale socket and says so); ENOENT means the socket was
 // never there — you cannot have sessions on a box whose tmux socket does not
-// exist. The no-server-shaped stderr we deliberately REJECT as a fault:
-// `error connecting to <sock>: Connection refused` (a stale socket that a
-// modern tmux would have self-cleaned — treated as a restart race, must
-// surface as a fault, never as a phantom empty box), `spawn tmux ENOENT`
-// (the tmux BINARY itself is missing) and hard-fault wording like
-// `lost server`.
+// exist. Empirically measured on this box's tmux 3.4 (BET-1454 review): a
+// stale socket file with no listener (true ECONNREFUSED at connect time)
+// comes back as `no server running on <sock>` — tmux 3.4 self-cleans it — so
+// the `Connection refused` arm of the third clause is belt-and-braces for
+// tmux builds that DO emit it verbatim. Both `error connecting to …` rows are
+// classified no-server per the issue's pinned spec. The no-server-shaped
+// stderr we deliberately REJECT as a fault: `spawn tmux ENOENT` (the tmux
+// BINARY itself is missing) and hard-fault wording like `lost server`.
 //
 // Pure + exported for tests.
 export function isNoTmuxServerError(err) {
@@ -336,7 +338,7 @@ export function isNoTmuxServerError(err) {
   return (
     /no server running on/i.test(msg) ||
     /no sessions?$/im.test(msg) ||
-    /error connecting to .*no such file or directory/i.test(msg)
+    /error connecting to .*(no such file or directory|connection refused)/i.test(msg)
   );
 }
 
