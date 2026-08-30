@@ -1783,6 +1783,32 @@ test("tmux:restore-preview plans against an empty live tree when tmux is dead", 
   assert.equal(out.restorable, 3);
 });
 
+test("tmux:restore-topology plans against an empty live tree when tmux is dead", async () => {
+  const snapshot = snapshotFrom(savedTree(), CAPTURED_AT);
+  await seedTopologyFile(snapshot);
+  const { deps, calls } = makeRestoreDeps({
+    listProjectsError: new Error("no server running on /tmp/tmux-1000/default"),
+  });
+  const handlers = buildHandlers(deps);
+  const out = await handlers["tmux:restore-topology"]();
+  // Same catch as the preview channel: the dead-box scenario must APPLY
+  // (rebuild everything) rather than throw.
+  assert.equal(out.ok, true);
+  assert.equal(out.created, 3);
+  assert.equal(out.failed, 0);
+  // The rebuilt dead box: its first window needed create-session, the rest
+  // landed as plain create-windows at their saved indices.
+  assert.deepEqual(
+    calls.restoreChatWindow.map((op) => op.createSession),
+    [true, false, false],
+  );
+  assert.deepEqual(
+    calls.restoreChatWindow.map((op) => op.windowIndex),
+    [2, 5, 7],
+  );
+  assert.equal(calls.refreshNow, 1);
+});
+
 test("tmux:restore-topology without a snapshot returns the error shape and touches nothing", async () => {
   await clearTopologyFile();
   const { deps, calls } = makeRestoreDeps();
