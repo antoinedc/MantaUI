@@ -539,13 +539,15 @@ export function createCtoCards(deps = {}) {
   // which writes the consent ring + the §9.5 verdict and calls
   // resolveConnectCards. No notification path — like decision cards, this is
   // a resting needs-you surface.
-  async function upsertConnect({ toolId, title, body, evidence = [], refs = [], ts = now() } = {}) {
+  async function upsertConnect({ toolId, title, body, evidence = [], refs = [], ring = "metadata", ts = now() } = {}) {
     if (!toolId || typeof toolId !== "string") return { changed: false, isNew: false };
+    const deep = ring === "deep_read";
+    const sourceId = deep ? `${toolId}:deep` : toolId;
     return upsertOpenCard({
-      id: stableCardId(CONNECT_SOURCE_KIND, toolId),
+      id: stableCardId(CONNECT_SOURCE_KIND, sourceId),
       variant: "connect",
       sourceKind: CONNECT_SOURCE_KIND,
-      sourceId: toolId,
+      sourceId,
       ts,
       build: () => ({
         title: typeof title === "string" && title ? title : `Connect ${toolId} (read-only)?`,
@@ -557,7 +559,7 @@ export function createCtoCards(deps = {}) {
           { label: "Never for this tool", answer: "never" },
         ].map((o) => ({
           ...o,
-          action: { type: "tool-connect", payload: { tool: toolId, answer: o.answer } },
+          action: { type: "tool-connect", payload: { tool: toolId, answer: o.answer, ring } },
         })),
         refs: Array.isArray(refs) && refs.length ? refs : [toolId],
         sessionID: null,
