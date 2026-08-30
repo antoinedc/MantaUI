@@ -165,7 +165,7 @@ function githubSpec(overrides = {}) {
   };
 }
 
-function build({ rows, specs, state, cards, ledger, http, now, thrifty, runEphemeral, projects, getTopFacts, getRollups } = {}) {
+function build({ rows, specs, state, cards, ledger, http, now, thrifty, runEphemeral, projects, getTopFacts, getRollups, resolveSegment } = {}) {
   return createProbes({
     registry: fakeRegistry(rows ?? [consentedTool()]),
     probes: memProbesStore(specs ?? { github: githubSpec() }),
@@ -179,7 +179,8 @@ function build({ rows, specs, state, cards, ledger, http, now, thrifty, runEphem
     isThrifty: thrifty ?? (() => false),
     listProjects: async () => projects ?? ["proj"],
     getTopFacts: getTopFacts ?? (async () => [{ statement: "ships the parser" }]),
-    getRollups: getRollups ?? (async () => "did a thing"),
+    getRollups: getRollups ?? (async () => []),
+    resolveSegment: resolveSegment ?? null,
     runEphemeral: runEphemeral ?? null,
   });
 }
@@ -757,7 +758,7 @@ test("relevanceScan: projects with nothing on the blackboard are watermarked, no
     rows,
     projects: ["empty"],
     getTopFacts: async () => [],
-    getRollups: async () => "",
+    getRollups: async () => [],
     runEphemeral: async () => {
       calls += 1;
       return { text: "0.5" };
@@ -790,6 +791,67 @@ test("relevanceScan: paces at 6 calls/day across tools and pairs", async () => {
   assert.equal(calls, 6, "the same UTC day gets no further calls");
   await eng.relevanceScan({ ts: day0 + 24 * 3_600_000 });
   assert.equal(calls, 12, "the next day gets a fresh budget");
+});
+
+test("relevanceScan: rollup context is the PROJECT'S OWN rollups, not the box-wide slice", async () => {
+  const rows = [consentedTool()];
+  const prompts = [];
+  const t = 1_700_000_000_000;
+  const eng = build({
+    rows,
+    projects: ["projA", "projB"],
+    getRollups: async () => [
+      {
+        level: "day",
+        window: [t - 86_400_000, t],
+        bullets: [
+          { text: "alpha work item", refs: ["seg-alpha"] },
+          { text: "beta work item", refs: ["seg-beta"] },
+        ],
+      },
+    ],
+    resolveSegment: async (id) =>
+      id === "seg-alpha" ? { project: "projA" } : id === "seg-beta" ? { project: "projB" } : null,
+    runEphemeral: async ({ context }) => {
+      prompts.push(context.map((c) => c.text).join("\n"));
+      return { text: "0.5" };
+    },
+  });
+  await eng.relevanceScan({ ts: t });
+  assert.equal(prompts.length, 2);
+  const a = prompts.find((p) => p.includes('"projA"'));
+  const b = prompts.find((p) => p.includes('"projB"'));
+  assert.ok(a, "projA prompt captured");
+  assert.ok(b, "projB prompt captured");
+  assert.ok(a.includes("alpha work item"), "projA sees its own rollup line");
+  assert.ok(!a.includes("beta work item"), "projA does not see projB's rollup line");
+  assert.ok(b.includes("beta work item"), "projB sees its own rollup line");
+  assert.ok(!b.includes("alpha work item"), "projB does not see projA's rollup line");
+});
+
+test("relevanceScan: no project-attributable rollups → facts-only fallback (no cross-project rollup block)", async () => {
+  const rows = [consentedTool()];
+  const prompts = [];
+  const t = 1_700_000_000_000;
+  const eng = build({
+    rows,
+    getRollups: async () => [
+      {
+        level: "day",
+        window: [t - 86_400_000, t],
+        bullets: [{ text: "someone else's work", refs: ["seg-other"] }],
+      },
+    ],
+    resolveSegment: async () => ({ project: "unrelated" }),
+    runEphemeral: async ({ context }) => {
+      prompts.push(context.map((c) => c.text).join("\n"));
+      return { text: "0.5" };
+    },
+  });
+  await eng.relevanceScan({ ts: t });
+  assert.equal(prompts.length, 1);
+  assert.ok(prompts[0].includes("ships the parser"), "the project's top facts still carried");
+  assert.ok(!prompts[0].includes("Recent rollups"), "no cross-project rollup block leaks into the prompt");
 });
 
 // ---------------------------------------------------------------------------
@@ -1018,7 +1080,7 @@ test("runOne: a chain-tripped tool's probing cadence is capped at weekly (regist
     isThrifty: () => false,
     listProjects: async () => ["proj"],
     getTopFacts: async () => [],
-    getRollups: async () => "",
+    getRollups: async () => [],
     runEphemeral: null,
   });
   const results = await eng.runDue();
@@ -1053,7 +1115,7 @@ function authoringHarness({ rows = [consentedTool()], specs, runEphemeral = null
     isThrifty: () => false,
     listProjects: async () => ["proj"],
     getTopFacts: async () => [],
-    getRollups: async () => "",
+    getRollups: async () => [],
     runEphemeral: runEphemeral
       ? async (opts) => {
           calls.push(opts);
