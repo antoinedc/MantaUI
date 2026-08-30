@@ -44,6 +44,7 @@ import * as oc from "./opencode.mjs";
 import * as pty from "./pty.mjs";
 import * as local from "./local.mjs";
 import { createPeekHandler } from "./peek.mjs";
+import { createProjectsHandler } from "./projectsRoute.mjs";
 import { createLogShipper, captureConsole, resolveAxiomConfig } from "../shared/logShip.mjs";
 import { setTelemetrySink, shipCtxEvent } from "./optimizer/telemetry.mjs";
 import { blendedPrice } from "../shared/blendedPrice.mjs";
@@ -2852,6 +2853,11 @@ const peekHandler = createPeekHandler({
   MIME,
 });
 
+// /api/projects handler with the real route logic in src/server/projectsRoute.mjs
+// (tested directly in projectsRoute.test.mjs — BET-1458, the BET-1454
+// safe-error contract). Injected with the live tmux listing.
+const projectsHandler = createProjectsHandler({ listProjects: tmux.listProjects });
+
 function requireLoopback(req, res, errorMessage) {
   if (
     isLocalDirectRequest({
@@ -3356,17 +3362,7 @@ const handleRequest = async (req, res) => {
   }
 
   if (req.method === "GET" && path === "/api/projects") {
-    try {
-      const projects = await tmux.listProjects();
-      respondJson(res, 200, projects);
-    } catch (e) {
-      // BET-1454: never forward raw tmux stderr to a client-facing body —
-      // the desktop chat panel renders `error` verbatim in a banner. Log the
-      // fault server-side and return a safe, human message instead.
-      console.warn("[api/projects] tmux listing failed:", e?.message ?? e);
-      respondJson(res, 500, { error: "Couldn't reach tmux on the box." });
-    }
-    return;
+    return projectsHandler(req, res);
   }
 
   if (req.method === "POST" && path === "/api/upload") {
