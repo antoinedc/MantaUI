@@ -8,6 +8,9 @@ import {
   loadTopology,
   saveTopology,
   createTopologyPersister,
+  planRestore,
+  executeRestore,
+  describeRestore,
 } from "./topology.mjs";
 
 // listProjects()-shaped fixture (src/server/tmux.mjs): one chat project with
@@ -304,4 +307,232 @@ test("persister: identical sessions with a moved clock skip (churn guard); renam
   assert.deepEqual(r2, { persisted: true, reason: "written" });
   assert.equal(calls.writes.length, 1);
   assert.deepEqual(JSON.parse(calls.writes[0][1]).capturedAt, 7); // stamp of the write
+});
+
+// ---------------------------------------------------------------------------
+// BET-1453 — restore planning + execution (pure)
+// ---------------------------------------------------------------------------
+
+// A snapshot in the exact shape snapshotFrom writes: two chat sessions,
+// windows at NON-trivial indices (5 before 3 in the saved order) so the
+// ascending-sort and the explicit-index behaviour are both exercised.
+const SNAP = {
+  version: TOPOLOGY_VERSION,
+  capturedAt: 1234,
+  sessions: [
+    {
+      tmuxSession: "alpha",
+      defaultCwd: "/home/dev/alpha",
+      mantaOwned: true,
+      windows: [
+        { index: 5, name: "w5", opencodeSessionId: "oc-5", cwd: "/home/dev/alpha", worktreePath: null, active: false },
+        { index: 3, name: "w3", opencodeSessionId: "oc-3", cwd: "/home/dev/alpha", worktreePath: "/home/dev/alpha/.worktrees/fix", active: true },
+        { index: 4, name: "w4", opencodeSessionId: "oc-4", cwd: "/home/dev/alpha", worktreePath: null, active: false },
+      ],
+    },
+    {
+      tmuxSession: "beta",
+      defaultCwd: "/home/dev/beta",
+      mantaOwned: false,
+      windows: [
+        { index: 1, name: "b1", opencodeSessionId: "oc-b", cwd: "/home/dev/beta", worktreePath: null, active: false },
+      ],
+    },
+  ],
+};
+
+// A listProjects()-shaped live tree with one window, for idempotency checks.
+function liveWindow(tmuxSession, index, opencodeSessionId) {
+  return {
+    tmuxSession,
+    defaultCwd: "/home/dev/x",
+    mantaOwned: false,
+    windows: [{ index, name: "live", active: false, paneCurrentPath: "/home/dev/x", opencodeSessionId, worktreePath: null, owner: "user" }],
+  };
+}
+
+// --- Required case 1: rebuilds into a dead box — create-session first, then
+// create-window, indices ascending ---
+test("planRestore rebuilds into a dead box — create-session first, then create-window, indices ascending", () => {
+  const { ops, skipped } = planRestore(SNAP, [], null);
+  assert.equal(skipped.length, 0);
+  assert.deepEqual(ops.map((o) => [o.tmuxSession, o.index]), [
+    ["alpha", 3], ["alpha", 4], ["alpha", 5], ["beta", 1],
+  ]);
+  assert.equal(ops[0].kind, "create-session");
+  assert.equal(ops[1].kind, "create-window");
+  assert.equal(ops[2].kind, "create-window");
+  // beta is also dead → its first window is a create-session too
+  assert.equal(ops[3].kind, "create-session");
+  // the create-session op carries the full payload the executor needs
+  assert.deepEqual(
+    { ...ops[0], kind: undefined },
+    {
+      tmuxSession: "alpha", mantaOwned: true, index: 3, name: "w3",
+      opencodeSessionId: "oc-3", cwd: "/home/dev/alpha",
+      worktreePath: "/home/dev/alpha/.worktrees/fix", kind: undefined,
+    },
+  );
+});
+
+// --- Required case 2: reproduces the EXACT index ---
+test("planRestore reproduces the exact snapshot index (5 stays 5)", () => {
+  const { ops } = planRestore(SNAP, [], null);
+  const op5 = ops.find((o) => o.tmuxSession === "alpha" && o.opencodeSessionId === "oc-5");
+  assert.equal(op5.index, 5);
+});
+
+// --- Required case 3: never emits a non-creation op ---
+test("planRestore never emits a non-creation op", () => {
+  const { ops } = planRestore(SNAP, [], null);
+  for (const op of ops) {
+    assert.ok(op.kind === "create-session" || op.kind === "create-window", op.kind);
+  }
+});
+
+// --- Required case 4: idempotent — a fully restored box plans nothing ---
+test("planRestore is idempotent — a fully restored box plans nothing", () => {
+  const live = [
+    liveWindow("alpha", 3, "oc-3"),
+    liveWindow("alpha", 4, "oc-4"),
+    liveWindow("alpha", 5, "oc-5"),
+    liveWindow("beta", 1, "oc-b"),
+  ];
+  const { ops } = planRestore(SNAP, live, null);
+  assert.equal(ops.length, 0);
+});
+
+// --- Required case 5: after a partial restore only the remainder is planned,
+// as create-window (session already exists) ---
+test("planRestore after a partial restore plans only the remainder, as create-window", () => {
+  const live = [liveWindow("alpha", 3, "oc-3"), liveWindow("alpha", 4, "oc-4")];
+  const { ops, skipped } = planRestore(SNAP, live, null);
+  assert.deepEqual(ops.map((o) => [o.tmuxSession, o.index, o.kind]), [
+    ["alpha", 5, "create-window"],
+    ["beta", 1, "create-session"],
+  ]);
+  // the two windows run 1 already rebuilt skip as already-restored (they are
+  // stamped live at their reproduced indices) — not the alarming
+  // "index-occupied"
+  assert.deepEqual(
+    skipped.map((s) => [s.tmuxSession, s.index, s.reason]),
+    [["alpha", 3, "already-restored"], ["alpha", 4, "already-restored"]],
+  );
+});
+
+// --- Required case 6: skips an id already stamped under a DIFFERENT session ---
+test("planRestore skips an id already stamped under a different session (already-restored)", () => {
+  const live = [liveWindow("gamma", 9, "oc-5")];
+  const { ops, skipped } = planRestore(SNAP, live, null);
+  const skip = skipped.find((s) => s.tmuxSession === "alpha" && s.index === 5);
+  assert.equal(skip.reason, "already-restored");
+  assert.ok(!ops.some((o) => o.opencodeSessionId === "oc-5"));
+  // the rest of alpha is still planned (its session is dead → create-session)
+  assert.equal(ops[0].kind, "create-session");
+  assert.deepEqual(ops.map((o) => o.index), [3, 4, 1]);
+});
+
+// --- Required case 7: skips an occupied index ---
+test("planRestore skips an occupied index (index-occupied)", () => {
+  // alpha IS live and index 5 is held by a TUI window (no opencode id) —
+  // the slot is taken, the conversation's id is stamped nowhere.
+  const live = [
+    { tmuxSession: "alpha", defaultCwd: "/home/dev/alpha", mantaOwned: true, windows: [{ index: 5, name: "shell", active: false, paneCurrentPath: "/home/dev/alpha", opencodeSessionId: null, worktreePath: null, owner: "user" }] },
+  ];
+  const { ops, skipped } = planRestore(SNAP, live, null);
+  const skip = skipped.find((s) => s.tmuxSession === "alpha" && s.index === 5);
+  assert.equal(skip.reason, "index-occupied");
+  // alpha exists live → every planned alpha op is a create-window
+  assert.deepEqual(ops.map((o) => [o.tmuxSession, o.kind]), [["alpha", "create-window"], ["alpha", "create-window"], ["beta", "create-session"]]);
+});
+
+// --- Required case 8: drops windows whose opencode session is gone ---
+test("planRestore drops windows whose opencode session is gone (knownSessionIds Set)", () => {
+  const { ops, skipped } = planRestore(SNAP, [], new Set(["oc-3", "oc-4"]));
+  assert.deepEqual(ops.map((o) => o.opencodeSessionId), ["oc-3", "oc-4"]);
+  assert.deepEqual(
+    skipped.map((s) => [s.tmuxSession, s.index, s.reason]),
+    [["alpha", 5, "opencode-session-gone"], ["beta", 1, "opencode-session-gone"]],
+  );
+});
+
+// --- Required case 9: knownSessionIds === null keeps everything ---
+test("planRestore with knownSessionIds === null keeps everything (unknown ≠ nothing survives)", () => {
+  const { ops, skipped } = planRestore(SNAP, [], null);
+  assert.equal(ops.length, 4);
+  assert.equal(skipped.length, 0);
+});
+
+test("planRestore tolerates null and {sessions: []} input", () => {
+  assert.deepEqual(planRestore(null, [], null), { ops: [], skipped: [] });
+  assert.deepEqual(planRestore({ version: TOPOLOGY_VERSION, capturedAt: 0, sessions: [] }, [], null), { ops: [], skipped: [] });
+});
+
+test("planRestore claims an id as it plans it — a duplicate id in one snapshot cannot be created twice", () => {
+  const snap = {
+    version: TOPOLOGY_VERSION,
+    capturedAt: 1,
+    sessions: [
+      {
+        tmuxSession: "alpha", defaultCwd: "/d", mantaOwned: false,
+        windows: [
+          { index: 2, name: "a", opencodeSessionId: "oc-dup", cwd: "/d", worktreePath: null, active: false },
+          { index: 7, name: "b", opencodeSessionId: "oc-dup", cwd: "/d", worktreePath: null, active: false },
+        ],
+      },
+    ],
+  };
+  const { ops, skipped } = planRestore(snap, [], null);
+  assert.deepEqual(ops.map((o) => o.index), [2]);
+  assert.equal(ops[0].kind, "create-session");
+  assert.deepEqual(skipped.map((s) => [s.index, s.reason]), [[7, "already-restored"]]);
+});
+
+// --- Required case 10: executeRestore continues past a failed create-window ---
+test("executeRestore continues past a failed create-window", async () => {
+  const { ops, skipped } = planRestore(SNAP, [], null);
+  const attempted = [];
+  const result = await executeRestore({ ops, skipped }, async (op) => {
+    attempted.push(`${op.tmuxSession}/${op.index}`);
+    if (op.tmuxSession === "alpha" && op.index === 4) throw new Error("tmux boom");
+  });
+  assert.deepEqual(attempted, ["alpha/3", "alpha/4", "alpha/5", "beta/1"]);
+  assert.equal(result.created, 3);
+  assert.equal(result.failed, 1);
+  assert.deepEqual(result.windows.map((w) => `${w.tmuxSession}/${w.index}`), ["alpha/3", "alpha/5", "beta/1"]);
+  assert.equal(result.failures.length, 1);
+  assert.equal(result.failures[0].index, 4);
+  assert.equal(result.failures[0].error, "tmux boom");
+});
+
+// --- Required case 11: executeRestore skips the rest of a session after a
+// failed create-session ---
+test("executeRestore skips the rest of a session after a failed create-session", async () => {
+  const { ops, skipped } = planRestore(SNAP, [], null);
+  const attempted = [];
+  const result = await executeRestore({ ops, skipped }, async (op) => {
+    attempted.push(`${op.tmuxSession}/${op.index}`);
+    if (op.kind === "create-session" && op.tmuxSession === "alpha") throw new Error("can't create session");
+  });
+  // alpha/3 attempted once; alpha/4 + alpha/5 failed WITHOUT an attempt;
+  // beta still restored.
+  assert.deepEqual(attempted, ["alpha/3", "beta/1"]);
+  assert.equal(result.created, 1);
+  assert.equal(result.failed, 3);
+  assert.deepEqual(result.failures.map((f) => [f.index, f.error]), [
+    [3, "can't create session"],
+    [4, "skipped — its tmux session could not be created"],
+    [5, "skipped — its tmux session could not be created"],
+  ]);
+  // created + failed always equals the planned window count
+  assert.equal(result.created + result.failed, ops.length);
+});
+
+// --- Required case 12: describeRestore covers created-only, created+failed,
+// and nothing-to-do ---
+test("describeRestore covers created-only, created+failed, and nothing-to-do", () => {
+  assert.equal(describeRestore({ created: 3, failed: 0 }), "Restored 3 windows.");
+  assert.equal(describeRestore({ created: 3, failed: 2 }), "Restored 3 windows · 2 failed.");
+  assert.equal(describeRestore({ created: 0, failed: 0 }), "Nothing to restore — every saved window is already open.");
+  assert.equal(describeRestore({ created: 1, failed: 0 }), "Restored 1 window.");
 });

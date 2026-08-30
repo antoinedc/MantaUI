@@ -163,6 +163,57 @@ export type SyncDelta =
   | SyncPayload
   | { resync: true };
 
+// BET-1453: one planned window-creation op from the topology restore plan.
+// ONLY creation ops are ever emitted — never a kill/rename/restamp/reorder —
+// so re-running a restore after a partial recovery is safe.
+export type TopologyRestoreOp = {
+  kind: "create-session" | "create-window";
+  tmuxSession: string;
+  mantaOwned: boolean;
+  index: number;
+  name: string;
+  opencodeSessionId: string;
+  cwd: string;
+  worktreePath: string | null;
+};
+
+// BET-1453: why planRestore did NOT plan a saved window. `already-restored`
+// covers both "stamped on a live window (any session)" and "claimed earlier
+// in the same plan" (a duplicate id in one snapshot).
+export type TopologyRestoreSkipped = {
+  tmuxSession: string;
+  index: number;
+  name: string;
+  opencodeSessionId: string;
+  reason: "index-occupied" | "already-restored" | "opencode-session-gone";
+};
+
+// BET-1453: `tmux:restore-preview` — READ-ONLY. `available:false` means no
+// usable snapshot (never captured, or unloadable); the restore button hides.
+export type TopologyRestorePreview = {
+  available: boolean;
+  capturedAt: number | null;
+  ops: TopologyRestoreOp[];
+  skipped: TopologyRestoreSkipped[];
+  restorable: number;
+};
+
+// BET-1453: `tmux:restore-topology` — apply the SAME plan the preview showed.
+// `created + failed` always equals the number of planned windows; a window
+// whose tmux session could not be created counts as failed too. `windows`
+// lists the created identities; `failures` carries one error per failed
+// window; `message` is the server's human summary (describeRestore).
+export type TopologyRestoreResult = {
+  ok: boolean;
+  error?: string;
+  created: number;
+  failed: number;
+  skipped?: TopologyRestoreSkipped[];
+  windows?: { tmuxSession: string; index: number; name: string; opencodeSessionId: string }[];
+  failures?: { tmuxSession: string; index: number; name: string; opencodeSessionId: string; error: string }[];
+  message?: string;
+};
+
 // Adaptive CTO state (§10.1/§10.6). The engine's `{kind:"ctoState"}` bus
 // event and `GET /api/cto/state` both carry this exact shape.
 export type CtoState = {
@@ -583,6 +634,15 @@ export interface Api {
   tmuxKillSession(sessionName: string): Promise<Project[]>;
   tmuxKillWindow(input: { sessionName: string; windowIndex: number }): Promise<Project[]>;
   tmuxSelectWindow(input: { sessionName: string; windowIndex: number }): Promise<void>;
+
+  // BET-1453: topology restore (S2a) — rebuild the saved chat-window layout
+  // at the ORIGINAL tmux indices after a tmux server death. Preview is
+  // READ-ONLY and mutates nothing; apply executes the SAME plan (preview can
+  // never disagree with apply) and never creates an opencode session — the
+  // ids in the snapshot are existing sessions being re-adopted. User-initiated
+  // only (Settings > General > Backup, S3) — restore is never automatic.
+  tmuxRestorePreview(): Promise<TopologyRestorePreview>;
+  tmuxRestoreTopology(): Promise<TopologyRestoreResult>;
 
   gitListWorktrees(cwd: string): Promise<WorktreeInfo[]>;
   // BET-246: create a sibling git worktree next to `cwd`'s repo root, named

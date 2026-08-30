@@ -582,6 +582,65 @@ export async function newWindow({ sessionName, windowName, cwd, chatMode, existi
   return { sessionId: sid ?? null, windowIndex: idx, projects: await listProjects() };
 }
 
+// BET-1453: rebuild ONE chat window from the topology snapshot at its
+// ORIGINAL tmux index. This is the dedicated restore primitive — it deliberately
+// does NOT branch inside newSession/newWindow, which carry unrelated semantics
+// (opencode session creation, createDir, forge stamps, missing-session
+// auto-heal); the restore path re-adopts an EXISTING opencode session id and
+// must never create one.
+//
+// Deliberately NOT automatic, NOT destructive: the caller (rpc's
+// tmux:restore-topology, via topology.executeRestore) only sends ops that the
+// plan proved free (index unoccupied, id unstamped). Failures are thrown to
+// the caller and reported per-window.
+//
+// `createSession` marks the FIRST window of a tmux session that does not
+// exist live. tmux's new-session cannot choose its first window's index —
+// it always uses the server's base-index (user-configurable, 0 by default,
+// 1 on many setups) — so create first, then move-window into the target
+// slot (verified on tmux 3.4; move to an explicit index works out of order).
+export async function restoreChatWindow({ createSession = false, sessionName,
+  windowIndex, windowName, cwd, opencodeSessionId, worktreePath = null,
+  mantaOwned = false }) {
+  // Fail loudly for a directory that no longer exists rather than letting
+  // tmux silently drop the window into $HOME — the caller reports it as a
+  // per-window failure (the same chokepoint newSession/newWindow use).
+  const dir = resolveCwdOrThrow(cwd);
+  if (createSession) {
+    const createdIdx = await newSessionGetIndex(sessionName, dir, windowName, true);
+    if (createdIdx !== windowIndex) {
+      await run("tmux", [
+        "move-window", "-s", `${sessionName}:${createdIdx}`, "-t", `${sessionName}:${windowIndex}`,
+      ]);
+    }
+    // Same survivability posture as newSession: the restored session must
+    // not evaporate when the last client detaches or the pane count dips.
+    await applySessionSurvivability(sessionName);
+  } else {
+    // new-window -t <sess>:<N> creates at an EXPLICIT index and works out of
+    // order (5 then 3 is fine) — appending is not required.
+    await run("tmux", [
+      "new-window", "-t", `${sessionName}:${windowIndex}`, "-n", windowName,
+      "-c", dir, "sh", "-c", CHAT_HOLDER_CMD,
+    ]);
+  }
+  // The stamp is what makes it a chat window — without it the renderer shows
+  // a Terminal over an inert pane.
+  await restampSessionId(sessionName, windowIndex, opencodeSessionId);
+  // Only when the snapshot recorded one — NEVER invent a worktree path
+  // (clean-on-close deletes what this option names; a guessed value could
+  // destroy a worktree manta never created).
+  if (worktreePath) {
+    await setWindowOption(sessionName, windowIndex, "@manta-worktree-path", worktreePath);
+  }
+  // Ownership normally lives in tmux-sessions.json, which a reboot that
+  // brings tmux back EMPTY prunes — re-add it so the restored session is
+  // recognized as Manta-owned again.
+  if (mantaOwned) {
+    await addOwnedSession(sessionName, { path: ownedSessionsCachePath });
+  }
+}
+
 export async function renameSession({ oldName, newName }) {
   await run("tmux", ["rename-session", "-t", oldName, newName]);
   // BET-348: keep the sidecar in sync with the rename — otherwise the

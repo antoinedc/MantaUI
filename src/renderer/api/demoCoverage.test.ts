@@ -189,6 +189,9 @@ export const DEMO_UNIMPLEMENTED = [
   "tmuxRenameSession",
   "tmuxRenameWindow",
   "tmuxRestoreConfig",
+  // BET-1453: topology restore (S2a) — no capture exercises it; S3 wires the UI.
+  "tmuxRestorePreview",
+  "tmuxRestoreTopology",
   "tmuxSelectWindow",
   "tmuxSetupConfig",
   "uploadBuffer",
