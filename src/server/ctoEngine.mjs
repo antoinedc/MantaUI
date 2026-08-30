@@ -1145,11 +1145,14 @@ export function createCtoEngine(deps = {}) {
     }
   }
 
-  // The §7.5 probe tick (BET-1396): due probes + weekly relevance, behind the
-  // master toggle, thrifty-shed, paused with the rest of the tick.
+  // The §7.5 probe tick (BET-1396; template authoring BET-1438): fill still-
+  // empty scaffolded probe specs (before the runner sees them, so consent →
+  // fill → first probe can land inside one tick), then due probes + weekly
+  // relevance, behind the master toggle, thrifty-shed, paused with the tick.
   async function probesTick() {
     const eng = getProbes();
     if (!eng) return;
+    await eng.authorSpecs().catch(() => {});
     await eng.runDue().catch(() => {});
     await eng.relevanceScan().catch(() => {});
   }
