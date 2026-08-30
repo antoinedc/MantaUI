@@ -42,6 +42,14 @@
 // tool's data domain against the project's top facts + recent rollups into
 // `relevance[project] ∈ [0,1]`.
 //
+// Spec authoring (BET-1438, §7.5): the engine scaffolds `{tool, probes: []}`
+// at consent time; an ephemeral nano session (the SAME §3.3-gated seam the
+// registry's classifier rides) proposes probe entries from the tool's evidence
+// rows — evidenced hosts + credential presence only — and fills the template
+// through writeSpec, the ONE validated engine-written path. A refused
+// candidate surfaces on the tool's evidence trail (the trail the connect ask
+// and drill-down read) — never silently.
+//
 // Failure escalation (§10.6-7): consecutive auth-shaped failures (401/403, or
 // a secret that no longer materializes — the same "key may have been rotated"
 // failure mode) ≥ 3 → ONE blocker card per probe (idempotent upsert; the body
@@ -94,6 +102,14 @@ export const RELEVANCE_WEEK_MS = 7 * 24 * 3_600_000;
 export const RELEVANCE_PER_DAY = 6;
 export const RELEVANCE_FAILURE_RETRY_MS = 3_600_000;
 export const RELEVANCE_TASK_CLASS = "ambient-summarize";
+// §7.5 authoring (BET-1438): the ephemeral session that FILLS scaffolded
+// templates. Pacing mirrors the relevance scan — attempts (not successes) are
+// the paced resource; a filled (or not-derivable) template rests for the week.
+export const AUTHORING_PER_DAY = 4;
+export const AUTHORING_WEEK_MS = 7 * 24 * 3_600_000;
+export const AUTHORING_FAILURE_RETRY_MS = 3_600_000;
+export const AUTHORING_TASK_CLASS = "ambient-summarize";
+export const AUTHOR_MAX_PROBES = 5;
 
 // Consent rings (D13). Probes only ever declare metadata | deep_read — the
 // write ring creates no standing specs (§7.4). Ordering matters: a probe's
@@ -275,6 +291,50 @@ export function vitalityOf(fields) {
   const out = {};
   if (lastEvent !== undefined && lastEvent !== null && lastEvent !== "") out.last_event = lastEvent;
   if (typeof rate === "number" && Number.isFinite(rate)) out.inflow_rate = rate;
+  return out;
+}
+
+/**
+ * Parse the authoring model's reply (BET-1438) into normalized §7.5 probe
+ * entries, or null when nothing parseable came back. Tolerates a fenced block
+ * and stray prose around the array; strips every key the validator does not
+ * know; forces `method: "GET"` (the model is never trusted to say otherwise)
+ * and defaults an omitted ring DOWN to "metadata" (the lowest ring — never
+ * the reverse). Structurally broken entries are dropped; whatever survives
+ * still faces the full validator inside writeSpec. An empty array is a valid
+ * "nothing derivable" answer (distinct from null, the parse failure).
+ */
+export function parseProposedProbes(text) {
+  if (text == null) return null;
+  let s = String(text).trim();
+  const fence = /```(?:json)?\s*([\s\S]*?)\s*```/.exec(s);
+  if (fence) s = fence[1].trim();
+  const start = s.indexOf("[");
+  const end = s.lastIndexOf("]");
+  if (start === -1 || end === -1 || end < start) return null;
+  let arr;
+  try {
+    arr = JSON.parse(s.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(arr)) return null;
+  const out = [];
+  for (const item of arr.slice(0, AUTHOR_MAX_PROBES)) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const p = {};
+    if (typeof item.name === "string" && item.name.trim()) p.name = item.name.trim();
+    if (typeof item.url === "string" && item.url.trim()) p.url = item.url.trim();
+    if (typeof item.cadence === "string" && item.cadence.trim()) p.cadence = item.cadence.trim();
+    if (item.ring === "metadata" || item.ring === "deep_read") p.ring = item.ring;
+    else p.ring = "metadata";
+    if (item.extract && typeof item.extract === "object" && !Array.isArray(item.extract)) {
+      p.extract = item.extract;
+    }
+    if (!p.name || !p.url || !p.cadence) continue;
+    p.method = "GET";
+    out.push(p);
+  }
   return out;
 }
 
@@ -590,7 +650,8 @@ export function evidenceHost(detail) {
  *   listProjects  — async () => [projectName] (active projects for §7.6).
  *   getTopFacts   — async (project, k) => [{statement}].
  *   getRollups    — async (project) => string lines (recent rollup facts).
- *   runEphemeral  — the pre-gated ephemeral session call (nano classify).
+ *   runEphemeral  — the pre-gated ephemeral session call (nano classify /
+ *                   relevance score / BET-1438 spec authoring).
  */
 export function createProbes(deps = {}) {
   const {
@@ -777,6 +838,155 @@ export function createProbes(deps = {}) {
     if (!check.ok) return { ok: false, errors: check.errors };
     await probes.save(tool, candidate);
     return { ok: true, errors: [] };
+  }
+
+  // ---- §7.5 spec authoring (BET-1438) ---------------------------------------
+
+  // A refused authored candidate (or an unparseable model reply) must surface
+  // on the tool's evidence trail — the trail the connect ask and the §10.5
+  // drill-down read — plus a ledger row. Never silent. The row never widens
+  // the host allowlist (`spec-refused:` is not an evidenceHost channel) and
+  // dedupes naturally on the refusal key.
+  async function surfaceRefusal(tool, reason, ts, errorCount = 1) {
+    try {
+      await registry.appendEvidence?.(tool, { channel: "probe", detail: `spec-refused:${reason}`.slice(0, 200), ts });
+    } catch {
+      /* best-effort */
+    }
+    if (ledger && typeof ledger.append === "function") {
+      try {
+        await ledger.append({ actor: "cto", kind: "cto.probe.author", tool, ok: false, refused: reason, errors: errorCount, ts });
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
+
+  // One nano call (the SAME §3.3-gated seam the registry's classifier rides):
+  // the tool's evidence rows → a JSON array of probe proposals. Untrusted
+  // context, structured-only output — the validator inside writeSpec is the
+  // only thing that makes any of it real. Returns null on a gate rejection /
+  // transport / parse failure, [] when nothing is derivable.
+  async function proposeProbes({ tool, row, allowedHosts, ring, auth }) {
+    const evidenceLines = (row?.evidence ?? [])
+      .map((e) => (typeof e?.detail === "string" ? `- ${e.channel}: ${e.detail.slice(0, 120)}` : ""))
+      .filter(Boolean)
+      .slice(0, 8);
+    const prompt = [
+      `Fill the probe-spec template for external tool "${tool}".`,
+      `Evidenced hosts (a probe URL may use ONLY one of these, exactly): ${allowedHosts.join(", ") || "(none)"}`,
+      auth?.secret
+        ? `A credential is evidenced; the template's auth section already names its vault key (${auth.secret}) — do not propose auth content.`
+        : "No credential is evidenced — propose only unauthenticated endpoints.",
+      ring === "deep_read"
+        ? 'Consented access ring is deep_read: probes may declare ring "metadata" or "deep_read".'
+        : 'Consented access ring is metadata: every probe must declare ring "metadata".',
+      "Observed evidence for this tool:",
+      ...evidenceLines,
+      "",
+      `Propose up to ${AUTHOR_MAX_PROBES} declarative GET probes reading small, useful JSON (counts, latest timestamps, status fields) from the evidenced hosts.`,
+      'Reply with ONLY a JSON array, each element {"name": "<kebab-case-id>", "url": "https://<evidenced-host>/...", "cadence": "<n>m|h|d (>=5m)", "ring": "metadata" or "deep_read", "extract": {"<field>": "<json.path"}}. No prose.',
+    ].join("\n");
+    let text = null;
+    try {
+      const out = await runEphemeral({ taskClass: AUTHORING_TASK_CLASS, context: [{ priority: 10, text: prompt }] });
+      text = typeof out === "string" ? out : (out?.text ?? out?.output ?? null);
+    } catch {
+      return null;
+    }
+    return parseProposedProbes(text);
+  }
+
+  /**
+   * The ephemeral authoring pass: per consented tool whose spec is still the
+   * EMPTY scaffold (`probes: []`), propose probe entries from the evidence
+   * rows and fill the template through writeSpec — the ONE validated,
+   * engine-written path. Pacing mirrors the relevance scan: the daily budget
+   * bounds ATTEMPTS (a failed or gate-rejected call consumes it too and sets
+   * a retry watermark), a filled or not-derivable template rests for the
+   * week, and the pass is one-shot — once a spec carries probes it is never
+   * rewritten here. Refused candidates are never silent (surfaceRefusal).
+   * Not thrifty-shed: a still-empty template is at most one paced nano call,
+   * not a fan-out.
+   */
+  async function authorSpecs({ ts = now(), todayKey = dayKeyOf(ts) } = {}) {
+    if (typeof runEphemeral !== "function") return { ran: 0, attempts: 0, skipped: "no-ephemeral" };
+    let tools;
+    try {
+      tools = await probes.list();
+    } catch {
+      return { ran: 0, attempts: 0 };
+    }
+    let st;
+    try {
+      st = (await state.load("_authoring")) ?? {};
+    } catch {
+      st = {};
+    }
+    if (st.day !== todayKey) {
+      st.day = todayKey;
+      st.todayCount = 0;
+    }
+    let budget = AUTHORING_PER_DAY - (st.todayCount ?? 0);
+    let ran = 0;
+    let attempts = 0;
+    for (const tool of tools) {
+      if (budget <= 0) break;
+      if ((await registry.consentFor(tool, "metadata")) !== "yes") continue;
+      let raw;
+      try {
+        raw = await probes.load(tool);
+      } catch {
+        continue;
+      }
+      // Target ONLY the empty scaffold; a spec that already carries probes is
+      // user/engine content this pass must never rewrite.
+      if (!raw || typeof raw !== "object" || raw.tool !== tool || !Array.isArray(raw.probes) || raw.probes.length > 0) {
+        continue;
+      }
+      const entry = st.relAt?.[tool] ?? {};
+      const restMs = entry.ok ? AUTHORING_WEEK_MS : AUTHORING_FAILURE_RETRY_MS;
+      if (typeof entry.at === "number" && ts - entry.at < restMs) continue;
+      st.relAt = { ...(st.relAt ?? {}), [tool]: entry };
+      const ctx = await consentContext(tool);
+      budget -= 1; // the attempt itself is the paced resource
+      attempts += 1;
+      const proposals = await proposeProbes({
+        tool,
+        row: ctx.row,
+        allowedHosts: ctx.allowedHosts,
+        ring: ctx.consentedRing,
+        auth: raw.auth ?? null,
+      });
+      entry.at = ts;
+      if (proposals === null) {
+        entry.ok = false;
+        await surfaceRefusal(tool, "unparseable-reply", ts);
+        continue;
+      }
+      if (proposals.length === 0) {
+        entry.ok = true; // nothing derivable — rest for the week, no write
+        if (ledger && typeof ledger.append === "function") {
+          await ledger.append({ actor: "cto", kind: "cto.probe.author", tool, ok: true, probes: 0, ts }).catch(() => {});
+        }
+        continue;
+      }
+      const res = await writeSpec(tool, { tool, ...(raw.auth ? { auth: raw.auth } : {}), probes: proposals });
+      entry.ok = res.ok === true;
+      if (res.ok) {
+        ran += 1;
+        if (ledger && typeof ledger.append === "function") {
+          await ledger.append({ actor: "cto", kind: "cto.probe.author", tool, ok: true, probes: proposals.length, ts }).catch(() => {});
+        }
+      } else {
+        await surfaceRefusal(tool, res.errors?.[0]?.key ?? "invalid", ts, res.errors?.length ?? 1);
+      }
+    }
+    if (attempts > 0) {
+      st.todayCount = (st.todayCount ?? 0) + attempts;
+      await saveToolState("_authoring", st);
+    }
+    return { ran, attempts };
   }
 
   // ---- one probe execution -------------------------------------------------
@@ -1166,5 +1376,5 @@ export function createProbes(deps = {}) {
     return Math.max(0, Math.min(1, n));
   }
 
-  return { scaffoldSpec, writeSpec, runDue, relevanceScan, healthSnapshot, probeKey, consentContext, loadToolState, probeSummary };
+  return { scaffoldSpec, writeSpec, authorSpecs, runDue, relevanceScan, healthSnapshot, probeKey, consentContext, loadToolState, probeSummary };
 }

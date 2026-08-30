@@ -6,6 +6,8 @@ import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
 import {
+  AUTHORING_FAILURE_RETRY_MS,
+  AUTHOR_MAX_PROBES,
   AUTH_FAIL_ESCALATE,
   CADENCE_DAILY_MS,
   CADENCE_FLOOR_MS,
@@ -23,6 +25,7 @@ import {
   hostAllowed,
   isPrivateAddress,
   parseProbeUrl,
+  parseProposedProbes,
   publicAddresses,
   stepFailureState,
   validateProbeSpec,
@@ -1009,4 +1012,167 @@ test("runOne: a chain-tripped tool's probing cadence is capped at weekly (regist
   assert.equal(results.length, 1);
   const st = await eng.loadToolState("github");
   assert.equal(st.probes.repo_events.nextRunAt, 1_700_000_000_000 + CADENCE_WEEKLY_MS, "30m spec capped at weekly while decayed");
+});
+
+// ---------------------------------------------------------------------------
+// BET-1438 — the §7.5 authoring pass: parseProposedProbes + authorSpecs
+// ---------------------------------------------------------------------------
+
+// A standalone harness for the authoring pass: keeps the raw store/state/
+// ledger/registry references so the tests can assert what landed on disk.
+function authoringHarness({ rows = [consentedTool()], specs, runEphemeral = null, nowTs = 1_700_000_000_000 } = {}) {
+  const scaffold = (tool) => ({ tool, probes: [] });
+  const store = memProbesStore(specs ?? { github: { ...scaffold("github"), auth: githubSpec().auth } });
+  const state = memStateStore();
+  const ledger = fakeLedger();
+  const registry = fakeRegistry(rows);
+  const calls = [];
+  const eng = createProbes({
+    registry,
+    probes: store,
+    stateStore: state,
+    cards: fakeCards(),
+    ledger,
+    now: () => nowTs,
+    httpRequest: async () => ({ status: 200, bodyText: "[]" }),
+    getSecretPath: async () => "/tmp/secret-file",
+    readSecret: async () => "v",
+    isThrifty: () => false,
+    listProjects: async () => ["proj"],
+    getTopFacts: async () => [],
+    getRollups: async () => "",
+    runEphemeral: runEphemeral
+      ? async (opts) => {
+          calls.push(opts);
+          return runEphemeral(opts);
+        }
+      : null,
+  });
+  return { eng, store, state, ledger, registry, calls };
+}
+
+test("parseProposedProbes: fences + prose tolerated, unknown keys stripped, GET forced, ring defaults down, cap 5", () => {
+  const reply = [
+    "Here is my proposal:",
+    "```json",
+    JSON.stringify([
+      { name: "repo_events", url: "https://api.github.com/x", cadence: "30m", ring: "metadata", extract: { a: "0.b" }, surprise: true },
+      { name: "bad", url: "https://api.github.com/y", cadence: "10m", ring: "deep_read", method: "DELETE" },
+      { url: "https://api.github.com/z", cadence: "1h" },
+    ]),
+    "```",
+    "Hope that helps!",
+  ].join("\n");
+  const out = parseProposedProbes(reply);
+  assert.equal(out.length, 2);
+  assert.deepEqual(out[0], { name: "repo_events", url: "https://api.github.com/x", cadence: "30m", ring: "metadata", extract: { a: "0.b" }, method: "GET" });
+  assert.equal(out[1].method, "GET", "a model-proposed method is never trusted");
+  assert.equal(out[1].ring, "deep_read");
+  assert.ok(!("surprise" in out[0]), "unknown keys are stripped before the validator ever sees them");
+  assert.equal(parseProposedProbes(JSON.stringify([{ name: "b", url: "https://api.github.com/x", cadence: "1h" }]))[0].ring, "metadata", "omitted ring defaults DOWN to metadata");
+  const many = Array.from({ length: 9 }, (_, i) => ({ name: `p${i}`, url: "https://api.github.com/x", cadence: "1h" }));
+  assert.equal(parseProposedProbes(JSON.stringify(many)).length, AUTHOR_MAX_PROBES);
+  assert.deepEqual(parseProposedProbes("[]"), [], "an empty array is a valid 'nothing derivable' answer");
+  assert.equal(parseProposedProbes("I cannot help with that."), null);
+  assert.equal(parseProposedProbes(null), null);
+});
+
+test("authorSpecs: fills an empty scaffold through writeSpec — probe lands, auth preserved, prompt carries hosts + key name, ledger row, state ok", async () => {
+  let sawPrompt = "";
+  const h = authoringHarness({
+    runEphemeral: async ({ context }) => {
+      sawPrompt = context[0].text;
+      return { text: JSON.stringify([{ name: "repo_events", url: "https://api.github.com/users/octocat/events", cadence: "30m", ring: "metadata", extract: { inflow_rate: "length" } }]) };
+    },
+  });
+  const r = await h.eng.authorSpecs({ ts: 1_700_000_000_000 });
+  assert.deepEqual(r, { ran: 1, attempts: 1 });
+  const spec = h.store._files.github;
+  assert.equal(spec.probes.length, 1);
+  assert.equal(spec.probes[0].method, "GET");
+  assert.equal(spec.probes[0].url, "https://api.github.com/users/octocat/events");
+  assert.deepEqual(spec.auth, githubSpec().auth, "the engine-written auth section is preserved verbatim");
+  assert.ok(sawPrompt.includes("api.github.com"), "the prompt carries the evidenced hosts");
+  assert.ok(sawPrompt.includes("GITHUB_TOKEN"), "the prompt names the evidenced vault key (a KEY NAME, never a value)");
+  assert.ok(sawPrompt.includes('ring "metadata"'));
+  assert.ok(h.ledger.rows.some((row) => row.kind === "cto.probe.author" && row.tool === "github" && row.ok === true && row.probes === 1));
+  const st = await h.state.load("_authoring");
+  assert.equal(st.relAt.github.ok, true);
+  assert.equal(st.todayCount, 1);
+});
+
+test("authorSpecs: refused proposal (off-allowlist host) surfaces as evidence on the tool row; template left empty", async () => {
+  const h = authoringHarness({
+    runEphemeral: async () => ({ text: JSON.stringify([{ name: "exfil", url: "https://evil.example.com/x", cadence: "30m", ring: "metadata" }]) }),
+  });
+  const r = await h.eng.authorSpecs({ ts: 1_700_000_000_000 });
+  assert.deepEqual(r, { ran: 0, attempts: 1 });
+  assert.equal(h.store._files.github.probes.length, 0, "the refused candidate never lands");
+  const row = h.registry._rows.get("github");
+  const refusal = (row.evidence ?? []).find((e) => e.channel === "probe");
+  assert.ok(refusal, "the refusal is on the tool's evidence trail");
+  assert.equal(refusal.detail, "spec-refused:probes[0].url");
+  assert.ok(h.ledger.rows.some((x) => x.kind === "cto.probe.author" && x.ok === false && x.refused === "probes[0].url"));
+  const st = await h.state.load("_authoring");
+  assert.equal(st.relAt.github.ok, false, "a refused fill retries on the failure watermark");
+});
+
+test("authorSpecs: unparseable reply → evidence row + failure watermark; no write, no re-attempt until the watermark elapses", async () => {
+  const h = authoringHarness({ runEphemeral: async () => ({ text: "I could not derive any probes." }) });
+  let r = await h.eng.authorSpecs({ ts: 1_700_000_000_000 });
+  assert.deepEqual(r, { ran: 0, attempts: 1 });
+  const row = h.registry._rows.get("github");
+  assert.ok((row.evidence ?? []).some((e) => e.detail === "spec-refused:unparseable-reply"));
+  assert.equal(h.store._files.github.probes.length, 0);
+  // failure watermark: a minute later nothing is re-attempted…
+  r = await h.eng.authorSpecs({ ts: 1_700_000_000_000 + 60_000 });
+  assert.deepEqual(r, { ran: 0, attempts: 0 });
+  assert.equal(h.calls.length, 1);
+  // …but after the watermark elapses the pass runs again
+  r = await h.eng.authorSpecs({ ts: 1_700_000_000_000 + AUTHORING_FAILURE_RETRY_MS });
+  assert.deepEqual(r, { ran: 0, attempts: 1 });
+  assert.equal(h.calls.length, 2);
+});
+
+test("authorSpecs: empty model array rests for the week with no write and no evidence noise", async () => {
+  const h = authoringHarness({ runEphemeral: async () => ({ text: "[]" }) });
+  const r = await h.eng.authorSpecs({ ts: 1_700_000_000_000 });
+  assert.deepEqual(r, { ran: 0, attempts: 1 });
+  assert.equal(h.store._files.github.probes.length, 0);
+  const row = h.registry._rows.get("github");
+  assert.equal((row.evidence ?? []).length, 1, "the pre-existing secret evidence row is untouched — no refusal row");
+  assert.ok(h.ledger.rows.some((x) => x.kind === "cto.probe.author" && x.ok === true && x.probes === 0));
+  const r2 = await h.eng.authorSpecs({ ts: 1_700_000_000_000 + 3_600_000 });
+  assert.deepEqual(r2, { ran: 0, attempts: 0 }, "an ok-but-empty pass rests for the week");
+});
+
+test("authorSpecs: one-shot — a filled spec is never rewritten; unconsented tools are skipped; no seam → skipped", async () => {
+  const filled = authoringHarness({ specs: { github: githubSpec() }, runEphemeral: async () => ({ text: "[]" }) });
+  assert.deepEqual(await filled.eng.authorSpecs({ ts: 1_700_000_000_000 }), { ran: 0, attempts: 0 });
+  assert.equal(filled.calls.length, 0, "a spec that already carries probes is never touched");
+  const unconsented = authoringHarness({
+    rows: [{ ...consentedTool(), consent: { metadata: "no", deep_read: null, write: null } }],
+    runEphemeral: async () => ({ text: "[]" }),
+  });
+  assert.deepEqual(await unconsented.eng.authorSpecs({ ts: 1_700_000_000_000 }), { ran: 0, attempts: 0 });
+  assert.equal(unconsented.calls.length, 0);
+  const noSeam = authoringHarness({});
+  assert.deepEqual(await noSeam.eng.authorSpecs({ ts: 1_700_000_000_000 }), { ran: 0, attempts: 0, skipped: "no-ephemeral" });
+});
+
+test("authorSpecs: the daily attempt budget bounds the calls box-wide, not per tool", async () => {
+  const tools = ["t1", "t2", "t3", "t4", "t5", "t6"];
+  const h = authoringHarness({
+    rows: tools.map((tool) => consentedTool(tool, ["api.github.com"])),
+    specs: Object.fromEntries(tools.map((tool) => [tool, { tool, probes: [] }])),
+    runEphemeral: async () => ({ text: JSON.stringify([{ name: "p", url: "https://api.github.com/x", cadence: "1h", ring: "metadata" }]) }),
+  });
+  const r = await h.eng.authorSpecs({ ts: 1_700_000_000_000 });
+  assert.equal(r.attempts, 4, "only AUTHORING_PER_DAY attempts are made");
+  assert.equal(h.calls.length, 4);
+  const r2 = await h.eng.authorSpecs({ ts: 1_700_000_000_000 + 60_000 });
+  assert.deepEqual(r2, { ran: 0, attempts: 0 }, "the budget is spent for the day");
+  const r3 = await h.eng.authorSpecs({ ts: 1_700_000_000_000 + 24 * 3_600_000 });
+  assert.equal(r3.attempts, 2, "the next day fills the remaining templates");
+  assert.deepEqual(r3, { ran: 2, attempts: 2 });
 });
