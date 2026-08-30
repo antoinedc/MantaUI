@@ -688,3 +688,21 @@ export function refChipAction(ref: string, openableSessions?: Set<string>): RefC
   }
   return { kind: "copy", title: ref };
 }
+
+// BET-1447: the digest "view evidence →" chip resolves through the same
+// decision table as the blackboard fact chips — the first openable session
+// ref jumps, otherwise the first ref (or the item id) is the copy fallback.
+// One decision table, two surfaces; never a dead control.
+export function digestEvidenceAction(
+  refs: string[] | undefined,
+  openableSessions?: Set<string>,
+  fallback?: string,
+): { kind: "jump" | "copy"; ref: string } {
+  const list = Array.isArray(refs) ? refs : [];
+  for (const ref of list) {
+    if (refChipAction(ref, openableSessions).kind === "jump") {
+      return { kind: "jump", ref };
+    }
+  }
+  return { kind: "copy", ref: list[0] ?? fallback ?? "" };
+}

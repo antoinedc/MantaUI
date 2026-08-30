@@ -50,6 +50,7 @@ import {
   bindingReserveFrac,
   budgetTodayUsd,
   refChipAction,
+  digestEvidenceAction,
   type BlockerCard,
   type ConnectCardRow,
   type CtoState,
@@ -518,8 +519,26 @@ export function CtoPanel({
     },
     [pushToast],
   );
+  // BET-1447: the digest "view evidence →" chip must always act (no dead
+  // controls). Same decision table as the blackboard fact chips: jump to the
+  // first openable session ref, copy the ref + toast otherwise. The §14.1
+  // `ctoDigestOpened` ledger entry still fires first.
+  const copyEvidenceRef = async (ref: string) => {
+    try {
+      await navigator.clipboard.writeText(ref);
+    } catch {
+      /* clipboard can be denied in the sandbox; the chip still responds */
+    }
+    pushToast({ id: `cto-ev-${ref}`, message: `Copied evidence ref: ${ref}` });
+  };
   const handleItemOpen = (item: { id: string; text: string; refs?: string[] }) => {
     void window.api?.ctoDigestOpened?.({ item: item.id, expand: false, digestId: digest?.id ?? null }).catch(() => {});
+    const evidence = digestEvidenceAction(item.refs, knownSessions, item.id);
+    if (evidence.kind === "jump") {
+      onOpenSession(evidence.ref);
+    } else if (evidence.ref) {
+      void copyEvidenceRef(evidence.ref);
+    }
   };
   const handleItemExpand = (item: { id: string }) => {
     void window.api?.ctoDigestOpened?.({ item: item.id, expand: true, digestId: digest?.id ?? null }).catch(() => {});
