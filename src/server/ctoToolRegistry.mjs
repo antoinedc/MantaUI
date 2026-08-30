@@ -31,7 +31,8 @@ import {
 } from "./ctoToolScan.mjs";
 // One-way dep (ctoProbes never imports this module): the §7.2 well-known
 // vitality pair {last_event, inflow_rate} pulled from a probe's extract map.
-import { vitalityOf } from "./ctoProbes.mjs";
+import { vitalityOf, CADENCE_WEEKLY_MS } from "./ctoProbes.mjs";
+import { betaLowerBound } from "./ctoVerdicts.mjs";
 
 export const TOOL_REGISTRY_VERSION = 1;
 export const ACTOR = "cto";
@@ -55,6 +56,17 @@ export const MAX_ASK_ROUNDS = 3;
 // "a fresh axis-bar crossing"; the vitality path's bar cannot re-cross, so
 // for credentials only the 30-day timer re-arms).
 export const REARM_FRESH_USES = 2;
+// Deep-read ask bar (spec §7.6 + BET-1404 on-call decision): max relevance
+// ≥ 0.5. The vitality half of the bar is `ewma > 0` — the only vitality
+// threshold precedent in shipped code (the daily-cadence regime,
+// `effectiveCadenceMs`); selectivity belongs to the relevance half.
+export const DEEP_RELEVANCE_MIN = 0.5;
+// Dismissal decay chain (spec §7.6): trip when the as_source Beta lower bound
+// drops below 0.3 after ≥3 reports (§9.4's 0.95 tail convention). "Then
+// dormant" is the §7.3 dead condition under the standard lifecycle — no
+// second dormancy definition lives here.
+export const AS_SOURCE_MIN_REPORTS = 3;
+export const AS_SOURCE_DECAY_LOWER_BOUND = 0.3;
 // The classification task class (§12.1 — cheapest nano tier).
 export const TOOL_CLASSIFY_TASK_CLASS = "ambient-summarize";
 
@@ -114,6 +126,15 @@ function baseTool(identity, ts) {
     askAtUses: 0,
     reArmAt: null,
     unneverAtUses: null,
+    // Deep-read ring ask bookkeeping (§7.4 ring semantics apply per ask).
+    deepAskRound: 0,
+    deepAskAtUses: 0,
+    deepReArmAt: null,
+    deepAskBarMet: false, // the deep bar's met-state snapshot at ask time
+    lastDeepAskDay: null,
+    // Dismissal decay chain (§7.6): the as_source trip's persisted state.
+    asSourceDecayed: false,
+    decayedAtUses: 0,
     llmAt: null,
     relevance: {}, // §7.6 blackboard match — refreshed weekly (later issue)
     as_source: { reports: 0, accepted: 0 }, // §7.2 counters — fed by §9.5 later
@@ -164,6 +185,32 @@ export function deriveRole(tool, { nowMs = Date.now() } = {}) {
 // Either axis crossed its bar (§7.4 observed → candidate).
 export function barCrossed(tool) {
   return engagementBarMet(tool) || hasCredential(tool);
+}
+
+// The deep-read ask bar (§7.6): a tool with metadata consent whose vitality ×
+// relevance clears the bar — vitality EWMA high (`ewma > 0`, the daily-cadence
+// regime; BET-1404 on-call decision) AND max relevance ≥ 0.5. Returns the
+// bar's state plus the argmax-relevance project (what the ask's concrete
+// intent names). `met` implies metadata consent; the deep ask adds its own
+// consent gates on top.
+export function deepReadBar(tool) {
+  const consent = tool?.consent ?? {};
+  if (consent.metadata !== "yes") return { met: false, project: null, relevance: 0 };
+  const ewma = tool?.vitality?.ewma;
+  if (!(typeof ewma === "number" && ewma > 0)) return { met: false, project: null, relevance: 0 };
+  let project = null;
+  let best = 0;
+  for (const [p, r] of Object.entries(tool?.relevance ?? {})) {
+    const s = Number(r);
+    if (Number.isFinite(s) && s > best) {
+      best = s;
+      project = p;
+    }
+  }
+  if (project === null || !(best >= DEEP_RELEVANCE_MIN)) {
+    return { met: false, project, relevance: best };
+  }
+  return { met: true, project, relevance: best };
 }
 
 // Near-duplicate suppression (§7.3): a host that is a subdomain of an
@@ -310,13 +357,26 @@ export function createToolRegistry(deps = {}) {
       const p = await registryStore.load();
       return {
         v: TOOL_REGISTRY_VERSION,
-        tools: Array.isArray(p?.tools) ? p.tools : [],
+        // Rows persisted before the deep-read/decay fields existed are
+        // back-filled here so every consumer sees the fields at their
+        // §7.2-schema defaults (spread order: stored row wins).
+        tools: (Array.isArray(p?.tools) ? p.tools : []).map((t) => ({
+          deepAskRound: 0,
+          deepAskAtUses: 0,
+          deepReArmAt: null,
+          deepAskBarMet: false,
+          lastDeepAskDay: null,
+          asSourceDecayed: false,
+          decayedAtUses: 0,
+          ...(t ?? {}),
+        })),
         lastScanTs: Number.isFinite(p?.lastScanTs) ? p.lastScanTs : null,
         lastFusedTs: Number.isFinite(p?.lastFusedTs) ? p.lastFusedTs : null,
         lastAskDay: typeof p?.lastAskDay === "string" ? p.lastAskDay : null,
+        lastDeepAskDay: typeof p?.lastDeepAskDay === "string" ? p.lastDeepAskDay : null,
       };
     } catch {
-      return { v: TOOL_REGISTRY_VERSION, tools: [], lastScanTs: null, lastFusedTs: null, lastAskDay: null };
+      return { v: TOOL_REGISTRY_VERSION, tools: [], lastScanTs: null, lastFusedTs: null, lastAskDay: null, lastDeepAskDay: null };
     }
   }
 
