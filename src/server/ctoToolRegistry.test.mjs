@@ -672,3 +672,222 @@ test("revoke then un-never-style lifecycle: a revoked tool can re-grant on a fre
   const t = registryStore._state().tools.find((x) => x.tool === "aws");
   assert.equal(t.status, statusBefore, "revoke narrows features; it does not reset the lifecycle");
 });
+
+// ---------------------------------------------------------------------------
+// BET-1404 — deep-read asks, as_source counters, dismissal decay chain
+// ---------------------------------------------------------------------------
+
+import { deepReadBar, AS_SOURCE_MIN_REPORTS, AS_SOURCE_DECAY_LOWER_BOUND } from "./ctoToolRegistry.mjs";
+import { CADENCE_WEEKLY_MS } from "./ctoProbes.mjs";
+import { betaLowerBound } from "./ctoVerdicts.mjs";
+
+// An integrated tool that clears the deep-read bar: metadata consented,
+// live vitality, and a relevance argmax above 0.5.
+function deepEligibleRow(overrides = {}) {
+  return {
+    tool: "github",
+    displayName: "GitHub",
+    status: "integrated",
+    consent: { metadata: "yes", deep_read: null, write: null },
+    engagement: { ewma_per_week: 4, last_used: W0, per_project: {} },
+    vitality: { last_event: W0 - DAY, inflow_rate: 3, ewma: 0.8, last_probed: W0 - DAY },
+    ewmaAt: W0,
+    uses: 6,
+    weeks: [weekKey(W0), weekKey(W0 - 7 * DAY)],
+    evidence: [],
+    relevance: { alpha: 0.7, beta: 0.3 },
+    as_source: { reports: 0, accepted: 0 },
+    askRound: 1,
+    firstSeenTs: W0 - 30 * DAY,
+    ...overrides,
+  };
+}
+
+function seededRegistry(rows, { nowMs = W0 + DAY } = {}) {
+  const registryStore = memStore({ tools: rows, lastScanTs: W0, lastAskDay: null, lastDeepAskDay: null });
+  const cards = fakeCards();
+  const ledger = fakeLedger();
+  const registry = createToolRegistry({ registryStore, usageStore: memStore({ rows: [] }), cards, ledger, now: () => nowMs });
+  return { registry, registryStore, cards, ledger };
+}
+
+test("thresholds match the BET-1404 on-call decisions", () => {
+  assert.equal(AS_SOURCE_MIN_REPORTS, 3);
+  assert.equal(AS_SOURCE_DECAY_LOWER_BOUND, 0.3);
+});
+
+test("deepReadBar: metadata yes + ewma>0 + max relevance >= 0.5 (Q1: no invented vitality floor)", () => {
+  assert.equal(deepReadBar(deepEligibleRow()).met, true);
+  assert.equal(deepReadBar(deepEligibleRow()).project, "alpha");
+  // each leg missing → not met
+  assert.equal(deepReadBar(deepEligibleRow({ consent: { metadata: "no", deep_read: null, write: null } })).met, false);
+  assert.equal(deepReadBar(deepEligibleRow({ vitality: { last_event: null, inflow_rate: null, ewma: null, last_probed: null } })).met, false);
+  assert.equal(deepReadBar(deepEligibleRow({ vitality: { last_event: W0, inflow_rate: 1, ewma: 0, last_probed: W0 } })).met, false, "ewma=0 is not 'high' — the bar is ewma > 0");
+  assert.equal(deepReadBar(deepEligibleRow({ relevance: { alpha: 0.49 } })).met, false);
+  assert.equal(deepReadBar(deepEligibleRow({ relevance: {} })).met, false);
+});
+
+test("deep-read ask: the bar crossing raises ONE concrete ask (ring deep_read, intent in the copy), once per day", async () => {
+  const { registry, registryStore, cards, ledger } = seededRegistry([deepEligibleRow()]);
+  const out = await registry.dailyScan();
+  assert.equal(out.ok, true);
+  assert.equal(cards.calls.upserts.length, 1, JSON.stringify(cards.calls.upserts));
+  const ask = cards.calls.upserts[0];
+  assert.equal(ask.ring, "deep_read");
+  assert.equal(ask.toolId, "github");
+  assert.match(ask.body, /analyze GitHub's data about alpha overnight and report findings/);
+  const row = registryStore._state().tools.find((x) => x.tool === "github");
+  assert.equal(row.deepAskRound, 1);
+  assert.equal(row.deepAskBarMet, true);
+  assert.equal(registryStore._state().lastDeepAskDay, new Date(W0 + DAY).toISOString().slice(0, 10));
+  assert.ok(ledger.rows.some((r) => r.kind === "cto.tool.deep_ask" && r.project === "alpha"));
+  // same day again → no second ask
+  await registry.dailyScan();
+  assert.equal(cards.calls.upserts.length, 1);
+  // next day → the gate re-opens (askRound < 3), one more ask
+  const { registry: reg2, cards: cards2 } = seededRegistry(
+    [deepEligibleRow({ deepAskRound: 1, deepAskBarMet: true })],
+    { nowMs: W0 + 2 * DAY },
+  );
+  await reg2.dailyScan();
+  assert.equal(cards2.calls.upserts.length, 1);
+});
+
+test("deep-read ask: consented, rounds exhausted, and chain-tripped tools are skipped", async () => {
+  // already deep-consented
+  const a = seededRegistry([deepEligibleRow({ consent: { metadata: "yes", deep_read: "yes", write: null } })]);
+  await a.registry.dailyScan();
+  assert.equal(a.cards.calls.upserts.length, 0);
+  // rounds exhausted
+  const b = seededRegistry([deepEligibleRow({ deepAskRound: 3 })]);
+  await b.registry.dailyScan();
+  assert.equal(b.cards.calls.upserts.length, 0);
+  // chain tripped
+  const c = seededRegistry([deepEligibleRow({ asSourceDecayed: true, decayedAtUses: 6 })]);
+  await c.registry.dailyScan();
+  assert.equal(c.cards.calls.upserts.length, 0);
+});
+
+test("deep-read ask: a declined ask re-arms ONLY on the 30-day timer (vitality path)", async () => {
+  const row = deepEligibleRow({ consent: { metadata: "yes", deep_read: "no", write: null }, deepAskRound: 1, deepAskAtUses: 6, deepReArmAt: W0 + DAY + 10 * DAY });
+  const { registry, cards } = seededRegistry([row]);
+  await registry.dailyScan();
+  assert.equal(cards.calls.upserts.length, 0, "timer not elapsed — no ask");
+  const row2 = deepEligibleRow({ consent: { metadata: "yes", deep_read: "no", write: null }, deepAskRound: 1, deepAskAtUses: 6, deepReArmAt: W0 + DAY - 1000 });
+  const { registry: r2, cards: c2, registryStore: s2 } = seededRegistry([row2]);
+  await r2.dailyScan();
+  assert.equal(c2.calls.upserts.length, 1);
+  const after = s2._state().tools.find((x) => x.tool === "github");
+  assert.equal(after.consent.deep_read, null, "re-armed");
+  assert.equal(after.deepAskRound, 2);
+});
+
+test("resolveConnect deep_read ring: connect grants deep read (metadata backstop); not-now re-arms; never kills all rings; bad ring rejected", async () => {
+  // grant — requires metadata consent
+  const ok = seededRegistry([deepEligibleRow()]);
+  const granted = await ok.registry.resolveConnect({ tool: "github", answer: "connect", ring: "deep_read" });
+  assert.equal(granted.ok, true);
+  const grantedRow = ok.registryStore._state().tools.find((x) => x.tool === "github");
+  assert.equal(grantedRow.consent.deep_read, "yes");
+  assert.ok(ok.ledger.rows.some((r) => r.kind === "cto.tool.consent" && r.ring === "deep_read" && r.value === "yes"));
+  // grant without metadata consent → refused
+  const noMeta = seededRegistry([deepEligibleRow({ consent: { metadata: "no", deep_read: null, write: null } })]);
+  const refused = await noMeta.registry.resolveConnect({ tool: "github", answer: "connect", ring: "deep_read" });
+  assert.equal(refused.ok, false);
+  // not-now re-arms on the 30-day timer
+  const later = seededRegistry([deepEligibleRow({ deepAskRound: 1 })]);
+  const declined = await later.registry.resolveConnect({ tool: "github", answer: "not-now", ring: "deep_read" });
+  assert.equal(declined.ok, true);
+  const declinedRow = later.registryStore._state().tools.find((x) => x.tool === "github");
+  assert.equal(declinedRow.consent.deep_read, "no");
+  assert.equal(declinedRow.deepReArmAt, W0 + DAY + 30 * DAY);
+  // never kills every ring regardless of the ask's ring
+  const never = seededRegistry([deepEligibleRow({ deepAskRound: 1 })]);
+  const killed = await never.registry.resolveConnect({ tool: "github", answer: "never", ring: "deep_read" });
+  assert.equal(killed.ok, true);
+  const killedRow = never.registryStore._state().tools.find((x) => x.tool === "github");
+  assert.deepEqual(killedRow.consent, { metadata: "never", deep_read: "never", write: "never" });
+  // invalid ring rejected without touching the store
+  const bad = seededRegistry([deepEligibleRow()]);
+  const badRes = await bad.registry.resolveConnect({ tool: "github", answer: "connect", ring: "write" });
+  assert.equal(badRes.ok, false);
+});
+
+test("applyAsSource: folds success/rejection, ignores access/decay, and trips the chain at LB<0.3 after >=3 reports", async () => {
+  // 3 reports, 1 accepted → betaLowerBound(1, 2) ≈ 0.075 < 0.3 → trip
+  const trip = seededRegistry([deepEligibleRow({ uses: 6 })]);
+  assert.equal(AS_SOURCE_MIN_REPORTS, 3);
+  const acc = await trip.registry.applyAsSource("github", { success: true });
+  assert.equal(acc.ok, true);
+  assert.deepEqual(acc.as_source, { reports: 1, accepted: 1 });
+  assert.equal(acc.decayed, false);
+  await trip.registry.applyAsSource("github", { rejection: true });
+  const tripped = await trip.registry.applyAsSource("github", { rejection: true });
+  assert.equal(tripped.decayed, true, "1 accept / 2 rejects after 3 reports trips");
+  const row = trip.registryStore._state().tools.find((x) => x.tool === "github");
+  assert.equal(row.asSourceDecayed, true);
+  assert.equal(row.decayedAtUses, 6);
+  assert.ok(trip.ledger.rows.some((r) => r.kind === "cto.tool.as_source_decayed" && r.reports === 3));
+  // access/decay effects never enter the counters
+  const noFold = seededRegistry([deepEligibleRow()]);
+  const access = await noFold.registry.applyAsSource("github", { access: true, decay: true });
+  assert.deepEqual(access, { ok: true, changed: false });
+  const cleanRow = noFold.registryStore._state().tools.find((x) => x.tool === "github");
+  assert.deepEqual(cleanRow.as_source, { reports: 0, accepted: 0 });
+  // 3 accepts / 1 reject after 4 reports: LB ≈ 0.43 > 0.3 → no trip
+  // (2 accepts / 1 reject after 3 DOES trip: LB ≈ 0.279)
+  const hold = seededRegistry([deepEligibleRow()]);
+  await hold.registry.applyAsSource("github", { success: true });
+  await hold.registry.applyAsSource("github", { success: true });
+  await hold.registry.applyAsSource("github", { success: true });
+  const fourth = await hold.registry.applyAsSource("github", { rejection: true });
+  assert.equal(fourth.decayed, false);
+  assert.ok(betaLowerBound(3, 1) >= 0.3);
+  // unknown tool / missing id
+  assert.equal((await hold.registry.applyAsSource("nope", { success: true })).ok, false);
+  assert.equal((await hold.registry.applyAsSource("", { success: true })).ok, false);
+});
+
+test("decay chain: a tripped tool stops deep asks and probes weekly; fresh engagement revives it", async () => {
+  const tripped = deepEligibleRow({ asSourceDecayed: true, decayedAtUses: 6, uses: 6 });
+  const { registry, registryStore, cards, ledger } = seededRegistry([tripped]);
+  // deep asks suppressed while decayed
+  await registry.dailyScan();
+  assert.equal(cards.calls.upserts.length, 0);
+  // probing caps at weekly — the chain's source of truth lives here
+  assert.equal(await registry.probeCadenceCapMs("github"), CADENCE_WEEKLY_MS);
+  assert.equal(await registry.probeCadenceCapMs("nope"), null);
+  // revival: fresh engagement beyond the trip's snapshot (uses > decayedAtUses + 2).
+  // The row is deep-consented (the trip came from dismissed REPORTS, which
+  // only exist under deep consent) so no new ask fires over the revival.
+  const revivedStore = memStore({
+    tools: [deepEligibleRow({ asSourceDecayed: true, decayedAtUses: 6, uses: 9, consent: { metadata: "yes", deep_read: "yes", write: null } })],
+    lastScanTs: W0,
+    lastAskDay: null,
+    lastDeepAskDay: null,
+  });
+  const revCards = fakeCards();
+  const revLedger = fakeLedger();
+  const rev = createToolRegistry({ registryStore: revivedStore, usageStore: memStore({ rows: [] }), cards: revCards, ledger: revLedger, now: () => W0 + DAY });
+  await rev.dailyScan();
+  const revivedRow = revivedStore._state().tools.find((x) => x.tool === "github");
+  assert.equal(revivedRow.asSourceDecayed, false);
+  assert.equal(revivedRow.decayedAtUses, 0);
+  assert.equal(revivedRow.deepReArmAt, W0 + DAY + 30 * DAY);
+  assert.ok(revLedger.rows.some((r) => r.kind === "cto.tool.as_source_revived"));
+  // and the deep ask front door re-opens after the timer
+  assert.equal(await rev.probeCadenceCapMs("github"), null);
+  // not-yet-fresh engagement does NOT revive (uses <= decayedAtUses + 2)
+  const stale = seededRegistry([deepEligibleRow({ asSourceDecayed: true, decayedAtUses: 6, uses: 8 })]);
+  await stale.registry.dailyScan();
+  assert.equal(stale.registryStore._state().tools.find((x) => x.tool === "github").asSourceDecayed, true);
+});
+
+test("listTools exposes the §7.6 chain state + relevance map (no dead state)", async () => {
+  const { registry } = seededRegistry([deepEligibleRow({ asSourceDecayed: true, as_source: { reports: 4, accepted: 1 } })]);
+  const view = await registry.listTools();
+  assert.equal(view.length, 1);
+  assert.deepEqual(view[0].asSource, { reports: 4, accepted: 1 });
+  assert.equal(view[0].asSourceDecayed, true);
+  assert.deepEqual(view[0].relevance, { alpha: 0.7, beta: 0.3 });
+});

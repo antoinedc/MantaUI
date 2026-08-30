@@ -59,7 +59,7 @@ import {
   patchEngineState,
   purgeExpiredInbox,
 } from "./ctoStores.mjs";
-import { createVerdictEngine } from "./ctoVerdicts.mjs";
+import { createVerdictEngine, createAsSourceSink } from "./ctoVerdicts.mjs";
 // BET-1403: the earned-trust ladder (§9.3/§9.4). Its per-class Beta counters
 // ride the §9.5 verdict sink registry below; the digest announces acts and
 // tier changes through the same engine.
@@ -118,7 +118,7 @@ import {
 // BET-1419 overnight execution (§11): the pure window/portfolio machine
 // (BET-1402) back the engine's veto/tonight verbs; resolveForgeOwner is the
 // pure project→job-parent resolver shared with forge dispatch.
-import { createOvernightScheduler, normalizeWindow, scheduleCountdown } from "./ctoOvernight.mjs";
+import { createOvernightScheduler, normalizeWindow, scheduleCountdown, dataAnalysisCandidatesFromTools } from "./ctoOvernight.mjs";
 import { resolveForgeOwner } from "./delegate.mjs";
 
 // BET-1395 tool discovery (§7): the registry engine — fusion of the four
@@ -994,6 +994,18 @@ export function createCtoEngine(deps = {}) {
     verdictsEngine = createVerdictEngine({ verdicts, now });
     verdictsEngine.registerCounterSink(factsCounterSink);
     verdictsEngine.registerCounterSink(tonightCounterSink);
+    // BET-1404 (§9.5): tool-as-source verdicts fold into the tool registry's
+    // as_source counters — the decay chain's input data. Late-bound registry
+    // handle: the tool registry is constructed lazily and the sink fires
+    // after any verdict, so resolve getTools() at fold time. Best-effort
+    // like every sink.
+    verdictsEngine.registerCounterSink(
+      createAsSourceSink({
+        registry: {
+          applyAsSource: (toolId, effects) => getTools().applyAsSource(toolId, effects),
+        },
+      }),
+    );
     // BET-1403 (§9.4): the trust counters ride the same §9.5 sink registry —
     // per-action-class Beta counters over class-attributed suggestion
     // verdicts. Best-effort like every sink: a failure never breaks verdict
@@ -1629,6 +1641,16 @@ export function createCtoEngine(deps = {}) {
     const candidates = [
       ...queueCandidatesFromRows(await tonightQueueRows()),
       ...watcherCandidatesFromRows(recentLedger),
+      // §7.6 (BET-1404): data-source analyses — one per deep-consented tool
+      // at argmax relevance, p_use = ewma × max(relevance). Best-effort: a
+      // registry hiccup must never take the overnight tick down.
+      ...await (async () => {
+        try {
+          return dataAnalysisCandidatesFromTools(await getTools().listTools());
+        } catch {
+          return [];
+        }
+      })(),
     ];
     let out = null;
     try {

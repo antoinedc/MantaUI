@@ -4665,6 +4665,7 @@ const handleRequest = async (req, res) => {
         const result = await adaptiveCto.tools.resolveConnect({
           tool: body?.tool,
           answer: body?.answer,
+          ring: body?.ring,
         });
         if (result?.ok) void bus.publish({ kind: "ctoState" });
         respondJson(res, result?.ok ? 200 : 400, result);

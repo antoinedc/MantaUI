@@ -383,9 +383,29 @@ test("upsertConnect: writes a variant=connect card with the three bound answers"
   );
   for (const o of card.options) {
     assert.equal(o.action.type, "tool-connect");
-    assert.deepEqual(o.action.payload, { tool: "vercel", answer: o.answer });
+    // BET-1404: the payload carries the ring the ask was about — the
+    // metadata default here, "deep_read" for the deep-read ask's card.
+    assert.deepEqual(o.action.payload, { tool: "vercel", answer: o.answer, ring: "metadata" });
   }
   assert.ok(h.ledgerRows.some((row) => row.kind === CARD_CREATED && row.variant === "connect"));
+});
+
+test("upsertConnect: the deep_read ask gets its own card id and ring-tagged payloads", async () => {
+  const h = makeHarness();
+  await h.cards.upsertConnect({ toolId: "vercel", title: "meta", refs: ["vercel"] });
+  const r = await h.cards.upsertConnect({
+    toolId: "vercel",
+    ring: "deep_read",
+    title: "deep",
+    refs: ["vercel"],
+  });
+  assert.equal(r.changed, true);
+  const deep = h.store().cards.find((c) => c.variant === "connect" && c.title === "deep");
+  assert.ok(deep);
+  assert.equal(deep.sourceId, "vercel:deep", "a distinct stable id — the metadata card is untouched");
+  for (const o of deep.options) {
+    assert.deepEqual(o.action.payload, { tool: "vercel", answer: o.answer, ring: "deep_read" });
+  }
 });
 
 test("upsertConnect: re-raising the same tool upserts in place (no dup)", async () => {

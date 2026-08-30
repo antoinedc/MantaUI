@@ -566,3 +566,81 @@ test("a trough-opened window closes when the profile re-derives the trough away 
   const rn = evaluateWindow(null, tickInput({ now: T0 + 2 * H, trough: shifted, runNow: true }));
   assert.equal(rn.window.state, "open");
 });
+
+// ---------------------------------------------------------------------------
+// BET-1404 — §7.6 data-source candidate source (p_use composition,
+// experiment-first, chain + consent gates)
+// ---------------------------------------------------------------------------
+
+import { dataAnalysisCandidatesFromTools, dataAnalysisPrompt } from "./ctoOvernight.mjs";
+
+function deepTool(overrides = {}) {
+  return {
+    tool: "github",
+    displayName: "GitHub",
+    status: "integrated",
+    consent: { metadata: "yes", deep_read: "yes", write: null },
+    asSourceDecayed: false,
+    asSource: { reports: 0, accepted: 0 },
+    relevance: { alpha: 0.7, beta: 0.3 },
+    vitality: { ewma: 0.8, last_event: 1, inflow_rate: 3, last_probed: 1 },
+    ...overrides,
+  };
+}
+
+test("dataAnalysisCandidatesFromTools: one candidate per deep-consented tool at argmax relevance; p_use = ewma × max(relevance)", () => {
+  const out = dataAnalysisCandidatesFromTools([deepTool()]);
+  assert.equal(out.length, 1);
+  const c = out[0];
+  assert.equal(c.id, "data-source:github");
+  assert.equal(c.project, "alpha", "argmax relevance picks the project");
+  assert.equal(c.category, "data-source");
+  assert.ok(Math.abs(c.pUse - 0.8 * 0.7) < 1e-9, `p_use = ewma × max(relevance), got ${c.pUse}`);
+  assert.equal(c.requestShaped, true, "§11.2 batch routing flag");
+  assert.deepEqual(c.refs, ["github"]);
+  assert.equal(c.value, 1);
+  assert.equal(c.confidence, 0.5);
+  assert.equal(c.predictedCost, 0.5, "reports=0 → the experiment-first shape (halved cost)");
+});
+
+test("dataAnalysisCandidatesFromTools: the gates exclude non-consented, non-integrated, decayed, vitality-dead, and relevance-less tools", () => {
+  const out = dataAnalysisCandidatesFromTools([
+    deepTool({ consent: { metadata: "yes", deep_read: null, write: null } }), // not deep-consented
+    deepTool({ status: "candidate" }), // probes never ran
+    deepTool({ asSourceDecayed: true }), // chain tripped → analyses stopped
+    deepTool({ vitality: { ewma: 0, last_event: 1, inflow_rate: 0, last_probed: 1 } }), // ewma=0 is not 'high' (Q1)
+    deepTool({ relevance: { alpha: 0.1 } }), // no relevance ≥ threshold... argmax exists but pUse>0 still — relevance score exists
+    deepTool({ relevance: {} }), // no relevance score at all → not emitted
+    deepTool(), // the eligible one
+  ]);
+  assert.equal(out.length, 2, "the 0.1-relevance tool emits (score exists; p_use carries selectivity); the empty-relevance one does not");
+  assert.deepEqual(out.map((c) => c.project).sort(), ["alpha", "alpha"]);
+});
+
+test("dataAnalysisCandidatesFromTools: experiment-first — the FIRST analysis is flagged small, later ones are full-size", () => {
+  const first = dataAnalysisCandidatesFromTools([deepTool({ asSource: { reports: 0, accepted: 0 } })]);
+  assert.equal(first.length, 1);
+  assert.equal(first[0].predictedCost, 0.5, "halved predicted cost for the experiment");
+  assert.match(first[0].prompt, /EXPERIMENT-FIRST CONSTRAINTS/);
+  assert.match(first[0].prompt, /single most recent probe window/);
+  assert.match(first[0].prompt, /half the normal context budget/);
+  const later = dataAnalysisCandidatesFromTools([deepTool({ asSource: { reports: 2, accepted: 1 } })]);
+  assert.equal(later.length, 1);
+  assert.equal(later[0].predictedCost, 1);
+  assert.ok(!later[0].prompt.includes("EXPERIMENT-FIRST"));
+  // every prompt carries the §11.5 report-artifact contract
+  assert.match(first[0].prompt, /REPORT-github\.md/);
+  assert.match(first[0].prompt, /no code gates/);
+});
+
+test("dataAnalysisCandidatesFromTools: survives garbage input (graceful-empty)", () => {
+  assert.deepEqual(dataAnalysisCandidatesFromTools(null), []);
+  assert.deepEqual(dataAnalysisCandidatesFromTools([null, 42, { tool: "" }, "x"]), []);
+});
+
+test("dataAnalysisPrompt: concrete intent names the tool and the project", () => {
+  const p = dataAnalysisPrompt("GitHub", "alpha", { experiment: false });
+  assert.match(p, /GitHub/);
+  assert.match(p, /alpha/);
+  assert.match(p, /REPORT/);
+});

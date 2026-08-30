@@ -941,3 +941,72 @@ function memStore(initial = {}) {
     _state: () => state,
   };
 }
+
+// ---------------------------------------------------------------------------
+// BET-1404 — deep-ring probes for deep-consented tools (characterization) +
+// the §7.6 decay chain's weekly probing cap
+// ---------------------------------------------------------------------------
+
+test("runDue: a deep-ring probe runs for a deep-consented tool; a metadata-only tool never runs it", async () => {
+  const deepSpec = () => {
+    const s = githubSpec();
+    s.probes[0].ring = "deep_read";
+    return s;
+  };
+  // deep-consented → the probe runs
+  const deep = build({
+    rows: [{ ...consentedTool(), consent: { metadata: "yes", deep_read: "yes", write: null } }],
+    specs: { github: deepSpec() },
+  });
+  const results = await deep.runDue();
+  assert.equal(results.length, 1, "deep-consented tool runs its deep-ring probe");
+  assert.equal(results[0].ok, true);
+  // metadata-only consent → the runner re-checks the live source of truth and skips
+  const meta = build({
+    rows: [consentedTool()],
+    specs: { github: deepSpec() },
+  });
+  assert.equal((await meta.runDue()).length, 0, "no deep probe without deep consent");
+});
+
+test("runDue: revoking deep consent stops the deep probe but the metadata probe still runs", async () => {
+  const s = githubSpec();
+  s.probes = [
+    { name: "meta_probe", method: "GET", url: "https://api.github.com/users/octocat/events", extract: { inflow_rate: "length" }, cadence: "30m", ring: "metadata" },
+    { name: "deep_probe", method: "GET", url: "https://api.github.com/users/octocat/events/full", extract: { inflow_rate: "length" }, cadence: "30m", ring: "deep_read" },
+  ];
+  const eng = build({
+    rows: [{ ...consentedTool(), consent: { metadata: "yes", deep_read: "no", write: null } }],
+    specs: { github: s },
+  });
+  const results = await eng.runDue();
+  assert.equal(results.length, 1);
+  assert.equal(results[0].probe, "github/meta_probe", "only the metadata probe ran");
+});
+
+test("runOne: a chain-tripped tool's probing cadence is capped at weekly (registry is the chain's source of truth)", async () => {
+  const base = fakeRegistry([{ ...consentedTool(), asSourceDecayed: true }]);
+  const eng = createProbes({
+    registry: {
+      ...base,
+      probeCadenceCapMs: async (tool) => (tool === "github" ? CADENCE_WEEKLY_MS : null),
+    },
+    probes: memProbesStore({ github: githubSpec() }),
+    stateStore: memStateStore(),
+    cards: fakeCards(),
+    ledger: fakeLedger(),
+    now: () => 1_700_000_000_000,
+    httpRequest: async () => ({ status: 200, bodyText: JSON.stringify([{ created_at: "2026-08-20T00:00:00Z" }]) }),
+    getSecretPath: async () => "/tmp/secret-file",
+    readSecret: async () => "sekrit-value",
+    isThrifty: () => false,
+    listProjects: async () => ["proj"],
+    getTopFacts: async () => [],
+    getRollups: async () => "",
+    runEphemeral: null,
+  });
+  const results = await eng.runDue();
+  assert.equal(results.length, 1);
+  const st = await eng.loadToolState("github");
+  assert.equal(st.probes.repo_events.nextRunAt, 1_700_000_000_000 + CADENCE_WEEKLY_MS, "30m spec capped at weekly while decayed");
+});

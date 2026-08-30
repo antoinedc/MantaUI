@@ -155,6 +155,60 @@ export function thompsonDraw(a, b, rng = Math.random) {
   return total > 0 ? x / total : betaMean(aa, bb);
 }
 
+// One-sided lower confidence bound of the Beta(a,b) mean, using the same
+// normal approximation as `betaTailAbove` (μ = a/(a+b), σ² = ab/((a+b)²(a+b+1))):
+// L = μ + σ·Φ⁻¹(1-conf), so P(μ > L) ≈ conf. With §9.4's 0.95 convention this
+// is the "Beta lower bound" the dismissal-decay gates test (spec §7.6: trip
+// when the as_source lower bound drops below 0.3). Degenerate Beta → 0.
+// Φ⁻¹ is bisected on the existing `standardNormalCdf` — monotone, and the
+// ~1e-3 CDF accuracy is far finer than any ledger-count decision.
+export function betaLowerBound(a, b, conf = 0.95) {
+  const aa = a || 0;
+  const bb = b || 0;
+  const n = aa + bb;
+  if (!(n > 0)) return 0;
+  const mu = betaMean(aa, bb);
+  const sigma = Math.sqrt((aa * bb) / (n * n * (n + 1)));
+  if (!(sigma > 0)) return mu; // a or b is 0: the mean is known exactly
+  const target = 1 - (conf || 0.95);
+  let lo = -8;
+  let hi = 8;
+  for (let i = 0; i < 60; i++) {
+    const mid = (lo + hi) / 2;
+    if (standardNormalCdf(mid) < target) lo = mid;
+    else hi = mid;
+  }
+  return mu + sigma * ((lo + hi) / 2);
+}
+
+// ---------------------------------------------------------------------------
+// Tool as-source counters (spec §7.6) — the counter sink for data-source
+// analyses
+// ---------------------------------------------------------------------------
+
+// The verdict subject class report reviews use: `{type: "tool", id: <toolId>,
+// class: AS_SOURCE_SUBJECT_CLASS}`. A verdict on this subject is a judgment
+// of a data-analysis REPORT the CTO produced from that tool's data (the
+// §7.6 experiment-first verdict seeds the same counters).
+export const AS_SOURCE_SUBJECT_CLASS = "tool-as-source";
+
+// Counter sink factory (§9.5 sink registry): folds tool-as-source verdict
+// effects into the tool registry's `as_source` Beta counters. Effects map per
+// the §9.5 table — accept/edit (`success`) → accepted+1 & reports+1;
+// dismiss/veto/correct/never (`rejection`) → reports+1; `access`/`decay`
+// (open/expire) never enter the acceptance counters. Best-effort like every
+// sink: a failing counter write never breaks verdict recording.
+export function createAsSourceSink({ registry } = {}) {
+  if (!registry || typeof registry.applyAsSource !== "function") {
+    throw new Error("createAsSourceSink requires a tool registry with applyAsSource()");
+  }
+  return (effects, entry) => {
+    const subject = entry?.subject;
+    if (subject?.type !== "tool" || subject?.class !== AS_SOURCE_SUBJECT_CLASS) return;
+    void Promise.resolve(registry.applyAsSource(subject.id, effects ?? {})).catch(() => {});
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Counter sink registry
 // ---------------------------------------------------------------------------

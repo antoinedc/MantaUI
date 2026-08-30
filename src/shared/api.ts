@@ -1415,6 +1415,9 @@ export interface Api {
   ctoToolConnect(input: {
     tool: string;
     answer: "connect" | "not-now" | "never";
+    // BET-1404: which ring the ask was about — "metadata" (default) or
+    // "deep_read" (the deep-read ask's connect grants deep read access).
+    ring?: "metadata" | "deep_read";
   }): Promise<{ ok: boolean; error?: string; tool?: string; answer?: string }>;
 }
 
