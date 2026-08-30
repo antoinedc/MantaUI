@@ -1140,7 +1140,7 @@ test("authorSpecs: empty model array rests for the week with no write and no evi
   assert.deepEqual(r, { ran: 0, attempts: 1 });
   assert.equal(h.store._files.github.probes.length, 0);
   const row = h.registry._rows.get("github");
-  assert.equal((row.evidence ?? []).length, 1, "the pre-existing secret evidence row is untouched — no refusal row");
+  assert.equal((row.evidence ?? []).filter((e) => e.channel === "probe").length, 0, "no refusal row — an ok-but-empty pass stays silent on the trail");
   assert.ok(h.ledger.rows.some((x) => x.kind === "cto.probe.author" && x.ok === true && x.probes === 0));
   const r2 = await h.eng.authorSpecs({ ts: 1_700_000_000_000 + 3_600_000 });
   assert.deepEqual(r2, { ran: 0, attempts: 0 }, "an ok-but-empty pass rests for the week");
