@@ -10,7 +10,7 @@
 // All three are cards (not footer items) so they render on BOTH desktop and
 // mobile with no mobile-CSS edits.
 
-import { memo, useEffect, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { Clock, Bell, Webhook, Key, Bot, ArrowLeft, Square, X } from "lucide-react";
 import type {
   DelegateApproval,
@@ -223,6 +223,7 @@ export const SecretsCard = memo(function SecretsCard({
   secrets,
   error,
   sessionId,
+  prefillKey,
   onSave,
   onDelete,
   onClose,
@@ -230,6 +231,11 @@ export const SecretsCard = memo(function SecretsCard({
   secrets: SecretMeta[];
   error: string | null;
   sessionId: string;
+  /** BET-1437: vault KEY NAME to pre-fill (deep-linked from a CTO probe
+      blocker). The card treats the fix as a rotation: the key lands in the
+      add/update form (save is an upsert), the input gets an accent ring, a
+      matching existing row is highlighted, and the value input is focused. */
+  prefillKey?: string | null;
   onSave: (input: {
     key: string;
     value: string;
@@ -245,6 +251,15 @@ export const SecretsCard = memo(function SecretsCard({
   const [scope, setScope] = useState<SecretScope>("shared");
   const [hint, setHint] = useState("");
   const [saving, setSaving] = useState(false);
+  const valueRef = useRef<HTMLInputElement>(null);
+
+  // Deep-link pre-fill (BET-1437). Re-runs when the hint changes (the card
+  // mounts only when open, so this fires once per open in practice).
+  useEffect(() => {
+    if (!prefillKey) return;
+    setKey(prefillKey);
+    valueRef.current?.focus();
+  }, [prefillKey]);
 
   const keyValid = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(key);
   const canSave = keyValid && value.length > 0 && !saving;
@@ -306,6 +321,11 @@ export const SecretsCard = memo(function SecretsCard({
             className={`min-w-0 flex-1 rounded-xs border bg-bg px-2 py-1 font-mono text-text outline-none ${
               key && !keyValid ? "border-danger/60" : "border-border"
             }`}
+            style={
+              prefillKey
+                ? { borderColor: "rgb(var(--accent-rgb) / 0.7)" }
+                : undefined
+            }
           />
           <select
             value={scope}
@@ -319,6 +339,7 @@ export const SecretsCard = memo(function SecretsCard({
           </select>
         </div>
         <input
+          ref={valueRef}
           value={value}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={(e) => {
@@ -369,7 +390,18 @@ export const SecretsCard = memo(function SecretsCard({
       ) : (
         <div className="flex flex-col gap-2 border-t border-border pt-2 max-h-[40vh] overflow-y-auto">
           {secrets.map((s) => (
-            <div key={s.id} className="flex items-center gap-2">
+            <div
+              key={s.id}
+              className="flex items-center gap-2 rounded-xs px-1 -mx-1"
+              style={
+                s.key === prefillKey
+                  ? {
+                      backgroundColor: "rgb(var(--accent-rgb) / 0.08)",
+                      boxShadow: "inset 2px 0 0 rgb(var(--accent-rgb) / 0.53)",
+                    }
+                  : undefined
+              }
+            >
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
                   <span className="text-text font-mono truncate">{s.key}</span>

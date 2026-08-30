@@ -3172,6 +3172,7 @@ export function ChatPanel({
             secrets={secrets}
             error={secretError}
             sessionId={sessionId}
+            prefillKey={resources.secretKeyHint}
             onClose={closePanel}
             onSave={(input) => window.api.secretsSet(input).then((r) => {
               if (r && r.ok === false) { setSecretError(r.error || "save failed"); return false; }

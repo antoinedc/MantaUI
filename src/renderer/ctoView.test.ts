@@ -9,6 +9,7 @@ import {
   formatEta,
   relativeTime,
   blockerTarget,
+  probeSecretKey,
   finishedVariant,
   digestTone,
   digestExpandable,
@@ -250,6 +251,30 @@ describe("blockerTarget (§10.3 Answer-now routing)", () => {
   });
   it("a null/absent session with an unknown kind → ledger", () => {
     expect(blockerTarget({ ...card(), sessionID: null }, new Set(["s1"]))).toEqual({ action: "ledger" });
+  });
+  it("probe source → secrets action with the key named in the body (BET-1437)", () => {
+    const probe = card({
+      sourceKind: "probe",
+      sourceId: "github/repo_events",
+      sessionID: null,
+      body: 'The "repo_events" probe for github failed auth 3 times in a row (HTTP 401/403 or the credential is gone), so the digest\'s view of github is degraded. If the key was rotated, update "GITHUB_PAT" on the secrets surface (⚙ Settings → Secrets).',
+    });
+    expect(blockerTarget(probe, new Set([]))).toEqual({ action: "secrets", key: "GITHUB_PAT" });
+  });
+  it("probe source without a named key → secrets action with a null key", () => {
+    const probe = card({
+      sourceKind: "probe",
+      sessionID: null,
+      body: 'The "tool_ping" probe for tool failed auth 3 times in a row (HTTP 401/403 or the credential is gone), so the digest\'s view of tool is degraded. Check the tool\'s credential on the secrets surface (⚙ Settings → Secrets).',
+    });
+    expect(blockerTarget(probe, new Set(["s1"]))).toEqual({ action: "secrets", key: null });
+  });
+  it("probe key extraction tolerates an absent body", () => {
+    const probe = card({ sourceKind: "probe", sessionID: null, body: "" });
+    expect(blockerTarget(probe, new Set([]))).toEqual({ action: "secrets", key: null });
+  });
+  it("a quoted phrase elsewhere in the body is not mistaken for the key", () => {
+    expect(probeSecretKey('The "repo_events" probe failed. Check the credential on the secrets surface.')).toBeNull();
   });
 });
 

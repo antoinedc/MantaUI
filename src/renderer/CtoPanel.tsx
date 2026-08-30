@@ -132,9 +132,13 @@ const DEFAULT_NIGHT_CAP_USD = 5;
 export function CtoPanel({
   state,
   onOpenSession,
+  onOpenSecrets,
 }: {
   state: CtoState | null;
   onOpenSession: (sessionId: string) => void;
+  /** BET-1437: open the secrets surface (active session, key pre-filled).
+      Returns false when there is no active chat session to open it in. */
+  onOpenSecrets?: (key: string | null) => boolean;
 }) {
   const [view, setView] = useState<"overview" | "settings" | "ledger" | "profile" | "blackboard" | "tools">("overview");
   const pushToast = useStore((s) => s.pushAppToast);
@@ -269,8 +273,17 @@ export function CtoPanel({
       );
       return;
     }
-    // ledger fallback (target/session missing, or an inbox/health source whose
-    // fix surface isn't in the renderer yet — §10.3 keeps the control honest).
+    // BET-1437: probe blockers deep-link to the secrets surface on the active
+    // chat session (key pre-filled/highlighted in the SecretsCard when the
+    // body names one). The App-side handler closes the CTO pane and dispatches
+    // manta-open-secrets; with no active chat session it returns false and the
+    // ledger fallback keeps the control honest (§10.3).
+    if (target.action === "secrets") {
+      if (onOpenSecrets?.(target.key)) return;
+    }
+    // ledger fallback (target/session missing, an inbox/health source whose
+    // fix surface isn't in the renderer yet, or a probe with no session to
+    // open the secrets card in — §10.3 keeps the control honest).
     setLedgerCard(card);
   };
 

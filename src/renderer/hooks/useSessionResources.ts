@@ -42,6 +42,10 @@ export type SessionResources = {
   secretError: string | null;
   setSecretError: React.Dispatch<React.SetStateAction<string | null>>;
   refreshSecrets: () => Promise<void>;
+  /** BET-1437: vault KEY NAME to pre-fill/highlight in the SecretsCard, or
+      null. Latched from a manta-open-secrets bridge detail; cleared when the
+      card closes. */
+  secretKeyHint: string | null;
 
   // Inbound webhooks (🪝).
   webhooks: WebhookMeta[];
@@ -70,19 +74,25 @@ type ResourceCardConfig<T> = {
   backgroundPoll: boolean;
   /** Error message when the server is unreachable. */
   unreachable: string;
+  /** BET-1437: consume extra fields of the bridge detail (e.g. the secrets
+      opener's `key`). Receives the detail on every matching open. */
+  onOpenDetail?: (detail: { sessionId?: string; key?: string } | undefined) => void;
 };
 
 function useResourceCard<T>({
-  panelName, sessionId, isActive, openPanel, setOpenPanel, fetch, empty, backgroundPoll, unreachable,
+  panelName, sessionId, isActive, openPanel, setOpenPanel, fetch, empty, backgroundPoll, unreachable, onOpenDetail,
 }: ResourceCardConfig<T>) {
   const [items, setItems] = useState<T[]>(empty);
   const [error, setError] = useState<string | null>(null);
-  // fetch/empty are passed inline (recreated each render); hold them in refs so
-  // `refresh` keeps a stable identity and the reset effect doesn't re-fire.
+  // fetch/empty/onOpenDetail are passed inline (recreated each render); hold
+  // them in refs so `refresh` keeps a stable identity and the reset effect
+  // doesn't re-fire.
   const fetchRef = useRef(fetch);
   fetchRef.current = fetch;
   const emptyRef = useRef(empty);
   emptyRef.current = empty;
+  const onOpenDetailRef = useRef(onOpenDetail);
+  onOpenDetailRef.current = onOpenDetail;
 
   const refresh = useCallback(() => {
     return fetchRef.current(sessionId)
@@ -120,11 +130,18 @@ function useResourceCard<T>({
 
   // Open this card from an out-of-panel `manta-open-*` bridge. Open-only —
   // never a toggle, because the dispatcher has no idea what is open.
+  // `onOpenDetail` (BET-1437) lets a card consume extra detail fields (e.g. the
+  // secrets bridge's `key`) without the generic listener knowing about them.
   useEffect(() => {
     const type = `manta-open-${panelName}`;
     const onOpen = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { sessionId?: string } | undefined;
-      if (detail?.sessionId === sessionId) setOpenPanel(panelName);
+      const detail = (e as CustomEvent).detail as
+        | { sessionId?: string; key?: string }
+        | undefined;
+      if (detail?.sessionId === sessionId) {
+        setOpenPanel(panelName);
+        onOpenDetailRef.current?.(detail);
+      }
     };
     window.addEventListener(type, onOpen);
     return () => window.removeEventListener(type, onOpen);
@@ -153,10 +170,16 @@ export function useSessionResources(sessionId: string, isActive: boolean): Sessi
 
   // Secrets (🔑): server-owned (values never leave the box). list returns
   // METADATA ONLY (no values). Refetch-driven like schedules.
+  // BET-1437: the manta-open-secrets bridge may carry a `key` — the vault KEY
+  // NAME a CTO probe blocker asks the user to rotate. Latched here, consumed
+  // by the SecretsCard as a pre-fill/highlight, and cleared when the card
+  // closes (a stale highlight would keep pointing at an old fix).
+  const [secretKeyHint, setSecretKeyHint] = useState<string | null>(null);
   const secrets = useResourceCard<SecretMeta>({
     panelName: "secrets", sessionId, isActive, openPanel, setOpenPanel,
     fetch: (sid) => window.api.secretsList(sid), empty: [], backgroundPoll: false,
     unreachable: "secrets server unreachable",
+    onOpenDetail: (d) => setSecretKeyHint(d?.key ?? null),
   });
 
   // Inbound webhooks (🪝): server-owned (external POSTs wake the session).
@@ -174,8 +197,16 @@ export function useSessionResources(sessionId: string, isActive: boolean): Sessi
     setOpenPanel(null);
   }, [sessionId]);
 
+  // BET-1437: clear the deep-link hint whenever the secrets card is not the
+  // open panel (closed, or another card took over) — a stale highlight would
+  // keep pointing at an old fix.
+  useEffect(() => {
+    if (openPanel !== "secrets") setSecretKeyHint(null);
+  }, [openPanel]);
+
   return {
     openPanel, togglePanel, closePanel,
+    secretKeyHint,
     schedules: schedules.items, setSchedules: schedules.setItems,
     scheduleError: schedules.error, setScheduleError: schedules.setError,
     refreshSchedules: schedules.refresh,
