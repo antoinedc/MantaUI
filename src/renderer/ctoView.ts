@@ -345,19 +345,39 @@ export function relativeTime(ts: number, now: number): string {
 //   - question/permission → navigate to the owning session (the in-session
 //     question card is focused via the existing manta-scroll-to-question
 //     bridge in the component).
+//   - probe (BET-1437 / §10.6-7) → open the secrets surface on the active
+//     chat session via the manta-open-secrets bridge, carrying the vault KEY
+//     NAME extracted from the card body when one is named (pre-fill/highlight).
+//     Probe cards are box-level (sessionID null), so knownSessions is
+//     irrelevant; the component's handler falls back to the ledger when there
+//     is no active chat session to open the card in.
 //   - inbox-note / health → no fix-surface navigation exists in the renderer
 //     yet, so these resolve to the ledger fallback (the §10.3 honest route).
 // When the card's target session no longer exists (or is absent), fall back
 // to opening the matching ledger entry via an inline modal.
 export type BlockerAction =
   | { action: "session"; sessionID: string }
+  | { action: "secrets"; key: string | null }
   | { action: "ledger" };
+
+// Extract the vault KEY NAME a probe blocker card names in its body (§10.6-7).
+// The server copy (ctoCards.mjs probeBlockerCopy) embeds it as
+// `update "KEY" on the secrets surface`; nothing else in the body is quoted
+// before that phrase, and the generic branch quotes nothing at all. Returns
+// null when no key is named.
+export function probeSecretKey(body: string): string | null {
+  const m = body?.match(/"([^"]+)"\s+on the secrets surface/);
+  return m ? m[1] : null;
+}
 
 export function blockerTarget(
   card: BlockerCard,
   knownSessions: Set<string>,
 ): BlockerAction {
   const sourceKind = card?.sourceKind ?? "";
+  if (sourceKind === "probe") {
+    return { action: "secrets", key: probeSecretKey(card.body ?? "") };
+  }
   const isSessionTarget = sourceKind !== "inbox" && sourceKind !== "health";
   if (isSessionTarget) {
     return card.sessionID && knownSessions.has(card.sessionID)

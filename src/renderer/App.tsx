@@ -359,6 +359,26 @@ function Shell() {
     : null;
   const activeChatSessionId = activeWin?.opencodeSessionId ?? null;
 
+  // BET-1437: probe blocker cards deep-link to the secrets surface. The chat
+  // panels stay mounted under the CTO pane, so dispatching the existing
+  // manta-open-secrets bridge with the ACTIVE session id opens the SecretsCard
+  // there (key pre-filled via the detail's `key`); closing the pane reveals it.
+  // Returns false when there is no active chat session — the caller falls back
+  // to the ledger modal.
+  const onOpenSecretsFromCto = useCallback(
+    (key: string | null): boolean => {
+      if (!activeChatSessionId) return false;
+      window.dispatchEvent(
+        new CustomEvent("manta-open-secrets", {
+          detail: { sessionId: activeChatSessionId, key: key ?? undefined },
+        }),
+      );
+      setCtoOpen(false);
+      return true;
+    },
+    [activeChatSessionId],
+  );
+
   // BET-730: record the active chat in an effect, not during render (render-
   // time ref mutation is a StrictMode hazard). A re-render that just touches
   // unrelated fields must never mutate the visited set.
@@ -2186,7 +2206,7 @@ function Shell() {
                   panels above are suppressed while it is open (their `active`
                   flips on !ctoOpen). Selecting a session closes it. */}
               <PanelShell key="cto" active={ctoOpen}>
-                <CtoPanel state={ctoState} onOpenSession={onOpenSessionFromCto} />
+                <CtoPanel state={ctoState} onOpenSession={onOpenSessionFromCto} onOpenSecrets={onOpenSecretsFromCto} />
               </PanelShell>
               {/* New-session DRAFT layer: shown over the always-mounted
                   session panels when a draft is the active view (user hit +
