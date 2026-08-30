@@ -72,6 +72,7 @@ import https from "node:https";
 import dns from "node:dns/promises";
 import { probesStore, probeStateStore } from "./ctoStores.mjs";
 import { provideSecret } from "./secrets.mjs";
+import { proposalsFromRollup } from "./ctoRollups.mjs";
 import {
   PROBE_SOURCE_KIND,
   probeBlockerCopy,
@@ -649,7 +650,15 @@ export function evidenceHost(detail) {
  *   isThrifty     — () => boolean (live engine thrifty flag).
  *   listProjects  — async () => [projectName] (active projects for §7.6).
  *   getTopFacts   — async (project, k) => [{statement}].
- *   getRollups    — async (project) => string lines (recent rollup facts).
+ *   getRollups    — async () => raw recent day-rollup payloads (the box-wide
+ *                   store contents, oldest-first, each {level, window, bullets:
+ *                   [{text, refs}]}); the runner projects them per project
+ *                   itself (BET-1439 — the relevance context is per-project).
+ *   resolveSegment— async (segmentId) => {project} | null — rollup-bullet
+ *                   attribution through the canonical segment resolver (the
+ *                   same seam the day-level fact sync uses). Absent → no
+ *                   bullet ever attributes → every project falls back to a
+ *                   facts-only rollup context.
  *   runEphemeral  — the pre-gated ephemeral session call (nano classify /
  *                   relevance score / BET-1438 spec authoring).
  */
@@ -674,7 +683,8 @@ export function createProbes(deps = {}) {
     isThrifty = () => false,
     listProjects = async () => [],
     getTopFacts = async () => [],
-    getRollups = async () => "",
+    getRollups = async () => [],
+    resolveSegment = null,
     runEphemeral,
   } = deps;
   if (!registry || typeof registry.consentFor !== "function" || typeof registry.applyProbeResult !== "function") {
@@ -1235,7 +1245,9 @@ export function createProbes(deps = {}) {
 
   /**
    * Weekly per consented tool × active project: one nano call matching the
-   * tool's data domain against the project's top facts + recent rollups →
+   * tool's data domain against the project's top facts + the project's OWN
+   * recent rollups (BET-1439 — the context is per-project, never the box-wide
+   * slice) →
    * `relevance[project] ∈ [0,1]`. Pacing bounds ATTEMPTS: every call —
    * success or failure — consumes the RELEVANCE_PER_DAY budget, and a failed
    * call also sets a RELEVANCE_FAILURE_RETRY_MS watermark so a persistently
@@ -1271,6 +1283,14 @@ export function createProbes(deps = {}) {
     let budget = RELEVANCE_PER_DAY - (st.todayCount ?? 0);
     let ran = 0;
     let attempts = 0;
+    // The raw box-wide day-rollup source is fetched at most once per scan and
+    // only on first need (a resting pair never pays for the read); the
+    // per-project projection happens per pair below.
+    let rawRollups = null;
+    const rollupSource = async () => {
+      if (rawRollups === null) rawRollups = await getRollups().catch(() => []);
+      return Array.isArray(rawRollups) ? rawRollups : [];
+    };
     for (const tool of tools) {
       if (budget <= 0) break;
       if ((await registry.consentFor(tool, "metadata")) !== "yes") continue;
@@ -1286,7 +1306,7 @@ export function createProbes(deps = {}) {
         const restMs = entry?.ok ? RELEVANCE_WEEK_MS : RELEVANCE_FAILURE_RETRY_MS;
         if (entry && typeof entry.at === "number" && ts - entry.at < restMs) continue;
         const facts = await getTopFacts(project, 5).catch(() => []);
-        const rollups = await getRollups(project).catch(() => "");
+        const rollups = await projectRollupContext(await rollupSource(), project, resolveSegment);
         if (!factLines(facts) && !rollupLines(rollups)) {
           relAt[project] = { at: ts, ok: true }; // nothing to match against — do not retry all week
           toolTouched = true;
@@ -1318,6 +1338,39 @@ export function createProbes(deps = {}) {
       await saveToolState("_relevance", st);
     }
     return { ran, attempts };
+  }
+
+  /**
+   * §7.6 relevance context selection (BET-1439): the project's OWN rollup
+   * lines, projected from the box-wide day-rollup store through the canonical
+   * segment-attribution mapper (`ctoRollups.proposalsFromRollup` — the same
+   * mapper the day-level fact sync uses). Newest rollup first, early stop at
+   * five lines. A bullet that resolves to no project — or to a different
+   * project — never enters the context: a cross-project slice would actively
+   * mislead the per-project scoring. Returns "" when nothing attributes, which
+   * is the documented fallback: the nano call then runs on the project's top
+   * facts alone rather than a misleading box-wide rollup.
+   */
+  async function projectRollupContext(dayRollups, project, resolveSegmentFn) {
+    if (!Array.isArray(dayRollups) || dayRollups.length === 0) return "";
+    const resolve = resolveSegmentFn ?? (async () => null);
+    const out = [];
+    for (let i = dayRollups.length - 1; i >= 0 && out.length < 5; i--) {
+      const rollup = dayRollups[i];
+      if (!rollup || rollup.level !== "day" || !Array.isArray(rollup.bullets)) continue;
+      let proposals;
+      try {
+        proposals = await proposalsFromRollup(rollup, { resolveSegment: resolve });
+      } catch {
+        continue;
+      }
+      for (const p of proposals) {
+        if (p?.project !== project || typeof p?.statement !== "string" || !p.statement) continue;
+        out.push(p.statement);
+        if (out.length >= 5) break;
+      }
+    }
+    return out.join("\n");
   }
 
   function factLines(facts) {
@@ -1353,7 +1406,7 @@ export function createProbes(deps = {}) {
       `Tool "${tool}" provides external data (evidence: ${domain}).`,
       `Project "${project}" blackboard facts:`,
       factLines(facts) || "(none)",
-      rollupLines(rollups) ? `Recent rollups:\n${rollupLines(rollups)}` : "",
+      rollupLines(rollups) ? `Recent rollups for this project:\n${rollupLines(rollups)}` : "",
       "",
       "Score how relevant this tool's data domain is to the project's active work: 0.0 (unrelated) to 1.0 (core data source for this work).",
       "Reply with ONLY the number.",
