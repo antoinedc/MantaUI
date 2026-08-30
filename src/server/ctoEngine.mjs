@@ -1120,28 +1120,25 @@ export function createCtoEngine(deps = {}) {
       isThrifty: () => thrifty,
       listProjects: () => getFactsEngine().listProjects(),
       getTopFacts: (project, k) => getFactsEngine().topFacts(project, { k }),
-      getRollups: probesRollupLines,
+      getRollups: () => loadRecentDayRollups(7),
+      resolveSegment: resolveSegmentProject,
       runEphemeral: toolsRunEphemeral ?? null,
     });
     return probesEngine;
   }
 
-  // §7.6 relevance context: the most recent day-rollup's bullet lines (the
-  // blackboard's freshest summarized work). Cross-project attribution of
-  // rollup bullets needs segment resolution (ctoRollups' proposal mapper) —
-  // deliberately not paid for a nano context; the project's own top facts
-  // (which rollups are fused into) carry the per-project signal.
-  async function probesRollupLines() {
+  // §7.6 relevance context (BET-1439): the probes runner receives the RAW
+  // recent day-rollup payloads and projects them per project itself, using
+  // this resolver to attribute each rollup bullet's leaf segment refs to
+  // their project (the same mapper the day-level fact sync runs). Best-effort:
+  // an unreadable segment attributes to nothing, which the runner treats as
+  // the facts-only fallback.
+  async function resolveSegmentProject(id) {
     try {
-      const rollups = await loadRecentDayRollups(7);
-      const latest = rollups[rollups.length - 1];
-      return (latest?.bullets ?? [])
-        .map((b) => (typeof b?.text === "string" ? b.text.trim() : ""))
-        .filter(Boolean)
-        .slice(0, 5)
-        .join("\n");
+      const s = await segmentsStore.load(id);
+      return s && s.project ? { project: s.project } : null;
     } catch {
-      return "";
+      return null;
     }
   }
 
