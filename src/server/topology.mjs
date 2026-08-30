@@ -128,15 +128,17 @@ export async function loadTopology(path = TOPOLOGY_PATH, io = defaultIo) {
 
 // Serialize + write the snapshot atomically. Pretty-printed so manual
 // inspection and diffs of the file stay readable. Propagates write errors —
-// callers decide whether persistence failure is fatal (the poller wrapper
-// in src/server/index.mjs swallows it so the sync path is never poisoned).
+// callers decide whether persistence failure is fatal (the refreshNow hook
+// in src/server/syncState.mjs warns + swallows so the sync path is never
+// poisoned).
 export async function saveTopology(snapshot, path = TOPOLOGY_PATH, io = defaultIo) {
   await io.writeFile(path, JSON.stringify(snapshot, null, 2));
 }
 
-// The per-refresh entry point wired into the server's tmux poller. Takes the
-// freshly fetched `listProjects()` tree, hydrates the previous snapshot from
-// disk ONCE on the first call (lazily — never at import), then:
+// The per-refresh entry point wired into syncState.refreshNow's success
+// branch (src/server/syncState.mjs — the single choke point, no new timer).
+// Takes the freshly fetched `listProjects()` tree, hydrates the previous
+// snapshot from disk ONCE on the first call (lazily — never at import), then:
 //   1. would-clobber guard (shouldPersist) → {persisted:false, reason}
 //   2. byte-identical skip — the freshly captured snapshot vs the last write
 //   3. otherwise persist

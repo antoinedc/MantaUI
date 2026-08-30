@@ -167,3 +167,42 @@ test("publish envelope shape is pinned {kind, payload:{gen, seq, changed}}", asy
   assert.ok("projects" in env.payload.changed);
   assert.equal(env.payload.seq, state.snapshot().seq);
 });
+
+// BET-1452: the topology snapshot must only ever be fed a SUCCESSFUL listing.
+test("a listing that THROWS must not call persistTopology", async () => {
+  const persisted = [];
+  let failList = false;
+  const state = createSyncState({
+    listProjects: async () => {
+      if (failList) throw new Error("tmux fault");
+      return P1;
+    },
+    publish: () => {},
+    persistTopology: async (projects) => {
+      persisted.push(projects);
+    },
+  });
+  failList = true;
+  await state.refreshNow(); // failure: stale path, persister untouched
+  assert.equal(persisted.length, 0);
+  assert.equal(state.snapshot().stale, true);
+
+  failList = false;
+  await state.refreshNow(); // success: persister gets the applied tree
+  assert.equal(persisted.length, 1);
+  assert.equal(persisted[0], P1);
+});
+
+test("a persistTopology failure never turns a good refresh into stale", async () => {
+  const state = createSyncState({
+    listProjects: async () => P1,
+    publish: () => {},
+    persistTopology: async () => {
+      throw new Error("disk full");
+    },
+  });
+  await state.refreshNow();
+  const snap = state.snapshot();
+  assert.equal(snap.stale, false); // in-memory list is still correct
+  assert.equal(snap.projects, P1); // we only lost a restore point
+});

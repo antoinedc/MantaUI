@@ -34,8 +34,9 @@ function defaultGenId() {
  * @param {() => Promise<Array>} deps.listProjects   one tmux listing tick
  * @param {(env: object) => void} deps.publish        pushes `{kind:"sync", payload:{gen,seq,changed}}` envelopes on the bus
  * @param {() => string} [deps.genId]                 injectable gen generator (default: crypto)
+ * @param {(projects: Array) => Promise} [deps.persistTopology]  optional BET-1452 hook — persists the chat-window topology snapshot. Called ONLY on a successful listing; a persist failure must never turn a good refresh into stale.
  */
-export function createSyncState({ listProjects, publish, genId = defaultGenId }) {
+export function createSyncState({ listProjects, publish, genId = defaultGenId, persistTopology = null }) {
   const gen = genId();
   let seq = 1;
   let projects = [];
@@ -67,6 +68,18 @@ export function createSyncState({ listProjects, publish, genId = defaultGenId })
         if (stale) {
           stale = false;
           bump("stale", false);
+        }
+        // BET-1452: persist the chat-window topology snapshot. Runs in the
+        // SUCCESS branch — a failed listing never reaches the snapshot — and
+        // its own try/catch swallows persist errors: the in-memory list is
+        // still correct, we only lost a restore point, so a good refresh must
+        // never be flipped to `stale` by a snapshot failure.
+        if (persistTopology) {
+          try {
+            await persistTopology(p);
+          } catch (e) {
+            console.warn("[topology] snapshot failed — restore point not updated:", e?.message ?? e);
+          }
         }
       } catch {
         // A fault is recorded as stale but NEVER clobbers the last-known-good

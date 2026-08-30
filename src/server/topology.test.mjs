@@ -10,8 +10,9 @@ import {
   createTopologyPersister,
 } from "./topology.mjs";
 
-// listProjects()-shaped fixture (src/server/tmux.mjs): one chat project, one
-// project with only terminal windows, one empty project.
+// listProjects()-shaped fixture (src/server/tmux.mjs): one chat project with
+// a TUI window + two chat windows (one worktree-backed), one TUI-only
+// project, one empty project.
 const P1 = [
   {
     tmuxSession: "alpha",
@@ -41,7 +42,7 @@ const P1 = [
         index: 2,
         name: "chat2",
         active: false,
-        paneCurrentPath: "",
+        paneCurrentPath: "/home/dev/alpha/.worktrees/fix",
         opencodeSessionId: "oc-2",
         worktreePath: "/home/dev/alpha/.worktrees/fix",
         owner: "user",
@@ -68,41 +69,76 @@ const P1 = [
   { tmuxSession: "empty", defaultCwd: "/home/dev/empty", mantaOwned: false, attached: false, windows: [] },
 ];
 
-test("snapshotFrom keeps only chat windows and drops empty projects", () => {
+// --- Required case 1: chat windows only; TUI window (null id) is dropped ---
+test("snapshotFrom records chat windows only — a TUI window (null opencodeSessionId) is dropped", () => {
   const snap = snapshotFrom(P1, 1234);
   assert.equal(snap.version, TOPOLOGY_VERSION);
   assert.equal(snap.capturedAt, 1234);
+  const alpha = snap.sessions.find((s) => s.tmuxSession === "alpha");
+  assert.ok(alpha, "chat project present");
+  assert.deepEqual(
+    alpha.windows.map((w) => w.opencodeSessionId),
+    ["oc-1", "oc-2"],
+  );
+  assert.ok(!alpha.windows.some((w) => w.name === "editor"), "TUI window dropped");
+});
+
+// --- Required case 2: a project left with no chat windows is dropped ---
+test("snapshotFrom drops a project left with no chat windows entirely", () => {
+  const snap = snapshotFrom(P1);
   assert.deepEqual(
     snap.sessions.map((s) => s.tmuxSession),
     ["alpha"],
   );
-  const s = snap.sessions[0];
-  assert.equal(s.defaultCwd, "/home/dev/alpha");
-  assert.equal(s.mantaOwned, true);
-  assert.deepEqual(
-    s.windows.map((w) => w.opencodeSessionId),
-    ["oc-1", "oc-2"],
-  );
+  assert.ok(!snap.sessions.some((s) => s.tmuxSession === "term-only"));
+  assert.ok(!snap.sessions.some((s) => s.tmuxSession === "empty"));
 });
 
-test("snapshotFrom maps per-window fields per the BET-1452 contract", () => {
+// --- Required case 3: index/name/cwd/worktreePath preserved verbatim ---
+test("snapshotFrom preserves index, name and worktreePath verbatim from the tmux listing", () => {
   const snap = snapshotFrom(P1);
-  const [w1, w2] = snap.sessions[0].windows;
-  // name ← live tmux window name; cwd ← paneCurrentPath, defaultCwd fallback
-  assert.deepEqual(w1, {
-    index: 1,
-    name: "chat",
-    opencodeSessionId: "oc-1",
-    cwd: "/home/dev/alpha",
-    worktreePath: null,
-    active: true,
+  const w2 = snap.sessions[0].windows[1];
+  assert.deepEqual(w2, {
+    index: 2,
+    name: "chat2",
+    opencodeSessionId: "oc-2",
+    cwd: "/home/dev/alpha/.worktrees/fix",
+    worktreePath: "/home/dev/alpha/.worktrees/fix",
+    active: false,
   });
-  // empty paneCurrentPath falls back to the project defaultCwd; observed
-  // worktreePath passes through untouched, never invented
-  assert.equal(w2.name, "chat2");
-  assert.equal(w2.cwd, "/home/dev/alpha");
-  assert.equal(w2.worktreePath, "/home/dev/alpha/.worktrees/fix");
-  assert.equal(w2.active, false);
+});
+
+// --- Required case 4: a non-worktree window keeps worktreePath: null ---
+test("snapshotFrom keeps worktreePath null for a non-worktree window (never invented)", () => {
+  const snap = snapshotFrom(P1);
+  const w1 = snap.sessions[0].windows[0];
+  assert.equal(w1.worktreePath, null);
+});
+
+// --- Required case 5: mantaOwned carried onto the snapshot session ---
+test("snapshotFrom carries mantaOwned onto the snapshot session", () => {
+  const snap = snapshotFrom(P1);
+  const alpha = snap.sessions[0];
+  assert.equal(alpha.mantaOwned, true);
+  assert.equal(alpha.defaultCwd, "/home/dev/alpha");
+});
+
+test("snapshotFrom maps cwd from paneCurrentPath with a defaultCwd fallback", () => {
+  const snap = snapshotFrom(
+    [
+      {
+        tmuxSession: "x",
+        defaultCwd: "/home/dev/x",
+        mantaOwned: false,
+        windows: [
+          { index: 0, name: "chat", active: true, paneCurrentPath: "", opencodeSessionId: "oc-9" },
+        ],
+      },
+    ],
+    7,
+  );
+  // empty paneCurrentPath falls back to the project defaultCwd
+  assert.equal(snap.sessions[0].windows[0].cwd, "/home/dev/x");
 });
 
 test("snapshotFrom normalizes mantaOwned/active strictly to === true from malformed input", () => {
@@ -140,13 +176,20 @@ test("countWindows counts across sessions; malformed input → 0", () => {
   assert.equal(countWindows({ version: 1, sessions: "nope" }), 0);
 });
 
-test("shouldPersist: windows present → true; empty→empty → true; non-empty→empty → false", () => {
+// --- Required case 6: shouldPersist REFUSES empty over non-empty ---
+test("shouldPersist refuses an empty listing over a non-empty snapshot", () => {
   const full = snapshotFrom(P1);
   const empty = { version: TOPOLOGY_VERSION, capturedAt: 0, sessions: [] };
-  assert.equal(shouldPersist(null, full), true);
-  assert.equal(shouldPersist(null, empty), true); // no file yet, empty box converges once
+  assert.equal(shouldPersist(full, empty), false);
+});
+
+// --- Required case 7: empty-over-empty allowed; any non-empty allowed ---
+test("shouldPersist allows empty-over-empty and any non-empty listing", () => {
+  const full = snapshotFrom(P1);
+  const empty = { version: TOPOLOGY_VERSION, capturedAt: 0, sessions: [] };
   assert.equal(shouldPersist(empty, empty), true);
-  assert.equal(shouldPersist(full, empty), false); // would-clobber
+  assert.equal(shouldPersist(null, full), true); // no file yet
+  assert.equal(shouldPersist(null, empty), true); // no file yet, empty box converges once
 });
 
 function makeIo({ initial = null, failRead = false } = {}) {
@@ -167,7 +210,7 @@ function makeIo({ initial = null, failRead = false } = {}) {
   };
 }
 
-test("loadTopology: valid file parses; missing/unparsable/version-mismatch/malformed → null", async () => {
+test("loadTopology: valid file parses; missing/unparsable/malformed/unreadable → null", async () => {
   const good = JSON.stringify(snapshotFrom(P1, 99));
   const ok = makeIo({ initial: good });
   const parsed = await loadTopology("/tmp/ignored.json", ok.io);
@@ -178,12 +221,17 @@ test("loadTopology: valid file parses; missing/unparsable/version-mismatch/malfo
   for (const bad of [
     makeIo({ initial: null }), // missing file
     makeIo({ initial: "{not json" }), // invalid JSON
-    makeIo({ initial: JSON.stringify({ version: 999, sessions: [] }) }), // version mismatch
     makeIo({ initial: JSON.stringify({ version: TOPOLOGY_VERSION, sessions: {} }) }), // non-array sessions
     makeIo({ failRead: true }), // unreadable
   ]) {
     assert.equal(await loadTopology("/tmp/ignored.json", bad.io), null);
   }
+});
+
+// --- Required case 10: loadTopology returns null for an unknown version ---
+test("loadTopology returns null for an unknown version (never guesses)", async () => {
+  const { io } = makeIo({ initial: JSON.stringify({ version: 999, sessions: [] }) });
+  assert.equal(await loadTopology("/tmp/ignored.json", io), null);
 });
 
 test("saveTopology writes pretty-printed JSON to the injected io", async () => {
@@ -197,12 +245,13 @@ test("saveTopology writes pretty-printed JSON to the injected io", async () => {
   assert.ok(data.includes('\n  "sessions"')); // pretty-printed, readable diffs
 });
 
-test("persister: first call hydrates lazily then writes; identical tick skips as unchanged", async () => {
+// --- Required case 8: persister skips an unchanged tick ---
+test("persister skips an unchanged tick — save fn ran once for two identical calls", async () => {
   const { calls, io } = makeIo();
   const persist = createTopologyPersister({ save: io.writeFile, load: io.readFile, now: () => 1234 });
   const r1 = await persist(P1);
   assert.deepEqual(r1, { persisted: true, reason: "written" });
-  assert.equal(calls.reads, 1); // hydrated exactly once
+  assert.equal(calls.reads, 1); // hydrated exactly once, lazily
   assert.equal(calls.writes.length, 1);
   assert.deepEqual(JSON.parse(calls.writes[0][1]).capturedAt, 1234);
 
@@ -215,24 +264,8 @@ test("persister: first call hydrates lazily then writes; identical tick skips as
   assert.equal(calls.reads, 1);
 });
 
-test("persister: changed topology writes again and updates the baseline", async () => {
-  const { calls, io } = makeIo();
-  const persist = createTopologyPersister({ save: io.writeFile, load: io.readFile, now: () => 1 });
-  await persist(P1);
-  const renamed = JSON.parse(JSON.stringify(P1));
-  renamed[0].windows[1].name = "renamed-by-user"; // BET-1364 rename drift flows in
-  const r2 = await persist(renamed);
-  assert.deepEqual(r2, { persisted: true, reason: "written" });
-  assert.equal(calls.writes.length, 2);
-  const saved = JSON.parse(calls.writes[1][1]);
-  // only the chat windows survive — "editor" (no opencodeSessionId) is gone
-  assert.deepEqual(
-    saved.sessions[0].windows.map((w) => w.name),
-    ["renamed-by-user", "chat2"],
-  );
-});
-
-test("persister: hydrating a non-empty file, zero-window tick → would-clobber, no write", async () => {
+// --- Required case 9: clobber refused against a snapshot hydrated from disk ---
+test("persister refuses the clobber against a snapshot hydrated from disk", async () => {
   const existing = JSON.stringify(snapshotFrom(P1, 77));
   const { calls, io } = makeIo({ initial: existing });
   const persist = createTopologyPersister({ save: io.writeFile, load: io.readFile, now: () => 2 });

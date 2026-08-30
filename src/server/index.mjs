@@ -294,20 +294,17 @@ const BUS_PUBLISH_DEPS = { publish: (evt) => bus.publish(evt) };
 // missed. `refreshNow()` is driven by the poller below; `tmux:list` lazily
 // guarantees a first tick before serving anything.
 // BET-1452: durable chat-window topology snapshot (~/.manta/topology.json) —
-// hydrated by a later stage across box-server restarts. Wrapping the
-// `listProjects` DEP (not the poller) means every refresh path — the startup
-// lazy tick, the 2s poller, the rename-session re-materialize — snapshots the
-// exact same tree syncState applies, including a tmux fault aborting before
-// any persist (the dep throws first). A persist failure is swallowed so it
-// can never flip refreshNow into stale=true.
-const persistTopology = createTopologyPersister({});
+// hydrated by a later stage across box-server restarts. The persister is an
+// OPTIONAL dep of createSyncState, so refreshNow's success branch is the
+// single choke point (no new timer, no second tmux code path): every refresh
+// path — the startup lazy tick, the 2s poller, the rename-session
+// re-materialize — snapshots the exact tree it just applied. Persist
+// failures are warned + swallowed inside syncState and can never flip a good
+// refresh to stale; a failed listing never reaches the persister at all.
 const syncState = createSyncState({
-  listProjects: async () => {
-    const projects = await tmux.listProjects();
-    await persistTopology(projects).catch(() => {});
-    return projects;
-  },
+  listProjects: () => tmux.listProjects(),
   publish: (env) => bus.publish(env),
+  persistTopology: createTopologyPersister(),
 });
 // Seed the config baseline at startup so the first snapshot already carries it.
 syncState.applyConfig(await local.configGet());
