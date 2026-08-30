@@ -1434,10 +1434,11 @@ export function buildHandlers({
       const resolvedCwd = await resolveProjectCwd(sessionName, cwd);
       const windowIndex = await tmux.newWindowGetIndex(sessionName, windowName, resolvedCwd);
       await tmux.restampSessionId(sessionName, windowIndex, forked.id);
-      const projects = await tmux.listProjects();
-      // BET-675: refresh materialized state so the new window's delta publishes now.
+      // BET-1454: refreshNow() materializes the refreshed tree — read it from
+      // the snapshot instead of a second listProjects() shell-out whose
+      // transient tmux fault would throw and forward raw stderr to the client.
       await syncState.refreshNow();
-      return { newSessionId: forked.id, projects };
+      return { newSessionId: forked.id, projects: syncState.snapshot().projects };
     },
 
     // opencode:clear-session
@@ -1451,10 +1452,9 @@ export function buildHandlers({
       const directory = await resolveProjectCwd(sessionName, cwd);
       const sess = await oc.createSession({ directory, title });
       await tmux.restampSessionId(sessionName, windowIndex, sess.id);
-      const projects = await tmux.listProjects();
-      // BET-675: refresh materialized state so the change publishes now.
+      // BET-1454: snapshot, not a second shell-out (see fork-session above).
       await syncState.refreshNow();
-      return { newSessionId: sess.id, projects };
+      return { newSessionId: sess.id, projects: syncState.snapshot().projects };
     },
 
     // opencode:delete-session
@@ -1467,10 +1467,9 @@ export function buildHandlers({
     "opencode:delete-session": async ({ sessionId, sessionName, windowIndex }) => {
       await oc.deleteSessionRaw(sessionId);
       await tmux.killWindow({ sessionName, windowIndex }).catch(() => {});
-      const projects = await tmux.listProjects();
-      // BET-675: refresh materialized state so the removed window publishes now.
+      // BET-1454: snapshot, not a second shell-out (see fork-session above).
       await syncState.refreshNow();
-      return projects;
+      return syncState.snapshot().projects;
     },
 
     // BET-421: bare session lifecycle for the onboarding verifier. create
