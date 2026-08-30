@@ -79,11 +79,15 @@ export const PROBE_SOURCE_KIND = "probe";
 // §10.6-7 probe-auth-failure card copy (3 consecutive auth failures — the
 // runner's AUTH_FAIL_ESCALATE). `secretKey` is the vault KEY NAME (not a
 // value) when the spec declared one — naming the exact key the user should
-// update is the deep-link to the secrets surface in words.
+// update is the deep-link to the secrets surface in words. The body keeps the
+// literal phrase "on the secrets surface" — the renderer's probeSecretKey
+// parse anchor (ctoView.ts) — and names the REAL surface after the dash: the
+// 🔑 SecretsCard in the chat session (BET-1437 deep-link target), never
+// "Settings → Secrets" (that Settings section does not exist).
 export function probeBlockerCopy(tool, probeName, secretKey = null) {
   const secret = secretKey
-    ? ` If the key was rotated, update "${secretKey}" on the secrets surface (⚙ Settings → Secrets).`
-    : " Check the tool's credential on the secrets surface (⚙ Settings → Secrets).";
+    ? ` If the key was rotated, update "${secretKey}" on the secrets surface — the 🔑 secrets card in your chat session.`
+    : " Check the tool's credential on the secrets surface — the 🔑 secrets card in your chat session.";
   return {
     title: `Probe failing — ${tool} key may have been rotated`,
     body: `The "${probeName}" probe for ${tool} failed auth 3 times in a row (HTTP 401/403 or the credential is gone), so the digest's view of ${tool} is degraded.${secret}`,

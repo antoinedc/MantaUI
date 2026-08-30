@@ -257,7 +257,7 @@ describe("blockerTarget (§10.3 Answer-now routing)", () => {
       sourceKind: "probe",
       sourceId: "github/repo_events",
       sessionID: null,
-      body: 'The "repo_events" probe for github failed auth 3 times in a row (HTTP 401/403 or the credential is gone), so the digest\'s view of github is degraded. If the key was rotated, update "GITHUB_PAT" on the secrets surface (⚙ Settings → Secrets).',
+      body: 'The "repo_events" probe for github failed auth 3 times in a row (HTTP 401/403 or the credential is gone), so the digest\'s view of github is degraded. If the key was rotated, update "GITHUB_PAT" on the secrets surface — the 🔑 secrets card in your chat session.',
     });
     expect(blockerTarget(probe, new Set([]))).toEqual({ action: "secrets", key: "GITHUB_PAT" });
   });
@@ -265,7 +265,7 @@ describe("blockerTarget (§10.3 Answer-now routing)", () => {
     const probe = card({
       sourceKind: "probe",
       sessionID: null,
-      body: 'The "tool_ping" probe for tool failed auth 3 times in a row (HTTP 401/403 or the credential is gone), so the digest\'s view of tool is degraded. Check the tool\'s credential on the secrets surface (⚙ Settings → Secrets).',
+      body: 'The "tool_ping" probe for tool failed auth 3 times in a row (HTTP 401/403 or the credential is gone), so the digest\'s view of tool is degraded. Check the tool\'s credential on the secrets surface — the 🔑 secrets card in your chat session.',
     });
     expect(blockerTarget(probe, new Set(["s1"]))).toEqual({ action: "secrets", key: null });
   });
