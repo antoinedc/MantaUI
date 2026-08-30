@@ -676,7 +676,35 @@ describe("refChipAction (BET-1441 — blackboard fact-ref chips)", () => {
 
 // --- BET-1441: blackboard fact-ref chip decisions --------------------------
 
-import { refChipAction } from "./ctoView";
+import { refChipAction, digestEvidenceAction } from "./ctoView";
+
+describe("digestEvidenceAction (BET-1447 — digest 'view evidence' chips)", () => {
+  const sessions = new Set(["ses_1", "ses_2"]);
+
+  it("jumps to the first openable session ref when present", () => {
+    expect(digestEvidenceAction(["seg_9", "ses_1"], sessions)).toEqual({ kind: "jump", ref: "ses_1" });
+    expect(digestEvidenceAction(["ses_2", "ses_1"], sessions)).toEqual({ kind: "jump", ref: "ses_2" });
+  });
+
+  it("copies the first ref when no ref is an openable session", () => {
+    expect(digestEvidenceAction(["seg_1", "seg_2"], sessions)).toEqual({ kind: "copy", ref: "seg_1" });
+    expect(digestEvidenceAction(["msg:12"], sessions)).toEqual({ kind: "copy", ref: "msg:12" });
+  });
+
+  it("falls back to the item id when refs are missing or empty", () => {
+    expect(digestEvidenceAction(undefined, sessions, "seg_9")).toEqual({ kind: "copy", ref: "seg_9" });
+    expect(digestEvidenceAction([], sessions, "seg_9")).toEqual({ kind: "copy", ref: "seg_9" });
+  });
+
+  it("copies (never jumps) when no session set is provided", () => {
+    expect(digestEvidenceAction(["ses_1"], undefined, "seg_9")).toEqual({ kind: "copy", ref: "ses_1" });
+    expect(digestEvidenceAction(["ses_1"], new Set(), "seg_9")).toEqual({ kind: "copy", ref: "ses_1" });
+  });
+
+  it("skips empty refs and still finds the first openable session", () => {
+    expect(digestEvidenceAction(["", "ses_1"], sessions)).toEqual({ kind: "jump", ref: "ses_1" });
+  });
+});
 
 describe("refChipAction", () => {
   const sessions = new Set(["ses_1", "ses_2"]);
