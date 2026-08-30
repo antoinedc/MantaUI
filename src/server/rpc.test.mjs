@@ -11,7 +11,9 @@ import {
   _resetOauthCallbacks,
 } from "./rpc.mjs";
 import { gunzipSync } from "node:zlib";
+import { rm } from "node:fs/promises";
 import { savePages } from "./servePage.mjs";
+import { snapshotFrom, saveTopology, planRestore, TOPOLOGY_PATH } from "./topology.mjs";
 import { statePath } from "../shared/paths.mjs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1647,4 +1649,203 @@ test("accounts:retry returns a non-empty message in both cleared and not-cleared
   assert.equal(notCleared.ok, false);
   assert.equal(notCleared.state, "out_of_credit");
   assert.ok(typeof notCleared.message === "string" && notCleared.message.length > 0, "not-cleared case needs a message");
+});
+
+// ---- BET-1457: the two topology-restore rpc channels ------------------------
+// The pure engine beneath them (planRestore / executeRestore / describeRestore)
+// is fully covered in topology.test.mjs; what was untested is the CHANNEL GLUE:
+// the no-snapshot shapes, the dead-tmux catch (a failed listing plans against
+// an EMPTY live tree instead of throwing), the plan passthrough (preview must
+// return exactly what planRestore plans — the same plan apply runs), the
+// {ok:true, ...result, message} shape with its refreshNow() push, and
+// restoreChatWindow's field adaptation (snapshot vocabulary → tmux vocabulary).
+
+// The handlers read the snapshot from the DEFAULT path (TOPOLOGY_PATH), so the
+// sandbox redirect (MANTA_STATE_HOME, set by scripts/testSandbox.mjs before
+// any module loads) is what keeps these tests off the live box. Seed / clear
+// that file per test — each node:test file is its own process with its own
+// sandbox dir, so nothing else in the run can collide with it.
+async function clearTopologyFile() {
+  await rm(TOPOLOGY_PATH, { force: true });
+}
+
+async function seedTopologyFile(snapshot) {
+  await saveTopology(snapshot);
+}
+
+// A saved tree (listProjects shape) with three chat windows chosen so each
+// skip rule can fire through the glue: ses_live survives the known-id filter,
+// ses_gone is dropped by it, and index 7 sits under a live TUI window.
+const CAPTURED_AT = 1725000000000;
+function savedTree() {
+  return [{
+    tmuxSession: "app",
+    defaultCwd: "/srv/app",
+    mantaOwned: true,
+    windows: [
+      { index: 2, name: "chat-a", opencodeSessionId: "ses_live", paneCurrentPath: "/srv/app", worktreePath: null, active: true },
+      { index: 5, name: "chat-b", opencodeSessionId: "ses_gone", paneCurrentPath: "/srv/app/wt", worktreePath: "/srv/app/wt", active: false },
+      { index: 7, name: "chat-c", opencodeSessionId: "ses_new", paneCurrentPath: "/srv/app", worktreePath: null, active: false },
+    ],
+  }];
+}
+
+// Minimal deps for the restore channels (mirrors makeDeps above, restricted to
+// the namespaces the two handlers touch). `ocListSessions` mirrors the two
+// production shapes of knownOpencodeSessionIds: a throw → null (filter OFF),
+// a session list → a Set (filter ON).
+function makeRestoreDeps({
+  liveProjects = [],
+  listProjectsError = null,
+  ocListSessions = async () => { throw new Error("opencode unreachable"); },
+} = {}) {
+  const calls = { restoreChatWindow: [], refreshNow: 0 };
+  return {
+    calls,
+    deps: {
+      tmux: {
+        listProjects: async () => {
+          if (listProjectsError) throw listProjectsError;
+          return liveProjects;
+        },
+        restoreChatWindow: async (op) => { calls.restoreChatWindow.push(op); },
+      },
+      oc: { listSessions: ocListSessions },
+      pty: {},
+      bus: {},
+      syncState: {
+        refreshNow: async () => { calls.refreshNow++; },
+        applyConfig: () => {},
+        snapshot: () => ({ projects: liveProjects }),
+        payloadSince: (s, g) => ({ gen: g, seq: 0, changed: {} }),
+        everSucceeded: () => true,
+      },
+      local: {
+        configGet: async () => ({ projects: [] }),
+        projectMetaUpsert: async () => ({}),
+        projectMetaDelete: async () => ({}),
+      },
+      push: { addApnsToken: async () => ({ ok: true, count: 0 }) },
+    },
+  };
+}
+
+test("tmux:restore-preview without a snapshot returns the unavailable shape", async () => {
+  await clearTopologyFile();
+  const { deps } = makeRestoreDeps();
+  const handlers = buildHandlers(deps);
+  const out = await handlers["tmux:restore-preview"]();
+  assert.deepEqual(out, { available: false, capturedAt: null, ops: [], skipped: [], restorable: 0 });
+});
+
+test("tmux:restore-preview returns exactly the planRestore plan (ops, skipped, restorable)", async () => {
+  const snapshot = snapshotFrom(savedTree(), CAPTURED_AT);
+  await seedTopologyFile(snapshot);
+  const liveProjects = [{
+    tmuxSession: "app",
+    defaultCwd: "/srv/app",
+    mantaOwned: true,
+    windows: [
+      { index: 7, name: "terminal", opencodeSessionId: null, paneCurrentPath: "/srv/app", worktreePath: null, active: false },
+    ],
+  }];
+  const { deps } = makeRestoreDeps({
+    liveProjects,
+    ocListSessions: async () => [{ id: "ses_live" }, { id: "ses_new" }],
+  });
+  const handlers = buildHandlers(deps);
+  const out = await handlers["tmux:restore-preview"]();
+  const expected = planRestore(snapshot, liveProjects, new Set(["ses_live", "ses_new"]));
+  assert.equal(out.available, true);
+  assert.equal(out.capturedAt, CAPTURED_AT);
+  assert.deepEqual(out.ops, expected.ops);
+  assert.deepEqual(out.skipped, expected.skipped);
+  assert.equal(out.restorable, out.ops.length);
+  // The skip reasons prove both glue-side filters ran: the gone-id drop comes
+  // from knownOpencodeSessionIds, the occupied slot from the live tree.
+  assert.deepEqual(out.skipped.map((s) => s.reason), ["opencode-session-gone", "index-occupied"]);
+});
+
+test("tmux:restore-preview plans against an empty live tree when tmux is dead", async () => {
+  const snapshot = snapshotFrom(savedTree(), CAPTURED_AT);
+  await seedTopologyFile(snapshot);
+  const { deps } = makeRestoreDeps({
+    listProjectsError: new Error("no server running on /tmp/tmux-1000/default"),
+  });
+  const handlers = buildHandlers(deps);
+  const out = await handlers["tmux:restore-preview"]();
+  const expected = planRestore(snapshot, [], null);
+  assert.equal(out.available, true);
+  assert.deepEqual(out.ops, expected.ops);
+  assert.deepEqual(out.skipped, expected.skipped);
+  // Session "app" is not live → its first window must be a create-session op.
+  assert.equal(out.ops[0].kind, "create-session");
+  assert.equal(out.restorable, 3);
+});
+
+test("tmux:restore-topology without a snapshot returns the error shape and touches nothing", async () => {
+  await clearTopologyFile();
+  const { deps, calls } = makeRestoreDeps();
+  const handlers = buildHandlers(deps);
+  const out = await handlers["tmux:restore-topology"]();
+  assert.deepEqual(out, { ok: false, error: "No saved window layout to restore from.", created: 0, failed: 0 });
+  assert.equal(calls.refreshNow, 0);
+  assert.equal(calls.restoreChatWindow.length, 0);
+});
+
+test("tmux:restore-topology applies the plan, calls refreshNow and passes describeRestore's message through", async () => {
+  const snapshot = snapshotFrom(savedTree(), CAPTURED_AT);
+  await seedTopologyFile(snapshot);
+  const { deps, calls } = makeRestoreDeps();
+  const handlers = buildHandlers(deps);
+  const out = await handlers["tmux:restore-topology"]();
+  assert.equal(out.ok, true);
+  assert.equal(out.created, 3);
+  assert.equal(out.failed, 0);
+  assert.deepEqual(out.skipped, []);
+  assert.deepEqual(out.failures, []);
+  assert.deepEqual(out.windows, [
+    { tmuxSession: "app", index: 2, name: "chat-a", opencodeSessionId: "ses_live" },
+    { tmuxSession: "app", index: 5, name: "chat-b", opencodeSessionId: "ses_gone" },
+    { tmuxSession: "app", index: 7, name: "chat-c", opencodeSessionId: "ses_new" },
+  ]);
+  assert.equal(out.message, "Restored 3 windows.");
+  assert.equal(calls.refreshNow, 1);
+  // Field adaptation: the first op (empty live tree → create-session) reaches
+  // restoreChatWindow in tmux's vocabulary; mantaOwned + worktreePath ride
+  // through from the snapshot.
+  assert.deepEqual(calls.restoreChatWindow[0], {
+    createSession: true,
+    sessionName: "app",
+    windowIndex: 2,
+    windowName: "chat-a",
+    cwd: "/srv/app",
+    opencodeSessionId: "ses_live",
+    worktreePath: null,
+    mantaOwned: true,
+  });
+  assert.equal(calls.restoreChatWindow[1].createSession, false);
+  assert.equal(calls.restoreChatWindow[1].worktreePath, "/srv/app/wt");
+});
+
+test("tmux:restore-topology stays ok:true past a per-window failure and reports it in the message", async () => {
+  const snapshot = snapshotFrom(savedTree(), CAPTURED_AT);
+  await seedTopologyFile(snapshot);
+  const { deps, calls } = makeRestoreDeps();
+  deps.tmux.restoreChatWindow = async (op) => {
+    calls.restoreChatWindow.push(op);
+    // restoreChatWindow receives the ADAPTED op (tmux vocabulary), so the
+    // index arrives as windowIndex.
+    if (op.windowIndex === 5) throw new Error("cwd vanished");
+  };
+  const handlers = buildHandlers(deps);
+  const out = await handlers["tmux:restore-topology"]();
+  assert.equal(out.ok, true);
+  assert.equal(out.created, 2);
+  assert.equal(out.failed, 1);
+  assert.deepEqual(out.failures, [
+    { tmuxSession: "app", index: 5, name: "chat-b", opencodeSessionId: "ses_gone", error: "cwd vanished" },
+  ]);
+  assert.equal(out.message, "Restored 2 windows · 1 failed.");
+  assert.equal(calls.refreshNow, 1);
 });
