@@ -715,7 +715,7 @@ export function createCtoCards(deps = {}) {
   // resolveConnectCards. No notification path — like decision cards, this is
   // a resting needs-you surface.
   async function upsertConnect({ toolId, title, body, evidence = [], refs = [], ring = "metadata", ts = now() } = {}) {
-    if (!toolId || typeof toolId !== "string") return { changed: false, isNew: false };
+    if (!toolId || typeof toolId !== "string") return { ok: false, changed: false, isNew: false };
     const deep = ring === "deep_read";
     const sourceId = deep ? `${toolId}:deep` : toolId;
     return upsertOpenCard({
