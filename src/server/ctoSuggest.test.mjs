@@ -1056,10 +1056,11 @@ test("BET-1477: a byte-identical veto regeneration stays the veto card — surfa
   assert.equal(h.ledgerRows.filter((r) => r.kind === "suggest.presented" && r.variant === "veto").length, 1, "exactly one presented row total");
 });
 
-test("BET-1477: a thrown or explicitly-refused (ok:false) card write still holds as suggest.silent(no-card-path)", async () => {
-  for (const [label, writer] of [
-    ["throw", async () => { throw new Error("card store boom"); }],
-    ["ok:false", async () => ({ ok: false, changed: false, isNew: false })],
+test("BET-1477: a thrown, missing, or explicitly-refused (ok:false) decision-card write still holds as suggest.silent(no-card-path)", async () => {
+  for (const [label, cardsDep] of [
+    ["throw", { upsertDecision: async () => { throw new Error("card store boom"); } }],
+    ["missing-method", {}],
+    ["ok:false", { upsertDecision: async () => ({ ok: false, changed: false, isNew: false }) }],
   ]) {
     const clock = { ms: 1_000_000 };
     const ledgerRows = [];
@@ -1072,7 +1073,7 @@ test("BET-1477: a thrown or explicitly-refused (ok:false) card write still holds
       digests: { list: async () => [], load: async () => null },
       facts: { list: async () => [], load: async () => null },
       configGet: async () => ({ ctoTier: "medium" }),
-      cards: { upsertDecision: writer },
+      cards: cardsDep,
       runSuggest: async () => ({
         text: JSON.stringify({ candidates: [{ class: "config-change", finding: { text: "x", refs: [] }, options: [{ label: "Apply", action: { type: "config-change", payload: {} } }] }] }),
       }),
