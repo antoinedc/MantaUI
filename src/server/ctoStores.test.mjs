@@ -5,6 +5,21 @@
 // tmux/opencode/network; the only I/O is real fs against grand the sandboxed
 // cto root (every path goes through ctoPath() → statePath()).
 
+// BET-1469: fail fast, before ANY test body runs, when this file is executed
+// outside the state sandbox. This file writes the real module-level CTO stores
+// (they resolve under MANTA_STATE_HOME when sandboxed); imported unsandboxed
+// those paths resolve against the LIVE box state (~/.manta) and the tests
+// would write production data. `npm test` / `npm run test:server` set
+// MANTA_STATE_HOME via scripts/testSandbox.mjs before any module is evaluated;
+// a bare `node --test <file>` does not.
+if (!process.env.MANTA_STATE_HOME) {
+  throw new Error(
+    "MANTA_STATE_HOME is not set — refusing to run CTO store tests against the live box state. " +
+      "Run via `npm test` or `npm run test:server` (both --import ./scripts/testSandbox.mjs), " +
+      "or set MANTA_STATE_HOME to a throwaway directory first.",
+  );
+}
+
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { homedir } from "node:os";
@@ -225,6 +240,12 @@ test("probes store round-trips YAML through the sandbox", async () => {
 // Sweep wiring (sandboxed fs)
 // ---------------------------------------------------------------------------
 
+// BET-1469 note: this is the only caller of sweepAllStores, and it exercises
+// the real module-level stores (sweepAllStores resolves ctoPath() directly —
+// it has no injection surface). Every one of those writes therefore lands in
+// the sandboxed CTO root, never the live box state — and the MANTA_STATE_HOME
+// guard at the top of this file makes an unsandboxed direct run of this file
+// impossible, so the "not the real state home" property cannot regress here.
 test("sweepAllStores trims the ledger and caps the archive (integration)", async () => {
   const nowMs = NOW_MS;
   const cutoff = nowMs - RETENTION_MS.ledger;

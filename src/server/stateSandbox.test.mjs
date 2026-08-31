@@ -23,6 +23,7 @@ import { stateHome, statePath } from "../shared/paths.mjs";
 import { STORE_PATH as AUTH_STORE_PATH } from "./auth.mjs";
 import { STORE_PATH as USAGE_STOP_STORE_PATH } from "./stoppedStore.mjs";
 import { STORE_PATH as MODEL_PREFS_STORE_PATH } from "./modelPrefs.mjs";
+import { cardsStore, ledgerStore } from "./ctoStores.mjs";
 
 test("the test run has a sandboxed state home", () => {
   const sandbox = process.env.MANTA_STATE_HOME;
@@ -60,4 +61,18 @@ test("store paths resolve inside the sandbox, not the live box", () => {
     `model-prefs store resolved to ${MODEL_PREFS_STORE_PATH}, outside the sandbox ${sandbox}`,
   );
   assert.ok(!MODEL_PREFS_STORE_PATH.startsWith(homedir() + sep + ".manta"));
+  // The CTO stores (BET-1469) — cards.json is the file the engine tests used
+  // to write through `defaultGetCounts()`, so pin it (and the ledger) the same
+  // way: any store module resolving to the live ~/.manta/cto/ root from a test
+  // re-opens the production-write hole for the whole Adaptive CTO suite.
+  for (const [label, path] of [
+    ["cto cards", cardsStore.path],
+    ["cto ledger", ledgerStore.path],
+  ]) {
+    assert.ok(
+      path.startsWith(sandbox + sep),
+      `${label} store resolved to ${path}, outside the sandbox ${sandbox}`,
+    );
+    assert.ok(!path.startsWith(homedir() + sep + ".manta"));
+  }
 });
