@@ -569,6 +569,21 @@ test("upsertConnect: re-raising the same tool upserts in place (no dup)", async 
   assert.equal(open[0].title, "second");
 });
 
+// BET-1481: the invalid-args early return carries the same { ok:false } shape
+// as the other three card writers — a future caller branching on ok (the
+// BET-1477 contract) must not read undefined as truthy-success here.
+test("upsertConnect: refuses a missing/non-string toolId with ok:false", async () => {
+  const h = makeHarness();
+  const r = await h.cards.upsertConnect({ title: "no toolId" });
+  assert.equal(r.ok, false);
+  assert.equal(r.changed, false);
+  assert.equal(r.isNew, false);
+  const r2 = await h.cards.upsertConnect({ toolId: 42 });
+  assert.equal(r2.ok, false);
+  assert.equal(openCardCount(h), 0);
+  assert.ok(!h.ledgerRows.some((row) => row.kind === CARD_CREATED && row.variant === "connect"));
+});
+
 test("resolveConnectCards: resolves the open card for the tool and writes the ledger row", async () => {
   const h = makeHarness();
   await h.cards.upsertConnect({ toolId: "vercel", title: "t", refs: ["vercel"] });
