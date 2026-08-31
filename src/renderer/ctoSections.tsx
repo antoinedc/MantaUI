@@ -384,13 +384,13 @@ export const NowRail = memo(function NowRail({ cards }: { cards: NowCard[] }) {
             key={card.id}
             type="button"
             onClick={card.onClick}
-            className="flex flex-col gap-2 rounded-md border border-strong bg-fill p-3 text-left hover:bg-fill-hover"
+            className="min-w-0 flex flex-col gap-2 rounded-md border border-strong bg-fill p-3 text-left hover:bg-fill-hover"
           >
             <div className="flex items-center gap-2">
               <span
                 className={`h-2 w-2 shrink-0 rounded-full ${card.state === "blocked" ? "bg-danger" : "bg-accent"}`}
               />
-              <span className="truncate text-sm font-medium text-text">{card.name}</span>
+              <span className="min-w-0 flex-1 truncate text-sm font-medium text-text">{card.name}</span>
               <span className="ml-auto shrink-0 rounded-full bg-fill-active px-2 py-1 text-[11px] font-medium capitalize text-text-muted">
                 {card.state}
               </span>

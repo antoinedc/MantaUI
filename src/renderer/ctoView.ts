@@ -327,6 +327,28 @@ export type BlockerCard = {
   refs: string[];
 };
 
+// Selector: the open blocker cards among the wire cards (§10.3). Selected
+// POSITIVELY (`variant === "blocker"`) rather than by excluding the other
+// variants — a denylist that must be updated whenever a variant is added is
+// exactly the defect that let connect cards double-render as dead-end
+// blockers (BET-1467). Also drops a row with neither title nor body so an
+// empty card never reaches BlockerSection's live "Answer now" control.
+export function blockerCards(cards: ReadonlyArray<Record<string, unknown>>): BlockerCard[] {
+  return (cards ?? [])
+    .filter((c) => c?.variant === "blocker")
+    .map((c) => ({
+      id: String(c.id ?? ""),
+      title: String(c.title ?? ""),
+      body: String(c.body ?? ""),
+      sourceKind: String(c.sourceKind ?? ""),
+      sourceId: typeof c.sourceId === "string" ? c.sourceId : null,
+      sessionID: typeof c.sessionID === "string" ? c.sessionID : null,
+      pendingSince: Number.isFinite(c.pendingSince) ? (c.pendingSince as number) : 0,
+      refs: Array.isArray(c.refs) ? (c.refs as string[]) : [],
+    }))
+    .filter((c) => c.title || c.body);
+}
+
 // Readable relative time (age stamps, Just-finished relative time). Short
 // forms: "<1m", "<Nm", "<Nh", "Nd". Pure + deterministic for a given clock.
 export function relativeTime(ts: number, now: number): string {
@@ -513,13 +535,16 @@ export type VetoCardRow = {
 };
 
 export function vetoCards(cards: ReadonlyArray<Record<string, unknown>>): VetoCardRow[] {
-  return (cards ?? []).filter((c) => c?.variant === "veto").map((c) => ({
-    id: String(c.id ?? ""),
-    title: String(c.title ?? ""),
-    body: String(c.body ?? ""),
-    dueMs: Number.isFinite(c.dueMs) ? (c.dueMs as number) : null,
-    options: Array.isArray(c.options) ? (c.options as VetoCardRow["options"]) : [],
-  }));
+  return (cards ?? [])
+    .filter((c) => c?.variant === "veto")
+    .map((c) => ({
+      id: String(c.id ?? ""),
+      title: String(c.title ?? ""),
+      body: String(c.body ?? ""),
+      dueMs: Number.isFinite(c.dueMs) ? (c.dueMs as number) : null,
+      options: Array.isArray(c.options) ? (c.options as VetoCardRow["options"]) : [],
+    }))
+    .filter((c) => c.title || c.body);
 }
 
 // BET-1395: the open connect-ask cards (§10.3 connect variant) among the wire
@@ -550,7 +575,8 @@ export function connectCards(cards: ReadonlyArray<Record<string, unknown>>): Con
             }),
           )
         : [],
-    }));
+    }))
+    .filter((c) => c.title || c.body);
 }
 
 // Live countdown to a veto card's `dueMs`: the ms remaining (≥ 0), or null

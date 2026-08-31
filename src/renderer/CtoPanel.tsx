@@ -38,6 +38,7 @@ import {
   showPausedBanner,
   statDisplay,
   nowCostLabel,
+  blockerCards,
   decisionCards,
   vetoCards,
   connectCards,
@@ -164,13 +165,18 @@ export function CtoPanel({
   const [tonightLoading, setTonightLoading] = useState(false);
   const [tonightPinned, setTonightPinned] = useState(false);
   const [tonightWindowOpen, setTonightWindowOpen] = useState(false);
-  const blockerCards = useMemo(() => cards.filter((c) => c.variant !== "decision" && c.variant !== "veto"), [cards]);
+  const blockerCardList = useMemo(() => blockerCards(cards as unknown as ReadonlyArray<Record<string, unknown>>), [cards]);
   const suggestionCards = useMemo(() => decisionCards(cards), [cards]);
   const vetoList = useMemo(() => vetoCards(cards as unknown as ReadonlyArray<Record<string, unknown>>), [cards]);
   const connectList = useMemo(() => connectCards(cards as unknown as ReadonlyArray<Record<string, unknown>>), [cards]);
 
   const busy = digestBusy(state);
   const busyRef = useRef(busy);
+  // §10.2: after a generation settles with an otherwise-empty overview, scroll
+  // the resting line into view. Advanced from the single busyRef-bookkeeping
+  // effect below (BET-1467: two effects used to share this ref, so the second
+  // always read prev === busy and this never fired).
+  const [didSettle, setDidSettle] = useState(false);
 
   // §10.6-5: the kill switch being active drives the banner via the pure
   // state→banner selector (tested in ctoView.test.ts).
@@ -221,6 +227,7 @@ export function CtoPanel({
     if (generationSettled) {
       void window.api?.ctoDigestGet?.().then((r) => setDigest(r.digest)).catch(() => {});
       void window.api?.ctoFinishedGet?.().then((r) => setFinished(r.items)).catch(() => {});
+      setDidSettle(true);
     }
   }, [busy]);
 
@@ -552,15 +559,7 @@ export function CtoPanel({
     digestHasItems: (digest?.items?.length ?? 0) > 0,
   });
 
-  // §10.2: after a generation settles with an otherwise-empty overview, scroll
-  // the resting line into view. (useRef kept in the effect-scope-free form.)
   const restingRef = useRef<HTMLDivElement>(null);
-  const [didSettle, setDidSettle] = useState(false);
-  useEffect(() => {
-    const prev = busyRef.current;
-    busyRef.current = busy;
-    if (prev && !busy) setDidSettle(true);
-  }, [busy]);
   useEffect(() => {
     if (didSettle && isResting) {
       restingRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -654,7 +653,7 @@ export function CtoPanel({
           {/* Learning card (§10.6-4): cold-start backfill progress (BET-1387).
               Informational — never counts into the sidebar badge. */}
           <BackfillCard state={state} />
-          <BlockerSection cards={blockerCards} now={Date.now()} onAnswer={handleAnswer} />
+          <BlockerSection cards={blockerCardList} now={Date.now()} onAnswer={handleAnswer} />
           <VetoSection cards={vetoList} now={Date.now()} onCancel={handleVetoCancel} onEditPlan={handleVetoEditPlan} onRunNow={handleVetoRunNow} />
           <ConnectSection cards={connectList} onAnswer={handleConnectAnswer} />
           <SuggestionSection cards={suggestionCards} onAction={handleSuggestionAction} onDismiss={handleSuggestionDismiss} />
@@ -940,7 +939,7 @@ function SettingsView({
           <section className="rounded-lg border border-border-subtle p-4">
             <h3 className="text-sm font-semibold text-text">Behavior</h3>
             <p className="mt-1 text-sm text-text-faint">
-              One hard daily cap (<span className="font-mono">${config?.ctoAmbientCap ?? 2.5}</span>)
+              One hard daily cap (<span className="font-mono">${(config?.ctoAmbientCap ?? 2.5).toFixed(2)}</span>)
               bounds all autonomous work, independent of the effort dial.
             </p>
 
@@ -1143,7 +1142,7 @@ function SettingsView({
                   <li key={id} className="flex items-baseline justify-between gap-3 py-2">
                     <span className="text-sm text-text-muted">{stat.label}</span>
                     <span className={"text-right text-sm " + (d.ready ? "font-mono text-text" : "text-text-faint")}>
-                      {d.ready ? d.text : <><span>{stat.label}</span> · {d.text}</>}
+                      {d.text}
                     </span>
                   </li>
                 );
@@ -1716,7 +1715,9 @@ function ProfileView({
                           </div>
                           <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1 text-[11px]">
                             {s.source === "stated" ? (
-                              <span className="text-text">stated: {s.statedValue}</span>
+                              <span className="text-text">
+                                stated: {typeof s.statedValue === "number" ? s.statedValue.toFixed(2) : s.statedValue}
+                              </span>
                             ) : s.topEvidence && s.topEvidence.length ? (
                               s.topEvidence.slice(0, 3).map((ref) => (
                                 <button
@@ -2506,7 +2507,7 @@ function ToolIntegrationsView({
           </span>
         ) : null}
         <span className="ml-auto text-[11px] text-text-faint">
-          {row.uses} uses · {row.weeksActive} wk active · ewma {row.ewmaPerWeek}/wk
+          {row.uses} uses · {row.weeksActive} wk active · ewma {Math.round(row.ewmaPerWeek * 100) / 100}/wk
         </span>
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-text-faint">

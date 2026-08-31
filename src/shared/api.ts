@@ -248,8 +248,10 @@ export type CtoState = {
 };
 
 // An open needs-you card row (§10.3), as served by GET /api/cto/cards (a thin
-// read of the A8 card store). Only `blocker` variant rows are written today;
-// the decision/veto/connect variants are reserved for later writers (§13.1).
+// read of the A8 card store). All four variants are live writers today:
+// `blocker` (ctoCardStore), `decision` (BET-1392), `veto` (BET-1419), and
+// `connect` (ctoToolRegistry). Consumers must select positively on the
+// variant they want — see BET-1467.
 export type CtoCard = {
   id: string;
   variant: "blocker" | "decision" | "veto" | "connect";
