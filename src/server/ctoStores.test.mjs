@@ -468,7 +468,7 @@ test("patchStore: parallel patches compose — every key lands on the injected s
   assert.equal(after.b, 2, "both increments landed on each other's committed state");
 });
 
-test("patchStore: a patch preserves keys it does not own — a stale-derived patch cannot erase a concurrent writer's key", async () => {
+test("patchStore: a patch preserves keys it does not own — a stale-derived patch cannot erase a concurrent writer's key (scalars AND whole-array replacements)", async () => {
   const store = memoryStore({ X: "old" });
   await patchStore(store, { X: "new" }); // A commits X=new
   // B's patch was derived from a stale snapshot still carrying old X — the
@@ -478,6 +478,21 @@ test("patchStore: a patch preserves keys it does not own — a stale-derived pat
   const after = await store.load();
   assert.equal(after.X, "new", "X survived B's save");
   assert.equal(after.Y, 42, "Y landed");
+
+  // The card/watcher/trust-pending shape: a patch that REPLACES a whole
+  // array. A commits a one-element array; B's stale-derived patch replaces a
+  // different key; then C's mutator (derived FRESH under the mutex) appends
+  // to the array it actually owns. A's rows survive all of it.
+  await patchStore(store, { cards: [{ id: "c1" }] });
+  await patchStore(store, { unrelated: true }); // a stale-derived whole-save would have reverted `cards`
+  const afterArray = await patchStore(store, (fresh) => ({
+    cards: [...(fresh.cards ?? []), { id: "c2" }],
+  }));
+  assert.deepEqual(
+    afterArray.cards.map((c) => c.id),
+    ["c1", "c2"],
+    "the array replacement composed with the unrelated writer's key",
+  );
 });
 
 test("patchStore: an async mutator holds the store mutex across its whole body", async () => {
