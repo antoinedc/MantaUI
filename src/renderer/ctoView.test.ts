@@ -595,8 +595,9 @@ it("connectCards: selects connect-variant cards and drops a row with neither tit
 // ---------------------------------------------------------------------------
 
 // A card shaped exactly like the server's upsertConnect output (ctoCards.mjs):
-// every option binds the ask's tool identity + ring at generation time.
-const connectAskCard = (ring: string, tool: unknown = "github"): ConnectCardRow => ({
+// every option binds the ask's tool identity + ring at generation time. Omit
+// `tool` to build the defensive no-tool variant.
+const connectAskCard = (ring: string, tool?: unknown): ConnectCardRow => ({
   id: "cto:card:connect:github",
   title: "Connect GitHub (read-only)?",
   body: "used 6 times this week",
@@ -610,7 +611,7 @@ const connectAskCard = (ring: string, tool: unknown = "github"): ConnectCardRow 
 
 describe("connectAnswerArgs (BET-1431 — connect answer → ctoToolConnect wiring)", () => {
   it("each of the three answers routes its option's tool + answer; the metadata ask sends no ring", () => {
-    const card = connectAskCard("metadata");
+    const card = connectAskCard("metadata", "github");
     expect(connectAnswerArgs(card, "connect")).toEqual({ tool: "github", answer: "connect" });
     expect(connectAnswerArgs(card, "not-now")).toEqual({ tool: "github", answer: "not-now" });
     expect(connectAnswerArgs(card, "never")).toEqual({ tool: "github", answer: "never" });
@@ -618,23 +619,32 @@ describe("connectAnswerArgs (BET-1431 — connect answer → ctoToolConnect wiri
   });
 
   it("a deep-read ask forwards ring deep_read on every answer (the ring the ask was about)", () => {
-    const card = connectAskCard("deep_read");
+    const card = connectAskCard("deep_read", "github");
     expect(connectAnswerArgs(card, "connect")).toEqual({ tool: "github", answer: "connect", ring: "deep_read" });
     expect(connectAnswerArgs(card, "not-now")).toEqual({ tool: "github", answer: "not-now", ring: "deep_read" });
     expect(connectAnswerArgs(card, "never")).toEqual({ tool: "github", answer: "never", ring: "deep_read" });
   });
 
   it("an option carrying no action.payload.tool produces no call (null, never a bogus tool)", () => {
+    const noToolKey: ConnectCardRow = {
+      ...connectAskCard("metadata"),
+      options: (["connect", "not-now", "never"] as const).map((answer) => ({
+        label: answer,
+        answer,
+        action: { type: "tool-connect", payload: {} },
+      })),
+    };
     for (const answer of ["connect", "not-now", "never"]) {
-      expect(connectAnswerArgs(connectAskCard("metadata", undefined), answer)).toBeNull();
+      expect(connectAnswerArgs(connectAskCard("metadata"), answer)).toBeNull();
+      expect(connectAnswerArgs(noToolKey, answer)).toBeNull();
       expect(connectAnswerArgs(connectAskCard("metadata", 42), answer)).toBeNull();
       expect(connectAnswerArgs(connectAskCard("metadata", ""), answer)).toBeNull();
     }
   });
 
   it("an answer that is not one of the three registry verbs (or matches no option) is null", () => {
-    expect(connectAnswerArgs(connectAskCard("metadata"), "always")).toBeNull();
-    expect(connectAnswerArgs({ ...connectAskCard("metadata"), options: [] }, "connect")).toBeNull();
+    expect(connectAnswerArgs(connectAskCard("metadata", "github"), "always")).toBeNull();
+    expect(connectAnswerArgs({ ...connectAskCard("metadata", "github"), options: [] }, "connect")).toBeNull();
   });
 });
 
