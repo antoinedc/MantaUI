@@ -919,14 +919,28 @@ export function createProbes(deps = {}) {
    * Not thrifty-shed: a still-empty template is at most one paced nano call,
    * not a fan-out.
    */
-  async function authorSpecs({ ts = now(), todayKey = dayKeyOf(ts) } = {}) {
-    if (typeof runEphemeral !== "function") return { ran: 0, attempts: 0, skipped: "no-ephemeral" };
+  // Common prologue of the two paced nano passes (authorSpecs / relevanceScan):
+  // normalize `{ts, todayKey}` (the day-key defaults from ts), gate on the
+  // ephemeral seam, and load the spec'd tool list. Returns the pass's
+  // zero-work result via `.early`, or `{ts, todayKey, tools}` to proceed.
+  async function pacedPassPrologue(opts = {}) {
+    const { ts = now(), todayKey = dayKeyOf(ts) } = opts;
+    if (typeof runEphemeral !== "function") {
+      return { early: { ran: 0, attempts: 0, skipped: "no-ephemeral" } };
+    }
     let tools;
     try {
       tools = await probes.list();
     } catch {
-      return { ran: 0, attempts: 0 };
+      return { early: { ran: 0, attempts: 0 } };
     }
+    return { ts, todayKey, tools };
+  }
+
+  async function authorSpecs(opts = {}) {
+    const prologue = await pacedPassPrologue(opts);
+    if (prologue.early) return prologue.early;
+    const { ts, todayKey, tools } = prologue;
     let st;
     try {
       st = (await state.load("_authoring")) ?? {};
@@ -1268,14 +1282,10 @@ export function createProbes(deps = {}) {
    * indefinitely (review cycle 1, Question 1). Successful pairs then rest
    * for the week.
    */
-  async function relevanceScan({ ts = now(), todayKey = dayKeyOf(ts) } = {}) {
-    if (typeof runEphemeral !== "function") return { ran: 0, attempts: 0, skipped: "no-ephemeral" };
-    let tools;
-    try {
-      tools = await probes.list();
-    } catch {
-      return { ran: 0, attempts: 0 };
-    }
+  async function relevanceScan(opts = {}) {
+    const prologue = await pacedPassPrologue(opts);
+    if (prologue.early) return prologue.early;
+    const { ts, todayKey, tools } = prologue;
     let projects = [];
     try {
       projects = (await listProjects()) ?? [];
