@@ -153,8 +153,8 @@ export function CtoPanel({
   const [finished, setFinished] = useState<CtoFinishedItem[]>([]);
   const [ledgerCard, setLedgerCard] = useState<BlockerCard | null>(null);
   const [logsItem, setLogsItem] = useState<CtoFinishedItem | null>(null);
-  // BET-1468 item 1: the three overview reads used to end in `.catch(() =>
-  // {})` — an offline box / stale token left the lists empty with no signal,
+  // BET-1468 item 1: the three overview reads used to end in an empty no-op
+  // catch — an offline box / stale token left the lists empty with no signal,
   // and `resting()` reads "everything empty" as "nothing needs you". Track
   // whether the first load has resolved and whether it failed so the resting
   // line can be gated on both (see `mayShowResting` in ctoView.ts).
@@ -330,8 +330,23 @@ export function CtoPanel({
     }
   };
 
-  const handleRegen = () => {
-    void window.api?.ctoDigestNow?.();
+  // BET-1468 item 3: the pane's primary button used to discard its result —
+  // `void ctoDigestNow()` — while httpApi returns `{ok:false, error}` "so the
+  // pane can toast the cause" and THROWS AuthRequiredError on a 401. Pressed
+  // while paused/disabled/offline it did nothing at all. Await and report BOTH
+  // branches (the AGENTS.md rule); success says so too, because the fresh
+  // digest only lands later, when the generation settles.
+  const handleRegen = async () => {
+    try {
+      const r = await window.api?.ctoDigestNow?.();
+      if (r && !r.ok) {
+        pushToast({ id: `regen-${Date.now()}`, message: `Couldn't regenerate the digest: ${r.error ?? "unknown error"}` });
+      } else {
+        pushToast({ id: `regen-${Date.now()}`, message: "Digest regeneration started — the pane refreshes when it lands" });
+      }
+    } catch (e) {
+      pushToast({ id: `regen-${Date.now()}`, message: `Couldn't regenerate the digest: ${e instanceof Error ? e.message : String(e)}` });
+    }
   };
 
   // BET-1392 decision-card actions (§9.1). The existing renderer api surface is
@@ -359,7 +374,7 @@ export function CtoPanel({
   // BET-1468 item 4: the §9.2/§9.3/§7.4 action handlers below each POST an
   // action that either resolves `{ok:false}` (toasted by its own .then) OR
   // REJECTS (an AuthRequiredError on a stale token, or a network failure —
-  // §401). An empty `.catch(() => {})` swallowed that second case: with a
+  // §401). An empty no-op catch swallowed that second case: with a
   // stale token every one of these controls did nothing and said nothing.
   // One handler, every call site, instead of writing the same catch six times.
   const catchActionError = useCallback(
@@ -915,11 +930,31 @@ function SettingsView({
   // usage snapshots (provider window notes), read once on settings-open.
   const [budget, setBudget] = useState<{ days?: Record<string, { usd?: number } | undefined>; quota?: Record<string, { provider?: string; mode?: string | null; reserve?: number | null; mape14?: number | null } | undefined> } | null>(null);
   const [usageSnaps, setUsageSnaps] = useState<{ provider?: string; windows?: { kind?: string; label?: string; resetsAt?: number | null }[] | null }[]>([]);
-
+  // BET-1468 item 2: `config` starts null and the four reads had no `.catch()`
+  // at all — while loading, every control displayed a default the box never
+  // sent (the effort radios showed "Low" on a High-tier box and a click wrote
+  // that downgrade through), and on a failure the pane stayed there forever.
+  // Track load state; the Behavior/Tonight cards stay gated on `config`.
+  const [settingsLoadError, setSettingsLoadError] = useState<string | null>(null);
+  const aliveRef = useRef(true);
   useEffect(() => {
-    let alive = true;
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
+  const reportSettingsLoadError = useCallback(
+    (label: string) => (e: unknown) => {
+      const msg = e instanceof Error ? e.message : String(e);
+      setSettingsLoadError(msg);
+      pushToast({ id: `cto-set-err-${Date.now()}`, message: `Couldn't load ${label}: ${msg}` });
+    },
+    [pushToast],
+  );
+  const loadSettings = useCallback(() => {
+    setSettingsLoadError(null);
     void window.api.configGet().then((c) => {
-      if (!alive) return;
+      if (!aliveRef.current) return;
       setConfig({
         ctoEnabled: !!c?.ctoEnabled,
         ctoTier: c?.ctoTier,
@@ -930,23 +965,24 @@ function SettingsView({
       });
       setCapText(String(c?.ctoAmbientCap ?? DEFAULT_AMBIENT_CAP_USD));
       setNightCapText(c?.ctoNightCapUsd != null ? String(c.ctoNightCapUsd) : "");
-    });
+    }).catch(reportSettingsLoadError("the CTO settings"));
     void window.api.ctoHealthGet().then((h) => {
-      if (alive) setHealth(h.stats);
-    });
+      if (aliveRef.current) setHealth(h.stats);
+    }).catch(reportSettingsLoadError("the health stats"));
     // BET-1405 (§10.5 card 3): the persisted budget payload (day buckets +
     // quota cache) and the usage snapshots (provider window notes) — one read
-    // on settings-open, never polled. Rejections degrade to absent data.
+    // on settings-open, never polled.
     void window.api.ctoQuotaRead().then((b) => {
-      if (alive) setBudget(b ?? null);
-    });
+      if (aliveRef.current) setBudget(b ?? null);
+    }).catch(reportSettingsLoadError("the budget history"));
     void window.api.usageList().then((snaps) => {
-      if (alive) setUsageSnaps(Array.isArray(snaps) ? snaps : []);
-    });
-    return () => {
-      alive = false;
-    };
-  }, []);
+      if (aliveRef.current) setUsageSnaps(Array.isArray(snaps) ? snaps : []);
+    }).catch(reportSettingsLoadError("the usage snapshots"));
+  }, [reportSettingsLoadError]);
+
+  useEffect(() => {
+    loadSettings();
+  }, [loadSettings]);
 
   const applyConfig = useCallback(
     async (patch: Partial<CtoSettingsConfig>) => {
@@ -956,7 +992,10 @@ function SettingsView({
         const next = (await window.api.configUpdate(patch)) as CtoSettingsConfig;
         setConfig((c) => ({ ...c, ...patch, ctoAmbientCap: next?.ctoAmbientCap }));
       } catch (e) {
-        setConfig(prev ?? {});
+        // BET-1468 item 2: restore exactly what was on screen before the
+        // optimistic patch — the old `prev ?? {}` fabricated an empty config
+        // (and lost the patch state) whenever the write failed.
+        setConfig(prev);
         pushToast({
           id: `cto-cfg-${Date.now()}`,
           message: `Couldn't update: ${e instanceof Error ? e.message : String(e)}`,
@@ -1038,6 +1077,27 @@ function SettingsView({
 
         <div className="mt-4 space-y-6">
           {/* ---------- Behavior card (§10.5 card 1, P1 subset) ---------- */}
+          {/* BET-1468 item 2: never render controls over a config the box has
+              not sent — the `?? false` / `?? "low"` defaults read as facts, and
+              a click on the effort dial wrote the fake tier through. Gate the
+              card on the read; the Loading… line matches the sibling
+              drill-downs, the failure case gets a Retry that re-runs the read. */}
+          {config === null ? (
+            settingsLoadError ? (
+              <div className="rounded-lg border border-border-subtle p-4">
+                <div className="text-sm text-text-muted">Couldn&rsquo;t load the CTO settings: {settingsLoadError}</div>
+                <button
+                  type="button"
+                  onClick={loadSettings}
+                  className="mt-2 text-sm text-accent underline hover:text-accent-strong"
+                >
+                  Retry
+                </button>
+              </div>
+            ) : (
+              <p className="text-sm text-text-faint">Loading…</p>
+            )
+          ) : (
           <section className="rounded-lg border border-border-subtle p-4">
             <h3 className="text-sm font-semibold text-text">Behavior</h3>
             <p className="mt-1 text-sm text-text-faint">
@@ -1211,6 +1271,23 @@ function SettingsView({
               </div>
             </div>
           </section>
+          )}
+
+          {/* BET-1468 item 2: the config read landed but a secondary read
+              failed — say so (the toast already fired) with a Retry, instead
+              of leaving the health/budget sections silently empty. */}
+          {config !== null && settingsLoadError ? (
+            <div className="rounded-lg border border-border-subtle p-3">
+              <div className="text-sm text-text-muted">Couldn&rsquo;t load everything: {settingsLoadError}</div>
+              <button
+                type="button"
+                onClick={loadSettings}
+                className="mt-2 text-sm text-accent underline hover:text-accent-strong"
+              >
+                Retry
+              </button>
+            </div>
+          ) : null}
 
           {/* ---------- Health card (§10.5 card 2) ---------- */}
           <section className="rounded-lg border border-border-subtle p-4">
@@ -1253,14 +1330,20 @@ function SettingsView({
           </section>
 
           {/* ---------- Tonight's budget (§10.5 card 3, BET-1405) ---------- */}
-          <TonightBudgetCard
-            tier={config?.ctoTier ?? "low"}
-            overnightOn={!!config?.ctoOvernight}
-            ambientCapUsd={config?.ctoAmbientCap ?? DEFAULT_AMBIENT_CAP_USD}
-            nightCapUsd={config?.ctoNightCapUsd ?? DEFAULT_NIGHT_CAP_USD}
-            budget={budget}
-            usageSnaps={usageSnaps}
-          />
+          {/* BET-1468 item 2: gated like the Behavior card — `tier ?? "low"`
+              here used to render "Overnight work is off — there is no night
+              pool to gauge", a false statement about a High-tier box, while
+              the read was still in flight (or after it failed). */}
+          {config !== null ? (
+            <TonightBudgetCard
+              tier={config?.ctoTier ?? "low"}
+              overnightOn={!!config?.ctoOvernight}
+              ambientCapUsd={config?.ctoAmbientCap ?? DEFAULT_AMBIENT_CAP_USD}
+              nightCapUsd={config?.ctoNightCapUsd ?? DEFAULT_NIGHT_CAP_USD}
+              budget={budget}
+              usageSnaps={usageSnaps}
+            />
+          ) : null}
 
           {/* ---------- Internals: rows 1-4 of the §10.5 drill-down list ---------- */}
           <section className="rounded-lg border border-border-subtle p-4">
@@ -1647,14 +1730,38 @@ function ProfileView({
   const [tab, setTab] = useState<ProfileTab>("profile");
   const [render, setRender] = useState<CtoProfileRender | null>(null);
   const [loading, setLoading] = useState(true);
+  // BET-1468 item 7: `loading` used to clear only on the success path, so a
+  // 401 left this drill-down on a permanent "Loading…" with no error and no
+  // retry. Track the failure; keep the last good render on it.
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [editDim, setEditDim] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
 
   const refresh = useCallback(async () => {
-    const r = await window.api.ctoProfileGet();
-    setRender(r);
-    setLoading(false);
-  }, []);
+    try {
+      const r = await window.api.ctoProfileGet();
+      // httpApi degrades a failed read to `emptyProfileRender()` (compiledAt
+      // 0 by construction; a server success always stamps a time). Treat that
+      // as the failure it is instead of claiming "nothing here yet".
+      if (r.compiledAt === 0) {
+        setLoadError("the profile read failed");
+        return;
+      }
+      setRender(r);
+      setLoadError(null);
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : String(e));
+      pushToast({ id: `cto-prof-load-${Date.now()}`, message: `Couldn't load the profile: ${e instanceof Error ? e.message : String(e)}` });
+    } finally {
+      setLoading(false);
+    }
+  }, [pushToast]);
+
+  const retryProfileLoad = useCallback(() => {
+    setLoading(true);
+    setLoadError(null);
+    void refresh();
+  }, [refresh]);
 
   useEffect(() => {
     void refresh();
@@ -1667,33 +1774,45 @@ function ProfileView({
       return;
     }
     const clamped = Math.min(1, Math.max(0, value));
-    const res = await window.api.ctoProfileEdit({ dimension: skill.dimension, value: clamped });
-    if (!res.ok) {
-      pushToast({ id: `cto-edit-fail-${skill.dimension}`, message: res.error ?? "Edit failed" });
-      return;
+    try {
+      const res = await window.api.ctoProfileEdit({ dimension: skill.dimension, value: clamped });
+      if (!res.ok) {
+        pushToast({ id: `cto-edit-fail-${skill.dimension}`, message: res.error ?? "Edit failed" });
+        return;
+      }
+      setRender(res);
+      setEditDim(null);
+      pushToast({ id: `cto-edit-ok-${skill.dimension}`, message: `Stated ${skill.dimension} as ${clamped}` });
+    } catch (e) {
+      pushToast({ id: `cto-edit-fail-${skill.dimension}`, message: `Couldn't save the edit: ${e instanceof Error ? e.message : String(e)}` });
     }
-    setRender(res);
-    setEditDim(null);
-    pushToast({ id: `cto-edit-ok-${skill.dimension}`, message: `Stated ${skill.dimension} as ${clamped}` });
   };
 
   const suppress = async (cls: string) => {
-    const res = await window.api.ctoProfileSuppress({ inference: cls });
-    if (!res.ok) {
-      pushToast({ id: `cto-sup-fail-${cls}`, message: res.error ?? "Couldn't delete" });
-      return;
+    try {
+      const res = await window.api.ctoProfileSuppress({ inference: cls });
+      if (!res.ok) {
+        pushToast({ id: `cto-sup-fail-${cls}`, message: res.error ?? "Couldn't delete" });
+        return;
+      }
+      setRender(res);
+      pushToast({ id: `cto-sup-ok-${cls}`, message: "Sensitive inference deleted for 90 days" });
+    } catch (e) {
+      pushToast({ id: `cto-sup-fail-${cls}`, message: `Couldn't delete the inference: ${e instanceof Error ? e.message : String(e)}` });
     }
-    setRender(res);
-    pushToast({ id: `cto-sup-ok-${cls}`, message: "Sensitive inference deleted for 90 days" });
   };
 
   const delJournal = async (id: string) => {
-    const res = await window.api.ctoJournalDelete({ id });
-    if (!res.ok) {
-      pushToast({ id: `cto-jdel-${id}`, message: "Couldn't delete the entry" });
-      return;
+    try {
+      const res = await window.api.ctoJournalDelete({ id });
+      if (!res.ok) {
+        pushToast({ id: `cto-jdel-${id}`, message: "Couldn't delete the entry" });
+        return;
+      }
+      void refresh();
+    } catch (e) {
+      pushToast({ id: `cto-jdel-${id}`, message: `Couldn't delete the entry: ${e instanceof Error ? e.message : String(e)}` });
     }
-    void refresh();
   };
 
   // Deep-link an evidence ref. Refs are bare provenance strings in the render
@@ -1746,6 +1865,13 @@ function ProfileView({
 
         {loading ? (
           <p className="text-sm text-text-faint">Loading…</p>
+        ) : loadError ? (
+          <div className="mt-4 flex flex-col items-start gap-1">
+            <p className="text-sm text-text-muted">Couldn&rsquo;t load the profile: {loadError}</p>
+            <button type="button" onClick={retryProfileLoad} className="text-sm text-accent underline hover:text-accent-strong">
+              Retry
+            </button>
+          </div>
         ) : tab === "journal" ? (
           <JournalTab render={render} delJournal={delJournal} />
         ) : (
@@ -1988,7 +2114,7 @@ function ProfileView({
           </div>
         )}
 
-        {!loading && empty && <p className="mt-8 text-sm text-text-faint">Nothing here yet — the CTO fills this in as it learns.</p>}
+        {!loading && !loadError && empty && <p className="mt-8 text-sm text-text-faint">Nothing here yet — the CTO fills this in as it learns.</p>}
       </div>
     </div>
   );
@@ -2312,6 +2438,10 @@ function BlackboardView({
   );
   const [render, setRender] = useState<CtoFactsRender | null>(null);
   const [loading, setLoading] = useState(true);
+  // BET-1468 item 7: same hole as Profile — `loading` cleared on success only,
+  // so a 401 hung this view on "Loading…" forever. Track the failure and keep
+  // the last good render (the project chip row stays switchable).
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [tab, setTab] = useState<"facts" | "archive">("facts");
   const [archive, setArchive] = useState<CtoFactRow[]>([]);
   const [archiveTotal, setArchiveTotal] = useState(0);
@@ -2320,10 +2450,31 @@ function BlackboardView({
   const [correction, setCorrection] = useState("");
 
   const refresh = useCallback(async () => {
-    const r = await window.api.ctoFactsGet({});
-    setRender(r);
-    setLoading(false);
-  }, []);
+    try {
+      const r = await window.api.ctoFactsGet({});
+      // httpApi degrades a failed read to `emptyFactsRender()` (compiledAt 0
+      // by construction; a server success always stamps a time). Treating it
+      // as success would swap the board — and the project chip row — for an
+      // empty render the user cannot switch back from (BET-1468 item 6).
+      if (r.compiledAt === 0) {
+        setLoadError("the blackboard read failed");
+        return;
+      }
+      setRender(r);
+      setLoadError(null);
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : String(e));
+      pushToast({ id: `bb-load-${Date.now()}`, message: `Couldn't load the blackboard: ${e instanceof Error ? e.message : String(e)}` });
+    } finally {
+      setLoading(false);
+    }
+  }, [pushToast]);
+
+  const retryBoardLoad = useCallback(() => {
+    setLoading(true);
+    setLoadError(null);
+    void refresh();
+  }, [refresh]);
 
   useEffect(() => {
     void refresh();
@@ -2331,14 +2482,19 @@ function BlackboardView({
 
   const loadArchive = useCallback(
     async (project: string | null, before?: number) => {
-      const page = await window.api.ctoFactsArchiveGet({ project, before });
-      if (!page.ok) {
-        pushToast({ id: `bb-arc-${Date.now()}`, message: page.error ?? "Couldn't load the archive" });
-        return;
+      try {
+        const page = await window.api.ctoFactsArchiveGet({ project, before });
+        if (!page.ok) {
+          pushToast({ id: `bb-arc-${Date.now()}`, message: page.error ?? "Couldn't load the archive" });
+          return;
+        }
+        setArchiveTotal(page.total);
+        setNextBefore(page.nextBefore);
+        setArchive((prev) => (before == null ? page.entries : [...prev, ...page.entries]));
+      } catch (e) {
+        // A stale token throws (AuthRequiredError) — say so, keep what's shown.
+        pushToast({ id: `bb-arc-${Date.now()}`, message: `Couldn't load the archive: ${e instanceof Error ? e.message : String(e)}` });
       }
-      setArchiveTotal(page.total);
-      setNextBefore(page.nextBefore);
-      setArchive((prev) => (before == null ? page.entries : [...prev, ...page.entries]));
     },
     [pushToast],
   );
@@ -2349,35 +2505,51 @@ function BlackboardView({
   };
 
   const switchProject = async (project: string) => {
-    const r = await window.api.ctoFactsGet({ project });
-    setRender(r);
-    setArchive([]);
-    setArchiveTotal(0);
-    setNextBefore(null);
-    if (tab === "archive") void loadArchive(project);
+    try {
+      const r = await window.api.ctoFactsGet({ project });
+      if (r.compiledAt === 0) {
+        // Failed read (httpApi degrades to the empty render) — keep the
+        // currently displayed board and its chip row instead of wiping them.
+        pushToast({ id: `bb-switch-${Date.now()}`, message: `Couldn't switch to ${project}` });
+        return;
+      }
+      setRender(r);
+      setArchive([]);
+      setArchiveTotal(0);
+      setNextBefore(null);
+      if (tab === "archive") void loadArchive(project);
+    } catch (e) {
+      pushToast({ id: `bb-switch-${Date.now()}`, message: `Couldn't switch to ${project}: ${e instanceof Error ? e.message : String(e)}` });
+    }
   };
 
   const pin = async (row: CtoFactRow) => {
-    if (!render?.project) return;
-    const res = await window.api.ctoFactPin({ project: render.project, factId: row.id });
-    pushToast(
-      res.ok
-        ? { id: `bb-pin-${row.id}`, message: "Pinned — the access clock was reset" }
-        : { id: `bb-pin-err-${row.id}`, message: res.error ?? "Pin failed" },
-    );
+    try {
+      const res = await window.api.ctoFactPin({ project: render!.project!, factId: row.id });
+      pushToast(
+        res.ok
+          ? { id: `bb-pin-${row.id}`, message: "Pinned — the access clock was reset" }
+          : { id: `bb-pin-err-${row.id}`, message: res.error ?? "Pin failed" },
+      );
+    } catch (e) {
+      pushToast({ id: `bb-pin-err-${row.id}`, message: `Couldn't pin: ${e instanceof Error ? e.message : String(e)}` });
+    }
   };
 
   const submitCorrection = async (row: CtoFactRow) => {
-    if (!render?.project) return;
-    const res = await window.api.ctoFactCorrect({ project: render.project, factId: row.id, statement: correction });
-    if (!res.ok) {
-      pushToast({ id: `bb-corr-err-${row.id}`, message: res.error ?? "Correction failed" });
-      return;
+    try {
+      const res = await window.api.ctoFactCorrect({ project: render!.project!, factId: row.id, statement: correction });
+      if (!res.ok) {
+        pushToast({ id: `bb-corr-err-${row.id}`, message: res.error ?? "Correction failed" });
+        return;
+      }
+      setCorrecting(null);
+      setCorrection("");
+      pushToast({ id: `bb-corr-${row.id}`, message: "Correction applied — the fact was superseded" });
+      void refresh();
+    } catch (e) {
+      pushToast({ id: `bb-corr-err-${row.id}`, message: `Couldn't send the correction: ${e instanceof Error ? e.message : String(e)}` });
     }
-    setCorrecting(null);
-    setCorrection("");
-    pushToast({ id: `bb-corr-${row.id}`, message: "Correction applied — the fact was superseded" });
-    void refresh();
   };
 
   return (
@@ -2425,6 +2597,13 @@ function BlackboardView({
 
         {loading ? (
           <div className="mt-4 text-sm text-text-muted">Loading…</div>
+        ) : loadError ? (
+          <div className="mt-4 flex flex-col items-start gap-1">
+            <div className="text-sm text-text-muted">Couldn&rsquo;t load the blackboard: {loadError}</div>
+            <button type="button" onClick={retryBoardLoad} className="text-sm text-accent underline hover:text-accent-strong">
+              Retry
+            </button>
+          </div>
         ) : tab === "facts" ? (
           <>
             {render && render.active.length > 0 ? (
@@ -2465,22 +2644,28 @@ function BlackboardView({
                         </div>
                       </div>
                     ) : null}
-                    <div className="mt-1 flex gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setCorrecting(correcting === row.id ? null : row.id)}
-                        className="rounded-md border border-border-subtle px-2 py-1 text-[11px] text-text-muted hover:text-text"
-                      >
-                        Wrong?
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void pin(row)}
-                        className="rounded-md border border-border-subtle px-2 py-1 text-[11px] text-text-muted hover:text-text"
-                      >
-                        Pin
-                      </button>
-                    </div>
+                    {/* BET-1468 item 8: Pin and the Supersede flow (opened by
+                        Wrong?) both act on `render.project` — when the render
+                        arrived without one they used to return silently. A
+                        control that cannot act is not rendered. */}
+                    {render?.project ? (
+                      <div className="mt-1 flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setCorrecting(correcting === row.id ? null : row.id)}
+                          className="rounded-md border border-border-subtle px-2 py-1 text-[11px] text-text-muted hover:text-text"
+                        >
+                          Wrong?
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void pin(row)}
+                          className="rounded-md border border-border-subtle px-2 py-1 text-[11px] text-text-muted hover:text-text"
+                        >
+                          Pin
+                        </button>
+                      </div>
+                    ) : null}
                   </div>
                 ))}
               </div>
@@ -2557,13 +2742,36 @@ function ToolIntegrationsView({
 }) {
   const [render, setRender] = useState<CtoToolsRender | null>(null);
   const [loading, setLoading] = useState(true);
+  // BET-1468 item 7: same success-only `setLoading(false)` hole as the other
+  // drill-downs — a 401 hung this view on "Loading…" forever.
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [busyTool, setBusyTool] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
-    const r = await window.api.ctoToolsGet();
-    setRender(r);
-    setLoading(false);
-  }, []);
+    try {
+      const r = await window.api.ctoToolsGet();
+      // httpApi degrades a failed read to `emptyToolsRender()` (compiledAt 0
+      // by construction; a server success always stamps a time) — treat it as
+      // the failure it is instead of claiming no tools are observed.
+      if (r.compiledAt === 0) {
+        setLoadError("the tool registry read failed");
+        return;
+      }
+      setRender(r);
+      setLoadError(null);
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : String(e));
+      pushToast({ id: `ti-load-${Date.now()}`, message: `Couldn't load the tool registry: ${e instanceof Error ? e.message : String(e)}` });
+    } finally {
+      setLoading(false);
+    }
+  }, [pushToast]);
+
+  const retryToolsLoad = useCallback(() => {
+    setLoading(true);
+    setLoadError(null);
+    void refresh();
+  }, [refresh]);
 
   useEffect(() => {
     void refresh();
@@ -2571,26 +2779,38 @@ function ToolIntegrationsView({
 
   const revoke = async (row: CtoToolRegistryRow, ring: "metadata" | "deep_read" | "write") => {
     setBusyTool(row.tool);
-    const res = await window.api.ctoToolRevoke({ tool: row.tool, ring });
-    pushToast(
-      res.ok
-        ? { id: `ti-rev-${row.tool}-${ring}`, message: `Revoked ${ring.replace("_", " ")} consent for ${row.displayName}` }
-        : { id: `ti-rev-err-${row.tool}-${ring}`, message: res.error ?? "Revoke failed" },
-    );
-    setBusyTool(null);
-    if (res.ok) void refresh();
+    try {
+      const res = await window.api.ctoToolRevoke({ tool: row.tool, ring });
+      pushToast(
+        res.ok
+          ? { id: `ti-rev-${row.tool}-${ring}`, message: `Revoked ${ring.replace("_", " ")} consent for ${row.displayName}` }
+          : { id: `ti-rev-err-${row.tool}-${ring}`, message: res.error ?? "Revoke failed" },
+      );
+      if (res.ok) void refresh();
+    } catch (e) {
+      pushToast({ id: `ti-rev-err-${row.tool}-${ring}`, message: `Couldn't revoke: ${e instanceof Error ? e.message : String(e)}` });
+    } finally {
+      // BET-1468: the busy flag used to survive a rejection, leaving the
+      // revoke control permanently disabled — a dead control.
+      setBusyTool(null);
+    }
   };
 
   const unnever = async (row: CtoToolRegistryRow) => {
     setBusyTool(row.tool);
-    const res = await window.api.ctoToolUnnever({ tool: row.tool });
-    pushToast(
-      res.ok
-        ? { id: `ti-un-${row.tool}`, message: `${row.displayName} re-enters the lifecycle at observed` }
-        : { id: `ti-un-err-${row.tool}`, message: res.error ?? "Un-never failed" },
-    );
-    setBusyTool(null);
-    if (res.ok) void refresh();
+    try {
+      const res = await window.api.ctoToolUnnever({ tool: row.tool });
+      pushToast(
+        res.ok
+          ? { id: `ti-un-${row.tool}`, message: `${row.displayName} re-enters the lifecycle at observed` }
+          : { id: `ti-un-err-${row.tool}`, message: res.error ?? "Un-never failed" },
+      );
+      if (res.ok) void refresh();
+    } catch (e) {
+      pushToast({ id: `ti-un-err-${row.tool}`, message: `Couldn't clear the never verdict: ${e instanceof Error ? e.message : String(e)}` });
+    } finally {
+      setBusyTool(null);
+    }
   };
 
   const toolBlock = (row: CtoToolRegistryRow) => (
@@ -2683,6 +2903,13 @@ function ToolIntegrationsView({
 
         {loading ? (
           <div className="mt-4 text-sm text-text-muted">Loading…</div>
+        ) : loadError ? (
+          <div className="mt-4 flex flex-col items-start gap-1">
+            <div className="text-sm text-text-muted">Couldn&rsquo;t load the tool registry: {loadError}</div>
+            <button type="button" onClick={retryToolsLoad} className="text-sm text-accent underline hover:text-accent-strong">
+              Retry
+            </button>
+          </div>
         ) : (
           <>
             {render && render.tools.length > 0 ? (
