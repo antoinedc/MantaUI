@@ -862,7 +862,7 @@ test("usedKeys is capped at 200 entries; the oldest fall off", async () => {
   assert.ok(used.includes("old-1")); // next-oldest survives — only one entry was dropped
 });
 
-test("notify: fireNotify carries a distinct, non-global identifier per candidate (defect 2)", async () => {
+test("notify: fireNotify carries a distinct, non-global tag per candidate WITHOUT synthesizing a sessionID (defect 2, review fix)", async () => {
   const notified = [];
   const fireNotify = async (args) => notified.push(args);
   const a = makeDedupeSug({ runSuggest: async () => ({ text: oneCandidateSuggestText("start-job", "A") }), fireNotify });
@@ -870,14 +870,18 @@ test("notify: fireNotify carries a distinct, non-global identifier per candidate
   await a.processFinding({ id: "rec:a", sourceKind: "failure-recurrence", text: "A", refs: [] }, { coldStart: false, tier: "medium" });
   await b.processFinding({ id: "rec:b", sourceKind: "failure-recurrence", text: "B", refs: [] }, { coldStart: false, tier: "medium" });
   assert.equal(notified.length, 2);
-  // push.mjs tags a session-less call `notify-${sessionID ?? "global"}` — a
-  // present, per-candidate sessionID is what keeps two unrelated CTO
-  // suggestions (and every other session-less AI `notify` call) from
-  // colliding on the shared "notify-global" tag.
-  assert.ok(notified[0].sessionID, "sessionID must be present — omission degrades to the shared notify-global tag");
-  assert.ok(notified[1].sessionID);
-  assert.notEqual(notified[0].sessionID, notified[1].sessionID);
-  assert.doesNotMatch(String(notified[0].sessionID), /^global$/);
+  // push.mjs's `tag` override (added for this fix) is the caller-supplied
+  // identifier — a present, per-candidate tag is what keeps two unrelated
+  // CTO suggestions (and every other session-less AI `notify` call) from
+  // colliding on the shared "notify-global" tag. `sessionID` is a real,
+  // load-bearing field that deep-links a phone tap — it must stay unset here,
+  // never synthesized just to influence the tag (that was the reviewer Block).
+  assert.ok(notified[0].tag, "tag must be present — omission degrades to the shared notify-global tag");
+  assert.ok(notified[1].tag);
+  assert.notEqual(notified[0].tag, notified[1].tag);
+  assert.doesNotMatch(String(notified[0].tag), /^global$/);
+  assert.equal(notified[0].sessionID, undefined);
+  assert.equal(notified[1].sessionID, undefined);
 });
 
 test("fireNotify is gated on the card write's isNew: a re-upserted (not new) card never re-pushes", async () => {
@@ -890,4 +894,57 @@ test("fireNotify is gated on the card write's isNew: a re-upserted (not new) car
   const r = await sug.processFinding({ id: "rec:re", sourceKind: "failure-recurrence", text: "again", refs: [] }, { coldStart: false, tier: "medium" });
   assert.equal(r.surfaced, 1); // the card write still counts as surfaced
   assert.equal(notified.length, 0); // but never re-pushes a not-new card
+});
+
+// ---------------------------------------------------------------------------
+// BET-1465 review, Block 1 — a gated or failed generation must NOT
+// permanently mark the finding used. The §3.3 ephemeral gate refuses by
+// RETURNING {ok:false}, not by throwing, so a budget-closed pass looked
+// exactly like "the generator ran and said zero candidates" before this fix.
+// ---------------------------------------------------------------------------
+
+test("a gated generation ({ok:false}) does not mark the finding used — it's reconsidered next pass", async () => {
+  let es = { suggest: { thresholds: { p_ask: 0.2, p_act: 0.95 } } };
+  const engineState = { load: async () => es, save: async (p) => { es = p; } };
+  let calls = 0;
+  const sug = makeDedupeSug({
+    engineState,
+    runSuggest: async () => {
+      calls += 1;
+      // §3.3 ephemeral gate refusal shape (index.mjs gatedSuggestionEphemeral)
+      return calls === 1 ? { ok: false, gated: true, error: "budget-closed" } : { text: oneCandidateSuggestText("start-job", "recovered") };
+    },
+    runWorthiness: async () => ({ text: "0.9" }),
+  });
+  const finding = { id: "rec:gated", sourceKind: "failure-recurrence", text: "x", refs: [] };
+  const r1 = await sug.processFinding(finding, { coldStart: false, tier: "medium" });
+  assert.equal(r1.surfaced, 0);
+  assert.equal(r1.silent, 0);
+  assert.ok(!(es.suggest?.usedKeys || []).includes("rec:gated"), "gated pass must not mark used");
+
+  const r2 = await sug.processFinding(finding, { coldStart: false, tier: "medium" });
+  assert.equal(calls, 2, "the generator ran again next pass — not permanently suppressed");
+  assert.equal(r2.surfaced, 1, "the finding is reconsidered and surfaces once budget frees up");
+});
+
+test("a throwing / unparseable generation does not mark the finding used", async () => {
+  let es = {};
+  const engineState = { load: async () => es, save: async (p) => { es = p; } };
+  const throwing = makeDedupeSug({ engineState, runSuggest: async () => { throw new Error("model timeout"); } });
+  await throwing.processFinding({ id: "rec:throws", sourceKind: "fact-anomaly", text: "x", refs: [] }, { coldStart: false, tier: "medium" });
+  assert.ok(!(es.suggest?.usedKeys || []).includes("rec:throws"));
+
+  let es2 = {};
+  const engineState2 = { load: async () => es2, save: async (p) => { es2 = p; } };
+  const garbage = makeDedupeSug({ engineState: engineState2, runSuggest: async () => ({ text: "not json at all" }) });
+  await garbage.processFinding({ id: "rec:garbage", sourceKind: "fact-anomaly", text: "x", refs: [] }, { coldStart: false, tier: "medium" });
+  assert.ok(!(es2.suggest?.usedKeys || []).includes("rec:garbage"));
+});
+
+test("a generator that legitimately returns zero candidates (valid empty JSON) IS marked used", async () => {
+  let es = {};
+  const engineState = { load: async () => es, save: async (p) => { es = p; } };
+  const sug = makeDedupeSug({ engineState, runSuggest: async () => ({ text: JSON.stringify({ candidates: [] }) }) });
+  await sug.processFinding({ id: "rec:empty", sourceKind: "fact-anomaly", text: "x", refs: [] }, { coldStart: false, tier: "medium" });
+  assert.ok((es.suggest?.usedKeys || []).includes("rec:empty"));
 });

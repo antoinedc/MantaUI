@@ -522,16 +522,28 @@ export function createCtoSuggest(deps = {}) {
     // already done": we cannot know a finding's candidate classes without
     // calling `runSuggest`, so a candidate-level check alone would still
     // re-pay that call every pass.
-    const { used } = await loadState();
+    // BET-1465 review (nit): loadState() is the single engine-state read for
+    // this finding — its `thresholds` feeds the same merge getThresholds()
+    // does, so we don't pay a second engine-state load per finding per pass.
+    const { used, thresholds: stateThresholds } = await loadState();
     if (used.includes(finding.id)) {
       return { finding: finding.id, surfaced: 0, silent: 0 };
     }
 
-    const th = await getThresholds();
+    const th = { ...(thresholds || {}), ...stateThresholds };
     const writeToolIds = await getWriteRingTools();
     const reliability = await senderReliability(finding);
 
+    // BET-1465 review (Block 1): the §3.3 ephemeral gate refuses by RETURNING
+    // `{ok:false, gated:true}`, not by throwing — so a budget-closed pass (or
+    // a transient model error / unparseable response) must NOT be treated as
+    // "the generator ran and legitimately said zero candidates". Only mark a
+    // finding used once we've confirmed the generator actually completed and
+    // returned parseable output; a gated/failed/unparseable pass falls
+    // through untouched so the finding is reconsidered next pass, exactly as
+    // it was before this dedupe existed.
     let candidates = [];
+    let generated = false;
     if (runSuggest) {
       try {
         const res = await runSuggest({
@@ -539,14 +551,29 @@ export function createCtoSuggest(deps = {}) {
           context: buildSuggestContext({ finding, writeToolIds, tier, capabilities }),
           deps: { validate: (out) => normalizeCandidates(parseSuggestionText(out?.text), finding.id).length >= 0 },
         });
-        candidates = normalizeCandidates(parseSuggestionText(res?.text), finding.id);
+        if (res?.ok === false) {
+          // Ephemeral rate/budget gate refused — the generator never ran.
+          generated = false;
+        } else {
+          const parsed = parseSuggestionText(res?.text);
+          if (parsed === null) {
+            // Ran, but returned unparseable output — a transient quality
+            // failure, not a legitimate "no suggestion" answer.
+            generated = false;
+          } else {
+            candidates = normalizeCandidates(parsed, finding.id);
+            generated = true;
+          }
+        }
       } catch {
-        candidates = [];
+        generated = false;
       }
     }
     if (!candidates.length) {
-      await ledgerAppend({ kind: "suggest.generated", findingId: finding.id, sourceKind: finding.sourceKind, candidates: 0 });
-      await markUsed([finding.id]);
+      if (generated) {
+        await ledgerAppend({ kind: "suggest.generated", findingId: finding.id, sourceKind: finding.sourceKind, candidates: 0 });
+        await markUsed([finding.id]);
+      }
       return { finding: finding.id, surfaced: 0, silent: 0 };
     }
 
@@ -693,21 +720,28 @@ export function createCtoSuggest(deps = {}) {
             title: "CTO suggestion",
             message: `Consider "${c.class}": ${c.finding.text}`,
             urgent: false,
-            // BET-1465 (defect 2): push.mjs tags a session-less `fireNotify`
-            // call `notify-${sessionID ?? "global"}` — every session-less AI
-            // `notify` tool call collides on the same "notify-global" tag and
-            // silently overwrites its predecessor in the notification shade.
-            // Passing a distinct, stable per-candidate identifier here drives
-            // that SAME (unchanged) tag formula to a per-candidate tag,
-            // without touching push.mjs's defaulting logic at all.
-            sessionID: `cto-suggest:${c.id}`,
+            // BET-1465 (defect 2, review fix): every session-less AI `notify`
+            // call previously collided on the SAME "notify-global" tag and
+            // silently overwrote its predecessor in the notification shade.
+            // `sessionID` is NOT a private tag input — it travels to the
+            // phone and the native app deep-links a tap to that session, so
+            // synthesizing one here (as the first cut of this fix did) opens
+            // a tap onto a session that doesn't exist. `tag` is the caller
+            // override push.mjs now exposes for exactly this case; sessionID
+            // stays unset, so a tap just opens the app, as it always did for
+            // a session-less notify.
+            tag: `cto-suggest:${c.id}`,
           });
         } catch {
           /* best-effort */
         }
       }
     }
-    await markUsed([finding.id, ...candidates.map((c) => c.id)]);
+    // BET-1465 review (Question 1): only `finding.id` is ever read back by the
+    // dedupe gate above — per-candidate keys were write-only and, at ~2
+    // candidates/finding, were eating the 200-entry cap ~3x faster than the
+    // cap implies. Persist only what's actually consulted.
+    await markUsed([finding.id]);
     return { finding: finding.id, surfaced, silent };
   }
 

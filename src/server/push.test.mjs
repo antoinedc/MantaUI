@@ -839,6 +839,33 @@ test("deferred: re-notify same tag supersedes (no stack)", async () => {
   _resetPushState();
 });
 
+// BET-1465 review (Block 2): a caller with no real session to attribute a
+// notify to (e.g. a background CTO suggestion) must be able to get a distinct
+// tag WITHOUT synthesizing a sessionID — sessionID travels to the phone and
+// deep-links a tap, so a fake one opens a session that doesn't exist.
+test("fireNotify: an explicit tag overrides the default; sessionId stays null when sessionID isn't passed", async () => {
+  _resetPushState();
+  const seen = [];
+  setDesktopSink((payload) => seen.push(payload));
+  setDesktopPresence({ idleSeconds: 5, lockedSeconds: null }); // present → desktop sink fires synchronously
+  await fireNotify({ message: "consider X", title: "CTO suggestion", tag: "cto-suggest:abc123" });
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].tag, "cto-suggest:abc123");
+  assert.equal(seen[0].sessionId, null); // never synthesized just to drive the tag
+  _resetPushState();
+});
+
+test("fireNotify: default tag formula is unchanged for callers that don't pass tag", async () => {
+  _resetPushState();
+  const seen = [];
+  setDesktopSink((payload) => seen.push(payload));
+  setDesktopPresence({ idleSeconds: 5, lockedSeconds: null });
+  await fireNotify({ message: "build done", sessionID: "ses_x" });
+  await fireNotify({ message: "build done" });
+  assert.deepEqual(seen.map((p) => p.tag), ["notify-ses_x", "notify-global"]);
+  _resetPushState();
+});
+
 // Counts mobile sends (each sendPush → one APNs fanout fetch). Installs the
 // fanout fakes and returns a counter, for the flush tests below.
 function withFanoutCount() {

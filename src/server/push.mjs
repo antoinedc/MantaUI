@@ -664,9 +664,18 @@ async function dispatchNotification(payload, now = Date.now()) {
  * via POST /api/notify. Session-tied: carries the originating sessionID so it
  * deep-links + dedupes like every other push.
  *
- * @param {{message:string, title?:string, urgent?:boolean, sessionID?:string}} args
+ * `sessionID` is a real, load-bearing field — it travels to the phone and the
+ * native app deep-links a tap to that session, so a caller must never pass a
+ * synthetic id just to influence the notification-shade tag (BET-1465 review:
+ * doing so opened a tap onto a session that doesn't exist). A caller with no
+ * real session to attribute the notify to (e.g. a background CTO suggestion)
+ * should instead pass an explicit `tag` — this OVERRIDES the tag only; the
+ * default `notify-${sessionID ?? "global"}` formula below is unchanged for
+ * every existing caller that doesn't pass one.
+ *
+ * @param {{message:string, title?:string, urgent?:boolean, sessionID?:string, tag?:string}} args
  */
-export async function fireNotify({ message, title, urgent, sessionID } = {}) {
+export async function fireNotify({ message, title, urgent, sessionID, tag } = {}) {
   const sid = typeof sessionID === "string" ? sessionID : null;
   const label = await resolveSessionLabel(sid);
   const payload = {
@@ -675,7 +684,7 @@ export async function fireNotify({ message, title, urgent, sessionID } = {}) {
     title: title || label || "Notification",
     body: typeof message === "string" ? message : "",
     sessionId: sid,
-    tag: `notify-${sid ?? "global"}`,
+    tag: typeof tag === "string" && tag ? tag : `notify-${sid ?? "global"}`,
   };
   await dispatchNotification(payload);
   return { ok: true };
