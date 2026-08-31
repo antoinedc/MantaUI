@@ -114,18 +114,42 @@ test("priceTokens prices via the model cost and a cache-heavy mix", () => {
 });
 
 test("expected hourly burn derives from trailing 7-day spend", () => {
-  // Spend $16.80 over 7 days → 16.80 / 168h = $0.10/h.
+  // Spend $16.80 over 7 days → 16.80 / 168h = $0.10/h — below the $2.50
+  // cap-equivalent pace, so the new floor wins (BET-1462 defect 1).
   let p = defaultBudgetPayload();
   for (let i = 0; i < 7; i++) {
     p = recordSpend(p, { now: MIDNIGHT + i * 86_400_000 + 1000, usd: 2.4 });
   }
   const burn = expectedHourlyBurnUsd(p, { now: MIDNIGHT + 6 * 86_400_000 + 2000, capUsd: 2.5 });
-  assert.ok(Math.abs(burn - 0.1) < 1e-9);
-  // Old spend ages out of the 7-day window: the day-7 bucket alone, /168h.
-  const onlyRecent = defaultBudgetPayload();
+  assert.ok(Math.abs(burn - 2.5 / 24) < 1e-9);
+  // Old spend ages out of the 7-day window: one active day → 1.68/24h = $0.07,
+  // again below the floor (BET-1462 defects 1+2).
   const p2 = recordSpend(defaultBudgetPayload(), { now: MIDNIGHT + 6 * 86_400_000 + 1000, usd: 1.68 });
   const burn2 = expectedHourlyBurnUsd(p2, { now: MIDNIGHT + 6 * 86_400_000 + 5000, capUsd: 2.5 });
-  assert.ok(Math.abs(burn2 - 1.68 / 168) < 1e-9);
+  assert.ok(Math.abs(burn2 - 2.5 / 24) < 1e-9);
+});
+
+test("BET-1462: expected burn floors at the cap-equivalent pace (incident numbers)", () => {
+  // 2026-08-31 incident: the box's 7-day ambient total was $0.00005173744. The
+  // old baseline ($0.00000031/hr, no floor) let today's $0.0000041/hr measured
+  // burn read as >4x and auto-pause the engine. With the floor, the same
+  // history yields the cap-equivalent pace.
+  const p = recordSpend(defaultBudgetPayload(), {
+    now: MIDNIGHT + 6 * 86_400_000 + 1000,
+    usd: 5.173744e-5,
+  });
+  const burn = expectedHourlyBurnUsd(p, { now: MIDNIGHT + 6 * 86_400_000 + 5000, capUsd: 2.5 });
+  assert.ok(Math.abs(burn - 2.5 / 24) < 1e-9);
+});
+
+test("BET-1462: a lone active day divides by 24h, not the blanket 168h", () => {
+  // A single $5 call inside an otherwise-empty trailing window: the active-day
+  // denominator (defect 2) measures $5/24 ≈ $0.2083 — above the $2.50 floor,
+  // so the division itself is observable (not 5/168 ≈ $0.0298).
+  const p = recordSpend(defaultBudgetPayload(), { now: MIDNIGHT + 6 * 86_400_000 + 1000, usd: 5 });
+  const burn = expectedHourlyBurnUsd(p, { now: MIDNIGHT + 6 * 86_400_000 + 5000, capUsd: 2.5 });
+  assert.ok(Math.abs(burn - 5 / 24) < 1e-9);
+  assert.ok(Math.abs(burn - 5 / 168) > 1e-9);
 });
 
 test("empty history falls back to the cap-equivalent pace (never 0)", () => {
@@ -137,6 +161,16 @@ test("spendPerHourNow measures today's burn vs hours elapsed", () => {
   const p = recordSpend(defaultBudgetPayload(), { now: NOON, usd: 1.2 }); // 12h into day
   assert.ok(Math.abs(spendPerHourNow(p, NOON) - 0.1) < 1e-9);
   assert.equal(spendPerHourNow(p, MIDNIGHT), 0); // 0 hours elapsed
+});
+
+test("BET-1462: spendPerHourNow never divides by a fraction of an hour", () => {
+  // 30 seconds past local midnight with $0.01 spent: the divisor is floored at
+  // 1 hour → $0.01/hr, not $0.01/0.0083h ≈ $1.20 (the 2026-08-31 trip shape).
+  const early = MIDNIGHT + 30_000;
+  const p = recordSpend(defaultBudgetPayload(), { now: early, usd: 0.01 });
+  const perHour = spendPerHourNow(p, early);
+  assert.ok(Math.abs(perHour - 0.01) < 1e-9);
+  assert.ok(Math.abs(perHour - 1.2) > 1e-9);
 });
 
 test("thrifty shed ladder: ordered shed vs the kept-to-last-token set", () => {
@@ -195,9 +229,9 @@ test("createCtoBudget records into an injected store and reports todayUsd/cap", 
   // A spend that crosses the cap is still recorded (it already happened);
   // the NEXT call gates. 
   // Expected burn + spend-per-hour derive from the same store. $2.50 today
-  // only (no older history) → $2.50 / 168h; the fresh-box fallback only fires
-  // when there is NO history at all.
-  assert.equal(await budget.expectedHourlyBurnUsd({ capUsd: 2.5 }), 2.5 / 168);
+  // only (one active day) → $2.50 / 24h, matching the cap-equivalent floor
+  // (BET-1462 defect 2 replaced the old blanket $2.50 / 168h).
+  assert.equal(await budget.expectedHourlyBurnUsd({ capUsd: 2.5 }), 2.5 / 24);
   assert.ok((await budget.spendPerHourUsd()) > 0);
 });
 

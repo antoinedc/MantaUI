@@ -212,37 +212,42 @@ export function overnightSpendUsd(rows, { now, modelCost = null } = {}) {
 // ---------------------------------------------------------------------------
 
 /**
- * The expected ambient $/hour, derived from the trailing 7-day ambient spend
- * (total / (7 × 24)). This is what the A2 watchdog compares the measured
- * per-hour burn against (>2× → auto-thrifty, >4× → auto-pause).
- *
- * Degenerate case: when the trailing 7-day history holds no spend (a fresh
- * box), we fall back to the cap-equivalent even pace (cap / 24) rather than 0 —
- * otherwise a box with no history would trip the watchdog instantly on its very
- * first ambient call.
+ * The expected ambient $/hour — the baseline the A2 watchdog compares the
+ * measured per-hour burn against (>2× → auto-thrifty, >4× → auto-pause).
+ * Derived from the trailing 7-day spend, divided by ACTIVE days only
+ * (day-buckets with non-zero spend, × 24) — a blanket 7×24 denominator crushed
+ * the baseline toward 0 on a box that spends on only a few days a week
+ * (BET-1462 defects 1–2). The result is floored at the cap-equivalent even
+ * pace (cap / 24): no history may push the baseline below what the box is
+ * configured to spend, or a tiny measured burn reads as a huge multiple and
+ * trips the watchdog (the 2026-08-31 auto-pause incident).
  */
 export function expectedHourlyBurnUsd(payload, { now, capUsd } = {}) {
   const t = typeof now === "number" && Number.isFinite(now) ? now : Date.now();
   const cap = dollar(capUsd);
   let total = 0;
+  let activeDays = 0;
   let sod = startOfDay(t);
   for (let i = 0; i < BURN_HISTORY_DAYS; i++) {
-    total += spendForDay(payload, String(sod));
+    const usd = spendForDay(payload, String(sod));
+    if (usd > 0) activeDays += 1;
+    total += usd;
     sod -= 24 * HOUR_MS;
   }
-  if (!(total > 0)) return cap / 24;
-  return dollar(total) / (BURN_HISTORY_DAYS * 24);
+  return Math.max(dollar(total) / (Math.max(1, activeDays) * 24), cap / 24);
 }
 
 /**
  * The measured ambient $/hour so far today — the watchdog's `getSpendPerHour`.
- * Returns 0 before the first hour of the day has elapsed.
+ * The divisor never drops below one hour: 30 seconds past local midnight a
+ * single $0.01 call measures $0.01/hr, not ~$1.20 (BET-1462 defect 3). At the
+ * exact midnight instant (0 hours elapsed) the reading is 0.
  */
 export function spendPerHourNow(payload, now) {
   const t = typeof now === "number" && Number.isFinite(now) ? now : Date.now();
   const h = hoursIntoLocalDay(t);
   if (h <= 0) return 0;
-  return todaySpend(payload, t) / h;
+  return todaySpend(payload, t) / Math.max(1, h);
 }
 
 // ---------------------------------------------------------------------------
