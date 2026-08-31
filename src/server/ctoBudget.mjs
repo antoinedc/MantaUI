@@ -794,6 +794,27 @@ export function createCtoBudget({
     const obs = hist[historyKey(provider, windowKind)] ?? [];
     const { series, historyDays, maxObserved } = buildSeries(obs, t);
 
+    // The windowed fold: one derivation shared by the store-mutex path and
+    // the degenerate fallback below (same inputs → same plan/quota shape).
+    const deriveWindowedQuota = (prevRow) => {
+      const activated = !!prevRow.activated || historyDays >= RESERVE_ACTIVATE_DAYS;
+      const foldedNow = foldQuotaState(prevRow, { capHits: capHitsSince, earnedCleanDays, activated });
+      const planNow = planReserve({ state: foldedNow, series, remainingPct, forecast });
+      const quotaNow = {
+        ...foldedNow,
+        provider,
+        mode: planNow.mode,
+        reserve: planNow.reserve,
+        spendable: planNow.spendableFrac,
+        maxObserved: planNow.maxObserved,
+        historyDays: planNow.historyDays,
+        remainingFrac: planNow.remainingFrac,
+        mape14: mapeFn({ series, tailDays: 14 }),
+        updatedMs: t,
+      };
+      return { prev: prevRow, folded: foldedNow, plan: planNow, quota: quotaNow };
+    };
+
     // BET-1464 defect 3: the fold derives from the provider's PREVIOUS quota
     // row read FRESH inside the store mutex — the old load-then-save shape
     // suspended inside load(), letting a concurrent spend row land and then
@@ -804,22 +825,7 @@ export function createCtoBudget({
     let folded = null;
     try {
       await patchBudget((payload) => {
-        prev = payload.quota?.[provider] ?? defaultQuotaState(provider);
-        const activated = !!prev.activated || historyDays >= RESERVE_ACTIVATE_DAYS;
-        folded = foldQuotaState(prev, { capHits: capHitsSince, earnedCleanDays, activated });
-        plan = planReserve({ state: folded, series, remainingPct, forecast });
-        quota = {
-          ...folded,
-          provider,
-          mode: plan.mode,
-          reserve: plan.reserve,
-          spendable: plan.spendableFrac,
-          maxObserved: plan.maxObserved,
-          historyDays: plan.historyDays,
-          remainingFrac: plan.remainingFrac,
-          mape14: mapeFn({ series, tailDays: 14 }),
-          updatedMs: t,
-        };
+        ({ prev, folded, plan, quota } = deriveWindowedQuota(payload.quota?.[provider] ?? defaultQuotaState(provider)));
         return { ...payload, quota: { ...payload.quota, [provider]: quota } };
       });
     } catch {
@@ -830,22 +836,7 @@ export function createCtoBudget({
       // from a plain read (no persistence attempt — same outcome as the old
       // caught save failure) so the caller still gets a plan.
       const payload = await load();
-      prev = payload.quota?.[provider] ?? defaultQuotaState(provider);
-      const activated = !!prev.activated || historyDays >= RESERVE_ACTIVATE_DAYS;
-      folded = foldQuotaState(prev, { capHits: capHitsSince, earnedCleanDays, activated });
-      plan = planReserve({ state: folded, series, remainingPct, forecast });
-      quota = {
-        ...folded,
-        provider,
-        mode: plan.mode,
-        reserve: plan.reserve,
-        spendable: plan.spendableFrac,
-        maxObserved: plan.maxObserved,
-        historyDays: plan.historyDays,
-        remainingFrac: plan.remainingFrac,
-        mape14: mapeFn({ series, tailDays: 14 }),
-        updatedMs: t,
-      };
+      ({ prev, folded, plan, quota } = deriveWindowedQuota(payload.quota?.[provider] ?? defaultQuotaState(provider)));
     }
     // §14.5 ledger rows: a fractile notch and a spendable-reserve line.
     if (folded.fractile !== (prev.fractile ?? FRACTILE_INIT)) {
