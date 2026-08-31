@@ -75,16 +75,20 @@ export const BlockerSection = memo(function BlockerSection({
 });
 
 // Minimal inline modal for the Answer-now "target missing" fallback (§10.3):
-// opens the matching ledger entry. The full ledger page ships with the settings
-// issue; until then the modal keeps the fallback branch honest without a dead
-// navigation target. Uses an inline backdrop color to avoid the dim-overlay
-// class owned by the Modal primitive (chrome-ownership rule).
+// opens the matching ledger entry. BET-1468 item 7: the full Activity-ledger
+// page has since shipped (`LedgerView`, reachable from Settings → Internals),
+// so the copy claiming it doesn't exist yet was stale, and Close was the
+// modal's only control — a dead end for a card whose whole point is routing
+// the user somewhere useful. Uses an inline backdrop color to avoid the
+// dim-overlay class owned by the Modal primitive (chrome-ownership rule).
 export const LedgerFallbackModal = memo(function LedgerFallbackModal({
   card,
   onClose,
+  onOpenLedger,
 }: {
   card: BlockerCard;
   onClose: () => void;
+  onOpenLedger: () => void;
 }) {
   return (
     <div
@@ -103,16 +107,22 @@ export const LedgerFallbackModal = memo(function LedgerFallbackModal({
         <p className="mt-1 text-sm text-text-muted">{card.body || "No additional detail."}</p>
         <p className="mt-2 text-xs text-text-faint">
           Ledger entry (source {card.sourceKind}
-          {card.sourceId ? ` ${card.sourceId}` : ""}) — the full ledger page
-          lands with the Settings issue.
+          {card.sourceId ? ` ${card.sourceId}` : ""}) — open the full Activity ledger to see it in context.
         </p>
-        <div className="mt-3 flex justify-end">
+        <div className="mt-3 flex justify-end gap-2">
           <button
             type="button"
             onClick={onClose}
             className="rounded-md px-2 py-1 text-sm text-text hover:bg-fill-hover"
           >
             Close
+          </button>
+          <button
+            type="button"
+            onClick={onOpenLedger}
+            className="rounded-md bg-accent px-2 py-1 text-sm font-medium text-text hover:opacity-90"
+          >
+            Open activity ledger
           </button>
         </div>
       </div>

@@ -14,6 +14,7 @@ import {
   digestTone,
   digestExpandable,
   resting,
+  mayShowResting,
   stateTone,
   nowCostLabel,
   nowRailMeta,
@@ -336,6 +337,21 @@ describe("resting (§10.6-1 Nothing needs you state)", () => {
   });
   it("null rails are treated as empty", () => {
     expect(resting({ cards: null, nowActive: null, finished: null, digestHasItems: false })).toBe(true);
+  });
+});
+
+describe("mayShowResting (BET-1468 item 1 — no false all-clear)", () => {
+  it("is false before the first load resolves, even if everything is empty", () => {
+    expect(mayShowResting({ loaded: false, loadError: false, isResting: true })).toBe(false);
+  });
+  it("is false when the load failed, even if the stale data is empty", () => {
+    expect(mayShowResting({ loaded: true, loadError: true, isResting: true })).toBe(false);
+  });
+  it("is false when loaded without error but not resting", () => {
+    expect(mayShowResting({ loaded: true, loadError: false, isResting: false })).toBe(false);
+  });
+  it("is true only once loaded, without error, and actually resting", () => {
+    expect(mayShowResting({ loaded: true, loadError: false, isResting: true })).toBe(true);
   });
 });
 

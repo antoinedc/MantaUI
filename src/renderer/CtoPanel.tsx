@@ -32,6 +32,7 @@ import {
   digestBusy,
   blockerTarget,
   resting,
+  mayShowResting,
   relativeTime,
   finishedVariant,
   formatEta,
@@ -152,6 +153,21 @@ export function CtoPanel({
   const [finished, setFinished] = useState<CtoFinishedItem[]>([]);
   const [ledgerCard, setLedgerCard] = useState<BlockerCard | null>(null);
   const [logsItem, setLogsItem] = useState<CtoFinishedItem | null>(null);
+  // BET-1468 item 1: the three overview reads used to end in `.catch(() =>
+  // {})` — an offline box / stale token left the lists empty with no signal,
+  // and `resting()` reads "everything empty" as "nothing needs you". Track
+  // whether the first load has resolved and whether it failed so the resting
+  // line can be gated on both (see `mayShowResting` in ctoView.ts).
+  const [overviewLoaded, setOverviewLoaded] = useState(false);
+  const [overviewLoadError, setOverviewLoadError] = useState<string | null>(null);
+  const reportOverviewError = useCallback(
+    (label: string) => (e: unknown) => {
+      const msg = e instanceof Error ? e.message : String(e);
+      setOverviewLoadError(msg);
+      pushToast({ id: `cto-overview-err-${Date.now()}`, message: `Couldn't refresh ${label}: ${msg}` });
+    },
+    [pushToast],
+  );
 
   // BET-1392: decision cards (§9.1) render in their own section; the Blocker
   // section keeps the ask/health cards only. The held (silent-log) list backs
@@ -205,17 +221,24 @@ export function CtoPanel({
     [projects],
   );
 
-  // Initial reads + regeneration-completion reload after a generation.
-  useEffect(() => {
-    void window.api?.ctoDigestGet?.()
+  // Initial reads (and the Retry button below, on failure).
+  const loadOverview = useCallback(() => {
+    setOverviewLoadError(null);
+    const p1 = window.api?.ctoDigestGet?.()
       .then((r) => setDigest(r.digest))
-      .catch(() => {});
-    void window.api?.ctoCardsGet?.()
+      .catch(reportOverviewError("the digest"));
+    const p2 = window.api?.ctoCardsGet?.()
       .then((r) => setCards(r.cards))
-      .catch(() => {});
-    void window.api?.ctoFinishedGet?.()
+      .catch(reportOverviewError("the blocker cards"));
+    const p3 = window.api?.ctoFinishedGet?.()
       .then((r) => setFinished(r.items))
-      .catch(() => {});
+      .catch(reportOverviewError("the finished rail"));
+    void Promise.all([p1, p2, p3]).finally(() => setOverviewLoaded(true));
+  }, [reportOverviewError]);
+
+  useEffect(() => {
+    loadOverview();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Reload the digest + finished rails when a generation completes, and the
@@ -225,19 +248,19 @@ export function CtoPanel({
     busyRef.current = busy;
     const generationSettled = prev && !busy;
     if (generationSettled) {
-      void window.api?.ctoDigestGet?.().then((r) => setDigest(r.digest)).catch(() => {});
-      void window.api?.ctoFinishedGet?.().then((r) => setFinished(r.items)).catch(() => {});
+      void window.api?.ctoDigestGet?.().then((r) => setDigest(r.digest)).catch(reportOverviewError("the digest"));
+      void window.api?.ctoFinishedGet?.().then((r) => setFinished(r.items)).catch(reportOverviewError("the finished rail"));
       setDidSettle(true);
     }
-  }, [busy]);
+  }, [busy, reportOverviewError]);
 
   useEffect(() => {
     if (typeof state?.needsYouCount === "number") {
       void window.api?.ctoCardsGet?.()
         .then((r) => setCards(r.cards))
-        .catch(() => {});
+        .catch(reportOverviewError("the blocker cards"));
     }
-  }, [state?.needsYouCount]);
+  }, [state?.needsYouCount, reportOverviewError]);
 
   // --- Now rail composition (§10.4) ---------------------------------------
   const nowCards = useMemo<NowCard[]>(() => {
@@ -330,8 +353,21 @@ export function CtoPanel({
   );
 
   const refreshCards = useCallback(() => {
-    void window.api?.ctoCardsGet?.().then((r) => setCards(r.cards)).catch(() => {});
-  }, []);
+    void window.api?.ctoCardsGet?.().then((r) => setCards(r.cards)).catch(reportOverviewError("the blocker cards"));
+  }, [reportOverviewError]);
+
+  // BET-1468 item 4: the §9.2/§9.3/§7.4 action handlers below each POST an
+  // action that either resolves `{ok:false}` (toasted by its own .then) OR
+  // REJECTS (an AuthRequiredError on a stale token, or a network failure —
+  // §401). An empty `.catch(() => {})` swallowed that second case: with a
+  // stale token every one of these controls did nothing and said nothing.
+  // One handler, every call site, instead of writing the same catch six times.
+  const catchActionError = useCallback(
+    (label: string) => (e: unknown) => {
+      pushToast({ id: `cto-act-err-${Date.now()}`, message: `Couldn't ${label}: ${e instanceof Error ? e.message : String(e)}` });
+    },
+    [pushToast],
+  );
 
   const handleSuggestionAction = useCallback(
     (card: DecisionCardRow, option: SuggestionOption) => {
@@ -339,7 +375,9 @@ export function CtoPanel({
         const r = await executeSuggestionOption({ option, api: suggestionApi });
         if (r.ok) {
           // acted-on = accept judgment through the B3 verdict route.
-          void window.api?.ctoVerdict?.({ subject: { type: "suggestion", id: card.id, class: option.action?.type }, verdict: "accept" }).catch(() => {});
+          void window.api
+            ?.ctoVerdict?.({ subject: { type: "suggestion", id: card.id, class: option.action?.type }, verdict: "accept" })
+            .catch(catchActionError("record the acceptance judgment"));
           pushToast({ id: `sugg-${Date.now()}`, message: `Applied: ${option.label}` });
           refreshCards();
         } else {
@@ -347,15 +385,25 @@ export function CtoPanel({
         }
       })();
     },
-    [suggestionApi, pushToast, refreshCards],
+    [suggestionApi, pushToast, refreshCards, catchActionError],
   );
 
+  // BET-1468 item 5: the verdict write was fire-and-forget with an empty
+  // catch, racing an un-awaited `refreshCards()` — a failed dismiss silently
+  // left the pipeline never learning the judgment, while the card visually
+  // vanished (refreshCards ran regardless). Chain it like every sibling
+  // action below: await, toast a failure, then refresh either way.
   const handleSuggestionDismiss = useCallback(
     (card: DecisionCardRow) => {
-      void window.api?.ctoVerdict?.({ subject: { type: "suggestion", id: card.id }, verdict: "dismiss" }).catch(() => {});
-      refreshCards();
+      void window.api
+        ?.ctoVerdict?.({ subject: { type: "suggestion", id: card.id }, verdict: "dismiss" })
+        .then((r) => {
+          if (!r?.ok) pushToast({ id: `sugg-dismiss-fail-${Date.now()}`, message: `Couldn't dismiss: ${r?.error ?? "unknown error"}` });
+        })
+        .catch(catchActionError("dismiss the suggestion"))
+        .finally(refreshCards);
     },
-    [refreshCards],
+    [refreshCards, pushToast, catchActionError],
   );
 
   // BET-1395 connect asks (§7.4): the three-way answer is a registry write
@@ -391,16 +439,22 @@ export function CtoPanel({
             pushToast({ id: `connect-fail-${Date.now()}`, message: `Couldn't record answer: ${r?.error ?? "unknown"}` });
           }
         })
-        .catch(() => {})
+        .catch(catchActionError("record the connect answer"))
         .finally(refreshCards);
     },
-    [pushToast, refreshCards],
+    [pushToast, refreshCards, catchActionError],
   );
 
   // BET-1419 tonight + veto actions (§9.2/§10.4). The veto card's Cancel
   // tonight is a veto VERDICT on the veto-window subject — the server route
   // performs the actual cancel (pause + close) before recording it. Run-now
   // and the drill-down edits go through the tonight verb route.
+  //
+  // BET-1468 item 6: a rejected fetch (stale token, offline box) used to wipe
+  // `tonightTasks`/`tonightWindowOpen` to empty here, so a genuinely queued
+  // plan flashed to "Nothing queued." while the box kept running it, and
+  // `tonightPinned` was left stale (contradicting the now-empty list). Keep
+  // whatever was last loaded and toast the failure instead of erasing it.
   const refreshTonight = useCallback(() => {
     setTonightLoading(true);
     void window.api
@@ -410,12 +464,9 @@ export function CtoPanel({
         setTonightPinned(Array.isArray(r.window?.pinnedOrder) && r.window.pinnedOrder.length > 0);
         setTonightWindowOpen(r.window?.state === "open");
       })
-      .catch(() => {
-        setTonightTasks([]);
-        setTonightWindowOpen(false);
-      })
+      .catch(catchActionError("refresh tonight's plan"))
       .finally(() => setTonightLoading(false));
-  }, []);
+  }, [catchActionError]);
 
   const handleVetoCancel = useCallback(
     (card: VetoCardRow) => {
@@ -427,10 +478,10 @@ export function CtoPanel({
         .then((r) => {
           if (!r?.ok) pushToast({ id: `veto-${Date.now()}`, message: `Couldn't cancel tonight: ${r?.error ?? "unknown"}` });
         })
-        .catch(() => {})
+        .catch(catchActionError("cancel tonight"))
         .finally(refreshCards);
     },
-    [pushToast, refreshCards],
+    [pushToast, refreshCards, catchActionError],
   );
 
   const handleVetoEditPlan = useCallback(() => {
@@ -446,10 +497,10 @@ export function CtoPanel({
           if (!r?.ok) pushToast({ id: `runnow-${Date.now()}`, message: `Couldn't start overnight now: ${r?.error ?? "unknown"}` });
           else pushToast({ id: `runnow-${Date.now()}`, message: "Overnight run starting" });
         })
-        .catch(() => {})
+        .catch(catchActionError("start overnight now"))
         .finally(refreshCards);
     },
-    [pushToast, refreshCards],
+    [pushToast, refreshCards, catchActionError],
   );
 
   const handleTonightToggle = useCallback(() => {
@@ -465,12 +516,12 @@ export function CtoPanel({
       .then((r) => {
         if (!r?.ok) pushToast({ id: `tonight-${Date.now()}`, message: `Couldn't cancel tonight: ${r?.error ?? "unknown"}` });
       })
-      .catch(() => {})
+      .catch(catchActionError("cancel the overnight plan"))
       .finally(() => {
         refreshCards();
         refreshTonight();
       });
-  }, [pushToast, refreshCards, refreshTonight]);
+  }, [pushToast, refreshCards, refreshTonight, catchActionError]);
 
   const handleTonightRemove = useCallback(
     (id: string) => {
@@ -479,10 +530,10 @@ export function CtoPanel({
         .then((r) => {
           if (!r?.ok) pushToast({ id: `tonight-${Date.now()}`, message: `Couldn't remove the task: ${r?.error ?? "unknown"}` });
         })
-        .catch(() => {})
+        .catch(catchActionError("remove the task"))
         .finally(refreshTonight);
     },
-    [pushToast, refreshTonight],
+    [pushToast, refreshTonight, catchActionError],
   );
 
   // Reorder via the up/down arrows — PINS the order for the current window
@@ -499,10 +550,10 @@ export function CtoPanel({
         .then((r) => {
           if (!r?.ok) pushToast({ id: `tonight-${Date.now()}`, message: `Couldn't reorder: ${r?.error ?? "unknown"}` });
         })
-        .catch(() => {})
+        .catch(catchActionError("reorder tasks"))
         .finally(refreshTonight);
     },
-    [tonightTasks, pushToast, refreshTonight],
+    [tonightTasks, pushToast, refreshTonight, catchActionError],
   );
 
   // Keep the veto countdown live between state events.
@@ -513,18 +564,33 @@ export function CtoPanel({
   }, []);
 
   // §14.3 silence audit: open / refresh the held list (from the digest aside).
+  // BET-1468 item 6: a failed load used to reset `heldRows` to `[]`, so the
+  // modal opened claiming "Nothing held back." right after the digest said
+  // otherwise. Keep whatever was last loaded (the Refresh button in the empty
+  // state covers retry) and toast the failure instead.
   const openHeld = useCallback(() => {
-    void window.api?.ctoHeldList?.().then((r) => setHeldRows(r.rows)).catch(() => setHeldRows([])).finally(() => setHeldOpen(true));
-  }, []);
+    void window.api?.ctoHeldList?.().then((r) => setHeldRows(r.rows)).catch(catchActionError("load held suggestions")).finally(() => setHeldOpen(true));
+  }, [catchActionError]);
+  // BET-1468 item 6: the row was removed from the list unconditionally even
+  // when the verdict POST failed (or threw on a stale token) — the user sees
+  // it accepted/dismissed while the pipeline never recorded the judgment.
+  // Only remove it once the server confirms the verdict landed.
   const handleHeldVerdict = useCallback(
     (row: CtoHeldRow, verdict: "accept" | "dismiss") => {
       void (async () => {
-        const r = await window.api?.ctoHeldVerdict?.({ id: row.id, verdict });
-        if (!r?.ok) pushToast({ id: `held-${Date.now()}`, message: `Couldn't ${verdict} held suggestion: ${r?.error ?? "unknown"}` });
-        setHeldRows((prev) => prev.filter((x) => x.id !== row.id));
+        try {
+          const r = await window.api?.ctoHeldVerdict?.({ id: row.id, verdict });
+          if (r?.ok) {
+            setHeldRows((prev) => prev.filter((x) => x.id !== row.id));
+          } else {
+            pushToast({ id: `held-${Date.now()}`, message: `Couldn't ${verdict} held suggestion: ${r?.error ?? "unknown"}` });
+          }
+        } catch (e) {
+          catchActionError(`${verdict} the held suggestion`)(e);
+        }
       })();
     },
-    [pushToast],
+    [pushToast, catchActionError],
   );
   // BET-1447: the digest "view evidence →" chip must always act (no dead
   // controls). Same decision table as the blackboard fact chips: jump to the
@@ -539,7 +605,10 @@ export function CtoPanel({
     pushToast({ id: `cto-ev-${ref}`, message: `Copied evidence ref: ${ref}` });
   };
   const handleItemOpen = (item: { id: string; text: string; refs?: string[] }) => {
-    void window.api?.ctoDigestOpened?.({ item: item.id, expand: false, digestId: digest?.id ?? null }).catch(() => {});
+    // Best-effort §14.1 ledger write — httpApi.ts documents this as
+    // non-critical to rendering. The visible action (jump/copy below) always
+    // happens regardless of whether this instrumentation call lands.
+    void window.api?.ctoDigestOpened?.({ item: item.id, expand: false, digestId: digest?.id ?? null }).catch(() => { /* non-critical, see httpApi.ts */ });
     const evidence = digestEvidenceAction(item.refs, knownSessions, item.id);
     if (evidence.kind === "jump") {
       onOpenSession(evidence.ref);
@@ -548,23 +617,30 @@ export function CtoPanel({
     }
   };
   const handleItemExpand = (item: { id: string }) => {
-    void window.api?.ctoDigestOpened?.({ item: item.id, expand: true, digestId: digest?.id ?? null }).catch(() => {});
+    // Same best-effort §14.1 write as handleItemOpen — expanding the item is
+    // the visible action here and already happened by the time this fires.
+    void window.api?.ctoDigestOpened?.({ item: item.id, expand: true, digestId: digest?.id ?? null }).catch(() => { /* non-critical, see httpApi.ts */ });
   };
 
   // --- resting gate (§10.6-1) ----------------------------------------------
+  // BET-1468 item 1: "Nothing needs you ✓" is a confident claim — it must
+  // never render before the first overview load resolves (empty state on
+  // open) or after that load failed (an offline box / stale token would
+  // otherwise read as a false all-clear). `mayShowResting` is the pure gate.
   const isResting = resting({
     cards,
     nowActive: nowCards,
     finished,
     digestHasItems: (digest?.items?.length ?? 0) > 0,
   });
+  const showResting = mayShowResting({ loaded: overviewLoaded, loadError: !!overviewLoadError, isResting });
 
   const restingRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (didSettle && isResting) {
+    if (didSettle && showResting) {
       restingRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
     }
-  }, [didSettle, isResting]);
+  }, [didSettle, showResting]);
 
   if (view === "settings") {
     return (
@@ -684,8 +760,10 @@ export function CtoPanel({
           ) : null}
         </div>
 
-        {/* Resting state (§10.6-1): only when every section is empty. */}
-        {isResting && (
+        {/* Resting state (§10.6-1): only when every section is empty AND the
+            overview actually loaded (never on open, never on a failed load —
+            see `mayShowResting`). */}
+        {showResting && (
           <div ref={restingRef} className="flex flex-col items-center gap-1 py-12">
             <div className="text-text-muted">
               Nothing needs you <span aria-hidden>✓</span>
@@ -695,9 +773,33 @@ export function CtoPanel({
             </div>
           </div>
         )}
+
+        {/* BET-1468 item 1: a failed overview load must say so, not render
+            an empty resting state that reads as a false all-clear. */}
+        {overviewLoadError && (
+          <div className="flex flex-col items-center gap-1 py-12">
+            <div className="text-sm text-text-muted">Couldn&rsquo;t load the CTO overview: {overviewLoadError}</div>
+            <button
+              type="button"
+              onClick={loadOverview}
+              className="text-sm text-accent underline hover:text-accent-strong"
+            >
+              Retry
+            </button>
+          </div>
+        )}
       </div>
 
-      {ledgerCard && <LedgerFallbackModal card={ledgerCard} onClose={() => setLedgerCard(null)} />}
+      {ledgerCard && (
+        <LedgerFallbackModal
+          card={ledgerCard}
+          onClose={() => setLedgerCard(null)}
+          onOpenLedger={() => {
+            setLedgerCard(null);
+            setView("ledger");
+          }}
+        />
+      )}
       {logsItem && logsItem.kind === "job" && (
         <JobLogsModal
           name={logsItem.name}
