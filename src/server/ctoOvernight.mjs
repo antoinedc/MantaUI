@@ -149,9 +149,26 @@ export function normalizeWindow(prev) {
     // explicit consent after a cancel). It expires naturally when the next
     // trough has a different startMs, so a veto never suppresses tomorrow.
     vetoedTroughStartMs: finiteOrNull(w.vetoedTroughStartMs),
+    // BET-1466: the trough start whose zero-candidates night was already
+    // reported to the ledger. Same expiry as the veto stamp — a long trough
+    // produces one `no-candidates` row, not one per tick.
+    lastNoCandidatesTroughStartMs: finiteOrNull(w.lastNoCandidatesTroughStartMs),
     countdown,
     lastEvaluatedMs: finiteOrNull(w.lastEvaluatedMs),
   };
+}
+
+// BET-1466: do the two normalized window states differ beyond the per-tick
+// evaluation bookkeeping? `lastEvaluatedMs` is bumped by every evaluation by
+// definition, so it alone never justifies persisting. Both sides go through
+// normalizeWindow (same literal key order → stable stringify) so a raw
+// persisted window compares equal to its normalized re-computation.
+function windowChanges(prev, next) {
+  const a = { ...normalizeWindow(prev) };
+  const b = { ...normalizeWindow(next) };
+  delete a.lastEvaluatedMs;
+  delete b.lastEvaluatedMs;
+  return JSON.stringify(a) !== JSON.stringify(b);
 }
 
 export function defaultWindow() {
@@ -282,9 +299,18 @@ export function evaluateWindow(prev, input) {
 
   if (zeroCandidates) {
     // §11.4: a night with zero candidates opens no window at all — not even
-    // on run-now (there is nothing to run).
+    // on run-now (there is nothing to run). BET-1466: the row is stamped with
+    // the trough it describes — emit only when this trough has not been
+    // reported yet, so a long trough yields one row instead of one per tick.
     if (inTrough && (signal || runNow)) {
-      rows.push(ledgerRow("cto.overnight.no-candidates", now, { reason: "zero candidates; no window" }));
+      const troughStart = finiteOrNull(trough?.startMs);
+      if (troughStart !== null && troughStart !== w.lastNoCandidatesTroughStartMs) {
+        rows.push(ledgerRow("cto.overnight.no-candidates", now, { reason: "zero candidates; no window" }));
+        return {
+          window: normalizeWindow({ ...w, countdown, lastNoCandidatesTroughStartMs: troughStart, lastEvaluatedMs: now }),
+          ledgerRows: rows,
+        };
+      }
     }
     return { window: normalizeWindow({ ...w, countdown, lastEvaluatedMs: now }), ledgerRows: rows };
   }
@@ -840,7 +866,15 @@ export function createOvernightScheduler({ store = defaultOvernightStore(), now 
         plan = selectPortfolio(ranked, { budgetFrac, pinnedOrder: window.pinnedOrder });
       }
 
-      await store.save({ ...payload, window }).catch(() => {});
+      // BET-1466: `lastEvaluatedMs` changes on every tick by definition, so
+      // it never justifies a save. When nothing else in the window state
+      // moved (the common idle trough tick), skip the write entirely — but
+      // the very first persist still lays the row down: a persisted window
+      // (even a closed, empty one) is the machine's liveness marker that
+      // readWindow consumers (e.g. the veto card) key on.
+      if (prevWindow == null || windowChanges(prevWindow, window)) {
+        await store.save({ ...payload, window }).catch(() => {});
+      }
       await ledgerAppend(ledgerRows);
       return { window, plan, ledgerRows };
     },

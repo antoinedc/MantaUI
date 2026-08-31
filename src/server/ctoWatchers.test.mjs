@@ -30,8 +30,10 @@ import {
   extractRecurringThemes,
   watcherHitPayload,
   collectWatcherHitsFromLedger,
+  pruneRetiredWatchers,
   createStandingQueryEngine,
 } from "./ctoWatchers.mjs";
+import { RETENTION_MS } from "./ctoStores.mjs";
 import { NOTIFY_RECURRENCE_KINDS, collectFindings } from "./ctoSuggest.mjs";
 
 function makeEngineDeps(overrides = {}) {
@@ -204,6 +206,83 @@ test("retireWatchers retires inactive watchers and archived signatures", () => {
   assert.deepEqual(retired.map((r) => r.id).sort(), ["w1", "w3"]);
   assert.equal(retired.find((r) => r.id === "w3").reason, "archived");
   assert.equal(next.find((w) => w.id === "w1").retired, true);
+});
+
+// BET-1466 item 1: retired rows used to accumulate forever — the tick now
+// drops them past the day-rollup retention bound.
+test("pruneRetiredWatchers drops retired rows past the day-rollup retention, keeps the rest", () => {
+  const nowMs = 3_000_000_000_000;
+  const retention = RETENTION_MS["rollups/day"];
+  const list = [
+    { id: "old", retired: true, retiredAt: nowMs - retention - 1, patternSignature: "s-old" },
+    { id: "edge", retired: true, retiredAt: nowMs - retention, patternSignature: "s-edge" }, // exactly at the bound → kept
+    { id: "fresh", retired: true, retiredAt: nowMs - 1_000, patternSignature: "s-fresh" },
+    { id: "active", retired: false, patternSignature: "s-live" },
+    { id: "no-ts", retired: true, patternSignature: "s-nots" }, // malformed — defensive keep
+  ];
+  const { next, dropped } = pruneRetiredWatchers(list, { nowMs });
+  assert.deepEqual(next.map((w) => w.id).sort(), ["active", "edge", "fresh", "no-ts"]);
+  assert.deepEqual(dropped, [{ id: "old", patternSignature: "s-old" }]);
+});
+
+test("runTick drops retired rows past the retention bound from the store (BET-1466 item 1)", async () => {
+  const state = { watchers: [] };
+  const deps = makeEngineDeps({
+    store: {
+      load: async () => state,
+      save: async (p) => {
+        state.watchers = p.watchers;
+      },
+    },
+  });
+  const eng = createStandingQueryEngine(deps);
+  await eng.register({ predicate: { kind: EVENT_PATTERN, params: { pattern: "boom" } } });
+  await eng.register({ predicate: { kind: EVENT_PATTERN, params: { pattern: "calm" } } });
+  const retention = RETENTION_MS["rollups/day"];
+  const t = 3_000_000_000_000;
+  // Age one watcher's retirement past the bound and leave the other fresh.
+  state.watchers[0].retired = true;
+  state.watchers[0].retiredAt = t - retention - 1;
+  state.watchers[1].retired = true;
+  state.watchers[1].retiredAt = t - 1_000;
+  // A later tick (far future) runs the same retirement+prune pass.
+  const agedEng = createStandingQueryEngine({ ...deps, now: () => t });
+  await agedEng.runTick();
+  // Only the fresh-retired row survives; the past-bound one is gone.
+  assert.equal(state.watchers.length, 1);
+  assert.equal(state.watchers[0].retired, true);
+  assert.equal(state.watchers[0].retiredAt, t - 1_000);
+  // Idempotent: a second tick drops nothing further.
+  await agedEng.runTick();
+  assert.equal(state.watchers.length, 1);
+});
+
+test("engine list reads are fresh but per-event evaluation reads the file once per burst (BET-1466 item 1b)", async () => {
+  let loads = 0;
+  const deps = makeEngineDeps();
+  deps.store = {
+    load: async () => {
+      loads += 1;
+      return { watchers: deps.savedWatchers ?? [] };
+    },
+    save: async (p) => {
+      deps.savedWatchers = p.watchers;
+    },
+  };
+  const eng = createStandingQueryEngine(deps);
+  await eng.register({ predicate: { kind: EVENT_PATTERN, params: { pattern: "boom" } } });
+  const loadsAfterRegister = loads;
+  // A burst of evidence events: one file read total (the cache from the burst's
+  // first evaluation is reused; the register's own write refreshed it).
+  await eng.evaluateEvent({ text: "nothing", kind: "prompt" });
+  await eng.evaluateEvent({ text: "still nothing", kind: "prompt" });
+  await eng.evaluateEvent({ text: "quiet", kind: "tool" });
+  assert.equal(loads, loadsAfterRegister, "the burst reuses one read; no per-event file reads");
+  assert.equal(deps.ledgerRows.filter((r) => r.kind === "watcher.hit").length, 0);
+  // list() stays a fresh read (user-facing surface).
+  const list = await eng.list();
+  assert.equal(list.length, 1);
+  assert.equal(loads > loadsAfterRegister, true);
 });
 
 // ---------------------------------------------------------------------------

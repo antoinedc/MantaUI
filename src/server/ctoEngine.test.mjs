@@ -884,3 +884,79 @@ test("isRunningCtoRow: single shared definition of a running CTO job row (BET-14
   assert.equal(isRunningCtoRow(undefined), false);
   assert.equal(isRunningCtoRow("cto/running"), false);
 });
+
+// ---------------------------------------------------------------------------
+// BET-1466 stage-3A
+// ---------------------------------------------------------------------------
+
+test("overnightTick reads the ledger with a 24h lower bound instead of the whole file (BET-1466 item 3)", async () => {
+  const readCalls = [];
+  const engine = createCtoEngine({
+    configGet: async () => ({ ctoEnabled: true, ctoOvernight: true }),
+    ledger: {
+      append: async () => {},
+      read: async (opts) => {
+        readCalls.push(opts ?? null);
+        return [];
+      },
+    },
+    engineState: {
+      load: async () => ({}),
+      save: async () => {},
+    },
+    killSwitch: { isPaused: async () => false, pause: async () => {}, resume: async () => {} },
+    tierGet: async () => "high",
+    overnight: { tick: async () => ({ window: null, ledgerRows: [] }) },
+    now: () => 5_000_000_000_000,
+  });
+  await engine.tick();
+  assert.equal(readCalls.length >= 1, true, "the overnight tick read the ledger");
+  const HOUR = 3_600_000;
+  for (const opts of readCalls) {
+    assert.ok(opts && typeof opts === "object", "read() is called with an options object");
+    assert.equal(opts.from, 5_000_000_000_000 - 24 * HOUR, "the read is bounded to the last 24h");
+  }
+});
+
+test("dispose unregisters the verdict counter sinks (BET-1466 item 7)", async () => {
+  let esState = {};
+  let verdictsState = { entries: [] };
+  const engine = createCtoEngine({
+    configGet: async () => ({ ctoEnabled: true }),
+    ledger: { append: async () => {} },
+    engineState: {
+      load: async () => esState,
+      save: async (p) => {
+        esState = p;
+      },
+    },
+    killSwitch: { isPaused: async () => false, pause: async () => {}, resume: async () => {} },
+    verdicts: {
+      load: async () => verdictsState,
+      save: async (p) => {
+        verdictsState = p;
+      },
+    },
+    now: () => 5_000_000_000_000,
+  });
+  const res = await engine.recordVerdict({ subject: { type: "fact", id: "f1", sender: "user" }, verdict: "accept" });
+  assert.equal(res.ok, true, "the verdict itself records");
+  // The sink folds asynchronously (best-effort void promise) — let it land.
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  const before = esState.factReliability?.user?.confirmed ?? 0;
+  assert.ok(before >= 1, "the sink folded the verdict into sender reliability");
+  engine.dispose();
+  await engine.recordVerdict({ subject: { type: "fact", id: "f2", sender: "user" }, verdict: "accept" });
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  const after = esState.factReliability?.user?.confirmed ?? 0;
+  assert.equal(after, before, "a post-dispose verdict no longer folds into reliability");
+});
+
+test("the engine surface declares get cards() exactly once (BET-1466 item 7: duplicate key deleted)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("./ctoEngine.mjs", import.meta.url), "utf8");
+  const count = src.split("get cards()").length - 1;
+  assert.equal(count, 1, "a duplicated object-literal key silently shadows its twin");
+});

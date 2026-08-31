@@ -997,34 +997,41 @@ export function createCtoEngine(deps = {}) {
   }
 
   // BET-1391 verdict ledger (§9.5): lazy single instance over the injectable
-  // verdicts store. The facts counter-sink is registered ONCE at construction
+  // verdicts store. The counter sinks are registered ONCE at construction
   // so every recorded verdict routes its §9.5 effects to the sender-reliability
-  // counters (B1) — and is removed by the engine's dispose below.
+  // counters (B1) and friends — and are unregistered by the engine's dispose
+  // below (BET-1466: the claim used to be false, the sinks kept firing after
+  // dispose against disposed engine state).
+  let verdictSinkDisposers = [];
   function getVerdictsEngine() {
     if (verdictsEngine) return verdictsEngine;
     verdictsEngine = createVerdictEngine({ verdicts, now });
-    verdictsEngine.registerCounterSink(factsCounterSink);
-    verdictsEngine.registerCounterSink(tonightCounterSink);
+    verdictSinkDisposers.push(verdictsEngine.registerCounterSink(factsCounterSink));
+    verdictSinkDisposers.push(verdictsEngine.registerCounterSink(tonightCounterSink));
     // BET-1404 (§9.5): tool-as-source verdicts fold into the tool registry's
     // as_source counters — the decay chain's input data. Late-bound registry
     // handle: the tool registry is constructed lazily and the sink fires
     // after any verdict, so resolve getTools() at fold time. Best-effort
     // like every sink.
-    verdictsEngine.registerCounterSink(
-      createAsSourceSink({
-        registry: {
-          applyAsSource: (toolId, effects) => getTools().applyAsSource(toolId, effects),
-        },
-      }),
+    verdictSinkDisposers.push(
+      verdictsEngine.registerCounterSink(
+        createAsSourceSink({
+          registry: {
+            applyAsSource: (toolId, effects) => getTools().applyAsSource(toolId, effects),
+          },
+        }),
+      ),
     );
     // BET-1403 (§9.4): the trust counters ride the same §9.5 sink registry —
     // per-action-class Beta counters over class-attributed suggestion
     // verdicts. Best-effort like every sink: a failure never breaks verdict
     // recording.
     const t = getTrust();
-    verdictsEngine.registerCounterSink((effects, entry) => {
-      void t.noteVerdictEffects(effects, entry).catch(() => {});
-    });
+    verdictSinkDisposers.push(
+      verdictsEngine.registerCounterSink((effects, entry) => {
+        void t.noteVerdictEffects(effects, entry).catch(() => {});
+      }),
+    );
     return verdictsEngine;
   }
 
@@ -1640,15 +1647,15 @@ export function createCtoEngine(deps = {}) {
     const trough = typeof profile?.getQuietTrough === "function" ? profile.getQuietTrough() : null;
     const runNow = pendingRunNow;
     pendingRunNow = false;
-    let ledgerRowsAll = [];
+    let recentLedger = [];
     try {
-      ledgerRowsAll = (await ledger.read()) ?? [];
+      // BET-1466: every consumer below looks at the last 24h at most (the
+      // watcher candidates; dispatchPlan at rows since the window opened) —
+      // request the bounded range instead of reading the whole ledger file.
+      recentLedger = (await ledger.read({ from: t - 24 * HOUR_MS })) ?? [];
     } catch {
-      ledgerRowsAll = [];
+      recentLedger = [];
     }
-    const recentLedger = ledgerRowsAll.filter(
-      (r) => typeof r?.ts !== "number" || r.ts >= t - 24 * HOUR_MS,
-    );
     const candidates = [
       ...queueCandidatesFromRows(await tonightQueueRows()),
       ...watcherCandidatesFromRows(recentLedger),
@@ -1700,7 +1707,7 @@ export function createCtoEngine(deps = {}) {
         plan: out.plan,
         trough,
         projects,
-        ledgerRows: ledgerRowsAll,
+        ledgerRows: recentLedger,
         windowOpenedMs: win.openedMs,
       }).catch(() => {});
     }
@@ -2243,6 +2250,16 @@ export function createCtoEngine(deps = {}) {
     disposed = true;
     stopTimers();
     stopCardTimer();
+    // BET-1466: drop the verdict counter sinks (registered lazily by
+    // getVerdictsEngine). Without this a post-dispose verdict still folds
+    // effects into this engine's reliability/registry state.
+    for (const d of verdictSinkDisposers.splice(0)) {
+      try {
+        d();
+      } catch {
+        /* best-effort */
+      }
+    }
   }
 
   async function getState() {
@@ -2483,9 +2500,6 @@ export function createCtoEngine(deps = {}) {
       return getTools();
     },
     toolsScan: () => toolsTick(),
-    get cards() {
-      return cards;
-    },
     // BET-1419 tonight verbs (§10.4 drill-down + §9.2 veto card actions).
     tonightList,
     tonightAdd,

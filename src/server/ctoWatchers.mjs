@@ -38,7 +38,7 @@
 // without a hit, or when the underlying fact/pattern is archived.
 
 import { randomBytes } from "node:crypto";
-import { patchEngineState, patchStore } from "./ctoStores.mjs";
+import { RETENTION_MS, patchEngineState, patchStore } from "./ctoStores.mjs";
 
 // Closed set of predicate kinds (spec §13.4). Adding a kind is a spec change.
 export const PREDICATE_KINDS = Object.freeze(["event-pattern", "rate-threshold", "usage-burn"]);
@@ -278,6 +278,31 @@ export function retireWatchers(watchers, { nowMs = Date.now(), inactiveAfterMs =
   return { next, retired };
 }
 
+// BET-1466: bound the growth of retired rows. `retireWatchers` only ever ADDS
+// the flag — nothing removed a retired entry, so they accumulated forever. The
+// bound reuses the day-rollup retention (ctoStores RETENTION_MS): the
+// auto-create source a resurfacing theme would re-arm from is itself retained
+// only that long, so a retired row kept past it is dead weight. Returns the
+// kept list plus what was dropped, so the caller saves only on a real change.
+export function pruneRetiredWatchers(watchers, { nowMs = Date.now(), retentionMs = RETENTION_MS["rollups/day"] } = {}) {
+  const next = [];
+  const dropped = [];
+  const cutoff = nowMs - retentionMs;
+  for (const w of Array.isArray(watchers) ? watchers : []) {
+    if (
+      w &&
+      w.retired === true &&
+      typeof w.retiredAt === "number" &&
+      w.retiredAt < cutoff
+    ) {
+      dropped.push({ id: w.id, patternSignature: w.patternSignature });
+      continue;
+    }
+    next.push(w);
+  }
+  return { next, dropped };
+}
+
 // ---------------------------------------------------------------------------
 // Migration from the legacy poller store (cto.json) — idempotent
 // ---------------------------------------------------------------------------
@@ -487,14 +512,22 @@ export function createStandingQueryEngine(deps = {}) {
   const windowHits = new Map();
   // watcherId -> last usage-burn hit ts (so burn doesn't re-fire every tick).
   const lastBurnHit = new Map();
+  // BET-1466: the watchers list, read once and reused across the burst of
+  // evidence events that follow. evaluateEvent runs per ledger row (one
+  // fire-and-forget call each) and used to re-read the whole file for every
+  // event; the list only changes through this engine's own writes, so the
+  // cache is refreshed directly from each patch and starts null per instance.
+  let listCache = null;
 
   async function loadAll() {
+    if (listCache) return listCache;
     try {
       const payload = await store.load();
-      return Array.isArray(payload?.watchers) ? payload.watchers : [];
+      listCache = Array.isArray(payload?.watchers) ? payload.watchers : [];
     } catch {
-      return [];
+      listCache = [];
     }
+    return listCache;
   }
 
   // BET-1464 defect 3: every watchers.json write routes through patchStore —
@@ -502,13 +535,18 @@ export function createStandingQueryEngine(deps = {}) {
   // derived from a stale snapshot (a hit's accounting, a tick's retirement,
   // a registration) can no longer erase a concurrent writer's row. The
   // mutator derives its next list from the FRESH payload and returns an
-  // empty patch to mean "no change, no save".
+  // empty patch to mean "no change, no save". The post-patch hook keeps the
+  // list cache coherent: whatever the store now holds is the list future
+  // evaluations match against.
   function patchWatchers(mutate) {
     return patchStore(store, (fresh) => {
       const all = Array.isArray(fresh?.watchers) ? fresh.watchers : [];
       const patch = mutate(all);
       if (!patch) return {};
       return { watchers: patch };
+    }).then((saved) => {
+      if (saved && Array.isArray(saved?.watchers)) listCache = saved.watchers;
+      return saved;
     });
   }
 
@@ -610,11 +648,15 @@ export function createStandingQueryEngine(deps = {}) {
     }
     // Retirement is cheap to run here too (once per tick). Under the store
     // mutex from the FRESH list (BET-1464 defect 3) — the `all` snapshot read
-    // at tick start may already be stale by the time retirement lands.
+    // at tick start may already be stale by the time retirement lands. The
+    // same pass drops retired rows older than the retention bound (BET-1466:
+    // `retireWatchers` only ever adds the flag, so retired rows used to
+    // accumulate forever).
     try {
       await patchWatchers((freshAll) => {
         const { next, retired } = retireWatchers(freshAll, { nowMs: t, archivedSignatures });
-        return retired.length > 0 ? next : null;
+        const { next: pruned, dropped } = pruneRetiredWatchers(next, { nowMs: t });
+        return retired.length > 0 || dropped.length > 0 ? pruned : null;
       });
     } catch {
       /* best-effort */
@@ -664,7 +706,16 @@ export function createStandingQueryEngine(deps = {}) {
   }
 
   async function list() {
-    return (await loadAll()).map((w) => ({
+    // The user-facing read: always fresh (rare, and its freshness is the
+    // point) — the cache exists for the per-event evaluation burst only.
+    let all = [];
+    try {
+      const payload = await store.load();
+      all = Array.isArray(payload?.watchers) ? payload.watchers : [];
+    } catch {
+      all = [];
+    }
+    return all.map((w) => ({
       id: w.id,
       patternSignature: w.patternSignature,
       predicate: w.predicate,

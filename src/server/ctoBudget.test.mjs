@@ -747,13 +747,12 @@ test("roiSnapshot: collectingUntil is the first month's end from the day buckets
   assert.equal(snap.collectingUntil, monthWindow(JUL_KEY).endTs);
 });
 
-test("pending rows past the retention horizon are dropped", async () => {
+test("pending rows past the retention horizon are dropped — counted AND never-merged (BET-1466 item 5)", async () => {
   let payload = defaultBudgetPayload();
   const store = { load: async () => payload, save: async (p) => (payload = p) };
   // A stateful jobs reader: the job exists only on the first refresh (the
   // jobs store sweeps terminal records after 7 days — long before the 60d
-  // pending-retention horizon drops a counted row, so a counted job can
-  // never be re-sampled in reality).
+  // pending-retention horizon, so a dropped row is never re-sampled).
   let jobsVisible = true;
   const budget = createCtoBudget({
     store,
@@ -770,11 +769,59 @@ test("pending rows past the retention horizon are dropped", async () => {
   });
   await budget.refreshRoi();
   await budget.refreshRoi();
-  assert.equal(payload.roi.pending.length, 1); // uncounted row is kept for later probes
-  payload.roi.pending[0].counted = true;
-  await store.save(payload);
+  // BET-1466: the uncounted (never-merged) row is the one that used to
+  // accumulate forever — it now ages out at the horizon like counted rows.
+  assert.equal(payload.roi.pending.length, 0);
+});
+
+test("pending retention keeps fresh probe-pending rows and counted fingerprints (BET-1466 item 5)", async () => {
+  let payload = defaultBudgetPayload();
+  payload.roi = {
+    months: {},
+    pending: [
+      { id: "fresh", counted: false, finishedAt: MIDNIGHT - 1_000 }, // probe-pending → kept
+      { id: "staleUncounted", counted: false, finishedAt: MIDNIGHT - ROI_PENDING_RETENTION_MS - 1 }, // aged out (was kept forever)
+      { id: "staleCounted", counted: true, finishedAt: MIDNIGHT - ROI_PENDING_RETENTION_MS - 1 }, // aged out (as before)
+      { id: "countedNoFinish", counted: true, finishedAt: null }, // counted fingerprint without a ts → kept
+    ],
+  };
+  const store = { load: async () => payload, save: async (p) => (payload = p) };
+  const budget = createCtoBudget({
+    store,
+    jobsRead: async () => [],
+    gitProbe: async () => ({ exists: true, isAncestor: false }),
+    discoverJobPr: async () => null, // forge: definitively no PR
+    ledgerRead: async () => [],
+    verdictsRead: async () => [],
+    segmentsRead: async () => [],
+    now: () => MIDNIGHT,
+  });
   await budget.refreshRoi();
-  assert.equal(payload.roi.pending.length, 0); // counted stale row swept
+  const ids = payload.roi.pending.map((j) => j.id).sort();
+  assert.deepEqual(ids, ["countedNoFinish", "fresh"]);
+});
+
+// BET-1466 item 4: budget.json is not covered by the store sweep — the spend
+// recorder itself now bounds day-bucket and ROI-month growth.
+test("recordSpend prunes day buckets beyond the burn history and ROI months beyond the horizon", () => {
+  const DAY = 86_400_000;
+  let p = defaultBudgetPayload();
+  p.days[dayKey(MIDNIGHT - 10 * DAY)] = { usd: 9, calls: 9 }; // outside the 7-day burn history
+  p.days[dayKey(MIDNIGHT - 6 * DAY)] = { usd: 1, calls: 1 }; // the oldest in-window day → kept
+  p.roi = {
+    months: {
+      [roiMonthKey(MIDNIGHT - 100 * DAY)]: { merged: 3 }, // past the 60d ROI horizon
+      [roiMonthKey(MIDNIGHT - 40 * DAY)]: { merged: 1 }, // recent → kept
+    },
+    pending: [],
+  };
+  const out = recordSpend(p, { now: MIDNIGHT + 60_000, usd: 0.25 });
+  assert.equal(out.days[dayKey(MIDNIGHT - 10 * DAY)], undefined, "a bucket older than the burn window is dropped");
+  assert.equal(out.days[dayKey(MIDNIGHT - 6 * DAY)].usd, 1, "the oldest in-window bucket survives");
+  assert.equal(out.days[dayKey(MIDNIGHT + 60_000)].usd, 0.25, "today's bucket is written");
+  assert.equal(out.roi.months[roiMonthKey(MIDNIGHT - 100 * DAY)], undefined, "an ROI month past the horizon is dropped");
+  assert.equal(out.roi.months[roiMonthKey(MIDNIGHT - 40 * DAY)].merged, 1, "a recent ROI month survives");
+  assert.equal(out.roi.pending.length, 0, "pending rides along untouched");
 });
 
 test("overnightSpendUsd prices today's job_started estTokens at the model cost (§11.2)", () => {

@@ -140,6 +140,44 @@ test("zero candidates → no window at all (§11.4 graceful-empty), even on run-
   }
 });
 
+// BET-1466 item 2: the no-candidates row is stamped with its trough (one row
+// per trough, not one per tick) and an unchanged window state is not re-saved.
+test("no-candidates row emits once per trough; idle trough ticks skip the save", async () => {
+  let saves = 0;
+  let saved = { v: 1, window: null };
+  const ledgerRows = [];
+  let clock = T0 + H;
+  const scheduler = createOvernightScheduler({
+    store: {
+      load: async () => saved,
+      save: async (d) => {
+        saves += 1;
+        saved = d;
+      },
+    },
+    now: () => clock,
+    budget: async () => FAT,
+    ledger: { append: async (row) => ledgerRows.push(row) },
+  });
+  // The scheduler reads its clock from the injected `now` (input.now is not
+  // consulted by tick), so the test advances the clock between ticks.
+  const input = (trough) => tickInput({ candidateCount: 0, candidates: [], trough });
+  const t1 = await scheduler.tick(input(TROUGH));
+  assert.equal(t1.ledgerRows.filter((r) => r.kind === "cto.overnight.no-candidates").length, 1);
+  assert.equal(saves, 1, "the first report stamps the trough start and saves");
+  // Same trough, a minute later: no new row, and the save is skipped.
+  clock = T0 + H + 60_000;
+  const t2 = await scheduler.tick(input(TROUGH));
+  assert.equal(t2.ledgerRows.filter((r) => r.kind === "cto.overnight.no-candidates").length, 0);
+  assert.equal(saves, 1, "an unchanged window state is not re-saved");
+  // A NEW trough reports again (the old stamp expires with its trough).
+  const nextTrough = { startMs: T0 + 24 * H, endMs: T0 + 30 * H };
+  clock = T0 + 25 * H;
+  const t3 = await scheduler.tick(input(nextTrough));
+  assert.equal(t3.ledgerRows.filter((r) => r.kind === "cto.overnight.no-candidates").length, 1);
+  assert.equal(saves, 2, "the new trough's stamp is persisted");
+});
+
 test("a fulfilled veto countdown is cleared by the open it announced", () => {
   const due = T0 + 30 * 60_000;
   let window = scheduleCountdown(null, { now: T0, dueMs: due });

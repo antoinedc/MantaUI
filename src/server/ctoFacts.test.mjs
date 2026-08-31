@@ -664,3 +664,38 @@ test("viewRender picks the first project when none given, sorts rows, and touche
   await engine.viewRender(null, { touch: false });
   assert.equal(inmemory.get("f:alpha").facts.find((f) => f.id === "cto:young").access_count, young.access_count);
 });
+
+// BET-1466 item 6: a persist failure must not surface as a queued proposal.
+test("submitProposal reports ok:false when the engine-state persist fails", async () => {
+  const failingState = {
+    load: async () => ({}),
+    save: async () => {
+      throw new Error("disk full");
+    },
+  };
+  const engine = createFactsEngine({
+    facts: {
+      load: async () => ({ v: 1, facts: [] }),
+      save: async () => {},
+      dir: "facts-dir-placeholder",
+    },
+    archive: {
+      load: async () => ({ v: 1, entries: [] }),
+      save: async () => {},
+    },
+    engineState: failingState,
+    ledger: { append: async () => {} },
+    listProjects: async () => ["alpha"],
+    now: () => 1000 * D,
+  });
+  const res = await engine.submitProposal({
+    proposalId: "pp",
+    project: "alpha",
+    kind: "status",
+    statement: "persist will fail",
+    refs: ["s1"],
+    sender: "cto",
+  });
+  assert.equal(res.ok, false, "a phantom ok is no longer returned");
+  assert.match(res.error || "", /persist failed/);
+});
