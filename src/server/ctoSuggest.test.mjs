@@ -255,99 +255,138 @@ test("parseSuggestionText: extracts JSON from prose fences", () => {
 
 // ---------------------------------------------------------------------------
 // The pipeline (createCtoSuggest) — injected stores + gated model seams
+//
+// ONE harness builder (`makeSug`) parameterizes the full createCtoSuggest()
+// config over memory-backed stores; each test overrides only the seams it
+// exercises. This is the file-wide generalization of BET-1465's local
+// makeDedupeSug pattern (BET-1474): the duplication gate re-scans the WHOLE
+// changed file, so every repeated config block must live in this builder.
 // ---------------------------------------------------------------------------
 
-function makeHarness() {
+// One-candidate generator payload for a class — the shape the gated `suggest`
+// model call returns for a single finding. The "Go" label is arbitrary; no
+// assertion reads it.
+function oneCandidateSuggestText(cls, text, refs = []) {
+  return JSON.stringify({
+    candidates: [{ class: cls, finding: { text, refs }, options: [{ label: "Go", action: { type: cls, payload: {} } }] }],
+  });
+}
+
+// The shared harness: memory-backed ledger / verdicts / engine-state / trust /
+// board stores + a parameterized createCtoSuggest(). Defaults encode the
+// common warm wiring (VERDICT_MIN recorded verdicts, medium tier, reliability
+// 1.0, a card writer that accepts and records every write). `build` assembles
+// a SECOND engine over the same stores for multi-instance tests.
+function makeSug({
+  thresholds = null, // flat {p_ask, p_act} → the es.suggest.thresholds override
+  engineState = null, // full initial engine state (wins over thresholds)
+  coldStart = false, // zero recorded verdicts (§10.6-4 cold-start cap)
+  trustTiers = null, // {class: tier} seeded into the trust store
+  liveTrust = false, // trust store persists saves (recordAct must survive)
+  digests: digestsDep = { list: async () => [], load: async () => null },
+  configGet = async () => ({ ctoTier: "medium" }),
+  capabilities = null,
+  cards: cardsDep = null, // cards dep override; default records into the board
+  vetoSink = null, // array → the cards dep also exposes a recording upsertVeto
+  buildCards = null, // ({boardStore, ledger, engineState, now}) => cards manager
+  runSuggest = async () => ({ text: JSON.stringify({ candidates: [] }) }),
+  runWorthiness = async () => ({ text: "0.9" }),
+  senderReliability = async () => 1.0,
+  classPriors = null,
+  executeAction = null,
+  recordVerdict = null, // default: the B3 route, recorded into verdictEntries
+  fireNotify = null, // default: recorded into notified[]
+} = {}) {
   const clock = { ms: 1_000_000 };
   const ledgerRows = [];
   const verdictEntries = [];
-  let engineState = { v: 1 };
-  let cardPayload = { v: 1, cards: [] };
-  const writes = [];
+  const notified = [];
+  let board = { v: 1, cards: [] };
+  const initialEs = engineState ?? (thresholds ? { v: 1, suggest: { thresholds } } : { v: 1 });
+  let es = initialEs;
+  const trustInitial = trustTiers ? { v: 1, tiers: trustTiers } : {};
+  let trustState = trustInitial;
 
   const ledger = { append: async (r) => ledgerRows.push(r), read: async () => ledgerRows };
-  const verdicts = {
-    load: async () => ({ v: 1, entries: verdictEntries }),
-    save: async (p) => {
-      verdictEntries.length = 0;
-      verdictEntries.push(...(p?.entries || []));
-    },
-  };
-  const engineState2 = {
-    load: async () => engineState,
-    save: async (p) => {
-      engineState = p;
-    },
-  };
+  const verdicts = coldStart
+    ? { load: async () => ({ entries: [] }), save: async () => {} }
+    : { load: async () => ({ entries: Array(VERDICT_MIN).fill({}) }), save: async () => {} };
+  const engineStateDep = { load: async () => es, save: async (p) => { es = p; } };
+  const trustStoreDep = liveTrust
+    ? { load: async () => trustState, save: async (p) => { trustState = p; } }
+    : { load: async () => trustInitial, save: async () => {} };
+  const boardStore = { load: async () => board, save: async (p) => { board = p; } };
 
-  // cards manager — a minimal fake exercising our upsertDecision contract.
-  const cards = {
+  const defaultCards = {
     upsertDecision: async (c) => {
-      cardPayload.cards.push(c);
-      writes.push(c.id);
+      board.cards.push(c);
       return { changed: true, isNew: true };
     },
-    loadCards: () => cardPayload.cards,
   };
+  if (vetoSink) {
+    defaultCards.upsertVeto = async (c) => {
+      vetoSink.push(c);
+      return { changed: true, isNew: true };
+    };
+  }
+  const cardsManager = buildCards
+    ? buildCards({ boardStore, ledger, engineState: engineStateDep, now: () => clock.ms })
+    : cardsDep ?? defaultCards;
 
-  const sug = createCtoSuggest({
-    now: () => clock.ms,
-    publish: () => {},
-    ledger,
-    verdicts,
-    engineState: engineState2,
-    digests: { list: async () => [], load: async () => null },
-    facts: { list: async () => [], load: async () => null },
-    configGet: async () => ({}),
-    cards,
-    recordVerdict: async ({ subject, verdict, never }) => {
-      verdictEntries.push({ ts: clock.ms, subject, verdict, ...(never ? { never: true } : {}) });
-      return { ok: true };
+  function assemble(extra = {}) {
+    return createCtoSuggest({
+      now: () => clock.ms,
+      publish: () => {},
+      ledger,
+      verdicts,
+      engineState: engineStateDep,
+      trustStore: trustStoreDep,
+      digests: digestsDep,
+      facts: { list: async () => [], load: async () => null },
+      configGet,
+      ...(capabilities ? { capabilities } : {}),
+      cards: cardsManager,
+      runSuggest,
+      runWorthiness,
+      senderReliability,
+      ...(classPriors ? { classPriors } : {}),
+      ...(executeAction ? { executeAction } : {}),
+      recordVerdict:
+        recordVerdict ??
+        (async ({ subject, verdict, never }) => {
+          verdictEntries.push({ ts: clock.ms, subject, verdict, ...(never ? { never: true } : {}) });
+          return { ok: true };
+        }),
+      fireNotify: fireNotify ?? (async (args) => { notified.push(args); }),
+      ...extra,
+    });
+  }
+
+  return {
+    sug: assemble(),
+    build: assemble, // a second engine over the SAME stores
+    clock,
+    ledgerRows,
+    verdictEntries,
+    notified,
+    get cardPayload() {
+      return board;
     },
-    fireNotify: async () => {
-      notified.push(1);
+    getEs: () => es,
+    resetEs() {
+      es = initialEs; // simulates usedKeys-cap churn / engine-state reset
     },
-    senderReliability: async () => 0.9,
-  });
-
-  const notified = [];
-
-  return { sug, clock, ledgerRows, verdictEntries, cardPayload, writes, notified, setEngineState(p) { engineState = p; } };
+  };
 }
 
 test("pipeline: silent-log when below p_ask (no card, ledger row, no notify)", async () => {
-  const h = makeHarness();
-  await h.setEngineState({ v: 1, suggest: { thresholds: { p_ask: 0.5, p_act: 0.95 } } });
-  const sug2 = createCtoSuggest({
-    now: () => h.clock.ms,
-    publish: () => {},
-    ledger: { append: async (r) => h.ledgerRows.push(r), read: async () => h.ledgerRows },
-    verdicts: {
-      load: async () => ({ entries: Array(VERDICT_MIN).fill({}) }),
-      save: async () => {},
-    },
-    engineState: {
-      load: async () => ({ suggest: { thresholds: { p_ask: 0.5, p_act: 0.95 } } }),
-      save: async () => {},
-    },
-    digests: { list: async () => [], load: async () => null },
-    facts: { list: async () => [], load: async () => null },
-    configGet: async () => ({ ctoTier: "medium" }),
-    cards: {
-      upsertDecision: async (c) => {
-        h.cardPayload.cards.push(c);
-        return { changed: true, isNew: true };
-      },
-    },
+  const h = makeSug({
+    thresholds: { p_ask: 0.5, p_act: 0.95 },
     // low worthiness score → p = 0.2 * prior * reliability < p_ask=0.5
-    runSuggest: async () => ({
-      text: JSON.stringify({ candidates: [{ class: "start-job", finding: { text: "a", refs: [] }, options: [{ label: "Go", action: { type: "start-job", payload: {} } }] }] }),
-    }),
+    runSuggest: async () => ({ text: oneCandidateSuggestText("start-job", "a") }),
     runWorthiness: async () => ({ text: "0.2" }),
-    senderReliability: async () => 1.0,
-    fireNotify: async () => h.notified.push(1),
   });
-  const r = await sug2.processFinding({ id: "rec:abc", sourceKind: "fact-anomaly", text: "a", refs: [] }, { coldStart: false, tier: "medium" });
+  const r = await h.sug.processFinding({ id: "rec:abc", sourceKind: "fact-anomaly", text: "a", refs: [] }, { coldStart: false, tier: "medium" });
   assert.equal(r.surfaced, 0);
   assert.equal(r.silent, 1);
   assert.equal(h.cardPayload.cards.length, 0);
@@ -356,52 +395,28 @@ test("pipeline: silent-log when below p_ask (no card, ledger row, no notify)", a
 });
 
 test("pipeline: decision card surfaced + notify on failure-recurrence; option executors excluded by P2 data", async () => {
-  const h = makeHarness();
-  const runSuggest = async () => ({
-    text: JSON.stringify({
-      candidates: [
-        {
-          class: "start-job",
-          finding: { text: "Restart the stuck build", refs: ["c1"] },
-          options: [
-            { label: "Kick build", action: { type: "start-job", payload: { prompt: "retry" } } },
-            { label: "Tonight", action: { type: "queue-tonight", payload: {} } },
-            { label: "Write", action: { type: "tool-write", payload: { tool: "edit" } } },
-          ],
-        },
-      ],
+  const h = makeSug({
+    thresholds: { p_ask: 0.2, p_act: 0.95 },
+    runSuggest: async () => ({
+      text: JSON.stringify({
+        candidates: [
+          {
+            class: "start-job",
+            finding: { text: "Restart the stuck build", refs: ["c1"] },
+            options: [
+              { label: "Kick build", action: { type: "start-job", payload: { prompt: "retry" } } },
+              { label: "Tonight", action: { type: "queue-tonight", payload: {} } },
+              { label: "Write", action: { type: "tool-write", payload: { tool: "edit" } } },
+            ],
+          },
+        ],
+      }),
     }),
-  });
-  const runWorthiness = async () => ({ text: "1.0" });
-  const sug2 = createCtoSuggest({
-    now: () => h.clock.ms,
-    publish: () => {},
-    ledger: { append: async (r) => h.ledgerRows.push(r), read: async () => h.ledgerRows },
-    verdicts: {
-      load: async () => ({ entries: Array(VERDICT_MIN).fill({}) }),
-      save: async () => {},
-    },
-    engineState: {
-      load: async () => ({ suggest: { thresholds: { p_ask: 0.2, p_act: 0.95 } } }),
-      save: async () => {},
-    },
-    digests: { list: async () => [], load: async () => null },
-    facts: { list: async () => [], load: async () => null },
-    configGet: async () => ({ ctoTier: "medium" }),
-    cards: {
-      upsertDecision: async (c) => {
-        h.cardPayload.cards.push(c);
-        return { changed: true, isNew: true };
-      },
-    },
-    runSuggest,
-    runWorthiness,
-    senderReliability: async () => 1.0,
-    fireNotify: async () => h.notified.push(1),
+    runWorthiness: async () => ({ text: "1.0" }),
   });
 
   // non-cold-start (15 verdicts above), failure-recurrence finding → notify
-  const r = await sug2.processFinding(
+  const r = await h.sug.processFinding(
     { id: "rec:x", sourceKind: "failure-recurrence", text: "build", refs: ["c1"] },
     { coldStart: false, tier: "medium" },
   );
@@ -416,38 +431,20 @@ test("pipeline: decision card surfaced + notify on failure-recurrence; option ex
 });
 
 test("pipeline: cold-start caps even a high-score candidate into a decision card (never acts)", async () => {
-  const h = makeHarness();
-  const sug2 = createCtoSuggest({
-    now: () => h.clock.ms,
-    publish: () => {},
-    ledger: { append: async (r) => h.ledgerRows.push(r), read: async () => h.ledgerRows },
-    verdicts: { load: async () => ({ entries: [] }), save: async () => {} }, // cold start
-    engineState: {
-      load: async () => ({ suggest: { thresholds: { p_ask: 0.2, p_act: 0.3 } } }),
-      save: async () => {},
-    },
-    digests: { list: async () => [], load: async () => null },
-    facts: { list: async () => [], load: async () => null },
+  const h = makeSug({
+    coldStart: true,
+    thresholds: { p_ask: 0.2, p_act: 0.3 },
     configGet: async () => ({ ctoTier: "high" }),
-    cards: {
-      upsertDecision: async (c) => {
-        h.cardPayload.cards.push(c);
-        return { changed: true, isNew: true };
-      },
-    },
-    runSuggest: async () => ({
-      text: JSON.stringify({ candidates: [{ class: "start-job", finding: { text: "cold", refs: [] }, options: [{ label: "Go", action: { type: "start-job", payload: {} } }] }] }),
-    }),
+    runSuggest: async () => ({ text: oneCandidateSuggestText("start-job", "cold") }),
     runWorthiness: async () => ({ text: "1.0" }), // score → p high
-    senderReliability: async () => 1.0,
   });
-  const r = await sug2.processFinding({ id: "rec:cold", sourceKind: "fact-anomaly", text: "cold", refs: [] }, { coldStart: true, tier: "high" });
+  const r = await h.sug.processFinding({ id: "rec:cold", sourceKind: "fact-anomaly", text: "cold", refs: [] }, { coldStart: true, tier: "high" });
   assert.equal(r.surfaced, 1); // capped -> decision card, not an act
   assert.equal(h.cardPayload.cards[0].capped, true);
 });
 
 test("listHeld: returns silent-log ledger rows", async () => {
-  const h = makeHarness();
+  const h = makeSug();
   h.ledgerRows.push({ kind: "suggest.silent", id: "a", score: 0.1, ts: 10 });
   h.ledgerRows.push({ kind: "suggest.presented", cardId: "b", ts: 9 });
   h.ledgerRows.push({ kind: "suggest.silent", id: "c", score: 0.2, ts: 11 });
@@ -457,7 +454,7 @@ test("listHeld: returns silent-log ledger rows", async () => {
 });
 
 test("verdictHeld: routes judgment to the B3 verdict route", async () => {
-  const h = makeHarness();
+  const h = makeSug();
   const r = await h.sug.verdictHeld({ id: "rec:abc", verdict: "dismiss" });
   assert.equal(r.ok, true);
   assert.equal(h.verdictEntries.length, 1);
@@ -479,41 +476,16 @@ test("collectFindings: combines digest + fact sources", () => {
 // ---------------------------------------------------------------------------
 
 test("production wiring can surface a decision card: reliability 1.0 × prior 0.6 ≥ p_ask 0.48", async () => {
-  const h = makeHarness();
   // Mirror the SHIPPED index.mjs constants: reliability 1.0 (trusted internal
   // sender), default class priors (max 0.6 record-decision), no engine-state
   // override → the BET-1471 per-class thresholds (record-decision p_ask 0.48
-  // = 0.8 × the 0.6 ceiling), Medium tier.
-  const sug2 = createCtoSuggest({
-    now: () => h.clock.ms,
-    publish: () => {},
-    ledger: { append: async (r) => h.ledgerRows.push(r), read: async () => h.ledgerRows },
-    verdicts: { load: async () => ({ entries: Array(VERDICT_MIN).fill({}) }), save: async () => {} },
-    engineState: { load: async () => ({}), save: async () => {} }, // no suggest.thresholds → defaults
-    digests: { list: async () => [], load: async () => null },
-    facts: { list: async () => [], load: async () => null },
-    configGet: async () => ({ ctoTier: "medium" }),
-    cards: {
-      upsertDecision: async (c) => {
-        h.cardPayload.cards.push(c);
-        return { changed: true, isNew: true };
-      },
-    },
-    runSuggest: async () => ({
-      text: JSON.stringify({
-        candidates: [
-          {
-            class: "record-decision", // prior 0.6 — the max
-            finding: { text: "Adopt pact", refs: [] },
-            options: [{ label: "Record", action: { type: "record-decision", payload: { statement: "x" } } }],
-          },
-        ],
-      }),
-    }),
+  // = 0.8 × the 0.6 ceiling), Medium tier — the harness defaults ARE that
+  // wiring; only the generator + worthiness seams are per-test.
+  const h = makeSug({
+    runSuggest: async () => ({ text: oneCandidateSuggestText("record-decision", "Adopt pact") }),
     runWorthiness: async () => ({ text: "1.0" }), // max-worthiness candidate
-    senderReliability: async () => 1.0, // SHIPPED value in index.mjs
   });
-  const r = await sug2.processFinding({ id: "rec:r", sourceKind: "fact-anomaly", text: "r", refs: [] }, { coldStart: false, tier: "medium" });
+  const r = await h.sug.processFinding({ id: "rec:r", sourceKind: "fact-anomaly", text: "r", refs: [] }, { coldStart: false, tier: "medium" });
   // p = 1.0 × 0.6 × 1.0 = 0.6 ≥ p_ask 0.48 → decision card, not silent-log.
   assert.equal(r.surfaced, 1);
   assert.equal(h.cardPayload.cards.length, 1);
@@ -524,38 +496,13 @@ test("production wiring can surface a decision card: reliability 1.0 × prior 0.
 // global p_ask 0.4, so the class was silent-log at ANY score. Its per-class
 // bar (0.28 = 0.8 × 0.35) makes a max-worthiness candidate surface.
 test("queue-tonight is no longer a dead class: score-1.0 candidate surfaces a card", async () => {
-  const h = makeHarness();
-  const sug2 = createCtoSuggest({
-    now: () => h.clock.ms,
-    publish: () => {},
-    ledger: { append: async (r) => h.ledgerRows.push(r), read: async () => h.ledgerRows },
-    verdicts: { load: async () => ({ entries: Array(VERDICT_MIN).fill({}) }), save: async () => {} },
-    engineState: { load: async () => ({}), save: async () => {} }, // no override → per-class thresholds
-    digests: { list: async () => [], load: async () => null },
-    facts: { list: async () => [], load: async () => null },
+  const h = makeSug({
     configGet: async () => ({ ctoTier: "high" }),
     capabilities: { queueTonight: true, toolWrite: true }, // SHIPPED values in index.mjs
-    cards: {
-      upsertDecision: async (c) => {
-        h.cardPayload.cards.push(c);
-        return { changed: true, isNew: true };
-      },
-    },
-    runSuggest: async () => ({
-      text: JSON.stringify({
-        candidates: [
-          {
-            class: "queue-tonight", // prior 0.35 — was below the old global p_ask 0.4
-            finding: { text: "Queue the maintenance window", refs: [] },
-            options: [{ label: "Queue", action: { type: "queue-tonight", payload: {} } }],
-          },
-        ],
-      }),
-    }),
+    runSuggest: async () => ({ text: oneCandidateSuggestText("queue-tonight", "Queue the maintenance window") }),
     runWorthiness: async () => ({ text: "1.0" }), // max-worthiness candidate
-    senderReliability: async () => 1.0, // SHIPPED value in index.mjs
   });
-  const r = await sug2.processFinding({ id: "rec:q", sourceKind: "fact-anomaly", text: "q", refs: [] }, { coldStart: false, tier: "high" });
+  const r = await h.sug.processFinding({ id: "rec:q", sourceKind: "fact-anomaly", text: "q", refs: [] }, { coldStart: false, tier: "high" });
   // p = 1.0 × 0.35 × 1.0 = 0.35 ≥ p_ask 0.28 → decision card. Under the old
   // global bar (0.4) this exact candidate was silent-log at every score.
   assert.equal(r.surfaced, 1);
@@ -599,40 +546,13 @@ test("act verb is arithmetically reachable for the §9.3-eligible classes", () =
 // ---------------------------------------------------------------------------
 
 test("pipeline: veto-window tier surfaces the veto verb; missing veto writer degrades to the decision card", async () => {
-  const h = makeHarness();
-  // Promote the class by seeding the trust state directly (same store the
-  // suggest engine consults), with a non-cold-start verdict ledger.
-  await h.setEngineState({ v: 1, trust: { tiers: { "record-decision": "veto-window" } } });
-  const sug2 = createCtoSuggest({
-    now: () => h.clock.ms,
-    publish: () => {},
-    ledger: { append: async (r) => h.ledgerRows.push(r), read: async () => h.ledgerRows },
-    verdicts: {
-      load: async () => ({ entries: Array(VERDICT_MIN).fill({}) }),
-      save: async () => {},
-    },
-    trustStore: {
-      load: async () => ({ v: 1, tiers: { "record-decision": "veto-window" } }),
-      save: async () => {},
-    },
-    engineState: { load: async () => ({ v: 1 }), save: async () => {} },
-    digests: { list: async () => [], load: async () => null },
-    facts: { list: async () => [], load: async () => null },
-    configGet: async () => ({ ctoTier: "medium" }),
-    cards: {
-      upsertDecision: async (c) => {
-        h.cardPayload.cards.push(c);
-        return { changed: true, isNew: true };
-      },
-      // no upsertVeto — BET-1419 ships it; the verb must degrade, not vanish
-    },
-    runSuggest: async () => ({
-      text: JSON.stringify({ candidates: [{ class: "record-decision", finding: { text: "a", refs: [] }, options: [{ label: "Go", action: { type: "record-decision", payload: {} } }] }] }),
-    }),
-    runWorthiness: async () => ({ text: "0.9" }),
-    senderReliability: async () => 1.0,
+  // Promote the class by seeding the trust store the suggest engine consults,
+  // with a non-cold-start verdict ledger (the harness warm default).
+  const h = makeSug({
+    trustTiers: { "record-decision": "veto-window" },
+    runSuggest: async () => ({ text: oneCandidateSuggestText("record-decision", "a") }),
   });
-  const r = await sug2.processFinding({ id: "rec:vd", sourceKind: "fact-anomaly", text: "a", refs: [] }, { coldStart: false, tier: "medium" });
+  const r = await h.sug.processFinding({ id: "rec:vd", sourceKind: "fact-anomaly", text: "a", refs: [] }, { coldStart: false, tier: "medium" });
   assert.equal(r.surfaced, 1);
   assert.equal(h.cardPayload.cards.length, 1);
   assert.equal(h.cardPayload.cards[0].variant, "decision"); // degraded veto verb
@@ -640,41 +560,13 @@ test("pipeline: veto-window tier surfaces the veto verb; missing veto writer deg
 });
 
 test("pipeline: veto-window verb writes the veto card when the writer exists", async () => {
-  const h = makeHarness();
   const vetoCards = [];
-  const sug2 = createCtoSuggest({
-    now: () => h.clock.ms,
-    publish: () => {},
-    ledger: { append: async (r) => h.ledgerRows.push(r), read: async () => h.ledgerRows },
-    verdicts: {
-      load: async () => ({ entries: Array(VERDICT_MIN).fill({}) }),
-      save: async () => {},
-    },
-    trustStore: {
-      load: async () => ({ v: 1, tiers: { "record-decision": "veto-window" } }),
-      save: async () => {},
-    },
-    engineState: { load: async () => ({ v: 1 }), save: async () => {} },
-    digests: { list: async () => [], load: async () => null },
-    facts: { list: async () => [], load: async () => null },
-    configGet: async () => ({ ctoTier: "medium" }),
-    cards: {
-      upsertDecision: async (c) => {
-        h.cardPayload.cards.push(c);
-        return { changed: true, isNew: true };
-      },
-      upsertVeto: async (c) => {
-        vetoCards.push(c);
-        return { changed: true, isNew: true };
-      },
-    },
-    runSuggest: async () => ({
-      text: JSON.stringify({ candidates: [{ class: "record-decision", finding: { text: "a", refs: [] }, options: [{ label: "Go", action: { type: "record-decision", payload: {} } }] }] }),
-    }),
-    runWorthiness: async () => ({ text: "0.9" }),
-    senderReliability: async () => 1.0,
+  const h = makeSug({
+    trustTiers: { "record-decision": "veto-window" },
+    vetoSink: vetoCards,
+    runSuggest: async () => ({ text: oneCandidateSuggestText("record-decision", "a") }),
   });
-  const r = await sug2.processFinding({ id: "rec:vv", sourceKind: "fact-anomaly", text: "a", refs: [] }, { coldStart: false, tier: "medium" });
+  const r = await h.sug.processFinding({ id: "rec:vv", sourceKind: "fact-anomaly", text: "a", refs: [] }, { coldStart: false, tier: "medium" });
   assert.equal(r.surfaced, 1);
   assert.equal(vetoCards.length, 1);
   assert.equal(vetoCards[0].variant, "veto");
@@ -683,168 +575,76 @@ test("pipeline: veto-window verb writes the veto card when the writer exists", a
 });
 
 test("pipeline: act tier + executable action executes, ledgers, and queues the digest report", async () => {
-  const h = makeHarness();
   const executed = [];
-  let es = { v: 1, tiers: { "record-decision": "act" } }; // memory-backed trust store: recordAct persists the pending report
-  const sug2 = createCtoSuggest({
-    now: () => h.clock.ms,
-    publish: () => {},
-    ledger: { append: async (r) => h.ledgerRows.push(r), read: async () => h.ledgerRows },
-    verdicts: {
-      load: async () => ({ entries: Array(VERDICT_MIN).fill({}) }),
-      save: async () => {},
-    },
-    trustStore: {
-      load: async () => es,
-      save: async (p) => {
-        es = p;
-      },
-    },
-    engineState: { load: async () => ({ v: 1 }), save: async () => {} },
-    digests: { list: async () => [], load: async () => null },
-    facts: { list: async () => [], load: async () => null },
-    configGet: async () => ({ ctoTier: "medium" }),
-    cards: {
-      upsertDecision: async (c) => {
-        h.cardPayload.cards.push(c);
-        return { changed: true, isNew: true };
-      },
-    },
+  const h = makeSug({
+    liveTrust: true, // memory-backed trust store: recordAct persists the pending report
+    trustTiers: { "record-decision": "act" },
     executeAction: async ({ cls, action }) => {
       executed.push({ cls, action });
       return { ok: true };
     },
-    runSuggest: async () => ({
-      text: JSON.stringify({ candidates: [{ class: "record-decision", finding: { text: "Adopt pact", refs: ["msg:1"] }, options: [{ label: "Record", action: { type: "record-decision", payload: { statement: "x" } } }] }] }),
-    }),
+    runSuggest: async () => ({ text: oneCandidateSuggestText("record-decision", "Adopt pact", ["msg:1"]) }),
     runWorthiness: async () => ({ text: "1.0" }), // p = 1.0 × 1.0 (prior override) ≥ p_act → act verb
-    senderReliability: async () => 1.0,
     classPriors: { "record-decision": 1.0 },
   });
-  const r = await sug2.processFinding({ id: "rec:aa", sourceKind: "fact-anomaly", text: "a", refs: [] }, { coldStart: false, tier: "medium" });
+  const r = await h.sug.processFinding({ id: "rec:aa", sourceKind: "fact-anomaly", text: "a", refs: [] }, { coldStart: false, tier: "medium" });
   assert.equal(r.surfaced, 1);
   assert.equal(executed.length, 1);
   assert.equal(executed[0].action.type, "record-decision");
   assert.equal(h.cardPayload.cards.length, 0); // no card — it acted
   assert.ok(h.ledgerRows.some((x) => x.kind === "suggest.acted" && x.class === "record-decision"));
   // The mandatory report (§9.2 invariant 1) is queued for the next digest.
-  const pending = await sug2._trust.listAnnouncements();
+  const pending = await h.sug._trust.listAnnouncements();
   assert.equal(pending.length, 1);
   assert.equal(pending[0].kind, "act");
   assert.match(pending[0].text, /^Acted on my own \(record-decision\)/);
 });
 
 test("pipeline: act tier + unexecutable action degrades to the veto-window verb (never silently acts)", async () => {
-  const h = makeHarness();
-  const sug2 = createCtoSuggest({
-    now: () => h.clock.ms,
-    publish: () => {},
-    ledger: { append: async (r) => h.ledgerRows.push(r), read: async () => h.ledgerRows },
-    verdicts: {
-      load: async () => ({ entries: Array(VERDICT_MIN).fill({}) }),
-      save: async () => {},
-    },
-    trustStore: {
-      load: async () => ({ v: 1, tiers: { "start-job": "act" } }),
-      save: async () => {},
-    },
-    engineState: { load: async () => ({ v: 1 }), save: async () => {} },
-    digests: { list: async () => [], load: async () => null },
-    facts: { list: async () => [], load: async () => null },
-    configGet: async () => ({ ctoTier: "medium" }),
-    cards: {
-      upsertDecision: async (c) => {
-        h.cardPayload.cards.push(c);
-        return { changed: true, isNew: true };
-      },
-    },
-    // no executeAction seam wired for this class → refuse
-    runSuggest: async () => ({
-      text: JSON.stringify({ candidates: [{ class: "start-job", finding: { text: "a", refs: [] }, options: [{ label: "Go", action: { type: "start-job", payload: {} } }] }] }),
-    }),
+  const h = makeSug({
+    trustTiers: { "start-job": "act" },
+    runSuggest: async () => ({ text: oneCandidateSuggestText("start-job", "a") }),
     runWorthiness: async () => ({ text: "1.0" }),
-    senderReliability: async () => 1.0,
+    // executeAction stays unwired for this class → refuse
   });
-  const r = await sug2.processFinding({ id: "rec:de", sourceKind: "fact-anomaly", text: "a", refs: [] }, { coldStart: false, tier: "medium" });
+  const r = await h.sug.processFinding({ id: "rec:de", sourceKind: "fact-anomaly", text: "a", refs: [] }, { coldStart: false, tier: "medium" });
   assert.equal(r.surfaced, 1);
   assert.equal(h.cardPayload.cards.length, 1); // degraded to the ask card (no veto writer)
   assert.equal(h.ledgerRows.filter((x) => x.kind === "suggest.acted").length, 0);
-  assert.equal((await sug2._trust.listAnnouncements()).length, 0);
+  assert.equal((await h.sug._trust.listAnnouncements()).length, 0);
 });
 
 test("pipeline: cold start keeps an act-tier class capped at the ask verb (§10.6-4 dominance)", async () => {
-  const h = makeHarness();
   const executed = [];
-  const sug2 = createCtoSuggest({
-    now: () => h.clock.ms,
-    publish: () => {},
-    ledger: { append: async (r) => h.ledgerRows.push(r), read: async () => h.ledgerRows },
-    verdicts: { load: async () => ({ entries: [] }), save: async () => {} }, // cold start
-    trustStore: {
-      load: async () => ({ v: 1, tiers: { "record-decision": "act" } }),
-      save: async () => {},
-    },
-    engineState: { load: async () => ({ v: 1 }), save: async () => {} },
-    digests: { list: async () => [], load: async () => null },
-    facts: { list: async () => [], load: async () => null },
-    configGet: async () => ({ ctoTier: "medium" }),
-    cards: {
-      upsertDecision: async (c) => {
-        h.cardPayload.cards.push(c);
-        return { changed: true, isNew: true };
-      },
-    },
+  const h = makeSug({
+    coldStart: true,
+    trustTiers: { "record-decision": "act" },
     executeAction: async ({ cls, action }) => {
       executed.push({ cls, action });
       return { ok: true };
     },
-    runSuggest: async () => ({
-      text: JSON.stringify({ candidates: [{ class: "record-decision", finding: { text: "a", refs: [] }, options: [{ label: "Go", action: { type: "record-decision", payload: {} } }] }] }),
-    }),
+    runSuggest: async () => ({ text: oneCandidateSuggestText("record-decision", "a") }),
     runWorthiness: async () => ({ text: "1.0" }),
-    senderReliability: async () => 1.0,
   });
-  const r = await sug2.processFinding({ id: "rec:cs", sourceKind: "fact-anomaly", text: "a", refs: [] }, { coldStart: true, tier: "medium" });
+  const r = await h.sug.processFinding({ id: "rec:cs", sourceKind: "fact-anomaly", text: "a", refs: [] }, { coldStart: true, tier: "medium" });
   assert.equal(r.surfaced, 1);
   assert.equal(executed.length, 0); // never acts under the cold-start gate
   assert.equal(h.cardPayload.cards[0].capped, true);
 });
 
 test("pipeline: an ineligible act-tier class above its act bar surfaces the ask card (no throw, no hold)", async () => {
-  const h = makeHarness();
-  const sug2 = createCtoSuggest({
-    now: () => h.clock.ms,
-    publish: () => {},
-    ledger: { append: async (r) => h.ledgerRows.push(r), read: async () => h.ledgerRows },
-    verdicts: {
-      load: async () => ({ entries: Array(VERDICT_MIN).fill({}) }),
-      save: async () => {},
-    },
-    engineState: {
-      // config-change is §9.3-capped; even a corrupt/foreign "act" tier row
-      // must never raise the ceiling — the ask card is the cap (BET-1471:
-      // the old throw silently held the class's best candidates).
-      load: async () => ({ v: 1, trust: { tiers: { "config-change": "act" } } }),
-      save: async () => {},
-    },
-    digests: { list: async () => [], load: async () => null },
-    facts: { list: async () => [], load: async () => null },
-    configGet: async () => ({ ctoTier: "medium" }),
-    cards: {
-      upsertDecision: async (c) => {
-        h.cardPayload.cards.push(c);
-        return { changed: true, isNew: true };
-      },
-    },
+  const h = makeSug({
+    // config-change is §9.3-capped; even a corrupt/foreign "act" tier row in
+    // the legacy engine-state trust payload must never raise the ceiling —
+    // the ask card is the cap (BET-1471: the old throw silently held the
+    // class's best candidates).
+    engineState: { v: 1, trust: { tiers: { "config-change": "act" } } },
     executeAction: async () => ({ ok: true }),
-    runSuggest: async () => ({
-      text: JSON.stringify({ candidates: [{ class: "config-change", finding: { text: "a", refs: [] }, options: [{ label: "Go", action: { type: "config-change", payload: {} } }] }] }),
-    }),
+    runSuggest: async () => ({ text: oneCandidateSuggestText("config-change", "a") }),
     runWorthiness: async () => ({ text: "1.0" }), // p = 1.0, above the class's act bar
-    senderReliability: async () => 1.0,
     classPriors: { "config-change": 1.0 },
   });
-  const r = await sug2.processFinding({ id: "rec:cc", sourceKind: "fact-anomaly", text: "a", refs: [] }, { coldStart: false, tier: "medium" });
+  const r = await h.sug.processFinding({ id: "rec:cc", sourceKind: "fact-anomaly", text: "a", refs: [] }, { coldStart: false, tier: "medium" });
   // The ask verb IS the §9.3 cap: the candidate surfaces a decision card.
   assert.equal(r.surfaced, 1);
   assert.equal(r.silent, 0);
@@ -857,37 +657,17 @@ test("pipeline: an ineligible act-tier class above its act bar surfaces the ask 
 });
 
 test("verdictHeld stamps the held row's class onto the subject (§9.4 attribution)", async () => {
-  const h = makeHarness();
-  const sug1 = createCtoSuggest({
-    now: () => h.clock.ms,
-    publish: () => {},
-    ledger: { append: async (r) => h.ledgerRows.push(r), read: async () => h.ledgerRows },
-    verdicts: h.verdicts,
-    engineState: { load: async () => ({}), save: async () => {} },
-    digests: { list: async () => [], load: async () => null },
-    facts: { list: async () => [], load: async () => null },
-    configGet: async () => ({}),
-    runSuggest: async () => ({
-      text: JSON.stringify({ candidates: [{ class: "start-job", finding: { text: "a", refs: [] }, options: [{ label: "Go", action: { type: "start-job", payload: {} } }] }] }),
-    }),
+  const h = makeSug({
+    runSuggest: async () => ({ text: oneCandidateSuggestText("start-job", "a") }),
     runWorthiness: async () => ({ text: "0.1" }), // p below p_ask → silent-log (a HELD row)
-    senderReliability: async () => 1.0,
   });
-  await sug1.processFinding(
+  await h.sug.processFinding(
     { id: "rec:h1", sourceKind: "fact-anomaly", text: "a", refs: [] },
     { coldStart: false, tier: "medium" }
   );
   const sid = stableSuggestionId("rec:h1", "start-job");
   const recorded = [];
-  const sug2 = createCtoSuggest({
-    now: () => h.clock.ms,
-    publish: () => {},
-    ledger: { append: async (r) => h.ledgerRows.push(r), read: async () => h.ledgerRows },
-    verdicts: h.verdicts,
-    engineState: { load: async () => ({}), save: async () => {} },
-    digests: { list: async () => [], load: async () => null },
-    facts: { list: async () => [], load: async () => null },
-    configGet: async () => ({}),
+  const sug2 = h.build({
     recordVerdict: async ({ subject, verdict }) => {
       recorded.push({ subject, verdict });
       return { ok: true };
@@ -900,60 +680,17 @@ test("verdictHeld stamps the held row's class onto the subject (§9.4 attributio
 
 // ---------------------------------------------------------------------------
 // BET-1465 — usedKeys dedupe (defect 1) + distinct notify tag (defect 2)
-//
-// One local builder shared by the four tests below (instead of repeating the
-// createCtoSuggest() config in each) so this addition doesn't itself grow the
-// file's clone count.
 // ---------------------------------------------------------------------------
 
-function oneCandidateSuggestText(cls, text, refs = []) {
-  return JSON.stringify({
-    candidates: [{ class: cls, finding: { text, refs }, options: [{ label: "Go", action: { type: cls, payload: {} } }] }],
-  });
-}
-
-function makeDedupeSug({
-  engineState: engineStateDep = { load: async () => ({ suggest: { thresholds: { p_ask: 0.2, p_act: 0.95 } } }), save: async () => {} },
-  ledger: ledgerDep = { append: async () => {}, read: async () => [] },
-  digests: digestsDep = { list: async () => [], load: async () => null },
-  cards: cardsDep = { upsertDecision: async () => ({ changed: true, isNew: true }) },
-  runSuggest: runSuggestDep = async () => ({ text: JSON.stringify({ candidates: [] }) }),
-  runWorthiness: runWorthinessDep = async () => ({ text: "0.9" }),
-  fireNotify: fireNotifyDep = async () => {},
-  now = () => 1,
-} = {}) {
-  return createCtoSuggest({
-    now,
-    publish: () => {},
-    ledger: ledgerDep,
-    verdicts: { load: async () => ({ entries: Array(VERDICT_MIN).fill({}) }), save: async () => {} },
-    engineState: engineStateDep,
-    digests: digestsDep,
-    facts: { list: async () => [], load: async () => null },
-    configGet: async () => ({ ctoTier: "medium" }),
-    cards: cardsDep,
-    runSuggest: runSuggestDep,
-    runWorthiness: runWorthinessDep,
-    senderReliability: async () => 1.0,
-    fireNotify: fireNotifyDep,
-  });
-}
-
 test("dedupe: a second runPass over the same findings makes no new model calls, ledger rows, or notifies", async () => {
-  const clock = { ms: 1_000_000 };
-  const ledgerRows = [];
-  let es = { suggest: { thresholds: { p_ask: 0.2, p_act: 0.95 } } };
   let suggestCalls = 0;
   let worthinessCalls = 0;
-  const notified = [];
   const digestList = [
     { generated: 1, items: [{ tier: "failure", text: "Pipeline red on main", refs: ["c1"] }] },
     { generated: 2, items: [{ tier: "failure", text: "Pipeline red on main", refs: ["c2"] }] },
   ];
-  const sug = makeDedupeSug({
-    now: () => clock.ms,
-    engineState: { load: async () => es, save: async (p) => { es = p; } },
-    ledger: { append: async (r) => ledgerRows.push(r), read: async () => ledgerRows },
+  const h = makeSug({
+    thresholds: { p_ask: 0.2, p_act: 0.95 },
     digests: { list: async () => ["d1", "d2"], load: async (id) => (id === "d1" ? digestList[0] : digestList[1]) },
     runSuggest: async () => {
       suggestCalls += 1;
@@ -963,33 +700,33 @@ test("dedupe: a second runPass over the same findings makes no new model calls, 
       worthinessCalls += 1;
       return { text: "0.9" };
     },
-    fireNotify: async (args) => notified.push(args),
   });
 
-  const r1 = await sug.runPass({ nowMs: clock.ms });
+  const r1 = await h.sug.runPass({ nowMs: h.clock.ms });
   assert.equal(r1.findings, 1);
   assert.equal(r1.surfaced, 1);
   assert.equal(suggestCalls, 1);
   assert.equal(worthinessCalls, 1);
-  assert.equal(ledgerRows.length, 1);
-  assert.equal(notified.length, 1); // failure-recurrence → notify
+  assert.equal(h.ledgerRows.length, 1);
+  assert.equal(h.notified.length, 1); // failure-recurrence → notify
 
-  clock.ms += 30 * 60_000; // simulate the next 30-minute pass over the SAME retained digests
-  const r2 = await sug.runPass({ nowMs: clock.ms });
+  h.clock.ms += 30 * 60_000; // simulate the next 30-minute pass over the SAME retained digests
+  const r2 = await h.sug.runPass({ nowMs: h.clock.ms });
   assert.equal(r2.findings, 1); // the finding is still collected (source retained)
   assert.equal(r2.surfaced, 0);
   assert.equal(r2.silent, 0);
   assert.equal(suggestCalls, 1, "no new suggest model call");
   assert.equal(worthinessCalls, 1, "no new worthiness model call");
-  assert.equal(ledgerRows.length, 1, "no new ledger row");
-  assert.equal(notified.length, 1, "no new fireNotify");
+  assert.equal(h.ledgerRows.length, 1, "no new ledger row");
+  assert.equal(h.notified.length, 1, "no new fireNotify");
 });
 
 test("usedKeys is capped at 200 entries; the oldest fall off", async () => {
-  let es = { suggest: { usedKeys: Array.from({ length: 200 }, (_, i) => `old-${i}`) } };
-  const sug = makeDedupeSug({ engineState: { load: async () => es, save: async (p) => { es = p; } } });
-  await sug.processFinding({ id: "rec:new", sourceKind: "fact-anomaly", text: "x", refs: [] }, { coldStart: false, tier: "medium" });
-  const used = es.suggest.usedKeys;
+  const h = makeSug({
+    engineState: { v: 1, suggest: { usedKeys: Array.from({ length: 200 }, (_, i) => `old-${i}`) } },
+  });
+  await h.sug.processFinding({ id: "rec:new", sourceKind: "fact-anomaly", text: "x", refs: [] }, { coldStart: false, tier: "medium" });
+  const used = h.getEs().suggest.usedKeys;
   assert.equal(used.length, 200);
   assert.ok(used.includes("rec:new"));
   assert.ok(!used.includes("old-0")); // the oldest entry fell off
@@ -999,10 +736,10 @@ test("usedKeys is capped at 200 entries; the oldest fall off", async () => {
 test("notify: fireNotify carries a distinct, non-global tag per candidate WITHOUT synthesizing a sessionID (defect 2, review fix)", async () => {
   const notified = [];
   const fireNotify = async (args) => notified.push(args);
-  const a = makeDedupeSug({ runSuggest: async () => ({ text: oneCandidateSuggestText("start-job", "A") }), fireNotify });
-  const b = makeDedupeSug({ runSuggest: async () => ({ text: oneCandidateSuggestText("start-job", "B") }), fireNotify });
-  await a.processFinding({ id: "rec:a", sourceKind: "failure-recurrence", text: "A", refs: [] }, { coldStart: false, tier: "medium" });
-  await b.processFinding({ id: "rec:b", sourceKind: "failure-recurrence", text: "B", refs: [] }, { coldStart: false, tier: "medium" });
+  const a = makeSug({ runSuggest: async () => ({ text: oneCandidateSuggestText("start-job", "A") }), fireNotify });
+  const b = makeSug({ runSuggest: async () => ({ text: oneCandidateSuggestText("start-job", "B") }), fireNotify });
+  await a.sug.processFinding({ id: "rec:a", sourceKind: "failure-recurrence", text: "A", refs: [] }, { coldStart: false, tier: "medium" });
+  await b.sug.processFinding({ id: "rec:b", sourceKind: "failure-recurrence", text: "B", refs: [] }, { coldStart: false, tier: "medium" });
   assert.equal(notified.length, 2);
   // push.mjs's `tag` override (added for this fix) is the caller-supplied
   // identifier — a present, per-candidate tag is what keeps two unrelated
@@ -1019,15 +756,13 @@ test("notify: fireNotify carries a distinct, non-global tag per candidate WITHOU
 });
 
 test("fireNotify is gated on the card write's isNew: a re-upserted (not new) card never re-pushes", async () => {
-  const notified = [];
-  const sug = makeDedupeSug({
+  const h = makeSug({
     cards: { upsertDecision: async () => ({ changed: true, isNew: false }) }, // upsert of a card already on the board
     runSuggest: async () => ({ text: oneCandidateSuggestText("start-job", "again") }),
-    fireNotify: async (args) => notified.push(args),
   });
-  const r = await sug.processFinding({ id: "rec:re", sourceKind: "failure-recurrence", text: "again", refs: [] }, { coldStart: false, tier: "medium" });
+  const r = await h.sug.processFinding({ id: "rec:re", sourceKind: "failure-recurrence", text: "again", refs: [] }, { coldStart: false, tier: "medium" });
   assert.equal(r.surfaced, 1); // the card write still counts as surfaced
-  assert.equal(notified.length, 0); // but never re-pushes a not-new card
+  assert.equal(h.notified.length, 0); // but never re-pushes a not-new card
 });
 
 // ---------------------------------------------------------------------------
@@ -1038,111 +773,77 @@ test("fireNotify is gated on the card write's isNew: a re-upserted (not new) car
 // ---------------------------------------------------------------------------
 
 test("a gated generation ({ok:false}) does not mark the finding used — it's reconsidered next pass", async () => {
-  let es = { suggest: { thresholds: { p_ask: 0.2, p_act: 0.95 } } };
-  const engineState = { load: async () => es, save: async (p) => { es = p; } };
   let calls = 0;
-  const sug = makeDedupeSug({
-    engineState,
+  const h = makeSug({
+    thresholds: { p_ask: 0.2, p_act: 0.95 },
     runSuggest: async () => {
       calls += 1;
       // §3.3 ephemeral gate refusal shape (index.mjs gatedSuggestionEphemeral)
       return calls === 1 ? { ok: false, gated: true, error: "budget-closed" } : { text: oneCandidateSuggestText("start-job", "recovered") };
     },
-    runWorthiness: async () => ({ text: "0.9" }),
   });
   const finding = { id: "rec:gated", sourceKind: "failure-recurrence", text: "x", refs: [] };
-  const r1 = await sug.processFinding(finding, { coldStart: false, tier: "medium" });
+  const r1 = await h.sug.processFinding(finding, { coldStart: false, tier: "medium" });
   assert.equal(r1.surfaced, 0);
   assert.equal(r1.silent, 0);
-  assert.ok(!(es.suggest?.usedKeys || []).includes("rec:gated"), "gated pass must not mark used");
+  assert.ok(!(h.getEs().suggest?.usedKeys || []).includes("rec:gated"), "gated pass must not mark used");
 
-  const r2 = await sug.processFinding(finding, { coldStart: false, tier: "medium" });
+  const r2 = await h.sug.processFinding(finding, { coldStart: false, tier: "medium" });
   assert.equal(calls, 2, "the generator ran again next pass — not permanently suppressed");
   assert.equal(r2.surfaced, 1, "the finding is reconsidered and surfaces once budget frees up");
 });
 
 test("a throwing / unparseable generation does not mark the finding used", async () => {
-  let es = {};
-  const engineState = { load: async () => es, save: async (p) => { es = p; } };
-  const throwing = makeDedupeSug({ engineState, runSuggest: async () => { throw new Error("model timeout"); } });
-  await throwing.processFinding({ id: "rec:throws", sourceKind: "fact-anomaly", text: "x", refs: [] }, { coldStart: false, tier: "medium" });
-  assert.ok(!(es.suggest?.usedKeys || []).includes("rec:throws"));
+  const throwing = makeSug({
+    runSuggest: async () => {
+      throw new Error("model timeout");
+    },
+  });
+  await throwing.sug.processFinding({ id: "rec:throws", sourceKind: "fact-anomaly", text: "x", refs: [] }, { coldStart: false, tier: "medium" });
+  assert.ok(!(throwing.getEs().suggest?.usedKeys || []).includes("rec:throws"));
 
-  let es2 = {};
-  const engineState2 = { load: async () => es2, save: async (p) => { es2 = p; } };
-  const garbage = makeDedupeSug({ engineState: engineState2, runSuggest: async () => ({ text: "not json at all" }) });
-  await garbage.processFinding({ id: "rec:garbage", sourceKind: "fact-anomaly", text: "x", refs: [] }, { coldStart: false, tier: "medium" });
-  assert.ok(!(es2.suggest?.usedKeys || []).includes("rec:garbage"));
+  const garbage = makeSug({ runSuggest: async () => ({ text: "not json at all" }) });
+  await garbage.sug.processFinding({ id: "rec:garbage", sourceKind: "fact-anomaly", text: "x", refs: [] }, { coldStart: false, tier: "medium" });
+  assert.ok(!(garbage.getEs().suggest?.usedKeys || []).includes("rec:garbage"));
 });
 
 test("a generator that legitimately returns zero candidates (valid empty JSON) IS marked used", async () => {
-  let es = {};
-  const engineState = { load: async () => es, save: async (p) => { es = p; } };
-  const sug = makeDedupeSug({ engineState, runSuggest: async () => ({ text: JSON.stringify({ candidates: [] }) }) });
-  await sug.processFinding({ id: "rec:empty", sourceKind: "fact-anomaly", text: "x", refs: [] }, { coldStart: false, tier: "medium" });
-  assert.ok((es.suggest?.usedKeys || []).includes("rec:empty"));
+  const h = makeSug(); // the default generator returns valid empty JSON
+  await h.sug.processFinding({ id: "rec:empty", sourceKind: "fact-anomaly", text: "x", refs: [] }, { coldStart: false, tier: "medium" });
+  assert.ok((h.getEs().suggest?.usedKeys || []).includes("rec:empty"));
 });
 
 // ---------------------------------------------------------------------------
 // BET-1477 — a byte-identical regeneration of an unchanged candidate is
 // "already surfaced, still current" (surfaced), never a suggest.silent
 // no-card-path hold, and never a veto→decision verb downgrade.
+//
+// These tests pin the whole chain through the REAL card manager
+// (createCtoCards over the harness's fake stores) — the BET-1463
+// byte-identical no-op return in ctoCards.mjs AND the BET-1477 branch in
+// ctoSuggest.mjs, not just a fake writer's return shape.
 // ---------------------------------------------------------------------------
 
-// A REAL card manager (createCtoCards) over fake stores — pins the whole
-// chain: the BET-1463 byte-identical no-op return in ctoCards.mjs AND the
-// BET-1477 branch in ctoSuggest.mjs, not just a fake writer's return shape.
-function makeRegenHarness() {
-  const clock = { ms: 1_000_000 };
-  const ledgerRows = [];
-  let cardPayload = { v: 1, cards: [] };
-  let engineState = { v: 1, suggest: { thresholds: { p_ask: 0.2, p_act: 0.95 } } };
-  const cards = createCtoCards({
-    cardStore: {
-      load: async () => cardPayload,
-      save: async (p) => { cardPayload = p; },
-    },
-    ledger: { append: async (r) => ledgerRows.push(r), read: async () => ledgerRows },
-    engineState: { load: async () => engineState, save: async (p) => { engineState = p; } },
-    now: () => clock.ms,
-  });
-  const deps = {
-    now: () => clock.ms,
-    publish: () => {},
-    ledger: { append: async (r) => ledgerRows.push(r), read: async () => ledgerRows },
-    verdicts: { load: async () => ({ v: 1, entries: Array(VERDICT_MIN).fill({}) }), save: async () => {} },
-    engineState: { load: async () => engineState, save: async (p) => { engineState = p; } },
-    digests: { list: async () => [], load: async () => null },
-    facts: { list: async () => [], load: async () => null },
-    configGet: async () => ({ ctoTier: "medium" }),
-    cards,
+function makeRegenSug(extra = {}) {
+  return makeSug({
+    thresholds: { p_ask: 0.2, p_act: 0.95 },
     runWorthiness: async () => ({ text: "0.6" }),
-    senderReliability: async () => 1.0,
-    fireNotify: async () => {},
-  };
-  return {
-    clock,
-    ledgerRows,
-    cards: () => cardPayload,
-    resetDedupe() { engineState = { v: 1, suggest: { thresholds: { p_ask: 0.2, p_act: 0.95 } } }; }, // simulates usedKeys-cap churn / engine-state reset
-    deps,
-  };
+    buildCards: ({ boardStore, ledger, engineState, now }) =>
+      createCtoCards({ cardStore: boardStore, ledger, engineState, now }),
+    ...extra,
+  });
 }
 
 test("BET-1477: a byte-identical decision regeneration counts as surfaced, not silent (no-card-path)", async () => {
-  const h = makeRegenHarness();
-  const sug = createCtoSuggest({
-    ...h.deps,
-    runSuggest: async () => ({
-      text: JSON.stringify({ candidates: [{ class: "config-change", finding: { text: "Tighten the cache TTL", refs: ["c1"] }, options: [{ label: "Apply", action: { type: "config-change", payload: {} } }] }] }),
-    }),
+  const h = makeRegenSug({
+    runSuggest: async () => ({ text: oneCandidateSuggestText("config-change", "Tighten the cache TTL", ["c1"]) }),
   });
   const finding = { id: "rec:regen-d", sourceKind: "fact-anomaly", text: "Tighten the cache TTL", refs: ["c1"] };
 
-  const r1 = await sug.processFinding(finding, { coldStart: false, tier: "medium" });
+  const r1 = await h.sug.processFinding(finding, { coldStart: false, tier: "medium" });
   assert.equal(r1.surfaced, 1);
   assert.equal(r1.silent, 0);
-  const firstWriteAt = h.cards().cards[0].updatedAt;
+  const firstWriteAt = h.cardPayload.cards[0].updatedAt;
   const presentedRows = h.ledgerRows.filter((r) => r.kind === "suggest.presented").length;
 
   // Next pass: the dedupe marker was evicted (cap churn / engine-state
@@ -1151,38 +852,34 @@ test("BET-1477: a byte-identical decision regeneration counts as surfaced, not s
   // cardContentEqual). This must count as surfaced, not as a no-card-path
   // hold.
   h.clock.ms += 30 * 60_000;
-  h.resetDedupe();
-  const r2 = await sug.processFinding(finding, { coldStart: false, tier: "medium" });
+  h.resetEs();
+  const r2 = await h.sug.processFinding(finding, { coldStart: false, tier: "medium" });
   assert.equal(r2.surfaced, 1, "unchanged card is already on the board and current → surfaced");
   assert.equal(r2.silent, 0);
   assert.ok(!h.ledgerRows.some((r) => r.kind === "suggest.silent" && r.reason === "no-card-path"), "no suggest.silent(no-card-path) miscount");
   assert.equal(h.ledgerRows.filter((r) => r.kind === "suggest.presented").length, presentedRows, "no second presented row — no ledger noise");
-  assert.equal(h.cards().cards.filter((c) => c.state === "open").length, 1, "never duplicated");
-  assert.equal(h.cards().cards[0].updatedAt, firstWriteAt, "byte-identical no-op did not rewrite the card");
+  assert.equal(h.cardPayload.cards.filter((c) => c.state === "open").length, 1, "never duplicated");
+  assert.equal(h.cardPayload.cards[0].updatedAt, firstWriteAt, "byte-identical no-op did not rewrite the card");
 });
 
 test("BET-1477: a byte-identical veto regeneration stays the veto card — surfaced, no downgrade", async () => {
-  const h = makeRegenHarness();
-  const sug = createCtoSuggest({
-    ...h.deps,
-    trustStore: { load: async () => ({ v: 1, tiers: { "record-decision": "veto-window" } }), save: async () => {} },
-    runSuggest: async () => ({
-      text: JSON.stringify({ candidates: [{ class: "record-decision", finding: { text: "Adopt a rollback policy", refs: ["c2"] }, options: [{ label: "Go", action: { type: "record-decision", payload: {} } }] }] }),
-    }),
+  const h = makeRegenSug({
+    trustTiers: { "record-decision": "veto-window" },
+    runSuggest: async () => ({ text: oneCandidateSuggestText("record-decision", "Adopt a rollback policy", ["c2"]) }),
   });
   const finding = { id: "rec:regen-v", sourceKind: "fact-anomaly", text: "Adopt a rollback policy", refs: ["c2"] };
 
-  const r1 = await sug.processFinding(finding, { coldStart: false, tier: "medium" });
+  const r1 = await h.sug.processFinding(finding, { coldStart: false, tier: "medium" });
   assert.equal(r1.surfaced, 1);
-  assert.equal(h.cards().cards[0].variant, "veto");
+  assert.equal(h.cardPayload.cards[0].variant, "veto");
 
   h.clock.ms += 30 * 60_000;
-  h.resetDedupe();
-  const r2 = await sug.processFinding(finding, { coldStart: false, tier: "medium" });
+  h.resetEs();
+  const r2 = await h.sug.processFinding(finding, { coldStart: false, tier: "medium" });
   assert.equal(r2.surfaced, 1, "unchanged veto card is already on the board and current → surfaced");
   assert.equal(r2.silent, 0);
   assert.ok(!h.ledgerRows.some((r) => r.kind === "suggest.silent" && r.reason === "no-card-path"), "no suggest.silent(no-card-path) miscount");
-  const open = h.cards().cards.filter((c) => c.state === "open");
+  const open = h.cardPayload.cards.filter((c) => c.state === "open");
   assert.equal(open.length, 1, "never duplicated");
   assert.equal(open[0].variant, "veto", "no veto→decision verb downgrade on the no-op path");
   assert.equal(h.ledgerRows.filter((r) => r.kind === "suggest.presented" && r.variant === "decision").length, 0);
@@ -1195,27 +892,15 @@ test("BET-1477: a thrown, missing, or explicitly-refused (ok:false) decision-car
     ["missing-method", {}],
     ["ok:false", { upsertDecision: async () => ({ ok: false, changed: false, isNew: false }) }],
   ]) {
-    const clock = { ms: 1_000_000 };
-    const ledgerRows = [];
-    const sug = createCtoSuggest({
-      now: () => clock.ms,
-      publish: () => {},
-      ledger: { append: async (r) => ledgerRows.push(r), read: async () => ledgerRows },
-      verdicts: { load: async () => ({ v: 1, entries: Array(VERDICT_MIN).fill({}) }), save: async () => {} },
-      engineState: { load: async () => ({ suggest: { thresholds: { p_ask: 0.2, p_act: 0.95 } } }), save: async () => {} },
-      digests: { list: async () => [], load: async () => null },
-      facts: { list: async () => [], load: async () => null },
-      configGet: async () => ({ ctoTier: "medium" }),
+    const h = makeSug({
+      thresholds: { p_ask: 0.2, p_act: 0.95 },
       cards: cardsDep,
-      runSuggest: async () => ({
-        text: JSON.stringify({ candidates: [{ class: "config-change", finding: { text: "x", refs: [] }, options: [{ label: "Apply", action: { type: "config-change", payload: {} } }] }] }),
-      }),
+      runSuggest: async () => ({ text: oneCandidateSuggestText("config-change", "x") }),
       runWorthiness: async () => ({ text: "0.6" }),
-      senderReliability: async () => 1.0,
     });
-    const r = await sug.processFinding({ id: `rec:fail-${label}`, sourceKind: "fact-anomaly", text: "x", refs: [] }, { coldStart: false, tier: "medium" });
+    const r = await h.sug.processFinding({ id: `rec:fail-${label}`, sourceKind: "fact-anomaly", text: "x", refs: [] }, { coldStart: false, tier: "medium" });
     assert.equal(r.surfaced, 0, `${label}: no surfaced count without a card`);
     assert.equal(r.silent, 1, `${label}: held instead`);
-    assert.ok(ledgerRows.some((x) => x.kind === "suggest.silent" && x.reason === "no-card-path"), `${label}: the hold reason is preserved`);
+    assert.ok(h.ledgerRows.some((x) => x.kind === "suggest.silent" && x.reason === "no-card-path"), `${label}: the hold reason is preserved`);
   }
 });
