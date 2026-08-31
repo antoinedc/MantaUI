@@ -984,8 +984,11 @@ function validPrRef(ref) {
       // shape read the payload up front and saved it at the end, so a spend
       // row recorded by a concurrent model call was silently reverted by the
       // stale snapshot. The body is an async IIFE so its awaits hold the
-      // store mutex — the serialization IS the fix.
-      await patchBudget((payload) => {
+      // store mutex — the serialization IS the fix. The roll's working shape
+      // is normalizeRoi's (quota normalization + the roi/months/pending
+      // defaults), the same normalizer the old load path applied.
+      await patchStore(store, (raw) => {
+        const payload = normalizeRoi(raw);
         months = { ...payload.roi.months };
         pending = payload.roi.pending.map((j) => ({ ...j }));
         const countMerged = (row) => {

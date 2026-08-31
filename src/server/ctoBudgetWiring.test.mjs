@@ -20,7 +20,11 @@ const indexSource = readFileSync(join(here, "index.mjs"), "utf8");
 
 // Walks the deps object literal that opens at `openMarker` (the first `{`
 // after the marker's call site) and returns its source, balancing braces
-// with quote awareness. Returns "" when the marker is absent.
+// with quote AND comment awareness. Returns "" when the marker is absent.
+// The comment awareness matters: an apostrophe inside a deps comment (e.g.
+// "the poller's pct observation") used to open a phantom quote and derail
+// the brace walk across the rest of the file — any unrelated edit after the
+// block could flip this gate (BET-1464).
 function depsBlock(source, openMarker) {
   const call = source.indexOf(openMarker);
   if (call === -1) return "";
@@ -30,8 +34,21 @@ function depsBlock(source, openMarker) {
   for (let i = open; i < source.length; i += 1) {
     const ch = source[i];
     const prev = i > 0 ? source[i - 1] : "";
+    const next = i + 1 < source.length ? source[i + 1] : "";
     if (quote) {
       if (ch === quote && prev !== "\\") quote = null;
+      continue;
+    }
+    if (ch === "/" && next === "/") {
+      // line comment — skip to the newline (apostrophes inside are text)
+      i = source.indexOf("\n", i);
+      if (i === -1) break;
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      const close = source.indexOf("*/", i + 2);
+      if (close === -1) break;
+      i = close + 1;
       continue;
     }
     if (ch === '"' || ch === "'" || ch === "`") {

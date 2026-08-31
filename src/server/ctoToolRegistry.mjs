@@ -20,7 +20,7 @@
 //
 // All I/O is injected; pure helpers are exported for tests.
 
-import { toolRegistryStore, toolUsageStore, ledgerStore } from "./ctoStores.mjs";
+import { toolRegistryStore, toolUsageStore, ledgerStore, patchStore } from "./ctoStores.mjs";
 import { displayName as catalogDisplayName } from "./ctoToolCatalog.mjs";
 import {
   CHANNEL_TRANSCRIPT,
@@ -390,7 +390,7 @@ export function createToolRegistry(deps = {}) {
   // and normalize via payloadFrom; returning an empty patch means "no
   // change, no save" (the early-exit error paths rely on that).
   function patchRegistry(mutate) {
-    return patchStore(registryStore, async (fresh) => mutate(payloadFrom(fresh)));
+    return patchStore(registryStore, async (fresh) => (await mutate(payloadFrom(fresh))) ?? {});
   }
 
   async function loadPayload() {
