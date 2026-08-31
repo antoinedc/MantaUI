@@ -36,6 +36,7 @@ import {
   appendLedgerBestEffort,
   ledgerStore,
   engineStateStore,
+  patchEngineState,
   trustStore,
   verdictsStore,
   digestsStore,
@@ -77,6 +78,11 @@ export const DEFAULT_CLASS_PRIORS = Object.freeze({
 // Cold-start: below this many verdicts every candidate is capped at ask verbs.
 // Owned by ctoTrust (§10.6-4) since BET-1403 — re-exported for callers.
 export const VERDICT_MIN = TRUST_VERDICT_MIN;
+
+// BET-1465: bound `es.suggest.usedKeys` so it cannot become the next
+// unbounded engine-state store — the `ctoStores.mjs` sweep does not cover
+// engine-state. Same trailing-slice idiom as `ctoBudget.mjs`'s `.slice(-200)`.
+const USED_KEYS_CAP = 200;
 
 // §9.1 default gate thresholds (engine-state overrides).
 export function defaultThresholds() {
@@ -416,6 +422,26 @@ export function createCtoSuggest(deps = {}) {
     return { es, st, thresholds: th, used };
   }
 
+  // BET-1465 (defect 1): persist processed keys into `es.suggest.usedKeys` via
+  // the same per-key read-modify-write path every other engine-state writer
+  // uses (`patchEngineState`) — a snapshot-spread save here would silently
+  // revert whatever another writer (thresholds, trust migration, …) committed
+  // to `es.suggest` between our load and save. Best-effort: a failed write
+  // means the dedupe misses next pass, not that this pass's work is lost.
+  async function markUsed(keys) {
+    const fresh = [...new Set((keys || []).filter((k) => typeof k === "string" && k))];
+    if (!fresh.length) return;
+    try {
+      await patchEngineState((freshState) => {
+        const st = (freshState?.suggest && typeof freshState.suggest === "object") ? freshState.suggest : {};
+        const prior = Array.isArray(st.usedKeys) ? st.usedKeys : [];
+        return { suggest: { ...st, usedKeys: [...prior, ...fresh].slice(-USED_KEYS_CAP) } };
+      }, { engineState });
+    } catch {
+      /* best-effort */
+    }
+  }
+
   async function getThresholds() {
     const { thresholds: th } = await loadState();
     return { ...(thresholds || {}), ...th };
@@ -483,6 +509,24 @@ export function createCtoSuggest(deps = {}) {
   // Run the generator + worthiness gate for ONE finding and route the result.
   async function processFinding(finding, { coldStart, tier } = {}) {
     if (!finding || !finding.id) return { finding: finding?.id, surfaced: 0, silent: 0 };
+
+    // BET-1465 (defect 1): a finding recurs on every pass for as long as its
+    // source digest/fact is retained (up to 30 digests) — without this gate
+    // the SAME finding re-pays the suggest + worthiness model calls, the
+    // ledger row, and (for steep-decay kinds) the notify push every 30
+    // minutes. `finding.id` is already the stable, content-derived identity
+    // the P2 collectors compute (collectFailuresFromDigests /
+    // collectAnomaliesFromFacts / collectWatcherHitsFromLedger) — reused
+    // as-is here, no new id scheme. Gating BEFORE the generator call (rather
+    // than only per-candidate) is what actually avoids "identical work
+    // already done": we cannot know a finding's candidate classes without
+    // calling `runSuggest`, so a candidate-level check alone would still
+    // re-pay that call every pass.
+    const { used } = await loadState();
+    if (used.includes(finding.id)) {
+      return { finding: finding.id, surfaced: 0, silent: 0 };
+    }
+
     const th = await getThresholds();
     const writeToolIds = await getWriteRingTools();
     const reliability = await senderReliability(finding);
@@ -502,6 +546,7 @@ export function createCtoSuggest(deps = {}) {
     }
     if (!candidates.length) {
       await ledgerAppend({ kind: "suggest.generated", findingId: finding.id, sourceKind: finding.sourceKind, candidates: 0 });
+      await markUsed([finding.id]);
       return { finding: finding.id, surfaced: 0, silent: 0 };
     }
 
@@ -560,6 +605,11 @@ export function createCtoSuggest(deps = {}) {
         capped: decision.capped === true,
       };
       let surfacedKind = null;
+      // BET-1465 (defect 1, belt-and-braces): whether the card write that
+      // actually surfaced was a genuinely NEW card (`isNew`), not a re-upsert
+      // of one already on the board. Gates `fireNotify` below so a re-surfaced
+      // suggestion never re-pushes even if the (1) dedupe above somehow missed.
+      let cardIsNew = false;
 
       // §9.2 act-and-report: the bound action of the primary option executes
       // immediately; the ledger row + digest report are written by the trust
@@ -592,7 +642,9 @@ export function createCtoSuggest(deps = {}) {
         let wrote = false;
         if (cards && typeof cards.upsertVeto === "function") {
           try {
-            wrote = (await cards.upsertVeto({ ...baseCard, variant: "veto", ts: now() })).changed === true;
+            const res = await cards.upsertVeto({ ...baseCard, variant: "veto", ts: now() });
+            wrote = res?.changed === true;
+            cardIsNew = res?.isNew === true;
           } catch {
             wrote = false;
           }
@@ -612,7 +664,9 @@ export function createCtoSuggest(deps = {}) {
         let wrote = false;
         if (cards && typeof cards.upsertDecision === "function") {
           try {
-            wrote = (await cards.upsertDecision({ ...card, ts: now() })).changed === true;
+            const res = await cards.upsertDecision({ ...card, ts: now() });
+            wrote = res?.changed === true;
+            cardIsNew = res?.isNew === true;
           } catch {
             wrote = false;
           }
@@ -629,19 +683,31 @@ export function createCtoSuggest(deps = {}) {
       }
 
       // notify variant: informational-tier router call when the decay rule
-      // matches AND a decision card was actually surfaced.
-      if (decision.notify === true) {
+      // matches AND a decision card was actually surfaced. Also require
+      // `cardIsNew` (belt-and-braces, defect 1): a re-surfaced suggestion
+      // (upsert of an existing card) must never re-push, even if it somehow
+      // reached here despite the (1) dedupe gate above.
+      if (decision.notify === true && cardIsNew) {
         try {
           await fireNotify({
             title: "CTO suggestion",
             message: `Consider "${c.class}": ${c.finding.text}`,
             urgent: false,
+            // BET-1465 (defect 2): push.mjs tags a session-less `fireNotify`
+            // call `notify-${sessionID ?? "global"}` — every session-less AI
+            // `notify` tool call collides on the same "notify-global" tag and
+            // silently overwrites its predecessor in the notification shade.
+            // Passing a distinct, stable per-candidate identifier here drives
+            // that SAME (unchanged) tag formula to a per-candidate tag,
+            // without touching push.mjs's defaulting logic at all.
+            sessionID: `cto-suggest:${c.id}`,
           });
         } catch {
           /* best-effort */
         }
       }
     }
+    await markUsed([finding.id, ...candidates.map((c) => c.id)]);
     return { finding: finding.id, surfaced, silent };
   }
 
