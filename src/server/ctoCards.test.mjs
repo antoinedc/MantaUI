@@ -345,6 +345,36 @@ test("createCtoCards exports upsertBlocker", () => {
   assert.equal(typeof cards.upsertBlocker, "function");
 });
 
+test("BET-1463: 82 pendingBlockers entries from the SAME watchdog trip source fold into ONE card, not 82", async () => {
+  // The literal shape of the 2026-08-31 incident: repeated watchdog trips
+  // each wrote a uniquely-id'd pendingBlockers entry with the same source.
+  const pendingBlockers = Array.from({ length: 82 }, (_, i) => ({
+    id: `trip-${i}`,
+    kind: "blocker",
+    source: "watchdog",
+    reason: `ambient spend ${i} > 4x expected`,
+    ts: 1_000_000 + i * 60_000,
+    resolved: false,
+  }));
+  const h = makeHarness({ pendingBlockers });
+
+  const r1 = await h.cards.ingestHealthEscalations();
+  assert.equal(r1.changed, true);
+  const open1 = h.store().cards.filter((c) => c.state === "open");
+  assert.equal(open1.length, 1, "at most one card after the first tick");
+  assert.equal(open1[0].pendingSince, 1_000_000, "pendingSince is the EARLIEST outstanding trip");
+  assert.ok(open1[0].body.includes("81"), "body carries the MOST RECENT reason");
+
+  const r2 = await h.cards.ingestHealthEscalations();
+  assert.equal(r2.changed, false, "second tick produces no new card / no new write");
+  assert.equal(h.store().cards.filter((c) => c.state === "open").length, 1);
+  assert.equal(
+    h.engineStateSnapshot().pendingBlockers.filter((b) => b.resolved !== true).length,
+    0,
+    "every entry stamped consumed",
+  );
+});
+
 test("dismiss moves a card out of cards.json with a card.dismissed ledger row", async () => {
   const h = makeHarness();
   await h.cards.onAskStart({ sourceKind: "question", sourceId: "que_m", sessionID: "sM", body: "", ts: h.clock.ms });

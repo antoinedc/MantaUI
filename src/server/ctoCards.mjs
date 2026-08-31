@@ -170,6 +170,14 @@ export function askQuestionText(evt) {
   return "";
 }
 
+// BET-1463: the health-card grouping identity for one `pendingBlockers`
+// entry — every entry from the same underlying trip source (`recordBlocker`'s
+// `source` param, e.g. "watchdog" | "rate_limit") is the SAME ongoing
+// condition and folds into ONE card, never one card per entry.
+function healthGroupKey(b) {
+  return typeof b?.source === "string" && b.source ? b.source : "unknown";
+}
+
 // BET-1463 (defect 2): compare a freshly-built card against the existing open
 // card, ignoring `updatedAt` (which always moves — it is the "when did we
 // last check" stamp, not content). A content-identical rebuild is not a
@@ -359,25 +367,27 @@ export function createCtoCards(deps = {}) {
       sessionID: card.sessionID,
       reason,
     });
-    // BET-1463 (defect 1): a closed health card's source entry must not
-    // survive in engine-state.json `pendingBlockers`, or the next card tick
-    // resurrects it (this is the "Resume doesn't work" bug). Covers
-    // resolveById AND dismissById since both call this helper.
+    // BET-1463 (defect 1): every pendingBlockers entry that fed the closed
+    // health card must not survive in engine-state.json, or the next card
+    // tick resurrects it (this is the "Resume doesn't work" bug). Covers
+    // resolveById AND dismissById since both call this helper. `sourceId` for
+    // a health card is the trip's GROUP KEY (see `healthGroupKey` below), not
+    // one entry's id — multiple pendingBlockers entries fold into one card.
     if (card.sourceKind === HEALTH_SOURCE_KIND) {
-      await dropPendingBlocker(card.sourceId);
+      await dropPendingBlockersByGroup(card.sourceId);
     }
     return { changed: true, card };
   }
 
-  // Remove one entry from `pendingBlockers` by its watchdog-assigned id (used
+  // Remove every `pendingBlockers` entry belonging to one health group (used
   // when its health card closes — resolved or dismissed). Best-effort, and a
-  // pure no-op patch (no save) when the id is already gone.
-  async function dropPendingBlocker(id) {
-    if (id === undefined || id === null || typeof patchPendingBlockers !== "function") return;
+  // pure no-op patch (no save) when nothing in the group is left.
+  async function dropPendingBlockersByGroup(group) {
+    if (!group || typeof patchPendingBlockers !== "function") return;
     try {
       await patchPendingBlockers((fresh) => {
         const pending = Array.isArray(fresh?.pendingBlockers) ? fresh.pendingBlockers : [];
-        const next = pending.filter((b) => b?.id !== id);
+        const next = pending.filter((b) => healthGroupKey(b) !== group);
         return next.length === pending.length ? {} : { pendingBlockers: next };
       });
     } catch {
@@ -470,6 +480,15 @@ export function createCtoCards(deps = {}) {
   // Source (2): read the watchdog's blocker-card requests that A2 already
   // writes to engine-state.json `pendingBlockers` and turn the unresolved ones
   // into health blocker cards. `{changed}` for tests/diagnostics.
+  //
+  // BET-1463: one health CARD per underlying CONDITION (`healthGroupKey`),
+  // not one card per pendingBlockers ENTRY. This is the literal shape of the
+  // 2026-08-31 incident — a watchdog that (before BET-1462) re-tripped every
+  // tick wrote one new uniquely-id'd entry per trip, and keying the card by
+  // that per-entry id turned 82 trips into 82 "identical" cards. Repeat
+  // trips of the SAME condition upsert the one ongoing card in place
+  // (pendingSince = the EARLIEST trip still outstanding, body = the most
+  // recent reason) exactly like re-detecting the same worker ask never dups.
   async function ingestHealthEscalations({ ts = now() } = {}) {
     let payload;
     try {
@@ -478,26 +497,41 @@ export function createCtoCards(deps = {}) {
       return { changed: false };
     }
     const pending = Array.isArray(payload?.pendingBlockers) ? payload.pendingBlockers : [];
+    const unresolved = pending.filter((b) => b?.resolved !== true);
     let changed = false;
-    // BET-1463 (defect 1): every entry ingested here gets stamped `resolved:
-    // true` below (once) so it is never reprocessed — this is what makes the
-    // `resolved !== true` filter below live instead of dead code.
     const consumedIds = [];
-    for (const b of pending) {
-      if (b?.resolved === true) continue;
-      const r = await upsertBlocker({
-        sourceKind: HEALTH_SOURCE_KIND,
-        sourceId: b.id,
-        sessionID: undefined,
-        title: blockerTitle(HEALTH_SOURCE_KIND),
-        body: blockerBody(HEALTH_SOURCE_KIND, b?.reason),
-        refs: [],
-        ts,
-        pendingSince: typeof b?.ts === "number" ? b.ts : ts,
-      });
-      changed = changed || r.changed;
-      if (b?.id !== undefined) consumedIds.push(b.id);
+    if (unresolved.length) {
+      const groups = new Map();
+      for (const b of unresolved) {
+        const key = healthGroupKey(b);
+        const bts = typeof b?.ts === "number" ? b.ts : ts;
+        const group = groups.get(key) ?? { minTs: bts, latest: b, latestTs: bts, ids: [] };
+        if (bts < group.minTs) group.minTs = bts;
+        if (bts >= group.latestTs) {
+          group.latest = b;
+          group.latestTs = bts;
+        }
+        if (b?.id !== undefined) group.ids.push(b.id);
+        groups.set(key, group);
+      }
+      for (const [key, group] of groups) {
+        const r = await upsertBlocker({
+          sourceKind: HEALTH_SOURCE_KIND,
+          sourceId: key,
+          sessionID: undefined,
+          title: blockerTitle(HEALTH_SOURCE_KIND),
+          body: blockerBody(HEALTH_SOURCE_KIND, group.latest?.reason),
+          refs: [],
+          ts,
+          pendingSince: group.minTs,
+        });
+        changed = changed || r.changed;
+        consumedIds.push(...group.ids);
+      }
     }
+    // BET-1463 (defect 1): every entry ingested above gets stamped `resolved:
+    // true` here (once) so it is never reprocessed — this is what makes the
+    // `resolved !== true` filter above live instead of dead code.
     await markPendingBlockersConsumed(consumedIds);
     return { changed };
   }
