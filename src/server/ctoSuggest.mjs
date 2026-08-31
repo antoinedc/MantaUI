@@ -36,6 +36,7 @@ import {
   appendLedgerBestEffort,
   ledgerStore,
   engineStateStore,
+  patchEngineState,
   trustStore,
   verdictsStore,
   digestsStore,
@@ -77,6 +78,11 @@ export const DEFAULT_CLASS_PRIORS = Object.freeze({
 // Cold-start: below this many verdicts every candidate is capped at ask verbs.
 // Owned by ctoTrust (§10.6-4) since BET-1403 — re-exported for callers.
 export const VERDICT_MIN = TRUST_VERDICT_MIN;
+
+// BET-1465: bound `es.suggest.usedKeys` so it cannot become the next
+// unbounded engine-state store — the `ctoStores.mjs` sweep does not cover
+// engine-state. Same trailing-slice idiom as `ctoBudget.mjs`'s `.slice(-200)`.
+const USED_KEYS_CAP = 200;
 
 // §9.1 default gate thresholds (engine-state overrides).
 export function defaultThresholds() {
@@ -416,6 +422,26 @@ export function createCtoSuggest(deps = {}) {
     return { es, st, thresholds: th, used };
   }
 
+  // BET-1465 (defect 1): persist processed keys into `es.suggest.usedKeys` via
+  // the same per-key read-modify-write path every other engine-state writer
+  // uses (`patchEngineState`) — a snapshot-spread save here would silently
+  // revert whatever another writer (thresholds, trust migration, …) committed
+  // to `es.suggest` between our load and save. Best-effort: a failed write
+  // means the dedupe misses next pass, not that this pass's work is lost.
+  async function markUsed(keys) {
+    const fresh = [...new Set((keys || []).filter((k) => typeof k === "string" && k))];
+    if (!fresh.length) return;
+    try {
+      await patchEngineState((freshState) => {
+        const st = (freshState?.suggest && typeof freshState.suggest === "object") ? freshState.suggest : {};
+        const prior = Array.isArray(st.usedKeys) ? st.usedKeys : [];
+        return { suggest: { ...st, usedKeys: [...prior, ...fresh].slice(-USED_KEYS_CAP) } };
+      }, { engineState });
+    } catch {
+      /* best-effort */
+    }
+  }
+
   async function getThresholds() {
     const { thresholds: th } = await loadState();
     return { ...(thresholds || {}), ...th };
@@ -483,11 +509,41 @@ export function createCtoSuggest(deps = {}) {
   // Run the generator + worthiness gate for ONE finding and route the result.
   async function processFinding(finding, { coldStart, tier } = {}) {
     if (!finding || !finding.id) return { finding: finding?.id, surfaced: 0, silent: 0 };
-    const th = await getThresholds();
+
+    // BET-1465 (defect 1): a finding recurs on every pass for as long as its
+    // source digest/fact is retained (up to 30 digests) — without this gate
+    // the SAME finding re-pays the suggest + worthiness model calls, the
+    // ledger row, and (for steep-decay kinds) the notify push every 30
+    // minutes. `finding.id` is already the stable, content-derived identity
+    // the P2 collectors compute (collectFailuresFromDigests /
+    // collectAnomaliesFromFacts / collectWatcherHitsFromLedger) — reused
+    // as-is here, no new id scheme. Gating BEFORE the generator call (rather
+    // than only per-candidate) is what actually avoids "identical work
+    // already done": we cannot know a finding's candidate classes without
+    // calling `runSuggest`, so a candidate-level check alone would still
+    // re-pay that call every pass.
+    // BET-1465 review (nit): loadState() is the single engine-state read for
+    // this finding — its `thresholds` feeds the same merge getThresholds()
+    // does, so we don't pay a second engine-state load per finding per pass.
+    const { used, thresholds: stateThresholds } = await loadState();
+    if (used.includes(finding.id)) {
+      return { finding: finding.id, surfaced: 0, silent: 0 };
+    }
+
+    const th = { ...(thresholds || {}), ...stateThresholds };
     const writeToolIds = await getWriteRingTools();
     const reliability = await senderReliability(finding);
 
+    // BET-1465 review (Block 1): the §3.3 ephemeral gate refuses by RETURNING
+    // `{ok:false, gated:true}`, not by throwing — so a budget-closed pass (or
+    // a transient model error / unparseable response) must NOT be treated as
+    // "the generator ran and legitimately said zero candidates". Only mark a
+    // finding used once we've confirmed the generator actually completed and
+    // returned parseable output; a gated/failed/unparseable pass falls
+    // through untouched so the finding is reconsidered next pass, exactly as
+    // it was before this dedupe existed.
     let candidates = [];
+    let generated = false;
     if (runSuggest) {
       try {
         const res = await runSuggest({
@@ -495,13 +551,29 @@ export function createCtoSuggest(deps = {}) {
           context: buildSuggestContext({ finding, writeToolIds, tier, capabilities }),
           deps: { validate: (out) => normalizeCandidates(parseSuggestionText(out?.text), finding.id).length >= 0 },
         });
-        candidates = normalizeCandidates(parseSuggestionText(res?.text), finding.id);
+        if (res?.ok === false) {
+          // Ephemeral rate/budget gate refused — the generator never ran.
+          generated = false;
+        } else {
+          const parsed = parseSuggestionText(res?.text);
+          if (parsed === null) {
+            // Ran, but returned unparseable output — a transient quality
+            // failure, not a legitimate "no suggestion" answer.
+            generated = false;
+          } else {
+            candidates = normalizeCandidates(parsed, finding.id);
+            generated = true;
+          }
+        }
       } catch {
-        candidates = [];
+        generated = false;
       }
     }
     if (!candidates.length) {
-      await ledgerAppend({ kind: "suggest.generated", findingId: finding.id, sourceKind: finding.sourceKind, candidates: 0 });
+      if (generated) {
+        await ledgerAppend({ kind: "suggest.generated", findingId: finding.id, sourceKind: finding.sourceKind, candidates: 0 });
+        await markUsed([finding.id]);
+      }
       return { finding: finding.id, surfaced: 0, silent: 0 };
     }
 
@@ -560,6 +632,11 @@ export function createCtoSuggest(deps = {}) {
         capped: decision.capped === true,
       };
       let surfacedKind = null;
+      // BET-1465 (defect 1, belt-and-braces): whether the card write that
+      // actually surfaced was a genuinely NEW card (`isNew`), not a re-upsert
+      // of one already on the board. Gates `fireNotify` below so a re-surfaced
+      // suggestion never re-pushes even if the (1) dedupe above somehow missed.
+      let cardIsNew = false;
 
       // §9.2 act-and-report: the bound action of the primary option executes
       // immediately; the ledger row + digest report are written by the trust
@@ -592,7 +669,9 @@ export function createCtoSuggest(deps = {}) {
         let wrote = false;
         if (cards && typeof cards.upsertVeto === "function") {
           try {
-            wrote = (await cards.upsertVeto({ ...baseCard, variant: "veto", ts: now() })).changed === true;
+            const res = await cards.upsertVeto({ ...baseCard, variant: "veto", ts: now() });
+            wrote = res?.changed === true;
+            cardIsNew = res?.isNew === true;
           } catch {
             wrote = false;
           }
@@ -612,7 +691,9 @@ export function createCtoSuggest(deps = {}) {
         let wrote = false;
         if (cards && typeof cards.upsertDecision === "function") {
           try {
-            wrote = (await cards.upsertDecision({ ...card, ts: now() })).changed === true;
+            const res = await cards.upsertDecision({ ...card, ts: now() });
+            wrote = res?.changed === true;
+            cardIsNew = res?.isNew === true;
           } catch {
             wrote = false;
           }
@@ -629,19 +710,38 @@ export function createCtoSuggest(deps = {}) {
       }
 
       // notify variant: informational-tier router call when the decay rule
-      // matches AND a decision card was actually surfaced.
-      if (decision.notify === true) {
+      // matches AND a decision card was actually surfaced. Also require
+      // `cardIsNew` (belt-and-braces, defect 1): a re-surfaced suggestion
+      // (upsert of an existing card) must never re-push, even if it somehow
+      // reached here despite the (1) dedupe gate above.
+      if (decision.notify === true && cardIsNew) {
         try {
           await fireNotify({
             title: "CTO suggestion",
             message: `Consider "${c.class}": ${c.finding.text}`,
             urgent: false,
+            // BET-1465 (defect 2, review fix): every session-less AI `notify`
+            // call previously collided on the SAME "notify-global" tag and
+            // silently overwrote its predecessor in the notification shade.
+            // `sessionID` is NOT a private tag input — it travels to the
+            // phone and the native app deep-links a tap to that session, so
+            // synthesizing one here (as the first cut of this fix did) opens
+            // a tap onto a session that doesn't exist. `tag` is the caller
+            // override push.mjs now exposes for exactly this case; sessionID
+            // stays unset, so a tap just opens the app, as it always did for
+            // a session-less notify.
+            tag: `cto-suggest:${c.id}`,
           });
         } catch {
           /* best-effort */
         }
       }
     }
+    // BET-1465 review (Question 1): only `finding.id` is ever read back by the
+    // dedupe gate above — per-candidate keys were write-only and, at ~2
+    // candidates/finding, were eating the 200-entry cap ~3x faster than the
+    // cap implies. Persist only what's actually consulted.
+    await markUsed([finding.id]);
     return { finding: finding.id, surfaced, silent };
   }
 

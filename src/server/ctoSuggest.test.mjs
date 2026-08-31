@@ -763,3 +763,188 @@ test("verdictHeld stamps the held row's class onto the subject (§9.4 attributio
   assert.equal(recorded.length, 1);
   assert.equal(recorded[0].subject.class, "start-job");
 });
+
+// ---------------------------------------------------------------------------
+// BET-1465 — usedKeys dedupe (defect 1) + distinct notify tag (defect 2)
+//
+// One local builder shared by the four tests below (instead of repeating the
+// createCtoSuggest() config in each) so this addition doesn't itself grow the
+// file's clone count.
+// ---------------------------------------------------------------------------
+
+function oneCandidateSuggestText(cls, text, refs = []) {
+  return JSON.stringify({
+    candidates: [{ class: cls, finding: { text, refs }, options: [{ label: "Go", action: { type: cls, payload: {} } }] }],
+  });
+}
+
+function makeDedupeSug({
+  engineState: engineStateDep = { load: async () => ({ suggest: { thresholds: { p_ask: 0.2, p_act: 0.95 } } }), save: async () => {} },
+  ledger: ledgerDep = { append: async () => {}, read: async () => [] },
+  digests: digestsDep = { list: async () => [], load: async () => null },
+  cards: cardsDep = { upsertDecision: async () => ({ changed: true, isNew: true }) },
+  runSuggest: runSuggestDep = async () => ({ text: JSON.stringify({ candidates: [] }) }),
+  runWorthiness: runWorthinessDep = async () => ({ text: "0.9" }),
+  fireNotify: fireNotifyDep = async () => {},
+  now = () => 1,
+} = {}) {
+  return createCtoSuggest({
+    now,
+    publish: () => {},
+    ledger: ledgerDep,
+    verdicts: { load: async () => ({ entries: Array(VERDICT_MIN).fill({}) }), save: async () => {} },
+    engineState: engineStateDep,
+    digests: digestsDep,
+    facts: { list: async () => [], load: async () => null },
+    configGet: async () => ({ ctoTier: "medium" }),
+    cards: cardsDep,
+    runSuggest: runSuggestDep,
+    runWorthiness: runWorthinessDep,
+    senderReliability: async () => 1.0,
+    fireNotify: fireNotifyDep,
+  });
+}
+
+test("dedupe: a second runPass over the same findings makes no new model calls, ledger rows, or notifies", async () => {
+  const clock = { ms: 1_000_000 };
+  const ledgerRows = [];
+  let es = { suggest: { thresholds: { p_ask: 0.2, p_act: 0.95 } } };
+  let suggestCalls = 0;
+  let worthinessCalls = 0;
+  const notified = [];
+  const digestList = [
+    { generated: 1, items: [{ tier: "failure", text: "Pipeline red on main", refs: ["c1"] }] },
+    { generated: 2, items: [{ tier: "failure", text: "Pipeline red on main", refs: ["c2"] }] },
+  ];
+  const sug = makeDedupeSug({
+    now: () => clock.ms,
+    engineState: { load: async () => es, save: async (p) => { es = p; } },
+    ledger: { append: async (r) => ledgerRows.push(r), read: async () => ledgerRows },
+    digests: { list: async () => ["d1", "d2"], load: async (id) => (id === "d1" ? digestList[0] : digestList[1]) },
+    runSuggest: async () => {
+      suggestCalls += 1;
+      return { text: oneCandidateSuggestText("start-job", "Restart the stuck build", ["c1"]) };
+    },
+    runWorthiness: async () => {
+      worthinessCalls += 1;
+      return { text: "0.9" };
+    },
+    fireNotify: async (args) => notified.push(args),
+  });
+
+  const r1 = await sug.runPass({ nowMs: clock.ms });
+  assert.equal(r1.findings, 1);
+  assert.equal(r1.surfaced, 1);
+  assert.equal(suggestCalls, 1);
+  assert.equal(worthinessCalls, 1);
+  assert.equal(ledgerRows.length, 1);
+  assert.equal(notified.length, 1); // failure-recurrence → notify
+
+  clock.ms += 30 * 60_000; // simulate the next 30-minute pass over the SAME retained digests
+  const r2 = await sug.runPass({ nowMs: clock.ms });
+  assert.equal(r2.findings, 1); // the finding is still collected (source retained)
+  assert.equal(r2.surfaced, 0);
+  assert.equal(r2.silent, 0);
+  assert.equal(suggestCalls, 1, "no new suggest model call");
+  assert.equal(worthinessCalls, 1, "no new worthiness model call");
+  assert.equal(ledgerRows.length, 1, "no new ledger row");
+  assert.equal(notified.length, 1, "no new fireNotify");
+});
+
+test("usedKeys is capped at 200 entries; the oldest fall off", async () => {
+  let es = { suggest: { usedKeys: Array.from({ length: 200 }, (_, i) => `old-${i}`) } };
+  const sug = makeDedupeSug({ engineState: { load: async () => es, save: async (p) => { es = p; } } });
+  await sug.processFinding({ id: "rec:new", sourceKind: "fact-anomaly", text: "x", refs: [] }, { coldStart: false, tier: "medium" });
+  const used = es.suggest.usedKeys;
+  assert.equal(used.length, 200);
+  assert.ok(used.includes("rec:new"));
+  assert.ok(!used.includes("old-0")); // the oldest entry fell off
+  assert.ok(used.includes("old-1")); // next-oldest survives — only one entry was dropped
+});
+
+test("notify: fireNotify carries a distinct, non-global tag per candidate WITHOUT synthesizing a sessionID (defect 2, review fix)", async () => {
+  const notified = [];
+  const fireNotify = async (args) => notified.push(args);
+  const a = makeDedupeSug({ runSuggest: async () => ({ text: oneCandidateSuggestText("start-job", "A") }), fireNotify });
+  const b = makeDedupeSug({ runSuggest: async () => ({ text: oneCandidateSuggestText("start-job", "B") }), fireNotify });
+  await a.processFinding({ id: "rec:a", sourceKind: "failure-recurrence", text: "A", refs: [] }, { coldStart: false, tier: "medium" });
+  await b.processFinding({ id: "rec:b", sourceKind: "failure-recurrence", text: "B", refs: [] }, { coldStart: false, tier: "medium" });
+  assert.equal(notified.length, 2);
+  // push.mjs's `tag` override (added for this fix) is the caller-supplied
+  // identifier — a present, per-candidate tag is what keeps two unrelated
+  // CTO suggestions (and every other session-less AI `notify` call) from
+  // colliding on the shared "notify-global" tag. `sessionID` is a real,
+  // load-bearing field that deep-links a phone tap — it must stay unset here,
+  // never synthesized just to influence the tag (that was the reviewer Block).
+  assert.ok(notified[0].tag, "tag must be present — omission degrades to the shared notify-global tag");
+  assert.ok(notified[1].tag);
+  assert.notEqual(notified[0].tag, notified[1].tag);
+  assert.doesNotMatch(String(notified[0].tag), /^global$/);
+  assert.equal(notified[0].sessionID, undefined);
+  assert.equal(notified[1].sessionID, undefined);
+});
+
+test("fireNotify is gated on the card write's isNew: a re-upserted (not new) card never re-pushes", async () => {
+  const notified = [];
+  const sug = makeDedupeSug({
+    cards: { upsertDecision: async () => ({ changed: true, isNew: false }) }, // upsert of a card already on the board
+    runSuggest: async () => ({ text: oneCandidateSuggestText("start-job", "again") }),
+    fireNotify: async (args) => notified.push(args),
+  });
+  const r = await sug.processFinding({ id: "rec:re", sourceKind: "failure-recurrence", text: "again", refs: [] }, { coldStart: false, tier: "medium" });
+  assert.equal(r.surfaced, 1); // the card write still counts as surfaced
+  assert.equal(notified.length, 0); // but never re-pushes a not-new card
+});
+
+// ---------------------------------------------------------------------------
+// BET-1465 review, Block 1 — a gated or failed generation must NOT
+// permanently mark the finding used. The §3.3 ephemeral gate refuses by
+// RETURNING {ok:false}, not by throwing, so a budget-closed pass looked
+// exactly like "the generator ran and said zero candidates" before this fix.
+// ---------------------------------------------------------------------------
+
+test("a gated generation ({ok:false}) does not mark the finding used — it's reconsidered next pass", async () => {
+  let es = { suggest: { thresholds: { p_ask: 0.2, p_act: 0.95 } } };
+  const engineState = { load: async () => es, save: async (p) => { es = p; } };
+  let calls = 0;
+  const sug = makeDedupeSug({
+    engineState,
+    runSuggest: async () => {
+      calls += 1;
+      // §3.3 ephemeral gate refusal shape (index.mjs gatedSuggestionEphemeral)
+      return calls === 1 ? { ok: false, gated: true, error: "budget-closed" } : { text: oneCandidateSuggestText("start-job", "recovered") };
+    },
+    runWorthiness: async () => ({ text: "0.9" }),
+  });
+  const finding = { id: "rec:gated", sourceKind: "failure-recurrence", text: "x", refs: [] };
+  const r1 = await sug.processFinding(finding, { coldStart: false, tier: "medium" });
+  assert.equal(r1.surfaced, 0);
+  assert.equal(r1.silent, 0);
+  assert.ok(!(es.suggest?.usedKeys || []).includes("rec:gated"), "gated pass must not mark used");
+
+  const r2 = await sug.processFinding(finding, { coldStart: false, tier: "medium" });
+  assert.equal(calls, 2, "the generator ran again next pass — not permanently suppressed");
+  assert.equal(r2.surfaced, 1, "the finding is reconsidered and surfaces once budget frees up");
+});
+
+test("a throwing / unparseable generation does not mark the finding used", async () => {
+  let es = {};
+  const engineState = { load: async () => es, save: async (p) => { es = p; } };
+  const throwing = makeDedupeSug({ engineState, runSuggest: async () => { throw new Error("model timeout"); } });
+  await throwing.processFinding({ id: "rec:throws", sourceKind: "fact-anomaly", text: "x", refs: [] }, { coldStart: false, tier: "medium" });
+  assert.ok(!(es.suggest?.usedKeys || []).includes("rec:throws"));
+
+  let es2 = {};
+  const engineState2 = { load: async () => es2, save: async (p) => { es2 = p; } };
+  const garbage = makeDedupeSug({ engineState: engineState2, runSuggest: async () => ({ text: "not json at all" }) });
+  await garbage.processFinding({ id: "rec:garbage", sourceKind: "fact-anomaly", text: "x", refs: [] }, { coldStart: false, tier: "medium" });
+  assert.ok(!(es2.suggest?.usedKeys || []).includes("rec:garbage"));
+});
+
+test("a generator that legitimately returns zero candidates (valid empty JSON) IS marked used", async () => {
+  let es = {};
+  const engineState = { load: async () => es, save: async (p) => { es = p; } };
+  const sug = makeDedupeSug({ engineState, runSuggest: async () => ({ text: JSON.stringify({ candidates: [] }) }) });
+  await sug.processFinding({ id: "rec:empty", sourceKind: "fact-anomaly", text: "x", refs: [] }, { coldStart: false, tier: "medium" });
+  assert.ok((es.suggest?.usedKeys || []).includes("rec:empty"));
+});
