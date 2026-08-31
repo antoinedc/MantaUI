@@ -579,11 +579,41 @@ export function mergeGatewayAuth(
 // string array; we want the FIRST IPv4 — Tailscale's order is stable and IPv4
 // comes first on a typical box, but we don't rely on it: we filter).
 //
-// Returns `{ ip: string }` on success, `null` for any failure: invalid JSON,
-// BackendState != "Running", missing TailscaleIPs, or no IPv4 in the list. Raw
-// IP only — we deliberately do NOT return the MagicDNS name. Plain HTTP over
-// the WireGuard tunnel needs the raw IP (MagicDNS resolution requires the
-// `tailscale0` interface up on the requester).
+// Returns `{ ip, ipv6, dnsName }` on success, `null` for any failure: invalid
+// JSON, BackendState != "Running", missing TailscaleIPs, or no IPv4 in the list.
+//
+// `ip` is what the server BINDS its tailnet listener to — always the raw IPv4,
+// never a name (you bind an address, not a hostname).
+//
+// `ipv6` is the box's Tailscale IPv6 (`fd7a:…`), or null. Tailscale assigns
+// BOTH families to every node and MagicDNS publishes both under the name, so a
+// client resolving the name gets two candidate addresses and — on Apple's
+// stack especially — tries the IPv6 one FIRST. A box listening only on its
+// IPv4 therefore has an address that answers and an address that does not, and
+// a client that picks the wrong one stalls instead of failing cleanly.
+//
+// This did not matter while the box advertised a raw IPv4: there was exactly
+// one address to try and it was the bound one. It became reachable the moment
+// the box started advertising a NAME, so the two changes belong together —
+// advertising a name obliges the box to answer on everything that name
+// resolves to.
+//
+// `dnsName` is the box's MagicDNS name (`Self.DNSName`, e.g.
+// "mybox.tail1234.ts.net."), normalized, or `null` when the tailnet has
+// MagicDNS disabled / the field is absent or unusable. It is what the box
+// ADVERTISES to client devices, and the two are deliberately separate:
+//
+//   An earlier revision returned the IP only, reasoning that MagicDNS
+//   resolution needs the tailnet interface up on the requester. That is true
+//   and irrelevant — a requester without the tailnet up cannot reach
+//   100.64.0.0/10 either. What the reasoning missed is that iOS refuses plain
+//   HTTP to a bare IP outright: App Transport Security only exempts the
+//   RFC1918 private ranges, and Tailscale's 100.64/10 (RFC 6598) is not one of
+//   them, while an ATS exception cannot name an IP address at all. So an
+//   IP-only box could be opened in Safari (exempt from an app's ATS policy)
+//   and never by the app — which is exactly how it shipped. A `ts.net` name
+//   CAN carry an ATS exception, so advertising the name is what makes a
+//   tailnet box reachable from the iOS client.
 //
 // IPv4 regex is intentionally permissive (`\d{1,3}` per octet, not `0-255`) —
 // the caller doesn't need to validate octet ranges, just that the shape is
@@ -591,6 +621,37 @@ export function mergeGatewayAuth(
 // address, so an over-permissive regex is harmless here.
 // ---------------------------------------------------------------------------
 const IPV4_RE = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
+// Deliberately strict (hex groups + colons only, no zone id, no embedded IPv4
+// form): this value is passed to a bind() call, so "shaped like an address"
+// is the wrong bar — anything unexpected is dropped rather than forwarded.
+const IPV6_RE = /^[0-9a-f]{0,4}(:[0-9a-f]{0,4}){2,7}$/i;
+
+// A MagicDNS name we are willing to advertise. The `.ts.net` suffix is NOT
+// cosmetic and NOT a stylistic preference — it is the acceptance condition of
+// every consumer downstream, and a name failing it is strictly worse than the
+// IP it would replace:
+//   • `isPrivateServerUrl` (src/shared/transport.mjs, and its Swift port in
+//     MantaPairingModels.swift) accepts a hostname ONLY when it is `localhost`
+//     or ends in `.ts.net`. A pair link carrying anything else is REFUSED
+//     WHOLESALE by the app — not downgraded, refused — so an over-permissive
+//     value here breaks pairing completely instead of merely leaving it as
+//     broken as the IP does.
+//   • the iOS ATS exception is written against `ts.net` + subdomains.
+// Hence: validate hard, and fall back to the IP on anything unexpected.
+const TAILNET_DNS_NAME_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*\.ts\.net$/;
+
+// Normalize a raw `Self.DNSName` into an advertisable host, or null.
+// Tailscale reports it FQDN-style with a trailing dot ("mybox.tail1234.ts.net.");
+// strip that, lowercase, and require at least one label in front of `.ts.net`
+// (a bare "ts.net" is not a box).
+export function normalizeTailnetDnsName(raw) {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim().replace(/\.+$/, "").toLowerCase();
+  if (trimmed === "" || trimmed.length > 253) return null;
+  if (!TAILNET_DNS_NAME_RE.test(trimmed)) return null;
+  return trimmed;
+}
+
 export function parseTailscaleStatus(jsonText) {
   if (typeof jsonText !== "string" || jsonText.trim() === "") return null;
   let parsed;
@@ -603,17 +664,51 @@ export function parseTailscaleStatus(jsonText) {
   if (parsed.BackendState !== "Running") return null;
   const ips = parsed?.Self?.TailscaleIPs;
   if (!Array.isArray(ips)) return null;
+  // MagicDNS is optional: a null name is a normal, supported outcome (the
+  // caller falls back to the IP), never a reason to reject the whole status.
+  const dnsName = normalizeTailnetDnsName(parsed?.Self?.DNSName);
+  let ip = null;
+  let ipv6 = null;
   for (const candidate of ips) {
-    if (typeof candidate === "string" && IPV4_RE.test(candidate)) {
-      return { ip: candidate };
-    }
+    if (typeof candidate !== "string") continue;
+    if (ip === null && IPV4_RE.test(candidate)) ip = candidate;
+    else if (ipv6 === null && IPV6_RE.test(candidate)) ipv6 = candidate;
   }
-  return null;
+  // An IPv4 remains REQUIRED. It is the identity the box is known by and the
+  // guaranteed-reachable address; an IPv6-only tailnet still falls back to the
+  // public path exactly as before rather than binding a half-usable listener.
+  if (ip === null) return null;
+  return { ip, ipv6, dnsName };
+}
+
+// The addresses the box's tailnet listener must bind, in the order a client is
+// likely to try them. Rendered into MANTA_TAILNET_HOST as a comma-separated
+// list (a single value stays a valid one-element list, so an already-installed
+// box's unit keeps working unchanged).
+export function tailnetBindHosts(status) {
+  if (!status || typeof status.ip !== "string") return [];
+  return status.ipv6 ? [status.ip, status.ipv6] : [status.ip];
 }
 
 // Build the ingress.json payload — pure helper. Validates that tailscale mode
 // carries both an IP and a port (the CLI subcommand below also enforces this,
 // but the pure form lets the test assert without spawning a subprocess).
+//
+// BIND ADDRESS vs ADVERTISED HOST — the one thing to keep straight here.
+// `tailnetIp` is what the server listens on and is ALWAYS recorded; it is the
+// only value that can be handed to `listen()`. `tailnetHostname` (optional) is
+// the MagicDNS name devices should DIAL, and it is what `serverUrl` is built
+// from when present. They are separate fields because they answer different
+// questions, and collapsing them is what produced a box whose advertised URL
+// the iOS client is structurally unable to open (see parseTailscaleStatus).
+// No hostname (MagicDNS disabled on the tailnet) → serverUrl falls back to the
+// IP, i.e. exactly the previous behaviour.
+//
+// A PRESENT-BUT-INVALID hostname is a hard error rather than a silent fallback:
+// the only caller that passes one is install.sh, which passes a value that has
+// already been validated by normalizeTailnetDnsName, so an invalid value here
+// means a hand-run or a bug — and silently degrading it would hide precisely
+// the class of defect this change exists to fix.
 //
 // Returns { ok: true, text, changed } | { ok: false, error }.
 //   text is the rendered JSON (pretty-printed + trailing newline, matching the
@@ -623,7 +718,7 @@ export function parseTailscaleStatus(jsonText) {
 const INGRESS_MODES = new Set(["public", "tailscale"]);
 export function buildIngressJson(
   existingText,
-  { mode, tailnetIp, port } = {},
+  { mode, tailnetIp, tailnetHostname, port } = {},
 ) {
   if (!INGRESS_MODES.has(mode)) {
     return { ok: false, error: `buildIngressJson: mode must be "public" or "tailscale" (got ${JSON.stringify(mode)})` };
@@ -636,7 +731,22 @@ export function buildIngressJson(
     if (!Number.isInteger(port) || port <= 0 || port > 65535) {
       return { ok: false, error: "buildIngressJson: tailscale mode requires port (1-65535)" };
     }
-    next = { mode: "tailscale", tailnetIp, serverUrl: `http://${tailnetIp}:${port}` };
+    let hostname = null;
+    if (tailnetHostname !== undefined && tailnetHostname !== null && tailnetHostname !== "") {
+      hostname = normalizeTailnetDnsName(tailnetHostname);
+      if (hostname === null) {
+        return {
+          ok: false,
+          error: `buildIngressJson: tailnetHostname must be a MagicDNS name ending in .ts.net (got ${JSON.stringify(tailnetHostname)})`,
+        };
+      }
+    }
+    next = {
+      mode: "tailscale",
+      tailnetIp,
+      ...(hostname ? { tailnetHostname: hostname } : {}),
+      serverUrl: `http://${hostname ?? tailnetIp}:${port}`,
+    };
   } else {
     next = { mode: "public" };
   }
@@ -1494,18 +1604,40 @@ async function cliMain(argv) {
     return 0;
   }
   if (cmd === "parse-tailscale-status") {
-    // node install-lib.mjs parse-tailscale-status
+    // node install-lib.mjs parse-tailscale-status [--field ip|dns-name]
     // Reads ALL of stdin (the JSON output of `tailscale status --json`), and
-    // on success prints the chosen Tailscale IPv4 to stdout (no trailing
-    // newline — install.sh's `$()` capture strips them anyway, and a stray
-    // newline would leak into the systemd unit). On any failure exits 1
-    // silently so install.sh's `||` short-circuits the tailscale path.
+    // on success prints ONE field to stdout (no trailing newline —
+    // install.sh's `$()` capture strips them anyway, and a stray newline would
+    // leak into the systemd unit). On any failure exits 1 silently so
+    // install.sh's `||` short-circuits the tailscale path.
+    //
+    // `--field ip` (the default, and the back-compatible behaviour) prints the
+    // box's IPv4 — its tailnet identity. `--field bind-hosts` prints the
+    // comma-separated list of every address the listener must bind (IPv4, plus
+    // the IPv6 when the node has one). `--field dns-name` prints the advertised
+    // MagicDNS name and exits 1 when the tailnet has none — which is NOT an
+    // error condition for the installer, just "fall back to the IP", so its
+    // call site tolerates the non-zero exit rather than dying on it.
+    const field = flags.field ?? "ip";
+    if (field !== "ip" && field !== "dns-name" && field !== "bind-hosts") {
+      process.stderr.write(`parse-tailscale-status: --field must be "ip", "bind-hosts" or "dns-name" (got ${JSON.stringify(field)})\n`);
+      return 2;
+    }
     const chunks = [];
     for await (const c of process.stdin) chunks.push(c);
     const raw = Buffer.concat(chunks).toString("utf-8");
     const res = parseTailscaleStatus(raw);
     if (res === null) {
       return 1;
+    }
+    if (field === "dns-name") {
+      if (!res.dnsName) return 1;
+      process.stdout.write(res.dnsName);
+      return 0;
+    }
+    if (field === "bind-hosts") {
+      process.stdout.write(tailnetBindHosts(res).join(","));
+      return 0;
     }
     process.stdout.write(res.ip);
     return 0;
@@ -1531,6 +1663,7 @@ async function cliMain(argv) {
       return 2;
     }
     let tailnetIp;
+    let tailnetHostname;
     let port;
     if (mode === "tailscale") {
       tailnetIp = flags["tailnet-ip"];
@@ -1538,6 +1671,9 @@ async function cliMain(argv) {
         process.stderr.write("write-ingress: tailscale mode requires --tailnet-ip <ip>\n");
         return 2;
       }
+      // Optional: the MagicDNS name devices dial. Absent → serverUrl falls
+      // back to --tailnet-ip. The bind address is always --tailnet-ip.
+      tailnetHostname = flags["tailnet-hostname"];
       const portStr = flags.port;
       const portNum = portStr ? Number(portStr) : NaN;
       if (!Number.isInteger(portNum) || portNum <= 0 || portNum > 65535) {
@@ -1557,7 +1693,7 @@ async function cliMain(argv) {
         return 1;
       }
     }
-    const res = buildIngressJson(existing, { mode, tailnetIp, port });
+    const res = buildIngressJson(existing, { mode, tailnetIp, tailnetHostname, port });
     if (!res.ok) {
       process.stderr.write(`write-ingress: ${res.error}\n`);
       return 1;
@@ -1583,7 +1719,7 @@ async function cliMain(argv) {
   }
   process.stderr.write(
     `install-lib: unknown command ${JSON.stringify(cmd)}\n` +
-      "  usage: node install-lib.mjs <print-config|check-identity|merge-opencode-config|merge-gateway|wait-for-dns|render-caddy-vhost|upsert-caddy-block|detect-distro|render-systemd-unit|parse-tailscale-status|write-ingress> [--version X] [--file P] [--template P] [--hostname H] [--expected-ip IP] [--max-attempts N] [--interval-ms MS] [--box-id ID] [--port N] [--mode M] [--os-release PATH] [--tailnet-ip IP] [--placeholder K=V]\n",
+      "  usage: node install-lib.mjs <print-config|check-identity|merge-opencode-config|merge-gateway|wait-for-dns|render-caddy-vhost|upsert-caddy-block|detect-distro|render-systemd-unit|parse-tailscale-status|write-ingress> [--version X] [--file P] [--template P] [--hostname H] [--expected-ip IP] [--max-attempts N] [--interval-ms MS] [--box-id ID] [--port N] [--mode M] [--os-release PATH] [--tailnet-ip IP] [--tailnet-hostname H] [--field ip|dns-name] [--placeholder K=V]\n",
   );
   return 2;
 }
@@ -1608,6 +1744,8 @@ function parseFlags(args) {
     "mode",
     "os-release",
     "tailnet-ip",
+    "tailnet-hostname",
+    "field",
     "has-claude-creds",
     "cli-claude",
     "cli-codex",

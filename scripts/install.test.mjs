@@ -22,6 +22,8 @@ import {
   mergeOpencodeConfig,
   mergeGatewayAuth,
   parseTailscaleStatus,
+  normalizeTailnetDnsName,
+  tailnetBindHosts,
   buildIngressJson,
   waitForDns,
   renderCaddyVhost,
@@ -36,6 +38,15 @@ import {
   DESKTOP_DMG_URL,
   IOS_APP_URL,
 } from "./install-lib.mjs";
+// The acceptance gate every client applies to a pair link's server URL. Imported
+// (not re-implemented) so the installer's advertised URL is asserted against the
+// SAME predicate the app enforces — a copy here could drift and let the
+// installer emit a URL the app refuses outright.
+import { isPrivateServerUrl } from "../src/shared/transport.mjs";
+// The consumer of MANTA_TAILNET_HOST. Imported so the installer's emitted
+// format is asserted against the parser that actually reads it — the two ends
+// of that variable live in different files and must not drift apart.
+import { parseTailnetHosts } from "../src/server/tailnet.mjs";
 
 const HOME = "/home/tester";
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -3166,6 +3177,94 @@ echo "MODE=$INGRESS_MODE IP=$TAILNET_IP"
   assert.doesNotMatch(out, /IP=100/, "MANTA_INGRESS=public must not pick up the running Tailscale IP");
 });
 
+test("resolve_ingress_mode advertises the MagicDNS name while binding the IP", () => {
+  // The whole point of the split: TAILNET_IP is what the listener binds,
+  // TAILNET_URL_HOST is what a device dials. They must not collapse — an
+  // IP-only advertisement is unopenable by the iOS client (Apple's transport
+  // policy exempts the RFC1918 ranges but not Tailscale's 100.64/10, and its
+  // domain exceptions cannot name an IP).
+  const out = runBootstrap({
+    preBody: `
+detect_tailscale_ip() { printf '%s' '100.64.1.5'; }
+detect_tailscale_dns_name() { printf '%s' 'mybox.tail1234.ts.net'; }
+detect_tailscale_bind_hosts() { printf '%s' '100.64.1.5'; }
+MANTA_INGRESS=auto
+resolve_ingress_mode node lib
+echo "MODE=$INGRESS_MODE BIND=$TAILNET_IP URLHOST=$TAILNET_URL_HOST"
+`,
+  });
+  assert.match(out, /MODE=tailscale/);
+  assert.match(out, /BIND=100\.64\.1\.5/, "the listener must still bind the IP");
+  assert.match(out, /URLHOST=mybox\.tail1234\.ts\.net/, "devices must be given the name");
+});
+
+test("resolve_ingress_mode collects every address the listener must bind", () => {
+  // TAILNET_BIND_HOSTS becomes MANTA_TAILNET_HOST in the unit file. It must
+  // carry the IPv6 as well as the IPv4, because the name the box now
+  // advertises resolves to both and an unbound one stalls callers.
+  const out = runBootstrap({
+    preBody: `
+detect_tailscale_ip() { printf '%s' '100.64.1.5'; }
+detect_tailscale_dns_name() { printf '%s' 'mybox.tail1234.ts.net'; }
+detect_tailscale_bind_hosts() { printf '%s' '100.64.1.5,fd7a:115c:a1e0::1'; }
+MANTA_INGRESS=auto
+resolve_ingress_mode node lib
+echo "BINDS=$TAILNET_BIND_HOSTS"
+`,
+  });
+  assert.match(out, /BINDS=100\.64\.1\.5,fd7a:115c:a1e0::1/);
+});
+
+test("resolve_ingress_mode falls back to binding the IPv4 alone if the bind lookup fails", () => {
+  // A detection failure must degrade to the previous single-address behaviour,
+  // never to an empty MANTA_TAILNET_HOST — an empty value is a WILDCARD bind,
+  // which would expose this listener to every interface instead of the tailnet.
+  const out = runBootstrap({
+    preBody: `
+detect_tailscale_ip() { printf '%s' '100.64.1.5'; }
+detect_tailscale_dns_name() { return 1; }
+detect_tailscale_bind_hosts() { return 1; }
+MANTA_INGRESS=auto
+resolve_ingress_mode node lib
+echo "BINDS=[$TAILNET_BIND_HOSTS]"
+`,
+  });
+  assert.match(out, /BINDS=\[100\.64\.1\.5\]/);
+});
+
+test("resolve_ingress_mode falls back to the IP when the tailnet has no MagicDNS name", () => {
+  // MagicDNS is a tailnet-wide setting the box does not control, so its
+  // absence must degrade to the previous behaviour, never fail the install.
+  const out = runBootstrap({
+    preBody: `
+detect_tailscale_ip() { printf '%s' '100.64.1.5'; }
+detect_tailscale_dns_name() { return 1; }   # MagicDNS off
+detect_tailscale_bind_hosts() { printf '%s' '100.64.1.5'; }
+MANTA_INGRESS=auto
+resolve_ingress_mode node lib
+echo "MODE=$INGRESS_MODE BIND=$TAILNET_IP URLHOST=$TAILNET_URL_HOST NAME=[$TAILNET_HOSTNAME]"
+`,
+  });
+  assert.match(out, /MODE=tailscale/);
+  assert.match(out, /BIND=100\.64\.1\.5/);
+  assert.match(out, /URLHOST=100\.64\.1\.5/);
+  assert.match(out, /NAME=\[\]/, "no name detected → empty, so the flag is never passed");
+});
+
+test("resolve_ingress_mode leaves the tailnet host empty on the public path", () => {
+  const out = runBootstrap({
+    preBody: `
+detect_tailscale_ip() { return 1; }
+detect_tailscale_dns_name() { printf '%s' 'should.not.be.read.ts.net'; }
+MANTA_INGRESS=auto
+resolve_ingress_mode node lib
+echo "MODE=$INGRESS_MODE URLHOST=[$TAILNET_URL_HOST]"
+`,
+  });
+  assert.match(out, /MODE=public/);
+  assert.match(out, /URLHOST=\[\]/, "a public box must not carry a tailnet URL host");
+});
+
 test("BET-980: MANTA_INGRESS=public + Tailscale up + no root → D1 gate fires (fatal)", () => {
   // Regression for the reviewer Block: the preflight must classify a
   // MANTA_INGRESS=public box as the public path even when Tailscale is
@@ -3554,7 +3653,7 @@ test("parseTailscaleStatus returns the first IPv4 when BackendState is Running",
     Self: { TailscaleIPs: ["100.64.1.5", "fd7a:115c:a1e0::1"] },
   });
   const res = parseTailscaleStatus(fixture);
-  assert.deepEqual(res, { ip: "100.64.1.5" });
+  assert.deepEqual(res, { ip: "100.64.1.5", ipv6: "fd7a:115c:a1e0::1", dnsName: null });
 });
 
 test("parseTailscaleStatus picks IPv4 even when IPv6 comes first in the list", () => {
@@ -3566,7 +3665,7 @@ test("parseTailscaleStatus picks IPv4 even when IPv6 comes first in the list", (
     Self: { TailscaleIPs: ["fd7a:115c:a1e0::1", "fd00::1", "100.99.99.99"] },
   });
   const res = parseTailscaleStatus(fixture);
-  assert.deepEqual(res, { ip: "100.99.99.99" });
+  assert.deepEqual(res, { ip: "100.99.99.99", ipv6: "fd7a:115c:a1e0::1", dnsName: null });
 });
 
 test("parseTailscaleStatus returns null when BackendState is not Running", () => {
@@ -3599,6 +3698,127 @@ test("parseTailscaleStatus returns null on invalid JSON", () => {
   assert.equal(parseTailscaleStatus(null), null);
 });
 
+test("parseTailscaleStatus returns the MagicDNS name alongside the IP", () => {
+  // The headline of the advertise-a-name change: the box binds the IP but
+  // advertises the name, because the name is the only form of this address an
+  // iOS app is permitted to open over plain HTTP. Tailscale reports DNSName
+  // FQDN-style with a trailing dot — it is normalized away here so the value
+  // can be dropped straight into a URL.
+  const fixture = JSON.stringify({
+    BackendState: "Running",
+    Self: { TailscaleIPs: ["100.64.1.5"], DNSName: "mybox.tail1234.ts.net." },
+  });
+  assert.deepEqual(parseTailscaleStatus(fixture), {
+    ip: "100.64.1.5",
+    ipv6: null,
+    dnsName: "mybox.tail1234.ts.net",
+  });
+});
+
+test("parseTailscaleStatus keeps the IP when MagicDNS is off or the name is unusable", () => {
+  // MagicDNS is a per-tailnet setting the box does not control, so a missing
+  // or unusable name is a NORMAL outcome that must degrade to the IP — never
+  // reject the whole status (which would drop the box onto the public path).
+  const cases = [
+    undefined,
+    "",
+    ".",
+    // Not a ts.net name. Refused deliberately: isPrivateServerUrl (and its
+    // Swift port) accepts a hostname only for `localhost` / `.ts.net`, and a
+    // pair link carrying anything else is refused WHOLESALE by the app — worse
+    // than the IP fallback it would displace.
+    "mybox.example.com",
+    "mybox.internal",
+    // A bare suffix is not a box.
+    "ts.net",
+    // Malformed labels.
+    "-bad.tail1234.ts.net",
+    "bad-.tail1234.ts.net",
+    "has space.tail1234.ts.net",
+  ];
+  for (const dnsName of cases) {
+    const fixture = JSON.stringify({
+      BackendState: "Running",
+      Self: { TailscaleIPs: ["100.64.1.5"], ...(dnsName === undefined ? {} : { DNSName: dnsName }) },
+    });
+    assert.deepEqual(
+      parseTailscaleStatus(fixture),
+      { ip: "100.64.1.5", ipv6: null, dnsName: null },
+      `expected no advertised name for DNSName=${JSON.stringify(dnsName)}`,
+    );
+  }
+});
+
+test("parseTailscaleStatus reports the IPv6 so the listener can bind it too", () => {
+  // MagicDNS publishes both families under the name, so advertising the name
+  // obliges the box to answer on both. Discarding the IPv6 (as this did while
+  // only an IPv4 was ever advertised) leaves an address that stalls callers.
+  const fixture = JSON.stringify({
+    BackendState: "Running",
+    Self: {
+      TailscaleIPs: ["100.64.1.5", "fd7a:115c:a1e0::1"],
+      DNSName: "mybox.tail1234.ts.net.",
+    },
+  });
+  assert.deepEqual(parseTailscaleStatus(fixture), {
+    ip: "100.64.1.5",
+    ipv6: "fd7a:115c:a1e0::1",
+    dnsName: "mybox.tail1234.ts.net",
+  });
+  assert.deepEqual(tailnetBindHosts(parseTailscaleStatus(fixture)), [
+    "100.64.1.5",
+    "fd7a:115c:a1e0::1",
+  ]);
+});
+
+test("parseTailscaleStatus still requires an IPv4, and binds it alone when there is no IPv6", () => {
+  // The IPv4 is the box's tailnet identity and its guaranteed-reachable
+  // address. An IPv6-only tailnet falls back to the public path rather than
+  // binding a half-usable listener — same as before.
+  const v6only = JSON.stringify({
+    BackendState: "Running",
+    Self: { TailscaleIPs: ["fd7a:115c:a1e0::1"] },
+  });
+  assert.equal(parseTailscaleStatus(v6only), null);
+
+  const v4only = JSON.stringify({
+    BackendState: "Running",
+    Self: { TailscaleIPs: ["100.64.1.5"] },
+  });
+  const res = parseTailscaleStatus(v4only);
+  assert.deepEqual(res, { ip: "100.64.1.5", ipv6: null, dnsName: null });
+  assert.deepEqual(tailnetBindHosts(res), ["100.64.1.5"]);
+  assert.deepEqual(tailnetBindHosts(null), []);
+});
+
+test("parse-tailscale-status CLI --field bind-hosts prints the comma-separated bind list", () => {
+  // This exact string becomes MANTA_TAILNET_HOST in the unit file, so it must
+  // carry no trailing newline and no spaces.
+  const fixture = JSON.stringify({
+    BackendState: "Running",
+    Self: { TailscaleIPs: ["100.64.1.5", "fd7a:115c:a1e0::1"] },
+  });
+  const out = execSync(
+    `node ${join(__dirname, "install-lib.mjs")} parse-tailscale-status --field bind-hosts`,
+    { input: fixture, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
+  );
+  assert.equal(out, "100.64.1.5,fd7a:115c:a1e0::1");
+  // And the server must read back exactly what the installer wrote — the two
+  // sides of MANTA_TAILNET_HOST asserted against each other rather than
+  // separately, so the wire format cannot drift.
+  assert.deepEqual(parseTailnetHosts(out), ["100.64.1.5", "fd7a:115c:a1e0::1"]);
+});
+
+test("normalizeTailnetDnsName lowercases, strips trailing dots, and gates on .ts.net", () => {
+  assert.equal(normalizeTailnetDnsName("MyBox.Tail1234.TS.NET."), "mybox.tail1234.ts.net");
+  assert.equal(normalizeTailnetDnsName("  mybox.tail1234.ts.net  "), "mybox.tail1234.ts.net");
+  assert.equal(normalizeTailnetDnsName("my-box-2.tail1234.ts.net"), "my-box-2.tail1234.ts.net");
+  assert.equal(normalizeTailnetDnsName("mybox.example.com"), null);
+  assert.equal(normalizeTailnetDnsName("ts.net"), null);
+  assert.equal(normalizeTailnetDnsName(null), null);
+  assert.equal(normalizeTailnetDnsName(`${"a".repeat(250)}.ts.net`), null);
+});
+
 test("buildIngressJson tailscale mode emits {mode, tailnetIp, serverUrl}", () => {
   // The install persists this exact shape to ~/.manta/ingress.json on
   // the tailnet path; `manta pair` reads it back to compose the connect
@@ -3617,6 +3837,87 @@ test("buildIngressJson tailscale mode emits {mode, tailnetIp, serverUrl}", () =>
     serverUrl: "http://100.64.1.5:8787",
   });
   assert.equal(res.changed, true);
+});
+
+test("buildIngressJson advertises the MagicDNS name but still records the bind IP", () => {
+  // The bind/advertise split. tailnetIp is the ONLY thing that can be handed
+  // to listen(), so it is always recorded; serverUrl is what a device dials,
+  // so it carries the name. Collapsing the two is what shipped a box whose
+  // advertised URL the iOS client is structurally unable to open.
+  const res = buildIngressJson("", {
+    mode: "tailscale",
+    tailnetIp: "100.64.1.5",
+    tailnetHostname: "mybox.tail1234.ts.net",
+    port: 8787,
+  });
+  assert.equal(res.ok, true);
+  assert.deepEqual(JSON.parse(res.text), {
+    mode: "tailscale",
+    tailnetIp: "100.64.1.5",
+    tailnetHostname: "mybox.tail1234.ts.net",
+    serverUrl: "http://mybox.tail1234.ts.net:8787",
+  });
+});
+
+test("buildIngressJson falls back to the IP when no MagicDNS name is supplied", () => {
+  // Absent/empty hostname == the pre-existing behaviour, byte for byte, so a
+  // MagicDNS-less tailnet is no worse off than before.
+  const withIp = buildIngressJson("", { mode: "tailscale", tailnetIp: "100.64.1.5", port: 8787 });
+  for (const absent of [undefined, null, ""]) {
+    const res = buildIngressJson("", {
+      mode: "tailscale",
+      tailnetIp: "100.64.1.5",
+      tailnetHostname: absent,
+      port: 8787,
+    });
+    assert.equal(res.ok, true);
+    assert.equal(res.text, withIp.text, `expected IP fallback for ${JSON.stringify(absent)}`);
+    assert.equal(JSON.parse(res.text).serverUrl, "http://100.64.1.5:8787");
+  }
+});
+
+test("buildIngressJson normalizes the hostname and rejects a non-ts.net one", () => {
+  const normalized = buildIngressJson("", {
+    mode: "tailscale",
+    tailnetIp: "100.64.1.5",
+    tailnetHostname: "MyBox.Tail1234.ts.net.",
+    port: 8787,
+  });
+  assert.equal(normalized.ok, true);
+  assert.equal(JSON.parse(normalized.text).serverUrl, "http://mybox.tail1234.ts.net:8787");
+
+  // A present-but-invalid hostname is a LOUD failure, not a silent fallback:
+  // the only caller passes an already-validated value, so an invalid one means
+  // a bug, and degrading it quietly would hide the exact class of defect this
+  // split exists to fix.
+  const rejected = buildIngressJson("", {
+    mode: "tailscale",
+    tailnetIp: "100.64.1.5",
+    tailnetHostname: "mybox.example.com",
+    port: 8787,
+  });
+  assert.equal(rejected.ok, false);
+  assert.match(rejected.error, /ts\.net/);
+});
+
+test("buildIngressJson tailscale serverUrl always passes isPrivateServerUrl", () => {
+  // The gate every consumer applies (src/shared/transport.mjs and its Swift
+  // port): a pair link whose server URL fails this is REFUSED WHOLESALE by the
+  // app. Both branches of the fallback must satisfy it.
+  for (const hostname of [undefined, "mybox.tail1234.ts.net"]) {
+    const res = buildIngressJson("", {
+      mode: "tailscale",
+      tailnetIp: "100.64.1.5",
+      tailnetHostname: hostname,
+      port: 8787,
+    });
+    assert.equal(res.ok, true);
+    assert.equal(
+      isPrivateServerUrl(JSON.parse(res.text).serverUrl),
+      true,
+      `serverUrl must stay private-gated for hostname=${JSON.stringify(hostname)}`,
+    );
+  }
 });
 
 test("buildIngressJson tailscale mode requires a valid IPv4 + port", () => {
@@ -3665,6 +3966,54 @@ test("parse-tailscale-status CLI subcommand prints the IP on a running fixture",
   // No trailing newline: install.sh captures via `$()` which strips it,
   // and a stray newline would leak into the systemd unit's environment line.
   assert.equal(out, "100.64.1.5");
+});
+
+test("parse-tailscale-status CLI --field dns-name prints the MagicDNS name", () => {
+  const fixture = JSON.stringify({
+    BackendState: "Running",
+    Self: { TailscaleIPs: ["100.64.1.5"], DNSName: "mybox.tail1234.ts.net." },
+  });
+  const out = execSync(
+    `node ${join(__dirname, "install-lib.mjs")} parse-tailscale-status --field dns-name`,
+    { input: fixture, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
+  );
+  assert.equal(out, "mybox.tail1234.ts.net");
+});
+
+test("parse-tailscale-status CLI --field dns-name exits 1 when MagicDNS is off", () => {
+  // Exit 1 here means "no name", NOT "tailscale is down" — install.sh's call
+  // site tolerates it and falls back to the IP. If this ever became fatal, a
+  // MagicDNS-less tailnet would fail to install at all.
+  const fixture = JSON.stringify({
+    BackendState: "Running",
+    Self: { TailscaleIPs: ["100.64.1.5"] },
+  });
+  try {
+    execSync(
+      `node ${join(__dirname, "install-lib.mjs")} parse-tailscale-status --field dns-name`,
+      { input: fixture, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    assert.fail("parse-tailscale-status --field dns-name must exit non-zero with no name");
+  } catch (e) {
+    assert.equal(e.status, 1);
+    assert.equal(e.stdout ?? "", "", "no stdout on failure");
+  }
+});
+
+test("parse-tailscale-status CLI rejects an unknown --field", () => {
+  const fixture = JSON.stringify({
+    BackendState: "Running",
+    Self: { TailscaleIPs: ["100.64.1.5"] },
+  });
+  try {
+    execSync(
+      `node ${join(__dirname, "install-lib.mjs")} parse-tailscale-status --field hostname`,
+      { input: fixture, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    assert.fail("parse-tailscale-status must reject an unknown --field");
+  } catch (e) {
+    assert.equal(e.status, 2);
+  }
 });
 
 test("parse-tailscale-status CLI subcommand exits 1 on a stopped fixture", () => {
@@ -3731,6 +4080,41 @@ test("write-ingress CLI subcommand persists public mode", () => {
     assert.deepEqual(written, { mode: "public" });
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("write-ingress CLI subcommand persists the advertised MagicDNS hostname", () => {
+  const dir = mkdtempSync(join(tmpdir(), "manta-write-ingress-magicdns-"));
+  const ingressFile = join(dir, "ingress.json");
+  try {
+    execSync(
+      `node ${join(__dirname, "install-lib.mjs")} write-ingress ` +
+        `--file ${ingressFile} --mode tailscale --tailnet-ip 100.64.1.5 ` +
+        `--tailnet-hostname mybox.tail1234.ts.net --port 8787`,
+      { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    assert.deepEqual(JSON.parse(readFileSync(ingressFile, "utf-8")), {
+      mode: "tailscale",
+      tailnetIp: "100.64.1.5",
+      tailnetHostname: "mybox.tail1234.ts.net",
+      serverUrl: "http://mybox.tail1234.ts.net:8787",
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("write-ingress CLI subcommand rejects a non-ts.net --tailnet-hostname", () => {
+  try {
+    execSync(
+      `node ${join(__dirname, "install-lib.mjs")} write-ingress ` +
+        `--file /tmp/__bad_host__ --mode tailscale --tailnet-ip 100.64.1.5 ` +
+        `--tailnet-hostname mybox.example.com --port 8787`,
+      { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] },
+    );
+    assert.fail("write-ingress must reject a non-ts.net --tailnet-hostname");
+  } catch (e) {
+    assert.match(e.stderr ?? "", /ts\.net/);
   }
 });
 

@@ -32,6 +32,7 @@ import { createConstraintStore, extractionInstruction, transcriptText } from "./
 import { createTuner, TUNE_IDLE_SWEEP_MS, GUARD_CACHE_HIT_DROP_PTS, GUARD_SUSTAIN_MS } from "./optimizer/tuner.mjs";
 import { parseConstraints } from "../shared/constraintPin.mjs";
 import { startPoller } from "./startPoller.mjs";
+import { parseTailnetHosts } from "./tailnet.mjs";
 import { getDb } from "./opencodeDb.mjs";
 import {
   resolvePolicy,
@@ -5397,16 +5398,26 @@ server.listen(PORT, HOST, () => {
   });
 });
 
-if (TAILNET_HOST) {
+// One listener per tailnet address. MANTA_TAILNET_HOST is a comma-separated
+// LIST because MagicDNS publishes both the node's IPv4 and its IPv6 under the
+// same name — binding only one of them leaves an advertised address that
+// stalls callers instead of refusing them. See src/server/tailnet.mjs.
+//
+// Each address gets its own server + independent retry: an IPv6 that cannot be
+// bound (a tailnet without IPv6, a host with it disabled) must never take the
+// working IPv4 listener down with it.
+for (const tailnetHost of parseTailnetHosts(TAILNET_HOST)) {
   const tailnetServer = createServer(handleRequest);
   tailnetServer.on("upgrade", handleUpgrade);
+  // IPv6 literals need brackets in a URL, but NOT when handed to listen().
+  const display = tailnetHost.includes(":") ? `[${tailnetHost}]` : tailnetHost;
   const listenTailnet = () => {
-    tailnetServer.listen(PORT, TAILNET_HOST, () => {
-      console.log(`manta listening on http://${TAILNET_HOST}:${PORT} (tailnet)`);
+    tailnetServer.listen(PORT, tailnetHost, () => {
+      console.log(`manta listening on http://${display}:${PORT} (tailnet)`);
     });
   };
   tailnetServer.on("error", (err) => {
-    console.warn(`[tailnet] listener error (${err.code ?? err.message}); retrying in 30s`);
+    console.warn(`[tailnet ${display}] listener error (${err.code ?? err.message}); retrying in 30s`);
     const t = setTimeout(listenTailnet, 30_000);
     t.unref();
   });

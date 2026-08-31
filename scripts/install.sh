@@ -525,12 +525,54 @@ public_ingress_preflight() {
 detect_tailscale_ip() {
   local node="$1" lib="$2"
   command -v tailscale >/dev/null 2>&1 || return 1
-  tailscale status --json 2>/dev/null | "$node" "$lib" parse-tailscale-status
+  tailscale status --json 2>/dev/null | "$node" "$lib" parse-tailscale-status --field ip
+}
+
+# detect_tailscale_dns_name <node> <lib> — the box's MagicDNS name
+# (`<host>.<tailnet>.ts.net`), or exit 1 with no output when the tailnet has
+# MagicDNS disabled or the name is unusable.
+#
+# A MISSING NAME IS NOT A FAILURE — it is the documented fallback (advertise
+# the raw IP, i.e. the pre-BET behaviour), so every call site must tolerate the
+# non-zero exit rather than `die` on it. The name matters because it is the
+# only form of this box's address an iOS app can legally open over plain HTTP:
+# App Transport Security exempts the RFC1918 ranges but not Tailscale's
+# 100.64/10, and an ATS exception can name a domain but never an IP. See the
+# comment on parseTailscaleStatus in install-lib.mjs.
+detect_tailscale_dns_name() {
+  local node="$1" lib="$2"
+  command -v tailscale >/dev/null 2>&1 || return 1
+  tailscale status --json 2>/dev/null | "$node" "$lib" parse-tailscale-status --field dns-name
+}
+
+# detect_tailscale_bind_hosts <node> <lib> — the comma-separated list of every
+# address the tailnet listener must bind: the IPv4, plus the IPv6 when the node
+# has one.
+#
+# Both are needed because MagicDNS publishes BOTH under the box's name, and a
+# client resolving that name will try the IPv6 first. Binding only the IPv4
+# leaves an advertised address that never answers — which stalls a connection
+# rather than refusing it. See parseTailscaleStatus in install-lib.mjs.
+detect_tailscale_bind_hosts() {
+  local node="$1" lib="$2"
+  command -v tailscale >/dev/null 2>&1 || return 1
+  tailscale status --json 2>/dev/null | "$node" "$lib" parse-tailscale-status --field bind-hosts
 }
 
 # resolve_ingress_mode <node> <lib> — resolve the ingress path honoring the
 # MANTA_INGRESS override (auto | public | tailscale), setting INGRESS_MODE
-# ("public" | "tailscale") and TAILNET_IP. MANTA_INGRESS=public FORCES public
+# ("public" | "tailscale") plus four tailnet vars. Keep the bind/advertise
+# split: a listener needs an address, a client needs a name it is allowed to
+# dial, and those are not the same string.
+#   TAILNET_IP         the box's tailnet identity — always an IPv4.
+#   TAILNET_BIND_HOSTS every address the listener binds, comma-separated
+#                      (IPv4 + IPv6), because the advertised name resolves to
+#                      both and an unbound one stalls callers.
+#   TAILNET_HOSTNAME   the advertised MagicDNS name; empty when the tailnet
+#                      has none.
+#   TAILNET_URL_HOST   what goes in a URL: the name if there is one, else the IP.
+#
+# MANTA_INGRESS=public FORCES public
 # even when Tailscale is up (the box wants a public address regardless of a
 # running tailnet); MANTA_INGRESS=tailscale forces tailnet and dies if
 # detection fails; auto picks tailnet iff Tailscale is up. Because the
@@ -540,6 +582,9 @@ resolve_ingress_mode() {
   local node="$1" lib="$2"
   MANTA_INGRESS="${MANTA_INGRESS:-auto}"
   TAILNET_IP=""
+  TAILNET_HOSTNAME=""
+  TAILNET_URL_HOST=""
+  TAILNET_BIND_HOSTS=""
   case "$MANTA_INGRESS" in
     public) ;;
     tailscale)
@@ -552,7 +597,17 @@ resolve_ingress_mode() {
     *) die "MANTA_INGRESS must be auto, public, or tailscale (got: $MANTA_INGRESS)" ;;
   esac
   INGRESS_MODE="public"
-  if [ -n "$TAILNET_IP" ]; then INGRESS_MODE="tailscale"; fi
+  if [ -n "$TAILNET_IP" ]; then
+    INGRESS_MODE="tailscale"
+    # Best-effort: MagicDNS is a per-tailnet setting a box does not control.
+    # `|| true` because no name is a supported outcome, not an install failure.
+    TAILNET_HOSTNAME="$(detect_tailscale_dns_name "$node" "$lib" 2>/dev/null || true)"
+    TAILNET_URL_HOST="${TAILNET_HOSTNAME:-$TAILNET_IP}"
+    # Every address the listener binds. Falls back to the IPv4 alone if the
+    # lookup fails, which is exactly the previous behaviour.
+    TAILNET_BIND_HOSTS="$(detect_tailscale_bind_hosts "$node" "$lib" 2>/dev/null || true)"
+    TAILNET_BIND_HOSTS="${TAILNET_BIND_HOSTS:-$TAILNET_IP}"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -1170,7 +1225,7 @@ main() {
       -e "s|@@MANTA_HOME@@|$MANTA_HOME|g" \
       -e "s|@@NODE_BIN@@|$NODE|g" \
       -e "s|@@MANTA_PORT@@|$MANTA_PORT|g" \
-      -e "s|@@MANTA_TAILNET_HOST@@|${TAILNET_IP:-}|g" \
+      -e "s|@@MANTA_TAILNET_HOST@@|${TAILNET_BIND_HOSTS:-}|g" \
       -e "s|@@OPENCODE_BIN@@|${OPENCODE_BIN:-}|g" \
       -e "s|@@AUTH_DIR@@|$AUTH_DIR|g" \
       -e "s|@@AGENT_PATH@@|$(launchd_agent_path)|g" \
@@ -1349,11 +1404,17 @@ main() {
   # and writes 0600 atomically (write <file>.tmp then rename).
   INGRESS_JSON="$AUTH_DIR/ingress.json"
   if [ "$DRY_RUN" = "1" ]; then
-    dry_log "would persist ingress decision to $INGRESS_JSON (mode=$INGRESS_MODE${TAILNET_IP:+, tailnetIp=$TAILNET_IP})"
+    dry_log "would persist ingress decision to $INGRESS_JSON (mode=$INGRESS_MODE${TAILNET_IP:+, tailnetIp=$TAILNET_IP}${TAILNET_HOSTNAME:+, tailnetHostname=$TAILNET_HOSTNAME})"
   else
     ING_ARGS=("$NODE" "$LIB" write-ingress --file "$INGRESS_JSON" --mode "$INGRESS_MODE")
     if [ -n "$TAILNET_IP" ]; then
       ING_ARGS+=(--tailnet-ip "$TAILNET_IP" --port "$MANTA_PORT")
+      # Only passed when detection produced one; write-ingress rejects a
+      # malformed value rather than silently falling back to the IP, so an
+      # empty flag must never be sent.
+      if [ -n "$TAILNET_HOSTNAME" ]; then
+        ING_ARGS+=(--tailnet-hostname "$TAILNET_HOSTNAME")
+      fi
     fi
     "${ING_ARGS[@]}" >/dev/null 2>/tmp/manta-ingress.err \
       || warn "write-ingress failed (see /tmp/manta-ingress.err) — \`manta pair\` will fall back to public-default connect block."
@@ -1369,7 +1430,7 @@ main() {
       -e "s|@@MANTA_HOME@@|$MANTA_HOME|g" \
       -e "s|@@NODE_BIN@@|$NODE|g" \
       -e "s|@@MANTA_PORT@@|$MANTA_PORT|g" \
-      -e "s|@@MANTA_TAILNET_HOST@@|$TAILNET_IP|g" \
+      -e "s|@@MANTA_TAILNET_HOST@@|${TAILNET_BIND_HOSTS:-}|g" \
       -e "s|@@AGENT_PATH@@|$(launchd_agent_path)|g" \
       -e "s|@@MANTA_CHANNEL@@|${MANTA_CHANNEL:-prod}|g" \
       "$UNIT_SRC" > "$UNIT_DIR/manta-server.service"
@@ -1398,7 +1459,7 @@ main() {
   else
     warn "systemctl not found (not a systemd host?). Starting the server in the background instead."
     warn "It will NOT survive reboot — set up your own supervisor for that."
-    ( MANTA_MOBILE_HOST=127.0.0.1 MANTA_MOBILE_PORT="$MANTA_PORT" MANTA_TAILNET_HOST="$TAILNET_IP" nohup "$NODE" "$MANTA_HOME/src/server/index.mjs" >"$AUTH_DIR/server.log" 2>&1 & )
+    ( MANTA_MOBILE_HOST=127.0.0.1 MANTA_MOBILE_PORT="$MANTA_PORT" MANTA_TAILNET_HOST="${TAILNET_BIND_HOSTS:-}" nohup "$NODE" "$MANTA_HOME/src/server/index.mjs" >"$AUTH_DIR/server.log" 2>&1 & )
     SERVER_MANAGED=nohup
   fi
 
@@ -1496,7 +1557,7 @@ main() {
     # Tailscale path (BET-267): skip Caddy install + DNS wait + vhost write +
     # caddy reload. B/C (gateway register + merge-gateway) still
     # run below — the gateway_token is still needed for APNs push.
-    log "Tailscale detected ($TAILNET_IP) — skipping Caddy + public DNS; devices connect over the tailnet."
+    log "Tailscale detected ($TAILNET_IP${TAILNET_HOSTNAME:+, MagicDNS $TAILNET_HOSTNAME}) — skipping Caddy + public DNS; devices connect over the tailnet."
   elif [ "$IS_MACOS" = "1" ]; then
     # macOS path (BET-274 / BET-276): no apt, no Caddy, no public DNS, no
     # Let's Encrypt. The box is loopback-only on the Mac; remote access
@@ -1907,10 +1968,22 @@ EOF
     cat <<EOF
 
 Tailscale detected ($TAILNET_IP) — your server is reachable over the tailnet at
-http://$TAILNET_IP:$MANTA_PORT (plain HTTP; WireGuard encrypts the hop). No public
-DNS, no Caddy, no Let's Encrypt on this path. Devices on the same tailnet can
-connect directly; off-tailnet devices need Tailscale access first.
+http://${TAILNET_URL_HOST:-$TAILNET_IP}:$MANTA_PORT (plain HTTP; WireGuard encrypts the hop). No
+public DNS, no Caddy, no Let's Encrypt on this path. Devices on the same tailnet
+can connect directly; off-tailnet devices need Tailscale access first.
 EOF
+    if [ -z "${TAILNET_HOSTNAME:-}" ]; then
+      cat <<EOF
+
+NOTE: this tailnet has no MagicDNS name for this machine, so the address above
+is a raw Tailscale IP. The iOS app cannot open a plain-HTTP address in
+Tailscale's 100.64.0.0/10 range (Apple's transport policy exempts the classic
+private ranges but not that one, and the exception it does honour can only name
+a domain). Turn MagicDNS on for your tailnet and re-run this installer to be
+advertised as http://<name>.<tailnet>.ts.net:$MANTA_PORT instead — the desktop
+app and a browser work either way.
+EOF
+    fi
   else
     cat <<EOF
 
