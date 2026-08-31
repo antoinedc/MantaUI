@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createCtoCards } from "./ctoCards.mjs";
 import {
   ACTION_TYPES,
   DEFAULT_CLASS_PRIORS,
@@ -947,4 +948,140 @@ test("a generator that legitimately returns zero candidates (valid empty JSON) I
   const sug = makeDedupeSug({ engineState, runSuggest: async () => ({ text: JSON.stringify({ candidates: [] }) }) });
   await sug.processFinding({ id: "rec:empty", sourceKind: "fact-anomaly", text: "x", refs: [] }, { coldStart: false, tier: "medium" });
   assert.ok((es.suggest?.usedKeys || []).includes("rec:empty"));
+});
+
+// ---------------------------------------------------------------------------
+// BET-1477 — a byte-identical regeneration of an unchanged candidate is
+// "already surfaced, still current" (surfaced), never a suggest.silent
+// no-card-path hold, and never a veto→decision verb downgrade.
+// ---------------------------------------------------------------------------
+
+// A REAL card manager (createCtoCards) over fake stores — pins the whole
+// chain: the BET-1463 byte-identical no-op return in ctoCards.mjs AND the
+// BET-1477 branch in ctoSuggest.mjs, not just a fake writer's return shape.
+function makeRegenHarness() {
+  const clock = { ms: 1_000_000 };
+  const ledgerRows = [];
+  let cardPayload = { v: 1, cards: [] };
+  let engineState = { v: 1, suggest: { thresholds: { p_ask: 0.2, p_act: 0.95 } } };
+  const cards = createCtoCards({
+    cardStore: {
+      load: async () => cardPayload,
+      save: async (p) => { cardPayload = p; },
+    },
+    ledger: { append: async (r) => ledgerRows.push(r), read: async () => ledgerRows },
+    engineState: { load: async () => engineState, save: async (p) => { engineState = p; } },
+    now: () => clock.ms,
+  });
+  const deps = {
+    now: () => clock.ms,
+    publish: () => {},
+    ledger: { append: async (r) => ledgerRows.push(r), read: async () => ledgerRows },
+    verdicts: { load: async () => ({ v: 1, entries: Array(VERDICT_MIN).fill({}) }), save: async () => {} },
+    engineState: { load: async () => engineState, save: async (p) => { engineState = p; } },
+    digests: { list: async () => [], load: async () => null },
+    facts: { list: async () => [], load: async () => null },
+    configGet: async () => ({ ctoTier: "medium" }),
+    cards,
+    runWorthiness: async () => ({ text: "0.6" }),
+    senderReliability: async () => 1.0,
+    fireNotify: async () => {},
+  };
+  return {
+    clock,
+    ledgerRows,
+    cards: () => cardPayload,
+    resetDedupe() { engineState = { v: 1, suggest: { thresholds: { p_ask: 0.2, p_act: 0.95 } } }; }, // simulates usedKeys-cap churn / engine-state reset
+    deps,
+  };
+}
+
+test("BET-1477: a byte-identical decision regeneration counts as surfaced, not silent (no-card-path)", async () => {
+  const h = makeRegenHarness();
+  const sug = createCtoSuggest({
+    ...h.deps,
+    runSuggest: async () => ({
+      text: JSON.stringify({ candidates: [{ class: "config-change", finding: { text: "Tighten the cache TTL", refs: ["c1"] }, options: [{ label: "Apply", action: { type: "config-change", payload: {} } }] }] }),
+    }),
+  });
+  const finding = { id: "rec:regen-d", sourceKind: "fact-anomaly", text: "Tighten the cache TTL", refs: ["c1"] };
+
+  const r1 = await sug.processFinding(finding, { coldStart: false, tier: "medium" });
+  assert.equal(r1.surfaced, 1);
+  assert.equal(r1.silent, 0);
+  const firstWriteAt = h.cards().cards[0].updatedAt;
+  const presentedRows = h.ledgerRows.filter((r) => r.kind === "suggest.presented").length;
+
+  // Next pass: the dedupe marker was evicted (cap churn / engine-state
+  // reset), the generator regenerates the SAME candidate — the card content
+  // is byte-identical, only the write timestamp differs (excluded from
+  // cardContentEqual). This must count as surfaced, not as a no-card-path
+  // hold.
+  h.clock.ms += 30 * 60_000;
+  h.resetDedupe();
+  const r2 = await sug.processFinding(finding, { coldStart: false, tier: "medium" });
+  assert.equal(r2.surfaced, 1, "unchanged card is already on the board and current → surfaced");
+  assert.equal(r2.silent, 0);
+  assert.ok(!h.ledgerRows.some((r) => r.kind === "suggest.silent" && r.reason === "no-card-path"), "no suggest.silent(no-card-path) miscount");
+  assert.equal(h.ledgerRows.filter((r) => r.kind === "suggest.presented").length, presentedRows, "no second presented row — no ledger noise");
+  assert.equal(h.cards().cards.filter((c) => c.state === "open").length, 1, "never duplicated");
+  assert.equal(h.cards().cards[0].updatedAt, firstWriteAt, "byte-identical no-op did not rewrite the card");
+});
+
+test("BET-1477: a byte-identical veto regeneration stays the veto card — surfaced, no downgrade", async () => {
+  const h = makeRegenHarness();
+  const sug = createCtoSuggest({
+    ...h.deps,
+    trustStore: { load: async () => ({ v: 1, tiers: { "record-decision": "veto-window" } }), save: async () => {} },
+    runSuggest: async () => ({
+      text: JSON.stringify({ candidates: [{ class: "record-decision", finding: { text: "Adopt a rollback policy", refs: ["c2"] }, options: [{ label: "Go", action: { type: "record-decision", payload: {} } }] }] }),
+    }),
+  });
+  const finding = { id: "rec:regen-v", sourceKind: "fact-anomaly", text: "Adopt a rollback policy", refs: ["c2"] };
+
+  const r1 = await sug.processFinding(finding, { coldStart: false, tier: "medium" });
+  assert.equal(r1.surfaced, 1);
+  assert.equal(h.cards().cards[0].variant, "veto");
+
+  h.clock.ms += 30 * 60_000;
+  h.resetDedupe();
+  const r2 = await sug.processFinding(finding, { coldStart: false, tier: "medium" });
+  assert.equal(r2.surfaced, 1, "unchanged veto card is already on the board and current → surfaced");
+  assert.equal(r2.silent, 0);
+  assert.ok(!h.ledgerRows.some((r) => r.kind === "suggest.silent" && r.reason === "no-card-path"), "no suggest.silent(no-card-path) miscount");
+  const open = h.cards().cards.filter((c) => c.state === "open");
+  assert.equal(open.length, 1, "never duplicated");
+  assert.equal(open[0].variant, "veto", "no veto→decision verb downgrade on the no-op path");
+  assert.equal(h.ledgerRows.filter((r) => r.kind === "suggest.presented" && r.variant === "decision").length, 0);
+  assert.equal(h.ledgerRows.filter((r) => r.kind === "suggest.presented" && r.variant === "veto").length, 1, "exactly one presented row total");
+});
+
+test("BET-1477: a thrown or explicitly-refused (ok:false) card write still holds as suggest.silent(no-card-path)", async () => {
+  for (const [label, writer] of [
+    ["throw", async () => { throw new Error("card store boom"); }],
+    ["ok:false", async () => ({ ok: false, changed: false, isNew: false })],
+  ]) {
+    const clock = { ms: 1_000_000 };
+    const ledgerRows = [];
+    const sug = createCtoSuggest({
+      now: () => clock.ms,
+      publish: () => {},
+      ledger: { append: async (r) => ledgerRows.push(r), read: async () => ledgerRows },
+      verdicts: { load: async () => ({ v: 1, entries: Array(VERDICT_MIN).fill({}) }), save: async () => {} },
+      engineState: { load: async () => ({ suggest: { thresholds: { p_ask: 0.2, p_act: 0.95 } } }), save: async () => {} },
+      digests: { list: async () => [], load: async () => null },
+      facts: { list: async () => [], load: async () => null },
+      configGet: async () => ({ ctoTier: "medium" }),
+      cards: { upsertDecision: writer },
+      runSuggest: async () => ({
+        text: JSON.stringify({ candidates: [{ class: "config-change", finding: { text: "x", refs: [] }, options: [{ label: "Apply", action: { type: "config-change", payload: {} } }] }] }),
+      }),
+      runWorthiness: async () => ({ text: "0.6" }),
+      senderReliability: async () => 1.0,
+    });
+    const r = await sug.processFinding({ id: `rec:fail-${label}`, sourceKind: "fact-anomaly", text: "x", refs: [] }, { coldStart: false, tier: "medium" });
+    assert.equal(r.surfaced, 0, `${label}: no surfaced count without a card`);
+    assert.equal(r.silent, 1, `${label}: held instead`);
+    assert.ok(ledgerRows.some((x) => x.kind === "suggest.silent" && x.reason === "no-card-path"), `${label}: the hold reason is preserved`);
+  }
 });
