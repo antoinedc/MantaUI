@@ -665,19 +665,28 @@ export function createCtoSuggest(deps = {}) {
       // §9.2 veto-window verb: a card with a countdown that executes unless
       // cancelled (the cancel is a verdict, §9.4). BET-1419 ships the veto
       // card writer; until it lands the verb degrades to the ask card.
+      // BET-1477: `ok !== false` is the "card path worked" test — a resolved
+      // call whose return is the BET-1463 byte-identical no-op (`ok: true,
+      // changed: false`) means the veto card is ALREADY on the board and
+      // current: count it as surfaced (variant veto) with no new ledger row
+      // and no re-push (`isNew` false), never a veto→decision downgrade.
+      // Only a missing writer, a thrown write, or an explicit `ok: false`
+      // (invalid args) degrades the verb.
       if (decision.verb === "veto-window") {
-        let wrote = false;
+        let res = null;
         if (cards && typeof cards.upsertVeto === "function") {
           try {
-            const res = await cards.upsertVeto({ ...baseCard, variant: "veto", ts: now() });
-            wrote = res?.changed === true;
-            cardIsNew = res?.isNew === true;
+            res = await cards.upsertVeto({ ...baseCard, variant: "veto", ts: now() });
           } catch {
-            wrote = false;
+            res = null;
           }
         }
+        const wrote = !!res && res.ok !== false;
+        cardIsNew = res?.isNew === true;
         if (wrote) {
-          await ledgerAppend({ kind: "suggest.presented", cardId: c.id, class: c.class, variant: "veto", score: p, sourceKind: finding.sourceKind });
+          if (res.changed === true) {
+            await ledgerAppend({ kind: "suggest.presented", cardId: c.id, class: c.class, variant: "veto", score: p, sourceKind: finding.sourceKind });
+          }
           surfaced += 1;
           surfacedKind = "veto";
         } else {
@@ -686,20 +695,27 @@ export function createCtoSuggest(deps = {}) {
       }
 
       // ask verb → write (or upsert) the decision card.
+      // BET-1477: same `ok !== false` contract as the veto branch — a
+      // byte-identical regeneration of an unchanged decision card is
+      // "already surfaced, still current" (surfaced, no new ledger row, no
+      // re-push), NOT a `suggest.silent` no-card-path hold. Only a missing
+      // writer, a thrown write, or an explicit `ok: false` is a hold.
       if (!surfacedKind) {
         const card = { ...baseCard, variant: "decision" };
-        let wrote = false;
+        let res = null;
         if (cards && typeof cards.upsertDecision === "function") {
           try {
-            const res = await cards.upsertDecision({ ...card, ts: now() });
-            wrote = res?.changed === true;
-            cardIsNew = res?.isNew === true;
+            res = await cards.upsertDecision({ ...card, ts: now() });
           } catch {
-            wrote = false;
+            res = null;
           }
         }
+        const wrote = !!res && res.ok !== false;
+        cardIsNew = res?.isNew === true;
         if (wrote) {
-          await ledgerAppend({ kind: "suggest.presented", cardId: c.id, class: c.class, variant: "decision", score: p, sourceKind: finding.sourceKind });
+          if (res.changed === true) {
+            await ledgerAppend({ kind: "suggest.presented", cardId: c.id, class: c.class, variant: "decision", score: p, sourceKind: finding.sourceKind });
+          }
           surfaced += 1;
         } else {
           // No card machinery (or it failed) → hold instead of acting.

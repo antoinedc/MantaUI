@@ -308,7 +308,10 @@ export function createCtoCards(deps = {}) {
 
   // Upsert one blocker card by its stable id. Idempotent on re-detection: the
   // existing open card is updated in place (title/body/refs/age preserved),
-  // never duplicated. Returns `{ changed, isNew }`.
+  // never duplicated. Returns `{ ok, changed, isNew }` — `ok` is true when
+  // the write path ran without exception (including the byte-identical
+  // no-op, where the card is already current), false when nothing was
+  // written (invalid args).
   async function upsertBlocker({ sourceKind, sourceId, sessionID, title, body, refs, ts = now(), pendingSince = ts }) {
     const id = stableCardId(sourceKind, sourceId);
     const { payload, cards } = await openCards();
@@ -329,7 +332,7 @@ export function createCtoCards(deps = {}) {
     // save, no ledger row. This is what stops an unanswered ask from being
     // "re-created" every minute forever by promoteDue.
     if (existing && cardContentEqual(existing, { ...card, updatedAt: ts })) {
-      return { changed: false, isNew: false };
+      return { ok: true, changed: false, isNew: false };
     }
     if (existing) {
       const idx = cards.indexOf(existing);
@@ -347,7 +350,7 @@ export function createCtoCards(deps = {}) {
       sessionID,
       refs: card.refs,
     });
-    return { changed: true, isNew: !existing };
+    return { ok: true, changed: true, isNew: !existing };
   }
 
   // Shared close-path for resolve/dismiss: remove one open card by id, save,
@@ -564,7 +567,7 @@ export function createCtoCards(deps = {}) {
   // deliberately out of scope for the server — option execution is the
   // renderer's job (§9.1 "option buttons execute a bound action").
   async function upsertDecision({ id, title, why, options = [], refs = [], evidence = [], sourceKind, cls, score, capped = false, ts = now() } = {}) {
-    if (!id || typeof id !== "string") return { changed: false, isNew: false };
+    if (!id || typeof id !== "string") return { ok: false, changed: false, isNew: false };
     return upsertOpenCard({
       id,
       variant: "decision",
@@ -607,9 +610,11 @@ export function createCtoCards(deps = {}) {
     };
     // BET-1463 (defect 2): same no-op rule as upsertBlocker — a byte-identical
     // regeneration (e.g. a decision card re-derived unchanged, or an unarmed
-    // veto countdown) is not a change.
+    // veto countdown) is not a change. BET-1477: the no-op still reports
+    // ok:true — the card is already on the board and current, which is a
+    // successful outcome for a caller branching on "did the card path work".
     if (existing && cardContentEqual(existing, card)) {
-      return { changed: false, isNew: false };
+      return { ok: true, changed: false, isNew: false };
     }
     if (existing) {
       const idx = list.indexOf(existing);
@@ -627,7 +632,7 @@ export function createCtoCards(deps = {}) {
       refs: card.refs,
       ...ledger,
     });
-    return { changed: true, isNew: !existing };
+    return { ok: true, changed: true, isNew: !existing };
   }
 
   // needs-you surface: only open cards count (§10.3 — resolved/dismissed cards
@@ -648,7 +653,7 @@ export function createCtoCards(deps = {}) {
   // points at; the engine resolves the card when the window opens (fulfilled),
   // cancels it (veto verdict) or abandons it (missed, §11.6).
   async function upsertVeto({ id, title, body, dueMs, options = [], refs = [], ts = now() } = {}) {
-    if (!id || typeof id !== "string") return { changed: false, isNew: false };
+    if (!id || typeof id !== "string") return { ok: false, changed: false, isNew: false };
     return upsertOpenCard({
       id,
       variant: "veto",
