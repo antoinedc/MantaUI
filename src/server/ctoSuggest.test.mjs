@@ -766,18 +766,49 @@ test("verdictHeld stamps the held row's class onto the subject (§9.4 attributio
 
 // ---------------------------------------------------------------------------
 // BET-1465 — usedKeys dedupe (defect 1) + distinct notify tag (defect 2)
+//
+// One local builder shared by the four tests below (instead of repeating the
+// createCtoSuggest() config in each) so this addition doesn't itself grow the
+// file's clone count.
 // ---------------------------------------------------------------------------
+
+function oneCandidateSuggestText(cls, text, refs = []) {
+  return JSON.stringify({
+    candidates: [{ class: cls, finding: { text, refs }, options: [{ label: "Go", action: { type: cls, payload: {} } }] }],
+  });
+}
+
+function makeDedupeSug({
+  engineState: engineStateDep = { load: async () => ({ suggest: { thresholds: { p_ask: 0.2, p_act: 0.95 } } }), save: async () => {} },
+  ledger: ledgerDep = { append: async () => {}, read: async () => [] },
+  digests: digestsDep = { list: async () => [], load: async () => null },
+  cards: cardsDep = { upsertDecision: async () => ({ changed: true, isNew: true }) },
+  runSuggest: runSuggestDep = async () => ({ text: JSON.stringify({ candidates: [] }) }),
+  runWorthiness: runWorthinessDep = async () => ({ text: "0.9" }),
+  fireNotify: fireNotifyDep = async () => {},
+  now = () => 1,
+} = {}) {
+  return createCtoSuggest({
+    now,
+    publish: () => {},
+    ledger: ledgerDep,
+    verdicts: { load: async () => ({ entries: Array(VERDICT_MIN).fill({}) }), save: async () => {} },
+    engineState: engineStateDep,
+    digests: digestsDep,
+    facts: { list: async () => [], load: async () => null },
+    configGet: async () => ({ ctoTier: "medium" }),
+    cards: cardsDep,
+    runSuggest: runSuggestDep,
+    runWorthiness: runWorthinessDep,
+    senderReliability: async () => 1.0,
+    fireNotify: fireNotifyDep,
+  });
+}
 
 test("dedupe: a second runPass over the same findings makes no new model calls, ledger rows, or notifies", async () => {
   const clock = { ms: 1_000_000 };
   const ledgerRows = [];
   let es = { suggest: { thresholds: { p_ask: 0.2, p_act: 0.95 } } };
-  const engineStateDep = {
-    load: async () => es,
-    save: async (p) => {
-      es = p;
-    },
-  };
   let suggestCalls = 0;
   let worthinessCalls = 0;
   const notified = [];
@@ -785,40 +816,19 @@ test("dedupe: a second runPass over the same findings makes no new model calls, 
     { generated: 1, items: [{ tier: "failure", text: "Pipeline red on main", refs: ["c1"] }] },
     { generated: 2, items: [{ tier: "failure", text: "Pipeline red on main", refs: ["c2"] }] },
   ];
-  const sug = createCtoSuggest({
+  const sug = makeDedupeSug({
     now: () => clock.ms,
-    publish: () => {},
+    engineState: { load: async () => es, save: async (p) => { es = p; } },
     ledger: { append: async (r) => ledgerRows.push(r), read: async () => ledgerRows },
-    verdicts: { load: async () => ({ entries: Array(VERDICT_MIN).fill({}) }), save: async () => {} },
-    engineState: engineStateDep,
-    digests: {
-      list: async () => ["d1", "d2"],
-      load: async (id) => (id === "d1" ? digestList[0] : digestList[1]),
-    },
-    facts: { list: async () => [], load: async () => null },
-    configGet: async () => ({ ctoTier: "medium" }),
-    cards: {
-      upsertDecision: async () => ({ changed: true, isNew: true }),
-    },
+    digests: { list: async () => ["d1", "d2"], load: async (id) => (id === "d1" ? digestList[0] : digestList[1]) },
     runSuggest: async () => {
       suggestCalls += 1;
-      return {
-        text: JSON.stringify({
-          candidates: [
-            {
-              class: "start-job",
-              finding: { text: "Restart the stuck build", refs: ["c1"] },
-              options: [{ label: "Go", action: { type: "start-job", payload: {} } }],
-            },
-          ],
-        }),
-      };
+      return { text: oneCandidateSuggestText("start-job", "Restart the stuck build", ["c1"]) };
     },
     runWorthiness: async () => {
       worthinessCalls += 1;
       return { text: "0.9" };
     },
-    senderReliability: async () => 1.0,
     fireNotify: async (args) => notified.push(args),
   });
 
@@ -843,25 +853,7 @@ test("dedupe: a second runPass over the same findings makes no new model calls, 
 
 test("usedKeys is capped at 200 entries; the oldest fall off", async () => {
   let es = { suggest: { usedKeys: Array.from({ length: 200 }, (_, i) => `old-${i}`) } };
-  const engineStateDep = {
-    load: async () => es,
-    save: async (p) => {
-      es = p;
-    },
-  };
-  const sug = createCtoSuggest({
-    now: () => 1,
-    publish: () => {},
-    ledger: { append: async () => {}, read: async () => [] },
-    verdicts: { load: async () => ({ entries: Array(VERDICT_MIN).fill({}) }), save: async () => {} },
-    engineState: engineStateDep,
-    digests: { list: async () => [], load: async () => null },
-    facts: { list: async () => [], load: async () => null },
-    configGet: async () => ({ ctoTier: "medium" }),
-    cards: { upsertDecision: async () => ({ changed: true, isNew: true }) },
-    runSuggest: async () => ({ text: JSON.stringify({ candidates: [] }) }),
-    senderReliability: async () => 1.0,
-  });
+  const sug = makeDedupeSug({ engineState: { load: async () => es, save: async (p) => { es = p; } } });
   await sug.processFinding({ id: "rec:new", sourceKind: "fact-anomaly", text: "x", refs: [] }, { coldStart: false, tier: "medium" });
   const used = es.suggest.usedKeys;
   assert.equal(used.length, 200);
@@ -872,29 +864,11 @@ test("usedKeys is capped at 200 entries; the oldest fall off", async () => {
 
 test("notify: fireNotify carries a distinct, non-global identifier per candidate (defect 2)", async () => {
   const notified = [];
-  function harnessFor(text) {
-    return createCtoSuggest({
-      now: () => 1,
-      publish: () => {},
-      ledger: { append: async () => {}, read: async () => [] },
-      verdicts: { load: async () => ({ entries: Array(VERDICT_MIN).fill({}) }), save: async () => {} },
-      engineState: { load: async () => ({ suggest: { thresholds: { p_ask: 0.2, p_act: 0.95 } } }), save: async () => {} },
-      digests: { list: async () => [], load: async () => null },
-      facts: { list: async () => [], load: async () => null },
-      configGet: async () => ({ ctoTier: "medium" }),
-      cards: { upsertDecision: async () => ({ changed: true, isNew: true }) },
-      runSuggest: async () => ({
-        text: JSON.stringify({
-          candidates: [{ class: "start-job", finding: { text, refs: [] }, options: [{ label: "Go", action: { type: "start-job", payload: {} } }] }],
-        }),
-      }),
-      runWorthiness: async () => ({ text: "0.9" }),
-      senderReliability: async () => 1.0,
-      fireNotify: async (args) => notified.push(args),
-    });
-  }
-  await harnessFor("A").processFinding({ id: "rec:a", sourceKind: "failure-recurrence", text: "A", refs: [] }, { coldStart: false, tier: "medium" });
-  await harnessFor("B").processFinding({ id: "rec:b", sourceKind: "failure-recurrence", text: "B", refs: [] }, { coldStart: false, tier: "medium" });
+  const fireNotify = async (args) => notified.push(args);
+  const a = makeDedupeSug({ runSuggest: async () => ({ text: oneCandidateSuggestText("start-job", "A") }), fireNotify });
+  const b = makeDedupeSug({ runSuggest: async () => ({ text: oneCandidateSuggestText("start-job", "B") }), fireNotify });
+  await a.processFinding({ id: "rec:a", sourceKind: "failure-recurrence", text: "A", refs: [] }, { coldStart: false, tier: "medium" });
+  await b.processFinding({ id: "rec:b", sourceKind: "failure-recurrence", text: "B", refs: [] }, { coldStart: false, tier: "medium" });
   assert.equal(notified.length, 2);
   // push.mjs tags a session-less call `notify-${sessionID ?? "global"}` — a
   // present, per-candidate sessionID is what keeps two unrelated CTO
@@ -908,26 +882,9 @@ test("notify: fireNotify carries a distinct, non-global identifier per candidate
 
 test("fireNotify is gated on the card write's isNew: a re-upserted (not new) card never re-pushes", async () => {
   const notified = [];
-  const sug = createCtoSuggest({
-    now: () => 1,
-    publish: () => {},
-    ledger: { append: async () => {}, read: async () => [] },
-    verdicts: { load: async () => ({ entries: Array(VERDICT_MIN).fill({}) }), save: async () => {} },
-    engineState: { load: async () => ({ suggest: { thresholds: { p_ask: 0.2, p_act: 0.95 } } }), save: async () => {} },
-    digests: { list: async () => [], load: async () => null },
-    facts: { list: async () => [], load: async () => null },
-    configGet: async () => ({ ctoTier: "medium" }),
-    cards: {
-      // isNew: false — an upsert of a card already on the board.
-      upsertDecision: async () => ({ changed: true, isNew: false }),
-    },
-    runSuggest: async () => ({
-      text: JSON.stringify({
-        candidates: [{ class: "start-job", finding: { text: "again", refs: [] }, options: [{ label: "Go", action: { type: "start-job", payload: {} } }] }],
-      }),
-    }),
-    runWorthiness: async () => ({ text: "0.9" }),
-    senderReliability: async () => 1.0,
+  const sug = makeDedupeSug({
+    cards: { upsertDecision: async () => ({ changed: true, isNew: false }) }, // upsert of a card already on the board
+    runSuggest: async () => ({ text: oneCandidateSuggestText("start-job", "again") }),
     fireNotify: async (args) => notified.push(args),
   });
   const r = await sug.processFinding({ id: "rec:re", sourceKind: "failure-recurrence", text: "again", refs: [] }, { coldStart: false, tier: "medium" });
