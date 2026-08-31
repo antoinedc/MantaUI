@@ -639,15 +639,22 @@ export function createFactsEngine(deps = {}) {
       return {};
     }
   }
+  // BET-1466: reports success instead of swallowing — callers that surface a
+  // user-facing result (submitProposal) must not claim ok when nothing
+  // reached disk. Fire-and-forget callers (bumpReliability and friends)
+  // ignore the return and keep their old silent shape.
   async function saveState(s) {
+    const patch = {};
+    for (const key of FACTS_STATE_KEYS) {
+      if (key in s) patch[key] = s[key];
+    }
+    // BET-1425: per-key RMW (load-fresh → merge owned keys → atomic save).
     try {
-      const patch = {};
-      for (const key of FACTS_STATE_KEYS) {
-        if (key in s) patch[key] = s[key];
-      }
-      // BET-1425: per-key RMW (load-fresh → merge owned keys → atomic save).
       await patchEngineState(patch, { engineState });
-    } catch {}
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   function currentHalfLives(tuning) {
@@ -714,7 +721,19 @@ export function createFactsEngine(deps = {}) {
     if (!validateProposal(proposal)) return { ok: false, error: "invalid proposal" };
     const state = await loadState();
     const res = enqueueProposal(state, proposal);
-    if (res.added) await saveState(res.state);
+    if (res.added) {
+      // BET-1466: the enqueue lives only in the freshly-loaded state object —
+      // until saveState persists it, the proposal exists nowhere. Report the
+      // persist failure instead of a phantom ok.
+      const saved = await saveState(res.state);
+      if (!saved) {
+        return {
+          ok: false,
+          error: "proposal accepted in memory but the persist failed; it was not queued",
+          proposalId: proposal.proposalId,
+        };
+      }
+    }
     return { ok: res.added, added: res.added, reason: res.reason, proposalId: proposal.proposalId };
   }
 

@@ -10,8 +10,8 @@
 //     (recorded in engine-state at kick-off); live ingestion owns ts ≥ it. The
 //     backfill only ever reads ts < startInstant, so a backfilled and a live
 //     segment can never overlap or double-count.
-//   - Spend bound: one-time budget (default $3, config `ctoBackfillCapUsd`),
-//     measured as the cumulative model-ledger cost attributed since the start
+//   - Spend bound: one-time budget (default $3, or the engine's explicit
+//     override), measured as the cumulative model-ledger cost attributed since the start
 //     instant. On hitting the bound it stops at the depth reached and persists
 //     {stoppedAtDepthDays, reason:"budget"}.
 //   - Batch-priority: reduce calls (summaries/rollups) run only while presence
@@ -137,8 +137,8 @@ export function createCtoBackfill(deps = {}) {
     getDb = null, // async () => read-only opencode db | null (index.mjs supplies the real handle)
     presenceCheck = async () => false, // true when present → stop/yield (batch-priority)
     now = () => Date.now(),
-    capUsd = null, // explicit override; else config.ctoBackfillCapUsd; else default
-    depthDays = null, // explicit override; else config.ctoBackfillDays; else default
+    capUsd = null, // explicit override; else DEFAULT_BACKFILL_CAP_USD
+    depthDays = null, // explicit override; else DEFAULT_BACKFILL_DAYS
     maxSessionsPerStep = MAX_SESSIONS_PER_STEP,
     maxRollupsPerStep = MAX_ROLLUPS_PER_STEP,
   } = deps;
@@ -156,15 +156,14 @@ export function createCtoBackfill(deps = {}) {
     }
     return cfg;
   }
-  function cfgNum(key, dflt) {
-    const v = cfg && cfg[key];
-    return typeof v === "number" && Number.isFinite(v) ? v : dflt;
-  }
+  // BET-1466: the config-key lookups that used to sit here read two config
+  // spellings written by no UI, doc, or code path — dead indirection. Only
+  // the explicit engine override or the fallback constant applies.
   function resolveCap() {
-    return capUsd ?? cfgNum("ctoBackfillCapUsd", DEFAULT_BACKFILL_CAP_USD);
+    return capUsd ?? DEFAULT_BACKFILL_CAP_USD;
   }
   function resolveDepth() {
-    return depthDays ?? cfgNum("ctoBackfillDays", DEFAULT_BACKFILL_DAYS);
+    return depthDays ?? DEFAULT_BACKFILL_DAYS;
   }
 
   async function readState() {

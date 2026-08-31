@@ -157,7 +157,33 @@ export function recordSpend(payload, { now, usd, calls = 1 } = {}) {
   const key = dayKey(t);
   const prev = dayBucket(p, key);
   const days = { ...p.days, [key]: { usd: dollar(prev.usd) + dollar(usd), calls: num(prev.calls) + ((calls | 0) || 1) } };
-  return { ...p, days, updatedMs: t };
+  // BET-1466: bound the growth inside the only writer that adds buckets.
+  // Day buckets older than the burn-history window are read by nothing
+  // (the burn history reads exactly BURN_HISTORY_DAYS day-starts including
+  // today); ROI month accumulators older than the retention horizon are
+  // beyond the report's honest horizon and are dropped with the pending
+  // rows that feed them. budget.json is not covered by the store sweep.
+  const oldestDay = startOfDay(t) - (BURN_HISTORY_DAYS - 1) * 24 * HOUR_MS;
+  for (const k of Object.keys(days)) {
+    const ts = Number(k);
+    if (Number.isFinite(ts) && ts < oldestDay) delete days[k];
+  }
+  let roi = p.roi;
+  if (roi && typeof roi === "object" && roi.months && typeof roi.months === "object") {
+    const cutoffKey = roiMonthKey(t - ROI_PENDING_RETENTION_MS);
+    let prunedAny = false;
+    const months = {};
+    for (const k of Object.keys(roi.months)) {
+      // Prune only well-formed month keys we understand; keep anything else.
+      if (/^\d{4}-\d{2}$/.test(k) && k < cutoffKey) {
+        prunedAny = true;
+        continue;
+      }
+      months[k] = roi.months[k];
+    }
+    if (prunedAny) roi = { ...roi, months };
+  }
+  return { ...p, days, ...(roi !== p.roi ? { roi } : {}), updatedMs: t };
 }
 
 // True when the budget's most recent record belongs to a day other than the
@@ -1072,9 +1098,20 @@ function validPrRef(ref) {
             if (computed) months[key] = computed;
           }
 
-          // 4. Hygiene: drop stale pending rows.
+          // 4. Hygiene: age out stale pending rows. The retention horizon
+          // applies to BOTH halves (BET-1466: it used to filter only counted
+          // rows while the never-merged ones — the rows that actually
+          // accumulate — were kept forever). A counted row is a dedupe
+          // fingerprint kept only past any possible re-sample: the delegate
+          // jobs store sweeps terminal records after 7 days, far inside the
+          // 60-day horizon, so a counted row dropped at the horizon can never
+          // be re-counted.
           const cutoff = t - ROI_PENDING_RETENTION_MS;
-          const kept = pending.filter((j) => j.counted === true ? (typeof j.finishedAt === "number" ? j.finishedAt >= cutoff : true) : true);
+          const kept = pending.filter((j) =>
+            j.counted === true
+              ? typeof j.finishedAt === "number" ? j.finishedAt >= cutoff : true
+              : typeof j.finishedAt === "number" && j.finishedAt >= cutoff,
+          );
           const trimmed = kept.slice(-200);
           pending = trimmed;
 

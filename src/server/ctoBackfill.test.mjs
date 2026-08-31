@@ -321,3 +321,15 @@ test("batch-priority: while the user is present, the backfill yields and touches
   assert.equal(dbCalls, 0, "present → yields before any work; no db read, no state write");
   assert.equal(engineState._data.backfillDone, undefined, "a present-yield is not a completion");
 });
+
+// BET-1466 item 8: the config-key indirection read spellings written by no
+// UI, doc, or code path — deleted; only the explicit override or the fallback
+// constants resolve cap/depth now.
+test("dead ctoBackfillCapUsd/ctoBackfillDays config lookups are gone; overrides + constants remain", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("./ctoBackfill.mjs", import.meta.url), "utf8");
+  assert.ok(!src.includes("ctoBackfillCapUsd"), "the un-writable cap config key is deleted");
+  assert.ok(!src.includes("ctoBackfillDays"), "the un-writable depth config key is deleted");
+  assert.ok(src.includes("capUsd ?? DEFAULT_BACKFILL_CAP_USD"), "explicit override, else the fallback constant");
+  assert.ok(src.includes("depthDays ?? DEFAULT_BACKFILL_DAYS"), "explicit override, else the fallback constant");
+});
