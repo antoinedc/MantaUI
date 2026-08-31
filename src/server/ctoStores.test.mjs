@@ -32,6 +32,9 @@ import {
   purgeExpiredInbox,
   engineStateStore,
   patchEngineState,
+  patchStore,
+  createLedgerStore,
+  startCtoStoreSweeper,
 } from "./ctoStores.mjs";
 import { createStandingQueryEngine, WATCHER_MIGRATION_KEY } from "./ctoWatchers.mjs";
 
@@ -443,4 +446,193 @@ test("durability: an engine-state writer that does not own tonightQueue cannot r
   assert.deepEqual(after.tonightQueue, [], "the removal landed");
   assert.deepEqual(after.pendingBlockers, [{ id: "b1" }], "the blocker survived both saves");
   assert.equal(after.segmentGMinutes, 7, "the late writer's key landed");
+});
+
+// ---------------------------------------------------------------------------
+// BET-1464 defect 3 — patchStore: the store-agnostic generalization of
+// patchEngineState. ONE mutex PER STORE PATH, shared by every writer of the
+// file; async mutators hold it across their whole body (the serialization the
+// per-engine write chains used to give); an empty patch is a pure no-op (no
+// save). All tests below use INJECTED stores — no shared singleton state.
+// ---------------------------------------------------------------------------
+
+test("patchStore: parallel patches compose — every key lands on the injected store", async () => {
+  const store = memoryStore({});
+  await Promise.all([
+    patchStore(store, { a: 1 }),
+    patchStore(store, (fresh) => ({ b: (fresh.b ?? 0) + 1 })),
+    patchStore(store, (fresh) => ({ b: (fresh.b ?? 0) + 1 })),
+  ]);
+  const after = await store.load();
+  assert.equal(after.a, 1);
+  assert.equal(after.b, 2, "both increments landed on each other's committed state");
+});
+
+test("patchStore: a patch preserves keys it does not own — a stale-derived patch cannot erase a concurrent writer's key (scalars AND whole-array replacements)", async () => {
+  const store = memoryStore({ X: "old" });
+  await patchStore(store, { X: "new" }); // A commits X=new
+  // B's patch was derived from a stale snapshot still carrying old X — the
+  // old whole-payload save shape would resurrect old X (or drop X entirely
+  // when the writer's shape no longer carries it). The per-key merge cannot.
+  await patchStore(store, { Y: 42 });
+  const after = await store.load();
+  assert.equal(after.X, "new", "X survived B's save");
+  assert.equal(after.Y, 42, "Y landed");
+
+  // The card/watcher/trust-pending shape: a patch that REPLACES a whole
+  // array. A commits a one-element array; B's stale-derived patch replaces a
+  // different key; then C's mutator (derived FRESH under the mutex) appends
+  // to the array it actually owns. A's rows survive all of it.
+  await patchStore(store, { cards: [{ id: "c1" }] });
+  await patchStore(store, { unrelated: true }); // a stale-derived whole-save would have reverted `cards`
+  const afterArray = await patchStore(store, (fresh) => ({
+    cards: [...(fresh.cards ?? []), { id: "c2" }],
+  }));
+  assert.deepEqual(
+    afterArray.cards.map((c) => c.id),
+    ["c1", "c2"],
+    "the array replacement composed with the unrelated writer's key",
+  );
+});
+
+test("patchStore: an async mutator holds the store mutex across its whole body", async () => {
+  const store = memoryStore({ n: 0 });
+  let releaseA;
+  const gateA = new Promise((r) => {
+    releaseA = r;
+  });
+  let bRan = false;
+  const a = patchStore(store, async () => {
+    await gateA; // A holds the mutex while suspended mid-body
+    return { n: 1 };
+  });
+  const b = patchStore(store, async () => {
+    bRan = true;
+    return { n: 2 };
+  });
+  // Flush microtasks AND give the timer wheel real turns: B must still not
+  // have started while A's gate is held.
+  await Promise.resolve();
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(bRan, false, "B's mutator must wait for A's whole body");
+  releaseA();
+  const afterB = await b;
+  await a;
+  assert.equal(afterB.n, 2, "B re-derived from A's committed state");
+  assert.equal((await store.load()).n, 2);
+});
+
+test("patchStore: an empty patch is a pure no-op — no save fires", async () => {
+  let saves = 0;
+  const store = {
+    load: async () => ({ v: 1, n: 7 }),
+    save: async () => {
+      saves += 1;
+    },
+  };
+  const out = await patchStore(store, {});
+  assert.equal(saves, 0, "a static empty patch saves nothing");
+  assert.equal(out.n, 7, "the fresh state is returned unchanged");
+  await patchStore(store, () => ({})); // the BET-1463 card-writer no-op shape
+  assert.equal(saves, 0, "a mutator resolving to an empty patch saves nothing");
+});
+
+test("patchStore: rejects a store without load/save and a non-object patch", async () => {
+  await assert.rejects(() => patchStore({}, { a: 1 }), /load and save/);
+  await assert.rejects(() => patchStore(memoryStore({}), null), /plain object/);
+  await assert.rejects(() => patchStore(memoryStore({}), () => [1, 2]), /plain object/);
+});
+
+// ---------------------------------------------------------------------------
+// BET-1464 defect 2 — the activity ledger's atomic rewrite. ONE write lock
+// shared by the appender and the retention sweep; the rewrite goes through
+// writeJsonAtomic (temp + rename). The invariant under test: an append
+// concurrent with a sweep is never lost, and a rewrite never truncates the
+// surviving ledger.
+// ---------------------------------------------------------------------------
+
+test("the ledger rewrite is atomic: an append concurrent with a sweep is not lost", async () => {
+  const { rm } = await import("node:fs/promises");
+  const path = ctoPath("ledger-1464-atomicity.jsonl");
+  const store = createLedgerStore({ path, now: () => NOW_MS });
+  const retentionMs = RETENTION_MS.ledger;
+  const cutoff = NOW_MS - retentionMs;
+  try {
+    for (let i = 0; i < 12; i += 1) {
+      await rm(path, { force: true });
+      await store.append({ kind: "old", ts: cutoff - 1 });
+      // Both ops fired in the same tick: the append either lands before the
+      // sweep's locked read (the fresh row is kept — fresh rows are never
+      // expired) or after its rewrite (the file already carries the rewritten
+      // content). It can never land "between" — that window IS the lock.
+      const freshKind = `fresh-${i}`;
+      const sweepP = store.sweepExpired({ nowMs: NOW_MS, retentionMs });
+      const appendP = store.append({ kind: freshKind, ts: NOW_MS });
+      await Promise.all([sweepP, appendP]);
+      const rows = await store.read();
+      assert.ok(
+        rows.some((r) => r.kind === freshKind),
+        `the concurrent append (iter ${i}) must survive the sweep`,
+      );
+      assert.ok(!rows.some((r) => r.kind === "old"), "the expired row is dropped");
+    }
+  } finally {
+    await rm(path, { force: true });
+  }
+});
+
+test("the ledger rewrite never truncates a mid-sweep append (the lock is held across the whole sweep section)", async () => {
+  const { rm } = await import("node:fs/promises");
+  const path = ctoPath("ledger-1464-midflight.jsonl");
+  const store = createLedgerStore({ path, now: () => NOW_MS });
+  const retentionMs = RETENTION_MS.ledger;
+  const cutoff = NOW_MS - retentionMs;
+  try {
+    // Seed the expired row plus enough fresh rows that the sweep's
+    // read-filter-rewrite spans real time.
+    await store.append({ kind: "old", ts: cutoff - 1 });
+    for (let i = 0; i < 800; i += 1) {
+      await store.append({ kind: `bulk-${i}`, ts: NOW_MS });
+    }
+    const sweepP = store.sweepExpired({ nowMs: NOW_MS, retentionMs });
+    // Land while the sweep is provably in its locked section.
+    await new Promise((r) => setTimeout(r, 2));
+    await store.append({ kind: "mid-sweep", ts: NOW_MS });
+    await sweepP;
+    const rows = await store.read();
+    assert.ok(rows.some((r) => r.kind === "mid-sweep"), "the mid-sweep append must not be lost");
+    assert.ok(!rows.some((r) => r.kind === "old"), "the expired row is dropped");
+    assert.equal(rows.filter((r) => r.kind?.startsWith("bulk-")).length, 800, "the kept set is intact (no truncation)");
+  } finally {
+    await rm(path, { force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// BET-1464 defect 1 — the retention sweeper actually starts. The poller is
+// real (immediate first tick + the given interval); the assertion is that its
+// sweep removes an expired ledger row from the sandboxed store.
+// ---------------------------------------------------------------------------
+
+test("startCtoStoreSweeper starts a poller that sweeps the stores on its interval", async () => {
+  const { rm } = await import("node:fs/promises");
+  const cutoff = Date.now() - RETENTION_MS.ledger;
+  await ledgerStore.append({ kind: "sweeper-canary", ts: cutoff - 1 });
+  const sweeper = startCtoStoreSweeper({ intervalMs: 15 });
+  try {
+    const deadline = Date.now() + 5000;
+    let gone = false;
+    while (Date.now() < deadline) {
+      const rows = await ledgerStore.read();
+      if (!rows.some((r) => r.kind === "sweeper-canary")) {
+        gone = true;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    assert.equal(gone, true, "the sweeper's first tick removed the expired ledger row");
+  } finally {
+    sweeper.stop();
+    await rm(ctoPath("ledger-1464-atomicity.jsonl"), { force: true });
+  }
 });

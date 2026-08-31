@@ -20,7 +20,7 @@
 //
 // All I/O is injected; pure helpers are exported for tests.
 
-import { toolRegistryStore, toolUsageStore, ledgerStore } from "./ctoStores.mjs";
+import { toolRegistryStore, toolUsageStore, ledgerStore, patchStore } from "./ctoStores.mjs";
 import { displayName as catalogDisplayName } from "./ctoToolCatalog.mjs";
 import {
   CHANNEL_TRANSCRIPT,
@@ -35,6 +35,31 @@ import { vitalityOf, CADENCE_WEEKLY_MS } from "./ctoProbes.mjs";
 import { betaLowerBound } from "./ctoVerdicts.mjs";
 
 export const TOOL_REGISTRY_VERSION = 1;
+
+// The raw store payload → the working registry shape (the writers' shared
+// normalization, BET-1440's single source): rows persisted before the
+// deep-read/decay fields existed are back-filled so every consumer sees the
+// fields at their §7.2-schema defaults (spread order: stored row wins). Pure.
+function payloadFrom(raw) {
+  const p = raw && typeof raw === "object" ? raw : {};
+  return {
+    v: TOOL_REGISTRY_VERSION,
+    tools: (Array.isArray(p?.tools) ? p.tools : []).map((t) => ({
+      deepAskRound: 0,
+      deepAskAtUses: 0,
+      deepReArmAt: null,
+      deepAskBarMet: false,
+      lastDeepAskDay: null,
+      asSourceDecayed: false,
+      decayedAtUses: 0,
+      ...(t ?? {}),
+    })),
+    lastScanTs: Number.isFinite(p?.lastScanTs) ? p.lastScanTs : null,
+    lastFusedTs: Number.isFinite(p?.lastFusedTs) ? p.lastFusedTs : null,
+    lastAskDay: typeof p?.lastAskDay === "string" ? p.lastAskDay : null,
+    lastDeepAskDay: typeof p?.lastDeepAskDay === "string" ? p.lastDeepAskDay : null,
+  };
+}
 export const ACTOR = "cto";
 
 // Evidence-log cap (all channels) — the usage log is a bounded FIFO.
@@ -352,68 +377,28 @@ export function createToolRegistry(deps = {}) {
     scaffoldProbes = null,
   } = deps;
 
+  // BET-1464 defect 3: every tool-registry.json write routes through
+  // patchStore — the read-fresh-merge-save runs under the registry store's
+  // own mutex, keyed by the store path. This replaces the old per-instance
+  // write chain (`serialized`) with the ONE shared discipline every CTO
+  // store writer uses: a writer whose body awaits (the scan's db batch, the
+  // LLM classification, the consent-time probe scaffold) holds the mutex
+  // across the whole body, so a connect answer landing mid-scan can no
+  // longer be silently overwritten by the scan's stale save — the user's
+  // explicit "never" reverting (the same snapshot-spreading-writer class
+  // BET-1425 fixed for engine-state). Mutators receive the RAW store payload
+  // and normalize via payloadFrom; returning an empty patch means "no
+  // change, no save" (the early-exit error paths rely on that).
+  function patchRegistry(mutate) {
+    return patchStore(registryStore, async (fresh) => (await mutate(payloadFrom(fresh))) ?? {});
+  }
+
   async function loadPayload() {
     try {
-      const p = await registryStore.load();
-      return {
-        v: TOOL_REGISTRY_VERSION,
-        // Rows persisted before the deep-read/decay fields existed are
-        // back-filled here so every consumer sees the fields at their
-        // §7.2-schema defaults (spread order: stored row wins).
-        tools: (Array.isArray(p?.tools) ? p.tools : []).map((t) => ({
-          deepAskRound: 0,
-          deepAskAtUses: 0,
-          deepReArmAt: null,
-          deepAskBarMet: false,
-          lastDeepAskDay: null,
-          asSourceDecayed: false,
-          decayedAtUses: 0,
-          ...(t ?? {}),
-        })),
-        lastScanTs: Number.isFinite(p?.lastScanTs) ? p.lastScanTs : null,
-        lastFusedTs: Number.isFinite(p?.lastFusedTs) ? p.lastFusedTs : null,
-        lastAskDay: typeof p?.lastAskDay === "string" ? p.lastAskDay : null,
-        lastDeepAskDay: typeof p?.lastDeepAskDay === "string" ? p.lastDeepAskDay : null,
-      };
+      return payloadFrom(await registryStore.load());
     } catch {
       return { v: TOOL_REGISTRY_VERSION, tools: [], lastScanTs: null, lastFusedTs: null, lastAskDay: null, lastDeepAskDay: null };
     }
-  }
-
-  async function savePayload(payload) {
-    await registryStore.save(payload);
-  }
-
-  // Shared preamble for the tool-scoped writers: normalize the toolId, load
-  // the whole-payload store, find the row. Returns `{ ok: false, error }` on
-  // failure or `{ ok: true, id, payload, t }` on success. Single source for
-  // the block the duplication gate flagged file↔file (BET-1440).
-  async function resolveToolRow(toolId) {
-    const id = typeof toolId === "string" ? toolId.trim().toLowerCase() : "";
-    if (!id) return { ok: false, error: "missing tool" };
-    const payload = await loadPayload();
-    const t = payload.tools.find((x) => x?.tool === id);
-    if (!t) return { ok: false, error: `unknown tool "${id}"` };
-    return { ok: true, id, payload, t };
-  }
-
-  // Serializes the registry's mutating writers (dailyScan / resolveConnect /
-  // unNever) — all load→mutate→save the same whole-payload store, and the
-  // scan holds its snapshot across seconds-long awaits (db batch, LLM
-  // classification). Without the guard, a connect answer landing mid-scan is
-  // silently overwritten by the scan's stale save — the user's explicit
-  // "never" reverting (lost update; the same snapshot-spreading-writer class
-  // BET-1425 fixed for engine-state). Writers queue behind the in-flight one
-  // (the established in-flight-guard pattern); each mutation is short except
-  // the scan, whose internal failures never leave the queue stuck.
-  let writeChain = Promise.resolve();
-  function serialized(fn) {
-    const run = writeChain.then(fn, fn);
-    writeChain = run.then(
-      () => {},
-      () => {},
-    );
-    return run;
   }
 
   async function ledgerLog(entry) {
@@ -425,12 +410,16 @@ export function createToolRegistry(deps = {}) {
   }
 
   // Append evidence rows to the bounded usage log (all channels funnel here —
-  // the §7.1 log). Returns the number of rows appended.
+  // the §7.1 log). Returns the number of rows appended. The usage log is its
+  // own file, so its patch mutex is the usage store's own (BET-1464 defect 3
+  // — two concurrent channels could previously drop each other's rows).
   async function appendUsage(rows) {
     if (!rows.length) return 0;
-    const payload = (await usageStore.load().catch(() => ({}))) ?? {};
-    const prev = Array.isArray(payload.rows) ? payload.rows : [];
-    await usageStore.save({ ...payload, rows: [...prev, ...rows].slice(-USAGE_ROWS_CAP) });
+    await patchStore(usageStore, (fresh) => {
+      const payload = fresh && typeof fresh === "object" ? fresh : {};
+      const prev = Array.isArray(payload.rows) ? payload.rows : [];
+      return { rows: [...prev, ...rows].slice(-USAGE_ROWS_CAP) };
+    });
     return rows.length;
   }
 
@@ -685,35 +674,42 @@ export function createToolRegistry(deps = {}) {
 
   // The daily batch (§7.1-2/3 + §7.3). First scan after install runs over the
   // cold-start backfill range; later scans run since the previous watermark.
-  // Returns `{ok, scanned, asked}`.
+  // The whole body runs under the registry store's mutex (BET-1464 defect 3):
+  // the scan holds its snapshot across seconds-long awaits, so without the
+  // mutex a connect answer landing mid-scan would be reverted by the scan's
+  // save. Returns `{ok, scanned, asked}`.
   async function dailyScan() {
     const nowMs = now();
     const untilTs = nowMs;
-    const payload = await loadPayload();
-    const sinceTs =
-      payload.lastScanTs ??
-      (Number.isFinite(backfillStartInstant) ? backfillStartInstant : nowMs - 30 * DAY_MS);
-
     const rows = [];
-    try {
-      if (typeof collectDb === "function") {
-        const dbRows = await collectDb({ sinceTs, untilTs, cap: SCAN_ROW_CAP });
-        rows.push(...extractFromDbRows(dbRows));
+    let asked = null;
+    let scanLedger = false;
+    await patchRegistry(async (payload) => {
+      const sinceTs =
+        payload.lastScanTs ??
+        (Number.isFinite(backfillStartInstant) ? backfillStartInstant : nowMs - 30 * DAY_MS);
+      try {
+        if (typeof collectDb === "function") {
+          const dbRows = await collectDb({ sinceTs, untilTs, cap: SCAN_ROW_CAP });
+          rows.push(...extractFromDbRows(dbRows));
+        }
+        if (typeof collectSurfaces === "function") {
+          const surfaces = (await collectSurfaces()) ?? {};
+          rows.push(...collectConfigEvidence(surfaces, { ts: nowMs }));
+        }
+      } catch {
+        /* channel failures never take the scan down */
       }
-      if (typeof collectSurfaces === "function") {
-        const surfaces = (await collectSurfaces()) ?? {};
-        rows.push(...collectConfigEvidence(surfaces, { ts: nowMs }));
-      }
-    } catch {
-      /* channel failures never take the scan down */
-    }
-    await appendUsage(rows);
-    await fusePending(payload);
-    await classifyOneRaw(payload);
-    const { changed, asked } = await lifecycleStep(payload);
-    payload.lastScanTs = untilTs;
-    await savePayload(payload);
-    if (changed || asked) {
+      await appendUsage(rows);
+      await fusePending(payload);
+      await classifyOneRaw(payload);
+      const { changed, asked: askTool } = await lifecycleStep(payload);
+      payload.lastScanTs = untilTs;
+      asked = askTool;
+      scanLedger = changed || askTool != null;
+      return payload;
+    });
+    if (scanLedger) {
       await ledgerLog({ kind: "cto.tool.scan", asked: asked ?? null });
     }
     return { ok: true, scanned: rows.length, asked: asked ?? null };
@@ -736,51 +732,62 @@ export function createToolRegistry(deps = {}) {
     if (ring !== "metadata" && ring !== "deep_read") {
       return { ok: false, error: `invalid ring "${ring}"` };
     }
-    const payload = await loadPayload();
-    const t = payload.tools.find((x) => x?.tool === id);
-    if (!t) return { ok: false, error: `unknown tool "${id}"` };
     const nowMs = now();
-    t.consent = t.consent ?? emptyConsent();
-    if (answer === "connect") {
-      if (ring === "deep_read") {
-        if (t.consent.metadata !== "yes") return { ok: false, error: `tool "${id}" has no metadata consent` };
-        t.consent.deep_read = "yes";
-        t.deepReArmAt = null;
-        await ledgerLog({ kind: "cto.tool.consent", tool: id, ring: "deep_read", value: "yes" });
-      } else {
-        // The metadata ring is granted. Status stays `candidate` until the
-        // first §7.5 probe actually runs (applyProbeResult flips it).
-        t.consent.metadata = "yes";
-        t.reArmAt = null;
-        await ledgerLog({ kind: "cto.tool.consent", tool: id, ring: "metadata", value: "yes" });
-        // §7.5 BET-1396: the ENGINE authors the tool's probe-spec template at
-        // consent time, filled with the evidenced credential key (if any). The
-        // file is engine-written; its content is completed through the runner's
-        // validated writeSpec path. Best-effort — consent never depends on it.
-        if (typeof scaffoldProbes === "function") {
-          const secretRow = (t.evidence ?? []).find((e) => e?.channel === "secret" && typeof e?.detail === "string" && e.detail.startsWith("secret:"));
-          await scaffoldProbes(id, { secret: secretRow ? secretRow.detail.slice("secret:".length) : null }).catch(() => {});
+    // The consent write runs under the registry store's mutex (BET-1464
+    // defect 3). An early-exit error path returns an empty patch: no save.
+    let err = null;
+    await patchRegistry(async (payload) => {
+      const t = payload.tools.find((x) => x?.tool === id);
+      if (!t) {
+        err = { ok: false, error: `unknown tool "${id}"` };
+        return null;
+      }
+      t.consent = t.consent ?? emptyConsent();
+      if (answer === "connect") {
+        if (ring === "deep_read") {
+          if (t.consent.metadata !== "yes") {
+            err = { ok: false, error: `tool "${id}" has no metadata consent` };
+            return null;
+          }
+          t.consent.deep_read = "yes";
+          t.deepReArmAt = null;
+          await ledgerLog({ kind: "cto.tool.consent", tool: id, ring: "deep_read", value: "yes" });
+        } else {
+          // The metadata ring is granted. Status stays `candidate` until the
+          // first §7.5 probe actually runs (applyProbeResult flips it).
+          t.consent.metadata = "yes";
+          t.reArmAt = null;
+          await ledgerLog({ kind: "cto.tool.consent", tool: id, ring: "metadata", value: "yes" });
+          // §7.5 BET-1396: the ENGINE authors the tool's probe-spec template at
+          // consent time, filled with the evidenced credential key (if any). The
+          // file is engine-written; its content is completed through the runner's
+          // validated writeSpec path. Best-effort — consent never depends on it.
+          if (typeof scaffoldProbes === "function") {
+            const secretRow = (t.evidence ?? []).find((e) => e?.channel === "secret" && typeof e?.detail === "string" && e.detail.startsWith("secret:"));
+            await scaffoldProbes(id, { secret: secretRow ? secretRow.detail.slice("secret:".length) : null }).catch(() => {});
+          }
         }
-      }
-    } else if (answer === "not-now") {
-      if (ring === "deep_read") {
-        t.consent.deep_read = "no";
-        t.deepReArmAt = nowMs + NOT_NOW_REARM_MS;
-        t.deepAskAtUses = t.uses ?? 0;
-        await ledgerLog({ kind: "cto.tool.consent", tool: id, ring: "deep_read", value: "no" });
+      } else if (answer === "not-now") {
+        if (ring === "deep_read") {
+          t.consent.deep_read = "no";
+          t.deepReArmAt = nowMs + NOT_NOW_REARM_MS;
+          t.deepAskAtUses = t.uses ?? 0;
+          await ledgerLog({ kind: "cto.tool.consent", tool: id, ring: "deep_read", value: "no" });
+        } else {
+          t.consent.metadata = "no";
+          t.reArmAt = nowMs + NOT_NOW_REARM_MS;
+          t.askAtUses = t.uses ?? 0;
+          await ledgerLog({ kind: "cto.tool.consent", tool: id, ring: "metadata", value: "no" });
+        }
       } else {
-        t.consent.metadata = "no";
-        t.reArmAt = nowMs + NOT_NOW_REARM_MS;
-        t.askAtUses = t.uses ?? 0;
-        await ledgerLog({ kind: "cto.tool.consent", tool: id, ring: "metadata", value: "no" });
+        // Never: kills ALL rings and suppresses future asks (revocable only in
+        // the §10.5 tool drill-down).
+        t.consent = { metadata: "never", deep_read: "never", write: "never" };
+        await ledgerLog({ kind: "cto.tool.consent", tool: id, ring: "metadata", value: "never" });
       }
-    } else {
-      // Never: kills ALL rings and suppresses future asks (revocable only in
-      // the §10.5 tool drill-down).
-      t.consent = { metadata: "never", deep_read: "never", write: "never" };
-      await ledgerLog({ kind: "cto.tool.consent", tool: id, ring: "metadata", value: "never" });
-    }
-    await savePayload(payload);
+      return payload;
+    });
+    if (err) return err;
 
     // §9.5: every UI control that expresses a judgment writes exactly one
     // verdict. Connect → accept; Not now → dismiss; Never → never. The class
@@ -821,16 +828,29 @@ export function createToolRegistry(deps = {}) {
   // exists to prevent). The server rule ships here; the drill-down UI/route
   // is B11's.
   async function unNever(toolId) {
-    const r = await resolveToolRow(toolId);
-    if (!r.ok) return r;
-    const { id, payload, t } = r;
-    if (t.consent?.metadata !== "never") return { ok: false, error: `tool "${id}" is not never'd` };
-    t.consent = emptyConsent();
-    t.status = "observed";
-    t.unneverAtUses = t.uses ?? 0;
-    t.reArmAt = null;
-    await savePayload(payload);
-    await ledgerLog({ kind: "cto.tool.unnever", tool: id, uses: t.uses });
+    const id = typeof toolId === "string" ? toolId.trim().toLowerCase() : "";
+    if (!id) return { ok: false, error: "missing tool" };
+    let err = null;
+    let uses = 0;
+    await patchRegistry(async (payload) => {
+      const t = payload.tools.find((x) => x?.tool === id);
+      if (!t) {
+        err = { ok: false, error: `unknown tool "${id}"` };
+        return null;
+      }
+      if (t.consent?.metadata !== "never") {
+        err = { ok: false, error: `tool "${id}" is not never'd` };
+        return null;
+      }
+      t.consent = emptyConsent();
+      t.status = "observed";
+      t.unneverAtUses = t.uses ?? 0;
+      t.reArmAt = null;
+      uses = t.uses ?? 0;
+      return payload;
+    });
+    if (err) return err;
+    await ledgerLog({ kind: "cto.tool.unnever", tool: id, uses });
     return { ok: true, tool: id };
   }
 
@@ -846,13 +866,22 @@ export function createToolRegistry(deps = {}) {
     if (ring !== "metadata" && ring !== "deep_read" && ring !== "write") {
       return { ok: false, error: `ring must be one of metadata, deep_read, write` };
     }
-    const payload = await loadPayload();
-    const t = payload.tools.find((x) => x?.tool === id);
-    if (!t) return { ok: false, error: `unknown tool "${id}"` };
-    const cur = { ...emptyConsent(), ...(t.consent ?? {}) };
-    if (cur[ring] !== "yes") return { ok: false, error: `ring "${ring}" is not granted for "${id}"` };
-    t.consent = { ...cur, [ring]: "no" };
-    await savePayload(payload);
+    let err = null;
+    await patchRegistry(async (payload) => {
+      const t = payload.tools.find((x) => x?.tool === id);
+      if (!t) {
+        err = { ok: false, error: `unknown tool "${id}"` };
+        return null;
+      }
+      const cur = { ...emptyConsent(), ...(t.consent ?? {}) };
+      if (cur[ring] !== "yes") {
+        err = { ok: false, error: `ring "${ring}" is not granted for "${id}"` };
+        return null;
+      }
+      t.consent = { ...cur, [ring]: "no" };
+      return payload;
+    });
+    if (err) return err;
     await ledgerLog({ kind: "cto.tool.consent", tool: id, ring, value: "no" });
     return { ok: true, tool: id, ring, value: "no" };
   }
@@ -869,8 +898,9 @@ export function createToolRegistry(deps = {}) {
 
   // ---------------------------------------------------------------------------
   // BET-1396 — §7.3 vitality / §7.6 relevance / §7.4 lifecycle. All mutating
-  // writers go through `serialized` (the whole-payload store's lost-update
-  // guard, same as the scan/connect writers).
+  // writers are patchStore writers (BET-1464 defect 3) — the whole-payload
+  // store's lost-update guard is the store mutex, shared with the scan and
+  // connect writers.
   // ---------------------------------------------------------------------------
 
   // The full row for one tool (probe runner reads evidence hosts + vitality;
@@ -900,36 +930,47 @@ export function createToolRegistry(deps = {}) {
   // The rate is EWMA-smoothed (τ = 7d, the engagement axis's constant) into
   // `vitality.ewma` — the runner reads it for the daily↔weekly adaptation.
   // First success also flips §7.4 candidate → integrated (probes ran).
-  // NOTE: the body does NOT self-serialize — the exported wrapper already
-  // routes through `serialized` (nesting would deadlock the write chain).
+  // NOTE: the body itself runs under the registry store's mutex — no
+  // wrapper serialization exists any more (BET-1464 defect 3); nesting a
+  // second patchStore on the same store would deadlock the promise tail.
   async function applyProbeResult(toolId, { fields, probedAt, cadenceMs } = {}) {
-    const r = await resolveToolRow(toolId);
-    if (!r.ok) return r;
-    const { id, payload, t } = r;
+    const id = typeof toolId === "string" ? toolId.trim().toLowerCase() : "";
+    if (!id) return { ok: false, error: "missing tool" };
     const vit = vitalityOf(fields);
-    t.vitality = t.vitality ?? { last_event: null, inflow_rate: null, ewma: null, last_probed: null };
-    const v = t.vitality;
-    const ts = typeof probedAt === "number" ? probedAt : now();
-    if (vit.last_event !== undefined) v.last_event = vit.last_event;
-    if (vit.inflow_rate !== undefined) {
-      const cad = Number.isFinite(cadenceMs) && cadenceMs > 0 ? cadenceMs : WEEK_MS;
-      const elapsed = Number.isFinite(v.last_probed) ? Math.max(ts - v.last_probed, 1) : cad;
-      const ratePerWeek = (vit.inflow_rate * WEEK_MS) / elapsed;
-      const decay = Math.exp(-(elapsed / DAY_MS) / EWMA_TAU_DAYS);
-      v.ewma = v.ewma == null ? ratePerWeek : v.ewma * decay + ratePerWeek * (1 - decay);
-      v.inflow_rate = vit.inflow_rate;
-    }
-    v.last_probed = ts;
+    let err = null;
     let flipped = false;
-    if (t.status === "candidate") {
-      t.status = "integrated";
-      flipped = true;
-    }
-    await savePayload(payload);
+    let vitality = null;
+    await patchRegistry(async (payload) => {
+      const t = payload.tools.find((x) => x?.tool === id);
+      if (!t) {
+        err = { ok: false, error: `unknown tool "${id}"` };
+        return null;
+      }
+      t.vitality = t.vitality ?? { last_event: null, inflow_rate: null, ewma: null, last_probed: null };
+      const v = t.vitality;
+      const ts = typeof probedAt === "number" ? probedAt : now();
+      if (vit.last_event !== undefined) v.last_event = vit.last_event;
+      if (vit.inflow_rate !== undefined) {
+        const cad = Number.isFinite(cadenceMs) && cadenceMs > 0 ? cadenceMs : WEEK_MS;
+        const elapsed = Number.isFinite(v.last_probed) ? Math.max(ts - v.last_probed, 1) : cad;
+        const ratePerWeek = (vit.inflow_rate * WEEK_MS) / elapsed;
+        const decay = Math.exp(-(elapsed / DAY_MS) / EWMA_TAU_DAYS);
+        v.ewma = v.ewma == null ? ratePerWeek : v.ewma * decay + ratePerWeek * (1 - decay);
+        v.inflow_rate = vit.inflow_rate;
+      }
+      v.last_probed = ts;
+      if (t.status === "candidate") {
+        t.status = "integrated";
+        flipped = true;
+      }
+      vitality = { ...v };
+      return payload;
+    });
+    if (err) return err;
     if (flipped) {
       await ledgerLog({ kind: "cto.tool.integrated", tool: id });
     }
-    return { ok: true, vitality: { ...v }, flipped };
+    return { ok: true, vitality, flipped };
   }
 
   // §7.6 relevance: persist the weekly nano-score for one (tool, project)
@@ -939,11 +980,17 @@ export function createToolRegistry(deps = {}) {
     if (!id || typeof project !== "string" || !project) return { ok: false, error: "missing tool/project" };
     const s = Number(score);
     if (!Number.isFinite(s)) return { ok: false, error: "invalid score" };
-    const payload = await loadPayload();
-    const t = payload.tools.find((x) => x?.tool === id);
-    if (!t) return { ok: false, error: `unknown tool "${id}"` };
-    t.relevance = { ...(t.relevance ?? {}), [project]: Math.max(0, Math.min(1, s)) };
-    await savePayload(payload);
+    let err = null;
+    await patchRegistry(async (payload) => {
+      const t = payload.tools.find((x) => x?.tool === id);
+      if (!t) {
+        err = { ok: false, error: `unknown tool "${id}"` };
+        return null;
+      }
+      t.relevance = { ...(t.relevance ?? {}), [project]: Math.max(0, Math.min(1, s)) };
+      return payload;
+    });
+    if (err) return err;
     return { ok: true };
   }
 
@@ -963,29 +1010,37 @@ export function createToolRegistry(deps = {}) {
     const e = effects && typeof effects === "object" ? effects : {};
     const isReport = e.success === true || e.rejection === true;
     if (!isReport) return { ok: true, changed: false };
-    const r = await resolveToolRow(id);
-    if (!r.ok) return r;
-    const { payload, t } = r;
-    t.as_source = t.as_source ?? { reports: 0, accepted: 0 };
-    if (e.success === true) t.as_source.accepted = (t.as_source.accepted ?? 0) + 1;
-    t.as_source.reports = (t.as_source.reports ?? 0) + 1;
-    const reports = t.as_source.reports;
-    const rejected = reports - (t.as_source.accepted ?? 0);
-    const tripped =
-      reports >= AS_SOURCE_MIN_REPORTS &&
-      betaLowerBound(t.as_source.accepted ?? 0, rejected) < AS_SOURCE_DECAY_LOWER_BOUND;
-    if (tripped && t.asSourceDecayed !== true) {
-      t.asSourceDecayed = true;
-      t.decayedAtUses = t.uses ?? 0;
-      await ledgerLog({
-        kind: "cto.tool.as_source_decayed",
-        tool: id,
-        reports,
-        accepted: t.as_source.accepted ?? 0,
-      });
-    }
-    await savePayload(payload);
-    return { ok: true, changed: true, as_source: { ...t.as_source }, decayed: t.asSourceDecayed === true };
+    let err = null;
+    let out = null;
+    await patchRegistry(async (payload) => {
+      const t = payload.tools.find((x) => x?.tool === id);
+      if (!t) {
+        err = { ok: false, error: `unknown tool "${id}"` };
+        return null;
+      }
+      t.as_source = t.as_source ?? { reports: 0, accepted: 0 };
+      if (e.success === true) t.as_source.accepted = (t.as_source.accepted ?? 0) + 1;
+      t.as_source.reports = (t.as_source.reports ?? 0) + 1;
+      const reports = t.as_source.reports;
+      const rejected = reports - (t.as_source.accepted ?? 0);
+      const tripped =
+        reports >= AS_SOURCE_MIN_REPORTS &&
+        betaLowerBound(t.as_source.accepted ?? 0, rejected) < AS_SOURCE_DECAY_LOWER_BOUND;
+      if (tripped && t.asSourceDecayed !== true) {
+        t.asSourceDecayed = true;
+        t.decayedAtUses = t.uses ?? 0;
+        await ledgerLog({
+          kind: "cto.tool.as_source_decayed",
+          tool: id,
+          reports,
+          accepted: t.as_source.accepted ?? 0,
+        });
+      }
+      out = { ok: true, changed: true, as_source: { ...t.as_source }, decayed: t.asSourceDecayed === true };
+      return payload;
+    });
+    if (err) return err;
+    return out;
   }
 
   // One evidence row on the tool's trail (probe failures; §7.2 evidence
@@ -995,16 +1050,24 @@ export function createToolRegistry(deps = {}) {
     if (!id || !entry || typeof entry.channel !== "string" || typeof entry.detail !== "string") {
       return { ok: false, error: "missing tool/evidence" };
     }
-    const payload = await loadPayload();
-    const t = payload.tools.find((x) => x?.tool === id);
-    if (!t) return { ok: false, error: `unknown tool "${id}"` };
-    const row = { channel: entry.channel, detail: entry.detail, ts: Number.isFinite(entry.ts) ? entry.ts : now() };
-    const exists = (t.evidence ?? []).some((e) => e?.channel === row.channel && e?.detail === row.detail);
-    if (exists) return { ok: true, changed: false };
-    t.evidence = [...(t.evidence ?? []), row];
-    if (t.evidence.length > EVIDENCE_CAP) t.evidence.splice(0, t.evidence.length - EVIDENCE_CAP);
-    await savePayload(payload);
-    return { ok: true, changed: true };
+    let err = null;
+    let changed = false;
+    await patchRegistry(async (payload) => {
+      const t = payload.tools.find((x) => x?.tool === id);
+      if (!t) {
+        err = { ok: false, error: `unknown tool "${id}"` };
+        return null;
+      }
+      const row = { channel: entry.channel, detail: entry.detail, ts: Number.isFinite(entry.ts) ? entry.ts : now() };
+      const exists = (t.evidence ?? []).some((e) => e?.channel === row.channel && e?.detail === row.detail);
+      if (exists) return null; // dedupe — an empty patch, no save
+      t.evidence = [...(t.evidence ?? []), row];
+      if (t.evidence.length > EVIDENCE_CAP) t.evidence.splice(0, t.evidence.length - EVIDENCE_CAP);
+      changed = true;
+      return payload;
+    });
+    if (err) return err;
+    return { ok: true, changed };
   }
 
   // Registry view for the §10.5 tool surfaces (read-only, stable shape).
@@ -1043,24 +1106,24 @@ export function createToolRegistry(deps = {}) {
   }
 
   return {
-    dailyScan: () => serialized(dailyScan),
-    resolveConnect: (input) => serialized(() => resolveConnect(input)),
-    unNever: (toolId) => serialized(() => unNever(toolId)),
-    revokeConsent: (toolId, ring) => serialized(() => revokeConsent(toolId, ring)),
+    dailyScan,
+    resolveConnect,
+    unNever,
+    revokeConsent,
     consentFor,
     listTools,
     appendUsage,
     // BET-1396: §7.5 probe-runner surface (read the row, fold vitality /
-    // relevance, append failure evidence). toolRow is a pure read — no
-    // serialization (it must never queue behind an in-flight scan).
+    // relevance, append failure evidence). toolRow is a pure read — it never
+    // touches the write mutex (must never queue behind an in-flight scan).
     toolRow,
-    applyProbeResult: (toolId, input) => serialized(() => applyProbeResult(toolId, input)),
-    applyRelevance: (toolId, project, score) => serialized(() => applyRelevance(toolId, project, score)),
-    appendEvidence: (toolId, entry) => serialized(() => appendEvidence(toolId, entry)),
-    // §9.5 as_source sink target (BET-1404) — serialized like the other
-    // whole-payload writers; the verdict sink is fire-and-forget, so the
-    // guard keeps concurrent folds from clobbering each other.
-    applyAsSource: (toolId, effects) => serialized(() => applyAsSource(toolId, effects)),
+    applyProbeResult,
+    applyRelevance,
+    appendEvidence,
+    // §9.5 as_source sink target (BET-1404) — a patchStore writer like the
+    // others; the verdict sink is fire-and-forget, so the mutex keeps
+    // concurrent folds from clobbering each other.
+    applyAsSource,
     // §7.6 decay chain: the runner asks instead of deriving chain state.
     probeCadenceCapMs,
   };

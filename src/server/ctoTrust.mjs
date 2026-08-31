@@ -26,7 +26,7 @@
 // Pure over injected stores + a now() clock — testable without a live box.
 
 import { betaTailAbove } from "./ctoVerdicts.mjs";
-import { appendLedgerBestEffort, engineStateStore, ledgerStore, trustStore, verdictsStore } from "./ctoStores.mjs";
+import { appendLedgerBestEffort, engineStateStore, ledgerStore, patchStore, trustStore, verdictsStore } from "./ctoStores.mjs";
 
 // The §3.5 ladder rungs, lowest → highest. `ask` covers the ask verbs
 // (silent-log / inbox card / notify — ctoSuggest picks within the rung);
@@ -147,20 +147,19 @@ export function createCtoTrust(deps = {}) {
     return appendLedgerBestEffort(ledger, now(), entry);
   }
 
-  async function loadState() {
-    let st = null;
-    try {
-      st = (await store.load()) ?? null;
-    } catch {
-      st = null;
-    }
+  // Derive the working state from a raw store payload, applying the one-time
+  // legacy `es.trust` adoption when the dedicated store is still fresh
+  // (shared by the read path and, under the store mutex, the writers).
+  async function stFromRaw(raw) {
+    let st = raw && typeof raw === "object" ? raw : null;
+    let adopted = false;
     // One-time migration (review cycle 4): trust used to live under the
     // shared engine-state file's `trust` key. If the dedicated store is
     // still fresh and a legacy payload exists, adopt it — after the first
     // write the dedicated store is authoritative and `es.trust` becomes a
     // harmless fossil no reader consults. Idempotent: the store being
     // non-empty short-circuits the legacy read entirely.
-    if (!st || typeof st !== "object" || (!st.v && !st.tiers && !st.stats && !st.pending)) {
+    if (!st || (!st.v && !st.tiers && !st.stats && !st.pending)) {
       let es = {};
       try {
         es = (await legacy?.load?.()) ?? {};
@@ -169,10 +168,25 @@ export function createCtoTrust(deps = {}) {
       }
       if (es.trust && typeof es.trust === "object" && (es.trust.tiers || es.trust.stats || es.trust.pending)) {
         st = es.trust;
-        await store.save(st).catch(() => {});
+        adopted = true;
       } else {
         st = {};
       }
+    }
+    return { st, adopted };
+  }
+
+  async function loadState() {
+    let st = null;
+    try {
+      st = (await store.load()) ?? null;
+    } catch {
+      st = null;
+    }
+    const derived = await stFromRaw(st);
+    st = derived.st;
+    if (derived.adopted) {
+      await store.save(st).catch(() => {});
     }
     return {
       st,
@@ -182,18 +196,29 @@ export function createCtoTrust(deps = {}) {
     };
   }
 
-  async function saveState(_snapshot, st) {
-    // Trust persists to its OWN file — the durability invariant (review
-    // cycle 4): no engine-state writer shape (snapshot-spread or otherwise)
-    // can revert tiers/counters/pending, because no engine-state writer
-    // touches this file. Callers pass a legacy snapshot for compatibility;
-    // it is never spread. `v` stamps the payload so a later load treats the
-    // store as authoritative even when it only holds the pending queue.
-    try {
-      await store.save({ ...(st ?? {}), v: st?.v ?? 1 });
-    } catch {
-      /* best-effort */
-    }
+  // BET-1464 defect 3: the trust writers' shared read-fresh-merge-save path —
+  // patchStore re-derives the working state from the FRESH payload inside the
+  // trust store's mutex (including the one-time legacy adoption, which the
+  // resulting patch persists — no separate unlocked save), runs the mutator,
+  // and persists the tiers/stats/pending keys. An empty patch is a pure
+  // no-op (no save). The old shape — loadState, mutate, saveState of a whole
+  // snapshot — could revert a concurrent writer's counters or queue rows.
+  async function patchState(mutate) {
+    return patchStore(store, async (fresh) => {
+      const { st } = await stFromRaw(fresh);
+      const patch = await mutate({
+        st,
+        tiers: (st.tiers && typeof st.tiers === "object") ? st.tiers : {},
+        stats: (st.stats && typeof st.stats === "object") ? st.stats : {},
+        pending: Array.isArray(st.pending) ? st.pending : [],
+      });
+      if (!patch) return {};
+      return {
+        tiers: patch.tiers ?? {},
+        stats: patch.stats ?? {},
+        pending: Array.isArray(patch.pending) ? patch.pending : [],
+      };
+    });
   }
 
   async function countVerdicts() {
@@ -226,48 +251,51 @@ export function createCtoTrust(deps = {}) {
   // non-counter outcome (e.g. a veto cancel when already at act) in the
   // rolling window without touching either Beta.
   async function applyOutcome(cls, { field = null, ok }) {
-    const { st, tiers, stats, pending } = await loadState();
-    const tier0 = TIERS.includes(tiers[cls]) ? tiers[cls] : TIER_ASK;
-    const s = stats[cls] && typeof stats[cls] === "object" ? { ...blankStats(), ...stats[cls] } : blankStats();
-    if (field) s[field] = (s[field] || 0) + 1;
-    s.recent = [...(Array.isArray(s.recent) ? s.recent : []), { ok: ok === true, ts: now() }].slice(-REJECT_WINDOW);
+    let result = { tier: TIER_ASK, changed: false };
+    await patchState(async ({ tiers, stats, pending }) => {
+      const tier0 = TIERS.includes(tiers[cls]) ? tiers[cls] : TIER_ASK;
+      const s = stats[cls] && typeof stats[cls] === "object" ? { ...blankStats(), ...stats[cls] } : blankStats();
+      if (field) s[field] = (s[field] || 0) + 1;
+      s.recent = [...(Array.isArray(s.recent) ? s.recent : []), { ok: ok === true, ts: now() }].slice(-REJECT_WINDOW);
 
-    const eligible = eligibilityOf(cls) === "eligible";
-    const coldStart = (await countVerdicts()) < VERDICT_MIN;
-    const ev = evaluateTier({
-      tier: tier0,
-      eligible,
-      coldStart,
-      ask: { a: s.a, b: s.b },
-      veto: { va: s.va, vb: s.vb },
-      recent: s.recent,
+      const eligible = eligibilityOf(cls) === "eligible";
+      const coldStart = (await countVerdicts()) < VERDICT_MIN;
+      const ev = evaluateTier({
+        tier: tier0,
+        eligible,
+        coldStart,
+        ask: { a: s.a, b: s.b },
+        veto: { va: s.va, vb: s.vb },
+        recent: s.recent,
+      });
+
+      let nextPending = pending.slice();
+      if (ev.changed) {
+        tiers[cls] = ev.tier;
+        s.recent = []; // the rolling window is consumed by the transition
+        // Ladder direction by RUNG order (never lexical — "act" < "veto-window"
+        // as strings), so an act promotion is never mislabeled a demotion.
+        const promoted = TIERS.indexOf(ev.tier) > TIERS.indexOf(tier0);
+        nextPending.push({
+          id: `trust-${now()}-${Math.random().toString(36).slice(2, 8)}`,
+          ts: now(),
+          kind: promoted ? "promoted" : "demoted",
+          text: announcementText(cls, tier0, ev.tier, ev.reason),
+          refs: [],
+        });
+        await ledgerAppend({
+          kind: promoted ? "trust.promoted" : "trust.demoted",
+          cls,
+          from: tier0,
+          to: ev.tier,
+          reason: ev.reason,
+        });
+      }
+      stats[cls] = s;
+      result = { tier: ev.tier, changed: ev.changed === true };
+      return { tiers, stats, pending: nextPending.slice(-PENDING_CAP) };
     });
-
-    let nextPending = pending.slice();
-    if (ev.changed) {
-      tiers[cls] = ev.tier;
-      s.recent = []; // the rolling window is consumed by the transition
-      // Ladder direction by RUNG order (never lexical — "act" < "veto-window"
-      // as strings), so an act promotion is never mislabeled a demotion.
-      const promoted = TIERS.indexOf(ev.tier) > TIERS.indexOf(tier0);
-      nextPending.push({
-        id: `trust-${now()}-${Math.random().toString(36).slice(2, 8)}`,
-        ts: now(),
-        kind: promoted ? "promoted" : "demoted",
-        text: announcementText(cls, tier0, ev.tier, ev.reason),
-        refs: [],
-      });
-      await ledgerAppend({
-        kind: promoted ? "trust.promoted" : "trust.demoted",
-        cls,
-        from: tier0,
-        to: ev.tier,
-        reason: ev.reason,
-      });
-    }
-    stats[cls] = s;
-    await saveState(null, { ...st, tiers, stats, pending: nextPending.slice(-PENDING_CAP) });
-    return { tier: ev.tier, changed: ev.changed === true };
+    return result;
   }
 
   // The B3 verdict-sink target (§9.5). Only suggestion verdicts attributed
@@ -301,7 +329,6 @@ export function createCtoTrust(deps = {}) {
   // act-tier execution is the top rung, not an acceptance input.
   async function recordAct({ cls, text, refs = [], action = null } = {}) {
     if (!cls || typeof cls !== "string") return { ok: false };
-    const { st, pending } = await loadState();
     const t = now();
     const row = {
       id: `act-${t}-${Math.random().toString(36).slice(2, 8)}`,
@@ -313,7 +340,7 @@ export function createCtoTrust(deps = {}) {
       actionType: action?.type ?? null,
     };
     await ledgerAppend({ kind: "trust.act", cls, text: row.text, refs: row.refs, actionType: row.actionType });
-    await saveState(null, { ...st, pending: [...pending, row].slice(-PENDING_CAP) });
+    await patchState(({ pending }) => ({ pending: [...pending, row].slice(-PENDING_CAP) }));
     return { ok: true, id: row.id };
   }
 
@@ -326,10 +353,13 @@ export function createCtoTrust(deps = {}) {
 
   async function markAnnounced(ids = []) {
     if (!Array.isArray(ids) || ids.length === 0) return { removed: 0 };
-    const { st, pending } = await loadState();
-    const keep = pending.filter((r) => !ids.includes(r?.id));
-    await saveState(null, { ...st, pending: keep });
-    return { removed: pending.length - keep.length };
+    let removed = 0;
+    await patchState(({ pending }) => {
+      const keep = pending.filter((r) => !ids.includes(r?.id));
+      removed = pending.length - keep.length;
+      return removed > 0 ? { pending: keep } : null;
+    });
+    return { removed };
   }
 
   // Diagnostics (tests / cto panel later): tiers + counters + queue depth.
