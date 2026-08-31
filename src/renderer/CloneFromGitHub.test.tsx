@@ -89,6 +89,12 @@ function mountPicker(overrides: MountOverrides = {}): void {
     />,
   );
   container = h.container;
+  // Wire the harness root into the module-level `root` so unmount() (test
+  // bodies + afterEach) really unmounts. Without this the unmount was a
+  // silent no-op for mountPicker-based tests: the component's effects never
+  // cleaned up and a mid-flight clone-poll loop kept running past teardown
+  // (BET-1479).
+  root = h.root;
 }
 
 async function flushMicro(): Promise<void> {
@@ -150,8 +156,22 @@ afterEach(() => {
 });
 
 describe("CloneFromGitHub picker", () => {
+  // NOTE (BET-1479): this file mounts real-timer async loops (the clone-poll
+  // chain awaits `setTimeout(…, 500)` between polls). A test that finishes
+  // with one of those loops mid-flight is the only way this file can leak
+  // async work past teardown — guarded today by the effect's `cancelled`
+  // flag, but one weakened guard away from polluting the next test. So every
+  // test whose clone start SUCCEEDS drives the poll loop to a TERMINAL state
+  // (done) inside the test, and the cancellation contract itself is pinned
+  // explicitly by the unmount-mid-clone test below.
   it("keeps a checked repo selected when the search term excludes it, and clones it on submit", async () => {
-    mountPicker();
+    mountPicker({
+      // The submit assertions only read forgeCloneStart; resolving the poll
+      // done here (instead of returning an in-progress clone) keeps the
+      // component's 500ms real-timer poll loop from outliving the test.
+      forgeCloneStatus: () =>
+        Promise.resolve({ ...CLONE_IN_PROGRESS, done: true, ok: true, percent: 100 }),
+    });
     await flushMicro();
 
     clickCheckbox(h!, "Clone alpha");
@@ -176,6 +196,54 @@ describe("CloneFromGitHub picker", () => {
     expect(startCalls.length).toBe(1);
     // The clone runs for the still-selected (but filtered-out) repo.
     expect(startCalls[0][0]).toMatchObject({ url: REPOS[0].cloneUrl });
+  });
+
+  it("stops polling and cancels the job when unmounted mid-clone (no async past teardown, BET-1479)", async () => {
+    // Pins the cancellation contract that keeps this file free of post-test
+    // async: the clone-poll loop must stop issuing status polls once the
+    // picker unmounts, and the in-flight job gets an explicit cancel. If the
+    // effect's `cancelled` guard is ever weakened, polls continue after
+    // teardown and fire into whatever test runs next — the classic source of
+    // cross-test flake (polls attributed to an unrelated test, act warnings
+    // after the file finished). Fake timers make the 500ms poll interval
+    // deterministic.
+    vi.useFakeTimers();
+    let pollCalls = 0;
+    mountPicker({
+      forgeCloneStatus: () => {
+        pollCalls++;
+        return Promise.resolve(CLONE_IN_PROGRESS);
+      },
+    });
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    clickCheckbox(h!, "Clone alpha");
+    act(() => {
+      cloneButtonFor("1 selected").click();
+    });
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    // The loop is live: exactly one start and one status poll so far (the
+    // next poll is scheduled 500ms out, still pending under fake timers).
+    expect((api.calls.forgeCloneStart ?? []).length).toBe(1);
+    expect(pollCalls).toBe(1);
+
+    unmount();
+
+    // The pending 500ms poll timer fires under advanceTimersByTime, but its
+    // await resumes on a microtask — drain it, then confirm the cancelled
+    // loop exited without polling again. The unmount cleanup also issued the
+    // explicit cancel for the in-flight job, exactly once.
+    act(() => {
+      vi.advanceTimersByTime(5000);
+    });
+    await flushMicrotasks();
+    expect(pollCalls).toBe(1);
+    const cancelCalls = api.calls.forgeCloneCancel ?? [];
+    expect(cancelCalls.length).toBe(1);
+    expect(cancelCalls[0][0]).toMatchObject({ id: "c1" });
   });
 
   it("puts the repo rows in an overflow-y-auto container that excludes the button row", async () => {
