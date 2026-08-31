@@ -868,8 +868,11 @@ export function createOvernightScheduler({ store = defaultOvernightStore(), now 
 
       // BET-1466: `lastEvaluatedMs` changes on every tick by definition, so
       // it never justifies a save. When nothing else in the window state
-      // moved (the common idle trough tick), skip the write entirely.
-      if (windowChanges(prevWindow, window)) {
+      // moved (the common idle trough tick), skip the write entirely — but
+      // the very first persist still lays the row down: a persisted window
+      // (even a closed, empty one) is the machine's liveness marker that
+      // readWindow consumers (e.g. the veto card) key on.
+      if (prevWindow == null || windowChanges(prevWindow, window)) {
         await store.save({ ...payload, window }).catch(() => {});
       }
       await ledgerAppend(ledgerRows);
