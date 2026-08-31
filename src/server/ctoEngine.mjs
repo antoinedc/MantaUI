@@ -309,7 +309,18 @@ export function createCtoEngine(deps = {}) {
     // (`cardFireNotify`) so an inbox `blocker` note (source 3) fires the one
     // notification on the live box.
     cardFireNotify = async () => {},
-    cards = createCtoCards({ fireNotify: cardFireNotify }),
+    // BET-1463: the cards module needs to consume/drop `pendingBlockers`
+    // entries in engine-state.json (mark ingested entries resolved; drop an
+    // entry when its health card closes) through the SAME sanctioned
+    // read-modify-write path `recordBlocker` uses below, so concurrent
+    // engine-state writers share one process-wide mutex. Inject a bound
+    // instance rather than letting ctoCards.mjs import patchEngineState
+    // itself — same seam pattern as getSessionInfo/getDesktopPresence.
+    cards = createCtoCards({
+      fireNotify: cardFireNotify,
+      engineState,
+      patchEngineState: (mutation) => patchEngineState(mutation, { engineState }),
+    }),
     // A5 evidence/presence seams (injected I/O — nothing here touches tmux /
     // push directly; index.mjs supplies the real resolvers).
     getSessionInfo = async () => ({ owner: "user", project: undefined }),

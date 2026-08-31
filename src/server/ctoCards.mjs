@@ -170,6 +170,34 @@ export function askQuestionText(evt) {
   return "";
 }
 
+// BET-1463: the health-card grouping identity for one `pendingBlockers`
+// entry — every entry from the same underlying trip source (`recordBlocker`'s
+// `source` param, e.g. "watchdog" | "rate_limit") is the SAME ongoing
+// condition and folds into ONE card, never one card per entry.
+function healthGroupKey(b) {
+  return typeof b?.source === "string" && b.source ? b.source : "unknown";
+}
+
+// BET-1463 (defect 2): compare a freshly-built card against the existing open
+// card, ignoring `updatedAt` (which always moves — it is the "when did we
+// last check" stamp, not content). A content-identical rebuild is not a
+// change: no save, no CARD_CREATED ledger row. Arrays are compared by value.
+function cardContentEqual(a, b) {
+  if (!a || !b) return false;
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  keys.delete("updatedAt");
+  for (const key of keys) {
+    const av = a[key];
+    const bv = b[key];
+    if (Array.isArray(av) || Array.isArray(bv)) {
+      if (JSON.stringify(av ?? []) !== JSON.stringify(bv ?? [])) return false;
+    } else if (av !== bv) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // The card manager — injected store/ledger/clock.
 // ---------------------------------------------------------------------------
@@ -184,6 +212,19 @@ export function createCtoCards(deps = {}) {
     // and health cards keep the "no notification path" invariant.
     fireNotify = async () => {},
     now = () => Date.now(),
+    // BET-1463: the writer for consuming/dropping a `pendingBlockers` entry in
+    // engine-state.json once its health card has been upserted or its card
+    // has closed. This MUST route through the engine's own `patchEngineState`
+    // (ctoStores.mjs) so it shares the same process-wide mutex as every other
+    // engine-state writer (e.g. `recordBlocker`) — ctoCards.mjs deliberately
+    // does NOT import patchEngineState itself; the engine injects its own
+    // bound instance here, the same way it injects getSessionInfo /
+    // getDesktopPresence into sibling modules. `mutation` is the same
+    // shape patchEngineState accepts: a static patch object, or a
+    // `(fresh) => patch` function. Defaults to null (a no-op) so standalone/
+    // test usage that doesn't care about pendingBlockers lifecycle keeps
+    // working without wiring it.
+    patchEngineState: patchPendingBlockers = null,
   } = deps;
 
   // In-flight worker asks: sessionID -> { sourceKind, sourceId, sessionID,
@@ -284,6 +325,12 @@ export function createCtoCards(deps = {}) {
       pendingSince,
       created,
     });
+    // BET-1463 (defect 2): a byte-identical rebuild is not a change — no
+    // save, no ledger row. This is what stops an unanswered ask from being
+    // "re-created" every minute forever by promoteDue.
+    if (existing && cardContentEqual(existing, { ...card, updatedAt: ts })) {
+      return { changed: false, isNew: false };
+    }
     if (existing) {
       const idx = cards.indexOf(existing);
       cards[idx] = { ...existing, ...card, created, updatedAt: ts };
@@ -320,7 +367,57 @@ export function createCtoCards(deps = {}) {
       sessionID: card.sessionID,
       reason,
     });
+    // BET-1463 (defect 1): every pendingBlockers entry that fed the closed
+    // health card must not survive in engine-state.json, or the next card
+    // tick resurrects it (this is the "Resume doesn't work" bug). Covers
+    // resolveById AND dismissById since both call this helper. `sourceId` for
+    // a health card is the trip's GROUP KEY (see `healthGroupKey` below), not
+    // one entry's id — multiple pendingBlockers entries fold into one card.
+    if (card.sourceKind === HEALTH_SOURCE_KIND) {
+      await dropPendingBlockersByGroup(card.sourceId);
+    }
     return { changed: true, card };
+  }
+
+  // Remove every `pendingBlockers` entry belonging to one health group (used
+  // when its health card closes — resolved or dismissed). Best-effort, and a
+  // pure no-op patch (no save) when nothing in the group is left.
+  async function dropPendingBlockersByGroup(group) {
+    if (!group || typeof patchPendingBlockers !== "function") return;
+    try {
+      await patchPendingBlockers((fresh) => {
+        const pending = Array.isArray(fresh?.pendingBlockers) ? fresh.pendingBlockers : [];
+        const next = pending.filter((b) => healthGroupKey(b) !== group);
+        return next.length === pending.length ? {} : { pendingBlockers: next };
+      });
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  // Stamp every ingested `pendingBlockers` entry `resolved: true` in one
+  // batched patch (used right after ingestHealthEscalations processes them).
+  // Best-effort; a missed stamp just means the same entry (harmlessly)
+  // upserts the same card again next tick — the upsert itself is idempotent.
+  async function markPendingBlockersConsumed(ids) {
+    if (!ids.length || typeof patchPendingBlockers !== "function") return;
+    try {
+      await patchPendingBlockers((fresh) => {
+        const pending = Array.isArray(fresh?.pendingBlockers) ? fresh.pendingBlockers : [];
+        const idSet = new Set(ids);
+        let touched = false;
+        const next = pending.map((b) => {
+          if (b && idSet.has(b.id) && b.resolved !== true) {
+            touched = true;
+            return { ...b, resolved: true };
+          }
+          return b;
+        });
+        return touched ? { pendingBlockers: next } : {};
+      });
+    } catch {
+      /* best-effort */
+    }
   }
 
   // Resolve one open card by id → `resolved` state + a card.resolved ACTIVITY
@@ -383,6 +480,15 @@ export function createCtoCards(deps = {}) {
   // Source (2): read the watchdog's blocker-card requests that A2 already
   // writes to engine-state.json `pendingBlockers` and turn the unresolved ones
   // into health blocker cards. `{changed}` for tests/diagnostics.
+  //
+  // BET-1463: one health CARD per underlying CONDITION (`healthGroupKey`),
+  // not one card per pendingBlockers ENTRY. This is the literal shape of the
+  // 2026-08-31 incident — a watchdog that (before BET-1462) re-tripped every
+  // tick wrote one new uniquely-id'd entry per trip, and keying the card by
+  // that per-entry id turned 82 trips into 82 "identical" cards. Repeat
+  // trips of the SAME condition upsert the one ongoing card in place
+  // (pendingSince = the EARLIEST trip still outstanding, body = the most
+  // recent reason) exactly like re-detecting the same worker ask never dups.
   async function ingestHealthEscalations({ ts = now() } = {}) {
     let payload;
     try {
@@ -391,21 +497,42 @@ export function createCtoCards(deps = {}) {
       return { changed: false };
     }
     const pending = Array.isArray(payload?.pendingBlockers) ? payload.pendingBlockers : [];
+    const unresolved = pending.filter((b) => b?.resolved !== true);
     let changed = false;
-    for (const b of pending) {
-      if (b?.resolved === true) continue;
-      const r = await upsertBlocker({
-        sourceKind: HEALTH_SOURCE_KIND,
-        sourceId: b.id,
-        sessionID: undefined,
-        title: blockerTitle(HEALTH_SOURCE_KIND),
-        body: blockerBody(HEALTH_SOURCE_KIND, b?.reason),
-        refs: [],
-        ts,
-        pendingSince: typeof b?.ts === "number" ? b.ts : ts,
-      });
-      changed = changed || r.changed;
+    const consumedIds = [];
+    if (unresolved.length) {
+      const groups = new Map();
+      for (const b of unresolved) {
+        const key = healthGroupKey(b);
+        const bts = typeof b?.ts === "number" ? b.ts : ts;
+        const group = groups.get(key) ?? { minTs: bts, latest: b, latestTs: bts, ids: [] };
+        if (bts < group.minTs) group.minTs = bts;
+        if (bts >= group.latestTs) {
+          group.latest = b;
+          group.latestTs = bts;
+        }
+        if (b?.id !== undefined) group.ids.push(b.id);
+        groups.set(key, group);
+      }
+      for (const [key, group] of groups) {
+        const r = await upsertBlocker({
+          sourceKind: HEALTH_SOURCE_KIND,
+          sourceId: key,
+          sessionID: undefined,
+          title: blockerTitle(HEALTH_SOURCE_KIND),
+          body: blockerBody(HEALTH_SOURCE_KIND, group.latest?.reason),
+          refs: [],
+          ts,
+          pendingSince: group.minTs,
+        });
+        changed = changed || r.changed;
+        consumedIds.push(...group.ids);
+      }
     }
+    // BET-1463 (defect 1): every entry ingested above gets stamped `resolved:
+    // true` here (once) so it is never reprocessed — this is what makes the
+    // `resolved !== true` filter above live instead of dead code.
+    await markPendingBlockersConsumed(consumedIds);
     return { changed };
   }
 
@@ -478,6 +605,12 @@ export function createCtoCards(deps = {}) {
       updatedAt: ts,
       state: "open",
     };
+    // BET-1463 (defect 2): same no-op rule as upsertBlocker — a byte-identical
+    // regeneration (e.g. a decision card re-derived unchanged, or an unarmed
+    // veto countdown) is not a change.
+    if (existing && cardContentEqual(existing, card)) {
+      return { changed: false, isNew: false };
+    }
     if (existing) {
       const idx = list.indexOf(existing);
       list[idx] = { ...existing, ...card, created, updatedAt: ts };
@@ -610,6 +743,7 @@ export function createCtoCards(deps = {}) {
     promoteDue,
     ingestHealthEscalations,
     onHealthRecovered,
+    upsertBlocker,
     resolveById,
     dismissById,
     upsertDecision,

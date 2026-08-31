@@ -31,7 +31,7 @@ import {
   validateProbeSpec,
   vitalityOf,
 } from "./ctoProbes.mjs";
-import { PROBE_SOURCE_KIND, probeBlockerCopy, stableCardId } from "./ctoCards.mjs";
+import { PROBE_SOURCE_KIND, createCtoCards, probeBlockerCopy, stableCardId } from "./ctoCards.mjs";
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -98,11 +98,20 @@ function fakeRegistry(rows = []) {
   };
 }
 
+// BET-1463 (defect 3): the real production bug was a fake `cards` double that
+// implemented a method (`upsertBlocker`) production's `createCtoCards()`
+// didn't actually export — the escalation guard's `typeof
+// cards.upsertBlocker === "function"` was true in every test and false on
+// the live box. Guard against that recurring: every method this fake defines
+// must be a real key of `createCtoCards()`'s return shape, or this throws at
+// module-load time instead of silently drifting from production again.
+const REAL_CARDS_KEYS = new Set(Object.keys(createCtoCards()));
+
 function fakeCards() {
   const upserts = [];
   const resolved = [];
   const open = [];
-  return {
+  const obj = {
     open,
     upserts,
     resolved,
@@ -122,6 +131,16 @@ function fakeCards() {
       return { changed: true };
     },
   };
+  for (const key of Object.keys(obj)) {
+    if (typeof obj[key] === "function" && !REAL_CARDS_KEYS.has(key)) {
+      throw new Error(
+        `fakeCards() defines "${key}" which createCtoCards() does not export — this is exactly the ` +
+          `BET-1463 defect 3 shape (a test double hiding a production gap). Fix createCtoCards()'s ` +
+          `return object, not this fake.`,
+      );
+    }
+  }
+  return obj;
 }
 
 function fakeLedger() {
@@ -606,6 +625,41 @@ test("a missing secret is auth-shaped (same rotated-key failure mode) and escala
   for (let i = 0; i < 3; i++) await eng.runDue({ forceTool: "github" });
   assert.equal(cards.upserts.length, 1);
   assert.match(cards.upserts[0].body, /GITHUB_TOKEN/);
+});
+
+test("BET-1463 defect 3: cardOpen is NOT latched when the card write is skipped (cards missing the method)", async () => {
+  // A `cards` double with no upsertBlocker at all — the exact shape of the
+  // pre-fix production bug (createCtoCards() didn't export it).
+  const skipCards = { async resolveById() { return { changed: false }; } };
+  const eng = build({ cards: skipCards, http: async () => ({ status: 401, bodyText: "" }) });
+  for (let i = 0; i < 3; i++) await eng.runDue({ forceTool: "github" });
+  const st = await eng.loadToolState("github");
+  assert.equal(st.probes.repo_events.cardOpen, false, "no write was attempted -> must not latch");
+});
+
+test("BET-1463 defect 3: cardOpen is NOT latched when the card write throws", async () => {
+  const throwCards = fakeCards();
+  throwCards.upsertBlocker = async () => {
+    throw new Error("store unavailable");
+  };
+  const eng = build({ cards: throwCards, http: async () => ({ status: 401, bodyText: "" }) });
+  for (let i = 0; i < 3; i++) await eng.runDue({ forceTool: "github" });
+  const st = await eng.loadToolState("github");
+  assert.equal(st.probes.repo_events.cardOpen, false, "a failed write must not latch cardOpen");
+});
+
+test("BET-1463 defect 3: a card write that failed before is retried on the next auth failure, not stuck forever", async () => {
+  const recoverCards = fakeCards();
+  // Seed state as if a prior run crossed the escalate threshold but the
+  // write failed (cardOpen correctly left false by the fix above).
+  const state = {
+    github: { probes: { repo_events: { fails: 3, authFails: 3, cardOpen: false, lastAt: 1, lastOk: false } } },
+  };
+  const eng = build({ cards: recoverCards, state, http: async () => ({ status: 401, bodyText: "" }) });
+  await eng.runDue({ forceTool: "github" });
+  assert.equal(recoverCards.upserts.length, 1, "escalation retries because it was never actually latched open");
+  const st = await eng.loadToolState("github");
+  assert.equal(st.probes.repo_events.cardOpen, true, "this time the write succeeded, so it latches");
 });
 
 test("non-auth failures (500s / timeouts) never escalate — health rows only", async () => {

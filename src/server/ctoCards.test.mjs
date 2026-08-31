@@ -15,13 +15,18 @@ import {
 } from "./ctoCards.mjs";
 
 // A fully-injected card harness: real in-memory card store, engine-state,
-// ledger and a clock we control. No real fs — pure behavior.
+// ledger and a clock we control. No real fs — pure behavior. The
+// `patchEngineState` seam mirrors the real ctoStores.mjs helper's contract
+// (a static patch object, or a `(fresh) => patch` function; a key set to
+// `undefined` deletes it) but without its mutex — fine for these
+// single-threaded, sequential-await tests.
 function makeHarness({ pendingBlockers = [], fireNotify = false } = {}) {
   const clock = { ms: 1_000_000 };
   let cardPayload = { v: 1, cards: [] };
   const ledgerRows = [];
   const notified = [];
   let engineState = { v: 1, pendingBlockers: [...pendingBlockers] };
+  const patchCalls = [];
 
   const cards = createCtoCards({
     cardStore: {
@@ -39,6 +44,18 @@ function makeHarness({ pendingBlockers = [], fireNotify = false } = {}) {
     ledger: { append: async (row) => ledgerRows.push(row) },
     ...(fireNotify ? { fireNotify: async (a) => notified.push(a) } : {}),
     now: () => clock.ms,
+    patchEngineState: async (mutation) => {
+      patchCalls.push(mutation);
+      const fresh = engineState;
+      const patch = typeof mutation === "function" ? await mutation(fresh) : mutation;
+      const next = { ...fresh };
+      for (const [k, v] of Object.entries(patch ?? {})) {
+        if (v === undefined) delete next[k];
+        else next[k] = v;
+      }
+      engineState = next;
+      return next;
+    },
   });
 
   return {
@@ -46,7 +63,9 @@ function makeHarness({ pendingBlockers = [], fireNotify = false } = {}) {
     clock,
     ledgerRows,
     notified,
+    patchCalls,
     store: () => cardPayload,
+    engineStateSnapshot: () => engineState,
     setCardPayload(p) {
       cardPayload = p;
     },
@@ -214,8 +233,11 @@ test("health escalation: watchdog pendingBlockers become health cards; recovery 
   assert.equal(open[0].variant, "blocker");
   assert.ok(open[0].body.includes("ambient spend"), "body carries the watchdog reason");
 
+  // BET-1463 (defect 1): ingesting the entry stamps it consumed on its own —
+  // no manual setPendingBlockers needed to simulate this any more.
+  assert.equal(h.engineStateSnapshot().pendingBlockers[0].resolved, true);
+
   // Resolved health cards are ignored (never re-created).
-  h.setPendingBlockers([{ id: "b1", resolved: true }]);
   await h.cards.ingestHealthEscalations();
   assert.equal(h.store().cards.filter((c) => c.state === "open").length, 1);
 
@@ -223,6 +245,134 @@ test("health escalation: watchdog pendingBlockers become health cards; recovery 
   await h.cards.onHealthRecovered();
   assert.equal(h.store().cards.filter((c) => c.state === "open").length, 0);
   assert.equal(h.ledgerRows.filter((r) => r.kind === CARD_RESOLVED).length, 1);
+});
+
+test("BET-1463 defect 1: ingesting a pending blocker stamps the entry consumed; a second ingest creates NO second card and appends NO second ledger row", async () => {
+  const h = makeHarness({
+    pendingBlockers: [{ id: "b1", source: "watchdog", reason: "r1", ts: 500, resolved: false }],
+  });
+
+  const r1 = await h.cards.ingestHealthEscalations();
+  assert.equal(r1.changed, true);
+  assert.equal(h.store().cards.filter((c) => c.state === "open").length, 1);
+  const createdRows = h.ledgerRows.filter((r) => r.kind === CARD_CREATED);
+  assert.equal(createdRows.length, 1);
+
+  // Same entry, unresolved-by-hand-mutation would be the OLD bug; here the
+  // engine-state store itself was stamped by the first ingest.
+  const r2 = await h.cards.ingestHealthEscalations();
+  assert.equal(r2.changed, false, "the consumed entry is skipped, not re-upserted");
+  assert.equal(h.store().cards.filter((c) => c.state === "open").length, 1, "still exactly one card");
+  assert.equal(h.ledgerRows.filter((r) => r.kind === CARD_CREATED).length, 1, "no second card.created row");
+});
+
+test("BET-1463 defect 1: resolving a health card removes its pendingBlockers entry, and a subsequent ingest does not recreate it (Resume regression)", async () => {
+  const h = makeHarness({
+    pendingBlockers: [{ id: "b1", source: "watchdog", reason: "ambient spend", ts: 500, resolved: false }],
+  });
+
+  await h.cards.ingestHealthEscalations();
+  const cardId = h.store().cards.find((c) => c.state === "open").id;
+  assert.equal(h.engineStateSnapshot().pendingBlockers.length, 1, "entry still present, just stamped consumed");
+
+  // User presses Resume -> onHealthRecovered resolves the open health card.
+  await h.cards.onHealthRecovered();
+  assert.equal(h.store().cards.filter((c) => c.state === "open").length, 0);
+  // The regression this test guards: the entry itself must be GONE, not just
+  // marked resolved — otherwise the next card tick's ingest (via a NEW
+  // watchdog trip reusing state, or a stale resolved:false somehow) has
+  // nothing to resurrect from.
+  assert.equal(h.engineStateSnapshot().pendingBlockers.length, 0);
+
+  // A card tick after Resume must not bring the card back.
+  const r = await h.cards.ingestHealthEscalations();
+  assert.equal(r.changed, false);
+  assert.equal(h.store().cards.filter((c) => c.state === "open").length, 0, "Resume actually works — no resurrection");
+  assert.equal(h.store().cards.find((c) => c.id === cardId), undefined);
+});
+
+test("BET-1463 defect 1: dismissing a health card also drops its pendingBlockers entry", async () => {
+  const h = makeHarness({
+    pendingBlockers: [{ id: "b1", source: "watchdog", reason: "ambient spend", ts: 500, resolved: false }],
+  });
+  await h.cards.ingestHealthEscalations();
+  const cardId = h.store().cards.find((c) => c.state === "open").id;
+
+  await h.cards.dismissById(cardId, { reason: "user dismissed" });
+  assert.equal(h.engineStateSnapshot().pendingBlockers.length, 0);
+
+  const r = await h.cards.ingestHealthEscalations();
+  assert.equal(r.changed, false);
+  assert.equal(h.store().cards.filter((c) => c.state === "open").length, 0);
+});
+
+test("BET-1463 defect 2: a no-op re-upsert returns changed:false and appends no ledger row", async () => {
+  const h = makeHarness();
+  const args = {
+    sourceKind: "question",
+    sourceId: "que_noop",
+    sessionID: "sN",
+    title: "Question waiting",
+    body: "Pick one?",
+    refs: ["sN"],
+    ts: h.clock.ms,
+    pendingSince: h.clock.ms,
+  };
+
+  const first = await h.cards.upsertBlocker(args);
+  assert.equal(first.changed, true);
+  assert.equal(first.isNew, true);
+  assert.equal(h.ledgerRows.filter((r) => r.kind === CARD_CREATED).length, 1);
+
+  // Time moves on (as promoteDue's re-check would do), but nothing about the
+  // ask actually changed — re-upserting identical content must be a no-op.
+  h.advance(60_000);
+  const second = await h.cards.upsertBlocker({ ...args, ts: h.clock.ms });
+  assert.equal(second.changed, false);
+  assert.equal(second.isNew, false);
+  assert.equal(h.ledgerRows.filter((r) => r.kind === CARD_CREATED).length, 1, "no second ledger row");
+  assert.equal(h.store().cards.filter((c) => c.state === "open").length, 1);
+
+  // A genuine content change still upserts.
+  h.advance(1000);
+  const third = await h.cards.upsertBlocker({ ...args, ts: h.clock.ms, body: "Pick one? (updated)" });
+  assert.equal(third.changed, true);
+  assert.equal(h.ledgerRows.filter((r) => r.kind === CARD_CREATED).length, 2);
+});
+
+test("createCtoCards exports upsertBlocker", () => {
+  const cards = createCtoCards();
+  assert.equal(typeof cards.upsertBlocker, "function");
+});
+
+test("BET-1463: 82 pendingBlockers entries from the SAME watchdog trip source fold into ONE card, not 82", async () => {
+  // The literal shape of the 2026-08-31 incident: repeated watchdog trips
+  // each wrote a uniquely-id'd pendingBlockers entry with the same source.
+  const pendingBlockers = Array.from({ length: 82 }, (_, i) => ({
+    id: `trip-${i}`,
+    kind: "blocker",
+    source: "watchdog",
+    reason: `ambient spend ${i} > 4x expected`,
+    ts: 1_000_000 + i * 60_000,
+    resolved: false,
+  }));
+  const h = makeHarness({ pendingBlockers });
+
+  const r1 = await h.cards.ingestHealthEscalations();
+  assert.equal(r1.changed, true);
+  const open1 = h.store().cards.filter((c) => c.state === "open");
+  assert.equal(open1.length, 1, "at most one card after the first tick");
+  assert.equal(open1[0].pendingSince, 1_000_000, "pendingSince is the EARLIEST outstanding trip");
+  assert.ok(open1[0].body.includes("81"), "body carries the MOST RECENT reason");
+
+  const r2 = await h.cards.ingestHealthEscalations();
+  assert.equal(r2.changed, false, "second tick produces no new card / no new write");
+  assert.equal(h.store().cards.filter((c) => c.state === "open").length, 1);
+  assert.equal(
+    h.engineStateSnapshot().pendingBlockers.filter((b) => b.resolved !== true).length,
+    0,
+    "every entry stamped consumed",
+  );
 });
 
 test("dismiss moves a card out of cards.json with a card.dismissed ledger row", async () => {

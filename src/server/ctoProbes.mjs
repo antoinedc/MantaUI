@@ -1104,10 +1104,38 @@ export function createProbes(deps = {}) {
       }
     }
 
-    // Escalation / resolution (§10.6-7) — nextState already carries cardOpen.
+    // Escalation / resolution (§10.6-7). `nextState.cardOpen` is the pure
+    // state machine's INTENT ("this failure crossed the escalate threshold"),
+    // not a fact about the world — BET-1463 (defect 3): only latch `cardOpen`
+    // once the card write actually lands. A missing method (cards not wired)
+    // or a thrown write must NOT latch, or the escalation is marked "already
+    // surfaced" and silently never retried while the credential stays broken.
+    let cardOpen = nextState.cardOpen;
+    if (action === "escalate") {
+      cardOpen = false;
+      if (cards && typeof cards.upsertBlocker === "function") {
+        const copy = probeBlockerCopy(tool, key, spec.auth?.secret ?? null);
+        try {
+          const r = await cards.upsertBlocker({
+            sourceKind: PROBE_SOURCE_KIND,
+            sourceId: probeKey(tool, key),
+            title: copy.title,
+            body: copy.body,
+            refs: [tool],
+            ts,
+          });
+          cardOpen = r?.changed !== false;
+        } catch {
+          cardOpen = false;
+        }
+      }
+    } else if (action === "resolve" && cards && typeof cards.resolveById === "function") {
+      await cards.resolveById(stableCardId(PROBE_SOURCE_KIND, probeKey(tool, key)), { reason: "probe recovered", ts }).catch(() => {});
+    }
     const p = st.probes ?? {};
     p[key] = {
       ...nextState,
+      cardOpen,
       lastAt: ts,
       lastOk: ok,
       lastError: ok ? null : (error ?? "unknown"),
@@ -1115,21 +1143,6 @@ export function createProbes(deps = {}) {
       nextRunAt: ts + cadence,
     };
     st.probes = p;
-    if (action === "escalate" && cards && typeof cards.upsertBlocker === "function") {
-      const copy = probeBlockerCopy(tool, key, spec.auth?.secret ?? null);
-      await cards
-        .upsertBlocker({
-          sourceKind: PROBE_SOURCE_KIND,
-          sourceId: probeKey(tool, key),
-          title: copy.title,
-          body: copy.body,
-          refs: [tool],
-          ts,
-        })
-        .catch(() => {});
-    } else if (action === "resolve" && cards && typeof cards.resolveById === "function") {
-      await cards.resolveById(stableCardId(PROBE_SOURCE_KIND, probeKey(tool, key)), { reason: "probe recovered", ts }).catch(() => {});
-    }
     await saveToolState(tool, st);
     return row;
   }
