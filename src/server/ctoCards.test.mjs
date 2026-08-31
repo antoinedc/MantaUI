@@ -266,44 +266,44 @@ test("BET-1463 defect 1: ingesting a pending blocker stamps the entry consumed; 
   assert.equal(h.ledgerRows.filter((r) => r.kind === CARD_CREATED).length, 1, "no second card.created row");
 });
 
-test("BET-1463 defect 1: resolving a health card removes its pendingBlockers entry, and a subsequent ingest does not recreate it (Resume regression)", async () => {
+// BET-1463 defect 1 shared setup: one tripped watchdog blocker, escalated
+// into its single open health card.
+async function escalatedHealthHarness() {
   const h = makeHarness({
     pendingBlockers: [{ id: "b1", source: "watchdog", reason: "ambient spend", ts: 500, resolved: false }],
   });
-
   await h.cards.ingestHealthEscalations();
   const cardId = h.store().cards.find((c) => c.state === "open").id;
+  return { h, cardId };
+}
+
+// The invariant both defect-1 teardown paths must hold: the entry itself is
+// GONE (not just marked resolved — otherwise a later card tick's ingest has
+// something to resurrect from) and a subsequent ingest cannot bring the
+// card back.
+async function assertNoResurrection(h) {
+  assert.equal(h.engineStateSnapshot().pendingBlockers.length, 0);
+  const r = await h.cards.ingestHealthEscalations();
+  assert.equal(r.changed, false);
+  assert.equal(h.store().cards.filter((c) => c.state === "open").length, 0, "no resurrection on a later card tick");
+}
+
+test("BET-1463 defect 1: resolving a health card removes its pendingBlockers entry, and a subsequent ingest does not recreate it (Resume regression)", async () => {
+  const { h, cardId } = await escalatedHealthHarness();
   assert.equal(h.engineStateSnapshot().pendingBlockers.length, 1, "entry still present, just stamped consumed");
 
   // User presses Resume -> onHealthRecovered resolves the open health card.
   await h.cards.onHealthRecovered();
   assert.equal(h.store().cards.filter((c) => c.state === "open").length, 0);
-  // The regression this test guards: the entry itself must be GONE, not just
-  // marked resolved — otherwise the next card tick's ingest (via a NEW
-  // watchdog trip reusing state, or a stale resolved:false somehow) has
-  // nothing to resurrect from.
-  assert.equal(h.engineStateSnapshot().pendingBlockers.length, 0);
-
-  // A card tick after Resume must not bring the card back.
-  const r = await h.cards.ingestHealthEscalations();
-  assert.equal(r.changed, false);
-  assert.equal(h.store().cards.filter((c) => c.state === "open").length, 0, "Resume actually works — no resurrection");
+  await assertNoResurrection(h);
   assert.equal(h.store().cards.find((c) => c.id === cardId), undefined);
 });
 
 test("BET-1463 defect 1: dismissing a health card also drops its pendingBlockers entry", async () => {
-  const h = makeHarness({
-    pendingBlockers: [{ id: "b1", source: "watchdog", reason: "ambient spend", ts: 500, resolved: false }],
-  });
-  await h.cards.ingestHealthEscalations();
-  const cardId = h.store().cards.find((c) => c.state === "open").id;
+  const { h, cardId } = await escalatedHealthHarness();
 
   await h.cards.dismissById(cardId, { reason: "user dismissed" });
-  assert.equal(h.engineStateSnapshot().pendingBlockers.length, 0);
-
-  const r = await h.cards.ingestHealthEscalations();
-  assert.equal(r.changed, false);
-  assert.equal(h.store().cards.filter((c) => c.state === "open").length, 0);
+  await assertNoResurrection(h);
 });
 
 test("BET-1463 defect 2: a no-op re-upsert returns changed:false and appends no ledger row", async () => {
