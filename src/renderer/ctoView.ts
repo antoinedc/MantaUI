@@ -462,6 +462,15 @@ export function resting(
   return cards.length === 0 && nowActive.length === 0 && finished.length === 0 && !inputs.digestHasItems;
 }
 
+// BET-1468 item 1: the resting line is a confident claim ("nothing needs
+// you") — it must never render before the first overview load resolves (it
+// flashes true on every open otherwise) or after that load failed (an
+// offline box / stale token would read as a false all-clear on the one
+// surface whose entire job is to say what's blocked).
+export function mayShowResting(inputs: { loaded: boolean; loadError: boolean; isResting: boolean }): boolean {
+  return inputs.loaded && !inputs.loadError && inputs.isResting;
+}
+
 // Now-rail/digest shared: does the list of sessions have any blocked one — the
 // "blocked — question above ↑" chip on a blocked Now card (never repeats the
 // question).
