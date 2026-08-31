@@ -3337,6 +3337,94 @@ echo "SHOULD_NOT_REACH=yes"
   assert.doesNotMatch(out, /SHOULD_NOT_REACH=yes/);
 });
 
+// ----------------------------------------------------------------------------
+// apt_priv — apt must never be able to ask a question.
+//
+// The desktop installer runs install.sh over `ssh -tt` with the child's stdin
+// set to `ignore`: apt sees a real terminal, so it feels free to prompt, and
+// nothing can answer. A field report on Ubuntu 22.04 hung forever at the
+// "Starting the service" stage on needrestart's "Which services should be
+// restarted?" screen, and reproduced on every retry because it is a property
+// of the distro, not a transient. These tests pin the three knobs that close
+// that door and the chokepoint that guarantees no apt call bypasses them.
+// ----------------------------------------------------------------------------
+
+test("apt_priv: apt runs fully unattended (frontend + needrestart + lock timeout)", () => {
+  const out = runBootstrap({
+    preBody: `
+SUDO_STRATEGY=nopasswd
+sudo() { echo "SUDO_ARGS=$*"; }
+apt_priv install -y caddy
+`,
+  });
+  // Routed through sudo_priv (so the resolved strategy still applies)…
+  assert.match(out, /SUDO_ARGS=-n env /);
+  // …with the environment set PER CALL via `env`, because sudo resets it.
+  assert.match(out, /DEBIAN_FRONTEND=noninteractive/);
+  // needrestart: the knob that actually hung a real install.
+  assert.match(out, /NEEDRESTART_MODE=a/);
+  // A first-boot unattended-upgrades lock must time out, not wait forever.
+  assert.match(out, /apt-get -o DPkg::Lock::Timeout=600 install -y caddy/);
+});
+
+test("apt_priv: the unattended env reaches apt under the bare-root strategy too", () => {
+  // SUDO_STRATEGY=root runs the command with no sudo at all. `env` execs a
+  // REAL binary, so this needs a real fake apt-get on PATH — a shell function
+  // could never intercept it, which is exactly why the knobs are an `env`
+  // prefix and not an export.
+  const dir = mkdtempSync(join(tmpdir(), "manta-aptpriv-"));
+  try {
+    writeFileSync(
+      join(dir, "apt-get"),
+      `#!/usr/bin/env bash
+echo "APT_ARGS=$*"
+echo "FRONTEND=$DEBIAN_FRONTEND"
+echo "NEEDRESTART=$NEEDRESTART_MODE"
+`,
+      { mode: 0o755 },
+    );
+    const out = runBootstrap({
+      env: { PATH: `${dir}:${process.env.PATH}` },
+      preBody: `
+SUDO_STRATEGY=root
+apt_priv update
+`,
+    });
+    assert.match(out, /FRONTEND=noninteractive/);
+    assert.match(out, /NEEDRESTART=a/);
+    assert.match(out, /APT_ARGS=-o DPkg::Lock::Timeout=600 update/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("apt_priv is the ONLY way install.sh runs apt (no call bypasses the chokepoint)", () => {
+  // A single bypassing call site reopens the hang, so assert on the whole
+  // file rather than on any one branch. Comments and the prerequisite hint
+  // strings (which TELL a user to run apt-get by hand, and span several
+  // lines inside one quoted die message) are advice, not invocations — track
+  // the multi-line string state so they are excluded without hand-listing
+  // line numbers.
+  let inString = false;
+  const invocations = [];
+  for (const line of readFileSync(INSTALL_SH, "utf-8").split("\n")) {
+    const wasInString = inString;
+    // An odd number of unescaped double quotes flips the state for the
+    // NEXT line; the current line is judged by the state it started in.
+    if ((line.match(/(?<!\\)"/g) ?? []).length % 2 === 1) inString = !inString;
+    if (wasInString) continue;
+    if (line.trim().startsWith("#")) continue;
+    // The chokepoint's own definition is the one legitimate invocation.
+    if (line.includes("DPkg::Lock::Timeout")) continue;
+    if (/(^|\s|\||&&)\s*(sudo_priv\s+)?apt-get\s/.test(line)) invocations.push(line);
+  }
+  assert.deepEqual(
+    invocations,
+    [],
+    `apt-get called outside apt_priv:\n${invocations.join("\n")}`,
+  );
+});
+
 test("BET-979: setup_askpass creates the SUDO_ASKPASS helper and exports it", () => {
   const dir = mkdtempSync(join(tmpdir(), "manta-setupask-"));
   try {

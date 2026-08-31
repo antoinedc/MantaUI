@@ -202,6 +202,43 @@ sudo_priv() {
   esac
 }
 
+# apt_priv <apt-get args…> — the ONE way this installer runs apt.
+#
+# apt on a stock Ubuntu box ASKS QUESTIONS, and the desktop installer runs
+# this script over `ssh -tt` (a real pty) with the child's stdin set to
+# `ignore`. So apt sees a terminal, decides it may prompt, and the prompt is
+# unanswerable by construction: the install blocks FOREVER inside the
+# "Starting the service" stage while the UI's elapsed timer keeps ticking, so
+# it reads as alive. Every retry reproduces it — this is a property of the
+# server's distro, not a transient. Reported from the field on Ubuntu 22.04.
+#
+# Three env knobs close every interactive door. They must be passed PER CALL
+# via `env`, NOT exported: sudo resets the environment (env_reset), so an
+# exported value never survives into the privileged child. Prefixing with
+# `env` works in all four sudo_priv strategies, including the bare-root one
+# where no sudo is involved at all.
+#
+#   DEBIAN_FRONTEND=noninteractive
+#       No debconf dialogs, no conffile "what do you want to do about the
+#       modified configuration file?" prompt.
+#   NEEDRESTART_MODE=a
+#       needrestart ships enabled AND interactive by default since Ubuntu
+#       22.04, hooked into apt via /etc/apt/apt.conf.d/99needrestart. Left
+#       alone it draws the full-screen "Daemons using outdated libraries /
+#       Which services should be restarted?" screen. `a` makes it restart
+#       services itself, silently. THIS is the one that hung a real install.
+#   -o DPkg::Lock::Timeout=600
+#       A freshly provisioned VM runs unattended-upgrades on first boot and
+#       holds the dpkg lock. With no timeout apt waits forever (same
+#       symptom, different cause); with one it waits up to 10 minutes and
+#       then FAILS, which the callers below report as a real error. Unknown
+#       `-o` keys are ignored by older apt, so this is safe on every distro
+#       the preflight admits.
+apt_priv() {
+  sudo_priv env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
+    apt-get -o DPkg::Lock::Timeout=600 "$@"
+}
+
 # setup_askpass — strategy 2: create the SUDO_ASKPASS helper that echoes the
 # staged password, export it, and arrange cleanup on exit (the temp helper
 # dir AND the staged password file are both removed). The desktop installer
@@ -1571,9 +1608,9 @@ main() {
       # empty/stale, which makes `apt-get install debian-keyring …` fail with
       # "Unable to locate package". The Caddy docs run `apt update` up front
       # for exactly this reason.
-      sudo_priv apt-get update \
+      apt_priv update \
         || die "apt-get update failed"
-      sudo_priv apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl \
+      apt_priv install -y debian-keyring debian-archive-keyring apt-transport-https curl \
         || die "apt-get install prerequisites for Caddy failed"
       curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
         | sudo_priv gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg \
@@ -1615,9 +1652,9 @@ main() {
       install_root_file "$_caddy_list_tmp" /etc/apt/sources.list.d/caddy-stable.list \
         || { rm -f "$_caddy_list_tmp"; die "failed to add Caddy apt repo"; }
       rm -f "$_caddy_list_tmp"
-      sudo_priv apt-get update \
+      apt_priv update \
         || die "apt-get update failed"
-      sudo_priv apt-get install -y caddy \
+      apt_priv install -y caddy \
         || die "apt-get install caddy failed"
       ok "caddy installed ($(caddy version 2>/dev/null || echo unknown))."
     fi
