@@ -387,6 +387,81 @@ test("watchdog: stale engine heartbeat is flagged, state untouched", async () =>
   assert.ok(h.ledgerRows.find((r) => r.kind === "cto.watchdog_stale"));
 });
 
+test("watchdog: a second tick while already paused does not re-escalate (BET-1462)", async () => {
+  const h = makeHarness({ ctoEnabled: true });
+  const calls = { hardPause: 0, setThrifty: 0 };
+  // Spy over the engine's escalation verbs without disturbing anything else
+  // (prototype delegation, so the engine's lazy getters are never touched).
+  const spyEngine = Object.create(h.engine);
+  spyEngine.hardPause = async (arg) => {
+    calls.hardPause += 1;
+    return h.engine.hardPause(arg);
+  };
+  spyEngine.setThrifty = async (v, opts) => {
+    calls.setThrifty += 1;
+    return h.engine.setThrifty(v, opts);
+  };
+  const w = createWatchdog({
+    engine: spyEngine,
+    getSpendPerHour: async () => 5,
+    expectedHourlyBurn: async () => 1,
+    livenessMs: 120_000,
+    now: () => h.clock.ms,
+    ledger: { append: async (row) => h.ledgerRows.push(row) },
+  });
+  await w.tick(); // 5 > 4×1 → the one legitimate hard pause
+  assert.equal(calls.hardPause, 1);
+  assert.equal(h.killSwitchPaused, true);
+  assert.equal(h.pendingBlockers.length, 1);
+  await w.tick(); // still burning, but the pause is already in effect
+  assert.equal(calls.hardPause, 1);
+  assert.equal(h.pendingBlockers.length, 1);
+  assert.equal(h.ledgerRows.filter((r) => r.kind === "cto.hard_pause").length, 1);
+  assert.equal((await h.engine.getState()).dot, DOT.PAUSED);
+});
+
+test("watchdog: already thrifty is never re-asserted (BET-1462)", async () => {
+  const h = makeHarness({ ctoEnabled: true });
+  const calls = { hardPause: 0, setThrifty: 0 };
+  const spyEngine = Object.create(h.engine);
+  spyEngine.hardPause = async (arg) => {
+    calls.hardPause += 1;
+    return h.engine.hardPause(arg);
+  };
+  spyEngine.setThrifty = async (v, opts) => {
+    calls.setThrifty += 1;
+    return h.engine.setThrifty(v, opts);
+  };
+  const w = createWatchdog({
+    engine: spyEngine,
+    getSpendPerHour: async () => 3,
+    expectedHourlyBurn: async () => 1,
+    livenessMs: 120_000,
+    now: () => h.clock.ms,
+    ledger: { append: async (row) => h.ledgerRows.push(row) },
+  });
+  await w.tick(); // 3 > 2×1 → the one legitimate thrifty flip
+  assert.equal(calls.setThrifty, 1);
+  assert.equal((await h.engine.getState()).dot, DOT.THRIFTY);
+  await w.tick(); // still >2×, but thrifty is already on → no re-assert
+  assert.equal(calls.setThrifty, 1);
+  assert.equal(h.ledgerRows.filter((r) => r.kind === "cto.thrifty_on").length, 1);
+});
+
+test("watchdog: the 2026-08-31 live values no longer pause the engine (BET-1462)", async () => {
+  // Incident: 7-day ambient total $5.173744e-05 against the live $2.50 cap.
+  // The fixed baseline floors at the cap-equivalent pace ($2.50/24), so the
+  // measured burn that tripped the old code ($4.1668e-06/hr) is far below
+  // even the 2× thrifty line.
+  const h = makeHarness({ ctoEnabled: true });
+  const w = makeWatchdog(h, { spend: 4.166828969341808e-6, expected: 2.5 / 24 });
+  await w.tick();
+  assert.equal((await h.engine.getState()).dot, DOT.ACTIVE);
+  assert.equal(h.killSwitchPaused, false);
+  assert.ok(!h.ledgerRows.some((r) => r.kind === "cto.hard_pause"));
+  assert.ok(!h.ledgerRows.some((r) => r.kind.startsWith("cto.thrifty")));
+});
+
 test("rate tracker slides the hourly window", async () => {
   const clock = { ms: 5_000 };
   const now = () => clock.ms;

@@ -2530,21 +2530,42 @@ export function createWatchdog(deps = {}) {
     }
   }
 
+  // BET-1462 defect 4: read the engine's live gate state through its own state
+  // accessor before escalating — an escalation already in effect is never
+  // re-asserted (the cardOpen-latch shape from ctoProbes). A failed read
+  // escalates as before; a real overspend is never silently skipped.
+  async function escalationState() {
+    try {
+      const st = await engine.getState();
+      return {
+        paused: st?.pausedAt != null || st?.dot === DOT.PAUSED,
+        thrifty: st?.dot === DOT.THRIFTY,
+      };
+    } catch {
+      return { paused: false, thrifty: false };
+    }
+  }
+
   async function tick() {
     const burn = await getSpendPerHour();
     const expected = await expectedHourlyBurn();
-    if (burn > 4 * expected) {
-      await engine.hardPause({
-        reason: `ambient spend ${burn} > 4x expected ${expected}`,
-        source: "watchdog",
-      });
-      return;
-    }
     if (burn > 2 * expected) {
-      await engine.setThrifty(true, {
-        reason: `ambient spend ${burn} > 2x expected ${expected}`,
-        source: "watchdog",
-      });
+      const { paused, thrifty } = await escalationState();
+      if (burn > 4 * expected) {
+        if (!paused) {
+          await engine.hardPause({
+            reason: `ambient spend $${burn.toFixed(2)}/hr > 4x expected $${expected.toFixed(2)}/hr`,
+            source: "watchdog",
+          });
+        }
+        return;
+      }
+      if (!thrifty) {
+        await engine.setThrifty(true, {
+          reason: `ambient spend $${burn.toFixed(2)}/hr > 2x expected $${expected.toFixed(2)}/hr`,
+          source: "watchdog",
+        });
+      }
       return;
     }
     const age = now() - (typeof engine.lastHeartbeat === "function" ? engine.lastHeartbeat() : 0);
