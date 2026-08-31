@@ -170,6 +170,26 @@ export function askQuestionText(evt) {
   return "";
 }
 
+// BET-1463 (defect 2): compare a freshly-built card against the existing open
+// card, ignoring `updatedAt` (which always moves — it is the "when did we
+// last check" stamp, not content). A content-identical rebuild is not a
+// change: no save, no CARD_CREATED ledger row. Arrays are compared by value.
+function cardContentEqual(a, b) {
+  if (!a || !b) return false;
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  keys.delete("updatedAt");
+  for (const key of keys) {
+    const av = a[key];
+    const bv = b[key];
+    if (Array.isArray(av) || Array.isArray(bv)) {
+      if (JSON.stringify(av ?? []) !== JSON.stringify(bv ?? [])) return false;
+    } else if (av !== bv) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // The card manager — injected store/ledger/clock.
 // ---------------------------------------------------------------------------
@@ -184,6 +204,19 @@ export function createCtoCards(deps = {}) {
     // and health cards keep the "no notification path" invariant.
     fireNotify = async () => {},
     now = () => Date.now(),
+    // BET-1463: the writer for consuming/dropping a `pendingBlockers` entry in
+    // engine-state.json once its health card has been upserted or its card
+    // has closed. This MUST route through the engine's own `patchEngineState`
+    // (ctoStores.mjs) so it shares the same process-wide mutex as every other
+    // engine-state writer (e.g. `recordBlocker`) — ctoCards.mjs deliberately
+    // does NOT import patchEngineState itself; the engine injects its own
+    // bound instance here, the same way it injects getSessionInfo /
+    // getDesktopPresence into sibling modules. `mutation` is the same
+    // shape patchEngineState accepts: a static patch object, or a
+    // `(fresh) => patch` function. Defaults to null (a no-op) so standalone/
+    // test usage that doesn't care about pendingBlockers lifecycle keeps
+    // working without wiring it.
+    patchEngineState: patchPendingBlockers = null,
   } = deps;
 
   // In-flight worker asks: sessionID -> { sourceKind, sourceId, sessionID,
@@ -284,6 +317,12 @@ export function createCtoCards(deps = {}) {
       pendingSince,
       created,
     });
+    // BET-1463 (defect 2): a byte-identical rebuild is not a change — no
+    // save, no ledger row. This is what stops an unanswered ask from being
+    // "re-created" every minute forever by promoteDue.
+    if (existing && cardContentEqual(existing, { ...card, updatedAt: ts })) {
+      return { changed: false, isNew: false };
+    }
     if (existing) {
       const idx = cards.indexOf(existing);
       cards[idx] = { ...existing, ...card, created, updatedAt: ts };
@@ -320,7 +359,55 @@ export function createCtoCards(deps = {}) {
       sessionID: card.sessionID,
       reason,
     });
+    // BET-1463 (defect 1): a closed health card's source entry must not
+    // survive in engine-state.json `pendingBlockers`, or the next card tick
+    // resurrects it (this is the "Resume doesn't work" bug). Covers
+    // resolveById AND dismissById since both call this helper.
+    if (card.sourceKind === HEALTH_SOURCE_KIND) {
+      await dropPendingBlocker(card.sourceId);
+    }
     return { changed: true, card };
+  }
+
+  // Remove one entry from `pendingBlockers` by its watchdog-assigned id (used
+  // when its health card closes — resolved or dismissed). Best-effort, and a
+  // pure no-op patch (no save) when the id is already gone.
+  async function dropPendingBlocker(id) {
+    if (id === undefined || id === null || typeof patchPendingBlockers !== "function") return;
+    try {
+      await patchPendingBlockers((fresh) => {
+        const pending = Array.isArray(fresh?.pendingBlockers) ? fresh.pendingBlockers : [];
+        const next = pending.filter((b) => b?.id !== id);
+        return next.length === pending.length ? {} : { pendingBlockers: next };
+      });
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  // Stamp every ingested `pendingBlockers` entry `resolved: true` in one
+  // batched patch (used right after ingestHealthEscalations processes them).
+  // Best-effort; a missed stamp just means the same entry (harmlessly)
+  // upserts the same card again next tick — the upsert itself is idempotent.
+  async function markPendingBlockersConsumed(ids) {
+    if (!ids.length || typeof patchPendingBlockers !== "function") return;
+    try {
+      await patchPendingBlockers((fresh) => {
+        const pending = Array.isArray(fresh?.pendingBlockers) ? fresh.pendingBlockers : [];
+        const idSet = new Set(ids);
+        let touched = false;
+        const next = pending.map((b) => {
+          if (b && idSet.has(b.id) && b.resolved !== true) {
+            touched = true;
+            return { ...b, resolved: true };
+          }
+          return b;
+        });
+        return touched ? { pendingBlockers: next } : {};
+      });
+    } catch {
+      /* best-effort */
+    }
   }
 
   // Resolve one open card by id → `resolved` state + a card.resolved ACTIVITY
@@ -392,6 +479,10 @@ export function createCtoCards(deps = {}) {
     }
     const pending = Array.isArray(payload?.pendingBlockers) ? payload.pendingBlockers : [];
     let changed = false;
+    // BET-1463 (defect 1): every entry ingested here gets stamped `resolved:
+    // true` below (once) so it is never reprocessed — this is what makes the
+    // `resolved !== true` filter below live instead of dead code.
+    const consumedIds = [];
     for (const b of pending) {
       if (b?.resolved === true) continue;
       const r = await upsertBlocker({
@@ -405,7 +496,9 @@ export function createCtoCards(deps = {}) {
         pendingSince: typeof b?.ts === "number" ? b.ts : ts,
       });
       changed = changed || r.changed;
+      if (b?.id !== undefined) consumedIds.push(b.id);
     }
+    await markPendingBlockersConsumed(consumedIds);
     return { changed };
   }
 
@@ -478,6 +571,12 @@ export function createCtoCards(deps = {}) {
       updatedAt: ts,
       state: "open",
     };
+    // BET-1463 (defect 2): same no-op rule as upsertBlocker — a byte-identical
+    // regeneration (e.g. a decision card re-derived unchanged, or an unarmed
+    // veto countdown) is not a change.
+    if (existing && cardContentEqual(existing, card)) {
+      return { changed: false, isNew: false };
+    }
     if (existing) {
       const idx = list.indexOf(existing);
       list[idx] = { ...existing, ...card, created, updatedAt: ts };
@@ -610,6 +709,7 @@ export function createCtoCards(deps = {}) {
     promoteDue,
     ingestHealthEscalations,
     onHealthRecovered,
+    upsertBlocker,
     resolveById,
     dismissById,
     upsertDecision,
