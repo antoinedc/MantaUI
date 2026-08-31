@@ -1,3 +1,17 @@
+// BET-1469: fail fast, before ANY test body runs, when this file is executed
+// outside the state sandbox. A CTO store module imported unsandboxed resolves
+// its paths against the LIVE box state (~/.manta) and a test would write
+// production data. `npm test` / `npm run test:server` set MANTA_STATE_HOME via
+// scripts/testSandbox.mjs before any module is evaluated; a bare
+// `node --test <file>` does not.
+if (!process.env.MANTA_STATE_HOME) {
+  throw new Error(
+    "MANTA_STATE_HOME is not set — refusing to run CTO tests against the live box state. " +
+      "Run via `npm test` or `npm run test:server` (both --import ./scripts/testSandbox.mjs), " +
+      "or set MANTA_STATE_HOME to a throwaway directory first.",
+  );
+}
+
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -21,6 +35,64 @@ import { windowFor } from "./ctoRollups.mjs";
 // clock we can advance. Everything the engine touches goes through these
 // seams, so the tests assert pure behavior. `clock` is shared so the watchdog
 // and the engine observe the same time.
+//
+// BET-1469: the store bundle is injected too, so even the paths this harness
+// does not exercise bind memory instead of real files — an enabled tick
+// (watchers/tools/probes/rollups/backfill) can no longer reach the live box
+// state through a lazily-constructed sub-engine.
+// BET-1469: one in-memory replacement per real CTO store — the full `stores`
+// bundle createCtoEngine accepts. Shapes mirror the real stores: json stores
+// are single-payload { load, save }; dir stores are one-payload-per-id
+// { load(id), save(id, data) } over a Map; the rollups store namespaces by
+// level. No fs anywhere: `dir` is "" so the engine's readdir fall-throughs
+// short-circuit, and pathFor is identity.
+function makeMemoryStores() {
+  const jsonStore = (initial) => {
+    let payload = { ...initial };
+    return {
+      load: async () => ({ ...payload }),
+      save: async (p) => {
+        payload = { ...p };
+      },
+    };
+  };
+  const dirStore = () => {
+    const map = new Map();
+    return {
+      dir: "",
+      pathFor: (id) => id,
+      load: async (id) => map.get(id) ?? { v: 1 },
+      save: async (id, data) => {
+        map.set(id, data);
+      },
+    };
+  };
+  return {
+    ledger: { append: async () => true },
+    engineState: jsonStore({ v: 1 }),
+    trust: jsonStore({}),
+    cards: jsonStore({ v: 1, cards: [] }),
+    inbox: jsonStore({ v: 1, entries: [] }),
+    verdicts: jsonStore({ entries: [] }),
+    budget: jsonStore({}),
+    watchers: jsonStore({ watchers: [] }),
+    toolRegistry: jsonStore({ tools: [] }),
+    toolUsage: jsonStore({}),
+    probeState: dirStore(),
+    segments: dirStore(),
+    rollups: {
+      dir: "",
+      dirFor: (level) => `mem://rollups/${level}`,
+      load: async () => ({ v: 1 }),
+      save: async () => {},
+    },
+    facts: dirStore(),
+    factsArchive: dirStore(),
+    profile: jsonStore({}),
+    journal: jsonStore({ entries: [] }),
+  };
+}
+
 function makeHarness({ ctoEnabled = false, counts = {}, rollups, facts } = {}) {
   const clock = { ms: 1_000_000 };
   const now = () => clock.ms;
@@ -32,10 +104,12 @@ function makeHarness({ ctoEnabled = false, counts = {}, rollups, facts } = {}) {
   const cardCalls = [];
   const state = { v: 1, pendingBlockers: [] };
   const budgetCfg = { budgetIsHit: false, tier: "low" };
+  const memStores = makeMemoryStores();
+  memStores.ledger.append = async (row) => ledgerRows.push(row);
 
   const engine = createCtoEngine({
     configGet: async () => ({ ...currentConfig }),
-    ledger: { append: async (row) => ledgerRows.push(row) },
+    stores: memStores,
     cards: {
       onAskStart: (...a) => (cardCalls.push({ fn: "onAskStart", args: a }), Promise.resolve()),
       onAskResolved: (...a) => (
@@ -535,16 +609,25 @@ test("resume() clears health-escalation blocker cards (health recovered)", async
   assert.ok(h.cardCalls.some((c) => c.fn === "onHealthRecovered"));
 });
 
-test("defaultGetCounts counts open cards from the real cards store", async () => {
+test("defaultGetCounts counts open cards from an injected cards store (BET-1469)", async () => {
   const { defaultGetCounts } = await import("./ctoEngine.mjs");
-  const { cardsStore } = await import("./ctoStores.mjs");
-  // The real cards store resolves under the test-sandbox state home; write a
-  // card there and confirm it is counted only while open.
-  await cardsStore.save({ v: 1, cards: [
-    { id: "a", state: "open" },
-    { id: "b", state: "resolved" },
-  ] });
-  assert.deepEqual(await defaultGetCounts(), {
+  // The counting logic needs no real store: the cards store is injectable, so
+  // this test no longer writes cards.json (sandboxed or otherwise).
+  let payload = {
+    v: 1,
+    cards: [
+      { id: "a", state: "open" },
+      { id: "b", state: "resolved" },
+    ],
+  };
+  const cardStore = {
+    name: "cards",
+    load: async () => payload,
+    save: async (p) => {
+      payload = p;
+    },
+  };
+  assert.deepEqual(await defaultGetCounts(cardStore), {
     needsYouCount: 1,
     generationInFlight: false,
     tonightCount: 0,
@@ -589,6 +672,7 @@ function makeSegEngine({ owner } = {}) {
   });
   const engine = createCtoEngine({
     configGet: async () => ({ ctoEnabled: false }),
+    stores: makeMemoryStores(),
     ledger: { append: async () => {} },
     engineState: { load: async () => ({ v: 1, pendingBlockers: [] }), save: async () => {} },
     publish: () => {},
@@ -843,6 +927,7 @@ test("drainInbox folds unread notes into high-salience B1-weighted evidence and 
 
   const engine = createCtoEngine({
     configGet: async () => ({ ctoEnabled: true }),
+    stores: makeMemoryStores(),
     ledger: { append: async (row) => ledgerRows.push(row) },
     engineState: { load: async () => ({ v: 1, entries: [] }), save: async () => {} },
     cards: {},
@@ -893,6 +978,7 @@ test("overnightTick reads the ledger with a 24h lower bound instead of the whole
   const readCalls = [];
   const engine = createCtoEngine({
     configGet: async () => ({ ctoEnabled: true, ctoOvernight: true }),
+    stores: makeMemoryStores(),
     ledger: {
       append: async () => {},
       read: async (opts) => {
@@ -923,6 +1009,7 @@ test("dispose unregisters the verdict counter sinks (BET-1466 item 7)", async ()
   let verdictsState = { entries: [] };
   const engine = createCtoEngine({
     configGet: async () => ({ ctoEnabled: true }),
+    stores: makeMemoryStores(),
     ledger: { append: async () => {} },
     engineState: {
       load: async () => esState,

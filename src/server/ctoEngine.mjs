@@ -55,7 +55,13 @@ import {
   verdictsStore,
   watchersStore,
   factsArchiveStore,
+  factsStore,
   probeStateStore,
+  profileStore,
+  journalStore,
+  toolRegistryStore,
+  toolUsageStore,
+  budgetStore,
   patchEngineState,
   purgeExpiredInbox,
 } from "./ctoStores.mjs";
@@ -270,10 +276,13 @@ export function computeDot({ enabled, paused, thrifty }) {
 // cards schema (BET-1382): an open card (state === "open") is a needs-you item;
 // resolved/dismissed cards have already moved off cards.json into the ledger.
 // Defensive — a malformed or missing store yields zeros, never a throw.
-export async function defaultGetCounts() {
+// BET-1469: the cards store is injectable so a test can exercise the counting
+// logic without writing the real cards.json (the engine's own default passes
+// the bundle's cards store; the standalone default stays the real one).
+export async function defaultGetCounts(cardStore = cardsStore) {
   let needsYouCount = 0;
   try {
-    const cards = await cardsStore.load();
+    const cards = await cardStore.load();
     const arr = Array.isArray(cards?.cards) ? cards.cards : [];
     needsYouCount = arr.filter((c) => c && c.state === "open").length;
   } catch {
@@ -287,20 +296,53 @@ export async function defaultGetCounts() {
 // ---------------------------------------------------------------------------
 
 export function createCtoEngine(deps = {}) {
+  // BET-1469: the one-line store bundle for tests. Every key replaces that
+  // real store for the WHOLE engine — including every sub-engine constructed
+  // lazily below — so a test harness can go fully hermetic in one line
+  // (`stores: fakeStores()`) instead of threading ~13 individual deps (the
+  // gap that let fixtures leak into the live cards.json). Resolution order:
+  // an explicitly passed individual dep (ledger, engineState, …) wins, then a
+  // bundle entry, then the real store. Production passes nothing here and
+  // gets exactly the real bundle it always had. Note the bundle carries
+  // STORES, not engines: `rollups` is the rollup STORE (the top-level
+  // `rollups` dep remains the pre-built runner), and `cards` is the cards.json
+  // store (the top-level `cards` dep remains the cards manager).
+  const bundle = {
+    ledger: ledgerStore,
+    engineState: engineStateStore,
+    trust: trustStore,
+    cards: cardsStore,
+    inbox: inboxStore,
+    verdicts: verdictsStore,
+    budget: budgetStore,
+    watchers: watchersStore,
+    toolRegistry: toolRegistryStore,
+    toolUsage: toolUsageStore,
+    probeState: probeStateStore,
+    segments: segmentsStore,
+    rollups: rollupsStore,
+    facts: factsStore,
+    factsArchive: factsArchiveStore,
+    profile: profileStore,
+    journal: journalStore,
+    ...deps.stores,
+  };
   const {
     configGet = async () => ({}), // → { ctoEnabled?: boolean }
-    ledger = ledgerStore, // A1 ledger writer { append }
-    engineState = engineStateStore, // { load, save } (engine-state.json)
+    ledger = bundle.ledger, // A1 ledger writer { append }
+    engineState = bundle.engineState, // { load, save } (engine-state.json)
     // BET-1403: the trust ladder's own file — isolated from engine-state
     // writers so no snapshot-spread save can revert tiers/counters/pending.
-    trustStore: trustStoreDep = trustStore,
+    trustStore: trustStoreDep = bundle.trust,
     killSwitch = createKillSwitch(),
     publish = () => {}, // (evt: {kind:"ctoState", payload}) => void
     now = () => Date.now(),
     rates: rateLimits = RATE_LIMITS,
     tickIntervalMs = TICK_INTERVAL_MS,
     cardCheckIntervalMs = CARD_CHECK_INTERVAL_MS,
-    getCounts = defaultGetCounts,
+    // BET-1469: default counts read the BUNDLE's cards store, so a bundle-only
+    // harness never binds the real cards.json through this path either.
+    getCounts: getCountsDep = null,
     track = createRateTracker({ now }),
     // BET-1382 needs-you card machinery (blocker cards). Defaults to the real
     // stores; tests inject a fake. Cards are about the user's own blockers,
@@ -318,6 +360,7 @@ export function createCtoEngine(deps = {}) {
     // itself — same seam pattern as getSessionInfo/getDesktopPresence.
     cards = createCtoCards({
       fireNotify: cardFireNotify,
+      cardStore: bundle.cards,
       engineState,
       patchEngineState: (mutation) => patchEngineState(mutation, { engineState }),
     }),
@@ -365,13 +408,13 @@ export function createCtoEngine(deps = {}) {
     // BET-1391 verdict ledger (§9.5): optional pre-built verdicts store (else
     // the shared `verdicts.json` store). The verdict engine + facts sink are
     // constructed below from it.
-    verdicts = verdictsStore,
+    verdicts = bundle.verdicts,
     // BET-1388 economics (§10.6-6/§12.1/§12.2/§13.3): the ambient-spend budget
     // accessor (defaults to the real budget.json store via createCtoBudget).
     // beginEphemeral consults it for the independent HARD CAP before every
     // ambient model call; reportAmbientSpend records each run's spend and flips
     // thrifty when the cap is crossed. `tier` is the A12 dial (default low).
-    budget = createCtoBudget(),
+    budget = createCtoBudget({ store: bundle.budget }),
     tierGet = async () => "low",
     // BET-1398 standing-query watchers (§4.3/§13.4): optional pre-built
     // watcher engine (else one is constructed below from watchersStore/ledger/
@@ -404,6 +447,11 @@ export function createCtoEngine(deps = {}) {
     toolsRunEphemeral = null,
     toolsGetSurfaces = null,
   } = deps;
+
+  // BET-1469: the default counts producer binds the bundle's cards store (an
+  // injected `getCounts` dep still wins), so `getState()` in a bundle-only
+  // harness never reads the real cards.json.
+  const getCounts = getCountsDep ?? (() => defaultGetCounts(bundle.cards));
 
   let disposed = false;
   let thrifty = false;
@@ -959,7 +1007,7 @@ export function createCtoEngine(deps = {}) {
   // tick, and the segment-summary atom feed (via the segmenter's onSummary).
   function getProfile() {
     if (profileEngine) return profileEngine;
-    profileEngine = deps.profile ?? createCtoProfile({ now });
+    profileEngine = deps.profile ?? createCtoProfile({ now, store: bundle.profile });
     return profileEngine;
   }
 
@@ -969,7 +1017,7 @@ export function createCtoEngine(deps = {}) {
   // exposes it for the render-model read under Settings → Internals.
   function getJournal() {
     if (journalEngine) return journalEngine;
-    journalEngine = deps.journal ?? createCtoJournal({});
+    journalEngine = deps.journal ?? createCtoJournal({ store: bundle.journal });
     return journalEngine;
   }
 
@@ -988,6 +1036,8 @@ export function createCtoEngine(deps = {}) {
       ledger,
       runEphemeral: runEphemeral ? gatedRunEphemeral : null,
       now,
+      facts: bundle.facts,
+      archive: bundle.factsArchive,
       presenceCheck: () => engine.getPresence().state === "present",
       surfaceExists: factSurfaceExists,
       verify: factVerify,
@@ -1068,7 +1118,7 @@ export function createCtoEngine(deps = {}) {
   function getWatchers() {
     if (watcherEngine) return watcherEngine;
     watcherEngine = watchers ?? createStandingQueryEngine({
-      store: watchersStore,
+      store: bundle.watchers,
       ledger,
       engineState,
       now,
@@ -1103,6 +1153,8 @@ export function createCtoEngine(deps = {}) {
     toolEngine =
       tools ??
       createToolRegistry({
+        registryStore: bundle.toolRegistry,
+        usageStore: bundle.toolUsage,
         cards,
         ledger,
         now,
@@ -1131,7 +1183,7 @@ export function createCtoEngine(deps = {}) {
     if (!toolEngine) return null;
     probesEngine = createProbes({
       registry: toolEngine,
-      stateStore: probeStateStore,
+      stateStore: bundle.probeState,
       cards,
       ledger,
       now,
@@ -1153,7 +1205,7 @@ export function createCtoEngine(deps = {}) {
   // the facts-only fallback.
   async function resolveSegmentProject(id) {
     try {
-      const s = await segmentsStore.load(id);
+      const s = await bundle.segments.load(id);
       return s && s.project ? { project: s.project } : null;
     } catch {
       return null;
@@ -1213,7 +1265,7 @@ export function createCtoEngine(deps = {}) {
     const since = now() - windowDays * 24 * HOUR_MS;
     let names = [];
     try {
-      names = await fsp.readdir(rollupsStore.dirFor("day"));
+      names = await fsp.readdir(bundle.rollups.dirFor("day"));
     } catch {
       return [];
     }
@@ -1222,7 +1274,7 @@ export function createCtoEngine(deps = {}) {
       if (!name.endsWith(".json")) continue;
       let r;
       try {
-        r = await rollupsStore.load("day", name.slice(0, -5));
+        r = await bundle.rollups.load("day", name.slice(0, -5));
       } catch {
         continue;
       }
@@ -1240,7 +1292,7 @@ export function createCtoEngine(deps = {}) {
   async function archivedWatcherSignatures() {
     const out = new Set();
     try {
-      const dir = factsArchiveStore.dir;
+      const dir = bundle.factsArchive.dir;
       let names = [];
       if (typeof dir === "string" && dir) {
         names = (await fsp.readdir(dir).catch(() => [])) ?? [];
@@ -1249,7 +1301,7 @@ export function createCtoEngine(deps = {}) {
         const project = String(name).endsWith(".json") ? String(name).slice(0, -5) : String(name);
         let p;
         try {
-          p = await factsArchiveStore.load(project);
+          p = await bundle.factsArchive.load(project);
         } catch {
           continue;
         }
@@ -2004,8 +2056,8 @@ export function createCtoEngine(deps = {}) {
       configGet,
       engineState,
       ledger,
-      segments: segmentsStore,
-      rollups: rollupsStore,
+      segments: bundle.segments,
+      rollups: bundle.rollups,
       summarize, // raw seam — the backfill owns its own budget, no rate gate
       computeOneLiner,
       runEphemeral: backfillRunEphemeral,
@@ -2036,7 +2088,7 @@ export function createCtoEngine(deps = {}) {
   // expired entries are dropped (`purgeExpiredInbox`) with no trace.
   async function drainInbox() {
     try {
-      const store = inbox ?? inboxStore;
+      const store = inbox ?? bundle.inbox;
       const payload = await store.load();
       const entries = Array.isArray(payload?.entries) ? payload.entries : [];
       if (entries.length === 0) return { drained: 0 };
