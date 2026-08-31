@@ -142,7 +142,7 @@ import * as appControl from "./appControl.mjs";
 import * as cto from "./cto.mjs";
 import * as ctoEngine from "./ctoEngine.mjs";
 import * as ctoBudget from "./ctoBudget.mjs";
-import { ledgerStore, engineStateStore, budgetStore, segmentsStore, verdictsStore, digestsStore, factsStore } from "./ctoStores.mjs";
+import { ledgerStore, engineStateStore, budgetStore, segmentsStore, verdictsStore, digestsStore, factsStore, startCtoStoreSweeper, CTO_STORE_SWEEP_INTERVAL_MS } from "./ctoStores.mjs";
 import * as ctoOvernight from "./ctoOvernight.mjs";
 import { computeHealthStats } from "./ctoHealth.mjs";
 import { composeProfileRender } from "./ctoProfile.mjs";
@@ -2436,6 +2436,19 @@ const stopAdaptiveCtoWatchdog = startPoller(adaptiveCtoWatchdog.tick, {
   label: "cto-watchdog",
 });
 void stopAdaptiveCtoWatchdog;
+
+// BET-1464 (§13.1): the CTO store retention sweeper — the last CTO poller the
+// engine/digest/suggest/watchdog family was missing. Sweeps every CTO store on
+// its own retention: the §14.5 activity ledger (180d), the byte-capped
+// inbox/verdict JSONL stores, engine-state sweeps (the writer's `undefined`
+// deletes / array splices), tool usage logs, and per-day budget files. Started
+// alongside the other CTO pollers so it survives exactly as long as the box
+// server does; no restart path needed (a process restart re-runs startup).
+const stopCtoStoreSweeper = startCtoStoreSweeper({
+  intervalMs: CTO_STORE_SWEEP_INTERVAL_MS,
+  label: "cto-store-sweeper",
+});
+void stopCtoStoreSweeper;
 
 // On-call CTO inbound funnel (Issue 2): the single place a CTO-bound event
 // enters the box. Producers (the send_to_cto tool, the watcher poller, a

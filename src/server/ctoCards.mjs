@@ -40,6 +40,7 @@ import {
   cardsStore,
   engineStateStore,
   ledgerStore,
+  patchStore,
 } from "./ctoStores.mjs";
 
 export const ACTOR = "cto";
@@ -310,64 +311,85 @@ export function createCtoCards(deps = {}) {
   // existing open card is updated in place (title/body/refs/age preserved),
   // never duplicated. Returns `{ ok, changed, isNew }` — `ok` is true when
   // the write path ran without exception (including the byte-identical
-  // no-op, where the card is already current), false when nothing was
-  // written (invalid args).
+  // no-op, where the card is already current — BET-1477's "card path
+  // worked" test), false when nothing was written (invalid args).
+  //
+  // BET-1464 defect 3: the read-fresh-merge-save runs under the cards store's
+  // patchStore mutex, so a writer derived from a stale snapshot can no longer
+  // erase a concurrent writer's card (reached from fire-and-forget call
+  // sites — promoteDue timers, bus handlers — which used to race).
   async function upsertBlocker({ sourceKind, sourceId, sessionID, title, body, refs, ts = now(), pendingSince = ts }) {
     const id = stableCardId(sourceKind, sourceId);
-    const { payload, cards } = await openCards();
-    const existing = cards.find((c) => c?.id === id && c?.state === "open");
-    const created = existing?.created ?? ts;
-    const card = buildBlockerCard({
-      id,
-      sourceKind,
-      sourceId,
-      sessionID,
-      title,
-      body,
-      refs,
-      pendingSince,
-      created,
+    let changed = false;
+    let isNew = false;
+    let cardRefs = [];
+    await patchStore(cardStore, (fresh) => {
+      const cards = Array.isArray(fresh?.cards) ? fresh.cards : [];
+      const existing = cards.find((c) => c?.id === id && c?.state === "open");
+      const created = existing?.created ?? ts;
+      const card = buildBlockerCard({
+        id,
+        sourceKind,
+        sourceId,
+        sessionID,
+        title,
+        body,
+        refs,
+        pendingSince,
+        created,
+      });
+      cardRefs = card.refs;
+      // BET-1463 (defect 2): a byte-identical rebuild is not a change — an
+      // empty patch is a pure no-op (no save, no ledger row). This is what
+      // stops an unanswered ask from being "re-created" every minute forever
+      // by promoteDue.
+      if (existing && cardContentEqual(existing, { ...card, updatedAt: ts })) return {};
+      changed = true;
+      isNew = !existing;
+      const nextCards = existing
+        ? cards.map((c) => (c === existing ? { ...existing, ...card, created, updatedAt: ts } : c))
+        : [...cards, card];
+      return { cards: nextCards };
     });
-    // BET-1463 (defect 2): a byte-identical rebuild is not a change — no
-    // save, no ledger row. This is what stops an unanswered ask from being
-    // "re-created" every minute forever by promoteDue.
-    if (existing && cardContentEqual(existing, { ...card, updatedAt: ts })) {
-      return { ok: true, changed: false, isNew: false };
+    if (changed) {
+      await ledgerAppend({
+        kind: CARD_CREATED,
+        cardId: id,
+        variant: "blocker",
+        sourceKind,
+        sourceId,
+        sessionID,
+        refs: cardRefs,
+      });
     }
-    if (existing) {
-      const idx = cards.indexOf(existing);
-      cards[idx] = { ...existing, ...card, created, updatedAt: ts };
-    } else {
-      cards.push(card);
-    }
-    await cardStore.save({ ...payload, cards });
-    await ledgerAppend({
-      kind: CARD_CREATED,
-      cardId: id,
-      variant: "blocker",
-      sourceKind,
-      sourceId,
-      sessionID,
-      refs: card.refs,
-    });
-    return { ok: true, changed: true, isNew: !existing };
+    // BET-1477: the no-op still reports ok:true — the card is already on the
+    // board and current, which is a successful outcome for a caller branching
+    // on "did the card path work" (`res.ok !== false` in ctoSuggest).
+    return { ok: true, changed, isNew };
   }
 
-  // Shared close-path for resolve/dismiss: remove one open card by id, save,
-  // and write the ledger row with the close kind (resolved vs dismissed).
+  // Shared close-path for resolve/dismiss: remove one open card by id (under
+  // the cards patchStore mutex — BET-1464 defect 3), save, and write the
+  // ledger row with the close kind (resolved vs dismissed). Two concurrent
+  // closes of the same id now compose: the second re-reads fresh, finds the
+  // card gone, and returns `{ changed: false }` instead of double-ledgering.
   async function closeOpenCard(id, kind, reason, ts = now()) {
-    const { payload, cards } = await openCards();
-    const idx = cards.findIndex((c) => c?.id === id && c?.state === "open");
-    if (idx < 0) return { changed: false };
-    const [card] = cards.splice(idx, 1);
-    await cardStore.save({ ...payload, cards });
+    let closed = null;
+    await patchStore(cardStore, (fresh) => {
+      const cards = Array.isArray(fresh?.cards) ? fresh.cards : [];
+      const idx = cards.findIndex((c) => c?.id === id && c?.state === "open");
+      if (idx < 0) return {};
+      closed = cards[idx];
+      return { cards: cards.filter((_, i) => i !== idx) };
+    });
+    if (!closed) return { changed: false };
     await ledgerAppend({
       kind,
       cardId: id,
-      variant: card.variant,
-      sourceKind: card.sourceKind,
-      refs: card.refs,
-      sessionID: card.sessionID,
+      variant: closed.variant,
+      sourceKind: closed.sourceKind,
+      refs: closed.refs,
+      sessionID: closed.sessionID,
       reason,
     });
     // BET-1463 (defect 1): every pendingBlockers entry that fed the closed
@@ -376,10 +398,10 @@ export function createCtoCards(deps = {}) {
     // resolveById AND dismissById since both call this helper. `sourceId` for
     // a health card is the trip's GROUP KEY (see `healthGroupKey` below), not
     // one entry's id — multiple pendingBlockers entries fold into one card.
-    if (card.sourceKind === HEALTH_SOURCE_KIND) {
-      await dropPendingBlockersByGroup(card.sourceId);
+    if (closed.sourceKind === HEALTH_SOURCE_KIND) {
+      await dropPendingBlockersByGroup(closed.sourceId);
     }
-    return { changed: true, card };
+    return { changed: true, card: closed };
   }
 
   // Remove every `pendingBlockers` entry belonging to one health group (used
@@ -589,50 +611,61 @@ export function createCtoCards(deps = {}) {
     });
   }
 
-  // Shared card-writer core: ONE load/find/merge-or-push/save/ledger path
-  // for every variant writer (decision/veto/connect). `build` returns the
+  // Shared card-writer core: ONE read-fresh-merge-save path for every
+  // variant writer (decision/veto/connect), under the cards store's
+  // patchStore mutex (BET-1464 defect 3 — a stale-derived writer can no
+  // longer erase a concurrent writer's card). `build` returns the
   // variant-specific fields given { existing, created, ts }; the helper adds
   // the identity/lifecycle envelope, upserts by stable id (regeneration
   // updates in place, never dups), saves, and writes the CARD_CREATED row.
+  // Returns `{ ok, changed, isNew }` per the BET-1477 contract: ok:true on
+  // the byte-identical no-op too, ok:false only from the variant wrappers'
+  // invalid-args guards.
   async function upsertOpenCard({ id, variant, sourceKind = null, sourceId = null, ts = now(), ledger = {}, build }) {
-    const { payload, cards: list } = await openCards();
-    const existing = list.find((c) => c?.id === id && c?.state === "open");
-    const created = existing?.created ?? ts;
-    const card = {
-      ...build({ existing, created, ts }),
-      id,
-      variant,
-      sourceKind,
-      sourceId,
-      created,
-      updatedAt: ts,
-      state: "open",
-    };
-    // BET-1463 (defect 2): same no-op rule as upsertBlocker — a byte-identical
-    // regeneration (e.g. a decision card re-derived unchanged, or an unarmed
-    // veto countdown) is not a change. BET-1477: the no-op still reports
-    // ok:true — the card is already on the board and current, which is a
-    // successful outcome for a caller branching on "did the card path work".
-    if (existing && cardContentEqual(existing, card)) {
-      return { ok: true, changed: false, isNew: false };
-    }
-    if (existing) {
-      const idx = list.indexOf(existing);
-      list[idx] = { ...existing, ...card, created, updatedAt: ts };
-    } else {
-      list.push(card);
-    }
-    await cardStore.save({ ...payload, cards: list });
-    await ledgerAppend({
-      kind: CARD_CREATED,
-      cardId: id,
-      variant,
-      sourceKind,
-      sourceId,
-      refs: card.refs,
-      ...ledger,
+    let changed = false;
+    let isNew = false;
+    let cardRefs = [];
+    await patchStore(cardStore, (fresh) => {
+      const list = Array.isArray(fresh?.cards) ? fresh.cards : [];
+      const existing = list.find((c) => c?.id === id && c?.state === "open");
+      const created = existing?.created ?? ts;
+      const card = {
+        ...build({ existing, created, ts }),
+        id,
+        variant,
+        sourceKind,
+        sourceId,
+        created,
+        updatedAt: ts,
+        state: "open",
+      };
+      cardRefs = card.refs;
+      // BET-1463 (defect 2): same no-op rule as upsertBlocker — a byte-identical
+      // regeneration (e.g. a decision card re-derived unchanged, or an unarmed
+      // veto countdown) is an empty patch: no save, no ledger row. BET-1477:
+      // the no-op still reports ok:true — the card is already on the board and
+      // current, which is a successful outcome for a caller branching on "did
+      // the card path work".
+      if (existing && cardContentEqual(existing, card)) return {};
+      changed = true;
+      isNew = !existing;
+      const nextList = existing
+        ? list.map((c) => (c === existing ? { ...existing, ...card, created, updatedAt: ts } : c))
+        : [...list, card];
+      return { cards: nextList };
     });
-    return { ok: true, changed: true, isNew: !existing };
+    if (changed) {
+      await ledgerAppend({
+        kind: CARD_CREATED,
+        cardId: id,
+        variant,
+        sourceKind,
+        sourceId,
+        refs: cardRefs,
+        ...ledger,
+      });
+    }
+    return { ok: true, changed, isNew };
   }
 
   // needs-you surface: only open cards count (§10.3 — resolved/dismissed cards
@@ -711,16 +744,22 @@ export function createCtoCards(deps = {}) {
 
   // Resolve every open connect-ask card for one tool (the registry's
   // three-way answer is the resolution predicate's only false-path). Returns
-  // `{changed}` for tests/diagnostics.
+  // `{changed}` for tests/diagnostics. Under the cards patchStore mutex
+  // (BET-1464 defect 3) the matched set derives from the FRESH list, so a
+  // concurrent card writer's card can never be reverted by this close.
   async function resolveConnectCards(toolId, reason, ts = now()) {
-    const { payload, cards: list } = await openCards();
-    const open = list.filter(
-      (c) => c?.state === "open" && c?.variant === "connect" && (c?.sourceId === toolId || c?.refs?.includes(toolId)),
-    );
-    let changed = false;
-    for (const card of open) {
-      const idx = list.indexOf(card);
-      list.splice(idx, 1);
+    const closed = [];
+    await patchStore(cardStore, (fresh) => {
+      const list = Array.isArray(fresh?.cards) ? fresh.cards : [];
+      const open = list.filter(
+        (c) => c?.state === "open" && c?.variant === "connect" && (c?.sourceId === toolId || c?.refs?.includes(toolId)),
+      );
+      if (open.length === 0) return {};
+      closed.push(...open);
+      const openSet = new Set(open);
+      return { cards: list.filter((c) => !openSet.has(c)) };
+    });
+    for (const card of closed) {
       await ledgerAppend({
         kind: CARD_RESOLVED,
         cardId: card.id,
@@ -730,10 +769,8 @@ export function createCtoCards(deps = {}) {
         refs: card.refs,
         reason,
       });
-      changed = true;
     }
-    if (changed) await cardStore.save({ ...payload, cards: list });
-    return { changed };
+    return { changed: closed.length > 0 };
   }
 
   async function listOpen() {

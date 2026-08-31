@@ -38,7 +38,7 @@
 // without a hit, or when the underlying fact/pattern is archived.
 
 import { randomBytes } from "node:crypto";
-import { patchEngineState } from "./ctoStores.mjs";
+import { patchEngineState, patchStore } from "./ctoStores.mjs";
 
 // Closed set of predicate kinds (spec §13.4). Adding a kind is a spec change.
 export const PREDICATE_KINDS = Object.freeze(["event-pattern", "rate-threshold", "usage-burn"]);
@@ -497,8 +497,19 @@ export function createStandingQueryEngine(deps = {}) {
     }
   }
 
-  async function saveAll(watchers) {
-    await store.save({ watchers: Array.isArray(watchers) ? watchers : [] });
+  // BET-1464 defect 3: every watchers.json write routes through patchStore —
+  // the read-fresh-merge-save runs under the store's own mutex, so a writer
+  // derived from a stale snapshot (a hit's accounting, a tick's retirement,
+  // a registration) can no longer erase a concurrent writer's row. The
+  // mutator derives its next list from the FRESH payload and returns an
+  // empty patch to mean "no change, no save".
+  function patchWatchers(mutate) {
+    return patchStore(store, (fresh) => {
+      const all = Array.isArray(fresh?.watchers) ? fresh.watchers : [];
+      const patch = mutate(all);
+      if (!patch) return {};
+      return { watchers: patch };
+    });
   }
 
   async function hit(watch, event = {}) {
@@ -510,16 +521,17 @@ export function createStandingQueryEngine(deps = {}) {
     }
     // Persist the watcher's moved hit accounting.
     try {
-      const all = await loadAll();
-      const idx = all.findIndex((w) => w && w.id === watch.id);
-      if (idx !== -1) {
-        all[idx] = {
+      await patchWatchers((all) => {
+        const idx = all.findIndex((w) => w && w.id === watch.id);
+        if (idx === -1) return null; // the watcher vanished — nothing to persist
+        const next = all.slice();
+        next[idx] = {
           ...all[idx],
           lastHit: now(),
           hits: (typeof all[idx].hits === "number" ? all[idx].hits : 0) + 1,
         };
-        await saveAll(all);
-      }
+        return next;
+      });
     } catch {
       /* best-effort */
     }
@@ -596,12 +608,14 @@ export function createStandingQueryEngine(deps = {}) {
         /* best-effort */
       }
     }
-    // Retirement is cheap to run here too (once per tick).
+    // Retirement is cheap to run here too (once per tick). Under the store
+    // mutex from the FRESH list (BET-1464 defect 3) — the `all` snapshot read
+    // at tick start may already be stale by the time retirement lands.
     try {
-      const { next, retired } = retireWatchers(all, { nowMs: t, archivedSignatures });
-      if (retired.length > 0) {
-        await saveAll(next);
-      }
+      await patchWatchers((freshAll) => {
+        const { next, retired } = retireWatchers(freshAll, { nowMs: t, archivedSignatures });
+        return retired.length > 0 ? next : null;
+      });
     } catch {
       /* best-effort */
     }
@@ -611,25 +625,42 @@ export function createStandingQueryEngine(deps = {}) {
   async function register(input = {}) {
     const built = makeWatcher({ ...input, now });
     if (!built.ok) return { ok: false, error: built.error };
-    const all = await loadAll();
-    // A watcher with the same patternSignature is added alongside (user
-    // registration is distinct from auto-upsert) but the same id is not.
-    if (all.some((w) => w && w.id === built.watch.id)) {
-      return { ok: false, error: `watcher id already exists: ${built.watch.id}` };
+    let duplicate = false;
+    try {
+      await patchWatchers((all) => {
+        // A watcher with the same patternSignature is added alongside (user
+        // registration is distinct from auto-upsert) but the same id is not.
+        if (all.some((w) => w && w.id === built.watch.id)) {
+          duplicate = true;
+          return null;
+        }
+        return [...all, built.watch];
+      });
+    } catch (e) {
+      return { ok: false, error: e?.message ?? "register failed" };
     }
-    await saveAll([...all, built.watch]);
+    if (duplicate) return { ok: false, error: `watcher id already exists: ${built.watch.id}` };
     return { ok: true, data: { watch: built.watch } };
   }
 
   async function unregister(id) {
     if (!id || typeof id !== "string") return { ok: true, data: { removed: false } };
-    const all = await loadAll();
-    const next = all.filter((w) => w && w.id !== id);
-    if (next.length === all.length) return { ok: true, data: { removed: false } };
-    await saveAll(next);
-    windowHits.delete(id);
-    lastBurnHit.delete(id);
-    return { ok: true, data: { removed: true } };
+    let removed = false;
+    try {
+      await patchWatchers((all) => {
+        const next = all.filter((w) => w && w.id !== id);
+        if (next.length === all.length) return null;
+        removed = true;
+        return next;
+      });
+    } catch {
+      return { ok: false, error: "unregister failed" };
+    }
+    if (removed) {
+      windowHits.delete(id);
+      lastBurnHit.delete(id);
+    }
+    return { ok: true, data: { removed } };
   }
 
   async function list() {
@@ -647,14 +678,23 @@ export function createStandingQueryEngine(deps = {}) {
   }
 
   // Auto-create watchers from the last N days of day rollups. Idempotent by
-  // patternSignature (upsert never duplicates).
+  // patternSignature (upsert never duplicates). The upsert runs under the
+  // store mutex from the FRESH list (BET-1464 defect 3).
   async function autoCreate(dayRollups) {
     const candidates = extractRecurringThemes(dayRollups, { now });
     if (candidates.length === 0) return { added: [], updated: [] };
-    const all = await loadAll();
-    const { next, added, updated } = upsertWatchers(all, candidates, { now });
-    if (added.length > 0 || updated.some((u) => u.rearmed)) await saveAll(next);
-    return { added, updated };
+    const result = { added: [], updated: [] };
+    try {
+      await patchWatchers((all) => {
+        const { next, added, updated } = upsertWatchers(all, candidates, { now });
+        result.added = added;
+        result.updated = updated;
+        return added.length > 0 || updated.some((u) => u.rearmed) ? next : null;
+      });
+    } catch {
+      /* best-effort */
+    }
+    return result;
   }
 
   // One-time migration of legacy cto.json watches, guarded by a marker in
@@ -671,10 +711,14 @@ export function createStandingQueryEngine(deps = {}) {
     }
     const converted = migrateLegacyWatches(legacyWatches, { now });
     if (converted.length > 0) {
-      const all = await loadAll();
-      const existingIds = new Set(all.map((w) => w?.id));
-      const fresh = converted.filter((c) => !existingIds.has(c.id));
-      await saveAll([...all, ...fresh]);
+      // Letting a store failure propagate keeps the pre-patchStore contract:
+      // the migration marker below is only stamped once the rows landed, so
+      // a failed save retries on the next invocation.
+      await patchWatchers((all) => {
+        const existingIds = new Set(all.map((w) => w?.id));
+        const fresh = converted.filter((c) => !existingIds.has(c.id));
+        return fresh.length > 0 ? [...all, ...fresh] : null;
+      });
     }
     try {
       // BET-1425: sub-key merge on `watchers` from the FRESH state — this key

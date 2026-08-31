@@ -57,7 +57,7 @@
 // `ctoNightCapUsd` (user-set in Behavior, default $5/night). The forecaster
 // still runs to feed the Health card, but produces no reserve.
 
-import { budgetStore } from "./ctoStores.mjs";
+import { budgetStore, patchStore } from "./ctoStores.mjs";
 import { startOfDay } from "./ctoRollups.mjs";
 import { blendedPrice } from "../shared/blendedPrice.mjs";
 import { effectsForVerdict } from "./ctoVerdicts.mjs";
@@ -666,8 +666,16 @@ export function createCtoBudget({
       return normalizeQuota(defaultBudgetPayload());
     }
   }
-  async function save(payload) {
-    await store.save(normalizeQuota(payload));
+  // BET-1464 defect 3: every budget.json write routes through patchStore —
+  // the read-fresh-merge-save runs under the budget store's mutex. The spend
+  // recorder fires per model call; the overnight roll (refreshRoi) holds the
+  // same mutex across its multi-second probe body, so a mid-roll spend row
+  // can no longer be reverted by the roll's stale-snapshot save. Mutators
+  // receive the RAW store payload and normalize it themselves; the patch is
+  // the full normalized payload (every key owned), so the merged state keeps
+  // the on-disk shape the accessors expect.
+  function patchBudget(mutate) {
+    return patchStore(store, (fresh) => mutate(normalizeQuota(fresh)));
   }
   async function ledgerAppend(row) {
     try {
@@ -680,9 +688,7 @@ export function createCtoBudget({
     const t = typeof nowMs === "number" && Number.isFinite(nowMs) ? nowMs : now();
     const usd = price({ model, tokens });
     try {
-      const payload = await load();
-      const next = recordSpend(payload, { now: t, usd, calls: 1 });
-      await save(next);
+      await patchBudget((payload) => recordSpend(payload, { now: t, usd, calls: 1 }));
       return { usd, dayKey: dayKey(t) };
     } catch {
       // Metering is best-effort: a store failure must never break the model
@@ -741,7 +747,6 @@ export function createCtoBudget({
       const obs = hist[historyKey(provider, windowKind)] ?? [];
       const { series, historyDays, maxObserved } = buildSeries(obs, t);
       const mape14 = mapeFn({ series, tailDays: 14 });
-      const payload = await load();
       const quota = {
         ...defaultQuotaState(provider),
         mode: "windowless",
@@ -753,9 +758,8 @@ export function createCtoBudget({
         mape14,
         updatedMs: t,
       };
-      const nextPayload = { ...payload, quota: { ...payload.quota, [provider]: quota } };
       try {
-        await save(nextPayload);
+        await patchBudget((payload) => ({ ...payload, quota: { ...payload.quota, [provider]: quota } }));
       } catch {
         /* quota persistence is best-effort */
       }
@@ -790,28 +794,58 @@ export function createCtoBudget({
     const obs = hist[historyKey(provider, windowKind)] ?? [];
     const { series, historyDays, maxObserved } = buildSeries(obs, t);
 
-    const payload = await load();
-    const prev = payload.quota?.[provider] ?? defaultQuotaState(provider);
-    const activated = !!prev.activated || historyDays >= RESERVE_ACTIVATE_DAYS;
-    const folded = foldQuotaState(prev, { capHits: capHitsSince, earnedCleanDays, activated });
-    const plan = planReserve({ state: folded, series, remainingPct, forecast });
-    const quota = {
-      ...folded,
-      provider,
-      mode: plan.mode,
-      reserve: plan.reserve,
-      spendable: plan.spendableFrac,
-      maxObserved: plan.maxObserved,
-      historyDays: plan.historyDays,
-      remainingFrac: plan.remainingFrac,
-      mape14: mapeFn({ series, tailDays: 14 }),
-      updatedMs: t,
-    };
-    const nextPayload = { ...payload, quota: { ...payload.quota, [provider]: quota } };
+    // BET-1464 defect 3: the fold derives from the provider's PREVIOUS quota
+    // row read FRESH inside the store mutex — the old load-then-save shape
+    // suspended inside load(), letting a concurrent spend row land and then
+    // reverted it with the stale snapshot.
+    let plan = null;
+    let quota = null;
+    let prev = null;
+    let folded = null;
     try {
-      await save(nextPayload);
+      await patchBudget((payload) => {
+        prev = payload.quota?.[provider] ?? defaultQuotaState(provider);
+        const activated = !!prev.activated || historyDays >= RESERVE_ACTIVATE_DAYS;
+        folded = foldQuotaState(prev, { capHits: capHitsSince, earnedCleanDays, activated });
+        plan = planReserve({ state: folded, series, remainingPct, forecast });
+        quota = {
+          ...folded,
+          provider,
+          mode: plan.mode,
+          reserve: plan.reserve,
+          spendable: plan.spendableFrac,
+          maxObserved: plan.maxObserved,
+          historyDays: plan.historyDays,
+          remainingFrac: plan.remainingFrac,
+          mape14: mapeFn({ series, tailDays: 14 }),
+          updatedMs: t,
+        };
+        return { ...payload, quota: { ...payload.quota, [provider]: quota } };
+      });
     } catch {
-      /* quota persistence is best-effort */
+      /* quota persistence is best-effort — the fold replays on the next refresh */
+    }
+    if (!plan) {
+      // Degenerate: the store path failed before deriving anything. Re-derive
+      // from a plain read (no persistence attempt — same outcome as the old
+      // caught save failure) so the caller still gets a plan.
+      const payload = await load();
+      prev = payload.quota?.[provider] ?? defaultQuotaState(provider);
+      const activated = !!prev.activated || historyDays >= RESERVE_ACTIVATE_DAYS;
+      folded = foldQuotaState(prev, { capHits: capHitsSince, earnedCleanDays, activated });
+      plan = planReserve({ state: folded, series, remainingPct, forecast });
+      quota = {
+        ...folded,
+        provider,
+        mode: plan.mode,
+        reserve: plan.reserve,
+        spendable: plan.spendableFrac,
+        maxObserved: plan.maxObserved,
+        historyDays: plan.historyDays,
+        remainingFrac: plan.remainingFrac,
+        mape14: mapeFn({ series, tailDays: 14 }),
+        updatedMs: t,
+      };
     }
     // §14.5 ledger rows: a fractile notch and a spendable-reserve line.
     if (folded.fractile !== (prev.fractile ?? FRACTILE_INIT)) {
@@ -942,115 +976,121 @@ function validPrRef(ref) {
    */
   async function refreshRoi() {
     const t = typeof now === "function" ? now() : Date.now();
-    let payload;
+    let months = {};
+    let pending = [];
     try {
-      payload = normalizeRoi(await store.load());
-    } catch {
-      payload = normalizeRoi(defaultBudgetPayload());
-    }
-    const months = { ...payload.roi.months };
-    const pending = payload.roi.pending.map((j) => ({ ...j }));
-    const countMerged = (row) => {
-      const key = roiMonthKey(typeof row.finishedAt === "number" ? row.finishedAt : t);
-      const acc = monthAccumulator(months, key);
-      acc.merged += 1;
-      months[key] = acc;
-      row.counted = true;
-    };
-
-    // 1. Sample terminal CTO-actor jobs not yet snapshotted.
-    let jobs = [];
-    try {
-      jobs = (await jobsRead()) ?? [];
-    } catch {
-      jobs = [];
-    }
-    // Every pending id — counted or not — is a dedupe fingerprint: a job
-    // already snapshotted (and probed) must never re-sample.
-    const known = new Set(pending.map((j) => j.id));
-    for (const j of jobs) {
-      if (!j || j.actor !== "cto" || j.status !== "done") continue;
-      if (typeof j.branch !== "string" || !j.branch) continue;
-      if (typeof j.id !== "string" || !j.id || known.has(j.id)) continue;
-      pending.push({
-        id: j.id,
-        branch: j.branch,
-        cwd: typeof j.cwd === "string" ? j.cwd : "",
-        finishedAt: typeof j.finishedAt === "number" && Number.isFinite(j.finishedAt) ? j.finishedAt : null,
-        counted: false,
-      });
-    }
-
-    // 2. Probe pending branches (merged = branch deleted-on-merge, or present
-    //    and an ancestor of the project's HEAD, or its forge PR reports
-    //    merged — the squash-merge case, BET-1422). Probe failures leave the
-    //    row uncounted for a later refresh.
-    for (const row of pending) {
-      if (row.counted === true) continue;
-      let probe = { exists: false, isAncestor: false };
-      try {
-        probe = (await gitProbe({ cwd: row.cwd, branch: row.branch })) ?? probe;
-      } catch {
-        probe = { exists: false, isAncestor: false };
-      }
-      if (isJobMerged(probe)) {
-        countMerged(row);
-        continue;
-      }
-      // The local-git signals can never fire for a squash merge: resolve the
-      // job's PR on the forge (once — a resolved PR or a definitive no-PR is
-      // persisted on the row so neither is ever re-queried; an unconsultable
-      // forge leaves both markers unset so the next refresh retries), then
-      // probe its state.
-      const havePr = validPrRef(row.pr);
-      if (!havePr && row.prTried !== true && typeof discoverJobPr === "function") {
-        try {
-          const pr = await discoverJobPr({ cwd: row.cwd, branch: row.branch });
-          if (validPrRef(pr)) {
-            row.pr = { repoKey: pr.repoKey, number: pr.number };
-          } else {
-            row.prTried = true;
+      // BET-1464 defect 3: the roll holds the budget store's mutex across its
+      // whole multi-second body (sampling, probes, month recomputes). The old
+      // shape read the payload up front and saved it at the end, so a spend
+      // row recorded by a concurrent model call was silently reverted by the
+      // stale snapshot. The body is an async IIFE so its awaits hold the
+      // store mutex — the serialization IS the fix.
+      await patchBudget((payload) => {
+        months = { ...payload.roi.months };
+        pending = payload.roi.pending.map((j) => ({ ...j }));
+        const countMerged = (row) => {
+          const key = roiMonthKey(typeof row.finishedAt === "number" ? row.finishedAt : t);
+          const acc = monthAccumulator(months, key);
+          acc.merged += 1;
+          months[key] = acc;
+          row.counted = true;
+        };
+        return (async () => {
+          // 1. Sample terminal CTO-actor jobs not yet snapshotted.
+          let jobs = [];
+          try {
+            jobs = (await jobsRead()) ?? [];
+          } catch {
+            jobs = [];
           }
-        } catch {
-          /* transient — retried on a later refresh */
-        }
-      }
-      const pr = validPrRef(row.pr);
-      if (!pr) continue;
-      let prMerged = null;
-      try {
-        prMerged = await forgeProbe({ repoKey: pr.repoKey, number: pr.number, head: row.branch });
-      } catch {
-        prMerged = null;
-      }
-      if (isJobMerged({ ...probe, prMerged })) countMerged(row);
-    }
+          // Every pending id — counted or not — is a dedupe fingerprint: a job
+          // already snapshotted (and probed) must never re-sample.
+          const known = new Set(pending.map((j) => j.id));
+          for (const j of jobs) {
+            if (!j || j.actor !== "cto" || j.status !== "done") continue;
+            if (typeof j.branch !== "string" || !j.branch) continue;
+            if (typeof j.id !== "string" || !j.id || known.has(j.id)) continue;
+            pending.push({
+              id: j.id,
+              branch: j.branch,
+              cwd: typeof j.cwd === "string" ? j.cwd : "",
+              finishedAt: typeof j.finishedAt === "number" && Number.isFinite(j.finishedAt) ? j.finishedAt : null,
+              counted: false,
+            });
+          }
 
-    // 3. Recompute the store-derived counters: current month every refresh;
-    //    the previous month once after it closes, then frozen.
-    const currentKey = roiMonthKey(t);
-    const currentWindow = monthWindow(currentKey);
-    const prevKey = currentWindow ? roiMonthKey(currentWindow.startTs - 1) : null;
-    const toCompute = [currentKey];
-    if (prevKey && months[prevKey]?.frozen !== true) toCompute.push(prevKey);
-    for (const key of toCompute) {
-      const acc = monthAccumulator(months, key);
-      const isCurrent = key === currentKey;
-      const computed = await computeMonth({ ...acc, frozen: !isCurrent }, t);
-      if (computed) months[key] = computed;
-    }
+          // 2. Probe pending branches (merged = branch deleted-on-merge, or
+          //    present and an ancestor of the project's HEAD, or its forge PR
+          //    reports merged — the squash-merge case, BET-1422). Probe
+          //    failures leave the row uncounted for a later refresh.
+          for (const row of pending) {
+            if (row.counted === true) continue;
+            let probe = { exists: false, isAncestor: false };
+            try {
+              probe = (await gitProbe({ cwd: row.cwd, branch: row.branch })) ?? probe;
+            } catch {
+              probe = { exists: false, isAncestor: false };
+            }
+            if (isJobMerged(probe)) {
+              countMerged(row);
+              continue;
+            }
+            // The local-git signals can never fire for a squash merge: resolve
+            // the job's PR on the forge (once — a resolved PR or a definitive
+            // no-PR is persisted on the row so neither is ever re-queried; an
+            // unconsultable forge leaves both markers unset so the next
+            // refresh retries), then probe its state.
+            const havePr = validPrRef(row.pr);
+            if (!havePr && row.prTried !== true && typeof discoverJobPr === "function") {
+              try {
+                const pr = await discoverJobPr({ cwd: row.cwd, branch: row.branch });
+                if (validPrRef(pr)) {
+                  row.pr = { repoKey: pr.repoKey, number: pr.number };
+                } else {
+                  row.prTried = true;
+                }
+              } catch {
+                /* transient — retried on a later refresh */
+              }
+            }
+            const pr = validPrRef(row.pr);
+            if (!pr) continue;
+            let prMerged = null;
+            try {
+              prMerged = await forgeProbe({ repoKey: pr.repoKey, number: pr.number, head: row.branch });
+            } catch {
+              prMerged = null;
+            }
+            if (isJobMerged({ ...probe, prMerged })) countMerged(row);
+          }
 
-    // 4. Hygiene: drop stale pending rows.
-    const cutoff = t - ROI_PENDING_RETENTION_MS;
-    const kept = pending.filter((j) => j.counted === true ? (typeof j.finishedAt === "number" ? j.finishedAt >= cutoff : true) : true);
-    const trimmed = kept.slice(-200);
+          // 3. Recompute the store-derived counters: current month every
+          //    refresh; the previous month once after it closes, then frozen.
+          const currentKey = roiMonthKey(t);
+          const currentWindow = monthWindow(currentKey);
+          const prevKey = currentWindow ? roiMonthKey(currentWindow.startTs - 1) : null;
+          const toCompute = [currentKey];
+          if (prevKey && months[prevKey]?.frozen !== true) toCompute.push(prevKey);
+          for (const key of toCompute) {
+            const acc = monthAccumulator(months, key);
+            const isCurrent = key === currentKey;
+            const computed = await computeMonth({ ...acc, frozen: !isCurrent }, t);
+            if (computed) months[key] = computed;
+          }
 
-    try {
-      await save({ ...payload, roi: { months, pending: trimmed } });
+          // 4. Hygiene: drop stale pending rows.
+          const cutoff = t - ROI_PENDING_RETENTION_MS;
+          const kept = pending.filter((j) => j.counted === true ? (typeof j.finishedAt === "number" ? j.finishedAt >= cutoff : true) : true);
+          const trimmed = kept.slice(-200);
+          pending = trimmed;
+
+          return { ...payload, roi: { months, pending: trimmed } };
+        })();
+      });
     } catch {
-      /* ROI persistence is best-effort */
+      /* ROI persistence is best-effort — a store failure degrades the report */
     }
-    return { months, pending: trimmed };
+    return { months, pending };
   }
 
   /** The render model for the Health ROI row (§12.4): the most recent CLOSED

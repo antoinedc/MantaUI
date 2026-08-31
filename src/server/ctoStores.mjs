@@ -159,50 +159,90 @@ export const engineStateStore = createCtoJsonStore("engine-state", ctoPath("engi
 export const trustStore = createCtoJsonStore("trust", ctoPath("trust.json"));
 
 // ---------------------------------------------------------------------------
-// BET-1425 engine-state write hygiene — per-key read-modify-write.
+// BET-1425 engine-state write hygiene, generalized in BET-1464 (defect 3) —
+// per-key read-modify-write for EVERY single-file CTO store.
 //
-// `engineStateStore.save(data)` writes the WHOLE file, so a writer that spreads
-// a load-time snapshot (`{ ...es, myKey }`) silently reverts every other key
-// another writer changed between its load and its save (the resurrect/clobber
-// demonstrated in the BET-1403 review). The durability invariant: a key's
-// value must survive any concurrent writer that does not own that key.
+// `store.save(data)` writes the WHOLE file, so a writer that spreads a
+// load-time snapshot (`{ ...snapshot, myKey }`) silently reverts every other
+// key another writer changed between its load and its save (the
+// resurrect/clobber demonstrated in the BET-1403 review). The durability
+// invariant: a key's value must survive any concurrent writer that does not
+// own that key.
 //
-// `patchEngineState` is the one sanctioned save path for engine-state writers:
-// under a process-wide mutex it loads FRESH, applies only the patch keys the
-// writer owns, and atomically saves. The mutex serializes the whole
-// load→merge→save sequence (the path mutex inside writeJsonAtomic only covers
-// the rename, not the read — a different mutex, so no nesting deadlock), so
-// two concurrent patches each re-derive from the other's committed state.
+// `patchStore(store, mutation)` is the one sanctioned save path for the CTO
+// stores: under ONE mutex PER STORE PATH it loads FRESH, applies only the
+// patch keys the writer owns, and atomically saves. The mutex serializes the
+// whole load→merge→save sequence (the path mutex inside writeJsonAtomic only
+// covers the rename, not the read — a different mutex, so no nesting
+// deadlock), so two concurrent patches each re-derive from the other's
+// committed state. Writers whose body awaits (a long scan, a network probe)
+// may pass an async mutator — the store mutex is held across the whole
+// body, exactly the serialization the old per-engine write chains gave, now
+// shared by every writer of the file.
 //
 // `mutation` is either a static patch object (keys owned by the writer) or a
 // `(fresh) => patch` function for writers whose value derives from state
 // (array pushes, sub-key merges like `watchers.lastAutoDay` vs the
-// `watchers` migration marker). Setting a patch key to `undefined` deletes it.
+// `watchers` migration marker). Setting a patch key to `undefined` deletes
+// it. An EMPTY patch (or a mutator resolving to one) is a pure no-op: no
+// save, no rewrite — the BET-1463 card writers rely on that to keep a
+// byte-identical regeneration from touching the file at all.
 // ---------------------------------------------------------------------------
 
-const engineStateWriteLock = createMutex();
+// One mutex per store path (BET-1464 defect 3): the five CTO writer files
+// (cards/watchers/trust/budget/tool-registry) each serialize on their own
+// key. Keyed by the real path so two wrapper instances around the same file
+// still serialize; injected test stores without a path fall back to the
+// object identity (over-serialization is always safe, under-serialization
+// is not).
+const storeWriteLocks = new Map();
 
-export async function patchEngineState(mutation, { engineState = engineStateStore } = {}) {
+function lockForStore(store) {
+  const key =
+    typeof store?.path === "string" && store.path
+      ? store.path
+      : typeof store?.name === "string" && store.name
+        ? `name:${store.name}`
+        : (store ?? ":anon:");
+  let lock = storeWriteLocks.get(key);
+  if (!lock) {
+    lock = createMutex();
+    storeWriteLocks.set(key, lock);
+  }
+  return lock;
+}
+
+export async function patchStore(store, mutation) {
+  if (!store || typeof store.load !== "function" || typeof store.save !== "function") {
+    throw new Error("patchStore requires a store with load and save");
+  }
   if (
     typeof mutation !== "function" &&
     (mutation === null || typeof mutation !== "object" || Array.isArray(mutation))
   ) {
-    throw new Error("engine-state patch must be a plain object or a (fresh) => patch function");
+    throw new Error("store patch must be a plain object or a (fresh) => patch function");
   }
-  return engineStateWriteLock.runExclusive(async () => {
-    const fresh = (await engineState.load()) ?? {};
+  return lockForStore(store).runExclusive(async () => {
+    const fresh = (await store.load()) ?? {};
     const patch = typeof mutation === "function" ? await mutation(fresh) : mutation;
     if (patch === null || typeof patch !== "object" || Array.isArray(patch)) {
-      throw new Error("engine-state patch must resolve to a plain object");
+      throw new Error("store patch must resolve to a plain object");
     }
     const next = { ...fresh };
     for (const [key, value] of Object.entries(patch)) {
       if (value === undefined) delete next[key];
       else next[key] = value;
     }
-    await engineState.save(next);
+    if (Object.keys(patch).length === 0) return fresh; // pure no-op: no save
+    await store.save(next);
     return next;
   });
+}
+
+// Engine-state's thin re-expression over the store-agnostic patchStore — the
+// original BET-1425 seam, unchanged for its callers.
+export async function patchEngineState(mutation, { engineState = engineStateStore } = {}) {
+  return patchStore(engineState, mutation);
 }
 
 // ---------------------------------------------------------------------------
@@ -312,13 +352,23 @@ function assertRollupLevel(level) {
 // ---------------------------------------------------------------------------
 
 export function createLedgerStore({ path = ctoPath("ledger.jsonl"), now = () => Date.now() } = {}) {
+  // BET-1464 defect 2: ONE write lock shared by the appender and the retention
+  // rewrite. Before this, append was a bare appendFile and the sweep's
+  // rewrite a bare writeFile — an append landing between the sweep's read and
+  // its rewrite was silently lost (appends are constant; the ledger is fed by
+  // the event firehose), and a crash mid-write truncated the whole 180-day
+  // audit ledger.
+  const writeLock = createMutex();
+
   async function append(entry) {
     if (entry === null || typeof entry !== "object") {
       throw new Error("ledger entries must be objects");
     }
     const row = { ...entry, ts: entry.ts != null ? entry.ts : now() };
-    await mkdir(dirname(path), { recursive: true });
-    await appendFile(path, JSON.stringify(row) + "\n", { mode: MODE });
+    return writeLock.runExclusive(async () => {
+      await mkdir(dirname(path), { recursive: true });
+      await appendFile(path, JSON.stringify(row) + "\n", { mode: MODE });
+    });
   }
 
   async function read({ from, to, timeField = "ts" } = {}) {
@@ -347,14 +397,40 @@ export function createLedgerStore({ path = ctoPath("ledger.jsonl"), now = () => 
     return rows;
   }
 
-  // Rewrites the whole file (used by the retention sweep to drop expired rows).
-  async function rewrite(rows) {
+  // Rewrites the whole file atomically (temp file + rename via the SHARED
+  // writeJsonAtomic — the same single atomic-write implementation every other
+  // store in this module uses; the jsonl text is already-serialized bytes, so
+  // no second implementation was needed and the bare writeFile is gone). The
+  // ledger write lock serializes it against concurrent appends; the jsonStore
+  // path mutex underneath covers the rename itself.
+  async function rewriteLocked(rows) {
     const text = rows.map((r) => JSON.stringify(r)).join("\n") + (rows.length ? "\n" : "");
-    await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, text, { mode: MODE });
+    await writeJsonAtomic(path, text, { mode: MODE });
   }
 
-  return { name: "ledger", path, append, read, rewrite };
+  async function rewrite(rows) {
+    if (!Array.isArray(rows)) throw new Error("ledger rewrite rows must be an array");
+    return writeLock.runExclusive(() => rewriteLocked(rows));
+  }
+
+  // The retention sweep primitive (BET-1464 defect 2): read-filter-rewrite as
+  // ONE atomic section under the ledger write lock, so an append concurrent
+  // with a sweep is never lost — it either lands before the section (the
+  // fresh read sees it; fresh rows are never expired) or after the rewrite
+  // (the file already carries the rewritten content), never between. Returns
+  // `{ dropped, wrote }`.
+  async function sweepExpired({ nowMs, retentionMs, timeField = "ts" } = {}) {
+    return writeLock.runExclusive(async () => {
+      const rows = await read();
+      if (rows.length === 0) return { dropped: 0, wrote: false };
+      const { keep, dropped } = expireRows(rows, { nowMs, retentionMs, timeField });
+      if (keep.length === rows.length) return { dropped: 0, wrote: false };
+      await rewriteLocked(keep);
+      return { dropped: dropped.length, wrote: true };
+    });
+  }
+
+  return { name: "ledger", path, append, read, rewrite, sweepExpired };
 }
 
 export const ledgerStore = createLedgerStore();
@@ -519,6 +595,7 @@ export async function sweepInbox(nowMs = Date.now()) {
 // ---------------------------------------------------------------------------
 
 const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+export const CTO_STORE_SWEEP_INTERVAL_MS = SWEEP_INTERVAL_MS;
 
 async function listJsonFiles(dir) {
   let entries;
@@ -538,10 +615,10 @@ async function fileTimestamp(filePath) {
 }
 
 async function sweepLedger(nowMs) {
-  const rows = await ledgerStore.read();
-  if (rows.length === 0) return;
-  const { keep } = expireRows(rows, { nowMs, retentionMs: RETENTION_MS.ledger });
-  if (keep.length !== rows.length) await ledgerStore.rewrite(keep);
+  // BET-1464 defect 2: the sweep is the ledger's own atomic
+  // read-filter-rewrite primitive — no append can be lost between the read
+  // and the rewrite (both hold the ledger's write lock).
+  await ledgerStore.sweepExpired({ nowMs, retentionMs: RETENTION_MS.ledger });
 }
 
 async function sweepVerdicts(nowMs) {
