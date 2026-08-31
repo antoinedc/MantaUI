@@ -12,13 +12,17 @@
 //     (empty ring = branch unreachable), `queue-tonight` only at High tier.
 //   - Worthiness gate: a `worthiness` class call returns a 0..1 score; the
 //     decision probability is `score × class prior × sender reliability`
-//     (§9.1 calibration). Per-class thresholds (`p_ask`, `p_act`) live in
-//     engine-state; below `p_ask` a candidate is SILENT-LOGGED (a ledger row
+//     (§9.1 calibration). Thresholds are per class (BET-1471: the p_ask/p_act
+//     pair derives from each class's prior ceiling — `defaultThresholds()`),
+//     with a flat engine-state `suggest.thresholds` pair overriding globally
+//     when present; below `p_ask` a candidate is SILENT-LOGGED (a ledger row
 //     {id, score, reason}) for the §14.3 silence audit, above it a DECISION
 //     card is written. The `notify` variant (informational-tier router call)
 //     fires only when the finding's decay is steep — the deterministic rule
-//     `sourceKind ∈ {failure-recurrence}`. `p_act` exists but NOTHING acts in
-//     P2: the act branch throws if reached.
+//     `sourceKind ∈ {failure-recurrence}`. The act verb is reachable only
+//     through the §9.4 ladder (eligible act-tier class, p >= p_act); an
+//     un-promoted class above its act bar surfaces the ask card — ask IS the
+//     §9.3 cap — it never acts.
 //   - Global cold-start gate: until ≥ VERDICT_MIN (15) verdicts exist, every
 //     candidate is capped at the ask verbs regardless of scores ($9.1).
 //   - Silence audit (§14.3): silent-log rows are re-readable; a held item
@@ -84,9 +88,23 @@ export const VERDICT_MIN = TRUST_VERDICT_MIN;
 // engine-state. Same trailing-slice idiom as `ctoBudget.mjs`'s `.slice(-200)`.
 const USED_KEYS_CAP = 200;
 
-// §9.1 default gate thresholds (engine-state overrides).
+// §9.1 per-class gate thresholds (BET-1471 — implements the BET-1470
+// decision; do not re-litigate). With reliability at 1.0 a candidate's p
+// ceiling IS its class prior, so each pair derives from that ceiling:
+// `p_ask = 0.8 × ceiling`, `p_act = 0.95 × ceiling` (0.95 mirrors the §9.4
+// promotion bar). The old single global pair made the act verb
+// arithmetically unreachable (0.95 > every ceiling) and silenced
+// queue-tonight and tool-write at every score. The engine-state
+// `suggest.thresholds` override keeps its flat `{p_ask, p_act}` shape and,
+// when present, applies globally to every class.
 export function defaultThresholds() {
-  return { p_ask: 0.4, p_act: 0.95 };
+  return {
+    "record-decision": { p_ask: 0.48, p_act: 0.57 },
+    "config-change": { p_ask: 0.4, p_act: 0.48 },
+    "start-job": { p_ask: 0.32, p_act: 0.38 },
+    "queue-tonight": { p_ask: 0.28, p_act: 0.33 },
+    "tool-write": { p_ask: 0.24, p_act: 0.29 },
+  };
 }
 
 // Stable, collision-resistant candidate id: regeneration of the same
@@ -136,6 +154,11 @@ export function worthinessProbability(score, prior = 0.5, senderReliability = 0.
 }
 
 // §9.1/§9.2 surface-verb selection for one candidate.
+//   - `cls` picks the threshold pair: `defaultThresholds()[cls]`; an unknown
+//     class falls back to the config-change pair. The `thresholds` override
+//     (engine-state `suggest.thresholds`) keeps its flat `{p_ask, p_act}`
+//     shape, wins over the per-class defaults and, when present, applies to
+//     every class.
 //   - coldStart (`verdicts < VERDICT_MIN`): capped at the ask verb regardless
 //     of score or trust tier — the §10.6-4 global gate dominates (§9.4).
 //   - The class's trust tier raises the ceiling (§9.4): at the veto-window
@@ -143,21 +166,27 @@ export function worthinessProbability(score, prior = 0.5, senderReliability = 0.
 //     becomes reachable once p >= p_act (below it the class still surfaces
 //     the veto-window verb). Eligibility (§9.3) gates the climb — an
 //     ask-capped class never leaves the ask verbs whatever its counters say.
-//   - p >= p_act on an un-promoted (ask-tier) class: the act branch is
-//     reached without trust → throw (the guard that nothing acts unearned).
+//   - p >= p_act on an un-promoted (ask-tier) class: the ask verb IS the
+//     §9.3 cap, so the candidate surfaces the decision card — never silence
+//     (BET-1471: the old throw silently swallowed the class's highest-
+//     worthiness candidates). The act gate lives only in the eligible
+//     act-tier branch below.
 //   - p >= p_ask: DECISION card; `notify` true when the decay rule matches.
 //   - else: SILENT-LOG (ledger row for the §14.3 audit).
 export function decideVerb({
   p,
-  thresholds = defaultThresholds(),
+  cls = null,
+  thresholds = null,
   coldStart = false,
   sourceKind = null,
   tier = "ask",
   eligible = false,
 } = {}) {
-  const th = { ...defaultThresholds(), ...(thresholds || {}) };
-  const pAct = Number.isFinite(th.p_act) ? th.p_act : 0.95;
-  const pAsk = Number.isFinite(th.p_ask) ? th.p_ask : 0.4;
+  const perClass = defaultThresholds();
+  const base = perClass[cls] || perClass["config-change"];
+  const th = { ...base, ...(thresholds || {}) };
+  const pAct = Number.isFinite(th.p_act) ? th.p_act : base.p_act;
+  const pAsk = Number.isFinite(th.p_ask) ? th.p_ask : base.p_ask;
   const notify = NOTIFY_RECURRENCE_KINDS.includes(sourceKind);
   if (p < pAsk) return { verb: "silent-log" };
   // p >= p_ask → at least the ask verb (decision card). Cold-start CAPS the
@@ -168,9 +197,8 @@ export function decideVerb({
     if (tier === "act" && p >= pAct) return { verb: "act", notify };
     return { verb: "veto-window", notify };
   }
-  if (p >= pAct) {
-    throw new Error("suggest: act branch reached — class not trusted (ask-tier hold)");
-  }
+  // BET-1471: the ask-tier hold surfaces the ask card, it does not throw —
+  // ask IS the §9.3 cap, and silence is below it.
   return { verb: "decision", notify };
 }
 
@@ -417,7 +445,10 @@ export function createCtoSuggest(deps = {}) {
       es = {};
     }
     const st = (es.suggest && typeof es.suggest === "object") ? es.suggest : {};
-    const th = { ...defaultThresholds(), ...(st.thresholds || {}) };
+    // BET-1471: `suggest.thresholds` keeps its flat `{p_ask, p_act}` override
+    // shape and is returned raw — per-class defaults are resolved per
+    // candidate inside decideVerb, not baked in here.
+    const th = (st.thresholds && typeof st.thresholds === "object") ? st.thresholds : {};
     const used = st.usedKeys || [];
     return { es, st, thresholds: th, used };
   }
@@ -442,6 +473,8 @@ export function createCtoSuggest(deps = {}) {
     }
   }
 
+  // BET-1471: the flat override only (in-memory dep + engine-state) —
+  // per-class defaults are resolved per candidate in decideVerb.
   async function getThresholds() {
     const { thresholds: th } = await loadState();
     return { ...(thresholds || {}), ...th };
@@ -601,17 +634,11 @@ export function createCtoSuggest(deps = {}) {
         }
       }
       const p = worthinessProbability(score, priors[c.class], reliability);
-      // §9.4: verb selection consults the class's earned-trust tier.
+      // §9.4: verb selection consults the class's earned-trust tier. The
+      // per-class thresholds resolve inside decideVerb (BET-1471); `th` is
+      // the flat engine-state override that applies globally when present.
       const trustInfo = await trustConsult(c.class, coldStart);
-      let decision;
-      try {
-        decision = decideVerb({ p, thresholds: th, coldStart, sourceKind: finding.sourceKind, tier: trustInfo.tier, eligible: trustInfo.eligible });
-      } catch {
-        // act branch reached without trust — log as a held item, never act.
-        await ledgerAppend({ kind: "suggest.silent", id: c.id, class: c.class, score: p, reason: "act-not-trusted", sourceKind: finding.sourceKind, text: c.finding.text });
-        silent += 1;
-        continue;
-      }
+      let decision = decideVerb({ p, cls: c.class, thresholds: th, coldStart, sourceKind: finding.sourceKind, tier: trustInfo.tier, eligible: trustInfo.eligible });
 
       if (decision.verb === "silent-log") {
         await ledgerAppend({ kind: "suggest.silent", id: c.id, class: c.class, score: p, reason: "below-p_ask", sourceKind: finding.sourceKind, text: c.finding.text });

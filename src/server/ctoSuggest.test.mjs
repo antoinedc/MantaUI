@@ -97,49 +97,95 @@ test("default priors cover the closed enum", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Verb decision (§9.1): cold-start cap + p_ask threshold + act unreachable
+// Verb decision (§9.1): per-class thresholds (BET-1471), cold-start cap,
+// trust ladder, flat override
 // ---------------------------------------------------------------------------
 
-test("decideVerb: below p_ask → silent-log", () => {
-  assert.deepEqual(decideVerb({ p: 0.1 }), { verb: "silent-log" });
+// BET-1471: the shipped per-class table — each pair derives from the class's
+// prior ceiling (p_ask = 0.8 × ceiling, p_act = 0.95 × ceiling). Pinned as
+// exact literals so a prior change without a threshold change cannot sneak
+// the arithmetic dead-zone back in.
+test("defaultThresholds: per-class pairs match the BET-1470 decision table", () => {
+  const th = defaultThresholds();
+  for (const t of ACTION_TYPES) {
+    assert.ok(th[t] && typeof th[t] === "object", `missing thresholds for ${t}`);
+  }
+  assert.deepEqual(th["record-decision"], { p_ask: 0.48, p_act: 0.57 });
+  assert.deepEqual(th["config-change"], { p_ask: 0.4, p_act: 0.48 });
+  assert.deepEqual(th["start-job"], { p_ask: 0.32, p_act: 0.38 });
+  assert.deepEqual(th["queue-tonight"], { p_ask: 0.28, p_act: 0.33 });
+  assert.deepEqual(th["tool-write"], { p_ask: 0.24, p_act: 0.29 });
+  // Every pair stays inside its class's p ceiling (= its prior): a candidate
+  // at the ceiling clears the ask bar, and the act bar sits below it.
+  for (const t of ACTION_TYPES) {
+    const ceiling = DEFAULT_CLASS_PRIORS[t];
+    assert.ok(th[t].p_act <= ceiling, `${t}: p_act must not exceed the prior ceiling`);
+    assert.ok(th[t].p_ask <= th[t].p_act, `${t}: p_ask must not exceed p_act`);
+  }
+});
+
+test("decideVerb: below the class's p_ask → silent-log", () => {
+  assert.deepEqual(decideVerb({ p: 0.1, cls: "config-change" }), { verb: "silent-log" });
+  // The bars differ per class: 0.26 clears tool-write's p_ask (0.24) but not
+  // config-change's (0.4).
+  assert.deepEqual(decideVerb({ p: 0.26, cls: "tool-write" }), { verb: "decision", notify: false });
+  assert.deepEqual(decideVerb({ p: 0.26, cls: "config-change" }), { verb: "silent-log" });
+});
+
+test("decideVerb: unknown class falls back to the config-change pair", () => {
+  assert.deepEqual(decideVerb({ p: 0.42, cls: "bogus" }), { verb: "decision", notify: false });
+  assert.deepEqual(decideVerb({ p: 0.39, cls: "bogus" }), { verb: "silent-log" });
+  assert.deepEqual(decideVerb({ p: 0.42 }), { verb: "decision", notify: false });
 });
 
 test("decideVerb: p between p_ask and p_act → decision (no notify unless recurrence)", () => {
-  assert.deepEqual(decideVerb({ p: 0.6 }), { verb: "decision", notify: false });
-  assert.deepEqual(decideVerb({ p: 0.8, sourceKind: "failure-recurrence" }), { verb: "decision", notify: true });
-  assert.deepEqual(decideVerb({ p: 0.8, sourceKind: "fact-anomaly" }), { verb: "decision", notify: false });
+  // record-decision: p_ask 0.48, p_act 0.57.
+  assert.deepEqual(decideVerb({ p: 0.5, cls: "record-decision" }), { verb: "decision", notify: false });
+  assert.deepEqual(decideVerb({ p: 0.5, cls: "record-decision", sourceKind: "failure-recurrence" }), { verb: "decision", notify: true });
+  assert.deepEqual(decideVerb({ p: 0.5, cls: "record-decision", sourceKind: "fact-anomaly" }), { verb: "decision", notify: false });
 });
 
-test("decideVerb: act branch without trust — throws on p >= p_act (BET-1403: ask-tier hold)", () => {
-  assert.throws(() => decideVerb({ p: 0.99 }), /class not trusted/);
+test("decideVerb: unpromoted class above its act bar → decision card, no throw (BET-1471)", () => {
+  // With live per-class bars the old ask-tier guard throw became reachable
+  // and would have silently swallowed the class's highest-worthiness
+  // candidates. Ask IS the §9.3 cap: above the act bar an un-promoted class
+  // still surfaces the ask verb.
+  assert.deepEqual(decideVerb({ p: 0.99, cls: "config-change" }), { verb: "decision", notify: false });
   // Eligibility gates the climb (§9.3): an ask-capped class never leaves the
   // ask verbs even when its tier record somehow reads promoted.
-  assert.throws(() => decideVerb({ p: 0.99, tier: "act", eligible: false }), /class not trusted/);
+  assert.deepEqual(decideVerb({ p: 0.99, cls: "config-change", tier: "act", eligible: false }), { verb: "decision", notify: false });
 });
 
 test("decideVerb: trust ladder raises the ceiling (§9.2/§9.4)", () => {
+  // record-decision: p_ask 0.48, p_act 0.57.
   // veto-window tier: p >= p_ask surfaces the veto-window verb.
-  assert.deepEqual(decideVerb({ p: 0.6, tier: "veto-window", eligible: true }), { verb: "veto-window", notify: false });
+  assert.deepEqual(decideVerb({ p: 0.5, cls: "record-decision", tier: "veto-window", eligible: true }), { verb: "veto-window", notify: false });
   // act tier but below the act bar → still the veto-window verb.
-  assert.deepEqual(decideVerb({ p: 0.6, tier: "act", eligible: true }), { verb: "veto-window", notify: false });
+  assert.deepEqual(decideVerb({ p: 0.5, cls: "record-decision", tier: "act", eligible: true }), { verb: "veto-window", notify: false });
   // act tier + p >= p_act → the act verb fires.
-  assert.deepEqual(decideVerb({ p: 0.99, tier: "act", eligible: true }), { verb: "act", notify: false });
-  assert.deepEqual(decideVerb({ p: 0.99, tier: "act", eligible: true, sourceKind: "watcher-hit-rate" }), { verb: "act", notify: true });
+  assert.deepEqual(decideVerb({ p: 0.6, cls: "record-decision", tier: "act", eligible: true }), { verb: "act", notify: false });
+  assert.deepEqual(decideVerb({ p: 0.6, cls: "record-decision", tier: "act", eligible: true, sourceKind: "watcher-hit-rate" }), { verb: "act", notify: true });
   // cold-start dominates the ladder (§10.6-4): capped at ask whatever the tier.
-  assert.deepEqual(decideVerb({ p: 0.99, coldStart: true, tier: "act", eligible: true }), { verb: "decision", capped: true, notify: false });
+  assert.deepEqual(decideVerb({ p: 0.99, cls: "record-decision", coldStart: true, tier: "act", eligible: true }), { verb: "decision", capped: true, notify: false });
 });
 
 test("decideVerb: cold-start caps high-score candidates at the ask verb (no throw)", () => {
   // Even a score that would exceed p_act is capped to a decision card during
   // cold start — the act branch is not even considered.
-  assert.deepEqual(decideVerb({ p: 0.99, coldStart: true }), { verb: "decision", capped: true, notify: false });
+  assert.deepEqual(decideVerb({ p: 0.99, cls: "config-change", coldStart: true }), { verb: "decision", capped: true, notify: false });
   // The p_ask threshold still applies during cold start: below it → silent-log.
-  assert.deepEqual(decideVerb({ p: 0.1, coldStart: true }), { verb: "silent-log" });
+  assert.deepEqual(decideVerb({ p: 0.1, cls: "config-change", coldStart: true }), { verb: "silent-log" });
 });
 
-test("decideVerb: custom thresholds override defaults", () => {
-  assert.deepEqual(decideVerb({ p: 0.3, thresholds: { p_ask: 0.2, p_act: 0.9 } }), { verb: "decision", notify: false });
-  assert.deepEqual(decideVerb({ p: 0.1, thresholds: { p_ask: 0.2 } }), { verb: "silent-log" });
+test("decideVerb: flat engine-state override wins over the per-class defaults (global)", () => {
+  // record-decision's own p_ask is 0.48; the flat override lowers it for
+  // every class.
+  assert.deepEqual(decideVerb({ p: 0.3, cls: "record-decision", thresholds: { p_ask: 0.2, p_act: 0.9 } }), { verb: "decision", notify: false });
+  assert.deepEqual(decideVerb({ p: 0.1, cls: "record-decision", thresholds: { p_ask: 0.2 } }), { verb: "silent-log" });
+  // A partial override keeps the class's own value for the other key:
+  // config-change p_ask lowered to 0.2, p_act stays 0.48.
+  assert.deepEqual(decideVerb({ p: 0.5, cls: "config-change", thresholds: { p_ask: 0.2 } }), { verb: "decision", notify: false });
+  assert.deepEqual(decideVerb({ p: 0.5, cls: "config-change", tier: "act", eligible: true, thresholds: { p_ask: 0.2 } }), { verb: "act", notify: false });
 });
 
 // ---------------------------------------------------------------------------
@@ -432,11 +478,12 @@ test("collectFindings: combines digest + fact sources", () => {
 // §9.1 review Block 1 — decision-card reachability under PRODUCTION wiring
 // ---------------------------------------------------------------------------
 
-test("production wiring can surface a decision card: reliability 1.0 × prior 0.6 ≥ p_ask 0.4", async () => {
+test("production wiring can surface a decision card: reliability 1.0 × prior 0.6 ≥ p_ask 0.48", async () => {
   const h = makeHarness();
   // Mirror the SHIPPED index.mjs constants: reliability 1.0 (trusted internal
-  // sender), default class priors (max 0.6 record-decision), default engine
-  // thresholds (p_ask 0.4, no suggest in engine-state), Medium tier.
+  // sender), default class priors (max 0.6 record-decision), no engine-state
+  // override → the BET-1471 per-class thresholds (record-decision p_ask 0.48
+  // = 0.8 × the 0.6 ceiling), Medium tier.
   const sug2 = createCtoSuggest({
     now: () => h.clock.ms,
     publish: () => {},
@@ -467,10 +514,84 @@ test("production wiring can surface a decision card: reliability 1.0 × prior 0.
     senderReliability: async () => 1.0, // SHIPPED value in index.mjs
   });
   const r = await sug2.processFinding({ id: "rec:r", sourceKind: "fact-anomaly", text: "r", refs: [] }, { coldStart: false, tier: "medium" });
-  // p = 1.0 × 0.6 × 1.0 = 0.6 ≥ p_ask 0.4 → decision card, not silent-log.
+  // p = 1.0 × 0.6 × 1.0 = 0.6 ≥ p_ask 0.48 → decision card, not silent-log.
   assert.equal(r.surfaced, 1);
   assert.equal(h.cardPayload.cards.length, 1);
   assert.equal(h.cardPayload.cards[0].variant, "decision");
+});
+
+// BET-1471 regression: queue-tonight's ceiling (prior 0.35) sat below the old
+// global p_ask 0.4, so the class was silent-log at ANY score. Its per-class
+// bar (0.28 = 0.8 × 0.35) makes a max-worthiness candidate surface.
+test("queue-tonight is no longer a dead class: score-1.0 candidate surfaces a card", async () => {
+  const h = makeHarness();
+  const sug2 = createCtoSuggest({
+    now: () => h.clock.ms,
+    publish: () => {},
+    ledger: { append: async (r) => h.ledgerRows.push(r), read: async () => h.ledgerRows },
+    verdicts: { load: async () => ({ entries: Array(VERDICT_MIN).fill({}) }), save: async () => {} },
+    engineState: { load: async () => ({}), save: async () => {} }, // no override → per-class thresholds
+    digests: { list: async () => [], load: async () => null },
+    facts: { list: async () => [], load: async () => null },
+    configGet: async () => ({ ctoTier: "high" }),
+    capabilities: { queueTonight: true, toolWrite: true }, // SHIPPED values in index.mjs
+    cards: {
+      upsertDecision: async (c) => {
+        h.cardPayload.cards.push(c);
+        return { changed: true, isNew: true };
+      },
+    },
+    runSuggest: async () => ({
+      text: JSON.stringify({
+        candidates: [
+          {
+            class: "queue-tonight", // prior 0.35 — was below the old global p_ask 0.4
+            finding: { text: "Queue the maintenance window", refs: [] },
+            options: [{ label: "Queue", action: { type: "queue-tonight", payload: {} } }],
+          },
+        ],
+      }),
+    }),
+    runWorthiness: async () => ({ text: "1.0" }), // max-worthiness candidate
+    senderReliability: async () => 1.0, // SHIPPED value in index.mjs
+  });
+  const r = await sug2.processFinding({ id: "rec:q", sourceKind: "fact-anomaly", text: "q", refs: [] }, { coldStart: false, tier: "high" });
+  // p = 1.0 × 0.35 × 1.0 = 0.35 ≥ p_ask 0.28 → decision card. Under the old
+  // global bar (0.4) this exact candidate was silent-log at every score.
+  assert.equal(r.surfaced, 1);
+  assert.equal(r.silent, 0);
+  assert.equal(h.cardPayload.cards.length, 1);
+  assert.equal(h.cardPayload.cards[0].variant, "decision");
+  assert.ok(h.ledgerRows.every((x) => x.kind !== "suggest.silent"));
+});
+
+// BET-1471 reachability: for each §9.3-eligible class, p at the class's
+// ceiling (= its prior, the arithmetic max with reliability 1.0) reaches the
+// act verb through a promoted act tier, surfaces the ask card when
+// un-promoted (never a throw), and stays silent below the class's p_ask.
+test("act verb is arithmetically reachable for the §9.3-eligible classes", () => {
+  const eligible = { "record-decision": 0.6, "queue-tonight": 0.35, "start-job": 0.4 };
+  for (const [cls, ceiling] of Object.entries(eligible)) {
+    // promoted act tier + p at the ceiling → the act verb fires
+    assert.deepEqual(
+      decideVerb({ p: ceiling, cls, tier: "act", eligible: true }),
+      { verb: "act", notify: false },
+      `${cls}: p at the ceiling must reach the act verb`
+    );
+    // the same p on an un-promoted class → decision card, no throw
+    assert.deepEqual(
+      decideVerb({ p: ceiling, cls }),
+      { verb: "decision", notify: false },
+      `${cls}: p at the ceiling must surface the ask card, not a hold`
+    );
+    // just below the class's p_ask → silent-log
+    const pAsk = defaultThresholds()[cls].p_ask;
+    assert.deepEqual(
+      decideVerb({ p: pAsk - 0.01, cls }),
+      { verb: "silent-log" },
+      `${cls}: below its own p_ask must stay silent`
+    );
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -689,7 +810,7 @@ test("pipeline: cold start keeps an act-tier class capped at the ask verb (§10.
   assert.equal(h.cardPayload.cards[0].capped, true);
 });
 
-test("pipeline: an act-tier ask-capped class still throws into the hold (§9.3 eligibility)", async () => {
+test("pipeline: an ineligible act-tier class above its act bar surfaces the ask card (no throw, no hold)", async () => {
   const h = makeHarness();
   const sug2 = createCtoSuggest({
     now: () => h.clock.ms,
@@ -701,26 +822,38 @@ test("pipeline: an act-tier ask-capped class still throws into the hold (§9.3 e
     },
     engineState: {
       // config-change is §9.3-capped; even a corrupt/foreign "act" tier row
-      // must never raise the ceiling — decideVerb throws, the pipeline holds.
+      // must never raise the ceiling — the ask card is the cap (BET-1471:
+      // the old throw silently held the class's best candidates).
       load: async () => ({ v: 1, trust: { tiers: { "config-change": "act" } } }),
       save: async () => {},
     },
     digests: { list: async () => [], load: async () => null },
     facts: { list: async () => [], load: async () => null },
     configGet: async () => ({ ctoTier: "medium" }),
-    cards: { upsertDecision: async () => ({ changed: true }) },
+    cards: {
+      upsertDecision: async (c) => {
+        h.cardPayload.cards.push(c);
+        return { changed: true, isNew: true };
+      },
+    },
     executeAction: async () => ({ ok: true }),
     runSuggest: async () => ({
       text: JSON.stringify({ candidates: [{ class: "config-change", finding: { text: "a", refs: [] }, options: [{ label: "Go", action: { type: "config-change", payload: {} } }] }] }),
     }),
-    runWorthiness: async () => ({ text: "1.0" }), // p = 1.0 ≥ p_act — the act branch, refused for a capped class
+    runWorthiness: async () => ({ text: "1.0" }), // p = 1.0, above the class's act bar
     senderReliability: async () => 1.0,
     classPriors: { "config-change": 1.0 },
   });
   const r = await sug2.processFinding({ id: "rec:cc", sourceKind: "fact-anomaly", text: "a", refs: [] }, { coldStart: false, tier: "medium" });
-  assert.equal(r.surfaced, 0);
-  assert.equal(r.silent, 1);
-  assert.ok(h.ledgerRows.some((x) => x.kind === "suggest.silent" && x.reason === "act-not-trusted"));
+  // The ask verb IS the §9.3 cap: the candidate surfaces a decision card.
+  assert.equal(r.surfaced, 1);
+  assert.equal(r.silent, 0);
+  assert.equal(h.cardPayload.cards.length, 1);
+  assert.equal(h.cardPayload.cards[0].variant, "decision");
+  // No act-not-trusted hold row, and — the class being ineligible — it never
+  // acted either.
+  assert.ok(!h.ledgerRows.some((x) => x.reason === "act-not-trusted"));
+  assert.ok(!h.ledgerRows.some((x) => x.kind === "suggest.acted"));
 });
 
 test("verdictHeld stamps the held row's class onto the subject (§9.4 attribution)", async () => {

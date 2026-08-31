@@ -2271,10 +2271,14 @@ const adaptiveCtoSuggest = createCtoSuggest({
   fireNotify: (args) => push.fireNotify(args),
   // §9.1 sender reliability. Findings here come from the box's OWN engine
   // (digest-detected recurrences, fact anomalies), not an external sender —
-  // a trusted internal source, so reliability approaches 1.0. With the max
-  // class prior (0.6) a score-1.0 candidate yields p = 0.6 ≥ p_ask 0.4, so a
-  // genuinely high-worthiness suggestion CAN surface (decision-reachability
-  // was dead under the old 0.5 factor — §9.1 review Block 1).
+  // a trusted internal source, so reliability approaches 1.0. With it pinned
+  // to 1.0 a candidate's p ceiling IS its class prior, and the BET-1471
+  // per-class thresholds hang off that same ceiling (p_ask = 0.8 × prior,
+  // p_act = 0.95 × prior): a score-1.0 candidate clears p_ask for EVERY
+  // class (p = prior ≥ 0.8 × prior), and the act bar is arithmetically
+  // reachable for the §9.3-eligible ones. Under the old global pair
+  // (p_act 0.95 > every ceiling) the act verb could never fire (§9.1 review
+  // Block 1; BET-1470).
   senderReliability: async () => 1.0,
   runSuggest: (opts) => gatedSuggestionEphemeral("suggest", opts),
   runWorthiness: (opts) => gatedSuggestionEphemeral("worthiness", opts),
