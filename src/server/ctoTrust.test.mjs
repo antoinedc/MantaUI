@@ -185,6 +185,55 @@ test("persistence: a legacy es.trust payload migrates into the dedicated store o
   assert.equal((await h.stores.legacy.load()).trust.stats["start-job"]?.va, 3);
 });
 
+// BET-1482: the one-time adoption persist rides the store's patchStore mutex.
+// The old shape — a naked whole-payload save outside any mutex — could clobber
+// a writer that committed between the read's outer load and the persist.
+test("durability: the adoption persist cannot clobber a writer that committed first (BET-1482)", async () => {
+  const legacyPayload = {
+    v: 1,
+    trust: {
+      tiers: { "start-job": TIER_VETO_WINDOW },
+      stats: { "start-job": { a: 40, b: 1, va: 3, vb: 0, recent: [] } },
+    },
+  };
+  // The SECOND legacy load (the concurrent read's adoption source) is slowed
+  // so the writer's full read-merge-save commits while that read is still
+  // deciding to adopt; later legacy loads resolve fast. The read's adoption
+  // persist must then re-derive INSIDE the mutex, see a no-longer-fresh
+  // store, and no-op — the old naked save would fire after the writer's
+  // commit and clobber it with the un-mutated legacy snapshot.
+  let legacyLoads = 0;
+  const legacy = {
+    load: async () => {
+      legacyLoads += 1;
+      if (legacyLoads === 2) await new Promise((r) => setTimeout(r, 30));
+      return JSON.parse(JSON.stringify(legacyPayload));
+    },
+    save: async () => {},
+  };
+  const store = memoryStore({});
+  const ledgerRows = [];
+  const trust = createCtoTrust({
+    store,
+    legacy,
+    ledger: { append: async (r) => ledgerRows.push(r), read: async () => ledgerRows },
+    verdicts: memoryStore({ v: 1, entries: [] }),
+    now: () => 1_000_000,
+  });
+  // The writer adopts the same legacy payload inside the mutex, bumps the
+  // ask counter, and commits — all while the read's adoption decision is
+  // still pending on the slowed legacy load.
+  const writer = trust.noteVerdictEffects(
+    { success: true },
+    { subject: { type: "suggestion", id: "x", class: "start-job" }, verdict: "accept" },
+  );
+  await trust.getState(); // concurrent read: adopts in memory, persists via the mutex
+  await writer;
+  const st = await trust.getState();
+  assert.equal(st.stats["start-job"]?.a, 41, "the writer's counter bump survived the adoption persist");
+  assert.equal(st.tiers["start-job"], TIER_VETO_WINDOW, "the adopted tier survived");
+});
+
 test("durability: a stale full-engine-state save cannot revert trust keys (the mirrored clobber direction)", async () => {
   const h = makeTrust({ verdictCount: VERDICT_MIN });
   await h.trust.noteVerdictEffects({ success: true }, { subject: { type: "suggestion", id: "x", class: "queue-tonight" }, verdict: "accept" });

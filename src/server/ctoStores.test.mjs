@@ -34,6 +34,7 @@ import {
   expireRows,
   capArchive,
   ctoPath,
+  inboxStore,
   verdictsStore,
   ledgerStore,
   factsArchiveStore,
@@ -41,6 +42,7 @@ import {
   rollupsStore,
   probesStore,
   sweepAllStores,
+  sweepInbox,
   INBOX_KINDS,
   INBOX_TTL_MS,
   inboxExpiresAt,
@@ -283,6 +285,84 @@ test("sweepAllStores trims the ledger and caps the archive (integration)", async
 
   const { rm } = await import("node:fs/promises");
   await rm(freshRollup);
+});
+
+// ---------------------------------------------------------------------------
+// BET-1482 — the sweep family writes through patchStore (read-filter-write
+// under the per-store mutex), not the old unlocked load-spread-save.
+// ---------------------------------------------------------------------------
+
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+
+test("sweepInbox is a patchStore section: a concurrent writer's patch and the sweep's expiry BOTH land", async () => {
+  await inboxStore.save({
+    entries: [
+      { id: "old", kind: "fyi", expires: NOW_MS - 1 },
+      { id: "new", kind: "finding", expires: NOW_MS + DAY },
+    ],
+  });
+  // The writer holds the inbox store's mutex mid-patch while the sweep runs;
+  // the sweep must queue behind it and re-derive from the writer's committed
+  // state (the old unlocked load-spread-save could clobber either side).
+  const writer = patchStore(inboxStore, async () => {
+    await delay(25);
+    return { marker: "w" };
+  });
+  await delay(5); // let the writer take the mutex
+  await sweepInbox(NOW_MS);
+  await writer;
+  const after = await inboxStore.load();
+  assert.equal(after.marker, "w", "the concurrent writer's key survived the sweep");
+  assert.deepEqual(
+    after.entries.map((e) => e.id),
+    ["new"],
+    "the sweep's expiry still landed on the writer's committed state",
+  );
+});
+
+test("sweepVerdicts (via sweepAllStores) is a patchStore section: a concurrent writer's patch and the expiry BOTH land", async () => {
+  const cutoff = NOW_MS - RETENTION_MS.verdicts;
+  await verdictsStore.save({
+    entries: [
+      { ts: cutoff - 1, verdict: "accept" },
+      { ts: NOW_MS, verdict: "accept" },
+    ],
+  });
+  const writer = patchStore(verdictsStore, async () => {
+    await delay(25);
+    return { marker: "w" };
+  });
+  await delay(5);
+  await sweepAllStores({ nowMs: NOW_MS });
+  await writer;
+  const after = await verdictsStore.load();
+  assert.equal(after.marker, "w", "the concurrent writer's key survived the sweep");
+  assert.equal(after.entries.length, 1, "only the fresh verdict survives");
+  assert.equal(after.entries[0].ts, NOW_MS);
+});
+
+test("sweepArchiveCaps trims through the store's own save: sibling keys survive and the payload stays versioned", async () => {
+  const many = Array.from({ length: ARCHIVE_CAP + 5 }, (_, i) => ({ id: i, ts: i }));
+  await factsArchiveStore.save("capproj", { entries: many, project: "capproj" });
+  await sweepAllStores({ nowMs: NOW_MS });
+  const after = await factsArchiveStore.load("capproj");
+  assert.equal(after.entries.length, ARCHIVE_CAP, "over-cap entries trimmed");
+  assert.equal(after.project, "capproj", "the keys the sweep does not own survive");
+  assert.equal(after.v, CURRENT_VERSION, "the write went through the store's versioned save");
+});
+
+test("sweepArchiveCaps is per-file best-effort: a too-new archive file is left untouched, the sweep survives", async () => {
+  const { writeFile, readFile } = await import("node:fs/promises");
+  const { join } = await import("node:path");
+  const futurePath = join(factsArchiveStore.dir, "future.json");
+  await writeFile(futurePath, JSON.stringify({ v: CURRENT_VERSION + 1 }), "utf-8");
+  const many = Array.from({ length: ARCHIVE_CAP + 5 }, (_, i) => ({ id: i, ts: i }));
+  await factsArchiveStore.save("goodproj", { entries: many });
+  await sweepAllStores({ nowMs: NOW_MS }); // must not throw
+  const after = await factsArchiveStore.load("goodproj");
+  assert.equal(after.entries.length, ARCHIVE_CAP, "the healthy archive is still capped");
+  const untouched = JSON.parse(await readFile(futurePath, "utf-8"));
+  assert.equal(untouched.v, CURRENT_VERSION + 1, "the too-new file was not rewritten by the older reader");
 });
 
 test("inboxExpiresAt: fyi is 48h, every other kind (and unknown) is 7 days", () => {
