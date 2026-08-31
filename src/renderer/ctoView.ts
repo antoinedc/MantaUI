@@ -588,6 +588,33 @@ export function connectCards(cards: ReadonlyArray<Record<string, unknown>>): Con
     .filter((c) => c.title || c.body);
 }
 
+// BET-1431 (BET-1395 residue): the connect answer's argument-building step,
+// extracted from CtoPanel's handleConnectAnswer so it is pure and testable
+// (the leaf stays a memoized callback shell). Returns the exact
+// `ctoToolConnect` argument set for the chosen answer, or null when there is
+// nothing valid to call: the answer is not one of the three registry verbs,
+// no option matches it, or the option's action carries no string
+// `payload.tool` — the caller must skip the call entirely rather than send a
+// bogus/undefined tool (the server's upsertConnect always binds the tool at
+// generation time, so null is a defensive contract, not an expected path).
+// `ring` is forwarded only for the deep-read ask; "metadata" is the route's
+// default and is omitted, matching the wire shape the server expects.
+export function connectAnswerArgs(
+  card: ConnectCardRow,
+  answer: string,
+): { tool: string; answer: "connect" | "not-now" | "never"; ring?: "deep_read" } | null {
+  if (answer !== "connect" && answer !== "not-now" && answer !== "never") return null;
+  const option = (card.options ?? []).find((o) => o.answer === answer);
+  const tool = option?.action?.payload?.tool;
+  if (typeof tool !== "string" || tool === "") return null;
+  const ring = option?.action?.payload?.ring;
+  return {
+    tool,
+    answer,
+    ...(ring === "deep_read" ? { ring: "deep_read" as const } : {}),
+  };
+}
+
 // Live countdown to a veto card's `dueMs`: the ms remaining (≥ 0), or null
 // when there is no due time or it already elapsed (the card resolves server-
 // side; the client just hides the countdown rather than reading negative).
