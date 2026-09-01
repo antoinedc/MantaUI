@@ -4807,7 +4807,13 @@ test("install.sh: opencode-serve gets background subagents, on every supervisor,
     scriptFile("launchd", "com.mantaui.opencode.plist"),
     new RegExp(`<key>${VAR}</key>\\s*<string>true</string>`),
   );
-  assert.match(installSh, new RegExp(`${VAR}=true nohup`));
+  // The fallback sets the var on the same `nohup` invocation. Matched loosely
+  // across the line continuation, because that subshell also carries the
+  // claimed-Claude-Code-version env var (BET-1503) between the two.
+  assert.match(
+    installSh,
+    new RegExp(`\\( ${VAR}=true[\\s\\S]{0,300}?nohup "\\$OPENCODE_BIN" serve`),
+  );
   // …and the unit must be re-rendered on every run, or an already-installed
   // box would never pick the line up: the systemd branch used to skip when
   // already active, and self-update.sh renders no units either. Pin the
@@ -5056,6 +5062,7 @@ sed \\
   -e "s|@@OPENCODE_BIN@@|\${OPENCODE_BIN:-}|g" \\
   -e "s|@@AUTH_DIR@@|\$AUTH_DIR|g" \\
   -e "s|@@AGENT_PATH@@|\$(launchd_agent_path)|g" \\
+  -e "s|@@ANTHROPIC_CLI_VERSION@@|\$(resolve_anthropic_cli_version)|g" \\
   -e "s|@@MANTA_CHANNEL@@|\${MANTA_CHANNEL:-prod}|g" \\
   "\$OC_PLIST_SRC" > "${rendered}"
 echo "EMPTY_SUBST_DONE=1"

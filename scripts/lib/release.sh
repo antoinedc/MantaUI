@@ -432,3 +432,207 @@ ensure_server_kill_policy() {
   log "manta-server unit patched with KillMode=process ($unit)"
   return 0
 }
+
+# ---------------------------------------------------------------------------
+# Claude Code version claimed to Anthropic (BET-1503)
+# ---------------------------------------------------------------------------
+#
+# opencode reaches Anthropic through the `opencode-claude-auth` plugin, which
+# authenticates as Claude Code and therefore sends a Claude Code version in its
+# user-agent + billing headers. That version is HARDCODED in the plugin
+# (`config.ccVersion`) and lags badly: the cached `@latest` on a live box was
+# 2.1.185 and even the newest published release claims 2.1.217.
+#
+# Anthropic gates new models on a minimum client version, and REFUSES the
+# request outright when the claim is below it — "Claude Code <x> does not
+# support this model; version <y> or newer is required". So an out-of-date
+# claim makes a model the user is entitled to simply unusable, with an error
+# that misdirects them into updating a CLI that is already current.
+#
+# The plugin reads `ANTHROPIC_CLI_VERSION` from its environment and prefers it
+# over the hardcoded value, so the box sets it on the opencode service.
+#
+# DO NOT let this become a pinned constant that needs a release every time
+# Anthropic raises the floor. The value is DERIVED at install/update time from
+# the real `claude` CLI on the box, which self-update already keeps current
+# (unpinned, upgraded on every run) — so the claim tracks the CLI on its own.
+# The floor below is only the fallback for a box where that CLI is absent
+# (install.sh no longer installs it — the app does, lazily, on first Claude
+# sign-in) or is itself too old to satisfy the current gate.
+
+# manta_claude_cli_version_floor — echo the fallback claim used when the box has
+# no `claude` CLI, or has one older than this. Raise it only when Anthropic's
+# floor moves past it AND a box's own CLI can't be relied on to be newer; the
+# derivation above is the normal path.
+#
+# A function rather than a top-level constant on purpose: this file is sourced
+# by install.sh and self-update.sh and is documented to define ONLY functions
+# and run nothing at source time, so it must not assign into a caller's shell.
+# It is also what lets the value ride along in install.sh's inline `curl | bash`
+# fallback, which extracts whole functions.
+manta_claude_cli_version_floor() {
+  printf '%s' "2.1.257"
+}
+
+# version_gte <a> <b> — return 0 when dotted-numeric version a >= b.
+# Compares component by component, numerically, padding a short side with
+# zeros (so 2.2 >= 2.1.9). Non-numeric junk in a component reads as 0, which
+# keeps a malformed input from ever comparing HIGH and silently winning.
+# Deliberately hand-rolled: `sort -V` is a GNU extension this must not depend
+# on (the same code runs on macOS boxes).
+version_gte() {
+  local a="$1" b="$2" i ac bc
+  local -a av bv
+  IFS='.' read -r -a av <<< "$a"
+  IFS='.' read -r -a bv <<< "$b"
+  for ((i = 0; i < 4; i++)); do
+    ac="${av[i]:-0}"; bc="${bv[i]:-0}"
+    case "$ac" in *[!0-9]*|"") ac=0 ;; esac
+    case "$bc" in *[!0-9]*|"") bc=0 ;; esac
+    if [ "$ac" -gt "$bc" ]; then return 0; fi
+    if [ "$ac" -lt "$bc" ]; then return 1; fi
+  done
+  return 0
+}
+
+# claude_cli_version — echo the version of the `claude` CLI on PATH, or empty.
+# `claude --version` prints e.g. "2.1.257 (Claude Code)"; take the first token
+# and keep it only if it looks like a dotted version. Never fails: a missing
+# CLI, a hung binary, or unrecognised output all yield empty, and the caller
+# falls back to the floor.
+claude_cli_version() {
+  local raw first
+  command -v claude >/dev/null 2>&1 || return 0
+  # Bounded: this runs on the install path, where a wedged binary that never
+  # returns would hang the whole install with no output. `timeout` is GNU and a
+  # stock macOS has none, so use it only when present — a Mac falls back to the
+  # plain call, which is the pre-existing risk and no worse.
+  if command -v timeout >/dev/null 2>&1; then
+    raw="$(timeout 10 claude --version 2>/dev/null)" || return 0
+  else
+    raw="$(claude --version 2>/dev/null)" || return 0
+  fi
+  first="${raw%% *}"
+  case "$first" in
+    [0-9]*.[0-9]*) printf '%s' "$first" ;;
+    *) : ;;
+  esac
+  return 0
+}
+
+# resolve_anthropic_cli_version — echo the Claude Code version the opencode
+# service should claim: the box's own CLI version when it is at least the
+# floor, else the floor. Never echoes empty.
+resolve_anthropic_cli_version() {
+  local detected floor
+  floor="$(manta_claude_cli_version_floor)"
+  detected="$(claude_cli_version)"
+  if [ -n "$detected" ] && version_gte "$detected" "$floor"; then
+    printf '%s' "$detected"
+  else
+    printf '%s' "$floor"
+  fi
+}
+
+# ensure_cli_version_text <unit-text> <version> — echo systemd unit text
+# carrying `Environment=ANTHROPIC_CLI_VERSION=<version>` in [Service].
+# Idempotent and monotonic. Behaviour, exhaustively:
+#   * an existing line whose value is >= <version> -> echo unchanged, byte for
+#     byte (never downgrade a value an operator, or a newer box, set higher)
+#   * an existing line with a lower value -> replaced in place
+#   * no such line -> inserted immediately after [Service]
+#   * no [Service] section -> echo unchanged (nothing safe to anchor on)
+ensure_cli_version_text() {
+  local text="$1" version="$2" existing
+  if ! printf '%s\n' "$text" | grep -q '^\[Service\]'; then
+    printf '%s' "$text"
+    return 0
+  fi
+  existing="$(printf '%s\n' "$text" | grep '^Environment=ANTHROPIC_CLI_VERSION=' | head -n1)"
+  if [ -n "$existing" ]; then
+    existing="${existing#Environment=ANTHROPIC_CLI_VERSION=}"
+    if version_gte "$existing" "$version"; then
+      printf '%s' "$text"
+      return 0
+    fi
+    printf '%s' "$text" | sed "s|^Environment=ANTHROPIC_CLI_VERSION=.*|Environment=ANTHROPIC_CLI_VERSION=$version|"
+    return 0
+  fi
+  printf '%s' "$text" | sed "/^\[Service\]$/a Environment=ANTHROPIC_CLI_VERSION=$version"
+  return 0
+}
+
+# ensure_opencode_cli_version — patch the INSTALLED opencode service definition
+# in place so the NEXT restart claims a supported Claude Code version, on both
+# supervisors. Call it immediately BEFORE restarting opencode: a supervisor
+# stops a service using its currently-LOADED definition, so the patch has to
+# land (and be reloaded) first.
+#
+# This exists because units are written by install.sh and self-update.sh never
+# re-renders them — so without an in-place patch the fix would reach fresh
+# installs only, and every existing box would stay broken forever. Same shape,
+# and same reasoning, as ensure_server_kill_policy above.
+#
+# Never fatal: every failure path leaves the pre-existing (broken-for-new-
+# models, but working for everything else) behaviour rather than aborting an
+# update.
+# $1 = version to claim, default resolve_anthropic_cli_version.
+# $2 = systemd unit path, default ~/.config/systemd/user/opencode-serve.service.
+# $3 = LaunchAgent plist path, default the com.mantaui.opencode agent.
+ensure_opencode_cli_version() {
+  local version="${1:-$(resolve_anthropic_cli_version)}"
+  local unit="${2:-$HOME/.config/systemd/user/opencode-serve.service}"
+  local plist="${3:-$HOME/Library/LaunchAgents/com.mantaui.opencode.plist}"
+  local current patched plistbuddy="/usr/libexec/PlistBuddy"
+
+  if [ -f "$unit" ]; then
+    if ! current="$(cat "$unit")"; then
+      warn "ensure_opencode_cli_version: could not read $unit"
+      return 0
+    fi
+    patched="$(ensure_cli_version_text "$current" "$version")" || return 0
+    if [ "$patched" = "$current" ]; then
+      return 0
+    fi
+    if ! printf '%s' "$patched" > "$unit"; then
+      warn "ensure_opencode_cli_version: could not write $unit"
+      return 0
+    fi
+    if ! systemctl --user daemon-reload; then
+      warn "ensure_opencode_cli_version: daemon-reload failed for $unit"
+      return 0
+    fi
+    log "opencode unit now claims Claude Code $version ($unit)"
+    return 0
+  fi
+
+  # macOS. Edit the plist with PlistBuddy rather than by hand — it is on every
+  # Mac and it will not mangle the XML. `Set` fails when the key is absent, so
+  # fall back to `Add`; both are no-ops for us if PlistBuddy is missing.
+  if [ -f "$plist" ] && [ -x "$plistbuddy" ]; then
+    local key=":EnvironmentVariables:ANTHROPIC_CLI_VERSION" existing
+    existing="$("$plistbuddy" -c "Print $key" "$plist" 2>/dev/null || true)"
+    if [ -n "$existing" ] && version_gte "$existing" "$version"; then
+      return 0
+    fi
+    if ! "$plistbuddy" -c "Set $key $version" "$plist" 2>/dev/null \
+       && ! "$plistbuddy" -c "Add $key string $version" "$plist" 2>/dev/null; then
+      warn "ensure_opencode_cli_version: could not patch $plist"
+      return 0
+    fi
+    # launchd keeps its own copy of the job definition, so editing the file is
+    # not enough — the agent has to be booted out and back in for the new
+    # environment to reach the process. `kickstart -k` alone would restart the
+    # job with the STALE definition, i.e. silently do nothing here.
+    local uid; uid="$(id -u)"
+    launchctl bootout "gui/$uid/com.mantaui.opencode" 2>/dev/null || true
+    if ! launchctl bootstrap "gui/$uid" "$plist" 2>/dev/null; then
+      warn "ensure_opencode_cli_version: could not reload com.mantaui.opencode"
+      return 0
+    fi
+    log "opencode LaunchAgent now claims Claude Code $version ($plist)"
+    return 0
+  fi
+
+  return 0
+}

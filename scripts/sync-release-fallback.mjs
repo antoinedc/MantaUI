@@ -52,6 +52,16 @@ export const HELPER_NAMES = [
   "resolve_arch",
   "_sha256_of",
   "verify_sha256",
+  // BET-1503: install.sh renders the opencode unit / LaunchAgent (and the
+  // nohup fallback) with the Claude Code version the box should claim to
+  // Anthropic, so the resolver has to exist in piped mode too — otherwise the
+  // substitution would silently render an empty value on the primary install
+  // path. The patcher functions are NOT here: only self-update calls them, and
+  // self-update always sources the lib.
+  "version_gte",
+  "claude_cli_version",
+  "manta_claude_cli_version_floor",
+  "resolve_anthropic_cli_version",
 ];
 
 // Extract one helper (its preceding contiguous `#` comment block + the function
