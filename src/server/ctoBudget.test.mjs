@@ -483,6 +483,7 @@ import {
   isJobMerged,
   roiRecommendation,
   trimPendingCap,
+  retainPendingHorizon,
 } from "./ctoBudget.mjs";
 
 const AUG_KEY = roiMonthKey(MIDNIGHT); // 2026-08 local
@@ -861,8 +862,40 @@ test("trimPendingCap evicts oldest-first but spares counted fingerprints that ca
   assert.equal(t5.length, 205);
 });
 
-test("refreshRoi: the pending cap never evicts a counted fingerprint whose job is still in the store (BET-1487)", async () => {
-  let payload = defaultBudgetPayload();
+// BET-1497: the retention horizon is liveness-aware — a counted row past the
+// horizon is a still-needed dedupe fingerprint while its delegate record can
+// re-sample (a dirty-worktree terminal record is never swept), so the drop
+// waits for the snapshot to prove the record gone.
+test("retainPendingHorizon ages rows past the horizon but spares counted fingerprints that can still re-sample (BET-1497)", () => {
+  const stale = MIDNIGHT - ROI_PENDING_RETENTION_MS - 1;
+  const cutoff = MIDNIGHT - ROI_PENDING_RETENTION_MS;
+  const row = (id, counted, finishedAt = stale) => ({ id, counted, finishedAt });
+  // Fresh rows (both kinds) and a counted row without a timestamp: kept, as before.
+  const fresh = [row("f", false, MIDNIGHT - 1), row("fc", true, MIDNIGHT - 1), row("cn", true, null)];
+  assert.deepEqual(
+    retainPendingHorizon(fresh, { cutoff, liveIds: new Set() }).map((j) => j.id),
+    ["f", "fc", "cn"],
+  );
+  // Past the horizon with the record provably swept: both kinds drop (BET-1466).
+  assert.deepEqual(
+    retainPendingHorizon([row("u", false), row("c", true)], { cutoff, liveIds: new Set() }).map((j) => j.id),
+    [],
+  );
+  // Past the horizon with the record STILL in the store: the counted
+  // fingerprint survives; the uncounted row still ages out.
+  assert.deepEqual(
+    retainPendingHorizon([row("u", false), row("c", true)], { cutoff, liveIds: new Set(["c"]) }).map((j) => j.id),
+    ["c"],
+  );
+  // A failed jobs read (liveIds null) keeps the counted fingerprint —
+  // liveness unknowable, the same convention the cap applies.
+  assert.deepEqual(
+    retainPendingHorizon([row("u", false), row("c", true)], { cutoff, liveIds: null }).map((j) => j.id),
+    ["c"],
+  );
+});
+
+test("refreshRoi: the pending cap never evicts a counted fingerprint whose job is still in the store (BET-1487)", async () => {  let payload = defaultBudgetPayload();
   const COUNTED = 50;
   const countedIds = Array.from({ length: COUNTED }, (_, i) => `c${i}`);
   // The 50 counted rows' delegate jobs are STILL in the jobs store (inside
@@ -935,6 +968,50 @@ test("refreshRoi: a failed jobs read protects every counted fingerprint from the
   assert.equal(payload.roi.pending.some((j) => j.id === "counted"), true);
   assert.equal(payload.roi.pending.some((j) => j.id === "u0"), false);
   assert.equal(payload.roi.pending.some((j) => j.id === "u200"), true);
+});
+
+// BET-1497: a counted row past the horizon whose delegate record lives
+// forever (dirty worktree → applyRetention never prunes it) must keep its
+// fingerprint — dropping it would let step 1 re-sample the still-stored job
+// and re-count it into its month accumulator.
+test("refreshRoi: a counted row past the horizon survives while its dirty-worktree record is still in the store (BET-1497)", async () => {
+  let payload = defaultBudgetPayload();
+  payload.roi = {
+    months: { [AUG_KEY]: { merged: 1 } }, // the job was counted once, long ago
+    pending: [
+      { id: "old", branch: "cto/old", cwd: "/p", finishedAt: MIDNIGHT - ROI_PENDING_RETENTION_MS - 1, counted: true },
+    ],
+  };
+  const store = { load: async () => payload, save: async (p) => (payload = p) };
+  const job = {
+    id: "old",
+    actor: "cto",
+    status: "done",
+    branch: "cto/old",
+    cwd: "/p",
+    finishedAt: MIDNIGHT - ROI_PENDING_RETENTION_MS - 1,
+    cleanedUp: false, // dirty worktree → the store never sweeps this record
+  };
+  let recordLive = true;
+  const budget = createCtoBudget({
+    store,
+    jobsRead: async () => (recordLive ? [job] : []),
+    gitProbe: async () => ({ exists: true, isAncestor: true }), // reads merged — a re-sample would re-count
+    ledgerRead: async () => [],
+    verdictsRead: async () => [],
+    segmentsRead: async () => [],
+    now: () => MIDNIGHT,
+  });
+  await budget.refreshRoi();
+  assert.equal(payload.roi.months[AUG_KEY].merged, 1, "no re-count while the record is live");
+  assert.deepEqual(payload.roi.pending.map((j) => j.id), ["old"], "the fingerprint survives the horizon");
+  // The worktree is finally cleaned and the record is swept: absence from the
+  // snapshot proves the fingerprint dead, and the row drops at the horizon —
+  // with no re-sample and no second count.
+  recordLive = false;
+  await budget.refreshRoi();
+  assert.equal(payload.roi.months[AUG_KEY].merged, 1);
+  assert.equal(payload.roi.pending.length, 0);
 });
 
 // BET-1466 item 4: budget.json is not covered by the store sweep — the spend

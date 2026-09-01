@@ -665,7 +665,8 @@ function monthAccumulator(months, key) {
 }
 
 // Pending rows older than this are dropped (bounded growth; a merge that
-// surfaced 60 days late is beyond the report's honest horizon).
+// surfaced 60 days late is beyond the report's honest horizon). BET-1497:
+// the drop is liveness-aware — see retainPendingHorizon.
 export const ROI_PENDING_RETENTION_MS = 60 * 24 * HOUR_MS;
 
 /**
@@ -698,6 +699,36 @@ export function trimPendingCap(rows, { cap = 200, liveIds = null } = {}) {
     else kept.push(row);
   }
   return kept;
+}
+
+/**
+ * The liveness-aware retention horizon on `roi.pending` (BET-1497). The
+ * BET-1466 filter assumed a counted row dropped at the horizon can never be
+ * re-counted — true only while the delegate store's sweeper eventually
+ * removes every terminal record. It does not: a job that finished with a
+ * dirty worktree (`cleanedUp === false`) is kept FOREVER (applyRetention
+ * spares it by time and by the 50-terminal-record cap alike). Dropping that
+ * job's fingerprint re-opens it to step 1's sampling — the same double-count
+ * the BET-1487 cap closed, reached through the retention path and
+ * independent of job volume. So the horizon drops:
+ *   - an uncounted row past the horizon (re-sampling it merely re-probes a
+ *     job that has never been counted — no double count), and
+ *   - a counted row past the horizon only once its record is provably gone
+ *     from the jobs snapshot — absence is final (job ids are minted once and
+ *     the store's sweeper only removes records), and
+ *   - never a counted row whose id is still in `liveIds`, nor any counted
+ *     row while liveness is unknowable (`liveIds === null` — the store read
+ *     failed; the same convention the cap applies).
+ * A counted row without a timestamp has no age to retire and is kept, as
+ * before. `liveIds` is the set shared with `trimPendingCap` — one snapshot
+ * read in step 1 answers both hygiene passes.
+ */
+export function retainPendingHorizon(rows, { cutoff, liveIds = null } = {}) {
+  return rows.filter((j) => {
+    if (typeof j.finishedAt !== "number") return j.counted === true;
+    if (j.finishedAt >= cutoff) return true;
+    return j.counted === true && (liveIds === null || liveIds.has(j.id));
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1155,29 +1186,29 @@ function validPrRef(ref) {
           }
 
           // 4. Hygiene: age out stale pending rows. The retention horizon
-          // applies to BOTH halves (BET-1466: it used to filter only counted
-          // rows while the never-merged ones — the rows that actually
-          // accumulate — were kept forever). A counted row is a dedupe
-          // fingerprint kept only past any possible re-sample: the delegate
-          // jobs store sweeps terminal records after 7 days, far inside the
-          // 60-day horizon, so a counted row dropped at the horizon can never
-          // be re-counted.
+          //    applies to BOTH halves (BET-1466: it used to filter only
+          //    counted rows while the never-merged ones — the rows that
+          //    actually accumulate — were kept forever). A counted row is a
+          //    dedupe fingerprint, so dropping one at the horizon requires
+          //    proof its job can never re-sample — and "the store sweeps
+          //    terminal records after 7 days" is not proof: a dirty-worktree
+          //    terminal record is never swept. The drop is liveness-aware
+          //    (BET-1497): a counted row past the horizon survives while its
+          //    record is still in the snapshot read in step 1 (or while the
+          //    read failed and liveness is unknowable) — the same rule the
+          //    cap below applies.
           const cutoff = t - ROI_PENDING_RETENTION_MS;
-          const kept = pending.filter((j) =>
-            j.counted === true
-              ? typeof j.finishedAt === "number" ? j.finishedAt >= cutoff : true
-              : typeof j.finishedAt === "number" && j.finishedAt >= cutoff,
-          );
+          const liveIds = jobsReadOk
+            ? new Set(jobs.map((j) => (j && typeof j.id === "string" ? j.id : null)).filter((id) => id !== null))
+            : null;
+          const kept = retainPendingHorizon(pending, { cutoff, liveIds });
           // The trailing cap is count-aware (BET-1487): a counted row is a
           // dedupe fingerprint while its delegate job could still re-sample —
-          // i.e. while its record is still in the store snapshot read in
+          // i.e. while its record is still in the jobs store snapshot read in
           // step 1. The cap evicts only fingerprints that snapshot proves
           // dead, so on a chatty box (>200 counted jobs inside the store's
           // terminal-retention window) the list exceeds the cap instead of
           // losing a fingerprint.
-          const liveIds = jobsReadOk
-            ? new Set(jobs.map((j) => (j && typeof j.id === "string" ? j.id : null)).filter((id) => id !== null))
-            : null;
           const trimmed = trimPendingCap(kept, { liveIds });
           pending = trimmed;
 
