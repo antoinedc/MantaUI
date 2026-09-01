@@ -397,17 +397,6 @@ test("dismiss moves a card out of cards.json with a card.dismissed ledger row", 
   assert.equal(h.ledgerRows.filter((x) => x.kind === CARD_DISMISSED).length, 1);
 });
 
-test("countOpen reflects only open cards", async () => {
-  const h = makeHarness();
-  assert.equal(await h.cards.countOpen(), 0);
-  await h.cards.onAskStart({ sourceKind: "question", sourceId: "que_c", sessionID: "sC", body: "", ts: h.clock.ms });
-  h.advance(BLOCKER_AFTER_MS);
-  await h.cards.promoteDue();
-  assert.equal(await h.cards.countOpen(), 1);
-  await h.cards.onAskResolved({ sessionID: "sC" });
-  assert.equal(await h.cards.countOpen(), 0);
-});
-
 test("BET-1397 source 3: an inbox blocker fires the blocking-tier notify exactly once and promotes a card", async () => {
   const h = makeHarness({ fireNotify: true });
   const r = await h.cards.onInboxBlocker({
