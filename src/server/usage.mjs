@@ -242,6 +242,10 @@ export function createUsagePoller({
   // direct users → no history recording.
   observe = null,
   staleRetryMs = STALE_RETRY_MS,
+  // Retry scheduling is injectable (BET-1485): tests queue armed retries and
+  // fire them manually, so the re-poll count doesn't depend on 5ms real
+  // timers surviving parallel test load.
+  timers = { setTimeout, clearTimeout },
 } = {}) {
   let snapshots = [];
   let lastContentKey = null;
@@ -370,15 +374,15 @@ export function createUsagePoller({
       }
       if (!anyStale) {
         staleRetries = 0;
-        clearTimeout(staleRetry);
+        timers.clearTimeout(staleRetry);
       } else if (staleRetries < MAX_STALE_RETRIES) {
         staleRetries += 1;
         console.log(
           `[usage] window past its reset instant — re-polling in ${staleRetryMs}ms ` +
             `(${staleRetries}/${MAX_STALE_RETRIES})`,
         );
-        clearTimeout(staleRetry);
-        staleRetry = setTimeout(() => void tick(), staleRetryMs);
+        timers.clearTimeout(staleRetry);
+        staleRetry = timers.setTimeout(() => void tick(), staleRetryMs);
         staleRetry?.unref?.();
       }
 
@@ -397,7 +401,7 @@ export function createUsagePoller({
   return {
     tick,
     stop() {
-      clearTimeout(staleRetry);
+      timers.clearTimeout(staleRetry);
       stopped = true;
     },
     get snapshots() {

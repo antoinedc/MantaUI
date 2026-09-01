@@ -946,6 +946,44 @@ test("poller: a window with no resetsAt is never marked stale", async () => {
   assert.equal("stale" in w, false);
 });
 
+// A deterministic replacement for the poller's real retry timers (BET-1485):
+// armed retries sit in a queue until the test fires them, so the re-poll
+// count no longer depends on 5ms real timers surviving parallel test load.
+function makeFakeRetryTimers() {
+  const queue = [];
+  const timers = {
+    setTimeout: (fn) => {
+      queue.push(fn);
+      return queue.length - 1;
+    },
+    clearTimeout: (id) => {
+      queue[id] = null;
+    },
+  };
+  // Fire every armed retry, let each resulting tick finish (its awaits are
+  // already-resolved promises, so microtasks drain before setImmediate), then
+  // repeat until nothing is armed. The guard turns a runaway re-arm loop
+  // (bound exceeded) into a failure instead of a hang.
+  const fireAll = async () => {
+    for (let rounds = 0; ; rounds++) {
+      if (rounds > 5) {
+        throw new Error("retry queue kept re-arming past the bound");
+      }
+      const due = [];
+      for (let i = 0; i < queue.length; i++) {
+        if (queue[i]) {
+          due.push(queue[i]);
+          queue[i] = null;
+        }
+      }
+      if (due.length === 0) return;
+      for (const fn of due) fn();
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  };
+  return { timers, fireAll };
+}
+
 test("poller: a waiting window re-polls a bounded number of times, then stops", async () => {
   let nowMs = 1000;
   let fetchCalls = 0;
@@ -958,17 +996,17 @@ test("poller: a waiting window re-polls a bounded number of times, then stops", 
       return { windows: [{ kind: "session", label: "s", pct: 78, resetsAt: 500 }] };
     },
   });
-  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-  const poller = createUsagePoller({ adapters: [adapter], now: () => nowMs, staleRetryMs: 5 });
+  const { timers, fireAll } = makeFakeRetryTimers();
+  const poller = createUsagePoller({ adapters: [adapter], now: () => nowMs, timers });
 
   await poller.tick(); // retry 1 armed
   assert.equal(fetchCalls, 1);
 
   // Each armed retry is itself a tick that arms the next, up to the cap of 3.
-  await sleep(60);
+  await fireAll();
   assert.equal(fetchCalls, 4, "the initial tick plus exactly MAX_STALE_RETRIES re-polls");
 
-  await sleep(60);
+  await fireAll(); // nothing is armed anymore — fireAll is a no-op
   assert.equal(fetchCalls, 4, "the budget is spent — no further re-poll while it stays stale");
 });
 
@@ -983,22 +1021,22 @@ test("poller: the retry budget re-arms once the window stops waiting", async () 
       return { windows: [{ kind: "session", label: "s", pct: 78, resetsAt }] };
     },
   });
-  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-  const poller = createUsagePoller({ adapters: [adapter], now: () => nowMs, staleRetryMs: 5 });
+  const { timers, fireAll } = makeFakeRetryTimers();
+  const poller = createUsagePoller({ adapters: [adapter], now: () => nowMs, timers });
 
   await poller.tick();
-  await sleep(60);
+  await fireAll();
   const spent = fetchCalls;
   assert.ok(spent >= 2, "budget was used while waiting");
 
   resetsAt = 99999; // provider published the new window
   await poller.tick();
-  await sleep(30);
+  await fireAll(); // a non-stale tick clears any armed retry and re-arms nothing
   const afterFresh = fetchCalls;
 
   resetsAt = 500; // a later boundary
   await poller.tick();
-  await sleep(60);
+  await fireAll();
   assert.ok(fetchCalls > afterFresh + 1, "a fresh boundary gets a fresh retry budget");
 });
 
