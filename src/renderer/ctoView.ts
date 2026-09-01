@@ -2,7 +2,7 @@
 // The CTO pane (§10) renders from a single `{kind:"ctoState"}` bus event
 // (payload shape below) plus a `GET /api/cto/state` initial read. This module
 // holds only deterministic mapping — no window.api, no React.
-import type { Api } from "../shared/api";
+import type { Api, CtoCard } from "../shared/api";
 import type { DelegateStartInput } from "../shared/types";
 import { cardHasContent } from "../shared/ctoCard.mjs";
 
@@ -335,7 +335,9 @@ export type BlockerCard = {
 // blockers (BET-1467). Also drops a card with neither title nor body (via the
 // shared cardHasContent predicate, BET-1476) so an empty card never reaches
 // BlockerSection's live "Answer now" control.
-export function blockerCards(cards: ReadonlyArray<Record<string, unknown>>): BlockerCard[] {
+// BET-1475: the input is the wire-typed `CtoCard[]` — selectors can no longer
+// be handed arbitrary shapes, and callers need no cast.
+export function blockerCards(cards: ReadonlyArray<CtoCard>): BlockerCard[] {
   return (cards ?? [])
     .filter((c) => c?.variant === "blocker" && cardHasContent(c))
     .map((c) => ({
@@ -530,8 +532,8 @@ export function suggestionConfidence(card: DecisionCardRow): number | null {
 
 // Selector: the open decision cards among the wire cards (the rest of the
 // store stays the Blocker section's).
-export function decisionCards(cards: ReadonlyArray<Record<string, unknown>>): DecisionCardRow[] {
-  return (cards ?? []).filter((c) => c?.variant === "decision") as DecisionCardRow[];
+export function decisionCards(cards: ReadonlyArray<CtoCard>): DecisionCardRow[] {
+  return (cards ?? []).filter((c): c is CtoCard & { variant: "decision" });
 }
 
 // BET-1419: the open veto card (§10.3) among the wire cards — the overnight
@@ -544,7 +546,7 @@ export type VetoCardRow = {
   options: { label: string; action: { type: string; payload: Record<string, unknown> } }[];
 };
 
-export function vetoCards(cards: ReadonlyArray<Record<string, unknown>>): VetoCardRow[] {
+export function vetoCards(cards: ReadonlyArray<CtoCard>): VetoCardRow[] {
   return (cards ?? [])
     .filter((c) => c?.variant === "veto" && cardHasContent(c))
     .map((c) => ({
@@ -567,7 +569,7 @@ export type ConnectCardRow = {
   options: { label: string; answer: string; action: { type: string; payload: Record<string, unknown> } }[];
 };
 
-export function connectCards(cards: ReadonlyArray<Record<string, unknown>>): ConnectCardRow[] {
+export function connectCards(cards: ReadonlyArray<CtoCard>): ConnectCardRow[] {
   return (cards ?? [])
     .filter((c) => c?.variant === "connect" && cardHasContent(c))
     .map((c) => ({
