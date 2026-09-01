@@ -15,12 +15,13 @@ import {
   RATE_LIMITS,
   isRunningCtoRow,
   buildFactsContext,
+  defaultGetCounts,
 } from "./ctoEngine.mjs";
 import { createSegmenter } from "./ctoSegments.mjs";
 import { startOfDay } from "./ctoRollups.mjs";
 import { createFactsEngine } from "./ctoFacts.mjs";
 import { windowFor } from "./ctoRollups.mjs";
-import { BLOCKER_AFTER_MS } from "./ctoCards.mjs";
+import { BLOCKER_AFTER_MS, CONTENTLESS_CARD_PRUNE_KEY, createCtoCards } from "./ctoCards.mjs";
 import { inboxStore, sweepInbox } from "./ctoStores.mjs";
 import { createCtoInbound } from "./cto.mjs";
 import { WATCHER_HIT_KIND, WATCHER_HIT_SALIENCE, EVENT_PATTERN, RATE_THRESHOLD, USAGE_BURN } from "./ctoWatchers.mjs";
@@ -589,6 +590,111 @@ test("defaultGetCounts counts only open cards with content from an injected card
     tonightCount: 0,
   });
 // ---------------------------------------------------------------------------
+});
+
+// ---------------------------------------------------------------------------
+// BET-1498: the one-time prune of the pre-BET-1469 residue — contentless OPEN
+// cards in cards.json that render in no pane section and (since BET-1476) no
+// longer count toward the badge, so nothing could ever resolve or dismiss
+// them. Retired at boot by a marker-guarded prune reusing the shared
+// cardHasContent predicate.
+// ---------------------------------------------------------------------------
+
+test("BET-1498: pruneLegacyOpenCards retires contentless open cards once (marker-guarded) and keeps every other row", async () => {
+  let cardPayload = {
+    v: 1,
+    cards: [
+      { id: "a", state: "open" }, // the BET-1469 fixture-pollution shape
+      { id: "b", state: "open", title: "Probe failing", body: "rotate the key" },
+      { id: "c", state: "resolved" }, // not open → untouched
+      { id: "d" }, // no state → untouched
+    ],
+  };
+  let saves = 0;
+  const cardStore = {
+    name: "cards",
+    load: async () => cardPayload,
+    save: async (p) => {
+      saves += 1;
+      cardPayload = p;
+    },
+  };
+  let engineState = { v: 1 };
+  const patchEngineState = async (mutation) => {
+    const patch = typeof mutation === "function" ? await mutation(engineState) : mutation;
+    engineState = { ...engineState, ...patch };
+  };
+  const cards = createCtoCards({
+    cardStore,
+    engineState: {
+      load: async () => engineState,
+      save: async (p) => {
+        engineState = p;
+      },
+    },
+    ledger: { append: async () => true },
+    now: () => 1_000_000,
+    patchEngineState,
+  });
+
+  const r1 = await cards.pruneLegacyOpenCards();
+  assert.deepEqual(r1, { pruned: 1, marked: true });
+  assert.deepEqual(
+    cardPayload.cards.map((c) => c.id),
+    ["b", "c", "d"],
+    "the contentless open row is retired; titled open, resolved and stateless rows survive",
+  );
+  assert.equal(engineState[CONTENTLESS_CARD_PRUNE_KEY].pruned, true);
+  assert.equal(engineState[CONTENTLESS_CARD_PRUNE_KEY].at, 1_000_000);
+
+  // The guarded re-run is a pure no-op: the marker short-circuits before any
+  // cards.json read-write (no save fired).
+  const r2 = await cards.pruneLegacyOpenCards();
+  assert.deepEqual(r2, { pruned: 0, marked: false });
+  assert.equal(saves, 1, "the marker-guarded re-run never rewrites cards.json");
+
+  // A box whose engine-state already carries the marker (re-deploy) prunes
+  // nothing and skips the stamp.
+  const fresh = createCtoCards({
+    cardStore: {
+      name: "cards",
+      load: async () => cardPayload,
+      save: async () => {},
+    },
+    engineState: {
+      load: async () => engineState,
+      save: async () => {},
+    },
+    ledger: { append: async () => true },
+    now: () => 1_000_000,
+    patchEngineState,
+  });
+  assert.deepEqual(await fresh.pruneLegacyOpenCards(), { pruned: 0, marked: false });
+
+  // The counting module agrees with the retired store — the badge now counts
+  // exactly the rows a pane section can render (BET-1476 parity, BET-1498 hygiene).
+  assert.deepEqual(await defaultGetCounts(cardStore), {
+    needsYouCount: 1,
+    generationInFlight: false,
+    tonightCount: 0,
+  });
+});
+
+test("BET-1498: engine start() prunes the contentless open cards from cards.json at boot", async () => {
+  const h = makeHarness({ realCards: true });
+  // Seed the residue straight into the store, like a box that still carries a
+  // fixture-polluted cards.json from before BET-1469.
+  h.cardsStore().cards = [
+    { id: "a", state: "open" },
+    { id: "b", state: "open", title: "Question waiting", body: "answer me" },
+  ];
+  await h.engine.start();
+  h.engine.dispose();
+  assert.deepEqual(
+    h.cardsStore().cards.map((c) => c.id),
+    ["b"],
+    "boot retires the dead row; the actionable card survives",
+  );
 });
 // A6 segmentation wiring (observeEvent → segmenter) (§5.1)
 // ---------------------------------------------------------------------------

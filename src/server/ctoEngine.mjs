@@ -2310,6 +2310,20 @@ export function createCtoEngine(deps = {}) {
         /* best-effort */
       }
     }
+    // BET-1498: one-time prune of the pre-BET-1469 contentless open cards in
+    // cards.json — the §10.3-invisible rows BET-1476's badge filter stopped
+    // counting but nothing can ever resolve or dismiss. Marker-guarded
+    // (idempotent) and best-effort, exactly like the seed above: a failed
+    // prune degrades to the BET-1476 status quo (invisible, uncounted rows)
+    // and retries on the next boot. Same seam guard — a test-injected cards
+    // fake without the method stays valid.
+    if (typeof cards?.pruneLegacyOpenCards === "function") {
+      try {
+        await cards.pruneLegacyOpenCards();
+      } catch {
+        /* best-effort */
+      }
+    }
     // Load the persisted segmentation G (minutes) from engine-state (§5.1-d).
     if (segmenter && typeof segmenter.boot === "function") {
       void segmenter.boot().catch(() => {});
