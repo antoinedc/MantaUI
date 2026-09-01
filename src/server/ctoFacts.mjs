@@ -562,6 +562,15 @@ const CI_BRANCH_STOPWORDS = new Set([
   "but", "and", "or", "so", "if", "then", "than", "when", "while", "just", "very", "now",
 ]);
 
+// One trailing-punctuation strip shared by every branch-token rule (ci +
+// git bare branch) so the two cannot drift: the token class includes `.`,
+// and "Merged branch main." must probe "main", never "main." (BET-1512).
+// Empty after the strip → null → the calling rule falls through.
+function branchTokenOf(capture) {
+  const token = String(capture ?? "").replace(/[._\-\/]+$/, "");
+  return token || null;
+}
+
 // Branch token for a CI statement — first non-filler capture wins:
 //   "branch <name>"  ("CI on branch feature/x is green")
 //   "CI on <name>"   ("CI on feature/x is green")
@@ -576,7 +585,7 @@ function ciBranchOf(s) {
   for (const re of patterns) {
     const m = s.match(re);
     if (!m) continue;
-    const token = m[1].replace(/[._\-\/]+$/, "");
+    const token = branchTokenOf(m[1]);
     if (token && !CI_BRANCH_STOPWORDS.has(token.toLowerCase())) return token;
   }
   return null;
@@ -591,7 +600,13 @@ export function matchCheckable(statement) {
   const ci = s.match(/\bCI\b[\s\S]*?\b(green|passing|passed|failed|failing|broken)\b/i);
   if (ci) return { kind: "ci", surface: "ci", probe: ci[1].toLowerCase(), branch: ciBranchOf(s) };
   const branch = s.match(/\bbranch\s+([A-Za-z0-9_\-.\/]+)\b/i);
-  if (branch) return { kind: "branch", surface: "git", probe: branch[1] };
+  if (branch) {
+    // Shared strip with the ci rule above — the git probe never carries
+    // trailing punctuation either (BET-1512). Nothing branch-like left →
+    // fall through to the later rules.
+    const token = branchTokenOf(branch[1]);
+    if (token) return { kind: "branch", surface: "git", probe: token };
+  }
   const issue = s.match(/\b([A-Z][A-Z0-9]+-\d+)\b/);
   if (issue) return { kind: "issue", surface: "issue", probe: issue[1] };
   const ver = s.match(/\bversion\s+(\d+(?:\.\d+){1,3})\b/i);

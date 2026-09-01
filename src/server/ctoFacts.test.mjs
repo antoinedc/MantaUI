@@ -371,6 +371,18 @@ test("matchCheckable: ci statements capture their branch scope (BET-1504)", () =
   assert.deepEqual(matchCheckable("branch fix/foo merged"), { kind: "branch", surface: "git", probe: "fix/foo" });
 });
 
+// BET-1512: the bare-branch git probe shares ciBranchOf's trailing-
+// punctuation strip — a sentence period must never ride on the probe
+// ("Merged branch main." → git cat-file -e "main", not "main.").
+test("matchCheckable: bare-branch probes strip trailing punctuation (BET-1512)", () => {
+  assert.deepEqual(matchCheckable("Merged branch main."), { kind: "branch", surface: "git", probe: "main" });
+  assert.deepEqual(matchCheckable("branch feat/x. Done."), { kind: "branch", surface: "git", probe: "feat/x" });
+  assert.deepEqual(matchCheckable("Merged branch fix-auth. Next sentence."), { kind: "branch", surface: "git", probe: "fix-auth" });
+  // The strip is shared with the ci rule — both rules treat a period the
+  // same way (ci side pinned in the BET-1504 test above).
+  assert.deepEqual(matchCheckable("CI green on main.").branch, "main");
+});
+
 test("median works on even/odd/empty", () => {
   assert.equal(median([]), null);
   assert.equal(median([5, 1, 3]), 3);
