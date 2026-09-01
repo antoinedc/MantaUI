@@ -2336,12 +2336,13 @@ const adaptiveCtoBudget = ctoBudget.createCtoBudget({
   // read (merged-branch detection), verdicts, segments (user-prompt history
   // for the incidents heuristic) and the §14.5 ledger.
   jobsRead: async () => {
-    try {
-      const { jobs = [] } = await delegateEngine.listJobs();
-      return jobs;
-    } catch {
-      return [];
-    }
+    // No catch: a failed read must reach refreshRoi as a failure, not as an
+    // empty store — its count-aware pending cap (BET-1487) reads absence
+    // from a successfully-read store as proof that a counted fingerprint's
+    // job can never re-sample, and an empty-on-error list would strip that
+    // protection. refreshRoi's own catch degrades the failure safely.
+    const { jobs = [] } = await delegateEngine.listJobs();
+    return jobs;
   },
   gitProbe: async ({ cwd, branch }) => {
     const dir = typeof cwd === "string" && cwd ? cwd : null;

@@ -668,6 +668,38 @@ function monthAccumulator(months, key) {
 // surfaced 60 days late is beyond the report's honest horizon).
 export const ROI_PENDING_RETENTION_MS = 60 * 24 * HOUR_MS;
 
+/**
+ * The count-aware trailing cap on `roi.pending` (BET-1487). The old blind
+ * `.slice(-200)` could evict a COUNTED row — a dedupe fingerprint — while its
+ * delegate job was still inside the jobs store's terminal-retention window:
+ * the sampling step would re-snapshot the job and the probe step would count
+ * it into its month accumulator a second time. So the cap evicts
+ * oldest-first, but only rows that are safe to re-sample:
+ *   - an uncounted row is always evictable (re-sampling it merely re-probes
+ *     a job that has never been counted — no double count), and
+ *   - a counted row only once its job record is provably gone from the jobs
+ *     store — absent from the same refresh's snapshot. Job ids are minted
+ *     once and the store's sweeper only removes records, so absence is
+ *     final. The store's own retention (7 days, a 50-terminal-record cap,
+ *     or forever for a dirty-worktree record) is irrelevant here: the
+ *     snapshot IS the ground truth.
+ * `liveIds` is the set of job ids the store actually returned this refresh,
+ * or null when the read failed (liveness unknowable → no counted row is
+ * evictable). When protection leaves more than `cap` rows, the list exceeds
+ * the cap until the store retires the records.
+ */
+export function trimPendingCap(rows, { cap = 200, liveIds = null } = {}) {
+  if (rows.length <= cap) return rows;
+  let toDrop = rows.length - cap;
+  const kept = [];
+  for (const row of rows) {
+    const evictable = row.counted !== true || (liveIds !== null && !liveIds.has(row.id));
+    if (evictable && toDrop > 0) toDrop -= 1;
+    else kept.push(row);
+  }
+  return kept;
+}
+
 // ---------------------------------------------------------------------------
 // The I/O accessor the engine consumes (injected store + seams).
 // ---------------------------------------------------------------------------
@@ -1038,9 +1070,13 @@ function validPrRef(ref) {
         return (async () => {
           // 1. Sample terminal CTO-actor jobs not yet snapshotted.
           let jobs = [];
+          let jobsReadOk = true;
           try {
             jobs = (await jobsRead()) ?? [];
           } catch {
+            // Liveness is unknowable this refresh — the step-4 cap must then
+            // treat every counted row as still-at-risk (BET-1487).
+            jobsReadOk = false;
             jobs = [];
           }
           // Every pending id — counted or not — is a dedupe fingerprint: a job
@@ -1132,7 +1168,17 @@ function validPrRef(ref) {
               ? typeof j.finishedAt === "number" ? j.finishedAt >= cutoff : true
               : typeof j.finishedAt === "number" && j.finishedAt >= cutoff,
           );
-          const trimmed = kept.slice(-200);
+          // The trailing cap is count-aware (BET-1487): a counted row is a
+          // dedupe fingerprint while its delegate job could still re-sample —
+          // i.e. while its record is still in the store snapshot read in
+          // step 1. The cap evicts only fingerprints that snapshot proves
+          // dead, so on a chatty box (>200 counted jobs inside the store's
+          // terminal-retention window) the list exceeds the cap instead of
+          // losing a fingerprint.
+          const liveIds = jobsReadOk
+            ? new Set(jobs.map((j) => (j && typeof j.id === "string" ? j.id : null)).filter((id) => id !== null))
+            : null;
+          const trimmed = trimPendingCap(kept, { liveIds });
           pending = trimmed;
 
           return { ...payload, roi: { months, pending: trimmed } };
