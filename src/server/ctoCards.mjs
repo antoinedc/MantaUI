@@ -864,17 +864,6 @@ export function createCtoCards(deps = {}) {
     return { ok: true, changed, isNew };
   }
 
-  // needs-you surface: only open cards count (§10.3 — resolved/dismissed cards
-  // left cards.json for the ledger).
-  async function countOpen() {
-    try {
-      const { cards } = await openCards();
-      return cards.filter((c) => c && c.state === "open").length;
-    } catch {
-      return 0;
-    }
-  }
-
   // BET-1419 (§9.2/§10.3): the veto-window card — announce tonight's run 30
   // min ahead with a live countdown. One open veto card at a time (the
   // overnight countdown is unique per window): re-arming upserts by id so the
@@ -990,7 +979,6 @@ export function createCtoCards(deps = {}) {
     upsertVeto,
     upsertConnect,
     resolveConnectCards,
-    countOpen,
     listOpen,
   };
 }

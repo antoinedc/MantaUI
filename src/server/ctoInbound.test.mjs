@@ -250,7 +250,7 @@ test("normalizeInboxKind maps unknown/bare to blocker; coalesceInboxEntry unions
 // ---------------------------------------------------------------------------
 
 function makeEngine(overrides = {}) {
-  return createCtoEngine(makeEngineDeps({ queryMultiba: async () => ({ ok: true }), ...overrides }));
+  return createCtoEngine(makeEngineDeps({ queryMultica: async () => ({ ok: true }), ...overrides }));
 }
 
 // Gate that reports confirm only for `watch` (the confirm-mode tool).

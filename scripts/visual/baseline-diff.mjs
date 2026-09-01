@@ -43,6 +43,25 @@ function gitShow(rev, path) {
   return execFileSync("git", ["show", `${rev}:${path}`], { cwd: ROOT });
 }
 
+/**
+ * True when this checkout has truncated history (`.git/shallow` present —
+ * `git clone --depth N`, a throwaway checkout, …). Memoized; a non-repo reads
+ * as not-shallow. (BET-1500: on a shallow clone the base rev's blob objects
+ * can be absent and `git show` dies with a bare git "object not found" that
+ * does not point at the real cause — say shallow instead.)
+ */
+let shallow;
+function isShallowRepo() {
+  if (shallow === undefined) {
+    try {
+      shallow = git(["rev-parse", "--is-shallow-repository"]) === "true";
+    } catch {
+      shallow = false;
+    }
+  }
+  return shallow;
+}
+
 /** List every baseline PNG modified and added against `base`, in git order. */
 function changedBaselines(base) {
   const modified = git([
@@ -104,7 +123,19 @@ async function main() {
       labels = ["(new — no prior baseline)", "after"];
       log(`new baseline      → ${name}.png (no prior baseline, grey panel)`);
     } else {
-      before = gitShow(base, path);
+      try {
+        before = gitShow(base, path);
+      } catch (e) {
+        if (isShallowRepo()) {
+          log(
+            `shallow clone: run \`git fetch --unshallow origin\` — the committed ` +
+              `"before" blob for ${path} at ${base} is absent from the truncated ` +
+              `history (git: ${String(e?.message ?? e).split("\n")[0]})`,
+          );
+          process.exit(1);
+        }
+        throw e;
+      }
       labels = ["before", "after"];
       log(`re-recorded       → ${name}.png`);
     }
