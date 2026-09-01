@@ -706,9 +706,14 @@ async function sweepArchiveCaps() {
         },
       );
     } catch {
-      // Per-file best-effort, as before: one unreadable (or too-new-versioned)
-      // archive must not take the whole sweep down — and a too-new payload is
-      // left untouched rather than rewritten by an older reader.
+      // Per-file best-effort — one unreadable or too-new-versioned archive
+      // must not take the whole sweep down (a too-new payload is left
+      // untouched rather than rewritten by an older reader). Note this is a
+      // deliberate delta from the old shape, not continuity: the naked
+      // readJson/writeJsonAtomic version only skipped READ failures, while a
+      // write failure propagated and aborted the remaining files. Here both
+      // are skipped, matching the sweep family's silent best-effort
+      // convention (every other catch in this module is silent too).
     }
   }
 }
