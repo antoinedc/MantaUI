@@ -23,6 +23,7 @@ import { windowFor } from "./ctoRollups.mjs";
 import { BLOCKER_AFTER_MS } from "./ctoCards.mjs";
 import { inboxStore, sweepInbox } from "./ctoStores.mjs";
 import { createCtoInbound } from "./cto.mjs";
+import { WATCHER_HIT_KIND, WATCHER_HIT_SALIENCE, EVENT_PATTERN, RATE_THRESHOLD, USAGE_BURN } from "./ctoWatchers.mjs";
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -1092,4 +1093,43 @@ test("BET-1407: engine start() drops a persisted ask past the blocker retention 
   assert.deepEqual(h.pendingAsks.map((a) => a.sessionID), ["s_new"]);
   assert.deepEqual(h.state.pendingAsks.map((a) => a.sessionID), ["s_new"], "the stale row is dropped from the persisted half too");
   h.engine.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// BET-1472 (BET-1436 decision c): project-less watcher hits are dropped from
+// overnight candidacy at the source. A usage-burn hit (or any pre-BET-1428 hit
+// row) carries no `project`, so §11.5 dispatch could never host its job and
+// re-skipped it on every tick of the open window. The B4 suggestion path
+// (ctoSuggest.mjs) is untouched and still surfaces these hits during the day.
+// ---------------------------------------------------------------------------
+
+test("BET-1472: project-less watcher.hit rows (usage-burn and pre-BET-1428 shapes) produce NO overnight candidate", () => {
+  const h = makeHarness();
+  const rows = [
+    { kind: WATCHER_HIT_KIND, salience: WATCHER_HIT_SALIENCE, watcherId: "w_usage", predicateKind: USAGE_BURN, text: "Usage burn", refs: [], ts: 1 },
+    { kind: WATCHER_HIT_KIND, salience: WATCHER_HIT_SALIENCE, watcherId: "w_pre1428", predicateKind: EVENT_PATTERN, text: "Pre-BET-1428 hit", refs: [], ts: 2 },
+  ];
+  assert.deepEqual(h.engine.watcherCandidatesFromRows(rows), []);
+});
+
+test("BET-1472: a watcher.hit row with an empty-string project produces NO overnight candidate", () => {
+  const h = makeHarness();
+  const rows = [
+    { kind: WATCHER_HIT_KIND, salience: WATCHER_HIT_SALIENCE, watcherId: "w_empty", predicateKind: RATE_THRESHOLD, text: "Empty project", project: "", refs: [], ts: 3 },
+  ];
+  assert.deepEqual(h.engine.watcherCandidatesFromRows(rows), []);
+});
+
+test("BET-1472: a watcher.hit row WITH a project still becomes a candidate carrying that project (BET-1428 hostable path intact)", () => {
+  const h = makeHarness();
+  const rows = [
+    { kind: WATCHER_HIT_KIND, salience: WATCHER_HIT_SALIENCE, watcherId: "w_hosted", predicateKind: EVENT_PATTERN, text: "Hostable hit", project: "better-ui", refs: ["m:1"], ts: 4 },
+  ];
+  const out = h.engine.watcherCandidatesFromRows(rows);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].id, "wh:w_hosted");
+  assert.equal(out[0].category, "watcher");
+  assert.equal(out[0].name, "Hostable hit");
+  assert.equal(out[0].project, "better-ui");
+  assert.deepEqual(out[0].refs, ["m:1"]);
 });

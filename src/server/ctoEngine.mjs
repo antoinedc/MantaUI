@@ -1442,14 +1442,21 @@ export function createCtoEngine(deps = {}) {
   function watcherCandidatesFromRows(rows) {
     const out = [];
     for (const hit of collectWatcherHitsFromLedger(rows)) {
+      // BET-1472 (BET-1436 decision c): overnight candidacy REQUIRES a hosting
+      // project. A project-less hit (usage-burn hits are box-wide; rows
+      // predating BET-1428 lack the field) can never be hosted by §11.5
+      // dispatch, so it is filtered at the source instead of producing a
+      // candidate that gets re-skipped on every tick of the open window. The
+      // B4 suggestion path is unaffected.
+      if (typeof hit.project !== "string" || !hit.project) continue;
       out.push({
         id: hit.id,
         name: hit.text,
         category: "watcher",
-        // BET-1428: the project whose evidence produced the hit — without it
-        // the §11.5 dispatch can never host the job and re-skips the hit on
-        // every tick of the open window.
-        project: typeof hit.project === "string" ? hit.project : undefined,
+        // BET-1428: the project whose evidence produced the hit — always a
+        // non-empty string here because project-less hits are filtered above
+        // (overnight candidacy requires a hosting project).
+        project: hit.project,
         value: 2,
         confidence: 0.8,
         predictedCost: 1,
@@ -2579,6 +2586,9 @@ export function createCtoEngine(deps = {}) {
       return getTools();
     },
     toolsScan: () => toolsTick(),
+    // BET-1472: the pure overnight watcher-candidacy predicate, exposed for
+    // diagnostics/tests (same pattern as toolsScan above).
+    watcherCandidatesFromRows,
     // BET-1419 tonight verbs (§10.4 drill-down + §9.2 veto card actions).
     tonightList,
     tonightAdd,
