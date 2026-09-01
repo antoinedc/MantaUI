@@ -4681,7 +4681,7 @@ const handleRequest = async (req, res) => {
   }
 
   // ---------- Tool discovery (BET-1395, §7) ----------
-  // POST /api/cto/tools/connect {tool, answer} — the connect-ask three-way
+  // POST /api/cto/tools/connect {tool, answer, ring} — the connect-ask three-way
   // (§7.4): "connect" grants the metadata consent ring, "not-now" declines
   // with a 30-day re-arm, "never" kills every ring for that tool. The
   // registry writes the consent + the §9.5 verdict and resolves the open

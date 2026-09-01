@@ -752,7 +752,6 @@ test("deep-read ask: the bar crossing raises ONE concrete ask (ring deep_read, i
   assert.match(ask.body, /analyze GitHub's data about alpha overnight and report findings/);
   const row = registryStore._state().tools.find((x) => x.tool === "github");
   assert.equal(row.deepAskRound, 1);
-  assert.equal(row.deepAskBarMet, true);
   assert.equal(registryStore._state().lastDeepAskDay, new Date(W0 + DAY).toISOString().slice(0, 10));
   assert.ok(ledger.rows.some((r) => r.kind === "cto.tool.deep_ask" && r.project === "alpha"));
   // same day again → no second ask
@@ -760,7 +759,7 @@ test("deep-read ask: the bar crossing raises ONE concrete ask (ring deep_read, i
   assert.equal(cards.calls.upserts.length, 1);
   // next day → the gate re-opens (askRound < 3), one more ask
   const { registry: reg2, cards: cards2 } = seededRegistry(
-    [deepEligibleRow({ deepAskRound: 1, deepAskBarMet: true })],
+    [deepEligibleRow({ deepAskRound: 1 })],
     { nowMs: W0 + 2 * DAY },
   );
   await reg2.dailyScan();
@@ -783,11 +782,11 @@ test("deep-read ask: consented, rounds exhausted, and chain-tripped tools are sk
 });
 
 test("deep-read ask: a declined ask re-arms ONLY on the 30-day timer (vitality path)", async () => {
-  const row = deepEligibleRow({ consent: { metadata: "yes", deep_read: "no", write: null }, deepAskRound: 1, deepAskAtUses: 6, deepReArmAt: W0 + DAY + 10 * DAY });
+  const row = deepEligibleRow({ consent: { metadata: "yes", deep_read: "no", write: null }, deepAskRound: 1, deepReArmAt: W0 + DAY + 10 * DAY });
   const { registry, cards } = seededRegistry([row]);
   await registry.dailyScan();
   assert.equal(cards.calls.upserts.length, 0, "timer not elapsed — no ask");
-  const row2 = deepEligibleRow({ consent: { metadata: "yes", deep_read: "no", write: null }, deepAskRound: 1, deepAskAtUses: 6, deepReArmAt: W0 + DAY - 1000 });
+  const row2 = deepEligibleRow({ consent: { metadata: "yes", deep_read: "no", write: null }, deepAskRound: 1, deepReArmAt: W0 + DAY - 1000 });
   const { registry: r2, cards: c2, registryStore: s2 } = seededRegistry([row2]);
   await r2.dailyScan();
   assert.equal(c2.calls.upserts.length, 1);

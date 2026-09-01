@@ -46,9 +46,7 @@ function payloadFrom(raw) {
     v: TOOL_REGISTRY_VERSION,
     tools: (Array.isArray(p?.tools) ? p.tools : []).map((t) => ({
       deepAskRound: 0,
-      deepAskAtUses: 0,
       deepReArmAt: null,
-      deepAskBarMet: false,
       lastDeepAskDay: null,
       asSourceDecayed: false,
       decayedAtUses: 0,
@@ -153,9 +151,7 @@ function baseTool(identity, ts) {
     unneverAtUses: null,
     // Deep-read ring ask bookkeeping (§7.4 ring semantics apply per ask).
     deepAskRound: 0,
-    deepAskAtUses: 0,
     deepReArmAt: null,
-    deepAskBarMet: false, // the deep bar's met-state snapshot at ask time
     lastDeepAskDay: null,
     // Dismissal decay chain (§7.6): the as_source trip's persisted state.
     asSourceDecayed: false,
@@ -660,9 +656,7 @@ export function createToolRegistry(deps = {}) {
           ts: nowMs,
         });
         t.deepAskRound = (t.deepAskRound ?? 0) + 1;
-        t.deepAskAtUses = t.uses ?? 0;
         t.deepReArmAt = null;
-        t.deepAskBarMet = bar.met;
         payload.lastDeepAskDay = today;
         changed = true;
         await ledgerLog({ kind: "cto.tool.deep_ask", tool: t.tool, project: bar.project, askRound: t.deepAskRound });
@@ -771,7 +765,6 @@ export function createToolRegistry(deps = {}) {
         if (ring === "deep_read") {
           t.consent.deep_read = "no";
           t.deepReArmAt = nowMs + NOT_NOW_REARM_MS;
-          t.deepAskAtUses = t.uses ?? 0;
           await ledgerLog({ kind: "cto.tool.consent", tool: id, ring: "deep_read", value: "no" });
         } else {
           t.consent.metadata = "no";
