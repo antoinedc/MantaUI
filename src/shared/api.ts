@@ -476,6 +476,17 @@ export type CtoProfileRender = {
 
 // ---------- Adaptive CTO drill-downs (BET-1399, §10.5 rows 1+4) ----------
 
+// The server stores checkable as the verify-stamp object (§6.7: probe +
+// last check + persisted detail, optional branch scope from BET-1504) and
+// passes it through verbatim in the render rows — never a flattened string
+// (BET-1512).
+export type CtoFactCheckable = {
+  probe: string;
+  branch?: string;
+  last_checked: number;
+  result: string | null;
+};
+
 // One rendered Blackboard fact row (§10.5 row 1): kind chip + confidence bar +
 // statement + ref chips + sender + age. Superseded rows carry `supersededBy`
 // (their chain head) and render struck-through; archive rows add `archivedAt`.
@@ -492,7 +503,7 @@ export type CtoFactRow = {
   supersededBy: string | null;
   validUntil: number | null;
   expired: boolean;
-  checkable: string | null;
+  checkable: CtoFactCheckable | null;
   archivedAt?: number;
 };
 
