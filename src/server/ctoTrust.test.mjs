@@ -42,6 +42,16 @@ function makeTrust({ engineState = {}, verdictCount = 0 } = {}) {
   return { trust, stores, ledgerRows, verdictEntries };
 }
 
+// Record `accepts` successful verdicts then one dismissal for `subject`,
+// returning the post-drive state.
+async function driveVerdicts(h, subject, accepts) {
+  for (let i = 0; i < accepts; i++) {
+    await h.trust.noteVerdictEffects({ success: true }, { subject, verdict: "accept" });
+  }
+  await h.trust.noteVerdictEffects({ rejection: true }, { subject, verdict: "dismiss" });
+  return h.trust.getState();
+}
+
 // ---------------------------------------------------------------------------
 // §9.3 eligibility map
 // ---------------------------------------------------------------------------
@@ -293,11 +303,7 @@ test("promotion: accepts past the bar promote ask → veto-window, ledger + dige
   const subject = { type: "suggestion", id: "s1", class: "start-job" };
   // 31 accepts + 1 dismiss: the tail clears (a degenerate b=0 record never
   // passes — the estimator refuses zero-variance records).
-  for (let i = 0; i < 31; i++) {
-    await h.trust.noteVerdictEffects({ success: true }, { subject, verdict: "accept" });
-  }
-  await h.trust.noteVerdictEffects({ rejection: true }, { subject, verdict: "dismiss" });
-  const st = await h.trust.getState();
+  const st = await driveVerdicts(h, subject, 31);
   assert.equal(st.tiers["start-job"], TIER_VETO_WINDOW);
   assert.ok(h.ledgerRows.some((r) => r.kind === "trust.promoted" && r.cls === "start-job" && r.to === TIER_VETO_WINDOW));
   assert.equal(st.pending, 1);
@@ -312,11 +318,7 @@ test("promotion never fires under the cold-start gate, whatever the counters say
   const h = makeTrust({ verdictCount: 0 }); // cold start: < VERDICT_MIN verdicts
   const subject = { type: "suggestion", id: "s1", class: "start-job" };
   // A record that would pass the tail outside cold start.
-  for (let i = 0; i < 40; i++) {
-    await h.trust.noteVerdictEffects({ success: true }, { subject, verdict: "accept" });
-  }
-  await h.trust.noteVerdictEffects({ rejection: true }, { subject, verdict: "dismiss" });
-  const st = await h.trust.getState();
+  const st = await driveVerdicts(h, subject, 40);
   assert.equal(st.pending, 0);
   // And consult reports the ask cap while the global gate holds.
   const c = await h.trust.consult("start-job", { coldStart: true });
@@ -326,11 +328,7 @@ test("promotion never fires under the cold-start gate, whatever the counters say
 test("capped class never promotes even with a stellar record", async () => {
   const h = makeTrust({ verdictCount: VERDICT_MIN });
   const subject = { type: "suggestion", id: "c1", class: "config-change" };
-  for (let i = 0; i < 40; i++) {
-    await h.trust.noteVerdictEffects({ success: true }, { subject, verdict: "accept" });
-  }
-  await h.trust.noteVerdictEffects({ rejection: true }, { subject, verdict: "dismiss" });
-  const st = await h.trust.getState();
+  const st = await driveVerdicts(h, subject, 40);
   assert.equal(st.tiers["config-change"] ?? TIER_ASK, TIER_ASK);
   assert.equal(st.pending, 0); // no announcement either
   const c = await h.trust.consult("config-change", { coldStart: false });
@@ -395,11 +393,7 @@ test("act-and-report bookkeeping: ledger row + pending announcement, exactly-onc
 test("rolling window is capped and consumed by a tier change", async () => {
   const h = makeTrust({ verdictCount: VERDICT_MIN });
   const subject = { type: "suggestion", id: "s1", class: "start-job" };
-  for (let i = 0; i < 31; i++) {
-    await h.trust.noteVerdictEffects({ success: true }, { subject, verdict: "accept" });
-  }
-  await h.trust.noteVerdictEffects({ rejection: true }, { subject, verdict: "dismiss" });
-  let st = await h.trust.getState();
+  let st = await driveVerdicts(h, subject, 31);
   assert.equal(st.tiers["start-job"], TIER_VETO_WINDOW);
   assert.equal(st.stats["start-job"].recent.length, 0); // consumed by promotion
   // Keep recording: the window caps at REJECT_WINDOW entries.

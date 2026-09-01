@@ -437,10 +437,7 @@ test("overnight: user prompt preempts — running cto jobs paused and the window
 
 test("overnight: veto card arms 30 min before the trough, cancels on the veto verdict, resolves once open", async () => {
   // Inside the pre-window: 20 min before the trough's start.
-  const due = h0().startMs;
-  const h = makeHarness({ trough: { startMs: due, endMs: due + 6 * HOUR }, queue: [QUEUE_TASK], projects: [] });
-  h.clock.ms = due - 20 * 60_000;
-  await h.engine.tick();
+  const { due, h } = await armVetoCard();
 
   assert.equal(h.overnightStoreObj.window?.countdown?.dueMs, due, "countdown armed at the trough start");
   assert.equal(h.vetoCards.length, 1);
@@ -506,12 +503,7 @@ test("overnight: veto card arms 30 min before the trough, cancels on the veto ve
 });
 
 test("overnight: an executed window feeds the veto record's acceptance (BET-1403 §9.4 veto→act bar)", async () => {
-  const due = h0().startMs;
-  const h = makeHarness({ trough: { startMs: due, endMs: due + 6 * HOUR }, queue: [QUEUE_TASK], projects: [] });
-
-  // Arm the veto card in the pre-window (no cancel this time).
-  h.clock.ms = due - 20 * 60_000;
-  await h.engine.tick();
+  const { due, h } = await armVetoCard();
   assert.equal(h.vetoCards.length, 1);
 
   // The clock enters the trough while the user is absent: the window opens
@@ -699,6 +691,16 @@ test("durability: a trust fold survives a queue-edit save landing after it (mirr
 });
 
 // Fixed trough helper for the veto-card test (a window that starts "now").
+// Arm a veto card: a harness with the canonical trough, the clock placed
+// 20 min inside the pre-window, one tick. Returns { due, h }.
+async function armVetoCard() {
+  const due = h0().startMs;
+  const h = makeHarness({ trough: { startMs: due, endMs: due + 6 * HOUR }, queue: [QUEUE_TASK], projects: [] });
+  h.clock.ms = due - 20 * 60_000;
+  await h.engine.tick();
+  return { due, h };
+}
+
 function h0() {
   return { startMs: 1_700_000_000_000 + 6 * HOUR, endMs: 1_700_000_000_000 + 12 * HOUR };
 }

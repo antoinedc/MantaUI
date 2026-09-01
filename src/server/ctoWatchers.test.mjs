@@ -133,15 +133,21 @@ test("rate-threshold honors an eventKind filter (other kinds don't count)", asyn
   assert.equal(deps.ledgerRows.filter((r) => r.kind === "watcher.hit").length, 0);
 });
 
+// A usage-burn standing-query engine over `deps` with the canonical
+// registered predicate (windowMs 6000, capFraction 0.5), ticked once.
+async function makeBurnEngine(deps) {
+  const eng = createStandingQueryEngine(deps);
+  await eng.register({ predicate: { kind: USAGE_BURN, params: { windowMs: 6000, capFraction: 0.5 } } });
+  await eng.runTick();
+  return eng;
+}
+
 test("usage-burn fires when burst spend is at/above the cap fraction (once per window)", async () => {
   const deps = makeEngineDeps({
     getSpendInWindow: async () => 60, // windowMs 6000 of a day = huge share
     getCapUsd: async () => 100,
   });
-  const eng = createStandingQueryEngine(deps);
-  await eng.register({ predicate: { kind: USAGE_BURN, params: { windowMs: 6000, capFraction: 0.5 } } });
-  // 60 >= 0.5 * (100 * 6000 / 86400000)=0.0035 → true
-  await eng.runTick();
+  await makeBurnEngine(deps);
   assert.equal(deps.ledgerRows.filter((r) => r.kind === "watcher.hit").length, 1);
 });
 
@@ -150,9 +156,7 @@ test("usage-burn does not fire when spend is below the cap share", async () => {
     getSpendInWindow: async () => 0,
     getCapUsd: async () => 100,
   });
-  const eng = createStandingQueryEngine(deps);
-  await eng.register({ predicate: { kind: USAGE_BURN, params: { windowMs: 6000, capFraction: 0.5 } } });
-  await eng.runTick();
+  await makeBurnEngine(deps);
   assert.equal(deps.ledgerRows.filter((r) => r.kind === "watcher.hit").length, 0);
 });
 

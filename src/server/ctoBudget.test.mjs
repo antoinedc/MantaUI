@@ -42,6 +42,22 @@ function dayStart(offsetDays = 0) {
 const MIDNIGHT = dayStart(0);
 const NOON = MIDNIGHT + 12 * 3_600_000;
 
+// A budget over a given payload snapshot with all external reads quiet (no
+// jobs, no git probes, no ledger/verdict/segment rows); `now` pins the clock.
+function makeQuietBudget(payload, now) {
+  let current = payload;
+  const store = { load: async () => current, save: async (p) => (current = p) };
+  return createCtoBudget({
+    store,
+    jobsRead: async () => [],
+    gitProbe: async () => ({ exists: false, isAncestor: false }),
+    ledgerRead: async () => [],
+    verdictsRead: async () => [],
+    segmentsRead: async () => [],
+    now,
+  });
+}
+
 test("cap defaults to $2.50 and honors ctoAmbientCap", () => {
   assert.equal(ambientCapUsd({}), DEFAULT_AMBIENT_CAP_USD);
   assert.equal(ambientCapUsd({ ctoAmbientCap: 1.25 }), 1.25);
@@ -734,17 +750,10 @@ test("refreshRoi: store and probe failures degrade without throwing (no frozen z
 });
 
 test("roiSnapshot: collectingUntil is the first month's end from the day buckets", async () => {
-  let payload = recordSpend(defaultBudgetPayload(), { now: dayStart(-40), usd: 0.5 });
-  const store = { load: async () => payload, save: async (p) => (payload = p) };
-  const budget = createCtoBudget({
-    store,
-    jobsRead: async () => [],
-    gitProbe: async () => ({ exists: false, isAncestor: false }),
-    ledgerRead: async () => [],
-    verdictsRead: async () => [],
-    segmentsRead: async () => [],
-    now: () => MIDNIGHT,
-  });
+  const budget = makeQuietBudget(
+    recordSpend(defaultBudgetPayload(), { now: dayStart(-40), usd: 0.5 }),
+    () => MIDNIGHT,
+  );
   const snap = await budget.roiSnapshot();
   assert.equal(snap.roll, null); // no refresh ran → no roll stored
   assert.equal(snap.collectingUntil, monthWindow(JUL_KEY).endTs);
@@ -866,16 +875,7 @@ test("refreshRoi freezes the closed month at its real spend after a >7-day outag
   payload = recordSpend(payload, { now: dayStart(-23), usd: 3 }); // Aug 5
   payload = recordSpend(payload, { now: dayStart(-8), usd: 7 }); // Aug 20 — the last pre-outage day
   payload = recordSpend(payload, { now: SEP_10, usd: 0.25 }); // Sep 10 — first post-boot spend
-  const store = { load: async () => payload, save: async (p) => (payload = p) };
-  const budget = createCtoBudget({
-    store,
-    jobsRead: async () => [],
-    gitProbe: async () => ({ exists: false, isAncestor: false }),
-    ledgerRead: async () => [],
-    verdictsRead: async () => [],
-    segmentsRead: async () => [],
-    now: () => SEP_10,
-  });
+  const budget = makeQuietBudget(payload, () => SEP_10);
   const r = await budget.refreshRoi();
   const aug = r.months["2026-08"];
   assert.ok(aug, "the closed month's roll exists");

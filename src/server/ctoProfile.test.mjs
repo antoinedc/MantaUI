@@ -362,7 +362,8 @@ test("offHoursDeviation: 3am for a midday worker → flagged; midday → null", 
 // Engine integration (injected store)
 // ---------------------------------------------------------------------------
 
-test("engine: observable deterministic layer builds temporal stats", async () => {
+// An initialized profile over a capturing in-memory store.
+async function makeProfile() {
   const store = {
     saved: null,
     load: async () => ({}),
@@ -372,6 +373,11 @@ test("engine: observable deterministic layer builds temporal stats", async () =>
   };
   const p = createCtoProfile({ store, now: () => 0 });
   await p.init();
+  return { store, p };
+}
+
+test("engine: observable deterministic layer builds temporal stats", async () => {
+  const { p } = await makeProfile();
   const DAY = 86_400_000;
   // midday activity (epoch → Date shift is platform-dependent; use now()=0 offset)
   for (let i = 0; i < 5; i++) {
@@ -383,15 +389,7 @@ test("engine: observable deterministic layer builds temporal stats", async () =>
 });
 
 test("engine: atoms + session length apply through applySegmentSummary", async () => {
-  const store = {
-    saved: null,
-    load: async () => ({}),
-    save: async (d) => {
-      store.saved = d;
-    },
-  };
-  const p = createCtoProfile({ store, now: () => 0 });
-  await p.init();
+  const { p } = await makeProfile();
   await p.applySegmentSummary({
     project: "manta",
     atoms: [{ dimension: "swift", direction: "up", weight: 1, ref: "s1" }],
@@ -404,15 +402,7 @@ test("engine: atoms + session length apply through applySegmentSummary", async (
 });
 
 test("engine: weekly decay erodes repo familiarity from others' edits", async () => {
-  const store = {
-    saved: null,
-    load: async () => ({}),
-    save: async (d) => {
-      store.saved = d;
-    },
-  };
-  const p = createCtoProfile({ store, now: () => 0 });
-  await p.init();
+  const { store, p } = await makeProfile();
   await p.recordRepoEdit({ repo: "manta", own: true }); // 0.2 → ~0.28
   await p.recordRepoEdit({ repo: "manta", own: false });
   await p.recordRepoEdit({ repo: "manta", own: false }); // 2 others' edits pending

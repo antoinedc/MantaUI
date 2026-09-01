@@ -115,6 +115,28 @@ function validSummarize() {
 const PRESENT = async () => true;
 const AWAY = async () => false;
 
+// The standard replay backfill over the fixture db: cto enabled, quiet
+// ledger/rollups, away-presence, in-memory engine state + segment files,
+// `oneLiner` as the fake segmenter's one-liner.
+function makeReplayBackfill(fx, { NOW, oneLiner }) {
+  const engineState = memStore();
+  const segments = memFileStore();
+  const backfill = createCtoBackfill({
+    configGet: async () => ({ ctoEnabled: true }),
+    engineState,
+    ledger: noopLedger,
+    segments,
+    rollups: { save: async () => {}, load: async () => null, dir: "/tmp/none" },
+    summarize: validSummarize(),
+    computeOneLiner: async () => oneLiner,
+    getDb: async () => fx.db,
+    presenceCheck: AWAY,
+    now: () => NOW,
+    maxSessionsPerStep: 100,
+  });
+  return { engineState, segments, backfill };
+}
+
 // ---------------------------------------------------------------------------
 // Pure guardrail tests
 // ---------------------------------------------------------------------------
@@ -243,21 +265,7 @@ test("segments phase replays a session into a persisted segment and advances pro
   fx.insMessage("u1", "s1", { role: "user", ts: NOW - 2000, text: "debug the login flow" });
   fx.insMessage("a1", "s1", { role: "assistant", ts: NOW - 1000, cost: 0 });
 
-  const engineState = memStore();
-  const segments = memFileStore();
-  const backfill = createCtoBackfill({
-    configGet: async () => ({ ctoEnabled: true }),
-    engineState,
-    ledger: noopLedger,
-    segments,
-    rollups: { save: async () => {}, load: async () => null, dir: "/tmp/none" },
-    summarize: validSummarize(),
-    computeOneLiner: async () => "debug the login flow",
-    getDb: async () => fx.db,
-    presenceCheck: AWAY,
-    now: () => NOW,
-    maxSessionsPerStep: 100,
-  });
+  const { engineState, segments, backfill } = makeReplayBackfill(fx, { NOW, oneLiner: "debug the login flow" });
 
   const res = await backfill.step();
   assert.equal(res.ok, true);
@@ -283,21 +291,7 @@ test("watermark enforced during replay: a message at/after the watermark is NOT 
   fx.insMessage("u1", "s1", { role: "user", ts: NOW - 2000, text: "old work" });
   fx.insMessage("w1", "s1", { role: "user", ts: NOW + 1000, text: "LIVE work after the watermark" });
 
-  const engineState = memStore();
-  const segments = memFileStore();
-  const backfill = createCtoBackfill({
-    configGet: async () => ({ ctoEnabled: true }),
-    engineState,
-    ledger: noopLedger,
-    segments,
-    rollups: { save: async () => {}, load: async () => null, dir: "/tmp/none" },
-    summarize: validSummarize(),
-    computeOneLiner: async () => "old work",
-    getDb: async () => fx.db,
-    presenceCheck: AWAY,
-    now: () => NOW,
-    maxSessionsPerStep: 100,
-  });
+  const { segments, backfill } = makeReplayBackfill(fx, { NOW, oneLiner: "old work" });
 
   await backfill.step();
   const seg = [...segments._data.values()][0];

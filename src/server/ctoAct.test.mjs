@@ -115,6 +115,16 @@ function makeDeps(overrides = {}) {
   return { deps, calls };
 }
 
+// The canonical §3.3 start-job probe: plain finding candidate, tracked cwd.
+async function runStartJobProbe(deps) {
+  const exec = createCtoActExecutor(deps);
+  return exec({
+    cls: "start-job",
+    action: { type: "start-job", payload: { prompt: "p", cwd: "/srv/app" } },
+    candidate: { finding: { text: "f", refs: [] } },
+  });
+}
+
 test("executor: record-decision proposes the gatekeeper-checked fact (behavior carried over from BET-1403)", async () => {
   const { deps, calls } = makeDeps();
   const exec = createCtoActExecutor(deps);
@@ -189,12 +199,7 @@ test("executor: start-job refuses at the §3.3 concurrent cto-delegate cap witho
       { id: "c", actor: "user", status: "running" },
     ],
   });
-  const exec = createCtoActExecutor(deps);
-  const out = await exec({
-    cls: "start-job",
-    action: { type: "start-job", payload: { prompt: "p", cwd: "/srv/app" } },
-    candidate: { finding: { text: "f", refs: [] } },
-  });
+  const out = await runStartJobProbe(deps);
   assert.equal(out.ok, false);
   assert.equal(out.reason, "rate_limit:concurrentDelegate");
   assert.equal(calls.beginDelegateJob, 0);
@@ -217,12 +222,7 @@ test("executor: start-job refusal from the delegate engine degrades with its err
   const { deps, calls } = makeDeps({
     startDelegateJob: async () => ({ ok: false, error: "at MAX_RUNNING_JOBS" }),
   });
-  const exec = createCtoActExecutor(deps);
-  const out = await exec({
-    cls: "start-job",
-    action: { type: "start-job", payload: { prompt: "p", cwd: "/srv/app" } },
-    candidate: { finding: { text: "f", refs: [] } },
-  });
+  const out = await runStartJobProbe(deps);
   assert.deepEqual(out, { ok: false, reason: "at MAX_RUNNING_JOBS" });
   assert.equal(calls.beginDelegateJob, 1);
   assert.equal(calls.gateReleased, 1);
@@ -230,12 +230,7 @@ test("executor: start-job refusal from the delegate engine degrades with its err
 
 test("executor: a §3.3 gate refusal (kill switch / pause) refuses the act before any start", async () => {
   const { deps, calls } = makeDeps({ beginDelegateJob: async () => ({ ok: false, error: "cto_paused" }) });
-  const exec = createCtoActExecutor(deps);
-  const out = await exec({
-    cls: "start-job",
-    action: { type: "start-job", payload: { prompt: "p", cwd: "/srv/app" } },
-    candidate: { finding: { text: "f", refs: [] } },
-  });
+  const out = await runStartJobProbe(deps);
   assert.deepEqual(out, { ok: false, reason: "cto_paused" });
   assert.equal(calls.startDelegateJob.length, 0);
   assert.equal(calls.gateReleased, 0);
