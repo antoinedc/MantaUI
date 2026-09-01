@@ -86,7 +86,9 @@ export const VERDICT_MIN = TRUST_VERDICT_MIN;
 
 // BET-1465: bound `es.suggest.usedKeys` so it cannot become the next
 // unbounded engine-state store — the `ctoStores.mjs` sweep does not cover
-// engine-state. Same trailing-slice idiom as `ctoBudget.mjs`'s `.slice(-200)`.
+// engine-state. Plain trailing slice — unlike `ctoBudget.mjs`'s ROI pending
+// cap (BET-1487), these keys carry no counted-fingerprint semantics, so a
+// blind bound is safe here.
 const USED_KEYS_CAP = 200;
 
 // §9.1 per-class gate thresholds (BET-1471 — implements the BET-1470
