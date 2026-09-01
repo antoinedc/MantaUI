@@ -509,6 +509,50 @@ test("checkable: ci branch scope is stamped and threaded to verify (BET-1504)", 
   assert.deepEqual(byBranch.get("none"), { surface: "ci", probe: "green", branch: null, project: "alpha" });
 });
 
+// BET-1505: the probe's own detail survives into checkable.result — a user
+// auditing the blackboard (§10.5) must be able to tell a closed issue from an
+// unavailable CLI from a missing branch, not just see the bare "failed".
+test("checkable: verify persists the probe's detail into checkable.result (BET-1505)", async () => {
+  const results = {
+    "MUL-1": { ok: false, result: "closed" },
+    "MUL-2": { ok: true, result: "green" },
+    "MUL-3": { ok: false, result: "not-found" },
+    "MUL-4": { ok: true },
+    "MUL-5": { ok: false },
+  };
+  const { engine, facts } = makeEngine({
+    surfaceExists: async (s) => s === "issue",
+    verify: async (args) => {
+      if (args.probe === "MUL-6") throw new Error("cli unavailable");
+      return results[args.probe] ?? { ok: false, result: "not-found" };
+    },
+  });
+  const probes = ["MUL-1", "MUL-2", "MUL-3", "MUL-4", "MUL-5", "MUL-6"];
+  for (const [i, id] of probes.entries()) {
+    await engine.submitProposal({ proposalId: `bd${i}`, project: "alpha", kind: "status", statement: `issue ${id} is blocking`, refs: [`r${i}`] });
+  }
+  await engine.pump();
+  await engine.verifyDue();
+  const stored = (await facts.load("alpha")).facts;
+  const detailOf = (probe) =>
+    stored.filter((x) => x.statement === `issue ${probe} is blocking` && x.checkable).map((x) => x.checkable.result);
+  assert.deepEqual(detailOf("MUL-1"), ["closed"], "failed probe keeps its detail");
+  assert.deepEqual(detailOf("MUL-2"), ["green"], "passing probe keeps its detail");
+  assert.deepEqual(detailOf("MUL-3"), ["not-found"], "seam-provided detail recorded");
+  assert.deepEqual(detailOf("MUL-4"), ["ok"], "passing probe without detail falls back to ok");
+  assert.deepEqual(detailOf("MUL-5"), ["failed"], "failing probe without detail falls back to failed");
+  assert.deepEqual(detailOf("MUL-6"), ["verify error"], "thrown verify records the error detail");
+  // §10.5 drill-down: factViewRow passes checkable through as-is, so the
+  // render surfaces the detail verbatim on active and superseded rows alike.
+  const render = composeFactsRender({ facts: stored, projects: ["alpha"], nowMs: 1000 * D, project: "alpha" });
+  const rowResult = (probe) =>
+    [...render.active, ...render.superseded]
+      .filter((r) => r.statement === `issue ${probe} is blocking` && r.checkable)
+      .map((r) => r.checkable.result);
+  assert.deepEqual(rowResult("MUL-1"), ["closed"]);
+  assert.deepEqual(rowResult("MUL-2"), ["green"]);
+});
+
 test("touchFacts bumps last_accessed + access_count on retrieval", async () => {
   const { engine, facts } = makeEngine();
   await engine.submitProposal({ proposalId: "ta", project: "alpha", kind: "status", statement: "touched", refs: ["r1"] });
