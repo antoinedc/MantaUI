@@ -416,6 +416,7 @@ it("decisionCards: selects decision-variant cards only", () => {
   const cards = [
     { id: "b1", variant: "blocker", title: "blk" },
     { id: "d1", variant: "decision", title: "dec", options: [] },
+    null,
     { id: "c1", variant: "connect", title: "con" },
   ];
   const out = decisionCards(cards as unknown as CtoCard[]);
