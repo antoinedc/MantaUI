@@ -562,13 +562,15 @@ export function matchCheckable(statement) {
   return null;
 }
 
-export async function maybeStampCheckable(fact, { surfaceExists = async () => false } = {}) {
+export async function maybeStampCheckable(fact, { surfaceExists = async () => false, project = null } = {}) {
   if (fact?.checkable) return fact;
   const match = matchCheckable(fact?.statement);
   if (!match || typeof surfaceExists !== "function") return fact;
   let exists = false;
   try {
-    exists = (await surfaceExists(match.surface)) === true;
+    // BET-1409: the surface guard receives the fact's project (the facts
+    // store key) so the real §6.7 surfaces can resolve a cwd / consent scope.
+    exists = (await surfaceExists(match.surface, { project })) === true;
   } catch {
     exists = false;
   }
@@ -782,11 +784,38 @@ export function createFactsEngine(deps = {}) {
     return { ...st, factReliability: rel };
   }
 
+  // §6.4 reliability accumulator shared by pump and verifyDue — the
+  // duplication gate blocks per-function clones of this 10-line note/merge
+  // pattern (reviewer Block on BET-1409 PR #1483; the clone pre-existed on
+  // main but any PR touching ctoFacts.mjs goes red until it is extracted).
+  // Each loop collects per-sender deltas locally and merges them into the
+  // engine state once, at the end.
+  function createRelTracker() {
+    const relDeltas = new Map(); // senderKey -> {confirmed, rejected}
+    return {
+      note: (sender, delta) => {
+        const key = senderKey(sender);
+        if (!key) return;
+        const e = relDeltas.get(key) ?? { confirmed: 0, rejected: 0 };
+        relDeltas.set(key, {
+          confirmed: e.confirmed + (delta.confirmed ?? 0),
+          rejected: e.rejected + (delta.rejected ?? 0),
+        });
+      },
+      mergeInto: (st) => {
+        let merged = st;
+        for (const [key, delta] of relDeltas) merged = mergeReliability(merged, key, delta);
+        return merged;
+      },
+      size: () => relDeltas.size,
+    };
+  }
+
   async function pump(project) {
     if (disposed) return { processed: 0, byAction: {} };
     let state = await loadState();
     const tally = { processed: 0, byAction: {} };
-    const relDeltas = new Map(); // senderKey -> {confirmed, rejected}
+    const rel = createRelTracker();
     // §6.4: per-fact sender reliability (Beta mean) feeds the retention/displacement
     // ranking. Unseen senders default to 1 (neutral) until they earn counters.
     const relOf = (fact) => {
@@ -794,15 +823,6 @@ export function createFactsEngine(deps = {}) {
       if (!k) return 1;
       const c = state.factReliability?.[k];
       return c ? senderReliability(c) : 1;
-    };
-    const noteRel = (sender, delta) => {
-      const key = senderKey(sender);
-      if (!key) return;
-      const e = relDeltas.get(key) ?? { confirmed: 0, rejected: 0 };
-      relDeltas.set(key, {
-        confirmed: e.confirmed + (delta.confirmed ?? 0),
-        rejected: e.rejected + (delta.rejected ?? 0),
-      });
     };
     const projects = project ? [project] : Object.keys(state.factQueue ?? {});
     for (const proj of projects) {
@@ -818,7 +838,7 @@ export function createFactsEngine(deps = {}) {
         let outcome;
         if (result.reject) {
           outcome = { action: "reject", reason: result.reason };
-          noteRel(proposal.sender, { rejected: 1 });
+          rel.note(proposal.sender, { rejected: 1 });
           await log({ kind: "cto.fact_reject", project: proj, proposalId: proposal.proposalId, reason: result.reason });
         } else {
           const capRes = enforceCap(result.facts, { cap: CAP_ACTIVE, nowMs: now(), halfLives: halfLivesNow, reliabilityOf: relOf });
@@ -831,7 +851,7 @@ export function createFactsEngine(deps = {}) {
           const newId = result.factId;
           const fi = newId ? activeFacts.findIndex((f) => f.id === newId) : -1;
           if (fi >= 0) {
-            const stamped = await maybeStampCheckable(activeFacts[fi], { surfaceExists });
+            const stamped = await maybeStampCheckable(activeFacts[fi], { surfaceExists, project: proj });
             if (stamped !== activeFacts[fi]) activeFacts[fi] = stamped;
           }
           await saveFacts(proj, activeFacts);
@@ -846,7 +866,7 @@ export function createFactsEngine(deps = {}) {
               await saveState({ ...st, factTuning: { ...(st.factTuning ?? {}), lifespans } });
             }
             if (old && now() - (old.created ?? 0) < OVERTURN_WINDOW_MS) {
-              noteRel(old.sender, { rejected: 1 });
+              rel.note(old.sender, { rejected: 1 });
             }
           }
         }
@@ -855,9 +875,7 @@ export function createFactsEngine(deps = {}) {
         tally.byAction[outcome.action] = (tally.byAction[outcome.action] ?? 0) + 1;
       }
     }
-    for (const [key, delta] of relDeltas) {
-      state = mergeReliability(state, key, delta);
-    }
+    state = rel.mergeInto(state);
     await saveState(state);
     return tally;
   }
@@ -889,16 +907,7 @@ export function createFactsEngine(deps = {}) {
     let superseded = 0;
     let seq = 0;
     let state = await loadState();
-    const relDeltas = new Map();
-    const noteRel = (sender, delta) => {
-      const key = senderKey(sender);
-      if (!key) return;
-      const e = relDeltas.get(key) ?? { confirmed: 0, rejected: 0 };
-      relDeltas.set(key, {
-        confirmed: e.confirmed + (delta.confirmed ?? 0),
-        rejected: e.rejected + (delta.rejected ?? 0),
-      });
-    };
+    const rel = createRelTracker();
     for (const proj of await listKnownProjects()) {
       let working = await loadFacts(proj);
       let changed = false;
@@ -910,7 +919,9 @@ export function createFactsEngine(deps = {}) {
         let ok = false;
         let result = null;
         try {
-          const r = await verify({ surface: matchCheckable(f.statement)?.surface, probe: f.checkable.probe });
+          // BET-1409: verify receives the project so the real §6.7 surfaces
+          // can resolve the probe's cwd (git worktree / CI repo scope).
+          const r = await verify({ surface: matchCheckable(f.statement)?.surface, probe: f.checkable.probe, project: proj });
           ok = r?.ok === true;
           result = r?.result ?? null;
         } catch {
@@ -923,7 +934,7 @@ export function createFactsEngine(deps = {}) {
         if (ok) {
           changed = true;
           // §6.6: a verify-pass is a confirmed instance of the origin sender.
-          noteRel(f.sender, { confirmed: 1 });
+          rel.note(f.sender, { confirmed: 1 });
         }
       }
       for (const { f, ok } of failed) {
@@ -956,10 +967,8 @@ export function createFactsEngine(deps = {}) {
       }
       if (changed) await saveFacts(proj, working);
     }
-    for (const [key, delta] of relDeltas) {
-      state = mergeReliability(state, key, delta);
-    }
-    if (relDeltas.size > 0) await saveState(state);
+    state = rel.mergeInto(state);
+    if (rel.size() > 0) await saveState(state);
     return { checked, superseded };
   }
 

@@ -143,6 +143,7 @@ import * as appControl from "./appControl.mjs";
 import * as cto from "./cto.mjs";
 import * as ctoEngine from "./ctoEngine.mjs";
 import * as ctoBudget from "./ctoBudget.mjs";
+import { createFactSurfaces } from "./ctoFactSurfaces.mjs";
 import { ledgerStore, engineStateStore, budgetStore, segmentsStore, verdictsStore, digestsStore, factsStore, startCtoStoreSweeper, CTO_STORE_SWEEP_INTERVAL_MS } from "./ctoStores.mjs";
 import * as ctoOvernight from "./ctoOvernight.mjs";
 import { computeHealthStats } from "./ctoHealth.mjs";
@@ -2014,6 +2015,101 @@ async function collectGitRemotes() {
   return out;
 }
 
+// BET-1409: the REAL §6.7 checkable-verify surfaces + §6.6 trace resolver
+// (src/server/ctoFactSurfaces.mjs), injected through the facts engine's
+// no-op-default seams below. Every probe is a bounded local/CLI exec — no
+// model cost (§6.7) — and every failure degrades to "not ok"/"no opinion",
+// never a throw into the engine. Surfaces stay OPPORTUNISTIC: no git
+// worktree / no gh / no consented issue tool → the matching facts are never
+// stamped checkable (the BET-1389 default behavior for unimplemented kinds).
+const factSurfaces = createFactSurfaces({
+  // project (the facts store key = tmux session name) → its worktree cwd;
+  // null (the trace resolver's commit check) → every known project cwd.
+  cwdsFor: async (project) => {
+    let projects = [];
+    try {
+      projects = await tmux.listProjects();
+    } catch {
+      return [];
+    }
+    const rows = (Array.isArray(projects) ? projects : []).filter((p) => typeof p?.cwd === "string" && p.cwd);
+    if (project != null) return rows.filter((p) => p.tmuxSession === project).map((p) => p.cwd);
+    return rows.map((p) => p.cwd);
+  },
+  runGit: async (cwd, args) => (await promisify(execFile)("git", ["-C", cwd, ...args], { timeout: 5000 })).stdout,
+  hasBinary: async (name) => {
+    try {
+      await promisify(execFile)("sh", ["-c", `command -v ${name}`], { timeout: 5000 });
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  // A cwd is a usable verification surface only when it IS a worktree with a
+  // forge remote — branch probes cat-file locally, and `gh run list` resolves
+  // the repo from that remote. Conservative for both surfaces: a repo
+  // without origin simply never stamps checkable facts (§6.7 opportunism).
+  gitRepoReady: async (cwd) => {
+    try {
+      await promisify(execFile)("git", ["-C", cwd, "rev-parse", "--git-dir"], { timeout: 5000 });
+      await promisify(execFile)("git", ["-C", cwd, "remote", "get-url", "origin"], { timeout: 5000 });
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  // `multica issue get` — exit 0 = found; the status field decides open vs
+  // closed (done/cancelled close a "BET-N …" fact). Any CLI failure (auth,
+  // network, foreign-workspace key) degrades to unavailable via the module's
+  // catch — a failed lookup is not evidence of a closed issue.
+  issueLookup: async (key) => {
+    const { stdout } = await promisify(execFile)("multica", ["issue", "get", String(key), "--output", "json"], {
+      timeout: 15000,
+    });
+    const data = JSON.parse(stdout);
+    const status = String(data?.status ?? "");
+    return { found: true, open: status !== "done" && status !== "cancelled" };
+  },
+  // Latest COMPLETED workflow run's conclusion in the repo at cwd (newest
+  // first). No completed run (fresh repo, gh error) → null → "unavailable".
+  ciLatestConclusion: async (cwd) => {
+    const { stdout } = await promisify(execFile)("gh", ["run", "list", "--limit", "10", "--json", "conclusion,status"], {
+      cwd,
+      timeout: 15000,
+    });
+    const runs = JSON.parse(stdout);
+    const latest = (Array.isArray(runs) ? runs : []).find(
+      (r) => r?.status === "completed" && typeof r?.conclusion === "string",
+    );
+    return latest?.conclusion ?? null;
+  },
+  // §6.6 trace resolver's message-id leg — the read-only opencode db (same
+  // handle the ⌘F search uses). ses_/msg_/part_ ids map to their tables; a
+  // null db (no Node 24 runtime) → null → no opinion.
+  messageExists: async (id) => {
+    const db = await getDb();
+    if (!db) return null;
+    const key = String(id);
+    const table = key.startsWith("ses_") ? "session" : key.startsWith("part_") ? "part" : "message";
+    const row = db.prepare(`SELECT 1 FROM ${table} WHERE id = ? LIMIT 1`).get(key);
+    return row != null;
+  },
+  // §6.7 "a consented tool for issue facts": the §7 registry's metadata
+  // consent ring for the box's issue tool (multica / issue-tracker identity).
+  // Unasked or revoked consent → the issue surface does not exist. Lazy
+  // adaptiveCto read — the registry engine is constructed on first call.
+  issueToolConsented: async () => {
+    try {
+      const tools = await adaptiveCto.getTools().listTools();
+      return (Array.isArray(tools) ? tools : []).some(
+        (t) => /^(?:multica|issue-tracker)(?:[-/].*)?$/i.test(String(t?.tool ?? "")) && t?.consent?.metadata === "yes",
+      );
+    } catch {
+      return false;
+    }
+  },
+});
+
 const adaptiveCto = ctoEngine.createCtoEngine({
   configGet: () => local.configGet(),
   ledger: ledgerStore,
@@ -2077,6 +2173,13 @@ const adaptiveCto = ctoEngine.createCtoEngine({
   // its own one-time spend bound, so they bypass the engine's §3.3 rate gate.
   getDb,
   backfillRunEphemeral: runEphemeral,
+  // BET-1409: real §6.7 checkable-verify surfaces + §6.6 trace resolver —
+  // replaces these seams' no-op defaults so facts CAN be stamped checkable
+  // and verify-supersessions can fire (each guarded by surfaceExists, so
+  // stamping stays opportunistic).
+  factSurfaceExists: (surface, ctx) => factSurfaces.surfaceExists(surface, ctx),
+  factVerify: (args) => factSurfaces.verify(args),
+  factResolveRef: (ref) => factSurfaces.resolveRef(ref),
   cardFireNotify: (args) => push.fireNotify(args),
   // BET-1398: one-time migration of the superseded cto.json watcher poller's
   // watches into the standing-query engine (idempotent, marker-guarded).

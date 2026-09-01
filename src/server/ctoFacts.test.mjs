@@ -432,6 +432,31 @@ test("checkable: stamping honors surface-exists; verify supersedes failures", as
   assert.ok(live.length >= 1);
 });
 
+// BET-1409: the real §6.7 surfaces need the fact's project (the store key) to
+// resolve a cwd / consent scope — pump and verifyDue must pass it through.
+test("checkable: pump and verifyDue pass the project ctx to the surface seams", async () => {
+  const seenSurface = [];
+  const seenVerify = [];
+  const { engine, facts } = makeEngine({
+    surfaceExists: async (s, ctx) => {
+      seenSurface.push([s, ctx]);
+      return s === "git";
+    },
+    verify: async (args) => {
+      seenVerify.push(args);
+      return { ok: true };
+    },
+  });
+  await engine.submitProposal({ proposalId: "cx", project: "alpha", kind: "status", statement: "branch fix/a is merged", refs: ["r1"] });
+  await engine.pump();
+  assert.ok(seenSurface.length >= 1, "surfaceExists consulted at stamp time");
+  assert.ok(seenSurface.some(([s, ctx]) => s === "git" && ctx?.project === "alpha"), "surfaceExists receives { project }");
+  await engine.verifyDue();
+  assert.ok(seenVerify.length >= 1, "verify consulted on the cycle");
+  assert.equal(seenVerify[0].project, "alpha", "verify receives the project");
+  assert.equal(seenVerify[0].surface, "git");
+});
+
 test("touchFacts bumps last_accessed + access_count on retrieval", async () => {
   const { engine, facts } = makeEngine();
   await engine.submitProposal({ proposalId: "ta", project: "alpha", kind: "status", statement: "touched", refs: ["r1"] });
