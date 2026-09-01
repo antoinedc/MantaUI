@@ -283,13 +283,7 @@ test("session-creations-per-hour limit trips to paused + health escalation", asy
 
 test("concurrent ephemeral cap trips to paused", async () => {
   const h = makeHarness({ ctoEnabled: true });
-  for (let i = 0; i < RATE_LIMITS.concurrentEphemeral; i++) {
-    assert.equal((await h.engine.beginEphemeral()).ok, true);
-  }
-  const sixth = await h.engine.beginEphemeral();
-  assert.equal(sixth.ok, false);
-  assert.equal(sixth.error, "rate_limit:concurrentEphemeral");
-  assert.equal((await h.engine.getState()).dot, DOT.PAUSED);
+  await tripEphemeralLimit(h);
 });
 
 test("concurrent delegate cap trips to paused", async () => {
