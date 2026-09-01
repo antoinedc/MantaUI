@@ -13,6 +13,27 @@ const SNAPSHOTS = "tests/visual/screens.visual.ts-snapshots";
 const gitBuf = (args) => execFileSync("git", args, { cwd: REPO_ROOT, encoding: "buffer" });
 
 /**
+ * True when this checkout has truncated history (`.git/shallow` present —
+ * `git clone --depth N`, a CI depth-1 graft, …). Memoized; a repo that is not
+ * a git repo at all reads as not-shallow so the per-test failures below keep
+ * their ordinary STALE meaning. (BET-1491: on a shallow clone an old
+ * recordSha's objects are absent, `git show` fails, and the unreachable case
+ * below must not be reported as STALE — the record may be perfectly fresh;
+ * the clone simply cannot prove it either way.)
+ */
+let shallow;
+const isShallowRepo = () => {
+  if (shallow === undefined) {
+    try {
+      shallow = gitBuf(["rev-parse", "--is-shallow-repository"]).toString().trim() === "true";
+    } catch {
+      shallow = false;
+    }
+  }
+  return shallow;
+};
+
+/**
  * Freshness of conformance records (BET-564). A conformance record is
  * judgement — no test can arbitrate what it says. But whether a record has
  * been LOOKED AT since its screen's baseline moved is mechanical, and that
@@ -23,8 +44,13 @@ const gitBuf = (args) => execFileSync("git", args, { cwd: REPO_ROOT, encoding: "
  * Mechanism (git, not file mtimes — mtimes lie after a fresh clone):
  *   recordSha       = the sha on the "Last reviewed" line
  *   reviewedBlob    = the committed <id>-visual-linux.png at recordSha
- *   FAIL            = reviewedBlob is missing or differs from the baseline on
- *                     disk — the baseline moved (or appeared) after the review.
+ *   FAIL            = reviewedBlob differs from the baseline on disk — the
+ *                     baseline moved after the review — or is unreachable at
+ *                     recordSha. Unreachable on a FULL clone means the record
+ *                     is stale (the baseline appeared after the review, or the
+ *                     sha is bad); unreachable on a SHALLOW clone only means
+ *                     the history is truncated, so that case fails with its
+ *                     own unshallow message instead of claiming STALE (BET-1491).
  *
  * We compare BLOB CONTENT at recordSha, NOT commit ancestry. Computing "the
  * last commit that touched a path" via `git log -- <path>` is not
@@ -85,9 +111,13 @@ for (const screen of SCREENS) {
 
     // Fresh = the committed baseline at the reviewed sha is byte-identical to
     // the baseline on disk. STALE when it differs, or isn't reachable at
-    // recordSha at all (a baseline that did not exist at the review, or a sha
-    // we cannot resolve, cannot prove the record current). See the mechanism
-    // comment above for why this is ancestry-equivalent but graft-immune.
+    // recordSha at all on a full clone (a baseline that did not exist at the
+    // review, or a sha we cannot resolve, cannot prove the record current).
+    // On a shallow clone, "not reachable" usually means the history is
+    // truncated, not that the record is stale — say so explicitly instead of
+    // reporting a false STALE with a visual:compare instruction (BET-1491).
+    // See the mechanism comment above for why this is ancestry-equivalent but
+    // graft-immune.
     let reviewedBlob;
     try {
       reviewedBlob = gitBuf(["show", `${recordSha}:${baseline}`]);
@@ -97,12 +127,18 @@ for (const screen of SCREENS) {
     const fresh = reviewedBlob !== null && reviewedBlob.equals(baselineBlob);
     assert.ok(
       fresh,
-      `conformance record for "${recordScreen}" is STALE: baseline ${screen.id} ` +
-        `differs from its committed state at the reviewed sha ${recordSha} ` +
-        `(${recordPath}) — the baseline moved after the review, so the ` +
-        `record does not describe the screen as it exists now. Fix: run ` +
-        `\`npm run visual:compare ${recordScreen}\`, reconcile ` +
-        `\`docs/screens/${recordScreen}/conformance.md\`, and update its Last reviewed sha.`,
+      reviewedBlob === null && isShallowRepo()
+        ? `conformance record for "${recordScreen}" cannot be judged on this ` +
+          `shallow clone: the reviewed sha ${recordSha} is outside the truncated ` +
+          `history, so its baseline object is absent — this is not evidence of ` +
+          `staleness (${recordPath}). Fix: run \`git fetch --unshallow origin\` ` +
+          `(or a full clone) and re-run the suite before judging conformance records.`
+        : `conformance record for "${recordScreen}" is STALE: baseline ${screen.id} ` +
+          `differs from its committed state at the reviewed sha ${recordSha} ` +
+          `(${recordPath}) — the baseline moved after the review, so the ` +
+          `record does not describe the screen as it exists now. Fix: run ` +
+          `\`npm run visual:compare ${recordScreen}\`, reconcile ` +
+          `\`docs/screens/${recordScreen}/conformance.md\`, and update its Last reviewed sha.`,
     );
   });
 }
