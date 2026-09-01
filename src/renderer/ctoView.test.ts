@@ -24,6 +24,7 @@ import {
   type CtoState,
   type CtoHealthStat,
 } from "./ctoView";
+import type { CtoCard } from "../shared/api";
 
 const base: CtoState = {
   enabled: true,
@@ -417,7 +418,7 @@ it("decisionCards: selects decision-variant cards only", () => {
     { id: "d1", variant: "decision", title: "dec", options: [] },
     { id: "c1", variant: "connect", title: "con" },
   ];
-  const out = decisionCards(cards as unknown as Record<string, unknown>[]);
+  const out = decisionCards(cards as unknown as CtoCard[]);
   expect(out.length).toBe(1);
   expect(out[0].id).toBe("d1");
 });
@@ -535,7 +536,7 @@ it("vetoCards: selects veto-variant cards with the countdown fields", () => {
     { id: "b1", variant: "blocker", title: "blk" },
     { id: "overnight:veto", variant: "veto", title: "Overnight run planned", body: "3 tasks", dueMs: 5000, options: [{ label: "Cancel tonight", action: { type: "veto-cancel", payload: {} } }] },
   ];
-  const out = vetoCards(cards as unknown as ReadonlyArray<Record<string, unknown>>);
+  const out = vetoCards(cards as unknown as CtoCard[]);
   expect(out.length).toBe(1);
   expect(out[0].id).toBe("overnight:veto");
   expect(out[0].dueMs).toBe(5000);
@@ -554,7 +555,7 @@ it("blockerCards: selects blocker-variant cards only — a connect card is NOT s
     { id: "v1", variant: "veto", title: "vet" },
     { id: "c1", variant: "connect", title: "con" },
   ];
-  const out = blockerCards(cards as unknown as ReadonlyArray<Record<string, unknown>>);
+  const out = blockerCards(cards as unknown as CtoCard[]);
   expect(out.length).toBe(1);
   expect(out[0].id).toBe("b1");
 });
@@ -565,7 +566,7 @@ it("blockerCards: drops a row with neither title nor body", () => {
     { id: "b2", variant: "blocker", title: "", body: "has body" },
     { id: "b3", variant: "blocker", title: "has title", body: "" },
   ];
-  const out = blockerCards(cards as unknown as ReadonlyArray<Record<string, unknown>>);
+  const out = blockerCards(cards as unknown as CtoCard[]);
   expect(out.map((c) => c.id)).toEqual(["b2", "b3"]);
 });
 
@@ -574,7 +575,7 @@ it("vetoCards: drops a row with neither title nor body", () => {
     { id: "v1", variant: "veto", title: "", body: "", dueMs: 1000, options: [] },
     { id: "v2", variant: "veto", title: "Overnight run planned", body: "", dueMs: 1000, options: [] },
   ];
-  const out = vetoCards(cards as unknown as ReadonlyArray<Record<string, unknown>>);
+  const out = vetoCards(cards as unknown as CtoCard[]);
   expect(out.map((c) => c.id)).toEqual(["v2"]);
 });
 
@@ -584,7 +585,7 @@ it("connectCards: selects connect-variant cards and drops a row with neither tit
     { id: "c1", variant: "connect", title: "", body: "", options: [] },
     { id: "c2", variant: "connect", title: "GitHub", body: "used 6 times this week", options: [] },
   ];
-  const out = connectCards(cards as unknown as ReadonlyArray<Record<string, unknown>>);
+  const out = connectCards(cards as unknown as CtoCard[]);
   expect(out.map((c) => c.id)).toEqual(["c2"]);
 });
 

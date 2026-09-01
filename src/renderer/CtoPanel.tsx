@@ -182,10 +182,10 @@ export function CtoPanel({
   const [tonightLoading, setTonightLoading] = useState(false);
   const [tonightPinned, setTonightPinned] = useState(false);
   const [tonightWindowOpen, setTonightWindowOpen] = useState(false);
-  const blockerCardList = useMemo(() => blockerCards(cards as unknown as ReadonlyArray<Record<string, unknown>>), [cards]);
+  const blockerCardList = useMemo(() => blockerCards(cards), [cards]);
   const suggestionCards = useMemo(() => decisionCards(cards), [cards]);
-  const vetoList = useMemo(() => vetoCards(cards as unknown as ReadonlyArray<Record<string, unknown>>), [cards]);
-  const connectList = useMemo(() => connectCards(cards as unknown as ReadonlyArray<Record<string, unknown>>), [cards]);
+  const vetoList = useMemo(() => vetoCards(cards), [cards]);
+  const connectList = useMemo(() => connectCards(cards), [cards]);
 
   const busy = digestBusy(state);
   const busyRef = useRef(busy);
