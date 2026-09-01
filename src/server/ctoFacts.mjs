@@ -562,13 +562,15 @@ export function matchCheckable(statement) {
   return null;
 }
 
-export async function maybeStampCheckable(fact, { surfaceExists = async () => false } = {}) {
+export async function maybeStampCheckable(fact, { surfaceExists = async () => false, project = null } = {}) {
   if (fact?.checkable) return fact;
   const match = matchCheckable(fact?.statement);
   if (!match || typeof surfaceExists !== "function") return fact;
   let exists = false;
   try {
-    exists = (await surfaceExists(match.surface)) === true;
+    // BET-1409: the surface guard receives the fact's project (the facts
+    // store key) so the real §6.7 surfaces can resolve a cwd / consent scope.
+    exists = (await surfaceExists(match.surface, { project })) === true;
   } catch {
     exists = false;
   }
@@ -831,7 +833,7 @@ export function createFactsEngine(deps = {}) {
           const newId = result.factId;
           const fi = newId ? activeFacts.findIndex((f) => f.id === newId) : -1;
           if (fi >= 0) {
-            const stamped = await maybeStampCheckable(activeFacts[fi], { surfaceExists });
+            const stamped = await maybeStampCheckable(activeFacts[fi], { surfaceExists, project: proj });
             if (stamped !== activeFacts[fi]) activeFacts[fi] = stamped;
           }
           await saveFacts(proj, activeFacts);
@@ -910,7 +912,9 @@ export function createFactsEngine(deps = {}) {
         let ok = false;
         let result = null;
         try {
-          const r = await verify({ surface: matchCheckable(f.statement)?.surface, probe: f.checkable.probe });
+          // BET-1409: verify receives the project so the real §6.7 surfaces
+          // can resolve the probe's cwd (git worktree / CI repo scope).
+          const r = await verify({ surface: matchCheckable(f.statement)?.surface, probe: f.checkable.probe, project: proj });
           ok = r?.ok === true;
           result = r?.result ?? null;
         } catch {
