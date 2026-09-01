@@ -803,25 +803,82 @@ test("pending retention keeps fresh probe-pending rows and counted fingerprints 
 
 // BET-1466 item 4: budget.json is not covered by the store sweep — the spend
 // recorder itself now bounds day-bucket and ROI-month growth.
-test("recordSpend prunes day buckets beyond the burn history and ROI months beyond the horizon", () => {
+// BET-1486: the prune keys on "no unfrozen month needs these buckets" — the
+// roll recomputes the current month on every refresh and the previous month
+// once more after it closes, so their buckets survive the burn-window prune.
+test("recordSpend prunes day buckets no live ROI recompute reads, and ROI months beyond the horizon", () => {
   const DAY = 86_400_000;
   let p = defaultBudgetPayload();
-  p.days[dayKey(MIDNIGHT - 10 * DAY)] = { usd: 9, calls: 9 }; // outside the 7-day burn history
+  p.days[dayKey(MIDNIGHT - 10 * DAY)] = { usd: 9, calls: 9 }; // Aug 18 — current month, outside the burn window → kept
   p.days[dayKey(MIDNIGHT - 6 * DAY)] = { usd: 1, calls: 1 }; // the oldest in-window day → kept
+  p.days[dayKey(MIDNIGHT - 40 * DAY)] = { usd: 3, calls: 3 }; // Jul 19 — the previous month, unfrozen → kept
+  p.days[dayKey(MIDNIGHT - 70 * DAY)] = { usd: 5, calls: 5 }; // Jun 19 — beyond every live window → dropped
   p.roi = {
     months: {
       [roiMonthKey(MIDNIGHT - 100 * DAY)]: { merged: 3 }, // past the 60d ROI horizon
-      [roiMonthKey(MIDNIGHT - 40 * DAY)]: { merged: 1 }, // recent → kept
+      [roiMonthKey(MIDNIGHT - 40 * DAY)]: { merged: 1 }, // recent → kept (and the unfrozen previous month)
     },
     pending: [],
   };
   const out = recordSpend(p, { now: MIDNIGHT + 60_000, usd: 0.25 });
-  assert.equal(out.days[dayKey(MIDNIGHT - 10 * DAY)], undefined, "a bucket older than the burn window is dropped");
+  assert.equal(out.days[dayKey(MIDNIGHT - 10 * DAY)].usd, 9, "a current-month bucket outside the burn window survives (the roll recomputes it every refresh)");
   assert.equal(out.days[dayKey(MIDNIGHT - 6 * DAY)].usd, 1, "the oldest in-window bucket survives");
+  assert.equal(out.days[dayKey(MIDNIGHT - 40 * DAY)].usd, 3, "the unfrozen previous month's bucket survives (its freeze recompute needs it)");
+  assert.equal(out.days[dayKey(MIDNIGHT - 70 * DAY)], undefined, "a bucket no live month recompute reads is dropped");
   assert.equal(out.days[dayKey(MIDNIGHT + 60_000)].usd, 0.25, "today's bucket is written");
   assert.equal(out.roi.months[roiMonthKey(MIDNIGHT - 100 * DAY)], undefined, "an ROI month past the horizon is dropped");
   assert.equal(out.roi.months[roiMonthKey(MIDNIGHT - 40 * DAY)].merged, 1, "a recent ROI month survives");
   assert.equal(out.roi.pending.length, 0, "pending rides along untouched");
+});
+
+// BET-1486: a missing/unfrozen entry for the previous month means its
+// post-close recompute (the freeze) has not run yet — its buckets must
+// survive the first post-outage spend so the roll freezes the real figure,
+// not $0. Once frozen, the buckets are dead weight and prune again.
+test("the closed month's buckets survive a post-outage prune until the roll freezes it, then prune (BET-1486)", () => {
+  const DAY = 86_400_000;
+  // >7-day outage spanning the close: the last pre-outage spend was Aug 20,
+  // the first post-boot spend is Sep 10 — the whole of August is outside
+  // the 7-day burn window and no roll has run since the close.
+  const SEP_10 = dayStart(13) + 3_600_000;
+  let p = defaultBudgetPayload();
+  p.days[dayKey(dayStart(-8))] = { usd: 7, calls: 7 }; // Aug 20 — the last pre-outage day
+  p.roi = { months: {}, pending: [] }; // no August entry → the freeze hasn't run
+  let out = recordSpend(p, { now: SEP_10, usd: 0.25 });
+  assert.equal(out.days[dayKey(dayStart(-8))].usd, 7, "the closed month's last bucket survives the first post-boot prune");
+  // The roll then freezes August (correctly, from the surviving buckets);
+  // the next spend prunes them.
+  out = { ...out, roi: { months: { "2026-08": { merged: 2, frozen: true } }, pending: [] } };
+  const out2 = recordSpend(out, { now: SEP_10 + 60_000, usd: 0.25 });
+  assert.equal(out2.days[dayKey(dayStart(-8))], undefined, "once the month is frozen its buckets no longer feed any recompute — pruned");
+});
+
+// BET-1486 end-to-end: the exact issue scenario — spends through Aug 20, a
+// >7-day outage spanning the close, the first post-boot spend (which prunes),
+// then the first roll. The August freeze must read the real spend, not $0.
+test("refreshRoi freezes the closed month at its real spend after a >7-day outage spanning the close (BET-1486)", async () => {
+  const DAY = 86_400_000;
+  const SEP_10 = dayStart(13) + 3_600_000;
+  let payload = defaultBudgetPayload();
+  payload = recordSpend(payload, { now: dayStart(-23), usd: 3 }); // Aug 5
+  payload = recordSpend(payload, { now: dayStart(-8), usd: 7 }); // Aug 20 — the last pre-outage day
+  payload = recordSpend(payload, { now: SEP_10, usd: 0.25 }); // Sep 10 — first post-boot spend
+  const store = { load: async () => payload, save: async (p) => (payload = p) };
+  const budget = createCtoBudget({
+    store,
+    jobsRead: async () => [],
+    gitProbe: async () => ({ exists: false, isAncestor: false }),
+    ledgerRead: async () => [],
+    verdictsRead: async () => [],
+    segmentsRead: async () => [],
+    now: () => SEP_10,
+  });
+  const r = await budget.refreshRoi();
+  const aug = r.months["2026-08"];
+  assert.ok(aug, "the closed month's roll exists");
+  assert.equal(aug.frozen, true, "the closed month is frozen on its first post-close recompute");
+  assert.ok(Math.abs(aug.spendUsd - 10) < 1e-9, `the freeze reads the real August spend (got ${aug.spendUsd})`);
+  assert.ok(Math.abs(r.months["2026-09"].spendUsd - 0.25) < 1e-9, "the current month's spend reads its own buckets");
 });
 
 test("overnightSpendUsd prices today's job_started estTokens at the model cost (§11.2)", () => {

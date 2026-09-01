@@ -158,15 +158,35 @@ export function recordSpend(payload, { now, usd, calls = 1 } = {}) {
   const prev = dayBucket(p, key);
   const days = { ...p.days, [key]: { usd: dollar(prev.usd) + dollar(usd), calls: num(prev.calls) + ((calls | 0) || 1) } };
   // BET-1466: bound the growth inside the only writer that adds buckets.
-  // Day buckets older than the burn-history window are read by nothing
-  // (the burn history reads exactly BURN_HISTORY_DAYS day-starts including
-  // today); ROI month accumulators older than the retention horizon are
-  // beyond the report's honest horizon and are dropped with the pending
-  // rows that feed them. budget.json is not covered by the store sweep.
+  // BET-1486: a day bucket is prunable only once no ROI recompute still
+  // reads it. The burn history reads exactly BURN_HISTORY_DAYS day-starts
+  // including today; the roll (refreshRoi) recomputes the CURRENT month's
+  // counters on every refresh and the PREVIOUS month's once more after it
+  // closes — the frozen figure the Health report renders. Buckets inside
+  // those two month windows therefore survive until the roll is done with
+  // them: pruning earlier froze an understated closed month (after a
+  // >7-day outage spanning the close, at $0, because the first post-boot
+  // spend pruned the closed month's buckets before the first roll ran).
+  // Once the roll freezes the previous month its buckets prune here on the
+  // next spend, so the keep-set stays bounded by the burn history plus at
+  // most two month windows. ROI month accumulators older than the
+  // retention horizon remain beyond the report's honest horizon and are
+  // dropped with the pending rows that feed them. budget.json is not
+  // covered by the store sweep.
   const oldestDay = startOfDay(t) - (BURN_HISTORY_DAYS - 1) * 24 * HOUR_MS;
+  const currentWindow = monthWindow(roiMonthKey(t));
+  const prevWindow = currentWindow ? monthWindow(roiMonthKey(currentWindow.startTs - 1)) : null;
+  const liveMonths = p.roi && typeof p.roi === "object" && p.roi.months && typeof p.roi.months === "object" ? p.roi.months : {};
+  // A missing entry means the post-close recompute has not run yet — the
+  // same predicate refreshRoi uses to include the previous month in
+  // toCompute. Unfrozen, unknown, or absent → the freeze is still pending.
+  const prevFrozen = !prevWindow || liveMonths[roiMonthKey(prevWindow.startTs)]?.frozen === true;
   for (const k of Object.keys(days)) {
     const ts = Number(k);
-    if (Number.isFinite(ts) && ts < oldestDay) delete days[k];
+    if (!Number.isFinite(ts) || ts >= oldestDay) continue; // the burn history still reads it
+    if (currentWindow && ts >= currentWindow.startTs) continue; // the current month — recomputed on every roll
+    if (!prevFrozen && ts >= prevWindow.startTs) continue; // the closed month — its freeze recompute still reads it
+    delete days[k];
   }
   let roi = p.roi;
   if (roi && typeof roi === "object" && roi.months && typeof roi.months === "object") {
