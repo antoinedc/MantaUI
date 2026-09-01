@@ -756,16 +756,38 @@ test("dedupe: a second runPass over the same findings makes no new model calls, 
   assert.equal(h.notified.length, 1, "no new fireNotify");
 });
 
-test("usedKeys is capped at 200 entries; the oldest fall off", async () => {
+test("usedKeys cap: exactly-at-cap holds every entry; the 201st evicts the OLDEST and preserves the MRU tail", async () => {
+  // Seed one short of the cap, then fill to exactly 200 through the real
+  // processFinding → markUsed append path.
   const h = makeSug({
-    engineState: { v: 1, suggest: { usedKeys: Array.from({ length: 200 }, (_, i) => `old-${i}`) } },
+    engineState: { v: 1, suggest: { usedKeys: Array.from({ length: 199 }, (_, i) => `old-${i}`) } },
   });
-  await h.sug.processFinding({ id: "rec:new", sourceKind: "fact-anomaly", text: "x", refs: [] }, { coldStart: false, tier: "medium" });
-  const used = h.getEs().suggest.usedKeys;
+  const process = (id) =>
+    h.sug.processFinding({ id, sourceKind: "fact-anomaly", text: "x", refs: [] }, { coldStart: false, tier: "medium" });
+
+  // At-cap state: the 200th distinct key lands with NO eviction.
+  await process("rec:fill");
+  let used = h.getEs().suggest.usedKeys;
   assert.equal(used.length, 200);
-  assert.ok(used.includes("rec:new"));
-  assert.ok(!used.includes("old-0")); // the oldest entry fell off
-  assert.ok(used.includes("old-1")); // next-oldest survives — only one entry was dropped
+  assert.equal(used[0], "old-0", "nothing evicted while filling to exactly the cap");
+  assert.equal(used[199], "rec:fill", "the newest key sits at the tail");
+
+  // One past the cap: the 201st distinct key evicts exactly one entry —
+  // the OLDEST (front), not the newest being dropped. Trailing-slice FIFO
+  // is the chosen rule (documented idiom shared with ctoBudget.mjs).
+  await process("rec:over");
+  used = h.getEs().suggest.usedKeys;
+  assert.equal(used.length, 200, "the cap holds: length never exceeds 200");
+  assert.ok(!used.includes("old-0"), "the 201st key evicts the OLDEST entry");
+  assert.ok(used.includes("rec:over"), "the newest key is kept, not dropped");
+
+  // The surviving keys are exactly the expected ones, in order —
+  // old-1..old-198 (198 entries) plus the two appends at the tail (MRU preserved).
+  assert.deepEqual(used, [
+    ...Array.from({ length: 198 }, (_, i) => `old-${i + 1}`),
+    "rec:fill",
+    "rec:over",
+  ]);
 });
 
 test("notify: fireNotify carries a distinct, non-global tag per candidate WITHOUT synthesizing a sessionID (defect 2, review fix)", async () => {
