@@ -13,6 +13,7 @@ import {
   DOT,
   HOUR_MS,
   RATE_LIMITS,
+  RATE_LIMIT_COOLDOWN_MS,
   isRunningCtoRow,
   buildFactsContext,
   defaultGetCounts,
@@ -282,13 +283,7 @@ test("session-creations-per-hour limit trips to paused + health escalation", asy
 
 test("concurrent ephemeral cap trips to paused", async () => {
   const h = makeHarness({ ctoEnabled: true });
-  for (let i = 0; i < RATE_LIMITS.concurrentEphemeral; i++) {
-    assert.equal((await h.engine.beginEphemeral()).ok, true);
-  }
-  const sixth = await h.engine.beginEphemeral();
-  assert.equal(sixth.ok, false);
-  assert.equal(sixth.error, "rate_limit:concurrentEphemeral");
-  assert.equal((await h.engine.getState()).dot, DOT.PAUSED);
+  await tripEphemeralLimit(h);
 });
 
 test("concurrent delegate cap trips to paused", async () => {
@@ -300,6 +295,62 @@ test("concurrent delegate cap trips to paused", async () => {
   assert.equal(third.ok, false);
   assert.equal(third.error, "rate_limit:concurrentDelegate");
   assert.equal((await h.engine.getState()).dot, DOT.PAUSED);
+});
+
+// ----- BET-1508: a rate-limit self-pause is a BACKOFF, not a policy -----
+
+// Shared setup: saturate the concurrent-ephemeral cap and take the trip.
+async function tripEphemeralLimit(h) {
+  for (let i = 0; i < RATE_LIMITS.concurrentEphemeral; i++) {
+    assert.equal((await h.engine.beginEphemeral()).ok, true);
+  }
+  const sixth = await h.engine.beginEphemeral();
+  assert.equal(sixth.ok, false);
+  assert.equal(sixth.error, "rate_limit:concurrentEphemeral");
+  assert.equal((await h.engine.getState()).dot, DOT.PAUSED);
+}
+
+test("BET-1508: the rate-limit self-pause auto-clears after the cool-down and never touches the kill switch", async () => {
+  const h = makeHarness({ ctoEnabled: true });
+  await tripEphemeralLimit(h);
+  // The trip raised the rate_limit health escalation…
+  assert.equal(h.pendingBlockers.length, 1);
+  assert.equal(h.pendingBlockers[0].source, "rate_limit");
+
+  // …which stays up through the cool-down itself…
+  h.clock.ms += RATE_LIMIT_COOLDOWN_MS - 1000;
+  await h.engine.tick();
+  assert.equal((await h.engine.getState()).dot, DOT.PAUSED);
+  assert.equal(h.ledgerRows.some((r) => r.kind === "cto.self_resume"), false);
+
+  // …and auto-clears once it has elapsed: the engine resumes ITSELF, the
+  // backoff is ledgered, and the health escalation resolves.
+  h.clock.ms += 2000;
+  await h.engine.tick();
+  assert.equal((await h.engine.getState()).dot, DOT.ACTIVE);
+  const selfResume = h.ledgerRows.find((r) => r.kind === "cto.self_resume");
+  assert.ok(selfResume, "self_resume ledgered");
+  assert.equal(selfResume.reason, "rate_limit_cooldown_elapsed");
+  assert.equal(h.cardCalls.some((c) => c.fn === "onHealthRecovered"), true);
+
+  // The auto-clear must NOT touch the persisted kill switch: the flag was
+  // never set by the trip, and it is still unset now.
+  assert.equal(h.killSwitchPaused, false);
+});
+
+test("BET-1508: a human kill-switch pause is NEVER auto-cleared by the cool-down", async () => {
+  const h = makeHarness({ ctoEnabled: true });
+  await h.engine.pause({ reason: "manual" });
+
+  // Well past any cool-down…
+  h.clock.ms += RATE_LIMIT_COOLDOWN_MS * 3;
+  await h.engine.tick();
+
+  // …the manual pause (flag file path) still holds: the cool-down only ever
+  // clears the in-memory rate-limit backoff.
+  assert.equal((await h.engine.getState()).dot, DOT.PAUSED);
+  assert.equal(h.ledgerRows.some((r) => r.kind === "cto.self_resume"), false);
+  assert.equal(h.killSwitchPaused, true);
 });
 
 test("releasing an ephemeral/delegate slot frees the cap", async () => {

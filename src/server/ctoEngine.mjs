@@ -155,6 +155,20 @@ export const RATE_LIMITS = Object.freeze({
 export const HOUR_MS = 3_600_000;
 export const TICK_INTERVAL_MS = 60_000;
 
+// How long a rate-limit self-pause (exceedRateLimit) backs off before the
+// engine's own tick auto-clears it (BET-1508). The concurrent-* limits trip on
+// a momentary burst of ambient sessions; a pause until a human resumes is the
+// wrong shape for a transient condition — on a busy box the boot→burst→trip
+// sequence left the engine permanently paused, and a manual resume was undone
+// within one tick (the next ambient dispatch re-tripped on top of the
+// still-in-flight sessions). Five minutes gives the burst time to drain; if
+// ambient is still saturated the next begin re-trips and the backoff repeats —
+// which IS the intended backoff semantics. The persisted kill-switch pause
+// (flag file, pause()/hardPause()) is NEVER auto-cleared: selfPaused is false
+// on that path (the flag is authoritative), so the cool-down can only ever
+// clear the in-memory rate-limit pause.
+export const RATE_LIMIT_COOLDOWN_MS = 5 * 60_000;
+
 // The card timer's cadence (BET-1382): it inspects pending asks / health
 // escalations once a minute and promotes any ask past BLOCKER_AFTER_MS into a
 // blocker card. The card threshold itself (10 min) lives in ctoCards.mjs.
@@ -473,6 +487,7 @@ export function createCtoEngine(deps = {}) {
   let thrifty = false;
   let thriftyAtDay = null; // local-day key thrifty was set on (BET-1388 auto-clear)
   let selfPaused = false;
+  let selfPausedAt = null; // when the rate-limit self-pause began (BET-1508 cool-down)
   let enabled = false;
   let heartbeatAt = now();
   let tickHandle = null;
@@ -626,6 +641,29 @@ export function createCtoEngine(deps = {}) {
     if (disposed) return;
     heartbeatAt = now();
     try {
+      // BET-1508: a rate-limit self-pause is a backoff, not a policy. Once the
+      // cool-down has elapsed, clear it and let this same tick re-assess —
+      // the next ambient dispatch re-trips if the burst is still running,
+      // which restarts the backoff instead of wedging the engine. The
+      // persisted kill-switch pause is untouched (selfPaused is false on
+      // that path), so a human Pause always wins.
+      if (selfPaused && selfPausedAt != null && now() - selfPausedAt >= RATE_LIMIT_COOLDOWN_MS) {
+        selfPaused = false;
+        selfPausedAt = null;
+        await ledgerLog({
+          kind: "cto.self_resume",
+          reason: "rate_limit_cooldown_elapsed",
+          source: "engine",
+        });
+        // The trip raised a rate_limit health card; the backoff ending is the
+        // liveness predicate going true again (same shape as onHealthRecovered
+        // on the manual resume path).
+        try {
+          await cards.onHealthRecovered();
+        } catch {
+          /* best-effort */
+        }
+      }
       const { enabled: enabledNow, paused } = await gateContext();
       if (paused) {
         await syncState();
@@ -855,9 +893,12 @@ export function createCtoEngine(deps = {}) {
   }
 
   // Exceeding a rate limit pauses the engine + raises a health warning (§3.3
-  // / §10.6-7).
+  // / §10.6-7). The pause is an in-memory BACKOFF (BET-1508): the tick
+  // auto-clears it once RATE_LIMIT_COOLDOWN_MS has elapsed. It never touches
+  // the kill-switch flag, so it can never override a human's Pause.
   async function exceedRateLimit(limitId) {
     selfPaused = true;
+    selfPausedAt = now();
     await ledgerLog({ kind: "cto.ratelimit_trip", reason: limitId, source: "engine" });
     await recordBlocker("rate_limit", limitId);
     await syncState();
