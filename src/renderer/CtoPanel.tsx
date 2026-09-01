@@ -43,6 +43,7 @@ import {
   decisionCards,
   vetoCards,
   connectCards,
+  connectAnswerArgs,
   tonightVisible,
   executeSuggestionOption,
   tonightBudgetMode,
@@ -426,17 +427,15 @@ export function CtoPanel({
   // all three; the client toasts the outcome and refreshes the cards.
   const handleConnectAnswer = useCallback(
     (card: ConnectCardRow, answer: string) => {
-      const option = (card.options ?? []).find((o) => o.answer === answer);
-      const tool = option?.action?.payload?.tool;
-      const toolId = typeof tool === "string" ? tool : card.id;
-      const ring = option?.action?.payload?.ring;
-      const deepRead = ring === "deep_read";
+      // BET-1431: the {tool, answer, ring} argument-building lives in
+      // ctoView.connectAnswerArgs (pure + tested). A card whose option
+      // carries no `action.payload.tool` produces NO call — never a call
+      // with a bogus/undefined tool.
+      const args = connectAnswerArgs(card, answer);
+      if (!args) return;
+      const deepRead = args.ring === "deep_read";
       void window.api
-        ?.ctoToolConnect?.({
-          tool: toolId,
-          answer: answer as "connect" | "not-now" | "never",
-          ...(deepRead ? { ring: "deep_read" as const } : {}),
-        })
+        ?.ctoToolConnect?.(args)
         .then((r) => {
           if (r?.ok) {
             pushToast({
