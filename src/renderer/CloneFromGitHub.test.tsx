@@ -20,10 +20,9 @@
 
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
+import type { Root } from "react-dom/client";
 import { CloneFromGitHub } from "./CloneFromGitHub";
 import { installMockApi, mount, clickCheckbox, type Harness, type MockApi } from "./testHarness";
-import type { ForgeCloneStatus } from "../shared/types";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -58,6 +57,20 @@ const CLONE_IN_PROGRESS = {
   cancelled: false,
 };
 
+// The device-flow payload both sign-in tests share: no credential yet, so
+// the component shows the device-code panel (user code ABCD-1234).
+const NOT_CONNECTED_START = {
+  connected: false,
+  grant: {
+    grantId: "g1",
+    userCode: "ABCD-1234",
+    verificationUri: "https://github.com/login/device",
+    expiresIn: 900,
+    pollInterval: 5,
+  },
+  error: null,
+};
+
 let container: HTMLElement | null = null;
 let root: Root | null = null;
 let api: MockApi;
@@ -65,27 +78,34 @@ let api: MockApi;
 // (clickCheckbox) rather than poking the sr-only input.
 let h: Harness | null = null;
 
-type MountOverrides = {
-  forgeCloneStart?: () => Promise<{ id?: string; error?: string; message?: string }>;
-  forgeCloneStatus?: () => Promise<ForgeCloneStatus | null>;
+// Per-test overrides: any window.api forge stub, plus the component's
+// onCloned prop (which is not an api stub).
+type MountOverrides = Partial<MockApi> & {
   onCloned?: (paths: string[]) => void;
 };
 
-function mountPicker(overrides: MountOverrides = {}): void {
+// The one mount path every test in this file uses: installs the mock api
+// with picker defaults (live credential + the REPOS list + stubbed clone
+// calls), then mounts the real component through the shared harness. Per-test
+// stubs override any forge method — e.g. a pending forgeRepos, a
+// not_connected device flow, or a failing forgeCloneStart. (BET-1488:
+// extracted from four hand-rolled installMockApi + createRoot copies that
+// the duplication gate deterministically flagged as self-clones.)
+function mountPicker({ onCloned, ...stubs }: MountOverrides = {}): void {
   ({ api } = installMockApi({
     // Existing credential — the picker renders immediately, skipping the
     // device-connect screen.
     forgeDeviceStart: () => Promise.resolve({ connected: true, grant: null }),
     forgeRepos: () => Promise.resolve({ repos: REPOS, stale: false, error: null }),
-    forgeCloneStart: overrides.forgeCloneStart ?? (() => Promise.resolve({ id: "c1" })),
-    forgeCloneStatus:
-      overrides.forgeCloneStatus ?? (() => Promise.resolve(CLONE_IN_PROGRESS)),
+    forgeCloneStart: () => Promise.resolve({ id: "c1" }),
+    forgeCloneStatus: () => Promise.resolve(CLONE_IN_PROGRESS),
+    ...stubs,
   }));
   h = mount(
     <CloneFromGitHub
       defaultRoot="/root"
       onCancel={() => {}}
-      onCloned={overrides.onCloned ?? (() => {})}
+      onCloned={onCloned ?? (() => {})}
     />,
   );
   container = h.container;
@@ -344,19 +364,8 @@ describe("CloneFromGitHub picker", () => {
     // `connected` on — so if the fetch ever ran pre-connect it would hit the
     // error branch (reproducing the old stuck state).
     let connected = false;
-    installMockApi({
-      forgeDeviceStart: () =>
-        Promise.resolve({
-          connected: false,
-          grant: {
-            grantId: "g1",
-            userCode: "ABCD-1234",
-            verificationUri: "https://github.com/login/device",
-            expiresIn: 900,
-            pollInterval: 5,
-          },
-          error: null,
-        }),
+    mountPicker({
+      forgeDeviceStart: () => Promise.resolve(NOT_CONNECTED_START),
       forgeDevicePoll: () => Promise.resolve({ status: "done" }),
       forgeRepos: () => {
         repoCallCount++;
@@ -366,16 +375,6 @@ describe("CloneFromGitHub picker", () => {
             : { repos: [], stale: false, error: "not_connected" },
         );
       },
-      forgeCloneStart: () => Promise.resolve({ id: "c1" }),
-      forgeCloneStatus: () => Promise.resolve(CLONE_IN_PROGRESS),
-    });
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
-    act(() => {
-      root!.render(
-        <CloneFromGitHub defaultRoot="/root" onCancel={() => {}} onCloned={() => {}} />,
-      );
     });
 
     // Let forgeDeviceStart settle so the code panel mounts and schedules the
@@ -403,20 +402,7 @@ describe("CloneFromGitHub picker", () => {
     const reposPromise = new Promise((resolve) => {
       resolveRepos = resolve;
     });
-    installMockApi({
-      forgeDeviceStart: () => Promise.resolve({ connected: true, grant: null }),
-      forgeRepos: () => reposPromise,
-      forgeCloneStart: () => Promise.resolve({ id: "c1" }),
-      forgeCloneStatus: () => Promise.resolve(CLONE_IN_PROGRESS),
-    });
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
-    act(() => {
-      root!.render(
-        <CloneFromGitHub defaultRoot="/root" onCancel={() => {}} onCloned={() => {}} />,
-      );
-    });
+    mountPicker({ forgeRepos: () => reposPromise });
     // The fetch is pending — the picker must show the loading state, not
     // "Search 0 repositories…" / "No repositories match.".
     await flushMicro();
@@ -440,36 +426,16 @@ describe("CloneFromGitHub picker", () => {
     // the box's behaviour after clearing a dead credential testable instead of
     // an infinite re-connect loop.
     let deviceStartCalls = 0;
-    installMockApi({
+    mountPicker({
       forgeDeviceStart: () => {
         deviceStartCalls++;
         return Promise.resolve(
           deviceStartCalls === 1
             ? { connected: true, grant: null }
-            : {
-                connected: false,
-                grant: {
-                  grantId: "g1",
-                  userCode: "ABCD-1234",
-                  verificationUri: "https://github.com/login/device",
-                  expiresIn: 900,
-                  pollInterval: 5,
-                },
-                error: null,
-              },
+            : NOT_CONNECTED_START,
         );
       },
       forgeRepos: () => Promise.resolve({ repos: [], stale: false, error: "rejected" }),
-      forgeCloneStart: () => Promise.resolve({ id: "c1" }),
-      forgeCloneStatus: () => Promise.resolve(CLONE_IN_PROGRESS),
-    });
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
-    act(() => {
-      root!.render(
-        <CloneFromGitHub defaultRoot="/root" onCancel={() => {}} onCloned={() => {}} />,
-      );
     });
     await flushMicro();
     await flushMicro();
@@ -484,19 +450,8 @@ describe("CloneFromGitHub picker", () => {
   });
 
   it("renders an error message for a network failure and does NOT drop to the connect panel (BET-1059)", async () => {
-    installMockApi({
-      forgeDeviceStart: () => Promise.resolve({ connected: true, grant: null }),
+    mountPicker({
       forgeRepos: () => Promise.resolve({ repos: [], stale: false, error: "network" }),
-      forgeCloneStart: () => Promise.resolve({ id: "c1" }),
-      forgeCloneStatus: () => Promise.resolve(CLONE_IN_PROGRESS),
-    });
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
-    act(() => {
-      root!.render(
-        <CloneFromGitHub defaultRoot="/root" onCancel={() => {}} onCloned={() => {}} />,
-      );
     });
     await flushMicro();
     await flushMicro();
