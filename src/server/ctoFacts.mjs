@@ -977,7 +977,10 @@ export function createFactsEngine(deps = {}) {
           result = "verify error";
         }
         checked += 1;
-        working[i] = { ...f, checkable: { ...f.checkable, last_checked: t, result: ok ? "ok" : "failed" } };
+        // BET-1505: keep the probe's own detail ("closed", "not-found", the CI
+        // conclusion, "verify error", …) — "ok"/"failed" are only the fallback
+        // when the probe returned no detail. §10.5 renders this verbatim.
+        working[i] = { ...f, checkable: { ...f.checkable, last_checked: t, result: ok ? (result ?? "ok") : (result ?? "failed") } };
         failed.push({ f: working[i], ok });
         if (ok) {
           changed = true;
@@ -1003,7 +1006,9 @@ export function createFactsEngine(deps = {}) {
         );
         const idxOld = working.findIndex((x) => x.id === f.id);
         if (idxOld >= 0) {
-          working[idxOld] = { ...working[idxOld], checkable: { ...(working[idxOld].checkable ?? {}), last_checked: t, result: "failed" } };
+          // BET-1505: preserve the probe's detail recorded in the check pass
+          // above — don't clobber it back to the bare "failed" literal.
+          working[idxOld] = { ...working[idxOld], checkable: { ...(working[idxOld].checkable ?? {}), last_checked: t, result: f.checkable?.result ?? "failed" } };
         }
         if (!res.reject && res.action === "supersede" && res.facts) {
           const present = await presenceCheck();
