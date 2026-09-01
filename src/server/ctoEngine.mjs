@@ -363,6 +363,11 @@ export function createCtoEngine(deps = {}) {
       cardStore: bundle.cards,
       engineState,
       patchEngineState: (mutation) => patchEngineState(mutation, { engineState }),
+      // The engine's clock is authoritative for the cards module too — one
+      // now for promoteDue thresholds AND the BET-1407 seed's retention
+      // bound (a test's fake clock must not make every persisted ask look
+      // ancient against a real Date.now()).
+      now,
     }),
     // A5 evidence/presence seams (injected I/O — nothing here touches tmux /
     // push directly; index.mjs supplies the real resolvers).
@@ -2269,8 +2274,21 @@ export function createCtoEngine(deps = {}) {
     };
   }
 
-  function start() {
+  async function start() {
     if (disposed) throw new Error("cto engine already disposed");
+    // BET-1407: restart resilience — rebuild the in-flight ask registry from
+    // its persisted half (engine-state.json `pendingAsks`) BEFORE the first
+    // card tick, so an ask that crossed the 10-min card threshold while the
+    // box was down still promotes instead of being lost. Same seam guard as
+    // segmenter.boot — a test-injected cards fake without the seed stays
+    // valid. Best-effort: a failed seed degrades to a fresh registry.
+    if (typeof cards?.seedPendingAsks === "function") {
+      try {
+        await cards.seedPendingAsks();
+      } catch {
+        /* best-effort */
+      }
+    }
     // Load the persisted segmentation G (minutes) from engine-state (§5.1-d).
     if (segmenter && typeof segmenter.boot === "function") {
       void segmenter.boot().catch(() => {});

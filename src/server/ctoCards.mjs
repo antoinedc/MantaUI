@@ -29,6 +29,13 @@
 // (2) health escalations — the watchdog's blocker-card requests that A2
 // (ctoEngine) already writes to `engine-state.json` `pendingBlockers`.
 //
+// BET-1407: the worker-ask registry is persisted (engine-state.json
+// `pendingAsks`, via the engine's bound patchEngineState — same single write
+// path as `pendingBlockers`) and seeded back on start, so a restart mid-ask
+// cannot drop an ask that had already crossed the 10-min card threshold.
+// Entries past the existing blocker retention window (INBOX_TTL_MS.blocker)
+// are dropped at seed; promoted asks are consumed from the registry.
+//
 // Determinism + testability: pure helpers are exported (stableCardId, ask
 // event classification, blocker copy); the stateful card manager is
 // `createCtoCards` with injected store/ledger/clock exactly like the other
@@ -37,8 +44,10 @@
 
 import { createHash } from "node:crypto";
 import {
+  INBOX_TTL_MS,
   cardsStore,
   engineStateStore,
+  isExpired,
   ledgerStore,
   patchStore,
 } from "./ctoStores.mjs";
@@ -171,6 +180,14 @@ export function askQuestionText(evt) {
   return "";
 }
 
+// BET-1407: the in-flight ask registry's key, shared by BOTH halves (the
+// in-memory map and the persisted `pendingAsks` array): the session when the
+// ask came from one, else the stable source id (sessionless inbox notes).
+// One derivation — memory and store can never disagree on identity.
+function askKeyOf(a) {
+  return (a && (a.sessionID || a.sourceId)) ?? null;
+}
+
 // BET-1463: the health-card grouping identity for one `pendingBlockers`
 // entry — every entry from the same underlying trip source (`recordBlocker`'s
 // `source` param, e.g. "watchdog" | "rate_limit") is the SAME ongoing
@@ -225,12 +242,19 @@ export function createCtoCards(deps = {}) {
     // `(fresh) => patch` function. Defaults to null (a no-op) so standalone/
     // test usage that doesn't care about pendingBlockers lifecycle keeps
     // working without wiring it.
-    patchEngineState: patchPendingBlockers = null,
+    // BET-1407: the SAME bound instance now also carries the worker-ask
+    // registry's persisted half (engine-state.json `pendingAsks`) — one
+    // writer, one mutex, one consume-and-prune shape for both queues.
+    patchEngineState: patchEngineStatePatch = null,
   } = deps;
 
-  // In-flight worker asks: sessionID -> { sourceKind, sourceId, sessionID,
-  // body, askedAt }. Kept in memory (derived from the live event stream); once
-  // promoted, the card itself is durable in cards.json.
+  // In-flight worker asks: key (sessionID, or sourceId for sessionless inbox
+  // notes) -> { sourceKind, sourceId, sessionID, body, askedAt, refs? }.
+  // BET-1407: no longer memory-only — every registration mirrors into
+  // engine-state.json `pendingAsks` (see registerAsk) and start() seeds this
+  // map back from it, so an ask that crossed the 10-min card threshold while
+  // the box was down still promotes instead of being lost. Once promoted, the
+  // card itself is durable in cards.json and the registry entry is consumed.
   const pendingAsks = new Map();
 
   // Source (3): a `blocker` inbox note (BET-1397 / spec §4.4). This is the ONE
@@ -256,8 +280,7 @@ export function createCtoCards(deps = {}) {
     // sending session when known, else by a stable hash of the tag/message;
     // the card id stays stable across re-reports of the same note (upsert).
     const sourceId = stableCardId(INBOX_SOURCE_KIND, tag || text);
-    const key = typeof sessionID === "string" && sessionID ? sessionID : sourceId;
-    pendingAsks.set(key, {
+    await registerAsk({
       sourceKind: INBOX_SOURCE_KIND,
       sourceId,
       sessionID: typeof sessionID === "string" ? sessionID : undefined,
@@ -266,6 +289,52 @@ export function createCtoCards(deps = {}) {
       askedAt: ts,
     });
     return { changed: true, notified: true };
+  }
+
+  // BET-1407: best-effort persist of one registry change through the engine's
+  // bound patchEngineState — the SAME sanctioned read-modify-write path
+  // recordBlocker and the pendingBlockers writers use (one process-wide
+  // mutex, no second write path, no bare save). A null writer (standalone/
+  // test usage without the engine) is a memory-only registry.
+  async function persistPendingAsks(mutation) {
+    if (typeof patchEngineStatePatch !== "function") return;
+    try {
+      await patchEngineStatePatch(mutation);
+    } catch {
+      /* best-effort — a registry write failure never takes the card path down */
+    }
+  }
+
+  // BET-1407: ONE registration idiom for BOTH ask sources (worker asks via
+  // onAskStart, inbox blocker notes via onInboxBlocker) — set the in-memory
+  // row, then mirror it into engine-state.json `pendingAsks` under the same
+  // key. Replace-in-place, never duplicate: re-registration is a no-op upsert
+  // in both halves.
+  async function registerAsk(ask) {
+    const key = askKeyOf(ask);
+    if (key == null) return;
+    pendingAsks.set(key, ask);
+    await persistPendingAsks((fresh) => {
+      const rows = Array.isArray(fresh?.pendingAsks) ? [...fresh.pendingAsks] : [];
+      const idx = rows.findIndex((r) => askKeyOf(r) === key);
+      if (idx >= 0) rows[idx] = ask;
+      else rows.push(ask);
+      return { pendingAsks: rows };
+    });
+  }
+
+  // BET-1407: remove registry rows by key from BOTH halves (the in-memory map
+  // and the persisted array). Best-effort; a pure no-op patch (no save) when
+  // no row matches. Malformed rows (unkeyable) are never matched.
+  async function removePendingAskRows(keys) {
+    const keySet = new Set((keys ?? []).filter((k) => k != null));
+    if (!keySet.size) return;
+    for (const k of keySet) pendingAsks.delete(k);
+    await persistPendingAsks((fresh) => {
+      const rows = Array.isArray(fresh?.pendingAsks) ? fresh.pendingAsks : [];
+      const next = rows.filter((r) => !keySet.has(askKeyOf(r)));
+      return next.length === rows.length ? {} : { pendingAsks: next };
+    });
   }
 
   async function ledgerAppend(entry) {
@@ -408,9 +477,9 @@ export function createCtoCards(deps = {}) {
   // when its health card closes — resolved or dismissed). Best-effort, and a
   // pure no-op patch (no save) when nothing in the group is left.
   async function dropPendingBlockersByGroup(group) {
-    if (!group || typeof patchPendingBlockers !== "function") return;
+    if (!group || typeof patchEngineStatePatch !== "function") return;
     try {
-      await patchPendingBlockers((fresh) => {
+      await patchEngineStatePatch((fresh) => {
         const pending = Array.isArray(fresh?.pendingBlockers) ? fresh.pendingBlockers : [];
         const next = pending.filter((b) => healthGroupKey(b) !== group);
         return next.length === pending.length ? {} : { pendingBlockers: next };
@@ -425,9 +494,9 @@ export function createCtoCards(deps = {}) {
   // Best-effort; a missed stamp just means the same entry (harmlessly)
   // upserts the same card again next tick — the upsert itself is idempotent.
   async function markPendingBlockersConsumed(ids) {
-    if (!ids.length || typeof patchPendingBlockers !== "function") return;
+    if (!ids.length || typeof patchEngineStatePatch !== "function") return;
     try {
-      await patchPendingBlockers((fresh) => {
+      await patchEngineStatePatch((fresh) => {
         const pending = Array.isArray(fresh?.pendingBlockers) ? fresh.pendingBlockers : [];
         const idSet = new Set(ids);
         let touched = false;
@@ -456,16 +525,19 @@ export function createCtoCards(deps = {}) {
   // Register a worker is now blocked on an ask. No card yet — the card appears
   // only once promoteDue sees the ask past BLOCKER_AFTER_MS (or via a health
   // escalation). Re-registration (global + scoped duplicate) is a no-op upsert.
+  // BET-1407: the ask also lands in engine-state.json `pendingAsks` so a
+  // restart mid-ask can seed it back.
   async function onAskStart({ sourceKind, sourceId, sessionID, body, ts = now() }) {
     if (!sessionID) return;
-    pendingAsks.set(sessionID, { sourceKind, sourceId, sessionID, body, askedAt: ts });
+    await registerAsk({ sourceKind, sourceId, sessionID, body, askedAt: ts });
   }
 
   // The ask was answered/rejected, or the owning session aborted → liveness
-  // predicate false: resolve any open blocker card for that session.
+  // predicate false: resolve any open blocker card for that session, and
+  // (BET-1407) prune the ask from both registry halves.
   async function onAskResolved({ sessionID, ts = now() } = {}) {
     if (!sessionID) return { changed: false };
-    pendingAsks.delete(sessionID);
+    await removePendingAskRows([sessionID]);
     return resolveForSession(sessionID, "ask answered", ts);
   }
 
@@ -481,9 +553,15 @@ export function createCtoCards(deps = {}) {
 
   // The 10-min card timer: promote every in-flight ask past BLOCKER_AFTER_MS
   // into its blocker card. `{changed, promoted}` for diagnostics/tests.
+  // BET-1407: each promoted ask is CONSUMED — removed from both registry
+  // halves — because the card is now the durable surface (cards.json survives
+  // restarts; the entry's job ends when the card machinery owns it). Removed
+  // AFTER the upsert so a crash in between can only re-add the entry, which
+  // converges on the next tick's byte-identical no-op upsert.
   async function promoteDue({ nowMs = now() } = {}) {
     let changed = false;
     let promoted = 0;
+    const consumedKeys = [];
     for (const ask of pendingAsks.values()) {
       if (nowMs - ask.askedAt < BLOCKER_AFTER_MS) continue;
       const r = await upsertBlocker({
@@ -498,8 +576,54 @@ export function createCtoCards(deps = {}) {
       });
       changed = changed || r.changed;
       if (r.isNew) promoted += 1;
+      consumedKeys.push(askKeyOf(ask));
     }
+    if (consumedKeys.length) await removePendingAskRows(consumedKeys);
     return { changed, promoted };
+  }
+
+  // BET-1407: restart resilience — rebuild the in-memory registry from its
+  // persisted half on engine start. An ask that crossed the 10-min card
+  // threshold while the box was down still promotes on the next card tick
+  // instead of being lost (the memory-only registry's "Resume doesn't work"
+  // gap — the same class of bug BET-1463 fixed for pendingBlockers).
+  //
+  // Bound: entries past the EXISTING blocker retention window
+  // (INBOX_TTL_MS.blocker — the week every blocker-class entry keeps, §4.4)
+  // are dropped from BOTH halves — the registry must not accumulate forever,
+  // and engine-state.json is not covered by the ctoStores retention sweeper.
+  // Boundary-exact via the shared isExpired helper (an entry exactly at the
+  // cutoff is kept). Rows that cannot be keyed or aged (no sessionID/sourceId,
+  // no numeric askedAt) are unreconstructable and dropped with the stale ones
+  // — a row with no askedAt would otherwise promote instantly on every
+  // restart (nowMs - undefined is NaN, which skips the threshold check).
+  // Pure no-op write when nothing is dropped. `{seeded, dropped}` for
+  // diagnostics/tests.
+  async function seedPendingAsks({ nowMs = now() } = {}) {
+    let payload;
+    try {
+      payload = await engineState.load();
+    } catch {
+      return { seeded: 0, dropped: 0 };
+    }
+    const rows = Array.isArray(payload?.pendingAsks) ? payload.pendingAsks : [];
+    const keep = [];
+    let dropped = 0;
+    for (const row of rows) {
+      const key = askKeyOf(row);
+      if (
+        key != null &&
+        typeof row?.askedAt === "number" &&
+        !isExpired(row.askedAt, { nowMs, retentionMs: INBOX_TTL_MS.blocker })
+      ) {
+        keep.push(row);
+        pendingAsks.set(key, row);
+      } else {
+        dropped += 1;
+      }
+    }
+    if (dropped) await persistPendingAsks(() => ({ pendingAsks: keep }));
+    return { seeded: keep.length, dropped };
   }
 
   // Source (2): read the watchdog's blocker-card requests that A2 already
@@ -782,6 +906,7 @@ export function createCtoCards(deps = {}) {
     onAskStart,
     onAskResolved,
     onInboxBlocker,
+    seedPendingAsks,
     promoteDue,
     ingestHealthEscalations,
     onHealthRecovered,
