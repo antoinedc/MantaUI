@@ -1,16 +1,5 @@
-// BET-1469: fail fast, before ANY test body runs, when this file is executed
-// outside the state sandbox. A CTO store module imported unsandboxed resolves
-// its paths against the LIVE box state (~/.manta) and a test would write
-// production data. `npm test` / `npm run test:server` set MANTA_STATE_HOME via
-// scripts/testSandbox.mjs before any module is evaluated; a bare
-// `node --test <file>` does not.
-if (!process.env.MANTA_STATE_HOME) {
-  throw new Error(
-    "MANTA_STATE_HOME is not set — refusing to run CTO tests against the live box state. " +
-      "Run via `npm test` or `npm run test:server` (both --import ./scripts/testSandbox.mjs), " +
-      "or set MANTA_STATE_HOME to a throwaway directory first.",
-  );
-}
+// BET-1490: shared fail-fast guard — must stay the first import (see ctoTestGuard.mjs).
+import "./ctoTestGuard.mjs";
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -161,10 +150,15 @@ function verdict(verdict, never, tsOffsetDays) {
   return { ts: NOW - (tsOffsetDays ?? 0) * DAY, verdict, ...(never ? { never: true } : {}) };
 }
 
+// The suggestionAcceptance health stat computed over the given verdicts.
+async function acceptanceStat(verdicts) {
+  const { stats } = await computeHealthStats({ now: () => NOW, verdictsRead: async () => verdicts });
+  return stats.find((x) => x.id === "suggestionAcceptance");
+}
+
 test("suggestion acceptance: collecting (n/10) until 10 acceptance-deciding verdicts", async () => {
   const verdicts = Array.from({ length: 5 }, (_, i) => verdict("accept", false, i));
-  const { stats } = await computeHealthStats({ now: () => NOW, verdictsRead: async () => verdicts });
-  const s = stats.find((x) => x.id === "suggestionAcceptance");
+  const s = await acceptanceStat(verdicts);
   assert.equal(s.min, HEALTH_STAT_MIN.suggestionAcceptance);
   assert.equal(s.n, 5);
   assert.equal(s.value, null);
@@ -177,8 +171,7 @@ test("suggestion acceptance: open/expire never enter the acceptance counters", a
     verdict("expire", false, 0),
     verdict("accept", false, 0),
   ];
-  const { stats } = await computeHealthStats({ now: () => NOW, verdictsRead: async () => verdicts });
-  const s = stats.find((x) => x.id === "suggestionAcceptance");
+  const s = await acceptanceStat(verdicts);
   assert.equal(s.n, 2); // only the two accept verdicts decide acceptance
   assert.equal(s.value, null); // still collecting
 });
@@ -188,8 +181,7 @@ test("suggestion acceptance: ≥10 verdicts renders accepted % (accept/edit succ
     ...Array.from({ length: 7 }, () => verdict("accept", false, 0)),
     ...Array.from({ length: 3 }, () => verdict("dismiss", false, 0)),
   ];
-  const { stats } = await computeHealthStats({ now: () => NOW, verdictsRead: async () => verdicts });
-  const s = stats.find((x) => x.id === "suggestionAcceptance");
+  const s = await acceptanceStat(verdicts);
   assert.equal(s.n, 10);
   assert.equal(s.value, "70% accepted");
 });
@@ -199,8 +191,7 @@ test("suggestion acceptance: a `never` flag counts as a rejection", async () => 
     ...Array.from({ length: 6 }, () => verdict("accept", false, 0)),
     ...Array.from({ length: 4 }, () => verdict("accept", true, 0)), // never-flagged accept → rejection
   ];
-  const { stats } = await computeHealthStats({ now: () => NOW, verdictsRead: async () => verdicts });
-  const s = stats.find((x) => x.id === "suggestionAcceptance");
+  const s = await acceptanceStat(verdicts);
   assert.equal(s.n, 10);
   assert.equal(s.value, "60% accepted");
 });
@@ -208,8 +199,7 @@ test("suggestion acceptance: a `never` flag counts as a rejection", async () => 
 test("suggestion acceptance: verdicts older than 30d are excluded", async () => {
   const old = verdict("accept", false, 40);
   const fresh = Array.from({ length: 10 }, () => verdict("accept", false, 1));
-  const { stats } = await computeHealthStats({ now: () => NOW, verdictsRead: async () => [old, ...fresh] });
-  const s = stats.find((x) => x.id === "suggestionAcceptance");
+  const s = await acceptanceStat([old, ...fresh]);
   assert.equal(s.n, 10);
 });
 

@@ -1,16 +1,5 @@
-// BET-1469: fail fast, before ANY test body runs, when this file is executed
-// outside the state sandbox. A CTO store module imported unsandboxed resolves
-// its paths against the LIVE box state (~/.manta) and a test would write
-// production data. `npm test` / `npm run test:server` set MANTA_STATE_HOME via
-// scripts/testSandbox.mjs before any module is evaluated; a bare
-// `node --test <file>` does not.
-if (!process.env.MANTA_STATE_HOME) {
-  throw new Error(
-    "MANTA_STATE_HOME is not set — refusing to run CTO tests against the live box state. " +
-      "Run via `npm test` or `npm run test:server` (both --import ./scripts/testSandbox.mjs), " +
-      "or set MANTA_STATE_HOME to a throwaway directory first.",
-  );
-}
+// BET-1490: shared fail-fast guard — must stay the first import (see ctoTestGuard.mjs).
+import "./ctoTestGuard.mjs";
 
 // src/server/ctoProfile.test.mjs
 // BET-1393 — profile engine (spec §8.1–8.4). Coverage per decomposition:
@@ -373,7 +362,8 @@ test("offHoursDeviation: 3am for a midday worker → flagged; midday → null", 
 // Engine integration (injected store)
 // ---------------------------------------------------------------------------
 
-test("engine: observable deterministic layer builds temporal stats", async () => {
+// An initialized profile over a capturing in-memory store.
+async function makeProfile() {
   const store = {
     saved: null,
     load: async () => ({}),
@@ -383,6 +373,11 @@ test("engine: observable deterministic layer builds temporal stats", async () =>
   };
   const p = createCtoProfile({ store, now: () => 0 });
   await p.init();
+  return { store, p };
+}
+
+test("engine: observable deterministic layer builds temporal stats", async () => {
+  const { p } = await makeProfile();
   const DAY = 86_400_000;
   // midday activity (epoch → Date shift is platform-dependent; use now()=0 offset)
   for (let i = 0; i < 5; i++) {
@@ -394,15 +389,7 @@ test("engine: observable deterministic layer builds temporal stats", async () =>
 });
 
 test("engine: atoms + session length apply through applySegmentSummary", async () => {
-  const store = {
-    saved: null,
-    load: async () => ({}),
-    save: async (d) => {
-      store.saved = d;
-    },
-  };
-  const p = createCtoProfile({ store, now: () => 0 });
-  await p.init();
+  const { p } = await makeProfile();
   await p.applySegmentSummary({
     project: "manta",
     atoms: [{ dimension: "swift", direction: "up", weight: 1, ref: "s1" }],
@@ -415,15 +402,7 @@ test("engine: atoms + session length apply through applySegmentSummary", async (
 });
 
 test("engine: weekly decay erodes repo familiarity from others' edits", async () => {
-  const store = {
-    saved: null,
-    load: async () => ({}),
-    save: async (d) => {
-      store.saved = d;
-    },
-  };
-  const p = createCtoProfile({ store, now: () => 0 });
-  await p.init();
+  const { store, p } = await makeProfile();
   await p.recordRepoEdit({ repo: "manta", own: true }); // 0.2 → ~0.28
   await p.recordRepoEdit({ repo: "manta", own: false });
   await p.recordRepoEdit({ repo: "manta", own: false }); // 2 others' edits pending

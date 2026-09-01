@@ -1,16 +1,5 @@
-// BET-1469: fail fast, before ANY test body runs, when this file is executed
-// outside the state sandbox. A CTO store module imported unsandboxed resolves
-// its paths against the LIVE box state (~/.manta) and a test would write
-// production data. `npm test` / `npm run test:server` set MANTA_STATE_HOME via
-// scripts/testSandbox.mjs before any module is evaluated; a bare
-// `node --test <file>` does not.
-if (!process.env.MANTA_STATE_HOME) {
-  throw new Error(
-    "MANTA_STATE_HOME is not set — refusing to run CTO tests against the live box state. " +
-      "Run via `npm test` or `npm run test:server` (both --import ./scripts/testSandbox.mjs), " +
-      "or set MANTA_STATE_HOME to a throwaway directory first.",
-  );
-}
+// BET-1490: shared fail-fast guard — must stay the first import (see ctoTestGuard.mjs).
+import "./ctoTestGuard.mjs";
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -52,6 +41,22 @@ function dayStart(offsetDays = 0) {
 }
 const MIDNIGHT = dayStart(0);
 const NOON = MIDNIGHT + 12 * 3_600_000;
+
+// A budget over a given payload snapshot with all external reads quiet (no
+// jobs, no git probes, no ledger/verdict/segment rows); `now` pins the clock.
+function makeQuietBudget(payload, now) {
+  let current = payload;
+  const store = { load: async () => current, save: async (p) => (current = p) };
+  return createCtoBudget({
+    store,
+    jobsRead: async () => [],
+    gitProbe: async () => ({ exists: false, isAncestor: false }),
+    ledgerRead: async () => [],
+    verdictsRead: async () => [],
+    segmentsRead: async () => [],
+    now,
+  });
+}
 
 test("cap defaults to $2.50 and honors ctoAmbientCap", () => {
   assert.equal(ambientCapUsd({}), DEFAULT_AMBIENT_CAP_USD);
@@ -745,17 +750,10 @@ test("refreshRoi: store and probe failures degrade without throwing (no frozen z
 });
 
 test("roiSnapshot: collectingUntil is the first month's end from the day buckets", async () => {
-  let payload = recordSpend(defaultBudgetPayload(), { now: dayStart(-40), usd: 0.5 });
-  const store = { load: async () => payload, save: async (p) => (payload = p) };
-  const budget = createCtoBudget({
-    store,
-    jobsRead: async () => [],
-    gitProbe: async () => ({ exists: false, isAncestor: false }),
-    ledgerRead: async () => [],
-    verdictsRead: async () => [],
-    segmentsRead: async () => [],
-    now: () => MIDNIGHT,
-  });
+  const budget = makeQuietBudget(
+    recordSpend(defaultBudgetPayload(), { now: dayStart(-40), usd: 0.5 }),
+    () => MIDNIGHT,
+  );
   const snap = await budget.roiSnapshot();
   assert.equal(snap.roll, null); // no refresh ran → no roll stored
   assert.equal(snap.collectingUntil, monthWindow(JUL_KEY).endTs);
@@ -877,16 +875,7 @@ test("refreshRoi freezes the closed month at its real spend after a >7-day outag
   payload = recordSpend(payload, { now: dayStart(-23), usd: 3 }); // Aug 5
   payload = recordSpend(payload, { now: dayStart(-8), usd: 7 }); // Aug 20 — the last pre-outage day
   payload = recordSpend(payload, { now: SEP_10, usd: 0.25 }); // Sep 10 — first post-boot spend
-  const store = { load: async () => payload, save: async (p) => (payload = p) };
-  const budget = createCtoBudget({
-    store,
-    jobsRead: async () => [],
-    gitProbe: async () => ({ exists: false, isAncestor: false }),
-    ledgerRead: async () => [],
-    verdictsRead: async () => [],
-    segmentsRead: async () => [],
-    now: () => SEP_10,
-  });
+  const budget = makeQuietBudget(payload, () => SEP_10);
   const r = await budget.refreshRoi();
   const aug = r.months["2026-08"];
   assert.ok(aug, "the closed month's roll exists");

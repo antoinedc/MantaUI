@@ -1,16 +1,5 @@
-// BET-1469: fail fast, before ANY test body runs, when this file is executed
-// outside the state sandbox. A CTO store module imported unsandboxed resolves
-// its paths against the LIVE box state (~/.manta) and a test would write
-// production data. `npm test` / `npm run test:server` set MANTA_STATE_HOME via
-// scripts/testSandbox.mjs before any module is evaluated; a bare
-// `node --test <file>` does not.
-if (!process.env.MANTA_STATE_HOME) {
-  throw new Error(
-    "MANTA_STATE_HOME is not set — refusing to run CTO tests against the live box state. " +
-      "Run via `npm test` or `npm run test:server` (both --import ./scripts/testSandbox.mjs), " +
-      "or set MANTA_STATE_HOME to a throwaway directory first.",
-  );
-}
+// BET-1490: shared fail-fast guard — must stay the first import (see ctoTestGuard.mjs).
+import "./ctoTestGuard.mjs";
 
 // src/server/ctoSegments.test.mjs — BET-1380 work segmentation (§5.1), segment
 // summaries (§5.2), turn completion, and the G refit. Pure logic only —
@@ -233,6 +222,31 @@ test("user abort (queued-drain) never caches a one-liner or flags a completion",
 });
 
 // ---------------------------------------------------------------------------
+// Two prompts 30s apart in session s1 (both within a 1-minute gap G).
+function seedTwoPrompts(h) {
+  h.set(0);
+  h.seg.observe(prompt("a"), { sessionID: "s1", project: "p", ts: h.now() });
+  h.set(30_000);
+  h.seg.observe(prompt("b"), { sessionID: "s1", ts: h.now() });
+}
+
+// A busy event then idle (turn completion), 1s apart, then the turn flush.
+async function observeTurnClose(h) {
+  h.set(1000);
+  h.seg.observe(busy(), { sessionID: "s1", ts: h.now() });
+  h.set(2000);
+  h.seg.observe(idle(), { sessionID: "s1", ts: h.now() });
+  await flushTurns(h.seg);
+}
+
+// Close session s1 with idle at 1s and return the persisted segment file.
+async function closeWithIdle(h) {
+  h.set(1000);
+  h.seg.observe(idle(), { sessionID: "s1", ts: h.now() });
+  await flushClose(h.seg);
+  return [...h.stores.segmentsStore.peek().values()][0];
+}
+
 // Segmentation: gap close, idle close (§5.1-a,b)
 // ---------------------------------------------------------------------------
 
@@ -242,10 +256,7 @@ test("events closer than G stay in one segment; idle closes it", async () => {
     g: 1, // G = 1 minute
     summarize: async (data) => { calls.push(data); return { ok: true, summary: validSummary({ window: data.start ? [0, 0] : [0, 0] }) }; },
   });
-  h.set(0);
-  h.seg.observe(prompt("a"), { sessionID: "s1", project: "p", ts: h.now() });
-  h.set(30_000);
-  h.seg.observe(prompt("b"), { sessionID: "s1", ts: h.now() }); // within G
+  seedTwoPrompts(h); // within G
   h.set(60_000);
   h.seg.observe(idle(), { sessionID: "s1", ts: h.now() }); // idle closes
   await flushClose(h.seg);
@@ -262,10 +273,7 @@ test("an inter-event gap exceeding G closes the segment and opens a new one", as
     g: 1, // G = 60000 ms
     summarize: async () => ({ ok: true, summary: validSummary() }),
   });
-  h.set(0);
-  h.seg.observe(prompt("a"), { sessionID: "s1", project: "p", ts: h.now() });
-  h.set(30_000);
-  h.seg.observe(prompt("b"), { sessionID: "s1", ts: h.now() }); // gap 30s < G
+  seedTwoPrompts(h); // gap 30s < G
   h.set(200_000);
   h.seg.observe(prompt("c"), { sessionID: "s1", ts: h.now() }); // gap 170s > G → closes seg1, opens seg2
   h.set(250_000);
@@ -327,11 +335,7 @@ test("one-liner computed at turn completion is cached and reused at segment clos
   });
   h.set(0);
   h.seg.observe(prompt("a"), { sessionID: "s1", project: "p", ts: h.now() });
-  h.set(1000);
-  h.seg.observe(busy(), { sessionID: "s1", ts: h.now() });
-  h.set(2000);
-  h.seg.observe(idle(), { sessionID: "s1", ts: h.now() }); // turn completion → one-liner
-  await flushTurns(h.seg);
+  await observeTurnClose(h);
   await flushClose(h.seg);
   assert.equal(oneLinerSeen.length, 1, "one-liner computed exactly once, at turn completion");
   assert.equal(h.seg.getOneLiner("s1"), "Fixed the login redirect", "cached");
@@ -344,11 +348,7 @@ test("a failed/absent one-liner degrades to the truncated last user prompt", asy
   const h = makeSeg({ computeOneLiner: async () => null });
   h.set(0);
   h.seg.observe(prompt("do the thing now"), { sessionID: "s1", ts: h.now() });
-  h.set(1000);
-  h.seg.observe(busy(), { sessionID: "s1", ts: h.now() });
-  h.set(2000);
-  h.seg.observe(idle(), { sessionID: "s1", ts: h.now() });
-  await flushTurns(h.seg);
+  await observeTurnClose(h);
   assert.equal(h.seg.getOneLiner("s1"), "do the thing now", "fallback is the truncated prompt");
 });
 
@@ -407,10 +407,7 @@ test("a non-gated validation failure persists a degraded summary and records the
   const h = makeSeg({ summarize: async () => ({ ok: false, gated: false }) });
   h.set(0);
   h.seg.observe(prompt("fix the bug please"), { sessionID: "s1", project: "p", ts: h.now() });
-  h.set(1000);
-  h.seg.observe(idle(), { sessionID: "s1", ts: h.now() });
-  await flushClose(h.seg);
-  const file = [...h.stores.segmentsStore.peek().values()][0];
+  const file = await closeWithIdle(h);
   assert.equal(file.summary.outcome, "in-progress");
   assert.equal(file.summary.one_liner, "fix the bug please");
   assert.ok(
@@ -423,10 +420,7 @@ test("a gated summary (disabled/paused) degrades without recording a failure", a
   const h = makeSeg({ summarize: async () => ({ ok: false, gated: true }) });
   h.set(0);
   h.seg.observe(prompt("work"), { sessionID: "s1", ts: h.now() });
-  h.set(1000);
-  h.seg.observe(idle(), { sessionID: "s1", ts: h.now() });
-  await flushClose(h.seg);
-  const file = [...h.stores.segmentsStore.peek().values()][0];
+  const file = await closeWithIdle(h);
   assert.equal(file.summary.outcome, "in-progress");
   assert.ok(
     !h.stores.ledgerStore.peek().some((r) => r.kind === "cto.segment_summary_failed"),

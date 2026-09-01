@@ -1,16 +1,5 @@
-// BET-1469: fail fast, before ANY test body runs, when this file is executed
-// outside the state sandbox. A CTO store module imported unsandboxed resolves
-// its paths against the LIVE box state (~/.manta) and a test would write
-// production data. `npm test` / `npm run test:server` set MANTA_STATE_HOME via
-// scripts/testSandbox.mjs before any module is evaluated; a bare
-// `node --test <file>` does not.
-if (!process.env.MANTA_STATE_HOME) {
-  throw new Error(
-    "MANTA_STATE_HOME is not set — refusing to run CTO tests against the live box state. " +
-      "Run via `npm test` or `npm run test:server` (both --import ./scripts/testSandbox.mjs), " +
-      "or set MANTA_STATE_HOME to a throwaway directory first.",
-  );
-}
+// BET-1490: shared fail-fast guard — must stay the first import (see ctoTestGuard.mjs).
+import "./ctoTestGuard.mjs";
 
 // ctoWatchers.test.mjs — standing-query watcher engine (BET-1398 / §4.3, §13.4).
 // Pure logic + injected I/O (fake store/ledger/engineState), no live services:
@@ -144,15 +133,21 @@ test("rate-threshold honors an eventKind filter (other kinds don't count)", asyn
   assert.equal(deps.ledgerRows.filter((r) => r.kind === "watcher.hit").length, 0);
 });
 
+// A usage-burn standing-query engine over `deps` with the canonical
+// registered predicate (windowMs 6000, capFraction 0.5), ticked once.
+async function makeBurnEngine(deps) {
+  const eng = createStandingQueryEngine(deps);
+  await eng.register({ predicate: { kind: USAGE_BURN, params: { windowMs: 6000, capFraction: 0.5 } } });
+  await eng.runTick();
+  return eng;
+}
+
 test("usage-burn fires when burst spend is at/above the cap fraction (once per window)", async () => {
   const deps = makeEngineDeps({
     getSpendInWindow: async () => 60, // windowMs 6000 of a day = huge share
     getCapUsd: async () => 100,
   });
-  const eng = createStandingQueryEngine(deps);
-  await eng.register({ predicate: { kind: USAGE_BURN, params: { windowMs: 6000, capFraction: 0.5 } } });
-  // 60 >= 0.5 * (100 * 6000 / 86400000)=0.0035 → true
-  await eng.runTick();
+  await makeBurnEngine(deps);
   assert.equal(deps.ledgerRows.filter((r) => r.kind === "watcher.hit").length, 1);
 });
 
@@ -161,9 +156,7 @@ test("usage-burn does not fire when spend is below the cap share", async () => {
     getSpendInWindow: async () => 0,
     getCapUsd: async () => 100,
   });
-  const eng = createStandingQueryEngine(deps);
-  await eng.register({ predicate: { kind: USAGE_BURN, params: { windowMs: 6000, capFraction: 0.5 } } });
-  await eng.runTick();
+  await makeBurnEngine(deps);
   assert.equal(deps.ledgerRows.filter((r) => r.kind === "watcher.hit").length, 0);
 });
 

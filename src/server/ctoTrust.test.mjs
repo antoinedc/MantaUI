@@ -1,16 +1,6 @@
-// BET-1469: fail fast, before ANY test body runs, when this file is executed
-// outside the state sandbox. A CTO store module imported unsandboxed resolves
-// its paths against the LIVE box state (~/.manta) and a test would write
-// production data. `npm test` / `npm run test:server` set MANTA_STATE_HOME via
-// scripts/testSandbox.mjs before any module is evaluated; a bare
-// `node --test <file>` does not.
-if (!process.env.MANTA_STATE_HOME) {
-  throw new Error(
-    "MANTA_STATE_HOME is not set — refusing to run CTO tests against the live box state. " +
-      "Run via `npm test` or `npm run test:server` (both --import ./scripts/testSandbox.mjs), " +
-      "or set MANTA_STATE_HOME to a throwaway directory first.",
-  );
-}
+// BET-1490: shared fail-fast guard — must stay the first import (see ctoTestGuard.mjs).
+import "./ctoTestGuard.mjs";
+import { memoryStore } from "./ctoTestStores.mjs";
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -36,18 +26,6 @@ import {
 // Fixtures
 // ---------------------------------------------------------------------------
 
-function memoryStore(initial = {}) {
-  // Deep-copy at the boundary like the real jsonStore (a parsed clone per
-  // load/save) — aliasing the live object would fake both migrations and
-  // clobbers.
-  let data = JSON.parse(JSON.stringify(initial ?? {}));
-  return {
-    load: async () => JSON.parse(JSON.stringify(data)),
-    save: async (p) => {
-      data = JSON.parse(JSON.stringify(p));
-    },
-  };
-}
 
 function makeTrust({ engineState = {}, verdictCount = 0 } = {}) {
   const ledgerRows = [];
@@ -62,6 +40,16 @@ function makeTrust({ engineState = {}, verdictCount = 0 } = {}) {
   };
   const trust = createCtoTrust({ ...stores, now: () => 1_000_000 });
   return { trust, stores, ledgerRows, verdictEntries };
+}
+
+// Record `accepts` successful verdicts then one dismissal for `subject`,
+// returning the post-drive state.
+async function driveVerdicts(h, subject, accepts) {
+  for (let i = 0; i < accepts; i++) {
+    await h.trust.noteVerdictEffects({ success: true }, { subject, verdict: "accept" });
+  }
+  await h.trust.noteVerdictEffects({ rejection: true }, { subject, verdict: "dismiss" });
+  return h.trust.getState();
 }
 
 // ---------------------------------------------------------------------------
@@ -315,11 +303,7 @@ test("promotion: accepts past the bar promote ask → veto-window, ledger + dige
   const subject = { type: "suggestion", id: "s1", class: "start-job" };
   // 31 accepts + 1 dismiss: the tail clears (a degenerate b=0 record never
   // passes — the estimator refuses zero-variance records).
-  for (let i = 0; i < 31; i++) {
-    await h.trust.noteVerdictEffects({ success: true }, { subject, verdict: "accept" });
-  }
-  await h.trust.noteVerdictEffects({ rejection: true }, { subject, verdict: "dismiss" });
-  const st = await h.trust.getState();
+  const st = await driveVerdicts(h, subject, 31);
   assert.equal(st.tiers["start-job"], TIER_VETO_WINDOW);
   assert.ok(h.ledgerRows.some((r) => r.kind === "trust.promoted" && r.cls === "start-job" && r.to === TIER_VETO_WINDOW));
   assert.equal(st.pending, 1);
@@ -334,11 +318,7 @@ test("promotion never fires under the cold-start gate, whatever the counters say
   const h = makeTrust({ verdictCount: 0 }); // cold start: < VERDICT_MIN verdicts
   const subject = { type: "suggestion", id: "s1", class: "start-job" };
   // A record that would pass the tail outside cold start.
-  for (let i = 0; i < 40; i++) {
-    await h.trust.noteVerdictEffects({ success: true }, { subject, verdict: "accept" });
-  }
-  await h.trust.noteVerdictEffects({ rejection: true }, { subject, verdict: "dismiss" });
-  const st = await h.trust.getState();
+  const st = await driveVerdicts(h, subject, 40);
   assert.equal(st.pending, 0);
   // And consult reports the ask cap while the global gate holds.
   const c = await h.trust.consult("start-job", { coldStart: true });
@@ -348,11 +328,7 @@ test("promotion never fires under the cold-start gate, whatever the counters say
 test("capped class never promotes even with a stellar record", async () => {
   const h = makeTrust({ verdictCount: VERDICT_MIN });
   const subject = { type: "suggestion", id: "c1", class: "config-change" };
-  for (let i = 0; i < 40; i++) {
-    await h.trust.noteVerdictEffects({ success: true }, { subject, verdict: "accept" });
-  }
-  await h.trust.noteVerdictEffects({ rejection: true }, { subject, verdict: "dismiss" });
-  const st = await h.trust.getState();
+  const st = await driveVerdicts(h, subject, 40);
   assert.equal(st.tiers["config-change"] ?? TIER_ASK, TIER_ASK);
   assert.equal(st.pending, 0); // no announcement either
   const c = await h.trust.consult("config-change", { coldStart: false });
@@ -417,11 +393,7 @@ test("act-and-report bookkeeping: ledger row + pending announcement, exactly-onc
 test("rolling window is capped and consumed by a tier change", async () => {
   const h = makeTrust({ verdictCount: VERDICT_MIN });
   const subject = { type: "suggestion", id: "s1", class: "start-job" };
-  for (let i = 0; i < 31; i++) {
-    await h.trust.noteVerdictEffects({ success: true }, { subject, verdict: "accept" });
-  }
-  await h.trust.noteVerdictEffects({ rejection: true }, { subject, verdict: "dismiss" });
-  let st = await h.trust.getState();
+  let st = await driveVerdicts(h, subject, 31);
   assert.equal(st.tiers["start-job"], TIER_VETO_WINDOW);
   assert.equal(st.stats["start-job"].recent.length, 0); // consumed by promotion
   // Keep recording: the window caps at REJECT_WINDOW entries.

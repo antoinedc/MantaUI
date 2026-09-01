@@ -1,16 +1,5 @@
-// BET-1469: fail fast, before ANY test body runs, when this file is executed
-// outside the state sandbox. A CTO store module imported unsandboxed resolves
-// its paths against the LIVE box state (~/.manta) and a test would write
-// production data. `npm test` / `npm run test:server` set MANTA_STATE_HOME via
-// scripts/testSandbox.mjs before any module is evaluated; a bare
-// `node --test <file>` does not.
-if (!process.env.MANTA_STATE_HOME) {
-  throw new Error(
-    "MANTA_STATE_HOME is not set — refusing to run CTO tests against the live box state. " +
-      "Run via `npm test` or `npm run test:server` (both --import ./scripts/testSandbox.mjs), " +
-      "or set MANTA_STATE_HOME to a throwaway directory first.",
-  );
-}
+// BET-1490: shared fail-fast guard — must stay the first import (see ctoTestGuard.mjs).
+import "./ctoTestGuard.mjs";
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -126,6 +115,16 @@ function makeDeps(overrides = {}) {
   return { deps, calls };
 }
 
+// The canonical §3.3 start-job probe: plain finding candidate, tracked cwd.
+async function runStartJobProbe(deps) {
+  const exec = createCtoActExecutor(deps);
+  return exec({
+    cls: "start-job",
+    action: { type: "start-job", payload: { prompt: "p", cwd: "/srv/app" } },
+    candidate: { finding: { text: "f", refs: [] } },
+  });
+}
+
 test("executor: record-decision proposes the gatekeeper-checked fact (behavior carried over from BET-1403)", async () => {
   const { deps, calls } = makeDeps();
   const exec = createCtoActExecutor(deps);
@@ -200,12 +199,7 @@ test("executor: start-job refuses at the §3.3 concurrent cto-delegate cap witho
       { id: "c", actor: "user", status: "running" },
     ],
   });
-  const exec = createCtoActExecutor(deps);
-  const out = await exec({
-    cls: "start-job",
-    action: { type: "start-job", payload: { prompt: "p", cwd: "/srv/app" } },
-    candidate: { finding: { text: "f", refs: [] } },
-  });
+  const out = await runStartJobProbe(deps);
   assert.equal(out.ok, false);
   assert.equal(out.reason, "rate_limit:concurrentDelegate");
   assert.equal(calls.beginDelegateJob, 0);
@@ -228,12 +222,7 @@ test("executor: start-job refusal from the delegate engine degrades with its err
   const { deps, calls } = makeDeps({
     startDelegateJob: async () => ({ ok: false, error: "at MAX_RUNNING_JOBS" }),
   });
-  const exec = createCtoActExecutor(deps);
-  const out = await exec({
-    cls: "start-job",
-    action: { type: "start-job", payload: { prompt: "p", cwd: "/srv/app" } },
-    candidate: { finding: { text: "f", refs: [] } },
-  });
+  const out = await runStartJobProbe(deps);
   assert.deepEqual(out, { ok: false, reason: "at MAX_RUNNING_JOBS" });
   assert.equal(calls.beginDelegateJob, 1);
   assert.equal(calls.gateReleased, 1);
@@ -241,12 +230,7 @@ test("executor: start-job refusal from the delegate engine degrades with its err
 
 test("executor: a §3.3 gate refusal (kill switch / pause) refuses the act before any start", async () => {
   const { deps, calls } = makeDeps({ beginDelegateJob: async () => ({ ok: false, error: "cto_paused" }) });
-  const exec = createCtoActExecutor(deps);
-  const out = await exec({
-    cls: "start-job",
-    action: { type: "start-job", payload: { prompt: "p", cwd: "/srv/app" } },
-    candidate: { finding: { text: "f", refs: [] } },
-  });
+  const out = await runStartJobProbe(deps);
   assert.deepEqual(out, { ok: false, reason: "cto_paused" });
   assert.equal(calls.startDelegateJob.length, 0);
   assert.equal(calls.gateReleased, 0);

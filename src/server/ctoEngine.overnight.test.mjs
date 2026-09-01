@@ -1,16 +1,5 @@
-// BET-1469: fail fast, before ANY test body runs, when this file is executed
-// outside the state sandbox. A CTO store module imported unsandboxed resolves
-// its paths against the LIVE box state (~/.manta) and a test would write
-// production data. `npm test` / `npm run test:server` set MANTA_STATE_HOME via
-// scripts/testSandbox.mjs before any module is evaluated; a bare
-// `node --test <file>` does not.
-if (!process.env.MANTA_STATE_HOME) {
-  throw new Error(
-    "MANTA_STATE_HOME is not set — refusing to run CTO tests against the live box state. " +
-      "Run via `npm test` or `npm run test:server` (both --import ./scripts/testSandbox.mjs), " +
-      "or set MANTA_STATE_HOME to a throwaway directory first.",
-  );
-}
+// BET-1490: shared fail-fast guard — must stay the first import (see ctoTestGuard.mjs).
+import "./ctoTestGuard.mjs";
 
 // BET-1419 overnight wiring tests (§11): window open → plan dispatch through
 // the delegate seams; §11.6 preemption on the user's return; the §9.2 veto
@@ -448,10 +437,7 @@ test("overnight: user prompt preempts — running cto jobs paused and the window
 
 test("overnight: veto card arms 30 min before the trough, cancels on the veto verdict, resolves once open", async () => {
   // Inside the pre-window: 20 min before the trough's start.
-  const due = h0().startMs;
-  const h = makeHarness({ trough: { startMs: due, endMs: due + 6 * HOUR }, queue: [QUEUE_TASK], projects: [] });
-  h.clock.ms = due - 20 * 60_000;
-  await h.engine.tick();
+  const { due, h } = await armVetoCard();
 
   assert.equal(h.overnightStoreObj.window?.countdown?.dueMs, due, "countdown armed at the trough start");
   assert.equal(h.vetoCards.length, 1);
@@ -517,12 +503,7 @@ test("overnight: veto card arms 30 min before the trough, cancels on the veto ve
 });
 
 test("overnight: an executed window feeds the veto record's acceptance (BET-1403 §9.4 veto→act bar)", async () => {
-  const due = h0().startMs;
-  const h = makeHarness({ trough: { startMs: due, endMs: due + 6 * HOUR }, queue: [QUEUE_TASK], projects: [] });
-
-  // Arm the veto card in the pre-window (no cancel this time).
-  h.clock.ms = due - 20 * 60_000;
-  await h.engine.tick();
+  const { due, h } = await armVetoCard();
   assert.equal(h.vetoCards.length, 1);
 
   // The clock enters the trough while the user is absent: the window opens
@@ -710,6 +691,16 @@ test("durability: a trust fold survives a queue-edit save landing after it (mirr
 });
 
 // Fixed trough helper for the veto-card test (a window that starts "now").
+// Arm a veto card: a harness with the canonical trough, the clock placed
+// 20 min inside the pre-window, one tick. Returns { due, h }.
+async function armVetoCard() {
+  const due = h0().startMs;
+  const h = makeHarness({ trough: { startMs: due, endMs: due + 6 * HOUR }, queue: [QUEUE_TASK], projects: [] });
+  h.clock.ms = due - 20 * 60_000;
+  await h.engine.tick();
+  return { due, h };
+}
+
 function h0() {
   return { startMs: 1_700_000_000_000 + 6 * HOUR, endMs: 1_700_000_000_000 + 12 * HOUR };
 }
