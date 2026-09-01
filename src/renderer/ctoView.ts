@@ -4,6 +4,7 @@
 // holds only deterministic mapping — no window.api, no React.
 import type { Api } from "../shared/api";
 import type { DelegateStartInput } from "../shared/types";
+import { cardHasContent } from "../shared/ctoCard.mjs";
 
 export type CtoDot = "active" | "disabled" | "thrifty" | "paused";
 
@@ -331,11 +332,12 @@ export type BlockerCard = {
 // POSITIVELY (`variant === "blocker"`) rather than by excluding the other
 // variants — a denylist that must be updated whenever a variant is added is
 // exactly the defect that let connect cards double-render as dead-end
-// blockers (BET-1467). Also drops a row with neither title nor body so an
-// empty card never reaches BlockerSection's live "Answer now" control.
+// blockers (BET-1467). Also drops a card with neither title nor body (via the
+// shared cardHasContent predicate, BET-1476) so an empty card never reaches
+// BlockerSection's live "Answer now" control.
 export function blockerCards(cards: ReadonlyArray<Record<string, unknown>>): BlockerCard[] {
   return (cards ?? [])
-    .filter((c) => c?.variant === "blocker")
+    .filter((c) => c?.variant === "blocker" && cardHasContent(c))
     .map((c) => ({
       id: String(c.id ?? ""),
       title: String(c.title ?? ""),
@@ -345,8 +347,7 @@ export function blockerCards(cards: ReadonlyArray<Record<string, unknown>>): Blo
       sessionID: typeof c.sessionID === "string" ? c.sessionID : null,
       pendingSince: Number.isFinite(c.pendingSince) ? (c.pendingSince as number) : 0,
       refs: Array.isArray(c.refs) ? (c.refs as string[]) : [],
-    }))
-    .filter((c) => c.title || c.body);
+    }));
 }
 
 // Readable relative time (age stamps, Just-finished relative time). Short
@@ -545,15 +546,14 @@ export type VetoCardRow = {
 
 export function vetoCards(cards: ReadonlyArray<Record<string, unknown>>): VetoCardRow[] {
   return (cards ?? [])
-    .filter((c) => c?.variant === "veto")
+    .filter((c) => c?.variant === "veto" && cardHasContent(c))
     .map((c) => ({
       id: String(c.id ?? ""),
       title: String(c.title ?? ""),
       body: String(c.body ?? ""),
       dueMs: Number.isFinite(c.dueMs) ? (c.dueMs as number) : null,
       options: Array.isArray(c.options) ? (c.options as VetoCardRow["options"]) : [],
-    }))
-    .filter((c) => c.title || c.body);
+    }));
 }
 
 // BET-1395: the open connect-ask cards (§10.3 connect variant) among the wire
@@ -569,7 +569,7 @@ export type ConnectCardRow = {
 
 export function connectCards(cards: ReadonlyArray<Record<string, unknown>>): ConnectCardRow[] {
   return (cards ?? [])
-    .filter((c) => c?.variant === "connect")
+    .filter((c) => c?.variant === "connect" && cardHasContent(c))
     .map((c) => ({
       id: String(c.id ?? ""),
       title: String(c.title ?? ""),
@@ -584,8 +584,7 @@ export function connectCards(cards: ReadonlyArray<Record<string, unknown>>): Con
             }),
           )
         : [],
-    }))
-    .filter((c) => c.title || c.body);
+    }));
 }
 
 // BET-1431 (BET-1395 residue): the connect answer's argument-building step,

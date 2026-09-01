@@ -559,15 +559,20 @@ test("resume() clears health-escalation blocker cards (health recovered)", async
   assert.ok(h.cardCalls.some((c) => c.fn === "onHealthRecovered"));
 });
 
-test("defaultGetCounts counts open cards from an injected cards store (BET-1469)", async () => {
+test("defaultGetCounts counts only open cards with content from an injected cards store (BET-1469, BET-1476)", async () => {
   const { defaultGetCounts } = await import("./ctoEngine.mjs");
   // The counting logic needs no real store: the cards store is injectable, so
   // this test no longer writes cards.json (sandboxed or otherwise).
+  // BET-1476: a contentless open card is the §10.3-invisible residue BET-1469
+  // stopped writing — it must NOT increment the needs-you count (the badge
+  // would advertise an answerable item no pane section renders), while a
+  // titled open card still does.
   let payload = {
     v: 1,
     cards: [
       { id: "a", state: "open" },
-      { id: "b", state: "resolved" },
+      { id: "b", state: "open", title: "Probe failing", body: "update \"GROQ\" on the secrets surface" },
+      { id: "c", state: "resolved", title: "Probe failing" },
     ],
   };
   const cardStore = {
