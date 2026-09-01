@@ -30,6 +30,7 @@ import { createSegmenter } from "./ctoSegments.mjs";
 import { startOfDay } from "./ctoRollups.mjs";
 import { createFactsEngine } from "./ctoFacts.mjs";
 import { windowFor } from "./ctoRollups.mjs";
+import { BLOCKER_AFTER_MS } from "./ctoCards.mjs";
 
 // Build a fully-injected engine harness: no real fs, no real stores, a fake
 // clock we can advance. Everything the engine touches goes through these
@@ -93,33 +94,50 @@ function makeMemoryStores() {
   };
 }
 
-function makeHarness({ ctoEnabled = false, counts = {}, rollups, facts } = {}) {
+function makeHarness({ ctoEnabled = false, counts = {}, rollups, facts, realCards = false, engineStateInit = {} } = {}) {
   const clock = { ms: 1_000_000 };
   const now = () => clock.ms;
   const ledgerRows = [];
   let pendingBlockers = [];
+  let pendingAsks = Array.isArray(engineStateInit?.pendingAsks) ? engineStateInit.pendingAsks : [];
   let killSwitchPaused = false;
   let published = [];
   let currentConfig = { ctoEnabled };
   const cardCalls = [];
-  const state = { v: 1, pendingBlockers: [] };
+  const state = { v: 1, pendingBlockers: [], ...(engineStateInit ?? {}) };
   const budgetCfg = { budgetIsHit: false, tier: "low" };
   const memStores = makeMemoryStores();
   memStores.ledger.append = async (row) => ledgerRows.push(row);
+  // BET-1407: with `realCards` the engine builds its REAL cards manager over
+  // the bundle's cards store — captured here so tests can assert cards.json
+  // contents without real fs.
+  let cardsPayload = { v: 1, cards: [] };
+  if (realCards) {
+    memStores.cards = {
+      load: async () => ({ ...cardsPayload }),
+      save: async (p) => {
+        cardsPayload = { ...p };
+      },
+    };
+  }
 
   const engine = createCtoEngine({
     configGet: async () => ({ ...currentConfig }),
     stores: memStores,
-    cards: {
-      onAskStart: (...a) => (cardCalls.push({ fn: "onAskStart", args: a }), Promise.resolve()),
-      onAskResolved: (...a) => (
-        cardCalls.push({ fn: "onAskResolved", args: a }),
-        Promise.resolve({ changed: false })
-      ),
-      onHealthRecovered: (...a) => (cardCalls.push({ fn: "onHealthRecovered", args: a }), Promise.resolve()),
-      promoteDue: async () => ({}),
-      ingestHealthEscalations: async () => ({}),
-    },
+    ...(realCards
+      ? {}
+      : {
+          cards: {
+            onAskStart: (...a) => (cardCalls.push({ fn: "onAskStart", args: a }), Promise.resolve()),
+            onAskResolved: (...a) => (
+              cardCalls.push({ fn: "onAskResolved", args: a }),
+              Promise.resolve({ changed: false })
+            ),
+            onHealthRecovered: (...a) => (cardCalls.push({ fn: "onHealthRecovered", args: a }), Promise.resolve()),
+            promoteDue: async () => ({}),
+            ingestHealthEscalations: async () => ({}),
+          },
+        }),
     engineState: {
       load: async () => ({ ...state }),
       save: async (payload) => {
@@ -127,6 +145,8 @@ function makeHarness({ ctoEnabled = false, counts = {}, rollups, facts } = {}) {
           ? payload.pendingBlockers
           : [];
         state.pendingBlockers = pendingBlockers;
+        pendingAsks = Array.isArray(payload?.pendingAsks) ? payload.pendingAsks : [];
+        state.pendingAsks = pendingAsks;
         if (payload?.rollupCursor) state.rollupCursor = payload.rollupCursor;
         if (payload?.segmentGMinutes != null) state.segmentGMinutes = payload.segmentGMinutes;
       },
@@ -170,6 +190,10 @@ function makeHarness({ ctoEnabled = false, counts = {}, rollups, facts } = {}) {
     get pendingBlockers() {
       return pendingBlockers;
     },
+    get pendingAsks() {
+      return pendingAsks;
+    },
+    cardsStore: () => cardsPayload,
     get killSwitchPaused() {
       return killSwitchPaused;
     },
@@ -1046,4 +1070,58 @@ test("the engine surface declares get cards() exactly once (BET-1466 item 7: dup
   const src = readFileSync(new URL("./ctoEngine.mjs", import.meta.url), "utf8");
   const count = src.split("get cards()").length - 1;
   assert.equal(count, 1, "a duplicated object-literal key silently shadows its twin");
+});
+
+// ---------------------------------------------------------------------------
+// BET-1407: the in-flight ask registry survives restarts. `start()` seeds it
+// from the persisted half (engine-state.json `pendingAsks`) so an ask that
+// crossed the 10-min card threshold while the box was down still promotes on
+// the next card tick, and a promoted ask is consumed from both halves.
+// ---------------------------------------------------------------------------
+
+test("BET-1407: engine start() seeds pendingAsks from the persisted registry and an ask past the 10-min threshold promotes on the next card tick", async () => {
+  // The harness clock starts at 1_000_000 — askedAt literals are relative to
+  // that. One ask crossed BLOCKER_AFTER_MS while the box was down; one is
+  // still young.
+  const h = makeHarness({
+    realCards: true,
+    engineStateInit: {
+      pendingAsks: [
+        { sourceKind: "question", sourceId: "que_old", sessionID: "s_old", body: "Old ask", askedAt: 1_000_000 - (BLOCKER_AFTER_MS + 60_000) },
+        { sourceKind: "question", sourceId: "que_new", sessionID: "s_new", body: "Young ask", askedAt: 1_000_000 - 60_000 },
+      ],
+    },
+  });
+  await h.engine.start();
+  // Seeded: both rows are live in memory, and the file kept them (nothing
+  // was stale — the seed write is a pure no-op).
+  assert.deepEqual(h.pendingAsks.map((a) => a.sessionID).sort(), ["s_new", "s_old"]);
+  // The straddled ask promotes on the next card tick (called directly —
+  // deterministic stand-in for the 60s poller) and is CONSUMED from both
+  // registry halves.
+  await h.engine.cards.promoteDue();
+  const open = h.cardsStore().cards.filter((c) => c.variant === "blocker" && c.state === "open");
+  assert.equal(open.length, 1);
+  assert.equal(open[0].sessionID, "s_old");
+  assert.equal(open[0].pendingSince, 1_000_000 - (BLOCKER_AFTER_MS + 60_000));
+  assert.deepEqual(h.pendingAsks.map((a) => a.sessionID), ["s_new"]);
+  assert.deepEqual(h.pendingAsks, h.state.pendingAsks, "memory and the persisted half agree");
+  h.engine.dispose();
+});
+
+test("BET-1407: engine start() drops a persisted ask past the blocker retention window", async () => {
+  const h = makeHarness({
+    realCards: true,
+    engineStateInit: {
+      pendingAsks: [
+        // 8 days old — past the existing blocker retention window.
+        { sourceKind: "question", sourceId: "que_rot", sessionID: "s_rot", body: "rotted", askedAt: 1_000_000 - 8 * 24 * 60 * 60_000 },
+        { sourceKind: "question", sourceId: "que_new", sessionID: "s_new", body: "Young ask", askedAt: 1_000_000 - 60_000 },
+      ],
+    },
+  });
+  await h.engine.start();
+  assert.deepEqual(h.pendingAsks.map((a) => a.sessionID), ["s_new"]);
+  assert.deepEqual(h.state.pendingAsks.map((a) => a.sessionID), ["s_new"], "the stale row is dropped from the persisted half too");
+  h.engine.dispose();
 });

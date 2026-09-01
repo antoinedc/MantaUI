@@ -13,6 +13,7 @@ import {
   isAskStartEvent,
   stableCardId,
 } from "./ctoCards.mjs";
+import { INBOX_TTL_MS } from "./ctoStores.mjs";
 
 // A fully-injected card harness: real in-memory card store, engine-state,
 // ledger and a clock we control. No real fs — pure behavior. The
@@ -71,6 +72,11 @@ function makeHarness({ pendingBlockers = [], fireNotify = false } = {}) {
     },
     setPendingBlockers(b) {
       engineState = { v: 1, pendingBlockers: b };
+    },
+    // BET-1407: pre-load the persisted ask registry (engine-state.json
+    // `pendingAsks`) the way a previous boot would have left it.
+    setPendingAsks(rows) {
+      engineState = { v: 1, pendingBlockers: [], pendingAsks: [...rows] };
     },
     advance(ms) {
       clock.ms += ms;
@@ -597,4 +603,124 @@ test("resolveConnectCards: resolves the open card for the tool and writes the le
   // Resolving an absent tool changes nothing.
   const r2 = await h.cards.resolveConnectCards("ghost", "no-op");
   assert.equal(r2.changed, false);
+});
+
+// ---------------------------------------------------------------------------
+// BET-1407: the in-flight ask registry is persisted (engine-state.json
+// `pendingAsks`) through the SAME patchEngineState seam the pendingBlockers
+// writers use, seeded back on start, bounded by the existing blocker
+// retention window, and consumed on promotion/resolution.
+// ---------------------------------------------------------------------------
+
+test("BET-1407: onAskStart persists the ask into engine-state pendingAsks; re-registration replaces, never duplicates", async () => {
+  const h = makeHarness();
+  await h.cards.onAskStart({ sourceKind: "question", sourceId: "que_1", sessionID: "s1", body: "Pick one?", ts: h.clock.ms });
+  let rows = h.engineStateSnapshot().pendingAsks;
+  assert.equal(rows.length, 1);
+  assert.deepEqual(rows[0], { sourceKind: "question", sourceId: "que_1", sessionID: "s1", body: "Pick one?", askedAt: h.clock.ms });
+  // Duplicate registration (global + scoped event) replaces the row — one
+  // entry per ask in both registry halves.
+  h.advance(1000);
+  await h.cards.onAskStart({ sourceKind: "question", sourceId: "que_1", sessionID: "s1", body: "Pick one?", ts: h.clock.ms });
+  rows = h.engineStateSnapshot().pendingAsks;
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].askedAt, h.clock.ms);
+  // Memory and store agree on the same key set.
+  assert.equal(h.engineStateSnapshot().pendingAsks.length, 1);
+});
+
+test("BET-1407: onInboxBlocker persists its registration under the same idiom (keyed by sessionID or sourceId)", async () => {
+  const h = makeHarness({ fireNotify: true });
+  await h.cards.onInboxBlocker({ message: "deploy failed", tag: "deploy", sessionID: "s7", ts: h.clock.ms });
+  let rows = h.engineStateSnapshot().pendingAsks;
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].sessionID, "s7");
+  assert.equal(rows[0].sourceKind, "inbox");
+  // A sessionless note keys by its stable source id.
+  await h.cards.onInboxBlocker({ message: "disk almost full", tag: "disk", ts: h.clock.ms });
+  rows = h.engineStateSnapshot().pendingAsks;
+  assert.equal(rows.length, 2);
+  assert.equal(rows[1].sessionID, undefined);
+  assert.ok(rows[1].sourceId);
+});
+
+test("BET-1407: promoteDue consumes the promoted ask — removed from the registry and engine-state, no re-promotion", async () => {
+  const h = makeHarness();
+  const t0 = h.clock.ms;
+  await h.cards.onAskStart({ sourceKind: "question", sourceId: "que_1", sessionID: "s1", body: "Pick one?", ts: t0 });
+  h.advance(BLOCKER_AFTER_MS + 60_000);
+  const r = await h.cards.promoteDue();
+  assert.equal(r.promoted, 1);
+  assert.equal(openCardCount(h), 1);
+  // The registry entry is gone from BOTH halves once the card owns the surface.
+  assert.equal(h.engineStateSnapshot().pendingAsks.length, 0);
+  // A second tick re-promotes nothing (no card dup, no registry resurrection).
+  const r2 = await h.cards.promoteDue();
+  assert.equal(r2.promoted, 0);
+  assert.equal(r2.changed, false);
+  assert.equal(openCardCount(h), 1);
+  assert.equal(h.engineStateSnapshot().pendingAsks.length, 0);
+});
+
+test("BET-1407: onAskResolved prunes the persisted registry row", async () => {
+  const h = makeHarness();
+  await h.cards.onAskStart({ sourceKind: "question", sourceId: "que_1", sessionID: "s1", body: "Pick one?", ts: h.clock.ms });
+  assert.equal(h.engineStateSnapshot().pendingAsks.length, 1);
+  await h.cards.onAskResolved({ sessionID: "s1", ts: h.clock.ms });
+  assert.equal(h.engineStateSnapshot().pendingAsks.length, 0);
+});
+
+test("BET-1407: seedPendingAsks restores in-flight asks — an ask past the 10-min threshold promotes on the next tick", async () => {
+  const h = makeHarness();
+  const t0 = h.clock.ms;
+  // What a previous boot persisted: one ask that crossed the threshold while
+  // the box was down, one young ask.
+  h.setPendingAsks([
+    { sourceKind: "question", sourceId: "que_old", sessionID: "s_old", body: "Old ask", askedAt: t0 - (BLOCKER_AFTER_MS + 60_000) },
+    { sourceKind: "question", sourceId: "que_new", sessionID: "s_new", body: "Young ask", askedAt: t0 - 60_000 },
+  ]);
+  const seeded = await h.cards.seedPendingAsks();
+  assert.equal(seeded.seeded, 2);
+  assert.equal(seeded.dropped, 0);
+  // The straddled ask promotes — the card is not lost to the restart.
+  const r = await h.cards.promoteDue();
+  assert.equal(r.promoted, 1);
+  const open = h.store().cards.filter((c) => c.variant === "blocker" && c.state === "open");
+  assert.equal(open.length, 1);
+  assert.equal(open[0].sessionID, "s_old");
+  // The consumed entry leaves the persisted registry; the young ask remains.
+  assert.deepEqual(h.engineStateSnapshot().pendingAsks.map((a) => a.sessionID), ["s_new"]);
+});
+
+test("BET-1407: seedPendingAsks drops asks past the existing blocker retention window (INBOX_TTL_MS.blocker) from both halves", async () => {
+  const h = makeHarness();
+  const t0 = h.clock.ms;
+  const cutoff = t0 - INBOX_TTL_MS.blocker;
+  h.setPendingAsks([
+    { sourceKind: "question", sourceId: "que_rot", sessionID: "s_rot", body: "rotted", askedAt: cutoff - 1 },
+    { sourceKind: "question", sourceId: "que_edge", sessionID: "s_edge", body: "at the cutoff is kept", askedAt: cutoff },
+    { sourceKind: "question", sourceId: "que_young", sessionID: "s_young", body: "young", askedAt: t0 - 60_000 },
+  ]);
+  const seeded = await h.cards.seedPendingAsks();
+  assert.equal(seeded.seeded, 2);
+  assert.equal(seeded.dropped, 1);
+  // Dropped from the persisted half too (the file must not accumulate).
+  assert.deepEqual(h.engineStateSnapshot().pendingAsks.map((a) => a.sessionID), ["s_edge", "s_young"]);
+  // Malformed rows (unkeyable / unageable) are unreconstructable — dropped.
+  h.setPendingAsks([
+    { sourceKind: "question", sourceId: "que_x", body: "no askedAt" },
+    { body: "no key", askedAt: t0 },
+  ]);
+  const seeded2 = await h.cards.seedPendingAsks();
+  assert.equal(seeded2.seeded, 0);
+  assert.equal(seeded2.dropped, 2);
+  assert.equal(h.engineStateSnapshot().pendingAsks.length, 0);
+});
+
+test("BET-1407: seedPendingAsks with no persisted registry is a pure no-op (no engine-state write)", async () => {
+  const h = makeHarness();
+  const patchesBefore = h.patchCalls.length;
+  const seeded = await h.cards.seedPendingAsks();
+  assert.deepEqual(seeded, { seeded: 0, dropped: 0 });
+  assert.equal(h.patchCalls.length, patchesBefore);
 });
