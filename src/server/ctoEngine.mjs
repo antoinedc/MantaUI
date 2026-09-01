@@ -892,16 +892,30 @@ export function createCtoEngine(deps = {}) {
     }
   }
 
-  // Exceeding a rate limit pauses the engine + raises a health warning (§3.3
-  // / §10.6-7). The pause is an in-memory BACKOFF (BET-1508): the tick
-  // auto-clears it once RATE_LIMIT_COOLDOWN_MS has elapsed. It never touches
-  // the kill-switch flag, so it can never override a human's Pause.
-  async function exceedRateLimit(limitId) {
-    selfPaused = true;
-    selfPausedAt = now();
+  // A tripped rate limit. Two severities (BET-1513 follow-up):
+  //   pause  — the RUNAWAY-shaped limit (sessionCreationsPerHour): a loop is
+  //          creating sessions faster than they finish. The engine pauses all
+  //          work and raises a rate_limit health card; the in-memory pause is
+  //          a BACKOFF auto-cleared by the tick after RATE_LIMIT_COOLDOWN_MS
+  //          (never the kill-switch flag, so a human Pause always wins).
+  //   shed   — the CONCURRENCY limits (concurrentEphemeral/concurrentDelegate):
+  //          "one more ambient call than slots" is a transient condition whose
+  //          correct response is refusing THE CALL — the caller already
+  //          degrades gracefully on {ok:false} — not pausing the whole engine.
+  //          Pausing here wedged busy boxes into a trip→backoff→burst→trip
+  //          oscillation (observed live 2026-09-01: boot → 5 ambient sessions
+  //          → trip → 5-min backoff → self-resume → re-trip 30s later), with
+  //          the dot reading paused most of the time. A shed is ledgered for
+  //          the drill-down; it raises NO needs-you card — routine backoff is
+  //          not something the user must act on.
+  async function exceedRateLimit(limitId, { pause = true } = {}) {
     await ledgerLog({ kind: "cto.ratelimit_trip", reason: limitId, source: "engine" });
-    await recordBlocker("rate_limit", limitId);
-    await syncState();
+    if (pause) {
+      selfPaused = true;
+      selfPausedAt = now();
+      await recordBlocker("rate_limit", limitId);
+      await syncState();
+    }
   }
 
   // ----- Session / job creation gates (§3.3) -----
@@ -947,7 +961,7 @@ export function createCtoEngine(deps = {}) {
       /* a failed cap read must not block ambient work */
     }
     if (track.ephemeral >= rateLimits.concurrentEphemeral) {
-      await exceedRateLimit("concurrentEphemeral");
+      await exceedRateLimit("concurrentEphemeral", { pause: false });
       return { ok: false, error: "rate_limit:concurrentEphemeral" };
     }
     track.recordSessionCreation();
@@ -961,7 +975,7 @@ export function createCtoEngine(deps = {}) {
     if (!enabledNow) return { ok: false, error: "cto_disabled" };
     if (paused) return { ok: false, error: "cto_paused" };
     if (track.delegate >= rateLimits.concurrentDelegate) {
-      await exceedRateLimit("concurrentDelegate");
+      await exceedRateLimit("concurrentDelegate", { pause: false });
       return { ok: false, error: "rate_limit:concurrentDelegate" };
     }
     const release = track.beginDelegate();

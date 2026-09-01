@@ -266,13 +266,7 @@ test("disabled engine refuses to start sessions", async () => {
 
 test("session-creations-per-hour limit trips to paused + health escalation", async () => {
   const h = makeHarness({ ctoEnabled: true });
-  for (let i = 0; i < RATE_LIMITS.sessionCreationsPerHour; i++) {
-    h.engine.rateTracker.recordSessionCreation();
-  }
-  const gate = await h.engine.checkCanCreateSession();
-  assert.equal(gate.ok, false);
-  assert.equal(gate.error, "rate_limit:sessionCreationsPerHour");
-  assert.equal((await h.engine.getState()).dot, DOT.PAUSED);
+  await tripSessionCreationLimit(h);
   const trip = h.ledgerRows.find((r) => r.kind === "cto.ratelimit_trip");
   assert.ok(trip, "rate-limit trip ledgered");
   assert.equal(trip.reason, "sessionCreationsPerHour");
@@ -281,12 +275,19 @@ test("session-creations-per-hour limit trips to paused + health escalation", asy
   assert.equal(h.pendingBlockers[0].source, "rate_limit");
 });
 
-test("concurrent ephemeral cap trips to paused", async () => {
+test("concurrent ephemeral cap SHEDS the call but does not pause the engine", async () => {
   const h = makeHarness({ ctoEnabled: true });
   await tripEphemeralLimit(h);
+  // The rejected caller degrades gracefully; the ENGINE keeps working —
+  // a concurrency blip is a per-call backoff, not a whole-engine pause.
+  assert.equal((await h.engine.getState()).dot, DOT.ACTIVE);
+  assert.equal(h.pendingBlockers.length, 0, "no needs-you card for a routine shed");
+  const trip = h.ledgerRows.find((r) => r.kind === "cto.ratelimit_trip");
+  assert.ok(trip, "the shed is ledgered for the drill-down");
+  assert.equal(trip.reason, "concurrentEphemeral");
 });
 
-test("concurrent delegate cap trips to paused", async () => {
+test("concurrent delegate cap sheds without pausing", async () => {
   const h = makeHarness({ ctoEnabled: true });
   for (let i = 0; i < RATE_LIMITS.concurrentDelegate; i++) {
     assert.equal((await h.engine.beginDelegateJob()).ok, true);
@@ -294,12 +295,13 @@ test("concurrent delegate cap trips to paused", async () => {
   const third = await h.engine.beginDelegateJob();
   assert.equal(third.ok, false);
   assert.equal(third.error, "rate_limit:concurrentDelegate");
-  assert.equal((await h.engine.getState()).dot, DOT.PAUSED);
+  assert.equal((await h.engine.getState()).dot, DOT.ACTIVE);
+  assert.equal(h.pendingBlockers.length, 0);
 });
 
 // ----- BET-1508: a rate-limit self-pause is a BACKOFF, not a policy -----
 
-// Shared setup: saturate the concurrent-ephemeral cap and take the trip.
+// Shared setup: saturate the concurrent-ephemeral cap and take the shed.
 async function tripEphemeralLimit(h) {
   for (let i = 0; i < RATE_LIMITS.concurrentEphemeral; i++) {
     assert.equal((await h.engine.beginEphemeral()).ok, true);
@@ -307,12 +309,23 @@ async function tripEphemeralLimit(h) {
   const sixth = await h.engine.beginEphemeral();
   assert.equal(sixth.ok, false);
   assert.equal(sixth.error, "rate_limit:concurrentEphemeral");
+}
+
+// Shared setup: trip the RUNAWAY limit (the one that pauses) and prove the
+// self-pause shape.
+async function tripSessionCreationLimit(h) {
+  for (let i = 0; i < RATE_LIMITS.sessionCreationsPerHour; i++) {
+    h.engine.rateTracker.recordSessionCreation();
+  }
+  const gate = await h.engine.checkCanCreateSession();
+  assert.equal(gate.ok, false);
+  assert.equal(gate.error, "rate_limit:sessionCreationsPerHour");
   assert.equal((await h.engine.getState()).dot, DOT.PAUSED);
 }
 
 test("BET-1508: the rate-limit self-pause auto-clears after the cool-down and never touches the kill switch", async () => {
   const h = makeHarness({ ctoEnabled: true });
-  await tripEphemeralLimit(h);
+  await tripSessionCreationLimit(h);
   // The trip raised the rate_limit health escalation…
   assert.equal(h.pendingBlockers.length, 1);
   assert.equal(h.pendingBlockers[0].source, "rate_limit");
