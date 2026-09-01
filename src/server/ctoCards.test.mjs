@@ -12,8 +12,10 @@ import {
   askResolveInfo,
   askStartInfo,
   createCtoCards,
+  inboxGroupKey,
   isAskResolveEvent,
   isAskStartEvent,
+  senderSlug,
   stableCardId,
 } from "./ctoCards.mjs";
 import { INBOX_TTL_MS } from "./ctoStores.mjs";
@@ -24,7 +26,7 @@ import { INBOX_TTL_MS } from "./ctoStores.mjs";
 // (a static patch object, or a `(fresh) => patch` function; a key set to
 // `undefined` deletes it) but without its mutex — fine for these
 // single-threaded, sequential-await tests.
-function makeHarness({ pendingBlockers = [], fireNotify = false } = {}) {
+function makeHarness({ pendingBlockers = [], fireNotify = false, getSessionInfo = null } = {}) {
   const clock = { ms: 1_000_000 };
   let cardPayload = { v: 1, cards: [] };
   const ledgerRows = [];
@@ -47,6 +49,7 @@ function makeHarness({ pendingBlockers = [], fireNotify = false } = {}) {
     },
     ledger: { append: async (row) => ledgerRows.push(row) },
     ...(fireNotify ? { fireNotify: async (a) => notified.push(a) } : {}),
+    ...(getSessionInfo ? { getSessionInfo } : {}),
     now: () => clock.ms,
     patchEngineState: async (mutation) => {
       patchCalls.push(mutation);
@@ -425,6 +428,105 @@ test("BET-1397 source 3: an inbox blocker fires the blocking-tier notify exactly
   assert.deepEqual(open[0].refs, ["BET-777"]);
 });
 
+// ---------------------------------------------------------------------------
+// Inbox-note grouping: one card per CONDITION, not one per restatement.
+// ---------------------------------------------------------------------------
+
+test("senderSlug: reads the agent's self-identifying prefix, ignoring decoration", () => {
+  assert.equal(senderSlug("tenanture-ops watchdog: root filesystem / is at 92%"), "tenanture-ops");
+  assert.equal(senderSlug("🤖 tenanture-ops early warning (tick 2026-08-31T20:35Z): …"), "tenanture-ops");
+  assert.equal(senderSlug("tenanture-ops tick 2026-09-01T00:10Z: root fs at 93%"), "tenanture-ops");
+  assert.equal(senderSlug("U6 SafeModules background job cannot run."), "u6");
+  // Not an identity: a bare number, a too-short token, or no leading word.
+  assert.equal(senderSlug("2026-08-31 disk report"), null);
+  assert.equal(senderSlug("  "), null);
+  assert.equal(senderSlug(undefined), null);
+});
+
+test("inboxGroupKey: tag wins, then project, then sender slug, then raw text", () => {
+  assert.equal(
+    inboxGroupKey({ tag: "root-disk", title: "x", message: "y", project: "p" }),
+    "tag:root-disk",
+  );
+  assert.equal(inboxGroupKey({ title: "x", message: "y", project: "tenanture" }), "project:tenanture");
+  assert.equal(inboxGroupKey({ message: "tenanture-ops watchdog: disk" }), "sender:tenanture-ops");
+  // Title is preferred over message for the slug.
+  assert.equal(
+    inboxGroupKey({ title: "ops-bot: disk", message: "other-bot: disk" }),
+    "sender:ops-bot",
+  );
+  assert.equal(inboxGroupKey({ message: "2026 report" }), "text:2026 report");
+});
+
+test("REGRESSION (2026-09-01): a watchdog restating one condition each tick yields ONE card, not one per tick", async () => {
+  const h = makeHarness({ fireNotify: true });
+  // The five real notes that produced five "Blocker flagged for CTO" cards:
+  // same condition, prose moving every tick (percentage, free-GB, timestamp),
+  // no dedupe tag, and a DIFFERENT sender session each tick.
+  const notes = [
+    ["tenanture-ops watchdog: root filesystem / is at 92% (6.2 GiB free of 75G)", "Root disk 92%"],
+    ["🤖 tenanture-ops early warning (tick 2026-08-31T20:35Z): root filesystem / is at 92% (6.1G free)", "Root fs at 92%"],
+    ["🤖 tenanture-ops watchdog (tick 2026-08-31T21:08Z): ROOT filesystem / is at 93% (5.5G free)", "Root fs 93%"],
+    ["tenanture-ops tick 2026-09-01T00:10Z: root filesystem / at 93% (5.4G free of 75G)", "Root disk 93%"],
+    ["tenanture-ops INFRA-DOWN escalation: root filesystem / at 96% (3.4G free of 75G)", "Root fs 96%"],
+  ];
+  for (const [message, title] of notes) {
+    await h.cards.onInboxBlocker({ message, title, sessionID: `ses-${Math.random()}`, ts: h.clock.ms });
+    h.advance(BLOCKER_AFTER_MS + 1);
+    await h.cards.promoteDue();
+  }
+
+  const open = h.store().cards.filter((c) => c.state === "open");
+  assert.equal(open.length, 1, "one condition → one card");
+  const card = open[0];
+  // The newest restatement is what the card says…
+  assert.match(card.body, /96%/);
+  // …under the SENDER's own headline, not the old constant.
+  assert.equal(card.title, "Root fs 96%");
+  // …aged from the FIRST report, and counting the restatements.
+  assert.equal(card.pendingSince, 1_000_000);
+  assert.equal(card.repeatCount, 5);
+  // Every note still fired its own blocking-tier notification (unchanged).
+  assert.equal(h.notified.length, 5);
+});
+
+test("inbox grouping: distinct conditions still get distinct cards", async () => {
+  const h = makeHarness();
+  await h.cards.onInboxBlocker({ message: "tenanture-ops watchdog: disk full", ts: h.clock.ms });
+  await h.cards.onInboxBlocker({ message: "U6 SafeModules job cannot run", ts: h.clock.ms });
+  await h.cards.onInboxBlocker({ message: "deploy-bot: release stuck", tag: "rel", ts: h.clock.ms });
+  h.advance(BLOCKER_AFTER_MS + 1);
+  await h.cards.promoteDue();
+  assert.equal(openCardCount(h), 3);
+});
+
+test("inbox grouping: an identical repeat is a pure no-op (no save, no ledger row, no count bump)", async () => {
+  const h = makeHarness();
+  await h.cards.onInboxBlocker({ message: "ops-bot: disk full", title: "Disk", ts: h.clock.ms });
+  h.advance(BLOCKER_AFTER_MS + 1);
+  await h.cards.promoteDue();
+  const rowsAfterFirst = h.ledgerRows.filter((r) => r.kind === CARD_CREATED).length;
+  const countAfterFirst = h.store().cards.find((c) => c.state === "open").repeatCount;
+
+  await h.cards.onInboxBlocker({ message: "ops-bot: disk full", title: "Disk", ts: h.clock.ms });
+  h.advance(BLOCKER_AFTER_MS + 1);
+  await h.cards.promoteDue();
+
+  assert.equal(openCardCount(h), 1);
+  assert.equal(h.ledgerRows.filter((r) => r.kind === CARD_CREATED).length, rowsAfterFirst);
+  assert.equal(h.store().cards.find((c) => c.state === "open").repeatCount, countAfterFirst);
+});
+
+test("inbox grouping: a tmux-resolvable sender groups by workspace", async () => {
+  const h = makeHarness({ getSessionInfo: async () => ({ owner: "user", project: "tenanture" }) });
+  // Two notes whose slugs DIFFER — only the resolved workspace can group them.
+  await h.cards.onInboxBlocker({ message: "alpha-bot: disk full", sessionID: "s1", ts: h.clock.ms });
+  await h.cards.onInboxBlocker({ message: "beta-bot: disk still full", sessionID: "s2", ts: h.clock.ms });
+  h.advance(BLOCKER_AFTER_MS + 1);
+  await h.cards.promoteDue();
+  assert.equal(openCardCount(h), 1);
+});
+
 test("upsertDecision: writes a decision card, and regenerating the same id upserts (no duplicate)", async () => {
   const h = makeHarness();
   const first = await h.cards.upsertDecision({
@@ -621,19 +723,27 @@ test("BET-1407: onAskStart persists the ask into engine-state pendingAsks; re-re
   assert.equal(h.engineStateSnapshot().pendingAsks.length, 1);
 });
 
-test("BET-1407: onInboxBlocker persists its registration under the same idiom (keyed by sessionID or sourceId)", async () => {
+test("BET-1407: onInboxBlocker persists its registration under the same idiom (keyed by the note's CONDITION)", async () => {
   const h = makeHarness({ fireNotify: true });
   await h.cards.onInboxBlocker({ message: "deploy failed", tag: "deploy", sessionID: "s7", ts: h.clock.ms });
   let rows = h.engineStateSnapshot().pendingAsks;
   assert.equal(rows.length, 1);
-  assert.equal(rows[0].sessionID, "s7");
   assert.equal(rows[0].sourceKind, "inbox");
-  // A sessionless note keys by its stable source id.
+  // An inbox note is registered WITHOUT a sessionID, on purpose: a recurring
+  // reporter opens a new session per tick, so keying the registry by session
+  // would re-open the per-tick duplication the group key exists to close. The
+  // originating session is retained separately for traceability.
+  assert.equal(rows[0].sessionID, undefined);
+  assert.equal(rows[0].noteSessionID, "s7");
+  assert.ok(rows[0].sourceId);
+  // A different condition is a separate registry row.
   await h.cards.onInboxBlocker({ message: "disk almost full", tag: "disk", ts: h.clock.ms });
   rows = h.engineStateSnapshot().pendingAsks;
   assert.equal(rows.length, 2);
-  assert.equal(rows[1].sessionID, undefined);
-  assert.ok(rows[1].sourceId);
+  assert.notEqual(rows[0].sourceId, rows[1].sourceId);
+  // The SAME condition from a new session replaces its row, never adds one.
+  await h.cards.onInboxBlocker({ message: "deploy failed again", tag: "deploy", sessionID: "s8", ts: h.clock.ms });
+  assert.equal(h.engineStateSnapshot().pendingAsks.length, 2);
 });
 
 test("BET-1407: promoteDue consumes the promoted ask — removed from the registry and engine-state, no re-promotion", async () => {

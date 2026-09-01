@@ -206,6 +206,7 @@ const card = (over = {}) => ({
   sessionID: "s1",
   pendingSince: 1000,
   refs: [] as string[],
+  repeatCount: 1,
   ...over,
 });
 
@@ -584,6 +585,17 @@ it("blockerCards: drops a row with neither title nor body", () => {
   ];
   const out = blockerCards(cards as unknown as CtoCard[]);
   expect(out.map((c) => c.id)).toEqual(["b2", "b3"]);
+});
+
+it("blockerCards: repeatCount defaults to 1 for pre-counter cards and junk, and carries a real count", () => {
+  const cards = [
+    { id: "b1", variant: "blocker", title: "old card", body: "written before the counter existed" },
+    { id: "b2", variant: "blocker", title: "recurring", body: "x", repeatCount: 7 },
+    { id: "b3", variant: "blocker", title: "junk", body: "x", repeatCount: 0 },
+    { id: "b4", variant: "blocker", title: "junk", body: "x", repeatCount: "many" },
+  ];
+  const out = blockerCards(cards as unknown as CtoCard[]);
+  expect(out.map((c) => c.repeatCount)).toEqual([1, 7, 1, 1]);
 });
 
 it("vetoCards: drops a row with neither title nor body", () => {

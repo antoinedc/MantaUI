@@ -326,6 +326,8 @@ export type BlockerCard = {
   sessionID: string | null;
   pendingSince: number;
   refs: string[];
+  // >= 1. How many times this condition has been reported (see CtoCard).
+  repeatCount: number;
 };
 
 // Selector: the open blocker cards among the wire cards (§10.3). Selected
@@ -349,6 +351,10 @@ export function blockerCards(cards: ReadonlyArray<CtoCard>): BlockerCard[] {
       sessionID: typeof c.sessionID === "string" ? c.sessionID : null,
       pendingSince: Number.isFinite(c.pendingSince) ? (c.pendingSince as number) : 0,
       refs: Array.isArray(c.refs) ? (c.refs as string[]) : [],
+      // Absent on cards written before the counter existed → reported once.
+      repeatCount: Number.isFinite(c.repeatCount) && (c.repeatCount as number) > 0
+        ? (c.repeatCount as number)
+        : 1,
     }));
 }
 
@@ -453,7 +459,10 @@ export function digestExpandable(item: { deep?: string | null } | null | undefin
 // passed as `digestHasItems` so an empty-but-present digest counts as empty.
 export function resting(
   inputs: {
-    cards?: BlockerCard[] | null;
+    // Only the COUNT is read — any card-ish list is a valid input, so this
+    // must not demand a fully-selected BlockerCard (the caller passes the raw
+    // wire rows).
+    cards?: readonly unknown[] | null;
     nowActive?: unknown[] | null;
     finished?: unknown[] | null;
     digestHasItems?: boolean;

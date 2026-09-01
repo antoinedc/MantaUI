@@ -265,6 +265,11 @@ export type CtoCard = {
   pendingSince: number;
   created: number;
   state: "open" | "resolved" | "dismissed";
+  // How many times this same condition has been reported (blocker variant).
+  // 1 (or absent, on cards written before the counter existed) = reported
+  // once. A recurring watchdog now bumps this instead of minting a new card,
+  // so the count IS the escalation signal.
+  repeatCount?: number;
   // BET-1392 decision cards (§9.1) — present only when variant === "decision".
   // `why` is the one-paragraph rationale; `options` are the bound-action
   // buttons (closed ACTION_TYPES enum); `evidence` feeds the "evidence ▸"

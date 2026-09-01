@@ -181,11 +181,70 @@ export function askResolveInfo(evt) {
   return { sessionID: typeof props.sessionID === "string" ? props.sessionID : null };
 }
 
+// ----- Inbox-note grouping (pure) -----
+//
+// The §10.3 never-duplicate rule applied to inbox blocker notes. Health
+// escalations already fold by CONDITION (healthGroupKey); inbox notes used to
+// key on `tag || message`, so a watchdog reporting the SAME condition every
+// tick — with the percentage, free-GB and tick timestamp moving each time —
+// minted a brand-new card per tick. That is the literal 2026-09-01 incident:
+// five "Blocker flagged for CTO" cards, one root-disk condition.
+//
+// The key is layered, first hit wins:
+//   1. `tag`      — the sender's own dedupe key (§4.4). Authoritative.
+//   2. `project`  — the sender session's resolved workspace, when the session
+//                   is tmux-stamped. Sessionless / subagent senders (which is
+//                   most watchdogs) resolve to nothing, hence layer 3.
+//   3. sender slug — the agent's self-identifying prefix, the way these notes
+//                   actually open ("tenanture-ops watchdog: …", "🤖 tenanture-ops
+//                   tick …"). One recurring reporter → one card.
+//   4. message    — the old whole-text hash, kept as the last resort so a note
+//                   that identifies itself in no way at all still gets a card.
+
+// Leading decoration a note may open with before its slug: emoji/pictographs,
+// zero-width joiners, variation selectors, and surrounding whitespace.
+const NOTE_DECORATION_RE = /^[\s\u200d\ufe0f\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]+/u;
+
+// The sender's self-identifying slug: the leading `word` (letters/digits with
+// internal - or _) of a note, lowercased. Returns null when the note does not
+// open with one, or when the leading token is a bare number/date (never an
+// identity). Deliberately NOT a general text normalizer — it reads only the
+// prefix agents use to name themselves, which is stable while the rest of the
+// sentence (percentages, sizes, timestamps) moves every tick.
+export function senderSlug(text) {
+  if (typeof text !== "string") return null;
+  const stripped = text.replace(NOTE_DECORATION_RE, "");
+  const m = stripped.match(/^([A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)*)/);
+  if (!m) return null;
+  const slug = m[1].toLowerCase();
+  // A single letter is noise ("A note that…"); two characters is already a
+  // real identity in practice (work-unit names like "U6").
+  return slug.length >= 2 ? slug : null;
+}
+
+// The grouping identity for one inbox blocker note. Pure; `project` is the
+// caller-resolved workspace (may be undefined). Always returns a non-empty
+// string so a card is never dropped for want of a key.
+export function inboxGroupKey({ tag, title, message, project } = {}) {
+  if (typeof tag === "string" && tag) return `tag:${tag}`;
+  if (typeof project === "string" && project) return `project:${project}`;
+  const slug = senderSlug(title) ?? senderSlug(message);
+  if (slug) return `sender:${slug}`;
+  return `text:${typeof message === "string" ? message : ""}`;
+}
+
 // Human blocker copy for a worker-ask event (title/body). Pure.
-export function blockerTitle(kind) {
+// `noteTitle` (inbox only) is the SENDER's own headline — every one of these
+// notes carries a good one ("Root fs 95% on runtime host — needs human cleanup
+// decision") and the card used to throw it away for a constant, which is a
+// large part of why several distinct cards read as one thing repeated.
+export function blockerTitle(kind, noteTitle) {
   if (kind === "permission") return "Permission needed";
   if (kind === "question") return "Question waiting";
-  if (kind === "inbox") return "Blocker flagged for CTO";
+  if (kind === "inbox") {
+    const t = typeof noteTitle === "string" ? noteTitle.trim() : "";
+    return t || "Blocker flagged for CTO";
+  }
   return "Health check";
 }
 
@@ -226,10 +285,14 @@ function healthGroupKey(b) {
 // card, ignoring `updatedAt` (which always moves — it is the "when did we
 // last check" stamp, not content). A content-identical rebuild is not a
 // change: no save, no CARD_CREATED ledger row. Arrays are compared by value.
+// `repeatCount` is excluded for the same reason as `updatedAt`: it is
+// bookkeeping ABOUT the change, not content. Including it would make every
+// rebuild differ from itself and defeat the no-op rule entirely.
 function cardContentEqual(a, b) {
   if (!a || !b) return false;
   const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
   keys.delete("updatedAt");
+  keys.delete("repeatCount");
   for (const key of keys) {
     const av = a[key];
     const bv = b[key];
@@ -255,6 +318,11 @@ export function createCtoCards(deps = {}) {
     // router (push.mjs fireNotify). Only `onInboxBlocker` uses it — worker-ask
     // and health cards keep the "no notification path" invariant.
     fireNotify = async () => {},
+    // Resolves a session id to its workspace (`{project}`) — the engine's own
+    // getSessionInfo. Used ONLY as grouping layer 2 for inbox notes; a
+    // sessionless/subagent sender (most watchdogs) resolves to nothing and
+    // falls through to the sender-slug layer. Best-effort by contract.
+    getSessionInfo = null,
     now = () => Date.now(),
     // BET-1463: the writer for consuming/dropping a `pendingBlockers` entry in
     // engine-state.json once its health card has been upserted or its card
@@ -288,6 +356,21 @@ export function createCtoCards(deps = {}) {
   // the injected router exactly once, and registers a pending blocker so the
   // card timer (promoteDue) promotes it at > 10 min like any ask. Read-only on
   // the inbox itself — the inbound funnel already persisted the entry.
+  // Grouping layer 2: the sender session's workspace, when it is tmux-stamped.
+  // Never throws and never blocks the card path — an unresolvable sender just
+  // falls through to the slug layer.
+  async function resolveNoteProject(sessionID) {
+    if (typeof getSessionInfo !== "function" || typeof sessionID !== "string" || !sessionID) {
+      return undefined;
+    }
+    try {
+      const info = await getSessionInfo(sessionID);
+      return typeof info?.project === "string" && info.project ? info.project : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   async function onInboxBlocker({ message, title, refs = [], tag, sessionID, ts = now() } = {}) {
     const text = typeof message === "string" ? message.trim() : "";
     if (!text) return { changed: false, notified: false };
@@ -302,19 +385,28 @@ export function createCtoCards(deps = {}) {
     } catch (e) {
       console.warn("[cto] inbox blocker notify failed:", e?.message ?? e);
     }
-    // Register a pending blocker so the card appears at > 10 min. Key by the
-    // sending session when known, else by a stable hash of the tag/message;
-    // the card id stays stable across re-reports of the same note (upsert).
-    const sourceId = stableCardId(INBOX_SOURCE_KIND, tag || text);
+    // Register a pending blocker so the card appears at > 10 min. The card id
+    // is keyed by the note's CONDITION (inboxGroupKey), not its prose, so a
+    // watchdog restating the same condition every tick upserts one card
+    // instead of minting a new one per tick.
+    const project = await resolveNoteProject(sessionID);
+    const groupKey = inboxGroupKey({ tag, title, message: text, project });
+    const sourceId = stableCardId(INBOX_SOURCE_KIND, groupKey);
     await registerAsk({
       sourceKind: INBOX_SOURCE_KIND,
       sourceId,
-      sessionID: typeof sessionID === "string" ? sessionID : undefined,
+      // Deliberately NOT keyed by sessionID: a recurring reporter opens a new
+      // session per tick, so keying the registry by session would re-open the
+      // per-tick duplication the group key just closed. `askKeyOf` falls back
+      // to sourceId, which IS the condition.
+      sessionID: undefined,
+      noteSessionID: typeof sessionID === "string" ? sessionID : undefined,
+      title: typeof title === "string" ? title : undefined,
       body: text,
       refs: Array.isArray(refs) ? refs : [],
       askedAt: ts,
     });
-    return { changed: true, notified: true };
+    return { changed: true, notified: true, groupKey };
   }
 
   // BET-1407: best-effort persist of one registry change through the engine's
@@ -422,6 +514,12 @@ export function createCtoCards(deps = {}) {
       const cards = Array.isArray(fresh?.cards) ? fresh.cards : [];
       const existing = cards.find((c) => c?.id === id && c?.state === "open");
       const created = existing?.created ?? ts;
+      // A regeneration keeps the EARLIEST outstanding age (§9.1 carried-forward
+      // open state): a recurring condition has been waiting since its first
+      // report, not since its latest restatement.
+      const since = Number.isFinite(existing?.pendingSince)
+        ? Math.min(existing.pendingSince, pendingSince)
+        : pendingSince;
       const card = buildBlockerCard({
         id,
         sourceKind,
@@ -430,7 +528,7 @@ export function createCtoCards(deps = {}) {
         title,
         body,
         refs,
-        pendingSince,
+        pendingSince: since,
         created,
       });
       cardRefs = card.refs;
@@ -441,9 +539,15 @@ export function createCtoCards(deps = {}) {
       if (existing && cardContentEqual(existing, { ...card, updatedAt: ts })) return {};
       changed = true;
       isNew = !existing;
+      // A genuine restatement of an existing condition — the count is the
+      // escalation signal ("this has now fired 7 times"), which was previously
+      // expressed as seven separate cards.
+      const repeatCount = existing ? (existing.repeatCount ?? 1) + 1 : 1;
       const nextCards = existing
-        ? cards.map((c) => (c === existing ? { ...existing, ...card, created, updatedAt: ts } : c))
-        : [...cards, card];
+        ? cards.map((c) =>
+            c === existing ? { ...existing, ...card, created, repeatCount, updatedAt: ts } : c,
+          )
+        : [...cards, { ...card, repeatCount }];
       return { cards: nextCards };
     });
     if (changed) {
@@ -590,13 +694,14 @@ export function createCtoCards(deps = {}) {
     const consumedKeys = [];
     for (const ask of pendingAsks.values()) {
       if (nowMs - ask.askedAt < BLOCKER_AFTER_MS) continue;
+      const fallbackRef = ask.sessionID ?? ask.noteSessionID;
       const r = await upsertBlocker({
         sourceKind: ask.sourceKind,
         sourceId: ask.sourceId,
         sessionID: ask.sessionID,
-        title: blockerTitle(ask.sourceKind),
+        title: blockerTitle(ask.sourceKind, ask.title),
         body: blockerBody(ask.sourceKind, ask.body),
-        refs: Array.isArray(ask.refs) && ask.refs.length ? ask.refs : ask.sessionID ? [ask.sessionID] : [],
+        refs: Array.isArray(ask.refs) && ask.refs.length ? ask.refs : fallbackRef ? [fallbackRef] : [],
         ts: nowMs,
         pendingSince: ask.askedAt,
       });
