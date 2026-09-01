@@ -3524,6 +3524,92 @@ test("apt_priv is the ONLY way install.sh runs apt (no call bypasses the chokepo
   );
 });
 
+// ----------------------------------------------------------------------------
+// Caddy signing-key import — the SECOND unanswerable prompt on the same stage.
+//
+// Same root cause as apt_priv above (ssh -tt, stdin ignored, nothing can
+// answer a question), different command: `gpg --dearmor -o <path>` asks
+// "File '<path>' exists. Overwrite? (y/N)" whenever the keyring is already
+// there. That is the NORMAL state on a retry — the first attempt writes the
+// key, fails or is cancelled later, and every run after that hangs HERE
+// deterministically, which is why the field report read as "stalls forever,
+// every time". Reported on Ubuntu 22.04, stuck at "Starting the service".
+// ----------------------------------------------------------------------------
+
+test("gpg --dearmor is always non-interactive (--batch --yes) in install.sh", () => {
+  // Assert on the whole file, not one branch: a single prompting call site
+  // reopens the hang. Mirrors the apt_priv chokepoint test above.
+  const bare = [];
+  for (const line of readFileSync(INSTALL_SH, "utf-8").split("\n")) {
+    if (line.trim().startsWith("#")) continue;
+    if (!/\bgpg\b.*--dearmor/.test(line)) continue;
+    if (!line.includes("--batch") || !line.includes("--yes")) bare.push(line.trim());
+  }
+  assert.deepEqual(
+    bare,
+    [],
+    `gpg --dearmor without --batch --yes (prompts + hangs on a retry):\n${bare.join("\n")}`,
+  );
+});
+
+test("gpg --dearmor: --batch --yes overwrites an existing keyring instead of asking", () => {
+  // The behavioural half — proves the flags actually fix it rather than just
+  // being present. With a tty (what `ssh -tt` gives the installer) the bare
+  // form BLOCKS on the prompt forever; with stdin closed and no tty, as here,
+  // the same prompt surfaces as a hard failure instead. Either way the bare
+  // form cannot succeed against an existing file and the fixed form must.
+  const gpg = spawnSync("gpg", ["--version"], { encoding: "utf-8" });
+  if (gpg.error) return; // no gpg on this machine — nothing to assert
+  const dir = mkdtempSync(join(tmpdir(), "manta-gpgkey-"));
+  try {
+    const src = join(dir, "key.asc");
+    const out = join(dir, "keyring.gpg");
+    // A real armored key so --dearmor has valid input.
+    writeFileSync(
+      src,
+      execSync(
+        "gpg --batch --yes --quiet --passphrase '' --quick-generate-key manta-test-key default default never" +
+          " >/dev/null 2>&1; gpg --armor --export manta-test-key",
+        { encoding: "utf-8", env: { ...process.env, GNUPGHOME: dir } },
+      ),
+    );
+    const run = (args) =>
+      spawnSync("gpg", [...args, "--dearmor", "-o", out], {
+        input: readFileSync(src),
+        encoding: "utf-8",
+        timeout: 20_000,
+      });
+
+    // Fresh target: both forms work, so the target must exist for the
+    // assertions below to mean anything.
+    assert.equal(run(["--batch", "--yes"]).status, 0);
+    assert.ok(statSync(out).size > 0);
+
+    // Existing target: the bare form cannot get through…
+    assert.notEqual(run([]).status, 0);
+    // …the fixed form does, silently.
+    assert.equal(run(["--batch", "--yes"]).status, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the Caddy signing key fetch is time-bounded (unreachable host fails, never hangs)", () => {
+  // The key comes from a third-party host (Cloudsmith). Unreachable rather
+  // than slow, an unbounded curl waits forever — same stage, same symptom as
+  // the prompt above, so it needs the same treatment.
+  // Join `\`-continued lines first (the invocation wraps), then anchor on a
+  // line that STARTS with the command — the die message below it quotes the
+  // same URL as advice for the user, and matching that would assert nothing.
+  const line = readFileSync(INSTALL_SH, "utf-8")
+    .replace(/\\\n\s*/g, " ")
+    .split("\n")
+    .find((l) => /^\s*(if\s+!\s+)?curl\b/.test(l) && l.includes("dl.cloudsmith.io"));
+  assert.ok(line, "expected a curl invocation for the Caddy signing key");
+  assert.match(line, /--connect-timeout \d+/);
+  assert.match(line, /--max-time \d+/);
+});
+
 test("BET-979: setup_askpass creates the SUDO_ASKPASS helper and exports it", () => {
   const dir = mkdtempSync(join(tmpdir(), "manta-setupask-"));
   try {
