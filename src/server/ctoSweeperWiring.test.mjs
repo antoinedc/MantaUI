@@ -1,3 +1,17 @@
+// BET-1469: fail fast, before ANY test body runs, when this file is executed
+// outside the state sandbox. A CTO store module imported unsandboxed resolves
+// its paths against the LIVE box state (~/.manta) and a test would write
+// production data. `npm test` / `npm run test:server` set MANTA_STATE_HOME via
+// scripts/testSandbox.mjs before any module is evaluated; a bare
+// `node --test <file>` does not.
+if (!process.env.MANTA_STATE_HOME) {
+  throw new Error(
+    "MANTA_STATE_HOME is not set — refusing to run CTO tests against the live box state. " +
+      "Run via `npm test` or `npm run test:server` (both --import ./scripts/testSandbox.mjs), " +
+      "or set MANTA_STATE_HOME to a throwaway directory first.",
+  );
+}
+
 // ctoSweeperWiring.test.mjs — BET-1464 defect 1 wiring gate. index.mjs cannot
 // be imported (it boots the server on import), so the sweeper's startup
 // wiring is asserted by a source scan: the poller must be imported from
