@@ -43,6 +43,7 @@
 // ctoPath() (test-sandbox rule).
 
 import { createHash } from "node:crypto";
+import { cardHasContent } from "../shared/ctoCard.mjs";
 import {
   INBOX_TTL_MS,
   cardsStore,
@@ -85,6 +86,31 @@ export const CONNECT_SOURCE_KIND = "tool";
 // failure that degraded the digest. Keyed by `<tool>/<probe>`; the body
 // deep-links (in copy) to the secrets surface — the fix is a rotated key.
 export const PROBE_SOURCE_KIND = "probe";
+
+// BET-1498: engine-state.json marker key for the one-time prune of the
+// pre-BET-1469 contentless open cards. Same idempotency contract as the
+// watchers migration (ctoWatchers.mjs migrateLegacy): the stamp lands only
+// after the prune's save succeeded, so a failed write retries next boot and
+// a re-deploy is a no-op.
+export const CONTENTLESS_CARD_PRUNE_KEY = "contentlessCardPrune";
+
+// Pure split for the BET-1498 one-time prune: drop ONLY open rows that fail
+// the shared cardHasContent predicate — the §10.3-invisible residue BET-1469
+// stopped writing (no coerced title AND no coerced body renders in no pane
+// section and, since BET-1476, no longer counts toward the badge, so nothing
+// could ever resolve or dismiss it). Rows that are not open — and malformed
+// rows — are left exactly where they are; this retires dead rows, it does
+// not relitigate the store's schema.
+export function splitContentlessOpenCards(cards) {
+  const rows = Array.isArray(cards) ? cards : [];
+  const keep = [];
+  const dropped = [];
+  for (const c of rows) {
+    if (c && c.state === "open" && !cardHasContent(c)) dropped.push(c);
+    else keep.push(c);
+  }
+  return { keep, dropped };
+}
 
 // §10.6-7 probe-auth-failure card copy (3 consecutive auth failures — the
 // runner's AUTH_FAIL_ESCALATE). `secretKey` is the vault KEY NAME (not a
@@ -626,6 +652,52 @@ export function createCtoCards(deps = {}) {
     return { seeded: keep.length, dropped };
   }
 
+  // BET-1498: one-time retirement of the pre-BET-1469 residue — open cards in
+  // cards.json with neither a title nor a body. BET-1476 already stopped the
+  // badge counting them, so they render nowhere and nothing can ever resolve
+  // or dismiss them: dead rows that only a load-time prune can retire.
+  // Marker-guarded in engine-state.json with the same contract as the
+  // watchers migration (ctoWatchers migrateLegacy): the stamp lands only
+  // AFTER the prune's save succeeded, so a failed write retries next boot and
+  // a re-deploy is a no-op. The prune itself is a patchStore read-fresh-write
+  // under the cards mutex (BET-1464 defect 3) — an already-clean store is a
+  // pure no-op (no save). `{pruned, marked}` for diagnostics/tests; a missing
+  // engine-state writer (standalone/test usage) skips only the stamp.
+  async function pruneLegacyOpenCards() {
+    let meta = {};
+    try {
+      meta = (await engineState.load()) ?? {};
+    } catch {
+      meta = {};
+    }
+    if (meta?.[CONTENTLESS_CARD_PRUNE_KEY]?.pruned === true) {
+      return { pruned: 0, marked: false };
+    }
+    let pruned = 0;
+    await patchStore(cardStore, (fresh) => {
+      const cards = Array.isArray(fresh?.cards) ? fresh.cards : [];
+      const { keep, dropped } = splitContentlessOpenCards(cards);
+      pruned = dropped.length;
+      return dropped.length ? { cards: keep } : {};
+    });
+    let marked = false;
+    if (typeof patchEngineStatePatch === "function") {
+      try {
+        await patchEngineStatePatch((fresh) => ({
+          [CONTENTLESS_CARD_PRUNE_KEY]: {
+            ...(fresh?.[CONTENTLESS_CARD_PRUNE_KEY] || {}),
+            pruned: true,
+            at: now(),
+          },
+        }));
+        marked = true;
+      } catch {
+        /* best-effort — an unstamped marker just re-prunes a clean store next boot */
+      }
+    }
+    return { pruned, marked };
+  }
+
   // Source (2): read the watchdog's blocker-card requests that A2 already
   // writes to engine-state.json `pendingBlockers` and turn the unresolved ones
   // into health blocker cards. `{changed}` for tests/diagnostics.
@@ -907,6 +979,7 @@ export function createCtoCards(deps = {}) {
     onAskResolved,
     onInboxBlocker,
     seedPendingAsks,
+    pruneLegacyOpenCards,
     promoteDue,
     ingestHealthEscalations,
     onHealthRecovered,
