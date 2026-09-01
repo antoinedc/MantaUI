@@ -580,12 +580,18 @@ export function purgeExpiredInbox(entries, { nowMs = Date.now(), expiresField = 
   return { keep, dropped };
 }
 
+// BET-1482: every sweep write is a patchStore read-filter-write section — the
+// whole-payload spread-save (`save({ ...payload, entries: keep })`) loaded its
+// snapshot OUTSIDE any mutex, so a sweep landing between another writer's load
+// and save (or racing a second sweep) could revert that writer's update. An
+// empty patch resolves to a pure no-op: no save fires when nothing expired.
 export async function sweepInbox(nowMs = Date.now()) {
-  const payload = await inboxStore.load();
-  const entries = Array.isArray(payload?.entries) ? payload.entries : [];
-  if (entries.length === 0) return;
-  const { keep } = purgeExpiredInbox(entries, { nowMs });
-  if (keep.length !== entries.length) await inboxStore.save({ ...payload, entries: keep });
+  await patchStore(inboxStore, (fresh) => {
+    const entries = Array.isArray(fresh?.entries) ? fresh.entries : [];
+    if (entries.length === 0) return {};
+    const { keep } = purgeExpiredInbox(entries, { nowMs });
+    return keep.length === entries.length ? {} : { entries: keep };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -622,11 +628,14 @@ async function sweepLedger(nowMs) {
 }
 
 async function sweepVerdicts(nowMs) {
-  const payload = await verdictsStore.load();
-  const entries = Array.isArray(payload?.entries) ? payload.entries : [];
-  if (entries.length === 0) return;
-  const { keep } = expireRows(entries, { nowMs, retentionMs: RETENTION_MS.verdicts });
-  if (keep.length !== entries.length) await verdictsStore.save({ ...payload, entries: keep });
+  // BET-1482: same patchStore discipline as sweepInbox — read-fresh-filter-
+  // write under the verdicts store's mutex.
+  await patchStore(verdictsStore, (fresh) => {
+    const entries = Array.isArray(fresh?.entries) ? fresh.entries : [];
+    if (entries.length === 0) return {};
+    const { keep } = expireRows(entries, { nowMs, retentionMs: RETENTION_MS.verdicts });
+    return keep.length === entries.length ? {} : { entries: keep };
+  });
 }
 
 async function sweepDirByFileTime(dir, nowMs, retentionMs) {
@@ -674,16 +683,38 @@ async function sweepArchiveCaps() {
   const dir = ctoPath("facts-archive");
   const files = await listJsonFiles(dir);
   for (const name of files) {
-    const filePath = join(dir, name);
-    const payload = await readJson(filePath, null);
-    if (!payload) continue;
-    const entries = Array.isArray(payload?.entries) ? payload.entries : [];
-    if (entries.length <= ARCHIVE_CAP) continue;
-    await writeJsonAtomic(
-      filePath,
-      JSON.stringify({ ...payload, entries: capArchive(entries, { cap: ARCHIVE_CAP }) }, null, 2),
-      { mode: MODE },
-    );
+    const id = name.slice(0, -".json".length);
+    if (!id) continue;
+    // BET-1482: the cap trim is a patchStore read-filter-write PER ARCHIVE
+    // FILE. The adapter reuses the dir store's own load/save (migration +
+    // v-stamp — the naked writeJsonAtomic spread-save bypassed both), and its
+    // `path` keys the mutex on the real file, so concurrent trims of the same
+    // archive serialize instead of racing their read/write windows.
+    try {
+      await patchStore(
+        {
+          name: factsArchiveStore.name,
+          path: factsArchiveStore.pathFor(id),
+          load: () => factsArchiveStore.load(id),
+          save: (data) => factsArchiveStore.save(id, data),
+        },
+        (fresh) => {
+          const entries = Array.isArray(fresh?.entries) ? fresh.entries : [];
+          return entries.length > ARCHIVE_CAP
+            ? { entries: capArchive(entries, { cap: ARCHIVE_CAP }) }
+            : {};
+        },
+      );
+    } catch {
+      // Per-file best-effort — one unreadable or too-new-versioned archive
+      // must not take the whole sweep down (a too-new payload is left
+      // untouched rather than rewritten by an older reader). Note this is a
+      // deliberate delta from the old shape, not continuity: the naked
+      // readJson/writeJsonAtomic version only skipped READ failures, while a
+      // write failure propagated and aborted the remaining files. Here both
+      // are skipped, matching the sweep family's silent best-effort
+      // convention (every other catch in this module is silent too).
+    }
   }
 }
 

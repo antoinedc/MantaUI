@@ -185,6 +185,69 @@ test("persistence: a legacy es.trust payload migrates into the dedicated store o
   assert.equal((await h.stores.legacy.load()).trust.stats["start-job"]?.va, 3);
 });
 
+// BET-1482: the one-time adoption persist rides the store's patchStore mutex.
+// The old shape — a naked whole-payload save outside any mutex — could clobber
+// a writer that committed between the read's outer load and the persist.
+// Sequenced with manually-resolved legacy-load promises (review cycle 1: a
+// load-count-based slowdown proved order-dependent — the read's outer store
+// load is issued synchronously before the writer starts, so the read takes
+// legacy load #1; slowing "call #2" slowed the WRITER and the old naked save
+// healed instead of clobbering).
+test("durability: the adoption persist cannot clobber a writer that committed first (BET-1482)", async () => {
+  const legacyPayload = {
+    v: 1,
+    trust: {
+      tiers: { "start-job": TIER_VETO_WINDOW },
+      stats: { "start-job": { a: 40, b: 1, va: 3, vb: 0, recent: [] } },
+    },
+  };
+  const copy = () => JSON.parse(JSON.stringify(legacyPayload));
+  // The FIRST legacy load is held unresolved until the test releases it; every
+  // later load auto-resolves on the next microtask. The read is the only
+  // consumer running when the first load fires, so "held" is deterministically
+  // the read's.
+  let held = null;
+  const legacy = {
+    load: () =>
+      new Promise((resolve) => {
+        if (held) queueMicrotask(() => resolve(copy()));
+        else held = resolve;
+      }),
+    save: async () => {},
+  };
+  const store = memoryStore({});
+  const ledgerRows = [];
+  const trust = createCtoTrust({
+    store,
+    legacy,
+    ledger: { append: async (r) => ledgerRows.push(r), read: async () => ledgerRows },
+    verdicts: memoryStore({ v: 1, entries: [] }),
+    now: () => 1_000_000,
+  });
+  const tick = () => new Promise((r) => setImmediate(r));
+  // 1. The read runs first: its outer store load sees the still-empty
+  //    dedicated store and it parks on its HELD legacy load — adoption
+  //    undecided.
+  const read = trust.getState();
+  while (!held) await tick();
+  // 2. The writer adopts the same legacy payload inside the store mutex
+  //    (auto-resolving legacy load), bumps the ask counter, fully commits.
+  await trust.noteVerdictEffects(
+    { success: true },
+    { subject: { type: "suggestion", id: "x", class: "start-job" }, verdict: "accept" },
+  );
+  // 3. Only NOW does the read decide to adopt. Under the old naked save its
+  //    persist fires strictly AFTER the writer's commit and clobbers the
+  //    counter back to 40; under the patchStore persist it queues behind the
+  //    mutex, re-derives from the committed (no-longer-fresh) payload, and
+  //    no-ops.
+  held(copy());
+  await read;
+  const st = await trust.getState();
+  assert.equal(st.stats["start-job"]?.a, 41, "the writer's counter bump survived the adoption persist");
+  assert.equal(st.tiers["start-job"], TIER_VETO_WINDOW, "the adopted tier survived");
+});
+
 test("durability: a stale full-engine-state save cannot revert trust keys (the mirrored clobber direction)", async () => {
   const h = makeTrust({ verdictCount: VERDICT_MIN });
   await h.trust.noteVerdictEffects({ success: true }, { subject: { type: "suggestion", id: "x", class: "queue-tonight" }, verdict: "accept" });

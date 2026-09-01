@@ -186,7 +186,17 @@ export function createCtoTrust(deps = {}) {
     const derived = await stFromRaw(st);
     st = derived.st;
     if (derived.adopted) {
-      await store.save(st).catch(() => {});
+      // BET-1482: persist the one-time adoption through the store mutex. The
+      // naked whole-payload save sat OUTSIDE it — a writer landing between
+      // this load and the save would be clobbered by the adopted snapshot.
+      // Re-deriving INSIDE the mutex keeps the persist lose-update-free: if a
+      // writer already adopted and persisted, the fresh payload is no longer
+      // fresh, the adoption short-circuits, and the patch resolves empty
+      // (a pure no-op — no save, no resurrect of the legacy snapshot).
+      await patchStore(store, async (fresh) => {
+        const rederived = await stFromRaw(fresh);
+        return rederived.adopted ? rederived.st : {};
+      }).catch(() => {});
     }
     return {
       st,
