@@ -33,6 +33,7 @@ import {
   blockerTarget,
   resting,
   mayShowResting,
+  heldModalShowsError,
   relativeTime,
   finishedVariant,
   formatEta,
@@ -175,6 +176,11 @@ export function CtoPanel({
   // the §14.3 silence-audit "review held" modal (opened from the digest aside).
   const [heldOpen, setHeldOpen] = useState(false);
   const [heldRows, setHeldRows] = useState<CtoHeldRow[]>([]);
+  // BET-1484: a failed FIRST-EVER held load leaves `heldRows` empty, and the
+  // modal then renders the "Nothing held back." empty state — a factual claim
+  // ("the box holds nothing") when the truth is "we don't know". Track the
+  // failure so the modal can say so (the drill-downs' error + Retry shape).
+  const [heldLoadError, setHeldLoadError] = useState<string | null>(null);
   // BET-1419: veto cards (§9.2) render in their own Overnight section; the
   // Tonight drill-down (§10.4) fetches its task list when expanded.
   const [tonightExpanded, setTonightExpanded] = useState(false);
@@ -581,9 +587,23 @@ export function CtoPanel({
   // BET-1468 item 6: a failed load used to reset `heldRows` to `[]`, so the
   // modal opened claiming "Nothing held back." right after the digest said
   // otherwise. Keep whatever was last loaded (the Refresh button in the empty
-  // state covers retry) and toast the failure instead.
+  // state covers retry) and toast the failure instead. BET-1484: on a
+  // first-ever failure that kept list is empty, so also record the error and
+  // let the modal render its in-modal error line + Retry (drill-down shape)
+  // rather than the empty state.
   const openHeld = useCallback(() => {
-    void window.api?.ctoHeldList?.().then((r) => setHeldRows(r.rows)).catch(catchActionError("load held suggestions")).finally(() => setHeldOpen(true));
+    void (async () => {
+      try {
+        const r = await window.api?.ctoHeldList?.();
+        setHeldRows(r.rows);
+        setHeldLoadError(null);
+      } catch (e) {
+        setHeldLoadError(e instanceof Error ? e.message : String(e));
+        catchActionError("load held suggestions")(e);
+      } finally {
+        setHeldOpen(true);
+      }
+    })();
   }, [catchActionError]);
   // BET-1468 item 6: the row was removed from the list unconditionally even
   // when the verdict POST failed (or threw on a stale token) — the user sees
@@ -824,6 +844,7 @@ export function CtoPanel({
       {heldOpen && (
         <HeldListModal
           rows={heldRows}
+          loadError={heldLoadError}
           onClose={() => setHeldOpen(false)}
           onRefresh={() => openHeld()}
           onVerdict={handleHeldVerdict}
@@ -2200,11 +2221,13 @@ function rendererDelegateStart(input: {
 // N — review" aside.
 function HeldListModal({
   rows,
+  loadError,
   onClose,
   onRefresh,
   onVerdict,
 }: {
   rows: CtoHeldRow[];
+  loadError?: string | null;
   onClose: () => void;
   onRefresh: () => void;
   onVerdict: (row: CtoHeldRow, verdict: "accept" | "dismiss") => void;
@@ -2239,7 +2262,20 @@ function HeldListModal({
         </p>
         <div className="mt-2 flex-1 space-y-2 overflow-auto">
           {rows.length === 0 ? (
-            <div className="py-6 text-center text-sm text-text-faint">Nothing held back.</div>
+            heldModalShowsError({ loadError: !!loadError, rowCount: rows.length }) ? (
+              // BET-1484: a failed first-ever load renders this error line +
+              // Retry (the drill-downs' shape) instead of the empty state —
+              // "Nothing held back." would read as a factual claim when the
+              // read never came back. The toast still fired too.
+              <div className="flex flex-col items-start gap-1 py-6">
+                <p className="text-sm text-text-muted">Couldn&rsquo;t load held suggestions: {loadError}</p>
+                <button type="button" onClick={onRefresh} className="text-sm text-accent underline hover:text-accent-strong">
+                  Retry
+                </button>
+              </div>
+            ) : (
+              <div className="py-6 text-center text-sm text-text-faint">Nothing held back.</div>
+            )
           ) : (
             rows.map((row) => (
               <div key={row.id} className="rounded-md border border-strong bg-fill px-3 py-2">

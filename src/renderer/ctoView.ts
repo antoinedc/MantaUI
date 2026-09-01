@@ -474,6 +474,17 @@ export function mayShowResting(inputs: { loaded: boolean; loadError: boolean; is
   return inputs.loaded && !inputs.loadError && inputs.isResting;
 }
 
+// BET-1484: the held modal's "Nothing held back." line is a factual claim
+// ("the box holds nothing") — it must not render when the load that would
+// have populated the list failed. A failed first-ever load leaves the rows
+// empty, so the empty state would show by default. The error line + Retry
+// replaces the empty state ONLY when there are no rows to show; with rows on
+// screen (last known data, kept on a failed refresh per BET-1468 item 6) the
+// rows are real and the toast already said the refresh failed.
+export function heldModalShowsError(inputs: { loadError: boolean; rowCount: number }): boolean {
+  return inputs.loadError && inputs.rowCount === 0;
+}
+
 // Now-rail/digest shared: does the list of sessions have any blocked one — the
 // "blocked — question above ↑" chip on a blocked Now card (never repeats the
 // question).

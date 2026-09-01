@@ -15,6 +15,7 @@ import {
   digestExpandable,
   resting,
   mayShowResting,
+  heldModalShowsError,
   stateTone,
   nowCostLabel,
   nowRailMeta,
@@ -353,6 +354,20 @@ describe("mayShowResting (BET-1468 item 1 — no false all-clear)", () => {
   });
   it("is true only once loaded, without error, and actually resting", () => {
     expect(mayShowResting({ loaded: true, loadError: false, isResting: true })).toBe(true);
+  });
+});
+
+describe("heldModalShowsError (BET-1484 — no false \"nothing held back\")", () => {
+  it("is true when a first-ever load failed (rows still empty)", () => {
+    expect(heldModalShowsError({ loadError: true, rowCount: 0 })).toBe(true);
+  });
+  it("is false when the load succeeded and the box holds nothing", () => {
+    expect(heldModalShowsError({ loadError: false, rowCount: 0 })).toBe(false);
+  });
+  it("is false when rows are on screen even after a failed refresh", () => {
+    // Last known data (kept on a failed refresh per BET-1468 item 6) is real;
+    // the error line must not displace it. The toast carries the failure.
+    expect(heldModalShowsError({ loadError: true, rowCount: 3 })).toBe(false);
   });
 });
 
