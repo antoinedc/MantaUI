@@ -889,19 +889,20 @@ test("refreshRoi: the pending cap never evicts a counted fingerprint whose job i
     now: () => MIDNIGHT,
   });
   await budget.refreshRoi();
-  // The 150 probe-counted rows + the 50 originals = 200 merged, and the cap
-  // trimmed its 1 surplus from an UNCOUNTED row — the old blind slice would
-  // have evicted counted `c0` (the oldest position) instead.
-  assert.equal(payload.roi.months[AUG_KEY].merged, COUNTED + 150);
+  // The 151 probe-counted rows (150 u-rows + fresh) + the 50 originals
+  // already counted = 201 merged, and the cap trimmed its 1 surplus from an
+  // UNCOUNTED-position row — the old blind slice would have evicted counted
+  // `c0` (the oldest position) instead.
+  assert.equal(payload.roi.months[AUG_KEY].merged, COUNTED + 151);
   assert.equal(payload.roi.pending.length, 200);
   const ids1 = new Set(payload.roi.pending.map((j) => j.id));
   for (const id of countedIds) assert.equal(ids1.has(id), true, `counted fingerprint ${id} survived the cap`);
   assert.equal(ids1.has("u0"), false, "the oldest uncounted row paid the cap");
   // Refresh 2: nothing re-samples (every store id is still snapshotted) and
   // nothing re-counts — under the old code the evicted `c0` fingerprint
-  // would re-sample here and double-count to COUNTED + 151.
+  // would re-sample here and double-count once more.
   await budget.refreshRoi();
-  assert.equal(payload.roi.months[AUG_KEY].merged, COUNTED + 150);
+  assert.equal(payload.roi.months[AUG_KEY].merged, COUNTED + 151);
   assert.equal(payload.roi.pending.length, 200);
 });
 
@@ -935,7 +936,7 @@ test("refreshRoi: a failed jobs read protects every counted fingerprint from the
   assert.equal(payload.roi.pending.length, 200);
   assert.equal(payload.roi.pending.some((j) => j.id === "counted"), true);
   assert.equal(payload.roi.pending.some((j) => j.id === "u0"), false);
-  assert.equal(payload.roi.pending.some((j) => j.id === "u201"), true);
+  assert.equal(payload.roi.pending.some((j) => j.id === "u200"), true);
 });
 
 // BET-1466 item 4: budget.json is not covered by the store sweep — the spend
