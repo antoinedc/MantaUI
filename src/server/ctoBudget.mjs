@@ -664,9 +664,10 @@ function monthAccumulator(months, key) {
   };
 }
 
-// Pending rows older than this are dropped (bounded growth; a merge that
-// surfaced 60 days late is beyond the report's honest horizon). BET-1497:
-// the drop is liveness-aware — see retainPendingHorizon.
+// Pending rows older than this are dropped — liveness-aware since BET-1497,
+// on both halves since BET-1503 — see retainPendingHorizon. The horizon
+// bounds growth only for records the store itself retires; a record the
+// store keeps forever (dirty worktree) keeps its row.
 export const ROI_PENDING_RETENTION_MS = 60 * 24 * HOUR_MS;
 
 /**
@@ -687,7 +688,10 @@ export const ROI_PENDING_RETENTION_MS = 60 * 24 * HOUR_MS;
  * `liveIds` is the set of job ids the store actually returned this refresh,
  * or null when the read failed (liveness unknowable → no counted row is
  * evictable). When protection leaves more than `cap` rows, the list exceeds
- * the cap until the store retires the records.
+ * the cap until the store retires the records. BET-1503: with the horizon
+ * no longer churning live uncounted rows, this cap is the remaining growth
+ * bound — an uncounted row it evicts whose record is still stored re-samples
+ * on the next refresh (the re-sampled row lands at the back of the list).
  */
 export function trimPendingCap(rows, { cap = 200, liveIds = null } = {}) {
   if (rows.length <= cap) return rows;
@@ -702,32 +706,39 @@ export function trimPendingCap(rows, { cap = 200, liveIds = null } = {}) {
 }
 
 /**
- * The liveness-aware retention horizon on `roi.pending` (BET-1497). The
- * BET-1466 filter assumed a counted row dropped at the horizon can never be
+ * The liveness-aware retention horizon on `roi.pending` (BET-1497, BET-1503).
+ * The BET-1466 filter assumed a row dropped at the horizon can never be
  * re-counted — true only while the delegate store's sweeper eventually
  * removes every terminal record. It does not: a job that finished with a
  * dirty worktree (`cleanedUp === false`) is kept FOREVER (applyRetention
  * spares it by time and by the 50-terminal-record cap alike). Dropping that
- * job's fingerprint re-opens it to step 1's sampling — the same double-count
- * the BET-1487 cap closed, reached through the retention path and
- * independent of job volume. So the horizon drops:
- *   - an uncounted row past the horizon (re-sampling it merely re-probes a
- *     job that has never been counted — no double count), and
- *   - a counted row past the horizon only once its record is provably gone
- *     from the jobs snapshot — absence is final (job ids are minted once and
- *     the store's sweeper only removes records), and
- *   - never a counted row whose id is still in `liveIds`, nor any counted
- *     row while liveness is unknowable (`liveIds === null` — the store read
- *     failed; the same convention the cap applies).
- * A counted row without a timestamp has no age to retire and is kept, as
- * before. `liveIds` is the set shared with `trimPendingCap` — one snapshot
- * read in step 1 answers both hygiene passes.
+ * job's row re-opens it to step 1's sampling — for a counted row the same
+ * double-count the BET-1487 cap closed, reached through the retention path;
+ * for an uncounted row (BET-1503) pure churn: re-sample → probe → age-out
+ * on every refresh, with the row's `pr`/`prTried` markers lost each cycle —
+ * a definitive no-PR was re-asked of the forge forever. So the horizon
+ * keeps, past the horizon:
+ *   - a row whose record is provably still in the jobs snapshot (counted or
+ *     not), and
+ *   — while liveness is unknowable (`liveIds === null` — the store read
+ *     failed), every row (the same convention the cap applies), and
+ *   - a counted row without a timestamp (no age to retire), as before —
+ *     while an uncounted timestamp-less row gets the same liveness rule.
+ * A row is dropped only once its record is provably gone from the snapshot —
+ * absence is final (job ids are minted once and the store's sweeper only
+ * removes records). Growth is no longer bounded by the horizon alone: rows
+ * whose records the store keeps forever mirror the store's own retention —
+ * the trade BET-1497 already accepted for counted rows; the 200-row cap
+ * stays the last bound. `liveIds` is the set shared with `trimPendingCap` —
+ * one snapshot read in step 1 answers both hygiene passes.
  */
 export function retainPendingHorizon(rows, { cutoff, liveIds = null } = {}) {
   return rows.filter((j) => {
-    if (typeof j.finishedAt !== "number") return j.counted === true;
+    if (typeof j.finishedAt !== "number") {
+      return j.counted === true || liveIds === null || liveIds.has(j.id);
+    }
     if (j.finishedAt >= cutoff) return true;
-    return j.counted === true && (liveIds === null || liveIds.has(j.id));
+    return liveIds === null || liveIds.has(j.id);
   });
 }
 
@@ -1185,18 +1196,19 @@ function validPrRef(ref) {
             if (computed) months[key] = computed;
           }
 
-          // 4. Hygiene: age out stale pending rows. The retention horizon
-          //    applies to BOTH halves (BET-1466: it used to filter only
-          //    counted rows while the never-merged ones — the rows that
-          //    actually accumulate — were kept forever). A counted row is a
-          //    dedupe fingerprint, so dropping one at the horizon requires
-          //    proof its job can never re-sample — and "the store sweeps
-          //    terminal records after 7 days" is not proof: a dirty-worktree
-          //    terminal record is never swept. The drop is liveness-aware
-          //    (BET-1497): a counted row past the horizon survives while its
-          //    record is still in the snapshot read in step 1 (or while the
-          //    read failed and liveness is unknowable) — the same rule the
-          //    cap below applies.
+          // 4. Hygiene: age out stale pending rows. The horizon drop is
+          //    liveness-aware on BOTH halves (BET-1466 first applied the
+          //    horizon to counted rows too, BET-1497 made the counted half
+          //    liveness-aware, BET-1503 the uncounted half): past the
+          //    horizon a row drops only once the snapshot read in step 1
+          //    proves its delegate record gone — "the store sweeps terminal
+          //    records after 7 days" is not proof: a dirty-worktree terminal
+          //    record is never swept, and dropping its row churned the job
+          //    back through re-sample → probe → age-out on every refresh
+          //    (losing the row's pr/prTried markers with each cycle, so a
+          //    definitive no-PR was re-asked of the forge forever). While
+          //    the read failed, liveness is unknowable and nothing drops —
+          //    the same rule the cap below applies.
           const cutoff = t - ROI_PENDING_RETENTION_MS;
           const liveIds = jobsReadOk
             ? new Set(jobs.map((j) => (j && typeof j.id === "string" ? j.id : null)).filter((id) => id !== null))

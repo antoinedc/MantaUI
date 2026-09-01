@@ -866,11 +866,15 @@ test("trimPendingCap evicts oldest-first but spares counted fingerprints that ca
 // horizon is a still-needed dedupe fingerprint while its delegate record can
 // re-sample (a dirty-worktree terminal record is never swept), so the drop
 // waits for the snapshot to prove the record gone.
-test("retainPendingHorizon ages rows past the horizon but spares counted fingerprints that can still re-sample (BET-1497)", () => {
+// BET-1503: the same liveness rule now covers the UNCOUNTED half — dropping
+// a live uncounted row churned its still-stored job back through re-sample →
+// probe → age-out on every refresh, losing the row's pr/prTried markers with
+// each cycle.
+test("retainPendingHorizon ages rows past the horizon but spares fingerprints — counted or not — that can still re-sample (BET-1497, BET-1503)", () => {
   const stale = MIDNIGHT - ROI_PENDING_RETENTION_MS - 1;
   const cutoff = MIDNIGHT - ROI_PENDING_RETENTION_MS;
   const row = (id, counted, finishedAt = stale) => ({ id, counted, finishedAt });
-  // Fresh rows (both kinds) and a counted row without a timestamp: kept, as before.
+  // Fresh rows (both kinds) and counted rows without a timestamp: kept, as before.
   const fresh = [row("f", false, MIDNIGHT - 1), row("fc", true, MIDNIGHT - 1), row("cn", true, null)];
   assert.deepEqual(
     retainPendingHorizon(fresh, { cutoff, liveIds: new Set() }).map((j) => j.id),
@@ -881,17 +885,34 @@ test("retainPendingHorizon ages rows past the horizon but spares counted fingerp
     retainPendingHorizon([row("u", false), row("c", true)], { cutoff, liveIds: new Set() }).map((j) => j.id),
     [],
   );
-  // Past the horizon with the record STILL in the store: the counted
-  // fingerprint survives; the uncounted row still ages out.
+  // Past the horizon with the record STILL in the store: both kinds survive —
+  // the counted fingerprint (BET-1497) and the uncounted row (BET-1503).
   assert.deepEqual(
-    retainPendingHorizon([row("u", false), row("c", true)], { cutoff, liveIds: new Set(["c"]) }).map((j) => j.id),
-    ["c"],
+    retainPendingHorizon([row("u", false), row("c", true)], { cutoff, liveIds: new Set(["c", "u"]) }).map((j) => j.id),
+    ["u", "c"],
   );
-  // A failed jobs read (liveIds null) keeps the counted fingerprint —
-  // liveness unknowable, the same convention the cap applies.
+  // A live UNCOUNTED row survives even when other ids are in the snapshot —
+  // the rule keys on the row's own id, not on liveness in general.
+  assert.deepEqual(
+    retainPendingHorizon([row("u", false)], { cutoff, liveIds: new Set(["other"]) }).map((j) => j.id),
+    [],
+  );
+  // A failed jobs read (liveIds null) keeps both halves — liveness
+  // unknowable, the same convention the cap applies.
   assert.deepEqual(
     retainPendingHorizon([row("u", false), row("c", true)], { cutoff, liveIds: null }).map((j) => j.id),
-    ["c"],
+    ["u", "c"],
+  );
+  // An uncounted timestamp-less row never had an age to retire; it now gets
+  // the same liveness rule (kept while its record is in the snapshot) instead
+  // of churning, while a counted one is kept unconditionally, as before.
+  assert.deepEqual(
+    retainPendingHorizon([row("un", false, null), row("cn", true, null)], { cutoff, liveIds: new Set(["un"]) }).map((j) => j.id),
+    ["un", "cn"],
+  );
+  assert.deepEqual(
+    retainPendingHorizon([row("un", false, null), row("cn", true, null)], { cutoff, liveIds: new Set() }).map((j) => j.id),
+    ["cn"],
   );
 });
 
@@ -1011,6 +1032,71 @@ test("refreshRoi: a counted row past the horizon survives while its dirty-worktr
   recordLive = false;
   await budget.refreshRoi();
   assert.equal(payload.roi.months[AUG_KEY].merged, 1);
+  assert.equal(payload.roi.pending.length, 0);
+});
+
+// BET-1503: the same churn, on the UNCOUNTED half — a never-merged job whose
+// dirty-worktree record lives forever used to re-sample (row minted) and
+// age-out (row dropped) on every refresh, and each dropped row took its
+// pr/prTried markers with it, so a definitive no-PR was re-asked of the
+// forge indefinitely. The row is now kept while its record is in the
+// snapshot: no churn, no marker loss, and the drop still fires the moment
+// the snapshot proves the record gone.
+test("refreshRoi: an uncounted row past the horizon survives (with its pr markers) while its dirty-worktree record is still in the store (BET-1503)", async () => {
+  let payload = defaultBudgetPayload();
+  payload.roi = {
+    months: {},
+    pending: [
+      // Aged out long ago; the forge already answered "no PR" definitively.
+      // `seeded` is a churn canary: a re-sampled row is minted without it.
+      { id: "old", branch: "cto/old", cwd: "/p", finishedAt: MIDNIGHT - ROI_PENDING_RETENTION_MS - 1, counted: false, prTried: true, seeded: true },
+    ],
+  };
+  const store = { load: async () => payload, save: async (p) => (payload = p) };
+  const job = {
+    id: "old",
+    actor: "cto",
+    status: "done",
+    branch: "cto/old",
+    cwd: "/p",
+    finishedAt: MIDNIGHT - ROI_PENDING_RETENTION_MS - 1,
+    cleanedUp: false, // dirty worktree → the store never sweeps this record
+  };
+  let recordLive = true;
+  const asked = [];
+  const probed = [];
+  const budget = createCtoBudget({
+    store,
+    jobsRead: async () => (recordLive ? [job] : []),
+    gitProbe: async ({ branch }) => {
+      probed.push(branch);
+      return { exists: true, isAncestor: false }; // never merges — stays uncounted
+    },
+    discoverJobPr: async ({ branch }) => {
+      asked.push(branch);
+      return null;
+    },
+    ledgerRead: async () => [],
+    verdictsRead: async () => [],
+    segmentsRead: async () => [],
+    now: () => MIDNIGHT,
+  });
+  await budget.refreshRoi();
+  await budget.refreshRoi();
+  // The row survives both refreshes — no re-sample (its id is still a
+  // fingerprint), no age-out — and its prTried marker rides along, so the
+  // forge is never re-asked a question it already answered definitively.
+  assert.deepEqual(payload.roi.pending.map((j) => j.id), ["old"]);
+  assert.equal(payload.roi.pending[0].prTried, true);
+  assert.equal(payload.roi.pending[0].seeded, true, "the row is never re-minted — no churn");
+  assert.equal(asked.length, 0, "a definitive no-PR is never re-asked while the row survives");
+  // The per-refresh probe waste the issue scoped out remains by design: the
+  // git probe is the only way to notice a late merge.
+  assert.equal(probed.length, 2);
+  // The record is finally swept: absence is final, the row drops, and with
+  // it the churn risk — there is nothing left to re-sample.
+  recordLive = false;
+  await budget.refreshRoi();
   assert.equal(payload.roi.pending.length, 0);
 });
 
