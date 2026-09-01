@@ -226,6 +226,31 @@ function makeWatchdog(harness, { spend = 0, expected = 0, livenessMs = 120_000 }
   });
 }
 
+// makeWatchdog + a spy over the engine's escalation verbs (prototype
+// delegation, so the engine's lazy getters are never touched) — shared by the
+// BET-1462 escalation tests (was a 17-line intra-file clone).
+function makeSpyWatchdog(harness, { spend }) {
+  const calls = { hardPause: 0, setThrifty: 0 };
+  const spyEngine = Object.create(harness.engine);
+  spyEngine.hardPause = async (arg) => {
+    calls.hardPause += 1;
+    return harness.engine.hardPause(arg);
+  };
+  spyEngine.setThrifty = async (v, opts) => {
+    calls.setThrifty += 1;
+    return harness.engine.setThrifty(v, opts);
+  };
+  const w = createWatchdog({
+    engine: spyEngine,
+    getSpendPerHour: async () => spend,
+    expectedHourlyBurn: async () => 1,
+    livenessMs: 120_000,
+    now: () => harness.clock.ms,
+    ledger: { append: async (row) => harness.ledgerRows.push(row) },
+  });
+  return { w, calls };
+}
+
 test("disabled by default when ctoEnabled is false (config default)", async () => {
   const h = makeHarness({ ctoEnabled: false });
   const s = await h.engine.getState();
@@ -491,26 +516,7 @@ test("watchdog: stale engine heartbeat is flagged, state untouched", async () =>
 
 test("watchdog: a second tick while already paused does not re-escalate (BET-1462)", async () => {
   const h = makeHarness({ ctoEnabled: true });
-  const calls = { hardPause: 0, setThrifty: 0 };
-  // Spy over the engine's escalation verbs without disturbing anything else
-  // (prototype delegation, so the engine's lazy getters are never touched).
-  const spyEngine = Object.create(h.engine);
-  spyEngine.hardPause = async (arg) => {
-    calls.hardPause += 1;
-    return h.engine.hardPause(arg);
-  };
-  spyEngine.setThrifty = async (v, opts) => {
-    calls.setThrifty += 1;
-    return h.engine.setThrifty(v, opts);
-  };
-  const w = createWatchdog({
-    engine: spyEngine,
-    getSpendPerHour: async () => 5,
-    expectedHourlyBurn: async () => 1,
-    livenessMs: 120_000,
-    now: () => h.clock.ms,
-    ledger: { append: async (row) => h.ledgerRows.push(row) },
-  });
+  const { w, calls } = makeSpyWatchdog(h, { spend: 5 });
   await w.tick(); // 5 > 4×1 → the one legitimate hard pause
   assert.equal(calls.hardPause, 1);
   assert.equal(h.killSwitchPaused, true);
@@ -524,24 +530,7 @@ test("watchdog: a second tick while already paused does not re-escalate (BET-146
 
 test("watchdog: already thrifty is never re-asserted (BET-1462)", async () => {
   const h = makeHarness({ ctoEnabled: true });
-  const calls = { hardPause: 0, setThrifty: 0 };
-  const spyEngine = Object.create(h.engine);
-  spyEngine.hardPause = async (arg) => {
-    calls.hardPause += 1;
-    return h.engine.hardPause(arg);
-  };
-  spyEngine.setThrifty = async (v, opts) => {
-    calls.setThrifty += 1;
-    return h.engine.setThrifty(v, opts);
-  };
-  const w = createWatchdog({
-    engine: spyEngine,
-    getSpendPerHour: async () => 3,
-    expectedHourlyBurn: async () => 1,
-    livenessMs: 120_000,
-    now: () => h.clock.ms,
-    ledger: { append: async (row) => h.ledgerRows.push(row) },
-  });
+  const { w, calls } = makeSpyWatchdog(h, { spend: 3 });
   await w.tick(); // 3 > 2×1 → the one legitimate thrifty flip
   assert.equal(calls.setThrifty, 1);
   assert.equal((await h.engine.getState()).dot, DOT.THRIFTY);
