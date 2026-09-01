@@ -75,6 +75,19 @@ function allPaths(root) {
 }
 
 /**
+ * Assert no `.new` staging directory survived under `root`. The swap stages
+ * each path as `<dest>/<rel>.new` and `mv`s it into place, so a leftover means
+ * the swap tore rather than completed — asserted by both the success path and
+ * every refuse-before-mutating path.
+ */
+function assertNoStagingDirs(root) {
+  for (const rel of allPaths(root)) {
+    assert.ok(!rel.endsWith(".new"), `staging dir survived: ${rel}`);
+    assert.ok(!rel.includes(".new/"), `staging dir survived: ${rel}`);
+  }
+}
+
+/**
  * Source scripts/lib/release.sh (trivial log/ok/warn/die defined first), then
  * call `replace_release_payload <pkg> <dest> <node>`. Runs in a throwaway
  * bash subprocess. Returns { status, stdout }.
@@ -243,10 +256,7 @@ test("no *.new staging directories survive a successful run", () => {
   try {
     const { status } = runReplace(pkg, dest);
     assert.equal(status, 0);
-    for (const rel of allPaths(dest)) {
-      assert.ok(!rel.endsWith(".new"), `staging dir survived: ${rel}`);
-      assert.ok(!rel.includes(".new/"), `staging dir survived: ${rel}`);
-    }
+    assertNoStagingDirs(dest);
   } finally {
     rmSync(pkg, { recursive: true, force: true });
     rmSync(dest, { recursive: true, force: true });
@@ -432,10 +442,7 @@ test("replace_release_payload: preflight refuses when disk is short, mutating no
     assert.match(r.stdout, /not enough disk space/);
     const after = readTree(dest);
     assert.equal(JSON.stringify(after), before, "dest must be untouched when refused");
-    for (const rel of allPaths(dest)) {
-      assert.ok(!rel.endsWith(".new"), `staging dir survived: ${rel}`);
-      assert.ok(!rel.includes(".new/"), `staging dir survived: ${rel}`);
-    }
+    assertNoStagingDirs(dest);
   } finally {
     rmSync(pkg, { recursive: true, force: true });
     rmSync(dest, { recursive: true, force: true });
@@ -666,31 +673,31 @@ test("ensure_kill_policy_text: a unit with no [Service] section is left unchange
 });
 
 /**
- * Source release.sh and run ensure_server_kill_policy against a real temp unit
- * path, with `systemctl` stubbed on PATH to a recorder so the test can assert
- * whether daemon-reload actually ran. Returns { status, stdout, reloaded }.
+ * Run a unit-patching helper with `systemctl` stubbed on PATH to a recorder,
+ * so a test can assert whether daemon-reload actually ran — both patchers must
+ * reload ONLY when they really wrote. `build(tmpDir)` returns the shell line to
+ * run (it gets the temp dir so it can place extra fixture paths there).
+ * Returns { status, stdout, reloaded }.
  */
-function runServerKillPolicy(unitPath) {
-  const dir = mkdtempSync(join(tmpdir(), "manta-kill-"));
+function runUnitPatcher(build) {
+  const dir = mkdtempSync(join(tmpdir(), "manta-unit-patch-"));
   const binDir = join(dir, "bin");
   mkdirSync(binDir, { recursive: true });
   const calls = join(dir, "systemctl.calls");
-  // Stub systemctl on PATH to a recorder so the test can assert whether
-  // daemon-reload actually ran (the function must only reload when it wrote).
   writeFileSync(
     join(binDir, "systemctl"),
     `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
     { mode: 0o755 },
   );
-  const r = sourceAndRun(`ensure_server_kill_policy '${unitPath}'`, {
-    preamble: `export PATH='${binDir}':"$PATH"`,
-  });
-  let reloaded = false;
-  if (existsSync(calls)) {
-    reloaded = readFileSync(calls, "utf8").split("\n").some((l) => l.includes("daemon-reload"));
-  }
+  const r = sourceAndRun(build(dir), { preamble: `export PATH='${binDir}':"$PATH"` });
+  const reloaded = existsSync(calls)
+    && readFileSync(calls, "utf8").split("\n").some((l) => l.includes("daemon-reload"));
   rmSync(dir, { recursive: true, force: true });
   return { status: r.status, stdout: r.stdout, reloaded };
+}
+
+function runServerKillPolicy(unitPath) {
+  return runUnitPatcher(() => `ensure_server_kill_policy '${unitPath}'`);
 }
 
 test("ensure_server_kill_policy: a missing unit path returns 0 and creates nothing", () => {
@@ -869,32 +876,12 @@ test("ensure_cli_version_text: a unit with no [Service] section is left unchange
   assert.equal(cliVersionText(text, "2.1.257"), text);
 });
 
-/**
- * Run ensure_opencode_cli_version against a real temp unit, with systemctl
- * stubbed so the test can assert whether daemon-reload actually ran.
- */
 function runEnsureOpencodeCliVersion(unitPath, version) {
-  const dir = mkdtempSync(join(tmpdir(), "manta-ccver-run-"));
-  const binDir = join(dir, "bin");
-  mkdirSync(binDir, { recursive: true });
-  const calls = join(dir, "systemctl.calls");
-  writeFileSync(
-    join(binDir, "systemctl"),
-    `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
-    { mode: 0o755 },
+  // The plist argument points at a path that does not exist, so the macOS
+  // branch is inert on a Linux runner and this stays a pure systemd test.
+  return runUnitPatcher(
+    (dir) => `ensure_opencode_cli_version '${version}' '${unitPath}' '${join(dir, "absent.plist")}'`,
   );
-  // Third arg is a plist path that does not exist, so the macOS branch is
-  // inert on a Linux runner and this stays a pure systemd test.
-  const r = sourceAndRun(
-    `ensure_opencode_cli_version '${version}' '${unitPath}' '${join(dir, "absent.plist")}'`,
-    { preamble: `export PATH='${binDir}':"$PATH"` },
-  );
-  let reloaded = false;
-  if (existsSync(calls)) {
-    reloaded = readFileSync(calls, "utf8").split("\n").some((l) => l.includes("daemon-reload"));
-  }
-  rmSync(dir, { recursive: true, force: true });
-  return { status: r.status, stdout: r.stdout, reloaded };
 }
 
 test("ensure_opencode_cli_version: a missing unit returns 0 and creates nothing", () => {
