@@ -1380,6 +1380,7 @@ export interface Api {
   }): Promise<{ ok: boolean; error?: string; effects?: { success?: boolean; rejection?: boolean; access?: boolean; decay?: boolean } }>;
   // GET /api/cto/profile — the §8.5 profile & §3.2 journal drill-down render
   // model, composed server-side (Settings → Internals → Profile & rhythm).
+  // Throws on failure (like ctoStateGet) — callers render the error state.
   ctoProfileGet(): Promise<CtoProfileRender>;
   // POST /api/cto/profile/edit — inline profile edit: writes a `stated` value
   // that wins over inference for that dimension (§8.5) + a `correct` verdict.
@@ -1398,6 +1399,7 @@ export interface Api {
   // GET /api/cto/facts — the Blackboard drill-down render (§10.5 row 1):
   // facts per project, active + superseded struck-through, optional
   // bi-temporal asOf. A missing project selects the first known one.
+  // Throws on failure (like ctoStateGet) — callers render the error state.
   ctoFactsGet(input?: { project?: string | null; asOf?: number | null }): Promise<CtoFactsRender>;
   // GET /api/cto/facts/archive — read-only paginated archive browser (§6.3).
   ctoFactsArchiveGet(input?: { project?: string | null; before?: number | null; limit?: number }): Promise<CtoFactsArchivePage>;
@@ -1416,6 +1418,7 @@ export interface Api {
   ctoFactPin(input: { project: string; factId: string }): Promise<{ ok: boolean; error?: string; touched?: number }>;
   // GET /api/cto/tools — the tool-integrations drill-down render (§10.5
   // row 4): registry + probes joined, plus the never list.
+  // Throws on failure (like ctoStateGet) — callers render the error state.
   ctoToolsGet(): Promise<CtoToolsRender>;
   // POST /api/cto/tools/revoke — per-ring revoke (ring → "no"; metadata
   // revoke stops that tool's probes via the consent gate).

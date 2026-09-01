@@ -1914,21 +1914,14 @@ export const httpApi: Api = {
 
   // GET /api/cto/profile — the §8.5 profile & §3.2 journal drill-down render
   // model, composed server-side (Settings → Internals → Profile & rhythm).
-  // A rejection (engine off / server down) degrades to an empty model so the
-  // drill-down renders an "inert / no data yet" state rather than crashing.
+  // Throws on failure (engine off / server down / HTTP error), like ctoStateGet
+  // — the caller's catch renders the failure instead of a "no data yet" state.
   ctoProfileGet: async (): Promise<CtoProfileRender> => {
     const url = `${serverBase()}/api/cto/profile`;
-    let res: Response;
-    try {
-      res = await fetch(url, { method: "GET", headers: authHeaders(clientToken()) });
-    } catch {
-      return emptyProfileRender();
-    }
+    const res = await fetch(url, { method: "GET", headers: authHeaders(clientToken()) });
     if (res.status === 401) throw new AuthRequiredError();
-    if (!res.ok) return emptyProfileRender();
-    let json: CtoProfileRender = emptyProfileRender();
-    try { json = (await res.json()) as CtoProfileRender; } catch { /* non-JSON */ }
-    return json;
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return (await res.json()) as CtoProfileRender;
   },
 
   // POST /api/cto/profile/edit — inline profile edit (stated wins, §8.5).
@@ -1993,24 +1986,16 @@ export const httpApi: Api = {
   },
 
   // GET /api/cto/facts — the Blackboard drill-down render model (§10.5 row 1,
-  // BET-1399), composed server-side. A rejection degrades to an empty model
-  // so the drill-down renders an "inert / no data yet" state.
+  // BET-1399), composed server-side. Throws on failure, like ctoStateGet.
   ctoFactsGet: async (input?: { project?: string | null; asOf?: number | null }): Promise<CtoFactsRender> => {
     const qs = new URLSearchParams();
     if (input?.project) qs.set("project", input.project);
     if (input?.asOf != null && Number.isFinite(input.asOf)) qs.set("asOf", String(Math.floor(input.asOf)));
     const url = `${serverBase()}/api/cto/facts${qs.toString() ? `?${qs.toString()}` : ""}`;
-    let res: Response;
-    try {
-      res = await fetch(url, { method: "GET", headers: authHeaders(clientToken()) });
-    } catch {
-      return emptyFactsRender();
-    }
+    const res = await fetch(url, { method: "GET", headers: authHeaders(clientToken()) });
     if (res.status === 401) throw new AuthRequiredError();
-    if (!res.ok) return emptyFactsRender();
-    let json: CtoFactsRender = emptyFactsRender();
-    try { json = (await res.json()) as CtoFactsRender; } catch { /* non-JSON */ }
-    return json;
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return (await res.json()) as CtoFactsRender;
   },
 
   // GET /api/cto/facts/archive — read-only paginated archive browser (§6.3).
@@ -2075,19 +2060,13 @@ export const httpApi: Api = {
   },
 
   // GET /api/cto/tools — the tool-integrations drill-down render (§10.5 row 4).
+  // Throws on failure, like ctoStateGet.
   ctoToolsGet: async (): Promise<CtoToolsRender> => {
     const url = `${serverBase()}/api/cto/tools`;
-    let res: Response;
-    try {
-      res = await fetch(url, { method: "GET", headers: authHeaders(clientToken()) });
-    } catch {
-      return emptyToolsRender();
-    }
+    const res = await fetch(url, { method: "GET", headers: authHeaders(clientToken()) });
     if (res.status === 401) throw new AuthRequiredError();
-    if (!res.ok) return emptyToolsRender();
-    let json: CtoToolsRender = emptyToolsRender();
-    try { json = (await res.json()) as CtoToolsRender; } catch { /* non-JSON */ }
-    return json;
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return (await res.json()) as CtoToolsRender;
   },
 
   // POST /api/cto/tools/revoke — per-ring revoke (§10.5 row 4).
@@ -2127,8 +2106,8 @@ export const httpApi: Api = {
   },
 };
 
-// A safe all-empty default so the profile drill-down renders an inert state
-// (and never crashes) while the engine has no data or the box is offline.
+// A safe all-empty default so a failed profile edit/suppress still resolves
+// with the `{ok:false,error}` shape the caller checks explicitly.
 function emptyProfileRender(): CtoProfileRender {
   return {
     compiledAt: 0,
@@ -2155,17 +2134,6 @@ function emptyProfileRender(): CtoProfileRender {
     sensitive: [],
     journal: [],
   };
-}
-
-// Safe all-empty defaults for the BET-1399 drill-downs so the Blackboard and
-// tool-integrations panels render an inert state (never crash) while the
-// engine has no data or the box is offline.
-function emptyFactsRender(): CtoFactsRender {
-  return { compiledAt: 0, project: null, projects: [], asOf: null, active: [], superseded: [] };
-}
-
-function emptyToolsRender(): CtoToolsRender {
-  return { compiledAt: 0, tools: [], never: [] };
 }
 
 // Base64-encode an ArrayBuffer in chunks. `btoa(String.fromCharCode(...))`

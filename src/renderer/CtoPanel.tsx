@@ -1739,13 +1739,8 @@ function ProfileView({
   const refresh = useCallback(async () => {
     try {
       const r = await window.api.ctoProfileGet();
-      // httpApi degrades a failed read to `emptyProfileRender()` (compiledAt
-      // 0 by construction; a server success always stamps a time). Treat that
-      // as the failure it is instead of claiming "nothing here yet".
-      if (r.compiledAt === 0) {
-        setLoadError("the profile read failed");
-        return;
-      }
+      // ctoProfileGet throws on a failed read (BET-1483) — the catch below
+      // surfaces it while the last good render stays on screen.
       setRender(r);
       setLoadError(null);
     } catch (e) {
@@ -2451,14 +2446,9 @@ function BlackboardView({
   const refresh = useCallback(async () => {
     try {
       const r = await window.api.ctoFactsGet({});
-      // httpApi degrades a failed read to `emptyFactsRender()` (compiledAt 0
-      // by construction; a server success always stamps a time). Treating it
-      // as success would swap the board — and the project chip row — for an
-      // empty render the user cannot switch back from (BET-1468 item 6).
-      if (r.compiledAt === 0) {
-        setLoadError("the blackboard read failed");
-        return;
-      }
+      // ctoFactsGet throws on a failed read (BET-1483) — the catch below keeps
+      // the board (and the project chip row) instead of swapping in an empty
+      // render the user cannot switch back from (BET-1468 item 6).
       setRender(r);
       setLoadError(null);
     } catch (e) {
@@ -2505,13 +2495,9 @@ function BlackboardView({
 
   const switchProject = async (project: string) => {
     try {
+      // ctoFactsGet throws on a failed read (BET-1483) — the catch keeps the
+      // currently displayed board and its chip row instead of wiping them.
       const r = await window.api.ctoFactsGet({ project });
-      if (r.compiledAt === 0) {
-        // Failed read (httpApi degrades to the empty render) — keep the
-        // currently displayed board and its chip row instead of wiping them.
-        pushToast({ id: `bb-switch-${Date.now()}`, message: `Couldn't switch to ${project}` });
-        return;
-      }
       setRender(r);
       setArchive([]);
       setArchiveTotal(0);
@@ -2749,13 +2735,8 @@ function ToolIntegrationsView({
   const refresh = useCallback(async () => {
     try {
       const r = await window.api.ctoToolsGet();
-      // httpApi degrades a failed read to `emptyToolsRender()` (compiledAt 0
-      // by construction; a server success always stamps a time) — treat it as
-      // the failure it is instead of claiming no tools are observed.
-      if (r.compiledAt === 0) {
-        setLoadError("the tool registry read failed");
-        return;
-      }
+      // ctoToolsGet throws on a failed read (BET-1483) — the catch below
+      // surfaces it instead of claiming no tools are observed.
       setRender(r);
       setLoadError(null);
     } catch (e) {
