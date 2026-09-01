@@ -1673,9 +1673,44 @@ main() {
         || die "apt-get update failed"
       apt_priv install -y debian-keyring debian-archive-keyring apt-transport-https curl \
         || die "apt-get install prerequisites for Caddy failed"
-      curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
-        | sudo_priv gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg \
-        || die "failed to download Caddy GPG key"
+      # Import Caddy's repo signing key. Staged through temp files and made
+      # NON-INTERACTIVE for the same reason apt_priv exists (see its comment):
+      # this script runs over `ssh -tt` with stdin ignored, so ANY command
+      # that asks a question blocks forever inside the "Starting the service"
+      # stage while the UI's elapsed timer keeps ticking — it reads as alive.
+      # Reported from the field on Ubuntu 22.04.
+      #
+      #   --batch --yes
+      #       `gpg --dearmor -o <path>` prompts "File '<path>' exists.
+      #       Overwrite? (y/N)" when the keyring is ALREADY THERE, which is
+      #       the normal state on a retry: the first attempt writes the key,
+      #       fails or is cancelled later, and every subsequent run then hangs
+      #       HERE deterministically. That self-perpetuating trap is the bug —
+      #       overwriting is always what we want (the key is re-fetched from
+      #       source in the line above).
+      #   --connect-timeout / --max-time
+      #       The key is ~7KB from a third-party host (Cloudsmith). Unreachable
+      #       rather than slow, a bare curl waits forever — same symptom, same
+      #       stage, different cause. Bounded so it FAILS and gets reported.
+      #
+      # Staging to a temp file also fixes the pipeline's error handling: in
+      # `curl … | gpg …` only gpg's status is checked, so a truncated download
+      # could be dearmored into a corrupt keyring that poisons apt later.
+      _caddy_key_asc="$(mktemp)"
+      _caddy_key_gpg="$(mktemp)"
+      if ! curl -1sLf --connect-timeout 15 --max-time 60 \
+          https://dl.cloudsmith.io/public/caddy/stable/gpg.key -o "$_caddy_key_asc"; then
+        rm -f "$_caddy_key_asc" "$_caddy_key_gpg"
+        die "failed to download the Caddy signing key from dl.cloudsmith.io (network unreachable, or the host is down).
+        Check the server can reach it:  curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key >/dev/null"
+      fi
+      if ! gpg --batch --yes --dearmor -o "$_caddy_key_gpg" < "$_caddy_key_asc"; then
+        rm -f "$_caddy_key_asc" "$_caddy_key_gpg"
+        die "failed to decode the Caddy signing key"
+      fi
+      install_root_file "$_caddy_key_gpg" /usr/share/keyrings/caddy-stable-archive-keyring.gpg \
+        || { rm -f "$_caddy_key_asc" "$_caddy_key_gpg"; die "failed to install the Caddy signing key"; }
+      rm -f "$_caddy_key_asc" "$_caddy_key_gpg"
       # Write the apt repo line DIRECTLY with a resolved, known-good codename
       # instead of piping Cloudsmith's config.deb.txt. That script probes
       # /etc/os-release and, on a distro its detector doesn't recognize (e.g.
