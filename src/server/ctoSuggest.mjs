@@ -41,6 +41,7 @@ import {
   ledgerStore,
   engineStateStore,
   patchEngineState,
+  patchStore,
   trustStore,
   verdictsStore,
   digestsStore,
@@ -842,11 +843,13 @@ export function createCtoSuggest(deps = {}) {
       const r = await recordVerdict({ subject, verdict, never });
       return { ok: r?.ok === true, error: r?.error };
     }
-    // Fallback: write directly through the shared verdicts store.
-    const payload = await verdicts.load().catch(() => null);
-    const entries = Array.isArray(payload?.entries) ? payload.entries : [];
+    // Fallback: append directly through the shared verdicts store — the same
+    // patchStore section as recordVerdict (BET-1492), so a concurrent
+    // recorder's verdict survives this write.
     const entry = { ts: now(), subject, verdict, ...(never === true ? { never: true } : {}) };
-    await verdicts.save({ ...(payload ?? {}), entries: [...entries, entry] });
+    await patchStore(verdicts, (fresh) => ({
+      entries: [...(Array.isArray(fresh?.entries) ? fresh.entries : []), entry],
+    }));
     return { ok: true };
   }
 

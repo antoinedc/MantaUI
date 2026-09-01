@@ -31,6 +31,10 @@ import { startOfDay } from "./ctoRollups.mjs";
 import { createFactsEngine } from "./ctoFacts.mjs";
 import { windowFor } from "./ctoRollups.mjs";
 import { BLOCKER_AFTER_MS } from "./ctoCards.mjs";
+import { inboxStore, sweepInbox } from "./ctoStores.mjs";
+import { createCtoInbound } from "./cto.mjs";
+
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Build a fully-injected engine harness: no real fs, no real stores, a fake
 // clock we can advance. Everything the engine touches goes through these
@@ -980,6 +984,48 @@ test("drainInbox folds unread notes into high-salience B1-weighted evidence and 
   assert.ok(Math.abs(rowB.senderReliability - 1 / 2) < 1e-9, "neutral sender weighted 1/2");
   // No evidence for the already-read entry.
   assert.ok(!rows.some((row) => row.message === "already seen"));
+});
+
+test("drainInbox mark-read is a patchStore section: a concurrent sweep + append BOTH survive the mark-read (BET-1492)", async () => {
+  // Seeded on the REAL clock — the append (createCtoInbound) and the sweep
+  // purge with their own real now(), not the engine's virtual clock.
+  await inboxStore.save({
+    v: 1,
+    entries: [
+      { id: "unread", kind: "finding", message: "flaky", sender: { sessionID: "s1" }, read: false, count: 1, expires: Date.now() + 100_000 },
+      { id: "old", kind: "fyi", message: "expired", read: true, count: 1, expires: Date.now() - 1 },
+    ],
+  });
+  const engine = createCtoEngine({
+    configGet: async () => ({ ctoEnabled: true }),
+    stores: makeMemoryStores(),
+    ledger: { append: async () => true },
+    engineState: { load: async () => ({ v: 1, entries: [] }), save: async () => {} },
+    cards: {},
+    inbox: inboxStore,
+    // The drain's (delayed) reliability lookup is where the patch section
+    // parks: the sweep and the append must queue behind it and re-derive.
+    // The old unlocked drain spread-save rewrote `entries` from its stale
+    // snapshot and dropped the note appended mid-drain.
+    facts: { getState: async () => { await delay(25); return { senderReliability: {} }; } },
+    now: () => 1_000_000,
+    publish: () => {},
+  });
+  const inbound = createCtoInbound({ registerBlocker: async () => {} });
+  const drain = engine.drainInbox(); // parks mid-patch at the delayed getState
+  await delay(5); // let the drain issue its load / take the mutex
+  const sweep = sweepInbox(Date.now());
+  const append = inbound.inbound({ surface: "session", payload: { kind: "fyi", message: "appended mid-drain" } });
+  const [drainRes] = await Promise.all([drain, sweep, append]);
+  assert.equal(drainRes.drained, 1);
+  await delay(30); // let every in-flight write land before reading the verdict
+  const after = await inboxStore.load();
+  assert.deepEqual(
+    after.entries.map((e) => e.message).sort(),
+    ["appended mid-drain", "flaky"],
+    "the mid-drain append survived the drain's mark-read; the expired note did not resurrect",
+  );
+  assert.equal(after.entries.find((e) => e.message === "flaky")?.read, true, "mark-read landed");
 });
 
 test("isRunningCtoRow: single shared definition of a running CTO job row (BET-1427)", () => {

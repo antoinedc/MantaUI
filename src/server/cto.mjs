@@ -41,6 +41,7 @@ import {
   INBOX_KINDS,
   inboxExpiresAt,
   purgeExpiredInbox,
+  patchStore,
 } from "./ctoStores.mjs";
 import { makeWatcher as buildWatcher, validatePredicate } from "./ctoWatchers.mjs";
 
@@ -1102,11 +1103,33 @@ export function createCtoInbound({
   isCallActive = () => false,
   ctoSessionID = null,
   sendPrompt = async () => {},
-  loadInbox = async () => inboxStore.load(),
-  saveInbox = async (data) => inboxStore.save(data),
+  // Legacy load/save seam (tests inject it). Left undefined by default —
+  // see inboxPatch below.
+  loadInbox,
+  saveInbox,
+  // BET-1492: the append runs as a patchStore section. Default: the REAL
+  // inbox store — its path-keyed mutex is the one every inbox writer (the
+  // engine drain, the retention sweep, concurrent appends) serializes on.
+  // A caller injecting the legacy load/save pair gets an adapter built ONCE
+  // per factory (stable object identity → stable mutex); it cannot share the
+  // path mutex, but the injected pair IS the whole store world in those
+  // (test) callers.
+  patchInbox = null,
   registerBlocker = async () => {},
   now = () => Date.now(),
 } = {}) {
+  const inboxPatch =
+    patchInbox ??
+    (loadInbox === undefined && saveInbox === undefined
+      ? (mutation) => patchStore(inboxStore, mutation)
+      : (mutation) =>
+          patchStore(
+            {
+              load: loadInbox ?? (async () => inboxStore.load()),
+              save: saveInbox ?? (async (data) => inboxStore.save(data)),
+            },
+            mutation,
+          ));
   async function inbound({ surface = "session", payload = {}, seenId } = {}) {
     // De-dupe: an event whose seenId was already handled is a re-delivery
     // (the same opencode event arrives on multiple streams; a watcher may
@@ -1152,31 +1175,33 @@ export function createCtoInbound({
       expires: inboxExpiresAt(kind, ts, { now }),
     };
 
-    // Load (silently dropping expired), dedupe by tag (coalesce) else append.
-    let data;
-    try {
-      data = await loadInbox();
-    } catch {
-      data = {};
-    }
-    let entries = Array.isArray(data?.entries) ? data.entries : [];
-    const { keep } = purgeExpiredInbox(entries, { nowMs: ts });
-    entries = keep;
+    // BET-1492: load-fresh → purge expired → dedupe by tag (coalesce) else
+    // append → save, all inside ONE patchStore section under the inbox
+    // store's mutex. The old unlocked load-spread-save (`saveInbox({
+    // ...data, entries })`) could revert a note another writer (the drain's
+    // mark-read, the retention sweep, a concurrent send_to_cto) committed
+    // between the load and the save.
     let coalesced = false;
-    if (tag) {
-      const idx = entries.findIndex((e) => e?.tag === tag);
-      if (idx >= 0) {
-        entries[idx] = coalesceInboxEntry(entries[idx], entry, ts);
-        coalesced = true;
-      } else {
-        entries.push(entry);
-      }
-    } else {
-      entries.push(entry);
-    }
-    const effective = coalesced ? entries.find((e) => e?.tag === tag) : entry;
+    let effective = entry;
     try {
-      await saveInbox({ ...data, entries });
+      await inboxPatch((fresh) => {
+        let entries = Array.isArray(fresh?.entries) ? fresh.entries : [];
+        const { keep } = purgeExpiredInbox(entries, { nowMs: ts });
+        entries = keep;
+        if (tag) {
+          const idx = entries.findIndex((e) => e?.tag === tag);
+          if (idx >= 0) {
+            entries[idx] = coalesceInboxEntry(entries[idx], entry, ts);
+            coalesced = true;
+          } else {
+            entries.push(entry);
+          }
+        } else {
+          entries.push(entry);
+        }
+        effective = coalesced ? entries.find((e) => e?.tag === tag) : entry;
+        return { entries };
+      });
     } catch (e) {
       console.warn("[cto] inbox save failed:", e?.message ?? e);
     }

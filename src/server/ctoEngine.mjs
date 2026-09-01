@@ -63,6 +63,7 @@ import {
   toolUsageStore,
   budgetStore,
   patchEngineState,
+  patchStore,
   purgeExpiredInbox,
 } from "./ctoStores.mjs";
 import { createVerdictEngine, createAsSourceSink } from "./ctoVerdicts.mjs";
@@ -2094,42 +2095,50 @@ export function createCtoEngine(deps = {}) {
   async function drainInbox() {
     try {
       const store = inbox ?? bundle.inbox;
-      const payload = await store.load();
-      const entries = Array.isArray(payload?.entries) ? payload.entries : [];
-      if (entries.length === 0) return { drained: 0 };
-      const { keep } = purgeExpiredInbox(entries, { nowMs: now() });
-      const unread = keep.filter((e) => !e?.read);
-      if (unread.length === 0) {
-        if (keep.length !== entries.length) await store.save({ ...payload, entries: keep });
-        return { drained: 0 };
-      }
-      // Per-sender reliability (Beta mean, §6.4 / B1); unseen senders default
-      // to neutral (1).
-      let rel = {};
-      try {
-        rel = (await getFactsEngine().getState())?.senderReliability ?? {};
-      } catch {
-        rel = {};
-      }
-      const next = keep.map((e) => {
-        if (e?.read) return e;
-        const weight = senderReliability(rel[senderKey(e?.sender)] ?? {});
-        const refs = Array.isArray(e?.refs) ? e.refs.slice() : [];
-        if (e?.sender?.sessionID) refs.push(e.sender.sessionID);
-        void ledgerLog({
-          channel: CHANNEL_EVENT,
-          sessionID: e?.sender?.sessionID ?? undefined,
-          kind: `inbox.${e?.kind ?? "note"}`,
-          salience: "high",
-          senderReliability: weight,
-          refs,
-          message: e?.message,
-          tag: e?.tag,
-        });
-        return { ...e, read: true };
+      let drained = 0;
+      // BET-1492: the mark-read (and the expired-only rewrite) is ONE
+      // patchStore read-derive-write section — the old unlocked
+      // load-spread-save could revert a note appended (or a read flag
+      // flipped) between the drain's load and its save. An empty patch is a
+      // pure no-op: no save when nothing expired and nothing unread.
+      await patchStore(store, async (payload) => {
+        const entries = Array.isArray(payload?.entries) ? payload.entries : [];
+        if (entries.length === 0) return {};
+        const { keep } = purgeExpiredInbox(entries, { nowMs: now() });
+        const unread = keep.filter((e) => !e?.read);
+        if (unread.length === 0) {
+          return keep.length === entries.length ? {} : { entries: keep };
+        }
+        // Per-sender reliability (Beta mean, §6.4 / B1); unseen senders default
+        // to neutral (1).
+        let rel = {};
+        try {
+          rel = (await getFactsEngine().getState())?.senderReliability ?? {};
+        } catch {
+          rel = {};
+        }
+        drained = unread.length;
+        return {
+          entries: keep.map((e) => {
+            if (e?.read) return e;
+            const weight = senderReliability(rel[senderKey(e?.sender)] ?? {});
+            const refs = Array.isArray(e?.refs) ? e.refs.slice() : [];
+            if (e?.sender?.sessionID) refs.push(e.sender.sessionID);
+            void ledgerLog({
+              channel: CHANNEL_EVENT,
+              sessionID: e?.sender?.sessionID ?? undefined,
+              kind: `inbox.${e?.kind ?? "note"}`,
+              salience: "high",
+              senderReliability: weight,
+              refs,
+              message: e?.message,
+              tag: e?.tag,
+            });
+            return { ...e, read: true };
+          }),
+        };
       });
-      await store.save({ ...payload, entries: next });
-      return { drained: unread.length };
+      return { drained };
     } catch {
       /* inbox drain is best-effort — never takes the engine down */
       return { drained: 0 };
