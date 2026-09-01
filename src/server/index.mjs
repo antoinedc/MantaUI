@@ -46,6 +46,8 @@ import * as pty from "./pty.mjs";
 import * as local from "./local.mjs";
 import { createPeekHandler } from "./peek.mjs";
 import { createProjectsHandler } from "./projectsRoute.mjs";
+import { createUploadHandler } from "./uploadRoute.mjs";
+import { CTO_SAFE_500_MESSAGE, respondSafe500 } from "./safeApiError.mjs";
 import { createLogShipper, captureConsole, resolveAxiomConfig } from "../shared/logShip.mjs";
 import { setTelemetrySink, shipCtxEvent } from "./optimizer/telemetry.mjs";
 import { blendedPrice } from "../shared/blendedPrice.mjs";
@@ -3003,50 +3005,10 @@ function requireLoopback(req, res, errorMessage) {
 // multipart parser.
 
 const UPLOAD_ROOT = uploadRoot();
-const SESSION_RE = /^[A-Za-z0-9._-]+$/;
-const BATCH_RE = /^[0-9]{6,20}$/;
-
-function safeBasename(name) {
-  // Strip path separators and control chars; collapse oddballs to "_".
-  let n = String(name).replace(/[\x00-\x1f\\/:*?"<>|]/g, "_");
-  if (n === "." || n === "..") n = "file";
-  if (!n) n = "file";
-  if (n.length > 200) n = n.slice(0, 200);
-  return n;
-}
-
-async function handleUpload(req, res, url) {
-  const session = url.searchParams.get("session");
-  if (!session || !SESSION_RE.test(session)) {
-    respondJson(res, 400, { error: "bad session" });
-    return;
-  }
-  const rawName = req.headers["x-filename"];
-  if (typeof rawName !== "string" || !rawName) {
-    respondJson(res, 400, { error: "missing X-Filename" });
-    return;
-  }
-  let decoded;
-  try { decoded = decodeURIComponent(rawName); } catch { decoded = rawName; }
-  const filename = safeBasename(decoded);
-
-  const batchHeader = req.headers["x-batch-id"];
-  const batch = typeof batchHeader === "string" && BATCH_RE.test(batchHeader)
-    ? batchHeader
-    : String(Date.now());
-
-  const dir = join(UPLOAD_ROOT, session, batch);
-  const target = join(dir, filename);
-
-  try {
-    await mkdir(dir, { recursive: true });
-    await pipeline(req, createWriteStream(target));
-  } catch (e) {
-    respondJson(res, 500, { error: String(e?.message ?? e) });
-    return;
-  }
-  respondJson(res, 200, { path: target });
-}
+// POST /api/upload handler — the real route logic lives in src/server/uploadRoute.mjs
+// (extracted BET-1460 on the projectsRoute.mjs pattern; tested in uploadRoute.test.mjs).
+// Injected with the box's upload root (~/.manta-uploads).
+const uploadHandler = createUploadHandler({ uploadRoot: UPLOAD_ROOT });
 
 // Agent → device download: stream a file back to the device as a browser
 // download. Path-traversal guarded with the SAME home-scoped rule /api/peek
@@ -3313,6 +3275,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
+      // class-2 (BET-1460): desktop main classifies outcomes to fixed copy (unpair.mjs) — raw is a debug aid.
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
@@ -3488,7 +3451,7 @@ const handleRequest = async (req, res) => {
   }
 
   if (req.method === "POST" && path === "/api/upload") {
-    return handleUpload(req, res, url);
+    return uploadHandler(req, res, url);
   }
 
   if (req.method === "GET" && path === "/api/download") {
@@ -3604,6 +3567,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
+      // class-2 (BET-1460): schedule opencode tool — relays the message to the model (the card UI reads via /rpc).
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
@@ -3724,6 +3688,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
+      // class-2 (BET-1460): cap runner (capExecutor) + plugins opencode tool — machine consumers.
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
@@ -3843,6 +3808,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
+      // class-2 (BET-1460): delegate opencode tool — relays the message to the model.
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
@@ -3884,6 +3850,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
+      // class-2 (BET-1460): plugins opencode tool + Settings plugins list (raw only behind its <details> disclosure).
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
@@ -3972,6 +3939,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
+      // class-2 (BET-1460): forge-rules opencode tool + Settings toggles (raw only behind its <details> disclosure).
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
@@ -4043,6 +4011,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
+      // class-2 (BET-1460): webhook opencode tool — relays the message to the model.
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
@@ -4077,6 +4046,7 @@ const handleRequest = async (req, res) => {
         ),
       );
     } catch (e) {
+      // class-2 (BET-1460): forge webhook delivery (/hook/<token>) — machine-to-machine; raw aids redelivery diagnosis.
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
@@ -4136,6 +4106,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
+      // class-2 (BET-1460): serve-page opencode tool — relays the message to the model.
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
@@ -4173,6 +4144,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
+      // class-2 (BET-1460): plan-render opencode tool — relays the message to the model.
       respondJson(res, 500, { ok: false, error: String(e?.message ?? e) });
     }
     return;
@@ -4204,6 +4176,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
+      // class-2 (BET-1460): notify opencode tool — relays the message to the model.
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
@@ -4246,6 +4219,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
+      // class-2 (BET-1460): manta-optimizer plugin hook (policy read) — relays the message to the model.
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
@@ -4277,6 +4251,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
+      // class-2 (BET-1460): manta-optimizer plugin hook (constraints read) — relays the message to the model.
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
@@ -4301,6 +4276,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
+      // class-2 (BET-1460): manta-optimizer plugin hook (counterfactual report) — relays the message to the model.
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
@@ -4360,6 +4336,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
+      // class-2 (BET-1460): progress opencode tool — relays the message to the model.
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
@@ -4411,6 +4388,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
+      // class-2 (BET-1460): peers opencode tools — relay the message to the model.
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
@@ -4446,6 +4424,7 @@ const handleRequest = async (req, res) => {
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
       // Errors return a message the model can act on, never a bare 500.
+      // class-2 (BET-1460): app-control opencode tool — relays the message to the model.
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
@@ -4464,7 +4443,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
-      respondJson(res, 500, { error: String(e?.message ?? e) });
+      respondSafe500(res, "cto/state", CTO_SAFE_500_MESSAGE, e);
     }
     return;
   }
@@ -4488,7 +4467,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
-      respondJson(res, 500, { error: String(e?.message ?? e) });
+      respondSafe500(res, "cto/pause-resume", CTO_SAFE_500_MESSAGE, e);
     }
     return;
   }
@@ -4541,7 +4520,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
-      respondJson(res, 500, { error: String(e?.message ?? e) });
+      respondSafe500(res, "cto/health", CTO_SAFE_500_MESSAGE, e);
     }
     return;
   }
@@ -4566,7 +4545,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
-      respondJson(res, 500, { error: String(e?.message ?? e) });
+      respondSafe500(res, "cto/ledger", CTO_SAFE_500_MESSAGE, e);
     }
     return;
   }
@@ -4590,7 +4569,7 @@ const handleRequest = async (req, res) => {
       respondJson(res, 200, { ...render, journal: entries });
       return;
     } catch (e) {
-      respondJson(res, 500, { error: String(e?.message ?? e) });
+      respondSafe500(res, "cto/profile", CTO_SAFE_500_MESSAGE, e);
     }
     return;
   }
@@ -4619,7 +4598,7 @@ const handleRequest = async (req, res) => {
       respondJson(res, 200, { ok: true, ...render });
       return;
     } catch (e) {
-      respondJson(res, 500, { error: String(e?.message ?? e) });
+      respondSafe500(res, "cto/profile-edit", CTO_SAFE_500_MESSAGE, e);
     }
     return;
   }
@@ -4643,7 +4622,7 @@ const handleRequest = async (req, res) => {
       respondJson(res, 200, { ok: true, ...render });
       return;
     } catch (e) {
-      respondJson(res, 500, { error: String(e?.message ?? e) });
+      respondSafe500(res, "cto/profile-suppress", CTO_SAFE_500_MESSAGE, e);
     }
     return;
   }
@@ -4661,7 +4640,7 @@ const handleRequest = async (req, res) => {
       respondJson(res, resDel?.ok ? 200 : 404, resDel ?? { ok: false, error: "not found" });
       return;
     } catch (e) {
-      respondJson(res, 500, { error: String(e?.message ?? e) });
+      respondSafe500(res, "cto/journal-delete", CTO_SAFE_500_MESSAGE, e);
     }
     return;
   }
@@ -4695,7 +4674,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
-      respondJson(res, 500, { error: String(e?.message ?? e) });
+      respondSafe500(res, "cto/digest", CTO_SAFE_500_MESSAGE, e);
     }
     return;
   }
@@ -4720,7 +4699,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
-      respondJson(res, 500, { error: String(e?.message ?? e) });
+      respondSafe500(res, "cto/digest-opened", CTO_SAFE_500_MESSAGE, e);
     }
     return;
   }
@@ -4779,7 +4758,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
-      respondJson(res, 500, { error: String(e?.message ?? e) });
+      respondSafe500(res, "cto/verdict", CTO_SAFE_500_MESSAGE, e);
     }
     return;
   }
@@ -4805,7 +4784,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
-      respondJson(res, 500, { error: String(e?.message ?? e) });
+      respondSafe500(res, "cto/tools-connect", CTO_SAFE_500_MESSAGE, e);
     }
     return;
   }
@@ -4836,7 +4815,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
-      respondJson(res, 500, { error: String(e?.message ?? e) });
+      respondSafe500(res, "cto/tonight", CTO_SAFE_500_MESSAGE, e);
     }
     return;
   }
@@ -4864,7 +4843,7 @@ const handleRequest = async (req, res) => {
       respondJson(res, 200, out);
       return;
     } catch (e) {
-      respondJson(res, 500, { error: String(e?.message ?? e) });
+      respondSafe500(res, "cto/facts", CTO_SAFE_500_MESSAGE, e);
     }
     return;
   }
@@ -4888,7 +4867,7 @@ const handleRequest = async (req, res) => {
       respondJson(res, result?.ok ? 200 : 400, result);
       return;
     } catch (e) {
-      respondJson(res, 500, { error: String(e?.message ?? e) });
+      respondSafe500(res, "cto/facts-correct-pin", CTO_SAFE_500_MESSAGE, e);
     }
     return;
   }
@@ -4911,7 +4890,7 @@ const handleRequest = async (req, res) => {
       respondJson(res, 200, await adaptiveCto.toolsView());
       return;
     } catch (e) {
-      respondJson(res, 500, { error: String(e?.message ?? e) });
+      respondSafe500(res, "cto/tools", CTO_SAFE_500_MESSAGE, e);
     }
     return;
   }
@@ -4930,7 +4909,7 @@ const handleRequest = async (req, res) => {
       respondJson(res, result?.ok ? 200 : 400, result);
       return;
     } catch (e) {
-      respondJson(res, 500, { error: String(e?.message ?? e) });
+      respondSafe500(res, "cto/tools-revoke-unnever", CTO_SAFE_500_MESSAGE, e);
     }
     return;
   }
@@ -4967,7 +4946,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
-      respondJson(res, 500, { error: String(e?.message ?? e) });
+      respondSafe500(res, "cto/suggest-held", CTO_SAFE_500_MESSAGE, e);
     }
     return;
   }
@@ -4985,7 +4964,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
-      respondJson(res, 500, { error: String(e?.message ?? e) });
+      respondSafe500(res, "cto/cards", CTO_SAFE_500_MESSAGE, e);
     }
     return;
   }
@@ -5034,7 +5013,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
-      respondJson(res, 500, { error: String(e?.message ?? e) });
+      respondSafe500(res, "cto/finished", CTO_SAFE_500_MESSAGE, e);
     }
     return;
   }
@@ -5073,7 +5052,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
-      respondJson(res, 500, { error: String(e?.message ?? e) });
+      respondSafe500(res, "cto/facts-propose", CTO_SAFE_500_MESSAGE, e);
     }
     return;
   }
@@ -5112,6 +5091,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
+      // class-2 (BET-1460): send-to-cto opencode tool — relays the message to the model.
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
@@ -5149,6 +5129,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
+      // class-2 (BET-1460): cto opencode tool (omnibus dispatch) — relays the message to the model.
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
@@ -5181,6 +5162,7 @@ const handleRequest = async (req, res) => {
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
       // Errors return a message the model can act on, never a bare 500.
+      // class-2 (BET-1460): media opencode tools — relay the message to the model.
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
@@ -5228,6 +5210,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
+      // class-2 (BET-1460): widget opencode tool — relays the message to the model.
       respondJson(res, 500, { ok: false, error: String(e?.message ?? e) });
     }
     return;
@@ -5273,6 +5256,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
+      // class-2 (BET-1460): secrets opencode tool — relays the message to the model.
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
@@ -5323,6 +5307,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
+      // class-2 (BET-1460): secrets opencode tool — relays the message to the model.
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
@@ -5398,6 +5383,7 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 200, result);
     } catch (e) {
+      // class-2 (BET-1460): native iOS shell + curl — the shell never surfaces the body; raw aids diagnostics.
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;

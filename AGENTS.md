@@ -1307,6 +1307,29 @@ Backup at `~/.tmux.conf.pre-MantaUI` on the remote if it was ever modified.
     in `src/server/tmux.test.mjs` + the `node -e` e2e in BET-307. Do NOT
     "simplify" by passing the cwd through unchanged — the chokepoint is
     what makes the silent `$HOME` fallback unreachable.
+- **HTTP 500-body contract (BET-1460) — classify every route by CONSUMER
+  before writing its error catch.** The contract is set by who reads the
+  body, decided once in BET-1460 and enforced by
+  `src/server/errorBodyContract.test.mjs`:
+  - **Class 1 — the 500 body can reach an END USER's screen** (chat panel
+    attachment chips, the CTO pane's toasts and load-error states, the iOS
+    composer). The body must be a SAFE HUMAN LITERAL and the underlying
+    error goes to `console.warn` server-side: write the 500 ONLY through
+    `respondSafe500(res, route, message, e)` from `src/server/safeApiError.mjs`
+    (the CTO family shares `CTO_SAFE_500_MESSAGE`; `/api/upload` is extracted
+    into `src/server/uploadRoute.mjs` on the `projectsRoute.mjs` pattern).
+    Never write `String(e?.message ?? e)` into a class-1 body — raw fs
+    paths and errno output on a user's screen is the leak BET-1454 fixed.
+  - **Class 2 — consumed only by an AI tool registrar / automation /
+    operator surface** (manta-native opencode tools relay the message
+    straight back to the model; the cap runner; Settings renders raw only
+    behind a `<details>` disclosure). Keep the raw body and put a
+    `// class-2 (BET-1460): …` marker comment on the catch — the gate test
+    asserts every remaining raw 500 carries one. Meaningful 400-class
+    bodies ("unknown action", "unauthorized") are untouched by this rule on
+    BOTH classes.
+  When adding a route, decide the class first; a class-1 conversion needs
+  the safe literal + warn, a class-2 route needs the marker comment.
 - **Queued message drain — abort at the next step boundary, then submit on
   idle.** When the user submits while `running` is true, the text gets pushed
   to `messageQueue` and the input clears. MantaUI does NOT wait for the whole
