@@ -67,6 +67,7 @@ import {
   purgeExpiredInbox,
 } from "./ctoStores.mjs";
 import { createVerdictEngine, createAsSourceSink } from "./ctoVerdicts.mjs";
+import { cardHasContent } from "../shared/ctoCard.mjs";
 // BET-1403: the earned-trust ladder (§9.3/§9.4). Its per-class Beta counters
 // ride the §9.5 verdict sink registry below; the digest announces acts and
 // tier changes through the same engine.
@@ -276,6 +277,10 @@ export function computeDot({ enabled, paused, thrifty }) {
 // tonight counts not populated until later pipeline issues. Wired to the real
 // cards schema (BET-1382): an open card (state === "open") is a needs-you item;
 // resolved/dismissed cards have already moved off cards.json into the ledger.
+// BET-1476: an open card with neither a title nor a body is the renderer-
+// invisible residue BET-1469 stopped writing (§10.3) — the mappers drop it, so
+// counting it would badge an answerable item the pane never renders. The same
+// shared predicate (cardHasContent) decides content on both sides.
 // Defensive — a malformed or missing store yields zeros, never a throw.
 // BET-1469: the cards store is injectable so a test can exercise the counting
 // logic without writing the real cards.json (the engine's own default passes
@@ -285,7 +290,7 @@ export async function defaultGetCounts(cardStore = cardsStore) {
   try {
     const cards = await cardStore.load();
     const arr = Array.isArray(cards?.cards) ? cards.cards : [];
-    needsYouCount = arr.filter((c) => c && c.state === "open").length;
+    needsYouCount = arr.filter((c) => c && c.state === "open" && cardHasContent(c)).length;
   } catch {
     needsYouCount = 0;
   }
