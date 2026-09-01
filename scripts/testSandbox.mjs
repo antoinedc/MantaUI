@@ -24,27 +24,65 @@
 //                  result through `test.env`, which vitest injects into every
 //                  worker before the test module is evaluated.
 //
-// An already-set MANTA_STATE_HOME is respected, so a caller that wants a
-// specific sandbox (or a nested runner) keeps control.
+// PER-PROCESS ISOLATION (BET-1493). `node --test` runs each test file as its
+// own concurrent process, and the runner hands every child the coordinator's
+// full environment (`env: { ...process.env, … }` in the runner's spawn). When
+// the coordinator ran this preload first — the node 20 behavior, which is what
+// CI pins via setup-node — every child therefore saw the ALREADY-SET
+// MANTA_STATE_HOME and reused it, so all concurrent test-file processes shared
+// ONE sandbox and raced on the same stores (e.g. the cto ledger): a test
+// asserting exact ledger contents intermittently observed rows appended by a
+// different file's process. Newer runners (node ≥ 22) spawn children before
+// their own `--import` preload evaluates, so each child created a fresh root —
+// masking the race locally.
+//
+// So the home is per-process: the module marks the home it created with
+// MANTA_STATE_HOME_OWNER (the creating pid). A process that inherits a home
+// marked by a DIFFERENT pid subdivides it — `<inherited root>/proc-<pid>` —
+// so every test-file process gets its own slice of the throwaway tree while
+// the whole run stays under one inspectable root. A home with NO owner marker
+// is treated as an explicit external choice and shared as-is, so a caller that
+// wants a specific sandbox (or a nested runner, like vitest.config.ts
+// injecting one home into its workers) keeps control.
 
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+const HOME_VAR = "MANTA_STATE_HOME";
+const OWNER_VAR = "MANTA_STATE_HOME_OWNER";
+
 /**
- * Resolve the sandbox directory for this run, creating it on first call.
- * Idempotent: returns the already-chosen directory on subsequent calls, so the
- * two runners and any nested import agree on one location.
+ * Resolve the sandbox directory for this process, creating it on first call.
+ * Idempotent: returns the already-chosen directory on subsequent calls in the
+ * same process, so the two runners and any nested import agree on one location.
  *
- * The directory is intentionally NOT cleaned up: it lives under the OS temp
- * dir, holds only bytes a test wrote, and keeping it makes a failing test's
- * leftovers inspectable. The OS reclaims it.
+ * The directory tree is intentionally NOT cleaned up: it lives under the OS
+ * temp dir, holds only bytes a test wrote, and keeping it makes a failing
+ * test's leftovers inspectable. The OS reclaims it.
  */
 export function sandboxStateHome() {
-  const existing = process.env.MANTA_STATE_HOME;
-  if (typeof existing === "string" && existing.trim() !== "") return existing;
+  const existing = process.env[HOME_VAR];
+  const owner = process.env[OWNER_VAR];
+
+  if (typeof existing === "string" && existing.trim() !== "") {
+    const inheritedFromOther =
+      typeof owner === "string" && owner.trim() !== "" && owner !== String(process.pid);
+    if (!inheritedFromOther) return existing;
+
+    // Inherited from a parent sandbox process (the node:test coordinator) —
+    // carve out this process's own slice so concurrent test files never share
+    // stores (BET-1493). Stays under the run's throwaway root.
+    const dir = join(existing, `proc-${process.pid}`);
+    mkdirSync(dir, { recursive: true });
+    process.env[HOME_VAR] = dir;
+    process.env[OWNER_VAR] = String(process.pid);
+    return dir;
+  }
+
   const dir = mkdtempSync(join(tmpdir(), "manta-test-home-"));
-  process.env.MANTA_STATE_HOME = dir;
+  process.env[HOME_VAR] = dir;
+  process.env[OWNER_VAR] = String(process.pid);
   return dir;
 }
 
