@@ -1118,18 +1118,20 @@ export function createCtoInbound({
   registerBlocker = async () => {},
   now = () => Date.now(),
 } = {}) {
+  const legacySeam =
+    loadInbox !== undefined || saveInbox !== undefined
+      ? {
+          load: loadInbox ?? (async () => inboxStore.load()),
+          save: saveInbox ?? (async (data) => inboxStore.save(data)),
+        }
+      : null;
+  // legacySeam is a FACTORY-SCOPE object: lockForStore falls back to object
+  // identity for path-less stores, so a per-call literal would mean a fresh
+  // mutex per call and concurrent appends through the injected pair would
+  // stay unserialized (review Block, BET-1492 attempt 2).
   const inboxPatch =
     patchInbox ??
-    (loadInbox === undefined && saveInbox === undefined
-      ? (mutation) => patchStore(inboxStore, mutation)
-      : (mutation) =>
-          patchStore(
-            {
-              load: loadInbox ?? (async () => inboxStore.load()),
-              save: saveInbox ?? (async (data) => inboxStore.save(data)),
-            },
-            mutation,
-          ));
+    (legacySeam ? (mutation) => patchStore(legacySeam, mutation) : (mutation) => patchStore(inboxStore, mutation));
   async function inbound({ surface = "session", payload = {}, seenId } = {}) {
     // De-dupe: an event whose seenId was already handled is a re-delivery
     // (the same opencode event arrives on multiple streams; a watcher may

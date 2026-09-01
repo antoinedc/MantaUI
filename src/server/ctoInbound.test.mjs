@@ -153,6 +153,34 @@ test("concurrent send_to_cto appends all land (the lost-update race between two 
   assert.equal(after.entries.length, 8, "every concurrent append survives (mutex-serialized)");
 });
 
+// Review-return Block (BET-1492 attempt 2): the legacy-seam adapter must be
+// built ONCE per factory. lockForStore falls back to object identity for
+// path-less stores, so a per-call `{load, save}` literal means a fresh mutex
+// per call — concurrent appends through an injected pair stayed unserialized.
+// The fake store snapshots like the real JSON store (fresh object per load);
+// a live-reference fake would mask the race.
+test("the injected legacy seam is serialized too: concurrent appends through it all land", async () => {
+  let state = { v: 1, entries: [] };
+  const snapshot = () => JSON.parse(JSON.stringify(state));
+  const inbound = createCtoInbound({
+    loadInbox: async () => snapshot(),
+    saveInbox: async (data) => {
+      state = JSON.parse(JSON.stringify(data));
+    },
+    registerBlocker: async () => {},
+  });
+  await Promise.all(
+    Array.from({ length: 8 }, (_, i) =>
+      inbound.inbound({ surface: "session", payload: { kind: "fyi", message: `note ${i}` } }),
+    ),
+  );
+  assert.equal(
+    state.entries.length,
+    8,
+    "the adapter's mutex is stable across calls — no append dropped to a last-write-wins",
+  );
+});
+
 test("the inbox append survives a concurrent retention sweep: both land", async () => {
   const nowMs = Date.now();
   await inboxStore.save({
