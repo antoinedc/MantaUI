@@ -482,6 +482,7 @@ import {
   preSurfacedIncidents,
   isJobMerged,
   roiRecommendation,
+  trimPendingCap,
 } from "./ctoBudget.mjs";
 
 const AUG_KEY = roiMonthKey(MIDNIGHT); // 2026-08 local
@@ -811,6 +812,129 @@ test("pending retention keeps fresh probe-pending rows and counted fingerprints 
   await budget.refreshRoi();
   const ids = payload.roi.pending.map((j) => j.id).sort();
   assert.deepEqual(ids, ["countedNoFinish", "fresh"]);
+});
+
+// BET-1487: the pending cap is count-aware — a counted row is a dedupe
+// fingerprint while its delegate job can still re-sample (its record is still
+// in the jobs store), so the cap evicts only provably-dead fingerprints.
+test("trimPendingCap evicts oldest-first but spares counted fingerprints that can still re-sample (BET-1487)", () => {
+  const row = (id, counted, finishedAt = MIDNIGHT - 1000) => ({ id, counted, finishedAt });
+  // At or under the cap: unchanged.
+  assert.deepEqual(
+    trimPendingCap([row("a", false), row("b", true)], { liveIds: new Set() }).map((j) => j.id),
+    ["a", "b"],
+  );
+  // Over the cap with everything evictable: the oldest rows drop, the newest
+  // `cap` survive — the old blind `.slice(-200)` behavior.
+  const allUncounted = Array.from({ length: 205 }, (_, i) => row(`u${i}`, false));
+  const t1 = trimPendingCap(allUncounted, { liveIds: new Set() });
+  assert.equal(t1.length, 200);
+  assert.deepEqual([t1[0].id, t1[199].id], ["u5", "u204"]);
+  // A counted row whose job is STILL in the store (id present in the
+  // snapshot) is protected even at the oldest position; an uncounted row
+  // further back pays instead.
+  const mixed = [row("c0", true), row("u0", false), ...Array.from({ length: 199 }, (_, i) => row(`u${i + 1}`, false))];
+  const t2 = trimPendingCap(mixed, { liveIds: new Set(["c0"]) });
+  assert.equal(t2.length, 200);
+  assert.equal(t2.some((j) => j.id === "c0"), true, "a live fingerprint survives");
+  assert.equal(t2.some((j) => j.id === "u0"), false, "an uncounted row is evicted first");
+  // The same list with the record swept (id absent from the snapshot): the
+  // fingerprint is dead and evictable like any other row.
+  const t3 = trimPendingCap(mixed, { liveIds: new Set() });
+  assert.equal(t3.some((j) => j.id === "c0"), false);
+  assert.equal(t3.some((j) => j.id === "u0"), true);
+  // The cap never keys on finishedAt — a counted row without a timestamp is
+  // protected by the same liveness rule.
+  const noTs = [row("cn", true, null), ...Array.from({ length: 200 }, (_, i) => row(`u${i}`, false))];
+  assert.equal(trimPendingCap(noTs, { liveIds: new Set(["cn"]) }).some((j) => j.id === "cn"), true);
+  assert.equal(trimPendingCap(noTs, { liveIds: new Set() }).some((j) => j.id === "cn"), false);
+  // A failed store read (liveIds null) protects every counted row — the cap
+  // trims only uncounted rows.
+  const heavy = [row("c0", true), row("c1", true), ...Array.from({ length: 200 }, (_, i) => row(`u${i}`, false))];
+  const t4 = trimPendingCap(heavy, { liveIds: null });
+  assert.equal(t4.length, 200);
+  assert.deepEqual(t4.filter((j) => j.counted === true).map((j) => j.id), ["c0", "c1"]);
+  // Fully protected: nothing evictable → the list exceeds the cap rather
+  // than lose a fingerprint.
+  const allCounted = Array.from({ length: 205 }, (_, i) => row(`c${i}`, true));
+  const t5 = trimPendingCap(allCounted, { liveIds: new Set(allCounted.map((j) => j.id)) });
+  assert.equal(t5.length, 205);
+});
+
+test("refreshRoi: the pending cap never evicts a counted fingerprint whose job is still in the store (BET-1487)", async () => {
+  let payload = defaultBudgetPayload();
+  const COUNTED = 50;
+  const countedIds = Array.from({ length: COUNTED }, (_, i) => `c${i}`);
+  // The 50 counted rows' delegate jobs are STILL in the jobs store (inside
+  // its terminal-retention window) — every one is a live dedupe fingerprint.
+  const jobs = countedIds.map((id) => ({ id, actor: "cto", status: "done", branch: `cto/${id}`, cwd: "/p", finishedAt: MIDNIGHT - 1000 }));
+  payload.roi = {
+    months: { [AUG_KEY]: { merged: COUNTED } }, // as if all 50 were already counted
+    pending: [
+      ...countedIds.map((id) => ({ id, branch: `cto/${id}`, cwd: "/p", finishedAt: MIDNIGHT - 1000, counted: true })), // oldest positions
+      ...Array.from({ length: 150 }, (_, i) => ({ id: `u${i}`, branch: `cto/u${i}`, cwd: "/p", finishedAt: MIDNIGHT - 500, counted: false })),
+      { id: "fresh", branch: "cto/fresh", cwd: "/p", finishedAt: MIDNIGHT - 10, counted: false },
+    ], // 201 rows → the cap is over by 1
+  };
+  const store = { load: async () => payload, save: async (p) => (payload = p) };
+  const budget = createCtoBudget({
+    store,
+    jobsRead: async () => jobs,
+    gitProbe: async () => ({ exists: false, isAncestor: false }), // every probe reads "merged"
+    ledgerRead: async () => [],
+    verdictsRead: async () => [],
+    segmentsRead: async () => [],
+    now: () => MIDNIGHT,
+  });
+  await budget.refreshRoi();
+  // The 151 probe-counted rows (150 u-rows + fresh) + the 50 originals
+  // already counted = 201 merged, and the cap trimmed its 1 surplus from an
+  // UNCOUNTED-position row — the old blind slice would have evicted counted
+  // `c0` (the oldest position) instead.
+  assert.equal(payload.roi.months[AUG_KEY].merged, COUNTED + 151);
+  assert.equal(payload.roi.pending.length, 200);
+  const ids1 = new Set(payload.roi.pending.map((j) => j.id));
+  for (const id of countedIds) assert.equal(ids1.has(id), true, `counted fingerprint ${id} survived the cap`);
+  assert.equal(ids1.has("u0"), false, "the oldest uncounted row paid the cap");
+  // Refresh 2: nothing re-samples (every store id is still snapshotted) and
+  // nothing re-counts — under the old code the evicted `c0` fingerprint
+  // would re-sample here and double-count once more.
+  await budget.refreshRoi();
+  assert.equal(payload.roi.months[AUG_KEY].merged, COUNTED + 151);
+  assert.equal(payload.roi.pending.length, 200);
+});
+
+test("refreshRoi: a failed jobs read protects every counted fingerprint from the cap (BET-1487)", async () => {
+  let payload = defaultBudgetPayload();
+  payload.roi = {
+    months: {},
+    pending: [
+      { id: "counted", branch: "cto/counted", cwd: "/p", finishedAt: MIDNIGHT - 1000, counted: true }, // oldest position
+      ...Array.from({ length: 201 }, (_, i) => ({ id: `u${i}`, branch: `cto/u${i}`, cwd: "/p", finishedAt: MIDNIGHT - 500, counted: false })),
+    ], // 202 rows → the cap is over by 2
+  };
+  const store = { load: async () => payload, save: async (p) => (payload = p) };
+  let readFails = true;
+  const budget = createCtoBudget({
+    store,
+    jobsRead: async () => {
+      if (readFails) throw new Error("jobs store down");
+      return [];
+    },
+    gitProbe: async () => ({ exists: true, isAncestor: false }), // nothing merges — rows stay uncounted
+    ledgerRead: async () => [],
+    verdictsRead: async () => [],
+    segmentsRead: async () => [],
+    now: () => MIDNIGHT,
+  });
+  await budget.refreshRoi();
+  // With the read failed, liveness is unknowable — the cap still bounds the
+  // uncounted rows (its actual job) but the counted fingerprint survives
+  // even at the oldest position. The old blind slice evicted it first.
+  assert.equal(payload.roi.pending.length, 200);
+  assert.equal(payload.roi.pending.some((j) => j.id === "counted"), true);
+  assert.equal(payload.roi.pending.some((j) => j.id === "u0"), false);
+  assert.equal(payload.roi.pending.some((j) => j.id === "u200"), true);
 });
 
 // BET-1466 item 4: budget.json is not covered by the store sweep — the spend
