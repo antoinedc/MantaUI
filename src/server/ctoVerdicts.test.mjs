@@ -12,6 +12,7 @@ import {
   createVerdictEngine,
   isValidVerdictSubject,
 } from "./ctoVerdicts.mjs";
+import { verdictsStore } from "./ctoStores.mjs";
 
 // ---------------------------------------------------------------------------
 // §9.5 counter mapping table
@@ -207,6 +208,32 @@ test("listVerdicts returns the recorded verdicts", async () => {
   const list = await engine.listVerdicts();
   assert.equal(list.length, 2);
   assert.equal(list[0].verdict, "accept");
+});
+
+// ---------------------------------------------------------------------------
+// BET-1492 — recordVerdict appends through the verdicts store's patchStore
+// mutex: concurrent recorders re-derive from each other's committed entries
+// instead of both loading the same array and dropping one verdict on save.
+// Uses the REAL verdicts store (sandboxed) so the mutex is the one shared
+// with the retention sweep and any other writer.
+// ---------------------------------------------------------------------------
+
+test("concurrent recordVerdict calls all land (no lost verdict between recorders)", async () => {
+  await verdictsStore.save({ entries: [] });
+  const a = createVerdictEngine({ verdicts: verdictsStore, now: () => 1_000 });
+  const b = createVerdictEngine({ verdicts: verdictsStore, now: () => 2_000 });
+  await Promise.all([
+    ...Array.from({ length: 5 }, (_, i) =>
+      a.recordVerdict({ subject: { type: "fact", id: `a${i}` }, verdict: "accept" }),
+    ),
+    ...Array.from({ length: 5 }, (_, i) =>
+      b.recordVerdict({ subject: { type: "fact", id: `b${i}` }, verdict: "dismiss" }),
+    ),
+  ]);
+  const after = await verdictsStore.load();
+  assert.equal(after.entries.length, 10, "every concurrent verdict survives");
+  assert.equal(after.entries.filter((e) => e?.verdict === "accept").length, 5);
+  assert.equal(after.entries.filter((e) => e?.verdict === "dismiss").length, 5);
 });
 
 test("a pre-built registry routes through sinks without self-registration", async () => {

@@ -31,6 +31,10 @@ import { startOfDay } from "./ctoRollups.mjs";
 import { createFactsEngine } from "./ctoFacts.mjs";
 import { windowFor } from "./ctoRollups.mjs";
 import { BLOCKER_AFTER_MS } from "./ctoCards.mjs";
+import { inboxStore, sweepInbox } from "./ctoStores.mjs";
+import { createCtoInbound } from "./cto.mjs";
+
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Build a fully-injected engine harness: no real fs, no real stores, a fake
 // clock we can advance. Everything the engine touches goes through these
@@ -220,6 +224,31 @@ function makeWatchdog(harness, { spend = 0, expected = 0, livenessMs = 120_000 }
     now: () => harness.clock.ms,
     ledger: { append: async (row) => harness.ledgerRows.push(row) },
   });
+}
+
+// makeWatchdog + a spy over the engine's escalation verbs (prototype
+// delegation, so the engine's lazy getters are never touched) — shared by the
+// BET-1462 escalation tests (was a 17-line intra-file clone).
+function makeSpyWatchdog(harness, { spend }) {
+  const calls = { hardPause: 0, setThrifty: 0 };
+  const spyEngine = Object.create(harness.engine);
+  spyEngine.hardPause = async (arg) => {
+    calls.hardPause += 1;
+    return harness.engine.hardPause(arg);
+  };
+  spyEngine.setThrifty = async (v, opts) => {
+    calls.setThrifty += 1;
+    return harness.engine.setThrifty(v, opts);
+  };
+  const w = createWatchdog({
+    engine: spyEngine,
+    getSpendPerHour: async () => spend,
+    expectedHourlyBurn: async () => 1,
+    livenessMs: 120_000,
+    now: () => harness.clock.ms,
+    ledger: { append: async (row) => harness.ledgerRows.push(row) },
+  });
+  return { w, calls };
 }
 
 test("disabled by default when ctoEnabled is false (config default)", async () => {
@@ -487,26 +516,7 @@ test("watchdog: stale engine heartbeat is flagged, state untouched", async () =>
 
 test("watchdog: a second tick while already paused does not re-escalate (BET-1462)", async () => {
   const h = makeHarness({ ctoEnabled: true });
-  const calls = { hardPause: 0, setThrifty: 0 };
-  // Spy over the engine's escalation verbs without disturbing anything else
-  // (prototype delegation, so the engine's lazy getters are never touched).
-  const spyEngine = Object.create(h.engine);
-  spyEngine.hardPause = async (arg) => {
-    calls.hardPause += 1;
-    return h.engine.hardPause(arg);
-  };
-  spyEngine.setThrifty = async (v, opts) => {
-    calls.setThrifty += 1;
-    return h.engine.setThrifty(v, opts);
-  };
-  const w = createWatchdog({
-    engine: spyEngine,
-    getSpendPerHour: async () => 5,
-    expectedHourlyBurn: async () => 1,
-    livenessMs: 120_000,
-    now: () => h.clock.ms,
-    ledger: { append: async (row) => h.ledgerRows.push(row) },
-  });
+  const { w, calls } = makeSpyWatchdog(h, { spend: 5 });
   await w.tick(); // 5 > 4×1 → the one legitimate hard pause
   assert.equal(calls.hardPause, 1);
   assert.equal(h.killSwitchPaused, true);
@@ -520,24 +530,7 @@ test("watchdog: a second tick while already paused does not re-escalate (BET-146
 
 test("watchdog: already thrifty is never re-asserted (BET-1462)", async () => {
   const h = makeHarness({ ctoEnabled: true });
-  const calls = { hardPause: 0, setThrifty: 0 };
-  const spyEngine = Object.create(h.engine);
-  spyEngine.hardPause = async (arg) => {
-    calls.hardPause += 1;
-    return h.engine.hardPause(arg);
-  };
-  spyEngine.setThrifty = async (v, opts) => {
-    calls.setThrifty += 1;
-    return h.engine.setThrifty(v, opts);
-  };
-  const w = createWatchdog({
-    engine: spyEngine,
-    getSpendPerHour: async () => 3,
-    expectedHourlyBurn: async () => 1,
-    livenessMs: 120_000,
-    now: () => h.clock.ms,
-    ledger: { append: async (row) => h.ledgerRows.push(row) },
-  });
+  const { w, calls } = makeSpyWatchdog(h, { spend: 3 });
   await w.tick(); // 3 > 2×1 → the one legitimate thrifty flip
   assert.equal(calls.setThrifty, 1);
   assert.equal((await h.engine.getState()).dot, DOT.THRIFTY);
@@ -980,6 +973,48 @@ test("drainInbox folds unread notes into high-salience B1-weighted evidence and 
   assert.ok(Math.abs(rowB.senderReliability - 1 / 2) < 1e-9, "neutral sender weighted 1/2");
   // No evidence for the already-read entry.
   assert.ok(!rows.some((row) => row.message === "already seen"));
+});
+
+test("drainInbox mark-read is a patchStore section: a concurrent sweep + append BOTH survive the mark-read (BET-1492)", async () => {
+  // Seeded on the REAL clock — the append (createCtoInbound) and the sweep
+  // purge with their own real now(), not the engine's virtual clock.
+  await inboxStore.save({
+    v: 1,
+    entries: [
+      { id: "unread", kind: "finding", message: "flaky", sender: { sessionID: "s1" }, read: false, count: 1, expires: Date.now() + 100_000 },
+      { id: "old", kind: "fyi", message: "expired", read: true, count: 1, expires: Date.now() - 1 },
+    ],
+  });
+  const engine = createCtoEngine({
+    configGet: async () => ({ ctoEnabled: true }),
+    stores: makeMemoryStores(),
+    ledger: { append: async () => true },
+    engineState: { load: async () => ({ v: 1, entries: [] }), save: async () => {} },
+    cards: {},
+    inbox: inboxStore,
+    // The drain's (delayed) reliability lookup is where the patch section
+    // parks: the sweep and the append must queue behind it and re-derive.
+    // The old unlocked drain spread-save rewrote `entries` from its stale
+    // snapshot and dropped the note appended mid-drain.
+    facts: { getState: async () => { await delay(25); return { senderReliability: {} }; } },
+    now: () => 1_000_000,
+    publish: () => {},
+  });
+  const inbound = createCtoInbound({ registerBlocker: async () => {} });
+  const drain = engine.drainInbox(); // parks mid-patch at the delayed getState
+  await delay(5); // let the drain issue its load / take the mutex
+  const sweep = sweepInbox(Date.now());
+  const append = inbound.inbound({ surface: "session", payload: { kind: "fyi", message: "appended mid-drain" } });
+  const [drainRes] = await Promise.all([drain, sweep, append]);
+  assert.equal(drainRes.drained, 1);
+  await delay(30); // let every in-flight write land before reading the verdict
+  const after = await inboxStore.load();
+  assert.deepEqual(
+    after.entries.map((e) => e.message).sort(),
+    ["appended mid-drain", "flaky"],
+    "the mid-drain append survived the drain's mark-read; the expired note did not resurrect",
+  );
+  assert.equal(after.entries.find((e) => e.message === "flaky")?.read, true, "mark-read landed");
 });
 
 test("isRunningCtoRow: single shared definition of a running CTO job row (BET-1427)", () => {

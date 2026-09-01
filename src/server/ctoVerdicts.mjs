@@ -19,7 +19,7 @@
 //
 // Pure over injected stores + a now() clock — testable without a live box.
 
-import { verdictsStore } from "./ctoStores.mjs";
+import { patchStore, verdictsStore } from "./ctoStores.mjs";
 
 // ---------------------------------------------------------------------------
 // §9.5 counter mapping (normative — one exported table, consumed by the router)
@@ -298,9 +298,13 @@ export function createVerdictEngine(deps = {}) {
       ...(never === true ? { never: true } : {}),
     };
 
-    const payload = await verdicts.load().catch(() => null);
-    const entries = Array.isArray(payload?.entries) ? payload.entries : [];
-    await verdicts.save({ ...(payload ?? {}), entries: [...entries, entry] });
+    // BET-1492: append through the verdicts store's patchStore mutex — two
+    // concurrent recorders (this engine and the ctoSuggest fallback) each
+    // re-derive from the other's committed entries instead of both loading
+    // the same array and dropping one verdict on save.
+    await patchStore(verdicts, (fresh) => ({
+      entries: [...(Array.isArray(fresh?.entries) ? fresh.entries : []), entry],
+    }));
 
     const effects = effectsForVerdict(verdict, never);
     registry.dispatch(effects, entry);

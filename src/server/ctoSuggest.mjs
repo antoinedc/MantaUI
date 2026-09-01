@@ -41,6 +41,7 @@ import {
   ledgerStore,
   engineStateStore,
   patchEngineState,
+  patchStore,
   trustStore,
   verdictsStore,
   digestsStore,
@@ -437,6 +438,27 @@ export function createCtoSuggest(deps = {}) {
     return appendLedgerBestEffort(ledger, now(), entry);
   }
 
+  // The veto / decision card branches share one upsert core (duplication-
+  // gate fix, was a 10-line intra-file clone): call the writer if wired,
+  // swallow a throw into null, and read the BET-1477 `ok !== false` /
+  // `isNew` / `changed` contract off the result.
+  async function upsertCardRes(upsert, card) {
+    let res = null;
+    if (cards && typeof upsert === "function") {
+      try {
+        res = await upsert({ ...card, ts: now() });
+      } catch {
+        res = null;
+      }
+    }
+    return {
+      res,
+      wrote: !!res && res.ok !== false,
+      isNew: res?.isNew === true,
+      changed: res?.changed === true,
+    };
+  }
+
   async function loadState() {
     let es = {};
     try {
@@ -700,18 +722,10 @@ export function createCtoSuggest(deps = {}) {
       // Only a missing writer, a thrown write, or an explicit `ok: false`
       // (invalid args) degrades the verb.
       if (decision.verb === "veto-window") {
-        let res = null;
-        if (cards && typeof cards.upsertVeto === "function") {
-          try {
-            res = await cards.upsertVeto({ ...baseCard, variant: "veto", ts: now() });
-          } catch {
-            res = null;
-          }
-        }
-        const wrote = !!res && res.ok !== false;
-        cardIsNew = res?.isNew === true;
-        if (wrote) {
-          if (res.changed === true) {
+        const up = await upsertCardRes(cards?.upsertVeto, { ...baseCard, variant: "veto" });
+        cardIsNew = up.isNew;
+        if (up.wrote) {
+          if (up.changed) {
             await ledgerAppend({ kind: "suggest.presented", cardId: c.id, class: c.class, variant: "veto", score: p, sourceKind: finding.sourceKind });
           }
           surfaced += 1;
@@ -728,19 +742,10 @@ export function createCtoSuggest(deps = {}) {
       // re-push), NOT a `suggest.silent` no-card-path hold. Only a missing
       // writer, a thrown write, or an explicit `ok: false` is a hold.
       if (!surfacedKind) {
-        const card = { ...baseCard, variant: "decision" };
-        let res = null;
-        if (cards && typeof cards.upsertDecision === "function") {
-          try {
-            res = await cards.upsertDecision({ ...card, ts: now() });
-          } catch {
-            res = null;
-          }
-        }
-        const wrote = !!res && res.ok !== false;
-        cardIsNew = res?.isNew === true;
-        if (wrote) {
-          if (res.changed === true) {
+        const up = await upsertCardRes(cards?.upsertDecision, { ...baseCard, variant: "decision" });
+        cardIsNew = up.isNew;
+        if (up.wrote) {
+          if (up.changed) {
             await ledgerAppend({ kind: "suggest.presented", cardId: c.id, class: c.class, variant: "decision", score: p, sourceKind: finding.sourceKind });
           }
           surfaced += 1;
@@ -842,11 +847,13 @@ export function createCtoSuggest(deps = {}) {
       const r = await recordVerdict({ subject, verdict, never });
       return { ok: r?.ok === true, error: r?.error };
     }
-    // Fallback: write directly through the shared verdicts store.
-    const payload = await verdicts.load().catch(() => null);
-    const entries = Array.isArray(payload?.entries) ? payload.entries : [];
+    // Fallback: append directly through the shared verdicts store — the same
+    // patchStore section as recordVerdict (BET-1492), so a concurrent
+    // recorder's verdict survives this write.
     const entry = { ts: now(), subject, verdict, ...(never === true ? { never: true } : {}) };
-    await verdicts.save({ ...(payload ?? {}), entries: [...entries, entry] });
+    await patchStore(verdicts, (fresh) => ({
+      entries: [...(Array.isArray(fresh?.entries) ? fresh.entries : []), entry],
+    }));
     return { ok: true };
   }
 

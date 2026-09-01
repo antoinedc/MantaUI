@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createCtoCards } from "./ctoCards.mjs";
+import { patchStore, verdictsStore } from "./ctoStores.mjs";
 import {
   ACTION_TYPES,
   DEFAULT_CLASS_PRIORS,
@@ -460,6 +461,37 @@ test("verdictHeld: routes judgment to the B3 verdict route", async () => {
   assert.equal(h.verdictEntries.length, 1);
   assert.equal(h.verdictEntries[0].subject.type, "suggestion");
   assert.equal(h.verdictEntries[0].verdict, "dismiss");
+});
+
+// BET-1492 — the direct-store fallback appends through the verdicts store's
+// patchStore mutex: a concurrent writer's committed state survives (the old
+// unlocked load-spread-save loaded before the writer's commit and reverted
+// its key on save).
+test("verdictHeld fallback is a patchStore section: a concurrent writer's patch and the append BOTH land", async () => {
+  const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+  await verdictsStore.save({ entries: [] });
+  const rows = [{ id: "held-9", kind: "suggest.silent", class: "tool", ts: 1 }];
+  const sug = createCtoSuggest({
+    ledger: { append: async () => true, read: async () => rows },
+    engineState: { load: async () => ({ v: 1 }), save: async () => {} },
+    trustStore: { load: async () => ({}), save: async () => {} },
+    verdicts: verdictsStore,
+    now: () => 1_000,
+    publish: () => {},
+    configGet: async () => ({}),
+    recordVerdict: null, // force the direct-store fallback
+  });
+  const writer = patchStore(verdictsStore, async () => {
+    await delay(25);
+    return { marker: "w" };
+  });
+  await delay(5); // let the writer take the mutex
+  const r = await sug.verdictHeld({ id: "held-9", verdict: "accept" });
+  assert.equal(r.ok, true);
+  await writer;
+  const after = await verdictsStore.load();
+  assert.equal(after.marker, "w", "the concurrent writer's key survived the fallback append");
+  assert.equal(after.entries.filter((e) => e?.subject?.id === "held-9").length, 1);
 });
 
 test("collectFindings: combines digest + fact sources", () => {

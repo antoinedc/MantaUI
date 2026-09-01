@@ -23,6 +23,7 @@ import {
   buildPreview,
   stableHash,
 } from "./cto.mjs";
+import { inboxStore, patchStore, sweepInbox } from "./ctoStores.mjs";
 
 // ---------------------------------------------------------------------------
 // Inbound routing + dedupe (BET-1397: parked notes persist to the inbox store;
@@ -109,6 +110,94 @@ test("inbound coalesces notes sharing a tag into one entry (refs union, count bu
   assert.equal(entries.length, 1);
   assert.equal(entries[0].count, 2);
   assert.deepEqual(entries[0].refs, ["BET-1", "BET-2"]);
+});
+
+// ---------------------------------------------------------------------------
+// BET-1492 — the append writes through patchStore (read-merge-save under the
+// inbox store's mutex), not the old unlocked load-spread-save. These use the
+// REAL inbox store (sandboxed) so the mutex is the same one the drain and the
+// retention sweep serialize on.
+// ---------------------------------------------------------------------------
+
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+
+test("the inbox append is a patchStore section: a concurrent writer's patch and the append BOTH land", async () => {
+  await inboxStore.save({ v: 1, entries: [] });
+  // The writer holds the inbox store's mutex mid-patch while the append runs;
+  // the append must queue behind it and re-derive from the writer's committed
+  // state (the old unlocked load-spread-save loaded before the writer's commit
+  // and reverted the marker on save).
+  const writer = patchStore(inboxStore, async () => {
+    await delay(25);
+    return { marker: "w" };
+  });
+  await delay(5); // let the writer take the mutex
+  const inbound = createCtoInbound({ registerBlocker: async () => {} });
+  await inbound.inbound({ surface: "session", payload: { kind: "fyi", message: "fresh note" } });
+  await writer;
+  const after = await inboxStore.load();
+  assert.equal(after.marker, "w", "the concurrent writer's key survived the append");
+  assert.equal(after.entries.length, 1, "the append landed on the writer's committed state");
+  assert.equal(after.entries[0].message, "fresh note");
+});
+
+test("concurrent send_to_cto appends all land (the lost-update race between two recorders)", async () => {
+  await inboxStore.save({ v: 1, entries: [] });
+  const inbound = createCtoInbound({ registerBlocker: async () => {} });
+  await Promise.all(
+    Array.from({ length: 8 }, (_, i) =>
+      inbound.inbound({ surface: "session", payload: { kind: "fyi", message: `note ${i}` } }),
+    ),
+  );
+  const after = await inboxStore.load();
+  assert.equal(after.entries.length, 8, "every concurrent append survives (mutex-serialized)");
+});
+
+// Review-return Block (BET-1492 attempt 2): the legacy-seam adapter must be
+// built ONCE per factory. lockForStore falls back to object identity for
+// path-less stores, so a per-call `{load, save}` literal means a fresh mutex
+// per call — concurrent appends through an injected pair stayed unserialized.
+// The fake store snapshots like the real JSON store (fresh object per load);
+// a live-reference fake would mask the race.
+test("the injected legacy seam is serialized too: concurrent appends through it all land", async () => {
+  let state = { v: 1, entries: [] };
+  const snapshot = () => JSON.parse(JSON.stringify(state));
+  const inbound = createCtoInbound({
+    loadInbox: async () => snapshot(),
+    saveInbox: async (data) => {
+      state = JSON.parse(JSON.stringify(data));
+    },
+    registerBlocker: async () => {},
+  });
+  await Promise.all(
+    Array.from({ length: 8 }, (_, i) =>
+      inbound.inbound({ surface: "session", payload: { kind: "fyi", message: `note ${i}` } }),
+    ),
+  );
+  assert.equal(
+    state.entries.length,
+    8,
+    "the adapter's mutex is stable across calls — no append dropped to a last-write-wins",
+  );
+});
+
+test("the inbox append survives a concurrent retention sweep: both land", async () => {
+  const nowMs = Date.now();
+  await inboxStore.save({
+    v: 1,
+    entries: [{ id: "old", kind: "fyi", message: "expired", read: true, count: 1, expires: nowMs - 1 }],
+  });
+  const inbound = createCtoInbound({ registerBlocker: async () => {} });
+  await Promise.all([
+    sweepInbox(nowMs),
+    inbound.inbound({ surface: "session", payload: { kind: "fyi", message: "fresh" } }),
+  ]);
+  const after = await inboxStore.load();
+  assert.deepEqual(
+    after.entries.map((e) => e.message).sort(),
+    ["fresh"],
+    "the expired note is gone and the append survived the sweep",
+  );
 });
 
 test("inbound live route injects into the CTO session when the flag is on (stub seam)", async () => {
