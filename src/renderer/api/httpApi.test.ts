@@ -56,6 +56,55 @@ beforeEach(() => {
 const HEX32 = "0123456789abcdef0123456789abcdef";
 
 // ---------------------------------------------------------------------------
+// CTO drill-down reads throw on failure (BET-1483)
+// ---------------------------------------------------------------------------
+//
+// ctoProfileGet / ctoFactsGet / ctoToolsGet used to swallow a failed read and
+// resolve with an all-empty render (compiledAt 0), which callers could only
+// detect by sniffing that sentinel. They now throw like ctoStateGet, so the
+// views' existing catch paths render the actual failure. These tests pin the
+// explicit contract: success resolves with the parsed body; 401 throws
+// AuthRequiredError; other HTTP errors and network failures reject.
+
+describe("httpApi CTO drill-down reads — explicit failure contract (BET-1483)", () => {
+  beforeEach(() => {
+    mockLocalStorage["manta_server"] = "https://example.com";
+    mockLocalStorage["manta_token"] = HEX32;
+  });
+
+  const drillDowns = [
+    { name: "ctoProfileGet", call: () => httpApi.ctoProfileGet(), path: "/api/cto/profile", okBody: { compiledAt: 42, skills: [] } },
+    { name: "ctoFactsGet", call: () => httpApi.ctoFactsGet({ project: "p" }), path: "/api/cto/facts?project=p", okBody: { compiledAt: 42, project: "p", active: [] } },
+    { name: "ctoToolsGet", call: () => httpApi.ctoToolsGet(), path: "/api/cto/tools", okBody: { compiledAt: 42, tools: [], never: [] } },
+  ] as const;
+
+  for (const d of drillDowns) {
+    it(`${d.name} resolves with the parsed body on success`, async () => {
+      stubFetch().mockImplementation(async () => new Response(JSON.stringify(d.okBody), { status: 200, headers: { "content-type": "application/json" } }));
+      const body = (await d.call()) as { compiledAt: number };
+      expect(body.compiledAt).toBe(42);
+    });
+
+    it(`${d.name} throws on an HTTP error instead of an empty render`, async () => {
+      stubFetch().mockImplementation(async () => new Response(JSON.stringify({ error: "no" }), { status: 503 }));
+      await expect(d.call()).rejects.toThrow("HTTP 503");
+    });
+
+    it(`${d.name} throws AuthRequiredError on 401`, async () => {
+      stubFetch().mockImplementation(async () => new Response("{}", { status: 401 }));
+      await expect(d.call()).rejects.toBeInstanceOf(AuthRequiredError);
+    });
+
+    it(`${d.name} rejects on a network failure (no empty render)`, async () => {
+      const fetchMock = stubFetch().mockImplementation(async () => { throw new Error("fetch failed"); });
+      await expect(d.call()).rejects.toThrow("fetch failed");
+      expect((fetchMock.mock.calls[0][0] as string).includes(d.path)).toBe(true);
+    });
+  }
+});
+
+
+// ---------------------------------------------------------------------------
 // authHeaders — attach Bearer when a token is present
 // ---------------------------------------------------------------------------
 
