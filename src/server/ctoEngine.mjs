@@ -369,6 +369,11 @@ export function createCtoEngine(deps = {}) {
       cardStore: bundle.cards,
       engineState,
       patchEngineState: (mutation) => patchEngineState(mutation, { engineState }),
+      // Inbox-note grouping layer 2 (§10.3 never-duplicate). Wrapped in a
+      // thunk, not passed by reference: `getSessionInfo` is destructured
+      // BELOW `cards` in this same binding, so naming it directly here is a
+      // TDZ error. The arrow body runs long after destructuring settles.
+      getSessionInfo: (sid) => getSessionInfo(sid),
       // The engine's clock is authoritative for the cards module too — one
       // now for promoteDue thresholds AND the BET-1407 seed's retention
       // bound (a test's fake clock must not make every persisted ask look

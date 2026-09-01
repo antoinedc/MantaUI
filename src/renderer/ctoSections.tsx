@@ -54,10 +54,39 @@ export const BlockerSection = memo(function BlockerSection({
           >
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2 text-sm">
-                <span className="font-medium text-text">{card.title}</span>
-                <span className="text-xs text-text-faint">{relativeTime(card.pendingSince, now)}</span>
+                <span className="truncate font-medium text-text">{card.title}</span>
+                <span className="shrink-0 text-xs text-text-faint">
+                  {relativeTime(card.pendingSince, now)}
+                </span>
+                {/* The escalation signal that used to be expressed as N
+                    separate cards. Only shown once it means something. */}
+                {card.repeatCount > 1 ? (
+                  <span
+                    className="shrink-0 rounded-sm px-1 text-xs text-text-faint"
+                    style={{ background: "var(--fill-hover)" }}
+                    title={`Reported ${card.repeatCount} times since ${new Date(card.pendingSince).toLocaleString()}`}
+                  >
+                    ×{card.repeatCount}
+                  </span>
+                ) : null}
               </div>
-              {card.body ? <p className="mt-1 text-sm text-text-muted">{card.body}</p> : null}
+              {/* The rail is a glanceable list of what needs you, not a
+                  transcript: these bodies run to several hundred characters.
+                  Clamped to two lines; the full text is one click away in the
+                  Answer-now detail surface. */}
+              {card.body ? (
+                <p
+                  className="mt-1 text-sm text-text-muted"
+                  style={{
+                    display: "-webkit-box",
+                    WebkitLineClamp: 2,
+                    WebkitBoxOrient: "vertical",
+                    overflow: "hidden",
+                  }}
+                >
+                  {card.body}
+                </p>
+              ) : null}
             </div>
             <button
               type="button"
