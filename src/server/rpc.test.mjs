@@ -452,29 +452,31 @@ test("opencode:provider-auth status rejects with the upstream error (no try/catc
 // never report success while it still holds the credential. restartOpencode is
 // injected via buildHandlers deps so no systemd unit is touched here.
 
-test("opencode:provider-auth disconnect restarts opencode exactly once on success (BET-1319)", async () => {
+// Shared disconnect wiring (BET-1459): stub the credential delete with the
+// given result, count opencode restarts, and run the disconnect once.
+async function runDisconnect(removeResult) {
   const { deps } = makeDeps([]);
   let restarts = 0;
-  deps.oc.removeProviderAuth = async () => ({ ok: true });
+  deps.oc.removeProviderAuth = async () => removeResult;
   deps.restartOpencode = async () => { restarts += 1; return { ok: true }; };
   const handlers = buildHandlers(deps);
   const result = await handlers["opencode:provider-auth"]({ action: "disconnect", id: "openai" });
+  return { result, restartCount: () => restarts };
+}
+
+test("opencode:provider-auth disconnect restarts opencode exactly once on success (BET-1319)", async () => {
+  const { result, restartCount } = await runDisconnect({ ok: true });
   assert.equal(result.action, "disconnect");
   assert.equal(result.ok, true);
-  assert.equal(restarts, 1, "restart called exactly once on a successful delete");
+  assert.equal(restartCount(), 1, "restart called exactly once on a successful delete");
 });
 
 test("opencode:provider-auth disconnect does NOT restart when the delete failed (BET-1319)", async () => {
-  const { deps } = makeDeps([]);
-  let restarts = 0;
-  deps.oc.removeProviderAuth = async () => ({ ok: false, error: "upstream rejected" });
-  deps.restartOpencode = async () => { restarts += 1; return { ok: true }; };
-  const handlers = buildHandlers(deps);
-  const result = await handlers["opencode:provider-auth"]({ action: "disconnect", id: "openai" });
+  const { result, restartCount } = await runDisconnect({ ok: false, error: "upstream rejected" });
   assert.equal(result.action, "disconnect");
   assert.equal(result.ok, false);
   assert.equal(result.error, "upstream rejected");
-  assert.equal(restarts, 0, "no restart when the delete did not succeed");
+  assert.equal(restartCount(), 0, "no restart when the delete did not succeed");
 });
 
 test("opencode:provider-auth disconnect returns ok:false when the restart fails (BET-1319)", async () => {
@@ -1213,7 +1215,11 @@ test("opencode:provider-auth start fires the oauth-auto callback detached with e
     "must call completeProviderOauth exactly once, with the RESOLVED index and empty code");
 });
 
-test("opencode:provider-auth oauth-status reports pending then ok, then clears (BET-1043)", async () => {
+// Shared setup for the oauth-status polls (BET-1459): fire the detached
+// callback against a never-settling gate, then hand the caller the gate (to
+// resolve per scenario) plus the built handlers — the start call is already
+// in flight when the helper returns.
+async function startGatedOauth() {
   const gate = deferred();
   const { deps } = makeDeps([]);
   setupOauthAutoDeps(deps);
@@ -1221,6 +1227,11 @@ test("opencode:provider-auth oauth-status reports pending then ok, then clears (
   _resetOauthCallbacks();
   const handlers = buildHandlers(deps);
   await handlers["opencode:provider-auth"]({ action: "start", id: "openai" });
+  return { gate, handlers };
+}
+
+test("opencode:provider-auth oauth-status reports pending then ok, then clears (BET-1043)", async () => {
+  const { gate, handlers } = await startGatedOauth();
 
   // In flight → pending.
   const pending = await handlers["opencode:provider-auth"]({ action: "oauth-status", id: "openai" });
@@ -1238,13 +1249,7 @@ test("opencode:provider-auth oauth-status reports pending then ok, then clears (
 });
 
 test("opencode:provider-auth oauth-status surfaces a failed callback as error (BET-1043)", async () => {
-  const gate = deferred();
-  const { deps } = makeDeps([]);
-  setupOauthAutoDeps(deps);
-  deps.oc.completeProviderOauth = () => gate.promise;
-  _resetOauthCallbacks();
-  const handlers = buildHandlers(deps);
-  await handlers["opencode:provider-auth"]({ action: "start", id: "openai" });
+  const { gate, handlers } = await startGatedOauth();
   gate.resolve({ ok: false, error: "bad_response" });
   await gate.promise;
   const r = await handlers["opencode:provider-auth"]({ action: "oauth-status", id: "openai" });
@@ -1284,27 +1289,77 @@ test("opencode:provider-auth start does NOT fire the detached callback for claud
 
 // ---- BET-1244: routing:choose / accounts:retry channels ----
 
+// Shared deps for the routing:choose tests (BET-1459): turning routing ON is
+// one configGet override (preset + optional declaredModels); routable models
+// and the health-state fn are the other per-test knobs. Omitting `preset`
+// keeps the makeDeps default configGet ({ projects } only → routing off).
+// Tests needing exotic stubs (throwing deps, recording wrappers) mutate the
+// returned deps BEFORE buildHandlers, exactly as before. `catalogIndex` is
+// folded into the returned deps object so callers can buildHandlers it
+// directly.
+function makeRoutingDeps({ preset, declaredModels, routableModels, healthState, catalogIndex } = {}) {
+  const { deps } = makeDeps([]);
+  if (preset !== undefined) {
+    const modelRouting = { preset };
+    if (declaredModels) modelRouting.declaredModels = declaredModels;
+    deps.local.configGet = async () => ({ projects: [], modelRouting });
+  }
+  if (routableModels) deps.routingListRoutableModels = async () => routableModels;
+  if (healthState) deps.routingProviderHealthState = healthState;
+  return catalogIndex ? { ...deps, routingCatalogIndex: catalogIndex } : deps;
+}
+
+// The seven-field routing:choose envelope, with the defaults every test here
+// repeats (ses_1 / /w / build / main / 0 tokens / no needs / the opus
+// incumbent). Per-test knobs — surface, incumbent, overrides — override them.
+function chooseRouting(handlers, { surface = "main", incumbent = { providerID: "anthropic", modelID: "claude-opus-4" }, overrides } = {}) {
+  return handlers["routing:choose"]({
+    sessionId: "ses_1",
+    directory: "/w",
+    agent: "build",
+    surface,
+    contextTokens: 0,
+    needs: {},
+    incumbent,
+    ...(overrides && { overrides }),
+  });
+}
+
+// A catalogue index so buildRoutingServices resolves identity + quality (the
+// SAME seam the BET-1265 log test and the 6e Block regression use).
+const routingFakeCatalog = (entries) => ({
+  matchModel: (id) => ({ kind: "exact", candidates: [{ id, name: id }] }),
+  lookupModel: (id) => ({ id }),
+  allModels: () => entries,
+});
+
+// The sonnet fixture shared by the [router]-log test and the 6e Block
+// regression: declared in config, priced in the catalogue, benchmarked at 0.8.
+const SONNET_DECLARED = { "anthropic/claude-sonnet-4": { catalogId: "claude-sonnet-4" } };
+const SONNET_ROUTABLE = [{
+  providerID: "anthropic",
+  id: "claude-sonnet-4",
+  status: "active",
+  cost: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 0.5 },
+}];
+const SONNET_CATALOG = [{ id: "claude-sonnet-4", benchmarks: [{ name: "SWE-Bench Verified", score: 0.8 }] }];
+
+// The bare opus catalog row the incumbent-health tests route against.
+const OPUS_ROUTABLE = [{ providerID: "anthropic", id: "claude-opus-4", status: "active" }];
+
 // routing:choose is read-only and never throws. A policy with no routing
 // directive (no preset / no perAgent) resolves to routing being unusable, and
 // the decision returns the incumbent unchanged — never a hidden switch and
 // never a throw.
 test("routing:choose returns the incumbent unchanged when routing is not activated", async () => {
-  const { deps } = makeDeps([]);
-  // local.configGet returns { projects } only — no modelRouting → routing off.
-  deps.routingListRoutableModels = async (surface, cfg) => [
-    { providerID: "anthropic", id: "claude-sonnet-4", status: "active" },
-  ];
+  // No preset → local.configGet returns { projects } only — no modelRouting →
+  // routing off.
+  const deps = makeRoutingDeps({
+    routableModels: [{ providerID: "anthropic", id: "claude-sonnet-4", status: "active" }],
+  });
   const handlers = buildHandlers(deps);
   const incumbent = { providerID: "anthropic", modelID: "claude-opus-4" };
-  const out = await handlers["routing:choose"]({
-    sessionId: "ses_1",
-    directory: "/w",
-    agent: "build",
-    surface: "main",
-    contextTokens: 0,
-    needs: {},
-    incumbent,
-  });
+  const out = await chooseRouting(handlers, { incumbent });
   assert.deepEqual(out.model, incumbent, "off-path keeps the incumbent");
   assert.equal(out.changed, false);
   assert.deepEqual(out.alternatives, []);
@@ -1314,21 +1369,13 @@ test("routing:choose returns the incumbent unchanged when routing is not activat
 // routing:choose must NEVER throw — even when every dependency rejects. It
 // degrades to the incumbent unchanged rather than propagating the failure.
 test("routing:choose never throws when its dependencies reject", async () => {
-  const { deps } = makeDeps([]);
+  const deps = makeRoutingDeps({});
   deps.local.configGet = async () => { throw new Error("config down"); };
   deps.routingListRoutableModels = async () => { throw new Error("catalogue down"); };
   const handlers = buildHandlers(deps);
   const incumbent = { providerID: "anthropic", modelID: "claude-opus-4" };
   // Must RESOLVE (not reject) with the incumbent unchanged, never a throw.
-  const out = await handlers["routing:choose"]({
-    sessionId: "ses_1",
-    directory: "/w",
-    agent: "build",
-    surface: "main",
-    contextTokens: 0,
-    needs: {},
-    incumbent,
-  });
+  const out = await chooseRouting(handlers, { incumbent });
   assert.deepEqual(out.model, incumbent);
   assert.equal(out.changed, false);
   assert.deepEqual(out.alternatives, []);
@@ -1338,10 +1385,9 @@ test("routing:choose never throws when its dependencies reject", async () => {
 // routing:choose must be handed the FILTERED catalogue — listRoutableModels
 // with the right surface — never a second filter and never raw listModels.
 test("routing:choose is handed the filtered catalogue for the requested surface (not listModels)", async () => {
-  const { deps } = makeDeps([]);
   // Config that ACTIVATES routing so the decision core actually runs against
   // the returned catalogue.
-  deps.local.configGet = async () => ({ projects: [], modelRouting: { preset: "economy" } });
+  const deps = makeRoutingDeps({ preset: "economy" });
   let surfaceSeen = null;
   let calls = 0;
   deps.routingListRoutableModels = async (surface) => {
@@ -1354,15 +1400,7 @@ test("routing:choose is handed the filtered catalogue for the requested surface 
     ];
   };
   const handlers = buildHandlers(deps);
-  const out = await handlers["routing:choose"]({
-    sessionId: "ses_1",
-    directory: "/w",
-    agent: "build",
-    surface: "sub",
-    contextTokens: 0,
-    needs: {},
-    incumbent: { providerID: "anthropic", modelID: "claude-opus-4" },
-  });
+  const out = await chooseRouting(handlers, { surface: "sub" });
   assert.equal(calls, 1);
   assert.equal(surfaceSeen, "sub", "listRoutableModels must be called with the requested surface");
   // A real decision was produced from the injected (filtered) catalogue — a
@@ -1378,34 +1416,18 @@ test("routing:choose is handed the filtered catalogue for the requested surface 
 // Format: [router] <surface>/<agent> → <provider>/<model> · <basis> ·
 // considered=<n> dropped=<n> mix=<measured|default>. Gated on nothing.
 test("routing:choose logs exactly one well-formed [router] line on a routed decision", async () => {
-  const { deps } = makeDeps([]);
-  // Config that ACTIVATES routing so the decision core actually runs.
-  deps.local.configGet = async () => ({
-    projects: [],
-    modelRouting: { preset: "economy", declaredModels: { "anthropic/claude-sonnet-4": { catalogId: "claude-sonnet-4" } } },
+  const deps = makeRoutingDeps({
+    preset: "economy",
+    declaredModels: SONNET_DECLARED,
+    routableModels: SONNET_ROUTABLE,
+    catalogIndex: routingFakeCatalog(SONNET_CATALOG),
   });
-  deps.routingListRoutableModels = async () => [
-    { providerID: "anthropic", id: "claude-sonnet-4", status: "active", cost: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 0.5 } },
-  ];
-  const fakeCatalog = {
-    matchModel: (id) => ({ kind: "exact", candidates: [{ id, name: id }] }),
-    lookupModel: (id) => ({ id }),
-    allModels: () => [{ id: "claude-sonnet-4", benchmarks: [{ name: "SWE-Bench Verified", score: 0.8 }] }],
-  };
-  const handlers = buildHandlers({ ...deps, routingCatalogIndex: fakeCatalog });
+  const handlers = buildHandlers(deps);
   const lines = [];
   const orig = console.log;
   console.log = (...a) => lines.push(a.join(" "));
   try {
-    await handlers["routing:choose"]({
-      sessionId: "ses_1",
-      directory: "/w",
-      agent: "build",
-      surface: "main",
-      contextTokens: 0,
-      needs: {},
-      incumbent: { providerID: "anthropic", modelID: "claude-opus-4" },
-    });
+    await chooseRouting(handlers);
   } finally {
     console.log = orig;
   }
@@ -1431,22 +1453,13 @@ test("routing:choose logs exactly one well-formed [router] line on a routed deci
 // the renderer's shouldSwitch can force an ineligible/unhealthy incumbent out
 // on the SAME round trip, without holding health state of its own.
 test("routing:choose reports incumbentHealthy=false when the incumbent's provider is failing (6e)", async () => {
-  const { deps } = makeDeps([]);
-  deps.local.configGet = async () => ({ projects: [], modelRouting: { preset: "economy" } });
-  deps.routingListRoutableModels = async () => [
-    { providerID: "anthropic", id: "claude-opus-4", status: "active" },
-  ];
-  deps.routingProviderHealthState = (pid) => (pid === "anthropic" ? "failing" : null);
-  const handlers = buildHandlers(deps);
-  const out = await handlers["routing:choose"]({
-    sessionId: "ses_1",
-    directory: "/w",
-    agent: "build",
-    surface: "main",
-    contextTokens: 0,
-    needs: {},
-    incumbent: { providerID: "anthropic", modelID: "claude-opus-4" },
+  const deps = makeRoutingDeps({
+    preset: "economy",
+    routableModels: OPUS_ROUTABLE,
+    healthState: (pid) => (pid === "anthropic" ? "failing" : null),
   });
+  const handlers = buildHandlers(deps);
+  const out = await chooseRouting(handlers);
   assert.equal(out.incumbentHealthy, false, "failing provider ⇒ incumbent unhealthy");
   assert.equal(
     typeof out.incumbentStillEligible,
@@ -1456,22 +1469,13 @@ test("routing:choose reports incumbentHealthy=false when the incumbent's provide
 });
 
 test("routing:choose reports incumbentHealthy=true for a healthy incumbent (6e)", async () => {
-  const { deps } = makeDeps([]);
-  deps.local.configGet = async () => ({ projects: [], modelRouting: { preset: "economy" } });
-  deps.routingListRoutableModels = async () => [
-    { providerID: "anthropic", id: "claude-opus-4", status: "active" },
-  ];
-  deps.routingProviderHealthState = () => null; // provider healthy (absent state)
-  const handlers = buildHandlers(deps);
-  const out = await handlers["routing:choose"]({
-    sessionId: "ses_1",
-    directory: "/w",
-    agent: "build",
-    surface: "main",
-    contextTokens: 0,
-    needs: {},
-    incumbent: { providerID: "anthropic", modelID: "claude-opus-4" },
+  const deps = makeRoutingDeps({
+    preset: "economy",
+    routableModels: OPUS_ROUTABLE,
+    healthState: () => null, // provider healthy (absent state)
   });
+  const handlers = buildHandlers(deps);
+  const out = await chooseRouting(handlers);
   assert.equal(out.incumbentHealthy, true);
 });
 
@@ -1480,39 +1484,13 @@ test("routing:choose reports incumbentHealthy=true for a healthy incumbent (6e)"
 // a price-less {providerID,id} stub — otherwise a perfectly describable incumbent
 // reads ineligible and shouldSwitch force-switches every boundary-crossing turn.
 test("routing:choose reports incumbentStillEligible=true for a describable incumbent (6e Block regression)", async () => {
-  const { deps } = makeDeps([]);
-  deps.local.configGet = async () => ({
-    projects: [],
-    modelRouting: {
-      preset: "economy",
-      declaredModels: { "anthropic/claude-sonnet-4": { catalogId: "claude-sonnet-4" } },
-    },
-  });
-  deps.routingListRoutableModels = async () => [
-    {
-      providerID: "anthropic",
-      id: "claude-sonnet-4",
-      status: "active",
-      cost: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 0.5 },
-    },
-  ];
-  // A catalogue index so buildRoutingServices resolves identity + quality (the
-  // SAME seam the BET-1265 log test uses).
-  const fakeCatalog = {
-    matchModel: (id) => ({ kind: "exact", candidates: [{ id, name: id }] }),
-    lookupModel: (id) => ({ id }),
-    allModels: () => [{ id: "claude-sonnet-4", benchmarks: [{ name: "SWE-Bench Verified", score: 0.8 }] }],
-  };
-  const handlers = buildHandlers({ ...deps, routingCatalogIndex: fakeCatalog });
-  const out = await handlers["routing:choose"]({
-    sessionId: "ses_1",
-    directory: "/w",
-    agent: "build",
-    surface: "main",
-    contextTokens: 0,
-    needs: {},
-    incumbent: { providerID: "anthropic", modelID: "claude-sonnet-4" },
-  });
+  const handlers = buildHandlers(makeRoutingDeps({
+    preset: "economy",
+    declaredModels: SONNET_DECLARED,
+    routableModels: SONNET_ROUTABLE,
+    catalogIndex: routingFakeCatalog(SONNET_CATALOG),
+  }));
+  const out = await chooseRouting(handlers, { incumbent: { providerID: "anthropic", modelID: "claude-sonnet-4" } });
   assert.equal(out.incumbentStillEligible, true, "a describable incumbent must read eligible");
 });
 
@@ -1520,47 +1498,26 @@ test("routing:choose reports incumbentStillEligible=true for a describable incum
 // not "production" (the harness / local box), enabledMain restricts the
 // candidate pool to the listed endpoint keys, and accounts/health replace their
 // services keys for ONE call — read-only, side-effect-free.
-const routingFakeCatalog = (entries) => ({
-  matchModel: (id) => ({ kind: "exact", candidates: [{ id, name: id }] }),
-  lookupModel: (id) => ({ id }),
-  allModels: () => entries,
-});
 
 test("routing:choose honours enabledMain by restricting the candidate pool (12a)", async () => {
-  const { deps } = makeDeps([]);
-  deps.local.configGet = async () => ({
-    projects: [],
-    modelRouting: {
-      preset: "balanced",
-      declaredModels: {
-        "anthropic/claude-opus-4": { catalogId: "claude-opus-4" },
-        "anthropic/claude-sonnet-4": { catalogId: "claude-sonnet-4" },
-      },
+  const handlers = buildHandlers(makeRoutingDeps({
+    preset: "balanced",
+    declaredModels: {
+      "anthropic/claude-opus-4": { catalogId: "claude-opus-4" },
+      "anthropic/claude-sonnet-4": { catalogId: "claude-sonnet-4" },
     },
-  });
-  deps.routingListRoutableModels = async () => [
-    { providerID: "anthropic", id: "claude-opus-4", status: "active", cost: { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 15 } },
-    { providerID: "anthropic", id: "claude-sonnet-4", status: "active", cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 } },
-  ];
-  const handlers = buildHandlers({
-    ...deps,
-    routingCatalogIndex: routingFakeCatalog([
+    routableModels: [
+      { providerID: "anthropic", id: "claude-opus-4", status: "active", cost: { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 15 } },
+      { providerID: "anthropic", id: "claude-sonnet-4", status: "active", cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 } },
+    ],
+    catalogIndex: routingFakeCatalog([
       { id: "claude-opus-4", benchmarks: [{ name: "SWE-Bench Verified", score: 0.95 }] },
       { id: "claude-sonnet-4", benchmarks: [{ name: "SWE-Bench Verified", score: 0.8 }] },
     ]),
-  });
+  }));
   // Both are build-qualified (deep); unfiltered the higher-quality opus wins.
   // Restricting the pool to sonnet proves the decision saw ONLY sonnet.
-  const out = await handlers["routing:choose"]({
-    sessionId: "ses_1",
-    directory: "/w",
-    agent: "build",
-    surface: "main",
-    contextTokens: 0,
-    needs: {},
-    incumbent: { providerID: "anthropic", modelID: "claude-opus-4" },
-    overrides: { enabledMain: ["anthropic/claude-sonnet-4"] },
-  });
+  const out = await chooseRouting(handlers, { overrides: { enabledMain: ["anthropic/claude-sonnet-4"] } });
   assert.equal(out.changed, true, "switching off the restricted-out incumbent");
   assert.equal(out.model?.modelID, "claude-sonnet-4", "winner must come from the enabledMain pool");
 });
@@ -1569,23 +1526,13 @@ test("routing:choose honours enabledMain by restricting the candidate pool (12a)
 // excluded/failing provider reads unhealthy on the SAME round trip the decision
 // core responds to the override.
 test("routing:choose applies a health override to the incumbent-health report (12a)", async () => {
-  const { deps } = makeDeps([]);
-  deps.local.configGet = async () => ({ projects: [], modelRouting: { preset: "economy" } });
-  deps.routingListRoutableModels = async () => [
-    { providerID: "anthropic", id: "claude-opus-4", status: "active" },
-  ];
-  deps.routingProviderHealthState = () => null; // real health: ok
-  const handlers = buildHandlers(deps);
-  const out = await handlers["routing:choose"]({
-    sessionId: "ses_1",
-    directory: "/w",
-    agent: "build",
-    surface: "main",
-    contextTokens: 0,
-    needs: {},
-    incumbent: { providerID: "anthropic", modelID: "claude-opus-4" },
-    overrides: { health: { anthropic: "failing" } },
+  const deps = makeRoutingDeps({
+    preset: "economy",
+    routableModels: OPUS_ROUTABLE,
+    healthState: () => null, // real health: ok
   });
+  const handlers = buildHandlers(deps);
+  const out = await chooseRouting(handlers, { overrides: { health: { anthropic: "failing" } } });
   assert.equal(out.incumbentHealthy, false, "health override must flip the incumbent-health report");
 });
 
@@ -1593,29 +1540,20 @@ test("routing:choose applies a health override to the incumbent-health report (1
 // client reaching prod must not change a real turn. Neither the candidate pool
 // nor the incumbent-health report may react to it.
 test("routing:choose ignores the overrides bag when NODE_ENV is production (12a gate)", async () => {
-  const { deps } = makeDeps([]);
-  deps.local.configGet = async () => ({ projects: [], modelRouting: { preset: "balanced" } });
-  deps.routingListRoutableModels = async () => [
-    { providerID: "anthropic", id: "claude-opus-4", status: "active", cost: { input: 15, output: 75 } },
-    { providerID: "anthropic", id: "claude-haiku-4", status: "active", cost: { input: 1, output: 5 } },
-  ];
-  const handlers = buildHandlers({
-    ...deps,
-    routingCatalogIndex: routingFakeCatalog([
+  const handlers = buildHandlers(makeRoutingDeps({
+    preset: "balanced",
+    routableModels: [
+      { providerID: "anthropic", id: "claude-opus-4", status: "active", cost: { input: 15, output: 75 } },
+      { providerID: "anthropic", id: "claude-haiku-4", status: "active", cost: { input: 1, output: 5 } },
+    ],
+    catalogIndex: routingFakeCatalog([
       { id: "claude-opus-4", benchmarks: [{ name: "SWE-Bench Verified", score: 0.9 }] },
     ]),
-  });
+  }));
   const prev = process.env.NODE_ENV;
   process.env.NODE_ENV = "production";
   try {
-    const out = await handlers["routing:choose"]({
-      sessionId: "ses_1",
-      directory: "/w",
-      agent: "build",
-      surface: "main",
-      contextTokens: 0,
-      needs: {},
-      incumbent: { providerID: "anthropic", modelID: "claude-opus-4" },
+    const out = await chooseRouting(handlers, {
       overrides: {
         enabledMain: ["anthropic/claude-haiku-4"],
         health: { anthropic: "failing" },
