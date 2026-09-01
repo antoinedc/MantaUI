@@ -1,16 +1,6 @@
-// BET-1469: fail fast, before ANY test body runs, when this file is executed
-// outside the state sandbox. A CTO store module imported unsandboxed resolves
-// its paths against the LIVE box state (~/.manta) and a test would write
-// production data. `npm test` / `npm run test:server` set MANTA_STATE_HOME via
-// scripts/testSandbox.mjs before any module is evaluated; a bare
-// `node --test <file>` does not.
-if (!process.env.MANTA_STATE_HOME) {
-  throw new Error(
-    "MANTA_STATE_HOME is not set — refusing to run CTO tests against the live box state. " +
-      "Run via `npm test` or `npm run test:server` (both --import ./scripts/testSandbox.mjs), " +
-      "or set MANTA_STATE_HOME to a throwaway directory first.",
-  );
-}
+// BET-1490: shared fail-fast guard — must stay the first import (see ctoTestGuard.mjs).
+import "./ctoTestGuard.mjs";
+import { makeEngineDeps } from "./ctoTestEngineDeps.mjs";
 
 // ctoInbound.test.mjs — On-call CTO inbound feed (BET-1165, issue 2/3).
 // Pure logic + injected I/O, no live tmux / opencode / multica / push:
@@ -260,22 +250,7 @@ test("normalizeInboxKind maps unknown/bare to blocker; coalesceInboxEntry unions
 // ---------------------------------------------------------------------------
 
 function makeEngine(overrides = {}) {
-  return createCtoEngine({
-    listProjects: async () => [],
-    listSessions: async () => [],
-    listMessages: async () => [],
-    listModels: async () => [],
-    getSessionAgent: async () => null,
-    listSnapshots: () => [],
-    listStopped: async () => ({ records: [], lastLooked: null }),
-    searchMessages: async () => ({ supported: true, hits: [] }),
-    configGet: async () => ({}),
-    gitStatus: async () => "",
-    gitBranch: async () => null,
-    gitLog: async () => "",
-    queryMultica: async () => ({ ok: true }),
-    ...overrides,
-  });
+  return createCtoEngine(makeEngineDeps({ queryMultiba: async () => ({ ok: true }), ...overrides }));
 }
 
 // Gate that reports confirm only for `watch` (the confirm-mode tool).

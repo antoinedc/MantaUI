@@ -1,16 +1,6 @@
-// BET-1469: fail fast, before ANY test body runs, when this file is executed
-// outside the state sandbox. A CTO store module imported unsandboxed resolves
-// its paths against the LIVE box state (~/.manta) and a test would write
-// production data. `npm test` / `npm run test:server` set MANTA_STATE_HOME via
-// scripts/testSandbox.mjs before any module is evaluated; a bare
-// `node --test <file>` does not.
-if (!process.env.MANTA_STATE_HOME) {
-  throw new Error(
-    "MANTA_STATE_HOME is not set — refusing to run CTO tests against the live box state. " +
-      "Run via `npm test` or `npm run test:server` (both --import ./scripts/testSandbox.mjs), " +
-      "or set MANTA_STATE_HOME to a throwaway directory first.",
-  );
-}
+// BET-1490: shared fail-fast guard — must stay the first import (see ctoTestGuard.mjs).
+import "./ctoTestGuard.mjs";
+import { memoryStore } from "./ctoTestStores.mjs";
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -36,18 +26,6 @@ import {
 // Fixtures
 // ---------------------------------------------------------------------------
 
-function memoryStore(initial = {}) {
-  // Deep-copy at the boundary like the real jsonStore (a parsed clone per
-  // load/save) — aliasing the live object would fake both migrations and
-  // clobbers.
-  let data = JSON.parse(JSON.stringify(initial ?? {}));
-  return {
-    load: async () => JSON.parse(JSON.stringify(data)),
-    save: async (p) => {
-      data = JSON.parse(JSON.stringify(p));
-    },
-  };
-}
 
 function makeTrust({ engineState = {}, verdictCount = 0 } = {}) {
   const ledgerRows = [];

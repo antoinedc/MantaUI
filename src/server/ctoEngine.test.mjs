@@ -1,16 +1,6 @@
-// BET-1469: fail fast, before ANY test body runs, when this file is executed
-// outside the state sandbox. A CTO store module imported unsandboxed resolves
-// its paths against the LIVE box state (~/.manta) and a test would write
-// production data. `npm test` / `npm run test:server` set MANTA_STATE_HOME via
-// scripts/testSandbox.mjs before any module is evaluated; a bare
-// `node --test <file>` does not.
-if (!process.env.MANTA_STATE_HOME) {
-  throw new Error(
-    "MANTA_STATE_HOME is not set — refusing to run CTO tests against the live box state. " +
-      "Run via `npm test` or `npm run test:server` (both --import ./scripts/testSandbox.mjs), " +
-      "or set MANTA_STATE_HOME to a throwaway directory first.",
-  );
-}
+// BET-1490: shared fail-fast guard — must stay the first import (see ctoTestGuard.mjs).
+import "./ctoTestGuard.mjs";
+import { makeMemoryStores } from "./ctoTestStores.mjs";
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -40,63 +30,6 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 // clock we can advance. Everything the engine touches goes through these
 // seams, so the tests assert pure behavior. `clock` is shared so the watchdog
 // and the engine observe the same time.
-//
-// BET-1469: the store bundle is injected too, so even the paths this harness
-// does not exercise bind memory instead of real files — an enabled tick
-// (watchers/tools/probes/rollups/backfill) can no longer reach the live box
-// state through a lazily-constructed sub-engine.
-// BET-1469: one in-memory replacement per real CTO store — the full `stores`
-// bundle createCtoEngine accepts. Shapes mirror the real stores: json stores
-// are single-payload { load, save }; dir stores are one-payload-per-id
-// { load(id), save(id, data) } over a Map; the rollups store namespaces by
-// level. No fs anywhere: `dir` is "" so the engine's readdir fall-throughs
-// short-circuit, and pathFor is identity.
-function makeMemoryStores() {
-  const jsonStore = (initial) => {
-    let payload = { ...initial };
-    return {
-      load: async () => ({ ...payload }),
-      save: async (p) => {
-        payload = { ...p };
-      },
-    };
-  };
-  const dirStore = () => {
-    const map = new Map();
-    return {
-      dir: "",
-      pathFor: (id) => id,
-      load: async (id) => map.get(id) ?? { v: 1 },
-      save: async (id, data) => {
-        map.set(id, data);
-      },
-    };
-  };
-  return {
-    ledger: { append: async () => true },
-    engineState: jsonStore({ v: 1 }),
-    trust: jsonStore({}),
-    cards: jsonStore({ v: 1, cards: [] }),
-    inbox: jsonStore({ v: 1, entries: [] }),
-    verdicts: jsonStore({ entries: [] }),
-    budget: jsonStore({}),
-    watchers: jsonStore({ watchers: [] }),
-    toolRegistry: jsonStore({ tools: [] }),
-    toolUsage: jsonStore({}),
-    probeState: dirStore(),
-    segments: dirStore(),
-    rollups: {
-      dir: "",
-      dirFor: (level) => `mem://rollups/${level}`,
-      load: async () => ({ v: 1 }),
-      save: async () => {},
-    },
-    facts: dirStore(),
-    factsArchive: dirStore(),
-    profile: jsonStore({}),
-    journal: jsonStore({ entries: [] }),
-  };
-}
 
 function makeHarness({ ctoEnabled = false, counts = {}, rollups, facts, realCards = false, engineStateInit = {} } = {}) {
   const clock = { ms: 1_000_000 };
