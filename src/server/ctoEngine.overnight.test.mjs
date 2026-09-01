@@ -1,3 +1,17 @@
+// BET-1469: fail fast, before ANY test body runs, when this file is executed
+// outside the state sandbox. A CTO store module imported unsandboxed resolves
+// its paths against the LIVE box state (~/.manta) and a test would write
+// production data. `npm test` / `npm run test:server` set MANTA_STATE_HOME via
+// scripts/testSandbox.mjs before any module is evaluated; a bare
+// `node --test <file>` does not.
+if (!process.env.MANTA_STATE_HOME) {
+  throw new Error(
+    "MANTA_STATE_HOME is not set — refusing to run CTO tests against the live box state. " +
+      "Run via `npm test` or `npm run test:server` (both --import ./scripts/testSandbox.mjs), " +
+      "or set MANTA_STATE_HOME to a throwaway directory first.",
+  );
+}
+
 // BET-1419 overnight wiring tests (§11): window open → plan dispatch through
 // the delegate seams; §11.6 preemption on the user's return; the §9.2 veto
 // card lifecycle; the tonight queue verbs. The overnight machine itself is
