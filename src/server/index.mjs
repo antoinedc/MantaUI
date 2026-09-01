@@ -2074,8 +2074,15 @@ const factSurfaces = createFactSurfaces({
   },
   // Latest COMPLETED workflow run's conclusion in the repo at cwd (newest
   // first). No completed run (fresh repo, gh error) → null → "unavailable".
-  ciLatestConclusion: async (cwd) => {
-    const { stdout } = await promisify(execFile)("gh", ["run", "list", "--limit", "10", "--json", "conclusion,status"], {
+  // BET-1504: branch (from the statement's ci probe) scopes the query to that
+  // branch's runs — `gh run list --branch <name>`; null keeps the repo-wide
+  // latest-run semantics (§6.7 opportunism: no branch in the statement → no
+  // branch filter).
+  ciLatestConclusion: async (cwd, branch = null) => {
+    const args = ["run", "list", "--limit", "10", "--json", "conclusion,status"];
+    const b = String(branch ?? "").trim();
+    if (b) args.push("--branch", b);
+    const { stdout } = await promisify(execFile)("gh", args, {
       cwd,
       timeout: 15000,
     });

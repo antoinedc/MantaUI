@@ -549,12 +549,49 @@ export function enforceCap(activeFacts, { cap = CAP_ACTIVE, nowMs, halfLives, we
   return { facts, displaced };
 }
 
+// BET-1504: filler words that can sit where a branch name would — capturing
+// one would scope the CI probe to a branch that is not a branch ("CI green
+// on the latest run" must stay repo-wide, not probe a branch named "the").
+const CI_BRANCH_STOPWORDS = new Set([
+  "the", "a", "an", "this", "that", "these", "those", "every", "each", "all", "any", "some", "no", "another", "other",
+  "it", "its", "our", "their", "his", "her", "my", "your", "one", "both", "either", "neither",
+  "is", "was", "are", "were", "be", "been", "being", "has", "have", "had", "will", "would", "should", "could",
+  "can", "may", "might", "must", "shall", "do", "does", "did", "not", "still", "yet", "again",
+  "in", "on", "at", "to", "for", "with", "from", "by", "of", "as", "into", "onto", "over", "under", "after",
+  "before", "during", "since", "until", "about", "across", "against", "along", "among", "around", "because",
+  "but", "and", "or", "so", "if", "then", "than", "when", "while", "just", "very", "now",
+]);
+
+// Branch token for a CI statement — first non-filler capture wins:
+//   "branch <name>"  ("CI on branch feature/x is green")
+//   "CI on <name>"   ("CI on feature/x is green")
+//   "<status> on <name>" ("CI is green on main")
+// No branch-looking token → null → the CI surface keeps repo-wide semantics.
+function ciBranchOf(s) {
+  const patterns = [
+    /\bbranch\s+([A-Za-z0-9_\-.\/]+)\b/i,
+    /\bCI\s+on\s+([A-Za-z0-9_\-.\/]+)\b/i,
+    /\b(?:green|passing|passed|failed|failing|broken)\s+on\s+([A-Za-z0-9_\-.\/]+)\b/i,
+  ];
+  for (const re of patterns) {
+    const m = s.match(re);
+    if (!m) continue;
+    const token = m[1].replace(/[._\-\/]+$/, "");
+    if (token && !CI_BRANCH_STOPWORDS.has(token.toLowerCase())) return token;
+  }
+  return null;
+}
+
 export function matchCheckable(statement) {
   const s = String(statement ?? "");
+  // CI first (BET-1504): a CI statement that names a branch must reach the
+  // ci surface with that branch — not fall through to the bare branch rule
+  // below, whose git-existence probe confirms "CI on F is green" the moment
+  // branch F merely exists, CI state never consulted.
+  const ci = s.match(/\bCI\b[\s\S]*?\b(green|passing|passed|failed|failing|broken)\b/i);
+  if (ci) return { kind: "ci", surface: "ci", probe: ci[1].toLowerCase(), branch: ciBranchOf(s) };
   const branch = s.match(/\bbranch\s+([A-Za-z0-9_\-.\/]+)\b/i);
   if (branch) return { kind: "branch", surface: "git", probe: branch[1] };
-  const ci = s.match(/\bCI\b[\s\S]*?\b(green|passing|passed|failed|failing|broken)\b/i);
-  if (ci) return { kind: "ci", surface: "ci", probe: ci[1].toLowerCase() };
   const issue = s.match(/\b([A-Z][A-Z0-9]+-\d+)\b/);
   if (issue) return { kind: "issue", surface: "issue", probe: issue[1] };
   const ver = s.match(/\bversion\s+(\d+(?:\.\d+){1,3})\b/i);
@@ -575,7 +612,12 @@ export async function maybeStampCheckable(fact, { surfaceExists = async () => fa
     exists = false;
   }
   if (!exists) return fact;
-  return { ...fact, checkable: { probe: match.probe, last_checked: 0, result: null } };
+  // BET-1504: ci probes may carry branch scope (probe stays the status word —
+  // facts stamped before this change have no branch field and keep verifying
+  // repo-wide). Absent → the stamp keeps the old shape.
+  const stamp = { probe: match.probe, last_checked: 0, result: null };
+  if (match.branch) stamp.branch = match.branch;
+  return { ...fact, checkable: stamp };
 }
 
 export function median(arr) {
@@ -921,7 +963,13 @@ export function createFactsEngine(deps = {}) {
         try {
           // BET-1409: verify receives the project so the real §6.7 surfaces
           // can resolve the probe's cwd (git worktree / CI repo scope).
-          const r = await verify({ surface: matchCheckable(f.statement)?.surface, probe: f.checkable.probe, project: proj });
+          // BET-1504: ci probes carry optional branch scope from the stamp.
+          const r = await verify({
+            surface: matchCheckable(f.statement)?.surface,
+            probe: f.checkable.probe,
+            branch: f.checkable.branch ?? null,
+            project: proj,
+          });
           ok = r?.ok === true;
           result = r?.result ?? null;
         } catch {

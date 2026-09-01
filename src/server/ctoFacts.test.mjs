@@ -343,10 +343,32 @@ test("enforceCap displaces the lowest-retention fact over the cap", () => {
 });
 
 test("matchCheckable recognizes branch/ci/issue probes", () => {
-  assert.deepEqual(matchCheckable("CI is green on main"), { kind: "ci", surface: "ci", probe: "green" });
+  assert.deepEqual(matchCheckable("CI is green on main"), { kind: "ci", surface: "ci", probe: "green", branch: "main" });
   assert.deepEqual(matchCheckable("branch fix/foo merged"), { kind: "branch", surface: "git", probe: "fix/foo" });
   assert.deepEqual(matchCheckable("BET-1234 is open"), { kind: "issue", surface: "issue", probe: "BET-1234" });
   assert.equal(matchCheckable("arbitrary thought"), null);
+});
+
+// BET-1504: a CI statement that names a branch scopes the ci probe to it
+// instead of falling through to the git branch-existence rule or losing the
+// branch entirely (repo-wide latest run).
+test("matchCheckable: ci statements capture their branch scope (BET-1504)", () => {
+  assert.deepEqual(matchCheckable("CI on branch feature/x is green"), { kind: "ci", surface: "ci", probe: "green", branch: "feature/x" });
+  assert.deepEqual(matchCheckable("CI on feature/x is green"), { kind: "ci", surface: "ci", probe: "green", branch: "feature/x" });
+  assert.deepEqual(matchCheckable("CI on branch F is broken"), { kind: "ci", surface: "ci", probe: "broken", branch: "F" });
+  // Trailing punctuation is not part of the branch token.
+  assert.deepEqual(matchCheckable("CI green on main."), { kind: "ci", surface: "ci", probe: "green", branch: "main" });
+  // No branch context → ci probe with null branch (repo-wide semantics kept).
+  assert.deepEqual(matchCheckable("CI is green"), { kind: "ci", surface: "ci", probe: "green", branch: null });
+  assert.deepEqual(matchCheckable("CI green"), { kind: "ci", surface: "ci", probe: "green", branch: null });
+  // Fillers are never branch tokens ("CI green on the latest run" stays repo-wide).
+  assert.deepEqual(matchCheckable("CI on the latest run is green"), { kind: "ci", surface: "ci", probe: "green", branch: null });
+  assert.deepEqual(matchCheckable("CI is green on the feature branch."), { kind: "ci", surface: "ci", probe: "green", branch: null });
+  // Ordering: CI + branch beats the bare branch rule — a git cat-file check
+  // would confirm "CI on F is green" the moment branch F merely exists.
+  assert.equal(matchCheckable("branch feature/x exists and CI is green").surface, "ci");
+  // Bare branch statements (no CI status) still route to git untouched.
+  assert.deepEqual(matchCheckable("branch fix/foo merged"), { kind: "branch", surface: "git", probe: "fix/foo" });
 });
 
 test("median works on even/odd/empty", () => {
@@ -455,6 +477,36 @@ test("checkable: pump and verifyDue pass the project ctx to the surface seams", 
   assert.ok(seenVerify.length >= 1, "verify consulted on the cycle");
   assert.equal(seenVerify[0].project, "alpha", "verify receives the project");
   assert.equal(seenVerify[0].surface, "git");
+});
+
+// BET-1504: ci probes may carry branch scope from the statement — the stamp
+// records it and verifyDue threads it into the verify seam. Facts without a
+// branch (and pre-BET-1504 stamps) verify with branch: null → repo-wide.
+test("checkable: ci branch scope is stamped and threaded to verify (BET-1504)", async () => {
+  const seenVerify = [];
+  const { engine } = makeEngine({
+    surfaceExists: async (s) => s === "ci",
+    verify: async (args) => {
+      seenVerify.push(args);
+      return { ok: true };
+    },
+  });
+  await engine.submitProposal({ proposalId: "cb", project: "alpha", kind: "status", statement: "CI on branch feature/x is green", refs: ["r1"] });
+  await engine.pump();
+  await engine.submitProposal({ proposalId: "cn", project: "alpha", kind: "status", statement: "CI is green", refs: ["r2"] });
+  await engine.pump();
+  const staged = (await engine.listFacts("alpha"));
+  const f = staged.find((x) => x.statement === "CI on branch feature/x is green");
+  const g = staged.find((x) => x.statement === "CI is green");
+  assert.equal(f.checkable.probe, "green");
+  assert.equal(f.checkable.branch, "feature/x", "branch scope stamped from the statement");
+  assert.equal(g.checkable.probe, "green");
+  assert.equal(g.checkable.branch, undefined, "no branch in the statement → old stamp shape");
+  await engine.verifyDue();
+  assert.equal(seenVerify.length, 2, "verify consulted once per checkable fact");
+  const byBranch = new Map(seenVerify.map((v) => [v.branch ?? "none", v]));
+  assert.deepEqual(byBranch.get("feature/x"), { surface: "ci", probe: "green", branch: "feature/x", project: "alpha" });
+  assert.deepEqual(byBranch.get("none"), { surface: "ci", probe: "green", branch: null, project: "alpha" });
 });
 
 test("touchFacts bumps last_accessed + access_count on retrieval", async () => {
