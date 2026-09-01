@@ -239,6 +239,19 @@ script import them.
 - **No retries** on the visual project. A retry on a deterministic gate only
   converts a real regression into an intermittent one.
 
+### Judging conformance records needs full history
+
+`scripts/conformance-freshness.test.mjs` reads each record's committed baseline
+at its "Last reviewed" sha. On a shallow clone (`git clone --depth N` — what
+agent runs and throwaway checkouts commonly produce) those objects are absent,
+and the suite refuses to judge rather than guessing: it fails with a
+`git fetch --unshallow origin` message instead of reporting STALE. **Run
+`git fetch --unshallow origin` before trusting this suite's verdict** — a green
+run on truncated history proves less than it looks like (records whose review
+sha falls inside the shallow window were judged; the rest were not). CI is
+unaffected: its checkout is full-depth, and the depth-1 `main` graft it adds on
+top leaves all recorded objects reachable.
+
 ## The marketing-shot drift gate (BET-341 / BET-444)
 
 `scripts/shots.mjs` captures the `website/shot-*.webp` marketing assets from the
