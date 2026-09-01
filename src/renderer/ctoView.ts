@@ -533,7 +533,7 @@ export function suggestionConfidence(card: DecisionCardRow): number | null {
 // Selector: the open decision cards among the wire cards (the rest of the
 // store stays the Blocker section's).
 export function decisionCards(cards: ReadonlyArray<CtoCard>): DecisionCardRow[] {
-  return (cards ?? []).filter((c): c is CtoCard & { variant: "decision" });
+  return (cards ?? []).filter((c): c is CtoCard & { variant: "decision" } => c.variant === "decision");
 }
 
 // BET-1419: the open veto card (§10.3) among the wire cards — the overnight
