@@ -8,7 +8,9 @@
 //           (probe: `git cat-file -e`, which resolves branch names and
 //           commit/short-shas alike through the revision machinery)
 //   ci    → a gh binary AND a usable repo surface (probe polarity checked
-//           against the latest completed run's conclusion)
+//           against the latest completed run's conclusion; a statement that
+//           names a branch scopes the query to that branch — BET-1504 —
+//           otherwise the repo-wide latest run is the evidence)
 //   issue → a multica binary AND a consented issue tool in the §7 registry
 //           ("a consented tool for issue facts" — consent metadata ring)
 // Any other surface (e.g. "version") is unimplemented here → surfaceExists
@@ -109,8 +111,9 @@ export function createFactSurfaces(deps = {}) {
   }
 
   // §6.7 verify probe — called by verifyDue as
-  // { surface, probe, project }. Returns { ok, result }.
-  async function verify({ surface, probe, project } = {}) {
+  // { surface, probe, branch, project }. Returns { ok, result }.
+  // branch (BET-1504) is ci-only scope: null → repo-wide latest run.
+  async function verify({ surface, probe, branch = null, project } = {}) {
     if (surface === "git") {
       const cwds = await readyCwds(project ?? null).catch(() => []);
       if (cwds.length === 0) return { ok: false, result: "no surface" };
@@ -124,7 +127,10 @@ export function createFactSurfaces(deps = {}) {
     if (surface === "ci") {
       const cwds = await readyCwds(project ?? null).catch(() => []);
       if (cwds.length === 0) return { ok: false, result: "no surface" };
-      const conclusion = await ciLatestConclusion(cwds[0]).catch(() => null);
+      // BET-1504: a statement that names a branch ("CI on branch F is green")
+      // must be confirmed by THAT branch's latest run — the repo-wide latest
+      // run never looked at F and cannot confirm (or refute) its state.
+      const conclusion = await ciLatestConclusion(cwds[0], branch ?? null).catch(() => null);
       if (!conclusion) return { ok: false, result: "unavailable" };
       return { ok: ciConclusionMatches(probe, conclusion), result: String(conclusion) };
     }

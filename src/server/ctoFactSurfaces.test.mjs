@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { COMMIT_SHA_RE, MESSAGE_REF_RE, ciConclusionMatches, createFactSurfaces } from "./ctoFactSurfaces.mjs";
 
 function makeSurfaces(over = {}) {
-  const calls = { surfaceExists: [], verify: [], resolveRef: [] };
+  const calls = { surfaceExists: [], verify: [], resolveRef: [], ciLatest: [] };
   const surfaces = createFactSurfaces({
     cwdsFor: async (project) => (project == null ? ["/repo/a", "/repo/b"] : project === "p1" ? ["/repo/p1"] : []),
     runGit: async (cwd, args) => {
@@ -19,7 +19,10 @@ function makeSurfaces(over = {}) {
     },
     hasBinary: async (name) => ["git", "gh", "multica"].includes(name),
     issueLookup: async (key) => (key === "BET-1" ? { found: true, open: true } : key === "BET-2" ? { found: true, open: false } : null),
-    ciLatestConclusion: async (cwd) => (cwd === "/repo/p1" ? "success" : null),
+    ciLatestConclusion: async (cwd, branch) => {
+      calls.ciLatest.push([cwd, branch]);
+      return cwd === "/repo/p1" ? "success" : null;
+    },
     messageExists: async (id) => (id === "msg_ghost" ? false : id === "msg_ok" ? true : null),
     issueToolConsented: async () => true,
     ...over,
@@ -144,6 +147,30 @@ test("verify ci: probe polarity against the latest completed conclusion", async 
   const gone = await surfaces.verify({ surface: "ci", probe: "green", project: "other" });
   assert.equal(gone.ok, false);
   assert.equal(gone.result, "no surface");
+});
+
+// BET-1504: a statement that names a branch ("CI on branch F is green") must
+// be judged by THAT branch's latest run — the repo-wide latest run never
+// looked at F and cannot confirm (or refute) its state.
+test("verify ci: branch scope threads into ciLatestConclusion (BET-1504)", async () => {
+  const { surfaces, calls } = makeSurfaces();
+  await surfaces.verify({ surface: "ci", probe: "green", branch: "feature/x", project: "p1" });
+  assert.deepEqual(calls.ciLatest.at(-1), ["/repo/p1", "feature/x"], "branch passed to the conclusion seam");
+  // No branch in the probe → null → repo-wide semantics preserved.
+  await surfaces.verify({ surface: "ci", probe: "green", project: "p1" });
+  assert.deepEqual(calls.ciLatest.at(-1), ["/repo/p1", null]);
+});
+
+test("verify ci: a branch-scoped probe is judged by THAT branch's run, not the repo-wide latest (BET-1504)", async () => {
+  // The repo-wide latest completed run is green; branch feature/red's own
+  // latest run is red. "CI on branch feature/red is green" must NOT confirm.
+  const scoped = makeSurfaces({
+    ciLatestConclusion: async (cwd, branch) => (branch === "feature/red" ? "failure" : "success"),
+  }).surfaces;
+  assert.equal((await scoped.verify({ surface: "ci", probe: "green", branch: "feature/red", project: "p1" })).ok, false);
+  assert.equal((await scoped.verify({ surface: "ci", probe: "green", branch: "feature/green", project: "p1" })).ok, true);
+  // No branch → repo-wide latest (green) → confirmed, as before.
+  assert.equal((await scoped.verify({ surface: "ci", probe: "green", project: "p1" })).ok, true);
 });
 
 test("verify issue: open → ok, closed/not-found/unavailable → not ok", async () => {

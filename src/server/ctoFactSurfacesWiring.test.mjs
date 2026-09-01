@@ -78,3 +78,13 @@ test("BET-1409: the factSurfaces bundle is constructed with the real surface dep
   // The message-id leg rides the shared read-only opencode db handle.
   assert.ok(block.includes("getDb()"), "messageExists must ride the opencodeDb handle");
 });
+
+// BET-1504: the ci conclusion seam must accept a branch scope and pass it to
+// `gh run list --branch <name>` — a statement that names a branch is judged
+// by that branch's run, not the repo-wide latest.
+test("BET-1504: the ci conclusion seam scopes gh run list to the statement's branch", () => {
+  const block = depsBlock(indexSource, "ciLatestConclusion:");
+  assert.ok(block.length > 0, "ciLatestConclusion block found in index.mjs");
+  assert.ok(block.includes("branch"), "ciLatestConclusion must take a branch parameter");
+  assert.ok(block.includes('"--branch"'), "gh run list must support --branch scoping");
+});
