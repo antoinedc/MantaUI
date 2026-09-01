@@ -138,7 +138,6 @@ export function createCtoEngine(deps = {}) {
     readProfile = null,
     readToolRegistry = null,
     loadInbox = async () => inboxStore.load(),
-    saveInbox = async (data) => inboxStore.save(data),
     now = () => Date.now(),
   } = deps;
 
