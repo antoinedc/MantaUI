@@ -132,7 +132,7 @@ test("priceTokens prices via the model cost and a cache-heavy mix", () => {
   assert.equal(priceTokens({ model: { providerID: "x", id: "y" }, tokens: 1_000_000 }), 0);
 });
 
-test("expected hourly burn derives from trailing 7-day spend", () => {
+test("BET-1462: trailing spend pacing below the cap-equivalent pace floors at cap/24", () => {
   // Spend $16.80 over 7 days → 16.80 / 168h = $0.10/h — below the $2.50
   // cap-equivalent pace, so the new floor wins (BET-1462 defect 1).
   let p = defaultBudgetPayload();
