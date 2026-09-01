@@ -24,6 +24,61 @@ function makeAdapter(id, { detect, fetch: doFetch }) {
   return { id, providerIDs: [id], detect, fetch: doFetch };
 }
 
+// The poller warns (console.warn) on every adapter failure it handles; tests
+// below silence it for the duration of a run and restore it afterwards.
+async function withSilencedWarnings(run) {
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  try {
+    await run();
+  } finally {
+    console.warn = originalWarn;
+  }
+}
+
+// An adapter whose every fetch throws a 429 — `retryAfterMs` undefined means
+// the header is absent entirely (the bare-429 floor case).
+function makeAlwaysRateLimited(id, retryAfterMs) {
+  let calls = 0;
+  const adapter = makeAdapter(id, {
+    detect: async () => true,
+    fetch: async () => {
+      calls++;
+      const err = new Error("rate limited");
+      err.status = 429;
+      if (retryAfterMs !== undefined) err.retryAfterMs = retryAfterMs;
+      throw err;
+    },
+  });
+  return { adapter, getCalls: () => calls };
+}
+
+// An adapter that succeeds on call 1 and throws `makeError()` on call 2 — the
+// "first poll ok, then the provider breaks" shape the carry-forward logic
+// exists for.
+function makeFlakyAdapter(makeError) {
+  let calls = 0;
+  const adapter = makeAdapter("a", {
+    detect: async () => true,
+    fetch: async () => {
+      calls++;
+      if (calls === 2) throw makeError();
+      return { windows: [{ kind: "session", label: "s", pct: 42 }] };
+    },
+  });
+  return { adapter, getCalls: () => calls };
+}
+
+// Codex adapter fetch with the standard injected deps, parameterized only by
+// the response sample.
+async function fetchCodexSample(sample) {
+  return codexAdapter.fetch({
+    fetchImpl: async () => fakeResponse(200, sample),
+    readToken: async () => "tok",
+    now: () => 0,
+  });
+}
+
 // ----------------------------------------------------------------------------
 // normalizeWindow — pure
 // ----------------------------------------------------------------------------
@@ -315,36 +370,29 @@ test("poller: a 429 with Retry-After backs off only that adapter, for exactly th
   }
 });
 
-test("poller: a bare 429 with no Retry-After floors at 2 minutes", async () => {
+// Both 429-floor tests walk the same ladder: tick → still backed off one
+// minute later → retried once 2 minutes have passed in total. They differ
+// only in the 429's shape (no Retry-After header vs retry-after: 0).
+async function assert429FloorsAt2Minutes({ retryAfterMs }) {
   let nowMs = 0;
-  let calls = 0;
-  const rl = makeAdapter("rl", {
-    detect: async () => true,
-    fetch: async () => {
-      calls++;
-      const err = new Error("rate limited");
-      err.status = 429; // no retryAfterMs
-      throw err;
-    },
-  });
-  const originalWarn = console.warn;
-  console.warn = () => {};
-  try {
+  const { adapter: rl, getCalls } = makeAlwaysRateLimited("rl", retryAfterMs);
+  await withSilencedWarnings(async () => {
     const poller = createUsagePoller({ adapters: [rl], now: () => nowMs });
     await poller.tick();
-    assert.equal(calls, 1);
+    assert.equal(getCalls(), 1);
 
     nowMs += 1 * 60_000; // just under the 2-minute floor (even retry-after: 0 lands here)
     await poller.tick();
-    assert.equal(calls, 1);
+    assert.equal(getCalls(), 1);
 
-    nowMs += 2 * 60_000; // now past 2 minutes total — retried
+    nowMs += 2 * 60_000; // past 2 minutes total — retried
     await poller.tick();
-    assert.equal(calls, 2);
-  } finally {
-    console.warn = originalWarn;
-  }
-});
+    assert.equal(getCalls(), 2);
+  });
+}
+
+test("poller: a bare 429 with no Retry-After floors at 2 minutes", () =>
+  assert429FloorsAt2Minutes({ retryAfterMs: undefined }));
 
 test("rateLimitBackoffMs: clamps into the 2-15 minute band", () => {
   assert.equal(rateLimitBackoffMs(undefined), 120_000);
@@ -354,53 +402,14 @@ test("rateLimitBackoffMs: clamps into the 2-15 minute band", () => {
   assert.equal(rateLimitBackoffMs(3_600_000), 900_000); // above ceiling
 });
 
-test("poller: a 429 carrying retry-after: 0 backs off 2 minutes, not 15 (regression)", async () => {
-  let nowMs = 0;
-  let calls = 0;
-  const rl = makeAdapter("rl", {
-    detect: async () => true,
-    fetch: async () => {
-      calls++;
-      const err = new Error("rate limited");
-      err.status = 429;
-      err.retryAfterMs = 0; // Anthropic's literal retry-after: 0
-      throw err;
-    },
-  });
-  const originalWarn = console.warn;
-  console.warn = () => {};
-  try {
-    const poller = createUsagePoller({ adapters: [rl], now: () => nowMs });
-    await poller.tick();
-    assert.equal(calls, 1);
-
-    nowMs += 1 * 60_000; // before the 2-minute floor → still backed off
-    await poller.tick();
-    assert.equal(calls, 1);
-
-    nowMs += 2 * 60_000; // past 2 minutes → retried (NOT after 15)
-    await poller.tick();
-    assert.equal(calls, 2);
-  } finally {
-    console.warn = originalWarn;
-  }
-});
+test("poller: a 429 carrying retry-after: 0 backs off 2 minutes, not 15 (regression)", () =>
+  assert429FloorsAt2Minutes({ retryAfterMs: 0 }));
 
 test("poller: a failing adapter's snapshot is carried forward (same ref, unchanged fetchedAt, nothing republished)", async () => {
   let nowMs = 1_000_000;
-  let calls = 0;
-  const adapter = makeAdapter("a", {
-    detect: async () => true,
-    fetch: async () => {
-      calls++;
-      if (calls === 2) throw new Error("boom");
-      return { windows: [{ kind: "session", label: "s", pct: 42 }] };
-    },
-  });
+  const { adapter, getCalls } = makeFlakyAdapter(() => new Error("boom"));
   const published = [];
-  const originalWarn = console.warn;
-  console.warn = () => {};
-  try {
+  await withSilencedWarnings(async () => {
     const poller = createUsagePoller({
       adapters: [adapter],
       now: () => nowMs,
@@ -414,34 +423,22 @@ test("poller: a failing adapter's snapshot is carried forward (same ref, unchang
 
     nowMs += 60_000; // 1 minute later the adapter throws
     await poller.tick();
-    assert.equal(calls, 2);
+    assert.equal(getCalls(), 2);
     assert.equal(poller.snapshots.length, 1, "snapshot still present after the failed tick");
     assert.equal(poller.snapshots[0], first, "the SAME object reference is carried forward");
     assert.equal(poller.snapshots[0].fetchedAt, 1_000_000, "fetchedAt untouched");
     assert.equal(published.length, 1, "the failed tick put nothing on the bus");
-  } finally {
-    console.warn = originalWarn;
-  }
+  });
 });
 
 test("poller: carry-forward across the backoff window keeps the snapshot present", async () => {
   let nowMs = 1_000_000;
-  let calls = 0;
-  const adapter = makeAdapter("a", {
-    detect: async () => true,
-    fetch: async () => {
-      calls++;
-      if (calls === 2) {
-        const err = new Error("rate limited");
-        err.status = 429;
-        throw err;
-      }
-      return { windows: [{ kind: "session", label: "s", pct: 42 }] };
-    },
+  const { adapter, getCalls } = makeFlakyAdapter(() => {
+    const err = new Error("rate limited");
+    err.status = 429;
+    return err;
   });
-  const originalWarn = console.warn;
-  console.warn = () => {};
-  try {
+  await withSilencedWarnings(async () => {
     const poller = createUsagePoller({ adapters: [adapter], now: () => nowMs });
     await poller.tick(); // success
     assert.equal(poller.snapshots.length, 1);
@@ -449,44 +446,30 @@ test("poller: carry-forward across the backoff window keeps the snapshot present
 
     nowMs += 1 * 60_000; // 1 min later — bare 429 sets the 2-minute floor backoff
     await poller.tick();
-    assert.equal(calls, 2, "adapter was called on the failing tick");
+    assert.equal(getCalls(), 2, "adapter was called on the failing tick");
     assert.equal(poller.snapshots.length, 1, "snapshot present after the 429");
 
     nowMs += 30_000; // still inside the 2-min backoff — adapter not even called
     await poller.tick();
-    assert.equal(calls, 2, "adapter not called while backed off");
+    assert.equal(getCalls(), 2, "adapter not called while backed off");
     assert.equal(poller.snapshots.length, 1, "snapshot carried across the backoff window");
     assert.equal(poller.snapshots[0], first, "same reference carried");
-  } finally {
-    console.warn = originalWarn;
-  }
+  });
 });
 
 test("poller: carry-forward expires after 30 minutes with no successful fetch", async () => {
   let nowMs = 1_000_000;
-  let calls = 0;
-  const adapter = makeAdapter("a", {
-    detect: async () => true,
-    fetch: async () => {
-      calls++;
-      if (calls === 2) throw new Error("boom");
-      return { windows: [{ kind: "session", label: "s", pct: 42 }] };
-    },
-  });
-  const originalWarn = console.warn;
-  console.warn = () => {};
-  try {
+  const { adapter, getCalls } = makeFlakyAdapter(() => new Error("boom"));
+  await withSilencedWarnings(async () => {
     const poller = createUsagePoller({ adapters: [adapter], now: () => nowMs });
     await poller.tick(); // success
     assert.equal(poller.snapshots.length, 1);
 
     nowMs += 31 * 60_000; // past the 30-minute carry-forward cap
     await poller.tick(); // fails again
-    assert.equal(calls, 2);
+    assert.equal(getCalls(), 2);
     assert.equal(poller.snapshots.length, 0, "snapshot dropped once older than the carry cap");
-  } finally {
-    console.warn = originalWarn;
-  }
+  });
 });
 
 test("poller: detect() flips to false → snapshot dropped on the very next tick, no carry-forward", async () => {
@@ -767,11 +750,7 @@ test("codex adapter: a 100% window reports exhausted even with a positive balanc
 
 test("codex adapter: absent credits balance stays undefined, never 0", async () => {
   const sample = { rate_limit: { primary_window: { used_percent: 5, reset_after_seconds: 60 } } };
-  const snap = await codexAdapter.fetch({
-    fetchImpl: async () => fakeResponse(200, sample),
-    readToken: async () => "tok",
-    now: () => 0,
-  });
+  const snap = await fetchCodexSample(sample);
   assert.equal("balance" in snap, false, "no credits field → no balance key at all");
   assert.equal(snap.balance, undefined, "absent balance is undefined, not 0");
   assert.equal("exhausted" in snap, false);
@@ -779,11 +758,7 @@ test("codex adapter: absent credits balance stays undefined, never 0", async () 
 
 test("codex adapter: no credits, no plan_type — extras/planLabel omitted, not fabricated", async () => {
   const sample = { rate_limit: { primary_window: { used_percent: 5, reset_after_seconds: 60 } } };
-  const snap = await codexAdapter.fetch({
-    fetchImpl: async () => fakeResponse(200, sample),
-    readToken: async () => "tok",
-    now: () => 0,
-  });
+  const snap = await fetchCodexSample(sample);
   assert.equal("planLabel" in snap, false);
   assert.equal("extras" in snap, false);
 });
