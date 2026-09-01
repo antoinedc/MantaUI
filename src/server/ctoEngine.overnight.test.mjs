@@ -294,29 +294,30 @@ test("overnight: a watcher hit with a tracked project hosts the investigation th
   );
 });
 
-test("overnight: a watcher hit with no hostable project skips ONCE per window, not per tick (BET-1428)", async () => {
+test("overnight: a watcher hit with no hostable project produces NO candidate and NO skip rows (BET-1472, decision c)", async () => {
   const h = makeHarness({ trough: TROUGH, projects: [PROJECT_ROW] });
   h.ledgerRows.push(watcherHitRow({ watcherId: "w2", ts: h.now() - 60_000 }));
   await h.engine.tick();
   assert.equal(h.startedJobs.length, 0);
   assert.equal(
     h.ledgerRows.filter((r) => r.kind === "cto.overnight.skip" && r.id === "wh:w2").length,
-    1,
-    "one skip row for the unhostable hit",
+    0,
+    "the never-hostable hit is filtered at the candidacy source — no skip row is written",
   );
 
-  // The hit remains a candidate for the whole 24h collection window; the
-  // per-window skip dedupe keeps the ledger quiet while the retry stays live.
+  // BET-1472: the hit never enters the overnight plan, so repeated ticks of
+  // the open window stay fully silent — the old BET-1428 per-window skip rows
+  // are gone entirely.
   h.advance(60 * 1000);
   await h.engine.tick();
   h.advance(60 * 1000);
   await h.engine.tick();
+  assert.equal(h.startedJobs.length, 0);
   assert.equal(
     h.ledgerRows.filter((r) => r.kind === "cto.overnight.skip" && r.id === "wh:w2").length,
-    1,
-    "still one skip row after two more ticks",
+    0,
+    "still no skip rows after two more ticks",
   );
-  assert.equal(h.startedJobs.length, 0);
 });
 
 test("overnight: a hit whose project no longer resolves skips once per window, and a mid-window session opens the retry (BET-1428)", async () => {
