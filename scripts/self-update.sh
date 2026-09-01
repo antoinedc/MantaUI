@@ -344,6 +344,21 @@ else
   fi
 fi
 
+# --- Re-source the lib the swap just shipped (BET-1503) ----------------------
+# This script sources scripts/lib/release.sh at the top, i.e. the copy that was
+# on disk BEFORE the payload swap — so a helper added by the very release being
+# installed is not defined in the running shell, and anything below that needs
+# it would silently no-op until the NEXT update. Re-sourcing after the swap
+# closes that one-update lag, and matches what install.sh already does (it
+# re-sources the lib from MANTA_HOME once the tarball is extracted).
+#
+# Only functions are defined here (the file is documented to have no source-time
+# side effects), so re-sourcing is a redefinition and nothing more. Guarded on
+# the file existing so a release that somehow lacked it can't abort the update.
+if [ "$PAYLOAD_REPLACED" = "1" ] && [ -f "$MANTA_HOME/scripts/lib/release.sh" ]; then
+  . "$MANTA_HOME/scripts/lib/release.sh"
+fi
+
 echo "MANTA_PROGRESS 4/7 Installing dependencies"
 install_prod_deps "$MANTA_HOME"
 
@@ -441,6 +456,19 @@ restart_opencode() {
   # Restart opencode so refreshed tools are actually loaded. opencode only
   # re-scans its tools/ directory at startup, so without this an update leaves
   # the new tools inert on disk.
+  #
+  # BET-1503: bring the installed service definition up to date FIRST. A
+  # supervisor stops a service using its currently-loaded definition, so the
+  # patch has to land (and be reloaded) before the restart for this run's
+  # restart to be the one that applies it. Units are written by install.sh and
+  # never re-rendered here, so without this in-place patch the fix would reach
+  # fresh installs only. Never fatal — see ensure_opencode_cli_version.
+  # Guarded on the function existing: an OLD self-update.sh can reach a NEW
+  # release.sh (and vice versa) across the swap above, and a missing helper
+  # must degrade to the previous behaviour rather than kill the update.
+  if declare -F ensure_opencode_cli_version >/dev/null 2>&1; then
+    ensure_opencode_cli_version
+  fi
   if command -v systemctl >/dev/null 2>&1; then
     echo "▸ self-update: restarting opencode-serve"
     systemctl --user restart opencode-serve || echo "⚠ self-update: opencode restart failed"

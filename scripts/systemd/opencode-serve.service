@@ -48,6 +48,16 @@ Environment=PATH=@@AGENT_PATH@@
 # subagent blocks its parent turn. Not a placeholder: it is unconditionally on
 # for every Manta box, so there is nothing for install.sh to substitute.
 Environment=OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true
+# Claude Code version claimed to Anthropic by the opencode-claude-auth plugin,
+# which authenticates as Claude Code. The plugin hardcodes a version that lags
+# badly (2.1.185 in a cached @latest, 2.1.217 even in the newest release) and
+# Anthropic REFUSES a request whose claim is below the floor for the model
+# asked for — so a stale claim makes newer models unusable, with an error that
+# blames the user's CLI. install.sh substitutes the version resolved from the
+# box's own `claude` CLI (see resolve_anthropic_cli_version) so the claim
+# tracks a CLI the box already keeps current, instead of a constant that would
+# need a release every time Anthropic moves the floor.
+Environment=ANTHROPIC_CLI_VERSION=@@ANTHROPIC_CLI_VERSION@@
 Restart=on-failure
 RestartSec=2
 # Give opencode a moment to flush pending SSE frames on stop before SIGKILL.

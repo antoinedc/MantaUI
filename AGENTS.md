@@ -3254,6 +3254,63 @@ every update, so a box stops drifting from whatever it was installed with
   already warns it restarts opencode and ends running agent turns, which is
   exactly right for this.
 
+### The box tells Anthropic which Claude Code version it is (BET-1503)
+
+opencode reaches Anthropic through the `opencode-claude-auth` plugin, which
+authenticates **as Claude Code** and therefore sends a Claude Code version in
+its user-agent and billing headers. That version is HARDCODED in the plugin
+(`config.ccVersion`) and lags badly — a live box's cached `@latest` claimed
+`2.1.185`, and even the newest published plugin claims `2.1.217`.
+
+**Anthropic gates new models on a minimum client version and refuses anything
+below it.** So a stale claim makes a model the user is entitled to simply
+unusable, with an error that misdirects: *"Claude Code 2.1.185 does not support
+this model; version 2.1.251 or newer is required. Run 'claude update'"* — which
+sends the user to update a CLI that is already current and has nothing to do
+with it. That is the whole reason this exists; the box's real `claude` binary
+was 2.1.257 at the time.
+
+The plugin honours `ANTHROPIC_CLI_VERSION` from its environment, so the box
+sets it on the opencode service. Four things about how:
+
+- **The value is DERIVED, never pinned.** `resolve_anthropic_cli_version` in
+  `scripts/lib/release.sh` reads the box's own `claude --version` and uses it
+  when it meets `manta_claude_cli_version_floor`, else the floor. Since
+  self-update already keeps that CLI current (unpinned, upgraded every run),
+  the claim tracks it on its own. **Do not replace this with a constant** —
+  Anthropic raises the floor with every model launch, and a constant means a
+  release each time plus a window where every box is broken again. The floor is
+  only the fallback for a box with no CLI (install.sh no longer installs one —
+  the app does, lazily, on first Claude sign-in) or one older than the gate.
+- **Three supervisors must agree.** The systemd unit, the LaunchAgent plist and
+  install.sh's `nohup` fallback all set it, exactly like
+  `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS` — otherwise behaviour would
+  depend on which one happened to start opencode. A test pins the templates and
+  install.sh's substitutions together, so a template that loses its placeholder
+  goes red instead of rendering a literal `@@ANTHROPIC_CLI_VERSION@@`.
+- **Existing boxes are patched IN PLACE, because self-update never re-renders
+  units.** `ensure_opencode_cli_version` edits the installed unit (or plist)
+  and reloads before the restart — same shape and same reasoning as
+  `ensure_server_kill_policy`. It is monotonic: a stale claim is replaced, a
+  higher one is never walked back. On macOS it uses PlistBuddy and must
+  bootout+bootstrap, since `launchctl kickstart -k` restarts the job from
+  launchd's STALE in-memory definition and would silently change nothing.
+- **self-update re-sources the lib after a payload swap.** The script sources
+  `release.sh` at the top — i.e. the copy from BEFORE the swap — so without the
+  re-source a helper shipped by the very release being installed would not be
+  defined, and the fix would land one update late. install.sh already had the
+  same re-source for the same reason.
+- **The resolver ships in install.sh's inline `curl | bash` fallback**, via
+  `HELPER_NAMES` in `scripts/sync-release-fallback.mjs`. Piped mode has no
+  local lib to source, so a resolver missing there would render an EMPTY value
+  on the primary install path. The patcher functions are deliberately absent
+  from that list: only self-update calls them, and it always sources the lib.
+
+If a model starts failing this way again, check what the box actually claims
+(`systemctl --user show opencode-serve -p Environment`) before touching
+anything else — and note the number in the error is the plugin's claim, never
+the CLI's real version.
+
 ### Verifying a deploy actually landed
 
 Never trust "the workflow was green" alone for the FIRST run of a new pipeline —

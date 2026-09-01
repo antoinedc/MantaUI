@@ -334,6 +334,80 @@ verify_sha256() {
       actual:   $actual
       (corrupt download or stale manifest — re-run; if it persists, report it)"
 }
+
+# version_gte <a> <b> — return 0 when dotted-numeric version a >= b.
+# Compares component by component, numerically, padding a short side with
+# zeros (so 2.2 >= 2.1.9). Non-numeric junk in a component reads as 0, which
+# keeps a malformed input from ever comparing HIGH and silently winning.
+# Deliberately hand-rolled: `sort -V` is a GNU extension this must not depend
+# on (the same code runs on macOS boxes).
+version_gte() {
+  local a="$1" b="$2" i ac bc
+  local -a av bv
+  IFS='.' read -r -a av <<< "$a"
+  IFS='.' read -r -a bv <<< "$b"
+  for ((i = 0; i < 4; i++)); do
+    ac="${av[i]:-0}"; bc="${bv[i]:-0}"
+    case "$ac" in *[!0-9]*|"") ac=0 ;; esac
+    case "$bc" in *[!0-9]*|"") bc=0 ;; esac
+    if [ "$ac" -gt "$bc" ]; then return 0; fi
+    if [ "$ac" -lt "$bc" ]; then return 1; fi
+  done
+  return 0
+}
+
+# claude_cli_version — echo the version of the `claude` CLI on PATH, or empty.
+# `claude --version` prints e.g. "2.1.257 (Claude Code)"; take the first token
+# and keep it only if it looks like a dotted version. Never fails: a missing
+# CLI, a hung binary, or unrecognised output all yield empty, and the caller
+# falls back to the floor.
+claude_cli_version() {
+  local raw first
+  command -v claude >/dev/null 2>&1 || return 0
+  # Bounded: this runs on the install path, where a wedged binary that never
+  # returns would hang the whole install with no output. `timeout` is GNU and a
+  # stock macOS has none, so use it only when present — a Mac falls back to the
+  # plain call, which is the pre-existing risk and no worse.
+  if command -v timeout >/dev/null 2>&1; then
+    raw="$(timeout 10 claude --version 2>/dev/null)" || return 0
+  else
+    raw="$(claude --version 2>/dev/null)" || return 0
+  fi
+  first="${raw%% *}"
+  case "$first" in
+    [0-9]*.[0-9]*) printf '%s' "$first" ;;
+    *) : ;;
+  esac
+  return 0
+}
+
+# manta_claude_cli_version_floor — echo the fallback claim used when the box has
+# no `claude` CLI, or has one older than this. Raise it only when Anthropic's
+# floor moves past it AND a box's own CLI can't be relied on to be newer; the
+# derivation above is the normal path.
+#
+# A function rather than a top-level constant on purpose: this file is sourced
+# by install.sh and self-update.sh and is documented to define ONLY functions
+# and run nothing at source time, so it must not assign into a caller's shell.
+# It is also what lets the value ride along in install.sh's inline `curl | bash`
+# fallback, which extracts whole functions.
+manta_claude_cli_version_floor() {
+  printf '%s' "2.1.257"
+}
+
+# resolve_anthropic_cli_version — echo the Claude Code version the opencode
+# service should claim: the box's own CLI version when it is at least the
+# floor, else the floor. Never echoes empty.
+resolve_anthropic_cli_version() {
+  local detected floor
+  floor="$(manta_claude_cli_version_floor)"
+  detected="$(claude_cli_version)"
+  if [ -n "$detected" ] && version_gte "$detected" "$floor"; then
+    printf '%s' "$detected"
+  else
+    printf '%s' "$floor"
+  fi
+}
   # >>> END GENERATED — scripts/sync-release-fallback.mjs — do not edit by hand <<<
 fi
 
@@ -1229,6 +1303,7 @@ main() {
       -e "s|@@OPENCODE_BIN@@|${OPENCODE_BIN:-}|g" \
       -e "s|@@AUTH_DIR@@|$AUTH_DIR|g" \
       -e "s|@@AGENT_PATH@@|$(launchd_agent_path)|g" \
+      -e "s|@@ANTHROPIC_CLI_VERSION@@|$(resolve_anthropic_cli_version)|g" \
       -e "s|@@MANTA_CHANNEL@@|${MANTA_CHANNEL:-prod}|g" \
       "$src" > "$dest"
     local uid; uid="$(id -u)"
@@ -1329,7 +1404,8 @@ main() {
     rendered="$("$NODE" "$LIB" render-systemd-unit \
       --template "$OC_UNIT_SRC" \
       --placeholder OPENCODE_BIN="$OPENCODE_BIN" \
-      --placeholder AGENT_PATH="$(launchd_agent_path)")" \
+      --placeholder AGENT_PATH="$(launchd_agent_path)" \
+      --placeholder ANTHROPIC_CLI_VERSION="$(resolve_anthropic_cli_version)")" \
       || die "render-systemd-unit failed (see lib)"
     printf '%s' "$rendered" > "$OC_UNIT"
     systemctl --user daemon-reload
@@ -1356,9 +1432,12 @@ main() {
     else
       warn "systemctl not found. Starting opencode-serve in the background instead."
       warn "It will NOT survive reboot — set up your own supervisor for that."
-      # Same background-subagent flag the systemd unit and the LaunchAgent
-      # carry — keep the three supervisors' environments identical.
-      ( OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true nohup "$OPENCODE_BIN" serve --port 4096 --hostname 127.0.0.1 >"$AUTH_DIR/opencode.log" 2>&1 & )
+      # Same background-subagent flag AND the same claimed Claude Code version
+      # the systemd unit and the LaunchAgent carry — keep the three
+      # supervisors' environments identical.
+      ( OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true \
+        ANTHROPIC_CLI_VERSION="$(resolve_anthropic_cli_version)" \
+        nohup "$OPENCODE_BIN" serve --port 4096 --hostname 127.0.0.1 >"$AUTH_DIR/opencode.log" 2>&1 & )
     fi
   fi
   # Health-wait: opencode is loopback-only on :4096. acceptAnyStatus:true is

@@ -75,6 +75,19 @@ function allPaths(root) {
 }
 
 /**
+ * Assert no `.new` staging directory survived under `root`. The swap stages
+ * each path as `<dest>/<rel>.new` and `mv`s it into place, so a leftover means
+ * the swap tore rather than completed — asserted by both the success path and
+ * every refuse-before-mutating path.
+ */
+function assertNoStagingDirs(root) {
+  for (const rel of allPaths(root)) {
+    assert.ok(!rel.endsWith(".new"), `staging dir survived: ${rel}`);
+    assert.ok(!rel.includes(".new/"), `staging dir survived: ${rel}`);
+  }
+}
+
+/**
  * Source scripts/lib/release.sh (trivial log/ok/warn/die defined first), then
  * call `replace_release_payload <pkg> <dest> <node>`. Runs in a throwaway
  * bash subprocess. Returns { status, stdout }.
@@ -243,10 +256,7 @@ test("no *.new staging directories survive a successful run", () => {
   try {
     const { status } = runReplace(pkg, dest);
     assert.equal(status, 0);
-    for (const rel of allPaths(dest)) {
-      assert.ok(!rel.endsWith(".new"), `staging dir survived: ${rel}`);
-      assert.ok(!rel.includes(".new/"), `staging dir survived: ${rel}`);
-    }
+    assertNoStagingDirs(dest);
   } finally {
     rmSync(pkg, { recursive: true, force: true });
     rmSync(dest, { recursive: true, force: true });
@@ -432,10 +442,7 @@ test("replace_release_payload: preflight refuses when disk is short, mutating no
     assert.match(r.stdout, /not enough disk space/);
     const after = readTree(dest);
     assert.equal(JSON.stringify(after), before, "dest must be untouched when refused");
-    for (const rel of allPaths(dest)) {
-      assert.ok(!rel.endsWith(".new"), `staging dir survived: ${rel}`);
-      assert.ok(!rel.includes(".new/"), `staging dir survived: ${rel}`);
-    }
+    assertNoStagingDirs(dest);
   } finally {
     rmSync(pkg, { recursive: true, force: true });
     rmSync(dest, { recursive: true, force: true });
@@ -666,31 +673,31 @@ test("ensure_kill_policy_text: a unit with no [Service] section is left unchange
 });
 
 /**
- * Source release.sh and run ensure_server_kill_policy against a real temp unit
- * path, with `systemctl` stubbed on PATH to a recorder so the test can assert
- * whether daemon-reload actually ran. Returns { status, stdout, reloaded }.
+ * Run a unit-patching helper with `systemctl` stubbed on PATH to a recorder,
+ * so a test can assert whether daemon-reload actually ran — both patchers must
+ * reload ONLY when they really wrote. `build(tmpDir)` returns the shell line to
+ * run (it gets the temp dir so it can place extra fixture paths there).
+ * Returns { status, stdout, reloaded }.
  */
-function runServerKillPolicy(unitPath) {
-  const dir = mkdtempSync(join(tmpdir(), "manta-kill-"));
+function runUnitPatcher(build) {
+  const dir = mkdtempSync(join(tmpdir(), "manta-unit-patch-"));
   const binDir = join(dir, "bin");
   mkdirSync(binDir, { recursive: true });
   const calls = join(dir, "systemctl.calls");
-  // Stub systemctl on PATH to a recorder so the test can assert whether
-  // daemon-reload actually ran (the function must only reload when it wrote).
   writeFileSync(
     join(binDir, "systemctl"),
     `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 0\n`,
     { mode: 0o755 },
   );
-  const r = sourceAndRun(`ensure_server_kill_policy '${unitPath}'`, {
-    preamble: `export PATH='${binDir}':"$PATH"`,
-  });
-  let reloaded = false;
-  if (existsSync(calls)) {
-    reloaded = readFileSync(calls, "utf8").split("\n").some((l) => l.includes("daemon-reload"));
-  }
+  const r = sourceAndRun(build(dir), { preamble: `export PATH='${binDir}':"$PATH"` });
+  const reloaded = existsSync(calls)
+    && readFileSync(calls, "utf8").split("\n").some((l) => l.includes("daemon-reload"));
   rmSync(dir, { recursive: true, force: true });
   return { status: r.status, stdout: r.stdout, reloaded };
+}
+
+function runServerKillPolicy(unitPath) {
+  return runUnitPatcher(() => `ensure_server_kill_policy '${unitPath}'`);
 }
 
 test("ensure_server_kill_policy: a missing unit path returns 0 and creates nothing", () => {
@@ -734,4 +741,211 @@ test("ensure_server_kill_policy: an already-patched unit is not rewritten and no
 test("drift guard: the shipped systemd template is already unchanged by ensure_kill_policy_text", () => {
   const template = readFileSync(MANTA_SERVICE_TEMPLATE, "utf8");
   assert.equal(killPolicyText(template), template);
+});
+
+// --- Claimed Claude Code version (BET-1503) ----------------------------------
+//
+// opencode reaches Anthropic through a plugin that authenticates AS Claude Code
+// and sends a hardcoded, badly-lagging version. Anthropic refuses a request
+// whose claim is below the floor for the model asked for, so a stale claim
+// makes a model the user is entitled to unusable. The box therefore sets
+// ANTHROPIC_CLI_VERSION on the opencode service, DERIVED from the real `claude`
+// CLI (which self-update already keeps current) so the claim tracks the CLI
+// rather than a constant needing a release each time Anthropic moves the floor.
+
+// Ask release.sh for the floor rather than restating it, so raising it there
+// does not turn these tests red for no reason.
+const FLOOR = sourceAndRun("manta_claude_cli_version_floor").stdout.trim();
+
+/** Source release.sh and echo `version_gte a b` as "yes"/"no". */
+function versionGte(a, b) {
+  const r = sourceAndRun(`if version_gte '${a}' '${b}'; then echo yes; else echo no; fi`);
+  return r.stdout.trim();
+}
+
+test("version_gte: equal versions compare as >=", () => {
+  assert.equal(versionGte("2.1.257", "2.1.257"), "yes");
+});
+
+test("version_gte: a higher patch component wins", () => {
+  assert.equal(versionGte("2.1.258", "2.1.257"), "yes");
+  assert.equal(versionGte("2.1.185", "2.1.257"), "no");
+});
+
+test("version_gte: components compare numerically, not as strings", () => {
+  // The whole point: "2.1.9" > "2.1.10" is true as strings and false as numbers.
+  assert.equal(versionGte("2.1.10", "2.1.9"), "yes");
+  assert.equal(versionGte("2.1.9", "2.1.10"), "no");
+});
+
+test("version_gte: a missing component reads as zero, so 2.2 >= 2.1.9", () => {
+  assert.equal(versionGte("2.2", "2.1.9"), "yes");
+  assert.equal(versionGte("2.1", "2.1.0"), "yes");
+});
+
+test("version_gte: unparseable junk reads as zero and never compares HIGH", () => {
+  assert.equal(versionGte("banana", "2.1.257"), "no");
+  assert.equal(versionGte("", "0.0.1"), "no");
+});
+
+/**
+ * Source release.sh with a stubbed `claude` on PATH and echo
+ * resolve_anthropic_cli_version. `output` null = no claude CLI at all.
+ */
+function resolveClaimedVersion(output) {
+  const dir = mkdtempSync(join(tmpdir(), "manta-ccver-"));
+  const binDir = join(dir, "bin");
+  mkdirSync(binDir, { recursive: true });
+  if (output !== null) {
+    writeFileSync(join(binDir, "claude"), `#!/bin/sh\nprintf '%s\\n' '${output}'\n`, { mode: 0o755 });
+  }
+  // PATH is REPLACED, not prepended: a real `claude` on the runner's PATH would
+  // otherwise answer for the "no CLI installed" case and make it flaky.
+  const r = sourceAndRun(`resolve_anthropic_cli_version`, {
+    preamble: `export PATH='${binDir}':/usr/bin:/bin`,
+  });
+  rmSync(dir, { recursive: true, force: true });
+  return r.stdout.trim();
+}
+
+test("resolve_anthropic_cli_version: uses the box's own claude CLI when it meets the floor", () => {
+  assert.equal(resolveClaimedVersion("2.1.300 (Claude Code)"), "2.1.300");
+});
+
+test("resolve_anthropic_cli_version: falls back to the floor when the CLI is older", () => {
+  // The exact case that broke fable 5.1: a claim below Anthropic's gate.
+  assert.equal(resolveClaimedVersion("2.1.185 (Claude Code)"), FLOOR);
+});
+
+test("resolve_anthropic_cli_version: falls back to the floor when no claude CLI exists", () => {
+  // install.sh no longer installs the CLI (the app does, lazily), so this is
+  // the normal state of a freshly-installed box — it must still claim a
+  // supported version.
+  assert.equal(resolveClaimedVersion(null), FLOOR);
+});
+
+test("resolve_anthropic_cli_version: unrecognised CLI output falls back to the floor", () => {
+  assert.equal(resolveClaimedVersion("who knows"), FLOOR);
+});
+
+/** Source release.sh and echo ensure_cli_version_text "$UNIT_TEXT" <version>. */
+function cliVersionText(text, version) {
+  return execFileSync(
+    "bash",
+    ["-c", `log(){ :;}; ok(){ :;}; warn(){ :;}; die(){ echo "$*" >&2; exit 1; }\n. '${RELEASE_LIB}'\nensure_cli_version_text "$UNIT_TEXT" '${version}'`],
+    { env: { ...process.env, UNIT_TEXT: text }, encoding: "utf-8" },
+  );
+}
+
+const OC_SERVICE_TEXT = `[Unit]
+Description=opencode server
+[Service]
+Type=simple
+Restart=on-failure
+[Install]
+WantedBy=default.target
+`;
+
+test("ensure_cli_version_text: a unit with no claim gains ONE right after [Service]", () => {
+  const out = cliVersionText(OC_SERVICE_TEXT, "2.1.257");
+  assert.match(out, /^\[Service\]\nEnvironment=ANTHROPIC_CLI_VERSION=2\.1\.257$/m);
+  assert.equal((out.match(/^Environment=ANTHROPIC_CLI_VERSION=/gm) ?? []).length, 1);
+});
+
+test("ensure_cli_version_text: applying twice equals applying once (idempotent)", () => {
+  const once = cliVersionText(OC_SERVICE_TEXT, "2.1.257");
+  assert.equal(cliVersionText(once, "2.1.257"), once);
+});
+
+test("ensure_cli_version_text: a STALE claim is replaced in place, not duplicated", () => {
+  const text = `[Service]\nEnvironment=ANTHROPIC_CLI_VERSION=2.1.185\nRestart=on-failure\n`;
+  const out = cliVersionText(text, "2.1.257");
+  assert.match(out, /^Environment=ANTHROPIC_CLI_VERSION=2\.1\.257$/m);
+  assert.equal((out.match(/^Environment=ANTHROPIC_CLI_VERSION=/gm) ?? []).length, 1);
+});
+
+test("ensure_cli_version_text: a HIGHER existing claim is never downgraded", () => {
+  // Monotonic on purpose: an operator (or a newer box) who set a higher value
+  // must not have it walked back by an older floor.
+  const text = `[Service]\nEnvironment=ANTHROPIC_CLI_VERSION=2.9.0\nRestart=on-failure\n`;
+  assert.equal(cliVersionText(text, "2.1.257"), text);
+});
+
+test("ensure_cli_version_text: a unit with no [Service] section is left unchanged", () => {
+  const text = `[Unit]\nDescription=no service section\n`;
+  assert.equal(cliVersionText(text, "2.1.257"), text);
+});
+
+function runEnsureOpencodeCliVersion(unitPath, version) {
+  // The plist argument points at a path that does not exist, so the macOS
+  // branch is inert on a Linux runner and this stays a pure systemd test.
+  return runUnitPatcher(
+    (dir) => `ensure_opencode_cli_version '${version}' '${unitPath}' '${join(dir, "absent.plist")}'`,
+  );
+}
+
+test("ensure_opencode_cli_version: a missing unit returns 0 and creates nothing", () => {
+  const missing = join(mkdtempSync(join(tmpdir(), "manta-ccver-missing-")), "nope.service");
+  const r = runEnsureOpencodeCliVersion(missing, "2.1.257");
+  assert.equal(r.status, 0);
+  assert.equal(existsSync(missing), false, "must not create the unit");
+  assert.equal(r.reloaded, false);
+});
+
+test("ensure_opencode_cli_version: patches an unclaimed unit and daemon-reloads", () => {
+  const dir = mkdtempSync(join(tmpdir(), "manta-ccver-"));
+  const unitPath = join(dir, "opencode-serve.service");
+  writeFileSync(unitPath, OC_SERVICE_TEXT);
+  try {
+    const r = runEnsureOpencodeCliVersion(unitPath, "2.1.257");
+    assert.equal(r.status, 0);
+    assert.match(readFileSync(unitPath, "utf8"), /^Environment=ANTHROPIC_CLI_VERSION=2\.1\.257$/m);
+    assert.equal(r.reloaded, true, "a changed unit must be daemon-reloaded before the restart");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ensure_opencode_cli_version: upgrades the stale claim a hand-patched box already carries", () => {
+  // The dev box was hand-patched before this shipped; an update must move it
+  // forward rather than leave the manual edit frozen.
+  const dir = mkdtempSync(join(tmpdir(), "manta-ccver-"));
+  const unitPath = join(dir, "opencode-serve.service");
+  writeFileSync(unitPath, `[Service]\nEnvironment=ANTHROPIC_CLI_VERSION=2.1.185\nRestart=on-failure\n`);
+  try {
+    const r = runEnsureOpencodeCliVersion(unitPath, "2.1.300");
+    assert.equal(r.status, 0);
+    assert.match(readFileSync(unitPath, "utf8"), /^Environment=ANTHROPIC_CLI_VERSION=2\.1\.300$/m);
+    assert.equal(r.reloaded, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ensure_opencode_cli_version: an already-current unit is not rewritten and not reloaded", () => {
+  const dir = mkdtempSync(join(tmpdir(), "manta-ccver-"));
+  const unitPath = join(dir, "opencode-serve.service");
+  const text = `[Service]\nEnvironment=ANTHROPIC_CLI_VERSION=2.1.257\nRestart=on-failure\n`;
+  writeFileSync(unitPath, text);
+  try {
+    const r = runEnsureOpencodeCliVersion(unitPath, "2.1.257");
+    assert.equal(r.status, 0);
+    assert.equal(readFileSync(unitPath, "utf8"), text, "file must be byte-identical");
+    assert.equal(r.reloaded, false, "no-op patch must not daemon-reload");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("drift guard: the shipped opencode template carries the placeholder, and install.sh substitutes it", () => {
+  // The two halves of the fix must stay wired together: a template that lost
+  // its placeholder, or an installer that stopped substituting one, would ship
+  // a literal @@ANTHROPIC_CLI_VERSION@@ into a live unit.
+  const tpl = readFileSync(join(__dirname, "../systemd/opencode-serve.service"), "utf8");
+  assert.match(tpl, /^Environment=ANTHROPIC_CLI_VERSION=@@ANTHROPIC_CLI_VERSION@@$/m);
+  const plist = readFileSync(join(__dirname, "../launchd/com.mantaui.opencode.plist"), "utf8");
+  assert.match(plist, /<string>@@ANTHROPIC_CLI_VERSION@@<\/string>/);
+  const installer = readFileSync(join(__dirname, "../install.sh"), "utf8");
+  assert.match(installer, /--placeholder ANTHROPIC_CLI_VERSION="\$\(resolve_anthropic_cli_version\)"/);
+  assert.match(installer, /s\|@@ANTHROPIC_CLI_VERSION@@\|\$\(resolve_anthropic_cli_version\)\|g/);
 });

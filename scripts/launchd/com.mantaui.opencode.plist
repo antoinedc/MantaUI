@@ -64,6 +64,16 @@
          so there is no placeholder to substitute. -->
     <key>OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS</key>
     <string>true</string>
+    <!-- Claude Code version claimed to Anthropic by the opencode-claude-auth
+         plugin, which authenticates as Claude Code. The plugin hardcodes a
+         version that lags badly, and Anthropic REFUSES a request whose claim
+         is below the floor for the model asked for — so a stale claim makes
+         newer models unusable. install.sh substitutes the version resolved
+         from the box's own `claude` CLI; see resolve_anthropic_cli_version in
+         scripts/lib/release.sh. Mirrors
+         scripts/systemd/opencode-serve.service. -->
+    <key>ANTHROPIC_CLI_VERSION</key>
+    <string>@@ANTHROPIC_CLI_VERSION@@</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
