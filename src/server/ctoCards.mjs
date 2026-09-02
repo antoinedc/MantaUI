@@ -152,18 +152,37 @@ export function splitOrphanedShedCards(cards) {
 //
 // A blocker enters the pipeline on the next engine tick via the findings.json
 // queue (the §9.2-v2 bypass removed: the note used to ride into evidence only
-// at a rollup-close breakpoint). Two producers, one row shape:
+// at a rollup-close breakpoint). Three producers, one row shape:
 //   - an inbox blocker note, queued at note arrival (source "inbox")
 //   - a worker ask promoted past the 10-min threshold (source "ask")
-// The ENGINE's drain turns each row into a high-salience evidence row on the
-// A1 ledger — for inbox notes the exact row shape drainInbox writes — and
-// marks the source note read so the breakpoint drain never double-folds it.
-// Pure builders; these shapes are the producer↔consumer contract.
+//   - a health escalation ingested from the watchdog (source "health")
+// Every row carries the normalized core the pipeline consumes downstream:
+//   {source, sourceKind, sourceId, ts, message, title, refs, pendingSince}
+// where `sourceId` is the stable card identity (the exact key the card
+// writer groups by), and producer-specific fields ride alongside (note
+// identity + sender for inbox; sessionID for asks; nothing extra for
+// health). The ENGINE's drain turns each row into a high-salience evidence
+// row on the A1 ledger — for inbox notes the exact row shape drainInbox
+// writes — and marks the source note read so the breakpoint drain never
+// double-folds it. Pure builders; these shapes are the producer↔consumer
+// contract.
 
-export function findingFromInboxNote(entry, { ts = Date.now() } = {}) {
+// The drain's ledger-kind mapping, in ONE pure place so the producers and
+// the engine's drain cannot drift: an ask folds as `ask.<sourceKind>`, a
+// health escalation as `health.blocker`, an inbox note as
+// `inbox.<noteKind>` (the shape drainInbox already wrote).
+export function findingLedgerKind(row) {
+  if (row?.source === "ask") return `ask.${row?.sourceKind ?? "blocker"}`;
+  if (row?.source === "health") return `health.blocker`;
+  return `inbox.${row?.noteKind ?? "blocker"}`;
+}
+
+export function findingFromInboxNote(entry, { ts = Date.now(), sourceId, project } = {}) {
   if (!entry || typeof entry !== "object") return null;
   return {
     source: "inbox",
+    sourceKind: INBOX_SOURCE_KIND,
+    sourceId: typeof sourceId === "string" && sourceId ? sourceId : undefined,
     ts,
     // The inbox entry id — the drain's dedupe marker against drainInbox (it
     // marks this note read after the ledger row fires).
@@ -174,6 +193,9 @@ export function findingFromInboxNote(entry, { ts = Date.now() } = {}) {
     tag: entry.tag ?? undefined,
     refs: Array.isArray(entry.refs) ? entry.refs : [],
     sender: entry.sender && typeof entry.sender === "object" ? entry.sender : undefined,
+    project: typeof project === "string" && project ? project : undefined,
+    // The note just arrived, so it has been outstanding since exactly now.
+    pendingSince: ts,
     // A note may NAME a checkable condition (§10.3 predicate 2 — "when the
     // plan or note names one"). Carried to the ask/card for the liveness pass.
     condition: typeof entry.condition === "string" && entry.condition ? entry.condition : undefined,
@@ -184,13 +206,36 @@ export function findingFromPromotedAsk(ask, { ts = Date.now() } = {}) {
   if (!ask || typeof ask !== "object") return null;
   return {
     source: "ask",
-    ts,
     sourceKind: ask.sourceKind,
     sourceId: ask.sourceId,
+    ts,
     sessionID: ask.sessionID ?? ask.noteSessionID ?? undefined,
     message: ask.body,
     title: blockerTitle(ask.sourceKind, ask.title),
     refs: Array.isArray(ask.refs) ? ask.refs : [],
+    pendingSince: Number.isFinite(ask.askedAt) ? ask.askedAt : undefined,
+  };
+}
+
+// Source (2b): a health escalation (the watchdog's `pendingBlockers` entry,
+// ingested + grouped by ingestHealthEscalations). One finding per escalation
+// event — each pendingBlockers entry is stamped consumed after ingest, so a
+// re-trip is a new event and produces a new row; the card upserts in place.
+// `group` is the ingestHealthEscalations Map value; `key` the healthGroupKey
+// (also the card's sourceId) and `sourceId` its stable card id form.
+export function findingFromHealthGroup(group, { key, sourceId, ts = Date.now() } = {}) {
+  if (!group || typeof group !== "object") return null;
+  return {
+    source: "health",
+    sourceKind: HEALTH_SOURCE_KIND,
+    sourceId: typeof key === "string" ? key : undefined,
+    stableCardId: typeof sourceId === "string" ? sourceId : undefined,
+    ts,
+    message: blockerBody(HEALTH_SOURCE_KIND, group.latest?.reason),
+    title: blockerTitle(HEALTH_SOURCE_KIND),
+    refs: [],
+    pendingSince: Number.isFinite(group.minTs) ? group.minTs : undefined,
+    tag: typeof key === "string" ? key : undefined,
   };
 }
 
@@ -598,7 +643,7 @@ export function createCtoCards(deps = {}) {
     await enqueueFinding(
       findingFromInboxNote(
         { id, kind: "blocker", message: text, title, tag, refs, sender: { ...sender, sessionID: noteSessionID }, condition: noteCondition },
-        { ts },
+        { ts, sourceId, project },
       ),
     );
     return { changed: true, notified: true, groupKey };
@@ -1171,6 +1216,12 @@ export function createCtoCards(deps = {}) {
         });
         changed = changed || r.changed;
         consumedIds.push(...group.ids);
+        // BET-1516 (§9.1): the third blocker source enters the pipeline too —
+        // one normalized finding per escalation event. Each pendingBlockers
+        // entry is stamped consumed below (never reprocessed), so a re-trip of
+        // the same condition is a NEW event and enqueues a NEW row while the
+        // card above still upserts in place. Best-effort by contract.
+        await enqueueFinding(findingFromHealthGroup(group, { key, ts }));
       }
     }
     // BET-1463 (defect 1): every entry ingested above gets stamped `resolved:
