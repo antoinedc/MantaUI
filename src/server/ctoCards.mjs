@@ -519,7 +519,7 @@ export function createCtoCards(deps = {}) {
     }
   }
 
-  async function queueInboxFinding(row) {
+  async function enqueueFinding(row) {
     if (typeof queueFinding !== "function") return;
     try {
       await queueFinding(row);
@@ -595,7 +595,7 @@ export function createCtoCards(deps = {}) {
     // §9.1: the blocker enters the pipeline on the next engine tick — queue
     // the finding AFTER the notify (the notification is the immediate timer,
     // the pipeline entry rides the queue). Best-effort by contract.
-    await queueInboxFinding(
+    await enqueueFinding(
       findingFromInboxNote(
         { id, kind: "blocker", message: text, title, tag, refs, sender: { ...sender, sessionID: noteSessionID }, condition: noteCondition },
         { ts },
@@ -922,7 +922,7 @@ export function createCtoCards(deps = {}) {
       // BET-1516 (§9.1): an ask past the §10.3 threshold enters the pipeline
       // too — the finding is queued at promotion, and the engine's card tick
       // turns it into evidence within a minute. Best-effort by contract.
-      await queueInboxFinding(findingFromPromotedAsk(ask, { ts: nowMs }));
+      await enqueueFinding(findingFromPromotedAsk(ask, { ts: nowMs }));
       consumedKeys.push(askKeyOf(ask));
     }
     if (consumedKeys.length) await removePendingAskRows(consumedKeys);
