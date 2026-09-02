@@ -12,10 +12,12 @@ import {
   askResolveInfo,
   askStartInfo,
   createCtoCards,
+  inboxCardLivenessGone,
   inboxGroupKey,
   isAskResolveEvent,
   isAskStartEvent,
   senderSlug,
+  splitOrphanedShedCards,
   stableCardId,
 } from "./ctoCards.mjs";
 import { INBOX_TTL_MS } from "./ctoStores.mjs";
@@ -26,11 +28,14 @@ import { INBOX_TTL_MS } from "./ctoStores.mjs";
 // (a static patch object, or a `(fresh) => patch` function; a key set to
 // `undefined` deletes it) but without its mutex — fine for these
 // single-threaded, sequential-await tests.
-function makeHarness({ pendingBlockers = [], fireNotify = false, getSessionInfo = null } = {}) {
+function makeHarness({ pendingBlockers = [], fireNotify = false, getSessionInfo = null, hasSession = null, conditionGone = null } = {}) {
   const clock = { ms: 1_000_000 };
   let cardPayload = { v: 1, cards: [] };
   const ledgerRows = [];
   const notified = [];
+  // BET-1516: the pending-findings queue capture (the engine's queueFinding
+  // seam in production is a bound append to findings.json).
+  const findings = [];
   let engineState = { v: 1, pendingBlockers: [...pendingBlockers] };
   const patchCalls = [];
 
@@ -50,6 +55,11 @@ function makeHarness({ pendingBlockers = [], fireNotify = false, getSessionInfo 
     ledger: { append: async (row) => ledgerRows.push(row) },
     ...(fireNotify ? { fireNotify: async (a) => notified.push(a) } : {}),
     ...(getSessionInfo ? { getSessionInfo } : {}),
+    ...(hasSession ? { hasSession } : {}),
+    ...(conditionGone ? { conditionGone } : {}),
+    // The engine wires queueFinding on the live box; here every harness
+    // captures (the queue path is core behavior now, not optional).
+    queueFinding: async (row) => findings.push(row),
     now: () => clock.ms,
     patchEngineState: async (mutation) => {
       patchCalls.push(mutation);
@@ -70,6 +80,7 @@ function makeHarness({ pendingBlockers = [], fireNotify = false, getSessionInfo 
     clock,
     ledgerRows,
     notified,
+    findings,
     patchCalls,
     store: () => cardPayload,
     engineStateSnapshot: () => engineState,
@@ -825,4 +836,292 @@ test("BET-1407: seedPendingAsks with no persisted registry is a pure no-op (no e
   const seeded = await h.cards.seedPendingAsks();
   assert.deepEqual(seeded, { seeded: 0, dropped: 0 });
   assert.equal(h.patchCalls.length, patchesBefore);
+});
+
+// ---------------------------------------------------------------------------
+// BET-1516 — blockers into the pipeline (§9.1) + inbox-card liveness (§10.3).
+// ---------------------------------------------------------------------------
+
+test("BET-1516: an inbox blocker note queues a finding (source inbox) carrying the note identity + sender", async () => {
+  const h = makeHarness({ fireNotify: true });
+  await h.cards.onInboxBlocker({
+    message: "build is red",
+    title: "CI broken",
+    refs: ["BET-777"],
+    tag: "ci",
+    id: "note-1",
+    expires: 9_999_999,
+    sender: { sessionID: "ses-9", name: "worker" },
+    ts: h.clock.ms,
+  });
+  assert.equal(h.findings.length, 1);
+  const row = h.findings[0];
+  assert.equal(row.source, "inbox");
+  // The normalized core every producer row carries: the stable card identity
+  // the pipeline keys downstream decisions on + the outstanding-since stamp.
+  assert.equal(row.sourceKind, "inbox");
+  assert.equal(row.sourceId, stableCardId("inbox", inboxGroupKey({ tag: "ci", title: "CI broken", message: "build is red", project: undefined })));
+  assert.equal(row.pendingSince, h.clock.ms);
+  assert.equal(row.project, undefined, "no session-info seam wired in this harness");
+  assert.equal(row.noteId, "note-1");
+  assert.equal(row.noteKind, "blocker");
+  assert.equal(row.message, "build is red");
+  assert.equal(row.title, "CI broken");
+  assert.equal(row.tag, "ci");
+  assert.deepEqual(row.refs, ["BET-777"]);
+  assert.deepEqual(row.sender, { sessionID: "ses-9", name: "worker" });
+  assert.equal(row.ts, h.clock.ms);
+  // The notify still fired exactly once (the immediate timer is untouched),
+  // and now routes by the sender's session id (the funnel sends it nested).
+  assert.equal(h.notified.length, 1);
+  assert.equal(h.notified[0].sessionID, "ses-9");
+  // The ask row carries the §10.3 predicate inputs.
+  const ask = h.engineStateSnapshot().pendingAsks[0];
+  assert.equal(ask.noteSessionID, "ses-9");
+  assert.equal(ask.noteId, "note-1");
+  assert.equal(ask.noteExpires, 9_999_999);
+});
+
+test("BET-1516: a promoted worker ask queues a finding (source ask) at promotion", async () => {
+  const h = makeHarness();
+  await h.cards.onAskStart({ sourceKind: "question", sourceId: "que_1", sessionID: "s1", body: "Pick one?", ts: h.clock.ms });
+  assert.equal(h.findings.length, 0, "the ask enters the pipeline only past the threshold");
+  h.advance(BLOCKER_AFTER_MS + 60_000);
+  await h.cards.promoteDue();
+  assert.equal(h.findings.length, 1);
+  const row = h.findings[0];
+  assert.equal(row.source, "ask");
+  assert.equal(row.sourceKind, "question");
+  assert.equal(row.sourceId, "que_1");
+  assert.equal(row.sessionID, "s1");
+  assert.equal(row.message, "Pick one?");
+  assert.equal(row.title, "Question waiting");
+  assert.equal(row.pendingSince, 1_000_000, "outstanding since the ask was asked");
+});
+
+test("BET-1516: an inbox blocker note queues the third finding (source health) identity fields — project resolves through the session-info seam", async () => {
+  const h = makeHarness({ fireNotify: true, getSessionInfo: async () => ({ project: "better-ui" }) });
+  await h.cards.onInboxBlocker({
+    message: "build is red",
+    title: "CI broken",
+    tag: "ci",
+    id: "note-1",
+    sender: { sessionID: "ses-9", name: "worker" },
+    ts: h.clock.ms,
+  });
+  assert.equal(h.findings.length, 1);
+  assert.equal(h.findings[0].project, "better-ui", "the sender session's project travels with the row");
+});
+
+test("BET-1516: a health escalation queues the third finding (source health) — one per escalation event, consumed entries never re-queue", async () => {
+  const h = makeHarness({
+    pendingBlockers: [
+      { id: "b1", source: "watchdog", reason: "ambient spend 5 > 4x expected", ts: 400, resolved: false },
+      { id: "b2", source: "watchdog", reason: "ambient spend 7 > 4x expected", ts: 900, resolved: false },
+      { id: "b3", source: "rate_limit", reason: "sessionCreationsPerHour", ts: 800, resolved: false },
+    ],
+  });
+
+  await h.cards.ingestHealthEscalations();
+  // Two condition groups (watchdog, rate_limit) → exactly two findings, the
+  // same one-row-per-escalation contract the other two producers follow.
+  assert.equal(h.findings.length, 2);
+  const watchdog = h.findings.find((f) => f.sourceId === "watchdog");
+  const rateLimit = h.findings.find((f) => f.sourceId === "rate_limit");
+  assert.ok(watchdog && rateLimit, "one row per healthGroupKey (the card identity)");
+  // The normalized core — the same shape the inbox/ask producers emit.
+  assert.equal(watchdog.source, "health");
+  assert.equal(watchdog.sourceKind, HEALTH_SOURCE_KIND);
+  assert.equal(watchdog.message, "ambient spend 7 > 4x expected", "the most recent reason travels");
+  assert.equal(watchdog.title, "Health check");
+  assert.equal(watchdog.pendingSince, 400, "earliest outstanding trip in the group");
+  assert.deepEqual(watchdog.refs, []);
+  assert.equal(watchdog.ts, h.clock.ms);
+  // The card path is untouched: one open health card per group.
+  assert.equal(h.store().cards.filter((c) => c.state === "open").length, 2);
+  // Each entry is consumed on ingest (never reprocessed) — a later tick
+  // cannot re-enqueue a finding from the same escalation.
+  await h.cards.ingestHealthEscalations();
+  assert.equal(h.findings.length, 2);
+});
+
+test("BET-1516: a promoted inbox ask refreshes the card's note fields (TTL stamp travels to the card)", async () => {
+  const h = makeHarness();
+  await h.cards.onInboxBlocker({
+    message: "deploy failed",
+    tag: "deploy",
+    id: "note-1",
+    expires: h.clock.ms + 1_000,
+    sender: { sessionID: "s7", name: "w" },
+    ts: h.clock.ms,
+  });
+  h.advance(BLOCKER_AFTER_MS + 60_000);
+  await h.cards.promoteDue();
+  const card = h.store().cards.find((c) => c.state === "open");
+  assert.equal(card.sourceKind, "inbox");
+  assert.equal(card.noteId, "note-1");
+  assert.equal(card.noteSessionID, "s7");
+  assert.equal(card.noteExpires, 1_000_000 + 1_000);
+});
+
+test("BET-1516 liveness: an inbox card whose note TTL passed auto-resolves as `resolved` (never a verdict)", async () => {
+  const h = makeHarness();
+  await h.cards.onInboxBlocker({ message: "deploy failed", tag: "deploy", id: "note-1", expires: h.clock.ms + 5_000, ts: h.clock.ms });
+  h.advance(BLOCKER_AFTER_MS + 60_000);
+  await h.cards.promoteDue();
+  assert.equal(openCardCount(h), 1);
+  h.advance(6_000);
+  const r = await h.cards.checkInboxLiveness();
+  assert.equal(r.changed, true);
+  assert.equal(openCardCount(h), 0);
+  const resolved = h.ledgerRows.filter((x) => x.kind === CARD_RESOLVED);
+  assert.equal(resolved.length, 1);
+  assert.equal(resolved[0].reason, "inbox note expired");
+});
+
+test("BET-1516 liveness: a pre-1516 card without a TTL stamp bounds by pendingSince + the blocker retention window", async () => {
+  const h = makeHarness();
+  const t0 = h.clock.ms;
+  h.setCardPayload({
+    v: 1,
+    cards: [
+      {
+        id: "legacy",
+        variant: "blocker",
+        state: "open",
+        title: "old",
+        body: "old",
+        refs: [],
+        sourceKind: "inbox",
+        sourceId: "old",
+        pendingSince: t0 - INBOX_TTL_MS.blocker - 1,
+      },
+    ],
+  });
+  const r = await h.cards.checkInboxLiveness();
+  assert.equal(r.changed, true);
+  assert.equal(openCardCount(h), 0);
+  assert.equal(h.ledgerRows.find((x) => x.kind === CARD_RESOLVED)?.reason, "inbox note expired");
+});
+
+test("BET-1516 liveness: sender session gone auto-resolves; a live session or a transient check keeps the card", async () => {
+  const h = makeHarness({ hasSession: async (sid) => (sid === "dead" ? false : true) });
+  h.setCardPayload({
+    v: 1,
+    cards: [
+      { id: "a", variant: "blocker", state: "open", sourceKind: "inbox", refs: [], noteSessionID: "dead" },
+      { id: "b", variant: "blocker", state: "open", sourceKind: "inbox", refs: [], noteSessionID: "alive" },
+      { id: "c", variant: "blocker", state: "open", sourceKind: "inbox", refs: [], noteSessionID: "flaky" },
+    ],
+  });
+  // A flaky checker throwing is "no opinion" — the card survives.
+  const r = await h.cards.checkInboxLiveness({
+    hasSession: async (sid) => {
+      if (sid === "flaky") throw new Error("transient");
+      return sid !== "dead";
+    },
+  });
+  assert.equal(r.changed, true);
+  const remaining = h.store().cards.filter((c) => c.state === "open").map((c) => c.id);
+  assert.deepEqual(remaining.sort(), ["b", "c"]);
+  assert.equal(h.ledgerRows.find((x) => x.kind === CARD_RESOLVED)?.reason, "sender session gone");
+});
+
+test("BET-1516 liveness: a named condition that went gone auto-resolves; no-surface is a no-opinion keep", async () => {
+  const h = makeHarness({ conditionGone: async (condition) => (condition === "CI on F broken" ? true : condition === "surface down" ? null : false) });
+  h.setCardPayload({
+    v: 1,
+    cards: [
+      { id: "g", variant: "blocker", state: "open", sourceKind: "inbox", refs: [], noteCondition: "CI on F broken" },
+      { id: "k", variant: "blocker", state: "open", sourceKind: "inbox", refs: [], noteCondition: "CI on F still broken" },
+      { id: "n", variant: "blocker", state: "open", sourceKind: "inbox", refs: [], noteCondition: "surface down" },
+      { id: "u", variant: "blocker", state: "open", sourceKind: "inbox", refs: [] },
+    ],
+  });
+  const r = await h.cards.checkInboxLiveness();
+  assert.equal(r.changed, true);
+  const remaining = h.store().cards.filter((c) => c.state === "open").map((c) => c.id);
+  assert.deepEqual(remaining.sort(), ["k", "n", "u"]);
+  assert.equal(h.ledgerRows.find((x) => x.kind === CARD_RESOLVED)?.reason, "condition gone");
+});
+
+test("BET-1516 liveness: worker-ask and health cards are out of scope for the inbox predicates", async () => {
+  const h = makeHarness({ hasSession: async () => false });
+  h.setCardPayload({
+    v: 1,
+    cards: [
+      { id: "w", variant: "blocker", state: "open", sourceKind: "question", sessionID: "s1", refs: [], noteSessionID: "s1" },
+      { id: "h", variant: "blocker", state: "open", sourceKind: "health", refs: [], noteExpires: h.clock.ms - 10_000 },
+    ],
+  });
+  const r = await h.cards.checkInboxLiveness();
+  assert.equal(r.changed, false);
+  assert.equal(openCardCount(h), 2);
+});
+
+test("BET-1516 liveness: inboxCardLivenessGone is pure and deterministic (TTL wins first, session/condition next)", async () => {
+  const nowMs = 10_000;
+  assert.equal(await inboxCardLivenessGone({ state: "open", variant: "blocker", noteExpires: nowMs }, { nowMs }), null);
+  assert.deepEqual(
+    await inboxCardLivenessGone({ state: "open", variant: "blocker", noteExpires: nowMs - 1 }, { nowMs }),
+    { reason: "inbox note expired" },
+  );
+  // A non-open / non-blocker row is never evaluated.
+  assert.equal(await inboxCardLivenessGone({ state: "resolved", variant: "blocker" }, { nowMs }), null);
+  assert.equal(await inboxCardLivenessGone({ state: "open", variant: "decision" }, { nowMs }), null);
+  // No TTL stamp + no pendingSince + no seams → no opinion (the card stays).
+  assert.equal(await inboxCardLivenessGone({ state: "open", variant: "blocker" }, { nowMs }), null);
+  // Order: with everything gone at once, the sync TTL reason wins.
+  assert.deepEqual(
+    await inboxCardLivenessGone(
+      { state: "open", variant: "blocker", noteExpires: nowMs - 1, noteCondition: "x", noteSessionID: "s" },
+      { nowMs, hasSession: async () => false, conditionGone: async () => true },
+    ),
+    { reason: "inbox note expired" },
+  );
+});
+
+test("BET-1516: splitOrphanedShedCards drops only open health rate_limit cards carrying a shed reason", () => {
+  const orphan = { id: "x", variant: "blocker", state: "open", sourceKind: "health", sourceId: "rate_limit", body: "concurrentEphemeral" };
+  const live = { id: "y", variant: "blocker", state: "open", sourceKind: "health", sourceId: "rate_limit", body: "sessionCreationsPerHour" };
+  const closed = { id: "z", variant: "blocker", state: "resolved", sourceKind: "health", sourceId: "rate_limit", body: "concurrentEphemeral" };
+  const other = { id: "w", variant: "blocker", state: "open", sourceKind: "inbox", sourceId: "rate_limit", body: "concurrentEphemeral" };
+  const { keep, dropped } = splitOrphanedShedCards([orphan, live, closed, other]);
+  assert.deepEqual(dropped, [orphan]);
+  assert.deepEqual(keep, [live, closed, other]);
+  // The delegate shed reason is equally orphaned.
+  const delegate = { id: "d", variant: "blocker", state: "open", sourceKind: "health", sourceId: "rate_limit", body: "concurrentDelegate" };
+  assert.deepEqual(splitOrphanedShedCards([delegate]).dropped, [delegate]);
+});
+
+test("BET-1516: pruneOrphanedShedCards removes the orphaned card + shed entries, ledger-resolves, and stamps the marker", async () => {
+  const h = makeHarness({
+    pendingBlockers: [
+      { id: "b1", kind: "blocker", source: "rate_limit", reason: "concurrentEphemeral", ts: 1 },
+      { id: "b2", kind: "blocker", source: "rate_limit", reason: "sessionCreationsPerHour", ts: 2 },
+      { id: "b3", kind: "blocker", source: "rate_limit", reason: "concurrentEphemeral", ts: 3, resolved: true },
+    ],
+  });
+  h.setCardPayload({
+    v: 1,
+    cards: [
+      { id: "orphan", variant: "blocker", state: "open", sourceKind: "health", sourceId: "rate_limit", body: "concurrentEphemeral", refs: [] },
+    ],
+  });
+  const r = await h.cards.pruneOrphanedShedCards();
+  assert.equal(r.pruned, 1);
+  assert.equal(r.droppedEntries, 1);
+  assert.equal(r.marked, true);
+  assert.equal(openCardCount(h), 0);
+  // The legit entry (and the already-resolved one) survive untouched.
+  assert.deepEqual(
+    h.engineStateSnapshot().pendingBlockers.map((b) => b.id),
+    ["b2", "b3"],
+  );
+  const resolved = h.ledgerRows.filter((x) => x.kind === CARD_RESOLVED);
+  assert.equal(resolved.length, 1);
+  assert.match(resolved[0].reason, /BET-1513/);
+  // A second run is a pure no-op (marker-guarded).
+  const r2 = await h.cards.pruneOrphanedShedCards();
+  assert.deepEqual(r2, { pruned: 0, droppedEntries: 0, marked: false });
 });

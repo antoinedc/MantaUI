@@ -94,6 +94,13 @@ export const send_to_cto = tool({
       .string()
       .optional()
       .describe("Optional short title for the surfaced notification. Defaults to the sender's session label."),
+    condition: z
+      .string()
+      .optional()
+      .describe(
+        "For blockers: a checkable condition the note is blocked on (e.g. 'CI on F is broken'). " +
+          "The CTO re-verifies it on its card ticks and auto-resolves the blocker when the named state no longer holds.",
+      ),
   },
   async execute(args, context) {
     const result = await call("POST", "/api/cto/inbound", {
@@ -104,6 +111,7 @@ export const send_to_cto = tool({
       refs: args.refs,
       tag: args.tag,
       title: args.title,
+      condition: args.condition,
     });
     const blocker = result.parked && args.kind !== "fyi" && args.kind !== "finding" &&
       args.kind !== "handoff" && args.kind !== "anomaly" && (args.kind === "blocker" || !args.kind);
