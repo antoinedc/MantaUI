@@ -924,7 +924,10 @@ function BackfillCard({ state }: { state: CtoState | null }) {
 // ---------------------------------------------------------------------------
 // Settings & health (§10.5)
 // ---------------------------------------------------------------------------
-function SettingsView({
+// Exported for the Settings → CTO τ round-trip component test
+// (ctoSettingsTau.test.tsx, BET-1521) — the control drives a real mock
+// window.api through the shared test harness.
+export function SettingsView({
   paused,
   pausedAt,
   onBack,
