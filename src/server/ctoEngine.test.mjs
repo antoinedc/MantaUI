@@ -1485,28 +1485,39 @@ test("cardTick drains the queue and runs the inbox-card liveness pass; a promote
 // 0–3 validated resolution plans in plans.json, keyed by finding id.
 // ---------------------------------------------------------------------------
 
+// §9.1 producer row factories — the literal shapes the drain hands triage,
+// one per source so the tests cannot drift from the producer contract.
+const inboxRow = (ts, over = {}) => ({
+  source: "inbox",
+  ts,
+  noteId: "note-1",
+  noteKind: "blocker",
+  message: "deploy failed",
+  title: "Deploy",
+  tag: "deploy",
+  refs: [],
+  sender: { sessionID: "s1" },
+  ...over,
+});
+const askRow = (ts, over = {}) => ({
+  source: "ask",
+  ts,
+  sourceKind: "permission",
+  sourceId: "perm_1",
+  sessionID: "s2",
+  message: "Allow rm -rf?",
+  title: "Permission needed",
+  refs: [],
+  ...over,
+});
+
 test("cardTick triages drained findings: one gated triage call per finding, plans keyed by finding id", async () => {
   const clock = { ms: 1_000_000 };
-  const stores = makeMemoryStores();
   const modelCalls = [];
-  const INBOX_ROW = {
-    source: "inbox",
-    ts: clock.ms,
-    noteId: "note-1",
-    noteKind: "blocker",
-    message: "deploy failed",
-    title: "Deploy",
-    tag: "deploy",
-    refs: ["BET-9"],
-    condition: "session s1 active",
-    sender: { sessionID: "s1", name: "w" },
-  };
-  await stores.findings.save({ v: 1, findings: [INBOX_ROW] });
-  const engine = createCtoEngine({
-    configGet: async () => ({ ctoEnabled: true }),
-    stores,
-    ledger: { append: async () => true },
-    facts: { getState: async () => ({ senderReliability: {} }) },
+  const INBOX_ROW = inboxRow(clock.ms, { refs: ["BET-9"], condition: "session s1 active", sender: { sessionID: "s1", name: "w" } });
+  const { engine, stores } = makeFindingsEngine({
+    clock,
+    ledgerRows: [],
     runEphemeral: async (args) => {
       modelCalls.push(args);
       return {
@@ -1527,9 +1538,8 @@ test("cardTick triages drained findings: one gated triage call per finding, plan
         }),
       };
     },
-    now: () => clock.ms,
-    publish: () => {},
   });
+  await stores.findings.save({ v: 1, findings: [INBOX_ROW] });
 
   // The drain returns the rows (the triage seam's input shape).
   const drained = await engine.drainFindings();
@@ -1560,29 +1570,9 @@ test("cardTick triages drained findings: one gated triage call per finding, plan
 
 test("triageDrained: thrifty keeps ALL §9.1 blocker sources (inbox/ask/health) to the last token, sheds only non-blocker findings (§12.2)", async () => {
   const clock = { ms: 3_000_000 };
-  const stores = makeMemoryStores();
   const modelCalls = [];
-  const INBOX_ROW = {
-    source: "inbox",
-    ts: clock.ms,
-    noteId: "note-1",
-    noteKind: "blocker",
-    message: "deploy failed",
-    title: "Deploy",
-    tag: "deploy",
-    refs: [],
-    sender: { sessionID: "s1" },
-  };
-  const ASK_ROW = {
-    source: "ask",
-    ts: clock.ms,
-    sourceKind: "permission",
-    sourceId: "perm_1",
-    sessionID: "s2",
-    message: "Allow rm -rf?",
-    title: "Permission needed",
-    refs: [],
-  };
+  const INBOX_ROW = inboxRow(clock.ms);
+  const ASK_ROW = askRow(clock.ms);
   const HEALTH_ROW = {
     source: "health",
     ts: clock.ms,
@@ -1601,17 +1591,13 @@ test("triageDrained: thrifty keeps ALL §9.1 blocker sources (inbox/ask/health) 
     title: "Flake",
     refs: [],
   };
-  const engine = createCtoEngine({
-    configGet: async () => ({ ctoEnabled: true }),
-    stores,
-    ledger: { append: async () => true },
-    facts: { getState: async () => ({ senderReliability: {} }) },
+  const { engine, stores } = makeFindingsEngine({
+    clock,
+    ledgerRows: [],
     runEphemeral: async (args) => {
       modelCalls.push(args);
       return { ok: true, text: '{"plans":[]}' };
     },
-    now: () => clock.ms,
-    publish: () => {},
   });
   await engine.setThrifty(true, { reason: "test", source: "test" });
   const res = await engine.triageDrained([INBOX_ROW, ASK_ROW, HEALTH_ROW, EVIDENCE_ROW]);
@@ -1632,16 +1618,8 @@ test("triageDrained: thrifty keeps ALL §9.1 blocker sources (inbox/ask/health) 
 
 test("triageDrained: no runEphemeral wired → calls gate out, plans store untouched, tick survives", async () => {
   const clock = { ms: 4_000_000 };
-  const stores = makeMemoryStores();
   const ledgerRows = [];
-  const engine = createCtoEngine({
-    configGet: async () => ({ ctoEnabled: true }),
-    stores,
-    ledger: { append: async (row) => ledgerRows.push(row) },
-    facts: { getState: async () => ({ senderReliability: {} }) },
-    now: () => clock.ms,
-    publish: () => {},
-  });
+  const { engine, stores } = makeFindingsEngine({ clock, ledgerRows });
   const res = await engine.triageDrained([{ source: "inbox", ts: clock.ms, noteId: "n", noteKind: "blocker", message: "m", refs: [] }]);
   assert.deepEqual(res, { triaged: 0, shed: 0 }, "a gated call is neither a triage nor a shed");
   assert.deepEqual((await stores.plans.load()).records, {});
