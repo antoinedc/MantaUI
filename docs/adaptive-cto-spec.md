@@ -1,9 +1,11 @@
 # Adaptive CTO — specification
 
-Status: draft v2 — post-review, 59 findings reconciled · Owner: Antoine · Sources: research pass 2026-08-27
+Status: draft v3 — v2 post-review (59 findings reconciled) + D22 autonomy
+amendment 2026-09-02 (§9 rewritten; §3.5, §7.4, §10.3, §10.6, §12, §14, §15
+patched) · Owner: Antoine · Sources: research pass 2026-08-27
 (mixed-initiative/interruption, agent memory/summarization, user modeling,
 budget-constrained computation), design session 2026-08-27, mockup v3
-(`/pages/cto-view`).
+(`/pages/cto-view`), autonomy design session 2026-09-02.
 
 The Adaptive CTO is a background system on the box that maintains a live model
 of all agent work, produces absence-aware digests, builds an editable profile
@@ -42,10 +44,13 @@ external tools gets a fully functional CTO minus the tool-dependent features.
 | **Profile** | The per-dimension (μ, σ) model of the user (§8) |
 | **Tool registry** | Discovered external tools with engagement + vitality scores (§7) |
 | **Probe** | A declarative, GET-only scheduled read against an external tool (§7.5) |
-| **Verdict** | Any user response to CTO output: accept / dismiss / edit / veto / expire / correct (§9.5) |
-| **Verb** | One of the five surfacing/action modes: silent-log, inbox card, notify, veto-window, act-and-report (§9.2) |
+| **Verdict** | Any user response to CTO output: accept / dismiss / edit / veto / expire / correct (§9.6) |
+| **Verb** | One of the three outcomes of the gate: act / ask / silent-log (§9.3) |
+| **Resolution plan** | Triage output for a finding or blocker: diagnosis, steps, access, verify check, confidence (§9.2) |
+| **Autonomy threshold (τ)** | The one number governing how autonomous the CTO is: act when effective confidence ≥ τ, default 0.7 (§9.3) |
+| **Calibration** | Per-class scale on stated confidence, learned from outcomes; replaces earned trust (§9.5) |
 | **Needs-you item** | A blocker or decision card — the only loud UI elements (§10.3) |
-| **Dial** | The user-facing effort setting: Low / Medium / High (§12.1) |
+| **Dial** | The user-facing effort setting: Low / Medium / High (§12.1) — spend, not autonomy |
 
 ---
 
@@ -74,6 +79,7 @@ external tools gets a fully functional CTO minus the tool-dependent features.
 | D19 | Cold-start backfill depth: **30 days** of transcript history. |
 | D20 | Blocker-tier items also route through the existing notification router (they do not wait for a view visit). |
 | D21 | "Just finished" rail includes finished CTO jobs (label `review →`) alongside user sessions. |
+| D22 | **Autonomy is one number.** (2026-09-02) Blockers and suggestions run through the same triage → plan → gate pipeline (§9). The gate is `confidence × calibration ≥ τ`, with **τ a single user setting, default 0.7**. No reversibility / category / "never-auto" criterion exists; risk is an input to confidence and calibration, not a separate gate. One generic executor runs every plan — no per-use-case handler anywhere. Verification is mandatory; one retry, then escalate to a human card with the attempt attached. Supersedes v2 §9.2 (blocker bypass), §9.3 (reversibility caps), §9.4 (trust ladder), §10.6-4 (≥ 15-verdict cold-start pin), and the per-action rows of §3.5. |
 
 ---
 
@@ -145,15 +151,18 @@ health warning (§10.6).
 4. User returns early → all CTO background jobs stop at their next step
    boundary (§11.6); the overnight window closes.
 
-### 3.5 Autonomy tiers for manta control
+### 3.5 Autonomy for manta control (D22)
 
-| Action | Tier |
+| Action | Rule |
 |---|---|
 | Read anything (transcripts, config, usage, git, stores) | always, silent |
 | Create/delete own ephemeral sessions; run consented probes | always, ledgered |
-| Create user-visible project/session; start an overnight job | veto-window → act-and-report as the class earns trust (§9.4) |
-| Prompt into a user-owned session | never autonomous; user-routed delivery only |
-| Restart services, modify config, touch secrets/webhooks definitions | always ask |
+| Prompt into a user-owned session | never autonomous; user-routed delivery only (§3.4-1 — etiquette, not risk) |
+| **Everything else** (start jobs, create sessions, change config, restart services, grant tool consent, touch host state, …) | the §9.3 gate: act when `confidence × calibration ≥ τ`, else ask. No per-action tier. |
+
+v2's per-action tiers ("veto-window as the class earns trust", "always ask"
+for config/secrets/services) are withdrawn: risk is an input to the plan's
+confidence and to calibration (§9.5), never a separate rule.
 
 ---
 
@@ -507,7 +516,7 @@ credential exists at all → eligible for the *metadata consent ask*) →
 **one connect ask** (a needs-you decision card, §10.3, with the evidence trail
 and the three-way answer: connect read-only / not now / **never for this
 tool**) → `integrated` (probes run) → `trusted:<action-class>` per the
-standard promotion ladder (§9.4). Rings (D13): metadata consent ≠ deep-read
+per-`(tool, class)` calibration partition (§9.5). Rings (D13): metadata consent ≠ deep-read
 consent ≠ write; each escalation is a separate ask; "never" kills all rings
 and suppresses future asks for that tool (revocable only in the tool
 drill-down).
@@ -526,10 +535,10 @@ Ring semantics, precisely:
   the loop.
 - **The write ring creates no standing write specs.** Writes are always
   one-off engine-executed requests bound to an accepted decision-card option
-  (§9.1 `tool-write`), never probes. Tool trust promotion
-  (`trusted:<action-class>`) is backed by per-tool-per-action-class Beta
-  counters — a finer partition of the same verdict ledger — on the §9.4
-  ladder.
+  (a `tool-consent` / `tool-write` class plan, §9.2), never probes. Tool trust
+  (`trusted:<action-class>`) is the §9.5 calibration estimator partitioned by
+  `(tool, class)` — a finer partition of the same verdict ledger; it feeds the
+  gate for those plans and nothing else.
 
 ### 7.5 Probe specs (declarative, AI-authored)
 
@@ -640,95 +649,195 @@ inference class for 90 days.
 
 ---
 
-## 9. Suggestion engine
+## 9. Suggestion & resolution engine (v3 — D22)
+
+One pipeline decides everything the CTO does on its own, and one number
+decides how much of it happens without a human. Blockers and suggestions are
+the same kind of thing here: a finding that may have a resolution plan.
 
 ### 9.1 Pipeline
 
+Two entry points, one pipeline:
+
+- **Findings** — the evidence-driven candidates as before: rollup themes,
+  watcher hits, probe results, profile signals.
+- **Blockers** — worker questions/permissions past the §10.3 threshold,
+  `blocker` inbox notes, health escalations (§10.6-7). **Blockers no longer
+  bypass the gate** (supersedes v2 §9.2). A blocker is a finding with
+  producer-declared "this stops work" salience; it enters the pipeline on the
+  next engine tick (≤ 1 min), not at a breakpoint, and its blocking-tier
+  notification (D20) still fires immediately — the notification is a separate
+  timer from the resolution.
+
 ```
-evidence events (+salience priors) 
-  → candidate generator (mid-class model; MAY output nothing; ≤ 3 candidates per finding)
-  → worthiness gate p(want|E) (calibrated: nano-model score × class prior × sender reliability)
-  → per-class thresholds (p_ask, p_act) → verb
+finding | blocker
+  → triage        one model call (class `triage`, §12.3) → 0–3 resolution plans (§9.2); MAY output none
+  → gate          effective confidence vs autonomy threshold τ (§9.3) → act | ask | none
+  → executor      act → §9.4 (run, verify, ≤ 1 retry) · ask → decision card · none → blocker card / silent-log
+  → outcome       calibration update (§9.5) + verdict ledger (§9.6)
 ```
 
-Silence is logged: gated-out candidates are recorded (id, score, reason) in
-the ledger for the silence audit (§14.3).
+Silence is logged: gated-out and plan-less findings are recorded (id, effective
+score, reason) in the ledger for the silence audit (§14.3).
 
-Candidate schema (what the generator emits is exactly what the card renders —
-no unbound options):
+### 9.2 Resolution plan (schema)
+
+The triage output is exactly what the gate reads, the executor runs, and the
+card renders. No unbound fields; nothing is added by the engine.
 
 ```
-{ id,                      // stable: hash(finding-id, class). Regenerations
-                           // UPDATE the existing card (age, counts, open
-                           // verdicts carry forward), never duplicate it.
-  class: string,           // action class, for thresholds + trust counters
+{ id,                       // stable: hash(finding-id, class); regenerations UPDATE
+                            // the existing plan/card (age, counts, open verdicts carry)
+  class: string,            // action class — the calibration partition (§9.5)
   finding: {text, refs[]},
-  options: [{label, action: {type, payload}}] }        // ≤ 3
+  diagnosis: string,        // one line
+  steps: string[],          // ≤ 4, plain language — the executor's whole brief
+  access: [{permission, pattern}],   // the ONLY grants the executor session gets
+  verify: {kind, ...},      // checkable condition proving the finding is gone (below)
+  undo: string,             // one line or "none" — informational only, never gates
+  confidence: number,       // 0–1, stated by the model
+  report: {one_liner, bullets: string[≤4]} }   // user-facing text; §10 amendment specifies rendering
 ```
 
-`action.type` is a closed enum: `config-change` (option opens a confirm
-showing the concrete diff, then applies it), `queue-tonight` (adds the
-payload task to the §11.4 portfolio), `start-job` (starts a delegate job with
-the payload prompt), `tool-write` (one-off engine-executed request; the
-generator may emit it ONLY for tools holding the `write` consent ring, §7.4),
-`record-decision` (writes a blackboard `decision` fact — the universal
-fallback when no tool ring or tracker applies). No option type outside this
-enum exists; an option is always executable the moment it renders.
+- `verify.kind` is a closed enum over surfaces that already exist:
+  `session-ok` (the executor/job session completed idle with no error),
+  `predicate` (a §6.7 checkable statement, e.g. branch exists / CI green /
+  issue closed), `probe` (a consented §7.5 probe read matches an expectation),
+  `condition-gone` (the originating blocker's own liveness predicate, §10.3,
+  now evaluates false). **A plan without a verifiable check is not a plan** —
+  triage emits a check or emits nothing.
+- `access` uses the delegate grant grammar (`{permission, pattern}`, allow).
+  The executor session receives exactly these plus the standard catch-all
+  deny. Triage declares what the plan needs; the engine never widens or
+  narrows it. A plan that needs access outside what the box can grant is not
+  a plan.
+- `class` is triage-assigned from a closed list maintained in the engine
+  (starting set: `job-redispatch`, `permission-grant`, `tool-consent`,
+  `config-change`, `host-maintenance`, `record-decision`, `queue-tonight`,
+  `start-job`, `other`). Unknown → `other`. The list is data, not code paths:
+  no class has its own handler (§9.4).
+- Blocker triage context: the note/ask verbatim (wrapped as untrusted data,
+  §4.4), the sender session's transcript tail (≤ 2k tokens), the sender's
+  project facts, and the sender's reliability (§6.6). Finding triage context:
+  the existing §3.1 `assembleContext` slice.
 
-### 9.2 The five verbs
+### 9.3 The gate — autonomy threshold
 
-| Verb | Behavior |
-|---|---|
-| silent-log | ledger entry only |
-| inbox card | a needs-you **decision card** (§10.3) — options rendered as buttons, no cost estimates (D14) |
-| notify | decision card + notification-router delivery at the informational tier (breakpoint-timed) |
-| veto-window | announce with countdown (default 30 min); executes unless cancelled; cancellation is a verdict |
-| act-and-report | execute (reversible/isolated actions only); ledger + digest report mandatory |
+One user setting, **autonomy threshold `τ ∈ [0, 1]`, default 0.7**, in
+Settings → CTO. It is the single control over how autonomous the CTO is and
+it governs blockers and suggestions identically.
 
-Blockers (worker questions/permissions, `blocker` inbox notes) are not
-suggestions — they bypass the gate, render as blocker cards, and route through
-the notification router at blocking tier (D20).
+```
+effective = confidence × calibration(class)        // §9.5
+effective ≥ τ   → act     executor (§9.4); reported, never asked
+effective <  τ  → ask     decision card; the plan is the first option ("Do it"), effective shown once as a number
+no plan         → blocker card with reply (blocker) · silent-log (finding)
+```
 
-### 9.3 Eligibility by reversibility
+Normative consequences:
 
-`act-and-report` and `veto-window` are only reachable for actions that are
-read-only, worktree-isolated, or trivially reversible. Anything touching a
-user session, protected refs, production systems, money, config, or secrets is
-capped at inbox/notify (ask) permanently.
+- **There is no reversibility, category, or "never-auto" criterion.**
+  Recoverability, blast radius, and the cost of being wrong are inputs to
+  the model's stated confidence and to calibration — not separate gates.
+  This supersedes v2 §9.3 (eligibility by reversibility), v2 §9.4 (earned-
+  trust promotion ladder), the per-action tiers in §3.5, and §10.6-4's
+  ≥ 15-verdict ask-only pin. What replaces all of them is §9.5: a class the
+  model over-rates loses effective confidence until it earns it back.
+- **Multiple plans for one finding**: gate the plan with the highest
+  effective score; if the verb is `ask`, the remaining plans are the card's
+  other options. Never execute more than one plan per finding.
+- `τ = 1` never acts (everything asks); `τ = 0` acts on any plan. Both are
+  legal; neither is special-cased.
+- **Verbs collapse to act / ask / silent-log.** `notify` is a delivery
+  property of `ask` (informational tier, breakpoint-timed; blockers keep the
+  blocking tier per D20), not a verb. The `veto-window` verb is withdrawn from
+  the gate; the overnight window's veto card (§10.3, §11) is a scheduler
+  artifact and is unchanged.
+- **What still binds regardless of τ — none of it is judgement**: budget caps
+  and thrifty mode (§12), rate limits (§3.3), the kill switch and master
+  switch (§10.6-5, §13.3), and control-etiquette rule §3.4-1 (never prompt
+  into a user-owned session — that is about not hijacking the user's chats,
+  not about risk). Thrifty mode sheds finding triage first; blocker triage is
+  kept to the last token (§12.2).
 
-### 9.4 Earned trust (per action class)
+### 9.4 Executor, verification, attempt cap
 
-Beta counters per class. Promotion ask→veto-window when
-`P(acceptance > 0.9) > 0.95` with ≥ 8 observations; veto-window→act-and-report
-at the same bar over the veto-window record (a cancel counts as rejection).
-Any 2 rejections in a rolling 10 demote one step. Promotions/demotions are
-themselves ledgered and announced in the next digest (`progress` tier).
-**The global cold-start gate dominates** (§10.6-4): no class may leave ask
-verbs before the ≥ 15-verdict minimum clears, whatever its own counters say.
+- **One generic executor, no handlers.** An `act` plan (or an `ask` plan the
+  user accepted) runs in a CTO-owned opencode session with `steps` as its
+  brief and `access` as its permission ruleset. The engine picks a delegate
+  job (worktree, branch, sidebar row) when `access` includes `write` or
+  `edit`, an ephemeral session otherwise. **This is the same code for every
+  class.** Adding a class is a list edit, never a code path; an implementation
+  that branches on class or on the content of a finding violates this spec.
+- **Presence.** Blocker-sourced plans run regardless of §3.4 rule 3 (they are
+  time-sensitive, like blocking-tier notifications). Finding-sourced plans
+  obey it.
+- **Verification** runs `verify` once the session goes idle. Pass → outcome
+  `resolved`. Fail → **exactly one retry**: the same session gets one more
+  turn with the failed check attached ("you did X; the check still shows Y"),
+  then re-verify. Fail again → outcome `escalated`: the finding becomes a
+  human blocker card carrying the attempt log (steps taken, both check
+  results). **Two executions per plan id, ever.** A blocker re-reported under
+  the same identity bumps the existing card's count and does not re-arm the
+  cap. A session error or the 30-min job timeout counts as a failed check.
+- **Concurrency**: ≤ 2 executor sessions at once (inside §3.3's limits).
+  Further `act` plans queue FIFO; a queued blocker plan is taken before a
+  queued finding plan.
+- **Ledger**: every execution writes one `cto.resolve` entry
+  `{planId, class, findingId, confidence, calibration, effective, tau,
+  trigger: act|accepted, outcome: resolved|escalated, attempts, cost, undo,
+  refs}`. Reporting to the user is specified in the §10 amendment, not here;
+  invariant 1 (quiet ≠ covert) already requires the ledger row.
 
-### 9.5 Verdict ledger
+### 9.5 Calibration (replaces earned trust)
+
+Per class, `calibration(class) ∈ (0, 1]` scales the model's stated confidence
+by its track record. It is the only learner between the model and the gate.
+
+- **Outcomes**, one per plan: `success` = verification passed AND no
+  `correct` / `dismiss` / undo verdict from the user within 7 days;
+  `failure` = escalated, OR the plan was dismissed unexecuted on an `ask`
+  card, OR a later `correct`/`dismiss`/undo. `expire` (card aged out
+  unanswered) is no signal.
+- **Estimator**: Beta mean with a (1, 1) prior over the last 30 outcomes of
+  the class — `(successes + 1) / (outcomes + 2)`. A fresh class starts at
+  0.5; a perfect class approaches 1; a class that fails half the time sits
+  near 0.5 and effectively needs the user's confirmation.
+- **Bootstrap is the ask path.** Executions the user accepts on a decision
+  card go through the same executor and verification and feed the same
+  outcomes. At the default τ = 0.7 a class the model rates 0.9 needs three
+  accepted successes before it acts unaided (0.5 → 0.67 → 0.75 → 0.8 ×
+  0.9 = 0.72). Lowering τ shortens that; raising it lengthens it. There is
+  no separate cold-start gate.
+- Per-tool trust for the write ring (§7.4) is the same estimator partitioned
+  by `(tool, class)`; it feeds `calibration` for `tool-consent` plans and
+  nothing else.
+- Calibration per class, with its outcome counts and the current τ, renders in
+  Settings → CTO so the user can see where the CTO is holding itself back.
+
+### 9.6 Verdict ledger
 
 `~/.manta/cto/verdicts.json`, append-only:
 `{ts, subject: {type, id, class, sender?}, verdict: accept|dismiss|edit|veto|expire|correct|open,
-never?: bool}`. Single source feeding: worthiness thresholds, trust counters,
-tool `as_*` counters, fact sender reliability, digest-item open-rate,
-depth-pref updates, and the reserve fractile (§11.3). Every UI control in §10
-that expresses a judgment writes exactly one verdict.
+never?: bool}`. Single source feeding: calibration (§9.5), tool `as_*`
+counters, fact sender reliability, digest-item open-rate, depth-pref updates,
+and the reserve fractile (§11.3). Every UI control in §10 that expresses a
+judgment writes exactly one verdict.
 
-Counter mapping (which verdicts feed which learners — this table is
-normative):
+Counter mapping (normative):
 
-| Verdict | Acceptance/trust Beta | Importance/retention | Note |
+| Verdict | Calibration (§9.5) | Importance/retention | Note |
 |---|---|---|---|
-| accept, edit | success | access | edit = accept-with-signal |
-| dismiss, veto, correct, never | rejection | — | veto = cancelled veto-window |
-| open | — | access | **never** enters acceptance counters |
-| expire | — | decay signal | **never** enters acceptance counters |
+| accept, edit | success (after verification passes) | access | edit = accept-with-signal |
+| dismiss, correct, never, undo | failure | — | dismiss of an unexecuted plan counts |
+| veto | — | — | overnight window only (§11); not a gate verdict |
+| open | — | access | **never** enters calibration |
+| expire | — | decay signal | **never** enters calibration |
 
-Estimator policy (deliberate, not an inconsistency): Thompson sampling is
-used where the system *selects under exploration* (portfolio categories,
-tool-as-source); Beta tail tests / means where it *gates* (trust promotion,
-sender reliability). Selection wants exploration; gates want stability.
+Estimator policy (deliberate): Thompson sampling where the system *selects
+under exploration* (portfolio categories, tool-as-source); Beta means where
+it *gates* (calibration, sender reliability). Selection wants exploration;
+gates want stability.
 
 ---
 
@@ -774,14 +883,19 @@ The only loud elements. Two variants:
   navigates to the first ref / the fix surface). If a card's target session
   or window no longer exists, the action falls back to opening the matching
   ledger entry — the button always lands somewhere. Sources: worker questions/permissions pending > 10 min, `blocker`
-  inbox notes, health escalations (§10.6-7). Two timers by design: the
+  inbox notes, health escalations (§10.6-7), and **escalated plans** (§9.4 —
+  a resolution the CTO tried twice and could not verify; the card carries the
+  attempt log). Two timers by design: the
   blocking-tier *notification* fires immediately (D20); the *card* appears at
-  > 10 min (most questions are answered in-session before that).
+  > 10 min (most questions are answered in-session before that). **A blocker
+  card is the gate's `none` / `escalated` outcome, not its default** (D22):
+  a blocker with a plan above τ is resolved and reported, never carded.
 - **Decision card** (accent left edge): title, one-paragraph why (with
-  occurrence counts/evidence inline), 2–3 option buttons, each bound at
-  generation time to a §9.1 action (`config-change` / `queue-tonight` /
-  `start-job` / `tool-write` where the write ring is consented /
-  `record-decision` as the universal fallback), `dismiss` (writes verdict),
+  occurrence counts/evidence inline), 2–3 option buttons = the finding's
+  resolution plans (§9.2) ordered by effective score, the first labelled
+  **Do it** and showing its effective score once; accepting runs the plan
+  through the §9.4 executor with verification, exactly as an `act` would.
+  `dismiss` (writes verdict — a §9.5 failure for the plan's class),
   `evidence ▸` (expands the refs list inline; each ref deep-links).
   **No cost estimates on options** (D14).
 - **Veto-window card** (warn left edge): countdown (live, 1s tick), **Cancel
@@ -799,9 +913,12 @@ re-checked on the relevant events (question answered in-session, permission
 granted, worker aborted, probe recovered, condition gone). A card whose
 predicate goes false **auto-retracts** with a `resolved` ledger entry — never
 an accept/dismiss verdict, so self-resolution cannot pollute acceptance
-stats. Card ids are stable across digest regenerations (§9.1): a regeneration
+stats. Card ids are stable across digest regenerations (§9.2): a regeneration
 updates the existing card in place (age, counts, carried-forward `open`
-verdicts), never re-creates it.
+verdicts), never re-creates it. Inbox-sourced blocker cards carry three
+predicates: sender session gone, a `condition-gone` check when the plan or
+note names one, and the inbox entry's own TTL (§4.4) — an inbox blocker can
+never outlive the note that raised it.
 
 ### 10.4 Rails & sections
 
@@ -875,8 +992,9 @@ Four cards (all controls live):
 2. **Veto window** — §10.3.
 3. **Connect ask** — §10.3.
 4. **Cold start**: a `learning`-chipped card shows backfill progress
-   (segments processed / total, ETA) and the ask-only promise; suggestion
-   engine is pinned to ask-verbs until ≥ 15 verdicts exist. Backfill = 30
+   (segments processed / total, ETA). There is no ask-only pin (D22):
+   calibration starts at its prior (§9.5), so a fresh class asks until it has
+   a track record, and τ alone decides how long that takes. Backfill = 30
    days (D19) of transcript history through the §5 pipeline at
    batch-priority; profile fields render "low confidence" until their
    minimums are met. Backfill runs behind a **watermark**: live ingestion
@@ -1075,7 +1193,12 @@ today has exactly `running/done/failed/stopped` and a 30-min running sweep:
 |---|---|---|
 | Low | rollups, digest, blackboard, Now/Just-finished rails, ledger | ~1–2% of plan usage, $/day derived |
 | Medium | + suggestions, watchers, profile extraction, tool discovery + probes | ~5% |
-| High | + overnight autonomy, veto-window actions | Medium cap + overnight spendable pool |
+| High | + overnight autonomy | Medium cap + overnight spendable pool |
+
+The dial is a **spend** control and gates which passes run. It does not gate
+autonomy: blocker triage and the §9.4 executor run at every tier (a blocker
+the CTO can resolve is cheaper than a human answering it), and how much the
+CTO acts unaided is τ (§9.3) alone.
 
 Hard daily ambient cap (default $2.50, user-editable in Behavior) applies at
 every tier, independent of the dial. Overnight spend is bounded separately by
@@ -1093,9 +1216,10 @@ the last token: blocker detection, segment one-liners, digest-on-open.
 Task classes with requirements, resolved by the existing model router (never
 pinned): `ambient-summarize` (structured output, ≤ 4k ctx) → cheapest
 qualifying nano; `gatekeeper`, `worthiness` → nano with logprob-free scoring
-rubric; `digest-compose`, `suggest` → mid-class; `overnight-job` → router
+rubric; `digest-compose`, `suggest`, `triage` (§9.1, structured plan output)
+→ mid-class; `overnight-job`, `resolve` (the §9.4 executor session) → router
 default for agents. Context assembly budgets: ambient ≤ 4k tokens, digest ≤
-12k, spawn ≤ 8k. Cascade rule: ambient classes escalate one class on
+12k, spawn ≤ 8k, triage ≤ 6k. Cascade rule: ambient classes escalate one class on
 low-confidence output, at most once.
 
 ### 12.4 ROI self-report
@@ -1176,6 +1300,10 @@ No parallel systems remain after P2.
 4. **Facts**: proposals by outcome, retrieval rates, overturn times.
 5. **Budget**: forecast MAPE, cap-hits caused, reserve fractile history.
 6. **Engine health**: pipeline lag, probe error rates, rate-limit trips.
+7. **Autonomy** (§9): per class — plans generated, act / ask / none counts,
+   stated vs realized confidence (the calibration curve), escalations,
+   retries used, τ at decision time; box-wide — resolved-unaided rate,
+   mean time from blocker to resolution.
 
 All are ledger-derived; the Health card renders them.
 
@@ -1193,7 +1321,27 @@ All are ledger-derived; the Health card renders them.
   metadata probes, watcher supersession, inbox supersession, Medium tier.
 - **P3 — autonomy layer**: quota forecasting + reserve, overnight scheduler +
   portfolio, veto-window verb, trust promotion ladder, deep-read data-source
-  analyses, delegate pause/resume, High tier, ROI report.
+  analyses, delegate pause/resume, High tier, ROI report. *(shipped as
+  specified in v2; the verb + ladder are superseded by P4 below)*
+- **P4 — one-number autonomy (D22)**, scoped and bounded — nothing outside
+  this list is in P4:
+  1. Blockers enter the pipeline (remove the §9.2-v2 bypass); inbox blocker
+     cards gain the three §10.3 liveness predicates.
+  2. Triage step + resolution-plan schema (§9.2), `triage` task class.
+  3. The gate (§9.3): τ setting (default 0.7) + per-class calibration (§9.5);
+     deletion of the reversibility caps, the promotion ladder, and the
+     ≥ 15-verdict pin.
+  4. One generic executor + verification + one-retry attempt cap + `cto.resolve`
+     ledger row (§9.4). Decision-card "Do it" runs the same path.
+  5. Suggestions routed through the same gate (their generator now emits
+     §9.2 plans).
+  6. Autonomy instrumentation rows (§14-7) + the calibration table in
+     Settings → CTO.
+  Explicitly **out** of P4: per-use-case handlers of any kind, undo execution,
+  new card variants or any UI beyond τ, the calibration table and a reply box
+  on blocker cards, presence-rule changes beyond §9.4's blocker exemption,
+  delegate baseline grants, tool-registry / secret-name-as-tool fixes (separate
+  tickets), and the user-facing report copy (a following §10 amendment).
 
 Each phase ships with its tests (pure logic injected-I/O, per repo
 conventions) and its Health rows.
