@@ -379,6 +379,9 @@ export type CtoDigest = {
 // far, `min` the minimum sample size before the value may be trusted. While
 // `n < min` the renderer shows `collecting (n/min)` — or the row's own
 // `collectingText` when the server supplies one — and never the number.
+// BET-1521 (§14-7): `autonomyResolvedUnaided` / `autonomyBlockerToResolve` are
+// the box-wide autonomy rows; `autonomyClass.<cls>` / `autonomyCalib.<cls>`
+// are emitted per triage class found in the 30d window (deterministic order).
 export type CtoHealthStat = {
   id:
     | "ambientSpendToday"
@@ -388,12 +391,35 @@ export type CtoHealthStat = {
     | "forecastAccuracy"
     | "capHitsCaused"
     | "reserveFractile"
-    | "roi";
+    | "roi"
+    | "autonomyResolvedUnaided"
+    | "autonomyBlockerToResolve"
+    | `autonomyClass.${string}`
+    | `autonomyCalib.${string}`;
   label: string;
   value: string | null;
   n: number;
   min: number;
   collectingText?: string;
+};
+
+// BET-1521 (§9.5): one row of the read-only per-class calibration table
+// (Settings → CTO). `value` is the Beta(1,1) posterior mean over the class's
+// last-30 outcome window; `successes`/`outcomes` are the raw counts it was
+// computed from (the table shows both — a mean alone hides the sample size).
+export type CtoCalibrationRow = {
+  cls: string;
+  value: number;
+  successes: number;
+  outcomes: number;
+};
+
+// The §9.5 calibration table payload, returned alongside the §10.5 health
+// stats by GET /api/cto/health. `tau` is the configured autonomy threshold
+// the table annotates (the same value the Settings τ control writes).
+export type CtoCalibrationTable = {
+  tau: number;
+  classes: CtoCalibrationRow[];
 };
 
 // A raw Activity-ledger row (A12 drill-down). Append-only; reverse-chron view.
@@ -1340,7 +1366,9 @@ export interface Api {
    ctoDigestNow(): Promise<{ ok: boolean; error?: string }>;
   // GET /api/cto/health — the §10.5 Health-card P1 stats (composed by the
   // engine from the ledger + budget + segment stores). Read on settings-open.
-  ctoHealthGet(): Promise<{ stats: CtoHealthStat[] }>;
+  // BET-1521: `calibration` carries the §9.5 per-class table payload for the
+  // Settings → CTO read-only table (null when the store is absent or fails).
+  ctoHealthGet(): Promise<{ stats: CtoHealthStat[]; calibration?: CtoCalibrationTable | null }>;
   // RPC `quota:read` — the persisted budget payload (day buckets + §11.3
   // per-provider quota cache). Read-only; feeds the Tonight's-budget card
   // (§10.5 card 3, BET-1405).

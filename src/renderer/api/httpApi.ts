@@ -38,6 +38,7 @@ import type {
   CtoTonightWindow,
   CtoDigest,
   CtoHealthStat,
+  CtoCalibrationTable,
   CtoLedgerRow,
   CtoLedgerPage,
   CtoProfileRender,
@@ -1571,22 +1572,26 @@ export const httpApi: Api = {
     return { ok: json.ok !== false, error: json.error };
   },
 
-  // GET /api/cto/health (A12, §10.5 card 2) — the P1 Health-card stats. Read
-  // on settings-open (no polling). A rejection degrades to empty stats so the
-  // card renders collecting rows rather than crashing.
-  ctoHealthGet: async (): Promise<{ stats: CtoHealthStat[] }> => {
+  // GET /api/cto/health (A12, §10.5 card 2) — the P1 Health-card stats +
+  // BET-1521's §9.5 calibration table. Read on settings-open (no polling). A
+  // rejection degrades to empty stats so the card renders collecting rows
+  // rather than crashing.
+  ctoHealthGet: async (): Promise<{ stats: CtoHealthStat[]; calibration?: CtoCalibrationTable | null }> => {
     const url = `${serverBase()}/api/cto/health`;
     let res: Response;
     try {
       res = await fetch(url, { method: "GET", headers: authHeaders(clientToken()) });
     } catch {
-      return { stats: [] };
+      return { stats: [], calibration: null };
     }
     if (res.status === 401) throw new AuthRequiredError();
-    if (!res.ok) return { stats: [] };
-    let json: { stats?: CtoHealthStat[] } = {};
+    if (!res.ok) return { stats: [], calibration: null };
+    let json: { stats?: CtoHealthStat[]; calibration?: CtoCalibrationTable | null } = {};
     try { json = await res.json() as typeof json; } catch { /* non-JSON */ }
-    return { stats: Array.isArray(json?.stats) ? json.stats : [] };
+    return {
+      stats: Array.isArray(json?.stats) ? json.stats : [],
+      calibration: json?.calibration ?? null,
+    };
   },
 
   // RPC `quota:read` (BET-1405) — the persisted budget payload (day buckets +
