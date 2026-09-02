@@ -1313,6 +1313,25 @@ test("BET-1472: a watcher.hit row WITH a project still becomes a candidate carry
 // BET-1516 — the pending-findings drain (blockers enter the pipeline, §9.1)
 // ---------------------------------------------------------------------------
 
+// The shared engine scaffold for the drain/cardTick tests in this section:
+// memory stores, captured ledger, fake clock, neutral sender reliability.
+// `clock` and `ledgerRows` are passed in by reference so the test keeps
+// asserting on its own handles; extra deps (e.g. `cards: {}` to fake the
+// cards manager in the pure drain tests) merge on top via `overrides`.
+function makeFindingsEngine({ clock, ledgerRows, ...overrides } = {}) {
+  const stores = makeMemoryStores();
+  const engine = createCtoEngine({
+    configGet: async () => ({ ctoEnabled: true }),
+    stores,
+    ledger: { append: async (row) => ledgerRows.push(row) },
+    facts: { getState: async () => ({ senderReliability: {} }) },
+    now: () => clock.ms,
+    publish: () => {},
+    ...overrides,
+  });
+  return { engine, stores };
+}
+
 test("drainFindings turns queued inbox findings into high-salience B1-weighted evidence and marks the note read", async () => {
   const clock = { ms: 1_000_000 };
   const ledgerRows = [];
@@ -1367,21 +1386,12 @@ test("drainFindings turns queued inbox findings into high-salience B1-weighted e
 test("drainFindings maps a promoted ask finding to an ask.<sourceKind> evidence row and leaves the inbox alone", async () => {
   const clock = { ms: 2_000_000 };
   const ledgerRows = [];
-  const stores = makeMemoryStores();
+  const { engine, stores } = makeFindingsEngine({ clock, ledgerRows, cards: {} });
   await stores.findings.save({
     v: 1,
     findings: [
       { source: "ask", ts: clock.ms, sourceKind: "permission", sourceId: "perm_1", sessionID: "s2", message: "Allow rm -rf?", title: "Permission needed", refs: [] },
     ],
-  });
-  const engine = createCtoEngine({
-    configGet: async () => ({ ctoEnabled: true }),
-    stores,
-    ledger: { append: async (row) => ledgerRows.push(row) },
-    cards: {},
-    facts: { getState: async () => ({ senderReliability: {} }) },
-    now: () => clock.ms,
-    publish: () => {},
   });
   const r = await engine.drainFindings();
   assert.equal(r.drained, 1);
@@ -1399,21 +1409,12 @@ test("drainFindings maps a promoted ask finding to an ask.<sourceKind> evidence 
 test("drainFindings maps a health escalation finding to a health.blocker evidence row (third producer, §9.1)", async () => {
   const clock = { ms: 3_000_000 };
   const ledgerRows = [];
-  const stores = makeMemoryStores();
+  const { engine, stores } = makeFindingsEngine({ clock, ledgerRows, cards: {} });
   await stores.findings.save({
     v: 1,
     findings: [
       { source: "health", sourceKind: "health", sourceId: "watchdog", ts: clock.ms, message: "ambient spend 7 > 4x expected", title: "Health check", refs: [], pendingSince: clock.ms - 500, tag: "watchdog" },
     ],
-  });
-  const engine = createCtoEngine({
-    configGet: async () => ({ ctoEnabled: true }),
-    stores,
-    ledger: { append: async (row) => ledgerRows.push(row) },
-    cards: {},
-    facts: { getState: async () => ({ senderReliability: {} }) },
-    now: () => clock.ms,
-    publish: () => {},
   });
   const r = await engine.drainFindings();
   assert.equal(r.drained, 1);
@@ -1432,15 +1433,7 @@ test("drainFindings maps a health escalation finding to a health.blocker evidenc
 test("cardTick enqueues the third blocker source (health escalation) and folds it into evidence on the same tick", async () => {
   const clock = { ms: 1_000_000 };
   const ledgerRows = [];
-  const stores = makeMemoryStores();
-  const engine = createCtoEngine({
-    configGet: async () => ({ ctoEnabled: true }),
-    stores,
-    ledger: { append: async (row) => ledgerRows.push(row) },
-    facts: { getState: async () => ({ senderReliability: {} }) },
-    now: () => clock.ms,
-    publish: () => {},
-  });
+  const { engine, stores } = makeFindingsEngine({ clock, ledgerRows });
   // The watchdog wrote a pendingBlockers entry (the recordBlocker shape).
   await stores.engineState.save({
     v: 1,
@@ -1464,15 +1457,7 @@ test("cardTick enqueues the third blocker source (health escalation) and folds i
 test("cardTick drains the queue and runs the inbox-card liveness pass; a promoted ask enters the pipeline on the next tick", async () => {
   const clock = { ms: 1_000_000 };
   const ledgerRows = [];
-  const stores = makeMemoryStores();
-  const engine = createCtoEngine({
-    configGet: async () => ({ ctoEnabled: true }),
-    stores,
-    ledger: { append: async (row) => ledgerRows.push(row) },
-    facts: { getState: async () => ({ senderReliability: {} }) },
-    now: () => clock.ms,
-    publish: () => {},
-  });
+  const { engine, stores } = makeFindingsEngine({ clock, ledgerRows });
   // A worker ask registered through the REAL cards manager (not a fake) —
   // the engine's own cards wiring must queue the finding at promotion, and
   // the SAME tick's drain consumes it into the pipeline: one pass,
