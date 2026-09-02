@@ -22,6 +22,7 @@ import {
   digestEvidenceAction,
   refChipAction,
   evidenceExpansion,
+  calibrationTableDisplay,
   type CtoState,
   type CtoHealthStat,
 } from "./ctoView";
@@ -113,6 +114,61 @@ describe("statDisplay (§10.5 stat min-sample collecting)", () => {
     const out = statDisplay(undefined as unknown as CtoHealthStat);
     expect(out.ready).toBe(false);
     expect(out.text).toBe("collecting (0 / 0)");
+  });
+
+  // BET-1521 (§14-7): the per-class autonomy rows ride the same stat shape —
+  // their ids are data-derived (`autonomyClass.<cls>` / `autonomyCalib.<cls>`)
+  // and must flow through the display selector unchanged.
+  it("BET-1521: per-class autonomy rows gate on their own min-sample size", () => {
+    const decisions = statDisplay(
+      stat({
+        id: "autonomyClass.record-decision",
+        label: "Autonomy · record-decision",
+        value: "plans 5 · act 3 · ask 2 · none 1 · esc 1 · retries 0",
+        n: 8,
+        min: 5,
+      }),
+    );
+    expect(decisions.ready).toBe(true);
+    expect(decisions.text).toContain("act 3");
+    const calib = statDisplay(
+      stat({ id: "autonomyCalib.record-decision", label: "Calibration · record-decision", n: 2, min: 5 }),
+    );
+    expect(calib.ready).toBe(false);
+    expect(calib.text).toBe("collecting (2 / 5)");
+  });
+});
+
+describe("calibrationTableDisplay (§9.5 Settings → CTO table, BET-1521)", () => {
+  it("renders the collecting line for a null / empty payload — never fabricated zeros", () => {
+    expect(calibrationTableDisplay(null).collecting).toBe(true);
+    expect(calibrationTableDisplay({ tau: 0.7, classes: [] }).collecting).toBe(true);
+    expect(calibrationTableDisplay({ tau: 0.7, classes: [{ cls: "a", value: NaN, successes: 1, outcomes: 2 }] }).collecting).toBe(true);
+  });
+
+  it("passes the server's deterministic row order through + annotates the configured τ", () => {
+    const out = calibrationTableDisplay({
+      tau: 0.7,
+      classes: [
+        { cls: "record-decision", value: 0.375, successes: 11, outcomes: 30 },
+        { cls: "queue-tonight", value: 0.5, successes: 3, outcomes: 8 },
+      ],
+    });
+    expect(out.collecting).toBe(false);
+    expect(out.tauText).toBe("τ 0.70");
+    expect(out.rows.map((r) => r.cls)).toEqual(["record-decision", "queue-tonight"]);
+    expect(out.rows[0]).toEqual({ cls: "record-decision", value: 0.375, successes: 11, outcomes: 30 });
+  });
+
+  it("drops malformed rows instead of rendering NaN cells", () => {
+    const out = calibrationTableDisplay({
+      tau: 0.7,
+      classes: [
+        { cls: "good", value: 0.6, successes: 3, outcomes: 6 },
+        { cls: "bad", value: NaN, successes: 1, outcomes: 1 },
+      ],
+    });
+    expect(out.rows.map((r) => r.cls)).toEqual(["good"]);
   });
 });
 

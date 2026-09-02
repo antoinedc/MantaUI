@@ -98,6 +98,12 @@ const DEFAULT_CONFIG = {
   // Adaptive CTO (BET-1386): push the pre-generated digest to the phone (§5.5
   // notify). Off by default.
   ctoDigestPush: false,
+  // Adaptive CTO (BET-1521, §9.3/§9.4): the autonomy threshold τ — the gate
+  // acts on its own when a candidate's confidence clears this bar; per-class
+  // calibration (§9.5) modulates the effective bar around it. 0.7 = the spec
+  // default. The Settings τ control writes it; the Health card shows the τ in
+  // effect at decision time.
+  ctoAutonomyThreshold: 0.7,
 };
 
 let _config = null;

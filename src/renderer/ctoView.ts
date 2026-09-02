@@ -48,6 +48,9 @@ export const idleBackfill: BackfillState = {
 // sample size before the value may be trusted. While `n < min` the renderer
 // shows `collecting (n/k)` and never the number — a stat never displays noise
 // as signal.
+// BET-1521 (§14-7): `autonomyResolvedUnaided` / `autonomyBlockerToResolve` are
+// the box-wide autonomy rows; `autonomyClass.<cls>` / `autonomyCalib.<cls>`
+// are emitted per triage class found in the 30d window (deterministic order).
 export type CtoHealthStat = {
   id:
     | "ambientSpendToday"
@@ -59,7 +62,11 @@ export type CtoHealthStat = {
     | "capHitsCaused"
     | "reserveFractile"
     // BET-1405 (§12.4): the monthly ROI self-report roll.
-    | "roi";
+    | "roi"
+    | "autonomyResolvedUnaided"
+    | "autonomyBlockerToResolve"
+    | `autonomyClass.${string}`
+    | `autonomyCalib.${string}`;
   label: string;
   value: string | null;
   n: number;
@@ -69,6 +76,44 @@ export type CtoHealthStat = {
   // supplies it verbatim; otherwise the generic `collecting (n / min)` renders.
   collectingText?: string;
 };
+
+// BET-1521 (§9.5): one read-only row of the per-class calibration table
+// (Settings → CTO) — the Beta(1,1) posterior mean over the class's last-30
+// outcome window plus the raw counts it was computed from.
+export type CtoCalibrationRow = {
+  cls: string;
+  value: number;
+  successes: number;
+  outcomes: number;
+};
+
+// The §9.5 calibration table payload (rides GET /api/cto/health). `tau` is
+// the configured autonomy threshold the table annotates.
+export type CtoCalibrationTable = {
+  tau: number;
+  classes: CtoCalibrationRow[];
+};
+
+// Pure selector for the §9.5 calibration table (Settings → CTO): what to
+// render for the given payload. `null`/empty payload → the collecting line
+// (never fabricated zeros); a payload → its rows in the server's
+// deterministic order + the τ annotation for the subline.
+export function calibrationTableDisplay(
+  table: CtoCalibrationTable | null | undefined,
+): { rows: CtoCalibrationRow[]; tauText: string | null; collecting: boolean } {
+  const rows = Array.isArray(table?.classes)
+    ? table.classes.filter((r) => r && typeof r.cls === "string" && Number.isFinite(Number(r.value)))
+    : [];
+  if (rows.length === 0) {
+    return { rows: [], tauText: null, collecting: true };
+  }
+  const tau = Number(table?.tau);
+  return {
+    rows,
+    tauText: Number.isFinite(tau) ? `τ ${tau.toFixed(2)}` : null,
+    collecting: false,
+  };
+}
 
 // Pure stat-display selector (§10.5): when a stat has not reached its minimum
 // sample size, render `collecting (n / min)` — or the stat's own

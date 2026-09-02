@@ -146,7 +146,7 @@ import * as cto from "./cto.mjs";
 import * as ctoEngine from "./ctoEngine.mjs";
 import * as ctoBudget from "./ctoBudget.mjs";
 import { createFactSurfaces } from "./ctoFactSurfaces.mjs";
-import { ledgerStore, engineStateStore, budgetStore, segmentsStore, verdictsStore, digestsStore, factsStore, startCtoStoreSweeper, CTO_STORE_SWEEP_INTERVAL_MS } from "./ctoStores.mjs";
+import { ledgerStore, engineStateStore, budgetStore, segmentsStore, verdictsStore, digestsStore, factsStore, resolveStore, calibrationStore, startCtoStoreSweeper, CTO_STORE_SWEEP_INTERVAL_MS } from "./ctoStores.mjs";
 import * as ctoOvernight from "./ctoOvernight.mjs";
 import { computeHealthStats } from "./ctoHealth.mjs";
 import { composeProfileRender } from "./ctoProfile.mjs";
@@ -4482,13 +4482,18 @@ const handleRequest = async (req, res) => {
   // GET /api/cto/health — the §10.5 Health-card P1 stats, composed by the
   // engine from the ledger + budget + segment stores. Read on settings-open,
   // never polled. Each stat carries `n` samples seen and `min` minimum — the
-  // renderer shows `collecting (n/k)` below `min`, never the number.
+  // renderer shows `collecting (n/k)` below `min`, never the number. The
+  // payload also carries the §9.5 calibration table (BET-1521) for the
+  // Settings → CTO read-only table.
   if (path === "/api/cto/health") {
     try {
       if (req.method === "GET") {
         const cfg = await local.configGet();
         const result = await computeHealthStats({
           ctoAmbientCap: typeof cfg?.ctoAmbientCap === "number" ? cfg.ctoAmbientCap : 2.5,
+          ctoAutonomyThreshold: typeof cfg?.ctoAutonomyThreshold === "number" ? cfg.ctoAutonomyThreshold : 0.7,
+          resolveRead: async () => (await resolveStore.load())?.entries ?? [],
+          calibrationRead: async () => await calibrationStore.load(),
       ledgerRead: () => ledgerStore.read(),
       budgetRead: () => budgetStore.load(),
       listSegments: async () => {
