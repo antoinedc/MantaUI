@@ -134,7 +134,7 @@ import { createOvernightScheduler, normalizeWindow, scheduleCountdown, dataAnaly
 import { resolveForgeOwner } from "./delegate.mjs";
 // BET-1517 (§9.1/§9.2): the triage stage — drained findings → 0–3 resolution
 // plans in plans.json, one mid-tier model call per finding per tick.
-import { createCtoTriage } from "./ctoTriage.mjs";
+import { BLOCKER_FINDING_SOURCES, createCtoTriage } from "./ctoTriage.mjs";
 
 // BET-1395 tool discovery (§7): the registry engine — fusion of the four
 // evidence channels, the two lifecycle bars, and the connect-ask gate.
@@ -2447,14 +2447,17 @@ export function createCtoEngine(deps = {}) {
 
   // §9.1 triage over the drain's rows — the engine-tick wire into the plans
   // store. Thrifty shed ladder (§12.2): finding triage sheds FIRST; blocker
-  // triage (inbox notes) is kept to the last token. One triage call per
-  // finding per tick; never throws into the card tick.
+  // triage is kept to the last token — blocker-ness spans ALL THREE §9.1
+  // producers (inbox notes, promoted asks, health escalations), not just the
+  // inbox one: a shed ask is permanently lost (consumed from the pending
+  // registry at promotion; only inbox notes re-queue via restatement).
+  // One triage call per finding per tick; never throws into the card tick.
   async function triageDrained(rows) {
     if (!Array.isArray(rows) || rows.length === 0) return { triaged: 0, shed: 0 };
     let triaged = 0;
     let shed = 0;
     for (const row of rows) {
-      const isBlockerFinding = row?.source === "inbox";
+      const isBlockerFinding = BLOCKER_FINDING_SOURCES.has(row?.source);
       if (thrifty && !isBlockerFinding) {
         shed += 1;
         continue;

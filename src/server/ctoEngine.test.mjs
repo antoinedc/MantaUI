@@ -1558,7 +1558,7 @@ test("cardTick triages drained findings: one gated triage call per finding, plan
   assert.ok(findingBlock && /untrusted DATA/.test(findingBlock.text));
 });
 
-test("triageDrained: thrifty sheds finding triage first and keeps blocker triage to the last token (§12.2)", async () => {
+test("triageDrained: thrifty keeps ALL §9.1 blocker sources (inbox/ask/health) to the last token, sheds only non-blocker findings (§12.2)", async () => {
   const clock = { ms: 3_000_000 };
   const stores = makeMemoryStores();
   const modelCalls = [];
@@ -1583,6 +1583,24 @@ test("triageDrained: thrifty sheds finding triage first and keeps blocker triage
     title: "Permission needed",
     refs: [],
   };
+  const HEALTH_ROW = {
+    source: "health",
+    ts: clock.ms,
+    sourceKind: "health",
+    sourceId: "h1",
+    message: "watchdog tripped",
+    title: "Host health",
+    refs: [],
+  };
+  // The future evidence-driven finding (later ticket) — the ONLY class the
+  // shed rung may drop.
+  const EVIDENCE_ROW = {
+    source: "evidence",
+    ts: clock.ms,
+    message: "tests flaky",
+    title: "Flake",
+    refs: [],
+  };
   const engine = createCtoEngine({
     configGet: async () => ({ ctoEnabled: true }),
     stores,
@@ -1596,16 +1614,20 @@ test("triageDrained: thrifty sheds finding triage first and keeps blocker triage
     publish: () => {},
   });
   await engine.setThrifty(true, { reason: "test", source: "test" });
-  const res = await engine.triageDrained([INBOX_ROW, ASK_ROW]);
-  assert.deepEqual(res, { triaged: 1, shed: 1 });
-  assert.equal(modelCalls.length, 1);
-  const onlyBlockerTriaged = modelCalls[0].context.some((b) => typeof b.text === "string" && b.text.includes("deploy failed"));
-  const askShed = !modelCalls[0].context.some((b) => typeof b.text === "string" && b.text.includes("Allow rm -rf?"));
-  assert.ok(onlyBlockerTriaged && askShed, "the inbox blocker is triaged, the ask finding is shed");
-  // The record for the triaged blocker landed; nothing for the shed ask.
+  const res = await engine.triageDrained([INBOX_ROW, ASK_ROW, HEALTH_ROW, EVIDENCE_ROW]);
+  assert.deepEqual(res, { triaged: 3, shed: 1 });
+  assert.equal(modelCalls.length, 3);
+  const allCallsText = modelCalls.map((c) => c.context.map((b) => b?.text ?? "").join("\n")).join("\n");
+  assert.ok(allCallsText.includes("deploy failed"), "the inbox blocker is triaged");
+  assert.ok(allCallsText.includes("Allow rm -rf?"), "the promoted ask is triaged (shed would lose it — consumed at promotion)");
+  assert.ok(allCallsText.includes("watchdog tripped"), "the health escalation is triaged");
+  assert.ok(!allCallsText.includes("tests flaky"), "the non-blocker finding is shed");
+  // Records for every kept blocker landed; nothing for the shed finding.
   const records = (await stores.plans.load()).records;
-  assert.equal(Object.keys(records).length, 1);
+  assert.equal(Object.keys(records).length, 3);
   assert.ok(records[findingIdOf(INBOX_ROW)]);
+  assert.ok(records[findingIdOf(ASK_ROW)]);
+  assert.ok(records[findingIdOf(HEALTH_ROW)]);
 });
 
 test("triageDrained: no runEphemeral wired → calls gate out, plans store untouched, tick survives", async () => {

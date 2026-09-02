@@ -79,6 +79,11 @@ test("normalizeAccess enforces the delegate grant grammar", () => {
   assert.equal(normalizeAccess([{ permission: "bash" }]).ok, false);
   assert.equal(normalizeAccess([{ permission: "bash", pattern: "**", action: "deny" }]).ok, false);
   assert.equal(normalizeAccess([{ permission: "bash", pattern: "**", action: "allow" }]).ok, true);
+  // Grantability (Q2, review return): the permission vocabulary is open on
+  // purpose — any tool-name string is grantable through the delegate ruleset
+  // (opencode accepts plugin/MCP tool keys verbatim). Grammar validity IS the
+  // triage-time check; the executor ticket owns the vocabulary check.
+  assert.deepEqual(normalizeAccess([{ permission: "myplugin_tool", pattern: "**" }]), { ok: true, value: [{ permission: "myplugin_tool", pattern: "**" }] });
 });
 
 test("normalizeVerify: closed enum; predicate needs a condition; probe needs a probe id", () => {
@@ -115,7 +120,7 @@ test("normalizePlan drops invalid plans with reasons", () => {
     [{ ...validPlan(), class: "" }, "class-missing"],
     [{ ...validPlan(), diagnosis: "" }, "diagnosis-missing"],
     [{ ...validPlan(), steps: [] }, "steps-empty"],
-    [{ ...validPlan(), steps: Array.from({ length: PLAN_STEPS_MAX + 1 }, () => "s") }, "steps-invalid"],
+    [{ ...validPlan(), steps: ["  ", ""] }, "steps-empty"],
     [{ ...validPlan(), access: [{ permission: "bash" }] }, "access-entry-missing-fields"],
     [{ ...validPlan(), verify: { kind: "predicate" } }, "verify-condition-missing"],
     [{ ...validPlan(), confidence: 1.5 }, "confidence-invalid"],
@@ -128,6 +133,18 @@ test("normalizePlan drops invalid plans with reasons", () => {
     assert.equal(res.ok, false, `expected drop: ${reason}`);
     assert.equal(res.reason, reason);
   }
+});
+
+test("normalizePlan truncates step overflow (§9.2: truncate, never synthesize)", () => {
+  const fid = findingIdOf(FINDING);
+  const res = normalizePlan(
+    validPlan({ steps: Array.from({ length: PLAN_STEPS_MAX + 2 }, (_, i) => `step ${i + 1}`) }),
+    fid,
+    FINDING,
+  );
+  assert.equal(res.ok, true, "steps > cap truncate, they do not drop the plan");
+  assert.equal(res.plan.steps.length, PLAN_STEPS_MAX);
+  assert.deepEqual(res.plan.steps, ["step 1", "step 2", "step 3", "step 4"], "the head of the brief survives");
 });
 
 // ---------------------------------------------------------------------------
@@ -160,6 +177,16 @@ test("parseResolutionPlans: cap of 3, drops invalid with reasons, unparseable �
   assert.deepEqual(garbage.dropped, [{ reason: "unparseable" }]);
 
   assert.deepEqual(parseResolutionPlans(null, fid, FINDING).dropped, [{ reason: "unparseable" }]);
+
+  // A bare top-level array is a legal shape — one element AND several.
+  const bare1 = parseResolutionPlans(`[${JSON.stringify(validPlan())}]`, fid, FINDING);
+  assert.equal(bare1.plans.length, 1);
+  const bareN = parseResolutionPlans(
+    JSON.stringify([validPlan(), validPlan({ class: "config-change" })]),
+    fid,
+    FINDING,
+  );
+  assert.equal(bareN.plans.length, 2);
 });
 
 // ---------------------------------------------------------------------------
@@ -182,6 +209,24 @@ test("buildTriageContext wraps the finding as untrusted data and keeps the promp
   // A bare finding still yields a well-formed prompt.
   const bare = buildTriageContext(FINDING, {});
   assert.equal(bare.length, 2);
+});
+
+test("buildTriageContext kind label spans all §9.1 producers (shared findingLedgerKind)", () => {
+  const labelOf = (finding) => {
+    const blocks = buildTriageContext(finding, {});
+    const m = blocks.find((b) => b.text.startsWith("[Finding from the CTO pipeline"));
+    return m.text.match(/^Source: (.+)$/m)?.[1];
+  };
+  assert.equal(labelOf(FINDING), "inbox.blocker");
+  assert.equal(
+    labelOf({ source: "ask", sourceKind: "permission", sourceId: "perm_1", message: "m" }),
+    "ask.permission",
+  );
+  assert.equal(
+    labelOf({ source: "health", sourceKind: "health", sourceId: "h1", message: "watchdog tripped" }),
+    "health.blocker",
+    "health escalations are not mislabeled as inbox rows",
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -240,6 +285,24 @@ test("triageFinding: model outputs none → an empty-plans record still lands (a
   assert.deepEqual(res.plans, []);
   const rec = (await plans.load()).records[findingIdOf(FINDING)];
   assert.deepEqual(rec.plans, []);
+});
+
+test("triageFinding: every §9.1 source stamps its true source on the stored record", async () => {
+  const plans = memoryStore({ v: 1, records: {} });
+  const triage = createCtoTriage({
+    plans,
+    runEphemeral: async () => ({ ok: true, text: '{"plans":[]}' }),
+    now: () => 1_000,
+  });
+  await triage.triageFinding({ source: "ask", sourceKind: "permission", sourceId: "perm_1", message: "m" }, {});
+  await triage.triageFinding({ source: "health", sourceKind: "health", sourceId: "h1", message: "watchdog tripped" }, {});
+  const records = (await plans.load()).records;
+  assert.equal(records[findingIdOf({ source: "ask", sourceKind: "permission", sourceId: "perm_1", message: "m" })].finding.source, "ask");
+  assert.equal(
+    records[findingIdOf({ source: "health", sourceKind: "health", sourceId: "h1", message: "watchdog tripped" })].finding.source,
+    "health",
+    "health rows are not mis-stamped as inbox",
+  );
 });
 
 test("triageFinding: gated/error model call persists NOTHING (the finding is already in evidence)", async () => {
