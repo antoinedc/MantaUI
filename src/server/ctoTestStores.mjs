@@ -41,6 +41,8 @@ export function makeMemoryStores() {
     inbox: jsonStore({ v: 1, entries: [] }),
     // BET-1516 (§9.1): the pending-findings queue.
     findings: jsonStore({ v: 1, findings: [] }),
+    // BET-1517 (§9.2): the resolution-plan store (triage output).
+    plans: jsonStore({ v: 1, records: {} }),
     verdicts: jsonStore({ entries: [] }),
     budget: jsonStore({}),
     watchers: jsonStore({ watchers: [] }),

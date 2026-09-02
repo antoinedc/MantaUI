@@ -2129,6 +2129,20 @@ const adaptiveCto = ctoEngine.createCtoEngine({
   engineState: engineStateStore,
   publish: (evt) => bus.publish(evt),
   getSessionInfo: resolveSessionInfo,
+  // BET-1517 (§9.2): the sender session's transcript tail for blocker triage
+  // context — last messages flattened to text and capped at ~2k tokens
+  // (~8000 chars) so the ≤ 6k triage context budget keeps room for the
+  // prompt contract and the finding itself.
+  getTranscriptTail: async (sessionID) => {
+    try {
+      const msgs = await oc.listMessages(sessionID, { limit: 30 });
+      const text = transcriptText(msgs);
+      if (!text) return null;
+      return text.length > 8000 ? text.slice(-8000) : text;
+    } catch {
+      return null;
+    }
+  },
   summarize: segmentSummarize,
   computeOneLiner: segmentOneLiner,
   reaper: ctoEphemeralReaper,

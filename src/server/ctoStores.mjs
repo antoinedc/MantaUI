@@ -146,6 +146,12 @@ export const inboxStore = createCtoJsonStore("inbox", ctoPath("inbox.json"));
 // `{ findings: [...] }`, drained to empty by the engine's card tick; the
 // retention rule below only bounds undrained residue.
 export const findingsStore = createCtoJsonStore("findings", ctoPath("findings.json"));
+// BET-1517 (§9.1/§9.2): the resolution-plan store — the TRIAGE stage's output.
+// Payload shape: `{ records: { <findingId>: { findingId, finding, plans,
+// triagedAt } } }` keyed by content-hash finding id, so a re-triage of the
+// same finding UPSERTS instead of appending. Owned by ctoTriage.mjs; the gate
+// stage (later issue) consumes records from here.
+export const plansStore = createCtoJsonStore("plans", ctoPath("plans.json"));
 export const cardsStore = createCtoJsonStore("cards", ctoPath("cards.json"));
 export const profileStore = createCtoJsonStore("profile", ctoPath("profile.json"));
 export const journalStore = createCtoJsonStore("journal", ctoPath("journal.json"));
