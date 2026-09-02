@@ -8,7 +8,7 @@
 // that produce their data (rule 4 in the decomposition) — they are NOT
 // rendered here.
 
-import { effectsForVerdict } from "./ctoVerdicts.mjs";
+import { effectsForVerdict, betaMean } from "./ctoVerdicts.mjs";
 import { todaySpend, roiMonthKey } from "./ctoBudget.mjs";
 
 const DAY_MS = 86_400_000;
@@ -29,6 +29,15 @@ export const HEALTH_STAT_MIN = Object.freeze({
   reserveFractile: 1,
   roi: 1,
   probeHealth: 1,
+  // BET-1521 (§14-7): the autonomy rows over the 30d window. A per-class
+  // decision row means something at ≥5 signals (executions + silent-logs +
+  // dismissed asks); the calibration row needs ≥5 stated-confidence entries
+  // before an average reads as signal; the box-wide unaided-rate wants ≥5
+  // executions; and the blocker→resolution mean is noise under 3 findings.
+  autonomyDecisions: 5,
+  autonomyCalibration: 5,
+  autonomyResolvedUnaided: 5,
+  autonomyBlockerToResolve: 3,
 });
 
 // EN month labels for ROI row copy — deterministic (server locale must not
@@ -91,9 +100,26 @@ export async function computeHealthStats({
   // BET-1396 (§7.5/§10.5): async () => { tools, probes, healthy, authFailed,
   // lastRunAt } — the probe runner's snapshot over consented tools.
   probesRead = async () => null,
+  // BET-1521 (§14-7): async () => entries[] — the §9.4 cto.resolve ledger
+  // (one entry per plan execution: { ts, planId, class, findingId,
+  // confidence, effective, tau, trigger: act|accepted, outcome:
+  // resolved|escalated, attempts, ... }). Executed plans only.
+  resolveRead = async () => [],
+  // BET-1521 (§9.5): async () => { classes: { <cls>: { successes, outcomes } } }
+  // — the calibration store's per-class last-30 outcome windows.
+  calibrationRead = async () => null,
+  // BET-1521 (§9.3/§9.4): the configured autonomy threshold τ (0..1, default
+  // 0.7) — annotated on the per-class rows + the calibration table payload.
+  ctoAutonomyThreshold = 0.7,
 } = {}) {
   const t = now();
   const stats = [];
+  // BET-1521: the configured autonomy bar, clamped to [0, 1] — an out-of-range
+  // config value (hand-edited config, buggy writer) must never surface as a
+  // nonsense τ on the health rows or the calibration table.
+  const threshold = Number.isFinite(Number(ctoAutonomyThreshold))
+    ? Math.min(1, Math.max(0, Number(ctoAutonomyThreshold)))
+    : 0.7;
 
   // 1. Ambient spend today / cap.
   let budget = null;
@@ -329,5 +355,201 @@ export async function computeHealthStats({
     ...(probeCount > 0 && !probeRan ? { collectingText: "configured — waiting for first run" } : {}),
   });
 
-  return { stats, generatedAt: t };
+  // 10. Autonomy rows (BET-1521, §14-7) — ledger-derived over the 30d window.
+  //     Per class: plans generated, act / ask / none counts, stated vs realized
+  //     confidence (the calibration curve), escalations, retries used, τ at
+  //     decision time. Box-wide: resolved-unaided rate, mean time from blocker
+  //     to resolution. Sources: the §9.4 cto.resolve ledger (executions), the
+  //     `suggest.silent` activity-ledger rows (gate→none decisions) and
+  //     suggestion-dismiss verdicts (asks the user ended without an execution).
+  //     Every read failure degrades to an empty source — rows collect, the
+  //     health read never throws.
+  const resolveCutoff = t - 30 * DAY_MS;
+  let resolveEntries = [];
+  try {
+    resolveEntries = (await resolveRead()) ?? [];
+  } catch {
+    resolveEntries = [];
+  }
+  const resolves = (Array.isArray(resolveEntries) ? resolveEntries : []).filter(
+    (e) => e && typeof e === "object" && typeof e.ts === "number" && e.ts >= resolveCutoff,
+  );
+
+  // Gate→none decisions: below-p_ask silent-logs (each row carries the
+  // finding's class). Read from the same A1 ledger the earlier rows consume.
+  const silentRows = rows.filter(
+    (r) => r?.kind === "suggest.silent" && typeof r?.ts === "number" && r.ts >= resolveCutoff,
+  );
+  // Asks ended without an execution: dismiss verdicts on suggestion subjects
+  // (§9.5 — a rejection). Accepts do not appear here: an accepted ask became
+  // a cto.resolve entry with trigger "accepted".
+  const askDismissedRows = verdicts.filter(
+    (v) =>
+      v?.verdict === "dismiss" &&
+      v?.subject?.type === "suggestion" &&
+      typeof v.subject?.class === "string" &&
+      typeof v?.ts === "number" &&
+      v.ts >= verdictCutoff,
+  );
+
+  const classOf = (c) => (typeof c === "string" && c.length > 0 ? c : null);
+  const perClass = new Map(); // cls -> { entries, silent, askDismissed }
+  const groupFor = (cls) => {
+    let g = perClass.get(cls);
+    if (!g) {
+      g = { entries: [], silent: 0, askDismissed: 0 };
+      perClass.set(cls, g);
+    }
+    return g;
+  };
+  for (const e of resolves) {
+    const cls = classOf(e.class);
+    if (cls) groupFor(cls).entries.push(e);
+  }
+  for (const r of silentRows) {
+    const cls = classOf(r.class);
+    if (cls) groupFor(cls).silent += 1;
+  }
+  for (const v of askDismissedRows) {
+    const cls = classOf(v.subject.class);
+    if (cls) groupFor(cls).askDismissed += 1;
+  }
+
+  // Box-wide: resolved-unaided rate — the share of executions that ended
+  // resolved WITHOUT asking (trigger "act"). Denominator is all executions
+  // (every resolve entry is a resolution attempt, aided or not).
+  const unaided = resolves.filter((e) => e.trigger === "act" && e.outcome === "resolved").length;
+  stats.push({
+    id: "autonomyResolvedUnaided",
+    label: "Resolved unaided · 30d",
+    min: HEALTH_STAT_MIN.autonomyResolvedUnaided,
+    n: resolves.length,
+    value:
+      resolves.length >= HEALTH_STAT_MIN.autonomyResolvedUnaided
+        ? `${Math.round((unaided / resolves.length) * 100)}% unaided (${unaided}/${resolves.length})`
+        : null,
+  });
+
+  // Box-wide: mean time from blocker to resolution. Per finding: the lag
+  // between its FIRST ledgered execution and the execution that resolved it
+  // (escalations + later accepted asks fold in). The §9.4 ledger stamps the
+  // execution time, not the blocker's first-reported time — when BET-1519's
+  // entries carry an explicit first-seen ts, the wiring here upgrades to it.
+  const firstSeen = new Map(); // findingId -> earliest ts
+  for (const e of [...resolves].sort((a, b) => a.ts - b.ts)) {
+    const fid = typeof e.findingId === "string" && e.findingId ? e.findingId : null;
+    if (fid && !firstSeen.has(fid)) firstSeen.set(fid, e.ts);
+  }
+  const resolveLags = [];
+  for (const e of resolves) {
+    if (e.outcome !== "resolved") continue;
+    const fid = typeof e.findingId === "string" && e.findingId ? e.findingId : null;
+    const start = fid ? firstSeen.get(fid) : undefined;
+    if (typeof start === "number" && e.ts - start > 0) resolveLags.push(e.ts - start);
+  }
+  const meanLag = resolveLags.length
+    ? resolveLags.reduce((a, b) => a + b, 0) / resolveLags.length
+    : null;
+  const formatLag = (ms) =>
+    ms >= 3_600_000 ? `${(ms / 3_600_000).toFixed(1)} h` : `${Math.max(1, Math.round(ms / 60_000))} min`;
+  stats.push({
+    id: "autonomyBlockerToResolve",
+    label: "Blocker → resolution · 30d",
+    min: HEALTH_STAT_MIN.autonomyBlockerToResolve,
+    n: resolveLags.length,
+    value:
+      resolveLags.length >= HEALTH_STAT_MIN.autonomyBlockerToResolve && meanLag != null
+        ? `mean ${formatLag(meanLag)}`
+        : null,
+  });
+
+  // Per-class rows, deterministically ordered: class name, then decisions row
+  // before its calibration row. `plans` = distinct executed planIds (the
+  // resolve ledger holds executions; generated-but-never-executed plans
+  // surface as none / dismissed-ask signals instead). `ask` = accepted asks
+  // plus asks dismissed without an execution. Retries = spent extra turns
+  // (attempts − 1, floored at 0).
+  const classNames = [...perClass.keys()].sort((a, b) => a.localeCompare(b));
+  for (const cls of classNames) {
+    const g = perClass.get(cls);
+    const entries = g.entries;
+    const acts = entries.filter((e) => e.trigger === "act").length;
+    const asks = entries.filter((e) => e.trigger === "accepted").length + g.askDismissed;
+    const escs = entries.filter((e) => e.outcome === "escalated").length;
+    const retries = entries.reduce((sum, e) => sum + Math.max(0, (Number(e.attempts) || 1) - 1), 0);
+    const planIds = new Set(entries.map((e) => (typeof e.planId === "string" ? e.planId : "")).filter(Boolean));
+    const signals = entries.length + g.silent + g.askDismissed;
+    stats.push({
+      id: `autonomyClass.${cls}`,
+      label: `Autonomy · ${cls}`,
+      min: HEALTH_STAT_MIN.autonomyDecisions,
+      n: signals,
+      value:
+        signals >= HEALTH_STAT_MIN.autonomyDecisions
+          ? `plans ${planIds.size} · act ${acts} · ask ${asks} · none ${g.silent} · esc ${escs} · retries ${retries}`
+          : null,
+    });
+  }
+
+  // Per-class calibration curve (§14-7): stated vs realized confidence. Stated
+  // = the mean confidence the gate recorded on the entries; realized = the
+  // share that actually resolved. τ at decision time = the most recent
+  // entry's recorded τ, falling back to the configured bar when the entries
+  // predate τ stamping.
+  for (const cls of classNames) {
+    const g = perClass.get(cls);
+    const withConf = g.entries.filter((e) => typeof e.confidence === "number" && Number.isFinite(e.confidence));
+    if (withConf.length === 0) continue;
+    const stated = withConf.reduce((a, e) => a + e.confidence, 0) / withConf.length;
+    const realized = g.entries.length
+      ? g.entries.filter((e) => e.outcome === "resolved").length / g.entries.length
+      : 0;
+    const lastEntry = [...g.entries].sort((a, b) => a.ts - b.ts).at(-1);
+    const tauAtDecision = typeof lastEntry?.tau === "number" && Number.isFinite(lastEntry.tau)
+      ? lastEntry.tau
+      : threshold;
+    stats.push({
+      id: `autonomyCalib.${cls}`,
+      label: `Calibration · ${cls}`,
+      min: HEALTH_STAT_MIN.autonomyCalibration,
+      n: withConf.length,
+      value:
+        withConf.length >= HEALTH_STAT_MIN.autonomyCalibration
+          ? `stated ${stated.toFixed(2)} · realized ${realized.toFixed(2)} · τ ${tauAtDecision.toFixed(2)}`
+          : null,
+    });
+  }
+
+  // 11. Calibration table payload (BET-1521, §9.5) — returned alongside the
+  //     stats for the Settings → CTO read-only table: per class the Beta(1,1)
+  //     posterior mean over its last-30 outcome window (via the shared
+  //     estimator in ctoVerdicts.mjs), the raw counts it was computed from,
+  //     and the configured τ. null when the store is absent or the read
+  //     fails — the table then renders its collecting line, never zeros.
+  let calibration = null;
+  try {
+    const cal = await calibrationRead();
+    const windows = cal && typeof cal === "object" ? (cal.classes && typeof cal.classes === "object" ? cal.classes : null) : null;
+    if (windows) {
+      calibration = {
+        tau: threshold,
+        classes: Object.entries(windows)
+          .filter(([, w]) => w && typeof w === "object" && Number.isFinite(Number(w.outcomes)))
+          .map(([cls, w]) => {
+            const successes = Math.max(0, Math.min(Number(w.outcomes), Number(w.successes) || 0));
+            return {
+              cls,
+              value: betaMean(successes + 1, Number(w.outcomes) - successes + 1),
+              successes,
+              outcomes: Number(w.outcomes),
+            };
+          })
+          .sort((a, b) => a.cls.localeCompare(b.cls)),
+      };
+    }
+  } catch {
+    calibration = null;
+  }
+
+  return { stats, calibration, generatedAt: t };
 }

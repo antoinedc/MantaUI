@@ -319,6 +319,10 @@ export type AppConfig = {
   // budget module's DEFAULT_NIGHT_CAP_USD); once tonight's estimated
   // overnight spend reaches it, no further overnight jobs are selected.
   ctoNightCapUsd?: number;
+  // Adaptive CTO (BET-1521, §9.3/§9.4): the autonomy threshold τ (0..1,
+  // default 0.7) — act on its own when the candidate's confidence clears this
+  // bar. The Settings τ control writes it; the gate + calibration read it.
+  ctoAutonomyThreshold?: number;
   // ----- Manta Optimizer (BET-1342 / Phase 2) -----
   // Master switch for the optimizer. DEFAULT FALSE. Opt-in: with it OFF the
   // optimizer changes nothing. It does NOT gate Automatic Manta Routing —

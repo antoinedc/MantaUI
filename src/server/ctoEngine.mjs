@@ -97,6 +97,7 @@ import {
   askResolveInfo,
   askQuestionText,
   createCtoCards,
+  findingLedgerKind,
   isAskResolveEvent,
   isConditionGoneResult,
 } from "./ctoCards.mjs";
@@ -2348,7 +2349,9 @@ export function createCtoEngine(deps = {}) {
           void ledgerLog({
             channel: CHANNEL_EVENT,
             sessionID: senderSessionID ?? undefined,
-            kind: row?.source === "ask" ? `ask.${row?.sourceKind ?? "blocker"}` : `inbox.${row?.noteKind ?? "blocker"}`,
+            // BET-1516: ONE pure mapping for all three producers (inbox / ask /
+            // health) — `ask.<sourceKind>` / `health.blocker` / `inbox.<noteKind>`.
+            kind: findingLedgerKind(row),
             salience: "high",
             senderReliability: weight,
             refs,

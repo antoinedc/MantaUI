@@ -170,6 +170,18 @@ export const engineStateStore = createCtoJsonStore("engine-state", ctoPath("engi
 // so it moved to a dedicated file no other writer touches. ctoTrust.mjs
 // migrates a legacy `es.trust` payload on first load.
 export const trustStore = createCtoJsonStore("trust", ctoPath("trust.json"));
+// BET-1521: the §9.4 cto.resolve ledger — one entry per plan execution
+// ({ planId, class, findingId, confidence, calibration, effective, tau,
+// trigger: act|accepted, outcome: resolved|escalated, attempts, cost, undo,
+// refs }). Payload `{ entries: [...] }`, verdicts-mirrored; owned by the
+// executor (BET-1519) and read by the §14-7 health rows. Readers tolerate the
+// bare `{ v: 1 }` default payload (entries ?? []).
+export const resolveStore = createCtoJsonStore("resolve", ctoPath("resolve.json"));
+// BET-1521: the §9.5 calibration store — per-class last-30 outcome windows
+// (`{ classes: { <cls>: { successes, outcomes } } }`), Beta(1,1) prior.
+// Owned by the gate/calibration engine (BET-1518); read by the §10.5
+// calibration table. Readers tolerate the bare `{ v: 1 }` default.
+export const calibrationStore = createCtoJsonStore("calibration", ctoPath("calibration.json"));
 
 // ---------------------------------------------------------------------------
 // BET-1425 engine-state write hygiene, generalized in BET-1464 (defect 3) —

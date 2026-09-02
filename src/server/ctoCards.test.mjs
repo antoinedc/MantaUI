@@ -857,6 +857,12 @@ test("BET-1516: an inbox blocker note queues a finding (source inbox) carrying t
   assert.equal(h.findings.length, 1);
   const row = h.findings[0];
   assert.equal(row.source, "inbox");
+  // The normalized core every producer row carries: the stable card identity
+  // the pipeline keys downstream decisions on + the outstanding-since stamp.
+  assert.equal(row.sourceKind, "inbox");
+  assert.equal(row.sourceId, stableCardId("inbox", inboxGroupKey({ tag: "ci", title: "CI broken", message: "build is red", project: undefined })));
+  assert.equal(row.pendingSince, h.clock.ms);
+  assert.equal(row.project, undefined, "no session-info seam wired in this harness");
   assert.equal(row.noteId, "note-1");
   assert.equal(row.noteKind, "blocker");
   assert.equal(row.message, "build is red");
@@ -890,6 +896,53 @@ test("BET-1516: a promoted worker ask queues a finding (source ask) at promotion
   assert.equal(row.sessionID, "s1");
   assert.equal(row.message, "Pick one?");
   assert.equal(row.title, "Question waiting");
+  assert.equal(row.pendingSince, 1_000_000, "outstanding since the ask was asked");
+});
+
+test("BET-1516: an inbox blocker note queues the third finding (source health) identity fields — project resolves through the session-info seam", async () => {
+  const h = makeHarness({ fireNotify: true, getSessionInfo: async () => ({ project: "better-ui" }) });
+  await h.cards.onInboxBlocker({
+    message: "build is red",
+    title: "CI broken",
+    tag: "ci",
+    id: "note-1",
+    sender: { sessionID: "ses-9", name: "worker" },
+    ts: h.clock.ms,
+  });
+  assert.equal(h.findings.length, 1);
+  assert.equal(h.findings[0].project, "better-ui", "the sender session's project travels with the row");
+});
+
+test("BET-1516: a health escalation queues the third finding (source health) — one per escalation event, consumed entries never re-queue", async () => {
+  const h = makeHarness({
+    pendingBlockers: [
+      { id: "b1", source: "watchdog", reason: "ambient spend 5 > 4x expected", ts: 400, resolved: false },
+      { id: "b2", source: "watchdog", reason: "ambient spend 7 > 4x expected", ts: 900, resolved: false },
+      { id: "b3", source: "rate_limit", reason: "sessionCreationsPerHour", ts: 800, resolved: false },
+    ],
+  });
+
+  await h.cards.ingestHealthEscalations();
+  // Two condition groups (watchdog, rate_limit) → exactly two findings, the
+  // same one-row-per-escalation contract the other two producers follow.
+  assert.equal(h.findings.length, 2);
+  const watchdog = h.findings.find((f) => f.sourceId === "watchdog");
+  const rateLimit = h.findings.find((f) => f.sourceId === "rate_limit");
+  assert.ok(watchdog && rateLimit, "one row per healthGroupKey (the card identity)");
+  // The normalized core — the same shape the inbox/ask producers emit.
+  assert.equal(watchdog.source, "health");
+  assert.equal(watchdog.sourceKind, HEALTH_SOURCE_KIND);
+  assert.equal(watchdog.message, "ambient spend 7 > 4x expected", "the most recent reason travels");
+  assert.equal(watchdog.title, "Health check");
+  assert.equal(watchdog.pendingSince, 400, "earliest outstanding trip in the group");
+  assert.deepEqual(watchdog.refs, []);
+  assert.equal(watchdog.ts, h.clock.ms);
+  // The card path is untouched: one open health card per group.
+  assert.equal(h.store().cards.filter((c) => c.state === "open").length, 2);
+  // Each entry is consumed on ingest (never reprocessed) — a later tick
+  // cannot re-enqueue a finding from the same escalation.
+  await h.cards.ingestHealthEscalations();
+  assert.equal(h.findings.length, 2);
 });
 
 test("BET-1516: a promoted inbox ask refreshes the card's note fields (TTL stamp travels to the card)", async () => {

@@ -338,3 +338,195 @@ test("ROI row: roiRead failure degrades to collecting, never throws", async () =
   assert.equal(r.value, null);
   assert.equal(r.collectingText, "collecting");
 });
+
+// --- BET-1521: §14-7 autonomy rows + §9.5 calibration table ----------------
+
+// A §9.4 cto.resolve entry — one row per plan execution.
+function resolveEntry(over = {}) {
+  return {
+    ts: NOW - 1 * DAY,
+    planId: "plan-1",
+    class: "record-decision",
+    findingId: "f-1",
+    confidence: 0.8,
+    effective: 0.75,
+    tau: 0.7,
+    trigger: "act",
+    outcome: "resolved",
+    attempts: 1,
+    ...over,
+  };
+}
+
+test("autonomy rows: no ledger → both box-wide rows collecting (0/min)", async () => {
+  const { stats } = await computeHealthStats({ now: () => NOW });
+  for (const id of ["autonomyResolvedUnaided", "autonomyBlockerToResolve"]) {
+    const s = stats.find((x) => x.id === id);
+    assert.equal(s.value, null);
+    assert.equal(s.n, 0);
+    assert.equal(s.min, HEALTH_STAT_MIN[id]);
+  }
+});
+
+test("resolved unaided: share of executions that resolved without asking", async () => {
+  const entries = [
+    resolveEntry(), // act + resolved → unaided
+    resolveEntry({ findingId: "f-2", trigger: "accepted" }), // aided
+    resolveEntry({ findingId: "f-3", outcome: "escalated" }), // act but escalated
+    resolveEntry({ findingId: "f-4" }),
+    resolveEntry({ findingId: "f-5" }),
+  ];
+  const { stats } = await computeHealthStats({ now: () => NOW, resolveRead: async () => entries });
+  const s = stats.find((x) => x.id === "autonomyResolvedUnaided");
+  assert.equal(s.n, 5);
+  assert.equal(s.value, "60% unaided (3/5)"); // 3 act-resolved of 5 executions
+});
+
+test("resolved unaided: entries older than 30d are excluded", async () => {
+  const entries = [
+    resolveEntry({ ts: NOW - 40 * DAY }),
+    ...Array.from({ length: 5 }, (_, i) => resolveEntry({ findingId: `f-${i}` })),
+  ];
+  const { stats } = await computeHealthStats({ now: () => NOW, resolveRead: async () => entries });
+  const s = stats.find((x) => x.id === "autonomyResolvedUnaided");
+  assert.equal(s.n, 5);
+});
+
+test("blocker → resolution: mean lag from first ledgered execution to the resolving one", async () => {
+  const entries = [
+    // finding A: first seen 90 min before resolution (lag 90 min)
+    resolveEntry({ findingId: "f-a", ts: NOW - 3 * 3_600_000 }),
+    resolveEntry({ findingId: "f-a", ts: NOW - 1.5 * 3_600_000 }),
+    // finding B: first seen 30 min before resolution (lag 30 min)
+    resolveEntry({ findingId: "f-b", trigger: "accepted", ts: NOW - 2 * 3_600_000 }),
+    resolveEntry({ findingId: "f-b", trigger: "accepted", ts: NOW - 1.5 * 3_600_000 }),
+    // finding C: first seen 60 min before resolution (lag 60 min)
+    resolveEntry({ findingId: "f-c", ts: NOW - 2 * 3_600_000 }),
+    resolveEntry({ findingId: "f-c", ts: NOW - 3_600_000 }),
+  ];
+  const { stats } = await computeHealthStats({ now: () => NOW, resolveRead: async () => entries });
+  const s = stats.find((x) => x.id === "autonomyBlockerToResolve");
+  assert.equal(s.n, 3); // three findings resolved
+  assert.equal(s.value, "mean 1.0 h"); // (90 + 30 + 60) / 3 = 60 min
+});
+
+test("blocker → resolution: only findings with a positive resolution lag count", async () => {
+  const entries = [
+    resolveEntry({ findingId: "f-a" }), // resolved, single entry → lag 0 → excluded
+    resolveEntry({ findingId: "f-b", outcome: "escalated", ts: NOW - 3_600_000 }), // never resolved
+    resolveEntry({ findingId: "f-c", ts: NOW - 3 * 3_600_000 }), // first seen
+    resolveEntry({ findingId: "f-c", ts: NOW - 3_600_000 }), // resolved, lag 2 h
+  ];
+  const { stats } = await computeHealthStats({ now: () => NOW, resolveRead: async () => entries });
+  const s = stats.find((x) => x.id === "autonomyBlockerToResolve");
+  assert.equal(s.n, 1); // only f-c has a positive lag
+});
+
+test("per-class decisions row: counts act/ask/none/escalations/retries over the window", async () => {
+  const entries = [
+    resolveEntry({ planId: "p-1" }), // act
+    resolveEntry({ planId: "p-2", findingId: "f-2" }), // act
+    resolveEntry({ planId: "p-3", findingId: "f-3", trigger: "accepted" }), // accepted ask
+    resolveEntry({ planId: "p-4", findingId: "f-4", outcome: "escalated", attempts: 2 }), // retry used
+    resolveEntry({ planId: "p-5", findingId: "f-5", trigger: "accepted", attempts: 3 }), // 2 retries
+  ];
+  const { stats } = await computeHealthStats({
+    now: () => NOW,
+    resolveRead: async () => entries,
+    ledgerRead: async () => [
+      { kind: "suggest.silent", ts: NOW - DAY, class: "record-decision" },
+      { kind: "suggest.silent", ts: NOW - DAY, class: "other-class" },
+    ],
+    verdictsRead: async () => [
+      { ts: NOW - DAY, verdict: "dismiss", subject: { type: "suggestion", id: "s-1", class: "record-decision" } },
+      { ts: NOW - DAY, verdict: "dismiss", subject: { type: "suggestion", id: "s-2", class: "record-decision" } },
+      // a fact rejection is NOT a dismissed ask
+      { ts: NOW - DAY, verdict: "dismiss", subject: { type: "fact", id: "x", class: "record-decision" } },
+    ],
+  });
+  const s = stats.find((x) => x.id === "autonomyClass.record-decision");
+  assert.equal(s.n, 8); // 5 entries + 1 silent + 2 dismissed asks
+  assert.equal(s.min, HEALTH_STAT_MIN.autonomyDecisions);
+  assert.equal(s.value, "plans 5 · act 3 · ask 4 · none 1 · esc 1 · retries 3");
+});
+
+test("per-class rows: absent class id or missing class stays out of per-class rows but counts box-wide", async () => {
+  const entries = [
+    ...Array.from({ length: 5 }, (_, i) => resolveEntry({ findingId: `f-${i}` })), // class set
+    resolveEntry({ findingId: "f-9", class: undefined }), // no class
+  ];
+  const { stats } = await computeHealthStats({ now: () => NOW, resolveRead: async () => entries });
+  assert.equal(stats.find((x) => x.id === "autonomyClass.record-decision").n, 5);
+  assert.equal(stats.find((x) => x.id === "autonomyResolvedUnaided").n, 6); // box-wide sees all
+  assert.ok(!stats.some((x) => x.id === "autonomyClass.undefined"));
+});
+
+test("per-class calibration row: stated mean vs realized share, τ from the last entry", async () => {
+  const entries = Array.from({ length: 4 }, (_, i) => resolveEntry({ findingId: `f-${i}`, confidence: 0.9 - i * 0.1 }));
+  entries.push(resolveEntry({ findingId: "f-9", confidence: 0.5, outcome: "escalated", tau: 0.65 }));
+  const { stats } = await computeHealthStats({ now: () => NOW, resolveRead: async () => entries });
+  const s = stats.find((x) => x.id === "autonomyCalib.record-decision");
+  assert.equal(s.n, 5);
+  // stated: (0.9+0.8+0.7+0.6+0.5)/5 = 0.70; realized: 4 resolved / 5 = 0.80
+  assert.equal(s.value, "stated 0.70 · realized 0.80 · τ 0.65");
+});
+
+test("per-class calibration row: τ falls back to the configured bar when entries lack it", async () => {
+  const entries = Array.from({ length: 5 }, (_, i) => resolveEntry({ findingId: `f-${i}`, tau: undefined }));
+  const { stats } = await computeHealthStats({
+    now: () => NOW,
+    ctoAutonomyThreshold: 0.55,
+    resolveRead: async () => entries,
+  });
+  const s = stats.find((x) => x.id === "autonomyCalib.record-decision");
+  assert.match(s.value, /τ 0\.55$/);
+});
+
+test("autonomy rows: resolveRead failure degrades to collecting, never throws", async () => {
+  const { stats } = await computeHealthStats({
+    now: () => NOW,
+    resolveRead: async () => {
+      throw new Error("store down");
+    },
+  });
+  for (const s of stats.filter((x) => x.id.startsWith("autonomy"))) {
+    assert.equal(s.value, null);
+  }
+});
+
+test("calibration table: Beta(1,1) posterior mean over the raw counts + τ annotation", async () => {
+  const { calibration } = await computeHealthStats({
+    now: () => NOW,
+    calibrationRead: async () => ({ classes: { "record-decision": { successes: 11, outcomes: 30 } } }),
+  });
+  assert.equal(calibration.tau, 0.7); // default τ
+  assert.deepEqual(calibration.classes, [
+    { cls: "record-decision", value: 0.375, successes: 11, outcomes: 30 }, // (11+1)/(30+2)
+  ]);
+});
+
+test("calibration table: configured τ is clamped into [0, 1]", async () => {
+  const { calibration } = await computeHealthStats({
+    now: () => NOW,
+    ctoAutonomyThreshold: 5,
+    calibrationRead: async () => ({ classes: { a: { successes: 1, outcomes: 2 } } }),
+  });
+  assert.equal(calibration.tau, 1);
+});
+
+test("calibration table: absent store, bare default payload or failed read → null, never fabricated rows", async () => {
+  const absent = await computeHealthStats({ now: () => NOW });
+  assert.equal(absent.calibration, null);
+  const bare = await computeHealthStats({
+    now: () => NOW,
+    calibrationRead: async () => ({ v: 1 }), // the store's default payload
+  });
+  assert.equal(bare.calibration, null);
+  const failed = await computeHealthStats({
+    now: () => NOW,
+    calibrationRead: async () => {
+      throw new Error("store down");
+    },
+  });
+  assert.equal(failed.calibration, null);
+});

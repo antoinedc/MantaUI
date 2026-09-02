@@ -55,10 +55,12 @@ import {
   budgetTodayUsd,
   digestEvidenceAction,
   evidenceExpansion,
+  calibrationTableDisplay,
   type BlockerCard,
   type ConnectCardRow,
   type CtoState,
   type CtoHealthStat,
+  type CtoCalibrationTable,
   type DecisionCardRow,
   type SuggestionApi,
   type VetoCardRow,
@@ -129,6 +131,9 @@ type CtoSettingsConfig = {
   // both — the full render is gated on High + Overnight on (§10.5 card 3).
   ctoOvernight?: boolean;
   ctoNightCapUsd?: number;
+  // BET-1521 (§9.3/§9.4): the autonomy threshold τ (0..1, default 0.7) — the
+  // Settings τ control writes it; the gate + calibration read it.
+  ctoAutonomyThreshold?: number;
 };
 
 // §11.2 defaults — the same constants ctoBudget.mjs enforces server-side.
@@ -919,7 +924,10 @@ function BackfillCard({ state }: { state: CtoState | null }) {
 // ---------------------------------------------------------------------------
 // Settings & health (§10.5)
 // ---------------------------------------------------------------------------
-function SettingsView({
+// Exported for the Settings → CTO τ round-trip component test
+// (ctoSettingsTau.test.tsx, BET-1521) — the control drives a real mock
+// window.api through the shared test harness.
+export function SettingsView({
   paused,
   pausedAt,
   onBack,
@@ -944,8 +952,12 @@ function SettingsView({
   const [config, setConfig] = useState<CtoSettingsConfig | null>(null);
   const [capText, setCapText] = useState("");
   const [nightCapText, setNightCapText] = useState("");
+  const [tauText, setTauText] = useState("");
   const [health, setHealth] = useState<CtoHealthStat[]>([]);
   const [busyPause, setBusyPause] = useState(false);
+  // BET-1521 (§9.5): the per-class calibration table (value + counts + current
+  // τ), read with the health stats on settings-open — one payload, no polling.
+  const [calibration, setCalibration] = useState<CtoCalibrationTable | null>(null);
   // BET-1405 (§10.5 card 3): budget payload (day buckets + quota cache) and
   // usage snapshots (provider window notes), read once on settings-open.
   const [budget, setBudget] = useState<{ days?: Record<string, { usd?: number } | undefined>; quota?: Record<string, { provider?: string; mode?: string | null; reserve?: number | null; mape14?: number | null } | undefined> } | null>(null);
@@ -982,12 +994,16 @@ function SettingsView({
         ctoDigestPush: !!c?.ctoDigestPush,
         ctoOvernight: !!c?.ctoOvernight,
         ctoNightCapUsd: c?.ctoNightCapUsd,
+        ctoAutonomyThreshold: c?.ctoAutonomyThreshold,
       });
       setCapText(String(c?.ctoAmbientCap ?? DEFAULT_AMBIENT_CAP_USD));
       setNightCapText(c?.ctoNightCapUsd != null ? String(c.ctoNightCapUsd) : "");
+      setTauText(c?.ctoAutonomyThreshold != null ? String(c.ctoAutonomyThreshold) : "");
     }).catch(reportSettingsLoadError("the CTO settings"));
     void window.api.ctoHealthGet().then((h) => {
-      if (aliveRef.current) setHealth(h.stats);
+      if (!aliveRef.current) return;
+      setHealth(h.stats);
+      setCalibration(h.calibration ?? null);
     }).catch(reportSettingsLoadError("the health stats"));
     // BET-1405 (§10.5 card 3): the persisted budget payload (day buckets +
     // quota cache) and the usage snapshots (provider window notes) — one read
@@ -1049,6 +1065,20 @@ function SettingsView({
     }
     void applyConfig({ ctoNightCapUsd: Math.round(n * 100) / 100 });
   }, [nightCapText, applyConfig, pushToast]);
+
+  // BET-1521 (§9.3/§9.4): the autonomy threshold τ — a proportion, 0..1.
+  // Two decimals is the meaningful precision (the gate compares against a
+  // calibration mean, not a micro-signal); values outside the range are a
+  // rejected write, not a silent clamp (a silently-clamped 5 would read as 1
+  // on reopen with no hint it was capped).
+  const saveTau = useCallback(() => {
+    const n = Number(tauText);
+    if (!Number.isFinite(n) || n < 0 || n > 1) {
+      pushToast({ id: `tau-${Date.now()}`, message: "Autonomy bar must be between 0 and 1." });
+      return;
+    }
+    void applyConfig({ ctoAutonomyThreshold: Math.round(n * 100) / 100 });
+  }, [tauText, applyConfig, pushToast]);
 
   const doPause = useCallback(async () => {
     setBusyPause(true);
@@ -1172,6 +1202,32 @@ function SettingsView({
                 </div>
               </div>
 
+              {/* Autonomy bar τ (BET-1521, §9.3/§9.4): the calibrated gate's
+                  threshold. Sits with the effort dial — both bound how much
+                  the CTO does on its own. */}
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-medium text-text">Autonomy bar (τ)</div>
+                  <div className="text-sm text-text-muted">
+                    The CTO acts on its own when its confidence clears this bar (0–1, default 0.7).
+                  </div>
+                </div>
+                <input
+                  type="number"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={tauText}
+                  onChange={(e) => setTauText(e.target.value)}
+                  onBlur={saveTau}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") saveTau();
+                  }}
+                  className="w-20 rounded-md border border-border bg-bg px-2 py-1 text-sm text-text"
+                  aria-label="Autonomy threshold tau, between 0 and 1"
+                />
+              </div>
+
               {/* Ambient cap editor */}
               <div className="flex items-center justify-between gap-3">
                 <div>
@@ -1293,6 +1349,52 @@ function SettingsView({
           </section>
           )}
 
+          {/* ---------- Autonomy calibration table (§9.5, BET-1521) ---------- */}
+          {/* Read-only: where the CTO is holding itself back per class — the
+              Beta(1,1) mean over each class's last-30 outcomes, the raw counts
+              behind it, and the configured τ. Collects until the store holds
+              windows; a failed read renders the collecting line, never zeros. */}
+          <section className="rounded-lg border border-border-subtle p-4">
+            <h3 className="text-sm font-semibold text-text">Autonomy calibration</h3>
+            {(() => {
+              const cal = calibrationTableDisplay(calibration);
+              return cal.collecting ? (
+                <p className="mt-1 text-sm text-text-faint">
+                  Collecting — the per-class windows fill as the CTO resolves work.
+                </p>
+              ) : (
+                <div className="mt-3">
+                  <p className="text-sm text-text-muted">
+                    Beta mean over each class&rsquo;s last 30 outcomes
+                    {cal.tauText ? ` · current ${cal.tauText}` : ""}.
+                  </p>
+                  <div className="mt-2 overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-left text-xs text-text-faint">
+                          <th className="py-2 font-medium">Class</th>
+                          <th className="py-2 font-medium">Calibration</th>
+                          <th className="py-2 text-right font-medium">Outcomes</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-border-subtle">
+                        {cal.rows.map((row) => (
+                          <tr key={row.cls}>
+                            <td className="py-2 text-text-muted">{row.cls}</td>
+                            <td className="py-2 font-mono text-text">{row.value.toFixed(2)}</td>
+                            <td className="py-2 text-right font-mono text-text">
+                              {row.successes}/{row.outcomes}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              );
+            })()}
+          </section>
+
           {/* BET-1468 item 2: the config read landed but a secondary read
               failed — say so (the toast already fired) with a Retry, instead
               of leaving the health/budget sections silently empty. */}
@@ -1331,6 +1433,10 @@ function SettingsView({
                       ? "Cap-hits caused · 30d"
                       : id === "reserveFractile"
                       ? "Reserve fractile"
+                      : id === "autonomyResolvedUnaided"
+                      ? "Resolved unaided · 30d"
+                      : id === "autonomyBlockerToResolve"
+                      ? "Blocker → resolution · 30d"
                       : "ROI · self-report",
                   value: null,
                   n: 0,
@@ -1346,6 +1452,24 @@ function SettingsView({
                   </li>
                 );
               })}
+              {/* BET-1521 (§14-7): the per-class autonomy + calibration rows
+                  (`autonomyClass.<cls>` / `autonomyCalib.<cls>`) — the server
+                  emits them only for classes with signals in the 30d window,
+                  in a deterministic order, so they render only when the data
+                  exists and gate on their own min-sample size. */}
+              {health
+                .filter((s) => s.id.startsWith("autonomyClass.") || s.id.startsWith("autonomyCalib."))
+                .map((stat) => {
+                  const d = statDisplay(stat);
+                  return (
+                    <li key={stat.id} className="flex items-baseline justify-between gap-3 py-2">
+                      <span className="text-sm text-text-muted">{stat.label}</span>
+                      <span className={"text-right text-sm " + (d.ready ? "font-mono text-text" : "text-text-faint")}>
+                        {d.text}
+                      </span>
+                    </li>
+                  );
+                })}
             </ul>
           </section>
 
@@ -1427,8 +1551,10 @@ function SettingsView({
   );
 }
 
-// §10.5 card 2 render order. BET-1400's forecast/cap-hit/reserve rows and
-// BET-1405's ROI row (last — the self-report closes the list).
+// §10.5 card 2 render order. BET-1400's forecast/cap-hit/reserve rows,
+// BET-1405's ROI row, then BET-1521's box-wide §14-7 autonomy rows (the
+// per-class rows render dynamically after these — class ids are data-derived,
+// so they can't live in a const list).
 const HEALTH_ROW_ORDER = [
   "ambientSpendToday",
   "digestOpens",
@@ -1438,6 +1564,8 @@ const HEALTH_ROW_ORDER = [
   "capHitsCaused",
   "reserveFractile",
   "roi",
+  "autonomyResolvedUnaided",
+  "autonomyBlockerToResolve",
 ] as const;
 
 // ---------------------------------------------------------------------------
