@@ -26,6 +26,7 @@ import { BLOCKER_AFTER_MS, CONTENTLESS_CARD_PRUNE_KEY, createCtoCards, splitOrph
 import { inboxStore, sweepInbox, INBOX_TTL_MS } from "./ctoStores.mjs";
 import { createCtoInbound } from "./cto.mjs";
 import { WATCHER_HIT_KIND, WATCHER_HIT_SALIENCE, EVENT_PATTERN, RATE_THRESHOLD, USAGE_BURN } from "./ctoWatchers.mjs";
+import { findingIdOf } from "./ctoTriage.mjs";
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -1427,6 +1428,160 @@ test("cardTick drains the queue and runs the inbox-card liveness pass; a promote
   await engine.cardTick();
   const left = (await stores.cards.load()).cards.filter((c) => c.state === "open");
   assert.equal(left.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// BET-1517 — the triage stage: drain → one gated model call per finding →
+// 0–3 validated resolution plans in plans.json, keyed by finding id.
+// ---------------------------------------------------------------------------
+
+test("cardTick triages drained findings: one gated triage call per finding, plans keyed by finding id", async () => {
+  const clock = { ms: 1_000_000 };
+  const stores = makeMemoryStores();
+  const modelCalls = [];
+  const INBOX_ROW = {
+    source: "inbox",
+    ts: clock.ms,
+    noteId: "note-1",
+    noteKind: "blocker",
+    message: "deploy failed",
+    title: "Deploy",
+    tag: "deploy",
+    refs: ["BET-9"],
+    condition: "session s1 active",
+    sender: { sessionID: "s1", name: "w" },
+  };
+  await stores.findings.save({ v: 1, findings: [INBOX_ROW] });
+  const engine = createCtoEngine({
+    configGet: async () => ({ ctoEnabled: true }),
+    stores,
+    ledger: { append: async () => true },
+    facts: { getState: async () => ({ senderReliability: {} }) },
+    runEphemeral: async (args) => {
+      modelCalls.push(args);
+      return {
+        ok: true,
+        text: JSON.stringify({
+          plans: [
+            {
+              class: "job-redispatch",
+              diagnosis: "The deploy job died; rerun it.",
+              steps: ["Restart the deploy job"],
+              access: [],
+              verify: { kind: "condition-gone" },
+              undo: "none",
+              confidence: 0.7,
+              report: { one_liner: "Rerunning the failed deploy", bullets: [] },
+            },
+          ],
+        }),
+      };
+    },
+    now: () => clock.ms,
+    publish: () => {},
+  });
+
+  // The drain returns the rows (the triage seam's input shape).
+  const drained = await engine.drainFindings();
+  assert.equal(drained.drained, 1);
+  assert.deepEqual(drained.rows, [INBOX_ROW]);
+  assert.deepEqual((await stores.findings.load()).findings, []);
+
+  // Re-queue, then run the WHOLE tick: drain → triage → plans store.
+  await stores.findings.save({ v: 1, findings: [INBOX_ROW] });
+  await engine.cardTick();
+  assert.equal(modelCalls.length, 1);
+  assert.equal(modelCalls[0].taskClass, "triage", "the call runs as the §12.3 triage class");
+  assert.deepEqual((await stores.findings.load()).findings, []);
+  const records = (await stores.plans.load()).records;
+  assert.equal(Object.keys(records).length, 1, "one record, keyed by finding id");
+  const fid = findingIdOf(INBOX_ROW);
+  const rec = records[fid];
+  assert.ok(rec, `record keyed ${fid} exists`);
+  assert.equal(rec.plans.length, 1);
+  assert.equal(rec.plans[0].class, "job-redispatch");
+  assert.equal(rec.plans[0].finding.text, "deploy failed", "the verbatim finding rides the plan");
+  assert.equal(rec.plans[0].verify.kind, "condition-gone");
+  assert.equal(rec.triagedAt, clock.ms);
+  // The context carried the untrusted finding block.
+  const findingBlock = modelCalls[0].context.find((b) => typeof b.text === "string" && b.text.includes("deploy failed"));
+  assert.ok(findingBlock && /untrusted DATA/.test(findingBlock.text));
+});
+
+test("triageDrained: thrifty sheds finding triage first and keeps blocker triage to the last token (§12.2)", async () => {
+  const clock = { ms: 3_000_000 };
+  const stores = makeMemoryStores();
+  const modelCalls = [];
+  const INBOX_ROW = {
+    source: "inbox",
+    ts: clock.ms,
+    noteId: "note-1",
+    noteKind: "blocker",
+    message: "deploy failed",
+    title: "Deploy",
+    tag: "deploy",
+    refs: [],
+    sender: { sessionID: "s1" },
+  };
+  const ASK_ROW = {
+    source: "ask",
+    ts: clock.ms,
+    sourceKind: "permission",
+    sourceId: "perm_1",
+    sessionID: "s2",
+    message: "Allow rm -rf?",
+    title: "Permission needed",
+    refs: [],
+  };
+  const engine = createCtoEngine({
+    configGet: async () => ({ ctoEnabled: true }),
+    stores,
+    ledger: { append: async () => true },
+    facts: { getState: async () => ({ senderReliability: {} }) },
+    runEphemeral: async (args) => {
+      modelCalls.push(args);
+      return { ok: true, text: '{"plans":[]}' };
+    },
+    now: () => clock.ms,
+    publish: () => {},
+  });
+  await engine.setThrifty(true, { reason: "test", source: "test" });
+  const res = await engine.triageDrained([INBOX_ROW, ASK_ROW]);
+  assert.deepEqual(res, { triaged: 1, shed: 1 });
+  assert.equal(modelCalls.length, 1);
+  const onlyBlockerTriaged = modelCalls[0].context.some((b) => typeof b.text === "string" && b.text.includes("deploy failed"));
+  const askShed = !modelCalls[0].context.some((b) => typeof b.text === "string" && b.text.includes("Allow rm -rf?"));
+  assert.ok(onlyBlockerTriaged && askShed, "the inbox blocker is triaged, the ask finding is shed");
+  // The record for the triaged blocker landed; nothing for the shed ask.
+  const records = (await stores.plans.load()).records;
+  assert.equal(Object.keys(records).length, 1);
+  assert.ok(records[findingIdOf(INBOX_ROW)]);
+});
+
+test("triageDrained: no runEphemeral wired → calls gate out, plans store untouched, tick survives", async () => {
+  const clock = { ms: 4_000_000 };
+  const stores = makeMemoryStores();
+  const ledgerRows = [];
+  const engine = createCtoEngine({
+    configGet: async () => ({ ctoEnabled: true }),
+    stores,
+    ledger: { append: async (row) => ledgerRows.push(row) },
+    facts: { getState: async () => ({ senderReliability: {} }) },
+    now: () => clock.ms,
+    publish: () => {},
+  });
+  const res = await engine.triageDrained([{ source: "inbox", ts: clock.ms, noteId: "n", noteKind: "blocker", message: "m", refs: [] }]);
+  assert.deepEqual(res, { triaged: 0, shed: 0 }, "a gated call is neither a triage nor a shed");
+  assert.deepEqual((await stores.plans.load()).records, {});
+  assert.ok(ledgerRows.some((r) => r.kind === "cto.triage" && r.gated === true), "the gated call leaves its ledger trail");
+  // And the whole card tick still completes with a queued finding.
+  await stores.findings.save({
+    v: 1,
+    findings: [{ source: "inbox", ts: clock.ms, noteId: "n2", noteKind: "blocker", message: "m2", refs: [] }],
+  });
+  await engine.cardTick();
+  assert.deepEqual((await stores.findings.load()).findings, []);
+  assert.deepEqual((await stores.plans.load()).records, {}, "gated tick stores no plans");
 });
 
 test("BET-1516: start() prunes the orphaned concurrentEphemeral health card (marker-guarded)", async () => {

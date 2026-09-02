@@ -53,6 +53,7 @@ import {
   rollupsStore,
   inboxStore,
   findingsStore,
+  plansStore,
   verdictsStore,
   watchersStore,
   factsArchiveStore,
@@ -130,6 +131,9 @@ import {
 // pure project→job-parent resolver shared with forge dispatch.
 import { createOvernightScheduler, normalizeWindow, scheduleCountdown, dataAnalysisCandidatesFromTools } from "./ctoOvernight.mjs";
 import { resolveForgeOwner } from "./delegate.mjs";
+// BET-1517 (§9.1/§9.2): the triage stage — drained findings → 0–3 resolution
+// plans in plans.json, one mid-tier model call per finding per tick.
+import { createCtoTriage } from "./ctoTriage.mjs";
 
 // BET-1395 tool discovery (§7): the registry engine — fusion of the four
 // evidence channels, the two lifecycle bars, and the connect-ask gate.
@@ -337,6 +341,8 @@ export function createCtoEngine(deps = {}) {
     inbox: inboxStore,
     // BET-1516 (§9.1): the pending-findings queue (blockers → pipeline).
     findings: findingsStore,
+    // BET-1517 (§9.2): the resolution-plan store (triage output).
+    plans: plansStore,
     verdicts: verdictsStore,
     budget: budgetStore,
     watchers: watchersStore,
@@ -457,6 +463,16 @@ export function createCtoEngine(deps = {}) {
     // enter the pipeline on the next engine tick. Defaults to the real store;
     // tests inject a bundle memory store.
     findings = null,
+    // BET-1517 (§9.2): the resolution-plan store (triage output, plans.json).
+    // Same resolution pattern as `findings`.
+    plans = null,
+    // BET-1517 (§9.1): optional pre-built triage engine (tests). Else one is
+    // constructed lazily below over bundle.plans + the gated runEphemeral.
+    triage = null,
+    // BET-1517 (§9.2): the sender-session transcript-tail reader for blocker
+    // triage context — async (sessionID) => string|null (≤ 2k tokens, the
+    // caller truncates). Default null → no tail block.
+    getTranscriptTail = null,
     // BET-1391 verdict ledger (§9.5): optional pre-built verdicts store (else
     // the shared `verdicts.json` store). The verdict engine + facts sink are
     // constructed below from it.
@@ -841,7 +857,10 @@ export function createCtoEngine(deps = {}) {
     try {
       await cards.promoteDue();
       await cards.ingestHealthEscalations();
-      await drainFindings();
+      const drained = await drainFindings();
+      // BET-1517: the triage stage consumes the drain's rows — 0–3 resolution
+      // plans per finding into plans.json (one gated model call per finding).
+      await triageDrained(drained?.rows);
       await cards.checkInboxLiveness();
       await syncState();
     } catch {
@@ -2296,10 +2315,13 @@ export function createCtoEngine(deps = {}) {
   // mark-read lands. Never orphaned, at worst a duplicated evidence row.
   async function drainFindings() {
     const store = findings ?? bundle.findings;
-    if (!store) return { drained: 0 };
+    if (!store) return { drained: 0, rows: [] };
     try {
       let drained = 0;
       const noteIds = [];
+      // BET-1517: the drained rows feed the triage stage (one model call per
+      // finding, plans.json) right after this patch commits.
+      const drainedRows = [];
       // 1) Ledger rows + clear the queue in ONE patch (crash-safe: rows fire
       // before the clear commits, so a crash can only duplicate — converge on
       // the next tick).
@@ -2307,6 +2329,7 @@ export function createCtoEngine(deps = {}) {
         const rows = Array.isArray(fresh?.findings) ? fresh.findings : [];
         if (rows.length === 0) return {};
         drained = rows.length;
+        drainedRows.push(...rows);
         // Per-sender reliability (Beta mean, §6.4 / B1); unseen senders
         // default to neutral (1) — the same weighting drainInbox applies.
         let rel = {};
@@ -2354,11 +2377,94 @@ export function createCtoEngine(deps = {}) {
           return touched ? { entries: next } : {};
         });
       }
-      return { drained };
+      return { drained, rows: drainedRows };
     } catch {
       /* findings drain is best-effort — never takes the engine down */
-      return { drained: 0 };
+      return { drained: 0, rows: [] };
     }
+  }
+
+  // BET-1517: lazy triage engine (§9.1/§9.2). The model seam is the engine's
+  // own gatedRunEphemeral, so every triage call rides the §12.1 ambient-cap
+  // check + §3.3 rate gate + spend metering; a null runEphemeral gates
+  // everything out (no plans, no spend).
+  let triageEngine = null;
+  function getTriage() {
+    if (triageEngine) return triageEngine;
+    triageEngine =
+      triage ??
+      createCtoTriage({
+        plans: plans ?? bundle.plans,
+        ledger,
+        runEphemeral: runEphemeral ? gatedRunEphemeral : null,
+        now,
+      });
+    return triageEngine;
+  }
+
+  // §9.2 blocker-triage context pieces: the sender session's transcript tail
+  // (engine-level getTranscriptTail dep, ≤ 2k tokens enforced by the caller in
+  // index.mjs), the sender project's top facts, and the B1 sender reliability.
+  // Everything is best-effort — a missing piece just drops its block.
+  async function buildTriageCtx(finding) {
+    const ctx = {};
+    const senderSessionID = finding?.sender?.sessionID ?? finding?.sessionID;
+    if (typeof senderSessionID !== "string" || !senderSessionID) return ctx;
+    if (getTranscriptTail) {
+      try {
+        const tail = await getTranscriptTail(senderSessionID);
+        if (typeof tail === "string" && tail.trim()) ctx.transcriptTail = tail;
+      } catch {
+        /* best-effort */
+      }
+    }
+    try {
+      const info = await getSessionInfo(senderSessionID);
+      const project = info?.project;
+      if (project) {
+        try {
+          const facts = await getFactsEngine().topFacts(project, { k: 8 });
+          const block = formatFactsBlock(facts, { nowMs: now() });
+          if (block?.text) ctx.factsBlock = block.text;
+        } catch {
+          /* best-effort */
+        }
+      }
+    } catch {
+      /* best-effort */
+    }
+    try {
+      const rel = (await getFactsEngine().getState())?.senderReliability ?? {};
+      ctx.reliability = senderReliability(rel[senderKey(finding?.sender ?? { sessionID: senderSessionID })] ?? {});
+    } catch {
+      /* best-effort */
+    }
+    return ctx;
+  }
+
+  // §9.1 triage over the drain's rows — the engine-tick wire into the plans
+  // store. Thrifty shed ladder (§12.2): finding triage sheds FIRST; blocker
+  // triage (inbox notes) is kept to the last token. One triage call per
+  // finding per tick; never throws into the card tick.
+  async function triageDrained(rows) {
+    if (!Array.isArray(rows) || rows.length === 0) return { triaged: 0, shed: 0 };
+    let triaged = 0;
+    let shed = 0;
+    for (const row of rows) {
+      const isBlockerFinding = row?.source === "inbox";
+      if (thrifty && !isBlockerFinding) {
+        shed += 1;
+        continue;
+      }
+      try {
+        const ctx = await buildTriageCtx(row);
+        const res = await getTriage().triageFinding(row, ctx);
+        if (res?.ok) triaged += 1;
+      } catch {
+        /* best-effort */
+      }
+    }
+    return { triaged, shed };
   }
 
   // Event ingestion — the ONE thing that keeps running while paused (§10.6-5).
@@ -2763,6 +2869,9 @@ export function createCtoEngine(deps = {}) {
     // index.mjs's debug surface, same seam as drainInbox. `cardTick` rides
     // along (the pass that drains findings + runs the §10.3 liveness pass).
     drainFindings,
+    // BET-1517 (§9.1): the triage stage over the drain's rows — exposed for
+    // tests + the gate ticket's seam (stored plans keyed by finding id).
+    triageDrained,
     cardTick,
     getPresence,
     getState,

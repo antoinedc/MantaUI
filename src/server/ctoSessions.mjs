@@ -18,7 +18,7 @@ import { chooseSubagentModel } from "./delegate.mjs";
 // Task classes (§12.3) — a literal table in code. NEVER a model id.
 //
 //   nano tier  : ambient-summarize (≤4k ctx), gatekeeper, worthiness
-//   mid tier   : digest-compose (≤12k ctx), suggest
+//   mid tier   : digest-compose (≤12k ctx), suggest, triage (≤6k ctx, §12.3)
 //   spawn      : context-assembly budget ≤8k (a delegate job, not a tier)
 //
 // `tier` is the routing band; `contextBudget` is the token cap for the
@@ -31,6 +31,8 @@ export const TASK_CLASSES = Object.freeze({
   worthiness: Object.freeze({ tier: "nano" }),
   "digest-compose": Object.freeze({ tier: "mid", contextBudget: 12000 }),
   suggest: Object.freeze({ tier: "mid" }),
+  // BET-1517 (§9.1/§12.3): the resolution-plan triage — mid tier, ≤ 6k ctx.
+  triage: Object.freeze({ tier: "mid", contextBudget: 6000 }),
   spawn: Object.freeze({ contextBudget: 8000 }),
 });
 
