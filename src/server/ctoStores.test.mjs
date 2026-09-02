@@ -24,6 +24,8 @@ import {
   capArchive,
   ctoPath,
   inboxStore,
+  findingsStore,
+  sweepFindings,
   verdictsStore,
   ledgerStore,
   factsArchiveStore,
@@ -713,4 +715,31 @@ test("startCtoStoreSweeper starts a poller that sweeps the stores on its interva
     sweeper.stop();
     await rm(ctoPath("ledger-1464-atomicity.jsonl"), { force: true });
   }
+});
+
+test("BET-1516: the findings store resolves under the sandbox and the retention sweep bounds undrained residue", async () => {
+  await findingsStore.save({
+    v: 1,
+    findings: [
+      { source: "inbox", ts: 1, noteId: "a", message: "ancient", sender: { sessionID: "s" } },
+      { source: "ask", ts: 2, sourceKind: "question", message: "fresh", sessionID: "s2" },
+    ],
+  });
+  await sweepFindings(RETENTION_MS.findings + 2);
+  const after = await findingsStore.load();
+  assert.deepEqual(after.findings.map((f) => f.message), ["fresh"]);
+  // Boundary-exact: an entry exactly at the cutoff survives.
+  await findingsStore.save({
+    v: 1,
+    findings: [{ source: "inbox", ts: 1, message: "edge", sender: null }],
+  });
+  await sweepFindings(RETENTION_MS.findings + 1);
+  assert.equal((await findingsStore.load()).findings.length, 1);
+  // SweepAllStores includes the findings queue (wiring canary).
+  await findingsStore.save({
+    v: 1,
+    findings: [{ source: "inbox", ts: 1, message: "ancient", sender: null }],
+  });
+  await sweepAllStores(Date.now() + RETENTION_MS.findings + 10);
+  assert.equal((await findingsStore.load()).findings.length, 0);
 });

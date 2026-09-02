@@ -1170,6 +1170,10 @@ export function createCtoInbound({
       tag,
       sender,
       title: typeof payload?.title === "string" && payload.title ? payload.title : undefined,
+      // BET-1516 (§10.3 predicate 2): the note may NAME a checkable condition
+      // ("when the plan or note names one") — carried to the ask/card so the
+      // §6.7 surface verify can auto-retract the blocker when it goes gone.
+      condition: typeof payload?.condition === "string" && payload.condition ? payload.condition : undefined,
       ts,
       read: false,
       count: 1,

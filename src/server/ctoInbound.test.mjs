@@ -415,3 +415,30 @@ test("stableHash is a short stable hash", () => {
   assert.ok(stableHash("x").length >= 1);
   assert.notEqual(stableHash("x"), stableHash("y"));
 });
+
+test("BET-1516: the funnel persists a named condition onto the entry (predicate 2 input) and threads sender session to the card path", async () => {
+  const inbox = memInbox();
+  const blockers = [];
+  const inbound = createCtoInbound({
+    loadInbox: inbox.load,
+    saveInbox: inbox.save,
+    registerBlocker: async (e) => blockers.push(e),
+  });
+  await inbound.inbound({
+    surface: "session",
+    payload: {
+      kind: "blocker",
+      message: "deploy is blocked",
+      tag: "deploy",
+      sessionID: "ses-42",
+      condition: "CI on main is broken",
+    },
+  });
+  const entry = inbox.entries()[0];
+  assert.equal(entry.condition, "CI on main is broken");
+  assert.equal(blockers[0].sender.sessionID, "ses-42");
+  assert.equal(blockers[0].condition, "CI on main is broken");
+  // A non-string condition is dropped, not persisted as garbage.
+  await inbound.inbound({ surface: "session", payload: { kind: "blocker", message: "x", condition: 7 } });
+  assert.equal(inbox.entries()[1].condition, undefined);
+});

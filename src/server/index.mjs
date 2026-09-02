@@ -1674,6 +1674,10 @@ function getCtoEngine() {
       listMessages: (sid, opts) => oc.listMessages(sid, opts),
       listModels: () => oc.listModels(),
       getSessionAgent: (sid) => oc.getSessionAgent(sid),
+      // BET-1516 (§10.3 predicate 1): the inbox-blocker cards' sender-session
+      // liveness check — the box's own sessionExists (definitive 404 → gone,
+      // transient → assume alive).
+      hasSession: (sid) => oc.sessionExists(sid),
       listSnapshots,
       listStopped,
       searchMessages,
@@ -5088,6 +5092,10 @@ const handleRequest = async (req, res) => {
             refs: body?.refs,
             tag: body?.tag,
             title: body?.title,
+            // BET-1516 (§10.3 predicate 2): the note may name a checkable
+            // condition ("CI on F broken") that the card liveness pass
+            // re-verifies via the §6.7 surface machinery.
+            condition: body?.condition,
             urgent: body?.urgent,
             sessionID: body?.sessionID,
             senderName: body?.senderName,

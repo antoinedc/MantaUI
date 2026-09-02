@@ -139,6 +139,13 @@ function createCtoJsonStore(name, path) {
 }
 
 export const inboxStore = createCtoJsonStore("inbox", ctoPath("inbox.json"));
+// BET-1516 (§9.1): the pending-findings queue — a blocker (an inbox blocker
+// note, or a worker ask promoted past the §10.3 threshold) waits here to
+// ENTER THE PIPELINE on the next engine tick, instead of riding evidence only
+// at a rollup-close breakpoint (the §9.2-v2 bypass). Payload shape:
+// `{ findings: [...] }`, drained to empty by the engine's card tick; the
+// retention rule below only bounds undrained residue.
+export const findingsStore = createCtoJsonStore("findings", ctoPath("findings.json"));
 export const cardsStore = createCtoJsonStore("cards", ctoPath("cards.json"));
 export const profileStore = createCtoJsonStore("profile", ctoPath("profile.json"));
 export const journalStore = createCtoJsonStore("journal", ctoPath("journal.json"));
@@ -501,6 +508,10 @@ export const probesStore = {
 export const RETENTION_MS = Object.freeze({
   ledger: 180 * DAY_MS,
   verdicts: 180 * DAY_MS,
+  // BET-1516: pending findings are drained by the engine's card tick within a
+  // minute; this is only the residue bound for an engine that stays down —
+  // pinned to the inbox blocker TTL (§4.4, the class it twins).
+  findings: 7 * DAY_MS,
   "rollups/hour": 14 * DAY_MS,
   "rollups/day": 120 * DAY_MS,
   "rollups/week": 2 * 365 * DAY_MS,
@@ -638,6 +649,19 @@ async function sweepVerdicts(nowMs) {
   });
 }
 
+// BET-1516: the pending-findings queue is normally emptied by the engine's
+// card tick within a minute of an enqueue; the sweep only bounds residue from
+// an engine that stayed down past the blocker TTL (§13.1). Exported for tests
+// (same pattern as sweepInbox).
+export async function sweepFindings(nowMs = Date.now()) {
+  await patchStore(findingsStore, (fresh) => {
+    const findings = Array.isArray(fresh?.findings) ? fresh.findings : [];
+    if (findings.length === 0) return {};
+    const { keep } = expireRows(findings, { nowMs, retentionMs: RETENTION_MS.findings });
+    return keep.length === findings.length ? {} : { findings: keep };
+  });
+}
+
 async function sweepDirByFileTime(dir, nowMs, retentionMs) {
   const files = await listJsonFiles(dir);
   for (const name of files) {
@@ -729,6 +753,7 @@ export async function sweepAllStores({ nowMs = Date.now() } = {}) {
     sweepDigests(),
     sweepArchiveCaps(),
     sweepInbox(nowMs),
+    sweepFindings(nowMs),
   ]);
 }
 

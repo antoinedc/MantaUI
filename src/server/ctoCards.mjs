@@ -112,6 +112,140 @@ export function splitContentlessOpenCards(cards) {
   return { keep, dropped };
 }
 
+// BET-1516: engine-state.json marker key for the one-time prune of the
+// orphaned `concurrentEphemeral` health card. BET-1513 made the concurrency
+// limit trips shed (pause:false) — they no longer call recordBlocker — so a
+// `pendingBlockers` entry or an open health card carrying one of these
+// reasons predates that change and is pure residue: re-upserted by every
+// tick forever, never closable by hand without folding the whole rate_limit
+// group. Same idempotency contract as CONTENTLESS_CARD_PRUNE_KEY.
+export const SHED_CARD_PRUNE_KEY = "shedCardPrune";
+export const SHED_RATE_LIMIT_REASONS = Object.freeze([
+  "concurrentEphemeral",
+  "concurrentDelegate",
+]);
+
+// Pure split for the BET-1516 one-time prune: drop ONLY open HEALTH cards
+// whose sourceId is the rate_limit group and whose body is one of the shed
+// reasons (BET-1513: shed trips never recordBlocker again, so any such card
+// today is residue, not a live signal). Non-open / malformed / other cards
+// are left exactly where they are.
+export function splitOrphanedShedCards(cards) {
+  const rows = Array.isArray(cards) ? cards : [];
+  const keep = [];
+  const dropped = [];
+  for (const c of rows) {
+    const isOrphan =
+      c &&
+      c.state === "open" &&
+      c.variant === "blocker" &&
+      c.sourceKind === HEALTH_SOURCE_KIND &&
+      c.sourceId === "rate_limit" &&
+      SHED_RATE_LIMIT_REASONS.includes(c.body);
+    if (isOrphan) dropped.push(c);
+    else keep.push(c);
+  }
+  return { keep, dropped };
+}
+
+// ----- Pending-findings queue rows (BET-1516 / §9.1) -----
+//
+// A blocker enters the pipeline on the next engine tick via the findings.json
+// queue (the §9.2-v2 bypass removed: the note used to ride into evidence only
+// at a rollup-close breakpoint). Two producers, one row shape:
+//   - an inbox blocker note, queued at note arrival (source "inbox")
+//   - a worker ask promoted past the 10-min threshold (source "ask")
+// The ENGINE's drain turns each row into a high-salience evidence row on the
+// A1 ledger — for inbox notes the exact row shape drainInbox writes — and
+// marks the source note read so the breakpoint drain never double-folds it.
+// Pure builders; these shapes are the producer↔consumer contract.
+
+export function findingFromInboxNote(entry, { ts = Date.now() } = {}) {
+  if (!entry || typeof entry !== "object") return null;
+  return {
+    source: "inbox",
+    ts,
+    // The inbox entry id — the drain's dedupe marker against drainInbox (it
+    // marks this note read after the ledger row fires).
+    noteId: typeof entry.id === "string" ? entry.id : undefined,
+    noteKind: "blocker",
+    message: entry.message,
+    title: entry.title,
+    tag: entry.tag ?? undefined,
+    refs: Array.isArray(entry.refs) ? entry.refs : [],
+    sender: entry.sender && typeof entry.sender === "object" ? entry.sender : undefined,
+    // A note may NAME a checkable condition (§10.3 predicate 2 — "when the
+    // plan or note names one"). Carried to the ask/card for the liveness pass.
+    condition: typeof entry.condition === "string" && entry.condition ? entry.condition : undefined,
+  };
+}
+
+export function findingFromPromotedAsk(ask, { ts = Date.now() } = {}) {
+  if (!ask || typeof ask !== "object") return null;
+  return {
+    source: "ask",
+    ts,
+    sourceKind: ask.sourceKind,
+    sourceId: ask.sourceId,
+    sessionID: ask.sessionID ?? ask.noteSessionID ?? undefined,
+    message: ask.body,
+    title: blockerTitle(ask.sourceKind, ask.title),
+    refs: Array.isArray(ask.refs) ? ask.refs : [],
+  };
+}
+
+// §10.3 predicate 2 classifier (pure): a §6.7 surface verify result against
+// the condition the note named. GONE when the verify definitively shows the
+// named state no longer holds. "no surface"/"unavailable" mean "no opinion"
+// — a probe that cannot see the surface must never resolve the card. Caller
+// passes the match from matchCheckable (null → no opinion).
+export function isConditionGoneResult(match, verifyResult) {
+  if (!match) return null;
+  if (!verifyResult || typeof verifyResult !== "object") return null;
+  if (verifyResult.ok !== false) return false;
+  const result = String(verifyResult.result ?? "");
+  return result !== "no surface" && result !== "unavailable";
+}
+
+// §10.3 inbox-card liveness (BET-1516, pure): evaluate the three predicates
+// against one open inbox-sourced blocker card. Returns `null` (all predicates
+// hold / no opinion — the card stays) or `{reason}` naming the one that went
+// false. Evaluation order is deterministic: the TTL stamp (sync, cheapest),
+// then the named condition, then the sender session. When the exact TTL stamp
+// is absent (a pre-1516 card), the blocker retention window counted from the
+// card's carried-forward first report is the bound — stricter than the note's
+// real expiry, never a card outliving its note.
+export async function inboxCardLivenessGone(card, { nowMs, hasSession = null, conditionGone = null } = {}) {
+  if (!card || card.state !== "open" || card.variant !== "blocker") return null;
+  const ttlBound = Number.isFinite(card.noteExpires)
+    ? card.noteExpires
+    : Number.isFinite(card.pendingSince)
+      ? card.pendingSince + INBOX_TTL_MS.blocker
+      : null;
+  if (ttlBound != null && nowMs > ttlBound) {
+    return { reason: "inbox note expired" };
+  }
+  if (typeof conditionGone === "function" && typeof card.noteCondition === "string" && card.noteCondition) {
+    let gone = null;
+    try {
+      gone = await conditionGone(card.noteCondition);
+    } catch {
+      gone = null;
+    }
+    if (gone === true) return { reason: "condition gone" };
+  }
+  if (typeof hasSession === "function" && typeof card.noteSessionID === "string" && card.noteSessionID) {
+    let exists = null;
+    try {
+      exists = await hasSession(card.noteSessionID);
+    } catch {
+      exists = null;
+    }
+    if (exists === false) return { reason: "sender session gone" };
+  }
+  return null;
+}
+
 // §10.6-7 probe-auth-failure card copy (3 consecutive auth failures — the
 // runner's AUTH_FAIL_ESCALATE). `secretKey` is the vault KEY NAME (not a
 // value) when the spec declared one — naming the exact key the user should
@@ -340,6 +474,20 @@ export function createCtoCards(deps = {}) {
     // registry's persisted half (engine-state.json `pendingAsks`) — one
     // writer, one mutex, one consume-and-prune shape for both queues.
     patchEngineState: patchEngineStatePatch = null,
+    // BET-1516 (§9.1): the pending-findings queue writer — the engine injects
+    // a bound append into findings.json. Both blocker entry points route
+    // through it (inbox notes at arrival, worker asks at promotion), and the
+    // engine's card tick drains the queue into the A1 ledger. Default null
+    // (a no-op) so standalone/test usage without the engine keeps working.
+    queueFinding = null,
+    // BET-1516 (§10.3 predicate 1): does an opencode session exist? The
+    // engine injects the box's sessionExists (404 → false, transient → true).
+    // Default null — the predicate is skipped when no checker is wired.
+    hasSession = null,
+    // BET-1516 (§10.3 predicate 2): is the condition a note named now GONE?
+    // Returns true (gone) / false (holds) / null (no opinion). The engine
+    // injects the §6.7 matcher + surface verify. Default null — skipped.
+    conditionGone = null,
   } = deps;
 
   // In-flight worker asks: key (sessionID, or sourceId for sessionless inbox
@@ -371,16 +519,45 @@ export function createCtoCards(deps = {}) {
     }
   }
 
-  async function onInboxBlocker({ message, title, refs = [], tag, sessionID, ts = now() } = {}) {
+  async function queueInboxFinding(row) {
+    if (typeof queueFinding !== "function") return;
+    try {
+      await queueFinding(row);
+    } catch (e) {
+      console.warn("[cto] finding queue append failed:", e?.message ?? e);
+    }
+  }
+
+  // Source (3): a `blocker` inbox note (BET-1397 / spec §4.4). This is the ONE
+  // notification path for inbox notes: fires the blocking-tier notify through
+  // the injected router exactly once, and registers a pending blocker so the
+  // card timer (promoteDue) promotes it at > 10 min like any ask. Read-only on
+  // the inbox itself — the inbound funnel already persisted the entry.
+  // Grouping layer 2: the sender session's workspace, when it is tmux-stamped.
+  // Never throws and never blocks the card path — an unresolvable sender just
+  // falls through to the slug layer.
+  //
+  // BET-1516 (§9.1): the note ALSO enters the pipeline — the finding row is
+  // queued (findings.json) and the engine's card tick turns it into evidence
+  // within a minute; the notification itself is untouched (its own timer).
+  // The sender session id is now threaded through (`sender.sessionID` is what
+  // the funnel sends; a top-level sessionID stays accepted for tests) — it
+  // routes the notification, keys the ask row, and feeds the card's
+  // sender-session liveness predicate.
+  async function onInboxBlocker({ message, title, refs = [], tag, sender, sessionID, ts = now(), id, expires, condition } = {}) {
     const text = typeof message === "string" ? message.trim() : "";
     if (!text) return { changed: false, notified: false };
+    const noteSessionID =
+      (sender && typeof sender.sessionID === "string" && sender.sessionID) ||
+      (typeof sessionID === "string" && sessionID ? sessionID : undefined) ||
+      undefined;
     // Blocking-tier notification — exactly one, via the shared router.
     try {
       await fireNotify({
         message: text,
         title: typeof title === "string" && title ? title : undefined,
         urgent: true,
-        sessionID: typeof sessionID === "string" ? sessionID : undefined,
+        sessionID: noteSessionID,
       });
     } catch (e) {
       console.warn("[cto] inbox blocker notify failed:", e?.message ?? e);
@@ -389,9 +566,15 @@ export function createCtoCards(deps = {}) {
     // is keyed by the note's CONDITION (inboxGroupKey), not its prose, so a
     // watchdog restating the same condition every tick upserts one card
     // instead of minting a new one per tick.
-    const project = await resolveNoteProject(sessionID);
+    const project = await resolveNoteProject(noteSessionID);
     const groupKey = inboxGroupKey({ tag, title, message: text, project });
     const sourceId = stableCardId(INBOX_SOURCE_KIND, groupKey);
+    // §10.3 predicate inputs ride the ask row: the note's identity, its TTL
+    // stamp (refreshed by every restatement — a card can never outlive the
+    // note that raised it), the sender session, and any named condition.
+    const noteExpires = Number.isFinite(expires) ? expires : undefined;
+    const noteCondition =
+      typeof condition === "string" && condition ? condition : undefined;
     await registerAsk({
       sourceKind: INBOX_SOURCE_KIND,
       sourceId,
@@ -400,12 +583,24 @@ export function createCtoCards(deps = {}) {
       // per-tick duplication the group key just closed. `askKeyOf` falls back
       // to sourceId, which IS the condition.
       sessionID: undefined,
-      noteSessionID: typeof sessionID === "string" ? sessionID : undefined,
+      noteSessionID,
+      noteId: typeof id === "string" ? id : undefined,
+      noteExpires,
+      noteCondition,
       title: typeof title === "string" ? title : undefined,
       body: text,
       refs: Array.isArray(refs) ? refs : [],
       askedAt: ts,
     });
+    // §9.1: the blocker enters the pipeline on the next engine tick — queue
+    // the finding AFTER the notify (the notification is the immediate timer,
+    // the pipeline entry rides the queue). Best-effort by contract.
+    await queueInboxFinding(
+      findingFromInboxNote(
+        { id, kind: "blocker", message: text, title, tag, refs, sender: { ...sender, sessionID: noteSessionID }, condition: noteCondition },
+        { ts },
+      ),
+    );
     return { changed: true, notified: true, groupKey };
   }
 
@@ -476,7 +671,15 @@ export function createCtoCards(deps = {}) {
     };
   }
 
-  function buildBlockerCard({ id, sourceKind, sourceId, sessionID, title, body, refs, pendingSince, created }) {
+  function buildBlockerCard({ id, sourceKind, sourceId, sessionID, title, body, refs, pendingSince, created, noteId, noteExpires, noteSessionID, noteCondition }) {
+    // §10.3 liveness inputs (BET-1516): set ONLY when present so a card that
+    // lacks them (worker-ask sourced, or a pre-1516 legacy rebuild) converges
+    // byte-identically instead of churning on undefined keys.
+    const noteFields = {};
+    if (noteId != null) noteFields.noteId = noteId;
+    if (Number.isFinite(noteExpires)) noteFields.noteExpires = noteExpires;
+    if (noteSessionID != null) noteFields.noteSessionID = noteSessionID;
+    if (noteCondition != null) noteFields.noteCondition = noteCondition;
     return {
       id,
       variant: "blocker",
@@ -491,6 +694,7 @@ export function createCtoCards(deps = {}) {
       created,
       updatedAt: created,
       state: "open",
+      ...noteFields,
     };
   }
 
@@ -505,7 +709,7 @@ export function createCtoCards(deps = {}) {
   // patchStore mutex, so a writer derived from a stale snapshot can no longer
   // erase a concurrent writer's card (reached from fire-and-forget call
   // sites — promoteDue timers, bus handlers — which used to race).
-  async function upsertBlocker({ sourceKind, sourceId, sessionID, title, body, refs, ts = now(), pendingSince = ts }) {
+  async function upsertBlocker({ sourceKind, sourceId, sessionID, title, body, refs, ts = now(), pendingSince = ts, noteId, noteExpires, noteSessionID, noteCondition }) {
     const id = stableCardId(sourceKind, sourceId);
     let changed = false;
     let isNew = false;
@@ -530,6 +734,10 @@ export function createCtoCards(deps = {}) {
         refs,
         pendingSince: since,
         created,
+        noteId,
+        noteExpires,
+        noteSessionID,
+        noteCondition,
       });
       cardRefs = card.refs;
       // BET-1463 (defect 2): a byte-identical rebuild is not a change — an
@@ -704,9 +912,17 @@ export function createCtoCards(deps = {}) {
         refs: Array.isArray(ask.refs) && ask.refs.length ? ask.refs : fallbackRef ? [fallbackRef] : [],
         ts: nowMs,
         pendingSince: ask.askedAt,
+        noteId: ask.noteId,
+        noteExpires: ask.noteExpires,
+        noteSessionID: ask.noteSessionID,
+        noteCondition: ask.noteCondition,
       });
       changed = changed || r.changed;
       if (r.isNew) promoted += 1;
+      // BET-1516 (§9.1): an ask past the §10.3 threshold enters the pipeline
+      // too — the finding is queued at promotion, and the engine's card tick
+      // turns it into evidence within a minute. Best-effort by contract.
+      await queueInboxFinding(findingFromPromotedAsk(ask, { ts: nowMs }));
       consumedKeys.push(askKeyOf(ask));
     }
     if (consumedKeys.length) await removePendingAskRows(consumedKeys);
@@ -801,6 +1017,108 @@ export function createCtoCards(deps = {}) {
       }
     }
     return { pruned, marked };
+  }
+
+  // BET-1516: the orphaned `concurrentEphemeral` health card. BET-1513 made
+  // the concurrency-limit trips shed (pause:false) — they stopped calling
+  // recordBlocker, but an entry predating that change could still sit in
+  // engine-state.json `pendingBlockers` and re-upsert its "Health check" card
+  // on every tick, forever and unresolvable (closeOpenCard drops the WHOLE
+  // rate_limit group, taking legit sessionCreationsPerHour entries with it —
+  // which is why resolution-by-hand was never the fix). One-time, marker-
+  // guarded prune with the same contract as pruneLegacyOpenCards: drop the
+  // orphaned open cards, drop + stamp the shed pendingBlockers entries, write
+  // one card.resolved ledger row per dropped card, stamp the marker only
+  // after the writes succeeded. `{pruned, droppedEntries, marked}` for tests.
+  async function pruneOrphanedShedCards({ ts = now() } = {}) {
+    let meta = {};
+    try {
+      meta = (await engineState.load()) ?? {};
+    } catch {
+      meta = {};
+    }
+    if (meta?.[SHED_CARD_PRUNE_KEY]?.pruned === true) {
+      return { pruned: 0, droppedEntries: 0, marked: false };
+    }
+    let pruned = 0;
+    const droppedCards = [];
+    await patchStore(cardStore, (fresh) => {
+      const cards = Array.isArray(fresh?.cards) ? fresh.cards : [];
+      const { keep, dropped } = splitOrphanedShedCards(cards);
+      pruned = dropped.length;
+      droppedCards.push(...dropped);
+      return dropped.length ? { cards: keep } : {};
+    });
+    let droppedEntries = 0;
+    if (typeof patchEngineStatePatch === "function") {
+      try {
+        await patchEngineStatePatch((fresh) => {
+          const pending = Array.isArray(fresh?.pendingBlockers) ? fresh.pendingBlockers : [];
+          const next = pending.filter(
+            (b) =>
+              !(
+                b &&
+                b.resolved !== true &&
+                b.source === "rate_limit" &&
+                SHED_RATE_LIMIT_REASONS.includes(b.reason)
+              ),
+          );
+          droppedEntries = pending.length - next.length;
+          return droppedEntries ? { pendingBlockers: next } : {};
+        });
+      } catch {
+        /* best-effort — the card prune above already made the board clean */
+      }
+    }
+    for (const card of droppedCards) {
+      await ledgerAppend({
+        kind: CARD_RESOLVED,
+        cardId: card.id,
+        variant: card.variant,
+        sourceKind: card.sourceKind,
+        refs: card.refs,
+        reason: "orphaned shed card — concurrency trips stopped carding (BET-1513)",
+        ts,
+      });
+    }
+    let marked = false;
+    if (typeof patchEngineStatePatch === "function") {
+      try {
+        await patchEngineStatePatch((fresh) => ({
+          [SHED_CARD_PRUNE_KEY]: {
+            ...(fresh?.[SHED_CARD_PRUNE_KEY] || {}),
+            pruned: true,
+            at: ts,
+          },
+        }));
+        marked = true;
+      } catch {
+        /* best-effort — an unstamped marker just re-prunes a clean store next boot */
+      }
+    }
+    return { pruned, droppedEntries, marked };
+  }
+
+  // BET-1516 (§10.3): the card-tick liveness pass for inbox-sourced blocker
+  // cards. Three predicates — sender session gone, a named condition that
+  // went gone, the inbox note's own TTL — auto-retract the card as `resolved`
+  // (CARD_RESOLVED, never a verdict). POST /api/cto/verdict remains an
+  // independent third path; a predicate resolution is additive. Skipped
+  // entirely when no seam is wired (standalone/test usage): an unevaluatable
+  // predicate is a no-op, never a false resolution.
+  async function checkInboxLiveness({ nowMs = now() } = {}) {
+    const { cards } = await openCards();
+    const open = cards.filter(
+      (c) => c?.state === "open" && c?.variant === "blocker" && c?.sourceKind === INBOX_SOURCE_KIND,
+    );
+    let changed = false;
+    for (const card of open) {
+      const gone = await inboxCardLivenessGone(card, { nowMs, hasSession, conditionGone });
+      if (gone) {
+        changed = (await resolveById(card.id, { reason: gone.reason, ts: nowMs })).changed || changed;
+      }
+    }
+    return { changed };
   }
 
   // Source (2): read the watchdog's blocker-card requests that A2 already
@@ -1074,9 +1392,11 @@ export function createCtoCards(deps = {}) {
     onInboxBlocker,
     seedPendingAsks,
     pruneLegacyOpenCards,
+    pruneOrphanedShedCards,
     promoteDue,
     ingestHealthEscalations,
     onHealthRecovered,
+    checkInboxLiveness,
     upsertBlocker,
     resolveById,
     dismissById,

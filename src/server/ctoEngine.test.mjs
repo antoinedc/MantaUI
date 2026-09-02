@@ -22,8 +22,8 @@ import { createSegmenter } from "./ctoSegments.mjs";
 import { startOfDay } from "./ctoRollups.mjs";
 import { createFactsEngine } from "./ctoFacts.mjs";
 import { windowFor } from "./ctoRollups.mjs";
-import { BLOCKER_AFTER_MS, CONTENTLESS_CARD_PRUNE_KEY, createCtoCards } from "./ctoCards.mjs";
-import { inboxStore, sweepInbox } from "./ctoStores.mjs";
+import { BLOCKER_AFTER_MS, CONTENTLESS_CARD_PRUNE_KEY, createCtoCards, splitOrphanedShedCards } from "./ctoCards.mjs";
+import { inboxStore, sweepInbox, INBOX_TTL_MS } from "./ctoStores.mjs";
 import { createCtoInbound } from "./cto.mjs";
 import { WATCHER_HIT_KIND, WATCHER_HIT_SALIENCE, EVENT_PATTERN, RATE_THRESHOLD, USAGE_BURN } from "./ctoWatchers.mjs";
 
@@ -1307,4 +1307,151 @@ test("BET-1472: a watcher.hit row WITH a project still becomes a candidate carry
   assert.equal(out[0].name, "Hostable hit");
   assert.equal(out[0].project, "better-ui");
   assert.deepEqual(out[0].refs, ["m:1"]);
+});
+
+// ---------------------------------------------------------------------------
+// BET-1516 — the pending-findings drain (blockers enter the pipeline, §9.1)
+// ---------------------------------------------------------------------------
+
+test("drainFindings turns queued inbox findings into high-salience B1-weighted evidence and marks the note read", async () => {
+  const clock = { ms: 1_000_000 };
+  const ledgerRows = [];
+  const stores = makeMemoryStores();
+  // The inbox note the finding came from: still unread, so the breakpoint
+  // drain (drainInbox) would fold it too — the mark-read below is what keeps
+  // the pipeline from double-counting the same blocker.
+  await stores.inbox.save({
+    v: 1,
+    entries: [{ id: "note-1", kind: "blocker", message: "deploy failed", refs: ["BET-9"], sender: { sessionID: "s1" }, tag: "deploy", read: false, count: 1, expires: clock.ms + 1000 }],
+  });
+  await stores.findings.save({
+    v: 1,
+    findings: [
+      { source: "inbox", ts: clock.ms, noteId: "note-1", noteKind: "blocker", message: "deploy failed", title: "Deploy", tag: "deploy", refs: ["BET-9"], sender: { sessionID: "s1", name: "w" } },
+    ],
+  });
+  const rel = { "session:s1": { confirmed: 3, rejected: 0 } };
+  const engine = createCtoEngine({
+    configGet: async () => ({ ctoEnabled: true }),
+    stores,
+    ledger: { append: async (row) => ledgerRows.push(row) },
+    cards: {},
+    facts: { getState: async () => ({ senderReliability: rel }) },
+    now: () => clock.ms,
+    publish: () => {},
+  });
+
+  const r = await engine.drainFindings();
+  assert.equal(r.drained, 1);
+
+  // The queue is empty after the drain.
+  assert.deepEqual((await stores.findings.load()).findings, []);
+  // The source note is marked read — drainInbox will not re-fold it.
+  assert.equal((await stores.inbox.load()).entries[0].read, true);
+
+  // One high-salience evidence row, byte-shape-identical to what drainInbox
+  // writes for the same note (incl. the B1 weight of the sending session).
+  const rows = ledgerRows.filter((row) => row.kind === "inbox.blocker");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].salience, "high");
+  assert.ok(Math.abs(rows[0].senderReliability - 4 / 5) < 1e-9, "3/0 confirmed → Beta mean (1+3)/(1+3+0+1) = 4/5");
+  assert.deepEqual(rows[0].refs, ["BET-9", "s1"]);
+  assert.equal(rows[0].tag, "deploy");
+  assert.equal(rows[0].sessionID, "s1");
+
+  // The breakpoint drain no longer sees it (already read).
+  const after = await engine.drainInbox();
+  assert.equal(after.drained, 0);
+});
+
+test("drainFindings maps a promoted ask finding to an ask.<sourceKind> evidence row and leaves the inbox alone", async () => {
+  const clock = { ms: 2_000_000 };
+  const ledgerRows = [];
+  const stores = makeMemoryStores();
+  await stores.findings.save({
+    v: 1,
+    findings: [
+      { source: "ask", ts: clock.ms, sourceKind: "permission", sourceId: "perm_1", sessionID: "s2", message: "Allow rm -rf?", title: "Permission needed", refs: [] },
+    ],
+  });
+  const engine = createCtoEngine({
+    configGet: async () => ({ ctoEnabled: true }),
+    stores,
+    ledger: { append: async (row) => ledgerRows.push(row) },
+    cards: {},
+    facts: { getState: async () => ({ senderReliability: {} }) },
+    now: () => clock.ms,
+    publish: () => {},
+  });
+  const r = await engine.drainFindings();
+  assert.equal(r.drained, 1);
+  const row = ledgerRows.find((x) => x.kind === "ask.permission");
+  assert.ok(row, "the ask's pipeline entry is an ask.* evidence row");
+  assert.equal(row.salience, "high");
+  assert.equal(row.sessionID, "s2");
+  assert.equal(row.message, "Allow rm -rf?");
+  assert.equal(row.tag, undefined);
+  // Neutral sender (no reliability history) and no note to mark read.
+  assert.ok(Math.abs(row.senderReliability - 1 / 2) < 1e-9);
+  assert.deepEqual((await stores.inbox.load()).entries, []);
+});
+
+test("cardTick drains the queue and runs the inbox-card liveness pass; a promoted ask enters the pipeline on the next tick", async () => {
+  const clock = { ms: 1_000_000 };
+  const ledgerRows = [];
+  const stores = makeMemoryStores();
+  const engine = createCtoEngine({
+    configGet: async () => ({ ctoEnabled: true }),
+    stores,
+    ledger: { append: async (row) => ledgerRows.push(row) },
+    facts: { getState: async () => ({ senderReliability: {} }) },
+    now: () => clock.ms,
+    publish: () => {},
+  });
+  // A worker ask registered through the REAL cards manager (not a fake) —
+  // the engine's own cards wiring must queue the finding at promotion, and
+  // the SAME tick's drain consumes it into the pipeline: one pass,
+  // promotion → queue → ledger row, queue empty again.
+  engine.cards.onAskStart({ sourceKind: "question", sourceId: "que_1", sessionID: "s1", body: "Pick one?", ts: clock.ms });
+  clock.ms += 10 * 60_000 + 1;
+  await engine.cardTick();
+  assert.equal(ledgerRows.filter((x) => x.kind === "ask.question").length, 1);
+  assert.deepEqual((await stores.findings.load()).findings, []);
+  // The liveness pass ran too (an inbox card past its TTL auto-resolves on
+  // the same tick rather than lingering).
+  await stores.cards.save({
+    v: 1,
+    cards: [{ id: "gone", variant: "blocker", state: "open", sourceKind: "inbox", sourceId: "g", title: "t", body: "b", refs: [], pendingSince: clock.ms - INBOX_TTL_MS.blocker - 1, created: clock.ms, updatedAt: clock.ms }],
+  });
+  clock.ms += 1;
+  await engine.cardTick();
+  const left = (await stores.cards.load()).cards.filter((c) => c.state === "open");
+  assert.equal(left.length, 0);
+});
+
+test("BET-1516: start() prunes the orphaned concurrentEphemeral health card (marker-guarded)", async () => {
+  const stores = makeMemoryStores();
+  await stores.cards.save({
+    v: 1,
+    cards: [
+      { id: "orphan", variant: "blocker", state: "open", sourceKind: "health", sourceId: "rate_limit", body: "concurrentEphemeral", refs: [] },
+    ],
+  });
+  await stores.engineState.save({
+    v: 1,
+    pendingBlockers: [{ id: "b1", kind: "blocker", source: "rate_limit", reason: "concurrentEphemeral", ts: 1, resolved: false }],
+  });
+  const engine = createCtoEngine({
+    configGet: async () => ({ ctoEnabled: true }),
+    stores,
+    ledger: { append: async () => true },
+    now: () => 1_000_000,
+    publish: () => {},
+  });
+  await engine.start();
+  assert.equal((await stores.cards.load()).cards.length, 0);
+  assert.deepEqual((await stores.engineState.load()).pendingBlockers, []);
+  // Marker stamped — a rebuild is a no-op re-prune of a clean store.
+  assert.equal((await stores.engineState.load()).shedCardPrune?.pruned, true);
+  engine.dispose();
 });

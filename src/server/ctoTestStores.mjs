@@ -39,6 +39,8 @@ export function makeMemoryStores() {
     trust: jsonStore({}),
     cards: jsonStore({ v: 1, cards: [] }),
     inbox: jsonStore({ v: 1, entries: [] }),
+    // BET-1516 (§9.1): the pending-findings queue.
+    findings: jsonStore({ v: 1, findings: [] }),
     verdicts: jsonStore({ entries: [] }),
     budget: jsonStore({}),
     watchers: jsonStore({ watchers: [] }),

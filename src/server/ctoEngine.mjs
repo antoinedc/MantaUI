@@ -52,6 +52,7 @@ import {
   segmentsStore,
   rollupsStore,
   inboxStore,
+  findingsStore,
   verdictsStore,
   watchersStore,
   factsArchiveStore,
@@ -96,6 +97,7 @@ import {
   askQuestionText,
   createCtoCards,
   isAskResolveEvent,
+  isConditionGoneResult,
 } from "./ctoCards.mjs";
 import { createProbes } from "./ctoProbes.mjs";
 import { createSegmenter, segmentEventKind } from "./ctoSegments.mjs";
@@ -105,7 +107,7 @@ import {
   ROLLUP_LEVELS,
   windowFor as rollupWindowFor,
 } from "./ctoRollups.mjs";
-import { buildFactProposal, createFactsEngine, VERIFY_CYCLE_MS, senderKey, senderReliability } from "./ctoFacts.mjs";
+import { buildFactProposal, createFactsEngine, matchCheckable, VERIFY_CYCLE_MS, senderKey, senderReliability } from "./ctoFacts.mjs";
 import { formatFactsBlock, estimateTokens } from "./ctoSessions.mjs";
 import {
   ambientCapUsd as budgetAmbientCapUsd,
@@ -333,6 +335,8 @@ export function createCtoEngine(deps = {}) {
     trust: trustStore,
     cards: cardsStore,
     inbox: inboxStore,
+    // BET-1516 (§9.1): the pending-findings queue (blockers → pipeline).
+    findings: findingsStore,
     verdicts: verdictsStore,
     budget: budgetStore,
     watchers: watchersStore,
@@ -378,6 +382,11 @@ export function createCtoEngine(deps = {}) {
     // engine-state writers share one process-wide mutex. Inject a bound
     // instance rather than letting ctoCards.mjs import patchEngineState
     // itself — same seam pattern as getSessionInfo/getDesktopPresence.
+    // BET-1516 (§10.3): the box's session-existence check (oc.sessionExists —
+    // definitive 404 → false, transient → true) for the inbox cards'
+    // sender-session liveness predicate. Default null → the predicate is
+    // skipped (no checker wired = no opinion, never a false resolution).
+    hasSession = null,
     cards = createCtoCards({
       fireNotify: cardFireNotify,
       cardStore: bundle.cards,
@@ -388,6 +397,15 @@ export function createCtoEngine(deps = {}) {
       // BELOW `cards` in this same binding, so naming it directly here is a
       // TDZ error. The arrow body runs long after destructuring settles.
       getSessionInfo: (sid) => getSessionInfo(sid),
+      // BET-1516 (§9.1): the pending-findings queue writer — blocker notes
+      // (at arrival) and worker asks (past the 10-min threshold) wait here to
+      // enter the pipeline on the next engine tick (drainFindings, card tick).
+      queueFinding: (finding) => queueFindingRow(finding),
+      // §10.3 liveness seams, same TDZ-safe thunk pattern as getSessionInfo:
+      // hasSession is destructured above, conditionGone classifies via the
+      // §6.7 matcher + factVerify (both destructured later in this binding).
+      hasSession: (sid) => hasSession(sid),
+      conditionGone: async (condition) => conditionGoneFromCondition(condition, factVerify),
       // The engine's clock is authoritative for the cards module too — one
       // now for promoteDue thresholds AND the BET-1407 seed's retention
       // bound (a test's fake clock must not make every persisted ask look
@@ -435,6 +453,10 @@ export function createCtoEngine(deps = {}) {
     // BET-1397 CTO inbox (§4.4): the durable inbox.json store + seam, so drain
     // is unit-testable without touching the real fs. Defaults to the real store.
     inbox = null,
+    // BET-1516 (§9.1): the pending-findings queue (findings.json) — blockers
+    // enter the pipeline on the next engine tick. Defaults to the real store;
+    // tests inject a bundle memory store.
+    findings = null,
     // BET-1391 verdict ledger (§9.5): optional pre-built verdicts store (else
     // the shared `verdicts.json` store). The verdict engine + facts sink are
     // constructed below from it.
@@ -525,6 +547,42 @@ export function createCtoEngine(deps = {}) {
       await ledger.append({ actor: ACTOR, ts: now(), ...entry });
     } catch {
       /* best-effort */
+    }
+  }
+
+  // BET-1516 (§9.1): append one finding to the pending-findings queue — the
+  // durable handoff between the HTTP funnel (inbox blocker notes) / the card
+  // timer (worker asks past the §10.3 threshold) and the engine's card tick
+  // drain. Best-effort: a queue failure never takes the funnel down (the
+  // note itself already persisted to the inbox, which remains the fallback
+  // breakpoint path).
+  async function queueFindingRow(finding) {
+    const store = findings ?? bundle.findings;
+    if (!store) return;
+    try {
+      await patchStore(store, (fresh) => ({
+        findings: [...(Array.isArray(fresh?.findings) ? fresh.findings : []), finding],
+      }));
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  // BET-1516 (§10.3 predicate 2): is the condition a note named now GONE?
+  // Reuses the §6.7 machinery exactly: matchCheckable picks the surface +
+  // probe (null → no opinion), factVerify (the same seam the facts engine
+  // uses — index.mjs wires it to the real surface verifier) checks the named
+  // state now. isConditionGoneResult classifies: a definitive negative is
+  // "gone"; "no surface"/"unavailable" is a no-opinion null, never a false
+  // resolution.
+  async function conditionGoneFromCondition(condition, verify) {
+    const match = matchCheckable(condition);
+    if (!match) return null;
+    try {
+      const r = await verify({ surface: match.surface, probe: match.probe, branch: match.branch ?? undefined });
+      return isConditionGoneResult(match, r);
+    } catch {
+      return null;
     }
   }
 
@@ -774,11 +832,17 @@ export function createCtoEngine(deps = {}) {
   // "needs you" surface (spec §10.3, §9.2), not autonomous CTO work, so it
   // keeps serving even when the engine's timers are stopped (§10.6-5's
   // "event ingestion keeps running" spirit). Stopped only on dispose.
+  // BET-1516: it is also the engine tick that (a) drains the pending-findings
+  // queue into the pipeline — blockers enter evidence ≤ 1 min after arrival,
+  // even on a paused engine, and (b) runs the §10.3 inbox-card liveness pass
+  // (sender session gone / condition gone / inbox TTL → auto-resolve).
   async function cardTick() {
     if (disposed) return;
     try {
       await cards.promoteDue();
       await cards.ingestHealthEscalations();
+      await drainFindings();
+      await cards.checkInboxLiveness();
       await syncState();
     } catch {
       /* never throw into the poller */
@@ -2217,6 +2281,86 @@ export function createCtoEngine(deps = {}) {
     }
   }
 
+  // BET-1516 (§9.1): the pending-findings drain — the "blockers enter the
+  // pipeline on the next engine tick (≤ 1 min)" half. The card tick calls
+  // this every pass (it runs even while paused, so a blocker reported to a
+  // paused engine still enters the pipeline within a minute); the
+  // notification itself stays the funnel's immediate path (separate timer).
+  //
+  // Each queued finding becomes a high-salience evidence row on the A1
+  // ledger — for inbox notes byte-shape-identical to what the breakpoint
+  // drain (drainInbox) writes — and the source inbox note is marked read so
+  // the breakpoint drain never double-folds it. Ordering: the ledger rows +
+  // queue clear commit in ONE patch first (the queue row is the recovery
+  // marker — a crash before the clear re-drains next tick), then the inbox
+  // mark-read lands. Never orphaned, at worst a duplicated evidence row.
+  async function drainFindings() {
+    const store = findings ?? bundle.findings;
+    if (!store) return { drained: 0 };
+    try {
+      let drained = 0;
+      const noteIds = [];
+      // 1) Ledger rows + clear the queue in ONE patch (crash-safe: rows fire
+      // before the clear commits, so a crash can only duplicate — converge on
+      // the next tick).
+      await patchStore(store, async (fresh) => {
+        const rows = Array.isArray(fresh?.findings) ? fresh.findings : [];
+        if (rows.length === 0) return {};
+        drained = rows.length;
+        // Per-sender reliability (Beta mean, §6.4 / B1); unseen senders
+        // default to neutral (1) — the same weighting drainInbox applies.
+        let rel = {};
+        try {
+          rel = (await getFactsEngine().getState())?.senderReliability ?? {};
+        } catch {
+          rel = {};
+        }
+        for (const row of rows) {
+          const senderSessionID = row?.sender?.sessionID ?? row?.sessionID ?? undefined;
+          const weight = senderReliability(
+            rel[senderKey(row?.sender ?? { sessionID: senderSessionID })] ?? {},
+          );
+          const refs = Array.isArray(row?.refs) ? row.refs.slice() : [];
+          if (senderSessionID) refs.push(senderSessionID);
+          void ledgerLog({
+            channel: CHANNEL_EVENT,
+            sessionID: senderSessionID ?? undefined,
+            kind: row?.source === "ask" ? `ask.${row?.sourceKind ?? "blocker"}` : `inbox.${row?.noteKind ?? "blocker"}`,
+            salience: "high",
+            senderReliability: weight,
+            refs,
+            message: row?.message,
+            tag: row?.tag,
+          });
+          if (row?.source === "inbox" && typeof row?.noteId === "string") noteIds.push(row.noteId);
+        }
+        return { findings: [] };
+      });
+      // 2) Mark the source notes read (dedupe guard against drainInbox).
+      // AFTER the ledger patch above, so this never orphans a finding: a
+      // crash before the clear commits just re-drains the queue next tick.
+      if (noteIds.length) {
+        await patchStore(inbox ?? bundle.inbox, (fresh) => {
+          const entries = Array.isArray(fresh?.entries) ? fresh.entries : [];
+          const idSet = new Set(noteIds);
+          let touched = false;
+          const next = entries.map((e) => {
+            if (e && !e.read && idSet.has(e.id)) {
+              touched = true;
+              return { ...e, read: true };
+            }
+            return e;
+          });
+          return touched ? { entries: next } : {};
+        });
+      }
+      return { drained };
+    } catch {
+      /* findings drain is best-effort — never takes the engine down */
+      return { drained: 0 };
+    }
+  }
+
   // Event ingestion — the ONE thing that keeps running while paused (§10.6-5).
   // Driven from index.mjs's event pump (not a timer); the engine is just
   // another consumer (§4.1). Consumes the opencode stream into normalized
@@ -2380,6 +2524,17 @@ export function createCtoEngine(deps = {}) {
     if (typeof cards?.pruneLegacyOpenCards === "function") {
       try {
         await cards.pruneLegacyOpenCards();
+      } catch {
+        /* best-effort */
+      }
+    }
+    // BET-1516: one-time prune of the orphaned `concurrentEphemeral` health
+    // card + its shed pendingBlockers entries (BET-1513 stopped the trips from
+    // carding; the residue re-upserted itself every tick). Same marker-guarded
+    // best-effort contract as the prune above.
+    if (typeof cards?.pruneOrphanedShedCards === "function") {
+      try {
+        await cards.pruneOrphanedShedCards();
       } catch {
         /* best-effort */
       }
@@ -2604,6 +2759,11 @@ export function createCtoEngine(deps = {}) {
     tierAllowsFeature: async (feature) => budgetTierAllows(await tierGet(), feature),
     observeEvent,
     drainInbox,
+    // BET-1516 (§9.1): the pending-findings drain — exposed for tests and for
+    // index.mjs's debug surface, same seam as drainInbox. `cardTick` rides
+    // along (the pass that drains findings + runs the §10.3 liveness pass).
+    drainFindings,
+    cardTick,
     getPresence,
     getState,
     readLedger,
