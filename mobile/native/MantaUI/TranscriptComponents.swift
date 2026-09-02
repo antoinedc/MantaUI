@@ -68,6 +68,16 @@ struct UserBand: View {
 struct MantaProse: View {
     let text: String
     let tokens: Tokens
+    /// Quote callback for the system text-selection menu (BET-1364). Nil on
+    /// read-only surfaces (subagent drill-in, capture fixture) which have no
+    /// composer to quote into — they keep the stock selection menu.
+    let onQuote: ((String, QuoteDestination) -> Void)?
+
+    init(text: String, tokens: Tokens, onQuote: ((String, QuoteDestination) -> Void)? = nil) {
+        self.text = text
+        self.tokens = tokens
+        self.onQuote = onQuote
+    }
 
     var body: some View {
         MarkdownText(text)
@@ -102,6 +112,15 @@ struct MantaProse: View {
             .padding(.bottom, Metrics.spacing.sp3)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("assistant-prose")
+            // The quote-menu attachment (BET-1364): a zero-size background probe
+            // that finds the library's `UITextView` and installs the forwarding
+            // edit-menu delegate. `onQuote` nil on read-only surfaces → nothing
+            // attached, stock menu stays.
+            .background {
+                if let onQuote {
+                    TranscriptEditMenuAttachment(onQuote: onQuote)
+                }
+            }
     }
 }
 
