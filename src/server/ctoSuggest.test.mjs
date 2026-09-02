@@ -8,14 +8,12 @@ import { patchStore, verdictsStore } from "./ctoStores.mjs";
 import {
   ACTION_TYPES,
   DEFAULT_CLASS_PRIORS,
-  VERDICT_MIN,
   buildSuggestContext,
   buildWorthinessContext,
   collectAnomaliesFromFacts,
   collectFailuresFromDigests,
   collectFindings,
   createCtoSuggest,
-  decideVerb,
   defaultThresholds,
   filterOptionsByData,
   normalizeCandidates,
@@ -24,6 +22,11 @@ import {
   stableSuggestionId,
   worthinessProbability,
 } from "./ctoSuggest.mjs";
+import { evaluateGate } from "./ctoGate.mjs";
+// BET-1518: the deleted verb-ladder symbols must be gone — a stale import of
+// decideVerb/VERDICT_MIN below (or anywhere) would break this file's module
+// contract check (see the deleted-symbols test at the bottom).
+const suggestModule = await import("./ctoSuggest.mjs");
 
 // ---------------------------------------------------------------------------
 // Id stability (§9.1)
@@ -101,15 +104,18 @@ test("default priors cover the closed enum", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Verb decision (§9.1): per-class thresholds (BET-1471), cold-start cap,
-// trust ladder, flat override
+// Salience floors (BET-1471) — the ONLY thresholds left under the gate.
+// The verb ladder itself (decideVerb, tiers, cold-start, p_act) is deleted
+// (BET-1518); the act/ask split is evaluateGate on effective = p ×
+// calibration ≥ τ (ctoGate.test.mjs covers the gate math).
 // ---------------------------------------------------------------------------
 
-// BET-1471: the shipped per-class table — each pair derives from the class's
-// prior ceiling (p_ask = 0.8 × ceiling, p_act = 0.95 × ceiling). Pinned as
-// exact literals so a prior change without a threshold change cannot sneak
-// the arithmetic dead-zone back in.
-test("defaultThresholds: per-class pairs match the BET-1470 decision table", () => {
+// BET-1471: the shipped per-class table — each floor derives from the class's
+// prior ceiling (p_ask = 0.8 × ceiling). Pinned as exact literals so a prior
+// change without a floor change cannot sneak the arithmetic dead-zone back
+// in. The p_act half of the pair is dead but kept in the shape so the
+// persisted engine-state override round-trips.
+test("defaultThresholds: per-class floors match the BET-1470 decision table", () => {
   const th = defaultThresholds();
   for (const t of ACTION_TYPES) {
     assert.ok(th[t] && typeof th[t] === "object", `missing thresholds for ${t}`);
@@ -119,77 +125,22 @@ test("defaultThresholds: per-class pairs match the BET-1470 decision table", () 
   assert.deepEqual(th["start-job"], { p_ask: 0.32, p_act: 0.38 });
   assert.deepEqual(th["queue-tonight"], { p_ask: 0.28, p_act: 0.33 });
   assert.deepEqual(th["tool-write"], { p_ask: 0.24, p_act: 0.29 });
-  // Every pair stays inside its class's p ceiling (= its prior): a candidate
-  // at the ceiling clears the ask bar, and the act bar sits below it.
+  // Every floor stays inside its class's p ceiling (= its prior): a candidate
+  // at the ceiling clears the ask bar.
   for (const t of ACTION_TYPES) {
     const ceiling = DEFAULT_CLASS_PRIORS[t];
-    assert.ok(th[t].p_act <= ceiling, `${t}: p_act must not exceed the prior ceiling`);
-    assert.ok(th[t].p_ask <= th[t].p_act, `${t}: p_ask must not exceed p_act`);
+    assert.ok(th[t].p_ask <= ceiling, `${t}: p_ask must not exceed the prior ceiling`);
   }
 });
 
-test("decideVerb: below the class's p_ask → silent-log", () => {
-  assert.deepEqual(decideVerb({ p: 0.1, cls: "config-change" }), { verb: "silent-log" });
-  // The bars differ per class: 0.26 clears tool-write's p_ask (0.24) but not
-  // config-change's (0.4).
-  assert.deepEqual(decideVerb({ p: 0.26, cls: "tool-write" }), { verb: "decision", notify: false });
-  assert.deepEqual(decideVerb({ p: 0.26, cls: "config-change" }), { verb: "silent-log" });
-});
-
-test("decideVerb: unknown class falls back to the config-change pair", () => {
-  assert.deepEqual(decideVerb({ p: 0.42, cls: "bogus" }), { verb: "decision", notify: false });
-  assert.deepEqual(decideVerb({ p: 0.39, cls: "bogus" }), { verb: "silent-log" });
-  assert.deepEqual(decideVerb({ p: 0.42 }), { verb: "decision", notify: false });
-});
-
-test("decideVerb: p between p_ask and p_act → decision (no notify unless recurrence)", () => {
-  // record-decision: p_ask 0.48, p_act 0.57.
-  assert.deepEqual(decideVerb({ p: 0.5, cls: "record-decision" }), { verb: "decision", notify: false });
-  assert.deepEqual(decideVerb({ p: 0.5, cls: "record-decision", sourceKind: "failure-recurrence" }), { verb: "decision", notify: true });
-  assert.deepEqual(decideVerb({ p: 0.5, cls: "record-decision", sourceKind: "fact-anomaly" }), { verb: "decision", notify: false });
-});
-
-test("decideVerb: unpromoted class above its act bar → decision card, no throw (BET-1471)", () => {
-  // With live per-class bars the old ask-tier guard throw became reachable
-  // and would have silently swallowed the class's highest-worthiness
-  // candidates. Ask IS the §9.3 cap: above the act bar an un-promoted class
-  // still surfaces the ask verb.
-  assert.deepEqual(decideVerb({ p: 0.99, cls: "config-change" }), { verb: "decision", notify: false });
-  // Eligibility gates the climb (§9.3): an ask-capped class never leaves the
-  // ask verbs even when its tier record somehow reads promoted.
-  assert.deepEqual(decideVerb({ p: 0.99, cls: "config-change", tier: "act", eligible: false }), { verb: "decision", notify: false });
-});
-
-test("decideVerb: trust ladder raises the ceiling (§9.2/§9.4)", () => {
-  // record-decision: p_ask 0.48, p_act 0.57.
-  // veto-window tier: p >= p_ask surfaces the veto-window verb.
-  assert.deepEqual(decideVerb({ p: 0.5, cls: "record-decision", tier: "veto-window", eligible: true }), { verb: "veto-window", notify: false });
-  // act tier but below the act bar → still the veto-window verb.
-  assert.deepEqual(decideVerb({ p: 0.5, cls: "record-decision", tier: "act", eligible: true }), { verb: "veto-window", notify: false });
-  // act tier + p >= p_act → the act verb fires.
-  assert.deepEqual(decideVerb({ p: 0.6, cls: "record-decision", tier: "act", eligible: true }), { verb: "act", notify: false });
-  assert.deepEqual(decideVerb({ p: 0.6, cls: "record-decision", tier: "act", eligible: true, sourceKind: "watcher-hit-rate" }), { verb: "act", notify: true });
-  // cold-start dominates the ladder (§10.6-4): capped at ask whatever the tier.
-  assert.deepEqual(decideVerb({ p: 0.99, cls: "record-decision", coldStart: true, tier: "act", eligible: true }), { verb: "decision", capped: true, notify: false });
-});
-
-test("decideVerb: cold-start caps high-score candidates at the ask verb (no throw)", () => {
-  // Even a score that would exceed p_act is capped to a decision card during
-  // cold start — the act branch is not even considered.
-  assert.deepEqual(decideVerb({ p: 0.99, cls: "config-change", coldStart: true }), { verb: "decision", capped: true, notify: false });
-  // The p_ask threshold still applies during cold start: below it → silent-log.
-  assert.deepEqual(decideVerb({ p: 0.1, cls: "config-change", coldStart: true }), { verb: "silent-log" });
-});
-
-test("decideVerb: flat engine-state override wins over the per-class defaults (global)", () => {
-  // record-decision's own p_ask is 0.48; the flat override lowers it for
-  // every class.
-  assert.deepEqual(decideVerb({ p: 0.3, cls: "record-decision", thresholds: { p_ask: 0.2, p_act: 0.9 } }), { verb: "decision", notify: false });
-  assert.deepEqual(decideVerb({ p: 0.1, cls: "record-decision", thresholds: { p_ask: 0.2 } }), { verb: "silent-log" });
-  // A partial override keeps the class's own value for the other key:
-  // config-change p_ask lowered to 0.2, p_act stays 0.48.
-  assert.deepEqual(decideVerb({ p: 0.5, cls: "config-change", thresholds: { p_ask: 0.2 } }), { verb: "decision", notify: false });
-  assert.deepEqual(decideVerb({ p: 0.5, cls: "config-change", tier: "act", eligible: true, thresholds: { p_ask: 0.2 } }), { verb: "act", notify: false });
+// BET-1518 regression: the deleted ladder symbols must be gone from the
+// module surface (no VERDICT_MIN re-export, no decideVerb, no countVerdicts).
+test("deleted symbols: no decideVerb, no VERDICT_MIN, no countVerdicts on the module", () => {
+  assert.equal("decideVerb" in suggestModule, false);
+  assert.equal("VERDICT_MIN" in suggestModule, false);
+  const eng = createCtoSuggest({});
+  assert.equal(typeof eng.countVerdicts, "undefined");
+  assert.equal("_trust" in eng, false);
 });
 
 // ---------------------------------------------------------------------------
@@ -276,22 +227,22 @@ function oneCandidateSuggestText(cls, text, refs = []) {
   });
 }
 
-// The shared harness: memory-backed ledger / verdicts / engine-state / trust /
-// board stores + a parameterized createCtoSuggest(). Defaults encode the
-// common warm wiring (VERDICT_MIN recorded verdicts, medium tier, reliability
-// 1.0, a card writer that accepts and records every write). `build` assembles
+// The shared harness: memory-backed ledger / verdicts / engine-state /
+// calibration / board stores + a parameterized createCtoSuggest(). Defaults
+// encode the common warm wiring (medium tier, reliability 1.0, a card writer
+// that accepts and records every write, fresh calibration 0.5 and τ 0.7 —
+// under which a max-p candidate still ASKS, never acts). `build` assembles
 // a SECOND engine over the same stores for multi-instance tests.
 function makeSug({
   thresholds = null, // flat {p_ask, p_act} → the es.suggest.thresholds override
   engineState = null, // full initial engine state (wins over thresholds)
-  coldStart = false, // zero recorded verdicts (§10.6-4 cold-start cap)
-  trustTiers = null, // {class: tier} seeded into the trust store
-  liveTrust = false, // trust store persists saves (recordAct must survive)
+  calibration = null, // number | async (cls) => (0,1] — the class's §9.5 calibration
+  tau = null, // number | async () => 0..1 — the gate's τ (default 0.7)
   digests: digestsDep = { list: async () => [], load: async () => null },
   configGet = async () => ({ ctoTier: "medium" }),
   capabilities = null,
   cards: cardsDep = null, // cards dep override; default records into the board
-  vetoSink = null, // array → the cards dep also exposes a recording upsertVeto
+  vetoSink = null, // array → the cards dep also exposes a recording upsertVeto (overnight tests only)
   buildCards = null, // ({boardStore, ledger, engineState, now}) => cards manager
   runSuggest = async () => ({ text: JSON.stringify({ candidates: [] }) }),
   runWorthiness = async () => ({ text: "0.9" }),
@@ -305,20 +256,14 @@ function makeSug({
   const ledgerRows = [];
   const verdictEntries = [];
   const notified = [];
+  const acts = [];
   let board = { v: 1, cards: [] };
   const initialEs = engineState ?? (thresholds ? { v: 1, suggest: { thresholds } } : { v: 1 });
   let es = initialEs;
-  const trustInitial = trustTiers ? { v: 1, tiers: trustTiers } : {};
-  let trustState = trustInitial;
 
   const ledger = { append: async (r) => ledgerRows.push(r), read: async () => ledgerRows };
-  const verdicts = coldStart
-    ? { load: async () => ({ entries: [] }), save: async () => {} }
-    : { load: async () => ({ entries: Array(VERDICT_MIN).fill({}) }), save: async () => {} };
+  const verdicts = { load: async () => ({ entries: verdictEntries }), save: async () => {} };
   const engineStateDep = { load: async () => es, save: async (p) => { es = p; } };
-  const trustStoreDep = liveTrust
-    ? { load: async () => trustState, save: async (p) => { trustState = p; } }
-    : { load: async () => trustInitial, save: async () => {} };
   const boardStore = { load: async () => board, save: async (p) => { board = p; } };
 
   const defaultCards = {
@@ -344,7 +289,6 @@ function makeSug({
       ledger,
       verdicts,
       engineState: engineStateDep,
-      trustStore: trustStoreDep,
       digests: digestsDep,
       facts: { list: async () => [], load: async () => null },
       configGet,
@@ -355,6 +299,22 @@ function makeSug({
       senderReliability,
       ...(classPriors ? { classPriors } : {}),
       ...(executeAction ? { executeAction } : {}),
+      calibrationOf:
+        calibration == null
+          ? async () => 0.5
+          : typeof calibration === "function"
+            ? calibration
+            : async () => calibration,
+      tau:
+        tau == null
+          ? async () => 0.7
+          : typeof tau === "function"
+            ? tau
+            : async () => tau,
+      recordAct: async (input) => {
+        acts.push(input);
+        return { ok: true };
+      },
       recordVerdict:
         recordVerdict ??
         (async ({ subject, verdict, never }) => {
@@ -373,6 +333,7 @@ function makeSug({
     ledgerRows,
     verdictEntries,
     notified,
+    acts,
     get cardPayload() {
       return board;
     },
@@ -390,7 +351,7 @@ test("pipeline: silent-log when below p_ask (no card, ledger row, no notify)", a
     runSuggest: async () => ({ text: oneCandidateSuggestText("start-job", "a") }),
     runWorthiness: async () => ({ text: "0.2" }),
   });
-  const r = await h.sug.processFinding({ id: "rec:abc", sourceKind: "fact-anomaly", text: "a", refs: [] }, { coldStart: false, tier: "medium" });
+  const r = await h.sug.processFinding({ id: "rec:abc", sourceKind: "fact-anomaly", text: "a", refs: [] }, { tier: "medium" });
   assert.equal(r.surfaced, 0);
   assert.equal(r.silent, 1);
   assert.equal(h.cardPayload.cards.length, 0);
@@ -419,10 +380,10 @@ test("pipeline: decision card surfaced + notify on failure-recurrence; option ex
     runWorthiness: async () => ({ text: "1.0" }),
   });
 
-  // non-cold-start (15 verdicts above), failure-recurrence finding → notify
+  // failure-recurrence finding → notify
   const r = await h.sug.processFinding(
     { id: "rec:x", sourceKind: "failure-recurrence", text: "build", refs: ["c1"] },
-    { coldStart: false, tier: "medium" },
+    { tier: "medium" },
   );
   assert.equal(r.surfaced, 1);
   assert.equal(h.notified.length, 1); // steep-decay notify variant fired
@@ -434,17 +395,19 @@ test("pipeline: decision card surfaced + notify on failure-recurrence; option ex
   assert.deepEqual(labels, ["start-job"]);
 });
 
-test("pipeline: cold-start caps even a high-score candidate into a decision card (never acts)", async () => {
+test("pipeline: a fresh class never acts (calibration 0.5 × p < τ) — the gate caps everything at ask", async () => {
+  // BET-1518: with a fresh class (calibration 0.5) and the default τ 0.7,
+  // even a max-worthiness candidate's effective (1.0 × 0.5 = 0.5) stays below
+  // the bar — the cold-start behavior emerges from the estimator, no pin.
   const h = makeSug({
-    coldStart: true,
     thresholds: { p_ask: 0.2, p_act: 0.3 },
     configGet: async () => ({ ctoTier: "high" }),
     runSuggest: async () => ({ text: oneCandidateSuggestText("start-job", "cold") }),
     runWorthiness: async () => ({ text: "1.0" }), // score → p high
   });
-  const r = await h.sug.processFinding({ id: "rec:cold", sourceKind: "fact-anomaly", text: "cold", refs: [] }, { coldStart: true, tier: "high" });
-  assert.equal(r.surfaced, 1); // capped -> decision card, not an act
-  assert.equal(h.cardPayload.cards[0].capped, true);
+  const r = await h.sug.processFinding({ id: "rec:cold", sourceKind: "fact-anomaly", text: "cold", refs: [] }, { tier: "high" });
+  assert.equal(r.surfaced, 1); // asks -> decision card, not an act
+  assert.equal(h.cardPayload.cards[0].variant, "decision");
 });
 
 test("listHeld: returns silent-log ledger rows", async () => {
@@ -477,7 +440,6 @@ test("verdictHeld fallback is a patchStore section: a concurrent writer's patch 
   const sug = createCtoSuggest({
     ledger: { append: async () => true, read: async () => rows },
     engineState: { load: async () => ({ v: 1 }), save: async () => {} },
-    trustStore: { load: async () => ({}), save: async () => {} },
     verdicts: verdictsStore,
     now: () => 1_000,
     publish: () => {},
@@ -520,8 +482,9 @@ test("production wiring can surface a decision card: reliability 1.0 × prior 0.
     runSuggest: async () => ({ text: oneCandidateSuggestText("record-decision", "Adopt pact") }),
     runWorthiness: async () => ({ text: "1.0" }), // max-worthiness candidate
   });
-  const r = await h.sug.processFinding({ id: "rec:r", sourceKind: "fact-anomaly", text: "r", refs: [] }, { coldStart: false, tier: "medium" });
-  // p = 1.0 × 0.6 × 1.0 = 0.6 ≥ p_ask 0.48 → decision card, not silent-log.
+  const r = await h.sug.processFinding({ id: "rec:r", sourceKind: "fact-anomaly", text: "r", refs: [] }, { tier: "medium" });
+  // p = 1.0 × 0.6 × 1.0 = 0.6 ≥ p_ask 0.48 → surfaces; the gate asks (fresh
+  // class 0.5 → effective 0.3 < τ 0.7), never silent-log.
   assert.equal(r.surfaced, 1);
   assert.equal(h.cardPayload.cards.length, 1);
   assert.equal(h.cardPayload.cards[0].variant, "decision");
@@ -537,7 +500,7 @@ test("queue-tonight is no longer a dead class: score-1.0 candidate surfaces a ca
     runSuggest: async () => ({ text: oneCandidateSuggestText("queue-tonight", "Queue the maintenance window") }),
     runWorthiness: async () => ({ text: "1.0" }), // max-worthiness candidate
   });
-  const r = await h.sug.processFinding({ id: "rec:q", sourceKind: "fact-anomaly", text: "q", refs: [] }, { coldStart: false, tier: "high" });
+  const r = await h.sug.processFinding({ id: "rec:q", sourceKind: "fact-anomaly", text: "q", refs: [] }, { tier: "high" });
   // p = 1.0 × 0.35 × 1.0 = 0.35 ≥ p_ask 0.28 → decision card. Under the old
   // global bar (0.4) this exact candidate was silent-log at every score.
   assert.equal(r.surfaced, 1);
@@ -547,158 +510,134 @@ test("queue-tonight is no longer a dead class: score-1.0 candidate surfaces a ca
   assert.ok(h.ledgerRows.every((x) => x.kind !== "suggest.silent"));
 });
 
-// BET-1471 reachability: for each §9.3-eligible class, p at the class's
-// ceiling (= its prior, the arithmetic max with reliability 1.0) reaches the
-// act verb through a promoted act tier, surfaces the ask card when
-// un-promoted (never a throw), and stays silent below the class's p_ask.
-test("act verb is arithmetically reachable for the §9.3-eligible classes", () => {
-  const eligible = { "record-decision": 0.6, "queue-tonight": 0.35, "start-job": 0.4 };
-  for (const [cls, ceiling] of Object.entries(eligible)) {
-    // promoted act tier + p at the ceiling → the act verb fires
-    assert.deepEqual(
-      decideVerb({ p: ceiling, cls, tier: "act", eligible: true }),
-      { verb: "act", notify: false },
-      `${cls}: p at the ceiling must reach the act verb`
-    );
-    // the same p on an un-promoted class → decision card, no throw
-    assert.deepEqual(
-      decideVerb({ p: ceiling, cls }),
-      { verb: "decision", notify: false },
-      `${cls}: p at the ceiling must surface the ask card, not a hold`
-    );
-    // just below the class's p_ask → silent-log
+// BET-1518 reachability: for each class, p at the ceiling reaches the act
+// verb through a fully-calibrated class (calibration → 1.0 over its outcome
+// window), surfaces the ask card on a fresh class, and stays silent below
+// the class's p_ask floor. No tiers, no eligibility map — the class list is
+// the §9.2 enum itself, and the τ dial is lowered to 0.3 (the default 0.7
+// exceeds the low-prior classes' ceilings by design: they ask until the user
+// turns the dial down).
+test("act verb is arithmetically reachable through calibration, not tiers", () => {
+  const classes = { "record-decision": 0.6, "queue-tonight": 0.35, "start-job": 0.4 };
+  for (const [cls, ceiling] of Object.entries(classes)) {
+    // τ dialed to the class's ceiling: a calibrated class reaches the act verb
+    const acted = evaluateGate({ plans: [{ id: "p", class: cls, confidence: ceiling }], tau: ceiling, calibration: { [cls]: 1.0 } });
+    assert.equal(acted.verb, "act", `${cls}: p at the ceiling with full calibration must reach the act verb`);
+    // the same p on a fresh class → ask card (0.5 × ceiling < ceiling)
+    const asked = evaluateGate({ plans: [{ id: "p", class: cls, confidence: ceiling }], tau: ceiling, calibration: { [cls]: 0.5 } });
+    assert.equal(asked.verb, "ask", `${cls}: p at the ceiling on a fresh class must surface the ask card`);
+    // just below the class's p_ask floor → silent-log (handled in processFinding)
     const pAsk = defaultThresholds()[cls].p_ask;
-    assert.deepEqual(
-      decideVerb({ p: pAsk - 0.01, cls }),
-      { verb: "silent-log" },
-      `${cls}: below its own p_ask must stay silent`
-    );
+    assert.ok(pAsk > 0 && pAsk < ceiling, `${cls}: the floor sits inside the class's ceiling`);
   }
 });
 
 // ---------------------------------------------------------------------------
-// BET-1403 — the trust ladder in the pipeline (§9.2/§9.3/§9.4)
+// BET-1518 — the gate in the pipeline (§9.3/§9.5): act vs ask on
+// effective = p × calibration ≥ τ; refusal degrades to the ask card; notify
+// is a delivery property of ask.
 // ---------------------------------------------------------------------------
 
-test("pipeline: veto-window tier surfaces the veto verb; missing veto writer degrades to the decision card", async () => {
-  // Promote the class by seeding the trust store the suggest engine consults,
-  // with a non-cold-start verdict ledger (the harness warm default).
-  const h = makeSug({
-    trustTiers: { "record-decision": "veto-window" },
-    runSuggest: async () => ({ text: oneCandidateSuggestText("record-decision", "a") }),
-  });
-  const r = await h.sug.processFinding({ id: "rec:vd", sourceKind: "fact-anomaly", text: "a", refs: [] }, { coldStart: false, tier: "medium" });
-  assert.equal(r.surfaced, 1);
-  assert.equal(h.cardPayload.cards.length, 1);
-  assert.equal(h.cardPayload.cards[0].variant, "decision"); // degraded veto verb
-  assert.ok(h.ledgerRows.some((x) => x.kind === "suggest.presented" && x.variant === "decision"));
-});
-
-test("pipeline: veto-window verb writes the veto card when the writer exists", async () => {
+test("pipeline: ask verb surfaces the decision card with the effective score (never a veto card)", async () => {
+  // Fresh calibration (0.5) × p 1.0 = 0.5 < τ 0.7 → ask. The veto-window
+  // verb is deleted: even with a veto writer on the harness, no veto card
+  // may be written.
   const vetoCards = [];
   const h = makeSug({
-    trustTiers: { "record-decision": "veto-window" },
     vetoSink: vetoCards,
     runSuggest: async () => ({ text: oneCandidateSuggestText("record-decision", "a") }),
   });
-  const r = await h.sug.processFinding({ id: "rec:vv", sourceKind: "fact-anomaly", text: "a", refs: [] }, { coldStart: false, tier: "medium" });
+  const r = await h.sug.processFinding({ id: "rec:vd", sourceKind: "fact-anomaly", text: "a", refs: [] }, { tier: "medium" });
   assert.equal(r.surfaced, 1);
-  assert.equal(vetoCards.length, 1);
-  assert.equal(vetoCards[0].variant, "veto");
-  assert.equal(h.cardPayload.cards.length, 0); // no ask-card fallback
-  assert.ok(h.ledgerRows.some((x) => x.kind === "suggest.presented" && x.variant === "veto"));
+  assert.equal(h.cardPayload.cards.length, 1);
+  assert.equal(h.cardPayload.cards[0].variant, "decision");
+  assert.equal(vetoCards.length, 0);
+  assert.ok(h.ledgerRows.some((x) => x.kind === "suggest.presented" && x.variant === "decision"));
 });
 
-test("pipeline: act tier + executable action executes, ledgers, and queues the digest report", async () => {
+test("pipeline: calibrated class + p ≥ τ acts, ledgers, and queues the digest report", async () => {
   const executed = [];
   const h = makeSug({
-    liveTrust: true, // memory-backed trust store: recordAct persists the pending report
-    trustTiers: { "record-decision": "act" },
+    calibration: async (cls) => (cls === "record-decision" ? 1.0 : 0.5),
+    tau: 0.7,
     executeAction: async ({ cls, action }) => {
       executed.push({ cls, action });
       return { ok: true };
     },
     runSuggest: async () => ({ text: oneCandidateSuggestText("record-decision", "Adopt pact", ["msg:1"]) }),
-    runWorthiness: async () => ({ text: "1.0" }), // p = 1.0 × 1.0 (prior override) ≥ p_act → act verb
+    runWorthiness: async () => ({ text: "1.0" }), // p = 1.0 × 1.0 (prior override) ≥ τ → act
     classPriors: { "record-decision": 1.0 },
   });
-  const r = await h.sug.processFinding({ id: "rec:aa", sourceKind: "fact-anomaly", text: "a", refs: [] }, { coldStart: false, tier: "medium" });
+  const r = await h.sug.processFinding({ id: "rec:aa", sourceKind: "fact-anomaly", text: "a", refs: [] }, { tier: "medium" });
   assert.equal(r.surfaced, 1);
   assert.equal(executed.length, 1);
   assert.equal(executed[0].action.type, "record-decision");
   assert.equal(h.cardPayload.cards.length, 0); // no card — it acted
   assert.ok(h.ledgerRows.some((x) => x.kind === "suggest.acted" && x.class === "record-decision"));
   // The mandatory report (§9.2 invariant 1) is queued for the next digest.
-  const pending = await h.sug._trust.listAnnouncements();
-  assert.equal(pending.length, 1);
-  assert.equal(pending[0].kind, "act");
-  assert.match(pending[0].text, /^Acted on my own \(record-decision\)/);
+  assert.equal(h.acts.length, 1);
+  assert.equal(h.acts[0].cls, "record-decision");
 });
 
-test("pipeline: act tier + unexecutable action degrades to the veto-window verb (never silently acts)", async () => {
+test("pipeline: act-refused action degrades to the ask card (never silently acts, never a veto card)", async () => {
   const h = makeSug({
-    trustTiers: { "start-job": "act" },
+    calibration: async (cls) => (cls === "start-job" ? 1.0 : 0.5),
     runSuggest: async () => ({ text: oneCandidateSuggestText("start-job", "a") }),
     runWorthiness: async () => ({ text: "1.0" }),
+    classPriors: { "start-job": 1.0 },
     // executeAction stays unwired for this class → refuse
   });
-  const r = await h.sug.processFinding({ id: "rec:de", sourceKind: "fact-anomaly", text: "a", refs: [] }, { coldStart: false, tier: "medium" });
+  const r = await h.sug.processFinding({ id: "rec:de", sourceKind: "fact-anomaly", text: "a", refs: [] }, { tier: "medium" });
   assert.equal(r.surfaced, 1);
-  assert.equal(h.cardPayload.cards.length, 1); // degraded to the ask card (no veto writer)
+  assert.equal(h.cardPayload.cards.length, 1); // degraded to the ask card
+  assert.equal(h.cardPayload.cards[0].variant, "decision");
   assert.equal(h.ledgerRows.filter((x) => x.kind === "suggest.acted").length, 0);
-  assert.equal((await h.sug._trust.listAnnouncements()).length, 0);
+  assert.equal(h.acts.length, 0);
 });
 
-test("pipeline: cold start keeps an act-tier class capped at the ask verb (§10.6-4 dominance)", async () => {
+test("pipeline: below the class's p_ask stays silent even when calibration would act", async () => {
   const executed = [];
   const h = makeSug({
-    coldStart: true,
-    trustTiers: { "record-decision": "act" },
+    calibration: 1.0,
+    runSuggest: async () => ({ text: oneCandidateSuggestText("config-change", "a") }),
+    runWorthiness: async () => ({ text: "0.35" }), // p = 0.35 < config-change p_ask 0.4
+    classPriors: { "config-change": 1.0 },
+    executeAction: async () => { executed.push(1); return { ok: true }; },
+  });
+  const r = await h.sug.processFinding({ id: "rec:cc", sourceKind: "fact-anomaly", text: "a", refs: [] }, { tier: "medium" });
+  assert.equal(r.surfaced, 0);
+  assert.equal(r.silent, 1);
+  assert.equal(executed.length, 0);
+  assert.equal(h.cardPayload.cards.length, 0);
+});
+
+test("pipeline: no special-casing — a config-change plan acts through the same gate", async () => {
+  const executed = [];
+  const h = makeSug({
+    calibration: 1.0,
+    tau: 0.5,
     executeAction: async ({ cls, action }) => {
       executed.push({ cls, action });
       return { ok: true };
     },
-    runSuggest: async () => ({ text: oneCandidateSuggestText("record-decision", "a") }),
-    runWorthiness: async () => ({ text: "1.0" }),
-  });
-  const r = await h.sug.processFinding({ id: "rec:cs", sourceKind: "fact-anomaly", text: "a", refs: [] }, { coldStart: true, tier: "medium" });
-  assert.equal(r.surfaced, 1);
-  assert.equal(executed.length, 0); // never acts under the cold-start gate
-  assert.equal(h.cardPayload.cards[0].capped, true);
-});
-
-test("pipeline: an ineligible act-tier class above its act bar surfaces the ask card (no throw, no hold)", async () => {
-  const h = makeSug({
-    // config-change is §9.3-capped; even a corrupt/foreign "act" tier row in
-    // the legacy engine-state trust payload must never raise the ceiling —
-    // the ask card is the cap (BET-1471: the old throw silently held the
-    // class's best candidates).
-    engineState: { v: 1, trust: { tiers: { "config-change": "act" } } },
-    executeAction: async () => ({ ok: true }),
     runSuggest: async () => ({ text: oneCandidateSuggestText("config-change", "a") }),
-    runWorthiness: async () => ({ text: "1.0" }), // p = 1.0, above the class's act bar
+    runWorthiness: async () => ({ text: "1.0" }),
     classPriors: { "config-change": 1.0 },
   });
-  const r = await h.sug.processFinding({ id: "rec:cc", sourceKind: "fact-anomaly", text: "a", refs: [] }, { coldStart: false, tier: "medium" });
-  // The ask verb IS the §9.3 cap: the candidate surfaces a decision card.
+  const r = await h.sug.processFinding({ id: "rec:noSpecial", sourceKind: "fact-anomaly", text: "a", refs: [] }, { tier: "medium" });
   assert.equal(r.surfaced, 1);
-  assert.equal(r.silent, 0);
-  assert.equal(h.cardPayload.cards.length, 1);
-  assert.equal(h.cardPayload.cards[0].variant, "decision");
-  // No act-not-trusted hold row, and — the class being ineligible — it never
-  // acted either.
-  assert.ok(!h.ledgerRows.some((x) => x.reason === "act-not-trusted"));
-  assert.ok(!h.ledgerRows.some((x) => x.kind === "suggest.acted"));
+  assert.equal(executed.length, 1);
+  assert.equal(executed[0].cls, "config-change");
 });
 
-test("verdictHeld stamps the held row's class onto the subject (§9.4 attribution)", async () => {
+test("verdictHeld stamps the held row's class onto the subject (§9.5 attribution)", async () => {
   const h = makeSug({
     runSuggest: async () => ({ text: oneCandidateSuggestText("start-job", "a") }),
     runWorthiness: async () => ({ text: "0.1" }), // p below p_ask → silent-log (a HELD row)
   });
   await h.sug.processFinding(
     { id: "rec:h1", sourceKind: "fact-anomaly", text: "a", refs: [] },
-    { coldStart: false, tier: "medium" }
+    { tier: "medium" }
   );
   const sid = stableSuggestionId("rec:h1", "start-job");
   const recorded = [];
@@ -763,7 +702,7 @@ test("usedKeys cap: exactly-at-cap holds every entry; the 201st evicts the OLDES
     engineState: { v: 1, suggest: { usedKeys: Array.from({ length: 199 }, (_, i) => `old-${i}`) } },
   });
   const process = (id) =>
-    h.sug.processFinding({ id, sourceKind: "fact-anomaly", text: "x", refs: [] }, { coldStart: false, tier: "medium" });
+    h.sug.processFinding({ id, sourceKind: "fact-anomaly", text: "x", refs: [] }, { tier: "medium" });
 
   // At-cap state: the 200th distinct key lands with NO eviction.
   await process("rec:fill");
@@ -795,8 +734,8 @@ test("notify: fireNotify carries a distinct, non-global tag per candidate WITHOU
   const fireNotify = async (args) => notified.push(args);
   const a = makeSug({ runSuggest: async () => ({ text: oneCandidateSuggestText("start-job", "A") }), fireNotify });
   const b = makeSug({ runSuggest: async () => ({ text: oneCandidateSuggestText("start-job", "B") }), fireNotify });
-  await a.sug.processFinding({ id: "rec:a", sourceKind: "failure-recurrence", text: "A", refs: [] }, { coldStart: false, tier: "medium" });
-  await b.sug.processFinding({ id: "rec:b", sourceKind: "failure-recurrence", text: "B", refs: [] }, { coldStart: false, tier: "medium" });
+  await a.sug.processFinding({ id: "rec:a", sourceKind: "failure-recurrence", text: "A", refs: [] }, { tier: "medium" });
+  await b.sug.processFinding({ id: "rec:b", sourceKind: "failure-recurrence", text: "B", refs: [] }, { tier: "medium" });
   assert.equal(notified.length, 2);
   // push.mjs's `tag` override (added for this fix) is the caller-supplied
   // identifier — a present, per-candidate tag is what keeps two unrelated
@@ -817,7 +756,7 @@ test("fireNotify is gated on the card write's isNew: a re-upserted (not new) car
     cards: { upsertDecision: async () => ({ changed: true, isNew: false }) }, // upsert of a card already on the board
     runSuggest: async () => ({ text: oneCandidateSuggestText("start-job", "again") }),
   });
-  const r = await h.sug.processFinding({ id: "rec:re", sourceKind: "failure-recurrence", text: "again", refs: [] }, { coldStart: false, tier: "medium" });
+  const r = await h.sug.processFinding({ id: "rec:re", sourceKind: "failure-recurrence", text: "again", refs: [] }, { tier: "medium" });
   assert.equal(r.surfaced, 1); // the card write still counts as surfaced
   assert.equal(h.notified.length, 0); // but never re-pushes a not-new card
 });
@@ -840,12 +779,12 @@ test("a gated generation ({ok:false}) does not mark the finding used — it's re
     },
   });
   const finding = { id: "rec:gated", sourceKind: "failure-recurrence", text: "x", refs: [] };
-  const r1 = await h.sug.processFinding(finding, { coldStart: false, tier: "medium" });
+  const r1 = await h.sug.processFinding(finding, { tier: "medium" });
   assert.equal(r1.surfaced, 0);
   assert.equal(r1.silent, 0);
   assert.ok(!(h.getEs().suggest?.usedKeys || []).includes("rec:gated"), "gated pass must not mark used");
 
-  const r2 = await h.sug.processFinding(finding, { coldStart: false, tier: "medium" });
+  const r2 = await h.sug.processFinding(finding, { tier: "medium" });
   assert.equal(calls, 2, "the generator ran again next pass — not permanently suppressed");
   assert.equal(r2.surfaced, 1, "the finding is reconsidered and surfaces once budget frees up");
 });
@@ -856,17 +795,17 @@ test("a throwing / unparseable generation does not mark the finding used", async
       throw new Error("model timeout");
     },
   });
-  await throwing.sug.processFinding({ id: "rec:throws", sourceKind: "fact-anomaly", text: "x", refs: [] }, { coldStart: false, tier: "medium" });
+  await throwing.sug.processFinding({ id: "rec:throws", sourceKind: "fact-anomaly", text: "x", refs: [] }, { tier: "medium" });
   assert.ok(!(throwing.getEs().suggest?.usedKeys || []).includes("rec:throws"));
 
   const garbage = makeSug({ runSuggest: async () => ({ text: "not json at all" }) });
-  await garbage.sug.processFinding({ id: "rec:garbage", sourceKind: "fact-anomaly", text: "x", refs: [] }, { coldStart: false, tier: "medium" });
+  await garbage.sug.processFinding({ id: "rec:garbage", sourceKind: "fact-anomaly", text: "x", refs: [] }, { tier: "medium" });
   assert.ok(!(garbage.getEs().suggest?.usedKeys || []).includes("rec:garbage"));
 });
 
 test("a generator that legitimately returns zero candidates (valid empty JSON) IS marked used", async () => {
   const h = makeSug(); // the default generator returns valid empty JSON
-  await h.sug.processFinding({ id: "rec:empty", sourceKind: "fact-anomaly", text: "x", refs: [] }, { coldStart: false, tier: "medium" });
+  await h.sug.processFinding({ id: "rec:empty", sourceKind: "fact-anomaly", text: "x", refs: [] }, { tier: "medium" });
   assert.ok((h.getEs().suggest?.usedKeys || []).includes("rec:empty"));
 });
 
@@ -897,7 +836,7 @@ test("BET-1477: a byte-identical decision regeneration counts as surfaced, not s
   });
   const finding = { id: "rec:regen-d", sourceKind: "fact-anomaly", text: "Tighten the cache TTL", refs: ["c1"] };
 
-  const r1 = await h.sug.processFinding(finding, { coldStart: false, tier: "medium" });
+  const r1 = await h.sug.processFinding(finding, { tier: "medium" });
   assert.equal(r1.surfaced, 1);
   assert.equal(r1.silent, 0);
   const firstWriteAt = h.cardPayload.cards[0].updatedAt;
@@ -910,37 +849,13 @@ test("BET-1477: a byte-identical decision regeneration counts as surfaced, not s
   // hold.
   h.clock.ms += 30 * 60_000;
   h.resetEs();
-  const r2 = await h.sug.processFinding(finding, { coldStart: false, tier: "medium" });
+  const r2 = await h.sug.processFinding(finding, { tier: "medium" });
   assert.equal(r2.surfaced, 1, "unchanged card is already on the board and current → surfaced");
   assert.equal(r2.silent, 0);
   assert.ok(!h.ledgerRows.some((r) => r.kind === "suggest.silent" && r.reason === "no-card-path"), "no suggest.silent(no-card-path) miscount");
   assert.equal(h.ledgerRows.filter((r) => r.kind === "suggest.presented").length, presentedRows, "no second presented row — no ledger noise");
   assert.equal(h.cardPayload.cards.filter((c) => c.state === "open").length, 1, "never duplicated");
   assert.equal(h.cardPayload.cards[0].updatedAt, firstWriteAt, "byte-identical no-op did not rewrite the card");
-});
-
-test("BET-1477: a byte-identical veto regeneration stays the veto card — surfaced, no downgrade", async () => {
-  const h = makeRegenSug({
-    trustTiers: { "record-decision": "veto-window" },
-    runSuggest: async () => ({ text: oneCandidateSuggestText("record-decision", "Adopt a rollback policy", ["c2"]) }),
-  });
-  const finding = { id: "rec:regen-v", sourceKind: "fact-anomaly", text: "Adopt a rollback policy", refs: ["c2"] };
-
-  const r1 = await h.sug.processFinding(finding, { coldStart: false, tier: "medium" });
-  assert.equal(r1.surfaced, 1);
-  assert.equal(h.cardPayload.cards[0].variant, "veto");
-
-  h.clock.ms += 30 * 60_000;
-  h.resetEs();
-  const r2 = await h.sug.processFinding(finding, { coldStart: false, tier: "medium" });
-  assert.equal(r2.surfaced, 1, "unchanged veto card is already on the board and current → surfaced");
-  assert.equal(r2.silent, 0);
-  assert.ok(!h.ledgerRows.some((r) => r.kind === "suggest.silent" && r.reason === "no-card-path"), "no suggest.silent(no-card-path) miscount");
-  const open = h.cardPayload.cards.filter((c) => c.state === "open");
-  assert.equal(open.length, 1, "never duplicated");
-  assert.equal(open[0].variant, "veto", "no veto→decision verb downgrade on the no-op path");
-  assert.equal(h.ledgerRows.filter((r) => r.kind === "suggest.presented" && r.variant === "decision").length, 0);
-  assert.equal(h.ledgerRows.filter((r) => r.kind === "suggest.presented" && r.variant === "veto").length, 1, "exactly one presented row total");
 });
 
 test("BET-1477: a thrown, missing, or explicitly-refused (ok:false) decision-card write still holds as suggest.silent(no-card-path)", async () => {
@@ -955,7 +870,7 @@ test("BET-1477: a thrown, missing, or explicitly-refused (ok:false) decision-car
       runSuggest: async () => ({ text: oneCandidateSuggestText("config-change", "x") }),
       runWorthiness: async () => ({ text: "0.6" }),
     });
-    const r = await h.sug.processFinding({ id: `rec:fail-${label}`, sourceKind: "fact-anomaly", text: "x", refs: [] }, { coldStart: false, tier: "medium" });
+    const r = await h.sug.processFinding({ id: `rec:fail-${label}`, sourceKind: "fact-anomaly", text: "x", refs: [] }, { tier: "medium" });
     assert.equal(r.surfaced, 0, `${label}: no surfaced count without a card`);
     assert.equal(r.silent, 1, `${label}: held instead`);
     assert.ok(h.ledgerRows.some((x) => x.kind === "suggest.silent" && x.reason === "no-card-path"), `${label}: the hold reason is preserved`);

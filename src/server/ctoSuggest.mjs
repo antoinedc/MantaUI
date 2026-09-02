@@ -7,24 +7,22 @@
 //     `id = hash(findingId, class)` (regeneration upserts the card, never
 //     duplicates), carries the finding text + refs, and ≤3 options whose
 //     `action` type comes from a closed enum (`ACTION_TYPES`). The generator is
-//     told which verbs are reachable by data so it cannot propose what the
-//     data forbids: `tool-write` only for tools holding the write ring
+//     told which option types are reachable by data so it cannot propose what
+//     the data forbids: `tool-write` only for tools holding the write ring
 //     (empty ring = branch unreachable), `queue-tonight` only at High tier.
 //   - Worthiness gate: a `worthiness` class call returns a 0..1 score; the
-//     decision probability is `score × class prior × sender reliability`
-//     (§9.1 calibration). Thresholds are per class (BET-1471: the p_ask/p_act
-//     pair derives from each class's prior ceiling — `defaultThresholds()`),
-//     with a flat engine-state `suggest.thresholds` pair overriding globally
-//     when present; below `p_ask` a candidate is SILENT-LOGGED (a ledger row
-//     {id, score, reason}) for the §14.3 silence audit, above it a DECISION
-//     card is written. The `notify` variant (informational-tier router call)
-//     fires only when the finding's decay is steep — the deterministic rule
-//     `sourceKind ∈ {failure-recurrence}`. The act verb is reachable only
-//     through the §9.4 ladder (eligible act-tier class, p >= p_act); an
-//     un-promoted class above its act bar surfaces the ask card — ask IS the
-//     §9.3 cap — it never acts.
-//   - Global cold-start gate: until ≥ VERDICT_MIN (15) verdicts exist, every
-//     candidate is capped at the ask verbs regardless of scores ($9.1).
+//     candidate probability is `score × class prior × sender reliability`
+//     (§9.1 calibration). A per-class salience floor (`p_ask` from
+//     `defaultThresholds()`, flat engine-state override wins) sits BELOW the
+//     surface verbs: under it a candidate is SILENT-LOGGED (a ledger row
+//     {id, score, reason}) for the §14.3 silence audit. Above it, the §9.3
+//     gate (ctoGate.mjs, BET-1518) decides act vs ask:
+//     `effective = p × calibration(class)` (§9.5); `effective ≥ τ` acts
+//     through the executeAction seam (refusal → ask card, never a silent
+//     no-op), `effective < τ` surfaces the decision card. The v2 verb ladder
+//     (trust tiers, veto-window verb, cold-start pin, p_act) is deleted
+//     (D22 supersedes v2 §9.4 and §10.6-4); `notify` is a delivery property
+//     of ask (steep-decay kinds), not a verb.
 //   - Silence audit (§14.3): silent-log rows are re-readable; a held item
 //     takes a verdict (accept → the fact/going-forward branch, dismiss → the
 //     rejection counter) through the B3 verdict route.
@@ -42,15 +40,15 @@ import {
   engineStateStore,
   patchEngineState,
   patchStore,
-  trustStore,
   verdictsStore,
   digestsStore,
   factsStore,
 } from "./ctoStores.mjs";
 import { collectWatcherHitsFromLedger } from "./ctoWatchers.mjs";
-// BET-1403: the earned-trust ladder (§9.3/§9.4) consults per-class tiers for
-// verb selection; VERDICT_MIN (the §10.6-4 cold-start gate) is owned here.
-import { createCtoTrust, VERDICT_MIN as TRUST_VERDICT_MIN } from "./ctoTrust.mjs";
+// BET-1518 (§9.3/§9.5): the gate replaces the verb ladder — act vs ask on
+// effective = p × calibration(class) vs τ; the suggest flow's candidate
+// confidence is its worthiness p.
+import { DEFAULT_TAU, evaluateGate } from "./ctoGate.mjs";
 
 export const SUGGEST_VERSION = 1;
 
@@ -80,10 +78,6 @@ export const DEFAULT_CLASS_PRIORS = Object.freeze({
   "record-decision": 0.6,
 });
 
-// Cold-start: below this many verdicts every candidate is capped at ask verbs.
-// Owned by ctoTrust (§10.6-4) since BET-1403 — re-exported for callers.
-export const VERDICT_MIN = TRUST_VERDICT_MIN;
-
 // BET-1465: bound `es.suggest.usedKeys` so it cannot become the next
 // unbounded engine-state store — the `ctoStores.mjs` sweep does not cover
 // engine-state. Plain trailing slice — unlike `ctoBudget.mjs`'s ROI pending
@@ -91,15 +85,16 @@ export const VERDICT_MIN = TRUST_VERDICT_MIN;
 // blind bound is safe here.
 const USED_KEYS_CAP = 200;
 
-// §9.1 per-class gate thresholds (BET-1471 — implements the BET-1470
-// decision; do not re-litigate). With reliability at 1.0 a candidate's p
-// ceiling IS its class prior, so each pair derives from that ceiling:
-// `p_ask = 0.8 × ceiling`, `p_act = 0.95 × ceiling` (0.95 mirrors the §9.4
-// promotion bar). The old single global pair made the act verb
-// arithmetically unreachable (0.95 > every ceiling) and silenced
-// queue-tonight and tool-write at every score. The engine-state
-// `suggest.thresholds` override keeps its flat `{p_ask, p_act}` shape and,
-// when present, applies globally to every class.
+// §9.1 per-class salience floors (BET-1471 — implements the BET-1470
+// decision; do not re-litigate). `p_ask` is the worthiness bar a candidate
+// must clear before it may surface at all; below it the candidate is a
+// silent-log row for the §14.3 audit. With reliability at 1.0 a candidate's
+// p ceiling IS its class prior, so the floor derives from that ceiling:
+// `p_ask = 0.8 × ceiling`. The v2 `p_act` half of the pair is dead under the
+// gate (the act/ask split is `effective = p × calibration ≥ τ`, ctoGate.mjs)
+// but stays in the pair shape so the persisted engine-state override
+// (`suggest.thresholds {p_ask, p_act}`) round-trips; only `p_ask` is read.
+// The engine-state override, when present, applies globally to every class.
 export function defaultThresholds() {
   return {
     "record-decision": { p_ask: 0.48, p_act: 0.57 },
@@ -156,54 +151,10 @@ export function worthinessProbability(score, prior = 0.5, senderReliability = 0.
   return Math.min(1, s * p * r);
 }
 
-// §9.1/§9.2 surface-verb selection for one candidate.
-//   - `cls` picks the threshold pair: `defaultThresholds()[cls]`; an unknown
-//     class falls back to the config-change pair. The `thresholds` override
-//     (engine-state `suggest.thresholds`) keeps its flat `{p_ask, p_act}`
-//     shape, wins over the per-class defaults and, when present, applies to
-//     every class.
-//   - coldStart (`verdicts < VERDICT_MIN`): capped at the ask verb regardless
-//     of score or trust tier — the §10.6-4 global gate dominates (§9.4).
-//   - The class's trust tier raises the ceiling (§9.4): at the veto-window
-//     tier the veto-window verb is reachable; at the act tier the act verb
-//     becomes reachable once p >= p_act (below it the class still surfaces
-//     the veto-window verb). Eligibility (§9.3) gates the climb — an
-//     ask-capped class never leaves the ask verbs whatever its counters say.
-//   - p >= p_act on an un-promoted (ask-tier) class: the ask verb IS the
-//     §9.3 cap, so the candidate surfaces the decision card — never silence
-//     (BET-1471: the old throw silently swallowed the class's highest-
-//     worthiness candidates). The act gate lives only in the eligible
-//     act-tier branch below.
-//   - p >= p_ask: DECISION card; `notify` true when the decay rule matches.
-//   - else: SILENT-LOG (ledger row for the §14.3 audit).
-export function decideVerb({
-  p,
-  cls = null,
-  thresholds = null,
-  coldStart = false,
-  sourceKind = null,
-  tier = "ask",
-  eligible = false,
-} = {}) {
-  const perClass = defaultThresholds();
-  const base = perClass[cls] || perClass["config-change"];
-  const th = { ...base, ...(thresholds || {}) };
-  const pAct = Number.isFinite(th.p_act) ? th.p_act : base.p_act;
-  const pAsk = Number.isFinite(th.p_ask) ? th.p_ask : base.p_ask;
-  const notify = NOTIFY_RECURRENCE_KINDS.includes(sourceKind);
-  if (p < pAsk) return { verb: "silent-log" };
-  // p >= p_ask → at least the ask verb (decision card). Cold-start CAPS the
-  // ceiling at ask "regardless of scores": the act branch is never considered.
-  if (coldStart) return { verb: "decision", capped: true, notify };
-  // §9.4 ladder: a promoted, eligible class may surface the higher verbs.
-  if (eligible && (tier === "veto-window" || tier === "act")) {
-    if (tier === "act" && p >= pAct) return { verb: "act", notify };
-    return { verb: "veto-window", notify };
-  }
-  // BET-1471: the ask-tier hold surfaces the ask card, it does not throw —
-  // ask IS the §9.3 cap, and silence is below it.
-  return { verb: "decision", notify };
-}
+// (BET-1518) `decideVerb` — the v2 verb ladder (per-class p_act, trust-tier
+// ceilings, veto-window verb, cold-start pin) — is deleted. The act/ask
+// split is the §9.3 gate (ctoGate.mjs: evaluateGate on effective = p ×
+// calibration vs τ); the salience floor above is the only threshold left.
 
 // ---------------------------------------------------------------------------
 // Generator output normalization (§9.1 schema)
@@ -402,7 +353,6 @@ export function createCtoSuggest(deps = {}) {
     publish = () => {},
     ledger = ledgerStore,
     engineState = engineStateStore,
-    trustStore: trustStoreDep = trustStore, // BET-1403: the trust ladder's own file (isolated from engine-state writers)
     verdicts = verdictsStore,
     digests = digestsStore,
     facts = factsStore,
@@ -417,33 +367,26 @@ export function createCtoSuggest(deps = {}) {
     classPriors = {}, // overrides for DEFAULT_CLASS_PRIORS
     thresholds = null, // in-memory engine-state thresholds (lazy)
     recordVerdict = null, // async ({subject, verdict, never}) => {ok} — B3 verdict route
-    executeAction = null, // BET-1403: async ({cls, action, candidate}) => {ok, ...} — act-and-report executors; null/unexecutable → verb degrades to veto-window
+    executeAction = null, // BET-1403: async ({cls, action, candidate}) => {ok, ...} — act-and-report executors; refusal → ask card
+    // BET-1518 (§9.3/§9.5): the gate's two inputs. `calibrationOf` is async
+    // (cls) => (0,1] — index.mjs wires it to the engine's calibration
+    // instance; a missing/unreadable class → 0.5 (fresh). `tau` is the τ
+    // source (the ctoAutonomyThreshold Settings control, default 0.7).
+    calibrationOf = async () => 0.5, // async cls => (0,1]; index.mjs wires the calibration engine
+    tau = async () => DEFAULT_TAU, // async () => 0..1 — the ctoAutonomyThreshold setting
+    recordAct = null, // async ({cls, text, refs, action, score}) — act-and-report queue + ledger row
   } = deps;
 
   const priors = { ...DEFAULT_CLASS_PRIORS, ...classPriors };
-  // BET-1403: the earned-trust engine over its own store file (tiers, Beta
-  // counters, rolling windows, and the pending digest-announcement queue) —
-  // isolated from engine-state writers; a legacy `es.trust` payload migrates
-  // on first load.
-  const trust = createCtoTrust({ store: trustStoreDep, legacy: engineState, ledger, verdicts, now });
-
-  // Trust consult for one candidate class — never throws, defaults to ask.
-  async function trustConsult(cls, coldStart) {
-    try {
-      return await trust.consult(cls, { coldStart });
-    } catch {
-      return { tier: "ask", eligible: false, capped: coldStart };
-    }
-  }
 
   async function ledgerAppend(entry) {
     return appendLedgerBestEffort(ledger, now(), entry);
   }
 
-  // The veto / decision card branches share one upsert core (duplication-
-  // gate fix, was a 10-line intra-file clone): call the writer if wired,
-  // swallow a throw into null, and read the BET-1477 `ok !== false` /
-  // `isNew` / `changed` contract off the result.
+  // The decision card branch shares one upsert core (duplication-gate fix,
+  // was a 10-line intra-file clone): call the writer if wired, swallow a
+  // throw into null, and read the BET-1477 `ok !== false` / `isNew` /
+  // `changed` contract off the result.
   async function upsertCardRes(upsert, card) {
     let res = null;
     if (cards && typeof upsert === "function") {
@@ -470,8 +413,8 @@ export function createCtoSuggest(deps = {}) {
     }
     const st = (es.suggest && typeof es.suggest === "object") ? es.suggest : {};
     // BET-1471: `suggest.thresholds` keeps its flat `{p_ask, p_act}` override
-    // shape and is returned raw — per-class defaults are resolved per
-    // candidate inside decideVerb, not baked in here.
+    // shape and is returned raw — per-class salience floors are resolved per
+    // candidate inside processFinding, not baked in here.
     const th = (st.thresholds && typeof st.thresholds === "object") ? st.thresholds : {};
     const used = st.usedKeys || [];
     return { es, st, thresholds: th, used };
@@ -498,19 +441,10 @@ export function createCtoSuggest(deps = {}) {
   }
 
   // BET-1471: the flat override only (in-memory dep + engine-state) —
-  // per-class defaults are resolved per candidate in decideVerb.
+  // per-class salience floors are resolved per candidate in processFinding.
   async function getThresholds() {
     const { thresholds: th } = await loadState();
     return { ...(thresholds || {}), ...th };
-  }
-
-  async function countVerdicts() {
-    try {
-      const payload = await verdicts.load();
-      return Array.isArray(payload?.entries) ? payload.entries.length : 0;
-    } catch {
-      return 0;
-    }
   }
 
   async function loadDigests({ count = 30 } = {}) {
@@ -564,7 +498,7 @@ export function createCtoSuggest(deps = {}) {
   }
 
   // Run the generator + worthiness gate for ONE finding and route the result.
-  async function processFinding(finding, { coldStart, tier } = {}) {
+  async function processFinding(finding, { tier } = {}) {
     if (!finding || !finding.id) return { finding: finding?.id, surfaced: 0, silent: 0 };
 
     // BET-1465 (defect 1): a finding recurs on every pass for as long as its
@@ -658,17 +592,44 @@ export function createCtoSuggest(deps = {}) {
         }
       }
       const p = worthinessProbability(score, priors[c.class], reliability);
-      // §9.4: verb selection consults the class's earned-trust tier. The
-      // per-class thresholds resolve inside decideVerb (BET-1471); `th` is
-      // the flat engine-state override that applies globally when present.
-      const trustInfo = await trustConsult(c.class, coldStart);
-      let decision = decideVerb({ p, cls: c.class, thresholds: th, coldStart, sourceKind: finding.sourceKind, tier: trustInfo.tier, eligible: trustInfo.eligible });
-
-      if (decision.verb === "silent-log") {
+      // §9.1 salience floor: under the class's p_ask the candidate is a
+      // silent-log row (the §14.3 audit counts it). The per-class floor
+      // resolves here (BET-1471); `th` is the flat engine-state override
+      // that applies globally when present. p_act is dead under the gate.
+      const perClass = defaultThresholds()[c.class] || defaultThresholds()["config-change"];
+      const thMerged = { ...perClass, ...th };
+      const pAsk = Number.isFinite(thMerged.p_ask) ? thMerged.p_ask : perClass.p_ask;
+      if (p < pAsk) {
         await ledgerAppend({ kind: "suggest.silent", id: c.id, class: c.class, score: p, reason: "below-p_ask", sourceKind: finding.sourceKind, text: c.finding.text });
         silent += 1;
         continue;
       }
+
+      // BET-1518 (§9.3): the gate decides act vs ask on
+      // effective = p × calibration(class) ≥ τ. The candidate's worthiness p
+      // is its stated confidence; the class's calibration comes from the
+      // §9.5 estimator (0.5 fresh). notify is a delivery property of ask
+      // (steep-decay kinds), evaluated up front.
+      const notify = NOTIFY_RECURRENCE_KINDS.includes(finding.sourceKind);
+      let cal = 0.5;
+      try {
+        const cRaw = await calibrationOf(c.class);
+        cal = Number.isFinite(cRaw) ? Math.min(1, Math.max(0, cRaw)) : 0.5;
+      } catch {
+        cal = 0.5;
+      }
+      let tauNow = DEFAULT_TAU;
+      try {
+        const tRaw = await tau();
+        if (Number.isFinite(tRaw)) tauNow = Math.min(1, Math.max(0, tRaw));
+      } catch {
+        tauNow = DEFAULT_TAU;
+      }
+      const decision = evaluateGate({
+        plans: [{ id: c.id, class: c.class, confidence: p }],
+        tau: tauNow,
+        calibration: { [c.class]: cal },
+      });
 
       const baseCard = {
         id: c.id,
@@ -680,9 +641,7 @@ export function createCtoSuggest(deps = {}) {
         evidence: c.finding.refs,
         options,
         score: p,
-        capped: decision.capped === true,
       };
-      let surfacedKind = null;
       // BET-1465 (defect 1, belt-and-braces): whether the card write that
       // actually surfaced was a genuinely NEW card (`isNew`), not a re-upsert
       // of one already on the board. Gates `fireNotify` below so a re-surfaced
@@ -690,10 +649,11 @@ export function createCtoSuggest(deps = {}) {
       let cardIsNew = false;
 
       // §9.2 act-and-report: the bound action of the primary option executes
-      // immediately; the ledger row + digest report are written by the trust
-      // engine. An unexecutable action (no executor wired, executor refused,
-      // no primary option) is a data gate — the verb degrades to the
-      // veto-window card, never silently acts.
+      // immediately; the ledger row + the digest announcement are written
+      // through recordAct. An unexecutable action (no executor wired,
+      // executor refused, no primary option) degrades to the ask card —
+      // never silently acts, never a veto-window (the veto-window verb is
+      // deleted with the ladder).
       if (decision.verb === "act") {
         const action = options[0]?.action ?? null;
         let exec = { ok: false, reason: "no-executor" };
@@ -705,45 +665,23 @@ export function createCtoSuggest(deps = {}) {
           }
         }
         if (exec?.ok === true) {
-          await trust.recordAct({ cls: c.class, text: c.finding.text, refs: c.finding.refs, action }).catch(() => {});
+          if (typeof recordAct === "function") {
+            await recordAct({ cls: c.class, text: c.finding.text, refs: c.finding.refs, action, score: decision.effective }).catch(() => {});
+          }
           await ledgerAppend({ kind: "suggest.acted", cardId: c.id, class: c.class, actionType: action?.type, score: p, sourceKind: finding.sourceKind });
           surfaced += 1;
           continue;
         }
-        decision = { ...decision, verb: "veto-window" };
+        // fall through to the decision card
       }
 
-      // §9.2 veto-window verb: a card with a countdown that executes unless
-      // cancelled (the cancel is a verdict, §9.4). BET-1419 ships the veto
-      // card writer; until it lands the verb degrades to the ask card.
-      // BET-1477: `ok !== false` is the "card path worked" test — a resolved
-      // call whose return is the BET-1463 byte-identical no-op (`ok: true,
-      // changed: false`) means the veto card is ALREADY on the board and
-      // current: count it as surfaced (variant veto) with no new ledger row
-      // and no re-push (`isNew` false), never a veto→decision downgrade.
-      // Only a missing writer, a thrown write, or an explicit `ok: false`
-      // (invalid args) degrades the verb.
-      if (decision.verb === "veto-window") {
-        const up = await upsertCardRes(cards?.upsertVeto, { ...baseCard, variant: "veto" });
-        cardIsNew = up.isNew;
-        if (up.wrote) {
-          if (up.changed) {
-            await ledgerAppend({ kind: "suggest.presented", cardId: c.id, class: c.class, variant: "veto", score: p, sourceKind: finding.sourceKind });
-          }
-          surfaced += 1;
-          surfacedKind = "veto";
-        } else {
-          decision = { ...decision, verb: "decision" };
-        }
-      }
-
-      // ask verb → write (or upsert) the decision card.
-      // BET-1477: same `ok !== false` contract as the veto branch — a
+      // ask verb (or degraded act) → write (or upsert) the decision card.
+      // BET-1477: `ok !== false` is the "card path worked" test — a
       // byte-identical regeneration of an unchanged decision card is
       // "already surfaced, still current" (surfaced, no new ledger row, no
       // re-push), NOT a `suggest.silent` no-card-path hold. Only a missing
       // writer, a thrown write, or an explicit `ok: false` is a hold.
-      if (!surfacedKind) {
+      {
         const up = await upsertCardRes(cards?.upsertDecision, { ...baseCard, variant: "decision" });
         cardIsNew = up.isNew;
         if (up.wrote) {
@@ -764,7 +702,7 @@ export function createCtoSuggest(deps = {}) {
       // `cardIsNew` (belt-and-braces, defect 1): a re-surfaced suggestion
       // (upsert of an existing card) must never re-push, even if it somehow
       // reached here despite the (1) dedupe gate above.
-      if (decision.notify === true && cardIsNew) {
+      if (notify === true && cardIsNew) {
         try {
           await fireNotify({
             title: "CTO suggestion",
@@ -800,18 +738,17 @@ export function createCtoSuggest(deps = {}) {
   async function runPass({ nowMs = now() } = {}) {
     const cfg = await configGet();
     const tier = String(cfg?.ctoTier ?? "low").toLowerCase();
-    const coldStart = (await countVerdicts()) < VERDICT_MIN;
     const [digestsArr, factsArr, ledgerRows] = await Promise.all([loadDigests(), loadFacts(), loadLedgerRows()]);
     const findings = collectFindings(digestsArr, factsArr, { nowMs, ledgerRows });
     let surfaced = 0;
     let silent = 0;
     for (const f of findings) {
-      const r = await processFinding(f, { coldStart, tier });
+      const r = await processFinding(f, { tier });
       surfaced += r.surfaced;
       silent += r.silent;
     }
-    await publish({ kind: "suggestState", payload: { findings: findings.length, surfaced, silent, coldStart, ts: nowMs } });
-    return { findings: findings.length, surfaced, silent, coldStart };
+    await publish({ kind: "suggestState", payload: { findings: findings.length, surfaced, silent, ts: nowMs } });
+    return { findings: findings.length, surfaced, silent };
   }
 
   // ---- §14.3 silence audit ----
@@ -832,9 +769,9 @@ export function createCtoSuggest(deps = {}) {
   }
 
   // A judgment on a held item → the B3 verdict route (§9.5). `accept` records
-  // an accept verdict (success/access counters); `dismiss` records a dismiss
-  // (rejection counter). The held row's action class is stamped onto the
-  // subject so the §9.4 trust counters can attribute the verdict. Returns
+  // an accept verdict (calibration success); `dismiss` records a dismiss
+  // (calibration failure). The held row's action class is stamped onto the
+  // subject so the §9.5 calibration fold can attribute the verdict. Returns
   // {ok} — a missing verdicts path degrades.
   async function verdictHeld({ id, verdict, never } = {}) {
     const sid = String(id || "");
@@ -865,10 +802,8 @@ export function createCtoSuggest(deps = {}) {
     listHeld,
     verdictHeld,
     getThresholds,
-    countVerdicts,
     // exposed for tests / diagnostics
     _priors: priors,
     _filterOptionsByData: filterOptionsByData,
-    _trust: trust,
   };
 }

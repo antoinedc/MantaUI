@@ -164,12 +164,8 @@ export const budgetStore = createCtoJsonStore("budget", ctoPath("budget.json"));
 // created, lastHit, hits, retired? }] }`. Owned by ctoWatchers.mjs.
 export const watchersStore = createCtoJsonStore("watchers", ctoPath("watchers.json"));
 export const engineStateStore = createCtoJsonStore("engine-state", ctoPath("engine-state.json"));
-// BET-1403 (review cycle 4): the trust ladder's own store. Trust state lived
-// under `es.trust` until the durability review showed ANY snapshot-spreading
-// engine-state writer could silently revert tiers/counters/announcements —
-// so it moved to a dedicated file no other writer touches. ctoTrust.mjs
-// migrates a legacy `es.trust` payload on first load.
-export const trustStore = createCtoJsonStore("trust", ctoPath("trust.json"));
+// (BET-1518) the trust ladder's trust.json store is deleted with the ladder —
+// calibration.json replaced it (§9.5, below).
 // BET-1521: the §9.4 cto.resolve ledger — one entry per plan execution
 // ({ planId, class, findingId, confidence, calibration, effective, tau,
 // trigger: act|accepted, outcome: resolved|escalated, attempts, cost, undo,
