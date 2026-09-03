@@ -662,9 +662,11 @@ test("durability: a calibration fold survives a queue-edit save landing after it
   const h = makeHarness({ trough: TROUGH, queue: [QUEUE_TASK], projects: [] });
 
   // The calibration fold lands first (a verdict's fire-and-forget sink writes
-  // the §9.5 calibration store).
+  // the §9.5 calibration store). BET-1519: the fold may now consult
+  // plans.json (the accept-on-a-plan deferral check) before folding, so the
+  // wait is a real settle, not one microtask turn.
   await h.engine.recordVerdict({ subject: { type: "suggestion", id: "card-2", class: "queue-tonight" }, verdict: "accept" });
-  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setTimeout(r, 25));
   const afterFold = await h.engine.calibration.getState();
   assert.equal(afterFold.classes["queue-tonight"]?.successes, 1);
 
