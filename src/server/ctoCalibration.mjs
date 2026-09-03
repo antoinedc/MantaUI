@@ -19,6 +19,13 @@
 // deriving anything. If the two ever disagree (hand edit), derive-from-window
 // wins.
 //
+// §7.4 per-tool trust (`trusted:<action-class>`) is THIS estimator partitioned
+// by `(tool, class)` — a finer partition of the same verdict ledger that will
+// feed the gate for tool-consent/tool-write plans only. There is no such
+// partition yet (the tool registry is a later child; no verdict subject
+// carries a tool id today) — when it lands, fold with a `tool:class` key into
+// the same row map; the row shape tolerates the extra keys.
+//
 // Also hosts the act-and-report bookkeeping that used to live in the trust
 // engine: an act must appear in the next digest (§9.2 invariant 1), so the
 // announcement queue (recordAct → listAnnouncements → markAnnounced) survives
