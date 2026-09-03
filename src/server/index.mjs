@@ -2459,14 +2459,10 @@ let adaptiveCtoDigest = null;
   adaptiveCtoDigest.start();
 }
 
-// BET-1392 suggestion engine (A10, §9.1 + §14.3): the worthiness-gated
-// suggestion pipeline. P2 sources = digest-detected recurrences + fact
-// anomalies (watcher hits arrive in a later issue). Runs only at Medium/High
-// tier (§12.1 — Low tier is "no suggestions"). Model spend goes through the
-// §3.3 ephemeral rate gate (gatedSuggestionEphemeral), the SAME as
-// digest-compose; worthiness is nano tier, the generator mid tier.
-// Notifications, when the steep-decay rule matches, go through the
-// informational router (fireNotify).
+// §3.3 ephemeral rate gate for the engine's mid-tier model classes — the
+// digest compose, the tool-registry scans and (since BET-1520) nothing in
+// the suggest flow, whose findings enqueue without a model call of their own
+// (the spend rides the shared triage/gate classes).
 async function gatedSuggestionEphemeral(taskClass, opts) {
   const gate = await adaptiveCto.beginEphemeral();
   if (!gate?.ok) return { ok: false, gated: true, error: gate?.error };
@@ -2483,58 +2479,29 @@ async function gatedSuggestionEphemeral(taskClass, opts) {
   }
 }
 // BET-1424's per-class act executors (record-decision / queue-tonight /
-// start-job branches) are RETIRED with this issue: ctoAct.mjs is the ONE
-// generic §9.4 plan executor now. The suggest flow's act verb (never fires —
-// executeAction is unwired) degrades to the ask card, where the bound options
-// remain user-executable through the renderer's ask path; blockers and
-// suggestions converge on the triage → plan → gate pipeline (D22).
+// start-job branches) are RETIRED (BET-1519), and BET-1520 retires the
+// suggest flow's own generator/worthiness/verb machinery with them:
+// ctoAct.mjs is the ONE generic §9.4 plan executor, and collected findings
+// surface only through the shared triage → plan → gate pipeline (D22).
 const adaptiveCtoSuggest = createCtoSuggest({
   now: () => Date.now(),
   publish: (evt) => bus.publish(evt),
   ledger: ledgerStore,
   engineState: engineStateStore,
-  verdicts: verdictsStore,
   digests: digestsStore,
   facts: factsStore,
-  configGet: () => local.configGet(),
-  cards: adaptiveCto.cards,
   // B3 verdict route shared with the opencode `cto_verdict` tool + the engine.
   recordVerdict: (input) => adaptiveCto.recordVerdict(input),
-  // BET-1419: the overnight queue (BET-1402 core + engine wiring in this
-  // issue) is live — queue-tonight options are now emittable at High tier.
-  // tool-write's capability gate is on too, but the §7.4 tool registry
-  // (P2-later) still feeds an empty write ring below, so a tool-write option
-  // remains data-unreachable until B7 lands (the ring is the real gate).
-  // BET-1403 → BET-1519: the suggest flow's machine act verb is RETIRED —
-  // the per-class bound executors collapsed into the ONE generic plan
-  // executor (ctoAct.mjs). executeAction stays unwired → every candidate
-  // degrades to the ask card (the human-in-the-loop fallback); its bound
-  // options stay user-executable through the renderer's ask path.
-  executeAction: null,
-  getWriteRingTools: async () => [], // §7.4 tool registry (P2-later) — empty → tool-write unreachable
-  capabilities: { queueTonight: true, toolWrite: true },
-  fireNotify: (args) => push.fireNotify(args),
-  // §9.1 sender reliability. Findings here come from the box's OWN engine
-  // (digest-detected recurrences, fact anomalies), not an external sender —
-  // a trusted internal source, so reliability approaches 1.0. With it pinned
-  // to 1.0 a candidate's p ceiling IS its class prior, and the BET-1471
-  // per-class salience floors hang off that same ceiling (p_ask = 0.8 ×
-  // prior): a score-1.0 candidate clears the floor for EVERY class
-  // (p = prior ≥ 0.8 × prior) and proceeds to the gate. Under the old global
-  // pair the ask verb could never fire for the quiet classes (§9.1 review
-  // Block 1; BET-1470). The act/ask split is the gate's effective ≥ τ, not a
-  // p_act threshold (BET-1518).
-  senderReliability: async () => 1.0,
-  // BET-1518 (§9.3/§9.5): the gate's two inputs, wired to the engine's ONE
-  // calibration instance (the same instance the verdict sink folds into, so
-  // every attribution lands in one window set), and the live τ setting
-  // (the ctoAutonomyThreshold control, default 0.7). The act branch books
-  // its digest announcement through the same engine (§9.2 invariant 1).
-  calibrationOf: async (cls) => adaptiveCto.calibration.calibration(cls),
-  tau: async () => local.configGet()?.ctoAutonomyThreshold,
-  recordAct: (input) => adaptiveCto.calibration.recordAct(input),
-  runSuggest: (opts) => gatedSuggestionEphemeral("suggest", opts),
-  runWorthiness: (opts) => gatedSuggestionEphemeral("worthiness", opts),
+  // BET-1520: collected findings enqueue on the pending-findings queue — the
+  // SAME queue inbox notes / promoted asks / health escalations ride — and
+  // flow through the ONE triage → gate → executor pipeline. The old
+  // in-module surface path (suggest generator → worthiness probability →
+  // verb → decision card / bound-action execution) is deleted; the §9.2
+  // triage call and the §9.3 gate's ask card replace it. `executeAction`
+  // stays unwired by design: candidate options execute through the ask path
+  // (the user's click), and its machine act verb degrades to the ask card
+  // when the executor declines.
+  queueFinding: (row) => adaptiveCto.queueFinding(row),
 });
 // Poller: run the suggestion pass periodically, only when suggestions are
 // enabled (Medium/High tier + ctoEnabled).

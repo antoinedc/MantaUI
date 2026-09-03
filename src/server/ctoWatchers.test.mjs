@@ -37,7 +37,7 @@ import {
   createStandingQueryEngine,
 } from "./ctoWatchers.mjs";
 import { RETENTION_MS } from "./ctoStores.mjs";
-import { NOTIFY_RECURRENCE_KINDS, collectFindings } from "./ctoSuggest.mjs";
+import { collectFindings } from "./ctoSuggest.mjs";
 
 function makeEngineDeps(overrides = {}) {
   const state = { watchers: [] };
@@ -414,9 +414,20 @@ test("an evidence event's project rides the hit into the ledger (BET-1428)", asy
   assert.equal(hit.project, "/repo", "the hosting project is captured at hit time");
 });
 
-test("the steep-decay notify rule set gained watcher-hit-rate", () => {
-  assert.ok(NOTIFY_RECURRENCE_KINDS.includes("watcher-hit-rate"));
-  assert.ok(NOTIFY_RECURRENCE_KINDS.includes("failure-recurrence"));
+// BET-1520: the steep-decay notify enum is retired with the suggest flow's
+// bespoke surface path — what survives is the sourceKind mapping.
+test("the collector maps a rate-threshold watcher hit to the watcher-hit-rate sourceKind", async () => {
+  const ledgerRows = [
+    { kind: "watcher.hit", salience: "high", watcherId: "w-rate", predicateKind: RATE_THRESHOLD, text: "burst trip", ts: 1 },
+  ];
+  const findings = collectFindings([], [], { ledgerRows });
+  assert.ok(findings.some((f) => f.sourceKind === "watcher-hit-rate" && f.text.includes("burst trip")));
+  const plain = collectFindings([], [], {
+    ledgerRows: [
+      { kind: "watcher.hit", salience: "high", watcherId: "w-plain", predicateKind: EVENT_PATTERN, text: "theme match", ts: 2 },
+    ],
+  });
+  assert.ok(plain.some((f) => f.sourceKind === "watcher-hit" && f.text.includes("theme match")));
 });
 
 test("collectFindings wires watcher hits into the candidate source input set", () => {

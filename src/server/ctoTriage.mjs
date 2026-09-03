@@ -30,7 +30,9 @@ import {
 import { sha, stableSuggestionId } from "./ctoSuggest.mjs";
 // The producer→ledger-kind mapping shared with the engine's drain (one pure
 // place, so the triage prompt's kind label cannot drift from the evidence row).
-import { findingLedgerKind } from "./ctoCards.mjs";
+// SUGGEST_FINDING_SOURCE: the fourth producer's row discriminator (BET-1520) —
+// findingIdOf keys on it and sourceFindingCopy passes it through verbatim.
+import { findingLedgerKind, SUGGEST_FINDING_SOURCE } from "./ctoCards.mjs";
 
 export const TRIAGE_VERSION = 1;
 
@@ -76,7 +78,10 @@ export const PLAN_RECORDS_CAP = 100;
  * re-report of the same condition (content-keyed, not noteId-keyed — a
  * restated blocker is the same finding per §9.2's regenerations-UPDATE rule).
  * Inbox rows are content-keyed like the inbox card's group key (tag, title,
- * message, liveness condition); ask rows key on their stable sourceId.
+ * message, liveness condition); ask rows key on their stable sourceId;
+ * suggest rows (BET-1520) key on the collector's own stable content id
+ * (sourceId: `rec:*` / `anom:*` / `wh:*`) — a re-collected identical finding
+ * keeps one finding id, so plan upserts converge.
  * Returns null for garbage input.
  */
 export function findingIdOf(finding) {
@@ -85,6 +90,10 @@ export function findingIdOf(finding) {
   if (finding.source === "ask") {
     const sourceId = typeof finding.sourceId === "string" ? finding.sourceId : "";
     return `find:ask:${sha(`${finding.sourceKind ?? ""}\u0000${sourceId}\u0000${message}`)}`;
+  }
+  if (finding.source === SUGGEST_FINDING_SOURCE) {
+    const sourceId = typeof finding.sourceId === "string" ? finding.sourceId : "";
+    return `find:suggest:${sha(`${finding.sourceKind ?? ""}\u0000${sourceId}\u0000${message}`)}`;
   }
   const tag = typeof finding.tag === "string" ? finding.tag : "";
   const title = typeof finding.title === "string" ? finding.title : "";
@@ -330,10 +339,16 @@ export function buildTriageContext(finding, ctx = {}) {
 }
 
 // Verbatim source fields worth carrying into the plans store (the gate/card
-// render from these; content stays untrusted data).
+// render from these; content stays untrusted data). The `suggest` source
+// passes through verbatim — it must reach the executor as non-blocker so the
+// §9.4 presence rule gates it, and it keeps the plans store's provenance honest.
 function sourceFindingCopy(finding) {
+  const source = finding?.source;
   return {
-    source: BLOCKER_FINDING_SOURCES.has(finding?.source) ? finding.source : "inbox",
+    source:
+      BLOCKER_FINDING_SOURCES.has(source) || source === SUGGEST_FINDING_SOURCE
+        ? source
+        : "inbox",
     sourceKind: typeof finding?.sourceKind === "string" ? finding.sourceKind : undefined,
     noteKind: typeof finding?.noteKind === "string" ? finding.noteKind : undefined,
     sourceId: typeof finding?.sourceId === "string" ? finding.sourceId : undefined,
