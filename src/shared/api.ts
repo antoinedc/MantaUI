@@ -272,7 +272,7 @@ export type CtoCard = {
   repeatCount?: number;
   // BET-1392 decision cards (§9.1) — present only when variant === "decision".
   // `why` is the one-paragraph rationale; `options` are the bound-action
-  // buttons (closed ACTION_TYPES enum); `evidence` feeds the "evidence ▸"
+  // buttons the ask path executes; `evidence` feeds the "evidence ▸"
   // expander; `cls` is the gating action-class; `score`/`capped` surface the
   // worthiness probability + cold-start cap for the health stat.
   why?: string;

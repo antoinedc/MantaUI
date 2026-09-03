@@ -3006,6 +3006,11 @@ export function createCtoEngine(deps = {}) {
     // index.mjs's debug surface, same seam as drainInbox. `cardTick` rides
     // along (the pass that drains findings + runs the §10.3 liveness pass).
     drainFindings,
+    // BET-1520: the queue's producer seam — the fourth producer (the suggest
+    // engine's collectors) enqueues its evidence-driven findings through this
+    // one writer, so every producer shares ONE queue, ONE drain, ONE
+    // triage→gate→executor pipeline.
+    queueFinding: (row) => queueFindingRow(row),
     // BET-1517 (§9.1): the triage stage over the drain's rows — exposed for
     // tests + the gate ticket's seam (stored plans keyed by finding id).
     triageDrained,

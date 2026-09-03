@@ -86,6 +86,11 @@ export const CONNECT_SOURCE_KIND = "tool";
 // failure that degraded the digest. Keyed by `<tool>/<probe>`; the body
 // deep-links (in copy) to the secrets surface — the fix is a rotated key.
 export const PROBE_SOURCE_KIND = "probe";
+// Evidence-driven suggestion findings (BET-1520 / §9.1): digest-detected
+// failure recurrences, fact anomalies, watcher hits. NOT a blocker source —
+// they shed first in thrifty mode (§12.2) and defer to ask while present
+// (§9.4); the "suggest" source is what downstream reads to tell them apart.
+export const SUGGEST_FINDING_SOURCE = "suggest";
 
 // BET-1498: engine-state.json marker key for the one-time prune of the
 // pre-BET-1469 contentless open cards. Same idempotency contract as the
@@ -152,28 +157,33 @@ export function splitOrphanedShedCards(cards) {
 //
 // A blocker enters the pipeline on the next engine tick via the findings.json
 // queue (the §9.2-v2 bypass removed: the note used to ride into evidence only
-// at a rollup-close breakpoint). Three producers, one row shape:
+// at a rollup-close breakpoint). Four producers, one row shape:
 //   - an inbox blocker note, queued at note arrival (source "inbox")
 //   - a worker ask promoted past the 10-min threshold (source "ask")
 //   - a health escalation ingested from the watchdog (source "health")
+//   - an evidence-driven suggestion finding from the collectors
+//     (BET-1520, source "suggest": failure recurrences, fact anomalies,
+//     watcher hits)
 // Every row carries the normalized core the pipeline consumes downstream:
 //   {source, sourceKind, sourceId, ts, message, title, refs, pendingSince}
 // where `sourceId` is the stable card identity (the exact key the card
 // writer groups by), and producer-specific fields ride alongside (note
-// identity + sender for inbox; sessionID for asks; nothing extra for
-// health). The ENGINE's drain turns each row into a high-salience evidence
-// row on the A1 ledger — for inbox notes the exact row shape drainInbox
-// writes — and marks the source note read so the breakpoint drain never
-// double-folds it. Pure builders; these shapes are the producer↔consumer
-// contract.
+// identity + sender for inbox; sessionID for asks; the collector's reason +
+// project for suggest findings). The ENGINE's drain turns each row into a
+// high-salience evidence row on the A1 ledger — for inbox notes the exact
+// row shape drainInbox writes — and marks the source note read so the
+// breakpoint drain never double-folds it. Pure builders; these shapes are
+// the producer↔consumer contract.
 
 // The drain's ledger-kind mapping, in ONE pure place so the producers and
 // the engine's drain cannot drift: an ask folds as `ask.<sourceKind>`, a
 // health escalation as `health.blocker`, an inbox note as
-// `inbox.<noteKind>` (the shape drainInbox already wrote).
+// `inbox.<noteKind>` (the shape drainInbox already wrote), a suggestion
+// finding as `suggest.<sourceKind>` (BET-1520).
 export function findingLedgerKind(row) {
   if (row?.source === "ask") return `ask.${row?.sourceKind ?? "blocker"}`;
   if (row?.source === "health") return `health.blocker`;
+  if (row?.source === SUGGEST_FINDING_SOURCE) return `suggest.${row?.sourceKind ?? "finding"}`;
   return `inbox.${row?.noteKind ?? "blocker"}`;
 }
 
@@ -236,6 +246,34 @@ export function findingFromHealthGroup(group, { key, sourceId, ts = Date.now() }
     refs: [],
     pendingSince: Number.isFinite(group.minTs) ? group.minTs : undefined,
     tag: typeof key === "string" ? key : undefined,
+  };
+}
+
+// Source (4, BET-1520): an evidence-driven suggestion finding from the
+// ctoSuggest collectors — a digest-detected failure recurrence
+// (`failure-recurrence`), a fact anomaly (`fact-anomaly`) or a watcher hit
+// (`watcher-hit` / `watcher-hit-rate`). `f` is the collector's output shape
+// ({id, sourceKind, text, refs, ts?, reason?, project?}); `id` is the
+// collector's own stable content key (`rec:*`, `anom:*`, `wh:*`) and becomes
+// the row's `sourceId` — findingIdOf re-hashes it so a re-collected
+// identical finding keeps one finding id across passes (the usedKeys dedupe
+// still bounds enqueue to once per finding). `reason` (the anomaly collector's
+// why) and `project` (watcher hits capture it at hit time) ride alongside.
+export function findingFromSuggestion(f, { ts = Date.now() } = {}) {
+  if (!f || typeof f !== "object") return null;
+  const text = typeof f.text === "string" ? f.text.trim() : "";
+  if (!text) return null;
+  return {
+    source: SUGGEST_FINDING_SOURCE,
+    sourceKind: typeof f.sourceKind === "string" && f.sourceKind ? f.sourceKind : "finding",
+    sourceId: typeof f.id === "string" ? f.id : undefined,
+    ts,
+    message: text,
+    title: `CTO finding: ${typeof f.sourceKind === "string" && f.sourceKind ? f.sourceKind : "evidence"}`,
+    refs: Array.isArray(f.refs) ? f.refs : [],
+    pendingSince: Number.isFinite(f.ts) ? f.ts : ts,
+    reason: typeof f.reason === "string" ? f.reason : undefined,
+    project: typeof f.project === "string" && f.project ? f.project : undefined,
   };
 }
 
@@ -1255,7 +1293,7 @@ export function createCtoCards(deps = {}) {
   // the candidate's stable id (hash(findingId, class)) — a regeneration
   // updates the existing open card in place (title/why/options/evidence
   // refresh; created + carried-forward open-verdict count preserved), never
-  // duplicates. Option `action` types use the closed ACTION_TYPES enum; RPC is
+  // duplicates. An option's bound `action` executes through the ask path; RPC is
   // deliberately out of scope for the server — option execution is the
   // renderer's job (§9.1 "option buttons execute a bound action").
   async function upsertDecision({ id, title, why, options = [], refs = [], evidence = [], sourceKind, cls, score, capped = false, ts = now() } = {}) {
