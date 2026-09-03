@@ -106,7 +106,7 @@ import {
   startCapSweeper,
 } from "./capabilities.mjs";
 import { notifyCapSession } from "./capNotifier.mjs";
-import { createDelegateEngine, buildPermissionRuleset as delegateBuildPermissionRuleset, resolveForgeOwner, loadJobs as loadDelegateJobs, pauseJob as delegatePauseJob } from "./delegate.mjs";
+import { createDelegateEngine, buildPermissionRuleset as delegateBuildPermissionRuleset, resolveForgeOwner, resolveOwner, loadJobs as loadDelegateJobs, pauseJob as delegatePauseJob } from "./delegate.mjs";
 import {
   reportProgress,
   readProgressRecord,
@@ -146,14 +146,17 @@ import * as cto from "./cto.mjs";
 import * as ctoEngine from "./ctoEngine.mjs";
 import * as ctoBudget from "./ctoBudget.mjs";
 import { createFactSurfaces } from "./ctoFactSurfaces.mjs";
-import { ledgerStore, engineStateStore, budgetStore, segmentsStore, verdictsStore, digestsStore, factsStore, resolveStore, calibrationStore, startCtoStoreSweeper, CTO_STORE_SWEEP_INTERVAL_MS } from "./ctoStores.mjs";
+import { ledgerStore, engineStateStore, budgetStore, segmentsStore, verdictsStore, digestsStore, factsStore, resolveStore, calibrationStore, plansStore, startCtoStoreSweeper, CTO_STORE_SWEEP_INTERVAL_MS } from "./ctoStores.mjs";
 import * as ctoOvernight from "./ctoOvernight.mjs";
 import { computeHealthStats } from "./ctoHealth.mjs";
 import { composeProfileRender } from "./ctoProfile.mjs";
 import { runEphemeral, createEphemeralReaper } from "./ctoSessions.mjs";
 import { createCtoDigest, STALE_MS } from "./ctoDigest.mjs";
 import { createCtoSuggest } from "./ctoSuggest.mjs";
-import { createCtoActExecutor } from "./ctoAct.mjs";
+// BET-1519: the per-class act executors are retired — ctoAct.mjs is now the
+// ONE generic §9.4 plan executor (the driver + runner); the suggest flow's
+// bound options execute through the ask path (the user's click), and its
+// machine act verb degrades to the ask card when the executor declines.
 import {
   parseSegmentSummaryText,
   validateSegmentSummary,
@@ -2123,12 +2126,132 @@ const factSurfaces = createFactSurfaces({
   },
 });
 
+// The standard work toolset for CTO-originated delegate jobs (the same grants
+// the forge dispatch declares). Used by the overnight dispatch and consulted
+// nowhere else — the plan executor declares the PLAN's access instead.
+const STANDARD_WORK_TOOLS = [
+  { permission: "read", pattern: "**" },
+  { permission: "bash", pattern: "**" },
+  { permission: "write", pattern: "**" },
+  { permission: "edit", pattern: "**" },
+  { permission: "webfetch", pattern: "**" },
+];
+
 const adaptiveCto = ctoEngine.createCtoEngine({
   configGet: () => local.configGet(),
   ledger: ledgerStore,
   engineState: engineStateStore,
   publish: (evt) => bus.publish(evt),
   getSessionInfo: resolveSessionInfo,
+  // BET-1519 (§9.4): the ONE generic plan executor's session seams — real
+  // opencode ephemeral sessions, the shared startJobWithApproval delegate
+  // path (the plan's access rules ARE the declared tools; the approval card
+  // is the human's veto over machine-originated work), the delegate job poll
+  // and the consented §7.5 probe read. The engine adds the §6.7 verify
+  // seams (matchCheckable + condition-gone) and all bookkeeping itself.
+  executor: {
+    runnerDeps: {
+      createSession: async ({ directory, title, permission } = {}) => {
+        const sess = await oc.createSession({ directory, title, permission });
+        return { ok: true, id: sess?.id };
+      },
+      sendPrompt: async (args) => {
+        try {
+          await oc.sendPrompt(args);
+          return { ok: true };
+        } catch (e) {
+          return { ok: false, error: e?.message };
+        }
+      },
+      listMessages: (sid) => oc.listMessages(sid),
+      abortSession: async (sid) => {
+        try {
+          await oc.abortSession(sid);
+          return { ok: true };
+        } catch {
+          return { ok: false };
+        }
+      },
+      deleteSession: async (sid) => {
+        try {
+          await oc.deleteSessionRaw(sid);
+          return { ok: true };
+        } catch {
+          return { ok: false };
+        }
+      },
+      startJob: async (input) =>
+        delegateEngine.startJobWithApproval({
+          prompt: input?.prompt,
+          parentSessionID: input?.parentSessionID,
+          parentDirectory: input?.parentDirectory,
+          tools: input?.tools,
+          trustMode: input?.trustMode === true,
+          actor: "cto",
+        }),
+      jobRow: async (jobId) => {
+        try {
+          const rows = await loadDelegateJobs();
+          const j = (Array.isArray(rows) ? rows : []).find((r) => r?.id === jobId);
+          if (!j) return null;
+          return { running: j.status === "running", sessionId: j.childSessionID ?? null, status: j.status };
+        } catch {
+          return null;
+        }
+      },
+      resolveParent: async ({ finding } = {}) => {
+        try {
+          const projects = await tmux.listProjects();
+          const rows = (Array.isArray(projects) ? projects : []).filter((p) =>
+            (p.windows || []).some((w) => w?.opencodeSessionId),
+          );
+          if (rows.length === 0) return null;
+          // The finding's sender session first (the blocker's own project),
+          // then the first tracked project as the default host.
+          const sid = finding?.senderSessionID ?? finding?.sender?.sessionID ?? null;
+          if (sid) {
+            const owner = resolveOwner(rows, sid);
+            if (owner) {
+              return { parentSessionID: sid, parentDirectory: owner.cwd ?? null };
+            }
+          }
+          for (const p of rows) {
+            const win = (p.windows || []).find((w) => w?.opencodeSessionId);
+            if (win) {
+              return {
+                parentSessionID: win.opencodeSessionId,
+                parentDirectory: p.defaultCwd ?? win.paneCurrentPath ?? null,
+              };
+            }
+          }
+          return null;
+        } catch {
+          return null;
+        }
+      },
+      probeRead: async (probe) => {
+        // §9.2 probe verify — a consented §7.5 probe read. The probes engine
+        // keys state per tool; "tool/probe" or "tool:probe" is the accepted
+        // spelling. No probes are authored yet on this box, so an unmatched
+        // name honestly fails verification (never a silent pass).
+        try {
+          const str = String(probe ?? "");
+          const sep = str.indexOf("/") >= 0 ? "/" : str.indexOf(":") >= 0 ? ":" : null;
+          if (!sep) return { ok: false, reason: "probe-name-unmatched" };
+          const tool = str.slice(0, str.indexOf(sep)).trim();
+          const name = str.slice(str.indexOf(sep) + 1).trim();
+          if (!tool || !name) return { ok: false, reason: "probe-name-unmatched" };
+          const summary = await adaptiveCto.probes.probeSummary(tool);
+          const row = (summary?.probes ?? []).find((pr) => pr?.name === name || pr?.id === name);
+          if (!row) return { ok: false, reason: "probe-name-unmatched" };
+          if (row.lastOk === true) return { ok: true };
+          return { ok: false, reason: row.lastOk === false ? "probe-unhealthy" : "no-probe-read" };
+        } catch {
+          return { ok: false, reason: "probe-read-error" };
+        }
+      },
+    },
+  },
   // BET-1517 (§9.2): the sender session's transcript tail for blocker triage
   // context — last messages flattened to text and capped at ~2k tokens
   // (~8000 chars) so the ≤ 6k triage context budget keeps room for the
@@ -2150,15 +2273,24 @@ const adaptiveCto = ctoEngine.createCtoEngine({
   // session/directory are resolved by the engine (resolveForgeOwner over
   // listProjects); this wrapper bakes in the "cto" actor, and the sweep
   // allowance (window remaining) is passed per-start by the engine.
+  // BET-1519 (delegate perm bypass fix): overnight jobs used to start with NO
+  // `permission` field, so opencode prepended its own allow-all default —
+  // every overnight job ran fully unconstrained. Route through the shared
+  // startJobWithApproval path with the standard work toolset DECLARED (the
+  // same grants the forge dispatch uses; the ruleset ends in the catch-all
+  // deny). trustMode true — the §11 veto card already consented tonight's
+  // plan, and an approval card here would just stall the overnight window.
   overnight: adaptiveCtoOvernight,
   startDelegateJob: async ({ name, prompt, parentSessionID, parentDirectory, sweepAllowanceMs } = {}) =>
-    delegateEngine.startJob({
+    delegateEngine.startJobWithApproval({
       prompt,
       name,
       parentSessionID,
       parentDirectory,
       actor: "cto",
       sweepAllowanceMs,
+      tools: STANDARD_WORK_TOOLS,
+      trustMode: true,
     }),
   listDelegateJobs: async () => {
     try {
@@ -2350,27 +2482,12 @@ async function gatedSuggestionEphemeral(taskClass, opts) {
     gate.release?.();
   }
 }
-// BET-1424 (§9.2/§9.3): the act-and-report executors for the bound suggest
-// options, wired to the live box subsystems. Refusals (and the still-unwired
-// config-change / tool-write classes) return {ok:false} so the suggest engine
-// degrades the act verb to the ask card — act-and-report never silently
-// no-ops. (BET-1518: the gate does not special-case any class; refusal lives
-// here, with the executor.)
-const ctoActExecutor = createCtoActExecutor({
-  proposeFact: (input) => adaptiveCto.proposeFact(input),
-  tonightAdd: (task) => adaptiveCto.tonightAdd(task),
-  beginDelegateJob: () => adaptiveCto.beginDelegateJob(),
-  listProjects: () => tmux.listProjects(),
-  startDelegateJob: async ({ prompt, model, parentSessionID, parentDirectory, actor } = {}) =>
-    delegateEngine.startJob({ prompt, model, parentSessionID, parentDirectory, actor }),
-  listDelegateJobs: async () => {
-    try {
-      return await loadDelegateJobs();
-    } catch {
-      return [];
-    }
-  },
-});
+// BET-1424's per-class act executors (record-decision / queue-tonight /
+// start-job branches) are RETIRED with this issue: ctoAct.mjs is the ONE
+// generic §9.4 plan executor now. The suggest flow's act verb (never fires —
+// executeAction is unwired) degrades to the ask card, where the bound options
+// remain user-executable through the renderer's ask path; blockers and
+// suggestions converge on the triage → plan → gate pipeline (D22).
 const adaptiveCtoSuggest = createCtoSuggest({
   now: () => Date.now(),
   publish: (evt) => bus.publish(evt),
@@ -2388,16 +2505,12 @@ const adaptiveCtoSuggest = createCtoSuggest({
   // tool-write's capability gate is on too, but the §7.4 tool registry
   // (P2-later) still feeds an empty write ring below, so a tool-write option
   // remains data-unreachable until B7 lands (the ring is the real gate).
-  // BET-1403 → BET-1518: act-and-report executors. The gate (not a ladder)
-  // decides act vs ask on effective = p × calibration ≥ τ; this seam decides
-  // whether the concrete bound action is machine-executable. BET-1424: all
-  // three bound executors are wired in ctoAct.mjs — record-decision (a
-  // validated, gatekeeper-checked fact proposal on the CTO's own blackboard),
-  // queue-tonight (the engine's tonightAdd) and start-job (a worktree-isolated
-  // delegate job as actor "cto" under the §3.3 gate). Anything unwired or
-  // refused → {ok:false} → the verb degrades to the ask card (the
-  // human-in-the-loop fallback). Never throws (ctoSuggest catches).
-  executeAction: ctoActExecutor,
+  // BET-1403 → BET-1519: the suggest flow's machine act verb is RETIRED —
+  // the per-class bound executors collapsed into the ONE generic plan
+  // executor (ctoAct.mjs). executeAction stays unwired → every candidate
+  // degrades to the ask card (the human-in-the-loop fallback); its bound
+  // options stay user-executable through the renderer's ask path.
+  executeAction: null,
   getWriteRingTools: async () => [], // §7.4 tool registry (P2-later) — empty → tool-write unreachable
   capabilities: { queueTonight: true, toolWrite: true },
   fireNotify: (args) => push.fireNotify(args),
@@ -4779,6 +4892,52 @@ const handleRequest = async (req, res) => {
           verdict,
           ...(never !== undefined ? { never } : {}),
         });
+        // BET-1519 (§9.4/§9.2 invariant 1): "Do it" — an accept (or edit) on a
+        // decision card whose subject resolves to a triage plan runs THAT plan
+        // through the ONE generic executor with trigger "accepted" (same
+        // executor, same verify, same attempt cap as the gate's act verb).
+        // The verdict stays the source of truth; the execution is best-effort
+        // and reported via the response's `execution` field (the calibration
+        // accept-fold is deferred to the executor's outcome — one outcome per
+        // plan). Refusals (cap-hit, queue-full, invalid) surface in the field
+        // and leave the card's plan for the ask path.
+        let execution = null;
+        if (
+          result.ok &&
+          (verdict === "accept" || verdict === "edit") &&
+          (subject?.type === "suggestion" || subject?.type === "plan") &&
+          typeof subject?.id === "string" &&
+          subject.id
+        ) {
+          try {
+            const payload = await plansStore.load();
+            let hit = null;
+            for (const rec of Object.values(payload?.records ?? {})) {
+              const plan = (rec?.plans ?? []).find((p) => p?.id === subject.id);
+              if (plan) {
+                hit = { plan, findingId: rec?.findingId ?? null, finding: rec?.finding ?? null };
+                break;
+              }
+            }
+            if (hit) {
+              let effective = null;
+              try {
+                const open = (await adaptiveCto.cards?.listOpen?.()) ?? [];
+                effective = open.find((c) => c?.id === subject.id)?.score ?? null;
+              } catch {
+                /* the ask card may already be closed — score is optional row context */
+              }
+              execution = await adaptiveCto.executor.executeAccepted(hit.plan, {
+                findingId: hit.findingId,
+                finding: hit.finding,
+                gateCtx: { effective },
+              });
+            }
+          } catch (e) {
+            execution = { ok: false, reason: `executor-error:${e?.message ?? "unknown"}` };
+          }
+          if (execution) void bus.publish({ kind: "ctoState" });
+        }
         // §9.1 resolution path (review Block 2): a judgment on a SUGGESTION
         // must also close the open decision card — accept → resolve, dismiss →
         // dismiss — so an acted-on / declined card is not left open forever.
@@ -4792,7 +4951,7 @@ const handleRequest = async (req, res) => {
             /* best-effort */
           }
         }
-        respondJson(res, result.ok ? 200 : 400, result);
+        respondJson(res, result.ok ? 200 : 400, result.ok ? { ...result, ...(execution ? { execution } : {}) } : result);
         return;
       }
       respondJson(res, 405, { error: "method not allowed" });

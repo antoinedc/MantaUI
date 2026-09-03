@@ -167,6 +167,22 @@ export function createCtoCalibration(deps = {}) {
     return null;
   }
 
+  // Does this verdict subject resolve to a PLAN (the executor owns its
+  // outcome)? The engine wires this to plans.json + the executor's resolve
+  // store; the standalone default checks plans.json only.
+  async function isPlanSubject(planId) {
+    if (!plans || typeof planId !== "string" || !planId) return false;
+    try {
+      const payload = await plans.load();
+      for (const rec of Object.values(payload?.records ?? {})) {
+        if ((rec?.plans ?? []).some((p) => p?.id === planId)) return true;
+      }
+    } catch {
+      /* best-effort attribution */
+    }
+    return false;
+  }
+
   // The §9.5 verdict sink — the replacement for the trust ladder's counter
   // sink, same B3 registration contract (called with the fold's effects and
   // the raw ledger entry, best-effort, never breaks verdict recording).
@@ -174,6 +190,13 @@ export function createCtoCalibration(deps = {}) {
   // suggestions from the suggest flow's ask/held cards, plans from the
   // gate's ask cards + the executor's act-and-report). Holds the ledger
   // row so §14.5 can audit the fold.
+  //
+  // BET-1519 (§9.5 "one outcome per plan"): accept/edit on a plan subject is
+  // DEFERRED — the execution the accept kicked off owns the outcome through
+  // notePlanOutcome (verification + the 7-day window). Folding the accept
+  // here too would double-count. Dismiss/correct/veto on a plan subject fold
+  // immediately (dismissed-unexecuted / later-negative are failures here,
+  // the executor folds its own on execution).
   async function noteVerdictEffects(effects, entry) {
     const subject = entry?.subject;
     const type = subject?.type;
@@ -182,6 +205,19 @@ export function createCtoCalibration(deps = {}) {
     if (!cls) return;
     const outcome = outcomeOfVerdict(entry?.verdict, entry?.never === true);
     if (outcome === null) return;
+    const defer =
+      outcome === "success" && (await (deps.isPlanSubject ?? isPlanSubject)(subject?.id));
+    if (defer) {
+      await ledgerLog({
+        kind: "calibrate.fold",
+        class: cls,
+        outcome: "deferred-to-executor",
+        subjectType: type,
+        subjectId: subject?.id ?? null,
+        verdict: entry?.verdict ?? null,
+      });
+      return;
+    }
     await noteOutcome(cls, outcome === "success");
     await ledgerLog({
       kind: "calibrate.fold",

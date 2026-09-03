@@ -653,20 +653,37 @@ test("tonightAdd project resolution (BET-1426): explicit canonicalize, auto-reso
 test("overnight: queue-tonight verdicts fold into the overnight Thompson counters", async () => {
   const h = makeHarness({ trough: TROUGH, projects: [] });
   await h.engine.recordVerdict({ subject: { type: "suggestion", id: "card-1", class: "queue-tonight" }, verdict: "accept" });
-  await new Promise((r) => setImmediate(r));
-  const counters = await h.overnight.readCounters();
-  assert.equal(counters?.["queue-tonight"]?.alpha, 1, "accept folds a success counter");
+  // The fold is fire-and-forget (and may consult plans.json first) — poll.
+  assert.equal(
+    await waitForState(async () => (await h.overnight.readCounters())?.["queue-tonight"]?.alpha, 1),
+    true,
+    "accept folds a success counter",
+  );
 });
+
+// BET-1519 review cycle 1: a fold is fire-and-forget and may now consult
+// plans.json (the accept-on-a-plan deferral check) before writing, so fixed
+// settles are load-fragile under the full suite's parallel workers. A bounded
+// poll for the expected state is deterministic under any scheduling.
+async function waitForState(read, expected, { timeoutMs = 5000, step = 25 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = await read();
+    if (last === expected) return true;
+    await new Promise((r) => setTimeout(r, step));
+  }
+  return false;
+}
 
 test("durability: a calibration fold survives a queue-edit save landing after it (mirrored-order regression, BET-1403 cycle 4)", async () => {
   const h = makeHarness({ trough: TROUGH, queue: [QUEUE_TASK], projects: [] });
+  const successesOf = async () => (await h.engine.calibration.getState())?.classes?.["queue-tonight"]?.successes;
 
   // The calibration fold lands first (a verdict's fire-and-forget sink writes
   // the §9.5 calibration store).
   await h.engine.recordVerdict({ subject: { type: "suggestion", id: "card-2", class: "queue-tonight" }, verdict: "accept" });
-  await new Promise((r) => setImmediate(r));
-  const afterFold = await h.engine.calibration.getState();
-  assert.equal(afterFold.classes["queue-tonight"]?.successes, 1);
+  assert.equal(await waitForState(successesOf, 1), true, "the accept verdict's fold landed");
 
   // Then a queue edit lands — AND the hostile old writer shape runs: a whole
   // engine-state save spreading a STALE pre-fold snapshot. When the ladder's
@@ -675,13 +692,11 @@ test("durability: a calibration fold survives a queue-edit save landing after it
   const removed = await h.engine.tonightRemove(h.engineStateObj.tonightQueue[0].id);
   assert.equal(removed.ok, true);
   await h.engineStateSave({ v: 1, tonightQueue: [{ id: "tq:stale" }] });
-  await new Promise((r) => setImmediate(r));
 
-  const after = await h.engine.calibration.getState();
   // Two folds landed: the accept verdict and the remove's own edit verdict —
   // BOTH survived the hostile stale engine-state save (both map to success
   // outcomes in the class's last-30 window, §9.5).
-  assert.equal(after.classes["queue-tonight"]?.successes, 2, "the calibration folds survived the stale engine-state save");
+  assert.equal(await waitForState(successesOf, 2), true, "the calibration folds survived the stale engine-state save");
   assert.deepEqual(h.engineStateObj.tonightQueue, [{ id: "tq:stale" }], "the queue edit landed");
 });
 

@@ -67,6 +67,7 @@ import {
   patchEngineState,
   patchStore,
   purgeExpiredInbox,
+  resolveStore,
 } from "./ctoStores.mjs";
 import { createVerdictEngine, createAsSourceSink } from "./ctoVerdicts.mjs";
 import { cardHasContent } from "../shared/ctoCard.mjs";
@@ -136,6 +137,13 @@ import { resolveForgeOwner } from "./delegate.mjs";
 // BET-1517 (§9.1/§9.2): the triage stage — drained findings → 0–3 resolution
 // plans in plans.json, one mid-tier model call per finding per tick.
 import { BLOCKER_FINDING_SOURCES, createCtoTriage } from "./ctoTriage.mjs";
+
+// BET-1519 (§9.4/§9.5): the ONE generic plan executor + its driver — the
+// queue (≤ 10 FIFO, blocker-before-finding), ≤ 2 in flight, the two
+// executions-per-plan cap over the resolve store, the verify/retry loop, the
+// escalation to a blocker card with the attempt log, the `cto.resolve` ledger
+// row, the calibration outcome and the 7-day success resolution.
+import { createCtoExecutorDriver, createCtoPlanRunner } from "./ctoAct.mjs";
 
 // BET-1395 tool discovery (§7): the registry engine — fusion of the four
 // evidence channels, the two lifecycle bars, and the connect-ask gate.
@@ -345,6 +353,9 @@ export function createCtoEngine(deps = {}) {
     findings: findingsStore,
     // BET-1517 (§9.2): the resolution-plan store (triage output).
     plans: plansStore,
+    // BET-1519 (§9.4): the cto.resolve store — one entry per plan execution +
+    // the resolution fold bookkeeping (the executor driver's state).
+    resolve: resolveStore,
     verdicts: verdictsStore,
     budget: budgetStore,
     watchers: watchersStore,
@@ -472,6 +483,12 @@ export function createCtoEngine(deps = {}) {
     // BET-1517 (§9.1): optional pre-built triage engine (tests). Else one is
     // constructed lazily below over bundle.plans + the gated runEphemeral.
     triage = null,
+    // BET-1519 (§9.4): the executor driver's session seams —
+    // `{ runner?, runnerDeps?, driverDeps? }`. index.mjs wires runnerDeps to
+    // the real opencode session/delegate primitives; tests inject a fake
+    // runner. The engine adds the bookkeeping seams (resolve store, ledger,
+    // calibration, escalation, verdict scan) itself.
+    executor = null,
     // BET-1517 (§9.2): the sender-session transcript-tail reader for blocker
     // triage context — async (sessionID) => string|null (≤ 2k tokens, the
     // caller truncates). Default null → no tail block.
@@ -545,6 +562,8 @@ export function createCtoEngine(deps = {}) {
   let builtInBackfill = null;
   let profileDecayHandle = null;
   let verdictsEngine = null;
+  // BET-1519: the executor driver (lazy — see getExecutor).
+  let executorDriver = null;
   let calibrationEngine = null;
   let gateEngine = null;
   let watcherEngine = null;
@@ -868,6 +887,11 @@ export function createCtoEngine(deps = {}) {
       // BET-1518: the gate consumes the triage stage's ungated plan records —
       // act (executor seam) or ask card per §9.3, one pass per record.
       await getGate().gatePass();
+      // BET-1519: the executor driver's tick — fold due §9.5 resolutions
+      // (7-day success window / negative-verdict failure) and drain the
+      // execution queue. Best-effort: an executor failure never breaks the
+      // cards pipeline.
+      await getExecutor().tick();
       await cards.checkInboxLiveness();
       await syncState();
     } catch {
@@ -1290,10 +1314,88 @@ export function createCtoEngine(deps = {}) {
         }
       },
       calibrationOf: (classList) => getCalibration().calibrationsFor(classList),
-      executePlan: null, // BET-1519 wires the executor here
+      // BET-1519: the executor driver's gate seam — validate → cap → queue →
+      // drain; the gate's own announce/ledger happens after the seam accepts.
+      executePlan: async (plan, ctx) => {
+        try {
+          return await getExecutor().executePlan(plan, ctx);
+        } catch {
+          return { ok: false, reason: "executor-error" };
+        }
+      },
       recordAct: (input) => getCalibration().recordAct(input),
     });
     return gateEngine;
+  }
+
+  // BET-1519 (§9.4/§9.5): the executor driver — lazy single instance. The
+  // runner's session seams come from index.mjs via deps.executor (real
+  // opencode sessions / the shared startJobWithApproval delegate path); the
+  // driver adds the queue, the cap, the outcomes, the escalation card and
+  // the 7-day resolution. Everything best-effort: an executor failure never
+  // breaks the tick.
+  function getExecutor() {
+    if (executorDriver) return executorDriver;
+    const ex = executor ?? {};
+    // The engine owns the two fact-verifier seams (§6.7): a predicate
+    // statement matches via matchCheckable and verifies through the same
+    // factVerify the facts engine uses; a condition-gone check reuses the
+    // §10.3 classifier. index.mjs supplies the session/delegate/probe seams.
+    const runner = ex.runner ?? createCtoPlanRunner({
+      verifyFact: async ({ condition } = {}) => {
+        const match = matchCheckable(condition);
+        if (!match) return { ok: false, reason: "not-checkable" };
+        try {
+          const r = await factVerify({ surface: match.surface, probe: match.probe, branch: match.branch ?? undefined });
+          if (r?.ok === true) return { ok: true };
+          return { ok: false, reason: r?.result ?? "predicate-false" };
+        } catch (e) {
+          return { ok: false, reason: "verify-error", detail: e?.message };
+        }
+      },
+      conditionGone: async (condition) => conditionGoneFromCondition(condition, factVerify),
+      ...(ex.runnerDeps ?? {}),
+    });
+    executorDriver = createCtoExecutorDriver({
+      runner,
+      store: bundle.resolve,
+      ledger,
+      escalate: (text) => recordBlocker("cto-executor", text).catch(() => {}),
+      calibration: (input) => getCalibration().notePlanOutcome(input),
+      recordAct: (input) => getCalibration().recordAct(input),
+      verdictsList: async () => {
+        try {
+          return (await getVerdictsEngine().listVerdicts()) ?? [];
+        } catch {
+          return [];
+        }
+      },
+      // §9.4 presence rule: finding-sourced machine acts refuse while the
+      // user is `present` (the gate degrades them to ask cards); blocker-
+      // sourced and user-accepted plans bypass. Same read the rollup/facts
+      // engines use.
+      presence: async () => {
+        try {
+          return getPresence().state ?? "away";
+        } catch {
+          return "away";
+        }
+      },
+      knowsPlan: async (planId) => {
+        try {
+          const payload = await bundle.plans.load();
+          for (const rec of Object.values(payload?.records ?? {})) {
+            if ((rec?.plans ?? []).some((p) => p?.id === planId)) return true;
+          }
+        } catch {
+          /* fall through to the resolve store */
+        }
+        return false;
+      },
+      now,
+      ...(ex.driverDeps ?? {}),
+    });
+    return executorDriver;
   }
 
   // BET-1398 standing-query watchers (§4.3/§13.4): lazy single instance over
@@ -2924,6 +3026,11 @@ export function createCtoEngine(deps = {}) {
     toolsView,
     // BET-1396 (§7.5/§10.5): the A12 health endpoint's probe-health reader.
     probeHealth: () => getProbes()?.healthSnapshot() ?? { tools: 0, probes: 0, healthy: 0, authFailed: 0, lastRunAt: null },
+    // BET-1519: the probes engine — the executor's probe verify seam reads a
+    // probe's latest run outcome through probeSummary(tool).
+    get probes() {
+      return getProbes();
+    },
     // BET-1391 verdict ledger (§9.5): record + read the verdict ledger (the
     // opencode `cto_verdict` tool + the digest-opened rewire + the health card
     // all reach one path through these).
@@ -2941,6 +3048,12 @@ export function createCtoEngine(deps = {}) {
     // seam.
     get gate() {
       return getGate();
+    },
+    // BET-1519: the executor driver — the ONE generic §9.4 plan executor
+    // (executePlan for the gate, executeAccepted for the decision card's
+    // "Do it", tick from cardTick). Exposed for the verdict route + tests.
+    get executor() {
+      return getExecutor();
     },
     get rateTracker() {
       return track;

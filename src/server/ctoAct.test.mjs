@@ -1,290 +1,576 @@
+// BET-1519 — §9.4 the ONE generic plan executor + driver: the brief, the
+// session-kind selection, the §9.2 verify dispatch, the one-retry loop, the
+// resolve rows, the queue (blocker-before-finding, ≤ 2 in flight), the
+// two-executions-per-plan cap, the escalations and the §9.5 outcome folding.
+
 // BET-1490: shared fail-fast guard — must stay the first import (see ctoTestGuard.mjs).
 import "./ctoTestGuard.mjs";
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  createCtoActExecutor,
-  normalizeQueueTonightPayload,
-  normalizeRecordDecisionPayload,
-  normalizeStartJobPayload,
+  buildExecutionBrief,
+  buildRetryBrief,
+  checkMarkerResult,
+  createCtoExecutorDriver,
+  createCtoPlanRunner,
+  CHECK_MARKER,
+  EXECUTIONS_PER_PLAN,
+  MAX_IN_FLIGHT,
+  permissionRulesetFor,
+  runVerifyCheck,
+  validatePlan,
+  wantsDelegateSession,
 } from "./ctoAct.mjs";
-import { ACTOR } from "./ctoEngine.mjs";
+import { patchStore } from "./ctoStores.mjs";
 
 // ---------------------------------------------------------------------------
-// Payload normalization (§9.1 schema → typed executor input)
+// Memory store (the resolve.json shape — {entries: []}) + fakes
 // ---------------------------------------------------------------------------
 
-test("normalizeRecordDecisionPayload: statement/project/refs required; refs fall back to the finding", () => {
-  assert.deepEqual(
-    normalizeRecordDecisionPayload({ statement: " Adopt pact ", project: " manta ", refs: ["msg:1", 5, "msg:2"] }),
-    { statement: "Adopt pact", project: "manta", refs: ["msg:1", "msg:2"] },
-  );
-  assert.deepEqual(
-    normalizeRecordDecisionPayload({ statement: "s", project: "p" }, { findingRefs: ["ref:9"] }),
-    { statement: "s", project: "p", refs: ["ref:9"] },
-  );
-  assert.equal(normalizeRecordDecisionPayload({ statement: "s", project: "p" }), null);
-  assert.equal(normalizeRecordDecisionPayload({ statement: "s", refs: ["r"] }), null);
-  assert.equal(normalizeRecordDecisionPayload({ project: "p", refs: ["r"] }), null);
-  assert.equal(normalizeRecordDecisionPayload(null), null);
+function memoryStore(initial = {}) {
+  let data = { ...initial };
+  return {
+    load: async () => ({ ...data }),
+    save: async (next) => {
+      data = { ...next };
+    },
+  };
+}
+
+const basePlan = (over = {}) => ({
+  id: "pl1",
+  class: "start-job",
+  confidence: 0.9,
+  finding: { text: "stale cache after deploy", refs: ["m1"] },
+  diagnosis: "the cache is not invalidated",
+  steps: ["Invalidate the cache", "Re-run the deploy check"],
+  access: [],
+  verify: { kind: "session-ok" },
+  undo: "re-run the deploy",
+  ...over,
 });
 
-test("normalizeStartJobPayload: prompt+cwd required; model passes through in either valid shape", () => {
-  assert.deepEqual(normalizeStartJobPayload({ prompt: "Run the sweep", cwd: "/srv/app" }), {
-    prompt: "Run the sweep",
-    cwd: "/srv/app",
+// A runner whose transcript "work" is canned: each sendPrompt call resolves
+// the next turn's last-assistant text and passes/fails verification via the
+// scripted checks.
+function fakeRunnerSeams({ texts = [], checks = null, startRefusal = null, latency = 0 } = {}) {
+  let turn = 0;
+  const sends = [];
+  const sessions = [];
+  let deleted = 0;
+  return {
+    state: { sends, sessions, get deleted() { return deleted; } },
+    deps: {
+      createSession: async ({ directory, title, permission } = {}) => {
+        if (startRefusal) return { ok: false, reason: startRefusal };
+        const id = `sess-${sessions.length + 1}`;
+        sessions.push({ id, directory, title, permission });
+        return { ok: true, id };
+      },
+      sendPrompt: async ({ sessionId, text }) => {
+        sends.push({ sessionId, text });
+        turn += 1;
+        return { ok: true };
+      },
+      listMessages: async () => {
+        const text = texts[Math.min(turn, texts.length) - 1] ?? `turn ${turn}`;
+        return [{ role: "user", parts: [{ type: "text", text: "go" }] }, { role: "assistant", parts: [{ type: "text", text }] }];
+      },
+      abortSession: async () => ({ ok: true }),
+      deleteSession: async () => {
+        deleted += 1;
+        return { ok: true };
+      },
+      verifyFact: checks?.verifyFact,
+      probeRead: checks?.probeRead,
+      conditionGone: checks?.conditionGone,
+      sleep: async () => {},
+      turnBudgetMs: 1000,
+    },
+  };
+}
+
+function fakeDriverDeps({ runnerResults = null, runner = null } = {}) {
+  const ledgerRows = [];
+  const escalations = [];
+  const calibrations = [];
+  const acts = [];
+  const store = memoryStore({ entries: [] });
+  return {
+    state: { ledgerRows, escalations, calibrations, acts, store },
+    deps: {
+      runner:
+        runner ??
+        (async () => {
+          const r = (runnerResults ?? []).shift() ?? { ok: true, outcome: "resolved", attempts: 1, cost: 42, reason: null, result: { kind: "ephemeral", lastText: "done" } };
+          return r;
+        }),
+      store,
+      ledger: { append: async (row) => ledgerRows.push(row) },
+      escalate: async (text) => escalations.push(text),
+      calibration: async (input) => calibrations.push(input),
+      recordAct: async (input) => acts.push(input),
+      verdictsList: async () => [],
+      now: () => 1_000_000,
+      sleep: async () => {},
+    },
+  };
+}
+
+// Let the driver's fire-and-forget runs actually settle (several awaits deep
+// — a bare setImmediate is not enough).
+const settle = (ms = 50) => new Promise((r) => setTimeout(r, ms));
+
+// ---------------------------------------------------------------------------
+// validatePlan / session-kind / ruleset
+// ---------------------------------------------------------------------------
+
+test("validatePlan: steps required, verify kind known, access normalized", () => {
+  assert.equal(validatePlan(null).ok, false);
+  assert.equal(validatePlan({}).reason, "invalid-plan:id");
+  assert.equal(validatePlan({ id: "p" }).reason, "invalid-plan:steps");
+  assert.equal(validatePlan({ id: "p", steps: ["a"] }).reason, "invalid-plan:verify:missing");
+  assert.equal(validatePlan({ id: "p", steps: ["a"], verify: { kind: "predicate" } }).reason, "invalid-plan:verify:condition");
+  const ok = validatePlan({
+    id: " p ",
+    steps: [" a ", "", 3],
+    access: [{ permission: " write ", pattern: "**" }, { permission: "read", action: "bogus" }],
+    verify: { kind: "predicate", condition: "CI on F is green" },
   });
-  // the renderer's ask-path spells the directory `directory` — accepted as an alias
-  assert.deepEqual(normalizeStartJobPayload({ prompt: "p", directory: "/srv/app" }), { prompt: "p", cwd: "/srv/app" });
-  assert.deepEqual(normalizeStartJobPayload({ prompt: "p", cwd: "/srv/app", model: " opus " }), {
-    prompt: "p",
-    cwd: "/srv/app",
-    model: "opus",
-  });
-  assert.deepEqual(normalizeStartJobPayload({ prompt: "p", cwd: "c", model: { providerID: "anthropic", modelID: "claude", variant: "v" } }), {
-    prompt: "p",
-    cwd: "c",
-    model: { providerID: "anthropic", modelID: "claude", variant: "v" },
-  });
-  assert.deepEqual(normalizeStartJobPayload({ prompt: "p", cwd: "c", model: { providerID: "a", modelID: "m" } }), {
-    prompt: "p",
-    cwd: "c",
-    model: { providerID: "a", modelID: "m" },
-  });
-  // a present-but-invalid model refuses the whole act (never silently dropped)
-  assert.equal(normalizeStartJobPayload({ prompt: "p", cwd: "c", model: 7 }), null);
-  assert.equal(normalizeStartJobPayload({ prompt: "p", cwd: "c", model: ["opus"] }), null);
-  assert.equal(normalizeStartJobPayload({ prompt: "p", cwd: "c", model: "" }), null);
-  assert.equal(normalizeStartJobPayload({ prompt: "p", cwd: "c", model: { providerID: "a" } }), null);
-  assert.equal(normalizeStartJobPayload({ prompt: "", cwd: "c" }), null);
-  assert.equal(normalizeStartJobPayload({ prompt: "p" }), null);
-  assert.equal(normalizeStartJobPayload(null), null);
+  assert.equal(ok.ok, true);
+  assert.deepEqual(ok.plan.steps, ["a", "3"]);
+  assert.deepEqual(ok.plan.access, [
+    { permission: "write", pattern: "**", action: "allow" },
+    { permission: "read", pattern: "*", action: "allow" },
+  ]);
 });
 
-test("normalizeQueueTonightPayload: name falls back to the finding text; cost is the predictedCost alias", () => {
-  assert.deepEqual(
-    normalizeQueueTonightPayload(
-      { name: "Nightly sweep", prompt: "Sweep it", project: "/srv/app", value: 2, confidence: 0.9, cost: 3, refs: ["a", 1] },
-      { findingText: "ignored when a name exists" },
-    ),
-    { name: "Nightly sweep", prompt: "Sweep it", project: "/srv/app", value: 2, confidence: 0.9, predictedCost: 3, refs: ["a"] },
-  );
-  assert.deepEqual(
-    normalizeQueueTonightPayload({ predictedCost: 1.5 }, { findingText: "Build failures recurred" }),
-    { name: "Build failures recurred", predictedCost: 1.5 },
-  );
-  // non-finite numbers and junk project shapes are dropped, not refused
-  assert.deepEqual(
-    normalizeQueueTonightPayload({ name: "n", value: "high", confidence: NaN, project: 42 }, {}),
-    { name: "n" },
-  );
-  assert.equal(normalizeQueueTonightPayload({}, { findingText: "" }), null);
-  assert.equal(normalizeQueueTonightPayload(null, {}), null);
+test("wantsDelegateSession: write/edit access → delegate job; else ephemeral", () => {
+  assert.equal(wantsDelegateSession([{ permission: "read" }]), false);
+  assert.equal(wantsDelegateSession([{ permission: "write", pattern: "**" }]), true);
+  assert.equal(wantsDelegateSession([{ permission: "edit", pattern: "src/**" }]), true);
+  assert.equal(wantsDelegateSession([]), false);
+});
+
+test("permissionRulesetFor: catch-all deny first, plan grants after (last-match-wins)", () => {
+  const rs = permissionRulesetFor([{ permission: "write", pattern: "**" }]);
+  assert.deepEqual(rs[0], { permission: "*", pattern: "**", action: "deny" });
+  assert.deepEqual(rs[1], { permission: "write", pattern: "**", action: "allow" });
 });
 
 // ---------------------------------------------------------------------------
-// The executor — refusal contract + wired paths
+// The brief
 // ---------------------------------------------------------------------------
 
-function makeDeps(overrides = {}) {
-  const calls = { proposeFact: [], tonightAdd: [], beginDelegateJob: 0, startDelegateJob: [], gateReleased: 0 };
-  const deps = {
-    proposeFact: async (input) => {
-      calls.proposeFact.push(input);
-      return { ok: true };
+test("buildExecutionBrief: finding, diagnosis, steps, undo, project and the exact marker line", () => {
+  const brief = buildExecutionBrief(basePlan(), { finding: { text: "boom on boot" }, project: "manta" });
+  assert.ok(brief.includes("## Finding"));
+  assert.ok(brief.includes("boom on boot"));
+  assert.ok(brief.includes("## Diagnosis"));
+  assert.ok(brief.includes("the cache is not invalidated"));
+  assert.ok(brief.includes("1. Invalidate the cache"));
+  assert.ok(brief.includes("2. Re-run the deploy check"));
+  assert.ok(brief.includes("## Undo"));
+  assert.ok(brief.includes("re-run the deploy"));
+  assert.ok(brief.includes("Project: manta"));
+  assert.ok(brief.includes(`\`${CHECK_MARKER} pass\``));
+  // delegate flavor for write-access plans
+  const del = buildExecutionBrief(basePlan({ access: [{ permission: "write", pattern: "**" }] }));
+  assert.ok(del.includes("isolated git worktree"));
+  const eph = buildExecutionBrief(basePlan());
+  assert.ok(eph.includes("read-only ephemeral session"));
+});
+
+test("buildRetryBrief: names the failed check and repeats the marker contract", () => {
+  const r = buildRetryBrief(basePlan(), { reason: "predicate-false", detail: "CI red" });
+  assert.ok(r.includes("predicate-false"));
+  assert.ok(r.includes("CI red"));
+  assert.ok(r.includes(`${CHECK_MARKER} pass`));
+});
+
+// ---------------------------------------------------------------------------
+// Verify dispatch (§9.2 kinds)
+// ---------------------------------------------------------------------------
+
+test("runVerifyCheck: session-ok reads the CHECK marker; missing marker fails", async () => {
+  assert.equal(checkMarkerResult(`did it\n${CHECK_MARKER} pass`).ok, true);
+  const fail = checkMarkerResult(`${CHECK_MARKER} fail: cache still stale`);
+  assert.equal(fail.ok, false);
+  assert.equal(fail.reason, "session-reported-fail");
+  assert.equal(fail.detail, "cache still stale");
+  assert.equal(checkMarkerResult("all done").reason, "no-check-marker");
+  const plan = basePlan({ verify: { kind: "session-ok" } });
+  assert.equal((await runVerifyCheck(plan, { lastText: `ok ${CHECK_MARKER} pass` })).ok, true);
+  assert.equal((await runVerifyCheck(plan, { lastText: "no marker" })).ok, false);
+});
+
+test("runVerifyCheck: predicate dispatches through the fact verifier; not-checkable/unavailable fail", async () => {
+  const plan = basePlan({ verify: { kind: "predicate", condition: "CI on F is green" } });
+  const ok = await runVerifyCheck(plan, { verifyFact: async () => ({ ok: true }) });
+  assert.equal(ok.ok, true);
+  const no = await runVerifyCheck(plan, { verifyFact: async () => ({ ok: false, reason: "predicate-false" }) });
+  assert.equal(no.ok, false);
+  assert.equal(no.reason, "predicate-false");
+  // a no-opinion (null) seam is a FAIL, never a silent pass
+  const unavailable = await runVerifyCheck(plan, { verifyFact: null });
+  assert.equal(unavailable.ok, false);
+  assert.equal(unavailable.reason, "verify-unavailable");
+});
+
+test("runVerifyCheck: probe + condition-gone dispatch; condition-unverified (no opinion) fails", async () => {
+  const probe = basePlan({ verify: { kind: "probe", probe: "github/ci" } });
+  assert.equal((await runVerifyCheck(probe, { probeRead: async () => ({ ok: true }) })).ok, true);
+  const unhealthy = await runVerifyCheck(probe, { probeRead: async () => ({ ok: false, reason: "probe-unhealthy" }) });
+  assert.equal(unhealthy.ok, false);
+  assert.equal(unhealthy.reason, "probe-unhealthy");
+
+  const cond = basePlan({ verify: { kind: "condition-gone", condition: "the deploy fails" } });
+  assert.equal((await runVerifyCheck(cond, { conditionGone: async () => true })).ok, true);
+  const still = await runVerifyCheck(cond, { conditionGone: async () => false });
+  assert.equal(still.ok, false);
+  assert.equal(still.reason, "condition-still-present");
+  const unsure = await runVerifyCheck(cond, { conditionGone: async () => null });
+  assert.equal(unsure.ok, false);
+  assert.equal(unsure.reason, "condition-unverified");
+});
+
+// ---------------------------------------------------------------------------
+// The runner: session kind, retry loop, escalations
+// ---------------------------------------------------------------------------
+
+test("runner: ephemeral plan resolves when the session leaves the pass marker", async () => {
+  const f = fakeRunnerSeams({ texts: [`done\n${CHECK_MARKER} pass`] });
+  const execute = createCtoPlanRunner(f.deps);
+  const res = await execute({ plan: basePlan(), finding: { text: "boom" } });
+  assert.equal(res.ok, true);
+  assert.equal(res.outcome, "resolved");
+  assert.equal(res.attempts, 1);
+  assert.equal(res.result.kind, "ephemeral");
+  assert.equal(f.state.sessions.length, 1);
+  assert.equal(f.state.sends.length, 1);
+  assert.ok(f.state.sends[0].text.includes("Invalidate the cache"));
+  // the ephemeral session is always cleaned up
+  assert.equal(f.state.deleted, 1);
+});
+
+test("runner: write-access plan routes through startJob with the plan access as tools and trustMode false", async () => {
+  const started = [];
+  const f = fakeRunnerSeams({});
+  const execute = createCtoPlanRunner({
+    ...f.deps,
+    resolveParent: async () => ({ parentSessionID: "par-1", parentDirectory: "/srv/app" }),
+    startJob: async (input) => {
+      started.push(input);
+      return { ok: true, job: { id: "job-1" } };
     },
-    tonightAdd: async (task) => {
-      calls.tonightAdd.push(task);
-      return { ok: true, task: { id: "tq:1" } };
-    },
-    beginDelegateJob: async () => {
-      calls.beginDelegateJob += 1;
-      return { ok: true, release: () => (calls.gateReleased += 1) };
-    },
-    listProjects: async () => [
-      { tmuxSession: "app", defaultCwd: "/srv/app", windows: [{ opencodeSessionId: "ses-1", paneCurrentPath: "/srv/app" }] },
+    jobRow: async () => ({ running: false, sessionId: "child-1", status: "done" }),
+    listMessages: async () => [{ role: "assistant", parts: [{ type: "text", text: `${CHECK_MARKER} pass` }] }],
+  });
+  const res = await execute({ plan: basePlan({ access: [{ permission: "write", pattern: "**" }] }) });
+  assert.equal(res.ok, true);
+  assert.equal(res.outcome, "resolved");
+  assert.equal(res.result.kind, "delegate");
+  assert.equal(started.length, 1);
+  assert.equal(started[0].trustMode, false);
+  assert.deepEqual(started[0].tools, [{ permission: "write", pattern: "**", action: "allow" }]);
+  assert.equal(started[0].parentSessionID, "par-1");
+});
+
+test("runner: no parent project → refused (never a silent no-op), ephemeral start failure refused", async () => {
+  const f = fakeRunnerSeams({});
+  const execute = createCtoPlanRunner({
+    ...f.deps,
+    resolveParent: async () => null,
+    startJob: async () => ({ ok: true, job: { id: "job-1" } }),
+  });
+  const res = await execute({ plan: basePlan({ access: [{ permission: "edit", pattern: "**" }] }) });
+  assert.equal(res.ok, false);
+  assert.equal(res.reason, "no-project-session");
+
+  const g = fakeRunnerSeams({ startRefusal: "opencode-down" });
+  const execute2 = createCtoPlanRunner(g.deps);
+  const res2 = await execute2({ plan: basePlan() });
+  assert.equal(res2.ok, false);
+  assert.equal(res2.reason, "opencode-down");
+});
+
+test("runner: fail → exactly one retry with the failed check → resolved; fail again → escalated with the attempt log", async () => {
+  const f = fakeRunnerSeams({
+    texts: [`${CHECK_MARKER} fail: cache stale`, `fixed\n${CHECK_MARKER} pass`],
+    checks: { verifyFact: undefined },
+  });
+  const execute = createCtoPlanRunner(f.deps);
+  const res = await execute({ plan: basePlan({ verify: { kind: "session-ok" } }) });
+  assert.equal(res.outcome, "resolved");
+  assert.equal(res.attempts, 2);
+  assert.equal(f.state.sends.length, 2);
+  assert.ok(f.state.sends[1].text.includes("session-reported-fail"));
+
+  // both attempts fail → escalated, the reason carries BOTH check results
+  const g = fakeRunnerSeams({ texts: [`${CHECK_MARKER} fail: a`, `${CHECK_MARKER} fail: b`] });
+  const execute2 = createCtoPlanRunner(g.deps);
+  const res2 = await execute2({ plan: basePlan({ verify: { kind: "session-ok" } }) });
+  assert.equal(res2.outcome, "escalated");
+  assert.equal(res2.attempts, 2);
+  assert.ok((res2.reason ?? "").includes("attempt1"));
+  assert.ok((res2.reason ?? "").includes("attempt2"));
+});
+
+// ---------------------------------------------------------------------------
+// The driver: queue, cap, rows, outcomes, 7-day resolution
+// ---------------------------------------------------------------------------
+
+test("driver: every execution writes ONE complete cto.resolve row (§9.4-9.5 fields)", async () => {
+  const f = fakeDriverDeps({ runnerResults: [{ ok: true, outcome: "resolved", attempts: 2, cost: 777, reason: null, result: null }] });
+  const d = createCtoExecutorDriver(f.deps);
+  const r = await d.executePlan(basePlan(), {
+    findingId: "f9",
+    finding: { kind: "blocker", text: "boom", refs: ["m3"] },
+    gateCtx: { effective: 0.72, tau: 0.7, calibration: 0.8 },
+  });
+  assert.equal(r.ok, true);
+  // the queued run is fire-and-forget — flush the microtask queue
+  await settle();
+  const payload = await f.state.store.load();
+  assert.equal(payload.entries.length, 1);
+  const row = payload.entries[0];
+  assert.equal(row.planId, "pl1");
+  assert.equal(row.class, "start-job");
+  assert.equal(row.findingId, "f9");
+  assert.equal(row.confidence, 0.9);
+  assert.equal(row.calibration, 0.8);
+  assert.equal(row.effective, 0.72);
+  assert.equal(row.tau, 0.7);
+  assert.equal(row.trigger, "act");
+  assert.equal(row.outcome, "resolved");
+  assert.equal(row.attempts, 2);
+  assert.equal(row.cost, 777);
+  assert.equal(row.undo, "re-run the deploy");
+  assert.deepEqual(row.refs, ["m1"]);
+  assert.equal(typeof row.ts, "number");
+  assert.equal(typeof row.resolvedAt, "number");
+  // resolved → success DEFERRED (no fold yet)
+  assert.deepEqual(f.state.calibrations, []);
+  const ledger = f.state.ledgerRows.filter((x) => x.kind === "cto.resolve");
+  assert.equal(ledger.length, 1);
+});
+
+test("driver: escalated → immediate calibration failure + a blocker card carrying the attempt log", async () => {
+  const f = fakeDriverDeps({ runnerResults: [{ ok: true, outcome: "escalated", attempts: 2, cost: 10, reason: "attempt1:no-check-marker; attempt2:session-reported-fail", result: { kind: "ephemeral", lastText: "gave up" } }] });
+  const d = createCtoExecutorDriver(f.deps);
+  await d.executePlan(basePlan());
+  await settle();
+  assert.deepEqual(f.state.calibrations, [{ planId: "pl1", class: "start-job", ok: false }]);
+  assert.equal(f.state.escalations.length, 1);
+  assert.ok(f.state.escalations[0].includes("attempt1"));
+  assert.ok(f.state.escalations[0].includes("plan pl1"));
+});
+
+test("driver: the 7-day window — success with no negative verdict; a negative verdict in-window fails immediately", async () => {
+  // resolved now; 7 days pass; no negative verdicts → success
+  let t = 1_000_000;
+  const f = fakeDriverDeps({ runnerResults: [{ ok: true, outcome: "resolved", attempts: 1, cost: 5, reason: null, result: null }] });
+  f.deps.now = () => t;
+  const d = createCtoExecutorDriver(f.deps);
+  await d.executePlan(basePlan());
+  await settle();
+  t += 7 * 24 * 3_600_000 + 1;
+  const tick = await d.tick();
+  assert.equal(tick.resolved, 1);
+  assert.deepEqual(f.state.calibrations, [{ planId: "pl1", class: "start-job", ok: true }]);
+
+  // resolved then a correct verdict inside the window → immediate failure
+  let t2 = 2_000_000;
+  const g = fakeDriverDeps({ runnerResults: [{ ok: true, outcome: "resolved", attempts: 1, cost: 5, reason: null, result: null }] });
+  g.deps.now = () => t2;
+  g.deps.verdictsList = async () => [{ subject: { type: "suggestion", id: "pl1" }, verdict: "correct", ts: t2 + 100 }];
+  const d2 = createCtoExecutorDriver(g.deps);
+  await d2.executePlan(basePlan());
+  await settle();
+  await d2.tick();
+  assert.deepEqual(g.state.calibrations, [{ planId: "pl1", class: "start-job", ok: false }]);
+  const rows = (await g.state.store.load()).entries;
+  assert.equal(rows[0].failureFoldedAt != null, true);
+});
+
+test("driver: two executions per plan id EVER — a re-triage cannot re-arm the cap; cap-hit refuses and never acts", async () => {
+  const f = fakeDriverDeps({
+    runnerResults: [
+      { ok: true, outcome: "resolved", attempts: 1, cost: 1, reason: null, result: null },
+      { ok: true, outcome: "escalated", attempts: 2, cost: 2, reason: "failed twice", result: null },
     ],
-    startDelegateJob: async (input) => {
-      calls.startDelegateJob.push(input);
+  });
+  const d = createCtoExecutorDriver(f.deps);
+  assert.equal((await d.executePlan(basePlan())).ok, true);
+  await settle();
+  // the plan is RE-REPORTED and re-triaged: the same plan id executes once more
+  assert.equal((await d.executePlan(basePlan(), { trigger: "accepted" })).ok, true);
+  await settle();
+  // third execution → cap-hit refusal (degrades to ask, never acts)
+  const third = await d.executePlan(basePlan());
+  assert.equal(third.ok, false);
+  assert.equal(third.reason, "cap-hit");
+  const rows = (await f.state.store.load()).entries;
+  assert.equal(rows.filter((r) => r.planId === "pl1").length, 2);
+  assert.equal(rows.filter((r) => r.planId === "pl1").length <= EXECUTIONS_PER_PLAN, true);
+});
+
+test("driver: queue caps at 10, blocker plans jump ahead of finding plans, ≤ 2 run at once", async () => {
+  // A runner gated on a released promise so the queue state is deterministic.
+  let release = null;
+  const gate = new Promise((r) => (release = r));
+  let started = 0;
+  const f = fakeDriverDeps({
+    runner: async () => {
+      started += 1;
+      await gate;
+      return { ok: true, outcome: "resolved", attempts: 1, cost: 1, reason: null, result: null };
+    },
+  });
+  const d = createCtoExecutorDriver(f.deps);
+  // 2 fill the in-flight slots; 10 more fill the queue; the 13th is refused.
+  for (let i = 0; i < 12; i += 1) {
+    const r = await d.executePlan(basePlan({ id: `pf${i}` }), { finding: { kind: "finding" } });
+    assert.equal(r.ok, true, `call ${i} should enqueue`);
+  }
+  assert.deepEqual(d.state(), { queueDepth: 10, inFlight: 2 });
+  const overflow = await d.executePlan(basePlan({ id: "pf-overflow" }));
+  assert.equal(overflow.ok, false);
+  assert.equal(overflow.reason, "queue-full");
+  // release: everything drains (concurrency ≤ MAX_IN_FLIGHT, all 12 written)
+  release();
+  await settle(40);
+  assert.deepEqual(d.state(), { queueDepth: 0, inFlight: 0 });
+  const rows = (await f.state.store.load()).entries;
+  assert.equal(rows.length, 12);
+  assert.equal(started, 12);
+  assert.ok(MAX_IN_FLIGHT >= 2); // the §3.3 sub-cap constant holds
+});
+
+test("driver: a queued blocker plan is taken before a queued finding plan", async () => {
+  // Both slots busy on gated runs; then enqueue finding → blocker → finding.
+  let releaseAll = null;
+  const gate = new Promise((r) => (releaseAll = r));
+  const f = fakeDriverDeps({
+    runner: async () => {
+      await gate;
+      return { ok: true, outcome: "resolved", attempts: 1, cost: 1, reason: null, result: null };
+    },
+  });
+  const d = createCtoExecutorDriver(f.deps);
+  await d.executePlan(basePlan({ id: "busy-1" }), { finding: { kind: "finding" } });
+  await d.executePlan(basePlan({ id: "busy-2" }), { finding: { kind: "finding" } });
+  await d.executePlan(basePlan({ id: "q-finding" }), { finding: { kind: "finding" } });
+  await d.executePlan(basePlan({ id: "q-blocker" }), { finding: { kind: "blocker" } });
+  await d.executePlan(basePlan({ id: "q-finding2" }), { finding: { kind: "finding" } });
+  assert.deepEqual(d.state(), { queueDepth: 3, inFlight: 2 });
+  releaseAll();
+  await settle(40);
+  const rows = (await f.state.store.load()).entries;
+  // the blocker's row exists and the blocker jumped the queue (drained before
+  // the finding entry queued behind it)
+  assert.equal(rows.length, 5);
+  assert.deepEqual(d.state(), { queueDepth: 0, inFlight: 0 });
+  assert.ok(rows.some((r) => r.planId === "q-blocker"));
+});
+
+test("driver: invalid plans are refused, never executed or ledgered", async () => {
+  const f = fakeDriverDeps({});
+  const d = createCtoExecutorDriver(f.deps);
+  const r = await d.executePlan({ id: "", steps: [] });
+  assert.equal(r.ok, false);
+  await settle();
+  assert.equal((await f.state.store.load()).entries.length, 0);
+  assert.deepEqual(f.state.ledgerRows, []);
+});
+
+test("driver: §9.4 presence — finding-sourced acts refuse while present; blockers, accepted and away all run", async () => {
+  const f = fakeDriverDeps({ runnerResults: [] });
+  let presenceState = "present";
+  f.deps.presence = async () => presenceState;
+  const d = createCtoExecutorDriver(f.deps);
+  // finding-sourced machine act while present → refused, nothing queued/run
+  const r1 = await d.executePlan(basePlan({ id: "pl-pres" }), { finding: { kind: "finding" } });
+  assert.equal(r1.ok, false);
+  assert.equal(r1.reason, "presence-gated");
+  await settle(5);
+  assert.equal((await f.state.store.load()).entries.length, 0);
+  assert.deepEqual(f.state.ledgerRows, []);
+  // blocker-sourced runs regardless of presence (the ONLY §9.4 exemption)
+  presenceState = "present";
+  const r2 = await d.executePlan(basePlan({ id: "pl-blocker" }), { finding: { kind: "blocker" } });
+  assert.equal(r2.ok, true);
+  // user-accepted plans are user-initiated → bypass presence
+  const r3 = await d.executePlan(basePlan({ id: "pl-accepted" }), { trigger: "accepted" });
+  assert.equal(r3.ok, true);
+  await settle(10);
+  // away → the finding act runs
+  presenceState = "away";
+  const r4 = await d.executePlan(basePlan({ id: "pl-away" }), { finding: { kind: "finding" } });
+  assert.equal(r4.ok, true);
+  await settle(10);
+  const rows = (await f.state.store.load()).entries;
+  assert.deepEqual(
+    rows.map((r) => r.planId).sort(),
+    ["pl-accepted", "pl-away", "pl-blocker"],
+  );
+  // a presence-read failure must not block machine work — run
+  const g = fakeDriverDeps({ runnerResults: [] });
+  g.deps.presence = async () => {
+    throw new Error("presence down");
+  };
+  const d2 = createCtoExecutorDriver(g.deps);
+  const r5 = await d2.executePlan(basePlan({ id: "pl-pres-err" }), { finding: { kind: "finding" } });
+  assert.equal(r5.ok, true);
+});
+
+test("runner: a delegate job still running at the turn budget escalates instead of interleaving the retry", async () => {
+  const sends = [];
+  const started = [];
+  const execute = createCtoPlanRunner({
+    resolveParent: async () => ({ parentSessionID: "par-1", parentDirectory: "/srv/app" }),
+    startJob: async (input) => {
+      started.push(input);
       return { ok: true, job: { id: "job-9" } };
     },
-    listDelegateJobs: async () => [],
-    ...overrides,
-  };
-  return { deps, calls };
-}
-
-// The canonical §3.3 start-job probe: plain finding candidate, tracked cwd.
-async function runStartJobProbe(deps) {
-  const exec = createCtoActExecutor(deps);
-  return exec({
-    cls: "start-job",
-    action: { type: "start-job", payload: { prompt: "p", cwd: "/srv/app" } },
-    candidate: { finding: { text: "f", refs: [] } },
+    // the job never finishes within the tiny test budget
+    jobRow: async () => ({ running: true, sessionId: "child-9", status: "running" }),
+    sendPrompt: async ({ text }) => {
+      sends.push(text);
+      return { ok: true };
+    },
+    listMessages: async () => [],
+    sleep: async () => {},
+    now: (() => { let t = 0; return () => (t += 500); })(), // each poll burns the budget
+    turnBudgetMs: 1000,
   });
-}
-
-test("executor: record-decision proposes the gatekeeper-checked fact (behavior carried over from BET-1403)", async () => {
-  const { deps, calls } = makeDeps();
-  const exec = createCtoActExecutor(deps);
-  const out = await exec({
-    cls: "record-decision",
-    action: { type: "record-decision", payload: { statement: "Adopt pact", project: "manta" } },
-    candidate: { id: "cand-1", finding: { text: "f", refs: ["ref:1"] } },
-  });
-  assert.deepEqual(out, { ok: true, detail: "decision fact proposed" });
-  assert.deepEqual(calls.proposeFact, [{ project: "manta", kind: "decision", statement: "Adopt pact", refs: ["ref:1"], sender: "cto" }]);
+  const res = await execute({ plan: basePlan({ access: [{ permission: "write", pattern: "**" }], verify: { kind: "session-ok" } }) });
+  assert.equal(res.outcome, "escalated");
+  assert.ok((res.reason ?? "").includes("job-still-running-at-budget"));
+  assert.equal(res.attempts, 1, "the retry never got a turn");
+  assert.equal(sends.length, 0, "no retry prompt was delivered into the running job");
 });
 
-test("executor: record-decision refusal surfaces the fact route's error", async () => {
-  const { deps } = makeDeps({ proposeFact: async () => ({ ok: false, error: "gatekeeper refused" }) });
-  const exec = createCtoActExecutor(deps);
-  const out = await exec({
-    cls: "record-decision",
-    action: { type: "record-decision", payload: { statement: "s", project: "p", refs: ["r"] } },
-    candidate: { finding: { text: "f", refs: [] } },
-  });
-  assert.deepEqual(out, { ok: false, reason: "gatekeeper refused" });
+test("driver: a runner THROW is an interrupt — escalated with the interrupt reason, never lost", async () => {
+  const f = fakeDriverDeps({ runner: async () => { throw new Error("provider died"); } });
+  const d = createCtoExecutorDriver(f.deps);
+  await d.executePlan(basePlan());
+  await settle();
+  const rows = (await f.state.store.load()).entries;
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].outcome, "escalated");
+  assert.ok((rows[0].reason ?? "").includes("interrupt"));
+  assert.deepEqual(f.state.calibrations, [{ planId: "pl1", class: "start-job", ok: false }]);
 });
 
-test("executor: queue-tonight adds the normalized task bound to the suggestion (cls + originId)", async () => {
-  const { deps, calls } = makeDeps();
-  const exec = createCtoActExecutor(deps);
-  const out = await exec({
-    cls: "queue-tonight",
-    action: { type: "queue-tonight", payload: { name: "Nightly sweep", prompt: "Sweep it", project: "/srv/app", cost: 2 } },
-    candidate: { id: "cand-2", finding: { text: "f", refs: ["ref:2"] } },
-  });
-  assert.deepEqual(out, { ok: true, detail: "queued for tonight", taskId: "tq:1" });
-  assert.deepEqual(calls.tonightAdd, [
-    { name: "Nightly sweep", prompt: "Sweep it", project: "/srv/app", predictedCost: 2, refs: ["ref:2"], cls: "queue-tonight", originId: "cand-2" },
-  ]);
-});
-
-test("executor: queue-tonight refusal carries tonightAdd's own gate error (overnight off, queue full)", async () => {
-  for (const error of ["overnight is not enabled (High tier + Overnight switch)", "tonight's queue is full (12) — cancel or edit first"]) {
-    const { deps } = makeDeps({ tonightAdd: async () => ({ ok: false, error }) });
-    const exec = createCtoActExecutor(deps);
-    const out = await exec({
-      cls: "queue-tonight",
-      action: { type: "queue-tonight", payload: { name: "n" } },
-      candidate: { finding: { text: "f", refs: [] } },
-    });
-    assert.deepEqual(out, { ok: false, reason: error });
-  }
-});
-
-test("executor: start-job starts a worktree-isolated delegate job as actor cto under the §3.3 gate", async () => {
-  const { deps, calls } = makeDeps();
-  const exec = createCtoActExecutor(deps);
-  const out = await exec({
-    cls: "start-job",
-    action: { type: "start-job", payload: { prompt: "Investigate flaky tests", cwd: "/srv/app", model: "opus" } },
-    candidate: { finding: { text: "f", refs: [] } },
-  });
-  assert.deepEqual(out, { ok: true, detail: "delegate job started", jobId: "job-9" });
-  assert.equal(calls.beginDelegateJob, 1);
-  assert.equal(calls.gateReleased, 1);
-  assert.deepEqual(calls.startDelegateJob, [
-    { prompt: "Investigate flaky tests", model: "opus", parentSessionID: "ses-1", parentDirectory: "/srv/app", actor: ACTOR },
-  ]);
-});
-
-test("executor: start-job refuses at the §3.3 concurrent cto-delegate cap without arming the gate", async () => {
-  const { deps, calls } = makeDeps({
-    listDelegateJobs: async () => [
-      { id: "a", actor: ACTOR, status: "running" },
-      { id: "b", actor: ACTOR, status: "running" },
-      { id: "c", actor: "user", status: "running" },
-    ],
-  });
-  const out = await runStartJobProbe(deps);
-  assert.equal(out.ok, false);
-  assert.equal(out.reason, "rate_limit:concurrentDelegate");
-  assert.equal(calls.beginDelegateJob, 0);
-  assert.equal(calls.startDelegateJob.length, 0);
-});
-
-test("executor: start-job refuses when no tracked project session hosts the cwd (gate never armed)", async () => {
-  const { deps, calls } = makeDeps({ listProjects: async () => [] });
-  const exec = createCtoActExecutor(deps);
-  const out = await exec({
-    cls: "start-job",
-    action: { type: "start-job", payload: { prompt: "p", cwd: "/elsewhere" } },
-    candidate: { finding: { text: "f", refs: [] } },
-  });
-  assert.deepEqual(out, { ok: false, reason: "no-project-session" });
-  assert.equal(calls.beginDelegateJob, 0);
-});
-
-test("executor: start-job refusal from the delegate engine degrades with its error and releases the gate", async () => {
-  const { deps, calls } = makeDeps({
-    startDelegateJob: async () => ({ ok: false, error: "at MAX_RUNNING_JOBS" }),
-  });
-  const out = await runStartJobProbe(deps);
-  assert.deepEqual(out, { ok: false, reason: "at MAX_RUNNING_JOBS" });
-  assert.equal(calls.beginDelegateJob, 1);
-  assert.equal(calls.gateReleased, 1);
-});
-
-test("executor: a §3.3 gate refusal (kill switch / pause) refuses the act before any start", async () => {
-  const { deps, calls } = makeDeps({ beginDelegateJob: async () => ({ ok: false, error: "cto_paused" }) });
-  const out = await runStartJobProbe(deps);
-  assert.deepEqual(out, { ok: false, reason: "cto_paused" });
-  assert.equal(calls.startDelegateJob.length, 0);
-  assert.equal(calls.gateReleased, 0);
-});
-
-// ---------------------------------------------------------------------------
-// Refusal contract: class/action coherence, unknown classes, unwired deps
-// ---------------------------------------------------------------------------
-
-test("executor: class and action.type must agree (act bookkeeping is per-class)", async () => {
-  const { deps, calls } = makeDeps();
-  const exec = createCtoActExecutor(deps);
-  assert.deepEqual(
-    await exec({ cls: "start-job", action: { type: "record-decision", payload: { statement: "s", project: "p", refs: ["r"] } } }),
-    { ok: false, reason: "class-mismatch" },
-  );
-  assert.deepEqual(await exec({ cls: undefined, action: { type: "start-job", payload: {} } }), { ok: false, reason: "class-mismatch" });
-  assert.deepEqual(await exec({ cls: "start-job", action: null }), { ok: false, reason: "class-mismatch" });
-  assert.equal(calls.startDelegateJob.length, 0);
-});
-
-test("executor: §9.3-ineligible and data-unreachable classes refuse as unwired (veto-window fallback)", async () => {
-  const exec = createCtoActExecutor(makeDeps().deps);
-  assert.deepEqual(await exec({ cls: "config-change", action: { type: "config-change", payload: { patch: {} } } }), {
-    ok: false,
-    reason: "no-executor",
-  });
-  assert.deepEqual(await exec({ cls: "tool-write", action: { type: "tool-write", payload: { tool: "t" } } }), {
-    ok: false,
-    reason: "no-executor",
-  });
-  assert.deepEqual(await exec({ cls: "unknown", action: { type: "unknown", payload: {} } }), { ok: false, reason: "no-executor" });
-});
-
-test("executor: an unwired dep refuses its class as no-executor; malformed payloads refuse as incomplete", async () => {
-  const { deps } = makeDeps();
-  const noTonight = createCtoActExecutor({ ...deps, tonightAdd: null });
-  assert.deepEqual(
-    await noTonight({ cls: "queue-tonight", action: { type: "queue-tonight", payload: { name: "n" } } }),
-    { ok: false, reason: "no-executor" },
-  );
-  const noDelegate = createCtoActExecutor({ ...deps, startDelegateJob: null, beginDelegateJob: null });
-  assert.deepEqual(
-    await noDelegate({ cls: "start-job", action: { type: "start-job", payload: { prompt: "p", cwd: "/srv/app" } } }),
-    { ok: false, reason: "no-executor" },
-  );
-  const exec = createCtoActExecutor(deps);
-  assert.deepEqual(await exec({ cls: "start-job", action: { type: "start-job", payload: {} } }), { ok: false, reason: "incomplete-payload" });
-  assert.deepEqual(await exec({ cls: "queue-tonight", action: { type: "queue-tonight", payload: {} }, candidate: { finding: { text: "", refs: [] } } }), {
-    ok: false,
-    reason: "incomplete-payload",
-  });
-  assert.deepEqual(await exec({ cls: "record-decision", action: { type: "record-decision", payload: {} } }), {
-    ok: false,
-    reason: "incomplete-payload",
-  });
+test("driver: executeAccepted announces the accepted execution through the act-and-report queue", async () => {
+  const f = fakeDriverDeps({});
+  const d = createCtoExecutorDriver(f.deps);
+  await d.executeAccepted(basePlan(), { gateCtx: { effective: 0.5 } });
+  await settle();
+  const rows = (await f.state.store.load()).entries;
+  assert.equal(rows[0].trigger, "accepted");
+  assert.equal(f.state.acts.length, 1);
+  assert.deepEqual(f.state.acts[0].action, { type: "plan", payload: { planId: "pl1" } });
 });

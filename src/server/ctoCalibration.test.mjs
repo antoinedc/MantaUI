@@ -110,10 +110,11 @@ test("engine: plan-subject verdicts resolve their class from plans.json when uns
       "f1": { findingId: "f1", plans: [{ id: "plan-1", class: "host-maintenance" }, { id: "plan-2", class: "other" }] },
     },
   });
+  const ledgerRows = [];
   const cal = createCtoCalibration({
     store,
     plans,
-    ledger: { append: async () => {} },
+    ledger: { append: async (row) => ledgerRows.push(row) },
     now: () => 1000,
   });
   // unstamped plan verdict → class from the plan row
@@ -121,10 +122,42 @@ test("engine: plan-subject verdicts resolve their class from plans.json when uns
   let st = await cal.getState();
   assert.equal(st.classes["host-maintenance"].outcomes, 1);
   assert.equal(st.classes["host-maintenance"].successes, 0);
-  // a stamped subject wins over the lookup
+  // a stamped subject wins over the lookup — and a SUCCESS verdict on a plan
+  // subject that resolves in plans.json is DEFERRED to the executor (BET-1519
+  // §9.5: one outcome per plan; the accept's own fold would double-count).
+  // Dismiss/correct still fold immediately (dismissed-unexecuted / later-
+  // negative are failures here).
   await cal.noteVerdictEffects({}, { subject: { type: "plan", id: "plan-2", class: "config-change" }, verdict: "edit" });
   st = await cal.getState();
-  assert.equal(st.classes["config-change"].successes, 1);
+  assert.equal(st.classes["config-change"], undefined);
+  assert.ok(
+    ledgerRows.some((r) => r.kind === "calibrate.fold" && r.outcome === "deferred-to-executor" && r.subjectId === "plan-2"),
+  );
+});
+
+test("engine: accept on a plan subject DEFERS to the executor; the engine's isPlanSubject wins", async () => {
+  const store = makeMemStore();
+  const ledgerRows = [];
+  const plans = makeMemStore({
+    records: { "f1": { findingId: "f1", plans: [{ id: "plan-9", class: "host-maintenance" }] } },
+  });
+  const cal = createCtoCalibration({
+    store,
+    plans,
+    ledger: { append: async (row) => ledgerRows.push(row) },
+    now: () => 1000,
+    isPlanSubject: async (planId) => planId === "plan-9",
+  });
+  // the stamped class + the plans.json hit → the accept fold is deferred
+  await cal.noteVerdictEffects({}, { subject: { type: "plan", id: "plan-9", class: "host-maintenance" }, verdict: "accept" });
+  let st = await cal.getState();
+  assert.equal(st.classes["host-maintenance"], undefined);
+  assert.ok(ledgerRows.some((r) => r.outcome === "deferred-to-executor" && r.subjectId === "plan-9"));
+  // dismiss on the same plan subject folds failure immediately
+  await cal.noteVerdictEffects({}, { subject: { type: "plan", id: "plan-9", class: "host-maintenance" }, verdict: "dismiss" });
+  st = await cal.getState();
+  assert.equal(st.classes["host-maintenance"].outcomes, 1);
+  assert.equal(st.classes["host-maintenance"].successes, 0);
 });
 
 test("engine: veto/open/expire verdicts never fold; unknown subjects never fold", async () => {

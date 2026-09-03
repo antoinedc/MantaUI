@@ -188,7 +188,17 @@ export function createCtoGate(deps = {}) {
         let exec = { ok: false, reason: "no-executor" };
         if (typeof executePlan === "function") {
           try {
-            exec = (await executePlan(plan)) ?? { ok: false };
+            exec = (await executePlan(plan, {
+              findingId,
+              finding: rec.finding ?? null,
+              // §9.4-9.5 row context: the gate knows calibration/τ/effective —
+              // the executor stamps them on the cto.resolve row.
+              gateCtx: {
+                effective: score,
+                tau,
+                calibration: calibrationMap[cls],
+              },
+            })) ?? { ok: false };
           } catch {
             exec = { ok: false };
           }

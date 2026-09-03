@@ -166,12 +166,16 @@ export const watchersStore = createCtoJsonStore("watchers", ctoPath("watchers.js
 export const engineStateStore = createCtoJsonStore("engine-state", ctoPath("engine-state.json"));
 // (BET-1518) the trust ladder's trust.json store is deleted with the ladder —
 // calibration.json replaced it (§9.5, below).
-// BET-1521: the §9.4 cto.resolve ledger — one entry per plan execution
+// BET-1519: the §9.4 cto.resolve ledger — one entry per plan execution
 // ({ planId, class, findingId, confidence, calibration, effective, tau,
 // trigger: act|accepted, outcome: resolved|escalated, attempts, cost, undo,
-// refs }). Payload `{ entries: [...] }`, verdicts-mirrored; owned by the
-// executor (BET-1519) and read by the §14-7 health rows. Readers tolerate the
-// bare `{ v: 1 }` default payload (entries ?? []).
+// refs, ts }, resolved rows carrying `resolvedAt`). The §9.5 resolution fold
+// mutates the resolved row in place with successFoldedAt / failureFoldedAt +
+// foldReason (never a second row — one entry per execution). Per-plan state
+// (the two-executions-ever attempt cap, the 7-day success window) is derived
+// by scanning rows, so a re-triage can never re-arm the cap. Owned by the
+// executor driver (ctoAct.mjs) and read by the §14-7 health rows. Readers
+// tolerate the bare `{ v: 1 }` default payload (entries ?? []).
 export const resolveStore = createCtoJsonStore("resolve", ctoPath("resolve.json"));
 // BET-1521: the §9.5 calibration store — per-class last-30 outcome windows
 // (`{ classes: { <cls>: { successes, outcomes } } }`), Beta(1,1) prior.
