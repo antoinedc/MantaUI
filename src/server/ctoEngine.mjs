@@ -1370,6 +1370,17 @@ export function createCtoEngine(deps = {}) {
           return [];
         }
       },
+      // §9.4 presence rule: finding-sourced machine acts refuse while the
+      // user is `present` (the gate degrades them to ask cards); blocker-
+      // sourced and user-accepted plans bypass. Same read the rollup/facts
+      // engines use.
+      presence: async () => {
+        try {
+          return getPresence().state ?? "away";
+        } catch {
+          return "away";
+        }
+      },
       knowsPlan: async (planId) => {
         try {
           const payload = await bundle.plans.load();

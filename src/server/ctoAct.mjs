@@ -509,6 +509,16 @@ export function createCtoPlanRunner(deps = {}) {
     let turn2 = { ok: false, reason: "no-send", lastText: "", assistants: 0 };
     try {
       if (isDelegate) {
+        // If turn 1 ended on budget but the job is still executing, delivering
+        // the retry brief into the child session now would interleave with the
+        // in-flight turn. Wait for the job to finish first (bounded by the
+        // retry deadline; still running at it → that IS the failed check).
+        if (turn.reason === "turn-budget") {
+          const stillRunning = await readTranscript(sessionId, { baseline: 0, deadline: retryDeadline });
+          if (stillRunning.ok === false && stillRunning.reason === "turn-budget") {
+            return finish("escalated", `attempt1:${check1.reason ?? "verify-failed"}; job-still-running-at-budget`);
+          }
+        }
         const row = await jobRow(sessionId);
         const childId = row?.sessionId;
         if (!childId) {
@@ -576,6 +586,7 @@ export function createCtoExecutorDriver(deps = {}) {
     recordAct = null, // ({cls, text, refs, action, score}) — digest announcement
     verdictsList = async () => [], // () => verdict entries
     knowsPlan = async () => false, // (planId) => plans.json hit
+    presence = null, // async () => "present"|"away"|"gone" (§9.4 rule; engine wires getPresence().state)
     now = () => Date.now(),
     execute = null, // when runner is not provided directly
     queueMax = QUEUE_MAX,
@@ -755,7 +766,19 @@ export function createCtoExecutorDriver(deps = {}) {
     }
   }
 
-  /** The gate/accepted seam: validate → cap → enqueue → drain. */
+  /**
+   * The gate/accepted seam: validate → cap → presence (§9.4) → enqueue →
+   * drain.
+   *
+   * §9.4 presence rule (§3.4 rule 3): blocker-sourced plans run regardless
+   * of presence (that is the point of a blocker); finding-sourced machine
+   * acts (trigger "act") refuse while the user is `present` — the gate then
+   * degrades them to the ask card, which is the right §9.3 surface when the
+   * human is right there. Decision (documented in the PR): the check is at
+   * ENQUEUE — a refused plan re-runs through the gate's ask path instead of
+   * being held in the queue for an indefinite away-window. User-accepted
+   * plans (trigger "accepted") are user-initiated and bypass presence.
+   */
   async function executePlan(plan, ctx = {}) {
     const { findingId = null, finding = null, project = null, trigger = "act", gateCtx = null } = ctx;
     const v = validatePlan(plan);
@@ -771,6 +794,15 @@ export function createCtoExecutorDriver(deps = {}) {
     }
     const isBlocker =
       finding?.kind === "blocker" || finding?.sourceKind === "blocker" || finding?.noteKind === "blocker";
+    if (trigger === "act" && !isBlocker && typeof presence === "function") {
+      try {
+        if ((await presence()) === "present") {
+          return { ok: false, reason: "presence-gated" };
+        }
+      } catch {
+        /* a presence read failure must not block machine work — run */
+      }
+    }
     queue.push({ planId, plan: v.plan, finding, findingId, project, trigger, gateCtx, isBlocker, queuedAt: now() });
     await drain();
     return { ok: true, queued: true, planId };

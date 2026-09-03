@@ -485,6 +485,73 @@ test("driver: invalid plans are refused, never executed or ledgered", async () =
   assert.deepEqual(f.state.ledgerRows, []);
 });
 
+test("driver: §9.4 presence — finding-sourced acts refuse while present; blockers, accepted and away all run", async () => {
+  const f = fakeDriverDeps({ runnerResults: [] });
+  let presenceState = "present";
+  f.deps.presence = async () => presenceState;
+  const d = createCtoExecutorDriver(f.deps);
+  // finding-sourced machine act while present → refused, nothing queued/run
+  const r1 = await d.executePlan(basePlan({ id: "pl-pres" }), { finding: { kind: "finding" } });
+  assert.equal(r1.ok, false);
+  assert.equal(r1.reason, "presence-gated");
+  await settle(5);
+  assert.equal((await f.state.store.load()).entries.length, 0);
+  assert.deepEqual(f.state.ledgerRows, []);
+  // blocker-sourced runs regardless of presence (the ONLY §9.4 exemption)
+  presenceState = "present";
+  const r2 = await d.executePlan(basePlan({ id: "pl-blocker" }), { finding: { kind: "blocker" } });
+  assert.equal(r2.ok, true);
+  // user-accepted plans are user-initiated → bypass presence
+  const r3 = await d.executePlan(basePlan({ id: "pl-accepted" }), { trigger: "accepted" });
+  assert.equal(r3.ok, true);
+  await settle(10);
+  // away → the finding act runs
+  presenceState = "away";
+  const r4 = await d.executePlan(basePlan({ id: "pl-away" }), { finding: { kind: "finding" } });
+  assert.equal(r4.ok, true);
+  await settle(10);
+  const rows = (await f.state.store.load()).entries;
+  assert.deepEqual(
+    rows.map((r) => r.planId).sort(),
+    ["pl-accepted", "pl-away", "pl-blocker"],
+  );
+  // a presence-read failure must not block machine work — run
+  const g = fakeDriverDeps({ runnerResults: [] });
+  g.deps.presence = async () => {
+    throw new Error("presence down");
+  };
+  const d2 = createCtoExecutorDriver(g.deps);
+  const r5 = await d2.executePlan(basePlan({ id: "pl-pres-err" }), { finding: { kind: "finding" } });
+  assert.equal(r5.ok, true);
+});
+
+test("runner: a delegate job still running at the turn budget escalates instead of interleaving the retry", async () => {
+  const sends = [];
+  const started = [];
+  const execute = createCtoPlanRunner({
+    resolveParent: async () => ({ parentSessionID: "par-1", parentDirectory: "/srv/app" }),
+    startJob: async (input) => {
+      started.push(input);
+      return { ok: true, job: { id: "job-9" } };
+    },
+    // the job never finishes within the tiny test budget
+    jobRow: async () => ({ running: true, sessionId: "child-9", status: "running" }),
+    sendPrompt: async ({ text }) => {
+      sends.push(text);
+      return { ok: true };
+    },
+    listMessages: async () => [],
+    sleep: async () => {},
+    now: (() => { let t = 0; return () => (t += 500); })(), // each poll burns the budget
+    turnBudgetMs: 1000,
+  });
+  const res = await execute({ plan: basePlan({ access: [{ permission: "write", pattern: "**" }], verify: { kind: "session-ok" } }) });
+  assert.equal(res.outcome, "escalated");
+  assert.ok((res.reason ?? "").includes("job-still-running-at-budget"));
+  assert.equal(res.attempts, 1, "the retry never got a turn");
+  assert.equal(sends.length, 0, "no retry prompt was delivered into the running job");
+});
+
 test("driver: a runner THROW is an interrupt — escalated with the interrupt reason, never lost", async () => {
   const f = fakeDriverDeps({ runner: async () => { throw new Error("provider died"); } });
   const d = createCtoExecutorDriver(f.deps);
