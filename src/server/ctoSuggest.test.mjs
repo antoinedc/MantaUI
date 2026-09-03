@@ -429,14 +429,12 @@ test("verdictHeld: routes judgment to the B3 verdict route", async () => {
   assert.equal(h.verdictEntries[0].verdict, "dismiss");
 });
 
-// BET-1492 — the direct-store fallback appends through the verdicts store's
-// patchStore mutex: a concurrent writer's committed state survives (the old
-// unlocked load-spread-save loaded before the writer's commit and reverted
-// its key on save).
-test("verdictHeld fallback is a patchStore section: a concurrent writer's patch and the append BOTH land", async () => {
-  const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+// BET-1518 — the direct-store fallback is deleted: a fallback-appended
+// entry bypasses the verdict sink registry (its counter effects would never
+// fold anywhere), so an unwired verdict route degrades instead.
+test("verdictHeld without a verdict route degrades — no direct-store append", async () => {
   await verdictsStore.save({ entries: [] });
-  const rows = [{ id: "held-9", kind: "suggest.silent", class: "tool", ts: 1 }];
+  const rows = [{ id: "held-9", kind: "suggest.silent", class: "tool-write", ts: 1 }];
   const sug = createCtoSuggest({
     ledger: { append: async () => true, read: async () => rows },
     engineState: { load: async () => ({ v: 1 }), save: async () => {} },
@@ -444,19 +442,35 @@ test("verdictHeld fallback is a patchStore section: a concurrent writer's patch 
     now: () => 1_000,
     publish: () => {},
     configGet: async () => ({}),
-    recordVerdict: null, // force the direct-store fallback
+    recordVerdict: null, // unwired route
   });
-  const writer = patchStore(verdictsStore, async () => {
-    await delay(25);
-    return { marker: "w" };
-  });
-  await delay(5); // let the writer take the mutex
   const r = await sug.verdictHeld({ id: "held-9", verdict: "accept" });
-  assert.equal(r.ok, true);
-  await writer;
+  assert.equal(r.ok, false);
+  assert.match(r.error ?? "", /no-verdict-route/);
   const after = await verdictsStore.load();
-  assert.equal(after.marker, "w", "the concurrent writer's key survived the fallback append");
-  assert.equal(after.entries.filter((e) => e?.subject?.id === "held-9").length, 1);
+  assert.equal((after.entries ?? []).length, 0, "no direct-store append behind the route's back");
+});
+
+test("verdictHeld stamps the held row's class onto the subject (§9.5 attribution)", async () => {
+  const h = makeSug({
+    runSuggest: async () => ({ text: oneCandidateSuggestText("start-job", "a") }),
+    runWorthiness: async () => ({ text: "0.1" }), // p below p_ask → silent-log (a HELD row)
+  });
+  await h.sug.processFinding(
+    { id: "rec:h1", sourceKind: "fact-anomaly", text: "a", refs: [] },
+    { tier: "medium" }
+  );
+  const sid = stableSuggestionId("rec:h1", "start-job");
+  const recorded = [];
+  const sug2 = h.build({
+    recordVerdict: async ({ subject, verdict }) => {
+      recorded.push({ subject, verdict });
+      return { ok: true };
+    },
+  });
+  await sug2.verdictHeld({ id: sid, verdict: "accept" });
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0].subject.class, "start-job");
 });
 
 test("collectFindings: combines digest + fact sources", () => {
@@ -628,28 +642,6 @@ test("pipeline: no special-casing — a config-change plan acts through the same
   assert.equal(r.surfaced, 1);
   assert.equal(executed.length, 1);
   assert.equal(executed[0].cls, "config-change");
-});
-
-test("verdictHeld stamps the held row's class onto the subject (§9.5 attribution)", async () => {
-  const h = makeSug({
-    runSuggest: async () => ({ text: oneCandidateSuggestText("start-job", "a") }),
-    runWorthiness: async () => ({ text: "0.1" }), // p below p_ask → silent-log (a HELD row)
-  });
-  await h.sug.processFinding(
-    { id: "rec:h1", sourceKind: "fact-anomaly", text: "a", refs: [] },
-    { tier: "medium" }
-  );
-  const sid = stableSuggestionId("rec:h1", "start-job");
-  const recorded = [];
-  const sug2 = h.build({
-    recordVerdict: async ({ subject, verdict }) => {
-      recorded.push({ subject, verdict });
-      return { ok: true };
-    },
-  });
-  await sug2.verdictHeld({ id: sid, verdict: "accept" });
-  assert.equal(recorded.length, 1);
-  assert.equal(recorded[0].subject.class, "start-job");
 });
 
 // ---------------------------------------------------------------------------

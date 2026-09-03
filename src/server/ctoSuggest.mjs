@@ -39,8 +39,6 @@ import {
   ledgerStore,
   engineStateStore,
   patchEngineState,
-  patchStore,
-  verdictsStore,
   digestsStore,
   factsStore,
 } from "./ctoStores.mjs";
@@ -353,7 +351,6 @@ export function createCtoSuggest(deps = {}) {
     publish = () => {},
     ledger = ledgerStore,
     engineState = engineStateStore,
-    verdicts = verdictsStore,
     digests = digestsStore,
     facts = factsStore,
     configGet = async () => ({}),
@@ -772,7 +769,9 @@ export function createCtoSuggest(deps = {}) {
   // an accept verdict (calibration success); `dismiss` records a dismiss
   // (calibration failure). The held row's action class is stamped onto the
   // subject so the §9.5 calibration fold can attribute the verdict. Returns
-  // {ok} — a missing verdicts path degrades.
+  // {ok} — an unwired verdict route degrades (BET-1518: the old direct-store
+  // fallback is deleted — a fallback-appended entry bypasses the verdict
+  // sink registry, so its counter effects would never fold anywhere).
   async function verdictHeld({ id, verdict, never } = {}) {
     const sid = String(id || "");
     let cls;
@@ -786,14 +785,7 @@ export function createCtoSuggest(deps = {}) {
       const r = await recordVerdict({ subject, verdict, never });
       return { ok: r?.ok === true, error: r?.error };
     }
-    // Fallback: append directly through the shared verdicts store — the same
-    // patchStore section as recordVerdict (BET-1492), so a concurrent
-    // recorder's verdict survives this write.
-    const entry = { ts: now(), subject, verdict, ...(never === true ? { never: true } : {}) };
-    await patchStore(verdicts, (fresh) => ({
-      entries: [...(Array.isArray(fresh?.entries) ? fresh.entries : []), entry],
-    }));
-    return { ok: true };
+    return { ok: false, error: "no-verdict-route" };
   }
 
   return {
