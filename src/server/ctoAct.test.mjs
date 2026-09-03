@@ -574,3 +574,49 @@ test("driver: executeAccepted announces the accepted execution through the act-a
   assert.equal(f.state.acts.length, 1);
   assert.deepEqual(f.state.acts[0].action, { type: "plan", payload: { planId: "pl1" } });
 });
+
+// ---------------------------------------------------------------------------
+// BET-1520 — the suggest finding's REAL pipeline shape obeys §3.4-3. The
+// finding the gate passes to the executor is the triage record's verbatim
+// copy of the pending-findings row (sourceFindingCopy), which preserves the
+// "suggest" source (pinned in ctoTriage.test.mjs). A suggest-sourced plan
+// must be presence-gated exactly like any other finding-sourced one, while
+// the inbox blocker's shape (source "inbox", noteKind "blocker") keeps the
+// §9.4 blocker exemption.
+// ---------------------------------------------------------------------------
+
+test("driver: §9.4 presence — a suggest-sourced plan defers to ask while present; an inbox blocker runs", async () => {
+  const f = fakeDriverDeps({ runnerResults: [] });
+  let presenceState = "present";
+  f.deps.presence = async () => presenceState;
+  const d = createCtoExecutorDriver(f.deps);
+  // The post-sourceFindingCopy shape of a suggest finding record.
+  const suggestFinding = {
+    source: "suggest",
+    sourceKind: "failure-recurrence",
+    sourceId: "rec:x",
+    ts: 1_000,
+    message: "Pipeline red on main",
+    title: "CTO finding: failure-recurrence",
+    refs: ["c1"],
+    pendingSince: 1_000,
+  };
+  const r1 = await d.executePlan(basePlan({ id: "pl-suggest" }), { finding: suggestFinding });
+  assert.equal(r1.ok, false, "a suggest-sourced machine act refuses while the user is present");
+  assert.equal(r1.reason, "presence-gated");
+  await settle(5);
+  assert.equal((await f.state.store.load()).entries.length, 0);
+  // The inbox blocker's real shape runs regardless of presence.
+  const r2 = await d.executePlan(basePlan({ id: "pl-inbox" }), {
+    finding: { source: "inbox", noteKind: "blocker", message: "deploy failed", refs: [] },
+  });
+  assert.equal(r2.ok, true);
+  await settle(10);
+  // Away → the same suggest plan runs.
+  presenceState = "away";
+  const r3 = await d.executePlan(basePlan({ id: "pl-suggest" }), { finding: suggestFinding });
+  assert.equal(r3.ok, true);
+  await settle(10);
+  const rows = (await f.state.store.load()).entries;
+  assert.deepEqual(rows.map((r) => r.planId).sort(), ["pl-inbox", "pl-suggest"]);
+});

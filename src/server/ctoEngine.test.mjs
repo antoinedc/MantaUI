@@ -27,6 +27,7 @@ import { inboxStore, sweepInbox, INBOX_TTL_MS } from "./ctoStores.mjs";
 import { createCtoInbound } from "./cto.mjs";
 import { WATCHER_HIT_KIND, WATCHER_HIT_SALIENCE, EVENT_PATTERN, RATE_THRESHOLD, USAGE_BURN } from "./ctoWatchers.mjs";
 import { findingIdOf } from "./ctoTriage.mjs";
+import { findingFromSuggestion } from "./ctoCards.mjs";
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -1582,13 +1583,15 @@ test("triageDrained: thrifty keeps ALL §9.1 blocker sources (inbox/ask/health) 
     title: "Host health",
     refs: [],
   };
-  // The future evidence-driven finding (later ticket) — the ONLY class the
-  // shed rung may drop.
+  // BET-1520's evidence-driven finding (the suggest collectors) — the ONLY
+  // class the shed rung may drop.
   const EVIDENCE_ROW = {
-    source: "evidence",
+    source: "suggest",
     ts: clock.ms,
+    sourceKind: "failure-recurrence",
+    sourceId: "rec:x",
     message: "tests flaky",
-    title: "Flake",
+    title: "CTO finding: failure-recurrence",
     refs: [],
   };
   const { engine, stores } = makeFindingsEngine({
@@ -1659,4 +1662,94 @@ test("BET-1516: start() prunes the orphaned concurrentEphemeral health card (mar
   // Marker stamped — a rebuild is a no-op re-prune of a clean store.
   assert.equal((await stores.engineState.load()).shedCardPrune?.pruned, true);
   engine.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// BET-1520 — the fourth producer: the suggest collectors enqueue on the SAME
+// pending-findings queue, and ONE drain → triage → gate pipeline handles
+// every producer.
+// ---------------------------------------------------------------------------
+
+test("drainFindings maps a suggest finding to a suggest.<sourceKind> evidence row with no inbox side effects", async () => {
+  const clock = { ms: 5_000_000 };
+  const ledgerRows = [];
+  const { engine, stores } = makeFindingsEngine({ clock, ledgerRows, cards: {} });
+  // The row shape findingFromSuggestion produces (the collector's contract).
+  const row = findingFromSuggestion(
+    { id: "rec:x", sourceKind: "failure-recurrence", text: "Pipeline red on main", refs: ["c1"] },
+    { ts: clock.ms },
+  );
+  await stores.findings.save({ v: 1, findings: [row] });
+
+  const r = await engine.drainFindings();
+  assert.equal(r.drained, 1);
+  const evidence = ledgerRows.find((x) => x.kind === "suggest.failure-recurrence");
+  assert.ok(evidence, "the suggest finding folds as suggest.* — one kind per producer");
+  assert.equal(evidence.salience, "high");
+  assert.equal(evidence.message, "Pipeline red on main");
+  assert.deepEqual(evidence.refs, ["c1"]);
+  // No inbox note was involved — nothing to mark read, no inbox row.
+  assert.deepEqual((await stores.inbox.load()).entries, []);
+  assert.ok(!ledgerRows.some((x) => x.kind?.startsWith("inbox.")));
+});
+
+test("ONE pipeline: a suggest finding and an inbox blocker share ONE cardTick drain → triage → gate", async () => {
+  const clock = { ms: 6_000_000 };
+  const ledgerRows = [];
+  const modelCalls = [];
+  const { engine, stores } = makeFindingsEngine({
+    clock,
+    ledgerRows,
+    runEphemeral: async (args) => {
+      modelCalls.push(args);
+      return {
+        ok: true,
+        text: JSON.stringify({
+          plans: [
+            {
+              class: "job-redispatch",
+              diagnosis: "Plan from triage.",
+              steps: ["Do the thing"],
+              access: [],
+              verify: { kind: "condition-gone" },
+              undo: "none",
+              confidence: 0.7,
+              report: { one_liner: "Resolution plan", bullets: [] },
+            },
+          ],
+        }),
+      };
+    },
+  });
+  // Producer 1: the suggest collectors' enqueue (findingFromSuggestion).
+  const suggestRow = findingFromSuggestion(
+    { id: "rec:one", sourceKind: "failure-recurrence", text: "Pipeline red on main", refs: ["c1"] },
+    { ts: clock.ms },
+  );
+  // Producer 2: an inbox blocker note's enqueue.
+  const inboxR = inboxRow(clock.ms);
+  await stores.findings.save({ v: 1, findings: [suggestRow, inboxR] });
+
+  // ONE tick: drain → triage (one gated call per finding) → gate → executor.
+  await engine.cardTick();
+
+  // The queue is empty; both rows went through the SAME drain.
+  assert.deepEqual((await stores.findings.load()).findings, []);
+  // Two triage calls — one per producer's row, through the same caller.
+  assert.equal(modelCalls.length, 2);
+  // Both plan records landed, keyed by their producer-specific finding ids.
+  const records = (await stores.plans.load()).records;
+  assert.equal(Object.keys(records).length, 2);
+  assert.ok(records[findingIdOf(suggestRow)], "the suggest finding got a §9.2 plan record");
+  assert.ok(records[findingIdOf(inboxR)], "the inbox blocker got a §9.2 plan record");
+  assert.equal(records[findingIdOf(suggestRow)].finding.source, "suggest", "provenance survives to the plans store");
+  // Both evidence rows are the producer-specific kinds, in ONE ledger.
+  assert.ok(ledgerRows.some((x) => x.kind === "suggest.failure-recurrence"));
+  assert.ok(ledgerRows.some((x) => x.kind === "inbox.blocker"));
+  // The gate ran for both records on the SAME pass (fresh class → ask cards;
+  // every record got its gate.asked trail through the same gatePass loop).
+  const asked = ledgerRows.filter((x) => x.kind === "gate.asked");
+  assert.equal(asked.length, 2, "one gate decision per finding, same pass");
+  const cardsPayload = await stores.cards.load();
+  assert.equal(cardsPayload.cards.filter((c) => c.variant === "decision").length, 2, "both producers surface through the §9.3 ask card");
 });

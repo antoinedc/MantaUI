@@ -227,6 +227,11 @@ test("buildTriageContext kind label spans all §9.1 producers (shared findingLed
     "health.blocker",
     "health escalations are not mislabeled as inbox rows",
   );
+  assert.equal(
+    labelOf({ source: "suggest", sourceKind: "failure-recurrence", sourceId: "rec:x", message: "m" }),
+    "suggest.failure-recurrence",
+    "BET-1520: the fourth producer's kind label spans the suggest source",
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -296,6 +301,12 @@ test("triageFinding: every §9.1 source stamps its true source on the stored rec
   });
   await triage.triageFinding({ source: "ask", sourceKind: "permission", sourceId: "perm_1", message: "m" }, {});
   await triage.triageFinding({ source: "health", sourceKind: "health", sourceId: "h1", message: "watchdog tripped" }, {});
+  // BET-1520: the fourth producer's source passes through verbatim — it must
+  // reach the executor as NON-blocker so the §9.4 presence rule gates it.
+  await triage.triageFinding(
+    { source: "suggest", sourceKind: "failure-recurrence", sourceId: "rec:x", message: "Pipeline red on main" },
+    {},
+  );
   const records = (await plans.load()).records;
   assert.equal(records[findingIdOf({ source: "ask", sourceKind: "permission", sourceId: "perm_1", message: "m" })].finding.source, "ask");
   assert.equal(
@@ -303,6 +314,10 @@ test("triageFinding: every §9.1 source stamps its true source on the stored rec
     "health",
     "health rows are not mis-stamped as inbox",
   );
+  const rec = records[findingIdOf({ source: "suggest", sourceKind: "failure-recurrence", sourceId: "rec:x", message: "Pipeline red on main" })];
+  assert.equal(rec.finding.source, "suggest", "suggest rows are not mis-stamped as inbox");
+  assert.equal(rec.finding.sourceKind, "failure-recurrence");
+  assert.equal(rec.finding.message, "Pipeline red on main");
 });
 
 test("triageFinding: gated/error model call persists NOTHING (the finding is already in evidence)", async () => {
