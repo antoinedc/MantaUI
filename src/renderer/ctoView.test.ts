@@ -506,6 +506,25 @@ it("runnableSuggestionOption: BET-1419 runs config-change/start-job/record-decis
   expect(runnableSuggestionOption({ action: { type: "bogus" } })).toBe(false);
 });
 
+// BET-1518 (§9.3, review cycle 1 Block 1): a gate ask card's plan options are
+// runnable — "Do it" (and the alternative plans) render as real controls.
+it("runnableSuggestionOption: BET-1518 runs plan options (gate ask cards render 'Do it')", () => {
+  expect(runnableSuggestionOption({ action: { type: "plan", payload: { planId: "p1" } } })).toBe(true);
+});
+
+// The plan click is the accept judgment: the executor validates the payload
+// (fails closed on a malformed option) and returns ok — the caller then posts
+// the §9.5 accept verdict (class stamped from the card) and the verdict route
+// resolves the card. The concrete execution is BET-1519's seam.
+it("executeSuggestionOption: plan validates the planId payload and succeeds", async () => {
+  const api = {} as never;
+  const ok = await executeSuggestionOption({ option: { action: { type: "plan", payload: { planId: "pl-1" } } }, api });
+  expect(ok.ok).toBe(true);
+  const bad = await executeSuggestionOption({ option: { action: { type: "plan", payload: {} } }, api });
+  expect(bad.ok).toBe(false);
+  expect(bad.error ?? "").toMatch(/planId/);
+});
+
 it("suggestionConfidence: exposes the worthiness probability or null", () => {
   const card = { id: "x", variant: "decision", title: "t" } as const;
   expect(suggestionConfidence({ ...card, score: 0.7 })).toBe(0.7);

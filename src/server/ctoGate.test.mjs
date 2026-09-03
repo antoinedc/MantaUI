@@ -156,8 +156,8 @@ test("gatePass: below-τ record emits exactly one ask card (Do it first, effecti
   assert.equal(card.cls, "start-job");
   assert.equal(card.score, 0.45);
   assert.equal(card.options[0].label, "Do it");
-  assert.equal(card.options[0].answer, "accept");
   assert.equal(card.options[0].action.type, "plan");
+  assert.equal(card.options[0].action.payload.planId, "pl-low");
   assert.ok(ledgerRows.some((row) => row.kind === "gate.asked" && row.cardId === "pl-low"));
   // second pass: the record is consumed → no duplicate card
   const r2 = await g.gatePass();
@@ -179,7 +179,8 @@ test("gatePass: a plan-less record silent-logs for the §14.3 audit", async () =
   });
   const r = await g.gatePass();
   assert.equal(r.none, 1);
-  assert.ok(ledgerRows.some((row) => row.kind === "gate.none" && row.findingId === "f1" && row.reason === "no-plan"));
+  // the §14.3 audit row: the suggest.silent shape listHeld counts
+  assert.ok(ledgerRows.some((row) => row.kind === "suggest.silent" && row.id === "f1" && row.reason === "no-plan"));
   const after = await plans.load();
   assert.equal(after.records.f1.gated.verb, "none");
 });
@@ -284,4 +285,63 @@ test("gatePass: τ reads live from the config seam per pass", async () => {
   const r2 = await g.gatePass();
   assert.equal(r2.acted, 0);
   assert.equal(r2.asked, 1);
+});
+
+test("gatePass: the §14.3 silence audit counts a no-plan hold (listHeld over the shared ledger)", async () => {
+  // The reviewer's pinned case: the gate's none-branch writes the
+  // `suggest.silent` shape, so the suggest flow's listHeld — the digest's
+  // "I held back N — review" source — sees gate holds with no filter change.
+  const ledgerRows = [];
+  const ledger = { append: async (r) => ledgerRows.push(r), read: async () => ledgerRows };
+  const plans = makePlansStore({
+    f1: { findingId: "f1", finding: { text: "orphan finding" }, plans: [] },
+  });
+  const g = createCtoGate({
+    plans,
+    ledger,
+    cards: makeCards(),
+    now: () => 500,
+    tau: async () => 0.7,
+  });
+  const r = await g.gatePass();
+  assert.equal(r.none, 1);
+  const { createCtoSuggest } = await import("./ctoSuggest.mjs");
+  const sug = createCtoSuggest({ ledger, now: () => 500 });
+  const held = await sug.listHeld();
+  assert.equal(held.length, 1, "the gate's no-plan hold is visible to the §14.3 audit");
+  assert.equal(held[0].reason, "no-plan");
+  assert.equal(held[0].id, "f1");
+});
+
+test("gatePass: the ask card carries the other plans as options after 'Do it'", async () => {
+  const plans = makePlansStore({
+    f1: {
+      findingId: "f1",
+      finding: { text: "multi" },
+      plans: [
+        { id: "pl-best", class: "start-job", confidence: 0.99, report: { one_liner: "Restart the worker" } },
+        { id: "pl-alt", class: "start-job", confidence: 0.5, report: { one_liner: "Clear the cache instead" } },
+        { id: "pl-alt2", class: "start-job", confidence: 0.3 },
+      ],
+    },
+  });
+  const cards = makeCards();
+  const g = createCtoGate({
+    plans,
+    ledger: { append: async () => {} },
+    cards,
+    now: () => 500,
+    tau: async () => 0.9, // 0.99 × 1.0 = 0.99... keep it asking: calibration 0.5 → 0.495 < 0.9
+    calibrationOf: async () => ({ "start-job": 0.5 }),
+  });
+  const r = await g.gatePass();
+  assert.equal(r.asked, 1);
+  const card = cards.written[0];
+  assert.equal(card.options.length, 3);
+  assert.equal(card.options[0].label, "Do it");
+  assert.equal(card.options[0].action.payload.planId, "pl-best");
+  assert.equal(card.options[1].label, "Clear the cache instead");
+  assert.equal(card.options[1].action.payload.planId, "pl-alt");
+  assert.equal(card.options[2].label, "Alternative plan"); // no one_liner → fallback
+  assert.equal(card.options[2].action.payload.planId, "pl-alt2");
 });

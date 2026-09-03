@@ -90,17 +90,23 @@ export function createCtoGate(deps = {}) {
   }
 
   // One record's ask card (§9.3: the plan is the first option "Do it",
-  // effective shown once as a number). The card id is the plan id — stable,
-  // so a re-gate upserts rather than duplicating. `capped` is not a thing
-  // under the gate (the cold-start pin is deleted); the card carries the
-  // plain decision variant.
-  async function emitAskCard(plan, effective) {
+  // effective shown once as a number; the OTHER plans ride along as the
+  // card's remaining options — never more than one plan executes per
+  // finding, and choosing an alternative is a judgment the same accept
+  // path records). The card id is the winning plan id — stable, so a
+  // re-gate upserts rather than duplicating. The cold-start pin is deleted;
+  // the card carries the plain decision variant.
+  async function emitAskCard(plan, effective, others = []) {
     if (!cards || typeof cards.upsertDecision !== "function") return null;
     try {
       const title =
         (typeof plan.report?.one_liner === "string" && plan.report.one_liner.trim()) ||
         (typeof plan.finding?.text === "string" && plan.finding.text.trim()) ||
         "CTO resolution plan";
+      const altLabel = (p) => {
+        const t = typeof p?.report?.one_liner === "string" ? p.report.one_liner.trim() : "";
+        return (t.length > 0 && t.slice(0, 60)) || "Alternative plan";
+      };
       return await cards.upsertDecision({
         ts: now(),
         id: plan.id,
@@ -115,9 +121,12 @@ export function createCtoGate(deps = {}) {
         options: [
           {
             label: "Do it",
-            answer: "accept",
             action: { type: "plan", payload: { planId: plan.id } },
           },
+          ...(Array.isArray(others) ? others : []).map((p) => ({
+            label: altLabel(p),
+            action: { type: "plan", payload: { planId: p?.id } },
+          })),
         ],
       });
     } catch {
@@ -162,7 +171,11 @@ export function createCtoGate(deps = {}) {
 
       if (decision.verb === "none") {
         none += 1;
-        await ledgerLog({ kind: "gate.none", findingId, reason: "no-plan", text: rec.finding?.text ?? "" });
+        // The §14.3 silence-audit row — the gate reuses the suggest flow's
+        // `suggest.silent` shape (id, score, reason) so `listHeld`'s single
+        // filter counts gate holds too; a new kind would be invisible to
+        // the digest's "I held back N — review" aside.
+        await ledgerLog({ kind: "suggest.silent", id: findingId, score: null, reason: "no-plan", text: rec.finding?.text ?? "" });
         await markRecord(findingId, { verb: "none", ts: now() });
         continue;
       }
@@ -199,7 +212,7 @@ export function createCtoGate(deps = {}) {
         // ladder).
       }
 
-      const up = await emitAskCard(plan, score);
+      const up = await emitAskCard(plan, score, decision.others);
       const wrote = !!up && up.ok !== false;
       if (wrote) {
         asked += 1;
@@ -208,9 +221,10 @@ export function createCtoGate(deps = {}) {
         }
         await markRecord(findingId, { verb: "ask", planId: plan.id, effective: score, ts: now() });
       } else {
-        // No card machinery → hold (the §14.3 audit row), same contract as
-        // the suggest flow's no-card-path.
-        await ledgerLog({ kind: "gate.none", findingId, planId: plan.id, reason: "no-card-path", score, text: rec.finding?.text ?? "" });
+        // No card machinery → hold (the §14.3 audit row, the same
+        // `suggest.silent` shape as the none-branch so `listHeld` counts
+        // it), same contract as the suggest flow's no-card-path.
+        await ledgerLog({ kind: "suggest.silent", id: plan.id, class: cls, score, reason: "no-card-path", text: rec.finding?.text ?? "" });
         await markRecord(findingId, { verb: "none", planId: plan.id, reason: "no-card-path", ts: now() });
         none += 1;
       }
