@@ -2212,11 +2212,7 @@ const adaptiveCto = ctoEngine.createCtoEngine({
           if (sid) {
             const owner = resolveOwner(rows, sid);
             if (owner) {
-              const proj = rows.find((p) => p.tmuxSession === owner.tmuxSession);
-              return {
-                parentSessionID: owner.parentSessionID,
-                parentDirectory: owner.defaultCwd ?? proj?.defaultCwd ?? null,
-              };
+              return { parentSessionID: sid, parentDirectory: owner.cwd ?? null };
             }
           }
           for (const p of rows) {
