@@ -565,13 +565,16 @@ export function nowRailMeta(project: string, cost: string | null, elapsed: strin
 // BET-1392 — decision cards (§9.1 / §10.3) + the §14.3 silence audit
 // ---------------------------------------------------------------------------
 
-// The closed enum of bound-action option types (§9.1).
+// The closed enum of bound-action option types (§9.1) + the gate's plan
+// options (BET-1518 §9.3: "Do it" / alternative-plan options carry
+// {type: "plan", payload: {planId}}).
 export type SuggestionActionType =
   | "config-change"
   | "queue-tonight"
   | "start-job"
   | "tool-write"
-  | "record-decision";
+  | "record-decision"
+  | "plan";
 
 // A structural subset of the wire `CtoCard` for the decision card — the
 // component + tests don't need every card field.
@@ -582,14 +585,12 @@ export type DecisionCardRow = {
   why?: string;
   cls?: string;
   score?: number;
-  capped?: boolean;
   options?: { label: string; action: { type: string; payload: Record<string, unknown> } }[];
   evidence?: string[];
   refs?: string[];
 };
 
-// §9.1 worthiness gate (server-computed). A capped card was surfaced during
-// cold start; surfaced with a ≥ p_ask probability.
+// §9.1 worthiness gate (server-computed): surfaced with a ≥ p_ask probability.
 export function suggestionConfidence(card: DecisionCardRow): number | null {
   const s = card?.score;
   return Number.isFinite(s) ? (s as number) : null;
@@ -704,16 +705,22 @@ export function tonightVisible(tonightCount: number | undefined, tier: string | 
 // execution are wired). `tool-write` stays non-runnable until the §7.4 tool
 // registry lands — with the empty write ring the server never emits one, so
 // no dead control is ever rendered.
+// BET-1518 (§9.3): `plan` is runnable — a gate ask card's "Do it" (and its
+// alternative-plan options) must render as a real control. The click records
+// the human's accept judgment through the §9.5 verdict route (the caller
+// stamps `card.cls`) and resolves the card; the concrete execution is
+// BET-1519's executor seam.
 const RUNNABLE_TYPES: Record<string, boolean> = {
   "config-change": true,
   "start-job": true,
   "record-decision": true,
   "queue-tonight": true,
   "tool-write": false,
+  plan: true,
 };
 
 export function runnableSuggestionOption(option: {
-  action?: { type?: string };
+  action?: { type?: string; payload?: Record<string, unknown> };
 } | null | undefined): boolean {
   return RUNNABLE_TYPES[option?.action?.type ?? ""] === true;
 }
@@ -790,6 +797,16 @@ export async function executeSuggestionOption({
           },
         });
         return r?.ok ? { ok: true } : { ok: false, error: r?.error ?? "queue-tonight failed" };
+      }
+      case "plan": {
+        // BET-1518 (§9.3): a gate ask card's plan option. The concrete
+        // execution is BET-1519's executor seam — today the click records
+        // the human's accept judgment (§9.5 verdict, stamped with the
+        // card's class by the caller) and the verdict route resolves the
+        // card. Validate the payload so a malformed option fails closed.
+        const planId = typeof payload.planId === "string" ? payload.planId : "";
+        if (!planId) return { ok: false, error: "plan needs a planId payload" };
+        return { ok: true };
       }
       default:
         return { ok: false, error: `unsupported action type: ${String(type ?? "")}` };

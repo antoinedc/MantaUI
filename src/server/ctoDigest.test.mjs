@@ -575,7 +575,8 @@ test("generateDigest: zero held suggestions → no heldSuggestions field (no asi
 });
 
 // ---------------------------------------------------------------------------
-// BET-1403 — trust asides: act-and-report lines + tier changes (§9.2/§9.4)
+// BET-1403 → BET-1518 — act asides: the act-and-report queue's lines
+// (§9.2 invariant 1). Tier changes died with the ladder (D22).
 // ---------------------------------------------------------------------------
 
 test("buildDigestContext: trust reports are injected as a high-priority input block", () => {
@@ -601,21 +602,21 @@ test("generateDigest: act reports reach the model input AND land as deterministi
     return { text: JSON.stringify({ items: [{ tier: "progress", text: "shipped", refs: [] }] }) };
   };
   const marked = [];
-  const trust = {
+  const announcements = {
     listAnnouncements: async () => [
       { id: "a1", ts: 900, kind: "act", text: "Acted on my own (record-decision): Adopt pact", refs: ["msg:1"] },
-      { id: "a2", ts: 950, kind: "promoted", text: 'Trust promoted: the "start-job" class may now use the veto-window verb.', refs: [] },
+      { id: "a2", ts: 950, kind: "act", text: "Acted on my own (queue-tonight): Queued the maintenance window", refs: [] },
     ],
     markAnnounced: async (ids) => {
       marked.push(...ids);
     },
   };
-  const { engine, store } = makeEngine({ runEphemeral: model, trust });
+  const { engine, store } = makeEngine({ runEphemeral: model, announcements });
   const digest = await engine.generateDigest({ reason: "manual" });
   const texts = digest.items.map((i) => `${i.tier}:${i.text}`);
-  // Both announcements deterministically present as progress items.
+  // Both act lines deterministically present as progress items.
   assert.ok(texts.includes("progress:Acted on my own (record-decision): Adopt pact"));
-  assert.ok(texts.some((t) => t.startsWith("progress:Trust promoted:")));
+  assert.ok(texts.some((t) => t.startsWith("progress:Acted on my own (queue-tonight)")));
   // The act line was injected into the model input too (the mandatory report).
   const inputBlock = (Array.isArray(sawContext) ? sawContext : (sawContext?.blocks ?? [])).find((b) => /Acted on my own/.test(b.text || ""));
   assert.ok(inputBlock, "act report injected into the digest input");
@@ -629,44 +630,44 @@ test("generateDigest: a model item already reporting the act is not duplicated b
     text: JSON.stringify({ items: [{ tier: "progress", text: "Acted on my own (record-decision): Adopt pact", refs: ["msg:1"] }] }),
   });
   const marked = [];
-  const trust = {
+  const announcements = {
     listAnnouncements: async () => [{ id: "a1", ts: 900, kind: "act", text: "Acted on my own (record-decision): Adopt pact", refs: ["msg:1"] }],
     markAnnounced: async (ids) => marked.push(...ids),
   };
-  const { engine } = makeEngine({ runEphemeral: model, trust });
+  const { engine } = makeEngine({ runEphemeral: model, announcements });
   const digest = await engine.generateDigest({ reason: "manual" });
   const matches = digest.items.filter((i) => i.text === "Acted on my own (record-decision): Adopt pact");
   assert.equal(matches.length, 1); // deduped — the model's item wins
   assert.deepEqual(marked, ["a1"]); // still consumed
 });
 
-test("generateDigest: trust asides survive a degraded digest (MUST appear, even when the model fails)", async () => {
-  const trust = {
+test("generateDigest: act asides survive a degraded digest (MUST appear, even when the model fails)", async () => {
+  const announcements = {
     listAnnouncements: async () => [{ id: "a1", ts: 900, kind: "act", text: "Acted on my own (record-decision): Adopt pact", refs: [] }],
     markAnnounced: async () => {},
   };
-  const { engine } = makeEngine({ runEphemeral: null, trust }); // no model → degraded path
+  const { engine } = makeEngine({ runEphemeral: null, announcements }); // no model → degraded path
   const digest = await engine.generateDigest({ reason: "manual" });
   assert.ok(digest.items.some((i) => i.tier === "progress" && i.text === "Acted on my own (record-decision): Adopt pact"));
 });
 
-test("generateDigest: a failed save does NOT consume the trust queue — the mandatory act report re-announces (§9.2 invariant 1)", async () => {
+test("generateDigest: a failed save does NOT consume the announcement queue — the mandatory act report re-announces (§9.2 invariant 1)", async () => {
   const marked = [];
-  const trust = {
+  const announcements = {
     listAnnouncements: async () => [{ id: "a1", ts: 900, kind: "act", text: "Acted on my own (record-decision): Adopt pact", refs: [] }],
     markAnnounced: async (ids) => marked.push(...ids),
   };
   // First generation: the digest composes (with the report appended) but the
   // save throws — the announcement queue must stay intact.
   const failing = { ...makeDigestStore(), save: async () => { throw new Error("disk full"); } };
-  const { engine } = makeEngine({ runEphemeral: async () => ({ text: JSON.stringify({ items: [{ tier: "progress", text: "shipped", refs: [] }] }) }), trust, digests: failing });
+  const { engine } = makeEngine({ runEphemeral: async () => ({ text: JSON.stringify({ items: [{ tier: "progress", text: "shipped", refs: [] }] }) }), announcements, digests: failing });
   const failed = await engine.generateDigest({ reason: "manual" });
   assert.ok(failed.items.some((i) => i.tier === "progress" && i.text === "Acted on my own (record-decision): Adopt pact"));
   assert.deepEqual(marked, [], "a failed save must not consume the announcements");
 
   // Next generation (save works again): the same report re-announces and is
   // then consumed exactly once.
-  const { engine: engine2 } = makeEngine({ runEphemeral: async () => ({ text: JSON.stringify({ items: [{ tier: "progress", text: "shipped", refs: [] }] }) }), trust });
+  const { engine: engine2 } = makeEngine({ runEphemeral: async () => ({ text: JSON.stringify({ items: [{ tier: "progress", text: "shipped", refs: [] }] }) }), announcements });
   const next = await engine2.generateDigest({ reason: "manual" });
   assert.equal(next.items.filter((i) => i.text === "Acted on my own (record-decision): Adopt pact").length, 1);
   assert.deepEqual(marked, ["a1"]);

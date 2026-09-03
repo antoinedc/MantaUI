@@ -273,11 +273,6 @@ function SuggestionCard({
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <span className="font-medium text-text">{card.title}</span>
-              {card.capped === true ? (
-                <span className="rounded-full bg-fill-active px-2 py-1 text-[11px] font-medium text-text-faint" title="Cold-start learning">
-                  learning
-                </span>
-              ) : null}
             </div>
             {card.why ? <p className="mt-1 text-sm text-text-muted">{card.why}</p> : null}
           </div>

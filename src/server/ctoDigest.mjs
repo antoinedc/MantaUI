@@ -499,7 +499,7 @@ export function createCtoDigest(deps = {}) {
     getInferredTz = async () => null, // {utcOffsetHours, confidence} | null
     getAudience = async () => null, // §8.4 async ({topics}) => audience block | null
     getDeviations = async () => [], // §8.4 deviation-from-baseline asides (user-only)
-    trust = null, // BET-1403: trust engine — act-and-report lines (mandatory report, §9.2) + tier changes, announced as progress asides
+    announcements = null, // BET-1518: the calibration engine's act-and-report queue — act lines (mandatory report, §9.2), announced as progress asides
     getHeldSuggestionCount = async () => 0, // §14.3 silence audit: held suggestion rows (default none)
     getEnabled = async () => false, // top-level ctoEnabled gate for the scheduler
     digestPushEnabled = async () => false, // §10.5 toggle (ships A12) — off by default
@@ -617,13 +617,14 @@ export function createCtoDigest(deps = {}) {
     const topics = [...new Set((slice || []).map((it) => it.project).filter(Boolean))];
     const audience = await safe(getAudience, { topics });
 
-    // BET-1403: pending trust announcements — act-and-report lines (the
-    // mandatory report, §9.2 invariant 1) + tier changes (§9.4). Acts are
-    // also injected into the digest input; every row is deterministically
-    // appended as a progress aside below so appearance is guaranteed.
-    const trustAsides = trust ? ((await safe(trust.listAnnouncements)) ?? []) : [];
+    // BET-1403 → BET-1518: pending act announcements — act-and-report lines
+    // (the mandatory report, §9.2 invariant 1; tier changes died with the
+    // ladder). Acts are also injected into the digest input; every row is
+    // deterministically appended as a progress aside below so appearance is
+    // guaranteed.
+    const actAsides = announcements ? ((await safe(announcements.listAnnouncements)) ?? []) : [];
 
-    const context = buildDigestContext({ granularity, window, slice: slice || [], needsYou, factsChanged: fChanged, probes, gMinutes, audience, reports: trustAsides.filter((a) => a?.kind === "act") });
+    const context = buildDigestContext({ granularity, window, slice: slice || [], needsYou, factsChanged: fChanged, probes, gMinutes, audience, reports: actAsides.filter((a) => a?.kind === "act") });
 
     let digest = null;
     if (runEphemeral) {
@@ -672,14 +673,14 @@ export function createCtoDigest(deps = {}) {
       }
     }
 
-    // BET-1403: trust asides — act-and-report lines (the mandatory report,
-    // §9.2 invariant 1) + trust-tier changes (§9.4) appended as progress-tier
-    // items, same treatment as the §8.4 deviations. Marked announced only
+    // BET-1403 → BET-1518: act asides — act-and-report lines (the mandatory
+    // report, §9.2 invariant 1) appended as progress-tier items, same
+    // treatment as the §8.4 deviations. Marked announced only
     // after the digest is persisted, so a failed save re-announces next time.
     const announcedIds = [];
-    if (validateDigest(digest) && trustAsides.length) {
+    if (validateDigest(digest) && actAsides.length) {
       const extant = new Set(digest.items.map((i) => `${i.tier || ""}:${i.text || ""}`));
-      for (const a of trustAsides) {
+      for (const a of actAsides) {
         if (!a || !a.text || !a.id) continue;
         if (extant.has(`progress:${a.text}`)) {
           announcedIds.push(a.id); // already reported (model picked it up)
@@ -703,11 +704,11 @@ export function createCtoDigest(deps = {}) {
       await digests.save(id, digest);
       persisted = true;
     } catch {
-      /* best-effort — but the trust queue below is NOT consumed on a failed
-         save: an announcement consumed without its digest persisting would
-         lose the mandatory act report (§9.2 invariant 1) forever. */
+      /* best-effort — but the announcement queue below is NOT consumed on a
+         failed save: an announcement consumed without its digest persisting
+         would lose the mandatory act report (§9.2 invariant 1) forever. */
     }
-    if (persisted && trust && announcedIds.length) await safe(trust.markAnnounced, announcedIds);
+    if (persisted && announcements && announcedIds.length) await safe(announcements.markAnnounced, announcedIds);
     lastGenerated = t;
     lastDigestId = id;
 

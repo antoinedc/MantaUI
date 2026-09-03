@@ -392,10 +392,10 @@ test("purgeExpiredInbox drops only expired entries, silently (no trace)", () => 
 // patch keys, and atomically saves.
 //
 // Interleaving regressions reuse the mirrored-order pattern from
-// ctoTrust.test.mjs ("stale full-engine-state save cannot revert trust
-// keys"), applied to engine-state keys — including the real shared-sub-key
-// collision on `watchers` (the engine's `lastAutoDay` day marker vs the
-// standing-query engine's migration marker).
+// ctoEngine.overnight.test.mjs ("stale full-engine-state save cannot revert
+// calibration keys"), applied to engine-state keys — including the real
+// shared-sub-key collision on `watchers` (the engine's `lastAutoDay` day
+// marker vs the standing-query engine's migration marker).
 // ---------------------------------------------------------------------------
 
 

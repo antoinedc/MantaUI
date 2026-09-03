@@ -47,7 +47,7 @@ import {
   ctoPath,
   ledgerStore,
   engineStateStore,
-  trustStore,
+  calibrationStore,
   cardsStore,
   segmentsStore,
   rollupsStore,
@@ -70,10 +70,11 @@ import {
 } from "./ctoStores.mjs";
 import { createVerdictEngine, createAsSourceSink } from "./ctoVerdicts.mjs";
 import { cardHasContent } from "../shared/ctoCard.mjs";
-// BET-1403: the earned-trust ladder (§9.3/§9.4). Its per-class Beta counters
-// ride the §9.5 verdict sink registry below; the digest announces acts and
-// tier changes through the same engine.
-import { createCtoTrust } from "./ctoTrust.mjs";
+// BET-1518 (§9.3/§9.5): the per-class calibration engine (the Beta estimator
+// over last-30 outcomes + the act-and-report queue) and the τ gate over the
+// triage stage's stored plans. The v2 earned-trust ladder is deleted (D22).
+import { createCtoCalibration } from "./ctoCalibration.mjs";
+import { createCtoGate } from "./ctoGate.mjs";
 import { createCtoBackfill } from "./ctoBackfill.mjs";
 import { startPoller } from "./startPoller.mjs";
 import { createSeenIdFilter } from "./seenIds.mjs";
@@ -337,7 +338,7 @@ export function createCtoEngine(deps = {}) {
   const bundle = {
     ledger: ledgerStore,
     engineState: engineStateStore,
-    trust: trustStore,
+    calibration: calibrationStore,
     cards: cardsStore,
     inbox: inboxStore,
     // BET-1516 (§9.1): the pending-findings queue (blockers → pipeline).
@@ -362,9 +363,10 @@ export function createCtoEngine(deps = {}) {
     configGet = async () => ({}), // → { ctoEnabled?: boolean }
     ledger = bundle.ledger, // A1 ledger writer { append }
     engineState = bundle.engineState, // { load, save } (engine-state.json)
-    // BET-1403: the trust ladder's own file — isolated from engine-state
-    // writers so no snapshot-spread save can revert tiers/counters/pending.
-    trustStore: trustStoreDep = bundle.trust,
+    // BET-1518: the §9.5 calibration store (calibration.json — per-class
+    // last-30 outcome windows + the pending act-announcement queue), isolated
+    // from engine-state writers like its trust.json predecessor was.
+    calibrationStore: calibrationStoreDep = bundle.calibration,
     killSwitch = createKillSwitch(),
     publish = () => {}, // (evt: {kind:"ctoState", payload}) => void
     now = () => Date.now(),
@@ -543,7 +545,8 @@ export function createCtoEngine(deps = {}) {
   let builtInBackfill = null;
   let profileDecayHandle = null;
   let verdictsEngine = null;
-  let trustEngine = null;
+  let calibrationEngine = null;
+  let gateEngine = null;
   let watcherEngine = null;
   let toolEngine = null;
   let probesEngine = null;
@@ -862,6 +865,9 @@ export function createCtoEngine(deps = {}) {
       // BET-1517: the triage stage consumes the drain's rows — 0–3 resolution
       // plans per finding into plans.json (one gated model call per finding).
       await triageDrained(drained?.rows);
+      // BET-1518: the gate consumes the triage stage's ungated plan records —
+      // act (executor seam) or ask card per §9.3, one pass per record.
+      await getGate().gatePass();
       await cards.checkInboxLiveness();
       await syncState();
     } catch {
@@ -1227,11 +1233,11 @@ export function createCtoEngine(deps = {}) {
         }),
       ),
     );
-    // BET-1403 (§9.4): the trust counters ride the same §9.5 sink registry —
-    // per-action-class Beta counters over class-attributed suggestion
-    // verdicts. Best-effort like every sink: a failure never breaks verdict
-    // recording.
-    const t = getTrust();
+    // BET-1403 → BET-1518: the calibration fold rides the same §9.5 sink
+    // registry — verdicts on suggestion/plan subjects feed the class's Beta
+    // outcome window (§9.5). Best-effort like every sink: a failure never
+    // breaks verdict recording.
+    const t = getCalibration();
     verdictSinkDisposers.push(
       verdictsEngine.registerCounterSink((effects, entry) => {
         void t.noteVerdictEffects(effects, entry).catch(() => {});
@@ -1254,15 +1260,40 @@ export function createCtoEngine(deps = {}) {
       .catch(() => {});
   }
 
-  // BET-1403: the earned-trust engine over its own store file (trust.json —
-  // a legacy `es.trust` payload migrates on first load). One instance per
-  // engine; the suggest module keeps
-  // its own over the same stores — both are stateless facades whose every
-  // op loads fresh, mutates, and saves.
-  function getTrust() {
-    if (trustEngine) return trustEngine;
-    trustEngine = createCtoTrust({ store: trustStoreDep, legacy: engineState, ledger, verdicts, now });
-    return trustEngine;
+  // BET-1518: the §9.5 calibration engine over its own store file
+  // (calibration.json). One instance per engine; the suggest module (in
+  // index.mjs) wires its calibrationOf/recordAct to the SAME instance, so
+  // folds and acts land in one window set.
+  function getCalibration() {
+    if (calibrationEngine) return calibrationEngine;
+    calibrationEngine = deps.calibration ?? createCtoCalibration({ store: calibrationStoreDep, ledger, verdicts, plans: bundle.plans, now });
+    return calibrationEngine;
+  }
+
+  // BET-1518: the §9.3 gate over the triage stage's stored plans (plans.json
+  // records the triage wrote and no pass has gated yet). τ reads the live
+  // ctoAutonomyThreshold setting per pass; calibration comes from the
+  // calibration engine; the act branch is the BET-1519 executor seam
+  // (unwired → the act degrades to the ask card, reason "no-executor").
+  function getGate() {
+    if (gateEngine) return gateEngine;
+    gateEngine = deps.gate ?? createCtoGate({
+      plans: bundle.plans,
+      ledger,
+      cards,
+      now,
+      tau: async () => {
+        try {
+          return (await configGet())?.ctoAutonomyThreshold;
+        } catch {
+          return undefined;
+        }
+      },
+      calibrationOf: (classList) => getCalibration().calibrationsFor(classList),
+      executePlan: null, // BET-1519 wires the executor here
+      recordAct: (input) => getCalibration().recordAct(input),
+    });
+    return gateEngine;
   }
 
   // BET-1398 standing-query watchers (§4.3/§13.4): lazy single instance over
@@ -1839,12 +1870,9 @@ export function createCtoEngine(deps = {}) {
       if (stale) {
         const fulfilled = win.state === "open" && win.countdown == null;
         await cards.resolveById(stale.id, { reason: fulfilled ? "window opened" : "countdown elapsed unmet" }).catch(() => {});
-        if (fulfilled) {
-          // BET-1403 §9.4: the announced window elapsed UNcancelled and the
-          // overnight run opened — the veto-window record's acceptance, feeding
-          // the veto→act promotion bar under the canonical action class.
-          void getTrust().noteVetoOutcome("queue-tonight", { accepted: true }).catch(() => {});
-        }
+        // (BET-1518) the ladder's veto→act promotion counter is deleted —
+        // the window's consent still records its verdict through the verdict
+        // route below (the §11.4 counters fold it independently).
       }
     }
   }
@@ -2101,16 +2129,17 @@ export function createCtoEngine(deps = {}) {
     const stale = open.find((c) => c?.id === VETO_CARD_ID && c?.variant === "veto");
     if (stale) await cards.resolveById(stale.id, { reason: "canceled by user" }).catch(() => {});
     await ledgerLog({ kind: "cto.overnight.veto", ts: now() });
-    // BET-1403 §9.4: a cancel IS the veto-window record's rejection. The
-    // canonical action class is "queue-tonight" (the §9.3 eligibility map's
-    // class — the overnight veto window guards tonight's queued tasks); the
-    // UI's veto-verdict subject carries the same stamp. Single writer: the
-    // trust sink ignores veto-window subjects, so the record is fed exactly
-    // once per resolved window (cancel here, executed-open in the veto card).
+    // BET-1403: a cancel IS the veto-window record's rejection. The
+    // canonical action class is "queue-tonight" (the overnight veto window
+    // guards tonight's queued tasks); the UI's veto-verdict subject carries
+    // the same stamp. Single writer: the calibration sink ignores
+    // veto-window subjects, so the record is fed exactly once per resolved
+    // window (cancel here, executed-open in the veto card).
     void getVerdictsEngine()
       .recordVerdict({ subject: { type: "veto-window", id: VETO_CARD_ID, class: "queue-tonight" }, verdict: "veto" })
       .catch(() => {});
-    void getTrust().noteVetoOutcome("queue-tonight", { accepted: false }).catch(() => {});
+    // (BET-1518) the ladder's veto-tier counters are deleted; the verdict
+    // above is the durable record of the window's rejection.
     await syncState().catch(() => {});
     return { ok: true };
   }
@@ -2900,9 +2929,19 @@ export function createCtoEngine(deps = {}) {
     // all reach one path through these).
     recordVerdict: (input) => getVerdictsEngine().recordVerdict(input),
     listVerdicts: () => getVerdictsEngine().listVerdicts(),
-    // BET-1403: trust engine — consult tiers, act-and-report bookkeeping, and
-    // the digest announcement queue (index.mjs wires the digest seam to it).
-    trust: getTrust(),
+    // BET-1518: the §9.5 calibration engine — the per-class Beta estimator,
+    // the verdict fold, and the act-and-report announcement queue (index.mjs
+    // wires the digest seam and the suggest engine's calibrationOf/recordAct
+    // to it).
+    get calibration() {
+      return getCalibration();
+    },
+    // BET-1518: the §9.3 gate — the plans.json consumer (act via the executor
+    // seam or ask card per record). Exposed for tests + the executor ticket's
+    // seam.
+    get gate() {
+      return getGate();
+    },
     get rateTracker() {
       return track;
     },

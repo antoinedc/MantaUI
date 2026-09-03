@@ -402,8 +402,13 @@ export function CtoPanel({
         const r = await executeSuggestionOption({ option, api: suggestionApi });
         if (r.ok) {
           // acted-on = accept judgment through the B3 verdict route.
+          // BET-1518: a gate plan option's canonical class is the CARD's
+          // (the plan's §9.2 class), not the action type ("plan" is the
+          // option's type, not a class) — stamp it from the card so the
+          // §9.5 calibration fold attributes the judgment.
+          const cls = option.action?.type === "plan" ? card.cls : option.action?.type;
           void window.api
-            ?.ctoVerdict?.({ subject: { type: "suggestion", id: card.id, class: option.action?.type }, verdict: "accept" })
+            ?.ctoVerdict?.({ subject: { type: "suggestion", id: card.id, class: cls }, verdict: "accept" })
             .catch(catchActionError("record the acceptance judgment"));
           pushToast({ id: `sugg-${Date.now()}`, message: `Applied: ${option.label}` });
           refreshCards();

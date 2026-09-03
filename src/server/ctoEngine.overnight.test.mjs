@@ -22,7 +22,7 @@ function makeHarness({ trough = null, queue = [], projects = [], tier = "high", 
   const engineStateObj = { v: 1, pendingBlockers: [], tonightQueue: JSON.parse(JSON.stringify(queue)) };
   const overnightStoreObj = { v: 1, window: null };
   const verdictsObj = { v: 1, entries: [] };
-  const trustObj = { v: 1, tiers: {}, stats: {}, pending: [] };
+  const calibrationObj = { v: 1, classes: {}, pendingAnnouncements: [] };
   const published = [];
   const startedJobs = [];
   const pausedJobs = [];
@@ -68,16 +68,15 @@ function makeHarness({ trough = null, queue = [], projects = [], tier = "high", 
         verdictsObj.entries = Array.isArray(payload?.entries) ? JSON.parse(JSON.stringify(payload.entries)) : [];
       },
     },
-    // BET-1403: the trust ladder's own store (in-memory, isolated from
-    // engine-state writers).
-    trustStore: {
-      load: async () => JSON.parse(JSON.stringify(trustObj)),
+    // BET-1518: the §9.5 calibration store (in-memory — the trust.json
+    // predecessor is deleted with the ladder).
+    calibrationStore: {
+      load: async () => JSON.parse(JSON.stringify(calibrationObj)),
       save: async (payload) => {
         const copy = JSON.parse(JSON.stringify(payload ?? {}));
-        trustObj.v = copy.v ?? 1;
-        trustObj.tiers = copy.tiers ?? {};
-        trustObj.stats = copy.stats ?? {};
-        trustObj.pending = Array.isArray(copy.pending) ? copy.pending : [];
+        calibrationObj.v = copy.v ?? 1;
+        calibrationObj.classes = copy.classes ?? {};
+        calibrationObj.pendingAnnouncements = Array.isArray(copy.pendingAnnouncements) ? copy.pendingAnnouncements : [];
       },
     },
     ledger: {
@@ -455,15 +454,14 @@ test("overnight: veto card arms 30 min before the trough, cancels on the veto ve
   assert.equal(h.vetoCards.length, 0, "the veto card resolved on cancel");
   assert.ok(h.ledgerRows.some((row) => row.kind === "cto.overnight.veto"));
 
-  // BET-1403 §9.4: the cancel verdict is stamped with the canonical action
-  // class the veto window guards (queue-tonight — the §9.3 eligibility map's
-  // class), and the veto-window record's rejection advanced exactly once.
+  // BET-1403 → BET-1518: the cancel verdict is stamped with the canonical
+  // action class the veto window guards (queue-tonight) and is recorded
+  // exactly once — the ladder's va/vb promotion record is deleted (D22);
+  // the durable veto verdict IS the consent record.
   const verdicts = (await h.engine.listVerdicts()).filter((v) => v?.subject?.type === "veto-window");
   assert.equal(verdicts.length, 1);
   assert.equal(verdicts[0].subject.class, "queue-tonight", "the veto verdict carries the canonical action class");
-  const trustAfterCancel = await h.engine.trust.getState();
-  assert.equal(trustAfterCancel.stats["queue-tonight"]?.vb, 1, "a cancel feeds the veto record's rejection");
-  assert.equal(trustAfterCancel.stats["queue-tonight"]?.va ?? 0, 0);
+  assert.equal(verdicts[0].verdict, "veto");
 
   // Still in the pre-window: the veto suppresses BOTH the card re-arm and the
   // countdown — a cancel is not a countdown reset (§9.2).
@@ -494,16 +492,15 @@ test("overnight: veto card arms 30 min before the trough, cancels on the veto ve
   assert.equal(h.overnightStoreObj.window?.state, "open", "the fresh trough opens normally (absent, in trough)");
   assert.equal(h.vetoCards.length, 0);
 
-  // BET-1403 §9.4: that resolution was the EXECUTED path — the announced
-  // window elapsed uncancelled and the run opened, so the veto record's
-  // acceptance advanced (the va side of the veto→act bar). Both sides of the
-  // record are now fed by the same machinery, exactly once per window.
-  const trustAfterOpen = await h.engine.trust.getState();
-  assert.equal(trustAfterOpen.stats["queue-tonight"]?.va, 1, "the executed window feeds the veto record's acceptance");
-  assert.equal(trustAfterOpen.stats["queue-tonight"]?.vb, 1, "the earlier cancel is still on the record");
+  // BET-1518: that resolution was the EXECUTED path — the announced window
+  // elapsed uncancelled and the run opened. It posts NO verdict (the veto
+  // verdict is the cancel's alone), so the veto-window record still holds
+  // exactly one row: the earlier cancel, never double-recorded per window.
+  const verdictsAfterOpen = (await h.engine.listVerdicts()).filter((v) => v?.subject?.type === "veto-window");
+  assert.equal(verdictsAfterOpen.length, 1, "an executed window resolves the card without a second verdict");
 });
 
-test("overnight: an executed window feeds the veto record's acceptance (BET-1403 §9.4 veto→act bar)", async () => {
+test("overnight: an executed window resolves the card verdict-free; a later cancel records once (BET-1518)", async () => {
   const { due, h } = await armVetoCard();
   assert.equal(h.vetoCards.length, 1);
 
@@ -516,16 +513,14 @@ test("overnight: an executed window feeds the veto record's acceptance (BET-1403
   assert.equal(h.overnightStoreObj.window?.state, "open", "the unannounced-veto window opened");
   assert.equal(h.vetoCards.length, 0, "the veto card resolved once the window opened");
 
-  // The veto-window record's acceptance advanced under the canonical class —
-  // the va/vb pair the veto→act promotion bar (§9.4) reads.
-  const st = await h.engine.trust.getState();
-  assert.equal(st.stats["queue-tonight"]?.va, 1, "an executed window feeds the veto record's acceptance");
-  assert.equal(st.stats["queue-tonight"]?.vb ?? 0, 0);
+  // The executed window posts NO veto verdict — consent rows come from
+  // cancels only, exactly once per resolved window (BET-1518).
+  let verdicts = (await h.engine.listVerdicts()).filter((v) => v?.subject?.type === "veto-window");
+  assert.equal(verdicts.length, 0);
 
-  // And a cancel on a LATER night demotes the rolling pressure the same way —
-  // both sides of the record are fed by the same machinery. BET-1426: night 1
-  // consumed (removed) the unresolvable queue row, so a fresh accepted task
-  // backs tomorrow's candidates — an empty queue arms no veto card.
+  // And a cancel on a LATER night records exactly one veto verdict. BET-1426:
+  // night 1 consumed (removed) the unresolvable queue row, so a fresh
+  // accepted task backs tomorrow's candidates — an empty queue arms no card.
   const nextDue = due + 24 * HOUR;
   h.setQueue([{ ...QUEUE_TASK, id: "tq:next" }]);
   h.setTrough({ startMs: nextDue, endMs: nextDue + 6 * HOUR });
@@ -533,9 +528,9 @@ test("overnight: an executed window feeds the veto record's acceptance (BET-1403
   await h.engine.tick(); // arm tomorrow's card
   assert.equal(h.vetoCards.length, 1, "the next night arms a fresh veto card");
   await h.engine.tonightCancel();
-  const st2 = await h.engine.trust.getState();
-  assert.equal(st2.stats["queue-tonight"]?.va, 1);
-  assert.equal(st2.stats["queue-tonight"]?.vb, 1, "the later cancel feeds the rejection side too");
+  verdicts = (await h.engine.listVerdicts()).filter((v) => v?.subject?.type === "veto-window");
+  assert.equal(verdicts.length, 1, "the later cancel feeds the durable consent record once");
+  assert.equal(verdicts[0].verdict, "veto");
 });
 
 test("overnight: run-now opens the window outside the trough and dispatches", async () => {
@@ -663,31 +658,30 @@ test("overnight: queue-tonight verdicts fold into the overnight Thompson counter
   assert.equal(counters?.["queue-tonight"]?.alpha, 1, "accept folds a success counter");
 });
 
-test("durability: a trust fold survives a queue-edit save landing after it (mirrored-order regression, BET-1403 cycle 4)", async () => {
+test("durability: a calibration fold survives a queue-edit save landing after it (mirrored-order regression, BET-1403 cycle 4)", async () => {
   const h = makeHarness({ trough: TROUGH, queue: [QUEUE_TASK], projects: [] });
 
-  // The trust fold lands first (a verdict's fire-and-forget sink writes the
-  // trust ladder's own store).
+  // The calibration fold lands first (a verdict's fire-and-forget sink writes
+  // the §9.5 calibration store).
   await h.engine.recordVerdict({ subject: { type: "suggestion", id: "card-2", class: "queue-tonight" }, verdict: "accept" });
   await new Promise((r) => setImmediate(r));
-  const afterFold = await h.engine.trust.getState();
-  assert.equal(afterFold.stats["queue-tonight"]?.a, 1);
+  const afterFold = await h.engine.calibration.getState();
+  assert.equal(afterFold.classes["queue-tonight"]?.successes, 1);
 
   // Then a queue edit lands — AND the hostile old writer shape runs: a whole
-  // engine-state save spreading a STALE pre-fold snapshot that still carries
-  // an `es.trust` fossil key. When trust lived under es.trust this reverted
-  // the fold; with the dedicated store the tier/counter change survives and
-  // the queue edit lands normally.
+  // engine-state save spreading a STALE pre-fold snapshot. When the ladder's
+  // counters lived under es.trust this reverted the fold; with the dedicated
+  // store the window survives and the queue edit lands normally.
   const removed = await h.engine.tonightRemove(h.engineStateObj.tonightQueue[0].id);
   assert.equal(removed.ok, true);
-  await h.engineStateSave({ v: 1, trust: { tiers: {}, stats: {} }, tonightQueue: [{ id: "tq:stale" }] });
+  await h.engineStateSave({ v: 1, tonightQueue: [{ id: "tq:stale" }] });
   await new Promise((r) => setImmediate(r));
 
-  const after = await h.engine.trust.getState();
-  // Two folds landed: the accept verdict (a=1) and the remove's own edit
-  // verdict (a=2) — BOTH survived the hostile stale engine-state save, which
-  // under es.trust would have reverted the record to the pre-fold snapshot.
-  assert.equal(after.stats["queue-tonight"]?.a, 2, "the trust folds survived the stale engine-state save");
+  const after = await h.engine.calibration.getState();
+  // Two folds landed: the accept verdict and the remove's own edit verdict —
+  // BOTH survived the hostile stale engine-state save (both map to success
+  // outcomes in the class's last-30 window, §9.5).
+  assert.equal(after.classes["queue-tonight"]?.successes, 2, "the calibration folds survived the stale engine-state save");
   assert.deepEqual(h.engineStateObj.tonightQueue, [{ id: "tq:stale" }], "the queue edit landed");
 });
 
