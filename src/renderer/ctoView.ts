@@ -799,11 +799,13 @@ export async function executeSuggestionOption({
         return r?.ok ? { ok: true } : { ok: false, error: r?.error ?? "queue-tonight failed" };
       }
       case "plan": {
-        // BET-1518 (§9.3): a gate ask card's plan option. The concrete
-        // execution is BET-1519's executor seam — today the click records
-        // the human's accept judgment (§9.5 verdict, stamped with the
-        // card's class by the caller) and the verdict route resolves the
-        // card. Validate the payload so a malformed option fails closed.
+        // BET-1518 (§9.3) + BET-1519 (§9.4): a gate ask card's plan option.
+        // The click records the human's accept judgment (§9.5 verdict,
+        // stamped with the card's class by the caller); the verdict route
+        // then runs the plan through the ONE generic executor server-side
+        // (trigger "accepted" — same session, verify, retry and cap as the
+        // gate's act verb). Validate the payload so a malformed option fails
+        // closed.
         const planId = typeof payload.planId === "string" ? payload.planId : "";
         if (!planId) return { ok: false, error: "plan needs a planId payload" };
         return { ok: true };
