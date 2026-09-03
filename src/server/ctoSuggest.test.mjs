@@ -174,13 +174,22 @@ function makeSug({
   };
 }
 
-test("runPass: collected findings enqueue on the pending-findings queue in the row contract shape", async () => {
+// Shared fixture: the same failure text in two retained digests → one
+// failure-recurrence finding collected on every pass. Returns the raw list
+// (for collectors assertions) and the store dep wired to serve it.
+function recurringDigests() {
   const digestList = [
     { generated: 1, items: [{ tier: "failure", text: "Pipeline red on main", refs: ["c1"] }] },
     { generated: 2, items: [{ tier: "failure", text: "Pipeline red on main", refs: ["c2"] }] },
   ];
+  const digests = { list: async () => ["d1", "d2"], load: async (id) => (id === "d1" ? digestList[0] : digestList[1]) };
+  return { digestList, digests };
+}
+
+test("runPass: collected findings enqueue on the pending-findings queue in the row contract shape", async () => {
+  const { digests } = recurringDigests();
   const h = makeSug({
-    digests: { list: async () => ["d1", "d2"], load: async (id) => (id === "d1" ? digestList[0] : digestList[1]) },
+    digests,
     facts: {
       list: async () => ["p1"],
       load: async () => ({ facts: [{ id: "f1", kind: "anomaly", statement: "Deploys spike on Tuesdays", refs: ["file:1"] }] }),
@@ -209,12 +218,9 @@ test("runPass: collected findings enqueue on the pending-findings queue in the r
 });
 
 test("dedupe: a second runPass over the same retained sources enqueues nothing (BET-1465 kept)", async () => {
-  const digestList = [
-    { generated: 1, items: [{ tier: "failure", text: "Pipeline red on main", refs: ["c1"] }] },
-    { generated: 2, items: [{ tier: "failure", text: "Pipeline red on main", refs: ["c2"] }] },
-  ];
+  const { digests } = recurringDigests();
   const h = makeSug({
-    digests: { list: async () => ["d1", "d2"], load: async (id) => (id === "d1" ? digestList[0] : digestList[1]) },
+    digests,
     queueFinding: () => {},
   });
   const r1 = await h.sug.runPass({ nowMs: h.clock.ms });
@@ -335,7 +341,11 @@ test("verdictHeld: routes judgment to the B3 verdict route", async () => {
   assert.equal(verdictEntries[0].verdict, "dismiss");
 });
 
-test("verdictHeld stamps the held row's class onto the subject (§9.5 attribution)", async () => {
+// Shared verdict-harness scaffold: a fixed ledger carrying one silent-log
+// row and a minimal wired engine. `recordVerdict` truthy → the B3 route is
+// wired to record into the returned `recorded` array; null → the unwired
+// route under test.
+function verdictHarness(recordVerdict) {
   const recorded = [];
   const rows = [{ id: "held-9", kind: "suggest.silent", class: "tool-write", ts: 1 }];
   const sug = createCtoSuggest({
@@ -343,11 +353,20 @@ test("verdictHeld stamps the held row's class onto the subject (§9.5 attributio
     engineState: { load: async () => ({ v: 1 }), save: async () => {} },
     now: () => 1_000,
     publish: () => {},
-    recordVerdict: async ({ subject, verdict }) => {
-      recorded.push({ subject, verdict });
-      return { ok: true };
-    },
+    ...(recordVerdict
+      ? {
+          recordVerdict: async (input) => {
+            recorded.push(input);
+            return { ok: true };
+          },
+        }
+      : { recordVerdict: null }),
   });
+  return { sug, recorded };
+}
+
+test("verdictHeld stamps the held row's class onto the subject (§9.5 attribution)", async () => {
+  const { sug, recorded } = verdictHarness(true);
   await sug.verdictHeld({ id: "held-9", verdict: "accept" });
   assert.equal(recorded.length, 1);
   assert.equal(recorded[0].subject.class, "tool-write");
@@ -358,14 +377,7 @@ test("verdictHeld stamps the held row's class onto the subject (§9.5 attributio
 // fold anywhere), so an unwired verdict route degrades instead.
 test("verdictHeld without a verdict route degrades — no direct-store append", async () => {
   await verdictsStore.save({ entries: [] });
-  const rows = [{ id: "held-9", kind: "suggest.silent", class: "tool-write", ts: 1 }];
-  const sug = createCtoSuggest({
-    ledger: { append: async () => true, read: async () => rows },
-    engineState: { load: async () => ({ v: 1 }), save: async () => {} },
-    now: () => 1_000,
-    publish: () => {},
-    recordVerdict: null, // unwired route
-  });
+  const { sug } = verdictHarness(null); // unwired route
   const r = await sug.verdictHeld({ id: "held-9", verdict: "accept" });
   assert.equal(r.ok, false);
   assert.match(r.error ?? "", /no-verdict-route/);
