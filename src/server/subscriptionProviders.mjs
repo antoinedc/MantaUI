@@ -275,7 +275,14 @@ export function subscriptionStatuses(connected, externallyManaged = new Set()) {
 // action. This classifier turns the in-flight map entry into the wire
 // payload. Pure — the caller owns the map and the clock.
 
-export const OAUTH_CALLBACK_LIMIT_MS = 5 * 60 * 1000;
+// 15 minutes, matching the lifetime OpenAI gives a Codex device code. This
+// used to be 5, which is SHORTER than the code is actually valid for — a
+// first-time sign-in (open the link, log into ChatGPT, 2FA, then approve)
+// routinely crosses 5 minutes, and the box would declare the attempt dead
+// while the provider still considered it live. Never set this below the
+// provider's own code lifetime: expiring first turns a working sign-in into
+// an unexplained failure.
+export const OAUTH_CALLBACK_LIMIT_MS = 15 * 60 * 1000;
 
 /**
  * Classify an in-flight device-flow callback for the `oauth-status` action.

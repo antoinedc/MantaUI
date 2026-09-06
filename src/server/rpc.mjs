@@ -135,6 +135,19 @@ export function _resetClaudeLoginSessions() {
 // so overwriting here is correct.
 const _oauthCallbacks = new Map();
 
+// Monotonic attempt id. EVERY start mints a new one, and a settling callback
+// may only write its result if it still owns the provider's slot.
+//
+// This is load-bearing, not defensive coding. opencode binds each device wait
+// to ONE specific user_code: a wait started for code A polls for code A
+// forever and can never observe that code B was approved. So the moment a
+// second code is minted (a retry, a remount, a double click), the first wait
+// is DEAD — it just doesn't know it. Without this guard that dead wait still
+// races to write into the same slot, so a stale "failed" can land on top of
+// the live attempt's "ok", or vice versa, and the UI reports the wrong
+// outcome for the code the user is actually looking at.
+let _oauthEpoch = 0;
+
 /** Test-only: peek the in-flight device-flow callbacks. */
 export function _getOauthCallbacks() {
   return new Map(_oauthCallbacks);
@@ -143,6 +156,7 @@ export function _getOauthCallbacks() {
 /** Test-only: clear between scenarios. */
 export function _resetOauthCallbacks() {
   _oauthCallbacks.clear();
+  _oauthEpoch = 0;
 }
 
 /**
@@ -154,18 +168,38 @@ export function _resetOauthCallbacks() {
  * the server down, so both settle paths record into the map instead.
  */
 function startOauthCallback(oc, id, methodIndex) {
-  _oauthCallbacks.set(id, { startedAt: Date.now(), state: "pending" });
+  const epoch = ++_oauthEpoch;
+  const startedAt = Date.now();
+  _oauthCallbacks.set(id, { startedAt, state: "pending", epoch });
+  // Log the START, not just the failures. A wait that HANGS is the failure
+  // mode that actually bit us: opencode's device poll has no expiry, so an
+  // orphaned wait spins against the provider forever, never settles, and
+  // therefore never reaches either branch below. With only failure logging
+  // that produced a completely silent, undiagnosable hang.
+  console.log(`[provider-auth] ${id}: oauth wait started (attempt ${epoch})`);
+  // Only the attempt that still owns the slot may publish its result — see
+  // the _oauthEpoch comment. A superseded wait settles into the void.
+  const settle = (entry, note) => {
+    const current = _oauthCallbacks.get(id);
+    if (current?.epoch !== epoch) {
+      console.warn(`[provider-auth] ${id}: ignoring superseded attempt ${epoch} (${note})`);
+      return;
+    }
+    _oauthCallbacks.set(id, { ...entry, startedAt, epoch });
+  };
   // Detached ON PURPOSE: this promise settles minutes later, long after the
   // `start` response has gone back to the renderer.
   oc.completeProviderOauth(id, methodIndex, "")
     .then((r) => {
-      _oauthCallbacks.set(id, r?.ok
-        ? { startedAt: Date.now(), state: "ok" }
-        : { startedAt: Date.now(), state: "error", error: r?.error ?? "failed" });
-      if (!r?.ok) console.warn(`[provider-auth] ${id}: oauth callback failed (${r?.error ?? "failed"})`);
+      settle(
+        r?.ok ? { state: "ok" } : { state: "error", error: r?.error ?? "failed" },
+        r?.ok ? "ok" : (r?.error ?? "failed"),
+      );
+      if (r?.ok) console.log(`[provider-auth] ${id}: oauth wait succeeded (attempt ${epoch})`);
+      else console.warn(`[provider-auth] ${id}: oauth callback failed (${r?.error ?? "failed"})`);
     })
     .catch((e) => {
-      _oauthCallbacks.set(id, { startedAt: Date.now(), state: "error", error: "unreachable" });
+      settle({ state: "error", error: "unreachable" }, "unreachable");
       console.warn(`[provider-auth] ${id}: oauth callback threw:`, e?.message ?? e);
     });
 }
@@ -1721,8 +1755,27 @@ export function buildHandlers({
           _oauthCallbacks.get(id),
           Date.now(),
         );
-        if (result.state !== "pending") _oauthCallbacks.delete(id);
+        if (result.state !== "pending") {
+          // An `expired` verdict is the one outcome nothing else reports:
+          // the underlying wait is still running (opencode never gives up),
+          // so neither settle branch fires and the only trace this attempt
+          // ever existed is right here. Log it or it is invisible.
+          if (result.state === "error") {
+            console.warn(`[provider-auth] ${id}: oauth wait ended (${result.error})`);
+          }
+          _oauthCallbacks.delete(id);
+        }
         return { action: "oauth-status", ...result };
+      }
+      // Abandoning the connect card (close / cancel / retry) must clear the
+      // slot. Otherwise the dead wait stays the provider's tracked attempt
+      // and the NEXT sign-in is judged against it — the previous behaviour,
+      // where a stale entry made a fresh attempt look already-expired.
+      if (action === "oauth-cancel") {
+        const id = String(req?.id ?? "");
+        const had = _oauthCallbacks.delete(id);
+        if (had) console.log(`[provider-auth] ${id}: oauth wait abandoned by the client`);
+        return { action: "oauth-cancel", ok: true };
       }
       if (action === "key") {
         const id = String(req?.id ?? "");

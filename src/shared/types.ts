@@ -2891,7 +2891,10 @@ export type OpencodeProviderAuthRequest =
   // + restartOpencode() if changed + connected[] verification. The
   // server retains startedAt across requests by keying off sessionKey.
   | { action: "claude-status"; sessionKey: string; startedAt: number }
-  | { action: "oauth-status"; id: string };
+  | { action: "oauth-status"; id: string }
+  // Abandon the in-flight device wait for `id` (card closed / cancelled /
+  // retried), so the next attempt is not judged against the dead one.
+  | { action: "oauth-cancel"; id: string };
 
 export type OpencodeProviderAuthResult =
   | { action: "status"; providers: SubscriptionStatus[] }
@@ -2918,4 +2921,5 @@ export type OpencodeProviderAuthResult =
   // user already had a working login and the connect was a no-op);
   // `completed` means restartOpencode fired + the connect[ed] probe ran.
   | { action: "claude-status"; ok: boolean; progress?: ClaudeLoginProgress; error?: string }
-  | { action: "oauth-status"; state: "pending" | "ok" | "error"; error?: string };
+  | { action: "oauth-status"; state: "pending" | "ok" | "error"; error?: string }
+  | { action: "oauth-cancel"; ok: boolean };

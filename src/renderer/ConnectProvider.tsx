@@ -74,7 +74,7 @@ const DEVICE_POLL_INTERVAL_MS = 3_000;
 // deadline itself is owned by the server (OAUTH_CALLBACK_LIMIT_MS in
 // subscriptionProviders.mjs) — this must MATCH it and exists only for the
 // countdown. (BET-1043)
-const DEVICE_POLL_LIMIT_MS = 5 * 60 * 1_000;
+const DEVICE_POLL_LIMIT_MS = 15 * 60 * 1_000;
 const RESTART_POLL_INTERVAL_MS = 3_000;
 const RESTART_POLL_LIMIT_MS = 30_000;
 const CLAUDE_POLL_INTERVAL_MS = 1_000;
@@ -455,14 +455,20 @@ export function ConnectProvider({
   // interval is freed as soon as we leave `waiting`.
   useEffect(() => {
     if (phase.kind !== "waiting") return;
+    // Settled by the poll below when the wait reaches a terminal state. It
+    // gates the cleanup so a SUCCESSFUL sign-in isn't cancelled on the way
+    // out — leaving `waiting` for `applying` runs this cleanup too.
+    let settled = false;
     const handle = window.setInterval(async () => {
       try {
         const res = await window.api.opencodeProviderAuth({ action: "oauth-status", id });
         if (res.action !== "oauth-status") return;
         if (res.state === "ok") {
+          settled = true;
           window.clearInterval(handle);
           safeSetPhase({ kind: "applying", restartConfirmed: false });
         } else if (res.state === "error") {
+          settled = true;
           window.clearInterval(handle);
           safeSetPhase({ kind: "failed", message: deviceAuthErrorMessage(res.error) });
         }
@@ -470,7 +476,19 @@ export function ConnectProvider({
         /* keep polling; box may be transiently unreachable */
       }
     }, DEVICE_POLL_INTERVAL_MS);
-    return () => window.clearInterval(handle);
+    return () => {
+      window.clearInterval(handle);
+      // Abandoning the wait (card closed, Cancel, Retry, Settings navigated
+      // away) must tell the box, or the dead attempt stays the provider's
+      // tracked one and the next sign-in inherits its verdict.
+      if (!settled) {
+        void window.api
+          .opencodeProviderAuth({ action: "oauth-cancel", id })
+          .catch(() => {
+            /* best-effort: the box's own expiry is the backstop */
+          });
+      }
+    };
   }, [phase.kind, id, safeSetPhase]);
 
   // Restart + readiness poll (applying). The restart fires immediately

@@ -1264,6 +1264,102 @@ test("opencode:provider-auth oauth-status for an unknown provider returns not_st
   assert.deepEqual(r, { action: "oauth-status", state: "error", error: "not_started" });
 });
 
+// ---- Codex device-flow correctness ----
+//
+// opencode binds each device wait to ONE user_code: a wait started for code A
+// polls for code A forever and can never see code B approved. So the instant a
+// second code is minted the first wait is dead, and it must not be able to
+// speak for the provider any more.
+
+test("a superseded oauth wait cannot overwrite the live attempt's result", async () => {
+  const gateA = deferred();
+  const gateB = deferred();
+  const { deps } = makeDeps([]);
+  setupOauthAutoDeps(deps);
+  const gates = [gateA, gateB];
+  let n = 0;
+  deps.oc.completeProviderOauth = () => gates[n++].promise;
+  _resetOauthCallbacks();
+  const handlers = buildHandlers(deps);
+
+  // Two starts → two codes. The SECOND is the one the user is shown.
+  await handlers["opencode:provider-auth"]({ action: "start", id: "openai" });
+  await handlers["opencode:provider-auth"]({ action: "start", id: "openai" });
+
+  // The abandoned first wait dies later, as it always eventually will.
+  gateA.resolve({ ok: false, error: "bad_response" });
+  await gateA.promise;
+
+  // It must NOT have reported a failure for the code still on screen.
+  assert.deepEqual(
+    await handlers["opencode:provider-auth"]({ action: "oauth-status", id: "openai" }),
+    { action: "oauth-status", state: "pending" },
+    "a dead wait must not fail the live attempt",
+  );
+
+  // The live wait succeeds and is the one that gets to speak.
+  gateB.resolve({ ok: true });
+  await gateB.promise;
+  assert.deepEqual(
+    await handlers["opencode:provider-auth"]({ action: "oauth-status", id: "openai" }),
+    { action: "oauth-status", state: "ok" },
+  );
+});
+
+test("a superseded oauth wait cannot succeed on behalf of the live attempt", async () => {
+  const gateA = deferred();
+  const gateB = deferred();
+  const { deps } = makeDeps([]);
+  setupOauthAutoDeps(deps);
+  const gates = [gateA, gateB];
+  let n = 0;
+  deps.oc.completeProviderOauth = () => gates[n++].promise;
+  _resetOauthCallbacks();
+  const handlers = buildHandlers(deps);
+
+  await handlers["opencode:provider-auth"]({ action: "start", id: "openai" });
+  await handlers["opencode:provider-auth"]({ action: "start", id: "openai" });
+
+  // A stale wait resolving ok must not green-light a code the user never saw.
+  gateA.resolve({ ok: true });
+  await gateA.promise;
+  assert.deepEqual(
+    await handlers["opencode:provider-auth"]({ action: "oauth-status", id: "openai" }),
+    { action: "oauth-status", state: "pending" },
+  );
+});
+
+test("oauth-cancel clears the slot so the next attempt is not judged against the dead one", async () => {
+  const { gate, handlers } = await startGatedOauth();
+
+  assert.deepEqual(
+    await handlers["opencode:provider-auth"]({ action: "oauth-cancel", id: "openai" }),
+    { action: "oauth-cancel", ok: true },
+  );
+  // Slot released — a later poll sees no attempt rather than a stale one.
+  assert.deepEqual(
+    await handlers["opencode:provider-auth"]({ action: "oauth-status", id: "openai" }),
+    { action: "oauth-status", state: "error", error: "not_started" },
+  );
+  // And the abandoned wait settling afterwards must stay silent.
+  gate.resolve({ ok: true });
+  await gate.promise;
+  assert.deepEqual(
+    await handlers["opencode:provider-auth"]({ action: "oauth-status", id: "openai" }),
+    { action: "oauth-status", state: "error", error: "not_started" },
+  );
+});
+
+test("oauth-cancel on a provider with no in-flight wait is a no-op, not an error", async () => {
+  const { deps } = makeDeps([]);
+  _resetOauthCallbacks();
+  const handlers = buildHandlers(deps);
+  assert.deepEqual(
+    await handlers["opencode:provider-auth"]({ action: "oauth-cancel", id: "openai" }),
+    { action: "oauth-cancel", ok: true },
+  );
+});
+
 test("opencode:provider-auth start does NOT fire the detached callback for claude-login or api-key providers (BET-1043)", async () => {
   const { deps } = makeDeps([]);
   deps.oc.listProviderAuthMethods = async () => ({
