@@ -553,16 +553,28 @@ test("runner: a delegate job still running at the turn budget escalates instead 
   assert.equal(sends.length, 0, "no retry prompt was delivered into the running job");
 });
 
-test("driver: a runner THROW is an interrupt — escalated with the interrupt reason, never lost", async () => {
+test("driver: infrastructure exceptions are observable without poisoning plan calibration", async () => {
   const f = fakeDriverDeps({ runner: async () => { throw new Error("provider died"); } });
   const d = createCtoExecutorDriver(f.deps);
   await d.executePlan(basePlan());
   await settle();
   const rows = (await f.state.store.load()).entries;
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].outcome, "escalated");
-  assert.ok((rows[0].reason ?? "").includes("interrupt"));
-  assert.deepEqual(f.state.calibrations, [{ planId: "pl1", class: "start-job", ok: false }]);
+  assert.equal(rows.length, 0);
+  assert.deepEqual(f.state.calibrations, []);
+  assert.deepEqual(f.state.escalations, []);
+  assert.ok(f.state.ledgerRows.some((r) => r.kind === "cto.execution_unavailable" && r.reason === "runner-error"));
+});
+
+test("driver: unknown targets and provenance failures are non-learning outcomes", async () => {
+  for (const reason of ["unknown-project", "provenance-error", "no-project-session"]) {
+    const f = fakeDriverDeps({ runner: async () => ({ ok: false, reason }) });
+    const d = createCtoExecutorDriver(f.deps);
+    await d.executePlan(basePlan());
+    await settle();
+    assert.equal(f.state.calibrations.length, 0);
+    assert.equal(f.state.escalations.length, 0);
+    assert.ok(f.state.ledgerRows.some((r) => r.kind === "cto.execution_unavailable" && r.reason === reason));
+  }
 });
 
 test("driver: executeAccepted announces the accepted execution through the act-and-report queue", async () => {

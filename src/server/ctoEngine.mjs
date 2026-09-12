@@ -599,6 +599,12 @@ export function createCtoEngine(deps = {}) {
     const store = findings ?? bundle.findings;
     if (!store) return;
     try {
+      const sid = finding?.sessionID ?? finding?.senderSessionID ?? finding?.sender?.sessionID;
+      if (sid && (!finding.project || !finding.cwd)) {
+        const info = await Promise.resolve().then(() => getSessionInfo(sid)).catch(() => null);
+        if (info && isPipelineSession(info.owner)) finding = { ...finding,
+          project: finding.project ?? info.project, cwd: finding.cwd ?? info.cwd };
+      }
       await patchStore(store, (fresh) => ({
         findings: [...(Array.isArray(fresh?.findings) ? fresh.findings : []), finding],
       }));
@@ -1514,11 +1520,17 @@ export function createCtoEngine(deps = {}) {
 
   // §7.1-2: the daily batch's db seam — tool-call part rows in the scan
   // window, via the injected opencodeDb read handle (same async supplier the
-  // backfill uses; a missing handle yields no rows, never a throw).
+  // backfill uses; missing/unsupported handles are distinguished for backoff).
   async function toolsCollectDb({ sinceTs, untilTs, cap, afterId }) {
-    if (typeof getDb !== "function") throw new Error("discovery-db-unavailable");
+    if (typeof getDb !== "function") throw Object.assign(new Error("discovery-db-unavailable"), { code: "unsupported-runtime" });
     const db = await getDb().catch(() => null);
-    if (!db) throw new Error("discovery-db-unavailable");
+    if (!db) {
+      let code = "db-unavailable";
+      try { await import("node:sqlite"); } catch (error) {
+        if (error.code === "ERR_UNKNOWN_BUILTIN_MODULE") code = "unsupported-runtime";
+      }
+      throw Object.assign(new Error("discovery-db-unavailable"), { code });
+    }
     const { collectDbRows } = await import("./ctoToolScan.mjs");
     return collectDbRows(db, { sinceTs, untilTs, cap, afterId });
   }
@@ -2625,9 +2637,15 @@ export function createCtoEngine(deps = {}) {
         let project;
         const sid = eventSessionID(evt);
         if (sid) {
-          const info = await getSessionInfo(sid);
+          const info = await Promise.resolve().then(() => getSessionInfo(sid)).catch(() => ({ owner: "unknown" }));
           owner = info?.owner ?? "unknown";
           project = info?.project;
+        }
+        if (owner === "unknown" && sid && isUserPromptEvent(evt)) {
+          // Unknown activity is not evidence, but it is unsafe to continue an
+          // unattended window while ownership is unavailable.
+          promptTs = Math.max(promptTs, now());
+          void preemptOvernight("unknown-activity").catch(() => {});
         }
         if (!isPipelineSession(owner)) return;
         // Headless/internal and job prompts are not evidence of human presence.

@@ -171,7 +171,7 @@ test("summary diagnostics sanitize codes and distinguish persistence failure", a
   f.seg.observe(idle(), { sessionID: "s1" });
   await flushClose(f.seg);
   const rows = stores.ledgerStore.peek();
-  assert.ok(rows.some((r) => r.kind === "cto.segment_summary_failed" && r.code === "schema-invalid"));
+  assert.ok(rows.some((r) => r.kind === "cto.segment_summary_failed" && r.code === "unknown-error"));
   assert.ok(rows.some((r) => r.kind === "cto.segment_persist_failed"));
   assert.ok(!JSON.stringify(rows).includes("SECRET"));
 });

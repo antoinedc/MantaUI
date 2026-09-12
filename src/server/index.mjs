@@ -2131,8 +2131,8 @@ const adaptiveCto = ctoEngine.createCtoEngine({
   // seams (matchCheckable + condition-gone) and all bookkeeping itself.
   executor: {
     runnerDeps: {
-      createSession: async ({ directory, title, permission } = {}) => {
-        const sess = await oc.createSession({ directory, title, permission });
+      createSession: async ({ directory, title, permission, signal } = {}) => {
+        const sess = await oc.createSession({ directory, title, permission, signal });
         return { ok: true, id: sess?.id };
       },
       sendPrompt: async (args) => {

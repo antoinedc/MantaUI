@@ -431,9 +431,10 @@ export function createCtoPlanRunner(deps = {}) {
         sessionId = res?.job?.id ?? null;
       } else {
         if (typeof createSession !== "function") return { ok: false, reason: "no-create-session" };
-        finishCreation = beginInternalSession();
+        finishCreation = (deps.trackCreation ?? beginInternalSession)();
         const res = await createSession({
           title: plan.id,
+          signal: AbortSignal.timeout(10_000),
           permission: ruleset,
           directory: parent?.parentDirectory ?? undefined,
         });
@@ -443,8 +444,10 @@ export function createCtoPlanRunner(deps = {}) {
       }
     } catch {
       if (!delegate && sessionId && typeof deleteSession === "function") {
-        try { await deleteSession(sessionId); } catch {
-          return { ok: false, reason: "provenance-cleanup-error" };
+        try {
+          if ((await deleteSession(sessionId))?.ok === false) throw new Error("cleanup-error");
+        } catch {
+          return { ok: false, reason: "provenance-error", cleanupCode: "cleanup-error" };
         }
       }
       return { ok: false, reason: !delegate && sessionId ? "provenance-error" : "start-error" };
@@ -713,16 +716,26 @@ export function createCtoExecutorDriver(deps = {}) {
     await ledgerLog({ kind: "calibrate.outcome", class: row?.class ?? null, planId: row?.planId ?? null, ok: ok === true, reason: reason ?? null });
   }
 
-  // One queued execution, run to completion. Never throws (a throw is an
-  // interrupt: escalate with outcome escalated per §9.4 — the run is never
-  // silently lost).
+  // One queued execution. Operational failures remain visible without being
+  // treated as evidence that the selected plan was wrong.
   async function runQueued(entry) {
     const { planId, plan, finding, findingId, trigger, gateCtx } = entry;
     let res;
     try {
       res = await runOne({ plan, finding, project: entry.project, trigger, gateCtx });
     } catch (e) {
-      res = { ok: true, outcome: "escalated", attempts: 1, cost: 0, reason: `interrupt:${e?.message ?? "unknown"}`, result: null };
+      res = { ok: false, reason: "runner-error" };
+    }
+    // A plan that could not start has not failed verification. Record the
+    // operational problem separately; do not teach calibration or page a human
+    // with a false "plan failed" claim.
+    if (res?.ok === false || ["send-failed", "turn-error", "verify-error", "verify-unavailable", "job-gone"].includes(res?.reason)) {
+      const reason = ["unknown-project", "provenance-error", "no-project-session", "no-start-job", "start-error",
+        "start-refused", "no-create-session", "session-create-failed", "runner-error", "send-failed", "turn-error",
+        "verify-error", "verify-unavailable", "job-gone"].includes(res.reason) ? res.reason : "unknown-error";
+      await ledgerLog({ kind: "cto.execution_unavailable", planId, findingId,
+        reason, ...(res.cleanupCode === "cleanup-error" ? { cleanupCode: "cleanup-error" } : {}), outcome: "unavailable" });
+      return;
     }
     const outcome = res?.outcome ?? "escalated";
     const class_ = typeof plan?.class === "string" ? plan.class : "other";

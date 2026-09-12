@@ -341,6 +341,20 @@ test("triageFinding: gated/error model call persists NOTHING (the finding is alr
   assert.deepEqual((await plans.load()).records, {});
 });
 
+test("triage persistence preserves explicit project/cwd and sender for execution", async () => {
+  const plans = memoryStore({ v: 1, records: {} });
+  const finding = { ...FINDING, project: "project", cwd: "/worktree", senderSessionID: "sender" };
+  const triage = createCtoTriage({ plans, ledger: { append: async () => {} },
+    runEphemeral: async () => ({ ok: true, text: JSON.stringify({ plans: [validPlan()] }) }),
+  });
+  await triage.triageFinding(finding);
+  const record = (await plans.load()).records[findingIdOf(finding)];
+  assert.equal(record.finding.project, "project");
+  assert.equal(record.finding.cwd, "/worktree");
+  assert.equal(record.finding.senderSessionID, "sender");
+  assert.equal(record.plans[0].cwd, "/worktree");
+});
+
 test("triageFinding: a model throw is contained (no record, ledger row, ok:false)", async () => {
   const plans = memoryStore({ v: 1, records: {} });
   const ledgerRows = [];

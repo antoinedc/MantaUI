@@ -56,6 +56,8 @@ function payloadFrom(raw) {
     lastScanId: typeof p.lastScanId === "string" ? p.lastScanId : "",
     lastSurfaceDay: typeof p.lastSurfaceDay === "string" ? p.lastSurfaceDay : null,
     lastClassificationDay: typeof p.lastClassificationDay === "string" ? p.lastClassificationDay : null,
+    scanRetryAt: Number.isFinite(p.scanRetryAt) ? p.scanRetryAt : 0,
+    scanFailures: Number.isFinite(p.scanFailures) ? p.scanFailures : 0,
     lastFusedTs: Number.isFinite(p?.lastFusedTs) ? p.lastFusedTs : null,
     lastAskDay: typeof p?.lastAskDay === "string" ? p.lastAskDay : null,
     lastDeepAskDay: typeof p?.lastDeepAskDay === "string" ? p.lastDeepAskDay : null,
@@ -478,8 +480,9 @@ export function createToolRegistry(deps = {}) {
 
   // Registry lock -> classification lock, never the reverse. The independent
   // store commits the reservation/result even if this registry transaction fails.
-  async function classifyOneRaw(payload) {
+  async function classifyOneRaw(payload, replayCount = 0) {
     if (typeof runEphemeral !== "function") return payload;
+    if (replayCount >= 100) return payload;
     const day = new Date(now()).toISOString().slice(0, 10);
     let target;
     let attempt;
@@ -511,7 +514,8 @@ export function createToolRegistry(deps = {}) {
       return { day, lane, records: { ...records, [target.tool]: attempt } };
     });
     if (!target) return payload;
-    payload.lastClassificationDay = day;
+    if (!replay) payload.lastClassificationDay = day;
+    const next = () => replay ? classifyOneRaw(payload, replayCount + 1) : payload;
     const context = [
       {
         priority: 1,
@@ -546,14 +550,14 @@ export function createToolRegistry(deps = {}) {
     target.llmAt = attempt.at;
     if (attempt.status === "rejected") {
       target.unclassifiable = true;
-      return payload;
+      return next();
     }
     const canonical = attempt.canonical;
     if (canonical === target.tool) {
       target.raw = false;
       target.source = "llm";
       target.displayName = humanize(canonical);
-      return payload;
+      return next();
     }
     // Merge the raw entry into the canonical identity (or create it).
     let canon = payload.tools.find((t) => t?.tool === canonical);
@@ -583,7 +587,7 @@ export function createToolRegistry(deps = {}) {
     canon.classificationOutcome = target.classificationOutcome;
     canon.aliases = [...new Set([...(canon.aliases ?? []), target.tool, ...(target.aliases ?? [])])];
     payload.tools = payload.tools.filter((t) => t !== target);
-    return payload;
+    return next();
   }
 
   // Lifecycle (§7.3/§7.4): EWMA decay, observed→candidate promotion, and at
@@ -754,12 +758,15 @@ export function createToolRegistry(deps = {}) {
   // mutex a connect answer landing mid-scan would be reverted by the scan's
   // save. Returns `{ok, scanned, asked}`.
   async function dailyScan() {
+    const previous = await loadPayload();
+    if (previous.scanRetryAt > now()) return { ok: false, deferred: true, retryAt: previous.scanRetryAt, scanned: 0 };
     const nowMs = now();
     const untilTs = nowMs;
     const rows = [];
     let asked = null;
     let scanLedger = false;
     let scanOk = true;
+    let scanCode;
     await patchRegistry(async (payload) => {
       const sinceTs =
         payload.lastScanTs ??
@@ -773,11 +780,15 @@ export function createToolRegistry(deps = {}) {
           dbCursor = dbRows.length >= SCAN_ROW_CAP
             ? { ts: last.time_created, id: last.id }
             : { ts: untilTs, id: "" };
-          if (dbRows.length >= SCAN_ROW_CAP && !last.id) throw new Error("missing-cursor");
+          if (!Number.isFinite(dbCursor.ts) || dbCursor.ts < sinceTs || dbCursor.ts > untilTs ||
+              typeof dbCursor.id !== "string" || (dbRows.length >= SCAN_ROW_CAP && !dbCursor.id)) {
+            throw new Error("invalid-cursor");
+          }
           rows.push(...extractFromDbRows(dbRows));
         }
-      } catch {
+      } catch (error) {
         scanOk = false;
+        scanCode = error.code === "unsupported-runtime" ? "unsupported-runtime" : "db-unavailable";
         dbCursor = null;
       }
       try {
@@ -789,6 +800,7 @@ export function createToolRegistry(deps = {}) {
         }
       } catch {
         scanOk = false;
+        scanCode ??= "surfaces-unavailable";
       }
       // Fuse the complete page, not the capped diagnostic usage FIFO. The DB
       // cursor and fused counters commit together in this registry transaction.
@@ -805,6 +817,9 @@ export function createToolRegistry(deps = {}) {
       }
       asked = askTool;
       scanLedger = changed || askTool != null;
+      payload.scanFailures = scanOk ? 0 : payload.scanFailures + 1;
+      payload.scanRetryAt = scanOk ? 0 : nowMs + (scanCode === "unsupported-runtime" ? DAY_MS :
+        Math.min(3_600_000, 300_000 * 2 ** Math.min(payload.scanFailures - 1, 4)));
       return payload;
     });
     if (scanLedger) {
@@ -816,6 +831,24 @@ export function createToolRegistry(deps = {}) {
       await ledgerLog({ kind: "cto.tool.usage_persist_failed", code: "persist-error" });
     }
     const saved = await loadPayload();
+    // Only prune outcomes proven applied to a committed registry. Pending
+    // results and reservations survive; never modify consent or aliases here.
+    await patchStore(classificationStore, (fresh) => {
+      const records = { ...fresh.records };
+      let changed = false, pruned = 0;
+      for (const [key, record] of Object.entries(records)) {
+        if (!["resolved", "rejected"].includes(record.status)) continue;
+        const applied = saved.tools.some((t) => record.status === "rejected"
+          ? t.tool === key && t.unclassifiable && t.llmAt === record.at
+          : !t.raw && (t.tool === key || t.aliases?.includes(key)));
+        if (!record.appliedAt && applied) { records[key] = { ...record, appliedAt: now() }; changed = true; }
+        if (record.appliedAt && now() - record.appliedAt > 90 * DAY_MS && pruned < 1000) {
+          delete records[key]; changed = true; pruned++;
+        }
+      }
+      return changed ? { records } : {};
+    });
+    if (!scanOk) await ledgerLog({ kind: "cto.tool.scan_unavailable", code: scanCode, retryAt: saved.scanRetryAt });
     return { ok: scanOk, partial: Boolean(saved.lastScanId), scanned: rows.length, asked: asked ?? null };
   }
 

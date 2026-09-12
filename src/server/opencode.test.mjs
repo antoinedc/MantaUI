@@ -2622,24 +2622,22 @@ for (const final of ["complete", "error"]) {
 for (const cleanupFails of [false, true]) {
   test(`provenance write failure never prompts and reports cleanup failure=${cleanupFails}`, async () => {
     const { runSynchronousSession } = await import("./opencode.mjs");
-    const { internalSessionsStore } = await import("./ctoStores.mjs");
-    const save = internalSessionsStore.save;
     let deleted = false;
-    internalSessionsStore.save = async () => { throw new Error("SECRET disk failure"); };
-    try {
-      await withMockFetch(async (url, opts) => {
-        assert.ok(!String(url).includes("/prompt_async"));
-        if (opts?.method === "DELETE") {
-          deleted = true;
-          return new Response(null, { status: cleanupFails ? 503 : 204 });
-        }
-        return new Response(JSON.stringify({ id: "provenance-failed" }));
-      }, async () => {
-        const result = await runSynchronousSession({ directory: "/work", instruction: "test" });
-        assert.equal(result.code, cleanupFails ? "cleanup-error" : "provenance-error");
-        assert.equal(result.ok, false);
+    await withMockFetch(async (url, opts) => {
+      assert.ok(!String(url).includes("/prompt_async"));
+      if (opts?.method === "DELETE") {
+        deleted = true;
+        return new Response(null, { status: cleanupFails ? 503 : 204 });
+      }
+      return new Response(JSON.stringify({ id: "provenance-failed" }));
+    }, async () => {
+      const result = await runSynchronousSession({ directory: "/work", instruction: "test",
+        trackCreation: () => async () => { throw new Error("SECRET disk failure"); },
       });
-    } finally { internalSessionsStore.save = save; }
+      assert.equal(result.code, "provenance-error");
+      assert.equal(result.cleanupCode, cleanupFails ? "cleanup-error" : undefined);
+      assert.equal(result.ok, false);
+    });
     assert.equal(deleted, true);
   });
 }

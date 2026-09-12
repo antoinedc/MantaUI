@@ -31,6 +31,9 @@ respects exponential backoff (one day initially, capped at fourteen days).
 New candidates and eligible retries alternate when both exist, with the least
 recently attempted retry going first. Include this store in maintenance backups;
 never erase it to bypass the daily limit.
+Replaying a saved result does not consume a new daily attempt. Applied outcomes
+older than 90 days can be pruned, at most 1,000 per scan; pending outcomes and
+unapplied reservations remain durable. Registry consent and aliases are untouched.
 Legacy `unclassifiable` records have no such distinction. The regular scan may
 retry one untouched legacy record only after evidence newer than its original
 classification arrives. The original timestamp and recovery basis are preserved.
@@ -71,3 +74,32 @@ new observed use; that is intentional.
 The 1,000-row bound is per reviewed recovery operation, not a loop. Continuing
 requires another reviewed page within the same fixed interval. If no trustworthy
 interval or historical ownership evidence exists, do not replay speculatively.
+
+## PR 1504 Review Disposition
+
+The reviewer session `ses_f68fb9237ffe13SZdKxHFQSVFw` was inspected through
+message metadata only. Its intermediate assistant messages have completed
+timestamps and `finish: tool-calls`; its final message
+`msg_0970fd567001QI3Zuh9W2h2eRS` has `finish: stop`. No new model call was made.
+
+| Finding | Disposition |
+| --- | --- |
+| 1 | Absent-finish premise disproved by live metadata. Missing finish stays non-terminal; a completed tool step is not completion. |
+| 2 | Shared completion classifier accepts normalized and provider-native terminal/cap spellings, reusing shared truncation classification. |
+| 3 | Positive/negative ownership caching, singleflight reads, cached parsed provenance with file-stamp/generation invalidation. Internal identity supersedes cached ownership. |
+| 4 | Headless creation requests carry a 10-second abort signal. Ownership barriers and reads time out fail-closed rather than indefinitely blocking activity. |
+| 5 | Operational execution failures are separately ledgered, not learned as failed plans or turned into false verification-failure cards. |
+| 6 | Normalized findings preserve project/cwd/sender; producers and queue enrichment retain known targets. Missing targets remain non-learning failures. |
+| 7 | Unknown prompt activity conservatively closes unattended work without entering evidence/profile/segments. Known internal activity remains excluded. |
+| 8 | Unsupported SQLite waits a day; transient scan failures persist exponential backoff from five minutes to one hour. No cursor advancement on failure. |
+| 9 | Provenance failures emit bounded, deduplicated, sanitized ledger diagnostics. |
+| 10 | Empty/schema/output-cap failures may cascade; transport, provenance and cleanup failures do not. |
+| 11 | Unrecognized failures use unknown-error, not schema-invalid. |
+| 12 | Bounded pruning of old applied classification outcomes; pending outcomes and consent/aliases remain intact. |
+| 13 | Free result replay leaves the actual classification budget available. |
+| 14 | Actual pane cwd priority is intentional: directory targets must match it; project-name selection remains distinct. Safety tests retained. |
+| 15 | Full-page cursor timestamp and ID validated before committing evidence/watermark. |
+| 16 | Cleanup diagnostic accompanies the primary failure; it no longer overwrites it. Structured cleanup failures are checked too. |
+| 17 | No recursive telemetry consumption found. Suggestion collectors filter kinds; digest content is sourced from rollups. Regression test excludes new telemetry. |
+| 18 | No consent defect: spec section 4.4 explicitly permits transcript reads. Existing summary enabled/pause/budget gates remain before evidence reads. External tool consent is unchanged. |
+| 19 | Failure-path tests inject creation tracking instead of mutating the shared production-store writer. Disk/restart tests retain isolated sandbox stores. |

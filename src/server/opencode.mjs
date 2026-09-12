@@ -16,6 +16,7 @@ import { expandTilde, patchPath } from "../shared/paths.mjs";
 import { readModalities, isDeprecated } from "../shared/modelGuide.mjs";
 import { startPoller } from "./startPoller.mjs";
 import { beginInternalSession } from "./internalSessions.mjs";
+import { assistantCompletion } from "./ctoRunOutcome.mjs";
 import { parseRetryAfterMs } from "./usageAdapters/httpError.mjs";
 import {
   CREDENTIALS_PATH,
@@ -112,7 +113,7 @@ function pooledOcRequest(url, init) {
     if (init?.headers) {
       for (const [k, v] of Object.entries(init.headers)) headers[k] = String(v);
     }
-    const req = http.request(url, { method, headers, agent: ocAgent }, (msg) => {
+    const req = http.request(url, { method, headers, agent: ocAgent, signal: init?.signal }, (msg) => {
       const body = new ReadableStream({
         start(controller) {
           msg.on("data", (chunk) => controller.enqueue(new Uint8Array(chunk)));
@@ -463,7 +464,7 @@ export function _onSessionDirectoryAdded(fn) {
 // paths. The server runs ON the opencode host, so `expandTilde` from
 // src/shared/paths.mjs expands against this process's own $HOME before
 // opencode sees the path.
-export async function createSession({ directory, title = "", permission }) {
+export async function createSession({ directory, title = "", permission, signal }) {
   const absDir = expandTilde(directory);
   const url = `/session?directory=${encodeURIComponent(absDir)}`;
   const body = { title };
@@ -479,6 +480,7 @@ export async function createSession({ directory, title = "", permission }) {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
+    signal,
   });
   if (!res.ok) {
     throw new Error(`opencode createSession ${res.status}: ${await res.text()}`);
@@ -984,11 +986,14 @@ export async function runSynchronousSession({
   pollIntervalMs = 1000,
   maxAttempts = 30,
   onCreated,
+  trackCreation = beginInternalSession,
 }) {
   const absDir = expandTilde(directory);
 
   let sid = null;
-  const finishCreation = beginInternalSession();
+  let result;
+  const finish = (out) => { result = out; return out; };
+  const finishCreation = trackCreation();
   try {
     const createRes = await ocFetch(
       apiUrl(`/session?directory=${encodeURIComponent(absDir)}`),
@@ -996,17 +1001,18 @@ export async function runSynchronousSession({
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ title }),
+        signal: AbortSignal.timeout(10_000),
       },
     );
     if (!createRes.ok) {
       await discardBody(createRes);
-      return { text: "", sid: null, ok: false, code: "create-http" };
+      return finish({ text: "", sid: null, ok: false, code: "create-http" });
     }
     sid = (await createRes.json()).id;
     try { await finishCreation(sid); } catch {
-      return { text: "", sid, ok: false, code: "provenance-error" };
+      return finish({ text: "", sid, ok: false, code: "provenance-error" });
     }
-    if (!sid || typeof sid !== "string") return { text: "", sid: null, ok: false, code: "create-invalid" };
+    if (!sid || typeof sid !== "string") return finish({ text: "", sid: null, ok: false, code: "create-invalid" });
     if (typeof onCreated === "function") {
       try {
         await onCreated(sid);
@@ -1032,7 +1038,7 @@ export async function runSynchronousSession({
     );
     if (!promptRes.ok) {
       await discardBody(promptRes);
-      return { text: "", sid, ok: false, code: "prompt-http" };
+      return finish({ text: "", sid, ok: false, code: "prompt-http" });
     }
 
     const msgUrl = apiUrl(`/session/${encodeURIComponent(sid)}/message`);
@@ -1048,21 +1054,19 @@ export async function runSynchronousSession({
       readFailed = false;
       const msgs = await r.json();
       if (Array.isArray(msgs) && msgs.some((m) => m?.info?.role === "assistant" && m.info.error)) {
-        return { text: "", sid, ok: false, code: "model-error" };
+        return finish({ text: "", sid, ok: false, code: "model-error" });
       }
       const assistant = Array.isArray(msgs) ? msgs.filter((m) => m?.info?.role === "assistant").at(-1) : null;
       // A completed tool-use step is not the end of the assistant's turn.
-      if (!Number.isFinite(assistant?.info?.time?.completed) ||
-          !assistant.info.finish || assistant.info.finish === "tool-calls" || assistant.info.finish === "unknown") continue;
-      if (["length", "content-filter", "error"].includes(assistant.info.finish)) {
-        return { text: "", sid, ok: false, code: "model-error" };
-      }
+      const completion = assistantCompletion(assistant?.info);
+      if (!completion) continue;
+      if (completion !== "ok") return finish({ text: "", sid, ok: false, code: completion });
       const text = extractAssistantText([assistant]);
-      return text ? { text, sid, ok: true } : { text: "", sid, ok: false, code: "empty-output" };
+      return finish(text ? { text, sid, ok: true } : { text: "", sid, ok: false, code: "empty-output" });
     }
-    return { text: "", sid, ok: false, code: readFailed ? "read-http" : "timeout" };
+    return finish({ text: "", sid, ok: false, code: readFailed ? "read-http" : "timeout" });
   } catch {
-    return { text: "", sid, ok: false, code: "transport-error" };
+    return finish({ text: "", sid, ok: false, code: "transport-error" });
   } finally {
     // A provenance failure must not bypass cleanup or leak a rejected promise.
     try { await finishCreation(sid); } catch { /* already returned a safe runner failure */ }
@@ -1071,7 +1075,8 @@ export async function runSynchronousSession({
         await deleteSessionRaw(sid);
       } catch {
         // Never report a clean run when the internal session was left behind.
-        return { text: "", sid, ok: false, code: "cleanup-error" };
+        result.cleanupCode = "cleanup-error";
+        if (result.ok) Object.assign(result, { ok: false, code: "cleanup-error" });
       }
     }
   }

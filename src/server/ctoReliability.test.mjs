@@ -1,7 +1,7 @@
 import "./ctoTestGuard.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { beginInternalSession, resolvePipelineSession } from "./internalSessions.mjs";
+import { beginInternalSession, createInternalSessions } from "./internalSessions.mjs";
 import { resolvePlanParent, createCtoPlanRunner } from "./ctoAct.mjs";
 import { collectDbRows, extractFromDbRows, SCAN_ROW_CAP } from "./ctoToolScan.mjs";
 import { readSegmentEvidence } from "./ctoSegmentEvidence.mjs";
@@ -25,6 +25,8 @@ async function openSqlite(t) {
 }
 
 test("production ownership resolver fences creation, retains deleted internal identity, and retries unknown ownership", async () => {
+  let time = 0;
+  const { beginInternalSession, resolvePipelineSession } = createInternalSessions({ store: store({ v: 1, ids: [] }), now: () => time });
   const finish = beginInternalSession();
   let settled = false;
   const pending = resolvePipelineSession("internal-race", async () => []).then((r) => { settled = true; return r; });
@@ -34,6 +36,7 @@ test("production ownership resolver fences creation, retains deleted internal id
   assert.equal((await pending).owner, "cto");
   assert.equal((await resolvePipelineSession("internal-race", async () => [])).owner, "cto");
   assert.equal((await resolvePipelineSession("new-human", async () => [])).owner, "unknown");
+  time = 1001;
   assert.equal((await resolvePipelineSession("new-human", async () => [
     { tmuxSession: "project", windows: [{ opencodeSessionId: "new-human" }] },
   ])).owner, "user");

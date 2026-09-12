@@ -23,7 +23,7 @@
 // issues that consume them; this layer only fixes the durability contract.
 
 import { readFileSync, existsSync, readdirSync } from "node:fs";
-import { readFile, writeFile, appendFile, mkdir, rm, readdir } from "node:fs/promises";
+import { readFile, writeFile, appendFile, mkdir, rm, readdir, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { statePath } from "../shared/paths.mjs";
@@ -121,6 +121,15 @@ function createCtoJsonStore(name, path, { strict = false } = {}) {
   return {
     name,
     path,
+    stamp: async () => {
+      try {
+        const s = await stat(path);
+        return `${s.ino}:${s.size}:${s.mtimeMs}:${s.ctimeMs}`;
+      } catch (error) {
+        if (error.code === "ENOENT") return "missing";
+        throw error;
+      }
+    },
     migrate: (data) => migrateStore(name, data),
     loadSync: () => {
       if (strict) {

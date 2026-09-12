@@ -13,7 +13,7 @@ import { listRoutableModels } from "./opencode.mjs";
 import { buildRoutingServices } from "./routingServices.mjs";
 import { lookupModel, matchModel, allModels } from "./modelCatalog.mjs";
 import { chooseSubagentModel } from "./delegate.mjs";
-import { safeSummaryCode } from "./ctoRunOutcome.mjs";
+import { safeSummaryCode, isQualityFailure } from "./ctoRunOutcome.mjs";
 
 // ---------------------------------------------------------------------------
 // Task classes (§12.3) — a literal table in code. NEVER a model id.
@@ -227,12 +227,12 @@ export async function runEphemeral({ taskClass, operation, context = [], directo
       await record("cto.operation_outcome", "runner-error");
       throw error;
     }
-    if (out.ok === false) {
+    if (out.cleanupCode || (out.ok === false && !isQualityFailure(out.code))) {
       await record("cto.operation_outcome", safeSummaryCode(out.code));
       return out;
     }
-    const valid = typeof deps.validate === "function" ? await deps.validate(out) : true;
-    await record("cto.operation_outcome", valid ? "ok" : "schema-invalid");
+    const valid = out.ok !== false && (typeof deps.validate === "function" ? await deps.validate(out) : true);
+    await record("cto.operation_outcome", valid ? "ok" : out.code ?? "schema-invalid");
     if (valid) return out;
     const next = escalateTier(meta.tier); // nano -> mid; others null
     if (next && next !== tier && !escalated) {
@@ -240,7 +240,7 @@ export async function runEphemeral({ taskClass, operation, context = [], directo
       tier = next;
       continue; // cascade exactly one tier, at most once per call
     }
-    return { ...out, ok: false, code: "schema-invalid" };
+    return { ...out, ok: false, code: out.code ?? "schema-invalid" };
   }
   // unreachable: the loop runs at most twice
   throw new Error(`runEphemeral: cascade exceeded maximum attempts for "${taskClass}"`);
@@ -288,7 +288,8 @@ async function runOnce({ taskClass, meta, tier, context, directory, deps }) {
       /* metering is best-effort */
     }
     return { text: res?.text ?? "", taskClass, tier, sid: res?.sid ?? sid,
-      ...(res?.ok === false ? { ok: false, code: safeSummaryCode(res.code) } : {}) };
+      ...(res?.ok === false ? { ok: false, code: safeSummaryCode(res.code) } : {}),
+      ...(res?.cleanupCode ? { cleanupCode: safeSummaryCode(res.cleanupCode) } : {}) };
   } finally {
     // Remove from the active set even when the run errored (finally).
     if (sid) {

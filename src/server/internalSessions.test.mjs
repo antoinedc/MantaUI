@@ -77,19 +77,17 @@ test("headless plan execution also persists ownership before its first prompt", 
 
 for (const cleanupFails of [false, true]) {
   test(`headless plan provenance failure stops prompting, cleanup failure=${cleanupFails}`, async () => {
-    const save = internalSessionsStore.save;
     let deleted = false;
-    internalSessionsStore.save = async () => { throw new Error("disk-full"); };
-    try {
-      const run = createCtoPlanRunner({
-        resolveParent: async () => ({ parentDirectory: "/work" }),
-        createSession: async () => ({ ok: true, id: "failed-plan" }),
-        sendPrompt: async () => assert.fail("provenance must persist before prompting"),
-        deleteSession: async () => { deleted = true; if (cleanupFails) throw new Error("delete-failed"); },
-      });
-      const result = await run({ plan: { id: "p", steps: ["inspect"], verify: { kind: "session-ok" } } });
-      assert.equal(result.reason, cleanupFails ? "provenance-cleanup-error" : "provenance-error");
-      assert.equal(deleted, true);
-    } finally { internalSessionsStore.save = save; }
+    const run = createCtoPlanRunner({
+      trackCreation: () => async () => { throw new Error("disk-full"); },
+      resolveParent: async () => ({ parentDirectory: "/work" }),
+      createSession: async () => ({ ok: true, id: "failed-plan" }),
+      sendPrompt: async () => assert.fail("provenance must persist before prompting"),
+      deleteSession: async () => { deleted = true; if (cleanupFails) throw new Error("delete-failed"); },
+    });
+    const result = await run({ plan: { id: "p", steps: ["inspect"], verify: { kind: "session-ok" } } });
+    assert.equal(result.reason, "provenance-error");
+    assert.equal(result.cleanupCode, cleanupFails ? "cleanup-error" : undefined);
+    assert.equal(deleted, true);
   });
 }
