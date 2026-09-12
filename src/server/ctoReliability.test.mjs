@@ -1,7 +1,6 @@
 import "./ctoTestGuard.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DatabaseSync } from "node:sqlite";
 import { beginInternalSession, resolvePipelineSession } from "./internalSessions.mjs";
 import { resolvePlanParent, createCtoPlanRunner } from "./ctoAct.mjs";
 import { collectDbRows, extractFromDbRows, SCAN_ROW_CAP } from "./ctoToolScan.mjs";
@@ -12,6 +11,18 @@ const store = (value = {}) => ({
   load: async () => structuredClone(value),
   save: async (next) => { value = structuredClone(next); },
 });
+
+async function openSqlite(t) {
+  let DatabaseSync;
+  try {
+    ({ DatabaseSync } = await import("node:sqlite"));
+  } catch (error) {
+    if (error.code !== "ERR_UNKNOWN_BUILTIN_MODULE") throw error;
+    t.skip("node:sqlite unavailable on this runtime");
+    return null;
+  }
+  return new DatabaseSync(":memory:");
+}
 
 test("production ownership resolver fences creation, retains deleted internal identity, and retries unknown ownership", async () => {
   const finish = beginInternalSession();
@@ -47,8 +58,9 @@ test("production target resolver never picks the first project for an unknown ta
   assert.equal(result.reason, "unknown-project");
 });
 
-test("real SQLite discovery paginates equal timestamps and excludes internal transcript", async () => {
-  const db = new DatabaseSync(":memory:");
+test("real SQLite discovery paginates equal timestamps and excludes internal transcript", async (t) => {
+  const db = await openSqlite(t);
+  if (!db) return;
   try {
     db.exec("CREATE TABLE session(id TEXT, title TEXT); CREATE TABLE part(id TEXT, session_id TEXT, time_created INTEGER, data TEXT)");
     db.exec("INSERT INTO session VALUES ('human','work'),('internal','cto:ambient-summarize')");
@@ -70,8 +82,9 @@ test("real SQLite discovery paginates equal timestamps and excludes internal tra
   } finally { db.close(); }
 });
 
-test("real SQLite summary evidence is session/time scoped and bounded", () => {
-  const db = new DatabaseSync(":memory:");
+test("real SQLite summary evidence is session/time scoped and bounded", async (t) => {
+  const db = await openSqlite(t);
+  if (!db) return;
   try {
     db.exec("CREATE TABLE message(id TEXT, data TEXT); CREATE TABLE part(id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT)");
     db.prepare("INSERT INTO message VALUES (?,?)").run("m", JSON.stringify({ role: "assistant" }));
