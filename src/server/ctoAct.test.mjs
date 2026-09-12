@@ -62,6 +62,7 @@ function fakeRunnerSeams({ texts = [], checks = null, startRefusal = null, laten
   return {
     state: { sends, sessions, get deleted() { return deleted; } },
     deps: {
+      resolveParent: async () => ({ parentSessionID: "parent", parentDirectory: "/srv/app" }),
       createSession: async ({ directory, title, permission } = {}) => {
         if (startRefusal) return { ok: false, reason: startRefusal };
         const id = `sess-${sessions.length + 1}`;
@@ -286,7 +287,7 @@ test("runner: no parent project → refused (never a silent no-op), ephemeral st
   });
   const res = await execute({ plan: basePlan({ access: [{ permission: "edit", pattern: "**" }] }) });
   assert.equal(res.ok, false);
-  assert.equal(res.reason, "no-project-session");
+  assert.equal(res.reason, "unknown-project");
 
   const g = fakeRunnerSeams({ startRefusal: "opencode-down" });
   const execute2 = createCtoPlanRunner(g.deps);

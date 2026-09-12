@@ -1515,12 +1515,12 @@ export function createCtoEngine(deps = {}) {
   // §7.1-2: the daily batch's db seam — tool-call part rows in the scan
   // window, via the injected opencodeDb read handle (same async supplier the
   // backfill uses; a missing handle yields no rows, never a throw).
-  async function toolsCollectDb({ sinceTs, untilTs, cap }) {
-    if (typeof getDb !== "function") return [];
+  async function toolsCollectDb({ sinceTs, untilTs, cap, afterId }) {
+    if (typeof getDb !== "function") throw new Error("discovery-db-unavailable");
     const db = await getDb().catch(() => null);
-    if (!db) return [];
+    if (!db) throw new Error("discovery-db-unavailable");
     const { collectDbRows } = await import("./ctoToolScan.mjs");
-    return collectDbRows(db, { sinceTs, untilTs, cap });
+    return collectDbRows(db, { sinceTs, untilTs, cap, afterId });
   }
 
   // The daily tool scan (§7.3): once per UTC day, inside the tick's enabled
@@ -1539,11 +1539,11 @@ export function createCtoEngine(deps = {}) {
     } catch {
       /* best-effort — the registry falls back to its own 30-day window */
     }
-    await getTools({ backfillStartInstant }).dailyScan();
+    const scan = await getTools({ backfillStartInstant }).dailyScan();
     // Stamp the day only AFTER a successful scan — a failed scan retries on
     // the next tick instead of waiting until tomorrow (the registry's own
     // watermarks keep the retry idempotent).
-    lastToolScanDay = day;
+    if (scan?.ok && !scan.partial) lastToolScanDay = day;
   }
 
   // Load the last `windowDays` (default 7, §13.4) day rollups so the watcher
@@ -2614,16 +2614,6 @@ export function createCtoEngine(deps = {}) {
     if (disposed) return;
     heartbeatAt = now();
     if (!evt || typeof evt !== "object") return;
-    // Presence (§5.4): a user prompt submission proves the user is at the desk.
-    if (isUserPromptEvent(evt)) {
-      const t = now();
-      if (t > promptTs) promptTs = t;
-      // §11.6 preemption on the user's return: an open overnight window closes
-      // and its running CTO jobs are paused at their next tool-call boundary —
-      // immediately, not at the next tick. Fire-and-forget; the next tick's
-      // evaluateWindow would reach the same close regardless.
-      void preemptOvernight("user-return").catch(() => {});
-    }
     // The SAME opencode event arrives on both the global and the per-directory
     // scoped stream — fold the duplicate so it counts once.
     const id = evt?.id;
@@ -2631,13 +2621,19 @@ export function createCtoEngine(deps = {}) {
     // Evidence append is best-effort I/O; never let it throw into the pump.
     void (async () => {
       try {
-        let owner = "user";
+        let owner = "unknown";
         let project;
         const sid = eventSessionID(evt);
         if (sid) {
           const info = await getSessionInfo(sid);
-          owner = info?.owner ?? "user";
+          owner = info?.owner ?? "unknown";
           project = info?.project;
+        }
+        if (!isPipelineSession(owner)) return;
+        // Headless/internal and job prompts are not evidence of human presence.
+        if (owner === "user" && isUserPromptEvent(evt)) {
+          promptTs = Math.max(promptTs, now());
+          void preemptOvernight("user-return").catch(() => {});
         }
         // A6 segmentation — feed pipeline (user|job) sessions into the
         // segmenter's online state machine. Never throws into the pump;

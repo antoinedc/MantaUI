@@ -20,7 +20,7 @@
 //
 // All I/O is injected; pure helpers are exported for tests.
 
-import { toolRegistryStore, toolUsageStore, ledgerStore, patchStore } from "./ctoStores.mjs";
+import { toolRegistryStore, toolUsageStore, toolClassificationStore, ledgerStore, patchStore } from "./ctoStores.mjs";
 import { displayName as catalogDisplayName } from "./ctoToolCatalog.mjs";
 import {
   CHANNEL_TRANSCRIPT,
@@ -53,6 +53,9 @@ function payloadFrom(raw) {
       ...(t ?? {}),
     })),
     lastScanTs: Number.isFinite(p?.lastScanTs) ? p.lastScanTs : null,
+    lastScanId: typeof p.lastScanId === "string" ? p.lastScanId : "",
+    lastSurfaceDay: typeof p.lastSurfaceDay === "string" ? p.lastSurfaceDay : null,
+    lastClassificationDay: typeof p.lastClassificationDay === "string" ? p.lastClassificationDay : null,
     lastFusedTs: Number.isFinite(p?.lastFusedTs) ? p.lastFusedTs : null,
     lastAskDay: typeof p?.lastAskDay === "string" ? p.lastAskDay : null,
     lastDeepAskDay: typeof p?.lastDeepAskDay === "string" ? p.lastDeepAskDay : null,
@@ -65,8 +68,41 @@ export const USAGE_ROWS_CAP = 4000;
 // Per-tool evidence trail cap (§7.2 `evidence: [{channel, detail, ts}]`).
 export const EVIDENCE_CAP = 20;
 // Raw evidence must appear this many times before ONE LLM classification is
-// spent on it (junk singletons are never classified).
+// spent on it (low-evidence singletons remain unresolved).
 export const RAW_CLASSIFY_MIN_USES = 2;
+export const UNRESOLVED_PRUNE_LIMIT = 1000;
+export const UNRESOLVED_RETENTION_MS = 90 * 24 * 3_600_000;
+
+// Bound only unresolved, untouched candidates. Human decisions and resolved
+// identities are never eviction candidates, even when they are old.
+export function retainUnresolved(tools, nowMs) {
+  const eligible = tools.filter((t) => t.raw && !t.unclassifiable &&
+    !(t.askRound > 0) && !(t.deepAskRound > 0) &&
+    !Object.values(t.consent ?? {}).some((v) => v != null) &&
+    t.status === "observed" && (t.uses ?? 0) <= 1 &&
+    nowMs - (t.engagement?.last_used ?? t.firstSeenTs ?? nowMs) > UNRESOLVED_RETENTION_MS);
+  const expired = new Set(eligible
+    .sort((a, b) => (a.engagement?.last_used ?? a.firstSeenTs ?? 0) - (b.engagement?.last_used ?? b.firstSeenTs ?? 0))
+    .slice(0, UNRESOLVED_PRUNE_LIMIT));
+  return tools.filter((t) => !expired.has(t));
+}
+
+export function recoverLegacyClassification(tools, nowMs) {
+  // Old records conflated errors/gating with an explicit model rejection.
+  // Never guess which it was: allow one new assessment only after new use,
+  // and only if no human has interacted with the identity.
+  const target = tools.find((t) => t.raw && t.unclassifiable &&
+    !t.classificationOutcome && !t.classificationRecovery &&
+    Number.isFinite(t.llmAt) && (t.engagement?.last_used ?? 0) > t.llmAt &&
+    (t.uses ?? 0) >= RAW_CLASSIFY_MIN_USES &&
+    t.status === "observed" && !(t.askRound > 0) && !(t.deepAskRound > 0) &&
+    !Object.values(t.consent ?? {}).some((v) => v != null));
+  if (!target) return null;
+  target.classificationRecovery = { at: nowMs, previousLlmAt: target.llmAt, basis: "fresh-evidence" };
+  target.unclassifiable = false;
+  target.llmAt = null;
+  return target.tool;
+}
 // The engagement bar (§7.4): ≥3 uses across ≥2 distinct weeks.
 export const ENGAGEMENT_MIN_USES = 3;
 export const ENGAGEMENT_MIN_WEEKS = 2;
@@ -300,7 +336,7 @@ export function fuseRow(tools, row, { nowMs } = {}) {
   const identity = typeof row.identity === "string" && row.identity ? row.identity.toLowerCase() : null;
   if (!identity) return arr; // no derivable identity — log-only evidence
 
-  let tool = arr.find((t) => t?.tool === identity);
+  let tool = arr.find((t) => t?.tool === identity || t?.aliases?.includes(identity));
   if (!tool) {
     tool = baseTool(identity, ts);
     tool.raw = row.source === "raw";
@@ -357,6 +393,7 @@ export function createToolRegistry(deps = {}) {
   const {
     registryStore = toolRegistryStore,
     usageStore = toolUsageStore,
+    classificationStore = toolClassificationStore,
     cards = null, // { upsertConnect, resolveConnectCards, listOpen }
     ledger = ledgerStore,
     recordVerdict = null, // async ({subject, verdict, never?}) => {ok}
@@ -429,6 +466,7 @@ export function createToolRegistry(deps = {}) {
     let tools = payload.tools;
     for (const r of rows) {
       const ts = Number(r?.ts) || 0;
+      if (r.fused === true) continue;
       if (ts <= watermark) continue;
       tools = fuseRow(tools, r, { nowMs: now() });
       maxTs = Math.max(maxTs, ts);
@@ -438,14 +476,42 @@ export function createToolRegistry(deps = {}) {
     return payload;
   }
 
-  // One LLM classification (≤1 per scan): the oldest raw identity past the
-  // uses threshold. Never re-asks a classified or unclassifiable identity.
+  // Registry lock -> classification lock, never the reverse. The independent
+  // store commits the reservation/result even if this registry transaction fails.
   async function classifyOneRaw(payload) {
     if (typeof runEphemeral !== "function") return payload;
-    const target = payload.tools
-      .filter((t) => t?.raw && !t?.unclassifiable && t?.llmAt == null && (t?.uses ?? 0) >= RAW_CLASSIFY_MIN_USES)
-      .sort((a, b) => (a?.firstSeenTs ?? 0) - (b?.firstSeenTs ?? 0))[0];
+    const day = new Date(now()).toISOString().slice(0, 10);
+    let target;
+    let attempt;
+    let replay = false;
+    await patchStore(classificationStore, (fresh) => {
+      const records = fresh.records ?? {};
+      const eligible = payload.tools.filter((t) => t.raw && !t.unclassifiable && t.llmAt == null &&
+        !Object.values(t.consent ?? {}).some((v) => v != null) && t.uses >= RAW_CLASSIFY_MIN_USES);
+      target = eligible.find((t) => ["resolved", "rejected"].includes(records[t.tool]?.status));
+      if (target) {
+        attempt = records[target.tool];
+        replay = true;
+        return {};
+      }
+      if (fresh.day === day || payload.lastClassificationDay === day) return {};
+      const due = eligible.filter((t) => Math.max(t.retryAfter ?? 0, records[t.tool]?.retryAfter ?? 0) <= now());
+      const untried = due.filter((t) => !records[t.tool] && !t.classificationOutcome)
+        .sort((a, b) => (a.firstSeenTs ?? 0) - (b.firstSeenTs ?? 0));
+      const retries = due.filter((t) => records[t.tool] || t.classificationOutcome)
+        .sort((a, b) => (records[a.tool]?.at ?? a.classificationOutcome?.at ?? 0) -
+          (records[b.tool]?.at ?? b.classificationOutcome?.at ?? 0));
+      // Alternate lanes when both exist; least-recently attempted retry first.
+      const lane = untried.length && (fresh.lane !== "new" || !retries.length) ? "new" : "retry";
+      target = (lane === "new" ? untried : retries)[0];
+      if (!target) return {};
+      const count = (records[target.tool]?.attempts ?? 0) + 1;
+      attempt = { status: "reserved", at: now(), attempts: count,
+        retryAfter: now() + DAY_MS * Math.min(14, 2 ** Math.min(count - 1, 4)) };
+      return { day, lane, records: { ...records, [target.tool]: attempt } };
+    });
     if (!target) return payload;
+    payload.lastClassificationDay = day;
     const context = [
       {
         priority: 1,
@@ -458,54 +524,66 @@ export function createToolRegistry(deps = {}) {
         ].join("\n"),
       },
     ];
-    target.llmAt = now();
-    try {
-      const res = await runEphemeral({ taskClass: TOOL_CLASSIFY_TASK_CLASS, context });
-      const canonical = parseClassification(res?.text);
-      if (!canonical) {
-        // Unclassifiable — cached; this identity is never re-asked (§7.1-4).
-        target.unclassifiable = true;
-        return payload;
-      }
-      if (canonical === target.tool) {
-        target.raw = false;
-        target.source = "llm";
-        target.displayName = humanize(canonical);
-        return payload;
-      }
-      // Merge the raw entry into the canonical identity (or create it).
-      let canon = payload.tools.find((t) => t?.tool === canonical);
-      if (!canon) {
-        canon = baseTool(canonical, target.firstSeenTs);
-        canon.source = "llm";
-        payload.tools.push(canon);
-      }
-      canon.uses += target.uses;
-      canon.engagement.last_used = Math.max(canon.engagement?.last_used ?? 0, target.engagement?.last_used ?? 0);
-      canon.firstSeenTs = Math.min(canon.firstSeenTs ?? Infinity, target.firstSeenTs ?? Infinity);
-      canon.engagement.ewma_per_week = (canon.engagement?.ewma_per_week ?? 0) + (target.engagement?.ewma_per_week ?? 0);
-      for (const [p, n] of Object.entries(target.engagement?.per_project ?? {})) {
-        canon.engagement.per_project[p] = (canon.engagement.per_project[p] ?? 0) + n;
-      }
-      for (const wk of target.weeks ?? []) {
-        if (!canon.weeks.includes(wk)) canon.weeks.push(wk);
-      }
-      canon.weeksActive = canon.weeks.length;
-      for (const e of target.evidence ?? []) {
-        if (!canon.evidence.some((x) => x?.channel === e?.channel && x?.detail === e?.detail)) {
-          canon.evidence.push(e);
+    if (!replay) {
+      let status = "retry";
+      let canonical = null;
+      try {
+        const res = await runEphemeral({ taskClass: TOOL_CLASSIFY_TASK_CLASS, operation: "tool-classification", context });
+        if (!res?.gated && res?.ok !== false && typeof res?.text === "string") {
+          canonical = parseClassification(res.text);
+          if (canonical) status = "resolved";
+          else if (res.text.trim().toLowerCase() === "unknown") status = "rejected";
         }
-      }
-      canon.evidence = canon.evidence.slice(-EVIDENCE_CAP);
-      canon.llmAt = target.llmAt;
-      payload.tools = payload.tools.filter((t) => t !== target);
+      } catch { /* reservation survives a thrown provider error */ }
+      attempt = { ...attempt, status, ...(canonical ? { canonical } : {}) };
+      await patchStore(classificationStore, (fresh) => ({ records: { ...fresh.records, [target.tool]: attempt } }));
+    }
+    target.classificationOutcome = { status: attempt.status, at: attempt.at };
+    if (attempt.status === "retry") {
+      target.retryAfter = attempt.retryAfter;
       return payload;
-    } catch {
-      // The call failed after being spent — cache "unclassifiable" (§7.1-4:
-      // at most once, never re-asked for the same identity).
+    }
+    target.llmAt = attempt.at;
+    if (attempt.status === "rejected") {
       target.unclassifiable = true;
       return payload;
     }
+    const canonical = attempt.canonical;
+    if (canonical === target.tool) {
+      target.raw = false;
+      target.source = "llm";
+      target.displayName = humanize(canonical);
+      return payload;
+    }
+    // Merge the raw entry into the canonical identity (or create it).
+    let canon = payload.tools.find((t) => t?.tool === canonical);
+    if (!canon) {
+      canon = baseTool(canonical, target.firstSeenTs);
+      canon.source = "llm";
+      payload.tools.push(canon);
+    }
+    canon.uses += target.uses;
+    canon.engagement.last_used = Math.max(canon.engagement?.last_used ?? 0, target.engagement?.last_used ?? 0);
+    canon.firstSeenTs = Math.min(canon.firstSeenTs ?? Infinity, target.firstSeenTs ?? Infinity);
+    canon.engagement.ewma_per_week = (canon.engagement?.ewma_per_week ?? 0) + (target.engagement?.ewma_per_week ?? 0);
+    for (const [p, n] of Object.entries(target.engagement?.per_project ?? {})) {
+      canon.engagement.per_project[p] = (canon.engagement.per_project[p] ?? 0) + n;
+    }
+    for (const wk of target.weeks ?? []) {
+      if (!canon.weeks.includes(wk)) canon.weeks.push(wk);
+    }
+    canon.weeksActive = canon.weeks.length;
+    for (const e of target.evidence ?? []) {
+      if (!canon.evidence.some((x) => x?.channel === e?.channel && x?.detail === e?.detail)) {
+        canon.evidence.push(e);
+      }
+    }
+    canon.evidence = canon.evidence.slice(-EVIDENCE_CAP);
+    canon.llmAt = target.llmAt;
+    canon.classificationOutcome = target.classificationOutcome;
+    canon.aliases = [...new Set([...(canon.aliases ?? []), target.tool, ...(target.aliases ?? [])])];
+    payload.tools = payload.tools.filter((t) => t !== target);
+    return payload;
   }
 
   // Lifecycle (§7.3/§7.4): EWMA decay, observed→candidate promotion, and at
@@ -547,6 +625,7 @@ export function createToolRegistry(deps = {}) {
     // un-never snapshot — barCrossed is monotone in uses, so without the
     // snapshot a just-un-never'd tool would instantly re-promote and re-ask.
     for (const t of payload.tools) {
+      if (t.raw || t.unclassifiable) continue;
       if (t?.status !== "observed" || !barCrossed(t)) continue;
       if (t.unneverAtUses != null && (t?.uses ?? 0) <= t.unneverAtUses + REARM_FRESH_USES) continue;
       t.unneverAtUses = null;
@@ -570,6 +649,7 @@ export function createToolRegistry(deps = {}) {
       const today = new Date(nowMs).toISOString().slice(0, 10);
       const eligible = payload.tools
         .filter((t) => {
+          if (t.raw || t.unclassifiable) return false;
           if (t?.status !== "candidate") return false;
           const consent = t?.consent ?? {};
           if (consent.metadata === "yes" || consent.metadata === "never") return false;
@@ -626,6 +706,7 @@ export function createToolRegistry(deps = {}) {
       // a chain-tripped tool (the cascade stopped deep analyses).
       const deepEligible = payload.tools
         .filter((t) => {
+          if (t.raw || t.unclassifiable) return false;
           if (t?.status !== "integrated" || t?.asSourceDecayed === true) return false;
           const consent = t?.consent ?? {};
           if (consent.metadata !== "yes") return false;
@@ -678,27 +759,50 @@ export function createToolRegistry(deps = {}) {
     const rows = [];
     let asked = null;
     let scanLedger = false;
+    let scanOk = true;
     await patchRegistry(async (payload) => {
       const sinceTs =
         payload.lastScanTs ??
         (Number.isFinite(backfillStartInstant) ? backfillStartInstant : nowMs - 30 * DAY_MS);
+      await fusePending(payload);
+      let dbCursor = null;
       try {
         if (typeof collectDb === "function") {
-          const dbRows = await collectDb({ sinceTs, untilTs, cap: SCAN_ROW_CAP });
+          const dbRows = await collectDb({ sinceTs, afterId: payload.lastScanId, untilTs, cap: SCAN_ROW_CAP });
+          const last = dbRows.at(-1);
+          dbCursor = dbRows.length >= SCAN_ROW_CAP
+            ? { ts: last.time_created, id: last.id }
+            : { ts: untilTs, id: "" };
+          if (dbRows.length >= SCAN_ROW_CAP && !last.id) throw new Error("missing-cursor");
           rows.push(...extractFromDbRows(dbRows));
         }
-        if (typeof collectSurfaces === "function") {
+      } catch {
+        scanOk = false;
+        dbCursor = null;
+      }
+      try {
+        const day = new Date(nowMs).toISOString().slice(0, 10);
+        if (typeof collectSurfaces === "function" && payload.lastSurfaceDay !== day) {
           const surfaces = (await collectSurfaces()) ?? {};
           rows.push(...collectConfigEvidence(surfaces, { ts: nowMs }));
+          payload.lastSurfaceDay = day;
         }
       } catch {
-        /* channel failures never take the scan down */
+        scanOk = false;
       }
-      await appendUsage(rows);
-      await fusePending(payload);
+      // Fuse the complete page, not the capped diagnostic usage FIFO. The DB
+      // cursor and fused counters commit together in this registry transaction.
+      for (const row of rows) payload.tools = fuseRow(payload.tools, row, { nowMs });
+      if (payload.lastClassificationDay !== new Date(nowMs).toISOString().slice(0, 10)) {
+        recoverLegacyClassification(payload.tools, nowMs);
+      }
       await classifyOneRaw(payload);
       const { changed, asked: askTool } = await lifecycleStep(payload);
-      payload.lastScanTs = untilTs;
+      payload.tools = retainUnresolved(payload.tools, nowMs);
+      if (dbCursor) {
+        payload.lastScanTs = dbCursor.ts;
+        payload.lastScanId = dbCursor.id;
+      }
       asked = askTool;
       scanLedger = changed || askTool != null;
       return payload;
@@ -706,7 +810,13 @@ export function createToolRegistry(deps = {}) {
     if (scanLedger) {
       await ledgerLog({ kind: "cto.tool.scan", asked: asked ?? null });
     }
-    return { ok: true, scanned: rows.length, asked: asked ?? null };
+    try {
+      await appendUsage(rows.map((row) => ({ ...row, fused: true })));
+    } catch {
+      await ledgerLog({ kind: "cto.tool.usage_persist_failed", code: "persist-error" });
+    }
+    const saved = await loadPayload();
+    return { ok: scanOk, partial: Boolean(saved.lastScanId), scanned: rows.length, asked: asked ?? null };
   }
 
   // Resolve a connect ask (§7.4 three-way, per ring). Writes the consent

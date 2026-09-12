@@ -35,6 +35,7 @@
 import { engineStateStore, segmentsStore, ledgerStore, patchEngineState } from "./ctoStores.mjs";
 import { isUserPromptEvent } from "./ctoEvidence.mjs";
 import { validateProposalList } from "./ctoJournal.mjs";
+import { safeSummaryCode } from "./ctoRunOutcome.mjs";
 
 export const DEFAULT_G_MINUTES = 45;
 export const G_MIN = 20;
@@ -498,15 +499,15 @@ export function createSegmenter(deps = {}) {
   // degraded), reusing the session's cached one-liner. Never throws. Awaits
   // any pending one-liner compute (turn completion) so close reuses the cached
   // value rather than racing it.
-  async function doClose(seg, st) {
-    if (st?.turnChain) {
+  async function doClose(seg, turnChain) {
+    let cached;
+    if (turnChain) {
       try {
-        await st.turnChain;
+        cached = await turnChain;
       } catch {
         /* one-liner compute is best-effort */
       }
     }
-    const cached = oneLiners.get(seg.sessionID)?.oneLiner;
     const data = {
       sessionID: seg.sessionID,
       project: seg.project,
@@ -518,6 +519,8 @@ export function createSegmenter(deps = {}) {
     };
     let summary;
     let failed = false;
+    let code = null;
+    await ledgerLog({ kind: "cto.segment_summary_attempt", sessionID: seg.sessionID, project: seg.project });
     try {
       const res = await summarize(data);
       if (res?.ok && validateSegmentSummary(res.summary)) {
@@ -531,16 +534,19 @@ export function createSegmenter(deps = {}) {
         // A real (non-gated) validation failure — record + degrade.
         summary = degradedSegmentSummary(data);
         failed = true;
+        code = safeSummaryCode(res?.code);
       } else {
         // Gated (disabled/paused/rate-limited): expected, persist degraded.
         summary = degradedSegmentSummary(data);
+        code = "gated";
       }
     } catch {
       summary = degradedSegmentSummary(data);
       failed = true;
+      code = "summary-error";
     }
     if (failed) {
-      await ledgerLog({ kind: "cto.segment_summary_failed", sessionID: seg.sessionID, project: seg.project });
+      await ledgerLog({ kind: "cto.segment_summary_failed", sessionID: seg.sessionID, project: seg.project, code });
     }
     try {
       await segments.save(seg.id, {
@@ -552,10 +558,13 @@ export function createSegmenter(deps = {}) {
         ts: seg.end,
         summarizedAt: now(), // when the summary was persisted (health §10.5 pipeline-lag measurement)
         summary,
+        summaryOutcome: { ok: !failed && code !== "gated", code },
       });
     } catch {
-      /* persistence is best-effort */
+      await ledgerLog({ kind: "cto.segment_persist_failed", sessionID: seg.sessionID, code: "persist-error" });
+      return summary;
     }
+    await ledgerLog({ kind: "cto.segment_summary_outcome", sessionID: seg.sessionID, code: code ?? "ok" });
     try {
       await onSummary(summary);
     } catch {
@@ -570,26 +579,22 @@ export function createSegmenter(deps = {}) {
     st.segment = null;
     seg.end = endTs;
     // Serialize closes per session so summaries for one session stay ordered.
-    st.closeChain = (st.closeChain ?? Promise.resolve()).then(() => doClose(seg, st)).catch(() => {});
+    const turnChain = st.turnChain;
+    st.closeChain = (st.closeChain ?? Promise.resolve()).then(() => doClose(seg, turnChain)).catch(() => {});
   }
 
   // Turn completion: compute + cache the one-liner; a failed/absent model
   // call degrades to the truncated last user prompt. Never throws.
-  async function computeAndCacheOneLiner(st) {
-    const data = {
-      sessionID: st.sessionID,
-      project: st.project,
-      events: st.segment ? st.segment.events : [],
-      lastUserPrompt: truncatePrompt(st.lastUserPrompt),
-    };
+  async function computeAndCacheOneLiner(data) {
     let oneLiner = null;
     try {
       oneLiner = await computeOneLiner(data);
     } catch {
       oneLiner = null;
     }
-    const cached = truncatePrompt(oneLiner) || truncatePrompt(st.lastUserPrompt);
-    oneLiners.set(st.sessionID, { oneLiner: cached, ts: now() });
+    const cached = truncatePrompt(oneLiner) || data.lastUserPrompt;
+    oneLiners.set(data.sessionID, { oneLiner: cached, ts: now() });
+    return cached;
   }
 
   // "inter-event gap exceeds G" close on a busy/prompt/touch event.
@@ -624,7 +629,13 @@ export function createSegmenter(deps = {}) {
     }
     if (kind === "idle") {
       if (isTurnCompletion(evt, st)) {
-        st.turnChain = (st.turnChain ?? Promise.resolve()).then(() => computeAndCacheOneLiner(st)).catch(() => {});
+        const data = {
+          sessionID: st.sessionID, project: st.project,
+          start: st.segment?.start, end: ts,
+          events: structuredClone(st.segment?.events ?? []),
+          lastUserPrompt: truncatePrompt(st.lastUserPrompt),
+        };
+        st.turnChain = (st.turnChain ?? Promise.resolve()).then(() => computeAndCacheOneLiner(data)).catch(() => {});
       }
       st.sawBusy = false;
       st.abort = false;

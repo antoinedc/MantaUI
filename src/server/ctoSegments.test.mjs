@@ -139,6 +139,42 @@ async function flushClose(seg, sid = "s1") {
   const st = seg._sessions.get(sid);
   if (st?.closeChain) await st.closeChain;
 }
+
+test("completion snapshots evidence and one-liner before close and the next prompt", async () => {
+  const inputs = [];
+  const f = makeSeg({
+    computeOneLiner: async (data) => { inputs.push(data); return data.lastUserPrompt; },
+    summarize: async () => ({ ok: true, summary: validSummary() }),
+  });
+  f.set(1000);
+  f.seg.observe(prompt("first task"), { sessionID: "s1", project: "p1" });
+  f.seg.observe(busy(), { sessionID: "s1", project: "p1" });
+  f.set(2000);
+  f.seg.observe(idle(), { sessionID: "s1", project: "p1" });
+  f.seg.observe(prompt("second task"), { sessionID: "s1", project: "p1" });
+  await flushClose(f.seg);
+  assert.equal(inputs[0].lastUserPrompt, "first task");
+  assert.ok(inputs[0].events.length > 0);
+  assert.equal(inputs[0].start, 1000);
+  assert.equal(inputs[0].end, 2000);
+  assert.equal([...f.stores.segmentsStore.peek().values()][0].summary.one_liner, "first task");
+});
+
+test("summary diagnostics sanitize codes and distinguish persistence failure", async () => {
+  const stores = fakeStores();
+  stores.segmentsStore.save = async () => { throw new Error("SECRET"); };
+  const f = makeSeg({ stores, summarize: async () => ({ ok: false, code: "SECRET" }) });
+  f.set(1000);
+  f.seg.observe(prompt(), { sessionID: "s1" });
+  f.seg.observe(busy(), { sessionID: "s1" });
+  f.set(2000);
+  f.seg.observe(idle(), { sessionID: "s1" });
+  await flushClose(f.seg);
+  const rows = stores.ledgerStore.peek();
+  assert.ok(rows.some((r) => r.kind === "cto.segment_summary_failed" && r.code === "schema-invalid"));
+  assert.ok(rows.some((r) => r.kind === "cto.segment_persist_failed"));
+  assert.ok(!JSON.stringify(rows).includes("SECRET"));
+});
 async function flushTurns(seg, sid = "s1") {
   const st = seg._sessions.get(sid);
   if (st?.turnChain) await st.turnChain;

@@ -218,6 +218,8 @@ export function normalizePlan(raw, findingId, finding) {
     plan: {
       id: stableSuggestionId(findingId, cls),
       class: cls,
+      ...(typeof finding?.project === "string" ? { project: finding.project } : {}),
+      ...(typeof finding?.cwd === "string" ? { cwd: finding.cwd } : {}),
       finding: { text: typeof finding?.message === "string" ? finding.message : "", refs },
       diagnosis,
       steps,

@@ -15,6 +15,7 @@ import http from "node:http";
 import { expandTilde, patchPath } from "../shared/paths.mjs";
 import { readModalities, isDeprecated } from "../shared/modelGuide.mjs";
 import { startPoller } from "./startPoller.mjs";
+import { beginInternalSession } from "./internalSessions.mjs";
 import { parseRetryAfterMs } from "./usageAdapters/httpError.mjs";
 import {
   CREDENTIALS_PATH,
@@ -987,6 +988,7 @@ export async function runSynchronousSession({
   const absDir = expandTilde(directory);
 
   let sid = null;
+  const finishCreation = beginInternalSession();
   try {
     const createRes = await ocFetch(
       apiUrl(`/session?directory=${encodeURIComponent(absDir)}`),
@@ -998,9 +1000,13 @@ export async function runSynchronousSession({
     );
     if (!createRes.ok) {
       await discardBody(createRes);
-      return { text: "", sid: null };
+      return { text: "", sid: null, ok: false, code: "create-http" };
     }
     sid = (await createRes.json()).id;
+    try { await finishCreation(sid); } catch {
+      return { text: "", sid, ok: false, code: "provenance-error" };
+    }
+    if (!sid || typeof sid !== "string") return { text: "", sid: null, ok: false, code: "create-invalid" };
     if (typeof onCreated === "function") {
       try {
         await onCreated(sid);
@@ -1026,30 +1032,46 @@ export async function runSynchronousSession({
     );
     if (!promptRes.ok) {
       await discardBody(promptRes);
-      return { text: "", sid };
+      return { text: "", sid, ok: false, code: "prompt-http" };
     }
 
     const msgUrl = apiUrl(`/session/${encodeURIComponent(sid)}/message`);
+    let readFailed = false;
     for (let i = 0; i < maxAttempts; i++) {
       await new Promise((r) => setTimeout(r, pollIntervalMs));
       const r = await ocFetch(msgUrl);
       if (!r.ok) {
         await discardBody(r);
+        readFailed = true;
         continue;
       }
+      readFailed = false;
       const msgs = await r.json();
-      const text = extractAssistantText(msgs);
-      if (text) return { text, sid };
+      if (Array.isArray(msgs) && msgs.some((m) => m?.info?.role === "assistant" && m.info.error)) {
+        return { text: "", sid, ok: false, code: "model-error" };
+      }
+      const assistant = Array.isArray(msgs) ? msgs.filter((m) => m?.info?.role === "assistant").at(-1) : null;
+      // A completed tool-use step is not the end of the assistant's turn.
+      if (!Number.isFinite(assistant?.info?.time?.completed) ||
+          !assistant.info.finish || assistant.info.finish === "tool-calls" || assistant.info.finish === "unknown") continue;
+      if (["length", "content-filter", "error"].includes(assistant.info.finish)) {
+        return { text: "", sid, ok: false, code: "model-error" };
+      }
+      const text = extractAssistantText([assistant]);
+      return text ? { text, sid, ok: true } : { text: "", sid, ok: false, code: "empty-output" };
     }
-    return { text: "", sid };
+    return { text: "", sid, ok: false, code: readFailed ? "read-http" : "timeout" };
   } catch {
-    return { text: "", sid };
+    return { text: "", sid, ok: false, code: "transport-error" };
   } finally {
+    // A provenance failure must not bypass cleanup or leak a rejected promise.
+    try { await finishCreation(sid); } catch { /* already returned a safe runner failure */ }
     if (sid) {
       try {
         await deleteSessionRaw(sid);
       } catch {
-        /* ignore */
+        // Never report a clean run when the internal session was left behind.
+        return { text: "", sid, ok: false, code: "cleanup-error" };
       }
     }
   }

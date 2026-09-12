@@ -842,6 +842,17 @@ test("cto-owned sessions are never segmented", async () => {
   assert.equal(stores.map.size, 0, "cto-owned work is excluded from segmentation");
 });
 
+test("internal and unresolved prompts do not change human presence or profile", async () => {
+  for (const owner of ["cto", "unknown"]) {
+    const { engine, seg, prompt } = makeSegEngine({ owner });
+    const before = engine.getPresence();
+    engine.observeEvent(prompt("internal summary request", `excluded-${owner}`));
+    await new Promise((r) => setTimeout(r, 10));
+    assert.deepEqual(engine.getPresence(), before);
+    assert.equal(seg._sessions.size, 0);
+  }
+});
+
 
 // ---------------------------------------------------------------------------
 // BET-1381 §5.3 rollups — window-close timers + persisted cursor on the tick

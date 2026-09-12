@@ -2546,7 +2546,7 @@ test("generateSessionTitle sends agent:title and never a format/model field", as
         return new Response(
           JSON.stringify([
             {
-              info: { role: "assistant" },
+              info: { role: "assistant", time: { completed: 2 }, finish: "stop" },
               parts: [{ type: "text", text: "Payment webhook retry idempotency" }],
             },
           ]),
@@ -2574,6 +2574,87 @@ test("generateSessionTitle sends agent:title and never a format/model field", as
     },
   );
 });
+
+test("headless primitive records provenance before prompt and returns safe structured errors", async () => {
+  const { runSynchronousSession } = await import("./opencode.mjs");
+  const { resolvePipelineSession } = await import("./internalSessions.mjs");
+  let deleted = false;
+  await withMockFetch(async (url, opts) => {
+    const u = String(url);
+    if (opts?.method === "DELETE") { deleted = true; return new Response(null, { status: 204 }); }
+    if (u.includes("/prompt_async")) {
+      assert.equal((await resolvePipelineSession("internal-error", async () => [])).owner, "cto");
+      return new Response("SECRET provider response", { status: 503 });
+    }
+    return new Response(JSON.stringify({ id: "internal-error" }));
+  }, async () => {
+    const result = await runSynchronousSession({ directory: "/work", instruction: "summarize" });
+    assert.equal(result.ok, false);
+    assert.equal(result.code, "prompt-http");
+    assert.ok(!JSON.stringify(result).includes("SECRET"));
+  });
+  assert.equal(deleted, true);
+  assert.equal((await resolvePipelineSession("internal-error", async () => [])).owner, "cto");
+});
+
+for (const final of ["complete", "error"]) {
+  test(`headless primitive waits through partial text before terminal ${final}`, async () => {
+    const { runSynchronousSession } = await import("./opencode.mjs");
+    let polls = 0;
+    let deleted = 0;
+    await withMockFetch(async (url, opts) => {
+      if (opts?.method === "DELETE") {
+        assert.equal(polls, 2, "must not delete during partial output");
+        deleted++;
+        return new Response(null, { status: 204 });
+      }
+      if (String(url).includes("/prompt_async")) return new Response(null, { status: 204 });
+      if (String(url).endsWith("/message")) {
+        polls++;
+        const info = { role: "assistant", time: { created: 1 } };
+        if (polls === 2) {
+          info.time.completed = 2;
+          info.finish = "stop";
+          if (final === "error") info.error = { name: "ProviderError", data: { message: "SECRET" } };
+        }
+        return new Response(JSON.stringify([{ info, parts: [{ type: "text", text: polls === 1 ? "part" : "complete" }] }]));
+      }
+      return new Response(JSON.stringify({ id: `partial-${final}` }));
+    }, async () => {
+      const result = await runSynchronousSession({ directory: "/work", instruction: "test", pollIntervalMs: 0, maxAttempts: 3 });
+      assert.equal(result.ok, final === "complete");
+      assert.equal(result.text, final === "complete" ? "complete" : "");
+      if (final === "error") assert.equal(result.code, "model-error");
+      assert.ok(!JSON.stringify(result).includes("SECRET"));
+    });
+    assert.equal(deleted, 1);
+  });
+}
+
+for (const cleanupFails of [false, true]) {
+  test(`provenance write failure never prompts and reports cleanup failure=${cleanupFails}`, async () => {
+    const { runSynchronousSession } = await import("./opencode.mjs");
+    const { internalSessionsStore } = await import("./ctoStores.mjs");
+    const save = internalSessionsStore.save;
+    let deleted = false;
+    internalSessionsStore.save = async () => { throw new Error("SECRET disk failure"); };
+    try {
+      await withMockFetch(async (url, opts) => {
+        assert.ok(!String(url).includes("/prompt_async"));
+        if (opts?.method === "DELETE") {
+          deleted = true;
+          return new Response(null, { status: cleanupFails ? 503 : 204 });
+        }
+        return new Response(JSON.stringify({ id: "provenance-failed" }));
+      }, async () => {
+        const result = await runSynchronousSession({ directory: "/work", instruction: "test" });
+        assert.equal(result.code, cleanupFails ? "cleanup-error" : "provenance-error");
+        assert.equal(result.ok, false);
+      });
+    } finally { internalSessionsStore.save = save; }
+    assert.equal(deleted, true);
+  });
+}
 
 // ---------------------------------------------------------------------------
 // completeProviderOauth (BET-1043)

@@ -33,6 +33,7 @@
 // stores/ledger/cards/calibration and drives it from cardTick.
 //
 // Pure over injected I/O — testable without a live opencode/tmux/delegate.
+import { beginInternalSession } from "./internalSessions.mjs";
 
 import { buildPermissionRuleset } from "./delegate.mjs";
 import { appendLedgerBestEffort, patchStore } from "./ctoStores.mjs";
@@ -312,6 +313,32 @@ export async function runVerifyCheck(plan, ctx) {
  *   verifyFact / probeRead / conditionGone — the §9.2 check seams
  *   sleep(ms), now(), pollMs, turnBudgetMs
  */
+export function resolvePlanParent(projects, { finding, project, plan } = {}) {
+  const target = project ?? plan?.project ?? finding?.project;
+  const cwd = plan?.cwd ?? finding?.cwd;
+  const sid = finding?.senderSessionID ?? finding?.sender?.sessionID;
+  const matches = [];
+  for (const p of projects ?? []) {
+    for (const w of p.windows ?? []) {
+      if (!w.opencodeSessionId) continue;
+      const directory = w.paneCurrentPath ?? p.defaultCwd;
+      if (typeof directory !== "string" || !directory.startsWith("/")) continue;
+      if (cwd && directory !== cwd) continue;
+      if (target) {
+        if (typeof target !== "string") continue;
+        if (target.startsWith("/")) {
+          if (target !== directory) continue;
+        } else if (target !== p.tmuxSession) continue;
+      } else if (!sid || w.opencodeSessionId !== sid) continue;
+      matches.push({ parentSessionID: w.opencodeSessionId, parentDirectory: directory });
+    }
+  }
+  const sender = matches.find((m) => m.parentSessionID === sid);
+  if (sender) return sender;
+  if (new Set(matches.map((m) => m.parentDirectory)).size === 1) return matches[0];
+  return null;
+}
+
 export function createCtoPlanRunner(deps = {}) {
   const {
     createSession = null,
@@ -373,18 +400,17 @@ export function createCtoPlanRunner(deps = {}) {
     // ---- session start -------------------------------------------------
     let sessionId = null;
     let kind = "ephemeral";
-    // The session host: a delegate job needs a tracked project session to
-    // parent it (the finding's sender session first, else the most active
-    // project); an ephemeral session just borrows its directory (opencode's
-    // default when none resolves).
+    let finishCreation;
+    // Both execution modes require an unambiguous resolved project directory.
     let parent = null;
     if (typeof resolveParent === "function") {
       try {
-        parent = await resolveParent({ finding });
+        parent = await resolveParent({ finding, project, plan });
       } catch {
         parent = null;
       }
     }
+    if (!parent?.parentDirectory?.startsWith("/")) return { ok: false, reason: "unknown-project" };
     try {
       if (delegate) {
         kind = "delegate";
@@ -405,6 +431,7 @@ export function createCtoPlanRunner(deps = {}) {
         sessionId = res?.job?.id ?? null;
       } else {
         if (typeof createSession !== "function") return { ok: false, reason: "no-create-session" };
+        finishCreation = beginInternalSession();
         const res = await createSession({
           title: plan.id,
           permission: ruleset,
@@ -412,9 +439,17 @@ export function createCtoPlanRunner(deps = {}) {
         });
         if (res?.ok !== true || !res.id) return { ok: false, reason: res?.reason ?? "session-create-failed" };
         sessionId = res.id;
+        await finishCreation(sessionId);
       }
-    } catch (e) {
-      return { ok: false, reason: "start-error", detail: e?.message };
+    } catch {
+      if (!delegate && sessionId && typeof deleteSession === "function") {
+        try { await deleteSession(sessionId); } catch {
+          return { ok: false, reason: "provenance-cleanup-error" };
+        }
+      }
+      return { ok: false, reason: !delegate && sessionId ? "provenance-error" : "start-error" };
+    } finally {
+      try { await finishCreation?.(); } catch { /* safe failure already returned */ }
     }
 
     const isDelegate = kind === "delegate";

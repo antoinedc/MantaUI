@@ -8,11 +8,12 @@
 // tmux/opencode/network in tests.
 
 import { startPoller } from "./startPoller.mjs";
-import { engineStateStore, patchEngineState } from "./ctoStores.mjs";
+import { engineStateStore, patchEngineState, ledgerStore } from "./ctoStores.mjs";
 import { listRoutableModels } from "./opencode.mjs";
 import { buildRoutingServices } from "./routingServices.mjs";
 import { lookupModel, matchModel, allModels } from "./modelCatalog.mjs";
 import { chooseSubagentModel } from "./delegate.mjs";
+import { safeSummaryCode } from "./ctoRunOutcome.mjs";
 
 // ---------------------------------------------------------------------------
 // Task classes (§12.3) — a literal table in code. NEVER a model id.
@@ -206,14 +207,32 @@ async function activeRemove(sid, { engineState }) {
  *   hook; every run reports its estimated token cost (default no-op). The engine wires it to the budget.
  * @returns {Promise<{text:string, taskClass:string, tier:string}>}
  */
-export async function runEphemeral({ taskClass, context = [], directory = "~", deps = {} } = {}) {
+export async function runEphemeral({ taskClass, operation, context = [], directory = "~", deps = {} } = {}) {
   const meta = getTaskClass(taskClass);
+  const op = ["segment-summary", "segment-one-liner", "tool-classification"].includes(operation) ? operation : taskClass;
+  const record = async (kind, code) => {
+    try {
+      await (deps.ledger ?? ledgerStore).append({ actor: "cto", ts: Date.now(), kind, operation: op, taskClass, code });
+    } catch { /* Diagnostics must not prevent cleanup or hide a result. */ }
+  };
 
   let tier = meta.tier;
   let escalated = false;
   for (let attempt = 0; attempt <= 1; attempt++) {
-    const out = await runOnce({ taskClass, meta, tier, context, directory, deps });
+    await record("cto.operation_attempt", null);
+    let out;
+    try {
+      out = await runOnce({ taskClass, meta, tier, context, directory, deps });
+    } catch (error) {
+      await record("cto.operation_outcome", "runner-error");
+      throw error;
+    }
+    if (out.ok === false) {
+      await record("cto.operation_outcome", safeSummaryCode(out.code));
+      return out;
+    }
     const valid = typeof deps.validate === "function" ? await deps.validate(out) : true;
+    await record("cto.operation_outcome", valid ? "ok" : "schema-invalid");
     if (valid) return out;
     const next = escalateTier(meta.tier); // nano -> mid; others null
     if (next && next !== tier && !escalated) {
@@ -221,7 +240,7 @@ export async function runEphemeral({ taskClass, context = [], directory = "~", d
       tier = next;
       continue; // cascade exactly one tier, at most once per call
     }
-    return out;
+    return { ...out, ok: false, code: "schema-invalid" };
   }
   // unreachable: the loop runs at most twice
   throw new Error(`runEphemeral: cascade exceeded maximum attempts for "${taskClass}"`);
@@ -268,7 +287,8 @@ async function runOnce({ taskClass, meta, tier, context, directory, deps }) {
     } catch {
       /* metering is best-effort */
     }
-    return { text: res?.text ?? "", taskClass, tier, sid: res?.sid ?? sid };
+    return { text: res?.text ?? "", taskClass, tier, sid: res?.sid ?? sid,
+      ...(res?.ok === false ? { ok: false, code: safeSummaryCode(res.code) } : {}) };
   } finally {
     // Remove from the active set even when the run errored (finally).
     if (sid) {

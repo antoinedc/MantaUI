@@ -162,6 +162,7 @@ test("collectDbRows queries the part table in the half-open window", async () =>
     return;
   }
   const { db } = fx;
+  db.exec("CREATE TABLE session (id TEXT, title TEXT); INSERT INTO session VALUES ('s1','work'),('s2','work'),('s3','work')");
   db.exec(
     "CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)",
   );
@@ -179,10 +180,10 @@ test("collectDbRows queries the part table in the half-open window", async () =>
   const all = await collectDbRows(db, { sinceTs: 0, untilTs: 1000 });
   assert.equal(all.length, 3);
 
-  // A missing/handle-less db yields no rows, never a throw.
-  assert.deepEqual(await collectDbRows(null, { sinceTs: 0, untilTs: 10 }), []);
+  // Unavailable data must not be mistaken for an exhausted page.
+  await assert.rejects(collectDbRows(null, { sinceTs: 0, untilTs: 10 }));
   const bad = { prepare() { throw new Error("boom"); } };
-  assert.deepEqual(await collectDbRows(bad, { sinceTs: 0, untilTs: 10 }), []);
+  await assert.rejects(collectDbRows(bad, { sinceTs: 0, untilTs: 10 }));
 });
 
 // ---------------------------------------------------------------------------
