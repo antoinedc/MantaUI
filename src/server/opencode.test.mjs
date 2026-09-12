@@ -417,23 +417,29 @@ test("createSession primes directory cache; sendPrompt then appends ?directory="
   );
 });
 
+function sessionFetch(session, fallback) {
+  return async (url) => {
+    if (String(url).startsWith("http://127.0.0.1:4096/session?directory=")) {
+      return new Response(JSON.stringify(session), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    return fallback(url);
+  };
+}
+
 test("sendPrompt non-2xx carries status + Retry-After (BET-1230)", async () => {
   // The model-turn path must mirror the usage meter's HTTP error shape so a
   // refusal can be told apart by status (402/429/5xx) without string-matching.
   _resetSessionDirectoryCache();
   await withMockFetch(
-    async (url) => {
-      if (String(url).startsWith("http://127.0.0.1:4096/session?directory=")) {
-        return new Response(
-          JSON.stringify({ id: "ses_rl", title: "t", directory: "/w", projectID: "p" }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-      }
-      return new Response("slow down", {
+    sessionFetch({ id: "ses_rl", title: "t", directory: "/w", projectID: "p" }, () =>
+      new Response("slow down", {
         status: 429,
         headers: { "retry-after": "30" },
-      });
-    },
+      }),
+    ),
     async () => {
       let thrown = null;
       try {
@@ -455,18 +461,12 @@ test("transport refusal records Retry-After per-session for the pump to bridge (
   // it to the matching session.error so providerHealth gets a real cooldown.
   _resetSessionDirectoryCache();
   await withMockFetch(
-    async (url) => {
-      if (String(url).startsWith("http://127.0.0.1:4096/session?directory=")) {
-        return new Response(
-          JSON.stringify({ id: "ses_rl", title: "t", directory: "/w", projectID: "p" }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-      }
-      return new Response("slow down", {
+    sessionFetch({ id: "ses_rl", title: "t", directory: "/w", projectID: "p" }, () =>
+      new Response("slow down", {
         status: 429,
         headers: { "retry-after": "900" },
-      });
-    },
+      }),
+    ),
     async () => {
       await assert.rejects(() => sendPrompt({ sessionId: "ses_rl", text: "hi" }));
       const refusal = getAndClearSessionRefusal("ses_rl");
@@ -1124,18 +1124,12 @@ test("listQuestions returns [] on a non-OK and does not throw", async () => {
 test("replyPermission still throws on a non-OK reply", async () => {
   _resetSessionDirectoryCache();
   await withMockFetch(
-    async (url) => {
-      if (String(url).startsWith("http://127.0.0.1:4096/session?directory=")) {
-        return new Response(JSON.stringify({ id: "ses_r", directory: "/proj/r" }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
+    sessionFetch({ id: "ses_r", directory: "/proj/r" }, (url) => {
       if (String(url).includes("/reply")) {
         return new Response("nope", { status: 400 });
       }
       return new Response(null, { status: 204 });
-    },
+    }),
     async () => {
       await assert.rejects(
         replyPermission({ requestId: "per_x", reply: "always", sessionId: "ses_r" }),
@@ -1149,18 +1143,12 @@ test("replyPermission still throws on a non-OK reply", async () => {
 test("replyQuestion still throws on a non-OK reply", async () => {
   _resetSessionDirectoryCache();
   await withMockFetch(
-    async (url) => {
-      if (String(url).startsWith("http://127.0.0.1:4096/session?directory=")) {
-        return new Response(JSON.stringify({ id: "ses_rq", directory: "/proj/rq" }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
+    sessionFetch({ id: "ses_rq", directory: "/proj/rq" }, (url) => {
       if (String(url).includes("/reply")) {
         return new Response("nope", { status: 400 });
       }
       return new Response(null, { status: 204 });
-    },
+    }),
     async () => {
       await assert.rejects(
         replyQuestion({ requestId: "que_x", answers: [["a"]], sessionId: "ses_rq" }),
