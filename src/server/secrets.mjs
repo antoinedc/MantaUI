@@ -83,6 +83,11 @@ export function toMeta(entry) {
 // precedence (session > project > shared). Returns metadata only (no values).
 // sessionID/project may each be falsy (the corresponding tier is just empty).
 // With neither set → only shared (a bare "shared" view).
+//
+// The returned array order is the TIERING order (session, then project, then
+// shared) — that is an implementation artifact of the shadowing filter chain,
+// not a display contract. Display order is imposed by `listSecrets` (BET-1531:
+// alphabetical by key) before the list reaches any consumer.
 export function visibleSecrets(secrets, sessionID, project) {
   const list = Array.isArray(secrets) ? secrets : [];
   const sessionScoped = sessionID
@@ -95,6 +100,27 @@ export function visibleSecrets(secrets, sessionID, project) {
   const shadowed = new Set([...sessionKeys, ...projectScoped.map((s) => s.key)]);
   const shared = list.filter((s) => s.scope === "shared" && !shadowed.has(s.key));
   return [...sessionScoped, ...projectScoped, ...shared].map(toMeta);
+}
+
+// Display order for every secrets listing: alphabetical by key, case-
+// insensitive (keys are conventionally SHOUTY_SNAKE but not enforced to be).
+// Ties are broken deterministically so the order never depends on store
+// insertion order: exact key (so `Foo` and `foo` are stable), then scope in
+// resolution precedence (session > project > shared — only reachable in the
+// includeAll view, since the visible view shadows duplicate keys), then owner,
+// then id. Pure; sorts a COPY.
+const SCOPE_RANK = { session: 0, project: 1, shared: 2 };
+
+export function sortSecretMetas(metas) {
+  const owner = (m) => m.sessionID ?? m.project ?? "";
+  return [...(Array.isArray(metas) ? metas : [])].sort(
+    (a, b) =>
+      a.key.localeCompare(b.key, "en", { sensitivity: "base", numeric: true }) ||
+      a.key.localeCompare(b.key, "en") ||
+      (SCOPE_RANK[a.scope] ?? 3) - (SCOPE_RANK[b.scope] ?? 3) ||
+      owner(a).localeCompare(owner(b), "en") ||
+      String(a.id ?? "").localeCompare(String(b.id ?? ""), "en"),
+  );
 }
 
 // Resolve which stored entry a `secret_provide(key)` call should materialize
@@ -241,10 +267,15 @@ export async function deleteSecret(id, { load = loadSecrets, save = saveSecrets,
 // List metadata visible to a caller (values stripped). includeAll → every
 // secret's metadata (a full-management view); otherwise shared + this session's
 // + this project's secrets (what an agent in that session/project can use).
+// BET-1531: the list is returned sorted alphabetically by key (see
+// sortSecretMetas) — this is the single chokepoint feeding every consumer
+// (GET /api/secrets for the agent tool, secrets:list RPC for the desktop
+// SecretsCard + the iOS secrets sheet), so every listing shows A→Z and no
+// client needs its own sort.
 export function listSecrets({ sessionID, project, includeAll = false } = {}, { load = loadSecrets } = {}) {
   const secrets = load();
-  if (includeAll) return secrets.map(toMeta);
-  return visibleSecrets(secrets, sessionID, project);
+  if (includeAll) return sortSecretMetas(secrets.map(toMeta));
+  return sortSecretMetas(visibleSecrets(secrets, sessionID, project));
 }
 
 // ---------------------------------------------------------------------------

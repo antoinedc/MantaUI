@@ -14,6 +14,7 @@ import {
   setSecret,
   deleteSecret,
   listSecrets,
+  sortSecretMetas,
   provideSecret,
   recordSecretUsage,
 } from "./secrets.mjs";
@@ -241,6 +242,89 @@ test("provideSecret resolves a project-scoped secret", async () => {
   assert.equal(r.path, join(dir, "projects", "Ronda", "API"));
   assert.equal("value" in r, false);
   await rm(dir, { recursive: true, force: true });
+});
+
+// ----------------------------------------------------------------------------
+// BET-1531 — listing order: alphabetical by key (sortSecretMetas / listSecrets)
+// ----------------------------------------------------------------------------
+
+// Pure/injected-load only — the suite runs on a live box, so no real store
+// writes and never ~/.manta/secrets.json.
+const SORT_STORE = [
+  { id: "1", key: "ZEBRA", value: "z", scope: "shared", sessionID: null, project: null },
+  { id: "2", key: "alpha", value: "a", scope: "shared", sessionID: null, project: null },
+  { id: "3", key: "MIDDLE", value: "m", scope: "shared", sessionID: null, project: null },
+];
+
+test("listSecrets returns keys alphabetically regardless of insertion order", () => {
+  const keys = listSecrets({ includeAll: true }, { load: () => SORT_STORE }).map((m) => m.key);
+  assert.deepEqual(keys, ["alpha", "MIDDLE", "ZEBRA"]);
+});
+
+test("listSecrets ordering is case-insensitive", () => {
+  const store = [
+    { id: "1", key: "ALPHA", value: "a", scope: "shared", sessionID: null, project: null },
+    { id: "2", key: "beta", value: "b", scope: "shared", sessionID: null, project: null },
+    { id: "3", key: "Gamma", value: "g", scope: "shared", sessionID: null, project: null },
+  ];
+  const keys = listSecrets({ includeAll: true }, { load: () => store }).map((m) => m.key);
+  assert.deepEqual(keys, ["ALPHA", "beta", "Gamma"]);
+});
+
+test("listSecrets ordering is numeric-aware (KEY_2 before KEY_10)", () => {
+  const store = [
+    { id: "1", key: "KEY_10", value: "a", scope: "shared", sessionID: null, project: null },
+    { id: "2", key: "KEY_2", value: "b", scope: "shared", sessionID: null, project: null },
+  ];
+  const keys = listSecrets({ includeAll: true }, { load: () => store }).map((m) => m.key);
+  assert.deepEqual(keys, ["KEY_2", "KEY_10"]);
+});
+
+test("listSecrets interleaves scopes: shared AAA sorts before session-scoped ZZZ", () => {
+  const store = [
+    { id: "1", key: "ZZZ", value: "z", scope: "session", sessionID: "ses_1", project: null },
+    { id: "2", key: "AAA", value: "a", scope: "shared", sessionID: null, project: null },
+  ];
+  const keys = listSecrets({ sessionID: "ses_1" }, { load: () => store }).map((m) => m.key);
+  assert.deepEqual(keys, ["AAA", "ZZZ"]);
+});
+
+test("shadowing holds after sorting: one TOKEN visible and it is the session's", () => {
+  const store = [
+    { id: "1", key: "TOKEN", value: "shared", scope: "shared", sessionID: null, project: null },
+    { id: "2", key: "TOKEN", value: "scoped", scope: "session", sessionID: "ses_1", project: null },
+  ];
+  const metas = listSecrets({ sessionID: "ses_1" }, { load: () => store });
+  const toks = metas.filter((m) => m.key === "TOKEN");
+  assert.equal(toks.length, 1, "exactly one TOKEN visible");
+  assert.equal(toks[0].scope, "session", "the session-scoped one wins");
+});
+
+test("includeAll surfaces the same key at two scopes, session before shared, rest alphabetical", () => {
+  const store = [
+    { id: "1", key: "TOKEN", value: "shared", scope: "shared", sessionID: null, project: null },
+    { id: "2", key: "BETA", value: "b", scope: "shared", sessionID: null, project: null },
+    { id: "3", key: "TOKEN", value: "scoped", scope: "session", sessionID: "ses_1", project: null },
+    { id: "4", key: "ALPHA", value: "a", scope: "shared", sessionID: null, project: null },
+  ];
+  const keys = listSecrets({ sessionID: "ses_1", includeAll: true }, { load: () => store }).map((m) => m.key);
+  assert.deepEqual(keys, ["ALPHA", "BETA", "TOKEN", "TOKEN"]);
+  const tokenScopes = listSecrets({ sessionID: "ses_1", includeAll: true }, { load: () => store })
+    .filter((m) => m.key === "TOKEN")
+    .map((m) => m.scope);
+  assert.deepEqual(tokenScopes, ["session", "shared"]);
+});
+
+test("sortSecretMetas does not mutate its input array", () => {
+  const input = [
+    { id: "1", key: "Z", scope: "shared", sessionID: null, project: null },
+    { id: "2", key: "A", scope: "shared", sessionID: null, project: null },
+  ];
+  const snapshot = JSON.parse(JSON.stringify(input));
+  const out = sortSecretMetas(input);
+  assert.deepEqual(input, snapshot, "input array unchanged");
+  assert.notEqual(out, input, "returns a new array");
+  assert.deepEqual(out.map((m) => m.key), ["A", "Z"]);
 });
 
 // ----------------------------------------------------------------------------
