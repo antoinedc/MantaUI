@@ -427,7 +427,7 @@ test("overnight: user prompt preempts — running cto jobs paused and the window
   assert.equal(h.overnightStoreObj.window?.state, "open");
   h.listedJobs.push({ id: "job-1", actor: "cto", status: "running" }, { id: "job-2", actor: "user", status: "running" });
 
-  h.engine.observeEvent({ type: "user.message.created" });
+  h.engine.observeEvent({ type: "user.message.created", properties: { sessionID: "human-session" } });
   await new Promise((r) => setImmediate(r));
 
   assert.deepEqual(h.pausedJobs, ["job-1"], "only the cto-actor job is paused");

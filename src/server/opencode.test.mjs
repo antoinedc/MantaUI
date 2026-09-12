@@ -417,23 +417,29 @@ test("createSession primes directory cache; sendPrompt then appends ?directory="
   );
 });
 
+function sessionFetch(session, fallback) {
+  return async (url) => {
+    if (String(url).startsWith("http://127.0.0.1:4096/session?directory=")) {
+      return new Response(JSON.stringify(session), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    return fallback(url);
+  };
+}
+
 test("sendPrompt non-2xx carries status + Retry-After (BET-1230)", async () => {
   // The model-turn path must mirror the usage meter's HTTP error shape so a
   // refusal can be told apart by status (402/429/5xx) without string-matching.
   _resetSessionDirectoryCache();
   await withMockFetch(
-    async (url) => {
-      if (String(url).startsWith("http://127.0.0.1:4096/session?directory=")) {
-        return new Response(
-          JSON.stringify({ id: "ses_rl", title: "t", directory: "/w", projectID: "p" }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-      }
-      return new Response("slow down", {
+    sessionFetch({ id: "ses_rl", title: "t", directory: "/w", projectID: "p" }, () =>
+      new Response("slow down", {
         status: 429,
         headers: { "retry-after": "30" },
-      });
-    },
+      }),
+    ),
     async () => {
       let thrown = null;
       try {
@@ -455,18 +461,12 @@ test("transport refusal records Retry-After per-session for the pump to bridge (
   // it to the matching session.error so providerHealth gets a real cooldown.
   _resetSessionDirectoryCache();
   await withMockFetch(
-    async (url) => {
-      if (String(url).startsWith("http://127.0.0.1:4096/session?directory=")) {
-        return new Response(
-          JSON.stringify({ id: "ses_rl", title: "t", directory: "/w", projectID: "p" }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-      }
-      return new Response("slow down", {
+    sessionFetch({ id: "ses_rl", title: "t", directory: "/w", projectID: "p" }, () =>
+      new Response("slow down", {
         status: 429,
         headers: { "retry-after": "900" },
-      });
-    },
+      }),
+    ),
     async () => {
       await assert.rejects(() => sendPrompt({ sessionId: "ses_rl", text: "hi" }));
       const refusal = getAndClearSessionRefusal("ses_rl");
@@ -1124,18 +1124,12 @@ test("listQuestions returns [] on a non-OK and does not throw", async () => {
 test("replyPermission still throws on a non-OK reply", async () => {
   _resetSessionDirectoryCache();
   await withMockFetch(
-    async (url) => {
-      if (String(url).startsWith("http://127.0.0.1:4096/session?directory=")) {
-        return new Response(JSON.stringify({ id: "ses_r", directory: "/proj/r" }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
+    sessionFetch({ id: "ses_r", directory: "/proj/r" }, (url) => {
       if (String(url).includes("/reply")) {
         return new Response("nope", { status: 400 });
       }
       return new Response(null, { status: 204 });
-    },
+    }),
     async () => {
       await assert.rejects(
         replyPermission({ requestId: "per_x", reply: "always", sessionId: "ses_r" }),
@@ -1149,18 +1143,12 @@ test("replyPermission still throws on a non-OK reply", async () => {
 test("replyQuestion still throws on a non-OK reply", async () => {
   _resetSessionDirectoryCache();
   await withMockFetch(
-    async (url) => {
-      if (String(url).startsWith("http://127.0.0.1:4096/session?directory=")) {
-        return new Response(JSON.stringify({ id: "ses_rq", directory: "/proj/rq" }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
+    sessionFetch({ id: "ses_rq", directory: "/proj/rq" }, (url) => {
       if (String(url).includes("/reply")) {
         return new Response("nope", { status: 400 });
       }
       return new Response(null, { status: 204 });
-    },
+    }),
     async () => {
       await assert.rejects(
         replyQuestion({ requestId: "que_x", answers: [["a"]], sessionId: "ses_rq" }),
@@ -2546,7 +2534,7 @@ test("generateSessionTitle sends agent:title and never a format/model field", as
         return new Response(
           JSON.stringify([
             {
-              info: { role: "assistant" },
+              info: { role: "assistant", time: { completed: 2 }, finish: "stop" },
               parts: [{ type: "text", text: "Payment webhook retry idempotency" }],
             },
           ]),
@@ -2574,6 +2562,85 @@ test("generateSessionTitle sends agent:title and never a format/model field", as
     },
   );
 });
+
+test("headless primitive records provenance before prompt and returns safe structured errors", async () => {
+  const { runSynchronousSession } = await import("./opencode.mjs");
+  const { resolvePipelineSession } = await import("./internalSessions.mjs");
+  let deleted = false;
+  await withMockFetch(async (url, opts) => {
+    const u = String(url);
+    if (opts?.method === "DELETE") { deleted = true; return new Response(null, { status: 204 }); }
+    if (u.includes("/prompt_async")) {
+      assert.equal((await resolvePipelineSession("internal-error", async () => [])).owner, "cto");
+      return new Response("SECRET provider response", { status: 503 });
+    }
+    return new Response(JSON.stringify({ id: "internal-error" }));
+  }, async () => {
+    const result = await runSynchronousSession({ directory: "/work", instruction: "summarize" });
+    assert.equal(result.ok, false);
+    assert.equal(result.code, "prompt-http");
+    assert.ok(!JSON.stringify(result).includes("SECRET"));
+  });
+  assert.equal(deleted, true);
+  assert.equal((await resolvePipelineSession("internal-error", async () => [])).owner, "cto");
+});
+
+for (const final of ["complete", "error"]) {
+  test(`headless primitive waits through partial text before terminal ${final}`, async () => {
+    const { runSynchronousSession } = await import("./opencode.mjs");
+    let polls = 0;
+    let deleted = 0;
+    await withMockFetch(async (url, opts) => {
+      if (opts?.method === "DELETE") {
+        assert.equal(polls, 2, "must not delete during partial output");
+        deleted++;
+        return new Response(null, { status: 204 });
+      }
+      if (String(url).includes("/prompt_async")) return new Response(null, { status: 204 });
+      if (String(url).endsWith("/message")) {
+        polls++;
+        const info = { role: "assistant", time: { created: 1 } };
+        if (polls === 2) {
+          info.time.completed = 2;
+          info.finish = "stop";
+          if (final === "error") info.error = { name: "ProviderError", data: { message: "SECRET" } };
+        }
+        return new Response(JSON.stringify([{ info, parts: [{ type: "text", text: polls === 1 ? "part" : "complete" }] }]));
+      }
+      return new Response(JSON.stringify({ id: `partial-${final}` }));
+    }, async () => {
+      const result = await runSynchronousSession({ directory: "/work", instruction: "test", pollIntervalMs: 0, maxAttempts: 3 });
+      assert.equal(result.ok, final === "complete");
+      assert.equal(result.text, final === "complete" ? "complete" : "");
+      if (final === "error") assert.equal(result.code, "model-error");
+      assert.ok(!JSON.stringify(result).includes("SECRET"));
+    });
+    assert.equal(deleted, 1);
+  });
+}
+
+for (const cleanupFails of [false, true]) {
+  test(`provenance write failure never prompts and reports cleanup failure=${cleanupFails}`, async () => {
+    const { runSynchronousSession } = await import("./opencode.mjs");
+    let deleted = false;
+    await withMockFetch(async (url, opts) => {
+      assert.ok(!String(url).includes("/prompt_async"));
+      if (opts?.method === "DELETE") {
+        deleted = true;
+        return new Response(null, { status: cleanupFails ? 503 : 204 });
+      }
+      return new Response(JSON.stringify({ id: "provenance-failed" }));
+    }, async () => {
+      const result = await runSynchronousSession({ directory: "/work", instruction: "test",
+        trackCreation: () => async () => { throw new Error("SECRET disk failure"); },
+      });
+      assert.equal(result.code, "provenance-error");
+      assert.equal(result.cleanupCode, cleanupFails ? "cleanup-error" : undefined);
+      assert.equal(result.ok, false);
+    });
+    assert.equal(deleted, true);
+  });
+}
 
 // ---------------------------------------------------------------------------
 // completeProviderOauth (BET-1043)

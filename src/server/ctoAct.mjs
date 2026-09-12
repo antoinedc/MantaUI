@@ -33,6 +33,7 @@
 // stores/ledger/cards/calibration and drives it from cardTick.
 //
 // Pure over injected I/O — testable without a live opencode/tmux/delegate.
+import { beginInternalSession } from "./internalSessions.mjs";
 
 import { buildPermissionRuleset } from "./delegate.mjs";
 import { appendLedgerBestEffort, patchStore } from "./ctoStores.mjs";
@@ -312,6 +313,32 @@ export async function runVerifyCheck(plan, ctx) {
  *   verifyFact / probeRead / conditionGone — the §9.2 check seams
  *   sleep(ms), now(), pollMs, turnBudgetMs
  */
+export function resolvePlanParent(projects, { finding, project, plan } = {}) {
+  const target = project ?? plan?.project ?? finding?.project;
+  const cwd = plan?.cwd ?? finding?.cwd;
+  const sid = finding?.senderSessionID ?? finding?.sender?.sessionID;
+  const matches = [];
+  for (const p of projects ?? []) {
+    for (const w of p.windows ?? []) {
+      if (!w.opencodeSessionId) continue;
+      const directory = w.paneCurrentPath ?? p.defaultCwd;
+      if (typeof directory !== "string" || !directory.startsWith("/")) continue;
+      if (cwd && directory !== cwd) continue;
+      if (target) {
+        if (typeof target !== "string") continue;
+        if (target.startsWith("/")) {
+          if (target !== directory) continue;
+        } else if (target !== p.tmuxSession) continue;
+      } else if (!sid || w.opencodeSessionId !== sid) continue;
+      matches.push({ parentSessionID: w.opencodeSessionId, parentDirectory: directory });
+    }
+  }
+  const sender = matches.find((m) => m.parentSessionID === sid);
+  if (sender) return sender;
+  if (new Set(matches.map((m) => m.parentDirectory)).size === 1) return matches[0];
+  return null;
+}
+
 export function createCtoPlanRunner(deps = {}) {
   const {
     createSession = null,
@@ -373,18 +400,17 @@ export function createCtoPlanRunner(deps = {}) {
     // ---- session start -------------------------------------------------
     let sessionId = null;
     let kind = "ephemeral";
-    // The session host: a delegate job needs a tracked project session to
-    // parent it (the finding's sender session first, else the most active
-    // project); an ephemeral session just borrows its directory (opencode's
-    // default when none resolves).
+    let finishCreation;
+    // Both execution modes require an unambiguous resolved project directory.
     let parent = null;
     if (typeof resolveParent === "function") {
       try {
-        parent = await resolveParent({ finding });
+        parent = await resolveParent({ finding, project, plan });
       } catch {
         parent = null;
       }
     }
+    if (!parent?.parentDirectory?.startsWith("/")) return { ok: false, reason: "unknown-project" };
     try {
       if (delegate) {
         kind = "delegate";
@@ -405,16 +431,28 @@ export function createCtoPlanRunner(deps = {}) {
         sessionId = res?.job?.id ?? null;
       } else {
         if (typeof createSession !== "function") return { ok: false, reason: "no-create-session" };
+        finishCreation = (deps.trackCreation ?? beginInternalSession)();
         const res = await createSession({
           title: plan.id,
+          signal: AbortSignal.timeout(10_000),
           permission: ruleset,
           directory: parent?.parentDirectory ?? undefined,
         });
         if (res?.ok !== true || !res.id) return { ok: false, reason: res?.reason ?? "session-create-failed" };
         sessionId = res.id;
+        await finishCreation(sessionId);
       }
-    } catch (e) {
-      return { ok: false, reason: "start-error", detail: e?.message };
+    } catch {
+      if (!delegate && sessionId && typeof deleteSession === "function") {
+        try {
+          if ((await deleteSession(sessionId))?.ok === false) throw new Error("cleanup-error");
+        } catch {
+          return { ok: false, reason: "provenance-error", cleanupCode: "cleanup-error" };
+        }
+      }
+      return { ok: false, reason: !delegate && sessionId ? "provenance-error" : "start-error" };
+    } finally {
+      try { await finishCreation?.(); } catch { /* safe failure already returned */ }
     }
 
     const isDelegate = kind === "delegate";
@@ -678,16 +716,26 @@ export function createCtoExecutorDriver(deps = {}) {
     await ledgerLog({ kind: "calibrate.outcome", class: row?.class ?? null, planId: row?.planId ?? null, ok: ok === true, reason: reason ?? null });
   }
 
-  // One queued execution, run to completion. Never throws (a throw is an
-  // interrupt: escalate with outcome escalated per §9.4 — the run is never
-  // silently lost).
+  // One queued execution. Operational failures remain visible without being
+  // treated as evidence that the selected plan was wrong.
   async function runQueued(entry) {
     const { planId, plan, finding, findingId, trigger, gateCtx } = entry;
     let res;
     try {
       res = await runOne({ plan, finding, project: entry.project, trigger, gateCtx });
     } catch (e) {
-      res = { ok: true, outcome: "escalated", attempts: 1, cost: 0, reason: `interrupt:${e?.message ?? "unknown"}`, result: null };
+      res = { ok: false, reason: "runner-error" };
+    }
+    // A plan that could not start has not failed verification. Record the
+    // operational problem separately; do not teach calibration or page a human
+    // with a false "plan failed" claim.
+    if (res?.ok === false || ["send-failed", "turn-error", "verify-error", "verify-unavailable", "job-gone"].includes(res?.reason)) {
+      const reason = ["unknown-project", "provenance-error", "no-project-session", "no-start-job", "start-error",
+        "start-refused", "no-create-session", "session-create-failed", "runner-error", "send-failed", "turn-error",
+        "verify-error", "verify-unavailable", "job-gone"].includes(res.reason) ? res.reason : "unknown-error";
+      await ledgerLog({ kind: "cto.execution_unavailable", planId, findingId,
+        reason, ...(res.cleanupCode === "cleanup-error" ? { cleanupCode: "cleanup-error" } : {}), outcome: "unavailable" });
+      return;
     }
     const outcome = res?.outcome ?? "escalated";
     const class_ = typeof plan?.class === "string" ? plan.class : "other";

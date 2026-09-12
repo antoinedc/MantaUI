@@ -70,6 +70,7 @@ function fakeLedger() {
 function nextDay(registryStore, cards, dayMs, rows, overrides = {}) {
   return createToolRegistry({
     registryStore,
+    classificationStore: memStore(),
     usageStore: memStore({ rows }),
     cards,
     ledger: fakeLedger(),
@@ -84,6 +85,7 @@ function makeRegistry({ usageRows = [], cards = fakeCards(), runEphemeral = null
   const ledger = fakeLedger();
   const registry = createToolRegistry({
     registryStore,
+    classificationStore: memStore(),
     usageStore,
     cards,
     ledger,
@@ -328,7 +330,7 @@ test("not-now declines with a 30-day re-arm; a fresh bar crossing re-arms early 
 
 test("§7.4 carve-out: a credential-only tool declined 'not now' re-arms ONLY at the 30-day timer", async () => {
   const cards = fakeCards();
-  const secret = (ts) => ({ channel: "secret", identity: "github_pat", detail: "secret:GITHUB_PAT", ts, source: "raw" });
+  const secret = (ts) => ({ channel: "secret", identity: "github_pat", detail: "secret:GITHUB_PAT", ts, source: "catalog" });
   const { registry, registryStore } = makeRegistry({ cards, usageRows: [secret(W0)], nowMs: W0 + DAY });
   await registry.dailyScan();
   await registry.resolveConnect({ tool: "github_pat", answer: "not-now" });
@@ -519,7 +521,8 @@ test("channel-1 secret rows (raw keys) fuse and give the tool the vitality path"
   assert.equal(t.raw, true);
   assert.equal(hasCredential(t), true);
   assert.equal(barCrossed(t), true);
-  assert.equal(t.status, "candidate"); // vitality path promotes at ONE use
+  assert.equal(t.status, "observed"); // unresolved identity cannot generate a connect ask
+  assert.equal(cards.calls.upserts.length, 0);
 });
 
 test("consentFor reads the rings the future probe/tool-write gates will check", async () => {

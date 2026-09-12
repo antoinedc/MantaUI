@@ -23,7 +23,7 @@
 // issues that consume them; this layer only fixes the durability contract.
 
 import { readFileSync, existsSync, readdirSync } from "node:fs";
-import { readFile, writeFile, appendFile, mkdir, rm, readdir } from "node:fs/promises";
+import { readFile, writeFile, appendFile, mkdir, rm, readdir, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { statePath } from "../shared/paths.mjs";
@@ -117,16 +117,41 @@ function assertSafeName(value, label) {
 // Single-file JSON stores (atomic jsonStore writes, mode 0600)
 // ---------------------------------------------------------------------------
 
-function createCtoJsonStore(name, path) {
+function createCtoJsonStore(name, path, { strict = false } = {}) {
   return {
     name,
     path,
+    stamp: async () => {
+      try {
+        const s = await stat(path);
+        return `${s.ino}:${s.size}:${s.mtimeMs}:${s.ctimeMs}`;
+      } catch (error) {
+        if (error.code === "ENOENT") return "missing";
+        throw error;
+      }
+    },
     migrate: (data) => migrateStore(name, data),
     loadSync: () => {
+      if (strict) {
+        try {
+          return migrateStore(name, JSON.parse(readFileSync(path, "utf-8")));
+        } catch (error) {
+          if (error.code === "ENOENT") return defaultPayload();
+          throw error;
+        }
+      }
       const raw = readJsonSync(path, null);
       return raw === null ? defaultPayload() : migrateStore(name, raw);
     },
     load: async () => {
+      if (strict) {
+        try {
+          return migrateStore(name, JSON.parse(await readFile(path, "utf-8")));
+        } catch (error) {
+          if (error.code === "ENOENT") return defaultPayload();
+          throw error;
+        }
+      }
       const raw = await readJson(path, null);
       return raw === null ? defaultPayload() : migrateStore(name, raw);
     },
@@ -164,6 +189,12 @@ export const budgetStore = createCtoJsonStore("budget", ctoPath("budget.json"));
 // created, lastHit, hits, retired? }] }`. Owned by ctoWatchers.mjs.
 export const watchersStore = createCtoJsonStore("watchers", ctoPath("watchers.json"));
 export const engineStateStore = createCtoJsonStore("engine-state", ctoPath("engine-state.json"));
+// Ownership tombstones are never swept: deleting a session is not permission
+// to reinterpret a late event as human activity. Corrupt/unreadable = fail closed.
+export const internalSessionsStore = createCtoJsonStore("internal-sessions", ctoPath("internal-sessions.json"), { strict: true });
+// Independent of registry transactions: reserve before spend, persist results
+// before cards/registry writes. A failed scan cannot erase a model attempt.
+export const toolClassificationStore = createCtoJsonStore("tool-classification", ctoPath("tool-classification.json"), { strict: true });
 // (BET-1518) the trust ladder's trust.json store is deleted with the ladder —
 // calibration.json replaced it (§9.5, below).
 // BET-1519: the §9.4 cto.resolve ledger — one entry per plan execution

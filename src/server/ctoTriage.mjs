@@ -218,6 +218,8 @@ export function normalizePlan(raw, findingId, finding) {
     plan: {
       id: stableSuggestionId(findingId, cls),
       class: cls,
+      ...(typeof finding?.project === "string" ? { project: finding.project } : {}),
+      ...(typeof finding?.cwd === "string" ? { cwd: finding.cwd } : {}),
       finding: { text: typeof finding?.message === "string" ? finding.message : "", refs },
       diagnosis,
       steps,
@@ -357,7 +359,9 @@ function sourceFindingCopy(finding) {
     message: typeof finding?.message === "string" ? finding.message : "",
     refs: Array.isArray(finding?.refs) ? finding.refs.filter((r) => typeof r === "string") : [],
     condition: typeof finding?.condition === "string" ? finding.condition : undefined,
-    senderSessionID: finding?.sender?.sessionID ?? finding?.sessionID ?? undefined,
+    senderSessionID: finding?.senderSessionID ?? finding?.sender?.sessionID ?? finding?.sessionID ?? undefined,
+    project: typeof finding?.project === "string" ? finding.project : undefined,
+    cwd: typeof finding?.cwd === "string" ? finding.cwd : undefined,
   };
 }
 

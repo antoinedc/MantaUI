@@ -17,6 +17,7 @@
 // `identity` is a canonical tool identity from the catalog, or null when the
 // evidence is raw (kept for the LLM fallback; never fused until classified).
 
+import { internalSessionIds } from "./internalSessions.mjs";
 import {
   matchCliIdentity,
   matchDomainIdentity,
@@ -28,7 +29,7 @@ export const CHANNEL_TRANSCRIPT = "transcript";
 export const CHANNEL_CONFIG = "config";
 
 // Cap on part rows scanned per batch — a runaway range can never wedge a tick.
-export const SCAN_ROW_CAP = 20_000;
+export const SCAN_ROW_CAP = 1000;
 
 // ---------------------------------------------------------------------------
 // Channel 2 — transcript extractors
@@ -141,6 +142,7 @@ export function extractFromToolPart({ data, ts, sessionID = null, project = null
 export function extractFromDbRows(rows) {
   const out = [];
   for (const r of Array.isArray(rows) ? rows : []) {
+    if (r.internal === true) continue;
     const ts = Number(r?.time_created);
     if (!Number.isFinite(ts) || ts <= 0) continue;
     out.push(
@@ -156,20 +158,20 @@ export function extractFromDbRows(rows) {
 
 // Query the read-only opencode db handle (the same one the backfill and
 // ⌘F search use). Returns part rows in the half-open (sinceTs, untilTs] range.
-export async function collectDbRows(db, { sinceTs, untilTs, cap = SCAN_ROW_CAP } = {}) {
-  if (!db || typeof db.prepare !== "function") return [];
-  try {
-    const stmt = db.prepare(
-      `SELECT p.session_id AS session_id, p.data AS data, p.time_created AS time_created
+export async function collectDbRows(db, { sinceTs, afterId = "", untilTs, cap = SCAN_ROW_CAP } = {}) {
+  if (!db || typeof db.prepare !== "function") throw new Error("discovery-db-unavailable");
+  const stmt = db.prepare(
+    `SELECT p.id AS id, p.session_id AS session_id, p.data AS data, p.time_created AS time_created
        FROM part p
-       WHERE p.time_created > ? AND p.time_created <= ?
-       ORDER BY p.time_created ASC
+       WHERE (p.time_created > ? OR (p.time_created = ? AND ? != '' AND p.id > ?))
+          AND p.time_created <= ?
+       ORDER BY p.time_created ASC, p.id ASC
        LIMIT ?`,
-    );
-    return stmt.all(sinceTs, untilTs, cap) ?? [];
-  } catch {
-    return [];
-  }
+  );
+  const rows = stmt.all(sinceTs, sinceTs, afterId, afterId, untilTs, cap) ?? [];
+  const internal = await internalSessionIds();
+  // Keep internal rows in the page for cursor advancement, not evidence.
+  return rows.map((row) => ({ ...row, internal: internal.has(row.session_id) }));
 }
 
 // ---------------------------------------------------------------------------

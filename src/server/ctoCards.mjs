@@ -220,6 +220,8 @@ export function findingFromPromotedAsk(ask, { ts = Date.now() } = {}) {
     sourceId: ask.sourceId,
     ts,
     sessionID: ask.sessionID ?? ask.noteSessionID ?? undefined,
+    ...(typeof ask.project === "string" ? { project: ask.project } : {}),
+    ...(typeof ask.cwd === "string" ? { cwd: ask.cwd } : {}),
     message: ask.body,
     title: blockerTitle(ask.sourceKind, ask.title),
     refs: Array.isArray(ask.refs) ? ask.refs : [],
@@ -246,6 +248,9 @@ export function findingFromHealthGroup(group, { key, sourceId, ts = Date.now() }
     refs: [],
     pendingSince: Number.isFinite(group.minTs) ? group.minTs : undefined,
     tag: typeof key === "string" ? key : undefined,
+    ...(typeof group.latest?.project === "string" ? { project: group.latest.project } : {}),
+    ...(typeof group.latest?.cwd === "string" ? { cwd: group.latest.cwd } : {}),
+    ...(typeof group.latest?.sessionID === "string" ? { sessionID: group.latest.sessionID } : {}),
   };
 }
 
