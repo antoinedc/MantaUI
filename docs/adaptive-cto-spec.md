@@ -508,32 +508,41 @@ low/low with prior engagement = dead (candidate-for-removal note in the tool
 drill-down; never auto-deleted). `dead` is a label, not a terminal state:
 renewed engagement or vitality re-promotes through the normal lifecycle.
 
-### 7.4 Lifecycle & consent rings
+### 7.4 Lifecycle & the access grant
 
-`observed` (evidence accumulates, nothing runs) → `candidate` when either axis
-crosses its bar (engagement: ≥ 3 uses across ≥ 2 weeks; vitality path: a
-credential exists at all → eligible for the *metadata consent ask*) →
-**one connect ask** (a needs-you decision card, §10.3, with the evidence trail
-and the three-way answer: connect read-only / not now / **never for this
-tool**) → `integrated` (probes run) → `trusted:<action-class>` per the
-per-`(tool, class)` calibration partition (§9.5). Rings (D13): metadata consent ≠ deep-read
-consent ≠ write; each escalation is a separate ask; "never" kills all rings
-and suppresses future asks for that tool (revocable only in the tool
-drill-down).
+**A key present in the manta secret store grants the CTO FULL access to the
+matching tool. There are no consent rings, no connect asks, and no read/write
+split.** The user adding a secret IS the grant; deleting the secret IS the
+revocation. The store is therefore the single access path and the single
+control surface, and the CTO never asks for access — a tool with no matching
+key simply has no access and nothing is raised about it.
 
-Ring semantics, precisely:
+Mechanics:
 
-- **Re-eligibility**: "not now" re-arms after 30 days or a fresh axis-bar
-  crossing; on the vitality path (whose bar — a credential exists — cannot
-  re-cross) the 30-day timer is the only re-arm. "Un-never" (tool
-  drill-down) returns the tool to `observed`; a new ask still requires a
-  fresh bar crossing.
-- **Rings govern the CTO's autonomous access only.** Worker agents may
-  already use a tool's credential at the user's direction — that is the
-  user's own workflow and implies nothing about the CTO's standing access.
-  The rings bound what the CTO may do on its own schedule with no human in
-  the loop.
-- **The write ring creates no standing write specs.** Writes are always
+- **The grant is derived, not recorded.** The registry reads the store's KEY
+  LIST at decision time (`consentFor` is the one chokepoint every probe and
+  read path funnels through), so a secret added a second ago grants at once
+  even if nothing has ever used it, and a deleted one stops granting at once.
+  Nothing is written down that could disagree with the store; a consent record
+  left by the retired ask flow is not consulted.
+- **A key names its tool.** The key and its hint are matched against the §7.1
+  catalog: a catalog hit wins (`GITHUB_PAT` → github), otherwise the last
+  meaningful segment of the key is the service (`CAPO_MULTICA_TOKEN` →
+  multica). Credential vocabulary (`TOKEN`, `API`, `KEY`, …) names nothing, so
+  a key made only of it grants nothing. There is no wildcard.
+- **Values are never read.** Only key names and hints reach this path, and a
+  key name is not a secret. Materializing a value stays §7.5's
+  by-reference-only business.
+- **The lifecycle is now display-only.** `observed` → `candidate` when either
+  axis crosses its bar (engagement: ≥ 3 uses across ≥ 2 weeks; vitality: a
+  credential exists at all) → `integrated` on the first successful probe →
+  `trusted:<action-class>` per the per-`(tool, class)` calibration partition
+  (§9.5). Status describes what the CTO has seen; it grants nothing.
+- **The grant governs the CTO's autonomous access only.** Worker agents may
+  already use a credential at the user's direction — that is the user's own
+  workflow. This bounds what the CTO may do on its own schedule with no human
+  in the loop.
+- **A grant creates no standing write specs.** Writes are always
   one-off engine-executed requests bound to an accepted decision-card option
   (a `tool-consent` / `tool-write` class plan, §9.2), never probes. Tool trust
   (`trusted:<action-class>`) is the §9.5 calibration estimator partitioned by
@@ -542,8 +551,8 @@ Ring semantics, precisely:
 
 ### 7.5 Probe specs (declarative, AI-authored)
 
-`~/.manta/cto/probes/<tool>.yaml`, written by the engine after consent,
-validated like forge rules (unknown keys fail by name):
+`~/.manta/cto/probes/<tool>.yaml`, scaffolded by the engine for every tool the
+secret store grants, validated like forge rules (unknown keys fail by name):
 
 ```yaml
 tool: <canonical id>
@@ -551,10 +560,10 @@ auth: { secret: <KEY_NAME>, header: <header template> }   # by reference only
 probes:
   - name: <probe id>
     method: GET                    # GET-only, enforced by the runner
-    url: <https url on the consented domain allowlist>
+    url: <https url on the granted tool's domain allowlist>
     extract: { <field>: <json-path> }
     cadence: <duration ≥ 5m>
-    ring: metadata | deep_read     # must be ≤ consented ring
+    ring: metadata | deep_read     # what the probe reads; not a gate
 ```
 
 Runner enforcement: domain allowlist derived from the tool's evidence (exact
@@ -981,8 +990,9 @@ Four cards (all controls live):
      tab (entries listed; per-entry delete).
    - **Activity ledger**: reverse-chron, filterable by actor/type; append-only.
    - **Tool integrations**: registry table (tool, role, engagement, vitality,
-     consent rings with per-ring revoke, probe cadence + last result, `never`
-     list with un-never), dead-tool candidates flagged.
+     the secret key that grants the tool, probe cadence + last result),
+     dead-tool candidates flagged. Read-only — access is changed in the
+     secrets surface, never here.
 
 ### 10.6 States (all reachable, all specified)
 
@@ -1317,7 +1327,8 @@ All are ledger-derived; the Health card renders them.
   kill switch + Low tier caps. Blackboard single-writer (engine only).
 - **P2 — judgment layer**: suggestion engine (ask verbs only until verdict
   minimum), collaborative blackboard (`cto_fact`, gatekeeper, sender
-  reliability), profile engine + drill-down, tool discovery + connect asks +
+  reliability), profile engine + drill-down, tool discovery + the secret-store
+  access grant +
   metadata probes, watcher supersession, inbox supersession, Medium tier.
 - **P3 — autonomy layer**: quota forecasting + reserve, overnight scheduler +
   portfolio, veto-window verb, trust promotion ladder, deep-read data-source

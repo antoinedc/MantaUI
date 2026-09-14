@@ -288,6 +288,81 @@ export function matchIssueKeys(text) {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Secret key → tool identity (the access grant's mapping).
+//
+// A key present in the secret store grants the CTO full access to the matching
+// tool, so this is the mapping that decides WHICH tool a key is about. It sees
+// the key NAME and the human-written hint only — never a value.
+//
+// Keys are env-var shaped (`CAPO_MULTICA_TOKEN`, `GITHUB_PAT`): an optional
+// org/prefix, the service, and credential noise. Segments that are pure
+// credential vocabulary carry no tool identity and are dropped; what remains
+// is the tool. A catalog hit (`GITHUB_PAT` → github) wins over the positional
+// guess; otherwise the LAST meaningful segment is the service the key belongs
+// to (`CAPO_MULTICA_TOKEN` → multica), which is how these names are written.
+//
+// A key whose segments are ALL noise (`API_KEY`) maps to nothing and grants
+// nothing — there is no wildcard, ever.
+// ---------------------------------------------------------------------------
+
+// Credential vocabulary: segments that never name a tool.
+export const SECRET_NOISE = Object.freeze(
+  new Set([
+    "token", "tokens", "key", "keys", "secret", "secrets", "api", "apis", "pat",
+    "id", "ids", "auth", "access", "refresh", "password", "passwd", "pass",
+    "credential", "credentials", "cred", "creds", "url", "uri", "endpoint",
+    "user", "username", "login", "account", "client", "app", "bearer", "oauth",
+    "private", "public", "personal", "admin", "prod", "production", "dev",
+    "development", "staging", "stage", "test", "local", "sandbox", "default",
+    "my", "the", "sk", "pk", "v1", "v2", "v3",
+  ]),
+);
+
+// Every canonical identity the catalog knows, for exact segment matching.
+const KNOWN_IDENTITIES = new Set([...Object.values(CLIS), ...Object.values(DOMAINS)]);
+
+const HOST_SHAPE = /\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b/gi;
+
+// One key segment → a canonical identity, or null when the catalog has never
+// heard of it (the segment itself is then the identity — the same rule the
+// registry already uses to key a raw `secret:` evidence row).
+function canonicalSegment(segment) {
+  if (CLIS[segment]) return CLIS[segment];
+  if (KNOWN_IDENTITIES.has(segment)) return segment;
+  return null;
+}
+
+// The tool identities a stored secret grants access to, best first. Pure; the
+// VALUE is never a parameter and never consulted.
+export function matchSecretIdentities(key, hint = "") {
+  const raw = String(key ?? "").trim();
+  if (!raw) return [];
+  const segments = raw
+    .split(/[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])/)
+    .map((s) => s.toLowerCase())
+    .filter(Boolean);
+  const meaningful = segments.filter((s) => s.length >= 2 && !SECRET_NOISE.has(s) && !/^\d+$/.test(s));
+  if (meaningful.length === 0) return [];
+  const out = [];
+  const push = (id) => {
+    if (id && !out.includes(id)) out.push(id);
+  };
+  // A catalog hit is the identity; otherwise the last meaningful segment is.
+  const catalogHit = meaningful.map(canonicalSegment).find(Boolean) ?? null;
+  push(catalogHit ?? meaningful[meaningful.length - 1]);
+  for (const s of meaningful) push(canonicalSegment(s) ?? s);
+  // The hint is free text the human wrote; a host in it is catalog evidence.
+  for (const host of String(hint ?? "").match(HOST_SHAPE) ?? []) {
+    const id = matchDomainIdentity(host);
+    if (typeof id === "string" && id) push(id);
+  }
+  // The whole key, lowercased: the identity a `secret:` evidence row already
+  // keys its registry entry by, so a row observed that way stays reachable.
+  push(raw.toLowerCase());
+  return out;
+}
+
 // Human display name for a canonical identity (§7.2 displayName).
 export function displayName(identity) {
   const id = String(identity ?? "").trim();

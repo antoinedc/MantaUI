@@ -19,6 +19,8 @@ import {
   senderSlug,
   splitOrphanedShedCards,
   stableCardId,
+  RETIRED_VARIANTS,
+  VARIANTS,
 } from "./ctoCards.mjs";
 import { INBOX_TTL_MS } from "./ctoStores.mjs";
 
@@ -619,95 +621,26 @@ test("upsertVeto: refuses a missing id", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// BET-1395 connect-ask cards (§7.4 / §10.3 connect variant)
+// Retired variants (the connect ask): the writer is gone, and a card an
+// upgraded box still has persisted must be invisible — unanswerable cards
+// that nothing can render are worse than no card at all.
 // ---------------------------------------------------------------------------
 
-test("upsertConnect: writes a variant=connect card with the three bound answers", async () => {
+test("a persisted connect card is dropped on load: no writer can make one, no reader sees one", async () => {
   const h = makeHarness();
-  const r = await h.cards.upsertConnect({
-    toolId: "vercel",
-    title: "Connect Vercel (read-only)?",
-    body: "Vercel showed up 3× across 2 week(s) of agent work",
-    evidence: ["transcript: cli:vercel", "secret: VERCEL_TOKEN"],
-    refs: ["vercel"],
+  assert.equal(VARIANTS.includes("connect"), false, "the variant is retired");
+  assert.equal(typeof h.cards.upsertConnect, "undefined", "there is no connect writer left");
+  assert.deepEqual(RETIRED_VARIANTS, ["connect"]);
+  // Seed the store the way an upgraded box's cards.json looks.
+  h.setCardPayload({
+    v: 1,
+    cards: [
+      { id: "cto:card:tool:github", variant: "connect", state: "open", title: "Connect GitHub (read-only)?", body: "why", refs: ["github"], sourceKind: "tool", sourceId: "github" },
+      { id: "cto:card:health:x", variant: "blocker", state: "open", title: "Health check", body: "b", refs: [], sourceKind: "health", sourceId: "x" },
+    ],
   });
-  assert.equal(r.changed, true);
-  assert.equal(r.isNew, true);
-  const card = h.store().cards.find((c) => c.variant === "connect");
-  assert.ok(card);
-  assert.equal(card.sourceKind, "tool");
-  assert.equal(card.sourceId, "vercel");
-  assert.deepEqual(card.refs, ["vercel"]);
-  assert.deepEqual(
-    card.options.map((o) => o.answer),
-    ["connect", "not-now", "never"],
-  );
-  for (const o of card.options) {
-    assert.equal(o.action.type, "tool-connect");
-    // BET-1404: the payload carries the ring the ask was about — the
-    // metadata default here, "deep_read" for the deep-read ask's card.
-    assert.deepEqual(o.action.payload, { tool: "vercel", answer: o.answer, ring: "metadata" });
-  }
-  assert.ok(h.ledgerRows.some((row) => row.kind === CARD_CREATED && row.variant === "connect"));
-});
-
-test("upsertConnect: the deep_read ask gets its own card id and ring-tagged payloads", async () => {
-  const h = makeHarness();
-  await h.cards.upsertConnect({ toolId: "vercel", title: "meta", refs: ["vercel"] });
-  const r = await h.cards.upsertConnect({
-    toolId: "vercel",
-    ring: "deep_read",
-    title: "deep",
-    refs: ["vercel"],
-  });
-  assert.equal(r.changed, true);
-  const deep = h.store().cards.find((c) => c.variant === "connect" && c.title === "deep");
-  assert.ok(deep);
-  assert.equal(deep.sourceId, "vercel:deep", "a distinct stable id — the metadata card is untouched");
-  for (const o of deep.options) {
-    assert.deepEqual(o.action.payload, { tool: "vercel", answer: o.answer, ring: "deep_read" });
-  }
-});
-
-test("upsertConnect: re-raising the same tool upserts in place (no dup)", async () => {
-  const h = makeHarness();
-  await h.cards.upsertConnect({ toolId: "vercel", title: "first", refs: ["vercel"] });
-  h.advance(1000);
-  const r = await h.cards.upsertConnect({ toolId: "vercel", title: "second", refs: ["vercel"] });
-  assert.equal(r.isNew, false);
-  const open = h.store().cards.filter((c) => c.variant === "connect" && c.state === "open");
-  assert.equal(open.length, 1);
-  assert.equal(open[0].title, "second");
-});
-
-// BET-1481: the invalid-args early return carries the same { ok:false } shape
-// as the other three card writers — a future caller branching on ok (the
-// BET-1477 contract) must not read undefined as truthy-success here.
-test("upsertConnect: refuses a missing/non-string toolId with ok:false", async () => {
-  const h = makeHarness();
-  const r = await h.cards.upsertConnect({ title: "no toolId" });
-  assert.equal(r.ok, false);
-  assert.equal(r.changed, false);
-  assert.equal(r.isNew, false);
-  const r2 = await h.cards.upsertConnect({ toolId: 42 });
-  assert.equal(r2.ok, false);
-  assert.equal(openCardCount(h), 0);
-  assert.ok(!h.ledgerRows.some((row) => row.kind === CARD_CREATED && row.variant === "connect"));
-});
-
-test("resolveConnectCards: resolves the open card for the tool and writes the ledger row", async () => {
-  const h = makeHarness();
-  await h.cards.upsertConnect({ toolId: "vercel", title: "t", refs: ["vercel"] });
-  await h.cards.upsertConnect({ toolId: "stripe", title: "t2", refs: ["stripe"] });
-  const r = await h.cards.resolveConnectCards("vercel", "connect answer: connect");
-  assert.equal(r.changed, true);
-  const open = h.store().cards.filter((c) => c.state === "open");
-  assert.equal(open.length, 1);
-  assert.equal(open[0].sourceId, "stripe");
-  assert.ok(h.ledgerRows.some((row) => row.kind === CARD_RESOLVED && row.sourceId === "vercel"));
-  // Resolving an absent tool changes nothing.
-  const r2 = await h.cards.resolveConnectCards("ghost", "no-op");
-  assert.equal(r2.changed, false);
+  const open = await h.cards.listOpen();
+  assert.deepEqual(open.map((c) => c.id), ["cto:card:health:x"]);
 });
 
 // ---------------------------------------------------------------------------

@@ -626,64 +626,6 @@ export function vetoCards(cards: ReadonlyArray<CtoCard>): VetoCardRow[] {
     }));
 }
 
-// BET-1395: the open connect-ask cards (§10.3 connect variant) among the wire
-// cards — tool name + why + evidence trail + the three-way answer bound as
-// `tool-connect` actions (the registry is the executor, always runnable).
-export type ConnectCardRow = {
-  id: string;
-  title: string;
-  body: string;
-  evidence?: string[];
-  options: { label: string; answer: string; action: { type: string; payload: Record<string, unknown> } }[];
-};
-
-export function connectCards(cards: ReadonlyArray<CtoCard>): ConnectCardRow[] {
-  return (cards ?? [])
-    .filter((c) => c?.variant === "connect" && cardHasContent(c))
-    .map((c) => ({
-      id: String(c.id ?? ""),
-      title: String(c.title ?? ""),
-      body: String(c.body ?? ""),
-      evidence: Array.isArray(c.evidence) ? (c.evidence as string[]) : [],
-      options: Array.isArray(c.options)
-        ? (c.options as { label?: string; answer?: string; action?: { type?: string; payload?: Record<string, unknown> } }[]).map(
-            (o) => ({
-              label: String(o?.label ?? ""),
-              answer: String(o?.answer ?? ""),
-              action: { type: String(o?.action?.type ?? ""), payload: (o?.action?.payload ?? {}) as Record<string, unknown> },
-            }),
-          )
-        : [],
-    }));
-}
-
-// BET-1431 (BET-1395 residue): the connect answer's argument-building step,
-// extracted from CtoPanel's handleConnectAnswer so it is pure and testable
-// (the leaf stays a memoized callback shell). Returns the exact
-// `ctoToolConnect` argument set for the chosen answer, or null when there is
-// nothing valid to call: the answer is not one of the three registry verbs,
-// no option matches it, or the option's action carries no string
-// `payload.tool` — the caller must skip the call entirely rather than send a
-// bogus/undefined tool (the server's upsertConnect always binds the tool at
-// generation time, so null is a defensive contract, not an expected path).
-// `ring` is forwarded only for the deep-read ask; "metadata" is the route's
-// default and is omitted, matching the wire shape the server expects.
-export function connectAnswerArgs(
-  card: ConnectCardRow,
-  answer: string,
-): { tool: string; answer: "connect" | "not-now" | "never"; ring?: "deep_read" } | null {
-  if (answer !== "connect" && answer !== "not-now" && answer !== "never") return null;
-  const option = (card.options ?? []).find((o) => o.answer === answer);
-  const tool = option?.action?.payload?.tool;
-  if (typeof tool !== "string" || tool === "") return null;
-  const ring = option?.action?.payload?.ring;
-  return {
-    tool,
-    answer,
-    ...(ring === "deep_read" ? { ring: "deep_read" as const } : {}),
-  };
-}
-
 // Live countdown to a veto card's `dueMs`: the ms remaining (≥ 0), or null
 // when there is no due time or it already elapsed (the card resolves server-
 // side; the client just hides the countdown rather than reading negative).

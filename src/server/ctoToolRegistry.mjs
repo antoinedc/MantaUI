@@ -1,15 +1,22 @@
-// ctoToolRegistry.mjs — §7.2 registry + fusion + lifecycle + connect asks
-// (BET-1395) + the §7.3 vitality / §7.6 relevance axes (BET-1396).
+// ctoToolRegistry.mjs — §7.2 registry + fusion + lifecycle (BET-1395) + the
+// §7.3 vitality / §7.6 relevance axes (BET-1396).
+//
+// ACCESS IS THE SECRET STORE. A key present in the manta secret store grants
+// the CTO FULL access to the matching tool — no consent rings, no connect
+// asks, no read/write split. The user adding a secret IS the grant; deleting
+// it is the revocation. `consentFor()` is the one chokepoint every probe and
+// read path funnels through, and it derives its answer from the store's KEY
+// LIST at decision time (keys and hints only — a value is never read here).
+// A tool with no matching secret has no access and asks nothing.
 //
 // The registry fuses the four §7.1 evidence channels into ONE row per tool
-// identity ("one identity, one row"), derives engagement, runs the two
-// lifecycle bars, and raises §7.4 connect asks as needs-you decision cards:
+// identity ("one identity, one row"), derives engagement, and tracks the
+// lifecycle bars for display:
 //
 //   observed (evidence accumulates) → candidate (either axis crosses its bar:
 //     engagement ≥3 uses across ≥2 weeks; OR the vitality path — a credential
-//     exists at all) → ONE connect ask (Connect read-only / Not now / Never)
-//     → integrated (the FIRST successful §7.5 probe run flips it here;
-//     applyProbeResult does the flip).
+//     exists at all) → integrated (the FIRST successful §7.5 probe run flips
+//     it here; applyProbeResult does the flip).
 //
 // Raw evidence (unknown CLIs/hosts/keys) is classified by the LLM fallback at
 // most ONCE per identity — the model's judgment is cached in the registry
@@ -21,7 +28,10 @@
 // All I/O is injected; pure helpers are exported for tests.
 
 import { toolRegistryStore, toolUsageStore, toolClassificationStore, ledgerStore, patchStore } from "./ctoStores.mjs";
-import { displayName as catalogDisplayName } from "./ctoToolCatalog.mjs";
+import { displayName as catalogDisplayName, matchSecretIdentities } from "./ctoToolCatalog.mjs";
+// Metadata-only listing (keys, scopes, hints — `toMeta` strips every value):
+// the access grant's source of truth. Never import a value-returning path.
+import { listSecrets } from "./secrets.mjs";
 import {
   CHANNEL_TRANSCRIPT,
   CHANNEL_CONFIG,
@@ -45,9 +55,6 @@ function payloadFrom(raw) {
   return {
     v: TOOL_REGISTRY_VERSION,
     tools: (Array.isArray(p?.tools) ? p.tools : []).map((t) => ({
-      deepAskRound: 0,
-      deepReArmAt: null,
-      lastDeepAskDay: null,
       asSourceDecayed: false,
       decayedAtUses: 0,
       ...(t ?? {}),
@@ -59,8 +66,6 @@ function payloadFrom(raw) {
     scanRetryAt: Number.isFinite(p.scanRetryAt) ? p.scanRetryAt : 0,
     scanFailures: Number.isFinite(p.scanFailures) ? p.scanFailures : 0,
     lastFusedTs: Number.isFinite(p?.lastFusedTs) ? p.lastFusedTs : null,
-    lastAskDay: typeof p?.lastAskDay === "string" ? p.lastAskDay : null,
-    lastDeepAskDay: typeof p?.lastDeepAskDay === "string" ? p.lastDeepAskDay : null,
   };
 }
 export const ACTOR = "cto";
@@ -75,12 +80,11 @@ export const RAW_CLASSIFY_MIN_USES = 2;
 export const UNRESOLVED_PRUNE_LIMIT = 1000;
 export const UNRESOLVED_RETENTION_MS = 90 * 24 * 3_600_000;
 
-// Bound only unresolved, untouched candidates. Human decisions and resolved
-// identities are never eviction candidates, even when they are old.
+// Bound only unresolved, untouched candidates. A resolved identity is never
+// an eviction candidate, even when it is old; nor is access ever at stake —
+// the secret store grants it, not this row.
 export function retainUnresolved(tools, nowMs) {
   const eligible = tools.filter((t) => t.raw && !t.unclassifiable &&
-    !(t.askRound > 0) && !(t.deepAskRound > 0) &&
-    !Object.values(t.consent ?? {}).some((v) => v != null) &&
     t.status === "observed" && (t.uses ?? 0) <= 1 &&
     nowMs - (t.engagement?.last_used ?? t.firstSeenTs ?? nowMs) > UNRESOLVED_RETENTION_MS);
   const expired = new Set(eligible
@@ -91,14 +95,12 @@ export function retainUnresolved(tools, nowMs) {
 
 export function recoverLegacyClassification(tools, nowMs) {
   // Old records conflated errors/gating with an explicit model rejection.
-  // Never guess which it was: allow one new assessment only after new use,
-  // and only if no human has interacted with the identity.
+  // Never guess which it was: allow one new assessment only after new use.
   const target = tools.find((t) => t.raw && t.unclassifiable &&
     !t.classificationOutcome && !t.classificationRecovery &&
     Number.isFinite(t.llmAt) && (t.engagement?.last_used ?? 0) > t.llmAt &&
     (t.uses ?? 0) >= RAW_CLASSIFY_MIN_USES &&
-    t.status === "observed" && !(t.askRound > 0) && !(t.deepAskRound > 0) &&
-    !Object.values(t.consent ?? {}).some((v) => v != null));
+    t.status === "observed");
   if (!target) return null;
   target.classificationRecovery = { at: nowMs, previousLlmAt: target.llmAt, basis: "fresh-evidence" };
   target.unclassifiable = false;
@@ -108,20 +110,9 @@ export function recoverLegacyClassification(tools, nowMs) {
 // The engagement bar (§7.4): ≥3 uses across ≥2 distinct weeks.
 export const ENGAGEMENT_MIN_USES = 3;
 export const ENGAGEMENT_MIN_WEEKS = 2;
-// "Not now" re-arms after 30 days (§7.4 ring semantics).
-export const NOT_NOW_REARM_MS = 30 * 24 * 3_600_000;
-// Max connect asks per tool (§7.4: askRound < 3).
-export const MAX_ASK_ROUNDS = 3;
-// A fresh bar crossing re-arms a declined ask early: this many uses beyond
-// the snapshot taken at ask time counts as fresh engagement (§7.4
-// "a fresh axis-bar crossing"; the vitality path's bar cannot re-cross, so
-// for credentials only the 30-day timer re-arms).
+// Renewed engagement beyond a decay trip's snapshot revives the tool: this
+// many uses past it counts as fresh engagement.
 export const REARM_FRESH_USES = 2;
-// Deep-read ask bar (spec §7.6 + BET-1404 on-call decision): max relevance
-// ≥ 0.5. The vitality half of the bar is `ewma > 0` — the only vitality
-// threshold precedent in shipped code (the daily-cadence regime,
-// `effectiveCadenceMs`); selectivity belongs to the relevance half.
-export const DEEP_RELEVANCE_MIN = 0.5;
 // Dismissal decay chain (spec §7.6): trip when the as_source Beta lower bound
 // drops below 0.3 after ≥3 reports (§9.4's 0.95 tail convention). "Then
 // dormant" is the §7.3 dead condition under the standard lifecycle — no
@@ -134,10 +125,6 @@ export const TOOL_CLASSIFY_TASK_CLASS = "ambient-summarize";
 const DAY_MS = 24 * 3_600_000;
 const WEEK_MS = 7 * DAY_MS;
 const EWMA_TAU_DAYS = 7; // engagement EWMA decay constant (1-week τ)
-
-export function emptyConsent() {
-  return { metadata: null, deep_read: null, write: null };
-}
 
 export function emptyVitality() {
   return { last_event: null, inflow_rate: null, ewma: null, last_probed: null };
@@ -161,8 +148,8 @@ function humanize(identity) {
 
 // §7.2 schema (verbatim axes) + the lifecycle bookkeeping the engine needs
 // on top: engagement/vitality are the spec'd axes; uses/weeksActive/weeks are
-// derived counters (the bar's inputs); askRound/askAtUses/reArmAt/
-// unneverAtUses drive the §7.4 ask gate.
+// derived counters (the bar's inputs). Access is NOT a field here — it is
+// derived from the secret store at decision time.
 function baseTool(identity, ts) {
   return {
     tool: identity,
@@ -182,15 +169,6 @@ function baseTool(identity, ts) {
     evidence: [],
     status: "observed",
     role: null, // §7.3 quadrants need vitality probes (§7.5) — derived later
-    consent: emptyConsent(),
-    askRound: 0,
-    askAtUses: 0,
-    reArmAt: null,
-    unneverAtUses: null,
-    // Deep-read ring ask bookkeeping (§7.4 ring semantics apply per ask).
-    deepAskRound: 0,
-    deepReArmAt: null,
-    lastDeepAskDay: null,
     // Dismissal decay chain (§7.6): the as_source trip's persisted state.
     asSourceDecayed: false,
     decayedAtUses: 0,
@@ -244,32 +222,6 @@ export function deriveRole(tool, { nowMs = Date.now() } = {}) {
 // Either axis crossed its bar (§7.4 observed → candidate).
 export function barCrossed(tool) {
   return engagementBarMet(tool) || hasCredential(tool);
-}
-
-// The deep-read ask bar (§7.6): a tool with metadata consent whose vitality ×
-// relevance clears the bar — vitality EWMA high (`ewma > 0`, the daily-cadence
-// regime; BET-1404 on-call decision) AND max relevance ≥ 0.5. Returns the
-// bar's state plus the argmax-relevance project (what the ask's concrete
-// intent names). `met` implies metadata consent; the deep ask adds its own
-// consent gates on top.
-export function deepReadBar(tool) {
-  const consent = tool?.consent ?? {};
-  if (consent.metadata !== "yes") return { met: false, project: null, relevance: 0 };
-  const ewma = tool?.vitality?.ewma;
-  if (!(typeof ewma === "number" && ewma > 0)) return { met: false, project: null, relevance: 0 };
-  let project = null;
-  let best = 0;
-  for (const [p, r] of Object.entries(tool?.relevance ?? {})) {
-    const s = Number(r);
-    if (Number.isFinite(s) && s > best) {
-      best = s;
-      project = p;
-    }
-  }
-  if (project === null || !(best >= DEEP_RELEVANCE_MIN)) {
-    return { met: false, project, relevance: best };
-  }
-  return { met: true, project, relevance: best };
 }
 
 // Near-duplicate suppression (§7.3): a host that is a subdomain of an
@@ -396,32 +348,61 @@ export function createToolRegistry(deps = {}) {
     registryStore = toolRegistryStore,
     usageStore = toolUsageStore,
     classificationStore = toolClassificationStore,
-    cards = null, // { upsertConnect, resolveConnectCards, listOpen }
     ledger = ledgerStore,
-    recordVerdict = null, // async ({subject, verdict, never?}) => {ok}
     runEphemeral = null, // async ({taskClass, context}) => {text}
+    // The access grant's source of truth: the secret store's KEY LIST, read
+    // at decision time. Metadata only — `listSecrets` returns `toMeta` rows,
+    // which carry key/scope/hint and never a value.
+    listSecretMetas = () => listSecrets({ includeAll: true }),
     now = () => Date.now(),
     // I/O seams for the daily scan (index.mjs supplies the live ones).
     collectDb = null, // async ({sinceTs, untilTs, cap}) => db part rows
     collectSurfaces = null, // async () => {config, forgeRepos, webhooks, gitRemotes, schedules}
     backfillStartInstant = null, // first-scan lower bound (the backfill range)
     // BET-1396 §7.5: async (toolId, {secret}) — the probe runner's
-    // scaffoldSpec; called at consent time so the ENGINE authors the tool's
-    // probe-spec template (AI-authored content goes through the runner's
-    // validated writeSpec; no other writer touches probes/<tool>.yaml).
+    // scaffoldSpec; called for every tool the secret store grants (the grant
+    // IS the trigger) so the ENGINE authors the tool's probe-spec template.
+    // AI-authored content goes through the runner's validated writeSpec; no
+    // other writer touches probes/<tool>.yaml. Idempotent per tool.
     scaffoldProbes = null,
   } = deps;
+
+  // ---- The access grant (the single rule) ---------------------------------
+  // Every stored key → the tool identities it names → `identity → {key,
+  // primary}`. Built fresh on every call: the store is the live control
+  // surface, so a secret added a second ago grants immediately and a deleted
+  // one stops granting immediately. Keys and hints only; a value is never
+  // touched. `primary` marks the one identity the key is chiefly about (the
+  // rest are the key's other meaningful segments) — access treats them
+  // alike; the probe scaffold only follows the primary.
+  function grantedTools() {
+    let metas;
+    try {
+      metas = listSecretMetas() ?? [];
+    } catch {
+      return new Map();
+    }
+    const granted = new Map();
+    for (const meta of Array.isArray(metas) ? metas : []) {
+      const key = typeof meta?.key === "string" ? meta.key : "";
+      if (!key) continue;
+      const identities = matchSecretIdentities(key, meta?.hint ?? "");
+      for (const [i, identity] of identities.entries()) {
+        if (!granted.has(identity)) granted.set(identity, { key, primary: i === 0 });
+      }
+    }
+    return granted;
+  }
 
   // BET-1464 defect 3: every tool-registry.json write routes through
   // patchStore — the read-fresh-merge-save runs under the registry store's
   // own mutex, keyed by the store path. This replaces the old per-instance
   // write chain (`serialized`) with the ONE shared discipline every CTO
   // store writer uses: a writer whose body awaits (the scan's db batch, the
-  // LLM classification, the consent-time probe scaffold) holds the mutex
-  // across the whole body, so a connect answer landing mid-scan can no
-  // longer be silently overwritten by the scan's stale save — the user's
-  // explicit "never" reverting (the same snapshot-spreading-writer class
-  // BET-1425 fixed for engine-state). Mutators receive the RAW store payload
+  // LLM classification) holds the mutex across the whole body, so a
+  // concurrent writer's row can no longer be silently overwritten by a stale
+  // save (the same snapshot-spreading-writer class BET-1425 fixed for
+  // engine-state). Mutators receive the RAW store payload
   // and normalize via payloadFrom; returning an empty patch means "no
   // change, no save" (the early-exit error paths rely on that).
   function patchRegistry(mutate) {
@@ -432,7 +413,7 @@ export function createToolRegistry(deps = {}) {
     try {
       return payloadFrom(await registryStore.load());
     } catch {
-      return { v: TOOL_REGISTRY_VERSION, tools: [], lastScanTs: null, lastFusedTs: null, lastAskDay: null, lastDeepAskDay: null };
+      return { v: TOOL_REGISTRY_VERSION, tools: [], lastScanTs: null, lastFusedTs: null };
     }
   }
 
@@ -490,7 +471,7 @@ export function createToolRegistry(deps = {}) {
     await patchStore(classificationStore, (fresh) => {
       const records = fresh.records ?? {};
       const eligible = payload.tools.filter((t) => t.raw && !t.unclassifiable && t.llmAt == null &&
-        !Object.values(t.consent ?? {}).some((v) => v != null) && t.uses >= RAW_CLASSIFY_MIN_USES);
+        t.uses >= RAW_CLASSIFY_MIN_USES);
       target = eligible.find((t) => ["resolved", "rejected"].includes(records[t.tool]?.status));
       if (target) {
         attempt = records[target.tool];
@@ -590,12 +571,12 @@ export function createToolRegistry(deps = {}) {
     return next();
   }
 
-  // Lifecycle (§7.3/§7.4): EWMA decay, observed→candidate promotion, and at
-  // most one new connect ask per day. Returns `{changed, asked}`.
+  // Lifecycle (§7.3): EWMA decay, decay-chain revival, and the
+  // observed→candidate promotion. Nothing here asks the user anything — the
+  // secret store is the only grant. Returns `{changed}`.
   async function lifecycleStep(payload) {
     const nowMs = now();
     let changed = false;
-    let asked = null;
 
     // Decay every tool's engagement EWMA to now (single lazy application).
     for (const t of payload.tools) {
@@ -608,162 +589,43 @@ export function createToolRegistry(deps = {}) {
     }
 
     // §7.6 decay-chain revival (§7.3/B7): renewed engagement re-promotes a
-    // tripped tool — fresh uses beyond the trip's snapshot clear the flag
-    // (deep analyses + candidate generation resume) and the deep-read ask
-    // re-arms on the §7.4 30-day timer. No second dormancy definition: the
-    // standard lifecycle owns everything downstream (Q2 decision).
+    // tripped tool — fresh uses beyond the trip's snapshot clear the flag so
+    // deep analyses + candidate generation resume. No second dormancy
+    // definition: the standard lifecycle owns everything downstream.
     for (const t of payload.tools) {
       if (t?.asSourceDecayed !== true) continue;
       if ((t?.uses ?? 0) > (t?.decayedAtUses ?? 0) + REARM_FRESH_USES) {
         t.asSourceDecayed = false;
         t.decayedAtUses = 0;
-        t.deepReArmAt = nowMs + NOT_NOW_REARM_MS;
         changed = true;
         await ledgerLog({ kind: "cto.tool.as_source_revived", tool: t.tool, uses: t.uses ?? 0 });
       }
     }
 
-    // Promote observed → candidate when either axis crosses its bar. After an
-    // un-never (§7.4: "returns the tool to observed; a new ask still requires
-    // a fresh bar crossing") the promotion needs NEW engagement beyond the
-    // un-never snapshot — barCrossed is monotone in uses, so without the
-    // snapshot a just-un-never'd tool would instantly re-promote and re-ask.
+    // Promote observed → candidate when either axis crosses its bar.
     for (const t of payload.tools) {
       if (t.raw || t.unclassifiable) continue;
       if (t?.status !== "observed" || !barCrossed(t)) continue;
-      if (t.unneverAtUses != null && (t?.uses ?? 0) <= t.unneverAtUses + REARM_FRESH_USES) continue;
-      t.unneverAtUses = null;
       t.status = "candidate";
       changed = true;
       await ledgerLog({ kind: "cto.tool.candidate", tool: t.tool, uses: t.uses, weeksActive: t.weeksActive });
     }
 
-    // Connect-ask gate (§7.4): candidate + no consent yet + askRound < 3 +
-    // re-armed + no open connect card + ≤1 new ask/day.
-    if (cards && typeof cards.upsertConnect === "function") {
-      let open = [];
-      try {
-        open = (typeof cards.listOpen === "function" ? await cards.listOpen() : []) ?? [];
-      } catch {
-        open = [];
-      }
-      const openConnectTools = new Set(
-        open.flatMap((c) => (c?.variant === "connect" && Array.isArray(c?.refs) ? c.refs : [])),
-      );
-      const today = new Date(nowMs).toISOString().slice(0, 10);
-      const eligible = payload.tools
-        .filter((t) => {
-          if (t.raw || t.unclassifiable) return false;
-          if (t?.status !== "candidate") return false;
-          const consent = t?.consent ?? {};
-          if (consent.metadata === "yes" || consent.metadata === "never") return false;
-          if ((t?.askRound ?? 0) >= MAX_ASK_ROUNDS) return false;
-          if (consent.metadata === "no") {
-            // §7.4 re-arm semantics: 30 days, or a fresh axis-bar crossing —
-            // BUT the fresh-crossing path exists only on the engagement axis
-            // (a credential-exists bar cannot re-cross, so on the vitality
-            // path the 30-day timer is the only re-arm).
-            const fresh = engagementBarMet(t) && (t?.uses ?? 0) > (t?.askAtUses ?? 0) + REARM_FRESH_USES;
-            const timer = t?.reArmAt != null && nowMs >= t.reArmAt;
-            if (!timer && !fresh) return false;
-          }
-          if (openConnectTools.has(t.tool)) return false;
-          return barCrossed(t);
-        })
-        .sort((a, b) => (b?.uses ?? 0) - (a?.uses ?? 0));
-
-      if (eligible.length && payload.lastAskDay !== today) {
-        const t = eligible[0];
-        if (t.consent?.metadata === "no") t.consent.metadata = null; // re-armed
-        const ev = (t?.evidence ?? []).slice(-4).map((e) => `${e?.channel}: ${e?.detail}`);
-        const why = [
-          `${t.displayName ?? t.tool} showed up ${t.uses}× across ${t.weeksActive} week(s) of agent work`,
-          hasCredential(t) ? "and a credential for it exists on this box" : "",
-          "— grant read-only metadata access so the CTO can keep it in its model, or decline.",
-        ]
-          .filter(Boolean)
-          .join(" ");
-        await cards.upsertConnect({
-          toolId: t.tool,
-          title: `Connect ${t.displayName ?? t.tool} (read-only)?`,
-          body: why,
-          evidence: ev,
-          refs: [t.tool],
-          ts: nowMs,
-        });
-        t.askRound = (t.askRound ?? 0) + 1;
-        t.askAtUses = t.uses ?? 0;
-        t.reArmAt = null;
-        payload.lastAskDay = today;
-        asked = t.tool;
-        changed = true;
-        await ledgerLog({ kind: "cto.tool.ask", tool: t.tool, askRound: t.askRound });
-      }
-
-      // Deep-read ask (§7.6, BET-1404): one ring up from metadata — for an
-      // integrated tool whose metadata consent exists but deep_read hasn't
-      // been asked (or was declined and re-armed), whose vitality × relevance
-      // clears the bar. The ask states the concrete intent (analyze <tool>'s
-      // data about <project> overnight and report findings). Ring semantics
-      // per §7.4: never/not-now rules identical (30-day timer re-arm only —
-      // the bar's vitality half cannot re-cross); ≤1 new ask/day; never for
-      // a chain-tripped tool (the cascade stopped deep analyses).
-      const deepEligible = payload.tools
-        .filter((t) => {
-          if (t.raw || t.unclassifiable) return false;
-          if (t?.status !== "integrated" || t?.asSourceDecayed === true) return false;
-          const consent = t?.consent ?? {};
-          if (consent.metadata !== "yes") return false;
-          if (consent.deep_read === "yes" || consent.deep_read === "never") return false;
-          if ((t?.deepAskRound ?? 0) >= MAX_ASK_ROUNDS) return false;
-          if (consent.deep_read === "no") {
-            // Vitality-path rule: the 30-day timer is the only re-arm.
-            if (!(t?.deepReArmAt != null && nowMs >= t.deepReArmAt)) return false;
-          }
-          if (openConnectTools.has(t.tool)) return false;
-          return deepReadBar(t).met;
-        })
-        .sort((a, b) => (b?.uses ?? 0) - (a?.uses ?? 0));
-
-      if (deepEligible.length && payload.lastDeepAskDay !== today) {
-        const t = deepEligible[0];
-        if (t.consent?.deep_read === "no") t.consent.deep_read = null; // re-armed
-        const bar = deepReadBar(t);
-        const name = t.displayName ?? t.tool;
-        const ev = (t?.evidence ?? []).slice(-4).map((e) => `${e?.channel}: ${e?.detail}`);
-        await cards.upsertConnect({
-          toolId: t.tool,
-          ring: "deep_read",
-          title: `Let the CTO analyze ${name}'s data?`,
-          body: `The CTO would analyze ${name}'s data about ${bar.project} overnight and report findings — one read-only pass beyond metadata. Reports can be dismissed, and ignored reports wind the analyses down.`,
-          evidence: ev,
-          refs: [t.tool],
-          ts: nowMs,
-        });
-        t.deepAskRound = (t.deepAskRound ?? 0) + 1;
-        t.deepReArmAt = null;
-        payload.lastDeepAskDay = today;
-        changed = true;
-        await ledgerLog({ kind: "cto.tool.deep_ask", tool: t.tool, project: bar.project, askRound: t.deepAskRound });
-      }
-    }
-
-    return { changed, asked };
+    return { changed };
   }
 
   // The daily batch (§7.1-2/3 + §7.3). First scan after install runs over the
   // cold-start backfill range; later scans run since the previous watermark.
   // The whole body runs under the registry store's mutex (BET-1464 defect 3):
   // the scan holds its snapshot across seconds-long awaits, so without the
-  // mutex a connect answer landing mid-scan would be reverted by the scan's
-  // save. Returns `{ok, scanned, asked}`.
+  // mutex a concurrent writer's row would be reverted by the scan's save.
+  // Returns `{ok, scanned}`.
   async function dailyScan() {
     const previous = await loadPayload();
     if (previous.scanRetryAt > now()) return { ok: false, deferred: true, retryAt: previous.scanRetryAt, scanned: 0 };
     const nowMs = now();
     const untilTs = nowMs;
     const rows = [];
-    let asked = null;
     let scanLedger = false;
     let scanOk = true;
     let scanCode;
@@ -809,22 +671,22 @@ export function createToolRegistry(deps = {}) {
         recoverLegacyClassification(payload.tools, nowMs);
       }
       await classifyOneRaw(payload);
-      const { changed, asked: askTool } = await lifecycleStep(payload);
+      const { changed } = await lifecycleStep(payload);
       payload.tools = retainUnresolved(payload.tools, nowMs);
       if (dbCursor) {
         payload.lastScanTs = dbCursor.ts;
         payload.lastScanId = dbCursor.id;
       }
-      asked = askTool;
-      scanLedger = changed || askTool != null;
+      scanLedger = changed;
       payload.scanFailures = scanOk ? 0 : payload.scanFailures + 1;
       payload.scanRetryAt = scanOk ? 0 : nowMs + (scanCode === "unsupported-runtime" ? DAY_MS :
         Math.min(3_600_000, 300_000 * 2 ** Math.min(payload.scanFailures - 1, 4)));
       return payload;
     });
     if (scanLedger) {
-      await ledgerLog({ kind: "cto.tool.scan", asked: asked ?? null });
+      await ledgerLog({ kind: "cto.tool.scan" });
     }
+    await scaffoldGrantedTools();
     try {
       await appendUsage(rows.map((row) => ({ ...row, fused: true })));
     } catch {
@@ -832,7 +694,7 @@ export function createToolRegistry(deps = {}) {
     }
     const saved = await loadPayload();
     // Only prune outcomes proven applied to a committed registry. Pending
-    // results and reservations survive; never modify consent or aliases here.
+    // results and reservations survive; never modify aliases here.
     await patchStore(classificationStore, (fresh) => {
       const records = { ...fresh.records };
       let changed = false, pruned = 0;
@@ -849,194 +711,49 @@ export function createToolRegistry(deps = {}) {
       return changed ? { records } : {};
     });
     if (!scanOk) await ledgerLog({ kind: "cto.tool.scan_unavailable", code: scanCode, retryAt: saved.scanRetryAt });
-    return { ok: scanOk, partial: Boolean(saved.lastScanId), scanned: rows.length, asked: asked ?? null };
+    return { ok: scanOk, partial: Boolean(saved.lastScanId), scanned: rows.length };
   }
 
-  // Resolve a connect ask (§7.4 three-way, per ring). Writes the consent
-  // ring, the §9.5 verdict (accept / dismiss / never), and resolves the open
-  // card. `ring` selects which ring the ask was about: "metadata" (default)
-  // or "deep_read" (BET-1404 — the deep-read ask's connect grants deep_read,
-  // its not-now re-arms on the 30-day timer; never kills ALL rings either
-  // way). A deep_read grant backstops on metadata consent (the ask gate
-  // already requires it; this keeps a hand-crafted answer from skipping a
-  // ring).
-  async function resolveConnect({ tool, answer, ring = "metadata" } = {}) {
-    const id = typeof tool === "string" ? tool.trim().toLowerCase() : "";
-    if (!id) return { ok: false, error: "missing tool" };
-    if (answer !== "connect" && answer !== "not-now" && answer !== "never") {
-      return { ok: false, error: `invalid answer "${answer}"` };
+  // The grant IS the trigger: every tool the secret store grants gets its
+  // §7.5 probe-spec template authored, filled with the granting key's NAME
+  // (never its value). `scaffoldSpec` is idempotent — a tool that already has
+  // a spec is left exactly as it is, so this runs safely on every scan and
+  // needs no per-tool bookkeeping. Best-effort: the scan never fails on it.
+  async function scaffoldGrantedTools() {
+    if (typeof scaffoldProbes !== "function") return;
+    for (const [tool, grant] of grantedTools()) {
+      if (!grant.primary) continue;
+      await scaffoldProbes(tool, { secret: grant.key }).catch(() => {});
     }
-    if (ring !== "metadata" && ring !== "deep_read") {
-      return { ok: false, error: `invalid ring "${ring}"` };
-    }
-    const nowMs = now();
-    // The consent write runs under the registry store's mutex (BET-1464
-    // defect 3). An early-exit error path returns an empty patch: no save.
-    let err = null;
-    await patchRegistry(async (payload) => {
-      const t = payload.tools.find((x) => x?.tool === id);
-      if (!t) {
-        err = { ok: false, error: `unknown tool "${id}"` };
-        return null;
-      }
-      t.consent = t.consent ?? emptyConsent();
-      if (answer === "connect") {
-        if (ring === "deep_read") {
-          if (t.consent.metadata !== "yes") {
-            err = { ok: false, error: `tool "${id}" has no metadata consent` };
-            return null;
-          }
-          t.consent.deep_read = "yes";
-          t.deepReArmAt = null;
-          await ledgerLog({ kind: "cto.tool.consent", tool: id, ring: "deep_read", value: "yes" });
-        } else {
-          // The metadata ring is granted. Status stays `candidate` until the
-          // first §7.5 probe actually runs (applyProbeResult flips it).
-          t.consent.metadata = "yes";
-          t.reArmAt = null;
-          await ledgerLog({ kind: "cto.tool.consent", tool: id, ring: "metadata", value: "yes" });
-          // §7.5 BET-1396: the ENGINE authors the tool's probe-spec template at
-          // consent time, filled with the evidenced credential key (if any). The
-          // file is engine-written; its content is completed through the runner's
-          // validated writeSpec path. Best-effort — consent never depends on it.
-          if (typeof scaffoldProbes === "function") {
-            const secretRow = (t.evidence ?? []).find((e) => e?.channel === "secret" && typeof e?.detail === "string" && e.detail.startsWith("secret:"));
-            await scaffoldProbes(id, { secret: secretRow ? secretRow.detail.slice("secret:".length) : null }).catch(() => {});
-          }
-        }
-      } else if (answer === "not-now") {
-        if (ring === "deep_read") {
-          t.consent.deep_read = "no";
-          t.deepReArmAt = nowMs + NOT_NOW_REARM_MS;
-          await ledgerLog({ kind: "cto.tool.consent", tool: id, ring: "deep_read", value: "no" });
-        } else {
-          t.consent.metadata = "no";
-          t.reArmAt = nowMs + NOT_NOW_REARM_MS;
-          t.askAtUses = t.uses ?? 0;
-          await ledgerLog({ kind: "cto.tool.consent", tool: id, ring: "metadata", value: "no" });
-        }
-      } else {
-        // Never: kills ALL rings and suppresses future asks (revocable only in
-        // the §10.5 tool drill-down).
-        t.consent = { metadata: "never", deep_read: "never", write: "never" };
-        await ledgerLog({ kind: "cto.tool.consent", tool: id, ring: "metadata", value: "never" });
-      }
-      return payload;
-    });
-    if (err) return err;
-
-    // §9.5: every UI control that expresses a judgment writes exactly one
-    // verdict. Connect → accept; Not now → dismiss; Never → never. The class
-    // names the ring the ask was about (metadata / deep-read), so §9.4
-    // per-class trust counting and the as_source sink stay unambiguous.
-    if (typeof recordVerdict === "function") {
-      try {
-        const subjectClass = ring === "deep_read" ? "tool-deep-read" : "tool-metadata";
-        if (answer === "connect") {
-          await recordVerdict({ subject: { type: "tool", id, class: subjectClass }, verdict: "accept" });
-        } else if (answer === "not-now") {
-          await recordVerdict({ subject: { type: "tool", id, class: subjectClass }, verdict: "dismiss" });
-        } else {
-          await recordVerdict({ subject: { type: "tool", id, class: subjectClass }, verdict: "never", never: true });
-        }
-      } catch {
-        /* best-effort — the consent ring is the source of truth */
-      }
-    }
-
-    // Close the open connect card for this tool (best-effort).
-    if (cards && typeof cards.resolveConnectCards === "function") {
-      try {
-        await cards.resolveConnectCards(id, `connect answer: ${answer}`);
-      } catch {
-        /* best-effort */
-      }
-    }
-    return { ok: true, tool: id, answer };
   }
 
-  // §7.4 "Un-never" (the tool drill-down, B11, calls this): returns the tool
-  // to `observed`, clears the never-suppression on every ring, and requires a
-  // FRESH bar crossing before the next ask — enforced by the `unneverAtUses`
-  // snapshot the promotion gate checks (barCrossed is monotone in uses, so
-  // without the snapshot the tool would instantly re-promote and re-ask,
-  // exactly the immediate re-prompt the spec's fresh-crossing requirement
-  // exists to prevent). The server rule ships here; the drill-down UI/route
-  // is B11's.
-  async function unNever(toolId) {
-    const id = typeof toolId === "string" ? toolId.trim().toLowerCase() : "";
-    if (!id) return { ok: false, error: "missing tool" };
-    let err = null;
-    let uses = 0;
-    await patchRegistry(async (payload) => {
-      const t = payload.tools.find((x) => x?.tool === id);
-      if (!t) {
-        err = { ok: false, error: `unknown tool "${id}"` };
-        return null;
-      }
-      if (t.consent?.metadata !== "never") {
-        err = { ok: false, error: `tool "${id}" is not never'd` };
-        return null;
-      }
-      t.consent = emptyConsent();
-      t.status = "observed";
-      t.unneverAtUses = t.uses ?? 0;
-      t.reArmAt = null;
-      uses = t.uses ?? 0;
-      return payload;
-    });
-    if (err) return err;
-    await ledgerLog({ kind: "cto.tool.unnever", tool: id, uses });
-    return { ok: true, tool: id };
-  }
-
-  // §10.5 row-4 per-ring revoke (§7.4 "consent rings … revocable"): writes
-  // the ring to "no". Revoking metadata stops the §7.5 probes for the tool
-  // automatically (consentContext requires metadata=yes) — no extra wiring.
-  // Revoking a ring that was never granted (or that is "never"-ring-killed)
-  // is a no-op error, not a silent pass — the drill-down disables the button
-  // for those states, and the server is the backstop.
-  async function revokeConsent(toolId, ring) {
-    const id = typeof toolId === "string" ? toolId.trim().toLowerCase() : "";
-    if (!id) return { ok: false, error: "missing tool" };
-    if (ring !== "metadata" && ring !== "deep_read" && ring !== "write") {
-      return { ok: false, error: `ring must be one of metadata, deep_read, write` };
-    }
-    let err = null;
-    await patchRegistry(async (payload) => {
-      const t = payload.tools.find((x) => x?.tool === id);
-      if (!t) {
-        err = { ok: false, error: `unknown tool "${id}"` };
-        return null;
-      }
-      const cur = { ...emptyConsent(), ...(t.consent ?? {}) };
-      if (cur[ring] !== "yes") {
-        err = { ok: false, error: `ring "${ring}" is not granted for "${id}"` };
-        return null;
-      }
-      t.consent = { ...cur, [ring]: "no" };
-      return payload;
-    });
-    if (err) return err;
-    await ledgerLog({ kind: "cto.tool.consent", tool: id, ring, value: "no" });
-    return { ok: true, tool: id, ring, value: "no" };
-  }
-
-  // Read a consent ring for the future probe / tool-write gates (§7.4:
-  // "metadata consent ≠ deep-read consent ≠ write").
-  async function consentFor(tool, ring = "metadata") {
+  // THE CHOKEPOINT. Every probe / read path asks here whether the CTO may
+  // touch a tool, and the answer comes from the secret store's key list —
+  // read fresh, right now. A key that names this tool grants FULL access, so
+  // the answer no longer depends on which ring a caller asks about — the
+  // callers are unchanged, and every one of them gets the same "yes". No
+  // secret → null: no access, and nothing is asked of the user.
+  //
+  // The store is the ONLY input. A registry row that still carries a consent
+  // record from the old ask flow cannot grant access and cannot shadow a
+  // stored secret either — stale state is simply not consulted.
+  async function consentFor(tool) {
     const id = typeof tool === "string" ? tool.trim().toLowerCase() : "";
     if (!id) return null;
-    const payload = await loadPayload();
-    const t = payload.tools.find((x) => x?.tool === id);
-    return t ? (t.consent?.[ring] ?? null) : null;
+    return grantedTools().has(id) ? "yes" : null;
+  }
+
+  // The grant behind a tool, for the §10.5 drill-down: which stored KEY makes
+  // it reachable (a key name is not a secret), or null when nothing does.
+  function grantFor(tool) {
+    const id = typeof tool === "string" ? tool.trim().toLowerCase() : "";
+    return (id && grantedTools().get(id)?.key) ?? null;
   }
 
   // ---------------------------------------------------------------------------
   // BET-1396 — §7.3 vitality / §7.6 relevance / §7.4 lifecycle. All mutating
   // writers are patchStore writers (BET-1464 defect 3) — the whole-payload
-  // store's lost-update guard is the store mutex, shared with the scan and
-  // connect writers.
+  // store's lost-update guard is the store mutex, shared with the scan.
   // ---------------------------------------------------------------------------
 
   // The full row for one tool (probe runner reads evidence hosts + vitality;
@@ -1214,6 +931,7 @@ export function createToolRegistry(deps = {}) {
   async function listTools({ nowMs } = {}) {
     const t = Number.isFinite(nowMs) ? nowMs : now();
     const payload = await loadPayload();
+    const granted = grantedTools();
     return payload.tools.map((row) => {
       const vitality = { ...emptyVitality(), ...(row.vitality ?? {}) };
       return {
@@ -1228,8 +946,10 @@ export function createToolRegistry(deps = {}) {
         lastSeenTs: row.engagement?.last_used ?? null,
         firstSeenTs: row.firstSeenTs ?? null,
         vitality,
-        consent: { ...emptyConsent(), ...(row.consent ?? {}) },
-        askRound: row.askRound ?? 0,
+        // Access, as the drill-down must state it: the stored KEY that grants
+        // this tool (a key name is not a secret), or null — in which case the
+        // CTO cannot reach it and nothing will ask the user to change that.
+        accessKey: granted.get(row.tool)?.key ?? null,
         // §7.6 chain visibility (§10.5 drill-down): counters + trip state so
         // the surface can explain why deep analyses stopped — no dead state.
         asSource: { ...(row.as_source ?? { reports: 0, accepted: 0 }) },
@@ -1243,10 +963,9 @@ export function createToolRegistry(deps = {}) {
 
   return {
     dailyScan,
-    resolveConnect,
-    unNever,
-    revokeConsent,
+    // The single access chokepoint + the grant behind it (§10.5 display).
     consentFor,
+    grantFor,
     listTools,
     appendUsage,
     // BET-1396: §7.5 probe-runner surface (read the row, fold vitality /

@@ -4885,32 +4885,6 @@ const handleRequest = async (req, res) => {
     return;
   }
 
-  // ---------- Tool discovery (BET-1395, §7) ----------
-  // POST /api/cto/tools/connect {tool, answer, ring} — the connect-ask three-way
-  // (§7.4): "connect" grants the metadata consent ring, "not-now" declines
-  // with a 30-day re-arm, "never" kills every ring for that tool. The
-  // registry writes the consent + the §9.5 verdict and resolves the open
-  // connect card. Invalid input → 400; never throws.
-  if (path === "/api/cto/tools/connect") {
-    try {
-      if (req.method === "POST") {
-        const body = await readJsonBody(req);
-        const result = await adaptiveCto.tools.resolveConnect({
-          tool: body?.tool,
-          answer: body?.answer,
-          ring: body?.ring,
-        });
-        if (result?.ok) void bus.publish({ kind: "ctoState" });
-        respondJson(res, result?.ok ? 200 : 400, result);
-        return;
-      }
-      respondJson(res, 405, { error: "method not allowed" });
-    } catch (e) {
-      respondSafe500(res, "cto/tools-connect", CTO_SAFE_500_MESSAGE, e);
-    }
-    return;
-  }
-
   // ---------- Tonight (BET-1419, §10.4 drill-down + §9.2 veto card) ----------
   // GET /api/cto/tonight → { tasks, window } — the queue + the window state
   // machine's current row. POST /api/cto/tonight {action, ...} → the tonight
@@ -4996,13 +4970,10 @@ const handleRequest = async (req, res) => {
 
   // ---------- Tool-integrations drill-down (BET-1399, §10.5 row 4) ----------
   // GET /api/cto/tools → the registry table (tool, status, engagement,
-  //   vitality, derived role, consent rings, probe cadence + last result) +
-  //   the never list.
-  // POST /api/cto/tools/revoke {tool, ring} — per-ring revoke (writes the
-  //   ring to "no"; revoking metadata stops that tool's probes via the
-  //   consent gate). Every action reports its outcome.
-  // POST /api/cto/tools/unnever {tool} — clear the never verdict so the tool
-  //   re-enters the lifecycle at observed (§7.4).
+  //   vitality, derived role, the secret key that grants access, probe
+  //   cadence + last result).
+  // Read-only: access is granted by adding a key to the secret store and
+  // revoked by deleting it, so there is no action on this route.
   if (path === "/api/cto/tools") {
     try {
       if (req.method !== "GET") {
@@ -5016,26 +4987,6 @@ const handleRequest = async (req, res) => {
     }
     return;
   }
-  if (path === "/api/cto/tools/revoke" || path === "/api/cto/tools/unnever") {
-    try {
-      if (req.method !== "POST") {
-        respondJson(res, 405, { error: "method not allowed" });
-        return;
-      }
-      const body = await readJsonBody(req);
-      const result =
-        path === "/api/cto/tools/revoke"
-          ? await adaptiveCto.tools?.revokeConsent(body?.tool, body?.ring)
-          : await adaptiveCto.tools?.unNever(body?.tool);
-      if (result?.ok) void bus.publish({ kind: "ctoState" });
-      respondJson(res, result?.ok ? 200 : 400, result);
-      return;
-    } catch (e) {
-      respondSafe500(res, "cto/tools-revoke-unnever", CTO_SAFE_500_MESSAGE, e);
-    }
-    return;
-  }
-
   // GET /api/cto/suggest/held → the held (silent-log) rows the silence audit's
   // "I held back N items — review?" aside links to. POST /api/cto/suggest/held
   //   body {id, verdict, never?} → a judgment on a held item through the B3

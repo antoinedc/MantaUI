@@ -102,6 +102,7 @@ import {
   findingLedgerKind,
   isAskResolveEvent,
   isConditionGoneResult,
+  RETIRED_VARIANTS,
 } from "./ctoCards.mjs";
 import { createProbes } from "./ctoProbes.mjs";
 import { createSegmenter, segmentEventKind } from "./ctoSegments.mjs";
@@ -146,7 +147,8 @@ import { BLOCKER_FINDING_SOURCES, createCtoTriage } from "./ctoTriage.mjs";
 import { createCtoExecutorDriver, createCtoPlanRunner } from "./ctoAct.mjs";
 
 // BET-1395 tool discovery (§7): the registry engine — fusion of the four
-// evidence channels, the two lifecycle bars, and the connect-ask gate.
+// evidence channels, the two lifecycle bars, and the access chokepoint (which
+// reads the secret store).
 import { createToolRegistry } from "./ctoToolRegistry.mjs";
 
 // Actor tag stamped on every engine RPC call / ledger row (spec §3.3).
@@ -320,7 +322,11 @@ export async function defaultGetCounts(cardStore = cardsStore) {
   try {
     const cards = await cardStore.load();
     const arr = Array.isArray(cards?.cards) ? cards.cards : [];
-    needsYouCount = arr.filter((c) => c && c.state === "open" && cardHasContent(c)).length;
+    // A retired variant is unanswerable and unrenderable (see openCards) —
+    // counting one would badge an item the pane will never show.
+    needsYouCount = arr.filter(
+      (c) => c && c.state === "open" && cardHasContent(c) && !RETIRED_VARIANTS.includes(c.variant),
+    ).length;
   } catch {
     needsYouCount = 0;
   }
@@ -1449,17 +1455,16 @@ export function createCtoEngine(deps = {}) {
       createToolRegistry({
         registryStore: bundle.toolRegistry,
         usageStore: bundle.toolUsage,
-        cards,
         ledger,
         now,
         runEphemeral: toolsRunEphemeral ?? runEphemeral,
         collectDb: toolsCollectDb,
         collectSurfaces: toolsGetSurfaces,
         backfillStartInstant,
-        recordVerdict: (input) => getVerdictsEngine().recordVerdict(input),
-        // §7.5 BET-1396: the consent path authors the tool's probe-spec
-        // template through the probes engine (late-bound — the probes engine
-        // is constructed just below with THIS registry as its registry dep).
+        // §7.5 BET-1396: every tool the secret store grants gets its probe-
+        // spec template authored through the probes engine (late-bound — the
+        // probes engine is constructed just below with THIS registry as its
+        // registry dep).
         scaffoldProbes: (toolId, opts) => getProbes().scaffoldSpec(toolId, opts),
       });
     getProbes();
@@ -2994,8 +2999,7 @@ export function createCtoEngine(deps = {}) {
       ...row,
       probes: summaries.get(row.tool) ?? { tool: row.tool, consented: false, configured: false, probes: [] },
     }));
-    const never = tools.filter((row) => row.consent?.metadata === "never");
-    return { compiledAt: Date.now(), tools, never };
+    return { compiledAt: Date.now(), tools };
   }
 
   const engine = {
@@ -3036,8 +3040,8 @@ export function createCtoEngine(deps = {}) {
     proposeFact,
     factsContextBlock,
     // BET-1399 (§10.5 rows 1+4): drill-down render routes + the row-1 fact
-    // actions (wrong → correctFact; pin → factPin). Tools actions ride the
-    // `tools` getter (revokeConsent / unNever).
+    // actions (wrong → correctFact; pin → factPin). The tools row is
+    // read-only — access is granted and revoked in the secret store.
     factsView,
     factsArchive,
     correctFact,
@@ -3104,9 +3108,9 @@ export function createCtoEngine(deps = {}) {
     get watchers() {
       return getWatchers();
     },
-    // BET-1395 tool discovery (§7): the registry engine (resolveConnect feeds
-    // the /api/cto/tools/connect route; listTools the §10.5 surfaces) plus the
-    // manual dailyScan trigger for diagnostics/tests.
+    // BET-1395 tool discovery (§7): the registry engine (consentFor is the
+    // access chokepoint; listTools the §10.5 surfaces) plus the manual
+    // dailyScan trigger for diagnostics/tests.
     get tools() {
       return getTools();
     },

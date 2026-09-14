@@ -733,9 +733,11 @@ export function createProbes(deps = {}) {
   // Consent + host allowlist for one tool, straight from the registry.
   async function consentContext(tool) {
     const row = await registry.toolRow(tool);
-    let consentedRing = null;
-    if ((await registry.consentFor(tool, "metadata")) === "yes") consentedRing = "metadata";
-    if (consentedRing && (await registry.consentFor(tool, "deep_read")) === "yes") consentedRing = "deep_read";
+    // Access is all-or-nothing: a key in the secret store grants the tool
+    // fully, so a granted tool may run every probe ring and an ungranted one
+    // runs nothing. The per-probe `ring` stays a spec vocabulary (it says
+    // what a probe reads); it is no longer a gate.
+    const consentedRing = (await registry.consentFor(tool)) === "yes" ? "deep_read" : null;
     const hosts = new Set();
     for (const e of row?.evidence ?? []) {
       const host = evidenceHost(e?.detail);
@@ -1110,7 +1112,7 @@ export function createProbes(deps = {}) {
         /* vitality is best-effort */
       }
     } else {
-      // Failure evidence on the registry row (the connect-ask evidence trail).
+      // Failure evidence on the registry row (the tool's evidence trail).
       try {
         await registry.appendEvidence?.(tool, { channel: "probe", detail: `${key}:${error ?? status}`, ts });
       } catch {
@@ -1241,20 +1243,6 @@ export function createProbes(deps = {}) {
           (typeof pst.nextRunAt === "number" && pst.nextRunAt <= ts);
         if (!due) continue;
         if (thrifty && !exempt.has(probeKey(tool, probe.name))) continue;
-        // Deep-ring probes run only while the tool's deep_read consent is
-        // CURRENTLY "yes" (BET-1404). The authoring gate validated the spec
-        // against the ring at write time; this re-checks the live source of
-        // truth so a revocation stops deep probes on the next tick without
-        // invalidating the tool's metadata probes.
-        if (probe.ring === "deep_read") {
-          let deepOk = false;
-          try {
-            deepOk = (await registry.consentFor(tool, "deep_read")) === "yes";
-          } catch {
-            deepOk = false;
-          }
-          if (!deepOk) continue;
-        }
         results.push(await runOne(tool, spec, probe, st, { ts }));
         touched = true;
       }

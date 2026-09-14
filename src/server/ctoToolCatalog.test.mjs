@@ -10,6 +10,7 @@ import {
   matchCliIdentity,
   matchDomainIdentity,
   matchIssueKeys,
+  matchSecretIdentities,
   displayName,
 } from "./ctoToolCatalog.mjs";
 
@@ -69,4 +70,47 @@ test("displayName humanizes identities", () => {
   assert.equal(displayName("gcp"), "Google Cloud");
   assert.equal(displayName("some_unknown"), "Some_unknown");
   assert.equal(displayName(""), "");
+});
+
+// ---------------------------------------------------------------------------
+// Secret key → tool identity: the mapping the access grant rides on. The
+// VALUE is never an input — only the key name and the human-written hint.
+// ---------------------------------------------------------------------------
+
+test("secret keys map to the tool they name (catalog hit, else the service segment)", () => {
+  // The required table.
+  assert.equal(matchSecretIdentities("CAPO_MULTICA_TOKEN")[0], "multica");
+  assert.equal(matchSecretIdentities("GITHUB_PAT")[0], "github");
+  assert.equal(matchSecretIdentities("GITHUB_TOKEN")[0], "github");
+  assert.equal(matchSecretIdentities("MODAL_TOKEN_ID")[0], "modal");
+  assert.equal(matchSecretIdentities("NORDVPN_TOKEN")[0], "nordvpn");
+  // A catalog alias resolves to the canonical identity, not the alias.
+  assert.equal(matchSecretIdentities("GH_TOKEN")[0], "github");
+  // Credential noise never wins: AWS_ACCESS_KEY_ID is about aws.
+  assert.equal(matchSecretIdentities("AWS_ACCESS_KEY_ID")[0], "aws");
+  assert.equal(matchSecretIdentities("OPENAI_API_KEY")[0], "openai");
+  // camelCase and hyphens split the same way.
+  assert.equal(matchSecretIdentities("stripeApiKey")[0], "stripe");
+  assert.equal(matchSecretIdentities("linear-api-key")[0], "linear");
+});
+
+test("a key made only of credential vocabulary names NOTHING (no wildcard)", () => {
+  for (const key of ["API_KEY", "TOKEN", "SECRET", "MY_TOKEN", "", "   ", "___"]) {
+    assert.deepEqual(matchSecretIdentities(key), [], key);
+  }
+});
+
+test("the other meaningful segments and the whole key stay reachable, nothing else", () => {
+  const ids = matchSecretIdentities("CAPO_MULTICA_TOKEN");
+  assert.deepEqual(ids, ["multica", "capo", "capo_multica_token"]);
+  // The org prefix grants only a tool literally called "capo" — never a
+  // neighbouring identity.
+  assert.equal(ids.includes("github"), false);
+});
+
+test("a host in the hint is catalog evidence; an unknown or private host adds nothing", () => {
+  assert.ok(matchSecretIdentities("DEPLOY_HOOK", "posts to https://api.vercel.com/v1").includes("vercel"));
+  const none = matchSecretIdentities("DEPLOY_HOOK", "posts to https://127.0.0.1:8787 and mybox.local");
+  assert.equal(none.includes("localhost"), false);
+  assert.deepEqual(matchSecretIdentities("DEPLOY_HOOK", ""), ["hook", "deploy", "deploy_hook"]);
 });

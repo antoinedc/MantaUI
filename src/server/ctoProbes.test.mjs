@@ -74,7 +74,9 @@ function memStateStore(initial = {}) {
 function fakeRegistry(rows = []) {
   const byTool = new Map(rows.map((r) => [r.tool, r]));
   return {
-    consentFor: async (tool, ring = "metadata") => byTool.get(tool)?.consent?.[ring] ?? null,
+    // Production's rule: a key in the secret store grants the tool fully, so
+    // every ring answers alike. `granted` stands in for "a secret names it".
+    consentFor: async (tool) => (byTool.get(tool)?.granted === true ? "yes" : null),
     toolRow: async (tool) => byTool.get(tool) ?? null,
     async applyProbeResult(tool, input) {
       const t = byTool.get(tool);
@@ -156,12 +158,12 @@ function fakeLedger() {
   };
 }
 
-// A valid consented tool row with evidenced hosts + a secret.
+// A valid granted tool row with evidenced hosts + a secret.
 function consentedTool(tool = "github", hosts = ["api.github.com"]) {
   return {
     tool,
     status: "candidate",
-    consent: { metadata: "yes", deep_read: null, write: null },
+    granted: true,
     evidence: [
       ...hosts.map((h) => ({ channel: "config", detail: `git:${h}`, ts: 1 })),
       { channel: "secret", detail: "secret:GITHUB_TOKEN", ts: 1 },
@@ -552,9 +554,9 @@ test("runDue: no second run before the cadence elapses; a forced tool runs immed
   assert.equal(forced.length, 1);
 });
 
-test("runDue: nothing runs without consent (§7.5 'nothing for tools without consent')", async () => {
+test("runDue: nothing runs without a grant (§7.5 'nothing for tools without consent')", async () => {
   const eng = build({
-    rows: [{ tool: "github", consent: { metadata: null, deep_read: null, write: null }, evidence: [{ channel: "config", detail: "git:api.github.com", ts: 1 }] }],
+    rows: [{ tool: "github", granted: false, evidence: [{ channel: "config", detail: "git:api.github.com", ts: 1 }] }],
   });
   assert.equal((await eng.runDue()).length, 0);
   const ledgerRows = eng.loadToolState; // no throw
@@ -926,9 +928,9 @@ test("healthSnapshot: counts configured vs healthy vs auth-failed probes", async
   assert.ok(snap.lastRunAt > 0);
 });
 
-test("healthSnapshot: an unconsented tool's spec never counts", async () => {
+test("healthSnapshot: an ungranted tool's spec never counts", async () => {
   const eng = build({
-    rows: [{ tool: "github", consent: { metadata: null, deep_read: null, write: null }, evidence: [] }],
+    rows: [{ tool: "github", granted: false, evidence: [] }],
   });
   const snap = await eng.healthSnapshot();
   assert.equal(snap.tools, 0);
@@ -995,7 +997,7 @@ test("registry applyProbeResult: folds inflow into an EWMA, adapts the cadence m
         {
           tool: "github",
           status: "candidate",
-          consent: { metadata: "yes", deep_read: null, write: null },
+          granted: true,
           evidence: [{ channel: "config", detail: "git:api.github.com", ts: 1 }],
         },
       ],
@@ -1028,7 +1030,7 @@ test("registry applyProbeResult: unknown tool is rejected; relevance + evidence 
   const reg = createToolRegistry({
     registryStore: memStore({
       v: 1,
-      tools: [{ tool: "github", status: "observed", consent: { metadata: "yes", deep_read: null, write: null }, evidence: [] }],
+      tools: [{ tool: "github", status: "observed", granted: true, evidence: [] }],
     }),
   });
   assert.equal((await reg.applyProbeResult("nope", { fields: {}, probedAt: 1 })).ok, false);
@@ -1078,45 +1080,24 @@ function memStore(initial = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// BET-1404 — deep-ring probes for deep-consented tools (characterization) +
-// the §7.6 decay chain's weekly probing cap
+// Deep-ring probes + the §7.6 decay chain's weekly probing cap
 // ---------------------------------------------------------------------------
 
-test("runDue: a deep-ring probe runs for a deep-consented tool; a metadata-only tool never runs it", async () => {
+test("runDue: the grant is full — a granted tool runs its deep-ring probes, an ungranted one runs nothing", async () => {
   const deepSpec = () => {
     const s = githubSpec();
     s.probes[0].ring = "deep_read";
     return s;
   };
-  // deep-consented → the probe runs
-  const deep = build({
-    rows: [{ ...consentedTool(), consent: { metadata: "yes", deep_read: "yes", write: null } }],
-    specs: { github: deepSpec() },
-  });
-  const results = await deep.runDue();
-  assert.equal(results.length, 1, "deep-consented tool runs its deep-ring probe");
+  const granted = build({ rows: [consentedTool()], specs: { github: deepSpec() } });
+  const results = await granted.runDue();
+  assert.equal(results.length, 1, "a granted tool runs every ring — there is no read/write split");
   assert.equal(results[0].ok, true);
-  // metadata-only consent → the runner re-checks the live source of truth and skips
-  const meta = build({
-    rows: [consentedTool()],
+  const ungranted = build({
+    rows: [{ ...consentedTool(), granted: false }],
     specs: { github: deepSpec() },
   });
-  assert.equal((await meta.runDue()).length, 0, "no deep probe without deep consent");
-});
-
-test("runDue: revoking deep consent stops the deep probe but the metadata probe still runs", async () => {
-  const s = githubSpec();
-  s.probes = [
-    { name: "meta_probe", method: "GET", url: "https://api.github.com/users/octocat/events", extract: { inflow_rate: "length" }, cadence: "30m", ring: "metadata" },
-    { name: "deep_probe", method: "GET", url: "https://api.github.com/users/octocat/events/full", extract: { inflow_rate: "length" }, cadence: "30m", ring: "deep_read" },
-  ];
-  const eng = build({
-    rows: [{ ...consentedTool(), consent: { metadata: "yes", deep_read: "no", write: null } }],
-    specs: { github: s },
-  });
-  const results = await eng.runDue();
-  assert.equal(results.length, 1);
-  assert.equal(results[0].probe, "github/meta_probe", "only the metadata probe ran");
+  assert.equal((await ungranted.runDue()).length, 0, "no secret, no probe");
 });
 
 test("runOne: a chain-tripped tool's probing cadence is capped at weekly (registry is the chain's source of truth)", async () => {
@@ -1278,12 +1259,12 @@ test("authorSpecs: empty model array rests for the week with no write and no evi
   assert.deepEqual(r2, { ran: 0, attempts: 0 }, "an ok-but-empty pass rests for the week");
 });
 
-test("authorSpecs: one-shot — a filled spec is never rewritten; unconsented tools are skipped; no seam → skipped", async () => {
+test("authorSpecs: one-shot — a filled spec is never rewritten; ungranted tools are skipped; no seam → skipped", async () => {
   const filled = authoringHarness({ specs: { github: githubSpec() }, runEphemeral: async () => ({ text: "[]" }) });
   assert.deepEqual(await filled.eng.authorSpecs({ ts: 1_700_000_000_000 }), { ran: 0, attempts: 0 });
   assert.equal(filled.calls.length, 0, "a spec that already carries probes is never touched");
   const unconsented = authoringHarness({
-    rows: [{ ...consentedTool(), consent: { metadata: "no", deep_read: null, write: null } }],
+    rows: [{ ...consentedTool(), granted: false }],
     runEphemeral: async () => ({ text: "[]" }),
   });
   assert.deepEqual(await unconsented.eng.authorSpecs({ ts: 1_700_000_000_000 }), { ran: 0, attempts: 0 });

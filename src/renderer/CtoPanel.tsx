@@ -43,8 +43,6 @@ import {
   blockerCards,
   decisionCards,
   vetoCards,
-  connectCards,
-  connectAnswerArgs,
   tonightVisible,
   executeSuggestionOption,
   tonightBudgetMode,
@@ -57,7 +55,6 @@ import {
   evidenceExpansion,
   calibrationTableDisplay,
   type BlockerCard,
-  type ConnectCardRow,
   type CtoState,
   type CtoHealthStat,
   type CtoCalibrationTable,
@@ -72,7 +69,6 @@ import {
   NowRail,
   JustFinishedRail,
   DigestSection,
-  ConnectSection,
   SuggestionSection,
   VetoSection,
   TonightSection,
@@ -196,7 +192,6 @@ export function CtoPanel({
   const blockerCardList = useMemo(() => blockerCards(cards), [cards]);
   const suggestionCards = useMemo(() => decisionCards(cards), [cards]);
   const vetoList = useMemo(() => vetoCards(cards), [cards]);
-  const connectList = useMemo(() => connectCards(cards), [cards]);
 
   const busy = digestBusy(state);
   const busyRef = useRef(busy);
@@ -436,43 +431,6 @@ export function CtoPanel({
         .finally(refreshCards);
     },
     [refreshCards, pushToast, catchActionError],
-  );
-
-  // BET-1395 connect asks (§7.4): the three-way answer is a registry write
-  // (consent ring + §9.5 verdict + card resolution) — the server route does
-  // all three; the client toasts the outcome and refreshes the cards.
-  const handleConnectAnswer = useCallback(
-    (card: ConnectCardRow, answer: string) => {
-      // BET-1431: the {tool, answer, ring} argument-building lives in
-      // ctoView.connectAnswerArgs (pure + tested). A card whose option
-      // carries no `action.payload.tool` produces NO call — never a call
-      // with a bogus/undefined tool.
-      const args = connectAnswerArgs(card, answer);
-      if (!args) return;
-      const deepRead = args.ring === "deep_read";
-      void window.api
-        ?.ctoToolConnect?.(args)
-        .then((r) => {
-          if (r?.ok) {
-            pushToast({
-              id: `connect-${Date.now()}`,
-              message:
-                answer === "connect"
-                  ? deepRead
-                    ? "Connected — deep read access granted"
-                    : "Connected read-only — metadata consent granted"
-                  : answer === "never"
-                    ? "Will not connect to this tool"
-                    : "Not now — I'll ask again later",
-            });
-          } else {
-            pushToast({ id: `connect-fail-${Date.now()}`, message: `Couldn't record answer: ${r?.error ?? "unknown"}` });
-          }
-        })
-        .catch(catchActionError("record the connect answer"))
-        .finally(refreshCards);
-    },
-    [pushToast, refreshCards, catchActionError],
   );
 
   // BET-1419 tonight + veto actions (§9.2/§10.4). The veto card's Cancel
@@ -775,7 +733,6 @@ export function CtoPanel({
           <BackfillCard state={state} />
           <BlockerSection cards={blockerCardList} now={Date.now()} onAnswer={handleAnswer} />
           <VetoSection cards={vetoList} now={Date.now()} onCancel={handleVetoCancel} onEditPlan={handleVetoEditPlan} onRunNow={handleVetoRunNow} />
-          <ConnectSection cards={connectList} onAnswer={handleConnectAnswer} />
           <SuggestionSection cards={suggestionCards} onAction={handleSuggestionAction} onDismiss={handleSuggestionDismiss} />
           <NowRail cards={nowCards} />
           <JustFinishedRail items={finished} now={Date.now()} onOpen={handleOpenFinished} />
@@ -2871,14 +2828,13 @@ function BlackboardView({
 // Tool integrations drill-down (BET-1399, §10.5 row 4)
 // ---------------------------------------------------------------------------
 // The §7.2 registry table: tool, derived §7.3 role (dead-tool flagged),
-// engagement + vitality axes, consent rings with per-ring revoke, §7.5 probe
-// cadence + last result, and the never list with un-never (§7.4).
-
-const RING_LABELS: Array<{ ring: "metadata" | "deep_read" | "write"; label: string }> = [
-  { ring: "metadata", label: "metadata" },
-  { ring: "deep_read", label: "deep read" },
-  { ring: "write", label: "write" },
-];
+// engagement + vitality axes, which stored secret grants the tool, and §7.5
+// probe cadence + last result.
+//
+// There is no action here ON PURPOSE. Access is granted by adding a key to
+// the secret store and revoked by deleting it, so this view states what is
+// granted and points at the one surface that changes it — rather than
+// offering a second control that would have to agree with it.
 
 const ROLE_LABELS: Record<string, string> = {
   both: "workflow + data source",
@@ -2899,7 +2855,6 @@ function ToolIntegrationsView({
   // BET-1468 item 7: same success-only `setLoading(false)` hole as the other
   // drill-downs — a 401 hung this view on "Loading…" forever.
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [busyTool, setBusyTool] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -2925,42 +2880,6 @@ function ToolIntegrationsView({
   useEffect(() => {
     void refresh();
   }, [refresh]);
-
-  const revoke = async (row: CtoToolRegistryRow, ring: "metadata" | "deep_read" | "write") => {
-    setBusyTool(row.tool);
-    try {
-      const res = await window.api.ctoToolRevoke({ tool: row.tool, ring });
-      pushToast(
-        res.ok
-          ? { id: `ti-rev-${row.tool}-${ring}`, message: `Revoked ${ring.replace("_", " ")} consent for ${row.displayName}` }
-          : { id: `ti-rev-err-${row.tool}-${ring}`, message: res.error ?? "Revoke failed" },
-      );
-      if (res.ok) void refresh();
-    } catch (e) {
-      pushToast({ id: `ti-rev-err-${row.tool}-${ring}`, message: `Couldn't revoke: ${e instanceof Error ? e.message : String(e)}` });
-    } finally {
-      // BET-1468: the busy flag used to survive a rejection, leaving the
-      // revoke control permanently disabled — a dead control.
-      setBusyTool(null);
-    }
-  };
-
-  const unnever = async (row: CtoToolRegistryRow) => {
-    setBusyTool(row.tool);
-    try {
-      const res = await window.api.ctoToolUnnever({ tool: row.tool });
-      pushToast(
-        res.ok
-          ? { id: `ti-un-${row.tool}`, message: `${row.displayName} re-enters the lifecycle at observed` }
-          : { id: `ti-un-err-${row.tool}`, message: res.error ?? "Un-never failed" },
-      );
-      if (res.ok) void refresh();
-    } catch (e) {
-      pushToast({ id: `ti-un-err-${row.tool}`, message: `Couldn't clear the never verdict: ${e instanceof Error ? e.message : String(e)}` });
-    } finally {
-      setBusyTool(null);
-    }
-  };
 
   const toolBlock = (row: CtoToolRegistryRow) => (
     <div key={row.tool} className="rounded-md border border-border-subtle px-3 py-2">
@@ -2992,29 +2911,15 @@ function ToolIntegrationsView({
         </span>
         {row.vitality.last_event != null ? <span>· last event {formatAge(Math.max(0, Date.now() - row.vitality.last_event))} ago</span> : null}
       </div>
-      <div className="mt-2 flex flex-wrap items-center gap-2">
-        {RING_LABELS.map(({ ring, label }) => {
-          const value = row.consent[ring];
-          return (
-            <span key={ring} className="flex items-center gap-1 rounded-md border border-border-subtle px-2 py-1 text-[11px]">
-              <span className="text-text-muted">{label}</span>
-              <span className={value === "yes" ? "font-medium text-accent" : value === "never" ? "font-medium text-text" : "text-text-faint"}>
-                {value ?? "—"}
-              </span>
-              {value === "yes" ? (
-                <button
-                  type="button"
-                  disabled={busyTool === row.tool}
-                  onClick={() => void revoke(row, ring)}
-                  className="ml-1 text-[10px] text-text-faint hover:text-text"
-                  title={`Revoke ${label} consent (writes the ring to no)`}
-                >
-                  revoke
-                </button>
-              ) : null}
-            </span>
-          );
-        })}
+      <div className="mt-2 text-[11px]">
+        {row.accessKey ? (
+          <span className="text-text-muted">
+            access: granted by secret <span className="font-medium text-accent">{row.accessKey}</span> — delete that
+            secret to revoke
+          </span>
+        ) : (
+          <span className="text-text-faint">access: none — add a secret named for this tool to grant it</span>
+        )}
       </div>
       <div className="mt-2 text-[11px] text-text-faint">
         {row.probes.configured ? (
@@ -3029,9 +2934,9 @@ function ToolIntegrationsView({
               .join("; ")}
           </span>
         ) : row.probes.consented ? (
-          <span>probes: consented, no spec written yet</span>
+          <span>probes: granted, no spec written yet</span>
         ) : (
-          <span>probes: paused — no metadata consent</span>
+          <span>probes: paused — no secret grants this tool</span>
         )}
       </div>
     </div>
@@ -3071,30 +2976,10 @@ function ToolIntegrationsView({
               </div>
             )}
 
-            {render && render.never.length > 0 ? (
-              <div className="mt-6">
-                <h3 className="text-xs font-semibold uppercase tracking-wide text-text-faint">Never</h3>
-                <div className="mt-2 space-y-2">
-                  {render.never.map((row) => (
-                    <div key={row.tool} className="flex items-center justify-between rounded-md border border-border-subtle px-3 py-2">
-                      <span className="text-sm text-text-muted">{row.displayName}</span>
-                      <button
-                        type="button"
-                        disabled={busyTool === row.tool}
-                        onClick={() => void unnever(row)}
-                        className="rounded-md border border-border-subtle px-3 py-1 text-[11px] text-text-muted hover:text-text"
-                        title="Clear the never verdict — the tool re-enters the lifecycle at observed"
-                      >
-                        Un-never
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : null}
             <p className="mt-4 text-xs text-text-faint">
-              Revoking a ring is legal anytime — features that depended on it simply narrow. Dead-flagged tools have
-              prior engagement but no live engagement or vitality; candidates for retirement.
+              A key in the secret store grants the CTO full access to the matching tool; deleting the key revokes
+              it, and features that depended on it simply narrow. Dead-flagged tools have prior engagement but no
+              live engagement or vitality; candidates for retirement.
             </p>
           </>
         )}

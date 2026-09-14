@@ -1893,30 +1893,6 @@ export const httpApi: Api = {
     }
   },
 
-  // POST /api/cto/tools/connect — BET-1395 (§7.4): the connect-ask three-way
-  // (grant read-only ring / not-now / never). The server writes the consent
-  // ring + verdict + closes the open connect card.
-  ctoToolConnect: async (input: {
-    tool: string;
-    answer: "connect" | "not-now" | "never";
-    ring?: "metadata" | "deep_read";
-  }): Promise<{ ok: boolean; error?: string; tool?: string; answer?: string }> => {
-    const url = `${serverBase()}/api/cto/tools/connect`;
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { ...authHeaders(clientToken()), "Content-Type": "application/json" },
-        body: JSON.stringify(input),
-      });
-      if (res.status === 401) throw new AuthRequiredError();
-      const json = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; tool?: string; answer?: string };
-      return { ok: !!json.ok, error: json.error, tool: json.tool, answer: json.answer };
-    } catch (e) {
-      if (e instanceof AuthRequiredError) throw e;
-      return { ok: false, error: e instanceof Error ? e.message : String(e) };
-    }
-  },
-
   // GET /api/cto/profile — the §8.5 profile & §3.2 journal drill-down render
   // model, composed server-side (Settings → Internals → Profile & rhythm).
   // Throws on failure (engine off / server down / HTTP error), like ctoStateGet
@@ -2064,8 +2040,10 @@ export const httpApi: Api = {
     }
   },
 
-  // GET /api/cto/tools — the tool-integrations drill-down render (§10.5 row 4).
-  // Throws on failure, like ctoStateGet.
+  // GET /api/cto/tools — the tool-integrations drill-down render (§10.5 row
+  // 4). Read-only: access is granted by adding a secret and revoked by
+  // deleting it, so there is no tool action to call. Throws on failure, like
+  // ctoStateGet.
   ctoToolsGet: async (): Promise<CtoToolsRender> => {
     const url = `${serverBase()}/api/cto/tools`;
     const res = await fetch(url, { method: "GET", headers: authHeaders(clientToken()) });
@@ -2074,41 +2052,6 @@ export const httpApi: Api = {
     return (await res.json()) as CtoToolsRender;
   },
 
-  // POST /api/cto/tools/revoke — per-ring revoke (§10.5 row 4).
-  ctoToolRevoke: async (input: { tool: string; ring: "metadata" | "deep_read" | "write" }): Promise<{ ok: boolean; error?: string; tool?: string; ring?: string; value?: string }> => {
-    const url = `${serverBase()}/api/cto/tools/revoke`;
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { ...authHeaders(clientToken()), "Content-Type": "application/json" },
-        body: JSON.stringify({ tool: input.tool, ring: input.ring }),
-      });
-      if (res.status === 401) throw new AuthRequiredError();
-      const json = (await res.json().catch(() => null)) as { ok?: boolean; error?: string; tool?: string; ring?: string; value?: string } | null;
-      return { ok: res.ok && json?.ok !== false, error: json?.error, tool: json?.tool, ring: json?.ring, value: json?.value };
-    } catch (e) {
-      if (e instanceof AuthRequiredError) throw e;
-      return { ok: false, error: "network error" };
-    }
-  },
-
-  // POST /api/cto/tools/unnever — clear the never verdict (§7.4).
-  ctoToolUnnever: async (input: { tool: string }): Promise<{ ok: boolean; error?: string; tool?: string }> => {
-    const url = `${serverBase()}/api/cto/tools/unnever`;
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { ...authHeaders(clientToken()), "Content-Type": "application/json" },
-        body: JSON.stringify({ tool: input.tool }),
-      });
-      if (res.status === 401) throw new AuthRequiredError();
-      const json = (await res.json().catch(() => null)) as { ok?: boolean; error?: string; tool?: string } | null;
-      return { ok: res.ok && json?.ok !== false, error: json?.error, tool: json?.tool };
-    } catch (e) {
-      if (e instanceof AuthRequiredError) throw e;
-      return { ok: false, error: "network error" };
-    }
-  },
 };
 
 // A safe all-empty default so a failed profile edit/suppress still resolves
