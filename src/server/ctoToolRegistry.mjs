@@ -898,27 +898,44 @@ export function createToolRegistry(deps = {}) {
     return (await accessFor(tool)) ?? null;
   }
 
-  // Is THIS stored key still granted FOR this tool — its catalog identity
-  // still exists in the store AND still serves the tool through the one seam?
+  // Is THIS stored key authorized FOR this tool — by the SAME authorization
+  // seam every regular grant goes through, with NO independent alias policy?
   // The §7.5 probe specs pin a granting key's NAME at scaffold time; this is
-  // how the runner checks a stale pin before sending that credential to the
-  // tool's endpoint: a pinned key whose identity no longer serves the tool
-  // (or that no longer exists in the store) must never be used — the fallback
-  // (grantFor) takes over, and never another service's credential.
+  // how the runner checks a pinned key before sending that credential to the
+  // tool's endpoint. Two conditions, both required:
+  //   1. the EXACT pinned key is still present in the store — its identity
+  //      being covered by some OTHER key is not enough (GITHUB_OLD_TOKEN
+  //      absent must not pass because GITHUB_TOKEN exists);
+  //   2. the policy would serve `tool` with a key of the pinned key's OWN
+  //      identity — asked of grantedKeyForName itself, the same function the
+  //      access chokepoint uses, so a cross-service alias (github's row
+  //      claiming "stripe") can never authorize sending STRIPE_TOKEN's
+  //      credential toward the github endpoint. When the pin fails, the
+  //      fallback (grantFor) supplies the tool's own granting key.
   async function keyGrantedForTool(key, tool) {
-    const id = typeof key === "string" ? matchSecretIdentity(key) : null;
-    if (!id) return false;
     const norm = normalizeToolId(tool);
     if (!norm) return false;
+    const idK = typeof key === "string" ? matchSecretIdentity(key) : null;
+    if (!idK) return false;
+    let keys;
+    try {
+      keys = readSecretKeys() ?? [];
+    } catch {
+      return false;
+    }
+    if (!Array.isArray(keys) || !keys.includes(key)) return false;
     const granted = grantedTools();
-    if (!granted.get(id)) return false;
     let tools = [];
     try {
       tools = (await loadPayload()).tools;
     } catch {
       tools = [];
     }
-    return resolveIdentities(tools, norm).includes(id);
+    const served = grantedKeyForName(granted, norm, resolveIdentities(tools, norm));
+    if (!served) return false;
+    // grantedKeyForName answers with ONE key; a sibling key of the SAME
+    // identity (both in the store) is the same service and is authorized too.
+    return matchSecretIdentity(served) === idK;
   }
 
   // ---------------------------------------------------------------------------

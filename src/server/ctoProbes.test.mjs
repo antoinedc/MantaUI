@@ -1064,16 +1064,20 @@ const MULTICA_ROW = {
   status: "observed",
   evidence: [{ channel: "config", detail: "git:api.multica.ai", ts: 1 }],
 };
-async function multicaRegistry(listSecretKeys) {
+// The REAL registry over injected fakes — every identity-seam test wires this.
+async function realRegistry(tools, keys) {
   const { createToolRegistry } = await import("./ctoToolRegistry.mjs");
   return createToolRegistry({
-    registryStore: memStore({ v: 1, tools: [MULTICA_ROW] }),
+    registryStore: memStore({ v: 1, tools }),
     classificationStore: memStore(),
     usageStore: memStore({ rows: [] }),
     ledger: fakeLedger(),
-    listSecretKeys,
+    listSecretKeys: keys,
     now: () => 1_700_000_000_000,
   });
+}
+async function multicaRegistry(listSecretKeys) {
+  return realRegistry([MULTICA_ROW], listSecretKeys);
 }
 // What scaffoldGrantedTools wrote at grant time: named after the STORE
 // identity ("multica"), not the registry row's canonical name.
@@ -1156,7 +1160,10 @@ test("rotation: a spec pinned to a removed key falls back to the tool's CURRENT 
   const results = await eng.runDue({ forceTool: "multica" });
   assert.equal(results.length, 1);
   assert.equal(results[0].ok, true, `the probe ran on the rotated key: ${JSON.stringify(results[0])}`);
-  assert.deepEqual(requested, ["MULTICA_TOKEN", "MULTICA_AI_TOKEN"], "pinned name tried first, current granting key second");
+  // The pinned name is no longer IN the store, so the exact-presence check
+  // refuses it before any materialization attempt — only the rotated key,
+  // the tool's current granting key, is ever materialized.
+  assert.deepEqual(requested, ["MULTICA_AI_TOKEN"], "the absent pin is refused; only the rotated key materializes");
   // Control: the grant exists and names the pinned key, but the secret
   // store cannot materialize it — the fallback must neither loop nor invent
   // access; the failure stays an honest secret_missing.
@@ -1455,19 +1462,41 @@ async function wiredCto(store, { dir, http, spec } = {}) {
     registry: reg,
     rows: [],
     specs: { multica: spec ?? multicaSpec("workspace_status") },
-    getSecretPath: async (key) => {
-      const r = await provideSecretForCto({ key, dir }, { load: () => store, recordUsage: async () => {} });
-      return r?.ok ? r.path : null;
-    },
+    getSecretPath: ctoGetSecretPath(dir, store),
     readSecret: (p) => readFileSyncP(p, "utf-8"),
-    http:
-      http ??
-      (async (req) => {
-        seen.push(req);
-        return { status: 200, bodyText: JSON.stringify([{ updated_at: "2026-09-01T00:00:00Z" }]) };
-      }),
+    http: http ?? captureHttp(seen),
   });
   return { reg, eng, seen };
+}
+
+// The production materialization + HTTP capture shared by the credential-path
+// tests: real provideSecretForCto into a throwaway dir; every request's
+// headers captured so a test can pin WHICH credential was sent.
+function ctoGetSecretPath(dir, store) {
+  return async (key) => {
+    const r = await provideSecretForCto({ key, dir }, { load: () => store, recordUsage: async () => {} });
+    return r?.ok ? r.path : null;
+  };
+}
+function captureHttp(seen) {
+  return async (req) => {
+    seen.push(req);
+    return { status: 200, bodyText: JSON.stringify([{ updated_at: "2026-09-01T00:00:00Z" }]) };
+  };
+}
+
+// One pinned-spec probe engine for the exploit tests below.
+async function exploitEng({ dir, reg, tool, pinned, url, store = CROSS_SERVICE_STORE }) {
+  const seen = [];
+  const eng = build({
+    registry: reg,
+    rows: [],
+    specs: { [tool]: serviceSpec(tool, pinned, url) },
+    getSecretPath: ctoGetSecretPath(dir, store),
+    readSecret: (p) => readFileSyncP(p, "utf-8"),
+    http: captureHttp(seen),
+  });
+  return { eng, seen };
 }
 
 test("production wiring: a project-scoped key grants the CTO and its probe materializes", async () => {
@@ -1536,6 +1565,105 @@ test("a stale pin never sends another service's credential — the fallback gran
     assert.equal(results[0].ok, true);
     assert.equal(seen[0]?.headers?.Authorization, "Bearer rotated-credential");
     assert.notEqual(seen[0]?.headers?.Authorization, "Bearer stripes-credential", "another service's credential never reaches this endpoint");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Astra round 8, P1 — the pinned-key check had its OWN alias policy (row
+// identities) instead of the grant seam: with github's row claiming "stripe"
+// as an alias and BOTH credentials stored, a GitHub spec pinned to
+// STRIPE_TOKEN materialized the Stripe credential and sent it toward the
+// github endpoint. Through the REAL registry × REAL probes × captured HTTP,
+// synthetic credentials, BOTH service directions and BOTH row orders:
+// the pin is rejected and ONLY the tool's own granting credential is
+// materialized and sent.
+// ---------------------------------------------------------------------------
+
+function serviceSpec(tool, secret, url) {
+  return {
+    tool,
+    auth: { secret, header: "Authorization: Bearer {secret}" },
+    probes: [
+      {
+        name: "status_probe",
+        method: "GET",
+        url,
+        extract: { last_event: "0.updated_at" },
+        cadence: "30m",
+        ring: "metadata",
+      },
+    ],
+  };
+}
+
+const CROSS_SERVICE_ROWS = [
+  { tool: "github", aliases: ["stripe"], evidence: [{ channel: "config", detail: "git:api.github.com", ts: 1 }], uses: 1 },
+  { tool: "stripe", evidence: [{ channel: "config", detail: "git:api.stripe.com", ts: 1 }], uses: 1 },
+];
+const CROSS_SERVICE_STORE = [
+  { id: "g", key: "GITHUB_TOKEN", value: "githubs-credential", scope: "shared", sessionID: null, project: null, hint: "" },
+  { id: "s", key: "STRIPE_TOKEN", value: "stripes-credential", scope: "shared", sessionID: null, project: null, hint: "" },
+];
+
+test("cross-service pin: the malicious alias never routes another service's credential — both directions, both row orders, with and without a target row", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "manta-probe-xsvc-"));
+  try {
+    // In the "no target row" variant github's row claims "stripe" as an alias
+    // with NO stripe row, so the spec for "stripe" validates against github's
+    // own evidence hosts — and the bridge still never carries a known name.
+    const variants = [
+      {
+        name: "with target row",
+        rows: CROSS_SERVICE_ROWS,
+        orders: ["alias-row-first", "primary-row-first"],
+        cases: [
+          { tool: "github", pinned: "STRIPE_TOKEN", expect: "Bearer githubs-credential", url: "https://api.github.com/v1/status" },
+          { tool: "stripe", pinned: "GITHUB_TOKEN", expect: "Bearer stripes-credential", url: "https://api.stripe.com/v1/status" },
+        ],
+      },
+      {
+        name: "no target row",
+        rows: [CROSS_SERVICE_ROWS[0]],
+        orders: ["alias-row-first", "only-row"],
+        cases: [
+          { tool: "github", pinned: "STRIPE_TOKEN", expect: "Bearer githubs-credential", url: "https://api.github.com/v1/status" },
+          { tool: "stripe", pinned: "GITHUB_TOKEN", expect: "Bearer stripes-credential", url: "https://api.github.com/v1/status" },
+        ],
+      },
+    ];
+    for (const v of variants) {
+      for (const order of v.orders) {
+        const ordered = order === "alias-row-first" ? v.rows : [...v.rows].reverse();
+        const reg = await realRegistry(ordered, () => listSecretKeys({ load: () => CROSS_SERVICE_STORE }));
+        for (const c of v.cases) {
+          const own = c.pinned === "STRIPE_TOKEN" ? "GITHUB_TOKEN" : "STRIPE_TOKEN";
+          const { eng, seen } = await exploitEng({ dir, reg, tool: c.tool, pinned: c.pinned, url: c.url });
+          assert.equal(await reg.keyGrantedForTool(c.pinned, c.tool), false, `${c.pinned} must not be authorized for ${c.tool} (${v.name}, ${order})`);
+          assert.equal(await reg.keyGrantedForTool(own, c.tool), true, `${own} serves ${c.tool} (${v.name}, ${order})`);
+          const results = await eng.runDue({ forceTool: c.tool });
+          assert.equal(results.length, 1, `${c.tool} runs (${v.name}, ${order})`);
+          assert.equal(results[0].ok, true, JSON.stringify(results[0]));
+          assert.equal(seen[0]?.headers?.Authorization, c.expect, `only the granting credential is sent (${v.name}, ${order}, ${c.tool})`);
+        }
+      }
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a stale pin (key absent, identity covered) is refused — the exact key is required — and the fallback credential is what ships", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "manta-probe-stale-"));
+  try {
+    const store = [CROSS_SERVICE_STORE[0]]; // GITHUB_TOKEN only; GITHUB_OLD_TOKEN does not exist
+    const reg = await realRegistry([CROSS_SERVICE_ROWS[0]], () => listSecretKeys({ load: () => store }));
+    assert.equal(await reg.keyGrantedForTool("GITHUB_OLD_TOKEN", "github"), false, "identity presence is not key presence");
+    const { eng, seen } = await exploitEng({ dir, reg, tool: "github", pinned: "GITHUB_OLD_TOKEN", url: "https://api.github.com/v1/status", store });
+    const results = await eng.runDue({ forceTool: "github" });
+    assert.equal(results[0].ok, true);
+    assert.equal(seen[0]?.headers?.Authorization, "Bearer githubs-credential", "the fallback granting credential is what ships");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

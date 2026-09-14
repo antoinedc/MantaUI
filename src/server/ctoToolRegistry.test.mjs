@@ -1016,28 +1016,50 @@ for (const order of ["alias-row-first", "primary-row-first"]) {
 }
 
 // The stale-pin check the probe runner uses before sending a pinned
-// credential: the pinned key is authoritative only while it is still granted
-// FOR this tool — its catalog identity still in the store and still serving
-// the tool through the one seam.
-test("keyGrantedForTool: same identity still granted → true; deleted or other-service key → false", async () => {
+// credential. It must ask the SAME authorization seam as every regular grant
+// (grantedKeyForName) and require the EXACT key's presence — no independent
+// alias policy, no identity-only pass.
+test("keyGrantedForTool: the grant seam decides; exact key required; a cross-service alias never authorizes", async () => {
+  // The Astra exploit: github's row claims "stripe" as an alias and BOTH
+  // keys are stored. The row's identity set contains "stripe", but the grant
+  // policy for the catalog name "github" serves direct-only — the pinned
+  // STRIPE_TOKEN must be refused, never used to answer github's endpoint.
   const reg = seamRegistry(
-    [{ tool: "github", aliases: ["gh"], evidence: [{ channel: "config", detail: "git:github.com", ts: 1 }], uses: 1 }],
+    [{ tool: "github", aliases: ["stripe"], evidence: [{ channel: "config", detail: "git:github.com", ts: 1 }], uses: 1 }],
+    ["GITHUB_TOKEN", "STRIPE_TOKEN"],
+  );
+  assert.equal(await reg.keyGrantedForTool("STRIPE_TOKEN", "github"), false, "the alias must not authorize another service's key");
+  assert.equal(await reg.keyGrantedForTool("GITHUB_TOKEN", "github"), true);
+  // A non-catalog tool name reaches its identity through the alias bridge,
+  // and the pinned key of THAT identity is authorized (the preserved mapping).
+  const regM = seamRegistry(
+    [{ tool: "multica-ai", aliases: ["multica"], evidence: [{ channel: "config", detail: "git:api.multica.ai", ts: 1 }], uses: 1 }],
+    ["MULTICA_TOKEN"],
+  );
+  assert.equal(await regM.keyGrantedForTool("MULTICA_TOKEN", "multica-ai"), true);
+  // The tool named by its alias reaches the same identity set.
+  assert.equal(await regM.keyGrantedForTool("MULTICA_TOKEN", "multica"), true);
+  // EXACT key presence: the pinned key must itself be in the store — its
+  // identity being covered by another key is not enough (GITHUB_OLD_TOKEN
+  // absent must not pass because GITHUB_TOKEN exists).
+  const reg2 = seamRegistry(
+    [{ tool: "github", evidence: [{ channel: "config", detail: "git:github.com", ts: 1 }], uses: 1 }],
     ["GITHUB_TOKEN"],
   );
-  // The granting key itself, and an ALIASED spelling of the same identity:
-  // both name the tool's identity, which is still in the store.
-  assert.equal(await reg.keyGrantedForTool("GITHUB_TOKEN", "github"), true);
-  // The key still exists but names ANOTHER service: never authorized for
-  // this tool's endpoint.
-  assert.equal(await reg.keyGrantedForTool("STRIPE_KEY", "github"), false);
-  // The tool named by its alias reaches the same identity set.
-  assert.equal(await reg.keyGrantedForTool("GITHUB_TOKEN", "gh"), true);
-  // Once the store no longer covers the identity — the key was deleted —
-  // the pin is stale even though the spec still names it.
-  const reg2 = seamRegistry(
-    [{ tool: "github", aliases: ["gh"], evidence: [{ channel: "config", detail: "git:github.com", ts: 1 }], uses: 1 }],
+  assert.equal(await reg2.keyGrantedForTool("GITHUB_OLD_TOKEN", "github"), false);
+  assert.equal(await reg2.keyGrantedForTool("GITHUB_TOKEN", "github"), true);
+  // A sibling key of the SAME identity (both in the store) is the same
+  // service: the policy serves one key per identity, the sibling passes.
+  const reg3 = seamRegistry(
+    [{ tool: "github", evidence: [{ channel: "config", detail: "git:github.com", ts: 1 }], uses: 1 }],
+    ["GITHUB_PAT", "GITHUB_TOKEN"],
+  );
+  assert.equal(await reg3.keyGrantedForTool("GITHUB_TOKEN", "github"), true);
+  // The store empty: nothing is authorized.
+  const reg4 = seamRegistry(
+    [{ tool: "github", evidence: [{ channel: "config", detail: "git:github.com", ts: 1 }], uses: 1 }],
     [],
   );
-  assert.equal(await reg2.keyGrantedForTool("GITHUB_TOKEN", "github"), false);
-  assert.equal(await reg2.keyGrantedForTool("STRIPE_KEY", "github"), false);
+  assert.equal(await reg4.keyGrantedForTool("GITHUB_TOKEN", "github"), false);
+  assert.equal(await reg4.keyGrantedForTool("STRIPE_KEY", "github"), false);
 });
