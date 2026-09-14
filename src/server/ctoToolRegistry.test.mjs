@@ -8,6 +8,7 @@ import {
   isIssueToolGranted,
   identitiesOf,
   findToolRow,
+  grantedKeyForName,
   resolveIdentities,
   fuseRow,
   weekKey,
@@ -862,12 +863,154 @@ test("resolveIdentities / findToolRow: the seam every lookup in the path goes th
   assert.equal(findToolRow(tools, "nope"), null);
   assert.equal(findToolRow(tools, ""), null);
   assert.equal(findToolRow(null, "github"), null);
-  // A known name resolves to the row's whole identity set…
-  assert.deepEqual(resolveIdentities(tools, "multica"), ["multica-ai", "multica"]);
+  // A name the catalog does NOT know resolves to the row's whole identity set…
   assert.deepEqual(resolveIdentities(tools, "multica-ai"), ["multica-ai", "multica"]);
+  // …but a KNOWN catalog name never inherits through the bridge: it is a
+  // distinct service its own keys name, so an alias must not extend anything
+  // onto it (only its own key — the direct path — may serve it).
+  assert.deepEqual(resolveIdentities(tools, "multica"), ["multica"]);
   // …an unknown one to itself, so a row is never a precondition for a grant.
   assert.deepEqual(resolveIdentities(tools, "nordvpn"), ["nordvpn"]);
   assert.deepEqual(resolveIdentities([], "nordvpn"), ["nordvpn"]);
   assert.deepEqual(resolveIdentities(tools, "  GitHub "), ["github"]);
   assert.deepEqual(resolveIdentities(tools, ""), []);
 });
+
+// Astra round 6, P1: the first-match alias lookup let a row's alias shadow an
+// exact primary and transfer a grant between distinct known services. The
+// seam's resolution order and its fail-closed edges, pinned pure:
+test("findToolRow: exact primary beats an alias; ambiguous aliases fail closed; row order never matters", () => {
+  // github's row claims "stripe" as an alias; a REAL stripe row also exists.
+  const withStripe = [{ tool: "github", aliases: ["stripe"] }, { tool: "stripe" }];
+  const withStripeReversed = [{ tool: "stripe" }, { tool: "github", aliases: ["stripe"] }];
+  for (const rows of [withStripe, withStripeReversed]) {
+    assert.equal(findToolRow(rows, "stripe")?.tool, "stripe", "exact primary wins");
+    assert.deepEqual(resolveIdentities(rows, "stripe"), ["stripe"], "the stripe row's own set only");
+  }
+  // The alias bridge without a target row: a single owner answers for the
+  // alias at the ROW level, but the KNOWN-identity guard keeps the grant
+  // from crossing (resolveIdentities returns the name alone).
+  const ghostAlias = [{ tool: "github", aliases: ["stripe"] }];
+  assert.equal(findToolRow(ghostAlias, "stripe")?.tool, "github");
+  assert.deepEqual(resolveIdentities(ghostAlias, "stripe"), ["stripe"]);
+  // Two rows claiming the same alias, no primary: ambiguous → no row, no
+  // inheritance — and the answer is identical whichever row comes first.
+  const ambiguousA = [{ tool: "aa", aliases: ["amb"] }, { tool: "bb", aliases: ["amb"] }];
+  const ambiguousB = [{ tool: "bb", aliases: ["amb"] }, { tool: "aa", aliases: ["amb"] }];
+  for (const rows of [ambiguousA, ambiguousB]) {
+    assert.equal(findToolRow(rows, "amb"), null);
+    assert.deepEqual(resolveIdentities(rows, "amb"), ["amb"]);
+  }
+});
+
+// The transfer rule, pinned pure: a name's own key always serves it; a known
+// catalog name never inherits another service's key through a row's aliases;
+// a non-catalog name (multica-ai) does.
+test("grantedKeyForName: own key serves; known names never inherit; unknown names may", () => {
+  const granted = new Map([["github", "GITHUB_TOKEN"], ["stripe", "STRIPE_KEY"]]);
+  assert.equal(grantedKeyForName(granted, "github", ["github"]), "GITHUB_TOKEN");
+  assert.equal(grantedKeyForName(granted, "stripe", ["stripe"]), "STRIPE_KEY");
+  // github's row claims stripe as an alias: requesting stripe must NOT reach
+  // github's key, and requesting github must NOT reach stripe's.
+  assert.equal(grantedKeyForName(granted, "stripe", ["github", "stripe"]), "STRIPE_KEY");
+  assert.equal(grantedKeyForName(granted, "github", ["github", "stripe"]), "GITHUB_TOKEN");
+  // Only the ALIASED key exists: the known name fails closed…
+  const half = new Map([["github", "GITHUB_TOKEN"]]);
+  assert.equal(grantedKeyForName(half, "stripe", ["github", "stripe"]), null);
+  const halfStripe = new Map([["stripe", "STRIPE_KEY"]]);
+  assert.equal(grantedKeyForName(halfStripe, "github", ["github", "stripe"]), null);
+  // …while a non-catalog name inherits freely (the preserved mapping).
+  const multica = new Map([["multica", "MULTICA_TOKEN"]]);
+  assert.equal(grantedKeyForName(multica, "multica-ai", ["multica-ai", "multica"]), "MULTICA_TOKEN");
+});
+
+// Astra round 6, P1 — the SAME adversarial scenarios through the REAL engine,
+// in BOTH row orders, because store-key authorization must be deterministic
+// independent of evidence ordering. Fixtures: "stripe" and "github" are BOTH
+// known catalog identities (distinct services their own keys name);
+// "codespace" and "multica-ai" are not.
+function seamRegistry(rows, keys) {
+  return createToolRegistry({
+    registryStore: memStore({ v: 1, tools: rows }),
+    classificationStore: memStore(),
+    usageStore: memStore({ rows: [] }),
+    ledger: fakeLedger(),
+    listSecretKeys: () => keys,
+    now: () => W0,
+  });
+}
+for (const order of ["alias-row-first", "primary-row-first"]) {
+  test(`exact primary beats a colliding alias, everywhere (${order})`, async () => {
+    const rows = [
+      { tool: "github", aliases: ["stripe"], evidence: [{ channel: "config", detail: "git:github.com", ts: 1 }], uses: 1 },
+      { tool: "stripe", evidence: [{ channel: "config", detail: "git:stripe.com", ts: 1 }], uses: 1 },
+    ];
+    const reg = seamRegistry(order === "alias-row-first" ? rows : [...rows].reverse(), ["GITHUB_TOKEN"]);
+    // Consent + grant: stripe's own row answers, and github's key may NOT
+    // serve it just because github's row once claimed the alias.
+    assert.equal(await reg.consentFor("stripe"), null);
+    assert.equal(await reg.grantFor("stripe"), null);
+    assert.equal(await reg.consentFor("github"), "yes");
+    assert.equal(await reg.grantFor("github"), "GITHUB_TOKEN");
+    // The row lookup lands on the stripe row in both orders — probe folding
+    // can no longer land on the alias claimant.
+    assert.equal((await reg.toolRow("stripe")).tool, "stripe");
+    // The LIST agrees with the chokepoint: stripe ungranted, github granted.
+    const list = await reg.listTools();
+    const stripeRow = list.find((t) => t.tool === "stripe");
+    const githubRow = list.find((t) => t.tool === "github");
+    assert.equal(stripeRow.accessKey, null);
+    assert.equal(githubRow.accessKey, "GITHUB_TOKEN");
+    // Probe folding under the exact name reaches the RIGHT row.
+    await reg.applyProbeResult("stripe", { fields: { last_event: W0 }, probedAt: W0 });
+    const after = await reg.toolRow("stripe");
+    assert.equal(after.vitality.last_probed, W0);
+    const githubAfter = await reg.toolRow("github");
+    assert.equal(githubAfter.vitality?.last_probed ?? null, null);
+  });
+
+  test(`an alias on a distinct known service never transfers the grant, even with no target row (${order})`, async () => {
+    const rows = [{ tool: "github", aliases: ["stripe"], evidence: [{ channel: "config", detail: "git:github.com", ts: 1 }], uses: 1 }];
+    // GITHUB_TOKEN only: stripe must read as unconsented and ungranted.
+    const gh = seamRegistry(order === "alias-row-first" ? rows : [...rows], ["GITHUB_TOKEN"]);
+    assert.equal(await gh.consentFor("stripe"), null);
+    assert.equal(await gh.grantFor("stripe"), null);
+    assert.equal(await gh.consentFor("github"), "yes");
+    const ghList = await gh.listTools();
+    assert.deepEqual(ghList.map((t) => t.tool), ["github"], "no phantom stripe row");
+    assert.equal(ghList[0].accessKey, "GITHUB_TOKEN");
+    // MIRROR — STRIPE_KEY only: stripe's own key serves stripe directly, but
+    // it must NOT cross the alias onto github, and the LIST must say the
+    // same thing the chokepoint says (the grant projects as its own row
+    // rather than vanishing behind the alias claimant).
+    const st = seamRegistry(rows, ["STRIPE_KEY"]);
+    assert.equal(await st.consentFor("stripe"), "yes");
+    assert.equal(await st.consentFor("github"), null);
+    assert.equal(await st.grantFor("github"), null);
+    const stList = await st.listTools();
+    const ghRow = stList.find((t) => t.tool === "github");
+    const stRow = stList.find((t) => t.tool === "stripe");
+    assert.equal(ghRow.accessKey, null, "github does not display stripe's key");
+    assert.equal(stRow.accessKey, "STRIPE_KEY", "the grant stays visible, on its own row");
+  });
+
+  test(`an alias claimed by two rows fails closed, in both row orders (${order})`, async () => {
+    const rows = [
+      { tool: "github", aliases: ["codespace"], evidence: [{ channel: "config", detail: "git:github.com", ts: 1 }], uses: 1 },
+      { tool: "nordvpn", aliases: ["codespace"], evidence: [{ channel: "config", detail: "git:nordvpn.com", ts: 1 }], uses: 1 },
+    ];
+    const reg = seamRegistry(order === "alias-row-first" ? rows : [...rows].reverse(), ["GITHUB_TOKEN"]);
+    // Ambiguous alias: no row answers for it, and nothing inherits —
+    // identical under both orderings.
+    assert.equal(await reg.toolRow("codespace"), null);
+    assert.equal(await reg.consentFor("codespace"), null);
+    assert.equal(await reg.grantFor("codespace"), null);
+    // The rows' own grants are untouched by the collision.
+    assert.equal(await reg.consentFor("github"), "yes");
+    assert.equal(await reg.consentFor("nordvpn"), null);
+    const list = await reg.listTools();
+    assert.equal(list.find((t) => t.tool === "github").accessKey, "GITHUB_TOKEN");
+    assert.equal(list.find((t) => t.tool === "nordvpn").accessKey, null);
+    assert.deepEqual(list.filter((t) => t.tool === "codespace"), [], "no phantom row for the ambiguous alias");
+  });
+}

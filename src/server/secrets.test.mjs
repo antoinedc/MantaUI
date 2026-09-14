@@ -519,7 +519,7 @@ test("listSecretKeys returns KEY NAMES ONLY — no value, no hint, no metadata o
     { id: "2", key: "GITHUB_TOKEN", value: "ghp_another_secret", scope: "session", sessionID: "ses_1", project: null, hint: "" },
   ];
   const keys = listSecretKeys({ load: () => store });
-  assert.deepEqual(keys, ["GITHUB_TOKEN", "NORDVPN_TOKEN"], "sorted key names");
+  assert.deepEqual(keys, ["NORDVPN_TOKEN"], "sorted key names — shared scope only");
   for (const k of keys) assert.equal(typeof k, "string", "every element is a bare string");
   // The structural guarantee: no value can be reached through this return.
   const serialized = JSON.stringify(keys);
@@ -528,7 +528,7 @@ test("listSecretKeys returns KEY NAMES ONLY — no value, no hint, no metadata o
   assert.equal(serialized.includes("vpn"), false, "not even the hint travels");
 });
 
-test("listSecretKeys covers every scope, dedupes, and tolerates junk rows", () => {
+test("listSecretKeys grants only what the session-less reader can materialize — shared scope", () => {
   const store = [
     { id: "1", key: "SHARED_ONE", value: "a", scope: "shared" },
     { id: "2", key: "SESSION_ONE", value: "b", scope: "session", sessionID: "ses_1" },
@@ -537,7 +537,12 @@ test("listSecretKeys covers every scope, dedupes, and tolerates junk rows", () =
     { id: "5", value: "no key", scope: "shared" },
     null,
   ];
-  assert.deepEqual(listSecretKeys({ load: () => store }), ["PROJECT_ONE", "SESSION_ONE", "SHARED_ONE"]);
+  // A session- or project-scoped key is deliberately invisible to every
+  // other caller, and the CTO's probe resolver materializes secrets with NO
+  // session/project context — a scoped key would grant a tool whose probes
+  // then always die on secret_missing: access claimed but unusable. Only
+  // shared keys are the grant surface; dedupe + junk tolerance unchanged.
+  assert.deepEqual(listSecretKeys({ load: () => store }), ["SHARED_ONE"]);
 });
 
 // --- tiny file-backed helpers for the round-trip tests above ---

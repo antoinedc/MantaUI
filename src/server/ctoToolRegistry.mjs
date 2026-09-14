@@ -28,7 +28,7 @@
 // All I/O is injected; pure helpers are exported for tests.
 
 import { toolRegistryStore, toolUsageStore, toolClassificationStore, ledgerStore, patchStore } from "./ctoStores.mjs";
-import { displayName as catalogDisplayName, matchSecretIdentity } from "./ctoToolCatalog.mjs";
+import { displayName as catalogDisplayName, isKnownIdentity, matchSecretIdentity } from "./ctoToolCatalog.mjs";
 // KEY NAMES ONLY — `listSecretKeys` returns an array of strings, so nothing
 // value-bearing can reach this module even by accident. Never import a
 // value-returning path here (`provideSecret` is not for this file).
@@ -83,12 +83,13 @@ export const UNRESOLVED_RETENTION_MS = 90 * 24 * 3_600_000;
 
 // ---------------------------------------------------------------------------
 // IDENTITY RESOLUTION — the one seam. Everything in the grant / access /
-// probe path resolves a tool name through these three functions and NOTHING
-// else; there is no bare `.find` on a tool name left in this module (the
-// sweep tests in ctoToolRegistry.test.mjs pin the seam under both names;
-// consumers outside the module go through the `identitiesFor` engine
-// method). The one deliberate exact-name comparison — the classification
-// prune below — is commented in place where it lives.
+// probe path resolves a tool name through these functions and NOTHING else:
+// findToolRow (which row), resolveIdentities (which names), grantedKeyForName
+// (which key may serve a name); there is no bare `.find` on a tool name left
+// in this module (the sweep tests in ctoToolRegistry.test.mjs pin the seam
+// under both names; consumers outside the module go through the
+// `identitiesFor` engine method). The one deliberate exact-name comparison —
+// the classification prune below — is commented in place where it lives.
 //
 // Why it has to be a seam rather than a convention: classification merges a
 // raw row into its canonical one and keeps the old token as an ALIAS, so one
@@ -111,11 +112,27 @@ export function identitiesOf(row) {
   );
 }
 
-// The ONE row that answers to `id`, by canonical name or by alias.
+// The ONE row that answers to `id`. Resolution order is load-bearing and
+// deterministic (independent of row order in the store):
+//   1. EXACT PRIMARY always wins — a row whose `tool` IS the name answers
+//      for it, and an alias on some other row must never shadow it.
+//   2. Otherwise the row that claims the name as an ALIAS — but only when
+//      exactly ONE row does. Two claimants is an ambiguous alias: there is
+//      no defensible pick, so it resolves to NO row (fail closed), whichever
+//      way the evidence happened to arrive.
 export function findToolRow(tools, id) {
   const norm = normalizeToolId(id);
   if (!norm) return null;
-  return (Array.isArray(tools) ? tools : []).find((r) => identitiesOf(r).includes(norm)) ?? null;
+  const arr = Array.isArray(tools) ? tools : [];
+  const primary = arr.find((r) => normalizeToolId(r?.tool) === norm);
+  if (primary) return primary;
+  let owner = null;
+  for (const r of arr) {
+    if (!(Array.isArray(r?.aliases) ? r.aliases : []).some((a) => normalizeToolId(a) === norm)) continue;
+    if (owner) return null;
+    owner = r;
+  }
+  return owner;
 }
 
 // Every identity `id` is known by — the identity SET the grant is checked
@@ -124,11 +141,38 @@ export function findToolRow(tools, id) {
 // used still resolves (a registry row is not a precondition for access), and
 // a row that answers to the name contributes its other names too (so the
 // canonical name and any alias reach the same grant).
+//
+// THE ALIAS BRIDGE HAS ONE LIMIT, and it is authorization, not discovery: a
+// requested name that is itself a KNOWN CATALOG identity is a distinct
+// service its own keys could name, so an alias must never transfer a grant
+// onto it — `GITHUB_TOKEN` must not authorize "stripe" because a model once
+// merged their evidence rows, even when no stripe row exists to object. A
+// name the catalog does NOT know can only be reached through the bridge at
+// all, so the bridge is exactly what makes it reachable (multica-ai inherits
+// multica's grant; the catalog knows `multica`, never `multica-ai`).
 export function resolveIdentities(tools, id) {
   const norm = normalizeToolId(id);
   if (!norm) return [];
   const row = findToolRow(tools, norm);
+  if (row && normalizeToolId(row.tool) !== norm && isKnownIdentity(norm)) return [norm];
   return row ? identitiesOf(row) : [norm];
+}
+
+// THE grant behind ONE name, given the identity set its row answers with —
+// one rule for every direction (the access chokepoint below AND the list
+// projection's per-row accessKey):
+//   - the name's OWN key always serves it (the direct path — a key that
+//     names the tool is the whole grant);
+//   - otherwise a grant may cross the row's alias bridge ONLY when the name
+//     is not itself a known catalog identity (see resolveIdentities).
+// Pure so both consumers provably share it; resolveIdentities applies the
+// same rule when building `ids`, so a caller that resolves the set through
+// the seam cannot disagree with this one.
+export function grantedKeyForName(granted, norm, ids) {
+  const direct = granted.get(norm);
+  if (direct) return direct;
+  if (isKnownIdentity(norm)) return null;
+  return (Array.isArray(ids) ? ids : []).map((id) => granted.get(id)).find(Boolean) ?? null;
 }
 
 // §6.7 "a consented tool for issue facts": does the registry report an issue
@@ -825,6 +869,9 @@ export function createToolRegistry(deps = {}) {
   // row resolves to itself, so a secret nothing has used still grants, and a
   // consent record left by the retired ask flow is not consulted at all.
   // Rows cannot withhold a grant; they can only tell us it is the same tool.
+  // The one limit — a known catalog name never inherits another service's
+  // key through an alias bridge — lives in the resolver (resolveIdentities +
+  // grantedKeyForName), not here: this is a consumer of the one seam.
   async function accessFor(tool) {
     const norm = normalizeToolId(tool);
     if (!norm) return null;
@@ -838,7 +885,7 @@ export function createToolRegistry(deps = {}) {
     } catch {
       tools = [];
     }
-    return resolveIdentities(tools, norm).map((id) => granted.get(id)).find(Boolean) ?? null;
+    return grantedKeyForName(granted, norm, resolveIdentities(tools, norm));
   }
 
   async function consentFor(tool) {
@@ -1059,12 +1106,15 @@ export function createToolRegistry(deps = {}) {
   //
   // Both halves of that — "is this identity already here?" and "which row
   // carries the grant?" — resolve a row's identity THE SAME WAY, through
-  // `identitiesOf`. They must: classification merges a raw row into its
-  // canonical one and keeps the old token as an ALIAS, so an identity the
-  // store grants can live on a row with a different primary name. When only
-  // the skip was alias-aware, such a row suppressed the projection AND
-  // carried no access — the grant reached nobody. One resolver, used twice,
-  // makes that disagreement unrepresentable.
+  // `findToolRow`, and the per-row accessKey goes through the same
+  // `grantedKeyForName` rule the access chokepoint uses. They must: an exact
+  // primary always wins over an alias, and a grant may cross an alias bridge
+  // only onto a name the catalog does not know (see the seam block above).
+  // When the resolved row does NOT display the grant — its primary is a
+  // different known service, so the alias cannot carry the key — the granted
+  // identity projects as its own row instead, keeping the list and the
+  // chokepoint in agreement. One resolver, used for both, makes that
+  // disagreement unrepresentable.
   async function listTools({ nowMs } = {}) {
     const t = Number.isFinite(nowMs) ? nowMs : now();
     const payload = await loadPayload();
@@ -1072,7 +1122,9 @@ export function createToolRegistry(deps = {}) {
     const seen = new Set();
     const rows = [...payload.tools];
     for (const tool of granted.keys()) {
-      if (!findToolRow(rows, tool)) rows.push(baseTool(tool, t));
+      const row = findToolRow(rows, tool);
+      if (row && grantedKeyForName(granted, normalizeToolId(row.tool), identitiesOf(row))) continue;
+      rows.push(baseTool(tool, t));
     }
     return rows.map((row) => {
       const vitality = { ...emptyVitality(), ...(row.vitality ?? {}) };
@@ -1094,7 +1146,11 @@ export function createToolRegistry(deps = {}) {
         // Access, as the drill-down must state it: the stored KEY that grants
         // this tool (a key name is not a secret), or null — in which case the
         // CTO cannot reach it and nothing will ask the user to change that.
-        accessKey: identitiesOf(row).map((id) => granted.get(id)).find(Boolean) ?? null,
+        // THE SAME RULE the access chokepoint applies to a request for this
+        // row's primary name (grantedKeyForName): its own key, or — only for
+        // a name the catalog does not know — a grant reached via the alias
+        // bridge.
+        accessKey: grantedKeyForName(granted, normalizeToolId(row.tool), identitiesOf(row)),
         // §7.6 chain visibility (§10.5 drill-down): counters + trip state so
         // the surface can explain why deep analyses stopped — no dead state.
         asSource: { ...(row.as_source ?? { reports: 0, accepted: 0 }) },

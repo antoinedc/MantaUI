@@ -278,18 +278,25 @@ export function listSecrets({ sessionID, project, includeAll = false } = {}, { l
   return sortSecretMetas(visibleSecrets(secrets, sessionID, project));
 }
 
-// The KEY NAMES in the store, sorted — nothing else. This is the narrowest
-// possible reader and exists for ONE caller: the Adaptive CTO's access grant
-// (§7.4), where a key's presence is the authorization. Because it returns an
-// array of strings, no value, hint, scope or any other field can travel down
-// that path even by accident — the grant decision is structurally incapable
-// of touching a secret. A key name is not a secret; a value never leaves this
+// The KEY NAMES the box-level (session-less) reader can actually use, sorted
+// — nothing else. This is the narrowest possible reader and exists for ONE
+// caller: the Adaptive CTO's access grant (§7.4), where a key's presence is
+// the authorization. Only SHARED keys count: a session- or project-scoped
+// key is deliberately invisible to every other caller (visibleSecrets), and
+// the CTO's probe resolver materializes secrets with NO session/project
+// context — a scoped key would grant a tool whose probes then always die on
+// `secret_missing`: access claimed but unusable. Filtering here keeps the
+// grant and the materialization in agreement. Because it returns an array
+// of strings, no value, hint, scope or any other field can travel down that
+// path even by accident — the grant decision is structurally incapable of
+// touching a secret. A key name is not a secret; a value never leaves this
 // module except through `provideSecret`, which writes it to a 0600 file and
 // returns only the path.
 export function listSecretKeys({ load = loadSecrets } = {}) {
   const keys = [];
   for (const entry of load()) {
-    const key = typeof entry?.key === "string" ? entry.key : "";
+    if (entry?.scope !== "shared") continue;
+    const key = typeof entry.key === "string" ? entry.key : "";
     if (key && !keys.includes(key)) keys.push(key);
   }
   return keys.sort((a, b) => a.localeCompare(b));

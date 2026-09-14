@@ -339,6 +339,17 @@ export const SECRET_NOISE = Object.freeze(
 
 // Every canonical identity the catalog knows, for exact segment matching.
 const KNOWN_IDENTITIES = new Set([...Object.values(CLIS), ...Object.values(DOMAINS)]);
+
+// Is `name` itself a known catalog identity? The registry's alias rule asks
+// this: a name the catalog knows is a DISTINCT SERVICE its own keys could
+// name, so a persisted LLM alias must never transfer a grant onto it (a
+// github key must not authorize "stripe" because a model merged their
+// evidence) — while a name the catalog does not know can only be reached
+// through the alias bridge at all (multica-ai inherits multica's grant).
+export function isKnownIdentity(name) {
+  return KNOWN_IDENTITIES.has(String(name ?? "").trim().toLowerCase());
+}
+
 // Own-property lookup only: a plain object inherits `constructor`, `toString`
 // and friends, so `CLIS["constructor"]` would hand back a function and
 // `CONSTRUCTOR_TOKEN` would "match" a tool that does not exist.

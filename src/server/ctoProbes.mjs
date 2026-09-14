@@ -1070,17 +1070,32 @@ export function createProbes(deps = {}) {
   // file path → read inside this closure only. Usage is deliberately NOT
   // recorded (provideSecret with a no-op recorder) so the runner can never
   // inflate the tool's own engagement axis.
-  async function buildHeaders(specAuth) {
+  //
+  // The spec pins the granting key's NAME at scaffold time, but a rotation
+  // renames the key while the GRANT (the store identity) persists — without
+  // a fallback the tool stays "granted" in the list while every probe dies
+  // on secret_missing: access claimed but unusable. So when the pinned name
+  // is gone, ask the registry's one grant seam for the CURRENT granting key
+  // and use that. The pinned name stays authoritative whenever it exists.
+  async function buildHeaders(tool, specAuth) {
     if (!specAuth) return {};
     let path = null;
+    let secretName = specAuth.secret;
     if (typeof getSecretPath === "function") {
-      path = await getSecretPath(specAuth.secret);
+      path = await getSecretPath(secretName);
+      if (!path && typeof registry.grantFor === "function") {
+        const current = await registry.grantFor(tool).catch(() => null);
+        if (typeof current === "string" && current && current !== secretName) {
+          path = await getSecretPath(current);
+          if (path) secretName = current;
+        }
+      }
     }
     if (!path) {
-      throw new ProbeHttpError("secret_missing", `secret "${specAuth.secret}" is not available`);
+      throw new ProbeHttpError("secret_missing", `secret "${secretName}" is not available`);
     }
     const value = (await readSecret(path)).trim();
-    if (!value) throw new ProbeHttpError("secret_missing", `secret "${specAuth.secret}" materialized empty`);
+    if (!value) throw new ProbeHttpError("secret_missing", `secret "${secretName}" materialized empty`);
     const idx = specAuth.header.indexOf(":");
     const name = specAuth.header.slice(0, idx).trim();
     const template = specAuth.header.slice(idx + 1).trim();
@@ -1097,7 +1112,7 @@ export function createProbes(deps = {}) {
     let error = null;
     let outcome = "fail";
     try {
-      const headers = await buildHeaders(spec.auth);
+      const headers = await buildHeaders(tool, spec.auth);
       const out = await httpRequest({ url: probe.url, headers });
       status = out.status;
       bodyText = out.bodyText;
@@ -1274,9 +1289,37 @@ export function createProbes(deps = {}) {
     } catch {
       return results;
     }
+    // One tool, ONE schedule. A spec is file-keyed by tool NAME, and a row
+    // answers to several — so the same tool can carry two specs (a legacy
+    // spec under the grant identity plus one under the row's canonical name,
+    // e.g. after a rotation renamed the granting key's identity). Running
+    // both would double-probe one tool every tick. Group the spec names by
+    // the row each resolves to; within a group prefer the spec named after
+    // the row's canonical name and fall back to alphabetical order, so the
+    // pick is deterministic and drifts toward the canonical name. (probeHealth
+    // and the budgeted authoring/relevance passes tolerate a duplicate as
+    // wasted spend within their daily caps; only double SCHEDULING is a
+    // correctness issue.)
+    const sorted = [...tools].sort((a, b) => a.localeCompare(b));
+    const groups = new Map();
+    for (const tool of sorted) {
+      let row = null;
+      try {
+        row = typeof registry.toolRow === "function" ? await registry.toolRow(tool) : null;
+      } catch {
+        row = null;
+      }
+      const key = typeof row?.tool === "string" && row.tool ? row.tool : tool;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(tool);
+    }
+    const schedule = [];
+    for (const [key, names] of groups) {
+      schedule.push(names.includes(key) ? key : names[0]);
+    }
     const exempt = await openProbeBlockers();
     const thrifty = isThrifty() === true;
-    for (const tool of tools) {
+    for (const tool of schedule) {
       if (forceTool && tool !== forceTool) continue;
       const valid = await validSpecFor(tool);
       if (!valid) continue;
