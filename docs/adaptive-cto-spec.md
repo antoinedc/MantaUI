@@ -534,6 +534,11 @@ Mechanics:
   **Two or more → nothing**: a key naming two services (`GITHUB_STRIPE_TOKEN`)
   is ambiguous, and granting both would hand the CTO a service the user may
   only have meant as a prefix. There is no wildcard and no guess.
+- **Detection is TOTAL: a partially-read key grants nothing.** Every
+  character is analysed or no grant is produced — a key whose tail was
+  dropped can look unambiguous only because the evidence that would have
+  refused it was discarded. There is no cap inside the analysis; input longer
+  than a stored key can be fails closed.
 - **Detection is CANONICAL, so spelling cannot evade the ambiguity rule.**
   Case, separator repetition and trailing ordinals are normalized before
   matching, and a camelCase run is read both whole and per-word — otherwise
@@ -542,6 +547,11 @@ Mechanics:
   rather than treated as a separator, so a homoglyph cannot hide half of an
   ambiguous key. An explicit separator IS a boundary: `GIT_HUB` is two names,
   not one.
+- **A row IS its aliases.** Classification folds a raw identity into a
+  canonical row and keeps the old token as an alias, so a granted identity
+  can live on a row with a different primary name. "Which row is this
+  identity?" and "which row carries its grant?" resolve the identity the same
+  way, or a persisted alias silently suppresses a real grant.
 - **The grant is ENUMERABLE, not just answerable.** Access comes from the
   store, which knows nothing about discovery, so the registry view projects a
   granted tool that has never been used — an honest empty row (zero uses, no
