@@ -769,7 +769,10 @@ export function createProbes(deps = {}) {
     } catch {
       vit = null;
     }
-    const st = await loadToolState(tool);
+    // State is keyed by the SPEC file's name (the name the runner writes it
+    // under), which after the identity fallback may differ from the name the
+    // caller asked by.
+    const st = await loadToolState(specInfo.name);
     const rows = (Array.isArray(specInfo.spec.probes) ? specInfo.spec.probes : [])
       .filter((p) => p && typeof p.name === "string" && p.name.length > 0)
       .map((p) => {
@@ -792,17 +795,63 @@ export function createProbes(deps = {}) {
   }
 
 
-  async function validSpecFor(tool) {
-    let raw;
+  // Spec/state files are keyed by tool NAME, but a row answers to several:
+  // the scaffold writes the spec under the STORE identity that granted the
+  // tool (scaffoldGrantedTools), while the drill-down asks by the registry
+  // row's CANONICAL name (classification may have merged the raw token into
+  // a different canonical and kept the grant name as an alias). Candidates
+  // resolve through the registry's ONE identity seam (identitiesFor — the
+  // same set the grant was checked against), requested name first so the
+  // runner (which always passes a spec file's own name) is unchanged; the
+  // fallback only fires when a caller asks by a sibling name.
+  async function specCandidates(tool) {
+    const names = [tool];
     try {
-      raw = await probes.load(tool);
+      const ids =
+        typeof registry.identitiesFor === "function" ? await registry.identitiesFor(tool) : [];
+      for (const id of Array.isArray(ids) ? ids : []) {
+        const norm = typeof id === "string" ? id.trim().toLowerCase() : "";
+        if (norm && !names.includes(norm)) names.push(norm);
+      }
     } catch {
-      return null;
+      /* registry hiccup → the requested name only */
     }
-    if (!raw || typeof raw !== "object") return null;
+    return names;
+  }
+
+  // The spec file for a tool, under whichever of its names it lives. The
+  // "is this actually a spec" guard matters: the real store returns `{}` for
+  // a missing file, and an empty object must not mask a real spec under the
+  // row's other name (scaffoldSpec's own existence check uses the same test).
+  async function loadSpecFor(tool) {
+    for (const name of await specCandidates(tool)) {
+      let raw = null;
+      try {
+        raw = await probes.load(name);
+      } catch {
+        raw = null;
+      }
+      if (raw && typeof raw === "object" && (raw.tool || Array.isArray(raw.probes))) {
+        return { name, spec: raw };
+      }
+    }
+    return null;
+  }
+
+  async function validSpecFor(tool) {
+    const found = await loadSpecFor(tool);
+    if (!found) return null;
+    const { name: specName, spec: raw } = found;
     const ctx = await consentContext(tool);
-    const check = validateProbeSpec(raw, { tool, allowedHosts: ctx.allowedHosts, consentedRing: ctx.consentedRing });
-    if (check.ok) return { spec: raw, ctx };
+    // Validate the file under the name it was found under (its own `tool:`
+    // field's file); the evidence hosts + consent ring come from the ROW,
+    // which resolves under any of the row's names.
+    const check = validateProbeSpec(raw, {
+      tool: specName,
+      allowedHosts: ctx.allowedHosts,
+      consentedRing: ctx.consentedRing,
+    });
+    if (check.ok) return { name: specName, spec: raw, ctx };
     // A consent REVOCATION narrows the tool's ring after authoring: ring-
     // escalation errors drop just those probes (the tool's metadata probes
     // keep running — losing deep_read must not invalidate the whole spec).
@@ -811,7 +860,7 @@ export function createProbes(deps = {}) {
     if (escalated.size === 0 || check.errors.length > escalated.size) return null;
     const kept = (Array.isArray(raw.probes) ? raw.probes : []).filter((_, i) => !escalated.has(`probes[${i}].ring`));
     if (kept.length === 0) return null;
-    return { spec: { ...raw, probes: kept }, ctx };
+    return { name: specName, spec: { ...raw, probes: kept }, ctx };
   }
 
   // ---- spec authoring (engine-written; the AI's content goes through here) —

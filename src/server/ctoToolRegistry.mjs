@@ -81,14 +81,54 @@ export const RAW_CLASSIFY_MIN_USES = 2;
 export const UNRESOLVED_PRUNE_LIMIT = 1000;
 export const UNRESOLVED_RETENTION_MS = 90 * 24 * 3_600_000;
 
+// ---------------------------------------------------------------------------
+// IDENTITY RESOLUTION — the one seam. Everything in the grant / access /
+// probe path resolves a tool name through these three functions and NOTHING
+// else; there is no bare `.find` on a tool name left in this module (the
+// sweep tests in ctoToolRegistry.test.mjs pin the seam under both names;
+// consumers outside the module go through the `identitiesFor` engine
+// method). The one deliberate exact-name comparison — the classification
+// prune below — is commented in place where it lives.
+//
+// Why it has to be a seam rather than a convention: classification merges a
+// raw row into its canonical one and keeps the old token as an ALIAS, so one
+// tool legitimately answers to several names. Three review rounds in a row
+// found the same shape of bug — the alias rule applied in one place and not
+// its neighbour — and every one of them was a place that wrote its own
+// lookup. A rule that lives in one function cannot be half-applied.
+// ---------------------------------------------------------------------------
+
+// A caller-supplied tool name, normalized. Identities are lowercase.
+export function normalizeToolId(id) {
+  return typeof id === "string" ? id.trim().toLowerCase() : "";
+}
+
 // Every identity a registry row answers to: its canonical name plus the
-// aliases classification folded into it. A row IS each of these — so asking
-// "which row is `multica`?" and "does this row carry multica's grant?" must
-// both go through here, or the two can disagree about the same row.
+// aliases classification folded into it. A row IS each of these.
 export function identitiesOf(row) {
   return [row?.tool, ...(Array.isArray(row?.aliases) ? row.aliases : [])].filter(
     (id) => typeof id === "string" && id !== "",
   );
+}
+
+// The ONE row that answers to `id`, by canonical name or by alias.
+export function findToolRow(tools, id) {
+  const norm = normalizeToolId(id);
+  if (!norm) return null;
+  return (Array.isArray(tools) ? tools : []).find((r) => identitiesOf(r).includes(norm)) ?? null;
+}
+
+// Every identity `id` is known by — the identity SET the grant is checked
+// against. A row can only EXTEND that set, never shrink it: an unknown name
+// resolves to itself, so a tool granted by a stored key that nothing has ever
+// used still resolves (a registry row is not a precondition for access), and
+// a row that answers to the name contributes its other names too (so the
+// canonical name and any alias reach the same grant).
+export function resolveIdentities(tools, id) {
+  const norm = normalizeToolId(id);
+  if (!norm) return [];
+  const row = findToolRow(tools, norm);
+  return row ? identitiesOf(row) : [norm];
 }
 
 // §6.7 "a consented tool for issue facts": does the registry report an issue
@@ -329,7 +369,7 @@ export function fuseRow(tools, row, { nowMs } = {}) {
   const identity = typeof row.identity === "string" && row.identity ? row.identity.toLowerCase() : null;
   if (!identity) return arr; // no derivable identity — log-only evidence
 
-  let tool = arr.find((t) => t?.tool === identity || t?.aliases?.includes(identity));
+  let tool = findToolRow(arr, identity);
   if (!tool) {
     tool = baseTool(identity, ts);
     tool.raw = row.source === "raw";
@@ -580,7 +620,7 @@ export function createToolRegistry(deps = {}) {
       return next();
     }
     // Merge the raw entry into the canonical identity (or create it).
-    let canon = payload.tools.find((t) => t?.tool === canonical);
+    let canon = findToolRow(payload.tools, canonical);
     if (!canon) {
       canon = baseTool(canonical, target.firstSeenTs);
       canon.source = "llm";
@@ -739,9 +779,16 @@ export function createToolRegistry(deps = {}) {
       let changed = false, pruned = 0;
       for (const [key, record] of Object.entries(records)) {
         if (!["resolved", "rejected"].includes(record.status)) continue;
+        // NOT an identity lookup, and deliberately not routed through the
+        // resolver: this asks "was THIS classification outcome applied to the
+        // registry", which is a question about one specific record. The
+        // rejected branch must match the raw row that was rejected under its
+        // own name (an alias would mean a different decision was applied);
+        // the resolved branch uses the resolver, because a resolved key is
+        // exactly an identity the merged row now answers to.
         const applied = saved.tools.some((t) => record.status === "rejected"
           ? t.tool === key && t.unclassifiable && t.llmAt === record.at
-          : !t.raw && (t.tool === key || t.aliases?.includes(key)));
+          : !t.raw && identitiesOf(t).includes(key));
         if (!record.appliedAt && applied) { records[key] = { ...record, appliedAt: now() }; changed = true; }
         if (record.appliedAt && now() - record.appliedAt > 90 * DAY_MS && pruned < 1000) {
           delete records[key]; changed = true; pruned++;
@@ -772,20 +819,36 @@ export function createToolRegistry(deps = {}) {
   // callers are unchanged, and every one of them gets the same "yes". No
   // secret → null: no access, and nothing is asked of the user.
   //
-  // The store is the ONLY input. A registry row that still carries a consent
-  // record from the old ask flow cannot grant access and cannot shadow a
-  // stored secret either — stale state is simply not consulted.
+  // The STORE is the only thing that grants. The registry is consulted for
+  // one purpose only — to learn which OTHER names this tool answers to (§7.2
+  // aliases) — and it can only ever WIDEN the identity set: a name with no
+  // row resolves to itself, so a secret nothing has used still grants, and a
+  // consent record left by the retired ask flow is not consulted at all.
+  // Rows cannot withhold a grant; they can only tell us it is the same tool.
+  async function accessFor(tool) {
+    const norm = normalizeToolId(tool);
+    if (!norm) return null;
+    const granted = grantedTools();
+    // Cheap path first: the name itself is granted, whatever the registry says.
+    const direct = granted.get(norm);
+    if (direct) return direct;
+    let tools = [];
+    try {
+      tools = (await loadPayload()).tools;
+    } catch {
+      tools = [];
+    }
+    return resolveIdentities(tools, norm).map((id) => granted.get(id)).find(Boolean) ?? null;
+  }
+
   async function consentFor(tool) {
-    const id = typeof tool === "string" ? tool.trim().toLowerCase() : "";
-    if (!id) return null;
-    return grantedTools().has(id) ? "yes" : null;
+    return (await accessFor(tool)) ? "yes" : null;
   }
 
   // The grant behind a tool, for the §10.5 drill-down: which stored KEY makes
   // it reachable (a key name is not a secret), or null when nothing does.
-  function grantFor(tool) {
-    const id = typeof tool === "string" ? tool.trim().toLowerCase() : "";
-    return (id && grantedTools().get(id)) ?? null;
+  async function grantFor(tool) {
+    return (await accessFor(tool)) ?? null;
   }
 
   // ---------------------------------------------------------------------------
@@ -797,10 +860,26 @@ export function createToolRegistry(deps = {}) {
   // The full row for one tool (probe runner reads evidence hosts + vitality;
   // the probe spec's host allowlist is derived from this). null when unknown.
   async function toolRow(toolId) {
-    const id = typeof toolId === "string" ? toolId.trim().toLowerCase() : "";
+    const id = normalizeToolId(toolId);
     if (!id) return null;
-    const payload = await loadPayload();
-    return payload.tools.find((x) => x?.tool === id) ?? null;
+    return findToolRow((await loadPayload()).tools, id);
+  }
+
+  // The identity SET behind a tool name — the exact resolution the grant
+  // (accessFor) is checked against, exposed for consumers that key their OWN
+  // state by tool name (the §7.5 probe spec/state files) so their lookup can
+  // agree with the grant under any of the row's names. Canonical first, the
+  // requested name never dropped by the caller (it prepends its own).
+  async function identitiesFor(toolId) {
+    const id = normalizeToolId(toolId);
+    if (!id) return [];
+    let tools = [];
+    try {
+      tools = (await loadPayload()).tools;
+    } catch {
+      tools = [];
+    }
+    return resolveIdentities(tools, id);
   }
 
   // The §7.6 decay chain's probing cap (Q2 cascade): a chain-tripped tool's
@@ -825,14 +904,14 @@ export function createToolRegistry(deps = {}) {
   // wrapper serialization exists any more (BET-1464 defect 3); nesting a
   // second patchStore on the same store would deadlock the promise tail.
   async function applyProbeResult(toolId, { fields, probedAt, cadenceMs } = {}) {
-    const id = typeof toolId === "string" ? toolId.trim().toLowerCase() : "";
+    const id = normalizeToolId(toolId);
     if (!id) return { ok: false, error: "missing tool" };
     const vit = vitalityOf(fields);
     let err = null;
     let flipped = false;
     let vitality = null;
     await patchRegistry(async (payload) => {
-      const t = payload.tools.find((x) => x?.tool === id);
+      const t = findToolRow(payload.tools, id);
       if (!t) {
         err = { ok: false, error: `unknown tool "${id}"` };
         return null;
@@ -867,13 +946,13 @@ export function createToolRegistry(deps = {}) {
   // §7.6 relevance: persist the weekly nano-score for one (tool, project)
   // pair into the row's `relevance[project]` (clamped to [0,1]).
   async function applyRelevance(toolId, project, score) {
-    const id = typeof toolId === "string" ? toolId.trim().toLowerCase() : "";
+    const id = normalizeToolId(toolId);
     if (!id || typeof project !== "string" || !project) return { ok: false, error: "missing tool/project" };
     const s = Number(score);
     if (!Number.isFinite(s)) return { ok: false, error: "invalid score" };
     let err = null;
     await patchRegistry(async (payload) => {
-      const t = payload.tools.find((x) => x?.tool === id);
+      const t = findToolRow(payload.tools, id);
       if (!t) {
         err = { ok: false, error: `unknown tool "${id}"` };
         return null;
@@ -896,7 +975,7 @@ export function createToolRegistry(deps = {}) {
   // is the §7.3 dead condition). Revival is the fresh-engagement path in
   // lifecycleStep (§7.3/B7: renewed engagement re-promotes).
   async function applyAsSource(toolId, effects) {
-    const id = typeof toolId === "string" ? toolId.trim().toLowerCase() : "";
+    const id = normalizeToolId(toolId);
     if (!id) return { ok: false, error: "missing tool" };
     const e = effects && typeof effects === "object" ? effects : {};
     const isReport = e.success === true || e.rejection === true;
@@ -904,7 +983,7 @@ export function createToolRegistry(deps = {}) {
     let err = null;
     let out = null;
     await patchRegistry(async (payload) => {
-      const t = payload.tools.find((x) => x?.tool === id);
+      const t = findToolRow(payload.tools, id);
       if (!t) {
         err = { ok: false, error: `unknown tool "${id}"` };
         return null;
@@ -937,14 +1016,14 @@ export function createToolRegistry(deps = {}) {
   // One evidence row on the tool's trail (probe failures; §7.2 evidence
   // shape). Deduped on (channel, detail); capped at EVIDENCE_CAP.
   async function appendEvidence(toolId, entry) {
-    const id = typeof toolId === "string" ? toolId.trim().toLowerCase() : "";
+    const id = normalizeToolId(toolId);
     if (!id || !entry || typeof entry.channel !== "string" || typeof entry.detail !== "string") {
       return { ok: false, error: "missing tool/evidence" };
     }
     let err = null;
     let changed = false;
     await patchRegistry(async (payload) => {
-      const t = payload.tools.find((x) => x?.tool === id);
+      const t = findToolRow(payload.tools, id);
       if (!t) {
         err = { ok: false, error: `unknown tool "${id}"` };
         return null;
@@ -993,7 +1072,7 @@ export function createToolRegistry(deps = {}) {
     const seen = new Set();
     const rows = [...payload.tools];
     for (const tool of granted.keys()) {
-      if (!rows.some((r) => identitiesOf(r).includes(tool))) rows.push(baseTool(tool, t));
+      if (!findToolRow(rows, tool)) rows.push(baseTool(tool, t));
     }
     return rows.map((row) => {
       const vitality = { ...emptyVitality(), ...(row.vitality ?? {}) };
@@ -1043,6 +1122,9 @@ export function createToolRegistry(deps = {}) {
     // relevance, append failure evidence). toolRow is a pure read — it never
     // touches the write mutex (must never queue behind an in-flight scan).
     toolRow,
+    // The identity set a name resolves to (the grant's own resolution) — the
+    // seam consumers outside this module key their name-spaced state by.
+    identitiesFor,
     applyProbeResult,
     applyRelevance,
     appendEvidence,

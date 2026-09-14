@@ -7,6 +7,8 @@ import {
   createToolRegistry,
   isIssueToolGranted,
   identitiesOf,
+  findToolRow,
+  resolveIdentities,
   fuseRow,
   weekKey,
   barCrossed,
@@ -378,7 +380,7 @@ test("a stored secret grants access with no usage, no evidence and no registry r
   // Nothing has ever been observed: the registry is empty.
   assert.deepEqual(registryStore._state().tools ?? [], []);
   assert.equal(await registry.consentFor("nordvpn"), "yes");
-  assert.equal(registry.grantFor("nordvpn"), "NORDVPN_TOKEN");
+  assert.equal(await registry.grantFor("nordvpn"), "NORDVPN_TOKEN");
 });
 
 test("the grant is FULL: every ring a caller asks about answers yes", async () => {
@@ -446,7 +448,7 @@ test("a tool with no matching secret gets nothing — however heavily it is used
   });
   await registry.dailyScan();
   assert.equal(await registry.consentFor("stripe"), null);
-  assert.equal(registry.grantFor("stripe"), null);
+  assert.equal(await registry.grantFor("stripe"), null);
   assert.equal((await registry.listTools()).find((r) => r.tool === "stripe").accessKey, null);
 });
 
@@ -770,9 +772,102 @@ test("an ALIASING row carries the grant — a persisted alias can never suppress
   assert.equal(isIssueToolGranted(none), false);
 });
 
+test("EVERY grant/access lookup resolves the same identity set — canonical name and alias alike", async () => {
+  // The regression: alias resolution reached the list view but not the probe
+  // path, so the drill-down showed access while `consentFor("multica-ai")`
+  // said no and `toolRow("multica")` found nothing — probes under the
+  // canonical name stayed disabled, and under the alias had no evidence to
+  // author from.
+  const row = {
+    tool: "multica-ai",
+    displayName: "Multica AI",
+    aliases: ["multica"],
+    status: "integrated",
+    engagement: { ewma_per_week: 2, last_used: W0, per_project: {} },
+    vitality: { last_event: null, inflow_rate: null, ewma: null, last_probed: null },
+    evidence: [{ channel: "config", detail: "git:api.multica.ai", ts: W0 }],
+    uses: 4,
+    weeks: [],
+    firstSeenTs: W0,
+  };
+  const registry = createToolRegistry({
+    registryStore: memStore({ tools: [row], lastScanTs: W0 }),
+    classificationStore: memStore(),
+    usageStore: memStore({ rows: [] }),
+    ledger: fakeLedger(),
+    listSecretKeys: () => ["MULTICA_TOKEN"],
+    now: () => W0 + DAY,
+  });
+
+  for (const name of ["multica", "multica-ai", "MULTICA", " Multica-AI "]) {
+    assert.equal(await registry.consentFor(name), "yes", `consentFor(${name})`);
+    assert.equal(await registry.grantFor(name), "MULTICA_TOKEN", `grantFor(${name})`);
+    const found = await registry.toolRow(name);
+    assert.ok(found, `toolRow(${name}) must find the row`);
+    assert.equal(found.tool, "multica-ai", "…and it is the SAME single row under either name");
+    assert.equal(found.evidence.length, 1, "the evidence authoring needs is reachable under either name");
+  }
+
+  // The writers the probe runner calls reach that one row under either name.
+  assert.equal((await registry.applyProbeResult("multica", { fields: { last_event: W0 }, probedAt: W0, cadenceMs: 3_600_000, probeName: "p" })).ok, true);
+  assert.equal((await registry.appendEvidence("multica-ai", { channel: "probe", detail: "p:500", ts: W0 })).ok, true);
+  const after = await registry.toolRow("multica");
+  assert.equal(after.vitality.last_event, W0, "the probe result folded onto the row, not a phantom");
+  assert.equal(after.evidence.length, 2);
+  assert.equal((await registry.listTools()).length, 1, "and still exactly one row");
+
+  // An alias can only WIDEN: with no secret, neither name grants anything.
+  const ungranted = createToolRegistry({
+    registryStore: memStore({ tools: [row], lastScanTs: W0 }),
+    classificationStore: memStore(),
+    usageStore: memStore({ rows: [] }),
+    ledger: fakeLedger(),
+    listSecretKeys: () => [],
+    now: () => W0 + DAY,
+  });
+  for (const name of ["multica", "multica-ai"]) {
+    assert.equal(await ungranted.consentFor(name), null, name);
+    assert.equal(await ungranted.grantFor(name), null, name);
+  }
+});
+
+test("a registry row can never WITHHOLD a grant — an unknown name resolves to itself", async () => {
+  // The alias lookup must not become a precondition for access: a secret
+  // nothing has ever used still grants, with an unrelated row present.
+  const { registry } = makeRegistry({ secrets: ["NORDVPN_TOKEN"], nowMs: W0 });
+  assert.equal(await registry.consentFor("nordvpn"), "yes");
+  const withRows = createToolRegistry({
+    registryStore: memStore({ tools: [{ tool: "github", aliases: ["gh"], evidence: [], uses: 1 }], lastScanTs: W0 }),
+    classificationStore: memStore(),
+    usageStore: memStore({ rows: [] }),
+    ledger: fakeLedger(),
+    listSecretKeys: () => ["NORDVPN_TOKEN"],
+    now: () => W0,
+  });
+  assert.equal(await withRows.consentFor("nordvpn"), "yes", "a row for another tool cannot deny it");
+  assert.equal(await withRows.consentFor("github"), null, "and cannot invent one either");
+});
+
 test("identitiesOf is the single identity resolver both halves of listTools use", () => {
   assert.deepEqual(identitiesOf({ tool: "multica-ai", aliases: ["multica", "mc"] }), ["multica-ai", "multica", "mc"]);
   assert.deepEqual(identitiesOf({ tool: "github" }), ["github"]);
   assert.deepEqual(identitiesOf({ tool: "x", aliases: ["", null, 7, "y"] }), ["x", "y"]);
   assert.deepEqual(identitiesOf(null), []);
+});
+
+test("resolveIdentities / findToolRow: the seam every lookup in the path goes through", () => {
+  const tools = [{ tool: "multica-ai", aliases: ["multica"] }, { tool: "github" }];
+  assert.equal(findToolRow(tools, "multica")?.tool, "multica-ai");
+  assert.equal(findToolRow(tools, "MULTICA-AI ")?.tool, "multica-ai");
+  assert.equal(findToolRow(tools, "nope"), null);
+  assert.equal(findToolRow(tools, ""), null);
+  assert.equal(findToolRow(null, "github"), null);
+  // A known name resolves to the row's whole identity set…
+  assert.deepEqual(resolveIdentities(tools, "multica"), ["multica-ai", "multica"]);
+  assert.deepEqual(resolveIdentities(tools, "multica-ai"), ["multica-ai", "multica"]);
+  // …an unknown one to itself, so a row is never a precondition for a grant.
+  assert.deepEqual(resolveIdentities(tools, "nordvpn"), ["nordvpn"]);
+  assert.deepEqual(resolveIdentities([], "nordvpn"), ["nordvpn"]);
+  assert.deepEqual(resolveIdentities(tools, "  GitHub "), ["github"]);
+  assert.deepEqual(resolveIdentities(tools, ""), []);
 });

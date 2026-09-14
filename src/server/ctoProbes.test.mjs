@@ -189,9 +189,9 @@ function githubSpec(overrides = {}) {
   };
 }
 
-function build({ rows, specs, state, cards, ledger, http, now, thrifty, runEphemeral, projects, getTopFacts, getRollups, resolveSegment } = {}) {
+function build({ rows, registry, specs, state, cards, ledger, http, now, thrifty, runEphemeral, projects, getTopFacts, getRollups, resolveSegment } = {}) {
   return createProbes({
-    registry: fakeRegistry(rows ?? [consentedTool()]),
+    registry: registry ?? fakeRegistry(rows ?? [consentedTool()]),
     probes: memProbesStore(specs ?? { github: githubSpec() }),
     stateStore: memStateStore(state),
     cards: cards ?? fakeCards(),
@@ -1043,6 +1043,90 @@ test("registry applyProbeResult: unknown tool is rejected; relevance + evidence 
   assert.equal(ev.ok, true);
   const dedup = await reg.appendEvidence("github", { channel: "probe", detail: "repo_events:http_500", ts: 6 });
   assert.equal(dedup.changed, false, "same (channel, detail) is deduped");
+});
+
+// ---------------------------------------------------------------------------
+// The identity seam, END TO END — real registry × real probes engine
+// ---------------------------------------------------------------------------
+
+// The reported shape: MULTICA_TOKEN names the tool "multica" in the secret
+// store; classification later merged the raw evidence into a canonical
+// "multica-ai" row and kept "multica" as an alias; the spec/state files were
+// scaffolded under the GRANTED name. Every lookup — grant, consent, row,
+// spec, state — must agree under BOTH names, or the drill-down (asking by
+// the canonical name) contradicts the runner (working by the granted name).
+// Red against the pre-fix code: consentFor said no under the canonical name
+// and toolRow said nothing under the alias.
+test("probeSummary + runDue: one aliased tool agrees under BOTH names (real registry wiring)", async () => {
+  const { createToolRegistry } = await import("./ctoToolRegistry.mjs");
+  const reg = createToolRegistry({
+    registryStore: memStore({
+      v: 1,
+      tools: [
+        {
+          tool: "multica-ai",
+          aliases: ["multica"],
+          status: "observed",
+          evidence: [{ channel: "config", detail: "git:api.multica.ai", ts: 1 }],
+        },
+      ],
+    }),
+    classificationStore: memStore(),
+    usageStore: memStore({ rows: [] }),
+    ledger: fakeLedger(),
+    listSecretKeys: () => ["MULTICA_TOKEN"],
+    now: () => 1_700_000_000_000,
+  });
+  const eng = build({
+    registry: reg,
+    rows: [],
+    specs: {
+      // What scaffoldGrantedTools wrote at grant time: named after the STORE
+      // identity, not the registry row's canonical name.
+      multica: {
+        tool: "multica",
+        auth: { secret: "MULTICA_TOKEN", header: "Authorization: Bearer {secret}" },
+        probes: [
+          {
+            name: "workspace_status",
+            method: "GET",
+            url: "https://api.multica.ai/v1/status",
+            extract: { last_event: "0.updated_at" },
+            cadence: "30m",
+            ring: "metadata",
+          },
+        ],
+      },
+    },
+    state: { multica: { probes: { workspace_status: { lastAt: 5, lastOk: true, nextRunAt: 9 } } } },
+    http: async () => ({ status: 200, bodyText: JSON.stringify([{ updated_at: "2026-09-01T00:00:00Z" }]) }),
+  });
+
+  // The row and the grant resolve identically under both names.
+  assert.equal((await reg.toolRow("multica")).tool, "multica-ai");
+  assert.equal((await reg.toolRow("multica-ai")).tool, "multica-ai");
+  assert.equal(await reg.grantFor("multica"), "MULTICA_TOKEN");
+  assert.equal(await reg.grantFor("multica-ai"), "MULTICA_TOKEN");
+
+  // probeSummary — the drill-down read — is granted AND finds the same
+  // configured probe under either name (spec + state live under the grant
+  // name; the summary resolves them through the registry's identity seam).
+  const byAlias = await eng.probeSummary("multica");
+  const byCanonical = await eng.probeSummary("multica-ai");
+  assert.equal(byAlias.consented, true);
+  assert.equal(byAlias.configured, true);
+  assert.equal(byCanonical.consented, true, "the canonical name must not read as unconsented");
+  assert.equal(byCanonical.configured, true, "the canonical name must not hide a configured spec");
+  assert.deepEqual(byCanonical.probes.map((p) => p.name), byAlias.probes.map((p) => p.name));
+  assert.equal(byCanonical.probes[0]?.lastAt, 5, "state is read under the spec's own name");
+
+  // The runner works by the spec-file name and folds into the ONE row.
+  const results = await eng.runDue({ forceTool: "multica" });
+  assert.equal(results.length, 1);
+  assert.equal(results[0].ok, true);
+  const row = await reg.toolRow("multica");
+  assert.equal(row.tool, "multica-ai", "the fold landed on the canonical row");
+  assert.ok(row.vitality?.last_probed, "vitality folded");
 });
 
 // ---------------------------------------------------------------------------
