@@ -28,10 +28,11 @@
 // All I/O is injected; pure helpers are exported for tests.
 
 import { toolRegistryStore, toolUsageStore, toolClassificationStore, ledgerStore, patchStore } from "./ctoStores.mjs";
-import { displayName as catalogDisplayName, matchSecretIdentities } from "./ctoToolCatalog.mjs";
-// Metadata-only listing (keys, scopes, hints — `toMeta` strips every value):
-// the access grant's source of truth. Never import a value-returning path.
-import { listSecrets } from "./secrets.mjs";
+import { displayName as catalogDisplayName, matchSecretIdentity } from "./ctoToolCatalog.mjs";
+// KEY NAMES ONLY — `listSecretKeys` returns an array of strings, so nothing
+// value-bearing can reach this module even by accident. Never import a
+// value-returning path here (`provideSecret` is not for this file).
+import { listSecretKeys } from "./secrets.mjs";
 import {
   CHANNEL_TRANSCRIPT,
   CHANNEL_CONFIG,
@@ -79,6 +80,20 @@ export const EVIDENCE_CAP = 20;
 export const RAW_CLASSIFY_MIN_USES = 2;
 export const UNRESOLVED_PRUNE_LIMIT = 1000;
 export const UNRESOLVED_RETENTION_MS = 90 * 24 * 3_600_000;
+
+// §6.7 "a consented tool for issue facts": does the registry report an issue
+// tool the CTO can actually reach? Reads `accessKey` — the §7.4 grant — off
+// the listTools projection, so the issue surface exists exactly when a secret
+// in the store names the box's issue tool, and stops existing the moment that
+// secret is deleted. Pure, so the wiring in index.mjs has nothing to get
+// wrong and this rule is testable against a real projection.
+export const ISSUE_TOOL_RE = /^(?:multica|issue-tracker)(?:[-/].*)?$/i;
+
+export function isIssueToolGranted(tools) {
+  return (Array.isArray(tools) ? tools : []).some(
+    (t) => ISSUE_TOOL_RE.test(String(t?.tool ?? "")) && typeof t?.accessKey === "string" && t.accessKey !== "",
+  );
+}
 
 // Bound only unresolved, untouched candidates. A resolved identity is never
 // an eviction candidate, even when it is old; nor is access ever at stake —
@@ -351,9 +366,9 @@ export function createToolRegistry(deps = {}) {
     ledger = ledgerStore,
     runEphemeral = null, // async ({taskClass, context}) => {text}
     // The access grant's source of truth: the secret store's KEY LIST, read
-    // at decision time. Metadata only — `listSecrets` returns `toMeta` rows,
-    // which carry key/scope/hint and never a value.
-    listSecretMetas = () => listSecrets({ includeAll: true }),
+    // at decision time. An array of key NAMES and nothing else — see
+    // `listSecretKeys`.
+    listSecretKeys: readSecretKeys = () => listSecretKeys(),
     now = () => Date.now(),
     // I/O seams for the daily scan (index.mjs supplies the live ones).
     collectDb = null, // async ({sinceTs, untilTs, cap}) => db part rows
@@ -368,28 +383,28 @@ export function createToolRegistry(deps = {}) {
   } = deps;
 
   // ---- The access grant (the single rule) ---------------------------------
-  // Every stored key → the tool identities it names → `identity → {key,
-  // primary}`. Built fresh on every call: the store is the live control
-  // surface, so a secret added a second ago grants immediately and a deleted
-  // one stops granting immediately. Keys and hints only; a value is never
-  // touched. `primary` marks the one identity the key is chiefly about (the
-  // rest are the key's other meaningful segments) — access treats them
-  // alike; the probe scaffold only follows the primary.
+  // Every stored key → the ONE tool it names → `identity → key`. Built fresh
+  // on every call: the store is the live control surface, so a secret added a
+  // second ago grants immediately and a deleted one stops granting
+  // immediately. A key that names no known tool, or names more than one,
+  // contributes nothing (see matchSecretIdentity). Key NAMES only — no value,
+  // no hint, nothing else is in scope here.
+  //
+  // Deliberately uncached. This is an authorization decision, and a cache is
+  // a second source of truth that can disagree with the store; the read is
+  // one small JSON file and its callers (probe ticks, drill-down renders) are
+  // minutes apart, not a tight loop. Correctness over a micro-optimisation.
   function grantedTools() {
-    let metas;
+    let keys;
     try {
-      metas = listSecretMetas() ?? [];
+      keys = readSecretKeys() ?? [];
     } catch {
       return new Map();
     }
     const granted = new Map();
-    for (const meta of Array.isArray(metas) ? metas : []) {
-      const key = typeof meta?.key === "string" ? meta.key : "";
-      if (!key) continue;
-      const identities = matchSecretIdentities(key, meta?.hint ?? "");
-      for (const [i, identity] of identities.entries()) {
-        if (!granted.has(identity)) granted.set(identity, { key, primary: i === 0 });
-      }
+    for (const key of Array.isArray(keys) ? keys : []) {
+      const identity = typeof key === "string" ? matchSecretIdentity(key) : null;
+      if (identity && !granted.has(identity)) granted.set(identity, key);
     }
     return granted;
   }
@@ -721,9 +736,8 @@ export function createToolRegistry(deps = {}) {
   // needs no per-tool bookkeeping. Best-effort: the scan never fails on it.
   async function scaffoldGrantedTools() {
     if (typeof scaffoldProbes !== "function") return;
-    for (const [tool, grant] of grantedTools()) {
-      if (!grant.primary) continue;
-      await scaffoldProbes(tool, { secret: grant.key }).catch(() => {});
+    for (const [tool, key] of grantedTools()) {
+      await scaffoldProbes(tool, { secret: key }).catch(() => {});
     }
   }
 
@@ -747,7 +761,7 @@ export function createToolRegistry(deps = {}) {
   // it reachable (a key name is not a secret), or null when nothing does.
   function grantFor(tool) {
     const id = typeof tool === "string" ? tool.trim().toLowerCase() : "";
-    return (id && grantedTools().get(id)?.key) ?? null;
+    return (id && grantedTools().get(id)) ?? null;
   }
 
   // ---------------------------------------------------------------------------
@@ -949,7 +963,7 @@ export function createToolRegistry(deps = {}) {
         // Access, as the drill-down must state it: the stored KEY that grants
         // this tool (a key name is not a secret), or null — in which case the
         // CTO cannot reach it and nothing will ask the user to change that.
-        accessKey: granted.get(row.tool)?.key ?? null,
+        accessKey: granted.get(row.tool) ?? null,
         // §7.6 chain visibility (§10.5 drill-down): counters + trip state so
         // the surface can explain why deep analyses stopped — no dead state.
         asSource: { ...(row.as_source ?? { reports: 0, accepted: 0 }) },

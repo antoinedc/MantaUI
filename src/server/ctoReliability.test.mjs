@@ -116,7 +116,7 @@ test("failed discovery preserves cursor; transient classification retries and al
     ledger: { append: async () => {} },
     collectDb: async () => { if (mode === "failed") throw new Error("SECRET"); return []; },
     runEphemeral: async () => mode === "failed" ? { ok: false, code: "timeout" } : { text: "github" },
-    listSecretMetas: () => [],
+    listSecretKeys: () => [],
     scaffoldProbes: async () => { scaffolds++; },
   });
   assert.equal((await make().dailyScan()).ok, false);

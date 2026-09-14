@@ -14,6 +14,7 @@ import {
   setSecret,
   deleteSecret,
   listSecrets,
+  listSecretKeys,
   sortSecretMetas,
   provideSecret,
   recordSecretUsage,
@@ -499,6 +500,40 @@ test("recordSecretUsage appends to the A1 tool-usage store (never the value)", a
     ],
   );
   for (const r of rows) assert.equal(r.value, undefined, "the secret value must never be recorded");
+});
+
+// ----------------------------------------------------------------------------
+// listSecretKeys — the Adaptive CTO's §7.4 access-grant reader. Its whole
+// contract is "key names, nothing else", because a key's presence IS the
+// authorization: anything wider travelling down that path would be a value
+// one refactor away from a log line.
+// ----------------------------------------------------------------------------
+
+test("listSecretKeys returns KEY NAMES ONLY — no value, no hint, no metadata of any kind", () => {
+  const store = [
+    { id: "1", key: "NORDVPN_TOKEN", value: "super-secret-value", scope: "shared", sessionID: null, project: null, hint: "vpn" },
+    { id: "2", key: "GITHUB_TOKEN", value: "ghp_another_secret", scope: "session", sessionID: "ses_1", project: null, hint: "" },
+  ];
+  const keys = listSecretKeys({ load: () => store });
+  assert.deepEqual(keys, ["GITHUB_TOKEN", "NORDVPN_TOKEN"], "sorted key names");
+  for (const k of keys) assert.equal(typeof k, "string", "every element is a bare string");
+  // The structural guarantee: no value can be reached through this return.
+  const serialized = JSON.stringify(keys);
+  assert.equal(serialized.includes("super-secret-value"), false);
+  assert.equal(serialized.includes("ghp_another_secret"), false);
+  assert.equal(serialized.includes("vpn"), false, "not even the hint travels");
+});
+
+test("listSecretKeys covers every scope, dedupes, and tolerates junk rows", () => {
+  const store = [
+    { id: "1", key: "SHARED_ONE", value: "a", scope: "shared" },
+    { id: "2", key: "SESSION_ONE", value: "b", scope: "session", sessionID: "ses_1" },
+    { id: "3", key: "PROJECT_ONE", value: "c", scope: "project", project: "manta" },
+    { id: "4", key: "SHARED_ONE", value: "d", scope: "session", sessionID: "ses_2" },
+    { id: "5", value: "no key", scope: "shared" },
+    null,
+  ];
+  assert.deepEqual(listSecretKeys({ load: () => store }), ["PROJECT_ONE", "SESSION_ONE", "SHARED_ONE"]);
 });
 
 // --- tiny file-backed helpers for the round-trip tests above ---

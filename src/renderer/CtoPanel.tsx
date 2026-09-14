@@ -1488,7 +1488,7 @@ export function SettingsView({
               <span>
                 <span className="block text-sm font-medium text-text">Tool integrations</span>
                 <span className="block text-xs text-text-muted">
-                  External tools — role, engagement, consent, probes.
+                  External tools — role, engagement, access, probes.
                 </span>
               </span>
               <span className="text-text-muted">›</span>
@@ -2918,7 +2918,9 @@ function ToolIntegrationsView({
             secret to revoke
           </span>
         ) : (
-          <span className="text-text-faint">access: none — add a secret named for this tool to grant it</span>
+          <span className="text-text-faint">
+            access: none — add a secret named for this tool (e.g. {row.tool.toUpperCase()}_TOKEN) to grant it
+          </span>
         )}
       </div>
       <div className="mt-2 text-[11px] text-text-faint">

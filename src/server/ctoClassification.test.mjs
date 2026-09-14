@@ -43,7 +43,7 @@ test("retry scheduling chooses the least recently attempted eligible tool", asyn
   let selected;
   await createToolRegistry({ registryStore, classificationStore, usageStore: mem(), now: () => 10 * DAY,
     ledger: { append: async () => {} },
-    listSecretMetas: () => [],
+    listSecretKeys: () => [],
     runEphemeral: async ({ context }) => { selected = context[0].text; return { gated: true }; },
   }).dailyScan();
   assert.match(selected, /Identity token: b\n/);
@@ -62,7 +62,7 @@ test("durable classification survives a registry-commit failure and restart with
   };
   const make = () => createToolRegistry({ registryStore, classificationStore, usageStore: mem(), now: () => 10 * DAY,
     ledger: { append: async () => {} },
-    listSecretMetas: () => [],
+    listSecretKeys: () => [],
     runEphemeral: async () => { calls++; called = true; return { text: "github" }; },
   });
   await assert.rejects(make().dailyScan(), /failed/);
@@ -87,7 +87,7 @@ test("failed result persistence leaves a durable reservation; same-day restart c
     await save(value);
   };
   const make = () => createToolRegistry({ registryStore, classificationStore, usageStore: mem(), now: () => 10 * DAY,
-    ledger: { append: async () => {} }, listSecretMetas: () => [], runEphemeral: async () => { calls++; return { text: "github" }; },
+    ledger: { append: async () => {} }, listSecretKeys: () => [], runEphemeral: async () => { calls++; return { text: "github" }; },
   });
   await assert.rejects(make().dailyScan(), /result-write-failed/);
   assert.equal((await classificationStore.load()).records.candidate.status, "reserved");
@@ -98,7 +98,7 @@ test("failed result persistence leaves a durable reservation; same-day restart c
 test("failed reservation prevents any model call", async () => {
   const registry = createToolRegistry({ registryStore: mem({ tools: [raw("candidate")] }), usageStore: mem(),
     classificationStore: { load: async () => ({}), save: async () => { throw new Error("disk-full"); } },
-    ledger: { append: async () => {} }, listSecretMetas: () => [], runEphemeral: async () => assert.fail("must reserve before calling"),
+    ledger: { append: async () => {} }, listSecretKeys: () => [], runEphemeral: async () => assert.fail("must reserve before calling"),
   });
   await assert.rejects(registry.dailyScan(), /disk-full/);
 });
@@ -108,7 +108,7 @@ test("a new process replays a durable result after a commit failure without call
   await toolClassificationStore.save({});
   const registry = createToolRegistry({ now: () => 20 * DAY,
     ledger: { append: async () => {} },
-    listSecretMetas: () => [],
+    listSecretKeys: () => [],
     // The real store's reader, with a writer that dies after the model call
     // has already been persisted durably — the crash window this covers.
     registryStore: { ...toolRegistryStore, save: async () => { throw new Error("commit-failed"); } },
@@ -121,7 +121,7 @@ test("a new process replays a durable result after a commit failure without call
     let calls = 0;
     await createToolRegistry({ now: () => ${20 * DAY},
       ledger: { append: async () => {} },
-      listSecretMetas: () => [],
+      listSecretKeys: () => [],
       runEphemeral: async () => { calls++; return { text: "wrong" }; },
     }).dailyScan();
     console.log(JSON.stringify({ calls, tool: (await toolRegistryStore.load()).tools[0].tool }));

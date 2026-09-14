@@ -525,14 +525,26 @@ Mechanics:
   even if nothing has ever used it, and a deleted one stops granting at once.
   Nothing is written down that could disagree with the store; a consent record
   left by the retired ask flow is not consulted.
-- **A key names its tool.** The key and its hint are matched against the §7.1
-  catalog: a catalog hit wins (`GITHUB_PAT` → github), otherwise the last
-  meaningful segment of the key is the service (`CAPO_MULTICA_TOKEN` →
-  multica). Credential vocabulary (`TOKEN`, `API`, `KEY`, …) names nothing, so
-  a key made only of it grants nothing. There is no wildcard.
-- **Values are never read.** Only key names and hints reach this path, and a
-  key name is not a secret. Materializing a value stays §7.5's
-  by-reference-only business.
+- **A key names AT MOST ONE tool, and only a known one.** The key NAME is
+  split into segments; credential vocabulary (`TOKEN`, `API`, `KEY`, …) names
+  nothing, and each remaining segment must match a §7.1 catalog identity.
+  Exactly one distinct identity → that tool is granted (`GITHUB_PAT` → github,
+  `CAPO_MULTICA_TOKEN` → multica). **Zero → nothing** (an unknown segment such
+  as an org prefix or internal codename can never become a grant of its own).
+  **Two or more → nothing**: a key naming two services (`GITHUB_STRIPE_TOKEN`)
+  is ambiguous, and granting both would hand the CTO a service the user may
+  only have meant as a prefix. There is no wildcard and no guess.
+- **The hint is NOT consulted.** It is free text written for a human; a
+  hostname that happens to appear in it must not authorize anything. This is a
+  grant, not a discovery label.
+- **The grant decision never touches a value.** The registry reads the store
+  through a reader that returns an array of key NAMES and nothing else, so no
+  value, hint or other field can reach the decision even by accident, and a
+  key name is not a secret. This is a statement about the GRANT path only:
+  §7.5 probes do materialize the granted credential by reference and send it
+  as an auth header to the tool's own API — that is what a grant is for, and
+  it remains the by-reference-only discipline (0600 file, never logged, never
+  in a transcript).
 - **The lifecycle is now display-only.** `observed` → `candidate` when either
   axis crosses its bar (engagement: ≥ 3 uses across ≥ 2 weeks; vitality: a
   credential exists at all) → `integrated` on the first successful probe →

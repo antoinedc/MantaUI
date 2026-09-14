@@ -149,6 +149,7 @@ import * as cto from "./cto.mjs";
 import * as ctoEngine from "./ctoEngine.mjs";
 import * as ctoBudget from "./ctoBudget.mjs";
 import { createFactSurfaces } from "./ctoFactSurfaces.mjs";
+import { isIssueToolGranted } from "./ctoToolRegistry.mjs";
 import { ledgerStore, engineStateStore, budgetStore, segmentsStore, verdictsStore, digestsStore, factsStore, resolveStore, calibrationStore, plansStore, startCtoStoreSweeper, CTO_STORE_SWEEP_INTERVAL_MS } from "./ctoStores.mjs";
 import * as ctoOvernight from "./ctoOvernight.mjs";
 import { computeHealthStats } from "./ctoHealth.mjs";
@@ -2090,16 +2091,14 @@ const factSurfaces = createFactSurfaces({
     const row = db.prepare(`SELECT 1 FROM ${table} WHERE id = ? LIMIT 1`).get(key);
     return row != null;
   },
-  // §6.7 "a consented tool for issue facts": the §7 registry's metadata
-  // consent ring for the box's issue tool (multica / issue-tracker identity).
-  // Unasked or revoked consent → the issue surface does not exist. Lazy
-  // adaptiveCto read — the registry engine is constructed on first call.
+  // §6.7 "a consented tool for issue facts": the §7.4 grant for the box's
+  // issue tool (multica / issue-tracker identity). No secret in the store
+  // names that tool → the CTO cannot reach it → the issue surface does not
+  // exist. Lazy adaptiveCto read — the registry engine is constructed on
+  // first call; the rule itself is the pure isIssueToolGranted.
   issueToolConsented: async () => {
     try {
-      const tools = await adaptiveCto.getTools().listTools();
-      return (Array.isArray(tools) ? tools : []).some(
-        (t) => /^(?:multica|issue-tracker)(?:[-/].*)?$/i.test(String(t?.tool ?? "")) && t?.consent?.metadata === "yes",
-      );
+      return isIssueToolGranted(await adaptiveCto.getTools().listTools());
     } catch {
       return false;
     }

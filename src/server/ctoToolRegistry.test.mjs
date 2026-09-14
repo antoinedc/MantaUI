@@ -5,6 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   createToolRegistry,
+  isIssueToolGranted,
   fuseRow,
   weekKey,
   barCrossed,
@@ -32,11 +33,12 @@ function memStore(initial = {}) {
   };
 }
 
-// The secret store, as the registry sees it: metadata rows only (this is the
-// `toMeta` shape — a value is never part of the contract). Injected in every
-// test so the suite never reads the box's real store.
+// The secret store, as the registry sees it: KEY NAMES only — the dep's whole
+// contract is `() => string[]`, so nothing value-bearing can reach the grant
+// path even in a test. Injected everywhere so the suite never reads the box's
+// real store.
 function fakeSecrets(keys = []) {
-  return keys.map((k) => (typeof k === "string" ? { key: k, scope: "shared", hint: "" } : k));
+  return [...keys];
 }
 
 function fakeLedger() {
@@ -57,7 +59,7 @@ function nextDay(registryStore, dayMs, rows, overrides = {}) {
     classificationStore: memStore(),
     usageStore: memStore({ rows }),
     ledger: fakeLedger(),
-    listSecretMetas: () => [],
+    listSecretKeys: () => [],
     now: () => dayMs,
     ...overrides,
   });
@@ -73,7 +75,7 @@ function makeRegistry({ usageRows = [], secrets = [], runEphemeral = null, nowMs
     usageStore,
     ledger,
     runEphemeral,
-    listSecretMetas: () => fakeSecrets(secrets),
+    listSecretKeys: () => fakeSecrets(secrets),
     scaffoldProbes,
     now: () => nowMs,
     collectDb,
@@ -408,6 +410,32 @@ test("key → tool mapping: the required table, and an unmatched key grants noth
   }
 });
 
+test("a grant is an authorization decision: no org prefixes, no second service, no hostnames from hints", async () => {
+  // An org/codename prefix names no tool — it must never become a grant.
+  const prefixed = makeRegistry({ secrets: ["CAPO_MULTICA_TOKEN"], nowMs: W0 });
+  assert.equal(await prefixed.registry.consentFor("multica"), "yes");
+  assert.equal(await prefixed.registry.consentFor("capo"), null, "the org prefix must not be granted");
+  assert.equal(await prefixed.registry.consentFor("capo_multica_token"), null, "nor the raw key");
+
+  // Two services in one key is ambiguous — it grants NEITHER, not both.
+  const ambiguous = makeRegistry({ secrets: ["GITHUB_STRIPE_TOKEN"], nowMs: W0 });
+  assert.equal(await ambiguous.registry.consentFor("github"), null);
+  assert.equal(await ambiguous.registry.consentFor("stripe"), null);
+
+  // A hostname a human mentioned in the hint authorizes nothing: the hint is
+  // not part of the decision at all (the dep carries key names only).
+  const hinted = createToolRegistry({
+    registryStore: memStore(),
+    classificationStore: memStore(),
+    usageStore: memStore({ rows: [] }),
+    ledger: fakeLedger(),
+    listSecretKeys: () => ["NORDVPN_TOKEN"],
+    now: () => W0,
+  });
+  assert.equal(await hinted.consentFor("nordvpn"), "yes");
+  assert.equal(await hinted.consentFor("github"), null, "an incidental host in a hint must not grant GitHub");
+});
+
 test("a tool with no matching secret gets nothing — however heavily it is used", async () => {
   const mk = (ts) => ({ channel: "transcript", identity: "stripe", detail: "cli:stripe", ts, source: "catalog" });
   const { registry } = makeRegistry({
@@ -449,7 +477,7 @@ test("the secret store is read at decision time — adding and deleting a key ta
     classificationStore: memStore(),
     usageStore: memStore({ rows: [] }),
     ledger: fakeLedger(),
-    listSecretMetas: () => fakeSecrets(keys),
+    listSecretKeys: () => fakeSecrets(keys),
     now: () => W0,
   });
   assert.equal(await registry.consentFor("modal"), null);
@@ -462,7 +490,7 @@ test("the secret store is read at decision time — adding and deleting a key ta
 test("the probe scaffold follows the grant, and is handed the key NAME (never a value)", async () => {
   const scaffolded = [];
   const { registry } = makeRegistry({
-    secrets: [{ key: "CAPO_MULTICA_TOKEN", scope: "shared", hint: "capo api" }],
+    secrets: ["CAPO_MULTICA_TOKEN"],
     scaffoldProbes: async (tool, opts) => {
       scaffolded.push([tool, opts]);
       return { ok: true };
@@ -470,7 +498,7 @@ test("the probe scaffold follows the grant, and is handed the key NAME (never a 
     nowMs: W0,
   });
   await registry.dailyScan();
-  assert.deepEqual(scaffolded, [["multica", { secret: "CAPO_MULTICA_TOKEN" }]], "one scaffold, for the key's primary tool");
+  assert.deepEqual(scaffolded, [["multica", { secret: "CAPO_MULTICA_TOKEN" }]], "one scaffold, for the one tool the key names");
 });
 
 test("a failing secret store denies rather than grants", async () => {
@@ -479,7 +507,7 @@ test("a failing secret store denies rather than grants", async () => {
     classificationStore: memStore(),
     usageStore: memStore({ rows: [] }),
     ledger: fakeLedger(),
-    listSecretMetas: () => {
+    listSecretKeys: () => {
       throw new Error("store unreadable");
     },
     now: () => W0,
@@ -522,7 +550,7 @@ function seededRegistry(rows, { nowMs = W0 + DAY, secrets = [] } = {}) {
     registryStore,
     usageStore: memStore({ rows: [] }),
     ledger,
-    listSecretMetas: () => fakeSecrets(secrets),
+    listSecretKeys: () => fakeSecrets(secrets),
     now: () => nowMs,
   });
   return { registry, registryStore, ledger };
@@ -581,7 +609,7 @@ test("decay chain: a tripped tool probes weekly; fresh engagement revives it", a
     lastScanTs: W0,
   });
   const revLedger = fakeLedger();
-  const rev = createToolRegistry({ registryStore: revivedStore, usageStore: memStore({ rows: [] }), ledger: revLedger, listSecretMetas: () => [], now: () => W0 + DAY });
+  const rev = createToolRegistry({ registryStore: revivedStore, usageStore: memStore({ rows: [] }), ledger: revLedger, listSecretKeys: () => [], now: () => W0 + DAY });
   await rev.dailyScan();
   const revivedRow = revivedStore._state().tools.find((x) => x.tool === "github");
   assert.equal(revivedRow.asSourceDecayed, false);
@@ -601,4 +629,32 @@ test("listTools exposes the §7.6 chain state + relevance map (no dead state)", 
   assert.deepEqual(view[0].asSource, { reports: 4, accepted: 1 });
   assert.equal(view[0].asSourceDecayed, true);
   assert.deepEqual(view[0].relevance, { alpha: 0.7, beta: 0.3 });
+});
+
+// The §6.7 issue surface (index.mjs `issueToolConsented`) asks the registry
+// whether the box's issue tool is reachable. It reads a REAL listTools
+// projection, so the test feeds one — without the §7.4 port this fails: the
+// projection carries no `consent` field, so checkable-verify stayed off even
+// with the granting secret in the store.
+test("isIssueToolGranted reads the grant off a REAL listTools projection", async () => {
+  const mk = (ts) => ({ channel: "transcript", identity: "multica", detail: "cli:multica", ts, source: "catalog" });
+  const listWith = async (secrets) => {
+    const { registry } = makeRegistry({ usageRows: [mk(W0)], secrets, nowMs: W0 + DAY });
+    await registry.dailyScan();
+    return registry.listTools();
+  };
+
+  const granted = await listWith(["CAPO_MULTICA_TOKEN"]);
+  assert.ok(granted.some((t) => t.tool === "multica"), "the tool is in the registry either way");
+  assert.equal(isIssueToolGranted(granted), true, "a stored key naming the issue tool opens the surface");
+
+  assert.equal(isIssueToolGranted(await listWith([])), false, "no key → no issue surface");
+  assert.equal(isIssueToolGranted(await listWith(["GITHUB_TOKEN"])), false, "a key for another tool opens nothing");
+
+  // Shape guards: the identity must match, and junk is never a grant.
+  assert.equal(isIssueToolGranted([{ tool: "issue-tracker", accessKey: "MULTICA_TOKEN" }]), true);
+  assert.equal(isIssueToolGranted([{ tool: "github", accessKey: "GITHUB_TOKEN" }]), false);
+  assert.equal(isIssueToolGranted([{ tool: "multica", accessKey: "" }]), false);
+  assert.equal(isIssueToolGranted([{ tool: "multica" }]), false);
+  assert.equal(isIssueToolGranted(null), false);
 });
