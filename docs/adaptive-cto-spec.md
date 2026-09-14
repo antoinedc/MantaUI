@@ -534,6 +534,27 @@ Mechanics:
   **Two or more → nothing**: a key naming two services (`GITHUB_STRIPE_TOKEN`)
   is ambiguous, and granting both would hand the CTO a service the user may
   only have meant as a prefix. There is no wildcard and no guess.
+- **Detection is CANONICAL, so spelling cannot evade the ambiguity rule.**
+  Case, separator repetition and trailing ordinals are normalized before
+  matching, and a camelCase run is read both whole and per-word — otherwise
+  `GITHUB_OpenAI_TOKEN` would hide its second service (as `Open` + `AI`) and
+  grant github outright. A character outside the key alphabet is refused
+  rather than treated as a separator, so a homoglyph cannot hide half of an
+  ambiguous key. An explicit separator IS a boundary: `GIT_HUB` is two names,
+  not one.
+- **The grant is ENUMERABLE, not just answerable.** Access comes from the
+  store, which knows nothing about discovery, so the registry view projects a
+  granted tool that has never been used — an honest empty row (zero uses, no
+  vitality) carrying the granting key. Without that, every surface deriving
+  access by scanning the registry (the §6.7 issue surface, §7.6 overnight
+  candidates, the §10.5 drill-down) would see no access while the chokepoint
+  said yes. The projection is never a write: being granted does not make a
+  tool observed.
+- **A credential is engagement with the tool it names.** Channel-1 evidence
+  resolves through this same matcher, so providing `GITHUB_PAT` is a use of
+  `github` rather than a parallel row the grant can never reach. A key the
+  catalog cannot place keeps its raw identity for the one-shot classification
+  (§7.1-4) and grants nothing.
 - **The hint is NOT consulted.** It is free text written for a human; a
   hostname that happens to appear in it must not authorize anything. This is a
   grant, not a discovery label.
