@@ -44,6 +44,9 @@ export const CLIS = Object.freeze({
   twilio: "twilio",
   shopify: "shopify",
   atlas: "mongodb-atlas",
+  multica: "multica",
+  modal: "modal",
+  nordvpn: "nordvpn",
   psql: "postgres",
   mysql: "mysql",
   redis: "redis",
@@ -145,6 +148,10 @@ export const DOMAINS = Object.freeze({
   "prisma.io": "prisma",
   "turso.tech": "turso",
   "xata.io": "xata",
+  "multica.ai": "multica",
+  "modal.com": "modal",
+  "modal.run": "modal",
+  "nordvpn.com": "nordvpn",
 });
 
 // This box's own infrastructure (gateway/DNS/etc.) — never external evidence.
@@ -286,6 +293,149 @@ export function matchIssueKeys(text) {
     }
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Secret key → tool identity (the access grant's mapping).
+//
+// A key present in the secret store grants the CTO FULL access to the tool
+// this function names, so this is an AUTHORIZATION decision — not a discovery
+// label like the matchers above. It is therefore deliberately conservative in
+// three ways, each of which closes a way to mint a grant nobody intended:
+//
+//   1. ONLY a KNOWN CATALOG IDENTITY can be granted. A segment the catalog
+//      has never heard of (`CAPO` in `CAPO_MULTICA_TOKEN`, an internal
+//      codename, a project prefix) names no tool and is ignored — it can
+//      never become a grant of its own. Nothing is invented from the key's
+//      own text, and only OWN properties of the catalog maps count (a plain
+//      object inherits `constructor`, which would otherwise "match").
+//   2. AT MOST ONE tool per key. A key naming two services
+//      (`GITHUB_STRIPE_TOKEN`) is AMBIGUOUS and grants NOTHING: there is no
+//      defensible way to pick, and granting both would hand the CTO a service
+//      the user may only have meant as a prefix. Silence is the safe answer.
+//   3. THE HINT IS NOT CONSULTED. It is free text a human wrote for another
+//      human; a hostname that happens to appear in it ("like the github.com
+//      one") is incidental and must not authorize anything.
+//
+// So the outcome is exactly one identity or nothing — never a set, never a
+// wildcard, never a guess.
+// ---------------------------------------------------------------------------
+
+// Credential vocabulary: readings that never name a tool. Since a grant now
+// requires a catalog identity, this is a cheap short-circuit rather than a
+// load-bearing filter — no entry here is a catalog identity, so dropping one
+// could not widen a grant.
+export const SECRET_NOISE = Object.freeze(
+  new Set([
+    "token", "tokens", "key", "keys", "secret", "secrets", "api", "apis", "pat",
+    "id", "ids", "auth", "access", "refresh", "password", "passwd", "pass",
+    "credential", "credentials", "cred", "creds", "url", "uri", "endpoint",
+    "user", "username", "login", "account", "client", "app", "bearer", "oauth",
+    "private", "public", "personal", "admin", "prod", "production", "dev",
+    "development", "staging", "stage", "test", "local", "sandbox", "default",
+    "cli", "sdk", "dsn", "my", "the", "sk", "pk", "v1", "v2", "v3",
+  ]),
+);
+
+// Every canonical identity the catalog knows, for exact segment matching.
+const KNOWN_IDENTITIES = new Set([...Object.values(CLIS), ...Object.values(DOMAINS)]);
+
+// Is `name` itself a known catalog identity? The registry's alias rule asks
+// this: a name the catalog knows is a DISTINCT SERVICE its own keys could
+// name, so a persisted LLM alias must never transfer a grant onto it (a
+// github key must not authorize "stripe" because a model merged their
+// evidence) — while a name the catalog does not know can only be reached
+// through the alias bridge at all (multica-ai inherits multica's grant).
+export function isKnownIdentity(name) {
+  return KNOWN_IDENTITIES.has(String(name ?? "").trim().toLowerCase());
+}
+
+// Own-property lookup only: a plain object inherits `constructor`, `toString`
+// and friends, so `CLIS["constructor"]` would hand back a function and
+// `CONSTRUCTOR_TOKEN` would "match" a tool that does not exist.
+const CLI_ALIASES = new Map(Object.entries(CLIS));
+
+// Key names are env-var shaped (`isValidKey` enforces `[A-Za-z_][A-Za-z0-9_]*`
+// and a 64-character limit on everything the store accepts). Anything outside
+// that alphabet plus the `-`/`.` a hand-written key might use is refused
+// rather than parsed: an unexpected character would be treated as a
+// separator, which is a way to hide one of two service names from the
+// ambiguity rule below.
+const KEY_ALPHABET = /^[A-Za-z0-9_.-]+$/;
+// THE MATCHING PATH HAS NO CAPS — see matchSecretIdentity. This is the length
+// beyond which a string cannot be a stored key at all, and it FAILS CLOSED
+// (null) rather than analysing a prefix.
+const KEY_MAX_LEN = 64;
+
+// One token → a canonical catalog identity, or null. A token that IS an
+// identity wins over the CLI alias table, so `SENTRY_DSN` resolves to the
+// service (`sentry`) rather than the alias table's CLI-flavoured value. A
+// trailing ordinal is format variance, not identity: `GITHUB2` is github.
+function canonicalToken(token) {
+  const t = token.toLowerCase();
+  if (KNOWN_IDENTITIES.has(t)) return t;
+  if (CLI_ALIASES.has(t)) return CLI_ALIASES.get(t);
+  const base = t.replace(/\d+$/, "");
+  if (base.length >= 2 && base !== t) {
+    if (KNOWN_IDENTITIES.has(base)) return base;
+    if (CLI_ALIASES.has(base)) return CLI_ALIASES.get(base);
+  }
+  return null;
+}
+
+// Every reading of one alphanumeric run, longest first: the whole run, then
+// each contiguous group of its `camelCase` words. Casing is a WEAK separator
+// — `OpenAI` is one word to a human and two to a splitter — so both readings
+// are considered and a match anywhere counts. That is what makes detection
+// canonical: `OPENAI_TOKEN`, `openai_token` and `openAiToken` all surface
+// `openai`, so a mixed-case spelling can no longer hide one of two services
+// from the ambiguity rule. Explicit separators are NOT crossed: `GIT_HUB` is
+// two runs and stays two runs.
+//
+// EVERY word is read. A cap here would be a bypass, not a safety valve: with
+// the words after the eighth dropped, `githubOne…SevenStripeToken` looked
+// like a key naming ONE service and granted github, instead of being refused
+// as ambiguous. The whole input is bounded by KEY_MAX_LEN before this runs,
+// so "read everything" is also cheap.
+function readingsOf(run) {
+  const words = run.split(/(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/);
+  const out = [];
+  for (let len = words.length; len >= 1; len--) {
+    for (let i = 0; i + len <= words.length; i++) out.push(words.slice(i, i + len).join(""));
+  }
+  return out;
+}
+
+// The ONE tool a stored secret grants access to, or null when the key names
+// no known tool or names more than one. Pure; the key NAME is the only input
+// — the value is not a parameter and the hint is deliberately not consulted.
+//
+// Identity detection is CANONICAL: the same key in any casing, separator
+// style or ordinal suffix resolves to the same set of identities, so the
+// "ambiguous → nothing" rule cannot be evaded by spelling.
+//
+// And it is TOTAL: every character of the key is analysed, or no grant is
+// produced. Partially-analysed input must never authorize anything — a key
+// whose tail was dropped can look unambiguous only because the evidence that
+// would have refused it was discarded. So there is no cap inside the
+// analysis; the one bound is on the input, and exceeding it fails closed.
+export function matchSecretIdentity(key) {
+  const raw = String(key ?? "").trim();
+  if (!raw || raw.length > KEY_MAX_LEN || !KEY_ALPHABET.test(raw)) return null;
+  const identities = [];
+  const add = (id) => {
+    if (id && !identities.includes(id)) identities.push(id);
+  };
+  for (const run of raw.split(/[^A-Za-z0-9]+/)) {
+    if (!run) continue;
+    for (const reading of readingsOf(run)) {
+      const r = reading.toLowerCase();
+      if (r.length < 2 || SECRET_NOISE.has(r) || /^\d+$/.test(r)) continue;
+      add(canonicalToken(reading));
+    }
+  }
+  // 0 → the key names nothing we know. >1 → ambiguous. Both grant nothing.
+  return identities.length === 1 ? identities[0] : null;
 }
 
 // Human display name for a canonical identity (§7.2 displayName).

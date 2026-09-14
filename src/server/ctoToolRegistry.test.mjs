@@ -5,6 +5,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   createToolRegistry,
+  isIssueToolGranted,
+  identitiesOf,
+  findToolRow,
+  grantedKeyForName,
+  resolveIdentities,
   fuseRow,
   weekKey,
   barCrossed,
@@ -32,27 +37,12 @@ function memStore(initial = {}) {
   };
 }
 
-function fakeCards() {
-  const calls = { upserts: [], resolved: [] };
-  const open = [];
-  return {
-    calls,
-    open,
-    async upsertConnect(input) {
-      calls.upserts.push(input);
-      open.push({ id: `card-${input.toolId}`, variant: "connect", state: "open", refs: input.refs });
-      return { changed: true, isNew: true };
-    },
-    async listOpen() {
-      return open.filter((c) => c.state === "open");
-    },
-    async resolveConnectCards(toolId, reason) {
-      const hit = open.some((c) => c.state === "open" && c.refs?.includes(toolId));
-      for (const c of open) if (c.refs?.includes(toolId)) c.state = "resolved";
-      calls.resolved.push({ toolId, reason, hit });
-      return { changed: hit };
-    },
-  };
+// The secret store, as the registry sees it: KEY NAMES only — the dep's whole
+// contract is `() => string[]`, so nothing value-bearing can reach the grant
+// path even in a test. Injected everywhere so the suite never reads the box's
+// real store.
+function fakeSecrets(keys = []) {
+  return [...keys];
 }
 
 function fakeLedger() {
@@ -67,19 +57,19 @@ function fakeLedger() {
 
 // A next-day scan over the SAME persisted registry store (fresh registry
 // instance, shared state) — the common shape of the lifecycle timing tests.
-function nextDay(registryStore, cards, dayMs, rows, overrides = {}) {
+function nextDay(registryStore, dayMs, rows, overrides = {}) {
   return createToolRegistry({
     registryStore,
     classificationStore: memStore(),
     usageStore: memStore({ rows }),
-    cards,
     ledger: fakeLedger(),
+    listSecretKeys: () => [],
     now: () => dayMs,
     ...overrides,
   });
 }
 
-function makeRegistry({ usageRows = [], cards = fakeCards(), runEphemeral = null, nowMs = W0, collectDb = null, collectSurfaces = null } = {}) {
+function makeRegistry({ usageRows = [], secrets = [], runEphemeral = null, nowMs = W0, collectDb = null, collectSurfaces = null, scaffoldProbes = null } = {}) {
   const registryStore = memStore();
   const usageStore = memStore({ rows: [...usageRows] });
   const ledger = fakeLedger();
@@ -87,14 +77,15 @@ function makeRegistry({ usageRows = [], cards = fakeCards(), runEphemeral = null
     registryStore,
     classificationStore: memStore(),
     usageStore,
-    cards,
     ledger,
     runEphemeral,
+    listSecretKeys: () => fakeSecrets(secrets),
+    scaffoldProbes,
     now: () => nowMs,
     collectDb,
     collectSurfaces,
   });
-  return { registry, registryStore, usageStore, ledger, cards };
+  return { registry, registryStore, usageStore, ledger };
 }
 
 // ---------------------------------------------------------------------------
@@ -166,12 +157,14 @@ test("EWMA decays toward zero with inactivity (single application)", () => {
   assert.ok(after >= 1, "each use adds exactly 1 after decay");
 });
 
+// A row carries the §7.2 axes and NO access field: access lives in the secret
+// store, so a registry row must never look like it grants anything.
 test("fused rows carry the §7.2 schema axes verbatim (engagement nested, vitality present)", () => {
   const tools = fuseRow([], { channel: "transcript", identity: "vercel", detail: "cli:vercel", ts: W0, project: "manta" });
   const t = tools[0];
   assert.deepEqual(
     Object.keys(t).filter((k) => ["engagement", "vitality", "evidence", "consent", "status", "role", "relevance", "as_source", "as_workflow", "tool"].includes(k)).sort(),
-    ["as_source", "as_workflow", "consent", "engagement", "evidence", "relevance", "role", "status", "tool", "vitality"],
+    ["as_source", "as_workflow", "engagement", "evidence", "relevance", "role", "status", "tool", "vitality"],
   );
   assert.equal(t.engagement.ewma_per_week, 1);
   assert.equal(t.engagement.last_used, W0);
@@ -189,17 +182,15 @@ test("parseClassification accepts one kebab-case line, rejects junk", () => {
 });
 
 // ---------------------------------------------------------------------------
-// the engine: scan → fusion → classification → lifecycle → asks → resolve
+// the engine: scan → fusion → classification → lifecycle
 // ---------------------------------------------------------------------------
 
-test("dailyScan fuses channel 2+3 rows, classifies raw once, promotes and asks", async () => {
-  const cards = fakeCards();
+test("dailyScan fuses channel 2+3 rows, classifies raw once, and promotes", async () => {
   const dbRows = [
     { session_id: "s1", data: JSON.stringify({ type: "tool", tool: "bash", state: { input: { command: "gh pr list" } } }), time_created: W0 },
     { session_id: "s1", data: JSON.stringify({ type: "tool", tool: "bash", state: { input: { command: "gh pr view" } } }), time_created: W0 + 8 * DAY },
   ];
   const { registry, registryStore, usageStore } = makeRegistry({
-    cards,
     nowMs: W0 + 9 * DAY,
     collectDb: async ({ sinceTs, untilTs }) => {
       assert.ok(sinceTs < W0);
@@ -219,13 +210,13 @@ test("dailyScan fuses channel 2+3 rows, classifies raw once, promotes and asks",
   const tools = Object.fromEntries(state.tools.map((t) => [t.tool, t]));
 
   // Channel 2 (gh 2×) + channel 3 (git:github.com) fuse into ONE github row:
-  // 3 uses across 2 distinct weeks → the engagement bar → candidate + the
-  // first connect ask. The mcp row is its own identity, 1 use → observed.
+  // 3 uses across 2 distinct weeks → the engagement bar → candidate. The mcp
+  // row is its own identity, 1 use → observed. Nothing asks the user
+  // anything: only a stored secret grants access.
   assert.equal(tools.github.uses, 3);
   assert.equal(tools.github.status, "candidate");
   assert.equal(tools.linear.status, "observed");
-  assert.equal(r.asked, "github");
-  assert.equal(cards.calls.upserts.length, 1);
+  assert.equal("asked" in r, false);
   // The usage log holds every evidence row (channels 2+3).
   const logRows = usageStore._state().rows;
   assert.equal(logRows.length, 4);
@@ -233,233 +224,7 @@ test("dailyScan fuses channel 2+3 rows, classifies raw once, promotes and asks",
   assert.ok(state.lastScanTs >= W0 + 9 * DAY);
 });
 
-test("engagement-bar tool becomes a candidate and raises ONE connect ask; the answer writes consent + verdict + resolves the card", async () => {
-  const cards = fakeCards();
-  const usageRows = [
-    { channel: "transcript", identity: "vercel", detail: "cli:vercel", ts: W0, source: "catalog" },
-    { channel: "transcript", identity: "vercel", detail: "cli:vercel", ts: W0 + 2 * DAY, source: "catalog" },
-    { channel: "transcript", identity: "vercel", detail: "cli:vercel", ts: W0 + 8 * DAY, source: "catalog" },
-  ];
-  const { registry, registryStore, ledger } = makeRegistry({ cards, usageRows, nowMs: W0 + 9 * DAY });
-
-  const r = await registry.dailyScan();
-  assert.equal(r.asked, "vercel");
-  assert.equal(cards.calls.upserts.length, 1);
-  const ask = cards.calls.upserts[0];
-  assert.equal(ask.toolId, "vercel");
-  assert.match(ask.title, /Connect Vercel \(read-only\)\?/);
-  assert.ok(ask.body.includes("3×"));
-  const state = registryStore._state();
-  const t = state.tools.find((x) => x.tool === "vercel");
-  assert.equal(t.status, "candidate");
-  assert.equal(t.askRound, 1);
-  assert.equal(state.lastAskDay, new Date(W0 + 9 * DAY).toISOString().slice(0, 10));
-
-  // The ask is recorded on the activity ledger.
-  assert.ok(ledger.rows.some((row) => row.kind === "cto.tool.ask" && row.tool === "vercel"));
-
-  // Resolve: connect → consent.metadata=yes, accept verdict, card closed.
-  const res = await registry.resolveConnect({ tool: "vercel", answer: "connect" });
-  assert.equal(res.ok, true);
-  const after = registryStore._state().tools.find((x) => x.tool === "vercel");
-  assert.equal(after.consent.metadata, "yes");
-  assert.ok(ledger.rows.some((row) => row.kind === "cto.tool.consent" && row.value === "yes"));
-  assert.equal(cards.calls.resolved.length, 1);
-  assert.equal(cards.calls.resolved[0].hit, true);
-  assert.equal(cards.open.every((c) => c.state === "resolved"), true);
-});
-
-test("ask pacing: at most one NEW ask per day, and askRound < 3 forever", async () => {
-  const cards = fakeCards();
-  const mk = (identity, ts) => ({ channel: "transcript", identity, detail: `cli:${identity}`, ts, source: "catalog" });
-  const usageRows = [
-    mk("vercel", W0), mk("vercel", W0 + 2 * DAY), mk("vercel", W0 + 8 * DAY),
-    mk("stripe", W0), mk("stripe", W0 + 2 * DAY), mk("stripe", W0 + 8 * DAY),
-  ];
-  const { registry, registryStore } = makeRegistry({ cards, usageRows, nowMs: W0 + 9 * DAY });
-  await registry.dailyScan();
-  assert.equal(cards.calls.upserts.length, 1); // ≤1/day
-  assert.equal(cards.calls.upserts[0].toolId, "vercel"); // highest uses first — tie → deterministic order
-
-  // Next day: the second tool asks (round 1 each) — vercel's ask card is
-  // still open, so the gate skips it and picks stripe.
-  const day2 = W0 + 10 * DAY;
-  const reg2 = nextDay(registryStore, cards, day2, [...usageRows, mk("vercel", day2), mk("stripe", day2)]);
-  await reg2.dailyScan();
-  assert.equal(cards.calls.upserts.length, 2);
-  assert.equal(cards.calls.upserts[1].toolId, "stripe");
-
-  // After 3 ask rounds with no answers, no more asks for that tool.
-  const state = registryStore._state();
-  for (const t of state.tools) t.askRound = 3;
-  await registryStore.save(state);
-  const day3 = W0 + 11 * DAY;
-  const reg3 = nextDay(registryStore, cards, day3, [...usageRows, mk("vercel", day3), mk("stripe", day3)]);
-  const res3 = await reg3.dailyScan();
-  assert.equal(res3.asked, null);
-  assert.equal(cards.calls.upserts.length, 2);
-});
-
-test("not-now declines with a 30-day re-arm; a fresh bar crossing re-arms early — engagement path only", async () => {
-  const cards = fakeCards();
-  const mk = (ts) => ({ channel: "transcript", identity: "stripe", detail: "cli:stripe", ts, source: "catalog" });
-  const usageRows = [mk(W0), mk(W0 + 2 * DAY), mk(W0 + 8 * DAY)];
-  const { registry, registryStore } = makeRegistry({ cards, usageRows, nowMs: W0 + 9 * DAY });
-  await registry.dailyScan();
-  await registry.resolveConnect({ tool: "stripe", answer: "not-now" });
-  let t = registryStore._state().tools.find((x) => x.tool === "stripe");
-  assert.equal(t.consent.metadata, "no");
-  assert.equal(t.reArmAt, W0 + 9 * DAY + 30 * DAY);
-
-  // Same day again → no new ask (reArmAt in the future, no fresh uses).
-  const day2 = W0 + 10 * DAY;
-  const reg2 = nextDay(registryStore, cards, day2, [mk(day2)]);
-  const res2 = await reg2.dailyScan();
-  assert.equal(res2.asked, null);
-
-  // Fresh engagement (2+ uses beyond the ask-time snapshot) re-arms early —
-  // this tool crossed the ENGAGEMENT bar, so the fresh-crossing path applies.
-  const day3 = W0 + 11 * DAY;
-  const reg3 = nextDay(registryStore, cards, day3, [mk(day3), mk(day3 + 1000)]);
-  const res3 = await reg3.dailyScan();
-  assert.equal(res3.asked, "stripe");
-  t = registryStore._state().tools.find((x) => x.tool === "stripe");
-  assert.equal(t.consent.metadata, null); // re-armed
-  assert.equal(t.askRound, 2);
-});
-
-test("§7.4 carve-out: a credential-only tool declined 'not now' re-arms ONLY at the 30-day timer", async () => {
-  const cards = fakeCards();
-  const secret = (ts) => ({ channel: "secret", identity: "github_pat", detail: "secret:GITHUB_PAT", ts, source: "catalog" });
-  const { registry, registryStore } = makeRegistry({ cards, usageRows: [secret(W0)], nowMs: W0 + DAY });
-  await registry.dailyScan();
-  await registry.resolveConnect({ tool: "github_pat", answer: "not-now" });
-  let t = registryStore._state().tools.find((x) => x.tool === "github_pat");
-  assert.equal(t.consent.metadata, "no");
-  assert.equal(t.reArmAt, W0 + DAY + 30 * DAY);
-  assert.equal(engagementBarMet(t), false, "the tool is vitality-path only");
-
-  // Fresh CLI uses arrive well inside the 30 days — the vitality path's bar
-  // (a credential exists) cannot re-cross, so NO early re-arm.
-  const day5 = W0 + 5 * DAY;
-  const reg2 = nextDay(registryStore, cards, day5, [secret(day5), secret(day5 + 1000), secret(day5 + 2000)]);
-  const res2 = await reg2.dailyScan();
-  assert.equal(res2.asked, null, "fresh uses must not re-arm a vitality-path decline");
-  t = registryStore._state().tools.find((x) => x.tool === "github_pat");
-  assert.equal(t.consent.metadata, "no");
-
-  // Only the 30-day timer re-arms.
-  const day32 = W0 + 32 * DAY;
-  const reg3 = createToolRegistry({
-    registryStore,
-    usageStore: memStore({ rows: [] }),
-    cards,
-    ledger: fakeLedger(),
-    now: () => day32,
-  });
-  const res3 = await reg3.dailyScan();
-  assert.equal(res3.asked, "github_pat");
-});
-
-// The aws fixture: a tool at the engagement bar (3 uses across 2 weeks),
-// scanned at day 9 — the common setup of the never/un-never lifecycle tests.
-function awsSetup() {
-  const cards = fakeCards();
-  const mk = (ts) => ({ channel: "transcript", identity: "aws", detail: "cli:aws", ts, source: "catalog" });
-  const { registry, registryStore } = makeRegistry({ cards, usageRows: [mk(W0), mk(W0 + 2 * DAY), mk(W0 + 8 * DAY)], nowMs: W0 + 9 * DAY });
-  return { cards, mk, registry, registryStore };
-}
-
-test("never kills every ring and suppresses future asks", async () => {
-  const { cards, mk, registry, registryStore } = awsSetup();
-  await registry.dailyScan();
-  const res = await registry.resolveConnect({ tool: "aws", answer: "never" });
-  assert.equal(res.ok, true);
-  const t = registryStore._state().tools.find((x) => x.tool === "aws");
-  assert.deepEqual(t.consent, { metadata: "never", deep_read: "never", write: "never" });
-
-  // Even with fresh evidence, never a new ask.
-  const day2 = W0 + 40 * DAY;
-  const reg2 = nextDay(registryStore, cards, day2, [mk(day2), mk(day2 + 1000), mk(day2 + 2000)]);
-  const res2 = await reg2.dailyScan();
-  assert.equal(res2.asked, null);
-  assert.equal(cards.calls.upserts.length, 1);
-});
-
-test("§7.4 un-never: returns the tool to observed; a fresh bar crossing is required before the next ask", async () => {
-  const { cards, mk, registry, registryStore } = awsSetup();
-  await registry.dailyScan();
-  await registry.resolveConnect({ tool: "aws", answer: "never" });
-
-  // Un-never (what B11's drill-down will call): back to observed, rings cleared.
-  const un = await registry.unNever("aws");
-  assert.equal(un.ok, true);
-  let t = registryStore._state().tools.find((x) => x.tool === "aws");
-  assert.deepEqual(t.consent, { metadata: null, deep_read: null, write: null });
-  assert.equal(t.status, "observed");
-  assert.equal(t.unneverAtUses, t.uses);
-
-  // The bar is still crossed (monotone uses) — but the next scan must NOT
-  // immediately re-promote + re-ask: no fresh crossing since the snapshot.
-  const day2 = W0 + 10 * DAY;
-  const reg2 = nextDay(registryStore, cards, day2, [mk(day2)]);
-  const res2 = await reg2.dailyScan();
-  assert.equal(res2.asked, null, "an un-never'd tool must not re-ask without a fresh bar crossing");
-  t = registryStore._state().tools.find((x) => x.tool === "aws");
-  assert.equal(t.status, "observed", "still observed — the fresh-crossing gate holds");
-
-  // Fresh engagement beyond the snapshot (2+ new uses) re-promotes → re-asks.
-  const day3 = W0 + 11 * DAY;
-  const reg3 = nextDay(registryStore, cards, day3, [mk(day3), mk(day3 + 1000)]);
-  const res3 = await reg3.dailyScan();
-  assert.equal(res3.asked, "aws");
-  t = registryStore._state().tools.find((x) => x.tool === "aws");
-  assert.equal(t.status, "candidate");
-  assert.equal(t.unneverAtUses, null);
-
-  // Un-nevering a tool that was never never'd is a clean error.
-  assert.equal((await registry.unNever("ghost")).ok, false);
-});
-
-test("a connect answer landing mid-scan is not lost (writers serialized)", async () => {
-  const cards = fakeCards();
-  const mk = (ts) => ({ channel: "transcript", identity: "vercel", detail: "cli:vercel", ts, source: "catalog" });
-  // One registry instance — the writer mutex is per-instance, matching
-  // production (the engine owns one registry). The db seam blocks on its
-  // SECOND call (the seconds-long await window where the stale-save clobber
-  // used to happen).
-  let blockSecond = null;
-  let releaseDb = () => {};
-  const { registry, registryStore } = makeRegistry({
-    cards,
-    usageRows: [mk(W0), mk(W0 + 2 * DAY), mk(W0 + 8 * DAY)],
-    nowMs: W0 + 9 * DAY,
-    collectDb: async () => {
-      if (blockSecond) await blockSecond;
-      return [];
-    },
-  });
-  await registry.dailyScan(); // scan 1: raises the ask (candidate)
-  await registry.resolveConnect({ tool: "vercel", answer: "connect" });
-
-  // Scan 2 starts and blocks inside its db batch.
-  blockSecond = new Promise((resolve) => (releaseDb = resolve));
-  const scanDone = registry.dailyScan();
-  await new Promise((r) => setTimeout(r, 25)); // let the scan reach the blocked await
-  // The user answers "never" DURING the scan. With serialized writers it
-  // queues behind the scan and its save lands LAST.
-  const answerDone = registry.resolveConnect({ tool: "vercel", answer: "never" });
-  releaseDb();
-  const [scanRes, answerRes] = await Promise.all([scanDone, answerDone]);
-  assert.equal(scanRes.ok, true);
-  assert.equal(answerRes.ok, true);
-  const t = registryStore._state().tools.find((x) => x.tool === "vercel");
-  assert.equal(t.consent.metadata, "never", "the mid-scan answer must survive the scan's save");
-  assert.deepEqual(t.consent, { metadata: "never", deep_read: "never", write: "never" });
-});
-
 test("LLM fallback classifies an unknown identity at most once and merges it", async () => {
-  const cards = fakeCards();
   const calls = [];
   const runEphemeral = async (opts) => {
     calls.push(opts);
@@ -468,7 +233,6 @@ test("LLM fallback classifies an unknown identity at most once and merges it", a
   const raw1 = { channel: "transcript", identity: null, detail: "cli:gt", ts: W0, source: "raw" };
   const raw2 = { channel: "transcript", identity: null, detail: "cli:gt", ts: W0 + DAY, source: "raw" };
   const { registry, registryStore } = makeRegistry({
-    cards,
     usageRows: [raw1, raw2],
     nowMs: W0 + 2 * DAY,
     runEphemeral,
@@ -489,7 +253,6 @@ test("LLM fallback classifies an unknown identity at most once and merges it", a
 });
 
 test("LLM fallback caches 'unknown' as unclassifiable and never re-asks", async () => {
-  const cards = fakeCards();
   let calls = 0;
   const runEphemeral = async () => {
     calls += 1;
@@ -497,7 +260,6 @@ test("LLM fallback caches 'unknown' as unclassifiable and never re-asks", async 
   };
   const raw = (ts) => ({ channel: "transcript", identity: null, detail: "cli:junktool", ts, source: "raw" });
   const { registry, registryStore } = makeRegistry({
-    cards,
     usageRows: [raw(W0), raw(W0 + DAY)],
     nowMs: W0 + 2 * DAY,
     runEphemeral,
@@ -510,55 +272,36 @@ test("LLM fallback caches 'unknown' as unclassifiable and never re-asks", async 
 });
 
 test("channel-1 secret rows (raw keys) fuse and give the tool the vitality path", async () => {
-  const cards = fakeCards();
   const usageRows = [
     { channel: "secret", identity: "github_pat", detail: "secret:GITHUB_PAT", ts: W0, source: "raw" },
   ];
-  const { registry, registryStore } = makeRegistry({ cards, usageRows, nowMs: W0 + DAY });
+  const { registry, registryStore } = makeRegistry({ usageRows, nowMs: W0 + DAY });
   await registry.dailyScan();
   const t = registryStore._state().tools.find((x) => x.tool === "github_pat");
   assert.ok(t);
   assert.equal(t.raw, true);
   assert.equal(hasCredential(t), true);
   assert.equal(barCrossed(t), true);
-  assert.equal(t.status, "observed"); // unresolved identity cannot generate a connect ask
-  assert.equal(cards.calls.upserts.length, 0);
+  assert.equal(t.status, "observed"); // an unresolved identity stays observed
 });
 
-test("consentFor reads the rings the future probe/tool-write gates will check", async () => {
-  const cards = fakeCards();
-  const mk = (ts) => ({ channel: "transcript", identity: "stripe", detail: "cli:stripe", ts, source: "catalog" });
-  const { registry } = makeRegistry({ cards, usageRows: [mk(W0), mk(W0 + 2 * DAY), mk(W0 + 8 * DAY)], nowMs: W0 + 9 * DAY });
-  await registry.dailyScan();
-  await registry.resolveConnect({ tool: "stripe", answer: "connect" });
-  assert.equal(await registry.consentFor("stripe", "metadata"), "yes");
-  assert.equal(await registry.consentFor("stripe", "deep_read"), null);
-  assert.equal(await registry.consentFor("nope"), null);
-});
-
-test("resolveConnect rejects bad input without touching the store", async () => {
-  const cards = fakeCards();
-  const { registry, registryStore } = makeRegistry({ cards, nowMs: W0 });
-  assert.equal((await registry.resolveConnect({})).ok, false);
-  assert.equal((await registry.resolveConnect({ tool: "x", answer: "maybe" })).ok, false);
-  assert.equal((await registry.resolveConnect({ tool: "ghost", answer: "connect" })).ok, false);
-  assert.deepEqual(registryStore._state().tools ?? [], []);
-  assert.equal(cards.calls.resolved.length, 0);
-});
-
-test("listTools returns the §10.5 view shape", async () => {
-  const cards = fakeCards();
+test("listTools returns the §10.5 view shape, naming the secret that grants the tool", async () => {
   const mk = (ts) => ({ channel: "transcript", identity: "vercel", detail: "cli:vercel", ts, source: "catalog" });
-  const { registry } = makeRegistry({ cards, usageRows: [mk(W0), mk(W0 + 2 * DAY), mk(W0 + 8 * DAY)], nowMs: W0 + 9 * DAY });
+  const { registry } = makeRegistry({
+    usageRows: [mk(W0), mk(W0 + 2 * DAY), mk(W0 + 8 * DAY)],
+    secrets: ["VERCEL_TOKEN"],
+    nowMs: W0 + 9 * DAY,
+  });
   await registry.dailyScan();
   const view = await registry.listTools();
   assert.equal(view.length, 1);
   const row = view[0];
-  for (const k of ["tool", "displayName", "status", "role", "uses", "weeksActive", "ewmaPerWeek", "lastSeenTs", "firstSeenTs", "consent", "askRound"]) {
+  for (const k of ["tool", "displayName", "status", "role", "uses", "weeksActive", "ewmaPerWeek", "lastSeenTs", "firstSeenTs", "accessKey"]) {
     assert.ok(k in row, k);
   }
   assert.equal(row.displayName, "Vercel");
-  assert.deepEqual(row.consent, { metadata: null, deep_read: null, write: null });
+  assert.equal(row.accessKey, "VERCEL_TOKEN");
+  assert.equal("consent" in row, false, "consent rings are gone — the store is the grant");
 });
 
 test("thresholds match the spec bars", () => {
@@ -611,12 +354,10 @@ test("deriveRole maps the §7.3 quadrants (both / workflow / data-source / dead)
 });
 
 test("listTools copies the vitality axis and derives the display role without writing it back", async () => {
-  const cards = fakeCards();
   // Uses across two distinct weeks so the §7.4 engagement bar clears.
   const mk = (ts) => ({ channel: "transcript", identity: "aws", detail: "cli:aws", ts, source: "catalog" });
-  const { registry, registryStore } = makeRegistry({ cards, usageRows: [mk(W0), mk(W0 + 8 * DAY), mk(W0 + 9 * DAY)], nowMs: W0 + 10 * DAY });
+  const { registry, registryStore } = makeRegistry({ usageRows: [mk(W0), mk(W0 + 8 * DAY), mk(W0 + 9 * DAY)], secrets: ["AWS_ACCESS_KEY_ID"], nowMs: W0 + 10 * DAY });
   await registry.dailyScan();
-  await registry.resolveConnect({ tool: "aws", answer: "connect" });
 
   const rows = await registry.listTools({ nowMs: W0 + 4 * DAY });
   const aws = rows.find((r) => r.tool === "aws");
@@ -628,73 +369,171 @@ test("listTools copies the vitality axis and derives the display role without wr
   assert.equal(stored.role ?? null, null);
 });
 
-test("§7.4 per-ring revoke writes the ring to no; revoked metadata stops the probe consent gate", async () => {
-  const cards = fakeCards();
-  const mk = (ts) => ({ channel: "transcript", identity: "aws", detail: "cli:aws", ts, source: "catalog" });
-  const { registry, registryStore, ledger } = makeRegistry({ cards, usageRows: [mk(W0), mk(W0 + DAY), mk(W0 + 2 * DAY)], nowMs: W0 + 3 * DAY });
-  await registry.dailyScan();
-  assert.equal((await registry.resolveConnect({ tool: "aws", answer: "connect" })).ok, true);
-  assert.equal(await registry.consentFor("aws", "metadata"), "yes");
+// ---------------------------------------------------------------------------
+// The access grant: a key in the secret store IS the grant. These pin the
+// whole rule — derived from the store (not from usage), mapped by key, full
+// for every ring, unshadowable by stale consent state, and nothing without a
+// key.
+// ---------------------------------------------------------------------------
 
-  // Revoking the metadata ring stops the probes (consentFor flips to no).
-  const rev = await registry.revokeConsent("aws", "metadata");
-  assert.equal(rev.ok, true);
-  assert.equal(rev.value, "no");
-  assert.equal(await registry.consentFor("aws", "metadata"), "no");
-  let t = registryStore._state().tools.find((x) => x.tool === "aws");
-  assert.equal(t.consent.metadata, "no");
-  assert.ok(ledger.rows.some((r) => r.kind === "cto.tool.consent" && r.ring === "metadata" && r.value === "no"), "the revoke is ledgered");
-
-  // A non-granted ring cannot be revoked (server-side backstop).
-  assert.equal((await registry.revokeConsent("aws", "deep_read")).ok, false);
-  assert.equal((await registry.revokeConsent("aws", "write")).ok, false);
-  assert.equal((await registry.revokeConsent("ghost", "metadata")).ok, false);
-  assert.equal((await registry.revokeConsent("aws", "bogus")).ok, false);
-  assert.equal((await registry.revokeConsent("", "metadata")).ok, false);
-
-  // deep_read grant → revoke round-trips ring by ring. (The deep-read grant
-  // path lives in the deep-read ask flow, not resolveConnect — seed the ring
-  // directly to exercise the revoke transition.)
-  registryStore._state().tools.find((x) => x.tool === "aws").consent.deep_read = "yes";
-  assert.equal(await registry.consentFor("aws", "deep_read"), "yes");
-  assert.equal((await registry.revokeConsent("aws", "deep_read")).ok, true);
-  assert.equal(await registry.consentFor("aws", "deep_read"), "no");
-  t = registryStore._state().tools.find((x) => x.tool === "aws");
-  assert.equal(t.consent.metadata, "no", "other rings untouched");
+test("a stored secret grants access with no usage, no evidence and no registry row at all", async () => {
+  const { registry, registryStore } = makeRegistry({ secrets: ["NORDVPN_TOKEN"], nowMs: W0 });
+  // Nothing has ever been observed: the registry is empty.
+  assert.deepEqual(registryStore._state().tools ?? [], []);
+  assert.equal(await registry.consentFor("nordvpn"), "yes");
+  assert.equal(await registry.grantFor("nordvpn"), "NORDVPN_TOKEN");
 });
 
-test("revoke then un-never-style lifecycle: a revoked tool can re-grant on a fresh ask", async () => {
-  const cards = fakeCards();
-  const mk = (ts) => ({ channel: "transcript", identity: "aws", detail: "cli:aws", ts, source: "catalog" });
-  const { registry, registryStore } = makeRegistry({ cards, usageRows: [mk(W0), mk(W0 + DAY), mk(W0 + 2 * DAY)], nowMs: W0 + 3 * DAY });
-  await registry.dailyScan();
-  await registry.resolveConnect({ tool: "aws", answer: "connect" });
-  assert.equal((await registry.revokeConsent("aws", "metadata")).ok, true);
+test("the grant is FULL: every ring a caller asks about answers yes", async () => {
+  const { registry } = makeRegistry({ secrets: ["GITHUB_PAT"], nowMs: W0 });
+  for (const ring of ["metadata", "deep_read", "write", undefined]) {
+    assert.equal(await registry.consentFor("github", ring), "yes", `ring ${ring}`);
+  }
+});
 
-  // The revoked tool keeps its lifecycle status — revoke narrows features;
-  // it does not reset the lifecycle (and un-never is a clean error here).
-  assert.equal((await registry.unNever("aws")).ok, false);
-  const statusBefore = registryStore._state().tools.find((x) => x.tool === "aws").status;
-  const t = registryStore._state().tools.find((x) => x.tool === "aws");
-  assert.equal(t.status, statusBefore, "revoke narrows features; it does not reset the lifecycle");
+test("key → tool mapping: the required table, and an unmatched key grants nothing", async () => {
+  const cases = [
+    ["CAPO_MULTICA_TOKEN", "multica"],
+    ["GITHUB_PAT", "github"],
+    ["GITHUB_TOKEN", "github"],
+    ["MODAL_TOKEN_ID", "modal"],
+    ["NORDVPN_TOKEN", "nordvpn"],
+  ];
+  for (const [key, tool] of cases) {
+    const { registry } = makeRegistry({ secrets: [key], nowMs: W0 });
+    assert.equal(await registry.consentFor(tool), "yes", `${key} → ${tool}`);
+    // The grant is specific: it never spills onto an unrelated tool.
+    assert.equal(await registry.consentFor("stripe"), null, `${key} must not grant stripe`);
+  }
+  // A key made only of credential vocabulary names no tool at all.
+  for (const key of ["API_KEY", "TOKEN", "SECRET"]) {
+    const { registry } = makeRegistry({ secrets: [key], nowMs: W0 });
+    for (const tool of ["github", "multica", "api", "key", "api_key", "token", "secret"]) {
+      assert.equal(await registry.consentFor(tool), null, `${key} must grant nothing (${tool})`);
+    }
+  }
+});
+
+test("a grant is an authorization decision: no org prefixes, no second service, no hostnames from hints", async () => {
+  // An org/codename prefix names no tool — it must never become a grant.
+  const prefixed = makeRegistry({ secrets: ["CAPO_MULTICA_TOKEN"], nowMs: W0 });
+  assert.equal(await prefixed.registry.consentFor("multica"), "yes");
+  assert.equal(await prefixed.registry.consentFor("capo"), null, "the org prefix must not be granted");
+  assert.equal(await prefixed.registry.consentFor("capo_multica_token"), null, "nor the raw key");
+
+  // Two services in one key is ambiguous — it grants NEITHER, not both.
+  const ambiguous = makeRegistry({ secrets: ["GITHUB_STRIPE_TOKEN"], nowMs: W0 });
+  assert.equal(await ambiguous.registry.consentFor("github"), null);
+  assert.equal(await ambiguous.registry.consentFor("stripe"), null);
+
+  // A hostname a human mentioned in the hint authorizes nothing: the hint is
+  // not part of the decision at all (the dep carries key names only).
+  const hinted = createToolRegistry({
+    registryStore: memStore(),
+    classificationStore: memStore(),
+    usageStore: memStore({ rows: [] }),
+    ledger: fakeLedger(),
+    listSecretKeys: () => ["NORDVPN_TOKEN"],
+    now: () => W0,
+  });
+  assert.equal(await hinted.consentFor("nordvpn"), "yes");
+  assert.equal(await hinted.consentFor("github"), null, "an incidental host in a hint must not grant GitHub");
+});
+
+test("a tool with no matching secret gets nothing — however heavily it is used", async () => {
+  const mk = (ts) => ({ channel: "transcript", identity: "stripe", detail: "cli:stripe", ts, source: "catalog" });
+  const { registry } = makeRegistry({
+    usageRows: [mk(W0), mk(W0 + 2 * DAY), mk(W0 + 8 * DAY)],
+    secrets: [],
+    nowMs: W0 + 9 * DAY,
+  });
+  await registry.dailyScan();
+  assert.equal(await registry.consentFor("stripe"), null);
+  assert.equal(await registry.grantFor("stripe"), null);
+  assert.equal((await registry.listTools()).find((r) => r.tool === "stripe").accessKey, null);
+});
+
+test("stale consent state from the retired ask flow cannot shadow the store either way", async () => {
+  const mk = (ts) => ({ channel: "transcript", identity: "stripe", detail: "cli:stripe", ts, source: "catalog" });
+  // (a) an old "never" record on the row must NOT block a stored secret.
+  const denied = makeRegistry({ usageRows: [mk(W0)], secrets: ["STRIPE_API_KEY"], nowMs: W0 + DAY });
+  await denied.registry.dailyScan();
+  const row = denied.registryStore._state().tools.find((t) => t.tool === "stripe");
+  row.consent = { metadata: "never", deep_read: "never", write: "never" };
+  row.askRound = 3;
+  await denied.registryStore.save(denied.registryStore._state());
+  assert.equal(await denied.registry.consentFor("stripe"), "yes", "the store grants; the stale record is not consulted");
+
+  // (b) an old "yes" record must NOT survive the secret's absence.
+  const granted = makeRegistry({ usageRows: [mk(W0)], secrets: [], nowMs: W0 + DAY });
+  await granted.registry.dailyScan();
+  const row2 = granted.registryStore._state().tools.find((t) => t.tool === "stripe");
+  row2.consent = { metadata: "yes", deep_read: "yes", write: "yes" };
+  await granted.registryStore.save(granted.registryStore._state());
+  assert.equal(await granted.registry.consentFor("stripe"), null, "no secret, no access — whatever the old record said");
+});
+
+test("the secret store is read at decision time — adding and deleting a key take effect immediately", async () => {
+  const registryStore = memStore();
+  let keys = [];
+  const registry = createToolRegistry({
+    registryStore,
+    classificationStore: memStore(),
+    usageStore: memStore({ rows: [] }),
+    ledger: fakeLedger(),
+    listSecretKeys: () => fakeSecrets(keys),
+    now: () => W0,
+  });
+  assert.equal(await registry.consentFor("modal"), null);
+  keys = ["MODAL_TOKEN_ID"];
+  assert.equal(await registry.consentFor("modal"), "yes", "adding the secret grants at once — no scan, no use");
+  keys = [];
+  assert.equal(await registry.consentFor("modal"), null, "deleting the secret revokes at once");
+});
+
+test("the probe scaffold follows the grant, and is handed the key NAME (never a value)", async () => {
+  const scaffolded = [];
+  const { registry } = makeRegistry({
+    secrets: ["CAPO_MULTICA_TOKEN"],
+    scaffoldProbes: async (tool, opts) => {
+      scaffolded.push([tool, opts]);
+      return { ok: true };
+    },
+    nowMs: W0,
+  });
+  await registry.dailyScan();
+  assert.deepEqual(scaffolded, [["multica", { secret: "CAPO_MULTICA_TOKEN" }]], "one scaffold, for the one tool the key names");
+});
+
+test("a failing secret store denies rather than grants", async () => {
+  const registry = createToolRegistry({
+    registryStore: memStore(),
+    classificationStore: memStore(),
+    usageStore: memStore({ rows: [] }),
+    ledger: fakeLedger(),
+    listSecretKeys: () => {
+      throw new Error("store unreadable");
+    },
+    now: () => W0,
+  });
+  assert.equal(await registry.consentFor("github"), null);
 });
 
 // ---------------------------------------------------------------------------
-// BET-1404 — deep-read asks, as_source counters, dismissal decay chain
+// BET-1404 — as_source counters + the dismissal decay chain
 // ---------------------------------------------------------------------------
 
-import { deepReadBar, AS_SOURCE_MIN_REPORTS, AS_SOURCE_DECAY_LOWER_BOUND } from "./ctoToolRegistry.mjs";
+import { AS_SOURCE_MIN_REPORTS, AS_SOURCE_DECAY_LOWER_BOUND } from "./ctoToolRegistry.mjs";
 import { CADENCE_WEEKLY_MS } from "./ctoProbes.mjs";
 import { betaLowerBound } from "./ctoVerdicts.mjs";
 
-// An integrated tool that clears the deep-read bar: metadata consented,
-// live vitality, and a relevance argmax above 0.5.
+// An integrated, live tool with a relevance argmax — the shape the §7.6
+// chain tests fold counters onto.
 function deepEligibleRow(overrides = {}) {
   return {
     tool: "github",
     displayName: "GitHub",
     status: "integrated",
-    consent: { metadata: "yes", deep_read: null, write: null },
     engagement: { ewma_per_week: 4, last_used: W0, per_project: {} },
     vitality: { last_event: W0 - DAY, inflow_rate: 3, ewma: 0.8, last_probed: W0 - DAY },
     ewmaAt: W0,
@@ -703,119 +542,27 @@ function deepEligibleRow(overrides = {}) {
     evidence: [],
     relevance: { alpha: 0.7, beta: 0.3 },
     as_source: { reports: 0, accepted: 0 },
-    askRound: 1,
     firstSeenTs: W0 - 30 * DAY,
     ...overrides,
   };
 }
 
-function seededRegistry(rows, { nowMs = W0 + DAY } = {}) {
-  const registryStore = memStore({ tools: rows, lastScanTs: W0, lastAskDay: null, lastDeepAskDay: null });
-  const cards = fakeCards();
+function seededRegistry(rows, { nowMs = W0 + DAY, secrets = [] } = {}) {
+  const registryStore = memStore({ tools: rows, lastScanTs: W0 });
   const ledger = fakeLedger();
-  const registry = createToolRegistry({ registryStore, usageStore: memStore({ rows: [] }), cards, ledger, now: () => nowMs });
-  return { registry, registryStore, cards, ledger };
+  const registry = createToolRegistry({
+    registryStore,
+    usageStore: memStore({ rows: [] }),
+    ledger,
+    listSecretKeys: () => fakeSecrets(secrets),
+    now: () => nowMs,
+  });
+  return { registry, registryStore, ledger };
 }
 
 test("thresholds match the BET-1404 on-call decisions", () => {
   assert.equal(AS_SOURCE_MIN_REPORTS, 3);
   assert.equal(AS_SOURCE_DECAY_LOWER_BOUND, 0.3);
-});
-
-test("deepReadBar: metadata yes + ewma>0 + max relevance >= 0.5 (Q1: no invented vitality floor)", () => {
-  assert.equal(deepReadBar(deepEligibleRow()).met, true);
-  assert.equal(deepReadBar(deepEligibleRow()).project, "alpha");
-  // each leg missing → not met
-  assert.equal(deepReadBar(deepEligibleRow({ consent: { metadata: "no", deep_read: null, write: null } })).met, false);
-  assert.equal(deepReadBar(deepEligibleRow({ vitality: { last_event: null, inflow_rate: null, ewma: null, last_probed: null } })).met, false);
-  assert.equal(deepReadBar(deepEligibleRow({ vitality: { last_event: W0, inflow_rate: 1, ewma: 0, last_probed: W0 } })).met, false, "ewma=0 is not 'high' — the bar is ewma > 0");
-  assert.equal(deepReadBar(deepEligibleRow({ relevance: { alpha: 0.49 } })).met, false);
-  assert.equal(deepReadBar(deepEligibleRow({ relevance: {} })).met, false);
-});
-
-test("deep-read ask: the bar crossing raises ONE concrete ask (ring deep_read, intent in the copy), once per day", async () => {
-  const { registry, registryStore, cards, ledger } = seededRegistry([deepEligibleRow()]);
-  const out = await registry.dailyScan();
-  assert.equal(out.ok, true);
-  assert.equal(cards.calls.upserts.length, 1, JSON.stringify(cards.calls.upserts));
-  const ask = cards.calls.upserts[0];
-  assert.equal(ask.ring, "deep_read");
-  assert.equal(ask.toolId, "github");
-  assert.match(ask.body, /analyze GitHub's data about alpha overnight and report findings/);
-  const row = registryStore._state().tools.find((x) => x.tool === "github");
-  assert.equal(row.deepAskRound, 1);
-  assert.equal(registryStore._state().lastDeepAskDay, new Date(W0 + DAY).toISOString().slice(0, 10));
-  assert.ok(ledger.rows.some((r) => r.kind === "cto.tool.deep_ask" && r.project === "alpha"));
-  // same day again → no second ask
-  await registry.dailyScan();
-  assert.equal(cards.calls.upserts.length, 1);
-  // next day → the gate re-opens (askRound < 3), one more ask
-  const { registry: reg2, cards: cards2 } = seededRegistry(
-    [deepEligibleRow({ deepAskRound: 1 })],
-    { nowMs: W0 + 2 * DAY },
-  );
-  await reg2.dailyScan();
-  assert.equal(cards2.calls.upserts.length, 1);
-});
-
-test("deep-read ask: consented, rounds exhausted, and chain-tripped tools are skipped", async () => {
-  // already deep-consented
-  const a = seededRegistry([deepEligibleRow({ consent: { metadata: "yes", deep_read: "yes", write: null } })]);
-  await a.registry.dailyScan();
-  assert.equal(a.cards.calls.upserts.length, 0);
-  // rounds exhausted
-  const b = seededRegistry([deepEligibleRow({ deepAskRound: 3 })]);
-  await b.registry.dailyScan();
-  assert.equal(b.cards.calls.upserts.length, 0);
-  // chain tripped
-  const c = seededRegistry([deepEligibleRow({ asSourceDecayed: true, decayedAtUses: 6 })]);
-  await c.registry.dailyScan();
-  assert.equal(c.cards.calls.upserts.length, 0);
-});
-
-test("deep-read ask: a declined ask re-arms ONLY on the 30-day timer (vitality path)", async () => {
-  const row = deepEligibleRow({ consent: { metadata: "yes", deep_read: "no", write: null }, deepAskRound: 1, deepReArmAt: W0 + DAY + 10 * DAY });
-  const { registry, cards } = seededRegistry([row]);
-  await registry.dailyScan();
-  assert.equal(cards.calls.upserts.length, 0, "timer not elapsed — no ask");
-  const row2 = deepEligibleRow({ consent: { metadata: "yes", deep_read: "no", write: null }, deepAskRound: 1, deepReArmAt: W0 + DAY - 1000 });
-  const { registry: r2, cards: c2, registryStore: s2 } = seededRegistry([row2]);
-  await r2.dailyScan();
-  assert.equal(c2.calls.upserts.length, 1);
-  const after = s2._state().tools.find((x) => x.tool === "github");
-  assert.equal(after.consent.deep_read, null, "re-armed");
-  assert.equal(after.deepAskRound, 2);
-});
-
-test("resolveConnect deep_read ring: connect grants deep read (metadata backstop); not-now re-arms; never kills all rings; bad ring rejected", async () => {
-  // grant — requires metadata consent
-  const ok = seededRegistry([deepEligibleRow()]);
-  const granted = await ok.registry.resolveConnect({ tool: "github", answer: "connect", ring: "deep_read" });
-  assert.equal(granted.ok, true);
-  const grantedRow = ok.registryStore._state().tools.find((x) => x.tool === "github");
-  assert.equal(grantedRow.consent.deep_read, "yes");
-  assert.ok(ok.ledger.rows.some((r) => r.kind === "cto.tool.consent" && r.ring === "deep_read" && r.value === "yes"));
-  // grant without metadata consent → refused
-  const noMeta = seededRegistry([deepEligibleRow({ consent: { metadata: "no", deep_read: null, write: null } })]);
-  const refused = await noMeta.registry.resolveConnect({ tool: "github", answer: "connect", ring: "deep_read" });
-  assert.equal(refused.ok, false);
-  // not-now re-arms on the 30-day timer
-  const later = seededRegistry([deepEligibleRow({ deepAskRound: 1 })]);
-  const declined = await later.registry.resolveConnect({ tool: "github", answer: "not-now", ring: "deep_read" });
-  assert.equal(declined.ok, true);
-  const declinedRow = later.registryStore._state().tools.find((x) => x.tool === "github");
-  assert.equal(declinedRow.consent.deep_read, "no");
-  assert.equal(declinedRow.deepReArmAt, W0 + DAY + 30 * DAY);
-  // never kills every ring regardless of the ask's ring
-  const never = seededRegistry([deepEligibleRow({ deepAskRound: 1 })]);
-  const killed = await never.registry.resolveConnect({ tool: "github", answer: "never", ring: "deep_read" });
-  assert.equal(killed.ok, true);
-  const killedRow = never.registryStore._state().tools.find((x) => x.tool === "github");
-  assert.deepEqual(killedRow.consent, { metadata: "never", deep_read: "never", write: "never" });
-  // invalid ring rejected without touching the store
-  const bad = seededRegistry([deepEligibleRow()]);
-  const badRes = await bad.registry.resolveConnect({ tool: "github", answer: "connect", ring: "write" });
-  assert.equal(badRes.ok, false);
 });
 
 test("applyAsSource: folds success/rejection, ignores access/decay, and trips the chain at LB<0.3 after >=3 reports", async () => {
@@ -853,34 +600,25 @@ test("applyAsSource: folds success/rejection, ignores access/decay, and trips th
   assert.equal((await hold.registry.applyAsSource("", { success: true })).ok, false);
 });
 
-test("decay chain: a tripped tool stops deep asks and probes weekly; fresh engagement revives it", async () => {
+test("decay chain: a tripped tool probes weekly; fresh engagement revives it", async () => {
   const tripped = deepEligibleRow({ asSourceDecayed: true, decayedAtUses: 6, uses: 6 });
-  const { registry, registryStore, cards, ledger } = seededRegistry([tripped]);
-  // deep asks suppressed while decayed
+  const { registry } = seededRegistry([tripped]);
   await registry.dailyScan();
-  assert.equal(cards.calls.upserts.length, 0);
   // probing caps at weekly — the chain's source of truth lives here
   assert.equal(await registry.probeCadenceCapMs("github"), CADENCE_WEEKLY_MS);
   assert.equal(await registry.probeCadenceCapMs("nope"), null);
   // revival: fresh engagement beyond the trip's snapshot (uses > decayedAtUses + 2).
-  // The row is deep-consented (the trip came from dismissed REPORTS, which
-  // only exist under deep consent) so no new ask fires over the revival.
   const revivedStore = memStore({
-    tools: [deepEligibleRow({ asSourceDecayed: true, decayedAtUses: 6, uses: 9, consent: { metadata: "yes", deep_read: "yes", write: null } })],
+    tools: [deepEligibleRow({ asSourceDecayed: true, decayedAtUses: 6, uses: 9 })],
     lastScanTs: W0,
-    lastAskDay: null,
-    lastDeepAskDay: null,
   });
-  const revCards = fakeCards();
   const revLedger = fakeLedger();
-  const rev = createToolRegistry({ registryStore: revivedStore, usageStore: memStore({ rows: [] }), cards: revCards, ledger: revLedger, now: () => W0 + DAY });
+  const rev = createToolRegistry({ registryStore: revivedStore, usageStore: memStore({ rows: [] }), ledger: revLedger, listSecretKeys: () => [], now: () => W0 + DAY });
   await rev.dailyScan();
   const revivedRow = revivedStore._state().tools.find((x) => x.tool === "github");
   assert.equal(revivedRow.asSourceDecayed, false);
   assert.equal(revivedRow.decayedAtUses, 0);
-  assert.equal(revivedRow.deepReArmAt, W0 + DAY + 30 * DAY);
   assert.ok(revLedger.rows.some((r) => r.kind === "cto.tool.as_source_revived"));
-  // and the deep ask front door re-opens after the timer
   assert.equal(await rev.probeCadenceCapMs("github"), null);
   // not-yet-fresh engagement does NOT revive (uses <= decayedAtUses + 2)
   const stale = seededRegistry([deepEligibleRow({ asSourceDecayed: true, decayedAtUses: 6, uses: 8 })]);
@@ -895,4 +633,446 @@ test("listTools exposes the §7.6 chain state + relevance map (no dead state)", 
   assert.deepEqual(view[0].asSource, { reports: 4, accepted: 1 });
   assert.equal(view[0].asSourceDecayed, true);
   assert.deepEqual(view[0].relevance, { alpha: 0.7, beta: 0.3 });
+});
+
+// The §6.7 issue surface (index.mjs `issueToolConsented`) asks the registry
+// whether the box's issue tool is reachable. It reads a REAL listTools
+// projection, so the test feeds one — without the §7.4 port this fails: the
+// projection carries no `consent` field, so checkable-verify stayed off even
+// with the granting secret in the store.
+test("isIssueToolGranted reads the grant off a REAL listTools projection — from an EMPTY registry", async () => {
+  // NOTHING has been discovered: no usage rows, no registry rows. The key in
+  // the store is the only input, exactly as it is on a box where the user has
+  // just added a secret and no agent has touched the tool yet.
+  const listWith = async (secrets) => {
+    const { registry, registryStore } = makeRegistry({ usageRows: [], secrets, nowMs: W0 + DAY });
+    await registry.dailyScan();
+    assert.deepEqual(registryStore._state().tools ?? [], [], "the registry really is empty");
+    return registry.listTools();
+  };
+
+  const granted = await listWith(["CAPO_MULTICA_TOKEN"]);
+  assert.ok(granted.some((t) => t.tool === "multica"), "a granted tool is enumerable with no registry row at all");
+  assert.equal(isIssueToolGranted(granted), true, "a stored key naming the issue tool opens the surface");
+
+  assert.equal(isIssueToolGranted(await listWith([])), false, "no key → no issue surface");
+  assert.equal(isIssueToolGranted(await listWith(["GITHUB_TOKEN"])), false, "a key for another tool opens nothing");
+
+  // Shape guards: the identity must match, and junk is never a grant.
+  assert.equal(isIssueToolGranted([{ tool: "issue-tracker", accessKey: "MULTICA_TOKEN" }]), true);
+  assert.equal(isIssueToolGranted([{ tool: "github", accessKey: "GITHUB_TOKEN" }]), false);
+  assert.equal(isIssueToolGranted([{ tool: "multica", accessKey: "" }]), false);
+  assert.equal(isIssueToolGranted([{ tool: "multica" }]), false);
+  assert.equal(isIssueToolGranted(null), false);
+});
+
+test("a never-used secret is ENUMERABLE, not just answerable: the projected row is honest and does not pretend to be discovery", async () => {
+  const { registry, registryStore } = makeRegistry({ usageRows: [], secrets: ["NORDVPN_TOKEN"], nowMs: W0 });
+  const view = await registry.listTools();
+  const row = view.find((r) => r.tool === "nordvpn");
+  assert.ok(row, "the granted tool appears without ever having been seen");
+  assert.equal(row.accessKey, "NORDVPN_TOKEN");
+  assert.equal(await registry.consentFor("nordvpn"), "yes", "and the chokepoint agrees with the list");
+  // The projection is not a write, and it invents no evidence.
+  assert.equal(row.uses, 0);
+  assert.equal(row.status, "observed");
+  assert.equal(row.ewmaPerWeek, 0);
+  assert.equal(row.vitality.ewma, null);
+  assert.deepEqual(registryStore._state().tools ?? [], [], "listTools never writes a row");
+  // A discovered tool is not duplicated by its own grant.
+  const dup = makeRegistry({
+    usageRows: [{ channel: "transcript", identity: "nordvpn", detail: "cli:nordvpn", ts: W0, source: "catalog" }],
+    secrets: ["NORDVPN_TOKEN"],
+    nowMs: W0 + DAY,
+  });
+  await dup.registry.dailyScan();
+  const rows = (await dup.registry.listTools()).filter((r) => r.tool === "nordvpn");
+  assert.equal(rows.length, 1, "one identity, one row");
+  assert.equal(rows[0].uses, 1);
+  assert.equal(rows[0].accessKey, "NORDVPN_TOKEN");
+});
+
+test("channel-1 credential evidence lands on the tool the key names, not on a phantom raw row", async () => {
+  // The production shape: recordSecretUsage writes the FACT (identity null,
+  // `secret:<KEY>`); the registry names the tool with the grant's matcher.
+  const { registry, registryStore } = makeRegistry({
+    usageRows: [{ channel: "secret", identity: null, detail: "secret:GITHUB_PAT", ts: W0, source: "raw" }],
+    secrets: ["GITHUB_PAT"],
+    nowMs: W0 + DAY,
+  });
+  await registry.dailyScan();
+  const tools = registryStore._state().tools;
+  assert.deepEqual(tools.map((t) => t.tool), ["github"], "no parallel github_pat row");
+  assert.equal(tools[0].raw, false, "a resolved credential is catalog-identified, not raw");
+  assert.equal(hasCredential(tools[0]), true, "and it still carries the vitality path");
+  assert.equal((await registry.listTools())[0].accessKey, "GITHUB_PAT");
+
+  // A key the catalog cannot place keeps the raw identity for the one-shot
+  // LLM classification — and grants nothing.
+  const unknown = makeRegistry({
+    usageRows: [{ channel: "secret", identity: null, detail: "secret:ACME_INTERNAL_TOKEN", ts: W0, source: "raw" }],
+    secrets: ["ACME_INTERNAL_TOKEN"],
+    nowMs: W0 + DAY,
+  });
+  await unknown.registry.dailyScan();
+  const raw = unknown.registryStore._state().tools.find((t) => t.tool === "acme_internal_token");
+  assert.ok(raw);
+  assert.equal(raw.raw, true);
+  assert.equal(await unknown.registry.consentFor("acme_internal_token"), null);
+});
+
+test("an ALIASING row carries the grant — a persisted alias can never suppress it", async () => {
+  // Real data, not a contrived fixture: classification merges a raw row into
+  // its canonical one and keeps the old token as an alias, so an identity the
+  // store grants can live on a row with a different primary name.
+  const seeded = memStore({
+    tools: [{
+      tool: "multica-ai",
+      displayName: "Multica AI",
+      aliases: ["multica"],
+      status: "integrated",
+      engagement: { ewma_per_week: 2, last_used: W0, per_project: {} },
+      vitality: { last_event: null, inflow_rate: null, ewma: null, last_probed: null },
+      evidence: [],
+      uses: 4,
+      weeks: [],
+      firstSeenTs: W0,
+    }],
+    lastScanTs: W0,
+  });
+  const registry = createToolRegistry({
+    registryStore: seeded,
+    classificationStore: memStore(),
+    usageStore: memStore({ rows: [] }),
+    ledger: fakeLedger(),
+    listSecretKeys: () => ["MULTICA_TOKEN"],
+    now: () => W0 + DAY,
+  });
+
+  assert.equal(await registry.consentFor("multica"), "yes", "the chokepoint grants the identity");
+  const view = await registry.listTools();
+  // No phantom: the alias row is the multica row, so nothing is projected…
+  assert.equal(view.length, 1, "no duplicate row for an identity a real row already answers to");
+  assert.equal(view[0].tool, "multica-ai", "and the real row is not masked");
+  assert.deepEqual(view[0].aliases, ["multica"]);
+  // …and it CARRIES the grant, so every consumer of the list sees it.
+  assert.equal(view[0].accessKey, "MULTICA_TOKEN", "the grant lands on the row that answers to the identity");
+  assert.equal(isIssueToolGranted(view), true, "the issue gate agrees with consentFor");
+
+  // Same row, no secret → no access anywhere.
+  const ungranted = createToolRegistry({
+    registryStore: seeded,
+    classificationStore: memStore(),
+    usageStore: memStore({ rows: [] }),
+    ledger: fakeLedger(),
+    listSecretKeys: () => [],
+    now: () => W0 + DAY,
+  });
+  const none = await ungranted.listTools();
+  assert.equal(none[0].accessKey, null);
+  assert.equal(isIssueToolGranted(none), false);
+});
+
+test("EVERY grant/access lookup resolves the same identity set — canonical name and alias alike", async () => {
+  // The regression: alias resolution reached the list view but not the probe
+  // path, so the drill-down showed access while `consentFor("multica-ai")`
+  // said no and `toolRow("multica")` found nothing — probes under the
+  // canonical name stayed disabled, and under the alias had no evidence to
+  // author from.
+  const row = {
+    tool: "multica-ai",
+    displayName: "Multica AI",
+    aliases: ["multica"],
+    status: "integrated",
+    engagement: { ewma_per_week: 2, last_used: W0, per_project: {} },
+    vitality: { last_event: null, inflow_rate: null, ewma: null, last_probed: null },
+    evidence: [{ channel: "config", detail: "git:api.multica.ai", ts: W0 }],
+    uses: 4,
+    weeks: [],
+    firstSeenTs: W0,
+  };
+  const registry = createToolRegistry({
+    registryStore: memStore({ tools: [row], lastScanTs: W0 }),
+    classificationStore: memStore(),
+    usageStore: memStore({ rows: [] }),
+    ledger: fakeLedger(),
+    listSecretKeys: () => ["MULTICA_TOKEN"],
+    now: () => W0 + DAY,
+  });
+
+  for (const name of ["multica", "multica-ai", "MULTICA", " Multica-AI "]) {
+    assert.equal(await registry.consentFor(name), "yes", `consentFor(${name})`);
+    assert.equal(await registry.grantFor(name), "MULTICA_TOKEN", `grantFor(${name})`);
+    const found = await registry.toolRow(name);
+    assert.ok(found, `toolRow(${name}) must find the row`);
+    assert.equal(found.tool, "multica-ai", "…and it is the SAME single row under either name");
+    assert.equal(found.evidence.length, 1, "the evidence authoring needs is reachable under either name");
+  }
+
+  // The writers the probe runner calls reach that one row under either name.
+  assert.equal((await registry.applyProbeResult("multica", { fields: { last_event: W0 }, probedAt: W0, cadenceMs: 3_600_000, probeName: "p" })).ok, true);
+  assert.equal((await registry.appendEvidence("multica-ai", { channel: "probe", detail: "p:500", ts: W0 })).ok, true);
+  const after = await registry.toolRow("multica");
+  assert.equal(after.vitality.last_event, W0, "the probe result folded onto the row, not a phantom");
+  assert.equal(after.evidence.length, 2);
+  assert.equal((await registry.listTools()).length, 1, "and still exactly one row");
+
+  // An alias can only WIDEN: with no secret, neither name grants anything.
+  const ungranted = createToolRegistry({
+    registryStore: memStore({ tools: [row], lastScanTs: W0 }),
+    classificationStore: memStore(),
+    usageStore: memStore({ rows: [] }),
+    ledger: fakeLedger(),
+    listSecretKeys: () => [],
+    now: () => W0 + DAY,
+  });
+  for (const name of ["multica", "multica-ai"]) {
+    assert.equal(await ungranted.consentFor(name), null, name);
+    assert.equal(await ungranted.grantFor(name), null, name);
+  }
+});
+
+test("a registry row can never WITHHOLD a grant — an unknown name resolves to itself", async () => {
+  // The alias lookup must not become a precondition for access: a secret
+  // nothing has ever used still grants, with an unrelated row present.
+  const { registry } = makeRegistry({ secrets: ["NORDVPN_TOKEN"], nowMs: W0 });
+  assert.equal(await registry.consentFor("nordvpn"), "yes");
+  const withRows = createToolRegistry({
+    registryStore: memStore({ tools: [{ tool: "github", aliases: ["gh"], evidence: [], uses: 1 }], lastScanTs: W0 }),
+    classificationStore: memStore(),
+    usageStore: memStore({ rows: [] }),
+    ledger: fakeLedger(),
+    listSecretKeys: () => ["NORDVPN_TOKEN"],
+    now: () => W0,
+  });
+  assert.equal(await withRows.consentFor("nordvpn"), "yes", "a row for another tool cannot deny it");
+  assert.equal(await withRows.consentFor("github"), null, "and cannot invent one either");
+});
+
+test("identitiesOf is the single identity resolver both halves of listTools use", () => {
+  assert.deepEqual(identitiesOf({ tool: "multica-ai", aliases: ["multica", "mc"] }), ["multica-ai", "multica", "mc"]);
+  assert.deepEqual(identitiesOf({ tool: "github" }), ["github"]);
+  assert.deepEqual(identitiesOf({ tool: "x", aliases: ["", null, 7, "y"] }), ["x", "y"]);
+  assert.deepEqual(identitiesOf(null), []);
+});
+
+test("resolveIdentities / findToolRow: the seam every lookup in the path goes through", () => {
+  const tools = [{ tool: "multica-ai", aliases: ["multica"] }, { tool: "github" }];
+  assert.equal(findToolRow(tools, "multica")?.tool, "multica-ai");
+  assert.equal(findToolRow(tools, "MULTICA-AI ")?.tool, "multica-ai");
+  assert.equal(findToolRow(tools, "nope"), null);
+  assert.equal(findToolRow(tools, ""), null);
+  assert.equal(findToolRow(null, "github"), null);
+  // A name the catalog does NOT know resolves to the row's whole identity set…
+  assert.deepEqual(resolveIdentities(tools, "multica-ai"), ["multica-ai", "multica"]);
+  // …but a KNOWN catalog name never inherits through the bridge: it is a
+  // distinct service its own keys name, so an alias must not extend anything
+  // onto it (only its own key — the direct path — may serve it).
+  assert.deepEqual(resolveIdentities(tools, "multica"), ["multica"]);
+  // …an unknown one to itself, so a row is never a precondition for a grant.
+  assert.deepEqual(resolveIdentities(tools, "nordvpn"), ["nordvpn"]);
+  assert.deepEqual(resolveIdentities([], "nordvpn"), ["nordvpn"]);
+  assert.deepEqual(resolveIdentities(tools, "  GitHub "), ["github"]);
+  assert.deepEqual(resolveIdentities(tools, ""), []);
+});
+
+// Astra round 6, P1: the first-match alias lookup let a row's alias shadow an
+// exact primary and transfer a grant between distinct known services. The
+// seam's resolution order and its fail-closed edges, pinned pure:
+test("findToolRow: exact primary beats an alias; ambiguous aliases fail closed; row order never matters", () => {
+  // github's row claims "stripe" as an alias; a REAL stripe row also exists.
+  const withStripe = [{ tool: "github", aliases: ["stripe"] }, { tool: "stripe" }];
+  const withStripeReversed = [{ tool: "stripe" }, { tool: "github", aliases: ["stripe"] }];
+  for (const rows of [withStripe, withStripeReversed]) {
+    assert.equal(findToolRow(rows, "stripe")?.tool, "stripe", "exact primary wins");
+    assert.deepEqual(resolveIdentities(rows, "stripe"), ["stripe"], "the stripe row's own set only");
+  }
+  // The alias bridge without a target row: for a KNOWN catalog name the
+  // bridge is refused at the ROW level too — a distinct known service never
+  // resolves onto another known service's row, so no evidence, hosts or
+  // folding cross — and resolveIdentities returns the name alone.
+  const ghostAlias = [{ tool: "github", aliases: ["stripe"] }];
+  assert.equal(findToolRow(ghostAlias, "stripe"), null);
+  assert.equal(findToolRow([ghostAlias[0], { tool: "nordvpn" }], "stripe"), null, "order-independent");
+  assert.equal(findToolRow([{ tool: "nordvpn" }, ghostAlias[0]], "stripe"), null);
+  assert.deepEqual(resolveIdentities(ghostAlias, "stripe"), ["stripe"]);
+  // The valid bridge survives: a NON-catalog primary answers for its catalog
+  // alias, in both directions of the row (multica-ai <-> multica).
+  assert.equal(findToolRow([{ tool: "multica-ai", aliases: ["multica"] }], "multica")?.tool, "multica-ai");
+  assert.equal(findToolRow([{ tool: "multica", aliases: ["multica-ai"] }], "multica-ai")?.tool, "multica");
+  // Two rows claiming the same alias, no primary: ambiguous → no row, no
+  // inheritance — and the answer is identical whichever row comes first.
+  const ambiguousA = [{ tool: "aa", aliases: ["amb"] }, { tool: "bb", aliases: ["amb"] }];
+  const ambiguousB = [{ tool: "bb", aliases: ["amb"] }, { tool: "aa", aliases: ["amb"] }];
+  for (const rows of [ambiguousA, ambiguousB]) {
+    assert.equal(findToolRow(rows, "amb"), null);
+    assert.deepEqual(resolveIdentities(rows, "amb"), ["amb"]);
+  }
+});
+
+// The transfer rule, pinned pure: a name's own key always serves it; a known
+// catalog name never inherits another service's key through a row's aliases;
+// a non-catalog name (multica-ai) does.
+test("grantedKeyForName: own key serves; known names never inherit; unknown names may", () => {
+  const granted = new Map([["github", "GITHUB_TOKEN"], ["stripe", "STRIPE_KEY"]]);
+  assert.equal(grantedKeyForName(granted, "github", ["github"]), "GITHUB_TOKEN");
+  assert.equal(grantedKeyForName(granted, "stripe", ["stripe"]), "STRIPE_KEY");
+  // github's row claims stripe as an alias: requesting stripe must NOT reach
+  // github's key, and requesting github must NOT reach stripe's.
+  assert.equal(grantedKeyForName(granted, "stripe", ["github", "stripe"]), "STRIPE_KEY");
+  assert.equal(grantedKeyForName(granted, "github", ["github", "stripe"]), "GITHUB_TOKEN");
+  // Only the ALIASED key exists: the known name fails closed…
+  const half = new Map([["github", "GITHUB_TOKEN"]]);
+  assert.equal(grantedKeyForName(half, "stripe", ["github", "stripe"]), null);
+  const halfStripe = new Map([["stripe", "STRIPE_KEY"]]);
+  assert.equal(grantedKeyForName(halfStripe, "github", ["github", "stripe"]), null);
+  // …while a non-catalog name inherits freely (the preserved mapping).
+  const multica = new Map([["multica", "MULTICA_TOKEN"]]);
+  assert.equal(grantedKeyForName(multica, "multica-ai", ["multica-ai", "multica"]), "MULTICA_TOKEN");
+});
+
+// Astra round 6, P1 — the SAME adversarial scenarios through the REAL engine,
+// in BOTH row orders, because store-key authorization must be deterministic
+// independent of evidence ordering. Fixtures: "stripe" and "github" are BOTH
+// known catalog identities (distinct services their own keys name);
+// "codespace" and "multica-ai" are not.
+function seamRegistry(rows, keys) {
+  return createToolRegistry({
+    registryStore: memStore({ v: 1, tools: rows }),
+    classificationStore: memStore(),
+    usageStore: memStore({ rows: [] }),
+    ledger: fakeLedger(),
+    listSecretKeys: () => keys,
+    now: () => W0,
+  });
+}
+for (const order of ["alias-row-first", "primary-row-first"]) {
+  test(`exact primary beats a colliding alias, everywhere (${order})`, async () => {
+    const rows = [
+      { tool: "github", aliases: ["stripe"], evidence: [{ channel: "config", detail: "git:github.com", ts: 1 }], uses: 1 },
+      { tool: "stripe", evidence: [{ channel: "config", detail: "git:stripe.com", ts: 1 }], uses: 1 },
+    ];
+    const reg = seamRegistry(order === "alias-row-first" ? rows : [...rows].reverse(), ["GITHUB_TOKEN"]);
+    // Consent + grant: stripe's own row answers, and github's key may NOT
+    // serve it just because github's row once claimed the alias.
+    assert.equal(await reg.consentFor("stripe"), null);
+    assert.equal(await reg.grantFor("stripe"), null);
+    assert.equal(await reg.consentFor("github"), "yes");
+    assert.equal(await reg.grantFor("github"), "GITHUB_TOKEN");
+    // The row lookup lands on the stripe row in both orders — probe folding
+    // can no longer land on the alias claimant.
+    assert.equal((await reg.toolRow("stripe")).tool, "stripe");
+    // The LIST agrees with the chokepoint: stripe ungranted, github granted.
+    const list = await reg.listTools();
+    const stripeRow = list.find((t) => t.tool === "stripe");
+    const githubRow = list.find((t) => t.tool === "github");
+    assert.equal(stripeRow.accessKey, null);
+    assert.equal(githubRow.accessKey, "GITHUB_TOKEN");
+    // Probe folding under the exact name reaches the RIGHT row.
+    await reg.applyProbeResult("stripe", { fields: { last_event: W0 }, probedAt: W0 });
+    const after = await reg.toolRow("stripe");
+    assert.equal(after.vitality.last_probed, W0);
+    const githubAfter = await reg.toolRow("github");
+    assert.equal(githubAfter.vitality?.last_probed ?? null, null);
+  });
+
+  test(`an alias on a distinct known service never transfers the grant, even with no target row (${order})`, async () => {
+    const rows = [{ tool: "github", aliases: ["stripe"], evidence: [{ channel: "config", detail: "git:github.com", ts: 1 }], uses: 1 }];
+    // GITHUB_TOKEN only: stripe must read as unconsented and ungranted.
+    const gh = seamRegistry(order === "alias-row-first" ? rows : [...rows], ["GITHUB_TOKEN"]);
+    assert.equal(await gh.consentFor("stripe"), null);
+    assert.equal(await gh.grantFor("stripe"), null);
+    assert.equal(await gh.consentFor("github"), "yes");
+    const ghList = await gh.listTools();
+    assert.deepEqual(ghList.map((t) => t.tool), ["github"], "no phantom stripe row");
+    assert.equal(ghList[0].accessKey, "GITHUB_TOKEN");
+    // Folding follows the same boundary: a probe result under the aliased
+    // known name cannot land on the other service's row — no evidence, no
+    // vitality, no host ever crosses.
+    const fold = await gh.applyProbeResult("stripe", { fields: { last_event: W0 }, probedAt: W0 });
+    assert.equal(fold.ok, false, "no github row is reachable under the stripe name");
+    assert.equal((await gh.toolRow("github")).vitality?.last_probed ?? null, null);
+    // MIRROR — STRIPE_KEY only: stripe's own key serves stripe directly, but
+    // it must NOT cross the alias onto github, and the LIST must say the
+    // same thing the chokepoint says (the grant projects as its own row
+    // rather than vanishing behind the alias claimant).
+    const st = seamRegistry(rows, ["STRIPE_KEY"]);
+    assert.equal(await st.consentFor("stripe"), "yes");
+    assert.equal(await st.consentFor("github"), null);
+    assert.equal(await st.grantFor("github"), null);
+    const stList = await st.listTools();
+    const ghRow = stList.find((t) => t.tool === "github");
+    const stRow = stList.find((t) => t.tool === "stripe");
+    assert.equal(ghRow.accessKey, null, "github does not display stripe's key");
+    assert.equal(stRow.accessKey, "STRIPE_KEY", "the grant stays visible, on its own row");
+  });
+
+  test(`an alias claimed by two rows fails closed, in both row orders (${order})`, async () => {
+    const rows = [
+      { tool: "github", aliases: ["codespace"], evidence: [{ channel: "config", detail: "git:github.com", ts: 1 }], uses: 1 },
+      { tool: "nordvpn", aliases: ["codespace"], evidence: [{ channel: "config", detail: "git:nordvpn.com", ts: 1 }], uses: 1 },
+    ];
+    const reg = seamRegistry(order === "alias-row-first" ? rows : [...rows].reverse(), ["GITHUB_TOKEN"]);
+    // Ambiguous alias: no row answers for it, and nothing inherits —
+    // identical under both orderings.
+    assert.equal(await reg.toolRow("codespace"), null);
+    assert.equal(await reg.consentFor("codespace"), null);
+    assert.equal(await reg.grantFor("codespace"), null);
+    // The rows' own grants are untouched by the collision.
+    assert.equal(await reg.consentFor("github"), "yes");
+    assert.equal(await reg.consentFor("nordvpn"), null);
+    const list = await reg.listTools();
+    assert.equal(list.find((t) => t.tool === "github").accessKey, "GITHUB_TOKEN");
+    assert.equal(list.find((t) => t.tool === "nordvpn").accessKey, null);
+    assert.deepEqual(list.filter((t) => t.tool === "codespace"), [], "no phantom row for the ambiguous alias");
+  });
+}
+
+// The stale-pin check the probe runner uses before sending a pinned
+// credential. It must ask the SAME authorization seam as every regular grant
+// (grantedKeyForName) and require the EXACT key's presence — no independent
+// alias policy, no identity-only pass.
+test("keyGrantedForTool: the grant seam decides; exact key required; a cross-service alias never authorizes", async () => {
+  // The Astra exploit: github's row claims "stripe" as an alias and BOTH
+  // keys are stored. The row's identity set contains "stripe", but the grant
+  // policy for the catalog name "github" serves direct-only — the pinned
+  // STRIPE_TOKEN must be refused, never used to answer github's endpoint.
+  const reg = seamRegistry(
+    [{ tool: "github", aliases: ["stripe"], evidence: [{ channel: "config", detail: "git:github.com", ts: 1 }], uses: 1 }],
+    ["GITHUB_TOKEN", "STRIPE_TOKEN"],
+  );
+  assert.equal(await reg.keyGrantedForTool("STRIPE_TOKEN", "github"), false, "the alias must not authorize another service's key");
+  assert.equal(await reg.keyGrantedForTool("GITHUB_TOKEN", "github"), true);
+  // A non-catalog tool name reaches its identity through the alias bridge,
+  // and the pinned key of THAT identity is authorized (the preserved mapping).
+  const regM = seamRegistry(
+    [{ tool: "multica-ai", aliases: ["multica"], evidence: [{ channel: "config", detail: "git:api.multica.ai", ts: 1 }], uses: 1 }],
+    ["MULTICA_TOKEN"],
+  );
+  assert.equal(await regM.keyGrantedForTool("MULTICA_TOKEN", "multica-ai"), true);
+  // The tool named by its alias reaches the same identity set.
+  assert.equal(await regM.keyGrantedForTool("MULTICA_TOKEN", "multica"), true);
+  // EXACT key presence: the pinned key must itself be in the store — its
+  // identity being covered by another key is not enough (GITHUB_OLD_TOKEN
+  // absent must not pass because GITHUB_TOKEN exists).
+  const reg2 = seamRegistry(
+    [{ tool: "github", evidence: [{ channel: "config", detail: "git:github.com", ts: 1 }], uses: 1 }],
+    ["GITHUB_TOKEN"],
+  );
+  assert.equal(await reg2.keyGrantedForTool("GITHUB_OLD_TOKEN", "github"), false);
+  assert.equal(await reg2.keyGrantedForTool("GITHUB_TOKEN", "github"), true);
+  // A sibling key of the SAME identity (both in the store) is the same
+  // service: the policy serves one key per identity, the sibling passes.
+  const reg3 = seamRegistry(
+    [{ tool: "github", evidence: [{ channel: "config", detail: "git:github.com", ts: 1 }], uses: 1 }],
+    ["GITHUB_PAT", "GITHUB_TOKEN"],
+  );
+  assert.equal(await reg3.keyGrantedForTool("GITHUB_TOKEN", "github"), true);
+  // The store empty: nothing is authorized.
+  const reg4 = seamRegistry(
+    [{ tool: "github", evidence: [{ channel: "config", detail: "git:github.com", ts: 1 }], uses: 1 }],
+    [],
+  );
+  assert.equal(await reg4.keyGrantedForTool("GITHUB_TOKEN", "github"), false);
+  assert.equal(await reg4.keyGrantedForTool("STRIPE_KEY", "github"), false);
 });

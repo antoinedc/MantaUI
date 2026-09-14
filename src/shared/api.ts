@@ -248,13 +248,12 @@ export type CtoState = {
 };
 
 // An open needs-you card row (§10.3), as served by GET /api/cto/cards (a thin
-// read of the A8 card store). All four variants are live writers today:
-// `blocker` (ctoCardStore), `decision` (BET-1392), `veto` (BET-1419), and
-// `connect` (ctoToolRegistry). Consumers must select positively on the
-// variant they want — see BET-1467.
+// read of the A8 card store). All three variants are live writers today:
+// `blocker` (ctoCardStore), `decision` (BET-1392), and `veto` (BET-1419).
+// Consumers must select positively on the variant they want — see BET-1467.
 export type CtoCard = {
   id: string;
-  variant: "blocker" | "decision" | "veto" | "connect";
+  variant: "blocker" | "decision" | "veto";
   title: string;
   body: string;
   refs: string[];
@@ -589,15 +588,20 @@ export type CtoToolRegistryRow = {
   lastSeenTs: number | null;
   firstSeenTs: number | null;
   vitality: { last_event: number | null; inflow_rate: number | null; ewma: number | null; last_probed: number | null };
-  consent: { metadata: string | null; deep_read: string | null; write: string | null };
-  askRound: number;
+  // Every other identity this row answers to (aliases folded in by
+  // classification). A consumer matching on a tool name must consider these
+  // too — the row IS each of them, and a grant may be resolved through one.
+  aliases: string[];
+  // The stored secret key that grants the CTO access to this tool, or null
+  // when no key names it (then the CTO cannot reach it at all). A key NAME is
+  // not a secret; a value never leaves the box.
+  accessKey: string | null;
   probes: CtoToolProbeSummary;
 };
 
 export type CtoToolsRender = {
   compiledAt: number;
   tools: CtoToolRegistryRow[];
-  never: CtoToolRegistryRow[];
 };
 
 
@@ -1463,13 +1467,9 @@ export interface Api {
   // GET /api/cto/tools — the tool-integrations drill-down render (§10.5
   // row 4): registry + probes joined, plus the never list.
   // Throws on failure (like ctoStateGet) — callers render the error state.
+  // Read-only by design: a tool is granted by adding its key to the secret
+  // store and revoked by deleting it, so there is no per-tool action here.
   ctoToolsGet(): Promise<CtoToolsRender>;
-  // POST /api/cto/tools/revoke — per-ring revoke (ring → "no"; metadata
-  // revoke stops that tool's probes via the consent gate).
-  ctoToolRevoke(input: { tool: string; ring: "metadata" | "deep_read" | "write" }): Promise<{ ok: boolean; error?: string; tool?: string; ring?: string; value?: string }>;
-  // POST /api/cto/tools/unnever — clear the never verdict; the tool
-  // re-enters the lifecycle at observed (§7.4).
-  ctoToolUnnever(input: { tool: string }): Promise<{ ok: boolean; error?: string; tool?: string }>;
   // POST /api/cto/facts — §8.2 fact proposal. Used by the decision-card
   // `record-decision` option executor: writes a `decision` fact from the card
   // payload through the gatekeeper so it is a first-class, supersedable fact.
@@ -1517,17 +1517,6 @@ export interface Api {
     id?: string;
     ids?: string[];
   }): Promise<{ ok: boolean; error?: string; task?: CtoTonightTask; pinned?: string[] }>;
-  // POST /api/cto/tools/connect — BET-1395 (§7.4): the connect-ask three-way.
-  // "connect" grants the tool's metadata consent ring (read-only), "not-now"
-  // declines with a 30-day re-arm, "never" suppresses every ring for the
-  // tool. Also closes the open connect card + writes the §9.5 verdict.
-  ctoToolConnect(input: {
-    tool: string;
-    answer: "connect" | "not-now" | "never";
-    // BET-1404: which ring the ask was about — "metadata" (default) or
-    // "deep_read" (the deep-read ask's connect grants deep read access).
-    ring?: "metadata" | "deep_read";
-  }): Promise<{ ok: boolean; error?: string; tool?: string; answer?: string }>;
 }
 
 /**

@@ -1,15 +1,22 @@
-// ctoToolRegistry.mjs — §7.2 registry + fusion + lifecycle + connect asks
-// (BET-1395) + the §7.3 vitality / §7.6 relevance axes (BET-1396).
+// ctoToolRegistry.mjs — §7.2 registry + fusion + lifecycle (BET-1395) + the
+// §7.3 vitality / §7.6 relevance axes (BET-1396).
+//
+// ACCESS IS THE SECRET STORE. A key present in the manta secret store grants
+// the CTO FULL access to the matching tool — no consent rings, no connect
+// asks, no read/write split. The user adding a secret IS the grant; deleting
+// it is the revocation. `consentFor()` is the one chokepoint every probe and
+// read path funnels through, and it derives its answer from the store's KEY
+// LIST at decision time (keys and hints only — a value is never read here).
+// A tool with no matching secret has no access and asks nothing.
 //
 // The registry fuses the four §7.1 evidence channels into ONE row per tool
-// identity ("one identity, one row"), derives engagement, runs the two
-// lifecycle bars, and raises §7.4 connect asks as needs-you decision cards:
+// identity ("one identity, one row"), derives engagement, and tracks the
+// lifecycle bars for display:
 //
 //   observed (evidence accumulates) → candidate (either axis crosses its bar:
 //     engagement ≥3 uses across ≥2 weeks; OR the vitality path — a credential
-//     exists at all) → ONE connect ask (Connect read-only / Not now / Never)
-//     → integrated (the FIRST successful §7.5 probe run flips it here;
-//     applyProbeResult does the flip).
+//     exists at all) → integrated (the FIRST successful §7.5 probe run flips
+//     it here; applyProbeResult does the flip).
 //
 // Raw evidence (unknown CLIs/hosts/keys) is classified by the LLM fallback at
 // most ONCE per identity — the model's judgment is cached in the registry
@@ -21,7 +28,11 @@
 // All I/O is injected; pure helpers are exported for tests.
 
 import { toolRegistryStore, toolUsageStore, toolClassificationStore, ledgerStore, patchStore } from "./ctoStores.mjs";
-import { displayName as catalogDisplayName } from "./ctoToolCatalog.mjs";
+import { displayName as catalogDisplayName, isKnownIdentity, matchSecretIdentity } from "./ctoToolCatalog.mjs";
+// KEY NAMES ONLY — `listSecretKeys` returns an array of strings, so nothing
+// value-bearing can reach this module even by accident. Never import a
+// value-returning path here (`provideSecret` is not for this file).
+import { listSecretKeys } from "./secrets.mjs";
 import {
   CHANNEL_TRANSCRIPT,
   CHANNEL_CONFIG,
@@ -45,9 +56,6 @@ function payloadFrom(raw) {
   return {
     v: TOOL_REGISTRY_VERSION,
     tools: (Array.isArray(p?.tools) ? p.tools : []).map((t) => ({
-      deepAskRound: 0,
-      deepReArmAt: null,
-      lastDeepAskDay: null,
       asSourceDecayed: false,
       decayedAtUses: 0,
       ...(t ?? {}),
@@ -59,8 +67,6 @@ function payloadFrom(raw) {
     scanRetryAt: Number.isFinite(p.scanRetryAt) ? p.scanRetryAt : 0,
     scanFailures: Number.isFinite(p.scanFailures) ? p.scanFailures : 0,
     lastFusedTs: Number.isFinite(p?.lastFusedTs) ? p.lastFusedTs : null,
-    lastAskDay: typeof p?.lastAskDay === "string" ? p.lastAskDay : null,
-    lastDeepAskDay: typeof p?.lastDeepAskDay === "string" ? p.lastDeepAskDay : null,
   };
 }
 export const ACTOR = "cto";
@@ -75,12 +81,134 @@ export const RAW_CLASSIFY_MIN_USES = 2;
 export const UNRESOLVED_PRUNE_LIMIT = 1000;
 export const UNRESOLVED_RETENTION_MS = 90 * 24 * 3_600_000;
 
-// Bound only unresolved, untouched candidates. Human decisions and resolved
-// identities are never eviction candidates, even when they are old.
+// ---------------------------------------------------------------------------
+// IDENTITY RESOLUTION — the one seam. Everything in the grant / access /
+// probe path resolves a tool name through these functions and NOTHING else:
+// findToolRow (which row), resolveIdentities (which names), grantedKeyForName
+// (which key may serve a name); there is no bare `.find` on a tool name left
+// in this module (the sweep tests in ctoToolRegistry.test.mjs pin the seam
+// under both names; consumers outside the module go through the
+// `identitiesFor` engine method). The one deliberate exact-name comparison —
+// the classification prune below — is commented in place where it lives.
+//
+// Why it has to be a seam rather than a convention: classification merges a
+// raw row into its canonical one and keeps the old token as an ALIAS, so one
+// tool legitimately answers to several names. Three review rounds in a row
+// found the same shape of bug — the alias rule applied in one place and not
+// its neighbour — and every one of them was a place that wrote its own
+// lookup. A rule that lives in one function cannot be half-applied.
+// ---------------------------------------------------------------------------
+
+// A caller-supplied tool name, normalized. Identities are lowercase.
+export function normalizeToolId(id) {
+  return typeof id === "string" ? id.trim().toLowerCase() : "";
+}
+
+// Every identity a registry row answers to: its canonical name plus the
+// aliases classification folded into it. A row IS each of these.
+export function identitiesOf(row) {
+  return [row?.tool, ...(Array.isArray(row?.aliases) ? row.aliases : [])].filter(
+    (id) => typeof id === "string" && id !== "",
+  );
+}
+
+// The ONE row that answers to `id`. Resolution order is load-bearing and
+// deterministic (independent of row order in the store):
+//   1. EXACT PRIMARY always wins — a row whose `tool` IS the name answers
+//      for it, and an alias on some other row must never shadow it.
+//   2. Otherwise the row that claims the name as an ALIAS — but only when
+//      exactly ONE row does. Two claimants is an ambiguous alias: there is
+//      no defensible pick, so it resolves to NO row (fail closed), whichever
+//      way the evidence happened to arrive.
+//   3. THE SERVICE BOUNDARY, in this one resolver so every consumer inherits
+//      it: a KNOWN catalog identity is a distinct service its own keys name,
+//      and it NEVER resolves onto a DIFFERENT known catalog service's row
+//      through an alias bridge — for ANY purpose (grant, row lookup,
+//      evidence, allowed hosts, spec validation, probe folding). Otherwise a
+//      row claiming "stripe" as an alias would lend github's evidence hosts
+//      to a stripe-named probe, and the stripe credential would be
+//      materialized and sent to github's endpoint. A row the catalog does
+//      NOT know (multica-ai) is reachable through the bridge in both
+//      directions; two known services (github <-> stripe) are not.
+export function findToolRow(tools, id) {
+  const norm = normalizeToolId(id);
+  if (!norm) return null;
+  const arr = Array.isArray(tools) ? tools : [];
+  const primary = arr.find((r) => normalizeToolId(r?.tool) === norm);
+  if (primary) return primary;
+  let owner = null;
+  for (const r of arr) {
+    if (!(Array.isArray(r?.aliases) ? r.aliases : []).some((a) => normalizeToolId(a) === norm)) continue;
+    if (owner) return null;
+    owner = r;
+  }
+  if (owner && isKnownIdentity(norm) && isKnownIdentity(normalizeToolId(owner.tool))) return null;
+  return owner;
+}
+
+// Every identity `id` is known by — the identity SET the grant is checked
+// against. A row can only EXTEND that set, never shrink it: an unknown name
+// resolves to itself, so a tool granted by a stored key that nothing has ever
+// used still resolves (a registry row is not a precondition for access), and
+// a row that answers to the name contributes its other names too (so the
+// canonical name and any alias reach the same grant).
+//
+// THE ALIAS BRIDGE HAS ONE LIMIT, and it is the service boundary above: a
+// requested name that is itself a KNOWN catalog identity is a distinct
+// service its own keys could name, so an alias must never transfer a grant
+// onto it — `GITHUB_TOKEN` must not authorize "stripe" because a model once
+// merged their evidence rows — and the row resolver refuses the known→known
+// bridge outright, so no evidence, hosts or folding cross either. A name the
+// catalog does NOT know can only be reached through the bridge at all, so
+// the bridge is exactly what makes it reachable (multica-ai inherits
+// multica's grant; the catalog knows `multica`, never `multica-ai`).
+export function resolveIdentities(tools, id) {
+  const norm = normalizeToolId(id);
+  if (!norm) return [];
+  const row = findToolRow(tools, norm);
+  if (row && normalizeToolId(row.tool) !== norm && isKnownIdentity(norm)) return [norm];
+  return row ? identitiesOf(row) : [norm];
+}
+
+// THE grant behind ONE name, given the identity set its row answers with —
+// one rule for every direction (the access chokepoint below AND the list
+// projection's per-row accessKey):
+//   - the name's OWN key always serves it (the direct path — a key that
+//     names the tool is the whole grant);
+//   - otherwise a grant may cross the row's alias bridge ONLY when the name
+//     is not itself a known catalog identity (see resolveIdentities).
+// Pure so both consumers provably share it; resolveIdentities applies the
+// same rule when building `ids`, so a caller that resolves the set through
+// the seam cannot disagree with this one.
+export function grantedKeyForName(granted, norm, ids) {
+  const direct = granted.get(norm);
+  if (direct) return direct;
+  if (isKnownIdentity(norm)) return null;
+  return (Array.isArray(ids) ? ids : []).map((id) => granted.get(id)).find(Boolean) ?? null;
+}
+
+// §6.7 "a consented tool for issue facts": does the registry report an issue
+// tool the CTO can actually reach? Reads `accessKey` — the §7.4 grant — off
+// the listTools projection, so the issue surface exists exactly when a secret
+// in the store names the box's issue tool, and stops existing the moment that
+// secret is deleted. Pure, so the wiring in index.mjs has nothing to get
+// wrong and this rule is testable against a real projection.
+export const ISSUE_TOOL_RE = /^(?:multica|issue-tracker)(?:[-/].*)?$/i;
+
+export function isIssueToolGranted(tools) {
+  return (Array.isArray(tools) ? tools : []).some(
+    (t) =>
+      identitiesOf(t).some((id) => ISSUE_TOOL_RE.test(id)) &&
+      typeof t?.accessKey === "string" &&
+      t.accessKey !== "",
+  );
+}
+
+// Bound only unresolved, untouched candidates. A resolved identity is never
+// an eviction candidate, even when it is old; nor is access ever at stake —
+// the secret store grants it, not this row.
 export function retainUnresolved(tools, nowMs) {
   const eligible = tools.filter((t) => t.raw && !t.unclassifiable &&
-    !(t.askRound > 0) && !(t.deepAskRound > 0) &&
-    !Object.values(t.consent ?? {}).some((v) => v != null) &&
     t.status === "observed" && (t.uses ?? 0) <= 1 &&
     nowMs - (t.engagement?.last_used ?? t.firstSeenTs ?? nowMs) > UNRESOLVED_RETENTION_MS);
   const expired = new Set(eligible
@@ -91,14 +219,12 @@ export function retainUnresolved(tools, nowMs) {
 
 export function recoverLegacyClassification(tools, nowMs) {
   // Old records conflated errors/gating with an explicit model rejection.
-  // Never guess which it was: allow one new assessment only after new use,
-  // and only if no human has interacted with the identity.
+  // Never guess which it was: allow one new assessment only after new use.
   const target = tools.find((t) => t.raw && t.unclassifiable &&
     !t.classificationOutcome && !t.classificationRecovery &&
     Number.isFinite(t.llmAt) && (t.engagement?.last_used ?? 0) > t.llmAt &&
     (t.uses ?? 0) >= RAW_CLASSIFY_MIN_USES &&
-    t.status === "observed" && !(t.askRound > 0) && !(t.deepAskRound > 0) &&
-    !Object.values(t.consent ?? {}).some((v) => v != null));
+    t.status === "observed");
   if (!target) return null;
   target.classificationRecovery = { at: nowMs, previousLlmAt: target.llmAt, basis: "fresh-evidence" };
   target.unclassifiable = false;
@@ -108,20 +234,9 @@ export function recoverLegacyClassification(tools, nowMs) {
 // The engagement bar (§7.4): ≥3 uses across ≥2 distinct weeks.
 export const ENGAGEMENT_MIN_USES = 3;
 export const ENGAGEMENT_MIN_WEEKS = 2;
-// "Not now" re-arms after 30 days (§7.4 ring semantics).
-export const NOT_NOW_REARM_MS = 30 * 24 * 3_600_000;
-// Max connect asks per tool (§7.4: askRound < 3).
-export const MAX_ASK_ROUNDS = 3;
-// A fresh bar crossing re-arms a declined ask early: this many uses beyond
-// the snapshot taken at ask time counts as fresh engagement (§7.4
-// "a fresh axis-bar crossing"; the vitality path's bar cannot re-cross, so
-// for credentials only the 30-day timer re-arms).
+// Renewed engagement beyond a decay trip's snapshot revives the tool: this
+// many uses past it counts as fresh engagement.
 export const REARM_FRESH_USES = 2;
-// Deep-read ask bar (spec §7.6 + BET-1404 on-call decision): max relevance
-// ≥ 0.5. The vitality half of the bar is `ewma > 0` — the only vitality
-// threshold precedent in shipped code (the daily-cadence regime,
-// `effectiveCadenceMs`); selectivity belongs to the relevance half.
-export const DEEP_RELEVANCE_MIN = 0.5;
 // Dismissal decay chain (spec §7.6): trip when the as_source Beta lower bound
 // drops below 0.3 after ≥3 reports (§9.4's 0.95 tail convention). "Then
 // dormant" is the §7.3 dead condition under the standard lifecycle — no
@@ -134,10 +249,6 @@ export const TOOL_CLASSIFY_TASK_CLASS = "ambient-summarize";
 const DAY_MS = 24 * 3_600_000;
 const WEEK_MS = 7 * DAY_MS;
 const EWMA_TAU_DAYS = 7; // engagement EWMA decay constant (1-week τ)
-
-export function emptyConsent() {
-  return { metadata: null, deep_read: null, write: null };
-}
 
 export function emptyVitality() {
   return { last_event: null, inflow_rate: null, ewma: null, last_probed: null };
@@ -161,8 +272,8 @@ function humanize(identity) {
 
 // §7.2 schema (verbatim axes) + the lifecycle bookkeeping the engine needs
 // on top: engagement/vitality are the spec'd axes; uses/weeksActive/weeks are
-// derived counters (the bar's inputs); askRound/askAtUses/reArmAt/
-// unneverAtUses drive the §7.4 ask gate.
+// derived counters (the bar's inputs). Access is NOT a field here — it is
+// derived from the secret store at decision time.
 function baseTool(identity, ts) {
   return {
     tool: identity,
@@ -182,15 +293,6 @@ function baseTool(identity, ts) {
     evidence: [],
     status: "observed",
     role: null, // §7.3 quadrants need vitality probes (§7.5) — derived later
-    consent: emptyConsent(),
-    askRound: 0,
-    askAtUses: 0,
-    reArmAt: null,
-    unneverAtUses: null,
-    // Deep-read ring ask bookkeeping (§7.4 ring semantics apply per ask).
-    deepAskRound: 0,
-    deepReArmAt: null,
-    lastDeepAskDay: null,
     // Dismissal decay chain (§7.6): the as_source trip's persisted state.
     asSourceDecayed: false,
     decayedAtUses: 0,
@@ -244,32 +346,6 @@ export function deriveRole(tool, { nowMs = Date.now() } = {}) {
 // Either axis crossed its bar (§7.4 observed → candidate).
 export function barCrossed(tool) {
   return engagementBarMet(tool) || hasCredential(tool);
-}
-
-// The deep-read ask bar (§7.6): a tool with metadata consent whose vitality ×
-// relevance clears the bar — vitality EWMA high (`ewma > 0`, the daily-cadence
-// regime; BET-1404 on-call decision) AND max relevance ≥ 0.5. Returns the
-// bar's state plus the argmax-relevance project (what the ask's concrete
-// intent names). `met` implies metadata consent; the deep ask adds its own
-// consent gates on top.
-export function deepReadBar(tool) {
-  const consent = tool?.consent ?? {};
-  if (consent.metadata !== "yes") return { met: false, project: null, relevance: 0 };
-  const ewma = tool?.vitality?.ewma;
-  if (!(typeof ewma === "number" && ewma > 0)) return { met: false, project: null, relevance: 0 };
-  let project = null;
-  let best = 0;
-  for (const [p, r] of Object.entries(tool?.relevance ?? {})) {
-    const s = Number(r);
-    if (Number.isFinite(s) && s > best) {
-      best = s;
-      project = p;
-    }
-  }
-  if (project === null || !(best >= DEEP_RELEVANCE_MIN)) {
-    return { met: false, project, relevance: best };
-  }
-  return { met: true, project, relevance: best };
 }
 
 // Near-duplicate suppression (§7.3): a host that is a subdomain of an
@@ -328,17 +404,28 @@ export function fuseRow(tools, row, { nowMs } = {}) {
   }
 
   if (row.identity == null) {
-    // Unclassified raw evidence → a raw registry entry keyed by the token
-    // itself, for the one-shot LLM classification (§7.1-4). Labels stay
-    // log-only.
-    const rawIdentity = rawIdentityFromDetail(detail);
-    if (rawIdentity) row = { ...row, identity: rawIdentity, source: "raw" };
+    // Channel 1: a credential names its tool the same way the §7.4 grant
+    // does, so the evidence lands ON that tool — providing GITHUB_PAT is
+    // engagement with github, not with a phantom "github_pat" row nothing
+    // can ever reach (the store grants `github`). A key the catalog cannot
+    // place falls through to the raw path below, which is what the one-shot
+    // LLM classification is for.
+    const fromSecret = detail.startsWith("secret:") ? matchSecretIdentity(detail.slice("secret:".length)) : null;
+    if (fromSecret) {
+      row = { ...row, identity: fromSecret, source: "catalog" };
+    } else {
+      // Unclassified raw evidence → a raw registry entry keyed by the token
+      // itself, for the one-shot LLM classification (§7.1-4). Labels stay
+      // log-only.
+      const rawIdentity = rawIdentityFromDetail(detail);
+      if (rawIdentity) row = { ...row, identity: rawIdentity, source: "raw" };
+    }
   }
 
   const identity = typeof row.identity === "string" && row.identity ? row.identity.toLowerCase() : null;
   if (!identity) return arr; // no derivable identity — log-only evidence
 
-  let tool = arr.find((t) => t?.tool === identity || t?.aliases?.includes(identity));
+  let tool = findToolRow(arr, identity);
   if (!tool) {
     tool = baseTool(identity, ts);
     tool.raw = row.source === "raw";
@@ -396,32 +483,61 @@ export function createToolRegistry(deps = {}) {
     registryStore = toolRegistryStore,
     usageStore = toolUsageStore,
     classificationStore = toolClassificationStore,
-    cards = null, // { upsertConnect, resolveConnectCards, listOpen }
     ledger = ledgerStore,
-    recordVerdict = null, // async ({subject, verdict, never?}) => {ok}
     runEphemeral = null, // async ({taskClass, context}) => {text}
+    // The access grant's source of truth: the secret store's KEY LIST, read
+    // at decision time. An array of key NAMES and nothing else — see
+    // `listSecretKeys`.
+    listSecretKeys: readSecretKeys = () => listSecretKeys(),
     now = () => Date.now(),
     // I/O seams for the daily scan (index.mjs supplies the live ones).
     collectDb = null, // async ({sinceTs, untilTs, cap}) => db part rows
     collectSurfaces = null, // async () => {config, forgeRepos, webhooks, gitRemotes, schedules}
     backfillStartInstant = null, // first-scan lower bound (the backfill range)
     // BET-1396 §7.5: async (toolId, {secret}) — the probe runner's
-    // scaffoldSpec; called at consent time so the ENGINE authors the tool's
-    // probe-spec template (AI-authored content goes through the runner's
-    // validated writeSpec; no other writer touches probes/<tool>.yaml).
+    // scaffoldSpec; called for every tool the secret store grants (the grant
+    // IS the trigger) so the ENGINE authors the tool's probe-spec template.
+    // AI-authored content goes through the runner's validated writeSpec; no
+    // other writer touches probes/<tool>.yaml. Idempotent per tool.
     scaffoldProbes = null,
   } = deps;
+
+  // ---- The access grant (the single rule) ---------------------------------
+  // Every stored key → the ONE tool it names → `identity → key`. Built fresh
+  // on every call: the store is the live control surface, so a secret added a
+  // second ago grants immediately and a deleted one stops granting
+  // immediately. A key that names no known tool, or names more than one,
+  // contributes nothing (see matchSecretIdentity). Key NAMES only — no value,
+  // no hint, nothing else is in scope here.
+  //
+  // Deliberately uncached. This is an authorization decision, and a cache is
+  // a second source of truth that can disagree with the store; the read is
+  // one small JSON file and its callers (probe ticks, drill-down renders) are
+  // minutes apart, not a tight loop. Correctness over a micro-optimisation.
+  function grantedTools() {
+    let keys;
+    try {
+      keys = readSecretKeys() ?? [];
+    } catch {
+      return new Map();
+    }
+    const granted = new Map();
+    for (const key of Array.isArray(keys) ? keys : []) {
+      const identity = typeof key === "string" ? matchSecretIdentity(key) : null;
+      if (identity && !granted.has(identity)) granted.set(identity, key);
+    }
+    return granted;
+  }
 
   // BET-1464 defect 3: every tool-registry.json write routes through
   // patchStore — the read-fresh-merge-save runs under the registry store's
   // own mutex, keyed by the store path. This replaces the old per-instance
   // write chain (`serialized`) with the ONE shared discipline every CTO
   // store writer uses: a writer whose body awaits (the scan's db batch, the
-  // LLM classification, the consent-time probe scaffold) holds the mutex
-  // across the whole body, so a connect answer landing mid-scan can no
-  // longer be silently overwritten by the scan's stale save — the user's
-  // explicit "never" reverting (the same snapshot-spreading-writer class
-  // BET-1425 fixed for engine-state). Mutators receive the RAW store payload
+  // LLM classification) holds the mutex across the whole body, so a
+  // concurrent writer's row can no longer be silently overwritten by a stale
+  // save (the same snapshot-spreading-writer class BET-1425 fixed for
+  // engine-state). Mutators receive the RAW store payload
   // and normalize via payloadFrom; returning an empty patch means "no
   // change, no save" (the early-exit error paths rely on that).
   function patchRegistry(mutate) {
@@ -432,7 +548,7 @@ export function createToolRegistry(deps = {}) {
     try {
       return payloadFrom(await registryStore.load());
     } catch {
-      return { v: TOOL_REGISTRY_VERSION, tools: [], lastScanTs: null, lastFusedTs: null, lastAskDay: null, lastDeepAskDay: null };
+      return { v: TOOL_REGISTRY_VERSION, tools: [], lastScanTs: null, lastFusedTs: null };
     }
   }
 
@@ -490,7 +606,7 @@ export function createToolRegistry(deps = {}) {
     await patchStore(classificationStore, (fresh) => {
       const records = fresh.records ?? {};
       const eligible = payload.tools.filter((t) => t.raw && !t.unclassifiable && t.llmAt == null &&
-        !Object.values(t.consent ?? {}).some((v) => v != null) && t.uses >= RAW_CLASSIFY_MIN_USES);
+        t.uses >= RAW_CLASSIFY_MIN_USES);
       target = eligible.find((t) => ["resolved", "rejected"].includes(records[t.tool]?.status));
       if (target) {
         attempt = records[target.tool];
@@ -560,7 +676,7 @@ export function createToolRegistry(deps = {}) {
       return next();
     }
     // Merge the raw entry into the canonical identity (or create it).
-    let canon = payload.tools.find((t) => t?.tool === canonical);
+    let canon = findToolRow(payload.tools, canonical);
     if (!canon) {
       canon = baseTool(canonical, target.firstSeenTs);
       canon.source = "llm";
@@ -590,12 +706,12 @@ export function createToolRegistry(deps = {}) {
     return next();
   }
 
-  // Lifecycle (§7.3/§7.4): EWMA decay, observed→candidate promotion, and at
-  // most one new connect ask per day. Returns `{changed, asked}`.
+  // Lifecycle (§7.3): EWMA decay, decay-chain revival, and the
+  // observed→candidate promotion. Nothing here asks the user anything — the
+  // secret store is the only grant. Returns `{changed}`.
   async function lifecycleStep(payload) {
     const nowMs = now();
     let changed = false;
-    let asked = null;
 
     // Decay every tool's engagement EWMA to now (single lazy application).
     for (const t of payload.tools) {
@@ -608,162 +724,43 @@ export function createToolRegistry(deps = {}) {
     }
 
     // §7.6 decay-chain revival (§7.3/B7): renewed engagement re-promotes a
-    // tripped tool — fresh uses beyond the trip's snapshot clear the flag
-    // (deep analyses + candidate generation resume) and the deep-read ask
-    // re-arms on the §7.4 30-day timer. No second dormancy definition: the
-    // standard lifecycle owns everything downstream (Q2 decision).
+    // tripped tool — fresh uses beyond the trip's snapshot clear the flag so
+    // deep analyses + candidate generation resume. No second dormancy
+    // definition: the standard lifecycle owns everything downstream.
     for (const t of payload.tools) {
       if (t?.asSourceDecayed !== true) continue;
       if ((t?.uses ?? 0) > (t?.decayedAtUses ?? 0) + REARM_FRESH_USES) {
         t.asSourceDecayed = false;
         t.decayedAtUses = 0;
-        t.deepReArmAt = nowMs + NOT_NOW_REARM_MS;
         changed = true;
         await ledgerLog({ kind: "cto.tool.as_source_revived", tool: t.tool, uses: t.uses ?? 0 });
       }
     }
 
-    // Promote observed → candidate when either axis crosses its bar. After an
-    // un-never (§7.4: "returns the tool to observed; a new ask still requires
-    // a fresh bar crossing") the promotion needs NEW engagement beyond the
-    // un-never snapshot — barCrossed is monotone in uses, so without the
-    // snapshot a just-un-never'd tool would instantly re-promote and re-ask.
+    // Promote observed → candidate when either axis crosses its bar.
     for (const t of payload.tools) {
       if (t.raw || t.unclassifiable) continue;
       if (t?.status !== "observed" || !barCrossed(t)) continue;
-      if (t.unneverAtUses != null && (t?.uses ?? 0) <= t.unneverAtUses + REARM_FRESH_USES) continue;
-      t.unneverAtUses = null;
       t.status = "candidate";
       changed = true;
       await ledgerLog({ kind: "cto.tool.candidate", tool: t.tool, uses: t.uses, weeksActive: t.weeksActive });
     }
 
-    // Connect-ask gate (§7.4): candidate + no consent yet + askRound < 3 +
-    // re-armed + no open connect card + ≤1 new ask/day.
-    if (cards && typeof cards.upsertConnect === "function") {
-      let open = [];
-      try {
-        open = (typeof cards.listOpen === "function" ? await cards.listOpen() : []) ?? [];
-      } catch {
-        open = [];
-      }
-      const openConnectTools = new Set(
-        open.flatMap((c) => (c?.variant === "connect" && Array.isArray(c?.refs) ? c.refs : [])),
-      );
-      const today = new Date(nowMs).toISOString().slice(0, 10);
-      const eligible = payload.tools
-        .filter((t) => {
-          if (t.raw || t.unclassifiable) return false;
-          if (t?.status !== "candidate") return false;
-          const consent = t?.consent ?? {};
-          if (consent.metadata === "yes" || consent.metadata === "never") return false;
-          if ((t?.askRound ?? 0) >= MAX_ASK_ROUNDS) return false;
-          if (consent.metadata === "no") {
-            // §7.4 re-arm semantics: 30 days, or a fresh axis-bar crossing —
-            // BUT the fresh-crossing path exists only on the engagement axis
-            // (a credential-exists bar cannot re-cross, so on the vitality
-            // path the 30-day timer is the only re-arm).
-            const fresh = engagementBarMet(t) && (t?.uses ?? 0) > (t?.askAtUses ?? 0) + REARM_FRESH_USES;
-            const timer = t?.reArmAt != null && nowMs >= t.reArmAt;
-            if (!timer && !fresh) return false;
-          }
-          if (openConnectTools.has(t.tool)) return false;
-          return barCrossed(t);
-        })
-        .sort((a, b) => (b?.uses ?? 0) - (a?.uses ?? 0));
-
-      if (eligible.length && payload.lastAskDay !== today) {
-        const t = eligible[0];
-        if (t.consent?.metadata === "no") t.consent.metadata = null; // re-armed
-        const ev = (t?.evidence ?? []).slice(-4).map((e) => `${e?.channel}: ${e?.detail}`);
-        const why = [
-          `${t.displayName ?? t.tool} showed up ${t.uses}× across ${t.weeksActive} week(s) of agent work`,
-          hasCredential(t) ? "and a credential for it exists on this box" : "",
-          "— grant read-only metadata access so the CTO can keep it in its model, or decline.",
-        ]
-          .filter(Boolean)
-          .join(" ");
-        await cards.upsertConnect({
-          toolId: t.tool,
-          title: `Connect ${t.displayName ?? t.tool} (read-only)?`,
-          body: why,
-          evidence: ev,
-          refs: [t.tool],
-          ts: nowMs,
-        });
-        t.askRound = (t.askRound ?? 0) + 1;
-        t.askAtUses = t.uses ?? 0;
-        t.reArmAt = null;
-        payload.lastAskDay = today;
-        asked = t.tool;
-        changed = true;
-        await ledgerLog({ kind: "cto.tool.ask", tool: t.tool, askRound: t.askRound });
-      }
-
-      // Deep-read ask (§7.6, BET-1404): one ring up from metadata — for an
-      // integrated tool whose metadata consent exists but deep_read hasn't
-      // been asked (or was declined and re-armed), whose vitality × relevance
-      // clears the bar. The ask states the concrete intent (analyze <tool>'s
-      // data about <project> overnight and report findings). Ring semantics
-      // per §7.4: never/not-now rules identical (30-day timer re-arm only —
-      // the bar's vitality half cannot re-cross); ≤1 new ask/day; never for
-      // a chain-tripped tool (the cascade stopped deep analyses).
-      const deepEligible = payload.tools
-        .filter((t) => {
-          if (t.raw || t.unclassifiable) return false;
-          if (t?.status !== "integrated" || t?.asSourceDecayed === true) return false;
-          const consent = t?.consent ?? {};
-          if (consent.metadata !== "yes") return false;
-          if (consent.deep_read === "yes" || consent.deep_read === "never") return false;
-          if ((t?.deepAskRound ?? 0) >= MAX_ASK_ROUNDS) return false;
-          if (consent.deep_read === "no") {
-            // Vitality-path rule: the 30-day timer is the only re-arm.
-            if (!(t?.deepReArmAt != null && nowMs >= t.deepReArmAt)) return false;
-          }
-          if (openConnectTools.has(t.tool)) return false;
-          return deepReadBar(t).met;
-        })
-        .sort((a, b) => (b?.uses ?? 0) - (a?.uses ?? 0));
-
-      if (deepEligible.length && payload.lastDeepAskDay !== today) {
-        const t = deepEligible[0];
-        if (t.consent?.deep_read === "no") t.consent.deep_read = null; // re-armed
-        const bar = deepReadBar(t);
-        const name = t.displayName ?? t.tool;
-        const ev = (t?.evidence ?? []).slice(-4).map((e) => `${e?.channel}: ${e?.detail}`);
-        await cards.upsertConnect({
-          toolId: t.tool,
-          ring: "deep_read",
-          title: `Let the CTO analyze ${name}'s data?`,
-          body: `The CTO would analyze ${name}'s data about ${bar.project} overnight and report findings — one read-only pass beyond metadata. Reports can be dismissed, and ignored reports wind the analyses down.`,
-          evidence: ev,
-          refs: [t.tool],
-          ts: nowMs,
-        });
-        t.deepAskRound = (t.deepAskRound ?? 0) + 1;
-        t.deepReArmAt = null;
-        payload.lastDeepAskDay = today;
-        changed = true;
-        await ledgerLog({ kind: "cto.tool.deep_ask", tool: t.tool, project: bar.project, askRound: t.deepAskRound });
-      }
-    }
-
-    return { changed, asked };
+    return { changed };
   }
 
   // The daily batch (§7.1-2/3 + §7.3). First scan after install runs over the
   // cold-start backfill range; later scans run since the previous watermark.
   // The whole body runs under the registry store's mutex (BET-1464 defect 3):
   // the scan holds its snapshot across seconds-long awaits, so without the
-  // mutex a connect answer landing mid-scan would be reverted by the scan's
-  // save. Returns `{ok, scanned, asked}`.
+  // mutex a concurrent writer's row would be reverted by the scan's save.
+  // Returns `{ok, scanned}`.
   async function dailyScan() {
     const previous = await loadPayload();
     if (previous.scanRetryAt > now()) return { ok: false, deferred: true, retryAt: previous.scanRetryAt, scanned: 0 };
     const nowMs = now();
     const untilTs = nowMs;
     const rows = [];
-    let asked = null;
     let scanLedger = false;
     let scanOk = true;
     let scanCode;
@@ -809,22 +806,22 @@ export function createToolRegistry(deps = {}) {
         recoverLegacyClassification(payload.tools, nowMs);
       }
       await classifyOneRaw(payload);
-      const { changed, asked: askTool } = await lifecycleStep(payload);
+      const { changed } = await lifecycleStep(payload);
       payload.tools = retainUnresolved(payload.tools, nowMs);
       if (dbCursor) {
         payload.lastScanTs = dbCursor.ts;
         payload.lastScanId = dbCursor.id;
       }
-      asked = askTool;
-      scanLedger = changed || askTool != null;
+      scanLedger = changed;
       payload.scanFailures = scanOk ? 0 : payload.scanFailures + 1;
       payload.scanRetryAt = scanOk ? 0 : nowMs + (scanCode === "unsupported-runtime" ? DAY_MS :
         Math.min(3_600_000, 300_000 * 2 ** Math.min(payload.scanFailures - 1, 4)));
       return payload;
     });
     if (scanLedger) {
-      await ledgerLog({ kind: "cto.tool.scan", asked: asked ?? null });
+      await ledgerLog({ kind: "cto.tool.scan" });
     }
+    await scaffoldGrantedTools();
     try {
       await appendUsage(rows.map((row) => ({ ...row, fused: true })));
     } catch {
@@ -832,15 +829,22 @@ export function createToolRegistry(deps = {}) {
     }
     const saved = await loadPayload();
     // Only prune outcomes proven applied to a committed registry. Pending
-    // results and reservations survive; never modify consent or aliases here.
+    // results and reservations survive; never modify aliases here.
     await patchStore(classificationStore, (fresh) => {
       const records = { ...fresh.records };
       let changed = false, pruned = 0;
       for (const [key, record] of Object.entries(records)) {
         if (!["resolved", "rejected"].includes(record.status)) continue;
+        // NOT an identity lookup, and deliberately not routed through the
+        // resolver: this asks "was THIS classification outcome applied to the
+        // registry", which is a question about one specific record. The
+        // rejected branch must match the raw row that was rejected under its
+        // own name (an alias would mean a different decision was applied);
+        // the resolved branch uses the resolver, because a resolved key is
+        // exactly an identity the merged row now answers to.
         const applied = saved.tools.some((t) => record.status === "rejected"
           ? t.tool === key && t.unclassifiable && t.llmAt === record.at
-          : !t.raw && (t.tool === key || t.aliases?.includes(key)));
+          : !t.raw && identitiesOf(t).includes(key));
         if (!record.appliedAt && applied) { records[key] = { ...record, appliedAt: now() }; changed = true; }
         if (record.appliedAt && now() - record.appliedAt > 90 * DAY_MS && pruned < 1000) {
           delete records[key]; changed = true; pruned++;
@@ -849,203 +853,132 @@ export function createToolRegistry(deps = {}) {
       return changed ? { records } : {};
     });
     if (!scanOk) await ledgerLog({ kind: "cto.tool.scan_unavailable", code: scanCode, retryAt: saved.scanRetryAt });
-    return { ok: scanOk, partial: Boolean(saved.lastScanId), scanned: rows.length, asked: asked ?? null };
+    return { ok: scanOk, partial: Boolean(saved.lastScanId), scanned: rows.length };
   }
 
-  // Resolve a connect ask (§7.4 three-way, per ring). Writes the consent
-  // ring, the §9.5 verdict (accept / dismiss / never), and resolves the open
-  // card. `ring` selects which ring the ask was about: "metadata" (default)
-  // or "deep_read" (BET-1404 — the deep-read ask's connect grants deep_read,
-  // its not-now re-arms on the 30-day timer; never kills ALL rings either
-  // way). A deep_read grant backstops on metadata consent (the ask gate
-  // already requires it; this keeps a hand-crafted answer from skipping a
-  // ring).
-  async function resolveConnect({ tool, answer, ring = "metadata" } = {}) {
-    const id = typeof tool === "string" ? tool.trim().toLowerCase() : "";
-    if (!id) return { ok: false, error: "missing tool" };
-    if (answer !== "connect" && answer !== "not-now" && answer !== "never") {
-      return { ok: false, error: `invalid answer "${answer}"` };
+  // The grant IS the trigger: every tool the secret store grants gets its
+  // §7.5 probe-spec template authored, filled with the granting key's NAME
+  // (never its value). `scaffoldSpec` is idempotent — a tool that already has
+  // a spec is left exactly as it is, so this runs safely on every scan and
+  // needs no per-tool bookkeeping. Best-effort: the scan never fails on it.
+  async function scaffoldGrantedTools() {
+    if (typeof scaffoldProbes !== "function") return;
+    for (const [tool, key] of grantedTools()) {
+      await scaffoldProbes(tool, { secret: key }).catch(() => {});
     }
-    if (ring !== "metadata" && ring !== "deep_read") {
-      return { ok: false, error: `invalid ring "${ring}"` };
-    }
-    const nowMs = now();
-    // The consent write runs under the registry store's mutex (BET-1464
-    // defect 3). An early-exit error path returns an empty patch: no save.
-    let err = null;
-    await patchRegistry(async (payload) => {
-      const t = payload.tools.find((x) => x?.tool === id);
-      if (!t) {
-        err = { ok: false, error: `unknown tool "${id}"` };
-        return null;
-      }
-      t.consent = t.consent ?? emptyConsent();
-      if (answer === "connect") {
-        if (ring === "deep_read") {
-          if (t.consent.metadata !== "yes") {
-            err = { ok: false, error: `tool "${id}" has no metadata consent` };
-            return null;
-          }
-          t.consent.deep_read = "yes";
-          t.deepReArmAt = null;
-          await ledgerLog({ kind: "cto.tool.consent", tool: id, ring: "deep_read", value: "yes" });
-        } else {
-          // The metadata ring is granted. Status stays `candidate` until the
-          // first §7.5 probe actually runs (applyProbeResult flips it).
-          t.consent.metadata = "yes";
-          t.reArmAt = null;
-          await ledgerLog({ kind: "cto.tool.consent", tool: id, ring: "metadata", value: "yes" });
-          // §7.5 BET-1396: the ENGINE authors the tool's probe-spec template at
-          // consent time, filled with the evidenced credential key (if any). The
-          // file is engine-written; its content is completed through the runner's
-          // validated writeSpec path. Best-effort — consent never depends on it.
-          if (typeof scaffoldProbes === "function") {
-            const secretRow = (t.evidence ?? []).find((e) => e?.channel === "secret" && typeof e?.detail === "string" && e.detail.startsWith("secret:"));
-            await scaffoldProbes(id, { secret: secretRow ? secretRow.detail.slice("secret:".length) : null }).catch(() => {});
-          }
-        }
-      } else if (answer === "not-now") {
-        if (ring === "deep_read") {
-          t.consent.deep_read = "no";
-          t.deepReArmAt = nowMs + NOT_NOW_REARM_MS;
-          await ledgerLog({ kind: "cto.tool.consent", tool: id, ring: "deep_read", value: "no" });
-        } else {
-          t.consent.metadata = "no";
-          t.reArmAt = nowMs + NOT_NOW_REARM_MS;
-          t.askAtUses = t.uses ?? 0;
-          await ledgerLog({ kind: "cto.tool.consent", tool: id, ring: "metadata", value: "no" });
-        }
-      } else {
-        // Never: kills ALL rings and suppresses future asks (revocable only in
-        // the §10.5 tool drill-down).
-        t.consent = { metadata: "never", deep_read: "never", write: "never" };
-        await ledgerLog({ kind: "cto.tool.consent", tool: id, ring: "metadata", value: "never" });
-      }
-      return payload;
-    });
-    if (err) return err;
-
-    // §9.5: every UI control that expresses a judgment writes exactly one
-    // verdict. Connect → accept; Not now → dismiss; Never → never. The class
-    // names the ring the ask was about (metadata / deep-read), so §9.4
-    // per-class trust counting and the as_source sink stay unambiguous.
-    if (typeof recordVerdict === "function") {
-      try {
-        const subjectClass = ring === "deep_read" ? "tool-deep-read" : "tool-metadata";
-        if (answer === "connect") {
-          await recordVerdict({ subject: { type: "tool", id, class: subjectClass }, verdict: "accept" });
-        } else if (answer === "not-now") {
-          await recordVerdict({ subject: { type: "tool", id, class: subjectClass }, verdict: "dismiss" });
-        } else {
-          await recordVerdict({ subject: { type: "tool", id, class: subjectClass }, verdict: "never", never: true });
-        }
-      } catch {
-        /* best-effort — the consent ring is the source of truth */
-      }
-    }
-
-    // Close the open connect card for this tool (best-effort).
-    if (cards && typeof cards.resolveConnectCards === "function") {
-      try {
-        await cards.resolveConnectCards(id, `connect answer: ${answer}`);
-      } catch {
-        /* best-effort */
-      }
-    }
-    return { ok: true, tool: id, answer };
   }
 
-  // §7.4 "Un-never" (the tool drill-down, B11, calls this): returns the tool
-  // to `observed`, clears the never-suppression on every ring, and requires a
-  // FRESH bar crossing before the next ask — enforced by the `unneverAtUses`
-  // snapshot the promotion gate checks (barCrossed is monotone in uses, so
-  // without the snapshot the tool would instantly re-promote and re-ask,
-  // exactly the immediate re-prompt the spec's fresh-crossing requirement
-  // exists to prevent). The server rule ships here; the drill-down UI/route
-  // is B11's.
-  async function unNever(toolId) {
-    const id = typeof toolId === "string" ? toolId.trim().toLowerCase() : "";
-    if (!id) return { ok: false, error: "missing tool" };
-    let err = null;
-    let uses = 0;
-    await patchRegistry(async (payload) => {
-      const t = payload.tools.find((x) => x?.tool === id);
-      if (!t) {
-        err = { ok: false, error: `unknown tool "${id}"` };
-        return null;
-      }
-      if (t.consent?.metadata !== "never") {
-        err = { ok: false, error: `tool "${id}" is not never'd` };
-        return null;
-      }
-      t.consent = emptyConsent();
-      t.status = "observed";
-      t.unneverAtUses = t.uses ?? 0;
-      t.reArmAt = null;
-      uses = t.uses ?? 0;
-      return payload;
-    });
-    if (err) return err;
-    await ledgerLog({ kind: "cto.tool.unnever", tool: id, uses });
-    return { ok: true, tool: id };
-  }
-
-  // §10.5 row-4 per-ring revoke (§7.4 "consent rings … revocable"): writes
-  // the ring to "no". Revoking metadata stops the §7.5 probes for the tool
-  // automatically (consentContext requires metadata=yes) — no extra wiring.
-  // Revoking a ring that was never granted (or that is "never"-ring-killed)
-  // is a no-op error, not a silent pass — the drill-down disables the button
-  // for those states, and the server is the backstop.
-  async function revokeConsent(toolId, ring) {
-    const id = typeof toolId === "string" ? toolId.trim().toLowerCase() : "";
-    if (!id) return { ok: false, error: "missing tool" };
-    if (ring !== "metadata" && ring !== "deep_read" && ring !== "write") {
-      return { ok: false, error: `ring must be one of metadata, deep_read, write` };
+  // THE CHOKEPOINT. Every probe / read path asks here whether the CTO may
+  // touch a tool, and the answer comes from the secret store's key list —
+  // read fresh, right now. A key that names this tool grants FULL access, so
+  // the answer no longer depends on which ring a caller asks about — the
+  // callers are unchanged, and every one of them gets the same "yes". No
+  // secret → null: no access, and nothing is asked of the user.
+  //
+  // The STORE is the only thing that grants. The registry is consulted for
+  // one purpose only — to learn which OTHER names this tool answers to (§7.2
+  // aliases) — and it can only ever WIDEN the identity set: a name with no
+  // row resolves to itself, so a secret nothing has used still grants, and a
+  // consent record left by the retired ask flow is not consulted at all.
+  // Rows cannot withhold a grant; they can only tell us it is the same tool.
+  // The one limit — a known catalog name never inherits another service's
+  // key through an alias bridge — lives in the resolver (resolveIdentities +
+  // grantedKeyForName), not here: this is a consumer of the one seam.
+  async function accessFor(tool) {
+    const norm = normalizeToolId(tool);
+    if (!norm) return null;
+    const granted = grantedTools();
+    // Cheap path first: the name itself is granted, whatever the registry says.
+    const direct = granted.get(norm);
+    if (direct) return direct;
+    let tools = [];
+    try {
+      tools = (await loadPayload()).tools;
+    } catch {
+      tools = [];
     }
-    let err = null;
-    await patchRegistry(async (payload) => {
-      const t = payload.tools.find((x) => x?.tool === id);
-      if (!t) {
-        err = { ok: false, error: `unknown tool "${id}"` };
-        return null;
-      }
-      const cur = { ...emptyConsent(), ...(t.consent ?? {}) };
-      if (cur[ring] !== "yes") {
-        err = { ok: false, error: `ring "${ring}" is not granted for "${id}"` };
-        return null;
-      }
-      t.consent = { ...cur, [ring]: "no" };
-      return payload;
-    });
-    if (err) return err;
-    await ledgerLog({ kind: "cto.tool.consent", tool: id, ring, value: "no" });
-    return { ok: true, tool: id, ring, value: "no" };
+    return grantedKeyForName(granted, norm, resolveIdentities(tools, norm));
   }
 
-  // Read a consent ring for the future probe / tool-write gates (§7.4:
-  // "metadata consent ≠ deep-read consent ≠ write").
-  async function consentFor(tool, ring = "metadata") {
-    const id = typeof tool === "string" ? tool.trim().toLowerCase() : "";
-    if (!id) return null;
-    const payload = await loadPayload();
-    const t = payload.tools.find((x) => x?.tool === id);
-    return t ? (t.consent?.[ring] ?? null) : null;
+  async function consentFor(tool) {
+    return (await accessFor(tool)) ? "yes" : null;
+  }
+
+  // The grant behind a tool, for the §10.5 drill-down: which stored KEY makes
+  // it reachable (a key name is not a secret), or null when nothing does.
+  async function grantFor(tool) {
+    return (await accessFor(tool)) ?? null;
+  }
+
+  // Is THIS stored key authorized FOR this tool — by the SAME authorization
+  // seam every regular grant goes through, with NO independent alias policy?
+  // The §7.5 probe specs pin a granting key's NAME at scaffold time; this is
+  // how the runner checks a pinned key before sending that credential to the
+  // tool's endpoint. Two conditions, both required:
+  //   1. the EXACT pinned key is still present in the store — its identity
+  //      being covered by some OTHER key is not enough (GITHUB_OLD_TOKEN
+  //      absent must not pass because GITHUB_TOKEN exists);
+  //   2. the policy would serve `tool` with a key of the pinned key's OWN
+  //      identity — asked of grantedKeyForName itself, the same function the
+  //      access chokepoint uses, so a cross-service alias (github's row
+  //      claiming "stripe") can never authorize sending STRIPE_TOKEN's
+  //      credential toward the github endpoint. When the pin fails, the
+  //      fallback (grantFor) supplies the tool's own granting key.
+  async function keyGrantedForTool(key, tool) {
+    const norm = normalizeToolId(tool);
+    if (!norm) return false;
+    const idK = typeof key === "string" ? matchSecretIdentity(key) : null;
+    if (!idK) return false;
+    let keys;
+    try {
+      keys = readSecretKeys() ?? [];
+    } catch {
+      return false;
+    }
+    if (!Array.isArray(keys) || !keys.includes(key)) return false;
+    const granted = grantedTools();
+    let tools = [];
+    try {
+      tools = (await loadPayload()).tools;
+    } catch {
+      tools = [];
+    }
+    const served = grantedKeyForName(granted, norm, resolveIdentities(tools, norm));
+    if (!served) return false;
+    // grantedKeyForName answers with ONE key; a sibling key of the SAME
+    // identity (both in the store) is the same service and is authorized too.
+    return matchSecretIdentity(served) === idK;
   }
 
   // ---------------------------------------------------------------------------
   // BET-1396 — §7.3 vitality / §7.6 relevance / §7.4 lifecycle. All mutating
   // writers are patchStore writers (BET-1464 defect 3) — the whole-payload
-  // store's lost-update guard is the store mutex, shared with the scan and
-  // connect writers.
+  // store's lost-update guard is the store mutex, shared with the scan.
   // ---------------------------------------------------------------------------
 
   // The full row for one tool (probe runner reads evidence hosts + vitality;
   // the probe spec's host allowlist is derived from this). null when unknown.
   async function toolRow(toolId) {
-    const id = typeof toolId === "string" ? toolId.trim().toLowerCase() : "";
+    const id = normalizeToolId(toolId);
     if (!id) return null;
-    const payload = await loadPayload();
-    return payload.tools.find((x) => x?.tool === id) ?? null;
+    return findToolRow((await loadPayload()).tools, id);
+  }
+
+  // The identity SET behind a tool name — the exact resolution the grant
+  // (accessFor) is checked against, exposed for consumers that key their OWN
+  // state by tool name (the §7.5 probe spec/state files) so their lookup can
+  // agree with the grant under any of the row's names. Canonical first, the
+  // requested name never dropped by the caller (it prepends its own).
+  async function identitiesFor(toolId) {
+    const id = normalizeToolId(toolId);
+    if (!id) return [];
+    let tools = [];
+    try {
+      tools = (await loadPayload()).tools;
+    } catch {
+      tools = [];
+    }
+    return resolveIdentities(tools, id);
   }
 
   // The §7.6 decay chain's probing cap (Q2 cascade): a chain-tripped tool's
@@ -1070,14 +1003,14 @@ export function createToolRegistry(deps = {}) {
   // wrapper serialization exists any more (BET-1464 defect 3); nesting a
   // second patchStore on the same store would deadlock the promise tail.
   async function applyProbeResult(toolId, { fields, probedAt, cadenceMs } = {}) {
-    const id = typeof toolId === "string" ? toolId.trim().toLowerCase() : "";
+    const id = normalizeToolId(toolId);
     if (!id) return { ok: false, error: "missing tool" };
     const vit = vitalityOf(fields);
     let err = null;
     let flipped = false;
     let vitality = null;
     await patchRegistry(async (payload) => {
-      const t = payload.tools.find((x) => x?.tool === id);
+      const t = findToolRow(payload.tools, id);
       if (!t) {
         err = { ok: false, error: `unknown tool "${id}"` };
         return null;
@@ -1112,13 +1045,13 @@ export function createToolRegistry(deps = {}) {
   // §7.6 relevance: persist the weekly nano-score for one (tool, project)
   // pair into the row's `relevance[project]` (clamped to [0,1]).
   async function applyRelevance(toolId, project, score) {
-    const id = typeof toolId === "string" ? toolId.trim().toLowerCase() : "";
+    const id = normalizeToolId(toolId);
     if (!id || typeof project !== "string" || !project) return { ok: false, error: "missing tool/project" };
     const s = Number(score);
     if (!Number.isFinite(s)) return { ok: false, error: "invalid score" };
     let err = null;
     await patchRegistry(async (payload) => {
-      const t = payload.tools.find((x) => x?.tool === id);
+      const t = findToolRow(payload.tools, id);
       if (!t) {
         err = { ok: false, error: `unknown tool "${id}"` };
         return null;
@@ -1141,7 +1074,7 @@ export function createToolRegistry(deps = {}) {
   // is the §7.3 dead condition). Revival is the fresh-engagement path in
   // lifecycleStep (§7.3/B7: renewed engagement re-promotes).
   async function applyAsSource(toolId, effects) {
-    const id = typeof toolId === "string" ? toolId.trim().toLowerCase() : "";
+    const id = normalizeToolId(toolId);
     if (!id) return { ok: false, error: "missing tool" };
     const e = effects && typeof effects === "object" ? effects : {};
     const isReport = e.success === true || e.rejection === true;
@@ -1149,7 +1082,7 @@ export function createToolRegistry(deps = {}) {
     let err = null;
     let out = null;
     await patchRegistry(async (payload) => {
-      const t = payload.tools.find((x) => x?.tool === id);
+      const t = findToolRow(payload.tools, id);
       if (!t) {
         err = { ok: false, error: `unknown tool "${id}"` };
         return null;
@@ -1182,14 +1115,14 @@ export function createToolRegistry(deps = {}) {
   // One evidence row on the tool's trail (probe failures; §7.2 evidence
   // shape). Deduped on (channel, detail); capped at EVIDENCE_CAP.
   async function appendEvidence(toolId, entry) {
-    const id = typeof toolId === "string" ? toolId.trim().toLowerCase() : "";
+    const id = normalizeToolId(toolId);
     if (!id || !entry || typeof entry.channel !== "string" || typeof entry.detail !== "string") {
       return { ok: false, error: "missing tool/evidence" };
     }
     let err = null;
     let changed = false;
     await patchRegistry(async (payload) => {
-      const t = payload.tools.find((x) => x?.tool === id);
+      const t = findToolRow(payload.tools, id);
       if (!t) {
         err = { ok: false, error: `unknown tool "${id}"` };
         return null;
@@ -1211,10 +1144,41 @@ export function createToolRegistry(deps = {}) {
   // quadrant role at read time (display-only — the stored `role` is written
   // by a later issue; deriving here keeps the drill-down honest without a
   // schema write on every read).
+  //
+  // THE GRANT IS ENUMERABLE HERE, NOT JUST ANSWERABLE. Access comes from the
+  // secret store, which knows nothing about discovery, so a tool granted by a
+  // key that nothing has ever used has no registry row — and every consumer
+  // that derives access by scanning this list (the §6.7 issue surface, the
+  // §7.6 overnight candidates, the §10.5 drill-down) would silently see no
+  // access at all while `consentFor` said yes. So a granted tool with no row
+  // is projected anyway, from the store: an honest empty row (zero uses, no
+  // vitality, status `observed`) carrying its `accessKey`. It is a
+  // PROJECTION, never a write — nothing about being granted makes a tool
+  // "observed", and the registry still only records what it really saw.
+  //
+  // Both halves of that — "is this identity already here?" and "which row
+  // carries the grant?" — resolve a row's identity THE SAME WAY, through
+  // `findToolRow`, and the per-row accessKey goes through the same
+  // `grantedKeyForName` rule the access chokepoint uses. They must: an exact
+  // primary always wins over an alias, and a grant may cross an alias bridge
+  // only onto a name the catalog does not know (see the seam block above).
+  // When the resolved row does NOT display the grant — its primary is a
+  // different known service, so the alias cannot carry the key — the granted
+  // identity projects as its own row instead, keeping the list and the
+  // chokepoint in agreement. One resolver, used for both, makes that
+  // disagreement unrepresentable.
   async function listTools({ nowMs } = {}) {
     const t = Number.isFinite(nowMs) ? nowMs : now();
     const payload = await loadPayload();
-    return payload.tools.map((row) => {
+    const granted = grantedTools();
+    const seen = new Set();
+    const rows = [...payload.tools];
+    for (const tool of granted.keys()) {
+      const row = findToolRow(rows, tool);
+      if (row && grantedKeyForName(granted, normalizeToolId(row.tool), identitiesOf(row))) continue;
+      rows.push(baseTool(tool, t));
+    }
+    return rows.map((row) => {
       const vitality = { ...emptyVitality(), ...(row.vitality ?? {}) };
       return {
         tool: row.tool,
@@ -1228,8 +1192,17 @@ export function createToolRegistry(deps = {}) {
         lastSeenTs: row.engagement?.last_used ?? null,
         firstSeenTs: row.firstSeenTs ?? null,
         vitality,
-        consent: { ...emptyConsent(), ...(row.consent ?? {}) },
-        askRound: row.askRound ?? 0,
+        // Every identity this row answers to, so a consumer matching on a
+        // tool NAME sees the same identity set the grant was resolved against.
+        aliases: [...(row.aliases ?? [])],
+        // Access, as the drill-down must state it: the stored KEY that grants
+        // this tool (a key name is not a secret), or null — in which case the
+        // CTO cannot reach it and nothing will ask the user to change that.
+        // THE SAME RULE the access chokepoint applies to a request for this
+        // row's primary name (grantedKeyForName): its own key, or — only for
+        // a name the catalog does not know — a grant reached via the alias
+        // bridge.
+        accessKey: grantedKeyForName(granted, normalizeToolId(row.tool), identitiesOf(row)),
         // §7.6 chain visibility (§10.5 drill-down): counters + trip state so
         // the surface can explain why deep analyses stopped — no dead state.
         asSource: { ...(row.as_source ?? { reports: 0, accepted: 0 }) },
@@ -1238,21 +1211,32 @@ export function createToolRegistry(deps = {}) {
         // this projection; also drives the drill-down's relevance display).
         relevance: { ...(row.relevance ?? {}) },
       };
+    }).filter((row) => {
+      // One row per identity, even if an alias collided during projection.
+      if (seen.has(row.tool)) return false;
+      seen.add(row.tool);
+      return true;
     });
   }
 
   return {
     dailyScan,
-    resolveConnect,
-    unNever,
-    revokeConsent,
+    // The single access chokepoint + the grant behind it (§10.5 display).
     consentFor,
+    grantFor,
+    // Whether ONE stored key is still granted FOR a tool (same identity,
+    // still in the store, identity still serves the tool through the seam) —
+    // the probe runner's stale-pin check.
+    keyGrantedForTool,
     listTools,
     appendUsage,
     // BET-1396: §7.5 probe-runner surface (read the row, fold vitality /
     // relevance, append failure evidence). toolRow is a pure read — it never
     // touches the write mutex (must never queue behind an in-flight scan).
     toolRow,
+    // The identity set a name resolves to (the grant's own resolution) — the
+    // seam consumers outside this module key their name-spaced state by.
+    identitiesFor,
     applyProbeResult,
     applyRelevance,
     appendEvidence,

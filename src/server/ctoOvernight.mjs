@@ -656,7 +656,7 @@ export function routeRequestShaped(candidate, providers = {}) {
 }
 
 /**
- * §7.6 data-source candidates (BET-1404): ONE per deep-consented,
+ * §7.6 data-source candidates (BET-1404): ONE per granted,
  * chain-untripped, integrated tool, targeting the argmax-relevance project —
  * emitted only when a relevance score exists. `p_use = vitality.ewma ×
  * max(relevance)` (the scoring composition the issue fixes; selectivity
@@ -667,7 +667,7 @@ export function routeRequestShaped(candidate, providers = {}) {
  * in the prompt contract and a 0.5 predicted cost); its verdict seeds the
  * as_source counters via the §9.5 sink.
  * @param {Array<{tool: string, displayName?: string, status?: string,
- *   consent?: {deep_read?: string|null}, asSourceDecayed?: boolean,
+ *   accessKey?: string|null, asSourceDecayed?: boolean,
  *   as_source?: {reports?: number, accepted?: number}, relevance?: Object,
  *   vitality?: {ewma?: number|null}}>} tools registry projections (listTools)
  */
@@ -675,7 +675,10 @@ export function dataAnalysisCandidatesFromTools(tools) {
   const out = [];
   for (const t of Array.isArray(tools) ? tools : []) {
     if (!t || typeof t !== "object" || typeof t.tool !== "string" || !t.tool) continue;
-    if (t.consent?.deep_read !== "yes") continue; // deep-consented only
+    // §7.4: a key in the secret store IS the grant, and it is full — so a
+    // granted tool may be analyzed. No key naming it → the CTO cannot read
+    // it at all, so there is nothing to analyze.
+    if (typeof t.accessKey !== "string" || t.accessKey === "") continue;
     if (t.status !== "integrated") continue; // probes actually ran
     if (t.asSourceDecayed === true) continue; // chain tripped → analyses stopped
     let project = null;

@@ -654,8 +654,8 @@ export function createCtoEngine(deps = {}) {
       "Read the Adaptive CTO's external-tool registry (spec §4.5/§7, BET-1399). " +
       "Read-only. Per tool: lifecycle status, the §7.2 engagement + vitality axes, " +
       "the derived §7.3 quadrant role (both / workflow / data-source / dead), the " +
-      "§7.4 consent rings, and the §7.5 probe cadence + last result; plus the " +
-      "never list (and what un-nevering would do).",
+      "secret-store key that grants the CTO access to it (§7.4 — no key, no " +
+      "access), and the §7.5 probe cadence + last result.",
     params: {},
     run: async () => {
       if (typeof readToolRegistry !== "function") return { ok: false, error: "read_toolregistry is not wired" };

@@ -60,7 +60,13 @@ export const ACTOR = "cto";
 // router (D20) — this is the *second* timer, the card.
 export const BLOCKER_AFTER_MS = 10 * 60_000;
 
-export const VARIANTS = Object.freeze(["blocker", "decision", "veto", "connect"]);
+export const VARIANTS = Object.freeze(["blocker", "decision", "veto"]);
+// Variants this engine used to write and no longer does. A persisted card of
+// a retired variant is dropped on load: nothing can render it, nothing can
+// answer it, and a card nobody can resolve is worse than no card. The
+// connect-ask variant retired when the secret store became the only access
+// grant — there is no question left to ask.
+export const RETIRED_VARIANTS = Object.freeze(["connect"]);
 export const CARD_STATES = Object.freeze(["open", "resolved", "dismissed"]);
 
 // ACTIVITY-ledger row kinds for the card lifecycle. Resolution/dismissal write
@@ -79,9 +85,6 @@ export const HEALTH_SOURCE_KIND = "health";
 // notification fires IMMEDIATELY through the existing router (the same one
 // source 1 relies on), and the card appears at > 10 min via promoteDue.
 export const INBOX_SOURCE_KIND = "inbox";
-// Connect-ask cards (BET-1395 / §7.4): one §7.2 tool identity per card, keyed
-// by the tool id.
-export const CONNECT_SOURCE_KIND = "tool";
 // Probe-failure blocker cards (BET-1396 / §10.6-7): an auth-shaped probe
 // failure that degraded the digest. Keyed by `<tool>/<probe>`; the body
 // deep-links (in copy) to the secrets surface — the fix is a rotated key.
@@ -755,7 +758,14 @@ export function createCtoCards(deps = {}) {
     }
     return {
       payload,
-      cards: Array.isArray(payload?.cards) ? payload.cards : [],
+      // Retired variants are dropped HERE, on load, rather than in each
+      // reader: a card written by a flow that no longer exists can never be
+      // answered, so every reader (the wire view, the badge, the liveness
+      // pass) must be blind to it — including on a box that upgraded with
+      // open connect asks sitting in its store.
+      cards: (Array.isArray(payload?.cards) ? payload.cards : []).filter(
+        (c) => !RETIRED_VARIANTS.includes(c?.variant),
+      ),
     };
   }
 
@@ -1408,73 +1418,6 @@ export function createCtoCards(deps = {}) {
     });
   }
 
-  // Connect-ask card writer (BET-1395 / §7.4 one connect ask, §10.3
-  // connect-ask variant). Upserts by the tool's stable id — re-raising the
-  // same tool's ask (re-arm path) updates the card in place, never dups.
-  // The three-way answer is bound at generation time to the tool identity;
-  // resolution runs through the registry (POST /api/cto/tools/connect),
-  // which writes the consent ring + the §9.5 verdict and calls
-  // resolveConnectCards. No notification path — like decision cards, this is
-  // a resting needs-you surface.
-  async function upsertConnect({ toolId, title, body, evidence = [], refs = [], ring = "metadata", ts = now() } = {}) {
-    if (!toolId || typeof toolId !== "string") return { ok: false, changed: false, isNew: false };
-    const deep = ring === "deep_read";
-    const sourceId = deep ? `${toolId}:deep` : toolId;
-    return upsertOpenCard({
-      id: stableCardId(CONNECT_SOURCE_KIND, sourceId),
-      variant: "connect",
-      sourceKind: CONNECT_SOURCE_KIND,
-      sourceId,
-      ts,
-      build: () => ({
-        title: typeof title === "string" && title ? title : `Connect ${toolId} (read-only)?`,
-        body: typeof body === "string" ? body : "",
-        evidence: Array.isArray(evidence) ? evidence : [],
-        options: [
-          { label: "Connect read-only", answer: "connect" },
-          { label: "Not now", answer: "not-now" },
-          { label: "Never for this tool", answer: "never" },
-        ].map((o) => ({
-          ...o,
-          action: { type: "tool-connect", payload: { tool: toolId, answer: o.answer, ring } },
-        })),
-        refs: Array.isArray(refs) && refs.length ? refs : [toolId],
-        sessionID: null,
-      }),
-    });
-  }
-
-  // Resolve every open connect-ask card for one tool (the registry's
-  // three-way answer is the resolution predicate's only false-path). Returns
-  // `{changed}` for tests/diagnostics. Under the cards patchStore mutex
-  // (BET-1464 defect 3) the matched set derives from the FRESH list, so a
-  // concurrent card writer's card can never be reverted by this close.
-  async function resolveConnectCards(toolId, reason, ts = now()) {
-    const closed = [];
-    await patchStore(cardStore, (fresh) => {
-      const list = Array.isArray(fresh?.cards) ? fresh.cards : [];
-      const open = list.filter(
-        (c) => c?.state === "open" && c?.variant === "connect" && (c?.sourceId === toolId || c?.refs?.includes(toolId)),
-      );
-      if (open.length === 0) return {};
-      closed.push(...open);
-      const openSet = new Set(open);
-      return { cards: list.filter((c) => !openSet.has(c)) };
-    });
-    for (const card of closed) {
-      await ledgerAppend({
-        kind: CARD_RESOLVED,
-        cardId: card.id,
-        variant: card.variant,
-        sourceKind: card.sourceKind,
-        sourceId: card.sourceId,
-        refs: card.refs,
-        reason,
-      });
-    }
-    return { changed: closed.length > 0 };
-  }
-
   async function listOpen() {
     const { cards } = await openCards();
     return cards.filter((c) => c && c.state === "open");
@@ -1496,8 +1439,6 @@ export function createCtoCards(deps = {}) {
     dismissById,
     upsertDecision,
     upsertVeto,
-    upsertConnect,
-    resolveConnectCards,
     listOpen,
   };
 }

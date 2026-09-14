@@ -111,18 +111,19 @@ test("failed discovery preserves cursor; transient classification retries and al
   const classificationStore = store();
   const usageStore = store();
   let mode = "failed";
-  let asks = 0;
+  let scaffolds = 0;
   const make = () => createToolRegistry({ registryStore, classificationStore, usageStore, now: () => now,
     ledger: { append: async () => {} },
     collectDb: async () => { if (mode === "failed") throw new Error("SECRET"); return []; },
     runEphemeral: async () => mode === "failed" ? { ok: false, code: "timeout" } : { text: "github" },
-    cards: { listOpen: async () => [], upsertConnect: async () => { asks++; } },
+    listSecretKeys: () => [],
+    scaffoldProbes: async () => { scaffolds++; },
   });
   assert.equal((await make().dailyScan()).ok, false);
   let saved = await registryStore.load();
   assert.equal(saved.lastScanTs, 10);
   assert.equal(saved.tools[0].unclassifiable, false);
-  assert.equal(asks, 0);
+  assert.equal(scaffolds, 0, "no secret in the store, so nothing to scaffold");
   mode = "ok";
   now += 2 * 86400000;
   await make().dailyScan();
@@ -147,12 +148,11 @@ test("retention removes only old singletons in bounded batches, never recent can
   assert.ok(kept.includes(recent));
 });
 
-test("legacy rejection recovery requires fresh evidence and never resets human or explicit decisions", () => {
+test("legacy rejection recovery requires fresh evidence and never resets an explicit decision", () => {
   const legacy = { tool: "candidate", raw: true, unclassifiable: true, llmAt: 100, uses: 3,
-    status: "observed", engagement: { last_used: 200 }, consent: {} };
+    status: "observed", engagement: { last_used: 200 } };
   for (const over of [
-    { engagement: { last_used: 100 } }, { consent: { metadata: "never" } },
-    { askRound: 1 }, { deepAskRound: 1 }, { status: "integrated" },
+    { engagement: { last_used: 100 } }, { status: "integrated" },
     { classificationOutcome: { status: "rejected" } },
   ]) {
     const row = { ...structuredClone(legacy), ...over };
@@ -169,7 +169,7 @@ test("legacy rejection recovery requires fresh evidence and never resets human o
 
 test("production scan persists legacy recovery and a restarted classifier honors explicit rejection", async () => {
   const row = { tool: "legacy", raw: true, unclassifiable: true, llmAt: 100, uses: 3,
-    status: "observed", engagement: { last_used: 200 }, consent: {} };
+    status: "observed", engagement: { last_used: 200 } };
   const registryStore = store({ tools: [row] });
   const classificationStore = store();
   let calls = 0;

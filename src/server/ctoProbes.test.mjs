@@ -8,6 +8,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
+import { mkdtemp, readFile as readFileSyncP, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { listSecretKeys, provideSecretForCto } from "./secrets.mjs";
 import {
   AUTHORING_FAILURE_RETRY_MS,
   AUTHOR_MAX_PROBES,
@@ -74,7 +78,9 @@ function memStateStore(initial = {}) {
 function fakeRegistry(rows = []) {
   const byTool = new Map(rows.map((r) => [r.tool, r]));
   return {
-    consentFor: async (tool, ring = "metadata") => byTool.get(tool)?.consent?.[ring] ?? null,
+    // Production's rule: a key in the secret store grants the tool fully, so
+    // every ring answers alike. `granted` stands in for "a secret names it".
+    consentFor: async (tool) => (byTool.get(tool)?.granted === true ? "yes" : null),
     toolRow: async (tool) => byTool.get(tool) ?? null,
     async applyProbeResult(tool, input) {
       const t = byTool.get(tool);
@@ -156,12 +162,12 @@ function fakeLedger() {
   };
 }
 
-// A valid consented tool row with evidenced hosts + a secret.
+// A valid granted tool row with evidenced hosts + a secret.
 function consentedTool(tool = "github", hosts = ["api.github.com"]) {
   return {
     tool,
     status: "candidate",
-    consent: { metadata: "yes", deep_read: null, write: null },
+    granted: true,
     evidence: [
       ...hosts.map((h) => ({ channel: "config", detail: `git:${h}`, ts: 1 })),
       { channel: "secret", detail: "secret:GITHUB_TOKEN", ts: 1 },
@@ -187,17 +193,17 @@ function githubSpec(overrides = {}) {
   };
 }
 
-function build({ rows, specs, state, cards, ledger, http, now, thrifty, runEphemeral, projects, getTopFacts, getRollups, resolveSegment } = {}) {
+function build({ rows, registry, specs, state, cards, ledger, http, now, thrifty, runEphemeral, projects, getTopFacts, getRollups, resolveSegment, getSecretPath, readSecret } = {}) {
   return createProbes({
-    registry: fakeRegistry(rows ?? [consentedTool()]),
+    registry: registry ?? fakeRegistry(rows ?? [consentedTool()]),
     probes: memProbesStore(specs ?? { github: githubSpec() }),
     stateStore: memStateStore(state),
     cards: cards ?? fakeCards(),
     ledger: ledger ?? fakeLedger(),
     now: now ?? (() => 1_700_000_000_000),
     httpRequest: http ?? (async () => ({ status: 200, bodyText: JSON.stringify([{ created_at: "2026-08-20T00:00:00Z" }]) })),
-    getSecretPath: async () => "/tmp/secret-file",
-    readSecret: async () => "sekrit-value",
+    getSecretPath: getSecretPath ?? (async () => "/tmp/secret-file"),
+    readSecret: readSecret ?? (async () => "sekrit-value"),
     isThrifty: thrifty ?? (() => false),
     listProjects: async () => projects ?? ["proj"],
     getTopFacts: getTopFacts ?? (async () => [{ statement: "ships the parser" }]),
@@ -552,9 +558,9 @@ test("runDue: no second run before the cadence elapses; a forced tool runs immed
   assert.equal(forced.length, 1);
 });
 
-test("runDue: nothing runs without consent (§7.5 'nothing for tools without consent')", async () => {
+test("runDue: nothing runs without a grant (§7.5 'nothing for tools without consent')", async () => {
   const eng = build({
-    rows: [{ tool: "github", consent: { metadata: null, deep_read: null, write: null }, evidence: [{ channel: "config", detail: "git:api.github.com", ts: 1 }] }],
+    rows: [{ tool: "github", granted: false, evidence: [{ channel: "config", detail: "git:api.github.com", ts: 1 }] }],
   });
   assert.equal((await eng.runDue()).length, 0);
   const ledgerRows = eng.loadToolState; // no throw
@@ -926,9 +932,9 @@ test("healthSnapshot: counts configured vs healthy vs auth-failed probes", async
   assert.ok(snap.lastRunAt > 0);
 });
 
-test("healthSnapshot: an unconsented tool's spec never counts", async () => {
+test("healthSnapshot: an ungranted tool's spec never counts", async () => {
   const eng = build({
-    rows: [{ tool: "github", consent: { metadata: null, deep_read: null, write: null }, evidence: [] }],
+    rows: [{ tool: "github", granted: false, evidence: [] }],
   });
   const snap = await eng.healthSnapshot();
   assert.equal(snap.tools, 0);
@@ -995,7 +1001,7 @@ test("registry applyProbeResult: folds inflow into an EWMA, adapts the cadence m
         {
           tool: "github",
           status: "candidate",
-          consent: { metadata: "yes", deep_read: null, write: null },
+          granted: true,
           evidence: [{ channel: "config", detail: "git:api.github.com", ts: 1 }],
         },
       ],
@@ -1028,7 +1034,7 @@ test("registry applyProbeResult: unknown tool is rejected; relevance + evidence 
   const reg = createToolRegistry({
     registryStore: memStore({
       v: 1,
-      tools: [{ tool: "github", status: "observed", consent: { metadata: "yes", deep_read: null, write: null }, evidence: [] }],
+      tools: [{ tool: "github", status: "observed", granted: true, evidence: [] }],
     }),
   });
   assert.equal((await reg.applyProbeResult("nope", { fields: {}, probedAt: 1 })).ok, false);
@@ -1041,6 +1047,159 @@ test("registry applyProbeResult: unknown tool is rejected; relevance + evidence 
   assert.equal(ev.ok, true);
   const dedup = await reg.appendEvidence("github", { channel: "probe", detail: "repo_events:http_500", ts: 6 });
   assert.equal(dedup.changed, false, "same (channel, detail) is deduped");
+});
+
+// ---------------------------------------------------------------------------
+// The identity seam, END TO END — real registry × real probes engine
+// ---------------------------------------------------------------------------
+
+// The reported shape, as shared fixtures: MULTICA_TOKEN names the tool
+// "multica" in the secret store; classification later merged the raw evidence
+// into a canonical "multica-ai" row and kept "multica" as an alias; the
+// spec/state files were scaffolded under the GRANTED name. Every lookup —
+// grant, consent, row, spec, state — must agree under BOTH names.
+const MULTICA_ROW = {
+  tool: "multica-ai",
+  aliases: ["multica"],
+  status: "observed",
+  evidence: [{ channel: "config", detail: "git:api.multica.ai", ts: 1 }],
+};
+// The REAL registry over injected fakes — every identity-seam test wires this.
+async function realRegistry(tools, keys) {
+  const { createToolRegistry } = await import("./ctoToolRegistry.mjs");
+  return createToolRegistry({
+    registryStore: memStore({ v: 1, tools }),
+    classificationStore: memStore(),
+    usageStore: memStore({ rows: [] }),
+    ledger: fakeLedger(),
+    listSecretKeys: keys,
+    now: () => 1_700_000_000_000,
+  });
+}
+async function multicaRegistry(listSecretKeys) {
+  return realRegistry([MULTICA_ROW], listSecretKeys);
+}
+// What scaffoldGrantedTools wrote at grant time: named after the STORE
+// identity ("multica"), not the registry row's canonical name.
+function multicaSpec(probeName, secret = "MULTICA_TOKEN") {
+  return {
+    tool: "multica",
+    auth: { secret, header: "Authorization: Bearer {secret}" },
+    probes: [
+      {
+        name: probeName,
+        method: "GET",
+        url: "https://api.multica.ai/v1/status",
+        extract: { last_event: "0.updated_at" },
+        cadence: "30m",
+        ring: "metadata",
+      },
+    ],
+  };
+}
+
+// Red against the pre-fix code: consentFor said no under the canonical name
+// and toolRow said nothing under the alias.
+test("probeSummary + runDue: one aliased tool agrees under BOTH names (real registry wiring)", async () => {
+  const reg = await multicaRegistry(() => ["MULTICA_TOKEN"]);
+  const eng = build({
+    registry: reg,
+    rows: [],
+    specs: {
+      multica: multicaSpec("workspace_status"),
+    },
+    state: { multica: { probes: { workspace_status: { lastAt: 5, lastOk: true, nextRunAt: 9 } } } },
+    http: async () => ({ status: 200, bodyText: JSON.stringify([{ updated_at: "2026-09-01T00:00:00Z" }]) }),
+  });
+
+  // The row and the grant resolve identically under both names.
+  assert.equal((await reg.toolRow("multica")).tool, "multica-ai");
+  assert.equal((await reg.toolRow("multica-ai")).tool, "multica-ai");
+  assert.equal(await reg.grantFor("multica"), "MULTICA_TOKEN");
+  assert.equal(await reg.grantFor("multica-ai"), "MULTICA_TOKEN");
+
+  // probeSummary — the drill-down read — is granted AND finds the same
+  // configured probe under either name (spec + state live under the grant
+  // name; the summary resolves them through the registry's identity seam).
+  const byAlias = await eng.probeSummary("multica");
+  const byCanonical = await eng.probeSummary("multica-ai");
+  assert.equal(byAlias.consented, true);
+  assert.equal(byAlias.configured, true);
+  assert.equal(byCanonical.consented, true, "the canonical name must not read as unconsented");
+  assert.equal(byCanonical.configured, true, "the canonical name must not hide a configured spec");
+  assert.deepEqual(byCanonical.probes.map((p) => p.name), byAlias.probes.map((p) => p.name));
+  assert.equal(byCanonical.probes[0]?.lastAt, 5, "state is read under the spec's own name");
+
+  // The runner works by the spec-file name and folds into the ONE row.
+  const results = await eng.runDue({ forceTool: "multica" });
+  assert.equal(results.length, 1);
+  assert.equal(results[0].ok, true);
+  const row = await reg.toolRow("multica");
+  assert.equal(row.tool, "multica-ai", "the fold landed on the canonical row");
+  assert.ok(row.vitality?.last_probed, "vitality folded");
+});
+
+// Astra round 6 residual 1 — rotation: the spec pins the granting key's NAME
+// at scaffold time, but a rotation renames the key while the GRANT (the store
+// identity) persists. Without a fallback the tool stays "granted" in the list
+// while every probe dies on secret_missing: access claimed but unusable.
+test("rotation: a spec pinned to a removed key falls back to the tool's CURRENT granting key", async () => {
+  // The OLD key (MULTICA_TOKEN, what the spec pins) is GONE; the rotated
+  // MULTICA_AI_TOKEN still resolves to the same catalog identity.
+  const reg = await multicaRegistry(() => ["MULTICA_AI_TOKEN"]);
+  const requested = [];
+  const eng = build({
+    registry: reg,
+    rows: [],
+    specs: { multica: multicaSpec("workspace_status") },
+    getSecretPath: async (key) => {
+      requested.push(key);
+      return key === "MULTICA_AI_TOKEN" ? "/tmp/secret-file" : null;
+    },
+  });
+  const results = await eng.runDue({ forceTool: "multica" });
+  assert.equal(results.length, 1);
+  assert.equal(results[0].ok, true, `the probe ran on the rotated key: ${JSON.stringify(results[0])}`);
+  // The pinned name is no longer IN the store, so the exact-presence check
+  // refuses it before any materialization attempt — only the rotated key,
+  // the tool's current granting key, is ever materialized.
+  assert.deepEqual(requested, ["MULTICA_AI_TOKEN"], "the absent pin is refused; only the rotated key materializes");
+  // Control: the grant exists and names the pinned key, but the secret
+  // store cannot materialize it — the fallback must neither loop nor invent
+  // access; the failure stays an honest secret_missing.
+  const reg2 = await multicaRegistry(() => ["MULTICA_TOKEN"]);
+  const eng2 = build({
+    registry: reg2,
+    rows: [],
+    specs: { multica: multicaSpec("workspace_status") },
+    getSecretPath: async () => null,
+  });
+  const none = await eng2.runDue({ forceTool: "multica" });
+  assert.equal(none.length, 1);
+  assert.equal(none[0].ok, false);
+  assert.equal(none[0].error, "secret_missing");
+});
+
+// Astra round 6 residual 3 — two specs for one tool (a legacy spec under the
+// grant identity plus one under the row's canonical name) must not schedule
+// the same tool's probes twice per tick.
+test("runDue schedules ONE spec per resolved row, preferring the canonical name", async () => {
+  const reg = await multicaRegistry(() => ["MULTICA_TOKEN"]);
+  const eng = build({
+    registry: reg,
+    rows: [],
+    specs: {
+      multica: multicaSpec("legacy_probe"),
+      "multica-ai": {
+        tool: "multica-ai",
+        auth: { secret: "MULTICA_TOKEN", header: "Authorization: Bearer {secret}" },
+        probes: [{ name: "canonical_probe", method: "GET", url: "https://api.multica.ai/v1/status", extract: { last_event: "0.updated_at" }, cadence: "30m", ring: "metadata" }],
+      },
+    },
+  });
+  const results = await eng.runDue();
+  assert.equal(results.length, 1, `one tool, one schedule: ${JSON.stringify(results.map((r) => r.probe))}`);
+  assert.ok(results[0].probe.includes("canonical_probe"), "the canonical-named spec wins");
 });
 
 // ---------------------------------------------------------------------------
@@ -1078,45 +1237,24 @@ function memStore(initial = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// BET-1404 — deep-ring probes for deep-consented tools (characterization) +
-// the §7.6 decay chain's weekly probing cap
+// Deep-ring probes + the §7.6 decay chain's weekly probing cap
 // ---------------------------------------------------------------------------
 
-test("runDue: a deep-ring probe runs for a deep-consented tool; a metadata-only tool never runs it", async () => {
+test("runDue: the grant is full — a granted tool runs its deep-ring probes, an ungranted one runs nothing", async () => {
   const deepSpec = () => {
     const s = githubSpec();
     s.probes[0].ring = "deep_read";
     return s;
   };
-  // deep-consented → the probe runs
-  const deep = build({
-    rows: [{ ...consentedTool(), consent: { metadata: "yes", deep_read: "yes", write: null } }],
-    specs: { github: deepSpec() },
-  });
-  const results = await deep.runDue();
-  assert.equal(results.length, 1, "deep-consented tool runs its deep-ring probe");
+  const granted = build({ rows: [consentedTool()], specs: { github: deepSpec() } });
+  const results = await granted.runDue();
+  assert.equal(results.length, 1, "a granted tool runs every ring — there is no read/write split");
   assert.equal(results[0].ok, true);
-  // metadata-only consent → the runner re-checks the live source of truth and skips
-  const meta = build({
-    rows: [consentedTool()],
+  const ungranted = build({
+    rows: [{ ...consentedTool(), granted: false }],
     specs: { github: deepSpec() },
   });
-  assert.equal((await meta.runDue()).length, 0, "no deep probe without deep consent");
-});
-
-test("runDue: revoking deep consent stops the deep probe but the metadata probe still runs", async () => {
-  const s = githubSpec();
-  s.probes = [
-    { name: "meta_probe", method: "GET", url: "https://api.github.com/users/octocat/events", extract: { inflow_rate: "length" }, cadence: "30m", ring: "metadata" },
-    { name: "deep_probe", method: "GET", url: "https://api.github.com/users/octocat/events/full", extract: { inflow_rate: "length" }, cadence: "30m", ring: "deep_read" },
-  ];
-  const eng = build({
-    rows: [{ ...consentedTool(), consent: { metadata: "yes", deep_read: "no", write: null } }],
-    specs: { github: s },
-  });
-  const results = await eng.runDue();
-  assert.equal(results.length, 1);
-  assert.equal(results[0].probe, "github/meta_probe", "only the metadata probe ran");
+  assert.equal((await ungranted.runDue()).length, 0, "no secret, no probe");
 });
 
 test("runOne: a chain-tripped tool's probing cadence is capped at weekly (registry is the chain's source of truth)", async () => {
@@ -1278,12 +1416,12 @@ test("authorSpecs: empty model array rests for the week with no write and no evi
   assert.deepEqual(r2, { ran: 0, attempts: 0 }, "an ok-but-empty pass rests for the week");
 });
 
-test("authorSpecs: one-shot — a filled spec is never rewritten; unconsented tools are skipped; no seam → skipped", async () => {
+test("authorSpecs: one-shot — a filled spec is never rewritten; ungranted tools are skipped; no seam → skipped", async () => {
   const filled = authoringHarness({ specs: { github: githubSpec() }, runEphemeral: async () => ({ text: "[]" }) });
   assert.deepEqual(await filled.eng.authorSpecs({ ts: 1_700_000_000_000 }), { ran: 0, attempts: 0 });
   assert.equal(filled.calls.length, 0, "a spec that already carries probes is never touched");
   const unconsented = authoringHarness({
-    rows: [{ ...consentedTool(), consent: { metadata: "no", deep_read: null, write: null } }],
+    rows: [{ ...consentedTool(), granted: false }],
     runEphemeral: async () => ({ text: "[]" }),
   });
   assert.deepEqual(await unconsented.eng.authorSpecs({ ts: 1_700_000_000_000 }), { ran: 0, attempts: 0 });
@@ -1307,4 +1445,292 @@ test("authorSpecs: the daily attempt budget bounds the calls box-wide, not per t
   const r3 = await h.eng.authorSpecs({ ts: 1_700_000_000_000 + 24 * 3_600_000 });
   assert.equal(r3.attempts, 2, "the next day fills the remaining templates");
   assert.deepEqual(r3, { ran: 2, attempts: 2 });
+});
+
+// ---------------------------------------------------------------------------
+// Production wiring — the CTO credential path, real functions end to end:
+// the REAL listSecretKeys grant reader (every scope, the approved rule) → the
+// REAL registry → the REAL provideSecretForCto materialization into a
+// throwaway dir → the probe's Authorization header. No live state: the store
+// is an injected array, the dir a tempdir.
+// ---------------------------------------------------------------------------
+
+async function wiredCto(store, { dir, http, spec } = {}) {
+  const reg = await multicaRegistry(() => listSecretKeys({ load: () => store }));
+  const seen = [];
+  const eng = build({
+    registry: reg,
+    rows: [],
+    specs: { multica: spec ?? multicaSpec("workspace_status") },
+    getSecretPath: ctoGetSecretPath(dir, store),
+    readSecret: (p) => readFileSyncP(p, "utf-8"),
+    http: http ?? captureHttp(seen),
+  });
+  return { reg, eng, seen };
+}
+
+// The production materialization + HTTP capture shared by the credential-path
+// tests: real provideSecretForCto into a throwaway dir; every request's
+// headers captured so a test can pin WHICH credential was sent.
+function ctoGetSecretPath(dir, store) {
+  return async (key) => {
+    const r = await provideSecretForCto({ key, dir }, { load: () => store, recordUsage: async () => {} });
+    return r?.ok ? r.path : null;
+  };
+}
+function captureHttp(seen) {
+  return async (req) => {
+    seen.push(req);
+    return { status: 200, bodyText: JSON.stringify([{ updated_at: "2026-09-01T00:00:00Z" }]) };
+  };
+}
+
+// One pinned-spec probe engine for the exploit tests below — the
+// materialization calls are counted so a test can prove a probe was blocked
+// BEFORE any credential was read.
+async function exploitEng({ dir, reg, tool, pinned, url, store = CROSS_SERVICE_STORE }) {
+  const seen = [];
+  const materializations = [];
+  const eng = build({
+    registry: reg,
+    rows: [],
+    specs: { [tool]: serviceSpec(tool, pinned, url) },
+    getSecretPath: async (key) => {
+      materializations.push(key);
+      const r = await provideSecretForCto({ key, dir }, { load: () => store, recordUsage: async () => {} });
+      return r?.ok ? r.path : null;
+    },
+    readSecret: (p) => readFileSyncP(p, "utf-8"),
+    http: captureHttp(seen),
+  });
+  return { eng, seen, materializations };
+}
+
+test("production wiring: a project-scoped key grants the CTO and its probe materializes", async () => {
+  const store = [{ id: "p1", key: "MULTICA_TOKEN", value: "proj-secret-value", scope: "project", sessionID: null, project: "manta", hint: "" }];
+  const dir = await mkdtemp(join(tmpdir(), "manta-probe-proj-"));
+  try {
+    const { reg, eng, seen } = await wiredCto(store, { dir });
+    assert.equal(await reg.consentFor("multica"), "yes", "the scoped key grants the CTO (the approved all-store rule)");
+    assert.equal(await reg.grantFor("multica"), "MULTICA_TOKEN");
+    const results = await eng.runDue({ forceTool: "multica" });
+    assert.equal(results.length, 1);
+    assert.equal(results[0].ok, true, JSON.stringify(results[0]));
+    assert.equal(seen[0]?.headers?.Authorization, "Bearer proj-secret-value", "the probe used the scoped credential");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("key deletion revokes the grant and stops the probes", async () => {
+  const store = [{ id: "p1", key: "MULTICA_TOKEN", value: "proj-secret-value", scope: "project", sessionID: null, project: "manta", hint: "" }];
+  const dir = await mkdtemp(join(tmpdir(), "manta-probe-del-"));
+  try {
+    const { reg, eng } = await wiredCto(store, { dir });
+    assert.equal(await reg.consentFor("multica"), "yes");
+    // The user deletes the key (deleteSecret empties it from the store).
+    store.splice(0, store.length);
+    assert.equal(await reg.consentFor("multica"), null, "the grant is gone with the key");
+    assert.equal(await reg.grantFor("multica"), null);
+    assert.deepEqual(await eng.runDue({ forceTool: "multica" }), [], "an unconsented tool is not scheduled");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("duplicate names materialize the durable credential — not an unrelated scratch copy", async () => {
+  const store = [
+    { id: "s1", key: "MULTICA_TOKEN", value: "scratch-session-value", scope: "session", sessionID: "ses_9", project: null, hint: "" },
+    { id: "d1", key: "MULTICA_TOKEN", value: "durable-shared-value", scope: "shared", sessionID: null, project: null, hint: "" },
+  ];
+  const dir = await mkdtemp(join(tmpdir(), "manta-probe-dup-"));
+  try {
+    const { reg, eng, seen } = await wiredCto(store, { dir });
+    assert.equal(await reg.consentFor("multica"), "yes");
+    const results = await eng.runDue({ forceTool: "multica" });
+    assert.equal(results[0].ok, true);
+    assert.equal(seen[0]?.headers?.Authorization, "Bearer durable-shared-value", "a scratch copy some chat stored never shadows the durable one");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a stale pin never sends another service's credential — the fallback granting key does", async () => {
+  const store = [
+    { id: "r1", key: "MULTICA_AI_TOKEN", value: "rotated-credential", scope: "shared", sessionID: null, project: null, hint: "" },
+    { id: "s1", key: "STRIPE_KEY", value: "stripes-credential", scope: "shared", sessionID: null, project: null, hint: "" },
+  ];
+  const dir = await mkdtemp(join(tmpdir(), "manta-probe-pin-"));
+  try {
+    // The spec pins STRIPE_KEY — present in the store, but it names stripe,
+    // not this tool. The pinned path must be refused (keyGrantedForTool) and
+    // the tool's own granting key used instead.
+    const { reg, eng, seen } = await wiredCto(store, { dir, spec: multicaSpec("workspace_status", "STRIPE_KEY") });
+    assert.equal(await reg.keyGrantedForTool("STRIPE_KEY", "multica"), false);
+    assert.equal(await reg.keyGrantedForTool("MULTICA_AI_TOKEN", "multica"), true);
+    const results = await eng.runDue({ forceTool: "multica" });
+    assert.equal(results[0].ok, true);
+    assert.equal(seen[0]?.headers?.Authorization, "Bearer rotated-credential");
+    assert.notEqual(seen[0]?.headers?.Authorization, "Bearer stripes-credential", "another service's credential never reaches this endpoint");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Astra round 8, P1 — the pinned-key check had its OWN alias policy (row
+// identities) instead of the grant seam: with github's row claiming "stripe"
+// as an alias and BOTH credentials stored, a GitHub spec pinned to
+// STRIPE_TOKEN materialized the Stripe credential and sent it toward the
+// github endpoint. Through the REAL registry × REAL probes × captured HTTP,
+// synthetic credentials, BOTH service directions and BOTH row orders:
+// the pin is rejected and ONLY the tool's own granting credential is
+// materialized and sent.
+// ---------------------------------------------------------------------------
+
+function serviceSpec(tool, secret, url) {
+  return {
+    tool,
+    auth: { secret, header: "Authorization: Bearer {secret}" },
+    probes: [
+      {
+        name: "status_probe",
+        method: "GET",
+        url,
+        extract: { last_event: "0.updated_at" },
+        cadence: "30m",
+        ring: "metadata",
+      },
+    ],
+  };
+}
+
+const CROSS_SERVICE_ROWS = [
+  { tool: "github", aliases: ["stripe"], evidence: [{ channel: "config", detail: "git:api.github.com", ts: 1 }], uses: 1 },
+  { tool: "stripe", evidence: [{ channel: "config", detail: "git:api.stripe.com", ts: 1 }], uses: 1 },
+];
+const CROSS_SERVICE_STORE = [
+  { id: "g", key: "GITHUB_TOKEN", value: "githubs-credential", scope: "shared", sessionID: null, project: null, hint: "" },
+  { id: "s", key: "STRIPE_TOKEN", value: "stripes-credential", scope: "shared", sessionID: null, project: null, hint: "" },
+];
+
+test("cross-service pin: the malicious alias never routes another service's credential — both directions, both row orders, with and without a target row", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "manta-probe-xsvc-"));
+  try {
+    // In the "no target row" variant github's row claims "stripe" as an alias
+    // with NO stripe row, so the spec for "stripe" validates against github's
+    // own evidence hosts — and the bridge still never carries a known name.
+    const variants = [
+      {
+        name: "with target row",
+        rows: CROSS_SERVICE_ROWS,
+        orders: ["alias-row-first", "primary-row-first"],
+        cases: [
+          { tool: "github", pinned: "STRIPE_TOKEN", expect: "Bearer githubs-credential", url: "https://api.github.com/v1/status", mode: "runs" },
+          { tool: "stripe", pinned: "GITHUB_TOKEN", expect: "Bearer stripes-credential", url: "https://api.stripe.com/v1/status", mode: "runs" },
+        ],
+      },
+      {
+        name: "no target row",
+        rows: [CROSS_SERVICE_ROWS[0]],
+        orders: ["alias-row-first", "only-row"],
+        cases: [
+          { tool: "github", pinned: "STRIPE_TOKEN", expect: "Bearer githubs-credential", url: "https://api.github.com/v1/status", mode: "runs" },
+          // The hostile shape Astra flagged: tool "stripe" — the aliased known
+          // service with no row of its own — pointing at github's evidenced
+          // host. The service boundary refuses the row, so there is NO
+          // matching evidence to authorize the endpoint: the probe is blocked
+          // BEFORE materialization — no credential, not even the fallback's,
+          // is ever sent toward the wrong service's endpoint.
+          { tool: "stripe", pinned: "STRIPE_TOKEN", url: "https://api.github.com/events", mode: "blocked" },
+        ],
+      },
+    ];
+    for (const v of variants) {
+      for (const order of v.orders) {
+        const ordered = order === "alias-row-first" ? v.rows : [...v.rows].reverse();
+        const reg = await realRegistry(ordered, () => listSecretKeys({ load: () => CROSS_SERVICE_STORE }));
+        for (const c of v.cases) {
+          const own = c.pinned === "STRIPE_TOKEN" ? "GITHUB_TOKEN" : "STRIPE_TOKEN";
+          const { eng, seen, materializations } = await exploitEng({ dir, reg, tool: c.tool, pinned: c.pinned, url: c.url });
+          if (c.mode === "blocked") {
+            // The pinned key IS the service's own (direct grant) — the block
+            // is the endpoint's missing service evidence, not the credential.
+            assert.equal(await reg.keyGrantedForTool(c.pinned, c.tool), true, `${c.pinned} is ${c.tool}'s own key (${v.name}, ${order})`);
+            assert.equal(await reg.toolRow(c.tool), null, "no other known service's row resolves under this name");
+            assert.deepEqual(await eng.runDue({ forceTool: c.tool }), [], "blocked before any request");
+            assert.deepEqual(materializations, [], "blocked BEFORE materialization");
+            assert.deepEqual(seen, [], "no cross-service credential ever sent to the wrong host");
+            const summary = await eng.probeSummary(c.tool);
+            assert.equal(summary.consented, true, "the grant itself is real (the service's own key)");
+            assert.equal(summary.configured, false, "but no spec validates without matching service evidence");
+            continue;
+          }
+          assert.equal(await reg.keyGrantedForTool(c.pinned, c.tool), false, `${c.pinned} must not be authorized for ${c.tool} (${v.name}, ${order})`);
+          assert.equal(await reg.keyGrantedForTool(own, c.tool), true, `${own} serves ${c.tool} (${v.name}, ${order})`);
+          const results = await eng.runDue({ forceTool: c.tool });
+          assert.equal(results.length, 1, `${c.tool} runs (${v.name}, ${order})`);
+          assert.equal(results[0].ok, true, JSON.stringify(results[0]));
+          assert.equal(seen[0]?.headers?.Authorization, c.expect, `only the granting credential is sent (${v.name}, ${order}, ${c.tool})`);
+        }
+      }
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a stale pin (key absent, identity covered) is refused — the exact key is required — and the fallback credential is what ships", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "manta-probe-stale-"));
+  try {
+    const store = [CROSS_SERVICE_STORE[0]]; // GITHUB_TOKEN only; GITHUB_OLD_TOKEN does not exist
+    const reg = await realRegistry([CROSS_SERVICE_ROWS[0]], () => listSecretKeys({ load: () => store }));
+    assert.equal(await reg.keyGrantedForTool("GITHUB_OLD_TOKEN", "github"), false, "identity presence is not key presence");
+    const { eng, seen } = await exploitEng({ dir, reg, tool: "github", pinned: "GITHUB_OLD_TOKEN", url: "https://api.github.com/v1/status", store });
+    const results = await eng.runDue({ forceTool: "github" });
+    assert.equal(results[0].ok, true);
+    assert.equal(seen[0]?.headers?.Authorization, "Bearer githubs-credential", "the fallback granting credential is what ships");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// Astra round 9 — captured-HTTP hostile spec tests. The endpoint allowlist
+// must be derived ONLY from the matching authorized service's own evidence:
+// a stripe-named spec pointing at github's evidenced host is blocked BEFORE
+// materialization (no credential, no request); the real stripe row's own
+// spec runs on its own host with its own credential. Both row orders.
+test("hostile spec: an aliased known service can never borrow another service's evidence host", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "manta-probe-hostile-"));
+  try {
+    for (const order of ["alias-row-first", "primary-row-first"]) {
+      const ordered = order === "alias-row-first" ? CROSS_SERVICE_ROWS : [...CROSS_SERVICE_ROWS].reverse();
+      const reg = await realRegistry(ordered, () => listSecretKeys({ load: () => CROSS_SERVICE_STORE }));
+      // Hostile: the stripe spec's URL is github's evidenced host. The
+      // allowlist comes from the STRIPE row's own evidence (api.stripe.com)
+      // — github's host is not on it, so the spec is invalid and the probe
+      // is blocked before the stripe credential is materialized or sent.
+      const hostile = await exploitEng({ dir, reg, tool: "stripe", pinned: "STRIPE_TOKEN", url: "https://api.github.com/events" });
+      assert.equal(await reg.consentFor("stripe"), "yes", "the grant is the service's own key");
+      assert.equal((await reg.toolRow("stripe")).tool, "stripe", "the stripe row answers by exact primary");
+      assert.deepEqual(await hostile.eng.runDue({ forceTool: "stripe" }), [], "blocked before any request");
+      assert.deepEqual(hostile.materializations, [], "the stripe credential is never materialized");
+      assert.deepEqual(hostile.seen, [], "nothing ever sent toward the wrong host");
+      // Legit: the same tool, its own evidenced host — runs with its own
+      // credential.
+      const legit = await exploitEng({ dir, reg, tool: "stripe", pinned: "STRIPE_TOKEN", url: "https://api.stripe.com/v1/status" });
+      const results = await legit.eng.runDue({ forceTool: "stripe" });
+      assert.equal(results.length, 1);
+      assert.equal(results[0].ok, true, JSON.stringify(results[0]));
+      assert.equal(legit.seen[0]?.headers?.Authorization, "Bearer stripes-credential", "the service's own credential to its own host");
+      // And the mirror: a github-named spec pointing at stripe's host is
+      // blocked the same way.
+      const mirror = await exploitEng({ dir, reg, tool: "github", pinned: "GITHUB_TOKEN", url: "https://api.stripe.com/v1/status" });
+      assert.deepEqual(await mirror.eng.runDue({ forceTool: "github" }), [], "github's spec cannot borrow stripe's host");
+      assert.deepEqual(mirror.materializations, [], "github's credential never materializes for a foreign host");
+      assert.deepEqual(mirror.seen, []);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

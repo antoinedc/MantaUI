@@ -614,13 +614,17 @@ test("a trough-opened window closes when the profile re-derives the trough away 
 // ---------------------------------------------------------------------------
 
 import { dataAnalysisCandidatesFromTools, dataAnalysisPrompt } from "./ctoOvernight.mjs";
+import { createToolRegistry } from "./ctoToolRegistry.mjs";
 
+// Shaped like a REAL listTools projection (see the production-wired test at
+// the end of this block, which feeds the genuine article through): `accessKey`
+// is the §7.4 grant — the stored secret key that makes the tool reachable.
 function deepTool(overrides = {}) {
   return {
     tool: "github",
     displayName: "GitHub",
     status: "integrated",
-    consent: { metadata: "yes", deep_read: "yes", write: null },
+    accessKey: "GITHUB_TOKEN",
     asSourceDecayed: false,
     asSource: { reports: 0, accepted: 0 },
     relevance: { alpha: 0.7, beta: 0.3 },
@@ -629,7 +633,7 @@ function deepTool(overrides = {}) {
   };
 }
 
-test("dataAnalysisCandidatesFromTools: one candidate per deep-consented tool at argmax relevance; p_use = ewma × max(relevance)", () => {
+test("dataAnalysisCandidatesFromTools: one candidate per granted tool at argmax relevance; p_use = ewma × max(relevance)", () => {
   const out = dataAnalysisCandidatesFromTools([deepTool()]);
   assert.equal(out.length, 1);
   const c = out[0];
@@ -644,9 +648,9 @@ test("dataAnalysisCandidatesFromTools: one candidate per deep-consented tool at 
   assert.equal(c.predictedCost, 0.5, "reports=0 → the experiment-first shape (halved cost)");
 });
 
-test("dataAnalysisCandidatesFromTools: the gates exclude non-consented, non-integrated, decayed, vitality-dead, and relevance-less tools", () => {
+test("dataAnalysisCandidatesFromTools: the gates exclude ungranted, non-integrated, decayed, vitality-dead, and relevance-less tools", () => {
   const out = dataAnalysisCandidatesFromTools([
-    deepTool({ consent: { metadata: "yes", deep_read: null, write: null } }), // not deep-consented
+    deepTool({ accessKey: null }), // no secret names it → the CTO cannot read it
     deepTool({ status: "candidate" }), // probes never ran
     deepTool({ asSourceDecayed: true }), // chain tripped → analyses stopped
     deepTool({ vitality: { ewma: 0, last_event: 1, inflow_rate: 0, last_probed: 1 } }), // ewma=0 is not 'high' (Q1)
@@ -684,4 +688,47 @@ test("dataAnalysisPrompt: concrete intent names the tool and the project", () =>
   assert.match(p, /GitHub/);
   assert.match(p, /alpha/);
   assert.match(p, /REPORT/);
+});
+
+// The projection this function consumes is produced by the registry, not by
+// this file's fixtures — so the wiring is tested end to end. Without the §7.4
+// port this fails: a real row carries no `consent` field at all, so the old
+// gate dropped every candidate even when a secret granted the tool.
+test("dataAnalysisCandidatesFromTools consumes a REAL listTools projection: granted emits, ungranted does not", async () => {
+  const store = (value = {}) => ({
+    load: async () => structuredClone(value),
+    save: async (next) => { value = structuredClone(next); },
+  });
+  const row = {
+    tool: "github",
+    displayName: "GitHub",
+    status: "integrated",
+    engagement: { ewma_per_week: 4, last_used: 1, per_project: {} },
+    vitality: { last_event: 1, inflow_rate: 3, ewma: 0.8, last_probed: 1 },
+    relevance: { alpha: 0.7 },
+    as_source: { reports: 1, accepted: 1 },
+    evidence: [],
+    uses: 6,
+    weeks: [],
+    firstSeenTs: 1,
+  };
+  const registryFor = (keys) => createToolRegistry({
+    registryStore: store({ tools: [structuredClone(row)], lastScanTs: 1 }),
+    classificationStore: store(),
+    usageStore: store({ rows: [] }),
+    ledger: { append: async () => {} },
+    listSecretKeys: () => keys,
+    now: () => 2,
+  });
+
+  const granted = dataAnalysisCandidatesFromTools(await registryFor(["GITHUB_TOKEN"]).listTools());
+  assert.equal(granted.length, 1, "a stored key naming the tool makes it analyzable");
+  assert.equal(granted[0].id, "data-source:github");
+
+  const ungranted = dataAnalysisCandidatesFromTools(await registryFor([]).listTools());
+  assert.equal(ungranted.length, 0, "no secret names it → nothing to analyze");
+
+  // And a key that names a DIFFERENT tool grants nothing here either.
+  const other = dataAnalysisCandidatesFromTools(await registryFor(["STRIPE_API_KEY"]).listTools());
+  assert.equal(other.length, 0);
 });

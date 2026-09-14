@@ -43,41 +43,38 @@ test("retry scheduling chooses the least recently attempted eligible tool", asyn
   let selected;
   await createToolRegistry({ registryStore, classificationStore, usageStore: mem(), now: () => 10 * DAY,
     ledger: { append: async () => {} },
+    listSecretKeys: () => [],
     runEphemeral: async ({ context }) => { selected = context[0].text; return { gated: true }; },
   }).dailyScan();
   assert.match(selected, /Identity token: b\n/);
 });
 
-for (const failure of ["card", "registry"]) {
-  test(`durable classification survives ${failure} failure and restart without repeating the call`, async () => {
-    const registryStore = mem({ tools: [raw("candidate")] });
-    const classificationStore = mem();
-    const save = registryStore.save;
-    let fail = true;
-    let called = false;
-    let calls = 0;
-    registryStore.save = async (value) => {
-      if (failure === "registry" && fail && called) throw new Error("registry-write-failed");
-      await save(value);
-    };
-    const make = () => createToolRegistry({ registryStore, classificationStore, usageStore: mem(), now: () => 10 * DAY,
-      ledger: { append: async () => {} },
-      cards: { listOpen: async () => [], upsertConnect: async () => {
-        if (failure === "card" && fail) throw new Error("card-failed");
-      } },
-      runEphemeral: async () => { calls++; called = true; return { text: "github" }; },
-    });
-    await assert.rejects(make().dailyScan(), /failed/);
-    assert.equal(calls, 1);
-    const saved = await classificationStore.load();
-    assert.equal(saved.records.candidate.status, "resolved");
-    assert.equal(saved.records.candidate.canonical, "github");
-    fail = false;
-    await make().dailyScan();
-    assert.equal(calls, 1);
-    assert.equal((await registryStore.load()).tools[0].tool, "github");
+test("durable classification survives a registry-commit failure and restart without repeating the call", async () => {
+  const registryStore = mem({ tools: [raw("candidate")] });
+  const classificationStore = mem();
+  const save = registryStore.save;
+  let fail = true;
+  let called = false;
+  let calls = 0;
+  registryStore.save = async (value) => {
+    if (fail && called) throw new Error("registry-write-failed");
+    await save(value);
+  };
+  const make = () => createToolRegistry({ registryStore, classificationStore, usageStore: mem(), now: () => 10 * DAY,
+    ledger: { append: async () => {} },
+    listSecretKeys: () => [],
+    runEphemeral: async () => { calls++; called = true; return { text: "github" }; },
   });
-}
+  await assert.rejects(make().dailyScan(), /failed/);
+  assert.equal(calls, 1);
+  const saved = await classificationStore.load();
+  assert.equal(saved.records.candidate.status, "resolved");
+  assert.equal(saved.records.candidate.canonical, "github");
+  fail = false;
+  await make().dailyScan();
+  assert.equal(calls, 1);
+  assert.equal((await registryStore.load()).tools[0].tool, "github");
+});
 
 test("failed result persistence leaves a durable reservation; same-day restart cannot spend again", async () => {
   const registryStore = mem({ tools: [raw("candidate")] });
@@ -90,7 +87,7 @@ test("failed result persistence leaves a durable reservation; same-day restart c
     await save(value);
   };
   const make = () => createToolRegistry({ registryStore, classificationStore, usageStore: mem(), now: () => 10 * DAY,
-    ledger: { append: async () => {} }, runEphemeral: async () => { calls++; return { text: "github" }; },
+    ledger: { append: async () => {} }, listSecretKeys: () => [], runEphemeral: async () => { calls++; return { text: "github" }; },
   });
   await assert.rejects(make().dailyScan(), /result-write-failed/);
   assert.equal((await classificationStore.load()).records.candidate.status, "reserved");
@@ -101,26 +98,30 @@ test("failed result persistence leaves a durable reservation; same-day restart c
 test("failed reservation prevents any model call", async () => {
   const registry = createToolRegistry({ registryStore: mem({ tools: [raw("candidate")] }), usageStore: mem(),
     classificationStore: { load: async () => ({}), save: async () => { throw new Error("disk-full"); } },
-    ledger: { append: async () => {} }, runEphemeral: async () => assert.fail("must reserve before calling"),
+    ledger: { append: async () => {} }, listSecretKeys: () => [], runEphemeral: async () => assert.fail("must reserve before calling"),
   });
   await assert.rejects(registry.dailyScan(), /disk-full/);
 });
 
-test("a new process replays a durable result after a card failure without calling the model", async () => {
+test("a new process replays a durable result after a commit failure without calling the model", async () => {
   await toolRegistryStore.save({ tools: [raw("restart-candidate")] });
   await toolClassificationStore.save({});
   const registry = createToolRegistry({ now: () => 20 * DAY,
     ledger: { append: async () => {} },
-    cards: { listOpen: async () => [], upsertConnect: async () => { throw new Error("card-failed"); } },
+    listSecretKeys: () => [],
+    // The real store's reader, with a writer that dies after the model call
+    // has already been persisted durably — the crash window this covers.
+    registryStore: { ...toolRegistryStore, save: async () => { throw new Error("commit-failed"); } },
     runEphemeral: async () => ({ text: "github" }),
   });
-  await assert.rejects(registry.dailyScan(), /card-failed/);
+  await assert.rejects(registry.dailyScan(), /commit-failed/);
   const result = execFileSync(process.execPath, ["--input-type=module", "-e", `
     import { createToolRegistry } from ${JSON.stringify(new URL("./ctoToolRegistry.mjs", import.meta.url).href)};
     import { toolRegistryStore } from ${JSON.stringify(new URL("./ctoStores.mjs", import.meta.url).href)};
     let calls = 0;
     await createToolRegistry({ now: () => ${20 * DAY},
       ledger: { append: async () => {} },
+      listSecretKeys: () => [],
       runEphemeral: async () => { calls++; return { text: "wrong" }; },
     }).dailyScan();
     console.log(JSON.stringify({ calls, tool: (await toolRegistryStore.load()).tools[0].tool }));

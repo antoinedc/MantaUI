@@ -71,7 +71,7 @@ import { readFile } from "node:fs/promises";
 import https from "node:https";
 import dns from "node:dns/promises";
 import { probesStore, probeStateStore } from "./ctoStores.mjs";
-import { provideSecret } from "./secrets.mjs";
+import { provideSecretForCto } from "./secrets.mjs";
 import { proposalsFromRollup } from "./ctoRollups.mjs";
 import {
   PROBE_SOURCE_KIND,
@@ -644,8 +644,9 @@ export function evidenceHost(detail) {
  *   cards, ledger — the needs-you cards engine + A1 ledger (both default).
  *   now           — clock.
  *   httpRequest   — the §7.5 transport (default: defaultHttpRequest).
- *   getSecretPath — async (keyName) => path | null (default: the shared
- *                   provideSecret machinery, usage-recording suppressed).
+  *   getSecretPath — async (keyName) => path | null (default: the CTO's own
+  *                   privileged provideSecretForCto machinery — every store
+  *                   scope, durable tier first — usage-recording suppressed).
  *   readSecret    — async (path) => string (default fs.readFile utf-8).
  *   isThrifty     — () => boolean (live engine thrifty flag).
  *   listProjects  — async () => [projectName] (active projects for §7.6).
@@ -671,12 +672,16 @@ export function createProbes(deps = {}) {
     ledger,
     now = () => Date.now(),
     httpRequest = defaultHttpRequest,
-    // Default: the shared provideSecret machinery, BY REFERENCE, with usage
-    // recording suppressed — a probe provide must never inflate the tool's
-    // own engagement axis (that would make the registry a feedback loop of
-    // its runner). Only shared/global secrets resolve without a session.
+    // Default: the CTO's OWN privileged provide machinery, BY REFERENCE, with
+    // usage recording suppressed — a probe provide must never inflate the
+    // tool's own engagement axis (that would make the registry a feedback
+    // loop of its runner). The approved grant rule is every key in the store,
+    // so the materialization goes through provideSecretForCto — the one
+    // deliberately-authorized path that can resolve a scoped entry,
+    // deterministically (durable tier first) — NOT the ordinary per-session
+    // provideSecret, whose scope visibility is unchanged.
     getSecretPath = async (key) => {
-      const r = await provideSecret({ key }, { recordUsage: async () => {} });
+      const r = await provideSecretForCto({ key }, { recordUsage: async () => {} });
       return r?.ok ? r.path : null;
     },
     readSecret = (path) => readFile(path, "utf-8"),
@@ -733,9 +738,11 @@ export function createProbes(deps = {}) {
   // Consent + host allowlist for one tool, straight from the registry.
   async function consentContext(tool) {
     const row = await registry.toolRow(tool);
-    let consentedRing = null;
-    if ((await registry.consentFor(tool, "metadata")) === "yes") consentedRing = "metadata";
-    if (consentedRing && (await registry.consentFor(tool, "deep_read")) === "yes") consentedRing = "deep_read";
+    // Access is all-or-nothing: a key in the secret store grants the tool
+    // fully, so a granted tool may run every probe ring and an ungranted one
+    // runs nothing. The per-probe `ring` stays a spec vocabulary (it says
+    // what a probe reads); it is no longer a gate.
+    const consentedRing = (await registry.consentFor(tool)) === "yes" ? "deep_read" : null;
     const hosts = new Set();
     for (const e of row?.evidence ?? []) {
       const host = evidenceHost(e?.detail);
@@ -767,7 +774,10 @@ export function createProbes(deps = {}) {
     } catch {
       vit = null;
     }
-    const st = await loadToolState(tool);
+    // State is keyed by the SPEC file's name (the name the runner writes it
+    // under), which after the identity fallback may differ from the name the
+    // caller asked by.
+    const st = await loadToolState(specInfo.name);
     const rows = (Array.isArray(specInfo.spec.probes) ? specInfo.spec.probes : [])
       .filter((p) => p && typeof p.name === "string" && p.name.length > 0)
       .map((p) => {
@@ -790,17 +800,63 @@ export function createProbes(deps = {}) {
   }
 
 
-  async function validSpecFor(tool) {
-    let raw;
+  // Spec/state files are keyed by tool NAME, but a row answers to several:
+  // the scaffold writes the spec under the STORE identity that granted the
+  // tool (scaffoldGrantedTools), while the drill-down asks by the registry
+  // row's CANONICAL name (classification may have merged the raw token into
+  // a different canonical and kept the grant name as an alias). Candidates
+  // resolve through the registry's ONE identity seam (identitiesFor — the
+  // same set the grant was checked against), requested name first so the
+  // runner (which always passes a spec file's own name) is unchanged; the
+  // fallback only fires when a caller asks by a sibling name.
+  async function specCandidates(tool) {
+    const names = [tool];
     try {
-      raw = await probes.load(tool);
+      const ids =
+        typeof registry.identitiesFor === "function" ? await registry.identitiesFor(tool) : [];
+      for (const id of Array.isArray(ids) ? ids : []) {
+        const norm = typeof id === "string" ? id.trim().toLowerCase() : "";
+        if (norm && !names.includes(norm)) names.push(norm);
+      }
     } catch {
-      return null;
+      /* registry hiccup → the requested name only */
     }
-    if (!raw || typeof raw !== "object") return null;
+    return names;
+  }
+
+  // The spec file for a tool, under whichever of its names it lives. The
+  // "is this actually a spec" guard matters: the real store returns `{}` for
+  // a missing file, and an empty object must not mask a real spec under the
+  // row's other name (scaffoldSpec's own existence check uses the same test).
+  async function loadSpecFor(tool) {
+    for (const name of await specCandidates(tool)) {
+      let raw = null;
+      try {
+        raw = await probes.load(name);
+      } catch {
+        raw = null;
+      }
+      if (raw && typeof raw === "object" && (raw.tool || Array.isArray(raw.probes))) {
+        return { name, spec: raw };
+      }
+    }
+    return null;
+  }
+
+  async function validSpecFor(tool) {
+    const found = await loadSpecFor(tool);
+    if (!found) return null;
+    const { name: specName, spec: raw } = found;
     const ctx = await consentContext(tool);
-    const check = validateProbeSpec(raw, { tool, allowedHosts: ctx.allowedHosts, consentedRing: ctx.consentedRing });
-    if (check.ok) return { spec: raw, ctx };
+    // Validate the file under the name it was found under (its own `tool:`
+    // field's file); the evidence hosts + consent ring come from the ROW,
+    // which resolves under any of the row's names.
+    const check = validateProbeSpec(raw, {
+      tool: specName,
+      allowedHosts: ctx.allowedHosts,
+      consentedRing: ctx.consentedRing,
+    });
+    if (check.ok) return { name: specName, spec: raw, ctx };
     // A consent REVOCATION narrows the tool's ring after authoring: ring-
     // escalation errors drop just those probes (the tool's metadata probes
     // keep running — losing deep_read must not invalidate the whole spec).
@@ -809,7 +865,7 @@ export function createProbes(deps = {}) {
     if (escalated.size === 0 || check.errors.length > escalated.size) return null;
     const kept = (Array.isArray(raw.probes) ? raw.probes : []).filter((_, i) => !escalated.has(`probes[${i}].ring`));
     if (kept.length === 0) return null;
-    return { spec: { ...raw, probes: kept }, ctx };
+    return { name: specName, spec: { ...raw, probes: kept }, ctx };
   }
 
   // ---- spec authoring (engine-written; the AI's content goes through here) —
@@ -1017,19 +1073,42 @@ export function createProbes(deps = {}) {
 
   // Resolve the secret AT SPAWN, by reference: vault KEY NAME → materialized
   // file path → read inside this closure only. Usage is deliberately NOT
-  // recorded (provideSecret with a no-op recorder) so the runner can never
-  // inflate the tool's own engagement axis.
-  async function buildHeaders(specAuth) {
+  // recorded (no-op recorder) so the runner can never inflate the tool's own
+  // engagement axis.
+  //
+  // The spec pins the granting key's NAME at scaffold time. That pin is
+  // authoritative ONLY while the key is still granted for this very tool
+  // (registry.keyGrantedForTool: its catalog identity still serves the tool
+  // and the identity is still in the store) — a stale pin must never send
+  // another service's credential to this tool's endpoint. When the pin no
+  // longer holds — rotation renamed the key (the GRANT, the store identity,
+  // persists), or the pinned key was never this tool's — the registry's one
+  // grant seam supplies the CURRENT granting key. Without the fallback the
+  // tool would stay "granted" in the list while every probe dies on
+  // secret_missing: access claimed but unusable.
+  async function buildHeaders(tool, specAuth) {
     if (!specAuth) return {};
     let path = null;
+    let secretName = specAuth.secret;
     if (typeof getSecretPath === "function") {
-      path = await getSecretPath(specAuth.secret);
+      const pinnedOk =
+        typeof registry.keyGrantedForTool === "function"
+          ? await registry.keyGrantedForTool(secretName, tool).catch(() => false)
+          : true; // a registry without the stale-pin check keeps the old order
+      if (pinnedOk) path = await getSecretPath(secretName);
+      if (!path && typeof registry.grantFor === "function") {
+        const current = await registry.grantFor(tool).catch(() => null);
+        if (typeof current === "string" && current && current !== secretName) {
+          path = await getSecretPath(current);
+          if (path) secretName = current;
+        }
+      }
     }
     if (!path) {
-      throw new ProbeHttpError("secret_missing", `secret "${specAuth.secret}" is not available`);
+      throw new ProbeHttpError("secret_missing", `secret "${secretName}" is not available`);
     }
     const value = (await readSecret(path)).trim();
-    if (!value) throw new ProbeHttpError("secret_missing", `secret "${specAuth.secret}" materialized empty`);
+    if (!value) throw new ProbeHttpError("secret_missing", `secret "${secretName}" materialized empty`);
     const idx = specAuth.header.indexOf(":");
     const name = specAuth.header.slice(0, idx).trim();
     const template = specAuth.header.slice(idx + 1).trim();
@@ -1046,7 +1125,7 @@ export function createProbes(deps = {}) {
     let error = null;
     let outcome = "fail";
     try {
-      const headers = await buildHeaders(spec.auth);
+      const headers = await buildHeaders(tool, spec.auth);
       const out = await httpRequest({ url: probe.url, headers });
       status = out.status;
       bodyText = out.bodyText;
@@ -1110,7 +1189,7 @@ export function createProbes(deps = {}) {
         /* vitality is best-effort */
       }
     } else {
-      // Failure evidence on the registry row (the connect-ask evidence trail).
+      // Failure evidence on the registry row (the tool's evidence trail).
       try {
         await registry.appendEvidence?.(tool, { channel: "probe", detail: `${key}:${error ?? status}`, ts });
       } catch {
@@ -1223,9 +1302,37 @@ export function createProbes(deps = {}) {
     } catch {
       return results;
     }
+    // One tool, ONE schedule. A spec is file-keyed by tool NAME, and a row
+    // answers to several — so the same tool can carry two specs (a legacy
+    // spec under the grant identity plus one under the row's canonical name,
+    // e.g. after a rotation renamed the granting key's identity). Running
+    // both would double-probe one tool every tick. Group the spec names by
+    // the row each resolves to; within a group prefer the spec named after
+    // the row's canonical name and fall back to alphabetical order, so the
+    // pick is deterministic and drifts toward the canonical name. (probeHealth
+    // and the budgeted authoring/relevance passes tolerate a duplicate as
+    // wasted spend within their daily caps; only double SCHEDULING is a
+    // correctness issue.)
+    const sorted = [...tools].sort((a, b) => a.localeCompare(b));
+    const groups = new Map();
+    for (const tool of sorted) {
+      let row = null;
+      try {
+        row = typeof registry.toolRow === "function" ? await registry.toolRow(tool) : null;
+      } catch {
+        row = null;
+      }
+      const key = typeof row?.tool === "string" && row.tool ? row.tool : tool;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(tool);
+    }
+    const schedule = [];
+    for (const [key, names] of groups) {
+      schedule.push(names.includes(key) ? key : names[0]);
+    }
     const exempt = await openProbeBlockers();
     const thrifty = isThrifty() === true;
-    for (const tool of tools) {
+    for (const tool of schedule) {
       if (forceTool && tool !== forceTool) continue;
       const valid = await validSpecFor(tool);
       if (!valid) continue;
@@ -1241,20 +1348,6 @@ export function createProbes(deps = {}) {
           (typeof pst.nextRunAt === "number" && pst.nextRunAt <= ts);
         if (!due) continue;
         if (thrifty && !exempt.has(probeKey(tool, probe.name))) continue;
-        // Deep-ring probes run only while the tool's deep_read consent is
-        // CURRENTLY "yes" (BET-1404). The authoring gate validated the spec
-        // against the ring at write time; this re-checks the live source of
-        // truth so a revocation stops deep probes on the next tick without
-        // invalidating the tool's metadata probes.
-        if (probe.ring === "deep_read") {
-          let deepOk = false;
-          try {
-            deepOk = (await registry.consentFor(tool, "deep_read")) === "yes";
-          } catch {
-            deepOk = false;
-          }
-          if (!deepOk) continue;
-        }
         results.push(await runOne(tool, spec, probe, st, { ts }));
         touched = true;
       }

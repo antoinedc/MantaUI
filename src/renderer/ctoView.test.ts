@@ -472,8 +472,6 @@ describe("nowRailMeta (§10.4 project · cost · elapsed)", () => {
 
 import {
   blockerCards,
-  connectCards,
-  connectAnswerArgs,
   decisionCards,
   executeSuggestionOption,
   runnableSuggestionOption,
@@ -481,7 +479,6 @@ import {
   vetoCards,
   countdownRemaining,
   tonightVisible,
-  type ConnectCardRow,
 } from "./ctoView";
 
 it("decisionCards: selects decision-variant cards only", () => {
@@ -489,7 +486,6 @@ it("decisionCards: selects decision-variant cards only", () => {
     { id: "b1", variant: "blocker", title: "blk" },
     { id: "d1", variant: "decision", title: "dec", options: [] },
     null,
-    { id: "c1", variant: "connect", title: "con" },
   ];
   const out = decisionCards(cards as unknown as CtoCard[]);
   expect(out.length).toBe(1);
@@ -636,16 +632,15 @@ it("vetoCards: selects veto-variant cards with the countdown fields", () => {
 });
 
 // ---------------------------------------------------------------------------
-// BET-1467 — blocker/veto/connect selectors: positive selection + contentless
+// BET-1467 — blocker/veto selectors: positive selection + contentless
 // rows are dropped before they reach a component with live buttons.
 // ---------------------------------------------------------------------------
 
-it("blockerCards: selects blocker-variant cards only — a connect card is NOT selected", () => {
+it("blockerCards: selects blocker-variant cards only — no other variant is selected", () => {
   const cards = [
     { id: "b1", variant: "blocker", title: "blk", body: "answer this" },
     { id: "d1", variant: "decision", title: "dec" },
     { id: "v1", variant: "veto", title: "vet" },
-    { id: "c1", variant: "connect", title: "con" },
   ];
   const out = blockerCards(cards as unknown as CtoCard[]);
   expect(out.length).toBe(1);
@@ -680,76 +675,6 @@ it("vetoCards: drops a row with neither title nor body", () => {
   ];
   const out = vetoCards(cards as unknown as CtoCard[]);
   expect(out.map((c) => c.id)).toEqual(["v2"]);
-});
-
-it("connectCards: selects connect-variant cards and drops a row with neither title nor body", () => {
-  const cards = [
-    { id: "b1", variant: "blocker", title: "blk" },
-    { id: "c1", variant: "connect", title: "", body: "", options: [] },
-    { id: "c2", variant: "connect", title: "GitHub", body: "used 6 times this week", options: [] },
-  ];
-  const out = connectCards(cards as unknown as CtoCard[]);
-  expect(out.map((c) => c.id)).toEqual(["c2"]);
-});
-
-// ---------------------------------------------------------------------------
-// BET-1431 — connect answer wiring (BET-1395 residue): the {tool, answer,
-// ring} argument set routed to ctoToolConnect. The card SELECTOR is covered
-// by the BET-1467 tests above; this pins the callback contract only.
-// ---------------------------------------------------------------------------
-
-// A card shaped exactly like the server's upsertConnect output (ctoCards.mjs):
-// every option binds the ask's tool identity + ring at generation time. Omit
-// `tool` to build the defensive no-tool variant.
-const connectAskCard = (ring: string, tool?: unknown): ConnectCardRow => ({
-  id: "cto:card:connect:github",
-  title: "Connect GitHub (read-only)?",
-  body: "used 6 times this week",
-  evidence: [],
-  options: (["connect", "not-now", "never"] as const).map((answer) => ({
-    label: answer,
-    answer,
-    action: { type: "tool-connect", payload: { tool, answer, ring } },
-  })),
-});
-
-describe("connectAnswerArgs (BET-1431 — connect answer → ctoToolConnect wiring)", () => {
-  it("each of the three answers routes its option's tool + answer; the metadata ask sends no ring", () => {
-    const card = connectAskCard("metadata", "github");
-    expect(connectAnswerArgs(card, "connect")).toEqual({ tool: "github", answer: "connect" });
-    expect(connectAnswerArgs(card, "not-now")).toEqual({ tool: "github", answer: "not-now" });
-    expect(connectAnswerArgs(card, "never")).toEqual({ tool: "github", answer: "never" });
-    expect("ring" in (connectAnswerArgs(card, "connect") ?? {})).toBe(false);
-  });
-
-  it("a deep-read ask forwards ring deep_read on every answer (the ring the ask was about)", () => {
-    const card = connectAskCard("deep_read", "github");
-    expect(connectAnswerArgs(card, "connect")).toEqual({ tool: "github", answer: "connect", ring: "deep_read" });
-    expect(connectAnswerArgs(card, "not-now")).toEqual({ tool: "github", answer: "not-now", ring: "deep_read" });
-    expect(connectAnswerArgs(card, "never")).toEqual({ tool: "github", answer: "never", ring: "deep_read" });
-  });
-
-  it("an option carrying no action.payload.tool produces no call (null, never a bogus tool)", () => {
-    const noToolKey: ConnectCardRow = {
-      ...connectAskCard("metadata"),
-      options: (["connect", "not-now", "never"] as const).map((answer) => ({
-        label: answer,
-        answer,
-        action: { type: "tool-connect", payload: {} },
-      })),
-    };
-    for (const answer of ["connect", "not-now", "never"]) {
-      expect(connectAnswerArgs(connectAskCard("metadata"), answer)).toBeNull();
-      expect(connectAnswerArgs(noToolKey, answer)).toBeNull();
-      expect(connectAnswerArgs(connectAskCard("metadata", 42), answer)).toBeNull();
-      expect(connectAnswerArgs(connectAskCard("metadata", ""), answer)).toBeNull();
-    }
-  });
-
-  it("an answer that is not one of the three registry verbs (or matches no option) is null", () => {
-    expect(connectAnswerArgs(connectAskCard("metadata", "github"), "always")).toBeNull();
-    expect(connectAnswerArgs({ ...connectAskCard("metadata", "github"), options: [] }, "connect")).toBeNull();
-  });
 });
 
 it("countdownRemaining: ms left, null once due or without a dueMs", () => {
