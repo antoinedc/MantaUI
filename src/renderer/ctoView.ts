@@ -2,7 +2,20 @@
 // The CTO pane (§10) renders from a single `{kind:"ctoState"}` bus event
 // (payload shape below) plus a `GET /api/cto/state` initial read. This module
 // holds only deterministic mapping — no window.api, no React.
-import type { Api, CtoCard } from "../shared/api";
+import type {
+  Api,
+  CtoCard,
+  CtoCalibrationRow,
+  CtoCalibrationTable,
+  CtoHealthStat,
+} from "../shared/api";
+
+// The health + calibration wire types are DECLARED ONCE, in `shared/api.ts`
+// (the box's own contract), and re-exported here because the pane's selectors
+// below are their main consumer. They used to be a second, hand-kept copy —
+// two declarations of one wire shape is exactly the drift this module cannot
+// afford.
+export type { CtoCalibrationRow, CtoCalibrationTable, CtoHealthStat };
 import type { DelegateStartInput } from "../shared/types";
 import { cardHasContent } from "../shared/ctoCard.mjs";
 
@@ -42,56 +55,6 @@ export const idleBackfill: BackfillState = {
   reason: null,
   stoppedAtDepthDays: null,
   active: false,
-};
-
-// A Health-card P1 row (§10.5 card 2). `n` = samples seen, `min` = minimum
-// sample size before the value may be trusted. While `n < min` the renderer
-// shows `collecting (n/k)` and never the number — a stat never displays noise
-// as signal.
-// BET-1521 (§14-7): `autonomyResolvedUnaided` / `autonomyBlockerToResolve` are
-// the box-wide autonomy rows; `autonomyClass.<cls>` / `autonomyCalib.<cls>`
-// are emitted per triage class found in the 30d window (deterministic order).
-export type CtoHealthStat = {
-  id:
-    | "ambientSpendToday"
-    | "digestOpens"
-    | "pipelineLag"
-    | "suggestionAcceptance"
-    // BET-1400 rows (rendered since their server stats landed):
-    | "forecastAccuracy"
-    | "capHitsCaused"
-    | "reserveFractile"
-    // BET-1405 (§12.4): the monthly ROI self-report roll.
-    | "roi"
-    | "autonomyResolvedUnaided"
-    | "autonomyBlockerToResolve"
-    | `autonomyClass.${string}`
-    | `autonomyCalib.${string}`;
-  label: string;
-  value: string | null;
-  n: number;
-  min: number;
-  // BET-1405: when a not-ready row needs a specific collecting sentence
-  // (e.g. the ROI row's `collecting — first report <date>`), the server
-  // supplies it verbatim; otherwise the generic `collecting (n / min)` renders.
-  collectingText?: string;
-};
-
-// BET-1521 (§9.5): one read-only row of the per-class calibration table
-// (Settings → CTO) — the Beta(1,1) posterior mean over the class's last-30
-// outcome window plus the raw counts it was computed from.
-export type CtoCalibrationRow = {
-  cls: string;
-  value: number;
-  successes: number;
-  outcomes: number;
-};
-
-// The §9.5 calibration table payload (rides GET /api/cto/health). `tau` is
-// the configured autonomy threshold the table annotates.
-export type CtoCalibrationTable = {
-  tau: number;
-  classes: CtoCalibrationRow[];
 };
 
 // Pure selector for the §9.5 calibration table (Settings → CTO): what to
