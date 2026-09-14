@@ -307,7 +307,8 @@ export function matchIssueKeys(text) {
 //      has never heard of (`CAPO` in `CAPO_MULTICA_TOKEN`, an internal
 //      codename, a project prefix) names no tool and is ignored — it can
 //      never become a grant of its own. Nothing is invented from the key's
-//      own text.
+//      own text, and only OWN properties of the catalog maps count (a plain
+//      object inherits `constructor`, which would otherwise "match").
 //   2. AT MOST ONE tool per key. A key naming two services
 //      (`GITHUB_STRIPE_TOKEN`) is AMBIGUOUS and grants NOTHING: there is no
 //      defensible way to pick, and granting both would hand the CTO a service
@@ -320,7 +321,10 @@ export function matchIssueKeys(text) {
 // wildcard, never a guess.
 // ---------------------------------------------------------------------------
 
-// Credential vocabulary: segments that never name a tool.
+// Credential vocabulary: readings that never name a tool. Since a grant now
+// requires a catalog identity, this is a cheap short-circuit rather than a
+// load-bearing filter — no entry here is a catalog identity, so dropping one
+// could not widen a grant.
 export const SECRET_NOISE = Object.freeze(
   new Set([
     "token", "tokens", "key", "keys", "secret", "secrets", "api", "apis", "pat",
@@ -335,29 +339,72 @@ export const SECRET_NOISE = Object.freeze(
 
 // Every canonical identity the catalog knows, for exact segment matching.
 const KNOWN_IDENTITIES = new Set([...Object.values(CLIS), ...Object.values(DOMAINS)]);
+// Own-property lookup only: a plain object inherits `constructor`, `toString`
+// and friends, so `CLIS["constructor"]` would hand back a function and
+// `CONSTRUCTOR_TOKEN` would "match" a tool that does not exist.
+const CLI_ALIASES = new Map(Object.entries(CLIS));
 
-// One key segment → a canonical catalog identity, or null when the catalog
-// has never heard of it. A segment that IS an identity wins over the CLI
-// alias table, so `SENTRY_DSN` resolves to the service (`sentry`) rather than
-// to the alias table's CLI-flavoured value.
-function canonicalSegment(segment) {
-  if (KNOWN_IDENTITIES.has(segment)) return segment;
-  if (CLIS[segment]) return CLIS[segment];
+// Key names are env-var shaped (`isValidKey` enforces `[A-Za-z_][A-Za-z0-9_]*`
+// on everything the store accepts). Anything outside that alphabet plus the
+// `-`/`.` a hand-written key might use is refused rather than parsed: an
+// unexpected character would be treated as a separator, which is a way to
+// hide one of two service names from the ambiguity rule below.
+const KEY_ALPHABET = /^[A-Za-z0-9_.-]+$/;
+
+// One token → a canonical catalog identity, or null. A token that IS an
+// identity wins over the CLI alias table, so `SENTRY_DSN` resolves to the
+// service (`sentry`) rather than the alias table's CLI-flavoured value. A
+// trailing ordinal is format variance, not identity: `GITHUB2` is github.
+function canonicalToken(token) {
+  const t = token.toLowerCase();
+  if (KNOWN_IDENTITIES.has(t)) return t;
+  if (CLI_ALIASES.has(t)) return CLI_ALIASES.get(t);
+  const base = t.replace(/\d+$/, "");
+  if (base.length >= 2 && base !== t) {
+    if (KNOWN_IDENTITIES.has(base)) return base;
+    if (CLI_ALIASES.has(base)) return CLI_ALIASES.get(base);
+  }
   return null;
+}
+
+// Every reading of one alphanumeric run, longest first: the whole run, then
+// each contiguous group of its `camelCase` words. Casing is a WEAK separator
+// — `OpenAI` is one word to a human and two to a splitter — so both readings
+// are considered and a match anywhere counts. That is what makes detection
+// canonical: `OPENAI_TOKEN`, `openai_token` and `openAiToken` all surface
+// `openai`, so a mixed-case spelling can no longer hide one of two services
+// from the ambiguity rule. Explicit separators are NOT crossed: `GIT_HUB` is
+// two runs and stays two runs.
+function readingsOf(run) {
+  const words = run.split(/(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/).slice(0, 8);
+  const out = [];
+  for (let len = words.length; len >= 1; len--) {
+    for (let i = 0; i + len <= words.length; i++) out.push(words.slice(i, i + len).join(""));
+  }
+  return out;
 }
 
 // The ONE tool a stored secret grants access to, or null when the key names
 // no known tool or names more than one. Pure; the key NAME is the only input
 // — the value is not a parameter and the hint is deliberately not consulted.
+//
+// Identity detection is CANONICAL: the same key in any casing, separator
+// style or ordinal suffix resolves to the same set of identities, so the
+// "ambiguous → nothing" rule cannot be evaded by spelling.
 export function matchSecretIdentity(key) {
   const raw = String(key ?? "").trim();
-  if (!raw) return null;
+  if (!raw || !KEY_ALPHABET.test(raw)) return null;
   const identities = [];
-  for (const segment of raw.split(/[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])/)) {
-    const s = segment.toLowerCase();
-    if (s.length < 2 || SECRET_NOISE.has(s) || /^\d+$/.test(s)) continue;
-    const id = canonicalSegment(s);
+  const add = (id) => {
     if (id && !identities.includes(id)) identities.push(id);
+  };
+  for (const run of raw.split(/[^A-Za-z0-9]+/)) {
+    if (!run) continue;
+    for (const reading of readingsOf(run)) {
+      const r = reading.toLowerCase();
+      if (r.length < 2 || SECRET_NOISE.has(r) || /^\d+$/.test(r)) continue;
+      add(canonicalToken(reading));
+    }
   }
   // 0 → the key names nothing we know. >1 → ambiguous. Both grant nothing.
   return identities.length === 1 ? identities[0] : null;

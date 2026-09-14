@@ -492,11 +492,15 @@ test("recordSecretUsage appends to the A1 tool-usage store (never the value)", a
   await recordSecretUsage({ key: "has space?", sessionID: null, project: null, ts: 124 });
   const payload = await toolUsageStore.load();
   const rows = (payload?.rows ?? []).slice(-2);
+  // `identity` is deliberately null: the row records WHICH KEY was provided,
+  // and the registry names the tool from `secret:<KEY>` with the same matcher
+  // the §7.4 grant uses. Deciding it here too would be a second copy of that
+  // rule, free to drift from the one that authorizes.
   assert.deepEqual(
     rows.map((r) => [r.channel, r.identity, r.detail, r.ts, r.project]),
     [
-      ["secret", "github_pat", "secret:GITHUB_PAT", 123, "p"],
-      ["secret", "has space?", "secret:has space?", 124, null],
+      ["secret", null, "secret:GITHUB_PAT", 123, "p"],
+      ["secret", null, "secret:has space?", 124, null],
     ],
   );
   for (const r of rows) assert.equal(r.value, undefined, "the secret value must never be recorded");

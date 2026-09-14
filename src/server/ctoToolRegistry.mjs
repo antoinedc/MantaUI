@@ -295,11 +295,22 @@ export function fuseRow(tools, row, { nowMs } = {}) {
   }
 
   if (row.identity == null) {
-    // Unclassified raw evidence → a raw registry entry keyed by the token
-    // itself, for the one-shot LLM classification (§7.1-4). Labels stay
-    // log-only.
-    const rawIdentity = rawIdentityFromDetail(detail);
-    if (rawIdentity) row = { ...row, identity: rawIdentity, source: "raw" };
+    // Channel 1: a credential names its tool the same way the §7.4 grant
+    // does, so the evidence lands ON that tool — providing GITHUB_PAT is
+    // engagement with github, not with a phantom "github_pat" row nothing
+    // can ever reach (the store grants `github`). A key the catalog cannot
+    // place falls through to the raw path below, which is what the one-shot
+    // LLM classification is for.
+    const fromSecret = detail.startsWith("secret:") ? matchSecretIdentity(detail.slice("secret:".length)) : null;
+    if (fromSecret) {
+      row = { ...row, identity: fromSecret, source: "catalog" };
+    } else {
+      // Unclassified raw evidence → a raw registry entry keyed by the token
+      // itself, for the one-shot LLM classification (§7.1-4). Labels stay
+      // log-only.
+      const rawIdentity = rawIdentityFromDetail(detail);
+      if (rawIdentity) row = { ...row, identity: rawIdentity, source: "raw" };
+    }
   }
 
   const identity = typeof row.identity === "string" && row.identity ? row.identity.toLowerCase() : null;
@@ -942,11 +953,27 @@ export function createToolRegistry(deps = {}) {
   // quadrant role at read time (display-only — the stored `role` is written
   // by a later issue; deriving here keeps the drill-down honest without a
   // schema write on every read).
+  //
+  // THE GRANT IS ENUMERABLE HERE, NOT JUST ANSWERABLE. Access comes from the
+  // secret store, which knows nothing about discovery, so a tool granted by a
+  // key that nothing has ever used has no registry row — and every consumer
+  // that derives access by scanning this list (the §6.7 issue surface, the
+  // §7.6 overnight candidates, the §10.5 drill-down) would silently see no
+  // access at all while `consentFor` said yes. So a granted tool with no row
+  // is projected anyway, from the store: an honest empty row (zero uses, no
+  // vitality, status `observed`) carrying its `accessKey`. It is a
+  // PROJECTION, never a write — nothing about being granted makes a tool
+  // "observed", and the registry still only records what it really saw.
   async function listTools({ nowMs } = {}) {
     const t = Number.isFinite(nowMs) ? nowMs : now();
     const payload = await loadPayload();
     const granted = grantedTools();
-    return payload.tools.map((row) => {
+    const seen = new Set();
+    const rows = [...payload.tools];
+    for (const tool of granted.keys()) {
+      if (!rows.some((r) => r?.tool === tool || r?.aliases?.includes(tool))) rows.push(baseTool(tool, t));
+    }
+    return rows.map((row) => {
       const vitality = { ...emptyVitality(), ...(row.vitality ?? {}) };
       return {
         tool: row.tool,
@@ -972,6 +999,11 @@ export function createToolRegistry(deps = {}) {
         // this projection; also drives the drill-down's relevance display).
         relevance: { ...(row.relevance ?? {}) },
       };
+    }).filter((row) => {
+      // One row per identity, even if an alias collided during projection.
+      if (seen.has(row.tool)) return false;
+      seen.add(row.tool);
+      return true;
     });
   }
 

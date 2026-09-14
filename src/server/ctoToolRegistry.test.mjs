@@ -636,16 +636,19 @@ test("listTools exposes the §7.6 chain state + relevance map (no dead state)", 
 // projection, so the test feeds one — without the §7.4 port this fails: the
 // projection carries no `consent` field, so checkable-verify stayed off even
 // with the granting secret in the store.
-test("isIssueToolGranted reads the grant off a REAL listTools projection", async () => {
-  const mk = (ts) => ({ channel: "transcript", identity: "multica", detail: "cli:multica", ts, source: "catalog" });
+test("isIssueToolGranted reads the grant off a REAL listTools projection — from an EMPTY registry", async () => {
+  // NOTHING has been discovered: no usage rows, no registry rows. The key in
+  // the store is the only input, exactly as it is on a box where the user has
+  // just added a secret and no agent has touched the tool yet.
   const listWith = async (secrets) => {
-    const { registry } = makeRegistry({ usageRows: [mk(W0)], secrets, nowMs: W0 + DAY });
+    const { registry, registryStore } = makeRegistry({ usageRows: [], secrets, nowMs: W0 + DAY });
     await registry.dailyScan();
+    assert.deepEqual(registryStore._state().tools ?? [], [], "the registry really is empty");
     return registry.listTools();
   };
 
   const granted = await listWith(["CAPO_MULTICA_TOKEN"]);
-  assert.ok(granted.some((t) => t.tool === "multica"), "the tool is in the registry either way");
+  assert.ok(granted.some((t) => t.tool === "multica"), "a granted tool is enumerable with no registry row at all");
   assert.equal(isIssueToolGranted(granted), true, "a stored key naming the issue tool opens the surface");
 
   assert.equal(isIssueToolGranted(await listWith([])), false, "no key → no issue surface");
@@ -657,4 +660,59 @@ test("isIssueToolGranted reads the grant off a REAL listTools projection", async
   assert.equal(isIssueToolGranted([{ tool: "multica", accessKey: "" }]), false);
   assert.equal(isIssueToolGranted([{ tool: "multica" }]), false);
   assert.equal(isIssueToolGranted(null), false);
+});
+
+test("a never-used secret is ENUMERABLE, not just answerable: the projected row is honest and does not pretend to be discovery", async () => {
+  const { registry, registryStore } = makeRegistry({ usageRows: [], secrets: ["NORDVPN_TOKEN"], nowMs: W0 });
+  const view = await registry.listTools();
+  const row = view.find((r) => r.tool === "nordvpn");
+  assert.ok(row, "the granted tool appears without ever having been seen");
+  assert.equal(row.accessKey, "NORDVPN_TOKEN");
+  assert.equal(await registry.consentFor("nordvpn"), "yes", "and the chokepoint agrees with the list");
+  // The projection is not a write, and it invents no evidence.
+  assert.equal(row.uses, 0);
+  assert.equal(row.status, "observed");
+  assert.equal(row.ewmaPerWeek, 0);
+  assert.equal(row.vitality.ewma, null);
+  assert.deepEqual(registryStore._state().tools ?? [], [], "listTools never writes a row");
+  // A discovered tool is not duplicated by its own grant.
+  const dup = makeRegistry({
+    usageRows: [{ channel: "transcript", identity: "nordvpn", detail: "cli:nordvpn", ts: W0, source: "catalog" }],
+    secrets: ["NORDVPN_TOKEN"],
+    nowMs: W0 + DAY,
+  });
+  await dup.registry.dailyScan();
+  const rows = (await dup.registry.listTools()).filter((r) => r.tool === "nordvpn");
+  assert.equal(rows.length, 1, "one identity, one row");
+  assert.equal(rows[0].uses, 1);
+  assert.equal(rows[0].accessKey, "NORDVPN_TOKEN");
+});
+
+test("channel-1 credential evidence lands on the tool the key names, not on a phantom raw row", async () => {
+  // The production shape: recordSecretUsage writes the FACT (identity null,
+  // `secret:<KEY>`); the registry names the tool with the grant's matcher.
+  const { registry, registryStore } = makeRegistry({
+    usageRows: [{ channel: "secret", identity: null, detail: "secret:GITHUB_PAT", ts: W0, source: "raw" }],
+    secrets: ["GITHUB_PAT"],
+    nowMs: W0 + DAY,
+  });
+  await registry.dailyScan();
+  const tools = registryStore._state().tools;
+  assert.deepEqual(tools.map((t) => t.tool), ["github"], "no parallel github_pat row");
+  assert.equal(tools[0].raw, false, "a resolved credential is catalog-identified, not raw");
+  assert.equal(hasCredential(tools[0]), true, "and it still carries the vitality path");
+  assert.equal((await registry.listTools())[0].accessKey, "GITHUB_PAT");
+
+  // A key the catalog cannot place keeps the raw identity for the one-shot
+  // LLM classification — and grants nothing.
+  const unknown = makeRegistry({
+    usageRows: [{ channel: "secret", identity: null, detail: "secret:ACME_INTERNAL_TOKEN", ts: W0, source: "raw" }],
+    secrets: ["ACME_INTERNAL_TOKEN"],
+    nowMs: W0 + DAY,
+  });
+  await unknown.registry.dailyScan();
+  const raw = unknown.registryStore._state().tools.find((t) => t.tool === "acme_internal_token");
+  assert.ok(raw);
+  assert.equal(raw.raw, true);
+  assert.equal(await unknown.registry.consentFor("acme_internal_token"), null);
 });

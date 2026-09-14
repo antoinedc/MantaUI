@@ -2976,11 +2976,12 @@ export function createCtoEngine(deps = {}) {
 
   // Row 4 — tool-integrations drill-down render: the §7.2 registry rows
   // (engagement, vitality, derived §7.3 role) joined with the §7.5 probe
-  // summaries (declared + effective cadence, last result). Never list is the
-  // subset of rows whose metadata ring is "never" (§7.4).
+  // summaries (declared + effective cadence, last result). `listTools` also
+  // projects the tools the secret store grants but nothing has used yet, so
+  // the drill-down shows an integration the moment its key is added.
   async function toolsView() {
     const reg = getTools();
-    if (!reg) return { compiledAt: Date.now(), tools: [], never: [] };
+    if (!reg) return { compiledAt: Date.now(), tools: [] };
     const rows = await reg.listTools().catch(() => []);
     const probes = getProbes();
     const summaries = new Map();

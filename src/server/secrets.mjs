@@ -342,7 +342,13 @@ export async function recordSecretUsage({ key, sessionID, project, ts = Date.now
     const rows = Array.isArray(payload.rows) ? payload.rows : [];
     rows.push({
       channel: "secret",
-      identity: typeof key === "string" ? key.toLowerCase() : null,
+      // The FACT only: which key was provided. Naming the tool is the
+      // registry's job — it resolves `secret:<KEY>` through the same matcher
+      // the §7.4 grant uses, so a provide of GITHUB_PAT is engagement with
+      // `github` rather than a parallel `github_pat` row the grant can never
+      // reach. Deciding it here as well would be a second, drift-prone copy
+      // of that rule.
+      identity: null,
       source: "raw",
       detail: `secret:${key}`,
       ts,

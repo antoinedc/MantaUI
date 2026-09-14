@@ -118,6 +118,60 @@ test("an unknown or noise-only key names NOTHING (no wildcard, no minting)", () 
   }
 });
 
+test("identity detection is CANONICAL: casing cannot smuggle a second service past the ambiguity rule", () => {
+  // The regression: `OpenAI` split into `Open` + `AI`, neither of which the
+  // catalog knows — so the second service vanished and the key granted the
+  // first one outright.
+  assert.equal(matchSecretIdentity("GITHUB_OpenAI_TOKEN"), null);
+  assert.equal(matchSecretIdentity("GITHUB_OPENAI_TOKEN"), null);
+  assert.equal(matchSecretIdentity("OPENAI_GitHub_TOKEN"), null);
+  // Every spelling of the same key agrees.
+  for (const k of ["OPENAI_TOKEN", "openai_token", "OpenAI_Token", "openAiToken", "OpenAI-token"]) {
+    assert.equal(matchSecretIdentity(k), "openai", k);
+  }
+  for (const k of ["GITHUB_TOKEN", "github_token", "GitHub_Token", "gitHubToken", "GITHUB.TOKEN"]) {
+    assert.equal(matchSecretIdentity(k), "github", k);
+  }
+  // …and so does every spelling of an ambiguous one.
+  for (const k of ["GITHUB_STRIPE_TOKEN", "githubStripeToken", "GitHub_Stripe", "STRIPE_GitHub_KEY", "github__stripe___token"]) {
+    assert.equal(matchSecretIdentity(k), null, k);
+  }
+  // A camelCase run is read both ways (whole and per-word), so a name a human
+  // reads as one word resolves as one word…
+  assert.equal(matchSecretIdentity("myGitHubToken"), "github");
+  assert.equal(matchSecretIdentity("awsS3Key"), "aws");
+  // …but an EXPLICIT separator is a real boundary and is never joined across.
+  assert.equal(matchSecretIdentity("GIT_HUB_TOKEN"), null);
+});
+
+test("format variance is normalized: separators, ordinals, and anything outside the key alphabet", () => {
+  // Repeated / mixed separators are just separators.
+  assert.equal(matchSecretIdentity("GITHUB___TOKEN"), "github");
+  assert.equal(matchSecretIdentity("__GITHUB__"), "github");
+  assert.equal(matchSecretIdentity("github.token"), "github");
+  // A trailing ordinal is a second account, not a second tool.
+  assert.equal(matchSecretIdentity("GITHUB2_TOKEN"), "github");
+  assert.equal(matchSecretIdentity("AWS1_ACCESS_KEY"), "aws");
+  assert.equal(matchSecretIdentity("GITHUB2_STRIPE1_TOKEN"), null, "ordinals do not hide ambiguity either");
+  // Digits alone name nothing.
+  assert.equal(matchSecretIdentity("2_TOKEN"), null);
+  // A character outside the key alphabet is refused rather than treated as a
+  // separator — a homoglyph must not be able to hide half of an ambiguous
+  // key. (`isValidKey` already rejects these at the store; this is the
+  // matcher holding its own contract.)
+  assert.equal(matchSecretIdentity("GITHUB_\u041ePENAI_TOKEN"), null, "Cyrillic О");
+  assert.equal(matchSecretIdentity("GITHUB TOKEN"), null);
+  assert.equal(matchSecretIdentity("GITHUB\u200b_TOKEN"), null, "zero-width space");
+});
+
+test("inherited object properties are not identities (the matcher owns its map)", () => {
+  // The regression: `CLIS["constructor"]` returned Object's constructor, so
+  // CONSTRUCTOR_TOKEN "matched" a tool that does not exist.
+  for (const key of ["CONSTRUCTOR_TOKEN", "toString_TOKEN", "HASOWNPROPERTY_KEY", "__proto___TOKEN", "VALUEOF_TOKEN"]) {
+    assert.equal(matchSecretIdentity(key), null, key);
+  }
+});
+
 test("the hint is not an input: the matcher takes the KEY and nothing else", () => {
   // The regression: a hint mentioning github.com once granted GitHub.
   assert.equal(matchSecretIdentity.length, 1, "one parameter — there is no hint to consult");
