@@ -278,25 +278,24 @@ export function listSecrets({ sessionID, project, includeAll = false } = {}, { l
   return sortSecretMetas(visibleSecrets(secrets, sessionID, project));
 }
 
-// The KEY NAMES the box-level (session-less) reader can actually use, sorted
-// — nothing else. This is the narrowest possible reader and exists for ONE
-// caller: the Adaptive CTO's access grant (§7.4), where a key's presence is
-// the authorization. Only SHARED keys count: a session- or project-scoped
-// key is deliberately invisible to every other caller (visibleSecrets), and
-// the CTO's probe resolver materializes secrets with NO session/project
-// context — a scoped key would grant a tool whose probes then always die on
-// `secret_missing`: access claimed but unusable. Filtering here keeps the
-// grant and the materialization in agreement. Because it returns an array
-// of strings, no value, hint, scope or any other field can travel down that
-// path even by accident — the grant decision is structurally incapable of
-// touching a secret. A key name is not a secret; a value never leaves this
-// module except through `provideSecret`, which writes it to a 0600 file and
-// returns only the path.
+// The KEY NAMES in the store, sorted — nothing else. This is the narrowest
+// possible reader and exists for ONE caller: the Adaptive CTO's access grant
+// (§7.4), where a key's presence is the authorization. The approved rule is
+// deliberate and scope-blind: EVERY key currently in the store grants the CTO
+// full use — shared, project-scoped and session-scoped alike, with no split
+// and no imported/session/project distinction. Scope still governs the
+// ORDINARY tools (secret_list / secret_provide are unchanged); only the CTO's
+// own materialization path may resolve a scoped entry, through
+// `provideSecretForCto` below — the one deliberately-authorized widening.
+// Because this returns an array of strings, no value, hint, scope or any
+// other field can travel down that path even by accident — the grant decision
+// is structurally incapable of touching a secret. A key name is not a secret;
+// a value never leaves this module except through a materialize call, which
+// writes it to a 0600 file and returns only the path.
 export function listSecretKeys({ load = loadSecrets } = {}) {
   const keys = [];
   for (const entry of load()) {
-    if (entry?.scope !== "shared") continue;
-    const key = typeof entry.key === "string" ? entry.key : "";
+    const key = typeof entry?.key === "string" ? entry.key : "";
     if (key && !keys.includes(key)) keys.push(key);
   }
   return keys.sort((a, b) => a.localeCompare(b));
@@ -305,6 +304,18 @@ export function listSecretKeys({ load = loadSecrets } = {}) {
 // ---------------------------------------------------------------------------
 // Materialize — write the resolved value to a 0600 file, return ONLY the path
 // ---------------------------------------------------------------------------
+
+// Write a resolved entry's value to its 0600 materialized file and return the
+// path. The one place a secret value ever touches the filesystem on a provide.
+async function materializeEntry(entry, dir) {
+  const path = materializedPath(entry, dir);
+  await mkdir(dirname(path), { recursive: true });
+  // Tighten the containing dir(s) to 0700 (best-effort).
+  await chmod(dir, 0o700).catch(() => {});
+  await writeFile(path, entry.value, { mode: 0o600 });
+  await chmod(path, 0o600).catch(() => {});
+  return path;
+}
 
 // Resolve `key` for `sessionID`, write its value to a 0600 file under
 // ~/.manta-secrets/, and return { ok, path, key, hint }. The VALUE IS NEVER
@@ -328,14 +339,62 @@ export async function provideSecret(
   if (!entry) {
     return { ok: false, error: `No secret named "${key}" is available to this session.` };
   }
-  const path = materializedPath(entry, dir);
-  await mkdir(dirname(path), { recursive: true });
-  // Tighten the containing dir(s) to 0700 (best-effort).
-  await chmod(dir, 0o700).catch(() => {});
-  await writeFile(path, entry.value, { mode: 0o600 });
-  await chmod(path, 0o600).catch(() => {});
+  const path = await materializeEntry(entry, dir);
   if (typeof recordUsage === "function") {
     await recordUsage({ key: entry.key, sessionID: sessionID ?? null, project: project ?? null }).catch(() => {});
+  }
+  return { ok: true, path, key: entry.key, hint: entry.hint ?? "" };
+}
+
+// Which stored entry THE CTO's own materialization resolves for a key name —
+// the deterministic duplicate-name pick behind the approved all-store grant.
+// The ordinary resolver (`resolveSecret`) is context-shaped: without a
+// session/project it can only ever see the shared tier, so a scoped key would
+// grant a tool whose probes could never materialize it. This is the narrow,
+// deliberately-authorized widening for the CTO's own credential-use path (and
+// nothing else — ordinary secret_list/secret_provide keep their scope
+// behavior): among entries sharing the name it picks the DURABLE credential —
+// shared > project > session, then the same owner/id tiebreak
+// `sortSecretMetas` uses — the mirror image of per-session shadowing, where a
+// session's own copy wins FOR THAT SESSION. For the session-LESS box reader
+// a scratch copy some chat stored must never shadow the user's durable
+// credential: a deterministic pick that ignores who typed last. Pure.
+export function ctoSecretEntry(secrets, key) {
+  const list = Array.isArray(secrets) ? secrets : [];
+  if (!isValidKey(key)) return null;
+  const rank = (s) => (s?.scope === "shared" ? 0 : s?.scope === "project" ? 1 : 2);
+  const owner = (s) => s?.sessionID ?? s?.project ?? "";
+  return (
+    list
+      .filter((s) => s && s.key === key && typeof s.value === "string" && s.value.length > 0)
+      .sort(
+        (a, b) =>
+          rank(a) - rank(b) ||
+          owner(a).localeCompare(owner(b), "en") ||
+          String(a.id ?? "").localeCompare(String(b.id ?? ""), "en"),
+      )[0] ?? null
+  );
+}
+
+// The Adaptive CTO's privileged materialization: resolve through
+// `ctoSecretEntry` (every scope, deterministic duplicate pick), write the
+// value to a 0600 file, return ONLY the path — the value never crosses any
+// grant/list API and never reaches a transcript. Ordinary per-session
+// provides keep using `provideSecret`, whose scope visibility is unchanged.
+export async function provideSecretForCto(
+  { key, dir = SECRETS_DIR },
+  { load = loadSecrets, recordUsage = null } = {},
+) {
+  if (!isValidKey(key)) {
+    return { ok: false, error: `Invalid key "${key}".` };
+  }
+  const entry = ctoSecretEntry(load(), key);
+  if (!entry) {
+    return { ok: false, error: `No secret named "${key}" exists in the store.` };
+  }
+  const path = await materializeEntry(entry, dir);
+  if (typeof recordUsage === "function") {
+    await recordUsage({ key: entry.key, sessionID: null, project: null }).catch(() => {});
   }
   return { ok: true, path, key: entry.key, hint: entry.hint ?? "" };
 }

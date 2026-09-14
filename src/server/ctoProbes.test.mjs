@@ -8,6 +8,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
+import { mkdtemp, readFile as readFileSyncP, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { listSecretKeys, provideSecretForCto } from "./secrets.mjs";
 import {
   AUTHORING_FAILURE_RETRY_MS,
   AUTHOR_MAX_PROBES,
@@ -1434,4 +1438,105 @@ test("authorSpecs: the daily attempt budget bounds the calls box-wide, not per t
   const r3 = await h.eng.authorSpecs({ ts: 1_700_000_000_000 + 24 * 3_600_000 });
   assert.equal(r3.attempts, 2, "the next day fills the remaining templates");
   assert.deepEqual(r3, { ran: 2, attempts: 2 });
+});
+
+// ---------------------------------------------------------------------------
+// Production wiring — the CTO credential path, real functions end to end:
+// the REAL listSecretKeys grant reader (every scope, the approved rule) → the
+// REAL registry → the REAL provideSecretForCto materialization into a
+// throwaway dir → the probe's Authorization header. No live state: the store
+// is an injected array, the dir a tempdir.
+// ---------------------------------------------------------------------------
+
+async function wiredCto(store, { dir, http, spec } = {}) {
+  const reg = await multicaRegistry(() => listSecretKeys({ load: () => store }));
+  const seen = [];
+  const eng = build({
+    registry: reg,
+    rows: [],
+    specs: { multica: spec ?? multicaSpec("workspace_status") },
+    getSecretPath: async (key) => {
+      const r = await provideSecretForCto({ key, dir }, { load: () => store, recordUsage: async () => {} });
+      return r?.ok ? r.path : null;
+    },
+    readSecret: (p) => readFileSyncP(p, "utf-8"),
+    http:
+      http ??
+      (async (req) => {
+        seen.push(req);
+        return { status: 200, bodyText: JSON.stringify([{ updated_at: "2026-09-01T00:00:00Z" }]) };
+      }),
+  });
+  return { reg, eng, seen };
+}
+
+test("production wiring: a project-scoped key grants the CTO and its probe materializes", async () => {
+  const store = [{ id: "p1", key: "MULTICA_TOKEN", value: "proj-secret-value", scope: "project", sessionID: null, project: "manta", hint: "" }];
+  const dir = await mkdtemp(join(tmpdir(), "manta-probe-proj-"));
+  try {
+    const { reg, eng, seen } = await wiredCto(store, { dir });
+    assert.equal(await reg.consentFor("multica"), "yes", "the scoped key grants the CTO (the approved all-store rule)");
+    assert.equal(await reg.grantFor("multica"), "MULTICA_TOKEN");
+    const results = await eng.runDue({ forceTool: "multica" });
+    assert.equal(results.length, 1);
+    assert.equal(results[0].ok, true, JSON.stringify(results[0]));
+    assert.equal(seen[0]?.headers?.Authorization, "Bearer proj-secret-value", "the probe used the scoped credential");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("key deletion revokes the grant and stops the probes", async () => {
+  const store = [{ id: "p1", key: "MULTICA_TOKEN", value: "proj-secret-value", scope: "project", sessionID: null, project: "manta", hint: "" }];
+  const dir = await mkdtemp(join(tmpdir(), "manta-probe-del-"));
+  try {
+    const { reg, eng } = await wiredCto(store, { dir });
+    assert.equal(await reg.consentFor("multica"), "yes");
+    // The user deletes the key (deleteSecret empties it from the store).
+    store.splice(0, store.length);
+    assert.equal(await reg.consentFor("multica"), null, "the grant is gone with the key");
+    assert.equal(await reg.grantFor("multica"), null);
+    assert.deepEqual(await eng.runDue({ forceTool: "multica" }), [], "an unconsented tool is not scheduled");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("duplicate names materialize the durable credential — not an unrelated scratch copy", async () => {
+  const store = [
+    { id: "s1", key: "MULTICA_TOKEN", value: "scratch-session-value", scope: "session", sessionID: "ses_9", project: null, hint: "" },
+    { id: "d1", key: "MULTICA_TOKEN", value: "durable-shared-value", scope: "shared", sessionID: null, project: null, hint: "" },
+  ];
+  const dir = await mkdtemp(join(tmpdir(), "manta-probe-dup-"));
+  try {
+    const { reg, eng, seen } = await wiredCto(store, { dir });
+    assert.equal(await reg.consentFor("multica"), "yes");
+    const results = await eng.runDue({ forceTool: "multica" });
+    assert.equal(results[0].ok, true);
+    assert.equal(seen[0]?.headers?.Authorization, "Bearer durable-shared-value", "a scratch copy some chat stored never shadows the durable one");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a stale pin never sends another service's credential — the fallback granting key does", async () => {
+  const store = [
+    { id: "r1", key: "MULTICA_AI_TOKEN", value: "rotated-credential", scope: "shared", sessionID: null, project: null, hint: "" },
+    { id: "s1", key: "STRIPE_KEY", value: "stripes-credential", scope: "shared", sessionID: null, project: null, hint: "" },
+  ];
+  const dir = await mkdtemp(join(tmpdir(), "manta-probe-pin-"));
+  try {
+    // The spec pins STRIPE_KEY — present in the store, but it names stripe,
+    // not this tool. The pinned path must be refused (keyGrantedForTool) and
+    // the tool's own granting key used instead.
+    const { reg, eng, seen } = await wiredCto(store, { dir, spec: multicaSpec("workspace_status", "STRIPE_KEY") });
+    assert.equal(await reg.keyGrantedForTool("STRIPE_KEY", "multica"), false);
+    assert.equal(await reg.keyGrantedForTool("MULTICA_AI_TOKEN", "multica"), true);
+    const results = await eng.runDue({ forceTool: "multica" });
+    assert.equal(results[0].ok, true);
+    assert.equal(seen[0]?.headers?.Authorization, "Bearer rotated-credential");
+    assert.notEqual(seen[0]?.headers?.Authorization, "Bearer stripes-credential", "another service's credential never reaches this endpoint");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

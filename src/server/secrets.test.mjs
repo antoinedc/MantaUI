@@ -17,6 +17,8 @@ import {
   listSecretKeys,
   sortSecretMetas,
   provideSecret,
+  provideSecretForCto,
+  ctoSecretEntry,
   recordSecretUsage,
 } from "./secrets.mjs";
 
@@ -519,7 +521,7 @@ test("listSecretKeys returns KEY NAMES ONLY — no value, no hint, no metadata o
     { id: "2", key: "GITHUB_TOKEN", value: "ghp_another_secret", scope: "session", sessionID: "ses_1", project: null, hint: "" },
   ];
   const keys = listSecretKeys({ load: () => store });
-  assert.deepEqual(keys, ["NORDVPN_TOKEN"], "sorted key names — shared scope only");
+  assert.deepEqual(keys, ["GITHUB_TOKEN", "NORDVPN_TOKEN"], "sorted key names");
   for (const k of keys) assert.equal(typeof k, "string", "every element is a bare string");
   // The structural guarantee: no value can be reached through this return.
   const serialized = JSON.stringify(keys);
@@ -528,7 +530,7 @@ test("listSecretKeys returns KEY NAMES ONLY — no value, no hint, no metadata o
   assert.equal(serialized.includes("vpn"), false, "not even the hint travels");
 });
 
-test("listSecretKeys grants only what the session-less reader can materialize — shared scope", () => {
+test("listSecretKeys grants EVERY key in the store — no scope split (the approved rule)", () => {
   const store = [
     { id: "1", key: "SHARED_ONE", value: "a", scope: "shared" },
     { id: "2", key: "SESSION_ONE", value: "b", scope: "session", sessionID: "ses_1" },
@@ -537,12 +539,87 @@ test("listSecretKeys grants only what the session-less reader can materialize �
     { id: "5", value: "no key", scope: "shared" },
     null,
   ];
-  // A session- or project-scoped key is deliberately invisible to every
-  // other caller, and the CTO's probe resolver materializes secrets with NO
-  // session/project context — a scoped key would grant a tool whose probes
-  // then always die on secret_missing: access claimed but unusable. Only
-  // shared keys are the grant surface; dedupe + junk tolerance unchanged.
-  assert.deepEqual(listSecretKeys({ load: () => store }), ["SHARED_ONE"]);
+  // ALL keys currently in the store grant the CTO full use — shared,
+  // project-scoped and session-scoped alike, no distinction (explicitly
+  // approved). Scope still governs the ORDINARY secret tools; the CTO's own
+  // materialization goes through provideSecretForCto. Dedupe + junk
+  // tolerance unchanged.
+  assert.deepEqual(listSecretKeys({ load: () => store }), ["PROJECT_ONE", "SESSION_ONE", "SHARED_ONE"]);
+});
+
+// ----------------------------------------------------------------------------
+// ctoSecretEntry / provideSecretForCto — the CTO's privileged materialization.
+// The approved grant rule: EVERY key in the store grants the CTO full use
+// (listSecretKeys above, no scope split). These pin the ONE deliberately-
+// authorized widening that makes scoped grants usable: a deterministic
+// duplicate-name pick (durable tier first) on the credential-use path only —
+// ordinary secret_list / secret_provide scope behavior is unchanged.
+// ----------------------------------------------------------------------------
+
+const CTO_STORE = [
+  { id: "a", key: "GITHUB_TOKEN", value: "durable-shared-value", scope: "shared", sessionID: null, project: null, hint: "user's durable PAT" },
+  { id: "b", key: "GITHUB_TOKEN", value: "scratch-session-value", scope: "session", sessionID: "ses_9", project: null, hint: "scratch copy a chat stored" },
+  { id: "c", key: "DEPLOY_KEY", value: "project-value", scope: "project", sessionID: null, project: "manta", hint: "" },
+];
+
+test("ctoSecretEntry resolves a session- or project-scoped key — the approved all-store grant", () => {
+  // Scoped-only stores resolve (the ordinary resolver without context cannot).
+  assert.equal(ctoSecretEntry([{ id: "x", key: "DEPLOY_KEY", value: "v", scope: "project", project: "manta" }], "DEPLOY_KEY")?.value, "v");
+  assert.equal(ctoSecretEntry([{ id: "y", key: "S_KEY", value: "v", scope: "session", sessionID: "ses_1" }], "S_KEY")?.value, "v");
+  assert.equal(ctoSecretEntry(CTO_STORE, "DEPLOY_KEY")?.scope, "project");
+  assert.equal(ctoSecretEntry(CTO_STORE, "MISSING"), null);
+  assert.equal(ctoSecretEntry(CTO_STORE, "bad key"), null, "invalid names resolve to nothing");
+});
+
+test("duplicate names pick the durable credential, deterministically — never an unrelated copy", () => {
+  // shared > project > session, then the stable owner/id tiebreak — the same
+  // pick under any store order.
+  const reversed = [...CTO_STORE].reverse();
+  for (const store of [CTO_STORE, reversed]) {
+    const picked = ctoSecretEntry(store, "GITHUB_TOKEN");
+    assert.equal(picked.id, "a", "the durable shared entry wins over a scratch session copy");
+    assert.equal(picked.value, "durable-shared-value");
+  }
+  // Removing the durable tier falls through, one tier at a time.
+  const noShared = ctoSecretEntry(CTO_STORE.filter((s) => s.scope !== "shared"), "GITHUB_TOKEN");
+  assert.equal(noShared?.id, "b", "the only remaining entry — the session copy — resolves");
+});
+
+test("provideSecretForCto materializes a scoped credential; the value never crosses the return", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "manta-cto-secret-"));
+  try {
+    const load = () => CTO_STORE;
+    // A PROJECT-scoped key materializes for the CTO...
+    const r = await provideSecretForCto({ key: "DEPLOY_KEY", dir }, { load });
+    assert.equal(r.ok, true);
+    assert.equal(r.key, "DEPLOY_KEY");
+    assert.ok(r.path.startsWith(dir), "materialized under the injected dir");
+    assert.equal(r.value, undefined, "the value never crosses the return");
+    assert.equal(JSON.stringify(r).includes("project-value"), false);
+    // ...and the duplicate-name pick uses the DURABLE credential's value.
+    const r2 = await provideSecretForCto({ key: "GITHUB_TOKEN", dir }, { load });
+    assert.equal(await readFile(r2.path, "utf-8"), "durable-shared-value", "not the unrelated session scratch copy");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("ordinary provideSecret scope behavior is UNCHANGED — a session-less call cannot see scoped entries", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "manta-ordinary-"));
+  try {
+    const load = () => CTO_STORE;
+    const scoped = await provideSecret({ key: "GITHUB_TOKEN", dir }, { load });
+    assert.equal(scoped.ok, true);
+    assert.equal(await readFile(scoped.path, "utf-8"), "durable-shared-value", "session-less provide = shared tier, as always");
+    const missing = await provideSecret({ key: "DEPLOY_KEY", dir }, { load });
+    assert.equal(missing.ok, false, "a project-scoped key is invisible without project context");
+    const withProject = await provideSecret({ key: "DEPLOY_KEY", project: "manta", dir }, { load });
+    assert.equal(withProject.ok, true, "with the project context it resolves, exactly as before");
+    const withSession = await provideSecret({ key: "GITHUB_TOKEN", sessionID: "ses_9", dir }, { load });
+    assert.equal(await readFile(withSession.path, "utf-8"), "scratch-session-value", "per-session shadowing unchanged");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 // --- tiny file-backed helpers for the round-trip tests above ---

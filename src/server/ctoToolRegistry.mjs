@@ -898,6 +898,29 @@ export function createToolRegistry(deps = {}) {
     return (await accessFor(tool)) ?? null;
   }
 
+  // Is THIS stored key still granted FOR this tool — its catalog identity
+  // still exists in the store AND still serves the tool through the one seam?
+  // The §7.5 probe specs pin a granting key's NAME at scaffold time; this is
+  // how the runner checks a stale pin before sending that credential to the
+  // tool's endpoint: a pinned key whose identity no longer serves the tool
+  // (or that no longer exists in the store) must never be used — the fallback
+  // (grantFor) takes over, and never another service's credential.
+  async function keyGrantedForTool(key, tool) {
+    const id = typeof key === "string" ? matchSecretIdentity(key) : null;
+    if (!id) return false;
+    const norm = normalizeToolId(tool);
+    if (!norm) return false;
+    const granted = grantedTools();
+    if (!granted.get(id)) return false;
+    let tools = [];
+    try {
+      tools = (await loadPayload()).tools;
+    } catch {
+      tools = [];
+    }
+    return resolveIdentities(tools, norm).includes(id);
+  }
+
   // ---------------------------------------------------------------------------
   // BET-1396 — §7.3 vitality / §7.6 relevance / §7.4 lifecycle. All mutating
   // writers are patchStore writers (BET-1464 defect 3) — the whole-payload
@@ -1172,6 +1195,10 @@ export function createToolRegistry(deps = {}) {
     // The single access chokepoint + the grant behind it (§10.5 display).
     consentFor,
     grantFor,
+    // Whether ONE stored key is still granted FOR a tool (same identity,
+    // still in the store, identity still serves the tool through the seam) —
+    // the probe runner's stale-pin check.
+    keyGrantedForTool,
     listTools,
     appendUsage,
     // BET-1396: §7.5 probe-runner surface (read the row, fold vitality /

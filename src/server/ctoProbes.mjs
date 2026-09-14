@@ -71,7 +71,7 @@ import { readFile } from "node:fs/promises";
 import https from "node:https";
 import dns from "node:dns/promises";
 import { probesStore, probeStateStore } from "./ctoStores.mjs";
-import { provideSecret } from "./secrets.mjs";
+import { provideSecretForCto } from "./secrets.mjs";
 import { proposalsFromRollup } from "./ctoRollups.mjs";
 import {
   PROBE_SOURCE_KIND,
@@ -644,8 +644,9 @@ export function evidenceHost(detail) {
  *   cards, ledger — the needs-you cards engine + A1 ledger (both default).
  *   now           — clock.
  *   httpRequest   — the §7.5 transport (default: defaultHttpRequest).
- *   getSecretPath — async (keyName) => path | null (default: the shared
- *                   provideSecret machinery, usage-recording suppressed).
+  *   getSecretPath — async (keyName) => path | null (default: the CTO's own
+  *                   privileged provideSecretForCto machinery — every store
+  *                   scope, durable tier first — usage-recording suppressed).
  *   readSecret    — async (path) => string (default fs.readFile utf-8).
  *   isThrifty     — () => boolean (live engine thrifty flag).
  *   listProjects  — async () => [projectName] (active projects for §7.6).
@@ -671,12 +672,16 @@ export function createProbes(deps = {}) {
     ledger,
     now = () => Date.now(),
     httpRequest = defaultHttpRequest,
-    // Default: the shared provideSecret machinery, BY REFERENCE, with usage
-    // recording suppressed — a probe provide must never inflate the tool's
-    // own engagement axis (that would make the registry a feedback loop of
-    // its runner). Only shared/global secrets resolve without a session.
+    // Default: the CTO's OWN privileged provide machinery, BY REFERENCE, with
+    // usage recording suppressed — a probe provide must never inflate the
+    // tool's own engagement axis (that would make the registry a feedback
+    // loop of its runner). The approved grant rule is every key in the store,
+    // so the materialization goes through provideSecretForCto — the one
+    // deliberately-authorized path that can resolve a scoped entry,
+    // deterministically (durable tier first) — NOT the ordinary per-session
+    // provideSecret, whose scope visibility is unchanged.
     getSecretPath = async (key) => {
-      const r = await provideSecret({ key }, { recordUsage: async () => {} });
+      const r = await provideSecretForCto({ key }, { recordUsage: async () => {} });
       return r?.ok ? r.path : null;
     },
     readSecret = (path) => readFile(path, "utf-8"),
@@ -1068,21 +1073,29 @@ export function createProbes(deps = {}) {
 
   // Resolve the secret AT SPAWN, by reference: vault KEY NAME → materialized
   // file path → read inside this closure only. Usage is deliberately NOT
-  // recorded (provideSecret with a no-op recorder) so the runner can never
-  // inflate the tool's own engagement axis.
+  // recorded (no-op recorder) so the runner can never inflate the tool's own
+  // engagement axis.
   //
-  // The spec pins the granting key's NAME at scaffold time, but a rotation
-  // renames the key while the GRANT (the store identity) persists — without
-  // a fallback the tool stays "granted" in the list while every probe dies
-  // on secret_missing: access claimed but unusable. So when the pinned name
-  // is gone, ask the registry's one grant seam for the CURRENT granting key
-  // and use that. The pinned name stays authoritative whenever it exists.
+  // The spec pins the granting key's NAME at scaffold time. That pin is
+  // authoritative ONLY while the key is still granted for this very tool
+  // (registry.keyGrantedForTool: its catalog identity still serves the tool
+  // and the identity is still in the store) — a stale pin must never send
+  // another service's credential to this tool's endpoint. When the pin no
+  // longer holds — rotation renamed the key (the GRANT, the store identity,
+  // persists), or the pinned key was never this tool's — the registry's one
+  // grant seam supplies the CURRENT granting key. Without the fallback the
+  // tool would stay "granted" in the list while every probe dies on
+  // secret_missing: access claimed but unusable.
   async function buildHeaders(tool, specAuth) {
     if (!specAuth) return {};
     let path = null;
     let secretName = specAuth.secret;
     if (typeof getSecretPath === "function") {
-      path = await getSecretPath(secretName);
+      const pinnedOk =
+        typeof registry.keyGrantedForTool === "function"
+          ? await registry.keyGrantedForTool(secretName, tool).catch(() => false)
+          : true; // a registry without the stale-pin check keeps the old order
+      if (pinnedOk) path = await getSecretPath(secretName);
       if (!path && typeof registry.grantFor === "function") {
         const current = await registry.grantFor(tool).catch(() => null);
         if (typeof current === "string" && current && current !== secretName) {

@@ -1014,3 +1014,30 @@ for (const order of ["alias-row-first", "primary-row-first"]) {
     assert.deepEqual(list.filter((t) => t.tool === "codespace"), [], "no phantom row for the ambiguous alias");
   });
 }
+
+// The stale-pin check the probe runner uses before sending a pinned
+// credential: the pinned key is authoritative only while it is still granted
+// FOR this tool — its catalog identity still in the store and still serving
+// the tool through the one seam.
+test("keyGrantedForTool: same identity still granted → true; deleted or other-service key → false", async () => {
+  const reg = seamRegistry(
+    [{ tool: "github", aliases: ["gh"], evidence: [{ channel: "config", detail: "git:github.com", ts: 1 }], uses: 1 }],
+    ["GITHUB_TOKEN"],
+  );
+  // The granting key itself, and an ALIASED spelling of the same identity:
+  // both name the tool's identity, which is still in the store.
+  assert.equal(await reg.keyGrantedForTool("GITHUB_TOKEN", "github"), true);
+  // The key still exists but names ANOTHER service: never authorized for
+  // this tool's endpoint.
+  assert.equal(await reg.keyGrantedForTool("STRIPE_KEY", "github"), false);
+  // The tool named by its alias reaches the same identity set.
+  assert.equal(await reg.keyGrantedForTool("GITHUB_TOKEN", "gh"), true);
+  // Once the store no longer covers the identity — the key was deleted —
+  // the pin is stale even though the spec still names it.
+  const reg2 = seamRegistry(
+    [{ tool: "github", aliases: ["gh"], evidence: [{ channel: "config", detail: "git:github.com", ts: 1 }], uses: 1 }],
+    [],
+  );
+  assert.equal(await reg2.keyGrantedForTool("GITHUB_TOKEN", "github"), false);
+  assert.equal(await reg2.keyGrantedForTool("STRIPE_KEY", "github"), false);
+});
