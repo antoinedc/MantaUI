@@ -81,6 +81,16 @@ export const RAW_CLASSIFY_MIN_USES = 2;
 export const UNRESOLVED_PRUNE_LIMIT = 1000;
 export const UNRESOLVED_RETENTION_MS = 90 * 24 * 3_600_000;
 
+// Every identity a registry row answers to: its canonical name plus the
+// aliases classification folded into it. A row IS each of these — so asking
+// "which row is `multica`?" and "does this row carry multica's grant?" must
+// both go through here, or the two can disagree about the same row.
+export function identitiesOf(row) {
+  return [row?.tool, ...(Array.isArray(row?.aliases) ? row.aliases : [])].filter(
+    (id) => typeof id === "string" && id !== "",
+  );
+}
+
 // §6.7 "a consented tool for issue facts": does the registry report an issue
 // tool the CTO can actually reach? Reads `accessKey` — the §7.4 grant — off
 // the listTools projection, so the issue surface exists exactly when a secret
@@ -91,7 +101,10 @@ export const ISSUE_TOOL_RE = /^(?:multica|issue-tracker)(?:[-/].*)?$/i;
 
 export function isIssueToolGranted(tools) {
   return (Array.isArray(tools) ? tools : []).some(
-    (t) => ISSUE_TOOL_RE.test(String(t?.tool ?? "")) && typeof t?.accessKey === "string" && t.accessKey !== "",
+    (t) =>
+      identitiesOf(t).some((id) => ISSUE_TOOL_RE.test(id)) &&
+      typeof t?.accessKey === "string" &&
+      t.accessKey !== "",
   );
 }
 
@@ -964,6 +977,15 @@ export function createToolRegistry(deps = {}) {
   // vitality, status `observed`) carrying its `accessKey`. It is a
   // PROJECTION, never a write — nothing about being granted makes a tool
   // "observed", and the registry still only records what it really saw.
+  //
+  // Both halves of that — "is this identity already here?" and "which row
+  // carries the grant?" — resolve a row's identity THE SAME WAY, through
+  // `identitiesOf`. They must: classification merges a raw row into its
+  // canonical one and keeps the old token as an ALIAS, so an identity the
+  // store grants can live on a row with a different primary name. When only
+  // the skip was alias-aware, such a row suppressed the projection AND
+  // carried no access — the grant reached nobody. One resolver, used twice,
+  // makes that disagreement unrepresentable.
   async function listTools({ nowMs } = {}) {
     const t = Number.isFinite(nowMs) ? nowMs : now();
     const payload = await loadPayload();
@@ -971,7 +993,7 @@ export function createToolRegistry(deps = {}) {
     const seen = new Set();
     const rows = [...payload.tools];
     for (const tool of granted.keys()) {
-      if (!rows.some((r) => r?.tool === tool || r?.aliases?.includes(tool))) rows.push(baseTool(tool, t));
+      if (!rows.some((r) => identitiesOf(r).includes(tool))) rows.push(baseTool(tool, t));
     }
     return rows.map((row) => {
       const vitality = { ...emptyVitality(), ...(row.vitality ?? {}) };
@@ -987,10 +1009,13 @@ export function createToolRegistry(deps = {}) {
         lastSeenTs: row.engagement?.last_used ?? null,
         firstSeenTs: row.firstSeenTs ?? null,
         vitality,
+        // Every identity this row answers to, so a consumer matching on a
+        // tool NAME sees the same identity set the grant was resolved against.
+        aliases: [...(row.aliases ?? [])],
         // Access, as the drill-down must state it: the stored KEY that grants
         // this tool (a key name is not a secret), or null — in which case the
         // CTO cannot reach it and nothing will ask the user to change that.
-        accessKey: granted.get(row.tool) ?? null,
+        accessKey: identitiesOf(row).map((id) => granted.get(id)).find(Boolean) ?? null,
         // §7.6 chain visibility (§10.5 drill-down): counters + trip state so
         // the surface can explain why deep analyses stopped — no dead state.
         asSource: { ...(row.as_source ?? { reports: 0, accepted: 0 }) },

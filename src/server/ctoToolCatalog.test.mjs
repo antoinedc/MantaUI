@@ -164,6 +164,25 @@ test("format variance is normalized: separators, ordinals, and anything outside 
   assert.equal(matchSecretIdentity("GITHUB\u200b_TOKEN"), null, "zero-width space");
 });
 
+test("analysis is TOTAL: a partially-read key can never produce a grant", () => {
+  // The regression: words after the eighth were silently discarded, so this
+  // key looked like it named ONE service and granted github — the dropped
+  // tail was exactly the evidence that would have refused it.
+  assert.equal(matchSecretIdentity("githubOneTwoThreeFourFiveSixSevenStripeToken"), null);
+  // The old cap boundary, from both sides: ambiguity is seen wherever the
+  // second service sits.
+  assert.equal(matchSecretIdentity("githubOneTwoThreeFourFiveSixStripeToken"), null, "8th word");
+  assert.equal(matchSecretIdentity("githubOneTwoThreeFourFiveSixSevenEightStripeToken"), null, "10th word");
+  assert.equal(matchSecretIdentity("githubOneTwoThreeFourFiveSixSevenEightNineTenStripe"), null, "12th word");
+  // A long key that is genuinely unambiguous still resolves.
+  assert.equal(matchSecretIdentity("githubOneTwoThreeFourFiveSixSevenToken"), "github");
+  // Beyond what a stored key can be (isValidKey caps at 64), it fails CLOSED
+  // rather than analysing a prefix.
+  assert.equal(matchSecretIdentity(`github_${"x".repeat(60)}`), null);
+  assert.equal(matchSecretIdentity("a".repeat(65)), null);
+  assert.equal(matchSecretIdentity(`GITHUB_${"O".repeat(58)}`), null, "64 chars is the last analysable length");
+});
+
 test("inherited object properties are not identities (the matcher owns its map)", () => {
   // The regression: `CLIS["constructor"]` returned Object's constructor, so
   // CONSTRUCTOR_TOKEN "matched" a tool that does not exist.

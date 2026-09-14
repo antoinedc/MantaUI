@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import {
   createToolRegistry,
   isIssueToolGranted,
+  identitiesOf,
   fuseRow,
   weekKey,
   barCrossed,
@@ -715,4 +716,63 @@ test("channel-1 credential evidence lands on the tool the key names, not on a ph
   assert.ok(raw);
   assert.equal(raw.raw, true);
   assert.equal(await unknown.registry.consentFor("acme_internal_token"), null);
+});
+
+test("an ALIASING row carries the grant — a persisted alias can never suppress it", async () => {
+  // Real data, not a contrived fixture: classification merges a raw row into
+  // its canonical one and keeps the old token as an alias, so an identity the
+  // store grants can live on a row with a different primary name.
+  const seeded = memStore({
+    tools: [{
+      tool: "multica-ai",
+      displayName: "Multica AI",
+      aliases: ["multica"],
+      status: "integrated",
+      engagement: { ewma_per_week: 2, last_used: W0, per_project: {} },
+      vitality: { last_event: null, inflow_rate: null, ewma: null, last_probed: null },
+      evidence: [],
+      uses: 4,
+      weeks: [],
+      firstSeenTs: W0,
+    }],
+    lastScanTs: W0,
+  });
+  const registry = createToolRegistry({
+    registryStore: seeded,
+    classificationStore: memStore(),
+    usageStore: memStore({ rows: [] }),
+    ledger: fakeLedger(),
+    listSecretKeys: () => ["MULTICA_TOKEN"],
+    now: () => W0 + DAY,
+  });
+
+  assert.equal(await registry.consentFor("multica"), "yes", "the chokepoint grants the identity");
+  const view = await registry.listTools();
+  // No phantom: the alias row is the multica row, so nothing is projected…
+  assert.equal(view.length, 1, "no duplicate row for an identity a real row already answers to");
+  assert.equal(view[0].tool, "multica-ai", "and the real row is not masked");
+  assert.deepEqual(view[0].aliases, ["multica"]);
+  // …and it CARRIES the grant, so every consumer of the list sees it.
+  assert.equal(view[0].accessKey, "MULTICA_TOKEN", "the grant lands on the row that answers to the identity");
+  assert.equal(isIssueToolGranted(view), true, "the issue gate agrees with consentFor");
+
+  // Same row, no secret → no access anywhere.
+  const ungranted = createToolRegistry({
+    registryStore: seeded,
+    classificationStore: memStore(),
+    usageStore: memStore({ rows: [] }),
+    ledger: fakeLedger(),
+    listSecretKeys: () => [],
+    now: () => W0 + DAY,
+  });
+  const none = await ungranted.listTools();
+  assert.equal(none[0].accessKey, null);
+  assert.equal(isIssueToolGranted(none), false);
+});
+
+test("identitiesOf is the single identity resolver both halves of listTools use", () => {
+  assert.deepEqual(identitiesOf({ tool: "multica-ai", aliases: ["multica", "mc"] }), ["multica-ai", "multica", "mc"]);
+  assert.deepEqual(identitiesOf({ tool: "github" }), ["github"]);
+  assert.deepEqual(identitiesOf({ tool: "x", aliases: ["", null, 7, "y"] }), ["x", "y"]);
+  assert.deepEqual(identitiesOf(null), []);
 });

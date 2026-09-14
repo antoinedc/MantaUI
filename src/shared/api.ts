@@ -588,6 +588,10 @@ export type CtoToolRegistryRow = {
   lastSeenTs: number | null;
   firstSeenTs: number | null;
   vitality: { last_event: number | null; inflow_rate: number | null; ewma: number | null; last_probed: number | null };
+  // Every other identity this row answers to (aliases folded in by
+  // classification). A consumer matching on a tool name must consider these
+  // too — the row IS each of them, and a grant may be resolved through one.
+  aliases: string[];
   // The stored secret key that grants the CTO access to this tool, or null
   // when no key names it (then the CTO cannot reach it at all). A key NAME is
   // not a secret; a value never leaves the box.

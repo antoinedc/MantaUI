@@ -345,11 +345,16 @@ const KNOWN_IDENTITIES = new Set([...Object.values(CLIS), ...Object.values(DOMAI
 const CLI_ALIASES = new Map(Object.entries(CLIS));
 
 // Key names are env-var shaped (`isValidKey` enforces `[A-Za-z_][A-Za-z0-9_]*`
-// on everything the store accepts). Anything outside that alphabet plus the
-// `-`/`.` a hand-written key might use is refused rather than parsed: an
-// unexpected character would be treated as a separator, which is a way to
-// hide one of two service names from the ambiguity rule below.
+// and a 64-character limit on everything the store accepts). Anything outside
+// that alphabet plus the `-`/`.` a hand-written key might use is refused
+// rather than parsed: an unexpected character would be treated as a
+// separator, which is a way to hide one of two service names from the
+// ambiguity rule below.
 const KEY_ALPHABET = /^[A-Za-z0-9_.-]+$/;
+// THE MATCHING PATH HAS NO CAPS — see matchSecretIdentity. This is the length
+// beyond which a string cannot be a stored key at all, and it FAILS CLOSED
+// (null) rather than analysing a prefix.
+const KEY_MAX_LEN = 64;
 
 // One token → a canonical catalog identity, or null. A token that IS an
 // identity wins over the CLI alias table, so `SENTRY_DSN` resolves to the
@@ -375,8 +380,14 @@ function canonicalToken(token) {
 // `openai`, so a mixed-case spelling can no longer hide one of two services
 // from the ambiguity rule. Explicit separators are NOT crossed: `GIT_HUB` is
 // two runs and stays two runs.
+//
+// EVERY word is read. A cap here would be a bypass, not a safety valve: with
+// the words after the eighth dropped, `githubOne…SevenStripeToken` looked
+// like a key naming ONE service and granted github, instead of being refused
+// as ambiguous. The whole input is bounded by KEY_MAX_LEN before this runs,
+// so "read everything" is also cheap.
 function readingsOf(run) {
-  const words = run.split(/(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/).slice(0, 8);
+  const words = run.split(/(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/);
   const out = [];
   for (let len = words.length; len >= 1; len--) {
     for (let i = 0; i + len <= words.length; i++) out.push(words.slice(i, i + len).join(""));
@@ -391,9 +402,15 @@ function readingsOf(run) {
 // Identity detection is CANONICAL: the same key in any casing, separator
 // style or ordinal suffix resolves to the same set of identities, so the
 // "ambiguous → nothing" rule cannot be evaded by spelling.
+//
+// And it is TOTAL: every character of the key is analysed, or no grant is
+// produced. Partially-analysed input must never authorize anything — a key
+// whose tail was dropped can look unambiguous only because the evidence that
+// would have refused it was discarded. So there is no cap inside the
+// analysis; the one bound is on the input, and exceeding it fails closed.
 export function matchSecretIdentity(key) {
   const raw = String(key ?? "").trim();
-  if (!raw || !KEY_ALPHABET.test(raw)) return null;
+  if (!raw || raw.length > KEY_MAX_LEN || !KEY_ALPHABET.test(raw)) return null;
   const identities = [];
   const add = (id) => {
     if (id && !identities.includes(id)) identities.push(id);
