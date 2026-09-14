@@ -120,6 +120,16 @@ export function identitiesOf(row) {
 //      exactly ONE row does. Two claimants is an ambiguous alias: there is
 //      no defensible pick, so it resolves to NO row (fail closed), whichever
 //      way the evidence happened to arrive.
+//   3. THE SERVICE BOUNDARY, in this one resolver so every consumer inherits
+//      it: a KNOWN catalog identity is a distinct service its own keys name,
+//      and it NEVER resolves onto a DIFFERENT known catalog service's row
+//      through an alias bridge — for ANY purpose (grant, row lookup,
+//      evidence, allowed hosts, spec validation, probe folding). Otherwise a
+//      row claiming "stripe" as an alias would lend github's evidence hosts
+//      to a stripe-named probe, and the stripe credential would be
+//      materialized and sent to github's endpoint. A row the catalog does
+//      NOT know (multica-ai) is reachable through the bridge in both
+//      directions; two known services (github <-> stripe) are not.
 export function findToolRow(tools, id) {
   const norm = normalizeToolId(id);
   if (!norm) return null;
@@ -132,6 +142,7 @@ export function findToolRow(tools, id) {
     if (owner) return null;
     owner = r;
   }
+  if (owner && isKnownIdentity(norm) && isKnownIdentity(normalizeToolId(owner.tool))) return null;
   return owner;
 }
 
@@ -142,13 +153,14 @@ export function findToolRow(tools, id) {
 // a row that answers to the name contributes its other names too (so the
 // canonical name and any alias reach the same grant).
 //
-// THE ALIAS BRIDGE HAS ONE LIMIT, and it is authorization, not discovery: a
-// requested name that is itself a KNOWN CATALOG identity is a distinct
+// THE ALIAS BRIDGE HAS ONE LIMIT, and it is the service boundary above: a
+// requested name that is itself a KNOWN catalog identity is a distinct
 // service its own keys could name, so an alias must never transfer a grant
 // onto it — `GITHUB_TOKEN` must not authorize "stripe" because a model once
-// merged their evidence rows, even when no stripe row exists to object. A
-// name the catalog does NOT know can only be reached through the bridge at
-// all, so the bridge is exactly what makes it reachable (multica-ai inherits
+// merged their evidence rows — and the row resolver refuses the known→known
+// bridge outright, so no evidence, hosts or folding cross either. A name the
+// catalog does NOT know can only be reached through the bridge at all, so
+// the bridge is exactly what makes it reachable (multica-ai inherits
 // multica's grant; the catalog knows `multica`, never `multica-ai`).
 export function resolveIdentities(tools, id) {
   const norm = normalizeToolId(id);

@@ -1485,18 +1485,25 @@ function captureHttp(seen) {
   };
 }
 
-// One pinned-spec probe engine for the exploit tests below.
+// One pinned-spec probe engine for the exploit tests below — the
+// materialization calls are counted so a test can prove a probe was blocked
+// BEFORE any credential was read.
 async function exploitEng({ dir, reg, tool, pinned, url, store = CROSS_SERVICE_STORE }) {
   const seen = [];
+  const materializations = [];
   const eng = build({
     registry: reg,
     rows: [],
     specs: { [tool]: serviceSpec(tool, pinned, url) },
-    getSecretPath: ctoGetSecretPath(dir, store),
+    getSecretPath: async (key) => {
+      materializations.push(key);
+      const r = await provideSecretForCto({ key, dir }, { load: () => store, recordUsage: async () => {} });
+      return r?.ok ? r.path : null;
+    },
     readSecret: (p) => readFileSyncP(p, "utf-8"),
     http: captureHttp(seen),
   });
-  return { eng, seen };
+  return { eng, seen, materializations };
 }
 
 test("production wiring: a project-scoped key grants the CTO and its probe materializes", async () => {
@@ -1619,8 +1626,8 @@ test("cross-service pin: the malicious alias never routes another service's cred
         rows: CROSS_SERVICE_ROWS,
         orders: ["alias-row-first", "primary-row-first"],
         cases: [
-          { tool: "github", pinned: "STRIPE_TOKEN", expect: "Bearer githubs-credential", url: "https://api.github.com/v1/status" },
-          { tool: "stripe", pinned: "GITHUB_TOKEN", expect: "Bearer stripes-credential", url: "https://api.stripe.com/v1/status" },
+          { tool: "github", pinned: "STRIPE_TOKEN", expect: "Bearer githubs-credential", url: "https://api.github.com/v1/status", mode: "runs" },
+          { tool: "stripe", pinned: "GITHUB_TOKEN", expect: "Bearer stripes-credential", url: "https://api.stripe.com/v1/status", mode: "runs" },
         ],
       },
       {
@@ -1628,8 +1635,14 @@ test("cross-service pin: the malicious alias never routes another service's cred
         rows: [CROSS_SERVICE_ROWS[0]],
         orders: ["alias-row-first", "only-row"],
         cases: [
-          { tool: "github", pinned: "STRIPE_TOKEN", expect: "Bearer githubs-credential", url: "https://api.github.com/v1/status" },
-          { tool: "stripe", pinned: "GITHUB_TOKEN", expect: "Bearer stripes-credential", url: "https://api.github.com/v1/status" },
+          { tool: "github", pinned: "STRIPE_TOKEN", expect: "Bearer githubs-credential", url: "https://api.github.com/v1/status", mode: "runs" },
+          // The hostile shape Astra flagged: tool "stripe" — the aliased known
+          // service with no row of its own — pointing at github's evidenced
+          // host. The service boundary refuses the row, so there is NO
+          // matching evidence to authorize the endpoint: the probe is blocked
+          // BEFORE materialization — no credential, not even the fallback's,
+          // is ever sent toward the wrong service's endpoint.
+          { tool: "stripe", pinned: "STRIPE_TOKEN", url: "https://api.github.com/events", mode: "blocked" },
         ],
       },
     ];
@@ -1639,7 +1652,20 @@ test("cross-service pin: the malicious alias never routes another service's cred
         const reg = await realRegistry(ordered, () => listSecretKeys({ load: () => CROSS_SERVICE_STORE }));
         for (const c of v.cases) {
           const own = c.pinned === "STRIPE_TOKEN" ? "GITHUB_TOKEN" : "STRIPE_TOKEN";
-          const { eng, seen } = await exploitEng({ dir, reg, tool: c.tool, pinned: c.pinned, url: c.url });
+          const { eng, seen, materializations } = await exploitEng({ dir, reg, tool: c.tool, pinned: c.pinned, url: c.url });
+          if (c.mode === "blocked") {
+            // The pinned key IS the service's own (direct grant) — the block
+            // is the endpoint's missing service evidence, not the credential.
+            assert.equal(await reg.keyGrantedForTool(c.pinned, c.tool), true, `${c.pinned} is ${c.tool}'s own key (${v.name}, ${order})`);
+            assert.equal(await reg.toolRow(c.tool), null, "no other known service's row resolves under this name");
+            assert.deepEqual(await eng.runDue({ forceTool: c.tool }), [], "blocked before any request");
+            assert.deepEqual(materializations, [], "blocked BEFORE materialization");
+            assert.deepEqual(seen, [], "no cross-service credential ever sent to the wrong host");
+            const summary = await eng.probeSummary(c.tool);
+            assert.equal(summary.consented, true, "the grant itself is real (the service's own key)");
+            assert.equal(summary.configured, false, "but no spec validates without matching service evidence");
+            continue;
+          }
           assert.equal(await reg.keyGrantedForTool(c.pinned, c.tool), false, `${c.pinned} must not be authorized for ${c.tool} (${v.name}, ${order})`);
           assert.equal(await reg.keyGrantedForTool(own, c.tool), true, `${own} serves ${c.tool} (${v.name}, ${order})`);
           const results = await eng.runDue({ forceTool: c.tool });
@@ -1664,6 +1690,46 @@ test("a stale pin (key absent, identity covered) is refused — the exact key is
     const results = await eng.runDue({ forceTool: "github" });
     assert.equal(results[0].ok, true);
     assert.equal(seen[0]?.headers?.Authorization, "Bearer githubs-credential", "the fallback granting credential is what ships");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// Astra round 9 — captured-HTTP hostile spec tests. The endpoint allowlist
+// must be derived ONLY from the matching authorized service's own evidence:
+// a stripe-named spec pointing at github's evidenced host is blocked BEFORE
+// materialization (no credential, no request); the real stripe row's own
+// spec runs on its own host with its own credential. Both row orders.
+test("hostile spec: an aliased known service can never borrow another service's evidence host", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "manta-probe-hostile-"));
+  try {
+    for (const order of ["alias-row-first", "primary-row-first"]) {
+      const ordered = order === "alias-row-first" ? CROSS_SERVICE_ROWS : [...CROSS_SERVICE_ROWS].reverse();
+      const reg = await realRegistry(ordered, () => listSecretKeys({ load: () => CROSS_SERVICE_STORE }));
+      // Hostile: the stripe spec's URL is github's evidenced host. The
+      // allowlist comes from the STRIPE row's own evidence (api.stripe.com)
+      // — github's host is not on it, so the spec is invalid and the probe
+      // is blocked before the stripe credential is materialized or sent.
+      const hostile = await exploitEng({ dir, reg, tool: "stripe", pinned: "STRIPE_TOKEN", url: "https://api.github.com/events" });
+      assert.equal(await reg.consentFor("stripe"), "yes", "the grant is the service's own key");
+      assert.equal((await reg.toolRow("stripe")).tool, "stripe", "the stripe row answers by exact primary");
+      assert.deepEqual(await hostile.eng.runDue({ forceTool: "stripe" }), [], "blocked before any request");
+      assert.deepEqual(hostile.materializations, [], "the stripe credential is never materialized");
+      assert.deepEqual(hostile.seen, [], "nothing ever sent toward the wrong host");
+      // Legit: the same tool, its own evidenced host — runs with its own
+      // credential.
+      const legit = await exploitEng({ dir, reg, tool: "stripe", pinned: "STRIPE_TOKEN", url: "https://api.stripe.com/v1/status" });
+      const results = await legit.eng.runDue({ forceTool: "stripe" });
+      assert.equal(results.length, 1);
+      assert.equal(results[0].ok, true, JSON.stringify(results[0]));
+      assert.equal(legit.seen[0]?.headers?.Authorization, "Bearer stripes-credential", "the service's own credential to its own host");
+      // And the mirror: a github-named spec pointing at stripe's host is
+      // blocked the same way.
+      const mirror = await exploitEng({ dir, reg, tool: "github", pinned: "GITHUB_TOKEN", url: "https://api.stripe.com/v1/status" });
+      assert.deepEqual(await mirror.eng.runDue({ forceTool: "github" }), [], "github's spec cannot borrow stripe's host");
+      assert.deepEqual(mirror.materializations, [], "github's credential never materializes for a foreign host");
+      assert.deepEqual(mirror.seen, []);
+    }
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

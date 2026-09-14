@@ -887,12 +887,19 @@ test("findToolRow: exact primary beats an alias; ambiguous aliases fail closed; 
     assert.equal(findToolRow(rows, "stripe")?.tool, "stripe", "exact primary wins");
     assert.deepEqual(resolveIdentities(rows, "stripe"), ["stripe"], "the stripe row's own set only");
   }
-  // The alias bridge without a target row: a single owner answers for the
-  // alias at the ROW level, but the KNOWN-identity guard keeps the grant
-  // from crossing (resolveIdentities returns the name alone).
+  // The alias bridge without a target row: for a KNOWN catalog name the
+  // bridge is refused at the ROW level too — a distinct known service never
+  // resolves onto another known service's row, so no evidence, hosts or
+  // folding cross — and resolveIdentities returns the name alone.
   const ghostAlias = [{ tool: "github", aliases: ["stripe"] }];
-  assert.equal(findToolRow(ghostAlias, "stripe")?.tool, "github");
+  assert.equal(findToolRow(ghostAlias, "stripe"), null);
+  assert.equal(findToolRow([ghostAlias[0], { tool: "nordvpn" }], "stripe"), null, "order-independent");
+  assert.equal(findToolRow([{ tool: "nordvpn" }, ghostAlias[0]], "stripe"), null);
   assert.deepEqual(resolveIdentities(ghostAlias, "stripe"), ["stripe"]);
+  // The valid bridge survives: a NON-catalog primary answers for its catalog
+  // alias, in both directions of the row (multica-ai <-> multica).
+  assert.equal(findToolRow([{ tool: "multica-ai", aliases: ["multica"] }], "multica")?.tool, "multica-ai");
+  assert.equal(findToolRow([{ tool: "multica", aliases: ["multica-ai"] }], "multica-ai")?.tool, "multica");
   // Two rows claiming the same alias, no primary: ambiguous → no row, no
   // inheritance — and the answer is identical whichever row comes first.
   const ambiguousA = [{ tool: "aa", aliases: ["amb"] }, { tool: "bb", aliases: ["amb"] }];
@@ -979,6 +986,12 @@ for (const order of ["alias-row-first", "primary-row-first"]) {
     const ghList = await gh.listTools();
     assert.deepEqual(ghList.map((t) => t.tool), ["github"], "no phantom stripe row");
     assert.equal(ghList[0].accessKey, "GITHUB_TOKEN");
+    // Folding follows the same boundary: a probe result under the aliased
+    // known name cannot land on the other service's row — no evidence, no
+    // vitality, no host ever crosses.
+    const fold = await gh.applyProbeResult("stripe", { fields: { last_event: W0 }, probedAt: W0 });
+    assert.equal(fold.ok, false, "no github row is reachable under the stripe name");
+    assert.equal((await gh.toolRow("github")).vitality?.last_probed ?? null, null);
     // MIRROR — STRIPE_KEY only: stripe's own key serves stripe directly, but
     // it must NOT cross the alias onto github, and the LIST must say the
     // same thing the chokepoint says (the grant projects as its own row
