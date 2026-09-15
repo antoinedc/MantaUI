@@ -857,9 +857,42 @@ export function createCtoBinding({
     return enqueueStoreTask(store, recoverOnce);
   }
 
+  /**
+   * P3a2 blocker 3 — LINEARIZABLE generation claim for admission dispatch.
+   * `reserve(binding)` runs under the SAME per-store task queue as
+   * ensure()/recover(), so a binding replacement can never interleave with
+   * the reservation: the binding is read FRESH inside the serialized section
+   * (never an outside snapshot compared against itself), handed to the
+   * callback, and the callback's reservation commits atomically against that
+   * exact generation. Lock order is binding → (callback's own stores); the
+   * callback must NOT await external services (no opencode, no network) —
+   * it is a local store reservation, released BEFORE any external POST.
+   * A generation change BEFORE the claim is simply observed (the callback
+   * reserves against the current binding — pending work always targets
+   * current); a change AFTER the claim serializes behind it and the claimed
+   * delivery stays on its own session per the §8.3 contract.
+   *
+   * @template T
+   * @param {(binding: object) => Promise<T>} reserve
+   * @returns {Promise<{ binding: object, result: T }>}
+   */
+  function claimGeneration(reserve) {
+    if (typeof reserve !== "function") {
+      return Promise.reject(
+        new CtoBindingError("claimGeneration requires a reserve callback", "invalid-argument"),
+      );
+    }
+    return enqueueStoreTask(store, async () => {
+      const binding = await loadBinding();
+      const result = await reserve(binding);
+      return { binding, result };
+    });
+  }
+
   return {
     ensure,
     recover,
+    claimGeneration,
     /**
      * Store read only — zero opencode calls, zero model turns. By default
      * returns the FULL previous-session archive (never dropped); pass

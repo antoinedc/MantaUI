@@ -429,3 +429,23 @@ under the store mutex, so a human arriving while the pump awaited the binding wi
 dispatch commits (no locks across the binding await). (6) the canonical hash binds agent + text
 + model + origin with key-order-canonical serialization, and dedup precedes generation
 validation — a same-payload id replay succeeds even after a binding replacement.
+
+Round-3 review blockers (offline repro, same service): (1) events are TRIGGERS for the
+receipt-specific transcript check, never proof — an `interrupt_pending` record can no longer be
+terminalized by a stale `session.idle`/`session.error`, and even a finished turn does not settle
+it while its abort is unresolved (`turnEndedAt` is recorded separately from the abort state).
+(2) the ABORT is its own active + durable uncertain state (`abortState`: pending/ok/refused/
+uncertain on the record): `interrupt_pending` settles ONLY when the abort has a DEFINITIVE
+server response ("ok" → interrupted, "refused" → completed) AND the finish-agnostic transcript
+reader (`turnEndedFromTranscript`) proves the turn ended; an uncertain (deadline/network) abort
+keeps the same-session admission barrier, is re-issued by reconcile across restarts (idempotent,
+bounded, signal-propagated into `opencode.abortSession`), and the timeout waiter is never
+treated as proof — so a late session-wide abort can never kill the next admitted turn. (3) the
+dispatch claim is LINEARIZABLE against binding generation changes via the additive
+`binding.claimGeneration(reserve)` operation (ctoBinding.mjs): the reserve callback runs under
+the SAME serialized store seam as ensure()/recover(), reads the binding FRESH inside that
+section, re-verifies gate/priority/CAS there, and reserves the admission record against that
+exact generation — lock order binding → admission, all locks released BEFORE the external POST;
+a change before the claim is observed (pending targets current), a change after the claim
+serializes behind it (claimed delivery stays on its own session). All timings are proven with
+latches, including both generation-change placements and the real ctoBinding service.

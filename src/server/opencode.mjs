@@ -763,10 +763,21 @@ export async function sendPrompt({ sessionId, text, model, agent, attachments, m
  *  signal in response, but the model loop never actually stops.
  *  @param {string} sessionId
  */
-export async function abortSession(sessionId) {
-  const dirQ = await getSessionDirectoryQuery(sessionId);
+/**
+ * Abort the running generation for a session (idempotent — aborting an idle
+ * session is a 200 no-op). P3a2 blocker 2: an optional `{ signal }` bounds
+ * the call through the directory gate AND the actual POST (the admission
+ * layer classifies a deadline hit as an UNCERTAIN abort — the server may
+ * still process it, so the caller keeps its barrier until a definitive
+ * response).
+ *
+ * @param {string} sessionId
+ * @param {{ signal?: AbortSignal }} [opts]
+ */
+export async function abortSession(sessionId, { signal } = {}) {
+  const dirQ = await getSessionDirectoryQuery(sessionId, { signal });
   const url = `/session/${encodeURIComponent(sessionId)}/abort${dirQ}`;
-  const res = await ocFetch(apiUrl(url), { method: "POST" });
+  const res = await ocFetch(apiUrl(url), { method: "POST", ...(signal ? { signal } : {}) });
   if (!res.ok) {
     throw new Error(`opencode abortSession ${res.status}: ${await res.text()}`);
   }

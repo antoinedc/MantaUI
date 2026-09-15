@@ -25,6 +25,7 @@ import {
 import { admissionStore } from "./ctoStores.mjs";
 import { statePath } from "../shared/paths.mjs";
 import * as ocModule from "./opencode.mjs";
+import { createCtoBinding } from "./ctoBinding.mjs";
 
 // ---------------------------------------------------------------------------
 // Test doubles
@@ -51,12 +52,21 @@ function memoryStore(name, { failSaveCalls = null } = {}) {
 }
 
 // A synthetic CTO role binding that tests can advance (generation + session).
+// `claimGeneration` mirrors the real binding service's contract: the reserve
+// callback runs with the CURRENT state snapshot (the real service additionally
+// serializes it against ensure/recover — that serialization is proven
+// separately against createCtoBinding itself).
 function fakeBinding({ generation = 3, currentSessionId = "ses_cto" } = {}) {
   const state = { generation, currentSessionId };
   return {
     state,
     async getBinding() {
       return { ...state };
+    },
+    async claimGeneration(reserve) {
+      const binding = { ...state };
+      const result = await reserve(binding);
+      return { binding, result };
     },
     advance(newSessionId) {
       state.generation += 1;
@@ -125,6 +135,21 @@ function fakeOc({ sendOutcome = "ok", receiptLands = true, rows = [] } = {}) {
         parts: [],
       });
     },
+    /** An ABORTED assistant row: finished (no longer running) but with a
+     * non-terminal finish — the turn-ended reader accepts it, the strict
+     * completion reader does not. */
+    abortTurnRow(messageID) {
+      oc.rows.push({
+        info: {
+          id: `asst_${(asstSeq += 1)}`,
+          role: "assistant",
+          parentID: messageID,
+          finish: "abort",
+          time: { created: 2, completed: 8_000 },
+        },
+        parts: [],
+      });
+    },
   };
   return oc;
 }
@@ -133,10 +158,11 @@ function buildService({ store = memoryStore(`t-${randomUUID()}`), binding = fake
   const svc = createCtoAdmission({
     store,
     binding,
-    sendPrompt: oc.sendPrompt.bind(oc),
-    getMessage: oc.getMessage.bind(oc),
-    listMessages: oc.listMessages.bind(oc),
-    abortSession: oc.abortSession.bind(oc),
+    // Late-binding wrappers so tests can swap oc implementations mid-test.
+    sendPrompt: (...a) => oc.sendPrompt(...a),
+    getMessage: (...a) => oc.getMessage(...a),
+    listMessages: (...a) => oc.listMessages(...a),
+    abortSession: (...a) => oc.abortSession(...a),
     now: () => clock.t,
     sleep: async () => {},
     ...rest,
@@ -278,21 +304,22 @@ test("human FIFO outranks queued background synthesis; accepted turns are never 
 
 test("priority race (blocker 5): a human arriving while the pump awaits the binding wins before the dispatch commits", async () => {
   const { svc, oc, binding } = buildService();
-  // Latch ONLY the pump's binding resolution (call 2): the submits' own
-  // generation reads (calls 1 and 3) resolve immediately, so both records
-  // are durably queued while the pump is parked mid-selection.
+  // Latch ONLY the pump's dispatch claim (the binding claimGeneration call):
+  // the submits' own generation reads resolve immediately, so both records
+  // are durably queued while the claim is parked mid-selection.
   let releaseBinding;
   const gate = new Promise((resolve) => (releaseBinding = resolve));
-  let bindingCalls = 0;
-  binding.getBinding = async () => {
-    bindingCalls += 1;
-    if (bindingCalls === 2) await gate;
-    return { generation: 3, currentSessionId: "ses_cto" };
+  const realClaim = binding.claimGeneration.bind(binding);
+  let claimCalls = 0;
+  binding.claimGeneration = async (reserve) => {
+    claimCalls += 1;
+    if (claimCalls === 1) await gate;
+    return realClaim(reserve);
   };
   const bg = await svc.submit({ id: "evt_bg", text: "background picked first", origin: "background" });
   const h = await svc.submit({ id: "evt_h", text: "human arrives during the await", origin: "human" });
   await flush();
-  assert.equal(oc.sends.length, 0, "pump is parked on the binding latch");
+  assert.equal(oc.sends.length, 0, "pump is parked on the binding claim latch");
   releaseBinding();
   await flush();
   await svc.tick();
@@ -676,7 +703,7 @@ test("delayed send + interrupt + follow-up tick: NEVER a second send; a late-lan
 // Interrupt (blocker 2)
 // ---------------------------------------------------------------------------
 
-test("interrupt: queued → cancelled without any abort; accepted → abort runs once then interrupt_pending until confirmed idle", async () => {
+test("interrupt: queued → cancelled without any abort; accepted → abort once → interrupted only on confirmed idle WITH transcript proof", async () => {
   const { svc, oc, clock } = buildService();
   // Contention so submit-order (not the fire-and-forget pump) decides which
   // record is accepted when the session frees: the EARLIER submission goes.
@@ -697,57 +724,139 @@ test("interrupt: queued → cancelled without any abort; accepted → abort runs
   await flush();
   assert.equal(oc.aborts.length, 1, "explicit interrupt of an accepted turn aborts once");
   assert.equal(oc.aborts[0], "ses_cto");
-  assert.equal(res.status, "interrupt_pending", "NOT terminal yet: the session is not confirmed idle");
+  assert.equal(res.status, "interrupt_pending", "NOT terminal yet");
   assert.equal(await statusOf(svc, "evt_running"), "interrupt_pending");
-  assert.equal(await recInterruptBarrier(svc), true, "the nonterminal barrier still holds");
-  // Confirmed idle for receipt → terminal interrupted with the outcome.
+  // A stale idle BEFORE the transcript proves the turn ended must NOT settle
+  // (events are triggers for receipt-specific reconciliation, never proof).
   clock.t += 5;
+  svc.observeEvent({ type: "session.idle", properties: { sessionID: "ses_cto" } });
+  await flush();
+  assert.equal(await statusOf(svc, "evt_running"), "interrupt_pending", "no generic event proof");
+  // Confirmed idle + transcript proof the turn ENDED → terminal interrupted.
+  clock.t += 5;
+  oc.completeTurn(oc.sends[0].messageID);
   svc.observeEvent({ type: "session.idle", properties: { sessionID: "ses_cto" } });
   await flush();
   const rec = await recordOf(svc, "evt_running");
   assert.equal(rec.status, "interrupted");
   assert.equal(rec.interruptReason, "stop the turn");
   assert.equal(rec.outcome.kind, "idle");
+  assert.equal(rec.abortState, "ok", "the abort settled definitively before terminalization");
   await assert.rejects(
     () => svc.interrupt("evt_running"),
     (err) => err instanceof CtoAdmissionError && err.code === "already-terminal",
   );
 });
 
-const recInterruptBarrier = async (svc) => {
-  const l = await svc.list();
-  return l.counts.unresolved >= 1;
-};
-
-test("a failed/unsupported abort RETAINS the interrupt_pending barrier (blocker 2)", async () => {
-  const oc = fakeOc();
-  oc.abortSession = async () => {
-    throw new Error("abort transport hung");
-  };
-  const { svc, oc: _oc, clock } = buildService({ oc });
+test("stale idle/error never terminalizes interrupt_pending when the abort is unsupported (blocker 1); no second send", async () => {
+  const { svc, oc, clock } = buildService({ abortSession: null });
   await svc.submit({ id: "evt_run", text: "run", origin: "human" });
   await svc.tick();
   assert.equal(await statusOf(svc, "evt_run"), "accepted");
   const res = await svc.interrupt("evt_run", { reason: "stop" });
-  assert.equal(res.status, "interrupt_pending", "abort failure keeps the request pending");
+  assert.equal(res.status, "interrupt_pending");
   const rec = await recordOf(svc, "evt_run");
-  assert.equal(rec.status, "interrupt_pending");
-  assert.ok(rec.abortError.includes("abort transport hung"));
-  // Barrier retained: a queued submission does NOT jump the fence.
+  assert.equal(rec.abortState, "pending");
+  assert.ok(rec.abortError.includes("abort-unsupported"));
+  // Stale idle AND stale error events: receipt-specific reconciliation only —
+  // no transcript proof of an ended turn → nothing terminalizes.
+  clock.t += 5;
+  svc.observeEvent({ type: "session.idle", properties: { sessionID: "ses_cto" } });
+  await flush();
+  clock.t += 5;
+  svc.observeEvent({ type: "session.error", properties: { sessionID: "ses_cto", error: { name: "X" } } });
+  await flush();
+  assert.equal(await statusOf(svc, "evt_run"), "interrupt_pending", "unsupported abort keeps the barrier");
+  // Even a finished turn does NOT settle it — the abort itself is unresolved.
+  oc.completeTurn(oc.sends[0].messageID);
+  clock.t += 5;
+  svc.observeEvent({ type: "session.idle", properties: { sessionID: "ses_cto" } });
+  await flush();
+  const still = await recordOf(svc, "evt_run");
+  assert.equal(still.status, "interrupt_pending");
+  assert.ok(still.turnEndedAt, "the turn end is recorded separately from the abort state");
+  // The barrier holds: a queued submission is never admitted, no second send.
   clock.t += 1;
   await svc.submit({ id: "evt_next", text: "next", origin: "human" });
   clock.t += 1;
   await svc.tick();
-  assert.equal(oc.sends.length, 1, "no new dispatch while interrupt_pending");
-  // No abortSession transport wired at all: same retained barrier.
-  const { svc: svc2, oc: oc2 } = buildService({ abortSession: null });
-  await svc2.submit({ id: "evt_run2", text: "run", origin: "human" });
+  assert.equal(oc.sends.length, 1, "no dispatch while the abort is unresolved");
+});
+
+test("an outstanding (uncertain) abort blocks admission across a NATURAL turn finish — a late abort can never kill the next turn (blocker 2)", async () => {
+  let releaseAbort;
+  const abortGate = new Promise((resolve) => (releaseAbort = resolve));
+  const oc = fakeOc();
+  oc.abortSession = async (sessionId, { signal } = {}) => {
+    oc.aborts.push({ sessionId, signal: signal ?? null });
+    await abortGate; // the abort hangs past its deadline → uncertain
+  };
+  const { svc, clock } = buildService({ oc, requestDeadlineMs: 40 });
+  await svc.submit({ id: "evt_t1", text: "first", origin: "human" });
+  await svc.tick();
+  assert.equal(await statusOf(svc, "evt_t1"), "accepted");
+  await svc.interrupt("evt_t1", { reason: "stop" });
+  await flush();
+  assert.equal((await recordOf(svc, "evt_t1")).abortState, "uncertain", "deadline ≠ proof of server accept");
+  assert.ok(oc.aborts[0].signal instanceof AbortSignal, "the abort deadline signal reaches the transport");
+  // The turn finishes NATURALLY while the abort is still outstanding.
+  clock.t += 1_000;
+  oc.completeTurn(oc.sends[0].messageID);
+  clock.t += 20_000;
+  await svc.tick(); // reconcile: turn ended, but the abort is NOT settled
+  const t1 = await recordOf(svc, "evt_t1");
+  assert.equal(t1.status, "interrupt_pending", "turn terminal ≠ abort settled");
+  assert.ok(t1.turnEndedAt);
+  // The gate holds: the NEXT turn is not admitted while the abort is out.
+  clock.t += 1;
+  await svc.submit({ id: "evt_t2", text: "second", origin: "human" });
+  clock.t += 1;
+  await svc.tick();
+  assert.equal(oc.sends.length, 1, "no next send until the abort itself is settled");
+  // The abort settles DEFINITIVELY (the re-issued idempotent abort responds).
+  oc.abortSession = async (sessionId) => {
+    oc.aborts.push({ sessionId });
+  };
+  clock.t += 20_000;
+  await svc.tick(); // reconcile re-issues the abort → "ok" → settles
+  const settled = await recordOf(svc, "evt_t1");
+  assert.equal(settled.abortState, "ok");
+  assert.equal(settled.status, "interrupted", "turn ended + abort confirmed → interrupted");
+  clock.t += 1;
+  await svc.tick();
+  assert.equal(oc.sends.length, 2, "the gate releases only after the abort settled");
+  assert.equal(await statusOf(svc, "evt_t2"), "accepted");
+});
+
+test("an abort timeout retains the barrier ACROSS RESTART; reconcile re-issues and settles (blocker 2)", async () => {
+  let releaseAbort;
+  const abortGate = new Promise((resolve) => (releaseAbort = resolve));
+  const oc = fakeOc();
+  oc.abortSession = async () => {
+    await abortGate; // hangs → deadline → uncertain
+  };
+  const store = memoryStore(`abort-restart-${randomUUID()}`);
+  const { svc } = buildService({ store, oc, requestDeadlineMs: 40 });
+  await svc.submit({ id: "evt_r", text: "run", origin: "human" });
+  await svc.tick();
+  await svc.interrupt("evt_r");
+  await flush();
+  assert.equal((await recordOf(svc, "evt_r")).abortState, "uncertain");
+  // RESTART: a fresh service instance over the same store — the uncertain
+  // abort state is durable, and the barrier holds immediately.
+  oc.abortSession = async () => {};
+  // The transcript shows the turn ENDED (an aborted row qualifies).
+  oc.abortTurnRow(oc.sends[0].messageID);
+  const { svc: svc2, clock } = buildService({ store, oc });
+  clock.t += 60_000;
+  await svc2.submit({ id: "evt_next", text: "next", origin: "human" });
+  await svc2.tick(); // reconcile re-issues the abort (definitive now) then settles
+  const rec = await recordOf(svc2, "evt_r");
+  assert.equal(rec.status, "interrupted", "restart + re-issued abort + turn ended → interrupted");
+  assert.equal(rec.abortState, "ok");
   await svc2.tick();
-  const res2 = await svc2.interrupt("evt_run2");
-  assert.equal(res2.status, "interrupt_pending");
-  const rec2 = await recordOf(svc2, "evt_run2");
-  assert.ok(rec2.abortError.includes("abort-unsupported"));
-  assert.equal(oc2.aborts.length, 0);
+  assert.equal(oc.sends.length, 2, "the second send happened only after the abort settled (turn send + evt_next)");
+  assert.equal((await recordOf(svc2, "evt_next")).status, "accepted");
 });
 
 test("reconcile settles an interrupt_pending record from transcript proof (restart mid-interrupt)", async () => {
@@ -758,8 +867,8 @@ test("reconcile settles an interrupt_pending record from transcript proof (resta
   await svc.interrupt("evt_run");
   assert.equal(await statusOf(svc, "evt_run"), "interrupt_pending");
   // The transcript proves the turn ended (aborts often leave no terminal
-  // finish, but a completed linked row does prove it).
-  oc.completeTurn(oc.sends[0].messageID);
+  // finish — the finish-agnostic turn-ended reader accepts this row).
+  oc.abortTurnRow(oc.sends[0].messageID);
   clock.t += 20_000;
   await svc.tick();
   const rec = await recordOf(svc, "evt_run");
@@ -1025,7 +1134,13 @@ test("production composition: real opencode.mjs sendPrompt carries the caller me
     // Production composition end-to-end: the admission service over the REAL
     // client functions, with a real binding store snapshot as the binding.
     const { svc } = buildService({
-      binding: { getBinding: async () => ({ generation: 1, currentSessionId: "ses_live" }) },
+      binding: {
+        getBinding: async () => ({ generation: 1, currentSessionId: "ses_live" }),
+        claimGeneration: async (reserve) => {
+          const b = { generation: 1, currentSessionId: "ses_live" };
+          return { binding: b, result: await reserve(b) };
+        },
+      },
       sendPrompt: (args) => ocModule.sendPrompt(args),
       getMessage: (sid, mid) => ocModule.getMessage(sid, mid),
       store: memoryStore(`composition-${randomUUID()}`),
@@ -1052,4 +1167,141 @@ test("the default store resolves inside the state-home sandbox (never the live b
 
 test("MAX_ENTRIES and the lifecycle constants are part of the published contract", () => {
   assert.equal(MAX_ENTRIES, 500);
+});
+
+// ---------------------------------------------------------------------------
+// Blocker 3: the LINEARIZABLE binding claim (real ctoBinding service)
+// ---------------------------------------------------------------------------
+
+// A real ctoBinding over a memory store, pre-bound to ses_cto/generation 3.
+// No opencode calls happen in these tests (ensure() is never invoked).
+function realBindingService() {
+  const store = memoryStore(`binding-${randomUUID()}`);
+  const tripwire = () => {
+    throw new Error("unexpected opencode call in the binding-claim test");
+  };
+  const binding = createCtoBinding({
+    oc: { createSession: tripwire, listSessions: tripwire, readSession: tripwire },
+    store,
+    controlDir: statePath("cto-binding-test", `claim-${randomUUID()}`, "conversation"),
+    sleep: async () => {},
+  });
+  return { binding, store };
+}
+
+const SEEDED_BINDING = {
+  v: 1,
+  generation: 3,
+  currentSessionId: "ses_cto",
+  currentOperation: "op-1",
+  previousSessionIds: [],
+};
+
+test("binding claimGeneration is serialized against the store queue and reads the binding FRESH inside it (blocker 3)", async () => {
+  const { binding, store } = realBindingService();
+  await store.save({ ...SEEDED_BINDING });
+  let releaseReserve;
+  const gate = new Promise((resolve) => (releaseReserve = resolve));
+  let firstEntered = false;
+  const p1 = binding.claimGeneration(async (b) => {
+    firstEntered = true;
+    await gate; // hold the serialized section
+    return { saw: b.generation };
+  });
+  const p2 = binding.claimGeneration(async (b) => ({ saw: b.generation }));
+  await flush();
+  assert.equal(firstEntered, true, "the first claim is running (holds the seam)");
+  // A replacement commits DIRECTLY on the store while the first claim holds
+  // the serialized section — the queued second claim must read it fresh.
+  await store.save({ ...SEEDED_BINDING, generation: 9, currentSessionId: "ses_v9" });
+  releaseReserve();
+  const [r1, r2] = await Promise.all([p1, p2]);
+  assert.equal(r1.binding.generation, 3, "the suspended claim keeps the binding it reserved against");
+  assert.equal(r2.binding.generation, 9, "the follow-up claim reads FRESH — never a stale self-comparison");
+});
+
+test("a generation change committed BEFORE the dispatch claim is observed: pending work targets the CURRENT sid (blocker 3)", async () => {
+  const { binding, store } = realBindingService();
+  await store.save({ ...SEEDED_BINDING });
+  const { svc, oc, clock } = buildService({ binding });
+  const first = await svc.submit({ text: "first", origin: "human" });
+  await svc.tick();
+  assert.equal(oc.sends[0].sessionId, "ses_cto");
+  // A pending submission queues while turn 1 is unresolved; it was born
+  // against generation 3.
+  const pending = await svc.submit({ text: "pending retargets", origin: "human" });
+  assert.equal((await recordOf(svc, pending.id)).submitGeneration, 3);
+  // A replacement commits on the binding store (the ensure/recover seam writes
+  // exactly this shape) BEFORE the next dispatch claim runs.
+  await store.save({ ...SEEDED_BINDING, generation: 4, currentSessionId: "ses_cto_v2" });
+  oc.completeTurn(oc.sends[0].messageID);
+  clock.t += 20_000;
+  await svc.tick();
+  assert.equal(oc.sends.length, 2);
+  assert.equal(oc.sends[1].sessionId, "ses_cto_v2", "the claim read the CURRENT binding inside the serialized section");
+  const rec = await recordOf(svc, pending.id);
+  assert.equal(rec.dispatchGeneration, 4);
+  assert.equal(rec.retargeted, true);
+});
+
+test("a generation change DURING a suspended claim cannot steal the delivery: the claim keeps its own sid (blocker 3)", async () => {
+  const { binding, store } = realBindingService();
+  await store.save({ ...SEEDED_BINDING });
+  // Suspend the claim INSIDE its serialized section: park the admission
+  // store's first load after the claim has begun (the claim's re-verify load).
+  let claimStarted = false;
+  let parked = false;
+  let releaseClaim;
+  const claimGate = new Promise((resolve) => (releaseClaim = resolve));
+  const realClaim = binding.claimGeneration.bind(binding);
+  binding.claimGeneration = async (reserve) =>
+    realClaim(async (b) => {
+      claimStarted = true;
+      return reserve(b);
+    });
+  const suspender = memoryStore(`suspender-${randomUUID()}`);
+  const underlyingLoad = suspender.load.bind(suspender);
+  suspender.load = async () => {
+    if (claimStarted && !parked) {
+      parked = true;
+      await claimGate;
+    }
+    return underlyingLoad();
+  };
+  const { svc, oc, clock } = buildService({ binding, store: suspender });
+  await svc.submit({ id: "evt_claimed", text: "claimed turn", origin: "human" });
+  await flush();
+  assert.equal(parked, true, "the claim is suspended inside the serialized section");
+  // While the claim is suspended, a replacement commits on the binding store
+  // AND queues behind the claim on the same seam.
+  await store.save({ ...SEEDED_BINDING, generation: 4, currentSessionId: "ses_cto_v2" });
+  let followUpSaw = null;
+  const followUp = binding.claimGeneration(async (b) => {
+    followUpSaw = { generation: b.generation, sid: b.currentSessionId };
+  });
+  releaseClaim();
+  await flush();
+  await followUp;
+  assert.equal(followUpSaw.generation, 4, "the replacement serialized BEHIND the claim and read its change");
+  assert.equal(oc.sends.length, 1);
+  assert.equal(oc.sends[0].sessionId, "ses_cto", "the claimed delivery stays on its own session");
+  const rec = await recordOf(svc, "evt_claimed");
+  assert.equal(rec.sessionId, "ses_cto");
+  assert.equal(rec.dispatchGeneration, 3);
+  assert.equal(rec.status, "accepted");
+});
+
+// The claim path is load-bearing in production composition: the REAL binding
+// service's claimGeneration drives the dispatch end-to-end.
+test("production dispatch claims through the real binding service's claimGeneration", async () => {
+  const { binding, store } = realBindingService();
+  await store.save({ ...SEEDED_BINDING });
+  const { svc, oc } = buildService({ binding });
+  const res = await svc.submit({ text: "via the real claim", origin: "human" });
+  await svc.tick();
+  assert.equal(oc.sends.length, 1);
+  assert.equal(oc.sends[0].sessionId, "ses_cto");
+  const rec = await recordOf(svc, res.id);
+  assert.equal(rec.status, "accepted");
+  assert.equal(rec.dispatchGeneration, 3);
 });

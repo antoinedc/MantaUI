@@ -13,7 +13,7 @@
 //
 // EXPLICIT STATE MATRIX (keep simple; no generic framework):
 //
-//   queued ──dispatch(persist intent)──▶ dispatching ──204+receipt──▶ accepted
+//   queued ──claim(persist intent)──▶ dispatching ──204+receipt──▶ accepted
 //      │                                     │                          │
 //      │                 4xx refusal ─▶ failed│ deadline/5xx/invisible    │
 //      │                                     ▼        └──▶ unknown       │
@@ -28,16 +28,24 @@
 //                                    cancelRequested retained)
 //
 //   accepted ──interrupt──▶ interrupt_pending (NONTERMINAL barrier)
-//                 abort ok + session confirmed idle (terminal event or
-//                 transcript proof) ─▶ interrupted; abort
-//                 unsupported/failed/timeout/restart RETAINS interrupt_pending
+//     abortState: "pending" → attempted → "ok" (2xx) | "refused" (4xx)
+//                                      | "uncertain" (deadline/network — the
+//                                        server may STILL process it; the
+//                                        timeout waiter is NOT proof)
+//     settle: abortState "ok" AND the transcript proves the turn ENDED
+//             (last linked assistant row no longer running — finish-agnostic,
+//             an aborted row qualifies) ⇒ interrupted;
+//             abortState "refused" AND turn ended ⇒ completed (natural finish)
+//     an abort left uncertain stays interrupt_pending; reconcile RE-ISSUES
+//     the idempotent abort (bounded, signal-propagated) until definitive.
 //
 //   accepted ──receipt-specific reconciliation──▶ completed
-//   (ONLY a transcript proof: our user message + the LAST assistant row whose
+//   (ONLY transcript proof: our user message + the LAST assistant row whose
 //   parentID == our messageID carrying a TERMINAL finish via the shared
 //   assistantCompletion helper. A session.idle/error EVENT triggers that
 //   reconciliation — it never blindly completes; a stale/idle event for an
-//   unrelated turn cannot release the queue.)
+//   unrelated turn cannot release the queue, and an event NEVER terminalizes
+//   an interrupt_pending record whose abort is unresolved.)
 //
 // The invariants this module exists for:
 //
@@ -58,7 +66,8 @@
 //    accepted (never resent); absent → stays unknown/cancel_requested
 //    (surfaced, barrier held). Only a definitive 4xx observed live proves
 //    non-acceptance ("failed"). Aborting the client request does NOT prove
-//    the server didn't accept — a deadline hit preserves unknown.
+//    the server didn't accept — a deadline hit preserves unknown. The same
+//    rule governs ABORTS: a timed-out/uncertain abort keeps its barrier.
 // 5. TERMINAL RECEIPTS RETAINED FOREVER. completed / failed / cancelled /
 //    interrupted records are never evicted; growth is bounded by refusing NEW
 //    submissions at MAX_ENTRIES — never by pruning receipts.
@@ -69,7 +78,20 @@
 //    active-operation lease so reconcile never touches the send it (or
 //    another engine instance) is currently awaiting.
 // 7. EXPLICIT INTERRUPTION. interrupt is its own operation; submit NEVER
-//    aborts a running turn (a busy session simply holds the queue).
+//    aborts a running turn (a busy session simply holds the queue). The ABORT
+//    is tracked as its own active+durable uncertain state, SEPARATE from the
+//    turn's terminal state: same-session admission stays blocked until the
+//    abort itself is known-settled (definitive server response), so a late
+//    session-wide abort can never kill the NEXT admitted turn.
+// 8. LINEARIZABLE CLAIM (blocker 3). The dispatch claim runs through the
+//    binding service's `claimGeneration(reserve)` — the reserve callback
+    //    executes under the SAME serialized store seam as ensure()/recover(),
+//    reads the binding FRESH inside that section, and reserves the admission
+//    record against that exact generation (lock order binding → admission;
+//    the locks are released BEFORE the external POST). A generation change
+//    before the claim is observed (pending work targets current); a change
+//    after the claim serializes behind it and the claimed delivery stays on
+//    its own session.
 //
 // Cross-process: single-writer-process design (one manta-server per box
 // composes one admission engine), mirroring ctoBinding.mjs. The patchStore
@@ -93,9 +115,9 @@ export const ORIGINS = Object.freeze(["human", "background"]);
 // Lifecycle. "dispatching" is the crash-window marker: persisted before the
 // POST, resolved by reconcile() after a restart. "unknown" is the
 // cannot-prove-acceptance state. "cancel_requested" / "interrupt_pending" are
-// the NONTERMINAL request markers from blocker 2: a caller's cancel/interrupt
-// request is VISIBLE but never erases a possibly-landed POST — the barrier
-// holds until reconciliation proves the outcome.
+// the NONTERMINAL request markers: a caller's cancel/interrupt request is
+// VISIBLE but never erases a possibly-landed POST or a possibly-landing
+// ABORT — the barrier holds until reconciliation proves the outcome.
 export const STATUSES = Object.freeze([
   "queued",
   "dispatching",
@@ -108,6 +130,16 @@ export const STATUSES = Object.freeze([
   "cancelled",
   "interrupted",
 ]);
+
+// Abort operation states on an interrupt_pending record (blocker 2 — tracked
+// separately from the turn's terminal state):
+//   pending   the abort has not definitively been attempted (or no transport)
+//   ok        the server CONFIRMED the abort (2xx) — settled
+//   refused   the server definitively refused (4xx) — settled
+//   uncertain the attempt timed out / network-failed — NOT settled; the
+//             server may still process it, so the barrier holds and
+//             reconcile re-issues the idempotent abort
+export const ABORT_STATES = Object.freeze(["pending", "ok", "refused", "uncertain"]);
 
 // Statuses that hold the one-turn-at-a-time gate: while any of these exist
 // the admit loop must not dispatch another submission.
@@ -207,6 +239,9 @@ export function normalizeAdmissionPayload(payload) {
         assertStr(r.sessionId, `submissions[${index}].sessionId (required once dispatched)`);
         assertStr(r.messageID, `submissions[${index}].messageID (required once dispatched)`);
       }
+      if (r.abortState !== undefined && !ABORT_STATES.includes(r.abortState)) {
+        throw invalidRecord(`submissions[${index}].abortState`, r.abortState);
+      }
       return r;
     }),
   };
@@ -237,7 +272,24 @@ function rowParentId(m) {
 }
 
 /**
- * Transcript proof that OUR turn finished (blocker 1): the LAST assistant row
+ * The LAST assistant row LINKED to our user message via parentID, or null.
+ * Shared by the strict-completion and turn-ended readers below.
+ */
+function lastLinkedAssistantRow(messages, userMessageId) {
+  const rows = Array.isArray(messages) ? messages : [];
+  const start = rows.findIndex((m) => rowRole(m) === "user" && rowId(m) === userMessageId);
+  if (start === -1) return { found: false, row: null };
+  let lastLinked = null;
+  for (let i = start + 1; i < rows.length; i += 1) {
+    if (rowRole(rows[i]) !== "assistant") continue;
+    if (rowParentId(rows[i]) !== userMessageId) continue; // unlinked: not our turn
+    lastLinked = rows[i];
+  }
+  return { found: true, row: lastLinked };
+}
+
+/**
+ * Transcript proof that OUR turn FINISHED (blocker 1): the LAST assistant row
  * LINKED to our user message via parentID == the submitted messageID whose
  * finish classifies terminal via the shared `assistantCompletion` helper.
  * Intermediate assistant rows (tool steps, finish "tool_use") and UNLINKED
@@ -248,20 +300,31 @@ function rowParentId(m) {
  *   null                                             — receipt not visible yet
  */
 export function turnCompletionFromTranscript(messages, userMessageId) {
-  const rows = Array.isArray(messages) ? messages : [];
-  const start = rows.findIndex((m) => rowRole(m) === "user" && rowId(m) === userMessageId);
-  if (start === -1) return null;
-  let lastLinked = null;
-  for (let i = start + 1; i < rows.length; i += 1) {
-    if (rowRole(rows[i]) !== "assistant") continue;
-    if (rowParentId(rows[i]) !== userMessageId) continue; // unlinked: not our turn
-    lastLinked = rows[i];
-  }
-  if (!lastLinked) return { completed: false };
-  const completion = assistantCompletion(rowInfo(lastLinked));
+  const { found, row } = lastLinkedAssistantRow(messages, userMessageId);
+  if (!found) return null;
+  if (!row) return { completed: false };
+  const completion = assistantCompletion(rowInfo(row));
   return completion !== null
     ? { completed: true, via: "transcript", outcome: completion }
     : { completed: false };
+}
+
+/**
+ * Weaker, finish-agnostic "did OUR turn END" reader for interrupt_pending
+ * records (blocker 2): the last LINKED assistant row is no longer running
+ * (time.completed set, or an error) — whatever its finish, an aborted row
+ * qualifies. Strict terminal-finish classification stays in
+ * turnCompletionFromTranscript for the `accepted` completion path. Returns
+ *   { ended: true|false } — or null when the receipt is not visible yet.
+ */
+export function turnEndedFromTranscript(messages, userMessageId) {
+  const { found, row } = lastLinkedAssistantRow(messages, userMessageId);
+  if (!found) return null;
+  if (!row) return { ended: false };
+  const info = rowInfo(row);
+  const completed = info?.time?.completed;
+  const ended = Number.isFinite(completed) || info?.error != null;
+  return { ended };
 }
 
 // ---------------------------------------------------------------------------
@@ -272,25 +335,26 @@ export function turnCompletionFromTranscript(messages, userMessageId) {
  * Build the durable CTO conversation admission service.
  *
  * @param {object} deps
- * @param {{ getBinding: () => Promise<{generation:number, currentSessionId:string|null}> }} deps.binding
- *        The P3a1 binding service. Dispatch resolves the CURRENT binding at
- *        dispatch time; submit resolves it only for NEW records (a dedup
- *        replay never touches the binding — blocker 6).
+ * @param {{ getBinding: (opts?: object) => Promise<{generation:number, currentSessionId:string|null}>,
+ *           claimGeneration: (reserve: (binding: object) => Promise<T>) => Promise<{binding: object, result: T}> }} deps.binding
+ *        The P3a1 binding service. Dispatch claims through claimGeneration —
+ *        the LINEARIZABLE reservation under the binding store's serialized
+ *        seam (blocker 3). submit resolves getBinding only for NEW records
+ *        (a dedup replay never touches the binding — blocker 6).
  * @param {(args:{sessionId:string, text:string, model?:object, agent?:string, messageID:string, signal?:AbortSignal})=>Promise<unknown>} deps.sendPrompt
- *        The opencode prompt injector. Production: opencode.mjs sendPrompt,
- *        which (P3a2) propagates the signal through the directory gate AND
- *        the actual POST (bounded headers/body). Aborting the client request
- *        does NOT prove the server didn't accept — classified unknown.
+ *        The opencode prompt injector (messageID + bounded signal, P0-proven).
  * @param {(sessionId:string, messageId:string)=>Promise<object|null>} deps.getMessage
  *        Single-message receipt read (production: opencode.mjs getMessage).
  *        null = not visible / read failed — never proof of absence.
  * @param {(sessionId:string)=>Promise<Array>} [deps.listMessages]
  *        Transcript read for receipt-specific reconciliation (production:
  *        opencode.mjs listMessages). Absent → event-driven completion is
- *        impossible and the record stays accepted (barrier held).
- * @param {(sessionId:string)=>Promise<void>} [deps.abortSession]
+ *        impossible and the record stays (barrier held).
+ * @param {(sessionId:string, opts?:{signal?:AbortSignal})=>Promise<void>} [deps.abortSession]
  *        Explicit interrupt of an accepted turn (production: opencode.mjs
- *        abortSession). Absent → interrupt stays interrupt_pending (barrier).
+ *        abortSession — idempotent, signal-capable). Absent → interrupt stays
+ *        interrupt_pending (barrier; surfaced abortError) — it never
+ *        terminalizes on events alone.
  * @param {(sessionId:string)=>boolean} [deps.isBusy]
  *        Shared busy view (production: promptDelivery.isBusy). Absent → an
  *        internal firehose-derived busy set is used instead.
@@ -300,7 +364,7 @@ export function turnCompletionFromTranscript(messages, userMessageId) {
  * @param {number} [deps.receiptReadAttempts] @param {number} [deps.receiptReadBackoffMs]
  * @param {number} [deps.unknownStaleMs] list() flags unknown records older than this.
  * @param {number} [deps.turnRecheckIntervalMs] Min spacing of transcript-based
- *        turn-completion rechecks per accepted record.
+ *        rechecks and abort re-issues per record.
  * @param {number} [deps.maxEntries] Hard cap on total records.
  * @returns {{ submit, list, tick, reconcile, interrupt, observeEvent }}
  */
@@ -322,8 +386,10 @@ export function createCtoAdmission({
   turnRecheckIntervalMs = TURN_RECHECK_INTERVAL_MS,
   maxEntries = MAX_ENTRIES,
 } = {}) {
-  if (!binding || typeof binding.getBinding !== "function") {
-    throw new Error("createCtoAdmission requires a binding service with getBinding");
+  if (!binding || typeof binding.getBinding !== "function" || typeof binding.claimGeneration !== "function") {
+    throw new Error(
+      "createCtoAdmission requires a binding service with getBinding AND claimGeneration (linearizable claim, blocker 3)",
+    );
   }
   if (typeof sendPrompt !== "function" || typeof getMessage !== "function") {
     throw new Error("createCtoAdmission requires sendPrompt and getMessage");
@@ -334,10 +400,11 @@ export function createCtoAdmission({
   // sessionId → submissionId currently dispatched/accepted on that session.
   // Hydrated at construction so a restart-mid-turn still observes its record.
   const acceptedBySession = new Map();
-  // submissionId → the operation this instance currently awaits ("dispatch").
-  // Lease: reconcile never touches a record whose dispatch is in flight.
+  // submissionId → the operation this instance currently awaits ("dispatch"
+  // or "abort"). Lease: reconcile never touches a record whose operation is
+  // in flight on this instance.
   const activeOps = new Map();
-  // submissionId → last transcript-based turn-completion check (ms epoch).
+  // submissionId → last transcript-based recheck (ms epoch).
   const turnCheckedAt = new Map();
 
   function busyCheck(sessionId) {
@@ -381,10 +448,11 @@ export function createCtoAdmission({
 
   // -------------------------------------------------------------------------
   // Bounded oc wait: the deadline bounds how long admission WAITS and drives
-  // the unknown classification; the signal is passed through for transports
-  // that support real cancellation (opencode.mjs sendPrompt propagates it
-  // through the directory gate AND the POST). A deadline hit — including an
-  // aborted client request — is uncertainty, never a definitive refusal.
+  // the classification; the signal is passed through for transports that
+  // support real cancellation (opencode.mjs propagates it through the
+  // directory gate AND the POST — send AND abort). A deadline hit — including
+  // an aborted client request — is UNCERTAINTY, never a definitive refusal
+  // (the server may still process it; the timeout waiter is not proof).
   // -------------------------------------------------------------------------
   async function bounded(run, label) {
     const signal = AbortSignal.timeout(requestDeadlineMs);
@@ -433,6 +501,11 @@ export function createCtoAdmission({
       console.warn(`[ctoAdmission] transition of ${id} to ${status} failed:`, describeErr(err));
       return null;
     }
+  }
+
+  /** Same-status field update under the store mutex (no lifecycle change). */
+  async function markFields(id, from, extra = {}) {
+    return markTransition(id, from, from, extra);
   }
 
   function onTransition(record) {
@@ -571,9 +644,12 @@ export function createCtoAdmission({
   }
 
   // -------------------------------------------------------------------------
-  // Dispatch (the pump) — single-flight AND joinable; resolves the binding at
-  // dispatch time; verifies the priority pick AT CLAIM TIME under the store
-  // mutex (blocker 5); persists the dispatch intent BEFORE the POST.
+  // Dispatch (the pump) — single-flight AND joinable. The CLAIM is
+  // linearizable against binding generation changes (blocker 3): it runs
+  // through binding.claimGeneration, whose reserve callback executes under
+  // the binding store's serialized seam, reads the binding FRESH there, and
+  // re-verifies the gate/priority/CAS before persisting the dispatch intent.
+  // Locks are released BEFORE the external POST.
   // -------------------------------------------------------------------------
   let pumping = null;
 
@@ -594,23 +670,32 @@ export function createCtoAdmission({
           if (fresh.submissions.some((r) => UNRESOLVED.has(r.status))) return;
           const next = pickNext(fresh.submissions);
           if (!next) return;
-          // Binding resolved OUTSIDE the lock, at dispatch time (§8.3): a
-          // pending submission always targets the CURRENT binding; an
-          // accepted turn never moves (its sessionId was fixed at dispatch).
-          let target;
-          try {
-            target = await binding.getBinding();
-          } catch (err) {
-            console.warn("[ctoAdmission] binding unavailable, holding queue:", describeErr(err));
-            return;
-          }
-          if (!target.currentSessionId) return; // unbound role: submissions stay queued
-          if (busyCheck(target.currentSessionId)) return; // busy → hold, never abort
-          // NOTE: a submission arriving DURING the await above is re-checked
-          // inside dispatch's phase-1 claim (under the store mutex) — a human
-          // outranking this pick restarts the loop (blocker 5).
-          const dispatched = await dispatch(next, target);
-          if (!dispatched) continue; // claim lost (priority/CAS) — reload and retry
+          const claim = await binding.claimGeneration(async (b) => {
+            // Under the binding store's serialized seam (blocker 3): the
+            // binding snapshot b was read FRESH inside that section. All
+            // re-verification + the reservation happen HERE; no external
+            // awaits from this callback beyond the local admission patch.
+            if (!b.currentSessionId) return { skip: "unbound" };
+            if (busyCheck(b.currentSessionId)) return { skip: "busy" }; // hold, never abort
+            const inner = await loadStore();
+            if (inner.submissions.some((r) => UNRESOLVED.has(r.status))) return { skip: "unresolved" };
+            const pick = pickNext(inner.submissions);
+            if (!pick) return { skip: "empty" };
+            if (pick.id !== next.id) return { retry: true }; // priority changed → re-pick
+            const messageID = `msg_${newId()}`;
+            const claimed = await claimDispatch(pick, b, messageID);
+            if (!claimed) return { retry: true }; // CAS lost — reload and retry
+            // Lease + session map set INSIDE the claim so any reconcile that
+            // observes the record as "dispatching" always sees the lease.
+            activeOps.set(claimed.id, "dispatch");
+            acceptedBySession.set(b.currentSessionId, claimed.id);
+            return { claimed };
+          });
+          const result = claim.result;
+          if (result.skip) return; // hold the queue (unbound/busy/unresolved)
+          if (result.retry) continue;
+          // --- external awaits: ALL locks released (invariants 6+8) ---
+          await sendAndClassify(result.claimed, claim.binding);
           return; // one turn at a time: the next admission waits for its terminal
         }
       } catch (err) {
@@ -622,106 +707,101 @@ export function createCtoAdmission({
     });
   }
 
-  /** Returns true when this call performed the dispatch, false on claim loss. */
-  async function dispatch(record, target) {
-    // Lease taken BEFORE any store mutation: a reconcile that observes the
-    // record as "dispatching" must always see the lease (blocker 3 — no
-    // window between the phase-1 save and the lease).
-    activeOps.set(record.id, "dispatch");
-    try {
-      return await dispatchInner(record, target);
-    } finally {
-      if (activeOps.get(record.id) === "dispatch") activeOps.delete(record.id);
-    }
-  }
-
-  async function dispatchInner(record, target) {
-    const messageID = `msg_${newId()}`;
-    const sessionId = target.currentSessionId;
-    const dispatchGeneration = target.generation ?? 0;
-    let proceed = false;
-    // Phase 1: persist the dispatch intent BEFORE any external call
-    // (invariant 1). The claim re-verifies, UNDER THE STORE MUTEX, that this
-    // record is still the correct priority pick — a human that arrived while
-    // we awaited the binding wins before the dispatch commits (blocker 5) —
-    // and that the record is still "queued" (CAS; also stops two engine
-    // instances over one store from double-dispatching).
+  /**
+   * Phase-1 reservation: persist the dispatch intent BEFORE any external
+   * call (invariant 1). Runs inside the binding claim's serialized section;
+   * the CAS re-verifies "queued" under the admission store mutex (two engine
+   * instances over one store cannot double-dispatch).
+   */
+  async function claimDispatch(record, target, messageID) {
+    let claimed = null;
     try {
       await patchStore(store, (fresh) => {
-        const normalized = normalizeAdmissionPayload(fresh);
-        const pick = pickNext(normalized.submissions);
-        if (!pick || pick.id !== record.id) return {}; // stale pick → re-select
-        return casSubmission(normalized, record.id, (r) => {
+        const patch = casSubmission(normalizeAdmissionPayload(fresh), record.id, (r) => {
           if (r.status !== "queued") return null;
-          proceed = true;
-          return {
+          claimed = {
             ...r,
             status: "dispatching",
-            sessionId,
+            sessionId: target.currentSessionId,
             messageID,
-            dispatchGeneration,
+            dispatchGeneration: target.generation ?? 0,
             dispatchStartedAt: now(),
-            retargeted: dispatchGeneration !== r.submitGeneration || undefined,
+            retargeted: (target.generation ?? 0) !== r.submitGeneration || undefined,
           };
+          return claimed;
         });
+        return patch;
       });
     } catch (err) {
       wrapStoreError(err, "dispatch"); // loud: a store failure must not stall silently
     }
-    if (!proceed) return false;
+    return claimed;
+  }
 
-    // --- external awaits: NO store lock held from here (invariant 6) ---
-    acceptedBySession.set(sessionId, record.id);
+  /** The external send + outcome classification. ALL locks are released. */
+  async function sendAndClassify(claimed, targetBinding) {
+    const sessionId = claimed.sessionId;
     let sendError = null;
     try {
       await bounded(
         (signal) =>
-          sendPrompt({ sessionId, text: record.text, model: record.model, agent: record.agent, messageID, signal }),
-        `sendPrompt (${record.id})`,
+          sendPrompt({
+            sessionId,
+            text: claimed.text,
+            model: claimed.model,
+            agent: claimed.agent,
+            messageID: claimed.messageID,
+            signal,
+          }),
+        `sendPrompt (${claimed.id})`,
       );
     } catch (err) {
       sendError = err;
     }
 
     if (sendError) {
+      activeOps.delete(claimed.id);
       acceptedBySession.delete(sessionId);
       // Definitive client-side refusal (4xx) proves non-acceptance. Anything
       // else (network, deadline — including an aborted client request, 5xx)
       // is uncertainty → unknown, never resend (blocker 3).
       const definitive = typeof sendError.status === "number" && sendError.status >= 400 && sendError.status < 500;
       await markTransition(
-        record.id,
+        claimed.id,
         "dispatching",
         definitive ? "failed" : "unknown",
         definitive
           ? { failedAt: now(), error: describeErr(sendError), errorStatus: sendError.status }
           : { unknownAt: now(), unknownReason: describeErr(sendError) },
       );
-      return true;
+      return;
     }
 
-    const receipt = await readReceiptUntilVisible(sessionId, messageID);
+    const receipt = await readReceiptUntilVisible(sessionId, claimed.messageID);
+    activeOps.delete(claimed.id);
     if (receipt) {
-      await markTransition(record.id, "dispatching", "accepted", { acceptedAt: now() });
+      await markTransition(claimed.id, "dispatching", "accepted", { acceptedAt: now() });
     } else {
       // 204 was observed but the receipt is not (yet) visible. This is NOT
       // proof of non-acceptance — mark unknown; reconcile() keeps checking.
       acceptedBySession.delete(sessionId);
-      await markTransition(record.id, "dispatching", "unknown", {
+      await markTransition(claimed.id, "dispatching", "unknown", {
         unknownAt: now(),
         unknownReason: "prompt accepted (204) but messageID receipt not visible",
       });
     }
-    return true;
   }
 
   // -------------------------------------------------------------------------
   // Receipt-specific reconciliation (blockers 1+2): a session.idle/error
   // EVENT triggers a transcript check for THIS record — it never blindly
-  // completes. accepted completes ONLY on transcript proof; interrupt_pending
-  // settles on the confirmed idle (the explicit abort was honored) or on
-  // transcript proof. A stale/idle event for an unrelated turn cannot
-  // release the queue.
+  // completes and never terminalizes an unresolved abort.
+  //  - accepted: completes ONLY on strict transcript proof (terminal finish).
+  //  - interrupt_pending: the transcript decides whether the turn ENDED
+  //    (finish-agnostic); the record settles ONLY when its abort is settled
+  //    ("ok" → interrupted; "refused" → completed). An unresolved abort
+  //    keeps the barrier even when the turn finished naturally — a late
+  //    session-wide abort must never kill the next admitted turn.
   // -------------------------------------------------------------------------
   async function transcriptTurnState(record) {
     if (!listMessages || !record.sessionId || !record.messageID) return null;
@@ -732,6 +812,45 @@ export function createCtoAdmission({
       console.warn(`[ctoAdmission] transcript check for ${record.id} failed:`, describeErr(err));
       return null;
     }
+  }
+
+  async function transcriptTurnEnded(record) {
+    if (!listMessages || !record.sessionId || !record.messageID) return null;
+    try {
+      const messages = await bounded(() => listMessages(record.sessionId), `listMessages (${record.sessionId})`);
+      return turnEndedFromTranscript(messages, record.messageID);
+    } catch (err) {
+      console.warn(`[ctoAdmission] transcript check for ${record.id} failed:`, describeErr(err));
+      return null;
+    }
+  }
+
+  /**
+   * Settle an interrupt_pending record once BOTH facts are proven: the turn
+   * ENDED (finish-agnostic transcript proof) and the abort is SETTLED
+   * (definitive server response). Records the turn-end separately from the
+   * abort state so an outstanding abort never fakes a terminal record.
+   */
+  async function settleInterruptPending(record, kind) {
+    const ended = await transcriptTurnEnded(record);
+    if (ended === null || !ended.ended) return null; // running / unreadable / no receipt yet
+    if (record.abortState === "ok") {
+      return markTransition(record.id, "interrupt_pending", "interrupted", {
+        confirmedIdleAt: now(),
+        outcome: { kind, via: "transcript", at: now() },
+      });
+    }
+    if (record.abortState === "refused") {
+      // The abort was definitively refused — the turn ended naturally.
+      return markTransition(record.id, "interrupt_pending", "completed", {
+        completedAt: now(),
+        abortRefused: record.abortError,
+        outcome: { kind, via: "transcript", at: now() },
+      });
+    }
+    // Abort unresolved: record the turn end (visibility) and keep the barrier.
+    await markFields(record.id, "interrupt_pending", { turnEndedAt: now() });
+    return null;
   }
 
   function settleAcceptedForSession(sessionId, kind, error) {
@@ -765,11 +884,11 @@ export function createCtoAdmission({
         return;
       }
       if (record.status === "interrupt_pending") {
-        // Confirmed idle for receipt: the requested abort took effect.
-        await markTransition(record.id, "interrupt_pending", "interrupted", {
-          confirmedIdleAt: now(),
-          outcome: { kind, via: "event", at: now() },
-        });
+        // Receipt-specific: does the transcript prove the turn ENDED?
+        const ended = await transcriptTurnEnded(record);
+        if (ended === null || !ended.ended) return; // stale event / running / unreadable
+        // Turn over; now the ABORT settlement decides the record's terminal.
+        await settleInterruptPending(record, kind);
       }
     })();
   }
@@ -777,7 +896,8 @@ export function createCtoAdmission({
   // -------------------------------------------------------------------------
   // observeEvent — same firehose tap promptDelivery sits on: busy tracking
   // (fallback when no shared isBusy) + receipt-specific reconciliation of the
-  // session's accepted/interrupt_pending record.
+  // session's accepted/interrupt_pending record. Events are TRIGGERS for the
+  // transcript check, never proof by themselves.
   // -------------------------------------------------------------------------
   function observeEvent(evt) {
     const sid = evt?.properties?.sessionID;
@@ -798,8 +918,51 @@ export function createCtoAdmission({
   }
 
   // -------------------------------------------------------------------------
+  // Abort operations (blocker 2): attempt an abort, classify DEFINITIVE vs
+  // UNCERTAIN, persist the durable uncertain state, and re-issue on
+  // reconcile until settled. The idempotent abort makes re-issuing safe —
+  // and the admission gate holds while any abort is unresolved, so a late
+  // session-wide abort can never kill the next admitted turn.
+  // -------------------------------------------------------------------------
+  async function attemptAbort(record) {
+    activeOps.set(record.id, "abort"); // reconcile skips the in-flight abort
+    let outcome;
+    try {
+      if (typeof abortSession !== "function") {
+        outcome = {
+          abortState: "pending",
+          abortError: "abort-unsupported: no abortSession transport wired",
+        };
+      } else {
+        try {
+          await bounded(
+            (signal) => abortSession(record.sessionId, { signal }), // signal-propagated
+            `abortSession (${record.sessionId})`,
+          );
+          outcome = { abortState: "ok" }; // definitive: server confirmed
+        } catch (err) {
+          const definitive = typeof err?.status === "number" && err.status >= 400 && err.status < 500;
+          outcome = definitive
+            ? { abortState: "refused", abortError: describeErr(err) }
+            : // deadline/network: the server may STILL process it — uncertain,
+              // barrier retained (the timeout waiter is not proof).
+              { abortState: "uncertain", abortError: describeErr(err) };
+        }
+      }
+    } finally {
+      if (activeOps.get(record.id) === "abort") activeOps.delete(record.id);
+    }
+    await markFields(record.id, "interrupt_pending", {
+      ...outcome,
+      abortAttempts: (record.abortAttempts ?? 0) + 1,
+      lastAbortAt: now(),
+    });
+    return outcome;
+  }
+
+  // -------------------------------------------------------------------------
   // reconcile — restart + uncertainty recovery. Joinable single-flight.
-  // Records with an active dispatch lease (a send this instance is currently
+  // Records with an active operation (dispatch/abort this instance is
   // awaiting) are SKIPPED — never raced, never double-classified (blocker 3).
   // NEVER resends: found receipts advance, absent receipts stay put.
   // -------------------------------------------------------------------------
@@ -810,7 +973,7 @@ export function createCtoAdmission({
     reconciling = (async () => {
       const fresh = await loadStore();
       for (const record of fresh.submissions) {
-        if (activeOps.has(record.id)) continue; // own currently-awaited send
+        if (activeOps.has(record.id)) continue; // own in-flight operation
         if (record.status === "dispatching" || record.status === "unknown" || record.status === "cancel_requested") {
           if (!record.sessionId || !record.messageID) continue; // never dispatched
           const row = await readReceiptUntilVisible(record.sessionId, record.messageID);
@@ -831,7 +994,48 @@ export function createCtoAdmission({
           }
           continue;
         }
-        if (record.status === "accepted" || record.status === "interrupt_pending") {
+        if (record.status === "interrupt_pending") {
+          if (record.abortState === "ok" || record.abortState === "refused") {
+            const last = turnCheckedAt.get(record.id) ?? 0;
+            if (now() - last < turnRecheckIntervalMs) continue;
+            turnCheckedAt.set(record.id, now());
+            await settleInterruptPending(record, "reconciled");
+            continue;
+          }
+          // "pending" (never attempted / unsupported transport / crash mid-
+          // attempt) or "uncertain": the abort must still be settled. Record
+          // the turn end SEPARATELY (visibility) even while the abort is out,
+          // then re-issue the idempotent abort (bounded, signal-bound) — if it
+          // comes back DEFINITIVE, settle in the same pass. Spaced per record
+          // so a polling tick stays cheap; survives restarts (durable state).
+          const lastAbort = record.lastAbortAt ?? 0;
+          const abortDue = now() - lastAbort >= turnRecheckIntervalMs;
+          const last = turnCheckedAt.get(record.id) ?? 0;
+          if (now() - last >= turnRecheckIntervalMs) {
+            turnCheckedAt.set(record.id, now());
+            const ended = await transcriptTurnEnded(record);
+            if (ended?.ended && !record.turnEndedAt) {
+              await markFields(record.id, "interrupt_pending", { turnEndedAt: now() });
+            }
+          }
+          if (!abortDue) continue;
+          const outcome = await attemptAbort(record);
+          if (outcome.abortState === "ok" || outcome.abortState === "refused") {
+            const refreshed = await (async () => {
+              try {
+                const f = await loadStore();
+                return f.submissions.find((r) => r.id === record.id) ?? null;
+              } catch {
+                return null;
+              }
+            })();
+            if (refreshed?.status === "interrupt_pending") {
+              await settleInterruptPending(refreshed, "reconciled");
+            }
+          }
+          continue;
+        }
+        if (record.status === "accepted") {
           // No observed terminal event (restart mid-turn, lost event): ask
           // the transcript, spaced per record so a polling tick stays cheap.
           const last = turnCheckedAt.get(record.id) ?? 0;
@@ -839,7 +1043,7 @@ export function createCtoAdmission({
           turnCheckedAt.set(record.id, now());
           const proof = await transcriptTurnState(record);
           if (proof?.completed) {
-            await markTransition(record.id, record.status, record.status === "accepted" ? "completed" : "interrupted", {
+            await markTransition(record.id, "accepted", "completed", {
               completedAt: now(),
               outcome: { kind: "reconciled", completion: proof.outcome, via: proof.via, at: now() },
             });
@@ -893,12 +1097,13 @@ export function createCtoAdmission({
   }
 
   // -------------------------------------------------------------------------
-  // interrupt — the EXPLICIT interruption operation (blocker 2). submit never
-  // aborts. A request is VISIBLE immediately (cancel_requested /
+  // interrupt — the EXPLICIT interruption operation (blockers 1+2). submit
+  // never aborts. A request is VISIBLE immediately (cancel_requested /
   // interrupt_pending) but the nonterminal barrier is retained until the
-  // outcome is proven: an abort that is unsupported/failed/timed out keeps
-  // interrupt_pending, and cancelling an unknown keeps cancel_requested (the
-  // possibly-landed POST must not be erased).
+  // outcome is proven: the ABORT is its own active+durable state
+  // (abortState) tracked SEPARATELY from the turn's terminal state, and an
+  // unresolved abort keeps the barrier even after the turn finishes
+  // naturally — a late session-wide abort must never kill the next turn.
   // -------------------------------------------------------------------------
   async function interrupt(submissionId, { reason } = {}) {
     if (typeof submissionId !== "string" || submissionId.length === 0) {
@@ -936,6 +1141,7 @@ export function createCtoAdmission({
               ...r,
               status: "interrupt_pending",
               interruptRequestedAt: now(),
+              abortState: "pending",
               ...(reason ? { interruptReason: reason } : {}),
             };
             return resulting;
@@ -967,28 +1173,10 @@ export function createCtoAdmission({
       return { ok: true, id: submissionId, status: prior.status };
     }
     if (prior.status === "accepted") {
-      if (typeof abortSession !== "function") {
-        // Barrier RETAINED: the request stands but nothing aborted.
-        await markTransition(submissionId, "interrupt_pending", "interrupt_pending", {
-          abortError: "abort-unsupported: no abortSession transport wired",
-        });
-        return { ok: true, id: submissionId, status: "interrupt_pending" };
-      }
-      let abortError;
-      try {
-        await bounded(() => abortSession(prior.sessionId), `abortSession (${prior.sessionId})`);
-      } catch (err) {
-        abortError = describeErr(err);
-      }
-      if (abortError) {
-        // Abort failed/timed out: the turn may still be running. RETAIN the
-        // nonterminal barrier and surface the failure (blocker 2).
-        await markTransition(submissionId, "interrupt_pending", "interrupt_pending", { abortError });
-        return { ok: true, id: submissionId, status: "interrupt_pending" };
-      }
-      // Abort succeeded: interrupt_pending UNTIL the session is confirmed
-      // idle (terminal event via observeEvent, or transcript proof via
-      // reconcile) — only then does the record become terminal "interrupted".
+      // The abort attempt happens AFTER the durable request; its outcome is
+      // classified in attemptAbort (definitive vs uncertain) and the record
+      // settles only via the receipt-specific reconciliation.
+      await attemptAbort({ ...resulting, abortAttempts: 0 });
       return { ok: true, id: submissionId, status: "interrupt_pending" };
     }
     onTransition(resulting);
