@@ -45,7 +45,7 @@ Constraint: compose ONE admission engine per box (single-writer-process, like ct
 | `list` | `list() → { submissions, counts }` | The queue projection clients render. Text payloads are stripped; each record carries its status, timestamps, generation fields, and for unknown records `unknownMs` + `staleUnknown`. Order = submission order; human FIFO is the filtered order. |
 | `tick` | `tick() → void` | Poller entry: `reconcile()` then admit (at most one turn). |
 | `reconcile` | `reconcile() → void` | Recovery only: receipt read-backs for `dispatching`/`unknown` records; transcript-based completion for accepted records whose terminal event was missed (spaced ≥10s per record). NEVER resends. |
-| `interrupt` | `interrupt(id, { reason? }) → { ok, id, status }` | The EXPLICIT interruption op. `queued` → `cancelled` (safe, never dispatched); `unknown` → `cancel_requested` (VISIBLE request, barrier retained — the POST may still be landing; reconcile settles by receipt); `accepted` → aborts the session once (bounded, signal-propagated) → `interrupt_pending` with the abort's own durable state (`abortState`): settled only on a definitive server response, re-issued by reconcile until then. The record terminalizes only when the abort is settled AND the transcript proves the turn ended (`"ok"` → `interrupted`, `"refused"` → `completed`). Idempotent re-requests return the current request-marker status. `submit` NEVER aborts. |
+| `interrupt` | `interrupt(id, { reason? }) → { ok, id, status }` | The EXPLICIT interruption op. `queued` → `cancelled` (safe, never dispatched); `unknown` → `cancel_requested` (VISIBLE request, barrier retained — the POST may still be landing; reconcile settles by receipt); `accepted` → ONE bounded, signal-propagated abort attempt → `interrupt_pending` with the abort's own durable state (`abortState`). The record terminalizes only when the abort is settled AND the transcript proves the turn ended (`"ok"` → `interrupted`, `"refused"` → `completed`). An `uncertain` abort NEVER retries and NEVER settles — `abortOutcomeReason: "abort_outcome_unknown"` + permanent barrier. Idempotent re-requests return the current request-marker status. `submit` NEVER aborts. |
 | `observeEvent` | `observeEvent(evt) → void` | Same firehose tap as promptDelivery. Tracks busy (fallback when no shared `isBusy`) and completes accepted turns on their ACTUAL terminal event (`session.idle` / `session.error`). |
 
 Contract error codes (`CtoAdmissionError.code`): `invalid-argument`, `duplicate-id-different-payload`,
@@ -71,24 +71,27 @@ queued ──dispatch──▶ dispatching ──204+receipt──▶ accepted �
          receipt flips it to accepted with cancelRequested retained)
 
 accepted ──interrupt──▶ interrupt_pending (NONTERMINAL barrier)
-   abortState: "pending" → attempted → "ok" (2xx, settled)
+   abortState: "pending" → ONE bounded attempt → "ok" (2xx, settled)
                                       | "refused" (4xx, settled)
-                                      | "uncertain" (deadline/network — NOT
-                                        settled; the server may still process
-                                        the abort; the timeout waiter is NOT
-                                        proof)
+                                      | "uncertain" (deadline/network) ⇒
+                                        PERMANENT fail-closed barrier with
+                                        reason abort_outcome_unknown
    settle needs BOTH facts: the transcript proves the turn ENDED
    (finish-agnostic: the last linked assistant row is no longer running —
    an aborted row qualifies) AND the abort is settled:
      "ok"      + turn ended ⇒ interrupted
      "refused" + turn ended ⇒ completed (natural finish)
-     unresolved + turn ended ⇒ the turn end is RECORDED (turnEndedAt) but the
-       record stays interrupt_pending — reconcile RE-ISSUES the idempotent,
-       signal-bound abort until a definitive response, across restarts
+     "uncertain" + turn ended ⇒ the turn end is RECORDED (turnEndedAt) but the
+       record stays interrupt_pending FOREVER: there are NO automatic abort
+       retries (a new attempt's response can never settle the ORIGINAL
+       request's uncertainty — monotonic — and a late original abort could
+       kill the next turn), so the same-session admission barrier persists
+       until a future EXPLICIT management operation resolves it (not built
+       yet). A crash before the FIRST attempt (state "pending") gets exactly
+       one attempt from reconcile; after that, uncertainty is final.
    events (session.idle/error) are TRIGGERS for the transcript check — they
    never terminalize an unresolved abort, and a stale/unrelated event cannot
-   release the queue. Same-session admission stays blocked while any abort is
-   unresolved, so a late session-wide abort can never kill the next turn.
+   release the queue.
 ```
 
 - **Durable before send**: id + canonical payload hash (sha256 over origin/text/model/agent,
@@ -146,6 +149,12 @@ sync mutators — no store lock is ever held across an opencode await.
    the abort settles + the turn is proven ended) or — for unknown — a caller cancels it. This
    is the conservative no-duplicate/no-late-abort trade; surface `list()` state, don't work
    around it.
+1a. **An uncertain abort is a PERMANENT, non-self-healing barrier** (`abortState: "uncertain"`,
+   `abortOutcomeReason: "abort_outcome_unknown"`): no automatic retry ever runs, the record
+   never settles on its own, and same-session admission stays blocked. The CURRENT resolution
+   is external and explicit only (a future management operation on the queue — not built in
+   this phase). The UI must present it as "abort outcome unknown — admission held for this
+   session", never as transient.
 2. **`interrupt` of an accepted turn aborts the whole role session** (opencode abort is
    session-wide). The gate holds until the abort settles, so the blast radius cannot reach the
    NEXT admitted turn — but a foreign turn running on the session during the abort is hit too.
@@ -154,7 +163,8 @@ sync mutators — no store lock is ever held across an opencode await.
    event-driven settlement is impossible (the barrier holds).
 4. **An abort with no transport never settles**: with no `abortSession` wired, an
    interrupt_pending record keeps its barrier (surfaced `abortError`) — production must wire
-   the idempotent, signal-capable abortSession.
+   the signal-capable abortSession. No idempotency is assumed or relied upon: after one
+   uncertain attempt the service stops issuing aborts entirely.
 5. **Single-writer-process**: one manta-server per box composes one engine (patchStore CAS
    narrows, never guarantees, cross-process races). The binding claim is linearizable only
    through the shared ctoBinding service on the same box.

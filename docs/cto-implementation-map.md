@@ -449,3 +449,19 @@ exact generation — lock order binding → admission, all locks released BEFORE
 a change before the claim is observed (pending targets current), a change after the claim
 serializes behind it (claimed delivery stays on its own session). All timings are proven with
 latches, including both generation-change placements and the real ctoBinding service.
+
+Final round (P1/P2): (P1) automatic abort retries are REMOVED entirely — one bounded attempt
+per interrupt request; an uncertain attempt (deadline/network) downgrades to a PERMANENT
+fail-closed barrier with `abortOutcomeReason: "abort_outcome_unknown"`: no retry ever runs (a
+new attempt's response can never settle the ORIGINAL request's uncertainty — monotonic — and a
+late original abort could kill the next admitted turn), the record never self-settles even
+when the transcript proves the turn ended (`turnEndedAt` recorded for visibility only), the
+same-session admission barrier persists across restarts, and resolution is a future EXPLICIT
+management operation (not built in this phase). A crash BEFORE the first attempt (state
+"pending") still gets exactly one attempt from reconcile. (P2) the dispatch claim's priority
+re-validation (unresolved gate, human FIFO, selected-still-queued CAS) moved INSIDE the same
+admission-mutex section that reserves — the round-3 verification read outside the mutex could
+miss a commit landing between it and the reservation; the binding claim lock stays OUTER and
+the locks still release before the external POST. Pinned by latches: human-commits-before-
+claim wins via the in-mutation re-validation, and a commit during the reservation mutation
+queues behind the mutex (atomic verify+reserve, no interleave).

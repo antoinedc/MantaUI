@@ -154,15 +154,35 @@ function fakeOc({ sendOutcome = "ok", receiptLands = true, rows = [] } = {}) {
   return oc;
 }
 
-function buildService({ store = memoryStore(`t-${randomUUID()}`), binding = fakeBinding(), oc = fakeOc(), clock = { t: 1_000_000 }, ...rest } = {}) {
-  const svc = createCtoAdmission({
-    store,
-    binding,
-    // Late-binding wrappers so tests can swap oc implementations mid-test.
+/** Late-binding oc dep wrappers so tests can swap implementations mid-test. */
+function ocDeps(oc) {
+  return {
     sendPrompt: (...a) => oc.sendPrompt(...a),
     getMessage: (...a) => oc.getMessage(...a),
     listMessages: (...a) => oc.listMessages(...a),
     abortSession: (...a) => oc.abortSession(...a),
+  };
+}
+
+/** Latch the pump's FIRST dispatch claim before its serialized section. */
+function latchFirstClaim(binding) {
+  let release;
+  const gate = new Promise((resolve) => (release = resolve));
+  const realClaim = binding.claimGeneration.bind(binding);
+  let claimCalls = 0;
+  binding.claimGeneration = async (reserve) => {
+    claimCalls += 1;
+    if (claimCalls === 1) await gate;
+    return realClaim(reserve);
+  };
+  return { release };
+}
+
+function buildService({ store = memoryStore(`t-${randomUUID()}`), binding = fakeBinding(), oc = fakeOc(), clock = { t: 1_000_000 }, ...rest } = {}) {
+  const svc = createCtoAdmission({
+    store,
+    binding,
+    ...ocDeps(oc),
     now: () => clock.t,
     sleep: async () => {},
     ...rest,
@@ -307,15 +327,7 @@ test("priority race (blocker 5): a human arriving while the pump awaits the bind
   // Latch ONLY the pump's dispatch claim (the binding claimGeneration call):
   // the submits' own generation reads resolve immediately, so both records
   // are durably queued while the claim is parked mid-selection.
-  let releaseBinding;
-  const gate = new Promise((resolve) => (releaseBinding = resolve));
-  const realClaim = binding.claimGeneration.bind(binding);
-  let claimCalls = 0;
-  binding.claimGeneration = async (reserve) => {
-    claimCalls += 1;
-    if (claimCalls === 1) await gate;
-    return realClaim(reserve);
-  };
+  const { release: releaseBinding } = latchFirstClaim(binding);
   const bg = await svc.submit({ id: "evt_bg", text: "background picked first", origin: "background" });
   const h = await svc.submit({ id: "evt_h", text: "human arrives during the await", origin: "human" });
   await flush();
@@ -327,6 +339,82 @@ test("priority race (blocker 5): a human arriving while the pump awaits the bind
   assert.equal(oc.sends[0].text, "human arrives during the await", "the stale background pick was re-verified at claim time");
   assert.equal(await statusOf(svc, h.id), "accepted");
   assert.equal(await statusOf(svc, bg.id), "queued", "the background submission waits its turn");
+});
+
+test("P2: the priority re-validation runs INSIDE the reservation mutation — a human committing before the claim's mutex section wins it", async () => {
+  const { svc, oc, binding } = buildService();
+  // Latch the pump's dispatch claim BEFORE its serialized section: the
+  // pre-check has selected the earlier background record; the human then
+  // COMMITS while the claim is parked. The reservation mutation must
+  // re-validate the pick from a fresh load under the same admission mutex
+  // that reserves — the human wins there, never the stale pick.
+  const { release: releaseBinding } = latchFirstClaim(binding);
+  const bg = await svc.submit({ id: "evt_bg2", text: "background selected by the pre-check", origin: "background" });
+  const h = await svc.submit({ id: "evt_h2", text: "human committed before the claim", origin: "human" });
+  await flush();
+  assert.equal(oc.sends.length, 0, "the claim is parked before its reservation mutation");
+  releaseBinding();
+  await flush();
+  await svc.tick();
+  assert.equal(oc.sends.length, 1);
+  assert.equal(oc.sends[0].text, "human committed before the claim", "the reservation mutation re-validated human FIFO");
+  assert.equal(await statusOf(svc, h.id), "accepted");
+  assert.equal(await statusOf(svc, bg.id), "queued");
+});
+
+test("P2: verification and reservation share ONE admission mutex section — a commit cannot interleave between them", async () => {
+  const { oc, binding, clock } = { oc: fakeOc(), binding: fakeBinding(), clock: { t: 1_000_000 } };
+  // Park the FIRST admission-store load that happens once the claim is in
+  // flight — that load is the reservation mutation's own fresh read, taken
+  // under the admission mutex. While it is parked, the mutex is HELD: a
+  // concurrent human submit can only commit AFTER the reservation.
+  let claimInFlight = false;
+  let parked = false;
+  let releaseLoad;
+  const loadGate = new Promise((resolve) => (releaseLoad = resolve));
+  const realClaim = binding.claimGeneration.bind(binding);
+  binding.claimGeneration = async (reserve) => {
+    claimInFlight = true;
+    try {
+      return await realClaim(reserve);
+    } finally {
+      claimInFlight = false;
+    }
+  };
+  const suspender = memoryStore(`mutex-${randomUUID()}`);
+  const underlyingLoad = suspender.load.bind(suspender);
+  suspender.load = async () => {
+    if (claimInFlight && !parked) {
+      parked = true;
+      await loadGate;
+    }
+    return underlyingLoad();
+  };
+  const svc = createCtoAdmission({
+    store: suspender,
+    binding,
+    ...ocDeps(oc),
+    now: () => clock.t,
+  });
+  const bg = await svc.submit({ id: "evt_bg3", text: "background claims first", origin: "background" });
+  await flush();
+  assert.equal(parked, true, "the reservation mutation's load is parked under the mutex");
+  // Commit a human WHILE the reservation mutation is parked: the mutex queues
+  // its insert behind the reservation — it can never land between the
+  // verification and the reservation.
+  const humanPromise = svc.submit({ id: "evt_h3", text: "human during the mutation", origin: "human" });
+  releaseLoad();
+  const human = await humanPromise;
+  await flush();
+  // The background turn completes → the human is admitted by the next pass.
+  oc.completeTurn(oc.sends[0].messageID);
+  clock.t += 20_000;
+  await svc.tick();
+  assert.equal(oc.sends.length, 2);
+  assert.equal(oc.sends[0].text, "background claims first", "the reservation committed atomically first");
+  assert.equal(oc.sends[1].text, "human during the mutation", "the later commit is picked by the next pass, never reordered in");
+  assert.equal((await recordOf(svc, bg.id)).status, "completed");
+  assert.equal(await statusOf(svc, "evt_h3"), "accepted");
 });
 
 // ---------------------------------------------------------------------------
@@ -783,7 +871,7 @@ test("stale idle/error never terminalizes interrupt_pending when the abort is un
   assert.equal(oc.sends.length, 1, "no dispatch while the abort is unresolved");
 });
 
-test("an outstanding (uncertain) abort blocks admission across a NATURAL turn finish — a late abort can never kill the next turn (blocker 2)", async () => {
+test("an UNCERTAIN abort is never retried and its barrier is permanent (fail-closed, abort_outcome_unknown) — the late original abort can never kill a next turn (blocker 2 final)", async () => {
   let releaseAbort;
   const abortGate = new Promise((resolve) => (releaseAbort = resolve));
   const oc = fakeOc();
@@ -797,38 +885,45 @@ test("an outstanding (uncertain) abort blocks admission across a NATURAL turn fi
   assert.equal(await statusOf(svc, "evt_t1"), "accepted");
   await svc.interrupt("evt_t1", { reason: "stop" });
   await flush();
-  assert.equal((await recordOf(svc, "evt_t1")).abortState, "uncertain", "deadline ≠ proof of server accept");
-  assert.ok(oc.aborts[0].signal instanceof AbortSignal, "the abort deadline signal reaches the transport");
-  // The turn finishes NATURALLY while the abort is still outstanding.
+  const afterInterrupt = await recordOf(svc, "evt_t1");
+  assert.equal(afterInterrupt.abortState, "uncertain", "deadline ≠ proof of server accept");
+  assert.equal(afterInterrupt.abortOutcomeReason, "abort_outcome_unknown");
+  assert.equal(oc.aborts.length, 1);
+  // The turn finishes NATURALLY while the abort is outstanding.
   clock.t += 1_000;
   oc.completeTurn(oc.sends[0].messageID);
   clock.t += 20_000;
-  await svc.tick(); // reconcile: turn ended, but the abort is NOT settled
+  await svc.tick(); // reconcile: records the turn end, NEVER retries
   const t1 = await recordOf(svc, "evt_t1");
   assert.equal(t1.status, "interrupt_pending", "turn terminal ≠ abort settled");
   assert.ok(t1.turnEndedAt);
-  // The gate holds: the NEXT turn is not admitted while the abort is out.
-  clock.t += 1;
-  await svc.submit({ id: "evt_t2", text: "second", origin: "human" });
-  clock.t += 1;
+  assert.equal(t1.abortState, "uncertain");
+  assert.equal(t1.abortOutcomeReason, "abort_outcome_unknown");
+  assert.equal(oc.aborts.length, 1, "NO automatic retry after uncertainty (monotonic)");
+  assert.equal(t1.abortAttempts, 1);
+  // A hypothetical second attempt / next turn: never issued, no matter how
+  // long the poller runs.
+  clock.t += 60_000;
   await svc.tick();
-  assert.equal(oc.sends.length, 1, "no next send until the abort itself is settled");
-  // The abort settles DEFINITIVELY (the re-issued idempotent abort responds).
-  oc.abortSession = async (sessionId) => {
-    oc.aborts.push({ sessionId });
-  };
+  clock.t += 60_000;
+  await svc.tick();
+  assert.equal(oc.aborts.length, 1, "still no second attempt");
+  assert.equal(oc.sends.length, 1, "no next send on that sid while the barrier holds");
+  // The ORIGINAL abort lands LATE (the server processed it after all) —
+  // exactly the scenario a retry would have raced: nothing else was ever
+  // sent, so it kills nothing.
+  releaseAbort();
+  await flush();
   clock.t += 20_000;
-  await svc.tick(); // reconcile re-issues the abort → "ok" → settles
-  const settled = await recordOf(svc, "evt_t1");
-  assert.equal(settled.abortState, "ok");
-  assert.equal(settled.status, "interrupted", "turn ended + abort confirmed → interrupted");
-  clock.t += 1;
   await svc.tick();
-  assert.equal(oc.sends.length, 2, "the gate releases only after the abort settled");
-  assert.equal(await statusOf(svc, "evt_t2"), "accepted");
+  assert.equal(oc.aborts.length, 1);
+  assert.equal(oc.sends.length, 1, "the late original abort had no second turn to kill");
+  const final = await recordOf(svc, "evt_t1");
+  assert.equal(final.status, "interrupt_pending", "the barrier persists (explicit management op is future work)");
+  assert.equal(final.abortOutcomeReason, "abort_outcome_unknown");
 });
 
-test("an abort timeout retains the barrier ACROSS RESTART; reconcile re-issues and settles (blocker 2)", async () => {
+test("an abort timeout retains the barrier ACROSS RESTART with no re-issue; explicit reason persists (blocker 2 final)", async () => {
   let releaseAbort;
   const abortGate = new Promise((resolve) => (releaseAbort = resolve));
   const oc = fakeOc();
@@ -842,21 +937,110 @@ test("an abort timeout retains the barrier ACROSS RESTART; reconcile re-issues a
   await svc.interrupt("evt_r");
   await flush();
   assert.equal((await recordOf(svc, "evt_r")).abortState, "uncertain");
-  // RESTART: a fresh service instance over the same store — the uncertain
-  // abort state is durable, and the barrier holds immediately.
-  oc.abortSession = async () => {};
-  // The transcript shows the turn ENDED (an aborted row qualifies).
-  oc.abortTurnRow(oc.sends[0].messageID);
+  // RESTART: a fresh service instance over the same store. The uncertainty is
+  // durable and monotonic — the new instance must NOT re-issue the abort and
+  // must NOT settle the record, even with a perfectly healthy transport.
+  let restartAborts = 0;
+  oc.abortSession = async () => {
+    restartAborts += 1;
+  };
   const { svc: svc2, clock } = buildService({ store, oc });
   clock.t += 60_000;
   await svc2.submit({ id: "evt_next", text: "next", origin: "human" });
-  await svc2.tick(); // reconcile re-issues the abort (definitive now) then settles
-  const rec = await recordOf(svc2, "evt_r");
-  assert.equal(rec.status, "interrupted", "restart + re-issued abort + turn ended → interrupted");
-  assert.equal(rec.abortState, "ok");
   await svc2.tick();
-  assert.equal(oc.sends.length, 2, "the second send happened only after the abort settled (turn send + evt_next)");
-  assert.equal((await recordOf(svc2, "evt_next")).status, "accepted");
+  await svc2.tick();
+  const rec = await recordOf(svc2, "evt_r");
+  assert.equal(rec.status, "interrupt_pending", "restart barrier holds");
+  assert.equal(rec.abortState, "uncertain");
+  assert.equal(rec.abortOutcomeReason, "abort_outcome_unknown");
+  assert.equal(restartAborts, 0, "no automatic re-issue after uncertainty");
+  assert.equal(oc.sends.length, 1, "no next send on that sid");
+  assert.equal((await recordOf(svc2, "evt_next")).status, "queued", "the queued submission waits behind the barrier");
+});
+
+test("a crash BEFORE the abort attempt (pending) attempts ONCE from reconcile; definitive settles, uncertain downgrades to the permanent barrier", async () => {
+  const store = memoryStore(`pending-abort-${randomUUID()}`);
+  // Seed the exact crash state: the interrupt request is durable, the abort
+  // was never attempted, and the turn is long gone from the transcript.
+  const messageID = "msg_crash";
+  await store.save({
+    v: 1,
+    submissions: [
+      {
+        id: "evt_crash",
+        origin: "human",
+        text: "crashed mid-interrupt",
+        payloadHash: canonicalRequestHash({ origin: "human", text: "crashed mid-interrupt" }),
+        status: "interrupt_pending",
+        createdAt: 1,
+        submitGeneration: 3,
+        sessionId: "ses_cto",
+        messageID,
+        dispatchGeneration: 3,
+        interruptRequestedAt: 2,
+        abortState: "pending",
+      },
+    ],
+  });
+  const oc = fakeOc();
+  oc.rows.push({ info: { id: messageID, role: "user", time: { created: 1 } }, parts: [] });
+  oc.abortTurnRow(messageID);
+  const { svc: svc2, clock } = buildService({ store, oc });
+  clock.t += 60_000;
+  await svc2.tick(); // the FIRST attempt for this request
+  let rec = await recordOf(svc2, "evt_crash");
+  assert.equal(rec.abortState, "ok", "the first attempt is definitive → settled");
+  assert.equal(rec.status, "interrupted");
+  assert.equal(oc.aborts.length, 1, "exactly one attempt");
+
+  // The uncertain variant: the first attempt times out → PERMANENT barrier,
+  // and later ticks never attempt again.
+  let releaseAbort;
+  const abortGate = new Promise((resolve) => (releaseAbort = resolve));
+  const store2 = memoryStore(`pending-abort2-${randomUUID()}`);
+  await store2.save({
+    v: 1,
+    submissions: [
+      {
+        id: "evt_crash2",
+        origin: "human",
+        text: "crashed mid-interrupt 2",
+        payloadHash: canonicalRequestHash({ origin: "human", text: "crashed mid-interrupt 2" }),
+        status: "interrupt_pending",
+        createdAt: 1,
+        submitGeneration: 3,
+        sessionId: "ses_cto",
+        messageID,
+        dispatchGeneration: 3,
+        interruptRequestedAt: 2,
+        abortState: "pending",
+      },
+    ],
+  });
+  const oc2 = fakeOc();
+  oc2.rows.push({ info: { id: messageID, role: "user", time: { created: 1 } }, parts: [] });
+  oc2.abortTurnRow(messageID);
+  let hangAborts = 0;
+  oc2.abortSession = async () => {
+    hangAborts += 1;
+    await abortGate;
+  };
+  const { svc: svc3, clock: clock3 } = buildService({ store: store2, oc: oc2, requestDeadlineMs: 40 });
+  clock3.t += 60_000;
+  await svc3.tick(); // first attempt → uncertain
+  let rec2 = await recordOf(svc3, "evt_crash2");
+  assert.equal(rec2.abortState, "uncertain");
+  assert.equal(rec2.abortOutcomeReason, "abort_outcome_unknown");
+  assert.equal(hangAborts, 1);
+  releaseAbort();
+  clock3.t += 60_000;
+  await svc3.tick();
+  clock3.t += 60_000;
+  await svc3.tick();
+  rec2 = await recordOf(svc3, "evt_crash2");
+  assert.equal(rec2.abortState, "uncertain", "uncertainty is monotonic — no retries ever");
+  assert.equal(rec2.abortAttempts, 1);
+  assert.equal(hangAborts, 1, "no second attempt after uncertainty");
 });
 
 test("reconcile settles an interrupt_pending record from transcript proof (restart mid-interrupt)", async () => {

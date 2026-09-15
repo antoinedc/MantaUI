@@ -28,16 +28,21 @@
 //                                    cancelRequested retained)
 //
 //   accepted ──interrupt──▶ interrupt_pending (NONTERMINAL barrier)
-//     abortState: "pending" → attempted → "ok" (2xx) | "refused" (4xx)
-//                                      | "uncertain" (deadline/network — the
-//                                        server may STILL process it; the
-//                                        timeout waiter is NOT proof)
+//     abortState: "pending" → attempted once → "ok" (2xx) | "refused" (4xx)
+//                                      | "uncertain" (deadline/network) ⇒
+//                                        PERMANENT same-session barrier with
+//                                        reason abort_outcome_unknown — NO
+//                                        automatic retries (a new attempt's
+//                                        response can never settle the ORIGINAL
+//                                        request's uncertainty, and a late
+//                                        original abort could kill the next
+//                                        turn); resolution is a future EXPLICIT
+//                                        management operation (not built here)
 //     settle: abortState "ok" AND the transcript proves the turn ENDED
 //             (last linked assistant row no longer running — finish-agnostic,
 //             an aborted row qualifies) ⇒ interrupted;
 //             abortState "refused" AND turn ended ⇒ completed (natural finish)
-//     an abort left uncertain stays interrupt_pending; reconcile RE-ISSUES
-//     the idempotent abort (bounded, signal-propagated) until definitive.
+//     an uncertain abort NEVER settles and NEVER releases the queue.
 //
 //   accepted ──receipt-specific reconciliation──▶ completed
 //   (ONLY transcript proof: our user message + the LAST assistant row whose
@@ -133,12 +138,17 @@ export const STATUSES = Object.freeze([
 
 // Abort operation states on an interrupt_pending record (blocker 2 — tracked
 // separately from the turn's terminal state):
-//   pending   the abort has not definitively been attempted (or no transport)
+//   pending   the abort has not definitively been attempted (no transport, or
+//             a crash between the durable request and the attempt)
 //   ok        the server CONFIRMED the abort (2xx) — settled
 //   refused   the server definitively refused (4xx) — settled
-//   uncertain the attempt timed out / network-failed — NOT settled; the
-//             server may still process it, so the barrier holds and
-//             reconcile re-issues the idempotent abort
+//   uncertain the attempt timed out / network-failed — PERMANENT barrier with
+//             reason abort_outcome_unknown: the server may still process the
+//             original request at any time, a NEW attempt's response can
+//             never settle the ORIGINAL uncertainty (monotonic), and
+//             automatic retries are therefore FORBIDDEN (fail-closed).
+//             Same-session admission stays blocked until a future EXPLICIT
+//             management operation resolves it (not built here).
 export const ABORT_STATES = Object.freeze(["pending", "ok", "refused", "uncertain"]);
 
 // Statuses that hold the one-turn-at-a-time gate: while any of these exist
@@ -672,28 +682,27 @@ export function createCtoAdmission({
           if (!next) return;
           const claim = await binding.claimGeneration(async (b) => {
             // Under the binding store's serialized seam (blocker 3): the
-            // binding snapshot b was read FRESH inside that section. All
-            // re-verification + the reservation happen HERE; no external
-            // awaits from this callback beyond the local admission patch.
+            // binding snapshot b was read FRESH inside that section. The
+            // busy gate is an in-memory view — checked here, BEFORE the
+            // admission mutation. EVERYTHING store-derived (unresolved gate,
+            // human-FIFO priority, selected-still-queued) is re-validated
+            // INSIDE the same admission-mutex section that reserves
+            // (blocker P2) — never against an outside read.
             if (!b.currentSessionId) return { skip: "unbound" };
             if (busyCheck(b.currentSessionId)) return { skip: "busy" }; // hold, never abort
-            const inner = await loadStore();
-            if (inner.submissions.some((r) => UNRESOLVED.has(r.status))) return { skip: "unresolved" };
-            const pick = pickNext(inner.submissions);
-            if (!pick) return { skip: "empty" };
-            if (pick.id !== next.id) return { retry: true }; // priority changed → re-pick
-            const messageID = `msg_${newId()}`;
-            const claimed = await claimDispatch(pick, b, messageID);
-            if (!claimed) return { retry: true }; // CAS lost — reload and retry
-            // Lease + session map set INSIDE the claim so any reconcile that
-            // observes the record as "dispatching" always sees the lease.
-            activeOps.set(claimed.id, "dispatch");
-            acceptedBySession.set(b.currentSessionId, claimed.id);
-            return { claimed };
+            const result = await claimDispatch(next, b, `msg_${newId()}`);
+            if (result.kind === "reserved") {
+              // Lease + session map set INSIDE the claim so any reconcile
+              // that observes the record as "dispatching" always sees the
+              // lease.
+              activeOps.set(result.claimed.id, "dispatch");
+              acceptedBySession.set(b.currentSessionId, result.claimed.id);
+            }
+            return result;
           });
           const result = claim.result;
-          if (result.skip) return; // hold the queue (unbound/busy/unresolved)
-          if (result.retry) continue;
+          if (result.kind === "skip") return; // hold the queue (unbound/busy)
+          if (result.kind === "retry") continue; // priority/CAS lost — reload and retry
           // --- external awaits: ALL locks released (invariants 6+8) ---
           await sendAndClassify(result.claimed, claim.binding);
           return; // one turn at a time: the next admission waits for its terminal
@@ -709,17 +718,36 @@ export function createCtoAdmission({
 
   /**
    * Phase-1 reservation: persist the dispatch intent BEFORE any external
-   * call (invariant 1). Runs inside the binding claim's serialized section;
-   * the CAS re-verifies "queued" under the admission store mutex (two engine
-   * instances over one store cannot double-dispatch).
+   * call (invariant 1). Runs inside the binding claim's serialized section,
+   * and the WHOLE decision — fresh load, unresolved gate, human-FIFO
+   * priority re-validation, selected-still-queued CAS, reservation — happens
+   * in ONE admission-mutex section (blocker P2): a submission that commits
+   * before the reservation is seen by the very mutation that reserves.
    */
   async function claimDispatch(record, target, messageID) {
-    let claimed = null;
+    let outcome = null; // { kind: "reserved", claimed } | { kind: "retry" } | { kind: "skip", reason }
     try {
       await patchStore(store, (fresh) => {
-        const patch = casSubmission(normalizeAdmissionPayload(fresh), record.id, (r) => {
-          if (r.status !== "queued") return null;
-          claimed = {
+        const normalized = normalizeAdmissionPayload(fresh);
+        if (normalized.submissions.some((r) => UNRESOLVED.has(r.status))) {
+          outcome = { kind: "skip", reason: "unresolved" };
+          return {};
+        }
+        const pick = pickNext(normalized.submissions);
+        if (!pick) {
+          outcome = { kind: "skip", reason: "empty" };
+          return {};
+        }
+        if (pick.id !== record.id) {
+          outcome = { kind: "retry" }; // priority changed → the pump re-picks
+          return {};
+        }
+        return casSubmission(normalized, record.id, (r) => {
+          if (r.status !== "queued") {
+            outcome = { kind: "retry" }; // CAS lost (concurrent claim/cancel)
+            return null;
+          }
+          const claimed = {
             ...r,
             status: "dispatching",
             sessionId: target.currentSessionId,
@@ -728,14 +756,14 @@ export function createCtoAdmission({
             dispatchStartedAt: now(),
             retargeted: (target.generation ?? 0) !== r.submitGeneration || undefined,
           };
+          outcome = { kind: "reserved", claimed };
           return claimed;
         });
-        return patch;
       });
     } catch (err) {
       wrapStoreError(err, "dispatch"); // loud: a store failure must not stall silently
     }
-    return claimed;
+    return outcome ?? { kind: "retry" };
   }
 
   /** The external send + outcome classification. ALL locks are released. */
@@ -848,8 +876,13 @@ export function createCtoAdmission({
         outcome: { kind, via: "transcript", at: now() },
       });
     }
-    // Abort unresolved: record the turn end (visibility) and keep the barrier.
-    await markFields(record.id, "interrupt_pending", { turnEndedAt: now() });
+    // Abort unresolved: record the turn end (visibility) and keep the
+    // PERMANENT barrier — the original abort's outcome stays unknown
+    // (monotonic); no retry, no settlement, explicit reason surfaced.
+    await markFields(record.id, "interrupt_pending", {
+      turnEndedAt: now(),
+      abortOutcomeReason: record.abortOutcomeReason ?? "abort_outcome_unknown",
+    });
     return null;
   }
 
@@ -917,48 +950,50 @@ export function createCtoAdmission({
     }
   }
 
-  // -------------------------------------------------------------------------
-  // Abort operations (blocker 2): attempt an abort, classify DEFINITIVE vs
-  // UNCERTAIN, persist the durable uncertain state, and re-issue on
-  // reconcile until settled. The idempotent abort makes re-issuing safe —
-  // and the admission gate holds while any abort is unresolved, so a late
-  // session-wide abort can never kill the next admitted turn.
-  // -------------------------------------------------------------------------
-  async function attemptAbort(record) {
-    activeOps.set(record.id, "abort"); // reconcile skips the in-flight abort
-    let outcome;
-    try {
-      if (typeof abortSession !== "function") {
-        outcome = {
-          abortState: "pending",
-          abortError: "abort-unsupported: no abortSession transport wired",
-        };
-      } else {
-        try {
-          await bounded(
-            (signal) => abortSession(record.sessionId, { signal }), // signal-propagated
-            `abortSession (${record.sessionId})`,
-          );
-          outcome = { abortState: "ok" }; // definitive: server confirmed
-        } catch (err) {
-          const definitive = typeof err?.status === "number" && err.status >= 400 && err.status < 500;
-          outcome = definitive
-            ? { abortState: "refused", abortError: describeErr(err) }
-            : // deadline/network: the server may STILL process it — uncertain,
-              // barrier retained (the timeout waiter is not proof).
-              { abortState: "uncertain", abortError: describeErr(err) };
-        }
+// -------------------------------------------------------------------------
+// Abort operations (blocker 2, final round): ONE bounded attempt per request.
+// A definitive response settles the abort state; an uncertain one is
+// PERMANENT and fail-closed — reason abort_outcome_unknown, same-session
+// admission barrier retained, NO automatic retries (a retry's response can
+// never settle the ORIGINAL request's uncertainty — monotonic — and a late
+// original abort could kill the next admitted turn). Resolution of an
+// uncertain abort is a future EXPLICIT management operation, not built here.
+// -------------------------------------------------------------------------
+async function attemptAbort(record) {
+  activeOps.set(record.id, "abort"); // reconcile skips the in-flight abort
+  let outcome;
+  try {
+    if (typeof abortSession !== "function") {
+      outcome = {
+        abortState: "pending",
+        abortError: "abort-unsupported: no abortSession transport wired",
+      };
+    } else {
+      try {
+        await bounded(
+          (signal) => abortSession(record.sessionId, { signal }), // signal-propagated
+          `abortSession (${record.sessionId})`,
+        );
+        outcome = { abortState: "ok" }; // definitive: server confirmed
+      } catch (err) {
+        const definitive = typeof err?.status === "number" && err.status >= 400 && err.status < 500;
+        outcome = definitive
+          ? { abortState: "refused", abortError: describeErr(err) }
+          : // deadline/network: the server may STILL process the ORIGINAL
+            // request — uncertainty is permanent and monotonic.
+            { abortState: "uncertain", abortOutcomeReason: "abort_outcome_unknown", abortError: describeErr(err) };
       }
-    } finally {
-      if (activeOps.get(record.id) === "abort") activeOps.delete(record.id);
     }
-    await markFields(record.id, "interrupt_pending", {
-      ...outcome,
-      abortAttempts: (record.abortAttempts ?? 0) + 1,
-      lastAbortAt: now(),
-    });
-    return outcome;
+  } finally {
+    if (activeOps.get(record.id) === "abort") activeOps.delete(record.id);
   }
+  await markFields(record.id, "interrupt_pending", {
+    ...outcome,
+    abortAttempts: (record.abortAttempts ?? 0) + 1,
+    lastAbortAt: now(),
+  });
+  return outcome;
+}
 
   // -------------------------------------------------------------------------
   // reconcile — restart + uncertainty recovery. Joinable single-flight.
@@ -996,29 +1031,41 @@ export function createCtoAdmission({
         }
         if (record.status === "interrupt_pending") {
           if (record.abortState === "ok" || record.abortState === "refused") {
+            // Abort SETTLED definitively: the transcript decides settlement.
             const last = turnCheckedAt.get(record.id) ?? 0;
             if (now() - last < turnRecheckIntervalMs) continue;
             turnCheckedAt.set(record.id, now());
             await settleInterruptPending(record, "reconciled");
             continue;
           }
-          // "pending" (never attempted / unsupported transport / crash mid-
-          // attempt) or "uncertain": the abort must still be settled. Record
-          // the turn end SEPARATELY (visibility) even while the abort is out,
-          // then re-issue the idempotent abort (bounded, signal-bound) — if it
-          // comes back DEFINITIVE, settle in the same pass. Spaced per record
-          // so a polling tick stays cheap; survives restarts (durable state).
-          const lastAbort = record.lastAbortAt ?? 0;
-          const abortDue = now() - lastAbort >= turnRecheckIntervalMs;
-          const last = turnCheckedAt.get(record.id) ?? 0;
-          if (now() - last >= turnRecheckIntervalMs) {
-            turnCheckedAt.set(record.id, now());
-            const ended = await transcriptTurnEnded(record);
-            if (ended?.ended && !record.turnEndedAt) {
-              await markFields(record.id, "interrupt_pending", { turnEndedAt: now() });
+          if (record.abortState === "uncertain") {
+            // FAIL-CLOSED (final round): the original abort's outcome is
+            // unknown and monotonic — NO automatic retries (a new attempt's
+            // response can never settle it), NO settlement, and the
+            // same-session barrier persists with the explicit reason until a
+            // future EXPLICIT management operation resolves it. Only the
+            // turn-end fact is recorded for visibility.
+            const last = turnCheckedAt.get(record.id) ?? 0;
+            if (now() - last >= turnRecheckIntervalMs) {
+              turnCheckedAt.set(record.id, now());
+              const ended = await transcriptTurnEnded(record);
+              if (ended?.ended && !record.turnEndedAt) {
+                await markFields(record.id, "interrupt_pending", {
+                  turnEndedAt: now(),
+                  abortOutcomeReason: record.abortOutcomeReason ?? "abort_outcome_unknown",
+                });
+              }
             }
+            continue;
           }
-          if (!abortDue) continue;
+          // "pending": the request is durable but no attempt definitively
+          // happened (crash between the durable mark and the POST, or no
+          // transport). Attempt ONCE (the FIRST attempt for this request —
+          // not a retry); a definitive result settles in the same pass, an
+          // uncertain result downgrades to the permanent barrier above.
+          if (typeof abortSession !== "function") continue; // nothing to attempt
+          const lastAbort = record.lastAbortAt ?? 0;
+          if (record.abortAttempts && now() - lastAbort < turnRecheckIntervalMs) continue;
           const outcome = await attemptAbort(record);
           if (outcome.abortState === "ok" || outcome.abortState === "refused") {
             const refreshed = await (async () => {
