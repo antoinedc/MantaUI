@@ -12,10 +12,16 @@
 //      synthetic DB — proving the fixture and the real accessor compose.
 //   3. The read path cannot write: the shared handle is opened read-only
 //      (a write through it raises SQLITE_READONLY) and a search leaves the
-//      source row-identical.
-//   4. No prompt dispatch on read (U04-shaped): with a throwing `fetch` spy at
-//      the process boundary, a search completes — the read path's only I/O is
-//      the read-only SQLite handle, so any dispatch attempt would fail the test.
+//      source row counts unchanged.
+//   4. No prompt dispatch observed on read (U04-shaped): with a throwing
+//      `fetch` spy at the process boundary, a search completes and the spy is
+//      never called — the read path's only OBSERVED I/O is the read-only
+//      SQLite handle; the fetch seam is what this test covers, not every
+//      conceivable side-effect channel.
+//   5. Fixture hygiene: `withFixtureDb` CLOSES the fixture-owned SQLite
+//      connection before dropping the module's reference (which only nulls
+//      it), on success and on callback exception, and never closes a handle
+//      the callback already closed.
 //
 // Every case degrades to skip on runtimes without node:sqlite (spec §15.2:
 // report unsupported rather than crash at import). Runs under the suite's
@@ -25,7 +31,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { searchMessages } from "./messageSearch.mjs";
-import { resolveDbPath, getDb, _resetDbHandle } from "./opencodeDb.mjs";
+import { resolveDbPath, getDb, _resetDbHandle, _getDbHandle } from "./opencodeDb.mjs";
 import {
   createFixtureDb,
   sqliteAvailable,
@@ -120,12 +126,11 @@ test("U04 (contract-only): searchMessages answers from the synthetic DB via the 
   }
 });
 
-test("U04 (contract-only): the read path cannot write — the shared handle is read-only and the source stays row-identical", async (t) => {
+test("U04 (contract-only): the shared handle is read-only — a write through the production accessor raises SQLITE_READONLY", async (t) => {
   if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
   const fixture = await createFixtureDb(seedRows());
   try {
     await withFixtureDb(fixture, async () => {
-      const before = fixture.rowCount("message") + fixture.rowCount("part");
       const db = await getDb();
       assert.ok(db);
       assert.throws(
@@ -133,31 +138,30 @@ test("U04 (contract-only): the read path cannot write — the shared handle is r
         (e) => /readonly/i.test(String(e?.message ?? e)),
         "a write through the production handle must raise SQLITE_READONLY",
       );
-      const res = await searchMessages({ query: "staging", sessionIds: ["s1"] });
-      assert.equal(res.supported, true);
-      const after = fixture.rowCount("message") + fixture.rowCount("part");
-      assert.equal(after, before, "a passive read must leave the source row-identical");
     });
   } finally {
     fixture.close();
   }
 });
 
-test("U04 (contract-only): a search performs zero HTTP/prompt dispatch — a throwing fetch spy is never called", async (t) => {
+test("U04 (contract-only): a search leaves row counts unchanged and the fetch spy is never called (no prompt dispatch observed)", async (t) => {
   if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
   const fixture = await createFixtureDb(seedRows());
   const realFetch = globalThis.fetch;
   let fetchCalls = 0;
-  globalThis.fetch = async (...args) => {
+  globalThis.fetch = async () => {
     fetchCalls++;
     throw new Error("prompt dispatch attempted from the passive read path");
   };
   try {
     await withFixtureDb(fixture, async () => {
-      const res = await searchMessages({ query: "staging", sessionIds: ["s1", "s2"] });
+      const before = fixture.rowCount("message") + fixture.rowCount("part");
+      const res = await searchMessages({ query: "staging", sessionIds: ["s1"] });
       assert.equal(res.supported, true);
       assert.ok(res.hits.length >= 1);
-      assert.equal(fetchCalls, 0, "the passive read must dispatch nothing — no prompt, no HTTP");
+      const after = fixture.rowCount("message") + fixture.rowCount("part");
+      assert.equal(after, before, "a passive read must leave the source row counts unchanged");
+      assert.equal(fetchCalls, 0, "the fetch seam observed zero calls — no prompt dispatch on the read path");
     });
   } finally {
     globalThis.fetch = realFetch;
@@ -181,5 +185,72 @@ test("U27 (contract-only): no DB at any resolved path degrades to supported:fals
     if (prevXdg === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = prevXdg;
     _resetDbHandle();
+  }
+});
+
+test("fixture hygiene: withFixtureDb closes the fixture-owned connection on success", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
+  const fixture = await createFixtureDb(seedRows());
+  let handleDuringCallback = null;
+  try {
+    await withFixtureDb(fixture, async () => {
+      const db = await getDb();
+      assert.ok(db);
+      handleDuringCallback = _getDbHandle();
+      assert.equal(handleDuringCallback, db, "the accessor's cached handle is the one the callback opened");
+      assert.equal(handleDuringCallback.isOpen, true);
+    });
+    // After the fixture ends the module reference is dropped AND the underlying
+    // connection is closed — _resetDbHandle alone would only null it, leaking
+    // the fd and pinning the temp dir.
+    const handleAfter = _getDbHandle();
+    assert.equal(handleAfter, null, "the module handle must be reset after the fixture");
+    assert.equal(handleDuringCallback.isOpen, false, "the fixture-owned connection must be closed, not just unreferenced");
+  } finally {
+    fixture.close();
+  }
+});
+
+test("fixture hygiene: withFixtureDb closes the fixture-owned connection when the callback throws, and restores the env", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
+  const fixture = await createFixtureDb(seedRows());
+  const prev = process.env.MANTA_OPENCODE_DB;
+  let handleDuringCallback = null;
+  const cbErr = new Error("callback exploded after opening the handle");
+  let observedErr = null;
+  try {
+    await withFixtureDb(fixture, async () => {
+      await getDb();
+      handleDuringCallback = _getDbHandle();
+      throw cbErr;
+    });
+  } catch (e) {
+    observedErr = e;
+  }
+  assert.equal(observedErr, cbErr, "the callback's own error must propagate untouched");
+  assert.equal(_getDbHandle(), null, "the module handle must be reset even on exception");
+  assert.equal(handleDuringCallback.isOpen, false, "the connection must be closed even on exception (restoration)");
+  assert.equal(
+    process.env.MANTA_OPENCODE_DB,
+    prev === undefined ? undefined : prev,
+    "the env override must be restored even on exception",
+  );
+  fixture.close();
+});
+
+test("fixture hygiene: a handle the callback already closed is skipped, never closed twice", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
+  const fixture = await createFixtureDb(seedRows());
+  try {
+    // The callback closes the handle itself — the same shape messageSearch's
+    // query-error recovery uses. The fixture's cleanup must tolerate it.
+    await withFixtureDb(fixture, async () => {
+      const db = await getDb();
+      db.close();
+      assert.equal(db.isOpen, false);
+    });
+    assert.equal(_getDbHandle(), null);
+  } finally {
+    fixture.close();
   }
 });

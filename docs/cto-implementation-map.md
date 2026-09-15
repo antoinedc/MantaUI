@@ -30,28 +30,28 @@ Every fact is labeled:
   (`SetMetadataInput {sessionID, metadata}`) for later mutation of `metadata`.
 - **`POST /session` accepts a free-form `metadata` object and the Session schema persists it.**
   [PROVEN] Live `/doc`: body property `metadata: object`, `Session.metadata: object` (also a
-  `metadata` column on the `session` SQLite table). opencode source stores the caller-supplied
-  object verbatim (`createNext(..., metadata: input?.metadata)`) and `session.ts:108` returns
-  `metadata: row.metadata ?? undefined` on read. This is the correlation seam for the role
-  binding: creation intent can be stamped as an identity marker on the session itself
+  `metadata` column on the `session` SQLite table); oc-src `Metadata = Schema.Record(String, Any)`.
+  **Behavior verified on the installed binary (P0 live probe, 2026-09-15, isolated disposable
+  session, zero model turns — see §8):** a metadata object stamped at create round-trips
+  verbatim through `GET /session/{id}`. This is the correlation seam for the role binding:
+  creation intent can be stamped as an identity marker on the session itself
   (`cto_role_binding` generation + operation id), satisfying "explicit identity marker or
-  receipt" for the crash-between-create-and-bind recovery. **[UNPROVEN]** as behavior —
-  metadata round-trip must be exercised in an isolated session before P3a relies on it
-  (the write path is a normal HTTP call, but honoring/visibility of arbitrary keys through the
-  running server has not been observed on this box).
+  receipt" for the crash-between-create-and-bind recovery.
 - **Client-supplied message ID for prompt admission reconciliation (spec §8.3).** The installed
   `POST /session/{id}/prompt_async` body (`Session.PromptInput`) includes
   `messageID: optional, pattern ^msg`. opencode source creates the user message as
   `id: input.messageID ?? MessageID.ascending()` (`session/prompt.ts:657`, plus the shell /
-  command paths at :471) — i.e. the client ID is **honored, not ignored**. **[PROVEN-SRC]**.
-  The HTTP response is `204 Prompt accepted` with **no echo of the messageID** [PROVEN], so
-  receipt verification still requires a read-back (`GET /session/{id}/message`) or an SSE
-  `message.updated` observation; a `messageID` accepted on the wire is not yet proven to appear
-  in the transcript on this box **[UNPROVEN]**. Note the guard rails: the same pattern is
-  `^msg_`-free (`^msg`), and Manta's own auto-rename path (AGENTS.md) shows opencode rejects
-  unknown structured `format` bodies with a permanent 400 — treat any new request-shape use as
-  needing an isolated-session probe (spec: "do not assume a parameter is honored because HTTP
-  returned 200").
+  command paths at :471). **Behavior verified on the installed binary (P0 live probe, see §8):**
+  the client `messageID` is persisted verbatim as the user message id and readable back via
+  `GET /session/{id}/message` — delivery receipt is provable without resubmission. The HTTP
+  response is `204 Prompt accepted` with **no echo of the messageID** [PROVEN], so receipt
+  verification requires the read-back (or an SSE observation); 204 alone is not a receipt.
+  Additionally `noReply: true` (prompt.ts:1069: `if (input.noReply === true) return message`
+  before the model loop) was verified to record the user message with **zero model turn** —
+  the receipt probe needs no voska call. Note the guard rails: Manta's own auto-rename path
+  (AGENTS.md) shows opencode rejects unknown structured `format` bodies with a permanent 400 —
+  treat any new request-shape use as needing an isolated-session probe (spec: "do not assume a
+  parameter is honored because HTTP returned 200").
 - **Ephemeral machinery is the wrong vehicle for the role session.** `runEphemeralSession`
   (opencode.mjs) creates → prompts → **deletes**; `createEphemeralReaper` (ctoSessions.mjs:436,
   wired index.mjs:1878) sweeps `manta-*`-titled sessions box-wide. A durable role session MUST
@@ -140,7 +140,7 @@ Every fact is labeled:
   `resolveForgeOwner`, `observeEvent` completion (sawBusy/idle), sweeper (30-min timeout,
   `delegate.mjs` sweeper), boot reconciliation in `index.mjs`.
 
-## 4. Project stable ID (spec §4.1 / §5.1 `ProjectRef`)
+## 4. Project stable ID (spec §4.1 / §5.1 `ProjectRef`) — UNRESOLVED
 
 **Seams:** `src/server/tmux.mjs` (`parseSessions`, `listProjects`), `~/.manta/tmux-sessions.json`
 store, `src/server/local.mjs` (`listProjects` config store), `src/server/projectsRoute.mjs`.
@@ -152,24 +152,39 @@ store, `src/server/local.mjs` (`listProjects` config store), `src/server/project
   no archive metadata, no ownership store. Window-level stamps exist as tmux user options:
   `@manta-session-id` (window → opencode session), `@manta-worktree-path`, `@manta-owner`
   (`"user"` / `"job"` today; `"cto"` unclaimed).
-- **opencode already persists a stable project ID. [PROVEN]** The live `opencode.db` (read via
-  a read-only schema dump, 2026-09-15) has a `project` table — `id` PRIMARY KEY (40-hex,
-  content-derived), `worktree` (the repo root path), `vcs`, `name`, `time_created/updated` —
-  plus `project_directory (project_id, directory)` and `workspace (id, project_id, directory,
-  branch, …)`. `session` rows carry `project_id NOT NULL` and `workspace_id` (nullable; the
-  Session API schema exposes `projectID`/`workspaceID`). A special `"global"` project row
-  (`worktree = "/"`) holds non-repo directories. This is the natural `ProjectRef.workspaceId`
-  the spec asks P0 to map — stable across session creation, keyed to the checkout root.
-  **[UNPROVEN]**: stability across directory *moves* (rows observed stable per absolute path;
-  no rename/rehash behavior observed), and whether `workspace_id` is reliably populated on
-  this box (column nullable; values seen null in sampled rows).
+- **opencode persists TWO distinct identifiers plus repo-root paths, and they are NOT the same
+  thing — the spec's `ProjectRef` mapping is UNRESOLVED until the semantics are verified.**
+  The live `opencode.db` (read via a read-only schema dump, 2026-09-15) has:
+  - `project` — `id` PRIMARY KEY (40-hex), `worktree` (the ABSOLUTE checkout root path),
+    `vcs`, `name`. Observed rows include the synthetic `"global"` project with `worktree="/"`
+    (all non-repo directories) and one row per worktree root: **`project.id` is per-checkout,
+    not per-repository.** Two worktrees of one Manta project (the delegate flow creates one
+    per job) are DIFFERENT `project` rows, and a directory move would land under a different
+    root. `project.vcs` holds only the VCS kind (`"git"`), NOT a canonical remote URL —
+    nothing in the DB observed so far provides repository identity.
+  - `workspace` — `id`, `project_id`, `directory`, `branch`. Its exact identity semantics
+    (one workspace per branch? per directory? lifecycle) were NOT verified; sampled rows left
+    `workspace_id` null on sessions, so `workspace.id` cannot be assumed populated or stable.
+  - `project_directory (project_id, directory)` — a directory→project mapping table.
+  - `session.project_id NOT NULL`, `session.workspace_id` nullable; the Session API schema
+    exposes `projectID`/`workspaceID`.
+  - **Mapping status: UNRESOLVED.** The spec's `ProjectRef = {workspaceId, repositoryId,
+    repositoryRoot}` does not map 1:1 onto what the DB shows: `project.id` ≈ a *checkout*
+    identity (worktree-rooted), `workspace.id` semantics unverified, and *repository* identity
+    (canonical repo key shared across worktrees) is present nowhere observed — it would have
+    to come from git remotes, not opencode's DB. P2a/P3a must NOT settle `project.id` into
+    `ProjectRef.workspaceId` (the earlier draft of this map did; corrected) or conflate the
+    three: verify actual semantics first (how rows are created for worktrees/global/moves,
+    when `workspace_id` is populated), then extend Manta metadata once with the explicit
+    mapping — a branch name or display title is never the key (spec §4.1).
 - **Manta has no second project registry today** — `listProjects` composes live tmux state +
   the `tmux-sessions.json` reconciliation (`mantaOwned` stamp). Spec §5.1's "extend its
   metadata once rather than inventing a second project registry" therefore means: map
-  tmux-project ⇄ opencode `project.id` via directory (pane path / `defaultCwd` matching the
+  tmux-project ⇄ opencode identifiers via directory (pane path / `defaultCwd` matching
   `project.worktree`/`project_directory.directory`), and persist only the mapping edge if
-  needed. Branch names and titles are never keys — matches current behavior (nothing derives
-  identity from branch names except `worktreeName()` in the Sidebar, which is display-only).
+  needed — after the semantics above are verified. Branch names and titles are never keys —
+  matches current behavior (nothing derives identity from branch names except `worktreeName()`
+  in the Sidebar, which is display-only).
 
 ## 5. DB source sandbox path (spec §14)
 
@@ -187,8 +202,10 @@ store, `src/server/local.mjs` (`listProjects` config store), `src/server/project
   **`src/server/fixtures/opencodeDbFixture.mjs`** — creates a synthetic SQLite DB
   (schema below), arms `MANTA_OPENCODE_DB`, resets the cached handle, and
   `assertNoLiveDbFallback()` pins the resolved path to the fixture and away from
-  `homedir()/.local/share/opencode/opencode.db`. Registered as
-  `src/server/ctoP0Fixture.test.mjs`.
+  `homedir()/.local/share/opencode/opencode.db`. On teardown it CLOSES the fixture-owned
+  connection before `_resetDbHandle()` (which only nulls the module reference) so no fd leaks
+  and the temp dir can be removed; a borrowed/live or already-closed handle is never closed.
+  Registered as `src/server/ctoP0Fixture.test.mjs`.
 - **Read-only is a hard invariant [PROVEN].** `getDb()` opens
   `new DatabaseSync(path, { readOnly: true })` with a bounded
   `PRAGMA busy_timeout = 5000` (BET-1360). Writes through the handle raise
@@ -218,18 +235,45 @@ store, `src/server/local.mjs` (`listProjects` config store), `src/server/project
 | Question (spec) | Answer | Evidence level |
 | --- | --- | --- |
 | Client-assignable session ID? | No — server-generated; `POST /session` accepts `metadata` object | PROVEN (live /doc + oc-src) |
-| Client-assignable message ID on `prompt_async`? | Yes — `messageID: ^msg`, honored in oc-src `id: input.messageID ?? ascending()` | PROVEN-SRC / behavior UNPROVEN (204 has no echo; read-back required) |
-| Correlation marker for crash recovery? | `metadata` on create + `setMetadata` after | PROVEN schema / round-trip UNPROVEN |
+| Metadata marker round-trips? | Yes — stamped at create, read back verbatim via `GET /session/{id}` | PROVEN (live probe §8, zero model) |
+| Client-assignable message ID on `prompt_async`? | Yes — `messageID: ^msg` persisted verbatim as the user message id, readable back | PROVEN (oc-src + live probe §8, zero model) |
+| Zero-model receipt probe possible? | Yes — `noReply: true` records the message with no model turn | PROVEN (oc-src + live probe §8) |
 | `promptDelivery` durable? | No — memory-only Map, FIFO defer | PROVEN-ABSENT |
 | Direct RPC bypass exists? | Yes — `rpc.mjs` `opencode:prompt` → `sendPrompt` unwrapped; client drain/abort is renderer-side | PROVEN |
 | Headless parent dispatch? | Not supported: `resolveOwner` requires parent tmux window | PROVEN (failure path) |
 | `isolationRequired`? | No — worktree failure silently falls back to parent dir | PROVEN (fallback path) |
 | Job ID ordering? | `genId()` after worktree + window creation, inside store lock | PROVEN |
-| Stable project ID? | Manta: tmux session name only; opencode: `project.id` 40-hex keyed to worktree, `session.project_id NOT NULL` | PROVEN (schema + live rows) / move-stability UNPROVEN |
+| Stable project ID? | Manta: tmux session name only; opencode: `project.id` is per-CHECKOUT (worktree-rooted, synthetic `global` row), `workspace.id` semantics unverified, repository identity absent from the DB | PROVEN (schema + live rows) / **ProjectRef mapping UNRESOLVED (§4)** |
 | `MANTA_STATE_HOME` redirects opencode DB? | No — only `MANTA_OPENCODE_DB`/`XDG_DATA_HOME`/`$HOME/.local/share` | PROVEN |
 | Read-only DB invariant? | `DatabaseSync(path, {readOnly:true})`, `null` on unsupported/missing | PROVEN + regression-pinned by this PR |
 
-## 7. What this PR changes (P0)
+## 8. P0 live receipt probes — run 2026-09-15 (zero model turns)
+
+The user-authorized isolated-session probes (spec P0 gate: "prove creation/delivery receipt
+semantics in isolated sessions"). Method: loopback-only `http://127.0.0.1:4096`, one dedicated
+disposable fixture session in a non-repo temp directory (`/tmp/opencode/cto-p0-probe`, so
+`projectID="global"`), title `manta-cto-p0-receipt-probe`, metadata operation marker
+`{role:"cto_p0_probe", operation:"cto-p0-receipt-probe", ...}`. No project session, no live
+secret, no existing session touched. **`noReply: true` kept the whole probe model-free** (the
+prompt records without a model loop), so no voska turn ran at all.
+
+1. **Creation receipt (A):** `POST /session` with a `metadata` marker → `GET /session/{id}`
+   returned the metadata object **verbatim** (deep-equal verified), the server-generated id
+   matched `^ses`, and `directory`/`projectID` were as expected (`workspaceID` absent/null).
+2. **Delivery receipt (B):** `POST /session/{id}/prompt_async` with a client
+   `messageID: "msg_…"` + `noReply: true` → `204`; within 2s `GET /session/{id}/message`
+   showed exactly one message whose id **is the client-supplied messageID verbatim**
+   (role `user`, one text part); no assistant message ever appeared (zero model turn).
+3. **Cleanup:** the session was deleted by id (guarded by the metadata marker before the
+   `DELETE`) and `GET /session/{id}` then 404'd — only the positively created fixture session
+   was removed.
+
+Consequence for the map: metadata correlation and messageID receipt are **behavior-proven on
+the installed binary**, satisfying the P0 gate. Remaining prerequisite (explicitly a P3a
+prerequisite, not a P0 gap): exercising these through Manta's own admission path and the
+running server's SSE (`message.updated` with the client id) rather than raw read-back.
+
+## 9. What this PR changes (P0)
 
 1. `docs/unified-cto-spec.md` — the spec itself, landed verbatim (byte-identical to the
    authoring copy, md5-verified).
@@ -238,12 +282,18 @@ store, `src/server/local.mjs` (`listProjects` config store), `src/server/project
    builds the verified `message`/`part`/`session` schema, arms `MANTA_OPENCODE_DB` **before**
    the shared handle opens, resets the handle, restores the environment, and exports
    `assertNoLiveDbFallback()` proving the resolved path is the fixture and never the
-   production home path.
+   production home path. Cleanup CLOSES the fixture-owned connection (the one the shared
+   accessor opened while armed) before dropping the module reference — `_resetDbHandle` alone
+   only nulls it — and never closes a borrowed/live or already-closed handle; the close runs
+   under exception restoration too.
 4. `src/server/ctoP0Fixture.test.mjs` — the deterministic acceptance-regression fixture tests
    for the *existing* passive-read seams (U04-shaped, contract-only): `searchMessages` over the
    synthetic DB returns correct hits; the production accessor cannot write (`SQLITE_READONLY`);
-   a search leaves the source byte/row-identical; and no HTTP/prompt dispatch occurs during a
-   read (fetch spy wired at the process boundary throws if the read path ever sends).
+   a search leaves the source **row counts** unchanged; the **fetch seam is observed with zero
+   calls** during a read (a throwing fetch spy — the tested coverage; not a claim about every
+   conceivable side-effect channel); missing DB degrades to `supported:false`; and the fixture
+   closes its own connection on success, on callback exception (env + handle restored), and
+   when the callback closed it first.
 
 No feature is asserted to exist: nothing here claims the CTO role session, admission path,
 headless delegate or context service — P1a/P2a build those. Contract-only per spec §15.

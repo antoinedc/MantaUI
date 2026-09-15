@@ -13,10 +13,12 @@
 //
 // This helper makes those two steps impossible to forget: `withFixtureDb()`
 // arms the env var and resets the module-cached handle before the callback
-// runs, restores both afterwards, and exports `assertNoLiveDbFallback()` as the
-// §14 canary. The seeded schema mirrors the verified live table shapes
-// (`message`, `part`, `session`) as read from opencode 1.18.29's own store —
-// see docs/cto-implementation-map.md §5.
+// runs, closes the fixture-owned connection and restores both afterwards, and
+// exports `assertNoLiveDbFallback()` as the §14 canary. The seeded schema
+// mirrors the verified live table shapes (`message`, `part`, `session`) as
+// read from opencode 1.18.29's own store — see docs/cto-implementation-map.md
+// §5. (It never closes a borrowed/live handle: the module handle is provably
+// null at arm time, and an already-closed handle is skipped.)
 //
 // Pure test infrastructure: no production imports besides the `opencodeDb`
 // reset/resolve seam, no network, no fallback to the live DB path. Requires
@@ -122,13 +124,23 @@ export function assertNoLiveDbFallback(resolvedPath, fixturePath) {
  * called BEFORE `fn` so the first `getDb()` inside the callback opens the
  * synthetic DB — never a handle cached against another path.
  *
+ * Cleanup closes the FIXTURE-OWNED connection: because the module handle was
+ * null when the fixture armed, any handle present after the callback was
+ * necessarily opened against THIS synthetic DB. That connection is closed
+ * before `_resetDbHandle()` drops the reference (which only nulls the module
+ * variable — it never closes the OS handle) so the fd is released and the temp
+ * dir can be removed. A borrowed/live handle can never be closed here: there
+ * is none at arm time, and a handle the callback already closed
+ * (`isOpen === false`, e.g. messageSearch's own query-error recovery) is left
+ * alone. Works under exception restoration too — the finally runs on throws.
+ *
  * @template T
  * @param {{ dbPath: string }} fixture  the value returned by createFixtureDb()
  * @param {(fixture: { dbPath: string }) => Promise<T>} fn
  * @returns {Promise<T>}
  */
 export async function withFixtureDb(fixture, fn) {
-  const { _resetDbHandle, resolveDbPath } = await import("../opencodeDb.mjs");
+  const { _getDbHandle, _resetDbHandle, resolveDbPath } = await import("../opencodeDb.mjs");
   const prev = process.env.MANTA_OPENCODE_DB;
   process.env.MANTA_OPENCODE_DB = fixture.dbPath;
   _resetDbHandle();
@@ -137,6 +149,20 @@ export async function withFixtureDb(fixture, fn) {
     assertNoLiveDbFallback(resolveDbPath(), fixture.dbPath);
     return await fn(fixture);
   } finally {
+    // Close the connection the shared accessor opened against THIS fixture
+    // (if it is still open) before dropping the module's reference. Never
+    // close a handle that is not ours: at arm time the module handle was
+    // null, so anything present now belongs to this fixture; an
+    // already-closed handle (isOpen === false) is skipped, and a close error
+    // must not mask the callback's own outcome.
+    const handle = _getDbHandle();
+    if (handle && handle.isOpen !== false && typeof handle.close === "function") {
+      try {
+        handle.close();
+      } catch {
+        /* best-effort: the reset below still drops the reference */
+      }
+    }
     _resetDbHandle();
     if (prev === undefined) delete process.env.MANTA_OPENCODE_DB;
     else process.env.MANTA_OPENCODE_DB = prev;
