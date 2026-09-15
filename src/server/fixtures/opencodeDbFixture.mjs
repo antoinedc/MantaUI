@@ -40,9 +40,14 @@ const LIVE_DB_PATH = join(homedir(), ".local", "share", "opencode", "opencode.db
  * legacy pair (`message` + `part` — the two tables `searchMessages` joins) and
  * the v2 `session` table's identity columns. `data` payloads are the JSON
  * strings opencode stores in those columns.
+ *
+ * P1a (ctoContext) additively extended `session` with the observed v2 columns
+ * it reads (`project_id`, `workspace_id`, `title`, timestamps incl.
+ * `time_archived`) — all nullable, so pre-existing seeds that only set
+ * `{id, parentId, agent, directory}` insert unchanged.
  */
 const SCHEMA = `
-  CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, agent TEXT, directory TEXT);
+  CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, agent TEXT, directory TEXT, project_id TEXT, workspace_id TEXT, title TEXT, time_created INTEGER, time_updated INTEGER, time_archived INTEGER);
   CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
   CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
 `;
@@ -63,7 +68,7 @@ export async function sqliteAvailable() {
 /**
  * Build and seed a synthetic opencode.db in a throwaway temp dir.
  * Seed shape (all optional):
- *   sessions: [{ id, parentId?, agent?, directory? }]
+ *   sessions: [{ id, parentId?, agent?, directory?, projectId?, workspaceId?, title?, timeCreated?, timeUpdated?, timeArchived? }]
  *   messages: [{ id, sessionId, timeCreated?, timeUpdated?, data? }]
  *   parts:    [{ id, messageId, sessionId, timeCreated?, timeUpdated?, data? }]
  * Returns { dbPath, dir, rowCount, close } — the caller owns cleanup via
@@ -74,7 +79,10 @@ export async function createFixtureDb(seed = {}) {
   const dir = mkdtempSync(join(tmpdir(), "manta-cto-p0-fixture-"));
   const dbPath = join(dir, "opencode.db");
   const inserts = {
-    sessions: ["INSERT INTO session (id, parent_id, agent, directory) VALUES (?,?,?,?)", (s) => [s.id, s.parentId ?? null, s.agent ?? null, s.directory ?? null]],
+    sessions: [
+      "INSERT INTO session (id, parent_id, agent, directory, project_id, workspace_id, title, time_created, time_updated, time_archived) VALUES (?,?,?,?,?,?,?,?,?,?)",
+      (s) => [s.id, s.parentId ?? null, s.agent ?? null, s.directory ?? null, s.projectId ?? null, s.workspaceId ?? null, s.title ?? null, s.timeCreated ?? null, s.timeUpdated ?? null, s.timeArchived ?? null],
+    ],
     messages: ["INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?)", (m) => [m.id, m.sessionId, m.timeCreated ?? 1, m.timeUpdated ?? 1, JSON.stringify(m.data ?? {})]],
     parts: ["INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)", (p) => [p.id, p.messageId, p.sessionId, p.timeCreated ?? 1, p.timeUpdated ?? 1, JSON.stringify(p.data ?? {})]],
   };
