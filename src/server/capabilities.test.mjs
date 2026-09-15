@@ -271,15 +271,23 @@ test("appendLog returns {ok:false} for a queued job", async () => {
   assert.equal(r.status, "queued");
 });
 
-test("appendLog returns {ok:false} for a terminal job (no resurrection)", async () => {
-  const h = harness();
+// Shared arrange for the terminal-guard tests: seed a job already flipped to
+// the given terminal status, so a late operation must be refused (no
+// resurrection / no double-claim).
+async function seedTerminalJob(deps, { status, error } = {}) {
   const created = await createCapJob(
     { capability: "ios.build", input: {}, host: "desktop", sessionID: "ses" },
-    h.deps,
+    deps,
   );
-  await startJob(created.job.id, h.deps);
-  await completeJob(created.job.id, { status: "failed", error: "boom" }, h.deps);
-  const r = await appendLog(created.job.id, "late flush", h.deps);
+  await startJob(created.job.id, deps);
+  await completeJob(created.job.id, { status, ...(error ? { error } : {}) }, deps);
+  return created.job.id;
+}
+
+test("appendLog returns {ok:false} for a terminal job (no resurrection)", async () => {
+  const h = harness();
+  const id = await seedTerminalJob(h.deps, { status: "failed", error: "boom" });
+  const r = await appendLog(id, "late flush", h.deps);
   assert.equal(r.ok, false);
   // Status is reported as whatever the job currently is.
   assert.equal(r.status, "failed");
@@ -323,13 +331,8 @@ test("startJob returns {ok:false, status} when called twice (SSE+catch-up dedup)
 
 test("startJob returns {ok:false} for a terminal job", async () => {
   const h = harness();
-  const created = await createCapJob(
-    { capability: "ios.build", input: {}, host: "desktop", sessionID: "ses" },
-    h.deps,
-  );
-  await startJob(created.job.id, h.deps);
-  await completeJob(created.job.id, { status: "done" }, h.deps);
-  const second = await startJob(created.job.id, h.deps);
+  const id = await seedTerminalJob(h.deps, { status: "done" });
+  const second = await startJob(id, h.deps);
   assert.equal(second.ok, false);
   assert.equal(second.status, "done");
 });

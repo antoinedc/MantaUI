@@ -37,3 +37,15 @@ src/main/installer/installer.test.ts
 # changed-file scan. Extracting them is out of BET-1395's scope; the
 # reviewer's instruction: keep the idiom, exempt the file.
 src/server/index.mjs
+# P3a3-review (fix commit d91521de, 2026-09-15): capabilities.mjs entered the
+# changed-file scan for a ONE-LINE ctoKey threading in markTerminal's notify
+# call, which surfaces two PRE-EXISTING clones this PR did not introduce and
+# should not refactor out of scope: (1) the store block whose own header
+# comment documents it as an intentional mirror ("Store (atomic, same pattern
+# as schedule.mjs)" — loadJobs/saveJobs/genId, 12 lines, flagged against
+# schedule.mjs which the same PR touches for the same one-line reason), and
+# (2) the intra-file jobsLock guarded-mutation prologue shared by appendLog
+# and startJob (load / findIndex / not-found / status-guard, 7 lines). The
+# PR's test-file surfaces (schedule.test.mjs, capabilities.test.mjs) were
+# deduplicated by extraction instead of exemption.
+src/server/capabilities.mjs

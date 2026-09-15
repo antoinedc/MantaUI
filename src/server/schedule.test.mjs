@@ -694,35 +694,30 @@ test("tick does NOT drop a recurring job with a past dueAt present", async () =>
   assert.equal(h.jobs[0].id, "rec1");
 });
 
-test("tick stamps and drops a legacy one-shot with no dueAt and a PAST cron date on the same tick", async () => {
-  const now = localDate(2026, 8, 19, 9, 0);
+// Shared arrange for the legacy one-shot tests: a pre-dueAt job whose cron
+// match must be stamped (or the job dropped) on the same tick.
+function legacyOneShotHarness({ id, now }) {
   const legacy = {
     ...baseJob,
-    id: "legacy1",
+    id,
     cron: "0 9 18 8 *",
     recurring: false,
     createdAt: localDate(2026, 8, 1, 0, 0).getTime(),
   };
   delete legacy.dueAt;
   const h = harness([legacy], now);
-  const { tick } = createScheduler(h.deps);
+  return { h, tick: createScheduler(h.deps).tick };
+}
+
+test("tick stamps and drops a legacy one-shot with no dueAt and a PAST cron date on the same tick", async () => {
+  const { h, tick } = legacyOneShotHarness({ id: "legacy1", now: localDate(2026, 8, 19, 9, 0) });
   await tick();
   assert.equal(h.sent.length, 0, "stale legacy one-shot must not fire");
   assert.equal(h.jobs.length, 0, "stale legacy one-shot is dropped this tick");
 });
 
 test("tick stamps a legacy one-shot with a FUTURE cron date and lets it survive", async () => {
-  const now = localDate(2026, 8, 13, 9, 0);
-  const legacy = {
-    ...baseJob,
-    id: "legacy2",
-    cron: "0 9 18 8 *",
-    recurring: false,
-    createdAt: localDate(2026, 8, 1, 0, 0).getTime(),
-  };
-  delete legacy.dueAt;
-  const h = harness([legacy], now);
-  const { tick } = createScheduler(h.deps);
+  const { h, tick } = legacyOneShotHarness({ id: "legacy2", now: localDate(2026, 8, 13, 9, 0) });
   await tick();
   assert.equal(h.sent.length, 0, "not due yet, must not fire");
   assert.equal(h.jobs.length, 1, "future legacy one-shot survives");
