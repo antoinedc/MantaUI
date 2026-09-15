@@ -141,6 +141,24 @@ test("extractFromDbRows maps part rows → evidence, skipping malformed rows", (
   );
 });
 
+test("extractFromDbRows role-aware: conversation ASSISTANT content is never ordinary evidence; generic internal excluded; legacy internal flag still works", () => {
+  const rows = extractFromDbRows([
+    { session_id: "ordinary", data: partData("bash", { command: "gh pr list" }), time_created: TS },
+    // Legacy shape (pre-provenance callers): the boolean still excludes.
+    { session_id: "legacy-internal", internal: true, data: partData("bash", { command: "aws s3 ls" }), time_created: TS + 1 },
+    // Generic internal provenance.
+    { session_id: "internal", provenance: "cto_internal", data: partData("bash", { command: "vercel deploy" }), time_created: TS + 2 },
+    // The durable conversation: assistant tool call EXCLUDED from ordinary evidence.
+    { session_id: "convo", provenance: "cto_conversation", role: "assistant", data: partData("bash", { command: "gh api repos" }), time_created: TS + 3 },
+    // Unknown role on a conversation row: conservatively excluded.
+    { session_id: "convo", provenance: "cto_conversation", role: null, data: partData("bash", { command: "gh api x" }), time_created: TS + 4 },
+  ]);
+  assert.deepEqual(
+    rows.map((r) => [r.identity, r.sessionID]),
+    [["github", "ordinary"]],
+  );
+});
+
 // A memory-backed SQLite fixture (node:sqlite). Returns { db, close } or null
 // when node:sqlite is unavailable (degrade the db tests to skip) — same
 // pattern as ctoBackfill.test.mjs. CI's Node 20 lacks node:sqlite.
@@ -236,4 +254,84 @@ test("collectConfigEvidence gathers all surfaces and never throws", () => {
   assert.equal(rows.length, 5);
   assert.deepEqual(collectConfigEvidence(undefined, { ts: TS }), []);
   assert.deepEqual(collectConfigEvidence({ config: null }, { ts: TS }), []);
+});
+
+// ---------------------------------------------------------------------------
+// P3a1 review round 2, blocker 4 — role-aware DB pipeline integration: the
+// REAL sqlite fixture through collectDbRows + extractFromDbRows, with the
+// sandbox provenance stores (generic tombstones + the binding record — never
+// the conversation in the tombstones). Not just the event path.
+// ---------------------------------------------------------------------------
+
+test("DB pipeline integration: distinct provenance tags rows; the conversation's assistant tool calls are not indexed ordinary; CEO user rows stay tagged consumable", async () => {
+  const fx = await openFixture();
+  if (!fx) {
+    test.skip("node:sqlite unavailable on this runtime");
+    return;
+  }
+  const { db } = fx;
+  // Seed a message table WITH role-bearing data (like the real opencode db).
+  db.exec(
+    "CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);" +
+      "CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)",
+  );
+  const insMsg = db.prepare("INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?)");
+  const insPart = db.prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)");
+  insMsg.run("m1", "ordinary", 1, 1, JSON.stringify({ role: "assistant" }));
+  insMsg.run("m2", "ephemeral", 1, 1, JSON.stringify({ role: "assistant" }));
+  insMsg.run("m3", "convo", 1, 1, JSON.stringify({ role: "assistant" }));
+  insMsg.run("m4", "convo", 1, 1, JSON.stringify({ role: "user" }));
+  insPart.run("p1", "m1", "ordinary", 10, 10, partData("bash", { command: "gh pr list" }));
+  insPart.run("p2", "m2", "ephemeral", 20, 20, partData("bash", { command: "aws s3 ls" }));
+  insPart.run("p3", "m3", "convo", 30, 30, partData("bash", { command: "vercel deploy" }));
+  // A CEO instruction text part in the conversation (user message row).
+  insPart.run("p4", "m4", "convo", 40, 40, JSON.stringify({ type: "text", text: "ship the release" }));
+
+  // Sandbox provenance: the ephemeral session in the generic tombstones; the
+  // durable conversation ONLY in the binding record (never the tombstones).
+  const { bindingStore, internalSessionsStore } = await import("./ctoStores.mjs");
+  const { CONVERSATION_ROLE, markerFor } = await import("./ctoBinding.mjs");
+  const priorTombstones = await internalSessionsStore.load();
+  const priorBinding = await bindingStore.load();
+  const op = { operation: "op-int", generation: 1, directory: "/x", startedAt: 1 };
+  try {
+    await internalSessionsStore.save({ v: 1, ids: ["ephemeral"] });
+    await bindingStore.save({
+      v: 1,
+      generation: 1,
+      currentSessionId: "convo",
+      currentOperation: op.operation,
+      previousSessionIds: [],
+      pendingOperation: null,
+    });
+
+    const rows = await collectDbRows(db, { sinceTs: 0, untilTs: 1000 });
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    // Distinct provenance, resolved from the two SEPARATE registers.
+    assert.equal(byId.get("p1").provenance, null);
+    assert.equal(byId.get("p1").role, "assistant");
+    assert.equal(byId.get("p2").provenance, "cto_internal");
+    assert.equal(byId.get("p3").provenance, CONVERSATION_ROLE);
+    assert.equal(byId.get("p3").role, "assistant");
+    assert.equal(byId.get("p4").provenance, CONVERSATION_ROLE);
+    assert.equal(byId.get("p4").role, "user");
+    // The conversation is NOT in the generic tombstones.
+    assert.ok(!priorTombstones.ids?.includes && true);
+    const tomb = await internalSessionsStore.load();
+    assert.ok(!tomb.ids.includes("convo"));
+
+    // Evidence extraction: ordinary tool call indexed; internal AND the
+    // conversation's assistant tool call NOT ordinary evidence; the CEO's
+    // user text row is not a tool part (yields nothing) but stays in the
+    // page tagged for its role path.
+    const evidence = extractFromDbRows(rows);
+    assert.deepEqual(
+      evidence.map((r) => [r.identity, r.sessionID]),
+      [["github", "ordinary"]],
+    );
+    void markerFor;
+  } finally {
+    await internalSessionsStore.save(priorTombstones);
+    await bindingStore.save(priorBinding);
+  }
 });

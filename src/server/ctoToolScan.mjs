@@ -18,6 +18,7 @@
 // evidence is raw (kept for the LLM fallback; never fused until classified).
 
 import { internalSessionIds } from "./internalSessions.mjs";
+import { readConversationSessionId, CONVERSATION_ROLE } from "./ctoBinding.mjs";
 import {
   matchCliIdentity,
   matchDomainIdentity,
@@ -137,12 +138,21 @@ export function extractFromToolPart({ data, ts, sessionID = null, project = null
 }
 
 // The daily/db batch: opencode db rows → evidence rows. `rows` come from
-// collectDbRows (already filtered to the time range); each row is
-// { data, time_created, session_id }.
+// collectDbRows (already filtered to the time range + provenance-tagged);
+// each row is { data, time_created, session_id, internal?, provenance?, role? }.
+//
+// Role-aware exclusion (P3a1 review round 2, blocker 4): generic CTO-internal
+// sessions contribute nothing; the durable CTO conversation contributes its
+// USER rows (CEO instructions — consumable under their own role path) while
+// its ASSISTANT rows (the CTO's own tool calls/output) are never ordinary
+// evidence. Unknown role on a conversation row is conservatively excluded.
 export function extractFromDbRows(rows) {
   const out = [];
   for (const r of Array.isArray(rows) ? rows : []) {
-    if (r.internal === true) continue;
+    const provenance =
+      typeof r?.provenance === "string" ? r.provenance : r?.internal === true ? "cto_internal" : null;
+    if (provenance === "cto_internal") continue;
+    if (provenance === CONVERSATION_ROLE && r.role !== "user") continue;
     const ts = Number(r?.time_created);
     if (!Number.isFinite(ts) || ts <= 0) continue;
     out.push(
@@ -157,21 +167,48 @@ export function extractFromDbRows(rows) {
 }
 
 // Query the read-only opencode db handle (the same one the backfill and
-// ⌘F search use). Returns part rows in the half-open (sinceTs, untilTs] range.
+// ⌘F search use). Returns part rows in the half-open (sinceTs, untilTs] range,
+// each tagged with distinct provenance: "cto_internal" (generic tombstones),
+// "cto_conversation" (the durable CEO channel — via the binding record, NOT
+// the tombstones), or null (ordinary pipeline sessions). The row's message
+// role is joined from the message table when one exists.
 export async function collectDbRows(db, { sinceTs, afterId = "", untilTs, cap = SCAN_ROW_CAP } = {}) {
   if (!db || typeof db.prepare !== "function") throw new Error("discovery-db-unavailable");
+  const range = `(p.time_created > ? OR (p.time_created = ? AND ? != '' AND p.id > ?)) AND p.time_created <= ?`;
+  const order = ` ORDER BY p.time_created ASC, p.id ASC LIMIT ?`;
+  const withMessage = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='message'`)
+    .all().length > 0;
   const stmt = db.prepare(
-    `SELECT p.id AS id, p.session_id AS session_id, p.data AS data, p.time_created AS time_created
-       FROM part p
-       WHERE (p.time_created > ? OR (p.time_created = ? AND ? != '' AND p.id > ?))
-          AND p.time_created <= ?
-       ORDER BY p.time_created ASC, p.id ASC
-       LIMIT ?`,
+    withMessage
+      ? `SELECT p.id AS id, p.session_id AS session_id, p.data AS data, p.time_created AS time_created,
+                CASE WHEN json_valid(m.data) THEN json_extract(m.data, '$.role') END AS role
+           FROM part p LEFT JOIN message m ON m.id = p.message_id
+          WHERE ${range}${order}`
+      : `SELECT p.id AS id, p.session_id AS session_id, p.data AS data, p.time_created AS time_created
+           FROM part p
+          WHERE ${range}${order}`,
   );
   const rows = stmt.all(sinceTs, sinceTs, afterId, afterId, untilTs, cap) ?? [];
   const internal = await internalSessionIds();
+  // Fail-closed: an unreadable binding store refuses classification rather
+  // than letting the CEO channel leak into ordinary evidence.
+  const conversationSid = await readConversationSessionId();
   // Keep internal rows in the page for cursor advancement, not evidence.
-  return rows.map((row) => ({ ...row, internal: internal.has(row.session_id) }));
+  return rows.map((row) => {
+    const isInternal = internal.has(row.session_id);
+    const provenance = isInternal
+      ? "cto_internal"
+      : conversationSid !== null && row.session_id === conversationSid
+        ? CONVERSATION_ROLE
+        : null;
+    return {
+      ...row,
+      internal: isInternal,
+      provenance,
+      role: typeof row.role === "string" ? row.role : null,
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------

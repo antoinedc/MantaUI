@@ -12,6 +12,7 @@ import "./ctoTestGuard.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -213,6 +214,25 @@ test("two engine instances over the SAME store share the flight — one creation
   assert.ok(rb.binding.currentSessionId);
 });
 
+test("recover-first then ensure: ensure still completes get-or-create — both orders, both instance roles", async () => {
+  for (const order of ["recover-first", "ensure-first"]) {
+    const oc = fakeOc();
+    const store = memoryStore(`binding-order-${order}`);
+    const a = makeService({ oc, store });
+    const b = makeService({ oc, store });
+    // Serialized per store; each caller completes its OWN postcondition —
+    // a joined recover() that creates nothing never reads as ensure success.
+    const [r1, r2] = order === "recover-first"
+      ? await Promise.all([a.recover(), b.ensure()])
+      : await Promise.all([b.ensure(), a.recover()]);
+    assert.equal(oc.createCalls, 1, `${order}: exactly one creation`);
+    const ensureResult = order === "recover-first" ? r2 : r1;
+    assert.equal(ensureResult.created, true, `${order}: ensure postcondition get-or-create holds`);
+    assert.ok(ensureResult.binding.currentSessionId);
+    assert.ok((await store.load()).currentSessionId, `${order}: the store ends bound`);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // CAS — a stale missing lookup must not replace a prior bind (blocker 1)
 // ---------------------------------------------------------------------------
@@ -332,6 +352,43 @@ test("a malformed list response is uncertainty, never [] / absence — reservati
 // ---------------------------------------------------------------------------
 // Unsupported identity — created sid persisted, terminal, never a loop (blocker 2)
 // ---------------------------------------------------------------------------
+
+test("receipt timeout persists the returned sid; recovery settles by DIRECT GET even when the list page hides it", async () => {
+  const controlDir = tempControlDir(randomUUID());
+  const oc = fakeOc();
+  const store = memoryStore("binding-receipt-sid");
+  // The receipt verification stays unknown (bounded retries) — but the create
+  // RETURNED a sid ("ses_fake1", deterministic first id of the fake).
+  oc.readStates["ses_fake1"] = () => ({ state: "unknown" });
+  const svc = createCtoBinding({ oc, store, controlDir, sleep: noopSleep });
+  await assert.rejects(svc.ensure(), (err) => err instanceof CtoBindingError && err.code === "create-unknown");
+  assert.equal(oc.createCalls, 1);
+
+  // The returned sid was persisted BEFORE any verification, with no
+  // unsupported-identity mark.
+  const op = (await store.load()).pendingOperation;
+  assert.equal(op.createdSessionId, "ses_fake1");
+  assert.equal(op.unsupportedIdentity, undefined);
+
+  // Recovery where the list page hides the created sid (full churn page):
+  // the direct GET on the persisted sid settles it — the scan never runs.
+  delete oc.readStates["ses_fake1"];
+  oc.listResponse = Array.from({ length: 100 }, (_, i) => ({
+    id: `ses_churn${i}`,
+    title: "churn",
+    metadata: null,
+    time: { created: 1, updated: 2 },
+  }));
+  const listCallsBefore = oc.listCalls;
+  const fresh = createCtoBinding({ oc, store, controlDir, sleep: noopSleep });
+  const result = await fresh.ensure();
+  assert.equal(result.created, false);
+  assert.ok(result.actions.some((a) => a.action === "adopted"));
+  assert.equal(result.binding.currentSessionId, "ses_fake1");
+  assert.equal(result.binding.currentOperation, op.operation);
+  assert.equal(oc.createCalls, 1);
+  assert.equal(oc.listCalls, listCallsBefore, "direct GET first — no marker scan when a sid is persisted");
+});
 
 test("a created session whose metadata was not preserved persists the sid + unsupported identity and stops", async () => {
   const controlDir = tempControlDir(randomUUID());
@@ -558,28 +615,44 @@ test("defaultControlDir resolves inside the state-home sandbox (never the live b
   assert.ok(defaultControlDir().startsWith(sandbox));
 });
 
-test("a .git in the control directory OR ANY ANCESTOR up to the state home refuses to bind", async () => {
-  const controlDir = tempControlDir(randomUUID());
+test("a .git in the control directory OR ANY ANCESTOR (inclusive state home) refuses to bind — validation precedes mutation", async () => {
   const oc = fakeOc();
-  const svc = makeService({ oc, controlDir });
 
-  // Direct .git
+  // (a) direct .git in the control directory.
+  let controlDir = tempControlDir(randomUUID());
+  let svc = makeService({ oc, controlDir });
   await mkdir(join(controlDir, ".git"), { recursive: true });
   await assert.rejects(svc.ensure(), (err) => err.code === "control-directory-repository");
   assert.equal(oc.createCalls, 0);
 
-  // Ancestor .git (the label directory between controlDir and the state home)
-  const labelDir = dirname(controlDir);
-  await rm(join(controlDir, ".git"), { recursive: true });
-  await mkdir(join(labelDir, ".git"), { recursive: true });
+  // (b) ancestor .git (the label directory between controlDir and the state
+  // home) — and the refusal must not have created or modified anything.
+  controlDir = tempControlDir(randomUUID());
+  svc = makeService({ oc, controlDir });
+  await mkdir(join(dirname(controlDir), ".git"), { recursive: true });
   await assert.rejects(svc.ensure(), (err) => err.code === "control-directory-repository");
   assert.equal(oc.createCalls, 0);
+  assert.ok(!existsSync(controlDir), "refusal must not create the control directory");
+  await rm(join(dirname(controlDir), ".git"), { recursive: true, force: true });
+
+  // (c) a .git at the state home itself is inside the inclusive ancestor walk.
+  const homeGit = join(stateHome(), ".git");
+  await mkdir(homeGit, { recursive: true });
+  try {
+    controlDir = tempControlDir(randomUUID());
+    svc = makeService({ oc, controlDir });
+    await assert.rejects(svc.ensure(), (err) => err.code === "control-directory-repository");
+    assert.equal(oc.createCalls, 0);
+  } finally {
+    await rm(homeGit, { recursive: true, force: true });
+  }
 });
 
-test("a symlink redirecting the control directory outside the state home is refused", async () => {
-  const { mkdtemp, symlink, rm } = await import("node:fs/promises");
+test("a symlink redirecting the control directory outside the state home is refused WITHOUT touching the target", async () => {
+  const { mkdtemp, symlink } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const external = await mkdtemp(join(tmpdir(), "cto-p3a1-external-"));
+  const targetModeBefore = (await stat(external)).mode & 0o777;
   const controlDir = tempControlDir(randomUUID());
   await mkdir(dirname(controlDir), { recursive: true });
   await symlink(external, controlDir, "dir");
@@ -591,6 +664,10 @@ test("a symlink redirecting the control directory outside the state home is refu
       (err) => err.code === "control-directory-outside-state-home",
     );
     assert.equal(oc.createCalls, 0);
+    // Validation precedes mutation: the rejected symlink target's mode is
+    // never modified by the refusal (no chmod follows the symlink first).
+    assert.equal((await stat(external)).mode & 0o777, targetModeBefore, "symlink target mode unchanged");
+    assert.ok(!existsSync(join(external, CONTROL_MARKER_FILENAME)), "no marker written into the rejected target");
   } finally {
     await rm(controlDir);
     await rm(external, { recursive: true, force: true });

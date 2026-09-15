@@ -46,11 +46,17 @@
 //  - Every oc call (list/read/create) is bounded by an AbortSignal deadline
 //    raced against the call, so hung headers or a hung body cannot stall
 //    ensure() forever; a timed-out create is unknown, not a retry.
+//
+// SINGLE-WRITER-PROCESS REQUIREMENT: the serialization (per-store task
+// queue) and the reservation/bind CAS are correct for ONE writer process —
+// one manta-server per box. Composing two LIVE writer processes over the
+// same store is unsupported; the CAS narrows but does not guarantee
+// cross-process exclusion, and no fake cross-process safety is claimed.
 
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, realpath } from "node:fs/promises";
-import { dirname, join, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { stateHome, statePath } from "../shared/paths.mjs";
 import { writeJsonAtomic } from "./jsonStore.mjs";
 import { bindingStore, patchStore } from "./ctoStores.mjs";
@@ -165,6 +171,27 @@ export function _resetConversationRoleCache() {
   conversationRoleCache = { sid: null, value: false, until: 0 };
 }
 
+/**
+ * The CURRENT durable conversation session id, or null — one uncached store
+ * read (no 5s window). This is the distinct-provenance seam the DB reader
+ * uses: rows from this session are role-classified (assistant CTO content
+ * excluded from ordinary indexing; CEO user instructions stay consumable
+ * under their own role), NOT folded into the generic internal tombstones.
+ */
+export async function readConversationSessionId() {
+  try {
+    return normalizeBinding(await bindingStore.load()).currentSessionId;
+  } catch (err) {
+    throw err instanceof CtoBindingError
+      ? err
+      : new CtoBindingError(
+          `binding store unreadable while resolving conversation provenance: ${describeErr(err)}`,
+          "store-unreadable",
+          { cause: err },
+        );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Binding record normalization — fail loudly on any shape violation (spec
 // §8.2: corrupt state is visible unhealthy state, never silently "unbound",
@@ -246,23 +273,29 @@ export function normalizeBinding(payload) {
 }
 
 // ---------------------------------------------------------------------------
-// Shared singleflight, keyed by the STORE (not the engine instance): two
-// createCtoBinding instances over the same store — desktop + anything else
-// composing its own engine in one process — join ONE flight, so concurrent
-// ensure/recover produce at most one operation (review blocker 1).
+// Per-store serialization (review round 2, blocker 1): tasks over the SAME
+// store run ONE AT A TIME across all engine instances in this process, and
+// every caller completes ITS OWN postcondition — an ensure() enqueued behind
+// a recover() still performs get-or-create when the store is still unbound
+// (a joined no-create recover result is never mistaken for ensure success).
+// At-most-one creation comes from the fresh store load + reservation CAS
+// inside ensureOnce, not from promise joining. CROSS-PROCESS: this is a
+// single-writer-process design (one manta-server per box) — the CAS narrows
+// but does not guarantee races between independent writer processes; the
+// service must not be composed as two live writers over one store.
 // ---------------------------------------------------------------------------
 
-const storeFlights = new Map();
+const storeQueues = new Map();
 
-function withStoreFlight(store, run) {
+function enqueueStoreTask(store, run) {
   const key = typeof store?.path === "string" && store.path ? store.path : `binding:${store?.name ?? "anon"}`;
-  const existing = storeFlights.get(key);
-  if (existing) return existing;
-  const flight = run().finally(() => {
-    if (storeFlights.get(key) === flight) storeFlights.delete(key);
+  const prev = storeQueues.get(key) ?? Promise.resolve();
+  const task = prev.then(run, run);
+  const tail = task.then(() => {}, () => {});
+  storeQueues.set(key, tail);
+  return task.finally(() => {
+    if (storeQueues.get(key) === tail) storeQueues.delete(key);
   });
-  storeFlights.set(key, flight);
-  return flight;
 }
 
 /**
@@ -333,18 +366,36 @@ export function createCtoBinding({
 
   /**
    * The control directory: exists, owned (0700, enforced), marked, never a
-   * repository (no `.git` in it or any ancestor up to the state home) and
-   * never a symlink redirect — the REAL path must stay inside the REAL state
-   * home, so the role session's cwd can never be pulled into a user project
-   * (review blocker 6).
+   * repository (no `.git` in it or in ANY ancestor up to and including the
+   * state home) and never a symlink redirect — the REAL path must stay inside
+   * the REAL state home, so the role session's cwd can never be pulled into a
+   * user project. VALIDATION PRECEDES EVERY MUTATION (review round 2,
+   * blocker 3): the realpath/containment/repository checks run against the
+   * deepest EXISTING ancestor BEFORE mkdir/chmod touch anything, so a
+   * rejected path (e.g. a symlink target) is never modified as a side effect
+   * of refusing it.
    */
   async function ensureControlDirectory() {
-    await mkdir(controlDir, { recursive: true, mode: 0o700 });
-    await chmod(controlDir, 0o700);
-    let realDir;
+    // --- validation (read-only) ---
+    // (1) Textual containment of the INTENDED path: catches `..` escapes and
+    // equality with the state home even when the directory does not exist yet.
+    const resolvedControl = resolve(controlDir);
+    const resolvedHome = resolve(stateHome());
+    if (!resolvedControl.startsWith(resolvedHome + sep)) {
+      throw new CtoBindingError(
+        `CTO control directory ${controlDir} is outside the state home ${resolvedHome} — refusing to bind`,
+        "control-directory-outside-state-home",
+      );
+    }
+    // (2) Real containment of the deepest EXISTING ancestor: resolves any
+    // symlinks in the existing chain; a redirect outside the state home is
+    // refused before anything is created or mode-changed.
+    let anchor = controlDir;
+    for (let guard = 0; guard < 256 && !existsSync(anchor); guard++) anchor = dirname(anchor);
+    let realAnchor;
     let realHome;
     try {
-      realDir = await realpath(controlDir);
+      realAnchor = await realpath(anchor);
       realHome = await realpath(stateHome());
     } catch (err) {
       throw new CtoBindingError(
@@ -353,21 +404,27 @@ export function createCtoBinding({
         { cause: err },
       );
     }
-    if (realDir === realHome || !realDir.startsWith(realHome + sep)) {
+    if (!realAnchor.startsWith(realHome + sep) && realAnchor !== realHome) {
       throw new CtoBindingError(
-        `CTO control directory ${controlDir} resolves to ${realDir}, outside the state home ${realHome} — ` +
+        `CTO control directory ${controlDir} resolves to ${realAnchor}, outside the state home ${realHome} — ` +
           `refusing to bind (a symlink must not redirect the role session's cwd)`,
         "control-directory-outside-state-home",
       );
     }
-    for (let dir = realDir; dir.startsWith(realHome + sep); dir = dirname(dir)) {
+    // (3) No repository: the existing chain up to AND INCLUDING the state home.
+    for (let dir = realAnchor; ; dir = dirname(dir)) {
       if (existsSync(join(dir, ".git"))) {
         throw new CtoBindingError(
           `CTO control directory ${controlDir} sits inside the repository at ${dir} — refusing to bind`,
           "control-directory-repository",
         );
       }
+      if (dir === realHome) break;
     }
+
+    // --- mutation (only after validation passed) ---
+    await mkdir(controlDir, { recursive: true, mode: 0o700 });
+    await chmod(controlDir, 0o700);
     await writeJsonAtomic(
       join(controlDir, CONTROL_MARKER_FILENAME),
       JSON.stringify(
@@ -426,10 +483,48 @@ export function createCtoBinding({
   }
 
   /**
-   * Resolve a reserved operation left by this or a previous process: adopt
-   * the created session by exact marker, or keep the reservation and report
-   * uncertainty. Never creates here — creation happens only from a clean
-   * slate in the callers.
+   * Adopt a marker-verified created session as the current binding (CAS: the
+   * operation must still be the pending one).
+   */
+  async function adoptOperation(pending, sessionId, actions) {
+    const next = await patchStore(store, (fresh) => {
+      const base = normalizeBinding(fresh);
+      if (base.pendingOperation?.operation !== pending.operation) return {};
+      const previous =
+        base.currentSessionId && base.currentSessionId !== sessionId
+          ? capPrevious([...base.previousSessionIds, base.currentSessionId])
+          : base.previousSessionIds;
+      return {
+        generation: Math.max(base.generation, pending.generation),
+        currentSessionId: sessionId,
+        currentOperation: pending.operation,
+        previousSessionIds: previous,
+        pendingOperation: undefined,
+      };
+    });
+    const base = normalizeBinding(next);
+    if (base.currentSessionId === sessionId) {
+      actions.push({ action: "adopted", operation: pending.operation, sessionId });
+    }
+    return base;
+  }
+
+  /** The created session dropped its marker: persist the terminal failure. */
+  async function markUnsupportedIdentity(pending, sessionId) {
+    await patchStore(store, (fresh) => {
+      const base = normalizeBinding(fresh);
+      if (base.pendingOperation?.operation !== pending.operation) return {};
+      return {
+        pendingOperation: { ...base.pendingOperation, createdSessionId: sessionId, unsupportedIdentity: true },
+      };
+    });
+  }
+
+  /**
+   * Resolve a reserved operation left by this or a previous process. With a
+   * persisted created sid, settlement goes DIRECTLY to that sid (a list page
+   * can hide the session; the direct read cannot be out-ordered by it) — the
+   * marker scan runs only when NO sid is persisted. Never creates here.
    */
   async function reconcilePending(actions) {
     const binding = await loadBinding();
@@ -446,28 +541,32 @@ export function createCtoBinding({
         "unsupported-identity",
       );
     }
+    if (pending.createdSessionId) {
+      // Direct GET on the persisted sid — the receipt is honored, never
+      // discarded; the list page plays no part in this settlement.
+      const read = await readSessionBounded(pending.createdSessionId);
+      if (read.state === "found") {
+        if (isMarkerSession(read.session, pending.operation)) {
+          return adoptOperation(pending, pending.createdSessionId, actions);
+        }
+        await markUnsupportedIdentity(pending, pending.createdSessionId);
+        throw new CtoBindingError(
+          `created session ${pending.createdSessionId} (operation ${pending.operation}) exists but lacks the ` +
+            `binding metadata marker — role-session identity is unsupported; creation is stopped to prevent ` +
+            `duplicates. Manual resolution required.`,
+          "unsupported-identity",
+        );
+      }
+      actions.push({
+        action: "reconcile-unknown",
+        operation: pending.operation,
+        reason: `created-session-${pending.createdSessionId}-${read.state}`,
+      });
+      return binding;
+    }
     const scan = await scanForMarker(pending.operation);
     if (scan.state === "found") {
-      const next = await patchStore(store, (fresh) => {
-        const base = normalizeBinding(fresh);
-        if (base.pendingOperation?.operation !== pending.operation) return {};
-        const previous =
-          base.currentSessionId && base.currentSessionId !== scan.sessionId
-            ? capPrevious([...base.previousSessionIds, base.currentSessionId])
-            : base.previousSessionIds;
-        return {
-          generation: Math.max(base.generation, pending.generation),
-          currentSessionId: scan.sessionId,
-          currentOperation: pending.operation,
-          previousSessionIds: previous,
-          pendingOperation: undefined,
-        };
-      });
-      const base = normalizeBinding(next);
-      if (base.currentSessionId === scan.sessionId) {
-        actions.push({ action: "adopted", operation: pending.operation, sessionId: scan.sessionId });
-      }
-      return base;
+      return adoptOperation(pending, scan.sessionId, actions);
     }
     // Unknown outcome (marker absent, malformed list, transient failures):
     // the reservation is RETAINED — never cleared, never re-created on top of.
@@ -562,6 +661,16 @@ export function createCtoBinding({
       );
     }
 
+    // Persist the returned sid IMMEDIATELY, before any receipt verification
+    // (review round 2, blocker 2): a receipt timeout must never leave the
+    // created session unidentifiable just because the newest-100 list page
+    // later hides it — recovery settles by a DIRECT read of this sid first.
+    await patchStore(store, (fresh) => {
+      const base = normalizeBinding(fresh);
+      if (base.pendingOperation?.operation !== op.operation) return {};
+      return { pendingOperation: { ...base.pendingOperation, createdSessionId: session.id } };
+    });
+
     // Receipt: a 2xx from the create alone is not proof (P0 map guard rails).
     // Bind only once the marker is verified on the record itself.
     let receipt = null;
@@ -573,13 +682,7 @@ export function createCtoBinding({
           // opencode dropped the marker: the session exists but can never be
           // re-identified. Persist the sid + the terminal failure BEFORE
           // erroring — never loop-create over an unidentifiable session.
-          await patchStore(store, (fresh) => {
-            const base = normalizeBinding(fresh);
-            if (base.pendingOperation?.operation !== op.operation) return {};
-            return {
-              pendingOperation: { ...base.pendingOperation, createdSessionId: session.id, unsupportedIdentity: true },
-            };
-          });
+          await markUnsupportedIdentity(op, session.id);
           throw new CtoBindingError(
             `opencode did not persist the binding metadata marker on ${session.id} — role-session identity is ` +
               `unsupported (operation ${op.operation}); creation is stopped to prevent duplicates. ` +
@@ -639,10 +742,21 @@ export function createCtoBinding({
     const actions = [];
     const binding = await reconcilePending(actions);
     if (binding.pendingOperation) {
+      // TRUTHFUL residual-unknown copy (review round 2): the create may never
+      // have landed — retrying ensure() will NOT fix that (it keeps reporting
+      // the same uncertainty and never creates over an unsettled operation),
+      // and no automatic retry is safe. Resolution requires the created
+      // session to become identifiable (direct lookup of the persisted sid,
+      // when one is recorded) or an explicit manual settle.
+      const op = binding.pendingOperation;
       throw new CtoBindingError(
-        `binding has an unreconciled creation operation (${binding.pendingOperation.operation}) — the create may ` +
-          `still be in flight or its outcome is unknown; the reservation is retained and no duplicate is created. ` +
-          `The operation settles when its marker session becomes identifiable; retry later or run recover().`,
+        `binding operation ${op.operation} is retained with an unresolved outcome` +
+          `${op.createdSessionId ? ` (created session sid ${op.createdSessionId} persisted)` : ""}: the create ` +
+          `may still be in flight, or it may never have landed — this is unknown. ensure()/recover() keep ` +
+          `reporting this uncertainty and will NOT create a replacement; retrying does not resolve it. ` +
+          `The operation settles only when its session becomes identifiable` +
+          `${op.createdSessionId ? " (direct lookup of the persisted sid)" : " (exact metadata marker in a session scan)"} ` +
+          `or an explicit manual settle is performed.`,
         "unknown-state",
       );
     }
@@ -690,16 +804,17 @@ export function createCtoBinding({
     return { binding: next, actions, replaced: true };
   }
 
-  // Singleflight shared by ensure() AND recover(), keyed by the store path
-  // (not the instance): concurrent calls — across engine instances over the
-  // same store — join ONE flight, so at most one creation/reconcile runs.
-  // Cross-process, the reservation + bind CAS guards correctness instead.
+  // Serialization shared by ensure() AND recover(), keyed by the store path
+  // (not the instance): concurrent calls run ONE AT A TIME and each caller
+  // gets ITS OWN result — an ensure() queued behind a recover() still
+  // completes get-or-create (review round 2, blocker 1). Cross-process, the
+  // reservation + bind CAS narrows races; single-writer-process is required.
   function ensure() {
-    return withStoreFlight(store, ensureOnce);
+    return enqueueStoreTask(store, ensureOnce);
   }
 
   function recover() {
-    return withStoreFlight(store, recoverOnce);
+    return enqueueStoreTask(store, recoverOnce);
   }
 
   return {

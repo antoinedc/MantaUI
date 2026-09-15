@@ -352,3 +352,18 @@ NEVER clears the reservation (an in-flight create can land after the snapshot; a
 list response is never read as absence). Only a definitive 4xx rejection clears its own
 reservation. A create whose response lacks the identity marker persists the created sid plus a
 terminal `unsupportedIdentity` failure — never a create-loop.
+
+Round-2 review corrections: ensure/recover serialize through a per-store task
+queue where every caller completes its own postcondition (ensure still creates
+when queued behind a no-create recover); the create's returned sid is persisted
+BEFORE receipt verification and recovery settles by a DIRECT read of that sid
+first (the marker scan runs only when no sid was persisted); control-directory
+validation (textual + realpath containment, repository walk including the state
+home) precedes every mkdir/chmod so a refused path is never modified; the DB
+scanner tags rows with distinct provenance (`cto_internal` from tombstones,
+`cto_conversation` from the binding record — never in the tombstones) and the
+conversation's assistant/tool content is excluded from ordinary evidence while
+its user rows (CEO instructions) stay consumable under their role path; strict
+stores never read a top-level null/array/string as default; the archive is
+uncapped with query pagination; and the service states its single-writer-
+process requirement — no fake cross-process CAS guarantee.
