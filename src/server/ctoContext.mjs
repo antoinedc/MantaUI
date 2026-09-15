@@ -199,10 +199,22 @@ function compactToBudget(result, units) {
   const trueOriginal = new Map(allFields.map((f) => [f, originalOf(f)]));
   const srcOf = (f) => trueOriginal.get(f);
 
-  // Phase 1 — exact minimal cut, largest field first: one field that can
-  // cover the whole overflow is cut once, content-maximally. A field that
-  // cannot cover it is restored (markers cleaned — later phases decide).
-  const bySize = [...allFields].sort((a, b) => byteLen(b.obj[b.field]) - byteLen(a.obj[a.field]));
+  // Protected fields (the requested anchor part's evidence) are excluded
+  // from EVERY non-final pass: neighbors relieve the overflow first — the
+  // decisive anchor text is trimmed only in the final pass, and only when no
+  // neighbor shrink can satisfy the budget.
+  const protectedSet = new Set(
+    units
+      .filter((u) => u.canDrop === false)
+      .flatMap((u) => u.fields)
+      .filter((f) => f.protected),
+  );
+  // Phase 1 — exact minimal cut, largest field first — over UNPROTECTED
+  // fields only. A field that cannot cover the whole overflow is restored
+  // (markers cleaned — later phases decide).
+  const bySize = allFields
+    .filter((f) => !protectedSet.has(f))
+    .sort((a, b) => byteLen(b.obj[b.field]) - byteLen(a.obj[a.field]));
   for (const f of bySize) {
     if (serializedBytes(result) <= CTO_CONTEXT_LIMITS.textBudgetBytes) return;
     const val = f.obj[f.field];
@@ -221,7 +233,6 @@ function compactToBudget(result, units) {
   // its size (small evidence survives; big dumps give the most; PROTECTED
   // fields — the requested anchor part's evidence — give last). Rounds
   // re-measure the completed response until it fits or nothing is left.
-  const protectedSet = new Set(units.filter((u) => u.canDrop === false).flatMap((u) => u.fields).filter((f) => f.protected));
   let guard = 64;
   while (serializedBytes(result) > CTO_CONTEXT_LIMITS.textBudgetBytes && guard-- > 0) {
     const live = allFields.filter((f) => f.obj[f.field] !== "" && !protectedSet.has(f));
@@ -456,6 +467,25 @@ const DECODED_MATCH_SQL = `(
       AND instr(lower(COALESCE(jt.value, '')), lower(?)) > 0
   )
 )`;
+// The FIRST matching decoded atom (document order) — its fullkey names the
+// field (part+field provenance) and json_extract decodes the value. The
+// candidate handed to JS is this BOUND MATCHED atom itself — not a capped
+// client-side traversal, which could hide a true match beyond its caps.
+const MATCHED_ATOM_SQL = `(
+  SELECT a.fullkey FROM json_tree(p.data) a
+  WHERE a.type NOT IN ('object', 'array')
+    AND instr(lower(COALESCE(a.value, '')), lower(?)) > 0
+  ORDER BY a.id LIMIT 1
+)`;
+// Which search field a matched atom belongs to, from its fullkey — the
+// candidate evidence stays tied to its part+field.
+function matchedFieldOf(fullkey) {
+  if (typeof fullkey !== "string") return "text";
+  if (fullkey === "$.tool") return "tool_name";
+  if (fullkey === "$.state.input" || fullkey.startsWith("$.state.input")) return "input";
+  if (fullkey === "$.state.output" || fullkey.startsWith("$.state.output")) return "output";
+  return "text";
+}
 
 // Pure: the decoded scalar strings of a structured JSON value (bounded) —
 // the serializer-independent searchable representation, aligned with the
@@ -508,10 +538,16 @@ function buildHit(row, part, msg, q, query) {
   let role = "assistant";
   if (msg && typeof msg === "object" && msg.role === "user") role = "user";
 
-  const idxOf = (text) => text.toLowerCase().indexOf(q);
-  const candidates = partCandidates(part).map((c) => ({ ...c, idx: idxOf(c.text) }));
-  const match = candidates.find((c) => c.idx >= 0);
-  if (!match) return null;
+  // The candidate is the BOUND MATCHED atom derived from SQL json_tree —
+  // tied to its part and field, aligned across serializer escape forms and
+  // nested structures, bounded by the SQL LIMIT (never a huge JS tree walk).
+  // Part-shape filters (synthetic/ignored text) still apply — they are
+  // properties of the part, not of query matching.
+  if (part.type === "text" && (part.synthetic || part.ignored)) return null;
+  const matched = row.match_value == null ? "" : String(row.match_value);
+  const idx = matched.toLowerCase().indexOf(q);
+  if (matched === "" || idx < 0) return null;
+  const field = matchedFieldOf(row.match_fullkey);
 
   const hit = {
     sessionId: row.session_id,
@@ -523,18 +559,17 @@ function buildHit(row, part, msg, q, query) {
     projectMapping: "unmapped",
   };
   if (part.type === "tool") {
-    hit.tool = { name: typeof part.tool === "string" ? part.tool : null, status: part.state?.status ?? null, matchedField: match.field };
+    hit.tool = { name: typeof part.tool === "string" ? part.tool : null, status: part.state?.status ?? null, matchedField: field };
   }
 
-  const idx = match.idx;
   const start = Math.max(0, idx - 60);
   const clean = (s) => s.replace(/\s+/g, " ");
   hit.snippet = {
-    pre: clean((start > 0 ? "…" : "") + match.text.slice(start, idx)),
-    match: clean(match.text.slice(idx, idx + query.length)),
-    post: clean(match.text.slice(idx + query.length, idx + query.length + 200)),
+    pre: clean((start > 0 ? "…" : "") + matched.slice(start, idx)),
+    match: clean(matched.slice(idx, idx + query.length)),
+    post: clean(matched.slice(idx + query.length, idx + query.length + 200)),
   };
-  return { hit, fieldBytes: byteLen(match.text) };
+  return { hit, fieldBytes: byteLen(matched) };
 }
 
 export async function ctoSearch({ query, projectId, directory, sessionId, limit, cursor, ...rest } = {}) {
@@ -555,8 +590,10 @@ export async function ctoSearch({ query, projectId, directory, sessionId, limit,
   if (!db) return sourceUnavailable();
 
   try {
+    // Placeholder order: the two MATCHED_ATOM_SQL subqueries in the SELECT
+    // list bind first, then the WHERE's EXISTS, then the filter placeholders.
     const where = [DECODED_MATCH_SQL];
-    const params = [q];
+    const params = [q, q, q];
     if (projectId != null) {
       where.push("s.project_id = ?");
       params.push(projectId);
@@ -575,7 +612,9 @@ export async function ctoSearch({ query, projectId, directory, sessionId, limit,
     }
     const sql = `
       SELECT p.id AS part_id, p.session_id, p.message_id, p.time_created,
-             p.data AS part_data, m.data AS msg_data
+             p.data AS part_data, m.data AS msg_data,
+             json_extract(p.data, ${MATCHED_ATOM_SQL}) AS match_value,
+             ${MATCHED_ATOM_SQL} AS match_fullkey
       FROM part p
       JOIN message m ON m.id = p.message_id
       LEFT JOIN session s ON s.id = p.session_id

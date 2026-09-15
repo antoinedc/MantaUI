@@ -806,6 +806,77 @@ test("around: a single MB output propagates its per-part cut to the aggregate tr
   }
 });
 
+test("search: the matched atom comes from SQL json_tree — hits beyond every JS traversal cap and at depth stay reachable", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
+  // state.input = object with 32 filler scalars and the DECISIVE 33rd: the
+  // old capped JS traversal (32 scalars / 64 nodes / depth 4) dropped the
+  // row after the SQL selected it — cursor advanced, walk exhausted, no hit.
+  const input = {};
+  for (let i = 0; i < 32; i++) input[`filler${i}`] = `filler ${i}`;
+  input.decisive = "the decisive thirty third scalar";
+  // A second part with the match 6 levels deep (beyond the old depth cap).
+  const deep = { l1: { l2: { l3: { l4: { l5: { l6: "deeply nested decisive token" } } } } } };
+  const messages = [
+    { id: "m_cap", sessionId: "s_cap", timeCreated: T, data: { role: "assistant" } },
+    { id: "m_deep", sessionId: "s_cap", timeCreated: T + 1, data: { role: "assistant" } },
+  ];
+  const parts = [
+    { id: "p_cap", messageId: "m_cap", sessionId: "s_cap", timeCreated: T, data: { type: "tool", tool: "bash", state: { status: "completed", input } } },
+    { id: "p_deep", messageId: "m_deep", sessionId: "s_cap", timeCreated: T + 1, data: { type: "tool", tool: "bash", state: { status: "completed", input: deep } } },
+  ];
+  await withFixture(
+    { sessions: [{ id: "s_cap", projectId: "prj_a", directory: "/repo-a", timeUpdated: T }], messages, parts },
+    async () => {
+      const res = await ctoSearch({ query: "the decisive thirty third scalar" });
+      assert.equal(res.status, "ok");
+      assert.equal(res.hits.length, 1, "the true hit beyond every cap is found on this page — no cursor-then-exhaustion");
+      assert.equal(res.hits[0].partId, "p_cap");
+      assert.equal(res.hits[0].tool.matchedField, "input", "the candidate evidence stays tied to its part+field");
+      assert.match(res.hits[0].snippet.match, /thirty third/);
+      const deepRes = await ctoSearch({ query: "deeply nested decisive token" });
+      assert.equal(deepRes.hits.length, 1, "a match beyond the old depth cap is reachable");
+      assert.equal(deepRes.hits[0].partId, "p_deep");
+      assert.equal(deepRes.hits[0].tool.matchedField, "input");
+    },
+  );
+});
+
+test("around: protected anchor text is trimmed only AFTER neighbors are relieved — the exact decisive tail survives", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
+  // Anchor part = 5988 bytes ending in an exact decisive tail; 25 neighbor
+  // messages with 650-byte parts each. The old largest-field-first pass cut
+  // the PROTECTED anchor while every neighbor stayed whole. Now: protected
+  // fields are excluded from every non-final pass, so a neighbor shrink
+  // satisfying the budget leaves the anchor's exact tail untouched.
+  const tail = "DECISIVE-TAIL-MARKER";
+  const anchorText = "A".repeat(5988 - tail.length) + tail;
+  const messages = [
+    ...Array.from({ length: 25 }, (_, i) => ({ id: `mn${i}`, sessionId: "s_tail", timeCreated: T + i, data: { role: "assistant" } })),
+    { id: "m_anchor", sessionId: "s_tail", timeCreated: T + 100, data: { role: "assistant" } },
+  ];
+  const parts = [
+    ...messages.filter((m) => m.id !== "m_anchor").map((m) => ({ id: `pn_${m.id}`, messageId: m.id, sessionId: "s_tail", timeCreated: m.timeCreated, data: { type: "text", text: `neighbor ${m.id} ` + "n".repeat(636) } })),
+    { id: "p_anchor", messageId: "m_anchor", sessionId: "s_tail", timeCreated: T + 100, data: { type: "text", text: anchorText } },
+  ];
+  await withFixture(
+    { sessions: [{ id: "s_tail", projectId: "prj_a", directory: "/repo-a", timeUpdated: T }], messages, parts },
+    async () => {
+      const res = await ctoAround({ sessionId: "s_tail", messageId: "m_anchor", partId: "p_anchor", before: 25, after: 0 });
+      assert.equal(res.status, "ok");
+      assert.ok(serializedBytes(res) <= CTO_CONTEXT_LIMITS.textBudgetBytes, "the ACTUAL serialized response must stay within 24 KiB");
+      const anchorMsg = res.messages.find((m) => m.id === "m_anchor");
+      assert.ok(anchorMsg, "the anchor message survives");
+      const anchorPart = anchorMsg.parts.find((p) => p.partId === "p_anchor");
+      assert.ok(anchorPart, "the requested part evidence is never omitted");
+      assert.equal(anchorPart.text.length, 5988, "the anchor text is untouched — neighbor shrink satisfied the budget");
+      assert.ok(anchorPart.text.endsWith(tail), "the exact decisive tail is preserved");
+      assert.equal(res.truncated, true, "the neighbor bounding is reported");
+      const relieved = res.messages.flatMap((m) => m.parts).some((p) => p.textTruncated === true && p.partId !== "p_anchor");
+      assert.ok(relieved, "neighbors were relieved (bounded) instead of the anchor");
+    },
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Honest degradation + zero side effects
 // ---------------------------------------------------------------------------
