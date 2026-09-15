@@ -1,53 +1,33 @@
-// ctoSearchIndex.test.mjs — P1b1 acceptance tests for the passive FTS5 search
-// index (unified-CTO spec §4.1/§4.3, contract-only; no tool/UI/poller wiring
-// is asserted to exist).
+// ctoSearchIndex.test.mjs — P1b1 (RESCOPED) acceptance tests: safe index
+// lifecycle + bounded cyclic refresh + FIRST-PAGE search only.
 //
-// Pinned behaviors:
-//   1. sync indexes eligible evidence (text + tool name/input/output) from
-//      the READ-ONLY source; closed (archived) and child sessions are kept;
-//      reasoning/synthetic/metadata are never evidence; hits are ranked
-//      (bm25) and enriched with role/provenance.
-//   2. An edited part row (moving source time_updated) is RE-indexed: the
-//      stale term is gone, the new term is found, no duplicate rows.
-//   3. Deletion reconciles boundedly (bounded sample per sync; no full scan).
-//   4. A failed batch (fault inside the transaction) leaves the persisted
-//      cursor AND the index untouched; the next sync completes.
-//   5. A "restart" (handle closed, cursor re-read from disk) resumes the
-//      incremental walk instead of reindexing from zero.
-//   6. Internal-ephemeral exclusion comes from the injected provenance seam
-//      (established registry IDs, never titles); excluded by default,
-//      includable explicitly; a failing registry fails the batch CLOSED.
-//   7. A corrupt index file is detected and REBUILT (disposable); the source
-//      is never mutated by indexing, searching, or recovery; no fetch calls
-//      are observed on the sync/search paths.
-//   8. Query policy: literal terms (see ftsQuery.mjs) — FTS5 metacharacters
-//      and `*` never act as operators; unicode/punctuation queries are
-//      honest (no hits, never syntax errors); empty input is invalid_input.
-//   9. Limits are enforced server-side (sync ≤ 500/stream, search ≤ 50) and
-//      pagination over the ranked keyset covers every hit exactly once.
-//  10. Evidence caps are BYTES (per-field, per-part): oversized tail text is
-//      not indexed — honestly not searchable, never fetched whole.
-//  11. Unsupported runtimes (no node:sqlite) degrade to a distinct status.
-//  12. Message-data edits re-index through their own stream (role refresh).
-//  13. Identity filters (sessionId/projectId/directory) constrain hits.
+// Parent-review blockers pinned here: (1) internal part indexed BEFORE its
+// session mirror row is still excluded — exclusion comes from the
+// AUTHORITATIVE registry at search time, not mirror progress; (2) content
+// edited WITHOUT moving time_updated (and late low-timestamp inserts) are
+// still reflected — bounded cyclic sweep, coverage EVENTUAL not snapshot;
+// (3) a `cursor` argument is rejected — bounded first page with honest
+// `truncated`/`omittedCount`, no fake pagination; (4) locks are retryable
+// `index_busy` and corruption is explicit `index_corrupt` with the file
+// RETAINED — never unlinked; (5) exactly ONE owned connection with an
+// explicit close lifecycle (injected connection-counting constructor);
+// (6) extraction bounds are REPORTED omissions; (7) Node 20 degrade is
+// actually exercised and this file degrades without a static import.
 //
-// Runs under the suite's `MANTA_STATE_HOME` sandbox (scripts/testSandbox.mjs)
-// — the index lands in the throwaway state dir, never the live box — and
-// every source is a synthetic fixture armed via `MANTA_OPENCODE_DB`
+// Runs under the suite's `MANTA_STATE_HOME` sandbox; every source is a
+// synthetic fixture armed via `MANTA_OPENCODE_DB`
 // (fixtures/opencodeDbFixture.mjs §14 canary).
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { DatabaseSync } from "node:sqlite";
-import { rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { statePath } from "../shared/paths.mjs";
 import {
   CTO_SEARCH_INDEX_LIMITS,
-  ctoSearchIndexSearch,
-  ctoSearchIndexStatus,
-  ctoSearchIndexSync,
-  _closeSearchIndexHandle,
-  _searchIndexPath,
-  _setSqliteModuleOverride,
+  createCtoSearchIndex,
+  _defaultSearchIndexPath,
   _setSyncFault,
 } from "./ctoSearchIndex.mjs";
 import {
@@ -56,10 +36,22 @@ import {
   withFixtureDb,
 } from "./fixtures/opencodeDbFixture.mjs";
 
-const hasSqlite = await sqliteAvailable();
+// Guarded dynamic import — the file must LOAD (and skip cleanly) on Node 20.
+let DatabaseSync = null;
+try {
+  ({ DatabaseSync } = await import("node:sqlite"));
+} catch {
+  DatabaseSync = null;
+}
+const hasSqlite = DatabaseSync != null && (await sqliteAvailable());
 
 const NOW = 1_700_000_000_000;
 const NO_FILTER = async () => [];
+let pathCounter = 0;
+
+function uniqueIndexPath() {
+  return join(tmpdir(), `manta-p1b1-${process.pid}-${Date.now()}-${pathCounter++}.sqlite`);
+}
 
 // Writable handle on the TEST-OWNED fixture (never the shared read-only
 // accessor): used to simulate source edits/deletions between syncs.
@@ -67,26 +59,30 @@ function editSource(fixture) {
   return new DatabaseSync(fixture.dbPath);
 }
 
-function resetIndexFiles() {
-  _closeSearchIndexHandle();
+function cleanupIndexPath(path) {
   for (const suffix of ["", "-wal", "-shm", "-journal"]) {
-    rmSync(_searchIndexPath() + suffix, { force: true });
+    rmSync(path + suffix, { force: true });
   }
 }
 
-// Arms a fresh synthetic source + a fresh index, runs `fn`, cleans up both.
-async function withIndexSource(seed, fn) {
+// Arms a fresh synthetic source + a fresh index instance, runs `fn`, cleans
+// up both. Extra per-test options (provenanceFilter, now, sqliteModule...)
+// flow into the factory.
+async function withIndexSource(seed, fn, instanceOpts = {}) {
   const fixture = await createFixtureDb(seed);
-  resetIndexFiles();
+  const indexPath = instanceOpts.path ?? uniqueIndexPath();
+  let instance = null;
   try {
-    return await withFixtureDb(fixture, () => fn(fixture));
+    instance = createCtoSearchIndex({ path: indexPath, ...instanceOpts });
+    return await withFixtureDb(fixture, () => fn(fixture, instance, indexPath));
   } finally {
-    resetIndexFiles();
+    if (instance) instance.close();
+    cleanupIndexPath(indexPath);
   }
 }
 
-// Throwing fetch spy at the process boundary (U04-shaped, mirrors the P0
-// fixture test): proves sync/search touch NO live endpoints.
+// Throwing fetch spy at the process boundary (U04-shaped): proves sync and
+// search touch NO live endpoints.
 async function withFetchSpy(fn) {
   const calls = [];
   const original = globalThis.fetch;
@@ -141,18 +137,23 @@ const BASE_SEED = {
 };
 const BASE_INDEXABLE = 3; // pText, pTool, pRetro
 
-test("sync indexes eligible evidence; search ranks, enriches, keeps closed/child sessions, leaves the source untouched, and never fetches", async (t) => {
+test("default index path resolves under the sandboxed Manta state home", () => {
+  assert.equal(_defaultSearchIndexPath(), statePath("cto", "search-index.sqlite"));
+});
+
+test("sync indexes eligible evidence; first-page search ranks, enriches, keeps closed/child sessions, leaves the source untouched, never fetches", async (t) => {
   if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
-  await withIndexSource(BASE_SEED, async (fixture) => {
+  await withIndexSource(BASE_SEED, async (fixture, idx) => {
     const before = { session: fixture.rowCount("session"), message: fixture.rowCount("message"), part: fixture.rowCount("part") };
     await withFetchSpy(async (calls) => {
-      const sync = await ctoSearchIndexSync({ limit: 500, provenanceFilter: NO_FILTER });
+      const sync = await idx.sync({ limit: 500 });
       assert.equal(sync.status, "ok");
       assert.equal(sync.coverage.indexedParts, BASE_INDEXABLE, "reasoning/synthetic parts carry no eligible evidence");
+      assert.equal(sync.coverage.eventual, true, "coverage is honest about eventual refresh");
 
       // "staging" exists in pText (indexed), pSynth (synthetic → excluded)
       // and pReasoning (never evidence) — exactly one hit proves the rule.
-      const staging = await ctoSearchIndexSearch({ query: "staging", provenanceFilter: NO_FILTER });
+      const staging = await idx.search({ query: "staging" });
       assert.equal(staging.status, "ok");
       assert.equal(staging.hits.length, 1, "only the eligible text part matches");
       const hit = staging.hits[0];
@@ -163,94 +164,150 @@ test("sync indexes eligible evidence; search ranks, enriches, keeps closed/child
       assert.equal(hit.provenance, "unclassified");
       assert.ok(hit.timeUpdated > 0, "hit carries the source update timestamp");
       assert.ok(typeof hit.snippet === "string" && hit.snippet.length > 0);
+      assert.ok(!("nextCursor" in staging), "no fake pagination on success");
 
-      const leasebot = await ctoSearchIndexSearch({ query: "leasebot", provenanceFilter: NO_FILTER });
+      const leasebot = await idx.search({ query: "leasebot" });
       assert.equal(leasebot.status, "ok");
       assert.equal(leasebot.hits[0].partId, "pText", "bm25 puts the higher-term-frequency part first");
       assert.ok(leasebot.hits.some((h) => h.partId === "pTool"), "tool input scalars are searchable");
       assert.equal(leasebot.hits.find((h) => h.partId === "pTool").role, "user");
       assert.equal(calls.length, 0, "no fetch calls on sync or search");
 
-      const tool = await ctoSearchIndexSearch({ query: "npm", provenanceFilter: NO_FILTER });
+      const tool = await idx.search({ query: "npm" });
       assert.equal(tool.hits.length, 1);
       assert.equal(tool.hits[0].partId, "pTool");
       assert.equal(tool.hits[0].kind, "tool");
-      assert.ok(tool.hits[0].field === "input" || tool.hits[0].field === "tool_name");
+
+      // Closed (archived) session evidence stays searchable.
+      const retro = await idx.search({ query: "retro" });
+      assert.equal(retro.hits.length, 1);
+      assert.equal(retro.hits[0].sessionId, "sArch", "archived/closed sessions are kept");
     });
-
-    // Closed (archived) session evidence stays searchable; child sessions too.
-    const retro = await ctoSearchIndexSearch({ query: "retro", provenanceFilter: NO_FILTER });
-    assert.equal(retro.hits.length, 1);
-    assert.equal(retro.hits[0].sessionId, "sArch", "archived/closed sessions are kept");
-
-    const status = await ctoSearchIndexStatus();
-    assert.equal(status.status, "ok");
-    assert.equal(status.counts.parts, BASE_INDEXABLE);
-
-    // Source untouched.
-    assert.equal(fixture.rowCount("session"), before.session);
+    assert.equal(fixture.rowCount("session"), before.session, "source untouched");
     assert.equal(fixture.rowCount("message"), before.message);
     assert.equal(fixture.rowCount("part"), before.part);
   });
 });
 
-test("edited part re-indexes: stale term gone, new term found, no duplicate rows", async (t) => {
+test("same-timestamp edit and late low-timestamp insert are both reflected by the bounded cyclic sweep", async (t) => {
   if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
-  await withIndexSource(BASE_SEED, async (fixture) => {
-    assert.equal((await ctoSearchIndexSync({ provenanceFilter: NO_FILTER })).status, "ok");
+  const seed = {
+    sessions: BASE_SEED.sessions.slice(0, 1),
+    messages: BASE_SEED.messages.slice(0, 1),
+    parts: [{ id: "p1", messageId: "m1", sessionId: "s1", timeCreated: 100, timeUpdated: 100, data: { type: "text", text: "alpha oldterm" } }],
+  };
+  await withIndexSource(seed, async (fixture, idx) => {
+    assert.equal((await idx.sync({ limit: 500 })).status, "ok");
+    assert.equal((await idx.search({ query: "oldterm" })).hits.length, 1);
 
+    // (a) content edited WITHOUT moving time_updated — the cyclic sweep re-reads it.
     const db = editSource(fixture);
     try {
-      db.prepare("UPDATE part SET data = ?, time_updated = ? WHERE id = ?").run(
-        JSON.stringify({ type: "text", text: "renamed widget renamed to gadget" }), NOW - 1000, "pText",
-      );
+      db.prepare("UPDATE part SET data = ? WHERE id = ?").run(JSON.stringify({ type: "text", text: "alpha newterm" }), "p1");
     } finally {
       db.close();
     }
-
-    const sync = await ctoSearchIndexSync({ provenanceFilter: NO_FILTER });
+    const sync = await idx.sync({ limit: 500 });
     assert.equal(sync.status, "ok");
-    assert.equal(sync.scanned.parts.scanned, 1, "the keyset catches exactly the edited row");
+    assert.equal(sync.coverage.indexedParts, 1);
+    assert.equal((await idx.search({ query: "oldterm" })).hits.length, 0, "stale term gone despite unchanged timestamp");
+    assert.equal((await idx.search({ query: "newterm" })).hits.length, 1, "new term found eventually");
 
-    const stale = await ctoSearchIndexSearch({ query: "leasebot", provenanceFilter: NO_FILTER });
-    assert.equal(stale.hits.filter((h) => h.partId === "pText").length, 0, "stale term is gone");
-
-    const fresh = await ctoSearchIndexSearch({ query: "gadget", provenanceFilter: NO_FILTER });
-    assert.equal(fresh.hits.filter((h) => h.partId === "pText").length, 1, "new term found exactly once (replace, not duplicate)");
+    // (b) a row INSERTED with a timestamp OLDER than everything already swept.
+    const db2 = editSource(fixture);
+    try {
+      db2.prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)").run(
+        "pEarly", "m1", "s1", 5, 5, JSON.stringify({ type: "text", text: "early backfilled" }),
+      );
+    } finally {
+      db2.close();
+    }
+    assert.equal((await idx.sync({ limit: 500 })).status, "ok");
+    assert.equal((await idx.search({ query: "backfilled" })).hits.length, 1, "late low-timestamp row caught on the next cycle");
   });
 });
 
-test("deletion reconciles boundedly: a removed source part disappears from the index", async (t) => {
+test("internal part indexed BEFORE its session mirror row exists is still excluded (authoritative registry filter, not mirror)", async (t) => {
   if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
-  await withIndexSource(BASE_SEED, async (fixture) => {
-    assert.equal((await ctoSearchIndexSync({ provenanceFilter: NO_FILTER })).status, "ok");
+  // Adversarial ordering: the internal session's part sorts into an EARLIER
+  // sweep batch than the internal session itself (part ts 150 < ordinary
+  // part ts 200 < internal session ts 300). After one limit-1 batch the
+  // internal part is indexed while its session mirror row is absent.
+  const seed = {
+    sessions: [
+      { id: "s1", parentId: null, directory: "/repo-a", projectId: "proj-a", timeCreated: 100, timeUpdated: 100 },
+      { id: "sInt", parentId: null, directory: "/repo-a", projectId: "proj-a", timeCreated: 300, timeUpdated: 300 },
+    ],
+    messages: [
+      { id: "mInt", sessionId: "sInt", timeCreated: 150, timeUpdated: 150, data: { role: "assistant" } },
+      { id: "mO", sessionId: "s1", timeCreated: 200, timeUpdated: 200, data: { role: "assistant" } },
+    ],
+    parts: [
+      { id: "pInt", messageId: "mInt", sessionId: "sInt", timeCreated: 150, timeUpdated: 150, data: { type: "text", text: "internal secret staging" } },
+      { id: "pOther", messageId: "mO", sessionId: "s1", timeCreated: 200, timeUpdated: 200, data: { type: "text", text: "ordinary public staging" } },
+    ],
+  };
+  await withIndexSource(seed, async (fixture, idx) => {
+    const filter = async () => ["sInt"];
+    const first = await idx.sync({ limit: 1, provenanceFilter: filter });
+    assert.equal(first.status, "ok");
+    const afterFirst = await idx.status();
+    assert.equal(afterFirst.counts.parts, 1, "one part indexed");
+    assert.equal(afterFirst.counts.sessions, 1, "and the internal session mirror row is NOT among them");
 
+    const excluded = await idx.search({ query: "staging", provenanceFilter: filter });
+    assert.equal(excluded.status, "ok");
+    assert.equal(excluded.hits.length, 0, "internal part excluded despite missing mirror row");
+
+    const included = await idx.search({ query: "staging", includeInternal: true, provenanceFilter: filter });
+    assert.equal(included.hits.length, 1);
+    assert.equal(included.hits[0].partId, "pInt");
+    assert.equal(included.hits[0].provenance, "internal", "display provenance follows the authoritative registry too");
+
+    // Second batch: the internal session mirror lands and the ordinary part
+    // is indexed; ordinary evidence becomes visible.
+    assert.equal((await idx.sync({ limit: 1, provenanceFilter: filter })).status, "ok");
+    const ordinary = await idx.search({ query: "staging", provenanceFilter: filter });
+    assert.equal(ordinary.hits.length, 1);
+    assert.equal(ordinary.hits[0].partId, "pOther");
+    assert.equal(ordinary.hits[0].provenance, "unclassified");
+  });
+});
+
+test("registry failure fails sync AND search closed; deletion reconciles boundedly", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
+  await withIndexSource(BASE_SEED, async (fixture, idx) => {
+    const failing = async () => {
+      throw new Error("registry down");
+    };
+    const s = await idx.sync({ provenanceFilter: failing });
+    assert.equal(s.status, "provenance_unavailable");
+    const q = await idx.search({ query: "staging", provenanceFilter: failing });
+    assert.equal(q.status, "provenance_unavailable", "search fails closed too — no unfiltered answers");
+    assert.equal(q.hits.length, 0);
+
+    assert.equal((await idx.sync({ provenanceFilter: NO_FILTER })).status, "ok");
     const db = editSource(fixture);
     try {
       db.prepare("DELETE FROM part WHERE id = ?").run("pText");
     } finally {
       db.close();
     }
-
-    const sync = await ctoSearchIndexSync({ provenanceFilter: NO_FILTER });
+    const sync = await idx.sync({ provenanceFilter: NO_FILTER });
     assert.equal(sync.status, "ok");
-    assert.ok(sync.scanned.parts.removed >= 1, "the bounded reconcile removed the orphan");
+    assert.ok(sync.scanned.parts.removed >= 1, "bounded reconcile removed the orphan");
     assert.ok(sync.scanned.verifiedParts <= CTO_SEARCH_INDEX_LIMITS.deleteReconcileMax, "reconcile is bounded");
-
-    const gone = await ctoSearchIndexSearch({ query: "leasebot", provenanceFilter: NO_FILTER });
-    assert.equal(gone.hits.filter((h) => h.partId === "pText").length, 0);
+    assert.equal((await idx.search({ query: "leasebot" })).hits.filter((h) => h.partId === "pText").length, 0);
   });
 });
 
-test("failed batch: cursor and index unchanged, next sync completes (atomicity)", async (t) => {
+test("failed batch commits nothing: sweep position and counts unchanged, next sync completes", async (t) => {
   if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
-  await withIndexSource(BASE_SEED, async (fixture) => {
-    assert.equal((await ctoSearchIndexSync({ provenanceFilter: NO_FILTER })).status, "ok");
-    const settled = await ctoSearchIndexStatus();
-    assert.equal(settled.status, "ok");
-    assert.equal(settled.counts.parts, BASE_INDEXABLE);
+  await withIndexSource(BASE_SEED, async (fixture, idx) => {
+    assert.equal((await idx.sync({ provenanceFilter: NO_FILTER })).status, "ok");
+    const settled = await idx.status();
+    const settledSweep = JSON.stringify(settled.sweep);
 
-    // A NEW source part enters the scan window; the fault fires on it.
     const db = editSource(fixture);
     try {
       db.prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)").run(
@@ -262,185 +319,206 @@ test("failed batch: cursor and index unchanged, next sync completes (atomicity)"
     _setSyncFault(({ row }) => {
       if (row.id === "pLater") throw new Error("injected fault");
     });
-
-    const failing = await ctoSearchIndexSync({ provenanceFilter: NO_FILTER });
-    assert.equal(failing.status, "index_error", "the injected fault surfaces as an explicit status");
-
-    const after = await ctoSearchIndexStatus();
-    assert.equal(JSON.stringify(after.cursor), JSON.stringify(settled.cursor), "cursor did NOT advance");
-    assert.equal(after.counts.parts, settled.counts.parts, "index rows did NOT change");
-
+    const failing = await idx.sync({ provenanceFilter: NO_FILTER });
+    assert.equal(failing.status, "index_error");
+    const after = await idx.status();
+    assert.equal(JSON.stringify(after.sweep), settledSweep, "sweep position did NOT advance");
+    assert.equal(after.counts.parts, settled.counts.parts, "no partial rows committed");
     _setSyncFault(null);
-    const recovered = await ctoSearchIndexSync({ provenanceFilter: NO_FILTER });
+
+    const recovered = await idx.sync({ provenanceFilter: NO_FILTER });
     assert.equal(recovered.status, "ok");
-    assert.equal(recovered.scanned.parts.scanned, 1, "the batch retries the same window");
-    assert.equal((await ctoSearchIndexStatus()).counts.parts, BASE_INDEXABLE + 1);
+    assert.equal((await idx.status()).counts.parts, settled.counts.parts + 1);
   });
 });
 
-test("restart resumes: cursor persists on disk, second sync indexes the remainder", async (t) => {
+test("corrupt index is explicit and RETAINED: no auto-unlink, no destructive retry loop", async (t) => {
   if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
-  // Only indexable parts (no synthetic/reasoning rows that would consume a
-  // limit-1 batch without producing an indexed part).
+  const path = uniqueIndexPath();
+  const fixture = await createFixtureDb(BASE_SEED);
+  try {
+    await withFixtureDb(fixture, async () => {
+      const idx = createCtoSearchIndex({ path, provenanceFilter: NO_FILTER });
+      assert.equal((await idx.sync()).status, "ok");
+      idx.close();
+
+      writeFileSync(path, Buffer.from("garbage that is not a database ".repeat(40)));
+      const bytes = readFileSync(path);
+
+      const idx2 = createCtoSearchIndex({ path, provenanceFilter: NO_FILTER });
+      try {
+        const r1 = await idx2.sync();
+        assert.equal(r1.status, "index_corrupt", "explicit status, not a silent rebuild");
+        assert.match(r1.detail, /retained/);
+        assert.deepEqual(readFileSync(path), bytes, "the corrupt file was NOT unlinked or rewritten");
+        const r2 = await idx2.sync();
+        assert.equal(r2.status, "index_corrupt", "no destructive retry loop");
+        assert.deepEqual(readFileSync(path), bytes);
+      } finally {
+        idx2.close();
+      }
+    });
+  } finally {
+    cleanupIndexPath(path);
+    fixture.close();
+  }
+});
+
+test("busy index is retryable, not corruption: file bytes and data preserved", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
+  await withIndexSource(BASE_SEED, async (fixture, idx, path) => {
+    assert.equal((await idx.sync({ provenanceFilter: NO_FILTER })).status, "ok");
+    const countsBefore = (await idx.status()).counts;
+    const bytesBefore = readFileSync(path);
+
+    // Hold an exclusive lock on the index file from a second connection.
+    const blocker = new DatabaseSync(path);
+    blocker.exec("BEGIN EXCLUSIVE");
+    try {
+      const busy = await idx.sync({ provenanceFilter: NO_FILTER });
+      assert.equal(busy.status, "index_busy", "locks are retryable, never 'corrupt'");
+      const busySearch = await idx.search({ query: "staging" });
+      assert.equal(busySearch.status, "index_busy");
+      assert.deepEqual(readFileSync(path), bytesBefore, "nothing deleted or rewritten while busy");
+    } finally {
+      blocker.exec("ROLLBACK");
+      blocker.close();
+    }
+
+    // Retry after the lock releases: same data, fully usable.
+    const retried = await idx.sync({ provenanceFilter: NO_FILTER });
+    assert.equal(retried.status, "ok");
+    const countsAfter = (await idx.status()).counts;
+    assert.deepEqual(countsAfter, countsBefore, "index data survived the busy window intact");
+    assert.equal((await idx.search({ query: "staging" })).hits.length, 1);
+  });
+});
+
+test("one owned connection: reused across every operation, closed exactly once, ops after close fail closed", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
+  let opens = 0;
+  let closes = 0;
+  class CountingDatabaseSync extends DatabaseSync {
+    constructor(...args) {
+      opens++;
+      super(...args);
+    }
+    close() {
+      closes++;
+      super.close();
+    }
+  }
+  await withIndexSource(
+    BASE_SEED,
+    async (fixture, idx) => {
+      assert.equal(opens, 0, "nothing opened until the first operation (lazy, still exactly one owned connection)");
+      await idx.sync({ provenanceFilter: NO_FILTER });
+      assert.equal(opens, 1, "first operation opened exactly one connection");
+      await idx.sync({ provenanceFilter: NO_FILTER });
+      await idx.search({ query: "staging" });
+      await idx.status();
+      assert.equal(opens, 1, "operations REUSE the owned connection — no per-op leak");
+      assert.equal(closes, 0);
+      idx.close();
+      assert.equal(closes, 1, "close() closes exactly once");
+      const after = await idx.search({ query: "staging" });
+      assert.equal(after.status, "index_closed");
+      const s = await idx.sync({ provenanceFilter: NO_FILTER });
+      assert.equal(s.status, "index_closed");
+      assert.equal(opens, 1);
+      assert.equal(closes, 1, "close is idempotent at the connection level");
+    },
+    {
+      sqliteModule: { DatabaseSync: CountingDatabaseSync },
+      // NOTE: only the INDEX connection is counted (the source fixture keeps its own handles).
+    },
+  );
+});
+
+test("extraction bounds are reported, not silent: dropped scalars surface as omissions", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
+  const input = {};
+  for (let i = 0; i < 80; i++) input[`k${i}`] = `word${i} filler`;
   const seed = {
-    sessions: BASE_SEED.sessions.slice(0, 2),
-    messages: BASE_SEED.messages.slice(0, 2),
-    parts: [
-      { id: "pA", messageId: "m1", sessionId: "s1", timeCreated: NOW - 3000, timeUpdated: NOW - 3000, data: { type: "text", text: "alpha resume" } },
-      { id: "pB", messageId: "m2", sessionId: "s2", timeCreated: NOW - 2000, timeUpdated: NOW - 2000, data: { type: "text", text: "bravo resume" } },
-      { id: "pC", messageId: "m1", sessionId: "s1", timeCreated: NOW - 1000, timeUpdated: NOW - 1000, data: { type: "text", text: "charlie resume" } },
-    ],
+    sessions: BASE_SEED.sessions.slice(0, 1),
+    messages: BASE_SEED.messages.slice(0, 1),
+    parts: [{ id: "pBig", messageId: "m1", sessionId: "s1", timeCreated: NOW, timeUpdated: NOW, data: { type: "tool", tool: "bash", state: { status: "completed", input } } }],
   };
-  await withIndexSource(seed, async () => {
-    const first = await ctoSearchIndexSync({ limit: 1, provenanceFilter: NO_FILTER });
-    assert.equal(first.status, "ok");
-    assert.equal(first.scanned.parts.scanned, 1);
-    assert.equal((await ctoSearchIndexStatus()).counts.parts, 1);
-
-    // Simulate a process restart: drop the cached handle; the cursor must
-    // come back from disk and the walk continue — NOT restart from zero.
-    _closeSearchIndexHandle();
-    const second = await ctoSearchIndexSync({ limit: 1, provenanceFilter: NO_FILTER });
-    assert.equal(second.status, "ok");
-    assert.equal(second.scanned.parts.scanned, 1, "resumes after the persisted cursor");
-    assert.equal((await ctoSearchIndexStatus()).counts.parts, 2, "exactly one new part indexed");
-
-    _closeSearchIndexHandle();
-    const third = await ctoSearchIndexSync({ limit: 1, provenanceFilter: NO_FILTER });
-    assert.equal(third.status, "ok");
-    assert.equal((await ctoSearchIndexStatus()).counts.parts, 3);
-  });
-});
-
-test("internal sessions are excluded by default (provenance seam), includable on request; registry failure fails closed", async (t) => {
-  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
-  const seed = structuredClone(BASE_SEED);
-  seed.sessions.push({ id: "sEphem", parentId: null, agent: "cto", directory: "/repo-a", projectId: "proj-a", title: "self-analysis", timeCreated: NOW - 500, timeUpdated: NOW - 500 });
-  seed.messages.push({ id: "mEphem", sessionId: "sEphem", timeCreated: NOW - 500, timeUpdated: NOW - 500, data: { role: "assistant" } });
-  seed.parts.push({ id: "pEphem", messageId: "mEphem", sessionId: "sEphem", timeCreated: NOW - 500, timeUpdated: NOW - 500, data: { type: "text", text: "ephemeral self analysis about leasebot" } });
-  await withIndexSource(seed, async () => {
-    const filter = async () => ["sEphem"]; // the established registry returns IDs, never titles
-    assert.equal((await ctoSearchIndexSync({ provenanceFilter: filter })).status, "ok");
-
-    const excluded = await ctoSearchIndexSearch({ query: "leasebot", provenanceFilter: filter });
-    assert.equal(excluded.hits.filter((h) => h.partId === "pEphem").length, 0, "internal excluded by default");
-    assert.ok(excluded.hits.length >= 2, "ordinary evidence still searchable");
-
-    const included = await ctoSearchIndexSearch({ query: "leasebot", includeInternal: true, provenanceFilter: filter });
-    const ephem = included.hits.filter((h) => h.partId === "pEphem");
-    assert.equal(ephem.length, 1, "internal searchable when explicitly requested");
-    assert.equal(ephem[0].provenance, "internal", "provenance recorded from the registry, not guessed");
-
-    // Registry failure fails the batch CLOSED and does not advance anything.
-    const settled = await ctoSearchIndexStatus();
-    const failing = await ctoSearchIndexSync({ provenanceFilter: async () => { throw new Error("registry down"); } });
-    assert.equal(failing.status, "provenance_unavailable");
-    const after = await ctoSearchIndexStatus();
-    assert.equal(JSON.stringify(after.cursor), JSON.stringify(settled.cursor), "cursor unchanged on provenance failure");
-  });
-});
-
-test("corrupt index is rebuilt (disposable); source stays untouched; rebuild flag is honest", async (t) => {
-  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
-  await withIndexSource(BASE_SEED, async (fixture) => {
-    assert.equal((await ctoSearchIndexSync({ provenanceFilter: NO_FILTER })).status, "ok");
-    const before = { session: fixture.rowCount("session"), message: fixture.rowCount("message"), part: fixture.rowCount("part") };
-
-    _closeSearchIndexHandle();
-    writeFileSync(_searchIndexPath(), Buffer.from("garbage that is not a database ".repeat(40)));
-
-    const sync = await ctoSearchIndexSync({ provenanceFilter: NO_FILTER });
+  await withIndexSource(seed, async (fixture, idx) => {
+    const sync = await idx.sync({ provenanceFilter: NO_FILTER });
     assert.equal(sync.status, "ok");
-    assert.equal(sync.rebuilt, true, "the rebuild is reported, not hidden");
-    assert.equal(sync.coverage.indexedParts, BASE_INDEXABLE, "full reindex from a reset cursor");
+    assert.ok(sync.scanned.parts.extractionOmitted >= 16, "the 33rd..80th scalars are REPORTED as omissions");
+    const found = await idx.search({ query: "word63" });
+    assert.equal(found.hits.length, 1, "the indexed prefix is searchable");
+    const missing = await idx.search({ query: "word79" });
+    assert.equal(missing.hits.length, 0, "dropped scalars are not searchable");
+    assert.equal(missing.coverage.eventual, true);
+    assert.ok(missing.coverage.indexedParts >= 1);
+  });
+});
 
-    const search = await ctoSearchIndexSearch({ query: "staging", provenanceFilter: NO_FILTER });
-    assert.equal(search.status, "ok");
-    assert.equal(search.hits.length, 1);
+test("cursor is explicitly rejected; results are bounded with honest truncation and byte budget (no fake pagination)", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
+  // 60 hits × ~620-byte snippets ≈ 31 KiB serialized — over the 24 KiB
+  // budget, so the hit cap AND the byte budget both bind in one corpus.
+  const parts = [];
+  for (let i = 0; i < 60; i++) {
+    parts.push({
+      id: `p${i}`, messageId: "m1", sessionId: "s1", timeCreated: NOW - i, timeUpdated: NOW - i,
+      data: { type: "text", text: `pageword item ${i} ${"z".repeat(600)}` },
+    });
+  }
+  const seed = { sessions: BASE_SEED.sessions.slice(0, 1), messages: BASE_SEED.messages.slice(0, 1), parts };
+  await withIndexSource(seed, async (fixture, idx) => {
+    assert.equal((await idx.sync({ limit: 500, provenanceFilter: NO_FILTER })).coverage.indexedParts, 60);
 
-    assert.equal(fixture.rowCount("session"), before.session, "recovery never touches the source");
-    assert.equal(fixture.rowCount("message"), before.message);
-    assert.equal(fixture.rowCount("part"), before.part);
+    const rejected = await idx.search({ query: "pageword", cursor: "anything" });
+    assert.equal(rejected.status, "invalid_input", "cursor explicitly rejected until P1b2");
+    assert.ok(!("nextCursor" in rejected));
+
+    const overLimit = await idx.search({ query: "pageword", limit: 9999, provenanceFilter: NO_FILTER });
+    assert.ok(overLimit.hits.length <= CTO_SEARCH_INDEX_LIMITS.searchHitsMax, "search limit clamps to 50");
+    assert.ok(overLimit.hits.length < 60, "the byte budget dropped tail hits before the cap");
+    assert.equal(overLimit.truncated, true, "honest: more matches existed than returned");
+    assert.equal(overLimit.omittedCount, 60 - overLimit.hits.length, "every unreturned match is counted, not hidden");
+    assert.ok(Buffer.byteLength(JSON.stringify(overLimit)) <= CTO_SEARCH_INDEX_LIMITS.responseBudgetBytes, "serialized response honors the budget");
+    assert.ok(!("nextCursor" in overLimit), "bounded results, not fake pagination");
+
+    const bigSync = await idx.sync({ limit: 9999, provenanceFilter: NO_FILTER });
+    assert.equal(bigSync.status, "ok");
+    assert.ok(bigSync.scanned.parts.scanned <= CTO_SEARCH_INDEX_LIMITS.syncBatchMax, "sync limit clamps to 500/stream");
   });
 });
 
 test("query policy is literal: metacharacters never act as operators, unicode/punctuation are honest no-hits, empty input is invalid", async (t) => {
   if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
-  await withIndexSource(BASE_SEED, async () => {
-    assert.equal((await ctoSearchIndexSync({ provenanceFilter: NO_FILTER })).status, "ok");
+  await withIndexSource(BASE_SEED, async (fixture, idx) => {
+    assert.equal((await idx.sync({ provenanceFilter: NO_FILTER })).status, "ok");
 
-    const star = await ctoSearchIndexSearch({ query: "stagi*", provenanceFilter: NO_FILTER });
+    const star = await idx.search({ query: "stagi*" });
     assert.equal(star.status, "ok");
     assert.equal(star.hits.length, 0, "quoted * is literal, not a prefix operator");
 
-    const paren = await ctoSearchIndexSearch({ query: "(staging)", provenanceFilter: NO_FILTER });
+    const paren = await idx.search({ query: "(staging)" });
     assert.equal(paren.status, "ok");
     assert.equal(paren.hits.length, 1, "parens are literal; the token still matches");
 
-    const unicode = await ctoSearchIndexSearch({ query: "café", provenanceFilter: NO_FILTER });
+    const unicode = await idx.search({ query: "café" });
     assert.equal(unicode.status, "ok", "unicode query never a syntax error");
     assert.equal(unicode.hits.length, 0);
 
-    const punct = await ctoSearchIndexSearch({ query: "...", provenanceFilter: NO_FILTER });
+    const punct = await idx.search({ query: "..." });
     assert.equal(punct.status, "ok", "punctuation-only query is a no-hit, never an error");
     assert.equal(punct.hits.length, 0);
 
-    const multi = await ctoSearchIndexSearch({ query: "leasebot verified", provenanceFilter: NO_FILTER });
+    const multi = await idx.search({ query: "leasebot verified" });
     assert.equal(multi.status, "ok");
     assert.ok(multi.hits.some((h) => h.partId === "pText"), "whitespace terms AND together");
 
-    const bad = await ctoSearchIndexSearch({ query: "   " });
+    const bad = await idx.search({ query: "   " });
     assert.equal(bad.status, "invalid_input");
-    const nonString = await ctoSearchIndexSearch({ query: 42 });
+    const nonString = await idx.search({ query: 42 });
     assert.equal(nonString.status, "invalid_input");
-  });
-});
-
-test("limits clamp server-side and ranked pagination covers every hit exactly once", async (t) => {
-  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
-  const parts = [];
-  for (let i = 0; i < 60; i++) {
-    parts.push({
-      id: `p${i}`, messageId: "m1", sessionId: "s1", timeCreated: NOW - i, timeUpdated: NOW - i,
-      data: { type: "text", text: `pageword item ${i} ${"x".repeat(20)}` },
-    });
-  }
-  const seed = { sessions: BASE_SEED.sessions.slice(0, 1), messages: BASE_SEED.messages.slice(0, 1), parts };
-  await withIndexSource(seed, async () => {
-    assert.equal((await ctoSearchIndexSync({ limit: 500, provenanceFilter: NO_FILTER })).coverage.indexedParts, 60);
-
-    const overLimit = await ctoSearchIndexSearch({ query: "pageword", limit: 9999, provenanceFilter: NO_FILTER });
-    assert.equal(overLimit.hits.length, CTO_SEARCH_INDEX_LIMITS.searchHitsMax, "search limit clamps to 50");
-    assert.equal(overLimit.truncated, true);
-    assert.ok(overLimit.nextCursor, "more pages exist");
-
-    // Sync limit clamps too: a sync({limit:9999}) never processes >500/stream.
-    const bigSync = await ctoSearchIndexSync({ limit: 9999, provenanceFilter: NO_FILTER });
-    assert.equal(bigSync.status, "ok");
-    assert.ok(bigSync.scanned.parts.scanned <= CTO_SEARCH_INDEX_LIMITS.syncBatchMax);
-
-    // Page through ALL hits; nothing repeats; the walk terminates.
-    const seen = new Set();
-    let cursor = undefined;
-    let pages = 0;
-    while (pages < 20) {
-      const page = await ctoSearchIndexSearch({ query: "pageword", limit: 20, cursor, provenanceFilter: NO_FILTER });
-      assert.equal(page.status, "ok");
-      for (const hit of page.hits) {
-        assert.ok(!seen.has(hit.partId), `no repeats across pages (${hit.partId})`);
-        seen.add(hit.partId);
-      }
-      pages++;
-      if (!page.nextCursor) break;
-      cursor = page.nextCursor;
-    }
-    assert.equal(seen.size, 60, "pagination covers every hit exactly once");
-    assert.ok(pages >= 3);
-
-    const badCursor = await ctoSearchIndexSearch({ query: "other", cursor: overLimit.nextCursor, provenanceFilter: NO_FILTER });
-    assert.equal(badCursor.status, "invalid_input", "a cursor is bound to its query");
-    const garbage = await ctoSearchIndexSearch({ query: "pageword", cursor: "not-a-cursor", provenanceFilter: NO_FILTER });
-    assert.equal(garbage.status, "invalid_input");
   });
 });
 
@@ -452,112 +530,63 @@ test("evidence caps are bytes: oversized tail is not indexed (honest, never fetc
     messages: BASE_SEED.messages.slice(0, 1),
     parts: [{ id: "pBig", messageId: "m1", sessionId: "s1", timeCreated: NOW, timeUpdated: NOW, data: { type: "tool", tool: "bash", state: { status: "completed", output: big } } }],
   };
-  await withIndexSource(seed, async () => {
-    const sync = await ctoSearchIndexSync({ provenanceFilter: NO_FILTER });
+  await withIndexSource(seed, async (fixture, idx) => {
+    const sync = await idx.sync({ provenanceFilter: NO_FILTER });
     assert.equal(sync.status, "ok");
-
-    const head = await ctoSearchIndexSearch({ query: "headword", provenanceFilter: NO_FILTER });
-    assert.equal(head.hits.length, 1, "the capped prefix is indexed");
-
-    const tail = await ctoSearchIndexSearch({ query: "tailword", provenanceFilter: NO_FILTER });
-    assert.equal(tail.hits.length, 0, "the byte-capped tail is honestly not searchable");
+    assert.equal(sync.scanned.parts.byteTruncated, 1, "the byte cap is reported");
+    assert.equal((await idx.search({ query: "headword" })).hits.length, 1, "the capped prefix is indexed");
+    assert.equal((await idx.search({ query: "tailword" })).hits.length, 0, "the byte-capped tail is honestly not searchable");
   });
 });
 
-test("unsupported runtime degrades to a distinct status (lazy import, no static node:sqlite)", async (t) => {
-  if (!hasSqlite) {
-    // On a runtime without node:sqlite the module API must still answer.
-    const sync = await ctoSearchIndexSync({ provenanceFilter: NO_FILTER });
-    assert.equal(sync.supported, false);
-    assert.equal(sync.status, "unsupported");
-    const search = await ctoSearchIndexSearch({ query: "x" });
-    assert.equal(search.supported, false);
-    assert.equal(search.status, "unsupported");
-    return;
+test("unsupported runtime degrades to a distinct status (injected null module; lazy import in production)", async (t) => {
+  const path = uniqueIndexPath();
+  const fixture = await createFixtureDb(BASE_SEED);
+  try {
+    await withFixtureDb(fixture, async () => {
+      const idx = createCtoSearchIndex({ path, sqliteModule: null });
+      try {
+        const sync = await idx.sync({ provenanceFilter: NO_FILTER });
+        assert.equal(sync.supported, false);
+        assert.equal(sync.status, "unsupported");
+        const search = await idx.search({ query: "staging" });
+        assert.equal(search.supported, false);
+        assert.equal(search.status, "unsupported");
+        const status = await idx.status();
+        assert.equal(status.status, "unsupported");
+      } finally {
+        idx.close();
+      }
+    });
+  } finally {
+    cleanupIndexPath(path);
+    fixture.close();
   }
-  await withIndexSource(BASE_SEED, async () => {
-    _setSqliteModuleOverride({ __importError: new Error("no sqlite on node 20") });
-    try {
-      const sync = await ctoSearchIndexSync({ provenanceFilter: NO_FILTER });
-      assert.equal(sync.supported, false);
-      assert.equal(sync.status, "unsupported");
-      const search = await ctoSearchIndexSearch({ query: "staging" });
-      assert.equal(search.supported, false);
-      assert.equal(search.status, "unsupported");
-    } finally {
-      _setSqliteModuleOverride(null);
-    }
-    _closeSearchIndexHandle();
-    const recovered = await ctoSearchIndexSync({ provenanceFilter: NO_FILTER });
-    assert.equal(recovered.status, "ok", "restores after the override is cleared");
-  });
 });
 
-test("message-data edits re-index through their own stream (role refresh)", async (t) => {
+test("message-data edits refresh role enrichment; identity filters constrain hits", async (t) => {
   if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
-  await withIndexSource(BASE_SEED, async (fixture) => {
-    assert.equal((await ctoSearchIndexSync({ provenanceFilter: NO_FILTER })).status, "ok");
+  await withIndexSource(BASE_SEED, async (fixture, idx) => {
+    assert.equal((await idx.sync({ provenanceFilter: NO_FILTER })).status, "ok");
 
     const db = editSource(fixture);
     try {
-      db.prepare("UPDATE message SET data = ?, time_updated = ? WHERE id = ?").run(
-        JSON.stringify({ role: "user" }), NOW - 500, "m1",
-      );
+      db.prepare("UPDATE message SET data = ? WHERE id = ?").run(JSON.stringify({ role: "user" }), "m1");
     } finally {
       db.close();
     }
-
-    const sync = await ctoSearchIndexSync({ provenanceFilter: NO_FILTER });
-    assert.equal(sync.status, "ok");
-    assert.equal(sync.scanned.messages.scanned, 1, "message edits are caught by their own stream");
-
-    const hits = await ctoSearchIndexSearch({ query: "staging", provenanceFilter: NO_FILTER });
+    assert.equal((await idx.sync({ provenanceFilter: NO_FILTER })).status, "ok");
+    const hits = await idx.search({ query: "staging" });
     assert.equal(hits.hits.find((h) => h.partId === "pText").role, "user", "role enrichment follows the message edit");
-  });
-});
 
-test("response budget is bytes: overflow drops tail hits honestly and paging continues", async (t) => {
-  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
-  // 30 hits × ~1.5 KiB snippets ≈ 45 KiB serialized — over the 24 KiB budget.
-  const parts = [];
-  for (let i = 0; i < 30; i++) {
-    parts.push({
-      id: `p${i}`, messageId: "m1", sessionId: "s1", timeCreated: NOW - i, timeUpdated: NOW - i,
-      data: { type: "text", text: `bigword item ${i} ${"z".repeat(1500)}` },
-    });
-  }
-  const seed = { sessions: BASE_SEED.sessions.slice(0, 1), messages: BASE_SEED.messages.slice(0, 1), parts };
-  await withIndexSource(seed, async () => {
-    assert.equal((await ctoSearchIndexSync({ provenanceFilter: NO_FILTER })).coverage.indexedParts, 30);
-
-    const page = await ctoSearchIndexSearch({ query: "bigword", limit: 50, provenanceFilter: NO_FILTER });
-    assert.equal(page.status, "ok");
-    assert.ok(page.hits.length < 30, "budget dropped tail hits before the cap");
-    assert.ok(page.hits.length >= 1, "some hits still fit");
-    assert.equal(page.truncated, true);
-    assert.equal(page.omittedCount, 30 - page.hits.length, "omissions are counted, not hidden");
-    assert.ok(page.nextCursor, "the dropped tail stays reachable");
-    assert.ok(Buffer.byteLength(JSON.stringify(page)) <= CTO_SEARCH_INDEX_LIMITS.responseBudgetBytes, "the serialized response honors the budget");
-  });
-});
-
-test("identity filters constrain hits; unknown identities never match", async (t) => {
-  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
-  await withIndexSource(BASE_SEED, async () => {
-    assert.equal((await ctoSearchIndexSync({ provenanceFilter: NO_FILTER })).status, "ok");
-
-    const bySession = await ctoSearchIndexSearch({ query: "leasebot", sessionId: "s2", provenanceFilter: NO_FILTER });
+    const bySession = await idx.search({ query: "leasebot", sessionId: "s2" });
     assert.ok(bySession.hits.length >= 1);
     assert.ok(bySession.hits.every((h) => h.sessionId === "s2"));
 
-    const byProject = await ctoSearchIndexSearch({ query: "leasebot", projectId: "proj-a", provenanceFilter: NO_FILTER });
-    assert.ok(byProject.hits.length >= 2);
-    assert.ok(byProject.hits.every((h) => h.sessionId === "s1" || h.sessionId === "s2"));
-
-    const otherProject = await ctoSearchIndexSearch({ query: "leasebot", projectId: "proj-zzz", provenanceFilter: NO_FILTER });
+    const otherProject = await idx.search({ query: "leasebot", projectId: "proj-zzz" });
     assert.equal(otherProject.hits.length, 0, "an unknown project never matches");
 
-    const byDirectory = await ctoSearchIndexSearch({ query: "retro", directory: "/repo-b", provenanceFilter: NO_FILTER });
+    const byDirectory = await idx.search({ query: "retro", directory: "/repo-b" });
     assert.equal(byDirectory.hits.length, 1);
     assert.equal(byDirectory.hits[0].sessionId, "sArch");
   });
