@@ -27,6 +27,7 @@
 //     ledger pages in reverse-chron with a cursor.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "./store";
+import { CtoChat } from "./CtoChat";
 import {
   backfillCardView,
   digestBusy,
@@ -147,7 +148,10 @@ export function CtoPanel({
       Returns false when there is no active chat session to open it in. */
   onOpenSecrets?: (key: string | null) => boolean;
 }) {
-  const [view, setView] = useState<"overview" | "settings" | "ledger" | "profile" | "blackboard" | "tools">("overview");
+  // P3b: the tab's PRIMARY surface is the conversation (§3.1); the dashboard
+  // and its sub-views remain intact, reachable from the chat header and from
+  // the dashboard's "Conversation" button.
+  const [view, setView] = useState<"chat" | "overview" | "settings" | "ledger" | "profile" | "blackboard" | "tools">("chat");
   const pushToast = useStore((s) => s.pushAppToast);
 
   // --- data reads ---------------------------------------------------------
@@ -644,6 +648,9 @@ export function CtoPanel({
     }
   }, [didSettle, showResting]);
 
+  if (view === "chat") {
+    return <CtoChat onOpenDashboard={() => setView("overview")} />;
+  }
   if (view === "settings") {
     return (
       <SettingsView
@@ -681,10 +688,18 @@ export function CtoPanel({
   return (
     <div className="h-full w-full overflow-y-auto bg-bg">
       <div className="mx-auto px-6 py-8" style={{ maxWidth: "var(--cto-col-max-w)" }}>
-        {/* Header row (§10.2): title · spacer · Digest now · ⚙ */}
+        {/* Header row (§10.2): title · spacer · Conversation · Digest now · ⚙ */}
         <div className="flex items-center gap-2 pb-4">
           <h1 className="text-lg font-semibold text-text">CTO</h1>
           <div className="flex-1" />
+          <button
+            type="button"
+            onClick={() => setView("chat")}
+            className="rounded-md px-3 py-1 text-sm font-medium text-text hover:bg-fill-hover"
+            aria-label="Back to the conversation"
+          >
+            Conversation
+          </button>
           <button
             type="button"
             onClick={handleRegen}
