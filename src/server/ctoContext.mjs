@@ -460,32 +460,75 @@ export async function ctoListSessions({
 // JSON text, not its decoded inner strings. json_tree yields every scalar
 // atom decoded, whatever serializer wrote the row. ASCII-case-folded, like
 // the previous LIKE semantics; parameterized; no FTS, no index changes.
+// The SINGLE eligibility rule, shared by row-candidacy and first-pick and
+// mirrored by matchedFieldOf: an atom is eligible iff its fullkey belongs to
+// an explicit allowed path class FOR THE PART'S TYPE. Persisted tool parts
+// carry state.output at completion; state.metadata.output is a streaming
+// transient that does not persist in source rows — intentionally NOT an
+// eligible class. Text parts contribute exactly $.text (never reasoning or
+// metadata); tool parts contribute exactly $.tool, or $.state.input /
+// $.state.output as a scalar or a descendant (boundary '.' or '[' — a bare
+// startswith would wrongly admit $.state.inputSummary).
+const ELIGIBLE_PATH_CLASSES = Object.freeze([
+  Object.freeze({ partType: "text", fullkey: "$.text", field: "text" }),
+  Object.freeze({ partType: "tool", fullkey: "$.tool", field: "tool_name" }),
+  Object.freeze({ partType: "tool", fullkey: "$.state.input", descendants: true, field: "input" }),
+  Object.freeze({ partType: "tool", fullkey: "$.state.output", descendants: true, field: "output" }),
+]);
+
+// Pure (aligned with the SQL below): the field of an eligible fullkey, or
+// null for any path outside the explicit classes — the caller rejects it.
+function matchedFieldOf(fullkey) {
+  if (typeof fullkey !== "string") return null;
+  for (const c of ELIGIBLE_PATH_CLASSES) {
+    if (fullkey !== c.fullkey) {
+      if (!c.descendants) continue;
+      const boundary = fullkey[c.fullkey.length];
+      if (boundary !== "." && boundary !== "[") continue;
+    }
+    return c.field;
+  }
+  return null;
+}
+
+// The eligibility predicate over one json_tree atom alias, emitted from the
+// same class list the JS helper mirrors.
+function eligibleAtomSql(atomAlias) {
+  const byType = new Map();
+  for (const c of ELIGIBLE_PATH_CLASSES) {
+    if (!byType.has(c.partType)) byType.set(c.partType, []);
+    let clause = `${atomAlias}.fullkey = '${c.fullkey}'`;
+    if (c.descendants) {
+      const pos = c.fullkey.length + 1;
+      clause = `(${clause} OR substr(${atomAlias}.fullkey, ${pos}, 1) IN ('.', '['))`;
+    }
+    byType.get(c.partType).push(clause);
+  }
+  const whens = [...byType.entries()].map(([type, clauses]) => `WHEN '${type}' THEN ${clauses.join(" OR ")}`);
+  return `(CASE json_extract(p.data, '$.type') ${whens.join(" ")} ELSE 0 END)`;
+}
+
+// Row candidacy: a decoded atom that matches AND is eligible.
 const DECODED_MATCH_SQL = `(
   json_valid(p.data) AND EXISTS (
     SELECT 1 FROM json_tree(p.data) jt
     WHERE jt.type NOT IN ('object', 'array')
       AND instr(lower(COALESCE(jt.value, '')), lower(?)) > 0
+      AND ${eligibleAtomSql("jt")}
   )
 )`;
-// The FIRST matching decoded atom (document order) — its fullkey names the
-// field (part+field provenance) and json_extract decodes the value. The
-// candidate handed to JS is this BOUND MATCHED atom itself — not a capped
-// client-side traversal, which could hide a true match beyond its caps.
+// The FIRST matching ELIGIBLE decoded atom (document order) — its fullkey
+// names the field (part+field provenance) and json_extract decodes the
+// value. Eligibility is applied BEFORE picking, so a metadata/reasoning
+// atom can never shadow the true output. The candidate handed to JS is this
+// bound matched atom itself — not a capped client-side traversal.
 const MATCHED_ATOM_SQL = `(
   SELECT a.fullkey FROM json_tree(p.data) a
   WHERE a.type NOT IN ('object', 'array')
     AND instr(lower(COALESCE(a.value, '')), lower(?)) > 0
+    AND ${eligibleAtomSql("a")}
   ORDER BY a.id LIMIT 1
 )`;
-// Which search field a matched atom belongs to, from its fullkey — the
-// candidate evidence stays tied to its part+field.
-function matchedFieldOf(fullkey) {
-  if (typeof fullkey !== "string") return "text";
-  if (fullkey === "$.tool") return "tool_name";
-  if (fullkey === "$.state.input" || fullkey.startsWith("$.state.input")) return "input";
-  if (fullkey === "$.state.output" || fullkey.startsWith("$.state.output")) return "output";
-  return "text";
-}
 
 // Pure: the decoded scalar strings of a structured JSON value (bounded) —
 // the serializer-independent searchable representation, aligned with the
@@ -548,6 +591,7 @@ function buildHit(row, part, msg, q, query) {
   const idx = matched.toLowerCase().indexOf(q);
   if (matched === "" || idx < 0) return null;
   const field = matchedFieldOf(row.match_fullkey);
+  if (field == null) return null; // unknown path class — rejected, never guessed
 
   const hit = {
     sessionId: row.session_id,

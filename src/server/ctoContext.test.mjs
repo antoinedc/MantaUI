@@ -877,6 +877,73 @@ test("around: protected anchor text is trimmed only AFTER neighbors are relieved
   );
 });
 
+test("search: eligibility restricts atoms BEFORE first-pick — metadata, reasoning, inputSummary never shadow the real evidence", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
+  const fixture = await createFixtureDb({
+    sessions: [{ id: "s_elig", projectId: "prj_a", directory: "/repo-a", timeUpdated: T }],
+    messages: [
+      { id: "m_txtmeta", sessionId: "s_elig", timeCreated: T, data: { role: "assistant" } },
+      { id: "m_reason", sessionId: "s_elig", timeCreated: T + 1, data: { role: "assistant" } },
+      { id: "m_shadow", sessionId: "s_elig", timeCreated: T + 2, data: { role: "assistant" } },
+      { id: "m_summary", sessionId: "s_elig", timeCreated: T + 3, data: { role: "assistant" } },
+    ],
+    parts: [],
+  });
+  try {
+    const { DatabaseSync } = await import("node:sqlite");
+    const raw = new DatabaseSync(fixture.dbPath);
+    try {
+      // Text part: the query ONLY in a metadata field — not eligible.
+      raw.prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)").run(
+        "p_txtmeta", "m_txtmeta", "s_elig", T, T,
+        '{"type":"text","text":"nothing relevant here","metadata":{"notes":"metadatum-only token"}}',
+      );
+      // Reasoning part: its text is not an eligible atom class.
+      raw.prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)").run(
+        "p_reason", "m_reason", "s_elig", T + 1, T + 1,
+        '{"type":"reasoning","text":"reasoner muses about reasoning-only token"}',
+      );
+      // Tool part: state.metadata.output (a streaming transient) sits BEFORE
+      // state.output in document order and shares a term with it — the pick
+      // must be the REAL output atom, never the metadata shadow.
+      raw.prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)").run(
+        "p_shadow", "m_shadow", "s_elig", T + 2, T + 2,
+        '{"type":"tool","tool":"bash","state":{"status":"completed","metadata":{"output":"claims shadowed done"},"output":"the real output done"}}',
+      );
+      // Tool part: state.inputSummary is NOT a descendant of state.input.
+      raw.prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)").run(
+        "p_summary", "m_summary", "s_elig", T + 3, T + 3,
+        '{"type":"tool","tool":"bash","state":{"status":"completed","inputSummary":"summary-only token","input":{"command":"npm test"}}}',
+      );
+    } finally {
+      raw.close();
+    }
+    const { withFixtureDb } = await import("./fixtures/opencodeDbFixture.mjs");
+    await withFixtureDb(fixture, async () => {
+      const txtmeta = await ctoSearch({ query: "metadatum-only token" });
+      assert.deepEqual(txtmeta.hits, [], "text-part metadata atoms are not eligible — no hit");
+      const reason = await ctoSearch({ query: "reasoning-only token" });
+      assert.deepEqual(reason.hits, [], "reasoning parts are not eligible — no hit");
+      const shared = await ctoSearch({ query: "done" });
+      assert.equal(shared.hits.length, 1, "the tool part is found via its REAL output");
+      assert.equal(shared.hits[0].partId, "p_shadow");
+      assert.equal(shared.hits[0].tool.matchedField, "output", "the metadata atom never shadows the legitimate output");
+      assert.match(shared.hits[0].snippet.match, /done/);
+      assert.match(shared.hits[0].snippet.pre + shared.hits[0].snippet.match, /real output/, "the snippet comes from state.output, not the metadata");
+      const shadowOnly = await ctoSearch({ query: "shadowed" });
+      assert.deepEqual(shadowOnly.hits, [], "a term only in state.metadata.output is not searchable — declared non-eligible");
+      const summary = await ctoSearch({ query: "summary-only token" });
+      assert.deepEqual(summary.hits, [], "inputSummary is not a descendant of state.input — no hit");
+      const legit = await ctoSearch({ query: "npm test", sessionId: "s_elig" });
+      assert.equal(legit.hits.length, 1, "the legitimate input remains reachable");
+      assert.equal(legit.hits[0].partId, "p_summary");
+      assert.equal(legit.hits[0].tool.matchedField, "input");
+    });
+  } finally {
+    fixture.close();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Honest degradation + zero side effects
 // ---------------------------------------------------------------------------
