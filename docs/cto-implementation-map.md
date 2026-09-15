@@ -152,31 +152,36 @@ store, `src/server/local.mjs` (`listProjects` config store), `src/server/project
   no archive metadata, no ownership store. Window-level stamps exist as tmux user options:
   `@manta-session-id` (window → opencode session), `@manta-worktree-path`, `@manta-owner`
   (`"user"` / `"job"` today; `"cto"` unclaimed).
-- **opencode persists TWO distinct identifiers plus repo-root paths, and they are NOT the same
-  thing — the spec's `ProjectRef` mapping is UNRESOLVED until the semantics are verified.**
-  The live `opencode.db` (read via a read-only schema dump, 2026-09-15) has:
-  - `project` — `id` PRIMARY KEY (40-hex), `worktree` (the ABSOLUTE checkout root path),
-    `vcs`, `name`. Observed rows include the synthetic `"global"` project with `worktree="/"`
-    (all non-repo directories) and one row per worktree root: **`project.id` is per-checkout,
-    not per-repository.** Two worktrees of one Manta project (the delegate flow creates one
-    per job) are DIFFERENT `project` rows, and a directory move would land under a different
-    root. `project.vcs` holds only the VCS kind (`"git"`), NOT a canonical remote URL —
-    nothing in the DB observed so far provides repository identity.
-  - `workspace` — `id`, `project_id`, `directory`, `branch`. Its exact identity semantics
-    (one workspace per branch? per directory? lifecycle) were NOT verified; sampled rows left
-    `workspace_id` null on sessions, so `workspace.id` cannot be assumed populated or stable.
-  - `project_directory (project_id, directory)` — a directory→project mapping table.
-  - `session.project_id NOT NULL`, `session.workspace_id` nullable; the Session API schema
-    exposes `projectID`/`workspaceID`.
+- **opencode persists TWO distinct identifier tables plus path mappings, and the spec's
+  `ProjectRef` mapping is UNRESOLVED until the identity semantics are verified.** Evidence
+  split below into SOURCE (column definitions, from the read-only schema dump of the live
+  `opencode.db`, 2026-09-15) and OBSERVATION (row samples at that instant — a sample is not a
+  rule; the id-derivation rule was NOT probed and no further live probing is planned):
+  - SOURCE `project` — columns `id` (PRIMARY KEY, 40-hex-shaped), `worktree` (path string),
+    `vcs`, `name`. OBSERVATION: rows seen include one with `id="global"`, `worktree="/"`
+    (a synthetic row), and rows pairing 40-hex ids with distinct absolute worktree paths.
+    **UNVERIFIED (do not infer):** how the id is derived; whether two worktrees of the same
+    repository share or split a project row; what happens to the row on a directory move;
+    whether `worktree` is unique per row. The earlier draft of this map asserted per-checkout
+    uniqueness from the sample — retracted; the sample is consistent with several rules.
+  - SOURCE `workspace` — columns `id`, `project_id`, `directory`, `branch`. OBSERVATION:
+    sampled sessions left `workspace_id` null. **UNVERIFIED:** workspace identity semantics
+    (per-branch? per-directory? lifecycle?), whether ids are populated or unique — do not
+    infer "unique workspace" from the table's existence.
+  - SOURCE `project_directory (project_id, directory)` — a directory→project mapping table.
+    OBSERVATION: one row per observed directory, including the synthetic `global` project.
+  - SOURCE `session` — `project_id NOT NULL`, `workspace_id` nullable; the Session API schema
+    exposes `projectID`/`workspaceID`. OBSERVATION: the probe session (map §8, non-repo dir)
+    carried `projectID="global"`, `workspaceID` absent.
   - **Mapping status: UNRESOLVED.** The spec's `ProjectRef = {workspaceId, repositoryId,
-    repositoryRoot}` does not map 1:1 onto what the DB shows: `project.id` ≈ a *checkout*
-    identity (worktree-rooted), `workspace.id` semantics unverified, and *repository* identity
-    (canonical repo key shared across worktrees) is present nowhere observed — it would have
-    to come from git remotes, not opencode's DB. P2a/P3a must NOT settle `project.id` into
-    `ProjectRef.workspaceId` (the earlier draft of this map did; corrected) or conflate the
-    three: verify actual semantics first (how rows are created for worktrees/global/moves,
-    when `workspace_id` is populated), then extend Manta metadata once with the explicit
-    mapping — a branch name or display title is never the key (spec §4.1).
+    repositoryRoot}` has no verified counterpart: no DB field observed so far carries
+    *repository* identity (`project.vcs` holds only the VCS kind string, not a remote URL —
+    source fact about one column, not proof the rest of the row cannot yield one, but nothing
+    observed does). `project.id` / `workspace.id` semantics are unverified as above. P2a/P3a
+    must NOT settle any observed id into `ProjectRef.workspaceId` or conflate the three
+    identifier classes: verify actual semantics first (row creation for worktrees/global,
+    move behavior, `workspace_id` population), then extend Manta metadata once with the
+    explicit mapping — a branch name or display title is never the key (spec §4.1).
 - **Manta has no second project registry today** — `listProjects` composes live tmux state +
   the `tmux-sessions.json` reconciliation (`mantaOwned` stamp). Spec §5.1's "extend its
   metadata once rather than inventing a second project registry" therefore means: map
@@ -243,7 +248,7 @@ store, `src/server/local.mjs` (`listProjects` config store), `src/server/project
 | Headless parent dispatch? | Not supported: `resolveOwner` requires parent tmux window | PROVEN (failure path) |
 | `isolationRequired`? | No — worktree failure silently falls back to parent dir | PROVEN (fallback path) |
 | Job ID ordering? | `genId()` after worktree + window creation, inside store lock | PROVEN |
-| Stable project ID? | Manta: tmux session name only; opencode: `project.id` is per-CHECKOUT (worktree-rooted, synthetic `global` row), `workspace.id` semantics unverified, repository identity absent from the DB | PROVEN (schema + live rows) / **ProjectRef mapping UNRESOLVED (§4)** |
+| Stable project ID? | Manta: tmux session name only. opencode DB: `project(id, worktree, vcs, name)` incl. a synthetic `"global"` row and 40-hex ids paired with worktree paths (OBSERVED sample); id-derivation rule, worktree/repo sharing, and `workspace.id` semantics UNVERIFIED; no repository-identity field observed. **ProjectRef mapping UNRESOLVED (§4)** | schema PROVEN / row semantics UNVERIFIED |
 | `MANTA_STATE_HOME` redirects opencode DB? | No — only `MANTA_OPENCODE_DB`/`XDG_DATA_HOME`/`$HOME/.local/share` | PROVEN |
 | Read-only DB invariant? | `DatabaseSync(path, {readOnly:true})`, `null` on unsupported/missing | PROVEN + regression-pinned by this PR |
 
