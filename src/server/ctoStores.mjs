@@ -233,6 +233,16 @@ export const calibrationStore = createCtoJsonStore("calibration", ctoPath("calib
 // binding must fail loudly — silently reading it as "unbound" would create
 // a duplicate role session.
 export const bindingStore = createCtoJsonStore("binding", ctoPath("binding.json"), { strict: true });
+// P3a2 (unified-cto-spec §8.3): the durable CTO conversation admission queue
+// — one record per submitted prompt (human or background), its stable event
+// ID + canonical request hash persisted BEFORE any send, and the
+// dispatch/receipt identity (sessionId + opencode messageID) persisted
+// before prompt_async. Owned by ctoAdmission.mjs. STRICT (blocker 4): a
+// top-level null/array/scalar payload and unparsable JSON/read errors FAIL
+// loudly — the corrupt file is never silently reset or overwritten (a
+// missing file still initializes the default). Per-record shape is
+// additionally validated by ctoAdmission's normalizeAdmissionPayload.
+export const admissionStore = createCtoJsonStore("admission", ctoPath("admission.json"), { strict: true });
 
 // ---------------------------------------------------------------------------
 // BET-1425 engine-state write hygiene, generalized in BET-1464 (defect 3) —

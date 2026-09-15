@@ -385,9 +385,9 @@ export function selectStreamsToEvict({
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function fetchSessionDirectory(sessionId) {
+async function fetchSessionDirectory(sessionId, signal) {
   try {
-    const res = await ocFetch(apiUrl(`/session/${encodeURIComponent(sessionId)}`));
+    const res = await ocFetch(apiUrl(`/session/${encodeURIComponent(sessionId)}`), signal ? { signal } : undefined);
     if (!res.ok) {
       await discardBody(res);
       return null;
@@ -399,10 +399,19 @@ async function fetchSessionDirectory(sessionId) {
   }
 }
 
-async function getSessionDirectoryQuery(sessionId, { awaitReady = true } = {}) {
+/** Rejects when the caller's bounded signal fires (no-op without one). */
+function signalAborted(signal) {
+  if (!signal) return new Promise(() => {});
+  if (signal.aborted) return Promise.reject(signal.reason ?? new Error("aborted"));
+  return new Promise((_, reject) => {
+    signal.addEventListener("abort", () => reject(signal.reason ?? new Error("aborted")), { once: true });
+  });
+}
+
+async function getSessionDirectoryQuery(sessionId, { awaitReady = true, signal } = {}) {
   let dir = sessionDirectoryCache.get(sessionId);
   if (!dir) {
-    const fetched = await fetchSessionDirectory(sessionId);
+    const fetched = await fetchSessionDirectory(sessionId, signal);
     if (fetched) {
       rememberSessionDirectory(sessionId, fetched);
       dir = fetched;
@@ -428,7 +437,9 @@ async function getSessionDirectoryQuery(sessionId, { awaitReady = true } = {}) {
     try { ensureStreamForDirectory(dir); } catch { /* non-fatal */ }
     if (awaitReady) {
       const ready = getOrCreateStreamReady(dir).promise;
-      await Promise.race([ready, sleep(readinessTimeoutMsOverride ?? 5000)]);
+      // P3a2: the caller's bounded signal also bounds the gate wait — a hung
+      // stream connect must not outlive the caller's deadline.
+      await Promise.race([ready, sleep(readinessTimeoutMsOverride ?? 5000), signalAborted(signal)]);
     }
   }
   return dir ? `?directory=${encodeURIComponent(dir)}` : "";
@@ -667,13 +678,26 @@ export function getAndClearSessionRefusal(sessionId) {
  * Send a user message (prompt_async — returns 204 immediately; response
  * streams via SSE). Model is per-prompt; omit to use opencode's default.
  *
- * @param {{ sessionId: string, text: string, model?: { providerID: string, modelID: string, variant?: string }, agent?: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, mentions?: Array<{ name: string, source: { value: string, start: number, end: number } }> }} opts
+ * `messageID` (P3a2, unified-cto-spec §8.3) is the P0-proven caller-supplied
+ * identity: opencode persists it verbatim as the user message id, readable
+ * back via getMessage/listMessages — the delivery receipt. The 204 alone is
+ * NOT a receipt (no echo of the messageID). Callers that do not need
+ * reconciliation omit it and get the pre-P3a2 behavior byte-identically.
+ *
+ * `signal` (P3a2) bounds the call through the ACTUAL transport: it is raced
+ * against the per-directory readiness gate AND forwarded to the POST itself
+ * (pooledOcRequest passes it to http.request — bound headers + body).
+ * Aborting the client request does NOT prove the server didn't accept; the
+ * admission layer classifies an abort as uncertainty (unknown), never a
+ * refusal.
+ *
+ * @param {{ sessionId: string, text: string, model?: { providerID: string, modelID: string, variant?: string }, agent?: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, mentions?: Array<{ name: string, source: { value: string, start: number, end: number } }>, messageID?: string, signal?: AbortSignal }} opts
  */
-export async function sendPrompt({ sessionId, text, model, agent, attachments, mentions }) {
+export async function sendPrompt({ sessionId, text, model, agent, attachments, mentions, messageID, signal }) {
   // Scope tools + events to the session's worktree. The matching per-directory
   // subscription in subscribeEvents below ensures the events still reach
   // listeners (the global /event subscription wouldn't see them otherwise).
-  const dirQ = await getSessionDirectoryQuery(sessionId);
+  const dirQ = await getSessionDirectoryQuery(sessionId, { signal });
   const url = `/session/${encodeURIComponent(sessionId)}/prompt_async${dirQ}`;
   const parts = [];
   if (attachments) {
@@ -699,11 +723,16 @@ export async function sendPrompt({ sessionId, text, model, agent, attachments, m
     if (model.variant) body.variant = model.variant;
   }
   if (agent) body.agent = agent;
+  if (messageID) body.messageID = messageID; // P0-proven: persisted verbatim as the user message id
 
   const res = await ocFetch(apiUrl(url), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
+    // P3a2: propagate the caller's bounded signal to the actual POST (the
+    // wrapper used to drop it — pooledOcRequest forwards init.signal to
+    // http.request, so headers/body are bounded end-to-end).
+    ...(signal ? { signal } : {}),
   });
   if (!res.ok) {
     const err = new Error(`opencode sendPrompt ${res.status}: ${await res.text()}`);
@@ -734,10 +763,21 @@ export async function sendPrompt({ sessionId, text, model, agent, attachments, m
  *  signal in response, but the model loop never actually stops.
  *  @param {string} sessionId
  */
-export async function abortSession(sessionId) {
-  const dirQ = await getSessionDirectoryQuery(sessionId);
+/**
+ * Abort the running generation for a session (idempotent — aborting an idle
+ * session is a 200 no-op). P3a2 blocker 2: an optional `{ signal }` bounds
+ * the call through the directory gate AND the actual POST (the admission
+ * layer classifies a deadline hit as an UNCERTAIN abort — the server may
+ * still process it, so the caller keeps its barrier until a definitive
+ * response).
+ *
+ * @param {string} sessionId
+ * @param {{ signal?: AbortSignal }} [opts]
+ */
+export async function abortSession(sessionId, { signal } = {}) {
+  const dirQ = await getSessionDirectoryQuery(sessionId, { signal });
   const url = `/session/${encodeURIComponent(sessionId)}/abort${dirQ}`;
-  const res = await ocFetch(apiUrl(url), { method: "POST" });
+  const res = await ocFetch(apiUrl(url), { method: "POST", ...(signal ? { signal } : {}) });
   if (!res.ok) {
     throw new Error(`opencode abortSession ${res.status}: ${await res.text()}`);
   }

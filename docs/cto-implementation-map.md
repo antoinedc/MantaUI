@@ -373,3 +373,109 @@ containment), and an existing controlDir that resolves to the state home
 itself is refused — equality with the state home is valid only as the
 existing ancestor of a not-yet-created controlDir, so chmod can never follow
 a link onto the state home or any other target.
+
+## 11. P3a2 addendum — the durable conversation admission queue is now a service
+
+`src/server/ctoAdmission.mjs` (`createCtoAdmission({ binding, sendPrompt, getMessage,
+listMessages?, abortSession?, isBusy?, store, ... })`) implements spec §8.3 as an injectable
+service: `submit` / `list` / `tick` / `reconcile` / `interrupt` / `observeEvent`. ALL CTO-role
+prompts (human + background) are meant to enter through it once the parent wires it; ordinary
+project delivery keeps promptDelivery unchanged — admission shares only its busy view
+(production passes `promptDelivery.isBusy`) and sits on the same firehose tap. The stable
+integration recipe, lifecycle diagram, error codes and honest limitations live in
+**`docs/cto-admission-contract.md`** (the contract for the next UI/API worker). Not wired to any
+route or poller here.
+
+Durability shape (all pinned by `ctoAdmission.test.mjs`): a submission's stable event id +
+canonical payload hash + origin + expected binding generation persist BEFORE any send; dispatch
+persists the resolved `sessionId` + allocated opencode `messageID` (status `dispatching`) BEFORE
+the `prompt_async` POST; every store transition is a sync-mutator `patchStore` section — no lock
+is held across an opencode await; the pump is single-flight AND joinable (event-driven and
+poller-driven pumps join one run). Ack is not completion: 204 + messageID receipt yields
+`accepted` only, and completion requires the real terminal event (`session.idle`/`session.error`
+via `observeEvent`) or a transcript proof (assistant row with `time.completed`/`error` after our
+user message — `turnCompletionFromTranscript`). The P0-proven caller messageID is the restart
+receipt: a crash-window `dispatching` record is reconciled by read-back (found → adopted, never
+resent; absent → `unknown`, surfaced with a stale flag after 60s, still never resent); only a
+definitive 4xx observed live is `failed`. Human FIFO outranks queued background at ONE pick
+point (never reorders an accepted turn); pending work retargets the CURRENT binding at dispatch
+(`retargeted` recorded) while accepted turns keep their original sid. Terminal receipts are
+retained forever — growth is bounded by refusing new submissions at `MAX_ENTRIES` (500), never
+by eviction. `interrupt` is the explicit abort op (`queued`/`unknown` → cancelled, `accepted` →
+one bounded `abortSession`); submit never aborts.
+
+Additive seams this PR lands on top of P3a1/P0: `opencode.sendPrompt` forwards an optional
+`messageID` onto the `prompt_async` body (P0 §8: persisted verbatim as the user message id,
+readable back; omitted → byte-identical pre-P3a2 behavior) and `ctoStores.admissionStore`.
+
+Round-2 review blockers (same service, same scope): (1) completion is receipt-specific —
+only the LAST assistant row whose `parentID` equals the submitted messageID with a TERMINAL
+finish via the shared `assistantCompletion` helper completes a turn; `session.idle`/`error`
+EVENTS trigger that transcript check and never blindly complete (a stale/unrelated idle cannot
+release the queue), and intermediate tool-step rows never do. (2) interrupt is a two-phase
+request: `accepted` → `interrupt_pending` (nonterminal barrier) → abort once → terminal
+`interrupted` only when the session is confirmed idle (terminal event or transcript proof);
+unsupported/failed/timed-out aborts RETAIN `interrupt_pending` with `abortError`; cancelling an
+`unknown` marks visible `cancel_requested` and retains the barrier — a late-landing POST is
+adopted (receipt found → `accepted` with `cancelRequested` retained), never erased. (3)
+reconcile is joinable-single-flight, takes an active-operation lease BEFORE the dispatch claim
+so it never races the send its own instance is awaiting, and mutations are serialized by the
+store mutex + from-status CAS. `opencode.sendPrompt` now propagates the caller's bounded signal
+through the per-directory readiness gate AND the actual POST (the wrapper used to drop it);
+an aborted client request stays uncertainty (unknown), never a refusal. (4)
+`ctoStores.admissionStore` is strict: top-level null/array/scalar and unparsable JSON fail
+loudly and never reset/overwrite the file. (5) the priority pick is re-verified AT CLAIM TIME
+under the store mutex, so a human arriving while the pump awaited the binding wins before the
+dispatch commits (no locks across the binding await). (6) the canonical hash binds agent + text
++ model + origin with key-order-canonical serialization, and dedup precedes generation
+validation — a same-payload id replay succeeds even after a binding replacement.
+
+Round-3 review blockers (offline repro, same service): (1) events are TRIGGERS for the
+receipt-specific transcript check, never proof — an `interrupt_pending` record can no longer be
+terminalized by a stale `session.idle`/`session.error`, and even a finished turn does not settle
+it while its abort is unresolved (`turnEndedAt` is recorded separately from the abort state).
+(2) the ABORT is its own active + durable uncertain state (`abortState`: pending/ok/refused/
+uncertain on the record): `interrupt_pending` settles ONLY when the abort has a DEFINITIVE
+server response ("ok" → interrupted, "refused" → completed) AND the finish-agnostic transcript
+reader (`turnEndedFromTranscript`) proves the turn ended; an uncertain (deadline/network) abort
+keeps the same-session admission barrier, is re-issued by reconcile across restarts (idempotent,
+bounded, signal-propagated into `opencode.abortSession`), and the timeout waiter is never
+treated as proof — so a late session-wide abort can never kill the next admitted turn. (3) the
+dispatch claim is LINEARIZABLE against binding generation changes via the additive
+`binding.claimGeneration(reserve)` operation (ctoBinding.mjs): the reserve callback runs under
+the SAME serialized store seam as ensure()/recover(), reads the binding FRESH inside that
+section, re-verifies gate/priority/CAS there, and reserves the admission record against that
+exact generation — lock order binding → admission, all locks released BEFORE the external POST;
+a change before the claim is observed (pending targets current), a change after the claim
+serializes behind it (claimed delivery stays on its own session). All timings are proven with
+latches, including both generation-change placements and the real ctoBinding service.
+
+Final round (P1/P2): (P1) automatic abort retries are REMOVED entirely — one bounded attempt
+per interrupt request; an uncertain attempt (deadline/network) downgrades to a PERMANENT
+fail-closed barrier with `abortOutcomeReason: "abort_outcome_unknown"`: no retry ever runs (a
+new attempt's response can never settle the ORIGINAL request's uncertainty — monotonic — and a
+late original abort could kill the next admitted turn), the record never self-settles even
+when the transcript proves the turn ended (`turnEndedAt` recorded for visibility only), the
+same-session admission barrier persists across restarts, and resolution is a future EXPLICIT
+management operation (not built in this phase). A crash BEFORE the first attempt (state
+"pending") still gets exactly one attempt from reconcile. (P2) the dispatch claim's priority
+re-validation (unresolved gate, human FIFO, selected-still-queued CAS) moved INSIDE the same
+admission-mutex section that reserves — the round-3 verification read outside the mutex could
+miss a commit landing between it and the reservation; the binding claim lock stays OUTER and
+the locks still release before the external POST. Pinned by latches: human-commits-before-
+claim wins via the in-mutation re-validation, and a commit during the reservation mutation
+queues behind the mutex (atomic verify+reserve, no interleave).
+Final P1 correction (offline repro): the round-4 "pending" state was only a LOCAL marker
+written before the await — an HTTP abort could already be outstanding when the store still
+said "never attempted", so a restart could issue a SECOND abort. Fixed by ordering: the
+attempt is RESERVED durably BEFORE the HTTP — one admission-lock section writes the atomic
+token (abortState "claimed" + attemptId + attemptStartedAt + attemptCount), the lock releases,
+and only then is the POST issued (local active-operation lease, no lock across the external
+await). The live owner settles ONLY its own matching attemptId (a recovery downgrade or any
+newer state is never overwritten — monotonic). Recovery treats ANY attempted-but-unsettled
+("claimed" without its owner) AND any "pending" as uncertain: reconcile NEVER issues aborts,
+no retries exist, and the same-session barrier persists until a future explicit management
+operation. Pinned by a crash snapshot taken INSIDE the abort mock (proving the token precedes
+the HTTP), a restart asserting zero aborts + zero next sends, the original request released
+afterward with the barrier persisting (the matching-attempt guard rejects the dead owner's
+late response), and concurrent interrupt+reconcile claiming at most one attempt.
