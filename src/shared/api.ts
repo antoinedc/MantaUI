@@ -456,6 +456,14 @@ export type CtoSubmissionProjection = {
   // reconciliation" instead of guessing).
   unknownMs?: number;
   staleUnknown?: boolean;
+  // Abort bookkeeping on an interrupt_pending record. `abortState:"uncertain"`
+  // (+ `abortOutcomeReason:"abort_outcome_unknown"`) is a PERMANENT,
+  // non-self-healing barrier: admission for the session stays held until an
+  // explicit external recovery — the UI must present it as such, never as a
+  // transient spinner (docs/cto-admission-contract.md limitation 1a).
+  abortState?: "pending" | "claimed" | "uncertain" | "ok" | "refused";
+  abortOutcomeReason?: string;
+  abortError?: string;
   [key: string]: unknown;
 };
 
@@ -481,10 +489,23 @@ export type CtoConversationOpenResult = {
   generation: number;
 };
 
+// A delivery the admission cap policy DROPPED: a queued BACKGROUND record
+// evicted (never dispatched) to admit a human submit. Projected as tombstones
+// so the loss is observable — queue counts can go DOWN without the delivery
+// ever running, and a one-shot schedule job may already have deleted itself.
+export type CtoConversationDropped = {
+  id: string;
+  origin: "human" | "background";
+  createdAt: number;
+};
+
 export type CtoConversationState = {
   binding: CtoConversationBindingView;
   submissions: CtoSubmissionProjection[];
   counts: CtoQueueCounts;
+  // Deliveries the cap policy dropped (never dispatched) — real lost
+  // deliveries; surfaced honestly, never ignored.
+  droppedByPolicy: CtoConversationDropped[];
 };
 
 // The interrupt receipt: the VISIBLE request marker status — `cancelled`
