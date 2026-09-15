@@ -14,8 +14,18 @@ import { join } from "node:path";
 import { existsSync } from "node:fs";
 
 let dbHandle = null;
+// The reason the last getDb() attempt could not hand out a handle — set on
+// every attempt (null on success or before the first). Additive P1a: lets
+// consumers distinguish `unsupported` (no node:sqlite on this runtime) from
+// `source_unavailable` (no DB path / open failure) instead of collapsing
+// both into a bare null. Existing consumers are unaffected: getDb() still
+// returns null on both.
+let _openFailure = null;
 // Test-only: a substitute for the node:sqlite module, so tests can fake a
 // DatabaseSync without ever opening the real opencode.db. Not runtime API.
+// If the substitute carries `__importError` (an Error), getDb() treats it as
+// the dynamic-import failure itself — the deterministic way to exercise the
+// `unsupported` degradation on a runtime that HAS node:sqlite.
 let _modOverride = null;
 export function _setSqliteModuleOverride(mod) {
   _modOverride = mod;
@@ -39,13 +49,33 @@ export function resolveDbPath() {
 // on a box that hasn't taken the Node 24 runtime yet it throws — that must
 // degrade to `null`, not crash the server. A cached handle that a consumer
 // closed (query-error recovery) is reopened on the next call. Null handle on
-// any failure.
+// any failure — with the CAUSE recorded for getDbOpenFailure().
 export async function getDb() {
+  _openFailure = null;
   if (dbHandle && dbHandle.isOpen !== false) return dbHandle;
   const path = resolveDbPath();
-  if (!path) return null;
+  if (!path) {
+    _openFailure = { reason: "source_unavailable", detail: "no opencode.db at any resolved path" };
+    return null;
+  }
+  let mod;
+  if (_modOverride !== null) {
+    if (_modOverride && _modOverride.__importError) {
+      _openFailure = { reason: "unsupported", detail: String(_modOverride.__importError?.message ?? _modOverride.__importError) };
+      return null;
+    }
+    mod = _modOverride;
+  } else {
+    try {
+      mod = await import("node:sqlite");
+    } catch (e) {
+      console.warn("[opencodeDb] node:sqlite unavailable:", e?.message ?? e);
+      _openFailure = { reason: "unsupported", detail: e?.message ?? String(e) };
+      dbHandle = null;
+      return null;
+    }
+  }
   try {
-    const mod = _modOverride ?? (await import("node:sqlite"));
     dbHandle = new mod.DatabaseSync(path, { readOnly: true });
     try {
       // BET-1360: bounded wait for a WAL-checkpoint-locked page, so a reader
@@ -58,10 +88,18 @@ export async function getDb() {
     }
     return dbHandle;
   } catch (e) {
-    console.warn("[opencodeDb] node:sqlite unavailable:", e?.message ?? e);
+    console.warn("[opencodeDb] could not open opencode.db read-only:", e?.message ?? e);
+    _openFailure = { reason: "source_unavailable", detail: e?.message ?? String(e) };
     dbHandle = null;
     return null;
   }
+}
+
+// Why the last getDb() returned null: {reason: "unsupported"|"source_unavailable",
+// detail} — or null when the handle is available / no attempt was made.
+// Additive read; existing null-returning contract unchanged.
+export function getDbOpenFailure() {
+  return _openFailure;
 }
 
 // Clears the cached handle so the next `getDb()` reopens it. Test-only: not

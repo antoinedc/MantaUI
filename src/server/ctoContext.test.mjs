@@ -15,10 +15,13 @@
 //   U27 — absence is honest: `source_unavailable` (distinct from unsupported
 //         runtime and from a legitimately empty source), and an empty source
 //         answers `status:"ok"` WITH coverage — never a fabricated result.
-// Plus: server-side limits independent of caller args, keyset cursors that
-// cannot repeat rows, and observed-identity passthrough (`projectId` is the
-// DB's project_id verbatim and is NEVER surfaced as a workspace id — the
-// mapping stays explicitly `unmapped`).
+// Plus (Astra PR1508 review): the scan-cap cursor advances past CONSUMED
+// candidates so a discarded-only page can never falsely end the walk;
+// JSON-escaped candidate selection keeps decoded quotes/backslashes/newlines
+// searchable; linear UTF-8 truncation; bounded part reads with early stop;
+// before/after zero valid and the 40-message cap INCLUDING the anchor; the
+// 24 KiB budget measured on the ACTUAL serialized response; and strict
+// independent `unsupported` vs `source_unavailable` degradation.
 //
 // Every DB case degrades to skip without node:sqlite (spec §15.2); the file
 // itself imports safely on Node 20 because node:sqlite is only ever imported
@@ -29,7 +32,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { ctoListSessions, ctoSearch, ctoAround, CTO_CONTEXT_LIMITS } from "./ctoContext.mjs";
-import { _resetDbHandle } from "./opencodeDb.mjs";
+import { _resetDbHandle, _setSqliteModuleOverride } from "./opencodeDb.mjs";
 import { createFixtureDb, sqliteAvailable, withFixtureDb } from "./fixtures/opencodeDbFixture.mjs";
 
 const hasSqlite = await sqliteAvailable();
@@ -45,6 +48,13 @@ async function withFixture(seed, fn) {
   } finally {
     fixture.close();
   }
+}
+
+// The serialized contract: the WHOLE response — every returned text field
+// (snippets, titles, directories, tool names), not just the fields the
+// implementation happens to charge — must stay within the 24 KiB call budget.
+function serializedBytes(res) {
+  return new TextEncoder().encode(JSON.stringify(res)).length;
 }
 
 // ---------------------------------------------------------------------------
@@ -88,7 +98,7 @@ function seedRows() {
   ];
   const parts = [
     { id: "p_kick", messageId: "mc1", sessionId: "s_child", timeCreated: T + 400, data: { type: "text", text: "kickoff for the worker" } },
-    { id: "p_decision", messageId: "mc2", sessionId: "s_child", timeCreated: T + 410, data: { type: "text", text: "decision: use lease-based locking for the store" } },
+    { id: "p_decision", messageId: "mc2", sessionId: "s_child", timeCreated: T + 410, data: { type: "text", text: 'decision: use lease-based locking; path C:\\store\\db; she said "lease it"' } },
     { id: "p_tool", messageId: "mc3", sessionId: "s_child", timeCreated: T + 420, data: { type: "tool", tool: "bash", state: { status: "completed", input: { command: "npm test" }, output: "42 passing" } } },
     ...Array.from({ length: 5 }, (_, i) => ({
       id: `p_bigid${i}`,
@@ -138,13 +148,16 @@ test("listSessions: discovers ALL historical sessions including the archived chi
     assert.equal(child.timeArchived, T + 990);
     // Observed identity: projectId carries the DB project_id verbatim and is
     // NEVER rebranded as a workspace id; workspaceId is the observed
-    // workspace value, distinct; the mapping is explicitly unmapped.
+    // workspace value, distinct; the mapping is explicitly unmapped and no
+    // checkout/repo semantics are inferred (revised P0 map: id derivation
+    // UNVERIFIED).
     assert.equal(child.projectId, "prj_a");
     assert.equal(child.workspaceId, "ws_a");
     assert.equal(child.projectMapping, "unmapped");
     assert.equal(child.title, "child worker");
     assert.equal(child.directory, "/repo-a");
     for (const s of res.sessions) assert.equal(s.projectMapping, "unmapped");
+    assert.ok(serializedBytes(res) <= CTO_CONTEXT_LIMITS.textBudgetBytes, "serialized response stays within the 24 KiB budget");
   });
 });
 
@@ -190,9 +203,35 @@ test("listSessions: server-side limit clamp + keyset cursor pagination with zero
   });
 });
 
+test("listSessions: huge titles/directories are charged on the SERIALIZED response — cuts flagged, IDs intact, over-budget items omitted", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
+  const huge = Array.from({ length: 30 }, (_, i) => ({
+    id: `s_huge${i}`,
+    projectId: "prj_a",
+    directory: `/repo-a/very/long/path/${i}`,
+    title: `huge title ${i} ${"t".repeat(3000)}`,
+    timeCreated: T + i,
+    timeUpdated: T + 3000 - i,
+  }));
+  await withFixture({ sessions: huge, messages: [], parts: [] }, async () => {
+    const res = await ctoListSessions({ limit: CTO_CONTEXT_LIMITS.sessionsMax });
+    assert.equal(res.status, "ok");
+    assert.equal(res.truncated, true, "budget cuts must set the aggregate truncation flag");
+    assert.ok(serializedBytes(res) <= CTO_CONTEXT_LIMITS.textBudgetBytes, "the ACTUAL serialized response must stay within 24 KiB");
+    assert.ok(res.omittedCount > 0, "sessions that cannot fit are omitted and counted, never emitted as cut-up rows");
+    for (const s of res.sessions) {
+      assert.ok(s.id, "emitted sessions always keep their stable id");
+      if (s.titleTruncated) {
+        assert.ok(s.titleSourceBytes > 3000, "omitted-size metadata names the full title");
+      }
+    }
+    assert.ok(res.sessions.some((s) => s.titleTruncated) || res.omittedCount > 0);
+  });
+});
+
 // ---------------------------------------------------------------------------
-// Search: closed-child hit (U03), tool evidence (U05), filters, limits,
-// cursors, budget
+// Search: closed-child hit (U03), tool evidence (U05), decoded-evidence
+// matching, limits, cursors, budget
 // ---------------------------------------------------------------------------
 
 test("search: the decision that exists only in the CLOSED child session is found with stable source IDs (U03)", async (t) => {
@@ -236,6 +275,68 @@ test("search: tool evidence is retrievable and its field identified (U05), with 
   });
 });
 
+test("search: decoded evidence with quotes/backslashes/newlines stays reachable — the raw-JSON-only LIKE must not exclude it", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
+  // opencode stores JSON; a Windows path is raw-stored as C:\\Users\\... and
+  // a quote as \". The raw-only LIKE pattern (real backslash/quote) missed
+  // those — candidate selection must also try the JSON-escaped query form.
+  await withFixture(seedRows(), async () => {
+    const winPath = await ctoSearch({ query: "C:\\store\\db" });
+    assert.equal(winPath.status, "ok");
+    assert.equal(winPath.hits.length, 1, "the Windows path literal must match its JSON-escaped storage");
+    assert.equal(winPath.hits[0].partId, "p_decision");
+    const quoted = await ctoSearch({ query: 'she said "lease it"' });
+    assert.equal(quoted.hits.length, 1, "a quoted phrase must match its JSON-escaped storage");
+    assert.equal(quoted.hits[0].partId, "p_decision");
+  });
+  const nlSeed = {
+    sessions: [{ id: "s_nl", projectId: "prj_a", directory: "/repo-a", timeUpdated: T }],
+    messages: [{ id: "m_nl", sessionId: "s_nl", timeCreated: T, data: { role: "assistant" } }],
+    parts: [{ id: "p_nl", messageId: "m_nl", sessionId: "s_nl", timeCreated: T, data: { type: "text", text: "line1\nline2 secret" } }],
+  };
+  await withFixture(nlSeed, async () => {
+    const res = await ctoSearch({ query: "line1\nline2" });
+    assert.equal(res.hits.length, 1, "a query containing a real newline must match its JSON-escaped storage");
+    assert.equal(res.hits[0].partId, "p_nl");
+  });
+});
+
+test("search: a scan window FULL of discarded candidates advances the cursor and never hides older matches", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
+  // 800 synthetic parts LIKE-match the raw JSON but are dropped by the
+  // decoded-candidate filter (synthetic) — the OLD code returned
+  // {hits:[], truncated:false, nextCursor:null} and the real older match
+  // below the scan cap was unreachable forever.
+  const synthMessages = Array.from({ length: 800 }, (_, i) => ({ id: `msyn${i}`, sessionId: "s_child", timeCreated: T + 10000 - i, data: { role: "assistant" } }));
+  const synthParts = synthMessages.map((m, i) => ({
+    id: `psyn${i}`,
+    messageId: m.id,
+    sessionId: "s_child",
+    timeCreated: T + 10000 - i,
+    data: { type: "text", synthetic: true, text: `synthetic needle ${i}` },
+  }));
+  const realMessage = { id: "m_real", sessionId: "s_child", timeCreated: T, data: { role: "assistant" } };
+  const realPart = { id: "p_real", messageId: "m_real", sessionId: "s_child", timeCreated: T, data: { type: "text", text: "the real older needle match" } };
+  await withFixture(
+    {
+      sessions: [{ id: "s_child", projectId: "prj_a", directory: "/repo-a", timeUpdated: T }],
+      messages: [...synthMessages, realMessage],
+      parts: [...synthParts, realPart],
+    },
+    async () => {
+      const page1 = await ctoSearch({ query: "needle", sessionId: "s_child" });
+      assert.equal(page1.status, "ok");
+      assert.deepEqual(page1.hits, [], "all 800 scanned candidates are discarded by the decoded filter");
+      assert.equal(page1.truncated, true, "a full scan window must be reported as cut, never a false clean end");
+      assert.ok(page1.nextCursor, "the cursor must advance past the last CONSUMED candidate");
+      const page2 = await ctoSearch({ query: "needle", sessionId: "s_child", cursor: page1.nextCursor });
+      assert.equal(page2.hits.length, 1, "the older real match becomes reachable");
+      assert.equal(page2.hits[0].partId, "p_real");
+      assert.equal(page2.nextCursor, null, "the source is exhausted after it");
+    },
+  );
+});
+
 test("search: the 24 KiB returned-text budget is enforced server-side with omitted-size metadata, never silently (U05/U27)", async (t) => {
   if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
   const encoder = new TextEncoder();
@@ -250,9 +351,10 @@ test("search: the 24 KiB returned-text budget is enforced server-side with omitt
     const cut = res.hits.find((h) => h.snippetTruncated === true);
     assert.ok(cut, "a snippet that does not fit the call budget must be cut and reported");
     assert.equal(cut.tool.matchedField, "output");
-    assert.equal(cut.sourceBytes, 7000, "omitted-size metadata names the FULL matched field");
-    const totalText = res.hits.reduce((n, h) => n + encoder.encode(h.snippet.pre + h.snippet.match + h.snippet.post).length, 0);
-    assert.ok(totalText <= CTO_CONTEXT_LIMITS.textBudgetBytes, "returned text must stay within the 24 KiB call budget");
+    assert.equal(cut.snippetSourceBytes, 7000, "omitted-size metadata names the FULL matched field");
+    assert.ok(cut.sessionId && cut.messageId && cut.partId, "cut hits keep their stable IDs");
+    assert.ok(serializedBytes(res) <= CTO_CONTEXT_LIMITS.textBudgetBytes, "the ACTUAL serialized response must stay within 24 KiB");
+    assert.equal(res.truncated, true, "a cut sets the aggregate truncation flag");
   });
   // (b) Many big-output candidates: the hit cap cuts the page and the result
   // says so (truncated + omittedCount), with every emitted snippet bounded.
@@ -272,8 +374,10 @@ test("search: the 24 KiB returned-text budget is enforced server-side with omitt
     assert.equal(res.omittedCount, 15, "65 candidates (60 new + 5 seeded big parts) − 50 emitted");
     for (const h of res.hits) {
       assert.equal(h.kind, "tool");
-      assert.ok(h.snippet.pre.length + h.snippet.match.length + h.snippet.post.length < 400, "every emitted snippet stays bounded");
+      assert.ok(serializedBytes(h) < 600, "every emitted hit stays bounded (window + fields)");
+      assert.ok(h.sessionId && h.messageId && h.partId, "stable IDs intact");
     }
+    assert.ok(serializedBytes(res) <= CTO_CONTEXT_LIMITS.textBudgetBytes, "the ACTUAL serialized response must stay within 24 KiB");
   });
 });
 
@@ -293,9 +397,10 @@ test("search: hit limit clamp + keyset cursor pagination over a needle series wi
       cursor = res.nextCursor;
       if (!cursor) break;
     }
-    // 3+3+1 hits, then one terminal EMPTY page (nextCursor stays set while
-    // hits were emitted; the empty page ends the walk).
-    assert.equal(pages, 4);
+    // 3+3+1 hits — the third page scans fewer rows than the window cap, so
+    // the source is provably exhausted and the walk ends without an extra
+    // terminal empty page.
+    assert.equal(pages, 3);
     assert.equal(new Set(seen).size, seen.length, "keyset cursor pages must never repeat a hit");
     assert.deepEqual(
       seen.slice().sort(),
@@ -308,7 +413,8 @@ test("search: hit limit clamp + keyset cursor pagination over a needle series wi
 });
 
 // ---------------------------------------------------------------------------
-// around: exact neighborhood, stable IDs, per-part + global budget
+// around: exact neighborhood, stable IDs, per-part + global budget, bounded
+// part reads, zero-valid before/after, 40-message cap INCLUDING the anchor
 // ---------------------------------------------------------------------------
 
 test("around: returns the exact chronological neighborhood with stable IDs, anchor flagged, tool evidence bounded per part", async (t) => {
@@ -330,31 +436,93 @@ test("around: returns the exact chronological neighborhood with stable IDs, anch
     assert.equal(toolMsg.parts[0].tool.name, "bash");
     assert.match(toolMsg.parts[0].text, /42 passing/, "the tool RESULT is the primary evidence (U05)");
     assert.equal(res.messages[0].anchor, false);
-
-    const clamped = await ctoAround({ sessionId: "s_child", messageId: "mc2", before: 9999, after: 9999 });
-    assert.ok(clamped.messages.length <= CTO_CONTEXT_LIMITS.aroundMessagesMax + 1, "before+after clamped server-side (anchor additional)");
+    assert.ok(serializedBytes(res) <= CTO_CONTEXT_LIMITS.textBudgetBytes);
   });
 });
 
-test("around: a huge tool output is cut per part with omitted-size metadata, and the global budget drops the tail honestly", async (t) => {
+test("around: before/after ZERO is valid (anchor only) and the 40-message cap INCLUDES the anchor", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
+  await withFixture(seedRows(), async () => {
+    const zero = await ctoAround({ sessionId: "s_child", messageId: "mc2", before: 0, after: 0 });
+    assert.equal(zero.status, "ok");
+    assert.deepEqual(zero.messages.map((m) => m.id), ["mc2"], "zero neighbors = exactly the anchor, not the default 5");
+    assert.equal(zero.truncated, false);
+
+    const oneSide = await ctoAround({ sessionId: "s_child", messageId: "mc2", before: 0, after: 2 });
+    assert.deepEqual(oneSide.messages.map((m) => m.id), ["mc2", "mc3", "mbig0"], "after:0-adjacent asymmetry honored");
+
+    // A session with 50 messages: over-asking must fill exactly 40
+    // (39 neighbors + the anchor — the cap INCLUDES the anchor).
+    const wideMessages = Array.from({ length: 50 }, (_, i) => ({ id: `mw${i}`, sessionId: "s_wide", timeCreated: T + i, data: { role: "assistant" } }));
+    const wideParts = wideMessages.map((m) => ({ id: `pw_${m.id}`, messageId: m.id, sessionId: "s_wide", timeCreated: m.timeCreated, data: { type: "text", text: `msg ${m.id}` } }));
+    await withFixture(
+      { sessions: [{ id: "s_wide", projectId: "prj_a", directory: "/repo-a", timeUpdated: T }], messages: wideMessages, parts: wideParts },
+      async () => {
+        const clamped = await ctoAround({ sessionId: "s_wide", messageId: "mw25", before: 9999, after: 9999 });
+        assert.ok(clamped.messages.length <= CTO_CONTEXT_LIMITS.aroundMessagesMax, "the 40-message cap includes the anchor");
+        assert.equal(clamped.messages.length, CTO_CONTEXT_LIMITS.aroundMessagesMax, "over-asking fills exactly 40 (39 neighbors + anchor)");
+        assert.equal(clamped.messages.filter((m) => m.anchor).length, 1, "the anchor is one of the 40");
+        assert.equal(clamped.messages.map((m) => m.id)[0], "mw0", "neighbors reach back to the session start");
+        const beforeCount = clamped.messages.filter((m) => Number(m.id.slice(2)) < 25).length;
+        const afterCount = clamped.messages.filter((m) => Number(m.id.slice(2)) > 25).length;
+        assert.equal(beforeCount, 25, "all available before-neighbors used");
+        assert.equal(afterCount, 14, "after absorbs the slack up to the 40 total");
+      },
+    );
+  });
+});
+
+test("around: a MB tool output is cut per part with omitted-size metadata, part reads are bounded, and the global budget drops the tail honestly", async (t) => {
   if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
   const encoder = new TextEncoder();
+  // (a) The seeded 7 KiB outputs exceed the global 24 KiB budget — the tail
+  // of the neighborhood is dropped and counted, the anchor survives.
   await withFixture(seedRows(), async () => {
     const res = await ctoAround({ sessionId: "s_child", messageId: "mc2", before: 0, after: 8 });
     assert.equal(res.status, "ok");
-    assert.equal(res.truncated, true, "five 7 KiB outputs exceed the 24 KiB call budget — the tail must be reported");
-    assert.ok(res.omittedCount >= 1, "messages whose evidence was dropped for budget are counted");
+    assert.equal(res.truncated, true, "huge outputs exceed both the per-part cap and the 24 KiB call budget");
+    assert.ok(res.omittedCount >= 1, "messages/parts whose evidence was dropped for budget are counted");
     // Every message keeps its stable ID even when its evidence was dropped;
     // the anchor's own evidence survives (budget priority).
     assert.ok(res.messages.every((m) => Array.isArray(m.parts)));
     const anchorMsg = res.messages.find((m) => m.anchor === true);
     assert.match(anchorMsg.parts[0].text, /lease-based locking/);
-    const cutPart = res.messages.flatMap((m) => m.parts).find((p) => p.truncated === true);
+    const cutPart = res.messages.flatMap((m) => m.parts).find((p) => p.textTruncated === true);
     assert.ok(cutPart, "the part that did not fit was cut with omitted-size metadata");
-    assert.equal(cutPart.sourceBytes, 7000);
-    const total = res.messages.reduce((n, m) => n + m.parts.reduce((k, p) => k + encoder.encode(p.text).length, 0), 0);
-    assert.ok(total <= CTO_CONTEXT_LIMITS.textBudgetBytes);
+    assert.equal(cutPart.textSourceBytes, 7000);
+    assert.ok(serializedBytes(res) <= CTO_CONTEXT_LIMITS.textBudgetBytes, "the ACTUAL serialized response must stay within 24 KiB");
   });
+  // (b) A MB tool output (per-part cap) and a 60-part message (bounded part
+  // read) in a dedicated session, so the budget cannot exhaust first.
+  const mbPart = { id: "p_mb", messageId: "m_mb", sessionId: "s_mb", timeCreated: T, data: { type: "tool", tool: "bash", state: { status: "completed", output: bigOutput(1_000_000) } } };
+  const manyParts = Array.from({ length: 60 }, (_, i) => ({ id: `p_many${i}`, messageId: "m_many", sessionId: "s_mb", timeCreated: T + 10, data: { type: "text", text: `part ${i} of many` } }));
+  await withFixture(
+    {
+      sessions: [{ id: "s_mb", projectId: "prj_a", directory: "/repo-a", timeUpdated: T }],
+      messages: [
+        { id: "m_mb", sessionId: "s_mb", timeCreated: T, data: { role: "assistant" } },
+        { id: "m_many", sessionId: "s_mb", timeCreated: T + 10, data: { role: "assistant" } },
+      ],
+      parts: [mbPart, ...manyParts],
+    },
+    async () => {
+      const res = await ctoAround({ sessionId: "s_mb", messageId: "m_mb", before: 0, after: 1 });
+      assert.equal(res.status, "ok");
+      // MB output: per-part cap with honest omitted-size metadata.
+      const mbItem = res.messages[0].parts[0];
+      assert.equal(mbItem.partId, "p_mb");
+      assert.equal(mbItem.textTruncated, true);
+      assert.equal(mbItem.textSourceBytes, 1_000_000);
+      assert.ok(encoder.encode(mbItem.text).length <= CTO_CONTEXT_LIMITS.partEvidenceMaxBytes);
+      // Many parts: the per-message part read is bounded and reported.
+      const manyMsg = res.messages[1];
+      assert.equal(manyMsg.id, "m_many");
+      assert.equal(manyMsg.partsOmitted, true, "a part read past the bound is reported, not silently dropped");
+      assert.ok(manyMsg.parts.length <= CTO_CONTEXT_LIMITS.partsPerMessageMax);
+      assert.equal(res.truncated, true);
+      assert.ok(serializedBytes(res) <= CTO_CONTEXT_LIMITS.textBudgetBytes, "the ACTUAL serialized response must stay within 24 KiB");
+    },
+  );
 });
 
 test("around: unknown session and unknown message return distinct reference_expired reasons, never a fake result", async (t) => {
@@ -377,7 +545,8 @@ test("around: unknown session and unknown message return distinct reference_expi
 // Honest degradation + zero side effects
 // ---------------------------------------------------------------------------
 
-test("degradation (all runtimes): a missing source answers supported:false honestly and never throws", async () => {
+test("degradation: a missing source answers exactly source_unavailable on a sqlite runtime, never throws", async (t) => {
+  if (!hasSqlite) return t.skip("meaningful only when node:sqlite exists (otherwise the same call is genuinely unsupported)");
   const prevDb = process.env.MANTA_OPENCODE_DB;
   _resetDbHandle();
   try {
@@ -385,16 +554,38 @@ test("degradation (all runtimes): a missing source answers supported:false hones
     _resetDbHandle();
     const res = await ctoListSessions({});
     assert.equal(res.supported, false);
-    assert.ok(
-      res.status === "source_unavailable" || res.status === "unsupported",
-      `honest degradation status, got ${res.status}`,
-    );
+    assert.equal(res.status, "source_unavailable", "a missing DB file is source_unavailable, distinct from unsupported");
     assert.deepEqual(res.sessions, []);
     const search = await ctoSearch({ query: "x" });
-    assert.equal(search.supported, false);
+    assert.equal(search.status, "source_unavailable");
     const around = await ctoAround({ sessionId: "s", messageId: "m" });
-    assert.equal(around.supported, false);
+    assert.equal(around.status, "source_unavailable");
   } finally {
+    if (prevDb === undefined) delete process.env.MANTA_OPENCODE_DB;
+    else process.env.MANTA_OPENCODE_DB = prevDb;
+    _resetDbHandle();
+  }
+});
+
+test("degradation: a runtime without node:sqlite answers exactly unsupported — never collapsed into source_unavailable", async (t) => {
+  // Simulated via the accessor's test seam (__importError): deterministic on
+  // a runtime that HAS node:sqlite, and identical to the real Node 20 path.
+  const prevDb = process.env.MANTA_OPENCODE_DB;
+  _resetDbHandle();
+  _setSqliteModuleOverride({ __importError: new Error("Cannot find module 'node:sqlite' (simulated Node 20)") });
+  try {
+    process.env.MANTA_OPENCODE_DB = "/nonexistent/cto-p1a/opencode.db";
+    _resetDbHandle();
+    const res = await ctoListSessions({});
+    assert.equal(res.supported, false);
+    assert.equal(res.status, "unsupported", "no node:sqlite is unsupported even when the DB path is also missing");
+    assert.match(res.detail, /node:sqlite/);
+    const search = await ctoSearch({ query: "x" });
+    assert.equal(search.status, "unsupported");
+    const around = await ctoAround({ sessionId: "s", messageId: "m" });
+    assert.equal(around.status, "unsupported");
+  } finally {
+    _setSqliteModuleOverride(null);
     if (prevDb === undefined) delete process.env.MANTA_OPENCODE_DB;
     else process.env.MANTA_OPENCODE_DB = prevDb;
     _resetDbHandle();
