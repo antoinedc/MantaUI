@@ -27,6 +27,10 @@
 // service. The firehose tap feeding admission.observeEvent is one-way.
 
 import { createHash } from "node:crypto";
+// Terminal statuses — the redirect reports a submit receipt's terminal
+// outcome honestly (a terminal replay has NOTHING queued; 202 would promise
+// a run that will never happen).
+import { TERMINAL } from "./ctoAdmission.mjs";
 
 /**
  * The single rejection copy for the "not admitted yet" seams. Both the
@@ -155,6 +159,7 @@ export function createCtoConversationService({
       },
       submissions: queue.submissions,
       counts: queue.counts,
+      droppedByPolicy: queue.droppedByPolicy,
     };
   }
 
@@ -308,11 +313,19 @@ export function createCtoConversationService({
         ...(backgroundDeliveryId(args.ctoKey) ? { id: backgroundDeliveryId(args.ctoKey) } : {}),
         agent: agentName,
       });
+      // Honest outcome mapping (round 4): a receipt that is already TERMINAL
+      // (a genuine retry replaying a settled record or tombstone — e.g. a
+      // cancelled-by-policy drop) has NOTHING queued and nothing running:
+      // queued:true here becomes HTTP 202 "queued" to the webhook sender for
+      // a delivery that will never run. Terminal → deduped (the redelivery
+      // dedupe shape: seen, not acted on); anything still live → queued.
+      const terminal = TERMINAL.has(receipt.status);
       return {
         redirected: true,
         result: {
           delivered: false,
-          queued: true,
+          queued: !terminal,
+          ...(terminal ? { deduped: true } : {}),
           ctoId: receipt.id,
           ctoStatus: receipt.status,
           persisted: receipt.persisted,

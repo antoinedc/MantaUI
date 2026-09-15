@@ -530,6 +530,11 @@ test("a genuine retry with the same caller identity dedups to one submission, ev
   assert.equal(retry.ctoId, r1.ctoId);
   assert.equal(retry.persisted, false, "replay, nothing new written");
   assert.equal(retry.ctoStatus, "completed");
+  // Round 4: the engine result must be honest — a TERMINAL replay has
+  // nothing queued and nothing running, so queued:true (HTTP 202 "queued"
+  // to the webhook sender) would promise a run that will never happen.
+  assert.equal(retry.queued, false, "a terminal replay is NOT queued");
+  assert.equal(retry.deduped, true, "the honest deduped flag for the webhook mapping");
   assert.equal(t.oc.sends.length, 1, "the retry did not re-send");
   // The NEXT firing minute is a NEW occurrence even though the text is
   // identical — this is the recurring-schedule case the content hash broke.
@@ -541,6 +546,43 @@ test("a genuine retry with the same caller identity dedups to one submission, ev
   assert.notEqual(next.ctoId, r1.ctoId);
   assert.equal(next.persisted, true);
   assert.ok(await waitFor(() => t.oc.sends.length >= 2), "the next occurrence fired");
+});
+
+test("a replay of a CANCELLED delivery is deduped, never 202-queued (round 4)", async () => {
+  const t = compose();
+  const open = await dispatch(t.handlers, "cto:conversation-open", []);
+  // Hold the pump's dispatch claim so the delivery stays QUEUED (never
+  // dispatched) — then cancel it the way Stop does.
+  let releaseClaim;
+  const gate = new Promise((r) => (releaseClaim = r));
+  const realClaim = t.binding.claimGeneration.bind(t.binding);
+  t.binding.claimGeneration = async (reserve) => {
+    await gate;
+    return realClaim(reserve);
+  };
+  const r1 = await t.pd.deliver({
+    sessionId: open.sessionId,
+    text: "board check",
+    ctoKey: "sched:j1:m1",
+  });
+  await flush();
+  const rc = await t.svc.interrupt({ id: r1.ctoId });
+  assert.equal(rc.status, "cancelled", "the queued delivery was cancelled before dispatch");
+  releaseClaim();
+  await flush();
+  // A genuine sender retry of the same delivery id: the cancelled record
+  // replays. The result must say deduped — queued:true (HTTP 202 to the
+  // webhook sender) would promise a delivery that will never run.
+  const retry = await t.pd.deliver({
+    sessionId: open.sessionId,
+    text: "board check",
+    ctoKey: "sched:j1:m1",
+  });
+  assert.equal(retry.ctoId, r1.ctoId);
+  assert.equal(retry.persisted, false, "replay, nothing new written");
+  assert.equal(retry.ctoStatus, "cancelled");
+  assert.equal(retry.queued, false, "a cancelled replay is NOT queued");
+  assert.equal(retry.deduped, true, "the honest deduped flag for the webhook mapping");
 });
 
 test("per-caller identity mapping: schedule job+minute and capability job+status map 1:1 to admission ids", async () => {

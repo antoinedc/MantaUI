@@ -455,6 +455,26 @@ test("deliverWebhook dedupes a redelivered X-GitHub-Delivery (acts once)", async
   assert.ok(saved.at(-1)?.includes("dlv-123"));
 });
 
+test("deliverWebhook reports a CTO-terminal dedupe as 200-deduped, never 202-queued (round 4)", async () => {
+  const { res } = await deliverToBusySession({
+    // The conversation redirect's honest result for a delivery replayed to a
+    // TERMINAL receipt (e.g. a cancelled-by-policy tombstone): nothing is
+    // queued and nothing is running. 202 "queued" would promise a run that
+    // will never happen.
+    enqueue: async () => ({
+      delivered: false,
+      queued: false,
+      deduped: true,
+      ctoId: "sched:j1:m1",
+      ctoStatus: "cancelled",
+      persisted: false,
+    }),
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.deduped, true, "the redelivery dedupe shape — seen, not acted on");
+  assert.equal(res.queued, undefined, "never a lying 202");
+});
+
 test("deliverWebhook drops an event type the hook was not registered for", async () => {
   const body = '{"something":"else"}';
   const headers = {

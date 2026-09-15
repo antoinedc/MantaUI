@@ -13,6 +13,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile, rm } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 
 import {
   CtoAdmissionError,
@@ -1159,7 +1160,15 @@ test("a human submit at cap drops the OLDEST QUEUED BACKGROUND delivery (cancell
   // A permanent barrier + a recurring schedule has filled the store with
   // QUEUED background deliveries. The human's own message must still get
   // in: the OLDEST queued background record yields instead.
-  const receipt = await svc.submit({ origin: "human", text: "hello", id: "m_human", agent: "a" });
+  const warns = [];
+  const origWarn = console.warn;
+  console.warn = (...args) => warns.push(args.map(String).join(" "));
+  let receipt;
+  try {
+    receipt = await svc.submit({ origin: "human", text: "hello", id: "m_human", agent: "a" });
+  } finally {
+    console.warn = origWarn;
+  }
   assert.equal(receipt.persisted, true, "the human submit is ADMITTED, never refused at cap");
   assert.equal(receipt.status, "queued");
   const q = await svc.list();
@@ -1181,6 +1190,101 @@ test("a human submit at cap drops the OLDEST QUEUED BACKGROUND delivery (cancell
   assert.equal(replay.persisted, false, "replay — nothing new written");
   assert.equal(replay.status, "cancelled", "the cancelled-by-policy outcome is returned");
   assert.equal(oc.sends.length, 0, "no double-send");
+  // Round 4: the drop must be OBSERVABLE. A one-shot schedule job deletes
+  // itself the moment it fires, so a silently dropped reminder would never
+  // happen AND leave no trace; a webhook already answered 202 vanishes the
+  // same way. Name the drop on the server console and project it in the
+  // queue listing.
+  assert.ok(
+    warns.some((w) => w.includes("sched:j1:m1") && w.includes("dropped-by-policy")),
+    `the dropped delivery is named in a console.warn, got: ${warns.join(" | ")}`,
+  );
+  const listed = await svc.list();
+  assert.deepEqual(
+    listed.droppedByPolicy,
+    [{ id: "sched:j1:m1", origin: "background", createdAt: 1 }],
+    "dropped-by-policy deliveries are projected in the queue listing",
+  );
+});
+
+test("a pump held by the unbound/busy gate stays silent — the skip shape reaches the pump (round 4, pre-existing from #1512)", async () => {
+  const warns = [];
+  const origWarn = console.warn;
+  console.warn = (...args) => warns.push(args.map(String).join(" "));
+  try {
+    // Busy gate: queued work exists, the role session is busy — the pump
+    // must hold SILENTLY. A malformed skip result fell through to
+    // sendAndClassify(undefined) and logged a swallowed TypeError that
+    // masked real pump failures.
+    const busy = buildService({ isBusy: () => true });
+    await busy.svc.submit({ origin: "background", text: "tick", id: "bg_1", agent: "cto-test" });
+    await flush();
+    // Unbound gate: same, with no bound session.
+    const unbound = buildService({
+      binding: fakeBinding({ generation: 1, currentSessionId: null }),
+    });
+    await unbound.svc.submit({ origin: "background", text: "tick", id: "bg_2", agent: "cto-test" });
+    await flush();
+    assert.ok(
+      !warns.some((w) => w.includes("[ctoAdmission] pump failed")),
+      `the pump must hold silently at the gates, got: ${warns.join(" | ")}`,
+    );
+  } finally {
+    console.warn = origWarn;
+  }
+});
+
+test("HUMAN dedupe identities outlive the tombstone horizon — a client resend never double-sends (round 4)", async () => {
+  const store = memoryStore(`t-${randomUUID()}`);
+  const humanHash = canonicalRequestHash({ origin: "human", text: "hello", agent: "a" });
+  await store.save({
+    v: 1,
+    submissions: [
+      terminalRecord("bg_a", { origin: "background", payloadHash: "ha", createdAt: 1000 }),
+      terminalRecord("bg_b", { origin: "background", payloadHash: "hb", createdAt: 1001 }),
+      terminalRecord("bg_c", { origin: "background", payloadHash: "hc", createdAt: 1002 }),
+    ],
+    tombstones: [
+      // The human identity is the composer's STABLE messageID — a client may
+      // legitimately resend it, so it must never expire from the dedup set.
+      { id: "m_human", payloadHash: humanHash, status: "completed", origin: "human", createdAt: 1 },
+      ...Array.from({ length: 200 }, (_, i) => ({
+        id: `bg_${i}`,
+        payloadHash: `h${i}`,
+        status: "completed",
+        origin: "background",
+        createdAt: 2 + i,
+      })),
+    ],
+  });
+  const { svc, oc } = buildService({ store, maxTerminalBackground: 2 });
+  // Three terminal receipts against a bound of 2: the trim evicts the oldest
+  // AND re-caps the tombstone list — under a horizon that also applies to
+  // human ids, the human identity is dropped here.
+  await svc.trimTerminal();
+  // The human identity must have survived the cap. A resend of the same
+  // message id replays the tombstone — a fresh record here would
+  // DOUBLE-SEND the human's message.
+  const resend = await svc.submit({ origin: "human", text: "hello", id: "m_human", agent: "a" });
+  assert.equal(resend.persisted, false, "the client's resend dedups — never a fresh dispatch");
+  assert.equal(resend.status, "completed", "the tombstoned outcome is returned");
+  assert.equal(oc.sends.length, 0, "no double-send of the human message");
+});
+
+test("the TERMINAL comment no longer claims the repealed 'retained forever' (round 4)", () => {
+  const source = readFileSync(new URL("./ctoAdmission.mjs", import.meta.url), "utf8");
+  const lines = source.split("\n");
+  const terminalIdx = lines.findIndex((l) => l.includes("const TERMINAL = new Set"));
+  assert.ok(terminalIdx > 0, "the TERMINAL definition is present");
+  const above = lines.slice(terminalIdx - 6, terminalIdx + 1).join("\n");
+  assert.ok(
+    !above.includes("Retained forever"),
+    "invariant 5 no longer retains forever — the comment must not claim it",
+  );
+  assert.ok(
+    above.includes("bounded"),
+    "the comment carries the current bounded-bookkeeping contract",
+  );
 });
 
 test("a BACKGROUND submit at cap cannot sacrifice its own queued peers — it refuses honestly", async () => {

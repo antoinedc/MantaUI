@@ -611,6 +611,14 @@ export async function deliverWebhook(
       );
       return { ok: false, status: 429, error: "queue full" };
     }
+    if (result?.deduped) {
+      // A CTO-targeted delivery replayed to a TERMINAL receipt (a genuine
+      // retry of a settled delivery — or a cancelled-by-policy drop): nothing
+      // is queued and nothing is running. 202 "queued" would promise a run
+      // that will never happen; acknowledge honestly with the redelivery
+      // dedupe shape instead.
+      return { ok: true, status: 200, deduped: true };
+    }
     if (result?.queued) {
       return { ok: true, status: 202, queued: true };
     }

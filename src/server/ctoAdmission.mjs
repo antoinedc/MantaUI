@@ -177,8 +177,13 @@ const UNRESOLVED = new Set([
   "interrupt_pending",
 ]);
 
-// Terminal receipts. Retained forever (invariant 5); never re-dispatched.
-const TERMINAL = new Set(["completed", "failed", "cancelled", "interrupted"]);
+// Terminal receipts — bounded bookkeeping since the P3a3 review (invariant 5
+// no longer retains forever: receipts are tombstoned past
+// MAX_TERMINAL_BACKGROUND, oldest first; see the constant's comment);
+// never re-dispatched. Exported so the redirect seam can report honestly
+// whether a submit receipt is terminal (round 4: a terminal replay must not
+// surface as 202-queued to a webhook sender).
+export const TERMINAL = new Set(["completed", "failed", "cancelled", "interrupted"]);
 
 export const MAX_ENTRIES = 500;
 // P3a3-review: bounded retention for TERMINAL BACKGROUND receipts. Unique
@@ -191,10 +196,15 @@ export const MAX_ENTRIES = 500;
 // compact durable TOMBSTONES (id + payloadHash + status) so a genuine
 // same-id retry still dedups, and the submit cap path additionally drops
 // the OLDEST QUEUED BACKGROUND records for a HUMAN submit — the human is
-// never refused. Eviction is safe because occurrence identities never recur
-// (sched keys embed the full-date minute key; a same-fire retry only re-fires
-// through the crash window between sendPrompt and the lastFiredMinute save —
-// minutes, not the ~200-delivery horizon).
+// never refused. Eviction is safe for BACKGROUND identities because
+// occurrence identities never recur (sched keys embed the full-date minute
+// key; a same-fire retry only re-fires through the crash window between
+// sendPrompt and the lastFiredMinute save — minutes, not the
+// ~200-delivery horizon). HUMAN identities are the composer's STABLE
+// messageID — a client may legitimately RESEND it — so a human dedupe
+// identity must never expire: capTombstones (below) keeps human tombstones
+// without a horizon and bounds only background ones (tiny records — no
+// payload text — paced by human sends, not a schedule firehose).
 export const MAX_TERMINAL_BACKGROUND = 200;
 export const DEFAULT_REQUEST_DEADLINE_MS = 15_000;
 export const RECEIPT_READ_ATTEMPTS = 3;
@@ -298,6 +308,10 @@ export function normalizeAdmissionPayload(payload) {
         status: t.status ?? "completed",
         origin: t.origin ?? "background",
         createdAt: Number.isInteger(t.createdAt) ? t.createdAt : 0,
+        // Set ONLY for a queued background delivery dropped by the cap
+        // policy (never dispatched) — it is how the projection distinguishes
+        // the policy drop from a legitimate cancellation.
+        ...(t.droppedByPolicy === true ? { droppedByPolicy: true } : {}),
       };
     }),
   };
@@ -450,6 +464,18 @@ export function createCtoAdmission({
   }
   if (typeof sendPrompt !== "function" || typeof getMessage !== "function") {
     throw new Error("createCtoAdmission requires sendPrompt and getMessage");
+  }
+
+  /**
+   * Tombstone cap, partitioned by origin (round 4): the background horizon is
+   * safe because background occurrence identities never recur; the HUMAN
+   * identity is the client's stable message id and must outlive any horizon.
+   * Each partition keeps its internal oldest→newest order.
+   */
+  function capTombstones(tombstones) {
+    const human = tombstones.filter((t) => t.origin === "human");
+    const background = tombstones.filter((t) => t.origin !== "human");
+    return [...human, ...background.slice(-maxTerminalBackground)];
   }
 
   // Firehose-derived busy set — the fallback when no shared isBusy is wired.
@@ -740,22 +766,32 @@ export function createCtoAdmission({
             }
             for (const r of queuedBg.slice(0, needed)) {
               evictedIds.add(r.id);
+              // The drop must be OBSERVABLE (round 4): a one-shot schedule
+              // job deletes itself the moment it fires and a webhook was
+              // already answered 202 — a silently dropped delivery would
+              // never happen AND leave no trace.
+              console.warn(
+                `[ctoAdmission] dropped-by-policy at cap: id=${r.id} origin=${r.origin} ` +
+                  `queued background delivery yielded to a human submit (never dispatched)`,
+              );
               tombstoned.push({
                 id: r.id,
                 payloadHash: r.payloadHash,
                 status: "cancelled",
                 origin: r.origin,
                 createdAt: r.createdAt,
+                droppedByPolicy: true,
               });
             }
           }
           const kept = normalized.submissions.filter((r) => !evictedIds.has(r.id));
-          // Tombstones are themselves bounded: drop the OLDEST identities —
-          // a retry landing after a double eviction creates a fresh record
-          // (occurrence identities never recur; see MAX_TERMINAL_BACKGROUND).
-          const keptTombstones = [...normalized.tombstones, ...tombstoned].slice(
-            -maxTerminalBackground,
-          );
+          // Tombstones are capped by ORIGIN (round 4): BACKGROUND identities
+          // never recur (sched keys embed the full-date minute key; a retry
+          // landing after a double eviction creates a fresh record), but a
+          // HUMAN id is the composer's stable messageID — a client may
+          // legitimately resend it, so human dedupe identities are kept
+          // WITHOUT a horizon.
+          const keptTombstones = capTombstones([...normalized.tombstones, ...tombstoned]);
           record = created;
           wrote = true;
           return { submissions: [...kept, created], tombstones: keptTombstones };
@@ -806,8 +842,8 @@ export function createCtoAdmission({
             // human-FIFO priority, selected-still-queued) is re-validated
             // INSIDE the same admission-mutex section that reserves
             // (blocker P2) — never against an outside read.
-            if (!b.currentSessionId) return { skip: "unbound" };
-            if (busyCheck(b.currentSessionId)) return { skip: "busy" }; // hold, never abort
+            if (!b.currentSessionId) return { kind: "skip", reason: "unbound" };
+            if (busyCheck(b.currentSessionId)) return { kind: "skip", reason: "busy" }; // hold, never abort
             const result = await claimDispatch(next, b, `msg_${newId()}`);
             if (result.kind === "reserved") {
               // Lease + session map set INSIDE the claim so any reconcile
@@ -1275,6 +1311,12 @@ async function claimAndAttemptAbort(record) {
           unresolved: fresh.submissions.filter((r) => UNRESOLVED.has(r.status)).length,
           terminal: fresh.submissions.filter((r) => TERMINAL.has(r.status)).length,
         },
+        // Deliveries the cap policy DROPPED (never dispatched) — projected so
+        // the drop is observable (the sender may already have been answered
+        // 202, and a one-shot schedule job deletes itself at fire time).
+        droppedByPolicy: fresh.tombstones
+          .filter((t) => t.droppedByPolicy === true)
+          .map((t) => ({ id: t.id, origin: t.origin, createdAt: t.createdAt })),
       };
     } catch (err) {
       wrapStoreError(err, "list");
@@ -1400,7 +1442,7 @@ async function claimAndAttemptAbort(record) {
         evicted = gone.length;
         return {
           submissions: normalized.submissions.filter((r) => !goneIds.has(r.id)),
-          tombstones: [...normalized.tombstones, ...tombstoned].slice(-maxTerminalBackground),
+          tombstones: capTombstones([...normalized.tombstones, ...tombstoned]),
         };
       });
       return { evicted };
