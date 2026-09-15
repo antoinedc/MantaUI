@@ -302,3 +302,33 @@ running server's SSE (`message.updated` with the client id) rather than raw read
 
 No feature is asserted to exist: nothing here claims the CTO role session, admission path,
 headless delegate or context service — P1a/P2a build those. Contract-only per spec §15.
+
+## 10. P3a1 addendum — the durable singleton conversation binding is now a service
+
+`src/server/ctoBinding.mjs` (`createCtoBinding({ oc, store, provenanceStore, controlDir, ... })`)
+implements spec §3.1 step 1 (create-or-recover ONE durable session) as an injectable service:
+`ensure()` (singleflight get-or-create-or-replace), `recover()` (explicit reconcile pass), and
+`getBinding()` (store read only — opening the tab never invokes the model). Not wired to any
+route yet; the future UI caller composes it.
+
+Additive seams this PR lands on top of the P0 receipts:
+
+- `opencode.createSession(...)` forwards a plain-object `metadata` option onto `POST /session`
+  (P0 §8 receipt: metadata round-trips verbatim through `GET /session/{id}`).
+- `opencode.readSession(sessionId)` — NEW three-state read (`found` with the full record incl.
+  `metadata` / `missing` on definitive 404 / `unknown` on 5xx+network), so callers can apply
+  the spec rule "timeout is not absence". `sessionExists` is unchanged.
+- `ctoStores.bindingStore` — strict store for the versioned binding record: `generation`,
+  `currentSessionId` + `currentOperation` (the exact identity marker to verify against),
+  `previousSessionIds` (capped archive references, sessions never deleted), and
+  `pendingOperation` (reserved BEFORE the remote create; recovery matches sessions by EXACT
+  `metadata.bindingOperation` — never by title).
+
+Role-session discipline (all pinned by `ctoBinding.test.mjs`): the role session's opencode
+directory is a server-owned control directory under the state home (`~/.manta/cto/conversation`,
+0700, marker file, refuses `.git`); its title deliberately avoids the ephemeral reaper's `cto:`
+prefix; it is registered only in the never-swept provenance tombstones (`internalSessions`), so
+`resolvePipelineSession` classifies it CTO-owned. Concurrent `ensure()` calls join one flight;
+unknown creation outcomes are reconciled by marker before any retry, with bounded attempts, and
+absence is proven only while the marker cannot have scrolled off `GET /session`'s newest-100
+page (page non-full, or its oldest entry predates the reservation) — uncertainty otherwise.

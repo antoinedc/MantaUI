@@ -213,6 +213,13 @@ export const resolveStore = createCtoJsonStore("resolve", ctoPath("resolve.json"
 // Owned by the gate/calibration engine (BET-1518); read by the §10.5
 // calibration table. Readers tolerate the bare `{ v: 1 }` default.
 export const calibrationStore = createCtoJsonStore("calibration", ctoPath("calibration.json"));
+// P3a1 (unified-cto-spec §3.1): the durable singleton CTO conversation
+// binding — binding generation, current/previous session ids, and the
+// reserve-before-create operation marker that recovers a role session whose
+// create landed but whose bind was lost to a crash. Strict: a corrupt
+// binding must fail loudly — silently reading it as "unbound" would create
+// a duplicate role session.
+export const bindingStore = createCtoJsonStore("binding", ctoPath("binding.json"), { strict: true });
 
 // ---------------------------------------------------------------------------
 // BET-1425 engine-state write hygiene, generalized in BET-1464 (defect 3) —
