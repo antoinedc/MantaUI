@@ -696,6 +696,116 @@ test("around: unknown session and unknown message return distinct reference_expi
   });
 });
 
+test("around: compaction removes the INTENDED records — the requested anchor message AND part survive (8x50 repro)", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
+  // 8 messages x 50 tool parts each; the request anchors the LAST message's
+  // LAST part. The old pop-by-position callbacks removed the anchor message
+  // while compacting an earlier one (only m0-m3 came back, no anchor).
+  const messages = Array.from({ length: 8 }, (_, i) => ({ id: `mr${i}`, sessionId: "s_r", timeCreated: T + i, data: { role: "assistant" } }));
+  const parts = messages.flatMap((m) =>
+    Array.from({ length: 50 }, (_, j) => ({
+      id: `pr_${m.id}_${String(j).padStart(2, "0")}`,
+      messageId: m.id,
+      sessionId: "s_r",
+      timeCreated: m.timeCreated * 1000 + j,
+      data: { type: "tool", tool: "bash", state: { status: "completed", output: `tool ${m.id}.${j} ` + "o".repeat(100) } },
+    })),
+  );
+  await withFixture(
+    { sessions: [{ id: "s_r", projectId: "prj_a", directory: "/repo-a", timeUpdated: T }], messages, parts },
+    async () => {
+      const requestedPart = "pr_mr7_49";
+      const res = await ctoAround({ sessionId: "s_r", messageId: "mr7", partId: requestedPart });
+      assert.equal(res.status, "ok");
+      assert.ok(serializedBytes(res) <= CTO_CONTEXT_LIMITS.textBudgetBytes, "the ACTUAL serialized response must stay within 24 KiB");
+      assert.equal(res.truncated, true, "compaction happened and is reported");
+      const anchorMsg = res.messages.find((m) => m.id === "mr7");
+      assert.ok(anchorMsg, "the ANCHOR message must survive compaction");
+      assert.equal(anchorMsg.anchor, true);
+      const requested = anchorMsg.parts.find((p) => p.partId === requestedPart);
+      assert.ok(requested, "the REQUESTED part evidence must never be omitted");
+      assert.match(requested.text, /tool mr7\.49/);
+      for (const m of res.messages) {
+        assert.ok(m.id, "every returned message keeps a stable id");
+        const ids = new Set(res.messages.map((x) => x.id));
+        assert.equal(ids.size, res.messages.length, "no duplicated messages");
+      }
+    },
+  );
+});
+
+test("search: object-shaped state.input with alternate stored serializer escapes is reachable — nested cafe and Windows path", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
+  // state.input is an OBJECT; the stored bytes use escape forms
+  // JSON.stringify never emits. json_extract on '$.state.input' returned the
+  // object's JSON text (escapes intact) and missed these; json_tree walks
+  // the DECODED scalar atoms instead, and the JS candidates align.
+  const fixture = await createFixtureDb({
+    sessions: [{ id: "s_obj", projectId: "prj_a", directory: "/repo-a", timeUpdated: T }],
+    messages: [
+      { id: "m_cafe", sessionId: "s_obj", timeCreated: T, data: { role: "assistant" } },
+      { id: "m_path", sessionId: "s_obj", timeCreated: T + 1, data: { role: "assistant" } },
+    ],
+    parts: [],
+  });
+  try {
+    const { DatabaseSync } = await import("node:sqlite");
+    const raw = new DatabaseSync(fixture.dbPath);
+    try {
+      raw.prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)").run(
+        "p_objcafe", "m_cafe", "s_obj", T, T,
+        '{"type":"tool","tool":"bash","state":{"status":"completed","input":{"command":"deploy caf\\u00e9 now"}}}',
+      );
+      raw.prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)").run(
+        "p_objpath", "m_path", "s_obj", T + 1, T + 1,
+        '{"type":"tool","tool":"bash","state":{"status":"completed","input":{"command":"robocopy C:\\\\Users\\\\dev"}}}',
+      );
+    } finally {
+      raw.close();
+    }
+    const { withFixtureDb } = await import("./fixtures/opencodeDbFixture.mjs");
+    await withFixtureDb(fixture, async () => {
+      const cafe = await ctoSearch({ query: "café" });
+      assert.equal(cafe.hits.length, 1, "a nested \u00e9-escaped object input must match the decoded query");
+      assert.equal(cafe.hits[0].partId, "p_objcafe");
+      assert.equal(cafe.hits[0].tool.matchedField, "input");
+      assert.match(cafe.hits[0].snippet.match, /café/);
+      const path = await ctoSearch({ query: "C:\\Users\\dev" });
+      assert.equal(path.hits.length, 1, "a nested Windows path in an object input must match the decoded query");
+      assert.equal(path.hits[0].partId, "p_objpath");
+      assert.equal(path.hits[0].tool.matchedField, "input");
+    });
+  } finally {
+    fixture.close();
+  }
+});
+
+test("around: a single MB output propagates its per-part cut to the aggregate truncated flag", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
+  const f = await (async () => {
+    const fixture = await createFixtureDb({
+      sessions: [{ id: "s_one", projectId: "prj_a", directory: "/repo-a", timeUpdated: T }],
+      messages: [{ id: "m_one", sessionId: "s_one", timeCreated: T, data: { role: "assistant" } }],
+      parts: [{ id: "p_one", messageId: "m_one", sessionId: "s_one", timeCreated: T, data: { type: "tool", tool: "bash", state: { status: "completed", output: bigOutput(1_000_000) } } }],
+    });
+    return fixture;
+  })();
+  try {
+    const { withFixtureDb } = await import("./fixtures/opencodeDbFixture.mjs");
+    await withFixtureDb(f, async () => {
+      const res = await ctoAround({ sessionId: "s_one", messageId: "m_one", before: 0, after: 0 });
+      assert.equal(res.status, "ok");
+      const item = res.messages[0].parts[0];
+      assert.equal(item.textTruncated, true, "the per-part cap flagged the item");
+      assert.equal(item.textSourceBytes, 1_000_000);
+      assert.equal(res.truncated, true, "the item-level cut MUST propagate to the aggregate flag — no early return may hide it");
+      assert.ok(serializedBytes(res) <= CTO_CONTEXT_LIMITS.textBudgetBytes);
+    });
+  } finally {
+    f.close();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Honest degradation + zero side effects
 // ---------------------------------------------------------------------------

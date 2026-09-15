@@ -159,6 +159,27 @@ function clearBound(markerObj, prefix) {
   delete markerObj[`${prefix}ReturnedBytes`];
 }
 
+// Serialized-aware exact minimal cut of one field: binary-search the largest
+// raw cut whose COMPLETED serialized response fits the budget. Returns the
+// best text, or null when even an emptied field cannot make it fit.
+function exactBoundField(result, obj, field, markerObj, prefix, sourceBytes) {
+  const val = obj[field];
+  let lo = 0;
+  let hi = byteLen(val);
+  let best = null;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    stampBound(obj, field, fitText(val, mid).text, markerObj, prefix, sourceBytes);
+    if (serializedBytes(result) <= CTO_CONTEXT_LIMITS.textBudgetBytes) {
+      best = obj[field];
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return best;
+}
+
 function compactToBudget(result, units) {
   // `units`: drop-order list (tail first) of { fields: [{obj, field,
   // sourceBytes?, markerObj?, prefix?}], pop: () => void }.
@@ -186,20 +207,7 @@ function compactToBudget(result, units) {
     if (serializedBytes(result) <= CTO_CONTEXT_LIMITS.textBudgetBytes) return;
     const val = f.obj[f.field];
     const { markerObj, prefix } = markerOf(f);
-    let lo = 0;
-    let hi = byteLen(val);
-    let best = null;
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1;
-      stampBound(f.obj, f.field, fitText(val, mid).text, markerObj, prefix, srcOf(f));
-      const m = serializedBytes(result);
-      if (m <= CTO_CONTEXT_LIMITS.textBudgetBytes) {
-        best = f.obj[f.field];
-        lo = mid + 1;
-      } else {
-        hi = mid - 1;
-      }
-    }
+    const best = exactBoundField(result, f.obj, f.field, markerObj, prefix, srcOf(f));
     if (best != null) {
       stampBound(f.obj, f.field, best, markerObj, prefix, srcOf(f));
       return;
@@ -208,13 +216,15 @@ function compactToBudget(result, units) {
     clearBound(markerObj, prefix);
   }
 
-  // Phase 2 — proportional fair share: no single field covers the overflow,
-  // so every field gives up an amount PROPORTIONAL to its size (small
-  // evidence survives; big dumps give the most). Rounds re-measure the
-  // completed response until it fits or nothing is left to give.
+  // Phase 2 — proportional fair share over the UNPROTECTED fields: no single
+  // field covers the overflow, so each gives up an amount PROPORTIONAL to
+  // its size (small evidence survives; big dumps give the most; PROTECTED
+  // fields — the requested anchor part's evidence — give last). Rounds
+  // re-measure the completed response until it fits or nothing is left.
+  const protectedSet = new Set(units.filter((u) => u.canDrop === false).flatMap((u) => u.fields).filter((f) => f.protected));
   let guard = 64;
   while (serializedBytes(result) > CTO_CONTEXT_LIMITS.textBudgetBytes && guard-- > 0) {
-    const live = allFields.filter((f) => f.obj[f.field] !== "");
+    const live = allFields.filter((f) => f.obj[f.field] !== "" && !protectedSet.has(f));
     if (live.length === 0) break;
     const over = serializedBytes(result) - CTO_CONTEXT_LIMITS.textBudgetBytes;
     const total = live.reduce((n, f) => n + byteLen(f.obj[f.field]), 0);
@@ -226,11 +236,26 @@ function compactToBudget(result, units) {
     }
   }
 
-  // Phase 3 — drop units tail-first until the response fits.
+  // Phase 3 — drop units tail-first until the response fits. Protected
+  // units (canDrop:false, e.g. the requested anchor part's evidence) are
+  // skipped, never omitted.
   for (const unit of units) {
     if (serializedBytes(result) <= CTO_CONTEXT_LIMITS.textBudgetBytes) return;
-    if (unit.canDrop === false) return;
+    if (unit.canDrop === false) continue;
     unit.pop();
+    result.truncated = true;
+  }
+
+  // Phase 4 — last resort: bound the PROTECTED fields themselves (the
+  // requested evidence is bounded, never omitted).
+  for (const f of allFields) {
+    if (serializedBytes(result) <= CTO_CONTEXT_LIMITS.textBudgetBytes) return;
+    if (!protectedSet.has(f)) continue;
+    const val = f.obj[f.field];
+    if (typeof val !== "string" || val === "") continue;
+    const { markerObj, prefix } = markerOf(f);
+    const best = exactBoundField(result, f.obj, f.field, markerObj, prefix, srcOf(f));
+    if (best != null) stampBound(f.obj, f.field, best, markerObj, prefix, srcOf(f));
     result.truncated = true;
   }
 }
@@ -417,14 +442,41 @@ export async function ctoListSessions({
 
 // The decoded-field candidate predicate. json_valid guards malformed rows;
 // COALESCE keeps NULL extracts out of the OR chain.
+// Candidate selection matches the DECODED JSON atoms (json_tree), never the
+// raw stored bytes and never a re-serialization of structured values — the
+// stored escape form is writer-dependent (`café` vs `caf\u00e9`, `\/`,
+// surrogate pairs), and json_extract on a nested object returns that object's
+// JSON text, not its decoded inner strings. json_tree yields every scalar
+// atom decoded, whatever serializer wrote the row. ASCII-case-folded, like
+// the previous LIKE semantics; parameterized; no FTS, no index changes.
 const DECODED_MATCH_SQL = `(
-  json_valid(p.data) AND (
-    instr(lower(COALESCE(json_extract(p.data, '$.text'), '')), lower(?)) > 0
-    OR instr(lower(COALESCE(json_extract(p.data, '$.tool'), '')), lower(?)) > 0
-    OR instr(lower(COALESCE(json_extract(p.data, '$.state.input'), '')), lower(?)) > 0
-    OR instr(lower(COALESCE(json_extract(p.data, '$.state.output'), '')), lower(?)) > 0
+  json_valid(p.data) AND EXISTS (
+    SELECT 1 FROM json_tree(p.data) jt
+    WHERE jt.type NOT IN ('object', 'array')
+      AND instr(lower(COALESCE(jt.value, '')), lower(?)) > 0
   )
 )`;
+
+// Pure: the decoded scalar strings of a structured JSON value (bounded) —
+// the serializer-independent searchable representation, aligned with the
+// SQL json_tree atoms so a SQL candidate is always verifiable in JS.
+function scalarTexts(value, out = [], seen = { n: 0 }, depth = 0) {
+  if (out.length >= 32 || seen.n >= 64 || depth > 4) return out;
+  seen.n++;
+  if (typeof value === "string") {
+    if (value !== "") out.push(value);
+    return out;
+  }
+  if (value && typeof value === "object") {
+    for (const v of Array.isArray(value) ? value : Object.values(value)) {
+      scalarTexts(v, out, seen, depth + 1);
+      if (out.length >= 32) break;
+    }
+    return out;
+  }
+  if (value != null) out.push(String(value));
+  return out;
+}
 
 // Pure: the searchable text candidates of one parsed part, most-specific
 // first. Returns [] for parts with no text evidence.
@@ -439,10 +491,11 @@ export function partCandidates(part) {
     const out = [];
     if (typeof part.tool === "string" && part.tool !== "") out.push({ field: "tool_name", text: part.tool });
     const state = part.state && typeof part.state === "object" ? part.state : null;
-    const input = state?.input;
-    if (input != null) out.push({ field: "input", text: typeof input === "string" ? input : JSON.stringify(input) });
-    const output = state?.output;
-    if (output != null) out.push({ field: "output", text: typeof output === "string" ? output : JSON.stringify(output) });
+    // Structured input/output contribute their DECODED scalar strings —
+    // never a JSON.stringify re-serialization, whose escaping would diverge
+    // from what the SQL json_tree atoms matched.
+    for (const t of scalarTexts(state?.input)) out.push({ field: "input", text: t });
+    for (const t of scalarTexts(state?.output)) out.push({ field: "output", text: t });
     return out.filter((c) => c.text !== "");
   }
   return [];
@@ -503,7 +556,7 @@ export async function ctoSearch({ query, projectId, directory, sessionId, limit,
 
   try {
     const where = [DECODED_MATCH_SQL];
-    const params = [q, q, q, q];
+    const params = [q];
     if (projectId != null) {
       where.push("s.project_id = ?");
       params.push(projectId);
@@ -748,6 +801,12 @@ export async function ctoAround({ sessionId, messageId, partId, before, after } 
           .all(rec.id, anchorPartRow.time_created ?? 0, anchorPartRow.time_created ?? 0, anchorPartRow.id, side + 1);
         if (beforeParts.length > side || afterParts.length > side) readCapped = true;
         itemsSource = [...beforeParts.slice(0, side).reverse(), anchorPartRow, ...afterParts.slice(0, side)];
+        // A centered window may still leave parts of this message outside it
+        // (e.g. 60 parts, window 49) — one bounded COUNT says so honestly.
+        if (!readCapped) {
+          const total = db.prepare("SELECT count(*) AS n FROM part WHERE message_id = ?").get(rec.id).n;
+          readCapped = total > itemsSource.length;
+        }
       } else {
         const fetched = db
           .prepare("SELECT id, time_created, data FROM part WHERE message_id = ? ORDER BY time_created ASC, id ASC LIMIT ?")
@@ -760,8 +819,8 @@ export async function ctoAround({ sessionId, messageId, partId, before, after } 
         const item = buildPartItem(partRow);
         if (item) rec.parts.push(item);
       }
-      if (readCapped) {
-        rec.partsOmitted = true;
+      if (readCapped || rec.parts.some((it) => it.textTruncated)) {
+        rec.partsOmitted = rec.partsOmitted || readCapped;
         result.truncated = true;
       }
     };
@@ -772,9 +831,11 @@ export async function ctoAround({ sessionId, messageId, partId, before, after } 
       fillParts(rec, false);
     }
 
-    // ONE authoritative compaction over the COMPLETED response: bound tail
-    // part-item texts first; drop tail part items (partsOmitted, counted);
-    // drop tail messages (counted; the anchor is never dropped).
+    // ONE authoritative compaction over the COMPLETED response. Units remove
+    // their OWN object by reference — never a blind pop, which removed the
+    // anchor message while compacting an earlier one. The requested anchor
+    // part's evidence is protected (boundable, never omitted); the anchor
+    // message is never dropped.
     const units = [];
     for (let m = result.messages.length - 1; m >= 0; m--) {
       const rec = result.messages[m];
@@ -782,9 +843,11 @@ export async function ctoAround({ sessionId, messageId, partId, before, after } 
         for (let p = rec.parts.length - 1; p >= 0; p--) {
           const item = rec.parts[p];
           units.push({
-            fields: [{ obj: item, field: "text" }],
+            fields: [{ obj: item, field: "text", protected: item.partId === partId }],
+            canDrop: item.partId !== partId,
             pop: () => {
-              rec.parts.pop();
+              const at = rec.parts.indexOf(item);
+              if (at >= 0) rec.parts.splice(at, 1);
               rec.partsOmitted = true;
               result.omittedCount++;
             },
@@ -795,7 +858,8 @@ export async function ctoAround({ sessionId, messageId, partId, before, after } 
         units.push({
           fields: [],
           pop: () => {
-            result.messages.pop();
+            const at = result.messages.indexOf(rec);
+            if (at >= 0) result.messages.splice(at, 1);
             result.omittedCount++;
           },
         });
