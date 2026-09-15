@@ -22,7 +22,7 @@ function makeEngine(overrides = {}) {
   return createCtoEngine(makeEngineDeps(overrides));
 }
 
-const TOOL_COUNT = 23; // 16 reads (BET-1164 + BET-1383 read_rollups/read_ledger) + read_inbox (BET-1397) + 3 watcher tools (BET-1165) + 3 drill-down read verbs (BET-1399)
+const TOOL_COUNT = 26; // 16 reads (BET-1164 + BET-1383 read_rollups/read_ledger) + read_inbox (BET-1397) + 3 watcher tools (BET-1165) + 3 drill-down read verbs (BET-1399) + 3 passive context verbs (P1c)
 
 // ---------------------------------------------------------------------------
 // Registry integrity
@@ -56,6 +56,9 @@ test("registry exposes every cto read tool with a complete shape, all mode auto"
       "read_profile",
       "read_toolregistry",
       "read_inbox",
+      "context_projects",
+      "context_search",
+      "context_around",
       "watch",
       "unwatch",
       "list_watches",
