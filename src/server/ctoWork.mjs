@@ -18,6 +18,25 @@
 // `stage`, `specHash`), which is how a stale result is detected after a
 // scope change (U13).
 //
+// RECEIPT LIFECYCLE (small explicit state machine — six statuses, one frozen
+// transition matrix, no workflow engine):
+//   pending   → in_flight | succeeded | failed | unknown
+//   in_flight → succeeded | failed | unknown
+//   unknown   → succeeded | failed     (reconciliation only, evidence required)
+//   succeeded/failed → immutable (same-status replays; anything else conflicts)
+// `pending` means the operation was reserved but NEVER externally issued —
+// that distinction is load-bearing for lease recovery: an expired-lease
+// `pending` is safely resumable, an expired-lease `in_flight` is durably
+// `unknown` (the external effect MAY have happened; reconcile, never
+// re-execute). There is NO downgrade path back to pending from any status.
+//
+// HISTORY RETENTION = SIMPLE HARD CAP, NO EVICTION. Every receipt ever
+// reserved is durable forever; nothing is compacted or tombstoned (spec
+// binding and outcome survive indefinitely). The bound is `HISTORY_CAPACITY`
+// receipts per work envelope: once full, a NEW unique key is REFUSED with
+// `history_capacity`, while identical retries of existing keys and all reads
+// keep working forever.
+//
 // LOCK ORDER (no deadlock). Two lock layers, always acquired in this order:
 //   1. `workGraphLock` — ONE module-level mutex serializing every
 //      dependency-graph mutation (create/revise that touch `dependencies`)
@@ -30,15 +49,6 @@
 // No code path acquires the graph lock while holding a file lock, and
 // operations that do not touch the graph (get/list/reserve/record/plain
 // revise) never take the graph lock at all.
-//
-// RETENTION = DEDUPE PRESERVED. Terminal receipt history is bounded
-// (OPERATIONS_KEEP full receipts); receipts evicted from the full set are
-// compacted into TOMBSTONES that keep the idempotency identity (key +
-// argsHash + op) and the original outcome (status/resultCode/externalRef), so
-// a retry of an old key still REPLAYS instead of re-executing (the 21st
-// operation must not resurrect the 1st as a blind duplicate). Tombstones are
-// capped at TOMBSTONE_KEEP. pending/in_flight/unknown receipts — and anything
-// not classifiable as terminal — are never evicted or tombstoned.
 //
 // CONTRACT-ONLY BOUNDARIES (P2a — deliberately NOT implemented here):
 //   - The work target (`project`) is a CALLER-SUPPLIED, structurally validated
@@ -86,25 +96,38 @@ export const WORK_STAGES = Object.freeze(["specify", "implement", "review", "mer
 export const WAITING_REASONS = Object.freeze(["dependency", "capacity", "provider", "external", "reconcile"]);
 export const DELIVERY_TARGET_KINDS = Object.freeze(["spec", "pr", "merged", "published", "deployed"]);
 export const OPERATION_STATUSES = Object.freeze(["pending", "in_flight", "succeeded", "failed", "unknown"]);
-// Unresolved receipts are never pruned or tombstoned (a pending/in_flight
-// receipt is someone's reservation; an unknown receipt is the only record
-// that an external effect MAY have happened — losing it invites blind
-// re-dispatch). Terminal receipts are the only ones eligible for compaction.
+// Unresolved statuses can never be evicted or skipped by retention; terminal
+// statuses are immutable once reached.
 export const UNRESOLVED_OPERATION_STATUSES = Object.freeze(["pending", "in_flight", "unknown"]);
 export const TERMINAL_OPERATION_STATUSES = Object.freeze(["succeeded", "failed"]);
 
-// Bounded operation history per envelope: at most OPERATIONS_KEEP FULL
-// terminal receipts; older terminals are compacted to tombstones; at most
-// TOMBSTONE_KEEP tombstones. Non-terminal receipts never count against
-// either cap.
-export const OPERATIONS_KEEP = 20;
-export const TOMBSTONE_KEEP = 4 * OPERATIONS_KEEP;
+// The one receipt transition matrix (blocker: no implicit in_flight→pending
+// downgrade anywhere — reserve recovery included). Same-status records are
+// idempotent replays, not transitions. unknown→terminal is reconciliation and
+// requires explicit evidence (a non-empty resultCode).
+export const RECEIPT_TRANSITIONS = Object.freeze({
+  pending: Object.freeze(["in_flight", "succeeded", "failed", "unknown"]),
+  in_flight: Object.freeze(["succeeded", "failed", "unknown"]),
+  succeeded: Object.freeze([]),
+  failed: Object.freeze([]),
+  unknown: Object.freeze(["succeeded", "failed"]),
+});
+
+// Hard cap on durable receipts per work envelope (blocker: the old layered
+// compaction moved replay breakage instead of bounding anything). Nothing is
+// ever evicted — when the cap is full, a NEW unique key is refused
+// (`history_capacity`) while identical retries and reads keep working forever.
+export const HISTORY_CAPACITY = 256;
 // List bound: listWorks never returns unbounded arrays; the caller learns the
 // true total so truncation is visible, never silent.
 export const LIST_DEFAULT_LIMIT = 100;
 export const LIST_MAX_LIMIT = 1000;
 
 const LEASE_DEFAULT_TTL_MS = 15 * 60_000;
+// Documented upper bound for caller-supplied lease TTLs: bounds crash-recovery
+// latency (a stuck in_flight receipt surfaces as unknown at most this long
+// after the holder died). Not related to any sweeper interval.
+export const MAX_LEASE_TTL_MS = 24 * 3_600_000;
 const DEFAULT_LEASE_OWNER = "cto-work";
 const MUTABLE_FIELDS = Object.freeze([
   "objective",
@@ -128,7 +151,7 @@ const MUTABLE_FIELDS = Object.freeze([
 // (target_not_found, revision_conflict, external_outcome_unknown); the few
 // service-layer codes beyond that list are spelled out and documented:
 //   target_exists, idempotency_key_args_mismatch, dependency_cycle,
-//   receipt_state_conflict, store_corrupt, store_unavailable.
+//   receipt_state_conflict, history_capacity, store_corrupt, store_unavailable.
 // ---------------------------------------------------------------------------
 
 export function workError(code, message, { receipt } = {}) {
@@ -154,6 +177,45 @@ export function canonicalJson(value) {
 
 export function canonicalArgsHash(op, args) {
   return createHash("sha256").update(canonicalJson({ op, args: args ?? {} })).digest("hex");
+}
+
+// Deterministic JSON-safety gate for operation args: only plain objects,
+// arrays, strings, finite numbers, booleans and null. Anything whose
+// JSON round-trip is lossy or nondeterministic (functions, class instances,
+// Dates, bigints, symbols, NaN/±Infinity, undefined values, cycles) is
+// rejected BY NAME before any write, so the hash and the stored snapshot can
+// never disagree.
+function assertJsonSafe(value, path, seen) {
+  if (value === null) return;
+  const type = typeof value;
+  if (type === "string" || type === "boolean") return;
+  if (type === "number") {
+    if (!Number.isFinite(value)) {
+      throw workError("unsupported", `${path} must be a finite number (got ${String(value)})`);
+    }
+    return;
+  }
+  if (type === "object") {
+    if (seen.has(value)) {
+      throw workError("unsupported", `${path} contains a circular reference`);
+    }
+    const isArray = Array.isArray(value);
+    const proto = Object.getPrototypeOf(value);
+    if (!isArray && proto !== Object.prototype && proto !== null) {
+      throw workError("unsupported", `${path} must be a plain object (class instances/Dates are not JSON-safe)`);
+    }
+    seen.add(value);
+    const entries = isArray ? value.map((v, i) => [String(i), v]) : Object.entries(value);
+    for (const [key, entry] of entries) {
+      if (entry === undefined) {
+        throw workError("unsupported", `${path}.${key} is undefined — JSON round-trip would drop it`);
+      }
+      assertJsonSafe(entry, `${path}.${key}`, seen);
+    }
+    seen.delete(value);
+    return;
+  }
+  throw workError("unsupported", `${path} must be JSON-serializable (got ${type})`);
 }
 
 // ---------------------------------------------------------------------------
@@ -229,44 +291,58 @@ function validateRefArray(value, label) {
   for (const entry of value) assertPlainObject(entry, `${label}[]`);
 }
 
-// A stored receipt must carry its full dedupe identity and a status from the
-// closed set — an unclassifiable status can never be mistaken for terminal by
-// the retention logic, because an envelope carrying one refuses to load.
+// A stored receipt carries its FULL safety identity: the dedupe key material
+// (key/op/argsHash), the staleness material (specHash/stage/workRevision) and
+// the recovery material (status/lease). A receipt missing any of these refuses
+// to load — retention and recovery logic never guess.
 function assertValidReceipt(receipt, workId) {
-  const label = `operations[]`;
+  const label = "operations[]";
   assertPlainObject(receipt, `${label} (work "${workId}")`);
   assertNonEmptyString(receipt.id, `${label}.id`);
   assertNonEmptyString(receipt.key, `${label}.key`);
+  assertNonEmptyString(receipt.op, `${label}.op`);
   assertNonEmptyString(receipt.argsHash, `${label}.argsHash`);
   if (!OPERATION_STATUSES.includes(receipt.status)) {
     throw workError("unsupported", `${label}.status ${JSON.stringify(receipt.status)} is not a valid operation status`);
   }
-  if (receipt.tombstone === true) {
-    if (typeof receipt.prunedAt !== "number") {
-      throw workError("unsupported", `${label}.prunedAt must be a number on a tombstone`);
-    }
-    return;
+  assertNonEmptyString(receipt.specHash, `${label}.specHash`);
+  if (!WORK_STAGES.includes(receipt.stage)) {
+    throw workError("unsupported", `${label}.stage ${JSON.stringify(receipt.stage)} is not a valid work stage`);
   }
-  assertNonEmptyString(receipt.op, `${label}.op`);
   if (!Number.isInteger(receipt.workRevision) || receipt.workRevision < 1) {
     throw workError("unsupported", `${label}.workRevision must be a positive integer`);
   }
   if (typeof receipt.createdAt !== "number" || typeof receipt.updatedAt !== "number") {
     throw workError("unsupported", `${label} timestamps must be numbers`);
   }
-  if (receipt.lease != null) {
-    assertPlainObject(receipt.lease, `${label}.lease`);
-    assertNonEmptyString(receipt.lease.owner, `${label}.lease.owner`);
-    if (typeof receipt.lease.expiresAt !== "number") {
-      throw workError("unsupported", `${label}.lease.expiresAt must be a number`);
+  assertPlainObject(receipt.lease, `${label}.lease`);
+  assertNonEmptyString(receipt.lease.owner, `${label}.lease.owner`);
+  if (typeof receipt.lease.expiresAt !== "number" || !Number.isFinite(receipt.lease.expiresAt)) {
+    throw workError("unsupported", `${label}.lease.expiresAt must be a finite number`);
+  }
+  // Safety-adjacent optional fields are validated when present.
+  if (receipt.resultAt != null && typeof receipt.resultAt !== "number") {
+    throw workError("unsupported", `${label}.resultAt must be a number or null`);
+  }
+  for (const field of ["externalRef", "resultCode"]) {
+    if (receipt[field] != null && typeof receipt[field] !== "string") {
+      throw workError("unsupported", `${label}.${field} must be a string or null`);
     }
+  }
+  if (receipt.takeoverCount != null && (!Number.isInteger(receipt.takeoverCount) || receipt.takeoverCount < 0)) {
+    throw workError("unsupported", `${label}.takeoverCount must be a non-negative integer`);
+  }
+  if (receipt.superseded != null && typeof receipt.superseded !== "boolean") {
+    throw workError("unsupported", `${label}.superseded must be a boolean`);
+  }
+  if (receipt.args !== undefined) {
+    assertJsonSafe(receipt.args, `${label}.args`, new Set());
   }
 }
 
-// Load-time shape gate (blocker: the loader used to accept anything with a
-// v/id). Every read, mutate and prune downstream sees a structurally valid
-// envelope or nothing at all — corruption is visible, never silently pruned
-// or classified.
+// Load-time shape gate: every read, mutate and retention decision downstream
+// sees a structurally valid envelope or nothing at all — corruption is
+// visible, never silently reinterpreted.
 function assertValidEnvelope(env, id) {
   const fail = (message) => workError("store_corrupt", `work envelope "${id}" is corrupt: ${message}`);
   try {
@@ -293,10 +369,10 @@ function assertValidEnvelope(env, id) {
     if (typeof env.priorityReason !== "string") {
       throw workError("unsupported", "priorityReason must be a string");
     }
-    if (env.state !== undefined && !WORK_STATES.includes(env.state)) {
+    if (!WORK_STATES.includes(env.state)) {
       throw workError("unsupported", `state "${env.state}" is not a valid work state`);
     }
-    if (env.stage !== undefined && !WORK_STAGES.includes(env.stage)) {
+    if (!WORK_STAGES.includes(env.stage)) {
       throw workError("unsupported", `stage "${env.stage}" is not a valid work stage`);
     }
     if (env.waitingReason !== undefined && !WAITING_REASONS.includes(env.waitingReason)) {
@@ -319,6 +395,9 @@ function assertValidEnvelope(env, id) {
     }
     if (!Array.isArray(env.operations)) {
       throw workError("unsupported", "operations must be an array");
+    }
+    if (env.operations.length > HISTORY_CAPACITY) {
+      throw workError("unsupported", `operations exceeds the durable history capacity ${HISTORY_CAPACITY}`);
     }
     for (const receipt of env.operations) assertValidReceipt(receipt, id);
   } catch (error) {
@@ -411,65 +490,6 @@ async function loadAllEnvelopes(store) {
     if (env) envs.push(env);
   }
   return envs;
-}
-
-// ---------------------------------------------------------------------------
-// Retention + dependency-graph helpers
-// ---------------------------------------------------------------------------
-
-// Pure: bound the operation history WITHOUT losing the dedupe function.
-//   - pending/in_flight/unknown receipts (and anything not classifiable as
-//     terminal) are always kept verbatim;
-//   - full terminal receipts beyond `keep` (oldest first) are compacted into
-//     tombstones preserving key + argsHash + op + original outcome;
-//   - tombstones beyond `tombstoneKeep` (oldest first) are dropped.
-export function pruneOperationHistory(
-  operations,
-  { keep = OPERATIONS_KEEP, tombstoneKeep = TOMBSTONE_KEEP, nowMs = Date.now() } = {},
-) {
-  const list = Array.isArray(operations) ? operations : [];
-  const kept = [];
-  const fullTerminals = [];
-  const tombstones = [];
-  for (const r of list) {
-    if (!r || typeof r !== "object") continue;
-    if (r.tombstone === true) tombstones.push(r);
-    else if (TERMINAL_OPERATION_STATUSES.includes(r.status)) fullTerminals.push(r);
-    else kept.push(r); // unresolved — never evicted, whatever the caps
-  }
-  const byResult = (a, b) =>
-    (a.resultAt ?? a.updatedAt ?? 0) - (b.resultAt ?? b.updatedAt ?? 0);
-  fullTerminals.sort(byResult);
-  const toTombstone = [];
-  if (fullTerminals.length > keep) {
-    toTombstone.push(...fullTerminals.slice(0, fullTerminals.length - keep));
-  }
-  const keptTerminals = fullTerminals.slice(Math.max(0, fullTerminals.length - keep));
-  const allTombstones = [
-    ...toTombstone.map((r) => ({
-      id: r.id,
-      key: r.key,
-      op: r.op,
-      argsHash: r.argsHash,
-      status: r.status,
-      resultCode: r.resultCode ?? null,
-      externalRef: r.externalRef ?? null,
-      resultAt: r.resultAt ?? r.updatedAt ?? null,
-      tombstone: true,
-      prunedAt: nowMs,
-    })),
-    ...tombstones,
-  ];
-  allTombstones.sort(byResult);
-  const droppedTombstones = allTombstones.length > tombstoneKeep
-    ? allTombstones.slice(0, allTombstones.length - tombstoneKeep)
-    : [];
-  const droppedIds = new Set(droppedTombstones.map((t) => t.id));
-  return [
-    ...kept,
-    ...keptTerminals,
-    ...allTombstones.filter((t) => !droppedIds.has(t.id)),
-  ];
 }
 
 // Pure: true when the dependency edges (workId → dependencies) contain a cycle.
@@ -681,9 +701,11 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
       // §5.2 "spec revisions invalidate incompatible results": a spec hash
       // change durably marks every receipt reserved under the old spec, so a
       // later redelivery of its result can never report superseded:false.
+      // Receipts (and their specHash) are never compacted away, so the
+      // staleness material survives as long as the envelope does.
       if (patch.spec !== undefined && next.spec.hash !== env.spec.hash) {
         for (const receipt of next.operations) {
-          if (receipt && receipt.tombstone !== true && receipt.specHash != null && receipt.specHash !== next.spec.hash) {
+          if (receipt.specHash !== next.spec.hash) {
             receipt.superseded = true;
           }
         }
@@ -725,7 +747,30 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
         `expectedRevision must be a positive integer (got ${JSON.stringify(expectedRevision)})`,
       );
     }
-    const argsHash = canonicalArgsHash(op, args);
+    // Lease inputs are validated BEFORE any write: a malformed lease must
+    // never reach the store and silently poison crash recovery.
+    if (leaseOwner !== undefined) assertNonEmptyString(leaseOwner, "leaseOwner");
+    if (leaseTtlMs !== undefined) {
+      if (typeof leaseTtlMs !== "number" || !Number.isInteger(leaseTtlMs) || leaseTtlMs <= 0) {
+        throw workError(
+          "unsupported",
+          `leaseTtlMs must be a positive finite integer (got ${JSON.stringify(leaseTtlMs)})`,
+        );
+      }
+      if (leaseTtlMs > MAX_LEASE_TTL_MS) {
+        throw workError(
+          "unsupported",
+          `leaseTtlMs ${leaseTtlMs} exceeds the documented maximum ${MAX_LEASE_TTL_MS}ms`,
+        );
+      }
+    }
+    // The args snapshot is validated and deep-cloned SYNCHRONOUSLY, before
+    // the first await: the hash AND the stored receipt derive from the same
+    // frozen snapshot, so a caller mutating its args object while the reserve
+    // is in flight can never make stored data disagree with the hashed data.
+    assertJsonSafe(args ?? {}, "args", new Set());
+    const argsSnapshot = args === undefined ? {} : JSON.parse(JSON.stringify(args));
+    const argsHash = canonicalArgsHash(op, argsSnapshot);
     const ts = now();
     const ttl = leaseTtlMs ?? LEASE_DEFAULT_TTL_MS;
     const owner = leaseOwner ?? DEFAULT_LEASE_OWNER;
@@ -744,14 +789,8 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
           throw workError(
             "idempotency_key_args_mismatch",
             `idempotency key "${key}" was already used on work "${workId}" with operation ` +
-              `${JSON.stringify(existing.op ?? "unknown")} and different arguments`,
+              `${JSON.stringify(existing.op)} and different arguments`,
           );
-        }
-        if (existing.tombstone === true) {
-          // Retention compacted the full receipt; the dedupe identity and the
-          // original outcome survive, so this retry REPLAYS — it must never
-          // re-execute the action as a new reservation.
-          return { save: null, value: { receipt: existing, replay: true } };
         }
         if (existing.status === "unknown") {
           // §8.2: unknown is not safe to retry without reconciliation — forbid
@@ -765,7 +804,7 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
         }
         if (TERMINAL_OPERATION_STATUSES.includes(existing.status)) {
           // Terminal ALWAYS replays, lease expired or not — a succeeded/failed
-          // operation is never reset to pending and never re-executed.
+          // operation is never reset and never re-executed.
           return { save: null, value: { receipt: existing, replay: true } };
         }
         const leaseLive = existing.lease != null && existing.lease.expiresAt > ts;
@@ -776,9 +815,9 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
           return { save: null, value: { receipt: existing, replay: true } };
         }
         if (existing.status === "pending") {
-          // Expired lease on a never-dispatched reservation (the P4 protocol
-          // records in_flight BEFORE the first external effect) → safe resume:
-          // re-arm the same receipt, never create a second one.
+          // Expired lease on a never-externally-issued reservation → safe
+          // resume: re-arm the SAME receipt (pending→pending is a lease
+          // re-arm, not a status transition), never create a second one.
           existing.lease = { owner, expiresAt: ts + ttl };
           existing.takeoverCount = (existing.takeoverCount ?? 0) + 1;
           existing.updatedAt = ts;
@@ -786,8 +825,9 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
           return { save: env, value: { receipt: existing, replay: false, recovered: true } };
         }
         // in_flight + expired lease → the external effect MAY have run and its
-        // outcome was never observed. Never re-execute: durably mark the
-        // receipt unknown and demand reconciliation.
+        // outcome was never observed. The transition matrix allows
+        // in_flight→unknown (never a downgrade to pending): durably mark it
+        // and demand reconciliation.
         existing.status = "unknown";
         existing.reconcileReason = "lease_expired";
         existing.resultAt = existing.resultAt ?? ts;
@@ -795,12 +835,20 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
         env.updatedAt = ts;
         return { save: env, value: { receipt: existing, replay: false, uncertain: true } };
       }
+      // New unique key at capacity → refuse; existing keys keep replaying.
+      if (env.operations.length >= HISTORY_CAPACITY) {
+        throw workError(
+          "history_capacity",
+          `work "${workId}" operation history is at the durable capacity ${HISTORY_CAPACITY}; ` +
+            `resolve/archive existing operations before reserving new ones (identical retries still replay)`,
+        );
+      }
       const receipt = {
         id: `op_${newId()}`,
         key,
         op,
         argsHash,
-        args: args ?? {},
+        args: argsSnapshot,
         workRevision: env.revision,
         stage: env.stage,
         specHash: env.spec.hash,
@@ -813,7 +861,7 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
         updatedAt: ts,
         resultAt: null,
       };
-      env.operations = pruneOperationHistory([...env.operations, receipt], { nowMs: ts });
+      env.operations = [...env.operations, receipt];
       // Receipt bookkeeping does NOT bump the work-state revision: a same-key
       // retry (or a concurrent reserve) carrying expectedRevision must replay,
       // not conflict. `revision` moves only when the work's semantic state
@@ -833,10 +881,11 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
     return result;
   }
 
-  // §8.1 step 5: persist the OBSERVED result on the receipt. Records only —
-  // stage advancement/orchestration is the later coordinator's job. A result
-  // whose spec hash no longer matches the envelope's current spec is recorded
-  // but marked superseded and never treated as current-work progress (U13) —
+  // §8.1 step 5: persist the OBSERVED result on the receipt, through the one
+  // explicit transition matrix (RECEIPT_TRANSITIONS). Records only — stage
+  // advancement/orchestration is the later coordinator's job. A result whose
+  // spec hash no longer matches the envelope's current spec is recorded but
+  // marked superseded and never treated as current-work progress (U13) —
   // including on REPLAY: a redelivered outcome for a receipt that succeeded
   // under an older spec reports superseded:true, never false.
   async function recordOperationOutcome(
@@ -858,33 +907,38 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
           `operation ${receiptId ?? `key "${key}"`} not found on work "${workId}"`,
         );
       }
-      const staleSpec = receipt.specHash != null && receipt.specHash !== env.spec.hash;
+      const staleSpec = receipt.specHash !== env.spec.hash;
       if (receipt.status === status) {
         // Idempotent replay of a known outcome — staleness is evaluated HERE
         // too, before returning, so a redelivery after a spec change can
         // never report superseded:false.
         return { save: null, value: { receipt, replay: true, superseded: receipt.superseded === true || staleSpec } };
       }
-      if (TERMINAL_OPERATION_STATUSES.includes(receipt.status)) {
+      const allowed = RECEIPT_TRANSITIONS[receipt.status] ?? [];
+      if (!allowed.includes(status)) {
         throw workError(
           "receipt_state_conflict",
-          `operation "${receipt.id}" is already terminal (${receipt.status}); refusing to record ${status}`,
+          `operation "${receipt.id}": transition ${receipt.status} → ${status} is not allowed ` +
+            `(allowed: ${allowed.length ? allowed.join(", ") : "none — terminal, replay only"})`,
         );
       }
-      if (receipt.status === "unknown" && status !== "succeeded" && status !== "failed") {
-        throw workError(
-          "receipt_state_conflict",
-          `operation "${receipt.id}" is unknown; only a definitive outcome (succeeded/failed) resolves it`,
-        );
+      if (receipt.status === "unknown") {
+        // Reconciliation must carry explicit evidence of HOW the outcome was
+        // verified (e.g. the PR head / run id that was inspected).
+        if (typeof resultCode !== "string" || resultCode.trim().length === 0) {
+          throw workError(
+            "unsupported",
+            `resolving unknown operation "${receipt.id}" requires explicit reconciliation evidence in resultCode`,
+          );
+        }
       }
       receipt.status = status;
-      receipt.resultCode = resultCode ?? null;
+      receipt.resultCode = resultCode ?? receipt.resultCode ?? null;
       receipt.externalRef = externalRef ?? receipt.externalRef ?? null;
       receipt.resultAt = ts;
       receipt.updatedAt = ts;
       const superseded = staleSpec;
       if (superseded) receipt.superseded = true;
-      env.operations = pruneOperationHistory([...env.operations], { nowMs: ts });
       env.updatedAt = ts;
       return { save: env, value: { receipt, replay: false, superseded } };
     });

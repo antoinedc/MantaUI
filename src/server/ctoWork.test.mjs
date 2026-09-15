@@ -7,13 +7,14 @@
 // exist yet in P2a.
 //
 // Every store path resolves under the MANTA_STATE_HOME sandbox
-// (ctoPath → statePath); each test gets its own subdirectory. The only I/O is
-// real fs against the sandbox — no live tmux/opencode/network.
+// (ctoPath → statePath); each test gets its own subdirectory, and the after()
+// hook removes only THIS file's fixtures. The only I/O is real fs against the
+// sandbox — no live tmux/opencode/network.
 
 // BET-1490: shared fail-fast guard — must stay the first import (see ctoTestGuard.mjs).
 import "./ctoTestGuard.mjs";
 
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdir, writeFile, readFile, chmod, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
@@ -21,12 +22,12 @@ import {
   createCtoWork,
   canonicalArgsHash,
   canonicalJson,
-  pruneOperationHistory,
   validateProjectRef,
   validateDeliveryTarget,
   workError,
-  OPERATIONS_KEEP,
-  TOMBSTONE_KEEP,
+  RECEIPT_TRANSITIONS,
+  HISTORY_CAPACITY,
+  MAX_LEASE_TTL_MS,
   LIST_DEFAULT_LIMIT,
   OPERATION_STATUSES,
   UNRESOLVED_OPERATION_STATUSES,
@@ -60,6 +61,31 @@ function sandboxStore(labelSuffix = "") {
   };
 }
 
+// Observable store: counts COMMITTED writes and lets a test latch on "the
+// Nth write has fully landed" — injected synchronization for deterministic
+// interleaving (waiting for a seeded file proves nothing about the write
+// under test).
+function observableStore(labelSuffix = "") {
+  const base = sandboxStore(labelSuffix);
+  const state = { writes: 0 };
+  const waiters = [];
+  const notify = () => {
+    const due = waiters.splice(0);
+    for (const w of due) w();
+  };
+  return {
+    ...base,
+    save: async (id, data) => {
+      await base.save(id, data);
+      state.writes += 1;
+      notify();
+    },
+    writes: () => state.writes,
+    waitForWrites: (n) =>
+      state.writes >= n ? Promise.resolve() : new Promise((resolve) => waiters.push(resolve)),
+  };
+}
+
 // Deterministic clock: each call ticks 1ms; advance() jumps forward.
 function makeClock() {
   let t = 1_700_000_000_000;
@@ -90,21 +116,15 @@ async function seedWork(service, id, overrides = {}) {
   return service.createWork({ id, ...makeWork(overrides) });
 }
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-// Deterministic interleave latch: resolve once `path` exists on disk.
-async function waitForFile(path, { timeoutMs = 5000 } = {}) {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    try {
-      await stat(path);
-      return;
-    } catch {
-      if (Date.now() > deadline) throw new Error(`file never appeared: ${path}`);
-      await sleep(5);
-    }
+// Teardown: remove ONLY this file's recorded fixtures (the box disk is tight;
+// nothing outside the sandbox is ever touched).
+const hookWorkIds = [];
+after(async () => {
+  await rm(ctoPath("work-test"), { recursive: true, force: true });
+  for (const id of hookWorkIds) {
+    await rm(workStore.pathFor(id), { force: true });
   }
-}
+});
 
 // ---------------------------------------------------------------------------
 // Envelope lifecycle: create / get / list (bounded)
@@ -186,7 +206,7 @@ test("createWork rejects an unknown dependency and a sequential duplicate id", a
   await assert.rejects(seedWork(work, "w_b"), (error) => error.code === "target_exists");
 });
 
-test("BLOCKER 4: concurrent creates of the SAME supplied id — exactly one wins, no overwrite erases it", async () => {
+test("create race: concurrent creates of the SAME supplied id — exactly one wins, no overwrite erases it", async () => {
   const store = sandboxStore();
   const work = createCtoWork({ store, now: makeClock().now });
   const [a, b] = await Promise.allSettled([
@@ -202,11 +222,11 @@ test("BLOCKER 4: concurrent creates of the SAME supplied id — exactly one wins
   assert.equal(env.objective, fulfilled[0].value.objective);
 });
 
-test("BLOCKER 4 (deterministic latch): create commits → a second create with the same id rejects, never overwrites", async () => {
-  const store = sandboxStore();
+test("create race (deterministic latch on injected write signals): second create after commit rejects, never overwrites", async () => {
+  const store = observableStore();
   const work = createCtoWork({ store, now: makeClock().now });
   const first = work.createWork({ id: "w_latch", ...makeWork({ attempts: [{ attempt: 1 }] }) });
-  await waitForFile(store.pathFor("w_latch")); // first create fully committed
+  await store.waitForWrites(1); // the FIRST create fully committed (not a pre-existing file)
   await assert.rejects(
     work.createWork({ id: "w_latch", ...makeWork() }),
     (error) => error.code === "target_exists",
@@ -231,7 +251,7 @@ test("listWorks is bounded and reports the true total (truncation is visible, ne
   await assert.rejects(work.listWorks({ limit: 0 }), /limit/);
 });
 
-test("BLOCKER 5: a missing store directory is an EMPTY portfolio (ENOENT), other readdir failures are explicit", async (t) => {
+test("a missing store directory is an EMPTY portfolio (ENOENT), other readdir failures are explicit", async (t) => {
   const store = sandboxStore();
   const work = createCtoWork({ store, now: makeClock().now });
   // No store yet → ENOENT → legitimately empty, never an error.
@@ -314,7 +334,7 @@ test("reviseWork with a stale expectedRevision is a revision_conflict and writes
   assert.equal(after.objective, "ship the thing");
 });
 
-test("BLOCKER 6: revise validation still applies to loaded envelopes — invalid updates never write", async () => {
+test("revise validation applies to loaded envelopes — invalid updates never write", async () => {
   const work = createCtoWork({ store: sandboxStore(), now: makeClock().now });
   const env = await seedWork(work, "w_r3");
   await assert.rejects(work.reviseWork("w_r3", { sneaky: true }), /unknown revise field/);
@@ -341,7 +361,7 @@ test("reviseWork enforces the waiting invariant in both directions", async () =>
   assert.equal(got.waitingReason, undefined);
 });
 
-test("BLOCKER 8: a spec change durably invalidates receipts reserved under the old spec", async () => {
+test("a spec change durably invalidates receipts reserved under the old spec (specHash preserved, never compacted)", async () => {
   const work = createCtoWork({ store: sandboxStore(), now: makeClock().now });
   await seedWork(work, "w_r5", { state: "running" });
   await work.reserveOperation("w_r5", { key: "kr", op: "dispatch", args: {} });
@@ -349,8 +369,10 @@ test("BLOCKER 8: a spec change durably invalidates receipts reserved under the o
     spec: { revision: 2, hash: "sha256:bbb", documentRef: "docs/specs/alpha.md#rev2" },
   });
   assert.equal(revised.operations[0].superseded, true, "marked superseded AT revision time");
+  assert.equal(revised.operations[0].specHash, "sha256:aaa", "the original spec binding is preserved on the receipt");
   const reloaded = await work.getWork("w_r5");
   assert.equal(reloaded.operations[0].superseded, true, "the invalidation is durable");
+  assert.equal(reloaded.operations[0].specHash, "sha256:aaa", "specHash survives reload — no compaction, no eviction");
 });
 
 test("reviseWork spec changes are monotonic and hash-consistent", async () => {
@@ -401,7 +423,7 @@ test("reviseWork rejects unknown dependencies and sequential dependency cycles",
   assert.deepEqual(d2.dependencies, []);
 });
 
-test("BLOCKER 3: concurrent A→B / B→A dependency revisions — one commits, the cycle never persists", async () => {
+test("concurrent A→B / B→A dependency revisions — one commits, the cycle never persists", async () => {
   const work = createCtoWork({ store: sandboxStore(), now: makeClock().now });
   await seedWork(work, "w_g1");
   await seedWork(work, "w_g2");
@@ -478,15 +500,15 @@ test("U10: two concurrent reserves with the same key produce exactly ONE reserva
   assert.equal(after.operations.length, 1);
 });
 
-test("U10 (deterministic latch): after the first reserve commits, an interleaved same-key reserve replays", async () => {
-  const store = sandboxStore();
+test("U10 (deterministic latch on injected write signals): after the first reserve commits, an interleaved same-key reserve replays", async () => {
+  const store = observableStore();
   const clock = makeClock();
   const work = createCtoWork({ store, now: clock.now });
-  const env = await seedWork(work, "w_o2b");
+  const env = await seedWork(work, "w_o2b"); // write #1
   const first = work.reserveOperation("w_o2b", {
     key: "kl", op: "dispatch", args: { n: 1 }, expectedRevision: env.revision,
   });
-  await waitForFile(store.pathFor("w_o2b")); // first reservation fully committed
+  await store.waitForWrites(2); // the RESERVE (write #2) fully committed — not a pre-existing file
   const second = await work.reserveOperation("w_o2b", {
     key: "kl", op: "dispatch", args: { n: 1 }, expectedRevision: env.revision,
   });
@@ -537,7 +559,7 @@ test("U10: the same key with DIFFERENT arguments is rejected and reserves nothin
   assert.equal(after.operations.length, 1);
 });
 
-test("BLOCKER 7: the same key with the SAME args but a DIFFERENT op is rejected", async () => {
+test("the same key with the SAME args but a DIFFERENT op is rejected", async () => {
   const clock = makeClock();
   const work = createCtoWork({ store: sandboxStore(), now: clock.now });
   await seedWork(work, "w_o4b");
@@ -571,7 +593,7 @@ test("U10: a live lease replays; an expired PENDING lease is recovered exactly o
   assert.equal(after.operations.length, 1);
 });
 
-test("BLOCKER 1: an expired lease NEVER resets a terminal receipt — succeeded still replays", async () => {
+test("an expired lease NEVER resets a terminal receipt — succeeded/failed still replay", async () => {
   const clock = makeClock();
   const work = createCtoWork({ store: sandboxStore(), now: clock.now });
   await seedWork(work, "w_o5b");
@@ -601,7 +623,7 @@ test("BLOCKER 1: an expired lease NEVER resets a terminal receipt — succeeded 
   assert.equal(failedReplay.receipt.status, "failed");
 });
 
-test("BLOCKER 1: an expired IN_FLIGHT lease becomes a durable UNKNOWN — reconcile, never re-execute", async () => {
+test("an expired IN_FLIGHT lease becomes a durable UNKNOWN — reconcile, never re-execute", async () => {
   const store = sandboxStore();
   const clock = makeClock();
   const work = createCtoWork({ store, now: clock.now });
@@ -627,9 +649,9 @@ test("BLOCKER 1: an expired IN_FLIGHT lease becomes a durable UNKNOWN — reconc
     fresh.reserveOperation("w_o5c", { key: "ki", op: "dispatch", args: {} }),
     (error) => error.code === "external_outcome_unknown",
   );
-  // Reconciliation resolves it; only then does the key replay.
+  // Reconciliation (with evidence) resolves it; only then does the key replay.
   const resolved = await fresh.recordOperationOutcome("w_o5c", {
-    receiptId: receipt.id, status: "succeeded", resultCode: "reconciled",
+    receiptId: receipt.id, status: "succeeded", resultCode: "reconciled:job_i_output_verified",
   });
   assert.equal(resolved.receipt.status, "succeeded");
   const replay = await fresh.reserveOperation("w_o5c", { key: "ki", op: "dispatch", args: {} });
@@ -677,10 +699,200 @@ test("reserveOperation with a stale expectedRevision is a revision_conflict and 
 });
 
 // ---------------------------------------------------------------------------
+// BLOCKER 5: lease inputs validated BEFORE any write
+// ---------------------------------------------------------------------------
+
+test("malformed lease inputs are rejected before any write", async () => {
+  const clock = makeClock();
+  const work = createCtoWork({ store: sandboxStore(), now: clock.now });
+  await seedWork(work, "w_lz");
+  for (const bad of ["1000", NaN, 0, -1000, Number.POSITIVE_INFINITY, 1.5, MAX_LEASE_TTL_MS + 1]) {
+    await assert.rejects(
+      work.reserveOperation("w_lz", { key: `k_${String(bad)}`, op: "dispatch", args: {}, leaseTtlMs: bad }),
+      (error) => error.code === "unsupported" && /leaseTtlMs/.test(error.message),
+      `leaseTtlMs ${String(bad)} must be rejected`,
+    );
+  }
+  await assert.rejects(
+    work.reserveOperation("w_lz", { key: "k_owner_empty", op: "dispatch", args: {}, leaseOwner: "" }),
+    (error) => error.code === "unsupported" && /leaseOwner/.test(error.message),
+  );
+  await assert.rejects(
+    work.reserveOperation("w_lz", { key: "k_owner_num", op: "dispatch", args: {}, leaseOwner: 42 }),
+    (error) => error.code === "unsupported" && /leaseOwner/.test(error.message),
+  );
+  const after = await work.getWork("w_lz");
+  assert.equal(after.operations.length, 0, "nothing was written by any rejected reserve");
+  // The documented maximum itself is accepted.
+  const ok = await work.reserveOperation("w_lz", { key: "k_max", op: "dispatch", args: {}, leaseTtlMs: MAX_LEASE_TTL_MS });
+  assert.equal(ok.replay, false);
+});
+
+// ---------------------------------------------------------------------------
+// BLOCKER 6: caller-mutable args — snapshot + hash taken synchronously
+// ---------------------------------------------------------------------------
+
+test("mutating the args object after reserve is called cannot desync stored data from the hash", async () => {
+  const clock = makeClock();
+  const work = createCtoWork({ store: sandboxStore(), now: clock.now });
+  await seedWork(work, "w_sn");
+  const args = { n: 1, nested: { deep: "v" } };
+  const pending = work.reserveOperation("w_sn", { key: "ks", op: "dispatch", args });
+  // Mutate WHILE the reserve is in flight — after the synchronous snapshot.
+  args.n = 999;
+  args.mutated = true;
+  args.nested.deep = "changed";
+  const { receipt } = await pending;
+  assert.deepEqual(receipt.args, { n: 1, nested: { deep: "v" } }, "stored args are the synchronous snapshot");
+  assert.equal("mutated" in receipt.args, false);
+  assert.equal(receipt.argsHash, canonicalArgsHash("dispatch", { n: 1, nested: { deep: "v" } }));
+  const reloaded = await work.getWork("w_sn");
+  assert.deepEqual(reloaded.operations[0].args, { n: 1, nested: { deep: "v" } }, "the snapshot survives persistence");
+  // Dedupe follows the snapshot, not the mutated caller object.
+  const replay = await work.reserveOperation("w_sn", { key: "ks", op: "dispatch", args: { n: 1, nested: { deep: "v" } } });
+  assert.equal(replay.replay, true);
+  await assert.rejects(
+    work.reserveOperation("w_sn", { key: "ks", op: "dispatch", args: { n: 999 } }),
+    (error) => error.code === "idempotency_key_args_mismatch",
+  );
+});
+
+test("non-JSON-safe args are rejected deterministically before any write", async () => {
+  const clock = makeClock();
+  const work = createCtoWork({ store: sandboxStore(), now: clock.now });
+  await seedWork(work, "w_js");
+  const cases = [
+    ["function", { fn: () => {} }],
+    ["date", { when: new Date(0) }],
+    ["undefined value", { hole: undefined }],
+    ["NaN", { x: NaN }],
+    ["Infinity", { x: Number.POSITIVE_INFINITY }],
+    ["bigint", { x: 1n }],
+    ["class instance", { x: new (class Thing {})() }],
+  ];
+  for (const [label, badArgs] of cases) {
+    await assert.rejects(
+      work.reserveOperation("w_js", { key: `k_${label.replace(/\W+/g, "_")}`, op: "dispatch", args: badArgs }),
+      (error) => error.code === "unsupported" && /args/.test(error.message),
+      `args case "${label}" must be rejected`,
+    );
+  }
+  // Cycles are rejected, not stack-overflowed.
+  const cyclic = { self: null };
+  cyclic.self = cyclic;
+  await assert.rejects(
+    work.reserveOperation("w_js", { key: "k_cycle", op: "dispatch", args: cyclic }),
+    (error) => error.code === "unsupported" && /circular/.test(error.message),
+  );
+  const after = await work.getWork("w_js");
+  assert.equal(after.operations.length, 0, "nothing was written by any rejected reserve");
+});
+
+// ---------------------------------------------------------------------------
+// BLOCKER 2: the explicit receipt transition matrix
+// ---------------------------------------------------------------------------
+
+test("the transition matrix is explicit and never downgrades to pending", () => {
+  assert.deepEqual(RECEIPT_TRANSITIONS.pending, ["in_flight", "succeeded", "failed", "unknown"]);
+  assert.deepEqual(RECEIPT_TRANSITIONS.in_flight, ["succeeded", "failed", "unknown"]);
+  assert.deepEqual(RECEIPT_TRANSITIONS.unknown, ["succeeded", "failed"]);
+  assert.deepEqual(RECEIPT_TRANSITIONS.succeeded, []);
+  assert.deepEqual(RECEIPT_TRANSITIONS.failed, []);
+  for (const targets of Object.values(RECEIPT_TRANSITIONS)) {
+    assert.equal(targets.includes("pending"), false, "no status may transition back to pending");
+  }
+});
+
+test("recording outcomes follows the matrix: downgrades and invalid jumps are conflicts", async () => {
+  const clock = makeClock();
+  const work = createCtoWork({ store: sandboxStore(), now: clock.now });
+  await seedWork(work, "w_m1");
+  const { receipt } = await work.reserveOperation("w_m1", { key: "km", op: "dispatch", args: {} });
+  await work.recordOperationOutcome("w_m1", { receiptId: receipt.id, status: "in_flight" });
+  // The forbidden downgrade.
+  await assert.rejects(
+    work.recordOperationOutcome("w_m1", { receiptId: receipt.id, status: "pending" }),
+    (error) => error.code === "receipt_state_conflict" && /in_flight → pending/.test(error.message),
+  );
+  // Terminal is immutable: any different record conflicts.
+  await work.recordOperationOutcome("w_m1", { receiptId: receipt.id, status: "succeeded", resultCode: "ok" });
+  await assert.rejects(
+    work.recordOperationOutcome("w_m1", { receiptId: receipt.id, status: "failed" }),
+    (error) => error.code === "receipt_state_conflict",
+  );
+  await assert.rejects(
+    work.recordOperationOutcome("w_m1", { receiptId: receipt.id, status: "pending" }),
+    (error) => error.code === "receipt_state_conflict",
+  );
+  // Same-status records remain idempotent replays.
+  const again = await work.recordOperationOutcome("w_m1", { receiptId: receipt.id, status: "succeeded", resultCode: "ok" });
+  assert.equal(again.replay, true);
+});
+
+test("resolving an UNKNOWN receipt requires explicit reconciliation evidence", async () => {
+  const clock = makeClock();
+  const work = createCtoWork({ store: sandboxStore(), now: clock.now });
+  await seedWork(work, "w_m2");
+  const { receipt } = await work.reserveOperation("w_m2", { key: "km2", op: "dispatch", args: {} });
+  await work.recordOperationOutcome("w_m2", { receiptId: receipt.id, status: "unknown", externalRef: "job_m" });
+  await assert.rejects(
+    work.recordOperationOutcome("w_m2", { receiptId: receipt.id, status: "succeeded" }),
+    (error) => error.code === "unsupported" && /reconciliation evidence/.test(error.message),
+  );
+  await assert.rejects(
+    work.recordOperationOutcome("w_m2", { receiptId: receipt.id, status: "in_flight" }),
+    (error) => error.code === "receipt_state_conflict",
+  );
+  const resolved = await work.recordOperationOutcome("w_m2", {
+    receiptId: receipt.id,
+    status: "succeeded",
+    resultCode: "reconciled:inspected job_m output",
+  });
+  assert.equal(resolved.receipt.status, "succeeded");
+});
+
+// ---------------------------------------------------------------------------
+// BLOCKER 1: hard history capacity — refuse new keys, never evict
+// ---------------------------------------------------------------------------
+
+test("at HISTORY_CAPACITY a NEW unique key is refused; identical retries and records keep working; nothing is evicted", async () => {
+  const clock = makeClock();
+  const work = createCtoWork({ store: sandboxStore(), now: clock.now });
+  await seedWork(work, "w_cap");
+  for (let i = 0; i < HISTORY_CAPACITY; i++) {
+    await work.reserveOperation("w_cap", { key: `cap_${i}`, op: "dispatch", args: { i } });
+  }
+  let env = await work.getWork("w_cap");
+  assert.equal(env.operations.length, HISTORY_CAPACITY);
+  // The FIRST key still replays at full capacity.
+  const firstReplay = await work.reserveOperation("w_cap", { key: "cap_0", op: "dispatch", args: { i: 0 } });
+  assert.equal(firstReplay.replay, true);
+  assert.equal(firstReplay.receipt.key, "cap_0");
+  // ...and its outcome can still be recorded (no new receipt).
+  const recorded = await work.recordOperationOutcome("w_cap", { key: "cap_0", status: "succeeded", resultCode: "ok" });
+  assert.equal(recorded.receipt.status, "succeeded");
+  // cap + 1: a NEW unique key is refused — never an eviction.
+  await assert.rejects(
+    work.reserveOperation("w_cap", { key: "over_the_cap", op: "dispatch", args: {} }),
+    (error) => error.code === "history_capacity" && /capacity/.test(error.message),
+  );
+  // Even after the first receipt reached a terminal state, the ID history is
+  // immutable: still refused, still no eviction.
+  env = await work.getWork("w_cap");
+  assert.equal(env.operations.length, HISTORY_CAPACITY, "no receipt was ever evicted or compacted");
+  assert.equal(env.operations[0].status, "succeeded");
+  assert.ok(env.operations.every((r) => r.specHash === "sha256:aaa"), "every receipt keeps its full spec binding");
+  // And the first key STILL replays after the refusal.
+  const still = await work.reserveOperation("w_cap", { key: "cap_0", op: "dispatch", args: { i: 0 } });
+  assert.equal(still.replay, true);
+  assert.equal(still.receipt.status, "succeeded");
+});
+
+// ---------------------------------------------------------------------------
 // Operation outcomes: transitions, unknown reconciliation, stale spec (U13)
 // ---------------------------------------------------------------------------
 
-test("recordOperationOutcome persists observed results and is idempotent for the same status", async () => {
+test("recordOperationOutcome persists observed results with external identity", async () => {
   const clock = makeClock();
   const work = createCtoWork({ store: sandboxStore(), now: clock.now });
   await seedWork(work, "w_p1");
@@ -710,16 +922,11 @@ test("recordOperationOutcome persists observed results and is idempotent for the
   assert.equal(again.receipt.resultCode, "ok");
 });
 
-test("recordOperationOutcome rejects contradictory terminal transitions and unknown statuses", async () => {
+test("recording an invalid status is rejected", async () => {
   const clock = makeClock();
   const work = createCtoWork({ store: sandboxStore(), now: clock.now });
   await seedWork(work, "w_p2");
   const { receipt } = await work.reserveOperation("w_p2", { key: "k8", op: "dispatch", args: {} });
-  await work.recordOperationOutcome("w_p2", { receiptId: receipt.id, status: "failed", resultCode: "boom" });
-  await assert.rejects(
-    work.recordOperationOutcome("w_p2", { receiptId: receipt.id, status: "succeeded" }),
-    (error) => error.code === "receipt_state_conflict",
-  );
   await assert.rejects(
     work.recordOperationOutcome("w_p2", { receiptId: receipt.id, status: "nonsense" }),
     /not a valid operation status/,
@@ -745,7 +952,7 @@ test("U19: recording UNKNOWN forbids blind re-dispatch until a definitive outcom
   );
   const after = await work.getWork("w_p3");
   assert.equal(after.operations.length, 1, "no second reservation was created");
-  // Reconciliation (a definitive outcome) resolves the unknown.
+  // Reconciliation (a definitive outcome with evidence) resolves the unknown.
   const resolved = await work.recordOperationOutcome("w_p3", {
     receiptId: receipt.id,
     status: "succeeded",
@@ -794,7 +1001,7 @@ test("U13: a result recorded after a spec change is marked superseded and does n
   assert.equal(fresh.receipt.specHash, "sha256:bbb");
 });
 
-test("BLOCKER 8: a redelivered stale completion REPLAYS with superseded:true — never false", async () => {
+test("a redelivered stale completion REPLAYS with superseded:true — never false", async () => {
   const clock = makeClock();
   const work = createCtoWork({ store: sandboxStore(), now: clock.now });
   await seedWork(work, "w_p4b", { state: "running" });
@@ -830,111 +1037,6 @@ test("recordOperationOutcome on a missing work or receipt fails visibly", async 
 });
 
 // ---------------------------------------------------------------------------
-// Bounded operation history (U19: bounded retries; dedupe preserved)
-// ---------------------------------------------------------------------------
-
-test("pruneOperationHistory compacts old terminals to TOMBSTONES and never evicts unresolved ones", () => {
-  const terminal = (i) => ({
-    id: `op_t${i}`,
-    key: `k${i}`,
-    op: "dispatch",
-    argsHash: `h${i}`,
-    workRevision: 1,
-    status: "succeeded",
-    resultAt: 1000 + i,
-    updatedAt: 1000 + i,
-    createdAt: 500 + i,
-  });
-  const unknown = { id: "op_unknown", key: "kU", argsHash: "hU", status: "unknown", updatedAt: 999 };
-  const operations = [...Array.from({ length: OPERATIONS_KEEP + 2 }, (_, i) => terminal(i)), unknown];
-  const pruned = pruneOperationHistory(operations, { nowMs: 5000 });
-  const fullTerminals = pruned.filter((r) => r.tombstone !== true && TERMINAL_OPERATION_STATUSES.includes(r.status));
-  assert.equal(fullTerminals.length, OPERATIONS_KEEP, "full terminal history is capped");
-  const tombstones = pruned.filter((r) => r.tombstone === true);
-  assert.equal(tombstones.length, 2, "the two oldest terminals became tombstones");
-  assert.ok(tombstones.some((r) => r.key === "k0" && r.status === "succeeded"), "tombstone preserves the original outcome");
-  assert.ok(pruned.some((r) => r.id === "op_unknown"), "the uncertain receipt survives verbatim");
-  // Unresolved-only history is never pruned, whatever the requested cap.
-  const pending = { id: "op_p", key: "kP", argsHash: "hP", status: "pending", updatedAt: 1 };
-  assert.deepEqual(pruneOperationHistory([pending], { keep: 0 }), [pending]);
-  // Tombstones themselves are bounded too.
-  const manyTombstones = Array.from({ length: TOMBSTONE_KEEP + 5 }, (_, i) => ({
-    id: `op_b${i}`, key: `kb${i}`, argsHash: `hb${i}`, op: "x", status: "succeeded",
-    resultAt: 2000 + i, tombstone: true, prunedAt: 2000 + i,
-  }));
-  const bounded = pruneOperationHistory(manyTombstones, { nowMs: 9999 });
-  assert.equal(bounded.filter((r) => r.tombstone === true).length, TOMBSTONE_KEEP);
-});
-
-test("BLOCKER 2 regression: after 21 operations the FIRST key still replays — never re-executes", async () => {
-  const clock = makeClock();
-  const work = createCtoWork({ store: sandboxStore(), now: clock.now });
-  await seedWork(work, "w_p6b");
-  const first = await work.reserveOperation("w_p6b", {
-    key: "first", op: "dispatch", args: { which: 1 },
-  });
-  await work.recordOperationOutcome("w_p6b", {
-    receiptId: first.receipt.id, status: "succeeded", resultCode: "originally_done", externalRef: "job_first",
-  });
-  // Push the first terminal out of the full-history cap.
-  for (let i = 0; i < OPERATIONS_KEEP; i++) {
-    const { receipt } = await work.reserveOperation("w_p6b", { key: `later_${i}`, op: "dispatch", args: { i } });
-    await work.recordOperationOutcome("w_p6b", { receiptId: receipt.id, status: "succeeded", resultCode: "ok" });
-  }
-  const env = await work.getWork("w_p6b");
-  assert.equal(
-    env.operations.filter((r) => r.tombstone !== true && TERMINAL_OPERATION_STATUSES.includes(r.status)).length,
-    OPERATIONS_KEEP,
-    "full terminal history is capped",
-  );
-  assert.ok(env.operations.some((r) => r.key === "first" && r.tombstone === true), "the first receipt survives as a tombstone");
-  // The dedupe identity + original outcome survive compaction: the retry REPLAYS.
-  const replay = await work.reserveOperation("w_p6b", { key: "first", op: "dispatch", args: { which: 1 } });
-  assert.equal(replay.replay, true, "the 21st operation must not resurrect the 1st as a new action");
-  assert.equal(replay.receipt.status, "succeeded");
-  assert.equal(replay.receipt.resultCode, "originally_done");
-  assert.equal(replay.receipt.externalRef, "job_first");
-  // A different payload under the compacted key is still a mismatch, never new.
-  await assert.rejects(
-    work.reserveOperation("w_p6b", { key: "first", op: "dispatch", args: { which: 2 } }),
-    (error) => error.code === "idempotency_key_args_mismatch",
-  );
-  const after = await work.getWork("w_p6b");
-  assert.equal(
-    after.operations.filter((r) => r.key === "first").length,
-    1,
-    "no new reservation was created for the compacted key",
-  );
-});
-
-test("stored operation history stays bounded while active unknown receipts are retained", async () => {
-  const clock = makeClock();
-  const work = createCtoWork({ store: sandboxStore(), now: clock.now });
-  await seedWork(work, "w_p6");
-  for (let i = 0; i < OPERATIONS_KEEP + 5; i++) {
-    const { receipt } = await work.reserveOperation("w_p6", { key: `bulk_${i}`, op: "dispatch", args: { i } });
-    await work.recordOperationOutcome("w_p6", { receiptId: receipt.id, status: "succeeded", resultCode: "ok" });
-  }
-  const { receipt: uncertain } = await work.reserveOperation("w_p6", {
-    key: "bulk_uncertain",
-    op: "dispatch",
-    args: { i: "x" },
-  });
-  await work.recordOperationOutcome("w_p6", { receiptId: uncertain.id, status: "unknown" });
-  const env = await work.getWork("w_p6");
-  const fullTerminals = env.operations.filter((r) => r.tombstone !== true && TERMINAL_OPERATION_STATUSES.includes(r.status));
-  const unresolved = env.operations.filter((r) => UNRESOLVED_OPERATION_STATUSES.includes(r.status));
-  assert.equal(fullTerminals.length, OPERATIONS_KEEP, "terminal history is capped");
-  assert.ok(unresolved.some((r) => r.key === "bulk_uncertain"), "the active unknown receipt was not evicted");
-  const oldest = env.operations.find((r) => r.key === "bulk_0");
-  assert.ok(oldest && oldest.tombstone === true, "the oldest terminal was compacted, not silently dropped");
-  assert.ok(env.operations.some((r) => r.key === `bulk_${OPERATIONS_KEEP + 4}` && r.tombstone !== true), "the newest terminal is a full receipt");
-  // And the compacted oldest key still dedupes.
-  const replay = await work.reserveOperation("w_p6", { key: "bulk_0", op: "dispatch", args: { i: 0 } });
-  assert.equal(replay.replay, true);
-});
-
-// ---------------------------------------------------------------------------
 // Durable storage contract: strict load, corruption is visible, version stamp
 // ---------------------------------------------------------------------------
 
@@ -951,34 +1053,59 @@ test("corrupt envelopes fail VISIBLY on get and list — never an empty success"
   await assert.rejects(work.getWork("w_c1"), /id mismatch/);
 });
 
-test("BLOCKER 6: structurally corrupt envelopes (missing fields, bad receipt statuses) refuse to load", async () => {
+test("structurally corrupt envelopes and receipts refuse to load (missing fields, bad statuses)", async () => {
   const store = sandboxStore();
   const work = createCtoWork({ store, now: makeClock().now });
   const env = await seedWork(work, "w_c2");
   const raw = JSON.parse(await readFile(store.pathFor("w_c2"), "utf-8"));
-  // Missing a required field.
-  const noObjective = { ...raw, objective: undefined };
-  await writeFile(store.pathFor("w_c2"), JSON.stringify(noObjective), "utf-8");
+  // Missing a required envelope field.
+  await writeFile(store.pathFor("w_c2"), JSON.stringify({ ...raw, objective: undefined }), "utf-8");
   await assert.rejects(work.getWork("w_c2"), (error) => error.code === "store_corrupt" && /objective/.test(error.message));
-  // Invalid receipt status — never misclassified as terminal or unresolved.
-  const badReceipt = {
-    ...raw,
-    operations: [{ id: "op_x", key: "k", argsHash: "h", status: "garbage", workRevision: 1, createdAt: 1, updatedAt: 1 }],
-  };
-  await writeFile(store.pathFor("w_c2"), JSON.stringify(badReceipt), "utf-8");
+  // A receipt missing its SAFETY fields (specHash / stage) is corrupt.
+  await writeFile(
+    store.pathFor("w_c2"),
+    JSON.stringify({
+      ...raw,
+      operations: [{ id: "op_x", key: "k", op: "dispatch", argsHash: "h", status: "pending", workRevision: 1, createdAt: 1, updatedAt: 1, lease: { owner: "o", expiresAt: 2 } }],
+    }),
+    "utf-8",
+  );
+  await assert.rejects(work.getWork("w_c2"), (error) => error.code === "store_corrupt" && /specHash/.test(error.message));
+  // A receipt with an invalid stage is corrupt too.
+  await writeFile(
+    store.pathFor("w_c2"),
+    JSON.stringify({
+      ...raw,
+      operations: [{ id: "op_x", key: "k", op: "dispatch", argsHash: "h", status: "pending", specHash: "s", stage: "party", workRevision: 1, createdAt: 1, updatedAt: 1, lease: { owner: "o", expiresAt: 2 } }],
+    }),
+    "utf-8",
+  );
+  await assert.rejects(work.getWork("w_c2"), (error) => error.code === "store_corrupt" && /stage/.test(error.message));
+  // An invalid receipt status can never be misclassified by retention/recovery.
+  await writeFile(
+    store.pathFor("w_c2"),
+    JSON.stringify({
+      ...raw,
+      operations: [{ id: "op_x", key: "k", op: "dispatch", argsHash: "h", status: "garbage", specHash: "s", stage: "specify", workRevision: 1, createdAt: 1, updatedAt: 1, lease: { owner: "o", expiresAt: 2 } }],
+    }),
+    "utf-8",
+  );
   await assert.rejects(
     work.getWork("w_c2"),
     (error) => error.code === "store_corrupt" && /not a valid operation status/.test(error.message),
   );
-  // Receipt missing its dedupe identity.
-  const noKey = {
-    ...raw,
-    operations: [{ id: "op_y", argsHash: "h", status: "pending", workRevision: 1, createdAt: 1, updatedAt: 1 }],
-  };
-  await writeFile(store.pathFor("w_c2"), JSON.stringify(noKey), "utf-8");
-  await assert.rejects(work.getWork("w_c2"), (error) => error.code === "store_corrupt" && /key/.test(error.message));
+  // A receipt without its lease (the recovery material) is corrupt.
+  await writeFile(
+    store.pathFor("w_c2"),
+    JSON.stringify({
+      ...raw,
+      operations: [{ id: "op_x", key: "k", op: "dispatch", argsHash: "h", status: "pending", specHash: "s", stage: "specify", workRevision: 1, createdAt: 1, updatedAt: 1 }],
+    }),
+    "utf-8",
+  );
+  await assert.rejects(work.getWork("w_c2"), (error) => error.code === "store_corrupt" && /lease/.test(error.message));
   // listWorks surfaces the same corruption instead of skipping the entry.
-  await writeFile(store.pathFor("w_c2"), JSON.stringify(noObjective), "utf-8");
+  await writeFile(store.pathFor("w_c2"), JSON.stringify({ ...raw, objective: undefined }), "utf-8");
   await assert.rejects(work.listWorks(), (error) => error.code === "store_corrupt");
   // A valid envelope still round-trips through the validator untouched.
   await writeFile(store.pathFor("w_c2"), JSON.stringify({ ...env, v: 1 }), "utf-8");
@@ -1003,6 +1130,7 @@ test("the default workStore hook writes versioned envelopes under the sandboxed 
   const clock = makeClock();
   const work = createCtoWork({ store: workStore, now: clock.now });
   const id = `w_hook_${testSeq}`;
+  hookWorkIds.push(id); // recorded for teardown — only OWN fixtures are removed
   const env = await work.createWork({ id, ...makeWork() });
   const raw = JSON.parse(await readFile(workStore.pathFor(id), "utf-8"));
   assert.equal(raw.v, 1);
