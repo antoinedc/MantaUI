@@ -407,3 +407,25 @@ one bounded `abortSession`); submit never aborts.
 Additive seams this PR lands on top of P3a1/P0: `opencode.sendPrompt` forwards an optional
 `messageID` onto the `prompt_async` body (P0 §8: persisted verbatim as the user message id,
 readable back; omitted → byte-identical pre-P3a2 behavior) and `ctoStores.admissionStore`.
+
+Round-2 review blockers (same service, same scope): (1) completion is receipt-specific —
+only the LAST assistant row whose `parentID` equals the submitted messageID with a TERMINAL
+finish via the shared `assistantCompletion` helper completes a turn; `session.idle`/`error`
+EVENTS trigger that transcript check and never blindly complete (a stale/unrelated idle cannot
+release the queue), and intermediate tool-step rows never do. (2) interrupt is a two-phase
+request: `accepted` → `interrupt_pending` (nonterminal barrier) → abort once → terminal
+`interrupted` only when the session is confirmed idle (terminal event or transcript proof);
+unsupported/failed/timed-out aborts RETAIN `interrupt_pending` with `abortError`; cancelling an
+`unknown` marks visible `cancel_requested` and retains the barrier — a late-landing POST is
+adopted (receipt found → `accepted` with `cancelRequested` retained), never erased. (3)
+reconcile is joinable-single-flight, takes an active-operation lease BEFORE the dispatch claim
+so it never races the send its own instance is awaiting, and mutations are serialized by the
+store mutex + from-status CAS. `opencode.sendPrompt` now propagates the caller's bounded signal
+through the per-directory readiness gate AND the actual POST (the wrapper used to drop it);
+an aborted client request stays uncertainty (unknown), never a refusal. (4)
+`ctoStores.admissionStore` is strict: top-level null/array/scalar and unparsable JSON fail
+loudly and never reset/overwrite the file. (5) the priority pick is re-verified AT CLAIM TIME
+under the store mutex, so a human arriving while the pump awaited the binding wins before the
+dispatch commits (no locks across the binding await). (6) the canonical hash binds agent + text
++ model + origin with key-order-canonical serialization, and dedup precedes generation
+validation — a same-payload id replay succeeds even after a binding replacement.

@@ -1,15 +1,18 @@
 // BET-P3a2: src/server/ctoAdmission.test.mjs — the durable per-CTO
-// conversation admission queue (unified-cto-spec §8.3). Synthetic oc +
-// injected stores for the state-machine tests; one production-composition
-// test drives the REAL opencode.mjs client through `_setOcTransport` to pin
-// the P0-proven messageID receipt on the wire. No live opencode, no network,
-// no model calls.
+// conversation admission queue (unified-cto-spec §8.3, round 2: six review
+// blockers). Synthetic oc + injected stores for the state-machine tests; one
+// production-composition test drives the REAL opencode.mjs client through
+// `_setOcTransport` to pin the P0-proven messageID receipt AND the bounded
+// signal propagation on the wire. No live opencode, no network, no model
+// calls. All negative races use LATCHES (manually resolved promises), never
+// timers.
 
 import "./ctoTestGuard.mjs";
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { mkdir, readFile, writeFile, rm } from "node:fs/promises";
 
 import {
   CtoAdmissionError,
@@ -20,6 +23,7 @@ import {
   turnCompletionFromTranscript,
 } from "./ctoAdmission.mjs";
 import { admissionStore } from "./ctoStores.mjs";
+import { statePath } from "../shared/paths.mjs";
 import * as ocModule from "./opencode.mjs";
 
 // ---------------------------------------------------------------------------
@@ -62,17 +66,18 @@ function fakeBinding({ generation = 3, currentSessionId = "ses_cto" } = {}) {
 }
 
 // A synthetic opencode: records sends/aborts, serves receipts from a
-// transcript map, and can fail sends in the three meaningful ways.
-function fakeOc({
-  sendOutcome = "ok", // "ok" | "http400" | "http500" | "network"
-  receiptLands = true,
-  transcriptRows = [],
-} = {}) {
+// transcript map, and can fail sends in the meaningful ways. `rows` is the
+// transcript (ascending) used by listMessages; `completeTurn` appends a
+// TERMINAL assistant row LINKED to the user message via parentID (the only
+// proof the reconciliation accepts).
+function fakeOc({ sendOutcome = "ok", receiptLands = true, rows = [] } = {}) {
+  let asstSeq = 0;
   const oc = {
     sends: [],
     aborts: [],
+    getMessageCalls: 0,
     transcript: new Map(), // messageID → receipt row
-    rows: [...transcriptRows],
+    rows: [...rows],
     async sendPrompt({ sessionId, text, model, agent, messageID }) {
       oc.sends.push({ sessionId, text, model, agent, messageID });
       if (sendOutcome === "http400") {
@@ -90,10 +95,14 @@ function fakeOc({
       }
       if (receiptLands) {
         oc.transcript.set(messageID, { info: { id: messageID, role: "user", time: { created: 1 } }, parts: [] });
+        // The transcript (listMessages view) also gains the user row — the
+        // receipt-specific reconciliation links assistant rows to it.
+        oc.rows.push({ info: { id: messageID, role: "user", time: { created: 1 } }, parts: [] });
       }
       return undefined; // the 204
     },
     async getMessage(sessionId, messageId) {
+      oc.getMessageCalls += 1;
       return oc.transcript.get(messageId) ?? null;
     },
     async listMessages(sessionId) {
@@ -101,6 +110,20 @@ function fakeOc({
     },
     async abortSession(sessionId) {
       oc.aborts.push(sessionId);
+    },
+    /** A finished assistant row linked to our user message (finish: stop). */
+    completeTurn(messageID, { finish = "stop", completedAt = 9_000, error = null } = {}) {
+      oc.rows.push({
+        info: {
+          id: `asst_${(asstSeq += 1)}`,
+          role: "assistant",
+          parentID: messageID,
+          finish,
+          time: { created: 2, completed: error ? undefined : completedAt },
+          ...(error ? { error } : {}),
+        },
+        parts: [],
+      });
     },
   };
   return oc;
@@ -128,6 +151,30 @@ const flush = async (rounds = 5) => {
 const statusOf = (svc, id) =>
   svc.list().then((l) => l.submissions.find((s) => s.id === id)?.status);
 
+const recordOf = async (svc, id) => (await svc.list()).submissions.find((s) => s.id === id);
+
+/**
+ * A fake oc whose sendPrompt PARKS on a manually-released latch (the standard
+ * "send in flight" fixture for the race tests). The parked send lands its
+ * receipt — transcript map AND listMessages user row — when released.
+ */
+function parkedSendOc() {
+  let releaseSend;
+  const gate = new Promise((resolve) => (releaseSend = resolve));
+  const oc = fakeOc();
+  oc.sendPrompt = async (args) => {
+    oc.sends.push(args);
+    try {
+      await gate;
+    } finally {
+      const row = { info: { id: args.messageID, role: "user", time: { created: 1 } }, parts: [] };
+      oc.transcript.set(args.messageID, row);
+      oc.rows.push(row);
+    }
+  };
+  return { oc, releaseSend };
+}
+
 // ---------------------------------------------------------------------------
 // Submit: durable identity before send
 // ---------------------------------------------------------------------------
@@ -150,7 +197,7 @@ test("dispatch resolves the CURRENT binding at dispatch time and persists receip
   assert.equal(oc.sends.length, 1);
   assert.equal(oc.sends[0].sessionId, "ses_cto");
   assert.match(oc.sends[0].messageID, /^msg_/);
-  const record = (await svc.list()).submissions.find((s) => s.id === res.id);
+  const record = await recordOf(svc, res.id);
   assert.equal(record.status, "accepted", "receipt found → accepted, not completed");
   assert.equal(record.sessionId, "ses_cto");
   assert.equal(record.dispatchGeneration, 3);
@@ -166,7 +213,7 @@ test("unbound role: submissions stay queued and nothing is sent", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Concurrency + priority
+// Concurrency + priority (blocker 5)
 // ---------------------------------------------------------------------------
 
 test("concurrent human clients + background: racing submits all persist; same-id racers dedup to ONE record", async () => {
@@ -210,19 +257,49 @@ test("human FIFO outranks queued background synthesis; accepted turns are never 
   await svc.tick();
   assert.equal(oc.sends.length, 1);
   assert.equal(oc.sends[0].text, "human arrives later");
-  // That turn's terminal → the background synthesis is next (FIFO within
-  // each origin; humans have drained).
+  // That turn's terminal (transcript proof) → the background synthesis is
+  // next (FIFO within each origin; humans have drained).
   clock.t += 1;
+  oc.completeTurn(oc.sends[0].messageID);
   svc.observeEvent({ type: "session.idle", properties: { sessionID: "ses_cto" } });
   await flush();
+  clock.t += 20_000;
   await svc.tick();
   assert.equal(oc.sends.length, 2);
   assert.equal(oc.sends[1].text, "bg first in line");
-  const bgRecord = (await svc.list()).submissions.find((s) => s.id === bg.id);
+  const bgRecord = await recordOf(svc, bg.id);
   assert.equal(bgRecord.status, "accepted");
-  const hRecord = (await svc.list()).submissions.find((s) => s.id === h.id);
+  const hRecord = await recordOf(svc, h.id);
   assert.equal(hRecord.status, "completed");
   assert.equal(hRecord.outcome.kind, "idle");
+  assert.equal(hRecord.outcome.completion, "ok");
+  assert.equal(hRecord.outcome.via, "transcript");
+});
+
+test("priority race (blocker 5): a human arriving while the pump awaits the binding wins before the dispatch commits", async () => {
+  const { svc, oc, binding } = buildService();
+  // Latch ONLY the pump's binding resolution (call 2): the submits' own
+  // generation reads (calls 1 and 3) resolve immediately, so both records
+  // are durably queued while the pump is parked mid-selection.
+  let releaseBinding;
+  const gate = new Promise((resolve) => (releaseBinding = resolve));
+  let bindingCalls = 0;
+  binding.getBinding = async () => {
+    bindingCalls += 1;
+    if (bindingCalls === 2) await gate;
+    return { generation: 3, currentSessionId: "ses_cto" };
+  };
+  const bg = await svc.submit({ id: "evt_bg", text: "background picked first", origin: "background" });
+  const h = await svc.submit({ id: "evt_h", text: "human arrives during the await", origin: "human" });
+  await flush();
+  assert.equal(oc.sends.length, 0, "pump is parked on the binding latch");
+  releaseBinding();
+  await flush();
+  await svc.tick();
+  assert.equal(oc.sends.length, 1);
+  assert.equal(oc.sends[0].text, "human arrives during the await", "the stale background pick was re-verified at claim time");
+  assert.equal(await statusOf(svc, h.id), "accepted");
+  assert.equal(await statusOf(svc, bg.id), "queued", "the background submission waits its turn");
 });
 
 // ---------------------------------------------------------------------------
@@ -250,46 +327,115 @@ test("busy session (an externally-started turn): submit queues durably, never se
 });
 
 // ---------------------------------------------------------------------------
-// Ack is not completion
+// Ack is not completion (blocker 1: receipt-specific reconciliation)
 // ---------------------------------------------------------------------------
 
-test("204 ack + receipt is ACCEPTED, not completed; only the terminal event completes", async () => {
+test("204 ack + receipt is ACCEPTED; the terminal event completes only with transcript proof", async () => {
   const { svc, oc, clock } = buildService();
   const res = await svc.submit({ text: "q", origin: "human" });
   await svc.tick();
   assert.equal(await statusOf(svc, res.id), "accepted");
   clock.t += 5;
+  oc.completeTurn(oc.sends[0].messageID);
   svc.observeEvent({ type: "session.idle", properties: { sessionID: "ses_cto" } });
   await flush();
-  const record = (await svc.list()).submissions.find((s) => s.id === res.id);
+  const record = await recordOf(svc, res.id);
   assert.equal(record.status, "completed");
   assert.equal(record.outcome.kind, "idle");
+  assert.equal(record.outcome.completion, "ok");
+  assert.equal(record.outcome.via, "transcript");
   assert.ok(record.completedAt > 1_000_000);
 });
 
-test("session.error is a terminal event carrying the error name", async () => {
+test("a stale session.idle cannot release an unrelated turn: no transcript proof → still accepted", async () => {
+  const { svc, oc, clock } = buildService();
+  const res = await svc.submit({ text: "q", origin: "human" });
+  await svc.tick();
+  assert.equal(await statusOf(svc, res.id), "accepted");
+  clock.t += 5;
+  // No assistant row exists for our message — an idle event for the session
+  // (e.g. from an unrelated turn) must NOT complete ours.
+  svc.observeEvent({ type: "session.idle", properties: { sessionID: "ses_cto" } });
+  await flush();
+  assert.equal(await statusOf(svc, res.id), "accepted", "blind completion is banned");
+  assert.ok(oc.sends.length === 1);
+  // Later the transcript proves the turn finished → reconcile completes it.
+  oc.completeTurn(oc.sends[0].messageID);
+  clock.t += 20_000;
+  await svc.tick();
+  const record = await recordOf(svc, res.id);
+  assert.equal(record.status, "completed");
+  assert.equal(record.outcome.kind, "reconciled");
+});
+
+test("intermediate assistant tool steps never complete the turn (blocker 1)", async () => {
+  const { svc, oc, clock } = buildService();
+  const res = await svc.submit({ text: "q", origin: "human" });
+  await svc.tick();
+  const sent = oc.sends[0].messageID;
+  // Step 1: a tool-use assistant row — completed but finish "tool_use".
+  oc.rows.push({
+    info: { id: "asst_tool", role: "assistant", parentID: sent, finish: "tool_use", time: { created: 2, completed: 5_000 } },
+    parts: [],
+  });
+  clock.t += 20_000;
+  await svc.tick();
+  assert.equal(await statusOf(svc, res.id), "accepted", "a completed tool step is not a completed turn");
+  // Stale events for the session must not complete it either.
+  svc.observeEvent({ type: "session.idle", properties: { sessionID: "ses_cto" } });
+  await flush();
+  assert.equal(await statusOf(svc, res.id), "accepted");
+  // Step 2: the final assistant row with a terminal finish → completes.
+  clock.t += 20_000;
+  oc.completeTurn(sent);
+  await svc.tick();
+  assert.equal(await statusOf(svc, res.id), "completed");
+});
+
+test("an UNLINKED assistant row (parentID != our messageID) is never proof (blocker 1)", async () => {
+  const { svc, oc, clock } = buildService();
+  const res = await svc.submit({ text: "q", origin: "human" });
+  await svc.tick();
+  const sent = oc.sends[0].messageID;
+  oc.completeTurn("msg_someone_else"); // finished assistant, different parent
+  clock.t += 20_000;
+  await svc.tick();
+  assert.equal(await statusOf(svc, res.id), "accepted");
+  oc.completeTurn(sent);
+  clock.t += 20_000;
+  await svc.tick();
+  assert.equal(await statusOf(svc, res.id), "completed");
+});
+
+test("session.error is a terminal event only with transcript proof of our turn's error", async () => {
   const { svc, oc, clock } = buildService();
   const res = await svc.submit({ text: "q", origin: "human" });
   await svc.tick();
   clock.t += 5;
+  // No proof yet → the error event must not complete.
   svc.observeEvent({
     type: "session.error",
     properties: { sessionID: "ses_cto", error: { name: "ProviderAuthError" } },
   });
   await flush();
-  const record = (await svc.list()).submissions.find((s) => s.id === res.id);
+  assert.equal(await statusOf(svc, res.id), "accepted");
+  // Transcript shows our linked assistant row errored → completes.
+  oc.completeTurn(oc.sends[0].messageID, { error: { name: "ProviderAuthError" } });
+  clock.t += 20_000;
+  await svc.tick();
+  const record = await recordOf(svc, res.id);
   assert.equal(record.status, "completed");
-  assert.equal(record.outcome.kind, "error");
-  assert.equal(record.outcome.errorName, "ProviderAuthError");
+  assert.equal(record.outcome.kind, "reconciled");
+  assert.equal(record.outcome.completion, "model-error");
 });
 
 // ---------------------------------------------------------------------------
-// Dedup
+// Dedup (blocker 6)
 // ---------------------------------------------------------------------------
 
 test("same id + same payload is idempotent; same id + different payload is an error and the original is untouched", async () => {
   const { svc, oc, store } = buildService();
-  const first = await svc.submit({ id: "evt_dup", text: "original", origin: "human" });
+  await svc.submit({ id: "evt_dup", text: "original", origin: "human" });
   const again = await svc.submit({ id: "evt_dup", text: "original", origin: "human" });
   assert.equal(again.id, "evt_dup");
   assert.equal(again.persisted, false);
@@ -306,6 +452,49 @@ test("same id + same payload is idempotent; same id + different payload is an er
   assert.equal(oc.sends.length, 1, "a deduped re-ack never causes a second send");
 });
 
+test("a different agent under the same id is a DIFFERENT payload → rejected (blocker 6)", async () => {
+  const { svc } = buildService();
+  await svc.submit({ id: "evt_agent", text: "go", origin: "background", agent: "synthesizer" });
+  await assert.rejects(
+    () => svc.submit({ id: "evt_agent", text: "go", origin: "background", agent: "reviewer" }),
+    (err) => err instanceof CtoAdmissionError && err.code === "duplicate-id-different-payload",
+  );
+  const ok = await svc.submit({ id: "evt_agent", text: "go", origin: "background", agent: "synthesizer" });
+  assert.equal(ok.persisted, false, "same agent replays idempotently");
+});
+
+test("reordered model object keys replay idempotently (key-order canonical hash, blocker 6)", async () => {
+  const { svc } = buildService();
+  const first = await svc.submit({
+    id: "evt_model",
+    text: "go",
+    origin: "human",
+    model: { providerID: "anthropic", modelID: "claude" },
+  });
+  const replay = await svc.submit({
+    id: "evt_model",
+    text: "go",
+    origin: "human",
+    model: { modelID: "claude", providerID: "anthropic" }, // reordered keys
+  });
+  assert.equal(replay.persisted, false);
+  assert.equal(replay.id, first.id);
+});
+
+test("a replay of an existing id succeeds even AFTER the binding generation advanced (dedup precedes generation validation, blocker 6)", async () => {
+  const { svc, binding } = buildService();
+  await svc.submit({ id: "evt_replay", text: "once", origin: "human", expectedGeneration: 3 });
+  binding.advance("ses_cto_v2"); // generation 4 — the submitter's CAS is now stale
+  const replay = await svc.submit({ id: "evt_replay", text: "once", origin: "human", expectedGeneration: 3 });
+  assert.equal(replay.persisted, false, "replay returns the existing record");
+  assert.equal(replay.status, "queued");
+  // A NEW record (different id) with the stale expectation still refuses.
+  await assert.rejects(
+    () => svc.submit({ text: "fresh", origin: "human", expectedGeneration: 3 }),
+    (err) => err instanceof CtoAdmissionError && err.code === "stale-generation",
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Crash + recovery (the P0 messageID receipt)
 // ---------------------------------------------------------------------------
@@ -317,7 +506,7 @@ test("crash after receipt before persist: restart reconcile finds the receipt �
   await svc.tick(); // send + receipt read-back succeed, then the persist "crashes"
   assert.equal(oc.sends.length, 1);
   const sentMessageId = oc.sends[0].messageID;
-  const crashed = (await svc.list()).submissions.find((s) => s.id === res.id);
+  const crashed = await recordOf(svc, res.id);
   assert.equal(crashed.status, "dispatching", "the store still holds the crash-window state");
   assert.equal(crashed.messageID, sentMessageId);
   // Reopen on the SAME store with a fresh oc; the role session's transcript
@@ -326,7 +515,7 @@ test("crash after receipt before persist: restart reconcile finds the receipt �
   oc2.transcript = oc.transcript;
   const { svc: svc2 } = buildService({ store, oc: oc2 });
   await svc2.reconcile();
-  const record = (await svc2.list()).submissions.find((s) => s.id === res.id);
+  const record = await recordOf(svc2, res.id);
   assert.equal(record.status, "accepted");
   assert.ok(record.reconciledAt);
   assert.equal(oc2.sends.length, 0, "no resend: the receipt proves acceptance");
@@ -392,7 +581,7 @@ test("unknown submissions are surfaced (stale flag), never resent, and tick keep
   assert.equal(oc.sends.length, 1);
   clock.t += 120_000; // past UNKNOWN_STALE_MS
   await svc.tick();
-  const record = (await svc.list()).submissions.find((s) => s.id === res.id);
+  const record = await recordOf(svc, res.id);
   assert.equal(record.status, "unknown");
   assert.equal(record.staleUnknown, true);
   assert.ok(record.unknownMs >= 120_000);
@@ -401,54 +590,181 @@ test("unknown submissions are surfaced (stale flag), never resent, and tick keep
 
 test("definitive 4xx refusal is failed (proven not accepted); 5xx is unknown", async () => {
   const { svc, oc } = buildService({ oc: fakeOc({ sendOutcome: "http400" }) });
-  const a = await svc.submit({ id: "evt_400", text: "refused", origin: "human" });
+  await svc.submit({ id: "evt_400", text: "refused", origin: "human" });
   await svc.tick();
-  const recA = (await svc.list()).submissions.find((s) => s.id === a.id);
+  const recA = await recordOf(svc, "evt_400");
   assert.equal(recA.status, "failed");
   assert.equal(recA.errorStatus, 400);
   assert.equal(oc.sends.length, 1);
 
   const { svc: svc5, oc: oc5 } = buildService({ oc: fakeOc({ sendOutcome: "http500" }) });
-  const b = await svc5.submit({ id: "evt_500", text: "maybe", origin: "human" });
+  await svc5.submit({ id: "evt_500", text: "maybe", origin: "human" });
   await svc5.tick();
-  const recB = (await svc5.list()).submissions.find((s) => s.id === b.id);
+  const recB = await recordOf(svc5, "evt_500");
   assert.equal(recB.status, "unknown", "a 5xx is uncertainty, not proof of refusal");
   assert.equal(oc5.sends.length, 1);
 });
 
 // ---------------------------------------------------------------------------
-// Binding generation: pending retargets, accepted stays
+// Blocker 3: reconcile vs an active dispatch; cancellation vs a late send
 // ---------------------------------------------------------------------------
 
-test("stale generation: pending submissions retarget the replacement binding; accepted turns keep their original sid", async () => {
-  const { svc, oc, binding } = buildService();
-  const a = await svc.submit({ text: "first", origin: "human" });
-  await svc.tick(); // accepted against ses_cto / generation 3
-  const pending = await svc.submit({ text: "still queued", origin: "human" });
-  binding.advance("ses_cto_v2"); // role session replaced → generation 4
-  svc.observeEvent({ type: "session.idle", properties: { sessionID: "ses_cto" } });
+test("reconcile skips the send this instance is currently awaiting (active-operation lease)", async () => {
+  const { oc, releaseSend } = parkedSendOc();
+  const { svc } = buildService({ oc, requestDeadlineMs: 5_000 });
+  const res = await svc.submit({ text: "in flight", origin: "human" });
+  // The submit's fire-and-forget pump claims the record and parks in the
+  // send. Wait for that state (bounded poll, no timers-as-latches).
+  for (let i = 0; i < 100 && (await statusOf(svc, res.id)) !== "dispatching"; i += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(await statusOf(svc, res.id), "dispatching");
+  const before = oc.getMessageCalls;
+  await svc.reconcile(); // must NOT race the in-flight dispatch
+  assert.equal(oc.getMessageCalls, before, "no receipt probe against an awaited send");
+  releaseSend();
   await flush();
-  await svc.tick(); // admits the pending submission against the CURRENT binding
-  assert.equal(oc.sends.length, 2);
-  assert.equal(oc.sends[0].sessionId, "ses_cto");
-  assert.equal(oc.sends[1].sessionId, "ses_cto_v2", "pending work retargets the replacement binding");
-  const aRecord = (await svc.list()).submissions.find((s) => s.id === a.id);
-  assert.equal(aRecord.sessionId, "ses_cto", "accepted turns stay associated with their original session");
-  const pRecord = (await svc.list()).submissions.find((s) => s.id === pending.id);
-  assert.equal(pRecord.sessionId, "ses_cto_v2");
-  assert.equal(pRecord.retargeted, true);
-  assert.equal(pRecord.submitGeneration, 3);
-  assert.equal(pRecord.dispatchGeneration, 4);
+  const rec = await recordOf(svc, res.id);
+  assert.equal(rec.status, "accepted", "the dispatch completed normally after the latch released");
+  assert.equal(rec.receiptChecks ?? 0, 0, "reconcile never re-classified the awaited send");
 });
 
-test("submit with an explicit expectedGeneration refuses on mismatch (optimistic CAS)", async () => {
-  const { svc } = buildService();
+test("delayed send + interrupt + follow-up tick: NEVER a second send; a late-landing POST is adopted, not erased (blockers 2+3)", async () => {
+  let releaseSend;
+  const gate = new Promise((resolve) => (releaseSend = resolve));
+  const oc = fakeOc();
+  oc.sendPrompt = async (args) => {
+    oc.sends.push(args);
+    try {
+      await gate; // the POST is hanging past the deadline
+    } finally {
+      // The late 204: the server DID accept after the client gave up.
+      oc.transcript.set(args.messageID, { info: { id: args.messageID, role: "user", time: { created: 1 } }, parts: [] });
+      oc.rows.push({ info: { id: args.messageID, role: "user", time: { created: 1 } }, parts: [] });
+    }
+  };
+  const { svc, clock } = buildService({ oc, requestDeadlineMs: 40 });
+  await svc.submit({ id: "evt_slow", text: "slow", origin: "human" });
+  await svc.tick(); // deadline fires → unknown
+  assert.equal(await statusOf(svc, "evt_slow"), "unknown");
+  await svc.interrupt("evt_slow", { reason: "user gave up" });
+  assert.equal(await statusOf(svc, "evt_slow"), "cancel_requested", "visible request, POST not erased");
+  clock.t += 1_000;
+  await svc.tick(); // receipt not yet visible → stays, barrier held
+  assert.equal(await statusOf(svc, "evt_slow"), "cancel_requested");
+  assert.equal(oc.sends.length, 1, "follow-up tick never sends again");
+  releaseSend(); // the late POST lands its receipt
+  await flush();
+  clock.t += 1_000;
+  await svc.tick(); // reconcile finds the receipt → accepted (not cancelled)
+  const record = await recordOf(svc, "evt_slow");
+  assert.equal(record.status, "accepted");
+  assert.equal(record.cancelRequested, true, "the request stays visible on the adopted record");
+  assert.equal(oc.sends.length, 1);
+  // The adopted turn finishes normally → the gate releases → next dispatches.
+  clock.t += 1_000;
+  oc.completeTurn(record.messageID);
+  clock.t += 20_000;
+  await svc.tick();
+  assert.equal(await statusOf(svc, "evt_slow"), "completed");
+  await svc.submit({ id: "evt_next", text: "next", origin: "human" });
+  await svc.tick();
+  assert.equal(oc.sends.length, 2);
+});
+
+// ---------------------------------------------------------------------------
+// Interrupt (blocker 2)
+// ---------------------------------------------------------------------------
+
+test("interrupt: queued → cancelled without any abort; accepted → abort runs once then interrupt_pending until confirmed idle", async () => {
+  const { svc, oc, clock } = buildService();
+  // Contention so submit-order (not the fire-and-forget pump) decides which
+  // record is accepted when the session frees: the EARLIER submission goes.
+  svc.observeEvent({ type: "session.status", properties: { sessionID: "ses_cto", status: { type: "busy" } } });
+  clock.t += 1;
+  await svc.submit({ id: "evt_running", text: "running", origin: "human" });
+  await svc.submit({ id: "evt_q", text: "queued", origin: "human" });
+  clock.t += 1;
+  svc.observeEvent({ type: "session.idle", properties: { sessionID: "ses_cto" } });
+  await svc.tick();
+  assert.equal(await statusOf(svc, "evt_running"), "accepted");
+  assert.equal(await statusOf(svc, "evt_q"), "queued");
+  assert.equal(oc.aborts.length, 0, "no implicit abort from submit or tick");
+  await svc.interrupt("evt_q", { reason: "user cancelled" });
+  assert.equal(await statusOf(svc, "evt_q"), "cancelled");
+  assert.equal(oc.aborts.length, 0);
+  const res = await svc.interrupt("evt_running", { reason: "stop the turn" });
+  await flush();
+  assert.equal(oc.aborts.length, 1, "explicit interrupt of an accepted turn aborts once");
+  assert.equal(oc.aborts[0], "ses_cto");
+  assert.equal(res.status, "interrupt_pending", "NOT terminal yet: the session is not confirmed idle");
+  assert.equal(await statusOf(svc, "evt_running"), "interrupt_pending");
+  assert.equal(await recInterruptBarrier(svc), true, "the nonterminal barrier still holds");
+  // Confirmed idle for receipt → terminal interrupted with the outcome.
+  clock.t += 5;
+  svc.observeEvent({ type: "session.idle", properties: { sessionID: "ses_cto" } });
+  await flush();
+  const rec = await recordOf(svc, "evt_running");
+  assert.equal(rec.status, "interrupted");
+  assert.equal(rec.interruptReason, "stop the turn");
+  assert.equal(rec.outcome.kind, "idle");
   await assert.rejects(
-    () => svc.submit({ text: "stale client", origin: "human", expectedGeneration: 2 }),
-    (err) => err instanceof CtoAdmissionError && err.code === "stale-generation",
+    () => svc.interrupt("evt_running"),
+    (err) => err instanceof CtoAdmissionError && err.code === "already-terminal",
   );
-  const ok = await svc.submit({ text: "fresh client", origin: "human", expectedGeneration: 3 });
-  assert.equal(ok.status, "queued");
+});
+
+const recInterruptBarrier = async (svc) => {
+  const l = await svc.list();
+  return l.counts.unresolved >= 1;
+};
+
+test("a failed/unsupported abort RETAINS the interrupt_pending barrier (blocker 2)", async () => {
+  const oc = fakeOc();
+  oc.abortSession = async () => {
+    throw new Error("abort transport hung");
+  };
+  const { svc, oc: _oc, clock } = buildService({ oc });
+  await svc.submit({ id: "evt_run", text: "run", origin: "human" });
+  await svc.tick();
+  assert.equal(await statusOf(svc, "evt_run"), "accepted");
+  const res = await svc.interrupt("evt_run", { reason: "stop" });
+  assert.equal(res.status, "interrupt_pending", "abort failure keeps the request pending");
+  const rec = await recordOf(svc, "evt_run");
+  assert.equal(rec.status, "interrupt_pending");
+  assert.ok(rec.abortError.includes("abort transport hung"));
+  // Barrier retained: a queued submission does NOT jump the fence.
+  clock.t += 1;
+  await svc.submit({ id: "evt_next", text: "next", origin: "human" });
+  clock.t += 1;
+  await svc.tick();
+  assert.equal(oc.sends.length, 1, "no new dispatch while interrupt_pending");
+  // No abortSession transport wired at all: same retained barrier.
+  const { svc: svc2, oc: oc2 } = buildService({ abortSession: null });
+  await svc2.submit({ id: "evt_run2", text: "run", origin: "human" });
+  await svc2.tick();
+  const res2 = await svc2.interrupt("evt_run2");
+  assert.equal(res2.status, "interrupt_pending");
+  const rec2 = await recordOf(svc2, "evt_run2");
+  assert.ok(rec2.abortError.includes("abort-unsupported"));
+  assert.equal(oc2.aborts.length, 0);
+});
+
+test("reconcile settles an interrupt_pending record from transcript proof (restart mid-interrupt)", async () => {
+  const { svc, oc, clock } = buildService();
+  await svc.submit({ id: "evt_run", text: "run", origin: "human" });
+  await svc.tick();
+  oc.abortSession = async () => {}; // silent success (restart lost the outcome)
+  await svc.interrupt("evt_run");
+  assert.equal(await statusOf(svc, "evt_run"), "interrupt_pending");
+  // The transcript proves the turn ended (aborts often leave no terminal
+  // finish, but a completed linked row does prove it).
+  oc.completeTurn(oc.sends[0].messageID);
+  clock.t += 20_000;
+  await svc.tick();
+  const rec = await recordOf(svc, "evt_run");
+  assert.equal(rec.status, "interrupted");
+  assert.equal(rec.outcome.kind, "reconciled");
 });
 
 // ---------------------------------------------------------------------------
@@ -461,6 +777,7 @@ test("terminal receipts are retained: the store never evicts; new submissions ar
   const a = await svc.submit({ id: "evt_a", text: "a", origin: "human" });
   await svc.tick();
   clock.t += 1;
+  oc.completeTurn(oc.sends[0].messageID);
   svc.observeEvent({ type: "session.idle", properties: { sessionID: "ses_cto" } });
   await flush();
   assert.equal(await statusOf(svc, a.id), "completed");
@@ -482,94 +799,33 @@ test("terminal receipts are retained: the store never evicts; new submissions ar
 });
 
 // ---------------------------------------------------------------------------
-// Interrupt — the explicit operation
+// Binding generation: pending retargets, accepted stays
 // ---------------------------------------------------------------------------
 
-test("interrupt: queued → cancelled without any abort; accepted → abortSession runs exactly once", async () => {
-  const { svc, oc, clock } = buildService();
-  // Contention so submit-order (not the fire-and-forget pump) decides which
-  // record is accepted when the session frees: the EARLIER submission goes.
-  svc.observeEvent({ type: "session.status", properties: { sessionID: "ses_cto", status: { type: "busy" } } });
-  clock.t += 1;
-  await svc.submit({ id: "evt_running", text: "running", origin: "human" });
-  await svc.submit({ id: "evt_q", text: "queued", origin: "human" });
+test("stale generation: pending submissions retarget the replacement binding; accepted turns keep their original sid", async () => {
+  const { svc, oc, binding, clock } = buildService();
+  const a = await svc.submit({ text: "first", origin: "human" });
+  await svc.tick(); // accepted against ses_cto / generation 3
+  const pending = await svc.submit({ text: "still queued", origin: "human" });
+  binding.advance("ses_cto_v2"); // role session replaced → generation 4
+  // Finish the accepted turn (transcript proof + terminal event) so the
+  // pending submission can be admitted against the CURRENT binding.
+  oc.completeTurn(oc.sends[0].messageID);
   clock.t += 1;
   svc.observeEvent({ type: "session.idle", properties: { sessionID: "ses_cto" } });
-  await svc.tick();
-  assert.equal(await statusOf(svc, "evt_running"), "accepted");
-  assert.equal(await statusOf(svc, "evt_q"), "queued");
-  assert.equal(oc.aborts.length, 0, "no implicit abort from submit or tick");
-  await svc.interrupt("evt_q", { reason: "user cancelled" });
-  assert.equal(await statusOf(svc, "evt_q"), "cancelled");
-  assert.equal(oc.aborts.length, 0);
-  await svc.interrupt("evt_running", { reason: "stop the turn" });
   await flush();
-  assert.equal(oc.aborts.length, 1, "explicit interrupt of an accepted turn aborts once");
-  assert.equal(oc.aborts[0], "ses_cto");
-  const rec = (await svc.list()).submissions.find((s) => s.id === "evt_running");
-  assert.equal(rec.status, "interrupted");
-  assert.equal(rec.interruptReason, "stop the turn");
-  await assert.rejects(
-    () => svc.interrupt("evt_running"),
-    (err) => err instanceof CtoAdmissionError && err.code === "already-terminal",
-  );
-});
-
-test("interrupt on an unknown record cancels it and unblocks the queue", async () => {
-  const { svc, oc, clock } = buildService({ oc: fakeOc({ sendOutcome: "network" }) });
-  await svc.submit({ id: "evt_unknown", text: "stuck", origin: "human" });
-  await svc.tick();
-  assert.equal(await statusOf(svc, "evt_unknown"), "unknown");
-  clock.t += 1;
-  await svc.submit({ id: "evt_next", text: "next", origin: "human" });
-  await svc.tick();
-  assert.equal(oc.sends.length, 1, "unknown holds the gate");
-  await svc.interrupt("evt_unknown", { reason: "abandon" });
-  assert.equal(await statusOf(svc, "evt_unknown"), "cancelled");
-  await svc.tick();
-  assert.equal(oc.sends.length, 2, "the gate is released");
-});
-
-// ---------------------------------------------------------------------------
-// Transcript-based turn completion (restart mid-turn)
-// ---------------------------------------------------------------------------
-
-test("reconcile completes an accepted turn when the transcript shows a finished assistant row", async () => {
-  const { svc, oc, clock } = buildService();
-  const res = await svc.submit({ text: "q", origin: "human" });
-  await svc.tick();
-  assert.equal(await statusOf(svc, res.id), "accepted");
-  // No terminal event ever arrives (restart lost it); the transcript shows
-  // the assistant's turn COMPLETED after our user message.
   clock.t += 20_000;
-  oc.rows = [
-    { info: { id: oc.sends[0].messageID, role: "user", time: { created: 1 } }, parts: [] },
-    { info: { id: "asst_1", role: "assistant", time: { created: 2, completed: 9_000 } }, parts: [] },
-  ];
   await svc.tick();
-  const record = (await svc.list()).submissions.find((s) => s.id === res.id);
-  assert.equal(record.status, "completed");
-  assert.equal(record.outcome.kind, "reconciled");
-});
-
-test("turnCompletionFromTranscript: running assistant row is NOT completion; missing receipt is not proof", () => {
-  const user = { info: { id: "msg_u", role: "user" }, parts: [] };
-  assert.deepEqual(turnCompletionFromTranscript([user], "msg_u"), { completed: false });
-  assert.deepEqual(
-    turnCompletionFromTranscript(
-      [user, { info: { id: "a", role: "assistant", time: { created: 1 } } }],
-      "msg_u",
-    ),
-    { completed: false },
-  );
-  assert.deepEqual(
-    turnCompletionFromTranscript(
-      [user, { info: { id: "a", role: "assistant", time: { created: 1, completed: 2 } } }],
-      "msg_u",
-    ),
-    { completed: true, via: "transcript" },
-  );
-  assert.equal(turnCompletionFromTranscript([{ info: { id: "other", role: "user" } }], "msg_u"), null);
+  assert.equal(oc.sends.length, 2);
+  assert.equal(oc.sends[0].sessionId, "ses_cto");
+  assert.equal(oc.sends[1].sessionId, "ses_cto_v2", "pending work retargets the replacement binding");
+  const aRecord = await recordOf(svc, a.id);
+  assert.equal(aRecord.sessionId, "ses_cto", "accepted turns stay associated with their original session");
+  const pRecord = await recordOf(svc, pending.id);
+  assert.equal(pRecord.sessionId, "ses_cto_v2");
+  assert.equal(pRecord.retargeted, true);
+  assert.equal(pRecord.submitGeneration, 3);
+  assert.equal(pRecord.dispatchGeneration, 4);
 });
 
 // ---------------------------------------------------------------------------
@@ -577,14 +833,7 @@ test("turnCompletionFromTranscript: running assistant row is NOT completion; mis
 // ---------------------------------------------------------------------------
 
 test("a submit during an in-flight send completes promptly (no store lock held across the external await)", async () => {
-  let releaseSend;
-  const gate = new Promise((resolve) => (releaseSend = resolve));
-  const oc = fakeOc();
-  oc.sendPrompt = async (args) => {
-    oc.sends.push(args);
-    await gate;
-    oc.transcript.set(args.messageID, { info: { id: args.messageID, role: "user", time: { created: 1 } }, parts: [] });
-  };
+  const { oc, releaseSend } = parkedSendOc();
   const { svc, clock } = buildService({ oc, requestDeadlineMs: 500 });
   const first = svc.submit({ text: "slow send", origin: "human" });
   await svc.tick(); // enters the send and parks on the gate
@@ -609,14 +858,14 @@ test("a send that hangs past the deadline is classified unknown, and its late fa
   const { svc } = buildService({ oc, requestDeadlineMs: 30 });
   const res = await svc.submit({ text: "hangs", origin: "human" });
   await svc.tick();
-  const record = (await svc.list()).submissions.find((s) => s.id === res.id);
-  assert.equal(record.status, "unknown", "a deadline hit is uncertainty, never a resend trigger");
+  const record = await recordOf(svc, res.id);
+  assert.equal(record.status, "unknown", "a deadline hit (aborted client request) is uncertainty, never a resend trigger");
   assert.equal(record.unknownReason.includes("deadline"), true);
   await new Promise((resolve) => setTimeout(resolve, 150)); // let the late rejection land
 });
 
 // ---------------------------------------------------------------------------
-// Strict store validation
+// Strict store validation + the real strict store file (blocker 4)
 // ---------------------------------------------------------------------------
 
 test("normalizeAdmissionPayload fails loudly on corruption; the default payload is empty and valid", () => {
@@ -642,19 +891,101 @@ test("normalizeAdmissionPayload fails loudly on corruption; the default payload 
     "an accepted record without its receipt identity is corruption",
   );
   assert.throws(() => normalizeAdmissionPayload({ submissions: "nope" }), /submissions/);
+  assert.doesNotThrow(
+    () =>
+      normalizeAdmissionPayload({
+        submissions: [
+          {
+            id: "x",
+            origin: "human",
+            text: "t",
+            payloadHash: "h",
+            status: "interrupt_pending",
+            createdAt: 1,
+            submitGeneration: 0,
+            sessionId: "s",
+            messageID: "msg_x",
+          },
+        ],
+      }),
+    "interrupt_pending is a valid nonterminal barrier state",
+  );
+});
+
+test("the strict admission store FAILS on malformed/null payload and preserves the file (blocker 4)", async () => {
+  const file = statePath("cto", "admission.json");
+  await mkdir(statePath("cto"), { recursive: true });
+  try {
+    // Top-level null: corruption → throw, file preserved byte-for-byte.
+    await writeFile(file, "null", "utf-8");
+    await assert.rejects(() => admissionStore.load(), /admission/);
+    assert.equal(await readFile(file, "utf-8"), "null", "never reset/overwritten");
+    // Unparsable JSON: throw, file preserved.
+    await writeFile(file, "{ oops", "utf-8");
+    await assert.rejects(() => admissionStore.load());
+    assert.equal(await readFile(file, "utf-8"), "{ oops", "never reset/overwritten");
+    // A read error (unreadable) also fails rather than falling back.
+    await writeFile(file, "[]", "utf-8");
+    await assert.rejects(() => admissionStore.load(), /array/);
+    assert.equal(await readFile(file, "utf-8"), "[]", "never reset/overwritten");
+  } finally {
+    await rm(file, { force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Transcript reader unit behavior
+// ---------------------------------------------------------------------------
+
+test("turnCompletionFromTranscript: linkage + terminal finish only; running/tool/unlinked rows are not proof", () => {
+  const user = { info: { id: "msg_u", role: "user" }, parts: [] };
+  assert.deepEqual(turnCompletionFromTranscript([user], "msg_u"), { completed: false });
+  assert.deepEqual(
+    turnCompletionFromTranscript([user, { info: { id: "a", role: "assistant", parentID: "msg_u", time: { created: 1 } } }], "msg_u"),
+    { completed: false },
+  );
+  assert.deepEqual(
+    turnCompletionFromTranscript(
+      [user, { info: { id: "a", role: "assistant", parentID: "msg_u", finish: "tool_use", time: { created: 1, completed: 2 } } }],
+      "msg_u",
+    ),
+    { completed: false },
+    "a completed tool step is not a completed turn",
+  );
+  assert.deepEqual(
+    turnCompletionFromTranscript(
+      [user, { info: { id: "unlinked", role: "assistant", parentID: "msg_other", finish: "stop", time: { created: 1, completed: 2 } } }],
+      "msg_u",
+    ),
+    { completed: false },
+    "an unlinked assistant row is never proof",
+  );
+  assert.deepEqual(
+    turnCompletionFromTranscript(
+      [
+        user,
+        { info: { id: "a1", role: "assistant", parentID: "msg_u", finish: "tool_use", time: { created: 1, completed: 2 } } },
+        { info: { id: "a2", role: "assistant", parentID: "msg_u", finish: "stop", time: { created: 3, completed: 4 } } },
+      ],
+      "msg_u",
+    ),
+    { completed: true, via: "transcript", outcome: "ok" },
+    "the LAST linked row decides: intermediate tool steps do not block the final proof",
+  );
+  assert.equal(turnCompletionFromTranscript([{ info: { id: "other", role: "user" } }], "msg_u"), null);
 });
 
 // ---------------------------------------------------------------------------
 // Production composition: the REAL opencode.mjs client on the wire
 // ---------------------------------------------------------------------------
 
-test("production composition: real opencode.mjs sendPrompt carries the caller messageID on the wire and getMessage reads the receipt back", async () => {
+test("production composition: real opencode.mjs sendPrompt carries the caller messageID AND the bounded signal on the wire; getMessage reads the receipt back", async () => {
   const calls = [];
   const prev = ocModule._setOcTransport(async (url, init = {}) => {
     const u = new URL(url);
     const method = init.method ?? "GET";
     const body = init.body ? JSON.parse(init.body) : null;
-    calls.push({ method, path: u.pathname, query: Object.fromEntries(u.searchParams), body });
+    calls.push({ method, path: u.pathname, query: Object.fromEntries(u.searchParams), body, signal: init.signal });
     if (method === "GET" && u.pathname === "/session/ses_live") {
       return new Response(
         JSON.stringify({ id: "ses_live", directory: "/tmp/cto-control", projectID: "global" }),
@@ -682,6 +1013,7 @@ test("production composition: real opencode.mjs sendPrompt carries the caller me
     assert.ok(post, "prompt_async hit the wire");
     assert.equal(post.body.messageID, "msg_probe", "the client messageID rides the prompt_async body");
     assert.equal(post.query.directory, "/tmp/cto-control");
+    assert.equal(post.signal, undefined, "no signal given → none on the wire (pre-P3a2 compat)");
     // And WITHOUT a messageID the body omits it entirely (pre-P3a2 behavior).
     await ocModule.sendPrompt({ sessionId: "ses_live", text: "bare" });
     const bare = calls.filter((c) => c.method === "POST" && c.path === "/session/ses_live/prompt_async")[1];
@@ -700,12 +1032,13 @@ test("production composition: real opencode.mjs sendPrompt carries the caller me
     });
     const res = await svc.submit({ text: "production admission", origin: "human" });
     await svc.tick();
-    const record = (await svc.list()).submissions.find((s) => s.id === res.id);
+    const record = await recordOf(svc, res.id);
     assert.equal(record.status, "accepted", "204 + wire receipt → accepted");
     assert.match(record.messageID, /^msg_/);
     const prodPost = calls.filter((c) => c.method === "POST" && c.path === "/session/ses_live/prompt_async").at(-1);
     assert.equal(prodPost.body.messageID, record.messageID);
     assert.equal(prodPost.body.parts.at(-1).text, "production admission");
+    assert.ok(prodPost.signal instanceof AbortSignal, "the admission deadline bounds the real POST");
   } finally {
     ocModule._setOcTransport(prev);
     ocModule._resetSessionDirectoryCache();
@@ -713,7 +1046,6 @@ test("production composition: real opencode.mjs sendPrompt carries the caller me
 });
 
 test("the default store resolves inside the state-home sandbox (never the live box)", async () => {
-  const { statePath } = await import("../shared/paths.mjs");
   assert.equal(admissionStore.path, statePath("cto", "admission.json"));
   assert.ok(admissionStore.path.startsWith(process.env.MANTA_STATE_HOME));
 });
