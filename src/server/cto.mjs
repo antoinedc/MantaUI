@@ -717,8 +717,9 @@ export function createCtoEngine(deps = {}) {
   register({
     name: "context_search",
     description:
-      "Bounded text + tool-evidence search over opencode's OWN store (spec §4.2) — ranked " +
-      "hits with stable session/message/part source ids and snippets; finds closed/archived " +
+      "Bounded newest-first text + tool-evidence search over opencode's OWN store (spec " +
+      "§4.2, direct source reads — no FTS/ranking index) — hits with stable session/message/part " +
+      "source ids and snippets; finds closed/archived " +
       "child sessions too. query required; optional observed projectId/directory/sessionId " +
       "filters, limit (default 20, max 50) and cursor. Envelope status distinguishes " +
       "ok/invalid_input/unsupported/source_unavailable; truncation carries omitted-size " +
