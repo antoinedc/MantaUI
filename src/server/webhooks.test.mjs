@@ -598,3 +598,20 @@ test("deliverWebhook surfaces a defer-queue-full rejection as 429, not 202 (BET-
   assert.equal(sent(), 0); // it was deferred-and-rejected, never sent now
   assert.equal(enqueueCalls, 1);
 });
+
+test("deliverWebhook passes the REAL refusal cause through instead of a misleading 'queue full'", async () => {
+  const res = await deliverWebhook(
+    { token: "a".repeat(32), rawBody: "{}", signatureHeader: "" },
+    {
+      load: async () => [fakeHook({ unsigned: true })],
+      save: async () => {},
+      sendPrompt: async () => {},
+      // A CTO admission refusal (e.g. binding unavailable) is NOT a queue
+      // overflow — the sender deserves the actual cause (P3a3-review).
+      enqueue: async () => ({ delivered: false, queued: false, rejected: true, error: "binding unavailable — refusing to admit against unresolved role identity" }),
+    },
+  );
+  assert.equal(res.status, 429);
+  assert.match(res.error, /binding unavailable/);
+  assert.notEqual(res.error, "queue full");
+});

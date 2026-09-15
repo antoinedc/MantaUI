@@ -21,6 +21,7 @@ import {
   CONVERSATION_ROLE,
   CtoBindingError,
   DEFAULT_REQUEST_DEADLINE_MS,
+  MAX_PREVIOUS_SESSION_IDS,
   RECONCILE_ATTEMPTS,
   ROLE_SESSION_TITLE,
   _resetConversationRoleCache,
@@ -1042,4 +1043,13 @@ test("production composition: createSession rejects a non-object metadata before
   } finally {
     ocModule._setOcTransport(prev);
   }
+});
+
+test("capPrevious actually CAPS the archive (newest kept) — it is scanned on every ordinary prompt (P3a3-review)", () => {
+  const ids = Array.from({ length: 30 }, (_, i) => `ses_old_${i}`);
+  const capped = capPrevious([...ids, "ses_new"]);
+  assert.equal(capped.length, MAX_PREVIOUS_SESSION_IDS, "bounded archive");
+  assert.equal(capped.at(-1), "ses_new", "the newest generation is kept");
+  assert.ok(!capped.includes("ses_old_0"), "the oldest generations fall off");
+  assert.deepEqual(capPrevious(["a", "a", "b"]), ["a", "b"], "dedupe preserved");
 });

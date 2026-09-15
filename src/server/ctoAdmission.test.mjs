@@ -1535,3 +1535,149 @@ test("production dispatch claims through the real binding service's claimGenerat
   assert.equal(rec.status, "accepted");
   assert.equal(rec.dispatchGeneration, 3);
 });
+
+// ---------------------------------------------------------------------------
+// P3a3-review: bounded retention for terminal BACKGROUND receipts. Unique
+// per-occurrence ids (schedule job+minute, webhook/delegate minted) make
+// them grow one per delivery forever — invariant 5's "retained forever"
+// would wedge the WHOLE conversation at MAX_ENTRIES (a */5 schedule hits it
+// unattended in under two days), refusing even the human's own message.
+// Terminal background receipts are evicted into durable tombstones; human
+// receipts are never evicted.
+// ---------------------------------------------------------------------------
+
+function terminalRecord(id, { origin, payloadHash, text = "tick", createdAt }) {
+  return {
+    id,
+    origin,
+    text,
+    payloadHash,
+    status: "completed",
+    createdAt,
+    submitGeneration: 1,
+    sessionId: "ses_cto",
+    messageID: `msg_${id}`,
+  };
+}
+
+test("a human submit is never refused because terminal background receipts filled the store (inline tombstoning at cap)", async () => {
+  const store = memoryStore(`t-${randomUUID()}`);
+  await store.save({
+    v: 1,
+    submissions: Array.from({ length: 10 }, (_, i) =>
+      terminalRecord(`bg_${i}`, { origin: "background", payloadHash: `h${i}`, createdAt: i }),
+    ),
+  });
+  const { svc } = buildService({ store, maxEntries: 10, maxTerminalBackground: 3 });
+  // BEFORE the fix: refused with at-cap ("terminal receipts are never evicted").
+  const receipt = await svc.submit({ origin: "human", text: "hello", id: "m_human", agent: "a" });
+  assert.equal(receipt.persisted, true, "the human submit succeeds");
+  assert.equal(receipt.status, "queued");
+  const q = await svc.list();
+  assert.equal(q.submissions.length, 10, "the store stays at cap (1 evicted + 1 created)");
+  assert.ok(q.submissions.some((r) => r.id === "m_human"), "the human record is present");
+  assert.ok(!q.submissions.some((r) => r.id === "bg_0"), "the OLDEST background receipt was evicted");
+  assert.ok(q.submissions.some((r) => r.id === "bg_9"), "the newest background receipt stays");
+});
+
+test("a genuine retry of an evicted (tombstoned) id still dedups and never double-sends", async () => {
+  const store = memoryStore(`t-${randomUUID()}`);
+  const retryPayload = { origin: "background", text: "board check", agent: "cto-test" };
+  const hash = canonicalRequestHash(retryPayload);
+  await store.save({
+    v: 1,
+    submissions: [],
+    tombstones: [
+      {
+        id: "sched:j1:2026-09-15T10:30",
+        payloadHash: hash,
+        status: "completed",
+        origin: "background",
+        createdAt: 1,
+      },
+    ],
+  });
+  const { svc, oc } = buildService({ store });
+  // Same id + same payload → the tombstone replays the terminal receipt.
+  const replay = await svc.submit({
+    origin: "background",
+    text: "board check",
+    id: "sched:j1:2026-09-15T10:30",
+    agent: "cto-test",
+  });
+  assert.equal(replay.persisted, false, "replay — nothing new written");
+  assert.equal(replay.status, "completed", "the tombstoned outcome is returned");
+  assert.equal(oc.sends.length, 0, "no double-send");
+  // Same id + DIFFERENT payload under a tombstoned id stays a caller error.
+  await assert.rejects(
+    () =>
+      svc.submit({
+        origin: "background",
+        text: "a different ask",
+        id: "sched:j1:2026-09-15T10:30",
+        agent: "cto-test",
+      }),
+    /different payload/,
+  );
+});
+
+test("a NEW occurrence after eviction is a fresh submission (identities never recur, tombstones never resurrect)", async () => {
+  const store = memoryStore(`t-${randomUUID()}`);
+  const hash = canonicalRequestHash({ origin: "background", text: "board check", agent: "cto-test" });
+  await store.save({
+    v: 1,
+    submissions: [],
+    tombstones: [
+      {
+        id: "sched:j1:2026-09-15T10:30",
+        payloadHash: hash,
+        status: "completed",
+        origin: "background",
+        createdAt: 1,
+      },
+    ],
+  });
+  const { svc } = buildService({ store });
+  const next = await svc.submit({
+    origin: "background",
+    text: "board check",
+    id: "sched:j1:2026-09-15T10:35", // the NEXT firing minute — a new identity
+    agent: "cto-test",
+  });
+  assert.equal(next.persisted, true, "a new occurrence is a new submission");
+});
+
+test("trimTerminalBackground tombstones the oldest terminal background receipts beyond the bound (sweeper hook)", async () => {
+  const store = memoryStore(`t-${randomUUID()}`);
+  await store.save({
+    v: 1,
+    submissions: [
+      terminalRecord("bg_old", { origin: "background", payloadHash: "h_old", createdAt: 1 }),
+      terminalRecord("bg_mid", { origin: "background", payloadHash: "h_mid", createdAt: 2 }),
+      terminalRecord("bg_new", { origin: "background", payloadHash: "h_new", createdAt: 3 }),
+      terminalRecord("m_human", { origin: "human", payloadHash: "h_human", createdAt: 4 }),
+    ],
+  });
+  const { svc } = buildService({ store, maxTerminalBackground: 2 });
+  const { evicted } = await svc.trimTerminalBackground();
+  assert.equal(evicted, 1);
+  const q = await svc.list();
+  assert.equal(q.submissions.length, 3);
+  assert.ok(!q.submissions.some((r) => r.id === "bg_old"), "the oldest is evicted");
+  assert.ok(q.submissions.some((r) => r.id === "m_human"), "the HUMAN receipt is never evicted");
+});
+
+test("terminal HUMAN receipts still fill the cap honestly — the refusal names what holds the gate", async () => {
+  const store = memoryStore(`t-${randomUUID()}`);
+  await store.save({
+    v: 1,
+    submissions: Array.from({ length: 5 }, (_, i) =>
+      terminalRecord(`m_${i}`, { origin: "human", payloadHash: `h${i}`, createdAt: i }),
+    ),
+  });
+  const { svc } = buildService({ store, maxEntries: 5, maxTerminalBackground: 3 });
+  await assert.rejects(
+    () => svc.submit({ origin: "human", text: "one more", id: "m_more" }),
+    /nothing evictable/,
+  );
+});

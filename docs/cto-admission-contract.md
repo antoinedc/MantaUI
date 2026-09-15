@@ -153,15 +153,25 @@ accepted ──interrupt──▶ interrupt_pending (NONTERMINAL barrier)
   pending work retargets a replacement role session automatically (recorded: `retargeted: true`,
   `dispatchGeneration`); an accepted turn keeps its original `sessionId` forever. A caller may
   pin `expectedGeneration` — mismatch refuses with `stale-generation` (new records only).
-- **Receipts retained forever**: terminal records are never evicted; growth is bounded by
-  refusing NEW submissions at `MAX_ENTRIES` (500) with `at-cap`.
+- **Receipts retained forever (human) — tombstoned at a bound (background)**: terminal HUMAN
+  receipts are never evicted; growth is bounded by refusing NEW submissions at `MAX_ENTRIES`
+  (500) with `at-cap`. Terminal BACKGROUND receipts (P3a3-review) are evicted into compact
+  durable TOMBSTONES (`{id, payloadHash, status}`) once they exceed
+  `MAX_TERMINAL_BACKGROUND` (200) — oldest first, inline at the cap and via the shared CTO
+  store sweeper (`admission.trimTerminalBackground()`). The tombstone keeps the dedup
+  identity: a genuine same-id retry still replays (never double-sends); occurrence identities
+  never recur (schedule keys embed the full-date minute key; webhook/delegate ids are unique),
+  so eviction cannot resurrect a turn. A human submit is NEVER refused because background
+  receipts filled the store — the cap path tombstones to make room first and refuses only
+  when nothing evictable remains.
 
 ## Store
 
 `ctoStores.admissionStore` (`~/.manta/cto/admission.json`, atomic 0600, sandbox-aware). Payload:
-`{ v: 1, submissions: [...] }`, validated strictly by `normalizeAdmissionPayload` (corruption
-throws; never silently reinterpreted). All writes go through `patchStore`'s per-path mutex with
-sync mutators — no store lock is ever held across an opencode await.
+`{ v: 1, submissions: [...], tombstones: [...] }`, validated strictly by
+`normalizeAdmissionPayload` (corruption throws; never silently reinterpreted). All writes go
+through `patchStore`'s per-path mutex with sync mutators — no store lock is ever held across an
+opencode await.
 
 ## Known limitations (honest scope)
 
@@ -197,3 +207,10 @@ sync mutators — no store lock is ever held across an opencode await.
    `list()`; nothing here talks to clients directly.
 7. **Routine work-event entries** (spec §3.2 rows that need no model turn) do NOT pass through
    admission — this service is for turns only.
+8. **Webhook redelivery outside the hook's dedupe window double-prompts** (P3a3-review):
+   manta hooks carry no stable delivery id (GitHub hooks route to forge ingest before any
+   delivery), so each accepted webhook delivery mints a UNIQUE admission id — a redelivery
+   that falls outside the hook store's own `seenDeliveryIds` window (and its HMAC replay
+   guard) becomes a NEW occurrence and sends again. The hook store's window is the designed
+   redelivery dedupe; admission cannot recognize the repeat. Callers WITH stable identities
+   (schedule job+minute, capability job+status) dedup exactly once per occurrence.

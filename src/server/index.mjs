@@ -2682,6 +2682,12 @@ void stopAdaptiveCtoWatchdog;
 const stopCtoStoreSweeper = startCtoStoreSweeper({
   intervalMs: CTO_STORE_SWEEP_INTERVAL_MS,
   label: "cto-store-sweeper",
+  // P3a3-review: the admission engine's terminal-background retention rides
+  // the SAME sweeper timer (unique per-occurrence ids make terminal
+  // background receipts grow one per delivery — without the trim, the store
+  // wedges at MAX_ENTRIES and refuses even human submits). startPoller's
+  // extras: pass through `hooks` → createCtoStoreSweep.
+  hooks: [() => ctoAdmissionEngine.trimTerminalBackground()],
 });
 void stopCtoStoreSweeper;
 

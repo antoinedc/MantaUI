@@ -127,9 +127,19 @@ export function isMarkerSession(session, operation) {
   );
 }
 
-/** Dedupe (keep order). The archive is NEVER capped or dropped (blocker 6). */
+/**
+ * Dedupe (keep order) and CAP the previous-generation archive, keeping the
+ * NEWEST generations (the tail). P3a3-review: the archive is scanned by the
+ * conversation seams' classification on every ordinary prompt (stamp-cached,
+ * but still scanned), so it must be BOUNDED — the earlier "never capped"
+ * stance predated that scan and capPrevious only deduped. 20 generations is
+ * far beyond any real rebind cadence; a previous-generation id older than the
+ * cap is a dead session no consumer can address anyway.
+ */
+export const MAX_PREVIOUS_SESSION_IDS = 20;
+
 export function capPrevious(ids) {
-  return [...new Set(ids)];
+  return [...new Set(ids)].slice(-MAX_PREVIOUS_SESSION_IDS);
 }
 
 /**

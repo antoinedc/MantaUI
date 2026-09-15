@@ -177,6 +177,19 @@ const UNRESOLVED = new Set([
 const TERMINAL = new Set(["completed", "failed", "cancelled", "interrupted"]);
 
 export const MAX_ENTRIES = 500;
+// P3a3-review: bounded retention for TERMINAL BACKGROUND receipts. Unique
+// per-occurrence ids (sched job+minute keys, webhook/delegate minted ids)
+// mean terminal background records accumulate one per delivery forever —
+// invariant 5's "retained forever" would wedge the WHOLE conversation at
+// MAX_ENTRIES (~500 deliveries: a */5 schedule hits it unattended in under
+// two days), refusing even the human's own message with no management op.
+// Terminal background receipts past this bound are evicted into compact
+// durable TOMBSTONES (id + payloadHash + status) so a genuine same-id retry
+// still dedups. Eviction is safe because occurrence identities never recur
+// (sched keys embed the full-date minute key; a same-fire retry only re-fires
+// through the crash window between sendPrompt and the lastFiredMinute save —
+// minutes, not the ~200-delivery horizon). Human receipts are NEVER evicted.
+export const MAX_TERMINAL_BACKGROUND = 200;
 export const DEFAULT_REQUEST_DEADLINE_MS = 15_000;
 export const RECEIPT_READ_ATTEMPTS = 3;
 export const RECEIPT_READ_BACKOFF_MS = 150;
@@ -236,6 +249,10 @@ export function normalizeAdmissionPayload(payload) {
   const p = payload && typeof payload === "object" && !Array.isArray(payload) ? payload : {};
   const submissions = p.submissions ?? [];
   if (!Array.isArray(submissions)) throw invalidRecord("submissions", p.submissions);
+  // Tombstones (P3a3-review): compact durable receipts for evicted terminal
+  // background submissions — the dedup identity survives eviction.
+  const tombstones = p.tombstones ?? [];
+  if (!Array.isArray(tombstones)) throw invalidRecord("tombstones", p.tombstones);
   const seen = new Set();
   return {
     v: 1,
@@ -265,6 +282,17 @@ export function normalizeAdmissionPayload(payload) {
         throw invalidRecord(`submissions[${index}].abortState`, r.abortState);
       }
       return r;
+    }),
+    // Tombstones keep only the dedup identity — never the payload text.
+    tombstones: tombstones.map((raw, index) => {
+      const t = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+      return {
+        id: assertStr(t.id, `tombstones[${index}].id`),
+        payloadHash: assertStr(t.payloadHash, `tombstones[${index}].payloadHash`),
+        status: t.status ?? "completed",
+        origin: t.origin ?? "background",
+        createdAt: Number.isInteger(t.createdAt) ? t.createdAt : 0,
+      };
     }),
   };
 }
@@ -407,6 +435,7 @@ export function createCtoAdmission({
   unknownStaleMs = UNKNOWN_STALE_MS,
   turnRecheckIntervalMs = TURN_RECHECK_INTERVAL_MS,
   maxEntries = MAX_ENTRIES,
+  maxTerminalBackground = MAX_TERMINAL_BACKGROUND,
 } = {}) {
   if (!binding || typeof binding.getBinding !== "function" || typeof binding.claimGeneration !== "function") {
     throw new Error(
@@ -579,12 +608,17 @@ export function createCtoAdmission({
 
     // Phase A: dedup / at-cap probe. A same-payload replay returns the
     // EXISTING record without ever reading the binding; a different payload
-    // under the same id is a caller error.
+    // under the same id is a caller error. Tombstoned (evicted terminal
+    // background) ids keep their dedup identity: same payload replays the
+    // tombstone, a different payload is still a caller error.
     let existing = null;
     try {
       await patchStore(store, (fresh) => {
         const normalized = normalizeAdmissionPayload(fresh);
-        existing = normalized.submissions.find((r) => r.id === submissionId) ?? null;
+        existing =
+          normalized.submissions.find((r) => r.id === submissionId) ??
+          normalized.tombstones.find((t) => t.id === submissionId) ??
+          null;
         if (existing && existing.payloadHash !== payloadHash) {
           throw new CtoAdmissionError(
             `duplicate submission id ${submissionId} with a different payload`,
@@ -637,10 +671,55 @@ export function createCtoAdmission({
           return {};
         }
         if (normalized.submissions.length >= maxEntries) {
-          throw new CtoAdmissionError(
-            `admission store at cap (${maxEntries} records); terminal receipts are never evicted`,
-            "at-cap",
+          // P3a3-review: before refusing, make room by tombstoning the OLDEST
+          // terminal BACKGROUND receipts (their dedup identity survives in
+          // the tombstone list). A human submit must NEVER be refused because
+          // background receipts filled the store — if nothing evictable
+          // remains, the cap refusal is honest (only unresolved/human state
+          // fills the store at that point).
+          const evictable = normalized.submissions
+            .filter((r) => TERMINAL.has(r.status) && r.origin === "background")
+            .sort((a, b) => a.createdAt - b.createdAt);
+          const needed = normalized.submissions.length + 1 - maxEntries;
+          if (evictable.length < needed) {
+            throw new CtoAdmissionError(
+              `admission store at cap (${maxEntries} records) and nothing evictable ` +
+                `(${evictable.length} terminal background receipts) — unresolved/human records hold the gate`,
+              "at-cap",
+            );
+          }
+          const evictedIds = new Set(evictable.slice(0, needed).map((r) => r.id));
+          const tombstoned = evictable
+            .slice(0, needed)
+            .map((r) => ({
+              id: r.id,
+              payloadHash: r.payloadHash,
+              status: r.status,
+              origin: r.origin,
+              createdAt: r.createdAt,
+            }));
+          const kept = normalized.submissions.filter((r) => !evictedIds.has(r.id));
+          // Tombstones are themselves bounded: drop the OLDEST identities —
+          // a retry landing after a double eviction creates a fresh record
+          // (occurrence identities never recur; see MAX_TERMINAL_BACKGROUND).
+          const keptTombstones = [...normalized.tombstones, ...tombstoned].slice(
+            -maxTerminalBackground,
           );
+          const created = {
+            id: submissionId,
+            origin,
+            text,
+            payloadHash,
+            status: "queued",
+            createdAt: now(),
+            submitGeneration: currentGeneration,
+            ...(model ? { model } : {}),
+            ...(agent ? { agent } : {}),
+            ...(expectedGeneration !== undefined ? { expectedGeneration } : {}),
+          };
+          record = created;
+          wrote = true;
+          return { submissions: [...kept, created], tombstones: keptTombstones };
         }
         const created = {
           id: submissionId,
@@ -1261,5 +1340,48 @@ async function claimAndAttemptAbort(record) {
     return { ok: true, id: submissionId, status: resulting.status };
   }
 
-  return { submit, list, tick, reconcile, interrupt, observeEvent };
+  // -- retention (P3a3-review) ----------------------------------------------
+  // Tombstone every terminal BACKGROUND receipt beyond the bound, oldest
+  // first. The dedup identity survives in the durable tombstone list, so a
+  // genuine same-id retry still replays instead of double-sending; occurrence
+  // identities never recur (sched keys embed the full-date minute key,
+  // webhook/delegate ids are unique), so eviction cannot resurrect a turn.
+  // Human receipts are NEVER evicted (invariant 5 holds for the human side).
+  // Called by the shared CTO store sweeper (no second timer) and inline by
+  // submit's cap path. Serialized with all other store ops via patchStore.
+  async function trimTerminalBackground() {
+    try {
+      let evicted = 0;
+      await patchStore(store, (fresh) => {
+        const normalized = normalizeAdmissionPayload(fresh);
+        const evictable = normalized.submissions
+          .filter((r) => TERMINAL.has(r.status) && r.origin === "background")
+          .sort((a, b) => a.createdAt - b.createdAt);
+        const excess = evictable.length - maxTerminalBackground;
+        if (excess <= 0) return {};
+        const gone = evictable.slice(0, excess);
+        const goneIds = new Set(gone.map((r) => r.id));
+        const tombstoned = gone.map((r) => ({
+          id: r.id,
+          payloadHash: r.payloadHash,
+          status: r.status,
+          origin: r.origin,
+          createdAt: r.createdAt,
+        }));
+        evicted = gone.length;
+        return {
+          submissions: normalized.submissions.filter((r) => !goneIds.has(r.id)),
+          tombstones: [...normalized.tombstones, ...tombstoned].slice(-maxTerminalBackground),
+        };
+      });
+      return { evicted };
+    } catch (err) {
+      // Best-effort: the sweeper must never die on a transient store error;
+      // submit's inline cap path is the guarantee that still holds.
+      console.warn("[ctoAdmission] terminal-background trim failed:", describeErr(err));
+      return { evicted: 0 };
+    }
+  }
+
+  return { submit, list, tick, reconcile, interrupt, observeEvent, trimTerminalBackground };
 }

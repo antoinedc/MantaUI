@@ -847,7 +847,7 @@ export async function sweepAllStores({ nowMs = Date.now() } = {}) {
   ]);
 }
 
-export function createCtoStoreSweep({ now = () => Date.now() } = {}) {
+export function createCtoStoreSweep({ now = () => Date.now(), hooks = [] } = {}) {
   let inFlight = false;
 
   async function sweep() {
@@ -855,6 +855,16 @@ export function createCtoStoreSweep({ now = () => Date.now() } = {}) {
     inFlight = true;
     try {
       await sweepAllStores({ nowMs: now() });
+      // P3a3-review: extra retention hooks wired by index.mjs (e.g. the
+      // admission engine's terminal-background trim) — the ONE sweeper timer,
+      // no second poller per engine.
+      for (const hook of hooks) {
+        try {
+          await hook(now());
+        } catch (e) {
+          console.warn("[cto-stores] retention hook failed:", e?.message ?? e);
+        }
+      }
     } finally {
       inFlight = false;
     }
