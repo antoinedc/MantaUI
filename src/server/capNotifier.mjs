@@ -31,10 +31,10 @@ function defaultDeliver({ sessionId, text }) {
  * (delivery engine / opencode). Errors are propagated (caller is expected
  * to swallow + log).
  *
- * @param {{sessionID: string, text: string}} args
- * @param {{deliver?: (args:{sessionId:string, text:string})=>Promise<unknown>}} [deps]
+ * @param {{sessionID: string, text: string, ctoKey?: string}} args
+ * @param {{deliver?: (args:{sessionId:string, text:string, ctoKey?:string})=>Promise<unknown>}} [deps]
  * @returns {Promise<unknown>}
  */
-export function notifyCapSession({ sessionID, text }, { deliver = defaultDeliver } = {}) {
-  return deliver({ sessionId: sessionID, text });
+export function notifyCapSession({ sessionID, text, ctoKey }, { deliver = defaultDeliver } = {}) {
+  return deliver({ sessionId: sessionID, text, ...(ctoKey ? { ctoKey } : {}) });
 }

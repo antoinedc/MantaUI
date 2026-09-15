@@ -4,38 +4,56 @@
 §8.3. This is the ONE server-owned admission path for every prompt to the CTO role session
 (desktop/native CEO submissions and background synthesis alike). Ordinary project delivery is
 UNTOUCHED (`promptDelivery.mjs` keeps its own engine for webhooks/schedules/peers/capability
-jobs). No routes, no UI, no poller are wired yet — that is the parent integration's job, using
-exactly the recipe below. Do not add a second admission path for the CTO session.
+jobs). Wired since P3a3 (`src/server/ctoConversation.mjs` + `src/server/index.mjs`): the four
+authenticated `cto:conversation-*` RPC channels, the direct-send seams, the event tap and the
+bounded tick poller all use exactly the recipe below. Do not add a second admission path for
+the CTO session.
 
-## Production composition (the parent wiring)
+## Production composition (as wired)
 
 ```js
 import { createCtoAdmission } from "./ctoAdmission.mjs";
 import { createPromptDelivery } from "./promptDelivery.mjs";
-import * as oc from "./opencode.mjs";
 import { createCtoBinding } from "./ctoBinding.mjs";
+import { createCtoConversationService } from "./ctoConversation.mjs";
+import { CTO_AGENT_NAME } from "./providers.mjs";
+import * as oc from "./opencode.mjs";
 
-const promptDelivery = createPromptDelivery({ sendPrompt: (args) => oc.sendPrompt(args) });
-const binding = createCtoBinding({ oc });                    // P3a1 service
+const promptDelivery = createPromptDelivery({
+  sendPrompt: (args) => oc.sendPrompt(args),
+  redirect: (args) => ctoConversation.redirectDelivery(args), // background seam
+});
+const binding = createCtoBinding({ oc });                    // P3a1 service (LAZY — no oc calls at boot)
 const admission = createCtoAdmission({
   binding,                          // dispatch resolves the CURRENT binding
   sendPrompt: (args) => oc.sendPrompt(args),  // messageID-capable (P3a2, P0-proven)
   getMessage: (sid, mid) => oc.getMessage(sid, mid),   // receipt read-back
-  listMessages: (sid) => oc.listMessages(sid),         // turn-completion reconcile
-  abortSession: (sid) => oc.abortSession(sid),         // explicit interrupt only
+  listMessages: (sid, opts) => oc.listMessages(sid, opts), // turn-completion reconcile
+  abortSession: (sid, opts) => oc.abortSession(sid, opts), // explicit interrupt only
   isBusy: promptDelivery.isBusy,       // SHARED busy view — one truth for both engines
 });
-
-// ONE firehose tap feeds both engines (same event shapes):
-onOpencodeEvent((evt) => {
-  promptDelivery.observeEvent(evt);
-  admission.observeEvent(evt);
+const ctoConversation = createCtoConversationService({
+  binding, admission,
+  agentName: CTO_AGENT_NAME,          // server-owned agent; callers never choose one
 });
-// A poller drives recovery + admission without events (30s is fine):
-setInterval(() => admission.tick().catch(() => {}), 30_000).unref();
+// A bounded tick poller drives recovery + admission without events (30s);
+// startPoller surfaces failures via warn — never swallowed as healthy.
+const { stop } = startPoller(() => admission.tick(), { intervalMs: 30_000, label: "cto-admission" });
 ```
 
 Constraint: compose ONE admission engine per box (single-writer-process, like ctoBinding).
+The ONE firehose tap in index.mjs feeds BOTH engines (`promptDelivery.observeEvent(evt)` then
+`admission.observeEvent(evt)`) — same event shapes, no second stream. The RPC surface
+(`rpc.mjs`): `cto:conversation-open` → `{sessionId, generation}` (first open creates the role
+session, no model invocation, singleflight under concurrency); `cto:conversation-state` →
+`{binding:{sessionId|null, generation}, submissions, counts}` (pure store read); 
+`cto:conversation-submit {id?, text, expectedGeneration?, model?}` → the durable submit
+receipt (origin "human" and the `cto` agent are stamped server-side); 
+`cto:conversation-interrupt {id}` → `{ok, id, status}`. The `opencode:prompt` /
+`opencode:run-command` routes redirect/reject conversation-targeted sends through the same
+seam (plain text routed with a stable id; slash commands and file parts rejected with the
+"not supported yet" copy), and `promptDelivery.deliver` redirects conversation-targeted
+background deliveries into this queue with a stable content-mapped id (`bg_*`).
 
 ## Operations
 
@@ -135,21 +153,34 @@ accepted ──interrupt──▶ interrupt_pending (NONTERMINAL barrier)
   pending work retargets a replacement role session automatically (recorded: `retargeted: true`,
   `dispatchGeneration`); an accepted turn keeps its original `sessionId` forever. A caller may
   pin `expectedGeneration` — mismatch refuses with `stale-generation` (new records only).
-- **Receipts retained forever**: terminal records are never evicted; growth is bounded by
-  refusing NEW submissions at `MAX_ENTRIES` (500) with `at-cap`.
+- **Terminal receipts are bounded bookkeeping (P3a3 review round 3)**: terminal receipts of
+  EITHER origin are evicted into compact durable TOMBSTONES (`{id, payloadHash, status}`)
+  once they exceed `MAX_TERMINAL_BACKGROUND` (200) — oldest first, inline at the cap and via
+  the shared CTO store sweeper (`admission.trimTerminal()`). They are queue bookkeeping, not
+  conversation history — the real transcript lives in opencode. The tombstone keeps the dedup
+  identity: a genuine same-id retry still replays (never double-sends); occurrence identities
+  never recur (schedule keys embed the full-date minute key; webhook/delegate ids are unique),
+  so eviction cannot resurrect a turn. **A human submit is NEVER refused at the cap**: the
+  cap path evicts terminal receipts first, then — for a HUMAN submit only — drops the OLDEST
+  QUEUED BACKGROUND deliveries (tombstoned as `cancelled`: cancelled-by-policy, never
+  dispatched, so a replay does not resurrect them; human FIFO outranks background synthesis).
+  Only a store full of UNRESOLVED records still refuses, and the refusal says so.
 
 ## Store
 
 `ctoStores.admissionStore` (`~/.manta/cto/admission.json`, atomic 0600, sandbox-aware). Payload:
-`{ v: 1, submissions: [...] }`, validated strictly by `normalizeAdmissionPayload` (corruption
-throws; never silently reinterpreted). All writes go through `patchStore`'s per-path mutex with
-sync mutators — no store lock is ever held across an opencode await.
+`{ v: 1, submissions: [...], tombstones: [...] }`, validated strictly by
+`normalizeAdmissionPayload` (corruption throws; never silently reinterpreted). All writes go
+through `patchStore`'s per-path mutex with sync mutators — no store lock is ever held across an
+opencode await.
 
 ## Known limitations (honest scope)
 
 1. **Nonterminal request markers hold the gate**: an `unknown` / `cancel_requested` /
    `interrupt_pending` record blocks admission until reconcile resolves it (receipt found, or
-   the abort settles + the turn is proven ended) or — for unknown — a caller cancels it. This
+   the abort settles + the turn is proven ended). A caller cancel does NOT release an
+   `unknown` — interrupting it only converts it to `cancel_requested`, which is still a
+   nonterminal barrier that reconcile must prove out of (Operations table above). This
    is the conservative no-duplicate/no-late-abort trade; surface `list()` state, don't work
    around it.
 1a. **An uncertain abort is a PERMANENT, non-self-healing barrier** (`abortState: "uncertain"`,
@@ -163,6 +194,15 @@ sync mutators — no store lock is ever held across an opencode await.
 2. **`interrupt` of an accepted turn aborts the whole role session** (opencode abort is
    session-wide). The gate holds until the abort settles, so the blast radius cannot reach the
    NEXT admitted turn — but a foreign turn running on the session during the abort is hit too.
+2a. **Abort seaming is DELIBERATELY DEFERRED to its own PR (parent decision, P3a3 round 3).**
+   Routing `opencode:abort` of the bound role session onto admission's tracked interrupt was
+   built and REVERTED in this PR: a session-wide raw abort is inherently unsafe once the
+   admission barrier can release (a stray abort on a parked-unknown record reconciles to
+   accepted, the barrier releases, and the LATE abort lands on the NEXT admitted turn —
+   invariant 7's exact exclusion), and every seam variant either reported silent success on a
+   marker or cancelled the wrong turn. This PR ships main's plain raw abort; nothing consumes
+   admission's `interrupt` yet. The seam returns in its own PR with the design settled first
+   (likely: a session-level barrier reference so an abort can be scoped to the admitted turn).
 3. **Turn-completion reconcile needs `listMessages`** (or the event tap). Without either, an
    accepted record waits for a terminal event that a restart may have swallowed, and
    event-driven settlement is impossible (the barrier holds).
@@ -177,3 +217,10 @@ sync mutators — no store lock is ever held across an opencode await.
    `list()`; nothing here talks to clients directly.
 7. **Routine work-event entries** (spec §3.2 rows that need no model turn) do NOT pass through
    admission — this service is for turns only.
+8. **Webhook redelivery outside the hook's dedupe window double-prompts** (P3a3-review):
+   manta hooks carry no stable delivery id (GitHub hooks route to forge ingest before any
+   delivery), so each accepted webhook delivery mints a UNIQUE admission id — a redelivery
+   that falls outside the hook store's own `seenDeliveryIds` window (and its HMAC replay
+   guard) becomes a NEW occurrence and sends again. The hook store's window is the designed
+   redelivery dedupe; admission cannot recognize the repeat. Callers WITH stable identities
+   (schedule job+minute, capability job+status) dedup exactly once per occurrence.

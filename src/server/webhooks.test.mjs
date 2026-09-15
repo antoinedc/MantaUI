@@ -455,6 +455,26 @@ test("deliverWebhook dedupes a redelivered X-GitHub-Delivery (acts once)", async
   assert.ok(saved.at(-1)?.includes("dlv-123"));
 });
 
+test("deliverWebhook reports a CTO-terminal dedupe as 200-deduped, never 202-queued (round 4)", async () => {
+  const { res } = await deliverToBusySession({
+    // The conversation redirect's honest result for a delivery replayed to a
+    // TERMINAL receipt (e.g. a cancelled-by-policy tombstone): nothing is
+    // queued and nothing is running. 202 "queued" would promise a run that
+    // will never happen.
+    enqueue: async () => ({
+      delivered: false,
+      queued: false,
+      deduped: true,
+      ctoId: "sched:j1:m1",
+      ctoStatus: "cancelled",
+      persisted: false,
+    }),
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.deduped, true, "the redelivery dedupe shape — seen, not acted on");
+  assert.equal(res.queued, undefined, "never a lying 202");
+});
+
 test("deliverWebhook drops an event type the hook was not registered for", async () => {
   const body = '{"something":"else"}';
   const headers = {
@@ -545,11 +565,32 @@ async function deliverToBusySession(deps) {
   return { res, sent: () => sent };
 }
 
+test("deliverWebhook routes an IDLE send through the shared delivery engine too (P3a3 anti-bypass)", async () => {
+  let enqueued = null;
+  const { res, sent } = await deliverToBusySession({
+    // The engine's unified path: deliver() decides busy-defer vs idle-send
+    // INTERNALLY, so the webhook route must call it in both states.
+    enqueue: async (sid, text) => {
+      enqueued = { sid, text };
+      return { delivered: true, queued: false };
+    },
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.queued, false);
+  assert.equal(sent(), 0, "the raw sendPrompt dep must NOT be used when the engine is wired");
+  assert.equal(enqueued.sid, "ses_1");
+  assert.match(enqueued.text, /Inbound webhook/);
+});
+
 test("deliverWebhook defers (202) on a busy session instead of draining", async () => {
   let queued = null;
   const { res, sent } = await deliverToBusySession({
     isBusy: () => true,
-    enqueue: (sid, text) => { queued = { sid, text }; },
+    // The shared engine's deliver() result shape for a busy-deferred prompt.
+    enqueue: async (sid, text) => {
+      queued = { sid, text };
+      return { delivered: false, queued: true };
+    },
   });
   assert.equal(res.status, 202);
   assert.equal(res.queued, true);
@@ -576,4 +617,37 @@ test("deliverWebhook surfaces a defer-queue-full rejection as 429, not 202 (BET-
   assert.equal(res.error, "queue full");
   assert.equal(sent(), 0); // it was deferred-and-rejected, never sent now
   assert.equal(enqueueCalls, 1);
+});
+
+test("deliverWebhook returns a SAFE literal on the public 429 body and warns the real cause (BET-1460)", async () => {
+  const warns = [];
+  const origWarn = console.warn;
+  console.warn = (...args) => warns.push(args.map(String).join(" "));
+  try {
+    const res = await deliverWebhook(
+      { token: "a".repeat(32), rawBody: "{}", signatureHeader: "" },
+      {
+        load: async () => [fakeHook({ unsigned: true })],
+        save: async () => {},
+        sendPrompt: async () => {},
+        // A CTO admission refusal (e.g. binding unavailable) — its message
+        // carries absolute internal paths that must never reach the public
+        // body of the one unauthenticated route (P3a3 review round 3).
+        enqueue: async () => ({
+          delivered: false,
+          queued: false,
+          rejected: true,
+          error: "binding unavailable — refusing to admit (store /home/dev/.manta/cto/binding.json unreadable)",
+        }),
+      },
+    );
+    assert.equal(res.status, 429);
+    assert.equal(res.error, "queue full", "the public body carries the safe literal only");
+    assert.ok(
+      warns.some((w) => w.includes("binding unavailable") && w.includes("/home/dev/.manta")),
+      "the REAL cause is warned server-side",
+    );
+  } finally {
+    console.warn = origWarn;
+  }
 });

@@ -468,11 +468,14 @@ export async function listHooks(sessionID, { load = loadHooks } = {}) {
 /**
  * Deliver one inbound POST. Resolves the token → hook, rate-limits, verifies the
  * HMAC signature (unless the hook is `unsigned`), parses the JSON body, formats
- * the turn, and either sends it now or — if the session is busy — defers it
- * until idle (NEVER drains the in-flight turn).
+ * the turn, and routes it through the SHARED delivery engine, which sends it
+ * now when the session is idle and defers it until idle when busy (it NEVER
+ * drains the in-flight turn). A CTO-conversation target is intercepted by the
+ * engine's redirect into the durable admission queue regardless of busy state.
  *
  * Returns { ok, status } where status is the HTTP status to send the SENDER:
- *   200 delivered now · 202 queued (session busy) · 400 bad body ·
+ *   200 delivered now · 202 queued (busy, or admitted by the CTO queue) ·
+ *   400 bad body ·
  *   401 bad/missing signature · 404 unknown token · 429 rate-limited,
  *   or "queue full" when the defer queue rejected the delivery (BET-772).
  *
@@ -576,7 +579,7 @@ export async function deliverWebhook(
 
   // A forge hook routes to the forge ingest path (verify, dedupe, filter, then
   // RECORD — it does not act on events in this issue). A MantaUI hook wakes
-  // its session via the existing sendPrompt/defer path.
+  // its session via the shared delivery path.
   if (provider !== "manta") {
     if (typeof forgeIngest === "function") {
       await forgeIngest({ hook, headers, event: headers?.[GITHUB_EVENT_HEADER], payload });
@@ -584,19 +587,47 @@ export async function deliverWebhook(
     return { ok: true, status: 200, queued: false };
   }
 
-  // Defer when busy — an external event must not abort the user's in-flight
-  // turn. Otherwise send now.
-  if (isBusy(hook.sessionID) && typeof enqueue === "function") {
+  // P3a3: BOTH the busy and the idle branch flow through the SAME shared
+  // delivery engine path (`enqueue` → delivery.deliver). This is what keeps a
+  // webhook aimed at the CTO conversation session on the durable admission
+  // queue whether the session is busy or idle (an idle raw sendPrompt here
+  // used to bypass admission entirely). For an ordinary session the engine's
+  // idle path is the same raw sendPrompt as before, so the response
+  // semantics are unchanged: 200 delivered now · 202 queued (busy) ·
+  // 429 overflow. A CTO-conversation delivery is accepted by the durable
+  // queue, so it now reports honestly as 202-queued in both busy states.
+  if (typeof enqueue === "function") {
     const result = await enqueue(hook.sessionID, text);
     // The shared engine may reject a deferred delivery when the session's
-    // pending queue is at its cap (BET-772). A 202-"queued" for a prompt that
-    // was dropped would be a false success signal to the sender — surface the
-    // overflow as 429 instead (matches the existing 429 rate-limit pattern).
+    // pending queue is at its cap (BET-772), and admission refusals for a
+    // confirmed CTO target surface through the same rejected shape. The
+    // /hook/<token> route is the one EXTERNALLY-reachable unauthenticated
+    // endpoint (BET-1460 class-1): never echo the raw internal error into
+    // the response body (it can carry absolute paths) — return a safe
+    // literal and warn the real cause server-side.
     if (result?.rejected) {
+      console.warn(
+        `[webhook] delivery rejected for hook ${hook.id} (${hook.sessionID}): ${result.error ?? "queue full"}`,
+      );
       return { ok: false, status: 429, error: "queue full" };
     }
-    return { ok: true, status: 202, queued: true };
+    if (result?.deduped) {
+      // A CTO-targeted delivery replayed to a TERMINAL receipt (a genuine
+      // retry of a settled delivery — or a cancelled-by-policy drop): nothing
+      // is queued and nothing is running. 202 "queued" would promise a run
+      // that will never happen; acknowledge honestly with the redelivery
+      // dedupe shape instead.
+      return { ok: true, status: 200, deduped: true };
+    }
+    if (result?.queued) {
+      return { ok: true, status: 202, queued: true };
+    }
+    return { ok: true, status: 200, queued: false };
   }
+  // Dep fallback when no shared delivery engine is wired (direct unit
+  // tests): raw send now, still reporting success to the sender — the
+  // delivery was accepted; a wedged opencode shouldn't trigger a sender-side
+  // retry storm.
   try {
     await sendPrompt({ sessionId: hook.sessionID, text });
   } catch (e) {

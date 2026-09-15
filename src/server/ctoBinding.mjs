@@ -5,8 +5,9 @@
 // directory is a stable server-owned control directory under the state home —
 // never a user repository, never an implicit implementation target. The
 // binding itself is a small versioned record in the CTO store: generation,
-// current session id, the full previous-session-id archive (never capped,
-// never dropped — replacements are rare and queries paginate), and a
+// current session id, the previous-session-id archive (deduped, newest kept,
+// capped at MAX_PREVIOUS_SESSION_IDS — it is scanned by the conversation
+// seams' classification — and getBinding paginates what the cap keeps), and a
 // reserve-before-create operation marker that recovers a role session whose
 // remote create landed but whose bind was lost to a crash.
 //
@@ -127,9 +128,19 @@ export function isMarkerSession(session, operation) {
   );
 }
 
-/** Dedupe (keep order). The archive is NEVER capped or dropped (blocker 6). */
+/**
+ * Dedupe (keep order) and CAP the previous-generation archive, keeping the
+ * NEWEST generations (the tail). P3a3-review: the archive is scanned by the
+ * conversation seams' classification on every ordinary prompt (stamp-cached,
+ * but still scanned), so it must be BOUNDED — the earlier "never capped"
+ * stance predated that scan and capPrevious only deduped. 20 generations is
+ * far beyond any real rebind cadence; a previous-generation id older than the
+ * cap is a dead session no consumer can address anyway.
+ */
+export const MAX_PREVIOUS_SESSION_IDS = 20;
+
 export function capPrevious(ids) {
-  return [...new Set(ids)];
+  return [...new Set(ids)].slice(-MAX_PREVIOUS_SESSION_IDS);
 }
 
 /**
@@ -895,9 +906,9 @@ export function createCtoBinding({
     claimGeneration,
     /**
      * Store read only — zero opencode calls, zero model turns. By default
-     * returns the FULL previous-session archive (never dropped); pass
+     * returns the (capped, newest-kept) previous-session archive; pass
      * `{ previousLimit, previousOffset }` (offset 0 = most recent) to
-     * paginate without dropping anything from the store.
+     * paginate within what the store keeps.
      */
     getBinding: async ({ previousLimit, previousOffset = 0 } = {}) => {
       const binding = await loadBinding();

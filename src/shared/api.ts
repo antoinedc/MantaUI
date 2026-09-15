@@ -421,6 +421,84 @@ export type CtoCalibrationTable = {
   classes: CtoCalibrationRow[];
 };
 
+// ---------------------------------------------------------------------------
+// CTO conversation (P3a3, unified-cto-spec §3.1 + §8.3) — the durable
+// conversation binding + admission queue, served over the four authenticated
+// `cto:conversation-*` RPC channels.
+// ---------------------------------------------------------------------------
+
+// Queue counters from the admission engine's projection.
+export type CtoQueueCounts = {
+  queued: { human: number; background: number };
+  unresolved: number;
+  terminal: number;
+};
+
+// One durable submission as the queue projects it: the persisted record
+// MINUS its text payload (listings stay payload-free), plus the unknown-age
+// fields the engine attaches while a send's outcome is unreconciled. Records
+// carry phase-specific extra fields (timestamps, abort tracking, retarget
+// markers) — hence the open index signature.
+export type CtoSubmissionProjection = {
+  id: string;
+  origin: "human" | "background";
+  status: string;
+  payloadHash: string;
+  createdAt: number;
+  submitGeneration: number;
+  // Present once dispatch resolved (and pinned for) a role session.
+  sessionId?: string;
+  messageID?: string;
+  model?: PromptModel;
+  agent?: string;
+  expectedGeneration?: number;
+  // Unknown tracking (surfaced so clients can render "pending
+  // reconciliation" instead of guessing).
+  unknownMs?: number;
+  staleUnknown?: boolean;
+  [key: string]: unknown;
+};
+
+// The full record at submit time — including the text payload the caller
+// just supplied (only the queue projection strips it). `persisted:false`
+// marks a same-id/same-payload REPLAY: the existing record returned
+// unchanged, nothing new written.
+export type CtoSubmitReceipt = CtoSubmissionProjection & {
+  text: string;
+  persisted: boolean;
+};
+
+// The binding view: the ONE durable role session. `sessionId` is null only
+// before the first open (nothing bound yet); `generation` increments on every
+// create/replace (rebind). Generation gates optimistic submits.
+export type CtoConversationBindingView = {
+  sessionId: string | null;
+  generation: number;
+};
+
+export type CtoConversationOpenResult = {
+  sessionId: string;
+  generation: number;
+};
+
+export type CtoConversationState = {
+  binding: CtoConversationBindingView;
+  submissions: CtoSubmissionProjection[];
+  counts: CtoQueueCounts;
+};
+
+// The interrupt receipt: the VISIBLE request marker status — `cancelled`
+// (was still queued, never dispatched), `interrupt_pending` (accepted turn),
+// or `cancel_requested` (unknown send; the barrier is RETAINED until
+// reconciliation proves the outcome — an interrupt does NOT release the
+// queue for unknown, see docs/cto-admission-contract.md limitation 1).
+export type CtoConversationInterruptResult = {
+  ok: boolean;
+  id: string;
+  status: string;
+};
+
+
 // A raw Activity-ledger row (A12 drill-down). Append-only; reverse-chron view.
 export type CtoLedgerRow = {
   ts: number;
@@ -1365,6 +1443,34 @@ export interface Api {
   // carries. Rejects with nothing on failure; the caller treats a rejection
   // as "no known state" (inert dot, no badge).
   ctoStateGet(): Promise<CtoState>;
+  // --- CTO conversation (P3a3, spec §3.1 + §8.3) — the four authenticated
+  // `cto:conversation-*` RPC channels over the ONE composed binding+admission
+  // runtime. ---
+  // Open (or recover) the ONE durable CTO role session. The FIRST open
+  // creates it (no model invocation); concurrent opens from desktop and
+  // phone return the same binding. The server never opens it on its own.
+  ctoConversationOpen(): Promise<CtoConversationOpenResult>;
+  // Binding + durable admission queue projection. A pure store read: never
+  // creates anything, never invokes the model; safe to poll. Clients render
+  // this server-owned queue state instead of draining the queue themselves.
+  ctoConversationState(): Promise<CtoConversationState>;
+  // Submit a human turn. Durable + deduped by `id` (same id/same payload
+  // replays return the existing record; same id/different payload is an
+  // actionable error), at most one turn at a time. The server owns the
+  // origin ("human") and the agent (central CTO role config) — the caller
+  // cannot choose an arbitrary agent. Throws actionable errors (at-cap,
+  // stale-generation, binding-unavailable, duplicate-id-different-payload).
+  ctoConversationSubmit(input: {
+    id?: string;
+    text: string;
+    expectedGeneration?: number;
+    model?: PromptModel;
+  }): Promise<CtoSubmitReceipt>;
+  // The EXPLICIT interruption op (submit never aborts a running turn).
+  // Returns the visible request-marker status; for an `unknown` send the
+  // queue stays held (barrier retained) until reconciliation proves the
+  // outcome — the receipt does NOT mean the queue was released.
+  ctoConversationInterrupt(input: { id: string }): Promise<CtoConversationInterruptResult>;
   // POST /api/cto/digest — joins or starts the §5.5 single-flight generation.
   // Returns `{ok:false, error}` on failure so the pane can toast the cause.
    ctoDigestNow(): Promise<{ ok: boolean; error?: string }>;

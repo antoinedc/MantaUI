@@ -43,7 +43,7 @@ test("wiring: every remaining raw 500 in index.mjs is an annotated class-2 route
 test("wiring: class-1 CTO routes write their 500 through respondSafe500 (BET-1460)", () => {
   assert.match(
     indexSource,
-    /import \{ CTO_SAFE_500_MESSAGE, respondSafe500 \} from "\.\/safeApiError\.mjs"/,
+    /import \{ CTO_SAFE_500_MESSAGE, (?:HOOK_SAFE_500_MESSAGE, )?respondSafe500 \} from "\.\/safeApiError\.mjs"/,
     "index.mjs must import the safe-500 writer",
   );
   // 19 CTO-family conversions in index.mjs (the 20th — upload — lives in
@@ -78,6 +78,20 @@ test("wiring: POST /api/upload is extracted into uploadRoute.mjs (projectsRoute 
   assert.ok(
     !indexSource.includes("async function handleUpload("),
     "the inline upload handler must be gone from index.mjs",
+  );
+});
+
+test("wiring: POST /hook/<token> — the one unauthenticated public route — writes its 500 through respondSafe500 (BET-1460 class-1)", () => {
+  const hookIdx = indexSource.indexOf('path.startsWith("/hook/")');
+  assert.ok(hookIdx >= 0, "the /hook route must exist");
+  const route = indexSource.slice(hookIdx, indexSource.indexOf("---------- Serve page", hookIdx));
+  assert.ok(
+    /respondSafe500\(res, "hook", HOOK_SAFE_500_MESSAGE/.test(route),
+    "the /hook 500 catch must write the class-1 safe literal through respondSafe500",
+  );
+  assert.ok(
+    !route.includes("respondJson(res, 500"),
+    "the public /hook route must not write a raw error into its 500 body",
   );
 });
 

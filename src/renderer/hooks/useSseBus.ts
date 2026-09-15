@@ -403,7 +403,13 @@ export function useSseBus(params: {
       cancelTurnSettle();
       drainAbortRef.current = true;
       void window.api.opencodeAbort(sessionId)
-        .catch(() => {
+        .catch((e: unknown) => {
+          // Surface, never silently swallow (AGENTS.md: a swallowed catch on
+          // a user action reads as a dead button). The queued prompt STAYS
+          // queued and the drain re-arms at the next tool boundary — e.g. the
+          // CTO seam's mid-dispatch refusal or a transport error must be
+          // visible in the console, not dropped.
+          console.warn("[drain] queued-prompt abort failed; keeping the queued prompt:", e);
           drainAbortRef.current = false;
         })
         .then(() => rejectAllPendingQuestions());

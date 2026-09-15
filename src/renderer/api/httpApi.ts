@@ -45,6 +45,10 @@ import type {
   CtoFactsRender,
   CtoFactsArchivePage,
   CtoToolsRender,
+  CtoConversationOpenResult,
+  CtoConversationState,
+  CtoSubmitReceipt,
+  CtoConversationInterruptResult,
 } from "../../shared/api.js";
 // BET-559: httpApi used to pull these claim helpers through the (now-retired)
 // mobile shell's pairingLogic re-export. The shared, process-boundary-safe
@@ -1551,6 +1555,20 @@ export const httpApi: Api = {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return (await res.json()) as CtoState;
   },
+
+  // --- CTO conversation (P3a3, spec §3.1 + §8.3) — the four authenticated
+  // `cto:conversation-*` RPC channels. Errors surface as thrown Errors with
+  // the server's actionable message (the standard rpc error pattern) — no
+  // fake success. The composer UI is a later phase; these are the exact
+  // signatures the worker consumes. ---
+  ctoConversationOpen: async (): Promise<CtoConversationOpenResult> =>
+    rpc<CtoConversationOpenResult>("cto:conversation-open"),
+  ctoConversationState: async (): Promise<CtoConversationState> =>
+    rpc<CtoConversationState>("cto:conversation-state"),
+  ctoConversationSubmit: async (input): Promise<CtoSubmitReceipt> =>
+    rpc<CtoSubmitReceipt>("cto:conversation-submit", input),
+  ctoConversationInterrupt: async (input): Promise<CtoConversationInterruptResult> =>
+    rpc<CtoConversationInterruptResult>("cto:conversation-interrupt", input),
 
   // POST /api/cto/digest — joins or starts the §5.5 single-flight generation
   // (server interplay keeps two views/devices from double-generating). The

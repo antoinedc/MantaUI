@@ -50,7 +50,7 @@ import * as local from "./local.mjs";
 import { createPeekHandler } from "./peek.mjs";
 import { createProjectsHandler } from "./projectsRoute.mjs";
 import { createUploadHandler } from "./uploadRoute.mjs";
-import { CTO_SAFE_500_MESSAGE, respondSafe500 } from "./safeApiError.mjs";
+import { CTO_SAFE_500_MESSAGE, HOOK_SAFE_500_MESSAGE, respondSafe500 } from "./safeApiError.mjs";
 import { createLogShipper, captureConsole, resolveAxiomConfig } from "../shared/logShip.mjs";
 import { setTelemetrySink, shipCtxEvent } from "./optimizer/telemetry.mjs";
 import { blendedPrice } from "../shared/blendedPrice.mjs";
@@ -150,7 +150,7 @@ import * as ctoEngine from "./ctoEngine.mjs";
 import * as ctoBudget from "./ctoBudget.mjs";
 import { createFactSurfaces } from "./ctoFactSurfaces.mjs";
 import { isIssueToolGranted } from "./ctoToolRegistry.mjs";
-import { ledgerStore, engineStateStore, budgetStore, segmentsStore, verdictsStore, digestsStore, factsStore, resolveStore, calibrationStore, plansStore, startCtoStoreSweeper, CTO_STORE_SWEEP_INTERVAL_MS } from "./ctoStores.mjs";
+import { ledgerStore, engineStateStore, budgetStore, segmentsStore, verdictsStore, digestsStore, factsStore, resolveStore, calibrationStore, plansStore, bindingStore, startCtoStoreSweeper, CTO_STORE_SWEEP_INTERVAL_MS } from "./ctoStores.mjs";
 import * as ctoOvernight from "./ctoOvernight.mjs";
 import { computeHealthStats } from "./ctoHealth.mjs";
 import { composeProfileRender } from "./ctoProfile.mjs";
@@ -174,9 +174,13 @@ import {
 } from "./media.mjs";
 import { setSecret, deleteSecret, listSecrets, provideSecret } from "./secrets.mjs";
 import { createPromptDelivery } from "./promptDelivery.mjs";
+import { createCtoBinding } from "./ctoBinding.mjs";
+import { createCtoAdmission } from "./ctoAdmission.mjs";
+import { createCtoConversationService } from "./ctoConversation.mjs";
 import {
   ensureMantaPlanAgent,
   ensureCtoAgent,
+  CTO_AGENT_NAME,
   readCacheTtl as readProvidersCacheTtl,
   readOpencodeConfig,
 } from "./providers.mjs";
@@ -415,8 +419,54 @@ const { stop: stopUploadCleanupPoller } = startUploadCleanupPoller({
 // target session is mid-turn — so a scheduled tick, a peer agent, a plugin
 // job finishing, or an external webhook can NEVER abort the user's in-flight
 // model turn. See src/server/promptDelivery.mjs.
+// P3a3 (spec §8.3): deliveries aimed at the CTO role session are redirected
+// into the durable admission queue via `redirect` (the closure resolves the
+// composed conversation service at call time; nothing below runs at boot).
 const promptDelivery = createPromptDelivery({
   sendPrompt: (args) => oc.sendPrompt(args),
+  redirect: (args) => ctoConversation.redirectDelivery(args),
+});
+
+// ----- CTO conversation runtime (P3a3, spec §3.1 + §8.3) -----
+// The ONE composition: exactly ONE binding engine + ONE admission engine for
+// the whole server lifecycle, plus the thin conversation service over them.
+// The composition itself performs NO oc calls — but the bounded tick poller
+// below fires an immediate first tick at boot, and §8.3 recovery legitimately
+// means that tick MAY dispatch a durable queued record that survived the
+// restart (to the already-bound session — a store read, never a create). On a
+// fresh box nothing is queued and nothing is sent: the role session is only
+// ever created by the first `cto:conversation-open` RPC. The admission engine
+// sends via the RAW low-level oc client (never promptDelivery), so a
+// redirected background delivery cannot recurse: promptDelivery.deliver →
+// admission.submit → raw oc.sendPrompt, one hop each way.
+const ctoBindingEngine = createCtoBinding({ oc });
+const ctoAdmissionEngine = createCtoAdmission({
+  binding: ctoBindingEngine,
+  sendPrompt: (args) => oc.sendPrompt(args),
+  getMessage: (sessionId, messageId) => oc.getMessage(sessionId, messageId),
+  listMessages: (sessionId, opts) => oc.listMessages(sessionId, opts),
+  abortSession: (sessionId, opts) => oc.abortSession(sessionId, opts),
+  // SHARED busy view — one truth for both prompt engines (promptDelivery's
+  // firehose-derived busy set; admission observes the same events itself).
+  isBusy: promptDelivery.isBusy,
+});
+const ctoConversation = createCtoConversationService({
+  binding: ctoBindingEngine,
+  admission: ctoAdmissionEngine,
+  // Server-owned central role agent (providers.mjs): the conversation's
+  // turns ALWAYS run the registered `cto` agent — callers can never choose
+  // an arbitrary agent for the role session.
+  agentName: CTO_AGENT_NAME,
+  // Cheap change stamp for the seam-classification cache (one stat instead of
+  // a binding.json read+parse on every ordinary project prompt).
+  stamp: () => bindingStore.stamp(),
+});
+// Bounded tick poller (spec §8.3 recovery): reconcile + pump with no inbound
+// events. startPoller surfaces failures via console.warn — a failed tick
+// (store corruption, binding unavailable) is never swallowed as healthy.
+const { stop: stopCtoAdmissionTick } = startPoller(() => ctoAdmissionEngine.tick(), {
+  intervalMs: 30_000,
+  label: "cto-admission",
 });
 
 // Scheduled-prompt engine: durable jobs in ~/.manta/schedule.json, fired
@@ -1551,6 +1601,11 @@ rpcHandlers = buildHandlers({
   // BET-1369: the single shared windowed `optimizer:series` read model, built
   // above — per-range 60s memo, shared by the RPC channel (the card's selector).
   optimizerSeries,
+  // BET-P3a3: the composed CTO conversation runtime (ONE binding + ONE
+  // admission instance, created above). Serves the four
+  // `cto:conversation-*` channels and the opencode:prompt /
+  // opencode:run-command anti-bypass seams.
+  ctoConversation,
   // BET-1336: quota-window forecast-at-reset read sources for the
   // optimizer:summary `windows` slice — the live polled snapshots + the
   // persisted observation history.
@@ -2624,6 +2679,11 @@ void stopAdaptiveCtoWatchdog;
 const stopCtoStoreSweeper = startCtoStoreSweeper({
   intervalMs: CTO_STORE_SWEEP_INTERVAL_MS,
   label: "cto-store-sweeper",
+  // P3a3 review: the admission engine's terminal-receipt retention rides the
+  // SAME sweeper timer (unique per-occurrence ids make terminal receipts grow
+  // one per delivery — without the trim, the store wedges at MAX_ENTRIES).
+  // `hooks` → createCtoStoreSweep: one sweeper, no second poller.
+  hooks: [() => ctoAdmissionEngine.trimTerminal()],
 });
 void stopCtoStoreSweeper;
 
@@ -2793,6 +2853,16 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
     promptDelivery.observeEvent(evt);
   } catch (e) {
     console.warn("[promptDelivery] observeEvent failed:", e?.message ?? e);
+  }
+  // P3a3 (spec §8.3): the SAME tap feeds the admission engine — ONE firehose
+  // tap for BOTH prompt engines, no second stream/endpoint. This is what
+  // moves admitted turns through their state machine (busy hold, receipt
+  // reconciliation, turn-ended proof). Cheap + guarded; never throws into
+  // the pump.
+  try {
+    ctoAdmissionEngine.observeEvent(evt);
+  } catch (e) {
+    console.warn("[cto-admission] observeEvent failed:", e?.message ?? e);
   }
   // Optimizer P2.4 (BET-1346): per-session idle tracking for the background
   // compaction scheduler — stamped at the SAME tap that feeds
@@ -4116,8 +4186,11 @@ const handleRequest = async (req, res) => {
         ),
       );
     } catch (e) {
-      // class-2 (BET-1460): forge webhook delivery (/hook/<token>) — machine-to-machine; raw aids redelivery diagnosis.
-      respondJson(res, 500, { error: String(e?.message ?? e) });
+      // class-1 (BET-1460): /hook/<token> is the ONE externally-reachable
+      // unauthenticated route — the body can reach a third-party sender's
+      // logs. Safe literal; the real cause (store paths, admission refusals)
+      // goes to the server console.
+      respondSafe500(res, "hook", HOOK_SAFE_500_MESSAGE, e);
     }
     return;
   }
