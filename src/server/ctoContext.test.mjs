@@ -946,10 +946,12 @@ test("search: eligibility restricts atoms BEFORE first-pick — metadata, reason
 
 test("search: descendant eligibility needs the exact prefix AND the boundary — a same-offset decoy never shadows the real output", async (t) => {
   if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
-  // $.metadata.xy.note has '.' at the SAME offset where $.state.input's
-  // boundary would sit — a boundary-only check accepts it as an "input"
-  // descendant. The decoy sits BEFORE the real output in document order, so
-  // it would shadow it; alone, it would fabricate a hit.
+  // Nested $.state.metadata.xy.note has '.' at the SAME offset where
+  // $.state.input's boundary would sit — a boundary-only check accepts it as
+  // an "input" descendant. The decoy sits BEFORE the real output in document
+  // order, so it would shadow it; alone, it would fabricate a hit. A second
+  // part carries the EXACT TOP-LEVEL $.metadata.xy.note — ineligible for
+  // every part type.
   const fixture = await createFixtureDb({
     sessions: [{ id: "s_decoy", projectId: "prj_a", directory: "/repo-a", timeUpdated: T }],
     messages: [
@@ -970,6 +972,12 @@ test("search: descendant eligibility needs the exact prefix AND the boundary —
         "p_real", "m_real", "s_decoy", T + 1, T + 1,
         '{"type":"tool","tool":"bash","state":{"status":"completed","metadata":{"xy":{"note":"shared done decoy"}},"output":"the real output done"}}',
       );
+      // EXACT top-level $.metadata.xy.note decoy — ineligible for every part
+      // type; alone it must fabricate no hit.
+      raw.prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)").run(
+        "p_toplevel", "m_real", "s_decoy", T + 2, T + 2,
+        '{"type":"tool","tool":"bash","state":{"status":"completed","output":"nothing relevant"},"metadata":{"xy":{"note":"toplevel-only token"}}}',
+      );
     } finally {
       raw.close();
     }
@@ -982,6 +990,8 @@ test("search: descendant eligibility needs the exact prefix AND the boundary —
       assert.equal(shared.hits[0].partId, "p_real");
       assert.equal(shared.hits[0].tool.matchedField, "output", "the decoy atom never shadows the legitimate output");
       assert.match(shared.hits[0].snippet.pre + shared.hits[0].snippet.match, /real output/, "the snippet comes from state.output, not the decoy");
+      const toplevel = await ctoSearch({ query: "toplevel-only token" });
+      assert.deepEqual(toplevel.hits, [], "the EXACT top-level $.metadata.xy.note decoy is ineligible — no hit");
     });
   } finally {
     fixture.close();
