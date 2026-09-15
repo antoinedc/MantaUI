@@ -373,3 +373,37 @@ containment), and an existing controlDir that resolves to the state home
 itself is refused — equality with the state home is valid only as the
 existing ancestor of a not-yet-created controlDir, so chmod can never follow
 a link onto the state home or any other target.
+
+## 11. P3a2 addendum — the durable conversation admission queue is now a service
+
+`src/server/ctoAdmission.mjs` (`createCtoAdmission({ binding, sendPrompt, getMessage,
+listMessages?, abortSession?, isBusy?, store, ... })`) implements spec §8.3 as an injectable
+service: `submit` / `list` / `tick` / `reconcile` / `interrupt` / `observeEvent`. ALL CTO-role
+prompts (human + background) are meant to enter through it once the parent wires it; ordinary
+project delivery keeps promptDelivery unchanged — admission shares only its busy view
+(production passes `promptDelivery.isBusy`) and sits on the same firehose tap. The stable
+integration recipe, lifecycle diagram, error codes and honest limitations live in
+**`docs/cto-admission-contract.md`** (the contract for the next UI/API worker). Not wired to any
+route or poller here.
+
+Durability shape (all pinned by `ctoAdmission.test.mjs`): a submission's stable event id +
+canonical payload hash + origin + expected binding generation persist BEFORE any send; dispatch
+persists the resolved `sessionId` + allocated opencode `messageID` (status `dispatching`) BEFORE
+the `prompt_async` POST; every store transition is a sync-mutator `patchStore` section — no lock
+is held across an opencode await; the pump is single-flight AND joinable (event-driven and
+poller-driven pumps join one run). Ack is not completion: 204 + messageID receipt yields
+`accepted` only, and completion requires the real terminal event (`session.idle`/`session.error`
+via `observeEvent`) or a transcript proof (assistant row with `time.completed`/`error` after our
+user message — `turnCompletionFromTranscript`). The P0-proven caller messageID is the restart
+receipt: a crash-window `dispatching` record is reconciled by read-back (found → adopted, never
+resent; absent → `unknown`, surfaced with a stale flag after 60s, still never resent); only a
+definitive 4xx observed live is `failed`. Human FIFO outranks queued background at ONE pick
+point (never reorders an accepted turn); pending work retargets the CURRENT binding at dispatch
+(`retargeted` recorded) while accepted turns keep their original sid. Terminal receipts are
+retained forever — growth is bounded by refusing new submissions at `MAX_ENTRIES` (500), never
+by eviction. `interrupt` is the explicit abort op (`queued`/`unknown` → cancelled, `accepted` →
+one bounded `abortSession`); submit never aborts.
+
+Additive seams this PR lands on top of P3a1/P0: `opencode.sendPrompt` forwards an optional
+`messageID` onto the `prompt_async` body (P0 §8: persisted verbatim as the user message id,
+readable back; omitted → byte-identical pre-P3a2 behavior) and `ctoStores.admissionStore`.

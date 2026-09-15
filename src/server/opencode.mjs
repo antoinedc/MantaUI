@@ -667,9 +667,15 @@ export function getAndClearSessionRefusal(sessionId) {
  * Send a user message (prompt_async — returns 204 immediately; response
  * streams via SSE). Model is per-prompt; omit to use opencode's default.
  *
- * @param {{ sessionId: string, text: string, model?: { providerID: string, modelID: string, variant?: string }, agent?: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, mentions?: Array<{ name: string, source: { value: string, start: number, end: number } }> }} opts
+ * `messageID` (P3a2, unified-cto-spec §8.3) is the P0-proven caller-supplied
+ * identity: opencode persists it verbatim as the user message id, readable
+ * back via getMessage/listMessages — the delivery receipt. The 204 alone is
+ * NOT a receipt (no echo of the messageID). Callers that do not need
+ * reconciliation omit it and get the pre-P3a2 behavior byte-identically.
+ *
+ * @param {{ sessionId: string, text: string, model?: { providerID: string, modelID: string, variant?: string }, agent?: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, mentions?: Array<{ name: string, source: { value: string, start: number, end: number } }>, messageID?: string }} opts
  */
-export async function sendPrompt({ sessionId, text, model, agent, attachments, mentions }) {
+export async function sendPrompt({ sessionId, text, model, agent, attachments, mentions, messageID }) {
   // Scope tools + events to the session's worktree. The matching per-directory
   // subscription in subscribeEvents below ensures the events still reach
   // listeners (the global /event subscription wouldn't see them otherwise).
@@ -699,6 +705,7 @@ export async function sendPrompt({ sessionId, text, model, agent, attachments, m
     if (model.variant) body.variant = model.variant;
   }
   if (agent) body.agent = agent;
+  if (messageID) body.messageID = messageID; // P0-proven: persisted verbatim as the user message id
 
   const res = await ocFetch(apiUrl(url), {
     method: "POST",
