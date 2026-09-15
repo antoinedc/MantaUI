@@ -670,6 +670,18 @@ export function createCtoAdmission({
           record = raced; // dedup semantics still apply
           return {};
         }
+        const created = {
+          id: submissionId,
+          origin,
+          text,
+          payloadHash,
+          status: "queued",
+          createdAt: now(),
+          submitGeneration: currentGeneration,
+          ...(model ? { model } : {}),
+          ...(agent ? { agent } : {}),
+          ...(expectedGeneration !== undefined ? { expectedGeneration } : {}),
+        };
         if (normalized.submissions.length >= maxEntries) {
           // P3a3-review: before refusing, make room by tombstoning the OLDEST
           // terminal BACKGROUND receipts (their dedup identity survives in
@@ -705,34 +717,10 @@ export function createCtoAdmission({
           const keptTombstones = [...normalized.tombstones, ...tombstoned].slice(
             -maxTerminalBackground,
           );
-          const created = {
-            id: submissionId,
-            origin,
-            text,
-            payloadHash,
-            status: "queued",
-            createdAt: now(),
-            submitGeneration: currentGeneration,
-            ...(model ? { model } : {}),
-            ...(agent ? { agent } : {}),
-            ...(expectedGeneration !== undefined ? { expectedGeneration } : {}),
-          };
           record = created;
           wrote = true;
           return { submissions: [...kept, created], tombstones: keptTombstones };
         }
-        const created = {
-          id: submissionId,
-          origin,
-          text,
-          payloadHash,
-          status: "queued",
-          createdAt: now(),
-          submitGeneration: currentGeneration,
-          ...(model ? { model } : {}),
-          ...(agent ? { agent } : {}),
-          ...(expectedGeneration !== undefined ? { expectedGeneration } : {}),
-        };
         record = created;
         wrote = true;
         return { submissions: [...normalized.submissions, created] };

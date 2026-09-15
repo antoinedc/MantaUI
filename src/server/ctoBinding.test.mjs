@@ -36,6 +36,7 @@ import {
 import { bindingStore, internalSessionsStore } from "./ctoStores.mjs";
 import { CTO_TITLE_PREFIX, selectReapCandidates } from "./ctoSessions.mjs";
 import * as ocModule from "./opencode.mjs";
+import { spyOcWire } from "./ctoTestWireSpy.mjs";
 import { stateHome, statePath } from "../shared/paths.mjs";
 
 const noopSleep = async () => {};
@@ -937,15 +938,10 @@ test("isMarkerSession requires role AND the exact operation (never title, never 
 // ---------------------------------------------------------------------------
 
 test("production composition: real opencode.mjs createSession sends the metadata marker on the wire and readSession reads it back", async () => {
-  const calls = [];
   const sessions = new Map();
   let seq = 0;
   let failNextRead = false;
-  const prev = ocModule._setOcTransport(async (url, init = {}) => {
-    const u = new URL(url);
-    const method = init.method ?? "GET";
-    const body = init.body ? JSON.parse(init.body) : null;
-    calls.push({ method, path: u.pathname, query: Object.fromEntries(u.searchParams), body });
+  const { calls, reset } = spyOcWire(({ u, method, body }) => {
     if (method === "POST" && u.pathname === "/session") {
       const session = {
         id: `ses_live${++seq}`,
@@ -1004,8 +1000,7 @@ test("production composition: real opencode.mjs createSession sends the metadata
     failNextRead = true;
     assert.equal((await ocModule.readSession(result.binding.currentSessionId)).state, "unknown");
   } finally {
-    ocModule._setOcTransport(prev);
-    ocModule._resetSessionDirectoryCache();
+    reset();
   }
 });
 

@@ -26,6 +26,7 @@ import { admissionStore } from "./ctoStores.mjs";
 import { statePath } from "../shared/paths.mjs";
 import * as ocModule from "./opencode.mjs";
 import { createCtoBinding } from "./ctoBinding.mjs";
+import { spyOcWire } from "./ctoTestWireSpy.mjs";
 
 // ---------------------------------------------------------------------------
 // Test doubles
@@ -1319,12 +1320,7 @@ test("turnCompletionFromTranscript: linkage + terminal finish only; running/tool
 // ---------------------------------------------------------------------------
 
 test("production composition: real opencode.mjs sendPrompt carries the caller messageID AND the bounded signal on the wire; getMessage reads the receipt back", async () => {
-  const calls = [];
-  const prev = ocModule._setOcTransport(async (url, init = {}) => {
-    const u = new URL(url);
-    const method = init.method ?? "GET";
-    const body = init.body ? JSON.parse(init.body) : null;
-    calls.push({ method, path: u.pathname, query: Object.fromEntries(u.searchParams), body, signal: init.signal });
+  const { calls, reset } = spyOcWire(({ u, method, body }) => {
     if (method === "GET" && u.pathname === "/session/ses_live") {
       return new Response(
         JSON.stringify({ id: "ses_live", directory: "/tmp/cto-control", projectID: "global" }),
@@ -1385,8 +1381,7 @@ test("production composition: real opencode.mjs sendPrompt carries the caller me
     assert.equal(prodPost.body.parts.at(-1).text, "production admission");
     assert.ok(prodPost.signal instanceof AbortSignal, "the admission deadline bounds the real POST");
   } finally {
-    ocModule._setOcTransport(prev);
-    ocModule._resetSessionDirectoryCache();
+    reset();
   }
 });
 
