@@ -944,6 +944,50 @@ test("search: eligibility restricts atoms BEFORE first-pick — metadata, reason
   }
 });
 
+test("search: descendant eligibility needs the exact prefix AND the boundary — a same-offset decoy never shadows the real output", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
+  // $.metadata.xy.note has '.' at the SAME offset where $.state.input's
+  // boundary would sit — a boundary-only check accepts it as an "input"
+  // descendant. The decoy sits BEFORE the real output in document order, so
+  // it would shadow it; alone, it would fabricate a hit.
+  const fixture = await createFixtureDb({
+    sessions: [{ id: "s_decoy", projectId: "prj_a", directory: "/repo-a", timeUpdated: T }],
+    messages: [
+      { id: "m_decoy", sessionId: "s_decoy", timeCreated: T, data: { role: "assistant" } },
+      { id: "m_real", sessionId: "s_decoy", timeCreated: T + 1, data: { role: "assistant" } },
+    ],
+    parts: [],
+  });
+  try {
+    const { DatabaseSync } = await import("node:sqlite");
+    const raw = new DatabaseSync(fixture.dbPath);
+    try {
+      raw.prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)").run(
+        "p_decoy", "m_decoy", "s_decoy", T, T,
+        '{"type":"tool","tool":"bash","state":{"status":"completed","metadata":{"xy":{"note":"decoy-only token"}},"output":"nothing relevant"}}',
+      );
+      raw.prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)").run(
+        "p_real", "m_real", "s_decoy", T + 1, T + 1,
+        '{"type":"tool","tool":"bash","state":{"status":"completed","metadata":{"xy":{"note":"shared done decoy"}},"output":"the real output done"}}',
+      );
+    } finally {
+      raw.close();
+    }
+    const { withFixtureDb } = await import("./fixtures/opencodeDbFixture.mjs");
+    await withFixtureDb(fixture, async () => {
+      const alone = await ctoSearch({ query: "decoy-only token" });
+      assert.deepEqual(alone.hits, [], "the same-offset decoy is not an eligible input descendant — no hit");
+      const shared = await ctoSearch({ query: "done" });
+      assert.equal(shared.hits.length, 1, "the part is found via its REAL output");
+      assert.equal(shared.hits[0].partId, "p_real");
+      assert.equal(shared.hits[0].tool.matchedField, "output", "the decoy atom never shadows the legitimate output");
+      assert.match(shared.hits[0].snippet.pre + shared.hits[0].snippet.match, /real output/, "the snippet comes from state.output, not the decoy");
+    });
+  } finally {
+    fixture.close();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Honest degradation + zero side effects
 // ---------------------------------------------------------------------------

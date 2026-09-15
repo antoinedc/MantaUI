@@ -462,13 +462,14 @@ export async function ctoListSessions({
 // the previous LIKE semantics; parameterized; no FTS, no index changes.
 // The SINGLE eligibility rule, shared by row-candidacy and first-pick and
 // mirrored by matchedFieldOf: an atom is eligible iff its fullkey belongs to
-// an explicit allowed path class FOR THE PART'S TYPE. Persisted tool parts
-// carry state.output at completion; state.metadata.output is a streaming
-// transient that does not persist in source rows — intentionally NOT an
-// eligible class. Text parts contribute exactly $.text (never reasoning or
+// an explicit allowed path class FOR THE PART'S TYPE. For tool parts the
+// completed-evidence contract is state.output; state.metadata.output — the
+// streaming transient — is intentionally excluded from that contract (it
+// may still appear in some stored rows, so it is simply not an eligible
+// evidence class). Text parts contribute exactly $.text (never reasoning or
 // metadata); tool parts contribute exactly $.tool, or $.state.input /
-// $.state.output as a scalar or a descendant (boundary '.' or '[' — a bare
-// startswith would wrongly admit $.state.inputSummary).
+// $.state.output as a scalar or a descendant (exact prefix plus a '.'/'
+// [' boundary — a bare startswith would wrongly admit $.state.inputSummary).
 const ELIGIBLE_PATH_CLASSES = Object.freeze([
   Object.freeze({ partType: "text", fullkey: "$.text", field: "text" }),
   Object.freeze({ partType: "tool", fullkey: "$.tool", field: "tool_name" }),
@@ -478,15 +479,17 @@ const ELIGIBLE_PATH_CLASSES = Object.freeze([
 
 // Pure (aligned with the SQL below): the field of an eligible fullkey, or
 // null for any path outside the explicit classes — the caller rejects it.
+// A descendant requires the CASE-SENSITIVE exact prefix AND a boundary
+// separator right after it ('.' or '[') — checking the boundary character
+// alone accepts same-offset decoys like $.metadata.xy.note.
 function matchedFieldOf(fullkey) {
   if (typeof fullkey !== "string") return null;
   for (const c of ELIGIBLE_PATH_CLASSES) {
-    if (fullkey !== c.fullkey) {
-      if (!c.descendants) continue;
-      const boundary = fullkey[c.fullkey.length];
-      if (boundary !== "." && boundary !== "[") continue;
-    }
-    return c.field;
+    if (fullkey === c.fullkey) return c.field;
+    if (!c.descendants) continue;
+    if (!fullkey.startsWith(c.fullkey)) continue;
+    const boundary = fullkey[c.fullkey.length];
+    if (boundary === "." || boundary === "[") return c.field;
   }
   return null;
 }
@@ -497,10 +500,13 @@ function eligibleAtomSql(atomAlias) {
   const byType = new Map();
   for (const c of ELIGIBLE_PATH_CLASSES) {
     if (!byType.has(c.partType)) byType.set(c.partType, []);
+    // Exact prefix AND following boundary ('.' or '[') — the prefix check is
+    // a substr equality against the literal class constant (code-owned, so
+    // the inline literal is parameter-safe), never a startswith.
+    const len = c.fullkey.length;
     let clause = `${atomAlias}.fullkey = '${c.fullkey}'`;
     if (c.descendants) {
-      const pos = c.fullkey.length + 1;
-      clause = `(${clause} OR substr(${atomAlias}.fullkey, ${pos}, 1) IN ('.', '['))`;
+      clause = `(${clause} OR (substr(${atomAlias}.fullkey, 1, ${len}) = '${c.fullkey}' AND substr(${atomAlias}.fullkey, ${len + 1}, 1) IN ('.', '[')))`;
     }
     byType.get(c.partType).push(clause);
   }
