@@ -44,6 +44,12 @@ import {
   patchStore,
 } from "./ctoStores.mjs";
 import { makeWatcher as buildWatcher, validatePredicate } from "./ctoWatchers.mjs";
+// P1c (spec §4.2): the passive project-context read verbs default to the REAL
+// ctoContext source-read service (P1a) — bounded direct reads over opencode's
+// own store. Defaults keep index.mjs wiring-free; tests may inject fakes.
+// ctoContext's dependency graph contains no prompt dispatch / session or
+// window creation (opencodeDb only).
+import { ctoListSessions, ctoSearch, ctoAround } from "./ctoContext.mjs";
 
 export const CTO_STORE_PATH = statePath("cto.json");
 
@@ -137,6 +143,12 @@ export function createCtoEngine(deps = {}) {
     readFacts = null,
     readProfile = null,
     readToolRegistry = null,
+    // P1c (§4.2): the passive context verbs. Defaults ARE the ctoContext
+    // service (see the import above) — the production composition is
+    // wiring-free; tests override to fake the source service.
+    contextProjects = ctoListSessions,
+    contextSearch = ctoSearch,
+    contextAround = ctoAround,
     loadInbox = async () => inboxStore.load(),
     now = () => Date.now(),
   } = deps;
@@ -665,6 +677,79 @@ export function createCtoEngine(deps = {}) {
         return { ok: false, error: `tool registry read failed: ${e?.message ?? e}` };
       }
     },
+  });
+
+  // -------------------------------------------------------------------------
+  // Passive project context (P1c, spec §4.2) — context_projects / search / around
+  // -------------------------------------------------------------------------
+  // THIN registrars over the ctoContext service: caller args are forwarded
+  // VERBATIM so every validation (observed-id filters, the forbidden Manta
+  // workspace key, cursor shape, server-side limits, the 24 KiB serialized
+  // budget) comes from the ONE existing implementation — no duplicate
+  // helpers here. Outputs are the ctoContext envelope itself: {status,
+  // coverage, observedAt, ...rows, nextCursor, truncated, omittedCount}.
+  // `status` (not a bare ok:false) is the deliberate contract: it keeps
+  // ok / invalid_input / unsupported / source_unavailable /
+  // reference_expired DISTINCT for the model, and coverage honestly reports
+  // direct-source reads with indexed:false (the P1b index is NOT wired here).
+  // All identities are OBSERVED source ids (opencode's own project_id /
+  // session / message / part) carried with projectMapping:"unmapped" — a DB
+  // projectID is never a Manta workspace id.
+  register({
+    name: "context_projects",
+    description:
+      "Passive historical session discovery over opencode's OWN SQLite store (spec §4.2) " +
+      "— ALL sessions including closed/archived and child workers; no live window needed. " +
+      "Filters use OBSERVED source ids: projectId/directory (a Manta workspace key is " +
+      "rejected — mapping is unmapped), optional includeArchived/limit/cursor. Returns " +
+      "sessions with stable source ids, projectId (semantics unverified), " +
+      "projectMapping:'unmapped', coverage and observedAt. Read-only.",
+    params: {
+      projectId: { type: "string", description: "Observed opencode project_id filter (NOT a Manta workspace id)." },
+      directory: { type: "string", description: "Exact session directory filter." },
+      includeArchived: { type: "boolean", description: "Include archived/closed sessions (default true)." },
+      limit: { type: "number", description: "Max sessions per page (default 20, max 50)." },
+      cursor: { type: "string", description: "nextCursor from a previous page." },
+    },
+    run: async (ctx, args) => ({ ok: true, data: await contextProjects(args ?? {}) }),
+  });
+
+  register({
+    name: "context_search",
+    description:
+      "Bounded text + tool-evidence search over opencode's OWN store (spec §4.2) — ranked " +
+      "hits with stable session/message/part source ids and snippets; finds closed/archived " +
+      "child sessions too. query required; optional observed projectId/directory/sessionId " +
+      "filters, limit (default 20, max 50) and cursor. Envelope status distinguishes " +
+      "ok/invalid_input/unsupported/source_unavailable; truncation carries omitted-size " +
+      "metadata, never silent. Read-only.",
+    params: {
+      query: { type: "string", description: "The search text (non-empty)." },
+      projectId: { type: "string", description: "Observed opencode project_id filter (NOT a Manta workspace id)." },
+      directory: { type: "string", description: "Exact session directory filter." },
+      sessionId: { type: "string", description: "Restrict to one observed source session id." },
+      limit: { type: "number", description: "Max hits per page (default 20, max 50)." },
+      cursor: { type: "string", description: "nextCursor from a previous page." },
+    },
+    run: async (ctx, args) => ({ ok: true, data: await contextSearch(args ?? {}) }),
+  });
+
+  register({
+    name: "context_around",
+    description:
+      "The chronological text/tool-evidence neighborhood of one message over opencode's " +
+      "OWN store (spec §4.2) — before/after bounded (default 5 each, 40 messages incl. the " +
+      "anchor), stable ids, per-part evidence capped with omitted-size metadata. " +
+      "sessionId + messageId (observed source ids from context_search hits) required; " +
+      "partId centers the anchor message's part window on that exact part. Read-only.",
+    params: {
+      sessionId: { type: "string", description: "Observed source session id." },
+      messageId: { type: "string", description: "Observed source message id (the anchor)." },
+      partId: { type: "string", description: "Optional observed part id to center the anchor's part window on." },
+      before: { type: "number", description: "Messages before the anchor (default 5, max 39; 0 = anchor only)." },
+      after: { type: "number", description: "Messages after the anchor (default 5, max 39)." },
+    },
+    run: async (ctx, args) => ({ ok: true, data: await contextAround(args ?? {}) }),
   });
 
   register({

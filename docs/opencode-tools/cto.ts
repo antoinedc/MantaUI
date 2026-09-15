@@ -27,7 +27,8 @@ const CTO_TOOLS =
   "list_sessions, list_projects, read_transcript, search_messages, git_status, " +
   "git_branch, git_log, list_models, get_usage, usage_stopped, session_usage, " +
   "context_state, session_plan_mode, get_config, read_rollups, read_ledger, read_inbox, watch, unwatch, " +
-  "list_watches, read_facts, read_profile, read_toolregistry";
+  "list_watches, read_facts, read_profile, read_toolregistry, " +
+  "context_projects, context_search, context_around";
 
 export const cto = tool({
   description: [
@@ -45,6 +46,15 @@ export const cto = tool({
     "read_toolregistry returns the external-tool registry (§7): status,",
     "engagement/vitality, derived role, the secret key that grants access,",
     "probe cadence + last result.",
+    "The passive project-context verbs (§4.2) read opencode's OWN store:",
+    "context_projects lists ALL historical sessions (closed/archived/child",
+    "included) with observed source ids; context_search returns bounded ranked",
+    "hits and context_around the message neighborhood, both with stable",
+    "session/message/part ids. Each returns a {status, coverage, observedAt,",
+    "nextCursor, truncated} envelope — status distinguishes ok / invalid_input",
+    "/ unsupported / source_unavailable / reference_expired. Filters take",
+    "OBSERVED projectId/directory/sessionId (a Manta workspace key is rejected;",
+    "project mapping is unmapped). All read-only.",
     `Pick \`tool\` from: ${CTO_TOOLS}.`,
     "Pass that tool's arguments as a free-form object in \`args\`",
     "(e.g. {tool:\"read_transcript\", args:{sessionID:\"ses_...\"}}).",
