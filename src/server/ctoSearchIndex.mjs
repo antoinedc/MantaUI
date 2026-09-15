@@ -24,16 +24,34 @@
 //     `time_updated` and late rows with old timestamps — is re-read every
 //     cycle and re-indexed when changed (parts hash-gated, mirrors plain
 //     upserts). `coverage.eventual` says so; index absence is NOT
-//     authoritative absence (P1a direct reads remain the fallback). A small
-//     existence check bounds deletion reconciliation.
+//     authoritative absence (P1a direct reads remain the fallback).
+//     DELETION verification uses the same rotating per-table keyset (rowid)
+//     cursor, so every indexed row — not just the first N — is existence-
+//     checked once per cycle; absence is eventual within documented cycles.
+//   • OWNERSHIP BEFORE ANY WRITE. The canonical index path (realpath,
+//     symlinks resolved) must differ from the source DB, and an EXISTING
+//     file at the path is validated READ-ONLY first: no Manta marker
+//     (`PRAGMA application_id` + schema_version) → `unowned_index`, the
+//     foreign/source database preserved byte- and row-identical. Only a
+//     fresh file (or a file carrying our marker) is initialized, markers
+//     written atomically inside one transaction.
+//   • SINGLEFLIGHT INITIALIZATION. Concurrent operations share ONE opening
+//     promise (exactly one handle); `close()` during a pending open settles
+//     it by closing the handle exactly once and every in-flight operation
+//     reports `index_closed` instead of a late success.
+//   • INCOMPLETENESS IS METADATA, NEVER SILENT. Extraction bounds and byte
+//     caps persist per document (`indexed_parts.incomplete`/`.truncated`);
+//     `search`/`status`/`sync` report the index-wide `incompleteParts`
+//     coverage even when a query has zero hits. Numeric counters are always
+//     initialized (a zero-change batch reports 0s, never undefined/NaN).
 //   • EVIDENCE, BOUNDED AND HONEST. Extraction walks the part JSON with
-//     explicit scalar/node/depth bounds and REPORTS every omission instead
-//     of silently dropping the 33rd scalar. Eligible classes mirror the
-//     P1a-reviewed contract (ctoContext `partCandidates`): text parts
-//     contribute `$.text` only (synthetic/ignored excluded); tool parts
-//     contribute tool name / `state.input` / `state.output` scalars.
-//     Reasoning and metadata are never evidence. Byte caps (per-field,
-//     per-part) are UTF-8-safe and flagged.
+//     explicit scalar/node/depth bounds and REPORTS every omission (incl.
+//     depth caps) instead of silently dropping the 33rd scalar. Eligible
+//     classes mirror the P1a-reviewed contract (ctoContext
+//     `partCandidates`): text parts contribute `$.text` only
+//     (synthetic/ignored excluded); tool parts contribute tool name /
+//     `state.input` / `state.output` scalars. Reasoning and metadata are
+//     never evidence. Byte caps (per-field, per-part) are UTF-8-safe.
 //   • PROVENANCE FROM THE AUTHORITATIVE REGISTRY. Internal-ephemeral
 //     exclusion is resolved at BOTH sync and search time from the injected
 //     `provenanceFilter` (default: the established `internalSessions`
@@ -55,11 +73,11 @@
 //
 // Query policy: the user's query is LITERAL text — see ftsQuery.mjs.
 
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { statePath } from "../shared/paths.mjs";
-import { getDb, getDbOpenFailure } from "./opencodeDb.mjs";
+import { getDb, getDbOpenFailure, resolveDbPath } from "./opencodeDb.mjs";
 import { internalSessionIds } from "./internalSessions.mjs";
 import { ftsMatchExpression } from "./ftsQuery.mjs";
 
@@ -89,7 +107,10 @@ export const CTO_SEARCH_INDEX_LIMITS = Object.freeze({
   snippetTokens: 24,
 });
 
-const SCHEMA_VERSION = "1";
+const SCHEMA_VERSION = "2";
+// Ownership marker in the file header ("MANT"): an existing database at the
+// index path without it is foreign and is never written.
+const APPLICATION_ID = 0x4d414e54;
 const INDEX_FILENAME = "search-index.sqlite";
 
 const ENC = new TextEncoder();
@@ -107,7 +128,7 @@ const DDL = `
   CREATE TABLE IF NOT EXISTS indexed_parts (
     part_id TEXT PRIMARY KEY, session_id TEXT, message_id TEXT,
     source_time INTEGER, field_count INTEGER, truncated INTEGER,
-    data_hash TEXT);
+    incomplete INTEGER, data_hash TEXT);
   CREATE VIRTUAL TABLE IF NOT EXISTS indexed_evidence USING fts5(
     text, field UNINDEXED, part_id UNINDEXED);
 `;
@@ -247,6 +268,12 @@ export function createCtoSearchIndex(deps = {}) {
   }
   // Honest coverage whenever a result is NOT a successful read/sync.
   const uncovered = () => ({ mode: "fts-index", indexedParts: null, eventual: true });
+  // `supported:false` means THIS BOX cannot perform the operation at all
+  // (no node:sqlite, no source database, or a closed instance) — the same
+  // contract ctoContext uses. Explicit failure statuses (corrupt/busy/
+  // error/unowned) leave supported:true: the runtime is capable, the
+  // operation failed for the stated reason.
+  const operationSupported = (status) => status !== "unsupported" && status !== "source_unavailable" && status !== "index_closed";
 
   function closedEnvelope(op) {
     return { ...baseEnvelope(), supported: false, status: "index_closed", detail: `index instance is closed (${op}); create a new instance` };
@@ -262,20 +289,85 @@ export function createCtoSearchIndex(deps = {}) {
   }
 
   async function loadModule() {
-    if (cachedModule !== null || sqliteModule !== undefined) return cachedModule;
+    if (sqliteModule !== undefined) {
+      if (typeof sqliteModule === "function") return await sqliteModule();
+      return sqliteModule;
+    }
+    if (cachedModule !== null) return cachedModule;
     cachedModule = await defaultLoadSqlite();
     return cachedModule;
   }
 
-  // Open (or reuse) the ONE owned connection; never destructive on failure.
-  async function openIndex() {
-    if (db) return { db };
+  // Canonical form with symlinks resolved; a not-yet-existing path falls
+  // back to its real parent + basename (still detects a symlinked parent).
+  function canonicalPath(p) {
+    try {
+      return realpathSync(p);
+    } catch {
+      try {
+        return join(realpathSync(dirname(p)), p === dirname(p) ? "." : (p.split("/").pop() || p));
+      } catch {
+        return p;
+      }
+    }
+  }
+
+  // Open (or reuse) the ONE owned connection — SINGLEFLIGHT: concurrent
+  // operations share one opening promise, so N concurrent ops open exactly
+  // one handle. Never destructive on failure; an EXISTING file at the path
+  // is validated READ-ONLY before any writable open/DDL:
+  //   • canonical path === source DB path        → unowned_index (no open)
+  //   • foreign database (no Manta marker)       → unowned_index, untouched
+  //   • not a database / our marker + bad version→ index_corrupt, retained
+  //   • locks                                    → retryable index_busy
+  // A fresh file is initialized atomically (application_id + DDL + schema
+  // marker in ONE transaction) inside the owned namespace.
+  let initPromise = null;
+  async function doOpen() {
     const mod = await loadModule();
     if (!mod || typeof mod.DatabaseSync !== "function") return { unsupported: true };
-    try {
-      mkdirSync(dirname(path), { recursive: true });
-    } catch (e) {
-      return { status: "index_error", detail: `cannot create index directory: ${e?.message ?? e}` };
+    const srcPath = resolveDbPath();
+    if (srcPath && canonicalPath(path) === canonicalPath(srcPath)) {
+      return { status: "unowned_index", detail: "index path resolves to the read-only source database; refusing to open writable" };
+    }
+    if (existsSync(path)) {
+      // Read-only ownership probe FIRST — a foreign/source file is never touched.
+      let ro = null;
+      try {
+        ro = new mod.DatabaseSync(path, { readOnly: true });
+        const check = ro.prepare("PRAGMA quick_check").get();
+        if (!check || check.quick_check !== "ok") {
+          return { status: "index_corrupt", detail: `index failed quick_check (${check?.quick_check ?? "unknown"}); file retained — explicit recovery required` };
+        }
+        const appId = ro.prepare("PRAGMA application_id").get();
+        if (!appId || appId.application_id !== APPLICATION_ID) {
+          return { status: "unowned_index", detail: "existing database at the index path carries no Manta search-index marker; preserved untouched" };
+        }
+        const ver = ro.prepare("SELECT value FROM index_meta WHERE key = 'schema_version'").get();
+        if (ver == null || ver.value !== SCHEMA_VERSION) {
+          return { status: "index_corrupt", detail: `index schema version ${ver?.value ?? "missing"} != ${SCHEMA_VERSION}; file retained — explicit recovery required` };
+        }
+      } catch (e) {
+        const status = classifyError(e);
+        const detail = status === "index_corrupt"
+          ? `index probe failed: ${e?.message ?? e}; file retained — explicit recovery required`
+          : `index probe failed: ${e?.message ?? e}`;
+        return { status, detail };
+      } finally {
+        if (ro) {
+          try {
+            ro.close();
+          } catch {
+            /* best effort */
+          }
+        }
+      }
+    } else {
+      try {
+        mkdirSync(dirname(path), { recursive: true });
+      } catch (e) {
+        return { status: "index_error", detail: `cannot create index directory: ${e?.message ?? e}` };
+      }
     }
     let d;
     try {
@@ -284,22 +376,21 @@ export function createCtoSearchIndex(deps = {}) {
       return { status: classifyError(e), detail: `cannot open index: ${e?.message ?? e}` };
     }
     try {
-      const check = d.prepare("PRAGMA quick_check").get();
-      if (!check || check.quick_check !== "ok") {
-        d.close();
-        return { status: "index_corrupt", detail: `index failed quick_check (${check?.quick_check ?? "unknown"}); file retained — explicit recovery required` };
-      }
+      d.exec("BEGIN IMMEDIATE");
       d.exec(DDL);
       const ver = d.prepare("SELECT value FROM index_meta WHERE key = 'schema_version'").get();
       if (ver == null) {
+        d.exec(`PRAGMA application_id = ${APPLICATION_ID}`);
         d.prepare("INSERT INTO index_meta (key, value) VALUES ('schema_version', ?)").run(SCHEMA_VERSION);
-      } else if (ver.value !== SCHEMA_VERSION) {
-        d.close();
-        return { status: "index_corrupt", detail: `index schema version ${ver.value} != ${SCHEMA_VERSION}; file retained — explicit recovery required` };
       }
-      db = d;
-      return { db };
+      d.exec("COMMIT");
+      return { db: d };
     } catch (e) {
+      try {
+        d.exec("ROLLBACK");
+      } catch {
+        /* best effort */
+      }
       try {
         d.close();
       } catch {
@@ -311,6 +402,38 @@ export function createCtoSearchIndex(deps = {}) {
         : `index open failed: ${e?.message ?? e}`;
       return { status, detail };
     }
+  }
+
+  function openIndex() {
+    if (db) return Promise.resolve({ db });
+    if (closed) return Promise.resolve({ status: "index_closed", detail: "index instance is closed" });
+    if (!initPromise) {
+      initPromise = doOpen();
+      // Settled ONCE: on success the owned handle is adopted; if close()
+      // happened during the await, the handle is closed exactly here and
+      // never handed out; a failure clears the flight so a later op may retry.
+      initPromise.then(
+        (result) => {
+          if (closed) {
+            if (result.db) {
+              try {
+                result.db.close();
+              } catch {
+                /* best effort */
+              }
+            }
+            initPromise = null;
+            return;
+          }
+          if (result.db) db = result.db;
+          else initPromise = null;
+        },
+        () => {
+          initPromise = null;
+        },
+      );
+    }
+    return initPromise;
   }
 
   function sweepPosition(db) {
@@ -393,7 +516,7 @@ export function createCtoSearchIndex(deps = {}) {
   function upsertPart(row) {
     const hash = sha256(row.data ?? "");
     const existing = db.prepare("SELECT data_hash FROM indexed_parts WHERE part_id = ?").get(row.id);
-    if (existing && existing.data_hash === hash) return { changed: false };
+    if (existing && existing.data_hash === hash) return { changed: false, indexed: false, omitted: 0, truncated: false };
     let part = null;
     try {
       part = row.data == null ? null : JSON.parse(row.data);
@@ -401,6 +524,8 @@ export function createCtoSearchIndex(deps = {}) {
       part = null;
     }
     const extraction = extractEvidence(part, CTO_SEARCH_INDEX_LIMITS);
+    // Depth caps are invisible in the candidate list — persist them.
+    const omitted = extraction.omittedScalars + extraction.omittedNodes + (extraction.depthCapped ? 1 : 0);
     let budget = CTO_SEARCH_INDEX_LIMITS.partEvidenceMaxBytes;
     let truncated = false;
     const evRows = [];
@@ -418,49 +543,74 @@ export function createCtoSearchIndex(deps = {}) {
     db.prepare("DELETE FROM indexed_evidence WHERE part_id = ?").run(row.id);
     if (!evRows.length) {
       db.prepare("DELETE FROM indexed_parts WHERE part_id = ?").run(row.id);
-      return { changed: true, omitted: extraction.omittedScalars + extraction.omittedNodes, truncated: false, indexed: false };
+      return { changed: true, omitted, truncated: false, indexed: false };
     }
+    const incomplete = omitted > 0 || truncated ? 1 : 0;
     db.prepare(
-      `INSERT INTO indexed_parts (part_id, session_id, message_id, source_time, field_count, truncated, data_hash)
-       VALUES (?,?,?,?,?,?,?)
+      `INSERT INTO indexed_parts (part_id, session_id, message_id, source_time, field_count, truncated, incomplete, data_hash)
+       VALUES (?,?,?,?,?,?,?,?)
        ON CONFLICT(part_id) DO UPDATE SET session_id=excluded.session_id, message_id=excluded.message_id,
          source_time=excluded.source_time, field_count=excluded.field_count, truncated=excluded.truncated,
-         data_hash=excluded.data_hash`,
-    ).run(row.id, row.session_id, row.message_id, row.time_updated ?? 0, evRows.length, truncated ? 1 : 0, hash);
+         incomplete=excluded.incomplete, data_hash=excluded.data_hash`,
+    ).run(row.id, row.session_id, row.message_id, row.time_updated ?? 0, evRows.length, truncated ? 1 : 0, incomplete, hash);
     const ins = db.prepare("INSERT INTO indexed_evidence (text, field, part_id) VALUES (?,?,?)");
     for (const r of evRows) ins.run(...r);
-    return { changed: true, omitted: extraction.omittedScalars + extraction.omittedNodes, truncated, indexed: true };
+    return { changed: true, omitted, truncated, indexed: true };
   }
 
-  // Bounded deletion reconcile: the sweep reads SOURCE rows and cannot see
-  // deletions, so this pass verifies a sample of indexed rows and removes orphans.
+  // Bounded deletion reconcile with a ROTATING per-table keyset cursor
+  // (rowid): every indexed row — not just the first N — is existence-checked
+  // once per cycle (batch wraps to the start when the table tail is reached),
+  // so deletion of part N+65 is also eventual. The sweep reads SOURCE rows
+  // and cannot see deletions; this pass is what bounds them.
+  function verifyPosition() {
+    const row = db.prepare("SELECT value FROM index_meta WHERE key = 'verify'").get();
+    const start = { part: 0, session: 0 };
+    if (!row) return start;
+    try {
+      const parsed = JSON.parse(row.value);
+      return { part: parsed?.part ?? 0, session: parsed?.session ?? 0 };
+    } catch {
+      return start;
+    }
+  }
+
   function reconcileDeletions(src) {
     let removed = 0;
+    const verify = verifyPosition();
+    const next = {};
     const livePart = src.prepare("SELECT 1 AS x FROM part WHERE id = ?");
-    const sample = db
-      .prepare("SELECT part_id FROM indexed_parts ORDER BY rowid ASC LIMIT ?")
-      .all(CTO_SEARCH_INDEX_LIMITS.deleteReconcileMax);
-    for (const p of sample) {
+    const pRows = db
+      .prepare("SELECT part_id, rowid AS rid FROM indexed_parts WHERE rowid > ? ORDER BY rowid ASC LIMIT ?")
+      .all(verify.part, CTO_SEARCH_INDEX_LIMITS.deleteReconcileMax);
+    for (const p of pRows) {
       if (livePart.get(p.part_id) == null) {
         db.prepare("DELETE FROM indexed_evidence WHERE part_id = ?").run(p.part_id);
         db.prepare("DELETE FROM indexed_parts WHERE part_id = ?").run(p.part_id);
         removed++;
       }
     }
+    // Full cycle reached (fewer rows than the batch) → wrap to the start.
+    next.part = pRows.length < CTO_SEARCH_INDEX_LIMITS.deleteReconcileMax ? 0 : pRows[pRows.length - 1].rid;
     const liveSession = src.prepare("SELECT 1 AS x FROM session WHERE id = ?");
-    const sSample = db
-      .prepare("SELECT id FROM indexed_sessions ORDER BY rowid ASC LIMIT ?")
-      .all(CTO_SEARCH_INDEX_LIMITS.sessionVerifyMax);
-    for (const s of sSample) {
+    const sRows = db
+      .prepare("SELECT id, rowid AS rid FROM indexed_sessions WHERE rowid > ? ORDER BY rowid ASC LIMIT ?")
+      .all(verify.session, CTO_SEARCH_INDEX_LIMITS.sessionVerifyMax);
+    for (const s of sRows) {
       if (liveSession.get(s.id) == null) {
         db.prepare("DELETE FROM indexed_sessions WHERE id = ?").run(s.id);
       }
     }
-    return { removed, verified: sample.length };
+    next.session = sRows.length < CTO_SEARCH_INDEX_LIMITS.sessionVerifyMax ? 0 : sRows[sRows.length - 1].rid;
+    db.prepare("INSERT INTO index_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(
+      "verify",
+      JSON.stringify(next),
+    );
+    return { removed, verified: pRows.length + sRows.length, verify: next };
   }
 
   function failEnvelope(status, detail) {
-    return { ...baseEnvelope(), supported: status !== "unsupported" && status !== "index_closed", status, detail, coverage: uncovered() };
+    return { ...baseEnvelope(), supported: operationSupported(status), status, detail, coverage: uncovered() };
   }
 
   function zeroCounts() {
@@ -510,6 +660,7 @@ export function createCtoSearchIndex(deps = {}) {
         return { ...failEnvelope(status, cause?.detail ?? "no opencode source database is available on this box"), scanned: zeroCounts(), sweep: null };
       }
       const opened = await openIndex();
+      if (closed) return closedEnvelope("sync"); // close() during the open await wins
       if (opened.unsupported) return { ...failEnvelope("unsupported", "node:sqlite unavailable on this runtime"), scanned: zeroCounts(), sweep: null };
       if (!opened.db) return { ...failEnvelope(opened.status, opened.detail), scanned: zeroCounts(), sweep: null };
       const indexDb = opened.db;
@@ -548,11 +699,13 @@ export function createCtoSearchIndex(deps = {}) {
           .prepare("INSERT INTO index_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
           .run("synced_at", JSON.stringify(new Date(now()).toISOString()));
         indexDb.exec("COMMIT");
-        const total = indexDb.prepare("SELECT count(*) AS n FROM indexed_parts").get().n;
+        const totals = indexDb
+          .prepare("SELECT count(*) AS total, sum(incomplete = 1 OR truncated = 1) AS incomplete FROM indexed_parts")
+          .get();
         return {
           ...base,
           status: "ok",
-          coverage: { mode: "fts-index", indexedParts: total, eventual: true },
+          coverage: { mode: "fts-index", indexedParts: totals.total, incompleteParts: totals.incomplete ?? 0, eventual: true },
           sweep: next,
           scanned: counts,
         };
@@ -598,6 +751,7 @@ export function createCtoSearchIndex(deps = {}) {
       const filterInternal = includeInternal === false;
 
       const opened = await openIndex();
+      if (closed) return closedEnvelope("search"); // close() during the open await wins
       if (opened.unsupported) return failEnvelope("unsupported", "node:sqlite unavailable on this runtime");
       if (!opened.db) return failEnvelope(opened.status, opened.detail);
       const indexDb = opened.db;
@@ -626,8 +780,10 @@ export function createCtoSearchIndex(deps = {}) {
           ORDER BY rank ASC, indexed_evidence.part_id ASC, indexed_evidence.field ASC
           LIMIT ?`;
         const raw = indexDb.prepare(sql).all(...params, window);
-        const total = indexDb.prepare("SELECT count(*) AS n FROM indexed_parts").get().n;
-        const coverage = { mode: "fts-index", indexedParts: total, eventual: true, retrieval: "bounded-first-page" };
+        const totals = indexDb
+          .prepare("SELECT count(*) AS total, sum(incomplete = 1 OR truncated = 1) AS incomplete FROM indexed_parts")
+          .get();
+        const coverage = { mode: "fts-index", indexedParts: totals.total, incompleteParts: totals.incomplete ?? 0, eventual: true, retrieval: "bounded-first-page" };
 
         // AUTHORITATIVE registry exclusion — irrespective of mirror progress
         // (a part indexed before its session mirror row is still filtered).
@@ -677,15 +833,17 @@ export function createCtoSearchIndex(deps = {}) {
       if (closed) return closedEnvelope("status");
       const base = baseEnvelope();
       const opened = await openIndex();
+      if (closed) return closedEnvelope("status"); // close() during the open await wins
       if (opened.unsupported) return failEnvelope("unsupported", "node:sqlite unavailable on this runtime");
       if (!opened.db) return failEnvelope(opened.status, opened.detail);
       const indexDb = opened.db;
       try {
         const count = (table) => indexDb.prepare(`SELECT count(*) AS n FROM ${table}`).get().n;
+        const incomplete = indexDb.prepare("SELECT count(*) AS n FROM indexed_parts WHERE incomplete = 1 OR truncated = 1").get().n;
         return {
           ...base,
           status: "ok",
-          counts: { sessions: count("indexed_sessions"), messages: count("indexed_messages"), parts: count("indexed_parts"), evidence: count("indexed_evidence") },
+          counts: { sessions: count("indexed_sessions"), messages: count("indexed_messages"), parts: count("indexed_parts"), evidence: count("indexed_evidence"), incompleteParts: incomplete },
           sweep: sweepPosition(indexDb),
         };
       } catch (e) {

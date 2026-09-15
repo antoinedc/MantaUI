@@ -11,8 +11,15 @@
 // `index_busy` and corruption is explicit `index_corrupt` with the file
 // RETAINED — never unlinked; (5) exactly ONE owned connection with an
 // explicit close lifecycle (injected connection-counting constructor);
-// (6) extraction bounds are REPORTED omissions; (7) Node 20 degrade is
-// actually exercised and this file degrades without a static import.
+// (6) extraction bounds are REPORTED omissions and persist as per-document
+//     incompleteness surfaced index-wide (even on zero-hit searches);
+// (7) Node 20 degrade is actually exercised and this file degrades without
+//     a static import; (8) deletion verification ROTATES (keyset cursor per
+//     table) — a part deleted past the first 64 is still eventually absent;
+// (9) an index path that resolves to the source DB (or any foreign database
+//     without the Manta marker) is never written — explicit `unowned_index`,
+//     foreign bytes/rows preserved; (10) concurrent ops share ONE opening
+//     promise and a close() during the await settles the handle exactly once.
 //
 // Runs under the suite's `MANTA_STATE_HOME` sandbox; every source is a
 // synthetic fixture armed via `MANTA_OPENCODE_DB`
@@ -20,7 +27,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { statePath } from "../shared/paths.mjs";
@@ -59,6 +66,23 @@ function editSource(fixture) {
   return new DatabaseSync(fixture.dbPath);
 }
 
+// Connection-counting wrapper around the REAL node:sqlite for lifecycle tests.
+// Read counters LIVE via the returned object (destructuring would snapshot).
+function makeCountingSqlite() {
+  const counts = { opens: 0, closes: 0 };
+  class CountingDatabaseSync extends DatabaseSync {
+    constructor(...args) {
+      counts.opens++;
+      super(...args);
+    }
+    close() {
+      counts.closes++;
+      super.close();
+    }
+  }
+  return { counts, DatabaseSync: CountingDatabaseSync };
+}
+
 function cleanupIndexPath(path) {
   for (const suffix of ["", "-wal", "-shm", "-journal"]) {
     rmSync(path + suffix, { force: true });
@@ -79,6 +103,14 @@ async function withIndexSource(seed, fn, instanceOpts = {}) {
     if (instance) instance.close();
     cleanupIndexPath(indexPath);
   }
+}
+
+// A linear corpus of `n` text parts with distinct ids/terms.
+function linearParts(prefix, n, textOf) {
+  return Array.from({ length: n }, (_, i) => ({
+    id: `${prefix}${i}`, messageId: "m1", sessionId: "s1", timeCreated: NOW - i, timeUpdated: NOW - i,
+    data: { type: "text", text: textOf(i) },
+  }));
 }
 
 // Throwing fetch spy at the process boundary (U04-shaped): proves sync and
@@ -296,7 +328,7 @@ test("registry failure fails sync AND search closed; deletion reconciles bounded
     const sync = await idx.sync({ provenanceFilter: NO_FILTER });
     assert.equal(sync.status, "ok");
     assert.ok(sync.scanned.parts.removed >= 1, "bounded reconcile removed the orphan");
-    assert.ok(sync.scanned.verifiedParts <= CTO_SEARCH_INDEX_LIMITS.deleteReconcileMax, "reconcile is bounded");
+    assert.ok(sync.scanned.verifiedParts <= CTO_SEARCH_INDEX_LIMITS.deleteReconcileMax + CTO_SEARCH_INDEX_LIMITS.sessionVerifyMax, "reconcile is bounded");
     assert.equal((await idx.search({ query: "leasebot" })).hits.filter((h) => h.partId === "pText").length, 0);
   });
 });
@@ -396,41 +428,47 @@ test("busy index is retryable, not corruption: file bytes and data preserved", a
 
 test("one owned connection: reused across every operation, closed exactly once, ops after close fail closed", async (t) => {
   if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
-  let opens = 0;
-  let closes = 0;
-  class CountingDatabaseSync extends DatabaseSync {
-    constructor(...args) {
-      opens++;
-      super(...args);
-    }
-    close() {
-      closes++;
-      super.close();
-    }
-  }
+  const counted = makeCountingSqlite();
+  const opens = () => counted.counts.opens;
+  const closes = () => counted.counts.closes;
   await withIndexSource(
     BASE_SEED,
-    async (fixture, idx) => {
-      assert.equal(opens, 0, "nothing opened until the first operation (lazy, still exactly one owned connection)");
+    async (fixture, idx, idxPath) => {
+      assert.equal(opens(), 0, "nothing opened until the first operation (lazy, singleflight)");
       await idx.sync({ provenanceFilter: NO_FILTER });
-      assert.equal(opens, 1, "first operation opened exactly one connection");
+      // First op on a FRESH path: writable open only (no existing file to probe).
+      assert.equal(opens(), 1, "exactly one owned connection");
       await idx.sync({ provenanceFilter: NO_FILTER });
       await idx.search({ query: "staging" });
       await idx.status();
-      assert.equal(opens, 1, "operations REUSE the owned connection — no per-op leak");
-      assert.equal(closes, 0);
+      assert.equal(opens(), 1, "operations REUSE the owned connection — no per-op leak");
+      assert.equal(closes(), 0);
       idx.close();
-      assert.equal(closes, 1, "close() closes exactly once");
+      assert.equal(closes(), 1, "close() closes the owned handle exactly once");
       const after = await idx.search({ query: "staging" });
       assert.equal(after.status, "index_closed");
-      const s = await idx.sync({ provenanceFilter: NO_FILTER });
-      assert.equal(s.status, "index_closed");
-      assert.equal(opens, 1);
-      assert.equal(closes, 1, "close is idempotent at the connection level");
+      const s2 = await idx.sync({ provenanceFilter: NO_FILTER });
+      assert.equal(s2.status, "index_closed");
+      assert.equal(opens(), 1);
+      assert.equal(closes(), 1);
+
+      // Reopening an EXISTING index validates ownership READ-ONLY first
+      // (probe + writable), without growing handles per op.
+      const reopened = createCtoSearchIndex({ path: idxPath, provenanceFilter: NO_FILTER, sqliteModule: counted });
+      try {
+        assert.equal((await reopened.sync({ provenanceFilter: NO_FILTER })).status, "ok");
+        assert.equal(opens(), 3, "reopen = read-only ownership probe + owned writable");
+        assert.equal(closes(), 2, "the probe was closed immediately after validation");
+        await reopened.search({ query: "staging" });
+        assert.equal(opens(), 3, "still no per-op leak");
+      } finally {
+        reopened.close();
+      }
+      assert.equal(closes(), 3);
     },
     {
-      sqliteModule: { DatabaseSync: CountingDatabaseSync },
       // NOTE: only the INDEX connection is counted (the source fixture keeps its own handles).
+      sqliteModule: counted,
     },
   );
 });
@@ -461,14 +499,7 @@ test("cursor is explicitly rejected; results are bounded with honest truncation 
   if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
   // 60 hits × ~620-byte snippets ≈ 31 KiB serialized — over the 24 KiB
   // budget, so the hit cap AND the byte budget both bind in one corpus.
-  const parts = [];
-  for (let i = 0; i < 60; i++) {
-    parts.push({
-      id: `p${i}`, messageId: "m1", sessionId: "s1", timeCreated: NOW - i, timeUpdated: NOW - i,
-      data: { type: "text", text: `pageword item ${i} ${"z".repeat(600)}` },
-    });
-  }
-  const seed = { sessions: BASE_SEED.sessions.slice(0, 1), messages: BASE_SEED.messages.slice(0, 1), parts };
+  const seed = { sessions: BASE_SEED.sessions.slice(0, 1), messages: BASE_SEED.messages.slice(0, 1), parts: linearParts("p", 60, (i) => `pageword item ${i} ${"z".repeat(600)}`) };
   await withIndexSource(seed, async (fixture, idx) => {
     assert.equal((await idx.sync({ limit: 500, provenanceFilter: NO_FILTER })).coverage.indexedParts, 60);
 
@@ -539,31 +570,6 @@ test("evidence caps are bytes: oversized tail is not indexed (honest, never fetc
   });
 });
 
-test("unsupported runtime degrades to a distinct status (injected null module; lazy import in production)", async (t) => {
-  const path = uniqueIndexPath();
-  const fixture = await createFixtureDb(BASE_SEED);
-  try {
-    await withFixtureDb(fixture, async () => {
-      const idx = createCtoSearchIndex({ path, sqliteModule: null });
-      try {
-        const sync = await idx.sync({ provenanceFilter: NO_FILTER });
-        assert.equal(sync.supported, false);
-        assert.equal(sync.status, "unsupported");
-        const search = await idx.search({ query: "staging" });
-        assert.equal(search.supported, false);
-        assert.equal(search.status, "unsupported");
-        const status = await idx.status();
-        assert.equal(status.status, "unsupported");
-      } finally {
-        idx.close();
-      }
-    });
-  } finally {
-    cleanupIndexPath(path);
-    fixture.close();
-  }
-});
-
 test("message-data edits refresh role enrichment; identity filters constrain hits", async (t) => {
   if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
   await withIndexSource(BASE_SEED, async (fixture, idx) => {
@@ -590,4 +596,235 @@ test("message-data edits refresh role enrichment; identity filters constrain hit
     assert.equal(byDirectory.hits.length, 1);
     assert.equal(byDirectory.hits[0].sessionId, "sArch");
   });
+});
+
+test("deletion verification ROTATES: a part deleted past the first 64 is eventually absent (documented cycles)", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
+  const seed = { sessions: BASE_SEED.sessions.slice(0, 1), messages: BASE_SEED.messages.slice(0, 1), parts: linearParts("p", 100, (i) => `term${i} filler text`) };
+  await withIndexSource(seed, async (fixture, idx) => {
+    assert.equal((await idx.sync({ limit: 500, provenanceFilter: NO_FILTER })).coverage.indexedParts, 100);
+    // Delete two rows BEYOND the 64-row verification batch (p80, p99) and one session.
+    const db = editSource(fixture);
+    try {
+      db.prepare("DELETE FROM part WHERE id = ?").run("p80");
+      db.prepare("DELETE FROM part WHERE id = ?").run("p99");
+      db.prepare("DELETE FROM session WHERE id = ?").run("s1");
+    } finally {
+      db.close();
+    }
+    // Verified budget per sync: 64 parts + 16 sessions. 100 indexed parts
+    // ⇒ full coverage within ceil(100/64) = 2 cycles; 3 syncs is the
+    // documented bound with margin.
+    for (let i = 0; i < 3; i++) {
+      assert.equal((await idx.sync({ limit: 500, provenanceFilter: NO_FILTER })).status, "ok");
+    }
+    const status = await idx.status();
+    assert.equal(status.counts.parts, 98, "both late-orphan parts reconciled");
+    assert.equal(status.counts.sessions, 0, "the deleted session mirror reconciled too");
+    assert.equal((await idx.search({ query: "term80" })).hits.length, 0);
+    assert.equal((await idx.search({ query: "term99" })).hits.length, 0);
+    assert.equal((await idx.search({ query: "term42" })).hits.length, 1, "survivors untouched");
+  });
+});
+
+test("source path (or any foreign database) as index path is NEVER written: explicit unowned_index, bytes and rows preserved", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
+  const fixture = await createFixtureDb(BASE_SEED);
+  try {
+    await withFixtureDb(fixture, async () => {
+      const before = readFileSync(fixture.dbPath);
+      const beforeRows = { session: fixture.rowCount("session"), message: fixture.rowCount("message"), part: fixture.rowCount("part") };
+      const { DatabaseSync: DS } = await import("node:sqlite");
+      const beforeSchema = new DS(fixture.dbPath).prepare("SELECT name, sql FROM sqlite_master ORDER BY name").all();
+
+      // (a) the SOURCE path itself as the index path
+      const idx = createCtoSearchIndex({ path: fixture.dbPath, provenanceFilter: NO_FILTER });
+      try {
+        const r = await idx.sync();
+        assert.equal(r.status, "unowned_index", "refuses to open the source writable");
+        assert.match(r.detail, /source database/);
+        const q = await idx.search({ query: "staging" });
+        assert.equal(q.status, "unowned_index");
+        idx.close();
+      } finally {
+        /* closed above */
+      }
+
+      // (b) an unrelated foreign database at the index path
+      const foreignPath = join(tmpdir(), `manta-p1b1-foreign-${process.pid}-${Date.now()}.sqlite`);
+      const fdb = new DS(foreignPath);
+      fdb.exec("CREATE TABLE user_data (x INTEGER)");
+      fdb.prepare("INSERT INTO user_data VALUES (42)").run();
+      fdb.close();
+      const foreignBefore = readFileSync(foreignPath);
+      const idx2 = createCtoSearchIndex({ path: foreignPath, provenanceFilter: NO_FILTER });
+      try {
+        const r = await idx2.sync();
+        assert.equal(r.status, "unowned_index", "foreign DB without the Manta marker is never written");
+        assert.match(r.detail, /marker/);
+        idx2.close();
+      } finally {
+        /* closed above */
+      }
+      assert.deepEqual(readFileSync(foreignPath), foreignBefore, "foreign bytes preserved");
+      const fdb2 = new DS(foreignPath);
+      assert.equal(fdb2.prepare("SELECT count(*) AS n FROM user_data").get().n, 1);
+      assert.equal(fdb2.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name LIKE 'indexed%'").get().n, 0, "no index tables injected");
+      fdb2.close();
+      rmSync(foreignPath, { force: true });
+
+      // Source untouched: bytes, row counts, and schema identical.
+      assert.deepEqual(readFileSync(fixture.dbPath), before, "source bytes preserved");
+      assert.equal(fixture.rowCount("session"), beforeRows.session);
+      assert.equal(fixture.rowCount("message"), beforeRows.message);
+      assert.equal(fixture.rowCount("part"), beforeRows.part);
+      const afterSchema = new DS(fixture.dbPath).prepare("SELECT name, sql FROM sqlite_master ORDER BY name").all();
+      assert.deepEqual(afterSchema, beforeSchema, "source schema identical (no injected index tables)");
+    });
+  } finally {
+    fixture.close();
+  }
+});
+
+test("singleflight init: concurrent ops share ONE handle; close during the await settles it exactly once", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
+  const counted = makeCountingSqlite();
+  const opens = () => counted.counts.opens;
+  const closes = () => counted.counts.closes;
+  // (a) three concurrent statuses → ONE flight, no 3x leak
+  await withIndexSource(
+    BASE_SEED,
+    async (fixture, idx) => {
+      const results = await Promise.all([idx.status(), idx.status(), idx.status()]);
+      assert.ok(results.every((r) => r.status === "ok"));
+      assert.equal(opens(), 1, "concurrent ops share the singleflight open (a naive impl would open 3)");
+      idx.close();
+
+      // (b) close() while the initialization is still in flight
+      const counted2 = makeCountingSqlite();
+      const opens2 = () => counted2.counts.opens;
+      const closes2 = () => counted2.counts.closes;
+      const slowPath = uniqueIndexPath();
+      const slow = createCtoSearchIndex({
+        path: slowPath,
+        provenanceFilter: NO_FILTER,
+        sqliteModule: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          return counted2;
+        },
+      });
+      try {
+        const pending = slow.status();
+        slow.close();
+        const r = await pending;
+        assert.equal(r.status, "index_closed", "close during the await prevents a late success");
+        assert.equal(opens2(), 1, "the in-flight open completed exactly once");
+        assert.equal(closes2(), 1, "the owned handle was closed exactly once at settlement");
+      } finally {
+        slow.close();
+        cleanupIndexPath(slowPath);
+      }
+      assert.equal(opens(), 1, "no reopening after close");
+      assert.equal(closes(), 1, "the closed instance's handle stayed closed");
+    },
+    { sqliteModule: counted },
+  );
+});
+
+test("incompleteness persists per document and is reported index-wide (even on zero-hit searches); counters stay numeric", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
+  // A scalar nested BEYOND the depth cap (6): its content is unsearchable and
+  // the omission must be persisted + surfaced.
+  const deep = { l1: { l2: { l3: { l4: { l5: { l6: { l7: { l8: { l9: { l10: "deepsecret" } } } } } } } } } };
+  const seed = {
+    sessions: BASE_SEED.sessions.slice(0, 1),
+    messages: BASE_SEED.messages.slice(0, 1),
+    parts: [{ id: "pDeep", messageId: "m1", sessionId: "s1", timeCreated: NOW, timeUpdated: NOW, data: { type: "tool", tool: "bash", state: { status: "completed", output: "shallow visible", input: deep } } }],
+  };
+  const path = uniqueIndexPath();
+  const fixture = await createFixtureDb(seed);
+  try {
+    await withFixtureDb(fixture, async () => {
+      const idx = createCtoSearchIndex({ path, provenanceFilter: NO_FILTER });
+      try {
+        const sync = await idx.sync();
+        assert.equal(sync.status, "ok");
+        assert.ok(sync.scanned.parts.extractionOmitted >= 1, "depth-cap omission reported");
+        assert.equal(sync.coverage.incompleteParts, 1, "index-wide incompleteness on sync");
+
+        // Second sync: nothing changed → counters numeric zero, NOT NaN/undefined.
+        const again = await idx.sync();
+        assert.equal(again.scanned.parts.extractionOmitted, 0);
+        assert.equal(again.scanned.parts.byteTruncated, 0);
+        assert.equal(again.coverage.incompleteParts, 1, "incompleteness persists across unchanged batches");
+
+        const hit = await idx.search({ query: "shallow" });
+        assert.equal(hit.hits.length, 1);
+        assert.equal(hit.coverage.incompleteParts, 1);
+
+        // Zero-hit search STILL reports the incomplete coverage honestly.
+        const none = await idx.search({ query: "zzzznotfound" });
+        assert.equal(none.status, "ok");
+        assert.equal(none.hits.length, 0);
+        assert.equal(none.coverage.incompleteParts, 1, "incomplete coverage surfaced with zero hits");
+        assert.equal((await idx.search({ query: "deepsecret" })).hits.length, 0, "depth-capped scalar is honestly unsearchable");
+
+        const st = await idx.status();
+        assert.equal(st.counts.incompleteParts, 1);
+        idx.close();
+
+        // New instance on the same path: metadata reloaded from disk.
+        const idx2 = createCtoSearchIndex({ path, provenanceFilter: NO_FILTER });
+        try {
+          const st2 = await idx2.status();
+          assert.equal(st2.counts.incompleteParts, 1, "per-document incompleteness survives reopen");
+        } finally {
+          idx2.close();
+        }
+      } finally {
+        if (idx) idx.close();
+      }
+    });
+  } finally {
+    cleanupIndexPath(path);
+    fixture.close();
+  }
+});
+
+test("unsupported needs no fixture DB: injected null module (and a failing source) degrade distinctly", async (t) => {
+  const missingDb = join(tmpdir(), `manta-p1b1-missing-${process.pid}-${Date.now()}.db`);
+  const prev = process.env.MANTA_OPENCODE_DB;
+  process.env.MANTA_OPENCODE_DB = missingDb; // §14 canary: never the live home DB
+  const { _resetDbHandle } = await import("./opencodeDb.mjs");
+  _resetDbHandle();
+  const path = uniqueIndexPath();
+  try {
+    const idx = createCtoSearchIndex({ path, sqliteModule: null });
+    try {
+      const search = await idx.search({ query: "staging" });
+      assert.equal(search.supported, false);
+      assert.equal(search.status, "unsupported");
+      const status = await idx.status();
+      assert.equal(status.status, "unsupported");
+      assert.equal(existsSync(path), false, "no index file created on an unsupported runtime");
+    } finally {
+      idx.close();
+    }
+    // A MISSING source degrades to source_unavailable (distinct from
+    // unsupported) — on a runtime WITHOUT node:sqlite the whole stack is
+    // unsupported first (the source check reports the same root cause).
+    const idx2 = createCtoSearchIndex({ path: uniqueIndexPath(), provenanceFilter: NO_FILTER });
+    try {
+      const sync = await idx2.sync();
+      assert.equal(sync.supported, false);
+      assert.equal(sync.status, hasSqlite ? "source_unavailable" : "unsupported");
+    } finally {
+      idx2.close();
+    }
+  } finally {
+    if (prev === undefined) delete process.env.MANTA_OPENCODE_DB;
+    else process.env.MANTA_OPENCODE_DB = prev;
+    _resetDbHandle();
+    cleanupIndexPath(path);
+  }
 });
