@@ -4,38 +4,56 @@
 §8.3. This is the ONE server-owned admission path for every prompt to the CTO role session
 (desktop/native CEO submissions and background synthesis alike). Ordinary project delivery is
 UNTOUCHED (`promptDelivery.mjs` keeps its own engine for webhooks/schedules/peers/capability
-jobs). No routes, no UI, no poller are wired yet — that is the parent integration's job, using
-exactly the recipe below. Do not add a second admission path for the CTO session.
+jobs). Wired since P3a3 (`src/server/ctoConversation.mjs` + `src/server/index.mjs`): the four
+authenticated `cto:conversation-*` RPC channels, the direct-send seams, the event tap and the
+bounded tick poller all use exactly the recipe below. Do not add a second admission path for
+the CTO session.
 
-## Production composition (the parent wiring)
+## Production composition (as wired)
 
 ```js
 import { createCtoAdmission } from "./ctoAdmission.mjs";
 import { createPromptDelivery } from "./promptDelivery.mjs";
-import * as oc from "./opencode.mjs";
 import { createCtoBinding } from "./ctoBinding.mjs";
+import { createCtoConversationService } from "./ctoConversation.mjs";
+import { CTO_AGENT_NAME } from "./providers.mjs";
+import * as oc from "./opencode.mjs";
 
-const promptDelivery = createPromptDelivery({ sendPrompt: (args) => oc.sendPrompt(args) });
-const binding = createCtoBinding({ oc });                    // P3a1 service
+const promptDelivery = createPromptDelivery({
+  sendPrompt: (args) => oc.sendPrompt(args),
+  redirect: (args) => ctoConversation.redirectDelivery(args), // background seam
+});
+const binding = createCtoBinding({ oc });                    // P3a1 service (LAZY — no oc calls at boot)
 const admission = createCtoAdmission({
   binding,                          // dispatch resolves the CURRENT binding
   sendPrompt: (args) => oc.sendPrompt(args),  // messageID-capable (P3a2, P0-proven)
   getMessage: (sid, mid) => oc.getMessage(sid, mid),   // receipt read-back
-  listMessages: (sid) => oc.listMessages(sid),         // turn-completion reconcile
-  abortSession: (sid) => oc.abortSession(sid),         // explicit interrupt only
+  listMessages: (sid, opts) => oc.listMessages(sid, opts), // turn-completion reconcile
+  abortSession: (sid, opts) => oc.abortSession(sid, opts), // explicit interrupt only
   isBusy: promptDelivery.isBusy,       // SHARED busy view — one truth for both engines
 });
-
-// ONE firehose tap feeds both engines (same event shapes):
-onOpencodeEvent((evt) => {
-  promptDelivery.observeEvent(evt);
-  admission.observeEvent(evt);
+const ctoConversation = createCtoConversationService({
+  binding, admission,
+  agentName: CTO_AGENT_NAME,          // server-owned agent; callers never choose one
 });
-// A poller drives recovery + admission without events (30s is fine):
-setInterval(() => admission.tick().catch(() => {}), 30_000).unref();
+// A bounded tick poller drives recovery + admission without events (30s);
+// startPoller surfaces failures via warn — never swallowed as healthy.
+const { stop } = startPoller(() => admission.tick(), { intervalMs: 30_000, label: "cto-admission" });
 ```
 
 Constraint: compose ONE admission engine per box (single-writer-process, like ctoBinding).
+The ONE firehose tap in index.mjs feeds BOTH engines (`promptDelivery.observeEvent(evt)` then
+`admission.observeEvent(evt)`) — same event shapes, no second stream. The RPC surface
+(`rpc.mjs`): `cto:conversation-open` → `{sessionId, generation}` (first open creates the role
+session, no model invocation, singleflight under concurrency); `cto:conversation-state` →
+`{binding:{sessionId|null, generation}, submissions, counts}` (pure store read); 
+`cto:conversation-submit {id?, text, expectedGeneration?, model?}` → the durable submit
+receipt (origin "human" and the `cto` agent are stamped server-side); 
+`cto:conversation-interrupt {id}` → `{ok, id, status}`. The `opencode:prompt` /
+`opencode:run-command` routes redirect/reject conversation-targeted sends through the same
+seam (plain text routed with a stable id; slash commands and file parts rejected with the
+"not supported yet" copy), and `promptDelivery.deliver` redirects conversation-targeted
+background deliveries into this queue with a stable content-mapped id (`bg_*`).
 
 ## Operations
 
@@ -149,7 +167,9 @@ sync mutators — no store lock is ever held across an opencode await.
 
 1. **Nonterminal request markers hold the gate**: an `unknown` / `cancel_requested` /
    `interrupt_pending` record blocks admission until reconcile resolves it (receipt found, or
-   the abort settles + the turn is proven ended) or — for unknown — a caller cancels it. This
+   the abort settles + the turn is proven ended). A caller cancel does NOT release an
+   `unknown` — interrupting it only converts it to `cancel_requested`, which is still a
+   nonterminal barrier that reconcile must prove out of (Operations table above). This
    is the conservative no-duplicate/no-late-abort trade; surface `list()` state, don't work
    around it.
 1a. **An uncertain abort is a PERMANENT, non-self-healing barrier** (`abortState: "uncertain"`,

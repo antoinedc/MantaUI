@@ -431,7 +431,23 @@ export function buildHandlers({
   // BET-1369: the shared windowed `optimizer:series` read model, hoisted to
   // index.mjs. Null when not injected → this builds its own (tests / fallback).
   optimizerSeries = null,
+  // BET-P3a3: the composed CTO conversation service (createCtoConversationService
+  // over ONE ctoBinding + ONE ctoAdmission instance, wired in index.mjs).
+  // Null when not wired (older boxes / tests that don't exercise it) → the
+  // cto:conversation-* channels answer a clear actionable error instead of a
+  // TypeError, and the opencode:prompt / opencode:run-command seams fall
+  // through byte-identically to the raw oc routes.
+  ctoConversation = null,
 }) {
+  // The cto:conversation-* channels require the composed runtime. Answer with
+  // an actionable message rather than an opaque crash when it isn't wired.
+  function requireCtoConversation() {
+    if (!ctoConversation) {
+      throw new Error("cto conversation APIs are not wired on this box");
+    }
+    return ctoConversation;
+  }
+
   // The sole resolver for project cwd — no longer mirrored to a desktop-main
   // copy (the src/main/index.ts duplicate was retired in the HTTP-only
   // migration). Renderer-supplied cwd is preferred when it's a real path, but
@@ -1031,7 +1047,17 @@ export function buildHandlers({
 
     // preload: ipcRenderer.invoke(IPC.opencodePrompt, { sessionId, text, model, attachments, mentions })
     // → args[0] = that object; opencode.mjs sendPrompt expects the same shape
-    "opencode:prompt": (input) => oc.sendPrompt(input),
+    // P3a3 (spec §8.3): a direct send aimed at the CTO role session must NOT
+    // bypass the durable admission queue. Plain text is routed through the
+    // same seam (stable id: the composer's messageID when present); file
+    // attachments / agent mentions get the clear "not supported yet"
+    // rejection. Ordinary project sessions take the byte-identical raw path.
+    "opencode:prompt": async (input) => {
+      if (input && ctoConversation && (await ctoConversation.isConversationSession(input.sessionId))) {
+        return ctoConversation.admitDirect(input);
+      }
+      return oc.sendPrompt(input);
+    },
 
     // preload: ipcRenderer.invoke(IPC.opencodeAbort, sessionId)
     // → args[0] = sessionId (string)
@@ -1533,7 +1559,29 @@ export function buildHandlers({
 
     // preload: ipcRenderer.invoke(IPC.opencodeRunCommand, { sessionId, command, arguments, model?, attachments? })
     // → args[0] = that object; opencode.mjs runCommand expects same shape
-    "opencode:run-command": (input) => oc.runCommand(input),
+    // P3a3 (spec §8.3): slash commands aimed at the CTO role session are NOT
+    // admitted through the conversation API yet — rejected with the clear
+    // "use the CTO conversation API for plain text" copy instead of silently
+    // bypassing the admission queue. Ordinary project sessions unaffected.
+    "opencode:run-command": async (input) => {
+      if (input && ctoConversation && (await ctoConversation.isConversationSession(input.sessionId))) {
+        await ctoConversation.rejectRunCommand(input);
+      }
+      return oc.runCommand(input);
+    },
+
+    // ---- cto: the conversation channels (P3a3, spec §8.3) ----
+    // All four are authenticated RPCs over the composed runtime (ONE binding +
+    // ONE admission instance). Open LAZILY creates the role session on first
+    // call (no model invocation, singleflight under concurrency); state is a
+    // pure store read (safe to poll, never creates); submit is the durable,
+    // dedup-by-id human turn (server-owned origin + agent); interrupt is the
+    // EXPLICIT interruption op. Errors are actionable (at-cap, stale
+    // generation, duplicate id, binding unavailable) — never fake success.
+    "cto:conversation-open": () => requireCtoConversation().open(),
+    "cto:conversation-state": () => requireCtoConversation().state(),
+    "cto:conversation-submit": (input) => requireCtoConversation().submit(input),
+    "cto:conversation-interrupt": (input) => requireCtoConversation().interrupt(input),
 
     // ---- opencode: composite operations (mirror src/main/index.ts behavior) ----
 

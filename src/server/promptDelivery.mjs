@@ -35,7 +35,7 @@
  *        The underlying opencode prompt injector (oc.sendPrompt).
  * @returns {{deliver: (args:{sessionId:string, text:string, model?:{providerID:string, modelID:string, variant?:string}})=>Promise<{delivered:boolean, queued:boolean, rejected?:boolean}>, observeEvent:(evt:unknown)=>void, isBusy:(sessionId:string)=>boolean}}
  */
-export function createPromptDelivery({ sendPrompt }) {
+export function createPromptDelivery({ sendPrompt, redirect = null }) {
   const busy = new Set(); // sessionIds currently running a turn
   const pending = new Map(); // sessionId -> [{text, model}, ...] queued while busy
 
@@ -101,6 +101,23 @@ export function createPromptDelivery({ sendPrompt }) {
   }
 
   async function deliver({ sessionId, text, model }) {
+    // P3a3 (spec §8.3): every writer to the CTO role session goes through the
+    // durable admission queue — including this engine's background senders.
+    // The redirect runs FIRST so a conversation-targeted delivery never
+    // enters the in-memory defer queue below. The redirect never throws (its
+    // own contract); the guard keeps even a buggy redirect from breaking
+    // ordinary delivery — it degrades to the historical path with a warn.
+    if (redirect) {
+      try {
+        const r = await redirect({ sessionId, text, model });
+        if (r) return r.result;
+      } catch (e) {
+        console.warn(
+          `[promptDelivery] cto redirect failed for ${sessionId}; delivering ordinarily:`,
+          e?.message ?? e,
+        );
+      }
+    }
     if (busy.has(sessionId)) {
       const q = pending.get(sessionId) ?? [];
       if (q.length >= MAX_PENDING_PER_SESSION) {

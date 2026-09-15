@@ -174,9 +174,13 @@ import {
 } from "./media.mjs";
 import { setSecret, deleteSecret, listSecrets, provideSecret } from "./secrets.mjs";
 import { createPromptDelivery } from "./promptDelivery.mjs";
+import { createCtoBinding } from "./ctoBinding.mjs";
+import { createCtoAdmission } from "./ctoAdmission.mjs";
+import { createCtoConversationService } from "./ctoConversation.mjs";
 import {
   ensureMantaPlanAgent,
   ensureCtoAgent,
+  CTO_AGENT_NAME,
   readCacheTtl as readProvidersCacheTtl,
   readOpencodeConfig,
 } from "./providers.mjs";
@@ -415,8 +419,48 @@ const { stop: stopUploadCleanupPoller } = startUploadCleanupPoller({
 // target session is mid-turn — so a scheduled tick, a peer agent, a plugin
 // job finishing, or an external webhook can NEVER abort the user's in-flight
 // model turn. See src/server/promptDelivery.mjs.
+// P3a3 (spec §8.3): deliveries aimed at the CTO role session are redirected
+// into the durable admission queue via `redirect` (the closure resolves the
+// composed conversation service at call time; nothing below runs at boot).
 const promptDelivery = createPromptDelivery({
   sendPrompt: (args) => oc.sendPrompt(args),
+  redirect: (args) => ctoConversation.redirectDelivery(args),
+});
+
+// ----- CTO conversation runtime (P3a3, spec §3.1 + §8.3) -----
+// The ONE composition: exactly ONE binding engine + ONE admission engine for
+// the whole server lifecycle, plus the thin conversation service over them.
+// Binding creation is LAZY — this composition runs at boot but performs NO
+// oc calls: no role session is created and no model is invoked until the
+// first `cto:conversation-open` RPC. The admission engine sends via the RAW
+// low-level oc client (never promptDelivery), so a redirected background
+// delivery cannot recurse: promptDelivery.deliver → admission.submit → raw
+// oc.sendPrompt, one hop each way.
+const ctoBindingEngine = createCtoBinding({ oc });
+const ctoAdmissionEngine = createCtoAdmission({
+  binding: ctoBindingEngine,
+  sendPrompt: (args) => oc.sendPrompt(args),
+  getMessage: (sessionId, messageId) => oc.getMessage(sessionId, messageId),
+  listMessages: (sessionId, opts) => oc.listMessages(sessionId, opts),
+  abortSession: (sessionId, opts) => oc.abortSession(sessionId, opts),
+  // SHARED busy view — one truth for both prompt engines (promptDelivery's
+  // firehose-derived busy set; admission observes the same events itself).
+  isBusy: promptDelivery.isBusy,
+});
+const ctoConversation = createCtoConversationService({
+  binding: ctoBindingEngine,
+  admission: ctoAdmissionEngine,
+  // Server-owned central role agent (providers.mjs): the conversation's
+  // turns ALWAYS run the registered `cto` agent — callers can never choose
+  // an arbitrary agent for the role session.
+  agentName: CTO_AGENT_NAME,
+});
+// Bounded tick poller (spec §8.3 recovery): reconcile + pump with no inbound
+// events. startPoller surfaces failures via console.warn — a failed tick
+// (store corruption, binding unavailable) is never swallowed as healthy.
+const { stop: stopCtoAdmissionTick } = startPoller(() => ctoAdmissionEngine.tick(), {
+  intervalMs: 30_000,
+  label: "cto-admission",
 });
 
 // Scheduled-prompt engine: durable jobs in ~/.manta/schedule.json, fired
@@ -1551,6 +1595,11 @@ rpcHandlers = buildHandlers({
   // BET-1369: the single shared windowed `optimizer:series` read model, built
   // above — per-range 60s memo, shared by the RPC channel (the card's selector).
   optimizerSeries,
+  // BET-P3a3: the composed CTO conversation runtime (ONE binding + ONE
+  // admission instance, created above). Serves the four
+  // `cto:conversation-*` channels and the opencode:prompt /
+  // opencode:run-command anti-bypass seams.
+  ctoConversation,
   // BET-1336: quota-window forecast-at-reset read sources for the
   // optimizer:summary `windows` slice — the live polled snapshots + the
   // persisted observation history.
@@ -2793,6 +2842,16 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
     promptDelivery.observeEvent(evt);
   } catch (e) {
     console.warn("[promptDelivery] observeEvent failed:", e?.message ?? e);
+  }
+  // P3a3 (spec §8.3): the SAME tap feeds the admission engine — ONE firehose
+  // tap for BOTH prompt engines, no second stream/endpoint. This is what
+  // moves admitted turns through their state machine (busy hold, receipt
+  // reconciliation, turn-ended proof). Cheap + guarded; never throws into
+  // the pump.
+  try {
+    ctoAdmissionEngine.observeEvent(evt);
+  } catch (e) {
+    console.warn("[cto-admission] observeEvent failed:", e?.message ?? e);
   }
   // Optimizer P2.4 (BET-1346): per-session idle tracking for the background
   // compaction scheduler — stamped at the SAME tap that feeds
