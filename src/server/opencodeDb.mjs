@@ -69,3 +69,11 @@ export async function getDb() {
 export function _resetDbHandle() {
   dbHandle = null;
 }
+
+// Test-only read of the cached handle, so fixtures can close the connection
+// the shared accessor opened before dropping the reference (`_resetDbHandle`
+// only nulls it — the OS file handle would leak and keep a temp dir pinned).
+// Not part of the runtime API.
+export function _getDbHandle() {
+  return dbHandle;
+}
