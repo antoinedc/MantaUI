@@ -18,6 +18,28 @@
 // `stage`, `specHash`), which is how a stale result is detected after a
 // scope change (U13).
 //
+// LOCK ORDER (no deadlock). Two lock layers, always acquired in this order:
+//   1. `workGraphLock` — ONE module-level mutex serializing every
+//      dependency-graph mutation (create/revise that touch `dependencies`)
+//      together with its validate+commit, so concurrent A→B / B→A revisions
+//      can never both validate clean against pre-commit state (the cycle
+//      race). It is local-storage-only work: no external call ever happens
+//      under it.
+//   2. the per-envelope file lock (`lockForStore`, keyed by the envelope's
+//      real path).
+// No code path acquires the graph lock while holding a file lock, and
+// operations that do not touch the graph (get/list/reserve/record/plain
+// revise) never take the graph lock at all.
+//
+// RETENTION = DEDUPE PRESERVED. Terminal receipt history is bounded
+// (OPERATIONS_KEEP full receipts); receipts evicted from the full set are
+// compacted into TOMBSTONES that keep the idempotency identity (key +
+// argsHash + op) and the original outcome (status/resultCode/externalRef), so
+// a retry of an old key still REPLAYS instead of re-executing (the 21st
+// operation must not resurrect the 1st as a blind duplicate). Tombstones are
+// capped at TOMBSTONE_KEEP. pending/in_flight/unknown receipts — and anything
+// not classifiable as terminal — are never evicted or tombstoned.
+//
 // CONTRACT-ONLY BOUNDARIES (P2a — deliberately NOT implemented here):
 //   - The work target (`project`) is a CALLER-SUPPLIED, structurally validated
 //     ref. Per docs/cto-implementation-map.md §4 the `ProjectRef` mapping is
@@ -29,7 +51,10 @@
 //   - No worker/dispatcher side effects: nothing here creates worktrees,
 //     windows, sessions or prompts. `reserveOperation`/`recordOperationOutcome`
 //     are the receipt protocol later phases execute through; the receipt's
-//     `externalRef` stays caller-supplied.
+//     `externalRef` stays caller-supplied. P4 protocol rule: a caller MUST
+//     record `in_flight` BEFORE its first external effect — that is what makes
+//     an expired-lease `pending` safely resumable while an expired-lease
+//     `in_flight` is durably `unknown` (reconcile required, never re-executed).
 //   - No §6 transition-precondition enforcement (that is the P4 work
 //     coordinator), no attempt subtypes beyond opaque ref objects, no future
 //     control methods (dispatch/pause/cancel/answer_decision/…), no sweeper
@@ -38,9 +63,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { migrateStore, lockForStore, workStore } from "./ctoStores.mjs";
+import { createMutex } from "./jsonStore.mjs";
 
 // ---------------------------------------------------------------------------
-// Closed vocabularies (spec §5.1) — enum membership is enforced on every write.
+// Closed vocabularies (spec §5.1) — enum membership is enforced on every write
+// and re-validated on every load.
 // ---------------------------------------------------------------------------
 
 export const WORK_STATES = Object.freeze([
@@ -59,16 +86,19 @@ export const WORK_STAGES = Object.freeze(["specify", "implement", "review", "mer
 export const WAITING_REASONS = Object.freeze(["dependency", "capacity", "provider", "external", "reconcile"]);
 export const DELIVERY_TARGET_KINDS = Object.freeze(["spec", "pr", "merged", "published", "deployed"]);
 export const OPERATION_STATUSES = Object.freeze(["pending", "in_flight", "succeeded", "failed", "unknown"]);
-// Terminal receipts may be pruned for retention; pending/in_flight/unknown are
-// UNRESOLVED and are never evicted arbitrarily (a pending/in_flight receipt is
-// someone's live reservation; an unknown receipt is the only record that an
-// external effect MAY have happened — losing it invites blind re-dispatch).
+// Unresolved receipts are never pruned or tombstoned (a pending/in_flight
+// receipt is someone's reservation; an unknown receipt is the only record
+// that an external effect MAY have happened — losing it invites blind
+// re-dispatch). Terminal receipts are the only ones eligible for compaction.
 export const UNRESOLVED_OPERATION_STATUSES = Object.freeze(["pending", "in_flight", "unknown"]);
+export const TERMINAL_OPERATION_STATUSES = Object.freeze(["succeeded", "failed"]);
 
-// Bounded operation history per envelope: terminal receipts beyond this cap
-// are pruned oldest-first at write time. Non-terminal receipts never count
-// against the cap.
+// Bounded operation history per envelope: at most OPERATIONS_KEEP FULL
+// terminal receipts; older terminals are compacted to tombstones; at most
+// TOMBSTONE_KEEP tombstones. Non-terminal receipts never count against
+// either cap.
 export const OPERATIONS_KEEP = 20;
+export const TOMBSTONE_KEEP = 4 * OPERATIONS_KEEP;
 // List bound: listWorks never returns unbounded arrays; the caller learns the
 // true total so truncation is visible, never silent.
 export const LIST_DEFAULT_LIMIT = 100;
@@ -96,7 +126,9 @@ const MUTABLE_FIELDS = Object.freeze([
 // ---------------------------------------------------------------------------
 // Errors — stable codes on `.code`. Spec §7 codes are used where §7 names one
 // (target_not_found, revision_conflict, external_outcome_unknown); the few
-// service-layer codes beyond that list are spelled out and documented.
+// service-layer codes beyond that list are spelled out and documented:
+//   target_exists, idempotency_key_args_mismatch, dependency_cycle,
+//   receipt_state_conflict, store_corrupt, store_unavailable.
 // ---------------------------------------------------------------------------
 
 export function workError(code, message, { receipt } = {}) {
@@ -107,9 +139,10 @@ export function workError(code, message, { receipt } = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// Canonical args hashing (receipt idempotency — spec §7/§8.1). Key order must
-// not matter: the same logical request under a different key order is the SAME
-// operation.
+// Canonical request hashing (receipt idempotency — spec §7/§8.1). The hash
+// binds BOTH the operation name and the arguments: the same key with the same
+// args under a different `op` is a DIFFERENT request and must not replay.
+// Key order never matters.
 // ---------------------------------------------------------------------------
 
 export function canonicalJson(value) {
@@ -119,8 +152,8 @@ export function canonicalJson(value) {
   return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(",")}}`;
 }
 
-export function canonicalArgsHash(args) {
-  return createHash("sha256").update(canonicalJson(args ?? {})).digest("hex");
+export function canonicalArgsHash(op, args) {
+  return createHash("sha256").update(canonicalJson({ op, args: args ?? {} })).digest("hex");
 }
 
 // ---------------------------------------------------------------------------
@@ -196,10 +229,108 @@ function validateRefArray(value, label) {
   for (const entry of value) assertPlainObject(entry, `${label}[]`);
 }
 
+// A stored receipt must carry its full dedupe identity and a status from the
+// closed set — an unclassifiable status can never be mistaken for terminal by
+// the retention logic, because an envelope carrying one refuses to load.
+function assertValidReceipt(receipt, workId) {
+  const label = `operations[]`;
+  assertPlainObject(receipt, `${label} (work "${workId}")`);
+  assertNonEmptyString(receipt.id, `${label}.id`);
+  assertNonEmptyString(receipt.key, `${label}.key`);
+  assertNonEmptyString(receipt.argsHash, `${label}.argsHash`);
+  if (!OPERATION_STATUSES.includes(receipt.status)) {
+    throw workError("unsupported", `${label}.status ${JSON.stringify(receipt.status)} is not a valid operation status`);
+  }
+  if (receipt.tombstone === true) {
+    if (typeof receipt.prunedAt !== "number") {
+      throw workError("unsupported", `${label}.prunedAt must be a number on a tombstone`);
+    }
+    return;
+  }
+  assertNonEmptyString(receipt.op, `${label}.op`);
+  if (!Number.isInteger(receipt.workRevision) || receipt.workRevision < 1) {
+    throw workError("unsupported", `${label}.workRevision must be a positive integer`);
+  }
+  if (typeof receipt.createdAt !== "number" || typeof receipt.updatedAt !== "number") {
+    throw workError("unsupported", `${label} timestamps must be numbers`);
+  }
+  if (receipt.lease != null) {
+    assertPlainObject(receipt.lease, `${label}.lease`);
+    assertNonEmptyString(receipt.lease.owner, `${label}.lease.owner`);
+    if (typeof receipt.lease.expiresAt !== "number") {
+      throw workError("unsupported", `${label}.lease.expiresAt must be a number`);
+    }
+  }
+}
+
+// Load-time shape gate (blocker: the loader used to accept anything with a
+// v/id). Every read, mutate and prune downstream sees a structurally valid
+// envelope or nothing at all — corruption is visible, never silently pruned
+// or classified.
+function assertValidEnvelope(env, id) {
+  const fail = (message) => workError("store_corrupt", `work envelope "${id}" is corrupt: ${message}`);
+  try {
+    assertPlainObject(env, "envelope");
+    if (env.id !== id) {
+      throw workError("unsupported", `envelope id mismatch — expected "${id}", found ${JSON.stringify(env.id)}`);
+    }
+    if (!Number.isInteger(env.revision) || env.revision < 1) {
+      throw workError("unsupported", `revision must be a positive integer`);
+    }
+    if (typeof env.createdAt !== "number" || typeof env.updatedAt !== "number") {
+      throw workError("unsupported", "createdAt/updatedAt must be numbers");
+    }
+    assertPlainObject(env.origin, "origin");
+    assertNonEmptyString(env.origin.conversationId, "origin.conversationId");
+    assertNonEmptyString(env.origin.messageId, "origin.messageId");
+    validateProjectRef(env.project);
+    validateSpec(env.spec);
+    validateDeliveryTarget(env.deliveryTarget);
+    assertNonEmptyString(env.objective, "objective");
+    if (typeof env.priority !== "number" || !Number.isFinite(env.priority)) {
+      throw workError("unsupported", "priority must be a finite number");
+    }
+    if (typeof env.priorityReason !== "string") {
+      throw workError("unsupported", "priorityReason must be a string");
+    }
+    if (env.state !== undefined && !WORK_STATES.includes(env.state)) {
+      throw workError("unsupported", `state "${env.state}" is not a valid work state`);
+    }
+    if (env.stage !== undefined && !WORK_STAGES.includes(env.stage)) {
+      throw workError("unsupported", `stage "${env.stage}" is not a valid work stage`);
+    }
+    if (env.waitingReason !== undefined && !WAITING_REASONS.includes(env.waitingReason)) {
+      throw workError("unsupported", `waitingReason "${env.waitingReason}" is not a valid waiting reason`);
+    }
+    if (env.state === "waiting" && !env.waitingReason) {
+      throw workError("unsupported", "state \"waiting\" requires a waitingReason");
+    }
+    if (env.state !== "waiting" && env.waitingReason !== undefined) {
+      throw workError("unsupported", "waitingReason requires state \"waiting\"");
+    }
+    if (!Array.isArray(env.dependencies) || env.dependencies.some((d) => typeof d !== "string" || d.length === 0)) {
+      throw workError("unsupported", "dependencies must be an array of non-empty strings");
+    }
+    for (const field of ["attempts", "decisions", "resources", "evidence"]) {
+      if (!Array.isArray(env[field])) {
+        throw workError("unsupported", `${field} must be an array`);
+      }
+      for (const entry of env[field]) assertPlainObject(entry, `${field}[]`);
+    }
+    if (!Array.isArray(env.operations)) {
+      throw workError("unsupported", "operations must be an array");
+    }
+    for (const receipt of env.operations) assertValidReceipt(receipt, id);
+  } catch (error) {
+    throw fail(error.message);
+  }
+}
+
 // ---------------------------------------------------------------------------
-// Store plumbing — strict envelope load (missing → null, corrupt → visible
-// throw, never the store's default-payload fall-through) + per-envelope
-// mutation under the shared per-path lock map from ctoStores.
+// Store plumbing — strict envelope load (missing → null, unavailable → visible
+// throw, corrupt → visible throw, never the store's default-payload
+// fall-through) + per-envelope mutation under the shared per-path lock map
+// from ctoStores.
 // ---------------------------------------------------------------------------
 
 async function loadEnvelopeStrict(store, id) {
@@ -208,7 +339,10 @@ async function loadEnvelopeStrict(store, id) {
     raw = await readFile(store.pathFor(id), "utf-8");
   } catch (error) {
     if (error.code === "ENOENT") return null;
-    throw error;
+    throw workError(
+      "store_unavailable",
+      `work envelope "${id}" could not be read (${error.code ?? error.message}) — store unavailable`,
+    );
   }
   let parsed;
   try {
@@ -217,9 +351,7 @@ async function loadEnvelopeStrict(store, id) {
     throw workError("store_corrupt", `work envelope "${id}" is corrupt (invalid JSON) — refusing to load`);
   }
   const migrated = migrateStore(store.name, parsed);
-  if (!migrated || typeof migrated !== "object" || migrated.id !== id) {
-    throw workError("store_corrupt", `work envelope "${id}" is corrupt (missing or mismatched id)`);
-  }
+  assertValidEnvelope(migrated, id);
   return migrated;
 }
 
@@ -246,44 +378,98 @@ async function mutateEnvelope(store, id, mutator) {
   });
 }
 
+// Create's absence-check + first write run under the SAME per-file lock, so
+// two concurrent creates with one supplied id can never both see "missing"
+// and have the second overwrite (and erase) the first.
+async function commitNewWork(store, id, envelope) {
+  const adapter = envelopeAdapter(store, id);
+  return lockForStore(adapter).runExclusive(async () => {
+    const existing = await adapter.load();
+    if (existing) throw workError("target_exists", `work "${id}" already exists`);
+    await adapter.save(envelope);
+    return envelope;
+  });
+}
+
 async function loadAllEnvelopes(store) {
   let entries;
   try {
     entries = await readdir(store.dir, { withFileTypes: true });
-  } catch {
-    return [];
+  } catch (error) {
+    if (error.code === "ENOENT") return []; // no store yet — a legitimately empty portfolio
+    throw workError(
+      "store_unavailable",
+      `work store directory "${store.dir}" is unavailable (${error.code ?? error.message})`,
+    );
   }
   const ids = entries
     .filter((e) => e.isFile() && e.name.endsWith(".json"))
     .map((e) => e.name.slice(0, -".json".length));
   const envs = [];
   for (const id of ids) {
-    const env = await loadEnvelopeStrict(store, id); // corrupt → visible failure, never skipped
+    const env = await loadEnvelopeStrict(store, id); // corrupt/unavailable → visible failure, never skipped
     if (env) envs.push(env);
   }
   return envs;
 }
 
 // ---------------------------------------------------------------------------
-// Retention + dependency-graph helpers (pure except the store reads they need)
+// Retention + dependency-graph helpers
 // ---------------------------------------------------------------------------
 
-// Pure: trim TERMINAL receipts beyond `keep`, oldest first (by resultAt, then
-// updatedAt, then original order for stability). pending/in_flight/unknown
-// receipts are never dropped, whatever their age — dropping an unresolved
-// receipt would erase the only record of a possibly-executed external effect.
-export function pruneOperationHistory(operations, { keep = OPERATIONS_KEEP } = {}) {
+// Pure: bound the operation history WITHOUT losing the dedupe function.
+//   - pending/in_flight/unknown receipts (and anything not classifiable as
+//     terminal) are always kept verbatim;
+//   - full terminal receipts beyond `keep` (oldest first) are compacted into
+//     tombstones preserving key + argsHash + op + original outcome;
+//   - tombstones beyond `tombstoneKeep` (oldest first) are dropped.
+export function pruneOperationHistory(
+  operations,
+  { keep = OPERATIONS_KEEP, tombstoneKeep = TOMBSTONE_KEEP, nowMs = Date.now() } = {},
+) {
   const list = Array.isArray(operations) ? operations : [];
-  const terminal = list.filter((r) => !UNRESOLVED_OPERATION_STATUSES.includes(r?.status));
-  if (terminal.length <= keep) return list;
-  const ranked = terminal
-    .map((r, i) => ({ r, i }))
-    .sort(
-      (a, b) =>
-        (a.r.resultAt ?? a.r.updatedAt ?? 0) - (b.r.resultAt ?? b.r.updatedAt ?? 0) || a.i - b.i,
-    );
-  const droppedIds = new Set(ranked.slice(0, terminal.length - keep).map((x) => x.r.id));
-  return list.filter((r) => !droppedIds.has(r?.id));
+  const kept = [];
+  const fullTerminals = [];
+  const tombstones = [];
+  for (const r of list) {
+    if (!r || typeof r !== "object") continue;
+    if (r.tombstone === true) tombstones.push(r);
+    else if (TERMINAL_OPERATION_STATUSES.includes(r.status)) fullTerminals.push(r);
+    else kept.push(r); // unresolved — never evicted, whatever the caps
+  }
+  const byResult = (a, b) =>
+    (a.resultAt ?? a.updatedAt ?? 0) - (b.resultAt ?? b.updatedAt ?? 0);
+  fullTerminals.sort(byResult);
+  const toTombstone = [];
+  if (fullTerminals.length > keep) {
+    toTombstone.push(...fullTerminals.slice(0, fullTerminals.length - keep));
+  }
+  const keptTerminals = fullTerminals.slice(Math.max(0, fullTerminals.length - keep));
+  const allTombstones = [
+    ...toTombstone.map((r) => ({
+      id: r.id,
+      key: r.key,
+      op: r.op,
+      argsHash: r.argsHash,
+      status: r.status,
+      resultCode: r.resultCode ?? null,
+      externalRef: r.externalRef ?? null,
+      resultAt: r.resultAt ?? r.updatedAt ?? null,
+      tombstone: true,
+      prunedAt: nowMs,
+    })),
+    ...tombstones,
+  ];
+  allTombstones.sort(byResult);
+  const droppedTombstones = allTombstones.length > tombstoneKeep
+    ? allTombstones.slice(0, allTombstones.length - tombstoneKeep)
+    : [];
+  const droppedIds = new Set(droppedTombstones.map((t) => t.id));
+  return [
+    ...kept,
+    ...keptTerminals,
+    ...allTombstones.filter((t) => !droppedIds.has(t.id)),
+  ];
 }
 
 // Pure: true when the dependency edges (workId → dependencies) contain a cycle.
@@ -306,6 +492,9 @@ function dependencyGraphHasCycle(edges) {
   return false;
 }
 
+// Reads every envelope and checks the POST-patch graph. Callers that mutate
+// the graph hold `workGraphLock` around validate + commit (see below), so the
+// snapshot here can never interleave with another graph mutation.
 async function assertDependenciesValid(store, deps, { selfId } = {}) {
   if (!Array.isArray(deps) || deps.some((d) => typeof d !== "string" || d.trim().length === 0)) {
     throw workError("unsupported", "dependencies must be an array of non-empty work IDs");
@@ -359,6 +548,12 @@ function validateWorkInput(input) {
   }
 }
 
+// ONE module-level mutex for dependency-graph mutations (validate + commit as
+// a single section). Local-storage-only work happens under it — no external
+// call, so holding it is cheap and there is no whole-system mutex for slow
+// external services.
+const workGraphLock = createMutex();
+
 // ---------------------------------------------------------------------------
 // Service factory — stateless over the injected store (default: the real,
 // sandboxed workStore). A fresh instance over the same store replays receipts.
@@ -392,12 +587,14 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
       updatedAt: ts,
     };
     if (envelope.dependencies.length > 0) {
-      await assertDependenciesValid(store, envelope.dependencies, { selfId: id });
+      // Graph mutation: validate + commit under the shared graph lock, then
+      // the per-file lock inside commitNewWork (lock order: graph → file).
+      return workGraphLock.runExclusive(async () => {
+        await assertDependenciesValid(store, envelope.dependencies, { selfId: id });
+        return commitNewWork(store, id, envelope);
+      });
     }
-    const existing = await loadEnvelopeStrict(store, id);
-    if (existing) throw workError("target_exists", `work "${id}" already exists`);
-    await store.save(id, envelope);
-    return envelope;
+    return commitNewWork(store, id, envelope);
   }
 
   async function getWork(id) {
@@ -426,7 +623,7 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
       if (!current) throw workError("target_not_found", `work "${id}" does not exist`);
       return current; // pure no-op: no write, no revision bump
     }
-    return mutateEnvelope(store, id, async (env) => {
+    const mutator = async (env) => {
       if (!env) throw workError("target_not_found", `work "${id}" does not exist`);
       if (expectedRevision !== undefined && expectedRevision !== env.revision) {
         throw workError(
@@ -481,22 +678,41 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
         }
       }
       next.revision = env.revision + 1;
+      // §5.2 "spec revisions invalidate incompatible results": a spec hash
+      // change durably marks every receipt reserved under the old spec, so a
+      // later redelivery of its result can never report superseded:false.
+      if (patch.spec !== undefined && next.spec.hash !== env.spec.hash) {
+        for (const receipt of next.operations) {
+          if (receipt && receipt.tombstone !== true && receipt.specHash != null && receipt.specHash !== next.spec.hash) {
+            receipt.superseded = true;
+          }
+        }
+      }
       if (patch.dependencies !== undefined) {
         // Dependency existence + acyclicity are checked against the POST-patch
         // graph. Nothing has been written yet, so a rejection leaves the
-        // envelope untouched (invalid updates never write).
+        // envelope untouched (invalid updates never write). Runs under the
+        // shared graph lock (the caller wraps this mutator), so concurrent
+        // graph mutations cannot interleave with this snapshot.
         await assertDependenciesValid(store, next.dependencies, { selfId: id });
       }
       return { save: next, value: next };
-    });
+    };
+    if (patch.dependencies !== undefined) {
+      // Graph mutation: the whole validate+commit section is serialized by
+      // the shared graph lock (lock order: graph → file inside mutateEnvelope).
+      return workGraphLock.runExclusive(() => mutateEnvelope(store, id, mutator));
+    }
+    return mutateEnvelope(store, id, mutator);
   }
 
   // §8.1 step 2: reserve the operation under the store lock — same key + same
-  // canonical args replays the prior receipt; same key + different args is an
-  // error; a second concurrent reserve observes the first (the lock
-  // serializes) and replays instead of double-reserving. No external effect
-  // happens inside this function: the lock is held only across the file
-  // read-modify-write and released before return.
+  // operation+args replays the prior receipt; same key with a different
+  // operation name or different args is an error; a second concurrent reserve
+  // observes the first (the lock serializes) and replays instead of
+  // double-reserving. No external effect happens inside this function: the
+  // lock is held only across the local file read-modify-write and released
+  // before return.
   async function reserveOperation(
     workId,
     { key, op, args, expectedRevision, leaseOwner, leaseTtlMs } = {},
@@ -509,12 +725,12 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
         `expectedRevision must be a positive integer (got ${JSON.stringify(expectedRevision)})`,
       );
     }
-    const argsHash = canonicalArgsHash(args);
+    const argsHash = canonicalArgsHash(op, args);
     const ts = now();
     const ttl = leaseTtlMs ?? LEASE_DEFAULT_TTL_MS;
     const owner = leaseOwner ?? DEFAULT_LEASE_OWNER;
 
-    return mutateEnvelope(store, workId, (env) => {
+    const result = await mutateEnvelope(store, workId, (env) => {
       if (!env) throw workError("target_not_found", `work "${workId}" does not exist`);
       if (expectedRevision !== undefined && expectedRevision !== env.revision) {
         throw workError(
@@ -527,8 +743,15 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
         if (existing.argsHash !== argsHash) {
           throw workError(
             "idempotency_key_args_mismatch",
-            `idempotency key "${key}" was already used with different arguments on work "${workId}"`,
+            `idempotency key "${key}" was already used on work "${workId}" with operation ` +
+              `${JSON.stringify(existing.op ?? "unknown")} and different arguments`,
           );
+        }
+        if (existing.tombstone === true) {
+          // Retention compacted the full receipt; the dedupe identity and the
+          // original outcome survive, so this retry REPLAYS — it must never
+          // re-execute the action as a new reservation.
+          return { save: null, value: { receipt: existing, replay: true } };
         }
         if (existing.status === "unknown") {
           // §8.2: unknown is not safe to retry without reconciliation — forbid
@@ -540,6 +763,11 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
             { receipt: existing },
           );
         }
+        if (TERMINAL_OPERATION_STATUSES.includes(existing.status)) {
+          // Terminal ALWAYS replays, lease expired or not — a succeeded/failed
+          // operation is never reset to pending and never re-executed.
+          return { save: null, value: { receipt: existing, replay: true } };
+        }
         const leaseLive = existing.lease != null && existing.lease.expiresAt > ts;
         if (leaseLive) {
           // A live reservation — pending or in_flight — is OWNED: a second
@@ -547,14 +775,25 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
           // keeps concurrent same-key requests to ONE reservation).
           return { save: null, value: { receipt: existing, replay: true } };
         }
-        // Unresolved with an expired/absent lease → crash recovery: the
-        // reservation is resumable; hand it back re-armed.
-        existing.status = "pending";
-        existing.lease = { owner, expiresAt: ts + ttl };
-        existing.takeoverCount = (existing.takeoverCount ?? 0) + 1;
+        if (existing.status === "pending") {
+          // Expired lease on a never-dispatched reservation (the P4 protocol
+          // records in_flight BEFORE the first external effect) → safe resume:
+          // re-arm the same receipt, never create a second one.
+          existing.lease = { owner, expiresAt: ts + ttl };
+          existing.takeoverCount = (existing.takeoverCount ?? 0) + 1;
+          existing.updatedAt = ts;
+          env.updatedAt = ts;
+          return { save: env, value: { receipt: existing, replay: false, recovered: true } };
+        }
+        // in_flight + expired lease → the external effect MAY have run and its
+        // outcome was never observed. Never re-execute: durably mark the
+        // receipt unknown and demand reconciliation.
+        existing.status = "unknown";
+        existing.reconcileReason = "lease_expired";
+        existing.resultAt = existing.resultAt ?? ts;
         existing.updatedAt = ts;
         env.updatedAt = ts;
-        return { save: env, value: { receipt: existing, replay: false, recovered: true } };
+        return { save: env, value: { receipt: existing, replay: false, uncertain: true } };
       }
       const receipt = {
         id: `op_${newId()}`,
@@ -574,21 +813,32 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
         updatedAt: ts,
         resultAt: null,
       };
-      env.operations = pruneOperationHistory([...env.operations, receipt]);
+      env.operations = pruneOperationHistory([...env.operations, receipt], { nowMs: ts });
       // Receipt bookkeeping does NOT bump the work-state revision: a same-key
-      // retry (or a concurrent reserve) carries expectedRevision and must
-      // replay, not conflict. `revision` moves only when the work's semantic
-      // state changes (create/revise) — which is exactly what
-      // `receipt.workRevision` snapshots for later staleness checks.
+      // retry (or a concurrent reserve) carrying expectedRevision must replay,
+      // not conflict. `revision` moves only when the work's semantic state
+      // changes (create/revise) — which is exactly what `receipt.workRevision`
+      // snapshots for later staleness checks.
       env.updatedAt = ts;
       return { save: env, value: { receipt, replay: false } };
     });
+    if (result.uncertain) {
+      throw workError(
+        "external_outcome_unknown",
+        `operation "${result.receipt.id}" on work "${workId}" was in_flight when its lease expired — the external ` +
+          `outcome is unknown; reconcile it (recordOperationOutcome) before re-reserving key "${key}"`,
+        { receipt: result.receipt },
+      );
+    }
+    return result;
   }
 
   // §8.1 step 5: persist the OBSERVED result on the receipt. Records only —
   // stage advancement/orchestration is the later coordinator's job. A result
   // whose spec hash no longer matches the envelope's current spec is recorded
-  // but marked superseded and never treated as current-work progress (U13).
+  // but marked superseded and never treated as current-work progress (U13) —
+  // including on REPLAY: a redelivered outcome for a receipt that succeeded
+  // under an older spec reports superseded:true, never false.
   async function recordOperationOutcome(
     workId,
     { receiptId, key, status, resultCode, externalRef } = {},
@@ -608,10 +858,14 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
           `operation ${receiptId ?? `key "${key}"`} not found on work "${workId}"`,
         );
       }
+      const staleSpec = receipt.specHash != null && receipt.specHash !== env.spec.hash;
       if (receipt.status === status) {
-        return { save: null, value: { receipt, replay: true, superseded: receipt.superseded === true } };
+        // Idempotent replay of a known outcome — staleness is evaluated HERE
+        // too, before returning, so a redelivery after a spec change can
+        // never report superseded:false.
+        return { save: null, value: { receipt, replay: true, superseded: receipt.superseded === true || staleSpec } };
       }
-      if (!UNRESOLVED_OPERATION_STATUSES.includes(receipt.status)) {
+      if (TERMINAL_OPERATION_STATUSES.includes(receipt.status)) {
         throw workError(
           "receipt_state_conflict",
           `operation "${receipt.id}" is already terminal (${receipt.status}); refusing to record ${status}`,
@@ -628,9 +882,9 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
       receipt.externalRef = externalRef ?? receipt.externalRef ?? null;
       receipt.resultAt = ts;
       receipt.updatedAt = ts;
-      const superseded = receipt.specHash !== env.spec.hash;
+      const superseded = staleSpec;
       if (superseded) receipt.superseded = true;
-      env.operations = pruneOperationHistory([...env.operations]);
+      env.operations = pruneOperationHistory([...env.operations], { nowMs: ts });
       env.updatedAt = ts;
       return { save: env, value: { receipt, replay: false, superseded } };
     });
