@@ -14,29 +14,35 @@
 //     `project_id` / `workspace_id` verbatim as observed values, each marked
 //     `projectMapping:"unmapped"` — the Manta-workspace mapping is explicitly
 //     unresolved and id semantics are UNVERIFIED
-//     (docs/cto-implementation-map.md §4, retracted-draft note); a DB
-//     projectID is NEVER surfaced under a name like `workspaceId`, and no
-//     checkout/repo/worktree semantics are inferred from it.
+//     (docs/cto-implementation-map.md §4); a DB projectID is NEVER surfaced
+//     under a name like `workspaceId`, and no checkout/repo/worktree
+//     semantics are inferred from it.
 //   • NO SIDE EFFECTS. No prompt sends, no tmux/window/job creation, no
 //     fetches — a passive read must never wake an agent (spec U04).
 //   • HONEST DEGRADATION. `unsupported` (no node:sqlite on this runtime),
 //     `source_unavailable` (no DB path / unreadable source — distinct from
 //     unsupported, cause preserved through the accessor),
-//     `reference_expired` (a stale/unknown session/message reference) and
-//     `invalid_input` (bad caller arguments, including the forbidden
+//     `reference_expired` (a stale/unknown session/message/part reference)
+//     and `invalid_input` (bad caller arguments, including the forbidden
 //     workspace-key filter) are distinct statuses. An empty result over a
 //     healthy source is `status:"ok"` WITH coverage/observedAt — never a
 //     fabricated "nothing happened" (spec U27).
+//   • ONE AUTHORITATIVE BUDGET. The completed response's SERIALIZED size is
+//     the only measure — no per-field parallel accounting, no slack guesses.
+//     After each item is added, if the whole response exceeds 24 KiB the
+//     item's designated text fields are bounded (serialized-aware, measured
+//     on the completed response) and only if that cannot suffice is the item
+//     omitted and counted — the walk then CONTINUES and the cursor rules
+//     keep every older source row reachable. Stable IDs are never cut.
+//   • SERIALIZER-INDEPENDENT MATCHING. Search candidates are selected on the
+//     DECODED JSON fields (SQLite json_extract), never on raw stored JSON —
+//     the stored form is serializer-dependent (`café` vs `caf\u00e9`, `\/`,
+//     surrogate escapes); JS matching stays authoritative.
 //   • BOUNDED. Server-side limits are enforced independently of caller
-//     arguments: hit/message limits, keyset cursors that cannot repeat rows
-//     and never end the walk while the scan window was full, and a hard
-//     24 KiB budget measured on the ACTUAL serialized response (every
-//     returned text field — snippets, titles, directories, tool names —
-//     counts; cuts set aggregate truncation/omitted metadata; stable IDs are
-//     never cut — an item that cannot fit is omitted and counted instead).
+//     arguments: hit/message/part limits, keyset cursors that cannot repeat
+//     rows and never end the walk while the scan window was full.
 
 import { getDb, getDbOpenFailure } from "./opencodeDb.mjs";
-import { likePattern } from "./messageSearch.mjs";
 
 export const CTO_CONTEXT_LIMITS = Object.freeze({
   searchHitsDefault: 20,
@@ -48,27 +54,29 @@ export const CTO_CONTEXT_LIMITS = Object.freeze({
   // The 40-message cap INCLUDES the anchor (spec §4.2: "40 messages per
   // request"), so at most 39 neighbors.
   aroundMessagesMax: 40,
-  // Spec §4.2: 24 KiB returned text per call, measured on the serialized
+  // Spec §4.2: 24 KiB returned text per call, measured on the SERIALIZED
   // response, enforced server-side.
   textBudgetBytes: 24 * 1024,
   // Per-part evidence cap inside an `around` window, so one huge tool dump
   // cannot blind the rest of the neighborhood (each cut is reported).
   partEvidenceMaxBytes: 6 * 1024,
   // Per-message bound on how many parts one `around` evidence read may fetch
-  // (read-bound; anything beyond is reported via `partsOmitted`).
+  // (read-bound; anything beyond is reported via `partsOmitted`). When the
+  // read is anchored at a partId, the window is centered on that part.
   partsPerMessageMax: 50,
-  // LIKE scan window before the JS-side filter/budget pass (mirrors
-  // messageSearch.mjs). When a page fills this window, the cursor advances
-  // past the last CONSUMED candidate so older matches stay reachable.
+  // Scan window before the JS-side filter pass (mirrors messageSearch.mjs).
+  // When a page fills this window, the cursor advances past the last
+  // CONSUMED candidate so older matches stay reachable.
   scanLimit: 800,
 });
 
 const ENC = new TextEncoder();
 const DEC = new TextDecoder();
 const byteLen = (s) => ENC.encode(s).length;
+const serializedBytes = (o) => byteLen(JSON.stringify(o));
 
 // ---------------------------------------------------------------------------
-// Shared envelope + budget helpers
+// Shared envelope + the ONE authoritative budget helper
 // ---------------------------------------------------------------------------
 
 function envelope(status, extra = {}) {
@@ -125,81 +133,106 @@ function fitText(text, maxBytes) {
   return { text: cut, truncated: true, returnedBytes: byteLen(cut), sourceBytes: source };
 }
 
-// A per-call budget measured on ACTUAL SERIALIZED bytes: the envelope
-// (including the session reference and empty item array) is measured first,
-// each item is charged at its own full JSON size, and a fixed slack covers
-// the fields filled in after charging (nextCursor). The caller can then
-// assert the whole serialized response stays within 24 KiB.
-// Truncation markers (`<field>Truncated` + two byte counts) are stamped on an
-// item AFTER the shrink is computed — reserve room for them so a cut item
-// still fits the remaining budget.
-const MARKER_SLACK_BYTES = 96;
+// The ONE authoritative budget mechanism — there is no parallel per-field
+// accounting and no slack guesses. Items are constructed FULLY first
+// (including pre-caps and markers); then `compactToBudget` enforces the only
+// invariant that matters: the COMPLETED response's serialized size.
+// Phase 1 bounds the largest field with an exact minimal cut (content-
+// maximal); phase 2 fair-shares the remaining overflow across all boundable
+// fields; phase 3 drops units tail-first only when bounding is exhausted.
+// Every step is measured on the completed response, so JSON escape expansion
+// (newlines, quotes, \uXXXX) cannot defeat a cut. Stable IDs are never cut —
+// only the named text fields shrink; every cut is stamped with omitted-size
+// metadata.
+function stampBound(obj, field, text, markerObj, prefix, sourceBytes) {
+  obj[field] = text;
+  if (!markerObj || typeof markerObj !== "object") return;
+  markerObj[`${prefix}Truncated`] = true;
+  markerObj[`${prefix}SourceBytes`] = sourceBytes;
+  markerObj[`${prefix}ReturnedBytes`] = byteLen(text);
+}
 
-function createResponseBudget(sampleEnvelope) {
-  const CURSOR_SLACK_BYTES = 128;
-  let remaining = CTO_CONTEXT_LIMITS.textBudgetBytes - byteLen(JSON.stringify(sampleEnvelope)) - CURSOR_SLACK_BYTES;
-  return {
-    get remaining() {
-      return remaining;
-    },
-    set remaining(v) {
-      remaining = v;
-    },
-    // Charge one item's full serialized size against the budget. If it does
-    // not fit, shrink the named text fields IN ORDER (never IDs or markers)
-    // to what remains — each field may carry its own pre-cap (e.g. the
-    // per-part evidence cap) — stamping `<field>Truncated` + source/returned
-    // byte markers on the item. Returns {ok:false} when the item still
-    // cannot fit — the caller omits it entirely and counts it (stable IDs
-    // are never emitted in a uselessly cut form).
-    charge(item, textFields, caps = {}) {
-      let bytes = byteLen(JSON.stringify(item));
-      const cuts = [];
-      // Track the ORIGINAL field size per field — a budget re-shrink after a
-      // pre-cap must still report the full source, not the pre-capped text.
-      const original = {};
-      for (const field of textFields) {
-        const val = item[field];
-        if (typeof val === "string") original[field] = byteLen(val);
-      }
-      // 1. Per-field pre-caps apply ALWAYS (they bound the item shape — e.g.
-      // one huge tool dump cannot eat the whole around window), not just on
-      // budget pressure.
-      for (const field of textFields) {
-        const cap = caps[field];
-        const val = item[field];
-        if (cap == null || typeof val !== "string" || val === "") continue;
-        if (byteLen(val) <= cap) continue;
-        const fit = fitText(val, cap);
-        item[field] = fit.text;
-        item[`${field}Truncated`] = true;
-        item[`${field}SourceBytes`] = original[field];
-        item[`${field}ReturnedBytes`] = fit.returnedBytes;
-        cuts.push(field);
-      }
-      bytes = byteLen(JSON.stringify(item));
-      // 2. Budget shrink: only when the item still does not fit the remaining
-      // budget (IDs and markers are never cut).
-      for (const field of textFields) {
-        if (bytes <= remaining) break;
-        const val = item[field];
-        if (typeof val !== "string" || val === "") break;
-        const otherBytes = bytes - byteLen(val);
-        const avail = remaining - otherBytes - MARKER_SLACK_BYTES;
-        if (avail <= 0) break;
-        const fit = fitText(val, Math.min(avail, caps[field] ?? Infinity));
-        item[field] = fit.text;
-        item[`${field}Truncated`] = true;
-        item[`${field}SourceBytes`] = original[field] ?? fit.sourceBytes;
-        item[`${field}ReturnedBytes`] = fit.returnedBytes;
-        if (!cuts.includes(field)) cuts.push(field);
-        bytes = byteLen(JSON.stringify(item));
-      }
-      if (bytes > remaining) return { ok: false, cuts };
-      remaining -= bytes;
-      return { ok: true, cuts };
-    },
+function clearBound(markerObj, prefix) {
+  if (!markerObj || typeof markerObj !== "object") return;
+  delete markerObj[`${prefix}Truncated`];
+  delete markerObj[`${prefix}SourceBytes`];
+  delete markerObj[`${prefix}ReturnedBytes`];
+}
+
+function compactToBudget(result, units) {
+  // `units`: drop-order list (tail first) of { fields: [{obj, field,
+  // sourceBytes?, markerObj?, prefix?}], pop: () => void }.
+  if (serializedBytes(result) <= CTO_CONTEXT_LIMITS.textBudgetBytes) return;
+  result.truncated = true; // any compaction is an honest cut — reported
+  const allFields = units
+    .flatMap((u) => u.fields)
+    .filter((f) => typeof f.obj?.[f.field] === "string" && f.obj[f.field] !== "");
+  const markerOf = (f) => ({ markerObj: f.markerObj ?? f.obj, prefix: f.prefix ?? f.field });
+  const originalOf = (f) => {
+    const { markerObj, prefix } = markerOf(f);
+    return f.sourceBytes ?? markerObj[`${prefix}SourceBytes`] ?? byteLen(f.obj[f.field]);
   };
+  // Snapshot the TRUE original sizes ONCE — phase 1's restores clear markers,
+  // and later phases must still report the full source size, not a shrunk
+  // intermediate.
+  const trueOriginal = new Map(allFields.map((f) => [f, originalOf(f)]));
+  const srcOf = (f) => trueOriginal.get(f);
+
+  // Phase 1 — exact minimal cut, largest field first: one field that can
+  // cover the whole overflow is cut once, content-maximally. A field that
+  // cannot cover it is restored (markers cleaned — later phases decide).
+  const bySize = [...allFields].sort((a, b) => byteLen(b.obj[b.field]) - byteLen(a.obj[a.field]));
+  for (const f of bySize) {
+    if (serializedBytes(result) <= CTO_CONTEXT_LIMITS.textBudgetBytes) return;
+    const val = f.obj[f.field];
+    const { markerObj, prefix } = markerOf(f);
+    let lo = 0;
+    let hi = byteLen(val);
+    let best = null;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      stampBound(f.obj, f.field, fitText(val, mid).text, markerObj, prefix, srcOf(f));
+      const m = serializedBytes(result);
+      if (m <= CTO_CONTEXT_LIMITS.textBudgetBytes) {
+        best = f.obj[f.field];
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    if (best != null) {
+      stampBound(f.obj, f.field, best, markerObj, prefix, srcOf(f));
+      return;
+    }
+    f.obj[f.field] = val;
+    clearBound(markerObj, prefix);
+  }
+
+  // Phase 2 — proportional fair share: no single field covers the overflow,
+  // so every field gives up an amount PROPORTIONAL to its size (small
+  // evidence survives; big dumps give the most). Rounds re-measure the
+  // completed response until it fits or nothing is left to give.
+  let guard = 64;
+  while (serializedBytes(result) > CTO_CONTEXT_LIMITS.textBudgetBytes && guard-- > 0) {
+    const live = allFields.filter((f) => f.obj[f.field] !== "");
+    if (live.length === 0) break;
+    const over = serializedBytes(result) - CTO_CONTEXT_LIMITS.textBudgetBytes;
+    const total = live.reduce((n, f) => n + byteLen(f.obj[f.field]), 0);
+    for (const f of live) {
+      const val = f.obj[f.field];
+      const share = Math.min(byteLen(val), Math.ceil((over * byteLen(val)) / total) + 1);
+      const { markerObj, prefix } = markerOf(f);
+      stampBound(f.obj, f.field, fitText(val, byteLen(val) - share).text, markerObj, prefix, srcOf(f));
+    }
+  }
+
+  // Phase 3 — drop units tail-first until the response fits.
+  for (const unit of units) {
+    if (serializedBytes(result) <= CTO_CONTEXT_LIMITS.textBudgetBytes) return;
+    if (unit.canDrop === false) return;
+    unit.pop();
+    result.truncated = true;
+  }
 }
 
 // Opaque keyset cursor: {v, t, i} (t = numeric time, i = id tiebreak),
@@ -257,6 +290,34 @@ function queryFailed(e) {
   return envelope("source_unavailable", { detail: `source read failed: ${e?.message ?? e}`, hits: [], sessions: [], messages: [], nextCursor: null, truncated: false, omittedCount: 0 });
 }
 
+// Cursor rules shared by the two paginated ops: an output-cap early break
+// leaves unconsumed candidates — the cursor stays at the last EMITTED item so
+// they remain reachable. Items omitted by the budget compaction must stay
+// reachable too: the cursor then also points at the last EMITTED item, so the
+// next page retries them with a fresh budget (or, with nothing emitted,
+// advances past the last consumed row — never a false end). A FULL scan
+// window with nothing omitted advances the cursor past the last CONSUMED row
+// — even a fully-discarded page continues the walk. A smaller window with
+// nothing omitted means the source is exhausted — the walk ends here.
+function finishPage(result, { earlyBreak, rows, emitted, timeKey, idKey, emittedTimeKey, emittedIdKey }) {
+  const windowFull = rows.length === CTO_CONTEXT_LIMITS.scanLimit;
+  const anyOmitted = emitted.length < rows.length;
+  const lastEmitted = emitted[emitted.length - 1];
+  const lastConsumed = rows[rows.length - 1];
+  result.truncated = result.truncated || earlyBreak || windowFull || anyOmitted;
+  result.omittedCount = Math.max(0, rows.length - emitted.length);
+  const lastEmittedCursor = lastEmitted ? encodeCursor(lastEmitted[emittedTimeKey] ?? 0, lastEmitted[emittedIdKey]) : null;
+  const lastConsumedCursor = lastConsumed ? encodeCursor(lastConsumed[timeKey] ?? 0, lastConsumed[idKey]) : null;
+  result.nextCursor = earlyBreak
+    ? lastEmittedCursor
+    : anyOmitted
+      ? (lastEmittedCursor ?? lastConsumedCursor)
+      : windowFull
+        ? lastConsumedCursor
+        : null;
+  return result;
+}
+
 // ---------------------------------------------------------------------------
 // 1. listSessions — discover ALL historical sessions (incl. closed/archived
 //    and child sessions; there is no live-window requirement — the source DB
@@ -305,48 +366,35 @@ export async function ctoListSessions({
     const rows = db.prepare(sql).all(...params, CTO_CONTEXT_LIMITS.scanLimit);
 
     const result = { ...envelope("ok"), sessions: [], truncated: false, omittedCount: 0, nextCursor: null };
-    const budget = createResponseBudget(result);
     let earlyBreak = false;
-    let anyCut = false;
     for (const row of rows) {
       if (result.sessions.length >= cap) {
         earlyBreak = true;
         break;
       }
-      const rec = sessionRecord(row);
-      const charged = budget.charge(rec, ["title", "directory"]);
-      if (!charged.ok) {
-        // Cannot fit even shrunk — stop here so unconsumed candidates stay
-        // reachable on the next page (fresh budget) instead of being consumed
-        // and lost; this page counts them as omitted.
-        earlyBreak = true;
-        break;
-      }
-      if (charged.cuts.length > 0) {
-        anyCut = true;
-        result.truncated = true;
-      }
-      result.sessions.push(rec);
+      result.sessions.push(sessionRecord(row));
     }
-    // Cursor rule: an early break (output cap / budget) leaves unconsumed
-    // candidate rows — the cursor must stay at the last EMITTED session so
-    // they remain reachable. When the loop consumed a FULL scan window, the
-    // cursor advances past the last CONSUMED row — even a page with zero
-    // emitted sessions then advances, so a discarded/omitted full window can
-    // never masquerade as the end of history. A window smaller than the scan
-    // cap means the source is exhausted — the walk ends here.
-    const windowFull = rows.length === CTO_CONTEXT_LIMITS.scanLimit;
-    const lastEmitted = result.sessions[result.sessions.length - 1];
-    const lastConsumed = rows[rows.length - 1];
-    result.truncated = result.truncated || earlyBreak || windowFull;
-    result.omittedCount = Math.max(0, rows.length - result.sessions.length);
-    result.nextCursor = earlyBreak
-      ? lastEmitted
-        ? encodeCursor(lastEmitted.timeUpdated ?? 0, lastEmitted.id)
-        : null
-      : windowFull && lastConsumed
-        ? encodeCursor(lastConsumed.time_updated ?? 0, lastConsumed.id)
-        : null;
+    // ONE authoritative compaction, iterated until the WHOLE completed
+    // response — cursor included — fits: bound escape-heavy titles and
+    // directories first (measured on the completed response); drop tail
+    // sessions only when no bound suffices. Each omission is counted and
+    // stays retry-reachable via the cursor rules.
+    const page = { earlyBreak, rows, emitted: result.sessions, timeKey: "time_updated", idKey: "id", emittedTimeKey: "timeUpdated", emittedIdKey: "id" };
+    let guard = 16;
+    while (guard-- > 0) {
+      compactToBudget(
+        result,
+        result.sessions.slice().reverse().map((rec) => ({
+          fields: [
+            { obj: rec, field: "title" },
+            { obj: rec, field: "directory" },
+          ],
+          pop: () => result.sessions.pop(),
+        })),
+      );
+      finishPage(result, page);
+      if (serializedBytes(result) <= CTO_CONTEXT_LIMITS.textBudgetBytes) break;
+    }
     return result;
   } catch (e) {
     return queryFailed(e);
@@ -360,18 +408,23 @@ export async function ctoListSessions({
 //    matched. One hit per part. Ordering is (time_created DESC, id DESC) with
 //    a strict keyset cursor — pages never repeat a hit.
 //
-//    Candidate selection matches the RAW stored JSON and its JSON-ESCAPED
-//    query form, so decoded evidence containing quotes, backslashes or
-//    newlines (e.g. a Windows path stored as `C:\\Users\\...`) stays
-//    reachable — the raw-only LIKE silently excluded those. Parameterized
-//    only; no FTS, no index changes.
+//    Candidate selection is SERIALIZER-INDEPENDENT: the DECODED JSON fields
+//    are matched in SQL (json_extract + instr, case-folded like LIKE's ASCII
+//    semantics), never the raw stored JSON — whose escape form depends on the
+//    writer (`café` vs `caf\u00e9`, `\/`, surrogate pairs). JS matching stays
+//    authoritative. Parameterized only; no FTS, no index changes.
 // ---------------------------------------------------------------------------
 
-// Pure: the JSON-escaped body of `query` as opencode's JSON writer would have
-// stored it inside `part.data` (quotes, backslashes, control chars).
-function jsonEscapedQuery(query) {
-  return JSON.stringify(query).slice(1, -1);
-}
+// The decoded-field candidate predicate. json_valid guards malformed rows;
+// COALESCE keeps NULL extracts out of the OR chain.
+const DECODED_MATCH_SQL = `(
+  json_valid(p.data) AND (
+    instr(lower(COALESCE(json_extract(p.data, '$.text'), '')), lower(?)) > 0
+    OR instr(lower(COALESCE(json_extract(p.data, '$.tool'), '')), lower(?)) > 0
+    OR instr(lower(COALESCE(json_extract(p.data, '$.state.input'), '')), lower(?)) > 0
+    OR instr(lower(COALESCE(json_extract(p.data, '$.state.output'), '')), lower(?)) > 0
+  )
+)`;
 
 // Pure: the searchable text candidates of one parsed part, most-specific
 // first. Returns [] for parts with no text evidence.
@@ -395,8 +448,9 @@ export function partCandidates(part) {
   return [];
 }
 
-// Pure: build one hit from a source row + its parsed part/message. Returns
-// { hit, fieldBytes } or null.
+// Pure: build one hit from a source row + its parsed part/message. The
+// snippet is assembled unbounded here; the authoritative completed-response
+// budget bounds it after the push.
 function buildHit(row, part, msg, q, query) {
   let role = "assistant";
   if (msg && typeof msg === "object" && msg.role === "user") role = "user";
@@ -419,10 +473,6 @@ function buildHit(row, part, msg, q, query) {
     hit.tool = { name: typeof part.tool === "string" ? part.tool : null, status: part.state?.status ?? null, matchedField: match.field };
   }
 
-  // Snippet: a bounded pre/match/post window from the full matched field.
-  // Budget fitting happens later on the serialized item (chargeHit), which
-  // may collapse this to one truncated string — the match segment is kept
-  // first so a cut never silently drops the match itself.
   const idx = match.idx;
   const start = Math.max(0, idx - 60);
   const clean = (s) => s.replace(/\s+/g, " ");
@@ -432,30 +482,6 @@ function buildHit(row, part, msg, q, query) {
     post: clean(match.text.slice(idx + query.length, idx + query.length + 200)),
   };
   return { hit, fieldBytes: byteLen(match.text) };
-}
-
-// Charge one hit's full serialized size; if it does not fit, collapse the
-// snippet to what remains (IDs and tool evidence are never cut) — an
-// emitted hit always carries usable stable IDs.
-function chargeHit(hit, budget, fieldBytes) {
-  const assembled = hit.snippet.pre + hit.snippet.match + hit.snippet.post;
-  let bytes = byteLen(JSON.stringify(hit));
-  if (bytes <= budget.remaining) {
-    budget.remaining -= bytes;
-    return { ok: true, cut: false };
-  }
-  const otherBytes = bytes - byteLen(assembled);
-  const avail = budget.remaining - otherBytes - MARKER_SLACK_BYTES;
-  if (avail < 0) return { ok: false, cut: false };
-  const fit = fitText(assembled, avail);
-  hit.snippet = { pre: "", match: fit.text, post: "" };
-  hit.snippetTruncated = true;
-  hit.snippetSourceBytes = fieldBytes;
-  hit.snippetReturnedBytes = fit.returnedBytes;
-  bytes = byteLen(JSON.stringify(hit));
-  if (bytes > budget.remaining) return { ok: false, cut: true };
-  budget.remaining -= bytes;
-  return { ok: true, cut: true };
 }
 
 export async function ctoSearch({ query, projectId, directory, sessionId, limit, cursor, ...rest } = {}) {
@@ -476,11 +502,8 @@ export async function ctoSearch({ query, projectId, directory, sessionId, limit,
   if (!db) return sourceUnavailable();
 
   try {
-    // Dual candidate selection: the raw stored JSON, plus the JSON-escaped
-    // form of the query — the raw-only LIKE cannot see decoded quotes,
-    // backslashes or newlines (a Windows path is stored as `C:\\...`).
-    const where = ["(p.data LIKE ? ESCAPE '\\' OR p.data LIKE ? ESCAPE '\\')"];
-    const params = [likePattern(q), likePattern(jsonEscapedQuery(q))];
+    const where = [DECODED_MATCH_SQL];
+    const params = [q, q, q, q];
     if (projectId != null) {
       where.push("s.project_id = ?");
       params.push(projectId);
@@ -509,11 +532,9 @@ export async function ctoSearch({ query, projectId, directory, sessionId, limit,
     const rows = db.prepare(sql).all(...params, CTO_CONTEXT_LIMITS.scanLimit);
 
     const result = { ...envelope("ok"), hits: [], truncated: false, omittedCount: 0, nextCursor: null };
-    const budget = createResponseBudget(result);
     let earlyBreak = false;
-    let anyCut = false;
     for (const row of rows) {
-      if (result.hits.length >= cap || budget.remaining <= 0) {
+      if (result.hits.length >= cap) {
         earlyBreak = true;
         break;
       }
@@ -527,38 +548,29 @@ export async function ctoSearch({ query, projectId, directory, sessionId, limit,
       }
       const built = buildHit(row, part, msg, q.toLowerCase(), q);
       if (!built) continue;
-      const charged = chargeHit(built.hit, budget, built.fieldBytes);
-      if (!charged.ok) {
-        // Cannot fit even shrunk — stop so unconsumed candidates stay
-        // reachable on the next page (fresh budget) instead of being consumed
-        // and lost; this page counts them as omitted.
-        earlyBreak = true;
-        break;
-      }
-      if (charged.cut) {
-        anyCut = true;
-        result.truncated = true;
-      }
       result.hits.push(built.hit);
+      // Non-enumerable: the full matched-field size for the omitted-size
+      // metadata if the budget bounds this hit's snippet.
+      Object.defineProperty(built.hit, "_fieldBytes", { value: built.fieldBytes, enumerable: false });
     }
-    // Cursor rule (see ctoListSessions): early break → cursor at the last
-    // EMITTED hit so unconsumed candidates stay reachable; a FULL scan window
-    // → cursor past the last CONSUMED candidate, so a page whose whole window
-    // was discarded/omitted still advances instead of falsely ending the walk
-    // and hiding older matches; a smaller window means the source is
-    // exhausted and the walk ends.
-    const windowFull = rows.length === CTO_CONTEXT_LIMITS.scanLimit;
-    const lastEmitted = result.hits[result.hits.length - 1];
-    const lastConsumed = rows[rows.length - 1];
-    result.truncated = result.truncated || earlyBreak || windowFull;
-    result.omittedCount = Math.max(0, rows.length - result.hits.length);
-    result.nextCursor = earlyBreak
-      ? lastEmitted
-        ? encodeCursor(lastEmitted.timeCreated ?? 0, lastEmitted.partId)
-        : null
-      : windowFull && lastConsumed
-        ? encodeCursor(lastConsumed.time_created ?? 0, lastConsumed.part_id)
-        : null;
+    // ONE authoritative compaction, iterated until the WHOLE completed
+    // response — cursor included — fits: bound snippet `match` segments first
+    // (metadata names the FULL matched field); drop tail hits only when no
+    // bound suffices. Each omission is counted and stays retry-reachable via
+    // the cursor rules.
+    const page = { earlyBreak, rows, emitted: result.hits, timeKey: "time_created", idKey: "part_id", emittedTimeKey: "timeCreated", emittedIdKey: "partId" };
+    let guard = 16;
+    while (guard-- > 0) {
+      compactToBudget(
+        result,
+        result.hits.slice().reverse().map((hit) => ({
+          fields: [{ obj: hit.snippet, field: "match", sourceBytes: hit._fieldBytes, markerObj: hit, prefix: "match" }],
+          pop: () => result.hits.pop(),
+        })),
+      );
+      finishPage(result, page);
+      if (serializedBytes(result) <= CTO_CONTEXT_LIMITS.textBudgetBytes) break;
+    }
     return result;
   } catch (e) {
     return queryFailed(e);
@@ -570,7 +582,9 @@ export async function ctoSearch({ query, projectId, directory, sessionId, limit,
 //    message, with stable source IDs. before/after are message-granular,
 //    ZERO is a valid explicit ask (anchor only), and the 40-message cap
 //    INCLUDES the anchor (39 neighbors max). Part reads are bounded per
-//    message and stop early once the call budget is exhausted, with metadata.
+//    message; `partId` anchors the anchor message's part window on that exact
+//    part — the contract a search hit uses to fetch its evidence even when
+//    the part lies beyond the first bounded read.
 // ---------------------------------------------------------------------------
 
 // Pure: for an `around` evidence item, the most decisive field of a tool
@@ -585,50 +599,46 @@ function primaryEvidenceField(candidates) {
   return candidates[candidates.length - 1];
 }
 
-// Pure: the evidence entries for one message's parts, under the call budget.
-// Each part yields at most one evidence item, capped per part so one huge
-// tool output cannot consume the whole window. Stops early once the budget
-// is exhausted and reports how many parts were skipped.
-function evidenceForParts(partRows, budget) {
-  const items = [];
-  let skipped = 0;
-  for (const row of partRows) {
-    if (budget.remaining <= 0) {
-      skipped++;
-      continue;
-    }
-    let part;
-    try {
-      part = JSON.parse(row.data);
-    } catch {
-      continue;
-    }
-    const candidates = partCandidates(part);
-    if (candidates.length === 0) continue;
-    const primary = primaryEvidenceField(candidates);
-    const isTool = part.type === "tool";
-    const item = {
-      partId: row.id,
-      kind: isTool ? "tool" : "text",
-      timeCreated: row.time_created ?? null,
-      text: primary.text,
-    };
-    if (isTool) {
-      item.tool = { name: typeof part.tool === "string" ? part.tool : null, status: part.state?.status ?? null };
-    }
-    const charged = budget.charge(item, ["text"], { text: CTO_CONTEXT_LIMITS.partEvidenceMaxBytes });
-    if (!charged.ok) {
-      skipped++;
-      continue;
-    }
-    if (charged.cuts.length > 0) item.textTruncated = true;
-    items.push(item);
+// Pure: one evidence item from a part row. The text is pre-capped to
+// partEvidenceMaxBytes (a shape bound — one huge tool dump cannot eat the
+// whole window); the authoritative completed-response budget bounds it
+// further after the push.
+function buildPartItem(row) {
+  let part;
+  try {
+    part = JSON.parse(row.data);
+  } catch {
+    return null;
   }
-  return { items, skipped };
+  const candidates = partCandidates(part);
+  if (candidates.length === 0) return null;
+  const primary = primaryEvidenceField(candidates);
+  const isTool = part.type === "tool";
+  const item = {
+    partId: row.id,
+    kind: isTool ? "tool" : "text",
+    timeCreated: row.time_created ?? null,
+    text: primary.text,
+  };
+  if (isTool) {
+    item.tool = { name: typeof part.tool === "string" ? part.tool : null, status: part.state?.status ?? null };
+  }
+  if (byteLen(item.text) > CTO_CONTEXT_LIMITS.partEvidenceMaxBytes) {
+    const fit = fitText(item.text, CTO_CONTEXT_LIMITS.partEvidenceMaxBytes);
+    item.text = fit.text;
+    item.textTruncated = true;
+    item.textSourceBytes = fit.sourceBytes;
+    item.textReturnedBytes = fit.returnedBytes;
+  }
+  return item;
 }
 
 const MSG_COLS = "id, time_created, time_updated, data";
 const PART_READ_LIMIT = CTO_CONTEXT_LIMITS.partsPerMessageMax + 1; // +1 detects overflow
+// When anchored at a partId, the part window is centered: this many parts on
+// EACH side of the anchor part (+ the part itself) — all keyset reads, never
+// a full unbounded load.
+const PART_ANCHOR_SIDE = Math.floor((CTO_CONTEXT_LIMITS.partsPerMessageMax - 1) / 2);
 
 function messageRecord(row, { anchor = false } = {}) {
   return {
@@ -643,12 +653,16 @@ function messageRecord(row, { anchor = false } = {}) {
     })(),
     timeCreated: row.time_created ?? null,
     anchor,
+    parts: [],
   };
 }
 
-export async function ctoAround({ sessionId, messageId, before, after } = {}) {
+export async function ctoAround({ sessionId, messageId, partId, before, after } = {}) {
   if (typeof sessionId !== "string" || sessionId === "" || typeof messageId !== "string" || messageId === "") {
     return invalidInput("sessionId and messageId are required source references");
+  }
+  if (partId != null && (typeof partId !== "string" || partId === "")) {
+    return invalidInput("partId must be a source part id when provided");
   }
   // Server-side clamp: before/after default to 5 each, ZERO is a valid
   // explicit ask (anchor only), and the 40-message cap INCLUDES the anchor —
@@ -670,7 +684,17 @@ export async function ctoAround({ sessionId, messageId, before, after } = {}) {
     if (!anchorRow) {
       return envelope("reference_expired", { detail: `message ${messageId} not found in source session ${sessionId}`, messages: [], truncated: false, omittedCount: 0 });
     }
-    const anchorMsg = messageRecord(anchorRow, { anchor: true });
+
+    // Optional partId anchor: the anchor message's evidence window centers on
+    // this exact part (the contract a search hit uses to reach its evidence
+    // even beyond the first bounded part read).
+    let anchorPartRow = null;
+    if (partId != null) {
+      anchorPartRow = db.prepare("SELECT id, time_created, data FROM part WHERE id = ? AND message_id = ? AND session_id = ?").get(partId, messageId, sessionId);
+      if (!anchorPartRow) {
+        return envelope("reference_expired", { detail: `part ${partId} not found in source message ${messageId}`, messages: [], truncated: false, omittedCount: 0 });
+      }
+    }
 
     const beforeRows = useBefore > 0
       ? db
@@ -691,70 +715,93 @@ export async function ctoAround({ sessionId, messageId, before, after } = {}) {
           .all(sessionId, anchorRow.time_created ?? 0, anchorRow.time_created ?? 0, anchorRow.id, useAfter)
       : [];
 
-    const chronological = [...beforeRows.slice().reverse(), anchorRow, ...afterRows];
     const result = {
       ...envelope("ok"),
-      session: { ...sessionRefOf(sess), anchorMessageId: messageId },
+      session: { ...sessionRefOf(sess), anchorMessageId: messageId, anchorPartId: partId ?? null },
       messages: [],
       truncated: false,
       omittedCount: 0,
     };
-    const budget = createResponseBudget(result);
 
-    // Every message RECORD is charged up-front (its id/role/timestamps are
-    // returned text too); a record that cannot fit is omitted and counted —
-    // stable IDs are never emitted in a uselessly cut form.
-    const recs = [];
-    for (const row of chronological) {
-      const rec = row === anchorRow ? anchorMsg : messageRecord(row);
-      if (!budget.charge(rec, []).ok) {
-        result.truncated = true;
-        result.omittedCount++;
-        continue;
+    const chronological = [...beforeRows.slice().reverse(), anchorRow, ...afterRows];
+    const recs = chronological.map((row) => (row === anchorRow ? messageRecord(anchorRow, { anchor: true }) : messageRecord(row)));
+    result.messages = recs;
+
+    // Part reads: the anchor message first (budget priority), centered on the
+    // partId anchor when given; the neighborhood messages read their first
+    // bounded window. Items are constructed fully; the compaction below is
+    // the only budget authority.
+    const fillParts = (rec, anchored) => {
+      let itemsSource;
+      let readCapped = false;
+      if (anchored && anchorPartRow) {
+        const side = PART_ANCHOR_SIDE;
+        const beforeParts = db
+          .prepare(
+            "SELECT id, time_created, data FROM part WHERE message_id = ? AND ((time_created < ?) OR (time_created = ? AND id < ?)) ORDER BY time_created DESC, id DESC LIMIT ?",
+          )
+          .all(rec.id, anchorPartRow.time_created ?? 0, anchorPartRow.time_created ?? 0, anchorPartRow.id, side + 1);
+        const afterParts = db
+          .prepare(
+            "SELECT id, time_created, data FROM part WHERE message_id = ? AND ((time_created > ?) OR (time_created = ? AND id > ?)) ORDER BY time_created ASC, id ASC LIMIT ?",
+          )
+          .all(rec.id, anchorPartRow.time_created ?? 0, anchorPartRow.time_created ?? 0, anchorPartRow.id, side + 1);
+        if (beforeParts.length > side || afterParts.length > side) readCapped = true;
+        itemsSource = [...beforeParts.slice(0, side).reverse(), anchorPartRow, ...afterParts.slice(0, side)];
+      } else {
+        const fetched = db
+          .prepare("SELECT id, time_created, data FROM part WHERE message_id = ? ORDER BY time_created ASC, id ASC LIMIT ?")
+          .all(rec.id, PART_READ_LIMIT);
+        readCapped = fetched.length > CTO_CONTEXT_LIMITS.partsPerMessageMax;
+        itemsSource = readCapped ? fetched.slice(0, CTO_CONTEXT_LIMITS.partsPerMessageMax) : fetched;
       }
-      recs.push(rec);
-    }
-
-    // Budget priority: the anchor's own evidence is taken FIRST, then the
-    // neighborhood in chronological order — one huge before-tool-dump cannot
-    // blind the message the caller actually asked about. Part reads are
-    // bounded (PART_READ_LIMIT) and stop early once the budget is spent;
-    // both report via `partsOmitted`.
-    let anyCut = false;
-    const buildParts = (rec) => {
-      const fetched = db
-        .prepare("SELECT id, time_created, data FROM part WHERE message_id = ? ORDER BY time_created ASC, id ASC LIMIT ?")
-        .all(rec.id, PART_READ_LIMIT);
-      const readCapped = fetched.length > CTO_CONTEXT_LIMITS.partsPerMessageMax;
-      const rowsToScan = readCapped ? fetched.slice(0, CTO_CONTEXT_LIMITS.partsPerMessageMax) : fetched;
-      const { items, skipped } = evidenceForParts(rowsToScan, budget);
-      if (readCapped || skipped > 0) {
+      rec.parts = [];
+      for (const partRow of itemsSource) {
+        const item = buildPartItem(partRow);
+        if (item) rec.parts.push(item);
+      }
+      if (readCapped) {
         rec.partsOmitted = true;
         result.truncated = true;
-        result.omittedCount += skipped;
       }
-      if (items.some((it) => it.textTruncated)) {
-        anyCut = true;
-        result.truncated = true;
-      }
-      rec.parts = items;
-      return skipped;
     };
     const anchorRec = recs.find((r) => r.anchor === true);
-    if (anchorRec) buildParts(anchorRec);
+    if (anchorRec) fillParts(anchorRec, Boolean(anchorPartRow));
     for (const rec of recs) {
-      if (rec.parts !== undefined) continue;
-      if (budget.remaining <= 0) {
-        rec.parts = [];
-        rec.partsOmitted = true;
-        result.truncated = true;
-        result.omittedCount++;
-        continue;
-      }
-      buildParts(rec);
+      if (rec === anchorRec) continue;
+      fillParts(rec, false);
     }
-    result.messages = recs;
-    result.truncated = result.truncated || anyCut;
+
+    // ONE authoritative compaction over the COMPLETED response: bound tail
+    // part-item texts first; drop tail part items (partsOmitted, counted);
+    // drop tail messages (counted; the anchor is never dropped).
+    const units = [];
+    for (let m = result.messages.length - 1; m >= 0; m--) {
+      const rec = result.messages[m];
+      if (Array.isArray(rec.parts)) {
+        for (let p = rec.parts.length - 1; p >= 0; p--) {
+          const item = rec.parts[p];
+          units.push({
+            fields: [{ obj: item, field: "text" }],
+            pop: () => {
+              rec.parts.pop();
+              rec.partsOmitted = true;
+              result.omittedCount++;
+            },
+          });
+        }
+      }
+      if (!rec.anchor) {
+        units.push({
+          fields: [],
+          pop: () => {
+            result.messages.pop();
+            result.omittedCount++;
+          },
+        });
+      }
+    }
+    compactToBudget(result, units);
     return result;
   } catch (e) {
     return queryFailed(e);
