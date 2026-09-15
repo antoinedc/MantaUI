@@ -94,6 +94,7 @@ import {
   normalizeEvidence,
   presenceState,
 } from "./ctoEvidence.mjs";
+import { CONVERSATION_ROLE } from "./ctoBinding.mjs";
 import {
   askStartInfo,
   askResolveInfo,
@@ -2640,9 +2641,10 @@ export function createCtoEngine(deps = {}) {
       try {
         let owner = "unknown";
         let project;
+        let info = null;
         const sid = eventSessionID(evt);
         if (sid) {
-          const info = await Promise.resolve().then(() => getSessionInfo(sid)).catch(() => ({ owner: "unknown" }));
+          info = await Promise.resolve().then(() => getSessionInfo(sid)).catch(() => ({ owner: "unknown" }));
           owner = info?.owner ?? "unknown";
           project = info?.project;
         }
@@ -2651,6 +2653,15 @@ export function createCtoEngine(deps = {}) {
           // unattended window while ownership is unavailable.
           promptTs = Math.max(promptTs, now());
           void preemptOvernight("unknown-activity").catch(() => {});
+        }
+        if (sid && owner === "cto" && info?.role === CONVERSATION_ROLE && isUserPromptEvent(evt)) {
+          // A human CEO instruction in the durable conversation (distinct role
+          // provenance, P3a1 review blocker 4): the CEO is present. The
+          // conversation still never produces evidence rows or segmentation
+          // input below — the CTO must not summarize its own assistant output
+          // recursively.
+          promptTs = Math.max(promptTs, now());
+          void preemptOvernight("user-return").catch(() => {});
         }
         if (!isPipelineSession(owner)) return;
         // Headless/internal and job prompts are not evidence of human presence.

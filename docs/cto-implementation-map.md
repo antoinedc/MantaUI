@@ -305,30 +305,50 @@ headless delegate or context service — P1a/P2a build those. Contract-only per 
 
 ## 10. P3a1 addendum — the durable singleton conversation binding is now a service
 
-`src/server/ctoBinding.mjs` (`createCtoBinding({ oc, store, provenanceStore, controlDir, ... })`)
+`src/server/ctoBinding.mjs` (`createCtoBinding({ oc, store, controlDir, requestDeadlineMs, ... })`)
 implements spec §3.1 step 1 (create-or-recover ONE durable session) as an injectable service:
-`ensure()` (singleflight get-or-create-or-replace), `recover()` (explicit reconcile pass), and
-`getBinding()` (store read only — opening the tab never invokes the model). Not wired to any
-route yet; the future UI caller composes it.
+`ensure()` (singleflight get-or-create-or-replace), `recover()` (explicit reconcile pass —
+ensure AND recover share one store-keyed flight across engine instances), and `getBinding()`
+(store read only, full archive + optional pagination — opening the tab never invokes the
+model). Not wired to any route yet; the future UI caller composes it.
 
 Additive seams this PR lands on top of the P0 receipts:
 
 - `opencode.createSession(...)` forwards a plain-object `metadata` option onto `POST /session`
-  (P0 §8 receipt: metadata round-trips verbatim through `GET /session/{id}`).
-- `opencode.readSession(sessionId)` — NEW three-state read (`found` with the full record incl.
-  `metadata` / `missing` on definitive 404 / `unknown` on 5xx+network), so callers can apply
-  the spec rule "timeout is not absence". `sessionExists` is unchanged.
+  (P0 §8 receipt: metadata round-trips verbatim through `GET /session/{id}`); its rejection
+  errors carry the numeric `status`, so a 4xx is a DEFINITIVE "nothing landed".
+- `opencode.readSession(sessionId, { signal })` — NEW three-state read (`found` with the full
+  record incl. `metadata` / `missing` on definitive 404 / `unknown` on 5xx+network), so callers
+  can apply the spec rule "timeout is not absence". `sessionExists` is unchanged.
+  `listSessions(directory, { signal })` now takes a signal too.
 - `ctoStores.bindingStore` — strict store for the versioned binding record: `generation`,
   `currentSessionId` + `currentOperation` (the exact identity marker to verify against),
-  `previousSessionIds` (capped archive references, sessions never deleted), and
-  `pendingOperation` (reserved BEFORE the remote create; recovery matches sessions by EXACT
-  `metadata.bindingOperation` — never by title).
+  the FULL `previousSessionIds` archive (never capped, never dropped; `getBinding` paginates),
+  and `pendingOperation` (reserved BEFORE the remote create with the expected pre-create state;
+  recovery matches sessions by EXACT `metadata.bindingOperation` — never by title). Strict
+  stores treat a top-level null/array/string payload as CORRUPTION — only a missing file
+  initializes the default.
 
 Role-session discipline (all pinned by `ctoBinding.test.mjs`): the role session's opencode
 directory is a server-owned control directory under the state home (`~/.manta/cto/conversation`,
-0700, marker file, refuses `.git`); its title deliberately avoids the ephemeral reaper's `cto:`
-prefix; it is registered only in the never-swept provenance tombstones (`internalSessions`), so
-`resolvePipelineSession` classifies it CTO-owned. Concurrent `ensure()` calls join one flight;
-unknown creation outcomes are reconciled by marker before any retry, with bounded attempts, and
-absence is proven only while the marker cannot have scrolled off `GET /session`'s newest-100
-page (page non-full, or its oldest entry predates the reservation) — uncertainty otherwise.
+0700 enforced, marker file, no `.git` in it or any ancestor up to the state home, realpath
+containment so no symlink can redirect the session's cwd outside the state home); its title
+deliberately avoids the ephemeral reaper's `cto:` prefix. Provenance is DISTINCT from the
+generic internal-session tombstones: the conversation is recognized via the binding record
+(`readConversationRole`, checked first in `resolvePipelineSession` → `{owner:"cto",
+role:"cto_conversation"}` vs `role:"cto_internal"` for ephemeral tombstones), so the engine can
+recognize a human CEO instruction (presence/preempt) while the conversation still never
+produces evidence rows or segmentation input — the CTO never summarizes its own assistant
+output recursively.
+
+Unknown-outcome discipline (review blockers 1-3): concurrent `ensure()`/`recover()` calls —
+across engine instances over the same store — join ONE flight; the reservation CAS
+(`expectedCurrentSessionId`/`expectedGeneration`) and the bind CAS stop a stale "missing"
+lookup from replacing a session a prior bind already replaced; every oc call (list/read/create)
+is bounded by an AbortSignal deadline through the actual transport (hung headers/body →
+explicit failure); a create with an UNKNOWN outcome (network/deadline/5xx) RETAINS its
+reservation and fails explicitly — never blind-retried, and a marker scan that finds nothing
+NEVER clears the reservation (an in-flight create can land after the snapshot; a malformed
+list response is never read as absence). Only a definitive 4xx rejection clears its own
+reservation. A create whose response lacks the identity marker persists the created sid plus a
+terminal `unsupportedIdentity` failure — never a create-loop.

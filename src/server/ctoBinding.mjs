@@ -5,16 +5,20 @@
 // directory is a stable server-owned control directory under the state home —
 // never a user repository, never an implicit implementation target. The
 // binding itself is a small versioned record in the CTO store: generation,
-// current session id, previous session ids, and a reserve-before-create
-// operation marker that recovers a role session whose remote create landed
-// but whose bind was lost to a crash.
+// current session id, the full previous-session-id archive (never capped,
+// never dropped — replacements are rare and queries paginate), and a
+// reserve-before-create operation marker that recovers a role session whose
+// remote create landed but whose bind was lost to a crash.
 //
 // Scope (deliberately small): ensure / recover / getBinding. NOT here —
 // prompt admission (P3a2), any UI or public route, the delegate extension,
 // session deletion (P6). The role session is DURABLE: its title never carries
-// the ephemeral reaper's `cto:` prefix and it is never registered with any
-// TTL'd registry — only with the never-swept provenance tombstones, so
-// pipeline readers classify it as CTO-owned rather than user activity.
+// the ephemeral reaper's `cto:` prefix and it is registered with NO TTL'd
+// machinery whatsoever — its provenance IS the binding record (see
+// readConversationRole), kept deliberately separate from the generic
+// internal-session tombstones so readers can tell the human CEO channel
+// (cto_conversation) apart from the CTO's own ephemeral inference sessions
+// (cto_internal, owned by internalSessions.mjs).
 //
 // Identity rule (spec: "A title match alone is not proof of ownership"): a
 // session is adopted ONLY on an exact metadata marker match — `metadata.role
@@ -22,24 +26,40 @@
 // operation id>` — verified by direct read-back, never by list title. The
 // marker is stamped on the session at create time (P0 live probes:
 // docs/cto-implementation-map.md §1/§8 — metadata round-trips verbatim).
-// Uncertainty (transient opencode errors, a marker outside the provable
-// window of `GET /session`'s newest-100 page) is reported as such and never
-// resolved by guessing or by blindly creating a replacement.
+//
+// Unknown-outcome discipline (P3a1 review blockers 1-3):
+//  - The reservation is persisted BEFORE the create and carries the expected
+//    pre-create state (expectedCurrentSessionId / expectedGeneration); both
+//    the reservation and the bind are compare-and-swap against the store, so
+//    a stale "missing" lookup can never create a replacement on top of a
+//    replacement another instance already bound.
+//  - A create whose outcome is unknown (network error, deadline, 5xx) keeps
+//    the reservation and fails explicitly — it is NEVER blind-retried, and a
+//    marker scan that finds nothing NEVER clears the reservation (the create
+//    may still be in flight and land after the scan). A reservation settles
+//    only when the marker session becomes identifiable (found + verified) or
+//    — for a DEFINITIVE opencode rejection (4xx) — when the create is known
+//    to have landed nothing, which clears its own reservation.
+//  - A create whose response body lacks the identity marker persists the
+//    created sid + an unsupported-identity failure (terminal, explicit) —
+//    never a create-loop.
+//  - Every oc call (list/read/create) is bounded by an AbortSignal deadline
+//    raced against the call, so hung headers or a hung body cannot stall
+//    ensure() forever; a timed-out create is unknown, not a retry.
 
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
-import { statePath } from "../shared/paths.mjs";
+import { chmod, mkdir, realpath } from "node:fs/promises";
+import { dirname, join, sep } from "node:path";
+import { stateHome, statePath } from "../shared/paths.mjs";
 import { writeJsonAtomic } from "./jsonStore.mjs";
-import { bindingStore, internalSessionsStore, patchStore } from "./ctoStores.mjs";
-import { createInternalSessions } from "./internalSessions.mjs";
+import { bindingStore, patchStore } from "./ctoStores.mjs";
 
-// Role provenance vocabulary (spec §3.1). The full four-way split
-// (cto_conversation / cto_worker / cto_internal / user_session) lands with the
-// admission phase; P3a1 pins the conversation role on the session marker and
-// registers the durable session in the CTO-owned tombstone store.
-export const BINDING_ROLE = "cto_conversation";
+// Role provenance vocabulary (spec §3.1). The durable CEO conversation is
+// `cto_conversation`; the CTO's own ephemeral inference sessions stay
+// `cto_internal` (classified in internalSessions.mjs). The full four-way
+// split lands with the admission phase.
+export const CONVERSATION_ROLE = "cto_conversation";
 
 // The role session's title. MUST NOT start with the ephemeral reaper's
 // `cto:` prefix (ctoSessions.CTO_TITLE_PREFIX) — the reaper deletes sessions
@@ -51,14 +71,18 @@ export const ROLE_SESSION_TITLE = "Manta CTO conversation";
 // re-writing it is idempotent.
 export const CONTROL_MARKER_FILENAME = "cto-control-directory.json";
 
-// opencode caps unscoped `GET /session` at the 100 most-recently-updated
-// sessions box-wide (docs/cto-implementation-map.md §1, sessionExists note).
-const LIST_PAGE_CAP = 100;
-
-export const PREVIOUS_SESSION_IDS_CAP = 10;
 export const RECONCILE_ATTEMPTS = 3;
 export const RECONCILE_BACKOFF_MS = 150;
 export const RECEIPT_ATTEMPTS = 3;
+
+// Every oc call (list/read/create) is bounded: hung response HEADERS or a
+// hung response BODY must not stall ensure() forever (review blocker 3).
+export const DEFAULT_REQUEST_DEADLINE_MS = 15_000;
+
+// Provenance lookup cache TTL — the reader path (resolvePipelineSession) is
+// per-event; binding.json is tiny but re-reading it per event is waste. The
+// staleness window matches the tombstone/tmux caches (5s).
+const CONVERSATION_ROLE_CACHE_MS = 5_000;
 
 export class CtoBindingError extends Error {
   constructor(message, code, { cause } = {}) {
@@ -69,6 +93,7 @@ export class CtoBindingError extends Error {
 }
 
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const describeErr = (err) => String(err?.message ?? err);
 
 /** The stable server-owned CTO control directory (under the state home). */
 export function defaultControlDir() {
@@ -78,7 +103,7 @@ export function defaultControlDir() {
 /** The identity marker stamped onto the created session's metadata. */
 export function markerFor(op) {
   return {
-    role: BINDING_ROLE,
+    role: CONVERSATION_ROLE,
     bindingOperation: op.operation,
     bindingGeneration: op.generation,
     boundAt: op.startedAt,
@@ -91,14 +116,53 @@ export function isMarkerSession(session, operation) {
   return (
     !!metadata &&
     typeof metadata === "object" &&
-    metadata.role === BINDING_ROLE &&
+    metadata.role === CONVERSATION_ROLE &&
     metadata.bindingOperation === operation
   );
 }
 
-/** Dedupe + keep the most recent archives, capped. */
-export function capPrevious(ids, cap = PREVIOUS_SESSION_IDS_CAP) {
-  return [...new Set(ids)].slice(-cap);
+/** Dedupe (keep order). The archive is NEVER capped or dropped (blocker 6). */
+export function capPrevious(ids) {
+  return [...new Set(ids)];
+}
+
+/**
+ * Is this session the CURRENT durable CTO conversation? Pure store read —
+ * zero opencode calls, zero model turns. This is the distinct role-provenance
+ * seam (review blocker 4): the provenance reader path consults it so the CEO
+ * conversation is recognized as its OWN role — not folded into the generic
+ * `cto` internal-session tombstones — letting consumers treat a human CEO
+ * message as CEO input while the CTO's own assistant output never re-enters
+ * ambient analysis. A 5s single-entry cache mirrors the other provenance
+ * caches; a corrupt binding store fails closed (throws) rather than guessing.
+ */
+let conversationRoleCache = { sid: null, value: false, until: 0 };
+export async function readConversationRole(sessionId) {
+  if (typeof sessionId !== "string" || sessionId.length === 0) return false;
+  const t = Date.now();
+  if (conversationRoleCache.sid === sessionId && t < conversationRoleCache.until) {
+    return conversationRoleCache.value;
+  }
+  let binding;
+  try {
+    binding = normalizeBinding(await bindingStore.load());
+  } catch (err) {
+    throw err instanceof CtoBindingError
+      ? err
+      : new CtoBindingError(
+          `binding store unreadable while resolving conversation provenance: ${describeErr(err)}`,
+          "store-unreadable",
+          { cause: err },
+        );
+  }
+  const value = binding.currentSessionId === sessionId;
+  conversationRoleCache = { sid: sessionId, value, until: t + CONVERSATION_ROLE_CACHE_MS };
+  return value;
+}
+
+/** Test-only: drop the provenance lookup cache. */
+export function _resetConversationRoleCache() {
+  conversationRoleCache = { sid: null, value: false, until: 0 };
 }
 
 // ---------------------------------------------------------------------------
@@ -122,7 +186,35 @@ function normalizePending(op) {
   }
   if (!Number.isInteger(op.generation) || op.generation < 1) throw invalidState("pendingOperation.generation", op.generation);
   if (!Number.isInteger(op.startedAt) || op.startedAt < 0) throw invalidState("pendingOperation.startedAt", op.startedAt);
-  return { operation: op.operation, generation: op.generation, directory: op.directory, startedAt: op.startedAt };
+  const out = { operation: op.operation, generation: op.generation, directory: op.directory, startedAt: op.startedAt };
+  // Expected-state CAS pair (review blocker 1): optional on read (tolerant of
+  // partially-written legacy payloads), always written by the service.
+  if (op.expectedCurrentSessionId !== undefined) {
+    const v = op.expectedCurrentSessionId;
+    if (v !== null && (typeof v !== "string" || v.length === 0)) throw invalidState("pendingOperation.expectedCurrentSessionId", v);
+    out.expectedCurrentSessionId = v ?? null;
+  }
+  if (op.expectedGeneration !== undefined) {
+    if (!Number.isInteger(op.expectedGeneration) || op.expectedGeneration < 0) {
+      throw invalidState("pendingOperation.expectedGeneration", op.expectedGeneration);
+    }
+    out.expectedGeneration = op.expectedGeneration;
+  }
+  if (op.reason !== undefined) {
+    if (typeof op.reason !== "string") throw invalidState("pendingOperation.reason", op.reason);
+    out.reason = op.reason;
+  }
+  if (op.createdSessionId !== undefined) {
+    if (typeof op.createdSessionId !== "string" || op.createdSessionId.length === 0) {
+      throw invalidState("pendingOperation.createdSessionId", op.createdSessionId);
+    }
+    out.createdSessionId = op.createdSessionId;
+  }
+  if (op.unsupportedIdentity !== undefined) {
+    if (typeof op.unsupportedIdentity !== "boolean") throw invalidState("pendingOperation.unsupportedIdentity", op.unsupportedIdentity);
+    out.unsupportedIdentity = op.unsupportedIdentity;
+  }
+  return out;
 }
 
 export function normalizeBinding(payload) {
@@ -153,6 +245,26 @@ export function normalizeBinding(payload) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Shared singleflight, keyed by the STORE (not the engine instance): two
+// createCtoBinding instances over the same store — desktop + anything else
+// composing its own engine in one process — join ONE flight, so concurrent
+// ensure/recover produce at most one operation (review blocker 1).
+// ---------------------------------------------------------------------------
+
+const storeFlights = new Map();
+
+function withStoreFlight(store, run) {
+  const key = typeof store?.path === "string" && store.path ? store.path : `binding:${store?.name ?? "anon"}`;
+  const existing = storeFlights.get(key);
+  if (existing) return existing;
+  const flight = run().finally(() => {
+    if (storeFlights.get(key) === flight) storeFlights.delete(key);
+  });
+  storeFlights.set(key, flight);
+  return flight;
+}
+
 /**
  * Build the durable singleton CTO conversation binding service.
  *
@@ -161,29 +273,28 @@ export function normalizeBinding(payload) {
  *        The opencode client (production: the matching exports of
  *        src/server/opencode.mjs). No other oc surface is touched — in
  *        particular ensure()/recover()/getBinding() never send a prompt or
- *        resolve a model.
+ *        resolve a model. Every call is issued with an AbortSignal deadline.
  * @param {object} [deps.store] Binding store (default: ctoStores.bindingStore,
  *        strict — corrupt payloads throw, never silently read as unbound).
- * @param {object} [deps.provenanceStore] Never-swept ownership tombstones
- *        (default: ctoStores.internalSessionsStore) — the reader seam that
- *        makes provenance classifiers see the durable session as CTO-owned.
- * @param {Function} [deps.createProvenance] internalSessions factory (injected).
  * @param {string} [deps.controlDir] The role session's opencode directory.
  * @param {Function} [deps.now] @param {Function} [deps.newId] @param {Function} [deps.sleep]
  * @param {number} [deps.reconcileAttempts] @param {number} [deps.reconcileBackoffMs]
- * @returns {{ ensure: () => Promise<object>, recover: () => Promise<object>, getBinding: () => Promise<object> }}
+ *        Bounds the marker SCAN retries and the receipt read-back retries —
+ *        never a create retry.
+ * @param {number} [deps.requestDeadlineMs] Per-call deadline for every oc
+ *        request (headers + body), enforced via the actual transport signal.
+ * @returns {{ ensure: () => Promise<object>, recover: () => Promise<object>, getBinding: (opts?) => Promise<object> }}
  */
 export function createCtoBinding({
   oc,
   store = bindingStore,
-  provenanceStore = internalSessionsStore,
-  createProvenance = createInternalSessions,
   controlDir = defaultControlDir(),
   now = () => Date.now(),
   newId = () => randomUUID(),
   sleep = defaultSleep,
   reconcileAttempts = RECONCILE_ATTEMPTS,
   reconcileBackoffMs = RECONCILE_BACKOFF_MS,
+  requestDeadlineMs = DEFAULT_REQUEST_DEADLINE_MS,
 } = {}) {
   if (
     !oc ||
@@ -193,7 +304,6 @@ export function createCtoBinding({
   ) {
     throw new Error("createCtoBinding requires an oc client with createSession, listSessions and readSession");
   }
-  const provenance = createProvenance({ store: provenanceStore });
 
   async function loadBinding() {
     try {
@@ -201,33 +311,69 @@ export function createCtoBinding({
     } catch (err) {
       if (err instanceof CtoBindingError) throw err;
       throw new CtoBindingError(
-        `binding store unreadable — refusing to create or recover a role session on top of unhealthy state: ${err?.message ?? err}`,
+        `binding store unreadable — refusing to create or recover a role session on top of unhealthy state: ${describeErr(err)}`,
         "store-unreadable",
         { cause: err },
       );
     }
   }
 
+  /** Bounded oc read; any failure (deadline, network, 5xx) is "unknown". */
+  async function readSessionBounded(sessionId) {
+    try {
+      return await withDeadline(
+        (signal) => oc.readSession(sessionId, { signal }),
+        requestDeadlineMs,
+        `readSession(${sessionId})`,
+      );
+    } catch {
+      return { state: "unknown" };
+    }
+  }
+
   /**
-   * The control directory: exists, owned (0700 at creation), marked, and
-   * never a repository (spec §3.1: the control directory "is never an
-   * implicit target for implementation" — a .git there means it stopped
-   * being a control directory).
+   * The control directory: exists, owned (0700, enforced), marked, never a
+   * repository (no `.git` in it or any ancestor up to the state home) and
+   * never a symlink redirect — the REAL path must stay inside the REAL state
+   * home, so the role session's cwd can never be pulled into a user project
+   * (review blocker 6).
    */
   async function ensureControlDirectory() {
     await mkdir(controlDir, { recursive: true, mode: 0o700 });
-    if (existsSync(join(controlDir, ".git"))) {
+    await chmod(controlDir, 0o700);
+    let realDir;
+    let realHome;
+    try {
+      realDir = await realpath(controlDir);
+      realHome = await realpath(stateHome());
+    } catch (err) {
       throw new CtoBindingError(
-        `CTO control directory ${controlDir} contains a .git — refusing to bind the role session to a repository`,
-        "control-directory-repository",
+        `CTO control directory ${controlDir} cannot be resolved: ${describeErr(err)}`,
+        "control-directory-unresolvable",
+        { cause: err },
       );
+    }
+    if (realDir === realHome || !realDir.startsWith(realHome + sep)) {
+      throw new CtoBindingError(
+        `CTO control directory ${controlDir} resolves to ${realDir}, outside the state home ${realHome} — ` +
+          `refusing to bind (a symlink must not redirect the role session's cwd)`,
+        "control-directory-outside-state-home",
+      );
+    }
+    for (let dir = realDir; dir.startsWith(realHome + sep); dir = dirname(dir)) {
+      if (existsSync(join(dir, ".git"))) {
+        throw new CtoBindingError(
+          `CTO control directory ${controlDir} sits inside the repository at ${dir} — refusing to bind`,
+          "control-directory-repository",
+        );
+      }
     }
     await writeJsonAtomic(
       join(controlDir, CONTROL_MARKER_FILENAME),
       JSON.stringify(
         {
           kind: "manta-cto-control-directory",
-          role: BINDING_ROLE,
+          role: CONVERSATION_ROLE,
           note: "Server-owned CTO control directory — not a repository; never an implicit implementation target.",
         },
         null,
@@ -238,79 +384,69 @@ export function createCtoBinding({
   }
 
   /**
-   * Register the durable session in the never-swept provenance tombstones —
-   * the one reader seam (internalSessions) that classifies sessions as
-   * CTO-owned. Deliberately NOT the TTL'd ephemeral machinery: the durable
-   * conversation is never registered with the reaper or any expiry.
-   */
-  async function registerProvenance(sessionId, actions) {
-    try {
-      const finish = provenance.beginInternalSession();
-      await finish(sessionId);
-    } catch (err) {
-      actions?.push({ action: "provenance-failed", sessionId, error: String(err?.message ?? err) });
-    }
-  }
-
-  /**
    * Marker scan with bounded retries. Returns
-   *   { state: "found", sessionId }      — exact marker, verified by direct read-back
-   *   { state: "absent", reason }        — healthy scan, definitively never created
-   *   { state: "unknown", reason }       — transient / unprovable; reservation stays
+   *   { state: "found", sessionId }  — exact marker, verified by direct read-back
+   *   { state: "unknown", reason }   — absent, malformed response, or transient
    *
-   * Absence is DEFINITIVE only while the op's session could not have scrolled
-   * off `GET /session`'s newest-100 page: the page must be non-full, or its
-   * oldest entry must predate the operation's reservation instant (a session
-   * created at ~startedAt ranks above anything older, so it would be on the
-   * page). A full page of entries all newer than the op proves nothing —
-   * that is uncertainty, not absence, and never a timeout-based replacement.
+   * There is deliberately NO "absent" settlement: an in-flight create can
+   * finish AFTER the list snapshot was taken (another engine instance, or a
+   * request that outlived its process), so a missing marker never proves the
+   * create never landed and never authorizes a second create (review
+   * blocker 1). Only a malformed response is distinguished for diagnostics.
    */
-  async function findSessionByMarker(pending) {
+  async function scanForMarker(operation) {
     let lastReason = "attempts-exhausted";
     for (let attempt = 1; attempt <= reconcileAttempts; attempt++) {
       if (attempt > 1) await sleep(reconcileBackoffMs * (attempt - 1));
       let sessions;
       try {
-        sessions = await oc.listSessions();
+        sessions = await withDeadline((signal) => oc.listSessions(undefined, { signal }), requestDeadlineMs, "listSessions");
       } catch (err) {
-        lastReason = `list-sessions-failed: ${err?.message ?? err}`;
+        lastReason = `list-sessions-failed: ${describeErr(err)}`;
         continue;
       }
-      const list = Array.isArray(sessions) ? sessions : [];
-      const hit = list.find((s) => isMarkerSession(s, pending.operation));
+      if (!Array.isArray(sessions)) {
+        // A malformed list response is NEVER read as [] / absence.
+        lastReason = `malformed-list-response:${sessions === null ? "null" : typeof sessions}`;
+        continue;
+      }
+      const hit = sessions.find((s) => isMarkerSession(s, operation));
       if (hit?.id) {
         // The list hit is a hint; the direct read-back is the receipt.
-        const read = await oc.readSession(hit.id);
-        if (read.state === "found" && isMarkerSession(read.session, pending.operation)) {
+        const read = await readSessionBounded(hit.id);
+        if (read.state === "found" && isMarkerSession(read.session, operation)) {
           return { state: "found", sessionId: hit.id };
         }
         lastReason = `list-hit-${hit.id}-unverified-${read.state}`;
         continue;
       }
-      const pageDates = list
-        .map((s) => s?.time?.updated ?? s?.time?.created ?? s?.created ?? null)
-        .filter((t) => typeof t === "number");
-      const pageProvesWindow = list.length < LIST_PAGE_CAP
-        ? true
-        : pageDates.length === list.length && Math.min(...pageDates) < pending.startedAt;
-      if (pageProvesWindow) {
-        return { state: "absent", reason: "marker-absent-in-provable-window" };
-      }
-      return { state: "unknown", reason: "marker-absent-beyond-list-page-window" };
+      return { state: "unknown", reason: "marker-absent" };
     }
     return { state: "unknown", reason: lastReason };
   }
 
   /**
    * Resolve a reserved operation left by this or a previous process: adopt
-   * the created session by exact marker, or clear the reservation once
-   * absence is definitive. Never creates here — creation happens only from a
-   * clean slate in ensure().
+   * the created session by exact marker, or keep the reservation and report
+   * uncertainty. Never creates here — creation happens only from a clean
+   * slate in the callers.
    */
-  async function reconcilePending(binding, actions) {
+  async function reconcilePending(actions) {
+    const binding = await loadBinding();
     const pending = binding.pendingOperation;
     if (!pending) return binding;
-    const scan = await findSessionByMarker(pending);
+    if (pending.unsupportedIdentity) {
+      // Terminal, persisted state (review blocker 2): the created session —
+      // whose sid IS persisted on the operation — can never be identified.
+      // Explicit failure every time; never a scan-adopt, never a re-create.
+      throw new CtoBindingError(
+        `binding operation ${pending.operation} hit an unsupported identity failure (created session ` +
+          `${pending.createdSessionId ?? "<sid lost>"} lacks the binding metadata marker) — creation is stopped ` +
+          `to prevent duplicates. Manual resolution required.`,
+        "unsupported-identity",
+      );
+    }
+    const scan = await scanForMarker(pending.operation);
     if (scan.state === "found") {
       const next = await patchStore(store, (fresh) => {
         const base = normalizeBinding(fresh);
@@ -330,19 +466,11 @@ export function createCtoBinding({
       const base = normalizeBinding(next);
       if (base.currentSessionId === scan.sessionId) {
         actions.push({ action: "adopted", operation: pending.operation, sessionId: scan.sessionId });
-        await registerProvenance(scan.sessionId, actions);
       }
       return base;
     }
-    if (scan.state === "absent") {
-      const next = await patchStore(store, (fresh) => {
-        const base = normalizeBinding(fresh);
-        if (base.pendingOperation?.operation !== pending.operation) return {};
-        return { pendingOperation: undefined };
-      });
-      actions.push({ action: "reservation-cleared", operation: pending.operation, reason: scan.reason });
-      return normalizeBinding(next);
-    }
+    // Unknown outcome (marker absent, malformed list, transient failures):
+    // the reservation is RETAINED — never cleared, never re-created on top of.
     actions.push({ action: "reconcile-unknown", operation: pending.operation, reason: scan.reason });
     return binding;
   }
@@ -353,54 +481,85 @@ export function createCtoBinding({
    * never adopted blindly, never replaced from).
    */
   async function verifyCurrent(binding) {
-    const read = await oc.readSession(binding.currentSessionId);
+    const read = await readSessionBounded(binding.currentSessionId);
     if (read.state === "found") {
       return isMarkerSession(read.session, binding.currentOperation) ? { state: "found" } : { state: "mismatch" };
     }
     return read;
   }
 
+  // A definitive opencode REJECTION (4xx — nothing landed) vs an unknown
+  // outcome (network error, deadline, 5xx — the create may still have landed).
+  const isDefinitiveRejection = (err) =>
+    err && typeof err.status === "number" && Number.isInteger(err.status) && err.status >= 400 && err.status < 500;
+
   /**
-   * Reserve → create → verify receipt → bind. The reservation is a single
-   * serialized store read-modify-write (no lock held across the external
-   * create); the marker rides on the create itself, so a crash anywhere
-   * leaves a recoverable reservation instead of an unidentifiable session.
+   * ONE create attempt (never retried inside the service): CAS-reserve the
+   * operation against the expected pre-create state → create with the marker
+   * → verify the receipt → CAS-bind. Any unknown outcome retains the
+   * reservation for marker settlement; a definitive 4xx clears its own
+   * reservation. The CAS pair (expectedCurrentSessionId / expectedGeneration)
+   * is what stops a stale "missing" lookup from replacing a session another
+   * instance already replaced (review blocker 1).
    */
-  async function reserveCreateAndBind(binding, actions) {
+  async function attemptCreate({ expected, reason, actions }) {
     const op = {
       operation: newId(),
-      generation: binding.generation + 1,
+      generation: expected.generation + 1,
       directory: controlDir,
       startedAt: now(),
+      reason,
+      expectedCurrentSessionId: expected.currentSessionId,
+      expectedGeneration: expected.generation,
     };
     const reserved = await patchStore(store, (fresh) => {
       const base = normalizeBinding(fresh);
       if (base.pendingOperation) return {}; // a concurrent reservation wins; caller re-reconciles
+      if (base.currentSessionId !== expected.currentSessionId || base.generation !== expected.generation) {
+        return {}; // CAS: the store moved (a prior bind landed) — do not create
+      }
       return { pendingOperation: op };
     });
     if (normalizeBinding(reserved).pendingOperation?.operation !== op.operation) {
-      throw new CtoBindingError("binding reservation deferred to a concurrent operation", "deferred");
+      throw new CtoBindingError(
+        `binding moved before reservation (expected generation ${expected.generation}` +
+          `${expected.currentSessionId ? ` with session ${expected.currentSessionId}` : " while unbound"}) — ` +
+          `deferring to the concurrent resolution`,
+        "deferred",
+      );
     }
 
     let session;
     try {
-      session = await oc.createSession({
-        directory: op.directory,
-        title: ROLE_SESSION_TITLE,
-        metadata: markerFor(op),
-      });
+      session = await withDeadline(
+        (signal) => oc.createSession({ directory: op.directory, title: ROLE_SESSION_TITLE, metadata: markerFor(op), signal }),
+        requestDeadlineMs,
+        "createSession",
+      );
     } catch (err) {
-      // Unknown outcome: the create may or may not have landed. The
-      // reservation deliberately STAYS — the next ensure/recover reconciles
-      // by exact marker before any retry. Never clear-and-blind-retry here.
+      if (isDefinitiveRejection(err)) {
+        await patchStore(store, (fresh) => {
+          const base = normalizeBinding(fresh);
+          if (base.pendingOperation?.operation !== op.operation) return {};
+          return { pendingOperation: undefined };
+        });
+        throw new CtoBindingError(
+          `role-session create definitively rejected by opencode (operation ${op.operation} cleared): ${describeErr(err)}`,
+          "create-rejected",
+          { cause: err },
+        );
+      }
       throw new CtoBindingError(
-        `role-session create failed with unknown outcome (operation ${op.operation} kept for recovery): ${err?.message ?? err}`,
+        `role-session create failed with unknown outcome (operation ${op.operation} retained for recovery): ${describeErr(err)}`,
         "create-unknown",
         { cause: err },
       );
     }
     if (typeof session?.id !== "string" || session.id.length === 0) {
-      throw new CtoBindingError("opencode createSession returned no session id", "unidentifiable-create");
+      throw new CtoBindingError(
+        `opencode createSession returned no session id (operation ${op.operation} retained for recovery)`,
+        "create-unknown",
+      );
     }
 
     // Receipt: a 2xx from the create alone is not proof (P0 map guard rails).
@@ -408,13 +567,24 @@ export function createCtoBinding({
     let receipt = null;
     for (let attempt = 1; attempt <= RECEIPT_ATTEMPTS; attempt++) {
       if (attempt > 1) await sleep(reconcileBackoffMs);
-      const read = await oc.readSession(session.id);
+      const read = await readSessionBounded(session.id);
       if (read.state === "found") {
         if (!isMarkerSession(read.session, op.operation)) {
+          // opencode dropped the marker: the session exists but can never be
+          // re-identified. Persist the sid + the terminal failure BEFORE
+          // erroring — never loop-create over an unidentifiable session.
+          await patchStore(store, (fresh) => {
+            const base = normalizeBinding(fresh);
+            if (base.pendingOperation?.operation !== op.operation) return {};
+            return {
+              pendingOperation: { ...base.pendingOperation, createdSessionId: session.id, unsupportedIdentity: true },
+            };
+          });
           throw new CtoBindingError(
-            `opencode did not persist the binding metadata marker on ${session.id} — role-session creation is ` +
-              `not identifiable (spec §3.1); refusing to bind. The created session is left unbound for investigation.`,
-            "unidentifiable-create",
+            `opencode did not persist the binding metadata marker on ${session.id} — role-session identity is ` +
+              `unsupported (operation ${op.operation}); creation is stopped to prevent duplicates. ` +
+              `Manual resolution required.`,
+            "unsupported-identity",
           );
         }
         receipt = read.session;
@@ -422,21 +592,24 @@ export function createCtoBinding({
       }
       if (read.state === "missing") {
         throw new CtoBindingError(
-          `created role session ${session.id} is immediately missing — refusing to bind (operation ${op.operation} kept for recovery)`,
-          "unidentifiable-create",
+          `created role session ${session.id} reads back missing — refusing to bind (operation ${op.operation} retained for recovery)`,
+          "create-unknown",
         );
       }
     }
     if (!receipt) {
       throw new CtoBindingError(
-        `could not verify the created role session ${session.id} (lookup stayed unknown) — operation ${op.operation} kept for recovery`,
-        "unknown-state",
+        `could not verify the created role session ${session.id} (lookup stayed unknown) — operation ${op.operation} retained for recovery`,
+        "create-unknown",
       );
     }
 
     const bound = await patchStore(store, (fresh) => {
       const base = normalizeBinding(fresh);
       if (base.pendingOperation?.operation !== op.operation) return {};
+      if (base.currentSessionId !== op.expectedCurrentSessionId || base.generation !== op.expectedGeneration) {
+        return {}; // CAS: a prior bind landed while we were creating — never overwrite it
+      }
       const previous =
         base.currentSessionId && base.currentSessionId !== session.id
           ? capPrevious([...base.previousSessionIds, base.currentSessionId])
@@ -452,71 +625,49 @@ export function createCtoBinding({
     const base = normalizeBinding(bound);
     if (base.currentSessionId !== session.id) {
       throw new CtoBindingError(
-        `binding for operation ${op.operation} was resolved concurrently — created session ${session.id} left for reconciliation`,
+        `binding moved while creating (operation ${op.operation}) — created session ${session.id} left as a ` +
+          `marker-stamped orphan for reconciliation`,
         "deferred",
       );
     }
-    actions.push({ action: "created", generation: op.generation, sessionId: session.id });
-    await registerProvenance(session.id, actions);
+    actions.push({ action: "created", generation: op.generation, sessionId: session.id, reason });
     return base;
   }
 
   async function ensureOnce() {
     await ensureControlDirectory();
     const actions = [];
-    let binding = await loadBinding();
-    let lastError = null;
-    for (let attempt = 1; attempt <= reconcileAttempts; attempt++) {
-      if (attempt > 1) await sleep(reconcileBackoffMs * (attempt - 1));
-      // Every attempt reconciles against FRESH store state: a previous
-      // attempt's failed create left a reservation this attempt must resolve
-      // (adopt or prove absent) before any retry.
-      binding = await reconcilePending(await loadBinding(), actions);
-      if (binding.pendingOperation) {
-        lastError = new CtoBindingError(
-          `binding has an unreconciled creation operation (${binding.pendingOperation.operation}) — opencode state is ` +
-            `unknown after ${reconcileAttempts} attempts; refusing to create a duplicate. Retry once opencode is reachable, or run recover().`,
-          "unknown-state",
-        );
-        continue;
+    const binding = await reconcilePending(actions);
+    if (binding.pendingOperation) {
+      throw new CtoBindingError(
+        `binding has an unreconciled creation operation (${binding.pendingOperation.operation}) — the create may ` +
+          `still be in flight or its outcome is unknown; the reservation is retained and no duplicate is created. ` +
+          `The operation settles when its marker session becomes identifiable; retry later or run recover().`,
+        "unknown-state",
+      );
+    }
+    if (binding.currentSessionId) {
+      const verdict = await verifyCurrent(binding);
+      if (verdict.state === "found") {
+        return { binding, created: false, actions };
       }
-      if (binding.currentSessionId) {
-        const verdict = await verifyCurrent(binding);
-        if (verdict.state === "found") {
-          return { binding, created: false, actions };
-        }
-        if (verdict.state === "unknown" || verdict.state === "mismatch") {
-          // Transient failure or an identity that no longer matches: a timeout
-          // is NEVER absence — returning the binding as-is can't duplicate.
-          actions.push({ action: "uncertain", reason: verdict.state, sessionId: binding.currentSessionId });
-          return { binding, created: false, uncertain: true, uncertainReason: verdict.state, actions };
-        }
-        // Definitive absence (404) → replacement generation, history preserved.
-      }
-      const wasBound = binding.currentSessionId !== null;
-      try {
-        binding = await reserveCreateAndBind(binding, actions);
-        return { binding, created: true, replaced: wasBound, actions };
-      } catch (err) {
-        lastError = err;
-        // Unknown outcome — reservation kept; the next attempt reconciles it
-        // by exact marker before retrying anything.
+      if (verdict.state === "unknown" || verdict.state === "mismatch") {
+        // A timeout/5xx is NEVER absence — returning the binding as-is can't
+        // duplicate; a replacement happens only on a definitive 404 below.
+        actions.push({ action: "uncertain", reason: verdict.state, sessionId: binding.currentSessionId });
+        return { binding, created: false, uncertain: true, uncertainReason: verdict.state, actions };
       }
     }
-    throw lastError instanceof CtoBindingError
-      ? lastError
-      : new CtoBindingError(
-          `ensure failed after ${reconcileAttempts} bounded attempts: ${lastError?.message ?? lastError}`,
-          "retries-exhausted",
-          { cause: lastError },
-        );
+    const wasBound = binding.currentSessionId !== null;
+    const expected = { currentSessionId: binding.currentSessionId, generation: binding.generation };
+    const next = await attemptCreate({ expected, reason: wasBound ? "bound-session-missing" : "ensure", actions });
+    return { binding: next, created: true, replaced: wasBound, actions };
   }
 
   async function recoverOnce() {
     await ensureControlDirectory();
     const actions = [];
-    let binding = await loadBinding();
-    binding = await reconcilePending(binding, actions);
+    const binding = await reconcilePending(actions);
     if (binding.pendingOperation) {
       actions.push({ action: "pending-unresolved", operation: binding.pendingOperation.operation });
       return { binding, actions, uncertain: true };
@@ -533,28 +684,77 @@ export function createCtoBinding({
       actions.push({ action: "uncertain", reason: verdict.state, sessionId: binding.currentSessionId });
       return { binding, actions, uncertain: true };
     }
-    binding = await reserveCreateAndBind(binding, actions);
-    actions.push({ action: "replaced", generation: binding.generation, sessionId: binding.currentSessionId });
-    return { binding, actions, replaced: true };
+    const expected = { currentSessionId: binding.currentSessionId, generation: binding.generation };
+    const next = await attemptCreate({ expected, reason: "recover: bound session definitively absent", actions });
+    actions.push({ action: "replaced", generation: next.generation, sessionId: next.currentSessionId });
+    return { binding: next, actions, replaced: true };
   }
 
-  // Singleflight: concurrent ensure() calls join ONE flight, so concurrent
-  // opens (desktop + phone) produce exactly one creation. The reservation
-  // itself is a store-local mutex scope — never held across the create.
-  let flight = null;
+  // Singleflight shared by ensure() AND recover(), keyed by the store path
+  // (not the instance): concurrent calls — across engine instances over the
+  // same store — join ONE flight, so at most one creation/reconcile runs.
+  // Cross-process, the reservation + bind CAS guards correctness instead.
   function ensure() {
-    if (!flight) {
-      flight = ensureOnce().finally(() => {
-        flight = null;
-      });
-    }
-    return flight;
+    return withStoreFlight(store, ensureOnce);
+  }
+
+  function recover() {
+    return withStoreFlight(store, recoverOnce);
   }
 
   return {
     ensure,
-    recover: recoverOnce,
-    /** Store read only — zero opencode calls, zero model turns. */
-    getBinding: async () => loadBinding(),
+    recover,
+    /**
+     * Store read only — zero opencode calls, zero model turns. By default
+     * returns the FULL previous-session archive (never dropped); pass
+     * `{ previousLimit, previousOffset }` (offset 0 = most recent) to
+     * paginate without dropping anything from the store.
+     */
+    getBinding: async ({ previousLimit, previousOffset = 0 } = {}) => {
+      const binding = await loadBinding();
+      const total = binding.previousSessionIds.length;
+      if (previousLimit === undefined) {
+        return { ...binding, previousSessionIdsTotal: total };
+      }
+      if (!Number.isInteger(previousLimit) || previousLimit < 1) {
+        throw new CtoBindingError("getBinding previousLimit must be a positive integer", "invalid-argument");
+      }
+      if (!Number.isInteger(previousOffset) || previousOffset < 0) {
+        throw new CtoBindingError("getBinding previousOffset must be a non-negative integer", "invalid-argument");
+      }
+      const end = Math.max(0, total - previousOffset);
+      return {
+        ...binding,
+        previousSessionIds: binding.previousSessionIds.slice(Math.max(0, end - previousLimit), end),
+        previousSessionIdsTotal: total,
+      };
+    },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Deadline plumbing (review blocker 3): every oc call races against an
+// AbortSignal.timeout so hung HEADERS or a hung BODY through the real pooled
+// transport (http.request with `signal`) — or any transport — cannot stall
+// ensure()/recover() past the deadline. A deadline hit is classified by the
+// caller: a timed-out CREATE is an unknown outcome (reservation retained,
+// never blind-retried), never a duplicate.
+// ---------------------------------------------------------------------------
+
+function withDeadline(run, deadlineMs, label) {
+  const signal = AbortSignal.timeout(deadlineMs);
+  return new Promise((resolve, reject) => {
+    const onAbort = () =>
+      reject(new CtoBindingError(`${label} exceeded its ${deadlineMs}ms deadline (request+body bound)`, "deadline-exceeded"));
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve()
+      .then(() => run(signal))
+      .then(resolve, reject)
+      .finally(() => signal.removeEventListener("abort", onAbort));
+  });
 }

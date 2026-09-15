@@ -1,35 +1,40 @@
 // BET-P3a1: src/server/ctoBinding.test.mjs — the durable singleton CTO
-// conversation binding (unified-cto-spec §3.1). Pure logic + injected
-// stores/oc; the composition tests drive the REAL opencode.mjs client through
-// `_setOcTransport` to prove the additive metadata option reaches the wire
-// and reads back. No live opencode, no network, no model calls.
+// conversation binding (unified-cto-spec §3.1), incl. the review blockers:
+// shared ensure/recover singleflight across engine instances, reservation +
+// bind CAS, unknown-create retention (never absence-proof re-creates),
+// unsupported-identity persistence, request/body deadlines, strict corrupt
+// detection, uncapped archive. Pure logic + injected stores/oc; composition
+// tests drive the REAL opencode.mjs client through `_setOcTransport`. No live
+// opencode, no network, no model calls.
 
 import "./ctoTestGuard.mjs";
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import {
-  BINDING_ROLE,
   CONTROL_MARKER_FILENAME,
+  CONVERSATION_ROLE,
   CtoBindingError,
-  PREVIOUS_SESSION_IDS_CAP,
+  DEFAULT_REQUEST_DEADLINE_MS,
   RECONCILE_ATTEMPTS,
   ROLE_SESSION_TITLE,
+  _resetConversationRoleCache,
   capPrevious,
   createCtoBinding,
   defaultControlDir,
   isMarkerSession,
   markerFor,
   normalizeBinding,
+  readConversationRole,
 } from "./ctoBinding.mjs";
-import { bindingStore } from "./ctoStores.mjs";
+import { bindingStore, internalSessionsStore } from "./ctoStores.mjs";
 import { CTO_TITLE_PREFIX, selectReapCandidates } from "./ctoSessions.mjs";
 import * as ocModule from "./opencode.mjs";
-import { statePath } from "../shared/paths.mjs";
+import { stateHome, statePath } from "../shared/paths.mjs";
 
 const noopSleep = async () => {};
 
@@ -56,7 +61,7 @@ function memoryStore(name, initial = { v: 1 }) {
  * is allowed to touch. `sendPrompt` is a tripwire: ensure/recover/getBinding
  * must never invoke the model.
  */
-function fakeOc({ failCreates = 0, listError, sessions = [], readStates = {} } = {}) {
+function fakeOc({ failCreates = 0, createStatus, listError, listResponse, sessions = [], readStates = {} } = {}) {
   const created = [];
   let seq = 0;
   const oc = {
@@ -75,7 +80,12 @@ function fakeOc({ failCreates = 0, listError, sessions = [], readStates = {} } =
       oc.createCalls++;
       if (oc.failCreatesRemaining > 0) {
         oc.failCreatesRemaining--;
-        throw new Error("simulated create failure");
+        if (createStatus !== undefined) {
+          const err = new Error(`simulated definitive rejection ${createStatus}`);
+          err.status = createStatus;
+          throw err;
+        }
+        throw new Error("simulated unknown create failure");
       }
       const session = {
         id: `ses_fake${++seq}`,
@@ -91,6 +101,7 @@ function fakeOc({ failCreates = 0, listError, sessions = [], readStates = {} } =
     async listSessions() {
       oc.listCalls++;
       if (listError) throw listError;
+      if (listResponse !== undefined) return listResponse;
       return structuredClone([...sessions, ...created]);
     },
     async readSession(id) {
@@ -140,11 +151,10 @@ test("ensure creates exactly one role session, binds generation 1, and stamps th
   assert.ok(first.binding.currentOperation);
   assert.equal(first.binding.pendingOperation, null);
 
-  // The marker receipt: the session record carries the exact marker.
   const session = oc.created[0];
   assert.equal(session.title, ROLE_SESSION_TITLE);
   assert.equal(session.directory, controlDir);
-  assert.equal(session.metadata.role, BINDING_ROLE);
+  assert.equal(session.metadata.role, CONVERSATION_ROLE);
   assert.equal(session.metadata.bindingOperation, first.binding.currentOperation);
   assert.equal(session.metadata.bindingGeneration, 1);
 
@@ -172,18 +182,326 @@ test("ensure requires an oc client (production composition is explicit)", () => 
   assert.throws(() => createCtoBinding({ oc: { createSession() {} } }), /oc client with createSession/);
 });
 
-test("concurrent ensure calls join one flight — exactly one creation", async () => {
+// ---------------------------------------------------------------------------
+// Shared singleflight — ensure + recover, across engine instances (blocker 1)
+// ---------------------------------------------------------------------------
+
+test("concurrent ensure AND recover calls join one flight — exactly one creation", async () => {
   const oc = fakeOc();
   const svc = makeService({ oc });
-  const results = await Promise.all(Array.from({ length: 5 }, () => svc.ensure()));
+  const results = await Promise.all([
+    svc.ensure(),
+    svc.recover(),
+    svc.ensure(),
+    svc.recover(),
+    svc.ensure(),
+  ]);
   assert.equal(oc.createCalls, 1);
   const ids = new Set(results.map((r) => r.binding.currentSessionId));
   assert.equal(ids.size, 1);
   assert.ok(ids.has(oc.created[0].id));
 });
 
+test("two engine instances over the SAME store share the flight — one creation", async () => {
+  const oc = fakeOc();
+  const store = memoryStore("binding-shared");
+  const a = makeService({ oc, store });
+  const b = makeService({ oc, store });
+  const [ra, rb] = await Promise.all([a.ensure(), b.ensure()]);
+  assert.equal(oc.createCalls, 1);
+  assert.equal(ra.binding.currentSessionId, rb.binding.currentSessionId);
+  assert.ok(rb.binding.currentSessionId);
+});
+
 // ---------------------------------------------------------------------------
-// Durable role, not ephemeral: never reaped, provenance tombstoned
+// CAS — a stale missing lookup must not replace a prior bind (blocker 1)
+// ---------------------------------------------------------------------------
+
+test("stale missing lookup + prior bind: reservation CAS defers, the prior bind is never overwritten", async () => {
+  const oc = fakeOc({
+    sessions: [
+      // The concurrently-landed prior replacement, verifiable by its marker.
+      { id: "ses_replacement", title: ROLE_SESSION_TITLE, directory: "/x", time: { created: 1, updated: 1 }, metadata: { role: CONVERSATION_ROLE, bindingOperation: "op-prior-bind" } },
+    ],
+  });
+  const store = memoryStore("binding-cas");
+  const svc = makeService({ oc, store });
+  const first = await svc.ensure();
+  const staleSid = first.binding.currentSessionId;
+  const staleGeneration = first.binding.generation;
+
+  // The lookup for the bound session is stale (says missing) AND, while it
+  // runs, a concurrent bind lands (a prior replacement completes). The
+  // reservation CAS must see the moved store and refuse to create.
+  oc.readStates[staleSid] = async () => {
+    const prior = await store.load();
+    await store.save({
+      ...prior,
+      generation: staleGeneration + 1,
+      currentSessionId: "ses_replacement",
+      currentOperation: "op-prior-bind",
+      previousSessionIds: [...prior.previousSessionIds, staleSid],
+    });
+    return { state: "missing" };
+  };
+  await assert.rejects(svc.ensure(), (err) => err instanceof CtoBindingError && err.code === "deferred");
+  assert.equal(oc.createCalls, 1, "the stale pass created NOTHING");
+
+  // The store still shows the prior bind; a fresh ensure verifies and returns it.
+  const after = await svc.ensure();
+  assert.equal(after.created, false);
+  assert.equal(after.binding.currentSessionId, "ses_replacement");
+  assert.equal(after.binding.generation, staleGeneration + 1);
+});
+
+// ---------------------------------------------------------------------------
+// Unknown create outcome — reservation retained, never absence-proof re-created
+// ---------------------------------------------------------------------------
+
+test("an unknown create failure retains the reservation; a marker-absent scan NEVER re-creates", async () => {
+  const controlDir = tempControlDir(randomUUID());
+  const oc = fakeOc({ failCreates: 1 }); // throws WITHOUT a status → unknown
+  const store = memoryStore("binding-unknown");
+  const svc = createCtoBinding({ oc, store, controlDir, sleep: noopSleep });
+
+  await assert.rejects(svc.ensure(), (err) => err instanceof CtoBindingError && err.code === "create-unknown");
+  assert.equal(oc.createCalls, 1, "one create attempt per ensure — no in-service retry loop");
+  assert.ok((await store.load()).pendingOperation, "reservation retained");
+
+  // A later ensure scans; the marker is absent; it must STILL not create.
+  await assert.rejects(svc.ensure(), (err) => err.code === "unknown-state");
+  assert.equal(oc.createCalls, 1);
+  assert.ok((await store.load()).pendingOperation);
+});
+
+test("a retained reservation settles when the marker session becomes identifiable (late landing)", async () => {
+  const controlDir = tempControlDir(randomUUID());
+  const oc = fakeOc({ failCreates: 1 });
+  const store = memoryStore("binding-settle");
+  const svc = createCtoBinding({ oc, store, controlDir, sleep: noopSleep });
+
+  await assert.rejects(svc.ensure(), () => true); // unknown outcome, retained
+  const op = (await store.load()).pendingOperation;
+  assert.ok(op);
+
+  // The in-flight create lands LATE (after the earlier list snapshot) with
+  // the exact marker: the next ensure settles by identification, not absence.
+  oc.created.push({
+    id: "ses_late-landing",
+    title: ROLE_SESSION_TITLE,
+    directory: controlDir,
+    time: { created: 1, updated: 1 },
+    metadata: markerFor(op),
+  });
+  const result = await svc.ensure();
+  assert.equal(result.created, false);
+  assert.ok(result.actions.some((a) => a.action === "adopted"));
+  assert.equal(result.binding.currentSessionId, "ses_late-landing");
+  assert.equal(oc.createCalls, 1);
+  assert.equal(result.binding.pendingOperation, null);
+});
+
+test("a DEFINITIVE opencode rejection (4xx) clears its own reservation; the next ensure may create", async () => {
+  const oc = fakeOc({ failCreates: 1, createStatus: 400 });
+  const store = memoryStore("binding-reject");
+  const svc = makeService({ oc, store });
+
+  await assert.rejects(svc.ensure(), (err) => err instanceof CtoBindingError && err.code === "create-rejected");
+  assert.equal(oc.createCalls, 1);
+  assert.equal((await store.load()).pendingOperation ?? null, null, "definitive rejection clears the reservation");
+
+  const second = await svc.ensure();
+  assert.equal(second.created, true);
+  assert.equal(oc.createCalls, 2);
+  assert.equal(second.binding.currentSessionId, oc.created[0].id);
+});
+
+test("a malformed list response is uncertainty, never [] / absence — reservation retained", async () => {
+  const controlDir = tempControlDir(randomUUID());
+  for (const malformed of [null, "garbage", 42, { not: "an array" }]) {
+    const store = memoryStore("binding-malformed");
+    await store.save({ ...EMPTY_BINDING, pendingOperation: { operation: `op-${randomUUID()}`, generation: 1, directory: controlDir, startedAt: Date.now() } });
+    const oc = fakeOc({ listResponse: malformed });
+    const svc = createCtoBinding({ oc, store, controlDir, sleep: noopSleep });
+    await assert.rejects(svc.ensure(), (err) => err instanceof CtoBindingError && err.code === "unknown-state");
+    assert.equal(oc.createCalls, 0, `${typeof malformed} list response must not read as absence`);
+    assert.ok((await store.load()).pendingOperation);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Unsupported identity — created sid persisted, terminal, never a loop (blocker 2)
+// ---------------------------------------------------------------------------
+
+test("a created session whose metadata was not preserved persists the sid + unsupported identity and stops", async () => {
+  const controlDir = tempControlDir(randomUUID());
+  const oc = fakeOc();
+  // Simulate an opencode regression: the session record loses its metadata.
+  const origCreate = oc.createSession;
+  oc.createSession = async (args) => {
+    const s = await origCreate(args);
+    // Mutate the STORED record (what readSession returns), not the clone.
+    oc.created[oc.created.length - 1].metadata = null;
+    void s;
+    return structuredClone(oc.created[oc.created.length - 1]);
+  };
+  const store = memoryStore("binding-unsupported");
+  const svc = createCtoBinding({ oc, store, controlDir, sleep: noopSleep });
+
+  await assert.rejects(svc.ensure(), (err) => err instanceof CtoBindingError && err.code === "unsupported-identity");
+  assert.equal(oc.createCalls, 1);
+
+  // The sid + failure state are PERSISTED (not lost with the error).
+  const pending = (await store.load()).pendingOperation;
+  assert.ok(pending?.unsupportedIdentity === true);
+  assert.equal(pending.createdSessionId, oc.created[0].id);
+
+  // Every later ensure fails explicitly and NEVER creates again — no 3-create loop.
+  for (let i = 0; i < 3; i++) {
+    await assert.rejects(svc.ensure(), (err) => err.code === "unsupported-identity");
+    await assert.rejects(svc.recover(), (err) => err.code === "unsupported-identity");
+  }
+  assert.equal(oc.createCalls, 1);
+  assert.equal(oc.listCalls, 0, "no marker scan can adopt an unidentifiable session");
+});
+
+// ---------------------------------------------------------------------------
+// Deadlines — hung headers / hung body through the actual transport signal (blocker 3)
+// ---------------------------------------------------------------------------
+
+test("every oc call carries an AbortSignal deadline: hung create headers fail bounded through the transport signal", async () => {
+  const deadlineMs = 120;
+  const signals = [];
+  const prev = ocModule._setOcTransport((url, init = {}) => {
+    signals.push(init.signal);
+    // (a) hung HEADERS: the transport promise never settles...
+    return new Promise(() => {});
+  });
+  ocModule._resetSessionDirectoryCache();
+  // AbortSignal.timeout timers deliberately do NOT keep the event loop alive —
+  // hold it open for the deadline ourselves.
+  const keepAlive = setTimeout(() => {}, deadlineMs + 500);
+  try {
+    const svc = createCtoBinding({
+      oc: { createSession: ocModule.createSession, listSessions: ocModule.listSessions, readSession: ocModule.readSession },
+      store: memoryStore("binding-deadline"),
+      controlDir: tempControlDir(randomUUID()),
+      sleep: noopSleep,
+      requestDeadlineMs: deadlineMs,
+    });
+    const t0 = Date.now();
+    // (a) hung create headers → the deadline classifies the create as unknown.
+    await assert.rejects(
+      svc.ensure(),
+      (err) => err instanceof CtoBindingError && err.code === "create-unknown" && /deadline/.test(err.message),
+    );
+    const elapsed = Date.now() - t0;
+    assert.ok(elapsed >= deadlineMs - 30, `deadline respected (${elapsed}ms)`);
+    assert.ok(elapsed < DEFAULT_REQUEST_DEADLINE_MS, "bounded well under the default");
+
+    // The signal reached the actual transport (http.request honors it) and
+    // fired at the deadline.
+    assert.equal(signals.length, 1, "one deadline signal per bounded call");
+    assert.equal(signals[0].aborted, true, "the transport signal actually aborted");
+  } finally {
+    clearTimeout(keepAlive);
+    ocModule._setOcTransport(prev);
+    ocModule._resetSessionDirectoryCache();
+  }
+});
+
+test("a hung response BODY on the liveness read is bounded uncertainty, never a replacement", async () => {
+  const deadlineMs = 120;
+  const signals = [];
+  const prev = ocModule._setOcTransport(async (url, init = {}) => {
+    signals.push(init.signal);
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new Uint8Array([123])); // headers arrive...
+      }, // ...the body never closes
+    });
+    return new Response(body, { status: 200, headers: { "content-type": "application/json" } });
+  });
+  const keepAlive = setTimeout(() => {}, deadlineMs + 500);
+  try {
+    const store = memoryStore("binding-body-deadline");
+    await store.save({ ...EMPTY_BINDING, generation: 1, currentSessionId: "ses_bound", currentOperation: "op-bound" });
+    const svc = createCtoBinding({
+      oc: { createSession: ocModule.createSession, listSessions: ocModule.listSessions, readSession: ocModule.readSession },
+      store,
+      controlDir: tempControlDir(randomUUID()),
+      sleep: noopSleep,
+      requestDeadlineMs: deadlineMs,
+    });
+    const t0 = Date.now();
+    const result = await svc.ensure();
+    const elapsed = Date.now() - t0;
+    assert.ok(elapsed >= deadlineMs - 30 && elapsed < DEFAULT_REQUEST_DEADLINE_MS, `bounded (${elapsed}ms)`);
+    assert.equal(result.uncertain, true);
+    assert.equal(result.uncertainReason, "unknown");
+    assert.equal(result.binding.currentSessionId, "ses_bound");
+    assert.equal(signals[0].aborted, true);
+  } finally {
+    clearTimeout(keepAlive);
+    ocModule._setOcTransport(prev);
+  }
+});
+
+test("a hung list response on a pending reservation fails bounded and retains the reservation", async () => {
+  const deadlineMs = 100;
+  const signals = [];
+  const prev = ocModule._setOcTransport(() => {
+    return new Promise((resolve) => {
+      signals.push(true);
+      void resolve; // hung headers — never resolves
+    });
+  });
+  const keepAlive = setTimeout(() => {}, deadlineMs * RECONCILE_ATTEMPTS + 1000);
+  try {
+    const controlDir = tempControlDir(randomUUID());
+    const store = memoryStore("binding-list-deadline");
+    await store.save({ ...EMPTY_BINDING, pendingOperation: { operation: "op-hung", generation: 1, directory: controlDir, startedAt: Date.now() } });
+    const svc = createCtoBinding({
+      oc: { createSession: ocModule.createSession, listSessions: ocModule.listSessions, readSession: ocModule.readSession },
+      store,
+      controlDir,
+      sleep: noopSleep,
+      requestDeadlineMs: deadlineMs,
+    });
+    await assert.rejects(svc.ensure(), (err) => err instanceof CtoBindingError && err.code === "unknown-state");
+    assert.ok(signals.length >= RECONCILE_ATTEMPTS, "bounded scan attempts");
+    assert.equal((await store.load()).pendingOperation?.operation, "op-hung", "retained");
+  } finally {
+    clearTimeout(keepAlive);
+    ocModule._setOcTransport(prev);
+  }
+});
+
+test("a create that times out is an UNKNOWN outcome — reservation retained, no blind retry", async () => {
+  const deadlineMs = 100;
+  const oc = fakeOc();
+  oc.createSession = async () => {
+    oc.createCalls++;
+    return new Promise(() => {});
+  }; // hung create
+  const store = memoryStore("binding-create-deadline");
+  const svc = makeService({ oc, store, requestDeadlineMs: deadlineMs });
+  const keepAlive = setTimeout(() => {}, deadlineMs * 2 + 500);
+
+  try {
+    await assert.rejects(svc.ensure(), (err) => err instanceof CtoBindingError && err.code === "create-unknown");
+    assert.equal(oc.createCalls, 1);
+    assert.ok((await store.load()).pendingOperation, "retained for marker settlement");
+    // A retry does NOT create again while the outcome is unsettled.
+    await assert.rejects(svc.ensure(), (err) => err.code === "unknown-state");
+    assert.equal(oc.createCalls, 1);
+  } finally {
+    clearTimeout(keepAlive);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Durable role, not ephemeral: never reaped, distinct provenance (blocker 4)
 // ---------------------------------------------------------------------------
 
 test("the durable role session never matches the ephemeral reaper (title prefix) and is not a reap candidate", async () => {
@@ -195,25 +513,28 @@ test("the durable role session never matches the ephemeral reaper (title prefix)
   assert.deepEqual(selectReapCandidates({ sessions: [session], nowMs: Date.now() + 10 * 60_000 }), []);
 });
 
-test("the bound session is registered in the never-swept provenance tombstones (CTO-owned, not a TTL registry)", async () => {
+test("the durable conversation is NOT registered in the generic internal tombstones — provenance is the binding itself", async () => {
+  _resetConversationRoleCache();
   const oc = fakeOc();
-  const provenanceStore = memoryStore("prov");
-  const svc = makeService({ oc, provenanceStore });
+  // The DEFAULT (sandboxed) binding store — readConversationRole reads it.
+  const svc = createCtoBinding({ oc, controlDir: tempControlDir(randomUUID()), sleep: noopSleep });
   const { binding } = await svc.ensure();
-  const payload = await provenanceStore.load();
-  assert.ok(Array.isArray(payload.ids));
-  assert.ok(payload.ids.includes(binding.currentSessionId));
-  // Idempotent: re-ensuring does not duplicate the tombstone.
-  await svc.ensure();
-  const again = await provenanceStore.load();
-  assert.equal(again.ids.filter((id) => id === binding.currentSessionId).length, 1);
+
+  const tombstones = await internalSessionsStore.load();
+  assert.ok(!Array.isArray(tombstones.ids) || !tombstones.ids.includes(binding.currentSessionId));
+
+  // The distinct role lookup: current sid → conversation; anything else → no.
+  assert.equal(await readConversationRole(binding.currentSessionId), true);
+  assert.equal(await readConversationRole("ses_something-else"), false);
+  assert.equal(await readConversationRole(null), false);
+  assert.equal(await readConversationRole(binding.previousSessionIds[0] ?? "ses_other"), false);
 });
 
 // ---------------------------------------------------------------------------
-// Control directory — exists, owned, marked, never a repository
+// Control directory — exists, owned, marked, never a repository, never redirected
 // ---------------------------------------------------------------------------
 
-test("the control directory is created 0700, marker file written, and opencode points at it", async () => {
+test("the control directory is created 0700 (enforced), marker written, and opencode points at it", async () => {
   const oc = fakeOc();
   const controlDir = tempControlDir(randomUUID());
   const svc = makeService({ oc, controlDir });
@@ -221,25 +542,59 @@ test("the control directory is created 0700, marker file written, and opencode p
 
   const dirStat = await stat(controlDir);
   assert.equal(dirStat.mode & 0o777, 0o700);
+  // Pre-existing wider permissions are corrected on every ensure.
+  await chmod(controlDir, 0o755);
+  await svc.ensure();
+  assert.equal((await stat(controlDir)).mode & 0o777, 0o700);
   const marker = JSON.parse(await readFile(join(controlDir, CONTROL_MARKER_FILENAME), "utf8"));
   assert.equal(marker.kind, "manta-cto-control-directory");
-  assert.equal(marker.role, BINDING_ROLE);
+  assert.equal(marker.role, CONVERSATION_ROLE);
   assert.equal(oc.created[0].directory, controlDir);
 });
 
 test("defaultControlDir resolves inside the state-home sandbox (never the live box)", () => {
-  const sandbox = process.env.MANTA_STATE_HOME;
+  const sandbox = stateHome();
   assert.ok(sandbox && sandbox.trim() !== "");
   assert.ok(defaultControlDir().startsWith(sandbox));
 });
 
-test("a .git inside the control directory refuses to bind — no repository execution", async () => {
-  const oc = fakeOc();
+test("a .git in the control directory OR ANY ANCESTOR up to the state home refuses to bind", async () => {
   const controlDir = tempControlDir(randomUUID());
+  const oc = fakeOc();
   const svc = makeService({ oc, controlDir });
+
+  // Direct .git
   await mkdir(join(controlDir, ".git"), { recursive: true });
-  await assert.rejects(svc.ensure(), (err) => err instanceof CtoBindingError && err.code === "control-directory-repository");
+  await assert.rejects(svc.ensure(), (err) => err.code === "control-directory-repository");
   assert.equal(oc.createCalls, 0);
+
+  // Ancestor .git (the label directory between controlDir and the state home)
+  const labelDir = dirname(controlDir);
+  await rm(join(controlDir, ".git"), { recursive: true });
+  await mkdir(join(labelDir, ".git"), { recursive: true });
+  await assert.rejects(svc.ensure(), (err) => err.code === "control-directory-repository");
+  assert.equal(oc.createCalls, 0);
+});
+
+test("a symlink redirecting the control directory outside the state home is refused", async () => {
+  const { mkdtemp, symlink, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const external = await mkdtemp(join(tmpdir(), "cto-p3a1-external-"));
+  const controlDir = tempControlDir(randomUUID());
+  await mkdir(dirname(controlDir), { recursive: true });
+  await symlink(external, controlDir, "dir");
+  const oc = fakeOc();
+  const svc = makeService({ oc, controlDir });
+  try {
+    await assert.rejects(
+      svc.ensure(),
+      (err) => err.code === "control-directory-outside-state-home",
+    );
+    assert.equal(oc.createCalls, 0);
+  } finally {
+    await rm(controlDir);
+    await rm(external, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -264,16 +619,16 @@ test("crash after remote create before binding — a fresh instance recovers by 
     },
   };
 
-  // The dying process: reservation lands, create lands remotely, the bind
-  // write is lost. The retry sleep throwing simulates the hard kill before
-  // the loop could self-heal — the store state is exactly post-crash state.
-  const dying = createCtoBinding({ oc, store, controlDir, sleep: async () => { throw new Error("simulated hard kill"); } });
-  await assert.rejects(() => dying.ensure(), /simulated hard kill/);
+  const dying = createCtoBinding({ oc, store, controlDir, sleep: noopSleep });
+  // With no in-service create retry, the lost bind write IS the crash: the
+  // process dies right here, store holding the reservation, session existing.
+  await assert.rejects(() => dying.ensure(), /bind write lost/);
   assert.equal(oc.createCalls, 1);
   assert.ok(payload.pendingOperation, "reservation survives the crash");
   const reservedOp = payload.pendingOperation;
+  assert.equal(reservedOp.expectedGeneration, 0);
+  assert.equal(reservedOp.expectedCurrentSessionId, null);
 
-  // A fresh process (same store, same opencode) recovers without duplicating.
   const fresh = createCtoBinding({ oc, store, controlDir, sleep: noopSleep });
   const result = await fresh.ensure();
   assert.equal(result.created, false);
@@ -289,93 +644,23 @@ test("recovery matches the EXACT operation marker — same-titled decoys with ot
   const controlDir = tempControlDir(randomUUID());
   const decoys = [
     { id: "ses_decoy-same-title", title: ROLE_SESSION_TITLE, directory: controlDir, metadata: null, time: { created: 1, updated: 1 } },
-    { id: "ses_decoy-other-op", title: ROLE_SESSION_TITLE, directory: controlDir, metadata: { role: BINDING_ROLE, bindingOperation: "op-someone-else" }, time: { created: 1, updated: 1 } },
-    { id: "ses_decoy-role-only", title: "cto:ambient", directory: controlDir, metadata: { role: BINDING_ROLE }, time: { created: 1, updated: 1 } },
+    { id: "ses_decoy-other-op", title: ROLE_SESSION_TITLE, directory: controlDir, metadata: { role: CONVERSATION_ROLE, bindingOperation: "op-someone-else" }, time: { created: 1, updated: 1 } },
+    { id: "ses_decoy-role-only", title: "cto:ambient", directory: controlDir, metadata: { role: CONVERSATION_ROLE }, time: { created: 1, updated: 1 } },
   ];
   const oc = fakeOc({ sessions: decoys });
   const store = memoryStore("binding-decoy");
-  // A crash-style reservation whose session never landed.
+  // A crash-style reservation whose session never landed: the marker scan
+  // finds nothing (decoys never match), the reservation is RETAINED, and no
+  // duplicate is created.
   await store.save({ ...EMPTY_BINDING, pendingOperation: { operation: "op-lost", generation: 1, directory: controlDir, startedAt: Date.now() } });
   const svc = createCtoBinding({ oc, store, controlDir, sleep: noopSleep });
 
-  const result = await svc.ensure();
-  // The scan proved definitive absence (page non-full) → cleared → fresh create.
-  assert.ok(result.actions.some((a) => a.action === "reservation-cleared"));
-  assert.equal(oc.createCalls, 1);
-  assert.equal(result.binding.currentSessionId, oc.created[0].id);
-  assert.notEqual(result.binding.currentSessionId, "ses_decoy-same-title");
-  assert.notEqual(result.binding.currentSessionId, "ses_decoy-other-op");
-  assert.equal(result.binding.generation, 1);
-});
-
-test("a failed create leaves the reservation for marker reconciliation, then the bounded retry succeeds — no blind duplicate", async () => {
-  const oc = fakeOc({ failCreates: 1 });
-  const svc = makeService({ oc });
-  const result = await svc.ensure();
-  assert.equal(oc.createCalls, 2, "first attempt failed unknown, second ran after reconcile-to-absent");
-  assert.equal(result.created, true);
-  assert.equal(result.binding.pendingOperation, null);
-  assert.equal(oc.created.length, 1, "the failed attempt left no session to adopt");
-  assert.equal(result.binding.currentSessionId, oc.created[0].id);
-});
-
-test("an unresolvable pending marker (opencode unreachable) fails LOUDLY after bounded attempts — no create, reservation kept", async () => {
-  const controlDir = tempControlDir(randomUUID());
-  const store = memoryStore("binding-stuck");
-  await store.save({ ...EMPTY_BINDING, pendingOperation: { operation: "op-stuck", generation: 1, directory: controlDir, startedAt: Date.now() } });
-  const oc = fakeOc({ listError: new Error("opencode down") });
-  const svc = createCtoBinding({ oc, store, controlDir, sleep: noopSleep });
-
   await assert.rejects(svc.ensure(), (err) => err instanceof CtoBindingError && err.code === "unknown-state");
   assert.equal(oc.createCalls, 0);
-  assert.ok(oc.listCalls >= RECONCILE_ATTEMPTS, "bounded scan attempts happened");
-  const after = await store.load();
-  assert.equal(after.pendingOperation?.operation, "op-stuck", "reservation preserved for recovery");
-});
-
-test("a marker outside the provable list-page window is uncertainty, not absence — no create", async () => {
-  const controlDir = tempControlDir(randomUUID());
-  const startedAt = 1_000_000;
-  // Full page (100) of entries all updated AFTER the reservation instant:
-  // the marker session could have scrolled off the newest-100 page.
-  const fullPage = Array.from({ length: 100 }, (_, i) => ({
-    id: `ses_churn${i}`,
-    title: `churn ${i}`,
-    metadata: null,
-    time: { created: startedAt + 5_000, updated: startedAt + 5_000 + i },
-  }));
-  const store = memoryStore("binding-horizon");
-  await store.save({ ...EMPTY_BINDING, pendingOperation: { operation: "op-old", generation: 1, directory: controlDir, startedAt } });
-  const oc = fakeOc({ sessions: fullPage });
-  const svc = createCtoBinding({ oc, store, controlDir, sleep: noopSleep });
-
-  await assert.rejects(svc.ensure(), (err) => err instanceof CtoBindingError && err.code === "unknown-state");
+  assert.notEqual((await store.load()).pendingOperation, null);
+  const recoverResult = await svc.recover();
+  assert.equal(recoverResult.uncertain, true);
   assert.equal(oc.createCalls, 0);
-  assert.equal((await store.load()).pendingOperation?.operation, "op-old");
-});
-
-test("a marker whose window IS provable (page oldest predates the op) resolves as definitive absence", async () => {
-  const controlDir = tempControlDir(randomUUID());
-  const startedAt = 1_000_000;
-  // Full page, but its oldest entry predates the reservation instant — a
-  // created session would rank above it, so absence from the page proves
-  // the create never landed.
-  const fullPage = Array.from({ length: 100 }, (_, i) => ({
-    id: `ses_old${i}`,
-    title: `old ${i}`,
-    metadata: null,
-    time: { created: startedAt - 10_000, updated: startedAt - 10_000 + i },
-  }));
-  const store = memoryStore("binding-window");
-  await store.save({ ...EMPTY_BINDING, pendingOperation: { operation: "op-old", generation: 1, directory: controlDir, startedAt } });
-  const oc = fakeOc({ sessions: fullPage });
-  const svc = createCtoBinding({ oc, store, controlDir, sleep: noopSleep });
-
-  const result = await svc.ensure();
-  assert.ok(result.actions.some((a) => a.action === "reservation-cleared"));
-  assert.equal(result.created, true);
-  assert.equal(oc.createCalls, 1);
-  assert.equal(result.binding.generation, 1);
 });
 
 // ---------------------------------------------------------------------------
@@ -427,41 +712,7 @@ test("a DEFINITIVELY absent bound session is replaced: generation bumps, history
   assert.equal(second.binding.generation, 2);
   assert.deepEqual(second.binding.previousSessionIds, [oldId]);
   assert.notEqual(second.binding.currentSessionId, oldId);
-  // The old session is NOT deleted — the archive reference still resolves.
   assert.ok((await oc.listSessions()).some((s) => s.id === oldId));
-});
-
-test("successive replacements accumulate generation history without deleting archives", async () => {
-  const oc = fakeOc();
-  const svc = makeService({ oc });
-  const ids = [];
-  for (let i = 0; i < 3; i++) {
-    const result = await svc.ensure();
-    ids.push(result.binding.currentSessionId);
-    if (i < 2) oc.readStates[ids[i]] = () => ({ state: "missing" });
-  }
-  const binding = await svc.getBinding();
-  assert.equal(binding.generation, 3);
-  assert.deepEqual(binding.previousSessionIds, [ids[0], ids[1]]);
-  assert.ok(oc.created.length >= 3);
-});
-
-// ---------------------------------------------------------------------------
-// recover() — explicit reconcile pass
-// ---------------------------------------------------------------------------
-
-test("recover(): nothing bound is a no-op (creation is ensure's job); bound+alive is a no-op", async () => {
-  const oc = fakeOc();
-  const svc = makeService({ oc });
-  const empty = await svc.recover();
-  assert.equal(empty.binding.currentSessionId, null);
-  assert.equal(oc.createCalls, 0);
-
-  await svc.ensure();
-  const alive = await svc.recover();
-  assert.equal(alive.replaced, undefined);
-  assert.equal(alive.uncertain, undefined);
-  assert.equal(oc.createCalls, 1);
 });
 
 test("recover(): definitively absent bound session is replaced with a replacement generation", async () => {
@@ -483,8 +734,6 @@ test("recover(): a crashed reservation whose session landed is adopted by exact 
   const oc = fakeOc();
   const store = memoryStore("binding-recover");
   const svc = createCtoBinding({ oc, store, controlDir, sleep: noopSleep });
-  // Simulate the crash window directly: reserve the marker, create remotely,
-  // persist only the reservation — then recover.
   const op = { operation: `op-${randomUUID()}`, generation: 1, directory: controlDir, startedAt: Date.now() };
   const session = await oc.createSession({ directory: controlDir, title: ROLE_SESSION_TITLE, metadata: markerFor(op) });
   await store.save({ ...EMPTY_BINDING, pendingOperation: op });
@@ -497,22 +746,57 @@ test("recover(): a crashed reservation whose session landed is adopted by exact 
 });
 
 // ---------------------------------------------------------------------------
-// Corrupt store — loud, never silently "unbound"
+// Archive — never capped, never dropped; queries paginate (blocker 6)
 // ---------------------------------------------------------------------------
 
-test("a corrupt binding store fails ensure loudly and creates nothing (never resets to unbound)", async () => {
+test("more than 10 generations: the archive keeps EVERY reference; pagination slices without dropping", async () => {
   const oc = fakeOc();
-  await mkdir(dirname(bindingStore.path), { recursive: true });
-  await writeFile(bindingStore.path, "{ definitely not json", "utf8");
-  const svc = createCtoBinding({ oc, controlDir: tempControlDir(randomUUID()), sleep: noopSleep });
-  await assert.rejects(svc.ensure(), (err) => err instanceof CtoBindingError && err.code === "store-unreadable");
-  await assert.rejects(svc.getBinding(), (err) => err.code === "store-unreadable");
-  assert.equal(oc.createCalls, 0);
+  const store = memoryStore("binding-archive");
+  const svc = createCtoBinding({ oc, store, controlDir: tempControlDir(randomUUID()), sleep: noopSleep });
+  const ids = [];
+  for (let i = 0; i < 12; i++) {
+    const result = await svc.ensure();
+    ids.push(result.binding.currentSessionId);
+    oc.readStates[ids[i]] = () => ({ state: "missing" });
+  }
+  const binding = await svc.getBinding();
+  assert.equal(binding.generation, 12);
+  assert.equal(binding.previousSessionIds.length, 11, "every replaced session is preserved");
+  assert.deepEqual(binding.previousSessionIds, ids.slice(0, 11));
+
+  // Pagination: most-recent-first windows, store untouched.
+  const page = await svc.getBinding({ previousLimit: 3 });
+  assert.deepEqual(page.previousSessionIds, ids.slice(8, 11));
+  assert.equal(page.previousSessionIdsTotal, 11);
+  const page2 = await svc.getBinding({ previousLimit: 3, previousOffset: 3 });
+  assert.deepEqual(page2.previousSessionIds, ids.slice(5, 8));
+  assert.equal(page2.previousSessionIdsTotal, 11);
+  await assert.rejects(svc.getBinding({ previousLimit: 0 }), /previousLimit/);
+  assert.deepEqual(capPrevious(["a", "a", "b"]), ["a", "b"]);
 });
 
 // ---------------------------------------------------------------------------
-// Pure helpers
+// Corrupt store — loud, never silently "unbound" (blocker 5)
 // ---------------------------------------------------------------------------
+
+test("strict top-level null/array/string payloads are CORRUPTION, never the default; only a missing file initializes", async () => {
+  const oc = fakeOc();
+  await mkdir(dirname(bindingStore.path), { recursive: true });
+  for (const corrupt of ["null", "[1,2]", '"str"', "{ definitely not json"]) {
+    await writeFile(bindingStore.path, corrupt, "utf8");
+    const svc = createCtoBinding({ oc, controlDir: tempControlDir(randomUUID()), sleep: noopSleep });
+    await assert.rejects(svc.ensure(), (err) => err instanceof CtoBindingError && err.code === "store-unreadable");
+    await assert.rejects(svc.getBinding(), () => true);
+    assert.equal(oc.createCalls, 0, `${corrupt} must never read as unbound`);
+  }
+
+  // A MISSING store file is the only default-initializing state.
+  const { rm: rmFile } = await import("node:fs/promises");
+  await rmFile(bindingStore.path, { force: true });
+  const fresh = createCtoBinding({ oc, controlDir: tempControlDir(randomUUID()), sleep: noopSleep });
+  const result = await fresh.ensure();
+  assert.equal(result.created, true);
+});
 
 test("normalizeBinding validates strictly and fails loudly on violations", () => {
   assert.deepEqual(normalizeBinding({}), {
@@ -532,20 +816,12 @@ test("normalizeBinding validates strictly and fails loudly on violations", () =>
   assert.equal(normalizeBinding({ currentSessionId: "ses_x", currentOperation: "op_x" }).currentSessionId, "ses_x");
 });
 
-test("capPrevious dedupes and keeps the most recent archives under the cap", () => {
-  assert.deepEqual(capPrevious(["a", "b", "a", "c"], 2), ["b", "c"]);
-  assert.deepEqual(capPrevious([], 3), []);
-  const ids = Array.from({ length: 20 }, (_, i) => `s${i}`);
-  assert.equal(capPrevious(ids, PREVIOUS_SESSION_IDS_CAP).length, PREVIOUS_SESSION_IDS_CAP);
-  assert.deepEqual(capPrevious(ids, PREVIOUS_SESSION_IDS_CAP), ids.slice(-PREVIOUS_SESSION_IDS_CAP));
-});
-
 test("isMarkerSession requires role AND the exact operation (never title, never role alone)", () => {
   const op = { operation: "op-1", generation: 1, directory: "/x", startedAt: 1 };
   const marked = { id: "s", title: "anything", metadata: markerFor(op) };
   assert.equal(isMarkerSession(marked, "op-1"), true);
   assert.equal(isMarkerSession(marked, "op-2"), false);
-  assert.equal(isMarkerSession({ id: "s", title: "anything", metadata: { role: BINDING_ROLE } }, "op-1"), false);
+  assert.equal(isMarkerSession({ id: "s", title: "anything", metadata: { role: CONVERSATION_ROLE } }, "op-1"), false);
   assert.equal(isMarkerSession({ id: "s", title: ROLE_SESSION_TITLE, metadata: null }, "op-1"), false);
   assert.equal(isMarkerSession(null, "op-1"), false);
 });
@@ -597,7 +873,7 @@ test("production composition: real opencode.mjs createSession sends the metadata
         createSession: ocModule.createSession,
         readSession: ocModule.readSession,
         listSessions: async () => {
-          throw new Error("listSessions not exercised in the composition test");
+          throw new Error("listSessions not exercised in this composition test");
         },
       },
       store: memoryStore("binding-composition"),
@@ -610,22 +886,43 @@ test("production composition: real opencode.mjs createSession sends the metadata
     const post = calls.find((c) => c.method === "POST" && c.path === "/session");
     assert.ok(post, "the binding create hit POST /session");
     assert.equal(post.body.title, ROLE_SESSION_TITLE);
-    assert.equal(post.body.metadata.role, BINDING_ROLE);
+    assert.equal(post.body.metadata.role, CONVERSATION_ROLE);
     assert.equal(post.body.metadata.bindingOperation, result.binding.currentOperation);
     assert.equal(post.query.directory, controlDir);
 
-    // The receipt read-back: real readSession, found with the exact marker.
     const found = await ocModule.readSession(result.binding.currentSessionId);
     assert.equal(found.state, "found");
     assert.equal(found.session.metadata.bindingOperation, result.binding.currentOperation);
 
-    // Three states: missing (404) and unknown (5xx).
     assert.equal((await ocModule.readSession("ses_never-created")).state, "missing");
     failNextRead = true;
     assert.equal((await ocModule.readSession(result.binding.currentSessionId)).state, "unknown");
   } finally {
     ocModule._setOcTransport(prev);
     ocModule._resetSessionDirectoryCache();
+  }
+});
+
+test("production composition: a 400 create carries err.status → the service treats it as a definitive rejection", async () => {
+  const prev = ocModule._setOcTransport(async () =>
+    new Response(JSON.stringify({ error: "bad request" }), { status: 400, headers: { "content-type": "application/json" } }),
+  );
+  try {
+    const store = memoryStore("binding-composition-reject");
+    const svc = createCtoBinding({
+      oc: {
+        createSession: ocModule.createSession,
+        listSessions: ocModule.listSessions,
+        readSession: ocModule.readSession,
+      },
+      store,
+      controlDir: tempControlDir(randomUUID()),
+      sleep: noopSleep,
+    });
+    await assert.rejects(svc.ensure(), (err) => err instanceof CtoBindingError && err.code === "create-rejected");
+    assert.equal((await store.load()).pendingOperation ?? null, null, "definitive rejection clears its reservation");
+  } finally {
+    ocModule._setOcTransport(prev);
   }
 });
 

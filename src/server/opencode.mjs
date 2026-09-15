@@ -495,7 +495,13 @@ export async function createSession({ directory, title = "", permission, metadat
     signal,
   });
   if (!res.ok) {
-    throw new Error(`opencode createSession ${res.status}: ${await res.text()}`);
+    const err = new Error(`opencode createSession ${res.status}: ${await res.text()}`);
+    // The numeric status lets callers distinguish a DEFINITIVE rejection
+    // (4xx — nothing was created) from an unknown outcome (network error,
+    // timeout, 5xx — the create may still have landed). The binding service
+    // clears a reservation only on the former (P3a1 review blocker 1).
+    err.status = res.status;
+    throw err;
   }
   const sess = await res.json();
   // Fall back to the EXPANDED dir, never the raw tilde (the bug we fixed).
@@ -740,9 +746,9 @@ export async function abortSession(sessionId) {
 /** List sessions scoped to a project directory.
  *  @param {string} [directory]
  */
-export async function listSessions(directory) {
+export async function listSessions(directory, { signal } = {}) {
   const qs = directory ? `?directory=${encodeURIComponent(directory)}` : "";
-  const res = await ocFetch(apiUrl(`/session${qs}`));
+  const res = await ocFetch(apiUrl(`/session${qs}`), { signal });
   if (!res.ok) {
     throw new Error(`opencode listSessions ${res.status}: ${await res.text()}`);
   }
@@ -843,10 +849,10 @@ export async function sessionExists(sessionId) {
  * @param {string} sessionId
  * @returns {Promise<{ state: "found", session: object } | { state: "missing" } | { state: "unknown" }>}
  */
-export async function readSession(sessionId) {
+export async function readSession(sessionId, { signal } = {}) {
   if (!sessionId) return { state: "missing" };
   try {
-    const res = await ocFetch(apiUrl(`/session/${encodeURIComponent(sessionId)}`));
+    const res = await ocFetch(apiUrl(`/session/${encodeURIComponent(sessionId)}`), { signal });
     if (res.status === 404) {
       await discardBody(res);
       return { state: "missing" };
