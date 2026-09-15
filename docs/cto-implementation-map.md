@@ -367,3 +367,9 @@ its user rows (CEO instructions) stay consumable under their role path; strict
 stores never read a top-level null/array/string as default; the archive is
 uncapped with query pagination; and the service states its single-writer-
 process requirement — no fake cross-process CAS guarantee.
+Round-3: an EXISTING controlDir symlink is refused outright (spec — symlink
+redirects are refused; ancestor symlinks remain fine under realpath
+containment), and an existing controlDir that resolves to the state home
+itself is refused — equality with the state home is valid only as the
+existing ancestor of a not-yet-created controlDir, so chmod can never follow
+a link onto the state home or any other target.

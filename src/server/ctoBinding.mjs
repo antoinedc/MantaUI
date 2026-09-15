@@ -55,7 +55,7 @@
 
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, realpath } from "node:fs/promises";
+import { chmod, lstat, mkdir, realpath } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import { stateHome, statePath } from "../shared/paths.mjs";
 import { writeJsonAtomic } from "./jsonStore.mjs";
@@ -387,7 +387,40 @@ export function createCtoBinding({
         "control-directory-outside-state-home",
       );
     }
-    // (2) Real containment of the deepest EXISTING ancestor: resolves any
+    // (2) An EXISTING controlDir must be a real directory strictly inside the
+    // state home (review round 3): a symlink is refused outright (spec —
+    // symlink redirects are refused; an ancestor symlink is still fine when
+    // realpath containment holds), anything that is not a directory is
+    // refused, and resolving to the STATE HOME ITSELF is refused — chmod
+    // follows links and would otherwise modify the redirect target. Equality
+    // with the state home is valid ONLY for the existing ANCESTOR of a
+    // not-yet-created controlDir (the anchor walk below).
+    let existingSt = null;
+    try {
+      existingSt = await lstat(controlDir);
+    } catch (err) {
+      if (err.code !== "ENOENT") {
+        throw new CtoBindingError(
+          `CTO control directory ${controlDir} cannot be inspected: ${describeErr(err)}`,
+          "control-directory-unresolvable",
+          { cause: err },
+        );
+      }
+    }
+    if (existingSt?.isSymbolicLink()) {
+      throw new CtoBindingError(
+        `CTO control directory ${controlDir} is a symlink — refusing to bind (symlink redirects are not allowed)`,
+        "control-directory-symlink",
+      );
+    }
+    const controlDirExisted = existingSt !== null;
+    if (controlDirExisted && !existingSt.isDirectory()) {
+      throw new CtoBindingError(
+        `CTO control directory ${controlDir} exists and is not a directory — refusing to bind`,
+        "control-directory-not-directory",
+      );
+    }
+    // (3) Real containment of the deepest EXISTING ancestor: resolves any
     // symlinks in the existing chain; a redirect outside the state home is
     // refused before anything is created or mode-changed.
     let anchor = controlDir;
@@ -404,6 +437,13 @@ export function createCtoBinding({
         { cause: err },
       );
     }
+    if (realAnchor === realHome && controlDirExisted) {
+      throw new CtoBindingError(
+        `CTO control directory ${controlDir} resolves to the state home ${realHome} itself — refusing to bind ` +
+          `(chmod would follow the link and modify the state home)`,
+        "control-directory-outside-state-home",
+      );
+    }
     if (!realAnchor.startsWith(realHome + sep) && realAnchor !== realHome) {
       throw new CtoBindingError(
         `CTO control directory ${controlDir} resolves to ${realAnchor}, outside the state home ${realHome} — ` +
@@ -411,7 +451,7 @@ export function createCtoBinding({
         "control-directory-outside-state-home",
       );
     }
-    // (3) No repository: the existing chain up to AND INCLUDING the state home.
+    // (4) No repository: the existing chain up to AND INCLUDING the state home.
     for (let dir = realAnchor; ; dir = dirname(dir)) {
       if (existsSync(join(dir, ".git"))) {
         throw new CtoBindingError(

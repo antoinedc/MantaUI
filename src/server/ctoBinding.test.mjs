@@ -648,7 +648,7 @@ test("a .git in the control directory OR ANY ANCESTOR (inclusive state home) ref
   }
 });
 
-test("a symlink redirecting the control directory outside the state home is refused WITHOUT touching the target", async () => {
+test("an existing controlDir symlink is refused outright WITHOUT touching its target", async () => {
   const { mkdtemp, symlink } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const external = await mkdtemp(join(tmpdir(), "cto-p3a1-external-"));
@@ -661,7 +661,7 @@ test("a symlink redirecting the control directory outside the state home is refu
   try {
     await assert.rejects(
       svc.ensure(),
-      (err) => err.code === "control-directory-outside-state-home",
+      (err) => err.code === "control-directory-symlink",
     );
     assert.equal(oc.createCalls, 0);
     // Validation precedes mutation: the rejected symlink target's mode is
@@ -672,6 +672,34 @@ test("a symlink redirecting the control directory outside the state home is refu
     await rm(controlDir);
     await rm(external, { recursive: true, force: true });
   }
+});
+
+test("a controlDir symlink pointing AT the state home is refused — the state home is never chmod'd, marked, or redirected", async () => {
+  const { symlink } = await import("node:fs/promises");
+  const homeModeBefore = (await stat(stateHome())).mode & 0o777;
+  const controlDir = tempControlDir(randomUUID());
+  await mkdir(dirname(controlDir), { recursive: true });
+  await symlink(stateHome(), controlDir, "dir");
+  const oc = fakeOc();
+  const svc = makeService({ oc, controlDir });
+  try {
+    await assert.rejects(svc.ensure(), (err) => err.code === "control-directory-symlink");
+    assert.equal(oc.createCalls, 0);
+    assert.equal((await stat(stateHome())).mode & 0o777, homeModeBefore, "state home mode unchanged");
+    assert.ok(!existsSync(join(stateHome(), CONTROL_MARKER_FILENAME)), "no marker at the state home root");
+  } finally {
+    await rm(controlDir);
+  }
+});
+
+test("a fully missing controlDir (deep chain through the state home) still creates — equality only for the existing ancestor", async () => {
+  const oc = fakeOc();
+  const controlDir = statePath("cto-binding-test", randomUUID(), "deep", "conversation");
+  const svc = makeService({ oc, controlDir });
+  const result = await svc.ensure();
+  assert.equal(result.created, true);
+  assert.equal((await stat(controlDir)).mode & 0o777, 0o700);
+  assert.equal(oc.created[0].directory, controlDir);
 });
 
 // ---------------------------------------------------------------------------
