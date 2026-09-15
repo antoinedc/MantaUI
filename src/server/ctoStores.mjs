@@ -251,9 +251,13 @@ export const calibrationStore = createCtoJsonStore("calibration", ctoPath("calib
 // still serialize; injected test stores without a path fall back to the
 // object identity (over-serialization is always safe, under-serialization
 // is not).
+//
+// Exported (P2a, unified-cto-spec §8.1): ctoWork.mjs builds per-envelope
+// store adapters keyed by the envelope's own file path and reuses THIS lock
+// map — one serialization primitive per path box-wide, never two.
 const storeWriteLocks = new Map();
 
-function lockForStore(store) {
+export function lockForStore(store) {
   const key =
     typeof store?.path === "string" && store.path
       ? store.path
@@ -358,6 +362,13 @@ export const probeStateStore = createDirJsonStore("probe-state", "probe-state");
 // Segments store — the read-layer work episodes (spec §5.1), one JSON file per
 // segment, swept 30d by sweepSegments(). Owned by the segmentation issue (A6).
 export const segmentsStore = createDirJsonStore("segments", "segments");
+// P2a (unified-cto-spec §5.1/§8.1): the durable work envelopes — one JSON file
+// per work id (`work/<id>.json`), so the ATOMIC-WRITE BOUNDARY is the single
+// work envelope (never several independently saved files, never one shared
+// portfolio file). Owned by ctoWork.mjs; reads go through its strict loader
+// (missing → null, corrupt → visible failure) rather than this store's
+// default-payload fall-through.
+export const workStore = createDirJsonStore("work", "work");
 
 // ---------------------------------------------------------------------------
 // Rollups: `rollups/<hour|day|week>/<id>.json` — one JSON file per rollup.
