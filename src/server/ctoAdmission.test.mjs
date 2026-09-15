@@ -199,6 +199,22 @@ const statusOf = (svc, id) =>
 
 const recordOf = async (svc, id) => (await svc.list()).submissions.find((s) => s.id === id);
 
+/** A fake oc whose abortSession PARKS on a manually-released latch — the
+ * standard "abort hangs past its deadline ⇒ uncertain" fixture. `onAbort`
+ * (optional) runs INSIDE the abort call before it parks (e.g. to snapshot
+ * the store at crash time). */
+function hangingAbortOc({ onAbort } = {}) {
+  let releaseAbort;
+  const abortGate = new Promise((resolve) => (releaseAbort = resolve));
+  const oc = fakeOc();
+  oc.abortSession = async (sessionId, { signal } = {}) => {
+    oc.aborts.push({ sessionId, signal: signal ?? null });
+    if (onAbort) await onAbort();
+    await abortGate;
+  };
+  return { oc, releaseAbort };
+}
+
 /**
  * A fake oc whose sendPrompt PARKS on a manually-released latch (the standard
  * "send in flight" fixture for the race tests). The parked send lands its
@@ -872,13 +888,7 @@ test("stale idle/error never terminalizes interrupt_pending when the abort is un
 });
 
 test("an UNCERTAIN abort is never retried and its barrier is permanent (fail-closed, abort_outcome_unknown) — the late original abort can never kill a next turn (blocker 2 final)", async () => {
-  let releaseAbort;
-  const abortGate = new Promise((resolve) => (releaseAbort = resolve));
-  const oc = fakeOc();
-  oc.abortSession = async (sessionId, { signal } = {}) => {
-    oc.aborts.push({ sessionId, signal: signal ?? null });
-    await abortGate; // the abort hangs past its deadline → uncertain
-  };
+  const { oc, releaseAbort } = hangingAbortOc();
   const { svc, clock } = buildService({ oc, requestDeadlineMs: 40 });
   await svc.submit({ id: "evt_t1", text: "first", origin: "human" });
   await svc.tick();
@@ -900,7 +910,7 @@ test("an UNCERTAIN abort is never retried and its barrier is permanent (fail-clo
   assert.equal(t1.abortState, "uncertain");
   assert.equal(t1.abortOutcomeReason, "abort_outcome_unknown");
   assert.equal(oc.aborts.length, 1, "NO automatic retry after uncertainty (monotonic)");
-  assert.equal(t1.abortAttempts, 1);
+  assert.equal(t1.attemptCount, 1);
   // A hypothetical second attempt / next turn: never issued, no matter how
   // long the poller runs.
   clock.t += 60_000;
@@ -958,89 +968,125 @@ test("an abort timeout retains the barrier ACROSS RESTART with no re-issue; expl
   assert.equal((await recordOf(svc2, "evt_next")).status, "queued", "the queued submission waits behind the barrier");
 });
 
-test("a crash BEFORE the abort attempt (pending) attempts ONCE from reconcile; definitive settles, uncertain downgrades to the permanent barrier", async () => {
-  const store = memoryStore(`pending-abort-${randomUUID()}`);
-  // Seed the exact crash state: the interrupt request is durable, the abort
-  // was never attempted, and the turn is long gone from the transcript.
-  const messageID = "msg_crash";
-  await store.save({
-    v: 1,
-    submissions: [
-      {
-        id: "evt_crash",
-        origin: "human",
-        text: "crashed mid-interrupt",
-        payloadHash: canonicalRequestHash({ origin: "human", text: "crashed mid-interrupt" }),
-        status: "interrupt_pending",
-        createdAt: 1,
-        submitGeneration: 3,
-        sessionId: "ses_cto",
-        messageID,
-        dispatchGeneration: 3,
-        interruptRequestedAt: 2,
-        abortState: "pending",
-      },
-    ],
+test("recovery fail-closes BOTH pending and claimed (attempted-but-unsettled) to uncertain — zero attempts, zero sends, monotonic", async () => {
+  // "claimed": the crash snapshot INSIDE the abort mock proves the durable
+  // reservation (attempt token) landed BEFORE the HTTP — the restart cannot
+  // know whether the request was issued, so it NEVER issues one.
+  let crashSnapshot = null;
+  const store = memoryStore(`claim-crash-${randomUUID()}`);
+  const { oc, releaseAbort } = hangingAbortOc({
+    // Crash snapshot taken INSIDE the abort call: it must already show the
+    // durable attempt reservation (the token landed BEFORE the HTTP).
+    onAbort: async () => {
+      crashSnapshot = JSON.parse(JSON.stringify(await store.load()));
+    },
   });
-  const oc = fakeOc();
-  oc.rows.push({ info: { id: messageID, role: "user", time: { created: 1 } }, parts: [] });
-  oc.abortTurnRow(messageID);
-  const { svc: svc2, clock } = buildService({ store, oc });
+  const { svc } = buildService({ store, oc, requestDeadlineMs: 60_000 });
+  await svc.submit({ id: "evt_c", text: "run", origin: "human" });
+  await svc.tick();
+  assert.equal(await statusOf(svc, "evt_c"), "accepted");
+  // Fire the interrupt and ABANDON it (the crash): the owner stays parked on
+  // the in-flight HTTP; its outcome is never persisted.
+  void svc.interrupt("evt_c", { reason: "stop" });
+  await flush();
+  assert.equal((await recordOf(svc, "evt_c")).abortState, "claimed");
+  assert.ok(crashSnapshot, "the snapshot was taken inside the abort call");
+  const snapRec = crashSnapshot.submissions.find((s) => s.id === "evt_c");
+  assert.equal(snapRec.abortState, "claimed", "the attempt token was durable BEFORE the HTTP");
+  assert.match(snapRec.attemptId, /^abt_/);
+  assert.equal(snapRec.attemptCount, 1);
+  assert.ok(snapRec.attemptStartedAt);
+  // RESTART: a fresh instance over the same store. Startup must issue ZERO
+  // aborts and ZERO next sends: claimed-without-owner ⇒ uncertain barrier.
+  const oc2 = fakeOc();
+  const { svc: svc2, clock } = buildService({ store, oc: oc2 });
   clock.t += 60_000;
-  await svc2.tick(); // the FIRST attempt for this request
-  let rec = await recordOf(svc2, "evt_crash");
-  assert.equal(rec.abortState, "ok", "the first attempt is definitive → settled");
-  assert.equal(rec.status, "interrupted");
-  assert.equal(oc.aborts.length, 1, "exactly one attempt");
+  await svc2.submit({ id: "evt_next", text: "next", origin: "human" });
+  await svc2.tick();
+  await svc2.tick();
+  const rec = await recordOf(svc2, "evt_c");
+  assert.equal(rec.status, "interrupt_pending", "restart barrier holds");
+  assert.equal(rec.abortState, "uncertain");
+  assert.equal(rec.abortOutcomeReason, "abort_outcome_unknown");
+  assert.ok(rec.recoveredAt);
+  assert.equal(oc2.aborts.length, 0, "startup issued zero aborts");
+  assert.equal(oc2.sends.length, 0, "startup issued zero next sends");
+  assert.equal(await statusOf(svc2, "evt_next"), "queued");
+  // Release the ORIGINAL request (the server processed it late): the dead
+  // owner's response must NOT settle the record (its state was downgraded —
+  // matching-attempt guard), and the barrier persists.
+  releaseAbort();
+  await flush();
+  clock.t += 20_000;
+  await svc2.tick();
+  const final = await recordOf(svc2, "evt_c");
+  assert.equal(final.status, "interrupt_pending", "the barrier persists after the original abort landed");
+  assert.equal(final.abortState, "uncertain");
+  assert.equal(oc2.sends.length, 0, "still no send on that sid");
 
-  // The uncertain variant: the first attempt times out → PERMANENT barrier,
-  // and later ticks never attempt again.
-  let releaseAbort;
-  const abortGate = new Promise((resolve) => (releaseAbort = resolve));
-  const store2 = memoryStore(`pending-abort2-${randomUUID()}`);
+  // "pending": a durable request with NO attempt reservation (a crash before
+  // the claim) — recovery also fail-closes it, never attempting.
+  const store2 = memoryStore(`pending-recovery-${randomUUID()}`);
   await store2.save({
     v: 1,
     submissions: [
       {
-        id: "evt_crash2",
+        id: "evt_p",
         origin: "human",
-        text: "crashed mid-interrupt 2",
-        payloadHash: canonicalRequestHash({ origin: "human", text: "crashed mid-interrupt 2" }),
+        text: "interrupted before any attempt",
+        payloadHash: canonicalRequestHash({ origin: "human", text: "interrupted before any attempt" }),
         status: "interrupt_pending",
         createdAt: 1,
         submitGeneration: 3,
         sessionId: "ses_cto",
-        messageID,
+        messageID: "msg_p",
         dispatchGeneration: 3,
         interruptRequestedAt: 2,
         abortState: "pending",
       },
     ],
   });
-  const oc2 = fakeOc();
-  oc2.rows.push({ info: { id: messageID, role: "user", time: { created: 1 } }, parts: [] });
-  oc2.abortTurnRow(messageID);
-  let hangAborts = 0;
-  oc2.abortSession = async () => {
-    hangAborts += 1;
-    await abortGate;
-  };
-  const { svc: svc3, clock: clock3 } = buildService({ store: store2, oc: oc2, requestDeadlineMs: 40 });
+  const oc3 = fakeOc();
+  oc3.rows.push({ info: { id: "msg_p", role: "user", time: { created: 1 } }, parts: [] });
+  oc3.abortTurnRow("msg_p");
+  const { svc: svc3, clock: clock3 } = buildService({ store: store2, oc: oc3 });
   clock3.t += 60_000;
-  await svc3.tick(); // first attempt → uncertain
-  let rec2 = await recordOf(svc3, "evt_crash2");
-  assert.equal(rec2.abortState, "uncertain");
-  assert.equal(rec2.abortOutcomeReason, "abort_outcome_unknown");
-  assert.equal(hangAborts, 1);
+  await svc3.tick();
+  const recP = await recordOf(svc3, "evt_p");
+  assert.equal(recP.status, "interrupt_pending");
+  assert.equal(recP.abortState, "uncertain", "pending at recovery ⇒ uncertain (simpler fail-closed recovery)");
+  assert.equal(recP.abortOutcomeReason, "abort_outcome_unknown");
+  assert.equal(oc3.aborts.length, 0, "recovery never issues an abort");
+  clock3.t += 60_000;
+  await svc3.tick();
+  assert.equal(oc3.aborts.length, 0, "and never does — uncertainty is final");
+});
+
+test("concurrent interrupt + reconcile claims AT MOST ONE abort attempt; a double interrupt issues exactly one", async () => {
+  const { oc, releaseAbort } = hangingAbortOc();
+  const { svc, clock } = buildService({ oc, requestDeadlineMs: 40 });
+  await svc.submit({ id: "evt_race", text: "run", origin: "human" });
+  await svc.tick();
+  assert.equal(await statusOf(svc, "evt_race"), "accepted");
+  // Interrupt and reconcile race: only the interrupt claims an attempt.
+  const [interruptRes] = await Promise.all([
+    svc.interrupt("evt_race", { reason: "stop" }),
+    svc.reconcile(),
+    svc.reconcile(),
+  ]);
+  await flush();
+  assert.equal(interruptRes.status, "interrupt_pending");
+  const rec = await recordOf(svc, "evt_race");
+  assert.equal(oc.aborts.length, 1, "exactly one abort attempt was claimed and issued");
+  assert.equal(rec.abortState, "uncertain");
+  assert.equal(rec.attemptCount, 1);
+  // A second interrupt on the SAME record is idempotent: no new claim/POST.
+  const again = await svc.interrupt("evt_race", { reason: "still stop" });
+  assert.equal(again.status, "interrupt_pending");
+  clock.t += 20_000;
   releaseAbort();
-  clock3.t += 60_000;
-  await svc3.tick();
-  clock3.t += 60_000;
-  await svc3.tick();
-  rec2 = await recordOf(svc3, "evt_crash2");
-  assert.equal(rec2.abortState, "uncertain", "uncertainty is monotonic — no retries ever");
-  assert.equal(rec2.abortAttempts, 1);
-  assert.equal(hangAborts, 1, "no second attempt after uncertainty");
+  await flush();
+  assert.equal(oc.aborts.length, 1, "no second attempt ever");
 });
 
 test("reconcile settles an interrupt_pending record from transcript proof (restart mid-interrupt)", async () => {

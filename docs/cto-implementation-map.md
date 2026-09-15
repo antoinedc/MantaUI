@@ -465,3 +465,17 @@ miss a commit landing between it and the reservation; the binding claim lock sta
 the locks still release before the external POST. Pinned by latches: human-commits-before-
 claim wins via the in-mutation re-validation, and a commit during the reservation mutation
 queues behind the mutex (atomic verify+reserve, no interleave).
+Final P1 correction (offline repro): the round-4 "pending" state was only a LOCAL marker
+written before the await — an HTTP abort could already be outstanding when the store still
+said "never attempted", so a restart could issue a SECOND abort. Fixed by ordering: the
+attempt is RESERVED durably BEFORE the HTTP — one admission-lock section writes the atomic
+token (abortState "claimed" + attemptId + attemptStartedAt + attemptCount), the lock releases,
+and only then is the POST issued (local active-operation lease, no lock across the external
+await). The live owner settles ONLY its own matching attemptId (a recovery downgrade or any
+newer state is never overwritten — monotonic). Recovery treats ANY attempted-but-unsettled
+("claimed" without its owner) AND any "pending" as uncertain: reconcile NEVER issues aborts,
+no retries exist, and the same-session barrier persists until a future explicit management
+operation. Pinned by a crash snapshot taken INSIDE the abort mock (proving the token precedes
+the HTTP), a restart asserting zero aborts + zero next sends, the original request released
+afterward with the barrier persisting (the matching-attempt guard rejects the dead owner's
+late response), and concurrent interrupt+reconcile claiming at most one attempt.

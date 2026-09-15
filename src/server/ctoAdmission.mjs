@@ -28,16 +28,17 @@
 //                                    cancelRequested retained)
 //
 //   accepted ──interrupt──▶ interrupt_pending (NONTERMINAL barrier)
-//     abortState: "pending" → attempted once → "ok" (2xx) | "refused" (4xx)
-//                                      | "uncertain" (deadline/network) ⇒
-//                                        PERMANENT same-session barrier with
-//                                        reason abort_outcome_unknown — NO
-//                                        automatic retries (a new attempt's
-//                                        response can never settle the ORIGINAL
-//                                        request's uncertainty, and a late
-//                                        original abort could kill the next
-//                                        turn); resolution is a future EXPLICIT
-//                                        management operation (not built here)
+//     abortState: "pending" (durable request, NO attempt marker — nothing
+//                   proved issued) --claim under admission lock--
+//                → "claimed" (durable attempt token: attemptId +
+//                   attemptStartedAt + attemptCount persisted BEFORE the HTTP
+//                   call; no lock across the external await)
+//                → "ok" (2xx) | "refused" (4xx) | "uncertain" (deadline /
+//                   network) — the owner settles ONLY its matching attemptId
+//     recovery: ANY attempted-but-unsettled state ("claimed" with no live
+//                   owner) and any "pending" found after a restart downgrade
+//                   to "uncertain" — NEVER retried; uncertainty is permanent
+//                   (reason abort_outcome_unknown), fail-closed
 //     settle: abortState "ok" AND the transcript proves the turn ENDED
 //             (last linked assistant row no longer running — finish-agnostic,
 //             an aborted row qualifies) ⇒ interrupted;
@@ -138,18 +139,29 @@ export const STATUSES = Object.freeze([
 
 // Abort operation states on an interrupt_pending record (blocker 2 — tracked
 // separately from the turn's terminal state):
-//   pending   the abort has not definitively been attempted (no transport, or
-//             a crash between the durable request and the attempt)
-//   ok        the server CONFIRMED the abort (2xx) — settled
-//   refused   the server definitively refused (4xx) — settled
-//   uncertain the attempt timed out / network-failed — PERMANENT barrier with
-//             reason abort_outcome_unknown: the server may still process the
-//             original request at any time, a NEW attempt's response can
-//             never settle the ORIGINAL uncertainty (monotonic), and
-//             automatic retries are therefore FORBIDDEN (fail-closed).
-//             Same-session admission stays blocked until a future EXPLICIT
+//   pending   the durable interrupt request exists; NO attempt reservation
+//             marker yet (a crash here provably precedes any HTTP: the
+//             reservation is persisted BEFORE the call). Recovery treats it
+//             as uncertain — fail-closed, no attempt is issued from recovery.
+//   claimed   an attempt is RESERVED (durable attemptId + attemptStartedAt +
+//             attemptCount written under the admission lock BEFORE the HTTP
+//             call) but its outcome is not persisted. After a restart this
+//             means attempted-but-unsettled ⇒ uncertain (the HTTP may or may
+//             not have been issued / may still land) — never retried.
+//   ok        the owner's DEFINITIVE 2xx response for ITS matching attemptId.
+//   refused   the owner's definitive 4xx response for its attemptId.
+//   uncertain PERMANENT barrier with reason abort_outcome_unknown: the
+//             original request's outcome is unknown and monotonic — no new
+//             attempt may be issued, no later response may erase it, and
+//             same-session admission stays blocked until a future EXPLICIT
 //             management operation resolves it (not built here).
-export const ABORT_STATES = Object.freeze(["pending", "ok", "refused", "uncertain"]);
+export const ABORT_STATES = Object.freeze([
+  "pending",
+  "claimed",
+  "ok",
+  "refused",
+  "uncertain",
+]);
 
 // Statuses that hold the one-turn-at-a-time gate: while any of these exist
 // the admit loop must not dispatch another submission.
@@ -951,48 +963,86 @@ export function createCtoAdmission({
   }
 
 // -------------------------------------------------------------------------
-// Abort operations (blocker 2, final round): ONE bounded attempt per request.
-// A definitive response settles the abort state; an uncertain one is
-// PERMANENT and fail-closed — reason abort_outcome_unknown, same-session
-// admission barrier retained, NO automatic retries (a retry's response can
-// never settle the ORIGINAL request's uncertainty — monotonic — and a late
-// original abort could kill the next admitted turn). Resolution of an
-// uncertain abort is a future EXPLICIT management operation, not built here.
+// Abort operations (blocker 2, final round): the attempt is RESERVED
+// durably BEFORE the HTTP call — an atomic token (abortState "claimed" +
+// attemptId + attemptStartedAt + attemptCount) is written under the admission
+// lock, the lock is released, and only then is the abort POST issued (a local
+// active-operation lease marks the owner). A crash can therefore never lose
+// the fact that an attempt MIGHT be outstanding: recovery downgrades any
+// claimed-without-owner (and any pending) to a PERMANENT uncertain barrier —
+// no attempt is ever issued from recovery, and no retry ever runs. The live
+// owner settles ONLY its own matching attemptId, so a late response can never
+// overwrite a recovery downgrade (monotonic uncertainty).
 // -------------------------------------------------------------------------
-async function attemptAbort(record) {
-  activeOps.set(record.id, "abort"); // reconcile skips the in-flight abort
-  let outcome;
+async function claimAndAttemptAbort(record) {
+  // Local lease BEFORE the claim so a concurrent reconcile on this instance
+  // never races the reservation/outcome writes.
+  activeOps.set(record.id, "abort");
+  const attemptId = `abt_${newId()}`;
+  let claimed = false;
   try {
+    // 1. Durable reservation under the admission lock — BEFORE any HTTP.
+    await patchStore(store, (fresh) =>
+      casSubmission(normalizeAdmissionPayload(fresh), record.id, (r) => {
+        if (r.status !== "interrupt_pending" || r.abortState !== "pending") return null; // already claimed/settled
+        claimed = true;
+        return {
+          ...r,
+          abortState: "claimed",
+          attemptId,
+          attemptStartedAt: now(),
+          attemptCount: (r.attemptCount ?? 0) + 1,
+        };
+      }),
+    );
+    if (!claimed) return null; // exactly-once: the attempt is owned elsewhere
     if (typeof abortSession !== "function") {
-      outcome = {
+      // Nothing will ever be issued: release the claim back to pending with
+      // the surfaced reason (recovery will fail-closed it to uncertain).
+      await markFields(record.id, "interrupt_pending", {
         abortState: "pending",
+        attemptId: undefined,
+        attemptStartedAt: undefined,
         abortError: "abort-unsupported: no abortSession transport wired",
-      };
-    } else {
-      try {
-        await bounded(
-          (signal) => abortSession(record.sessionId, { signal }), // signal-propagated
-          `abortSession (${record.sessionId})`,
-        );
-        outcome = { abortState: "ok" }; // definitive: server confirmed
-      } catch (err) {
-        const definitive = typeof err?.status === "number" && err.status >= 400 && err.status < 500;
-        outcome = definitive
-          ? { abortState: "refused", abortError: describeErr(err) }
-          : // deadline/network: the server may STILL process the ORIGINAL
-            // request — uncertainty is permanent and monotonic.
-            { abortState: "uncertain", abortOutcomeReason: "abort_outcome_unknown", abortError: describeErr(err) };
-      }
+      });
+      return { abortState: "pending", abortError: "abort-unsupported: no abortSession transport wired" };
     }
+
+    // 2. External await — NO store lock held (invariant 6).
+    let outcome;
+    try {
+      await bounded(
+        (signal) => abortSession(record.sessionId, { signal }), // signal-propagated
+        `abortSession (${record.sessionId})`,
+      );
+      outcome = { abortState: "ok" }; // definitive: server confirmed
+    } catch (err) {
+      const definitive = typeof err?.status === "number" && err.status >= 400 && err.status < 500;
+      outcome = definitive
+        ? { abortState: "refused", abortError: describeErr(err) }
+        : // deadline/network: the ORIGINAL request may still land — the
+          // timeout waiter is not proof; uncertainty is permanent.
+          { abortState: "uncertain", abortOutcomeReason: "abort_outcome_unknown", abortError: describeErr(err) };
+    }
+
+    // 3. Settle ONLY the matching attempt: a recovery downgrade or any newer
+    // state must never be overwritten by this (possibly stale) response.
+    await patchStore(store, (fresh) =>
+      casSubmission(normalizeAdmissionPayload(fresh), record.id, (r) => {
+        if (r.status !== "interrupt_pending" || r.abortState !== "claimed" || r.attemptId !== attemptId) return null;
+        return {
+          ...r,
+          abortState: outcome.abortState,
+          ...(outcome.abortOutcomeReason ? { abortOutcomeReason: outcome.abortOutcomeReason } : {}),
+          ...(outcome.abortError ? { abortError: outcome.abortError } : {}),
+          abortSettledAt: now(),
+        };
+      }),
+    );
+    return outcome;
   } finally {
     if (activeOps.get(record.id) === "abort") activeOps.delete(record.id);
   }
-  await markFields(record.id, "interrupt_pending", {
-    ...outcome,
-    abortAttempts: (record.abortAttempts ?? 0) + 1,
-    lastAbortAt: now(),
-  });
-  return outcome;
 }
 
   // -------------------------------------------------------------------------
@@ -1038,46 +1088,28 @@ async function attemptAbort(record) {
             await settleInterruptPending(record, "reconciled");
             continue;
           }
-          if (record.abortState === "uncertain") {
-            // FAIL-CLOSED (final round): the original abort's outcome is
-            // unknown and monotonic — NO automatic retries (a new attempt's
-            // response can never settle it), NO settlement, and the
-            // same-session barrier persists with the explicit reason until a
-            // future EXPLICIT management operation resolves it. Only the
-            // turn-end fact is recorded for visibility.
-            const last = turnCheckedAt.get(record.id) ?? 0;
-            if (now() - last >= turnRecheckIntervalMs) {
-              turnCheckedAt.set(record.id, now());
-              const ended = await transcriptTurnEnded(record);
-              if (ended?.ended && !record.turnEndedAt) {
-                await markFields(record.id, "interrupt_pending", {
-                  turnEndedAt: now(),
-                  abortOutcomeReason: record.abortOutcomeReason ?? "abort_outcome_unknown",
-                });
-              }
-            }
-            continue;
-          }
-          // "pending": the request is durable but no attempt definitively
-          // happened (crash between the durable mark and the POST, or no
-          // transport). Attempt ONCE (the FIRST attempt for this request —
-          // not a retry); a definitive result settles in the same pass, an
-          // uncertain result downgrades to the permanent barrier above.
-          if (typeof abortSession !== "function") continue; // nothing to attempt
-          const lastAbort = record.lastAbortAt ?? 0;
-          if (record.abortAttempts && now() - lastAbort < turnRecheckIntervalMs) continue;
-          const outcome = await attemptAbort(record);
-          if (outcome.abortState === "ok" || outcome.abortState === "refused") {
-            const refreshed = await (async () => {
-              try {
-                const f = await loadStore();
-                return f.submissions.find((r) => r.id === record.id) ?? null;
-              } catch {
-                return null;
-              }
-            })();
-            if (refreshed?.status === "interrupt_pending") {
-              await settleInterruptPending(refreshed, "reconciled");
+          // "claimed" (attempted-but-unsettled: the HTTP may still land) and
+          // "pending" (no attempt reservation proved) both downgrade to the
+          // PERMANENT uncertain barrier at recovery — FAIL-CLOSED: no attempt
+          // is ever issued from reconcile, no retry ever runs, and no settle
+          // happens even when the transcript proves the turn ended. Only the
+          // turn-end fact is recorded for visibility.
+          const last = turnCheckedAt.get(record.id) ?? 0;
+          if (now() - last >= turnRecheckIntervalMs) {
+            turnCheckedAt.set(record.id, now());
+            const ended = await transcriptTurnEnded(record);
+            const downgrade = {
+              abortState: "uncertain",
+              abortOutcomeReason: record.abortOutcomeReason ?? "abort_outcome_unknown",
+              recoveredAt: now(),
+            };
+            if (ended?.ended) {
+              await markFields(record.id, "interrupt_pending", {
+                ...downgrade,
+                turnEndedAt: record.turnEndedAt ?? now(),
+              });
+            } else {
+              await markFields(record.id, "interrupt_pending", downgrade);
             }
           }
           continue;
@@ -1220,10 +1252,9 @@ async function attemptAbort(record) {
       return { ok: true, id: submissionId, status: prior.status };
     }
     if (prior.status === "accepted") {
-      // The abort attempt happens AFTER the durable request; its outcome is
-      // classified in attemptAbort (definitive vs uncertain) and the record
-      // settles only via the receipt-specific reconciliation.
-      await attemptAbort({ ...resulting, abortAttempts: 0 });
+      // The attempt is claimed durably (BEFORE the HTTP) and issued exactly
+      // once by THIS call; the outcome settles only the matching attemptId.
+      await claimAndAttemptAbort(resulting);
       return { ok: true, id: submissionId, status: "interrupt_pending" };
     }
     onTransition(resulting);
