@@ -545,11 +545,32 @@ async function deliverToBusySession(deps) {
   return { res, sent: () => sent };
 }
 
+test("deliverWebhook routes an IDLE send through the shared delivery engine too (P3a3 anti-bypass)", async () => {
+  let enqueued = null;
+  const { res, sent } = await deliverToBusySession({
+    // The engine's unified path: deliver() decides busy-defer vs idle-send
+    // INTERNALLY, so the webhook route must call it in both states.
+    enqueue: async (sid, text) => {
+      enqueued = { sid, text };
+      return { delivered: true, queued: false };
+    },
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.queued, false);
+  assert.equal(sent(), 0, "the raw sendPrompt dep must NOT be used when the engine is wired");
+  assert.equal(enqueued.sid, "ses_1");
+  assert.match(enqueued.text, /Inbound webhook/);
+});
+
 test("deliverWebhook defers (202) on a busy session instead of draining", async () => {
   let queued = null;
   const { res, sent } = await deliverToBusySession({
     isBusy: () => true,
-    enqueue: (sid, text) => { queued = { sid, text }; },
+    // The shared engine's deliver() result shape for a busy-deferred prompt.
+    enqueue: async (sid, text) => {
+      queued = { sid, text };
+      return { delivered: false, queued: true };
+    },
   });
   assert.equal(res.status, 202);
   assert.equal(res.queued, true);

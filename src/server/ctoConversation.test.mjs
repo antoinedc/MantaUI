@@ -24,6 +24,7 @@ import {
 import { createCtoBinding } from "./ctoBinding.mjs";
 import { createCtoAdmission } from "./ctoAdmission.mjs";
 import { createPromptDelivery } from "./promptDelivery.mjs";
+import { createWebhookEngine } from "./webhooks.mjs";
 import { statePath } from "../shared/paths.mjs";
 
 const noopSleep = async () => {};
@@ -118,6 +119,20 @@ function fakeOc() {
       oc.commandCalls.push(input);
       return { messageID: `cmd_${oc.commandCalls.length}` };
     },
+    /** A finished assistant row LINKED to our user message (finish: stop) —
+     * transcript proof the turn ended (mirrors ctoAdmission.test's fake). */
+    completeTurn(messageID) {
+      oc.rows.push({
+        info: {
+          id: `asst_${(asstSeq += 1)}`,
+          role: "assistant",
+          parentID: messageID,
+          finish: "stop",
+          time: { created: 2, completed: 9_000 },
+        },
+        parts: [],
+      });
+    },
   };
   return oc;
 }
@@ -175,11 +190,12 @@ const stubDeps = () => ({
 // binding + ONE admission + the conversation service, the prompt-delivery
 // engine with its redirect, and the real channel map. Agent name is a stub
 // stand-in for providers.CTO_AGENT_NAME.
-function compose() {
+function compose({ stamp, abortRaw, bindingStore } = {}) {
   const oc = fakeOc();
+  const bStore = bindingStore ?? memoryStore("binding");
   const binding = createCtoBinding({
     oc,
-    store: memoryStore("binding"),
+    store: bStore,
     controlDir: statePath("cto-conversation-test", randomUUID()),
     sleep: noopSleep,
   });
@@ -206,9 +222,28 @@ function compose() {
     binding,
     admission,
     agentName: "cto-test-agent",
+    ...(stamp ? { stamp } : {}),
+    ...(abortRaw ? { abortSession: abortRaw } : {}),
   });
   const handlers = buildHandlers({ oc, ctoConversation: svc, ...stubDeps() });
-  return { oc, binding, admission, svc, pd, handlers };
+  return { oc, binding, admission, svc, pd, handlers, bStore };
+}
+
+/** Drive the admitted turn for `ctoId` to its terminal `completed` state:
+ * transcript proof (a finished linked assistant row) + the session idle
+ * event, then wait for reconcile. */
+async function completeTurn(t, ctoId) {
+  assert.ok(t.oc.sends.length >= 1, "a send is in flight to complete");
+  t.oc.completeTurn(t.oc.sends.at(-1).messageID);
+  t.admission.observeEvent({
+    type: "session.idle",
+    properties: { sessionID: t.oc.sends.at(-1).sessionId },
+  });
+  const done = await waitFor(async () => {
+    const q = await t.admission.list();
+    return q.submissions.find((r) => r.id === ctoId)?.status === "completed";
+  });
+  assert.ok(done, `turn ${ctoId} settled completed`);
 }
 
 // ---------------------------------------------------------------------------
@@ -414,7 +449,7 @@ test("promptDelivery redirects conversation-targeted background deliveries into 
     });
     assert.equal(r1.delivered, false);
     assert.equal(r1.queued, true);
-    assert.ok(r1.ctoId.startsWith("bg_"), "stable content-mapped background id");
+    assert.ok(r1.ctoId, "a stable id was minted for the delivery");
     assert.ok(await waitFor(() => t.oc.sends.length >= 1), "background submission dispatched by admission");
 
     const st = await dispatch(t.handlers, "cto:conversation-state", []);
@@ -424,28 +459,114 @@ test("promptDelivery redirects conversation-targeted background deliveries into 
     assert.equal(row.agent, "cto-test-agent", "server-stamped agent, never from a body");
     assert.deepEqual(row.model, { providerID: "p", modelID: "m" });
     assert.equal(t.oc.pdSends.length, 0, "never sent raw through the delivery engine");
-
-    // An identical redelivery maps to the SAME stable id → dedup replay.
-    const r2 = await t.pd.deliver({
-      sessionId: open.sessionId,
-      text: "overnight check",
-      model: { providerID: "p", modelID: "m" },
-    });
-    assert.equal(r2.ctoId, r1.ctoId);
-    assert.equal(r2.persisted, false);
-    const st2 = await dispatch(t.handlers, "cto:conversation-state", []);
-    assert.equal(st2.submissions.length, 1, "no duplicate submitted turn");
   } finally {
     release();
   }
 });
 
-test("backgroundDeliveryId is stable across identical content and distinct otherwise", () => {
-  const a = backgroundDeliveryId({ text: "x", model: { providerID: "p", modelID: "m" } });
-  const b = backgroundDeliveryId({ text: "x", model: { providerID: "p", modelID: "m" } });
-  const c = backgroundDeliveryId({ text: "y", model: { providerID: "p", modelID: "m" } });
-  assert.equal(a, b);
-  assert.notEqual(a, c);
+// ---------------------------------------------------------------------------
+// Background dedupe identity = the CALLER's delivery identity, never content
+// (blocker 1: a content-derived id made a recurring identical schedule fire
+// exactly once ever — admission dedups by id even against terminal records).
+// ---------------------------------------------------------------------------
+
+test("three identical recurring deliveries (no caller identity) are three submissions and three sends", async () => {
+  const t = compose();
+  const open = await dispatch(t.handlers, "cto:conversation-open", []);
+  // Delivery #1 → dispatched → fully completed.
+  const r1 = await t.pd.deliver({ sessionId: open.sessionId, text: "overnight check" });
+  assert.ok(await waitFor(() => t.oc.sends.length >= 1));
+  await completeTurn(t, r1.ctoId);
+  // Delivery #2 — IDENTICAL text, a NEW occurrence: must be a NEW submission.
+  const r2 = await t.pd.deliver({ sessionId: open.sessionId, text: "overnight check" });
+  assert.notEqual(r2.ctoId, r1.ctoId, "identical content is never the dedupe identity");
+  assert.equal(r2.persisted, true);
+  assert.ok(await waitFor(() => t.oc.sends.length >= 2));
+  await completeTurn(t, r2.ctoId);
+  // Delivery #3 — same again.
+  const r3 = await t.pd.deliver({ sessionId: open.sessionId, text: "overnight check" });
+  assert.notEqual(r3.ctoId, r1.ctoId);
+  assert.notEqual(r3.ctoId, r2.ctoId);
+  assert.ok(await waitFor(() => t.oc.sends.length >= 3));
+  await completeTurn(t, r3.ctoId);
+
+  const st = await dispatch(t.handlers, "cto:conversation-state", []);
+  assert.equal(st.submissions.length, 3, "three occurrences, three records");
+  assert.equal(t.oc.sends.length, 3, "every occurrence actually fired");
+  assert.deepEqual(
+    st.counts,
+    { queued: { human: 0, background: 0 }, unresolved: 0, terminal: 3 },
+  );
+});
+
+test("a genuine retry with the same caller identity dedups to one submission, even against a completed record", async () => {
+  const t = compose();
+  const open = await dispatch(t.handlers, "cto:conversation-open", []);
+  // First fire of schedule job j1 at minute 15:05 → admitted + completed.
+  const r1 = await t.pd.deliver({
+    sessionId: open.sessionId,
+    text: "check the deploy",
+    ctoKey: "sched:j1:2026-06-20T15:05",
+  });
+  assert.equal(r1.ctoId, "sched:j1:2026-06-20T15:05", "caller identity IS the admission id");
+  assert.ok(await waitFor(() => t.oc.sends.length >= 1));
+  await completeTurn(t, r1.ctoId);
+  // A RETRY of the same logical delivery (same identity): dedups — the
+  // completed record is returned, nothing re-fires.
+  const retry = await t.pd.deliver({
+    sessionId: open.sessionId,
+    text: "check the deploy",
+    ctoKey: "sched:j1:2026-06-20T15:05",
+  });
+  assert.equal(retry.ctoId, r1.ctoId);
+  assert.equal(retry.persisted, false, "replay, nothing new written");
+  assert.equal(retry.ctoStatus, "completed");
+  assert.equal(t.oc.sends.length, 1, "the retry did not re-send");
+  // The NEXT firing minute is a NEW occurrence even though the text is
+  // identical — this is the recurring-schedule case the content hash broke.
+  const next = await t.pd.deliver({
+    sessionId: open.sessionId,
+    text: "check the deploy",
+    ctoKey: "sched:j1:2026-06-20T15:10",
+  });
+  assert.notEqual(next.ctoId, r1.ctoId);
+  assert.equal(next.persisted, true);
+  assert.ok(await waitFor(() => t.oc.sends.length >= 2), "the next occurrence fired");
+});
+
+test("per-caller identity mapping: schedule job+minute and capability job+status map 1:1 to admission ids", async () => {
+  const t = compose();
+  const open = await dispatch(t.handlers, "cto:conversation-open", []);
+  const { release } = parkSends(t.oc);
+  try {
+    const sched = await t.pd.deliver({
+      sessionId: open.sessionId,
+      text: "x",
+      ctoKey: "sched:job1:2026-06-20T15:05",
+    });
+    const cap = await t.pd.deliver({
+      sessionId: open.sessionId,
+      text: "y",
+      ctoKey: "cap:job9:done",
+    });
+    assert.equal(sched.ctoId, "sched:job1:2026-06-20T15:05");
+    assert.equal(cap.ctoId, "cap:job9:done");
+    // Distinct identities never collide into one record.
+    const st = await dispatch(t.handlers, "cto:conversation-state", []);
+    assert.equal(st.submissions.filter((r) => r.origin === "background").length, 2);
+  } finally {
+    release();
+  }
+});
+
+test("backgroundDeliveryId passes caller identity through and truncates only oversized keys", () => {
+  assert.equal(backgroundDeliveryId("sched:job1:2026-06-20T15:05"), "sched:job1:2026-06-20T15:05");
+  assert.equal(backgroundDeliveryId(undefined), null);
+  assert.equal(backgroundDeliveryId(""), null);
+  const long = `cap:${"x".repeat(300)}`;
+  const mapped = backgroundDeliveryId(long);
+  assert.ok(mapped.startsWith("bg_"), "oversized identity maps to a bounded id");
+  assert.equal(mapped, backgroundDeliveryId(long), "the mapping itself is stable");
 });
 
 // ---------------------------------------------------------------------------
@@ -483,4 +604,247 @@ test("admission dispatch and interrupt forward their bounded signals to the raw 
   const row = st.submissions.find((s) => s.id === "m_sig");
   assert.equal(row.status, "interrupt_pending");
   assert.equal(st.counts.unresolved, 1);
+});
+
+// ---------------------------------------------------------------------------
+// Blocker 3: the opencode:abort seam — a raw abort is invisible to
+// admission's abortState, so the bound role session's abort routes onto the
+// tracked interrupt path.
+// ---------------------------------------------------------------------------
+
+// Shared prologue for the abort-seam cases: compose with a raw-fallback
+// counter, open the conversation, and submit an admitted turn whose raw send
+// stays parked until released (deterministic dispatching/accepted states).
+async function composeWithSubmittedTurn({ id, text } = {}) {
+  const fallbackCount = { n: 0, sid: null };
+  const t = compose({
+    abortRaw: async (sid) => {
+      fallbackCount.n += 1;
+      fallbackCount.sid = sid;
+    },
+  });
+  const open = await dispatch(t.handlers, "cto:conversation-open", []);
+  const { release } = parkSends(t.oc);
+  await dispatch(t.handlers, "cto:conversation-submit", [{ id, text }]);
+  assert.ok(await waitFor(() => t.oc.sends.length >= 1), "admission dispatched the turn");
+  return { t, open, release, fallbackCount };
+}
+
+test("opencode:abort at the bound session tracks the accepted turn as interrupt_pending with a forwarded signal", async () => {
+  const { t, open, release, fallbackCount } = await composeWithSubmittedTurn({
+    id: "m_abort",
+    text: "long turn",
+  });
+  release();
+  // The send landed its receipt → the record is the ACCEPTED turn.
+  assert.ok(
+    await waitFor(async () =>
+      (await t.admission.list()).submissions.find((r) => r.id === "m_abort")?.status === "accepted",
+    ),
+    "the turn is accepted before the abort",
+  );
+
+  // THE SEAM: the caller only knows the session id — the accepted record is
+  // resolved server-side and interrupted through admission's tracked path.
+  await dispatch(t.handlers, "opencode:abort", [open.sessionId]);
+  assert.ok(
+    await waitFor(async () =>
+      (await t.admission.list()).submissions.find((r) => r.id === "m_abort")?.status ===
+      "interrupt_pending",
+    ),
+    "the abort is VISIBLE to abortState (tracked interrupt)",
+  );
+  assert.equal(t.oc.aborts.length, 1, "the tracked abort reached the raw oc");
+  assert.equal(t.oc.aborts[0].sessionId, open.sessionId);
+  assert.ok(t.oc.aborts[0].signal instanceof AbortSignal, "the abort carries a bounded signal");
+  assert.equal(fallbackCount.n, 0, "the tracked path handled it — no raw fallback");
+  // And the queue stays held (interrupt_pending is a barrier until reconcile).
+  const st = await dispatch(t.handlers, "cto:conversation-state", []);
+  assert.equal(st.counts.unresolved, 1);
+});
+
+test("opencode:abort with nothing unresolved on the session falls back to the raw abort", async () => {
+  let rawFallbacks = 0;
+  let rawFallbackSid = null;
+  const t = compose({
+    abortRaw: async (sid) => {
+      rawFallbacks += 1;
+      rawFallbackSid = sid;
+    },
+  });
+  const open = await dispatch(t.handlers, "cto:conversation-open", []);
+  // Empty queue: there is no admission turn to track — honor the stop request
+  // via the documented raw fallback.
+  await dispatch(t.handlers, "opencode:abort", [open.sessionId]);
+  assert.equal(rawFallbacks, 1);
+  assert.equal(rawFallbackSid, open.sessionId);
+  assert.equal(t.oc.aborts.length, 0, "the tracked path never fired");
+  const st = await dispatch(t.handlers, "cto:conversation-state", []);
+  assert.equal(st.submissions.length, 0);
+});
+
+test("opencode:abort while the admitted turn is mid-dispatch is an actionable refusal, not a raw abort", async () => {
+  const { t, open, release, fallbackCount } = await composeWithSubmittedTurn({
+    id: "m_dispatch",
+    text: "go",
+  });
+  try {
+    assert.ok(
+      await waitFor(async () =>
+        (await t.admission.list()).submissions.find((r) => r.id === "m_dispatch")?.status ===
+        "dispatching",
+      ),
+      "the record is mid-dispatch (send parked)",
+    );
+    await assert.rejects(
+      () => dispatch(t.handlers, "opencode:abort", [open.sessionId]),
+      /mid-dispatch/,
+    );
+    assert.equal(fallbackCount.n, 0);
+    assert.equal(t.oc.aborts.length, 0, "no untracked abort escapes");
+  } finally {
+    release();
+  }
+});
+
+test("opencode:abort at an ordinary session passes through raw, byte-identically", async () => {
+  const t = compose();
+  await dispatch(t.handlers, "opencode:abort", ["ses_project"]);
+  assert.equal(t.oc.aborts.length, 1);
+  assert.equal(t.oc.aborts[0].sessionId, "ses_project");
+  const st = await dispatch(t.handlers, "cto:conversation-state", []);
+  assert.equal(st.submissions.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Previous-generation retarget: a delivery aimed at a REPLACED role session
+// must still flow through admission (which dispatches to the CURRENT
+// binding), not fire into the dead session.
+// ---------------------------------------------------------------------------
+
+test("a delivery to a previous-generation role session retargets through admission to the live session", async () => {
+  const t = compose();
+  const open1 = await dispatch(t.handlers, "cto:conversation-open", []);
+  // Force a rebind: evict the bound session from opencode so recovery sees it
+  // DEFINITIVELY missing, then recover → replace with a new generation.
+  t.oc.created = [];
+  await t.binding.recover();
+  const bound = await t.binding.getBinding();
+  assert.equal(bound.generation, 2, "the binding advanced");
+  assert.ok(bound.previousSessionIds.includes(open1.sessionId), "the old id is archived");
+
+  const { release } = parkSends(t.oc);
+  try {
+    // A background delivery aimed at the OLD (dead) session id.
+    const r = await t.pd.deliver({ sessionId: open1.sessionId, text: "pre-rebind schedule" });
+    assert.equal(r.queued, true, "classified as the conversation — retargeted, not ordinary");
+    assert.ok(await waitFor(() => t.oc.sends.length >= 1));
+    assert.equal(
+      t.oc.sends[0].sessionId,
+      bound.currentSessionId,
+      "admission dispatched the turn to the LIVE session",
+    );
+    assert.equal(t.oc.pdSends.length, 0, "never fired raw into the dead session");
+  } finally {
+    release();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Blocker 2 end-to-end: an IDLE CTO-session webhook goes through the shared
+// delivery engine into the admission queue (it used to bypass via raw send).
+// ---------------------------------------------------------------------------
+
+test("an idle webhook aimed at the CTO conversation is admitted (202) — not raw-sent", async () => {
+  const t = compose();
+  const open = await dispatch(t.handlers, "cto:conversation-open", []);
+  // A real hooks store with one unsigned manta hook targeting the conversation.
+  const hooksDir = statePath("cto-conversation-test", randomUUID());
+  const { mkdir, writeFile } = await import("node:fs/promises");
+  const { join } = await import("node:path");
+  await mkdir(hooksDir, { recursive: true });
+  const hook = {
+    id: "h_cto",
+    token: "b".repeat(32),
+    secret: "whsec_x",
+    unsigned: true,
+    label: "board",
+    instructions: "",
+    sessionID: open.sessionId,
+    deliveries: 0,
+    lastDeliveredAt: null,
+  };
+  await writeFile(join(hooksDir, "hooks.json"), JSON.stringify({ hooks: [hook] }));
+  let webhookRawSends = 0;
+  const engine = createWebhookEngine({
+    sendPrompt: async () => {
+      webhookRawSends += 1;
+    },
+    delivery: t.pd,
+    publish: () => {},
+    storePath: join(hooksDir, "hooks.json"),
+  });
+  const res = await engine.deliver({ token: "b".repeat(32), rawBody: '{"n":1}' });
+  assert.equal(res.status, 202, "the durable queue accepted it — reported honestly as queued");
+  assert.equal(res.queued, true);
+  const st = await dispatch(t.handlers, "cto:conversation-state", []);
+  assert.equal(st.submissions.length, 1, "the webhook landed in the admission queue");
+  assert.equal(st.submissions[0].origin, "background");
+  assert.equal(webhookRawSends, 0, "never bypassed via the raw webhook sendPrompt");
+  assert.equal(t.oc.pdSends.length, 0, "and never via the delivery engine's raw send");
+});
+
+// ---------------------------------------------------------------------------
+// admitDirect forwards the optimistic-generation guard (finding N3).
+// ---------------------------------------------------------------------------
+
+test("admitDirect forwards expectedGeneration from the direct-send input", async () => {
+  const t = compose();
+  const open = await dispatch(t.handlers, "cto:conversation-open", []);
+  const { release } = parkSends(t.oc);
+  try {
+    const receipt = await dispatch(t.handlers, "opencode:prompt", [
+      { sessionId: open.sessionId, text: "status", expectedGeneration: 1 },
+    ]);
+    assert.equal(receipt.expectedGeneration, 1, "the optimistic-generation guard survives the seam");
+  } finally {
+    release();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Stamp-validated classification cache (finding N4): an ordinary project
+// prompt must not pay a binding.json read+parse on every send.
+// ---------------------------------------------------------------------------
+
+test("seam classification is stamp-cached; a stamp change invalidates", async () => {
+  let stampValue = "s1";
+  let loads = 0;
+  let payload = { v: 1 };
+  const countingStore = {
+    name: "binding",
+    path: `binding-${randomUUID()}.json`,
+    async load() {
+      loads += 1;
+      return payload;
+    },
+    async save(next) {
+      payload = next;
+    },
+  };
+  const t = compose({ stamp: () => stampValue, bindingStore: countingStore });
+  await dispatch(t.handlers, "cto:conversation-open", []);
+  loads = 0; // count only the SEAM classifications below
+  // Three ordinary project prompts → three classifications.
+  for (let i = 0; i < 3; i += 1) {
+    await dispatch(t.handlers, "opencode:prompt", [{ sessionId: "ses_project", text: `p${i}` }]);
+  }
+  assert.equal(loads, 1, "one binding read serves all classifications at the same stamp");
+  // The stamp changes (a binding write) → the very next classification re-reads.
+  stampValue = "s2";
+  await dispatch(t.handlers, "opencode:prompt", [{ sessionId: "ses_project", text: "p3" }]);
+  assert.equal(loads, 2, "a changed stamp invalidates the cache");
+  // The open itself still worked — and the open path is unaffected.
+  const st = await dispatch(t.handlers, "cto:conversation-state", []);
+  assert.equal(st.binding.sessionId, "ses_cto1");
 });

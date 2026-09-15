@@ -429,7 +429,16 @@ export function createScheduler({
               console.warn(`[schedule] fire job ${job.id}: kind "notify" but fireNotify was not injected`);
             }
           } else {
-            await sendPrompt({ sessionId: job.sessionID, text: job.prompt });
+            // P3a3: the firing identity (job id + this tick's minute key)
+            // becomes the CTO admission dedupe id for the delivery — a
+            // genuine retry of the same fire dedups, and every NEW firing
+            // minute is a NEW occurrence (content must never be the
+            // identity: recurring identical prompts would fire once ever).
+            await sendPrompt({
+              sessionId: job.sessionID,
+              text: job.prompt,
+              ctoKey: `sched:${job.id}:${key}`,
+            });
           }
         } catch (e) {
           console.warn(`[schedule] fire job ${job.id} failed:`, e?.message ?? e);

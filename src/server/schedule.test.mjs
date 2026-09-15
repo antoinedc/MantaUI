@@ -295,7 +295,11 @@ test("tick fires a job with no kind as prompt (regression for legacy store jobs)
   const { tick } = createScheduler(h.deps);
   await tick();
   assert.equal(h.promptSent.length, 1);
-  assert.deepEqual(h.promptSent[0], { sessionId: "ses_abc", text: "check the deploy" });
+  assert.deepEqual(h.promptSent[0], {
+    sessionId: "ses_abc",
+    text: "check the deploy",
+    ctoKey: "sched:legacy1:2026-08-18T09:01",
+  });
   assert.equal(h.notifySent.length, 0);
 });
 
@@ -357,9 +361,32 @@ test("tick fires a due recurring job and stamps lastFiredMinute", async () => {
   const { tick } = createScheduler(h.deps);
   await tick();
   assert.equal(h.sent.length, 1);
-  assert.deepEqual(h.sent[0], { sessionId: "ses_abc", text: "check the deploy" });
+  assert.deepEqual(h.sent[0], {
+    sessionId: "ses_abc",
+    text: "check the deploy",
+    ctoKey: "sched:job1:2026-06-20T15:05",
+  });
   assert.equal(h.jobs.length, 1, "recurring job survives");
   assert.equal(h.jobs[0].lastFiredMinute, "2026-06-20T15:05");
+});
+
+test("each firing minute carries a NEW ctoKey occurrence identity (same text never dedupes recurring fires)", async () => {
+  const now = localDate(2026, 6, 20, 15, 5); // matches */5
+  const h = harness([{ ...baseJob, lastFiredMinute: "2026-06-20T15:00" }], now);
+  const { tick } = createScheduler(h.deps);
+  await tick();
+  assert.equal(h.sent[0].ctoKey, "sched:job1:2026-06-20T15:05");
+  // Advance one firing interval: same job, same prompt text — the identity
+  // must be the minute key, so a CTO-conversation delivery is a NEW
+  // occurrence (the content-hash defect made this fire once ever).
+  const next = localDate(2026, 6, 20, 15, 10);
+  h.deps.now = () => next;
+  h.deps.load = async () => h.jobs.map((j) => ({ ...j }));
+  const { tick: tick2 } = createScheduler(h.deps);
+  await tick2();
+  assert.equal(h.sent.length, 2);
+  assert.equal(h.sent[1].ctoKey, "sched:job1:2026-06-20T15:10");
+  assert.equal(h.sent[1].text, h.sent[0].text, "identical text, distinct occurrence identity");
 });
 
 test("tick does NOT fire a job that isn't due this minute", async () => {
@@ -473,7 +500,11 @@ test("tick fires a job whose directory exists (regression)", async () => {
   const { tick } = createScheduler({ ...h.deps, directoryExists: () => true });
   await tick();
   assert.equal(h.sent.length, 1);
-  assert.deepEqual(h.sent[0], { sessionId: "ses_abc", text: "check the deploy" });
+  assert.deepEqual(h.sent[0], {
+    sessionId: "ses_abc",
+    text: "check the deploy",
+    ctoKey: "sched:job1:2026-06-20T15:05",
+  });
 });
 
 test("tick auto-disables a job whose directory is gone and does not re-fire it", async () => {
@@ -524,7 +555,11 @@ test("tick processes a mix of live and dead-cwd jobs correctly", async () => {
   await tick();
   // Live job fires, dead job does not.
   assert.equal(h.sent.length, 1);
-  assert.deepEqual(h.sent[0], { sessionId: "ses_abc", text: "check the deploy" });
+  assert.deepEqual(h.sent[0], {
+    sessionId: "ses_abc",
+    text: "check the deploy",
+    ctoKey: "sched:live1:2026-06-20T15:05",
+  });
   // Both jobs survive: live with stamped minute, dead auto-disabled.
   assert.equal(h.jobs.length, 2);
   const live = h.jobs.find((j) => j.id === "live1");

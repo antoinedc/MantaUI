@@ -3,10 +3,10 @@
 // that keep every writer on the durable admission queue.
 //
 // Scope (deliberately small): the four authenticated conversation channels
-// (open / state / submit / interrupt) plus the two anti-bypass seams that
-// redirect direct sends at the bound role session into the same queue:
-//   • the `opencode:prompt` / `opencode:run-command` RPC routes (human-typed
-//     traffic aimed at the conversation session), and
+// (open / state / submit / interrupt) plus the anti-bypass seams that keep
+// every writer on the durable admission queue:
+//   • the `opencode:prompt` / `opencode:run-command` / `opencode:abort` RPC
+//     routes (human traffic aimed at the conversation session),
 //   • the background prompt-delivery engine (schedule / capability / webhook
 //     / delegate completion prompts aimed at the conversation session).
 //
@@ -40,19 +40,29 @@ function describeErr(err) {
 }
 
 /**
- * Stable id for a background delivery, mapped from the delivery's known
- * content so a retried/redelivered identical prompt maps to the SAME
- * submission id (and admission's id-keyed dedup then collapses the replay
- * per §8.3 "do not duplicate a submitted turn"). The agent is server-stamped
- * and constant per box, so it is not part of the identity; model is.
+ * The background dedupe identity is the CALLER's stable delivery identity
+ * (`ctoKey`) — NEVER the content. Admission dedups by id (and returns the
+ * existing record even when terminal), so content-derived ids made a
+ * recurring identical delivery fire exactly once ever. Per caller:
+ *   • schedule   → `sched:<jobId>:<minuteKey>`  (each firing minute is a NEW
+ *                  occurrence; a retry of the same fire dedups);
+ *   • capability → `cap:<jobId>:<status>`       (one notify per transition);
+ *   • webhook    → none available on the manta-hook delivery path (GitHub
+ *                  hooks route to forge ingest before any delivery, and
+ *                  manta hooks carry no delivery id) — their repeat window
+ *                  is the hook store's own seenDeliveryIds dedupe, so each
+ *                  accepted delivery mints a fresh unique admission id;
+ *   • delegate   → none (completions fire once per job; unique id is
+ *                  correct).
+ * With no identity, NO id is passed and admission mints a fresh `evt_*` per
+ * delivery — identical text is never an identity.
  */
-export function backgroundDeliveryId({ text, model } = {}) {
-  const hash = createHash("sha256")
-    .update(text ?? "")
-    .update("\u0000")
-    .update(JSON.stringify(model ?? null))
-    .digest("hex");
-  return `bg_${hash.slice(0, 24)}`;
+export function backgroundDeliveryId(ctoKey) {
+  if (typeof ctoKey !== "string" || ctoKey.length === 0) return null;
+  // Normalise long caller keys to a bounded, readable id: keep the source
+  // namespace + a content-addressed digest of the full identity.
+  if (ctoKey.length <= 200) return ctoKey;
+  return `bg_${createHash("sha256").update(ctoKey).digest("hex").slice(0, 24)}`;
 }
 
 /**
@@ -66,9 +76,22 @@ export function backgroundDeliveryId({ text, model } = {}) {
  * @param {string} deps.agentName — the server-owned central role agent
  *   (providers.mjs CTO_AGENT_NAME). Stampeded onto every admitted turn: the
  *   caller can NEVER choose an arbitrary agent for the CTO conversation.
+ * @param {(() => Promise<string|null>)} [deps.stamp] — the binding store's
+ *   cheap change stamp (ctoStores `stamp()`), enabling a stamp-validated
+ *   classification cache. Without it every seam classification pays a full
+ *   binding.json read+parse — on EVERY ordinary project `opencode:prompt`.
+ * @param {((sessionId: string) => Promise<unknown>)} [deps.abortSession] —
+ *   the RAW oc abort, used only by the abort seam's documented untracked
+ *   fallback (no unresolved admission record on the session).
  * @returns conversation service
  */
-export function createCtoConversationService({ binding, admission, agentName }) {
+export function createCtoConversationService({
+  binding,
+  admission,
+  agentName,
+  stamp = null,
+  abortSession = null,
+}) {
   if (!binding || typeof binding.ensure !== "function" || typeof binding.getBinding !== "function") {
     throw new Error("createCtoConversationService requires the composed ctoBinding engine");
   }
@@ -78,6 +101,13 @@ export function createCtoConversationService({ binding, admission, agentName }) 
   if (typeof agentName !== "string" || agentName.length === 0) {
     throw new Error("createCtoConversationService requires the server-owned agent name");
   }
+
+  // Stamp-validated classification cache: one stat per seam classification
+  // instead of a binding.json read+parse. `stamp()` changes whenever the
+  // binding store is written (ino:size:mtime:ctime), so a rebind invalidates
+  // on the very next classification. Cache-miss direction (re-read) is the
+  // safe direction; the stamp tuple makes a stale hit practically impossible.
+  let classificationCache = { stamp: null, currentSessionId: null, previousSessionIds: [] };
 
   function requireInputObject(input) {
     if (!input || typeof input !== "object" || Array.isArray(input)) {
@@ -148,23 +178,53 @@ export function createCtoConversationService({ binding, admission, agentName }) 
   }
 
   // -- seam: classify a target session --------------------------------------
-  // TRUE only for the CURRENT binding's role session (a replaced generation's
-  // archived id is ordinary again). FAILS OPEN on a binding store read
-  // failure (warn + false): classification must never break ORDINARY project
-  // delivery, and an unreadable store means the whole conversation runtime is
-  // already failing loudly everywhere else.
+  // TRUE for the CURRENT binding's role session AND for a previous
+  // generation's archived role session id: a delivery aimed at a replaced
+  // session must still retarget through admission (whose dispatch resolves
+  // the CURRENT binding) — classifying it "ordinary" would fire a pre-rebind
+  // schedule into a dead session. An archived role id can never collide with
+  // an ordinary project session. FAILS OPEN on a binding read failure (warn
+  // + false): classification must never break ORDINARY project delivery, and
+  // an unreadable store means the whole conversation runtime is already
+  // failing loudly everywhere else. Reads are stamp-cached when a `stamp` dep
+  // is wired (one stat per classification instead of read+parse).
   async function isConversationSession(sessionId) {
     if (typeof sessionId !== "string" || sessionId.length === 0) return false;
     let bound;
     try {
-      bound = await binding.getBinding();
+      let current = null;
+      if (typeof stamp === "function") {
+        current = await stamp();
+        if (current !== null && current === classificationCache.stamp) {
+          bound = {
+            currentSessionId: classificationCache.currentSessionId,
+            previousSessionIds: classificationCache.previousSessionIds,
+          };
+        }
+      }
+      if (!bound) {
+        bound = await binding.getBinding();
+        if (typeof stamp === "function") {
+          const readStamp = typeof current === "string" ? current : await stamp();
+          classificationCache = {
+            stamp: readStamp,
+            currentSessionId: bound.currentSessionId ?? null,
+            previousSessionIds: Array.isArray(bound.previousSessionIds)
+              ? [...bound.previousSessionIds]
+              : [],
+          };
+        }
+      }
     } catch (e) {
       console.warn(
         `[cto-conversation] binding unreadable; treating session ${sessionId} as ordinary: ${describeErr(e)}`,
       );
       return false;
     }
-    return bound.currentSessionId === sessionId;
+    return (
+      bound.currentSessionId === sessionId ||
+      (Array.isArray(bound.previousSessionIds) && bound.previousSessionIds.includes(sessionId))
+    );
   }
 
   // -- seam: direct sends (`opencode:prompt`) at the conversation session ----
@@ -189,8 +249,56 @@ export function createCtoConversationService({ binding, admission, agentName }) 
         ? { id: input.messageID }
         : {}),
       ...(input.model !== undefined ? { model: input.model } : {}),
+      ...(input.expectedGeneration !== undefined ? { expectedGeneration: input.expectedGeneration } : {}),
       agent: agentName,
     });
+  }
+
+  // -- seam: abort (`opencode:abort`) at the bound role session --------------
+  // Spec §8.3 names drain/abort: a raw session abort is INVISIBLE to
+  // admission's abortState — the interrupted turn would settle `completed`
+  // and a LATE abort could hit the next admitted turn. So the abort of the
+  // bound role session routes onto the tracked interrupt path:
+  //   • the currently ACCEPTED turn → `interrupt(record.id)` (tracked
+  //     abortState, signal forwarded);
+  //   • an `unknown` send → `interrupt(...)` → visible `cancel_requested`
+  //     (barrier retained until reconcile — see contract limitation 1);
+  //   • an existing interrupt marker → idempotent no-op re-request;
+  //   • mid-`dispatching` → actionable error (the contract refuses an
+  //     interrupt until the dispatch resolves — surface it, never guess);
+  //   • NOTHING unresolved on the session → the caller's stop request is
+  //     honored with the RAW session abort (a turn admission cannot see —
+  //     pre-P3a3 or foreign — is not trackable, so no abortState is touched;
+  //     this is exactly the contract's known limitation 2, unchanged).
+  // Resolves the target record server-side from the durable queue: the
+  // caller only knows the session id. Returns nothing (the Api is void) —
+  // tracked status is visible via cto:conversation-state.
+  async function abortAdmittedTurn(sessionId) {
+    const queue = await admission.list();
+    const mine = queue.submissions.filter((r) => r.sessionId === sessionId);
+    const accepted = mine.find((r) => r.status === "accepted");
+    if (accepted) {
+      await admission.interrupt(accepted.id);
+      return;
+    }
+    const unknown = mine.find((r) => r.status === "unknown");
+    if (unknown) {
+      await admission.interrupt(unknown.id);
+      return;
+    }
+    const marker = mine.find(
+      (r) => r.status === "interrupt_pending" || r.status === "cancel_requested",
+    );
+    if (marker) return;
+    const dispatching = mine.find((r) => r.status === "dispatching");
+    if (dispatching) {
+      throw new Error(
+        "cto conversation: the admitted turn is still mid-dispatch — retry the abort in a moment",
+      );
+    }
+    if (typeof abortSession === "function") {
+      await abortSession(sessionId);
+    }
   }
 
   // -- seam: slash commands (`opencode:run-command`) at the conversation ----
@@ -202,8 +310,10 @@ export function createCtoConversationService({ binding, admission, agentName }) 
   // -- seam: background prompt delivery -------------------------------------
   // promptDelivery calls this FIRST on every deliver(); returning null means
   // "not ours — continue ordinarily". A CONFIRMED conversation target is
-  // submitted to admission with origin "background" and the stable
-  // content-mapped id. Submit refusals are surfaced as
+  // submitted to admission with origin "background" and the CALLER's stable
+  // delivery identity (ctoKey) when one exists — else a fresh unique id per
+  // delivery (identical text is never an identity; see
+  // backgroundDeliveryId). Submit refusals are surfaced as
   // {rejected:true, error} (never swallowed, never fake success) — the
   // delivery engine's contract is to never reject, so the outcome rides the
   // result object. Classification failure fails OPEN to the ordinary path
@@ -217,7 +327,14 @@ export function createCtoConversationService({ binding, admission, agentName }) 
         origin: "background",
         text: args.text,
         ...(args.model !== undefined ? { model: args.model } : {}),
-        id: backgroundDeliveryId({ text: args.text, model: args.model }),
+        // Dedupe identity is the CALLER's stable delivery identity (ctoKey)
+        // when one exists — a genuine retry of the same logical delivery
+        // dedups (id-keyed, even against a terminal record, which is exactly
+        // right for a retry); each NEW occurrence carries a fresh id. With
+        // no identity, admission mints a fresh unique id per delivery —
+        // identical text is NEVER the identity (that defect made a recurring
+        // schedule fire once ever).
+        ...(backgroundDeliveryId(args.ctoKey) ? { id: backgroundDeliveryId(args.ctoKey) } : {}),
         agent: agentName,
       });
       return {
@@ -255,6 +372,7 @@ export function createCtoConversationService({ binding, admission, agentName }) 
     interrupt,
     isConversationSession,
     admitDirect,
+    abortAdmittedTurn,
     rejectRunCommand,
     redirectDelivery,
     tick,

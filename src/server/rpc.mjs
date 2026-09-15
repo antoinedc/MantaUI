@@ -1061,7 +1061,20 @@ export function buildHandlers({
 
     // preload: ipcRenderer.invoke(IPC.opencodeAbort, sessionId)
     // → args[0] = sessionId (string)
-    "opencode:abort": (sessionId) => oc.abortSession(sessionId),
+    // P3a3 (spec §8.3 names drain/abort): an abort aimed at the bound role
+    // session routes through the tracked interrupt path so the abort is
+    // VISIBLE to admission's abortState (a raw abort would let the
+    // interrupted turn settle `completed` and a late abort could hit the
+    // next admitted turn). The service resolves the target record
+    // server-side; with nothing unresolved on the session it falls back to
+    // the raw abort (a turn admission cannot see is untrackable — documented
+    // in the service). Ordinary project sessions take the raw path unchanged.
+    "opencode:abort": async (sessionId) => {
+      if (sessionId && ctoConversation && (await ctoConversation.isConversationSession(sessionId))) {
+        return ctoConversation.abortAdmittedTurn(sessionId);
+      }
+      return oc.abortSession(sessionId);
+    },
 
     // preload: ipcRenderer.invoke(IPC.opencodePermissions, sessionId?) → args[0] = sessionId
     // Scope the list to the session's directory — opencode returns [] for a

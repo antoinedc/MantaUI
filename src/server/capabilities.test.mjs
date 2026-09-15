@@ -164,10 +164,13 @@ test("lifecycle: create → start → appendLog×N → done, with timestamps and
   assert.equal(h.published[1].payload.id, id);
   assert.equal(h.published[1].payload.status, "done");
 
-  // notifySession called once with completionText output
+  // notifySession called once with completionText output, and the notify
+  // carries the stable per-transition delivery identity for the CTO
+  // conversation's admission dedupe (P3a3): job id + transition status.
   assert.equal(h.notified.length, 1);
   assert.equal(h.notified[0].sessionID, "ses_abc");
   assert.match(h.notified[0].text, /ios\.build job .+ finished with status "done"\./);
+  assert.equal(h.notified[0].ctoKey, `cap:${id}:done`);
 });
 
 // ----------------------------------------------------------------------------

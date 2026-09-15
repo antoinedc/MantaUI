@@ -263,7 +263,14 @@ async function markTerminal(
   // session never fails the REST call. Mirrors the scheduler's fire path.
   if (notifySession && job.sessionID) {
     try {
-      await notifySession({ sessionID: job.sessionID, text: completionText(job) });
+      // P3a3: job id + transition status is the notify's stable delivery
+      // identity (one notify per terminal transition; a retry of the same
+      // transition dedups on the CTO conversation instead of double-firing).
+      await notifySession({
+        sessionID: job.sessionID,
+        text: completionText(job),
+        ctoKey: `cap:${job.id}:${status}`,
+      });
     } catch (e) {
       console.warn(`[cap] notifySession failed for ${job.id}:`, e?.message ?? e);
     }

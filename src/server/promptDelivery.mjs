@@ -59,6 +59,11 @@ export function createPromptDelivery({ sendPrompt, redirect = null }) {
     // itself (e.g. a second webhook arriving while we flush) is not lost —
     // it lands in a fresh queue rather than being iterated mid-flush.
     pending.delete(sessionId);
+    // P3a3 note: the drain flushes RAW (sendPrompt), bypassing the cto
+    // redirect. That is safe by construction — a conversation-targeted
+    // delivery is redirected BEFORE the busy check below and never enters
+    // this queue; only ordinary deliveries (and a delivery that slipped in
+    // while the binding was unreadable) reach this degraded flush path.
     for (const { text, model } of queue) {
       try {
         await sendPrompt(withModel(sessionId, text, model));
@@ -100,16 +105,19 @@ export function createPromptDelivery({ sendPrompt, redirect = null }) {
     return busy.has(sessionId);
   }
 
-  async function deliver({ sessionId, text, model }) {
+  async function deliver({ sessionId, text, model, ctoKey }) {
     // P3a3 (spec §8.3): every writer to the CTO role session goes through the
     // durable admission queue — including this engine's background senders.
     // The redirect runs FIRST so a conversation-targeted delivery never
-    // enters the in-memory defer queue below. The redirect never throws (its
+    // enters the in-memory defer queue below. `ctoKey` is the caller's
+    // stable delivery identity (schedule job+minute, capability job+status)
+    // that becomes the admission dedupe id; senders without one omit it and
+    // each delivery mints a fresh unique id. The redirect never throws (its
     // own contract); the guard keeps even a buggy redirect from breaking
     // ordinary delivery — it degrades to the historical path with a warn.
     if (redirect) {
       try {
-        const r = await redirect({ sessionId, text, model });
+        const r = await redirect({ sessionId, text, model, ctoKey });
         if (r) return r.result;
       } catch (e) {
         console.warn(

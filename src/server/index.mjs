@@ -150,7 +150,7 @@ import * as ctoEngine from "./ctoEngine.mjs";
 import * as ctoBudget from "./ctoBudget.mjs";
 import { createFactSurfaces } from "./ctoFactSurfaces.mjs";
 import { isIssueToolGranted } from "./ctoToolRegistry.mjs";
-import { ledgerStore, engineStateStore, budgetStore, segmentsStore, verdictsStore, digestsStore, factsStore, resolveStore, calibrationStore, plansStore, startCtoStoreSweeper, CTO_STORE_SWEEP_INTERVAL_MS } from "./ctoStores.mjs";
+import { ledgerStore, engineStateStore, budgetStore, segmentsStore, verdictsStore, digestsStore, factsStore, resolveStore, calibrationStore, plansStore, bindingStore, startCtoStoreSweeper, CTO_STORE_SWEEP_INTERVAL_MS } from "./ctoStores.mjs";
 import * as ctoOvernight from "./ctoOvernight.mjs";
 import { computeHealthStats } from "./ctoHealth.mjs";
 import { composeProfileRender } from "./ctoProfile.mjs";
@@ -430,12 +430,15 @@ const promptDelivery = createPromptDelivery({
 // ----- CTO conversation runtime (P3a3, spec §3.1 + §8.3) -----
 // The ONE composition: exactly ONE binding engine + ONE admission engine for
 // the whole server lifecycle, plus the thin conversation service over them.
-// Binding creation is LAZY — this composition runs at boot but performs NO
-// oc calls: no role session is created and no model is invoked until the
-// first `cto:conversation-open` RPC. The admission engine sends via the RAW
-// low-level oc client (never promptDelivery), so a redirected background
-// delivery cannot recurse: promptDelivery.deliver → admission.submit → raw
-// oc.sendPrompt, one hop each way.
+// The composition itself performs NO oc calls — but the bounded tick poller
+// below fires an immediate first tick at boot, and §8.3 recovery legitimately
+// means that tick MAY dispatch a durable queued record that survived the
+// restart (to the already-bound session — a store read, never a create). On a
+// fresh box nothing is queued and nothing is sent: the role session is only
+// ever created by the first `cto:conversation-open` RPC. The admission engine
+// sends via the RAW low-level oc client (never promptDelivery), so a
+// redirected background delivery cannot recurse: promptDelivery.deliver →
+// admission.submit → raw oc.sendPrompt, one hop each way.
 const ctoBindingEngine = createCtoBinding({ oc });
 const ctoAdmissionEngine = createCtoAdmission({
   binding: ctoBindingEngine,
@@ -454,6 +457,12 @@ const ctoConversation = createCtoConversationService({
   // turns ALWAYS run the registered `cto` agent — callers can never choose
   // an arbitrary agent for the role session.
   agentName: CTO_AGENT_NAME,
+  // Cheap change stamp for the seam-classification cache (one stat instead of
+  // a binding.json read+parse on every ordinary project prompt).
+  stamp: () => bindingStore.stamp(),
+  // Raw oc abort for the abort seam's documented untracked fallback (no
+  // unresolved admission record on the session).
+  abortSession: (sessionId) => oc.abortSession(sessionId),
 });
 // Bounded tick poller (spec §8.3 recovery): reconcile + pump with no inbound
 // events. startPoller surfaces failures via console.warn — a failed tick
