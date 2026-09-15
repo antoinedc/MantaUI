@@ -117,6 +117,19 @@ function assertSafeName(value, label) {
 // Single-file JSON stores (atomic jsonStore writes, mode 0600)
 // ---------------------------------------------------------------------------
 
+// A strict store's parsed payload must be a JSON OBJECT: a top-level null,
+// array or string is CORRUPTION (fail loudly naming the store), never the
+// store's empty/default value — silently reading `null` as "unbound" would
+// let a caller create a duplicate durable resource (P3a1 review blocker 5).
+// Only a MISSING file initializes the default payload.
+function parseStrictStorePayload(name, parsed) {
+  if (parsed === null || Array.isArray(parsed) || typeof parsed !== "object") {
+    const kind = parsed === null ? "null" : Array.isArray(parsed) ? "array" : typeof parsed;
+    throw new Error(`store "${name}" payload is corrupt (top-level ${kind}) — refusing to read`);
+  }
+  return parsed;
+}
+
 function createCtoJsonStore(name, path, { strict = false } = {}) {
   return {
     name,
@@ -134,7 +147,7 @@ function createCtoJsonStore(name, path, { strict = false } = {}) {
     loadSync: () => {
       if (strict) {
         try {
-          return migrateStore(name, JSON.parse(readFileSync(path, "utf-8")));
+          return migrateStore(name, parseStrictStorePayload(name, JSON.parse(readFileSync(path, "utf-8"))));
         } catch (error) {
           if (error.code === "ENOENT") return defaultPayload();
           throw error;
@@ -146,7 +159,7 @@ function createCtoJsonStore(name, path, { strict = false } = {}) {
     load: async () => {
       if (strict) {
         try {
-          return migrateStore(name, JSON.parse(await readFile(path, "utf-8")));
+          return migrateStore(name, parseStrictStorePayload(name, JSON.parse(await readFile(path, "utf-8"))));
         } catch (error) {
           if (error.code === "ENOENT") return defaultPayload();
           throw error;
@@ -213,6 +226,13 @@ export const resolveStore = createCtoJsonStore("resolve", ctoPath("resolve.json"
 // Owned by the gate/calibration engine (BET-1518); read by the §10.5
 // calibration table. Readers tolerate the bare `{ v: 1 }` default.
 export const calibrationStore = createCtoJsonStore("calibration", ctoPath("calibration.json"));
+// P3a1 (unified-cto-spec §3.1): the durable singleton CTO conversation
+// binding — binding generation, current/previous session ids, and the
+// reserve-before-create operation marker that recovers a role session whose
+// create landed but whose bind was lost to a crash. Strict: a corrupt
+// binding must fail loudly — silently reading it as "unbound" would create
+// a duplicate role session.
+export const bindingStore = createCtoJsonStore("binding", ctoPath("binding.json"), { strict: true });
 
 // ---------------------------------------------------------------------------
 // BET-1425 engine-state write hygiene, generalized in BET-1464 (defect 3) —

@@ -302,3 +302,74 @@ running server's SSE (`message.updated` with the client id) rather than raw read
 
 No feature is asserted to exist: nothing here claims the CTO role session, admission path,
 headless delegate or context service — P1a/P2a build those. Contract-only per spec §15.
+
+## 10. P3a1 addendum — the durable singleton conversation binding is now a service
+
+`src/server/ctoBinding.mjs` (`createCtoBinding({ oc, store, controlDir, requestDeadlineMs, ... })`)
+implements spec §3.1 step 1 (create-or-recover ONE durable session) as an injectable service:
+`ensure()` (singleflight get-or-create-or-replace), `recover()` (explicit reconcile pass —
+ensure AND recover share one store-keyed flight across engine instances), and `getBinding()`
+(store read only, full archive + optional pagination — opening the tab never invokes the
+model). Not wired to any route yet; the future UI caller composes it.
+
+Additive seams this PR lands on top of the P0 receipts:
+
+- `opencode.createSession(...)` forwards a plain-object `metadata` option onto `POST /session`
+  (P0 §8 receipt: metadata round-trips verbatim through `GET /session/{id}`); its rejection
+  errors carry the numeric `status`, so a 4xx is a DEFINITIVE "nothing landed".
+- `opencode.readSession(sessionId, { signal })` — NEW three-state read (`found` with the full
+  record incl. `metadata` / `missing` on definitive 404 / `unknown` on 5xx+network), so callers
+  can apply the spec rule "timeout is not absence". `sessionExists` is unchanged.
+  `listSessions(directory, { signal })` now takes a signal too.
+- `ctoStores.bindingStore` — strict store for the versioned binding record: `generation`,
+  `currentSessionId` + `currentOperation` (the exact identity marker to verify against),
+  the FULL `previousSessionIds` archive (never capped, never dropped; `getBinding` paginates),
+  and `pendingOperation` (reserved BEFORE the remote create with the expected pre-create state;
+  recovery matches sessions by EXACT `metadata.bindingOperation` — never by title). Strict
+  stores treat a top-level null/array/string payload as CORRUPTION — only a missing file
+  initializes the default.
+
+Role-session discipline (all pinned by `ctoBinding.test.mjs`): the role session's opencode
+directory is a server-owned control directory under the state home (`~/.manta/cto/conversation`,
+0700 enforced, marker file, no `.git` in it or any ancestor up to the state home, realpath
+containment so no symlink can redirect the session's cwd outside the state home); its title
+deliberately avoids the ephemeral reaper's `cto:` prefix. Provenance is DISTINCT from the
+generic internal-session tombstones: the conversation is recognized via the binding record
+(`readConversationRole`, checked first in `resolvePipelineSession` → `{owner:"cto",
+role:"cto_conversation"}` vs `role:"cto_internal"` for ephemeral tombstones), so the engine can
+recognize a human CEO instruction (presence/preempt) while the conversation still never
+produces evidence rows or segmentation input — the CTO never summarizes its own assistant
+output recursively.
+
+Unknown-outcome discipline (review blockers 1-3): concurrent `ensure()`/`recover()` calls —
+across engine instances over the same store — join ONE flight; the reservation CAS
+(`expectedCurrentSessionId`/`expectedGeneration`) and the bind CAS stop a stale "missing"
+lookup from replacing a session a prior bind already replaced; every oc call (list/read/create)
+is bounded by an AbortSignal deadline through the actual transport (hung headers/body →
+explicit failure); a create with an UNKNOWN outcome (network/deadline/5xx) RETAINS its
+reservation and fails explicitly — never blind-retried, and a marker scan that finds nothing
+NEVER clears the reservation (an in-flight create can land after the snapshot; a malformed
+list response is never read as absence). Only a definitive 4xx rejection clears its own
+reservation. A create whose response lacks the identity marker persists the created sid plus a
+terminal `unsupportedIdentity` failure — never a create-loop.
+
+Round-2 review corrections: ensure/recover serialize through a per-store task
+queue where every caller completes its own postcondition (ensure still creates
+when queued behind a no-create recover); the create's returned sid is persisted
+BEFORE receipt verification and recovery settles by a DIRECT read of that sid
+first (the marker scan runs only when no sid was persisted); control-directory
+validation (textual + realpath containment, repository walk including the state
+home) precedes every mkdir/chmod so a refused path is never modified; the DB
+scanner tags rows with distinct provenance (`cto_internal` from tombstones,
+`cto_conversation` from the binding record — never in the tombstones) and the
+conversation's assistant/tool content is excluded from ordinary evidence while
+its user rows (CEO instructions) stay consumable under their role path; strict
+stores never read a top-level null/array/string as default; the archive is
+uncapped with query pagination; and the service states its single-writer-
+process requirement — no fake cross-process CAS guarantee.
+Round-3: an EXISTING controlDir symlink is refused outright (spec — symlink
+redirects are refused; ancestor symlinks remain fine under realpath
+containment), and an existing controlDir that resolves to the state home
+itself is refused — equality with the state home is valid only as the
+existing ancestor of a not-yet-created controlDir, so chmod can never follow
+a link onto the state home or any other target.

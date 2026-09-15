@@ -464,7 +464,7 @@ export function _onSessionDirectoryAdded(fn) {
 // paths. The server runs ON the opencode host, so `expandTilde` from
 // src/shared/paths.mjs expands against this process's own $HOME before
 // opencode sees the path.
-export async function createSession({ directory, title = "", permission, signal }) {
+export async function createSession({ directory, title = "", permission, metadata, signal }) {
   const absDir = expandTilde(directory);
   const url = `/session?directory=${encodeURIComponent(absDir)}`;
   const body = { title };
@@ -476,6 +476,18 @@ export async function createSession({ directory, title = "", permission, signal 
   if (Array.isArray(permission) && permission.length > 0) {
     body.permission = permission;
   }
+  // P3a1 (unified-cto-spec §3.1): a free-form `metadata` object stamped at
+  // create — the role-session identity marker. Round-trip behavior verified
+  // on the installed binary by the P0 live probes (docs/cto-implementation-map.md
+  // §1/§8): the object persists on the Session record and reads back verbatim
+  // through GET /session/{id}. Only forward plain objects; opencode's
+  // CreateInput declares `metadata: object`.
+  if (metadata !== undefined) {
+    if (metadata === null || typeof metadata !== "object" || Array.isArray(metadata)) {
+      throw new Error("opencode createSession metadata must be a plain object");
+    }
+    body.metadata = metadata;
+  }
   const res = await ocFetch(apiUrl(url), {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -483,7 +495,13 @@ export async function createSession({ directory, title = "", permission, signal 
     signal,
   });
   if (!res.ok) {
-    throw new Error(`opencode createSession ${res.status}: ${await res.text()}`);
+    const err = new Error(`opencode createSession ${res.status}: ${await res.text()}`);
+    // The numeric status lets callers distinguish a DEFINITIVE rejection
+    // (4xx — nothing was created) from an unknown outcome (network error,
+    // timeout, 5xx — the create may still have landed). The binding service
+    // clears a reservation only on the former (P3a1 review blocker 1).
+    err.status = res.status;
+    throw err;
   }
   const sess = await res.json();
   // Fall back to the EXPANDED dir, never the raw tilde (the bug we fixed).
@@ -728,9 +746,9 @@ export async function abortSession(sessionId) {
 /** List sessions scoped to a project directory.
  *  @param {string} [directory]
  */
-export async function listSessions(directory) {
+export async function listSessions(directory, { signal } = {}) {
   const qs = directory ? `?directory=${encodeURIComponent(directory)}` : "";
-  const res = await ocFetch(apiUrl(`/session${qs}`));
+  const res = await ocFetch(apiUrl(`/session${qs}`), { signal });
   if (!res.ok) {
     throw new Error(`opencode listSessions ${res.status}: ${await res.text()}`);
   }
@@ -816,6 +834,36 @@ export async function sessionExists(sessionId) {
     return true;
   } catch {
     return true; // transient failure — never treat as "gone"
+  }
+}
+
+/**
+ * Read one session record with an EXPLICIT three-state outcome. The durable
+ * CTO binding (ctoBinding.mjs) needs the distinction sessionExists collapses:
+ * only a definitive 404 proves absence; anything else (5xx, auth, network)
+ * is "unknown" and must never be read as "gone" — a replacement created off
+ * a transient error would duplicate the role session. Returns the FULL
+ * record (including `metadata`) so callers can verify an identity marker
+ * stamped at create (P0 live probes: metadata round-trips verbatim).
+ *
+ * @param {string} sessionId
+ * @returns {Promise<{ state: "found", session: object } | { state: "missing" } | { state: "unknown" }>}
+ */
+export async function readSession(sessionId, { signal } = {}) {
+  if (!sessionId) return { state: "missing" };
+  try {
+    const res = await ocFetch(apiUrl(`/session/${encodeURIComponent(sessionId)}`), { signal });
+    if (res.status === 404) {
+      await discardBody(res);
+      return { state: "missing" };
+    }
+    if (!res.ok) {
+      await discardBody(res);
+      return { state: "unknown" };
+    }
+    return { state: "found", session: await res.json() };
+  } catch {
+    return { state: "unknown" };
   }
 }
 

@@ -1,8 +1,16 @@
 import { internalSessionsStore, ledgerStore, patchStore } from "./ctoStores.mjs";
+import { readConversationRole, CONVERSATION_ROLE } from "./ctoBinding.mjs";
+
+// The durable CEO conversation's role label contrast for the generic internal
+// class. The conversation itself is NEVER in these tombstones — it is
+// recognized via the binding record (readConversationRole), keeping the two
+// provenance registers separate (P3a1 review blocker 4).
+export const CTO_INTERNAL_ROLE = "cto_internal";
 
 const generations = new WeakMap();
 export function createInternalSessions({ store = internalSessionsStore, now = Date.now, barrierMs = 250,
-  report = (row) => ledgerStore.append(row) } = {}) {
+  report = (row) => ledgerStore.append(row),
+  conversationReader = readConversationRole } = {}) {
   const creating = new Set();
   const internal = new Set();
   const owners = new Map();
@@ -81,12 +89,18 @@ export function createInternalSessions({ store = internalSessionsStore, now = Da
 
   async function resolvePipelineSession(sessionID, listProjects) {
     if (!sessionID) return { owner: "unknown" };
-    if (await isInternalSession(sessionID)) return { owner: "cto" };
+    // Distinct role provenance (P3a1 review blocker 4): the durable CEO
+    // conversation is recognized from the BINDING record — checked before the
+    // generic tombstones and before tmux — so readers can tell a human CEO
+    // message (cto_conversation) apart from the CTO's own ephemeral inference
+    // sessions (cto_internal). A corrupt binding store fails closed (throws).
+    if (await conversationReader(sessionID)) return { owner: "cto", role: CONVERSATION_ROLE };
+    if (await isInternalSession(sessionID)) return { owner: "cto", role: CTO_INTERNAL_ROLE };
     const cached = owners.get(sessionID);
     if (cached && cached.until > now()) return cached.info;
     if (!projectsFlight) projectsFlight = Promise.resolve().then(listProjects).finally(() => { projectsFlight = null; });
     const projects = await bounded(projectsFlight);
-    if (await isInternalSession(sessionID)) return { owner: "cto" };
+    if (await isInternalSession(sessionID)) return { owner: "cto", role: CTO_INTERNAL_ROLE };
     let info = { owner: "unknown" };
     for (const p of projects ?? []) {
       const w = (p.windows ?? []).find((w) => w.opencodeSessionId === sessionID);

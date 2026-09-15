@@ -91,3 +91,63 @@ for (const cleanupFails of [false, true]) {
     assert.equal(deleted, true);
   });
 }
+
+// ---------------------------------------------------------------------------
+// P3a1 review blocker 4 — the durable CEO conversation carries DISTINCT role
+// provenance (from the binding record, never the generic tombstones): a human
+// CEO instruction is recognized as CEO presence, while the conversation never
+// produces evidence or segmentation input (the CTO must not summarize its own
+// assistant output recursively). Ephemeral inference sessions stay
+// cto_internal with none of that.
+// ---------------------------------------------------------------------------
+
+test("the conversation binding resolves as a DISTINCT role: cto_conversation wins over tmux; tombstones are cto_internal", async () => {
+  const tombstones = createInternalSessions();
+  await tombstones.beginInternalSession()("ephemeral-inference");
+  let projects = async () => [
+    { tmuxSession: "work", windows: [
+      { opencodeSessionId: "ceo-convo", owner: "user" },
+      { opencodeSessionId: "human-work", owner: "user" },
+    ] },
+  ];
+  const is = createInternalSessions({
+    conversationReader: async (sid) => sid === "ceo-convo",
+  });
+  const convo = await is.resolvePipelineSession("ceo-convo", projects);
+  assert.equal(convo.owner, "cto");
+  assert.equal(convo.role, "cto_conversation");
+  const internal = await is.resolvePipelineSession("ephemeral-inference", projects);
+  assert.equal(internal.owner, "cto");
+  assert.equal(internal.role, "cto_internal");
+  const human = await is.resolvePipelineSession("human-work", projects);
+  assert.equal(human.owner, "user");
+  assert.equal(human.role, undefined);
+  // Non-conversation, non-internal, no tmux match → unchanged unknown shape.
+  projects = async () => [];
+  assert.deepEqual(await is.resolvePipelineSession("ses-mystery", projects), { owner: "unknown" });
+  void tombstones;
+});
+
+test("event provenance: a human CEO instruction updates presence WITHOUT becoming evidence or segmentation input; ephemeral sessions do neither", async () => {
+  let observations = 0;
+  const engine = createCtoEngine({
+    configGet: async () => ({ ctoEnabled: false }),
+    getSessionInfo: async (sid) =>
+      sid === "ceo-convo"
+        ? { owner: "cto", role: "cto_conversation" }
+        : { owner: "cto", role: "cto_internal" },
+    segmenterOverride: { observe: () => { observations++; } },
+    now: () => 1_000_000,
+  });
+  engine.observeEvent({ type: "user.message.created", properties: { sessionID: "ceo-convo", message: { role: "user", text: "CEO instruction" } } });
+  await new Promise((r) => setTimeout(r, 30));
+  const after = engine.getPresence();
+  assert.ok(after.lastSeen >= 1_000_000, "a human CEO instruction counts as CEO presence");
+  assert.equal(observations, 0, "the conversation is never segmentation input");
+
+  const beforeEphemeral = engine.getPresence();
+  engine.observeEvent({ type: "user.message.created", properties: { sessionID: "ephemeral-inference", message: { role: "user", text: "internal" } } });
+  await new Promise((r) => setTimeout(r, 30));
+  assert.deepEqual(engine.getPresence(), beforeEphemeral, "ephemeral cto activity is not presence");
+  assert.equal(observations, 0);
+});
