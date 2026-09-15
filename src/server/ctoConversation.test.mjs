@@ -64,6 +64,7 @@ function fakeOc() {
     commandCalls: [],
     transcript: new Map(),
     rows: [],
+    readStates: {},
     async sendPrompt(args) {
       oc.calls.push(["sendPrompt", args]);
       oc.sends.push(args);
@@ -99,6 +100,10 @@ function fakeOc() {
     },
     async readSession(id) {
       oc.calls.push(["readSession", id]);
+      // readStates mirrors the binding tests' fake: an override forces a
+      // verification outcome (e.g. "missing" so a rebind fires).
+      const override = oc.readStates?.[id];
+      if (typeof override === "function") return override();
       const session = oc.created.find((s) => s.id === id);
       return session ? { state: "found", session: structuredClone(session) } : { state: "missing" };
     },
@@ -194,7 +199,7 @@ const stubDeps = () => ({
 // binding + ONE admission + the conversation service, the prompt-delivery
 // engine with its redirect, and the real channel map. Agent name is a stub
 // stand-in for providers.CTO_AGENT_NAME.
-function compose({ stamp, abortRaw, bindingStore, admissionOptions } = {}) {
+function compose({ stamp, bindingStore, admissionOptions } = {}) {
   const oc = fakeOc();
   const bStore = bindingStore ?? memoryStore("binding");
   const binding = createCtoBinding({
@@ -228,9 +233,6 @@ function compose({ stamp, abortRaw, bindingStore, admissionOptions } = {}) {
     admission,
     agentName: "cto-test-agent",
     ...(stamp ? { stamp } : {}),
-    // Production wiring: the raw oc abort is ALWAYS available to the seam's
-    // fallback paths (uncertain / refused / cancel_requested / untracked).
-    abortSession: abortRaw ?? ((sid) => oc.abortSession(sid)),
   });
   const handlers = buildHandlers({ oc, ctoConversation: svc, ...stubDeps() });
   return { oc, binding, admission, svc, pd, handlers, bStore };
@@ -614,236 +616,6 @@ test("admission dispatch and interrupt forward their bounded signals to the raw 
 });
 
 // ---------------------------------------------------------------------------
-// Blocker 3: the opencode:abort seam — a raw abort is invisible to
-// admission's abortState, so the bound role session's abort routes onto the
-// tracked interrupt path.
-// ---------------------------------------------------------------------------
-
-// Shared prologue for the abort-seam cases: compose with a raw-fallback
-// counter, open the conversation, and submit an admitted turn whose raw send
-// stays parked until released (deterministic dispatching/accepted states).
-async function composeWithSubmittedTurn({ id, text } = {}) {
-  const fallbackCount = { n: 0, sid: null };
-  const t = compose({
-    abortRaw: async (sid) => {
-      fallbackCount.n += 1;
-      fallbackCount.sid = sid;
-    },
-  });
-  const open = await dispatch(t.handlers, "cto:conversation-open", []);
-  const { release } = parkSends(t.oc);
-  await dispatch(t.handlers, "cto:conversation-submit", [{ id, text }]);
-  assert.ok(await waitFor(() => t.oc.sends.length >= 1), "admission dispatched the turn");
-  return { t, open, release, fallbackCount };
-}
-
-test("opencode:abort at the bound session tracks the accepted turn as interrupt_pending with a forwarded signal", async () => {
-  const { t, open, release, fallbackCount } = await composeWithSubmittedTurn({
-    id: "m_abort",
-    text: "long turn",
-  });
-  release();
-  // The send landed its receipt → the record is the ACCEPTED turn.
-  assert.ok(
-    await waitFor(async () =>
-      (await t.admission.list()).submissions.find((r) => r.id === "m_abort")?.status === "accepted",
-    ),
-    "the turn is accepted before the abort",
-  );
-
-  // THE SEAM: the caller only knows the session id — the accepted record is
-  // resolved server-side and interrupted through admission's tracked path.
-  await dispatch(t.handlers, "opencode:abort", [open.sessionId]);
-  assert.ok(
-    await waitFor(async () =>
-      (await t.admission.list()).submissions.find((r) => r.id === "m_abort")?.status ===
-      "interrupt_pending",
-    ),
-    "the abort is VISIBLE to abortState (tracked interrupt)",
-  );
-  assert.equal(t.oc.aborts.length, 1, "the tracked abort reached the raw oc");
-  assert.equal(t.oc.aborts[0].sessionId, open.sessionId);
-  assert.ok(t.oc.aborts[0].signal instanceof AbortSignal, "the abort carries a bounded signal");
-  assert.equal(fallbackCount.n, 0, "the tracked path handled it — no raw fallback");
-  // And the queue stays held (interrupt_pending is a barrier until reconcile).
-  const st = await dispatch(t.handlers, "cto:conversation-state", []);
-  assert.equal(st.counts.unresolved, 1);
-});
-
-test("opencode:abort with nothing unresolved on the session falls back to the raw abort", async () => {
-  let rawFallbacks = 0;
-  let rawFallbackSid = null;
-  const t = compose({
-    abortRaw: async (sid) => {
-      rawFallbacks += 1;
-      rawFallbackSid = sid;
-    },
-  });
-  const open = await dispatch(t.handlers, "cto:conversation-open", []);
-  // Empty queue: there is no admission turn to track — honor the stop request
-  // via the documented raw fallback.
-  await dispatch(t.handlers, "opencode:abort", [open.sessionId]);
-  assert.equal(rawFallbacks, 1);
-  assert.equal(rawFallbackSid, open.sessionId);
-  assert.equal(t.oc.aborts.length, 0, "the tracked path never fired");
-  const st = await dispatch(t.handlers, "cto:conversation-state", []);
-  assert.equal(st.submissions.length, 0);
-});
-
-test("opencode:abort while the admitted turn is mid-dispatch is an actionable refusal, not a raw abort", async () => {
-  const { t, open, release, fallbackCount } = await composeWithSubmittedTurn({
-    id: "m_dispatch",
-    text: "go",
-  });
-  try {
-    assert.ok(
-      await waitFor(async () =>
-        (await t.admission.list()).submissions.find((r) => r.id === "m_dispatch")?.status ===
-        "dispatching",
-      ),
-      "the record is mid-dispatch (send parked)",
-    );
-    await assert.rejects(
-      () => dispatch(t.handlers, "opencode:abort", [open.sessionId]),
-      /mid-dispatch/,
-    );
-    assert.equal(fallbackCount.n, 0);
-    assert.equal(t.oc.aborts.length, 0, "no untracked abort escapes");
-  } finally {
-    release();
-  }
-});
-
-test("opencode:abort at an ordinary session passes through raw, byte-identically", async () => {
-  const t = compose();
-  await dispatch(t.handlers, "opencode:abort", ["ses_project"]);
-  assert.equal(t.oc.aborts.length, 1);
-  assert.equal(t.oc.aborts[0].sessionId, "ses_project");
-  const st = await dispatch(t.handlers, "cto:conversation-state", []);
-  assert.equal(st.submissions.length, 0);
-});
-
-// ---------------------------------------------------------------------------
-// Re-review blocker: a marker (interrupt_pending / cancel_requested) must
-// NEVER make Stop a silent no-op. The idempotent return is honest ONLY while
-// an abort is genuinely in flight or already confirmed.
-// ---------------------------------------------------------------------------
-
-test("Stop on a parked-unknown record: the second press actually aborts the running turn (never silent success)", async () => {
-  const t = compose();
-  const open = await dispatch(t.handlers, "cto:conversation-open", []);
-  // The send lands but its receipt is NOT visible → the record parks `unknown`
-  // while the turn is genuinely running on the session.
-  t.oc.receiptVisible = false;
-  await dispatch(t.handlers, "cto:conversation-submit", [{ id: "m_unknown", text: "long turn" }]);
-  assert.ok(await waitFor(() => t.oc.sends.length >= 1), "the turn is live");
-  assert.ok(
-    await waitFor(async () =>
-      (await t.admission.list()).submissions.find((r) => r.id === "m_unknown")?.status === "unknown",
-    ),
-    "the record is parked unknown (receipt invisible)",
-  );
-
-  // Press 1: the contract's visible request — cancel_requested, NO abort
-  // issued (the send's outcome is unreconciled; admission must not guess).
-  await dispatch(t.handlers, "opencode:abort", [open.sessionId]);
-  assert.ok(
-    await waitFor(async () =>
-      (await t.admission.list()).submissions.find((r) => r.id === "m_unknown")?.status ===
-      "cancel_requested",
-    ),
-    "press 1 converts the record to the visible cancel_requested marker",
-  );
-  assert.equal(t.oc.aborts.length, 0, "press 1 issues no abort by contract");
-
-  // Press 2 (and any later press): the marker previously made Stop a SILENT
-  // no-op returning success while the model kept running. It must fall
-  // through to the REAL raw abort — the turn is untrackable, so stopping it
-  // is the honest action.
-  await dispatch(t.handlers, "opencode:abort", [open.sessionId]);
-  assert.ok(t.oc.aborts.length >= 1, "the second press actually aborts the turn");
-  assert.equal(t.oc.aborts[0].sessionId, open.sessionId);
-  // The barrier itself stays admission's business (reconcile proves it out).
-  const st = await dispatch(t.handlers, "cto:conversation-state", []);
-  assert.equal(st.submissions[0].status, "cancel_requested");
-});
-
-test("Stop after an uncertain abort (abortState uncertain, barrier permanent) issues the real abort", async () => {
-  const t = compose();
-  const open = await dispatch(t.handlers, "cto:conversation-open", []);
-  const { release } = parkSends(t.oc);
-  await dispatch(t.handlers, "cto:conversation-submit", [{ id: "m_unc", text: "long turn" }]);
-  assert.ok(await waitFor(() => t.oc.sends.length >= 1));
-  release();
-  await flush();
-  // The abort transport fails NON-DEFINITIVELY (no .status → permanent
-  // uncertainty). Press 1: tracked attempt, abortState → "uncertain".
-  t.oc.abortSession = async () => {
-    throw new Error("network reset");
-  };
-  await dispatch(t.handlers, "opencode:abort", [open.sessionId]);
-  assert.ok(
-    await waitFor(async () =>
-      (await t.admission.list()).submissions.find((r) => r.id === "m_unc")?.abortState ===
-      "uncertain",
-    ),
-    "press 1 leaves the permanent uncertain barrier",
-  );
-  // Press 2: previously 0 oc calls returning undefined = fake success while
-  // the turn may still run. Now: the REAL abort is issued.
-  t.oc.aborts = []; // count only what press 2 does
-  let press2Aborts = 0;
-  t.oc.abortSession = async (sid, opts = {}) => {
-    press2Aborts += 1;
-    t.oc.aborts.push({ sessionId: sid, signal: opts.signal ?? null });
-  };
-  await dispatch(t.handlers, "opencode:abort", [open.sessionId]);
-  assert.equal(press2Aborts, 1, "the wedged record's Stop still stops the turn");
-  assert.equal(
-    (await t.admission.list()).submissions.find((r) => r.id === "m_unc")?.status,
-    "interrupt_pending",
-    "the barrier itself stays admission's business",
-  );
-});
-
-test("Stop while an abort is genuinely in flight stays idempotent (no duplicate abort)", async () => {
-  const t = compose();
-  const open = await dispatch(t.handlers, "cto:conversation-open", []);
-  const { release } = parkSends(t.oc);
-  await dispatch(t.handlers, "cto:conversation-submit", [{ id: "m_live", text: "long turn" }]);
-  assert.ok(await waitFor(() => t.oc.sends.length >= 1));
-  release();
-  await flush();
-  // Hold the tracked abort IN FLIGHT (claimed, not settled).
-  let releaseAbort;
-  const abortGate = new Promise((r) => (releaseAbort = r));
-  const realAbort = t.oc.abortSession.bind(t.oc);
-  t.oc.abortSession = async (sid, opts) => {
-    await abortGate;
-    return realAbort(sid, opts);
-  };
-  // Press 1 is IN FLIGHT until the gate releases — do not await it yet.
-  const press1 = dispatch(t.handlers, "opencode:abort", [open.sessionId]);
-  assert.ok(
-    await waitFor(async () =>
-      (await t.admission.list()).submissions.find((r) => r.id === "m_live")?.abortState ===
-      "claimed",
-    ),
-    "the tracked abort is in flight (claimed)",
-  );
-  // Press 2 while in flight: idempotent — no duplicate abort request.
-  await dispatch(t.handlers, "opencode:abort", [open.sessionId]);
-  assert.equal(
-    (await t.admission.list()).submissions.find((r) => r.id === "m_live")?.attemptCount,
-    1,
-    "no second attempt was claimed",
-  );
-  releaseAbort();
-  await press1;
-  assert.equal(t.oc.aborts.length, 1, "exactly one abort was ever issued");
-});
-
-// ---------------------------------------------------------------------------
 // Previous-generation retarget: a delivery aimed at a REPLACED role session
 // must still flow through admission (which dispatches to the CURRENT
 // binding), not fire into the dead session.
@@ -992,4 +764,44 @@ test("a stamp (stat) failure degrades to a cache miss, never to a failed classif
   assert.equal(receipt.origin, "human");
   const st = await dispatch(t.handlers, "cto:conversation-state", []);
   assert.equal(st.submissions.length, 1);
+});
+
+test("a binding write landing DURING the getBinding read invalidates the cache (stale-hit regression)", async () => {
+  // The reviewed regression: the classification cached under the stamp read
+  // AFTER getBinding() returned, so a rebind landing inside the read window
+  // stored the PRE-write binding under the POST-write stamp — every later
+  // classification was a stale hit and the LIVE role session classified as
+  // ordinary (bypassing admission) until the next binding write.
+  let stampValue = "s1";
+  const t = compose({ stamp: () => stampValue });
+  await dispatch(t.handlers, "cto:conversation-open", []);
+  // Model the race on the public read: the snapshot is taken BEFORE a
+  // rebind, the rebind (a binding write → new stamp) lands while the read
+  // is "in flight", and the read returns the PRE-write binding.
+  const realGetBinding = t.binding.getBinding.bind(t.binding);
+  let rebindLanded = false;
+  let liveSessionId = null;
+  t.binding.getBinding = async (...args) => {
+    const pre = await realGetBinding(...args);
+    if (!rebindLanded) {
+      rebindLanded = true;
+      // The rebind only fires when the current role session no longer
+      // verifies — mark it missing, exactly like the binding archive tests.
+      t.oc.readStates["ses_cto1"] = () => ({ state: "missing" });
+      stampValue = "s2"; // the write's change stamp
+      const re = await t.binding.ensure();
+      liveSessionId = re.binding.currentSessionId;
+    }
+    return pre;
+  };
+  // First classification populates the cache (pre-read stamp "s1" after the
+  // fix; the post-read stamp "s2" before it).
+  assert.ok(await t.svc.isConversationSession("ses_cto1"));
+  assert.equal(liveSessionId, "ses_cto2");
+  // The NEXT call, aimed at the live (post-rebind) session, must re-read:
+  // the pre-write binding cached in the gap must not classify it ordinary.
+  assert.ok(
+    await t.svc.isConversationSession(liveSessionId),
+    "a rebind during the read window must invalidate the cache — the live session is still the conversation",
+  );
 });

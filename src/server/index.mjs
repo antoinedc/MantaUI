@@ -50,7 +50,7 @@ import * as local from "./local.mjs";
 import { createPeekHandler } from "./peek.mjs";
 import { createProjectsHandler } from "./projectsRoute.mjs";
 import { createUploadHandler } from "./uploadRoute.mjs";
-import { CTO_SAFE_500_MESSAGE, respondSafe500 } from "./safeApiError.mjs";
+import { CTO_SAFE_500_MESSAGE, HOOK_SAFE_500_MESSAGE, respondSafe500 } from "./safeApiError.mjs";
 import { createLogShipper, captureConsole, resolveAxiomConfig } from "../shared/logShip.mjs";
 import { setTelemetrySink, shipCtxEvent } from "./optimizer/telemetry.mjs";
 import { blendedPrice } from "../shared/blendedPrice.mjs";
@@ -460,9 +460,6 @@ const ctoConversation = createCtoConversationService({
   // Cheap change stamp for the seam-classification cache (one stat instead of
   // a binding.json read+parse on every ordinary project prompt).
   stamp: () => bindingStore.stamp(),
-  // Raw oc abort for the abort seam's documented untracked fallback (no
-  // unresolved admission record on the session).
-  abortSession: (sessionId) => oc.abortSession(sessionId),
 });
 // Bounded tick poller (spec §8.3 recovery): reconcile + pump with no inbound
 // events. startPoller surfaces failures via console.warn — a failed tick
@@ -2682,12 +2679,11 @@ void stopAdaptiveCtoWatchdog;
 const stopCtoStoreSweeper = startCtoStoreSweeper({
   intervalMs: CTO_STORE_SWEEP_INTERVAL_MS,
   label: "cto-store-sweeper",
-  // P3a3-review: the admission engine's terminal-background retention rides
-  // the SAME sweeper timer (unique per-occurrence ids make terminal
-  // background receipts grow one per delivery — without the trim, the store
-  // wedges at MAX_ENTRIES and refuses even human submits). startPoller's
-  // extras: pass through `hooks` → createCtoStoreSweep.
-  hooks: [() => ctoAdmissionEngine.trimTerminalBackground()],
+  // P3a3 review: the admission engine's terminal-receipt retention rides the
+  // SAME sweeper timer (unique per-occurrence ids make terminal receipts grow
+  // one per delivery — without the trim, the store wedges at MAX_ENTRIES).
+  // `hooks` → createCtoStoreSweep: one sweeper, no second poller.
+  hooks: [() => ctoAdmissionEngine.trimTerminal()],
 });
 void stopCtoStoreSweeper;
 
@@ -4190,8 +4186,11 @@ const handleRequest = async (req, res) => {
         ),
       );
     } catch (e) {
-      // class-2 (BET-1460): forge webhook delivery (/hook/<token>) — machine-to-machine; raw aids redelivery diagnosis.
-      respondJson(res, 500, { error: String(e?.message ?? e) });
+      // class-1 (BET-1460): /hook/<token> is the ONE externally-reachable
+      // unauthenticated route — the body can reach a third-party sender's
+      // logs. Safe literal; the real cause (store paths, admission refusals)
+      // goes to the server console.
+      respondSafe500(res, "hook", HOOK_SAFE_500_MESSAGE, e);
     }
     return;
   }

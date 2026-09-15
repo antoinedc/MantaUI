@@ -1111,7 +1111,7 @@ test("reconcile settles an interrupt_pending record from transcript proof (resta
 // Receipts retained forever; hard cap on NEW entries
 // ---------------------------------------------------------------------------
 
-test("terminal receipts are retained: the store never evicts; new submissions are refused at the cap", async () => {
+test("at-cap inline eviction: the oldest terminal receipt is tombstoned to admit a new submission (P3a3 review)", async () => {
   const store = memoryStore(`cap-${randomUUID()}`);
   const { svc, oc, clock } = buildService({ store, maxEntries: 3 });
   const a = await svc.submit({ id: "evt_a", text: "a", origin: "human" });
@@ -1122,20 +1122,95 @@ test("terminal receipts are retained: the store never evicts; new submissions ar
   await flush();
   assert.equal(await statusOf(svc, a.id), "completed");
   // Hold the session busy so the queued entries stay queued while the cap
-  // fills (the priority of this test is retention, not admission).
+  // fills (the priority of this test is the cap path, not admission).
   svc.observeEvent({ type: "session.status", properties: { sessionID: "ses_cto", status: { type: "busy" } } });
   clock.t += 1;
   await svc.submit({ id: "evt_b", text: "b", origin: "human" });
   clock.t += 1;
   await svc.submit({ id: "evt_c", text: "c", origin: "human" }); // fills the cap
   clock.t += 1;
-  await assert.rejects(
-    () => svc.submit({ id: "evt_d", text: "d", origin: "human" }),
-    (err) => err instanceof CtoAdmissionError && err.code === "at-cap",
-  );
+  // At cap the completed receipt is queue BOOKKEEPING, not conversation
+  // history: it yields (tombstoned — dedupe identity survives) instead of
+  // refusing the new submission.
+  const d = await svc.submit({ id: "evt_d", text: "d", origin: "human" });
+  assert.equal(d.persisted, true, "the new submission is admitted, never refused");
+  assert.equal(d.status, "queued");
+  const q = await svc.list();
+  assert.ok(!q.submissions.some((r) => r.id === "evt_a"), "the OLDEST terminal receipt was evicted");
+  assert.ok(q.submissions.some((r) => r.id === "evt_b" && r.status === "queued"), "unresolved entries stay");
+  assert.ok(q.submissions.some((r) => r.id === "evt_c" && r.status === "queued"), "unresolved entries stay");
+  assert.ok(q.submissions.some((r) => r.id === "evt_d" && r.status === "queued"), "the new submission is queued");
   const raw = await store.load();
-  assert.equal(raw.submissions.length, 3, "no eviction: the completed receipt and queued entries stay");
+  assert.equal(raw.submissions.length, 3, "the store stays at cap (1 evicted + 1 created)");
+  const tomb = (raw.tombstones ?? []).find((t) => t.id === "evt_a");
+  assert.ok(tomb, "the evicted receipt's dedupe identity survives in the tombstone list");
+  assert.equal(tomb.status, "completed");
   assert.equal(oc.sends.length, 1);
+});
+
+test("a human submit at cap drops the OLDEST QUEUED BACKGROUND delivery (cancelled-by-policy) — the human is never refused", async () => {
+  const store = memoryStore(`t-${randomUUID()}`);
+  const tickHash = canonicalRequestHash({ origin: "background", text: "tick 1", agent: "cto-test" });
+  await seedQueuedBackground(store, tickHash);
+  // Hold the session busy: the pump must never dispatch here — the only
+  // thing under test is the cap path and the tombstone replay, so a stray
+  // send can never race the assertions.
+  const { svc, oc } = buildService({ store, maxEntries: 3, isBusy: () => true });
+  // A permanent barrier + a recurring schedule has filled the store with
+  // QUEUED background deliveries. The human's own message must still get
+  // in: the OLDEST queued background record yields instead.
+  const receipt = await svc.submit({ origin: "human", text: "hello", id: "m_human", agent: "a" });
+  assert.equal(receipt.persisted, true, "the human submit is ADMITTED, never refused at cap");
+  assert.equal(receipt.status, "queued");
+  const q = await svc.list();
+  assert.ok(!q.submissions.some((r) => r.id === "sched:j1:m1"), "the OLDEST queued background delivery was dropped");
+  assert.ok(q.submissions.some((r) => r.id === "sched:j1:m2" && r.status === "queued"), "younger queued deliveries stay");
+  assert.ok(q.submissions.some((r) => r.id === "sched:j1:m3" && r.status === "queued"), "younger queued deliveries stay");
+  assert.ok(q.submissions.some((r) => r.id === "m_human"), "the human record is present");
+  const raw = await store.load();
+  const tomb = (raw.tombstones ?? []).find((t) => t.id === "sched:j1:m1");
+  assert.ok(tomb, "the dropped delivery's identity survives in the tombstone list");
+  assert.equal(tomb.status, "cancelled", "cancelled-by-policy, never dispatched");
+  // A retry of the dropped identity replays the tombstone — never re-fires.
+  const replay = await svc.submit({
+    origin: "background",
+    text: "tick 1",
+    id: "sched:j1:m1",
+    agent: "cto-test",
+  });
+  assert.equal(replay.persisted, false, "replay — nothing new written");
+  assert.equal(replay.status, "cancelled", "the cancelled-by-policy outcome is returned");
+  assert.equal(oc.sends.length, 0, "no double-send");
+});
+
+test("a BACKGROUND submit at cap cannot sacrifice its own queued peers — it refuses honestly", async () => {
+  const store = memoryStore(`t-${randomUUID()}`);
+  await seedQueuedBackground(store, "h1");
+  const { svc } = buildService({ store, maxEntries: 3 });
+  // Only a HUMAN submit may drop queued background records; a background
+  // submit with nothing terminal to yield refuses (human FIFO outranks
+  // background synthesis — the cap never reshuffles background order).
+  await assert.rejects(
+    () => svc.submit({ origin: "background", text: "tick 4", id: "sched:j1:m4", agent: "cto-test" }),
+    /nothing evictable/,
+  );
+});
+
+test("a human submit at cap with nothing queued-background to yield refuses honestly", async () => {
+  const store = memoryStore(`t-${randomUUID()}`);
+  await store.save({
+    v: 1,
+    submissions: [
+      { id: "m_1", origin: "human", text: "one", payloadHash: "h1", status: "queued", createdAt: 1, submitGeneration: 1 },
+      { id: "m_2", origin: "human", text: "two", payloadHash: "h2", status: "queued", createdAt: 2, submitGeneration: 1 },
+      { id: "m_3", origin: "human", text: "three", payloadHash: "h3", status: "queued", createdAt: 3, submitGeneration: 1 },
+    ],
+  });
+  const { svc } = buildService({ store, maxEntries: 3 });
+  await assert.rejects(
+    () => svc.submit({ origin: "human", text: "four", id: "m_4", agent: "a" }),
+    /nothing background-queued remains/,
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -1555,6 +1630,19 @@ function terminalRecord(id, { origin, payloadHash, text = "tick", createdAt }) {
   };
 }
 
+/** A store holding exactly MAX_ENTRIES QUEUED BACKGROUND deliveries — the
+ * "permanent barrier + recurring schedule" fixture for the at-cap tests. */
+async function seedQueuedBackground(store, tick1Hash) {
+  await store.save({
+    v: 1,
+    submissions: [
+      { id: "sched:j1:m1", origin: "background", text: "tick 1", payloadHash: tick1Hash, status: "queued", createdAt: 1, submitGeneration: 1 },
+      { id: "sched:j1:m2", origin: "background", text: "tick 2", payloadHash: "h2", status: "queued", createdAt: 2, submitGeneration: 1 },
+      { id: "sched:j1:m3", origin: "background", text: "tick 3", payloadHash: "h3", status: "queued", createdAt: 3, submitGeneration: 1 },
+    ],
+  });
+}
+
 test("a human submit is never refused because terminal background receipts filled the store (inline tombstoning at cap)", async () => {
   const store = memoryStore(`t-${randomUUID()}`);
   await store.save({
@@ -1642,37 +1730,53 @@ test("a NEW occurrence after eviction is a fresh submission (identities never re
   assert.equal(next.persisted, true, "a new occurrence is a new submission");
 });
 
-test("trimTerminalBackground tombstones the oldest terminal background receipts beyond the bound (sweeper hook)", async () => {
+test("trimTerminal tombstones the oldest terminal receipts beyond the bound, EITHER origin (sweeper hook)", async () => {
   const store = memoryStore(`t-${randomUUID()}`);
+  const humanPayload = { origin: "human", text: "hello", agent: "a" };
   await store.save({
     v: 1,
     submissions: [
       terminalRecord("bg_old", { origin: "background", payloadHash: "h_old", createdAt: 1 }),
-      terminalRecord("bg_mid", { origin: "background", payloadHash: "h_mid", createdAt: 2 }),
-      terminalRecord("bg_new", { origin: "background", payloadHash: "h_new", createdAt: 3 }),
-      terminalRecord("m_human", { origin: "human", payloadHash: "h_human", createdAt: 4 }),
+      terminalRecord("h_old", {
+        origin: "human",
+        payloadHash: canonicalRequestHash(humanPayload),
+        text: "hello",
+        createdAt: 2,
+      }),
+      terminalRecord("bg_mid", { origin: "background", payloadHash: "h_mid", createdAt: 3 }),
+      terminalRecord("h_new", { origin: "human", payloadHash: "h_new", createdAt: 4 }),
+      terminalRecord("bg_new", { origin: "background", payloadHash: "h_newest", createdAt: 5 }),
     ],
   });
-  const { svc } = buildService({ store, maxTerminalBackground: 2 });
-  const { evicted } = await svc.trimTerminalBackground();
-  assert.equal(evicted, 1);
+  const { svc, oc } = buildService({ store, maxTerminalBackground: 3 });
+  const { evicted } = await svc.trimTerminal();
+  assert.equal(evicted, 2, "the two OLDEST terminal receipts are evicted regardless of origin");
   const q = await svc.list();
   assert.equal(q.submissions.length, 3);
-  assert.ok(!q.submissions.some((r) => r.id === "bg_old"), "the oldest is evicted");
-  assert.ok(q.submissions.some((r) => r.id === "m_human"), "the HUMAN receipt is never evicted");
+  assert.ok(!q.submissions.some((r) => r.id === "bg_old"), "the oldest background receipt is evicted");
+  assert.ok(!q.submissions.some((r) => r.id === "h_old"), "the oldest HUMAN receipt is evicted too — queue bookkeeping, not conversation history");
+  assert.ok(q.submissions.some((r) => r.id === "h_new"), "the newest human receipt stays");
+  // Same tombstone treatment: a genuine same-id retry of the evicted HUMAN
+  // receipt still dedups and never double-sends.
+  const replay = await svc.submit({ origin: "human", text: "hello", id: "h_old", agent: "a" });
+  assert.equal(replay.persisted, false, "replay — nothing new written");
+  assert.equal(replay.status, "completed", "the tombstoned outcome is returned");
+  assert.equal(oc.sends.length, 0, "no double-send");
 });
 
-test("terminal HUMAN receipts still fill the cap honestly — the refusal names what holds the gate", async () => {
+test("UNRESOLVED records hold the gate: the at-cap refusal names them (terminal receipts never do anymore)", async () => {
   const store = memoryStore(`t-${randomUUID()}`);
   await store.save({
     v: 1,
-    submissions: Array.from({ length: 5 }, (_, i) =>
-      terminalRecord(`m_${i}`, { origin: "human", payloadHash: `h${i}`, createdAt: i }),
-    ),
+    submissions: [
+      { id: "m_1", origin: "human", text: "one", payloadHash: "h1", status: "accepted", createdAt: 1, submitGeneration: 1, sessionId: "ses_cto", messageID: "msg_1" },
+      { id: "m_2", origin: "human", text: "two", payloadHash: "h2", status: "accepted", createdAt: 2, submitGeneration: 1, sessionId: "ses_cto", messageID: "msg_2" },
+      { id: "m_3", origin: "human", text: "three", payloadHash: "h3", status: "accepted", createdAt: 3, submitGeneration: 1, sessionId: "ses_cto", messageID: "msg_3" },
+    ],
   });
-  const { svc } = buildService({ store, maxEntries: 5, maxTerminalBackground: 3 });
+  const { svc } = buildService({ store, maxEntries: 3, maxTerminalBackground: 3 });
   await assert.rejects(
-    () => svc.submit({ origin: "human", text: "one more", id: "m_more" }),
-    /nothing evictable/,
+    () => svc.submit({ origin: "human", text: "one more", id: "m_more", agent: "a" }),
+    (err) => err instanceof CtoAdmissionError && err.code === "at-cap" && /hold the gate/.test(err.message),
   );
 });

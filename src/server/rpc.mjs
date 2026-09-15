@@ -1061,20 +1061,15 @@ export function buildHandlers({
 
     // preload: ipcRenderer.invoke(IPC.opencodeAbort, sessionId)
     // → args[0] = sessionId (string)
-    // P3a3 (spec §8.3 names drain/abort): an abort aimed at the bound role
-    // session routes through the tracked interrupt path so the abort is
-    // VISIBLE to admission's abortState (a raw abort would let the
-    // interrupted turn settle `completed` and a late abort could hit the
-    // next admitted turn). The service resolves the target record
-    // server-side; with nothing unresolved on the session it falls back to
-    // the raw abort (a turn admission cannot see is untrackable — documented
-    // in the service). Ordinary project sessions take the raw path unchanged.
-    "opencode:abort": async (sessionId) => {
-      if (sessionId && ctoConversation && (await ctoConversation.isConversationSession(sessionId))) {
-        return ctoConversation.abortAdmittedTurn(sessionId);
-      }
-      return oc.abortSession(sessionId);
-    },
+    // P3a3 parent decision: the abort seam is DELIBERATELY DEFERRED to its
+    // own PR (design settled first). A session-wide abort of the role
+    // session is inherently unsafe once the admission barrier can release —
+    // a stray abort can land on the NEXT admitted turn (admission invariant
+    // 7's exact exclusion) — and every seam variant either lied to the user
+    // (silent no-op on a marker) or cancelled the wrong turn (raw fallback).
+    // Main's plain raw abort is exactly what this PR ships; nothing consumes
+    // the admission engine's interrupt yet.
+    "opencode:abort": (sessionId) => oc.abortSession(sessionId),
 
     // preload: ipcRenderer.invoke(IPC.opencodePermissions, sessionId?) → args[0] = sessionId
     // Scope the list to the session's directory — opencode returns [] for a

@@ -153,17 +153,18 @@ accepted ──interrupt──▶ interrupt_pending (NONTERMINAL barrier)
   pending work retargets a replacement role session automatically (recorded: `retargeted: true`,
   `dispatchGeneration`); an accepted turn keeps its original `sessionId` forever. A caller may
   pin `expectedGeneration` — mismatch refuses with `stale-generation` (new records only).
-- **Receipts retained forever (human) — tombstoned at a bound (background)**: terminal HUMAN
-  receipts are never evicted; growth is bounded by refusing NEW submissions at `MAX_ENTRIES`
-  (500) with `at-cap`. Terminal BACKGROUND receipts (P3a3-review) are evicted into compact
-  durable TOMBSTONES (`{id, payloadHash, status}`) once they exceed
-  `MAX_TERMINAL_BACKGROUND` (200) — oldest first, inline at the cap and via the shared CTO
-  store sweeper (`admission.trimTerminalBackground()`). The tombstone keeps the dedup
+- **Terminal receipts are bounded bookkeeping (P3a3 review round 3)**: terminal receipts of
+  EITHER origin are evicted into compact durable TOMBSTONES (`{id, payloadHash, status}`)
+  once they exceed `MAX_TERMINAL_BACKGROUND` (200) — oldest first, inline at the cap and via
+  the shared CTO store sweeper (`admission.trimTerminal()`). They are queue bookkeeping, not
+  conversation history — the real transcript lives in opencode. The tombstone keeps the dedup
   identity: a genuine same-id retry still replays (never double-sends); occurrence identities
   never recur (schedule keys embed the full-date minute key; webhook/delegate ids are unique),
-  so eviction cannot resurrect a turn. A human submit is NEVER refused because background
-  receipts filled the store — the cap path tombstones to make room first and refuses only
-  when nothing evictable remains.
+  so eviction cannot resurrect a turn. **A human submit is NEVER refused at the cap**: the
+  cap path evicts terminal receipts first, then — for a HUMAN submit only — drops the OLDEST
+  QUEUED BACKGROUND deliveries (tombstoned as `cancelled`: cancelled-by-policy, never
+  dispatched, so a replay does not resurrect them; human FIFO outranks background synthesis).
+  Only a store full of UNRESOLVED records still refuses, and the refusal says so.
 
 ## Store
 
@@ -193,6 +194,15 @@ opencode await.
 2. **`interrupt` of an accepted turn aborts the whole role session** (opencode abort is
    session-wide). The gate holds until the abort settles, so the blast radius cannot reach the
    NEXT admitted turn — but a foreign turn running on the session during the abort is hit too.
+2a. **Abort seaming is DELIBERATELY DEFERRED to its own PR (parent decision, P3a3 round 3).**
+   Routing `opencode:abort` of the bound role session onto admission's tracked interrupt was
+   built and REVERTED in this PR: a session-wide raw abort is inherently unsafe once the
+   admission barrier can release (a stray abort on a parked-unknown record reconciles to
+   accepted, the barrier releases, and the LATE abort lands on the NEXT admitted turn —
+   invariant 7's exact exclusion), and every seam variant either reported silent success on a
+   marker or cancelled the wrong turn. This PR ships main's plain raw abort; nothing consumes
+   admission's `interrupt` yet. The seam returns in its own PR with the design settled first
+   (likely: a session-level barrier reference so an abort can be scoped to the admitted turn).
 3. **Turn-completion reconcile needs `listMessages`** (or the event tap). Without either, an
    accepted record waits for a terminal event that a restart may have swallowed, and
    event-driven settlement is impossible (the barrier holds).

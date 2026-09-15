@@ -600,14 +600,16 @@ export async function deliverWebhook(
     const result = await enqueue(hook.sessionID, text);
     // The shared engine may reject a deferred delivery when the session's
     // pending queue is at its cap (BET-772), and admission refusals for a
-    // confirmed CTO target surface through the same rejected shape. Pass the
-    // REAL refusal through — a CTO binding-unavailable is not "queue full",
-    // and the sender (and operator) deserve the actual cause. The status
-    // stays 429 (not delivered; retry-able), which is the contract for every
-    // rejected delivery. A 202-"queued" for a prompt that was dropped would
-    // be a false success signal to the sender.
+    // confirmed CTO target surface through the same rejected shape. The
+    // /hook/<token> route is the one EXTERNALLY-reachable unauthenticated
+    // endpoint (BET-1460 class-1): never echo the raw internal error into
+    // the response body (it can carry absolute paths) — return a safe
+    // literal and warn the real cause server-side.
     if (result?.rejected) {
-      return { ok: false, status: 429, error: result.error || "queue full" };
+      console.warn(
+        `[webhook] delivery rejected for hook ${hook.id} (${hook.sessionID}): ${result.error ?? "queue full"}`,
+      );
+      return { ok: false, status: 429, error: "queue full" };
     }
     if (result?.queued) {
       return { ok: true, status: 202, queued: true };

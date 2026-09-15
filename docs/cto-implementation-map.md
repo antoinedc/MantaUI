@@ -323,7 +323,9 @@ Additive seams this PR lands on top of the P0 receipts:
   `listSessions(directory, { signal })` now takes a signal too.
 - `ctoStores.bindingStore` — strict store for the versioned binding record: `generation`,
   `currentSessionId` + `currentOperation` (the exact identity marker to verify against),
-  the FULL `previousSessionIds` archive (never capped, never dropped; `getBinding` paginates),
+  the `previousSessionIds` archive (deduped, newest kept, capped at
+  `MAX_PREVIOUS_SESSION_IDS=20` since the P3a3 review — the seams' classification scans it —
+  and `getBinding` paginates what the store keeps),
   and `pendingOperation` (reserved BEFORE the remote create with the expected pre-create state;
   recovery matches sessions by EXACT `metadata.bindingOperation` — never by title). Strict
   stores treat a top-level null/array/string payload as CORRUPTION — only a missing file
@@ -400,9 +402,12 @@ resent; absent → `unknown`, surfaced with a stale flag after 60s, still never 
 definitive 4xx observed live is `failed`. Human FIFO outranks queued background at ONE pick
 point (never reorders an accepted turn); pending work retargets the CURRENT binding at dispatch
 (`retargeted` recorded) while accepted turns keep their original sid. Terminal receipts are
-retained forever — growth is bounded by refusing new submissions at `MAX_ENTRIES` (500), never
-by eviction. `interrupt` is the explicit abort op (`queued`/`unknown` → cancelled, `accepted` →
-one bounded `abortSession`); submit never aborts.
+BOUNDED bookkeeping (P3a3 review): tombstoned past `MAX_TERMINAL_BACKGROUND` (200, oldest
+first — the dedup identity survives in the tombstone list), the submit cap path drops the
+oldest QUEUED BACKGROUND records for a human submit, and a background submit with nothing
+evictable is refused at `MAX_ENTRIES` (500). `interrupt` is the explicit abort op
+(`queued`/`unknown` → cancelled, `accepted` → one bounded `abortSession`); submit never
+aborts.
 
 Additive seams this PR lands on top of P3a1/P0: `opencode.sendPrompt` forwards an optional
 `messageID` onto the `prompt_async` body (P0 §8: persisted verbatim as the user message id,

@@ -18,6 +18,7 @@ import { Writable } from "node:stream";
 
 import {
   CTO_SAFE_500_MESSAGE,
+  HOOK_SAFE_500_MESSAGE,
   UPLOAD_SAFE_500_MESSAGE,
   respondSafe500,
 } from "./safeApiError.mjs";
@@ -67,6 +68,7 @@ test("the underlying error text never reaches the response body", () => {
 test("the safe literals are pinned literally (wording drift is review-visible)", () => {
   assert.equal(UPLOAD_SAFE_500_MESSAGE, "Couldn't save the upload on the box.");
   assert.equal(CTO_SAFE_500_MESSAGE, "The box's assistant service hit an unexpected error.");
+  assert.equal(HOOK_SAFE_500_MESSAGE, "The box could not process this webhook delivery.");
 });
 
 test("the underlying error goes to console.warn tagged with the route", () => {

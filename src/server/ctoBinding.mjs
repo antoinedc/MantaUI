@@ -5,8 +5,9 @@
 // directory is a stable server-owned control directory under the state home —
 // never a user repository, never an implicit implementation target. The
 // binding itself is a small versioned record in the CTO store: generation,
-// current session id, the full previous-session-id archive (never capped,
-// never dropped — replacements are rare and queries paginate), and a
+// current session id, the previous-session-id archive (deduped, newest kept,
+// capped at MAX_PREVIOUS_SESSION_IDS — it is scanned by the conversation
+// seams' classification — and getBinding paginates what the cap keeps), and a
 // reserve-before-create operation marker that recovers a role session whose
 // remote create landed but whose bind was lost to a crash.
 //
@@ -905,9 +906,9 @@ export function createCtoBinding({
     claimGeneration,
     /**
      * Store read only — zero opencode calls, zero model turns. By default
-     * returns the FULL previous-session archive (never dropped); pass
+     * returns the (capped, newest-kept) previous-session archive; pass
      * `{ previousLimit, previousOffset }` (offset 0 = most recent) to
-     * paginate without dropping anything from the store.
+     * paginate within what the store keeps.
      */
     getBinding: async ({ previousLimit, previousOffset = 0 } = {}) => {
       const binding = await loadBinding();

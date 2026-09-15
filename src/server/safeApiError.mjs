@@ -31,6 +31,10 @@
 export const UPLOAD_SAFE_500_MESSAGE = "Couldn't save the upload on the box.";
 export const CTO_SAFE_500_MESSAGE =
   "The box's assistant service hit an unexpected error.";
+// /hook/<token> is the ONE externally-reachable unauthenticated route: a
+// third-party forge sender reads the body. Refusal causes there carry
+// absolute box paths (review finding, P3a3 round 3).
+export const HOOK_SAFE_500_MESSAGE = "The box could not process this webhook delivery.";
 
 /**
  * Write a class-1 500: safe human literal in the body, underlying error on

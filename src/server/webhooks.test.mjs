@@ -599,19 +599,35 @@ test("deliverWebhook surfaces a defer-queue-full rejection as 429, not 202 (BET-
   assert.equal(enqueueCalls, 1);
 });
 
-test("deliverWebhook passes the REAL refusal cause through instead of a misleading 'queue full'", async () => {
-  const res = await deliverWebhook(
-    { token: "a".repeat(32), rawBody: "{}", signatureHeader: "" },
-    {
-      load: async () => [fakeHook({ unsigned: true })],
-      save: async () => {},
-      sendPrompt: async () => {},
-      // A CTO admission refusal (e.g. binding unavailable) is NOT a queue
-      // overflow — the sender deserves the actual cause (P3a3-review).
-      enqueue: async () => ({ delivered: false, queued: false, rejected: true, error: "binding unavailable — refusing to admit against unresolved role identity" }),
-    },
-  );
-  assert.equal(res.status, 429);
-  assert.match(res.error, /binding unavailable/);
-  assert.notEqual(res.error, "queue full");
+test("deliverWebhook returns a SAFE literal on the public 429 body and warns the real cause (BET-1460)", async () => {
+  const warns = [];
+  const origWarn = console.warn;
+  console.warn = (...args) => warns.push(args.map(String).join(" "));
+  try {
+    const res = await deliverWebhook(
+      { token: "a".repeat(32), rawBody: "{}", signatureHeader: "" },
+      {
+        load: async () => [fakeHook({ unsigned: true })],
+        save: async () => {},
+        sendPrompt: async () => {},
+        // A CTO admission refusal (e.g. binding unavailable) — its message
+        // carries absolute internal paths that must never reach the public
+        // body of the one unauthenticated route (P3a3 review round 3).
+        enqueue: async () => ({
+          delivered: false,
+          queued: false,
+          rejected: true,
+          error: "binding unavailable — refusing to admit (store /home/dev/.manta/cto/binding.json unreadable)",
+        }),
+      },
+    );
+    assert.equal(res.status, 429);
+    assert.equal(res.error, "queue full", "the public body carries the safe literal only");
+    assert.ok(
+      warns.some((w) => w.includes("binding unavailable") && w.includes("/home/dev/.manta")),
+      "the REAL cause is warned server-side",
+    );
+  } finally {
+    console.warn = origWarn;
+  }
 });

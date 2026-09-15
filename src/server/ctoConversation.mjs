@@ -5,8 +5,11 @@
 // Scope (deliberately small): the four authenticated conversation channels
 // (open / state / submit / interrupt) plus the anti-bypass seams that keep
 // every writer on the durable admission queue:
-//   • the `opencode:prompt` / `opencode:run-command` / `opencode:abort` RPC
-//     routes (human traffic aimed at the conversation session),
+//   • the `opencode:prompt` / `opencode:run-command` RPC routes (human
+//     traffic aimed at the conversation session; the `opencode:abort` seam
+//     is deliberately DEFERRED to its own PR — a session-wide abort of the
+//     role session is inherently unsafe once the admission barrier can
+//     release, see docs/cto-admission-contract.md),
 //   • the background prompt-delivery engine (schedule / capability / webhook
 //     / delegate completion prompts aimed at the conversation session).
 //
@@ -80,9 +83,6 @@ export function backgroundDeliveryId(ctoKey) {
  *   cheap change stamp (ctoStores `stamp()`), enabling a stamp-validated
  *   classification cache. Without it every seam classification pays a full
  *   binding.json read+parse — on EVERY ordinary project `opencode:prompt`.
- * @param {((sessionId: string) => Promise<unknown>)} [deps.abortSession] —
- *   the RAW oc abort, used only by the abort seam's documented untracked
- *   fallback (no unresolved admission record on the session).
  * @returns conversation service
  */
 export function createCtoConversationService({
@@ -90,7 +90,6 @@ export function createCtoConversationService({
   admission,
   agentName,
   stamp = null,
-  abortSession = null,
 }) {
   if (!binding || typeof binding.ensure !== "function" || typeof binding.getBinding !== "function") {
     throw new Error("createCtoConversationService requires the composed ctoBinding engine");
@@ -217,9 +216,16 @@ export function createCtoConversationService({
       }
       if (!bound) {
         bound = await binding.getBinding();
-        if (typeof stamp === "function") {
+        // Cache under the PRE-READ stamp only. Re-stamping AFTER the read
+        // would store pre-write data under a post-write stamp when a binding
+        // write lands in the read window — a stale hit that classifies the
+        // LIVE session as ordinary until the next write (50/50 bypass). The
+        // pre-read stamp makes any write that landed during the read
+        // invalidate on the very next classification; a failed pre-read
+        // stamps nothing (always-miss is always correct).
+        if (typeof stamp === "function" && typeof current === "string") {
           classificationCache = {
-            stamp: await safeStamp(),
+            stamp: current,
             currentSessionId: bound.currentSessionId ?? null,
             previousSessionIds: Array.isArray(bound.previousSessionIds)
               ? [...bound.previousSessionIds]
@@ -264,88 +270,6 @@ export function createCtoConversationService({
       ...(input.expectedGeneration !== undefined ? { expectedGeneration: input.expectedGeneration } : {}),
       agent: agentName,
     });
-  }
-
-  // -- seam: abort (`opencode:abort`) at the bound role session --------------
-  // Spec §8.3 names drain/abort: a raw session abort is INVISIBLE to
-  // admission's abortState — the interrupted turn would settle `completed`
-  // and a LATE abort could hit the next admitted turn. So the abort of the
-  // bound role session routes onto the tracked interrupt path:
-  //   • the currently ACCEPTED turn → `interrupt(record.id)` (tracked
-  //     abortState, signal forwarded);
-  //   • an `unknown` send → `interrupt(...)` → visible `cancel_requested`
-  //     (barrier retained until reconcile — see contract limitation 1);
-  //   • an existing marker: IDEMPOTENT only while an abort is genuinely in
-  //     flight (interrupt_pending with abortState "pending"/"claimed") or
-  //     already confirmed ("ok" — opencode accepted the stop). For the WEDGED
-  //     states — abortState "uncertain" (a previous abort's outcome is
-  //     permanently unknown) and "refused" (opencode declined the stop), and
-  //     for `cancel_requested` (the unknown path issues NO abort at all) —
-  //     the request falls through to the REAL raw abort: the turn may still
-  //     be running, it is already untrackable, and stopping it is the honest
-  //     action. Never a silent no-op success (AGENTS.md: a control that
-  //     reports success while the model keeps running is the worst defect);
-  //   • mid-`dispatching` → actionable error (the contract refuses an
-  //     interrupt until the dispatch resolves — surface it, never guess);
-  //   • NOTHING unresolved on the session → the caller's stop request is
-  //     honored with the RAW session abort (a turn admission cannot see —
-  //     pre-P3a3 or foreign — is not trackable, so no abortState is touched;
-  //     this is exactly the contract's known limitation 2, unchanged).
-  // Resolves the target record server-side from the durable queue: the
-  // caller only knows the session id. Returns nothing (the Api is void) —
-  // tracked status is visible via cto:conversation-state.
-  const ABORT_IN_FLIGHT = new Set(["pending", "claimed"]);
-  const ABORT_WEDGED = new Set(["uncertain", "refused"]);
-  async function abortAdmittedTurn(sessionId) {
-    const queue = await admission.list();
-    const mine = queue.submissions.filter((r) => r.sessionId === sessionId);
-    const accepted = mine.find((r) => r.status === "accepted");
-    if (accepted) {
-      await admission.interrupt(accepted.id);
-      return;
-    }
-    const unknown = mine.find((r) => r.status === "unknown");
-    if (unknown) {
-      await admission.interrupt(unknown.id);
-      return;
-    }
-    const dispatching = mine.find((r) => r.status === "dispatching");
-    if (dispatching) {
-      throw new Error(
-        "cto conversation: the admitted turn is still mid-dispatch — retry the abort in a moment",
-      );
-    }
-    const pendingMarker = mine.find((r) => r.status === "interrupt_pending");
-    if (pendingMarker) {
-      const state = pendingMarker.abortState;
-      // Abort genuinely in flight (the durable request is about to be / is
-      // being issued by its owner) or already confirmed by opencode: an
-      // idempotent re-request, honest because the stop IS happening.
-      if (ABORT_IN_FLIGHT.has(state) || state === "ok") return;
-      // Wedged (uncertain / refused): the turn may still be running and no
-      // abort is in flight — issue the real stop. The record's barrier is
-      // admission's business (reconcile proves it out); the user's intent —
-      // the turn STOPS — is served here.
-      if (ABORT_WEDGED.has(state) && typeof abortSession === "function") {
-        await abortSession(sessionId);
-      }
-      return;
-    }
-    const cancelMarker = mine.find((r) => r.status === "cancel_requested");
-    if (cancelMarker) {
-      // The unknown path NEVER issues an abort (a visible request marker
-      // only). Without this fallback, Stop after a parked-unknown press is a
-      // permanent silent no-op while the model keeps running. Fall through to
-      // the real raw abort — the send's outcome is unreconciled, so the turn
-      // may well be live and stopping it is exactly what Stop means.
-      if (typeof abortSession === "function") {
-        await abortSession(sessionId);
-      }
-      return;
-    }
-    if (typeof abortSession === "function") {
-      await abortSession(sessionId);
-    }
   }
 
   // -- seam: slash commands (`opencode:run-command`) at the conversation ----
@@ -419,7 +343,6 @@ export function createCtoConversationService({
     interrupt,
     isConversationSession,
     admitDirect,
-    abortAdmittedTurn,
     rejectRunCommand,
     redirectDelivery,
     tick,

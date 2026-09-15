@@ -853,10 +853,11 @@ test("recover(): a crashed reservation whose session landed is adopted by exact 
 });
 
 // ---------------------------------------------------------------------------
-// Archive — never capped, never dropped; queries paginate (blocker 6)
+// Archive — deduped, newest-kept, CAPPED at MAX_PREVIOUS_SESSION_IDS (it is
+// scanned by the conversation seams' classification); queries paginate
 // ---------------------------------------------------------------------------
 
-test("more than 10 generations: the archive keeps EVERY reference; pagination slices without dropping", async () => {
+test("more than 10 generations: the archive keeps every reference below the cap; pagination slices without dropping", async () => {
   const oc = fakeOc();
   const store = memoryStore("binding-archive");
   const svc = createCtoBinding({ oc, store, controlDir: tempControlDir(randomUUID()), sleep: noopSleep });
@@ -868,7 +869,7 @@ test("more than 10 generations: the archive keeps EVERY reference; pagination sl
   }
   const binding = await svc.getBinding();
   assert.equal(binding.generation, 12);
-  assert.equal(binding.previousSessionIds.length, 11, "every replaced session is preserved");
+  assert.equal(binding.previousSessionIds.length, 11, "every replaced session is preserved (11 ≤ cap)");
   assert.deepEqual(binding.previousSessionIds, ids.slice(0, 11));
 
   // Pagination: most-recent-first windows, store untouched.
@@ -880,6 +881,33 @@ test("more than 10 generations: the archive keeps EVERY reference; pagination sl
   assert.equal(page2.previousSessionIdsTotal, 11);
   await assert.rejects(svc.getBinding({ previousLimit: 0 }), /previousLimit/);
   assert.deepEqual(capPrevious(["a", "a", "b"]), ["a", "b"]);
+});
+
+test("the archive is CAPPED at MAX_PREVIOUS_SESSION_IDS, keeping the NEWEST generations (P3a3 review)", async () => {
+  const oc = fakeOc();
+  const store = memoryStore("binding-archive-cap");
+  const svc = createCtoBinding({ oc, store, controlDir: tempControlDir(randomUUID()), sleep: noopSleep });
+  const ids = [];
+  for (let i = 0; i < MAX_PREVIOUS_SESSION_IDS + 5; i++) {
+    const result = await svc.ensure();
+    ids.push(result.binding.currentSessionId);
+    oc.readStates[ids[i]] = () => ({ state: "missing" });
+  }
+  const binding = await svc.getBinding();
+  assert.equal(binding.generation, MAX_PREVIOUS_SESSION_IDS + 5);
+  assert.equal(binding.currentSessionId, ids.at(-1), "the newest session is CURRENT, never archived");
+  assert.equal(
+    binding.previousSessionIds.length,
+    MAX_PREVIOUS_SESSION_IDS,
+    "the archive is bounded",
+  );
+  assert.deepEqual(
+    binding.previousSessionIds,
+    // The NEWEST PREVIOUS generations — the current id is the tail's
+    // successor and is carried by currentSessionId, not the archive.
+    ids.slice(ids.length - 1 - MAX_PREVIOUS_SESSION_IDS, ids.length - 1),
+    "the NEWEST generations are the ones kept",
+  );
 });
 
 // ---------------------------------------------------------------------------
