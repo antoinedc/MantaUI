@@ -788,6 +788,37 @@ test("non-JSON-safe args are rejected deterministically before any write", async
   assert.equal(after.operations.length, 0, "nothing was written by any rejected reserve");
 });
 
+test("BLOCKER 2: args contract — omitted ≡ {} (same op), explicit null rejected, nested null preserved and distinct", async () => {
+  const clock = makeClock();
+  const work = createCtoWork({ store: sandboxStore(), now: clock.now });
+  await seedWork(work, "w_an");
+  // An explicit null is rejected deterministically — never silently hashed as {}.
+  await assert.rejects(
+    work.reserveOperation("w_an", { key: "knull", op: "dispatch", args: null }),
+    (error) => error.code === "unsupported" && /null/.test(error.message),
+  );
+  assert.equal((await work.getWork("w_an")).operations.length, 0, "the null reserve wrote nothing");
+  // Omitted and {} are the SAME operation: reserve omitted, retry {} → replay.
+  const first = await work.reserveOperation("w_an", { key: "kdef", op: "dispatch" });
+  assert.deepEqual(first.receipt.args, {});
+  assert.equal(first.receipt.argsHash, canonicalArgsHash("dispatch", {}));
+  const retry = await work.reserveOperation("w_an", { key: "kdef", op: "dispatch", args: {} });
+  assert.equal(retry.replay, true, "null-free default: {} retries the omitted-args operation");
+  assert.equal(retry.receipt.id, first.receipt.id);
+  // Nested null is ordinary JSON: persisted verbatim, hashed distinctly from {}.
+  const nested = await work.reserveOperation("w_an", { key: "knest", op: "dispatch", args: { x: null } });
+  assert.deepEqual(nested.receipt.args, { x: null });
+  assert.equal(nested.receipt.argsHash, canonicalArgsHash("dispatch", { x: null }));
+  assert.notEqual(nested.receipt.argsHash, canonicalArgsHash("dispatch", {}));
+  const nestedRetry = await work.reserveOperation("w_an", { key: "knest", op: "dispatch", args: { x: null } });
+  assert.equal(nestedRetry.replay, true);
+  await assert.rejects(
+    work.reserveOperation("w_an", { key: "knest", op: "dispatch", args: {} }),
+    (error) => error.code === "idempotency_key_args_mismatch",
+    "{} is a DIFFERENT request from {x: null}",
+  );
+});
+
 // ---------------------------------------------------------------------------
 // BLOCKER 2: the explicit receipt transition matrix
 // ---------------------------------------------------------------------------
@@ -849,6 +880,47 @@ test("resolving an UNKNOWN receipt requires explicit reconciliation evidence", a
     resultCode: "reconciled:inspected job_m output",
   });
   assert.equal(resolved.receipt.status, "succeeded");
+});
+
+test("BLOCKER 1: outcome fields are validated BEFORE any write — a rejected record leaves the store unchanged", async () => {
+  const store = observableStore();
+  const clock = makeClock();
+  const work = createCtoWork({ store, now: clock.now });
+  await seedWork(work, "w_pv"); // write 1
+  const { receipt } = await work.reserveOperation("w_pv", { key: "kpv", op: "dispatch", args: {} }); // write 2
+  // Typed-wrong outcomes are rejected on every path, before any write.
+  for (const bad of [
+    { resultCode: 42 },
+    { externalRef: {} },
+    { externalRef: [] },
+    { resultCode: 42, externalRef: 7 },
+  ]) {
+    await assert.rejects(
+      work.recordOperationOutcome("w_pv", { receiptId: receipt.id, status: "succeeded", ...bad }),
+      (error) => error.code === "unsupported",
+      `outcome ${JSON.stringify(bad)} must be rejected`,
+    );
+  }
+  const afterRejects = await work.getWork("w_pv");
+  assert.equal(afterRejects.operations[0].status, "pending", "no partial success was written");
+  assert.equal(afterRejects.operations[0].resultCode, null);
+  assert.equal(afterRejects.operations[0].externalRef, null);
+  assert.equal(store.writes(), 2, "the store is byte-for-byte unchanged by the rejected records");
+  // Same guard on the unknown-reconciliation path (evidence + typed fields).
+  await work.recordOperationOutcome("w_pv", { receiptId: receipt.id, status: "unknown" }); // write 3
+  await assert.rejects(
+    work.recordOperationOutcome("w_pv", {
+      receiptId: receipt.id, status: "succeeded", resultCode: "evidence", externalRef: {},
+    }),
+    (error) => error.code === "unsupported" && /externalRef/.test(error.message),
+  );
+  assert.equal((await work.getWork("w_pv")).operations[0].status, "unknown", "reconciliation did not half-apply");
+  // A valid record still lands normally.
+  const ok = await work.recordOperationOutcome("w_pv", {
+    receiptId: receipt.id, status: "succeeded", resultCode: "evidence", externalRef: "job_ok",
+  });
+  assert.equal(ok.receipt.status, "succeeded");
+  assert.equal(ok.receipt.externalRef, "job_ok");
 });
 
 // ---------------------------------------------------------------------------

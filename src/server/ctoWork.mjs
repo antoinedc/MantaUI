@@ -176,7 +176,10 @@ export function canonicalJson(value) {
 }
 
 export function canonicalArgsHash(op, args) {
-  return createHash("sha256").update(canonicalJson({ op, args: args ?? {} })).digest("hex");
+  // Hashes EXACTLY the value passed — no null→{} coalescing here. Callers pass
+  // the frozen args snapshot (reserveOperation normalizes `undefined` to `{}`);
+  // hashing anything other than the stored snapshot would desync dedupe.
+  return createHash("sha256").update(canonicalJson({ op, args })).digest("hex");
 }
 
 // Deterministic JSON-safety gate for operation args: only plain objects,
@@ -764,6 +767,13 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
         );
       }
     }
+    // Args contract (simple, consistent JSON): omitted ≡ `{}` — the same
+    // operation under the same key; an EXPLICIT `null` is rejected because it
+    // would hash as `{}` while persisting as `null` (hash/storage desync).
+    // Nested nulls inside the object are ordinary JSON and stay allowed.
+    if (args === null) {
+      throw workError("unsupported", "args must be omitted or an object — explicit null is reserved (it would collide with {})");
+    }
     // The args snapshot is validated and deep-cloned SYNCHRONOUSLY, before
     // the first await: the hash AND the stored receipt derive from the same
     // frozen snapshot, so a caller mutating its args object while the reserve
@@ -894,6 +904,16 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
   ) {
     if (!OPERATION_STATUSES.includes(status)) {
       throw workError("unsupported", `status "${status}" is not a valid operation status`);
+    }
+    // Outcome fields are validated BEFORE any write, on every path (including
+    // unknown reconciliation): a typed-wrong resultCode/externalRef must never
+    // reach the store — the strict loader would then refuse to reload the
+    // envelope the write just claimed success on.
+    if (resultCode !== undefined && resultCode !== null && typeof resultCode !== "string") {
+      throw workError("unsupported", `resultCode must be a string or null (got ${typeof resultCode})`);
+    }
+    if (externalRef !== undefined && externalRef !== null && typeof externalRef !== "string") {
+      throw workError("unsupported", `externalRef must be a string or null (got ${typeof externalRef})`);
     }
     const ts = now();
     return mutateEnvelope(store, workId, (env) => {
