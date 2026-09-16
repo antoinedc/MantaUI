@@ -237,6 +237,14 @@ export async function submitPairingCode(code: string): Promise<ClaimOutcome> {
  * is generous for a ~100ms direct round-trip while still bounding the worst
  * case.
  */
+// The CTO admission send/interrupt BOUND: an unbounded rpc pins the composer
+// on "Sending…" forever (the busy flag clears only in the send's finally).
+// The bound converts a hung transport into the UI's designed "outcome
+// unknown" path — the retry reuses the SAME id + payload, which the server's
+// dedup makes idempotent. Generous (not the 15s metadata default) because a
+// legitimate send can queue behind the server's admission mutex.
+const CTO_ADMISSION_TIMEOUT_MS = 20000;
+
 async function fetchWithTimeout(
   url: string,
   init: RequestInit,
@@ -1566,9 +1574,9 @@ export const httpApi: Api = {
   ctoConversationState: async (): Promise<CtoConversationState> =>
     rpc<CtoConversationState>("cto:conversation-state"),
   ctoConversationSubmit: async (input): Promise<CtoSubmitReceipt> =>
-    rpc<CtoSubmitReceipt>("cto:conversation-submit", input),
+    rpcWithTimeout("cto:conversation-submit", CTO_ADMISSION_TIMEOUT_MS, input),
   ctoConversationInterrupt: async (input): Promise<CtoConversationInterruptResult> =>
-    rpc<CtoConversationInterruptResult>("cto:conversation-interrupt", input),
+    rpcWithTimeout("cto:conversation-interrupt", CTO_ADMISSION_TIMEOUT_MS, input),
 
   // POST /api/cto/digest — joins or starts the §5.5 single-flight generation
   // (server interplay keeps two views/devices from double-generating). The
