@@ -618,6 +618,21 @@ export function buildHandlers({
           /* best-effort audit trail */
         }
       }
+      // CTO operating-doctrine work: a preset or house-rules change must take
+      // effect without the user restarting anything manually. Re-materialize
+      // the composed prompt and restart opencode (providers.refreshCtoDoctrine
+      // reuses the SAME restart plumbing ensureCtoAgent/ensureMantaPlanAgent
+      // already use — never a second restart mechanism). Gated on `cto.enabled`
+      // (the on-call CTO agent actually being installed) so an unrelated box
+      // never eats a disruptive opencode restart for a setting nothing reads
+      // yet. Best-effort: never fails the config save itself.
+      if ((patch?.ctoStyle !== undefined || patch?.ctoHouseRules !== undefined) && next?.cto?.enabled) {
+        try {
+          await providers.refreshCtoDoctrine({ style: next.ctoStyle, houseRules: next.ctoHouseRules });
+        } catch (e) {
+          console.warn("[cto-doctrine] refresh after config change failed:", e instanceof Error ? e.message : e);
+        }
+      }
       syncState.applyConfig(next);
       return next;
     },

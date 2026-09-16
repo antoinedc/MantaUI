@@ -104,6 +104,19 @@ const DEFAULT_CONFIG = {
   // default. The Settings τ control writes it; the Health card shows the τ in
   // effect at decision time.
   ctoAutonomyThreshold: 0.7,
+  // On-call CTO operating doctrine (BET-1164 follow-up): the preset that
+  // governs the CTO agent's TONE, INITIATIVE and REPORTING — never its
+  // read-only guardrails (see docs/opencode/skills/cto/prompt.md +
+  // src/server/ctoDoctrine.mjs). "executive" (report outcomes, decide over
+  // asking, no staged plans) is the default per the product requirement —
+  // see ctoDoctrine.mjs's CTO_STYLE_DOCTRINES for the full text of all three
+  // presets.
+  ctoStyle: "executive",
+  // Free-text "house rules" appended verbatim, last, on top of the preset —
+  // they can refine the doctrine (ask for more or less of something) but can
+  // never remove a guardrail (see ctoDoctrine.mjs's composeCtoPrompt). Empty
+  // by default.
+  ctoHouseRules: "",
 };
 
 let _config = null;
