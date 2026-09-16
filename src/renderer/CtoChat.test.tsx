@@ -186,6 +186,41 @@ async function pressStop(): Promise<Array<Array<unknown>>> {
   return api!.calls.ctoConversationInterrupt ?? [];
 }
 
+// Press the unknown-send bubble's Dismiss control and flush.
+async function pressDismissUnknown(): Promise<void> {
+  const dismiss = Array.from(h!.container.querySelectorAll("button")).find(
+    (b) => b.getAttribute("aria-label") === "Dismiss unknown send",
+  );
+  expect(dismiss).not.toBeNull();
+  await act(async () => {
+    dismiss!.click();
+  });
+  await h!.flush();
+}
+
+// Mount over a MUTABLE queue holder with a submit that fails its FIRST call
+// with `message` (the message chooses the failure class: definitive refusal
+// vs unknown outcome), so later steps can swap the server truth.
+async function mountFailingSubmit(
+  holder: { current: CtoConversationState },
+  message: string,
+): Promise<Harness> {
+  let failFirst = true;
+  const mounted = mountCto(holder.current, {
+    ctoConversationState: () => Promise.resolve(holder.current),
+    ctoConversationSubmit: (input: { id?: string; text: string }) => {
+      if (failFirst) {
+        failFirst = false;
+        return Promise.reject(new Error(message));
+      }
+      return Promise.resolve(receiptOf(input));
+    },
+  });
+  h = mounted;
+  await mounted.flush();
+  return mounted;
+}
+
   beforeEach(() => {
     resetStore();
   });
@@ -367,14 +402,7 @@ async function pressStop(): Promise<Array<Array<unknown>>> {
     await h.flush();
     await typeAndSubmit(h, "ping");
     expect(h.text()).toContain("Outcome unknown — reconciling");
-    const dismiss = Array.from(h.container.querySelectorAll("button")).find(
-      (b) => b.getAttribute("aria-label") === "Dismiss unknown send",
-    );
-    expect(dismiss).not.toBeNull();
-    await act(async () => {
-      dismiss!.click();
-    });
-    await h.flush();
+    await pressDismissUnknown();
     expect(h.text()).not.toContain("Outcome unknown — reconciling");
   });
 
@@ -485,10 +513,13 @@ async function pressStop(): Promise<Array<Array<unknown>>> {
     });
     await h.flush();
     // The contract-mandated phrasing (limitation 1a) — as a pinned bubble
-    // above the composer (where the user is looking), carrying the held
-    // turn's text from the transcript.
+    // above the composer (where the user is looking).
     expect(h.text()).toContain("Abort outcome unknown — admission held for this session");
-    expect(h.text()).toContain("hold the line");
+    // The bubble is a STATUS AFFORDANCE, not a second copy of the message:
+    // the transcript already renders the record's text (the transcript mock
+    // here renders nothing, so any occurrence would be the bubble
+    // duplicating it).
+    expect(h.text()).not.toContain("hold the line");
     // The surrounding controls must not lie: nothing is running and the
     // pump dispatches nothing while held.
     //  - Stop is an idempotent no-op on the held record → hidden.
@@ -744,6 +775,126 @@ async function pressStop(): Promise<Array<Array<unknown>>> {
       delete (window as unknown as { IntersectionObserver?: unknown })
         .IntersectionObserver;
     }
+  });
+
+  it("a restored draft never replays over what the user has since typed — a rebind keeps their text", async () => {
+    // The reviewer's exact sequence: definitive decline → restore → the user
+    // replaces the draft → one rebind remounts → the user's text survives.
+    const holder = { current: emptyQueue() };
+    h = await mountFailingSubmit(
+      holder,
+      "binding unavailable — refusing to admit against unresolved role identity: x",
+    );
+    await typeAndSubmit(h, "OLD DRAFT");
+    const ta = () =>
+      h!.container.querySelector(
+        'textarea[aria-label="Message the CTO"]',
+      ) as HTMLTextAreaElement;
+    // Restored after the decline.
+    expect(ta().value).toBe("OLD DRAFT");
+    // The user replaces it with their own text.
+    await act(async () => {
+      typeInto(ta(), "NEW TEXT");
+    });
+    await h.flush();
+    expect(ta().value).toBe("NEW TEXT");
+    // One rebind (another device) remounts the conversation.
+    const rebound = emptyQueue();
+    rebound.binding = { sessionId: "ses_cto_2", generation: 4 };
+    holder.current = rebound;
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await h.flush();
+    // The user's text survives the remount — no stale draft replay.
+    expect(ta().value).toBe("NEW TEXT");
+  });
+
+  it("a refused-abort record is not an interrupt target — no dead Stop, no false ack", async () => {
+    // SERVER-REALISTIC: abortState "refused" keeps the record interrupt_pending
+    // for the rest of a still-running turn (settle needs turn-end proof), and
+    // the server's interrupt on it is the IDEMPOTENT NO-OP branch — it returns
+    // the prior status and issues NO new attempt. Stop must not be rendered,
+    // and nothing may affirm an abort that was never issued.
+    const q = emptyQueue();
+    q.submissions = [
+      submission("evt_refused_1", "interrupt_pending", {
+        abortState: "refused",
+        abortError: "Session not found",
+        messageID: "msg_refused_1",
+      }),
+    ];
+    q.counts.unresolved = 1;
+    h = mountCto(q, {
+      opencodeMessages: () =>
+        Promise.resolve(userTranscriptRows([{ messageID: "msg_refused_1", text: "deploy" }])),
+    });
+    await h.flush();
+    expect(h.container.querySelector('button[aria-label="Interrupt"]')).toBeNull();
+    // The hold copy still tells the truth (the pump holds for ANY unresolved
+    // record) — without claiming an action the server did not perform.
+    expect(h.text()).toContain("Admission held");
+    expect(h.text()).not.toContain("Interrupt requested");
+  });
+
+  it("a dismissed unknown id does not suppress the LATER permanent-hold bubble for the same record", async () => {
+    // Sequence the server can produce: send X times out (unknown) → the user
+    // dismisses the unknown guess → reconcile proves X was accepted → the
+    // user interrupts → the abort outcome can't be proven → the SAME record
+    // id is now the PERMANENT hold. The hold must render.
+    const holder = { current: emptyQueue() };
+    h = await mountFailingSubmit(holder, "network timeout");
+    await typeAndSubmit(h, "the send"); // times out → unknown bubble
+    const submitId = (api.calls.ctoConversationSubmit?.[0]?.[0] as { id: string }).id;
+    await pressDismissUnknown();
+    expect(h.text()).not.toContain("Outcome unknown — reconciling");
+    // Reconcile: the SAME record is now the uncertain-abort hold. Its user
+    // message is in the transcript (server-realistic for a dispatched record).
+    const held = emptyQueue();
+    held.submissions = [
+      submission(submitId, "interrupt_pending", {
+        abortState: "uncertain",
+        abortOutcomeReason: "abort_outcome_unknown",
+        messageID: "msg_the_send",
+      }),
+    ];
+    held.counts.unresolved = 1;
+    holder.current = held;
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await h.flush();
+    expect(h.text()).toContain("Abort outcome unknown — admission held for this session");
+  });
+
+  it("held + a still-running turn says BOTH: the hold, and that the turn can no longer be interrupted", async () => {
+    const q = emptyQueue();
+    q.submissions = [
+      submission("evt_held_run_1", "interrupt_pending", {
+        abortState: "uncertain",
+        abortOutcomeReason: "abort_outcome_unknown",
+        messageID: "msg_held_run_1",
+      }),
+    ];
+    q.counts.unresolved = 1;
+    h = mountCto(q, {
+      opencodeMessages: () =>
+        Promise.resolve(userTranscriptRows([{ messageID: "msg_held_run_1", text: "run it" }])),
+    });
+    await h.flush();
+    // The turn is STILL RUNNING — an uncertain abort means the abort may not
+    // have landed. (Running arrives via the box stream's `running` sub, the
+    // same envelope the sidebar uses.)
+    await emitStreamAndFlush(bus, h, {
+      sub: "running",
+      sessionId: SESSION,
+      payload: { running: true },
+    });
+    // Both truths: the hold blocks dispatch AND the running turn has become
+    // unstoppable (Stop is hidden — no dead control, no false promise).
+    expect(h.text()).toContain("the running turn can no longer be interrupted");
+    expect(h.text()).toContain("will not dispatch");
+    expect(h.container.querySelector('button[aria-label="Interrupt"]')).toBeNull();
   });
 });
 
