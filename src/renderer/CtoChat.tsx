@@ -55,6 +55,10 @@ import type { ModelSelection, TaskContextValue } from "./chatShared";
 import { useStore } from "./store";
 
 const EMPTY_STRINGS: string[] = [];
+// Every question renders ONCE, in the pinned stack above the composer — the
+// same split ChatPanel enforces with its plan-exit filter (each question is
+// EXCLUDED from the inline transcript rendering so it never appears twice).
+const NO_QUESTIONS: QuestionRequest[] = [];
 
 // Human submissions get a client-minted id so a retry of a lost response
 // dedups server-side instead of creating a second queue entry. `ceo_` marks
@@ -70,11 +74,27 @@ function newSubmissionId(): string {
 // Errors that mean "the send was definitively rejected — nothing durable
 // happened". A retry must mint a fresh id (the payload itself was the
 // problem); everything else (timeout, network, transport) keeps the id.
+//
+// The server's CtoAdmissionError.code is NOT transported over /rpc (only
+// String(e.message) is), so classification reads the message text against the
+// merged server's wording (src/server/ctoAdmission.mjs submit()). Included:
+//  - "different payload" / "invalid" / "empty" — caller/payload errors
+//  - "binding unavailable — refusing to admit against unresolved role
+//    identity" — a DEFINITIVE refusal, nothing admitted (code
+//    binding-unavailable)
+//  - "admission store at cap … nothing evictable / … yield" — a DEFINITIVE
+//    refusal (code at-cap). Both would otherwise fall into the "outcome
+//    unknown" bubble, whose retry could then never succeed (nothing persisted
+//    ⇒ the projection never dissolves it) — mislabelling a definitive no as
+//    "reconciling" forever.
 function isDefinitiveSubmitError(msg: string): boolean {
+  const m = msg.toLowerCase();
   return (
-    msg.includes("different payload") ||
-    msg.toLowerCase().includes("invalid") ||
-    msg.toLowerCase().includes("empty")
+    m.includes("different payload") ||
+    m.includes("invalid") ||
+    m.includes("empty") ||
+    m.includes("binding unavailable") ||
+    m.includes("at cap")
   );
 }
 
@@ -142,25 +162,42 @@ type QueueSummary = {
   active: CtoSubmissionProjection | null;
   waiting: CtoSubmissionProjection[];
   canInterrupt: boolean;
+  // A permanent uncertain-abort barrier exists in the queue. While held, the
+  // server's pump dispatches NOTHING (any unresolved record holds the gate —
+  // src/server/ctoAdmission.mjs pump()), so "sends queue up" copy would lie.
+  held: boolean;
 };
 
 // Derive what the composer/interrupt need from the server-owned queue: the
 // newest non-terminal human submission (the interrupt target) and any still-
 // waiting queued sends. Terminal statuses are ignored.
 function summarizeQueue(state: CtoConversationState | null): QueueSummary {
-  if (!state) return { active: null, waiting: [], canInterrupt: false };
+  if (!state) return { active: null, waiting: [], canInterrupt: false, held: false };
   const terminal = new Set(["completed", "interrupted", "cancelled", "failed"]);
   const live = state.submissions.filter(
     (s) => s.origin === "human" && !terminal.has(s.status),
   );
   // Newest first — the interrupt op targets the most recent record.
   live.reverse();
+  // The uncertain-abort barrier is NOT an interrupt target: the server's
+  // interrupt on it is an idempotent no-op with no visible change (a dead
+  // control if rendered as one), and while it holds nothing else dispatches.
+  // It is excluded from targeting so Stop only ever offers actions with an
+  // observable outcome.
+  const interruptible = live.filter((s) => !isUncertainAbort(s));
+  const held = interruptible.length !== live.length;
   const active =
-    live.find((s) => s.status !== "queued" && s.status !== "dispatching") ?? null;
-  const waiting = live.filter(
+    interruptible.find((s) => s.status !== "queued" && s.status !== "dispatching") ??
+    null;
+  const waiting = interruptible.filter(
     (s) => s.status === "queued" || s.status === "dispatching",
   );
-  return { active, waiting, canInterrupt: live.length > 0 };
+  return {
+    active,
+    waiting,
+    canInterrupt: interruptible.length > 0,
+    held,
+  };
 }
 
 export function CtoChat({ onOpenDashboard }: { onOpenDashboard?: () => void }) {
@@ -194,6 +231,9 @@ export function CtoChat({ onOpenDashboard }: { onOpenDashboard?: () => void }) {
   // display:none PanelShell from app start, so opening must wait until the
   // surface is actually shown. An IntersectionObserver fires exactly then;
   // jsdom (tests) has no IO → open immediately, as the tab is "shown" there.
+  // FALLBACK: if the observer never reports (display quirks, nested
+  // overflow) the pane must not show "Opening…" forever — a 5s timer opens
+  // anyway. An open while hidden is a cheap store read, never a model turn.
   const rootRef = useRef<HTMLDivElement | null>(null);
   const openedRef = useRef(false);
   useEffect(() => {
@@ -215,7 +255,11 @@ export function CtoChat({ onOpenDashboard }: { onOpenDashboard?: () => void }) {
       }
     });
     io.observe(el);
-    return () => io.disconnect();
+    const fallback = setTimeout(fire, 5_000);
+    return () => {
+      io.disconnect();
+      clearTimeout(fallback);
+    };
   }, [doOpen]);
 
   // ---- Cheap queue poll: a pure store read; never a model turn ----
@@ -289,6 +333,18 @@ export function CtoChat({ onOpenDashboard }: { onOpenDashboard?: () => void }) {
   const submitBusyRef = useRef(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [staleGenNotice, setStaleGenNotice] = useState<string | null>(null);
+  // Draft restore: a declined or stale-generation send is NOT lost — the
+  // text is returned to the composer (it was optimistically cleared on
+  // submit, and the rebind path REMOUNTS this conversation, so the notice
+  // must never claim "kept" without doing it).
+  const [draftRestore, setDraftRestore] = useState<{ text: string; nonce: number } | null>(
+    null,
+  );
+  const draftRestoreNonceRef = useRef(0);
+  // Interrupt ack: the server receipt ("cancelled" / "interrupt_pending" /
+  // "cancel_requested") confirmed visibly — a silent interrupt reads as a
+  // dead control. Ephemeral: auto-dismisses once it has been seen.
+  const [interruptAck, setInterruptAck] = useState<string | null>(null);
   // The controller → conversation receipt hook (per-instance, no globals).
   const onReceiptRef = useRef<(() => void) | null>(null);
 
@@ -298,7 +354,7 @@ export function CtoChat({ onOpenDashboard }: { onOpenDashboard?: () => void }) {
   const sessionChoice = useSessionModelChoice(sessionId ?? "");
 
   const submitTurn = useCallback(
-    async (text: string): Promise<void> => {
+    async (text: string, opts?: { reuseId?: string }): Promise<void> => {
       if (!text.trim() || !open.sessionId) return;
       // Double-submit guard: while a send is in flight a second Enter must
       // not mint a second queue entry.
@@ -308,10 +364,15 @@ export function CtoChat({ onOpenDashboard }: { onOpenDashboard?: () => void }) {
       setStaleGenNotice(null);
       setSending(text);
       // Stable id: a retry of a timed-out/lost send reuses the SAME id +
-      // payload so the server dedups. A NEW message (different text) mints a
-      // fresh id — reusing the id with a different payload would be rejected.
+      // payload so the server dedups. The id for a retry comes from the
+      // PENDING RECORD ITSELF (unknownPending already holds {id, text}) —
+      // NOT from the single-slot retryRef, which an intervening successful
+      // send clears (a fresh id could double-run a send the server actually
+      // accepted with a lost response).
       let id: string;
-      if (retryRef.current && retryRef.current.text === text) {
+      if (opts?.reuseId) {
+        id = opts.reuseId;
+      } else if (retryRef.current && retryRef.current.text === text) {
         id = retryRef.current.id;
       } else {
         retryRef.current = null;
@@ -343,13 +404,20 @@ export function CtoChat({ onOpenDashboard }: { onOpenDashboard?: () => void }) {
           localTextsRef.current.delete(id);
           setSending(null);
           setSendError(`The CTO declined the send: ${msg}`);
+          // The text was optimistically cleared — give it back (nothing was
+          // admitted; the user edits/resends, not retypes).
+          draftRestoreNonceRef.current += 1;
+          setDraftRestore({ text, nonce: draftRestoreNonceRef.current });
         } else if (isStaleGenerationError(msg)) {
           // The binding was rebound under us. Nothing was accepted. Keep the
-          // id (dedup-safe) + the text in the composer; the poll effect will
-          // adopt the new binding and reload the transcript.
+          // id (dedup-safe). The composer was optimistically cleared AND the
+          // rebind remounts this conversation — so the text is explicitly
+          // RESTORED to the composer before the notice claims it.
+          draftRestoreNonceRef.current += 1;
+          setDraftRestore({ text, nonce: draftRestoreNonceRef.current });
           setSending(null);
           setStaleGenNotice(
-            "The conversation was just rebound by another device — your text is kept, resend to submit it.",
+            "The conversation was just rebound by another device — the send was not accepted. Your text is back in the composer; submit it again.",
           );
           refreshQueueNow();
         } else {
@@ -392,21 +460,44 @@ export function CtoChat({ onOpenDashboard }: { onOpenDashboard?: () => void }) {
     const summary = summarizeQueue(queue);
     if (!summary.canInterrupt) return;
     // The EXPLICIT interruption op: the ADMISSION RECORD id, never an opencode
-    // abort. Prefer the dispatched record; else cancel the queued one.
-    const target = summary.active ?? summary.waiting[summary.waiting.length - 1];
+    // abort. Prefer the dispatched record; else the MOST RECENT queued send
+    // (live is newest-first — NOT the oldest, which a [length-1] index would
+    // hit and which contradicts the "most recent" contract).
+    const target = summary.active ?? summary.waiting[0];
     if (!target) return;
     try {
-      await window.api.ctoConversationInterrupt({ id: target.id });
+      const r = await window.api.ctoConversationInterrupt({ id: target.id });
+      // Confirm the outcome visibly — the receipt status is the request
+      // marker the queue will now show.
+      setInterruptAck(
+        r.status === "cancelled"
+          ? "Queued send cancelled — it will not run."
+          : r.status === "cancel_requested"
+            ? "Cancel requested for the unconfirmed send — reconciliation will settle it."
+            : "Interrupt requested — the abort is being applied to the running turn.",
+      );
     } catch (e) {
       setSendError(String((e as Error)?.message ?? e));
     }
     refreshQueueNow();
   }, [queue, refreshQueueNow]);
 
+  // The ack is ephemeral — it confirms a completed action, it is not a state.
+  useEffect(() => {
+    if (!interruptAck) return;
+    const t = setTimeout(() => setInterruptAck(null), 3500);
+    return () => clearTimeout(t);
+  }, [interruptAck]);
+
   const qSummary = summarizeQueue(queue);
   const { models, defaultModel } = useModelCatalog();
   const retryUnknown = useCallback(() => {
-    if (unknownPending) void submitTurn(unknownPending.text);
+    if (!unknownPending) return;
+    // Retry the EXACT pending record — its own {id, text} pair, not whatever
+    // the single-slot retryRef still holds (an intervening successful send
+    // clears retryRef; a fresh id could double-run a send the server actually
+    // accepted with a lost response).
+    void submitTurn(unknownPending.text, { reuseId: unknownPending.id });
   }, [unknownPending, submitTurn]);
   const dismissUnknown = useCallback(() => {
     if (unknownPending) dismissedUnknownRef.current.add(unknownPending.id);
@@ -445,7 +536,11 @@ export function CtoChat({ onOpenDashboard }: { onOpenDashboard?: () => void }) {
           )}{" "}
           Work inspector
           {queue
-            ? ` · ${queue.counts.queued.human} queued · ${queue.counts.unresolved} active`
+            ? ` · ${queue.counts.queued.human} queued · ${queue.counts.unresolved} active${
+                (queue.droppedByPolicy?.length ?? 0) > 0
+                  ? ` · ${queue.droppedByPolicy!.length} dropped by policy`
+                  : ""
+              }`
             : ""}
         </button>
         {onOpenDashboard && (
@@ -497,6 +592,8 @@ export function CtoChat({ onOpenDashboard }: { onOpenDashboard?: () => void }) {
           onDismissUnknown={dismissUnknown}
           onSubmit={submitTurn}
           onInterrupt={interrupt}
+          interruptAck={interruptAck}
+          draftRestore={draftRestore}
           submitting={submitBusyRef.current}
           inspectorOpen={inspectorOpen}
           onReceiptRef={onReceiptRef}
@@ -531,8 +628,10 @@ function CtoConversation(props: {
   unknownPending: { id: string; text: string } | null;
   onRetryUnknown: () => void;
   onDismissUnknown: () => void;
-  onSubmit: (text: string) => Promise<void>;
+  onSubmit: (text: string, opts?: { reuseId?: string }) => Promise<void>;
   onInterrupt: () => Promise<void>;
+  interruptAck: string | null;
+  draftRestore: { text: string; nonce: number } | null;
   submitting: boolean;
   inspectorOpen: boolean;
   onReceiptRef: React.MutableRefObject<(() => void) | null>;
@@ -558,6 +657,8 @@ function CtoConversation(props: {
     onDismissUnknown,
     onSubmit,
     onInterrupt,
+    interruptAck,
+    draftRestore,
     submitting,
     inspectorOpen,
     onReceiptRef,
@@ -577,6 +678,15 @@ function CtoConversation(props: {
   }, []);
   const [input, setInput] = useState("");
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // Draft restore (after a declined or stale-generation send): the controller
+  // hands the text back and the composer genuinely restores it — the notice
+  // may say "your text is back" because it is. The nonce fires the effect on
+  // a same-mount restore; a fresh mount (rebind remount) restores immediately.
+  useEffect(() => {
+    if (!draftRestore) return;
+    setInput(draftRestore.text);
+  }, [draftRestore]);
 
   const ts = useTranscriptState({ sessionId, isActive: true, motionStateRef });
   const { messages, setMessages } = ts;
@@ -742,11 +852,14 @@ function CtoConversation(props: {
       bus.setQuestions((prev) => prev.filter((x) => x.id !== q.id));
       try {
         await window.api.opencodeQuestionReject(que, q.sessionID);
-      } catch {
+      } catch (e) {
+        // A user-initiated control reports its failure (same as replyQuestion
+        // above) — a swallowed error reads as a dead dismiss button.
+        setSendError(String((e as Error)?.message ?? e));
         void bus.refreshQuestions();
       }
     },
-    [bus],
+    [bus, setSendError],
   );
 
   // ---- Composer ----
@@ -773,12 +886,28 @@ function CtoConversation(props: {
 
   // Pending-send bubbles: server-owned truth (queue projection) for anything
   // not yet visible in the transcript, plus the local in-flight send. Text
-  // comes from the local ephemeral map — the queue projection strips it.
+  // comes from the local ephemeral map — the queue projection strips it —
+  // falling back to the transcript's own user message (the server projection
+  // REQUIRES messageID for every record that is not queued/cancelled, so a
+  // dispatched record's message is usually already in the transcript).
   const messages_ = messages ?? [];
   const messageIds = useMemo(
     () => new Set(messages_.map((m) => m.info.id)),
     [messages_],
   );
+  const userTextByMessageId = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const row of messages_) {
+      if (row.info.role !== "user") continue;
+      const text = row.parts
+        ?.filter((p) => p.type === "text" && typeof p.text === "string")
+        .map((p) => p.text as string)
+        .join(" ")
+        .trim();
+      if (text) m.set(row.info.id, text);
+    }
+    return m;
+  }, [messages_]);
   const pendingBubbles = useMemo(() => {
     const rows: Array<{
       key: string;
@@ -793,12 +922,22 @@ function CtoConversation(props: {
     if (queue) {
       for (const s of queue.submissions) {
         if (s.origin !== "human" || !PENDING_STATUSES.has(s.status)) continue;
-        if (typeof s.messageID === "string" && messageIds.has(s.messageID)) continue;
+        // The uncertain-abort hold is NEVER skipped — its message is ALWAYS
+        // already in the transcript (an interrupt_pending record came from
+        // accepted, and the merged validator requires sessionId+messageID for
+        // it), so the "visible turn covers it" skip below would otherwise
+        // make the PERMANENT hold invisible everywhere (the reviewer's P1).
+        if (typeof s.messageID === "string" && messageIds.has(s.messageID) && !isUncertainAbort(s)) continue;
         if (sending != null && localTextsRef.current.get(s.id) === sending) continue;
         if (dismissedUnknownRef.current.has(s.id)) continue;
         rows.push({
           key: s.id,
-          text: localTextsRef.current.get(s.id) ?? `Submission ${s.id.slice(0, 12)}…`,
+          text:
+            localTextsRef.current.get(s.id) ??
+            (typeof s.messageID === "string"
+              ? userTextByMessageId.get(s.messageID)
+              : undefined) ??
+            `Submission ${s.id.slice(0, 12)}…`,
           status: submissionStatusLabel(s),
           unknown:
             s.status === "unknown" ||
@@ -824,7 +963,7 @@ function CtoConversation(props: {
     // localTextsRef / dismissedUnknownRef mutate without renders — every
     // transition that matters re-renders through sending/queue/unknownPending.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sending, queue, messageIds, localTextsRef, unknownPending]);
+  }, [sending, queue, messageIds, userTextByMessageId, localTextsRef, unknownPending]);
 
   const optInModels = useStore((s) => s.optInModels) ?? EMPTY_STRINGS;
   const deactivatedMainModels = useStore((s) => s.deactivatedMainModels) ?? EMPTY_STRINGS;
@@ -858,7 +997,7 @@ function CtoConversation(props: {
             progress={null}
             isActive={true}
             activeTodos={null}
-            questions={bus.questions}
+            questions={NO_QUESTIONS}
             turnInfo={turnInfo}
             finishByMessageId={bus.finishByMessageId}
             userCommandInfo={userCommandInfo}
@@ -892,26 +1031,26 @@ function CtoConversation(props: {
       </div>
 
       {/* Pinned asks: permission + question cards (same components, same
-          semantics as the ordinary composer's stack). */}
-      {!submitting &&
-        bus.permissions.map((p) => (
-          <div key={p.id} className="shrink-0 px-4 pt-2">
-            <PermissionCard
-              perm={p}
-              onReply={(reply) => void replyPermission(p.id, reply, p.sessionID)}
-            />
-          </div>
-        ))}
-      {!submitting &&
-        bus.questions.map((q) => (
-          <div key={q.id} className="shrink-0 px-4 pt-2">
-            <QuestionCard
-              request={q}
-              onReply={(answers) => void replyQuestion(q, answers)}
-              onReject={() => void rejectQuestion(q)}
-            />
-          </div>
-        ))}
+          semantics as the ordinary composer's stack). NEVER gated on a send
+          in flight — an ask blocks the whole session on the user's answer,
+          and hiding it during a send (or a hung one) would strand it. */}
+      {bus.permissions.map((p) => (
+        <div key={p.id} className="shrink-0 px-4 pt-2">
+          <PermissionCard
+            perm={p}
+            onReply={(reply) => void replyPermission(p.id, reply, p.sessionID)}
+          />
+        </div>
+      ))}
+      {bus.questions.map((q) => (
+        <div key={q.id} className="shrink-0 px-4 pt-2">
+          <QuestionCard
+            request={q}
+            onReply={(answers) => void replyQuestion(q, answers)}
+            onReject={() => void rejectQuestion(q)}
+          />
+        </div>
+      ))}
       {bus.retryInfo && (
         <div className="shrink-0 px-4 pt-2">
           <RetryCard info={bus.retryInfo} />
@@ -943,6 +1082,11 @@ function CtoConversation(props: {
           </button>
         </div>
       )}
+      {interruptAck && (
+        <div className="shrink-0 mx-4 mb-1 px-2 py-1 text-meta text-text-muted bg-fill-active border border-border-subtle rounded-xs flex items-start gap-2">
+          <span className="flex-1">{interruptAck}</span>
+        </div>
+      )}
 
       {/* Work inspector (collapsible) — the admission queue, verbatim. */}
       {inspectorOpen && <WorkInspector queue={queue} />}
@@ -967,7 +1111,11 @@ function CtoConversation(props: {
                   <button
                     type="button"
                     onClick={onRetryUnknown}
-                    className="shrink-0 underline hover:no-underline"
+                    disabled={submitting}
+                    // Disabled, not silent: submitTurn early-returns on the
+                    // in-flight guard, so an enabled Retry mid-send would be
+                    // a no-op control.
+                    className={`shrink-0 underline hover:no-underline ${submitting ? "opacity-50" : ""}`}
                     aria-label="Retry send"
                   >
                     Retry
@@ -1001,9 +1149,13 @@ function CtoConversation(props: {
             placeholder={
               submitting
                 ? "Sending…"
-                : bus.running || qSummary.canInterrupt
-                  ? "Queue a message after the current turn…"
-                  : "Message the CTO…"
+                : qSummary.held
+                  ? // The permanent hold: nothing is running AND no queued
+                    // send will dispatch (the pump holds the whole queue).
+                    "Admission is held — sends queue but dispatch nothing until the hold clears"
+                  : bus.running || qSummary.canInterrupt
+                    ? "Queue a message after the current turn…"
+                    : "Message the CTO…"
             }
             className="flex-1 resize-none bg-transparent text-body text-text placeholder:text-text-faint outline-none disabled:opacity-60"
             aria-label="Message the CTO"
@@ -1049,9 +1201,11 @@ function CtoConversation(props: {
           />
           <div className="flex-1" />
           <span className="text-meta text-text-faint">
-            {bus.running || qSummary.canInterrupt
-              ? "Working — sends queue up"
-              : "Attachments and slash commands are not available here"}
+            {qSummary.held
+              ? "Admission held — queued sends will not dispatch until the hold clears"
+              : bus.running || qSummary.canInterrupt
+                ? "Working — sends queue up"
+                : "Attachments and slash commands are not available here"}
           </span>
         </div>
       </div>

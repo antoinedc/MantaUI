@@ -20,6 +20,7 @@ import {
   installMockApi,
   mount,
   emitAndFlush,
+  emitStreamAndFlush,
   resetStore,
   type Harness,
   type MockApi,
@@ -27,7 +28,18 @@ import {
 } from "./testHarness";
 import { CtoChat } from "./CtoChat";
 import { CtoPanel } from "./CtoPanel";
-import type { CtoConversationState } from "../shared/api";
+import type { CtoConversationState, CtoSubmissionProjection } from "../shared/api";
+
+// Capture what the transcript receives. The inline question copy renders
+// INSIDE the virtualized list, which jsdom (zero-height) renders empty — so
+// a DOM text-count cannot see the double render. Assert the PROP instead.
+const transcriptProps: Array<{ questions?: unknown[] }> = [];
+vi.mock("./Transcript", () => ({
+  Transcript: (props: { questions?: unknown[] }) => {
+    transcriptProps.push(props);
+    return null;
+  },
+}));
 
 const SESSION = "ses_cto_1";
 const GENERATION = 3;
@@ -52,6 +64,44 @@ function receiptOf(input: { id?: string; text: string }) {
     text: input.text,
     persisted: true,
   };
+}
+
+// A server-realistic queue PROJECTION — exactly what admission.list() emits
+// after normalizeAdmissionPayload validated the stored record
+// (src/server/ctoAdmission.mjs): the payload TEXT is stripped from listings,
+// and sessionId+messageID are REQUIRED on every record that is not
+// queued/cancelled (the validator rejects the rest), so this helper defaults
+// them. Fixtures that violate these invariants describe states the server
+// cannot produce — and green tests over them mean nothing.
+function submission(
+  id: string,
+  status: CtoSubmissionProjection["status"],
+  extra: Partial<CtoSubmissionProjection> = {},
+): CtoSubmissionProjection {
+  const s: CtoSubmissionProjection = {
+    id,
+    origin: "human",
+    payloadHash: `hash_${id}`,
+    status,
+    createdAt: Date.now(),
+    submitGeneration: GENERATION,
+    ...extra,
+  };
+  if (s.status !== "queued" && s.status !== "cancelled") {
+    if (s.sessionId === undefined) s.sessionId = SESSION;
+    if (s.messageID === undefined) s.messageID = `msg_${id}`;
+  }
+  return s;
+}
+
+// Seed the transcript with the user message a dispatched record's messageID
+// points at — the server-realistic situation for accepted/interrupt_pending
+// records (the user message lands in the transcript when the turn starts).
+function userTranscriptRows(refs: Array<{ messageID: string; text: string }>) {
+  return refs.map((r) => ({
+    info: { id: r.messageID, role: "user", sessionID: SESSION },
+    parts: [{ type: "text", text: r.text }],
+  }));
 }
 
 // The default CTO conversation harness: the four conversation-channel mocks
@@ -111,6 +161,30 @@ describe("CtoChat", () => {
   let api: MockApi;
   let bus: MockEventBus;
   let h: Harness | null = null;
+
+// Press the unknown-send bubble's Retry control and flush.
+async function pressRetry(): Promise<void> {
+  const retryBtn = Array.from(h!.container.querySelectorAll("button")).find(
+    (b) => b.getAttribute("aria-label") === "Retry send",
+  );
+  expect(retryBtn).not.toBeNull();
+  await act(async () => {
+    retryBtn!.click();
+  });
+  await h!.flush();
+}
+
+// Press the composer's Stop (Interrupt) control, flush, and return the
+// recorded ctoConversationInterrupt calls for the assertions.
+async function pressStop(): Promise<Array<Array<unknown>>> {
+  const stop = h!.container.querySelector('button[aria-label="Interrupt"]');
+  expect(stop).not.toBeNull();
+  await act(async () => {
+    (stop as HTMLButtonElement).click();
+  });
+  await h!.flush();
+  return api!.calls.ctoConversationInterrupt ?? [];
+}
 
   beforeEach(() => {
     resetStore();
@@ -207,16 +281,8 @@ describe("CtoChat", () => {
   });
 
   it("a follow-up while a turn runs is queued (server-side) — no client drain, no abort", async () => {
-    const queuedRecord = {
-      id: "evt_q_other_client",
-      origin: "human" as const,
-      status: "queued",
-      payloadHash: "h2",
-      createdAt: Date.now(),
-      submitGeneration: GENERATION,
-    };
     const q = emptyQueue();
-    q.submissions = [queuedRecord];
+    q.submissions = [submission("evt_q_other_client", "queued")];
     q.counts.queued.human = 1;
     h = mountCto(q);
     await h.flush();
@@ -282,14 +348,7 @@ describe("CtoChat", () => {
     expect(h.text()).toContain("check the deploy");
     // Explicit Retry resubmits the SAME id + payload (server dedup makes it
     // idempotent) — never a fresh uuid per retry.
-    const retryBtn = Array.from(h.container.querySelectorAll("button")).find(
-      (b) => b.getAttribute("aria-label") === "Retry send",
-    );
-    expect(retryBtn).not.toBeNull();
-    await act(async () => {
-      retryBtn!.click();
-    });
-    await h.flush();
+    await pressRetry();
     expect(seen.length).toBe(2);
     expect(seen[0]).toBe(seen[1]);
     expect((seen[0].split(":")[0] ?? "").startsWith("ceo_")).toBe(true);
@@ -320,32 +379,21 @@ describe("CtoChat", () => {
   });
 
   it("interrupt goes through ctoConversationInterrupt with the ADMISSION RECORD id — never an opencode abort", async () => {
-    const running = {
-      id: "evt_running_1",
-      origin: "human" as const,
-      status: "accepted",
-      payloadHash: "h3",
-      createdAt: Date.now(),
-      submitGeneration: GENERATION,
-      messageID: "msg_1",
-      sessionId: SESSION,
-    };
+    // SERVER-REALISTIC: an accepted record requires sessionId+messageID and
+    // its user message is already in the transcript (the turn dispatched).
     const q = emptyQueue();
-    q.submissions = [running];
+    q.submissions = [submission("evt_running_1", "accepted")];
     q.counts.unresolved = 1;
-    h = mountCto(q);
+    h = mountCto(q, {
+      opencodeMessages: () =>
+        Promise.resolve(userTranscriptRows([{ messageID: "msg_evt_running_1", text: "run the deploy" }])),
+    });
     await h.flush();
     await emitAndFlush(bus, h, {
       type: "session.status",
       properties: { sessionID: SESSION, status: "busy" },
     });
-    const stop = h.container.querySelector('button[aria-label="Interrupt"]');
-    expect(stop).not.toBeNull();
-    await act(async () => {
-      (stop as HTMLButtonElement).click();
-    });
-    await h.flush();
-    const interrupts = api.calls.ctoConversationInterrupt ?? [];
+    const interrupts = await pressStop();
     expect(interrupts.length).toBe(1);
     expect((interrupts[0][0] as { id: string }).id).toBe("evt_running_1");
     expect(api.calls.opencodeAbort?.length ?? 0).toBe(0);
@@ -390,27 +438,19 @@ describe("CtoChat", () => {
 
   it("surfaces droppedByPolicy deliveries honestly — real losses, never ignored", async () => {
     const q = emptyQueue();
-    q.submissions = [
-      {
-        id: "sched_j1_min",
-        origin: "background",
-        status: "queued",
-        payloadHash: "hb",
-        createdAt: Date.now(),
-        submitGeneration: GENERATION,
-      },
-    ];
+    q.submissions = [submission("sched_j1_min", "queued", { origin: "background" })];
     q.counts.queued.background = 1;
     q.droppedByPolicy = [
       { id: "sched_j0_min", origin: "background", createdAt: Date.now() - 60_000 },
     ];
     h = mountCto(q);
     await h.flush();
-    // The inspector is opened via the Work inspector toggle.
+    // The loss is visible on the CLOSED toggle — without opening the panel.
     const toggle = Array.from(h.container.querySelectorAll("button")).find((b) =>
       b.textContent?.includes("Work inspector"),
     );
     expect(toggle).not.toBeNull();
+    expect(toggle!.textContent).toContain("1 dropped by policy");
     await act(async () => {
       toggle!.click();
     });
@@ -423,29 +463,287 @@ describe("CtoChat", () => {
     expect(h.text()).toContain("never dispatched");
   });
 
-  it("renders an uncertain abort as a PERMANENT admission hold — never transient", async () => {
+  it("renders an uncertain abort as a PERMANENT admission hold — visible where the user is looking", async () => {
+    // SERVER-REALISTIC (the previous fixture was not, which is why the hold
+    // could render in a test yet never in production): an interrupt_pending
+    // record always came from accepted, the merged validator REQUIRES
+    // sessionId+messageID on it, and its user message IS already in the
+    // transcript — exactly the state whose "visible turn covers it" skip made
+    // the permanent hold invisible.
     const q = emptyQueue();
     q.submissions = [
-      {
-        id: "evt_held_1",
-        origin: "human",
-        status: "interrupt_pending",
-        payloadHash: "h4",
-        createdAt: Date.now(),
-        submitGeneration: GENERATION,
-        sessionId: SESSION,
+      submission("evt_held_1", "interrupt_pending", {
         abortState: "uncertain",
         abortOutcomeReason: "abort_outcome_unknown",
-      },
+        messageID: "msg_held_1",
+      }),
     ];
     q.counts.unresolved = 1;
-    h = mountCto(q);
+    h = mountCto(q, {
+      opencodeMessages: () =>
+        Promise.resolve(userTranscriptRows([{ messageID: "msg_held_1", text: "hold the line" }])),
+    });
     await h.flush();
-    // The contract-mandated phrasing (limitation 1a): held for this session,
-    // not "stopped", not a spinner that never resolves.
+    // The contract-mandated phrasing (limitation 1a) — as a pinned bubble
+    // above the composer (where the user is looking), carrying the held
+    // turn's text from the transcript.
     expect(h.text()).toContain("Abort outcome unknown — admission held for this session");
-    // And it reads as a barrier, not as a completed interrupt.
-    expect(h.text()).not.toContain("Interrupt pending");
+    expect(h.text()).toContain("hold the line");
+    // The surrounding controls must not lie: nothing is running and the
+    // pump dispatches nothing while held.
+    //  - Stop is an idempotent no-op on the held record → hidden.
+    expect(h.container.querySelector('button[aria-label="Interrupt"]')).toBeNull();
+    //  - The footer does not claim "Working — sends queue up".
+    expect(h.text()).toContain("Admission held — queued sends will not dispatch");
+    expect(h.text()).not.toContain("Working — sends queue up");
+    //  - The composer placeholder says the same.
+    const ta = h.container.querySelector(
+      'textarea[aria-label="Message the CTO"]',
+    ) as HTMLTextAreaElement;
+    expect(ta.placeholder).toContain("Admission is held");
+  });
+
+  it("Stop with only queued sends targets the MOST RECENT queued one and confirms the outcome", async () => {
+    const q = emptyQueue();
+    q.submissions = [submission("evt_q_old", "queued"), submission("evt_q_new", "queued")];
+    q.counts.queued.human = 2;
+    h = mountCto(q, {
+      ctoConversationInterrupt: (input: { id: string }) =>
+        Promise.resolve({ ok: true, id: input.id, status: "cancelled" }),
+    });
+    await h.flush();
+    const interrupts = await pressStop();
+    expect(interrupts.length).toBe(1);
+    // Newest-first (live is reversed) — NOT the oldest via [length-1].
+    expect((interrupts[0][0] as { id: string }).id).toBe("evt_q_new");
+    // The outcome is confirmed visibly — not a silent no-op.
+    expect(h.text()).toContain("Queued send cancelled — it will not run.");
+  });
+
+  it("a definitive refusal (binding unavailable) shows the server's message and restores the draft — never 'outcome unknown'", async () => {
+    // The server message is the REAL wording of the binding-unavailable
+    // refusal (the CtoAdmissionError.code is not transported over /rpc —
+    // surfacing the message is the honest minimum).
+    h = mountCto(emptyQueue(), {
+      ctoConversationSubmit: () =>
+        Promise.reject(
+          new Error(
+            "binding unavailable — refusing to admit against unresolved role identity: role identity unresolved",
+          ),
+        ),
+    });
+    await h.flush();
+    await typeAndSubmit(h, "urgent ask");
+    expect(h.text()).toContain("The CTO declined the send: binding unavailable");
+    // A definitive no: nothing persisted, nothing to reconcile — the unknown
+    // bubble with its forever-Retry would be a lie.
+    expect(h.text()).not.toContain("Outcome unknown — reconciling");
+    // The composer was optimistically cleared — the draft is genuinely back.
+    const ta = h.container.querySelector(
+      'textarea[aria-label="Message the CTO"]',
+    ) as HTMLTextAreaElement;
+    expect(ta.value).toBe("urgent ask");
+  });
+
+  it("a stale-generation send restores the draft after the rebind remount and says so", async () => {
+    h = mountCto(emptyQueue(), {
+      ctoConversationSubmit: () =>
+        Promise.reject(
+          new Error("stale generation: expected 3, current binding generation is 4"),
+        ),
+    });
+    await h.flush();
+    await typeAndSubmit(h, "rebind survivor");
+    // The rebind remounts the conversation — the draft must actually be
+    // restored, not merely claimed as kept.
+    const ta = h.container.querySelector(
+      'textarea[aria-label="Message the CTO"]',
+    ) as HTMLTextAreaElement;
+    expect(ta.value).toBe("rebind survivor");
+    expect(h.text()).toContain("Your text is back in the composer");
+  });
+
+  it("Retry reuses the PENDING RECORD's id even after an intervening successful send", async () => {
+    const seen: string[] = [];
+    let failFirst = true;
+    h = mountCto(emptyQueue(), {
+      ctoConversationSubmit: (input: { id?: string; text: string }) => {
+        seen.push(`${input.id}:${input.text}`);
+        if (failFirst) {
+          failFirst = false;
+          return Promise.reject(new Error("network timeout"));
+        }
+        return Promise.resolve(receiptOf(input));
+      },
+    });
+    await h.flush();
+    await typeAndSubmit(h, "send A"); // times out → unknown A
+    await typeAndSubmit(h, "send B"); // succeeds → clears the single-slot retryRef
+    // Retry A: must reuse A's ORIGINAL id (from the pending record itself).
+    // A fresh id could double-run a send the server actually accepted with a
+    // lost response.
+    await pressRetry();
+    expect(seen.length).toBe(3);
+    expect(seen[2]).toBe(seen[0]);
+  });
+
+  it("Retry is disabled — not a silent no-op — while a send is in flight", async () => {
+    const hold = gate();
+    let attempts = 0;
+    h = mountCto(emptyQueue(), {
+      ctoConversationSubmit: (input: { id?: string; text: string }) => {
+        attempts += 1;
+        if (attempts === 1) return Promise.reject(new Error("network timeout"));
+        // The retry attempt hangs until the test releases it.
+        return new Promise((_resolve) => {
+          hold.resolve({ v: receiptOf(input) });
+        });
+      },
+    });
+    await h.flush();
+    await typeAndSubmit(h, "first");
+    const retry = () =>
+      Array.from(h!.container.querySelectorAll("button")).find(
+        (b) => b.getAttribute("aria-label") === "Retry send",
+      ) as HTMLButtonElement | null;
+    expect(retry()).not.toBeNull();
+    await act(async () => {
+      retry()!.click();
+    });
+    await h.flush();
+    // In flight → the button is DISABLED (an enabled Retry mid-send would be
+    // a no-op control: submitTurn early-returns on the busy guard).
+    expect(retry()!.disabled).toBe(true);
+    hold.resolve(undefined);
+    await h.flush();
+  });
+
+  it("a pending permission ask stays visible while a send is in flight", async () => {
+    const hold = gate();
+    h = mountCto(emptyQueue(), {
+      opencodePermissions: () =>
+        Promise.resolve([
+          {
+            id: "perm_1",
+            sessionID: SESSION,
+            permission: "bash",
+            patterns: ["deploy *"],
+            metadata: { command: "deploy --prod" },
+          },
+        ]),
+      ctoConversationSubmit: () =>
+        new Promise((_resolve) => {
+          hold.resolve({ v: receiptOf({ id: "held", text: "held" }) });
+        }),
+    });
+    await h.flush();
+    // The ask arrives the way the box delivers it: a permission.asked event
+    // triggers the permissions refetch (the mock returns the pending ask).
+    await emitAndFlush(bus, h, {
+      type: "permission.asked",
+      properties: { sessionID: SESSION, id: "perm_1" },
+    });
+    expect(h.text()).toContain("Run a shell command?");
+    // A send goes out and hangs (the submit mock holds it) — the ask must
+    // stay visible through the in-flight window (and forever under a hang).
+    await typeAndSubmit(h, "while blocked");
+    await h.flush();
+    expect(h.text()).toContain("Run a shell command?");
+    hold.resolve(undefined);
+    await h.flush();
+  });
+
+  it("a pending question renders exactly once — pinned stack, not duplicated inline", async () => {
+    h = mountCto();
+    await h.flush();
+    await emitStreamAndFlush(bus, h, {
+      sub: "questions",
+      sessionId: SESSION,
+      payload: {
+        questions: [
+          {
+            id: "q1",
+            sessionID: SESSION,
+            requestId: "que_1",
+            questions: [
+              {
+                question: "Which migration path?",
+                header: "Migration",
+                options: [{ label: "Online", description: "no downtime" }],
+                multiple: false,
+              },
+            ],
+          },
+        ],
+      },
+    });
+    // The pinned stack renders the card; the transcript must receive NO
+    // inline questions — each question renders ONCE (the ChatPanel precedent
+    // filters inline questions for exactly this).
+    expect(transcriptProps.at(-1)?.questions ?? []).toHaveLength(0);
+    const occurrences = h.text().split("Which migration path?").length - 1;
+    expect(occurrences).toBe(1);
+  });
+
+  it("a question dismiss reports its failure like a reply does", async () => {
+    h = mountCto(emptyQueue(), {
+      opencodeQuestionReject: () => Promise.reject(new Error("reject failed: gone")),
+    });
+    await h.flush();
+    await emitStreamAndFlush(bus, h, {
+      sub: "questions",
+      sessionId: SESSION,
+      payload: {
+        questions: [
+          {
+            id: "q2",
+            sessionID: SESSION,
+            requestId: "que_2",
+            questions: [
+              {
+                question: "Proceed without tests?",
+                header: "Tests",
+                options: [{ label: "Yes", description: "skip" }],
+                multiple: false,
+              },
+            ],
+          },
+        ],
+      },
+    });
+    const dismiss = Array.from(h.container.querySelectorAll("button")).find(
+      (b) => b.getAttribute("title") === "Dismiss this question",
+    );
+    expect(dismiss).not.toBeNull();
+    await act(async () => {
+      dismiss!.click();
+    });
+    await h.flush();
+    expect(h.text()).toContain("reject failed: gone");
+  });
+
+  it("opens even if the IntersectionObserver never fires (bounded fallback, no eternal spinner)", async () => {
+    class NeverObservable {
+      observe(): void {}
+      disconnect(): void {}
+      unobserve(): void {}
+    }
+    (window as unknown as { IntersectionObserver: unknown }).IntersectionObserver =
+      NeverObservable;
+    try {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      h = mountCto();
+      await h.flush();
+      // The observer never reports — the open has NOT fired yet.
+      expect(api.calls.ctoConversationOpen?.length ?? 0).toBe(0);
+      vi.advanceTimersByTime(5_100);
+      await h.flush();
+      expect(api.calls.ctoConversationOpen?.length ?? 0).toBeGreaterThan(0);
+    } finally {
+      vi.useRealTimers();
+      delete (window as unknown as { IntersectionObserver?: unknown })
+        .IntersectionObserver;
+    }
   });
 });
 
