@@ -1047,11 +1047,14 @@ export function buildHandlers({
 
     // preload: ipcRenderer.invoke(IPC.opencodePrompt, { sessionId, text, model, attachments, mentions })
     // → args[0] = that object; opencode.mjs sendPrompt expects the same shape
-    // P3a3 (spec §8.3): a direct send aimed at the CTO role session must NOT
-    // bypass the durable admission queue. Plain text is routed through the
-    // same seam (stable id: the composer's messageID when present); file
-    // attachments / agent mentions get the clear "not supported yet"
-    // rejection. Ordinary project sessions take the byte-identical raw path.
+    // P3a3 (spec §8.3, full-parity widening): a direct send aimed at the CTO
+    // role session must NOT bypass the durable admission queue. EVERY send —
+    // plain text, file attachments, resolved @agent mentions — is routed
+    // through the same seam (stable id: the composer's messageID when
+    // present) via admitDirect, which also gates the caller's `agent` field
+    // through a closed plan-mode allowlist (see ctoConversation.mjs
+    // resolveAgent — the caller still can never pick an arbitrary agent).
+    // Ordinary project sessions take the byte-identical raw path.
     "opencode:prompt": async (input) => {
       if (input && ctoConversation && (await ctoConversation.isConversationSession(input.sessionId))) {
         return ctoConversation.admitDirect(input);
@@ -1567,13 +1570,15 @@ export function buildHandlers({
 
     // preload: ipcRenderer.invoke(IPC.opencodeRunCommand, { sessionId, command, arguments, model?, attachments? })
     // → args[0] = that object; opencode.mjs runCommand expects same shape
-    // P3a3 (spec §8.3): slash commands aimed at the CTO role session are NOT
-    // admitted through the conversation API yet — rejected with the clear
-    // "use the CTO conversation API for plain text" copy instead of silently
-    // bypassing the admission queue. Ordinary project sessions unaffected.
+    // P3a3 (spec §8.3, full-parity widening): a slash command aimed at the
+    // CTO role session is routed through the SAME durable admission queue as
+    // a direct send — admitCommand persists a `kind:"command"` record that
+    // admission dispatches via sendCommand (a different opencode endpoint
+    // than a prompt), never bypassing the queue. Ordinary project sessions
+    // take the byte-identical raw route.
     "opencode:run-command": async (input) => {
       if (input && ctoConversation && (await ctoConversation.isConversationSession(input.sessionId))) {
-        await ctoConversation.rejectRunCommand(input);
+        return ctoConversation.admitCommand(input);
       }
       return oc.runCommand(input);
     },

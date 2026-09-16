@@ -4,10 +4,12 @@
 // createCtoConversationService and dispatched through the REAL buildHandlers
 // channel map (the exact channels the renderer's httpApi calls). Covers the
 // P3a3 acceptance list: concurrent open creates once; submit dedup + queue
-// projection; the direct-send seams (route plain text / reject slash+file);
-// background prompt-delivery into the SAME queue; ordinary project traffic
-// byte-identical; composition at boot touches zero oc; signals forwarded to
-// the raw oc. No live opencode, no network, no model calls.
+// projection; the direct-send seams (full-parity widening: plain text, file
+// attachments, resolved @agent mentions, AND slash commands all route
+// through admission — nothing is rejected); background prompt-delivery into
+// the SAME queue; ordinary project traffic byte-identical; composition at
+// boot touches zero oc; signals forwarded to the raw oc; the closed
+// plan-mode agent allowlist. No live opencode, no network, no model calls.
 
 import "./ctoTestGuard.mjs";
 
@@ -16,11 +18,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
 import { dispatch, buildHandlers } from "./rpc.mjs";
-import {
-  CTO_CONVERSATION_UNSUPPORTED_MESSAGE,
-  backgroundDeliveryId,
-  createCtoConversationService,
-} from "./ctoConversation.mjs";
+import { backgroundDeliveryId, createCtoConversationService } from "./ctoConversation.mjs";
 import { createCtoBinding } from "./ctoBinding.mjs";
 import { createCtoAdmission } from "./ctoAdmission.mjs";
 import { createPromptDelivery } from "./promptDelivery.mjs";
@@ -123,10 +121,25 @@ function fakeOc() {
       oc.calls.push(["abortSession", sessionId, opts]);
       oc.aborts.push({ sessionId, signal: opts.signal ?? null });
     },
+    // P3a3 full-parity widening: admission's sendCommand dep — mirrors
+    // sendPrompt's receipt-landing mechanics (the messageID here is
+    // admission-allocated, exactly like a prompt's) so the SAME
+    // dispatching→accepted state machine exercises a command in these tests.
     async runCommand(input) {
       oc.calls.push(["runCommand", input]);
       oc.commandCalls.push(input);
-      return { messageID: `cmd_${oc.commandCalls.length}` };
+      if (oc.onSend) await oc.onSend(input);
+      if (input.messageID) {
+        oc.transcript.set(input.messageID, {
+          info: { id: input.messageID, role: "user", time: { created: 1 } },
+          parts: [],
+        });
+        oc.rows.push({
+          info: { id: input.messageID, role: "user", time: { created: 1 } },
+          parts: [],
+        });
+      }
+      return undefined;
     },
     /** A finished assistant row LINKED to our user message (finish: stop) —
      * transcript proof the turn ended (mirrors ctoAdmission.test's fake). */
@@ -199,7 +212,7 @@ const stubDeps = () => ({
 // binding + ONE admission + the conversation service, the prompt-delivery
 // engine with its redirect, and the real channel map. Agent name is a stub
 // stand-in for providers.CTO_AGENT_NAME.
-function compose({ stamp, bindingStore, admissionOptions } = {}) {
+function compose({ stamp, bindingStore, admissionOptions, conversationOptions } = {}) {
   const oc = fakeOc();
   const bStore = bindingStore ?? memoryStore("binding");
   const binding = createCtoBinding({
@@ -221,6 +234,9 @@ function compose({ stamp, bindingStore, admissionOptions } = {}) {
     store: memoryStore("admission"),
     binding,
     sendPrompt: (...a) => oc.sendPrompt(...a),
+    // P3a3 full-parity widening: the slash-command sender (opencode.mjs
+    // runCommand's stand-in) — mirrors the production wiring in index.mjs.
+    sendCommand: (...a) => oc.runCommand(...a),
     getMessage: (sid, mid) => oc.getMessage(sid, mid),
     listMessages: (sid, opts) => oc.listMessages(sid, opts),
     abortSession: (sid, opts) => oc.abortSession(sid, opts),
@@ -232,7 +248,11 @@ function compose({ stamp, bindingStore, admissionOptions } = {}) {
     binding,
     admission,
     agentName: "cto-test-agent",
+    // Stub stand-in for providers.MANTA_PLAN_AGENT_NAME (mirrors the
+    // production wiring) — the ONE allow-listed additional agent.
+    planAgentName: "cto-test-plan-agent",
     ...(stamp ? { stamp } : {}),
+    ...conversationOptions,
   });
   const handlers = buildHandlers({ oc, ctoConversation: svc, ...stubDeps() });
   return { oc, binding, admission, svc, pd, handlers, bStore };
@@ -363,51 +383,136 @@ test("cto:conversation-submit: stable id, durable queue projection, server-owned
 // Seams: direct sends / slash commands at the conversation session
 // ---------------------------------------------------------------------------
 
-test("opencode:prompt at the conversation session routes plain text through admission and rejects attachments and slash commands", async () => {
+test("opencode:prompt at the conversation session routes plain text, file attachments and @agent mentions through admission — nothing is rejected", async () => {
+  const t = compose();
+  const open = await dispatch(t.handlers, "cto:conversation-open", []);
+  // Plain text (with a caller-chosen agent that must be DROPPED — it is not
+  // the allow-listed plan agent) → routed through the same durable queue
+  // with the caller's stable messageID.
+  const receipt1 = await dispatch(t.handlers, "opencode:prompt", [
+    { sessionId: open.sessionId, text: "status please", agent: "build", messageID: "m_direct_1" },
+  ]);
+  assert.ok(await waitFor(() => t.oc.sends.length >= 1), "routed direct send was dispatched by admission");
+  const st = await dispatch(t.handlers, "cto:conversation-state", []);
+  const row = st.submissions.find((s) => s.id === "m_direct_1");
+  assert.ok(row, "direct send was admitted through the queue");
+  assert.equal(row.origin, "human");
+  // The send that reaches the raw oc is ADMISSION's dispatch — server-owned
+  // agent, admission-allocated stable messageID, not a byte pass-through.
+  const send = t.oc.sends[0];
+  assert.equal(send.sessionId, open.sessionId);
+  assert.equal(send.agent, "cto-test-agent");
+  assert.ok(send.messageID.startsWith("msg_"));
+  // One turn at a time — settle it before the next send can dispatch.
+  await completeTurn(t, receipt1.id);
+
+  // File attachments AND @agent mentions → full-parity widening: admitted
+  // through the SAME queue, not rejected — they ride the record verbatim
+  // and reach sendPrompt on dispatch.
+  const attachments = [{ mime: "text/plain", remotePath: "/tmp/x", filename: "x.txt" }];
+  const mentions = [{ name: "build", source: { value: "@build", start: 0, end: 6 } }];
+  await dispatch(t.handlers, "opencode:prompt", [
+    { sessionId: open.sessionId, text: "see file", attachments, mentions, messageID: "m_direct_2" },
+  ]);
+  assert.ok(await waitFor(() => t.oc.sends.length >= 2), "the attachment-bearing send was also dispatched");
+  const dispatched = t.oc.sends[1];
+  assert.deepEqual(dispatched.attachments, attachments);
+  assert.deepEqual(dispatched.mentions, mentions);
+
+  const stAfter = await dispatch(t.handlers, "cto:conversation-state", []);
+  assert.equal(stAfter.submissions.length, 2, "both sends were admitted — nothing was rejected");
+});
+
+test("opencode:run-command at the conversation session routes a slash command through admission via sendCommand", async () => {
   const t = compose();
   const open = await dispatch(t.handlers, "cto:conversation-open", []);
   const { release } = parkSends(t.oc);
   try {
-    // Plain text (with a caller-chosen agent that must be DROPPED) → routed
-    // through the same durable queue with the caller's stable messageID.
-    await dispatch(t.handlers, "opencode:prompt", [
-      { sessionId: open.sessionId, text: "status please", agent: "build", messageID: "m_direct_1" },
+    const receipt = await dispatch(t.handlers, "opencode:run-command", [
+      { sessionId: open.sessionId, command: "compact", arguments: "", agent: "build" },
     ]);
-    assert.ok(await waitFor(() => t.oc.sends.length >= 1), "routed direct send was dispatched by admission");
+    assert.ok(receipt.id, "the command was admitted through the durable queue, not rejected");
+    assert.equal(receipt.origin, "human");
+    assert.ok(await waitFor(() => t.oc.commandCalls.length >= 1), "admission dispatched via sendCommand");
+    assert.equal(t.oc.sends.length, 0, "sendPrompt was never called for a command");
+    const sent = t.oc.commandCalls[0];
+    assert.equal(sent.command, "compact");
+    assert.equal(sent.agent, "cto-test-agent", "server-owned agent — the caller's 'build' was dropped");
     const st = await dispatch(t.handlers, "cto:conversation-state", []);
-    const row = st.submissions.find((s) => s.id === "m_direct_1");
-    assert.ok(row, "direct send was admitted through the queue");
-    assert.equal(row.origin, "human");
-    // The send that reaches the raw oc is ADMISSION's dispatch — server-owned
-    // agent, admission-allocated stable messageID, not a byte pass-through.
-    const send = t.oc.sends[0];
-    assert.equal(send.sessionId, open.sessionId);
-    assert.equal(send.agent, "cto-test-agent");
-    assert.ok(send.messageID.startsWith("msg_"));
+    const row = st.submissions.find((s) => s.id === receipt.id);
+    assert.equal(row.kind, "command");
+    assert.equal(row.command, "compact");
+  } finally {
+    release();
+  }
+});
 
-    // File attachments → the clear rejection; nothing queued.
-    await assert.rejects(
-      () =>
-        dispatch(t.handlers, "opencode:prompt", [
-          {
-            sessionId: open.sessionId,
-            text: "see file",
-            attachments: [{ mime: "text/plain", remotePath: "/tmp/x" }],
-          },
-        ]),
-      (e) => e.message === CTO_CONVERSATION_UNSUPPORTED_MESSAGE,
-    );
+test("plan mode: the caller may request the ONE allow-listed plan agent; any other agent value is still dropped", async () => {
+  const t = compose();
+  const open = await dispatch(t.handlers, "cto:conversation-open", []);
+  // One turn at a time — drive each submission through dispatch AND
+  // completion before the next one, exactly like the recurring-delivery
+  // tests above (completeTurn), so every case gets its own clean dispatch.
+  let n = 0;
+  const tryAgent = async (agent) => {
+    n += 1;
+    const id = `m_plan_${n}`;
+    const before = t.oc.sends.length;
+    const receipt = await dispatch(t.handlers, "opencode:prompt", [
+      { sessionId: open.sessionId, text: `try ${agent}`, agent, messageID: id },
+    ]);
+    // NOTE: admission allocates its OWN dispatch messageID (`msg_...`) —
+    // distinct from the submission's own `id` (the composer's messageID,
+    // used as the record's `id`, not as the wire messageID). Identify the
+    // dispatched send positionally (one turn at a time, so it's the newest).
+    assert.ok(await waitFor(() => t.oc.sends.length > before));
+    const sent = t.oc.sends.at(-1);
+    await completeTurn(t, receipt.id);
+    return sent.agent;
+  };
+  // The allow-listed plan agent passes through unchanged.
+  assert.equal(await tryAgent("cto-test-plan-agent"), "cto-test-plan-agent", "the ONE allow-listed value rides through");
+  // ANY other value — including something that merely LOOKS like a plan
+  // agent (a box-native "plan", or an arbitrary string) — is still dropped:
+  // the allowlist has exactly one entry, not a pattern.
+  for (const arbitrary of ["plan", "build", "cto-test-plan-agent-impostor", "manta-plan"]) {
+    assert.equal(await tryAgent(arbitrary), "cto-test-agent", `${arbitrary} must be refused`);
+  }
+});
 
-    // Slash commands → the clear rejection (not admitted until a later phase).
-    await assert.rejects(
-      () =>
-        dispatch(t.handlers, "opencode:run-command", [
-          { sessionId: open.sessionId, command: "compact" },
-        ]),
-      (e) => e.message === CTO_CONVERSATION_UNSUPPORTED_MESSAGE,
-    );
-    const stAfter = await dispatch(t.handlers, "cto:conversation-state", []);
-    assert.equal(stAfter.submissions.length, 1, "rejected inputs never queued");
+test("plan mode allowlist applies identically to cto:conversation-submit and opencode:run-command", async () => {
+  const t = compose();
+  const open = await dispatch(t.handlers, "cto:conversation-open", []);
+  const { release } = parkSends(t.oc);
+  try {
+    const submitReceipt = await dispatch(t.handlers, "cto:conversation-submit", [
+      { id: "m_submit_plan", text: "plan via submit", agent: "cto-test-plan-agent" },
+    ]);
+    assert.equal(submitReceipt.agent, "cto-test-plan-agent");
+    const submitReceipt2 = await dispatch(t.handlers, "cto:conversation-submit", [
+      { id: "m_submit_arbitrary", text: "not plan", agent: "some-other-agent" },
+    ]);
+    assert.equal(submitReceipt2.agent, "cto-test-agent", "arbitrary agent refused on cto:conversation-submit too");
+
+    const cmdReceipt = await dispatch(t.handlers, "opencode:run-command", [
+      { sessionId: open.sessionId, command: "init", arguments: "", agent: "cto-test-plan-agent" },
+    ]);
+    assert.equal(cmdReceipt.agent, "cto-test-plan-agent");
+  } finally {
+    release();
+  }
+});
+
+test("a box with no planAgentName wired drops every agent value (safe default, identical to pre-widening behavior)", async () => {
+  const t = compose({ conversationOptions: { planAgentName: null } });
+  const open = await dispatch(t.handlers, "cto:conversation-open", []);
+  const { release } = parkSends(t.oc);
+  try {
+    await dispatch(t.handlers, "opencode:prompt", [
+      { sessionId: open.sessionId, text: "hi", agent: "cto-test-plan-agent", messageID: "m_noplan" },
+    ]);
+    assert.ok(await waitFor(() => t.oc.sends.length >= 1));
+    assert.equal(t.oc.sends[0].agent, "cto-test-agent", "no allowlist wired → every agent value drops");
   } finally {
     release();
   }

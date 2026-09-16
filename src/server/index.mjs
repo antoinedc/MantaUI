@@ -181,6 +181,7 @@ import {
   ensureMantaPlanAgent,
   ensureCtoAgent,
   CTO_AGENT_NAME,
+  MANTA_PLAN_AGENT_NAME,
   readCacheTtl as readProvidersCacheTtl,
   readOpencodeConfig,
 } from "./providers.mjs";
@@ -443,6 +444,10 @@ const ctoBindingEngine = createCtoBinding({ oc });
 const ctoAdmissionEngine = createCtoAdmission({
   binding: ctoBindingEngine,
   sendPrompt: (args) => oc.sendPrompt(args),
+  // P3a3 full-parity widening: a slash command aimed at the CTO role session
+  // dispatches through opencode.mjs runCommand — a different endpoint than
+  // sendPrompt. Same raw low-level oc client, same anti-recursion property.
+  sendCommand: (args) => oc.runCommand(args),
   getMessage: (sessionId, messageId) => oc.getMessage(sessionId, messageId),
   listMessages: (sessionId, opts) => oc.listMessages(sessionId, opts),
   abortSession: (sessionId, opts) => oc.abortSession(sessionId, opts),
@@ -457,6 +462,10 @@ const ctoConversation = createCtoConversationService({
   // turns ALWAYS run the registered `cto` agent — callers can never choose
   // an arbitrary agent for the role session.
   agentName: CTO_AGENT_NAME,
+  // The ONE additional agent a caller may reach, and only by requesting
+  // plan mode (full-parity widening item 5) — see ctoConversation.mjs
+  // resolveAgent for the closed allowlist this enables.
+  planAgentName: MANTA_PLAN_AGENT_NAME,
   // Cheap change stamp for the seam-classification cache (one stat instead of
   // a binding.json read+parse on every ordinary project prompt).
   stamp: () => bindingStore.stamp(),

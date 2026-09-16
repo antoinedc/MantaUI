@@ -452,6 +452,16 @@ export type CtoSubmissionProjection = {
   model?: PromptModel;
   agent?: string;
   expectedGeneration?: number;
+  // P3a3 full-parity widening: file attachments / resolved @agent mentions
+  // ride a prompt-kind submission verbatim. `kind:"command"` + `command`
+  // mark a slash-command submission dispatched via sendCommand instead of
+  // sendPrompt; its free-text `args` is stripped from the projection (the
+  // server keeps payload text — including a command's argument body — out
+  // of queue listings, same as `text`).
+  attachments?: PromptAttachment[];
+  mentions?: PromptAgentMention[];
+  kind?: "prompt" | "command";
+  command?: string;
   // Unknown tracking (surfaced so clients can render "pending
   // reconciliation" instead of guessing).
   unknownMs?: number;
@@ -1478,14 +1488,24 @@ export interface Api {
   // Submit a human turn. Durable + deduped by `id` (same id/same payload
   // replays return the existing record; same id/different payload is an
   // actionable error), at most one turn at a time. The server owns the
-  // origin ("human") and the agent (central CTO role config) — the caller
-  // cannot choose an arbitrary agent. Throws actionable errors (at-cap,
-  // stale-generation, binding-unavailable, duplicate-id-different-payload).
+  // origin ("human"); `agent` rides a CLOSED server-side allowlist of
+  // exactly one additional value — the MantaUI plan agent — so a caller may
+  // request plan mode the same way an ordinary opencode:prompt already does
+  // (passing the plan agent's own name as `agent`); any other value is
+  // dropped and the central CTO role agent is stamped instead — the caller
+  // still cannot choose an arbitrary agent (P3a3 full-parity widening item
+  // 5). `attachments`/`mentions` ride a submission verbatim, hashed into the
+  // same idempotency key as `text` (full-parity widening item 1-3). Throws
+  // actionable errors (at-cap, stale-generation, binding-unavailable,
+  // duplicate-id-different-payload).
   ctoConversationSubmit(input: {
     id?: string;
     text: string;
     expectedGeneration?: number;
     model?: PromptModel;
+    attachments?: PromptAttachment[];
+    mentions?: PromptAgentMention[];
+    agent?: string;
   }): Promise<CtoSubmitReceipt>;
   // The EXPLICIT interruption op (submit never aborts a running turn).
   // Returns the visible request-marker status; for an `unknown` send the
