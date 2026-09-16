@@ -96,6 +96,16 @@ export const CTO_HISTORY_SCOPE: HistoryScope = {
   windowIndex: 0,
 };
 
+// The CTO conversation's upload target. `uploadProjectName` is NOT a project
+// lookup — POST /api/upload treats it as an opaque `session` label, validated
+// against /^[A-Za-z0-9._-]+$/ and used as the batch directory name under
+// ~/.manta-uploads (see uploadRoute.mjs). So a surface with no tmux project
+// does not need a server change to upload; it needs a stable label. This one
+// matches the history sentinel so both of the CTO conversation's box-side
+// namespaces read as obviously the same surface, and neither can collide with
+// a real project's (a project label is a directory name, never this literal).
+export const CTO_UPLOAD_SCOPE = "__manta_cto_conversation__";
+
 export type ComposerControllerConfig = {
   // The opencode session id this composer targets. Model choice + effort are
   // keyed by it (the same box-backed store the session composer uses), so the

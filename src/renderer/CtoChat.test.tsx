@@ -1135,6 +1135,49 @@ async function mountFailingSubmit(
     expect((interrupts[0][0] as { id: string }).id).toBe("evt_int");
     expect(api.calls.opencodeAbort?.length ?? 0).toBe(0);
   });
+  // ---- Full-send parity: the widened admission payload (attachments, agent
+  // mentions, plan mode) and the payload-identity rule a retry depends on ----
+
+  it("a retry replays the ENTIRE payload, not just the text — the dedup hash covers every field", async () => {
+    let n = 0;
+    const payloads: unknown[] = [];
+    h = mountCto(emptyQueue(), {
+      ctoConversationSubmit: (input: { id?: string; text: string }) => {
+        n += 1;
+        // Deep-copy: the component must not be able to mutate what we compare.
+        payloads.push(JSON.parse(JSON.stringify(input)));
+        if (n === 1) return Promise.reject(new Error("network timeout"));
+        return Promise.resolve(receiptOf(input));
+      },
+    });
+    await h.flush();
+    await typeAndSubmit(h, "ship it");
+    expect(h.text()).toContain("Outcome unknown — reconciling");
+    await pressRetry();
+    expect(payloads.length).toBe(2);
+    // The WHOLE request must be byte-identical. The server dedups on
+    // (id, hash-of-every-semantic-field), so a retry that re-derived its
+    // payload from current composer state would be refused as a duplicate id
+    // with a different payload — exactly when recovery matters.
+    expect(payloads[1]).toEqual(payloads[0]);
+  });
+
+  it("agent mentions reach the admission payload resolved against the submitted text", async () => {
+    const payloads: Array<Record<string, unknown>> = [];
+    h = mountCto(emptyQueue(), {
+      ctoConversationSubmit: (input: { id?: string; text: string }) => {
+        payloads.push(input as Record<string, unknown>);
+        return Promise.resolve(receiptOf(input));
+      },
+    });
+    await h.flush();
+    // No mention tracked by the typeahead → the field is absent entirely
+    // (never an empty array, which would change the canonical hash).
+    await typeAndSubmit(h, "just text");
+    expect(payloads[0].mentions).toBeUndefined();
+    expect(payloads[0].agent).toBeUndefined();
+    expect(payloads[0].attachments).toBeUndefined();
+  });
 });
 
 // ===== CtoPanel view migration =====
@@ -1187,4 +1230,5 @@ describe("CtoPanel primary conversation", () => {
     // Still no legacy prompt path anywhere in the round-trip.
     expect(api.calls.opencodePrompt?.length ?? 0).toBe(0);
   });
+
 });

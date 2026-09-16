@@ -75,6 +75,7 @@ import {
   readSavedDelegateModel,
   writeSavedDelegateModel,
   resolveActiveModel,
+  resolveAgentMentions,
   type Attachment,
   type ModelSelection,
   type SessionMode,
@@ -1430,32 +1431,10 @@ export function ChatPanel({
           attachments: readyAttachments,
         });
       } else {
-        // Resolve agent mentions to {value, start, end} offsets by re-scanning
-        // the submitted text. Unmatched mentions (user deleted the @token)
-        // are silently dropped.
-        const resolvedMentions: Array<{
-          name: string;
-          source: { value: string; start: number; end: number };
-        }> = [];
-        for (const m of agentMentions) {
-          const token = `@${m.name}`;
-          let pos = 0;
-          while (true) {
-            const idx = text.indexOf(token, pos);
-            if (idx < 0) break;
-            const prev = idx > 0 ? text[idx - 1] : "";
-            const next = text[idx + token.length] ?? "";
-            const wordChar = /[A-Za-z0-9_]/;
-            if (!wordChar.test(prev) && !wordChar.test(next)) {
-              resolvedMentions.push({
-                name: m.name,
-                source: { value: token, start: idx, end: idx + token.length },
-              });
-              break;
-            }
-            pos = idx + token.length;
-          }
-        }
+        // Resolve agent mentions to {value, start, end} offsets against the
+        // text actually being submitted — shared with the CTO conversation so
+        // the two surfaces cannot drift on the wire shape.
+        const resolvedMentions = resolveAgentMentions(text, agentMentions);
         await window.api.opencodePrompt(
           sessionId,
           text,

@@ -49,7 +49,11 @@ import { useSessionResources } from "./hooks/useSessionResources";
 // The ONE shared composer container — the CTO conversation renders the SAME
 // composer as a session through this hook (see its header comment). The synthetic
 // history scope keeps CTO prompt history from colliding with a real window's key.
-import { useComposerController, CTO_HISTORY_SCOPE } from "./hooks/useComposerController";
+import {
+  useComposerController,
+  CTO_HISTORY_SCOPE,
+  CTO_UPLOAD_SCOPE,
+} from "./hooks/useComposerController";
 import { useModelCatalog } from "./modelCatalog";
 import { useSessionModelChoice } from "./modelPrefs";
 import {
@@ -57,7 +61,14 @@ import {
   computeTurnInfo,
   type EntryMotionState,
 } from "./chatUtils";
-import { appendPromptHistory, type TaskContextValue } from "./chatShared";
+import {
+  appendPromptHistory,
+  mimeToInputMode,
+  resolveAgentMentions,
+  type ResolvedAgentMention,
+  type TaskContextValue,
+} from "./chatShared";
+import { acceptsModality } from "../shared/modelGuide.mjs";
 import { useStore } from "./store";
 
 // CTO questions render ONCE, in the pinned stack above the composer — the
@@ -352,6 +363,28 @@ export function CtoChat({ onOpenDashboard }: { onOpenDashboard?: () => void }) {
 
   // ---- Stable-id send bookkeeping (kept in the controller so a remount of
   // the transcript on rebind can't lose the retryable id) ----
+  //
+  // The retry unit is the WHOLE PAYLOAD, not just the text. The admission
+  // contract dedups on (id, canonical-request-hash) and that hash now covers
+  // every semantic field — text, model, attachments, mentions, agent. So a
+  // retry that reuses an id but rebuilds its payload from CURRENT composer
+  // state would hash differently and be refused as "duplicate id, different
+  // payload" — precisely in the uncertain-outcome case the retry exists to
+  // recover. (This was already latent for `model`: changing the picker between
+  // an uncertain send and its retry re-derived a different payload under the
+  // same id.) Storing the payload verbatim, keyed by id, makes a replay
+  // byte-identical by construction rather than by the caller remembering to
+  // reassemble it the same way.
+  type SubmitPayload = {
+    id: string;
+    text: string;
+    expectedGeneration?: number;
+    model?: PromptModel;
+    attachments?: { remotePath: string; mime: string; filename?: string }[];
+    mentions?: ResolvedAgentMention[];
+    agent?: string;
+  };
+  const payloadsRef = useRef<Map<string, SubmitPayload>>(new Map());
   const retryRef = useRef<{ id: string; text: string } | null>(null);
   // Unknown barrier: a send whose outcome we could not confirm (timeout /
   // lost response / transport). Ephemeral + local — cleared as soon as the
@@ -398,7 +431,15 @@ export function CtoChat({ onOpenDashboard }: { onOpenDashboard?: () => void }) {
   const sessionChoice = useSessionModelChoice(sessionId ?? "");
 
   const submitTurn = useCallback(
-    async (text: string, opts?: { reuseId?: string }): Promise<void> => {
+    async (
+      text: string,
+      opts?: {
+        reuseId?: string;
+        attachments?: { remotePath: string; mime: string; filename?: string }[];
+        mentions?: ResolvedAgentMention[];
+        agent?: string;
+      },
+    ): Promise<void> => {
       if (!text.trim() || !open.sessionId) return;
       // Double-submit guard: while a send is in flight a second Enter must
       // not mint a second queue entry.
@@ -424,19 +465,31 @@ export function CtoChat({ onOpenDashboard }: { onOpenDashboard?: () => void }) {
       }
       retryRef.current = { id, text };
       localTextsRef.current.set(id, text);
-      const input: {
-        id: string;
-        text: string;
-        expectedGeneration?: number;
-        model?: PromptModel;
-      } = { id, text };
-      if (generationRef.current != null) input.expectedGeneration = generationRef.current;
-      if (sessionChoice.kind === "model") input.model = sessionChoice.model;
+      // A reused id replays its STORED payload verbatim (same canonical hash →
+      // the server dedups instead of refusing). Only a genuinely new send
+      // assembles a payload from current composer state. Assembling it here
+      // rather than at the call site is what makes "retry replays exactly what
+      // was sent" a property of this function, not of every caller.
+      const stored = opts?.reuseId ? payloadsRef.current.get(opts.reuseId) : undefined;
+      let input: SubmitPayload;
+      if (stored) {
+        input = stored;
+      } else {
+        input = { id, text };
+        if (generationRef.current != null) input.expectedGeneration = generationRef.current;
+        if (sessionChoice.kind === "model") input.model = sessionChoice.model;
+        if (opts?.attachments && opts.attachments.length > 0) input.attachments = opts.attachments;
+        if (opts?.mentions && opts.mentions.length > 0) input.mentions = opts.mentions;
+        if (opts?.agent) input.agent = opts.agent;
+        payloadsRef.current.set(id, input);
+      }
       try {
         await window.api.ctoConversationSubmit(input);
         // Definitive server ack — the id is consumed; a NEW message must mint
-        // a fresh id (a replay with the same id would dedup to nothing).
+        // a fresh id (a replay with the same id would dedup to nothing). The
+        // stored payload goes with it: there is nothing left to replay.
         retryRef.current = null;
+        payloadsRef.current.delete(id);
         setSending(null);
         if (unknownPending?.id === id) setUnknownPending(null);
         refreshQueueNow();
@@ -446,6 +499,9 @@ export function CtoChat({ onOpenDashboard }: { onOpenDashboard?: () => void }) {
         if (isDefinitiveSubmitError(msg)) {
           retryRef.current = null;
           localTextsRef.current.delete(id);
+          // Definitively refused: the id is dead, so its stored payload can
+          // never be replayed. Dropping it keeps the retry map bounded.
+          payloadsRef.current.delete(id);
           setSending(null);
           setSendError(`The CTO declined the send: ${msg}`);
           // The text was optimistically cleared — give it back. The
@@ -669,7 +725,15 @@ function CtoConversation(props: {
   unknownPending: { id: string; text: string } | null;
   onRetryUnknown: () => void;
   onDismissUnknown: () => void;
-  onSubmit: (text: string, opts?: { reuseId?: string }) => Promise<void>;
+  onSubmit: (
+    text: string,
+    opts?: {
+      reuseId?: string;
+      attachments?: { remotePath: string; mime: string; filename?: string }[];
+      mentions?: ResolvedAgentMention[];
+      agent?: string;
+    },
+  ) => Promise<void>;
   onInterrupt: () => Promise<void>;
   interruptAck: string | null;
   // The composer text is CONTROLLER-OWNED (survives the rebind remount —
@@ -904,9 +968,9 @@ function CtoConversation(props: {
   //   - HISTORY key is the synthetic CTO scope — the CTO conversation has no tmux
   //     window, and CTO_HISTORY_SCOPE's sentinel session name cannot collide with
   //     any real project window's key.
-  //   - UPLOAD target is the CTO conversation project (null today: the box has no
-  //     tmux project for it, so drop/paste upload paths early-return — the chips
-  //     still render; wiring an upload endpoint is a server dependency, noted).
+  //   - UPLOAD target is CTO_UPLOAD_SCOPE. `uploadProjectName` is not a project
+  //     lookup — the upload route takes it as an opaque batch label — so this
+  //     surface uploads for real despite having no tmux project.
   //   - The SEND transport is the admission seam (`onSubmit` → submitTurn), NOT a
   //     client queue: the CTO queue is server-owned and not client-drainable, so
   //     onQueuePop is a no-op (the pending bubbles below render the server's queue
@@ -919,7 +983,7 @@ function CtoConversation(props: {
     sessionId,
     messages,
     historyScope: CTO_HISTORY_SCOPE,
-    uploadProjectName: null,
+    uploadProjectName: CTO_UPLOAD_SCOPE,
     refreshing: ts.refreshing,
     sendError,
     setSendError,
@@ -958,35 +1022,67 @@ function CtoConversation(props: {
   // which mints the stable submission id + expectedGeneration and enqueues it
   // SERVER-side — never a raw opencode abort, never a client queue.
   //
-  // Attachments-as-FileParts, @agent mentions and plan mode are rendered and
-  // usable in the composer; carrying them past the text into the admission
-  // payload needs the widened server contract (the parallel job on
-  // ctoConversationSubmit). Until that lands, media/@agent/plan ride only as far
-  // as the text can carry them (path-ref tokens + the literal @name / command
-  // text the typeahead already inserted). NO client-side capability gating is
-  // added — the controls stay live per the task contract.
+  // Media attachments, @agent mentions and plan mode ride the admission payload
+  // itself (the widened `ctoConversationSubmit`), assembled here the same way
+  // ChatPanel assembles an ordinary send — two chip classes, not one:
+  //   - path-ref chips (csv/code/text: nothing the model can decode) fold into
+  //     the TEXT as `@<remotePath>` tokens for the agent's Read tool;
+  //   - media chips become real FileParts and travel as `attachments`.
+  // Plan mode is expressed as the plan AGENT's name, which is the one extra
+  // value the server's closed allowlist accepts (it still refuses anything
+  // else and stamps the central CTO role agent) — so plan works here without
+  // opening up arbitrary agent choice.
   const doSubmit = useCallback(() => {
     // One send at a time: while a submission is in flight the composer is
     // disabled (explicit "Sending…" state) — the double-click protection; it
     // never silently drops a draft.
     if (submitting) return;
-    const ready = composer.attachments.filter(
-      (a) => a.status === "ready" && !!a.remotePath && a.asPathRef,
-    );
-    const pathRefText = ready.map((a) => `@${a.remotePath}`).join(" ");
+    const readyChips = composer.attachments.filter((a) => a.status === "ready" && !!a.remotePath);
+    const pathRefs = readyChips.filter((a) => a.asPathRef);
+    const media = readyChips.filter((a) => !a.asPathRef);
+    const pathRefText = pathRefs.map((a) => `@${a.remotePath}`).join(" ");
     const typed = input.trim();
     const text = pathRefText ? (typed ? `${typed} ${pathRefText}` : pathRefText) : typed;
     if (!text) return;
+    // Refuse only what the active model POSITIVELY declares it cannot read —
+    // the same rule the session composer applies. A file that maps to no media
+    // mode is refused on its own merits (a property of the file); when we know
+    // nothing about the model's modalities we send and let the provider answer,
+    // rather than asserting "accepts nothing". Refusing here, before the id is
+    // minted, keeps a doomed payload out of the durable queue entirely.
+    if (media.length > 0) {
+      const unsupported = media
+        .map((a) => ({ filename: a.filename, mime: a.mime, mode: mimeToInputMode(a.mime) }))
+        .filter((a) => a.mode === "other" || !acceptsModality(composer.activeModel, a.mode));
+      if (unsupported.length > 0) {
+        setSendError(
+          `This model can't read ${unsupported.map((u) => u.filename).join(", ")}. Remove the attachment or switch model.`,
+        );
+        return;
+      }
+    }
     // Persist to the CTO conversation's own prompt-history key so ↑ recalls it.
     appendPromptHistory(CTO_HISTORY_SCOPE.tmuxSession, CTO_HISTORY_SCOPE.windowIndex, text);
     onInputChange("");
-    // Drop consumed path-ref chips so a retry does not re-append them.
-    if (ready.length > 0) {
-      const ids = new Set(ready.map((a) => a.id));
+    // Resolve plan at SUBMIT time, not at toggle time: a mode flipped mid-turn
+    // must apply to the turn that actually runs.
+    const planAgent = composer.plan.available && composer.plan.on ? composer.plan.agent : undefined;
+    const attachments = media.map((a) => ({
+      remotePath: a.remotePath!,
+      mime: a.mime,
+      filename: a.filename,
+    }));
+    const mentions = resolveAgentMentions(text, composer.agentMentions);
+    // Clear consumed chips + mentions so a NEW send can't re-append them. The
+    // in-flight payload is already stored under its submission id, so a retry
+    // still replays the attachments verbatim even though the chips are gone.
+    if (readyChips.length > 0) {
+      const ids = new Set(readyChips.map((a) => a.id));
       composer.setAttachments((prev) => prev.filter((a) => !ids.has(a.id)));
     }
-    void onSubmit(text);
-  }, [submitting, input, onInputChange, onSubmit, composer]);
+    if (mentions.length > 0) composer.setAgentMentions([]);
+    void onSubmit(text, { attachments, mentions, agent: planAgent });
+  }, [submitting, input, onInputChange, onSubmit, composer, setSendError]);
 
   // Keep the controller's send-ref current so voice's take → send reaches the
   // admission seam (the same always-current-ref pattern a session uses).

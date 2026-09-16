@@ -46,6 +46,55 @@ export type AgentMention = {
   name: string;
 };
 
+// The wire shape a resolved @agent mention travels in: the agent's name plus
+// the exact slice of the submitted text it occupies.
+export type ResolvedAgentMention = {
+  name: string;
+  source: { value: string; start: number; end: number };
+};
+
+/**
+ * Resolve tracked @agent mentions against the text ACTUALLY being submitted.
+ *
+ * The composer records a mention when the typeahead inserts it, but the user
+ * may then edit around it — delete the token, retype it, move it. So offsets
+ * are never trusted from insertion time; they are recomputed here by scanning
+ * the final text for the token on word boundaries (so `@build` does not match
+ * inside `@builder`). A mention whose token is no longer present is silently
+ * dropped: the user removed it, and sending a stale offset would mis-slice the
+ * message server-side.
+ *
+ * Shared deliberately — both the session composer and the CTO conversation
+ * submit through it, so the two surfaces can never drift on what "@agent"
+ * means on the wire.
+ */
+export function resolveAgentMentions(
+  text: string,
+  mentions: AgentMention[],
+): ResolvedAgentMention[] {
+  const wordChar = /[A-Za-z0-9_]/;
+  const resolved: ResolvedAgentMention[] = [];
+  for (const m of mentions) {
+    const token = `@${m.name}`;
+    let pos = 0;
+    for (;;) {
+      const idx = text.indexOf(token, pos);
+      if (idx < 0) break;
+      const prev = idx > 0 ? text[idx - 1] : "";
+      const next = text[idx + token.length] ?? "";
+      if (!wordChar.test(prev) && !wordChar.test(next)) {
+        resolved.push({
+          name: m.name,
+          source: { value: token, start: idx, end: idx + token.length },
+        });
+        break;
+      }
+      pos = idx + token.length;
+    }
+  }
+  return resolved;
+}
+
 // Active typeahead popup state. The renderer tracks what we're matching and
 // the [start, end) slice of the input string that the popup overlays — on
 // selection we replace that slice with the canonical insertion text.
