@@ -27,7 +27,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { VirtuosoHandle } from "react-virtuoso";
-import { ChevronDown, ChevronUp, Send, Square } from "lucide-react";
+import { ChevronDown, ChevronUp } from "lucide-react";
 import type {
   CtoConversationState,
   CtoSubmissionProjection,
@@ -39,22 +39,27 @@ type PromptModel = { providerID: string; modelID: string; variant?: string };
 import type { QuestionRequest } from "../shared/types";
 import { Transcript } from "./Transcript";
 import { PermissionCard, QuestionCard, RetryCard } from "./Cards";
+import { ScheduledTasksCard, SecretsCard, WebhooksCard } from "./PanelCards";
 import { MantaLoader } from "./MantaLoader";
-import { ModelPicker } from "./ModelPicker";
+import { Composer } from "./Composer";
 import { VoicePlaybackProvider } from "./hooks/useVoicePlayback";
 import { useTranscriptState } from "./hooks/useTranscriptState";
 import { useSseBus } from "./hooks/useSseBus";
+import { useSessionResources } from "./hooks/useSessionResources";
+// The ONE shared composer container — the CTO conversation renders the SAME
+// composer as a session through this hook (see its header comment). The synthetic
+// history scope keeps CTO prompt history from colliding with a real window's key.
+import { useComposerController, CTO_HISTORY_SCOPE } from "./hooks/useComposerController";
 import { useModelCatalog } from "./modelCatalog";
-import { setSessionChoice, useSessionModelChoice } from "./modelPrefs";
+import { useSessionModelChoice } from "./modelPrefs";
 import {
   computeLiveTurn,
   computeTurnInfo,
   type EntryMotionState,
 } from "./chatUtils";
-import type { ModelSelection, TaskContextValue } from "./chatShared";
+import { appendPromptHistory, type TaskContextValue } from "./chatShared";
 import { useStore } from "./store";
 
-const EMPTY_STRINGS: string[] = [];
 // CTO questions render ONCE, in the pinned stack above the composer — the
 // transcript receives none. (ChatPanel's split is the mirror image, not the
 // same shape: it renders ORDINARY questions inline via Transcript's questions
@@ -492,13 +497,11 @@ export function CtoChat({ onOpenDashboard }: { onOpenDashboard?: () => void }) {
     }
   }, [queue, unknownPending]);
 
-  const selectModel = useCallback(
-    (m: ModelSelection | null) => {
-      if (!sessionId) return;
-      setSessionChoice(sessionId, m ? { kind: "model", model: m } : { kind: "server-default" });
-    },
-    [sessionId],
-  );
+  // Model selection is written by the shared composer's picker (via
+  // useComposerController, keyed by this same sessionId + box store). The outer
+  // keeps only its useSessionModelChoice READ (below, in submitTurn) for the
+  // admission send's per-turn model — the same box store the picker writes, so
+  // there is a single source of truth and no divergence.
 
   const interrupt = useCallback(async () => {
     const summary = summarizeQueue(queue);
@@ -534,7 +537,10 @@ export function CtoChat({ onOpenDashboard }: { onOpenDashboard?: () => void }) {
   }, [interruptAck]);
 
   const qSummary = summarizeQueue(queue);
-  const { models, defaultModel } = useModelCatalog();
+  // Only the server default is needed by the outer (it seeds the inner composer
+  // controller's model fallback). The full catalog + per-session choice + picker
+  // live inside useComposerController now.
+  const { defaultModel } = useModelCatalog();
   const retryUnknown = useCallback(() => {
     if (!unknownPending) return;
     // Retry the EXACT pending record — its own {id, text} pair, not whatever
@@ -642,17 +648,7 @@ export function CtoChat({ onOpenDashboard }: { onOpenDashboard?: () => void }) {
           submitting={submitBusyRef.current}
           inspectorOpen={inspectorOpen}
           onReceiptRef={onReceiptRef}
-          models={models}
           defaultModel={defaultModel}
-          modelSelection={sessionChoice.kind === "model" ? sessionChoice.model : null}
-          onSelectModel={selectModel}
-          modelLabel={
-            sessionChoice.kind === "model"
-              ? `${sessionChoice.model.providerID}/${sessionChoice.model.modelID}`
-              : defaultModel
-                ? `${defaultModel.providerID}/${defaultModel.modelID}`
-                : null
-          }
         />
       )}
     </div>
@@ -683,11 +679,12 @@ function CtoConversation(props: {
   submitting: boolean;
   inspectorOpen: boolean;
   onReceiptRef: React.MutableRefObject<(() => void) | null>;
-  models: ReturnType<typeof useModelCatalog>["models"];
+  // The box-level server default seeds the composer controller's model fallback.
+  // The catalog / per-session choice / picker now live INSIDE the controller —
+  // the outer no longer threads them down (it keeps its own useSessionModelChoice
+  // read only for the admission send's per-turn model, which is the same box
+  // store the controller's picker writes, so there is one source of truth).
   defaultModel: ReturnType<typeof useModelCatalog>["defaultModel"];
-  modelSelection: ModelSelection | null;
-  onSelectModel: (m: ModelSelection | null) => void;
-  modelLabel: string | null;
 }) {
   const {
     sessionId,
@@ -711,11 +708,7 @@ function CtoConversation(props: {
     submitting,
     inspectorOpen,
     onReceiptRef,
-    models,
     defaultModel,
-    modelSelection,
-    onSelectModel,
-    modelLabel,
   } = props;
 
   const motionStateRef = useRef<EntryMotionState | null>(null);
@@ -725,7 +718,6 @@ function CtoConversation(props: {
   const setFollowing = useCallback((v: boolean) => {
     followingRef.current = v;
   }, []);
-  const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
   const ts = useTranscriptState({ sessionId, isActive: true, motionStateRef });
   const { messages, setMessages } = ts;
@@ -901,27 +893,104 @@ function CtoConversation(props: {
     [bus, setSendError],
   );
 
-  // ---- Composer ----
+  // ---- Composer (the SHARED container) ----
+  // The CTO conversation renders the SAME composer as a session, through the
+  // SAME useComposerController hook (docs/unified-cto-spec.md §… "one composer").
+  // Everything that differs is a parameter and nothing else:
+  //   - INPUT is host-controlled: the OUTER component owns `input`/`onInputChange`
+  //     because the admission send path restores the draft on a definitive /
+  //     stale rejection and that restore must survive the inner remount on a
+  //     rebind (docs/cto-admission-contract.md). So it is passed IN, not owned.
+  //   - HISTORY key is the synthetic CTO scope — the CTO conversation has no tmux
+  //     window, and CTO_HISTORY_SCOPE's sentinel session name cannot collide with
+  //     any real project window's key.
+  //   - UPLOAD target is the CTO conversation project (null today: the box has no
+  //     tmux project for it, so drop/paste upload paths early-return — the chips
+  //     still render; wiring an upload endpoint is a server dependency, noted).
+  //   - The SEND transport is the admission seam (`onSubmit` → submitTurn), NOT a
+  //     client queue: the CTO queue is server-owned and not client-drainable, so
+  //     onQueuePop is a no-op (the pending bubbles below render the server's queue
+  //     projection instead).
+  // The resource toolbar is real parity: the CTO surface hosts its own
+  // schedules / secrets / webhooks panels (rendered below), driven by the same
+  // useSessionResources hook a session uses.
+  const resources = useSessionResources(sessionId, true);
+  const composer = useComposerController({
+    sessionId,
+    messages,
+    historyScope: CTO_HISTORY_SCOPE,
+    uploadProjectName: null,
+    refreshing: ts.refreshing,
+    sendError,
+    setSendError,
+    scheduleCount: resources.schedules.length,
+    onSchedules: () => resources.togglePanel("schedules"),
+    onSecrets: () => resources.togglePanel("secrets"),
+    onWebhooks: () => resources.togglePanel("webhooks"),
+    // The CTO queue is SERVER-owned — there is no client queue to pop from.
+    onQueuePop: () => {},
+    isActive: true,
+    cwd: "",
+    configDefaultModel: defaultModel,
+    textareaAriaLabel: "Message the CTO",
+    // The admission-seam placeholder copy has no session equivalent (a session
+    // has no server-owned hold); it is computed here and passed in so the shared
+    // textarea shows it verbatim.
+    placeholderOverride: submitting
+      ? "Sending…"
+      : qSummary.held
+        ? bus.running
+          ? qSummary.runningTurnUnstoppable
+            ? "Admission is held — the running turn can no longer be interrupted"
+            : "Admission is held — the abort is being applied to the running turn"
+          : "Admission is held — sends queue but dispatch nothing until the hold clears"
+        : bus.running || qSummary.canInterrupt
+          ? "Queue a message after the current turn…"
+          : "Message the CTO…",
+    // Input is host-controlled (see the block comment above).
+    inputValue: input,
+    setInputValue: onInputChange as React.Dispatch<React.SetStateAction<string>>,
+  });
+
+  // The CTO send. It reads the controller's composer state (path-ref
+  // attachments appended as `@remotePath` tokens exactly as a session does) and
+  // hands the assembled text to the admission seam (`onSubmit` = submitTurn),
+  // which mints the stable submission id + expectedGeneration and enqueues it
+  // SERVER-side — never a raw opencode abort, never a client queue.
+  //
+  // Attachments-as-FileParts, @agent mentions and plan mode are rendered and
+  // usable in the composer; carrying them past the text into the admission
+  // payload needs the widened server contract (the parallel job on
+  // ctoConversationSubmit). Until that lands, media/@agent/plan ride only as far
+  // as the text can carry them (path-ref tokens + the literal @name / command
+  // text the typeahead already inserted). NO client-side capability gating is
+  // added — the controls stay live per the task contract.
   const doSubmit = useCallback(() => {
     // One send at a time: while a submission is in flight the composer is
-    // disabled (explicit "Sending…" state) — this is the double-click
-    // protection, and it never silently drops a draft.
+    // disabled (explicit "Sending…" state) — the double-click protection; it
+    // never silently drops a draft.
     if (submitting) return;
-    const text = input.trim();
+    const ready = composer.attachments.filter(
+      (a) => a.status === "ready" && !!a.remotePath && a.asPathRef,
+    );
+    const pathRefText = ready.map((a) => `@${a.remotePath}`).join(" ");
+    const typed = input.trim();
+    const text = pathRefText ? (typed ? `${typed} ${pathRefText}` : pathRefText) : typed;
     if (!text) return;
+    // Persist to the CTO conversation's own prompt-history key so ↑ recalls it.
+    appendPromptHistory(CTO_HISTORY_SCOPE.tmuxSession, CTO_HISTORY_SCOPE.windowIndex, text);
     onInputChange("");
+    // Drop consumed path-ref chips so a retry does not re-append them.
+    if (ready.length > 0) {
+      const ids = new Set(ready.map((a) => a.id));
+      composer.setAttachments((prev) => prev.filter((a) => !ids.has(a.id)));
+    }
     void onSubmit(text);
-  }, [input, onInputChange, onSubmit, submitting]);
+  }, [submitting, input, onInputChange, onSubmit, composer]);
 
-  const onKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-      if (e.key === "Enter" && !e.shiftKey) {
-        e.preventDefault();
-        doSubmit();
-      }
-    },
-    [doSubmit],
-  );
+  // Keep the controller's send-ref current so voice's take → send reaches the
+  // admission seam (the same always-current-ref pattern a session uses).
+  composer.submitRef.current = doSubmit;
 
   // Pending-send bubbles: server-owned truth (queue projection) for anything
   // not yet visible in the transcript, plus the local in-flight send. Text
@@ -1017,19 +1086,9 @@ function CtoConversation(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sending, queue, messageIds, userTextByMessageId, localTextsRef, unknownPending]);
 
-  const optInModels = useStore((s) => s.optInModels) ?? EMPTY_STRINGS;
-  const deactivatedMainModels = useStore((s) => s.deactivatedMainModels) ?? EMPTY_STRINGS;
-  const optInModel = useStore((s) => s.optInModel);
-  const modelLabelFromTranscript = useMemo(() => {
-    if (!messages) return null;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const info = messages[i].info;
-      if (info.role === "assistant" && info.modelID) {
-        return info.providerID ? `${info.providerID}/${info.modelID}` : info.modelID;
-      }
-    }
-    return null;
-  }, [messages]);
+  // The model picker (with its opt-in / deactivated lists and the transcript
+  // model-label) now lives inside the shared composer via useComposerController;
+  // the CTO inner component no longer subscribes to those store slices itself.
 
   return (
     <div className="flex-1 min-h-0 flex flex-col">
@@ -1187,93 +1246,113 @@ function CtoConversation(props: {
         </div>
       )}
 
-      {/* Composer — text only. Attachments and slash commands are NOT
-          rendered (unsupported in the CTO conversation; hidden, not dead). */}
-      <div className="shrink-0 px-4 pb-3 pt-2">
-        <div className="flex items-end gap-2 rounded-lg border border-border-subtle bg-fill-active px-3 py-2">
-          <textarea
-            ref={inputRef}
-            value={input}
-            onChange={(e) => onInputChange(e.target.value)}
-            onKeyDown={onKeyDown}
-            rows={1}
-            disabled={submitting}
-            placeholder={
-              submitting
-                ? "Sending…"
-                : qSummary.held
-                  ? // The hold stops dispatch — but only an UNCERTAIN/REFUSED
-                    // barrier (or cancel_requested) makes a RUNNING turn
-                    // unstoppable. A plain in-flight interrupt has the abort
-                    // accepted and landing — say that, matching the ack.
-                    bus.running
-                      ? qSummary.runningTurnUnstoppable
-                        ? "Admission is held — the running turn can no longer be interrupted"
-                        : "Admission is held — the abort is being applied to the running turn"
-                      : "Admission is held — sends queue but dispatch nothing until the hold clears"
-                  : bus.running || qSummary.canInterrupt
-                    ? "Queue a message after the current turn…"
-                    : "Message the CTO…"
+      {/* Resource panels — the SAME schedules / secrets / webhooks cards a
+          session hosts, opened by the composer's resource toolbar. */}
+      {resources.openPanel === "schedules" && (
+        <div className="shrink-0 px-4 pt-2 pb-2">
+          <ScheduledTasksCard
+            jobs={resources.schedules}
+            error={resources.scheduleError}
+            onClose={resources.closePanel}
+            onDelete={(id) => {
+              window.api
+                .scheduleDelete(id)
+                .then(() => resources.refreshSchedules())
+                .catch(() => resources.refreshSchedules());
+            }}
+          />
+        </div>
+      )}
+      {resources.openPanel === "secrets" && (
+        <div className="shrink-0 px-4 pt-2 pb-2">
+          <SecretsCard
+            secrets={resources.secrets}
+            error={resources.secretError}
+            sessionId={sessionId}
+            prefillKey={resources.secretKeyHint}
+            onClose={resources.closePanel}
+            onSave={(secretInput) =>
+              window.api
+                .secretsSet(secretInput)
+                .then((r) => {
+                  if (r && r.ok === false) return false;
+                  void resources.refreshSecrets();
+                  return true;
+                })
+                .catch(() => false)
             }
-            className="flex-1 resize-none bg-transparent text-body text-text placeholder:text-text-faint outline-none disabled:opacity-60"
-            aria-label="Message the CTO"
+            onDelete={(id) => {
+              window.api
+                .secretsDelete(id)
+                .then(() => resources.refreshSecrets())
+                .catch(() => resources.refreshSecrets());
+            }}
           />
-          {qSummary.canInterrupt && (
-            <button
-              type="button"
-              onClick={() => void onInterrupt()}
-              disabled={submitting}
-              title={
-                submitting
-                  ? "Waiting for the server to accept the send"
-                  : "Interrupt the current turn"
-              }
-              className="shrink-0 rounded-md p-1 text-text-muted hover:bg-fill-hover hover:text-danger disabled:opacity-50"
-              aria-label="Interrupt"
-            >
-              <Square size={14} />
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={doSubmit}
-            disabled={input.trim() === "" || submitting}
-            className="shrink-0 rounded-md p-1 text-text-muted hover:bg-fill-hover hover:text-text disabled:opacity-40"
-            aria-label="Send"
-          >
-            <Send size={14} />
-          </button>
         </div>
-        <div className="flex items-center gap-2 pt-1">
-          <ModelPicker
-            models={models}
-            modelLabel={modelLabel ?? modelLabelFromTranscript}
-            modelOverride={modelSelection}
-            defaultModel={defaultModel}
-            deactivatedMainModels={deactivatedMainModels}
-            optInModels={optInModels}
-            onOptInModel={optInModel}
-            onOpen={() => {}}
-            onSelect={onSelectModel}
-            onSelectEffort={(m) => onSelectModel(m)}
+      )}
+      {resources.openPanel === "webhooks" && (
+        <div className="shrink-0 px-4 pt-2 pb-2">
+          <WebhooksCard
+            hooks={resources.webhooks}
+            error={resources.webhookError}
+            onClose={resources.closePanel}
+            onDelete={(id) => {
+              window.api
+                .webhookDelete(id)
+                .then(() => resources.refreshWebhooks())
+                .catch(() => resources.refreshWebhooks());
+            }}
           />
-          <div className="flex-1" />
-          <span className="text-meta text-text-faint">
-            {qSummary.held
-              ? bus.running
-                ? // Mirror the placeholder: only an uncertain/refused barrier
-                  // (or cancel_requested) makes the running turn unstoppable;
-                  // a plain in-flight interrupt means the abort is landing.
-                  qSummary.runningTurnUnstoppable
-                  ? "Admission held — the running turn can no longer be interrupted; queued sends will not dispatch until the hold clears"
-                  : "Admission held — the abort is being applied; queued sends will not dispatch until it settles"
-                : "Admission held — queued sends will not dispatch until the hold clears"
-              : bus.running || qSummary.canInterrupt
-                ? "Working — sends queue up"
-                : "Attachments and slash commands are not available here"}
-          </span>
         </div>
+      )}
+
+      {/* Admission status strip — the admission-seam presentation the shared
+          composer has no equivalent for (a session has no server-owned hold).
+          It states what the hold / running turn / queue is doing, in the exact
+          copy the contract mandates (docs/cto-admission-contract.md): a plain
+          in-flight interrupt says the abort is LANDING; only an uncertain /
+          refused barrier (or cancel_requested) says the running turn can no
+          longer be interrupted. Rendered as CTO chrome ABOVE the shared
+          composer, never inside it — it is not composer state. */}
+      <div className="shrink-0 px-4 pt-1 flex items-center gap-2">
+        <span className="text-meta text-text-faint">
+          {qSummary.held
+            ? bus.running
+              ? qSummary.runningTurnUnstoppable
+                ? "Admission held — the running turn can no longer be interrupted; queued sends will not dispatch until the hold clears"
+                : "Admission held — the abort is being applied; queued sends will not dispatch until it settles"
+              : "Admission held — queued sends will not dispatch until the hold clears"
+            : bus.running || qSummary.canInterrupt
+              ? "Working — sends queue up"
+              : "\u00a0"}
+        </span>
       </div>
+
+      {/* Composer — the SHARED container, identical to a session's. The send
+          transport (submit → the admission seam) and the interrupt (abort →
+          onInterrupt, which goes through the ADMISSION RECORD, never a raw
+          opencode abort — docs/cto-admission-contract.md) are the ONLY
+          parameters that differ; everything else (attachment chips, typeahead,
+          voice, plan toggle, model picker with effort, usage dial, resource
+          toolbar) is literally the same component reached through the same path. */}
+      <Composer
+        {...composer.composerProps}
+        submit={doSubmit}
+        // The interrupt is the EXPLICIT admission op, not a raw abort — the
+        // shared stop button routes to it. `running` is true whenever there is a
+        // send in flight OR a turn/queue that can be interrupted, so the stop
+        // affordance appears exactly when interrupting is meaningful.
+        abort={() => void onInterrupt()}
+        // `running` drives BOTH the shared Stop button's visibility AND the
+        // send→queue affordance. It must be TRUE exactly when interrupting is
+        // meaningful — i.e. the admission queue reports an interruptible record
+        // (qSummary.canInterrupt). This mirrors the OLD bespoke composer, which
+        // rendered the interrupt button only on canInterrupt: an uncertain /
+        // refused / held-idempotent barrier makes canInterrupt false, so the
+        // Stop button is hidden (no dead control, no false promise) even while
+        // the turn is technically still running.
+        running={qSummary.canInterrupt}
+      />
     </div>
   );
 }
