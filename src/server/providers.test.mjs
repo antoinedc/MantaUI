@@ -29,6 +29,11 @@ import {
   planCacheTtlOps,
   syncCacheTtl,
   readCacheTtl,
+  ensureCtoAgent,
+  ctoPromptPath,
+  ctoMaterializedPromptPath,
+  materializeCtoPrompt,
+  refreshCtoDoctrine,
 } from "./providers.mjs";
 
 // ---------------------------------------------------------------------------
@@ -1125,6 +1130,224 @@ describe("ensureMantaPlanAgent", () => {
       promptPath: "/box/prompt.md",
     });
     assert.equal(result.ok, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ensureCtoAgent (BET-1164) — same shape as ensureMantaPlanAgent, but its
+// default promptPath now resolves to the MATERIALIZED doctrine file (this
+// doctrine work), not the committed source doc directly.
+// ---------------------------------------------------------------------------
+
+describe("ensureCtoAgent", () => {
+  it("is a no-op (no write, no restart) when a cto block already exists", async () => {
+    let applied = false;
+    let restarted = false;
+    const existingCfg = {
+      agent: { cto: { mode: "primary", description: "X", permission: {}, prompt: "{file:/x.md}" } },
+    };
+    const result = await ensureCtoAgent({
+      readConfig: async () => existingCfg,
+      applySubagents: async () => { applied = true; return { ok: true }; },
+      restart: async () => { restarted = true; return { ok: true }; },
+      promptPath: "/box/cto-prompt.md",
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.changed, false);
+    assert.equal(applied, false);
+    assert.equal(restarted, false);
+  });
+
+  it("upserts the block referencing the given promptPath and restarts when absent", async () => {
+    const applied = [];
+    const restarts = [];
+    const result = await ensureCtoAgent({
+      readConfig: async () => ({}),
+      applySubagents: async (ops) => { applied.push(ops); return { ok: true }; },
+      restart: async () => { restarts.push(1); return { ok: true }; },
+      promptPath: "/box/cto-prompt.md",
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.changed, true);
+    assert.equal(restarts.length, 1);
+    const upsert = applied[0].upsert[0];
+    assert.equal(upsert.name, "cto");
+    assert.equal(upsert.mode, "primary");
+    assert.equal(upsert.permission.cto, "allow");
+    assert.equal(upsert.prompt, "{file:/box/cto-prompt.md}");
+  });
+
+  it("defaults promptPath to the materialized doctrine file, not the committed source doc", () => {
+    // Regression guard for the customisation seam: a caller that doesn't
+    // override promptPath must get the box-side materialized path, never the
+    // read-only committed docs/ file (which a user edit has nowhere to live).
+    assert.equal(ctoMaterializedPromptPath().endsWith("/cto/prompt.md"), true);
+    assert.notEqual(ctoMaterializedPromptPath(), ctoPromptPath());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// materializeCtoPrompt / refreshCtoDoctrine (BET-1164 follow-up) — the I/O
+// wrapper around ctoDoctrine.mjs's pure composeCtoPrompt. Every case here
+// injects readFile/writeFile/mkdir/restart, so nothing touches the real
+// filesystem or opencode.
+// ---------------------------------------------------------------------------
+
+describe("materializeCtoPrompt", () => {
+  const BASE = "# On-call CTO\n\n## Guardrails\n\n- Never fabricate data.\n";
+
+  it("composes the doctrine and writes it to the output path", async () => {
+    const writes = [];
+    const result = await materializeCtoPrompt({
+      style: "handson",
+      houseRules: "Always confirm before deploying.",
+      basePromptPath: "/base/prompt.md",
+      outputPath: "/box/cto/prompt.md",
+      readFile: async (p) => { assert.equal(p, "/base/prompt.md"); return BASE; },
+      writeFile: async (p, data) => { writes.push({ p, data }); },
+      mkdir: async () => {},
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.fellBack, false);
+    assert.equal(result.path, "/box/cto/prompt.md");
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].p, "/box/cto/prompt.md");
+    assert.match(writes[0].data, /Operating doctrine: Hands-on/);
+    assert.match(writes[0].data, /Always confirm before deploying\./);
+    assert.ok(writes[0].data.includes("Never fabricate data."), "guardrails survive verbatim");
+  });
+
+  it("creates the output directory before writing (best-effort)", async () => {
+    let mkdirCalledWith = null;
+    await materializeCtoPrompt({
+      basePromptPath: "/base/prompt.md",
+      outputPath: "/box/cto/prompt.md",
+      readFile: async () => BASE,
+      writeFile: async () => {},
+      mkdir: async (dir, opts) => { mkdirCalledWith = { dir, opts }; },
+    });
+    assert.equal(mkdirCalledWith.dir, "/box/cto");
+    assert.equal(mkdirCalledWith.opts.recursive, true);
+  });
+
+  it("a mkdir failure is swallowed (best-effort) and the write still proceeds", async () => {
+    const writes = [];
+    const result = await materializeCtoPrompt({
+      basePromptPath: "/base/prompt.md",
+      outputPath: "/box/cto/prompt.md",
+      readFile: async () => BASE,
+      writeFile: async (p, data) => { writes.push({ p, data }); },
+      mkdir: async () => { throw new Error("EEXIST"); },
+    });
+    assert.equal(result.ok, true);
+    assert.equal(writes.length, 1);
+  });
+
+  it("falls back to writing the committed base prompt VERBATIM when composing/writing the doctrine fails", async () => {
+    const writes = [];
+    let call = 0;
+    const result = await materializeCtoPrompt({
+      style: "balanced",
+      basePromptPath: "/base/prompt.md",
+      outputPath: "/box/cto/prompt.md",
+      readFile: async () => BASE,
+      writeFile: async (p, data) => {
+        call += 1;
+        if (call === 1) throw new Error("disk full"); // the composed write fails
+        writes.push({ p, data }); // the fallback write succeeds
+      },
+      mkdir: async () => {},
+      log: { error: () => {}, warn: () => {} },
+    });
+    assert.equal(result.ok, false, "reports failure — the caller must know the doctrine did not apply");
+    assert.equal(result.fellBack, true);
+    assert.equal(writes.length, 1, "the fallback write happened");
+    assert.equal(writes[0].data, BASE, "the fallback content is the committed prompt, byte-for-byte");
+  });
+
+  it("reports failure (never throws) when even the fallback write fails", async () => {
+    const result = await materializeCtoPrompt({
+      basePromptPath: "/base/prompt.md",
+      outputPath: "/box/cto/prompt.md",
+      readFile: async () => BASE,
+      writeFile: async () => { throw new Error("disk full"); },
+      mkdir: async () => {},
+      log: { error: () => {}, warn: () => {} },
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.fellBack, false);
+  });
+
+  it("reports failure (never throws) when the committed base prompt itself cannot be read", async () => {
+    const result = await materializeCtoPrompt({
+      basePromptPath: "/base/prompt.md",
+      outputPath: "/box/cto/prompt.md",
+      readFile: async () => { throw new Error("ENOENT"); },
+      writeFile: async () => { throw new Error("must not be called"); },
+      mkdir: async () => { throw new Error("must not be called"); },
+      log: { error: () => {}, warn: () => {} },
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.fellBack, false);
+  });
+
+  it("defaults outputPath to the fixed materialized path", async () => {
+    const result = await materializeCtoPrompt({
+      basePromptPath: "/base/prompt.md",
+      readFile: async () => BASE,
+      writeFile: async () => {},
+      mkdir: async () => {},
+    });
+    assert.equal(result.path, ctoMaterializedPromptPath());
+  });
+});
+
+describe("refreshCtoDoctrine", () => {
+  it("materializes the prompt and restarts opencode via the injected restart function", async () => {
+    const writes = [];
+    let restarted = false;
+    const result = await refreshCtoDoctrine({
+      style: "executive",
+      basePromptPath: "/base/prompt.md",
+      outputPath: "/box/cto/prompt.md",
+      readFile: async () => "# base\n",
+      writeFile: async (p, data) => { writes.push({ p, data }); },
+      mkdir: async () => {},
+      restart: async () => { restarted = true; return { ok: true }; },
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.restarted, true);
+    assert.equal(writes.length, 1);
+  });
+
+  it("reuses restartOpencode's own error contract — a failed restart is logged, not thrown", async () => {
+    const warnings = [];
+    const result = await refreshCtoDoctrine({
+      basePromptPath: "/base/prompt.md",
+      outputPath: "/box/cto/prompt.md",
+      readFile: async () => "# base\n",
+      writeFile: async () => {},
+      mkdir: async () => {},
+      restart: async () => ({ ok: false, error: "opencode not running" }),
+      log: { error: () => {}, warn: (...a) => warnings.push(a) },
+    });
+    assert.equal(result.restarted, false);
+    // the write itself still succeeded — a restart failure never undoes it.
+    assert.equal(result.ok, true);
+    assert.ok(warnings.length > 0);
+  });
+
+  it("does not throw when restart itself throws", async () => {
+    const result = await refreshCtoDoctrine({
+      basePromptPath: "/base/prompt.md",
+      outputPath: "/box/cto/prompt.md",
+      readFile: async () => "# base\n",
+      writeFile: async () => {},
+      mkdir: async () => {},
+      restart: async () => { throw new Error("ECONNREFUSED"); },
+      log: { error: () => {}, warn: () => {} },
+    });
+    assert.equal(result.restarted, false);
   });
 });
 

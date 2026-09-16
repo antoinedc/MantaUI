@@ -447,6 +447,33 @@ test("engine: audience consumer + rising edge + deviations work end-to-end", asy
   assert.ok(Array.isArray(p.getDeviations({ hour: 12 })));
 });
 
+// §8.4 precedence (CTO operating-doctrine work): an explicit `ctoStyle`
+// passed to getAudience must override the profile's own inferred depth_pref,
+// mirroring the §8.1/§8.5 "stated wins" rule already applied to skills.
+test("getAudience: an explicit style overrides the inferred depth_pref", async () => {
+  const store = { load: async () => ({}), save: async () => {} };
+  const p = createCtoProfile({ store, now: () => 0 });
+  await p.init();
+  // No explicitStyle: the (default, inferred) depth_pref of 0 is used —
+  // technicality comes purely from the (empty) skill dimensions.
+  const inferredOnly = p.getAudience({ topics: [] });
+  // "handson" maps to depthPref 1 (see ctoDoctrine.mjs) — strictly higher
+  // than the default inferred value of 0, so the resulting technicality
+  // score must be at least as high, and the two texts must differ.
+  const withExplicit = p.getAudience({ topics: [], explicitStyle: "handson" });
+  assert.notEqual(inferredOnly.text, withExplicit.text, "explicit style changes the composed audience block");
+  assert.equal(withExplicit.tech >= inferredOnly.tech, true, "handson's explicit depthPref of 1 never lowers technicality");
+});
+
+test("getAudience: an unrecognized/absent explicitStyle keeps the inferred value (no behavior change for existing callers)", async () => {
+  const store = { load: async () => ({}), save: async () => {} };
+  const p = createCtoProfile({ store, now: () => 0 });
+  await p.init();
+  const withoutStyle = p.getAudience({ topics: [] });
+  const withUndefinedStyle = p.getAudience({ topics: [], explicitStyle: undefined });
+  assert.equal(withoutStyle.text, withUndefinedStyle.text);
+});
+
 // ---------------------------------------------------------------------------
 // BET-1394 — §8.5 stated-wins, sensitive-inference suppression, render model.
 // ---------------------------------------------------------------------------

@@ -180,6 +180,7 @@ import { createCtoConversationService } from "./ctoConversation.mjs";
 import {
   ensureMantaPlanAgent,
   ensureCtoAgent,
+  materializeCtoPrompt,
   CTO_AGENT_NAME,
   MANTA_PLAN_AGENT_NAME,
   readCacheTtl as readProvidersCacheTtl,
@@ -1791,6 +1792,14 @@ async function maybeEnsureCtoAgent() {
       cfg?.defaultModel?.providerID && cfg?.defaultModel?.modelID
         ? `${cfg.defaultModel.providerID}/${cfg.defaultModel.modelID}`
         : undefined;
+    // CTO operating doctrine: ensureCtoAgent's default promptPath now points
+    // at the MATERIALIZED file (providers.ctoMaterializedPromptPath), not the
+    // committed source doc, so that file must hold real content before the
+    // agent block is ever written — including on a fresh box where it has
+    // never been written before. Best-effort/non-throwing, matching
+    // ensureCtoAgent's own contract; on any failure it falls back to writing
+    // the committed prompt verbatim (see materializeCtoPrompt's own doc).
+    await materializeCtoPrompt({ style: cfg?.ctoStyle, houseRules: cfg?.ctoHouseRules });
     await ensureCtoAgent({ model });
   } catch (e) {
     console.error("[cto] ensure failed:", e);
@@ -2433,7 +2442,21 @@ let adaptiveCtoDigest = null;
     // timing scheduler's rising-edge / inferred-TZ branch read the profile.
     getRisingEdge: async () => adaptiveCto.profile?.getRisingEdgeMsIntoDay?.() ?? null,
     getInferredTz: async () => adaptiveCto.profile?.getInferredTz?.() ?? null,
-    getAudience: async ({ topics } = {}) => adaptiveCto.profile?.getAudience?.({ topics }) ?? null,
+    // §8.4 precedence (CTO operating-doctrine work): the box's EXPLICIT
+    // `ctoStyle` setting beats the profile's INFERRED depth_pref — see
+    // ctoDoctrine.mjs's header and ctoProfile.mjs's getAudience for the full
+    // rationale. Best-effort: a config read failure just means "no explicit
+    // opinion", falling back to the inferred value exactly as before this
+    // wiring existed.
+    getAudience: async ({ topics } = {}) => {
+      let explicitStyle;
+      try {
+        explicitStyle = (await local.configGet())?.ctoStyle;
+      } catch {
+        explicitStyle = undefined;
+      }
+      return adaptiveCto.profile?.getAudience?.({ topics, explicitStyle }) ?? null;
+    },
     getDeviations: async () => adaptiveCto.profile?.getDeviations?.() ?? [],
     // BET-1518 (§9.2/§9.5): the calibration engine's act-and-report queue —
     // act lines, announced as progress asides.

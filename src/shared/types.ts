@@ -323,6 +323,16 @@ export type AppConfig = {
   // default 0.7) — act on its own when the candidate's confidence clears this
   // bar. The Settings τ control writes it; the gate + calibration read it.
   ctoAutonomyThreshold?: number;
+  // On-call CTO operating doctrine (BET-1164 follow-up, docs/opencode/skills/
+  // cto/prompt.md + src/server/ctoDoctrine.mjs): the preset governing the
+  // on-call CTO agent's tone/initiative/reporting — never its read-only
+  // guardrails. Default "executive". Changing this re-materializes the
+  // agent's prompt and restarts opencode (see rpc.mjs `config:update` +
+  // providers.refreshCtoDoctrine).
+  ctoStyle?: "executive" | "balanced" | "handson";
+  // Free-text house rules appended verbatim, last, on top of the preset
+  // above — refine the doctrine but can never remove a guardrail. Default "".
+  ctoHouseRules?: string;
   // ----- Manta Optimizer (BET-1342 / Phase 2) -----
   // Master switch for the optimizer. DEFAULT FALSE. Opt-in: with it OFF the
   // optimizer changes nothing. It does NOT gate Automatic Manta Routing —

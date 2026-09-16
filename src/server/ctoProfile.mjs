@@ -32,6 +32,12 @@
 // `ctoProfile.test.mjs`; I/O is injected like ctoDigest/ctoFacts.
 
 import { profileStore } from "./ctoStores.mjs";
+// §8.4 precedence (this doctrine work, docs/adaptive-cto-spec.md §8.4): an
+// EXPLICIT stated preference beats an INFERRED one, the same "stated always
+// wins" rule §8.1/§8.5 already apply to skill dimensions — generalised here
+// to the interaction-stats consumer below (`getAudience`'s depthPref). See
+// ctoDoctrine.mjs's own header for the full rationale.
+import { depthPrefForStyle, resolveInteractionPref } from "./ctoDoctrine.mjs";
 
 export const DAY_MS = 86_400_000;
 export const HOUR_MS = 3_600_000;
@@ -699,12 +705,25 @@ export function createCtoProfile(deps = {}) {
       await flush();
     },
 
-    // ---- consumers (mwired in ctoDigest / ctoEngine) ----
-    getAudience({ topics = [] } = {}) {
+    // ---- consumers (wired in ctoDigest / ctoEngine) ----
+    // `explicitStyle` (§8.4 precedence, added for the CTO operating-doctrine
+    // work): the box's `ctoStyle` setting, when the caller has one to offer.
+    // A user-selected doctrine is an EXPLICIT stated preference — stronger
+    // than the profile's own INFERRED depth_pref EWMA — so it wins outright
+    // when present, exactly like §8.1's identity.stated overrides an inferred
+    // skill dimension. `explicitStyle` is optional and defaults to "no
+    // opinion" (undefined) so every existing caller (and every existing test)
+    // that doesn't pass it keeps consuming the inferred value unchanged.
+    getAudience({ topics = [], explicitStyle } = {}) {
+      const explicit = explicitStyle != null ? depthPrefForStyle(explicitStyle) : undefined;
+      const depthPref = resolveInteractionPref({
+        explicit,
+        inferred: state.interaction.depth_pref?.value ?? 0,
+      }).value;
       return computeAudience({
         dimensions: state.skills,
         topics,
-        depthPref: state.interaction.depth_pref?.value ?? 0,
+        depthPref,
       });
     },
 
