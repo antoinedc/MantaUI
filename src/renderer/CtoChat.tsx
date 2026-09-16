@@ -166,17 +166,35 @@ type QueueSummary = {
   active: CtoSubmissionProjection | null;
   waiting: CtoSubmissionProjection[];
   canInterrupt: boolean;
-  // A permanent uncertain-abort barrier exists in the queue. While held, the
-  // server's pump dispatches NOTHING (any unresolved record holds the gate —
-  // src/server/ctoAdmission.mjs pump()), so "sends queue up" copy would lie.
+  // Live interrupt-request markers exist (interrupt_pending — any abortState —
+  // or cancel_requested). While held, the server's pump dispatches NOTHING
+  // (any unresolved record holds the gate — src/server/ctoAdmission.mjs
+  // pump()), so "sends queue up" copy would lie. NOT synonymous with
+  // "permanent barrier": a plain in-flight interrupt holds the queue too and
+  // settles at turn end.
   held: boolean;
+  // While held AND a turn is running: TRUE when nothing can stop that turn
+  // anymore — an uncertain/refused barrier (no retry ever) or a
+  // cancel_requested record (reconcile settles by receipt, no abort
+  // machinery). FALSE for a plain in-flight interrupt: the abort has been
+  // accepted and is landing, and claiming the turn "can no longer be
+  // interrupted" would contradict the ack that says it is being applied.
+  runningTurnUnstoppable: boolean;
 };
 
 // Derive what the composer/interrupt need from the server-owned queue: the
 // newest non-terminal human submission (the interrupt target) and any still-
 // waiting queued sends. Terminal statuses are ignored.
 function summarizeQueue(state: CtoConversationState | null): QueueSummary {
-  if (!state) return { active: null, waiting: [], canInterrupt: false, held: false };
+  if (!state) {
+    return {
+      active: null,
+      waiting: [],
+      canInterrupt: false,
+      held: false,
+      runningTurnUnstoppable: false,
+    };
+  }
   const terminal = new Set(["completed", "interrupted", "cancelled", "failed"]);
   const live = state.submissions.filter(
     (s) => s.origin === "human" && !terminal.has(s.status),
@@ -190,13 +208,10 @@ function summarizeQueue(state: CtoConversationState | null): QueueSummary {
   // dead control, and an ack would affirm an abort that was never issued.
   // It is excluded from targeting so Stop only ever offers actions with an
   // observable outcome.
-  const interruptible = live.filter(
-    (s) =>
-      !isUncertainAbort(s) &&
-      s.status !== "interrupt_pending" &&
-      s.status !== "cancel_requested",
-  );
-  const held = interruptible.length !== live.length;
+  const isInterruptMarker = (s: CtoSubmissionProjection): boolean =>
+    s.status === "interrupt_pending" || s.status === "cancel_requested";
+  const interruptible = live.filter((s) => !isInterruptMarker(s));
+  const heldRecords = live.filter(isInterruptMarker);
   const active =
     interruptible.find((s) => s.status !== "queued" && s.status !== "dispatching") ??
     null;
@@ -207,7 +222,13 @@ function summarizeQueue(state: CtoConversationState | null): QueueSummary {
     active,
     waiting,
     canInterrupt: interruptible.length > 0,
-    held,
+    held: heldRecords.length > 0,
+    runningTurnUnstoppable: heldRecords.some(
+      (s) =>
+        s.status === "cancel_requested" ||
+        s.abortState === "refused" ||
+        isUncertainAbort(s),
+    ),
   };
 }
 
@@ -349,13 +370,22 @@ export function CtoChat({ onOpenDashboard }: { onOpenDashboard?: () => void }) {
   // controller-owned state survives that remount. A decline/stale-generation
   // restore simply writes back into this state — no replay mechanism that
   // could resurrect stale text over what the user has since typed.
-  const [composerInput, setComposerInput] = useState("");
+  const [composerInput, setComposerInputState] = useState("");
   // Interrupt ack: the server receipt ("cancelled" / "interrupt_pending" /
   // "cancel_requested") confirmed visibly — a silent interrupt reads as a
   // dead control. Ephemeral: auto-dismisses once it has been seen.
   const [interruptAck, setInterruptAck] = useState<string | null>(null);
   // The controller → conversation receipt hook (per-instance, no globals).
   const onReceiptRef = useRef<(() => void) | null>(null);
+  // Mirror of the composer text, synced by the single write helper below so
+  // submitTurn's catch can decide TRUTHFULLY whether the restore applies (the
+  // state value in a callback closure would be stale). All writes — typing,
+  // doSubmit's clear, the restores — go through setComposerInput.
+  const composerInputRef = useRef("");
+  const setComposerInput = useCallback((v: string) => {
+    composerInputRef.current = v;
+    setComposerInputState(v);
+  }, []);
 
   // Model picker wiring (per-session choice keyed by the CTO session id, the
   // same box-backed store the ordinary composer uses). Read during render so
@@ -415,16 +445,23 @@ export function CtoChat({ onOpenDashboard }: { onOpenDashboard?: () => void }) {
           setSendError(`The CTO declined the send: ${msg}`);
           // The text was optimistically cleared — give it back. The
           // empty-guard NEVER overwrites what the user has since typed.
-          setComposerInput((cur) => (cur.trim() === "" ? text : cur));
+          if (composerInputRef.current.trim() === "") setComposerInput(text);
         } else if (isStaleGenerationError(msg)) {
           // The binding was rebound under us. Nothing was accepted. Keep the
           // id (dedup-safe). The composer was optimistically cleared AND the
           // rebind remounts the conversation — but the composer text is
           // controller-owned, so writing it back here survives the remount.
-          setComposerInput((cur) => (cur.trim() === "" ? text : cur));
+          // The empty-guard NEVER overwrites what the user has since typed
+          // (reachable: a retry does not clear the composer), and the notice
+          // claims the restore ONLY when it actually happened.
+          const restored = composerInputRef.current.trim() === "";
+          if (restored) setComposerInput(text);
           setSending(null);
           setStaleGenNotice(
-            "The conversation was just rebound by another device — the send was not accepted. Your text is back in the composer; submit it again.",
+            "The conversation was just rebound by another device — the send was not accepted." +
+              (restored
+                ? " Your text is back in the composer; submit it again."
+                : " The composer keeps your newer text; submit it again."),
           );
           refreshQueueNow();
         } else {
@@ -931,12 +968,16 @@ function CtoConversation(props: {
         // accepted, and the merged validator requires sessionId+messageID for
         // it), so the "visible turn covers it" skip below would otherwise
         // make the PERMANENT hold invisible everywhere (the reviewer's P1).
-        // The hold also survives a DISMISSED unknown bubble for the same id
-        // (unknown → reconciled-accepted → interrupted → uncertain): the
-        // dismissal applied to the unknown guess, not to the permanent hold.
+        // The dismissal applies to the LOCAL unknown guess — and to the
+        // server's `unknown` record for the same id (same state, same label).
+        // It must NOT suppress a LATER server-side barrier the user never
+        // dismissed: reconcile can prove the send was accepted and a
+        // subsequent Stop turns the same record into cancel_requested or
+        // interrupt_pending (abort pending/claimed/refused/uncertain) — the
+        // queue is held and the user must see it.
         if (typeof s.messageID === "string" && messageIds.has(s.messageID) && !isUncertainAbort(s)) continue;
         if (sending != null && localTextsRef.current.get(s.id) === sending) continue;
-        if (dismissedUnknownRef.current.has(s.id) && !isUncertainAbort(s)) continue;
+        if (dismissedUnknownRef.current.has(s.id) && s.status === "unknown") continue;
         rows.push({
           key: s.id,
           // The held bubble is a STATUS AFFORDANCE, not a second copy of the
@@ -1161,11 +1202,14 @@ function CtoConversation(props: {
               submitting
                 ? "Sending…"
                 : qSummary.held
-                  ? // The hold: nothing dispatches until it clears — and an
-                    // uncertain abort means the turn may STILL be running,
-                    // so say both things when it is.
+                  ? // The hold stops dispatch — but only an UNCERTAIN/REFUSED
+                    // barrier (or cancel_requested) makes a RUNNING turn
+                    // unstoppable. A plain in-flight interrupt has the abort
+                    // accepted and landing — say that, matching the ack.
                     bus.running
-                      ? "Admission is held — the running turn can no longer be interrupted"
+                      ? qSummary.runningTurnUnstoppable
+                        ? "Admission is held — the running turn can no longer be interrupted"
+                        : "Admission is held — the abort is being applied to the running turn"
                       : "Admission is held — sends queue but dispatch nothing until the hold clears"
                   : bus.running || qSummary.canInterrupt
                     ? "Queue a message after the current turn…"
@@ -1217,9 +1261,12 @@ function CtoConversation(props: {
           <span className="text-meta text-text-faint">
             {qSummary.held
               ? bus.running
-                ? // An uncertain abort means the turn MAY still be running:
-                  // it has become unstoppable, and the hold blocks dispatch.
-                  "Admission held — the running turn can no longer be interrupted; queued sends will not dispatch until the hold clears"
+                ? // Mirror the placeholder: only an uncertain/refused barrier
+                  // (or cancel_requested) makes the running turn unstoppable;
+                  // a plain in-flight interrupt means the abort is landing.
+                  qSummary.runningTurnUnstoppable
+                  ? "Admission held — the running turn can no longer be interrupted; queued sends will not dispatch until the hold clears"
+                  : "Admission held — the abort is being applied; queued sends will not dispatch until it settles"
                 : "Admission held — queued sends will not dispatch until the hold clears"
               : bus.running || qSummary.canInterrupt
                 ? "Working — sends queue up"

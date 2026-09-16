@@ -198,6 +198,16 @@ async function pressDismissUnknown(): Promise<void> {
   await h!.flush();
 }
 
+// Send that times out into the unknown bubble, then dismissed — the shared
+// preamble of the dismissed-suppression tests. Returns the submission id.
+async function submitAndDismissUnknown(text: string): Promise<string> {
+  await typeAndSubmit(h!, text); // times out → unknown bubble
+  const submitId = (api!.calls.ctoConversationSubmit?.[0]?.[0] as { id: string }).id;
+  await pressDismissUnknown();
+  expect(h!.text()).not.toContain("Outcome unknown — reconciling");
+  return submitId;
+}
+
 // Mount over a MUTABLE queue holder with a submit that fails its FIRST call
 // with `message` (the message chooses the failure class: definitive refusal
 // vs unknown outcome), so later steps can swap the server truth.
@@ -844,10 +854,7 @@ async function mountFailingSubmit(
     // id is now the PERMANENT hold. The hold must render.
     const holder = { current: emptyQueue() };
     h = await mountFailingSubmit(holder, "network timeout");
-    await typeAndSubmit(h, "the send"); // times out → unknown bubble
-    const submitId = (api.calls.ctoConversationSubmit?.[0]?.[0] as { id: string }).id;
-    await pressDismissUnknown();
-    expect(h.text()).not.toContain("Outcome unknown — reconciling");
+    const submitId = await submitAndDismissUnknown("the send");
     // Reconcile: the SAME record is now the uncertain-abort hold. Its user
     // message is in the transcript (server-realistic for a dispatched record).
     const held = emptyQueue();
@@ -895,6 +902,112 @@ async function mountFailingSubmit(
     expect(h.text()).toContain("the running turn can no longer be interrupted");
     expect(h.text()).toContain("will not dispatch");
     expect(h.container.querySelector('button[aria-label="Interrupt"]')).toBeNull();
+  });
+
+  it("a NORMAL successful Stop with the turn still running does not claim the turn is permanently unstoppable", async () => {
+    // SERVER-REALISTIC: the normal Stop path — interrupt on the accepted
+    // record → interrupt_pending with abortState claimed (the abort has been
+    // ACCEPTED and is landing; it settles at turn-end proof). The turn is
+    // still running. The copy must match the ack ("the abort is being
+    // applied"), never claim a permanent barrier.
+    const holder = { current: emptyQueue() };
+    holder.current.submissions = [submission("evt_stopping_1", "accepted")];
+    holder.current.counts.unresolved = 1;
+    h = mountCto(holder.current, {
+      ctoConversationState: () => Promise.resolve(holder.current),
+      // SERVER-REALISTIC: the accepted record's message is in the transcript.
+      opencodeMessages: () =>
+        Promise.resolve(
+          userTranscriptRows([{ messageID: "msg_evt_stopping_1", text: "run the deploy" }]),
+        ),
+    });
+    await h.flush();
+    // The turn is running.
+    await emitStreamAndFlush(bus, h, {
+      sub: "running",
+      sessionId: SESSION,
+      payload: { running: true },
+    });
+    const interrupts = await pressStop();
+    expect(interrupts.length).toBe(1);
+    expect((interrupts[0][0] as { id: string }).id).toBe("evt_stopping_1");
+    // The ack says the abort is being applied.
+    expect(h.text()).toContain("Interrupt requested — the abort is being applied to the running turn.");
+    // The queue now shows the record mid-abort (claimed), turn still running.
+    const stopping = emptyQueue();
+    stopping.submissions = [
+      submission("evt_stopping_1", "interrupt_pending", { abortState: "claimed" }),
+    ];
+    stopping.counts.unresolved = 1;
+    holder.current = stopping;
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await h.flush();
+    // The footer must NOT contradict the ack with the permanent-barrier claim.
+    expect(h.text()).not.toContain("the running turn can no longer be interrupted");
+    // It says the same thing the ack says.
+    expect(h.text()).toContain("the abort is being applied");
+  });
+
+  it("a dismissed unknown id does not suppress the LATER cancel_requested barrier for the same record", async () => {
+    // Reachable sequence: send times out (unknown) → dismissed → the record
+    // exists server-side as unknown → Stop is offered (unknown is still
+    // interruptible) → the server records cancel_requested (ctoAdmission.mjs
+    // interrupt(): unknown → cancel_requested) → the queue is held. The
+    // dismissal applied to the local guess, not to this barrier.
+    const holder = { current: emptyQueue() };
+    h = await mountFailingSubmit(holder, "network timeout");
+    const submitId = await submitAndDismissUnknown("the send");
+    // Stop on the unknown record: the server records cancel_requested.
+    const cancelled = emptyQueue();
+    cancelled.submissions = [
+      submission(submitId, "cancel_requested", { messageID: "msg_the_send" }),
+    ];
+    cancelled.counts.unresolved = 1;
+    holder.current = cancelled;
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await h.flush();
+    expect(h.text()).toContain("Cancel requested — held until reconciled");
+  });
+
+  it("the stale-generation notice claims the restore ONLY when it happened (retry keeps a newer draft)", async () => {
+    // Reachable divergence: a Retry does NOT clear the composer, so the
+    // composer can hold NEWER text when the stale-generation rejection
+    // arrives. The restore guard must keep that text, and the notice must
+    // not claim "Your text is back".
+    const holder = { current: emptyQueue() };
+    let attempt = 0;
+    h = mountCto(holder.current, {
+      ctoConversationState: () => Promise.resolve(holder.current),
+      ctoConversationSubmit: () => {
+        attempt += 1;
+        if (attempt === 1) return Promise.reject(new Error("network timeout"));
+        return Promise.reject(
+          new Error("stale generation: expected 3, current binding generation is 4"),
+        );
+      },
+    });
+    await h.flush();
+    await typeAndSubmit(h, "first send"); // times out → unknown bubble
+    // The user has since typed a newer draft (the bubble is still up).
+    const ta = () =>
+      h!.container.querySelector(
+        'textarea[aria-label="Message the CTO"]',
+      ) as HTMLTextAreaElement;
+    await act(async () => {
+      typeInto(ta(), "new draft");
+    });
+    await h.flush();
+    // Retry the unknown send — the rejection is stale-generation.
+    await pressRetry();
+    // The composer was NOT clobbered by the retried text…
+    expect(ta().value).toBe("new draft");
+    // …and the notice tells the truth about it.
+    expect(h.text()).toContain("The composer keeps your newer text");
+    expect(h.text()).not.toContain("Your text is back in the composer");
   });
 });
 
