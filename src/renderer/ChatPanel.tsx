@@ -23,14 +23,12 @@ import type {
   DelegateApproval,
   DelegateApprovalTool,
   ForgeCheckRun,
-  OpencodeModel,
   OptimizerSummary,
   ProgressRecord,
   PullRequest,
   QuestionRequest,
 } from "../shared/types";
 import { useStore } from "./store";
-import type { PendingScreenshot } from "./store";
 import { flashMessageRow } from "./messageFlash";
 import {
   allTodosTerminal,
@@ -61,28 +59,22 @@ import {
   parseModelRef,
   describeMergeFailure,
   progressAttentionKind,
-  resolvePlanToggle,
   isPlanExitQuestion,
   extractPlanData,
   selectableModelGroups,
   titleCase,
   formatCompactionSaving,
 } from "./chatUtils";
-import { isPlanAgent, planPageUrl } from "../shared/planMode.mjs";
+import { planPageUrl } from "../shared/planMode.mjs";
 import { serverBase } from "./api/httpApi";
 import {
   appendPromptHistory,
-  guessMime,
   mimeToInputMode,
   modelInputModes,
-  modelSupportsAttachments,
-  modelFromChoice,
-  readPlanSaved,
   writePlanSaved,
   readSavedDelegateModel,
   writeSavedDelegateModel,
   resolveActiveModel,
-  type AgentMention,
   type Attachment,
   type ModelSelection,
   type SessionMode,
@@ -91,13 +83,10 @@ import {
 } from "./chatShared";
 import { crossesBoundary, shouldSwitch, boundaryPhrase, BOUNDARY } from "../shared/routingBoundary.mjs";
 import { acceptsModality } from "../shared/modelGuide.mjs";
-import { useModelCatalog } from "./modelCatalog";
-import {
-  sessionBoxSelection,
-  setSessionChoice,
-  useSessionModelChoice,
-} from "./modelPrefs";
-import { useAgentCatalog } from "./agentCatalog";
+// The box-level model catalog, per-session model choice, and agent catalog are
+// subscribed INSIDE useComposerController now. ChatPanel keeps `setSessionChoice`
+// only for the /clear model carry-forward.
+import { setSessionChoice } from "./modelPrefs";
 import { MantaLoader } from "./MantaLoader";
 import { MeasureColumn } from "./MeasureColumn";
 import { BlockedProgressCard, CompactionCard, PermissionCard, PlanCard, RetryCard } from "./Cards";
@@ -105,12 +94,10 @@ import { Button } from "./Button";
 import { DelegateApprovalCard, ReadOnlyJobBar, ScheduledTasksCard, SecretsCard, WebhooksCard } from "./PanelCards";
 import { CardStack, type PinnedCardRender } from "./components/CardStack";
 import { useSessionResources } from "./hooks/useSessionResources";
-import { useInputHistory } from "./hooks/useInputHistory";
+import { useComposerController } from "./hooks/useComposerController";
 import { useTranscriptState } from "./hooks/useTranscriptState";
 import { useTranscriptSelection } from "./hooks/useTranscriptSelection";
 import { useSseBus } from "./hooks/useSseBus";
-import { useVoice } from "./hooks/useVoice";
-import { useTypeahead } from "./hooks/useTypeahead";
 import { VoicePlaybackProvider } from "./hooks/useVoicePlayback";
 import { Transcript } from "./Transcript";
 import { QuoteToolbar } from "./QuoteToolbar";
@@ -210,13 +197,12 @@ export function ChatPanel({
   unregisterModelControl,
   seedPrompt,
 }: Props) {
-  const chatAutoAllow = useStore((s) => s.chatAutoAllow);
-  const setChatAutoAllow = useStore((s) => s.setChatAutoAllow);
+  // chatAutoAllow / setChatAutoAllow / optInModels / optInModel are subscribed
+  // INSIDE useComposerController now (they feed the composer's trust toggle +
+  // model picker). ChatPanel keeps only what its OWN (non-composer) paths read.
   const autoRenameSessions = useStore((s) => s.autoRenameSessions);
   const configDefaultModel = useStore((s) => s.defaultModel);
   const deactivatedMainModels = useStore((s) => s.deactivatedMainModels);
-  const optInModels = useStore((s) => s.optInModels);
-  const optInModel = useStore((s) => s.optInModel);
   // BET-1274 10d: the routing preset drives the Auto row's display label; the
   // value lives on the same store block Settings writes (modelRouting.preset).
   const routingPreset = useStore((s) => s.modelRouting?.preset);
@@ -338,7 +324,9 @@ export function ChatPanel({
   const setActive = useStore((s) => s.setActive);
   const activateWindow = useStore((s) => s.activateWindow);
 
-  const inputRef = useRef<HTMLTextAreaElement>(null);
+  // inputRef, input state, model/plan/attachment/voice/typeahead/history state
+  // now live in useComposerController (constructed below). ChatPanel reads them
+  // by the same names via the controller destructure.
   // Per-child debounce timers for refetching child transcripts when their
   // expanded card is receiving SSE traffic. Keyed by childSessionId. 300ms
   // matches the parent's scheduleRefetch debounce so behavior is uniform.
@@ -352,11 +340,21 @@ export function ChatPanel({
     for (const t of childRefetchTimers.current.values()) clearTimeout(t);
     childRefetchTimers.current.clear();
   }, []);
-  // Forward declaration: submitRef is defined later (depends on submit), but
-  // useSseBus needs it now for the drain effect.
-  const submitRef = useRef<(textOverride?: string, attachmentsOverride?: Attachment[]) => void>(() => {});
-  // Input state must be declared before useSseBus (which needs setInput).
-  const [input, setInput] = useState("");
+  // Forward-declared setSendError bridge (BET — CTO full composer). The composer
+  // controller (useComposerController) is constructed BEFORE useSseBus — it
+  // produces `submitRef`/`input`/`providerID` that useSseBus needs — yet the
+  // send-error setter is OWNED by useSseBus (it is tied 1:1 with the auth-
+  // reconnect banner). A stable wrapper ref breaks the cycle: the controller
+  // calls the wrapper (only from callbacks — attachment upload gate, voice —
+  // never during render), and useSseBus's real setter is assigned into it right
+  // after useSseBus is constructed. Until then it is a harmless no-op.
+  const setSendErrorRef = useRef<(v: string | null) => void>(() => {});
+  const setSendErrorBridge = useCallback((v: string | null) => setSendErrorRef.current(v), []);
+  // Same bridge shape for the client-queue pop: the composer's ↑-on-empty pops
+  // the last CLIENT-queued message back into the box, but the message queue is
+  // owned by useSseBus (constructed after the controller). Assigned right after
+  // useSseBus; a no-op until then.
+  const queuePopRef = useRef<() => void>(() => {});
   // Bumped after each submit so useInputHistory re-reads localStorage and the
   // freshly-persisted prompt becomes immediately cyclable (BET-257). The hook
   // can't watch localStorage on its own — we drive the re-read from here.
@@ -401,6 +399,86 @@ export function ChatPanel({
     childLoadedAllRef,
     loadingChildEarlier,
   } = useTranscriptState({ sessionId, isActive, motionStateRef });
+
+  // ===== Composer controller (BET — CTO full composer) =====
+  // The ONE reusable composer container — input + prompt history, typeahead,
+  // voice, attachments (upload lifecycle / drop / paste / screenshots), model
+  // selection / override / routing / effort / Auto, plan mode, and the trust
+  // toggle. The SAME hook the CTO conversation renders, so the two surfaces can
+  // never drift. This owns the composer's INPUT half; ChatPanel keeps its own
+  // send path (`submit`, below — entangled with routing / optimistic transcript /
+  // compaction, none of which is composer state) and reads the controller's
+  // returned state (attachments, agent mentions, the resolved model, plan). The
+  // controller is constructed HERE, before useSseBus, because it produces the
+  // `submitRef` / `input` / `providerID` useSseBus needs; its send-error setter
+  // rides the forward-declared bridge above (assigned right after useSseBus).
+  const composer = useComposerController({
+    sessionId,
+    messages,
+    // Session history is keyed by the owning tmux window (survives /clear).
+    historyScope: { tmuxSession, windowIndex },
+    // Attachments upload to the session's tmux project (SSH/HTTP).
+    uploadProjectName: tmuxSession,
+    refreshing,
+    sendError: null, // read from useSseBus's own state below, not the controller
+    setSendError: setSendErrorBridge,
+    scheduleCount: schedules.length,
+    onSchedules: () => togglePanel("schedules"),
+    onSecrets: () => togglePanel("secrets"),
+    onWebhooks: () => togglePanel("webhooks"),
+    // The session composer owns a CLIENT-side queue — pop the last queued
+    // message back into the box. setMessageQueue is owned by useSseBus (below),
+    // so the pop is wired through a bridge assigned right after useSseBus.
+    onQueuePop: () => queuePopRef.current(),
+    isActive,
+    historyEpoch,
+    setPendingVoiceNote,
+    setVoiceNotes,
+    cwd,
+    optSavingPct,
+    presetLabel: routingPreset
+      ? `${titleCase(routingPreset)}${routingEco >= 1 ? " · eco" : ""}`
+      : undefined,
+    configDefaultModel,
+  });
+  // Destructure the pieces ChatPanel's own send path + wiring read. The
+  // composer-input state now lives in the controller; these aliases keep the
+  // rest of ChatPanel reading them by the same names it always used.
+  const {
+    input,
+    setInput,
+    inputRef,
+    attachments,
+    setAttachments,
+    agentMentions,
+    setAgentMentions,
+    models,
+    defaultModel,
+    modelOverride,
+    setModelOverride,
+    sessionChoice,
+    autoActive,
+    activeModel,
+    selectModel,
+    applyRouted,
+    routedModelRef,
+    pendingAutoUserRef,
+    plan,
+    planOn,
+    setPlanOn,
+    addDroppedFiles,
+    submitRef,
+    commands,
+    currentModelName,
+    updateInputWithHistoryReset,
+  } = composer;
+  // `voice`, `navigateHistory`, `modelLabel`, the trust toggle and the opt-in
+  // model controls are consumed only by <Composer> (via composer.composerProps),
+  // so ChatPanel no longer destructures them — the controller owns their wiring.
+  // Ref to opencode's slash commands so submit reads the latest without being
+  // in its deps (submit is defined before `commands` is stable across renders).
+  const commandsRef = useRef(commands);
+  commandsRef.current = commands;
 
   // ===== Virtualized scroll (BET-679) =====
   // react-virtuoso owns the transcript scroller (see Transcript.tsx). This
@@ -464,146 +542,39 @@ export function ChatPanel({
     virtuosoRef.current?.scrollToIndex({ index: idx, align: "center", behavior });
   }, [setFollowing]);
 
-  // ===== Per-session model override =====
-  // Declared before useSseBus: the auth-banner providerID below derives from
-  // it. Seeded from the box-backed per-session choice (modelPrefs.ts, BET-1281),
-  // falling back to the persisted global default.
-  // BET-1247: whether the session's model choice is Auto (the three-state
-  // choice from BET-1245). Under Auto the override seeds to null rather than
-  // the server default — the default is not "the model Auto chose", and the
-  // chip must read "Auto" until the router actually resolves one (a turn
-  // running applies the routed pick to `modelOverride`).
-  // BET-1281: the box-backed per-session choice (the model-prefs box store +
-  // the device-local Auto flag). Single source for every seed below.
-  const sessionChoice = useSessionModelChoice(sessionId);
-  const [autoActive, setAutoActive] = useState<boolean>(
-    () => sessionChoice.kind === "auto",
-  );
-  // BET-1248: the override seed derives from the THREE-state choice so the
-  // rest of the component is untouched: {kind:"model"} → the model,
-  // {kind:"server-default"} → the global default, {kind:"auto"} → null until
-  // the router resolves one. The routed pick is applied to the override the
-  // moment a turn runs (BET-1247).
-  const [modelOverride, setModelOverride] = useState<ModelSelection | null>(() =>
-    modelFromChoice(sessionChoice, configDefaultModel),
-  );
-  // BET-1248: routed state for the composer pill — set when the router chose
-  // this session's model (fed by the main-conversation boundary routing in
-  // submit). The pill renders ONLY while this is non-null; clearing it reverts
-  // the pill to its normal appearance.
-  const [routed, setRouted] = useState<{
-    reason: string;
-    incumbent: { providerID: string; modelID: string } | null;
-  } | null>(null);
-  // BET-1248: boundary-routing state for the main conversation. `routedModel`
-  // is the session's current routed endpoint — the incumbent shouldSwitch uses
-  // and the model the next Auto turn runs on; `routedReason` is the latest
-  // decision reason (with the boundary phrase appended) for surfacing. Keyed
-  // by session: reset on session change, exactly like stepTokens / liveTodos /
-  // finishByMessageId.
-  const [routedModel, setRoutedModel] = useState<ModelSelection | null>(null);
-  const [routedReason, setRoutedReason] = useState<string | null>(null);
-  // Ref mirror so submit() reads the incumbent synchronously without re-creating
-  // the callback on every routed change (the commandsRef pattern).
-  const routedModelRef = useRef<ModelSelection | null>(null);
-  useEffect(() => {
-    routedModelRef.current = routedModel;
-  }, [routedModel]);
-  // The single producer of `routed`: apply a boundary-routing decision. With
-  // an incumbent (the model the session was on before the switch) surface the
-  // undoable pill — the reason and the model undo reverts to. With no
-  // incumbent (the first turn of a session) there is nothing to undo, so the
-  // reason still surfaces (the pill renders the reason without an undo action)
-  // — never silently. The model is applied to the override, carrying forward
-  // the user's current in-memory effort (BET-1274 10c) so a just-chosen effort
-  // is not dropped by a route.
+  // ===== Boundary-routing refs (submit reads these; owned by ChatPanel) =====
+  // The per-session model override, Auto flag, routed pill state, applyRouted,
+  // routedModelRef and pendingAutoUserRef now live in useComposerController
+  // (above) — they are composer state shared with the CTO surface. The refs
+  // BELOW are ChatPanel's OWN routing bookkeeping (boundary detection facts fed
+  // into routingBoundary.mjs); they are NOT composer state and stay here.
+  //
   // The incumbent provider's health as LAST REPORTED BY THE BOX (routing:choose
-  // returns it — see 6e). Kept as a ref so crossesBoundary can read whether the
-  // incumbent is still available BEFORE the next routing:choose round trip, while
-  // the renderer itself holds no independent health state. Defaults healthy.
+  // returns it). Kept as a ref so crossesBoundary can read whether the
+  // incumbent is still available BEFORE the next routing:choose round trip.
   const incumbentHealthRef = useRef<boolean>(true);
-  const applyRouted = useCallback((model: ModelSelection | null, reason: string) => {
-    const incumbent = routedModelRef.current;
-    setRouted({
-      reason,
-      incumbent: incumbent
-        ? { providerID: incumbent.providerID, modelID: incumbent.modelID }
-        : null,
-    });
-    routedModelRef.current = model;
-    setRoutedModel(model);
-    setRoutedReason(reason);
-    const override =
-      model && modelOverride?.variant ? { ...model, variant: modelOverride.variant } : model;
-    setModelOverride(override);
-    return override;
-  }, [modelOverride]);
   // The agent the PREVIOUS turn ran as — drives the agent-changed boundary.
   const lastAgentRef = useRef<string | undefined>(undefined);
   // A compaction completed since the last submit (cache is gone → re-deciding
-  // is free). Latched from the compaction card (see the effect below the SSE
-  // bus), cleared on the next turn.
+  // is free). Latched from the compaction card, cleared on the next turn.
   const justCompactedRef = useRef(false);
-  // Ref mirror of latestTokens (set below, after its memo is defined) so submit
-  // reads the CURRENT context size without re-creating the callback on every
-  // stream update (the liveChildStatusRef / permissionsRef pattern).
+  // Ref mirror of latestTokens (set below) so submit reads the CURRENT context
+  // size without re-creating the callback on every stream update.
   const latestTokensRef = useRef<TokenUsage | null>(null);
-  // The user re-picked Auto while a routed model may exist — the next turn
-  // re-decides (user-requested boundary). Detected as an autoActive flip.
-  const pendingAutoUserRef = useRef(false);
-  const priorAutoRef = useRef(autoActive);
-  useEffect(() => {
-    if (autoActive && !priorAutoRef.current && routedModelRef.current) {
-      pendingAutoUserRef.current = true;
-    }
-    priorAutoRef.current = autoActive;
-  }, [autoActive]);
-  // BET-1281: keep the panel's local override + Auto flag in sync with the
-  // box-backed choice. Runs on mount and whenever the choice changes — e.g. the
-  // box mirror first loads, an `model-prefs.updated` refetch lands (including a
-  // refetch of this client's own write, a harmless reseed of the same value), or
-  // /clear swaps the session id. `sessionChoice` is memoized, so this does not
-  // re-run on keystroke renders.
-  useEffect(() => {
-    setAutoActive(sessionChoice.kind === "auto");
-    setModelOverride(modelFromChoice(sessionChoice, configDefaultModel));
-    priorAutoRef.current = sessionChoice.kind === "auto";
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionChoice, configDefaultModel]);
-  // Active-model providerID for the auth-error banner (BET-316). Per-session
-  // override wins over the persisted default; null if neither is set. Memoized
-  // on `modelOverride` (the in-memory selection, itself seeded from
-  // localStorage) so the localStorage read + parse runs on model change, not
-  // on every keystroke re-render.
+  // Active-model providerID for the auth-error banner (BET-316) — derived from
+  // the controller's override. useSseBus needs it, hence it is computed here.
   const providerID = useMemo(
     () => modelOverride?.providerID ?? configDefaultModel?.providerID ?? null,
     [modelOverride, configDefaultModel],
   );
-
-  // ===== Per-session plan mode (BET-949) =====
-  // Local on/off, seeded from the per-session storage key (the `Session.agent`
-  // seed falls back to this). The honesty handlers in useSseBus sync this from
-  // opencode's own agent-switch events (plan_enter/plan_exit / agent.switched),
-  // so the chip never claims plan mode while the next turn would run as build.
-  const [planOn, setPlanOn] = useState<boolean>(() => readPlanSaved(sessionId));
-  // The `plan` agent availability comes from the shared box-level catalog.
-  const { agents } = useAgentCatalog();
-  const plan = useMemo(
-    () => resolvePlanToggle(agents, planOn),
-    [agents, planOn],
-  );
-  const togglePlan = useCallback(() => {
-    const next = !planOn;
-    setPlanOn(next);
-    writePlanSaved(sessionId, next);
-  }, [planOn, sessionId]);
   // Honesty sync from useSseBus: opencode's OWN agent switches (plan_enter /
-  // plan_exit / agent.switched) drive this so the chip never lies about the
-  // agent the next turn will run as. Also persists so a re-mount seeds right.
+  // plan_exit / agent.switched) drive the controller's plan flag so the chip
+  // never lies about the agent the next turn will run as. writePlanSaved persists
+  // so a re-mount seeds right. (The controller owns planOn; this writes into it.)
   const syncPlan = useCallback((next: boolean) => {
     setPlanOn(next);
     writePlanSaved(sessionId, next);
-  }, [sessionId]);
+  }, [sessionId, setPlanOn]);
 
   // ===== SSE bus state (extracted to useSseBus) =====
   const {
@@ -677,6 +648,32 @@ export function ChatPanel({
     submitRef,
   });
 
+  // Assign the composer controller's forward-declared bridges now that useSseBus
+  // has produced their real targets (setSendError, the client-side message
+  // queue). The controller (constructed above, before useSseBus) reaches these
+  // ONLY from callbacks, so wiring them here — not during the controller's
+  // render — is race-free.
+  setSendErrorRef.current = setSendError;
+  queuePopRef.current = () => {
+    // The setMessageQueue updater must stay pure (double-invoked under
+    // StrictMode). Compute the popped value inside it, then run the setInput +
+    // focus side effects AFTER — otherwise setInput and the rAF fire twice.
+    let last: string | undefined;
+    setMessageQueue((q) => {
+      if (q.length === 0) return q;
+      last = q[q.length - 1];
+      return q.slice(0, -1);
+    });
+    if (last === undefined) return;
+    setInput(last);
+    requestAnimationFrame(() => {
+      const el = inputRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(last!.length, last!.length);
+    });
+  };
+
   // BET-1248: latch a completed compaction into `justCompactedRef` so the
   // NEXT submit re-evaluates routing at the (now free) compacted boundary. The
   // compaction card clears itself ~2.5s later; latching keeps the boundary
@@ -725,17 +722,8 @@ export function ChatPanel({
   // ===== ChatPanel-own state (not extracted to hooks) =====
   const [error, setError] = useState<string | null>(null);
   const [showThinking, setShowThinking] = useState(false);
-  // Available models + server default. The catalog is box-level, not
-  // per-session, so it lives in a shared module cache (`useModelCatalog`) — a
-  // panel mounted by `/clear` reads the already-known list synchronously and
-  // the picker never flashes "Loading…" for a list that didn't change.
-  // Selection, by contrast, IS per-session and persists via localStorage.
-  const { models, defaultModel } = useModelCatalog();
-  // Pending attachments (chips above input) + agent @-mentions waiting to be
-  // serialized into FilePart / AgentPart on next submit. Cleared on success.
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
-  // Agent @-mentions state — populated by useTypeahead, consumed by submit.
-  const [agentMentions, setAgentMentions] = useState<AgentMention[]>([]);
+  // `models` / `defaultModel` (the box-level catalog), `attachments` and
+  // `agentMentions` now come from useComposerController (destructured above).
   // Ephemeral system notice (e.g. /help output). Lives in the store so the
   // App-level global toast host (BET-723) renders it over every pane type.
   // Cleared on dismiss or on next session change.
@@ -766,33 +754,12 @@ export function ChatPanel({
   // useSseBus's effect now.
   useEffect(() => {
     setError(null);
-    const planOnStart = readPlanSaved(sessionId);
-    setPlanOn(planOnStart);
-    // BET-1248: routed state is per-session — reset on session change (and on
-    // /clear, which swaps the session id), exactly like stepTokens / liveTodos.
-    setRoutedModel(null);
-    setRoutedReason(null);
-    routedModelRef.current = null;
+    // Model override / Auto flag / routed pill state / attachments / agent
+    // mentions / plan mode (incl. the Session.agent seed) all reset on session
+    // change INSIDE useComposerController now — that state is composer state it
+    // owns. ChatPanel keeps only its OWN routing bookkeeping + the ambient
+    // per-session resets that are not composer state.
     incumbentHealthRef.current = true;
-    pendingAutoUserRef.current = false;
-    // Seed plan mode from the session's own `agent` field when present (BET-949
-    // §5): a session pre-set to plan OUTSIDE MantaUI would otherwise show the
-    // chip off and send the next prompt as build — the stored key alone can't
-    // know. Session.agent takes precedence over the stored key; on failure or
-    // absence we keep the stored-key seed. Guarded like modelCatalog: the
-    // pre-pairing preload subset lacks the method, and calling it throws.
-    const api = window.api as Partial<typeof window.api>;
-    if (api.opencodeSessionAgent) {
-      api.opencodeSessionAgent(sessionId).then((agent) => {
-        if (agent && agent.length > 0) {
-          const planNow = isPlanAgent(agent);
-          setPlanOn(planNow);
-          writePlanSaved(sessionId, planNow);
-        }
-      }).catch(() => { /* non-fatal — stored-key seed stands */ });
-    }
-    setAttachments([]);
-    setAgentMentions([]);
     setSystemNotice(null);
     setDragHover(false);
     dragDepth.current = 0;
@@ -1692,129 +1659,11 @@ export function ChatPanel({
     [refreshQuestions],
   );
 
-  // Kept for the picker button's onOpen — no-op now that we pre-fetch.
-  const ensureModels = useCallback(async () => { /* noop */ }, []);
-
-  // Active model used for the NEXT prompt. modelOverride wins; otherwise the
-  // server default. Used to look up capability flags (attachment support) and
-  // the context-window limit. Resolution lives in chatShared so ModelPicker
-  // and ChatPanel share one path (BET-415 duplication gate).
-  const activeModel = useMemo<OpencodeModel | null>(
-    () => resolveActiveModel(models, modelOverride, defaultModel),
-    [models, modelOverride, defaultModel],
-  );
-  const currentModelSupportsAttachments = modelSupportsAttachments(activeModel);
-  const currentModelName = activeModel?.name ?? "this model";
-
-  // ===== Typeahead (extracted to useTypeahead) =====
-  // Declared after currentModelName so it's available in the hook params.
-  const {
-    typeahead,
-    setTypeahead: setTypeaheadFromHook,
-    typeaheadRows,
-    commands,
-    onTypeaheadSelect: applyTypeahead,
-    onTypeaheadMove: moveTypeaheadSelection,
-    updateInput,
-  } = useTypeahead({
-    input,
-    setInput,
-    inputRef,
-    cwd,
-    currentModelSupportsAttachments,
-    currentModelName,
-    agentMentions,
-    setAgentMentions,
-  });
-  // Ref to commands so submit can access it without being in deps (commands
-  // is defined after submit in the file, but submit needs the latest value).
-  const commandsRef = useRef(commands);
-  commandsRef.current = commands;
-
-  // If the saved model references one that isn't in the current list of
-  // connected models (common after switching providers or fixing listModels'
-  // source endpoint), clear it. Otherwise the server rejects the prompt with a
-  // not-found error and nothing reaches the transcript. Reads the BOX-backed
-  // selection (BET-1281); re-runs when models or the session choice change.
-  useEffect(() => {
-    if (!models) return;
-    const sel = sessionBoxSelection(sessionId);
-    if (!sel) return;
-    if (models.some((m) => m.providerID === sel.providerID && m.id === sel.modelID)) return;
-    setSessionChoice(sessionId, { kind: "server-default" });
-    setModelOverride(null);
-  }, [models, sessionId, sessionChoice]);
-
-  // BET-1247/BET-1274: a manual model choice is THE off switch for Auto — the
-  // design contract's only one. It writes the three-state choice, flips the UI
-  // off Auto (so the chip stops claiming Auto in this very commit), and ends
-  // any routed pill state (BET-1225).
-  const selectModel = useCallback(
-    (m: ModelSelection | null) => {
-      setModelOverride(m);
-      setSessionChoice(sessionId, m ? { kind: "model", model: m } : { kind: "server-default" });
-      setAutoActive(false);
-      setRouted(null);
-    },
-    [sessionId],
-  );
-
-  // BET-1248: the user explicitly re-picked Auto — write the three-state choice,
-  // flip the UI to Auto, and flag the NEXT turn as a user-requested boundary so
-  // it re-decides at once (crossesBoundary USER). Clears the override so the
-  // pill reads "Auto · chooses when the turn starts" until routing resolves.
-  const onSelectAuto = useCallback(() => {
-    setSessionChoice(sessionId, { kind: "auto" });
-    setAutoActive(true);
-    setModelOverride(null);
-    setRouted(null);
-    if (routedModelRef.current) pendingAutoUserRef.current = true;
-  }, [sessionId]);
-
-  // BET-1274 10c: effort (the variant dial) and the ⚡ fast toggle write a
-  // VARIANT, not a model choice — they must not change the ModelChoice kind and
-  // must not turn Auto off. Under a pinned model ("model") the value (possibly a
-  // `-fast` twin model) is merged into the box-backed record; under "auto" the
-  // box has no model/effort slot (BET-1287: Auto is a device-local boolean), so
-  // the effort is applied to the current in-memory routed model only and Auto is
-  // never exited; server-default falls back to pinning (same as before).
-  const onSelectEffort = useCallback(
-    (value: ModelSelection) => {
-      const choice = sessionChoice;
-      if (choice.kind === "model") {
-        const merged = { ...choice.model, ...value };
-        setSessionChoice(sessionId, { kind: "model", model: merged });
-        setModelOverride(merged);
-      } else if (choice.kind === "auto") {
-        // Auto has no model/effort slot to persist into — applying effort here
-        // only affects the current in-memory routed model (the next send runs at
-        // that effort) without exiting Auto. The fast-twin MODEL swap stays a
-        // model choice and is not expressible under Auto; Auto keeps picking.
-        setModelOverride((prev) => (prev ? { ...prev, variant: value.variant } : prev));
-      } else {
-        setSessionChoice(sessionId, {
-          kind: "model",
-          model: { providerID: value.providerID, modelID: value.modelID, variant: value.variant },
-        });
-        setModelOverride({ ...value });
-      }
-    },
-    [sessionId, sessionChoice],
-  );
-
-  // BET-1222: undo a routed model choice. Reverts through the SAME per-session
-  // override path the manual picker uses (selectModel) — no
-  // second persistence path — then clears the routed state so the pill reverts.
-  // selectModel is synchronous; a failure cannot occur here, so this needs no
-  // async wrapper or try/catch (BET-1274 10e).
-  const undoRouted = useCallback(() => {
-    if (!routed?.incumbent) return;
-    selectModel({
-      providerID: routed.incumbent.providerID,
-      modelID: routed.incumbent.modelID,
-    });
-    setRouted(null);
-  }, [routed, selectModel]);
+  // The active model, model-picker callbacks (selectModel / onSelectAuto /
+  // onSelectEffort / undoRouted), the typeahead, the "model not in list" reset,
+  // and ensureModels ALL live in useComposerController now — they are composer
+  // state shared with the CTO surface. `activeModel` is read from the controller
+  // (destructured above) for ChatPanel's send-time capability + context checks.
 
   // App-control (BET-840/841): expose this panel's `selectModel` to App so the
   // box's `switch-model` app-control event drives the override through the same
@@ -2065,134 +1914,11 @@ export function ChatPanel({
     })();
   }, [running, messages, autoRenameSessions, tmuxSession, windowIndex, cwd, refresh, sessionId]);
 
-  // ===== Voice (extracted to useVoice) =====
-  const voice = useVoice({
-    input,
-    setInput,
-    inputRef,
-    submitRef,
-    setSendError,
-    setSystemNotice,
-    groqApiKey: useStore((s) => s.groqApiKey),
-    sessionId,
-    setPendingVoiceNote,
-    setVoiceNotes,
-  });
-
-  // ===== Drag-drop attachments =====
-  //
-  // Files dropped anywhere on the panel are shipped to ~/.manta-uploads/<session>/
-  // and each gets a chip above the input ("uploading" → "ready"; failures keep
-  // the chip with an error tooltip). TWO transports, decided per file:
-  //   - OS path available (Electron preload's webUtils via getPathForFile) →
-  //     batch scp through the uploadFiles bridge (desktop SSH mode).
-  //   - No OS path (desktop HTTP mode / mobile browser: getPathForFile returns
-  //     "") → read the File's bytes and POST them through uploadBuffer, the
-  //     same byte path paste already uses. Without this fallback a drop in
-  //     HTTP mode silently discarded every file.
-
-  // Patch one attachment by id with a Partial<Attachment>. The single owner of
-  // the "uploading" -> "ready" (with remotePath) / -> "error" (with errorMsg)
-  // state transition, reused by every upload path (drag-drop, paste,
-  // screenshot) so they never repeat a setAttachments closure (duplication-
-  // gate).
-  const patchAttachment = useCallback(
-    (id: string, patch: Partial<Attachment>) => {
-      setAttachments((prev) =>
-        prev.map((a) => (a.id === id ? { ...a, ...patch } : a)),
-      );
-    },
-    [],
-  );
-
-  const addDroppedFiles = useCallback(
-    async (files: FileList | File[]) => {
-      if (!tmuxSession) return;
-      const list = Array.from(files);
-      if (list.length === 0) return;
-
-      // Every dropped file gets a chip card. Split by mime decides HOW it's
-      // sent at submit, not WHETHER it shows a chip:
-      //   - Image/PDF/audio/video → multimodal FilePart (bytes the model decodes).
-      //   - Everything else (csv/code/text/…) → `asPathRef` chip; its remote
-      //     path is appended to the outgoing message as `@<path>` at submit so
-      //     the AI reads it with its Read tool. The path no longer pollutes the
-      //     composer — the chip is the user-visible affordance.
-      // `lp === ""` means "no OS path" → the file rides the byte path below.
-      type Pending = { file: File; lp: string; mime: string; asPathRef: boolean; id: string };
-      const pending: Pending[] = list.map((f) => {
-        const mime = f.type || guessMime(f.name);
-        return {
-          file: f,
-          lp: window.api.getPathForFile(f),
-          mime,
-          asPathRef: mimeToInputMode(mime) === "other",
-          id: `att-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
-        };
-      });
-
-      // Pre-upload chip placeholders for ALL entries.
-      const newChips: Attachment[] = pending.map((p) => ({
-        id: p.id,
-        filename: p.file.name,
-        mime: p.mime,
-        status: "uploading",
-        source: "drop",
-        asPathRef: p.asPathRef,
-      }));
-      setAttachments((prev) => [...prev, ...newChips]);
-
-      // Settle each chip once its upload finishes: route every completion /
-      // failure through the shared patchAttachment owner (this used to be a
-      // local settleChip that duplicated it — BET-732).
-      const settleReady = (id: string, rp: string | null) =>
-        patchAttachment(
-          id,
-          rp
-            ? { status: "ready", remotePath: rp }
-            : { status: "error", errorMsg: "Upload returned no path" },
-        );
-
-      // Path-based entries upload in one batch (cheaper round-trip).
-      const pathPending = pending.filter((p) => p.lp);
-      const pathBatch = (async () => {
-        if (pathPending.length === 0) return;
-        let remotePaths: string[] = [];
-        try {
-          remotePaths = await window.api.uploadFiles({
-            projectName: tmuxSession,
-            localPaths: pathPending.map((p) => p.lp),
-          });
-        } catch (e) {
-          const msg = String((e as Error)?.message ?? e);
-          for (const p of pathPending) patchAttachment(p.id, { status: "error", errorMsg: msg });
-          return;
-        }
-        pathPending.forEach((p, i) => settleReady(p.id, remotePaths[i] ?? null));
-      })();
-
-      // Byte-based entries upload individually (each File's bytes → uploadBuffer).
-      const bytePending = pending.filter((p) => !p.lp);
-      const byteBatch = Promise.all(
-        bytePending.map(async (p) => {
-          try {
-            const buffer = await p.file.arrayBuffer();
-            const rp = await window.api.uploadBuffer({
-              projectName: tmuxSession,
-              filename: p.file.name,
-              buffer,
-            });
-            settleReady(p.id, rp || null);
-          } catch (e) {
-            patchAttachment(p.id, { status: "error", errorMsg: String((e as Error)?.message ?? e) });
-          }
-        }),
-      );
-
-      await Promise.all([pathBatch, byteBatch]);
-    },
-    [tmuxSession, patchAttachment],
-  );
+  // Voice, the attachment upload lifecycle (patchAttachment / addDroppedFiles /
+  // onPaste / screenshots), and prompt-history navigation now live in
+  // useComposerController (destructured above as `voice` / `addDroppedFiles` /
+  // `navigateHistory` / `updateInputWithHistoryReset`). ChatPanel keeps only its
+  // own panel-level drag overlay handlers (below) and the mobile attach bridge.
 
   // Mobile ⋯ sheet → attach-files bridge (BET-260). The hidden <input
   // type="file"> inside SessionScreen's ⋯ sheet dispatches this with the
@@ -2217,98 +1943,10 @@ export function ChatPanel({
     return () => window.removeEventListener("manta-attach-files", onAttachFiles);
   }, [sessionId, addDroppedFiles]);
 
-  const removeAttachment = useCallback((id: string) => {
-    setAttachments((prev) => prev.filter((a) => a.id !== id));
-  }, []);
+  // removeAttachment, onPaste, and the pending-screenshot accept path are owned
+  // by useComposerController now (they are the composer's own upload lifecycle).
 
-  // ===== Clipboard paste (screenshots) =====
-  //
-  // When the user pastes into the textarea, check for image/* items in the
-  // clipboard. If found, upload them via uploadBuffer (bytes → temp file →
-  // scp) and add chips exactly like drag-drop. Text items are left to the
-  // browser default (inserted into the textarea as-is).
-  const onPaste = useCallback(
-    async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-      if (!tmuxSession) return;
-      const items = Array.from(e.clipboardData.items);
-      const imageItems = items.filter((item) => item.type.startsWith("image/"));
-      if (imageItems.length === 0) return;
-      // Prevent the browser from pasting anything for this event — image data
-      // in a textarea would just be lost anyway, but be explicit.
-      e.preventDefault();
-
-      for (const item of imageItems) {
-        const blob = item.getAsFile();
-        if (!blob) continue;
-        const mime = item.type; // e.g. "image/png"
-        const ext = mime.split("/")[1] ?? "png";
-        const filename = `screenshot-${Date.now()}.${ext}`;
-        const id = `att-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-
-        setAttachments((prev) => [
-          ...prev,
-          { id, filename, mime, status: "uploading", source: "paste" } as Attachment,
-        ]);
-
-        try {
-          const arrayBuffer = await blob.arrayBuffer();
-          const remotePath = await window.api.uploadBuffer({
-            projectName: tmuxSession,
-            filename,
-            buffer: arrayBuffer,
-          });
-          patchAttachment(id, { status: "ready", remotePath });
-        } catch (err) {
-          const msg = String((err as Error)?.message ?? err);
-          patchAttachment(id, { status: "error", errorMsg: msg });
-        }
-      }
-    },
-    [tmuxSession],
-  );
-
-   // ===== Pending screenshots =====
-   //
-   // Also lives in the store (App.tsx reads the bytes + records them). Only
-   // the active panel renders + acts on them; acting clears the global
-   // records.
-
-   const pendingScreenshots = useStore((s) => s.pendingScreenshots);
-   const removePendingScreenshots = useStore((s) => s.removePendingScreenshots);
-
-   // Attach one or more pending screenshots. The bytes were already read at
-   // detection (App.tsx), so this is now just "make a chip, upload the bytes" —
-   // the same tail every other upload path runs. Accepting one and accepting
-   // all are the same call with a different array.
-   const acceptScreenshots = useCallback(
-     (shots: PendingScreenshot[]) => {
-       removePendingScreenshots(shots.map((s) => s.id));
-       if (!tmuxSession) return;
-       for (const shot of shots) {
-         const id = `att-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-         setAttachments((prev) => [
-           ...prev,
-           { id, filename: shot.filename, mime: "image/png", status: "uploading", source: "paste" } as Attachment,
-         ]);
-         void (async () => {
-           try {
-             const remotePath = await window.api.uploadBuffer({
-               projectName: tmuxSession,
-               filename: shot.filename,
-               buffer: shot.bytes,
-             });
-             if (!remotePath) throw new Error("Upload failed");
-             patchAttachment(id, { status: "ready", remotePath });
-           } catch (err) {
-             patchAttachment(id, { status: "error", errorMsg: String((err as Error)?.message ?? err) });
-           }
-         })();
-       }
-     },
-     [tmuxSession, removePendingScreenshots, patchAttachment],
-   );
-
-   // Panel-level drag handlers. We listen on the chat container; the body of
+  // Panel-level drag handlers. We listen on the chat container; the body of
   // the panel paints a dotted overlay while dragHover is true. App.tsx
   // already suppresses default drag/drop on the window so the renderer
   // doesn't navigate to file:// — we only handle the panel-local case.
@@ -2351,19 +1989,9 @@ export function ChatPanel({
     [addDroppedFiles],
   );
 
-  // Prompt-history navigation (Up/Down) + the typing path that exits history
-  // mode. Self-contained hook; see useInputHistory. The hook also returns
-  // `promptHistory`, but ChatPanel doesn't consume it.
-  const { navigateHistory, updateInputWithHistoryReset } = useInputHistory({
-    messages,
-    inputRef,
-    setInput,
-    setTypeahead: setTypeaheadFromHook,
-    updateInput,
-    tmuxSession,
-    windowIndex,
-    historyEpoch,
-  });
+  // Prompt-history navigation (Up/Down) + the typing exit path are owned by
+  // useComposerController now (`navigateHistory` / `updateInputWithHistoryReset`
+  // destructured above).
 
   // BET-1351 — transcript quote bar. The hook is event-driven/one-shot: it
   // shows on pointerup / shift-arrow keyup, captures the selection position
@@ -2396,17 +2024,8 @@ export function ChatPanel({
     ),
   });
 
-  // Model line: last assistant message's modelID (provider/model).
-  const modelLabel = useMemo(() => {
-    if (!messages) return null;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const info = messages[i].info;
-      if (info.role === "assistant" && info.modelID) {
-        return info.providerID ? `${info.providerID}/${info.modelID}` : info.modelID;
-      }
-    }
-    return null;
-  }, [messages]);
+  // The composer's model-name pill (`modelLabel`, derived from the last
+  // assistant message's modelID) is computed inside useComposerController now.
 
   // Latest assistant message's token usage — drives the running indicator's
   // `↑ N tokens · X% ctx` readout. Updates live as message parts stream in
@@ -3436,92 +3055,15 @@ export function ChatPanel({
         />
       ) : (
       <Composer
-        attachments={attachments}
-        onRemoveAttachment={removeAttachment}
-        onAttachFiles={(files) => void addDroppedFiles(files)}
-        pendingScreenshots={isActive ? pendingScreenshots : []}
-        onAcceptScreenshots={acceptScreenshots}
-        onDiscardScreenshot={(id) => removePendingScreenshots([id])}
-        typeahead={typeahead}
-        typeaheadRows={typeaheadRows}
-        onTypeaheadSelect={applyTypeahead}
-        onTypeaheadHover={(idx) =>
-          setTypeaheadFromHook((prev) => (prev ? { ...prev, selectedIdx: idx } : prev))
-        }
-        input={input}
-        setInput={updateInputWithHistoryReset}
-        inputRef={inputRef}
+        {...composer.composerProps}
+        // The send transport is ChatPanel's own — its `submit` is entangled with
+        // routing / optimistic transcript / compaction and is NOT composer state,
+        // so it is spread on top of the controller's ready-to-render bundle. The
+        // client-side queue pop (onQueuePop) is already wired in the controller
+        // config to ChatPanel's message queue via queuePopRef.
         submit={submit}
         abort={abort}
         running={running}
-        refreshing={refreshing}
-        modelLabel={modelLabel}
-        chatAutoAllow={chatAutoAllow}
-        setChatAutoAllow={setChatAutoAllow}
-        voice={voice}
-        models={models}
-        modelOverride={modelOverride}
-        defaultModel={defaultModel}
-        auto={autoActive}
-        autoReason={routedReason}
-        onSelectAuto={onSelectAuto}
-        routed={routed}
-        onRoutedUndone={() => void undoRouted()}
-        plan={plan}
-        onTogglePlan={togglePlan}
-        activeProviderID={activeModel?.providerID ?? null}
-        deactivatedMainModels={deactivatedMainModels}
-        optInModels={optInModels}
-        onOptInModel={optInModel}
-        onOpenModels={ensureModels}
-        onSelectModel={selectModel}
-        onSelectEffort={onSelectEffort}
-        presetLabel={routingPreset ? `${titleCase(routingPreset)}${routingEco >= 1 ? " · eco" : ""}` : undefined}
-        optSavingPct={optSavingPct}
-        scheduleCount={schedules.length}
-        onSchedules={() => togglePanel("schedules")}
-        onSecrets={() => togglePanel("secrets")}
-        onWebhooks={() => togglePanel("webhooks")}
-        typeaheadOpen={typeahead != null && typeaheadRows.length > 0}
-        typeaheadExactMatch={(() => {
-          if (!typeahead || typeaheadRows.length === 0) return false;
-          const idx = Math.min(typeahead.selectedIdx, typeaheadRows.length - 1);
-          const row = typeaheadRows[idx];
-          // Compare against the trimmed input, ignoring trailing spaces the
-          // user may have typed while staring at the popup.
-          return input.trim() === row.primary;
-        })()}
-        onTypeaheadConfirm={() => {
-          if (typeahead && typeaheadRows.length > 0) {
-            const idx = Math.min(typeahead.selectedIdx, typeaheadRows.length - 1);
-            applyTypeahead(typeaheadRows[idx]);
-          }
-        }}
-        onTypeaheadMove={moveTypeaheadSelection}
-        onTypeaheadCancel={() => setTypeaheadFromHook(null)}
-        onHistoryUp={() => navigateHistory(-1)}
-        onHistoryDown={() => navigateHistory(1)}
-        onQueuePop={() => {
-          // The setMessageQueue updater must stay pure (it's double-invoked
-          // under StrictMode). Compute the popped value inside it, then run
-          // the setInput + focus side effects AFTER — otherwise setInput and
-          // the rAF fire twice per pop.
-          let last: string | undefined;
-          setMessageQueue((q) => {
-            if (q.length === 0) return q;
-            last = q[q.length - 1];
-            return q.slice(0, -1);
-          });
-          if (last === undefined) return;
-          setInput(last);
-          requestAnimationFrame(() => {
-            const el = inputRef.current;
-            if (!el) return;
-            el.focus();
-            el.setSelectionRange(last!.length, last!.length);
-          });
-        }}
-        onPaste={onPaste}
       />
       )}
 

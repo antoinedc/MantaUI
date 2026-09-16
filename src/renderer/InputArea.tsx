@@ -183,6 +183,8 @@ export function InputArea({
   onHistoryDown,
   onQueuePop,
   onPaste,
+  textareaAriaLabel,
+  placeholderOverride,
 }: {
   input: string;
   setInput: (v: string) => void;
@@ -272,6 +274,19 @@ export function InputArea({
   onHistoryDown: () => void;
   onQueuePop: () => void;
   onPaste: (e: React.ClipboardEvent<HTMLTextAreaElement>) => void;
+  // Accessible name for the message textarea. Optional because a session
+  // composer leaves the field unnamed and relies on its placeholder — but a
+  // surface that must be locatable by a STABLE name regardless of the running
+  // placeholder (the CTO conversation, whose tests + a11y target the field by
+  // "Message the CTO") supplies one. Purely additive: unset preserves the
+  // historical session behaviour byte-for-byte.
+  textareaAriaLabel?: string;
+  // Override the resting/running placeholder text. The CTO surface's admission
+  // seam replaces the placeholder with hold/queue copy that has no equivalent
+  // on a session composer (there is no server-owned queue there), so it is
+  // computed by the host and passed in. Unset → the session's own two-state
+  // placeholder (compose / "Queue a message…" while running) is used, unchanged.
+  placeholderOverride?: string;
 }) {
   const { voiceEnabled, voiceRecording, voiceProcessing, voiceAnnouncement } =
     voice;
@@ -509,7 +524,11 @@ export function InputArea({
             }
           }}
           onPaste={onPaste}
-          placeholder={running ? "Queue a message…  (⏎ to queue · Esc to stop)" : "Reply, or describe the next task…"}
+          placeholder={
+            placeholderOverride ??
+            (running ? "Queue a message…  (⏎ to queue · Esc to stop)" : "Reply, or describe the next task…")
+          }
+          aria-label={textareaAriaLabel}
           rows={1}
           spellCheck={false}
           className="flex-1 resize-none bg-transparent text-text text-prose focus:outline-none placeholder:text-text-faint font-sans min-w-0"
