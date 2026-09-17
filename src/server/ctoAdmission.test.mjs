@@ -77,6 +77,33 @@ function fakeBinding({ generation = 3, currentSessionId = "ses_cto" } = {}) {
   };
 }
 
+// The shared sendOutcome knob for BOTH fake senders: fail the send in the
+// meaningful ways (definitive 400 / definitive 500 / unknown network), else
+// land the receipt in the transcript. `label` names the failing endpoint in
+// the thrown error ("sendPrompt" vs "runCommand") so tests can tell the two
+// dispatch paths apart — the ONLY difference between the senders.
+function applySendOutcome(oc, { sendOutcome, receiptLands, messageID, label }) {
+  if (sendOutcome === "http400") {
+    const err = new Error(`opencode ${label} 400: bad request`);
+    err.status = 400;
+    throw err;
+  }
+  if (sendOutcome === "http500") {
+    const err = new Error(`opencode ${label} 500: boom`);
+    err.status = 500;
+    throw err;
+  }
+  if (sendOutcome === "network") {
+    throw new Error("socket hang up");
+  }
+  if (receiptLands) {
+    oc.transcript.set(messageID, { info: { id: messageID, role: "user", time: { created: 1 } }, parts: [] });
+    // The transcript (listMessages view) also gains the user row — the
+    // receipt-specific reconciliation links assistant rows to it.
+    oc.rows.push({ info: { id: messageID, role: "user", time: { created: 1 } }, parts: [] });
+  }
+}
+
 // A synthetic opencode: records sends/aborts, serves receipts from a
 // transcript map, and can fail sends in the meaningful ways. `rows` is the
 // transcript (ascending) used by listMessages; `completeTurn` appends a
@@ -93,25 +120,7 @@ function fakeOc({ sendOutcome = "ok", receiptLands = true, rows = [] } = {}) {
     rows: [...rows],
     async sendPrompt({ sessionId, text, model, agent, attachments, mentions, messageID }) {
       oc.sends.push({ sessionId, text, model, agent, attachments, mentions, messageID });
-      if (sendOutcome === "http400") {
-        const err = new Error("opencode sendPrompt 400: bad request");
-        err.status = 400;
-        throw err;
-      }
-      if (sendOutcome === "http500") {
-        const err = new Error("opencode sendPrompt 500: boom");
-        err.status = 500;
-        throw err;
-      }
-      if (sendOutcome === "network") {
-        throw new Error("socket hang up");
-      }
-      if (receiptLands) {
-        oc.transcript.set(messageID, { info: { id: messageID, role: "user", time: { created: 1 } }, parts: [] });
-        // The transcript (listMessages view) also gains the user row — the
-        // receipt-specific reconciliation links assistant rows to it.
-        oc.rows.push({ info: { id: messageID, role: "user", time: { created: 1 } }, parts: [] });
-      }
+      applySendOutcome(oc, { sendOutcome, receiptLands, messageID, label: "sendPrompt" });
       return undefined; // the 204
     },
     // P3a3 full-parity widening: the slash-command sender (a DIFFERENT
@@ -119,23 +128,7 @@ function fakeOc({ sendOutcome = "ok", receiptLands = true, rows = [] } = {}) {
     // sendOutcome fixture drives both dispatch paths in the new tests below).
     async sendCommand({ sessionId, command, arguments: argumentsStr, attachments, model, agent, messageID }) {
       oc.commandSends.push({ sessionId, command, arguments: argumentsStr, attachments, model, agent, messageID });
-      if (sendOutcome === "http400") {
-        const err = new Error("opencode runCommand 400: bad request");
-        err.status = 400;
-        throw err;
-      }
-      if (sendOutcome === "http500") {
-        const err = new Error("opencode runCommand 500: boom");
-        err.status = 500;
-        throw err;
-      }
-      if (sendOutcome === "network") {
-        throw new Error("socket hang up");
-      }
-      if (receiptLands) {
-        oc.transcript.set(messageID, { info: { id: messageID, role: "user", time: { created: 1 } }, parts: [] });
-        oc.rows.push({ info: { id: messageID, role: "user", time: { created: 1 } }, parts: [] });
-      }
+      applySendOutcome(oc, { sendOutcome, receiptLands, messageID, label: "runCommand" });
       return undefined;
     },
     async getMessage(sessionId, messageId) {

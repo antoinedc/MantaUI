@@ -69,6 +69,8 @@ import { planPageUrl } from "../shared/planMode.mjs";
 import { serverBase } from "./api/httpApi";
 import {
   appendPromptHistory,
+  makePermissionReplyHandler,
+  makeQuestionReplyHandler,
   mimeToInputMode,
   modelInputModes,
   writePlanSaved,
@@ -1573,53 +1575,30 @@ export function ChatPanel({
     rejectAllPendingQuestions();
   }, [sessionId, rejectAllPendingQuestions]);
 
+  // Permissions/questions replies — the ONE shared implementation
+  // (makePermissionReplyHandler / makeQuestionReplyHandler in chatShared),
+  // bound here to this surface's bus accessors so the two chat surfaces
+  // (this and CtoChat) cannot drift apart. The factory is re-invoked per
+  // render (cheap) and useCallback keeps the last identity until a dep moves.
   const replyPermission = useCallback(
-    async (
-      requestId: string,
-      reply: "once" | "always" | "reject",
-      recordSessionId?: string,
-    ) => {
-      // Optimistically drop this request so the card disappears immediately.
-      setPermissions((prev) => prev.filter((p) => p.id !== requestId));
-      // Clear the sidebar attention dot immediately — the SSE round-trip can
-      // be missed, leaving the red `!` stuck.
-      useStore.getState().setChatAttention(sessionId, null);
-      // Route the reply to the request's OWN session, not the panel's. A
-      // background job's permission lives on the job's child session; the
-      // record carries that sessionID. Fall back to the viewed session for
-      // the panel's own requests (BET-380 decision #8).
-      const sid = recordSessionId ?? sessionId;
-      try {
-        await window.api.opencodePermissionReply(requestId, reply, sid);
-      } catch (e) {
-        setSendError(String((e as Error)?.message ?? e));
-        refreshPermissions();
-      }
-    },
-    [refreshPermissions, sessionId],
+    makePermissionReplyHandler({
+      sessionId,
+      dropPermission: setPermissions,
+      setSendError,
+      refreshPermissions,
+      clearAttention: (sessionID) => useStore.getState().setChatAttention(sessionID, null),
+    }),
+    [sessionId, setPermissions, setSendError, refreshPermissions],
   );
 
   const replyQuestion = useCallback(
-    async (q: QuestionRequest, answers: string[][]) => {
-      const que = q.requestId;
-      // No reply token → unanswerable ask (stale/orphan/cross-session leak).
-      // Auto-dismiss instead of surfacing an error the user can't clear.
-      if (!que) {
-        setQuestions((prev) => prev.filter((x) => x.id !== q.id));
-        useStore.getState().setChatAttention(q.sessionID, null);
-        return;
-      }
-      setQuestions((prev) => prev.filter((x) => x.id !== q.id));
-      // Clear the sidebar attention dot immediately.
-      useStore.getState().setChatAttention(q.sessionID, null);
-      try {
-        await window.api.opencodeQuestionReply(que, answers, q.sessionID);
-      } catch (e) {
-        setSendError(String((e as Error)?.message ?? e));
-        refreshQuestions();
-      }
-    },
-    [refreshQuestions],
+    makeQuestionReplyHandler({
+      dropQuestion: setQuestions,
+      setSendError,
+      refreshQuestions,
+      clearAttention: (sessionID) => useStore.getState().setChatAttention(sessionID, null),
+    }),
+    [setQuestions, setSendError, refreshQuestions],
   );
 
   const rejectQuestion = useCallback(

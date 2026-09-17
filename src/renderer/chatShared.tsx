@@ -11,7 +11,12 @@
 // pure helpers, so this stays cheap to import from anywhere.
 
 import { createContext, type ReactNode } from "react";
-import type { OpencodeMessage, OpencodeModel } from "../shared/types";
+import type {
+  OpencodeMessage,
+  OpencodeModel,
+  PermissionRequest,
+  QuestionRequest,
+} from "../shared/types";
 import { readModalities } from "../shared/modelGuide.mjs";
 // TokenUsage now lives in src/shared/types.ts (the single source — it also
 // types OpencodeMessageInfo.tokens, which killed the renderer's
@@ -595,4 +600,88 @@ export function MetaBadge({
       {children}
     </span>
   );
+}
+
+// ===== Permission / question card reply glue =====
+//
+// The two chat surfaces — ChatPanel's session view and CtoChat's CTO
+// conversation — render the SAME PermissionCard/QuestionCard over the SAME
+// useSseBus accessors, so their reply handlers were line-identical except for
+// how each surface reaches those accessors. One implementation here; each
+// surface binds its own accessors once via these factories. (Kept OUT of
+// useSseBus: the CTO surface passes its OWN setSendError, not the bus's, and
+// the handlers are card glue, not SSE state.)
+//
+// Behaviour contract preserved verbatim from the handlers this replaces — do
+// not "simplify" any step away:
+//   - the optimistic local drop happens BEFORE the await, so the card
+//     disappears immediately;
+//   - the sidebar attention dot is cleared synchronously too — the SSE
+//     round-trip can be missed, leaving a stuck red `!`/`?`;
+//   - a permission reply routes to the record's OWN session
+//     (`recordSessionId ?? sessionId`) — a background job's permission lives
+//     on the job's child session (BET-380 decision #8);
+//   - a question without a reply token is unanswerable (stale/orphan/
+//     cross-session leak) and is auto-dismissed, never errored;
+//   - on failure the error is surfaced via setSendError and the list is
+//     refetched (the optimistic drop may have been wrong).
+
+export type ChatReplyKind = "once" | "always" | "reject";
+
+export function makePermissionReplyHandler(args: {
+  sessionId: string;
+  dropPermission: (updater: (prev: PermissionRequest[]) => PermissionRequest[]) => void;
+  setSendError: (msg: string) => void;
+  refreshPermissions: () => unknown;
+  clearAttention: (sessionID: string) => void;
+}) {
+  return async (
+    requestId: string,
+    reply: ChatReplyKind,
+    recordSessionId?: string,
+  ): Promise<void> => {
+    // Optimistically drop this request so the card disappears immediately.
+    args.dropPermission((prev) => prev.filter((p) => p.id !== requestId));
+    // Clear the sidebar attention dot immediately — the SSE round-trip can
+    // be missed, leaving the red `!` stuck.
+    args.clearAttention(args.sessionId);
+    // Route the reply to the request's OWN session, not the panel's. A
+    // background job's permission lives on the job's child session; the
+    // record carries that sessionID. Fall back to the viewed session for
+    // the panel's own requests (BET-380 decision #8).
+    const sid = recordSessionId ?? args.sessionId;
+    try {
+      await window.api.opencodePermissionReply(requestId, reply, sid);
+    } catch (e) {
+      args.setSendError(String((e as Error)?.message ?? e));
+      void args.refreshPermissions();
+    }
+  };
+}
+
+export function makeQuestionReplyHandler(args: {
+  dropQuestion: (updater: (prev: QuestionRequest[]) => QuestionRequest[]) => void;
+  setSendError: (msg: string) => void;
+  refreshQuestions: () => unknown;
+  clearAttention: (sessionID: string) => void;
+}) {
+  return async (q: QuestionRequest, answers: string[][]): Promise<void> => {
+    const que = q.requestId;
+    // No reply token → unanswerable ask (stale/orphan/cross-session leak).
+    // Auto-dismiss instead of surfacing an error the user can't clear.
+    if (!que) {
+      args.dropQuestion((prev) => prev.filter((x) => x.id !== q.id));
+      args.clearAttention(q.sessionID);
+      return;
+    }
+    args.dropQuestion((prev) => prev.filter((x) => x.id !== q.id));
+    // Clear the sidebar attention dot immediately.
+    args.clearAttention(q.sessionID);
+    try {
+      await window.api.opencodeQuestionReply(que, answers, q.sessionID);
+    } catch (e) {
+      args.setSendError(String((e as Error)?.message ?? e));
+      void args.refreshQuestions();
+    }
+  };
 }

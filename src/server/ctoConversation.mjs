@@ -47,6 +47,49 @@ function describeErr(err) {
 }
 
 /**
+ * The composer's optimistic messageID → the admission dedupe id, for the two
+ * opencode seams (admitDirect / admitCommand). Present only when it is a
+ * non-empty string; otherwise admission mints a fresh id. Distinct from
+ * submit()'s pass-through contract, which forwards the caller's `id` field
+ * verbatim.
+ */
+function messageIDToId(input) {
+  return typeof input.messageID === "string" && input.messageID.length > 0 ? input.messageID : undefined;
+}
+
+/**
+ * The shared middle of the three human-origin admission payloads (submit /
+ * admitDirect / admitCommand) — one assembly so the seams cannot drift.
+ *
+ * The per-seam differences stay AT the seams, parameterised here:
+ *   • `withText` — the prompt seams always carry a `text` key (even when the
+ *     value is undefined, exactly as the inline `text: input.text` did); the
+ *     command seam carries none (its kind is "command").
+ *   • `id` — submit() passes the caller's idempotency key through VERBATIM
+ *     (undefined → absent); the opencode seams derive it from the composer's
+ *     optimistic messageID via messageIDToId().
+ *   • property ORDER is preserved exactly (text, id, model,
+ *     expectedGeneration, attachments) so each seam's submitted record keeps
+ *     the key order it always had — admission persists these records and
+ *     their serialized shape is part of the durable store.
+ * `mentions` and the command-only fields (kind/command/args) remain at the
+ * seams: they are ordered differently per seam (mentions after the shared
+ * fields on the prompt seams, kind/command/args before the shared fields on
+ * the command seam), so folding them in here would change record shape.
+ */
+function humanAdmissionFields(input, { withText, id }) {
+  return {
+    ...(withText ? { text: input.text } : {}),
+    ...(id !== undefined ? { id } : {}),
+    ...(input.model !== undefined ? { model: input.model } : {}),
+    ...(input.expectedGeneration !== undefined ? { expectedGeneration: input.expectedGeneration } : {}),
+    ...(Array.isArray(input.attachments) && input.attachments.length > 0
+      ? { attachments: input.attachments }
+      : {}),
+  };
+}
+
+/**
  * The background dedupe identity is the CALLER's stable delivery identity
  * (`ctoKey`) — NEVER the content. Admission dedups by id (and returns the
  * existing record even when terminal), so content-derived ids made a
@@ -204,13 +247,7 @@ export function createCtoConversationService({
     requireInputObject(input);
     return admission.submit({
       origin: "human",
-      text: input.text,
-      ...(input.id !== undefined ? { id: input.id } : {}),
-      ...(input.model !== undefined ? { model: input.model } : {}),
-      ...(input.expectedGeneration !== undefined ? { expectedGeneration: input.expectedGeneration } : {}),
-      ...(Array.isArray(input.attachments) && input.attachments.length > 0
-        ? { attachments: input.attachments }
-        : {}),
+      ...humanAdmissionFields(input, { withText: true, id: input.id }),
       ...(Array.isArray(input.mentions) && input.mentions.length > 0 ? { mentions: input.mentions } : {}),
       agent: resolveAgent(input.agent),
     });
@@ -302,15 +339,7 @@ export function createCtoConversationService({
     requireInputObject(input);
     return admission.submit({
       origin: "human",
-      text: input.text,
-      ...(typeof input.messageID === "string" && input.messageID.length > 0
-        ? { id: input.messageID }
-        : {}),
-      ...(input.model !== undefined ? { model: input.model } : {}),
-      ...(input.expectedGeneration !== undefined ? { expectedGeneration: input.expectedGeneration } : {}),
-      ...(Array.isArray(input.attachments) && input.attachments.length > 0
-        ? { attachments: input.attachments }
-        : {}),
+      ...humanAdmissionFields(input, { withText: true, id: messageIDToId(input) }),
       ...(Array.isArray(input.mentions) && input.mentions.length > 0 ? { mentions: input.mentions } : {}),
       agent: resolveAgent(input.agent),
     });
@@ -334,14 +363,7 @@ export function createCtoConversationService({
       kind: "command",
       command: input.command,
       args: input.arguments,
-      ...(typeof input.messageID === "string" && input.messageID.length > 0
-        ? { id: input.messageID }
-        : {}),
-      ...(input.model !== undefined ? { model: input.model } : {}),
-      ...(input.expectedGeneration !== undefined ? { expectedGeneration: input.expectedGeneration } : {}),
-      ...(Array.isArray(input.attachments) && input.attachments.length > 0
-        ? { attachments: input.attachments }
-        : {}),
+      ...humanAdmissionFields(input, { withText: false, id: messageIDToId(input) }),
       agent: resolveAgent(input.agent),
     });
   }

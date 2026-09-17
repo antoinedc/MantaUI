@@ -63,6 +63,8 @@ import {
 } from "./chatUtils";
 import {
   appendPromptHistory,
+  makePermissionReplyHandler,
+  makeQuestionReplyHandler,
   mimeToInputMode,
   resolveAgentMentions,
   type ResolvedAgentMention,
@@ -899,42 +901,27 @@ function CtoConversation(props: {
   const mediaByMessageId = useMemo(() => new Map(), []);
   const widgetsByMessageId = useMemo(() => new Map(), []);
 
-  // Permissions/questions replies — same routing as the ordinary composer.
+  // Permissions/questions replies — the ONE shared implementation
+  // (makePermissionReplyHandler / makeQuestionReplyHandler in chatShared),
+  // bound here to this surface's bus accessors so the two chat surfaces
+  // (this and ChatPanel) cannot drift apart.
   const replyPermission = useCallback(
-    async (
-      requestId: string,
-      reply: "once" | "always" | "reject",
-      recordSessionId?: string,
-    ) => {
-      bus.setPermissions((prev) => prev.filter((p) => p.id !== requestId));
-      useStore.getState().setChatAttention(sessionId, null);
-      const sid = recordSessionId ?? sessionId;
-      try {
-        await window.api.opencodePermissionReply(requestId, reply, sid);
-      } catch (e) {
-        setSendError(String((e as Error)?.message ?? e));
-        void bus.refreshPermissions();
-      }
-    },
+    makePermissionReplyHandler({
+      sessionId,
+      dropPermission: bus.setPermissions,
+      setSendError,
+      refreshPermissions: bus.refreshPermissions,
+      clearAttention: (sessionID) => useStore.getState().setChatAttention(sessionID, null),
+    }),
     [bus, sessionId, setSendError],
   );
   const replyQuestion = useCallback(
-    async (q: QuestionRequest, answers: string[][]) => {
-      const que = q.requestId;
-      if (!que) {
-        bus.setQuestions((prev) => prev.filter((x) => x.id !== q.id));
-        useStore.getState().setChatAttention(q.sessionID, null);
-        return;
-      }
-      bus.setQuestions((prev) => prev.filter((x) => x.id !== q.id));
-      useStore.getState().setChatAttention(q.sessionID, null);
-      try {
-        await window.api.opencodeQuestionReply(que, answers, q.sessionID);
-      } catch (e) {
-        setSendError(String((e as Error)?.message ?? e));
-        void bus.refreshQuestions();
-      }
-    },
+    makeQuestionReplyHandler({
+      dropQuestion: bus.setQuestions,
+      setSendError,
+      refreshQuestions: bus.refreshQuestions,
+      clearAttention: (sessionID) => useStore.getState().setChatAttention(sessionID, null),
+    }),
     [bus, setSendError],
   );
   const rejectQuestion = useCallback(

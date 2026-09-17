@@ -37,6 +37,77 @@ import {
 } from "./providers.mjs";
 
 // ---------------------------------------------------------------------------
+// Shared writer-harness helpers.
+//
+// The three set* writers (setProviders / setSubagents / setReferences) share
+// one injectable shape ({patch, remove}), so their tests repeat the same
+// recording-writer wiring. These helpers hold the wiring ONCE; the writer,
+// the payloads, and the key-specific assertions stay at each test.
+// ---------------------------------------------------------------------------
+
+// Runs a REMOVE-ONLY call against a recording writer and returns what the
+// writer saw. The remove path must reach removeConfigKeys without any patch;
+// each caller asserts its own key shape.
+async function runRemoveThroughSetter(setter, removeArg) {
+  let removedPaths = null;
+  let patched = false;
+  const result = await setter(
+    { remove: removeArg },
+    {
+      patch: async () => { patched = true; return { ok: true }; },
+      remove: async (paths) => { removedPaths = paths; return { ok: true, changed: true }; },
+    },
+  );
+  return { result, removedPaths, patched };
+}
+
+// The two-step ordering probe shared by the writers' "patches before deleting
+// ... and stops when the patch fails" tests: the happy path must PATCH then
+// REMOVE, in order, and a failing patch must NOT delete. `setter` + the two
+// payloads differ per writer; the guarantees under test are the same.
+async function assertPatchBeforeRemove(setter, okBatch, failBatch) {
+  const order = [];
+  const okResult = await setter(
+    okBatch,
+    {
+      patch: async () => { order.push("patch"); return { ok: true }; },
+      remove: async () => { order.push("remove"); return { ok: true }; },
+    },
+  );
+  assert.equal(okResult.ok, true);
+  assert.deepEqual(order, ["patch", "remove"]);
+
+  let removed = false;
+  const failResult = await setter(
+    failBatch,
+    {
+      patch: async () => ({ ok: false, error: "boom" }),
+      remove: async () => { removed = true; return { ok: true }; },
+    },
+  );
+  assert.equal(failResult.ok, false);
+  assert.equal(removed, false, "must not delete when the upsert patch failed");
+}
+
+// Recording removeConfigKeys deps: serves SRC, captures the written text and
+// the restart count. Shared by the happy-path removal tests; each keeps its
+// own paths and written-content assertions. SRC is the shared opencode.jsonc
+// fixture (hoisted to module scope so the helper above can read it).
+const SRC = '{\n  // keep me\n  "provider": {\n    "a": {"x":1},\n    "b": {"y":2}\n  },\n  "model": "m"\n}';
+
+function recordingRemoveDeps() {
+  const state = { written: null, restarts: 0 };
+  return {
+    state,
+    deps: {
+      readText: async () => SRC,
+      writeText: async (t) => { state.written = t; },
+      restart: async () => { state.restarts += 1; return { ok: true }; },
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // parseModelsResponse
 // ---------------------------------------------------------------------------
 
@@ -527,15 +598,7 @@ describe("setProviders", () => {
   });
 
   it("routes a remove through removeConfigKeys (no longer rejects)", async () => {
-    let removedPaths = null;
-    let patched = false;
-    const result = await setProviders(
-      { remove: ["voska"] },
-      {
-        patch: async () => { patched = true; return { ok: true }; },
-        remove: async (paths) => { removedPaths = paths; return { ok: true, changed: true }; },
-      },
-    );
+    const { result, removedPaths, patched } = await runRemoveThroughSetter(setProviders, ["voska"]);
     assert.equal(result.ok, true);
     assert.deepEqual(removedPaths, [["provider", "voska"]]);
     assert.equal(patched, false, "a pure remove does not PATCH");
@@ -822,42 +885,18 @@ describe("setSubagents", () => {
   });
 
   it("routes a remove through removeConfigKeys against the agent key (no longer rejects)", async () => {
-    let removedPaths = null;
-    let patched = false;
-    const result = await setSubagents(
-      { remove: ["haiku"] },
-      {
-        patch: async () => { patched = true; return { ok: true }; },
-        remove: async (paths) => { removedPaths = paths; return { ok: true, changed: true }; },
-      },
-    );
+    const { result, removedPaths, patched } = await runRemoveThroughSetter(setSubagents, ["haiku"]);
     assert.equal(result.ok, true);
     assert.deepEqual(removedPaths, [["agent", "haiku"]]);
     assert.equal(patched, false);
   });
 
   it("patches before deleting on a mixed upsert+remove batch, and stops when the patch fails", async () => {
-    const order = [];
-    const okResult = await setSubagents(
+    await assertPatchBeforeRemove(
+      setSubagents,
       { upsert: [{ name: "fast", model: "anthropic/claude-haiku-4", description: "Fast" }], remove: ["haiku"] },
-      {
-        patch: async () => { order.push("patch"); return { ok: true }; },
-        remove: async () => { order.push("remove"); return { ok: true }; },
-      },
-    );
-    assert.equal(okResult.ok, true);
-    assert.deepEqual(order, ["patch", "remove"]);
-
-    let removed = false;
-    const failResult = await setSubagents(
       { upsert: [{ name: "fast", model: "x", description: "F" }], remove: ["haiku"] },
-      {
-        patch: async () => ({ ok: false, error: "boom" }),
-        remove: async () => { removed = true; return { ok: true }; },
-      },
     );
-    assert.equal(failResult.ok, false);
-    assert.equal(removed, false, "must not delete when the upsert patch failed");
   });
 });
 
@@ -1396,42 +1435,18 @@ describe("setReferences", () => {
   });
 
   it("routes a remove through removeConfigKeys against the references key (no longer rejects)", async () => {
-    let removedPaths = null;
-    let patched = false;
-    const result = await setReferences(
-      { remove: ["docs"] },
-      {
-        patch: async () => { patched = true; return { ok: true }; },
-        remove: async (paths) => { removedPaths = paths; return { ok: true, changed: true }; },
-      },
-    );
+    const { result, removedPaths, patched } = await runRemoveThroughSetter(setReferences, ["docs"]);
     assert.equal(result.ok, true);
     assert.deepEqual(removedPaths, [["references", "docs"]]);
     assert.equal(patched, false);
   });
 
   it("patches before deleting on a mixed batch, and stops when the patch fails", async () => {
-    const order = [];
-    const okResult = await setReferences(
+    await assertPatchBeforeRemove(
+      setReferences,
       { upsert: [{ alias: "docs", path: "../docs" }], remove: ["old"] },
-      {
-        patch: async () => { order.push("patch"); return { ok: true }; },
-        remove: async () => { order.push("remove"); return { ok: true }; },
-      },
-    );
-    assert.equal(okResult.ok, true);
-    assert.deepEqual(order, ["patch", "remove"]);
-
-    let removed = false;
-    const failResult = await setReferences(
       { upsert: [{ alias: "docs", path: "../docs" }], remove: ["old"] },
-      {
-        patch: async () => ({ ok: false, error: "boom" }),
-        remove: async () => { removed = true; return { ok: true }; },
-      },
     );
-    assert.equal(failResult.ok, false);
-    assert.equal(removed, false, "must not delete when the upsert patch failed");
   });
 
   it("no-ops when there is nothing to upsert", async () => {
@@ -1462,21 +1477,14 @@ describe("setReferences", () => {
 // ---------------------------------------------------------------------------
 
 describe("removeConfigKeys", () => {
-  const SRC = '{\n  // keep me\n  "provider": {\n    "a": {"x":1},\n    "b": {"y":2}\n  },\n  "model": "m"\n}';
-
   it("deletes a key and leaves a // comment elsewhere intact", async () => {
-    let written = null;
-    let restarts = 0;
-    const result = await removeConfigKeys([["provider", "b"]], {
-      readText: async () => SRC,
-      writeText: async (t) => { written = t; },
-      restart: async () => { restarts++; return { ok: true }; },
-    });
+    const { state, deps } = recordingRemoveDeps();
+    const result = await removeConfigKeys([["provider", "b"]], deps);
     assert.equal(result.ok, true);
     assert.equal(result.changed, true);
-    assert.ok(written.includes("// keep me"), "comment preserved");
-    assert.ok(!written.includes('"b"'), "removed key is gone");
-    assert.equal(restarts, 1);
+    assert.ok(state.written.includes("// keep me"), "comment preserved");
+    assert.ok(!state.written.includes('"b"'), "removed key is gone");
+    assert.equal(state.restarts, 1);
   });
 
   it("missing key → ok:true changed:false, writer NOT called, restart NOT called", async () => {
@@ -1494,18 +1502,13 @@ describe("removeConfigKeys", () => {
   });
 
   it("multi-path call removes all and restarts exactly once", async () => {
-    let written = null;
-    let restarts = 0;
-    const result = await removeConfigKeys([["provider", "a"], ["provider", "b"]], {
-      readText: async () => SRC,
-      writeText: async (t) => { written = t; },
-      restart: async () => { restarts++; return { ok: true }; },
-    });
+    const { state, deps } = recordingRemoveDeps();
+    const result = await removeConfigKeys([["provider", "a"], ["provider", "b"]], deps);
     assert.equal(result.ok, true);
     assert.equal(result.changed, true);
-    assert.equal(restarts, 1);
-    assert.ok(!written.includes('"a"') && !written.includes('"b"'));
-    assert.ok(written.includes("// keep me"));
+    assert.equal(state.restarts, 1);
+    assert.ok(!state.written.includes('"a"') && !state.written.includes('"b"'));
+    assert.ok(state.written.includes("// keep me"));
   });
 
   it("restart failure → ok:false (never reports success while a live opencode holds the key)", async () => {
