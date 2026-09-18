@@ -50,6 +50,10 @@ import { makeWatcher as buildWatcher, validatePredicate } from "./ctoWatchers.mj
 // ctoContext's dependency graph contains no prompt dispatch / session or
 // window creation (opencodeDb only).
 import { ctoListSessions, ctoSearch, ctoAround } from "./ctoContext.mjs";
+// P4 (spec §7): the `projects` + `sessions` control-tool families. Composed
+// from the ENGINE's own read deps (so engine tests inherit their fakes);
+// write deps default to the real server operations inside the factory.
+import { createCtoMantaControl, registerCtoMantaControlTools } from "./ctoMantaTools.mjs";
 
 export const CTO_STORE_PATH = statePath("cto.json");
 
@@ -1007,6 +1011,26 @@ export function createCtoEngine(deps = {}) {
       return { ok: true, data: { entries } };
     },
   });
+
+  // -------------------------------------------------------------------------
+  // §7 control-tool families — projects + sessions (P4)
+  // -------------------------------------------------------------------------
+  // Composed from the engine's read deps (listProjects/listSessions/listModels/
+  // configGet/gitStatus) so engine tests inherit their fakes; every write dep
+  // defaults to the REAL server operation inside the factory. All mutations
+  // are confirm-mode (a side effect needs the user's go-ahead, like `watch`);
+  // all reads are auto and provably dispatch-free (ctoMantaTools.test.mjs
+  // wires throwing write spies at THIS composition boundary).
+  const mantaControl =
+    deps.mantaControl ??
+    createCtoMantaControl({
+      listProjects,
+      listSessions,
+      listModels,
+      configGet,
+      gitStatus,
+    });
+  registerCtoMantaControlTools(register, mantaControl);
 
   // -------------------------------------------------------------------------
   // Dispatch
