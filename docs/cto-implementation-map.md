@@ -140,10 +140,21 @@ Every fact is labeled:
   `resolveForgeOwner`, `observeEvent` completion (sawBusy/idle), sweeper (30-min timeout,
   `delegate.mjs` sweeper), boot reconciliation in `index.mjs`.
 
-## 4. Project stable ID (spec §4.1 / §5.1 `ProjectRef`) — UNRESOLVED
+## 4. Project stable ID (spec §4.1 / §5.1 `ProjectRef`) — RESOLVED (probe pass 2026-09-18)
 
 **Seams:** `src/server/tmux.mjs` (`parseSessions`, `listProjects`), `~/.manta/tmux-sessions.json`
 store, `src/server/local.mjs` (`listProjects` config store), `src/server/projectsRoute.mjs`.
+
+Label vocabulary: **SOURCE** = schema fact (read-only dump of the live `opencode.db`); **OBSERVATION**
+= row sample at an instant (a sample is not a rule); **PROVEN** = established by the repeatable
+probe pass of 2026-09-18 (log at the end of this section), corroborated by opencode **v1.18.29**
+source (the installed binary's version): the derivation rule lives in
+`packages/core/src/project.ts` (`resolve()` → `Project.fromDirectory()` migration + upsert),
+`packages/core/src/git.ts` (`repo.discover` = `rev-parse --show-toplevel` / `--git-common-dir`;
+`remote.get-url origin`; `rev-list --max-parents=0 HEAD`), `packages/core/src/util/hash.ts`
+(`Hash.fast` = sha1), `packages/opencode/src/session/session.ts` (sessions stamp
+`ctx.project.id`, resolved at instance boot), and
+`packages/core/src/control-plane/workspace.sql.ts` (the `workspace` table).
 
 - **Manta-side project identity today is the tmux session NAME. [PROVEN]** A "project" is a
   tmux session (`projects[].tmuxSession`) with `defaultCwd` derived from its first window's
@@ -152,44 +163,182 @@ store, `src/server/local.mjs` (`listProjects` config store), `src/server/project
   no archive metadata, no ownership store. Window-level stamps exist as tmux user options:
   `@manta-session-id` (window → opencode session), `@manta-worktree-path`, `@manta-owner`
   (`"user"` / `"job"` today; `"cto"` unclaimed).
-- **opencode persists TWO distinct identifier tables plus path mappings, and the spec's
-  `ProjectRef` mapping is UNRESOLVED until the identity semantics are verified.** Evidence
-  split below into SOURCE (column definitions, from the read-only schema dump of the live
-  `opencode.db`, 2026-09-15) and OBSERVATION (row samples at that instant — a sample is not a
-  rule; the id-derivation rule was NOT probed and no further live probing is planned):
-  - SOURCE `project` — columns `id` (PRIMARY KEY, 40-hex-shaped), `worktree` (path string),
-    `vcs`, `name`. OBSERVATION: rows seen include one with `id="global"`, `worktree="/"`
-    (a synthetic row), and rows pairing 40-hex ids with distinct absolute worktree paths.
-    **UNVERIFIED (do not infer):** how the id is derived; whether two worktrees of the same
-    repository share or split a project row; what happens to the row on a directory move;
-    whether `worktree` is unique per row. The earlier draft of this map asserted per-checkout
-    uniqueness from the sample — retracted; the sample is consistent with several rules.
-  - SOURCE `workspace` — columns `id`, `project_id`, `directory`, `branch`. OBSERVATION:
-    sampled sessions left `workspace_id` null. **UNVERIFIED:** workspace identity semantics
-    (per-branch? per-directory? lifecycle?), whether ids are populated or unique — do not
-    infer "unique workspace" from the table's existence.
-  - SOURCE `project_directory (project_id, directory)` — a directory→project mapping table.
-    OBSERVATION: one row per observed directory, including the synthetic `global` project.
-  - SOURCE `session` — `project_id NOT NULL`, `workspace_id` nullable; the Session API schema
-    exposes `projectID`/`workspaceID`. OBSERVATION: the probe session (map §8, non-repo dir)
-    carried `projectID="global"`, `workspaceID` absent.
-  - **Mapping status: UNRESOLVED.** The spec's `ProjectRef = {workspaceId, repositoryId,
-    repositoryRoot}` has no verified counterpart: no DB field observed so far carries
-    *repository* identity (`project.vcs` holds only the VCS kind string, not a remote URL —
-    source fact about one column, not proof the rest of the row cannot yield one, but nothing
-    observed does). `project.id` / `workspace.id` semantics are unverified as above. P2a/P3a
-    must NOT settle any observed id into `ProjectRef.workspaceId` or conflate the three
-    identifier classes: verify actual semantics first (row creation for worktrees/global,
-    move behavior, `workspace_id` population), then extend Manta metadata once with the
-    explicit mapping — a branch name or display title is never the key (spec §4.1).
+- **`project.id` is a REPOSITORY-identity hash — not a path hash, not random. [PROVEN]**
+  SOURCE: `project` columns `id` (TEXT PRIMARY KEY, 40-hex), `worktree` (TEXT NOT NULL), `vcs`,
+  `name`, `icon_url`, `time_created`/`time_updated`/`time_initialized`, `sandboxes` (JSON),
+  `commands`; the only unique index is the PK autoindex — **`worktree` carries NO unique
+  constraint**, and the probe pass produced a live counter-example to uniqueness (two project
+  rows sharing one worktree path, below). Derivation, resolved when an opencode instance boots
+  for a directory, in precedence order (each step PROVEN by a predicted-hash match in the live
+  probe pass, and by upstream v1.18.29 `resolve()`):
+  1. no git repo at or above the directory → the literal id `"global"`;
+  2. git repo with a usable `origin` remote (non-`file://` URL) → `sha1("git-remote:" + host +
+     "/" + path)` with the host lowercased and `.git` stripped. Probe repo with
+     `origin git@fake.example:cto/identity-remote-probe.git` got id `2fe13b47495607a4c6150e1a37c906ca077fc747`
+     = exactly sha1("git-remote:fake.example/cto/identity-remote-probe"); production rows match
+     the same function (`afe412f7…` = sha1("git-remote:github.com/antoinedc/MantaUI"),
+     `4ad07051…` = sha1("git-remote:github.com/antoinedc/drone-ai"));
+  3. no remote → the cached id in the file `<git-common-dir>/opencode`, which opencode itself
+     writes at resolve time (OBSERVATION: the file appeared during the probe with the id inside);
+  4. no cache → sha1 of the first root commit (`git rev-list --max-parents=0 HEAD`); a probe
+     repo without a remote got id = its root commit exactly.
+  `project.worktree` holds the FIRST-seen worktree root for that id and the upsert never
+  overwrites it for non-global rows (source); later checkouts land in `project_directory` and
+  the `sandboxes` JSON instead.
+- **Two worktrees of one repository share ONE project row. [PROVEN — decisive for the CTO]**
+  Probe: one repo + two `git worktree add` checkouts → sessions in both worktrees carried the
+  SAME `projectID`; exactly one `project` row existed for that id; each worktree ROOT got a
+  `project_directory` row and was appended to the row's `sandboxes` JSON; a session in a
+  SUBDIRECTORY also mapped to the repo project with NO new `project_directory` row (the recorded
+  directory is the resolved repo root, not the session's subdir — the session row's own
+  `directory` column keeps the subdir). opencode's "project" is therefore REPOSITORY-grained:
+  N worktrees = N directory rows under 1 project. (OBSERVATION: production rows mark linked
+  worktrees `strategy="git_worktree"` in `project_directory`; the probe's hand-made worktrees
+  got `strategy=null` and the marker's writer is UNVERIFIED — not load-bearing here.)
+- **Moves keep the id; deletes/recreates split it; one migration path. [PROVEN]**
+  - MOVE a repo dir → the id FOLLOWS the repo (remote, cache file, and history all move with
+    `.git`): same project row, same id. `project_directory` ACCUMULATES the new path and KEEPS
+    the stale old rows (no pruning observed across the probe window); the `sandboxes` JSON
+    self-prunes to existing dirs on every resolve; `project.worktree` keeps the stale
+    first-seen path. Production rows show the same residue (e.g. the drone project still lists
+    a moved-away directory).
+  - DELETE + RECREATE at the same path WITHOUT a remote → the fresh repo resolves to its NEW
+    root commit → a NEW project row; the old row LINGERS. One directory can map to MULTIPLE
+    project rows over time — an identity fork, observed live (two probe sessions in the same
+    path carried different project ids; `project_directory` PK is `(project_id, directory)`, so
+    the same directory legitimately appears under two projects).
+  - DELETE + RECREATE WITH the same remote → the SAME id returns (it is remote-derived) and the
+    same row is reused.
+  - ATTACH a remote LATER → opencode MIGRATES: the id becomes the remote hash (predicted value
+    matched), the old project row is DELETED, and existing sessions are re-pointed to the new
+    id in the DB. Identity migration is a first-class opencode behavior, not a guess.
+  - `git init` in a formerly non-repo dir retroactively CLAIMS that directory's existing
+    `global` sessions (probe: the earlier `global` session row was re-pointed to the new
+    project id).
+  - **Instance-cache caveat [PROVEN]:** within ONE opencode server process, a directory's
+    project id is pinned by the per-directory instance cache — a session created in a recreated
+    directory was stamped with the OLD id until the instance was disposed
+    (`POST /instance/dispose?directory=…`) or the service restarts. Observed ids can be stale
+    w.r.t. on-disk reality until the next fresh resolve.
+- **The `workspace` identifier class is DEAD on this box. [SOURCE + OBSERVATION]** SOURCE:
+  `workspace` columns `id` (PK), `type` NOT NULL, `name`, `branch`, `directory`, `extra`,
+  `project_id` NOT NULL FK→project (ON DELETE CASCADE), `time_used` NOT NULL; no unique
+  constraint on `directory`. Upstream, rows are created ONLY by the experimental workspaces
+  feature (`Workspace.create`, gated behind `OPENCODE_EXPERIMENTAL_WORKSPACES`) and
+  `session.workspace_id` is stamped only for sessions created through a workspace. OBSERVATION
+  (2026-09-18): 0 rows in `workspace`; 0 of 1143 sessions carry a non-null `workspace_id`.
+  Whether experimental workspaces are per-branch or per-directory is **UNVERIFIED** (feature
+  inactive here; enabling a global experimental flag was out of scope). Practical statement:
+  `ProjectRef.workspaceId` cannot be sourced from opencode today.
+- **Repository identity is derivable — for remote-backed repos `project.id` IS it. [PROVEN]**
+  No column carries a remote URL (SOURCE: the column list above; OBSERVATION: `vcs` holds only
+  the kind string, e.g. `"git"`). But for repos with a usable origin, `project.id =
+  sha1("git-remote:" + normalized)` — a deterministic function of repository identity, identical
+  on any machine cloning the same repo (verified against three independent live rows + the
+  probe). For remote-less repos the id is the root-commit hash — history identity, fork-prone
+  (see above). `file://` remotes are excluded by the normalizer (source; not probed separately).
+- **`project.id="global"` (worktree `"/"`) is the non-git bucket. [PROVEN]** Sessions in
+  directories with no git repo resolve to `global`; NO `project_directory` row is ever created
+  for it (probe + source: the directory-save step skips global). Manta's own CTO control
+  directory (`~/.manta/cto/…`, deliberately non-git) therefore resolves to the `global`
+  project — the CTO conversation session lives in the synthetic row.
 - **Manta has no second project registry today** — `listProjects` composes live tmux state +
-  the `tmux-sessions.json` reconciliation (`mantaOwned` stamp). Spec §5.1's "extend its
-  metadata once rather than inventing a second project registry" therefore means: map
-  tmux-project ⇄ opencode identifiers via directory (pane path / `defaultCwd` matching
-  `project.worktree`/`project_directory.directory`), and persist only the mapping edge if
-  needed — after the semantics above are verified. Branch names and titles are never keys —
-  matches current behavior (nothing derives identity from branch names except `worktreeName()`
-  in the Sidebar, which is display-only).
+  the `tmux-sessions.json` reconciliation (`mantaOwned` stamp). Branch names and titles are
+  never keys — matches current behavior (nothing derives identity from branch names except
+  `worktreeName()` in the Sidebar, which is display-only).
+
+### 4.1 Decision — durable project key and the persisted mapping edge
+
+**The durable project key is a Manta-minted id persisted ONCE on the Manta project record; no
+opencode identifier may serve as the key. Concretely: add `projectId` (minted once, at project
+creation or first sight) to each `~/.manta/config.json` `projects[]` entry, plus one optional
+cache field `opencodeProjectId`. Nothing else — no new store, no second registry.**
+
+Why not opencode's ids — against the four failure modes that matter:
+
+1. **User renames a tmux session** — the name is Manta's only project identity today [PROVEN],
+   and renames break it. A minted id survives renames provided Manta treats a rename as a
+   REBIND of the same record (rename is observable in tmux); never mint a new project on rename.
+2. **A repo with multiple worktrees** — opencode `project.id` is repository-grained [PROVEN],
+   while Manta's "project" is checkout/window-grained. Adopting opencode's id as the Manta key
+   would fuse all worktrees of a repo into one Manta project — exactly the class conflation
+   spec §4.1 forbids.
+3. **A directory move** — path keys break; opencode's id follows the repo [PROVEN]; a minted id
+   is indifferent.
+4. **A worktree deleted then recreated** — remote-backed repos keep the same opencode id
+   [PROVEN]; remote-less repos fork it [PROVEN]. A minted id is stable in both cases.
+   Re-attaching a recreated record to the old key must key on REPOSITORY identity (opencode
+   project id / normalized remote), never on path or name.
+
+**`ProjectRef` mapping (spec §5.1):**
+
+- `workspaceId` ← the Manta `projectId`. opencode's workspace class is dead on this box
+  [SOURCE + OBSERVATION]; do not pre-adopt experimental workspaces — extend the mapping only
+  if that feature ships for real.
+- `repositoryId` ← opencode `project.id`: for remote-backed repos it IS the repository identity
+  (deterministic, machine-stable) [PROVEN]; for remote-less repos mark `repositoryId` UNMAPPED
+  (spec §4.1's explicit-unmapped state) rather than persisting the fork-prone root-commit id.
+- `repositoryRoot` ← the validated checkout path at use time; never persisted as identity
+  (moves are normal).
+
+**`opencodeProjectId` cache semantics:** the last OBSERVED opencode project id for the record's
+directory — a cache, never authoritative. It changes legitimately (remote attach migrates it
+[PROVEN]; remote-less recreation forks it [PROVEN]; the per-directory instance cache can serve
+a stale value until dispose/restart [PROVEN]). On mismatch, adopt the new id — opencode has
+already migrated its sessions; Manta follows, it does not fight. Live re-resolution paths: the
+session object's `projectID` field, or a read-only `project_directory` lookup by directory
+(same read path as `opencodeDb.mjs` — note a directory lookup can return MULTIPLE projects
+after a fork; disambiguate by liveness, not by ordering).
+
+**Still forbidden (unchanged):** branch names, display titles, tmux names, and paths as keys;
+settling any observed id into `ProjectRef` without the semantics above.
+
+#### Probe log (re-runnable, 2026-09-18)
+
+Zero-model, loopback-only (`http://127.0.0.1:4096`), DB read via `node:sqlite`
+`DatabaseSync(path, {readOnly: true})` at `$HOME/.local/share/opencode/opencode.db` (same
+resolution as `src/server/opencodeDb.mjs`). All sessions carried
+`metadata:{probe:"cto-identity-probe"}` and titles `cto-idprobe-*` (deliberately NOT the
+`manta-*` ephemeral-reaper prefix); every probe session was DELETEd and verified 404 afterward,
+and every throwaway directory removed. `opencode-serve` was never restarted; the only
+per-directory side effect was `POST /instance/dispose?directory=…` on the probe's own
+directories.
+
+```
+1. mkdir /home/dev/projects/cto-probe-nonrepo                (no .git)
+   POST /session?directory=…  → projectID="global"; no project row, no project_directory row
+2. git init cto-probe-remote + 1 commit + remote origin git@fake.example:cto/identity-remote-probe.git
+   POST /session  → projectID == sha1("git-remote:fake.example/cto/identity-remote-probe")
+                    (predicted, matched); row created; .git/opencode cache file written with the id
+3. git init cto-probe-local + 1 commit, NO remote
+   POST /session  → projectID == root commit sha (predicted, matched)
+4. git worktree add cto-probe-local-wt1 / -wt2
+   POST /session ×2 → both SAME projectID as step 3; 1 project row; project_directory rows per
+                      worktree root; sandboxes JSON grew to both worktrees
+5. POST /session in cto-probe-local/sub → same projectID; NO new project_directory row
+6. worktree remove ×2; mv cto-probe-local → cto-probe-local-moved
+   POST /session → SAME projectID (id follows the repo); project_directory gained the new path
+                   and kept the stale ones; sandboxes pruned to existing dirs
+7. rm -rf moved dir; git init fresh at the ORIGINAL path + new commit
+   POST /session → STALE old id (instance cache) …
+   POST /instance/dispose?directory=… → POST /session → NEW projectID = new root commit;
+                   NEW project row; old row lingers (identity fork; same directory under 2 projects)
+8. git remote add origin git@fake.example:cto/identity-local-probe.git; dispose; POST /session
+   → projectID == sha1("git-remote:fake.example/cto/identity-local-probe") (predicted, matched);
+   old row DELETED; probe sessions re-pointed in the DB (migration proven live)
+9. git init in cto-probe-nonrepo + commit; dispose; POST /session
+   → the earlier "global" session of that directory was RE-POINTED to the new project id
+10. rm -rf cto-probe-remote; recreate at the same path with the SAME remote; dispose; POST /session
+   → SAME id as step 2 (remote-derived ids survive delete+recreate)
+Cleanup: DELETE /session/{id} ×12 (metadata-guarded), verify 404; rm -rf all probe dirs.
+```
+
+**Residue disclosure:** opencode-managed rows created BY OPENCODE during the probes remain in
+`opencode.db` — four inert `project` rows (`2fe13b47…`, `dc99338c…`, `d2727c1b…`, `c4eb0fe0…`)
+plus their `project_directory` rows, naming the removed `cto-probe-*` paths. Removing them
+would require writing to opencode's DB, which the read-only invariant forbids; they are the
+same class as pre-existing stale rows for dead directories. All probe SESSIONS and DIRECTORIES
+are gone (verified). `~/.manta` state was never touched.
 
 ## 5. DB source sandbox path (spec §14)
 
@@ -248,7 +397,7 @@ store, `src/server/local.mjs` (`listProjects` config store), `src/server/project
 | Headless parent dispatch? | Not supported: `resolveOwner` requires parent tmux window | PROVEN (failure path) |
 | `isolationRequired`? | No — worktree failure silently falls back to parent dir | PROVEN (fallback path) |
 | Job ID ordering? | `genId()` after worktree + window creation, inside store lock | PROVEN |
-| Stable project ID? | Manta: tmux session name only. opencode DB: `project(id, worktree, vcs, name)` incl. a synthetic `"global"` row and 40-hex ids paired with worktree paths (OBSERVED sample); id-derivation rule, worktree/repo sharing, and `workspace.id` semantics UNVERIFIED; no repository-identity field observed. **ProjectRef mapping UNRESOLVED (§4)** | schema PROVEN / row semantics UNVERIFIED |
+| Stable project ID? | Manta: tmux session name only. opencode: `project.id` is a repository-identity hash — sha1 of the normalized git remote (else cached `<common-dir>/opencode`, else root commit, else `"global"`); N worktrees share ONE project row; moves keep the id; remote-less recreate forks it; remote attach migrates it; `workspace` table unused (0 rows). **ProjectRef mapping RESOLVED — §4 + decision §4.1** | derivation + lifecycle PROVEN (probe pass 2026-09-18, §4 probe log) / experimental-workspace semantics UNVERIFIED |
 | `MANTA_STATE_HOME` redirects opencode DB? | No — only `MANTA_OPENCODE_DB`/`XDG_DATA_HOME`/`$HOME/.local/share` | PROVEN |
 | Read-only DB invariant? | `DatabaseSync(path, {readOnly:true})`, `null` on unsupported/missing | PROVEN + regression-pinned by this PR |
 
