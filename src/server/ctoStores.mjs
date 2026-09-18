@@ -243,6 +243,13 @@ export const bindingStore = createCtoJsonStore("binding", ctoPath("binding.json"
 // missing file still initializes the default). Per-record shape is
 // additionally validated by ctoAdmission's normalizeAdmissionPayload.
 export const admissionStore = createCtoJsonStore("admission", ctoPath("admission.json"), { strict: true });
+// P4 (unified-cto-spec §7): the `projects` + `sessions` control families'
+// durable bookkeeping — per-resource control records (archive flags, the
+// server-owned model/effort override, revisions) and the operation receipts
+// that make every mutation idempotent. Owned by ctoMantaTools.mjs. STRICT:
+// a corrupt payload fails loudly — silently reading it as empty would break
+// receipt replay (double-executing an external effect).
+export const mantaControlStore = createCtoJsonStore("manta-control", ctoPath("manta-control.json"), { strict: true });
 
 // ---------------------------------------------------------------------------
 // BET-1425 engine-state write hygiene, generalized in BET-1464 (defect 3) —

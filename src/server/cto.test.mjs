@@ -22,7 +22,7 @@ function makeEngine(overrides = {}) {
   return createCtoEngine(makeEngineDeps(overrides));
 }
 
-const TOOL_COUNT = 26; // 16 reads (BET-1164 + BET-1383 read_rollups/read_ledger) + read_inbox (BET-1397) + 3 watcher tools (BET-1165) + 3 drill-down read verbs (BET-1399) + 3 passive context verbs (P1c)
+const TOOL_COUNT = 41; // 16 reads (BET-1164 + BET-1383 read_rollups/read_ledger) + read_inbox (BET-1397) + 3 watcher tools (BET-1165) + 3 drill-down read verbs (BET-1399) + 3 passive context verbs (P1c) + 15 §7 projects/sessions control tools (P4)
 
 // ---------------------------------------------------------------------------
 // Registry integrity
@@ -62,6 +62,21 @@ test("registry exposes every cto read tool with a complete shape, all mode auto"
       "watch",
       "unwatch",
       "list_watches",
+      "projects_list",
+      "projects_inspect",
+      "projects_create",
+      "projects_update",
+      "projects_archive",
+      "projects_remove",
+      "sessions_list",
+      "sessions_inspect",
+      "sessions_usage",
+      "sessions_create",
+      "sessions_configure",
+      "sessions_fork",
+      "sessions_compact",
+      "sessions_archive",
+      "sessions_remove",
     ].sort(),
   );
   for (const t of tools) {

@@ -64,6 +64,7 @@ import { forgeDiffForCwd, forgeStatus, pullRequestForCwd, shipPullRequest, shipP
 import { listRules as forgeListRules, formatIssueRef, parseIssueRef } from "./forgeRules.mjs";
 import { clearStoredToken } from "./forge/auth.mjs";
 import { parseRules as parseForgeRules } from "../shared/forgeRules.mjs";
+import { resolveProjectCwd as sharedResolveProjectCwd } from "./projectCwd.mjs";
 
 // The number of rules (event entries) in a repo's rules YAML — shown in
 // Settings [G1] so a valid repo reads "3 rules".
@@ -463,29 +464,15 @@ export function buildHandlers({
   // opencode's session.create requires an absolute directory; per-pane
   // paneCurrentPath can drift (or be empty for fresh chat-holder panes), so
   // the workspace's defaultCwd is the canonical "where this project lives".
+  // The SOLE cwd resolver, extracted verbatim to projectCwd.mjs so the §7
+  // control-tool families share ONE implementation (never a reimplementation
+  // in a second module). The injected local/tmux namespaces keep this
+  // buildHandlers instance's I/O seams.
   async function resolveProjectCwd(sessionName, inputCwd) {
-    const trimmed = typeof inputCwd === "string" ? inputCwd.trim() : "";
-    if (trimmed && trimmed !== "~") return trimmed;
-    // 1. Prefer the stored project meta (set by the desktop on project create).
-    const cfg = await local.configGet();
-    const meta = cfg.projects?.find((p) => p.tmuxSession === sessionName);
-    const storedCwd = (meta?.defaultCwd ?? "").trim();
-    if (storedCwd && storedCwd !== "~") return storedCwd;
-    // 2. Fall back to the LIVE tmux session's directory. The config file is
-    //    frequently empty or stale (sessions created outside the desktop
-    //    project-create flow have no stored meta), which silently dropped every
-    //    new window into $HOME. listProjects() derives defaultCwd from the
-    //    session's first window's actual pane path — the canonical "where this
-    //    project lives" — so consult it before defaulting to ~.
-    try {
-      const projects = await tmux.listProjects();
-      const live = projects.find((p) => p.tmuxSession === sessionName);
-      const liveCwd = (live?.defaultCwd ?? "").trim();
-      if (liveCwd && liveCwd !== "~") return liveCwd;
-    } catch {
-      // tmux unavailable → fall through to the last-resort default below.
-    }
-    return storedCwd || trimmed || "~";
+    return sharedResolveProjectCwd(sessionName, inputCwd, {
+      configGet: local.configGet,
+      listProjects: tmux.listProjects,
+    });
   }
 
   // Resolve a caller's manta project (tmux session) name from its opencode
