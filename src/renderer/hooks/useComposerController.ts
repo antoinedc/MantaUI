@@ -138,10 +138,13 @@ export type ComposerControllerConfig = {
   onSchedules: () => void;
   onSecrets: () => void;
   onWebhooks: () => void;
-  // Pop the last CLIENT-queued message back into the box. Session: real. CTO:
-  // a no-op (the queue is server-owned and not client-drainable). Kept explicit
-  // so the divergence is in the contract, not smuggled through a shared queue.
-  onQueuePop: () => void;
+  // Pop the last CLIENT-queued message back into the box. Session: wired to
+  // the client queue, returning true IFF a queued item was actually popped.
+  // CTO: omitted entirely (the queue is server-owned and not client-drainable).
+  // Either way the shared ArrowUp gesture falls through to prompt history
+  // when nothing was popped — a surface with no client queue item never
+  // swallows the keypress.
+  onQueuePop?: () => boolean;
   // Only the ACTIVE panel renders pending screenshots + drives the OS detector
   // toast. A hidden/secondary surface passes false so it neither shows nor
   // consumes them.
@@ -669,7 +672,16 @@ export function useComposerController(config: ComposerControllerConfig): Compose
     onTypeaheadCancel: () => setTypeaheadFromHook(null),
     onHistoryUp: () => navigateHistory(-1),
     onHistoryDown: () => navigateHistory(1),
-    onQueuePop,
+    // ArrowUp on an empty box while running (the queue-pop gesture, shared
+    // with InputArea): pop the client-queued message when the surface HAS
+    // one; otherwise the honest gesture is prompt history — exactly what the
+    // same keypress does when idle. Never a swallowed no-op that also steals
+    // history from a surface whose queue is server-owned (the CTO) or whose
+    // client queue is momentarily empty (a session).
+    onQueuePop: () => {
+      if (onQueuePop?.() === true) return;
+      navigateHistory(-1);
+    },
     onPaste,
     refreshing,
     textareaAriaLabel,

@@ -612,6 +612,7 @@ describe("ChatPanel transcript rendering", () => {
 // added" integration test called for by BET-63.
 describe("ChatPanel composer submit", () => {
   let api: MockApi;
+  let bus: MockEventBus;
   let h: Harness | null = null;
 
   afterEach(() => {
@@ -715,6 +716,42 @@ describe("ChatPanel composer submit", () => {
     });
     await h.flush();
     // useInputHistory swapped the empty draft for the last user prompt.
+    expect(textarea.value).toBe("previous prompt");
+  });
+
+  it("while running with an EMPTY client queue, ArrowUp still recalls prompt history (fall-through, never a swallowed keypress)", async () => {
+    // The queue-pop branch (running + empty composer) must fall through to
+    // prompt history when the surface owns no client queue item to pop — the
+    // CTO surface (no client queue at all) and the session surface (queue
+    // currently empty) both inherit this from the shared InputArea.
+    const transcript = [
+      {
+        info: { id: "msg_u1", sessionID: "ses_test", role: "user" as const },
+        parts: [
+          { type: "text", id: "prt_u1", messageID: "msg_u1", text: "previous prompt" },
+        ],
+      },
+    ];
+    ({ api, bus } = installMockApi({
+      opencodeMessages: () => Promise.resolve(transcript),
+    }));
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    // The turn is running (the queue-pop branch's precondition).
+    await emitStreamAndFlush(bus, h, {
+      sub: "running",
+      sessionId: "ses_test",
+      payload: { running: true },
+    });
+    const textarea = h.container.querySelector("textarea") as HTMLTextAreaElement;
+    expect(textarea.value).toBe("");
+    await act(async () => {
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }),
+      );
+    });
+    await h.flush();
     expect(textarea.value).toBe("previous prompt");
   });
 

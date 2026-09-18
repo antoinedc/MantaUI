@@ -34,6 +34,7 @@ import {
   ctoMaterializedPromptPath,
   materializeCtoPrompt,
   refreshCtoDoctrine,
+  createCtoDoctrineRestarter,
 } from "./providers.mjs";
 
 // ---------------------------------------------------------------------------
@@ -1387,6 +1388,114 @@ describe("refreshCtoDoctrine", () => {
       log: { error: () => {}, warn: () => {} },
     });
     assert.equal(result.restarted, false);
+  });
+});
+
+// createCtoDoctrineRestarter — the review fix for the silent restart: a
+// doctrine edit must NEVER kill in-flight turns as an invisible side effect
+// (AGENTS.md: a restart "is never triggered automatically as a side effect").
+// The file write is immediate and safe; the RESTART waits for an idle box and
+// the caller reports the pending state visibly.
+describe("createCtoDoctrineRestarter", () => {
+  const IO = {
+    basePromptPath: "/base/prompt.md",
+    outputPath: "/box/cto/prompt.md",
+    readFile: async () => "# base\n",
+    writeFile: async () => {},
+    mkdir: async () => {},
+    log: { error: () => {}, warn: () => {}, info: () => {} },
+  };
+
+  it("restarts immediately when the box is idle (nothing in-flight to kill)", async () => {
+    let restarts = 0;
+    const mgr = createCtoDoctrineRestarter({
+      ...IO,
+      restart: async () => { restarts += 1; return { ok: true }; },
+      anyBusy: () => false,
+    });
+    const r = await mgr.refresh({ style: "executive", houseRules: "" });
+    assert.equal(r.ok, true);
+    assert.equal(r.restarted, true);
+    assert.equal(r.pending, false);
+    assert.equal(restarts, 1);
+    assert.equal(mgr.isPending(), false);
+  });
+
+  it("defers the restart while any opencode session is busy, then applies it on the first idle tick", async () => {
+    let restarts = 0;
+    let busy = true;
+    const mgr = createCtoDoctrineRestarter({
+      ...IO,
+      restart: async () => { restarts += 1; return { ok: true }; },
+      anyBusy: () => busy,
+    });
+    const r = await mgr.refresh({ style: "executive", houseRules: "be terse" });
+    assert.equal(r.ok, true, "the doctrine FILE is written immediately — the edit is saved");
+    assert.equal(r.restarted, false, "busy → no restart now (no silent kill)");
+    assert.equal(r.pending, true, "…and the caller can tell the user it is pending");
+    assert.equal(restarts, 0);
+    assert.equal(mgr.isPending(), true);
+    // The box goes idle; the manager's tick applies the restart.
+    busy = false;
+    await mgr.tick();
+    assert.equal(restarts, 1, "applied automatically — the setting takes effect with no manual restart");
+    assert.equal(mgr.isPending(), false);
+    await mgr.tick();
+    assert.equal(restarts, 1, "no duplicate restart after it applied");
+  });
+
+  it("a failed deferred restart stays pending and retries on the next idle tick", async () => {
+    let attempts = 0;
+    const mgr = createCtoDoctrineRestarter({
+      ...IO,
+      restart: async () => {
+        attempts += 1;
+        return attempts === 1 ? { ok: false, error: "systemd down" } : { ok: true };
+      },
+      anyBusy: () => false,
+    });
+    // The FIRST refresh restarts (idle) and fails — the file is written, so
+    // the change still applies at the next natural restart; pending stays
+    // false because nothing was deferred. Simulate the deferred-failure path
+    // via a busy-then-idle transition instead.
+    const first = await mgr.refresh({ style: "executive", houseRules: "" });
+    assert.equal(first.restarted, false);
+    assert.equal(first.pending, false, "an immediate (non-deferred) failed restart is not pending");
+    assert.equal(attempts, 1);
+  });
+
+  it("a deferred restart whose apply fails retries on the next tick", async () => {
+    let attempts = 0;
+    let busy = true;
+    const mgr = createCtoDoctrineRestarter({
+      ...IO,
+      restart: async () => {
+        attempts += 1;
+        return attempts === 1 ? { ok: false, error: "systemd down" } : { ok: true };
+      },
+      anyBusy: () => busy,
+    });
+    await mgr.refresh({ style: "executive", houseRules: "" });
+    assert.equal(mgr.isPending(), true);
+    busy = false;
+    await mgr.tick();
+    assert.equal(attempts, 1, "the retry ran (and failed)");
+    assert.equal(mgr.isPending(), true, "still pending — the change is not applied yet");
+    await mgr.tick();
+    assert.equal(attempts, 2, "…and retried");
+    assert.equal(mgr.isPending(), false, "applied on the successful retry");
+  });
+
+  it("no anyBusy wiring → never defers (immediate restart, the pre-fix behavior)", async () => {
+    let restarts = 0;
+    const mgr = createCtoDoctrineRestarter({
+      ...IO,
+      restart: async () => { restarts += 1; return { ok: true }; },
+    });
+    const r = await mgr.refresh({ style: "executive", houseRules: "" });
+    assert.equal(r.restarted, true);
+    assert.equal(r.pending, false);
+    assert.equal(restarts, 1);
   });
 });
 

@@ -328,11 +328,18 @@ export type AppConfig = {
   // on-call CTO agent's tone/initiative/reporting — never its read-only
   // guardrails. Default "executive". Changing this re-materializes the
   // agent's prompt and restarts opencode (see rpc.mjs `config:update` +
-  // providers.refreshCtoDoctrine).
+  // providers.createCtoDoctrineRestarter — the restart is DEFERRED while any
+  // opencode session is mid-turn, applied on the next idle poll).
   ctoStyle?: "executive" | "balanced" | "handson";
   // Free-text house rules appended verbatim, last, on top of the preset
   // above — refine the doctrine but can never remove a guardrail. Default "".
   ctoHouseRules?: string;
+  // TRANSIENT, server-computed projection — never persisted by the client
+  // and never written via config:update. True while a deferred doctrine
+  // restart is queued (box was busy at save time); the config:get /
+  // config:update responses report it so the UI can show "applies when the
+  // box is idle". Absent on boxes without the manager.
+  ctoDoctrineRestartPending?: boolean;
   // ----- Manta Optimizer (BET-1342 / Phase 2) -----
   // Master switch for the optimizer. DEFAULT FALSE. Opt-in: with it OFF the
   // optimizer changes nothing. It does NOT gate Automatic Manta Routing —

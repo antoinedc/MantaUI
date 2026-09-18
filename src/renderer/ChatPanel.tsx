@@ -357,7 +357,11 @@ export function ChatPanel({
   // the last CLIENT-queued message back into the box, but the message queue is
   // owned by useSseBus (constructed after the controller). Assigned right after
   // useSseBus; a no-op until then.
-  const queuePopRef = useRef<() => void>(() => {});
+  // The queue-pop gesture (ArrowUp on an empty box while running). Returns
+  // true IFF a queued item was popped — the shared controller falls through
+  // to prompt history when it didn't (an empty client queue must never
+  // swallow the keypress AND steal history).
+  const queuePopRef = useRef<() => boolean>(() => false);
   // Bumped after each submit so useInputHistory re-reads localStorage and the
   // freshly-persisted prompt becomes immediately cyclable (BET-257). The hook
   // can't watch localStorage on its own — we drive the re-read from here.
@@ -430,8 +434,10 @@ export function ChatPanel({
     onSecrets: () => togglePanel("secrets"),
     onWebhooks: () => togglePanel("webhooks"),
     // The session composer owns a CLIENT-side queue — pop the last queued
-    // message back into the box. setMessageQueue is owned by useSseBus (below),
-    // so the pop is wired through a bridge assigned right after useSseBus.
+    // message back into the box, returning whether anything was popped (the
+    // shared controller falls through to prompt history on a miss).
+    // setMessageQueue is owned by useSseBus (below), so the pop is wired
+    // through a bridge assigned right after useSseBus.
     onQueuePop: () => queuePopRef.current(),
     isActive,
     historyEpoch,
@@ -667,7 +673,9 @@ export function ChatPanel({
       last = q[q.length - 1];
       return q.slice(0, -1);
     });
-    if (last === undefined) return;
+    // Nothing queued → report the miss so the shared gesture falls through
+    // to prompt history instead of silently eating the keypress.
+    if (last === undefined) return false;
     setInput(last);
     requestAnimationFrame(() => {
       const el = inputRef.current;
@@ -675,6 +683,7 @@ export function ChatPanel({
       el.focus();
       el.setSelectionRange(last!.length, last!.length);
     });
+    return true;
   };
 
   // BET-1248: latch a completed compaction into `justCompactedRef` so the

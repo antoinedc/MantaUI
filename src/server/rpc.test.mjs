@@ -1909,3 +1909,57 @@ test("tmux:restore-topology stays ok:true past a per-window failure and reports 
   assert.equal(out.message, "Restored 2 windows · 1 failed.");
   assert.equal(calls.refreshNow, 1);
 });
+
+// ---------------------------------------------------------------------------
+// Deferred CTO doctrine restart (review fix): a doctrine edit must never
+// restart opencode as an invisible side effect (it kills every in-flight turn
+// box-wide). The wired manager defers while busy; the RPC response carries
+// the pending flag so the client can tell the user.
+// ---------------------------------------------------------------------------
+
+test("config:update defers the doctrine restart while the box is busy and reports pending on the response", async () => {
+  const refreshes = [];
+  const doctrineRestart = {
+    refresh: async (args) => {
+      refreshes.push(args);
+      return { ok: true, fellBack: false, path: "/p", restarted: false, pending: true };
+    },
+    isPending: () => true,
+  };
+  const applyConfigCalls = [];
+  const handlers = buildHandlers({
+    local: {
+      configGet: async () => ({ cto: { enabled: true }, ctoStyle: "executive", ctoHouseRules: "" }),
+      configUpdate: async (patch) => ({ cto: { enabled: true }, ...patch }),
+    },
+    syncState: { applyConfig: (c) => applyConfigCalls.push(c) },
+    doctrineRestart,
+  });
+  const next = await handlers["config:update"]({ ctoHouseRules: "be terse" });
+  assert.deepEqual(refreshes, [{ style: "executive", houseRules: "be terse" }],
+    "the manager (not a direct restart) owns the doctrine refresh");
+  assert.equal(next.ctoDoctrineRestartPending, true,
+    "the response tells the client the restart is pending (visible state)");
+  assert.equal(applyConfigCalls[0]?.ctoDoctrineRestartPending, undefined,
+    "the transient flag never rides the synced config delta");
+});
+
+test("config:get reports the pending doctrine restart so a reload shows the truth", async () => {
+  const doctrineRestart = { refresh: async () => ({}), isPending: () => true };
+  const handlers = buildHandlers({
+    local: { configGet: async () => ({ cacheTtl: "1h" }) },
+    doctrineRestart,
+  });
+  const cfg = await handlers["config:get"]();
+  assert.equal(cfg.ctoDoctrineRestartPending, true);
+});
+
+test("config:get with nothing pending does not add the flag as true", async () => {
+  const doctrineRestart = { refresh: async () => ({}), isPending: () => false };
+  const handlers = buildHandlers({
+    local: { configGet: async () => ({ cacheTtl: "1h" }) },
+    doctrineRestart,
+  });
+  const cfg = await handlers["config:get"]();
+  assert.equal(cfg.ctoDoctrineRestartPending, false);
+});

@@ -438,6 +438,13 @@ export function buildHandlers({
   // TypeError, and the opencode:prompt / opencode:run-command seams fall
   // through byte-identically to the raw oc routes.
   ctoConversation = null,
+  // The doctrine restart manager (providers.createCtoDoctrineRestarter, wired
+  // in index.mjs with the shared busy view + a tick poller). A ctoStyle /
+  // ctoHouseRules edit defers its opencode restart until the box is idle
+  // instead of killing in-flight turns invisibly, and reports the deferred
+  // state on the config responses. Null when not wired → config:update keeps
+  // the pre-fix immediate restart via providers.refreshCtoDoctrine.
+  doctrineRestart = null,
 }) {
   // The cto:conversation-* channels require the composed runtime. Answer with
   // an actionable message rather than an opaque crash when it isn't wired.
@@ -543,6 +550,13 @@ export function buildHandlers({
     // stored mirror is used unchanged rather than showing the user a guess.
     "config:get": async () => {
       const cfg = await local.configGet();
+      // Deferred doctrine restart (review fix): the pending flag rides EVERY
+      // config:get — always a boolean when the manager is wired (false =
+      // nothing pending) — so a reload re-renders the "applies when the box
+      // is idle" note. Unwired → the response is byte-identical to before.
+      const doctrineFlag = doctrineRestart
+        ? { ctoDoctrineRestartPending: doctrineRestart.isPending() === true }
+        : {};
       try {
         const live = await providers.readCacheTtl({ listProviders: oc.getProviders });
         if (live && live !== cfg.cacheTtl) {
@@ -553,17 +567,17 @@ export function buildHandlers({
             );
             if (applied.ok) {
               console.log("[config] applied stored cacheTtl=1h to opencode");
-              return cfg;
+              return { ...cfg, ...doctrineFlag };
             }
             console.warn("[config] could not apply stored cacheTtl:", applied.error);
           }
           await local.configUpdate({ cacheTtl: live });
-          return { ...cfg, cacheTtl: live };
+          return { ...cfg, cacheTtl: live, ...doctrineFlag };
         }
       } catch (e) {
         console.warn("[config] cacheTtl reconcile skipped:", e instanceof Error ? e.message : e);
       }
-      return cfg;
+      return { ...cfg, ...doctrineFlag };
     },
 
     // preload: ipcRenderer.invoke(IPC.configUpdate, patch)  → args[0] = patch (Partial<AppConfig>)
@@ -619,22 +633,39 @@ export function buildHandlers({
         }
       }
       // CTO operating-doctrine work: a preset or house-rules change must take
-      // effect without the user restarting anything manually. Re-materialize
-      // the composed prompt and restart opencode (providers.refreshCtoDoctrine
-      // reuses the SAME restart plumbing ensureCtoAgent/ensureMantaPlanAgent
-      // already use — never a second restart mechanism). Gated on `cto.enabled`
-      // (the on-call CTO agent actually being installed) so an unrelated box
-      // never eats a disruptive opencode restart for a setting nothing reads
-      // yet. Best-effort: never fails the config save itself.
+      // effect without the user restarting anything manually. The doctrine
+      // FILE is re-materialized immediately; the opencode RESTART is owned by
+      // `doctrineRestart` (providers.createCtoDoctrineRestarter, wired in
+      // index.mjs with the shared busy view): applied at once when the box is
+      // idle, DEFERRED while any opencode session is mid-turn. The old
+      // synchronous restart here killed every in-flight turn box-wide as an
+      // invisible side effect of a style CLICK or a house-rules BLUR.
+      // Gated on `cto.enabled` (the on-call CTO agent actually being
+      // installed) so an unrelated box never eats a disruptive opencode
+      // restart for a setting nothing reads yet. Best-effort: never fails the
+      // config save itself.
       if ((patch?.ctoStyle !== undefined || patch?.ctoHouseRules !== undefined) && next?.cto?.enabled) {
         try {
-          await providers.refreshCtoDoctrine({ style: next.ctoStyle, houseRules: next.ctoHouseRules });
+          // The EFFECTIVE doctrine inputs: what the patch set, else what was
+          // stored before the save (never assume configUpdate's merge shape).
+          const doctrineStyle = patch?.ctoStyle ?? prev?.ctoStyle ?? next?.ctoStyle;
+          const doctrineHouseRules = patch?.ctoHouseRules ?? prev?.ctoHouseRules ?? next?.ctoHouseRules;
+          if (doctrineRestart) {
+            await doctrineRestart.refresh({ style: doctrineStyle, houseRules: doctrineHouseRules });
+          } else {
+            // Not wired (older boxes / some tests): the pre-fix immediate path.
+            await providers.refreshCtoDoctrine({ style: doctrineStyle, houseRules: doctrineHouseRules });
+          }
         } catch (e) {
           console.warn("[cto-doctrine] refresh after config change failed:", e instanceof Error ? e.message : e);
         }
       }
       syncState.applyConfig(next);
-      return next;
+      // The transient pending flag rides the RESPONSE, never the synced
+      // config delta above (it is a live manager state, not a persisted
+      // setting). Unwired → the response shape is unchanged.
+      if (!doctrineRestart) return next;
+      return { ...next, ctoDoctrineRestartPending: doctrineRestart.isPending() === true };
     },
 
     // preload: ipcRenderer.invoke(IPC.projectMetaDelete, tmuxSession)  → args[0] = tmuxSession (string)

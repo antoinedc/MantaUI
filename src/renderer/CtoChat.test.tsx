@@ -28,6 +28,8 @@ import {
 } from "./testHarness";
 import { CtoChat } from "./CtoChat";
 import { CtoPanel } from "./CtoPanel";
+import { historyKey, appendPromptHistory } from "./chatShared";
+import { CTO_HISTORY_SCOPE } from "./hooks/useComposerController";
 import type { CtoConversationState, CtoSubmissionProjection } from "../shared/api";
 
 // Capture what the transcript receives. The inline question copy renders
@@ -1177,6 +1179,32 @@ async function mountFailingSubmit(
     expect(payloads[0].mentions).toBeUndefined();
     expect(payloads[0].agent).toBeUndefined();
     expect(payloads[0].attachments).toBeUndefined();
+  });
+
+  it("ArrowUp in an empty composer while running recalls prompt history — the keypress is not swallowed (no client queue to pop)", async () => {
+    // The CTO queue is SERVER-owned and deliberately not client-drainable, so
+    // ArrowUp-on-empty-while-running has no queue item to pop. The honest
+    // gesture is prompt history (the session surface's behaviour), never a
+    // silent no-op that ALSO steals the keypress from history.
+    localStorage.removeItem(historyKey(CTO_HISTORY_SCOPE.tmuxSession!, CTO_HISTORY_SCOPE.windowIndex!));
+    appendPromptHistory(CTO_HISTORY_SCOPE.tmuxSession, CTO_HISTORY_SCOPE.windowIndex!, "prior cto prompt");
+    h = mountCto();
+    await h.flush();
+    // The turn is running — the state where the queue-pop branch used to eat
+    // the keypress.
+    await emitStreamAndFlush(bus, h, {
+      sub: "running",
+      sessionId: SESSION,
+      payload: { running: true },
+    });
+    const textarea = h.container.querySelector("textarea") as HTMLTextAreaElement;
+    expect(textarea.value).toBe("");
+    await act(async () => {
+      textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    });
+    await h.flush();
+    expect(textarea.value).toBe("prior cto prompt");
+    localStorage.removeItem(historyKey(CTO_HISTORY_SCOPE.tmuxSession!, CTO_HISTORY_SCOPE.windowIndex!));
   });
 });
 

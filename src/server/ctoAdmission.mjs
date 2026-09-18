@@ -633,6 +633,15 @@ export function turnEndedFromTranscript(messages, userMessageId) {
  *        interrupt_pending (barrier; surfaced abortError) — it never
  *        terminalizes on events alone.
  * @param {(sessionId:string)=>boolean} [deps.isBusy]
+ * @param {(path:string)=>Promise<boolean>} [deps.fileExists] dispatch-time
+ *        attachment re-validation. The upload staging area (~/.manta-uploads)
+ *        is swept after `uploadCleanupHours` while a queued record can be
+ *        held indefinitely (busy turn, uncertain-abort barrier), so an
+ *        attachment that existed at submit() time may be GONE at dispatch.
+ *        When wired, every queued attachment's remotePath is re-checked
+ *        immediately before the send; a miss fails the record (actionable
+ *        error naming the file) instead of dispatching a dangling FilePart.
+ *        Unwired (null) → no re-check, dispatch proceeds.
  *        Shared busy view (production: promptDelivery.isBusy). Absent → an
  *        internal firehose-derived busy set is used instead.
  * @param {object} [deps.store] admission store (default ctoStores.admissionStore, strict)
@@ -653,6 +662,7 @@ export function createCtoAdmission({
   listMessages = null,
   abortSession = null,
   isBusy = null,
+  fileExists = null,
   store = admissionStore,
   now = () => Date.now(),
   newId = () => randomUUID(),
@@ -1208,6 +1218,45 @@ export function createCtoAdmission({
   async function sendAndClassify(claimed, targetBinding) {
     const sessionId = claimed.sessionId;
     const isCommand = claimed.kind === "command";
+    // Dispatch-time attachment re-validation (sweep guard): the staging area
+    // (~/.manta-uploads) is swept after uploadCleanupHours while this record
+    // can sit queued INDEFINITELY (a busy turn, or the uncertain-abort
+    // barrier until manual recovery), so an attachment present at submit()
+    // may be gone by now. Dispatching it anyway sends a dangling
+    // `file://` FilePart — verified live on opencode 1.18.29: prompt_async
+    // ACCEPTS the POST (204), then the turn dies in
+    // SessionPrompt.createUserMessage (PlatformError NotFound: readFile)
+    // BEFORE the user message persists — no history poison, but the message
+    // (text included) never goes out and the record lands "unknown", an
+    // UNRESOLVED status that holds the one-turn-at-a-time gate until manual
+    // recovery. A definitive local check turns that wedge into a visible,
+    // actionable failure: nothing is sent, the text is NOT sent as though
+    // complete, and the queue projection names the missing file. A probe
+    // ERROR is not proof of absence — fail open (send and let opencode's own
+    // resolution be the backstop); only a definite miss blocks the dispatch.
+    if (typeof fileExists === "function" && Array.isArray(claimed.attachments) && claimed.attachments.length > 0) {
+      const missing = [];
+      for (const a of claimed.attachments) {
+        let present = true;
+        try {
+          present = await fileExists(a.remotePath);
+        } catch {
+          present = true; // probe failure ≠ proof of absence — fail open
+        }
+        if (!present) missing.push(a.remotePath);
+      }
+      if (missing.length > 0) {
+        activeOps.delete(claimed.id);
+        acceptedBySession.delete(sessionId);
+        await markTransition(claimed.id, "dispatching", "failed", {
+          failedAt: now(),
+          error:
+            `Attachment no longer on disk (swept from the upload staging area before dispatch): ` +
+            `${missing.join(", ")}. Re-attach the file and send again — the message was NOT delivered.`,
+        });
+        return;
+      }
+    }
     let sendError = null;
     try {
       await bounded(

@@ -960,8 +960,9 @@ function CtoConversation(props: {
   //     surface uploads for real despite having no tmux project.
   //   - The SEND transport is the admission seam (`onSubmit` → submitTurn), NOT a
   //     client queue: the CTO queue is server-owned and not client-drainable, so
-  //     onQueuePop is a no-op (the pending bubbles below render the server's queue
-  //     projection instead).
+  //     `onQueuePop` is OMITTED and the shared controller's fall-through makes
+  //     the ArrowUp-on-empty-while-running gesture recall prompt history (the
+  //     pending bubbles below render the server's queue projection instead).
   // The resource toolbar is real parity: the CTO surface hosts its own
   // schedules / secrets / webhooks panels (rendered below), driven by the same
   // useSessionResources hook a session uses.
@@ -978,8 +979,9 @@ function CtoConversation(props: {
     onSchedules: () => resources.togglePanel("schedules"),
     onSecrets: () => resources.togglePanel("secrets"),
     onWebhooks: () => resources.togglePanel("webhooks"),
-    // The CTO queue is SERVER-owned — there is no client queue to pop from.
-    onQueuePop: () => {},
+    // No `onQueuePop`: the CTO queue is SERVER-owned — there is no client
+    // queue to pop. The shared controller's ArrowUp fall-through then does
+    // the honest thing (prompt history) instead of swallowing the keypress.
     isActive: true,
     cwd: "",
     configDefaultModel: defaultModel,

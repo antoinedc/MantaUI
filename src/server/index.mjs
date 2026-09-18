@@ -181,6 +181,7 @@ import {
   ensureMantaPlanAgent,
   ensureCtoAgent,
   materializeCtoPrompt,
+  createCtoDoctrineRestarter,
   CTO_AGENT_NAME,
   MANTA_PLAN_AGENT_NAME,
   readCacheTtl as readProvidersCacheTtl,
@@ -455,6 +456,21 @@ const ctoAdmissionEngine = createCtoAdmission({
   // SHARED busy view — one truth for both prompt engines (promptDelivery's
   // firehose-derived busy set; admission observes the same events itself).
   isBusy: promptDelivery.isBusy,
+  // Dispatch-time attachment re-validation (sweep guard): the staging area is
+  // swept after uploadCleanupHours while a queued record can be held
+  // indefinitely, so a file that existed at submit() may be gone at
+  // dispatch. ENOENT is a definitive miss (the record fails with an
+  // actionable error, nothing is sent); any other probe error is NOT proof
+  // of absence and is rethrown so the guard fails open.
+  fileExists: async (p) => {
+    try {
+      await stat(p);
+      return true;
+    } catch (e) {
+      if (e?.code === "ENOENT") return false;
+      throw e;
+    }
+  },
 });
 const ctoConversation = createCtoConversationService({
   binding: ctoBindingEngine,
@@ -470,6 +486,24 @@ const ctoConversation = createCtoConversationService({
   // Cheap change stamp for the seam-classification cache (one stat instead of
   // a binding.json read+parse on every ordinary project prompt).
   stamp: () => bindingStore.stamp(),
+});
+
+// Doctrine restart manager (review fix): a ctoStyle/ctoHouseRules edit must
+// never restart opencode as an invisible side effect — the old synchronous
+// restart killed every in-flight turn box-wide on a style radio CLICK. The
+// manager defers the restart until the box is idle and the RPC layer reports
+// the pending state on the config responses. `anyBusy` is promptDelivery's
+// firehose-derived busy set — the same truth the admission engine's busy gate
+// trusts (claude-TUI/shell panes are not opencode sessions and are unaffected
+// by an opencode-serve restart, so "any opencode turn in flight" is exactly
+// "a restart would kill something"). The tick poller applies a deferred
+// restart on the first idle beat; a failed apply retries on the next one.
+const ctoDoctrineRestarter = createCtoDoctrineRestarter({
+  anyBusy: () => promptDelivery.anyBusy(),
+});
+const { stop: stopCtoDoctrineTick } = startPoller(() => ctoDoctrineRestarter.tick(), {
+  intervalMs: 30_000,
+  label: "cto-doctrine",
 });
 // Bounded tick poller (spec §8.3 recovery): reconcile + pump with no inbound
 // events. startPoller surfaces failures via console.warn — a failed tick
@@ -1616,6 +1650,10 @@ rpcHandlers = buildHandlers({
   // `cto:conversation-*` channels and the opencode:prompt /
   // opencode:run-command anti-bypass seams.
   ctoConversation,
+  // The doctrine restart manager (created above): config:update defers a
+  // ctoStyle/ctoHouseRules restart until the box is idle and reports the
+  // pending state on the config responses.
+  doctrineRestart: ctoDoctrineRestarter,
   // BET-1336: quota-window forecast-at-reset read sources for the
   // optimizer:summary `windows` slice — the live polled snapshots + the
   // persisted observation history.

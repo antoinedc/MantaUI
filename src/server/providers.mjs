@@ -953,6 +953,106 @@ export async function refreshCtoDoctrine(deps = {}) {
   return { ...result, restarted };
 }
 
+/**
+ * The doctrine restarter — the review fix for the SILENT restart. The old
+ * refreshCtoDoctrine path restarted opencode synchronously inside
+ * `config:update`, i.e. on a style-radio CLICK or a house-rules BLUR: any
+ * in-flight opencode turn box-wide died with no user-visible signal
+ * (AGENTS.md: a restart "is never triggered automatically as a side effect"
+ * of an edit). The manager splits the two halves:
+ *
+ *   - refresh(): the doctrine FILE is materialized immediately (the edit is
+ *     saved, whatever happens next), but the RESTART is applied at once only
+ *     when the box is idle. Busy → the restart is deferred: `pending` flips
+ *     true and the caller reports it (`ctoDoctrineRestartPending` on the
+ *     config:get/config:update responses) so the UI can show "applies when
+ *     the box is idle".
+ *   - tick(): the poller's beat. While a restart is pending and the box has
+ *     gone idle, it applies the restart; a failed apply STAYS pending and
+ *     retries on the next tick, so the setting takes effect with no manual
+ *     action. Not pending → a cheap no-op.
+ *
+ * `anyBusy` is the shared busy view (promptDelivery's firehose-derived set —
+ * the same truth the admission engine's busy gate trusts). There is an
+ * unavoidable ~ms race between the idle check and the restart itself; that is
+ * the same window every "restart when idle" mechanism lives with. Without
+ * `anyBusy` wiring the manager restarts immediately (the pre-fix behaviour),
+ * so a bare construction can never silently defer.
+ *
+ * Pending state is in-memory for this manta-server life. If manta-server
+ * itself restarts while a restart is pending, the doctrine file is already
+ * on disk and the change still lands at the next natural opencode restart —
+ * nothing is lost, only the auto-apply.
+ *
+ * @param {object} [deps] materializeCtoPrompt deps (style/houseRules come per
+ *        call), plus:
+ * @param {() => Promise<{ok: boolean, error?: string}>} [deps.restart]
+ * @param {() => boolean} [deps.anyBusy] true while ANY opencode session is
+ *        mid-turn. Unwired → never defers.
+ * @param {{warn?: Function, error?: Function, info?: Function}} [deps.log]
+ * @returns {{refresh, tick, isPending}}
+ */
+export function createCtoDoctrineRestarter(deps = {}) {
+  const {
+    restart = restartOpencode,
+    anyBusy = null,
+    log = console,
+    ...materializeDeps
+  } = deps;
+  let pending = false;
+
+  async function refresh({ style, houseRules } = {}) {
+    // The FILE is written first and unconditionally — the edit is saved even
+    // if the restart is deferred or fails (the new prompt still takes effect
+    // at the next natural restart).
+    const result = await materializeCtoPrompt({ ...materializeDeps, style, houseRules, log });
+    if (!result.ok) {
+      log.warn?.("[cto-doctrine] materialize failed; restart deferred decision still applies");
+    }
+    const idle = !anyBusy || !anyBusy();
+    if (!idle) {
+      pending = true;
+      log.info?.("[cto-doctrine] box busy — doctrine restart deferred until idle");
+      return { ...result, restarted: false, pending: true };
+    }
+    let restarted = false;
+    try {
+      const r = await restart();
+      restarted = !!r?.ok;
+      if (!restarted) {
+        // An IMMEDIATE (non-deferred) failed restart is not "pending": the
+        // file is written, so the change still applies at the next natural
+        // restart — the same semantics as the pre-fix best-effort path.
+        log.warn?.("[cto-doctrine] immediate restart after doctrine change failed:", r?.error);
+      }
+    } catch (e) {
+      log.warn?.("[cto-doctrine] immediate restart after doctrine change threw:", e);
+    }
+    return { ...result, restarted, pending: false };
+  }
+
+  async function tick() {
+    if (!pending) return { applied: false };
+    if (anyBusy && anyBusy()) return { applied: false, deferred: true };
+    let r = null;
+    try {
+      r = await restart();
+    } catch (e) {
+      log.warn?.("[cto-doctrine] deferred restart threw; still pending, will retry:", e);
+      return { applied: false, error: String(e?.message ?? e) };
+    }
+    if (r?.ok) {
+      pending = false;
+      log.info?.("[cto-doctrine] deferred doctrine restart applied (box idle)");
+      return { applied: true };
+    }
+    log.warn?.("[cto-doctrine] deferred restart failed; still pending, will retry:", r?.error);
+    return { applied: false, error: r?.error };
+  }
+
+  return { refresh, tick, isPending: () => pending };
+}
+
 // ---------------------------------------------------------------------------
 // Prompt-cache TTL (cacheTtl → opencode's real wire TTL)
 // ---------------------------------------------------------------------------

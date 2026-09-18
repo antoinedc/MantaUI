@@ -162,6 +162,9 @@ type CtoSettingsConfig = {
   ctoStyle?: "executive" | "balanced" | "handson";
   // Free-text house rules, applied verbatim on top of the preset above.
   ctoHouseRules?: string;
+  // Transient server projection (never persisted by the client): a deferred
+  // doctrine restart is queued — the change applies when the box is idle.
+  ctoDoctrineRestartPending?: boolean;
 };
 
 // §11.2 defaults — the same constants ctoBudget.mjs enforces server-side.
@@ -1009,6 +1012,11 @@ export function SettingsView({
         ctoAutonomyThreshold: c?.ctoAutonomyThreshold,
         ctoStyle: c?.ctoStyle,
         ctoHouseRules: c?.ctoHouseRules,
+        // Transient server projection (review fix): a deferred doctrine
+        // restart is queued — the note below renders from this, on load
+        // included, so a reload keeps the "applies when the box is idle"
+        // state visible.
+        ctoDoctrineRestartPending: c?.ctoDoctrineRestartPending === true,
       });
       setCapText(String(c?.ctoAmbientCap ?? DEFAULT_AMBIENT_CAP_USD));
       setNightCapText(c?.ctoNightCapUsd != null ? String(c.ctoNightCapUsd) : "");
@@ -1041,7 +1049,29 @@ export function SettingsView({
       setConfig((c) => ({ ...(c ?? {}), ...patch }));
       try {
         const next = (await window.api.configUpdate(patch)) as CtoSettingsConfig;
-        setConfig((c) => ({ ...c, ...patch, ctoAmbientCap: next?.ctoAmbientCap }));
+        setConfig((c) => ({
+          ...c,
+          ...patch,
+          ctoAmbientCap: next?.ctoAmbientCap,
+          // The transient pending projection from the response (review fix):
+          // true = a deferred doctrine restart is queued. Absent (older box)
+          // reads as false — there was never a pending restart to show.
+          ctoDoctrineRestartPending: next?.ctoDoctrineRestartPending === true,
+        }));
+        // Only a doctrine EDIT toasts — an unrelated save that happens to
+        // return pending:true updates the note, it doesn't claim a doctrine
+        // change was just saved.
+        if (
+          next?.ctoDoctrineRestartPending === true &&
+          (patch.ctoStyle !== undefined || patch.ctoHouseRules !== undefined)
+        ) {
+          pushToast({
+            id: `cto-doctrine-pending-${Date.now()}`,
+            message:
+              "Saved. It applies when the box is idle — the agent service restarts " +
+              "automatically at the next quiet moment (any turn running then is ended).",
+          });
+        }
       } catch (e) {
         // BET-1468 item 2: restore exactly what was on screen before the
         // optimistic patch — the old `prev ?? {}` fabricated an empty config
@@ -1381,9 +1411,18 @@ export function SettingsView({
             <h3 className="text-sm font-semibold text-text">How the CTO reports to you</h3>
             <p className="mt-1 text-sm text-text-faint">
               Governs tone, initiative and reporting only — it can never turn off the
-              CTO&rsquo;s read-only guardrails. Saving restarts the CTO&rsquo;s background
-              agent, so it takes a few seconds before its next reply reflects the change.
+              CTO&rsquo;s read-only guardrails. Saving rewrites the CTO&rsquo;s prompt and
+              then restarts the box&rsquo;s background agent service so the change takes
+              effect — every project agent runs on that one service, so any agent turn
+              in flight anywhere on the box is ended by the restart.
             </p>
+            {config?.ctoDoctrineRestartPending ? (
+              <p className="mt-2 rounded-md border border-border-subtle bg-fill-active p-2 text-sm text-text-muted">
+                Saved — it applies when the box is idle: the background agent service
+                restarts automatically at the next quiet moment, ending any agent turn
+                that happens to be running then.
+              </p>
+            ) : null}
 
             <div className="mt-4 space-y-4">
               {/* Style preset */}

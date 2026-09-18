@@ -206,6 +206,10 @@ function buildService({ store = memoryStore(`t-${randomUUID()}`), binding = fake
     ...ocDeps(oc),
     now: () => clock.t,
     sleep: async () => {},
+    // Dispatch-time attachment re-validation defaults to "present" for the
+    // fake paths the other tests use (/tmp/upload/... exists on no disk);
+    // the sweep test overrides it with a targeted miss.
+    fileExists: async () => true,
     ...rest,
   });
   return { svc, store, binding, oc, clock };
@@ -1947,6 +1951,55 @@ test("attachments and mentions round-trip through a persisted record and reach s
   assert.deepEqual(oc.sends[0].attachments, SAMPLE_ATTACHMENTS, "dispatch hands them to sendPrompt unchanged");
   assert.deepEqual(oc.sends[0].mentions, SAMPLE_MENTIONS);
   assert.equal((await recordOf(svc, res.id)).status, "accepted");
+});
+
+test("a queued attachment swept from disk before dispatch fails the record — nothing sent, reason actionable", async () => {
+  // The upload staging area (~/.manta-uploads) is swept after
+  // uploadCleanupHours while a queued record can be held INDEFINITELY (a busy
+  // turn, or the permanent uncertain-abort barrier). Dispatch must
+  // RE-VALIDATE: a missing file must never reach sendPrompt as a dangling
+  // FilePart (opencode persists bad FileParts in session history forever,
+  // and this is the ONE durable role session), and the text must NOT go out
+  // as if the message were complete.
+  const missing = "/tmp/upload/swept.png";
+  let busy = true;
+  const { svc, oc } = buildService({
+    isBusy: () => busy,
+    fileExists: async (p) => p !== missing,
+  });
+  const res = await svc.submit({
+    text: "look at this",
+    origin: "human",
+    agent: "a",
+    attachments: [{ remotePath: missing, mime: "image/png", filename: "swept.png" }],
+  });
+  assert.equal(await statusOf(svc, res.id), "queued", "held by the busy turn — the sweep window");
+  // The staging sweep deletes the batch dir while the send is queued.
+  busy = false;
+  await svc.tick();
+  assert.equal(oc.sends.length, 0, "nothing dispatched — no dangling FilePart, no bare text");
+  const rec = await recordOf(svc, res.id);
+  assert.equal(rec.status, "failed", "a definitive failure, not a silent drop");
+  assert.ok((rec.error ?? "").includes(missing), "the reason names the missing file");
+  assert.ok(/re-attach|attach/i.test(rec.error ?? ""), "…and tells the user what to do");
+});
+
+test("the same sweep guard covers the sendCommand path (a queued slash command with a missing attachment sends nothing)", async () => {
+  const missing = "/tmp/upload/swept-cmd.png";
+  const { svc, oc } = buildService({
+    fileExists: async (p) => p !== missing,
+  });
+  await svc.submit({
+    origin: "human",
+    kind: "command",
+    command: "init",
+    args: "--force",
+    agent: "a",
+    attachments: [{ remotePath: missing, mime: "image/png", filename: "swept-cmd.png" }],
+  });
+  await svc.tick();
+  assert.equal(oc.commandSends.length, 0, "no dangling FilePart down the command endpoint either");
+  assert.equal(oc.sends.length, 0);
 });
 
 test("a same-id replay with the SAME attachments dedups; the SAME id with DIFFERENT attachments is a caller error", async () => {
