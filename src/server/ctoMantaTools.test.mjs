@@ -24,8 +24,11 @@
 //  G10  success never lies: every mutation actually drives its external dep
 //
 // Sandbox discipline: ctoTestGuard aborts without MANTA_STATE_HOME; every
-// store is a per-test fixture file under the sandbox; MANTA_OPENCODE_DB is
-// armed before imports so no handle can ever resolve the live box DB.
+// store is a per-test fixture file under the sandbox. MANTA_OPENCODE_DB is
+// armed before any test runs and before any DB handle could open (nothing in
+// this module's dependency graph opens one — these tests are pure/injected —
+// but the var is set so a future import of opencodeDb can never resolve the
+// live box DB).
 
 // BET-1490: shared fail-fast guard — must stay the first import.
 import "./ctoTestGuard.mjs";
