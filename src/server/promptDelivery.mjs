@@ -105,6 +105,14 @@ export function createPromptDelivery({ sendPrompt, redirect = null }) {
     return busy.has(sessionId);
   }
 
+  // Box-level idle view for consumers that need "ANY opencode turn in
+  // flight?" (the doctrine restart manager): the same firehose-derived set
+  // the per-session gate trusts. claude-TUI/shell panes are not opencode
+  // sessions and never appear here.
+  function anyBusy() {
+    return busy.size > 0;
+  }
+
   async function deliver({ sessionId, text, model, ctoKey }) {
     // P3a3 (spec §8.3): every writer to the CTO role session goes through the
     // durable admission queue — including this engine's background senders.
@@ -156,5 +164,5 @@ export function createPromptDelivery({ sendPrompt, redirect = null }) {
     }
   }
 
-  return { deliver, observeEvent, isBusy };
+  return { deliver, observeEvent, isBusy, anyBusy };
 }

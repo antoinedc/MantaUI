@@ -3,8 +3,11 @@
 // that keep every writer on the durable admission queue.
 //
 // Scope (deliberately small): the four authenticated conversation channels
-// (open / state / submit / interrupt) plus the anti-bypass seams that keep
-// every writer on the durable admission queue:
+// (open / state / submit / interrupt) plus the seams that route EVERY write
+// — including file attachments, resolved @agent mentions, and slash
+// commands (P3a3 full-parity widening, admission-contract ADR) — onto the
+// SAME durable admission queue. Nothing bypasses it, and as of this
+// widening nothing is rejected outright either:
 //   • the `opencode:prompt` / `opencode:run-command` RPC routes (human
 //     traffic aimed at the conversation session; the `opencode:abort` seam
 //     is deliberately DEFERRED to its own PR — a session-wide abort of the
@@ -22,9 +25,16 @@
 // API" — spec §3.1).
 //
 // Anti-recursion: the admission engine sends via the RAW low-level oc client
-// (its own sendPrompt dep), so a redirected delivery can never loop back
-// through promptDelivery, and admission's own dispatch never re-enters this
-// service. The firehose tap feeding admission.observeEvent is one-way.
+// (its own sendPrompt/sendCommand deps), so a redirected delivery can never
+// loop back through promptDelivery, and admission's own dispatch never
+// re-enters this service. The firehose tap feeding admission.observeEvent is
+// one-way.
+//
+// PLAN MODE (full-parity widening item 5): the caller can STILL never choose
+// an arbitrary agent for the CTO conversation — that invariant is unchanged
+// — but the caller MAY request plan mode. See resolveAgent() below for the
+// closed, one-entry allowlist that makes this possible without opening the
+// door any wider.
 
 import { createHash } from "node:crypto";
 // Terminal statuses — the redirect reports a submit receipt's terminal
@@ -32,18 +42,51 @@ import { createHash } from "node:crypto";
 // a run that will never happen).
 import { TERMINAL } from "./ctoAdmission.mjs";
 
-/**
- * The single rejection copy for the "not admitted yet" seams. Both the
- * attachment-bearing direct send and the slash-command route throw it: the
- * CTO conversation API admits PLAIN TEXT only until a later phase adds
- * slash-command / file-part support. Actionable — names the API to use.
- */
-export const CTO_CONVERSATION_UNSUPPORTED_MESSAGE =
-  "the CTO conversation API admits plain text only — submit via cto:conversation-submit; " +
-  "slash commands and file attachments on the CTO conversation are not supported yet";
-
 function describeErr(err) {
   return err?.message ? String(err.message) : String(err);
+}
+
+/**
+ * The composer's optimistic messageID → the admission dedupe id, for the two
+ * opencode seams (admitDirect / admitCommand). Present only when it is a
+ * non-empty string; otherwise admission mints a fresh id. Distinct from
+ * submit()'s pass-through contract, which forwards the caller's `id` field
+ * verbatim.
+ */
+function messageIDToId(input) {
+  return typeof input.messageID === "string" && input.messageID.length > 0 ? input.messageID : undefined;
+}
+
+/**
+ * The shared middle of the three human-origin admission payloads (submit /
+ * admitDirect / admitCommand) — one assembly so the seams cannot drift.
+ *
+ * The per-seam differences stay AT the seams, parameterised here:
+ *   • `withText` — the prompt seams always carry a `text` key (even when the
+ *     value is undefined, exactly as the inline `text: input.text` did); the
+ *     command seam carries none (its kind is "command").
+ *   • `id` — submit() passes the caller's idempotency key through VERBATIM
+ *     (undefined → absent); the opencode seams derive it from the composer's
+ *     optimistic messageID via messageIDToId().
+ *   • property ORDER is preserved exactly (text, id, model,
+ *     expectedGeneration, attachments) so each seam's submitted record keeps
+ *     the key order it always had — admission persists these records and
+ *     their serialized shape is part of the durable store.
+ * `mentions` and the command-only fields (kind/command/args) remain at the
+ * seams: they are ordered differently per seam (mentions after the shared
+ * fields on the prompt seams, kind/command/args before the shared fields on
+ * the command seam), so folding them in here would change record shape.
+ */
+function humanAdmissionFields(input, { withText, id }) {
+  return {
+    ...(withText ? { text: input.text } : {}),
+    ...(id !== undefined ? { id } : {}),
+    ...(input.model !== undefined ? { model: input.model } : {}),
+    ...(input.expectedGeneration !== undefined ? { expectedGeneration: input.expectedGeneration } : {}),
+    ...(Array.isArray(input.attachments) && input.attachments.length > 0
+      ? { attachments: input.attachments }
+      : {}),
+  };
 }
 
 /**
@@ -83,6 +126,12 @@ export function backgroundDeliveryId(ctoKey) {
  * @param {string} deps.agentName — the server-owned central role agent
  *   (providers.mjs CTO_AGENT_NAME). Stampeded onto every admitted turn: the
  *   caller can NEVER choose an arbitrary agent for the CTO conversation.
+ * @param {string} [deps.planAgentName] — the ONE additional agent a caller
+ *   may reach (providers.mjs MANTA_PLAN_AGENT_NAME). A closed, one-entry
+ *   server-side allowlist (full-parity widening item 5) — see resolveAgent.
+ *   Absent/empty → the allowlist is empty and every `agent` value is dropped,
+ *   identical to the pre-widening behavior (safe default for tests that
+ *   don't wire it).
  * @param {(() => Promise<string|null>)} [deps.stamp] — the binding store's
  *   cheap change stamp (ctoStores `stamp()`), enabling a stamp-validated
  *   classification cache. Without it every seam classification pays a full
@@ -93,6 +142,7 @@ export function createCtoConversationService({
   binding,
   admission,
   agentName,
+  planAgentName = null,
   stamp = null,
 }) {
   if (!binding || typeof binding.ensure !== "function" || typeof binding.getBinding !== "function") {
@@ -103,6 +153,27 @@ export function createCtoConversationService({
   }
   if (typeof agentName !== "string" || agentName.length === 0) {
     throw new Error("createCtoConversationService requires the server-owned agent name");
+  }
+
+  /**
+   * Closed server-side allowlist (full-parity widening item 5): the caller
+   * can NEVER choose an arbitrary agent for the CTO conversation — exactly
+   * as strict as before this widening — but MAY request plan mode. A
+   * caller requests plan mode the SAME way an ordinary opencode:prompt
+   * already signals it: the `agent` field carries the plan agent's own name
+   * (see the renderer's ChatPanel.tsx `planAgent`, sent verbatim as
+   * `opencodePrompt`'s `agent` argument). So this seam recognizes exactly
+   * ONE value — `planAgentName` — and passes it through unchanged; any
+   * other value (a box-native "plan", "build", or anything else) is
+   * dropped, falling back to the central role agent. Widening the allowlist
+   * further is a conscious, separate decision — never a side effect of
+   * adding a new caller field.
+   */
+  function resolveAgent(inputAgent) {
+    if (typeof planAgentName === "string" && planAgentName.length > 0 && inputAgent === planAgentName) {
+      return planAgentName;
+    }
+    return agentName;
   }
 
   // Stamp-validated classification cache: one stat per seam classification
@@ -165,19 +236,20 @@ export function createCtoConversationService({
 
   // -- channel: cto:conversation-submit -------------------------------------
   // The human turn. Origin is fixed ("human" — the caller is the CEO side of
-  // the conversation; the server stamps it, never the request body), the
-  // agent is the server-owned central role config. `id` is the caller's
-  // idempotency key: a same-id/same-payload replay returns the existing
-  // record, a same-id/different-payload is an actionable error.
+  // the conversation; the server stamps it, never the request body). `id` is
+  // the caller's idempotency key: a same-id/same-payload replay returns the
+  // existing record, a same-id/different-payload is an actionable error.
+  // Full-parity widening: attachments/mentions ride through verbatim (a
+  // prompt-kind submission only — this channel has no slash-command
+  // concept, see admitCommand for that) and `agent` passes through the
+  // closed plan-mode allowlist (resolveAgent) — never an arbitrary value.
   async function submit(input) {
     requireInputObject(input);
     return admission.submit({
       origin: "human",
-      text: input.text,
-      ...(input.id !== undefined ? { id: input.id } : {}),
-      ...(input.model !== undefined ? { model: input.model } : {}),
-      ...(input.expectedGeneration !== undefined ? { expectedGeneration: input.expectedGeneration } : {}),
-      agent: agentName,
+      ...humanAdmissionFields(input, { withText: true, id: input.id }),
+      ...(Array.isArray(input.mentions) && input.mentions.length > 0 ? { mentions: input.mentions } : {}),
+      agent: resolveAgent(input.agent),
     });
   }
 
@@ -251,36 +323,49 @@ export function createCtoConversationService({
   }
 
   // -- seam: direct sends (`opencode:prompt`) at the conversation session ----
-  // Plain text → routed through the same durable admission queue with a
-  // stable id (the caller's messageID when present — the composer's optimistic
-  // id — else admission mints one). File attachments / agent mentions → the
-  // clear rejection (not admitted yet). The caller's `agent` field is
-  // deliberately DROPPED: the server owns the role agent. Throws actionable
-  // errors (unsupported parts, at-cap, stale-generation, ...) — never fake
-  // success.
+  // Routed through the same durable admission queue with a stable id (the
+  // caller's messageID when present — the composer's optimistic id — else
+  // admission mints one). Full-parity widening: file attachments and
+  // resolved @agent mentions ride through VERBATIM (admission.submit hashes
+  // them into the same canonical idempotency key and hands them to
+  // sendPrompt unchanged — opencode.mjs already turns them into file/agent
+  // parts for an ordinary session). The caller's `agent` field passes
+  // through the closed plan-mode allowlist (resolveAgent): every value
+  // except the ONE allow-listed plan agent is still dropped exactly as
+  // before — the server owns the role agent. Throws actionable errors
+  // (at-cap, stale-generation, invalid attachment/mention shape, ...) —
+  // never fake success.
   async function admitDirect(input) {
     requireInputObject(input);
-    const hasAttachments = Array.isArray(input.attachments) && input.attachments.length > 0;
-    const hasMentions = Array.isArray(input.mentions) && input.mentions.length > 0;
-    if (hasAttachments || hasMentions) {
-      throw new Error(CTO_CONVERSATION_UNSUPPORTED_MESSAGE);
-    }
     return admission.submit({
       origin: "human",
-      text: input.text,
-      ...(typeof input.messageID === "string" && input.messageID.length > 0
-        ? { id: input.messageID }
-        : {}),
-      ...(input.model !== undefined ? { model: input.model } : {}),
-      ...(input.expectedGeneration !== undefined ? { expectedGeneration: input.expectedGeneration } : {}),
-      agent: agentName,
+      ...humanAdmissionFields(input, { withText: true, id: messageIDToId(input) }),
+      ...(Array.isArray(input.mentions) && input.mentions.length > 0 ? { mentions: input.mentions } : {}),
+      agent: resolveAgent(input.agent),
     });
   }
 
   // -- seam: slash commands (`opencode:run-command`) at the conversation ----
-  // Rejected with the clear copy until a later phase adds support.
-  async function rejectRunCommand() {
-    throw new Error(CTO_CONVERSATION_UNSUPPORTED_MESSAGE);
+  // Full-parity widening: a command aimed at the conversation session is
+  // routed through the SAME durable admission queue as a direct send, via a
+  // `kind:"command"` record (admission.submit validates command/args and
+  // refuses outright — before persisting anything — if no sendCommand
+  // transport is wired). Every existing admission guarantee is preserved
+  // (one turn at a time, durable dedup by id, the queue projection shape,
+  // the interrupt/abort barrier, the definitive-4xx-vs-uncertain crash
+  // classification) — only the dispatcher changes (sendCommand instead of
+  // sendPrompt, a different opencode endpoint). `agent` passes through the
+  // SAME closed plan-mode allowlist as admitDirect.
+  async function admitCommand(input) {
+    requireInputObject(input);
+    return admission.submit({
+      origin: "human",
+      kind: "command",
+      command: input.command,
+      args: input.arguments,
+      ...humanAdmissionFields(input, { withText: false, id: messageIDToId(input) }),
+      agent: resolveAgent(input.agent),
+    });
   }
 
   // -- seam: background prompt delivery -------------------------------------
@@ -356,7 +441,7 @@ export function createCtoConversationService({
     interrupt,
     isConversationSession,
     admitDirect,
-    rejectRunCommand,
+    admitCommand,
     redirectDelivery,
     tick,
   };

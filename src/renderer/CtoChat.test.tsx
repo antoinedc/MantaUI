@@ -28,6 +28,8 @@ import {
 } from "./testHarness";
 import { CtoChat } from "./CtoChat";
 import { CtoPanel } from "./CtoPanel";
+import { historyKey, appendPromptHistory } from "./chatShared";
+import { CTO_HISTORY_SCOPE } from "./hooks/useComposerController";
 import type { CtoConversationState, CtoSubmissionProjection } from "../shared/api";
 
 // Capture what the transcript receives. The inline question copy renders
@@ -174,10 +176,18 @@ async function pressRetry(): Promise<void> {
   await h!.flush();
 }
 
-// Press the composer's Stop (Interrupt) control, flush, and return the
-// recorded ctoConversationInterrupt calls for the assertions.
+// The SHARED composer's Stop affordance (BET — CTO full composer). The CTO
+// conversation now renders the same <Composer> a session does; its stop button
+// carries the shared "Stop the running turn" label and its onClick is wired to
+// the CTO's admission interrupt (never a raw opencode abort). The interrupt
+// SEMANTICS the CTO tests assert are unchanged — only the control's label moved
+// from the old bespoke "Interrupt" button to the shared one.
+const STOP_SELECTOR = 'button[aria-label="Stop the running turn"]';
+
+// Press the composer's Stop control, flush, and return the recorded
+// ctoConversationInterrupt calls for the assertions.
 async function pressStop(): Promise<Array<Array<unknown>>> {
-  const stop = h!.container.querySelector('button[aria-label="Interrupt"]');
+  const stop = h!.container.querySelector(STOP_SELECTOR);
   expect(stop).not.toBeNull();
   await act(async () => {
     (stop as HTMLButtonElement).click();
@@ -533,7 +543,7 @@ async function mountFailingSubmit(
     // The surrounding controls must not lie: nothing is running and the
     // pump dispatches nothing while held.
     //  - Stop is an idempotent no-op on the held record → hidden.
-    expect(h.container.querySelector('button[aria-label="Interrupt"]')).toBeNull();
+    expect(h.container.querySelector(STOP_SELECTOR)).toBeNull();
     //  - The footer does not claim "Working — sends queue up".
     expect(h.text()).toContain("Admission held — queued sends will not dispatch");
     expect(h.text()).not.toContain("Working — sends queue up");
@@ -840,7 +850,7 @@ async function mountFailingSubmit(
         Promise.resolve(userTranscriptRows([{ messageID: "msg_refused_1", text: "deploy" }])),
     });
     await h.flush();
-    expect(h.container.querySelector('button[aria-label="Interrupt"]')).toBeNull();
+    expect(h.container.querySelector(STOP_SELECTOR)).toBeNull();
     // The hold copy still tells the truth (the pump holds for ANY unresolved
     // record) — without claiming an action the server did not perform.
     expect(h.text()).toContain("Admission held");
@@ -901,7 +911,7 @@ async function mountFailingSubmit(
     // unstoppable (Stop is hidden — no dead control, no false promise).
     expect(h.text()).toContain("the running turn can no longer be interrupted");
     expect(h.text()).toContain("will not dispatch");
-    expect(h.container.querySelector('button[aria-label="Interrupt"]')).toBeNull();
+    expect(h.container.querySelector(STOP_SELECTOR)).toBeNull();
   });
 
   it("a NORMAL successful Stop with the turn still running does not claim the turn is permanently unstoppable", async () => {
@@ -1009,6 +1019,193 @@ async function mountFailingSubmit(
     expect(h.text()).toContain("The composer keeps your newer text");
     expect(h.text()).not.toContain("Your text is back in the composer");
   });
+
+  // ===== Composer parity (BET — CTO full composer) =====
+  //
+  // The whole point of the refactor: the CTO conversation renders the SAME
+  // composer a session does, through the SAME useComposerController → <Composer>
+  // path — full feature parity, not a lookalike subset. These lock that the
+  // shared controls are actually present on the CTO surface, and that the ONE
+  // real divergence (server-owned queue via the admission seam, stable
+  // submission id, never a client abort) is preserved.
+
+  it("renders the SHARED composer controls a session has — not a bespoke subset", async () => {
+    h = mountCto();
+    await h.flush();
+    // Attachment affordance: the hidden file input the attach button / mobile
+    // attach bridge mounts (drop / paste / screenshots ride the same shared
+    // upload lifecycle).
+    expect(h.container.querySelector('input[type="file"]')).not.toBeNull();
+    // Plan toggle: the ⇧Tab plan chip (identity class manta-plan-toggle) — the
+    // SAME control a session has, not the old "plan mode is not a CTO surface".
+    expect(h.container.querySelector(".manta-plan-toggle")).not.toBeNull();
+    // Model picker: the shared picker trigger (identity class), replacing the
+    // old bespoke ModelPicker wiring — same effort / Auto / routing surface.
+    expect(h.container.querySelector(".manta-model-picker-btn")).not.toBeNull();
+    // The resource toolbar — schedules / secrets / webhooks triggers (a session
+    // has these; the old CTO composer had none).
+    expect(h.container.querySelector('button[aria-label="schedules"]')).not.toBeNull();
+    expect(h.container.querySelector('button[aria-label="secrets"]')).not.toBeNull();
+    expect(h.container.querySelector('button[aria-label="webhooks"]')).not.toBeNull();
+    // The CTO-named textarea (the shared field, given a stable accessible name).
+    const ta = h.container.querySelector(
+      'textarea[aria-label="Message the CTO"]',
+    ) as HTMLTextAreaElement;
+    expect(ta).not.toBeNull();
+    // The shared Send control appears once there is text (the SAME "text →
+    // Send" affordance a session has, with the shared aria-label).
+    await act(async () => {
+      typeInto(ta, "hi");
+    });
+    await h.flush();
+    expect(
+      h.container.querySelector('button[aria-label="Send message"]'),
+    ).not.toBeNull();
+    // Voice is wired the SAME way a session's is: desktop voice is
+    // keyboard-driven (CmdOrCtrl+Shift+M / Enter / Esc), so — exactly like a
+    // session composer in this harness — there is NO persistent mic button on
+    // desktop; the mic FAB is mobile-shell only. Its presence would be a
+    // FALSE parity signal here, so we assert the shared recording row is NOT
+    // shown at rest (a take is not active) rather than a control that a session
+    // also lacks on desktop.
+    expect(h.container.querySelector('button[aria-label="Send recording"]')).toBeNull();
+  });
+
+  it("opens a resource panel from the shared composer toolbar (schedules)", async () => {
+    h = mountCto(emptyQueue(), {
+      scheduleList: () => Promise.resolve([]),
+    });
+    await h.flush();
+    const schedulesBtn = h.container.querySelector(
+      'button[aria-label="schedules"]',
+    ) as HTMLButtonElement;
+    expect(schedulesBtn).not.toBeNull();
+    await act(async () => {
+      schedulesBtn.click();
+    });
+    await h.flush();
+    // The shared ScheduledTasksCard panel opened — the toolbar is live, not
+    // decorative. (Empty state copy from the shared card.)
+    expect(h.text()).toMatch(/schedule/i);
+  });
+
+  it("a CTO send through the shared composer carries a stable submission id and queues server-side — never an abort", async () => {
+    // A turn is already running on the bound session.
+    const q = emptyQueue();
+    q.submissions = [submission("evt_running", "accepted", { messageID: "msg_running" })];
+    q.counts.unresolved = 1;
+    h = mountCto(q, {
+      opencodeMessages: () =>
+        Promise.resolve(userTranscriptRows([{ messageID: "msg_running", text: "go" }])),
+    });
+    await h.flush();
+    await emitAndFlush(bus, h, {
+      type: "session.status",
+      properties: { sessionID: SESSION, status: "busy" },
+    });
+    // Send a follow-up through the SHARED composer (the same textarea + Enter a
+    // session uses).
+    await typeAndSubmit(h, "and tail the logs");
+    const submits = api.calls.ctoConversationSubmit ?? [];
+    expect(submits.length).toBe(1);
+    const payload = submits[0][0] as { id: string; text: string; expectedGeneration?: number };
+    // Stable, client-minted submission id (dedup-safe across a retry).
+    expect(typeof payload.id).toBe("string");
+    expect(payload.id.length).toBeGreaterThan(0);
+    expect(payload.text).toBe("and tail the logs");
+    // It carries the binding generation (admission contract) …
+    expect(payload.expectedGeneration).toBe(GENERATION);
+    // … and the send went through the ADMISSION seam, NOT a client abort or the
+    // legacy opencode prompt path — the running turn is untouched.
+    expect(api.calls.opencodeAbort?.length ?? 0).toBe(0);
+    expect(api.calls.opencodePrompt?.length ?? 0).toBe(0);
+  });
+
+  it("the shared composer's Stop routes to the admission interrupt (never opencode abort) while running", async () => {
+    const q = emptyQueue();
+    q.submissions = [submission("evt_int", "accepted", { messageID: "msg_int" })];
+    q.counts.unresolved = 1;
+    h = mountCto(q, {
+      opencodeMessages: () =>
+        Promise.resolve(userTranscriptRows([{ messageID: "msg_int", text: "work" }])),
+    });
+    await h.flush();
+    // The shared Stop button is present (the record is interruptible) and its
+    // click reaches ctoConversationInterrupt with the ADMISSION RECORD id.
+    const interrupts = await pressStop();
+    expect(interrupts.length).toBe(1);
+    expect((interrupts[0][0] as { id: string }).id).toBe("evt_int");
+    expect(api.calls.opencodeAbort?.length ?? 0).toBe(0);
+  });
+  // ---- Full-send parity: the widened admission payload (attachments, agent
+  // mentions, plan mode) and the payload-identity rule a retry depends on ----
+
+  it("a retry replays the ENTIRE payload, not just the text — the dedup hash covers every field", async () => {
+    let n = 0;
+    const payloads: unknown[] = [];
+    h = mountCto(emptyQueue(), {
+      ctoConversationSubmit: (input: { id?: string; text: string }) => {
+        n += 1;
+        // Deep-copy: the component must not be able to mutate what we compare.
+        payloads.push(JSON.parse(JSON.stringify(input)));
+        if (n === 1) return Promise.reject(new Error("network timeout"));
+        return Promise.resolve(receiptOf(input));
+      },
+    });
+    await h.flush();
+    await typeAndSubmit(h, "ship it");
+    expect(h.text()).toContain("Outcome unknown — reconciling");
+    await pressRetry();
+    expect(payloads.length).toBe(2);
+    // The WHOLE request must be byte-identical. The server dedups on
+    // (id, hash-of-every-semantic-field), so a retry that re-derived its
+    // payload from current composer state would be refused as a duplicate id
+    // with a different payload — exactly when recovery matters.
+    expect(payloads[1]).toEqual(payloads[0]);
+  });
+
+  it("agent mentions reach the admission payload resolved against the submitted text", async () => {
+    const payloads: Array<Record<string, unknown>> = [];
+    h = mountCto(emptyQueue(), {
+      ctoConversationSubmit: (input: { id?: string; text: string }) => {
+        payloads.push(input as Record<string, unknown>);
+        return Promise.resolve(receiptOf(input));
+      },
+    });
+    await h.flush();
+    // No mention tracked by the typeahead → the field is absent entirely
+    // (never an empty array, which would change the canonical hash).
+    await typeAndSubmit(h, "just text");
+    expect(payloads[0].mentions).toBeUndefined();
+    expect(payloads[0].agent).toBeUndefined();
+    expect(payloads[0].attachments).toBeUndefined();
+  });
+
+  it("ArrowUp in an empty composer while running recalls prompt history — the keypress is not swallowed (no client queue to pop)", async () => {
+    // The CTO queue is SERVER-owned and deliberately not client-drainable, so
+    // ArrowUp-on-empty-while-running has no queue item to pop. The honest
+    // gesture is prompt history (the session surface's behaviour), never a
+    // silent no-op that ALSO steals the keypress from history.
+    localStorage.removeItem(historyKey(CTO_HISTORY_SCOPE.tmuxSession!, CTO_HISTORY_SCOPE.windowIndex!));
+    appendPromptHistory(CTO_HISTORY_SCOPE.tmuxSession, CTO_HISTORY_SCOPE.windowIndex!, "prior cto prompt");
+    h = mountCto();
+    await h.flush();
+    // The turn is running — the state where the queue-pop branch used to eat
+    // the keypress.
+    await emitStreamAndFlush(bus, h, {
+      sub: "running",
+      sessionId: SESSION,
+      payload: { running: true },
+    });
+    const textarea = h.container.querySelector("textarea") as HTMLTextAreaElement;
+    expect(textarea.value).toBe("");
+    await act(async () => {
+      textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    });
+    await h.flush();
+    expect(textarea.value).toBe("prior cto prompt");
+    localStorage.removeItem(historyKey(CTO_HISTORY_SCOPE.tmuxSession!, CTO_HISTORY_SCOPE.windowIndex!));
+  });
 });
 
 // ===== CtoPanel view migration =====
@@ -1061,4 +1258,5 @@ describe("CtoPanel primary conversation", () => {
     // Still no legacy prompt path anywhere in the round-trip.
     expect(api.calls.opencodePrompt?.length ?? 0).toBe(0);
   });
+
 });

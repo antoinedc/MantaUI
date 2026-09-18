@@ -180,7 +180,10 @@ import { createCtoConversationService } from "./ctoConversation.mjs";
 import {
   ensureMantaPlanAgent,
   ensureCtoAgent,
+  materializeCtoPrompt,
+  createCtoDoctrineRestarter,
   CTO_AGENT_NAME,
+  MANTA_PLAN_AGENT_NAME,
   readCacheTtl as readProvidersCacheTtl,
   readOpencodeConfig,
 } from "./providers.mjs";
@@ -443,12 +446,31 @@ const ctoBindingEngine = createCtoBinding({ oc });
 const ctoAdmissionEngine = createCtoAdmission({
   binding: ctoBindingEngine,
   sendPrompt: (args) => oc.sendPrompt(args),
+  // P3a3 full-parity widening: a slash command aimed at the CTO role session
+  // dispatches through opencode.mjs runCommand — a different endpoint than
+  // sendPrompt. Same raw low-level oc client, same anti-recursion property.
+  sendCommand: (args) => oc.runCommand(args),
   getMessage: (sessionId, messageId) => oc.getMessage(sessionId, messageId),
   listMessages: (sessionId, opts) => oc.listMessages(sessionId, opts),
   abortSession: (sessionId, opts) => oc.abortSession(sessionId, opts),
   // SHARED busy view — one truth for both prompt engines (promptDelivery's
   // firehose-derived busy set; admission observes the same events itself).
   isBusy: promptDelivery.isBusy,
+  // Dispatch-time attachment re-validation (sweep guard): the staging area is
+  // swept after uploadCleanupHours while a queued record can be held
+  // indefinitely, so a file that existed at submit() may be gone at
+  // dispatch. ENOENT is a definitive miss (the record fails with an
+  // actionable error, nothing is sent); any other probe error is NOT proof
+  // of absence and is rethrown so the guard fails open.
+  fileExists: async (p) => {
+    try {
+      await stat(p);
+      return true;
+    } catch (e) {
+      if (e?.code === "ENOENT") return false;
+      throw e;
+    }
+  },
 });
 const ctoConversation = createCtoConversationService({
   binding: ctoBindingEngine,
@@ -457,9 +479,31 @@ const ctoConversation = createCtoConversationService({
   // turns ALWAYS run the registered `cto` agent — callers can never choose
   // an arbitrary agent for the role session.
   agentName: CTO_AGENT_NAME,
+  // The ONE additional agent a caller may reach, and only by requesting
+  // plan mode (full-parity widening item 5) — see ctoConversation.mjs
+  // resolveAgent for the closed allowlist this enables.
+  planAgentName: MANTA_PLAN_AGENT_NAME,
   // Cheap change stamp for the seam-classification cache (one stat instead of
   // a binding.json read+parse on every ordinary project prompt).
   stamp: () => bindingStore.stamp(),
+});
+
+// Doctrine restart manager (review fix): a ctoStyle/ctoHouseRules edit must
+// never restart opencode as an invisible side effect — the old synchronous
+// restart killed every in-flight turn box-wide on a style radio CLICK. The
+// manager defers the restart until the box is idle and the RPC layer reports
+// the pending state on the config responses. `anyBusy` is promptDelivery's
+// firehose-derived busy set — the same truth the admission engine's busy gate
+// trusts (claude-TUI/shell panes are not opencode sessions and are unaffected
+// by an opencode-serve restart, so "any opencode turn in flight" is exactly
+// "a restart would kill something"). The tick poller applies a deferred
+// restart on the first idle beat; a failed apply retries on the next one.
+const ctoDoctrineRestarter = createCtoDoctrineRestarter({
+  anyBusy: () => promptDelivery.anyBusy(),
+});
+const { stop: stopCtoDoctrineTick } = startPoller(() => ctoDoctrineRestarter.tick(), {
+  intervalMs: 30_000,
+  label: "cto-doctrine",
 });
 // Bounded tick poller (spec §8.3 recovery): reconcile + pump with no inbound
 // events. startPoller surfaces failures via console.warn — a failed tick
@@ -1606,6 +1650,10 @@ rpcHandlers = buildHandlers({
   // `cto:conversation-*` channels and the opencode:prompt /
   // opencode:run-command anti-bypass seams.
   ctoConversation,
+  // The doctrine restart manager (created above): config:update defers a
+  // ctoStyle/ctoHouseRules restart until the box is idle and reports the
+  // pending state on the config responses.
+  doctrineRestart: ctoDoctrineRestarter,
   // BET-1336: quota-window forecast-at-reset read sources for the
   // optimizer:summary `windows` slice — the live polled snapshots + the
   // persisted observation history.
@@ -1782,6 +1830,14 @@ async function maybeEnsureCtoAgent() {
       cfg?.defaultModel?.providerID && cfg?.defaultModel?.modelID
         ? `${cfg.defaultModel.providerID}/${cfg.defaultModel.modelID}`
         : undefined;
+    // CTO operating doctrine: ensureCtoAgent's default promptPath now points
+    // at the MATERIALIZED file (providers.ctoMaterializedPromptPath), not the
+    // committed source doc, so that file must hold real content before the
+    // agent block is ever written — including on a fresh box where it has
+    // never been written before. Best-effort/non-throwing, matching
+    // ensureCtoAgent's own contract; on any failure it falls back to writing
+    // the committed prompt verbatim (see materializeCtoPrompt's own doc).
+    await materializeCtoPrompt({ style: cfg?.ctoStyle, houseRules: cfg?.ctoHouseRules });
     await ensureCtoAgent({ model });
   } catch (e) {
     console.error("[cto] ensure failed:", e);
@@ -2424,7 +2480,21 @@ let adaptiveCtoDigest = null;
     // timing scheduler's rising-edge / inferred-TZ branch read the profile.
     getRisingEdge: async () => adaptiveCto.profile?.getRisingEdgeMsIntoDay?.() ?? null,
     getInferredTz: async () => adaptiveCto.profile?.getInferredTz?.() ?? null,
-    getAudience: async ({ topics } = {}) => adaptiveCto.profile?.getAudience?.({ topics }) ?? null,
+    // §8.4 precedence (CTO operating-doctrine work): the box's EXPLICIT
+    // `ctoStyle` setting beats the profile's INFERRED depth_pref — see
+    // ctoDoctrine.mjs's header and ctoProfile.mjs's getAudience for the full
+    // rationale. Best-effort: a config read failure just means "no explicit
+    // opinion", falling back to the inferred value exactly as before this
+    // wiring existed.
+    getAudience: async ({ topics } = {}) => {
+      let explicitStyle;
+      try {
+        explicitStyle = (await local.configGet())?.ctoStyle;
+      } catch {
+        explicitStyle = undefined;
+      }
+      return adaptiveCto.profile?.getAudience?.({ topics, explicitStyle }) ?? null;
+    },
     getDeviations: async () => adaptiveCto.profile?.getDeviations?.() ?? [],
     // BET-1518 (§9.2/§9.5): the calibration engine's act-and-report queue —
     // act lines, announced as progress asides.

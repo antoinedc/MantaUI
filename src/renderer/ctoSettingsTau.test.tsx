@@ -35,10 +35,16 @@ function pressEnter(input: HTMLElement): void {
 
 async function mountSettings(
   config: Record<string, unknown>,
+  // What the box answers a config:update with. Default: echo the patch
+  // verbatim. The doctrine tests overlay the transient
+  // `ctoDoctrineRestartPending` flag the real server adds to the response —
+  // that answer is exactly what each scenario varies on.
+  configUpdateEcho: (patch: unknown) => Promise<unknown> = (patch) =>
+    Promise.resolve(patch),
 ): Promise<{ h: Harness; api: MockApi }> {
   const { api } = installMockApi({
     configGet: () => Promise.resolve(config),
-    configUpdate: (patch: unknown) => Promise.resolve(patch),
+    configUpdate: configUpdateEcho,
     ctoHealthGet: () => Promise.resolve({ stats: [], calibration: null }),
   });
   const h = mount(
@@ -121,5 +127,77 @@ describe("SettingsView τ round-trip (BET-1521)", () => {
     const toasts = useStore.getState().appToasts;
     expect(toasts.length).toBeGreaterThan(toastsBefore);
     expect(toasts[toasts.length - 1]?.message).toContain("between 0 and 1");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Doctrine restart visibility (review fix): a doctrine edit (style radio /
+// house rules) used to restart opencode SILENTLY — killing every in-flight
+// turn box-wide with no user-visible signal. The server now defers the
+// restart until the box is idle and reports `ctoDoctrineRestartPending` on
+// the config responses; the settings page must SHOW that state.
+// ---------------------------------------------------------------------------
+
+describe("SettingsView doctrine-restart visibility", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+    act(() => useStore.setState({ appToasts: [] }));
+  });
+
+  it("a deferred restart is visible: the save response's pending flag shows the pending note + toast", async () => {
+    // The save answer carries the pending flag (box was busy → deferred).
+    const m = await mountSettings(
+      { ctoEnabled: true, cto: { enabled: true }, ctoStyle: "executive" },
+      (patch) => Promise.resolve({ ...(patch as object), ctoDoctrineRestartPending: true }),
+    );
+    h = m.h;
+    const radios = h.container.querySelectorAll<HTMLInputElement>('input[name="cto-style"]');
+    expect(radios.length).toBeGreaterThan(1);
+    const toastsBefore = useStore.getState().appToasts.length;
+    await act(async () => {
+      radios[1]!.click();
+    });
+    await h.flush();
+    expect(m.api.calls.configUpdate?.length).toBe(1);
+    const toasts = useStore.getState().appToasts;
+    // The user is TOLD the restart is pending (a toast says the box is busy).
+    expect(toasts.length).toBeGreaterThan(toastsBefore);
+    expect(toasts[toasts.length - 1]?.message).toContain("idle");
+    expect(h.text()).toContain("applies when the box is idle");
+  });
+
+  it("an immediate apply (box was idle) does not claim a pending restart", async () => {
+    // The save answer reports nothing pending (box was idle → applied now).
+    const m = await mountSettings(
+      { ctoEnabled: true, cto: { enabled: true }, ctoStyle: "executive" },
+      (patch) => Promise.resolve({ ...(patch as object), ctoDoctrineRestartPending: false }),
+    );
+    h = m.h;
+    const radios = h.container.querySelectorAll<HTMLInputElement>('input[name="cto-style"]');
+    const toastsBefore = useStore.getState().appToasts.length;
+    await act(async () => {
+      radios[1]!.click();
+    });
+    await h.flush();
+    expect(m.api.calls.configUpdate?.length).toBe(1);
+    // Nothing pending → no pending toast.
+    expect(useStore.getState().appToasts.length).toBe(toastsBefore);
+    expect(h.text()).not.toContain("applies when the box is idle");
+  });
+
+  it("configGet's pending flag renders the note on load (truth survives a reload)", async () => {
+    // The CONFIG already carries the pending flag — the note must render from
+    // the load path alone, before any save.
+    const m = await mountSettings({
+      ctoEnabled: true,
+      cto: { enabled: true },
+      ctoStyle: "executive",
+      ctoDoctrineRestartPending: true,
+    });
+    h = m.h;
+    expect(m.api.calls.configGet?.length).toBeGreaterThan(0);
+    expect(h.text()).toContain("applies when the box is idle");
   });
 });

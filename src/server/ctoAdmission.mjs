@@ -103,6 +103,20 @@
 //    after the claim serializes behind it and the claimed delivery stays on
 //    its own session.
 //
+// 9. FULL-PARITY WIDENING (P3a3, spec §8.3 item 8.3.x, admission-contract
+//    ADR). A submission carries everything an ordinary opencode:prompt /
+//    opencode:run-command send can carry — file attachments, resolved
+//    @agent mentions, and (via `kind:"command"`) a slash command — through
+//    the SAME durable queue, dispatched by the SAME state machine above.
+//    None of invariants 1-8 are weakened to do this: attachments/mentions/
+//    kind/command/args are additional SEMANTIC fields on the SAME record
+//    (persisted before send, hashed into the SAME canonical idempotency key,
+//    subject to the SAME one-turn-at-a-time gate and crash classification).
+//    The one deliberately CLOSED door is the AGENT: the caller still can
+//    never choose an arbitrary agent for a CTO-conversation submission — see
+//    ctoConversation.mjs's resolveAgent, which is enforced one layer up
+//    (this module stays agent-value-agnostic, exactly as before).
+//
 // Cross-process: single-writer-process design (one manta-server per box
 // composes one admission engine), mirroring ctoBinding.mjs. The patchStore
 // CAS narrows but does not guarantee multi-writer safety.
@@ -166,6 +180,18 @@ export const ABORT_STATES = Object.freeze([
   "refused",
   "uncertain",
 ]);
+
+// P3a3 (spec §8.3 full-parity widening): a submission is either a PROMPT
+// (routed via sendPrompt) or a slash COMMAND (routed via sendCommand — a
+// DIFFERENT opencode endpoint, opencode.mjs runCommand). The kind is a
+// discriminated record field so the dispatcher calls the matching sender; a
+// record with no `kind` is a legacy prompt (the default), keeping every
+// pre-widening record valid without a migration. Only "command" records
+// carry `command` (the slash command name) + `args` (its free-text argument
+// body — never "arguments": that's a reserved-ish identifier this module
+// avoids as a local variable name, so the record field, the submit() param,
+// and canonicalRequestHash's param all agree on `args`).
+export const KINDS = Object.freeze(["prompt", "command"]);
 
 // Statuses that hold the one-turn-at-a-time gate: while any of these exist
 // the admit loop must not dispatch another submission.
@@ -233,15 +259,73 @@ function stableStringify(value) {
 
 /**
  * Canonical request hash: sha256 over a stable encoding of EVERY semantic
- * request field (origin, text, model, agent) with key-order canonicalization,
- * so a caller that re-serializes its model object with reordered keys still
- * replays idempotently. Same ID + same hash = same submission; same ID + a
- * different hash (e.g. a different agent) is a caller error.
+ * request field with key-order canonicalization, so a caller that
+ * re-serializes an object field with reordered keys still replays
+ * idempotently. Same ID + same hash = same submission; same ID + a different
+ * hash (a different agent, a different attachment, a switch from prompt to
+ * command, …) is a caller error.
+ *
+ * P3a3 (spec §8.3 full-parity widening): attachments, mentions and the
+ * prompt/command discriminator (kind + command + arguments) are SEMANTIC
+ * request fields — a submission carrying a file or a slash command is a
+ * genuinely different request than the same text alone, so they MUST ride the
+ * hash for idempotency to stay correct. Arrays hash in DOCUMENT ORDER (the
+ * order the composer emitted the chips / mentions in — a reorder is a
+ * different request, matching what the user sees), while object keys within
+ * each element are sorted (a re-serialization with reordered keys is NOT a
+ * different request). Only the identity-bearing sub-fields are hashed —
+ * `attachment.mime/remotePath/filename/asPathRef` and
+ * `mention.name/source` — so a purely presentational field a client might add
+ * later never breaks an in-flight dedup. Legacy fields (origin/text/model/
+ * agent) keep their exact prior positions; a plain-text prompt with no
+ * attachments/mentions and the default kind hashes to a value that is stable
+ * across this change ONLY where those fields are absent — see below.
+ *
+ * NOTE ON BACK-COMPAT: including the new fields unconditionally would change
+ * the hash of a plain-text prompt (breaking replay of a record persisted by
+ * the pre-widening code across a deploy). To keep a bare prompt's hash
+ * IDENTICAL to before, the new fields are folded in ONLY when non-empty: no
+ * attachments AND no mentions AND kind "prompt" (the default) with no
+ * command ⇒ the encoded object is byte-identical to the legacy
+ * `{agent,model,origin,text}` shape.
  */
-export function canonicalRequestHash({ origin, text, model, agent } = {}) {
-  return createHash("sha256")
-    .update(stableStringify({ agent: agent ?? null, model: model ?? null, origin, text }))
-    .digest("hex");
+export function canonicalRequestHash({
+  origin,
+  text,
+  model,
+  agent,
+  attachments,
+  mentions,
+  kind,
+  command,
+  args,
+} = {}) {
+  const encoded = { agent: agent ?? null, model: model ?? null, origin, text };
+  // Only the identity-bearing sub-fields participate — document order
+  // preserved, per-element keys sorted by stableStringify.
+  if (Array.isArray(attachments) && attachments.length > 0) {
+    encoded.attachments = attachments.map((a) => ({
+      mime: a?.mime ?? null,
+      remotePath: a?.remotePath ?? null,
+      filename: a?.filename ?? null,
+      asPathRef: a?.asPathRef === true ? true : null,
+    }));
+  }
+  if (Array.isArray(mentions) && mentions.length > 0) {
+    encoded.mentions = mentions.map((m) => ({
+      name: m?.name ?? null,
+      source: m?.source ?? null,
+    }));
+  }
+  // The discriminator only enters the hash for a COMMAND (kind "command" +
+  // its command/arguments) — a bare prompt keeps the legacy encoding so its
+  // hash is unchanged across the widening deploy.
+  if (kind === "command") {
+    encoded.kind = "command";
+    encoded.command = command ?? null;
+    encoded.args = args ?? null;
+  }
+  return createHash("sha256").update(stableStringify(encoded)).digest("hex");
 }
 
 // ---------------------------------------------------------------------------
@@ -259,6 +343,97 @@ function invalidRecord(what, value) {
 function assertStr(value, label) {
   if (typeof value !== "string" || value.length === 0) throw invalidRecord(label, value);
   return value;
+}
+
+function isPlainObject(v) {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
+/**
+ * Strict shape check for a persisted `attachments` array (normalizeAdmission
+ * Payload's convention: corruption fails loudly, never silently reinterpreted).
+ * A record only ever WRITES this field when non-empty (submit()), so an
+ * empty-but-present array is itself a corruption signal.
+ */
+function assertAttachmentsShape(value, label) {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0) throw invalidRecord(label, value);
+  value.forEach((a, i) => {
+    if (!isPlainObject(a)) throw invalidRecord(`${label}[${i}]`, a);
+    assertStr(a.remotePath, `${label}[${i}].remotePath`);
+    assertStr(a.mime, `${label}[${i}].mime`);
+    if (a.filename !== undefined && typeof a.filename !== "string") {
+      throw invalidRecord(`${label}[${i}].filename`, a.filename);
+    }
+    if (a.asPathRef !== undefined && typeof a.asPathRef !== "boolean") {
+      throw invalidRecord(`${label}[${i}].asPathRef`, a.asPathRef);
+    }
+  });
+  return value;
+}
+
+/** Strict shape check for a persisted `mentions` array — same convention. */
+function assertMentionsShape(value, label) {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0) throw invalidRecord(label, value);
+  value.forEach((m, i) => {
+    if (!isPlainObject(m)) throw invalidRecord(`${label}[${i}]`, m);
+    assertStr(m.name, `${label}[${i}].name`);
+    const s = m.source;
+    if (!isPlainObject(s)) throw invalidRecord(`${label}[${i}].source`, s);
+    assertStr(s.value, `${label}[${i}].source.value`);
+    if (!Number.isInteger(s.start) || s.start < 0) throw invalidRecord(`${label}[${i}].source.start`, s.start);
+    if (!Number.isInteger(s.end) || s.end < 0) throw invalidRecord(`${label}[${i}].source.end`, s.end);
+  });
+  return value;
+}
+
+/**
+ * Loose-but-correct validation for a CALLER-supplied attachments array
+ * (submit()'s own input, before anything is persisted). Distinct from
+ * assertAttachmentsShape (store corruption): a bad caller input is a plain
+ * actionable CtoAdmissionError, never the store's invalidRecord/"invalid-state".
+ */
+function validateAttachmentsInput(attachments) {
+  if (attachments === undefined) return;
+  if (!Array.isArray(attachments)) {
+    throw new CtoAdmissionError("submit attachments must be an array when provided", "invalid-argument");
+  }
+  attachments.forEach((a, i) => {
+    if (!isPlainObject(a) || typeof a.remotePath !== "string" || a.remotePath.length === 0 ||
+        typeof a.mime !== "string" || a.mime.length === 0) {
+      throw new CtoAdmissionError(
+        `submit attachments[${i}] must have a non-empty remotePath and mime`,
+        "invalid-argument",
+      );
+    }
+    if (a.filename !== undefined && typeof a.filename !== "string") {
+      throw new CtoAdmissionError(`submit attachments[${i}].filename must be a string when provided`, "invalid-argument");
+    }
+    if (a.asPathRef !== undefined && typeof a.asPathRef !== "boolean") {
+      throw new CtoAdmissionError(`submit attachments[${i}].asPathRef must be a boolean when provided`, "invalid-argument");
+    }
+  });
+}
+
+/** Loose-but-correct validation for a CALLER-supplied mentions array. */
+function validateMentionsInput(mentions) {
+  if (mentions === undefined) return;
+  if (!Array.isArray(mentions)) {
+    throw new CtoAdmissionError("submit mentions must be an array when provided", "invalid-argument");
+  }
+  mentions.forEach((m, i) => {
+    if (!isPlainObject(m) || typeof m.name !== "string" || m.name.length === 0) {
+      throw new CtoAdmissionError(`submit mentions[${i}] must have a non-empty name`, "invalid-argument");
+    }
+    const s = m.source;
+    if (!isPlainObject(s) || typeof s.value !== "string" || !Number.isInteger(s.start) || !Number.isInteger(s.end)) {
+      throw new CtoAdmissionError(
+        `submit mentions[${i}].source must be {value:string, start:number, end:number}`,
+        "invalid-argument",
+      );
+    }
+  });
 }
 
 export function normalizeAdmissionPayload(payload) {
@@ -297,6 +472,27 @@ export function normalizeAdmissionPayload(payload) {
       if (r.abortState !== undefined && !ABORT_STATES.includes(r.abortState)) {
         throw invalidRecord(`submissions[${index}].abortState`, r.abortState);
       }
+      // P3a3 full-parity widening: a slash-command record carries the
+      // discriminated kind + its command/args (see the KINDS comment). An
+      // absent `kind` is the legacy prompt default — never required, so
+      // every pre-widening record stays valid with no migration.
+      if (r.kind !== undefined && !KINDS.includes(r.kind)) {
+        throw invalidRecord(`submissions[${index}].kind`, r.kind);
+      }
+      if (r.kind === "command") {
+        assertStr(r.command, `submissions[${index}].command`);
+        if (typeof r.args !== "string") throw invalidRecord(`submissions[${index}].args`, r.args);
+      } else if (r.command !== undefined || r.args !== undefined) {
+        // command/args without kind:"command" would be silently ignored by
+        // the dispatcher (sendAndClassify only reads them for a command) —
+        // exactly the kind of latent corruption this normalizer refuses.
+        throw invalidRecord(`submissions[${index}].command/args (present without kind:"command")`, {
+          command: r.command,
+          args: r.args,
+        });
+      }
+      assertAttachmentsShape(r.attachments, `submissions[${index}].attachments`);
+      assertMentionsShape(r.mentions, `submissions[${index}].mentions`);
       return r;
     }),
     // Tombstones keep only the dedup identity — never the payload text.
@@ -411,8 +607,19 @@ export function turnEndedFromTranscript(messages, userMessageId) {
  *        the LINEARIZABLE reservation under the binding store's serialized
  *        seam (blocker 3). submit resolves getBinding only for NEW records
  *        (a dedup replay never touches the binding — blocker 6).
- * @param {(args:{sessionId:string, text:string, model?:object, agent?:string, messageID:string, signal?:AbortSignal})=>Promise<unknown>} deps.sendPrompt
+ * @param {(args:{sessionId:string, text:string, model?:object, agent?:string, attachments?:Array, mentions?:Array, messageID:string, signal?:AbortSignal})=>Promise<unknown>} deps.sendPrompt
  *        The opencode prompt injector (messageID + bounded signal, P0-proven).
+ *        Carries attachments/mentions verbatim (P3a3 full-parity widening) —
+ *        opencode.mjs sendPrompt already turns them into file/agent parts.
+ * @param {(args:{sessionId:string, command:string, arguments:string, attachments?:Array, model?:object, agent?:string, messageID:string, signal?:AbortSignal})=>Promise<unknown>} [deps.sendCommand]
+ *        The opencode SLASH-COMMAND injector (opencode.mjs runCommand — a
+ *        DIFFERENT endpoint than sendPrompt: /session/{id}/command, not
+ *        /prompt_async). Dispatched ONLY for a `kind:"command"` record; the
+ *        record's `args` field maps to this call's `arguments` param (the
+ *        record avoids the name `arguments` as a local identifier — see the
+ *        KINDS comment). Absent → submit() refuses any kind:"command"
+ *        request outright (invalid-argument) rather than ever persisting a
+ *        "dispatching" record it has no sender for.
  * @param {(sessionId:string, messageId:string)=>Promise<object|null>} deps.getMessage
  *        Single-message receipt read (production: opencode.mjs getMessage).
  *        null = not visible / read failed — never proof of absence.
@@ -426,6 +633,15 @@ export function turnEndedFromTranscript(messages, userMessageId) {
  *        interrupt_pending (barrier; surfaced abortError) — it never
  *        terminalizes on events alone.
  * @param {(sessionId:string)=>boolean} [deps.isBusy]
+ * @param {(path:string)=>Promise<boolean>} [deps.fileExists] dispatch-time
+ *        attachment re-validation. The upload staging area (~/.manta-uploads)
+ *        is swept after `uploadCleanupHours` while a queued record can be
+ *        held indefinitely (busy turn, uncertain-abort barrier), so an
+ *        attachment that existed at submit() time may be GONE at dispatch.
+ *        When wired, every queued attachment's remotePath is re-checked
+ *        immediately before the send; a miss fails the record (actionable
+ *        error naming the file) instead of dispatching a dangling FilePart.
+ *        Unwired (null) → no re-check, dispatch proceeds.
  *        Shared busy view (production: promptDelivery.isBusy). Absent → an
  *        internal firehose-derived busy set is used instead.
  * @param {object} [deps.store] admission store (default ctoStores.admissionStore, strict)
@@ -441,10 +657,12 @@ export function turnEndedFromTranscript(messages, userMessageId) {
 export function createCtoAdmission({
   binding,
   sendPrompt,
+  sendCommand = null,
   getMessage,
   listMessages = null,
   abortSession = null,
   isBusy = null,
+  fileExists = null,
   store = admissionStore,
   now = () => Date.now(),
   newId = () => randomUUID(),
@@ -612,8 +830,57 @@ export function createCtoAdmission({
   // after a binding replacement — blocker 6), then generation-validate and
   // persist new records. Never sends from here.
   // -------------------------------------------------------------------------
-  async function submit({ text, origin, id, model, expectedGeneration, agent } = {}) {
-    if (typeof text !== "string" || text.length === 0) {
+  async function submit({
+    text,
+    origin,
+    id,
+    model,
+    expectedGeneration,
+    agent,
+    // P3a3 full-parity widening: attachments/mentions ride a prompt-kind
+    // submission verbatim through to sendPrompt; kind/command/args select
+    // (and populate) a slash-command submission dispatched via sendCommand.
+    attachments,
+    mentions,
+    kind,
+    command,
+    args,
+  } = {}) {
+    const effectiveKind = kind ?? "prompt";
+    if (!KINDS.includes(effectiveKind)) {
+      throw new CtoAdmissionError(`submit kind must be one of ${KINDS.join("|")}`, "invalid-argument");
+    }
+    if (effectiveKind === "command") {
+      if (typeof command !== "string" || command.length === 0) {
+        throw new CtoAdmissionError('submit requires a non-empty command for kind "command"', "invalid-argument");
+      }
+      if (args !== undefined && typeof args !== "string") {
+        throw new CtoAdmissionError("submit command args must be a string when provided", "invalid-argument");
+      }
+      if (typeof sendCommand !== "function") {
+        // Fail BEFORE anything is persisted (invariant 1's spirit extended):
+        // a record this instance can never dispatch must never reach
+        // "queued", let alone "dispatching" with no sender to call.
+        throw new CtoAdmissionError(
+          "submit refuses a slash command: no sendCommand transport wired for this admission instance",
+          "invalid-argument",
+        );
+      }
+    } else if (command !== undefined || args !== undefined) {
+      throw new CtoAdmissionError('submit command/args require kind:"command"', "invalid-argument");
+    }
+    const resolvedArgs = effectiveKind === "command" ? (args ?? "") : undefined;
+    // A slash command has no natural free-text body of its own — synthesize
+    // a human-readable display form (`/command args`) ONLY so the record's
+    // `text` field stays non-empty for EVERY kind, matching the schema's
+    // uniform `assertStr(r.text, ...)` (never relaxed per-kind, and stripped
+    // from the queue projection exactly like a prompt's text). Never sent to
+    // opencode — sendCommand takes `command`/`arguments` directly.
+    const effectiveText =
+      effectiveKind === "command" && (typeof text !== "string" || text.length === 0)
+        ? `/${command}${resolvedArgs ? ` ${resolvedArgs}` : ""}`
+        : text;
+    if (typeof effectiveText !== "string" || effectiveText.length === 0) {
       throw new CtoAdmissionError("submit requires a non-empty text", "invalid-argument");
     }
     if (!ORIGINS.includes(origin)) {
@@ -634,9 +901,21 @@ export function createCtoAdmission({
     if (agent !== undefined && (typeof agent !== "string" || agent.length === 0)) {
       throw new CtoAdmissionError("submit agent must be a non-empty string when provided", "invalid-argument");
     }
+    validateAttachmentsInput(attachments);
+    validateMentionsInput(mentions);
 
     const submissionId = id ?? `evt_${newId()}`;
-    const payloadHash = canonicalRequestHash({ origin, text, model, agent });
+    const payloadHash = canonicalRequestHash({
+      origin,
+      text: effectiveText,
+      model,
+      agent,
+      attachments,
+      mentions,
+      kind: effectiveKind,
+      command,
+      args: resolvedArgs,
+    });
 
     // Phase A: dedup / at-cap probe. A same-payload replay returns the
     // EXISTING record without ever reading the binding; a different payload
@@ -705,7 +984,7 @@ export function createCtoAdmission({
         const created = {
           id: submissionId,
           origin,
-          text,
+          text: effectiveText,
           payloadHash,
           status: "queued",
           createdAt: now(),
@@ -713,6 +992,9 @@ export function createCtoAdmission({
           ...(model ? { model } : {}),
           ...(agent ? { agent } : {}),
           ...(expectedGeneration !== undefined ? { expectedGeneration } : {}),
+          ...(effectiveKind === "command" ? { kind: "command", command, args: resolvedArgs } : {}),
+          ...(Array.isArray(attachments) && attachments.length > 0 ? { attachments } : {}),
+          ...(Array.isArray(mentions) && mentions.length > 0 ? { mentions } : {}),
         };
         if (normalized.submissions.length >= maxEntries) {
           // P3a3-review round 3: the cap must NEVER refuse the human. Make
@@ -920,22 +1202,87 @@ export function createCtoAdmission({
     return outcome ?? { kind: "retry" };
   }
 
-  /** The external send + outcome classification. ALL locks are released. */
+  /**
+   * The external send + outcome classification. ALL locks are released.
+   * P3a3 full-parity widening: the discriminated `kind` selects the sender —
+   * a legacy/prompt record (no kind, or kind:"prompt") dispatches through
+   * sendPrompt with its attachments/mentions carried verbatim; a
+   * kind:"command" record dispatches through sendCommand instead (a
+   * DIFFERENT opencode endpoint — submit() already proved sendCommand is
+   * wired before ever persisting such a record, so this is never reached
+   * with kind:"command" and no sender). Both branches share the exact same
+   * outcome classification below (4xx → failed, everything else → unknown,
+   * receipt-found → accepted) — the crash/retry contract does not care which
+   * endpoint was called.
+   */
   async function sendAndClassify(claimed, targetBinding) {
     const sessionId = claimed.sessionId;
+    const isCommand = claimed.kind === "command";
+    // Dispatch-time attachment re-validation (sweep guard): the staging area
+    // (~/.manta-uploads) is swept after uploadCleanupHours while this record
+    // can sit queued INDEFINITELY (a busy turn, or the uncertain-abort
+    // barrier until manual recovery), so an attachment present at submit()
+    // may be gone by now. Dispatching it anyway sends a dangling
+    // `file://` FilePart — verified live on opencode 1.18.29: prompt_async
+    // ACCEPTS the POST (204), then the turn dies in
+    // SessionPrompt.createUserMessage (PlatformError NotFound: readFile)
+    // BEFORE the user message persists — no history poison, but the message
+    // (text included) never goes out and the record lands "unknown", an
+    // UNRESOLVED status that holds the one-turn-at-a-time gate until manual
+    // recovery. A definitive local check turns that wedge into a visible,
+    // actionable failure: nothing is sent, the text is NOT sent as though
+    // complete, and the queue projection names the missing file. A probe
+    // ERROR is not proof of absence — fail open (send and let opencode's own
+    // resolution be the backstop); only a definite miss blocks the dispatch.
+    if (typeof fileExists === "function" && Array.isArray(claimed.attachments) && claimed.attachments.length > 0) {
+      const missing = [];
+      for (const a of claimed.attachments) {
+        let present = true;
+        try {
+          present = await fileExists(a.remotePath);
+        } catch {
+          present = true; // probe failure ≠ proof of absence — fail open
+        }
+        if (!present) missing.push(a.remotePath);
+      }
+      if (missing.length > 0) {
+        activeOps.delete(claimed.id);
+        acceptedBySession.delete(sessionId);
+        await markTransition(claimed.id, "dispatching", "failed", {
+          failedAt: now(),
+          error:
+            `Attachment no longer on disk (swept from the upload staging area before dispatch): ` +
+            `${missing.join(", ")}. Re-attach the file and send again — the message was NOT delivered.`,
+        });
+        return;
+      }
+    }
     let sendError = null;
     try {
       await bounded(
         (signal) =>
-          sendPrompt({
-            sessionId,
-            text: claimed.text,
-            model: claimed.model,
-            agent: claimed.agent,
-            messageID: claimed.messageID,
-            signal,
-          }),
-        `sendPrompt (${claimed.id})`,
+          isCommand
+            ? sendCommand({
+                sessionId,
+                command: claimed.command,
+                arguments: claimed.args ?? "",
+                attachments: claimed.attachments,
+                model: claimed.model,
+                agent: claimed.agent,
+                messageID: claimed.messageID,
+                signal,
+              })
+            : sendPrompt({
+                sessionId,
+                text: claimed.text,
+                model: claimed.model,
+                agent: claimed.agent,
+                attachments: claimed.attachments,
+                mentions: claimed.mentions,
+                messageID: claimed.messageID,
+                signal,
+              }),
+        `${isCommand ? "sendCommand" : "sendPrompt"} (${claimed.id})`,
       );
     } catch (err) {
       sendError = err;
@@ -1297,6 +1644,7 @@ async function claimAndAttemptAbort(record) {
         submissions: fresh.submissions.map((r) => {
           const projected = { ...r };
           delete projected.text; // payloads stay out of queue listings
+          delete projected.args; // ditto — a command's free-text argument body
           if (r.status === "unknown" || r.status === "cancel_requested") {
             projected.unknownMs = t - (r.unknownAt ?? r.createdAt);
             projected.staleUnknown = projected.unknownMs > unknownStaleMs || undefined;

@@ -18,6 +18,7 @@ import {
   writeSavedMode,
   modelFromChoice,
   resolveLauncherFlags,
+  resolveAgentMentions,
   readPromptHistory,
   appendPromptHistory,
   mergePromptHistory,
@@ -531,5 +532,45 @@ describe("last-active session persistence (restored on refresh/relaunch)", () =>
     expect(readSavedActiveSession()).toBeNull();
     localStorage.setItem("manta:lastActiveSession", JSON.stringify({ project: "p", window: 1.5 }));
     expect(readSavedActiveSession()).toBeNull();
+  });
+});
+
+// resolveAgentMentions — shared by the session composer and the CTO
+// conversation, so a drift here would silently change what "@agent" means on
+// one surface only.
+describe("resolveAgentMentions", () => {
+  const m = (name: string) => ({ id: `m-${name}`, name });
+
+  it("resolves a mention to the slice it occupies in the SUBMITTED text", () => {
+    expect(resolveAgentMentions("ask @build to ship", [m("build")])).toEqual([
+      { name: "build", source: { value: "@build", start: 4, end: 10 } },
+    ]);
+  });
+
+  it("drops a mention whose token the user deleted before sending", () => {
+    // Offsets are never trusted from insertion time — the token is gone, so
+    // sending a stale offset would mis-slice the message server-side.
+    expect(resolveAgentMentions("ask someone to ship", [m("build")])).toEqual([]);
+  });
+
+  it("requires word boundaries — @build must not match inside @builder", () => {
+    expect(resolveAgentMentions("ask @builder to ship", [m("build")])).toEqual([]);
+  });
+
+  it("takes the first boundary-valid occurrence, skipping an embedded one", () => {
+    expect(resolveAgentMentions("@builder then @build", [m("build")])).toEqual([
+      { name: "build", source: { value: "@build", start: 14, end: 20 } },
+    ]);
+  });
+
+  it("resolves several mentions independently", () => {
+    expect(resolveAgentMentions("@build and @plan", [m("build"), m("plan")])).toEqual([
+      { name: "build", source: { value: "@build", start: 0, end: 6 } },
+      { name: "plan", source: { value: "@plan", start: 11, end: 16 } },
+    ]);
+  });
+
+  it("returns an empty array when nothing is tracked", () => {
+    expect(resolveAgentMentions("no mentions here", [])).toEqual([]);
   });
 });

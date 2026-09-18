@@ -438,6 +438,13 @@ export function buildHandlers({
   // TypeError, and the opencode:prompt / opencode:run-command seams fall
   // through byte-identically to the raw oc routes.
   ctoConversation = null,
+  // The doctrine restart manager (providers.createCtoDoctrineRestarter, wired
+  // in index.mjs with the shared busy view + a tick poller). A ctoStyle /
+  // ctoHouseRules edit defers its opencode restart until the box is idle
+  // instead of killing in-flight turns invisibly, and reports the deferred
+  // state on the config responses. Null when not wired → config:update keeps
+  // the pre-fix immediate restart via providers.refreshCtoDoctrine.
+  doctrineRestart = null,
 }) {
   // The cto:conversation-* channels require the composed runtime. Answer with
   // an actionable message rather than an opaque crash when it isn't wired.
@@ -543,6 +550,13 @@ export function buildHandlers({
     // stored mirror is used unchanged rather than showing the user a guess.
     "config:get": async () => {
       const cfg = await local.configGet();
+      // Deferred doctrine restart (review fix): the pending flag rides EVERY
+      // config:get — always a boolean when the manager is wired (false =
+      // nothing pending) — so a reload re-renders the "applies when the box
+      // is idle" note. Unwired → the response is byte-identical to before.
+      const doctrineFlag = doctrineRestart
+        ? { ctoDoctrineRestartPending: doctrineRestart.isPending() === true }
+        : {};
       try {
         const live = await providers.readCacheTtl({ listProviders: oc.getProviders });
         if (live && live !== cfg.cacheTtl) {
@@ -553,17 +567,17 @@ export function buildHandlers({
             );
             if (applied.ok) {
               console.log("[config] applied stored cacheTtl=1h to opencode");
-              return cfg;
+              return { ...cfg, ...doctrineFlag };
             }
             console.warn("[config] could not apply stored cacheTtl:", applied.error);
           }
           await local.configUpdate({ cacheTtl: live });
-          return { ...cfg, cacheTtl: live };
+          return { ...cfg, cacheTtl: live, ...doctrineFlag };
         }
       } catch (e) {
         console.warn("[config] cacheTtl reconcile skipped:", e instanceof Error ? e.message : e);
       }
-      return cfg;
+      return { ...cfg, ...doctrineFlag };
     },
 
     // preload: ipcRenderer.invoke(IPC.configUpdate, patch)  → args[0] = patch (Partial<AppConfig>)
@@ -618,8 +632,40 @@ export function buildHandlers({
           /* best-effort audit trail */
         }
       }
+      // CTO operating-doctrine work: a preset or house-rules change must take
+      // effect without the user restarting anything manually. The doctrine
+      // FILE is re-materialized immediately; the opencode RESTART is owned by
+      // `doctrineRestart` (providers.createCtoDoctrineRestarter, wired in
+      // index.mjs with the shared busy view): applied at once when the box is
+      // idle, DEFERRED while any opencode session is mid-turn. The old
+      // synchronous restart here killed every in-flight turn box-wide as an
+      // invisible side effect of a style CLICK or a house-rules BLUR.
+      // Gated on `cto.enabled` (the on-call CTO agent actually being
+      // installed) so an unrelated box never eats a disruptive opencode
+      // restart for a setting nothing reads yet. Best-effort: never fails the
+      // config save itself.
+      if ((patch?.ctoStyle !== undefined || patch?.ctoHouseRules !== undefined) && next?.cto?.enabled) {
+        try {
+          // The EFFECTIVE doctrine inputs: what the patch set, else what was
+          // stored before the save (never assume configUpdate's merge shape).
+          const doctrineStyle = patch?.ctoStyle ?? prev?.ctoStyle ?? next?.ctoStyle;
+          const doctrineHouseRules = patch?.ctoHouseRules ?? prev?.ctoHouseRules ?? next?.ctoHouseRules;
+          if (doctrineRestart) {
+            await doctrineRestart.refresh({ style: doctrineStyle, houseRules: doctrineHouseRules });
+          } else {
+            // Not wired (older boxes / some tests): the pre-fix immediate path.
+            await providers.refreshCtoDoctrine({ style: doctrineStyle, houseRules: doctrineHouseRules });
+          }
+        } catch (e) {
+          console.warn("[cto-doctrine] refresh after config change failed:", e instanceof Error ? e.message : e);
+        }
+      }
       syncState.applyConfig(next);
-      return next;
+      // The transient pending flag rides the RESPONSE, never the synced
+      // config delta above (it is a live manager state, not a persisted
+      // setting). Unwired → the response shape is unchanged.
+      if (!doctrineRestart) return next;
+      return { ...next, ctoDoctrineRestartPending: doctrineRestart.isPending() === true };
     },
 
     // preload: ipcRenderer.invoke(IPC.projectMetaDelete, tmuxSession)  → args[0] = tmuxSession (string)
@@ -1047,11 +1093,14 @@ export function buildHandlers({
 
     // preload: ipcRenderer.invoke(IPC.opencodePrompt, { sessionId, text, model, attachments, mentions })
     // → args[0] = that object; opencode.mjs sendPrompt expects the same shape
-    // P3a3 (spec §8.3): a direct send aimed at the CTO role session must NOT
-    // bypass the durable admission queue. Plain text is routed through the
-    // same seam (stable id: the composer's messageID when present); file
-    // attachments / agent mentions get the clear "not supported yet"
-    // rejection. Ordinary project sessions take the byte-identical raw path.
+    // P3a3 (spec §8.3, full-parity widening): a direct send aimed at the CTO
+    // role session must NOT bypass the durable admission queue. EVERY send —
+    // plain text, file attachments, resolved @agent mentions — is routed
+    // through the same seam (stable id: the composer's messageID when
+    // present) via admitDirect, which also gates the caller's `agent` field
+    // through a closed plan-mode allowlist (see ctoConversation.mjs
+    // resolveAgent — the caller still can never pick an arbitrary agent).
+    // Ordinary project sessions take the byte-identical raw path.
     "opencode:prompt": async (input) => {
       if (input && ctoConversation && (await ctoConversation.isConversationSession(input.sessionId))) {
         return ctoConversation.admitDirect(input);
@@ -1567,13 +1616,15 @@ export function buildHandlers({
 
     // preload: ipcRenderer.invoke(IPC.opencodeRunCommand, { sessionId, command, arguments, model?, attachments? })
     // → args[0] = that object; opencode.mjs runCommand expects same shape
-    // P3a3 (spec §8.3): slash commands aimed at the CTO role session are NOT
-    // admitted through the conversation API yet — rejected with the clear
-    // "use the CTO conversation API for plain text" copy instead of silently
-    // bypassing the admission queue. Ordinary project sessions unaffected.
+    // P3a3 (spec §8.3, full-parity widening): a slash command aimed at the
+    // CTO role session is routed through the SAME durable admission queue as
+    // a direct send — admitCommand persists a `kind:"command"` record that
+    // admission dispatches via sendCommand (a different opencode endpoint
+    // than a prompt), never bypassing the queue. Ordinary project sessions
+    // take the byte-identical raw route.
     "opencode:run-command": async (input) => {
       if (input && ctoConversation && (await ctoConversation.isConversationSession(input.sessionId))) {
-        await ctoConversation.rejectRunCommand(input);
+        return ctoConversation.admitCommand(input);
       }
       return oc.runCommand(input);
     },

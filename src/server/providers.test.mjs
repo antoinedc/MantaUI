@@ -29,7 +29,84 @@ import {
   planCacheTtlOps,
   syncCacheTtl,
   readCacheTtl,
+  ensureCtoAgent,
+  ctoPromptPath,
+  ctoMaterializedPromptPath,
+  materializeCtoPrompt,
+  refreshCtoDoctrine,
+  createCtoDoctrineRestarter,
 } from "./providers.mjs";
+
+// ---------------------------------------------------------------------------
+// Shared writer-harness helpers.
+//
+// The three set* writers (setProviders / setSubagents / setReferences) share
+// one injectable shape ({patch, remove}), so their tests repeat the same
+// recording-writer wiring. These helpers hold the wiring ONCE; the writer,
+// the payloads, and the key-specific assertions stay at each test.
+// ---------------------------------------------------------------------------
+
+// Runs a REMOVE-ONLY call against a recording writer and returns what the
+// writer saw. The remove path must reach removeConfigKeys without any patch;
+// each caller asserts its own key shape.
+async function runRemoveThroughSetter(setter, removeArg) {
+  let removedPaths = null;
+  let patched = false;
+  const result = await setter(
+    { remove: removeArg },
+    {
+      patch: async () => { patched = true; return { ok: true }; },
+      remove: async (paths) => { removedPaths = paths; return { ok: true, changed: true }; },
+    },
+  );
+  return { result, removedPaths, patched };
+}
+
+// The two-step ordering probe shared by the writers' "patches before deleting
+// ... and stops when the patch fails" tests: the happy path must PATCH then
+// REMOVE, in order, and a failing patch must NOT delete. `setter` + the two
+// payloads differ per writer; the guarantees under test are the same.
+async function assertPatchBeforeRemove(setter, okBatch, failBatch) {
+  const order = [];
+  const okResult = await setter(
+    okBatch,
+    {
+      patch: async () => { order.push("patch"); return { ok: true }; },
+      remove: async () => { order.push("remove"); return { ok: true }; },
+    },
+  );
+  assert.equal(okResult.ok, true);
+  assert.deepEqual(order, ["patch", "remove"]);
+
+  let removed = false;
+  const failResult = await setter(
+    failBatch,
+    {
+      patch: async () => ({ ok: false, error: "boom" }),
+      remove: async () => { removed = true; return { ok: true }; },
+    },
+  );
+  assert.equal(failResult.ok, false);
+  assert.equal(removed, false, "must not delete when the upsert patch failed");
+}
+
+// Recording removeConfigKeys deps: serves SRC, captures the written text and
+// the restart count. Shared by the happy-path removal tests; each keeps its
+// own paths and written-content assertions. SRC is the shared opencode.jsonc
+// fixture (hoisted to module scope so the helper above can read it).
+const SRC = '{\n  // keep me\n  "provider": {\n    "a": {"x":1},\n    "b": {"y":2}\n  },\n  "model": "m"\n}';
+
+function recordingRemoveDeps() {
+  const state = { written: null, restarts: 0 };
+  return {
+    state,
+    deps: {
+      readText: async () => SRC,
+      writeText: async (t) => { state.written = t; },
+      restart: async () => { state.restarts += 1; return { ok: true }; },
+    },
+  };
+}
 
 // ---------------------------------------------------------------------------
 // parseModelsResponse
@@ -522,15 +599,7 @@ describe("setProviders", () => {
   });
 
   it("routes a remove through removeConfigKeys (no longer rejects)", async () => {
-    let removedPaths = null;
-    let patched = false;
-    const result = await setProviders(
-      { remove: ["voska"] },
-      {
-        patch: async () => { patched = true; return { ok: true }; },
-        remove: async (paths) => { removedPaths = paths; return { ok: true, changed: true }; },
-      },
-    );
+    const { result, removedPaths, patched } = await runRemoveThroughSetter(setProviders, ["voska"]);
     assert.equal(result.ok, true);
     assert.deepEqual(removedPaths, [["provider", "voska"]]);
     assert.equal(patched, false, "a pure remove does not PATCH");
@@ -817,42 +886,18 @@ describe("setSubagents", () => {
   });
 
   it("routes a remove through removeConfigKeys against the agent key (no longer rejects)", async () => {
-    let removedPaths = null;
-    let patched = false;
-    const result = await setSubagents(
-      { remove: ["haiku"] },
-      {
-        patch: async () => { patched = true; return { ok: true }; },
-        remove: async (paths) => { removedPaths = paths; return { ok: true, changed: true }; },
-      },
-    );
+    const { result, removedPaths, patched } = await runRemoveThroughSetter(setSubagents, ["haiku"]);
     assert.equal(result.ok, true);
     assert.deepEqual(removedPaths, [["agent", "haiku"]]);
     assert.equal(patched, false);
   });
 
   it("patches before deleting on a mixed upsert+remove batch, and stops when the patch fails", async () => {
-    const order = [];
-    const okResult = await setSubagents(
+    await assertPatchBeforeRemove(
+      setSubagents,
       { upsert: [{ name: "fast", model: "anthropic/claude-haiku-4", description: "Fast" }], remove: ["haiku"] },
-      {
-        patch: async () => { order.push("patch"); return { ok: true }; },
-        remove: async () => { order.push("remove"); return { ok: true }; },
-      },
-    );
-    assert.equal(okResult.ok, true);
-    assert.deepEqual(order, ["patch", "remove"]);
-
-    let removed = false;
-    const failResult = await setSubagents(
       { upsert: [{ name: "fast", model: "x", description: "F" }], remove: ["haiku"] },
-      {
-        patch: async () => ({ ok: false, error: "boom" }),
-        remove: async () => { removed = true; return { ok: true }; },
-      },
     );
-    assert.equal(failResult.ok, false);
-    assert.equal(removed, false, "must not delete when the upsert patch failed");
   });
 });
 
@@ -1128,6 +1173,332 @@ describe("ensureMantaPlanAgent", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// ensureCtoAgent (BET-1164) — same shape as ensureMantaPlanAgent, but its
+// default promptPath now resolves to the MATERIALIZED doctrine file (this
+// doctrine work), not the committed source doc directly.
+// ---------------------------------------------------------------------------
+
+describe("ensureCtoAgent", () => {
+  it("is a no-op (no write, no restart) when a cto block already exists", async () => {
+    let applied = false;
+    let restarted = false;
+    const existingCfg = {
+      agent: { cto: { mode: "primary", description: "X", permission: {}, prompt: "{file:/x.md}" } },
+    };
+    const result = await ensureCtoAgent({
+      readConfig: async () => existingCfg,
+      applySubagents: async () => { applied = true; return { ok: true }; },
+      restart: async () => { restarted = true; return { ok: true }; },
+      promptPath: "/box/cto-prompt.md",
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.changed, false);
+    assert.equal(applied, false);
+    assert.equal(restarted, false);
+  });
+
+  it("upserts the block referencing the given promptPath and restarts when absent", async () => {
+    const applied = [];
+    const restarts = [];
+    const result = await ensureCtoAgent({
+      readConfig: async () => ({}),
+      applySubagents: async (ops) => { applied.push(ops); return { ok: true }; },
+      restart: async () => { restarts.push(1); return { ok: true }; },
+      promptPath: "/box/cto-prompt.md",
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.changed, true);
+    assert.equal(restarts.length, 1);
+    const upsert = applied[0].upsert[0];
+    assert.equal(upsert.name, "cto");
+    assert.equal(upsert.mode, "primary");
+    assert.equal(upsert.permission.cto, "allow");
+    assert.equal(upsert.prompt, "{file:/box/cto-prompt.md}");
+  });
+
+  it("defaults promptPath to the materialized doctrine file, not the committed source doc", () => {
+    // Regression guard for the customisation seam: a caller that doesn't
+    // override promptPath must get the box-side materialized path, never the
+    // read-only committed docs/ file (which a user edit has nowhere to live).
+    assert.equal(ctoMaterializedPromptPath().endsWith("/cto/prompt.md"), true);
+    assert.notEqual(ctoMaterializedPromptPath(), ctoPromptPath());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// materializeCtoPrompt / refreshCtoDoctrine (BET-1164 follow-up) — the I/O
+// wrapper around ctoDoctrine.mjs's pure composeCtoPrompt. Every case here
+// injects readFile/writeFile/mkdir/restart, so nothing touches the real
+// filesystem or opencode.
+// ---------------------------------------------------------------------------
+
+describe("materializeCtoPrompt", () => {
+  const BASE = "# On-call CTO\n\n## Guardrails\n\n- Never fabricate data.\n";
+
+  it("composes the doctrine and writes it to the output path", async () => {
+    const writes = [];
+    const result = await materializeCtoPrompt({
+      style: "handson",
+      houseRules: "Always confirm before deploying.",
+      basePromptPath: "/base/prompt.md",
+      outputPath: "/box/cto/prompt.md",
+      readFile: async (p) => { assert.equal(p, "/base/prompt.md"); return BASE; },
+      writeFile: async (p, data) => { writes.push({ p, data }); },
+      mkdir: async () => {},
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.fellBack, false);
+    assert.equal(result.path, "/box/cto/prompt.md");
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].p, "/box/cto/prompt.md");
+    assert.match(writes[0].data, /Operating doctrine: Hands-on/);
+    assert.match(writes[0].data, /Always confirm before deploying\./);
+    assert.ok(writes[0].data.includes("Never fabricate data."), "guardrails survive verbatim");
+  });
+
+  it("creates the output directory before writing (best-effort)", async () => {
+    let mkdirCalledWith = null;
+    await materializeCtoPrompt({
+      basePromptPath: "/base/prompt.md",
+      outputPath: "/box/cto/prompt.md",
+      readFile: async () => BASE,
+      writeFile: async () => {},
+      mkdir: async (dir, opts) => { mkdirCalledWith = { dir, opts }; },
+    });
+    assert.equal(mkdirCalledWith.dir, "/box/cto");
+    assert.equal(mkdirCalledWith.opts.recursive, true);
+  });
+
+  it("a mkdir failure is swallowed (best-effort) and the write still proceeds", async () => {
+    const writes = [];
+    const result = await materializeCtoPrompt({
+      basePromptPath: "/base/prompt.md",
+      outputPath: "/box/cto/prompt.md",
+      readFile: async () => BASE,
+      writeFile: async (p, data) => { writes.push({ p, data }); },
+      mkdir: async () => { throw new Error("EEXIST"); },
+    });
+    assert.equal(result.ok, true);
+    assert.equal(writes.length, 1);
+  });
+
+  it("falls back to writing the committed base prompt VERBATIM when composing/writing the doctrine fails", async () => {
+    const writes = [];
+    let call = 0;
+    const result = await materializeCtoPrompt({
+      style: "balanced",
+      basePromptPath: "/base/prompt.md",
+      outputPath: "/box/cto/prompt.md",
+      readFile: async () => BASE,
+      writeFile: async (p, data) => {
+        call += 1;
+        if (call === 1) throw new Error("disk full"); // the composed write fails
+        writes.push({ p, data }); // the fallback write succeeds
+      },
+      mkdir: async () => {},
+      log: { error: () => {}, warn: () => {} },
+    });
+    assert.equal(result.ok, false, "reports failure — the caller must know the doctrine did not apply");
+    assert.equal(result.fellBack, true);
+    assert.equal(writes.length, 1, "the fallback write happened");
+    assert.equal(writes[0].data, BASE, "the fallback content is the committed prompt, byte-for-byte");
+  });
+
+  it("reports failure (never throws) when even the fallback write fails", async () => {
+    const result = await materializeCtoPrompt({
+      basePromptPath: "/base/prompt.md",
+      outputPath: "/box/cto/prompt.md",
+      readFile: async () => BASE,
+      writeFile: async () => { throw new Error("disk full"); },
+      mkdir: async () => {},
+      log: { error: () => {}, warn: () => {} },
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.fellBack, false);
+  });
+
+  it("reports failure (never throws) when the committed base prompt itself cannot be read", async () => {
+    const result = await materializeCtoPrompt({
+      basePromptPath: "/base/prompt.md",
+      outputPath: "/box/cto/prompt.md",
+      readFile: async () => { throw new Error("ENOENT"); },
+      writeFile: async () => { throw new Error("must not be called"); },
+      mkdir: async () => { throw new Error("must not be called"); },
+      log: { error: () => {}, warn: () => {} },
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.fellBack, false);
+  });
+
+  it("defaults outputPath to the fixed materialized path", async () => {
+    const result = await materializeCtoPrompt({
+      basePromptPath: "/base/prompt.md",
+      readFile: async () => BASE,
+      writeFile: async () => {},
+      mkdir: async () => {},
+    });
+    assert.equal(result.path, ctoMaterializedPromptPath());
+  });
+});
+
+describe("refreshCtoDoctrine", () => {
+  it("materializes the prompt and restarts opencode via the injected restart function", async () => {
+    const writes = [];
+    let restarted = false;
+    const result = await refreshCtoDoctrine({
+      style: "executive",
+      basePromptPath: "/base/prompt.md",
+      outputPath: "/box/cto/prompt.md",
+      readFile: async () => "# base\n",
+      writeFile: async (p, data) => { writes.push({ p, data }); },
+      mkdir: async () => {},
+      restart: async () => { restarted = true; return { ok: true }; },
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.restarted, true);
+    assert.equal(writes.length, 1);
+  });
+
+  it("reuses restartOpencode's own error contract — a failed restart is logged, not thrown", async () => {
+    const warnings = [];
+    const result = await refreshCtoDoctrine({
+      basePromptPath: "/base/prompt.md",
+      outputPath: "/box/cto/prompt.md",
+      readFile: async () => "# base\n",
+      writeFile: async () => {},
+      mkdir: async () => {},
+      restart: async () => ({ ok: false, error: "opencode not running" }),
+      log: { error: () => {}, warn: (...a) => warnings.push(a) },
+    });
+    assert.equal(result.restarted, false);
+    // the write itself still succeeded — a restart failure never undoes it.
+    assert.equal(result.ok, true);
+    assert.ok(warnings.length > 0);
+  });
+
+  it("does not throw when restart itself throws", async () => {
+    const result = await refreshCtoDoctrine({
+      basePromptPath: "/base/prompt.md",
+      outputPath: "/box/cto/prompt.md",
+      readFile: async () => "# base\n",
+      writeFile: async () => {},
+      mkdir: async () => {},
+      restart: async () => { throw new Error("ECONNREFUSED"); },
+      log: { error: () => {}, warn: () => {} },
+    });
+    assert.equal(result.restarted, false);
+  });
+});
+
+// createCtoDoctrineRestarter — the review fix for the silent restart: a
+// doctrine edit must NEVER kill in-flight turns as an invisible side effect
+// (AGENTS.md: a restart "is never triggered automatically as a side effect").
+// The file write is immediate and safe; the RESTART waits for an idle box and
+// the caller reports the pending state visibly.
+describe("createCtoDoctrineRestarter", () => {
+  const IO = {
+    basePromptPath: "/base/prompt.md",
+    outputPath: "/box/cto/prompt.md",
+    readFile: async () => "# base\n",
+    writeFile: async () => {},
+    mkdir: async () => {},
+    log: { error: () => {}, warn: () => {}, info: () => {} },
+  };
+
+  it("restarts immediately when the box is idle (nothing in-flight to kill)", async () => {
+    let restarts = 0;
+    const mgr = createCtoDoctrineRestarter({
+      ...IO,
+      restart: async () => { restarts += 1; return { ok: true }; },
+      anyBusy: () => false,
+    });
+    const r = await mgr.refresh({ style: "executive", houseRules: "" });
+    assert.equal(r.ok, true);
+    assert.equal(r.restarted, true);
+    assert.equal(r.pending, false);
+    assert.equal(restarts, 1);
+    assert.equal(mgr.isPending(), false);
+  });
+
+  it("defers the restart while any opencode session is busy, then applies it on the first idle tick", async () => {
+    let restarts = 0;
+    let busy = true;
+    const mgr = createCtoDoctrineRestarter({
+      ...IO,
+      restart: async () => { restarts += 1; return { ok: true }; },
+      anyBusy: () => busy,
+    });
+    const r = await mgr.refresh({ style: "executive", houseRules: "be terse" });
+    assert.equal(r.ok, true, "the doctrine FILE is written immediately — the edit is saved");
+    assert.equal(r.restarted, false, "busy → no restart now (no silent kill)");
+    assert.equal(r.pending, true, "…and the caller can tell the user it is pending");
+    assert.equal(restarts, 0);
+    assert.equal(mgr.isPending(), true);
+    // The box goes idle; the manager's tick applies the restart.
+    busy = false;
+    await mgr.tick();
+    assert.equal(restarts, 1, "applied automatically — the setting takes effect with no manual restart");
+    assert.equal(mgr.isPending(), false);
+    await mgr.tick();
+    assert.equal(restarts, 1, "no duplicate restart after it applied");
+  });
+
+  it("a failed deferred restart stays pending and retries on the next idle tick", async () => {
+    let attempts = 0;
+    const mgr = createCtoDoctrineRestarter({
+      ...IO,
+      restart: async () => {
+        attempts += 1;
+        return attempts === 1 ? { ok: false, error: "systemd down" } : { ok: true };
+      },
+      anyBusy: () => false,
+    });
+    // The FIRST refresh restarts (idle) and fails — the file is written, so
+    // the change still applies at the next natural restart; pending stays
+    // false because nothing was deferred. Simulate the deferred-failure path
+    // via a busy-then-idle transition instead.
+    const first = await mgr.refresh({ style: "executive", houseRules: "" });
+    assert.equal(first.restarted, false);
+    assert.equal(first.pending, false, "an immediate (non-deferred) failed restart is not pending");
+    assert.equal(attempts, 1);
+  });
+
+  it("a deferred restart whose apply fails retries on the next tick", async () => {
+    let attempts = 0;
+    let busy = true;
+    const mgr = createCtoDoctrineRestarter({
+      ...IO,
+      restart: async () => {
+        attempts += 1;
+        return attempts === 1 ? { ok: false, error: "systemd down" } : { ok: true };
+      },
+      anyBusy: () => busy,
+    });
+    await mgr.refresh({ style: "executive", houseRules: "" });
+    assert.equal(mgr.isPending(), true);
+    busy = false;
+    await mgr.tick();
+    assert.equal(attempts, 1, "the retry ran (and failed)");
+    assert.equal(mgr.isPending(), true, "still pending — the change is not applied yet");
+    await mgr.tick();
+    assert.equal(attempts, 2, "…and retried");
+    assert.equal(mgr.isPending(), false, "applied on the successful retry");
+  });
+
+  it("no anyBusy wiring → never defers (immediate restart, the pre-fix behavior)", async () => {
+    let restarts = 0;
+    const mgr = createCtoDoctrineRestarter({
+      ...IO,
+      restart: async () => { restarts += 1; return { ok: true }; },
+    });
+    const r = await mgr.refresh({ style: "executive", houseRules: "" });
+    assert.equal(r.restarted, true);
+    assert.equal(r.pending, false);
+    assert.equal(restarts, 1);
+  });
+});
+
 // setReferences — BET-1023. Writes go through opencode's /global/config
 // endpoint (injectable `patch`, the single config-write path — never a second
 // writer). Remove ops are rejected because the endpoint has no delete
@@ -1173,42 +1544,18 @@ describe("setReferences", () => {
   });
 
   it("routes a remove through removeConfigKeys against the references key (no longer rejects)", async () => {
-    let removedPaths = null;
-    let patched = false;
-    const result = await setReferences(
-      { remove: ["docs"] },
-      {
-        patch: async () => { patched = true; return { ok: true }; },
-        remove: async (paths) => { removedPaths = paths; return { ok: true, changed: true }; },
-      },
-    );
+    const { result, removedPaths, patched } = await runRemoveThroughSetter(setReferences, ["docs"]);
     assert.equal(result.ok, true);
     assert.deepEqual(removedPaths, [["references", "docs"]]);
     assert.equal(patched, false);
   });
 
   it("patches before deleting on a mixed batch, and stops when the patch fails", async () => {
-    const order = [];
-    const okResult = await setReferences(
+    await assertPatchBeforeRemove(
+      setReferences,
       { upsert: [{ alias: "docs", path: "../docs" }], remove: ["old"] },
-      {
-        patch: async () => { order.push("patch"); return { ok: true }; },
-        remove: async () => { order.push("remove"); return { ok: true }; },
-      },
-    );
-    assert.equal(okResult.ok, true);
-    assert.deepEqual(order, ["patch", "remove"]);
-
-    let removed = false;
-    const failResult = await setReferences(
       { upsert: [{ alias: "docs", path: "../docs" }], remove: ["old"] },
-      {
-        patch: async () => ({ ok: false, error: "boom" }),
-        remove: async () => { removed = true; return { ok: true }; },
-      },
     );
-    assert.equal(failResult.ok, false);
-    assert.equal(removed, false, "must not delete when the upsert patch failed");
   });
 
   it("no-ops when there is nothing to upsert", async () => {
@@ -1239,21 +1586,14 @@ describe("setReferences", () => {
 // ---------------------------------------------------------------------------
 
 describe("removeConfigKeys", () => {
-  const SRC = '{\n  // keep me\n  "provider": {\n    "a": {"x":1},\n    "b": {"y":2}\n  },\n  "model": "m"\n}';
-
   it("deletes a key and leaves a // comment elsewhere intact", async () => {
-    let written = null;
-    let restarts = 0;
-    const result = await removeConfigKeys([["provider", "b"]], {
-      readText: async () => SRC,
-      writeText: async (t) => { written = t; },
-      restart: async () => { restarts++; return { ok: true }; },
-    });
+    const { state, deps } = recordingRemoveDeps();
+    const result = await removeConfigKeys([["provider", "b"]], deps);
     assert.equal(result.ok, true);
     assert.equal(result.changed, true);
-    assert.ok(written.includes("// keep me"), "comment preserved");
-    assert.ok(!written.includes('"b"'), "removed key is gone");
-    assert.equal(restarts, 1);
+    assert.ok(state.written.includes("// keep me"), "comment preserved");
+    assert.ok(!state.written.includes('"b"'), "removed key is gone");
+    assert.equal(state.restarts, 1);
   });
 
   it("missing key → ok:true changed:false, writer NOT called, restart NOT called", async () => {
@@ -1271,18 +1611,13 @@ describe("removeConfigKeys", () => {
   });
 
   it("multi-path call removes all and restarts exactly once", async () => {
-    let written = null;
-    let restarts = 0;
-    const result = await removeConfigKeys([["provider", "a"], ["provider", "b"]], {
-      readText: async () => SRC,
-      writeText: async (t) => { written = t; },
-      restart: async () => { restarts++; return { ok: true }; },
-    });
+    const { state, deps } = recordingRemoveDeps();
+    const result = await removeConfigKeys([["provider", "a"], ["provider", "b"]], deps);
     assert.equal(result.ok, true);
     assert.equal(result.changed, true);
-    assert.equal(restarts, 1);
-    assert.ok(!written.includes('"a"') && !written.includes('"b"'));
-    assert.ok(written.includes("// keep me"));
+    assert.equal(state.restarts, 1);
+    assert.ok(!state.written.includes('"a"') && !state.written.includes('"b"'));
+    assert.ok(state.written.includes("// keep me"));
   });
 
   it("restart failure → ok:false (never reports success while a live opencode holds the key)", async () => {

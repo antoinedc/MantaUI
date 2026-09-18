@@ -106,6 +106,30 @@ const EFFORT_LEVELS: EffortLevel[] = [
   },
 ];
 
+// The CTO operating-doctrine presets (BET-1164 follow-up). One-line blurbs
+// mirror ctoDoctrine.mjs's CTO_STYLE_SUMMARIES verbatim, kept here as a plain
+// literal (not imported — this is a renderer bundle, the doctrine text itself
+// lives server-side) so the UI never claims a behavior the composed prompt
+// doesn't actually implement. Update both together if the wording changes.
+type CtoStylePreset = { value: "executive" | "balanced" | "handson"; title: string; blurb: string };
+const CTO_STYLE_PRESETS: CtoStylePreset[] = [
+  {
+    value: "executive",
+    title: "Executive",
+    blurb: "Concise, decides and reports outcomes; asks only when truly blocked. (Default.)",
+  },
+  {
+    value: "balanced",
+    title: "Balanced",
+    blurb: "Explains briefly; asks when genuinely ambiguous.",
+  },
+  {
+    value: "handson",
+    title: "Hands-on",
+    blurb: "Shows reasoning, proposes options, confirms before acting.",
+  },
+];
+
 // A minimal non-interactive clock for the paused-at line + ledger timestamps.
 function formatTime(ts: number | null | undefined): string {
   if (!ts) return "";
@@ -131,6 +155,16 @@ type CtoSettingsConfig = {
   // BET-1521 (§9.3/§9.4): the autonomy threshold τ (0..1, default 0.7) — the
   // Settings τ control writes it; the gate + calibration read it.
   ctoAutonomyThreshold?: number;
+  // BET-1164 follow-up: the on-call CTO's operating-doctrine preset — tone/
+  // initiative/reporting only, never the read-only guardrails (materialized
+  // server-side; see src/server/providers.mjs materializeCtoPrompt). Default
+  // "executive".
+  ctoStyle?: "executive" | "balanced" | "handson";
+  // Free-text house rules, applied verbatim on top of the preset above.
+  ctoHouseRules?: string;
+  // Transient server projection (never persisted by the client): a deferred
+  // doctrine restart is queued — the change applies when the box is idle.
+  ctoDoctrineRestartPending?: boolean;
 };
 
 // §11.2 defaults — the same constants ctoBudget.mjs enforces server-side.
@@ -930,6 +964,10 @@ export function SettingsView({
   const [capText, setCapText] = useState("");
   const [nightCapText, setNightCapText] = useState("");
   const [tauText, setTauText] = useState("");
+  // BET-1164 follow-up: house rules are free text, so they get their own
+  // local-text-state + onBlur-save pattern (matching capText/nightCapText/
+  // tauText above) rather than the instant-apply radios/toggles.
+  const [houseRulesText, setHouseRulesText] = useState("");
   const [health, setHealth] = useState<CtoHealthStat[]>([]);
   const [busyPause, setBusyPause] = useState(false);
   // BET-1521 (§9.5): the per-class calibration table (value + counts + current
@@ -972,10 +1010,18 @@ export function SettingsView({
         ctoOvernight: !!c?.ctoOvernight,
         ctoNightCapUsd: c?.ctoNightCapUsd,
         ctoAutonomyThreshold: c?.ctoAutonomyThreshold,
+        ctoStyle: c?.ctoStyle,
+        ctoHouseRules: c?.ctoHouseRules,
+        // Transient server projection (review fix): a deferred doctrine
+        // restart is queued — the note below renders from this, on load
+        // included, so a reload keeps the "applies when the box is idle"
+        // state visible.
+        ctoDoctrineRestartPending: c?.ctoDoctrineRestartPending === true,
       });
       setCapText(String(c?.ctoAmbientCap ?? DEFAULT_AMBIENT_CAP_USD));
       setNightCapText(c?.ctoNightCapUsd != null ? String(c.ctoNightCapUsd) : "");
       setTauText(c?.ctoAutonomyThreshold != null ? String(c.ctoAutonomyThreshold) : "");
+      setHouseRulesText(c?.ctoHouseRules ?? "");
     }).catch(reportSettingsLoadError("the CTO settings"));
     void window.api.ctoHealthGet().then((h) => {
       if (!aliveRef.current) return;
@@ -1003,7 +1049,29 @@ export function SettingsView({
       setConfig((c) => ({ ...(c ?? {}), ...patch }));
       try {
         const next = (await window.api.configUpdate(patch)) as CtoSettingsConfig;
-        setConfig((c) => ({ ...c, ...patch, ctoAmbientCap: next?.ctoAmbientCap }));
+        setConfig((c) => ({
+          ...c,
+          ...patch,
+          ctoAmbientCap: next?.ctoAmbientCap,
+          // The transient pending projection from the response (review fix):
+          // true = a deferred doctrine restart is queued. Absent (older box)
+          // reads as false — there was never a pending restart to show.
+          ctoDoctrineRestartPending: next?.ctoDoctrineRestartPending === true,
+        }));
+        // Only a doctrine EDIT toasts — an unrelated save that happens to
+        // return pending:true updates the note, it doesn't claim a doctrine
+        // change was just saved.
+        if (
+          next?.ctoDoctrineRestartPending === true &&
+          (patch.ctoStyle !== undefined || patch.ctoHouseRules !== undefined)
+        ) {
+          pushToast({
+            id: `cto-doctrine-pending-${Date.now()}`,
+            message:
+              "Saved. It applies when the box is idle — the agent service restarts " +
+              "automatically at the next quiet moment (any turn running then is ended).",
+          });
+        }
       } catch (e) {
         // BET-1468 item 2: restore exactly what was on screen before the
         // optimistic patch — the old `prev ?? {}` fabricated an empty config
@@ -1056,6 +1124,15 @@ export function SettingsView({
     }
     void applyConfig({ ctoAutonomyThreshold: Math.round(n * 100) / 100 });
   }, [tauText, applyConfig, pushToast]);
+
+  // BET-1164 follow-up: free text, no validation to reject — an empty value
+  // just clears the house rules. Skip the write entirely when the blurred
+  // text matches what's already saved, so leaving the field without editing
+  // it doesn't trigger the doctrine-refresh restart for nothing.
+  const saveHouseRules = useCallback(() => {
+    if ((config?.ctoHouseRules ?? "") === houseRulesText) return;
+    void applyConfig({ ctoHouseRules: houseRulesText });
+  }, [houseRulesText, config, applyConfig]);
 
   const doPause = useCallback(async () => {
     setBusyPause(true);
@@ -1325,6 +1402,80 @@ export function SettingsView({
             </div>
           </section>
           )}
+
+          {/* ---------- Operating doctrine card (BET-1164 follow-up) ---------- */}
+          {/* Same load-gate as the Behavior card above (BET-1468 item 2): never
+              render the style radios over a config the box hasn't sent yet. */}
+          {config !== null ? (
+          <section className="rounded-lg border border-border-subtle p-4">
+            <h3 className="text-sm font-semibold text-text">How the CTO reports to you</h3>
+            <p className="mt-1 text-sm text-text-faint">
+              Governs tone, initiative and reporting only — it can never turn off the
+              CTO&rsquo;s read-only guardrails. Saving rewrites the CTO&rsquo;s prompt and
+              then restarts the box&rsquo;s background agent service so the change takes
+              effect — every project agent runs on that one service, so any agent turn
+              in flight anywhere on the box is ended by the restart.
+            </p>
+            {config?.ctoDoctrineRestartPending ? (
+              <p className="mt-2 rounded-md border border-border-subtle bg-fill-active p-2 text-sm text-text-muted">
+                Saved — it applies when the box is idle: the background agent service
+                restarts automatically at the next quiet moment, ending any agent turn
+                that happens to be running then.
+              </p>
+            ) : null}
+
+            <div className="mt-4 space-y-4">
+              {/* Style preset */}
+              <div>
+                <div className="text-sm font-medium text-text">Style</div>
+                <div className="mt-2 grid gap-2 sm:grid-cols-3">
+                  {CTO_STYLE_PRESETS.map((p) => (
+                    <label
+                      key={p.value}
+                      className={
+                        "cursor-pointer rounded-md border p-3 text-sm " +
+                        ((config?.ctoStyle ?? "executive") === p.value
+                          ? "border-accent bg-fill-hover"
+                          : "border-border-subtle")
+                      }
+                    >
+                      <span className="flex items-center gap-2">
+                        <input
+                          type="radio"
+                          name="cto-style"
+                          value={p.value}
+                          checked={(config?.ctoStyle ?? "executive") === p.value}
+                          onChange={() => void applyConfig({ ctoStyle: p.value })}
+                          className="accent-accent"
+                        />
+                        <span className="font-medium text-text">{p.title}</span>
+                      </span>
+                      <span className="mt-1 block text-xs text-text-muted">{p.blurb}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              {/* House rules */}
+              <div>
+                <div className="text-sm font-medium text-text">House rules</div>
+                <div className="text-sm text-text-muted">
+                  Your own standing instructions, applied on top of the style above — they
+                  can ask for more or less of something, never remove a guardrail.
+                </div>
+                <textarea
+                  value={houseRulesText}
+                  onChange={(e) => setHouseRulesText(e.target.value)}
+                  onBlur={saveHouseRules}
+                  rows={3}
+                  placeholder="e.g. Always name the affected environment."
+                  className="mt-2 w-full rounded-md border border-border bg-bg px-2 py-1 text-sm text-text"
+                  aria-label="CTO house rules"
+                />
+              </div>
+            </div>
+          </section>
+          ) : null}
 
           {/* ---------- Autonomy calibration table (§9.5, BET-1521) ---------- */}
           {/* Read-only: where the CTO is holding itself back per class — the

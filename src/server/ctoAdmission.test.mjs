@@ -77,6 +77,33 @@ function fakeBinding({ generation = 3, currentSessionId = "ses_cto" } = {}) {
   };
 }
 
+// The shared sendOutcome knob for BOTH fake senders: fail the send in the
+// meaningful ways (definitive 400 / definitive 500 / unknown network), else
+// land the receipt in the transcript. `label` names the failing endpoint in
+// the thrown error ("sendPrompt" vs "runCommand") so tests can tell the two
+// dispatch paths apart — the ONLY difference between the senders.
+function applySendOutcome(oc, { sendOutcome, receiptLands, messageID, label }) {
+  if (sendOutcome === "http400") {
+    const err = new Error(`opencode ${label} 400: bad request`);
+    err.status = 400;
+    throw err;
+  }
+  if (sendOutcome === "http500") {
+    const err = new Error(`opencode ${label} 500: boom`);
+    err.status = 500;
+    throw err;
+  }
+  if (sendOutcome === "network") {
+    throw new Error("socket hang up");
+  }
+  if (receiptLands) {
+    oc.transcript.set(messageID, { info: { id: messageID, role: "user", time: { created: 1 } }, parts: [] });
+    // The transcript (listMessages view) also gains the user row — the
+    // receipt-specific reconciliation links assistant rows to it.
+    oc.rows.push({ info: { id: messageID, role: "user", time: { created: 1 } }, parts: [] });
+  }
+}
+
 // A synthetic opencode: records sends/aborts, serves receipts from a
 // transcript map, and can fail sends in the meaningful ways. `rows` is the
 // transcript (ascending) used by listMessages; `completeTurn` appends a
@@ -86,32 +113,23 @@ function fakeOc({ sendOutcome = "ok", receiptLands = true, rows = [] } = {}) {
   let asstSeq = 0;
   const oc = {
     sends: [],
+    commandSends: [],
     aborts: [],
     getMessageCalls: 0,
     transcript: new Map(), // messageID → receipt row
     rows: [...rows],
-    async sendPrompt({ sessionId, text, model, agent, messageID }) {
-      oc.sends.push({ sessionId, text, model, agent, messageID });
-      if (sendOutcome === "http400") {
-        const err = new Error("opencode sendPrompt 400: bad request");
-        err.status = 400;
-        throw err;
-      }
-      if (sendOutcome === "http500") {
-        const err = new Error("opencode sendPrompt 500: boom");
-        err.status = 500;
-        throw err;
-      }
-      if (sendOutcome === "network") {
-        throw new Error("socket hang up");
-      }
-      if (receiptLands) {
-        oc.transcript.set(messageID, { info: { id: messageID, role: "user", time: { created: 1 } }, parts: [] });
-        // The transcript (listMessages view) also gains the user row — the
-        // receipt-specific reconciliation links assistant rows to it.
-        oc.rows.push({ info: { id: messageID, role: "user", time: { created: 1 } }, parts: [] });
-      }
+    async sendPrompt({ sessionId, text, model, agent, attachments, mentions, messageID }) {
+      oc.sends.push({ sessionId, text, model, agent, attachments, mentions, messageID });
+      applySendOutcome(oc, { sendOutcome, receiptLands, messageID, label: "sendPrompt" });
       return undefined; // the 204
+    },
+    // P3a3 full-parity widening: the slash-command sender (a DIFFERENT
+    // opencode endpoint — mirrors sendPrompt's outcome knobs so the same
+    // sendOutcome fixture drives both dispatch paths in the new tests below).
+    async sendCommand({ sessionId, command, arguments: argumentsStr, attachments, model, agent, messageID }) {
+      oc.commandSends.push({ sessionId, command, arguments: argumentsStr, attachments, model, agent, messageID });
+      applySendOutcome(oc, { sendOutcome, receiptLands, messageID, label: "runCommand" });
+      return undefined;
     },
     async getMessage(sessionId, messageId) {
       oc.getMessageCalls += 1;
@@ -160,6 +178,7 @@ function fakeOc({ sendOutcome = "ok", receiptLands = true, rows = [] } = {}) {
 function ocDeps(oc) {
   return {
     sendPrompt: (...a) => oc.sendPrompt(...a),
+    sendCommand: (...a) => oc.sendCommand(...a),
     getMessage: (...a) => oc.getMessage(...a),
     listMessages: (...a) => oc.listMessages(...a),
     abortSession: (...a) => oc.abortSession(...a),
@@ -187,6 +206,10 @@ function buildService({ store = memoryStore(`t-${randomUUID()}`), binding = fake
     ...ocDeps(oc),
     now: () => clock.t,
     sleep: async () => {},
+    // Dispatch-time attachment re-validation defaults to "present" for the
+    // fake paths the other tests use (/tmp/upload/... exists on no disk);
+    // the sweep test overrides it with a targeted miss.
+    fileExists: async () => true,
     ...rest,
   });
   return { svc, store, binding, oc, clock };
@@ -1883,4 +1906,309 @@ test("UNRESOLVED records hold the gate: the at-cap refusal names them (terminal 
     () => svc.submit({ origin: "human", text: "one more", id: "m_more", agent: "a" }),
     (err) => err instanceof CtoAdmissionError && err.code === "at-cap" && /hold the gate/.test(err.message),
   );
+});
+
+// ---------------------------------------------------------------------------
+// P3a3 full-parity widening: attachments, mentions, slash commands
+// ---------------------------------------------------------------------------
+
+const SAMPLE_ATTACHMENTS = [
+  { remotePath: "/tmp/upload/a.png", mime: "image/png", filename: "a.png" },
+];
+const SAMPLE_MENTIONS = [{ name: "build", source: { value: "@build", start: 0, end: 6 } }];
+
+test("canonicalRequestHash includes attachments/mentions/kind/command/args: a different value changes the hash", () => {
+  const base = { origin: "human", text: "hi", agent: "a" };
+  const baseHash = canonicalRequestHash(base);
+  assert.notEqual(canonicalRequestHash({ ...base, attachments: SAMPLE_ATTACHMENTS }), baseHash);
+  assert.notEqual(canonicalRequestHash({ ...base, mentions: SAMPLE_MENTIONS }), baseHash);
+  assert.notEqual(canonicalRequestHash({ ...base, kind: "command", command: "init", args: "" }), baseHash);
+  assert.notEqual(
+    canonicalRequestHash({ ...base, kind: "command", command: "init", args: "a" }),
+    canonicalRequestHash({ ...base, kind: "command", command: "init", args: "b" }),
+  );
+  // Same payload, same hash — determinism (round-trip identity for dedup).
+  assert.equal(
+    canonicalRequestHash({ ...base, attachments: SAMPLE_ATTACHMENTS, mentions: SAMPLE_MENTIONS }),
+    canonicalRequestHash({ ...base, attachments: SAMPLE_ATTACHMENTS, mentions: SAMPLE_MENTIONS }),
+  );
+});
+
+test("attachments and mentions round-trip through a persisted record and reach sendPrompt verbatim on dispatch", async () => {
+  const { svc, oc } = buildService();
+  const res = await svc.submit({
+    text: "look at this",
+    origin: "human",
+    agent: "a",
+    attachments: SAMPLE_ATTACHMENTS,
+    mentions: SAMPLE_MENTIONS,
+  });
+  const stored = await recordOf(svc, res.id);
+  assert.deepEqual(stored.attachments, SAMPLE_ATTACHMENTS, "persisted verbatim before any send (invariant 1)");
+  assert.deepEqual(stored.mentions, SAMPLE_MENTIONS);
+  await svc.tick();
+  assert.equal(oc.sends.length, 1);
+  assert.deepEqual(oc.sends[0].attachments, SAMPLE_ATTACHMENTS, "dispatch hands them to sendPrompt unchanged");
+  assert.deepEqual(oc.sends[0].mentions, SAMPLE_MENTIONS);
+  assert.equal((await recordOf(svc, res.id)).status, "accepted");
+});
+
+test("a queued attachment swept from disk before dispatch fails the record — nothing sent, reason actionable", async () => {
+  // The upload staging area (~/.manta-uploads) is swept after
+  // uploadCleanupHours while a queued record can be held INDEFINITELY (a busy
+  // turn, or the permanent uncertain-abort barrier). Dispatch must
+  // RE-VALIDATE: a missing file must never reach sendPrompt as a dangling
+  // FilePart (opencode persists bad FileParts in session history forever,
+  // and this is the ONE durable role session), and the text must NOT go out
+  // as if the message were complete.
+  const missing = "/tmp/upload/swept.png";
+  let busy = true;
+  const { svc, oc } = buildService({
+    isBusy: () => busy,
+    fileExists: async (p) => p !== missing,
+  });
+  const res = await svc.submit({
+    text: "look at this",
+    origin: "human",
+    agent: "a",
+    attachments: [{ remotePath: missing, mime: "image/png", filename: "swept.png" }],
+  });
+  assert.equal(await statusOf(svc, res.id), "queued", "held by the busy turn — the sweep window");
+  // The staging sweep deletes the batch dir while the send is queued.
+  busy = false;
+  await svc.tick();
+  assert.equal(oc.sends.length, 0, "nothing dispatched — no dangling FilePart, no bare text");
+  const rec = await recordOf(svc, res.id);
+  assert.equal(rec.status, "failed", "a definitive failure, not a silent drop");
+  assert.ok((rec.error ?? "").includes(missing), "the reason names the missing file");
+  assert.ok(/re-attach|attach/i.test(rec.error ?? ""), "…and tells the user what to do");
+});
+
+test("the same sweep guard covers the sendCommand path (a queued slash command with a missing attachment sends nothing)", async () => {
+  const missing = "/tmp/upload/swept-cmd.png";
+  const { svc, oc } = buildService({
+    fileExists: async (p) => p !== missing,
+  });
+  await svc.submit({
+    origin: "human",
+    kind: "command",
+    command: "init",
+    args: "--force",
+    agent: "a",
+    attachments: [{ remotePath: missing, mime: "image/png", filename: "swept-cmd.png" }],
+  });
+  await svc.tick();
+  assert.equal(oc.commandSends.length, 0, "no dangling FilePart down the command endpoint either");
+  assert.equal(oc.sends.length, 0);
+});
+
+test("a same-id replay with the SAME attachments dedups; the SAME id with DIFFERENT attachments is a caller error", async () => {
+  const { svc, oc } = buildService();
+  const first = await svc.submit({
+    text: "hi",
+    origin: "human",
+    id: "evt_att",
+    agent: "a",
+    attachments: SAMPLE_ATTACHMENTS,
+  });
+  assert.equal(first.persisted, true);
+  const replay = await svc.submit({
+    text: "hi",
+    origin: "human",
+    id: "evt_att",
+    agent: "a",
+    attachments: SAMPLE_ATTACHMENTS,
+  });
+  assert.equal(replay.persisted, false, "identical payload — dedups, no new record");
+  await assert.rejects(
+    () =>
+      svc.submit({
+        text: "hi",
+        origin: "human",
+        id: "evt_att",
+        agent: "a",
+        attachments: [{ remotePath: "/tmp/upload/different.png", mime: "image/png" }],
+      }),
+    (err) => err instanceof CtoAdmissionError && err.code === "duplicate-id-different-payload",
+  );
+  // The pump is kicked fire-and-forget by every submit() (including the
+  // dedup replay); by now it may have dispatched the ONE legitimate record.
+  // What matters is no DOUBLE-send happened — the replay/rejected-payload
+  // calls never triggered a second send for the same submission.
+  await flush(20);
+  assert.ok(oc.sends.length <= 1, "no double-send from the replay or the rejected different-payload attempt");
+});
+
+test("submit rejects a malformed caller-supplied attachment/mention (loose-but-correct input validation)", async () => {
+  const { svc } = buildService();
+  await assert.rejects(
+    () => svc.submit({ text: "hi", origin: "human", attachments: [{ mime: "image/png" }] }),
+    (err) => err instanceof CtoAdmissionError && err.code === "invalid-argument" && /remotePath/.test(err.message),
+  );
+  await assert.rejects(
+    () => svc.submit({ text: "hi", origin: "human", mentions: [{ name: "build" }] }),
+    (err) => err instanceof CtoAdmissionError && err.code === "invalid-argument" && /source/.test(err.message),
+  );
+});
+
+test("a kind:\"command\" submission dispatches via sendCommand (not sendPrompt) and carries model/agent/attachments", async () => {
+  const { svc, oc } = buildService();
+  const res = await svc.submit({
+    origin: "human",
+    kind: "command",
+    command: "init",
+    args: "--force",
+    agent: "a",
+    model: { providerID: "anthropic", modelID: "claude" },
+    attachments: SAMPLE_ATTACHMENTS,
+  });
+  // submit()'s own return value carries the record UNPROJECTED (list()'s
+  // stripping of `text` is a queue-listing concern, not submit()'s contract).
+  assert.equal(res.kind, "command");
+  assert.equal(res.command, "init");
+  assert.equal(res.text, "/init --force", "a synthesized display form — never sent to opencode");
+  const stored = await recordOf(svc, res.id);
+  assert.equal(stored.kind, "command");
+  assert.equal(stored.command, "init");
+  await svc.tick();
+  assert.equal(oc.sends.length, 0, "sendPrompt was NOT called for a command");
+  assert.equal(oc.commandSends.length, 1, "sendCommand WAS called");
+  const sent = oc.commandSends[0];
+  assert.equal(sent.command, "init");
+  assert.equal(sent.arguments, "--force", "the record's `args` maps to sendCommand's `arguments` param");
+  assert.deepEqual(sent.attachments, SAMPLE_ATTACHMENTS);
+  assert.equal(sent.agent, "a");
+  assert.deepEqual(sent.model, { providerID: "anthropic", modelID: "claude" });
+  assert.equal((await recordOf(svc, res.id)).status, "accepted");
+});
+
+test("a command with no args still dispatches (empty string, never undefined) and a bare command needs no text", async () => {
+  const { svc, oc } = buildService();
+  const res = await svc.submit({ origin: "human", kind: "command", command: "undo", agent: "a" });
+  assert.equal(res.text, "/undo");
+  await svc.tick();
+  assert.equal(oc.commandSends[0].arguments, "", "args defaults to the empty string, never undefined");
+});
+
+test("a definitive 4xx from sendCommand fails the record; anything else is unknown — same classification as sendPrompt", async () => {
+  {
+    const { svc, oc } = buildService({ oc: fakeOc({ sendOutcome: "http400" }) });
+    const res = await svc.submit({ origin: "human", kind: "command", command: "bad", agent: "a" });
+    await svc.tick();
+    assert.equal((await recordOf(svc, res.id)).status, "failed");
+    assert.equal(oc.commandSends.length, 1);
+  }
+  {
+    const { svc, oc } = buildService({ oc: fakeOc({ sendOutcome: "network" }) });
+    const res = await svc.submit({ origin: "human", kind: "command", command: "flaky", agent: "a" });
+    await svc.tick();
+    assert.equal((await recordOf(svc, res.id)).status, "unknown", "uncertainty — never resend");
+    assert.equal(oc.commandSends.length, 1);
+  }
+});
+
+test("submit refuses kind:\"command\" outright — before persisting anything — when no sendCommand transport is wired", async () => {
+  const store = memoryStore(`t-${randomUUID()}`);
+  const svc = createCtoAdmission({
+    store,
+    binding: fakeBinding(),
+    sendPrompt: async () => {},
+    getMessage: async () => null,
+    now: () => 1,
+    sleep: async () => {},
+    // sendCommand deliberately omitted
+  });
+  await assert.rejects(
+    () => svc.submit({ origin: "human", kind: "command", command: "init", agent: "a" }),
+    (err) => err instanceof CtoAdmissionError && err.code === "invalid-argument" && /no sendCommand transport/.test(err.message),
+  );
+  const raw = await store.load();
+  assert.equal((raw?.submissions ?? []).length, 0, "nothing was ever persisted for the refused command");
+});
+
+test("submit rejects an unknown kind, and command/args without kind:\"command\"", async () => {
+  const { svc } = buildService();
+  await assert.rejects(
+    () => svc.submit({ origin: "human", text: "hi", kind: "bogus" }),
+    (err) => err instanceof CtoAdmissionError && err.code === "invalid-argument",
+  );
+  await assert.rejects(
+    () => svc.submit({ origin: "human", text: "hi", command: "init" }),
+    (err) => err instanceof CtoAdmissionError && err.code === "invalid-argument" && /kind:"command"/.test(err.message),
+  );
+});
+
+test("list() strips a command's free-text args (payload) but keeps attachments/mentions/command/kind (metadata)", async () => {
+  const { svc } = buildService();
+  const promptRes = await svc.submit({
+    text: "hi",
+    origin: "human",
+    agent: "a",
+    attachments: SAMPLE_ATTACHMENTS,
+    mentions: SAMPLE_MENTIONS,
+  });
+  const cmdRes = await svc.submit({ origin: "human", kind: "command", command: "init", args: "secret-ish", agent: "b" });
+  const { submissions } = await svc.list();
+  const projectedPrompt = submissions.find((r) => r.id === promptRes.id);
+  const projectedCmd = submissions.find((r) => r.id === cmdRes.id);
+  assert.equal(projectedPrompt.text, undefined, "text stays out of the projection");
+  assert.deepEqual(projectedPrompt.attachments, SAMPLE_ATTACHMENTS, "attachments are metadata, not payload");
+  assert.deepEqual(projectedPrompt.mentions, SAMPLE_MENTIONS);
+  assert.equal(projectedCmd.kind, "command");
+  assert.equal(projectedCmd.command, "init");
+  assert.equal(projectedCmd.args, undefined, "a command's free-text argument body is stripped, same as text");
+  assert.equal(projectedCmd.text, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// P3a3 full-parity widening: normalizeAdmissionPayload strict corruption
+// ---------------------------------------------------------------------------
+
+function baseRecord(overrides = {}) {
+  return {
+    id: "evt_1",
+    origin: "human",
+    text: "hi",
+    payloadHash: "h",
+    status: "queued",
+    createdAt: 1,
+    submitGeneration: 1,
+    ...overrides,
+  };
+}
+
+test("normalizeAdmissionPayload refuses a malformed attachments/mentions shape in the store (corruption fails loudly)", () => {
+  assert.throws(
+    () => normalizeAdmissionPayload({ submissions: [baseRecord({ attachments: [] })] }),
+    /attachments/,
+    "an empty-but-present array is itself a corruption signal (submit() never writes one)",
+  );
+  assert.throws(
+    () => normalizeAdmissionPayload({ submissions: [baseRecord({ attachments: [{ mime: "image/png" }] })] }),
+    /remotePath/,
+  );
+  assert.throws(
+    () => normalizeAdmissionPayload({ submissions: [baseRecord({ mentions: [{ name: "x", source: { value: "@x" } }] })] }),
+    /source/,
+  );
+});
+
+test("normalizeAdmissionPayload refuses kind:\"command\" without a command, and command/args without kind:\"command\"", () => {
+  assert.throws(
+    () => normalizeAdmissionPayload({ submissions: [baseRecord({ kind: "command" })] }),
+    /command/,
+  );
+  assert.throws(
+    () => normalizeAdmissionPayload({ submissions: [baseRecord({ command: "init", args: "" })] }),
+    /command\/args/,
+  );
+  assert.throws(
+    () => normalizeAdmissionPayload({ submissions: [baseRecord({ kind: "bogus" })] }),
+    /kind/,
+  );
+  // A valid command record normalizes cleanly.
+  const ok = normalizeAdmissionPayload({
+    submissions: [baseRecord({ kind: "command", command: "init", args: "--force" })],
+  });
+  assert.equal(ok.submissions[0].command, "init");
 });

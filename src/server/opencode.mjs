@@ -2340,8 +2340,19 @@ export async function listReferences() {
  *
  * @param {{ sessionId: string, command: string, arguments: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, model?: { providerID: string, modelID: string, variant?: string }, agent?: string }} opts
  */
-export async function runCommand({ sessionId, command, arguments: argumentsStr, attachments, model, agent }) {
-  const dirQ = await getSessionDirectoryQuery(sessionId);
+export async function runCommand({ sessionId, command, arguments: argumentsStr, attachments, model, agent, messageID, signal }) {
+  // P3a3 (spec §8.3): the CTO admission queue admits slash commands too, and
+  // its durable model needs the SAME P0-proven receipt for a command as for a
+  // prompt. opencode creates the command's user message as
+  // `id: input.messageID ?? MessageID.ascending()` on the /command path
+  // (session/prompt.ts:471, verified in docs/cto-implementation-map.md §8): a
+  // caller-supplied `messageID` is persisted verbatim and readable back via
+  // GET /session/{id}/message. So a command dispatched by admission carries an
+  // admission-allocated `messageID` and a bounded `signal`, exactly like
+  // sendPrompt — the crash-window reconciliation (dispatching → receipt found
+  // → accepted; absent → unknown, never resent) then works identically for
+  // both kinds. Ordinary composer traffic passes neither and behaves as before.
+  const dirQ = await getSessionDirectoryQuery(sessionId, { signal });
   const url = `/session/${encodeURIComponent(sessionId)}/command${dirQ}`;
   const parts = [];
   if (attachments) {
@@ -2360,13 +2371,24 @@ export async function runCommand({ sessionId, command, arguments: argumentsStr, 
     if (model.variant) body.variant = model.variant;
   }
   if (agent) body.agent = agent;
+  if (messageID) body.messageID = messageID; // P0-proven: persisted verbatim as the user message id
   const res = await ocFetch(apiUrl(url), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
+    // Propagate the caller's bounded deadline signal to the actual POST (the
+    // admission engine bounds every oc call; without this a hung command POST
+    // would never surface as the "unknown" uncertainty it is).
+    ...(signal ? { signal } : {}),
   });
   if (!res.ok) {
-    throw new Error(`opencode runCommand ${res.status}: ${await res.text()}`);
+    const err = new Error(`opencode runCommand ${res.status}: ${await res.text()}`);
+    // Carry the real HTTP status so admission can tell a DEFINITIVE 4xx
+    // refusal (→ failed, proven not accepted) from anything else (→ unknown,
+    // never resent) — the same classification sendPrompt's error already
+    // enables (blocker 3 / invariant 4).
+    err.status = res.status;
+    throw err;
   }
 }
 

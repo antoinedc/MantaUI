@@ -10,14 +10,16 @@
 // This slice only adds the HTTP path. The RPC layer serves both (SSH + HTTP)
 // until SSH is removed.
 
-import { readFile, writeFile, rename } from "node:fs/promises";
+import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse, modify, applyEdits } from "jsonc-parser";
 import { reconcileSubagents } from "../shared/subagentSync.mjs";
 import { restartOpencode } from "./opencodeAdmin.mjs";
+import { statePath } from "../shared/paths.mjs";
+import { composeCtoPrompt } from "./ctoDoctrine.mjs";
 
 // ---------------------------------------------------------------------------
 // Pure helpers (ported from src/main/providers.ts)
@@ -804,7 +806,13 @@ export async function ensureCtoAgent(deps = {}) {
     readConfig = readRemoteConfig,
     applySubagents = setSubagents,
     restart = restartOpencode,
-    promptPath = ctoPromptPath(),
+    // The agent block points at the MATERIALIZED prompt (this doctrine work),
+    // not the committed file directly — see "CTO operating doctrine" below.
+    // `materializeCtoPrompt` guarantees this fixed path always holds SOME
+    // valid prompt content (the composed doctrine, or the committed prompt
+    // verbatim as a fallback) before this block is ever written, so the
+    // agent is never pointed at a file that doesn't exist yet.
+    promptPath = ctoMaterializedPromptPath(),
     model,
     log = console,
   } = deps;
@@ -817,6 +825,232 @@ export async function ensureCtoAgent(deps = {}) {
     logPrefix: "ensureCtoAgent",
     log,
   });
+}
+
+// ---------------------------------------------------------------------------
+// CTO operating doctrine — materializing the effective prompt (BET-1164
+// follow-up: "give the CTO an explicit, user-customisable operating
+// doctrine"). See ctoDoctrine.mjs's header for the full design rationale;
+// this section is purely the I/O wrapper around its pure `composeCtoPrompt`.
+//
+// THE CUSTOMISATION SEAM. `ensureCtoAgent`'s agent block used to point
+// straight at the committed `docs/opencode/skills/cto/prompt.md` — a file a
+// user edit has nowhere to live (it is versioned source, identical in every
+// checkout). This section fixes that: the effective prompt (committed base +
+// precedence note + the selected doctrine preset + the user's house rules)
+// is composed and written to a FIXED box-side path under the CTO state root
+// (`~/.manta/cto/prompt.md`, resolved through the shared `statePath()` used
+// by every other CTO store — see ctoStores.mjs/ctoProbes.mjs), and the agent
+// block references THAT path instead. Editing the doctrine is then just:
+// rewrite this file, restart opencode so its `{file:...}` reference is
+// re-read.
+//
+// NON-THROWING, BEST-EFFORT, NEVER LEAVE THE AGENT WITHOUT A PROMPT. Like
+// `ensureCtoAgent`/`ensureMantaPlanAgent`, every step here degrades instead
+// of throwing. Specifically: if composing or writing the FULL doctrine fails
+// for any reason (a bad style value cannot cause this — `composeCtoPrompt`
+// normalizes defensively — but a disk/permission failure can), this function
+// falls back to writing the COMMITTED prompt verbatim to the same fixed
+// path, so the agent block (which always points here) still has a valid,
+// safe prompt to run with. Only a total inability to write to disk at all
+// leaves the file unchanged, which is reported back as `{ ok:false }` for
+// the caller to log — exactly like every other ensure* helper in this file.
+
+export function ctoMaterializedPromptPath() {
+  return statePath("cto", "prompt.md");
+}
+
+/**
+ * Materialize the effective CTO prompt at the fixed box-side path
+ * `ctoMaterializedPromptPath()`. Pure composition (`composeCtoPrompt`) plus
+ * injectable I/O so this is testable without touching the real filesystem.
+ *
+ * @param {object} [deps]
+ * @param {string} [deps.style] one of ctoDoctrine.CTO_STYLES; anything else
+ *   (including undefined) composes as the default preset.
+ * @param {string} [deps.houseRules] free text, appended verbatim when non-empty.
+ * @param {string} [deps.basePromptPath] defaults to the committed prompt.md.
+ * @param {string} [deps.outputPath] defaults to ctoMaterializedPromptPath().
+ * @param {(p: string, enc: string) => Promise<string>} [deps.readFile]
+ * @param {(p: string, data: string) => Promise<void>} [deps.writeFile]
+ * @param {(p: string, opts?: object) => Promise<void>} [deps.mkdir]
+ * @param {{warn?: Function, error?: Function}} [deps.log]
+ * @returns {Promise<{ok: boolean, fellBack: boolean, path: string, error?: string}>}
+ */
+export async function materializeCtoPrompt(deps = {}) {
+  const {
+    style,
+    houseRules,
+    basePromptPath = ctoPromptPath(),
+    outputPath = ctoMaterializedPromptPath(),
+    readFile: read = readFile,
+    writeFile: write = writeFile,
+    mkdir: makeDir = mkdir,
+    log = console,
+  } = deps;
+  let base;
+  try {
+    base = await read(basePromptPath, "utf8");
+  } catch (e) {
+    // The committed base prompt is source-tree data that should always be
+    // present; if it truly isn't, there is nothing safe to compose OR fall
+    // back to — report failure rather than writing an empty/garbage prompt.
+    log.error?.("[cto-doctrine] could not read the committed base prompt:", e);
+    return { ok: false, fellBack: false, path: outputPath, error: String(e?.message ?? e) };
+  }
+  try {
+    await makeDir(dirname(outputPath), { recursive: true });
+  } catch {
+    // best-effort — the write below will surface any real failure
+  }
+  try {
+    const composed = composeCtoPrompt({ basePrompt: base, style, houseRules });
+    await write(outputPath, composed);
+    return { ok: true, fellBack: false, path: outputPath };
+  } catch (e) {
+    log.error?.("[cto-doctrine] composing/writing the doctrine failed, falling back to the committed prompt:", e);
+    try {
+      await write(outputPath, base);
+      return { ok: false, fellBack: true, path: outputPath, error: String(e?.message ?? e) };
+    } catch (e2) {
+      log.error?.("[cto-doctrine] fallback write also failed — the agent's existing prompt file (if any) is left untouched:", e2);
+      return { ok: false, fellBack: false, path: outputPath, error: String(e2?.message ?? e2) };
+    }
+  }
+}
+
+/**
+ * Re-materialize the doctrine prompt AND restart opencode so the CTO agent's
+ * `{file:...}` reference is re-read — the seam the task calls "reusing the
+ * existing ensureCtoAgent restart plumbing rather than inventing a second
+ * path": `restart` defaults to the SAME `restartOpencode` used by
+ * `ensureCtoAgent`/`ensureMantaPlanAgent`, never a bespoke second mechanism.
+ * Called whenever the user changes `ctoStyle`/`ctoHouseRules` (see rpc.mjs's
+ * `config:update`), and once at startup before the agent block is first
+ * installed (see index.mjs's `maybeEnsureCtoAgent`) so the fixed prompt path
+ * has real content before anything references it.
+ *
+ * Best-effort/non-throwing throughout, matching every other ensure* helper:
+ * a restart failure is logged, not thrown, and never undoes the file write
+ * (the new prompt still takes effect the next time opencode restarts for any
+ * other reason).
+ *
+ * @param {object} [deps] forwarded to materializeCtoPrompt, plus:
+ * @param {() => Promise<{ok: boolean, error?: string}>} [deps.restart]
+ * @returns {Promise<{ok: boolean, fellBack: boolean, path: string, restarted: boolean, error?: string}>}
+ */
+export async function refreshCtoDoctrine(deps = {}) {
+  const { restart = restartOpencode, log = console, ...materializeDeps } = deps;
+  const result = await materializeCtoPrompt({ ...materializeDeps, log });
+  let restarted = false;
+  try {
+    const r = await restart();
+    restarted = !!r?.ok;
+    if (!restarted) log.warn?.("[cto-doctrine] restart after doctrine change failed:", r?.error);
+  } catch (e) {
+    log.warn?.("[cto-doctrine] restart after doctrine change threw:", e);
+  }
+  return { ...result, restarted };
+}
+
+/**
+ * The doctrine restarter — the review fix for the SILENT restart. The old
+ * refreshCtoDoctrine path restarted opencode synchronously inside
+ * `config:update`, i.e. on a style-radio CLICK or a house-rules BLUR: any
+ * in-flight opencode turn box-wide died with no user-visible signal
+ * (AGENTS.md: a restart "is never triggered automatically as a side effect"
+ * of an edit). The manager splits the two halves:
+ *
+ *   - refresh(): the doctrine FILE is materialized immediately (the edit is
+ *     saved, whatever happens next), but the RESTART is applied at once only
+ *     when the box is idle. Busy → the restart is deferred: `pending` flips
+ *     true and the caller reports it (`ctoDoctrineRestartPending` on the
+ *     config:get/config:update responses) so the UI can show "applies when
+ *     the box is idle".
+ *   - tick(): the poller's beat. While a restart is pending and the box has
+ *     gone idle, it applies the restart; a failed apply STAYS pending and
+ *     retries on the next tick, so the setting takes effect with no manual
+ *     action. Not pending → a cheap no-op.
+ *
+ * `anyBusy` is the shared busy view (promptDelivery's firehose-derived set —
+ * the same truth the admission engine's busy gate trusts). There is an
+ * unavoidable ~ms race between the idle check and the restart itself; that is
+ * the same window every "restart when idle" mechanism lives with. Without
+ * `anyBusy` wiring the manager restarts immediately (the pre-fix behaviour),
+ * so a bare construction can never silently defer.
+ *
+ * Pending state is in-memory for this manta-server life. If manta-server
+ * itself restarts while a restart is pending, the doctrine file is already
+ * on disk and the change still lands at the next natural opencode restart —
+ * nothing is lost, only the auto-apply.
+ *
+ * @param {object} [deps] materializeCtoPrompt deps (style/houseRules come per
+ *        call), plus:
+ * @param {() => Promise<{ok: boolean, error?: string}>} [deps.restart]
+ * @param {() => boolean} [deps.anyBusy] true while ANY opencode session is
+ *        mid-turn. Unwired → never defers.
+ * @param {{warn?: Function, error?: Function, info?: Function}} [deps.log]
+ * @returns {{refresh, tick, isPending}}
+ */
+export function createCtoDoctrineRestarter(deps = {}) {
+  const {
+    restart = restartOpencode,
+    anyBusy = null,
+    log = console,
+    ...materializeDeps
+  } = deps;
+  let pending = false;
+
+  async function refresh({ style, houseRules } = {}) {
+    // The FILE is written first and unconditionally — the edit is saved even
+    // if the restart is deferred or fails (the new prompt still takes effect
+    // at the next natural restart).
+    const result = await materializeCtoPrompt({ ...materializeDeps, style, houseRules, log });
+    if (!result.ok) {
+      log.warn?.("[cto-doctrine] materialize failed; restart deferred decision still applies");
+    }
+    const idle = !anyBusy || !anyBusy();
+    if (!idle) {
+      pending = true;
+      log.info?.("[cto-doctrine] box busy — doctrine restart deferred until idle");
+      return { ...result, restarted: false, pending: true };
+    }
+    let restarted = false;
+    try {
+      const r = await restart();
+      restarted = !!r?.ok;
+      if (!restarted) {
+        // An IMMEDIATE (non-deferred) failed restart is not "pending": the
+        // file is written, so the change still applies at the next natural
+        // restart — the same semantics as the pre-fix best-effort path.
+        log.warn?.("[cto-doctrine] immediate restart after doctrine change failed:", r?.error);
+      }
+    } catch (e) {
+      log.warn?.("[cto-doctrine] immediate restart after doctrine change threw:", e);
+    }
+    return { ...result, restarted, pending: false };
+  }
+
+  async function tick() {
+    if (!pending) return { applied: false };
+    if (anyBusy && anyBusy()) return { applied: false, deferred: true };
+    let r = null;
+    try {
+      r = await restart();
+    } catch (e) {
+      log.warn?.("[cto-doctrine] deferred restart threw; still pending, will retry:", e);
+      return { applied: false, error: String(e?.message ?? e) };
+    }
+    if (r?.ok) {
+      pending = false;
+      log.info?.("[cto-doctrine] deferred doctrine restart applied (box idle)");
+      return { applied: true };
+    }
+    log.warn?.("[cto-doctrine] deferred restart failed; still pending, will retry:", r?.error);
+    return { applied: false, error: r?.error };
+  }
+
+  return { refresh, tick, isPending: () => pending };
 }
 
 // ---------------------------------------------------------------------------

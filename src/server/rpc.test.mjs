@@ -1230,6 +1230,27 @@ async function startGatedOauth() {
   return { gate, handlers };
 }
 
+// The supersession scenario: TWO gated oauth waits started back to back —
+// the SECOND code is the one the user is shown, the first wait is superseded
+// and still parked on its own gate. Each supersession test resolves the dead
+// wait with a different outcome and asserts the live attempt is unaffected.
+async function startSupersededOauthWaits() {
+  const gateA = deferred();
+  const gateB = deferred();
+  const { deps } = makeDeps([]);
+  setupOauthAutoDeps(deps);
+  const gates = [gateA, gateB];
+  let n = 0;
+  deps.oc.completeProviderOauth = () => gates[n++].promise;
+  _resetOauthCallbacks();
+  const handlers = buildHandlers(deps);
+
+  // Two starts → two codes. The SECOND is the one the user is shown.
+  await handlers["opencode:provider-auth"]({ action: "start", id: "openai" });
+  await handlers["opencode:provider-auth"]({ action: "start", id: "openai" });
+  return { gateA, gateB, handlers };
+}
+
 test("opencode:provider-auth oauth-status reports pending then ok, then clears (BET-1043)", async () => {
   const { gate, handlers } = await startGatedOauth();
 
@@ -1272,19 +1293,7 @@ test("opencode:provider-auth oauth-status for an unknown provider returns not_st
 // speak for the provider any more.
 
 test("a superseded oauth wait cannot overwrite the live attempt's result", async () => {
-  const gateA = deferred();
-  const gateB = deferred();
-  const { deps } = makeDeps([]);
-  setupOauthAutoDeps(deps);
-  const gates = [gateA, gateB];
-  let n = 0;
-  deps.oc.completeProviderOauth = () => gates[n++].promise;
-  _resetOauthCallbacks();
-  const handlers = buildHandlers(deps);
-
-  // Two starts → two codes. The SECOND is the one the user is shown.
-  await handlers["opencode:provider-auth"]({ action: "start", id: "openai" });
-  await handlers["opencode:provider-auth"]({ action: "start", id: "openai" });
+  const { gateA, gateB, handlers } = await startSupersededOauthWaits();
 
   // The abandoned first wait dies later, as it always eventually will.
   gateA.resolve({ ok: false, error: "bad_response" });
@@ -1307,18 +1316,7 @@ test("a superseded oauth wait cannot overwrite the live attempt's result", async
 });
 
 test("a superseded oauth wait cannot succeed on behalf of the live attempt", async () => {
-  const gateA = deferred();
-  const gateB = deferred();
-  const { deps } = makeDeps([]);
-  setupOauthAutoDeps(deps);
-  const gates = [gateA, gateB];
-  let n = 0;
-  deps.oc.completeProviderOauth = () => gates[n++].promise;
-  _resetOauthCallbacks();
-  const handlers = buildHandlers(deps);
-
-  await handlers["opencode:provider-auth"]({ action: "start", id: "openai" });
-  await handlers["opencode:provider-auth"]({ action: "start", id: "openai" });
+  const { gateA, handlers } = await startSupersededOauthWaits();
 
   // A stale wait resolving ok must not green-light a code the user never saw.
   gateA.resolve({ ok: true });
@@ -1908,4 +1906,58 @@ test("tmux:restore-topology stays ok:true past a per-window failure and reports 
   ]);
   assert.equal(out.message, "Restored 2 windows · 1 failed.");
   assert.equal(calls.refreshNow, 1);
+});
+
+// ---------------------------------------------------------------------------
+// Deferred CTO doctrine restart (review fix): a doctrine edit must never
+// restart opencode as an invisible side effect (it kills every in-flight turn
+// box-wide). The wired manager defers while busy; the RPC response carries
+// the pending flag so the client can tell the user.
+// ---------------------------------------------------------------------------
+
+test("config:update defers the doctrine restart while the box is busy and reports pending on the response", async () => {
+  const refreshes = [];
+  const doctrineRestart = {
+    refresh: async (args) => {
+      refreshes.push(args);
+      return { ok: true, fellBack: false, path: "/p", restarted: false, pending: true };
+    },
+    isPending: () => true,
+  };
+  const applyConfigCalls = [];
+  const handlers = buildHandlers({
+    local: {
+      configGet: async () => ({ cto: { enabled: true }, ctoStyle: "executive", ctoHouseRules: "" }),
+      configUpdate: async (patch) => ({ cto: { enabled: true }, ...patch }),
+    },
+    syncState: { applyConfig: (c) => applyConfigCalls.push(c) },
+    doctrineRestart,
+  });
+  const next = await handlers["config:update"]({ ctoHouseRules: "be terse" });
+  assert.deepEqual(refreshes, [{ style: "executive", houseRules: "be terse" }],
+    "the manager (not a direct restart) owns the doctrine refresh");
+  assert.equal(next.ctoDoctrineRestartPending, true,
+    "the response tells the client the restart is pending (visible state)");
+  assert.equal(applyConfigCalls[0]?.ctoDoctrineRestartPending, undefined,
+    "the transient flag never rides the synced config delta");
+});
+
+test("config:get reports the pending doctrine restart so a reload shows the truth", async () => {
+  const doctrineRestart = { refresh: async () => ({}), isPending: () => true };
+  const handlers = buildHandlers({
+    local: { configGet: async () => ({ cacheTtl: "1h" }) },
+    doctrineRestart,
+  });
+  const cfg = await handlers["config:get"]();
+  assert.equal(cfg.ctoDoctrineRestartPending, true);
+});
+
+test("config:get with nothing pending does not add the flag as true", async () => {
+  const doctrineRestart = { refresh: async () => ({}), isPending: () => false };
+  const handlers = buildHandlers({
+    local: { configGet: async () => ({ cacheTtl: "1h" }) },
+    doctrineRestart,
+  });
+  const cfg = await handlers["config:get"]();
+  assert.equal(cfg.ctoDoctrineRestartPending, false);
 });
