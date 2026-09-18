@@ -1230,6 +1230,27 @@ async function startGatedOauth() {
   return { gate, handlers };
 }
 
+// The supersession scenario: TWO gated oauth waits started back to back —
+// the SECOND code is the one the user is shown, the first wait is superseded
+// and still parked on its own gate. Each supersession test resolves the dead
+// wait with a different outcome and asserts the live attempt is unaffected.
+async function startSupersededOauthWaits() {
+  const gateA = deferred();
+  const gateB = deferred();
+  const { deps } = makeDeps([]);
+  setupOauthAutoDeps(deps);
+  const gates = [gateA, gateB];
+  let n = 0;
+  deps.oc.completeProviderOauth = () => gates[n++].promise;
+  _resetOauthCallbacks();
+  const handlers = buildHandlers(deps);
+
+  // Two starts → two codes. The SECOND is the one the user is shown.
+  await handlers["opencode:provider-auth"]({ action: "start", id: "openai" });
+  await handlers["opencode:provider-auth"]({ action: "start", id: "openai" });
+  return { gateA, gateB, handlers };
+}
+
 test("opencode:provider-auth oauth-status reports pending then ok, then clears (BET-1043)", async () => {
   const { gate, handlers } = await startGatedOauth();
 
@@ -1272,19 +1293,7 @@ test("opencode:provider-auth oauth-status for an unknown provider returns not_st
 // speak for the provider any more.
 
 test("a superseded oauth wait cannot overwrite the live attempt's result", async () => {
-  const gateA = deferred();
-  const gateB = deferred();
-  const { deps } = makeDeps([]);
-  setupOauthAutoDeps(deps);
-  const gates = [gateA, gateB];
-  let n = 0;
-  deps.oc.completeProviderOauth = () => gates[n++].promise;
-  _resetOauthCallbacks();
-  const handlers = buildHandlers(deps);
-
-  // Two starts → two codes. The SECOND is the one the user is shown.
-  await handlers["opencode:provider-auth"]({ action: "start", id: "openai" });
-  await handlers["opencode:provider-auth"]({ action: "start", id: "openai" });
+  const { gateA, gateB, handlers } = await startSupersededOauthWaits();
 
   // The abandoned first wait dies later, as it always eventually will.
   gateA.resolve({ ok: false, error: "bad_response" });
@@ -1307,18 +1316,7 @@ test("a superseded oauth wait cannot overwrite the live attempt's result", async
 });
 
 test("a superseded oauth wait cannot succeed on behalf of the live attempt", async () => {
-  const gateA = deferred();
-  const gateB = deferred();
-  const { deps } = makeDeps([]);
-  setupOauthAutoDeps(deps);
-  const gates = [gateA, gateB];
-  let n = 0;
-  deps.oc.completeProviderOauth = () => gates[n++].promise;
-  _resetOauthCallbacks();
-  const handlers = buildHandlers(deps);
-
-  await handlers["opencode:provider-auth"]({ action: "start", id: "openai" });
-  await handlers["opencode:provider-auth"]({ action: "start", id: "openai" });
+  const { gateA, handlers } = await startSupersededOauthWaits();
 
   // A stale wait resolving ok must not green-light a code the user never saw.
   gateA.resolve({ ok: true });
