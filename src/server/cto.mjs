@@ -54,6 +54,7 @@ import { ctoListSessions, ctoSearch, ctoAround } from "./ctoContext.mjs";
 // from the ENGINE's own read deps (so engine tests inherit their fakes);
 // write deps default to the real server operations inside the factory.
 import { createCtoMantaControl, registerCtoMantaControlTools } from "./ctoMantaTools.mjs";
+import { createCtoWorkControl, registerCtoWorkTools } from "./ctoWorkTools.mjs";
 
 export const CTO_STORE_PATH = statePath("cto.json");
 
@@ -1031,6 +1032,15 @@ export function createCtoEngine(deps = {}) {
       gitStatus,
     });
   registerCtoMantaControlTools(register, mantaControl);
+
+  // §7 `work` control-tool family — record + dispatch half. The target
+  // identity is EXPLICIT per work item; dispatch targets the bound delegate
+  // engine (`delegateOps`) and delivers worker completions to the CTO
+  // conversation via the runtime binding (§8.1's headless completion parent).
+  const workControl =
+    deps.workControl ??
+    createCtoWorkControl({ listProjects, ...(deps.delegateOps ? { delegateOps: deps.delegateOps } : {}) });
+  registerCtoWorkTools(register, workControl);
 
   // -------------------------------------------------------------------------
   // Dispatch

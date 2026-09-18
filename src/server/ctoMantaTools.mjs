@@ -111,7 +111,9 @@ export function controlError(code, message, { retrySafe = false, details } = {})
 // errors carry `.status` when the HTTP call completed: a definitive 4xx is
 // not retryable, everything else (5xx, network, unknown) is. Anything not
 // carrying a recognizable caller-error shape becomes provider_unavailable.
-function toControlError(error) {
+// Exported so the §7 `work` family (ctoWorkTools.mjs) maps its raw errors
+// through the SAME one mapper — never a second error-shaping implementation.
+export function toControlError(error) {
   if (error && error.code && typeof error.retrySafe === "boolean") return error;
   const message = String(error?.message ?? error);
   const status = typeof error?.status === "number" ? error.status : null;
@@ -155,16 +157,18 @@ function assertSafeName(value, label) {
   }
 }
 
-function assertPlainObject(value, label) {
+// Tool args arrive as JSON by construction; a snapshot round-trip both
+// deep-clones (so the stored receipt cannot alias caller state) and rejects
+// anything JSON-unsafe before the receipt write. Exported because the §7
+// `work` family (ctoWorkTools.mjs) snapshots its args through the SAME
+// helper — one snapshotting implementation, one mismatch vocabulary.
+export function assertPlainObject(value, label) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw controlError("unsupported", `${label} must be a plain object`);
   }
 }
 
-// Tool args arrive as JSON by construction; a snapshot round-trip both
-// deep-clones (so the stored receipt cannot alias caller state) and rejects
-// anything JSON-unsafe before the receipt write.
-function argsSnapshot(args) {
+export function argsSnapshot(args) {
   if (args === undefined) return {};
   assertPlainObject(args, "args");
   try {
@@ -177,6 +181,191 @@ function argsSnapshot(args) {
 // ---------------------------------------------------------------------------
 // Identity resolution — THE one place (see header). Pure.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Shared operation-receipt runner — the §8.1 reserve → in_flight → execute →
+// record lifecycle, extracted from createCtoMantaControl so the §7 `work`
+// family (ctoWorkTools.mjs) reuses the EXACT same protocol for family-level
+// receipts (work_create — its receipt must predate the envelope it creates)
+// instead of growing a second implementation.
+// ---------------------------------------------------------------------------
+export function createOperationRunner({
+  store,
+  now = () => Date.now(),
+  newId = () => randomUUID(),
+  receiptsCap = MANTA_CONTROL_RECEIPTS_CAP,
+  leaseTtlMs = MANTA_CONTROL_LEASE_TTL_MS,
+  owner = RECEIPT_OWNER,
+}) {
+  async function runOperation({ key, op, args, execute }) {
+      assertNonEmptyString(key, "idempotency key");
+      assertNonEmptyString(op, "operation name");
+      const snapshot = argsSnapshot(args);
+      const argsHash = canonicalArgsHash(op, snapshot);
+  
+      const reserved = await withControl(store, (data) => {
+        const ts = now();
+        data.receipts = data.receipts ?? {};
+        const existing = data.receipts[key];
+        if (existing) {
+          if (existing.argsHash !== argsHash) {
+            throw controlError(
+              "idempotency_key_args_mismatch",
+              `idempotency key "${key}" was already used for ${JSON.stringify(existing.op)} with different arguments`,
+              { retrySafe: false },
+            );
+          }
+          if (existing.status === "succeeded") return { save: null, value: { action: "replay-success", receipt: existing } };
+          if (existing.status === "failed") return { save: null, value: { action: "replay-failure", receipt: existing } };
+          if (existing.status === "unknown") {
+            throw controlError(
+              "external_outcome_unknown",
+              `operation "${existing.operationId}" has an UNKNOWN external outcome — reconcile it before re-issuing key "${key}"`,
+              { retrySafe: false },
+            );
+          }
+          const leaseLive = existing.lease != null && existing.lease.expiresAt > ts;
+          if (existing.status === "in_flight") {
+            if (leaseLive) {
+              throw controlError(
+                "external_outcome_unknown",
+                `operation "${existing.operationId}" is currently in flight under key "${key}" — ` +
+                  `retry to obtain its result`,
+                { retrySafe: true },
+              );
+            }
+            existing.status = "unknown";
+            existing.updatedAt = ts;
+            return { save: data, value: { action: "throw-unknown", receipt: existing } };
+          }
+          // pending + live lease: a concurrent duplicate — never double-execute.
+          if (leaseLive) {
+            throw controlError(
+              "external_outcome_unknown",
+              `operation "${existing.operationId}" is being issued under key "${key}" — retry to obtain its result`,
+              { retrySafe: true },
+            );
+          }
+          // pending + expired lease: the reservation was made but nothing was
+          // ever issued — safe resume (take over the SAME receipt).
+          existing.lease = { owner, expiresAt: ts + leaseTtlMs };
+          existing.takeoverCount = (existing.takeoverCount ?? 0) + 1;
+          existing.updatedAt = ts;
+          return { save: data, value: { action: "resume", receipt: existing } };
+        }
+        if (Object.keys(data.receipts).length >= receiptsCap) {
+          throw controlError(
+            "capacity_wait",
+            `the operation-receipt ledger is at its cap (${receiptsCap}) — prune ` +
+              `${store.path} (terminal receipts only) before issuing new operations`,
+            { retrySafe: true },
+          );
+        }
+        const receipt = {
+          key,
+          op,
+          argsHash,
+          args: snapshot,
+          status: "pending",
+          operationId: `op_${newId()}`,
+          resourceId: null,
+          result: null,
+          error: null,
+          lease: { owner, expiresAt: ts + leaseTtlMs },
+          takeoverCount: 0,
+          createdAt: ts,
+          updatedAt: ts,
+        };
+        data.receipts[key] = receipt;
+        return { save: data, value: { action: "start", receipt } };
+      });
+  
+      const { action, receipt } = reserved;
+      if (action === "replay-success") {
+        return { ok: true, replayed: true, ...receipt.result };
+      }
+      if (action === "replay-failure") {
+        // The cached answer for a known-failed operation: same code, same
+        // retry-safety, never a fresh execution.
+        return {
+          ok: false,
+          replayed: true,
+          operationId: receipt.operationId,
+          key,
+          code: receipt.error?.code ?? "external_outcome_unknown",
+          retrySafe: receipt.error?.retrySafe === true,
+          error: receipt.error?.message ?? "operation previously failed",
+        };
+      }
+      if (action === "throw-unknown") {
+        throw controlError(
+          "external_outcome_unknown",
+          `operation "${receipt.operationId}" was in flight when its lease expired — the external outcome is ` +
+            `unknown; reconcile before re-issuing key "${key}"`,
+          { retrySafe: false },
+        );
+      }
+  
+      // pending → in_flight: persisted IMMEDIATELY BEFORE the external effect,
+      // in its own store section (the crash-window marker — an expired
+      // in_flight is durably unknown).
+      await withControl(store, (data) => {
+        const r = data.receipts?.[key];
+        if (!r || r.operationId !== receipt.operationId) {
+          throw controlError("external_outcome_unknown", `reservation for key "${key}" changed mid-flight`, { retrySafe: true });
+        }
+        if (r.status !== "pending") {
+          throw controlError(
+            "external_outcome_unknown",
+            `reservation for key "${key}" moved to ${r.status} mid-flight — reconcile before re-issuing`,
+            { retrySafe: true },
+          );
+        }
+        r.status = "in_flight";
+        r.lease = { owner, expiresAt: now() + leaseTtlMs };
+        r.updatedAt = now();
+        return { save: data, value: null };
+      });
+  
+      // EXECUTE — the store lock is RELEASED (§8.1: never hold it across an
+      // external call). A fresh failure is RECORDED (the receipt replays it
+      // forever) and then RETHROWN — the tool wrapper turns it into the
+      // {ok:false, code, retrySafe} response; a REPLAY of a failed receipt
+      // returns the cached failure as a value instead (it is the answer, not a
+      // new event).
+      let payload;
+      try {
+        payload = await execute();
+      } catch (error) {
+        const err = toControlError(error);
+        await withControl(store, (data) => {
+          const r = data.receipts?.[key];
+          if (!r) return { save: null, value: null };
+          r.status = "failed";
+          r.error = { code: err.code, message: err.message, retrySafe: err.retrySafe };
+          r.resourceId = err.resourceId ?? r.resourceId;
+          r.updatedAt = now();
+          return { save: data, value: null };
+        });
+        throw err;
+      }
+  
+    await withControl(store, (data) => {
+      const r = data.receipts?.[key];
+      if (!r) return { save: null, value: null };
+      r.status = "succeeded";
+      // Persist the FULL payload — the replay contract ("replaying a terminal
+      // receipt returns its ORIGINAL result") means every field the first
+      // caller saw is what the replay returns, never a subset.
+      r.result = { ...payload, operationId: receipt.operationId, key };
+      r.resourceId = payload.resourceId ?? r.resourceId;
+      r.updatedAt = now();
+      return { save: data, value: null };
+    });
+    return { ok: true, replayed: false, ...payload, operationId: receipt.operationId, key };
+  }
+  return { runOperation };
+}
 
 export function resolveProjectIdentity(projects, name) {
   if (typeof name !== "string" || name.trim().length === 0) {
@@ -365,185 +554,13 @@ export function createCtoMantaControl({
     tmuxRenameSession: tmuxRenameSession ?? tmuxWrites.renameSession,
     tmuxRenameWindow: tmuxRenameWindow ?? tmuxWrites.renameWindow,
   };
-
-  // -------------------------------------------------------------------------
   // Receipt protocol — reserve → in_flight → execute → record (lock released
-  // across execute; §8.1). Returns the full response envelope.
-  // -------------------------------------------------------------------------
-  async function runOperation({ key, op, args, execute }) {
-    assertNonEmptyString(key, "idempotency key");
-    assertNonEmptyString(op, "operation name");
-    const snapshot = argsSnapshot(args);
-    const argsHash = canonicalArgsHash(op, snapshot);
+  // across execute; §8.1). The lifecycle lives in the SHARED
+  // createOperationRunner above so the §7 `work` family (ctoWorkTools.mjs)
+  // reuses the exact same protocol for its own family-level receipts (e.g.
+  // work_create, whose receipt must predate the envelope it creates).
+  const { runOperation } = createOperationRunner({ store, now, newId, receiptsCap, leaseTtlMs });
 
-    const reserved = await withControl(store, (data) => {
-      const ts = now();
-      data.receipts = data.receipts ?? {};
-      const existing = data.receipts[key];
-      if (existing) {
-        if (existing.argsHash !== argsHash) {
-          throw controlError(
-            "idempotency_key_args_mismatch",
-            `idempotency key "${key}" was already used for ${JSON.stringify(existing.op)} with different arguments`,
-            { retrySafe: false },
-          );
-        }
-        if (existing.status === "succeeded") return { save: null, value: { action: "replay-success", receipt: existing } };
-        if (existing.status === "failed") return { save: null, value: { action: "replay-failure", receipt: existing } };
-        if (existing.status === "unknown") {
-          throw controlError(
-            "external_outcome_unknown",
-            `operation "${existing.operationId}" has an UNKNOWN external outcome — reconcile it before re-issuing key "${key}"`,
-            { retrySafe: false },
-          );
-        }
-        const leaseLive = existing.lease != null && existing.lease.expiresAt > ts;
-        if (existing.status === "in_flight") {
-          if (leaseLive) {
-            throw controlError(
-              "external_outcome_unknown",
-              `operation "${existing.operationId}" is currently in flight under key "${key}" — ` +
-                `retry to obtain its result`,
-              { retrySafe: true },
-            );
-          }
-          existing.status = "unknown";
-          existing.updatedAt = ts;
-          return { save: data, value: { action: "throw-unknown", receipt: existing } };
-        }
-        // pending + live lease: a concurrent duplicate — never double-execute.
-        if (leaseLive) {
-          throw controlError(
-            "external_outcome_unknown",
-            `operation "${existing.operationId}" is being issued under key "${key}" — retry to obtain its result`,
-            { retrySafe: true },
-          );
-        }
-        // pending + expired lease: the reservation was made but nothing was
-        // ever issued — safe resume (take over the SAME receipt).
-        existing.lease = { owner: RECEIPT_OWNER, expiresAt: ts + leaseTtlMs };
-        existing.takeoverCount = (existing.takeoverCount ?? 0) + 1;
-        existing.updatedAt = ts;
-        return { save: data, value: { action: "resume", receipt: existing } };
-      }
-      if (Object.keys(data.receipts).length >= receiptsCap) {
-        throw controlError(
-          "capacity_wait",
-          `the operation-receipt ledger is at its cap (${receiptsCap}) — prune ` +
-            `${store.path} (terminal receipts only) before issuing new operations`,
-          { retrySafe: true },
-        );
-      }
-      const receipt = {
-        key,
-        op,
-        argsHash,
-        args: snapshot,
-        status: "pending",
-        operationId: `op_${newId()}`,
-        resourceId: null,
-        result: null,
-        error: null,
-        lease: { owner: RECEIPT_OWNER, expiresAt: ts + leaseTtlMs },
-        takeoverCount: 0,
-        createdAt: ts,
-        updatedAt: ts,
-      };
-      data.receipts[key] = receipt;
-      return { save: data, value: { action: "start", receipt } };
-    });
-
-    const { action, receipt } = reserved;
-    if (action === "replay-success") {
-      return { ok: true, replayed: true, ...receipt.result };
-    }
-    if (action === "replay-failure") {
-      // The cached answer for a known-failed operation: same code, same
-      // retry-safety, never a fresh execution.
-      return {
-        ok: false,
-        replayed: true,
-        operationId: receipt.operationId,
-        key,
-        code: receipt.error?.code ?? "external_outcome_unknown",
-        retrySafe: receipt.error?.retrySafe === true,
-        error: receipt.error?.message ?? "operation previously failed",
-      };
-    }
-    if (action === "throw-unknown") {
-      throw controlError(
-        "external_outcome_unknown",
-        `operation "${receipt.operationId}" was in flight when its lease expired — the external outcome is ` +
-          `unknown; reconcile before re-issuing key "${key}"`,
-        { retrySafe: false },
-      );
-    }
-
-    // pending → in_flight: persisted IMMEDIATELY BEFORE the external effect,
-    // in its own store section (the crash-window marker — an expired
-    // in_flight is durably unknown).
-    await withControl(store, (data) => {
-      const r = data.receipts?.[key];
-      if (!r || r.operationId !== receipt.operationId) {
-        throw controlError("external_outcome_unknown", `reservation for key "${key}" changed mid-flight`, { retrySafe: true });
-      }
-      if (r.status !== "pending") {
-        throw controlError(
-          "external_outcome_unknown",
-          `reservation for key "${key}" moved to ${r.status} mid-flight — reconcile before re-issuing`,
-          { retrySafe: true },
-        );
-      }
-      r.status = "in_flight";
-      r.lease = { owner: RECEIPT_OWNER, expiresAt: now() + leaseTtlMs };
-      r.updatedAt = now();
-      return { save: data, value: null };
-    });
-
-    // EXECUTE — the store lock is RELEASED (§8.1: never hold it across an
-    // external call). A fresh failure is RECORDED (the receipt replays it
-    // forever) and then RETHROWN — the tool wrapper turns it into the
-    // {ok:false, code, retrySafe} response; a REPLAY of a failed receipt
-    // returns the cached failure as a value instead (it is the answer, not a
-    // new event).
-    let payload;
-    try {
-      payload = await execute();
-    } catch (error) {
-      const err = toControlError(error);
-      await withControl(store, (data) => {
-        const r = data.receipts?.[key];
-        if (!r) return { save: null, value: null };
-        r.status = "failed";
-        r.error = { code: err.code, message: err.message, retrySafe: err.retrySafe };
-        r.resourceId = err.resourceId ?? r.resourceId;
-        r.updatedAt = now();
-        return { save: data, value: null };
-      });
-      throw err;
-    }
-
-    await withControl(store, (data) => {
-      const r = data.receipts?.[key];
-      if (!r) return { save: null, value: null };
-      r.status = "succeeded";
-      r.result = {
-        operationId: receipt.operationId,
-        key,
-        resourceId: payload.resourceId,
-        revision: payload.revision ?? null,
-        state: payload.state,
-        summary: payload.summary,
-        ...(payload.changed !== undefined ? { changed: payload.changed } : {}),
-        ...(payload.model !== undefined ? { model: payload.model } : {}),
-        ...(payload.sessionID !== undefined ? { sessionID: payload.sessionID } : {}),
-      };
-      r.resourceId = payload.resourceId ?? r.resourceId;
-      r.updatedAt = now();
-      return { save: data, value: null };
-    });
-    return { ok: true, replayed: false, ...payload, operationId: receipt.operationId, key };
-  }
 
   // -------------------------------------------------------------------------
   // Shared read primitives (reads ONLY — no dispatch anywhere downstream)

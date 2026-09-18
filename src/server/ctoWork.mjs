@@ -341,6 +341,13 @@ function assertValidReceipt(receipt, workId) {
   if (receipt.args !== undefined) {
     assertJsonSafe(receipt.args, `${label}.args`, new Set());
   }
+  // Persisted operation result (the replay contract: "replaying a terminal
+  // receipt returns its ORIGINAL result"). Validated JSON-safe when present —
+  // never a bare string; failures carry {code,message,retrySafe,...}.
+  if (receipt.result !== undefined && receipt.result !== null) {
+    assertPlainObject(receipt.result, `${label}.result`);
+    assertJsonSafe(receipt.result, `${label}.result`, new Set());
+  }
 }
 
 // Load-time shape gate: every read, mutate and retention decision downstream
@@ -395,6 +402,15 @@ function assertValidEnvelope(env, id) {
         throw workError("unsupported", `${field} must be an array`);
       }
       for (const entry of env[field]) assertPlainObject(entry, `${field}[]`);
+    }
+    // Worker-outcome claims (written by the P4 work family, ctoWorkTools.mjs).
+    // OPTIONAL for envelopes created before that family existed; validated
+    // whenever present so the strict-shape invariant holds for every write.
+    if (env.claims !== undefined) {
+      if (!Array.isArray(env.claims)) {
+        throw workError("unsupported", "claims must be an array when present");
+      }
+      for (const entry of env.claims) assertPlainObject(entry, "claims[]");
     }
     if (!Array.isArray(env.operations)) {
       throw workError("unsupported", "operations must be an array");
@@ -900,7 +916,7 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
   // under an older spec reports superseded:true, never false.
   async function recordOperationOutcome(
     workId,
-    { receiptId, key, status, resultCode, externalRef } = {},
+    { receiptId, key, status, resultCode, externalRef, result } = {},
   ) {
     if (!OPERATION_STATUSES.includes(status)) {
       throw workError("unsupported", `status "${status}" is not a valid operation status`);
@@ -914,6 +930,10 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
     }
     if (externalRef !== undefined && externalRef !== null && typeof externalRef !== "string") {
       throw workError("unsupported", `externalRef must be a string or null (got ${typeof externalRef})`);
+    }
+    if (result !== undefined && result !== null) {
+      assertPlainObject(result, "result");
+      assertJsonSafe(result, "result", new Set());
     }
     const ts = now();
     return mutateEnvelope(store, workId, (env) => {
@@ -955,6 +975,7 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
       receipt.status = status;
       receipt.resultCode = resultCode ?? receipt.resultCode ?? null;
       receipt.externalRef = externalRef ?? receipt.externalRef ?? null;
+      if (result !== undefined) receipt.result = result;
       receipt.resultAt = ts;
       receipt.updatedAt = ts;
       const superseded = staleSpec;
@@ -964,5 +985,29 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
     });
   }
 
-  return { createWork, getWork, listWorks, reviseWork, reserveOperation, recordOperationOutcome };
+  // Validated general envelope mutator for the work-family semantics
+  // (ctoWorkTools.mjs): ONE read-modify-write section under the per-envelope
+  // lock (the same lock every other mutator uses), strict load, and the saved
+  // envelope re-validated before the write — so every write path keeps the
+  // strict-shape invariant. NOT for dependency patches (those must go through
+  // reviseWork, which holds the graph lock). `mutator(envOrNull)` returns
+  // `{ save, value }` with `save: null` meaning a pure read.
+  async function mutateWork(id, mutator) {
+    return mutateEnvelope(store, id, async (env) => {
+      if (!env) throw workError("target_not_found", `work "${id}" does not exist`);
+      const { save, value } = await mutator(env);
+      if (save !== null) assertValidEnvelope(save, id);
+      return { save, value };
+    });
+  }
+
+  return {
+    createWork,
+    getWork,
+    listWorks,
+    reviseWork,
+    reserveOperation,
+    recordOperationOutcome,
+    mutateWork,
+  };
 }
