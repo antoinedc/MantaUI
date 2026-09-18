@@ -147,6 +147,7 @@ import { endpointSummary as routingEndpointSummary, providerTokenTotals, ROUTING
 import * as appControl from "./appControl.mjs";
 import * as cto from "./cto.mjs";
 import * as ctoEngine from "./ctoEngine.mjs";
+import { createCtoWorkControl } from "./ctoWorkTools.mjs";
 import * as ctoBudget from "./ctoBudget.mjs";
 import { createFactSurfaces } from "./ctoFactSurfaces.mjs";
 import { isIssueToolGranted } from "./ctoToolRegistry.mjs";
@@ -770,12 +771,22 @@ const webhookEngine = createWebhookEngine({
 // jobs (30 min) and prunes terminal retention; the 10s activity poller
 // refreshes the `activity` summary for running jobs. The AI tool + UI are
 // Stage 3 — this server wiring is Stage 2 only.
+//
+// §8.1 outcome routing (work family): a terminal job carrying correlation
+// `{kind:"work"}` is adopted into its work envelope by the CTO work control.
+// The sink is assigned once the work control is composed below (the engine is
+// created earlier in module scope); until then it is a no-op, and a routing
+// failure never breaks the job's own terminal transition.
+let workOutcomeSink = null;
 const delegateEngine = createDelegateEngine({
   publish: (evt) => bus.publish(evt),
   deliver: (args) => promptDelivery.deliver(args),
   listProjects: () => tmux.listProjects(),
   newWindow: (input) => tmux.newWindow(input),
   killWindow: (input) => tmux.killWindow(input),
+  onJobTerminal: async (job) => {
+    if (workOutcomeSink) await workOutcomeSink(job);
+  },
   // BET-1377: stamp the job's window owner as "job" (see tmux.stampOwner).
   stampOwner: (sessionName, windowIndex, owner) =>
     tmux.stampOwner(sessionName, windowIndex, owner),
@@ -828,6 +839,17 @@ const delegateEngine = createDelegateEngine({
 delegateEngine.reconcileJobsOnBoot().catch((e) =>
   console.warn("[delegate] boot reconciliation failed:", e?.message ?? e),
 );
+
+// §7 `work` control-tool family (record + dispatch half): composed from the
+// live tmux reader and the bound delegate engine, and injected into the CTO
+// engine as its workControl. Terminal delegate jobs correlated to a work item
+// ({kind:"work"}) are routed here so the work envelope records the worker's
+// outcome (a CLAIM — never a completion verdict).
+const ctoWorkControl = createCtoWorkControl({
+  listProjects: () => tmux.listProjects(),
+  delegateOps: delegateEngine,
+});
+workOutcomeSink = (job) => ctoWorkControl.recordWorkerOutcome(job);
 // eslint-disable-next-line no-unused-vars
 const { stop: stopDelegateSweeper } = delegateEngine.startSweeper();
 // eslint-disable-next-line no-unused-vars
@@ -1784,6 +1806,10 @@ function getCtoEngine() {
       listMessages: (sid, opts) => oc.listMessages(sid, opts),
       listModels: () => oc.listModels(),
       getSessionAgent: (sid) => oc.getSessionAgent(sid),
+      // §7 `work` family: the bound delegate engine is the dispatch/observe
+      // capability (§8.1 — reuse the existing job machinery, never a second
+      // runner); the composed control above owns outcome adoption.
+      workControl: ctoWorkControl,
       // BET-1516 (§10.3 predicate 1): the inbox-blocker cards' sender-session
       // liveness check — the box's own sessionExists (definitive 404 → gone,
       // transient → assume alive).

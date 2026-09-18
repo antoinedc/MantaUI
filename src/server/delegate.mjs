@@ -366,6 +366,16 @@ async function registerJob(
     link,
     actor,
     sweepAllowanceMs,
+    // §8.1 explicit-contract path (spec: "Accept a preallocated operation/job
+    // identity and persist its reservation before creating any worktree,
+    // window or opencode session"): the execution target is the CALLER-
+    // VALIDATED project reference, never re-derived from the parent's tmux
+    // window — a headless completion parent (the on-call CTO conversation)
+    // has no holder to resolve. `correlation` is the preallocated operation
+    // identity persisted on the record so a crash after creation can adopt
+    // the matching worker instead of creating another blindly.
+    targetTmuxSession,
+    correlation,
   },
   deps = {},
 ) {
@@ -385,11 +395,18 @@ async function registerJob(
   let tmuxSession = null;
   let windowIndex = null;
   try {
-    const owner = resolveOwner(await listProjects(), parentSessionID);
-    if (!owner) {
-      throw new Error(`could not resolve the tmux session owning ${parentSessionID}`);
+    if (targetTmuxSession) {
+      // §8.1: target workspace resolution uses the explicit project reference,
+      // not parent lookup. The caller already failed it closed against live
+      // tmux; newWindow below still fails loudly if the target vanished.
+      tmuxSession = targetTmuxSession;
+    } else {
+      const owner = resolveOwner(await listProjects(), parentSessionID);
+      if (!owner) {
+        throw new Error(`could not resolve the tmux session owning ${parentSessionID}`);
+      }
+      tmuxSession = owner.tmuxSession;
     }
-    tmuxSession = owner.tmuxSession;
     const created = await newWindow({
       sessionName: tmuxSession,
       windowName: name,
@@ -463,6 +480,11 @@ async function registerJob(
     // Who started the job ("user" default; "cto" for the adaptive-CTO engine).
     // Persisted so the CTO engine can reason about its own jobs across restarts.
     actor: actor ?? "user",
+    // §8.1 operation-correlation identity ({kind:"work", workId, receiptId, op})
+    // persisted so a crashed dispatch can ADOPT the matching worker instead of
+    // creating another blindly ("never create another blindly"). Ordinary
+    // user/CTO jobs carry null.
+    correlation: correlation ?? null,
     // Running-sweep allowance (ms) this job gets; absent ⇒ the 30-min default.
     // The CTO engine passes overnightWindowRemainingMs for its overnight sweep.
     // Persisted so a resumed or restarted job keeps the same allowance.
@@ -826,7 +848,10 @@ export async function startJob(input, deps = {}) {
     const name = deriveName(prompt);
 
     // 4. Create the worktree. On throw, catch and continue with
-    //    worktree = branch = baseSha = null and cwd = parentDirectory.
+    //    worktree = branch = baseSha = null and cwd = parentDirectory —
+    //    UNLESS the caller demands isolation (§8.1: for implementation work,
+    //    isolationRequired is true and a worktree failure must fail BEFORE
+    //    prompting, never fall back to the original repository directory).
     let worktree = null;
     let branch = null;
     let baseSha = null;
@@ -836,7 +861,16 @@ export async function startJob(input, deps = {}) {
       worktree = wt.path;
       branch = wt.branch;
       cwd = wt.path;
-    } catch {
+    } catch (e) {
+      if (input?.isolationRequired) {
+        return {
+          ok: false,
+          code: "worktree_failed",
+          error:
+            `worktree creation failed, refusing to fall back to the original repository directory ` +
+            `(isolationRequired): ${e?.message ?? e}`,
+        };
+      }
       worktree = null;
       branch = null;
       baseSha = null;
@@ -873,6 +907,12 @@ export async function startJob(input, deps = {}) {
         link: input?.link,
         actor: input?.actor,
         sweepAllowanceMs: input?.sweepAllowanceMs,
+        // §8.1 explicit-contract path (absent on ordinary callers — their
+        // behavior is byte-identical): the execution target comes from the
+        // caller's validated project reference, and `correlation` is the
+        // preallocated operation identity persisted on the job record.
+        targetTmuxSession: input?.targetProject ?? null,
+        correlation: input?.correlation ?? null,
       },
       deps,
     );
@@ -1295,6 +1335,18 @@ export async function finishJob(job, status, error, deps = {}, sawBusy) {
     });
     if (sawBusy) sawBusy.delete(job.childSessionID);
 
+    // §8.1 outcome-routing seam: the engine composition may route a terminal
+    // job to the work coordinator (jobs carrying correlation.kind === "work").
+    // Best-effort — a routing failure must never break the job's own terminal
+    // transition or its completion delivery.
+    if (typeof deps.onJobTerminal === "function") {
+      try {
+        await deps.onJobTerminal(updated);
+      } catch (e) {
+        console.warn(`[delegate] onJobTerminal failed for ${updated.id}:`, e?.message ?? e);
+      }
+    }
+
     // The child session is ending — clear its progress record (progress is
     // "where are we right now"; a finished job leaves none). Reads the SAME
     // progress.json store, no second record/event. Never fails the transition.
@@ -1625,6 +1677,23 @@ export function startSweeper(deps = {}, { intervalMs = SWEEP_INTERVAL_MS } = {})
 // Stopping and deleting
 // ---------------------------------------------------------------------------
 
+// Shared lock + lookup + running-guard for the job-lifecycle controls (stop,
+// pause). The callback runs INSIDE the jobs-store lock and performs its own
+// save — the read-check-mutate sequence stays atomic against other writers.
+async function withRunningJob(id, deps, fn) {
+  const { load = loadJobs } = deps;
+  return jobsLock.runExclusive(async () => {
+    const jobs = await load();
+    const idx = jobs.findIndex((j) => j.id === id);
+    if (idx === -1) return { ok: false, error: "not found" };
+    const job = jobs[idx];
+    if (job.status !== "running") {
+      return { ok: false, error: "job not running", status: job.status };
+    }
+    return fn(jobs, idx, job);
+  });
+}
+
 /**
  * stopJob aborts the child session with oc.abortSession, marks the job
  * `stopped`, and sends a completion message. Window and worktree are kept.
@@ -1641,14 +1710,7 @@ export async function stopJob(id, deps = {}) {
   } = deps;
   // Under the jobs-store lock: the read-check-mutate + the cleanedUp stamp are
   // atomic, so a stop cannot race another writer into a half-state.
-  return jobsLock.runExclusive(async () => {
-    const jobs = await load();
-    const idx = jobs.findIndex((j) => j.id === id);
-    if (idx === -1) return { ok: false, error: "not found" };
-    const job = jobs[idx];
-    if (job.status !== "running") {
-      return { ok: false, error: "job not running", status: job.status };
-    }
+  return withRunningJob(id, deps, async (jobs, idx, job) => {
     if (abortSession && job.childSessionID) {
       try {
         await abortSession(job.childSessionID);
@@ -1780,14 +1842,7 @@ export async function deleteJob(id, deps = {}) {
  */
 export async function pauseJob(id, deps = {}) {
   const { load = loadJobs, save = saveJobs, publish } = deps;
-  return jobsLock.runExclusive(async () => {
-    const jobs = await load();
-    const idx = jobs.findIndex((j) => j.id === id);
-    if (idx === -1) return { ok: false, error: "not found" };
-    const job = jobs[idx];
-    if (job.status !== "running") {
-      return { ok: false, error: "job not running", status: job.status };
-    }
+  return withRunningJob(id, deps, async (jobs, idx, job) => {
     const updated = { ...job, pauseRequested: true };
     jobs[idx] = updated;
     await save(jobs);
