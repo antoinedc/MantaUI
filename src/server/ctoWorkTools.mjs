@@ -496,6 +496,119 @@ export function createCtoWorkControl({
     }
   }
 
+  // Every §7/§11 stage operation reserves its receipt identically — the only
+  // thing that varies is the operation name. Extracted so the reservation
+  // shape (idempotency key, args snapshot, expected revision, lease) cannot
+  // drift between stages: a stage that reserved differently would be a
+  // silently weaker idempotency guarantee.
+  async function reserveStage(opName, input) {
+    return reserveOrThrow(input.work, {
+      key: input.key,
+      op: opName,
+      args: argsSnapshot(input),
+      expectedRevision: input.expectedRevision,
+      leaseOwner: RECEIPT_OWNER,
+      leaseTtlMs,
+    });
+  }
+
+  // Append an evidence reference once, keyed by id — re-observing the same
+  // external effect must not duplicate the record it is evidence for.
+  function pushEvidenceOnce(evidence, evidenceId, kind) {
+    if (!evidence.some((r) => r?.id === evidenceId)) {
+      evidence.push({ kind, id: evidenceId, observedAt: now() });
+    }
+  }
+
+  // A stage whose external effect is NOT a delegate job (release, verify,
+  // complete, rollback) still records an attempt, so a crash mid-effect leaves
+  // a visible "dispatching" attempt rather than a silent gap. Shared so every
+  // such stage numbers and stamps its attempt identically.
+  async function appendStageAttempt(input, attemptId, receipt, stage) {
+    await work.mutateWork(input.work, (env) => {
+      const attempt = {
+        id: attemptId,
+        stage,
+        attemptNumber: (env.attempts ?? []).filter((a) => a?.stage === stage).length + 1,
+        specHash: env.spec.hash,
+        receiptId: receipt.id,
+        jobId: null,
+        status: "dispatching",
+        startedAt: now(),
+        updatedAt: now(),
+      };
+      return { save: { ...env, attempts: [...(env.attempts ?? []), attempt], updatedAt: now() }, value: null };
+    });
+  }
+
+  // A delegate job that STARTED: the receipt succeeds with the job as its
+  // external ref, the attempt is linked to the job and marked running, and the
+  // job is registered as an owned resource (so cleanup and the borrowed-
+  // resource protections can see it). Shared by dispatch and review — the only
+  // difference is the result code, and a stage that linked the job differently
+  // would leak an unowned worker.
+  async function recordJobStarted(input, receipt, attemptId, job, payload, resultCode) {
+    await work.recordOperationOutcome(input.work, {
+      receiptId: receipt.id,
+      status: "succeeded",
+      externalRef: job.id,
+      resultCode,
+      result: payload,
+    });
+    await work.mutateWork(input.work, (env) => {
+      const attempts = (env.attempts ?? []).map((a) =>
+        a?.id === attemptId ? { ...a, jobId: job.id, status: "running", updatedAt: now() } : a,
+      );
+      const resources = [...(env.resources ?? [])];
+      if (!resources.some((r) => r?.kind === "delegate_job" && r.ref === job.id)) {
+        resources.push(jobResourceEntry(env, job, attemptId));
+      }
+      return { save: { ...env, attempts, resources, updatedAt: now() }, value: null };
+    });
+    return { ok: true, replayed: false, ...payload, operationId: receipt.id, key: receipt.key };
+  }
+
+  // A delegate job's transcript is the evidence record for whatever it
+  // produced. Appended once per job (id-keyed) so re-observing a terminal
+  // event never duplicates the reference.
+  function withJobEvidence(env, job) {
+    const evidence = [...(env.evidence ?? [])];
+    const evidenceId = `delegate-job:${job.id}`;
+    if (!evidence.some((r) => r?.id === evidenceId)) {
+      evidence.push({
+        kind: "message",
+        id: evidenceId,
+        sessionId: job.childSessionID ?? null,
+        observedAt: now(),
+      });
+    }
+    return evidence;
+  }
+
+  // A stage whose external effect threw: record the receipt failure and mark
+  // the in-flight attempt failed. Extracted because every stage must fail the
+  // SAME way — a stage that skipped the attempt update would leave a
+  // permanently "dispatching" attempt blocking its own retry.
+  async function failStageAttempt(input, receipt, attemptId, label, error) {
+    const err = toWorkToolError(error);
+    await recordReceiptFailure(input.work, receipt, err).catch(() => {});
+    await work
+      .mutateWork(input.work, (env) => ({
+        save: {
+          ...env,
+          attempts: (env.attempts ?? []).map((a) =>
+            a?.id === attemptId && a.status === "dispatching"
+              ? { ...a, status: "failed", updatedAt: now(), note: clipNote(`${label} failed: ${err.message}`) }
+              : a,
+          ),
+          updatedAt: now(),
+        },
+        value: null,
+      }))
+      .catch(() => {});
+    throw err;
+  }
+
   async function readJobsOrThrow(reason) {
     try {
       const jobs = await listDelegateJobs();
@@ -1023,16 +1136,7 @@ export function createCtoWorkControl({
       ),
     };
 
-    const evidence = [...(env.evidence ?? [])];
-    const evidenceId = `delegate-job:${job.id}`;
-    if (!evidence.some((r) => r?.id === evidenceId)) {
-      evidence.push({
-        kind: "message",
-        id: evidenceId,
-        sessionId: job.childSessionID ?? null,
-        observedAt: now(),
-      });
-    }
+    const evidence = withJobEvidence(env, job);
 
     let next = { ...env, attempts, claims, evidence, updatedAt: now() };
     // State moves ONLY from "running" or "paused" (a worker outcome supersedes
@@ -1171,16 +1275,7 @@ export function createCtoWorkControl({
         : a,
     );
 
-    const evidence = [...(env.evidence ?? [])];
-    const evidenceId = `delegate-job:${job.id}`;
-    if (!evidence.some((r) => r?.id === evidenceId)) {
-      evidence.push({
-        kind: "message",
-        id: evidenceId,
-        sessionId: job.childSessionID ?? null,
-        observedAt: now(),
-      });
-    }
+    const evidence = withJobEvidence(env, job);
 
     let next = { ...env, attempts: reviewAttempts, claims, evidence, updatedAt: now() };
     if (!staleSpec && (next.state === "running" || next.state === "paused")) {
@@ -1734,24 +1829,7 @@ export function createCtoWorkControl({
       const job = started.job;
 
       const payload = dispatchResultFromJob(envBefore, job);
-      await work.recordOperationOutcome(input.work, {
-        receiptId: receipt.id,
-        status: "succeeded",
-        externalRef: job.id,
-        resultCode: "dispatched",
-        result: payload,
-      });
-      await work.mutateWork(input.work, (env) => {
-        const attempts = (env.attempts ?? []).map((a) =>
-          a?.id === attemptId ? { ...a, jobId: job.id, status: "running", updatedAt: now() } : a,
-        );
-        const resources = [...(env.resources ?? [])];
-        if (!resources.some((r) => r?.kind === "delegate_job" && r.ref === job.id)) {
-          resources.push(jobResourceEntry(env, job, attemptId));
-        }
-        return { save: { ...env, attempts, resources, updatedAt: now() }, value: null };
-      });
-      return { ok: true, replayed: false, ...payload, operationId: receipt.id, key: receipt.key };
+      return await recordJobStarted(input, receipt, attemptId, job, payload, "dispatched");
     } catch (error) {
       const err = toWorkToolError(error);
       await recordReceiptFailure(input.work, receipt, err).catch(() => {});
@@ -1799,14 +1877,7 @@ export function createCtoWorkControl({
     // Reserve BEFORE admission so a terminal receipt REPLAYS the original
     // result regardless of the work's current state (replaying a succeeded
     // dispatch must not be blocked by the state the dispatch itself caused).
-    const reserved = await reserveOrThrow(input.work, {
-      key: input.key,
-      op: "work.dispatch",
-      args: argsSnapshot(input),
-      expectedRevision: input.expectedRevision,
-      leaseOwner: RECEIPT_OWNER,
-      leaseTtlMs,
-    });
+    const reserved = await reserveStage("work.dispatch", input);
     if (reserved.replay) return replayResponse(reserved.receipt, input.work);
     const envBefore = await getWorkOrThrow(input.work);
     assertDispatchAdmissible(envBefore);
@@ -1869,14 +1940,7 @@ export function createCtoWorkControl({
     }
     await reconcileUnknownReceipts(input.work);
     // Reserve BEFORE admission — replay first (see work_dispatch).
-    const reserved = await reserveOrThrow(input.work, {
-      key: input.key,
-      op: "work.retry",
-      args: argsSnapshot(input),
-      expectedRevision: input.expectedRevision,
-      leaseOwner: RECEIPT_OWNER,
-      leaseTtlMs,
-    });
+    const reserved = await reserveStage("work.retry", input);
     if (reserved.replay) return replayResponse(reserved.receipt, input.work);
     const envBefore = await getWorkOrThrow(input.work);
     // Retry = a NEW attempt for the current stage (§8.2): from a failed work,
@@ -1926,14 +1990,7 @@ export function createCtoWorkControl({
     assertNonEmptyString(input.key, "idempotency key");
     assertNonEmptyString(input.work, "work");
     const envBefore = await getWorkOrThrow(input.work);
-    const reserved = await reserveOrThrow(input.work, {
-      key: input.key,
-      op: "work.pause",
-      args: argsSnapshot(input),
-      expectedRevision: input.expectedRevision,
-      leaseOwner: RECEIPT_OWNER,
-      leaseTtlMs,
-    });
+    const reserved = await reserveStage("work.pause", input);
     if (reserved.replay) return replayResponse(reserved.receipt, input.work);
     const receipt = reserved.receipt;
     const pauseJob = requireDelegateAction("pauseJob");
@@ -1992,14 +2049,7 @@ export function createCtoWorkControl({
     if (envBefore.state !== "paused") {
       throw controlError("policy_blocked", `work "${input.work}" is not paused (state ${envBefore.state})`, { retrySafe: false });
     }
-    const reserved = await reserveOrThrow(input.work, {
-      key: input.key,
-      op: "work.resume",
-      args: argsSnapshot(input),
-      expectedRevision: input.expectedRevision,
-      leaseOwner: RECEIPT_OWNER,
-      leaseTtlMs,
-    });
+    const reserved = await reserveStage("work.resume", input);
     if (reserved.replay) return replayResponse(reserved.receipt, input.work);
     const receipt = reserved.receipt;
     const resumeJob = requireDelegateAction("resumeJob");
@@ -2095,14 +2145,7 @@ export function createCtoWorkControl({
     if (["cancelled", "archived", "completed"].includes(envBefore.state)) {
       throw controlError("policy_blocked", `work "${input.work}" is already ${envBefore.state}`, { retrySafe: false });
     }
-    const reserved = await reserveOrThrow(input.work, {
-      key: input.key,
-      op: "work.cancel",
-      args: argsSnapshot(input),
-      expectedRevision: input.expectedRevision,
-      leaseOwner: RECEIPT_OWNER,
-      leaseTtlMs,
-    });
+    const reserved = await reserveStage("work.cancel", input);
     if (reserved.replay) return replayResponse(reserved.receipt, input.work);
     const receipt = reserved.receipt;
     const stopJob = requireDelegateAction("stopJob");
@@ -2170,14 +2213,7 @@ export function createCtoWorkControl({
     assertNonEmptyString(input.decisionId, "decisionId");
     assertNonEmptyString(input.response, "response");
     const envBefore = await getWorkOrThrow(input.work);
-    const reserved = await reserveOrThrow(input.work, {
-      key: input.key,
-      op: "work.answer_decision",
-      args: argsSnapshot(input),
-      expectedRevision: input.expectedRevision,
-      leaseOwner: RECEIPT_OWNER,
-      leaseTtlMs,
-    });
+    const reserved = await reserveStage("work.answer_decision", input);
     if (reserved.replay) return replayResponse(reserved.receipt, input.work);
     const receipt = reserved.receipt;
     try {
@@ -2250,14 +2286,7 @@ export function createCtoWorkControl({
     assertNonEmptyString(input.key, "idempotency key");
     assertNonEmptyString(input.work, "work");
     const envBefore = await getWorkOrThrow(input.work);
-    const reserved = await reserveOrThrow(input.work, {
-      key: input.key,
-      op: "work.archive",
-      args: argsSnapshot(input),
-      expectedRevision: input.expectedRevision,
-      leaseOwner: RECEIPT_OWNER,
-      leaseTtlMs,
-    });
+    const reserved = await reserveStage("work.archive", input);
     if (reserved.replay) return replayResponse(reserved.receipt, input.work);
     const receipt = reserved.receipt;
     try {
@@ -2318,14 +2347,7 @@ export function createCtoWorkControl({
     assertNonEmptyString(input.key, "idempotency key");
     assertNonEmptyString(input.work, "work");
     const envBefore = await getWorkOrThrow(input.work);
-    const reserved = await reserveOrThrow(input.work, {
-      key: input.key,
-      op: "work.cleanup",
-      args: argsSnapshot(input),
-      expectedRevision: input.expectedRevision,
-      leaseOwner: RECEIPT_OWNER,
-      leaseTtlMs,
-    });
+    const reserved = await reserveStage("work.cleanup", input);
     if (reserved.replay) return replayResponse(reserved.receipt, input.work);
     const receipt = reserved.receipt;
     const deleteJob = requireDelegateAction("deleteJob");
@@ -2573,14 +2595,7 @@ export function createCtoWorkControl({
       throw controlError("unsupported", "work_review requires a bound CTO conversation to receive the reviewer's report — bind the role session first (§3.1)", { retrySafe: true });
     }
     const deps = requireDelegateOps("review");
-    const reserved = await reserveOrThrow(input.work, {
-      key: input.key,
-      op: "work.review",
-      args: argsSnapshot(input),
-      expectedRevision: input.expectedRevision,
-      leaseOwner: RECEIPT_OWNER,
-      leaseTtlMs,
-    });
+    const reserved = await reserveStage("work.review", input);
     if (reserved.replay) return replayResponse(reserved.receipt, input.work);
     const receipt = reserved.receipt;
     let attemptId = null;
@@ -2661,24 +2676,7 @@ export function createCtoWorkControl({
           `dispatched INDEPENDENT reviewer (model ${input.reviewerModel}) for work "${input.work}" at head ${input.headSha} ` +
           `(spec ${envBefore.spec.hash}); the verdict becomes a review claim only from the reviewer's terminal report`,
       };
-      await work.recordOperationOutcome(input.work, {
-        receiptId: receipt.id,
-        status: "succeeded",
-        externalRef: job.id,
-        resultCode: "review_dispatched",
-        result: payload,
-      });
-      await work.mutateWork(input.work, (env) => {
-        const attempts = (env.attempts ?? []).map((a) =>
-          a?.id === attemptId ? { ...a, jobId: job.id, status: "running", updatedAt: now() } : a,
-        );
-        const resources = [...(env.resources ?? [])];
-        if (!resources.some((r) => r?.kind === "delegate_job" && r.ref === job.id)) {
-          resources.push(jobResourceEntry(env, job, attemptId));
-        }
-        return { save: { ...env, attempts, resources, updatedAt: now() }, value: null };
-      });
-      return { ok: true, replayed: false, ...payload, operationId: receipt.id, key: receipt.key };
+      return await recordJobStarted(input, receipt, attemptId, job, payload, "review_dispatched");
     } catch (error) {
       const err = toWorkToolError(error);
       await recordReceiptFailure(input.work, receipt, err).catch(() => {});
@@ -2715,14 +2713,7 @@ export function createCtoWorkControl({
     if (input.method !== undefined && !["merge", "squash", "rebase"].includes(input.method)) {
       throw controlError("unsupported", `method must be merge|squash|rebase (got ${JSON.stringify(input.method)})`);
     }
-    const reserved = await reserveOrThrow(input.work, {
-      key: input.key,
-      op: "work.merge",
-      args: argsSnapshot(input),
-      expectedRevision: input.expectedRevision,
-      leaseOwner: RECEIPT_OWNER,
-      leaseTtlMs,
-    });
+    const reserved = await reserveStage("work.merge", input);
     if (reserved.replay) return replayResponse(reserved.receipt, input.work);
     const receipt = reserved.receipt;
     const forgeOps = requireForge();
@@ -2825,34 +2816,14 @@ export function createCtoWorkControl({
       );
     }
     const trigger = requireReleaseTrigger();
-    const reserved = await reserveOrThrow(input.work, {
-      key: input.key,
-      op: "work.release",
-      args: argsSnapshot(input),
-      expectedRevision: input.expectedRevision,
-      leaseOwner: RECEIPT_OWNER,
-      leaseTtlMs,
-    });
+    const reserved = await reserveStage("work.release", input);
     if (reserved.replay) return replayResponse(reserved.receipt, input.work);
     const receipt = reserved.receipt;
     let attemptId = null;
     try {
       await work.recordOperationOutcome(input.work, { receiptId: receipt.id, status: "in_flight" });
       attemptId = `att_${newId()}`;
-      await work.mutateWork(input.work, (env) => {
-        const attempt = {
-          id: attemptId,
-          stage: "release",
-          attemptNumber: (env.attempts ?? []).filter((a) => a?.stage === "release").length + 1,
-          specHash: env.spec.hash,
-          receiptId: receipt.id,
-          jobId: null,
-          status: "dispatching",
-          startedAt: now(),
-          updatedAt: now(),
-        };
-        return { save: { ...env, attempts: [...(env.attempts ?? []), attempt], updatedAt: now() }, value: null };
-      });
+      await appendStageAttempt(input, attemptId, receipt, "release");
       const observed = await trigger({ contract, work: envBefore, deliveryTarget: dt, recoveryRef: input.recoveryRef ?? null });
       assertNoSecretLikeValues(observed, "release result");
       if (!observed?.runId || !observed?.artifact?.identity) {
@@ -2881,9 +2852,7 @@ export function createCtoWorkControl({
         const claims = [...(env.claims ?? []), claim];
         const evidence = [...(env.evidence ?? [])];
         const evidenceId = `release:${contract.pipeline}:${observed.runId}`;
-        if (!evidence.some((r) => r?.id === evidenceId)) {
-          evidence.push({ kind: "release", id: evidenceId, observedAt: now() });
-        }
+        pushEvidenceOnce(evidence, evidenceId, "release");
         const attempts = (env.attempts ?? []).map((a) =>
           a?.id === attemptId ? { ...a, status: "reported_complete", updatedAt: now(), note: clipNote(claim.note) } : a,
         );
@@ -2900,23 +2869,7 @@ export function createCtoWorkControl({
       await work.recordOperationOutcome(input.work, { receiptId: receipt.id, status: "succeeded", resultCode: "released", result: payload });
       return { ok: true, replayed: false, ...payload };
     } catch (error) {
-      const err = toWorkToolError(error);
-      await recordReceiptFailure(input.work, receipt, err).catch(() => {});
-      await work
-        .mutateWork(input.work, (env) => ({
-          save: {
-            ...env,
-            attempts: (env.attempts ?? []).map((a) =>
-              a?.id === attemptId && a.status === "dispatching"
-                ? { ...a, status: "failed", updatedAt: now(), note: clipNote(`release failed: ${err.message}`) }
-                : a,
-            ),
-            updatedAt: now(),
-          },
-          value: null,
-        }))
-        .catch(() => {});
-      throw err;
+      await failStageAttempt(input, receipt, attemptId, "release", error);
     }
   }
 
@@ -2952,14 +2905,7 @@ export function createCtoWorkControl({
     if (!contract) {
       throw controlError("policy_blocked", `no release contract matches project "${envBefore.project.workspaceId}" — the rollback trigger cannot be addressed (§11)`, { retrySafe: false });
     }
-    const reserved = await reserveOrThrow(input.work, {
-      key: input.key,
-      op: "work.rollback",
-      args: argsSnapshot(input),
-      expectedRevision: input.expectedRevision,
-      leaseOwner: RECEIPT_OWNER,
-      leaseTtlMs,
-    });
+    const reserved = await reserveStage("work.rollback", input);
     if (reserved.replay) return replayResponse(reserved.receipt, input.work);
     const receipt = reserved.receipt;
     try {
@@ -2969,9 +2915,7 @@ export function createCtoWorkControl({
       await work.mutateWork(input.work, (env) => {
         const evidence = [...(env.evidence ?? [])];
         const evidenceId = `rollback:${receipt.id}`;
-        if (!evidence.some((r) => r?.id === evidenceId)) {
-          evidence.push({ kind: "release", id: evidenceId, observedAt: now() });
-        }
+        pushEvidenceOnce(evidence, evidenceId, "release");
         return { save: { ...env, evidence, updatedAt: now() }, value: null };
       });
       const fresh = await getWorkOrThrow(input.work);
@@ -3028,14 +2972,7 @@ export function createCtoWorkControl({
         { retrySafe: true, details: { missing: ["merged_commit_exists", "artifact_published"] } },
       );
     }
-    const reserved = await reserveOrThrow(input.work, {
-      key: input.key,
-      op: "work.verify",
-      args: argsSnapshot(input),
-      expectedRevision: input.expectedRevision,
-      leaseOwner: RECEIPT_OWNER,
-      leaseTtlMs,
-    });
+    const reserved = await reserveStage("work.verify", input);
     if (reserved.replay) return replayResponse(reserved.receipt, input.work);
     const receipt = reserved.receipt;
     let attemptId = null;
@@ -3043,20 +2980,7 @@ export function createCtoWorkControl({
     try {
       await work.recordOperationOutcome(input.work, { receiptId: receipt.id, status: "in_flight" });
       attemptId = `att_${newId()}`;
-      await work.mutateWork(input.work, (env) => {
-        const attempt = {
-          id: attemptId,
-          stage: "verify",
-          attemptNumber: (env.attempts ?? []).filter((a) => a?.stage === "verify").length + 1,
-          specHash: env.spec.hash,
-          receiptId: receipt.id,
-          jobId: null,
-          status: "dispatching",
-          startedAt: now(),
-          updatedAt: now(),
-        };
-        return { save: { ...env, attempts: [...(env.attempts ?? []), attempt], updatedAt: now() }, value: null };
-      });
+      await appendStageAttempt(input, attemptId, receipt, "verify");
       const observed = await probe({ work: envBefore, deliveryTarget: dt, targetName });
       assertNoSecretLikeValues(observed, "probe result");
       const observedSha = typeof observed?.sha === "string" && observed.sha ? observed.sha : null;
@@ -3122,9 +3046,7 @@ export function createCtoWorkControl({
         const claims = [...(env.claims ?? []), runsClaim, ...(acceptanceClaim ? [acceptanceClaim] : [])];
         const evidence = [...(env.evidence ?? [])];
         const evidenceId = `verify:${receipt.id}`;
-        if (!evidence.some((r) => r?.id === evidenceId)) {
-          evidence.push({ kind: "release", id: evidenceId, observedAt: now() });
-        }
+        pushEvidenceOnce(evidence, evidenceId, "release");
         const attempts = (env.attempts ?? []).map((a) =>
           a?.id === attemptId
             ? {
@@ -3160,23 +3082,7 @@ export function createCtoWorkControl({
       await work.recordOperationOutcome(input.work, { receiptId: receipt.id, status: "succeeded", resultCode: "verified", result: payload });
       return { ok: true, replayed: false, ...payload };
     } catch (error) {
-      const err = toWorkToolError(error);
-      await recordReceiptFailure(input.work, receipt, err).catch(() => {});
-      await work
-        .mutateWork(input.work, (env) => ({
-          save: {
-            ...env,
-            attempts: (env.attempts ?? []).map((a) =>
-              a?.id === attemptId && a.status === "dispatching"
-                ? { ...a, status: "failed", updatedAt: now(), note: clipNote(`verification failed: ${err.message}`) }
-                : a,
-            ),
-            updatedAt: now(),
-          },
-          value: null,
-        }))
-        .catch(() => {});
-      throw err;
+      await failStageAttempt(input, receipt, attemptId, "verification", error);
     }
   }
 
@@ -3242,14 +3148,7 @@ export function createCtoWorkControl({
       // to run against; the CTO supplies it at completion time.
       throw controlError("unsupported", "work_complete for a pr delivery target requires prNumber (the open PR the gate runs on, §6)", { retrySafe: false });
     }
-    const reserved = await reserveOrThrow(input.work, {
-      key: input.key,
-      op: "work.complete",
-      args: argsSnapshot(input),
-      expectedRevision: input.expectedRevision,
-      leaseOwner: RECEIPT_OWNER,
-      leaseTtlMs,
-    });
+    const reserved = await reserveStage("work.complete", input);
     if (reserved.replay) return replayResponse(reserved.receipt, input.work);
     const receipt = reserved.receipt;
     try {
