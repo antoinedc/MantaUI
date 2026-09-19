@@ -1333,6 +1333,9 @@ export function createCtoWorkControl({
         ...workRow(env),
         attempts,
         claims: env.claims ?? [],
+        // §11: each observation becomes durable, attributable evidence — it
+        // must be inspectable, not just the claims it supports.
+        evidence: env.evidence ?? [],
         decisions: env.decisions ?? [],
         resources: env.resources ?? [],
         operations: (env.operations ?? []).map((r) => ({
@@ -3267,12 +3270,16 @@ export function createCtoWorkControl({
         const approval = liveClaimOf(env, REVIEW_CLAIM);
         gate = await forgeGate({ env, approval, prNumber: input.prNumber, purpose: "completion" });
       }
-      const fresh = await work.mutateWork(input.work, (e) => {
+      // mutateWork returns the mutator's VALUE, not the saved envelope —
+      // re-read the completed work for the result payload (a completed-state
+      // marker object has no workId and the receipt recorder would refuse it).
+      await work.mutateWork(input.work, (e) => {
         if (e.state === "completed") return { save: null, value: null };
         return { save: withState(e, "completed"), value: { state: "completed" } };
       });
+      const fresh = await getWorkOrThrow(input.work);
       const payload = successPayload({
-        env: fresh ?? env,
+        env: fresh,
         receipt,
         summary: `work "${input.work}" COMPLETED — delivery target ${describeDeliveryTarget(dt)} satisfied by evidence: ` +
           claims.map((c) => c.kind).join(", ") +
