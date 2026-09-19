@@ -23,7 +23,6 @@ process.env.MANTA_OPENCODE_DB =
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { readFile, rm, mkdir, writeFile } from "node:fs/promises";
-import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import {
   resolveProjectIdentity,
@@ -37,6 +36,22 @@ import { projectIdentityPersist, configGet } from "./local.mjs";
 import { lookupProjectIdByDirectory, _resetDbHandle } from "./opencodeDb.mjs";
 import { ctoPath } from "./ctoStores.mjs";
 import { statePath } from "../shared/paths.mjs";
+
+// `node:sqlite` is the Node 22.5+/24 built-in the box runtime has but CI's Node
+// 20 does not. The G10 observer fixtures build a REAL opencode.db with it, so a
+// top-level import would throw at module load and fail every test in this file
+// on CI — which is exactly what it did. Probe once and SKIP those tests where
+// the runtime cannot host them, mirroring how messageSearch.mjs degrades
+// ("a box that has not taken the Node 24 runtime yet has no node:sqlite").
+// The tests still run in full on the box, so the coverage is not lost.
+let DatabaseSync = null;
+try {
+  ({ DatabaseSync } = await import("node:sqlite"));
+} catch {
+  DatabaseSync = null;
+}
+const sqliteMissing = DatabaseSync == null;
+const skipNoSqlite = sqliteMissing ? { skip: "node:sqlite unavailable on this runtime (Node < 22.5)" } : {};
 import { resolveCwdOrThrow } from "./tmux.mjs";
 
 // ---------------------------------------------------------------------------
@@ -470,7 +485,7 @@ test("G9: projectIdentityPersist applies upserts+removes in one write and lands 
   assert.equal(raw.projects.find((p) => p.tmuxSession === "beta")?.projectId, "proj_alpha_1");
 });
 
-test("G9: an id-less record is not broken by the persist path and a legacy {name} shape is normalized on read", async () => {
+test("G9: an id-less record is not broken by the persist path and a legacy {name} shape is normalized on read", skipNoSqlite, async () => {
   // A desktop-era record written WITHOUT the durable key must survive a
   // persist round-trip untouched (additive metadata only).
   await projectIdentityPersist({ upserts: [{ tmuxSession: "legacy", defaultCwd: fix("wt1") }], removes: [] });
@@ -499,7 +514,7 @@ async function writeOpencodeFixture(path, { projectDirectoryRows, sessionRows })
   db.close();
 }
 
-test("G10: the observer returns the single mapping; 'global' is never a repository id", async () => {
+test("G10: the observer returns the single mapping; 'global' is never a repository id", skipNoSqlite, async () => {
   const dbPath = ctoPath("identity-fixtures", "observer-single.db");
   await writeOpencodeFixture(dbPath, {
     projectDirectoryRows: [["afe412f7", fix("alpha"), 100]],
@@ -515,7 +530,7 @@ test("G10: the observer returns the single mapping; 'global' is never a reposito
   }
 });
 
-test("G10: a fork (two projects over one directory) disambiguates by the FRESHEST session — not row order", async () => {
+test("G10: a fork (two projects over one directory) disambiguates by the FRESHEST session — not row order", skipNoSqlite, async () => {
   const dbPath = ctoPath("identity-fixtures", "observer-fork.db");
   // Row ORDER is the trap: the LINGERING (dead) project is inserted FIRST and
   // the fresh one second — and the freshest session still points at the new
@@ -543,7 +558,7 @@ test("G10: a fork (two projects over one directory) disambiguates by the FRESHES
   }
 });
 
-test("G10: an unresolvable fork (no session evidence) is null; a missing DB is null", async () => {
+test("G10: an unresolvable fork (no session evidence) is null; a missing DB is null", skipNoSqlite, async () => {
   const dbPath = ctoPath("identity-fixtures", "observer-ambiguous.db");
   await writeOpencodeFixture(dbPath, {
     projectDirectoryRows: [
