@@ -29,17 +29,17 @@
 //     "completed" from any path (the §11 PR adds the verified-completion
 //     operation that legitimately owns that transition).
 //
-// PROJECT IDENTITY (§1.1, §5.1 ProjectRef) — carried EXPLICITLY with the work.
-// work_create resolves the caller-supplied project name through
-// ctoMantaTools.resolveProjectIdentity (THE one identity surface — the
-// Manta-minted durable projectId from PR #1516 is a SEPARATE follow-up
-// adoption; nothing here pre-empts it) and persists a ProjectRef. Every later
-// operation REVALIDATES the stored workspaceId against live tmux state and
-// fails CLOSED (target_not_found / target_changed / target_ambiguous) — never
-// inferring a target from the conversation cwd or the first project. KNOWN
-// LIMITATION (documented, deliberate): identity resolves against live tmux
-// state; a rename surfaces as target_changed (current name in the error) or
-// target_not_found after a full rename.
+// PROJECT IDENTITY (§1.1, §4.1, §5.1 ProjectRef) — carried EXPLICITLY with the
+// work. work_create resolves the caller-supplied project through the ONE
+// identity surface (ctoMantaTools.resolveProjectIdentity via the identity
+// adapter) and persists a ProjectRef whose workspaceId is the Manta-minted
+// durable projectId — a rename rebinds the record, the key never changes.
+// repositoryId is opencode's project id ONLY for a remote-backed repo (never
+// the fork-prone root-commit id of a remote-less one); repositoryRoot is the
+// validated checkout path at USE TIME, never persisted as identity. Every
+// later operation REVALIDATES the stored key against live tmux state and
+// fails CLOSED (target_not_found / target_ambiguous) — never inferring a
+// target from the conversation cwd or the first project.
 //
 // OPERATION PROTOCOL (§8.1) for envelope mutations (dispatch/retry):
 //   1. validate (shape + admission preconditions)  — store-only
@@ -70,7 +70,8 @@ import { randomUUID } from "node:crypto";
 import {
   controlError,
   toControlError,
-  resolveProjectIdentity,
+  createProjectIdentityAdapter,
+  defaultObserveOpencodeProjectId,
   createOperationRunner,
   assertPlainObject,
   argsSnapshot,
@@ -216,6 +217,57 @@ function assertNonEmptyString(value, label) {
   if (typeof value !== "string" || value.trim().length === 0) {
     throw controlError("unsupported", `${label} must be a non-empty string`);
   }
+}
+
+// Lazy §4.1 identity defaults (invoked only at execute time, like the other
+// lazy production defaults).
+function lazyLocalConfigGet() {
+  return async () => (await import("./local.mjs")).configGet();
+}
+function lazyLocalPersist() {
+  return async (plan) => (await import("./local.mjs")).projectIdentityPersist(plan);
+}
+
+// defaultGitRemoteUrl — the checkout's origin URL (then the first remote
+// listed), mirroring opencode's remote preference for repository-identity
+// purposes. Null when the checkout has no usable remote (never throws).
+function defaultGitRemoteUrl(cwd) {
+  return new Promise((resolve) => {
+    execFile("git", ["-C", cwd, "remote", "get-url", "origin"], { timeout: 10_000 }, (error, stdout) => {
+      if (!error && typeof stdout === "string" && stdout.trim()) {
+        resolve(stdout.trim());
+        return;
+      }
+      execFile("git", ["-C", cwd, "remote"], { timeout: 10_000 }, (listError, listOut) => {
+        const names = typeof listOut === "string" ? listOut.split("\n").map((s) => s.trim()).filter(Boolean) : [];
+        if (listError || names.length === 0) {
+          resolve(null);
+          return;
+        }
+        execFile("git", ["-C", cwd, "remote", "get-url", names[0]], { timeout: 10_000 }, (urlError, urlOut) => {
+          resolve(!urlError && typeof urlOut === "string" && urlOut.trim() ? urlOut.trim() : null);
+        });
+      });
+    });
+  });
+}
+
+/**
+ * ProjectRef.repositoryId derivation (§4.1, §5.1): opencode's `project.id` is
+ * the repository identity for REMOTE-BACKED repos only — deterministic and
+ * machine-stable. A remote-less repo's id is the fork-prone root-commit hash
+ * (it forks on delete+recreate [PROVEN]) and is NEVER persisted: the ref says
+ * `unmapped` instead. A remote-backed checkout whose id is unobservable also
+ * degrades to `unmapped` rather than persisting a guess. A caller-supplied
+ * repositoryId always wins (explicit data beats derivation).
+ */
+export function deriveRepositoryId({ repositoryId, remoteUrl, observedOpencodeProjectId }) {
+  if (typeof repositoryId === "string" && repositoryId.trim().length > 0) return repositoryId.trim();
+  const remote = typeof remoteUrl === "string" ? remoteUrl.trim() : "";
+  const remoteBacked = remote.length > 0 && !remote.startsWith("file://");
+  if (!remoteBacked) return "unmapped";
+  const observed = typeof observedOpencodeProjectId === "string" ? observedOpencodeProjectId.trim() : "";
+  return observed.length > 0 ? observed : "unmapped";
 }
 
 function clipNote(text) {
@@ -390,10 +442,22 @@ export function createCtoWorkControl({
   // ---- READ deps (the ONLY deps the read operations may touch) -------------
   listProjects,
   listDelegateJobs = loadJobs,
+  configGet = lazyLocalConfigGet(),
+  // §4.1 identity READ dep — the opencode project id opencode currently
+  // resolves for a directory (null when unobservable). Feeds the rebind gate
+  // and ProjectRef.repositoryId derivation.
+  observeOpencodeProjectId = defaultObserveOpencodeProjectId,
   // ---- WRITE deps (mutations only; reads never reference these) ------------
   delegateOps = null, // { startJob, stopJob, pauseJob, resumeJob, deleteJob } — the bound engine
   resolveCwd = resolveCwdOrThrow,
   getConversationId = readConversationSessionId,
+  // §4.1 identity WRITE dep — applies `{upserts, removes}` to the
+  // `~/.manta/config.json` projects[] records in one read-modify-write.
+  persistProjectIdentity = lazyLocalPersist(),
+  // The git origin URL for ProjectRef.repositoryId classification (null when
+  // the checkout has no usable remote — a remote-less repo's opencode id is
+  // fork-prone and is never persisted as identity).
+  gitRemoteUrl = defaultGitRemoteUrl,
   // ---- §11 stage deps (review/merge/release/verify) -------------------------
   // forge: an existing forge adapter seam (src/server/forge/*) exposing
   //   getPullRequest(repo, number), getChecks(repo, sha), merge(repo, number,
@@ -415,6 +479,16 @@ export function createCtoWorkControl({
     now,
     newId,
     owner: CREATE_RECEIPT_OWNER,
+  });
+
+  // THE identity adapter (§4.1) — one composition; work_create and the
+  // revalidation paths all resolve through it. Writes persist the reconcile
+  // plan; reads (work_get's liveness) resolve identically and write nothing.
+  const resolveProject = createProjectIdentityAdapter({
+    configGet,
+    observeOpencodeProjectId,
+    persistProjectIdentity,
+    newId,
   });
 
   function requireDelegateOps(action) {
@@ -623,8 +697,11 @@ export function createCtoWorkControl({
     }
   }
 
-  // §1.1/§6 target revalidation — the stored workspaceId must still resolve
-  // against LIVE tmux state, exactly as it did at create time. Fail closed.
+  // §1.1/§6 target revalidation — the stored workspaceId (the §4.1 durable
+  // projectId; legacy envelopes carry the tmux name) must still resolve
+  // against LIVE tmux state, exactly as it did at create time. The identity
+  // adapter applies the settled rename-rebind rule (fail closed); a rebind
+  // persists so the stored key keeps resolving across renames.
   async function revalidateTarget(env) {
     let projects;
     try {
@@ -632,8 +709,24 @@ export function createCtoWorkControl({
     } catch (error) {
       throw toControlError(error);
     }
-    const { project } = resolveProjectIdentity(projects, env.project.workspaceId);
-    return project;
+    const outcome = await resolveProject(projects, env.project.workspaceId);
+    return outcome.project;
+  }
+
+  // §5.1 repositoryRoot is the validated checkout path AT USE TIME — the live
+  // session's cwd, never the create-time snapshot used as identity.
+  async function resolveTargetCheckout(env, target) {
+    const liveRoot = target?.defaultCwd || env.project.repositoryRoot;
+    try {
+      return resolveCwd(liveRoot);
+    } catch {
+      throw controlError(
+        "target_not_found",
+        `work "${env.id}" target checkout ${liveRoot} no longer exists — ` +
+          `re-point the work or restore the checkout`,
+        { retrySafe: false },
+      );
+    }
   }
 
   // §9 dependency readiness — bounded, honest about its source: a dependency
@@ -1368,7 +1461,24 @@ export function createCtoWorkControl({
     }
     if (project !== undefined) {
       assertNonEmptyString(project, "project");
-      rows = rows.filter((r) => r.project.workspaceId === project);
+      // Envelopes key on the §4.1 durable projectId; a legacy envelope still
+      // carries the tmux name it was created with. Accept BOTH spellings of
+      // the same project: resolve the filter through the identity surface so
+      // a caller naming the project (or quoting its key) matches either.
+      const projects = await listProjects().catch(() => null);
+      const aliases = new Set([project]);
+      if (projects) {
+        try {
+          const outcome = await resolveProject(projects, project, { persist: false });
+          if (outcome.projectId) aliases.add(outcome.projectId);
+          if (outcome.project?.tmuxSession) aliases.add(outcome.project.tmuxSession);
+          const record = outcome.record;
+          if (record?.tmuxSession) aliases.add(record.tmuxSession);
+        } catch {
+          // Unknown target: the filter then matches nothing — never a guess.
+        }
+      }
+      rows = rows.filter((r) => aliases.has(r.project.workspaceId));
     }
     const bounded = Math.max(1, Math.min(LIST_MAX_LIMIT, Math.floor(Number(limit) || LIST_DEFAULT_LIMIT)));
     return {
@@ -1414,10 +1524,13 @@ export function createCtoWorkControl({
       .map((r) => ({ id: r.id, key: r.key, op: r.op, status: r.status, leaseExpiresAt: r.lease?.expiresAt ?? null }));
     // Target liveness — a READ of live tmux; identity resolution stays a
     // write-path concern (fail closed at mutation time, not inspection time).
+    // The stored workspaceId is the §4.1 durable key, so liveness resolves
+    // through the identity surface (read-only: no reconcile, no persist).
     let targetLive = null;
     try {
       const projects = await listProjects();
-      const exact = projects.filter((p) => p?.tmuxSession === env.project.workspaceId);
+      const outcome = await resolveProject(projects, env.project.workspaceId, { persist: false });
+      const exact = projects.filter((p) => p?.tmuxSession === outcome.project?.tmuxSession);
       targetLive = exact.length === 1 ? true : exact.length === 0 ? false : "ambiguous";
     } catch {
       targetLive = null; // source unavailable — visible as null, never a guess
@@ -1539,14 +1652,17 @@ export function createCtoWorkControl({
           for (const d of input.decisions ?? []) validateDecisionRecord(d, "decisions[]");
 
           // §1.1: the target is EXPLICIT and resolved against live tmux — never
-          // inferred from the conversation cwd or the first project.
+          // inferred from the conversation cwd or the first project. The §4.1
+          // adapter reconciles the durable key (mint on first sight, migrate
+          // id-less records in place, rebind renames) and persists it.
           let projects;
           try {
             projects = await listProjects();
           } catch (error) {
             throw toControlError(error);
           }
-          const { project: resolved } = resolveProjectIdentity(projects, input.project);
+          const outcome = await resolveProject(projects, input.project);
+          const resolved = outcome.project;
 
           const conversationId = await getConversationId();
           if (typeof conversationId !== "string" || !conversationId) {
@@ -1558,13 +1674,32 @@ export function createCtoWorkControl({
             );
           }
 
+          // §5.1 ProjectRef — workspaceId is the Manta-minted durable key; a
+          // rename rebinds the record, the key never changes. repositoryId is
+          // opencode's project id ONLY for a remote-backed repo (never the
+          // fork-prone root-commit id of a remote-less one); repositoryRoot is
+          // the validated checkout path, never persisted as identity.
+          let remoteUrl = null;
+          let observedRepositoryId = null;
+          if (typeof resolved.defaultCwd === "string" && resolved.defaultCwd.length > 0) {
+            try {
+              remoteUrl = await gitRemoteUrl(resolved.defaultCwd);
+            } catch {
+              remoteUrl = null;
+            }
+            try {
+              observedRepositoryId = await observeOpencodeProjectId(resolved.defaultCwd);
+            } catch {
+              observedRepositoryId = null;
+            }
+          }
           const projectRef = {
-            // workspaceId is the PROVEN Manta-side identity (the tmux session
-            // name). The Manta-minted durable projectId (PR #1516) is a separate
-            // adoption — this record keeps ONE identity surface so it can land
-            // without touching call sites.
-            workspaceId: resolved.tmuxSession,
-            repositoryId: input.repositoryId ?? "unmapped",
+            workspaceId: outcome.projectId,
+            repositoryId: deriveRepositoryId({
+              repositoryId: input.repositoryId,
+              remoteUrl,
+              observedOpencodeProjectId: observedRepositoryId,
+            }),
             repositoryRoot: resolved.defaultCwd,
           };
           validateProjectRefRef(projectRef);
@@ -1763,19 +1898,11 @@ export function createCtoWorkControl({
       // in_flight BEFORE the first external effect (§8.1 crash-window marker).
       await work.recordOperationOutcome(input.work, { receiptId: receipt.id, status: "in_flight" });
 
-      // Target revalidation (§6) + cwd existence chokepoint.
+      // Target revalidation (§6) + cwd existence chokepoint — the checkout
+      // path is validated AT USE TIME from the live session (§5.1), so a
+      // moved checkout is followed, never guessed from the stale snapshot.
       const target = await revalidateTarget(envBefore);
-      let repositoryRoot;
-      try {
-        repositoryRoot = resolveCwd(envBefore.project.repositoryRoot);
-      } catch {
-        throw controlError(
-          "target_not_found",
-          `work "${input.work}" target checkout ${envBefore.project.repositoryRoot} no longer exists — ` +
-            `re-point the work or restore the checkout`,
-          { retrySafe: false },
-        );
-      }
+      const repositoryRoot = await resolveTargetCheckout(envBefore, target);
 
       // §8.1 step 4 + §6: state → running with the attempt LINKED, atomically
       // under the envelope lock, BEFORE the prompt is dispatched. Receipt
@@ -1809,8 +1936,11 @@ export function createCtoWorkControl({
         // resolved at admission and passed in.
         parentSessionID: completionParentSessionId,
         // The validated execution target (§8.1) — explicit, never parent lookup.
+        // targetProject is the LIVE tmux session name (the delegate engine's
+        // window-placement handle, revalidated just above); the durable §4.1
+        // key stays in the envelope's ProjectRef.
         parentDirectory: repositoryRoot,
-        targetProject: envBefore.project.workspaceId,
+        targetProject: target.tmuxSession,
         isolationRequired: true,
         correlation: { kind: "work", workId: input.work, receiptId: receipt.id, op },
         actor: "cto",
@@ -2603,12 +2733,7 @@ export function createCtoWorkControl({
       await work.recordOperationOutcome(input.work, { receiptId: receipt.id, status: "in_flight" });
       const envBefore = await getWorkOrThrow(input.work);
       const target = await revalidateTarget(envBefore);
-      let repositoryRoot;
-      try {
-        repositoryRoot = resolveCwd(envBefore.project.repositoryRoot);
-      } catch {
-        throw controlError("target_not_found", `work "${input.work}" target checkout ${envBefore.project.repositoryRoot} no longer exists`, { retrySafe: false });
-      }
+      const repositoryRoot = await resolveTargetCheckout(envBefore, target);
       attemptId = `att_${newId()}`;
       // Admission + approval invalidation + attempt LINKED, atomically. A
       // prior approval pinned to a DIFFERENT head is invalidated HERE (the
@@ -2644,7 +2769,9 @@ export function createCtoWorkControl({
         prompt: buildReviewPrompt(envBefore, { headSha: input.headSha }),
         parentSessionID: completionParentSessionId,
         parentDirectory: repositoryRoot,
-        targetProject: envBefore.project.workspaceId,
+        // The LIVE tmux session name (window-placement handle, revalidated
+        // above); the durable §4.1 key stays in the envelope's ProjectRef.
+        targetProject: target.tmuxSession,
         isolationRequired: true, // review is independent of implementation context (§11)
         correlation: { kind: "work", workId: input.work, receiptId: receipt.id, op: "work.review" },
         actor: "cto",

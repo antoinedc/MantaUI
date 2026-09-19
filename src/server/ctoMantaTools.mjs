@@ -2,25 +2,26 @@
 // families (P4 slice). The `work` family (dispatch/review/merge lifecycle) is
 // deliberately NOT here — separate PR.
 //
-// PROJECT IDENTITY — NARROW, ON PURPOSE (docs/cto-implementation-map.md §4).
-// The opencode `project.id` / `workspace.id` semantics are UNRESOLVED and a
-// parallel investigation is verifying them; until it reports, this module
-// builds against the PROVEN Manta-side identity only: a project IS a tmux
-// session (name + resolved cwd, per tmux.mjs `listProjects`). Consequences,
-// all deliberate:
-//   • NO opencode project/workspace id is ever written into a durable record
-//     here (control records key on the tmux session name and the opencode
-//     SESSION id — session ids are opencode's own stable primary keys, not
-//     the unresolved project/workspace classes).
+// PROJECT IDENTITY — THE DURABLE KEY (docs/cto-implementation-map.md §4/§4.1,
+// adopted per PR #1516's probe). A project IS a tmux session (name + resolved
+// cwd, per tmux.mjs `listProjects`); its DURABLE key is a Manta-minted
+// `projectId`, persisted ONCE on the `~/.manta/config.json` `projects[]`
+// record — `{tmuxSession, defaultCwd, projectId, opencodeProjectId?}`. No
+// opencode identifier may BE the key (opencode's `project.id` is
+// repository-grained while a Manta project is checkout-grained; remote-less
+// repos fork their id on delete+recreate). `opencodeProjectId` is a CACHE,
+// never authoritative: on a mismatch with a live observation, ADOPT the new
+// value — opencode has already migrated its sessions; Manta follows.
+// Consequences, all deliberate:
 //   • NO second project registry: live tmux state stays the source of truth;
-//     the control store only holds additive metadata (archive flags, model
-//     override, revisions, receipts).
-//   • The identity surface is ONE function — `resolveProjectIdentity` — so
-//     the later opencode mapping lands there without touching any call site.
-//   • KNOWN WEAKNESS: tmux session names are user-renameable. A rename
-//     surfaces as `target_changed` when exactly one case-insensitive match
-//     remains, and as `target_not_found` after a full rename. Fail closed,
-//     never inferred from a cwd or "the first project" (spec §1.1).
+//     the config record only adds the minted key + the two cache fields.
+//   • The identity surface is ONE function — `resolveProjectIdentity` — the
+//     rules live there; `createProjectIdentityAdapter` is its single I/O
+//     wrapper (config records in, persist plan out).
+//   • tmux session names are user-renameable. A rename REBINDS the existing
+//     record (keeps its minted key) under the settled §4.1 rule; what the
+//     rule cannot recover fails closed — see the §4.1 doc, "what it cannot
+//     recover".
 //
 // RECEIPT LIFECYCLE — mirrors ctoWork.mjs (same canonicalArgsHash, same
 // transition family, adapted to box-management effects whose latency is
@@ -367,17 +368,269 @@ export function createOperationRunner({
   return { runOperation };
 }
 
-export function resolveProjectIdentity(projects, name) {
+// ---------------------------------------------------------------------------
+// §4.1 project identity — the durable key, its reconcile plan, and the ONE
+// identity surface. All pure (I/O injected); `createProjectIdentityAdapter`
+// below is the single production I/O wrapper.
+// ---------------------------------------------------------------------------
+
+// A persisted identity record's checkout anchor is usable for rebind matching
+// only when it names a SPECIFIC path — never "~" (a window-less session's
+// listProjects fallback) or empty.
+const UNBINDABLE_DIRS = new Set(["", "~"]);
+
+function rebindAnchor(record) {
+  const dir = record?.defaultCwd;
+  return typeof dir === "string" && !UNBINDABLE_DIRS.has(dir) ? dir : null;
+}
+
+// Orphaned = its name matches no live session (a rename moved the session
+// away from the name this record was keyed by).
+function recordIsOrphaned(record, projects) {
+  const name = record?.tmuxSession;
+  return typeof name === "string" && name.length > 0 && !projects.some((p) => p?.tmuxSession === name);
+}
+
+// Repository-identity contradiction (§4.1 failure mode 4): the record's cached
+// opencode project id and a LIVE observation for the same directory both exist
+// and differ → the path now hosts a different repository (remote-less
+// recreation forks the id [PROVEN]; a remote attach migrates it [PROVEN]).
+// A rename plus an identity change observed together is unresolvable from
+// Manta's signals — the rebind is REFUSED, not guessed.
+function rebindContradicted(record, observedId) {
+  return (
+    typeof record?.opencodeProjectId === "string" &&
+    record.opencodeProjectId.length > 0 &&
+    typeof observedId === "string" &&
+    observedId.length > 0 &&
+    observedId !== record.opencodeProjectId
+  );
+}
+
+// Directories the rebind gate could need an opencode project-id observation
+// for: every orphaned record's anchor, plus every live session that matches no
+// record (a first-sight mint may rebind from an orphan anchored there, or may
+// stamp a fresh cache). Bounded; empty in steady state.
+export function directoriesNeedingObservation(projects, records) {
+  const list = Array.isArray(projects) ? projects : [];
+  const recs = Array.isArray(records) ? records : [];
+  const dirs = new Set();
+  for (const r of recs) {
+    const anchor = rebindAnchor(r);
+    if (anchor && recordIsOrphaned(r, list)) dirs.add(anchor);
+  }
+  const named = new Set(recs.map((r) => r?.tmuxSession).filter((n) => typeof n === "string" && n.length > 0));
+  for (const p of list) {
+    const dir = typeof p?.defaultCwd === "string" ? p.defaultCwd : null;
+    if (dir && !UNBINDABLE_DIRS.has(dir) && !named.has(p.tmuxSession)) dirs.add(dir);
+  }
+  return [...dirs];
+}
+
+// First-sight reconcile for a live project that matches NO record: rebind the
+// unique orphaned record anchored at the same checkout (rename recognition,
+// §4.1), else mint a new project. Appends to the persist plan.
+function planAdoptOrMint(project, records, projects, identity, plan) {
+  const dir = typeof project?.defaultCwd === "string" ? project.defaultCwd : null;
+  const observed = dir != null ? identity.observed?.get(dir) ?? null : null;
+  const orphans =
+    dir == null
+      ? []
+      : records.filter((r) => rebindAnchor(r) === dir && recordIsOrphaned(r, projects));
+  if (orphans.length === 1 && !rebindContradicted(orphans[0], observed)) {
+    const orphan = orphans[0];
+    const rebound = {
+      ...orphan,
+      tmuxSession: project.tmuxSession,
+      defaultCwd: dir,
+      ...(observed ? { opencodeProjectId: observed } : {}),
+    };
+    plan.upserts.push(rebound);
+    plan.removes.push(orphan.tmuxSession);
+    return { projectId: orphan.projectId, record: rebound };
+  }
+  const record = {
+    tmuxSession: project.tmuxSession,
+    defaultCwd: dir ?? "",
+    projectId: identity.newId(),
+    ...(observed ? { opencodeProjectId: observed } : {}),
+  };
+  plan.upserts.push(record);
+  return { projectId: record.projectId, record };
+}
+
+// Refresh reconcile for a live project that DOES match a record by name:
+// refresh the cwd cache, mint the id IN PLACE when the record predates the
+// durable key (migration — never a new project), and ADOPT a mismatched
+// opencode id cache (§4.1: "on mismatch, adopt the new value — Manta follows
+// rather than fights").
+function planRefresh(record, project, identity, plan) {
+  const dir = typeof project?.defaultCwd === "string" ? project.defaultCwd : null;
+  const changes = {};
+  let changed = false;
+  if (dir != null && dir !== record.defaultCwd) {
+    changes.defaultCwd = dir;
+    changed = true;
+  }
+  let projectId = record.projectId;
+  if (typeof projectId !== "string" || projectId.length === 0) {
+    projectId = identity.newId();
+    changes.projectId = projectId;
+    changed = true;
+  }
+  const observed = dir != null ? identity.observed?.get(dir) ?? null : null;
+  if (observed && observed !== record.opencodeProjectId) {
+    changes.opencodeProjectId = observed;
+    changed = true;
+  }
+  if (!changed) return { projectId, record };
+  const refreshed = { ...record, ...changes };
+  plan.upserts.push(refreshed);
+  return { projectId, record: refreshed };
+}
+
+/**
+ * THE identity surface (§4.1). Resolves a target that is either a live tmux
+ * session name or a Manta-minted durable `projectId`, and — when an identity
+ * context is supplied — reconciles the config records against live state:
+ * minting on first sight, migrating id-less records in place, rebinding
+ * renamed records, and adopting moved caches. Pure: all I/O arrives via the
+ * injected context.
+ *
+ *   identity = { records, observed?: Map<dir, opencodeProjectId|null>, newId }
+ *
+ * Returns `{ project }` unchanged for a bare call; with a context it returns
+ * `{ project, projectId, record, changed, persistPlan }` where persistPlan is
+ * `{ upserts: [record…], removes: [tmuxSession…] }`.
+ *
+ * Resolution order: exact live name → durable key / stale record name → the
+ * historical case-insensitive guards → target_not_found. The rebind matcher
+ * keys on the CHECKOUT DIRECTORY (the only signal a rename leaves behind) and
+ * refuses on repository-identity contradiction — fail closed, never guessed.
+ */
+export function resolveProjectIdentity(projects, name, identity = null) {
   if (typeof name !== "string" || name.trim().length === 0) {
     throw controlError("unsupported", "project must be a non-empty string");
   }
   const target = name.trim();
   const list = Array.isArray(projects) ? projects : [];
   const exact = list.filter((p) => p?.tmuxSession === target);
-  if (exact.length === 1) return { project: exact[0] };
+  if (exact.length === 1) {
+    const project = exact[0];
+    if (!identity) return { project };
+    const plan = { upserts: [], removes: [] };
+    const records = Array.isArray(identity.records) ? identity.records : [];
+    const existing = records.find((r) => r?.tmuxSession === project.tmuxSession) ?? null;
+    const reconciled = existing
+      ? planRefresh(existing, project, identity, plan)
+      : planAdoptOrMint(project, records, list, identity, plan);
+    return {
+      project,
+      projectId: reconciled.projectId,
+      record: reconciled.record,
+      changed: plan.upserts.length > 0 || plan.removes.length > 0,
+      persistPlan: plan,
+    };
+  }
   if (exact.length > 1) {
     throw controlError("target_ambiguous", `project "${target}" matches ${exact.length} live sessions`);
   }
+
+  if (identity) {
+    const plan = { upserts: [], removes: [] };
+    const records = Array.isArray(identity.records) ? identity.records : [];
+    // The durable key is authoritative: a projectId match wins over a stale
+    // record-name match (legacy envelopes that still carry a tmux name).
+    const byId = records.filter((r) => typeof r?.projectId === "string" && r.projectId === target);
+    const candidates = byId.length > 0 ? byId : records.filter((r) => r?.tmuxSession === target);
+    if (candidates.length === 1) {
+      const record = candidates[0];
+      // The record may still be live-claimed under its own name — the durable
+      // key resolves straight to it (the common case; nothing to rebind).
+      // planRefresh keeps this path's reconcile identical to a name match.
+      const own = list.filter((p) => p?.tmuxSession === record.tmuxSession);
+      if (own.length === 1) {
+        const reconciled = planRefresh(record, own[0], identity, plan);
+        return {
+          project: own[0],
+          projectId: reconciled.projectId,
+          record: reconciled.record,
+          changed: plan.upserts.length > 0 || plan.removes.length > 0,
+          persistPlan: plan,
+        };
+      }
+      // Orphaned: the rebind matcher. Unclaimed live sessions at the record's
+      // checkout — a session that already carries its OWN record belongs to
+      // that identity, never to this one.
+      const anchor = rebindAnchor(record);
+      // A CONTESTED anchor — more than one orphaned record anchored at the
+      // same checkout — cannot tell which of them the renamed session was.
+      // Whoever resolved first would silently win the checkout; that is a
+      // guess, so fail closed instead (§4.1: the rename rule never guesses).
+      const contested = records.filter((r) => r !== record && rebindAnchor(r) === anchor && recordIsOrphaned(r, list));
+      if (contested.length > 0) {
+        throw controlError(
+          "target_ambiguous",
+          `project "${target}" is keyed to checkout ${anchor}, where ${contested.length + 1} orphaned identity records ` +
+            `anchor the same path (${[record.tmuxSession, ...contested.map((r) => r.tmuxSession)].map((n) => `"${n}"`).join(", ")}) — ` +
+            `which of them renamed is not decidable; re-issue against the live session name`,
+          { retrySafe: false, details: { storedCheckout: anchor } },
+        );
+      }
+      const unclaimed = anchor
+        ? list.filter(
+            (p) =>
+              p?.defaultCwd === anchor &&
+              !records.some((r) => r?.tmuxSession === p.tmuxSession),
+          )
+        : [];
+      if (unclaimed.length === 1) {
+        const observed = identity.observed?.get(anchor) ?? null;
+        if (rebindContradicted(record, observed)) {
+          throw controlError(
+            "target_not_found",
+            `project "${target}" is keyed to checkout ${anchor}, but that path now hosts a different ` +
+              `repository (cached ${record.opencodeProjectId}, observed ${observed}) — a rename observed ` +
+              `together with a repository-identity change is not recoverable; re-issue against the live session`,
+            { retrySafe: false, details: { storedCheckout: anchor, cachedRepositoryId: record.opencodeProjectId, observedRepositoryId: observed } },
+          );
+        }
+        const rebound = {
+          ...record,
+          tmuxSession: unclaimed[0].tmuxSession,
+          defaultCwd: anchor,
+          ...(observed ? { opencodeProjectId: observed } : {}),
+        };
+        plan.upserts.push(rebound);
+        plan.removes.push(record.tmuxSession);
+        return {
+          project: unclaimed[0],
+          projectId: record.projectId,
+          record: rebound,
+          changed: true,
+          persistPlan: plan,
+        };
+      }
+      if (unclaimed.length === 0) {
+        throw controlError(
+          "target_not_found",
+          `project "${target}" is keyed to checkout ${anchor ?? record?.defaultCwd ?? "?"}, which matches no ` +
+            `live session (the checkout may have moved together with the rename, or the session is gone)`,
+          { retrySafe: false, details: { storedCheckout: anchor } },
+        );
+      }
+      throw controlError(
+        "target_ambiguous",
+        `project "${target}" is keyed to checkout ${anchor}, where ${unclaimed.length} live sessions now sit: ` +
+          unclaimed.map((p) => `"${p.tmuxSession}"`).join(", ") + " — refusing to guess which one holds the key",
+        { retrySafe: false, details: { storedCheckout: anchor } },
+      );
+    }
+    if (candidates.length > 1) {
+      throw controlError("target_ambiguous", `project key "${target}" matches ${candidates.length} identity records`);
+    }
+  }
+
   const ci = list.filter(
     (p) => typeof p?.tmuxSession === "string" && p.tmuxSession.toLowerCase() === target.toLowerCase(),
   );
@@ -403,6 +656,69 @@ export function resolveProjectIdentity(projects, name) {
       `from the current directory or the first project)`,
     { retrySafe: false },
   );
+}
+
+// Cache-adoption plan (§4.1): a live observation that differs from the
+// record's cached opencode id is ADOPTED — opencode has already migrated its
+// sessions; Manta follows rather than fights. Pure.
+export function planCacheAdoption(record, observedOpencodeProjectId) {
+  if (!record || typeof record.tmuxSession !== "string" || record.tmuxSession.length === 0) return null;
+  if (typeof observedOpencodeProjectId !== "string" || observedOpencodeProjectId.length === 0) return null;
+  if (observedOpencodeProjectId === record.opencodeProjectId) return null;
+  return { upserts: [{ ...record, opencodeProjectId: observedOpencodeProjectId }], removes: [] };
+}
+
+// The single I/O wrapper around the identity surface. Loads the config
+// records, observes what the rebind gate could need (bounded — usually zero
+// directories), resolves, and persists the plan. `persist: false` (reads)
+// resolves identically but writes nothing.
+export function createProjectIdentityAdapter({ configGet, observeOpencodeProjectId, persistProjectIdentity, newId }) {
+  return async function resolveProject(projects, target, { persist = true } = {}) {
+    const cfg = await configGet();
+    const records = Array.isArray(cfg?.projects) ? cfg.projects : [];
+    const observed = new Map();
+    for (const dir of directoriesNeedingObservation(projects, records)) {
+      let value = null;
+      try {
+        value = await observeOpencodeProjectId(dir);
+      } catch {
+        value = null;
+      }
+      observed.set(dir, value);
+    }
+    const outcome = resolveProjectIdentity(projects, target, { records, observed, newId });
+    if (persist && outcome.changed && outcome.persistPlan) {
+      await persistProjectIdentity(outcome.persistPlan);
+    }
+    // Cache adoption for the RESOLVED project: the rebind gate observes only
+    // orphan candidates, so a name-matched record's stale cache refreshes
+    // here — one bounded read, persisted only on mismatch.
+    if (persist && outcome.project && outcome.record) {
+      const dir = outcome.project.defaultCwd;
+      if (typeof dir === "string" && dir.length > 0) {
+        let live = null;
+        try {
+          live = await observeOpencodeProjectId(dir);
+        } catch {
+          live = null;
+        }
+        const adoption = planCacheAdoption(outcome.record, live);
+        if (adoption) await persistProjectIdentity(adoption);
+      }
+    }
+    return outcome;
+  };
+}
+
+// Production default observer: the read-only opencode DB lookup by directory.
+// Null on any failure — an unobservable id never blocks or guesses. Exported
+// so the work family composes the SAME default (one observer, one semantics).
+export async function defaultObserveOpencodeProjectId(directory) {
+  try {
+    return await (await import("./opencodeDb.mjs")).lookupProjectIdByDirectory(directory);
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -525,6 +841,14 @@ export function createCtoMantaControl({
   listModels = ocListModelsDefault,
   configGet = lazyLocal().configGet,
   gitStatus = defaultGitStatus,
+  // ---- §4.1 identity deps --------------------------------------------------
+  // observeOpencodeProjectId: a READ dep — the opencode project id opencode
+  //   currently resolves for a directory (null when unobservable; never a
+  //   guess). Feeds the rebind gate and the cache-adoption semantics.
+  // persistProjectIdentity: a WRITE dep — applies `{upserts, removes}` to the
+  //   `~/.manta/config.json` projects[] records in ONE read-modify-write.
+  observeOpencodeProjectId = defaultObserveOpencodeProjectId,
+  persistProjectIdentity = lazyLocal().projectIdentityPersist,
   // ---- WRITE deps (mutations only; reads never reference these) ------------
   resolveProjectCwd = defaultResolveProjectCwd,
   resolveCwd = resolveCwdOrThrow,
@@ -560,6 +884,16 @@ export function createCtoMantaControl({
   // reuses the exact same protocol for its own family-level receipts (e.g.
   // work_create, whose receipt must predate the envelope it creates).
   const { runOperation } = createOperationRunner({ store, now, newId, receiptsCap, leaseTtlMs });
+
+  // THE identity adapter — composed once; every resolution in this factory
+  // (and ctoWorkTools', via the exported factory) flows through it. Writes
+  // persist the reconcile plan; reads resolve identically and write nothing.
+  const resolveProject = createProjectIdentityAdapter({
+    configGet,
+    observeOpencodeProjectId,
+    persistProjectIdentity,
+    newId,
+  });
 
 
   // -------------------------------------------------------------------------
@@ -719,7 +1053,7 @@ export function createCtoMantaControl({
 
   async function projectsInspect({ project } = {}) {
     const projects = await liveProjects();
-    const { project: resolved } = resolveProjectIdentity(projects, project);
+    const { project: resolved } = await resolveProject(projects, project, { persist: false });
     const data = await withControl(store, (d) => ({ save: null, value: d }));
     let dirty = null;
     try {
@@ -749,13 +1083,26 @@ export function createCtoMantaControl({
         } catch (error) {
           throw mapCwdError(error);
         }
-        await writes.tmuxNewSession({
+        const created = await writes.tmuxNewSession({
           name: input.name,
           cwd: resolvedCwd,
           windowName: input.windowName,
           createDir: input.createDir === true,
           chatMode: false,
         });
+        // §4.1 — the mint-at-creation trigger: the created project's durable
+        // key persists NOW, on the refreshed live row, through the ONE
+        // identity surface (an orphan anchored at this checkout rebinds
+        // instead — recreate-over-old-key keeps the old key). The tmux write
+        // returns the refreshed live list (tmux.newSession's contract).
+        try {
+          const live = Array.isArray(created?.projects) ? created.projects : [];
+          await resolveProject(live.length > 0 ? live : await liveProjects(), input.name);
+        } catch {
+          // Best-effort mint: the tmux session EXISTS, and the next identity
+          // resolution re-mints on first sight. A persist failure here must
+          // never turn an accepted create into a failed receipt.
+        }
         const ts = now();
         const record = await withControl(store, (data) => {
           const { record } = ensureProjectRecord(data, input.name, ts);
@@ -787,7 +1134,7 @@ export function createCtoMantaControl({
         }
         if (hasRename) assertSafeName(input.rename, "rename");
         const projects = await liveProjects();
-        const { project: resolved } = resolveProjectIdentity(projects, input.project);
+        const { project: resolved } = await resolveProject(projects, input.project);
         if (hasRename && projects.some((p) => p.tmuxSession === input.rename)) {
           throw controlError("target_exists", `project "${input.rename}" already exists`, { retrySafe: false });
         }
@@ -846,7 +1193,7 @@ export function createCtoMantaControl({
       args: input ?? {},
       execute: async () => {
         const projects = await liveProjects();
-        const { project: resolved } = resolveProjectIdentity(projects, input.project);
+        const { project: resolved } = await resolveProject(projects, input.project);
         const ts = now();
         const outcome = await withControl(store, (data) => {
           const { record } = ensureProjectRecord(data, resolved.tmuxSession, ts);
@@ -881,7 +1228,7 @@ export function createCtoMantaControl({
       args: input ?? {},
       execute: async () => {
         const projects = await liveProjects();
-        const { project: resolved } = resolveProjectIdentity(projects, input.project);
+        const { project: resolved } = await resolveProject(projects, input.project);
         const windows = resolved.windows ?? [];
         const jobWindows = windows.filter((w) => w?.owner === "job");
         if (jobWindows.length > 0) {
@@ -988,7 +1335,7 @@ export function createCtoMantaControl({
       };
     });
     if (project !== undefined) {
-      const { project: resolved } = resolveProjectIdentity(projects, project);
+      const { project: resolved } = await resolveProject(projects, project, { persist: false });
       rows = rows.filter((r) => r.project === resolved.tmuxSession);
     }
     if (!includeArchived) rows = rows.filter((r) => !r.archived);
@@ -1080,7 +1427,7 @@ export function createCtoMantaControl({
         let resolvedCwd;
         if (hasProject) {
           const projects = await liveProjects();
-          const { project: resolved } = resolveProjectIdentity(projects, input.project);
+          const { project: resolved } = await resolveProject(projects, input.project);
           projectName = resolved.tmuxSession;
           resolvedCwd = await resolveProjectCwd(projectName, input.cwd, { configGet, listProjects });
         } else {
@@ -1215,7 +1562,7 @@ export function createCtoMantaControl({
         if (input.name !== undefined) assertSafeName(input.name, "name");
         let projectName = null;
         if (input.project !== undefined) {
-          const { project: resolvedProject } = resolveProjectIdentity(resolved.projects, input.project);
+          const { project: resolvedProject } = await resolveProject(resolved.projects, input.project);
           projectName = resolvedProject.tmuxSession;
         } else if (resolved.live) {
           projectName = resolved.live.project.tmuxSession;

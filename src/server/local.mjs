@@ -200,6 +200,27 @@ export async function projectMetaDelete(tmuxSession) {
   return next;
 }
 
+// projectIdentityPersist({ upserts, removes }) — the §4.1 durable-key write
+// path (docs/cto-implementation-map.md §4.1): upserts REPLACE records by
+// tmuxSession, removes drop by name, applied in ONE read-modify-write so a
+// rebind (move a record's name, keep its minted projectId) can never strand
+// two records carrying the same id. Same discipline as projectMetaUpsert:
+// additive metadata only; no wholesale config replace.
+export async function projectIdentityPersist({ upserts = [], removes = [] } = {}) {
+  const cfg = await getConfig();
+  let projects = (cfg.projects ?? []).filter((p) => !removes.includes(p?.tmuxSession));
+  for (const upsert of upserts) {
+    if (!upsert || typeof upsert.tmuxSession !== "string" || upsert.tmuxSession.length === 0) {
+      throw new Error("projectIdentityPersist: upsert requires a non-empty tmuxSession");
+    }
+    projects = projects.filter((p) => p?.tmuxSession !== upsert.tmuxSession);
+    projects.push(upsert);
+  }
+  const next = { ...cfg, projects };
+  await saveConfig(next);
+  return next;
+}
+
 // ============================================================
 // Git: list worktrees (real implementation)
 // ============================================================

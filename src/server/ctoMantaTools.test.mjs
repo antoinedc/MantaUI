@@ -140,6 +140,10 @@ function fixtureModels() {
 // `overrides` replaces individual impls (used for failure injection).
 function makeSpies({ throwing = false, overrides = {} } = {}) {
   const calls = [];
+  // Mutable §4.1 config-store double, shared with the projectIdentityPersist
+  // spy: a stateful server-realistic identity record store (records live on
+  // ~/.manta/config.json projects[] in production).
+  const configState = { projects: [] };
   const spy = (name, impl) => async (input) => {
     calls.push({ name, input });
     const effective = overrides[name] ?? impl;
@@ -171,8 +175,20 @@ function makeSpies({ throwing = false, overrides = {} } = {}) {
     ocForkSession: spy("ocForkSession", ({ sessionId }) => ({ id: `ses_fork_${sessionId}`, directory: fix("better-ui") })),
     ocCompactSession: spy("ocCompactSession", () => true),
     ocDeleteSessionRaw: spy("ocDeleteSessionRaw", () => undefined),
+    // §4.1 identity persist — a WRITE dep (reads must never call it: the G7
+    // throwing mode covers it). In recording mode it mutates the shared
+    // configState so identity records behave like the real config store.
+    projectIdentityPersist: spy("projectIdentityPersist", ({ upserts = [], removes = [] }) => {
+      let projects = (configState.projects ?? []).filter((p) => !removes.includes(p?.tmuxSession));
+      for (const u of upserts) {
+        projects = projects.filter((p) => p?.tmuxSession !== u.tmuxSession);
+        projects.push({ ...u });
+      }
+      configState.projects = projects;
+      return { projects };
+    }),
   };
-  return { calls, list };
+  return { calls, list, configState };
 }
 
 // A per-test control store under the sandbox (same shape ctoStores' JSON
@@ -199,23 +215,27 @@ function controlStoreFixture() {
 }
 
 // The standard composition: real read data from fixtures, all writes spied.
-function makeControl({ projects = fixtureProjects(), sessions = fixtureSessions(), models = fixtureModels(), jobs = [], gitStatus = "", store, spies, listModels, getWindowOption } = {}) {
+function makeControl({ projects = fixtureProjects(), sessions = fixtureSessions(), models = fixtureModels(), jobs = [], gitStatus = "", store, spies, listModels, getWindowOption, configRecords } = {}) {
   const s = spies ?? makeSpies();
+  if (configRecords) s.configState.projects = configRecords.map((r) => ({ ...r }));
   const control = createCtoMantaControl({
     store: store ?? controlStoreFixture(),
     now: (() => { let t = 1_700_000_000_000; return () => (t += 1000); })(),
     listProjects: async () => projects,
     listSessions: async () => sessions,
     listModels: listModels ?? (async () => models),
-    configGet: async () => ({}),
+    configGet: async () => ({ projects: s.configState.projects.map((r) => ({ ...r })) }),
     gitStatus: async () => gitStatus,
+    // §4.1 identity observer — deterministic stub; tests never touch a real
+    // opencode DB (the factory default would try MANTA_OPENCODE_DB and warn).
+    observeOpencodeProjectId: async () => null,
     listDelegateJobs: async () => jobs,
     resolveProjectCwd: sharedResolveProjectCwd,
     resolveCwd: resolveCwdOrThrow,
     getWindowOption: getWindowOption ?? (async () => null),
     ...s.list,
   });
-  return { control, calls: s.calls };
+  return { control, calls: s.calls, configState: s.configState };
 }
 
 async function seedReceipt(store, { key, op, input, status, leaseExpiresAt, result, error }) {
@@ -622,6 +642,7 @@ test("sessions_create attaches through the target project's resolved cwd (never 
     listSessions: async () => [],
     listModels: async () => fixtureModels(),
     configGet: async () => ({ projects: [{ tmuxSession: "manta", defaultCwd: fix("better-ui") }] }),
+    observeOpencodeProjectId: async () => null,
     gitStatus: async () => "",
     listDelegateJobs: async () => [],
     resolveProjectCwd: sharedResolveProjectCwd,
@@ -736,6 +757,7 @@ test("receipt ledger at cap refuses a NEW key with capacity_wait while existing 
     listSessions: async () => [],
     listModels: async () => fixtureModels(),
     configGet: async () => ({}),
+    observeOpencodeProjectId: async () => null,
     gitStatus: async () => "",
     listDelegateJobs: async () => [],
     resolveProjectCwd: sharedResolveProjectCwd,

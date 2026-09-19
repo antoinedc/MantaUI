@@ -309,6 +309,15 @@ function makeDelegateSpy({ jobs = [], worktreeOk = true, stopFails = false, cap 
   return { engine, calls, state };
 }
 
+// The §4.1 durable key the harness seeds for the shared "manta" fixture
+// project — server-realistic: a Manta project record carries its minted key
+// from creation, and work envelopes then key on it.
+const MANTA_PROJECT_ID = "proj_manta_1";
+
+function mantaIdentityRecord() {
+  return { tmuxSession: "manta", defaultCwd: fix("better-ui"), projectId: MANTA_PROJECT_ID };
+}
+
 function makeWorkControl({
   projects = fixtureProjects(),
   jobs = [],
@@ -319,6 +328,10 @@ function makeWorkControl({
   conversationId = "ses_cto",
   maxStageAttempts,
   cap,
+  // ---- §4.1 identity deps --------------------------------------------------
+  identityRecords = [mantaIdentityRecord()],
+  observedOpencodeIds = {},
+  remoteUrl = null,
   // ---- §11 stage deps ------------------------------------------------------
   forge = null,
   releaseContracts = [],
@@ -332,6 +345,11 @@ function makeWorkControl({
   // Mutable holder so a test can move the LIVE tmux state between operations
   // (e.g. rename a project after create to exercise dispatch-time revalidation).
   const live = { projects };
+  // A stateful, server-realistic config-store double: persisted identity
+  // plans land here and configGet returns them, exactly like
+  // local.mjs configGet/projectIdentityPersist do around ~/.manta/config.json.
+  const configState = { projects: identityRecords.map((r) => ({ ...r })) };
+  const identityWrites = [];
   const control = createCtoWorkControl({
     store: ws,
     createReceiptsStore: lg,
@@ -341,6 +359,19 @@ function makeWorkControl({
     delegateOps: spy.engine,
     resolveCwd: resolveCwdOrThrow,
     getConversationId: async () => conversationId,
+    configGet: async () => ({ projects: configState.projects.map((r) => ({ ...r })) }),
+    persistProjectIdentity: async (plan) => {
+      identityWrites.push(plan);
+      let next = configState.projects.filter((p) => !plan.removes.includes(p?.tmuxSession));
+      for (const u of plan.upserts) {
+        next = next.filter((p) => p?.tmuxSession !== u.tmuxSession);
+        next.push({ ...u });
+      }
+      configState.projects = next;
+      return { projects: next };
+    },
+    observeOpencodeProjectId: async (dir) => observedOpencodeIds[dir] ?? null,
+    gitRemoteUrl: async () => remoteUrl,
     ...(maxStageAttempts !== undefined ? { maxStageAttempts } : {}),
     ...(forge !== null ? { forge } : {}),
     ...(releaseContracts !== undefined ? { releaseContracts } : {}),
@@ -348,7 +379,7 @@ function makeWorkControl({
     ...(rollbackTrigger !== null ? { rollbackTrigger } : {}),
     ...(targetProbe !== null ? { targetProbe } : {}),
   });
-  return { control, calls: spy.calls, jobs: spy.state, workStore: ws, ledger: lg, live };
+  return { control, calls: spy.calls, jobs: spy.state, workStore: ws, ledger: lg, live, configState, identityWrites };
 }
 
 // A forge spy mirroring the REAL adapter contract (src/server/forge/github.mjs):
@@ -475,36 +506,65 @@ test("work_create fails closed on a renamed or ambiguous project", async () => {
 });
 
 test("counterfactual: a valid target resolves and the envelope carries the explicit ProjectRef", async () => {
-  const { control } = makeWorkControl();
+  const { control, configState } = makeWorkControl();
   const created = await seedReadyWork(control);
   assert.equal(created.ok, true);
+  // §4.1: workspaceId is the Manta-minted durable key (the seeded record's),
+  // not the tmux session name; repositoryId stays unmapped for a remote-less
+  // checkout; the checkout path is carried, never used as identity.
   assert.deepEqual(created.project, {
-    workspaceId: "manta",
+    workspaceId: MANTA_PROJECT_ID,
     repositoryId: "unmapped",
     repositoryRoot: fix("better-ui"),
   });
   const { data } = await control.workInspect({ work: created.workId });
-  assert.equal(data.project.workspaceId, "manta");
+  assert.equal(data.project.workspaceId, MANTA_PROJECT_ID);
   assert.equal(data.targetLive, true);
+  // The reconcile persisted nothing new: the record already carried its key.
+  assert.equal(configState.projects.length, 1);
+  assert.equal(configState.projects[0].projectId, MANTA_PROJECT_ID);
 });
 
-test("work_dispatch revalidates the stored target against live tmux (rename → fail closed, no worker)", async () => {
-  const { control, calls, live } = makeWorkControl();
+test("work_dispatch revalidates the stored key against live tmux (rebind on rename; fail closed with no record)", async () => {
+  const { control, calls, live, identityWrites } = makeWorkControl();
   const created = await seedReadyWork(control, { id: "w1-target" });
-  // Case-variant rename: the stored workspaceId no longer matches exactly —
-  // target_changed names the current name instead of guessing.
+  // Case-variant rename: the stored durable key still resolves — through the
+  // record — and the record REBINDS to the live session (same checkout, no
+  // repository-identity contradiction), keeping its key. The worker is placed
+  // by the LIVE tmux name.
   live.projects = [{ tmuxSession: "Manta", defaultCwd: fix("better-ui"), attached: false, mantaOwned: true, windows: [] }];
-  await assert.rejects(
-    control.workDispatch({ key: "w1-d", work: created.workId }),
-    (error) => error.code === "target_changed" && error.message.includes("Manta"),
-  );
-  // Full rename: target_not_found — never inferred from anything else.
+  const dispatched = await control.workDispatch({ key: "w1-d", work: created.workId });
+  assert.equal(dispatched.ok, true);
+  assert.equal(calls.filter((c) => c.name === "startJob").length, 1, "the rebound record dispatches");
+  const started = calls.find((c) => c.name === "startJob");
+  assert.equal(started.input.targetProject, "Manta", "window placement uses the LIVE tmux name");
+  const rebound = identityWrites.find((p) => p.removes.includes("manta"));
+  assert.ok(rebound, "the rename rebind was persisted");
+  assert.deepEqual(rebound.removes, ["manta"]);
+  const upserted = rebound.upserts.find((u) => u.projectId === MANTA_PROJECT_ID);
+  assert.equal(upserted.tmuxSession, "Manta", "same record, new name, same durable key");
+
+  // Full rename over the SAME checkout with the rebound record: still rebinds
+  // (a fresh work item, addressed by the CURRENT live name, then the session
+  // renamed again before dispatch).
+  const second = await seedReadyWork(control, { id: "w1-target2", state: "ready", project: "Manta" });
   live.projects = [{ tmuxSession: "renamed-away", defaultCwd: fix("better-ui"), attached: false, mantaOwned: true, windows: [] }];
+  const secondDispatch = await control.workDispatch({ key: "w1-d2b", work: second.workId });
+  assert.equal(secondDispatch.ok, true, "the rebound key follows the session across another rename");
+
+  // A key whose record is GONE (identity store lost the record): fail closed —
+  // the name is gone and there is nothing to rebind, so nothing is inferred.
+  const orphan = makeWorkControl();
+  const legacy = await seedReadyWork(orphan.control, { id: "w1-legacy" });
+  orphan.configState.projects = []; // the record vanished (lost store)
+  orphan.live.projects = [
+    { tmuxSession: "renamed-away", defaultCwd: fix("better-ui"), attached: false, mantaOwned: true, windows: [] },
+  ];
   await assert.rejects(
-    control.workDispatch({ key: "w1-d2", work: created.workId }),
+    orphan.control.workDispatch({ key: "w1-d3", work: legacy.workId }),
     (error) => error.code === "target_not_found",
   );
-  assert.equal(calls.filter((c) => c.name === "startJob").length, 0, "no worker was created against a moved target");
+  assert.equal(orphan.calls.filter((c) => c.name === "startJob").length, 0, "no worker against an unresolved target");
 });
 
 // ---------------------------------------------------------------------------
@@ -834,6 +894,8 @@ test("reads succeed with every write dep throwing, and no write spy is ever call
     delegateOps: throwing.engine,
     resolveCwd: resolveCwdOrThrow,
     getConversationId: async () => "ses_cto",
+    observeOpencodeProjectId: async () => null,
+    gitRemoteUrl: async () => null,
   });
   await seedReadyWork(control, { id: "w7-seed" });
   const reads = [
@@ -943,6 +1005,8 @@ test("work_capacity reflects the delegate cap and dispatch at cap parks the work
     delegateOps: makeDelegateSpy({ cap: MAX_RUNNING_JOBS, jobs: foreign }).engine,
     resolveCwd: resolveCwdOrThrow,
     getConversationId: async () => "ses_cto",
+    observeOpencodeProjectId: async () => null,
+    gitRemoteUrl: async () => null,
   });
   const w2 = await control2.workCreate({
     key: "w9-create",
@@ -1185,6 +1249,8 @@ test("cleanup removes only owned terminal resources via the existing non-forced 
     delegateOps: spy.engine,
     resolveCwd: resolveCwdOrThrow,
     getConversationId: async () => "ses_cto",
+    observeOpencodeProjectId: async () => null,
+    gitRemoteUrl: async () => null,
   });
   const c2work = await control2.workCreate({
     key: "w12-c2",
@@ -1329,6 +1395,8 @@ test("the stage attempt is linked before prompt delivery (the startJob spy sees 
     delegateOps: spy.engine,
     resolveCwd: resolveCwdOrThrow,
     getConversationId: async () => "ses_cto",
+    observeOpencodeProjectId: async () => null,
+    gitRemoteUrl: async () => null,
   });
   const created = await seedReadyWork(control, { id: "w15-link" });
   const dispatched = await control.workDispatch({ key: "w15-d", work: created.workId });
@@ -1585,7 +1653,9 @@ async function stageApprovedWork(control, jobs, { id, headSha, reviewerModel = "
 function seedContract(overrides = {}) {
   return {
     id: "rc-manta-web",
-    workspaceId: "manta",
+    // The contract scopes by the ENVELOPE's workspaceId — the §4.1 durable
+    // key the harness's "manta" project carries.
+    workspaceId: MANTA_PROJECT_ID,
     pipeline: "manta-web-deploy",
     allowedTargets: ["web"],
     allowedChannels: ["prod"],
@@ -2419,18 +2489,18 @@ test("V11: a release contract is DATA with a closed field set — nothing execut
 test("V11: resolveReleaseContract resolves per project/target/channel — scoped wins, ambiguity is an error, no match is null", () => {
   const scoped = seedContract();
   const global = seedContract({ id: "rc-global", workspaceId: null });
-  assert.equal(resolveReleaseContract([global, scoped], "manta", "web", "prod").id, scoped.id, "an exact workspace-scoped contract wins over a global one");
+  assert.equal(resolveReleaseContract([global, scoped], MANTA_PROJECT_ID, "web", "prod").id, scoped.id, "an exact workspace-scoped contract wins over a global one");
   assert.equal(resolveReleaseContract([global], "other", "web", "prod").id, global.id, "a global contract applies to every project");
-  assert.equal(resolveReleaseContract([scoped], "manta", "web", "staging"), null, "a channel the contract does not allow does not match");
-  assert.equal(resolveReleaseContract([scoped], "manta", "windows", "prod"), null, "a target the contract does not allow does not match");
+  assert.equal(resolveReleaseContract([scoped], MANTA_PROJECT_ID, "web", "staging"), null, "a channel the contract does not allow does not match");
+  assert.equal(resolveReleaseContract([scoped], MANTA_PROJECT_ID, "windows", "prod"), null, "a target the contract does not allow does not match");
   assert.equal(resolveReleaseContract([scoped], "other", "web", "prod"), null, "a scoped contract does not match another project");
   assert.throws(
-    () => resolveReleaseContract([seedContract({ id: "rc-a" }), seedContract({ id: "rc-b" })], "manta", "web", "prod"),
+    () => resolveReleaseContract([seedContract({ id: "rc-a" }), seedContract({ id: "rc-b" })], MANTA_PROJECT_ID, "web", "prod"),
     (error) => error.code === "target_ambiguous" && /narrow the contract set/.test(error.message),
     "two scoped candidates for one project are ambiguous, not a pick-one",
   );
   assert.throws(
-    () => resolveReleaseContract([global, seedContract({ id: "rc-g2", workspaceId: null })], "manta", "web", "prod"),
+    () => resolveReleaseContract([global, seedContract({ id: "rc-g2", workspaceId: null })], MANTA_PROJECT_ID, "web", "prod"),
     (error) => error.code === "target_ambiguous",
     "two global candidates are ambiguous too",
   );
