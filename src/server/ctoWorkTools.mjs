@@ -1,7 +1,11 @@
 // ctoWorkTools.mjs — unified-CTO spec §7 `work` control-tool family, RECORD +
-// DISPATCH half. Review/merge/release/verify (§11) are deliberately NOT here —
-// next PR. This family turns a request into tracked work and puts a worker on
-// it in an EXPLICIT project.
+// DISPATCH half (§5/§6/§8/§9/§12) and the §11 REVIEW / MERGE / RELEASE /
+// VERIFICATION work-stage operations. This family turns a request into tracked
+// work, puts a worker on it in an EXPLICIT project, and then establishes the
+// remaining §11 observations BY EVIDENCE: independent review of an exact head,
+// a SHA-bound merge observed on the forge, a contract-driven release with run
+// identity, live verification against the actual target, and verified
+// completion — the one operation that legitimately owns state "completed".
 //
 // CENTRAL INVARIANT (§1.1): "Completing a worker is not completing the work.
 // The declared delivery target determines completion." It is enforced
@@ -9,6 +13,10 @@
 //   • work_create only ever creates "draft" or "ready" envelopes.
 //   • work_revise REFUSES patch.state "completed" (and "running"/"archived"/
 //     "cancelled", whose owners are dispatch/dispatch/cancel/archive).
+//   • workReview / workMerge / workRelease / workRollback / workVerify /
+//     workComplete — the §11 evidence paths (independent review of an exact
+//     head, SHA-bound merge, contract-driven release, live target
+//     verification, verified completion).
 //   • recordWorkerOutcome / adoptJobOutcome — the paths that observe a
 //     worker's terminal event — have NO parameter and NO code path that
 //     writes state "completed". A reported-complete worker moves the work to
@@ -83,6 +91,7 @@ import { workStore, mantaControlStore } from "./ctoStores.mjs";
 import { MAX_RUNNING_JOBS, CAP_ERROR, loadJobs } from "./delegate.mjs";
 import { resolveCwdOrThrow } from "./tmux.mjs";
 import { readConversationSessionId } from "./ctoBinding.mjs";
+import { rollupChecks } from "../shared/forge.mjs";
 
 // Lease TTL for in_flight dispatch receipts: the protected window covers
 // worktree + window + prompt delivery (seconds, occasionally a slow box), not
@@ -92,10 +101,13 @@ export const WORK_LEASE_TTL_MS = MANTA_CONTROL_LEASE_TTL_MS;
 const RECEIPT_OWNER = "cto-work-tools";
 const CREATE_RECEIPT_OWNER = "cto-work-create";
 
-// §11's seven observations. This half records ONLY `implementation_reported`
-// (the worker's own "done" — a claim, never a verdict). The other six are
-// named so the §11 PR's verified observations have a closed vocabulary to
-// land in; nothing here writes them.
+// §11's seven observations — a CLOSED claim vocabulary. The dispatch half
+// records `implementation_reported` (the worker's own "done" — a claim, never
+// a verdict); the §11 operations record the five evidence-backed observations
+// (independent review of an exact head, merged commit, published artifact,
+// target runs the artifact, acceptance checks on that target) and own the one
+// verified-completion transition. `tests_reported` stays a worker-report claim
+// (the implementation worker's own test statement — labelled, never verified).
 export const CLAIM_KINDS = Object.freeze([
   "implementation_reported",
   "tests_reported",
@@ -106,17 +118,51 @@ export const CLAIM_KINDS = Object.freeze([
   "acceptance_checks_passed",
 ]);
 export const IMPLEMENTATION_CLAIM = "implementation_reported";
+export const REVIEW_CLAIM = "independent_review_approved";
+export const MERGE_CLAIM = "merged_commit_exists";
+export const RELEASE_CLAIM = "artifact_published";
+export const TARGET_RUNS_CLAIM = "target_runs_artifact";
+export const ACCEPTANCE_CLAIM = "acceptance_checks_passed";
+for (const kind of [IMPLEMENTATION_CLAIM, REVIEW_CLAIM, MERGE_CLAIM, RELEASE_CLAIM, TARGET_RUNS_CLAIM, ACCEPTANCE_CLAIM]) {
+  if (!CLAIM_KINDS.includes(kind)) throw new Error(`claim kind ${kind} is outside the closed §11 vocabulary`);
+}
 
 // Attempt statuses (the work-record view of a stage attempt; the delegate job
-// store stays authoritative for low-level job state — §5.1).
+// store stays authoritative for low-level job state — §5.1). The §11 stage
+// attempts add their own terminal shapes: a review attempt ends `approved` or
+// `changes_requested`; a verify attempt that held ends `verified`.
 export const ATTEMPT_STATUSES = Object.freeze([
   "dispatching",
   "running",
   "reported_complete",
+  "approved",
+  "changes_requested",
+  "verified",
   "failed",
   "stopped",
   "superseded",
   "missing",
+]);
+
+// §11 review verdicts — the ONLY machine-readable outcomes a reviewer report
+// may carry (parseReviewVerdict). Anything else is a failed review, never a
+// guess.
+export const REVIEW_VERDICTS = Object.freeze(["approved", "changes_requested"]);
+const VERDICT_RE = /^\s*VERDICT:\s*(approved|changes_requested)\s*$/i;
+
+// §11 release contracts — DATA identifying an existing pipeline. Field set is
+// closed (typo protection in a file that can start a pipeline); nothing here
+// is executable.
+export const RELEASE_CONTRACT_FIELDS = Object.freeze([
+  "id",
+  "workspaceId",
+  "pipeline",
+  "allowedTargets",
+  "allowedChannels",
+  "sourceRevision",
+  "artifactIdentity",
+  "verification",
+  "mutates",
 ]);
 
 // §8.2: "A configurable-by-existing-policy attempt limit may govern runtime
@@ -187,6 +233,132 @@ function assertSafeWorkId(id) {
 }
 
 // ---------------------------------------------------------------------------
+// §11 pure helpers (exported for tests; every guarantee below has a
+// counterfactual positive control in ctoWorkTools.test.mjs).
+// ---------------------------------------------------------------------------
+
+/**
+ * §11: the reviewer's verdict is machine-readable ONLY through an explicit
+ * marker line — `VERDICT: approved` / `VERDICT: changes_requested` (last one
+ * wins). Free-text "looks approved" is NOT a verdict: a report that merely
+ * mentions "approved" mid-sentence parses as null, and a null verdict records
+ * a failed review rather than a guessed approval.
+ */
+export function parseReviewVerdict(reportText) {
+  const text = String(reportText ?? "");
+  let verdict = null;
+  for (const line of text.split(/\r?\n/)) {
+    const m = VERDICT_RE.exec(line);
+    if (m) verdict = m[1].toLowerCase();
+  }
+  return verdict;
+}
+
+// Value shapes that read as credential material (§11: "Secrets live in
+// existing service clients and are never written into the work record, tool
+// arguments, or logs"). Key-NAME evidence first, then well-known token
+// prefixes in any value.
+const SECRET_KEY_RE = /(token|secret|password|passphrase|apikey|api_key|authorization|credential|privatekey|private_key)/i;
+const SECRET_VALUE_RES = [
+  /^gh[pousr]_[A-Za-z0-9]{20,}/,
+  /^github_pat_[A-Za-z0-9_]{20,}/,
+  /^xox[baprs]-/,
+  /^AKIA[0-9A-Z]{16}$/,
+  /^sk-[A-Za-z0-9]{20,}/,
+  /^eyJ[A-Za-z0-9_-]{10,}/,
+  /^Bearer\s+/i,
+];
+
+function assertNoSecretLikeValues(value, label, path = "") {
+  if (value == null) return;
+  if (typeof value === "string") {
+    const key = path.split(".").pop() ?? "";
+    if (SECRET_KEY_RE.test(key)) {
+      throw controlError("unsupported", `${label}: "${path}" reads as credential material — tokens never enter work records (§11)`);
+    }
+    for (const re of SECRET_VALUE_RES) {
+      if (re.test(value)) {
+        throw controlError("unsupported", `${label}: value at "${path}" reads as credential material — tokens never enter work records (§11)`);
+      }
+    }
+    return;
+  }
+  if (typeof value === "number" || typeof value === "boolean") return;
+  if (Array.isArray(value)) {
+    value.forEach((v, i) => assertNoSecretLikeValues(v, label, `${path}[${i}]`));
+    return;
+  }
+  if (typeof value === "object") {
+    for (const [k, v] of Object.entries(value)) assertNoSecretLikeValues(v, label, path ? `${path}.${k}` : k);
+  }
+}
+
+/**
+ * §11: the repository identity a merge/checks operation addresses. Two
+ * non-empty segments "owner/repo" — no stray whitespace, no host prefix (the
+ * composition's forge adapter owns host resolution).
+ */
+export function parseRepoKey(repoKey) {
+  assertNonEmptyString(repoKey, "repositoryId");
+  const parts = repoKey.trim().split("/");
+  if (parts.length !== 2 || parts.some((p) => p.trim().length === 0)) {
+    throw controlError("unsupported", `repositoryId ${JSON.stringify(repoKey)} must be "owner/repo" — the canonical forge identity, not a workspace name`);
+  }
+  return { owner: parts[0].trim(), repo: parts[1].trim() };
+}
+
+/**
+ * §11: a release contract is DATA identifying an EXISTING pipeline — closed
+ * field set, descriptive fields only, nothing executable.
+ */
+export function validateReleaseContract(contract) {
+  assertPlainObject(contract, "release contract");
+  const unknown = Object.keys(contract).filter((k) => !RELEASE_CONTRACT_FIELDS.includes(k));
+  if (unknown.length > 0) {
+    throw controlError("unsupported", `release contract "${contract?.id ?? "?"}" has unknown field(s): ${unknown.join(", ")} — a release contract is data (id, pipeline, allowedTargets, allowedChannels, sourceRevision, artifactIdentity, verification, mutates), not a DSL`);
+  }
+  for (const field of ["id", "pipeline", "sourceRevision", "artifactIdentity", "verification"]) {
+    assertNonEmptyString(contract[field], `release contract.${field}`);
+  }
+  for (const field of ["allowedTargets", "allowedChannels"]) {
+    if (!Array.isArray(contract[field]) || contract[field].length === 0 || contract[field].some((v) => typeof v !== "string" || v.trim().length === 0)) {
+      throw controlError("unsupported", `release contract.${field} must be a non-empty array of non-empty strings`);
+    }
+  }
+  if (contract.mutates !== undefined && typeof contract.mutates !== "boolean") {
+    throw controlError("unsupported", "release contract.mutates must be a boolean");
+  }
+  if (contract.workspaceId !== undefined && contract.workspaceId !== null && typeof contract.workspaceId !== "string") {
+    throw controlError("unsupported", "release contract.workspaceId must be a string, null, or omitted (null/omitted = applies to every project)");
+  }
+  return contract;
+}
+
+/**
+ * Resolve the release contract for a project+target+channel. An exact
+ * workspace-scoped contract wins over a global one; a target/channel the
+ * contract does not allow does not match. Multiple candidate global
+ * contracts for the same target+channel are ambiguous, not a pick-one.
+ */
+export function resolveReleaseContract(contracts, workspaceId, releaseTarget, channel) {
+  const valid = (contracts ?? []).map((c) => validateReleaseContract(c));
+  const matches = valid.filter((c) => {
+    if (!c.allowedTargets.includes(releaseTarget) || !c.allowedChannels.includes(channel)) return false;
+    return c.workspaceId == null || c.workspaceId === workspaceId;
+  });
+  const scoped = matches.filter((c) => c.workspaceId != null);
+  if (scoped.length > 1) {
+    throw controlError("target_ambiguous", `release contracts ${scoped.map((c) => c.id).join(", ")} all match project ${workspaceId} — narrow the contract set`);
+  }
+  if (scoped.length === 1) return scoped[0];
+  if (matches.length > 1) {
+    throw controlError("target_ambiguous", `global release contracts ${matches.map((c) => c.id).join(", ")} all match ${releaseTarget}/${channel} — narrow the contract set`);
+  }
+  if (matches.length === 1) return matches[0];
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // §5.1 sub-record validation (the shapes this family writes into envelopes).
 // ---------------------------------------------------------------------------
 
@@ -222,6 +394,20 @@ export function createCtoWorkControl({
   delegateOps = null, // { startJob, stopJob, pauseJob, resumeJob, deleteJob } — the bound engine
   resolveCwd = resolveCwdOrThrow,
   getConversationId = readConversationSessionId,
+  // ---- §11 stage deps (review/merge/release/verify) -------------------------
+  // forge: an existing forge adapter seam (src/server/forge/*) exposing
+  //   getPullRequest(repo, number), getChecks(repo, sha), merge(repo, number,
+  //   {method, sha}) — repo is {owner, repo}. Tokens stay INSIDE the adapter.
+  forge = null,
+  // releaseContracts: DATA (validated by validateReleaseContract) describing
+  //   each project's existing pipeline. Never executable.
+  releaseContracts = [],
+  // releaseTrigger / rollbackTrigger / targetProbe: the thin external seams a
+  // production composition wires to the existing release scripts and target
+  // probes. Unwired operations fail `unsupported` — never a silent no-op.
+  releaseTrigger = null, // ({ contract, work, deliveryTarget, recoveryRef }) => { runId, artifact: { identity, digest?, version? } }
+  rollbackTrigger = null, // ({ contract, work, recoveryRef }) => { ok, note? }
+  targetProbe = null, // ({ work, deliveryTarget, contract? }) => { sha?, digest?, version?, checks?: [{ name, passed, note? }] }
 } = {}) {
   const work = createCtoWorkService({ store, now, newId });
   const createReceipts = createOperationRunner({
@@ -252,6 +438,33 @@ export function createCtoWorkControl({
       );
     }
     return delegateOps[name];
+  }
+
+  // §11 stage seams — unwired means the operation visibly refuses; nothing
+  // here fakes a stage outcome.
+  function requireForge() {
+    if (!forge) {
+      throw controlError("unsupported", "forge is not wired on this composition — pass an adapter exposing getPullRequest/getChecks/merge", { retrySafe: true });
+    }
+    return forge;
+  }
+  function requireReleaseTrigger() {
+    if (typeof releaseTrigger !== "function") {
+      throw controlError("unsupported", "releaseTrigger is not wired on this composition — a release is requested, never faked", { retrySafe: true });
+    }
+    return releaseTrigger;
+  }
+  function requireRollbackTrigger() {
+    if (typeof rollbackTrigger !== "function") {
+      throw controlError("unsupported", "rollbackTrigger is not wired on this composition — rollback is explicit or not offered", { retrySafe: true });
+    }
+    return rollbackTrigger;
+  }
+  function requireTargetProbe() {
+    if (typeof targetProbe !== "function") {
+      throw controlError("unsupported", "targetProbe is not wired on this composition — verification never trusts a green build alone (§11)", { retrySafe: true });
+    }
+    return targetProbe;
   }
 
   // Move an envelope to a new state, honoring the strict loader's invariant
@@ -397,15 +610,7 @@ export function createCtoWorkControl({
   }
 
   function assertAttemptBudget(env) {
-    const used = (env.attempts ?? []).filter((a) => a?.stage === env.stage).length;
-    if (used >= maxStageAttempts) {
-      throw controlError(
-        "policy_blocked",
-        `attempt limit reached for work "${env.id}" stage "${env.stage}" (${used}/${maxStageAttempts}) — ` +
-          `escalate rather than looping (§8.2: bounded human-facing behavior)`,
-        { retrySafe: false, details: { stage: env.stage, attemptsUsed: used, limit: maxStageAttempts } },
-      );
-    }
+    assertStageAttemptBudget(env, env.stage);
   }
 
   function isLiveJob(job) {
@@ -511,6 +716,79 @@ export function createCtoWorkControl({
       `not a completion verdict.`,
     ];
     return lines.join("\n");
+  }
+
+  // ---------------------------------------------------------------------------
+  // §11 — review / merge / release / verify helpers
+  // ---------------------------------------------------------------------------
+
+  function buildReviewPrompt(env, { headSha }) {
+    const lines = [
+      `You are the INDEPENDENT reviewer for tracked work ${env.id} (work revision ${env.revision}).`,
+      ``,
+      `Objective under review: ${env.objective}`,
+      `Repository identity: ${env.project.repositoryId}. Review commit ${headSha} (exact head — verify you`,
+      `are reviewing precisely this SHA).`,
+      `Spec: revision ${env.spec.revision}, hash ${env.spec.hash}, document ${env.spec.documentRef}.`,
+      `Your context is independent of the implementation worker's context. Do not trust its report:`,
+      `read the diff of ${headSha} and judge it against the spec and its acceptance criteria.`,
+      ``,
+      `End your report with EXACTLY one final line and nothing after it:`,
+      `VERDICT: approved`,
+      `or`,
+      `VERDICT: changes_requested`,
+    ];
+    return lines.join("\n");
+  }
+
+  // §5.1 attempt budget for ANY stage — the §11 stage operations (review/
+  // merge/release/verify) count attempts per-stage against the same bounded
+  // maxStageAttempts the dispatch pipeline uses (§8.2).
+  function assertStageAttemptBudget(env, stage) {
+    const used = (env.attempts ?? []).filter((a) => a?.stage === stage).length;
+    if (used >= maxStageAttempts) {
+      throw controlError(
+        "policy_blocked",
+        `attempt limit reached for work "${env.id}" stage "${stage}" (${used}/${maxStageAttempts}) — ` +
+          `escalate rather than looping (§8.2: bounded human-facing behavior)`,
+        { retrySafe: false, details: { stage, attemptsUsed: used, limit: maxStageAttempts } },
+      );
+    }
+  }
+
+  // Supersede a set of claims INSIDE a mutator (pure over the envelope's
+  // claims array — the caller persists the result). Supersession is additive
+  // bookkeeping on the claim record: the claim stays readable as evidence, it
+  // just stops reading as current (§8.2/U13 shape, now driven by review
+  // verdicts too).
+  function supersededClaims(claims, predicate, { by, reason }) {
+    return (claims ?? []).map((c) =>
+      c && predicate(c) && c.superseded !== true
+        ? { ...c, superseded: true, supersededBy: by ?? null, supersededReason: clipNote(reason ?? "") }
+        : c,
+    );
+  }
+
+  // The live (non-superseded, current-spec) claim of a given kind — the ONLY
+  // way stage operations read a prior observation. Newest wins when several
+  // are live.
+  function liveClaimOf(env, kind) {
+    return (env.claims ?? [])
+      .filter((c) => c?.kind === kind && c.superseded !== true && c.specHash === env.spec.hash)
+      .sort((a, b) => (b.observedAt ?? 0) - (a.observedAt ?? 0))[0] ?? null;
+  }
+
+  // An approval claim is INVALIDATED the moment the head it approved is no
+  // longer the head under consideration (§11: "When head SHA changes,
+  // invalidate the approval … never preserve old approval silently"). The
+  // observation points are a new-head review request and the forge's live PR
+  // read at merge time — both call this inside their mutator.
+  function invalidateApprovalClaimsForHead(env, newHeadSha, { by, reason }) {
+    return supersededClaims(
+      env.claims,
+      (c) => c.kind === REVIEW_CLAIM && c.headSha !== newHeadSha,
+      { by, reason },
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -773,6 +1051,147 @@ export function createCtoWorkControl({
     return { save: next, value: { adopted: true, claim: claim?.id ?? null, state: next.state } };
   }
 
+  // ---------------------------------------------------------------------------
+  // §11 review outcome adoption — the reviewer's terminal event becomes the
+  // review observation. An APPROVAL records `independent_review_approved`
+  // pinned to the EXACT head/spec/model the dispatch fixed; a REJECTION
+  // records no approval and SUPERSEDES the implementation claim(s) so
+  // downstream work admitted on that claim reads its dependency as unmet
+  // (the §11 carry-forward). A reviewer that finished without a
+  // machine-readable verdict records a failed review — never a guessed one.
+  // ---------------------------------------------------------------------------
+  async function adoptReviewOutcomeInEnvelope(env, job) {
+    const attempts = [...(env.attempts ?? [])];
+    const idx = attempts.findIndex((a) => a?.jobId === job.id && a?.stage === "review");
+    if (idx === -1) return { save: null, value: { adopted: false, reason: "no review attempt links this job" } };
+    const attempt = attempts[idx];
+    const headSha = attempt.headSha ?? null;
+    if (!headSha) return { save: null, value: { adopted: false, reason: "review attempt carries no head" } };
+
+    if (job.status === "stopped" || job.status === "failed") {
+      const status = job.status === "stopped" ? "stopped" : "failed";
+      if (attempt.status === status) {
+        return { save: null, value: { adopted: false, replay: true, reason: `review attempt already ${status}` } };
+      }
+      const failedAttempts = attempts.map((a) =>
+        a?.id === attempt.id
+          ? {
+              ...a,
+              status,
+              updatedAt: now(),
+              note: clipNote(`reviewer ${status} — BLOCKED review, no verdict recorded: ${clipNote(job.error ?? "")}`),
+            }
+          : a,
+      );
+      let next = { ...env, attempts: failedAttempts, updatedAt: now() };
+      if (next.state === "running" || next.state === "paused") {
+        next = withState(next, "waiting", { waitingReason: "external" });
+      }
+      return { save: next, value: { adopted: true, verdict: null, state: next.state } };
+    }
+    if (job.status !== "done") {
+      return { save: null, value: { adopted: false, reason: `job status ${JSON.stringify(job.status)} is not a terminal outcome` } };
+    }
+
+    // §8.2/U13: a late completion for an attempt superseded by a spec
+    // revision preserves the verdict as SUPERSEDED evidence and never
+    // advances the current work.
+    const staleSpec = attempt.specHash !== env.spec.hash || attempt.status === "superseded";
+    const verdict = parseReviewVerdict(job.result);
+    if (!verdict) {
+      if (attempt.status === "failed") {
+        return { save: null, value: { adopted: false, replay: true, reason: "review attempt already failed" } };
+      }
+      const failedAttempts = attempts.map((a) =>
+        a?.id === attempt.id
+          ? {
+              ...a,
+              status: "failed",
+              updatedAt: now(),
+              note: clipNote(
+                `reviewer finished WITHOUT a machine-readable verdict (expected a final "VERDICT: " line) — ` +
+                  `BLOCKED review, no approval recorded${staleSpec ? "; attempt superseded by a later spec revision" : ""}`,
+              ),
+            }
+          : a,
+      );
+      let next = { ...env, attempts: failedAttempts, updatedAt: now() };
+      if (!staleSpec && (next.state === "running" || next.state === "paused")) {
+        next = withState(next, "waiting", { waitingReason: "external" });
+      }
+      return { save: next, value: { adopted: true, verdict: null, state: next.state } };
+    }
+
+    const claims = [...(env.claims ?? [])];
+    let claim = null;
+    if (verdict === "approved") {
+      const claimId = `${attempt.id}:${REVIEW_CLAIM}`;
+      if (!claims.some((c) => c?.id === claimId)) {
+        claim = {
+          id: claimId,
+          kind: REVIEW_CLAIM,
+          attemptId: attempt.id,
+          jobId: job.id,
+          specHash: attempt.specHash,
+          headSha,
+          reviewerModel: attempt.reviewerModel ?? null,
+          observedAt: now(),
+          superseded: staleSpec,
+          note: clipNote(job.result ?? ""),
+        };
+        claims.push(claim);
+      }
+    } else {
+      // §11 carry-forward: a rejected head invalidates the implementation
+      // claim the rejection sits on. Downstream work admitted on that claim
+      // must no longer read its dependency as met.
+      const supersededImplementation = supersededClaims(
+        claims,
+        (c) => c.kind === IMPLEMENTATION_CLAIM,
+        { by: attempt.id, reason: `review of head ${headSha} requested changes (§11) — the implementation claim is superseded` },
+      );
+      claims.length = 0;
+      claims.push(...supersededImplementation);
+    }
+
+    const terminalStatus = verdict === "approved" ? "approved" : "changes_requested";
+    const reviewAttempts = attempts.map((a) =>
+      a?.id === attempt.id
+        ? {
+            ...a,
+            status: a.status === "superseded" ? "superseded" : terminalStatus,
+            ...(staleSpec ? { superseded: true } : {}),
+            updatedAt: now(),
+            note: clipNote(
+              verdict === "approved"
+                ? `reviewer approved head ${headSha}${staleSpec ? "; attempt superseded by a later spec revision" : ""}`
+                : `reviewer requested changes on head ${headSha} — implementation claim superseded; repair via work_retry`,
+            ),
+          }
+        : a,
+    );
+
+    const evidence = [...(env.evidence ?? [])];
+    const evidenceId = `delegate-job:${job.id}`;
+    if (!evidence.some((r) => r?.id === evidenceId)) {
+      evidence.push({
+        kind: "message",
+        id: evidenceId,
+        sessionId: job.childSessionID ?? null,
+        observedAt: now(),
+      });
+    }
+
+    let next = { ...env, attempts: reviewAttempts, claims, evidence, updatedAt: now() };
+    if (!staleSpec && (next.state === "running" || next.state === "paused")) {
+      // Both verdicts hand the work back to the waiting-for-next-stages state:
+      // approved awaits merge/verify; changes_requested awaits the repair
+      // dispatch (work_retry). The claim — or its absence — is the record.
+      next = withState(next, "waiting", { waitingReason: "external" });
+    }
+    return { save: next, value: { adopted: true, verdict, claim: claim?.id ?? null, state: next.state } };
+  }
+
   // Resolve an unresolved dispatch receipt for a terminal job (the crash case:
   // the worker EXISTS, so the dispatch effect happened). Runs OUTSIDE the
   // envelope lock — never call this from inside a mutateWork mutator (the
@@ -803,7 +1222,13 @@ export function createCtoWorkControl({
     const env = await work.getWork(corr.workId);
     if (!env) return { adopted: false, reason: "work envelope no longer exists" };
     await resolveReceiptForJob(corr.workId, job).catch(() => {});
-    return work.mutateWork(corr.workId, (e) => adoptOutcomeInEnvelope(e, job));
+    // Route by the correlation op stamped at dispatch: review-correlated
+    // jobs adopt through the §11 review path, everything else keeps the
+    // implementation-claim path.
+    const isReviewJob = corr.op === "work.review";
+    return work.mutateWork(corr.workId, (e) =>
+      isReviewJob ? adoptReviewOutcomeInEnvelope(e, job) : adoptOutcomeInEnvelope(e, job),
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -2019,6 +2444,850 @@ export function createCtoWorkControl({
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // §11 — REVIEW / MERGE / RELEASE / ROLLBACK / VERIFY / COMPLETE
+  //
+  // The five observations the dispatch half cannot establish, each by
+  // EVIDENCE, never assertion:
+  //   • independent_review_approved — an independent reviewer job (own
+  //     worktree, requested model verbatim, exact head + spec hash pinned at
+  //     dispatch) whose terminal report carries a machine-readable verdict.
+  //   • merged_commit_exists — the forge ACCEPTED a merge bound to the
+  //     approved head (matching-head precondition), with required checks
+  //     queried from the forge FOR THAT HEAD.
+  //   • artifact_published — an injected release trigger's OBSERVED run +
+  //     artifact identity, gated on the work's release contract (data).
+  //   • target_runs_artifact / acceptance_checks_passed — a probe comparing
+  //     the ACTUAL target's sha/digest/version to the claims the work already
+  //     holds, plus acceptance checks observed on that target.
+  // workComplete owns the single verified "completed" transition, and only
+  // when the DECLARED delivery target's evidence chain is present.
+  // ---------------------------------------------------------------------------
+
+  // Map a forge merge failure to the closed §7 code set. The forge adapters
+  // throw typed errors (kind: sha_mismatch | cannot_merge | permission) or
+  // raw status numbers.
+  function forgeMergeError(error, { repoKey, prNumber }) {
+    const kind = error?.kind ?? (error?.status === 405 ? "cannot_merge" : error?.status === 409 ? "sha_mismatch" : error?.status === 403 ? "permission" : null);
+    if (kind === "sha_mismatch") {
+      return controlError(
+        "target_changed",
+        `the forge refused the merge of ${repoKey}#${prNumber}: the head moved between the gate read and the merge ` +
+          `(matching-head precondition) — re-read the PR and re-review if the head changed (§11)`,
+        { retrySafe: true },
+      );
+    }
+    if (kind === "cannot_merge" || kind === "permission") {
+      return controlError(
+        "policy_blocked",
+        `the forge refused the merge of ${repoKey}#${prNumber}: ${error?.message ?? error} (§11)`,
+        { retrySafe: false },
+      );
+    }
+    return toControlError(error);
+  }
+
+  // The §11 forge gate — shared by work_merge and work_complete for a
+  // "pr"-target work. Required checks are queried FROM THE FORGE and must
+  // correspond to THAT head; the approval is invalidated the moment the live
+  // head differs (never preserved silently). Returns the observed gate facts.
+  async function forgeGate({ env, approval, prNumber, purpose }) {
+    const forgeOps = requireForge();
+    const repoKey = env.project.repositoryId;
+    if (!repoKey || repoKey === "unmapped") {
+      throw controlError(
+        "unsupported",
+        `work "${env.id}" carries no canonical repository identity (project.repositoryId) — ` +
+          `forge operations address the repo the work names, never a guessed one (§1.1)`,
+        { retrySafe: false },
+      );
+    }
+    const repo = parseRepoKey(repoKey);
+    let pr;
+    try {
+      pr = (await forgeOps.getPullRequest(repo, prNumber))?.data ?? null;
+    } catch (error) {
+      throw toControlError(error);
+    }
+    if (!pr?.headSha) {
+      throw controlError("target_not_found", `PR #${prNumber} not found (or carries no head) on ${repoKey}`, { retrySafe: false });
+    }
+    if (pr.headSha !== approval.headSha) {
+      // §11: when the head SHA changes, invalidate the approval — at the one
+      // point the server can OBSERVE the change (the forge's live PR head).
+      await work
+        .mutateWork(env.id, (e) => ({
+          save: {
+            ...e,
+            claims: invalidateApprovalClaimsForHead(e, pr.headSha, {
+              reason: `forge head ${pr.headSha} moved past approved ${approval.headSha}; approval invalidated (§11) — re-review required`,
+            }),
+            updatedAt: now(),
+          },
+          value: null,
+        }))
+        .catch(() => {});
+      throw controlError(
+        "target_changed",
+        `head moved under the approval: approved ${approval.headSha}, PR head is now ${pr.headSha} — ` +
+          `the approval was invalidated; re-review the new head before ${purpose} (§11)`,
+        { retrySafe: false, details: { approvedHead: approval.headSha, currentHead: pr.headSha } },
+      );
+    }
+    if (pr.state && pr.state !== "open") {
+      throw controlError("policy_blocked", `PR #${prNumber} on ${repoKey} is ${JSON.stringify(pr.state)} — ${purpose} runs on an open PR (§6)`, { retrySafe: false });
+    }
+    let checks = [];
+    try {
+      const checksRes = await forgeOps.getChecks(repo, approval.headSha);
+      checks = Array.isArray(checksRes?.data) ? checksRes.data : [];
+    } catch (error) {
+      throw toControlError(error);
+    }
+    const rollup = rollupChecks(checks);
+    if (rollup !== "green") {
+      throw controlError(
+        "policy_blocked",
+        `required checks on the approved head ${approval.headSha} are "${rollup}" (queried from the forge FOR that head) — ` +
+          `${purpose} requires green (§11)`,
+        { retrySafe: true, details: { headSha: approval.headSha, rollup, checks: checks.length } },
+      );
+    }
+    return { repo, repoKey, pr, checks, rollup };
+  }
+
+  // §6 review starts: candidate commit (headSha) and acceptance criteria (the
+  // pinned spec) are fixed by the caller; the reviewer gets an INDEPENDENT
+  // context (isolationRequired) and the REQUESTED model — verbatim.
+  async function workReview(input) {
+    assertPlainObject(input, "review input");
+    assertNonEmptyString(input.key, "idempotency key");
+    assertNonEmptyString(input.work, "work");
+    assertNonEmptyString(input.headSha, "headSha");
+    assertNonEmptyString(input.reviewerModel, "reviewerModel");
+    const completionParentSessionId = input.completionParentSessionId ?? (await getConversationId());
+    if (typeof completionParentSessionId !== "string" || !completionParentSessionId) {
+      throw controlError("unsupported", "work_review requires a bound CTO conversation to receive the reviewer's report — bind the role session first (§3.1)", { retrySafe: true });
+    }
+    const deps = requireDelegateOps("review");
+    const reserved = await reserveOrThrow(input.work, {
+      key: input.key,
+      op: "work.review",
+      args: argsSnapshot(input),
+      expectedRevision: input.expectedRevision,
+      leaseOwner: RECEIPT_OWNER,
+      leaseTtlMs,
+    });
+    if (reserved.replay) return replayResponse(reserved.receipt, input.work);
+    const receipt = reserved.receipt;
+    let attemptId = null;
+    try {
+      await work.recordOperationOutcome(input.work, { receiptId: receipt.id, status: "in_flight" });
+      const envBefore = await getWorkOrThrow(input.work);
+      const target = await revalidateTarget(envBefore);
+      let repositoryRoot;
+      try {
+        repositoryRoot = resolveCwd(envBefore.project.repositoryRoot);
+      } catch {
+        throw controlError("target_not_found", `work "${input.work}" target checkout ${envBefore.project.repositoryRoot} no longer exists`, { retrySafe: false });
+      }
+      attemptId = `att_${newId()}`;
+      // Admission + approval invalidation + attempt LINKED, atomically. A
+      // prior approval pinned to a DIFFERENT head is invalidated HERE (the
+      // new-head review request is an observation of the head change).
+      await work.mutateWork(input.work, (env) => {
+        if (!["ready", "waiting"].includes(env.state)) {
+          throw controlError(
+            "policy_blocked",
+            `work "${input.work}" is ${env.state}${env.waitingReason ? ` (${env.waitingReason})` : ""} — review starts from ready or from a reported-complete work awaiting its next stages (§6)`,
+            { retrySafe: false },
+          );
+        }
+        assertStageAttemptBudget(env, "review");
+        const claims = invalidateApprovalClaimsForHead(env, input.headSha, {
+          reason: `a review of head ${input.headSha} was requested; approval of a different head is invalidated (§11)`,
+        });
+        const attempt = {
+          id: attemptId,
+          stage: "review",
+          attemptNumber: (env.attempts ?? []).filter((a) => a?.stage === "review").length + 1,
+          specHash: env.spec.hash,
+          headSha: input.headSha,
+          reviewerModel: input.reviewerModel,
+          receiptId: receipt.id,
+          jobId: null,
+          status: "dispatching",
+          startedAt: now(),
+          updatedAt: now(),
+        };
+        return { save: withState({ ...env, claims, attempts: [...(env.attempts ?? []), attempt] }, "running"), value: null };
+      });
+      const started = await deps.startJob({
+        prompt: buildReviewPrompt(envBefore, { headSha: input.headSha }),
+        parentSessionID: completionParentSessionId,
+        parentDirectory: repositoryRoot,
+        targetProject: envBefore.project.workspaceId,
+        isolationRequired: true, // review is independent of implementation context (§11)
+        correlation: { kind: "work", workId: input.work, receiptId: receipt.id, op: "work.review" },
+        actor: "cto",
+        model: input.reviewerModel, // the requested reviewer — never substituted (§11/U15)
+        ...(input.subagentType !== undefined ? { subagent_type: input.subagentType } : {}),
+      });
+      if (!started?.ok || !started.job) {
+        const rawError = started?.error ?? "startJob returned no job";
+        const code = started?.error === CAP_ERROR || rawError === CAP_ERROR ? "capacity_wait" : "provider_unavailable";
+        throw controlError(
+          code,
+          `review of work "${input.work}" is BLOCKED — the reviewer failed to start: ${rawError} ` +
+            `(a blocked review is not a passed review, and the requested model ${input.reviewerModel} was not substituted)`,
+          { retrySafe: code === "capacity_wait" },
+        );
+      }
+      const job = started.job;
+      const payload = {
+        workId: envBefore.id,
+        revision: envBefore.revision,
+        state: "running",
+        jobId: job.id,
+        workerSessionId: job.childSessionID ?? null,
+        jobStatus: job.status,
+        headSha: input.headSha,
+        reviewerModel: input.reviewerModel,
+        changed: true,
+        summary:
+          `dispatched INDEPENDENT reviewer (model ${input.reviewerModel}) for work "${input.work}" at head ${input.headSha} ` +
+          `(spec ${envBefore.spec.hash}); the verdict becomes a review claim only from the reviewer's terminal report`,
+      };
+      await work.recordOperationOutcome(input.work, {
+        receiptId: receipt.id,
+        status: "succeeded",
+        externalRef: job.id,
+        resultCode: "review_dispatched",
+        result: payload,
+      });
+      await work.mutateWork(input.work, (env) => {
+        const attempts = (env.attempts ?? []).map((a) =>
+          a?.id === attemptId ? { ...a, jobId: job.id, status: "running", updatedAt: now() } : a,
+        );
+        const resources = [...(env.resources ?? [])];
+        if (!resources.some((r) => r?.kind === "delegate_job" && r.ref === job.id)) {
+          resources.push(jobResourceEntry(env, job, attemptId));
+        }
+        return { save: { ...env, attempts, resources, updatedAt: now() }, value: null };
+      });
+      return { ok: true, replayed: false, ...payload, operationId: receipt.id, key: receipt.key };
+    } catch (error) {
+      const err = toWorkToolError(error);
+      await recordReceiptFailure(input.work, receipt, err).catch(() => {});
+      // A reviewer that failed to start leaves a BLOCKED review: the attempt
+      // is failed with that note, no approval claim exists, and the work is
+      // dispatchable again for the stage it came from.
+      await work
+        .mutateWork(input.work, (env) => {
+          const attempts = (env.attempts ?? []).map((a) =>
+            a?.id === attemptId && a.status === "dispatching"
+              ? { ...a, status: "failed", updatedAt: now(), note: clipNote(`reviewer failed to start — BLOCKED review (§11): ${err.message}`) }
+              : a,
+          );
+          const prior = attempts.length > 0 && (env.state === "running") ? "waiting" : env.state;
+          const next = env.state === "running" ? withState({ ...env, attempts }, prior, prior === "waiting" ? { waitingReason: "external" } : {}) : { ...env, attempts, updatedAt: now() };
+          return { save: next, value: null };
+        })
+        .catch(() => {});
+      throw err;
+    }
+  }
+
+  // §6 review approves -> merge: exact head approved (a live review claim),
+  // required checks green ON THAT HEAD (queried from the forge), and the
+  // merge itself bound to the approved SHA. The observed merge commit is
+  // recorded as the merged_commit_exists claim.
+  async function workMerge(input) {
+    assertPlainObject(input, "merge input");
+    assertNonEmptyString(input.key, "idempotency key");
+    assertNonEmptyString(input.work, "work");
+    if (!Number.isInteger(input.prNumber) || input.prNumber < 1) {
+      throw controlError("unsupported", "prNumber must be a positive integer");
+    }
+    if (input.method !== undefined && !["merge", "squash", "rebase"].includes(input.method)) {
+      throw controlError("unsupported", `method must be merge|squash|rebase (got ${JSON.stringify(input.method)})`);
+    }
+    const reserved = await reserveOrThrow(input.work, {
+      key: input.key,
+      op: "work.merge",
+      args: argsSnapshot(input),
+      expectedRevision: input.expectedRevision,
+      leaseOwner: RECEIPT_OWNER,
+      leaseTtlMs,
+    });
+    if (reserved.replay) return replayResponse(reserved.receipt, input.work);
+    const receipt = reserved.receipt;
+    const forgeOps = requireForge();
+    try {
+      await work.recordOperationOutcome(input.work, { receiptId: receipt.id, status: "in_flight" });
+      const env = await getWorkOrThrow(input.work);
+      const approval = liveClaimOf(env, REVIEW_CLAIM);
+      if (!approval?.headSha) {
+        throw controlError(
+          "evidence_missing",
+          `merge of work "${input.work}" refused: no live independent_review_approved claim for the current spec — ` +
+            `an exact-head approval is the merge precondition (§11); run work_review first`,
+          { retrySafe: true, details: { missing: ["independent_review_approved"] } },
+        );
+      }
+      const gate = await forgeGate({ env, approval, prNumber: input.prNumber, purpose: "merge" });
+      let merged;
+      try {
+        merged = await forgeOps.merge(gate.repo, input.prNumber, { method: input.method ?? "merge", sha: approval.headSha });
+      } catch (error) {
+        throw forgeMergeError(error, { repoKey: gate.repoKey, prNumber: input.prNumber });
+      }
+      const mergeCommitSha = typeof merged?.data?.sha === "string" && merged.data.sha ? merged.data.sha : null;
+      const claim = {
+        id: `merge:${receipt.id}`,
+        kind: MERGE_CLAIM,
+        specHash: env.spec.hash,
+        headSha: approval.headSha,
+        mergeCommitSha,
+        prNumber: input.prNumber,
+        repoKey: gate.repoKey,
+        observedAt: now(),
+        superseded: false,
+        note: `forge accepted the merge of PR #${input.prNumber} bound to approved head ${approval.headSha}` +
+          (mergeCommitSha ? ` — merge commit ${mergeCommitSha}` : " (the forge response carried no merge commit SHA)"),
+      };
+      assertNoSecretLikeValues(claim, "merge claim");
+      await work.mutateWork(input.work, (e) => {
+        const claims = [...(e.claims ?? []), claim];
+        const evidence = [...(e.evidence ?? [])];
+        const evidenceId = `forge:merge:${gate.repoKey}#${input.prNumber}@${approval.headSha}`;
+        if (!evidence.some((r) => r?.id === evidenceId)) {
+          evidence.push({ kind: "forge", id: evidenceId, observedAt: now() });
+        }
+        return { save: { ...e, claims, evidence, updatedAt: now() }, value: null };
+      });
+      const fresh = await getWorkOrThrow(input.work);
+      const payload = successPayload({
+        env: fresh,
+        receipt,
+        summary: `merged ${gate.repoKey}#${input.prNumber} at the approved head ${approval.headSha}` +
+          (mergeCommitSha ? ` — merge commit ${mergeCommitSha} observed` : "") +
+          `; required checks were green on THAT head (queried from the forge)`,
+        extra: { changed: true, headSha: approval.headSha, mergeCommitSha, prNumber: input.prNumber, checks: gate.checks.length },
+      });
+      await work.recordOperationOutcome(input.work, { receiptId: receipt.id, status: "succeeded", resultCode: "merged", result: payload });
+      return { ok: true, replayed: false, ...payload };
+    } catch (error) {
+      const err = toWorkToolError(error);
+      await recordReceiptFailure(input.work, receipt, err);
+      throw err;
+    }
+  }
+
+  // §6 merge -> release: gated on the project's release CONTRACT (data
+  // naming the existing pipeline — never an executable DSL and never a
+  // guessed universal deploy). The trigger's OBSERVED run + artifact
+  // identity is the evidence; a mutating contract must carry a recovery
+  // reference BEFORE it runs (§11).
+  async function workRelease(input) {
+    assertPlainObject(input, "release input");
+    assertNonEmptyString(input.key, "idempotency key");
+    assertNonEmptyString(input.work, "work");
+    if (input.recoveryRef !== undefined && input.recoveryRef !== null) assertNonEmptyString(input.recoveryRef, "recoveryRef");
+    const envBefore = await getWorkOrThrow(input.work);
+    const dt = envBefore.deliveryTarget;
+    if (dt.kind !== "published" && dt.kind !== "deployed") {
+      throw controlError(
+        "policy_blocked",
+        `work "${input.work}" delivery target ${dt.kind} names no release — work_release applies to published/deployed targets (§6: stages not needed for the declared target are explicitly skipped)`,
+        { retrySafe: false },
+      );
+    }
+    const contract = resolveReleaseContract(releaseContracts, envBefore.project.workspaceId, dt.releaseTarget, dt.channel);
+    if (!contract) {
+      throw controlError(
+        "policy_blocked",
+        `no release contract matches project "${envBefore.project.workspaceId}" target ${JSON.stringify(dt.releaseTarget)} ` +
+          `channel ${JSON.stringify(dt.channel)} — a release contract is DATA naming the existing pipeline; ` +
+          `spec/PR/merge work may finish at its declared target, but the requested deployment is blocked rather than guessed (§11)`,
+        { retrySafe: false },
+      );
+    }
+    if (contract.mutates === true && !input.recoveryRef) {
+      throw controlError(
+        "evidence_missing",
+        `release contract "${contract.id}" mutates configuration/infrastructure — a recovery reference must be ` +
+          `preserved BEFORE the release runs (§11)`,
+        { retrySafe: false },
+      );
+    }
+    const trigger = requireReleaseTrigger();
+    const reserved = await reserveOrThrow(input.work, {
+      key: input.key,
+      op: "work.release",
+      args: argsSnapshot(input),
+      expectedRevision: input.expectedRevision,
+      leaseOwner: RECEIPT_OWNER,
+      leaseTtlMs,
+    });
+    if (reserved.replay) return replayResponse(reserved.receipt, input.work);
+    const receipt = reserved.receipt;
+    let attemptId = null;
+    try {
+      await work.recordOperationOutcome(input.work, { receiptId: receipt.id, status: "in_flight" });
+      attemptId = `att_${newId()}`;
+      await work.mutateWork(input.work, (env) => {
+        const attempt = {
+          id: attemptId,
+          stage: "release",
+          attemptNumber: (env.attempts ?? []).filter((a) => a?.stage === "release").length + 1,
+          specHash: env.spec.hash,
+          receiptId: receipt.id,
+          jobId: null,
+          status: "dispatching",
+          startedAt: now(),
+          updatedAt: now(),
+        };
+        return { save: { ...env, attempts: [...(env.attempts ?? []), attempt], updatedAt: now() }, value: null };
+      });
+      const observed = await trigger({ contract, work: envBefore, deliveryTarget: dt, recoveryRef: input.recoveryRef ?? null });
+      assertNoSecretLikeValues(observed, "release result");
+      if (!observed?.runId || !observed?.artifact?.identity) {
+        throw controlError(
+          "provider_unavailable",
+          `release trigger for "${contract.pipeline}" returned no run/artifact identity — refusing to record a release ` +
+            `without observed identity (§11)`,
+          { retrySafe: true },
+        );
+      }
+      const claim = {
+        id: `release:${receipt.id}`,
+        kind: RELEASE_CLAIM,
+        specHash: envBefore.spec.hash,
+        observedAt: now(),
+        superseded: false,
+        runId: observed.runId,
+        artifact: observed.artifact,
+        pipeline: contract.pipeline,
+        recoveryRef: input.recoveryRef ?? null,
+        note: `pipeline ${contract.pipeline} run ${observed.runId} published ${observed.artifact.identity}` +
+          (observed.artifact.digest ? ` (digest ${observed.artifact.digest})` : "") +
+          (observed.artifact.version ? ` (version ${observed.artifact.version})` : ""),
+      };
+      await work.mutateWork(input.work, (env) => {
+        const claims = [...(env.claims ?? []), claim];
+        const evidence = [...(env.evidence ?? [])];
+        const evidenceId = `release:${contract.pipeline}:${observed.runId}`;
+        if (!evidence.some((r) => r?.id === evidenceId)) {
+          evidence.push({ kind: "release", id: evidenceId, observedAt: now() });
+        }
+        const attempts = (env.attempts ?? []).map((a) =>
+          a?.id === attemptId ? { ...a, status: "reported_complete", updatedAt: now(), note: clipNote(claim.note) } : a,
+        );
+        return { save: { ...env, claims, evidence, attempts, updatedAt: now() }, value: null };
+      });
+      const fresh = await getWorkOrThrow(input.work);
+      const payload = successPayload({
+        env: fresh,
+        receipt,
+        summary: `released work "${input.work}" through contract "${contract.id}" (pipeline ${contract.pipeline}) — ` +
+          `run ${observed.runId} published ${observed.artifact.identity}; the release REQUEST ran, the target is not yet verified`,
+        extra: { changed: true, runId: observed.runId, artifact: observed.artifact, pipeline: contract.pipeline, recoveryRef: input.recoveryRef ?? null },
+      });
+      await work.recordOperationOutcome(input.work, { receiptId: receipt.id, status: "succeeded", resultCode: "released", result: payload });
+      return { ok: true, replayed: false, ...payload };
+    } catch (error) {
+      const err = toWorkToolError(error);
+      await recordReceiptFailure(input.work, receipt, err).catch(() => {});
+      await work
+        .mutateWork(input.work, (env) => ({
+          save: {
+            ...env,
+            attempts: (env.attempts ?? []).map((a) =>
+              a?.id === attemptId && a.status === "dispatching"
+                ? { ...a, status: "failed", updatedAt: now(), note: clipNote(`release failed: ${err.message}`) }
+                : a,
+            ),
+            updatedAt: now(),
+          },
+          value: null,
+        }))
+        .catch(() => {});
+      throw err;
+    }
+  }
+
+  // §11: rollback is an EXPLICIT operation with its own result — never
+  // assumed possible for every migration. It runs only with a recovery
+  // reference (preserved at release time or supplied here) and records only
+  // its own outcome; no completion or verification claim is affected.
+  async function workRollback(input) {
+    assertPlainObject(input, "rollback input");
+    assertNonEmptyString(input.key, "idempotency key");
+    assertNonEmptyString(input.work, "work");
+    if (input.recoveryRef !== undefined && input.recoveryRef !== null) assertNonEmptyString(input.recoveryRef, "recoveryRef");
+    const trigger = requireRollbackTrigger();
+    const envBefore = await getWorkOrThrow(input.work);
+    const dt = envBefore.deliveryTarget;
+    if (dt.kind !== "published" && dt.kind !== "deployed") {
+      throw controlError("policy_blocked", `work "${input.work}" delivery target ${dt.kind} names no release to roll back`, { retrySafe: false });
+    }
+    const releaseClaim = liveClaimOf(envBefore, RELEASE_CLAIM);
+    if (!releaseClaim) {
+      throw controlError("policy_blocked", `work "${input.work}" has no published artifact to roll back (no artifact_published claim)`, { retrySafe: false });
+    }
+    const recoveryRef = input.recoveryRef ?? releaseClaim.recoveryRef ?? null;
+    if (!recoveryRef) {
+      throw controlError(
+        "evidence_missing",
+        `rollback of work "${input.work}" refused: no recovery reference was preserved at release time and none was supplied — ` +
+          `rollback is not assumed possible for every migration (§11)`,
+        { retrySafe: false },
+      );
+    }
+    const contract = resolveReleaseContract(releaseContracts, envBefore.project.workspaceId, dt.releaseTarget, dt.channel);
+    if (!contract) {
+      throw controlError("policy_blocked", `no release contract matches project "${envBefore.project.workspaceId}" — the rollback trigger cannot be addressed (§11)`, { retrySafe: false });
+    }
+    const reserved = await reserveOrThrow(input.work, {
+      key: input.key,
+      op: "work.rollback",
+      args: argsSnapshot(input),
+      expectedRevision: input.expectedRevision,
+      leaseOwner: RECEIPT_OWNER,
+      leaseTtlMs,
+    });
+    if (reserved.replay) return replayResponse(reserved.receipt, input.work);
+    const receipt = reserved.receipt;
+    try {
+      await work.recordOperationOutcome(input.work, { receiptId: receipt.id, status: "in_flight" });
+      const observed = await trigger({ contract, work: envBefore, recoveryRef });
+      assertNoSecretLikeValues(observed, "rollback result");
+      await work.mutateWork(input.work, (env) => {
+        const evidence = [...(env.evidence ?? [])];
+        const evidenceId = `rollback:${receipt.id}`;
+        if (!evidence.some((r) => r?.id === evidenceId)) {
+          evidence.push({ kind: "release", id: evidenceId, observedAt: now() });
+        }
+        return { save: { ...env, evidence, updatedAt: now() }, value: null };
+      });
+      const fresh = await getWorkOrThrow(input.work);
+      const payload = successPayload({
+        env: fresh,
+        receipt,
+        summary: `rollback of work "${input.work}" executed via recovery reference ${recoveryRef} — its own result is recorded; ` +
+          `no completion or verification claim was created or revoked by this operation`,
+        extra: { changed: true, rollback: observed ?? { ok: true }, recoveryRef },
+      });
+      await work.recordOperationOutcome(input.work, { receiptId: receipt.id, status: "succeeded", resultCode: "rolled_back", result: payload });
+      return { ok: true, replayed: false, ...payload };
+    } catch (error) {
+      const err = toWorkToolError(error);
+      await recordReceiptFailure(input.work, receipt, err);
+      throw err;
+    }
+  }
+
+  // §11: production verification NEVER trusts a green build alone. The probe
+  // OBSERVES the actual target; the operation compares what it observed
+  // against the identity the work's own claims already hold (expected sha /
+  // digest / version). Mismatches fail with the target named; matches record
+  // target_runs_artifact, and observed acceptance checks record
+  // acceptance_checks_passed.
+  async function workVerify(input) {
+    assertPlainObject(input, "verify input");
+    assertNonEmptyString(input.key, "idempotency key");
+    assertNonEmptyString(input.work, "work");
+    const probe = requireTargetProbe();
+    const envBefore = await getWorkOrThrow(input.work);
+    const dt = envBefore.deliveryTarget;
+    if (dt.kind !== "deployed" && dt.kind !== "published") {
+      throw controlError(
+        "policy_blocked",
+        `work "${input.work}" delivery target ${dt.kind} names no target instance to verify — work_verify applies to published/deployed targets`,
+        { retrySafe: false },
+      );
+    }
+    // Expected identity comes from the work's OWN observations, never from
+    // the caller's input — a verifier that accepts expected values as
+    // arguments would be an assertion, not a check.
+    const mergeClaim = liveClaimOf(envBefore, MERGE_CLAIM);
+    const releaseClaim = liveClaimOf(envBefore, RELEASE_CLAIM);
+    const approvalClaim = liveClaimOf(envBefore, REVIEW_CLAIM);
+    const expectedSha = mergeClaim?.mergeCommitSha ?? mergeClaim?.headSha ?? approvalClaim?.headSha ?? null;
+    const expectedDigest = releaseClaim?.artifact?.digest ?? null;
+    const expectedVersion = releaseClaim?.artifact?.version ?? null;
+    if (!expectedSha && !expectedDigest && !expectedVersion) {
+      throw controlError(
+        "evidence_missing",
+        `verification of work "${input.work}" refused: the work holds no expected artifact identity ` +
+          `(no merge/release claims) — verification compares observations, it does not assert them (§11)`,
+        { retrySafe: true, details: { missing: ["merged_commit_exists", "artifact_published"] } },
+      );
+    }
+    const reserved = await reserveOrThrow(input.work, {
+      key: input.key,
+      op: "work.verify",
+      args: argsSnapshot(input),
+      expectedRevision: input.expectedRevision,
+      leaseOwner: RECEIPT_OWNER,
+      leaseTtlMs,
+    });
+    if (reserved.replay) return replayResponse(reserved.receipt, input.work);
+    const receipt = reserved.receipt;
+    let attemptId = null;
+    const targetName = dt.instance ?? `${dt.releaseTarget} (${dt.channel})`;
+    try {
+      await work.recordOperationOutcome(input.work, { receiptId: receipt.id, status: "in_flight" });
+      attemptId = `att_${newId()}`;
+      await work.mutateWork(input.work, (env) => {
+        const attempt = {
+          id: attemptId,
+          stage: "verify",
+          attemptNumber: (env.attempts ?? []).filter((a) => a?.stage === "verify").length + 1,
+          specHash: env.spec.hash,
+          receiptId: receipt.id,
+          jobId: null,
+          status: "dispatching",
+          startedAt: now(),
+          updatedAt: now(),
+        };
+        return { save: { ...env, attempts: [...(env.attempts ?? []), attempt], updatedAt: now() }, value: null };
+      });
+      const observed = await probe({ work: envBefore, deliveryTarget: dt, targetName });
+      assertNoSecretLikeValues(observed, "probe result");
+      const observedSha = typeof observed?.sha === "string" && observed.sha ? observed.sha : null;
+      const observedDigest = typeof observed?.digest === "string" && observed.digest ? observed.digest : null;
+      const observedVersion = typeof observed?.version === "string" && observed.version ? observed.version : null;
+      const comparable =
+        (expectedSha && observedSha) || (expectedDigest && observedDigest) || (expectedVersion && observedVersion);
+      if (!comparable) {
+        throw controlError(
+          "evidence_missing",
+          `the probe of ${targetName} observed nothing comparable (sha/digest/version) — verification never trusts ` +
+            `a green build alone, and it also never asserts a match it could not compare (§11)`,
+          { retrySafe: true },
+        );
+      }
+      const mismatches = [];
+      if (expectedSha && observedSha && observedSha !== expectedSha) mismatches.push(`sha expected ${expectedSha}, observed ${observedSha}`);
+      if (expectedDigest && observedDigest && observedDigest !== expectedDigest) mismatches.push(`digest expected ${expectedDigest}, observed ${observedDigest}`);
+      if (expectedVersion && observedVersion && observedVersion !== expectedVersion) mismatches.push(`version expected ${expectedVersion}, observed ${observedVersion}`);
+      if (mismatches.length > 0) {
+        throw controlError(
+          "target_changed",
+          `verification of ${targetName} FAILED — the target does not run the expected artifact: ${mismatches.join("; ")} (§11)`,
+          { retrySafe: false, details: { mismatches } },
+        );
+      }
+      const checks = Array.isArray(observed?.checks) ? observed.checks : [];
+      const failedChecks = checks.filter((c) => c?.passed !== true);
+      const runsClaim = {
+        id: `verify:${receipt.id}:runs`,
+        kind: TARGET_RUNS_CLAIM,
+        specHash: envBefore.spec.hash,
+        observedAt: now(),
+        superseded: false,
+        target: targetName,
+        expectedSha,
+        observedSha,
+        expectedDigest,
+        observedDigest,
+        expectedVersion,
+        observedVersion,
+        note: `${targetName} runs the expected artifact` +
+          (observedSha ? ` (sha ${observedSha})` : "") +
+          (observedDigest ? ` (digest ${observedDigest})` : "") +
+          (observedVersion ? ` (version ${observedVersion})` : ""),
+      };
+      const acceptanceClaim = checks.length > 0 && failedChecks.length === 0
+        ? {
+            id: `verify:${receipt.id}:acceptance`,
+            kind: ACCEPTANCE_CLAIM,
+            specHash: envBefore.spec.hash,
+            observedAt: now(),
+            superseded: false,
+            target: targetName,
+            checks: checks.map((c) => ({ name: c?.name ?? "unnamed", passed: true })),
+            note: `acceptance checks passed on ${targetName}: ${checks.map((c) => c?.name ?? "unnamed").join(", ")}`,
+          }
+        : null;
+      for (const claim of [runsClaim, acceptanceClaim]) {
+        if (claim) assertNoSecretLikeValues(claim, `${claim.kind} claim`);
+      }
+      await work.mutateWork(input.work, (env) => {
+        const claims = [...(env.claims ?? []), runsClaim, ...(acceptanceClaim ? [acceptanceClaim] : [])];
+        const evidence = [...(env.evidence ?? [])];
+        const evidenceId = `verify:${receipt.id}`;
+        if (!evidence.some((r) => r?.id === evidenceId)) {
+          evidence.push({ kind: "release", id: evidenceId, observedAt: now() });
+        }
+        const attempts = (env.attempts ?? []).map((a) =>
+          a?.id === attemptId
+            ? {
+                ...a,
+                status: "verified",
+                updatedAt: now(),
+                note: clipNote(runsClaim.note + (failedChecks.length > 0 ? `; acceptance checks FAILED: ${failedChecks.map((c) => c?.name ?? "unnamed").join(", ")}` : "")),
+              }
+            : a,
+        );
+        return { save: { ...env, claims, evidence, attempts, updatedAt: now() }, value: null };
+      });
+      if (failedChecks.length > 0) {
+        throw controlError(
+          "policy_blocked",
+          `acceptance checks FAILED on ${targetName}: ${failedChecks.map((c) => c?.name ?? "unnamed").join(", ")} — ` +
+            `the target runs the expected artifact but the acceptance criteria do not hold (§11)`,
+          { retrySafe: false, details: { failed: failedChecks.map((c) => c?.name ?? "unnamed") } },
+        );
+      }
+      const fresh = await getWorkOrThrow(input.work);
+      const payload = successPayload({
+        env: fresh,
+        receipt,
+        summary: `verified ${targetName} against the work's own claims — it runs the expected artifact` +
+          (checks.length > 0 ? `; ${checks.length} acceptance check(s) passed` : "; no acceptance checks were reported by the probe"),
+        extra: {
+          changed: true,
+          observed: { sha: observedSha, digest: observedDigest, version: observedVersion },
+          acceptanceChecks: checks.length,
+        },
+      });
+      await work.recordOperationOutcome(input.work, { receiptId: receipt.id, status: "succeeded", resultCode: "verified", result: payload });
+      return { ok: true, replayed: false, ...payload };
+    } catch (error) {
+      const err = toWorkToolError(error);
+      await recordReceiptFailure(input.work, receipt, err).catch(() => {});
+      await work
+        .mutateWork(input.work, (env) => ({
+          save: {
+            ...env,
+            attempts: (env.attempts ?? []).map((a) =>
+              a?.id === attemptId && a.status === "dispatching"
+                ? { ...a, status: "failed", updatedAt: now(), note: clipNote(`verification failed: ${err.message}`) }
+                : a,
+            ),
+            updatedAt: now(),
+          },
+          value: null,
+        }))
+        .catch(() => {});
+      throw err;
+    }
+  }
+
+  // §6 -> completed: the ONE verified-completion transition, owned by the
+  // declared delivery target's evidence chain — completion evidence, not
+  // merely worker prose. Stages not needed for the target are skipped, not
+  // recorded as executions.
+  function completionRequirements(env) {
+    const missing = [];
+    const claims = [];
+    const need = (kind, label) => {
+      const claim = liveClaimOf(env, kind);
+      if (!claim) missing.push(label);
+      else claims.push({ claimId: claim.id, kind });
+      return claim;
+    };
+    const dt = env.deliveryTarget;
+    switch (dt.kind) {
+      case "spec":
+        need(IMPLEMENTATION_CLAIM, "implementation_reported (the settled-spec report)");
+        break;
+      case "pr":
+        need(REVIEW_CLAIM, "independent_review_approved for the current spec");
+        break;
+      case "merged":
+        need(MERGE_CLAIM, "merged_commit_exists (a forge-observed merge of the approved head)");
+        break;
+      case "published":
+        need(MERGE_CLAIM, "merged_commit_exists (§6: merge precedes release)");
+        need(RELEASE_CLAIM, "artifact_published (an observed pipeline run + artifact identity)");
+        break;
+      case "deployed":
+        need(MERGE_CLAIM, "merged_commit_exists (§6: merge precedes release)");
+        need(RELEASE_CLAIM, "artifact_published (an observed pipeline run + artifact identity)");
+        need(TARGET_RUNS_CLAIM, "target_runs_artifact (live verification of the actual target)");
+        need(ACCEPTANCE_CLAIM, "acceptance_checks_passed on that target");
+        break;
+      default:
+        missing.push(`delivery target kind ${JSON.stringify(dt?.kind)}`);
+    }
+    return { missing, claims };
+  }
+
+  async function workComplete(input) {
+    assertPlainObject(input, "complete input");
+    assertNonEmptyString(input.key, "idempotency key");
+    assertNonEmptyString(input.work, "work");
+    const envBefore = await getWorkOrThrow(input.work);
+    if (envBefore.state === "completed") {
+      throw controlError("policy_blocked", `work "${input.work}" is already completed`, { retrySafe: false });
+    }
+    if (["draft", "running", "paused", "cancelled", "archived", "needs_decision", "failed"].includes(envBefore.state)) {
+      throw controlError(
+        "policy_blocked",
+        `work "${input.work}" is ${envBefore.state}${envBefore.waitingReason ? ` (${envBefore.waitingReason})` : ""} — ` +
+          `completion verifies a delivered target from a settled state`,
+        { retrySafe: false },
+      );
+    }
+    const dt = envBefore.deliveryTarget;
+    if (dt.kind === "pr" && (input.prNumber === undefined || !Number.isInteger(input.prNumber) || input.prNumber < 1)) {
+      // A pr-target work completes on an OPEN PR (§6) — the gate needs the PR
+      // to run against; the CTO supplies it at completion time.
+      throw controlError("unsupported", "work_complete for a pr delivery target requires prNumber (the open PR the gate runs on, §6)", { retrySafe: false });
+    }
+    const reserved = await reserveOrThrow(input.work, {
+      key: input.key,
+      op: "work.complete",
+      args: argsSnapshot(input),
+      expectedRevision: input.expectedRevision,
+      leaseOwner: RECEIPT_OWNER,
+      leaseTtlMs,
+    });
+    if (reserved.replay) return replayResponse(reserved.receipt, input.work);
+    const receipt = reserved.receipt;
+    try {
+      await work.recordOperationOutcome(input.work, { receiptId: receipt.id, status: "in_flight" });
+      const env = await getWorkOrThrow(input.work);
+      // Fresh evidence collection: claims may have been superseded between
+      // the reserve and now (e.g. a concurrent review rejection).
+      const { missing, claims } = completionRequirements(env);
+      if (missing.length > 0) {
+        throw controlError(
+          "evidence_missing",
+          `work "${input.work}" cannot complete: ${missing.join("; ")} — completion is evidence, not worker prose (§11)`,
+          { retrySafe: true, details: { missing } },
+        );
+      }
+      let gate = null;
+      if (dt.kind === "pr") {
+        const approval = liveClaimOf(env, REVIEW_CLAIM);
+        gate = await forgeGate({ env, approval, prNumber: input.prNumber, purpose: "completion" });
+      }
+      const fresh = await work.mutateWork(input.work, (e) => {
+        if (e.state === "completed") return { save: null, value: null };
+        return { save: withState(e, "completed"), value: { state: "completed" } };
+      });
+      const payload = successPayload({
+        env: fresh ?? env,
+        receipt,
+        summary: `work "${input.work}" COMPLETED — delivery target ${describeDeliveryTarget(dt)} satisfied by evidence: ` +
+          claims.map((c) => c.kind).join(", ") +
+          (gate ? `; the gate was re-observed live on ${gate.repoKey}#${input.prNumber} at head ${gate.pr.headSha}` : ""),
+        extra: { changed: true, evidence: claims, ...(gate ? { gate: { headSha: gate.pr.headSha, rollup: gate.rollup } } : {}) },
+      });
+      await work.recordOperationOutcome(input.work, { receiptId: receipt.id, status: "succeeded", resultCode: "completed", result: payload });
+      return { ok: true, replayed: false, ...payload };
+    } catch (error) {
+      const err = toWorkToolError(error);
+      await recordReceiptFailure(input.work, receipt, err);
+      throw err;
+    }
+  }
+
   return {
     // reads
     workList,
@@ -2037,6 +3306,13 @@ export function createCtoWorkControl({
     workAnswerDecision,
     workArchive,
     workCleanup,
+    // §11 stage operations
+    workReview,
+    workMerge,
+    workRelease,
+    workRollback,
+    workVerify,
+    workComplete,
     // engine-facing outcome routing (delegate.onJobTerminal)
     recordWorkerOutcome,
   };
@@ -2272,5 +3548,99 @@ export function registerCtoWorkTools(register, workControl) {
       expectedRevision: { type: "number", description: "The work revision you read (omit to skip the CAS)." },
     },
     (args) => workControl.workCleanup(args),
+  );
+
+  // ---- §11 work-stage operations (review / merge / release / verify) -------
+
+  def(
+    "work_review",
+    "Dispatch an INDEPENDENT reviewer for an exact head SHA: its own context (isolated worktree), the " +
+      "requested reviewer model passed through verbatim (never substituted), the pinned spec hash in the " +
+      "prompt. The reviewer's terminal report — only through its machine-readable VERDICT line — becomes an " +
+      "independent_review_approved claim pinned to that head, or a rejection that supersedes the " +
+      "implementation claim. A reviewer failing to start is a BLOCKED review. Idempotent via key.",
+    {
+      key: { type: "string", description: "Stable idempotency key." },
+      work: { type: "string", description: "The work id (ready, or reported-complete awaiting its next stages)." },
+      headSha: { type: "string", description: "The exact candidate head SHA to review." },
+      reviewerModel: { type: "string", description: "The requested reviewer model — used verbatim, never substituted." },
+      subagentType: { type: "string", description: "Optional subagent type / intent for the reviewer." },
+      expectedRevision: { type: "number", description: "The work revision you read (omit to skip the CAS)." },
+    },
+    (args) => workControl.workReview(args),
+  );
+
+  def(
+    "work_merge",
+    "Merge a PR under the §11 gate: requires a live independent_review_approved claim for the current spec; " +
+      "reads the PR's LIVE head from the forge (a moved head invalidates the approval and refuses with " +
+      "target_changed), queries required checks FROM THE FORGE for THAT head, then merges bound to the " +
+      "approved SHA. Records the merged_commit_exists claim with the observed merge commit. Idempotent via key.",
+    {
+      key: { type: "string", description: "Stable idempotency key." },
+      work: { type: "string", description: "The work id (its project.repositoryId names the repo as owner/repo)." },
+      prNumber: { type: "number", description: "The PR number to merge." },
+      method: { type: "string", description: "merge (default) | squash | rebase." },
+      expectedRevision: { type: "number", description: "The work revision you read (omit to skip the CAS)." },
+    },
+    (args) => workControl.workMerge(args),
+  );
+
+  def(
+    "work_release",
+    "Release through the project's release CONTRACT — data naming the existing pipeline, its allowed " +
+      "target/channel and artifact identity; never a guessed deploy. Missing contract → visibly blocked. The " +
+      "trigger's observed run + artifact identity is recorded as artifact_published. A contract that mutates " +
+      "configuration/infrastructure requires recoveryRef BEFORE it runs. Idempotent via key.",
+    {
+      key: { type: "string", description: "Stable idempotency key." },
+      work: { type: "string", description: "The work id (published/deployed delivery target)." },
+      recoveryRef: { type: "string", description: "Recovery reference preserved before a mutating release runs (required when the contract declares mutates)." },
+      expectedRevision: { type: "number", description: "The work revision you read (omit to skip the CAS)." },
+    },
+    (args) => workControl.workRelease(args),
+  );
+
+  def(
+    "work_rollback",
+    "EXPLICIT rollback of a published release, through the preserved recovery reference (the release record's " +
+      "or one supplied here) — rollback is never assumed possible for every migration. Records only its own " +
+      "result; touches no completion or verification claim. Idempotent via key.",
+    {
+      key: { type: "string", description: "Stable idempotency key." },
+      work: { type: "string", description: "The work id (must hold an artifact_published claim)." },
+      recoveryRef: { type: "string", description: "Recovery reference (falls back to the one preserved on the release record)." },
+      expectedRevision: { type: "number", description: "The work revision you read (omit to skip the CAS)." },
+    },
+    (args) => workControl.workRollback(args),
+  );
+
+  def(
+    "work_verify",
+    "Verify the ACTUAL target (§11: never trust a green build alone): the probe OBSERVES sha/digest/version " +
+      "and the operation compares them to the identity the work's own merge/release claims already hold. " +
+      "Mismatch → target_changed, no claim. Match → target_runs_artifact; observed acceptance checks that all " +
+      "pass record acceptance_checks_passed. Idempotent via key.",
+    {
+      key: { type: "string", description: "Stable idempotency key." },
+      work: { type: "string", description: "The work id (published/deployed delivery target)." },
+      expectedRevision: { type: "number", description: "The work revision you read (omit to skip the CAS)." },
+    },
+    (args) => workControl.workVerify(args),
+  );
+
+  def(
+    "work_complete",
+    "The ONE verified-completion transition. Checks the DECLARED delivery target's evidence chain on the " +
+      "work record: spec → settled-spec report; pr → review approval + live forge gate on the open PR; merged " +
+      "→ observed merge; published → merge + artifact; deployed → merge + artifact + live verification + " +
+      "acceptance checks. Missing evidence refuses — completion is evidence, not worker prose. Idempotent via key.",
+    {
+      key: { type: "string", description: "Stable idempotency key." },
+      work: { type: "string", description: "The work id." },
+      prNumber: { type: "number", description: "For a pr delivery target: the open PR the gate re-observes." },
+      expectedRevision: { type: "number", description: "The work revision you read (omit to skip the CAS)." },
+    },
+    (args) => workControl.workComplete(args),
   );
 }

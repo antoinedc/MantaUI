@@ -56,14 +56,59 @@
 //       is dispatchable again — never silently de-isolated
 //   W17 sandbox canary: the production work + control stores resolve under
 //       MANTA_STATE_HOME
-//   W18 tool registration: 15 family tools, reads auto, mutations confirm,
-//       params action-specific (no shared args bag)
+//   W18 tool registration: 21 family tools (15 dispatch-half + 6 §11 stage
+//       operations), reads auto, mutations confirm, params action-specific
+//       (no shared args bag)
 //   W19 outcome adoption is idempotent and spec-stale-aware: a repeated
 //       terminal event advances at most once; an attempt whose spec hash no
 //       longer matches is superseded WITHOUT advancing the work (U13)
 //   W20 resume reconciles: a paused worker is resumed in its worktree, a
 //       terminal outcome that landed while paused is adopted, and the
 //       resulting admission state is decided from the reconciliation
+//
+// §11 — review / merge / release / verify (each observation by EVIDENCE, with
+// its counterfactual positive control):
+//   V1  independent review: the reviewer dispatch pins the exact head + spec
+//       hash, passes the REQUESTED model through verbatim, runs in an
+//       independent context; an approval records independent_review_approved
+//       from the reviewer's terminal report; counterfactual: a report without
+//       a machine-readable verdict records a failed review, never a guess
+//   V2  a reviewer failing to start is a BLOCKED review — no approval claim,
+//       the requested model never silently substituted; counterfactual: with
+//       the engine healthy the reviewer dispatches
+//   V3  the review-rejection cascade (the carry-forward): A claims complete →
+//       B admitted on A's claim → A's review rejects → A's implementation
+//       claim is SUPERSEDED → B's dependency reads unmet; counterfactual: an
+//       approving review leaves the claim live and downstream dispatchable
+//   V4  head-change invalidation: a new-head review request or the forge's
+//       live PR head invalidates an approval of a different head — never
+//       preserved silently; counterfactual: matching head → merge proceeds
+//   V5  the merge gate: required checks queried FROM THE FORGE for THAT head;
+//       the merge is bound to the approved SHA (matching-head precondition);
+//       merge records merged_commit_exists with the observed merge commit;
+//       counterfactual: no approval → evidence_missing; not-green → no merge
+//   V6  release contract: DATA (closed field set, non-executable) resolved per
+//       project/target/channel; missing contract → visibly blocked; the
+//       trigger's observed run + artifact identity is the claim; a mutating
+//       contract requires the recovery reference BEFORE it runs; counterfactual:
+//       contract + trigger → artifact_published recorded
+//   V7  rollback is explicit: needs a preserved recovery reference and a wired
+//       trigger, records only its own result; counterfactual: wired + ref →
+//       the trigger ran
+//   V8  verification never trusts a green build alone: the probe's
+//       observations are compared to the work's OWN claims (sha/digest/
+//       version); mismatch → target_changed, no claim; acceptance failures
+//       record the identity but not acceptance_checks_passed; counterfactual:
+//       matching probe → both claims recorded
+//   V9  verified completion is the one "completed" writer, gated per delivery
+//       target on the evidence chain; counterfactual: missing evidence →
+//       evidence_missing
+//   V10 secret hygiene: token-shaped material anywhere a record is written is
+//       refused — tokens stay in the service clients; counterfactual: clean
+//       records pass
+//   V11 pure helpers: parseReviewVerdict (marker contract, not keyword
+//       search), resolveReleaseContract (scoped over global, ambiguous →
+//       error), parseRepoKey
 //
 // Sandbox discipline: ctoTestGuard aborts without MANTA_STATE_HOME; every
 // store is a per-test fixture under the sandbox; MANTA_OPENCODE_DB is armed
@@ -260,6 +305,12 @@ function makeWorkControl({
   conversationId = "ses_cto",
   maxStageAttempts,
   cap,
+  // ---- §11 stage deps ------------------------------------------------------
+  forge = null,
+  releaseContracts = [],
+  releaseTrigger = null,
+  rollbackTrigger = null,
+  targetProbe = null,
 } = {}) {
   const ws = store ?? workStoreFixture();
   const lg = ledger ?? ledgerFixture();
@@ -277,8 +328,40 @@ function makeWorkControl({
     resolveCwd: resolveCwdOrThrow,
     getConversationId: async () => conversationId,
     ...(maxStageAttempts !== undefined ? { maxStageAttempts } : {}),
+    ...(forge !== null ? { forge } : {}),
+    ...(releaseContracts !== undefined ? { releaseContracts } : {}),
+    ...(releaseTrigger !== null ? { releaseTrigger } : {}),
+    ...(rollbackTrigger !== null ? { rollbackTrigger } : {}),
+    ...(targetProbe !== null ? { targetProbe } : {}),
   });
   return { control, calls: spy.calls, jobs: spy.state, workStore: ws, ledger: lg, live };
+}
+
+// A forge spy mirroring the REAL adapter contract (src/server/forge/github.mjs):
+// getPullRequest → {data: {headSha, headRef, state, ...}}, getChecks(repo, sha)
+// → {data: [{name, status, conclusion}]}, merge(repo, number, {method, sha}) →
+// {data: {sha, merged}} or a typed throw ({status, kind}). No live forge call
+// ever happens in a test.
+function makeForgeSpy({ prs = {}, checksBySha = {}, mergeError = null, mergeSha = "mergecommit40hex0123456789abcd" } = {}) {
+  const calls = [];
+  return {
+    calls,
+    async getPullRequest(repo, number) {
+      calls.push({ name: "getPullRequest", repo: `${repo.owner}/${repo.repo}`, number });
+      const pr = prs[number];
+      if (!pr) return { data: null, stale: false };
+      return { data: { number, headSha: pr.headSha, headRef: pr.headRef ?? "feature/x", state: pr.state ?? "open", title: "the PR" }, stale: false };
+    },
+    async getChecks(repo, sha) {
+      calls.push({ name: "getChecks", repo: `${repo.owner}/${repo.repo}`, sha });
+      return { data: checksBySha[sha] ?? [], stale: false };
+    },
+    async merge(repo, number, { method, sha }) {
+      calls.push({ name: "merge", repo: `${repo.owner}/${repo.repo}`, number, method, sha });
+      if (mergeError) throw mergeError;
+      return { data: { sha: mergeSha, merged: true, method }, stale: false };
+    },
+  };
 }
 
 // Standard work fixture: created READY against the explicit "manta" project.
