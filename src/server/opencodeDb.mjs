@@ -115,3 +115,40 @@ export function _resetDbHandle() {
 export function _getDbHandle() {
   return dbHandle;
 }
+
+// lookupProjectIdByDirectory(directory) → opencode project id | null
+//
+// §4.1's live observation path for the project-identity work: the opencode
+// project id opencode CURRENTLY resolves for a checkout directory. Read-only,
+// bounded, and degrading — a missing DB, schema drift, or any query error
+// yields null (an unobservable id never blocks or guesses).
+//
+// A directory lookup can return MULTIPLE project rows after a remote-less
+// recreation forks the id [PROVEN in §4.1]. Disambiguate by LIVENESS, not by
+// row order: the live id is the one opencode most recently stamped on a
+// session row pointing at that project. The `global` pseudo-project id is
+// never returned (§4.1: never persist it as a repository identity either).
+export async function lookupProjectIdByDirectory(directory) {
+  if (typeof directory !== "string" || directory.length === 0) return null;
+  const db = await getDb();
+  if (!db) return null;
+  try {
+    const rows = db
+      .prepare("SELECT project_id AS id FROM project_directory WHERE directory = ?")
+      .all(directory);
+    const ids = [...new Set(rows.map((r) => (r?.id == null ? null : String(r.id))).filter((id) => id && id !== "global"))];
+    if (ids.length === 0) return null;
+    if (ids.length === 1) return ids[0];
+    const placeholders = ids.map(() => "?").join(",");
+    const live = db
+      .prepare(
+        `SELECT project_id AS id FROM session WHERE project_id IN (${placeholders})
+         ORDER BY COALESCE(time_created, 0) DESC LIMIT 1`,
+      )
+      .all(...ids);
+    const id = live[0]?.id == null ? null : String(live[0].id);
+    return id && ids.includes(id) ? id : null;
+  } catch {
+    return null;
+  }
+}

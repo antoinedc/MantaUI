@@ -140,7 +140,7 @@ Every fact is labeled:
   `resolveForgeOwner`, `observeEvent` completion (sawBusy/idle), sweeper (30-min timeout,
   `delegate.mjs` sweeper), boot reconciliation in `index.mjs`.
 
-## 4. Project stable ID (spec §4.1 / §5.1 `ProjectRef`) — RESOLVED (probe pass 2026-09-18)
+## 4. Project stable ID (spec §4.1 / §5.1 `ProjectRef`) — RESOLVED + ADOPTED (probe 2026-09-18, adoption 2026-09-19)
 
 **Seams:** `src/server/tmux.mjs` (`parseSessions`, `listProjects`), `~/.manta/tmux-sessions.json`
 store, `src/server/local.mjs` (`listProjects` config store), `src/server/projectsRoute.mjs`.
@@ -270,7 +270,8 @@ Why not opencode's ids — against the four failure modes that matter:
    Re-attaching a recreated record to the old key must key on REPOSITORY identity (opencode
    project id / normalized remote), never on path or name.
 
-**`ProjectRef` mapping (spec §5.1):**
+**`ProjectRef` mapping (spec §5.1)** — ADOPTED 2026-09-19: `workspaceId` is the minted key on
+every new work envelope; legacy envelopes keyed by the tmux name still resolve (see §4.1a):
 
 - `workspaceId` ← the Manta `projectId`. opencode's workspace class is dead on this box
   [SOURCE + OBSERVATION]; do not pre-adopt experimental workspaces — extend the mapping only
@@ -278,8 +279,13 @@ Why not opencode's ids — against the four failure modes that matter:
 - `repositoryId` ← opencode `project.id`: for remote-backed repos it IS the repository identity
   (deterministic, machine-stable) [PROVEN]; for remote-less repos mark `repositoryId` UNMAPPED
   (spec §4.1's explicit-unmapped state) rather than persisting the fork-prone root-commit id.
+  Remote-backed but unobservable (no readable opencode DB) also degrades to UNMAPPED — never a
+  guess. The remote-backed classification reads the checkout's origin URL (`file://` remotes
+  excluded, matching opencode's normalizer); a caller-supplied `repositoryId` always wins.
 - `repositoryRoot` ← the validated checkout path at use time; never persisted as identity
-  (moves are normal).
+  (moves are normal). Dispatch/review validate the LIVE session's path, not the create-time
+  snapshot. The delegate job's `targetProject` stays the LIVE tmux name (the window-placement
+  handle, revalidated at dispatch); the durable key lives only in the ProjectRef.
 
 **`opencodeProjectId` cache semantics:** the last OBSERVED opencode project id for the record's
 directory — a cache, never authoritative. It changes legitimately (remote attach migrates it
@@ -289,6 +295,56 @@ already migrated its sessions; Manta follows, it does not fight. Live re-resolut
 session object's `projectID` field, or a read-only `project_directory` lookup by directory
 (same read path as `opencodeDb.mjs` — note a directory lookup can return MULTIPLE projects
 after a fork; disambiguate by liveness, not by ordering).
+
+#### 4.1a The rebind-on-rename rule — SETTLED (2026-09-19, adoption PR)
+
+§4.1 said a rename must REBIND the existing record but deliberately left open HOW Manta
+recognises one: Manta's config keys projects by tmux session NAME, so after a rename the only
+surviving signal is the checkout DIRECTORY. The settled rule (`resolveProjectIdentity` in
+`src/server/ctoMantaTools.mjs` — the one identity surface; `createProjectIdentityAdapter` is its
+single I/O wrapper):
+
+**A live tmux session that matches no record under its name is the RENAME of an existing
+project — and its record is REBOUND (keeps its minted `projectId`, moves its name, refreshes
+its cwd) — iff ALL of:**
+
+1. **Unique orphan**: exactly ONE orphaned record (its name matches no live session) is
+   anchored at the same checkout directory (`defaultCwd` equality — both sides come from the
+   same tmux reporting; `"~"`/empty anchors never match). The anchor must be UNCONTESTED: two
+   orphaned records on one directory is undecidable — no rebind for either.
+2. **Unclaimed live target**: the live session carries no record of its own (a session already
+   claimed by another record belongs to that identity), and is the only unclaimed live session
+   at the anchor.
+3. **Repository identity does not CONTRADICT**: when the record's cached `opencodeProjectId`
+   AND a live observation for the directory both exist and differ, the path now hosts a
+   different repository (remote-less recreation forks the id [PROVEN]; a remote attach migrates
+   it [PROVEN]) — a rename observed together with an identity change is not separable, so the
+   rebind is REFUSED and the live session is minted as a NEW project (the old record stays
+   orphaned). When either side is unobservable, the directory match stands alone.
+
+Resolution order: exact live name → durable `projectId` / stale record name (a legacy
+name-keyed work envelope resolves through its record the same way) → the historical
+case-insensitive guards (`target_changed` / `target_ambiguous`) → `target_not_found`. On every
+rebind the record's `opencodeProjectId` cache is adopted from the live observation. Mints
+happen at creation (`projects_create`) and on first sight of an existing project; an id-less
+record (desktop-era) is migrated IN PLACE — never re-keyed as a new project. Reads resolve
+identically but persist nothing.
+
+**What the rule CANNOT recover — fail-closed outcomes, each visible as an error naming the
+stored key and checkout, never a guess:**
+
+- **Rename + directory move observed together.** The orphan's anchor no longer matches any
+  live session's directory; the key resolves to nothing until a human re-points it.
+- **Rename + repository-identity change observed together** (remote attach, or remote-less
+  recreation with no intervening touch to refresh the cache). Refused by rule 3; the live
+  session gets a NEW key. Any write-path touch between the two changes refreshes the cache
+  (adoption) and makes the later rename rebind normally.
+- **Two orphaned records sharing one directory** (two sessions over one checkout, both
+  renamed). Contested anchor — undecidable which one the new session is.
+- In every refused case the old record keeps its key; work records keyed by it fail
+  `target_not_found` / `target_ambiguous` and recover by re-issuing against the live session
+  name. A silently-wrong rebind (dispatching a worker into the wrong repository) is worse than
+  a refused one — the rule prefers failing closed (spec §1.1).
 
 **Still forbidden (unchanged):** branch names, display titles, tmux names, and paths as keys;
 settling any observed id into `ProjectRef` without the semantics above.
@@ -397,7 +453,7 @@ are gone (verified). `~/.manta` state was never touched.
 | Headless parent dispatch? | Not supported: `resolveOwner` requires parent tmux window | PROVEN (failure path) |
 | `isolationRequired`? | No — worktree failure silently falls back to parent dir | PROVEN (fallback path) |
 | Job ID ordering? | `genId()` after worktree + window creation, inside store lock | PROVEN |
-| Stable project ID? | Manta: tmux session name only. opencode: `project.id` is a repository-identity hash — sha1 of the normalized git remote (else cached `<common-dir>/opencode`, else root commit, else `"global"`); N worktrees share ONE project row; moves keep the id; remote-less recreate forks it; remote attach migrates it; `workspace` table unused (0 rows). **ProjectRef mapping RESOLVED — §4 + decision §4.1** | derivation + lifecycle PROVEN (probe pass 2026-09-18, §4 probe log) / experimental-workspace semantics UNVERIFIED |
+| Stable project ID? | Manta: a minted `projectId` on the config `projects[]` record (§4.1 decision) — ADOPTED 2026-09-19 with the §4.1a rename-rebind rule. opencode: `project.id` is a repository-identity hash — sha1 of the normalized git remote (else cached `<common-dir>/opencode`, else root commit, else `"global"`); N worktrees share ONE project row; moves keep the id; remote-less recreate forks it; remote attach migrates it; `workspace` table unused (0 rows). **ProjectRef mapping RESOLVED + ADOPTED — §4 + decision §4.1 + §4.1a** | derivation + lifecycle PROVEN (probe pass 2026-09-18, §4 probe log) / experimental-workspace semantics UNVERIFIED |
 | `MANTA_STATE_HOME` redirects opencode DB? | No — only `MANTA_OPENCODE_DB`/`XDG_DATA_HOME`/`$HOME/.local/share` | PROVEN |
 | Read-only DB invariant? | `DatabaseSync(path, {readOnly:true})`, `null` on unsupported/missing | PROVEN + regression-pinned by this PR |
 
