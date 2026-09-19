@@ -147,6 +147,7 @@ import { MAX_RUNNING_JOBS, CAP_ERROR } from "./delegate.mjs";
 import { ctoPath, lockForStore, workStore, mantaControlStore } from "./ctoStores.mjs";
 import { stateHome } from "../shared/paths.mjs";
 import { resolveCwdOrThrow } from "./tmux.mjs";
+import { makeJsonStoreFixture } from "./ctoTestJsonStore.mjs";
 
 // ---------------------------------------------------------------------------
 // Fixtures — what the real server produces. Project cwds are REAL directories
@@ -189,24 +190,9 @@ function workStoreFixture() {
 }
 
 function ledgerFixture() {
-  testSeq += 1;
-  const file = ctoPath("work-tools-test", `ledger-${testSeq}.json`);
-  return {
-    name: "manta-control",
-    path: file,
-    load: async () => {
-      try {
-        return JSON.parse(await readFile(file, "utf-8"));
-      } catch (error) {
-        if (error.code === "ENOENT") return { v: 1 };
-        throw error;
-      }
-    },
-    save: async (data) => {
-      await mkdir(dirname(file), { recursive: true });
-      await writeFile(file, JSON.stringify(data, null, 2));
-    },
-  };
+  // Shared fixture body (ctoTestStores.mjs) — the duplication gate scans
+  // every changed file pairwise.
+  return makeJsonStoreFixture("work-tools-test", "ledger");
 }
 
 function makeClock() {
@@ -410,6 +396,24 @@ function makeForgeSpy({ prs = {}, checksBySha = {}, mergeError = null, mergeSha 
 }
 
 // Standard work fixture: created READY against the explicit "manta" project.
+// A direct createCtoWorkControl composition for tests that need a SEPARATE
+// control instance next to the makeWorkControl one (custom spy engine or a
+// wrapped startJob over a distinct store).
+function directWorkControl({ store, spy }) {
+  return createCtoWorkControl({
+    store,
+    createReceiptsStore: ledgerFixture(),
+    now: makeClock(),
+    listProjects: async () => fixtureProjects(),
+    listDelegateJobs: async () => spy.state.jobs,
+    delegateOps: spy.engine,
+    resolveCwd: resolveCwdOrThrow,
+    getConversationId: async () => "ses_cto",
+    observeOpencodeProjectId: async () => null,
+    gitRemoteUrl: async () => null,
+  });
+}
+
 async function seedReadyWork(control, overrides = {}) {
   const created = await control.workCreate({
     key: `create-${overrides.id ?? "seed"}`,
@@ -1240,18 +1244,7 @@ test("cleanup removes only owned terminal resources via the existing non-forced 
     if (id === dispatched.jobId) return { ok: false, reason: "dirty" };
     return { ok: true };
   };
-  const control2 = createCtoWorkControl({
-    store: workStoreFixture(),
-    createReceiptsStore: ledgerFixture(),
-    now: makeClock(),
-    listProjects: async () => fixtureProjects(),
-    listDelegateJobs: async () => spy.state.jobs,
-    delegateOps: spy.engine,
-    resolveCwd: resolveCwdOrThrow,
-    getConversationId: async () => "ses_cto",
-    observeOpencodeProjectId: async () => null,
-    gitRemoteUrl: async () => null,
-  });
+  const control2 = directWorkControl({ store: workStoreFixture(), spy });
   const c2work = await control2.workCreate({
     key: "w12-c2",
     project: "manta",
@@ -1386,18 +1379,7 @@ test("the stage attempt is linked before prompt delivery (the startJob spy sees 
     envAtDispatch = JSON.parse(raw);
     return originalStart(input);
   };
-  const control = createCtoWorkControl({
-    store,
-    createReceiptsStore: ledgerFixture(),
-    now: makeClock(),
-    listProjects: async () => fixtureProjects(),
-    listDelegateJobs: async () => spy.state.jobs,
-    delegateOps: spy.engine,
-    resolveCwd: resolveCwdOrThrow,
-    getConversationId: async () => "ses_cto",
-    observeOpencodeProjectId: async () => null,
-    gitRemoteUrl: async () => null,
-  });
+  const control = directWorkControl({ store, spy });
   const created = await seedReadyWork(control, { id: "w15-link" });
   const dispatched = await control.workDispatch({ key: "w15-d", work: created.workId });
   assert.equal(dispatched.ok, true);

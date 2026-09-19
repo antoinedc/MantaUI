@@ -53,6 +53,7 @@ import { canonicalArgsHash } from "./ctoWork.mjs";
 import { stateHome } from "../shared/paths.mjs";
 import { resolveProjectCwd as sharedResolveProjectCwd } from "./projectCwd.mjs";
 import { resolveCwdOrThrow } from "./tmux.mjs";
+import { makeJsonStoreFixture } from "./ctoTestJsonStore.mjs";
 
 // ---------------------------------------------------------------------------
 // Fixtures — what the real server produces (tmux.mjs parseSessions shape,
@@ -75,8 +76,6 @@ for (const name of ["better-ui", "ethernal", "marketing", "marketing-two", "crea
 // oc.listSessions items, oc.listModels items), plus a spy recorder for the
 // write deps so every mutation is observed, never assumed.
 // ---------------------------------------------------------------------------
-
-let testSeq = 0;
 
 function fixtureProjects() {
   return [
@@ -193,25 +192,10 @@ function makeSpies({ throwing = false, overrides = {} } = {}) {
 
 // A per-test control store under the sandbox (same shape ctoStores' JSON
 // stores expose: name/path/load/save; locking goes through lockForStore).
+// The fixture body is shared (ctoTestStores.mjs) — the duplication gate
+// scans every changed file pairwise.
 function controlStoreFixture() {
-  testSeq += 1;
-  const file = ctoPath("manta-control-test", `${testSeq}.json`);
-  return {
-    name: "manta-control",
-    path: file,
-    load: async () => {
-      try {
-        return JSON.parse(await readFile(file, "utf-8"));
-      } catch (error) {
-        if (error.code === "ENOENT") return { v: 1 };
-        throw error;
-      }
-    },
-    save: async (data) => {
-      await mkdir(dirname(file), { recursive: true });
-      await writeFile(file, JSON.stringify(data, null, 2));
-    },
-  };
+  return makeJsonStoreFixture("manta-control-test", "control");
 }
 
 // The standard composition: real read data from fixtures, all writes spied.

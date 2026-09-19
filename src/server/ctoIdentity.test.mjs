@@ -97,6 +97,7 @@ function makeConfigDouble(records) {
   const state = { projects: records.map((r) => ({ ...r })) };
   return {
     state,
+    storeLabel: "cfg",
     configGet: async () => ({ projects: state.projects.map((r) => ({ ...r })) }),
     persist: async (plan) => {
       let next = state.projects.filter((p) => !plan.removes.includes(p?.tmuxSession));
@@ -573,16 +574,16 @@ test("G10: an unresolvable fork (no session evidence) is null; a missing DB is n
 // persisted-record assertion goes red.
 // ---------------------------------------------------------------------------
 
-test("G11: projects_create persists the durable key at creation, through the ONE identity surface", async () => {
-  mintSeq = 0;
-  const cfg = makeConfigDouble([]);
-  const persistCalls = [];
+// A minimal projects_create composition for the mint-at-creation tests: real
+// control factory, injected identity deps, and a tmux writer that materialises
+// the created session row (the production write returns the refreshed list).
+function makeCreateFlowControl({ cfg, persistCalls = null, listProjects = null }) {
   let createdRow = null;
   const control = createCtoMantaControl({
-    store: memoryControlStore("control-g11"),
+    store: memoryControlStore(`control-${cfg.storeLabel}`),
     now: () => 1_700_000_000_000,
     newId: mintSeqId,
-    listProjects: async () => (createdRow ? [createdRow] : []),
+    listProjects: listProjects ?? (async () => (createdRow ? [createdRow] : [])),
     listSessions: async () => [],
     listModels: async () => [],
     configGet: cfg.configGet,
@@ -597,10 +598,19 @@ test("G11: projects_create persists the durable key at creation, through the ONE
       return { sessionId: null, windowIndex: 0, projects: [createdRow] };
     },
     persistProjectIdentity: async (plan) => {
-      persistCalls.push(plan);
+      if (persistCalls) persistCalls.push(plan);
       return cfg.persist(plan);
     },
   });
+  return control;
+}
+
+test("G11: projects_create persists the durable key at creation, through the ONE identity surface", async () => {
+  mintSeq = 0;
+  const cfg = makeConfigDouble([]);
+  cfg.storeLabel = "g11";
+  const persistCalls = [];
+  const control = makeCreateFlowControl({ cfg, persistCalls });
   const result = await control.projectsCreate({ key: "id-create-1", name: "target", cwd: fix("target") });
   assert.equal(result.ok, true);
   assert.equal(cfg.state.projects.length, 1, "exactly one identity record was persisted");
@@ -613,27 +623,8 @@ test("G11: projects_create persists the durable key at creation, through the ONE
 test("G11 counterfactual: recreating over an orphaned record at the same checkout keeps the OLD key", async () => {
   mintSeq = 0;
   const cfg = makeConfigDouble([record("oldname", fix("target"), "proj_old_1")]);
-  let createdRow = null;
-  const control = createCtoMantaControl({
-    store: memoryControlStore("control-g11b"),
-    now: () => 1_700_000_000_000,
-    newId: mintSeqId,
-    listProjects: async () => [],
-    listSessions: async () => [],
-    listModels: async () => [],
-    configGet: cfg.configGet,
-    observeOpencodeProjectId: async () => null,
-    gitStatus: async () => "",
-    listDelegateJobs: async () => [],
-    resolveProjectCwd: async (name) => fix("target"),
-    resolveCwd: resolveCwdOrThrow,
-    getWindowOption: async () => null,
-    tmuxNewSession: async ({ name, cwd }) => {
-      createdRow = liveRow(name, cwd);
-      return { sessionId: null, windowIndex: 0, projects: [createdRow] };
-    },
-    persistProjectIdentity: async (plan) => cfg.persist(plan),
-  });
+  cfg.storeLabel = "g11b";
+  const control = makeCreateFlowControl({ cfg, listProjects: async () => [] });
   await control.projectsCreate({ key: "id-create-2", name: "target", cwd: fix("target") });
   // The orphaned record was REBOUND onto the recreated session — the old key
   // survives (recreate-over-old-key is the §4.1 re-attach case).
