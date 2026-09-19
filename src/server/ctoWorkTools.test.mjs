@@ -1353,11 +1353,21 @@ test("sandbox canary: the production work and control stores resolve under MANTA
 // W18 — tool registration
 // ---------------------------------------------------------------------------
 
-test("tool registration: 15 family tools, reads auto, mutations confirm, params action-specific", () => {
+test("tool registration: 21 family tools, reads auto, mutations confirm, params action-specific", () => {
   const { control } = makeWorkControl();
   const tools = [];
   registerCtoWorkTools((def) => tools.push(def), control);
-  assert.equal(tools.length, 15);
+  // 15 record+dispatch (PR #1518) + 6 §11 completion stages: review, merge,
+  // release, verify, complete, rollback. Every §11 stage is a MUTATION —
+  // none widens the read set, so an unverified observation can never be
+  // established by a read-mode tool.
+  assert.equal(tools.length, 21);
+  for (const stage of ["work_review", "work_merge", "work_release", "work_verify", "work_complete", "work_rollback"]) {
+    assert.ok(
+      tools.some((t) => t.name === stage),
+      `${stage} is registered`,
+    );
+  }
   const reads = new Set(["work_list", "work_inspect", "work_evidence", "work_capacity"]);
   for (const t of tools) {
     assert.ok(t.name.startsWith("work_"));
