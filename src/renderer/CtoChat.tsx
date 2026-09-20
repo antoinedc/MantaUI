@@ -40,6 +40,8 @@ import type { QuestionRequest } from "../shared/types";
 import { Transcript } from "./Transcript";
 import { PermissionCard, QuestionCard, RetryCard } from "./Cards";
 import { ScheduledTasksCard, SecretsCard, WebhooksCard } from "./PanelCards";
+import { WorkStageCards } from "./ctoWorkCardsView";
+import { useCtoWorkCards, type CtoWorkCard } from "./ctoWorkCards";
 import { MantaLoader } from "./MantaLoader";
 import { Composer } from "./Composer";
 import { VoicePlaybackProvider } from "./hooks/useVoicePlayback";
@@ -615,6 +617,11 @@ export function CtoChat({ onOpenDashboard }: { onOpenDashboard?: () => void }) {
   // Inspector collapsible (§8.3: work metadata/progress secondary).
   const [inspectorOpen, setInspectorOpen] = useState(false);
 
+  // §11 work-lifecycle cards — the ONE purpose-built read of the work
+  // envelopes (work_list + work_inspect through the existing dispatch route),
+  // refetch-driven (poll + focus + visibility).
+  const work = useCtoWorkCards();
+
   return (
     <div
       ref={rootRef}
@@ -705,6 +712,8 @@ export function CtoChat({ onOpenDashboard }: { onOpenDashboard?: () => void }) {
           onInputChange={setComposerInput}
           submitting={submitBusyRef.current}
           inspectorOpen={inspectorOpen}
+          workCards={work.cards}
+          workCardsError={work.error}
           onReceiptRef={onReceiptRef}
           defaultModel={defaultModel}
         />
@@ -744,6 +753,8 @@ function CtoConversation(props: {
   onInputChange: (v: string) => void;
   submitting: boolean;
   inspectorOpen: boolean;
+  workCards: CtoWorkCard[];
+  workCardsError: string | null;
   onReceiptRef: React.MutableRefObject<(() => void) | null>;
   // The box-level server default seeds the composer controller's model fallback.
   // The catalog / per-session choice / picker now live INSIDE the controller —
@@ -773,6 +784,8 @@ function CtoConversation(props: {
     onInputChange,
     submitting,
     inspectorOpen,
+    workCards,
+    workCardsError,
     onReceiptRef,
     defaultModel,
   } = props;
@@ -1286,6 +1299,16 @@ function CtoConversation(props: {
 
       {/* Work inspector (collapsible) — the admission queue, verbatim. */}
       {inspectorOpen && <WorkInspector queue={queue} />}
+
+      {/* §11 work-lifecycle cards — purpose-built, always-on when any work is
+          active: review state, merge gate, release/verify progress, and the
+          parked state with its visible reason. Pinned like the ask cards;
+          quiet (nothing rendered) when no work is active. */}
+      {(workCards.length > 0 || workCardsError) && (
+        <div className="shrink-0 px-4 pt-2 max-h-[40vh] overflow-y-auto">
+          <WorkStageCards cards={workCards} error={workCardsError} />
+        </div>
+      )}
 
       {/* Pending sends — acknowledged by the server, not yet in the
           transcript. Ephemeral, reconciled by the queue poll. */}

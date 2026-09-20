@@ -1697,6 +1697,31 @@ export const httpApi: Api = {
     return { ok: true };
   },
 
+  // POST /api/cto — dispatch an existing cto tool by name (the §11 work
+  // cards read `work_list` / `work_inspect` through it). Mirrors ctoPause's
+  // never-throw shape for reads: failures come back as {ok:false, error}.
+  ctoWorkRun: async (
+    tool: string,
+    args?: Record<string, unknown>,
+  ): Promise<{ ok: boolean; error?: string; data?: unknown }> => {
+    const url = `${serverBase()}/api/cto`;
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: { ...authHeaders(clientToken()), "Content-Type": "application/json" },
+        body: JSON.stringify({ tool, args: args ?? {} }),
+      });
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+    if (res.status === 401) throw new AuthRequiredError();
+    let json: { ok?: boolean; error?: string; data?: unknown } = {};
+    try { json = (await res.json()) as typeof json; } catch { /* non-JSON body */ }
+    if (!res.ok) return { ok: false, error: json.error ?? `HTTP ${res.status}` };
+    return { ok: json.ok !== false, error: json.error, data: json.data };
+  },
+
   // GET /api/cto/digest — the view read of the latest stored digest (§5.5).
   // `digest` is null when nothing has been generated yet; `stale` mirrors the
   // server's own staleness check so the section can badge "needs regenerating".
