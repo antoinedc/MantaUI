@@ -42,7 +42,14 @@
 //     settle: abortState "ok" AND the transcript proves the turn ENDED
 //             (last linked assistant row no longer running — finish-agnostic,
 //             an aborted row qualifies) ⇒ interrupted;
-//             abortState "refused" AND turn ended ⇒ completed (natural finish)
+//             abortState "refused" AND turn ended ⇒ completed (natural finish);
+//             degenerate no-row case (CAPO-352): abortState "ok" + the user
+//             row IS present + NO linked assistant row ever existed + a grace
+//             interval since the abort settled (INTERRUPT_NO_ROW_GRACE_MS) ⇒
+//             interrupted (outcome via "abort-no-row") — the definitive ok
+//             proves the turn is not running; the missing row plus the grace
+//             proves it never started. A claimed/uncertain/refused abort
+//             still holds the barrier in every shape.
 //     an uncertain abort NEVER settles and NEVER releases the queue.
 //
 //   accepted ──receipt-specific reconciliation──▶ completed
@@ -52,6 +59,18 @@
 //   reconciliation — it never blindly completes; a stale/idle event for an
 //   unrelated turn cannot release the queue, and an event NEVER terminalizes
 //   an interrupt_pending record whose abort is unresolved.)
+//
+//   accepted ──periodic reconcile──▶ completed | interrupted (CAPO-352)
+//   The reconcile ALSO settles accepted records without any event: it reads
+//   the messageID receipt back from the transcript — user row absent ⇒ the
+//   record stays put with bounded receipt-check bookkeeping (lastReceiptCheckAt
+//   / receiptChecks, the same semantics as the unknown path), never resent; a
+//   terminal linked row ⇒ completed (the strict reader); the degenerate
+//   no-row crash shape (user row present, ZERO linked assistant rows — a live
+//   turn produces its first row in seconds, so persisting past
+//   ACCEPTED_NO_ROW_GRACE_MS means the turn died) ⇒ interrupted with outcome
+//   via "transcript-no-row". No blind resend, no blind completion — the
+//   transcript decides.
 //
 // The invariants this module exists for:
 //
@@ -237,6 +256,27 @@ export const RECEIPT_READ_ATTEMPTS = 3;
 export const RECEIPT_READ_BACKOFF_MS = 150;
 export const UNKNOWN_STALE_MS = 60_000;
 export const TURN_RECHECK_INTERVAL_MS = 10_000;
+// CAPO-352 settlement graces for the degenerate NO-LINKED-ASSISTANT-ROW
+// transcript shape (the user row persisted, then the process died before the
+// model produced anything — the exact shape that wedged the live box for
+// 96h). A live turn produces its first linked assistant row within seconds of
+// the user row persisting, so "no row" persisting past the grace is itself
+// the proof the turn is dead.
+//
+// ACCEPTED_NO_ROW_GRACE_MS (gap 1): measured from the record's acceptedAt.
+// Generous by design — the only false-interrupt exposure is a turn whose
+// model call has not started for the whole grace (a live turn creates the
+// assistant row when streaming begins), while the alternative was the 96h
+// wedge. 15 minutes covers cold provider starts and per-session queueing
+// many times over.
+export const ACCEPTED_NO_ROW_GRACE_MS = 15 * 60_000;
+// INTERRUPT_NO_ROW_GRACE_MS (gap 2): measured from abortSettledAt — the
+// abort's definitive ok already proves nothing is running, so this grace only
+// covers a post-abort assistant row landing late (transcript read latency is
+// bounded by the request deadline, and a landing row is seen by the next
+// recheck). One bounded-read window plus slack, ≥2 recheck cycles at the
+// default 10s spacing before the conclusion becomes terminal.
+export const INTERRUPT_NO_ROW_GRACE_MS = 30_000;
 
 export class CtoAdmissionError extends Error {
   constructor(message, code, options = {}) {
@@ -576,6 +616,27 @@ export function turnCompletionFromTranscript(messages, userMessageId) {
 }
 
 /**
+ * The WEAK turn-end reader's raw shape (CAPO-352): receipt presence, whether
+ * a linked assistant row exists, and (if so) whether it has ENDED —
+ * finish-agnostic, the exact semantics of turnEndedFromTranscript, exposed so
+ * the settlement paths can distinguish the degenerate no-row crash shape
+ * (receipt present, zero linked assistant rows) from a running or
+ * intermediate row. Messages are ascending (oldest first).
+ */
+export function turnEndShapeFromTranscript(messages, userMessageId) {
+  const { found, row } = lastLinkedAssistantRow(messages, userMessageId);
+  if (!found) return { found: false, hasLinkedRow: false, ended: false };
+  if (!row) return { found: true, hasLinkedRow: false, ended: false };
+  const info = rowInfo(row);
+  const completed = info?.time?.completed;
+  return {
+    found: true,
+    hasLinkedRow: true,
+    ended: Number.isFinite(completed) || info?.error != null,
+  };
+}
+
+/**
  * Weaker, finish-agnostic "did OUR turn END" reader for interrupt_pending
  * records (blocker 2): the last LINKED assistant row is no longer running
  * (time.completed set, or an error) — whatever its finish, an aborted row
@@ -584,13 +645,9 @@ export function turnCompletionFromTranscript(messages, userMessageId) {
  *   { ended: true|false } — or null when the receipt is not visible yet.
  */
 export function turnEndedFromTranscript(messages, userMessageId) {
-  const { found, row } = lastLinkedAssistantRow(messages, userMessageId);
-  if (!found) return null;
-  if (!row) return { ended: false };
-  const info = rowInfo(row);
-  const completed = info?.time?.completed;
-  const ended = Number.isFinite(completed) || info?.error != null;
-  return { ended };
+  const shape = turnEndShapeFromTranscript(messages, userMessageId);
+  if (!shape.found) return null;
+  return { ended: shape.ended };
 }
 
 // ---------------------------------------------------------------------------
@@ -1332,58 +1389,81 @@ export function createCtoAdmission({
   //    keeps the barrier even when the turn finished naturally — a late
   //    session-wide abort must never kill the next admitted turn.
   // -------------------------------------------------------------------------
-  async function transcriptTurnState(record) {
+  /** One bounded transcript fetch shared by every settlement path. */
+  async function transcriptRows(record) {
     if (!listMessages || !record.sessionId || !record.messageID) return null;
     try {
-      const messages = await bounded(() => listMessages(record.sessionId), `listMessages (${record.sessionId})`);
-      return turnCompletionFromTranscript(messages, record.messageID);
+      return await bounded(() => listMessages(record.sessionId), `listMessages (${record.sessionId})`);
     } catch (err) {
       console.warn(`[ctoAdmission] transcript check for ${record.id} failed:`, describeErr(err));
       return null;
     }
+  }
+
+  async function transcriptTurnState(record) {
+    const messages = await transcriptRows(record);
+    return messages === null ? null : turnCompletionFromTranscript(messages, record.messageID);
   }
 
   async function transcriptTurnEnded(record) {
-    if (!listMessages || !record.sessionId || !record.messageID) return null;
-    try {
-      const messages = await bounded(() => listMessages(record.sessionId), `listMessages (${record.sessionId})`);
-      return turnEndedFromTranscript(messages, record.messageID);
-    } catch (err) {
-      console.warn(`[ctoAdmission] transcript check for ${record.id} failed:`, describeErr(err));
-      return null;
-    }
+    const messages = await transcriptRows(record);
+    return messages === null ? null : turnEndedFromTranscript(messages, record.messageID);
   }
 
   /**
-   * Settle an interrupt_pending record once BOTH facts are proven: the turn
-   * ENDED (finish-agnostic transcript proof) and the abort is SETTLED
-   * (definitive server response). Records the turn-end separately from the
-   * abort state so an outstanding abort never fakes a terminal record.
+   * Settle an interrupt_pending record. One decision point for BOTH triggers
+   * (the reconcile's spaced recheck and the event tap) and BOTH transcript
+   * shapes:
+   * - the normal shape: the weak (finish-agnostic) reader proves the last
+   *   linked assistant row ended, then the ABORT settlement decides the
+   *   terminal status ("ok" → interrupted, "refused" → completed, unresolved
+   *   → recorded, barrier kept). Records the turn-end separately from the
+   *   abort state so an outstanding abort never fakes a terminal record.
+   * - the degenerate no-row crash shape (CAPO-352 gap 2): the user row IS
+   *   present but NO linked assistant row ever existed, so the weak reader
+   *   can never see an end. Only a DEFINITIVELY settled abort ("ok" — the
+   *   server confirmed nothing is running) may settle it, and only after
+   *   INTERRUPT_NO_ROW_GRACE_MS has passed since the abort settled (a
+   *   post-abort row can legitimately land late). A claimed/uncertain/refused
+   *   abort keeps the barrier in every shape.
    */
   async function settleInterruptPending(record, kind) {
-    const ended = await transcriptTurnEnded(record);
-    if (ended === null || !ended.ended) return null; // running / unreadable / no receipt yet
-    if (record.abortState === "ok") {
+    const messages = await transcriptRows(record);
+    if (messages === null) return null;
+    const shape = turnEndShapeFromTranscript(messages, record.messageID);
+    if (!shape.found) return null; // receipt not visible yet — nothing proven
+    if (shape.hasLinkedRow) {
+      if (!shape.ended) return null; // running / intermediate row
+      if (record.abortState === "ok") {
+        return markTransition(record.id, "interrupt_pending", "interrupted", {
+          confirmedIdleAt: now(),
+          outcome: { kind, via: "transcript", at: now() },
+        });
+      }
+      if (record.abortState === "refused") {
+        // The abort was definitively refused — the turn ended naturally.
+        return markTransition(record.id, "interrupt_pending", "completed", {
+          completedAt: now(),
+          abortRefused: record.abortError,
+          outcome: { kind, via: "transcript", at: now() },
+        });
+      }
+      // Abort unresolved: record the turn end (visibility) and keep the
+      // PERMANENT barrier — the original abort's outcome stays unknown
+      // (monotonic); no retry, no settlement, explicit reason surfaced.
+      await markFields(record.id, "interrupt_pending", {
+        turnEndedAt: now(),
+        abortOutcomeReason: record.abortOutcomeReason ?? "abort_outcome_unknown",
+      });
+      return null;
+    }
+    // The degenerate no-row crash shape (CAPO-352 gap 2).
+    if (record.abortState === "ok" && now() - (record.abortSettledAt ?? 0) >= INTERRUPT_NO_ROW_GRACE_MS) {
       return markTransition(record.id, "interrupt_pending", "interrupted", {
         confirmedIdleAt: now(),
-        outcome: { kind, via: "transcript", at: now() },
+        outcome: { kind, via: "abort-no-row", at: now() },
       });
     }
-    if (record.abortState === "refused") {
-      // The abort was definitively refused — the turn ended naturally.
-      return markTransition(record.id, "interrupt_pending", "completed", {
-        completedAt: now(),
-        abortRefused: record.abortError,
-        outcome: { kind, via: "transcript", at: now() },
-      });
-    }
-    // Abort unresolved: record the turn end (visibility) and keep the
-    // PERMANENT barrier — the original abort's outcome stays unknown
-    // (monotonic); no retry, no settlement, explicit reason surfaced.
-    await markFields(record.id, "interrupt_pending", {
-      turnEndedAt: now(),
-      abortOutcomeReason: record.abortOutcomeReason ?? "abort_outcome_unknown",
-    });
     return null;
   }
 
@@ -1418,10 +1498,10 @@ export function createCtoAdmission({
         return;
       }
       if (record.status === "interrupt_pending") {
-        // Receipt-specific: does the transcript prove the turn ENDED?
-        const ended = await transcriptTurnEnded(record);
-        if (ended === null || !ended.ended) return; // stale event / running / unreadable
-        // Turn over; now the ABORT settlement decides the record's terminal.
+        // Receipt-specific: settleInterruptPending fetches the transcript and
+        // decides BOTH settlement shapes (the weak turn-ended proof, and
+        // CAPO-352's degenerate no-row case behind a definitive abort + the
+        // post-abort grace). A stale event / running turn settles nothing.
         await settleInterruptPending(record, kind);
       }
     })();
@@ -1609,7 +1689,43 @@ async function claimAndAttemptAbort(record) {
           const last = turnCheckedAt.get(record.id) ?? 0;
           if (now() - last < turnRecheckIntervalMs) continue;
           turnCheckedAt.set(record.id, now());
-          const proof = await transcriptTurnState(record);
+          const messages = await transcriptRows(record);
+          if (messages === null) continue; // no transport / read failed: barrier holds
+          const shape = turnEndShapeFromTranscript(messages, record.messageID);
+          if (!shape.found) {
+            // Receipt read-back found NOTHING: stay put and hold the barrier
+            // exactly like the unknown path's absent receipt, with the same
+            // bounded receipt-check bookkeeping. NEVER resent (invariant 4).
+            await markFields(record.id, "accepted", {
+              lastReceiptCheckAt: now(),
+              receiptChecks: (record.receiptChecks ?? 0) + 1,
+            });
+            continue;
+          }
+          if (!shape.hasLinkedRow) {
+            // CAPO-352 gap 1 — the degenerate no-row crash shape: the turn
+            // happened (the user row is in the transcript) but the crash left
+            // NO linked assistant row, so the strict completion reader can
+            // never fire. A record that has sat in this shape past the
+            // accepted-age grace settles INTERRUPTED — the transcript
+            // decides, nothing is resent, nothing is blindly completed (a
+            // live turn produces its first linked row in seconds; persisting
+            // rowless past ACCEPTED_NO_ROW_GRACE_MS is the proof the turn
+            // died).
+            const acceptedAge = now() - (record.acceptedAt ?? record.createdAt);
+            if (acceptedAge >= ACCEPTED_NO_ROW_GRACE_MS) {
+              await markTransition(record.id, "accepted", "interrupted", {
+                outcome: { kind: "reconciled", via: "transcript-no-row", at: now() },
+              });
+            } else {
+              await markFields(record.id, "accepted", {
+                lastReceiptCheckAt: now(),
+                receiptChecks: (record.receiptChecks ?? 0) + 1,
+              });
+            }
+            continue;
+          }
+          const proof = turnCompletionFromTranscript(messages, record.messageID);
           if (proof?.completed) {
             await markTransition(record.id, "accepted", "completed", {
               completedAt: now(),

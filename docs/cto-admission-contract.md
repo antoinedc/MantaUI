@@ -62,7 +62,7 @@ background deliveries into this queue with a stable content-mapped id (`bg_*`).
 | `submit` | `submit({ text, origin, id?, model?, agent?, expectedGeneration? }) → { id, status, persisted, payloadHash, submitGeneration, ... }` | Validates, dedups by `id`, persists durably, THEN kicks dispatch. Throws only contract errors (below). `origin` is `"human"` or `"background"`. Omitting `id` mints `evt_<uuid>` — the STABLE EVENT ID (persisted before any send; clients dedup replays by it). |
 | `list` | `list() → { submissions, counts }` | The queue projection clients render. Text payloads are stripped; each record carries its status, timestamps, generation fields, and for unknown records `unknownMs` + `staleUnknown`. Order = submission order; human FIFO is the filtered order. |
 | `tick` | `tick() → void` | Poller entry: `reconcile()` then admit (at most one turn). |
-| `reconcile` | `reconcile() → void` | Recovery only: receipt read-backs for `dispatching`/`unknown` records; transcript-based completion for accepted records whose terminal event was missed (spaced ≥10s per record). NEVER resends. |
+| `reconcile` | `reconcile() → void` | Recovery only: receipt read-backs for `dispatching`/`unknown` records; transcript-based settlement for accepted records whose terminal event was missed (spaced ≥10s per record) — terminal linked row → `completed` (strict reader); receipt absent → stamped bookkeeping, barrier held; the degenerate NO-LINKED-ROW crash shape (CAPO-352) → `interrupted` after `ACCEPTED_NO_ROW_GRACE_MS`. Transcript-based settlement for `interrupt_pending` incl. the abort-ok + no-row grace (below). NEVER resends. |
 | `interrupt` | `interrupt(id, { reason? }) → { ok, id, status }` | The EXPLICIT interruption op. `queued` → `cancelled` (safe, never dispatched); `unknown` → `cancel_requested` (VISIBLE request, barrier retained — the POST may still be landing; reconcile settles by receipt); `accepted` → the attempt is RESERVED durably BEFORE the HTTP (`abortState: "claimed"` + `attemptId` + `attemptStartedAt` + `attemptCount`, written under the admission lock — exactly once, claimed by THIS call) → ONE bounded, signal-propagated abort → the owner settles only its matching attemptId → `interrupt_pending` throughout. Terminalization needs the abort settled AND the transcript proving the turn ended (`"ok"` → `interrupted`, `"refused"` → `completed`). An `uncertain` abort NEVER retries and NEVER settles — `abortOutcomeReason: "abort_outcome_unknown"` + permanent barrier. Idempotent re-requests return the current request-marker status. `submit` NEVER aborts. |
 | `observeEvent` | `observeEvent(evt) → void` | Same firehose tap as promptDelivery. Tracks busy (fallback when no shared `isBusy`) and completes accepted turns on their ACTUAL terminal event (`session.idle` / `session.error`). |
 
@@ -88,6 +88,31 @@ queued ──dispatch──▶ dispatching ──204+receipt──▶ accepted �
         (NONTERMINAL: the POST may still be landing; barrier held; a found
          receipt flips it to accepted with cancelRequested retained)
 
+accepted ──receipt-specific reconciliation──▶ completed
+   (ONLY transcript proof: our user message + the LAST assistant row whose
+   parentID == our messageID carrying a TERMINAL finish via the shared
+   assistantCompletion helper. tool-step finishes and unlinked rows are never
+   proof.)
+
+accepted ──periodic reconcile──▶ completed | interrupted (CAPO-352)
+   The reconcile ALSO settles accepted records with no event at all. It reads
+   the messageID receipt back from the transcript:
+     receipt absent          ⇒ stays accepted + stamped receipt-check
+                               bookkeeping (lastReceiptCheckAt / receiptChecks,
+                               the same semantics as the unknown path) — never
+                               resent;
+     terminal linked row     ⇒ completed (the strict reader, as above);
+     NO linked row (crash)   ⇒ interrupted (outcome via "transcript-no-row")
+                               once the record has sat rowless past
+                               ACCEPTED_NO_ROW_GRACE_MS (15 min from acceptedAt).
+   The no-row shape is the incident's exact shape (CAPO-352): a restart
+   between message-persist and turn completion leaves the user row with ZERO
+   assistant rows, so the strict reader can never fire and an accepted record
+   held the whole queue for 96h. A live turn produces its first linked row
+   within seconds of the user row persisting, so persisting rowless past the
+   grace is itself the proof the turn died. No blind resend, no blind
+   completion — the transcript decides.
+
 accepted ──interrupt──▶ interrupt_pending (NONTERMINAL barrier)
    abortState: "pending" (durable request, no attempt marker) --claim under
                 the admission lock: "claimed" + attemptId + attemptStartedAt
@@ -96,20 +121,29 @@ accepted ──interrupt──▶ interrupt_pending (NONTERMINAL barrier)
      interrupt call → "ok" (2xx) | "refused" (4xx) | "uncertain" (deadline /
      network) — the owner settles ONLY its own matching attemptId (a stale or
      late response can never overwrite a newer state — monotonic)
-   settle needs BOTH facts: the transcript proves the turn ENDED
-   (finish-agnostic: the last linked assistant row is no longer running —
-   an aborted row qualifies) AND the abort is settled:
-     "ok"      + turn ended ⇒ interrupted
-     "refused" + turn ended ⇒ completed (natural finish)
-     "uncertain" + turn ended ⇒ the turn end is RECORDED (turnEndedAt) but the
-       record stays interrupt_pending FOREVER: there are NO automatic abort
-       retries (a new attempt's response can never settle the ORIGINAL
-       request's uncertainty — monotonic — and a late original abort could
-       kill the next turn), so the same-session admission barrier persists
-       until a future EXPLICIT management operation resolves it (not built
-       yet). AT RECOVERY (restart) BOTH "claimed"-without-a-live-owner
-       (attempted-but-unsettled — the HTTP may still land) and "pending"
-       downgrade to "uncertain": reconcile NEVER issues an abort.
+    settle needs BOTH facts: the transcript proves the turn ENDED
+    (finish-agnostic: the last linked assistant row is no longer running —
+    an aborted row qualifies) AND the abort is settled:
+      "ok"      + turn ended ⇒ interrupted
+      "refused" + turn ended ⇒ completed (natural finish)
+      "uncertain" + turn ended ⇒ the turn end is RECORDED (turnEndedAt) but the
+        record stays interrupt_pending FOREVER: there are NO automatic abort
+        retries (a new attempt's response can never settle the ORIGINAL
+        request's uncertainty — monotonic — and a late original abort could
+        kill the next turn), so the same-session admission barrier persists
+        until a future EXPLICIT management operation resolves it (not built
+        yet). AT RECOVERY (restart) BOTH "claimed"-without-a-live-owner
+        (attempted-but-unsettled — the HTTP may still land) and "pending"
+        downgrade to "uncertain": reconcile NEVER issues an abort.
+    degenerate no-row case (CAPO-352): the turn can die BEFORE any linked
+    assistant row ever exists, so the finish-agnostic reader can never see an
+    end. Then — ONLY when the abort is DEFINITIVELY settled "ok" (the server
+    confirmed nothing is running) AND the user row IS present in the
+    transcript AND INTERRUPT_NO_ROW_GRACE_MS (30s) has passed since the abort
+    settled (a post-abort row can legitimately land late) — the record
+    settles interrupted with outcome via "abort-no-row". A claimed /
+    uncertain / refused abort keeps the barrier in every shape, and a
+    receipt that is absent settles nothing.
    events (session.idle/error) are TRIGGERS for the transcript check — they
    never terminalize an unresolved abort, and a stale/unrelated event cannot
    release the queue.
@@ -203,9 +237,15 @@ opencode await.
    marker or cancelled the wrong turn. This PR ships main's plain raw abort; nothing consumes
    admission's `interrupt` yet. The seam returns in its own PR with the design settled first
    (likely: a session-level barrier reference so an abort can be scoped to the admitted turn).
-3. **Turn-completion reconcile needs `listMessages`** (or the event tap). Without either, an
+3. **Turn-completion settlement needs `listMessages`** (or the event tap). Without either, an
    accepted record waits for a terminal event that a restart may have swallowed, and
-   event-driven settlement is impossible (the barrier holds).
+   event-driven settlement is impossible (the barrier holds). With `listMessages` wired, the
+   periodic reconcile now also settles the two CAPO-352 degenerate shapes without any event:
+   accepted + no linked assistant row (interrupted after `ACCEPTED_NO_ROW_GRACE_MS`) and
+   interrupt_pending + definitive abort-ok + no linked assistant row (interrupted after
+   `INTERRUPT_NO_ROW_GRACE_MS`). An accepted record whose transcript shows a linked row that
+   NEVER reaches a terminal finish is still not distinguishable from a live turn by the
+   transcript alone — that barrier holds by design.
 4. **An abort with no transport never settles**: with no `abortSession` wired, an
    interrupt_pending record keeps its barrier (surfaced `abortError`) — production must wire
    the signal-capable abortSession. No idempotency is assumed or relied upon: after one
