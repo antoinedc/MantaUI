@@ -1185,8 +1185,17 @@ test("overnightTick reads the ledger with a 24h lower bound instead of the whole
   const HOUR = 3_600_000;
   for (const opts of readCalls) {
     assert.ok(opts && typeof opts === "object", "read() is called with an options object");
-    assert.equal(opts.from, 5_000_000_000_000 - 24 * HOUR, "the read is bounded to the last 24h");
+    // BET-1533: tick() now has TWO bounded ledger readers — the overnight
+    // window (24h) and the operation-class watcher (14d). The invariant this
+    // test pins is "no read is ever the whole file": every read carries a
+    // numeric lower bound in the past.
+    assert.equal(typeof opts.from, "number", "every read is bounded (never the whole file)");
+    assert.ok(opts.from <= 5_000_000_000_000, "the lower bound is in the past");
   }
+  assert.ok(
+    readCalls.some((o) => o.from === 5_000_000_000_000 - 24 * HOUR),
+    "the overnight read is bounded to the last 24h",
+  );
 });
 
 test("dispose unregisters the verdict counter sinks (BET-1466 item 7)", async () => {
