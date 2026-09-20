@@ -18,6 +18,8 @@ import { readFileSync } from "node:fs";
 import {
   CtoAdmissionError,
   MAX_ENTRIES,
+  ACCEPTED_NO_ROW_GRACE_MS,
+  INTERRUPT_NO_ROW_GRACE_MS,
   canonicalRequestHash,
   createCtoAdmission,
   normalizeAdmissionPayload,
@@ -77,6 +79,15 @@ function fakeBinding({ generation = 3, currentSessionId = "ses_cto" } = {}) {
   };
 }
 
+/** Land the user receipt row in BOTH receipt views (the getMessage map and
+ * the listMessages transcript) — the shared shape every receipt fixture uses. */
+function landUserRow(oc, messageID) {
+  oc.transcript.set(messageID, { info: { id: messageID, role: "user", time: { created: 1 } }, parts: [] });
+  // The transcript (listMessages view) also gains the user row — the
+  // receipt-specific reconciliation links assistant rows to it.
+  oc.rows.push({ info: { id: messageID, role: "user", time: { created: 1 } }, parts: [] });
+}
+
 // The shared sendOutcome knob for BOTH fake senders: fail the send in the
 // meaningful ways (definitive 400 / definitive 500 / unknown network), else
 // land the receipt in the transcript. `label` names the failing endpoint in
@@ -97,10 +108,7 @@ function applySendOutcome(oc, { sendOutcome, receiptLands, messageID, label }) {
     throw new Error("socket hang up");
   }
   if (receiptLands) {
-    oc.transcript.set(messageID, { info: { id: messageID, role: "user", time: { created: 1 } }, parts: [] });
-    // The transcript (listMessages view) also gains the user row — the
-    // receipt-specific reconciliation links assistant rows to it.
-    oc.rows.push({ info: { id: messageID, role: "user", time: { created: 1 } }, parts: [] });
+    landUserRow(oc, messageID);
   }
 }
 
@@ -1594,6 +1602,9 @@ test("the default store resolves inside the state-home sandbox (never the live b
 
 test("MAX_ENTRIES and the lifecycle constants are part of the published contract", () => {
   assert.equal(MAX_ENTRIES, 500);
+  // CAPO-352 settlement graces for the degenerate no-row transcript shape.
+  assert.equal(ACCEPTED_NO_ROW_GRACE_MS, 15 * 60_000);
+  assert.equal(INTERRUPT_NO_ROW_GRACE_MS, 30_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -2211,4 +2222,318 @@ test("normalizeAdmissionPayload refuses kind:\"command\" without a command, and 
     submissions: [baseRecord({ kind: "command", command: "init", args: "--force" })],
   });
   assert.equal(ok.submissions[0].command, "init");
+});
+
+// ---------------------------------------------------------------------------
+// CAPO-352 — the two settlement gaps that wedged the live box's admission
+// queue for 96 hours. Both share ONE transcript shape — the incident's exact
+// shape, recovered from the box: the user row persisted, then the process
+// died before the model produced ANY assistant row. The strict completion
+// reader and the weak turn-ended reader BOTH return not-settled on it
+// forever, so the records could only be cleared by an event that never came.
+// ---------------------------------------------------------------------------
+
+/** A raw store record with the identity fields every seeded submission needs. */
+function seededRecord({ id, origin = "human", text, status, extra = {} }) {
+  return {
+    id,
+    origin,
+    text,
+    payloadHash: canonicalRequestHash({ origin, text }),
+    status,
+    createdAt: 1,
+    submitGeneration: 3,
+    ...extra,
+  };
+}
+
+/** The EXACT incident transcript shape (CAPO-352): the user row persisted,
+ * ZERO assistant rows after it. Modeled from the live box, not imagined. */
+function incidentNoRowTranscript(oc, messageID) {
+  landUserRow(oc, messageID);
+  // zero assistant rows — nothing else is appended
+}
+
+/** A raw assistant row that exists but is still running (no completion, no
+ * error) — the "turn produced a row and is mid-stream" boundary shape. */
+function runningAssistantRow(oc, messageID) {
+  oc.rows.push({ info: { id: `asst_run_${oc.rows.length}`, role: "assistant", parentID: messageID, time: { created: 2 } }, parts: [] });
+}
+
+test("CAPO-352 gap 1 (incident): a stale accepted record over the crashed no-row transcript settles interrupted from the periodic reconcile and releases the one-turn gate", async () => {
+  const store = memoryStore(`capo352-gap1-${randomUUID()}`);
+  // The store as the crash left it: the turn was accepted ~96h ago (the
+  // measured wedge duration), the receipt was proven at dispatch time, and
+  // the restart killed the turn between message-persist and any assistant
+  // output. A queued submission waits behind the wedge — the incident's
+  // observable impact.
+  await store.save({
+    v: 1,
+    submissions: [
+      seededRecord({
+        id: "evt_wedge",
+        text: "the wedged turn",
+        status: "accepted",
+        extra: {
+          sessionId: "ses_cto",
+          messageID: "msg_wedge",
+          dispatchGeneration: 3,
+          dispatchStartedAt: 2,
+          acceptedAt: 1_000_000 - 96 * 3_600_000,
+        },
+      }),
+      seededRecord({ id: "evt_next", text: "queued behind the wedge", status: "queued" }),
+    ],
+  });
+  const oc = fakeOc();
+  incidentNoRowTranscript(oc, "msg_wedge");
+  const { svc } = buildService({ store, oc });
+  // No events fire (the incident: the session went idle while nothing was
+  // watching) — only the periodic reconcile runs.
+  await svc.reconcile();
+  await flush();
+  const wedge = await recordOf(svc, "evt_wedge");
+  assert.equal(wedge.status, "interrupted", "the transcript decides: the turn happened but never produced a row");
+  assert.equal(wedge.outcome.kind, "reconciled");
+  assert.equal(wedge.outcome.via, "transcript-no-row");
+  assert.ok(!oc.sends.some((s) => s.messageID === "msg_wedge"), "no blind resend — the receipt proves the turn happened");
+  assert.equal(oc.aborts.length, 0, "no abort needed — settlement is transcript-driven");
+  assert.equal(await statusOf(svc, "evt_next"), "accepted", "the one-turn gate released: the queue drains");
+});
+
+test("CAPO-352 gap 1 control: a YOUNG accepted no-row record (within the accepted-age grace) is not settled — a live turn's first moments must not read as a crash", async () => {
+  const store = memoryStore(`capo352-gap1-young-${randomUUID()}`);
+  await store.save({
+    v: 1,
+    submissions: [
+      seededRecord({
+        id: "evt_young",
+        text: "just accepted",
+        status: "accepted",
+        extra: {
+          sessionId: "ses_cto",
+          messageID: "msg_young",
+          dispatchGeneration: 3,
+          dispatchStartedAt: 2,
+          acceptedAt: 1_000_000 - 60_000, // 60s ago — well within the grace
+        },
+      }),
+    ],
+  });
+  const oc = fakeOc();
+  incidentNoRowTranscript(oc, "msg_young");
+  const { svc } = buildService({ store, oc });
+  await svc.reconcile();
+  await flush();
+  assert.equal(await statusOf(svc, "evt_young"), "accepted", "no premature settlement of a possibly-running turn");
+});
+
+test("CAPO-352 gap 1: an accepted record whose receipt is absent from the transcript stays put with bounded receipt-check bookkeeping (the same settle-as-unknown semantics), never resent", async () => {
+  const store = memoryStore(`capo352-gap1-absent-${randomUUID()}`);
+  await store.save({
+    v: 1,
+    submissions: [
+      seededRecord({
+        id: "evt_gone",
+        text: "receipt vanished",
+        status: "accepted",
+        extra: {
+          sessionId: "ses_cto",
+          messageID: "msg_gone",
+          dispatchGeneration: 3,
+          dispatchStartedAt: 2,
+          acceptedAt: 1_000_000 - 96 * 3_600_000,
+        },
+      }),
+    ],
+  });
+  const oc = fakeOc(); // empty transcript: the user row is NOT visible
+  const { svc } = buildService({ store, oc });
+  await svc.reconcile();
+  await flush();
+  const rec = await recordOf(svc, "evt_gone");
+  assert.equal(rec.status, "accepted", "absent receipt → barrier held, exactly like the unknown path");
+  assert.ok(rec.receiptChecks >= 1, "the bounded receipt check is stamped on the record");
+  assert.ok(rec.lastReceiptCheckAt);
+  assert.equal(oc.sends.length, 0, "never resent");
+});
+
+test("CAPO-352 gap 1 control: an accepted record with a linked assistant row still running is NOT settled by the no-row path, even far past the grace", async () => {
+  const store = memoryStore(`capo352-gap1-row-${randomUUID()}`);
+  await store.save({
+    v: 1,
+    submissions: [
+      seededRecord({
+        id: "evt_streaming",
+        text: "actually still streaming",
+        status: "accepted",
+        extra: {
+          sessionId: "ses_cto",
+          messageID: "msg_streaming",
+          dispatchGeneration: 3,
+          dispatchStartedAt: 2,
+          acceptedAt: 1_000_000 - 96 * 3_600_000,
+        },
+      }),
+    ],
+  });
+  const oc = fakeOc();
+  incidentNoRowTranscript(oc, "msg_streaming");
+  runningAssistantRow(oc, "msg_streaming");
+  const { svc } = buildService({ store, oc });
+  await svc.reconcile();
+  await flush();
+  assert.equal(
+    await statusOf(svc, "evt_streaming"),
+    "accepted",
+    "a linked row exists — the strict completion reader keeps its contract; the no-row path must not swallow it",
+  );
+});
+
+test("CAPO-352 gap 2 (incident): interrupt_pending with a definitive abort ok over the crashed no-row transcript settles interrupted after the post-abort grace", async () => {
+  const { svc, oc, clock } = buildService();
+  await svc.submit({ id: "evt_i", text: "run", origin: "human" });
+  await svc.tick();
+  assert.equal(await statusOf(svc, "evt_i"), "accepted");
+  // The turn died before ANY assistant row existed; the abort POST then
+  // returned DEFINITIVELY ok (the server confirmed nothing is running). The
+  // fake transcript holds exactly the incident shape: the user row, zero
+  // assistant rows — nothing will ever append one.
+  const res = await svc.interrupt("evt_i", { reason: "stop" });
+  await flush();
+  assert.equal(res.status, "interrupt_pending");
+  assert.equal((await recordOf(svc, "evt_i")).abortState, "ok");
+  assert.equal(oc.aborts.length, 1);
+  // Within the post-abort grace: NOT settled yet — a post-abort row can
+  // legitimately land late.
+  clock.t += 1_000;
+  await svc.tick();
+  assert.equal(await statusOf(svc, "evt_i"), "interrupt_pending");
+  // Past the grace: the degenerate shape settles as interrupted.
+  clock.t += 60_000;
+  await svc.tick();
+  const rec = await recordOf(svc, "evt_i");
+  assert.equal(rec.status, "interrupted");
+  assert.equal(rec.outcome.via, "abort-no-row");
+  assert.equal(rec.abortState, "ok", "the abort stays definitively settled on the terminal record");
+  assert.equal(oc.aborts.length, 1, "no second abort attempt — the ok settled its attemptId");
+  assert.equal(oc.sends.length, 1, "never resent");
+});
+
+test("CAPO-352 gap 2: the no-row interrupt settlement is reachable from the event path too — one decision point for both triggers", async () => {
+  const { svc, oc, clock } = buildService();
+  await svc.submit({ id: "evt_i2", text: "run", origin: "human" });
+  await svc.tick();
+  await svc.interrupt("evt_i2", { reason: "stop" });
+  await flush();
+  assert.equal((await recordOf(svc, "evt_i2")).abortState, "ok");
+  clock.t += 1_000;
+  svc.observeEvent({ type: "session.idle", properties: { sessionID: "ses_cto" } });
+  await flush();
+  assert.equal(await statusOf(svc, "evt_i2"), "interrupt_pending", "within the grace the event settles nothing");
+  clock.t += 60_000;
+  svc.observeEvent({ type: "session.idle", properties: { sessionID: "ses_cto" } });
+  await flush();
+  const rec = await recordOf(svc, "evt_i2");
+  assert.equal(rec.status, "interrupted");
+  assert.equal(rec.outcome.via, "abort-no-row");
+});
+
+test("CAPO-352 gap 2 control: an abortState of uncertain (recovery fail-closed) over the no-row transcript NEVER settles — the general rule is not weakened", async () => {
+  const store = memoryStore(`capo352-gap2-unc-${randomUUID()}`);
+  await store.save({
+    v: 1,
+    submissions: [
+      seededRecord({
+        id: "evt_unc",
+        text: "uncertain abort",
+        status: "interrupt_pending",
+        extra: {
+          sessionId: "ses_cto",
+          messageID: "msg_unc",
+          dispatchGeneration: 3,
+          interruptRequestedAt: 2,
+          abortState: "uncertain",
+          abortOutcomeReason: "abort_outcome_unknown",
+          abortSettledAt: 3,
+        },
+      }),
+    ],
+  });
+  const oc = fakeOc();
+  incidentNoRowTranscript(oc, "msg_unc");
+  const { svc, clock } = buildService({ store, oc });
+  clock.t += 96 * 3_600_000;
+  await svc.reconcile();
+  await flush();
+  let rec = await recordOf(svc, "evt_unc");
+  assert.equal(rec.status, "interrupt_pending");
+  assert.equal(rec.abortState, "uncertain");
+  clock.t += 60_000;
+  await svc.reconcile();
+  await flush();
+  rec = await recordOf(svc, "evt_unc");
+  assert.equal(rec.status, "interrupt_pending", "an unresolved abort keeps the barrier no matter the transcript shape");
+  assert.equal(rec.abortOutcomeReason, "abort_outcome_unknown");
+  assert.equal(oc.aborts.length, 0, "and no attempt is ever issued from reconcile");
+});
+
+test("CAPO-352 gap 2 control: abortState ok with a linked NON-terminal assistant row is not settled by the no-row path", async () => {
+  const store = memoryStore(`capo352-gap2-row-${randomUUID()}`);
+  await store.save({
+    v: 1,
+    submissions: [
+      seededRecord({
+        id: "evt_row",
+        text: "row exists",
+        status: "interrupt_pending",
+        extra: {
+          sessionId: "ses_cto",
+          messageID: "msg_row",
+          dispatchGeneration: 3,
+          interruptRequestedAt: 2,
+          abortState: "ok",
+          abortSettledAt: 3,
+        },
+      }),
+    ],
+  });
+  const oc = fakeOc();
+  incidentNoRowTranscript(oc, "msg_row");
+  runningAssistantRow(oc, "msg_row");
+  const { svc, clock } = buildService({ store, oc });
+  clock.t += 96 * 3_600_000;
+  await svc.reconcile();
+  await flush();
+  const rec = await recordOf(svc, "evt_row");
+  assert.equal(rec.status, "interrupt_pending", "a row exists — the no-row settlement does not apply");
+});
+
+test("CAPO-352 gap 2 control: abortState ok with the receipt ABSENT from the transcript is not settled — the user row must be present", async () => {
+  const store = memoryStore(`capo352-gap2-absent-${randomUUID()}`);
+  await store.save({
+    v: 1,
+    submissions: [
+      seededRecord({
+        id: "evt_absent",
+        text: "receipt never landed",
+        status: "interrupt_pending",
+        extra: {
+          sessionId: "ses_cto",
+          messageID: "msg_absent",
+          dispatchGeneration: 3,
+          interruptRequestedAt: 2,
+          abortState: "ok",
+          abortSettledAt: 3,
+        },
+      }),
+    ],
+  });
+  const oc = fakeOc(); // empty transcript — no user row
+  const { svc, clock } = buildService({ store, oc });
+  clock.t += 96 * 3_600_000;
+  await svc.reconcile();
+  await flush();
+  const rec = await recordOf(svc, "evt_absent");
+  assert.equal(rec.status, "interrupt_pending", "without the receipt nothing is proven — barrier held");
 });

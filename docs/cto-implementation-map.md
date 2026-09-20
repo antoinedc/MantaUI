@@ -689,3 +689,27 @@ operation. Pinned by a crash snapshot taken INSIDE the abort mock (proving the t
 the HTTP), a restart asserting zero aborts + zero next sends, the original request released
 afterward with the barrier persisting (the matching-attempt guard rejects the dead owner's
 late response), and concurrent interrupt+reconcile claiming at most one attempt.
+
+CAPO-352 settlement round (live incident: the box's queue wedged 96h): both gaps are the same
+family — recovery required an event (or a linked assistant row) that never comes. The incident's
+exact transcript shape (modeled in the fixtures, not imagined): the user row persisted, ZERO
+assistant rows after it — on which BOTH the strict completion reader and the weak turn-ended
+reader return not-settled forever. (1) `accepted` now settles from the PERIODIC reconcile with
+no event: the messageID receipt is read back from the transcript — absent ⇒ stays accepted with
+stamped `lastReceiptCheckAt`/`receiptChecks` bookkeeping (the same semantics as the unknown
+path, never resent); a terminal linked row ⇒ completed (strict reader, unchanged); the no-row
+shape ⇒ interrupted (outcome via "transcript-no-row") once the record has sat rowless past
+`ACCEPTED_NO_ROW_GRACE_MS` (15 min from `acceptedAt` — a live turn produces its first linked row
+in seconds, so rowless-past-the-grace is the proof the turn died). (2) `interrupt_pending`
+settles the no-row shape when — and only when — the abort is DEFINITIVELY "ok" (the server
+confirmed nothing is running), the user row IS present, and `INTERRUPT_NO_ROW_GRACE_MS` (30s,
+measured from `abortSettledAt` — one bounded-read window plus slack, ≥2 recheck cycles) has
+passed since the abort settled: interrupted with outcome via "abort-no-row", reachable from BOTH
+triggers through one decision point (`settleInterruptPending`; the event tap no longer
+pre-filters the no-row shape away). A claimed/uncertain/refused abort keeps the barrier in every
+shape (the general rule is NOT weakened), and a receipt that is absent settles nothing. Shared
+reader `turnEndShapeFromTranscript` extracts receipt-presence + linked-row-presence + weak
+ended-ness (the weak reader's contract is unchanged); graces pinned in the published-contract
+test. Every settlement has fail-first tests plus counterfactual controls (young accepted,
+linked running row, absent receipt, uncertain abort, within-grace), and both new settlement
+branches were broken in source and watched RED before landing.
