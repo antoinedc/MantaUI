@@ -1766,12 +1766,16 @@ export async function stopJob(id, deps = {}) {
 
 /**
  * deleteJob removes the tmux window, then calls
- * local.gitRemoveWorktree({ path, force: false }), then removes the record.
- * NEVER pass force: true. If gitRemoveWorktree returns {removed:false,
+ * local.gitRemoveWorktree({ path, force }), then removes the record.
+ * force defaults to false. If gitRemoveWorktree returns {removed:false,
  * reason:"dirty"}, keep the worktree AND keep the job record, and return that
- * reason so the UI can explain it.
+ * reason so the UI can explain it. The engine's own paths NEVER pass
+ * force: true; the ONLY caller allowed to is the §12 CTO cleanup override
+ * (ctoWorkTools workCleanup with overrideDirty:true — the user explicitly
+ * accepted destroying uncommitted changes and the file list is preserved as
+ * evidence first).
  */
-export async function deleteJob(id, deps = {}) {
+export async function deleteJob(id, deps = {}, opts = {}) {
   const {
     load = loadJobs,
     save = saveJobs,
@@ -1795,10 +1799,11 @@ export async function deleteJob(id, deps = {}) {
       }
     }
 
-    // 2. Remove the worktree (force: false, NEVER force: true).
+    // 2. Remove the worktree (non-forced by default; force only via the §12
+    // explicit override — see the header comment).
     if (gitRemoveWorktree && job.worktree) {
       try {
-        const res = await gitRemoveWorktree({ path: job.worktree, force: false });
+        const res = await gitRemoveWorktree({ path: job.worktree, force: opts?.force === true });
         if (res && res.removed === false && res.reason === "dirty") {
           // Keep the worktree AND keep the job record; report `dirty`.
           return { ok: false, error: "dirty", reason: "dirty" };
@@ -2250,7 +2255,7 @@ export function createDelegateEngine(deps) {
     startJob: (input) => startJob(input, deps),
     startJobWithApproval,
     stopJob: (id) => stopJob(id, deps),
-    deleteJob: (id) => deleteJob(id, deps),
+    deleteJob: (id, opts) => deleteJob(id, deps, opts),
     pauseJob: (id) => pauseJob(id, deps),
     resumeJob: (id) => resumeJob(id, deps),
     runningJobCount: () => runningJobCount(deps),
