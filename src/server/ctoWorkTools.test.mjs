@@ -2654,13 +2654,11 @@ test("S6 integrated through the control: the plan read is dispatch-free and agre
   assert.equal(calls.filter((c) => c.name === "startJob").length, startCalls, "a scheduling read never dispatches");
 });
 
-test("S7 boundary: a dependency outside the plan's list page resolves as UNMET (missing) — the plan errs conservative, like the dispatch gate", async () => {
-  // A portfolio LARGER than the plan's page (composition option
-  // `listPageLimit`, LIST_MAX_LIMIT-capped in production): the plan read is
-  // PARTIAL. A dependency id that resolves to no envelope in the scan must
-  // never read as met — the dispatch gate treats missing dependencies as
-  // unmet (assertDependenciesOrPark), so the plan may only err the same way.
-  const control = createCtoWorkControl({
+// A control with a SMALL plan list-page (composition option `listPageLimit`)
+// — the list-page-boundary fixture shared by the S7 tests. Production default
+// stays LIST_MAX_LIMIT; the option only shrinks the page.
+function smallPageControl(listPageLimit) {
+  return createCtoWorkControl({
     store: workStoreFixture(),
     createReceiptsStore: ledgerFixture(),
     now: makeClock(),
@@ -2671,8 +2669,16 @@ test("S7 boundary: a dependency outside the plan's list page resolves as UNMET (
     getConversationId: async () => "ses_cto",
     observeOpencodeProjectId: async () => null,
     gitRemoteUrl: async () => null,
-    listPageLimit: 2,
+    listPageLimit,
   });
+}
+
+test("S7 boundary: a dependency outside the plan's list page resolves as UNMET (missing) — the plan errs conservative, like the dispatch gate", async () => {
+  // A portfolio LARGER than the plan's page: the plan read is PARTIAL. A
+  // dependency id that resolves to no envelope in the scan must never read
+  // as met — the dispatch gate treats missing dependencies as unmet
+  // (assertDependenciesOrPark), so the plan may only err the same way.
+  const control = smallPageControl(2);
   const dep = await seedReadyWork(control, { id: "w-dep-old" }); // oldest updatedAt → outside the newest-first page
   await seedReadyWork(control, { id: "w-fill" });
   const child = await control.workCreate({
@@ -2700,19 +2706,7 @@ test("S7 boundary: a dependency outside the plan's list page resolves as UNMET (
 });
 
 test("S7 counterfactual: the same dependency INSIDE the page reads its true state — 'missing' is page-specific, not a blanket label", async () => {
-  const control = createCtoWorkControl({
-    store: workStoreFixture(),
-    createReceiptsStore: ledgerFixture(),
-    now: makeClock(),
-    listProjects: async () => fixtureProjects(),
-    listDelegateJobs: async () => [],
-    delegateOps: makeDelegateSpy().engine,
-    resolveCwd: resolveCwdOrThrow,
-    getConversationId: async () => "ses_cto",
-    observeOpencodeProjectId: async () => null,
-    gitRemoteUrl: async () => null,
-    listPageLimit: 2,
-  });
+  const control = smallPageControl(2);
   const dep = await seedReadyWork(control, { id: "w-dep-in" });
   const child = await control.workCreate({
     key: "create-w-child-in",
