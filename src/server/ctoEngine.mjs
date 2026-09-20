@@ -71,6 +71,15 @@ import {
 } from "./ctoStores.mjs";
 import { createVerdictEngine, createAsSourceSink } from "./ctoVerdicts.mjs";
 import { cardHasContent } from "../shared/ctoCard.mjs";
+// BET-1533: the operation-class outcome watcher (§W7 item 1) — pure predicate
+// + reason formatter; the thin I/O wrapper (ledger read → evaluate →
+// recordBlocker → latch persist) lives in opClassWatcherTick() below.
+import {
+  evaluateOpClass,
+  formatOpClassReason,
+  OP_CLASS_LOOKBACK_MS,
+  OP_CLASS_WATCH_INTERVAL_MS,
+} from "./ctoOpClassWatcher.mjs";
 // BET-1518 (§9.3/§9.5): the per-class calibration engine (the Beta estimator
 // over last-30 outcomes + the act-and-report queue) and the τ gate over the
 // triage stage's stored plans. The v2 earned-trust ladder is deleted (D22).
@@ -390,6 +399,9 @@ export function createCtoEngine(deps = {}) {
     now = () => Date.now(),
     rates: rateLimits = RATE_LIMITS,
     tickIntervalMs = TICK_INTERVAL_MS,
+    // BET-1533: the operation-class watcher's own read pacing (it parses the
+    // whole ledger file per read, so it must not run on every 60s tick).
+    opClassWatchIntervalMs = OP_CLASS_WATCH_INTERVAL_MS,
     cardCheckIntervalMs = CARD_CHECK_INTERVAL_MS,
     // BET-1469: default counts read the BUNDLE's cards store, so a bundle-only
     // harness never binds the real cards.json through this path either.
@@ -577,6 +589,9 @@ export function createCtoEngine(deps = {}) {
   let toolEngine = null;
   let probesEngine = null;
   let lastToolScanDay = null;
+  // BET-1533: last time the operation-class watcher actually read the ledger
+  // (in-memory pacing only — a restart just makes the next tick read again).
+  let lastOpClassWatchAt = 0;
 
   // A5 presence inputs (spec §5.4): lastSeen = max(desktop heartbeat, app
   // open, user prompt). The desktop heartbeat is read live via
@@ -789,6 +804,9 @@ export function createCtoEngine(deps = {}) {
         // §4.3/§13.4 standing-query watchers: windowed kinds + retirement, and
         // auto-created watchers after a new day rollup lands.
         await watcherTick();
+        // §W7 item 1 (BET-1533): operation-class outcome watcher — a silently
+        // dying class (0% / <50% success) becomes a blocker.
+        await opClassWatcherTick();
         // §11 overnight: window state machine + plan dispatch (BET-1419).
         await overnightTick();
         // §7 tool discovery: the daily evidence scan + lifecycle + connect
@@ -1650,6 +1668,48 @@ export function createCtoEngine(deps = {}) {
       }
     } catch {
       /* watchers are best-effort — never take the engine down */
+    }
+  }
+
+  // BET-1533: the operation-class outcome watcher (§W7 item 1). Reads recent
+  // `cto.operation_outcome` rows through the existing ledgerStore, runs the
+  // pure fold (ctoOpClassWatcher.mjs), raises one pendingBlockers entry per
+  // newly-fired incident through the EXISTING blocker path (one health card
+  // per class via the `op-class:<taskClass>` source), and latches the alarm
+  // under the `opClassAlarms` key in engine-state.json (keyed
+  // (taskClass, incidentGeneration); re-arms only after a fresh `ok`). No new
+  // notification mechanism, no new bus kind, no new config flag, no new store.
+  // Paced to at most one ledger read per interval (the read is O(file)).
+  async function opClassWatcherTick() {
+    const t = now();
+    if (t - lastOpClassWatchAt < opClassWatchIntervalMs) return;
+    lastOpClassWatchAt = t;
+    try {
+      const rows = await ledger.read({ from: t - OP_CLASS_LOOKBACK_MS });
+      let prev = {};
+      try {
+        prev = (await engineState.load())?.opClassAlarms ?? {};
+      } catch {
+        prev = {};
+      }
+      const { alarms: next, raised, recovered } = evaluateOpClass(rows, { nowMs: t, alarms: prev });
+      // Raise first, persist latches second: a crash between the two re-fires
+      // next tick and the cards layer upserts the duplicate in place — the
+      // reverse order could latch an alarm whose card request never landed.
+      for (const alarm of raised) {
+        await recordBlocker(`op-class:${alarm.taskClass}`, formatOpClassReason(alarm));
+      }
+      if (raised.length > 0 || recovered.length > 0) {
+        await patchEngineState(() => ({ opClassAlarms: next }), { engineState });
+      }
+      if (raised.length > 0) {
+        await ledgerLog({ kind: "cto.opclass_blocked", count: raised.length, classes: raised.map((a) => a.taskClass) });
+      }
+      if (recovered.length > 0) {
+        await ledgerLog({ kind: "cto.opclass_recovered", classes: recovered });
+      }
+    } catch {
+      /* best-effort — never take the engine down */
     }
   }
 

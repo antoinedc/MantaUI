@@ -36,7 +36,7 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 // seams, so the tests assert pure behavior. `clock` is shared so the watchdog
 // and the engine observe the same time.
 
-function makeHarness({ ctoEnabled = false, counts = {}, rollups, facts, realCards = false, engineStateInit = {} } = {}) {
+function makeHarness({ ctoEnabled = false, counts = {}, rollups, facts, realCards = false, engineStateInit = {}, ledger: ledgerDep } = {}) {
   const clock = { ms: 1_000_000 };
   const now = () => clock.ms;
   const ledgerRows = [];
@@ -91,6 +91,9 @@ function makeHarness({ ctoEnabled = false, counts = {}, rollups, facts, realCard
         state.pendingAsks = pendingAsks;
         if (payload?.rollupCursor) state.rollupCursor = payload.rollupCursor;
         if (payload?.segmentGMinutes != null) state.segmentGMinutes = payload.segmentGMinutes;
+        // BET-1533: the operation-class watcher's alarm latch must round-trip
+        // through the fake engineState for the no-refire / re-arm tests.
+        if (payload?.opClassAlarms) state.opClassAlarms = payload.opClassAlarms;
       },
     },
     killSwitch: {
@@ -119,6 +122,7 @@ function makeHarness({ ctoEnabled = false, counts = {}, rollups, facts, realCard
     tierGet: async () => budgetCfg.tier,
     ...(rollups ? { rollups } : {}),
     ...(facts ? { facts } : {}),
+    ...(ledgerDep ? { ledger: ledgerDep } : {}),
   });
 
   return {
@@ -1763,4 +1767,108 @@ test("ONE pipeline: a suggest finding and an inbox blocker share ONE cardTick dr
   assert.equal(asked.length, 2, "one gate decision per finding, same pass");
   const cardsPayload = await stores.cards.load();
   assert.equal(cardsPayload.cards.filter((c) => c.variant === "decision").length, 2, "both producers surface through the §9.3 ask card");
+});
+
+// ---------------------------------------------------------------------------
+// BET-1533: the operation-class outcome watcher wiring (§W7 item 1). The
+// predicate itself is unit-tested in ctoOpClassWatcher.test.mjs; here the
+// engine's thin I/O wrapper is exercised end-to-end over a memory ledger:
+// read → evaluate → recordBlocker (pendingBlockers) → latch in engine-state.
+// ---------------------------------------------------------------------------
+
+// A memory ledger with a ts-filtered read, shaped like createLedgerStore.
+function makeMemoryLedger() {
+  const rows = [];
+  return {
+    rows,
+    append: async (row) => {
+      rows.push({ ...row });
+      return true;
+    },
+    read: async ({ from, to } = {}) =>
+      rows.filter((r) => (from === undefined || r.ts >= from) && (to === undefined || r.ts <= to)),
+  };
+}
+
+const OP_ROW = (over = {}) => ({
+  actor: "cto",
+  kind: "cto.operation_outcome",
+  operation: "segment-summary",
+  code: "model-error",
+  ...over,
+});
+
+test("op-class watcher raises one blocker through pendingBlockers when a class is dead", async () => {
+  const ledger = makeMemoryLedger();
+  const h = makeHarness({ ctoEnabled: true, ledger });
+  const base = h.clock.ms;
+  // 10 failures spanning ≥1h.
+  for (let i = 0; i < 10; i++) {
+    await ledger.append(OP_ROW({ ts: base - 3 * HOUR_MS + i * (HOUR_MS / 9 + 1) }));
+  }
+  await h.engine.tick();
+  const entries = h.pendingBlockers.filter((b) => b.source === "op-class:segment-summary");
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].kind, "blocker");
+  assert.match(entries[0].reason, /segment-summary/);
+  assert.match(entries[0].reason, /model-error/);
+  assert.match(entries[0].reason, /×10/);
+  // The latch persisted to engine-state (one active incident, generation 1).
+  assert.equal(h.state.opClassAlarms["segment-summary"]?.active, true);
+  assert.equal(h.state.opClassAlarms["segment-summary"]?.generation, 1);
+});
+
+test("op-class watcher does not re-fire on a second tick with no new data", async () => {
+  const ledger = makeMemoryLedger();
+  const h = makeHarness({ ctoEnabled: true, ledger });
+  const base = h.clock.ms;
+  for (let i = 0; i < 10; i++) {
+    await ledger.append(OP_ROW({ ts: base - 3 * HOUR_MS + i * (HOUR_MS / 9 + 1) }));
+  }
+  await h.engine.tick();
+  assert.equal(h.pendingBlockers.filter((b) => b.source === "op-class:segment-summary").length, 1);
+  // Advance past the watch interval and tick again — the latch holds.
+  h.advance(30 * 60_000);
+  await h.engine.tick();
+  h.advance(30 * 60_000);
+  await h.engine.tick();
+  assert.equal(h.pendingBlockers.filter((b) => b.source === "op-class:segment-summary").length, 1);
+});
+
+test("op-class watcher re-arms after a success then a fresh failure run", async () => {
+  const ledger = makeMemoryLedger();
+  const h = makeHarness({ ctoEnabled: true, ledger });
+  const base = h.clock.ms;
+  for (let i = 0; i < 10; i++) {
+    await ledger.append(OP_ROW({ ts: base - 3 * HOUR_MS + i * (HOUR_MS / 9 + 1) }));
+  }
+  await h.engine.tick();
+  assert.equal(h.pendingBlockers.filter((b) => b.source === "op-class:segment-summary").length, 1);
+  // A fresh ok (after the alarm's fire time) demonstrates recovery. The
+  // advance clears the watcher's read-pacing interval first.
+  h.advance(11 * 60_000);
+  await ledger.append(OP_ROW({ ts: h.clock.ms, code: "ok" }));
+  await h.engine.tick();
+  assert.equal(h.state.opClassAlarms["segment-summary"]?.active, false);
+  // A fresh failure run re-arms with a new incident generation.
+  h.advance(11 * 60_000);
+  const t2 = h.clock.ms;
+  for (let i = 0; i < 10; i++) {
+    await ledger.append(OP_ROW({ ts: t2 - HOUR_MS - 60_000 + i * (HOUR_MS / 9 + 1) }));
+  }
+  await h.engine.tick();
+  const entries = h.pendingBlockers.filter((b) => b.source === "op-class:segment-summary");
+  assert.equal(entries.length, 2, "a second incident raises a second blocker entry");
+  assert.equal(h.state.opClassAlarms["segment-summary"]?.active, true);
+  assert.equal(h.state.opClassAlarms["segment-summary"]?.generation, 2);
+});
+
+test("op-class watcher paces its ledger reads to the watch interval", async () => {
+  const ledger = makeMemoryLedger();
+  const h = makeHarness({ ctoEnabled: true, ledger });
+  await h.engine.tick();
+  const readsAfterFirst = ledger.rows.length; // no rows — read happened once
+  h.advance(60_000); // inside the default 10-minute interval
+  await h.engine.tick();
+  assert.equal(ledger.rows.length, readsAfterFirst);
 });
