@@ -274,14 +274,26 @@ export function scheduleWorks(
   const blocked = [];
   const ready = [];
   for (const env of candidates) {
-    const unmet = (env.dependencies ?? [])
-      .map((id) => byId.get(id))
-      .filter((dep) => dep && !isDependencyMet(dep).met);
+    // Dependency readiness IDENTICAL to the dispatch gate
+    // (assertDependenciesOrPark): an id that resolves to NO envelope in this
+    // scan is UNMET with readiness "missing" — never silently met. Past the
+    // list page this can only make the plan MORE conservative (false-unmet),
+    // never less; the plan page is surfaced as truncated by the caller.
+    const unmet = [];
+    for (const id of env.dependencies ?? []) {
+      const dep = byId.get(id);
+      if (!dep) {
+        unmet.push({ id, readiness: "missing" });
+      } else if (!isDependencyMet(dep).met) {
+        unmet.push({ id, readiness: dep.state ?? "unknown" });
+      }
+    }
     if (unmet.length > 0) {
       blocked.push({
         id: env.id,
         waitReason: "dependency",
-        note: `waiting on ${unmet.map((d) => `"${d.id}" (${d.state ?? "unknown"})`).join(", ")}`,
+        note: `waiting on ${unmet.map((d) => `"${d.id}" (${d.readiness})`).join(", ")}`,
+        unmet,
       });
       continue;
     }
@@ -621,6 +633,7 @@ export function createCtoWorkControl({
   newId = () => randomUUID(),
   leaseTtlMs = WORK_LEASE_TTL_MS,
   maxStageAttempts = DEFAULT_MAX_STAGE_ATTEMPTS,
+  listPageLimit = LIST_MAX_LIMIT,
   // ---- READ deps (the ONLY deps the read operations may touch) -------------
   listProjects,
   listDelegateJobs = loadJobs,
@@ -1819,7 +1832,7 @@ export function createCtoWorkControl({
         retrySafe: false,
       });
     }
-    const { works } = await work.listWorks({ limit: LIST_MAX_LIMIT });
+    const { works, total } = await work.listWorks({ limit: listPageLimit });
     const jobs = await readJobsOrThrow("scheduling");
     const running = jobs.filter((j) => j?.status === "running").length;
     const availableSlots = Math.max(0, MAX_RUNNING_JOBS - running);
@@ -1842,12 +1855,23 @@ export function createCtoWorkControl({
       intent,
       maxStageAttempts,
     });
+    // A partial list page is a PARTIAL plan — surfaced, never silent. A
+    // truncated plan can only under-report readiness candidates; dependency
+    // ids missing from the page resolve as unmet (matching the dispatch
+    // gate), so the disagreement direction stays conservative.
+    const truncated = total > works.length;
     return {
       ok: true,
       data: {
         ...plan,
         observedAt: new Date(now()).toISOString(),
         reservation: { interactiveActive, interactiveSource, intent },
+        listScan: {
+          scanned: works.length,
+          total,
+          truncated,
+          ...(truncated ? { note: `plan computed from the first ${works.length} of ${total} envelopes (newest-updated first) — treat as partial` } : {}),
+        },
       },
     };
   }

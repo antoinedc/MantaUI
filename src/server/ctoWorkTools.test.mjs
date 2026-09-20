@@ -2654,6 +2654,83 @@ test("S6 integrated through the control: the plan read is dispatch-free and agre
   assert.equal(calls.filter((c) => c.name === "startJob").length, startCalls, "a scheduling read never dispatches");
 });
 
+test("S7 boundary: a dependency outside the plan's list page resolves as UNMET (missing) — the plan errs conservative, like the dispatch gate", async () => {
+  // A portfolio LARGER than the plan's page (composition option
+  // `listPageLimit`, LIST_MAX_LIMIT-capped in production): the plan read is
+  // PARTIAL. A dependency id that resolves to no envelope in the scan must
+  // never read as met — the dispatch gate treats missing dependencies as
+  // unmet (assertDependenciesOrPark), so the plan may only err the same way.
+  const control = createCtoWorkControl({
+    store: workStoreFixture(),
+    createReceiptsStore: ledgerFixture(),
+    now: makeClock(),
+    listProjects: async () => fixtureProjects(),
+    listDelegateJobs: async () => [],
+    delegateOps: makeDelegateSpy().engine,
+    resolveCwd: resolveCwdOrThrow,
+    getConversationId: async () => "ses_cto",
+    observeOpencodeProjectId: async () => null,
+    gitRemoteUrl: async () => null,
+    listPageLimit: 2,
+  });
+  const dep = await seedReadyWork(control, { id: "w-dep-old" }); // oldest updatedAt → outside the newest-first page
+  await seedReadyWork(control, { id: "w-fill" });
+  const child = await control.workCreate({
+    key: "create-w-child",
+    project: "manta",
+    objective: "depends on something old",
+    spec: { revision: 1, hash: "sha256:aaa", documentRef: "d" },
+    deliveryTarget: { kind: "pr" },
+    state: "ready",
+    dependencies: [dep.workId],
+  });
+  assert.equal(child.ok, true, "dependency existence is enforced at the store, not the page");
+  const { data: plan } = await control.workSchedule({});
+  assert.deepEqual(
+    plan.listScan,
+    { scanned: 2, total: 3, truncated: true, note: "plan computed from the first 2 of 3 envelopes (newest-updated first) — treat as partial" },
+    "the partial view is surfaced, never silent",
+  );
+  const entry = plan.waiting.find((w) => w.id === child.workId);
+  assert.ok(entry, "the dependent is not dispatchable in a partial plan");
+  assert.equal(entry.waitReason, "dependency");
+  assert.match(entry.note, /\(missing\)/, "the readiness label names the missing page — the dispatch gate's own vocabulary");
+  assert.deepEqual(entry.unmet, [{ id: dep.workId, readiness: "missing" }]);
+  assert.ok(plan.plan.some((p) => p.id !== child.workId), "dependency-free work in the page still plans normally");
+});
+
+test("S7 counterfactual: the same dependency INSIDE the page reads its true state — 'missing' is page-specific, not a blanket label", async () => {
+  const control = createCtoWorkControl({
+    store: workStoreFixture(),
+    createReceiptsStore: ledgerFixture(),
+    now: makeClock(),
+    listProjects: async () => fixtureProjects(),
+    listDelegateJobs: async () => [],
+    delegateOps: makeDelegateSpy().engine,
+    resolveCwd: resolveCwdOrThrow,
+    getConversationId: async () => "ses_cto",
+    observeOpencodeProjectId: async () => null,
+    gitRemoteUrl: async () => null,
+    listPageLimit: 2,
+  });
+  const dep = await seedReadyWork(control, { id: "w-dep-in" });
+  const child = await control.workCreate({
+    key: "create-w-child-in",
+    project: "manta",
+    objective: "depends on something in the page",
+    spec: { revision: 1, hash: "sha256:aaa", documentRef: "d" },
+    deliveryTarget: { kind: "pr" },
+    state: "ready",
+    dependencies: [dep.workId],
+  });
+  const { data: plan } = await control.workSchedule({});
+  assert.equal(plan.listScan.truncated, false, "two envelopes, page of two — no truncation to report");
+  const entry = plan.waiting.find((w) => w.id === child.workId);
+  assert.equal(entry.waitReason, "dependency");
+  assert.deepEqual(entry.unmet, [{ id: dep.workId, readiness: "ready" }], "the unmet readiness is the dependency's real state");
+  assert.doesNotMatch(entry.note, /\(missing\)/);
+});
+
 test("U19 integrated: at cap, dispatch parks the envelope on waiting/capacity AND the plan records the same reason", async () => {
   // A box whose slots are all taken by foreign jobs (the W9 fixture shape):
   // the dispatch is refused BEFORE any worker starts, the work parks on
