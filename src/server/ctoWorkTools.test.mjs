@@ -56,7 +56,7 @@
 //       is dispatchable again — never silently de-isolated
 //   W17 sandbox canary: the production work + control stores resolve under
 //       MANTA_STATE_HOME
-//   W18 tool registration: 21 family tools (15 dispatch-half + 6 §11 stage
+//   W18 tool registration: 22 family tools (16 dispatch-half + P6 handoff + 6 §11 stage
 //       operations), reads auto, mutations confirm, params action-specific
 //       (no shared args bag)
 //   W19 outcome adoption is idempotent and spec-stale-aware: a repeated
@@ -206,7 +206,7 @@ function makeDelegateSpy({ jobs = [], worktreeOk = true, stopFails = false, cap 
   // and capacity can evaporate between calls, so §11 tests flip them on
   // `state` mid-test (the §11 fixtures exercise a reviewer that fails to
   // start AFTER the implementation dispatched successfully).
-  const state = { jobs: [...jobs], worktreeOk, cap };
+  const state = { jobs: [...jobs], worktreeOk, cap, dirtyWorktrees: new Set() };
   let seq = 0;
   const find = (id) => state.jobs.find((j) => j?.id === id) ?? null;
   const engine = {
@@ -283,11 +283,17 @@ function makeDelegateSpy({ jobs = [], worktreeOk = true, stopFails = false, cap 
       job.pauseRequested = false;
       return { ok: true, job };
     },
-    async deleteJob(id) {
-      calls.push({ name: "deleteJob", input: id });
+    async deleteJob(id, opts) {
+      calls.push({ name: "deleteJob", input: id, opts });
       const job = find(id);
       if (!job) return { ok: false, error: "not found" };
       if (job.status === "running") return { ok: false, error: "job still running" };
+      // Real gitRemoveWorktree contract: a DIRTY worktree is refused by the
+      // non-forced removal ({ok:false, reason:"dirty"}); only an explicit
+      // force destroys it.
+      if (state.dirtyWorktrees.has(id) && opts?.force !== true) {
+        return { ok: false, reason: "dirty" };
+      }
       state.jobs = state.jobs.filter((j) => j.id !== id);
       return { ok: true };
     },
@@ -314,6 +320,10 @@ function makeWorkControl({
   conversationId = "ses_cto",
   maxStageAttempts,
   cap,
+  // §12 cleanup classification: path → porcelain status ("" = clean). A
+  // server-realistic double over a stateful map, so a test can flip a
+  // worktree dirty→clean and watch the retry succeed.
+  worktreeStatus = {},
   // ---- §4.1 identity deps --------------------------------------------------
   identityRecords = [mantaIdentityRecord()],
   observedOpencodeIds = {},
@@ -336,6 +346,7 @@ function makeWorkControl({
   // local.mjs configGet/projectIdentityPersist do around ~/.manta/config.json.
   const configState = { projects: identityRecords.map((r) => ({ ...r })) };
   const identityWrites = [];
+  const statusState = { byPath: { ...worktreeStatus } };
   const control = createCtoWorkControl({
     store: ws,
     createReceiptsStore: lg,
@@ -358,6 +369,7 @@ function makeWorkControl({
     },
     observeOpencodeProjectId: async (dir) => observedOpencodeIds[dir] ?? null,
     gitRemoteUrl: async () => remoteUrl,
+    gitStatus: async (cwd) => statusState.byPath[cwd] ?? "",
     ...(maxStageAttempts !== undefined ? { maxStageAttempts } : {}),
     ...(forge !== null ? { forge } : {}),
     ...(releaseContracts !== undefined ? { releaseContracts } : {}),
@@ -365,7 +377,7 @@ function makeWorkControl({
     ...(rollbackTrigger !== null ? { rollbackTrigger } : {}),
     ...(targetProbe !== null ? { targetProbe } : {}),
   });
-  return { control, calls: spy.calls, jobs: spy.state, workStore: ws, ledger: lg, live, configState, identityWrites };
+  return { control, calls: spy.calls, jobs: spy.state, workStore: ws, ledger: lg, live, configState, identityWrites, statusState };
 }
 
 // A forge spy mirroring the REAL adapter contract (src/server/forge/github.mjs):
@@ -399,19 +411,24 @@ function makeForgeSpy({ prs = {}, checksBySha = {}, mergeError = null, mergeSha 
 // A direct createCtoWorkControl composition for tests that need a SEPARATE
 // control instance next to the makeWorkControl one (custom spy engine or a
 // wrapped startJob over a distinct store).
-function directWorkControl({ store, spy }) {
-  return createCtoWorkControl({
-    store,
-    createReceiptsStore: ledgerFixture(),
-    now: makeClock(),
-    listProjects: async () => fixtureProjects(),
-    listDelegateJobs: async () => spy.state.jobs,
-    delegateOps: spy.engine,
-    resolveCwd: resolveCwdOrThrow,
-    getConversationId: async () => "ses_cto",
-    observeOpencodeProjectId: async () => null,
-    gitRemoteUrl: async () => null,
-  });
+function directWorkControl({ store, spy, worktreeStatus = {} }) {
+  const statusState = { byPath: { ...worktreeStatus } };
+  return {
+    control: createCtoWorkControl({
+      store,
+      createReceiptsStore: ledgerFixture(),
+      now: makeClock(),
+      listProjects: async () => fixtureProjects(),
+      listDelegateJobs: async () => spy.state.jobs,
+      delegateOps: spy.engine,
+      resolveCwd: resolveCwdOrThrow,
+      getConversationId: async () => "ses_cto",
+      observeOpencodeProjectId: async () => null,
+      gitRemoteUrl: async () => null,
+      gitStatus: async (cwd) => statusState.byPath[cwd] ?? "",
+    }),
+    statusState,
+  };
 }
 
 async function seedReadyWork(control, overrides = {}) {
@@ -1228,45 +1245,62 @@ test("archive is metadata-only (destroys nothing) and refuses a live worker", as
   assert.equal(data.operations.length > 0, true, "receipts preserved");
 });
 
-test("cleanup removes only owned terminal resources via the existing non-forced operation and retains failures", async () => {
-  const { control, calls, jobs } = makeWorkControl();
-  const created = await seedReadyWork(control, { id: "w12-clean" });
-  const dispatched = await control.workDispatch({ key: "w12-cd", work: created.workId });
-  await control.workCancel({ key: "w12-cc", work: created.workId });
-  void jobs;
-  // Make the worktree dirty → deleteJob (non-forced) refuses with reason dirty.
-  const dirtyControl = makeWorkControl({ jobs: [] });
-  void dirtyControl;
-  // The spy's deleteJob only refuses for a still-running job; emulate the
-  // dirty-worktree refusal the real non-forced removal returns.
-  const spy = makeDelegateSpy({ jobs: [] });
-  spy.engine.deleteJob = async (id) => {
-    if (id === dispatched.jobId) return { ok: false, reason: "dirty" };
-    return { ok: true };
-  };
-  const control2 = directWorkControl({ store: workStoreFixture(), spy });
-  const c2work = await control2.workCreate({
-    key: "w12-c2",
-    project: "manta",
-    objective: "x",
-    spec: { revision: 1, hash: "h", documentRef: "d" },
-    deliveryTarget: { kind: "pr" },
-    state: "ready",
-  });
-  await control2.workDispatch({ key: "w12-c2d", work: c2work.workId });
-  await control2.workCancel({ key: "w12-c2c", work: c2work.workId });
+test("cleanup classifies a dirty worktree BEFORE removal: preserved with the reason visible, and retry succeeds once clean (U20)", async () => {
+  // A stateful gitStatus double keyed by worktree path — the exact
+  // server-realistic shape (path → porcelain listing; "" = clean).
+  const { control, statusState } = directWorkControl({ store: workStoreFixture(), spy: makeDelegateSpy({ jobs: [] }) });
+  const mk = async (id, key) =>
+    control.workCreate({
+      key,
+      project: "manta",
+      objective: "x",
+      spec: { revision: 1, hash: "h", documentRef: "d" },
+      deliveryTarget: { kind: "pr" },
+      state: "ready",
+      id,
+    });
+  const pathOf = async (workId, jobId) =>
+    (await control.workInspect({ work: workId })).data.resources.find(
+      (r) => r.kind === "delegate_job" && r.ref === jobId,
+    ).path;
+  // Counterfactual positive control: a CLEAN worktree's cleanup succeeds —
+  // so the preserve gate below is the only thing standing between a dirty
+  // worktree and its removal.
+  const a = await mk("w12-clean-cf", "w12-cfa");
+  const aJob = (await control.workDispatch({ key: "w12-cfa-d", work: a.workId })).jobId;
+  await control.workCancel({ key: "w12-cfa-c", work: a.workId });
+  const cleanedClean = await control.workCleanup({ key: "w12-cfa-x", work: a.workId });
+  assert.equal(cleanedClean.ok, true);
+  assert.deepEqual(cleanedClean.removed, [aJob]);
+  // Dirty worktree + no override: classification happens BEFORE any
+  // destructive call — the worktree is PRESERVED (not removed, not "failed")
+  // and the refusal names the reason.
+  const b = await mk("w12-dirty", "w12-c2");
+  const bJob = (await control.workDispatch({ key: "w12-c2d", work: b.workId })).jobId;
+  await control.workCancel({ key: "w12-c2c", work: b.workId });
+  statusState.byPath[await pathOf(b.workId, bJob)] = " M src/worker.js\n?? scratch.txt";
   await assert.rejects(
-    control2.workCleanup({ key: "w12-c2x", work: c2work.workId }),
+    control.workCleanup({ key: "w12-c2x", work: b.workId }),
     (error) => {
       assert.equal(error.code, "dirty_resource");
+      assert.match(error.message, /preserved/);
+      assert.match(error.message, /src\/worker\.js/);
+      assert.deepEqual(error.details?.preserved, [{ ref: bJob, reason: "dirty" }]);
       return true;
     },
   );
-  const { data } = await control2.workInspect({ work: c2work.workId });
-  const res = data.resources.find((r) => r.kind === "delegate_job");
-  assert.equal(res.cleanupStatus, "failed", "the failure is retained and visible");
-  assert.equal(res.path !== null, true, "metadata kept to retry");
+  const { data } = await control.workInspect({ work: b.workId });
+  const res = data.resources.find((r) => r.kind === "delegate_job" && r.ref === bJob);
+  assert.equal(res.cleanupStatus, "preserved", "the worktree is preserved, visibly");
+  assert.equal(res.preservedReason, "dirty", "the reason is visible on the resource row");
+  assert.match(res.failureReason, /src\/worker\.js/);
   assert.equal(data.operations.length > 0, true, "the record was never dropped because removal threw");
+  // Retryability: the SAME dirty worktree, once the status clears (a commit
+  // landed), is removed by the retry — a preserved cleanup is not a dead end.
+  statusState.byPath[await pathOf(b.workId, bJob)] = "";
+  const retried = await control.workCleanup({ key: "w12-c2x-retry", work: b.workId });
+  assert.equal(retried.ok, true);
+  assert.deepEqual(retried.removed, [bJob]);
 });
 
 test("counterfactual: cleanup of a terminal owned job removes it and records the removal", async () => {
@@ -1379,7 +1413,7 @@ test("the stage attempt is linked before prompt delivery (the startJob spy sees 
     envAtDispatch = JSON.parse(raw);
     return originalStart(input);
   };
-  const control = directWorkControl({ store, spy });
+  const control = directWorkControl({ store, spy }).control;
   const created = await seedReadyWork(control, { id: "w15-link" });
   const dispatched = await control.workDispatch({ key: "w15-d", work: created.workId });
   assert.equal(dispatched.ok, true);
@@ -1425,16 +1459,16 @@ test("sandbox canary: the production work and control stores resolve under MANTA
 // W18 — tool registration
 // ---------------------------------------------------------------------------
 
-test("tool registration: 21 family tools, reads auto, mutations confirm, params action-specific", () => {
+test("tool registration: 22 family tools, reads auto, mutations confirm, params action-specific", () => {
   const { control } = makeWorkControl();
   const tools = [];
   registerCtoWorkTools((def) => tools.push(def), control);
-  // 15 record+dispatch (PR #1518) + 6 §11 completion stages: review, merge,
-  // release, verify, complete, rollback. Every §11 stage is a MUTATION —
-  // none widens the read set, so an unverified observation can never be
-  // established by a read-mode tool.
-  assert.equal(tools.length, 21);
-  for (const stage of ["work_review", "work_merge", "work_release", "work_verify", "work_complete", "work_rollback"]) {
+  // 16 record+dispatch (PR #1518 + P6 work_handoff) + 6 §11 completion stages:
+  // review, merge, release, verify, complete, rollback. Every §11 stage is a
+  // MUTATION — none widens the read set, so an unverified observation can
+  // never be established by a read-mode tool.
+  assert.equal(tools.length, 22);
+  for (const stage of ["work_review", "work_merge", "work_release", "work_verify", "work_complete", "work_rollback", "work_handoff"]) {
     assert.ok(
       tools.some((t) => t.name === stage),
       `${stage} is registered`,
@@ -1448,14 +1482,19 @@ test("tool registration: 21 family tools, reads auto, mutations confirm, params 
     assert.ok(t.params && typeof t.params === "object");
   }
   // Action-specific schemas: dispatch carries model/subagentType but not the
-  // create schema's spec/deliveryTarget; cleanup has no model.
+  // create schema's spec/deliveryTarget; cleanup has no model but carries the
+  // §12 overrideDirty flag; the handoff has neither.
   const dispatchParams = JSON.stringify(tools.find((t) => t.name === "work_dispatch").params);
   const createParams = JSON.stringify(tools.find((t) => t.name === "work_create").params);
   const cleanupParams = JSON.stringify(tools.find((t) => t.name === "work_cleanup").params);
+  const handoffParams = JSON.stringify(tools.find((t) => t.name === "work_handoff").params);
   assert.ok(createParams.includes("deliveryTarget"));
+  assert.ok(createParams.includes("schedulingClass"));
   assert.ok(!dispatchParams.includes("deliveryTarget"), "dispatch does not accept a delivery target");
   assert.ok(dispatchParams.includes("model"));
   assert.ok(!cleanupParams.includes("model"), "cleanup does not accept a model");
+  assert.ok(cleanupParams.includes("overrideDirty"), "cleanup carries the §12 override flag");
+  assert.ok(handoffParams.includes("constraints"), "the handoff carries the §10 constraint list");
 });
 
 // ---------------------------------------------------------------------------
@@ -2496,4 +2535,478 @@ test("V11: parseRepoKey is the canonical owner/repo identity — no host prefix,
   assert.throws(() => parseRepoKey("/manta"), /owner\/repo/);
   assert.throws(() => parseRepoKey("justone"), /owner\/repo/);
   assert.throws(() => parseRepoKey(""), /non-empty string/);
+});
+
+// ---------------------------------------------------------------------------
+// P6 — §9 priorities/dependencies, §10 checkpoint handoffs, §12 cleanup
+// classification. Every guarantee below has a counterfactual positive
+// control in the same test: the setup that WOULD dispatch/wait/destroy is
+// observed both ways.
+// ---------------------------------------------------------------------------
+
+function foreignRunningJob(id, at = 1) {
+  return {
+    id,
+    name: "other",
+    prompt: "other work",
+    parentSessionID: `ses_${id}`,
+    parentDirectory: fix("better-ui"),
+    childSessionID: `ses_child_${id}`,
+    tmuxSession: "manta",
+    windowIndex: 3,
+    worktree: `${fix("better-ui")}/.worktrees/foreign-${id}`,
+    branch: "other",
+    baseSha: null,
+    origin: "delegate",
+    actor: "user",
+    correlation: null,
+    permission: null,
+    status: "running",
+    activity: null,
+    pauseRequested: false,
+    createdAt: at,
+    startedAt: at,
+    finishedAt: null,
+    result: null,
+    error: null,
+    filesChanged: null,
+  };
+}
+
+test("P6 schedulingClass: persists on create/revise; anything else is refused (closed vocabulary)", async () => {
+  const { control } = makeWorkControl();
+  const created = await seedReadyWork(control, { id: "p6-class", schedulingClass: "interactive" });
+  assert.equal(created.ok, true);
+  let { data } = await control.workInspect({ work: created.workId });
+  assert.equal(data.schedulingClass, "interactive");
+  await control.workRevise({ key: "p6-class-rev", work: created.workId, patch: { schedulingClass: "background" } });
+  ({ data } = await control.workInspect({ work: created.workId }));
+  assert.equal(data.schedulingClass, "background", "a class change is a normal revise");
+  await assert.rejects(
+    control.workRevise({ key: "p6-class-bad", work: created.workId, patch: { schedulingClass: "urgent" } }),
+    (error) => error.code === "unsupported" && /schedulingClass/.test(error.message),
+  );
+  await assert.rejects(
+    control.workCreate({
+      key: "p6-class-bad2",
+      project: "manta",
+      objective: "x",
+      spec: { revision: 1, hash: "h", documentRef: "d" },
+      deliveryTarget: { kind: "pr" },
+      state: "ready",
+      schedulingClass: "asap",
+    }),
+    (error) => error.code === "unsupported",
+  );
+});
+
+test("U19: a background dispatch YIELDS to the interactive reserve with an explicit durable reason; interactive dispatch never yields; no competitor, no yield", async () => {
+  // Four foreign running jobs → 1 available slot (MAX_RUNNING_JOBS 5). The
+  // reserve is 1, so the free slot is INSIDE the reserve band.
+  const base = { jobs: [1, 2, 3, 4].map((n) => foreignRunningJob(`foreign-${n}`)) };
+  // (a) background work + a dispatchable interactive competitor → yield.
+  const yielded = makeWorkControl({ ...base });
+  const bg = await seedReadyWork(yielded.control, { id: "p6-bg-yield" });
+  await seedReadyWork(yielded.control, { id: "p6-interactive-competitor", schedulingClass: "interactive" });
+  await assert.rejects(
+    yielded.control.workDispatch({ key: "p6-bg-yield-d", work: bg.workId }),
+    (error) => {
+      assert.equal(error.code, "capacity_wait");
+      assert.equal(error.retrySafe, true);
+      assert.match(error.message, /yielded to the interactive reserve/);
+      assert.match(error.message, /p6-interactive-competitor/);
+      assert.deepEqual(error.details?.competitors, ["p6-interactive-competitor"]);
+      return true;
+    },
+    "background yields when the free slot is the interactive reserve and a real interactive work waits",
+  );
+  let { data } = await yielded.control.workInspect({ work: bg.workId });
+  assert.equal(data.state, "waiting");
+  assert.equal(data.waitingReason, "capacity", "the wait reason is durable and dispatchable-again later");
+  // (b) counterfactual: the SAME contention, INTERACTIVE work → dispatches.
+  const interactive = makeWorkControl({ ...base });
+  const iw = await seedReadyWork(interactive.control, { id: "p6-interactive-goes", schedulingClass: "interactive" });
+  const dispatchedInteractive = await interactive.control.workDispatch({ key: "p6-i-d", work: iw.workId });
+  assert.equal(dispatchedInteractive.ok, true, "interactive dispatch never yields");
+  // (c) counterfactual: the SAME background work, NO interactive competitor
+  // → dispatches into the free slot (the reserve binds only against a real
+  // CEO-requested competitor, never speculatively).
+  const noCompetitor = makeWorkControl({ ...base });
+  const nc = await seedReadyWork(noCompetitor.control, { id: "p6-bg-nocomp" });
+  const dispatchedNoComp = await noCompetitor.control.workDispatch({ key: "p6-nc-d", work: nc.workId });
+  assert.equal(dispatchedNoComp.ok, true, "background dispatches freely when nothing interactive waits");
+});
+
+test("§9 scheduling order (work_capacity): interactive first, then priority, then fair aging — the observable 'which next'", async () => {
+  const { control } = makeWorkControl();
+  const older = await seedReadyWork(control, { id: "p6-order-bg-low", priority: 1 });
+  await control.workRevise({ key: "p6-order-interactive", work: older.workId, patch: { schedulingClass: "interactive" } });
+  const waiting = await seedReadyWork(control, { id: "p6-order-bg-high", priority: 9 });
+  await control.workRevise({ key: "p6-order-wait", work: waiting.workId, patch: { state: "waiting", waitingReason: "capacity" } });
+  const { data } = await control.workCapacity();
+  const ids = data.schedulingOrder.map((r) => r.workId);
+  assert.equal(ids[0], "p6-order-bg-low", "interactive outranks priority (CEO requests first)");
+  assert.equal(ids[1], "p6-order-bg-high", "higher priority next");
+  assert.equal(data.interactiveReserve, 1);
+});
+
+test("U19: a priority change re-evaluates the waiting set — a dependency-satisfied waiter is PROMOTED, stale evidence stays waiting", async () => {
+  const { control, jobs } = makeWorkControl();
+  const dep = await seedReadyWork(control, { id: "p6-reeval-dep" });
+  const waiter = await seedReadyWork(control, { id: "p6-reeval-waiter", dependencies: [dep.workId], state: "ready" });
+  await control.workDispatch({ key: "p6-reeval-dep-d", work: dep.workId });
+  const job = jobs.jobs.find((j) => j.correlation?.workId === dep.workId);
+  job.status = "done";
+  job.result = "implemented per spec rev1";
+  await control.recordWorkerOutcome(job);
+  const depDone = await control.workInspect({ work: dep.workId });
+  assert.equal(depDone.data.state, "waiting", "the dependency reports a claim and waits for §11 stages");
+  // The waiter was parked on its (then-unmet) dependency before the claim.
+  await control.workRevise({ key: "p6-reeval-park", work: waiter.workId, patch: { state: "waiting", waitingReason: "dependency" } });
+  // A priority change is the re-evaluation trigger.
+  const result = await control.workPrioritize({ key: "p6-reeval-prio", work: waiter.workId, priority: 5 });
+  assert.equal(result.ok, true);
+  assert.ok(
+    result.reevaluated.some((r) => r.workId === waiter.workId && r.to === "ready"),
+    "the waiter is promoted because its dependency now carries a matching implementation claim",
+  );
+  const after = await control.workInspect({ work: waiter.workId });
+  assert.equal(after.data.state, "ready");
+  assert.equal(after.data.waitingReason, undefined);
+  // Counterfactual (stale evidence ≠ met): the dependency's spec moves — the
+  // claim no longer matches the CURRENT spec hash, so a waiting dependent is
+  // NOT promoted.
+  const dep2 = await seedReadyWork(control, { id: "p6-reeval-dep2" });
+  const waiter2 = await seedReadyWork(control, { id: "p6-reeval-waiter2", dependencies: [dep2.workId], state: "ready" });
+  await control.workDispatch({ key: "p6-reeval-dep2-d", work: dep2.workId });
+  const job2 = jobs.jobs.find((j) => j.correlation?.workId === dep2.workId);
+  job2.status = "done";
+  job2.result = "implemented per spec rev1";
+  await control.recordWorkerOutcome(job2);
+  await control.workRevise({ key: "p6-reeval-park2", work: waiter2.workId, patch: { state: "waiting", waitingReason: "dependency" } });
+  await control.workRevise({
+    key: "p6-reeval-spec2",
+    work: dep2.workId,
+    patch: { spec: { revision: 2, hash: "sha256:rev2", documentRef: "d#rev2" } },
+  });
+  const result2 = await control.workPrioritize({ key: "p6-reeval-prio2", work: waiter2.workId, priority: 7 });
+  assert.equal(result2.reevaluated.some((r) => r.workId === waiter2.workId), false, "stale evidence never promotes");
+  const after2 = await control.workInspect({ work: waiter2.workId });
+  assert.equal(after2.data.state, "waiting", "still honestly waiting");
+  assert.equal(after2.data.waitingReason, "dependency");
+});
+
+test("U19: a dependency revision invalidates claim-sourced satisfaction at the NEXT dispatch (stale evidence ≠ met)", async () => {
+  const { control, jobs } = makeWorkControl();
+  const dep = await seedReadyWork(control, { id: "p6-stale-dep" });
+  const consumer = await seedReadyWork(control, { id: "p6-stale-consumer", dependencies: [dep.workId] });
+  // Positive control first: with the dep's claim matching the CURRENT spec,
+  // the consumer dispatches (claim-sourced readiness).
+  await control.workDispatch({ key: "p6-stale-dep-d", work: dep.workId });
+  const job = jobs.jobs.find((j) => j.correlation?.workId === dep.workId);
+  job.status = "done";
+  job.result = "implemented per spec rev1";
+  await control.recordWorkerOutcome(job);
+  const dispatched = await control.workDispatch({ key: "p6-stale-cd", work: consumer.workId });
+  assert.equal(dispatched.ok, true, "a matching claim admits the dependent");
+  // Now the dependency's spec is revised: the claim no longer matches.
+  const consumer2 = await seedReadyWork(control, { id: "p6-stale-consumer2", dependencies: [dep.workId] });
+  await control.workRevise({
+    key: "p6-stale-spec",
+    work: dep.workId,
+    patch: { spec: { revision: 2, hash: "sha256:new", documentRef: "d#rev2" } },
+  });
+  await assert.rejects(
+    control.workDispatch({ key: "p6-stale-c2d", work: consumer2.workId }),
+    (error) => {
+      assert.equal(error.code, "policy_blocked");
+      assert.match(error.message, /sha256:new|stale|unmet|dependencies unmet/i);
+      return true;
+    },
+    "the revised dependency invalidates the old claim — stale evidence is not met",
+  );
+  const { data } = await control.workInspect({ work: consumer2.workId });
+  assert.equal(data.state, "waiting");
+  assert.equal(data.waitingReason, "dependency");
+});
+
+test("U19: capacity waits are bounded by the stage attempt budget (repeated capacity refusals end in policy_blocked)", async () => {
+  const { control } = makeWorkControl({ cap: 0, maxStageAttempts: 2 });
+  const created = await seedReadyWork(control, { id: "p6-bounded" });
+  // Dispatch 1 → the engine's cap refuses → capacity_wait (attempt 1 failed).
+  await assert.rejects(
+    control.workDispatch({ key: "p6-bounded-1", work: created.workId }),
+    (error) => error.code === "capacity_wait",
+  );
+  let { data } = await control.workInspect({ work: created.workId });
+  assert.equal(data.state, "waiting");
+  assert.equal(data.waitingReason, "capacity");
+  // Dispatch 2 (waiting/capacity is dispatchable) → attempt 2 failed.
+  await assert.rejects(
+    control.workDispatch({ key: "p6-bounded-2", work: created.workId }),
+    (error) => error.code === "capacity_wait",
+  );
+  // Dispatch 3 → the budget refuses: retries are BOUNDED, never infinite.
+  await assert.rejects(
+    control.workDispatch({ key: "p6-bounded-3", work: created.workId }),
+    (error) => error.code === "policy_blocked",
+  );
+});
+
+test("§10 work_handoff writes a typed durable record; replay is idempotent; fields validate; the bound trims visibly", async () => {
+  const { control } = makeWorkControl();
+  const created = await seedReadyWork(control, { id: "p6-handoff" });
+  const first = await control.workHandoff({
+    key: "p6-h1",
+    work: created.workId,
+    objective: "ship the export fix",
+    target: "wt_main",
+    diffCommit: "abc1234",
+    testResults: "npm test: 12 pass",
+    pendingDecisions: ["keep or drop the legacy flag?"],
+    nextStep: "rebase onto main, then re-run the suite",
+    constraints: ["never touch the secrets module", "no new dependencies"],
+  });
+  assert.equal(first.ok, true);
+  const rec = first.handoff;
+  assert.equal(rec.stage, "specify", "the handoff pins the work's stage at write time");
+  assert.equal(rec.specHash, "sha256:aaa", "the handoff pins the spec hash at write time");
+  assert.equal(rec.attemptId, null, "no live attempt — the record is attemptless");
+  assert.deepEqual(rec.constraints, ["never touch the secrets module", "no new dependencies"]);
+  let { data } = await control.workInspect({ work: created.workId });
+  assert.equal(data.handoffs.length, 1);
+  assert.deepEqual(data.handoffs[0], rec, "the record is durable on the envelope");
+  // Idempotent replay returns the ORIGINAL result; the same key with
+  // DIFFERENT args is a visible conflict, never a silent second write.
+  const replay = await control.workHandoff({
+    key: "p6-h1",
+    work: created.workId,
+    objective: "ship the export fix",
+    target: "wt_main",
+    diffCommit: "abc1234",
+    testResults: "npm test: 12 pass",
+    pendingDecisions: ["keep or drop the legacy flag?"],
+    nextStep: "rebase onto main, then re-run the suite",
+    constraints: ["never touch the secrets module", "no new dependencies"],
+  });
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.handoff.id, rec.id);
+  await assert.rejects(
+    control.workHandoff({ key: "p6-h1", work: created.workId, objective: "different args, same key" }),
+    (error) => error.code === "idempotency_key_args_mismatch",
+  );
+  await assert.rejects(
+    control.workHandoff({ key: "p6-h2", work: created.workId, constraints: "not-a-list" }),
+    (error) => error.code === "unsupported" && /constraints/.test(error.message),
+  );
+  await assert.rejects(
+    control.workHandoff({ key: "p6-h3", work: created.workId, constraints: ["a", ""] }),
+    (error) => error.code === "unsupported",
+  );
+  await assert.rejects(
+    control.workHandoff({
+      key: "p6-h4",
+      work: created.workId,
+      constraints: Array.from({ length: 11 }, (_, i) => `c${i}`),
+    }),
+    (error) => error.code === "unsupported" && /at most 10/.test(error.message),
+  );
+  // Bounded: the record cap trims the OLDEST and reports the trim.
+  for (let i = 0; i < 21; i += 1) {
+    await control.workHandoff({ key: `p6-h-loop-${i}`, work: created.workId, nextStep: `step ${i}` });
+  }
+  ({ data } = await control.workInspect({ work: created.workId }));
+  assert.equal(data.handoffs.length, 20, "the handoff list is bounded");
+  assert.equal(data.handoffs.some((h) => h.id === rec.id), false, "the oldest record was trimmed");
+  assert.equal(data.handoffs.at(-1).nextStep, "step 20");
+  // Over-long text is clipped with a visible marker, never silently kept.
+  const long = await control.workHandoff({ key: "p6-h-long", work: created.workId, objective: "x".repeat(3000) });
+  assert.ok(long.handoff.objective.endsWith("(truncated)"), "clipping is visible");
+  // Terminal states refuse — there is no next attempt to read the record.
+  await control.workCancel({ key: "p6-h-cancel", work: created.workId });
+  await assert.rejects(
+    control.workHandoff({ key: "p6-h-terminal", work: created.workId, nextStep: "nope" }),
+    (error) => error.code === "policy_blocked" && /no next attempt/.test(error.message),
+  );
+});
+
+test("§10: the NEXT attempt READS the handoff — constraints appear verbatim in the worker prompt; a stale handoff is labelled, never silently dropped", async () => {
+  const { control, calls, jobs } = makeWorkControl();
+  const created = await seedReadyWork(control, { id: "p6-read" });
+  // Counterfactual control first: no handoff → no handoff section at all.
+  await control.workDispatch({ key: "p6-read-bare", work: created.workId });
+  const barePrompt = calls.find((c) => c.name === "startJob" && c.input.correlation?.workId === created.workId).input.prompt;
+  assert.ok(!barePrompt.includes("Handoff from a previous attempt"));
+  // Attempt 1 reports; the work is reported-complete awaiting the next stage.
+  const job1 = jobs.jobs.find((j) => j.correlation?.workId === created.workId);
+  job1.status = "done";
+  job1.result = "implemented per spec rev1";
+  await control.recordWorkerOutcome(job1);
+  // The handoff is written AT THE CHECKPOINT between attempts, then the
+  // retry (attempt 2) must read it.
+  await control.workHandoff({
+    key: "p6-read-h",
+    work: created.workId,
+    objective: "mid-attempt checkpoint",
+    diffCommit: "def5678",
+    nextStep: "finish the export path",
+    constraints: ["never touch the secrets module"],
+  });
+  const retried = await control.workRetry({ key: "p6-read-retry", work: created.workId });
+  assert.equal(retried.ok, true);
+  const prompts = calls.filter((c) => c.name === "startJob" && c.input.correlation?.workId === created.workId);
+  const handoffPrompt = prompts.at(-1).input.prompt;
+  assert.ok(handoffPrompt.includes("Handoff from a previous attempt"), "the handoff section is present");
+  assert.ok(handoffPrompt.includes("never touch the secrets module"), "constraints are enumerated verbatim — never dropped");
+  assert.ok(handoffPrompt.includes("mid-attempt checkpoint"));
+  assert.ok(handoffPrompt.includes("def5678"));
+  assert.ok(handoffPrompt.includes("finish the export path"));
+  // Stale: the spec moves AFTER the handoff — the record is still injected
+  // but labelled SUPERSEDED (never silently dropped, never silently trusted).
+  const { control: control2, calls: calls2, jobs: jobs2 } = makeWorkControl();
+  const created2 = await seedReadyWork(control2, { id: "p6-read2" });
+  await control2.workDispatch({ key: "p6-read2-d", work: created2.workId });
+  const job2a = jobs2.jobs.find((j) => j.correlation?.workId === created2.workId);
+  job2a.status = "done";
+  job2a.result = "implemented per spec rev1";
+  await control2.recordWorkerOutcome(job2a);
+  await control2.workHandoff({ key: "p6-read2-h", work: created2.workId, nextStep: "old-plan" });
+  await control2.workRevise({
+    key: "p6-read2-spec",
+    work: created2.workId,
+    patch: { spec: { revision: 2, hash: "sha256:new-spec", documentRef: "d#rev2" } },
+  });
+  await control2.workRetry({ key: "p6-read2-retry", work: created2.workId });
+  const stalePrompt = calls2
+    .filter((c) => c.name === "startJob" && c.input.correlation?.workId === created2.workId)
+    .at(-1).input.prompt;
+  assert.ok(stalePrompt.includes("SUPERSEDED"), "the stale handoff is labelled");
+  assert.ok(stalePrompt.includes("old-plan"), "and its content still travels — not dropped");
+});
+
+test("U21: archive preserves the WHY — claims (rationale), handoffs and operations stay readable after archive", async () => {
+  const { control, jobs } = makeWorkControl();
+  const created = await seedReadyWork(control, { id: "p6-u21" });
+  await control.workDispatch({ key: "p6-u21-d", work: created.workId });
+  const job = jobs.jobs.find((j) => j.correlation?.workId === created.workId);
+  job.status = "done";
+  job.result = "changed src/export.ts: handled the empty-input case; verified with npm test (7 pass)";
+  const adopted = await control.recordWorkerOutcome(job);
+  assert.equal(adopted.adopted, true);
+  await control.workHandoff({
+    key: "p6-u21-h",
+    work: created.workId,
+    nextStep: "request independent review of the head",
+    constraints: ["do not widen the public API"],
+  });
+  const archived = await control.workArchive({ key: "p6-u21-a", work: created.workId });
+  assert.equal(archived.ok, true);
+  const { data } = await control.workInspect({ work: created.workId });
+  assert.equal(data.state, "archived");
+  const claim = data.claims.find((c) => c.kind === "implementation_reported");
+  assert.ok(claim, "the claim survives archive");
+  assert.match(claim.note, /handled the empty-input case/, "'why it acted' — the worker's own report — is still readable");
+  assert.equal(data.handoffs.length, 1, "the checkpoint handoff survives archive");
+  assert.deepEqual(data.handoffs[0].constraints, ["do not widen the public API"]);
+  assert.equal(data.operations.length > 0, true, "the receipt history survives archive");
+  const evidence = await control.workEvidence({ work: created.workId });
+  assert.equal(evidence.ok, true);
+  assert.ok(
+    JSON.stringify(evidence.data).includes("handled the empty-input case"),
+    "the evidence read path still reaches the claim after archive",
+  );
+});
+
+test("§12 overrideDirty: an explicit override destroys a dirty worktree AFTER its file list is preserved as evidence; without it the force path never runs", async () => {
+  const ovrSpy = makeDelegateSpy({ jobs: [] });
+  const ctl = directWorkControl({ store: workStoreFixture(), spy: ovrSpy });
+  const created = await ctl.control.workCreate({
+    key: "p6-ovr-c",
+    project: "manta",
+    objective: "x",
+    spec: { revision: 1, hash: "h", documentRef: "d" },
+    deliveryTarget: { kind: "pr" },
+    state: "ready",
+    id: "p6-ovr",
+  });
+  const dispatched = await ctl.control.workDispatch({ key: "p6-ovr-d", work: created.workId });
+  await ctl.control.workCancel({ key: "p6-ovr-x", work: created.workId });
+  const path = (await ctl.control.workInspect({ work: created.workId })).data.resources.find(
+    (r) => r.kind === "delegate_job" && r.ref === dispatched.jobId,
+  ).path;
+  ctl.statusState.byPath[path] = " M src/worker.js\n M src/other.js";
+  ovrSpy.state.dirtyWorktrees.add(dispatched.jobId); // the spy's gitRemoveWorktree will refuse non-forced
+  // Counterfactual FIRST: WITHOUT the override flag the forced removal is
+  // never taken — the spy refuses (reason "dirty") and the worktree is
+  // preserved with the reason visible.
+  await assert.rejects(
+    ctl.control.workCleanup({ key: "p6-ovr-no", work: created.workId }),
+    (error) => error.code === "dirty_resource" && /preserved/.test(error.message),
+  );
+  const nonForced = ovrSpy.calls.filter((c) => c.name === "deleteJob" && c.input === dispatched.jobId);
+  assert.equal(nonForced.length, 0, "pre-classified dirty: no destructive call at all before the override");
+  // With the flag: evidence FIRST, then the forced removal, and the response
+  // reports what was preserved.
+  const cleaned = await ctl.control.workCleanup({ key: "p6-ovr-x2", work: created.workId, overrideDirty: true });
+  assert.equal(cleaned.ok, true);
+  assert.deepEqual(cleaned.removed, [dispatched.jobId], "the override DID destroy the worktree");
+  const forcedCall = ovrSpy.calls.filter((c) => c.name === "deleteJob" && c.input === dispatched.jobId).at(-1);
+  assert.equal(forcedCall.opts?.force, true, "the removal ran FORCED — the explicit override reached git");
+  assert.equal(cleaned.preserved.length, 1);
+  assert.equal(cleaned.preserved[0].ref, dispatched.jobId);
+  assert.match(cleaned.preserved[0].reason, /overrideDirty/);
+  const { data } = await ctl.control.workInspect({ work: created.workId });
+  const evidence = data.evidence.find((e) => e.kind === "worktree_preserved");
+  assert.ok(evidence, "the uncommitted file list is durable evidence");
+  assert.deepEqual(evidence.files, [" M src/worker.js", " M src/other.js"], "raw porcelain lines (leading column characters kept), bounded");
+  assert.equal(evidence.path, path);
+  const res = data.resources.find((r) => r.kind === "delegate_job" && r.ref === dispatched.jobId);
+  assert.equal(res.cleanupStatus, "removed", "the resource record closes normally after the override");
+});
+
+test("§12 still-referenced: a worktree another live work still references is PRESERVED with the referencing work named", async () => {
+  const store = workStoreFixture();
+  const { control } = makeWorkControl({ store });
+  const holder = await seedReadyWork(control, { id: "p6-ref-holder" });
+  const holderDispatch = await control.workDispatch({ key: "p6-ref-hd", work: holder.workId });
+  await control.workCancel({ key: "p6-ref-hc", work: holder.workId });
+  const holderPath = (await control.workInspect({ work: holder.workId })).data.resources.find(
+    (r) => r.kind === "delegate_job" && r.ref === holderDispatch.jobId,
+  ).path;
+  // A second work envelope whose resource points at the SAME worktree path
+  // (the shared-checkout case): the holder's cleanup must preserve.
+  const borrower = await seedReadyWork(control, { id: "p6-ref-borrower" });
+  await lockForStore({ name: store.name, path: store.pathFor(borrower.workId) }).runExclusive(async () => {
+    const raw = await readFile(store.pathFor(borrower.workId), "utf-8");
+    const env = JSON.parse(raw);
+    env.resources = [
+      ...(env.resources ?? []),
+      { id: "res_shared", kind: "delegate_job", ref: "job_foreign", path: holderPath, owned: true, createdAt: 1, updatedAt: 1 },
+    ];
+    await store.save(borrower.workId, env);
+  });
+  await assert.rejects(
+    control.workCleanup({ key: "p6-ref-hx", work: holder.workId }),
+    (error) => {
+      assert.equal(error.code, "active_resource");
+      assert.match(error.message, /p6-ref-borrower/, "the referencing work is named");
+      assert.deepEqual(error.details?.preserved, [{ ref: holderDispatch.jobId, reason: "still_referenced" }]);
+      return true;
+    },
+  );
+  const { data } = await control.workInspect({ work: holder.workId });
+  const res = data.resources.find((r) => r.kind === "delegate_job" && r.ref === holderDispatch.jobId);
+  assert.equal(res.cleanupStatus, "preserved");
+  assert.equal(res.preservedReason, "still_referenced");
+  // Counterfactual: once the other work's resource is REMOVED (its own
+  // cleanup ran), the same holder cleanup succeeds.
+  await lockForStore({ name: store.name, path: store.pathFor(borrower.workId) }).runExclusive(async () => {
+    const raw = await readFile(store.pathFor(borrower.workId), "utf-8");
+    const env = JSON.parse(raw);
+    env.resources = env.resources.map((x) => (x?.id === "res_shared" ? { ...x, cleanupStatus: "removed" } : x));
+    await store.save(borrower.workId, env);
+  });
+  const cleaned = await control.workCleanup({ key: "p6-ref-hx2", work: holder.workId });
+  assert.equal(cleaned.ok, true, "a cleared reference unblocks the cleanup");
+  assert.deepEqual(cleaned.removed, [holderDispatch.jobId]);
 });

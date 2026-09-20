@@ -171,6 +171,21 @@ export const RELEASE_CONTRACT_FIELDS = Object.freeze([
 // unbounded review loop.
 export const DEFAULT_MAX_STAGE_ATTEMPTS = 3;
 
+// P6 scheduling (spec §9). The interactive reserve is the capacity-count a
+// BACKGROUND dispatch must leave free while an INTERACTIVE work item is
+// dispatchable — "speculative backfill and nonurgent ambient analysis yield
+// before CEO requests". Interactive dispatch itself never yields.
+export const DEFAULT_INTERACTIVE_RESERVE = 1;
+
+// P6 checkpoint handoffs (spec §10). Bounded: at most HANDOFF_KEEP records per
+// envelope (oldest trimmed, count reported), string fields clipped with a
+// visible marker at NOTE_MAX_CHARS (the file's shared bounded-text rule),
+// list fields bounded in count.
+export const HANDOFF_KEEP = 20;
+const HANDOFF_LIST_MAX = 10;
+const HANDOFF_LIST_FIELDS = Object.freeze(["pendingDecisions", "constraints"]);
+const HANDOFF_TEXT_FIELDS = Object.freeze(["objective", "target", "diffCommit", "testResults", "nextStep"]);
+
 // Bounded note/result text stored on attempts and claims.
 const NOTE_MAX_CHARS = 2000;
 
@@ -248,6 +263,21 @@ function defaultGitRemoteUrl(cwd) {
           resolve(!urlError && typeof urlOut === "string" && urlOut.trim() ? urlOut.trim() : null);
         });
       });
+    });
+  });
+}
+
+// §12 cleanup gitStatus default — the same contract as ctoMantaTools'
+// defaultGitStatus: porcelain stdout ("" when clean), rejected with the
+// stderr message when git fails (the caller maps that to provider_unavailable).
+function defaultWorktreeGitStatus(cwd) {
+  return new Promise((resolve, reject) => {
+    execFile("git", ["-C", cwd, "status", "--porcelain"], { timeout: 10_000 }, (error, stdout) => {
+      if (error) {
+        reject(new Error(error.stderr?.trim() || error.message));
+        return;
+      }
+      resolve(String(stdout ?? ""));
     });
   });
 }
@@ -428,6 +458,91 @@ function isBlockingOpenDecision(decision) {
 }
 
 // ---------------------------------------------------------------------------
+// P6 pure helpers (§9 scheduling, §10 handoffs, §12 cleanup classification).
+// Exported for tests; every guarantee built on them has a counterfactual
+// positive control in ctoWorkTools.test.mjs.
+// ---------------------------------------------------------------------------
+
+/**
+ * §10: the handoff the NEXT attempt reads. Newest record wins; `stale` marks a
+ * handoff recorded against a spec hash that is no longer current — it is
+ * still injected (never silently dropped) but labelled superseded, so a
+ * prompt-space consumer can never mistake old checkpoint context for current
+ * constraints.
+ */
+export function selectHandoffForAttempt(env) {
+  const handoffs = Array.isArray(env?.handoffs) ? env.handoffs : [];
+  const newest = [...handoffs].sort((a, b) => (b?.recordedAt ?? 0) - (a?.recordedAt ?? 0))[0] ?? null;
+  if (!newest) return null;
+  return { handoff: newest, stale: newest.specHash !== env.spec.hash };
+}
+
+/**
+ * §9 scheduling order — the pure comparator behind work_capacity's
+ * schedulingOrder: interactive first, then explicit priority (higher first),
+ * then fair aging (older created first), then id (total, deterministic order).
+ */
+export function compareScheduling(a, b) {
+  const classA = a?.schedulingClass === "interactive" ? 0 : 1;
+  const classB = b?.schedulingClass === "interactive" ? 0 : 1;
+  if (classA !== classB) return classA - classB;
+  if ((b?.priority ?? 0) !== (a?.priority ?? 0)) return (b?.priority ?? 0) - (a?.priority ?? 0);
+  if ((a?.createdAt ?? 0) !== (b?.createdAt ?? 0)) return (a?.createdAt ?? 0) - (b?.createdAt ?? 0);
+  return String(a?.id ?? "").localeCompare(String(b?.id ?? ""));
+}
+
+/**
+ * §9 scheduling decision for ONE dispatch request — a discriminated union:
+ *   { action: "dispatch" }
+ *   { action: "wait", reason: "capacity", detail: { exhausted: true } }
+ *   { action: "wait", reason: "capacity", detail: { yieldedTo: "interactive", ... } }
+ * Order per §9: availability, then the interactive reserve (a BACKGROUND item
+ * yields when the remaining slots are at or below the reserve AND a real
+ * interactive work item is dispatchable — no competitor, no yield). The
+ * exhausted branch is reported for observability; the caller lets the delegate
+ * engine's own cap refusal surface it (the one shared capacity seam).
+ */
+export function schedulingDecision({ work, availableSlots, interactiveCompetitors = [], interactiveReserve = DEFAULT_INTERACTIVE_RESERVE }) {
+  if (!Number.isInteger(availableSlots) || availableSlots < 0) {
+    throw controlError("unsupported", `availableSlots must be a non-negative integer (got ${JSON.stringify(availableSlots)})`);
+  }
+  if (availableSlots <= 0) {
+    return { action: "wait", reason: "capacity", detail: { exhausted: true } };
+  }
+  if (work?.schedulingClass !== "interactive" && availableSlots <= interactiveReserve && interactiveCompetitors.length > 0) {
+    return {
+      action: "wait",
+      reason: "capacity",
+      detail: {
+        yieldedTo: "interactive",
+        interactiveReserve,
+        competitors: interactiveCompetitors.map((c) => c?.id ?? String(c)),
+      },
+    };
+  }
+  return { action: "dispatch" };
+}
+
+/**
+ * §12 cleanup classification for ONE owned job resource, computed BEFORE any
+ * destructive call: clean | dirty | still_referenced | active. Dirty and
+ * still-referenced are PRESERVED (never destroyed without the explicit
+ * override); the classification names WHY, visibly.
+ */
+export function classifyCleanupResource({ resource, job, dirtyStatus, referencedBy = [] }) {
+  if (job && (job.status === "running" || job.status === "paused")) {
+    return { cls: "active", reason: `job ${job.id} is still ${job.status}` };
+  }
+  if (referencedBy.length > 0) {
+    return { cls: "still_referenced", reason: `worktree ${resource?.path ?? "?"} is still referenced by: ${referencedBy.join(", ")}` };
+  }
+  if (dirtyStatus) {
+    return { cls: "dirty", reason: `worktree ${resource?.path ?? "?"} has uncommitted changes: ${dirtyStatus}` };
+  }
+  return { cls: "clean", reason: null };
+}
+
+// ---------------------------------------------------------------------------
 // Service factory
 // ---------------------------------------------------------------------------
 
@@ -458,6 +573,13 @@ export function createCtoWorkControl({
   // the checkout has no usable remote — a remote-less repo's opencode id is
   // fork-prone and is never persisted as identity).
   gitRemoteUrl = defaultGitRemoteUrl,
+  // §12 cleanup classification dep — git status --porcelain over a worktree
+  // path ("" when clean, a non-empty porcelain listing when dirty, a throw
+  // when unreadable). Mirrors ctoMantaTools' gitStatus dep contract.
+  gitStatus = defaultWorktreeGitStatus,
+  // §9 interactive reserve — how many slots a background dispatch must leave
+  // free while an interactive work item is dispatchable.
+  interactiveReserve = DEFAULT_INTERACTIVE_RESERVE,
   // ---- §11 stage deps (review/merge/release/verify) -------------------------
   // forge: an existing forge adapter seam (src/server/forge/*) exposing
   //   getPullRequest(repo, number), getChecks(repo, sha), merge(repo, number,
@@ -733,7 +855,10 @@ export function createCtoWorkControl({
   // is met when the dependency work is completed, or when it carries a
   // non-superseded implementation claim matching its CURRENT spec (a
   // REPORTED outcome — labelled as a claim, never silently a verdict; the
-  // §11 PR adds verified completion as the stronger signal).
+  // §11 PR adds verified completion as the stronger signal). Readiness is
+  // always computed FRESH against the dependency's live envelope, so a
+  // dependency revision (spec hash move) or a superseded claim invalidates
+  // satisfaction by construction — stale evidence is never "met".
   function dependencyReadiness(dep) {
     if (dep.state === "completed") {
       return { met: true, source: "completed" };
@@ -745,6 +870,28 @@ export function createCtoWorkControl({
       return { met: true, source: "reported (claim — unverified)" };
     }
     return { met: false, source: dep.state };
+  }
+
+  // The unmet-dependency list of ONE envelope, computed against the live
+  // dependency envelopes. Shared by the dispatch gate (assertDependenciesOrPark)
+  // and the P6 waiting re-evaluation pass (§9).
+  async function unmetDependencies(env) {
+    const unmet = [];
+    for (const depId of env.dependencies ?? []) {
+      let dep;
+      try {
+        dep = await work.getWork(depId);
+      } catch {
+        dep = null;
+      }
+      if (!dep) {
+        unmet.push({ id: depId, readiness: "missing" });
+        continue;
+      }
+      const r = dependencyReadiness(dep);
+      if (!r.met) unmet.push({ id: depId, readiness: r.source });
+    }
+    return unmet;
   }
 
   // ---------------------------------------------------------------------------
@@ -907,6 +1054,37 @@ export function createCtoWorkControl({
     }
   }
 
+  // §10: the section the prompt renders for a checkpoint handoff. The handoff
+  // is the DURABLE record verbatim — constraints are enumerated so the next
+  // attempt cannot silently drop them (a prompt-space summary would). A stale
+  // handoff (recorded against a moved spec hash) is still injected but labelled
+  // SUPERSEDED — never silently dropped, never silently trusted.
+  function buildHandoffPromptSection(env) {
+    const selected = selectHandoffForAttempt(env);
+    if (!selected) return null;
+    const { handoff, stale } = selected;
+    const lines = [
+      ``,
+      `## Handoff from a previous attempt (durable checkpoint record${stale ? " — SUPERSEDED" : ""})`,
+    ];
+    if (stale) {
+      lines.push(`RECORDED AGAINST SPEC ${handoff.specHash}; the work is now on spec ${env.spec.hash}. Treat as background context and verify before trusting.`);
+    }
+    if (handoff.objective) lines.push(`Objective at checkpoint: ${handoff.objective}`);
+    if (handoff.target) lines.push(`Target at checkpoint: ${handoff.target}`);
+    if (handoff.diffCommit) lines.push(`Diff/commit at checkpoint: ${handoff.diffCommit}`);
+    if (handoff.testResults) lines.push(`Test results at checkpoint: ${handoff.testResults}`);
+    if (Array.isArray(handoff.pendingDecisions) && handoff.pendingDecisions.length > 0) {
+      lines.push(`Pending decisions: ${handoff.pendingDecisions.join("; ")}`);
+    }
+    if (handoff.nextStep) lines.push(`Next step at checkpoint: ${handoff.nextStep}`);
+    if (Array.isArray(handoff.constraints) && handoff.constraints.length > 0) {
+      lines.push(`Constraints (MUST be honored):`);
+      for (const c of handoff.constraints) lines.push(`- ${c}`);
+    }
+    return lines;
+  }
+
   function buildWorkPrompt(env) {
     const lines = [
       `You are the implementation worker for tracked work ${env.id} (work revision ${env.revision}).`,
@@ -921,6 +1099,8 @@ export function createCtoWorkControl({
       `When you finish, report exactly what you changed and how you verified it — that report is a CLAIM,`,
       `not a completion verdict.`,
     ];
+    const handoffLines = buildHandoffPromptSection(env);
+    if (handoffLines) lines.push(...handoffLines);
     return lines.join("\n");
   }
 
@@ -1433,6 +1613,7 @@ export function createCtoWorkControl({
       stage: env.stage,
       priority: env.priority,
       priorityReason: env.priorityReason,
+      schedulingClass: env.schedulingClass ?? "background",
       project: env.project,
       deliveryTarget: env.deliveryTarget,
       spec: env.spec,
@@ -1544,6 +1725,9 @@ export function createCtoWorkControl({
         // §11: each observation becomes durable, attributable evidence — it
         // must be inspectable, not just the claims it supports.
         evidence: env.evidence ?? [],
+        // §10: the checkpoint handoffs — the next attempt reads the newest
+        // one; "ask why it acted" after archive reads these plus the claims.
+        handoffs: env.handoffs ?? [],
         decisions: env.decisions ?? [],
         resources: env.resources ?? [],
         operations: (env.operations ?? []).map((r) => ({
@@ -1598,6 +1782,22 @@ export function createCtoWorkControl({
     const { works } = await work.listWorks({ limit: LIST_MAX_LIMIT });
     const byState = {};
     for (const env of works) byState[env.state] = (byState[env.state] ?? 0) + 1;
+    // §9 scheduling order — dependency readiness filters the candidates, then
+    // compareScheduling orders them: interactive first, explicit priority,
+    // then fair aging. This is the observable "which next and why" for
+    // contended capacity.
+    const candidates = works.filter((w) => w.state === "ready" || w.state === "waiting");
+    const schedulingOrder = [...candidates]
+      .sort(compareScheduling)
+      .map((w) => ({
+        workId: w.id,
+        state: w.state,
+        waitingReason: w.waitingReason ?? null,
+        priority: w.priority,
+        priorityReason: w.priorityReason ?? "",
+        schedulingClass: w.schedulingClass ?? "background",
+        createdAt: w.createdAt,
+      }));
     return {
       ok: true,
       data: {
@@ -1606,6 +1806,8 @@ export function createCtoWorkControl({
           maxRunningJobs: MAX_RUNNING_JOBS,
           availableSlots: Math.max(0, MAX_RUNNING_JOBS - running),
         },
+        interactiveReserve,
+        schedulingOrder,
         worksByState: byState,
         dispatchable: (byState.ready ?? 0) + (byState.waiting ?? 0),
         observedAt: new Date(now()).toISOString(),
@@ -1648,6 +1850,9 @@ export function createCtoWorkControl({
           }
           if (input.priorityReason !== undefined && typeof input.priorityReason !== "string") {
             throw controlError("unsupported", "priorityReason must be a string");
+          }
+          if (input.schedulingClass !== undefined) {
+            assertNonEmptyString(input.schedulingClass, "schedulingClass");
           }
           for (const d of input.decisions ?? []) validateDecisionRecord(d, "decisions[]");
 
@@ -1716,6 +1921,7 @@ export function createCtoWorkControl({
               dependencies: input.dependencies ?? [],
               priority: input.priority ?? 0,
               priorityReason: input.priorityReason ?? "",
+              schedulingClass: input.schedulingClass ?? "background",
               stage: "specify",
               state: input.state ?? "draft",
               decisions: input.decisions ?? [],
@@ -1867,10 +2073,20 @@ export function createCtoWorkControl({
         { priority: input.priority, priorityReason: input.priorityReason ?? "" },
         { expectedRevision: input.expectedRevision },
       );
+      // §9: a priority change re-evaluates the waiting set. A waiting/
+      // dependency item whose dependencies have since become satisfied is
+      // PROMOTED to ready (recording the transition); items whose evidence is
+      // stale (the dependency's spec moved on) stay waiting. Running workers
+      // are never disturbed.
+      const reevaluated = await reevaluateWaitingWorks();
       const payload = successPayload({
         env,
         receipt,
-        summary: `work "${env.id}" priority → ${env.priority}${env.priorityReason ? ` (${env.priorityReason})` : ""} — running workers were not disturbed`,
+        summary: `work "${env.id}" priority → ${env.priority}${env.priorityReason ? ` (${env.priorityReason})` : ""} — running workers were not disturbed` +
+          (reevaluated.length
+            ? `; waiting re-evaluation promoted: ${reevaluated.map((r) => r.workId).join(", ")}`
+            : ""),
+        extra: { reevaluated },
       });
       await work.recordOperationOutcome(input.work, {
         receiptId: receipt.id,
@@ -1884,6 +2100,35 @@ export function createCtoWorkControl({
       await recordReceiptFailure(input.work, receipt, err);
       throw err;
     }
+  }
+
+  // §9 re-evaluation pass over the waiting set (bounded by the list cap):
+  // every waiting/dependency work whose dependencies now read satisfied is
+  // promoted to ready with a visible transition record. A work whose
+  // dependency evidence is stale (unmet after the fresh readiness read) stays
+  // waiting — the park is honest, never optimistic.
+  async function reevaluateWaitingWorks() {
+    const { works } = await work.listWorks({ limit: LIST_MAX_LIMIT });
+    const reevaluated = [];
+    for (const w of works) {
+      if (w.state !== "waiting" || w.waitingReason !== "dependency") continue;
+      const unmet = await unmetDependencies(w);
+      if (unmet.length > 0) continue;
+      const outcome = await work
+        .mutateWork(w.id, (env) => {
+          // Guarded: only a still-waiting-on-dependency envelope moves. A
+          // concurrent dispatch/cancel wins and this pass no-ops.
+          if (env.state !== "waiting" || env.waitingReason !== "dependency") {
+            return { save: null, value: null };
+          }
+          return { save: withState(env, "ready"), value: { promoted: true } };
+        })
+        .catch(() => null);
+      if (outcome?.promoted) {
+        reevaluated.push({ workId: w.id, from: "waiting/dependency", to: "ready" });
+      }
+    }
+    return reevaluated;
   }
 
   // ---------------------------------------------------------------------------
@@ -2012,6 +2257,7 @@ export function createCtoWorkControl({
     const envBefore = await getWorkOrThrow(input.work);
     assertDispatchAdmissible(envBefore);
     await assertDependenciesOrPark(input.work, envBefore);
+    await assertSchedulingOrPark(input.work, envBefore);
     assertAttemptBudget(envBefore);
     return runDispatchPipeline({
       input,
@@ -2023,21 +2269,7 @@ export function createCtoWorkControl({
   }
 
   async function assertDependenciesOrPark(workId, env) {
-    const unmet = [];
-    for (const depId of env.dependencies ?? []) {
-      let dep;
-      try {
-        dep = await work.getWork(depId);
-      } catch {
-        dep = null;
-      }
-      if (!dep) {
-        unmet.push({ id: depId, readiness: "missing" });
-        continue;
-      }
-      const r = dependencyReadiness(dep);
-      if (!r.met) unmet.push({ id: depId, readiness: r.source });
-    }
+    const unmet = await unmetDependencies(env);
     if (unmet.length === 0) return;
     // Durable wait reason (§9), then refuse.
     await work
@@ -2052,6 +2284,47 @@ export function createCtoWorkControl({
       `work "${workId}" cannot dispatch — dependencies unmet: ` +
         unmet.map((u) => `${u.id} (${u.readiness})`).join(", "),
       { retrySafe: true, details: { unmet } },
+    );
+  }
+
+  // §9 interactive reserve — the P6 scheduling gate. A BACKGROUND dispatch
+  // yields (explicitly, with a durable wait reason) when the remaining slots
+  // are at or below the interactive reserve AND a real interactive work item
+  // is dispatchable; interactive dispatch never yields. Runs BEFORE the
+  // pipeline: no attempt is burned on a refusal the schedule already knows,
+  // and the park lands here (waiting/capacity — dispatchable again the moment
+  // a slot frees or the competitor clears).
+  async function assertSchedulingOrPark(workId, env) {
+    if (env.schedulingClass === "interactive") return; // CEO work never yields
+    const jobs = await readJobsOrThrow(`scheduling work "${workId}"`);
+    const availableSlots = Math.max(0, MAX_RUNNING_JOBS - jobs.filter((j) => j?.status === "running").length);
+    const { works } = await work.listWorks({ limit: LIST_MAX_LIMIT });
+    const competitors = works.filter(
+      (w) =>
+        w.id !== workId &&
+        w.schedulingClass === "interactive" &&
+        (w.state === "ready" || (w.state === "waiting" && w.waitingReason === "capacity")),
+    );
+    const decision = schedulingDecision({
+      work: env,
+      availableSlots,
+      interactiveCompetitors: competitors,
+      interactiveReserve,
+    });
+    if (decision.action !== "wait" || decision.detail?.yieldedTo !== "interactive") return;
+    const why = `yielded to the interactive reserve (${decision.detail.interactiveReserve}) — ` +
+      `interactive work ${competitors.map((c) => c.id).join(", ")} is dispatchable and keeps the next slot(s)`;
+    await work
+      .mutateWork(workId, (e) =>
+        e.state === "running"
+          ? { save: null, value: null }
+          : { save: { ...e, state: "waiting", waitingReason: "capacity", updatedAt: now() }, value: null },
+      )
+      .catch(() => {});
+    throw controlError(
+      "capacity_wait",
+      `dispatch of work "${workId}" waits: ${why}`,
+      { retrySafe: true, details: decision.detail },
     );
   }
 
@@ -2101,6 +2374,7 @@ export function createCtoWorkControl({
     const envAfter = await getWorkOrThrow(input.work);
     assertDispatchAdmissible(envAfter);
     await assertDependenciesOrPark(input.work, envAfter);
+    await assertSchedulingOrPark(input.work, envAfter);
     assertAttemptBudget(envAfter);
     return runDispatchPipeline({
       input,
@@ -2408,6 +2682,108 @@ export function createCtoWorkControl({
   }
 
   // ---------------------------------------------------------------------------
+  // work_handoff (§10) — the durable checkpoint record. Written AT CHECKPOINT
+  // (pause boundary, attempt replacement, compaction of a work conversation);
+  // read at the NEXT attempt's start via the worker prompt — never a
+  // prompt-space summary that silently drops constraints. Bounded: field text
+  // clipped with a visible marker, list fields capped, oldest records trimmed
+  // past HANDOFF_KEEP (count reported).
+  // ---------------------------------------------------------------------------
+
+  function validateHandoffInput(input) {
+    for (const field of HANDOFF_TEXT_FIELDS) {
+      if (input[field] !== undefined) {
+        if (typeof input[field] !== "string") {
+          throw controlError("unsupported", `handoff.${field} must be a string`);
+        }
+      }
+    }
+    for (const field of HANDOFF_LIST_FIELDS) {
+      if (input[field] !== undefined) {
+        if (!Array.isArray(input[field]) || input[field].some((v) => typeof v !== "string" || v.trim().length === 0)) {
+          throw controlError("unsupported", `handoff.${field} must be an array of non-empty strings`);
+        }
+        if (input[field].length > HANDOFF_LIST_MAX) {
+          throw controlError(
+            "unsupported",
+            `handoff.${field} accepts at most ${HANDOFF_LIST_MAX} entries (got ${input[field].length})`,
+          );
+        }
+      }
+    }
+    if (input.stage !== undefined && !WORK_STAGES.includes(input.stage)) {
+      throw controlError("unsupported", `handoff.stage must be one of ${WORK_STAGES.join(", ")} (got ${JSON.stringify(input.stage)})`);
+    }
+  }
+
+  function buildHandoffRecord(env, input) {
+    const clip = (v) => (v === undefined ? undefined : clipNote(v));
+    const liveAttempt = (env.attempts ?? []).find((a) => a?.status === "running" || a?.status === "dispatching") ?? null;
+    return {
+      id: `hnd_${newId()}`,
+      stage: input.stage ?? env.stage,
+      specHash: env.spec.hash,
+      workRevision: env.revision,
+      recordedAt: now(),
+      attemptId: liveAttempt?.id ?? null,
+      ...(input.objective !== undefined ? { objective: clip(input.objective) } : {}),
+      ...(input.target !== undefined ? { target: clip(input.target) } : {}),
+      ...(input.diffCommit !== undefined ? { diffCommit: clip(input.diffCommit) } : {}),
+      ...(input.testResults !== undefined ? { testResults: clip(input.testResults) } : {}),
+      ...(input.nextStep !== undefined ? { nextStep: clip(input.nextStep) } : {}),
+      ...(input.pendingDecisions !== undefined ? { pendingDecisions: input.pendingDecisions.map(clip) } : {}),
+      ...(input.constraints !== undefined ? { constraints: input.constraints.map(clip) } : {}),
+    };
+  }
+
+  async function workHandoff(input) {
+    assertPlainObject(input, "handoff input");
+    assertNonEmptyString(input.key, "idempotency key");
+    assertNonEmptyString(input.work, "work");
+    const envBefore = await getWorkOrThrow(input.work);
+    if (["completed", "cancelled", "archived"].includes(envBefore.state)) {
+      throw controlError(
+        "policy_blocked",
+        `work "${input.work}" is ${envBefore.state} — a checkpoint handoff records context for a NEXT attempt; there is no next attempt here`,
+        { retrySafe: false },
+      );
+    }
+    validateHandoffInput(input);
+    const reserved = await reserveStage("work.handoff", input);
+    if (reserved.replay) return replayResponse(reserved.receipt, input.work);
+    const receipt = reserved.receipt;
+    try {
+      let trimmed = 0;
+      const record = buildHandoffRecord(envBefore, input);
+      await work.mutateWork(input.work, (env) => {
+        // §10: bounded — the newest records survive, the trim count is visible.
+        const kept = [...(env.handoffs ?? []), record];
+        if (kept.length > HANDOFF_KEEP) {
+          trimmed = kept.length - HANDOFF_KEEP;
+          kept.splice(0, trimmed);
+        }
+        return { save: { ...env, handoffs: kept, updatedAt: now() }, value: null };
+      });
+      const fresh = await getWorkOrThrow(input.work);
+      const payload = successPayload({
+        env: fresh,
+        receipt,
+        summary: `recorded checkpoint handoff ${record.id} on work "${input.work}" (stage ${record.stage}, spec ${record.specHash})` +
+          (record.attemptId ? ` for attempt ${record.attemptId}` : "") +
+          ` — the next attempt reads it at start` +
+          (trimmed ? `; ${trimmed} oldest handoff(s) trimmed (bounded at ${HANDOFF_KEEP})` : ""),
+        extra: { changed: true, handoff: record, trimmed },
+      });
+      await work.recordOperationOutcome(input.work, { receiptId: receipt.id, status: "succeeded", resultCode: "handed_off", result: payload });
+      return { ok: true, replayed: false, ...payload };
+    } catch (error) {
+      const err = toWorkToolError(error);
+      await recordReceiptFailure(input.work, receipt, err);
+      throw err;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // work_archive / work_cleanup (§12)
   // ---------------------------------------------------------------------------
 
@@ -2472,10 +2848,61 @@ export function createCtoWorkControl({
     }));
   }
 
+  // §12 cleanup classification — computed BEFORE any destructive call so a
+  // dirty / still-referenced worktree is PRESERVED (never destroyed), the
+  // reason is visible, and the retry path is obvious. Only `overrideDirty`
+  // lets cleanup proceed past a dirty worktree, and even then the uncommitted
+  // file list is preserved as durable evidence FIRST (§12 order: preserve
+  // evidence → remove).
+  async function classifyJobResourcesForCleanup({ workId, jobResources, jobs }) {
+    const { works } = await work.listWorks({ limit: LIST_MAX_LIMIT });
+    const classifications = [];
+    for (const r of jobResources) {
+      const job = jobs.find((j) => j?.id === r.ref);
+      // Still-referenced: ANOTHER live work envelope's (non-removed) resource
+      // sits at the same worktree path — removing ours would pull theirs.
+      const referencedBy = r.path
+        ? works
+            .filter((w) => w.id !== workId)
+            .filter((w) =>
+              (w.resources ?? []).some(
+                (x) => x?.kind === "delegate_job" && x.cleanupStatus !== "removed" && x.path === r.path,
+              ),
+            )
+            .map((w) => w.id)
+        : [];
+      let dirtyStatus = null;
+      if (referencedBy.length === 0 && r.path) {
+        try {
+          const status = await gitStatus(r.path);
+          // Keep the raw porcelain (leading column characters are meaningful);
+          // only the EMPTINESS check trims.
+          dirtyStatus = typeof status === "string" && status.trim().length > 0 ? status : null;
+        } catch (error) {
+          throw controlError(
+            "provider_unavailable",
+            `cannot check worktree ${r.path} of work "${workId}" for uncommitted changes: ${error?.message ?? error} — ` +
+              `cleanup proceeds only once the worktree state is observable`,
+            { retrySafe: true },
+          );
+        }
+      }
+      classifications.push({
+        resource: r,
+        ...classifyCleanupResource({ resource: r, job, dirtyStatus, referencedBy }),
+        dirtyStatus,
+      });
+    }
+    return classifications;
+  }
+
   async function workCleanup(input) {
     assertPlainObject(input, "cleanup input");
     assertNonEmptyString(input.key, "idempotency key");
     assertNonEmptyString(input.work, "work");
+    if (input.overrideDirty !== undefined && typeof input.overrideDirty !== "boolean") {
+      throw controlError("unsupported", "overrideDirty must be a boolean when present");
+    }
     const envBefore = await getWorkOrThrow(input.work);
     const reserved = await reserveStage("work.cleanup", input);
     if (reserved.replay) return replayResponse(reserved.receipt, input.work);
@@ -2523,22 +2950,58 @@ export function createCtoWorkControl({
       }
       const jobs = await readJobsOrThrow(`cleaning up work "${input.work}"`);
       const jobResources = resources.filter((r) => r?.kind === "delegate_job" && r.cleanupStatus !== "removed");
-      for (const r of jobResources) {
-        const job = jobs.find((j) => j?.id === r.ref);
-        if (job && isLiveJob(job)) {
+      const classifications = await classifyJobResourcesForCleanup({
+        workId: input.work,
+        jobResources,
+        jobs,
+      });
+      // Dirty / still-referenced are PRESERVED up front — classified before
+      // anything destructive, with the reason on both the error and the
+      // resource row (visible + retryable, §12/U20). Destroying a dirty
+      // worktree requires the explicit overrideDirty flag.
+      for (const c of classifications) {
+        if (c.cls === "active") {
           throw controlError(
             "active_resource",
-            `resource ${r.ref} of work "${input.work}" is still ${job.status} — stop it before cleanup`,
+            `resource ${c.resource.ref} of work "${input.work}" is still live — ${c.reason} — stop it before cleanup`,
             { retrySafe: false },
+          );
+        }
+        if (c.cls === "still_referenced") {
+          await markResource(input.work, c.resource.id, {
+            cleanupStatus: "preserved",
+            preservedReason: "still_referenced",
+            failureReason: clipNote(c.reason),
+          });
+          throw controlError(
+            "active_resource",
+            `cleanup of work "${input.work}" preserved ${c.resource.ref} — ${c.reason} — resolve the reference and retry`,
+            { retrySafe: true, details: { preserved: [{ ref: c.resource.ref, reason: "still_referenced" }] } },
+          );
+        }
+        if (c.cls === "dirty" && input.overrideDirty !== true) {
+          await markResource(input.work, c.resource.id, {
+            cleanupStatus: "preserved",
+            preservedReason: "dirty",
+            failureReason: clipNote(c.reason),
+          });
+          throw controlError(
+            "dirty_resource",
+            `cleanup of work "${input.work}" preserved ${c.resource.ref} — ${c.reason} — ` +
+              `commit or discard the changes and retry, or pass overrideDirty to destroy them (the file list is preserved as evidence first)`,
+            { retrySafe: true, details: { preserved: [{ ref: c.resource.ref, reason: "dirty" }] } },
           );
         }
       }
       // §12 order: validate and record intent → preserve evidence → remove
-      // through the existing NON-FORCED operation → record success. Failure
+      // through the existing NON-FORCED operation (force ONLY where the
+      // explicit override accepted a dirty worktree) → record success. Failure
       // retains metadata to retry and stays visible.
       const removed = [];
       const failed = [];
-      for (const r of jobResources) {
+      const preserved = [];
+      for (const c of classifications) {
+        const r = c.resource;
         await work.mutateWork(input.work, (env) => ({
           save: {
             ...env,
@@ -2548,8 +3011,26 @@ export function createCtoWorkControl({
           },
           value: null,
         }));
+        // Override path: the dirty worktree IS destroyed, but what was there
+        // is preserved as durable evidence BEFORE the removal (§12 order).
+        let evidenceId = null;
+        if (c.cls === "dirty" && input.overrideDirty === true) {
+          const files = (c.dirtyStatus ?? "")
+            .split("\n")
+            .filter((line) => line.trim().length > 0)
+            .slice(0, HANDOFF_LIST_MAX);
+          evidenceId = `dirty-worktree:${r.ref}`;
+          await work.mutateWork(input.work, (env) => {
+            const evidence = [...(env.evidence ?? [])];
+            if (!evidence.some((e) => e?.id === evidenceId)) {
+              evidence.push({ kind: "worktree_preserved", id: evidenceId, path: r.path, files, observedAt: now() });
+            }
+            return { save: { ...env, evidence, updatedAt: now() }, value: null };
+          });
+          preserved.push({ ref: r.ref, reason: "dirty (destroyed by explicit overrideDirty — uncommitted file list preserved as evidence)", evidenceId });
+        }
         try {
-          const res = await deleteJob(r.ref);
+          const res = await deleteJob(r.ref, c.cls === "dirty" && input.overrideDirty === true ? { force: true } : undefined);
           if (res?.ok) {
             removed.push(r.ref);
             await markResource(input.work, r.id, { cleanupStatus: "removed", removedAt: now() });
@@ -2580,6 +3061,9 @@ export function createCtoWorkControl({
       const summary =
         `cleaned up work "${input.work}"` +
         (removed.length ? `; removed: ${removed.join(", ")}` : "") +
+        (preserved.length
+          ? `; destroyed-by-override with evidence preserved: ${preserved.map((p) => p.ref).join(", ")}`
+          : "") +
         (failed.length
           ? `; RETAINED (visible + retryable): ${failed.map((f) => `${f.ref} (${f.reason})`).join(", ")}`
           : "") +
@@ -2588,7 +3072,7 @@ export function createCtoWorkControl({
         env: fresh,
         receipt,
         summary,
-        extra: { changed: removed.length > 0, removed, failed },
+        extra: { changed: removed.length > 0, removed, preserved, failed },
       });
       await work.recordOperationOutcome(input.work, { receiptId: receipt.id, status: "succeeded", resultCode: "cleaned", result: payload });
       return { ok: true, replayed: false, ...payload };
@@ -3337,6 +3821,7 @@ export function createCtoWorkControl({
     workCancel,
     workRetry,
     workAnswerDecision,
+    workHandoff,
     workArchive,
     workCleanup,
     // §11 stage operations
@@ -3419,7 +3904,8 @@ export function registerCtoWorkTools(register, workControl) {
     "work_create",
     "Create a tracked work item. The target project is EXPLICIT (exact tmux session name — resolved against " +
       "live state, never inferred); the spec (revision + hash + document ref) and the delivery target are " +
-      "required. Creates as draft (or ready when the spec is settled). Idempotent via key.",
+      "required. Creates as draft (or ready when the spec is settled). schedulingClass marks CEO-requested work " +
+      "'interactive' — background dispatches yield to it when capacity is contended (§9). Idempotent via key.",
     {
       key: { type: "string", description: "Stable idempotency key (replays the original result)." },
       project: { type: "string", description: "Target project — the exact tmux session name." },
@@ -3436,6 +3922,7 @@ export function registerCtoWorkTools(register, workControl) {
       dependencies: { type: "array", description: "Work ids this depends on (acyclic; existence enforced)." },
       priority: { type: "number", description: "Scheduling priority (higher first)." },
       priorityReason: { type: "string", description: "Why this priority." },
+      schedulingClass: { type: "string", description: "interactive (CEO-requested, reserves capacity) | background (default — yields to interactive when contended)." },
       repositoryId: { type: "string", description: "Optional canonical repository identity (defaults to 'unmapped')." },
       decisions: { type: "array", description: "Initial decision records (usually empty)." },
       originMessageId: { type: "string", description: "Optional originating CTO message id." },
@@ -3446,14 +3933,14 @@ export function registerCtoWorkTools(register, workControl) {
   def(
     "work_revise",
     "Revise a work item: objective, spec (monotonic revision; a hash change pauses advancement and supersedes " +
-      "in-flight results), delivery target, dependencies, stage, or state (draft/ready/waiting/paused/" +
-      "needs_decision/failed — NEVER completed/running/archived/cancelled, which are owned by their operations). " +
-      "Takes expectedRevision for optimistic concurrency. Idempotent via key.",
+      "in-flight results), delivery target, dependencies, stage, schedulingClass (interactive|background), or " +
+      "state (draft/ready/waiting/paused/needs_decision/failed — NEVER completed/running/archived/cancelled, " +
+      "which are owned by their operations). Takes expectedRevision for optimistic concurrency. Idempotent via key.",
     {
       key: { type: "string", description: "Stable idempotency key." },
       work: { type: "string", description: "The work id." },
       expectedRevision: { type: "number", description: "The work revision you read (omit to skip the CAS)." },
-      patch: { type: "object", description: "The fields to change (objective, spec, deliveryTarget, dependencies, stage, state, waitingReason, priority, priorityReason)." },
+      patch: { type: "object", description: "The fields to change (objective, spec, deliveryTarget, dependencies, stage, state, waitingReason, priority, priorityReason, schedulingClass)." },
       reason: { type: "string", description: "Why the revision (recorded in the summary)." },
     },
     (args) => workControl.workRevise(args),
@@ -3462,7 +3949,9 @@ export function registerCtoWorkTools(register, workControl) {
   def(
     "work_prioritize",
     "Change a work item's scheduling priority ('do this first'). Only the priority fields move — running " +
-      "workers are never disturbed to reorder a queue. Idempotent via key.",
+      "workers are never disturbed to reorder a queue. The change also re-evaluates the waiting set (§9): " +
+      "waiting items whose dependencies became satisfied are promoted to ready, and the response reports each " +
+      "transition. Idempotent via key.",
     {
       key: { type: "string", description: "Stable idempotency key." },
       work: { type: "string", description: "The work id." },
@@ -3475,10 +3964,11 @@ export function registerCtoWorkTools(register, workControl) {
 
   def(
     "work_dispatch",
-    "Put a worker on a READY work item in its EXPLICIT target project: revalidates the target and dependencies, " +
-      "reserves the operation, links the attempt, then starts an ISOLATED delegate job (own worktree + branch; " +
-      "a worktree failure never falls back to the repository directory). At the box's delegate cap → " +
-      "capacity_wait. The worker finishing does NOT complete the work. Idempotent via key.",
+    "Put a worker on a READY work item in its EXPLICIT target project: revalidates the target, dependencies " +
+      "and schedule (a background item yields — capacity_wait with an explicit reason — when the interactive " +
+      "reserve is contended), reserves the operation, links the attempt, then starts an ISOLATED delegate job " +
+      "(own worktree + branch; a worktree failure never falls back to the repository directory). The worker " +
+      "finishing does NOT complete the work. Idempotent via key.",
     {
       key: { type: "string", description: "Stable idempotency key." },
       work: { type: "string", description: "The work id (must be ready)." },
@@ -3558,8 +4048,29 @@ export function registerCtoWorkTools(register, workControl) {
   );
 
   def(
+    "work_handoff",
+    "Write the DURABLE checkpoint handoff for a work item (§10) — call it AT CHECKPOINT (pause boundary, " +
+      "attempt replacement, context compaction). The next attempt reads this record at start (it is injected " +
+      "into the worker prompt verbatim, constraints enumerated — never a prompt-space summary). Stale records " +
+      "(recorded against an older spec) are still injected but labelled SUPERSEDED. Idempotent via key.",
+    {
+      key: { type: "string", description: "Stable idempotency key." },
+      work: { type: "string", description: "The work id." },
+      objective: { type: "string", description: "Objective AT CHECKPOINT (may have drifted from the envelope)." },
+      target: { type: "string", description: "Target / checkout at checkpoint." },
+      diffCommit: { type: "string", description: "Current diff or commit at checkpoint." },
+      testResults: { type: "string", description: "Test results observed at checkpoint." },
+      pendingDecisions: { type: "string[]", description: "Open questions the next attempt must resolve (bounded)." },
+      nextStep: { type: "string", description: "The concrete next step at checkpoint." },
+      constraints: { type: "string[]", description: "Constraints the next attempt MUST honor (bounded)." },
+      stage: { type: "string", description: "Stage the checkpoint belongs to (defaults to the work's current stage)." },
+    },
+    (args) => workControl.workHandoff(args),
+  );
+
+  def(
     "work_archive",
-    "Archive a work item: metadata only — attempts, claims, evidence, receipts and resources all remain " +
+    "Archive a work item: metadata only — attempts, claims, evidence, handoffs, receipts and resources all remain " +
       "readable; NOTHING is deleted. Refuses while a worker is still live. Idempotent via key.",
     {
       key: { type: "string", description: "Stable idempotency key." },
@@ -3572,12 +4083,16 @@ export function registerCtoWorkTools(register, workControl) {
   def(
     "work_cleanup",
     "Remove the disposable compute resources a work item owns (delegate jobs: window + worktree through the " +
-      "existing NON-FORCED removal), preserving the durable work record and evidence. Refuses borrowed " +
-      "resources, live workers, open decisions and unresolved receipts; failures stay visible and retryable. " +
+      "existing NON-FORCED removal), preserving the durable work record and evidence. Classifies each worktree " +
+      "FIRST (§12/U20): clean | dirty | still-referenced | active — dirty or still-referenced or active " +
+      "worktrees are PRESERVED with the reason visible, never destroyed; destroying a dirty worktree requires " +
+      "the explicit overrideDirty flag (the uncommitted file list is preserved as evidence before removal). " +
+      "Refuses borrowed resources, open decisions and unresolved receipts; failures stay visible and retryable. " +
       "Idempotent via key.",
     {
       key: { type: "string", description: "Stable idempotency key." },
       work: { type: "string", description: "The work id." },
+      overrideDirty: { type: "boolean", description: "Explicit override: destroy dirty worktrees (file list preserved as evidence first). Default false — dirty worktrees are preserved." },
       expectedRevision: { type: "number", description: "The work revision you read (omit to skip the CAS)." },
     },
     (args) => workControl.workCleanup(args),

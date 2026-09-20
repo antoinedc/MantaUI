@@ -96,6 +96,10 @@ export const WORK_STAGES = Object.freeze(["specify", "implement", "review", "mer
 export const WAITING_REASONS = Object.freeze(["dependency", "capacity", "provider", "external", "reconcile"]);
 export const DELIVERY_TARGET_KINDS = Object.freeze(["spec", "pr", "merged", "published", "deployed"]);
 export const OPERATION_STATUSES = Object.freeze(["pending", "in_flight", "succeeded", "failed", "unknown"]);
+// §9 scheduling classes — a CLOSED vocabulary (P6). "interactive" marks
+// CEO-requested / explicit user work that background dispatches yield to;
+// "background" is speculative backfill and nonurgent ambient analysis.
+export const SCHEDULING_CLASSES = Object.freeze(["interactive", "background"]);
 // Unresolved statuses can never be evicted or skipped by retention; terminal
 // statuses are immutable once reached.
 export const UNRESOLVED_OPERATION_STATUSES = Object.freeze(["pending", "in_flight", "unknown"]);
@@ -137,6 +141,7 @@ const MUTABLE_FIELDS = Object.freeze([
   "dependencies",
   "priority",
   "priorityReason",
+  "schedulingClass",
   "stage",
   "state",
   "waitingReason",
@@ -289,6 +294,14 @@ function validateStateFields({ state, stage, waitingReason }) {
   }
 }
 
+// §9 scheduling class is a CLOSED vocabulary; when absent the envelope defaults
+// to "background" (applied at create — see createWork).
+function validateSchedulingClass(value) {
+  if (!SCHEDULING_CLASSES.includes(value)) {
+    throw workError("unsupported", `schedulingClass must be one of ${SCHEDULING_CLASSES.join(", ")} (got ${JSON.stringify(value)})`);
+  }
+}
+
 function validateRefArray(value, label) {
   if (!Array.isArray(value)) throw workError("unsupported", `${label} must be an array`);
   for (const entry of value) assertPlainObject(entry, `${label}[]`);
@@ -379,6 +392,9 @@ function assertValidEnvelope(env, id) {
     if (typeof env.priorityReason !== "string") {
       throw workError("unsupported", "priorityReason must be a string");
     }
+    if (env.schedulingClass !== undefined) {
+      validateSchedulingClass(env.schedulingClass);
+    }
     if (!WORK_STATES.includes(env.state)) {
       throw workError("unsupported", `state "${env.state}" is not a valid work state`);
     }
@@ -396,6 +412,15 @@ function assertValidEnvelope(env, id) {
     }
     if (!Array.isArray(env.dependencies) || env.dependencies.some((d) => typeof d !== "string" || d.length === 0)) {
       throw workError("unsupported", "dependencies must be an array of non-empty strings");
+    }
+    // §10 checkpoint handoffs — OPTIONAL (envelopes pre-P6 carry none);
+    // validated structurally whenever present. The tool layer enforces the
+    // typed field grammar; the store enforces "array of records".
+    if (env.handoffs !== undefined) {
+      if (!Array.isArray(env.handoffs)) {
+        throw workError("unsupported", "handoffs must be an array when present");
+      }
+      for (const entry of env.handoffs) assertPlainObject(entry, "handoffs[]");
     }
     for (const field of ["attempts", "decisions", "resources", "evidence"]) {
       if (!Array.isArray(env[field])) {
@@ -576,6 +601,9 @@ function validateWorkInput(input) {
   if (input.priorityReason !== undefined && typeof input.priorityReason !== "string") {
     throw workError("unsupported", "priorityReason must be a string");
   }
+  if (input.schedulingClass !== undefined) {
+    validateSchedulingClass(input.schedulingClass);
+  }
   for (const field of ["attempts", "decisions", "resources", "evidence"]) {
     if (input[field] !== undefined) validateRefArray(input[field], field);
   }
@@ -614,11 +642,13 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
       dependencies: [...(input.dependencies ?? [])],
       priority: input.priority ?? 0,
       priorityReason: input.priorityReason ?? "",
+      schedulingClass: input.schedulingClass ?? "background",
       stage: input.stage ?? "specify",
       state: input.state ?? "draft",
       ...(input.waitingReason !== undefined ? { waitingReason: input.waitingReason } : {}),
       attempts: [...(input.attempts ?? [])],
       operations: [],
+      handoffs: [],
       decisions: [...(input.decisions ?? [])],
       resources: [...(input.resources ?? [])],
       evidence: [...(input.evidence ?? [])],
@@ -681,6 +711,9 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
       }
       if (patch.priorityReason !== undefined && typeof patch.priorityReason !== "string") {
         throw workError("unsupported", "priorityReason must be a string");
+      }
+      if (patch.schedulingClass !== undefined) {
+        validateSchedulingClass(patch.schedulingClass);
       }
       if (patch.project !== undefined) validateProjectRef(patch.project);
       if (patch.deliveryTarget !== undefined) validateDeliveryTarget(patch.deliveryTarget);
